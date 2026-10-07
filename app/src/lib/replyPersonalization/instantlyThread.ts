@@ -146,6 +146,42 @@ async function fetchMailboxConversation(params: {
 }
 
 /**
+ * Только буквы и цифры: копия письма из Instantly приходит из HTML, и знаки
+ * препинания, кавычки и переносы в ней отличаются от того, что мы отправляли.
+ */
+const normalize = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * Дописывает в тред наши отправленные ответы, которых в нём ещё нет.
+ *
+ * Instantly показывает отправленное из портала письмо в треде с задержкой, а
+ * бывает, что не показывает вовсе. Без этого ИИ не видел нашего ответа и
+ * на просьбу о пинге заново отвечал на прошлую реплику адресата (07.10.2026),
+ * а экран показывал диалог без ответа. Журнал отправок — наш, и он точно
+ * знает, что ушло.
+ *
+ * Сверяем по началу текста: копия из Instantly содержит наш текст плюс
+ * процитированную историю переписки, поэтому равенство строк не подходит.
+ * Ставим по времени отправки — перед первым более поздним письмом треда.
+ */
+export function withSentDrafts(messages: ThreadMessage[], sent: { text: string; sentAt: string }[]): ThreadMessage[] {
+  const result = [...messages];
+  for (const draft of sent) {
+    const key = normalize(draft.text).slice(0, 120);
+    if (!key) continue;
+    if (result.some((m) => m.fromUs && normalize(m.text).includes(key))) continue;
+    const message: ThreadMessage = { fromUs: true, text: draft.text, timestamp: draft.sentAt || undefined };
+    const sentAt = draft.sentAt ? Date.parse(draft.sentAt) : NaN;
+    const later = Number.isNaN(sentAt)
+      ? -1
+      : result.findIndex((m) => m.timestamp !== undefined && Date.parse(m.timestamp) > sentAt);
+    if (later === -1) result.push(message);
+    else result.splice(later, 0, message);
+  }
+  return result;
+}
+
+/**
  * Переписка по письму из списка: письмо кампании — по треду, письмо вне
  * кампании — по ящику и адресу. null — получить не удалось, вызывающий код
  * откатывается на сохранённые отрывки.
