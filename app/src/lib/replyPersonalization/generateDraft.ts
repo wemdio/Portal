@@ -106,6 +106,7 @@ export async function generateDraftForQualification(
     contextComplete,
     campaignSteps,
     recipientEmail: newContact,
+    ourEmail: qualification.eaccount,
     language,
   });
   const result = await generateReplyWithSearch(messages);

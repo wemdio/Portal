@@ -63,6 +63,29 @@ const EMAIL_VERIFICATION_LABELS: Record<string, string> = {
   unverified: 'проверить не удалось',
 };
 
+/** Короткие имена источников для таблицы и окна шага; полные — SOURCE_LABELS в панели запуска. */
+const SOURCE_SHORT: Record<SourceCode, string> = {
+  hh: 'hh.ru',
+  direct: 'Директ',
+  crm: 'AMO',
+  exhibitors: 'Выставки',
+  contracts: 'Госконтракты',
+  tenders: 'Тендеры',
+  growth: 'Гранты',
+  site_news: 'Новости сайтов',
+  directory: 'Общая база',
+  gis: '2ГИС',
+  ymaps: 'Я.Карты',
+  revenue_growth: 'Выручка ФНС',
+  news: 'Новости',
+};
+
+/** Откуда пришла компания: source_type — все её источники через «+» (одна компания — одна карточка). */
+function sourcesOf(row: RuRow): string | null {
+  const codes = (row.source_type ?? '').split('+').filter(Boolean);
+  return codes.length ? codes.map((c) => SOURCE_SHORT[c as SourceCode] ?? c).join(' + ') : null;
+}
+
 const reasonLabel = (code: string) => REASON_LABELS[code] ?? code;
 const signalLabel = (type: string | null | undefined) => (type ? SIGNAL_LABELS[type] ?? type : null);
 const chainLabel = (chain: string | null | undefined) => (chain ? CHAIN_LABELS[chain as ChainType] ?? chain : null);
@@ -84,6 +107,7 @@ function companyOf(row: RuRow): string {
 
 function passedDetail(row: RuRow): string {
   return [
+    sourcesOf(row),
     row.normalized_domain,
     chainLabel(row.chain_type),
     row.priority_score != null ? `оценка ${row.priority_score}` : null,
@@ -104,7 +128,7 @@ function entryOf(row: RuRow, passed: boolean): OutreachStageEntry {
     company: companyOf(row),
     link: row.source_url ? { href: row.source_url, label: signalLabel(row.signal_type) ?? 'источник' } : null,
     passed,
-    detail: passed ? passedDetail(row) : [row.normalized_domain, signalLabel(row.signal_type)].filter(Boolean).join(' · '),
+    detail: passed ? passedDetail(row) : [sourcesOf(row), row.normalized_domain, signalLabel(row.signal_type)].filter(Boolean).join(' · '),
     quote: passed ? row.evidence_quote : null,
     reason: passed ? null : droppedReason(row),
   };
@@ -326,6 +350,13 @@ export const ruOutreachAdapter: OutreachRunAdapter<RuRow, Partial<RuOutreachConf
   website: (row) => row.company_website,
   columns: [
     {
+      header: 'Источник',
+      cell: (row) => {
+        const label = sourcesOf(row) ?? '—';
+        return <div className="max-w-[140px] truncate" title={label}>{label}</div>;
+      },
+    },
+    {
       header: 'Повод',
       cell: (row) => {
         const label = signalLabel(row.signal_type) ?? '—';
@@ -390,7 +421,7 @@ export const ruOutreachAdapter: OutreachRunAdapter<RuRow, Partial<RuOutreachConf
     ) : null,
 
   detailHeading: (row) =>
-    `${signalLabel(row.signal_type) ?? 'Повод'} от ${row.signal_date ? fmtDate(row.signal_date) : '—'}${row.source_type ? ` · ${SOURCE_LABELS[row.source_type as SourceCode] ?? row.source_type}` : ''}`,
+    `${signalLabel(row.signal_type) ?? 'Повод'} от ${row.signal_date ? fmtDate(row.signal_date) : '—'}${sourcesOf(row) ? ` · ${sourcesOf(row)}` : ''}`,
   detailBlocks: (row) => (
     <>
       <ScoreBlock row={row} />
