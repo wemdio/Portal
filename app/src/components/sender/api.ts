@@ -880,3 +880,81 @@ export interface SenderProjectDto {
 export function fetchSenderProjects() {
   return authFetchJson<{ projects: SenderProjectDto[] }>(`${BASE}/projects`);
 }
+
+/** Вкладка «Контрольные ящики»: свои ящики Яндекс/Gmail/Mail.ru для проверки «входящие или спам». */
+export type SeedProviderId = 'yandex' | 'gmail' | 'mailru';
+
+export interface SeedWeekDto {
+  inbox: number;
+  spam: number;
+  missing: number;
+  /** Все пробы за 7 дней, включая ещё не проверенные и сбои. */
+  total: number;
+}
+
+export interface SeedBoxDto {
+  id: string;
+  provider: SeedProviderId;
+  email: string;
+  imap_host: string;
+  imap_port: number;
+  enabled: boolean;
+  status: 'pending' | 'ok' | 'failed';
+  last_error: string | null;
+  checked_at: string | null;
+  junk_folder: string | null;
+  created_at: string;
+  week: SeedWeekDto;
+}
+
+export interface SeedBoxesResponse {
+  probesActive: boolean;
+  boxes: SeedBoxDto[];
+  providers: { provider: SeedProviderId; label: string; week: SeedWeekDto }[];
+}
+
+export interface SeedHealthDto {
+  id: string;
+  email: string;
+  inbox: number;
+  spam: number;
+  missing: number;
+  /** Доля «Входящих» за 7 дней, %; null — проверенных проб ещё нет. */
+  score: number | null;
+  last: Partial<Record<SeedProviderId, { status: string; day: string; folder: string | null }>>;
+}
+
+export function fetchSeedBoxes() {
+  return authFetchJson<SeedBoxesResponse>(`${BASE}/seed-boxes`);
+}
+
+/** Один ящик из формы или пачка строк из выдачи продавца (`lines`). */
+export function addSeedBoxes(body: { lines: string } | { provider?: SeedProviderId; email: string; password: string }) {
+  return authFetchJson<{ created: { id: string; email: string }[]; skipped: string[] }>(`${BASE}/seed-boxes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export function checkSeedBox(id: string) {
+  return authFetchJson<{ ok: boolean; error: string | null; junkFolder: string | null }>(`${BASE}/seed-boxes/${id}/check`, {
+    method: 'POST',
+  });
+}
+
+export function updateSeedBox(id: string, patch: { enabled?: boolean; password?: string }) {
+  return authFetchJson<{ ok: true }>(`${BASE}/seed-boxes/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteSeedBox(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/seed-boxes/${id}`, { method: 'DELETE' });
+}
+
+export function fetchSeedHealth() {
+  return authFetchJson<{ mailboxes: SeedHealthDto[] }>(`${BASE}/seed-boxes/health`);
+}
