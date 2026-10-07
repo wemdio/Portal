@@ -443,9 +443,12 @@ export function fetchFolders() {
   return authFetchJson<{ folders: SenderFolderDto[] }>(`${BASE}/folders`);
 }
 
-/** Сохранить настройки папки; droppedMailboxes — выбранные ящики, которых уже нет. */
+/**
+ * Сохранить настройки папки; droppedMailboxes — выбранные ящики, которых уже
+ * нет, pooledCampaigns — в сколько идущих рассылок долились новые ящики.
+ */
 export function updateFolder(id: string, body: FolderSettingsInput) {
-  return authFetchJson<{ folder: SenderFolderDto; droppedMailboxes: number }>(`${BASE}/folders/${id}`, {
+  return authFetchJson<{ folder: SenderFolderDto; droppedMailboxes: number; pooledCampaigns: number }>(`${BASE}/folders/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

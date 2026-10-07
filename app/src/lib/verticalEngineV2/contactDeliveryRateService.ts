@@ -7,7 +7,38 @@ import { normalizeLaunchMailboxIds, launchMailboxScopesEqual } from './launchPor
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { VE_CAMPAIGN_SENDING_SETTINGS, DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
 
-const READ_OPTIONS = { timeoutMs: 10_000, timeoutIncludesBody: true, retryRateLimits: false };
+// consumer — подпись в счётчиках instantly_api_usage_hourly: без неё расчёт
+// темпа шёл как «unspecified» и его ~36 тыс. запросов в сутки не было видно.
+const READ_OPTIONS = { timeoutMs: 10_000, timeoutIncludesBody: true, retryRateLimits: false, consumer: 've2_delivery_rate' };
+
+/**
+ * Как часто плановый проход заново проверяет темп в Instantly. Проход идёт раз
+ * в 5 минут и каждый раз листал все ящики и кампании воркспейса (~31 страницу
+ * каждого списка): 07.10.2026 это было ~70% всех наших запросов к Instantly.
+ * Успешный расчёт держим час; раньше пересчитываем, если сменились настройки
+ * (revision) или набор наших кампаний. Ручной расчёт на экране не ограничен.
+ */
+const RATE_RECHECK_MS = (() => {
+  const configured = Number(process.env.VE_DELIVERY_RATE_RECHECK_MS);
+  return Number.isFinite(configured) && configured >= 5 * 60_000 ? configured : 60 * 60_000;
+})();
+/** Последний успешный плановый пересчёт по проекту — в памяти воркера; рестарт просто пересчитает. */
+const lastRefresh = new Map<string, { key: string; at: number }>();
+
+/** Наши действующие кампании проекта — по базе, без Instantly. */
+async function ownCampaignKey(portalDb: SupabaseClient, projectId: string): Promise<string> {
+  const items = await readContactDeliveryPages<{ id: string; status: string }>(
+    'rate recheck items', (from, to) => portalDb.from('ve_launch_queue_items')
+      .select('id, status', { count: 'exact' }).eq('project_id', projectId)
+      .order('id', { ascending: true }).range(from, to));
+  const active = items.filter(item => item.status === 'active').map(item => item.id);
+  if (!active.length) return '';
+  const children = await readContactDeliveryPages<{ id: string; campaign_id: string }>(
+    'rate recheck campaigns', (from, to) => portalDb.from('ve_launch_queue_campaigns')
+      .select('id, campaign_id', { count: 'exact' }).in('item_id', active)
+      .order('id', { ascending: true }).range(from, to));
+  return children.map(child => child.campaign_id).sort().join(',');
+}
 async function allPages<T>(read: (cursor?: string) => Promise<PaginatedResponse<T>>): Promise<T[]> {
   const rows: T[] = [], seen = new Set<string>();
   let cursor: string | undefined;
@@ -136,6 +167,10 @@ export async function saveDeliveryRate(portalDb:SupabaseClient, instantlyDb:Supa
 export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:SupabaseClient, projectId:string) {
   const rate=await readDeliveryRate(portalDb,projectId);
   if(!rate) return;
+  const recheckKey=`${rate.revision}|${await ownCampaignKey(portalDb,projectId)}`;
+  const last=lastRefresh.get(projectId);
+  if(rate.status==='ready' && last?.key===recheckKey && Date.now()-last.at<RATE_RECHECK_MS) return;
+  lastRefresh.delete(projectId);
   const token=randomUUID();
   const claimed=await rateRpc(portalDb,'ve_claim_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token});
   if(claimed!==true) throw new DeliveryRateError('Темп обновляется другим процессом. Следующий проход повторит проверку.');
@@ -164,6 +199,7 @@ export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:S
     await renew();
     const finished = await rateRpc(portalDb,'ve_finish_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token,p_snapshot:current.snapshot,p_error:null});
     if (finished !== true) throw new DeliveryRateError('Не удалось подтвердить сохранение темпа.');
+    lastRefresh.set(projectId,{key:recheckKey,at:Date.now()});
   } catch(error) {
     await rateRpc(portalDb,'ve_finish_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token,p_snapshot:null,p_error:'Не удалось проверить или применить темп в Instantly. Повторим автоматически.'});
     throw error;

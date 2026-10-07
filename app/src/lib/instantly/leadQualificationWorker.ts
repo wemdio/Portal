@@ -55,6 +55,7 @@ import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoin
 import { captureQualificationReplySnapshot, qualificationRecoveryBackoff, qualificationReplySnapshot, type QualificationRecoveryState } from './qualificationRecovery';
 import { InstantlyApiError } from './errors';
 import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
+import { backfillReplyInboxStep, loadInboxTargets, saveInboxFromPage } from './replyInbox';
 import {
   discoverReplyIntake,
   claimReplyIntake,
@@ -1185,8 +1186,32 @@ export async function discoverQualificationRepliesCycle(): Promise<DiscoveryCycl
   const db = supabaseAdmin;
   const campaigns = await getCampaignsByAccountCached();
   const maxPages = Math.max(1, Math.min(20, Math.floor(envNumber('INSTANTLY_LEADS_EMAIL_PAGES', 5))));
-  return runDiscoveryAcrossAccounts(campaigns, (accountId, campaignIds) =>
-    discoverReplyIntake(db, { accountId, campaignIds, maxPages }));
+  // Ящик «Персонализированных ответов» (replyInbox.ts): ответы наших
+  // «N. Polza_…» берём с тех же страниц, квалификатор их не видит.
+  let inboxCampaignIds = new Set<string>();
+  try {
+    inboxCampaignIds = (await loadInboxTargets(db)).own;
+  } catch (error) {
+    workerLog('warn', 'Reply inbox campaigns unavailable — discovery continues without them', error);
+  }
+  const result = await runDiscoveryAcrossAccounts(campaigns, (accountId, campaignIds) =>
+    discoverReplyIntake(db, {
+      accountId,
+      campaignIds,
+      maxPages,
+      onPage: accountId === 'main' && inboxCampaignIds.size
+        ? (emails) => saveInboxFromPage(db, emails, accountId, inboxCampaignIds)
+        : undefined,
+    }));
+  // История кампаний для того же ящика — по странице за цикл, в полосе 'bulk':
+  // свежие ответы клиентам она не задерживает.
+  try {
+    const step = await backfillReplyInboxStep(db);
+    if (step) workerLog('info', `reply inbox backfill ${step.campaignId}: saved=${step.saved}, done=${step.done}`);
+  } catch (error) {
+    workerLog('warn', 'Reply inbox backfill step failed', error);
+  }
+  return result;
 }
 
 export async function discoverQualificationReplies(): Promise<number> {

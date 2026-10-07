@@ -62,7 +62,15 @@ function timestamp(value: unknown): string | null {
  */
 export async function discoverReplyIntake(
   db: IntakeDb,
-  options: { accountId: string; campaignIds: ReadonlySet<string>; maxPages?: number },
+  options: {
+    accountId: string; campaignIds: ReadonlySet<string>; maxPages?: number;
+    /**
+     * Каждая прочитанная страница — тем, кому нужны письма вне квалификатора
+     * (ящик «Персонализированных ответов», replyInbox.ts). Без лишних запросов к
+     * Instantly; сбой здесь не останавливает сбор ответов.
+     */
+    onPage?: (emails: Email[]) => Promise<unknown>;
+  },
 ): Promise<{ staged: number; pages: number; sweepComplete: boolean; busy: boolean }> {
   const stats = { staged: 0, pages: 0, sweepComplete: false, busy: false };
   if (!options.accountId.trim()) throw new Error(`${FAILURE}: missing account`);
@@ -100,6 +108,13 @@ export async function discoverReplyIntake(
         timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false,
       });
       if (!Array.isArray(page.items) || page.items.length > PAGE_SIZE) throw new Error(`${FAILURE}: invalid email page`);
+      if (options.onPage) {
+        try {
+          await options.onPage(page.items);
+        } catch (error) {
+          console.warn(`[reply-intake] page side-save failed for ${options.accountId}: ${error instanceof Error ? error.message : 'unknown'}`);
+        }
+      }
       let payloadFailure: ReplyIntakePayloadError | null = null;
       const items = page.items.filter(email =>
         (email.ue_type ?? 2) === 2 && email.campaign_id && options.campaignIds.has(email.campaign_id),
