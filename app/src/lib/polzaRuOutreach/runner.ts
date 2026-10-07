@@ -1018,7 +1018,14 @@ async function runJob(
         // Каталоги Яндекс Карт — второй источник адреса: на сайте почта есть
         // не всегда (01.10.2026 — 131 отсев EMAIL_NOT_FOUND из 433 компаний).
         const catalog = await lookupCatalogEmails(db, domain);
-        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, catalog);
+        // Адрес из каталога выставки (sources/exhibitorsSync.ts) — туда же, к каталожным.
+        const sourceEmails = c.signals
+          .map((s) => s.meta?.email)
+          .filter((e): e is string => typeof e === 'string' && e.includes('@'));
+        const extra = sourceEmails.length
+          ? { emails: Array.from(new Set([...catalog.emails, ...sourceEmails])), sourceUrl: catalog.sourceUrl ?? c.signals.find((s) => s.meta?.email)?.url ?? null }
+          : catalog;
+        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, extra);
         smtpSilent = noteEmailVerdict(found.verdict);
         if (!found.email || !found.verification) {
           // Адреса на сайте есть, но все не прошли проверку, — своя причина:

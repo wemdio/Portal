@@ -245,7 +245,8 @@ export async function collectCandidates(
               url,
               quote: null,
               level: 'B',
-              meta: { customer: r.details.customer ?? null, event_start: r.upload.event_start, program: r.details.program ?? r.upload.title },
+              // email — адрес из каталога выставки: поиск почты проверяет его наравне с сайтом.
+              meta: { customer: r.details.customer ?? null, event_start: r.upload.event_start, program: r.details.program ?? r.upload.title, email: r.details.email ?? null },
             }],
           }),
         );
