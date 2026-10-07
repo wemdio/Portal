@@ -43,13 +43,16 @@ export async function loadDirectoryCandidates(
 }
 
 /** Выручка и штат по ИНН для кандидатов из других источников. */
-export async function loadSizeByInn(db: SupabaseClient, inns: string[]): Promise<Map<string, { revenue: number | null; employees: number | null }>> {
-  const out = new Map<string, { revenue: number | null; employees: number | null }>();
+export async function loadSizeByInn(
+  db: SupabaseClient,
+  inns: string[],
+): Promise<Map<string, { revenue: number | null; employees: number | null; website: string | null }>> {
+  const out = new Map<string, { revenue: number | null; employees: number | null; website: string | null }>();
   const unique = Array.from(new Set(inns.filter(Boolean)));
   for (let i = 0; i < unique.length; i += 500) {
     const { data, error } = await db
       .from('companies_directory')
-      .select('inn,revenue,employees_count')
+      .select('inn,revenue,employees_count,website')
       .in('inn', unique.slice(i, i + 500));
     if (error) throw new Error(`directory size lookup failed: ${error.message}`);
     for (const r of data ?? []) {
@@ -57,6 +60,7 @@ export async function loadSizeByInn(db: SupabaseClient, inns: string[]): Promise
       out.set(String(r.inn), {
         revenue: r.revenue != null ? Number(r.revenue) : null,
         employees: r.employees_count != null ? Number(r.employees_count) : null,
+        website: r.website ? String(r.website) : null,
       });
     }
   }
