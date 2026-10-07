@@ -131,8 +131,13 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
         const target = job.config?.limit ?? null;
         const done = job.total_parsed ?? 0;
         const own = isOwn(job);
-        // В общем списке видно, чей запуск; в «Моих» и так ясно.
-        const author = scope === 'all' ? `${own ? 'вы' : job.author_name ?? 'коллега'} · ` : '';
+        // В общем списке видно, чей запуск; в «Моих» и так ясно. Автосбор
+        // записан на включившего автодобор, но запускал его не человек.
+        const author = job.config?.autofill
+          ? 'система · '
+          : scope === 'all'
+            ? `${own ? 'вы' : job.author_name ?? 'коллега'} · `
+            : '';
         return {
           id: job.id,
           status: job.status as JobRailItem['status'],
