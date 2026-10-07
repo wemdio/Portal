@@ -28,6 +28,8 @@ import type { QualificationRow, ThreadMessage } from './types';
 
 /** Писем переписки ящика с адресом: последних хватает, прогрев бывает длинным. */
 const MAILBOX_CONVERSATION_LIMIT = 50;
+/** Писем с адресатом в кампании: максимум страницы Instantly, без него отдаётся меньше. */
+const CAMPAIGN_CONVERSATION_LIMIT = 100;
 
 /**
  * Строка, с которой начинается процитированная история: «> …», «On … wrote:»
@@ -109,10 +111,18 @@ export async function fetchFullThread(params: {
         search: params.leadEmail,
         mode: 'emode_all',
         sort_order: 'asc',
+        limit: CAMPAIGN_CONVERSATION_LIMIT,
       },
       { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'interactive', consumer: 'personalization_thread' },
     );
-    const messages = toThreadMessages((response.items ?? []).filter((email) => email.thread_id === params.threadId));
+    // Весь диалог с адресатом в кампании, а не только ветка его ответа: шаг
+    // цепочки с новой темой Instantly шлёт отдельным тредом, и ИИ не видел
+    // часть наших писем (просьба 07.10.2026). Свой тред берём всегда — ответ
+    // бывает с другого адреса; чужие письма, где адрес лишь упомянут, отсекает
+    // поле lead.
+    const leadEmail = params.leadEmail.toLowerCase();
+    const messages = toThreadMessages((response.items ?? []).filter((email) =>
+      email.thread_id === params.threadId || (email.lead ?? '').toLowerCase() === leadEmail));
     return messages.length > 0 ? messages : null;
   } catch {
     // Сбой живого запроса не должен ронять генерацию — вызывающий код
@@ -143,6 +153,42 @@ async function fetchMailboxConversation(params: {
   } catch {
     return null;
   }
+}
+
+/**
+ * Только буквы и цифры: копия письма из Instantly приходит из HTML, и знаки
+ * препинания, кавычки и переносы в ней отличаются от того, что мы отправляли.
+ */
+const normalize = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * Дописывает в тред наши отправленные ответы, которых в нём ещё нет.
+ *
+ * Instantly показывает отправленное из портала письмо в треде с задержкой, а
+ * бывает, что не показывает вовсе. Без этого ИИ не видел нашего ответа и
+ * на просьбу о пинге заново отвечал на прошлую реплику адресата (07.10.2026),
+ * а экран показывал диалог без ответа. Журнал отправок — наш, и он точно
+ * знает, что ушло.
+ *
+ * Сверяем по началу текста: копия из Instantly содержит наш текст плюс
+ * процитированную историю переписки, поэтому равенство строк не подходит.
+ * Ставим по времени отправки — перед первым более поздним письмом треда.
+ */
+export function withSentDrafts(messages: ThreadMessage[], sent: { text: string; sentAt: string }[]): ThreadMessage[] {
+  const result = [...messages];
+  for (const draft of sent) {
+    const key = normalize(draft.text).slice(0, 120);
+    if (!key) continue;
+    if (result.some((m) => m.fromUs && normalize(m.text).includes(key))) continue;
+    const message: ThreadMessage = { fromUs: true, text: draft.text, timestamp: draft.sentAt || undefined };
+    const sentAt = draft.sentAt ? Date.parse(draft.sentAt) : NaN;
+    const later = Number.isNaN(sentAt)
+      ? -1
+      : result.findIndex((m) => m.timestamp !== undefined && Date.parse(m.timestamp) > sentAt);
+    if (later === -1) result.push(message);
+    else result.splice(later, 0, message);
+  }
+  return result;
 }
 
 /**

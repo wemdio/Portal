@@ -1,8 +1,16 @@
 import { buildReplyPrompt } from './buildPrompt';
 import { fetchCampaignSteps } from './campaignSequence';
-import { getGlobalKnowledgeBase, getGlobalSystemPrompt, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
+import {
+  getGlobalKnowledgeBase,
+  getGlobalSystemPrompt,
+  getKnowledgeBaseOrEmpty,
+  getProjectBrief,
+  insertDraft,
+  listSentDrafts,
+  resolveBrief,
+} from './db';
 import { generateReplyWithSearch } from './geminiClient';
-import { fetchReplyThread } from './instantlyThread';
+import { fetchReplyThread, withSentDrafts } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
 import type { GenerateDraftResult, ReplyLanguage, ThreadMessage } from './types';
@@ -59,15 +67,19 @@ export async function generateDraftForQualification(
   const { qualification, accountId } = reply;
 
   let contextComplete = true;
-  const [fullThread, campaignSteps] = await Promise.all([
+  const [fullThread, campaignSteps, sent] = await Promise.all([
     fetchReplyThread(qualification, accountId),
     fetchCampaignSteps(qualification.campaignId, accountId),
+    listSentDrafts(qualificationId),
   ]);
   let thread: ThreadMessage[] | null = fullThread;
   if (!thread) {
     contextComplete = false;
     thread = fallbackThread(qualification);
   }
+  // Наши ответы из портала — как на экране переписки: Instantly их может ещё
+  // не показывать, и без них ИИ отвечал заново на уже отвеченную реплику.
+  thread = withSentDrafts(thread, sent);
   if (thread.length === 0) {
     throw new GenerateDraftError('Нет текста переписки для генерации ответа', 422);
   }

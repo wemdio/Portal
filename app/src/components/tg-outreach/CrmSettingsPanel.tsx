@@ -7,8 +7,8 @@
  * выбранной amoCRM: нашей или клиента. Здесь же сотрудник подключает amoCRM
  * клиента — адрес и долгосрочный токен, проверка живым запросом.
  *
- * Сохраняется отдельно от остальных настроек: у блока свой запрос воронок, и
- * смешивать его с промптом и паузами в одну кнопку незачем.
+ * Своей кнопки сохранения нет: текущий выбор блок отдаёт наверх через
+ * onChange, и его сохраняет общая кнопка «Сохранить настройки» вкладки.
  * Спека: docs/superpowers/specs/2026-10-06-tg-outreach-crm-handoff-design.md
  */
 
@@ -37,7 +37,7 @@ interface Pipeline {
   statuses: Array<{ id: number; name: string }>;
 }
 
-interface CrmSettings {
+export interface CrmSettings {
   enabled: boolean;
   connection: string | null;
   pipeline_id: number | null;
@@ -53,16 +53,17 @@ async function readError(res: Response): Promise<string> {
   return body?.error ?? `Ошибка ${res.status}`;
 }
 
-export default function CrmSettingsPanel({ campaignId }: { campaignId: string }) {
+export default function CrmSettingsPanel({ campaignId, onChange }: {
+  campaignId: string;
+  /** null — настройки ещё не загружены, сохранять их нечего. */
+  onChange: (settings: CrmSettings | null) => void;
+}) {
   const [settings, setSettings] = useState<CrmSettings>(EMPTY);
   const [connections, setConnections] = useState<CrmConnection[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [pipelinesError, setPipelinesError] = useState<string | null>(null);
   const [loadingPipelines, setLoadingPipelines] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [savedAt, setSavedAt] = useState<number | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ name: '', base_url: '', token: '' });
@@ -125,22 +126,9 @@ export default function CrmSettingsPanel({ campaignId }: { campaignId: string })
     return () => { cancelled = true; };
   }, [loaded, settings.enabled, settings.connection]);
 
-  const pipeline = pipelines.find((p) => p.id === settings.pipeline_id) ?? null;
+  useEffect(() => { onChange(loaded ? settings : null); }, [loaded, settings, onChange]);
 
-  const save = async () => {
-    setSaving(true);
-    setSaveError(null);
-    try {
-      const res = await authFetch(`${API_BASE}/campaigns/${campaignId}`, {
-        method: 'PUT',
-        body: JSON.stringify({ crm_settings: settings }),
-      });
-      if (!res.ok) { setSaveError(await readError(res)); return; }
-      setSavedAt(Date.now());
-    } finally {
-      setSaving(false);
-    }
-  };
+  const pipeline = pipelines.find((p) => p.id === settings.pipeline_id) ?? null;
 
   const addConnection = async () => {
     setFormBusy(true);
@@ -181,26 +169,16 @@ export default function CrmSettingsPanel({ campaignId }: { campaignId: string })
 
   return (
     <section className="space-y-3 rounded-lg border border-gray-200 p-3">
-      <div className="flex items-center justify-between gap-3">
-        <label className="flex w-fit cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
-          <span className="relative inline-flex shrink-0">
-            <input type="checkbox" checked={settings.enabled}
-              onChange={(e) => setSettings((prev) => ({ ...prev, enabled: e.target.checked, connection: prev.connection ?? POLZA }))}
-              className="peer sr-only" />
-            <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
-            <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
-          </span>
-          Передавать лидов в CRM
-        </label>
-        <div className="flex items-center gap-2">
-          {savedAt && !saving && <span className="text-[10px] text-emerald-600">Сохранено</span>}
-          <button type="button" onClick={() => void save()} disabled={saving || (settings.enabled && !settings.status_id)}
-            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
-            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
-            Сохранить CRM
-          </button>
-        </div>
-      </div>
+      <label className="flex w-fit cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
+        <span className="relative inline-flex shrink-0">
+          <input type="checkbox" checked={settings.enabled}
+            onChange={(e) => setSettings((prev) => ({ ...prev, enabled: e.target.checked, connection: prev.connection ?? POLZA }))}
+            className="peer sr-only" />
+          <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
+          <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
+        </span>
+        Передавать лидов в CRM
+      </label>
       <p className="text-[10px] text-gray-400">Переданный лид станет сделкой: контакт @ник, тег оффера, переписка в примечании.</p>
 
       {settings.enabled && (
@@ -242,9 +220,6 @@ export default function CrmSettingsPanel({ campaignId }: { campaignId: string })
         <p className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-700">
           {pipelinesError || selected?.last_error}
         </p>
-      )}
-      {saveError && (
-        <p className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[10px] text-rose-700">{saveError}</p>
       )}
 
       {/* amoCRM клиентов: подключают наши сотрудники, токен после сохранения не показывается. */}

@@ -23,7 +23,7 @@ import {
   type AmoClient,
   type AmoTelegramField,
 } from './amoClient';
-import { POLZA_CONNECTION, POLZA_SOURCE_FIELD_ID, resolveCrmConnection } from './connections';
+import { POLZA_CONNECTION, resolveCrmConnection } from './connections';
 
 export type CrmLogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -71,20 +71,23 @@ export interface CrmDealSpec {
   contact: { name: string; telegram?: string | null; email?: string | null; phone?: string | null };
   leadName: string;
   tags: string[];
-  /** Значение поля «Источник» — только в нашей AMO. */
-  polzaSource: string;
+  /**
+   * Списочные поля сделки, которые заполняем только в нашей AMO: «Источник»,
+   * «Контур». Значение ищется по тексту варианта в поле.
+   */
+  polzaSelects: Array<{ fieldId: number; fieldName: string; value: string }>;
   /** Кого создаём — в журнал. */
   label: string;
 }
 
-/** enum_id значения «Источника» — по адресу AMO и тексту, на жизнь процесса. */
-const sourceEnumCache = new Map<string, number | null>();
+/** enum_id варианта списочного поля — по адресу AMO, полю и тексту, на жизнь процесса. */
+const selectEnumCache = new Map<string, number | null>();
 
-async function polzaSourceEnumId(client: AmoClient, value: string): Promise<number | null> {
-  const key = `${client.baseUrl}::${value}`;
-  if (sourceEnumCache.has(key)) return sourceEnumCache.get(key) ?? null;
-  const id = await client.findLeadFieldEnumId(POLZA_SOURCE_FIELD_ID, value);
-  sourceEnumCache.set(key, id);
+async function leadSelectEnumId(client: AmoClient, fieldId: number, value: string): Promise<number | null> {
+  const key = `${client.baseUrl}::${fieldId}::${value}`;
+  if (selectEnumCache.has(key)) return selectEnumCache.get(key) ?? null;
+  const id = await client.findLeadFieldEnumId(fieldId, value);
+  selectEnumCache.set(key, id);
   return id;
 }
 
@@ -133,9 +136,14 @@ async function pushOne(db: SupabaseClient, table: string, task: CrmQueueRow, spe
 
       const customFields: Array<{ field_id: number; values: Array<{ enum_id: number }> }> = [];
       if (isPolza) {
-        const enumId = await polzaSourceEnumId(client, spec.polzaSource).catch(() => null);
-        if (enumId) customFields.push({ field_id: POLZA_SOURCE_FIELD_ID, values: [{ enum_id: enumId }] });
-        else warning = `в поле «Источник» не найдено значение «${spec.polzaSource}» — проставьте руками`;
+        const missing: string[] = [];
+        for (const select of spec.polzaSelects) {
+          const enumId = await leadSelectEnumId(client, select.fieldId, select.value).catch(() => null);
+          if (enumId) customFields.push({ field_id: select.fieldId, values: [{ enum_id: enumId }] });
+          else missing.push(`«${select.fieldName}» = «${select.value}»`);
+        }
+        // Сделку всё равно заводим: лид важнее пометки, её доставят руками.
+        if (missing.length) warning = `в AMO не найдено ${missing.join(', ')} — проставьте руками`;
       }
 
       leadId = await client.createLead({
