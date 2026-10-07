@@ -4,9 +4,26 @@ import {
   buildContactDeliveryPlan,
 } from '@/lib/verticalEngineV2/contactDeliveryPlanner';
 import { calculateDeliveryRate, distributeDeliveryRate } from '@/lib/verticalEngineV2/contactDeliveryRate';
+import { contactTargetDailyPlan, parseContactTarget, type ContactTargetState } from '@/lib/verticalEngineV2/contactDeliveryTarget';
 import { AccountStatus, CampaignStatus, type Account, type Campaign } from '@/lib/instantly/types';
 
 describe('buildContactDeliveryPlan', () => {
+  it('previews a shared edited target without multiplying it by hypothesis count or changing delivered facts', () => {
+    const state: ContactTargetState = { target_contacts: 2000, revision: 0, minimum_target: 38,
+      actual_contacted: 0, committed_contacts: 38, reserved_contacts: 0, ready_contacts: 462,
+      deadline: '2026-12-20', daily_capacity: 216, schedule_days: [1,2,3,4,5], timezone: 'Europe/Kirov',
+      has_period: false, can_edit: true };
+    const before = structuredClone(state);
+    const now = new Date('2026-10-07T14:00:00Z');
+    expect(contactTargetDailyPlan(state, 2000, now)).toBe(38);
+    expect(contactTargetDailyPlan(state, 10000, now)).toBe(189);
+    expect(contactTargetDailyPlan(state, 20000, now)).toBe(216);
+    expect(contactTargetDailyPlan(state, 1000, now)).toBe(19);
+    expect(contactTargetDailyPlan({ ...state, actual_contacted: 1000 }, 1000, now)).toBe(0);
+    expect(state).toEqual(before);
+    for (const value of ['', '1e3', '2.5', '-1', '0', '1000001']) expect(parseContactTarget(value)).toBeNull();
+    expect(parseContactTarget(' 10000 ')).toBe(10000);
+  });
   it('uses local schedule dates through the inclusive deadline and reports independent shortfalls', () => {
     const plan = buildContactDeliveryPlan({
       now: new Date('2026-09-06T21:30:00.000Z'),

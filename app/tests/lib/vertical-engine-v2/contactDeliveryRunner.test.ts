@@ -6,6 +6,7 @@ import { runContactDeliveryDay } from '@/lib/verticalEngineV2/contactDeliveryRun
 import { loadVeContactDeliveryCampaignInventory } from '@/lib/verticalEngineV2/contactDeliveryInventory';
 import { getCampaign, getCampaignAnalyticsOverview } from '@/lib/instantly/client';
 import { activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
+import { changeContactTarget } from '@/lib/verticalEngineV2/contactDeliveryTargetService';
 
 jest.mock('@/lib/instantly/client', () => ({ getCampaign: jest.fn(), getCampaignAnalyticsOverview: jest.fn() }));
 
@@ -119,6 +120,30 @@ function instantlyDb(workspace = 'workspace-1') {
 }
 
 describe('VE2 contact delivery runner', () => {
+  it('edits the shared target with trusted cross-campaign facts and CAS, without uploading or activating anything', async () => {
+    const portal = portalDb();
+    const rpc = jest.spyOn(portal, 'rpc').mockResolvedValueOnce({ data: { target_contacts: 2000, revision: 1 }, error: null } as never);
+    const result = await changeContactTarget(portal as never, instantlyDb() as never, {
+      projectId: VE_PROJECT_ID, target: 2000, expectedTarget: 23, expectedRevision: 0, actorId: 'specialist',
+    });
+    expect(result).toMatchObject({ target_contacts: 2000, revision: 1 });
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith('ve_change_contact_target', {
+      p_project_id: VE_PROJECT_ID, p_target_contacts: 2000, p_expected_target: 23, p_expected_revision: 0,
+      p_actor_id: 'specialist', p_observed_first_contacted: 10,
+    });
+    expect(activateDelivered).not.toHaveBeenCalled();
+    rpc.mockResolvedValueOnce({ data: null, error: { code: 'P0001', message: 'Цель уже изменена' } } as never);
+    await expect(changeContactTarget(portal as never, instantlyDb() as never, {
+      projectId: VE_PROJECT_ID, target: 20, expectedTarget: 23, expectedRevision: 0, actorId: 'specialist',
+    })).rejects.toThrow('Цель уже изменена');
+    const failed = instantlyDb();
+    await failed.from('instantly_campaign_catalog').update({ new_leads_contacted_count: null }).eq('id', 'campaign-a');
+    await expect(changeContactTarget(portal as never, failed as never, {
+      projectId: VE_PROJECT_ID, target: 40, expectedTarget: 23, expectedRevision: 0, actorId: 'specialist',
+    })).rejects.toThrow();
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
   it('uses the explicit Portal project, active period and complete child campaign set before reserving rows', async () => {
     const portal = portalDb();
     const instantly = instantlyDb();
