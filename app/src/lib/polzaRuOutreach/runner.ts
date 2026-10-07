@@ -219,9 +219,12 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
  * строк. Было 15 на строку — при доходимости новых компаний около 6% (запуск
  * 01.10.2026: 19 готовых из 304 новых кандидатов) этого не хватало даже на
  * один лимит, и запуск упирался в потолок раньше, чем набирал норму.
+ * 30 на строку тоже мало: у автосборов октября 2026 доходит ~3,5% (100 из
+ * 2 800–3 000), и сбор на 100 упирался в 3 000. Теперь 50 — 5 000 на сотню;
+ * разбор ИИ стоит ~$0,1 на тысячу компаний.
  */
 export function maxCandidatesFor(target: number): number {
-  return Math.min(20_000, Math.max(300, target * 30));
+  return Math.min(20_000, Math.max(300, target * 50));
 }
 
 export function nextWaveSize(target: number, totals: { scanned: number; ready: number }): number {
