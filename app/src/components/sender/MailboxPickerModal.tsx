@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { Check, Loader2, Search, Tag } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Check, ChevronDown, Loader2, Search, Tag } from 'lucide-react';
 import { fetchMailboxTags, fetchMailboxes, type MailboxDto, type MailboxTagDto } from './api';
 import { MAILBOX_STATUS_LABELS, providerLabel } from './labels';
-import { TagChip, tagTones } from './MailboxTags';
+import { TagChip, tagTones, useDismiss } from './MailboxTags';
 import { SenderModal } from './SenderModal';
 
 /** Ящик в выборке: адрес храним рядом с id, чтобы показать его без повторного запроса. */
@@ -201,56 +201,34 @@ export function MailboxPickerModal({
         </>
       }
     >
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          autoFocus
-          placeholder="Поиск по адресу: домен, имя, часть адреса"
-          className="w-full rounded-xl border border-zinc-300 bg-white py-2.5 pl-9 pr-3 text-sm text-zinc-900"
-        />
-      </div>
-
-      {/* Тег одной кнопкой: частый случай — «в эту кампанию шлём с ящиков
-          такого-то клиента», и это ровно один тег, а не двадцать галочек. */}
-      {tags.length ? (
-        <div className="mt-3">
-          <p className="mb-1.5 text-xs text-zinc-500">
-            Взять целиком по тегу — нажмите; повторное нажатие снимает весь тег:
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            {tags.map((tag) => {
-              // «Выбран» — когда в выборке уже столько ящиков этого тега,
-              // сколько в нём есть. Считаем по счётчику тега, а не по экрану:
-              // на экране первые две сотни и результат поиска.
-              const inPicked = picked.filter((m) => tagMailboxIds.get(tag.id)?.has(m.id)).length;
-              const full = tag.mailboxes > 0 && inPicked >= tag.mailboxes;
-              return (
-                <button
-                  key={tag.id}
-                  type="button"
-                  onClick={() => void toggleTag(tag)}
-                  disabled={tagBusy != null}
-                  className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors disabled:opacity-50 ${
-                    full ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
-                  }`}
-                >
-                  {tagBusy === tag.id ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : full ? (
-                    <Check className="h-3 w-3" />
-                  ) : (
-                    <Tag className="h-3 w-3 opacity-60" />
-                  )}
-                  {tag.name}
-                  <span className={full ? 'opacity-80' : 'text-zinc-400'}>{tag.mailboxes}</span>
-                </button>
-              );
-            })}
-          </div>
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            autoFocus
+            placeholder="Поиск по адресу: домен, имя, часть адреса"
+            className="w-full rounded-xl border border-zinc-300 bg-white py-2.5 pl-9 pr-3 text-sm text-zinc-900"
+          />
         </div>
-      ) : null}
+        {/* Тег одной галочкой: частый случай — «в эту кампанию шлём с ящиков
+            такого-то клиента», и это ровно один тег, а не двадцать галочек. */}
+        {tags.length ? (
+          <TagPickMenu
+            tags={tags}
+            isFull={(tag) => {
+              // «Взят» — когда в выборке уже столько ящиков этого тега, сколько
+              // в нём есть. Считаем по счётчику тега, а не по экрану: на экране
+              // первые две сотни и результат поиска.
+              const inPicked = picked.filter((m) => tagMailboxIds.get(tag.id)?.has(m.id)).length;
+              return tag.mailboxes > 0 && inPicked >= tag.mailboxes;
+            }}
+            busyId={tagBusy}
+            onToggle={(tag) => void toggleTag(tag)}
+          />
+        ) : null}
+      </div>
 
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
         <span>
@@ -313,5 +291,81 @@ export function MailboxPickerModal({
 
       {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
     </SenderModal>
+  );
+}
+
+/**
+ * «Теги» — выпадающий список, как фильтр во вкладке «Ящики»: цветной чип тега,
+ * галочка — тег взят целиком, повторное нажатие снимает весь тег.
+ */
+function TagPickMenu({
+  tags,
+  isFull,
+  busyId,
+  onToggle,
+}: {
+  tags: MailboxTagDto[];
+  isFull: (tag: MailboxTagDto) => boolean;
+  busyId: string | null;
+  onToggle: (tag: MailboxTagDto) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useDismiss(open, close);
+  const taken = tags.filter(isFull);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2.5 text-sm transition-colors ${
+          taken.length
+            ? 'border-blue-300 bg-blue-50 text-blue-700'
+            : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100'
+        }`}
+      >
+        <Tag className="h-4 w-4" />
+        Теги
+        {taken.length ? <span className="font-medium">({taken.length})</span> : null}
+        <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+      </button>
+
+      {open ? (
+        <div className="absolute right-0 z-30 mt-1 w-72 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
+          <p className="px-2 py-1 text-xs uppercase tracking-wide text-zinc-500">Взять ящики тега целиком</p>
+          <div className="max-h-72 overflow-y-auto">
+            {tags.map((tag) => {
+              const full = isFull(tag);
+              return (
+                <button
+                  key={tag.id}
+                  type="button"
+                  onClick={() => onToggle(tag)}
+                  disabled={busyId != null}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                >
+                  <span
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                      full ? 'border-blue-600 bg-blue-600 text-white' : 'border-zinc-300'
+                    }`}
+                  >
+                    {busyId === tag.id ? (
+                      <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />
+                    ) : full ? (
+                      <Check className="h-3 w-3" />
+                    ) : null}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <TagChip name={tag.name} tone={tag.tone} />
+                  </span>
+                  <span className="text-xs text-zinc-400">{tag.mailboxes}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
