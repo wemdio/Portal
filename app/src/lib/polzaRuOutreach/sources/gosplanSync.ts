@@ -28,9 +28,10 @@ import {
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
 
+// 223-ФЗ не берём: за 05.10.2026 из 933 договоров от 3 млн ₽ поставщик не
+// указан ни в одном — ни в списке, ни в полном документе ГосПлана.
 const LAWS: Array<{ law: GosplanLaw; kind: 'contracts' | 'tenders'; label: string }> = [
   { law: 'fz44', kind: 'contracts', label: '44-ФЗ' },
-  { law: 'fz223', kind: 'tenders', label: '223-ФЗ' },
 ];
 
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
@@ -206,7 +207,7 @@ export async function runGosplanSyncTick(
 ): Promise<void> {
   const cfg = gosplanConfigFromEnv();
   if (!cfg) {
-    if (!disabledLogged) log('info', 'ГосПлан: синк контрактов выключен — не заданы GOSPLAN_BASE_URL / GOSPLAN_API_KEY');
+    if (!disabledLogged) log('info', 'ГосПлан: синк контрактов выключен (GOSPLAN_ENABLED=0)');
     disabledLogged = true;
     return;
   }

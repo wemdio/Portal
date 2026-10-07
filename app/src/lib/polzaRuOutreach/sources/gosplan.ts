@@ -45,13 +45,14 @@ function envNum(raw: string | undefined, fallback: number): number {
 }
 
 /**
- * Настройки из env. Нет ни GOSPLAN_API_KEY, ни GOSPLAN_BASE_URL → null (синк выключен).
- * Без адреса: с ключом — прод, без ключа — тестовый сервер.
+ * Настройки из env. Синк включён по умолчанию (решение пользователя 07.10.2026:
+ * без переменных на сервере); GOSPLAN_ENABLED=0 → null (выключен).
+ * Без адреса: с ключом — прод, без ключа — бесплатный тестовый сервер.
  */
 export function gosplanConfigFromEnv(env: NodeJS.ProcessEnv = process.env): GosplanConfig | null {
+  if (/^(0|false|no|off)$/i.test(env.GOSPLAN_ENABLED?.trim() ?? '')) return null;
   const apiKey = env.GOSPLAN_API_KEY?.trim() || null;
   const baseRaw = env.GOSPLAN_BASE_URL?.trim() || '';
-  if (!apiKey && !baseRaw) return null;
   const baseUrl = (baseRaw || (apiKey ? GOSPLAN_PROD_URL : GOSPLAN_TEST_URL)).replace(/\/+$/, '');
   const isTest = baseUrl.includes('v2test.');
   return {
