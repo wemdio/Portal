@@ -53,6 +53,8 @@ export function fatalAiAccountError(errorMessage: string): string | null {
     lower.includes('insufficient credit')
     || lower.includes('insufficient_quota')
     || lower.includes('out of credits')
+    || lower.includes('balance is too low')
+    || lower.includes('http 402')
   ) {
     return 'На счёте ИИ-провайдера закончились средства. Пополните баланс и запустите заново.';
   }

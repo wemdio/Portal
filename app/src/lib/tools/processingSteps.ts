@@ -33,11 +33,14 @@ import {
   EMAIL_VALIDATION_MAX_ATTEMPTS,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
   FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL,
+  PERSONALIZATION_CHECKPOINT_STATE_COL,
+  parsePersonalizationCheckpointResult,
   parseEmailValidationCheckpointState,
   serializeEmailValidationCheckpointState,
   stripBaseConstructorCheckpointMetadata,
   stripEnrichCheckpointMetadata,
   stripFindEmailsCheckpointMetadata,
+  stripPersonalizationCheckpointMetadata,
   FOUND_EMAIL_ORIGIN_COL,
   type EmailValidationCheckpointEntry,
   type EmailValidationCheckpointState,
@@ -144,7 +147,7 @@ const TA_MAX_HTTP_ATTEMPTS = 16;
 const TA_BATCH_TIMEOUT_MS = 240_000;
 const TA_MAX_OUTPUT_TOKENS = 8000;
 // CLEANUP_BATCH (50, не 100) и обоснование — в nameCleanupProtocol.ts.
-const PERSONALIZATION_BATCH = 5;
+const PERSONALIZATION_CONCURRENCY = 5;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1500;
 
@@ -1751,21 +1754,59 @@ const PERSONALIZATION_SYSTEM_PROMPT = `Ты — помощник для перс
 
 Ответ: только текст персонализации.`;
 
+export interface StepPersonalizeOptions {
+  /** Per-job override: five by default, capped at twenty concurrent requests. */
+  concurrency?: number;
+  onCheckpoint?: CheckpointFn;
+}
+
 export async function stepPersonalize(
   data: string[][],
   prompt: string,
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
+  options?: StepPersonalizeOptions,
 ): Promise<string[][]> {
-  const header = data[0];
-  const body = data.slice(1);
-  const result: PersonalizationRowResult[] = [];
+  const stateIndex = data[0]?.indexOf(PERSONALIZATION_CHECKPOINT_STATE_COL) ?? -1;
+  const [header = [], ...body] = stripPersonalizationCheckpointMetadata(data);
+  const result: Array<PersonalizationRowResult | undefined> = body.map((row, index) => {
+    const saved = stateIndex >= 0
+      ? parsePersonalizationCheckpointResult(data[index + 1][stateIndex])
+      : undefined;
+    return saved ? { source: row, ...saved } : undefined;
+  });
+  const pending = body.map((_row, index) => index).filter((index) => !result[index]);
+  const concurrency = boundedInteger(options?.concurrency, PERSONALIZATION_CONCURRENCY, 1, 20);
+  const shouldCheckpoint = makeCheckpointGate();
+  const activeRequests = new Set<AbortController>();
+  let fatalError: Error | undefined;
+  let done = 0;
+  let reportChain = Promise.resolve();
+  const stop = (error: unknown) => {
+    fatalError ??= error instanceof Error ? error : new Error(String(error));
+    for (const request of activeRequests) request.abort();
+  };
+  const checkCancelled = async (): Promise<boolean> => {
+    if (fatalError) return true;
+    if (isCancelled && await isCancelled()) stop(new PersonalizationCancelledError());
+    return Boolean(fatalError);
+  };
+  const checkpoint = (): string[][] => [
+    [...header, PERSONALIZATION_CHECKPOINT_STATE_COL],
+    ...body.map((row, index) => {
+      const saved = result[index];
+      return [...header.map((_column, col) => row[col] || ''), saved
+        ? JSON.stringify({ proposal: saved.proposal, ...(saved.error ? { error: saved.error } : {}) })
+        : ''];
+    }),
+  ];
 
-  for (let batch = 0; batch < body.length; batch += PERSONALIZATION_BATCH) {
-    if (isCancelled && await isCancelled()) throw new Error('Отменено');
-    const chunk = body.slice(batch, batch + PERSONALIZATION_BATCH);
-
-    const promises = chunk.map(async (row) => {
+  // A continuous pool releases each slot as soon as its own row finishes;
+  // one slow response no longer holds up every row in the next batch.
+  await processInPool(pending, concurrency, async (index) => {
+    try {
+      if (await checkCancelled()) return;
+      const row = body[index];
       const obj: Record<string, string> = {};
       header.forEach((h, c) => { obj[h] = row[c] || ''; });
       const sourceData = Object.entries(obj)
@@ -1774,6 +1815,9 @@ export async function stepPersonalize(
         .join('\n');
 
       const userMsg = `Данные: "${sourceData.slice(0, 3000)}"\n\nЗадача: ${prompt.slice(0, 2000)}\n\nСгенерируй 1 персонализированное предложение.`;
+      let personalized: PersonalizationRowResult;
+      const controller = new AbortController();
+      activeRequests.add(controller);
       try {
         const content = await generatePersonalizationCompletion({
           apiKey: OPENROUTER_PERSONALIZATION_API_KEY,
@@ -1783,23 +1827,45 @@ export async function stepPersonalize(
             { role: 'user', content: userMsg },
           ],
           title: 'Portal - Base Constructor Personalization',
-          isCancelled,
+          isCancelled: checkCancelled,
+          signal: controller.signal,
         });
-        return { source: row, proposal: content };
+        personalized = { source: row, proposal: content };
       } catch (error) {
         if (error instanceof PersonalizationCancelledError) throw error;
-        return { source: row, proposal: '', error: personalizationFailureMessage(error) };
+        personalized = { source: row, proposal: '', error: personalizationFailureMessage(error) };
+      } finally {
+        activeRequests.delete(controller);
       }
-    });
-
-    const batchResults = await Promise.all(promises);
-    if (isCancelled && await isCancelled()) throw new PersonalizationCancelledError();
-    result.push(...batchResults);
-    await onProgress(Math.round(((batch + chunk.length) / body.length) * 100));
-  }
+      if (await checkCancelled()) return;
+      result[index] = personalized;
+      // Serialize saves and progress. A failed save stops sibling requests and
+      // queued reports, rather than letting the pool swallow persistence errors.
+      reportChain = reportChain.then(async () => {
+        if (await checkCancelled()) return;
+        done += 1;
+        if (options?.onCheckpoint && shouldCheckpoint(done, done === pending.length)) {
+          await options.onCheckpoint(checkpoint());
+        }
+        if (await checkCancelled()) return;
+        // On resume this reports the unfinished tail, as expected by the worker.
+        if (done % 5 === 0 || done === pending.length) {
+          await onProgress(Math.min(99, Math.round((done / pending.length) * 100)));
+        }
+      }).catch((error) => { stop(error); throw error; });
+      await reportChain;
+    } catch (error) {
+      stop(error);
+    }
+  });
+  await reportChain;
+  await checkCancelled();
+  if (fatalError) throw fatalError;
+  const completed = result.filter((row): row is PersonalizationRowResult => Boolean(row));
+  if (completed.length !== body.length) throw new Error('Не удалось сохранить результат персонализации');
 
   await onProgress(100);
-  return buildPersonalizationTable(header, result);
+  return buildPersonalizationTable(header, completed);
 }
 
 /* ═══════════════════════════════════════════
