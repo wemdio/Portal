@@ -29,8 +29,6 @@
  *    в `search_results`. Прогресс обновляется в `search_parser_jobs`.
  */
 
-import { searchExecution, withSearchExecution, saveSearchProgress, saveSearchResults, searchQueueDeadline, SearchPersistenceError } from './searchExecution';
-import { runSearchProbe } from './searchProbeWorker';
 import { SEARCH_CONFIG } from '@/lib/config';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logError, logInfo, logWarn } from '@/lib/loggerServer';
@@ -120,20 +118,27 @@ async function insertInBatches<T extends Record<string, unknown>>(
   admin: NonNullable<typeof supabaseAdmin>,
   rows: T[],
   opts?: { batchSize?: number },
-): Promise<number> {
+): Promise<{ inserted: number; hadFailures: boolean; firstErrorMessage: string | null }> {
   const batchSize = Math.max(1, Math.min(250, Math.floor(opts?.batchSize ?? 60)));
   let inserted = 0;
+  let hadFailures = false;
+  let firstErrorMessage: string | null = null;
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
-    if (!batch.length) continue;
-    // The DB write and ownership check are one operation. Replaying a saved
-    // page after restart does not insert the same domain twice.
-    inserted += await saveSearchResults(admin, String(batch[0].job_id), batch);
-
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error } = await admin.from('search_results').insert(batch as any);
+    if (error) {
+      hadFailures = true;
+      firstErrorMessage ??= error.message;
+      // Also log to stdout to make local debugging obvious.
+      console.error('search_results insert batch failed:', error.message);
+      continue;
+    }
+    inserted += batch.length;
   }
 
-  return inserted;
+  return { inserted, hadFailures, firstErrorMessage };
 }
 
 async function safeUpdateSearchJob(
@@ -141,7 +146,32 @@ async function safeUpdateSearchJob(
   jobId: string,
   patch: Record<string, unknown>,
 ): Promise<void> {
-  await saveSearchProgress(admin, jobId, patch);
+  const attempt = await admin.from('search_parser_jobs').update(patch).eq('id', jobId);
+  if (!attempt.error) return;
+
+  const err = attempt.error as { code?: string; message?: string };
+  const msg = String(err?.message ?? '');
+  const isMissingColumn =
+    err?.code === 'PGRST204' &&
+    (msg.includes("progress_stage") || msg.includes("progress_percent") || msg.includes("schema cache"));
+
+  if (!isMissingColumn) {
+    console.warn('search_parser_jobs update failed:', err?.message ?? attempt.error);
+    return;
+  }
+
+  const { progress_stage, progress_percent, ...rest } = patch as Record<string, unknown> & {
+    progress_stage?: unknown;
+    progress_percent?: unknown;
+  };
+  void progress_stage;
+  void progress_percent;
+
+  if (Object.keys(rest).length === 0) return;
+  const retry = await admin.from('search_parser_jobs').update(rest).eq('id', jobId);
+  if (retry.error) {
+    console.warn('search_parser_jobs update retry failed:', (retry.error as { message?: string })?.message ?? retry.error);
+  }
 }
 
 async function throttleBetweenQueries(provider: 'google' | 'duckduckgo' | 'bing' | 'mojeek') {
@@ -638,15 +668,7 @@ function toLeadRow(
   };
 }
 
-export async function runSearchParserJob(jobId?: string): Promise<boolean> {
-  if (!supabaseAdmin) throw new Error('supabaseAdmin not configured');
-  return withSearchExecution(supabaseAdmin, jobId, async (lease) => {
-    if (lease.probe) await runSearchProbe(supabaseAdmin!, lease);
-    else await runManualSearchParserJob(lease.job_id);
-  });
-}
-
-async function runManualSearchParserJob(jobId: string) {
+export async function runSearchParserJob(jobId: string) {
   if (!supabaseAdmin) {
     console.error('supabaseAdmin not configured');
     return;
@@ -673,8 +695,11 @@ async function runManualSearchParserJob(jobId: string) {
     const requestId = crypto.randomUUID();
     const logMeta = { userId: job.user_id, requestId, route: 'search_parser_worker' };
 
-    // Claimed atomically by withSearchExecution; never overwrite cancellation.
-    searchExecution(jobId);
+    // 2. Set running
+    await admin
+      .from('search_parser_jobs')
+      .update({ status: 'running', started_at: job.started_at ?? new Date().toISOString() })
+      .eq('id', jobId);
 
     const rawConfig =
       job.config && typeof job.config === 'object' ? (job.config as { queries?: string[]; brief?: string; search_depth?: number }) : {};
@@ -742,9 +767,6 @@ async function runManualSearchParserJob(jobId: string) {
 
     let totalResults = Math.max(0, Number(job.total_results ?? 0));
     let processedQueries = resumeFrom;
-    // Only a contiguous prefix is resumable: a faster second query must not
-    // cause a restart to skip the still-running first query.
-    const completedQueries = new Set<number>();
     // NOTE: we prefer completing with a warning over failing the whole job
     // when search engines temporarily rate-limit or challenge the scraper.
     let hadFailures = false;
@@ -815,7 +837,6 @@ async function runManualSearchParserJob(jobId: string) {
     // 3. Process queries (parallel workers: 2-3 by default)
     await mapWithConcurrency(remainingQueries, QUERY_CONCURRENCY, async (query, index) => {
       if (cancelled) return;
-      searchExecution(jobId);
 
       // Check for cancellation (best-effort)
       const { data: currentJob } = await admin
@@ -837,7 +858,6 @@ async function runManualSearchParserJob(jobId: string) {
       });
 
       let insertedCount = 0;
-      let persistenceFailed = false;
       let hadQueryFailures = false;
       let statsProvider: string = 'google';
       let statsLastGooglePage: number | null = null;
@@ -1243,7 +1263,17 @@ async function runManualSearchParserJob(jobId: string) {
         }
 
         if (companyRowsToInsert.length > 0) {
-          insertedCount = await insertInBatches(admin, companyRowsToInsert, { batchSize: 60 });
+          const inserted = await insertInBatches(admin, companyRowsToInsert, { batchSize: 60 });
+          if (inserted.hadFailures) {
+            hadQueryFailures = true;
+            void logError(
+              'parser.search.insert.failed',
+              new Error(inserted.firstErrorMessage ?? 'insert failed'),
+              { jobId, provider, query, attempted: companyRowsToInsert.length, inserted: inserted.inserted },
+              logMeta,
+            );
+          }
+          insertedCount = inserted.inserted;
         }
 
         await querySpan?.end(
@@ -1291,7 +1321,6 @@ async function runManualSearchParserJob(jobId: string) {
           logMeta,
         );
       } catch (err) {
-        if (err instanceof SearchPersistenceError) { persistenceFailed = true; throw err; }
         hadQueryFailures = true;
         if (!isGoogleBlockedError(err) && !isDuckDuckGoBlockedError(err) && !isBingBlockedError(err) && !isMojeekBlockedError(err)) {
           console.error(`Error processing query "${query}":`, err);
@@ -1335,10 +1364,8 @@ async function runManualSearchParserJob(jobId: string) {
           });
         }
       } finally {
-        if (!persistenceFailed) {
         await withLock(async () => {
-          completedQueries.add(absoluteIndex);
-          while (completedQueries.has(processedQueries)) processedQueries += 1;
+          processedQueries += 1;
           if (insertedCount > 0) totalResults += insertedCount;
           if (hadQueryFailures) hadFailures = true;
         });
@@ -1364,7 +1391,6 @@ async function runManualSearchParserJob(jobId: string) {
         } catch (statsErr) {
           console.warn('search_parser_query_stats upsert failed:', statsErr);
         }
-        }
       }
     });
 
@@ -1384,13 +1410,6 @@ async function runManualSearchParserJob(jobId: string) {
       // If job was switched to failed/cancelled externally, don't overwrite external status.
       return;
     }
-
-    // A result INSERT may have committed before its response was lost. On
-    // replay the domain insert returns zero new rows; derive the final count
-    // from saved results rather than displaying an incorrect empty warning.
-    const savedCount = await searchQueueDeadline(admin.from('search_results').select('id', { count: 'exact', head: true }).eq('job_id', jobId));
-    if (savedCount.error || savedCount.count == null) throw new SearchPersistenceError('Search result count unavailable');
-    totalResults = savedCount.count;
 
     // Prefer completing with a meaningful hint if we saw blocks.
     const hint =
@@ -1432,9 +1451,6 @@ async function runManualSearchParserJob(jobId: string) {
       logMeta,
     );
   } catch (err) {
-    // Leave the job and its durable checkpoint for lease recovery. Never mark
-    // a DB/ownership failure as successfully processed search queries.
-    if (err instanceof SearchPersistenceError) throw err;
     console.error('Search parser worker failed:', err);
     if (supabaseAdmin) {
       await safeUpdateSearchJob(supabaseAdmin, jobId, {

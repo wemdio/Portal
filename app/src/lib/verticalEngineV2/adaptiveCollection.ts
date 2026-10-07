@@ -18,7 +18,7 @@ export const VE_SERPER_CREDIT_ESTIMATE_USD = 50 / 49_999;
 const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
   : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, stable(item)])) : value;
 export const veSourceStrategyKey = (task: VeCollectTask) => {
-  const filters = task.source === 'web_search' ? task.search_query : task.source === 'companies_directory' ? { ...task.directory_filters, includeIp: task.directory_filters?.includeIp ?? false }
+  const filters = task.source === 'companies_directory' ? { ...task.directory_filters, includeIp: task.directory_filters?.includeIp ?? false }
     : task.source === 'hh_live' ? task.hh_query : task.source === 'pdl' ? task.pdl_filters
       : task.source === 'funded' ? task.funded_filters : task.source === 'eng_hiring' ? task.eng_hiring_query : task.maps_query;
   return createHash('sha256').update(JSON.stringify(stable({ source: task.source, filters }))).digest('hex');

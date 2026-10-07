@@ -26,8 +26,6 @@ export interface ProviderUsageEvent {
   reportedCostUsd?: number;
   estimatedCostUsd?: number;
   serperCredits?: number;
-  /** Upper quote BEFORE the request, separate from measured/estimated usage. */
-  reservedCostUsd?: number;
 }
 
 export type ProviderUsageDetails = Omit<ProviderUsageEvent, 'attemptId' | 'provider' | 'phase'>;
@@ -46,16 +44,6 @@ export class ProviderUsageWriteError extends Error {
   constructor() {
     super('Provider usage journal could not be saved.');
     this.name = 'ProviderUsageWriteError';
-  }
-}
-
-export class ProviderBudgetWaitError extends ProviderUsageWriteError {
-  constructor(readonly reason: string) {
-    super();
-    this.name = 'ProviderBudgetWaitError';
-    this.message = reason === 'budget'
-      ? 'Автоматический поисковый добор ожидает освобождения общего бюджета $3 за 24 часа. Результаты сохранены.'
-      : 'Автоматический поисковый добор приостановлен: требуется проверка бюджета или тарифа.';
   }
 }
 
@@ -92,7 +80,7 @@ function usageDetails(details: ProviderUsageDetails): ProviderUsageDetails {
   }
   for (const field of [
     'httpStatus', 'retryAfterMs', 'promptTokens', 'completionTokens', 'cachedTokens',
-    'reportedCostUsd', 'estimatedCostUsd', 'serperCredits', 'reservedCostUsd',
+    'reportedCostUsd', 'estimatedCostUsd', 'serperCredits',
   ] as const) {
     const value = details[field];
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) result[field] = value;
@@ -112,8 +100,8 @@ export async function beginProviderUsage(
   const write = async (event: ProviderUsageEvent): Promise<void> => {
     try {
       await context.writer({ ...context.scope }, event);
-    } catch (error) {
-      context.failure ??= error instanceof ProviderUsageWriteError ? error : new ProviderUsageWriteError();
+    } catch {
+      context.failure ??= new ProviderUsageWriteError();
       throw context.failure;
     }
   };

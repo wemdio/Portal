@@ -134,37 +134,3 @@ describe('пауза растёт только без продвижения', (
     expect(veIdleRequeueMs(1_000, 1.5)).toBe(1_000);
   });
 });
-
-
-import { addVeSearchFallback, nextVeSearchProbe } from '@/lib/verticalEngineV2/webSearchFallback';
-import type { VeCollectInfo, VeCollectTaskState } from '@/lib/verticalEngineV2/stages/baseCollect';
-import { ProviderBudgetWaitError } from '@/lib/providerUsage';
-import { planVeJobFailure } from '@/lib/verticalEngineV2/jobRetry';
-import { SearchPersistenceError } from '@/lib/parsers/searchExecution';
-
-describe('bounded search after exhausted acquisition', () => {
-  it('retains checkpoints and hypothesis scope; a disabled fallback leaves ordinary sources untouched', async () => {
-    const tasks: VeCollectTaskState[] = [{ source: 'companies_directory', task: { source: 'companies_directory', rationale: 'old source' },
-      status: 'pending', child_job_id: null, rows: 0, directory_cursors: { existing: 1630 } }];
-    const info: VeCollectInfo = { tasks };
-    const db = createMockSupabase({ tables: { ve_search_control: [{ singleton: true, enabled: false }],
-      ve_hypotheses: [{ id: 'h', title: 'Online platforms', description: 'Own subscriptions' }] } });
-    const client = db as unknown as SupabaseClient;
-    expect(await addVeSearchFallback(client, 'h', 'en', info, tasks, 0)).toBe(false);
-    expect(tasks[0].status).toBe('pending');
-    await client.from('ve_search_control').update({ enabled: true }).eq('singleton', true);
-    expect(await addVeSearchFallback(client, 'h', 'en', info, tasks, 0)).toBe(true);
-    expect(tasks[0]).toMatchObject({ directory_cursors: { existing: 1630 }, hit_ceiling: true });
-    expect(tasks[1].task.search_query).toEqual({ query: 'Online platforms official website', locale: 'en', page: 1 });
-    expect(info.search_budget).toBe(true);
-    expect(nextVeSearchProbe(info.web_search, 0)).toBeNull();
-    expect(nextVeSearchProbe(info.web_search, 1)).toBe(2);
-    expect(nextVeSearchProbe({ query: 'q', page: 3, ready_before: 5 }, 10)).toBeNull();
-  });
-  it('budget wait preserves failure allowance and never becomes an immediate paid retry', () => {
-    expect(planVeJobFailure({ id: 'j', attempts: 4, payload: {}, stage: 'base_collect' }, new SearchPersistenceError(), 0))
-      .toMatchObject({ status: 'pending', attempts: 4, runAfter: '1970-01-01T00:01:00.000Z' });
-    expect(planVeJobFailure({ id: 'j', attempts: 4, payload: {}, stage: 'base_collect' }, new ProviderBudgetWaitError('budget'), 0))
-      .toMatchObject({ status: 'pending', attempts: 4, runAfter: '1970-01-01T01:00:00.000Z' });
-  });
-});

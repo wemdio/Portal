@@ -11,7 +11,7 @@ import { Resolver } from 'node:dns/promises';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
-import { withProviderUsage, ProviderBudgetWaitError } from '@/lib/providerUsage';
+import { withProviderUsage } from '@/lib/providerUsage';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
 import { createVeCachedSearch, freshVeSearchCacheItems, VE_EMPTY_SEARCH_CACHE_TTL_MS, VE_SEARCH_CACHE_TTL_MS } from '@/lib/verticalEngineV2/relevanceSearchCache';
@@ -28,7 +28,7 @@ jest.mock('@/lib/enrich/websiteParser', () => ({
 
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
-import { veLlmUpperCost, callLLMText, callLLMWithSchema, getVeModel, setVeActiveJobSignal, withVeActiveJobSignal, getVeActiveJobSignal, VE_COLLECTION_MODEL } from '@/lib/verticalEngineV2/llm';
+import { callLLMText, callLLMWithSchema, getVeModel, setVeActiveJobSignal, withVeActiveJobSignal, getVeActiveJobSignal, VE_COLLECTION_MODEL } from '@/lib/verticalEngineV2/llm';
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
@@ -45,8 +45,6 @@ import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 import { createVeLlmRateLimit, veLlmRateLimit, veRetryAfterMs, VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { planVeRelevanceRetry } from '@/lib/verticalEngineV2/relevanceRetry';
 import { retryRunAfter } from '@/lib/verticalEngineV2/jobRetry';
-
-import { accountSearchSpend } from '@/lib/parsers/searchSpend';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -94,37 +92,6 @@ describe('llm rawCall retry', () => {
     jest.useRealTimers();
     jest.restoreAllMocks();
     jest.clearAllMocks();
-  });
-
-  it('reserves the complete model request before HTTP and defers automatic search at the shared budget', async () => {
-    global.fetch = jest.fn();
-    const messages = [{ role: 'user' as const, content: 'Find relevant companies' }];
-    expect(veLlmUpperCost(messages, 'unpriced-model', 100)).toBeUndefined();
-    expect(veLlmUpperCost(messages, 'openai/gpt-4o-mini', 100, { schema: 'x'.repeat(4000) }))
-      .toBeGreaterThan(veLlmUpperCost(messages, 'openai/gpt-4o-mini', 100)!);
-    const db = createMockSupabase({
-      tables: { ve_bases: [{ id: 'base', search_budget: 'true' }] },
-      rpcHandlers: { ve_reserve_search_spend: () => ({ data: 'budget' }) },
-    });
-    const job = { id: 'job', project_id: 'project', stage: 'base_collect',
-      payload: { base_id: 'base', provider_usage_origin: { runId: 'origin' } } } as unknown as VeJob;
-    await expect(withVeCostTelemetry(db as unknown as SupabaseClient, job,
-      () => callLLMWithSchema(messages, schema, { model: 'openai/gpt-4o-mini' })))
-      .rejects.toBeInstanceOf(ProviderBudgetWaitError);
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(db.rpcCalls[0]).toMatchObject({ fn: 've_reserve_search_spend', params: { p_base_id: 'base', p_reserved_usd: expect.any(Number) } });
-    // Ordinary bases are admitted without reserving automatic-search money.
-    const normal = createMockSupabase({ rpcHandlers: { ve_reserve_search_spend: () => ({ data: 'not_applicable' }) } });
-    global.fetch = jest.fn().mockResolvedValue(httpResponse(200, { choices: [{ message: { content: 'ok' } }], usage: {} }));
-    await withVeCostTelemetry(normal as unknown as SupabaseClient, job,
-      () => callLLMText(messages, { model: 'unpriced-model' }));
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(normal.rpcCalls).toHaveLength(1);
-    // An ambiguous provider response retains the reservation.
-    const rpc = jest.fn(async () => ({ error: null }));
-    await accountSearchSpend({ rpc } as unknown as SupabaseClient, 'base',
-      { attemptId: 'a', provider: 'requesty', phase: 'finished', status: 'ambiguous', estimatedCostUsd: 0 });
-    expect(rpc).toHaveBeenCalledWith('ve_settle_search_spend', { p_attempt_id: 'a', p_actual_usd: null });
   });
 
   it('retries a transient 502 and succeeds on the next attempt', async () => {

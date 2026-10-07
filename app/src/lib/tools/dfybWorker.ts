@@ -1,5 +1,4 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { createHash } from 'node:crypto';
 import { generateDfybPlan, type DfybPlan, type DfybParserConfig } from './dfybPlanner';
 import {
   removeEmptyRowsAndCols,
@@ -165,34 +164,15 @@ async function stepPlan(
 
 const STD_HEADER = ['Компания', 'Сайт', 'Email', 'Телефон', 'Описание', 'Город', 'Категории'];
 
-async function runSearchParsing(queries: string[], userId: string, parentJobId: string): Promise<string[][]> {
-  // A lost enqueue response/restarted DFYB parent reuses the same child.
-  const hash = createHash('sha256').update(JSON.stringify(['dfyb.search.v1', parentJobId, queries])).digest('hex');
-  const job = { id: `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}` };
-  const { error } = await admin
+async function runSearchParsing(queries: string[], userId: string): Promise<string[][]> {
+  const { data: job, error } = await admin
     .from('search_parser_jobs')
-    .upsert({ id: job.id, user_id: userId, status: 'pending', config: { queries }, total_queries: queries.length },
-      { onConflict: 'id', ignoreDuplicates: true });
-  if (error) throw new Error(`Failed to create search job: ${error.message}`);
+    .insert({ user_id: userId, status: 'pending', config: { queries }, total_queries: queries.length })
+    .select()
+    .single();
+  if (error || !job) throw new Error(`Failed to create search job: ${error?.message}`);
 
-  // Direct callers share the same lease/capacity gate as worker-search.
-  // A busy queue is waiting, never an empty completed result.
-  const deadline = Date.now() + 3 * 60 * 60_000;
-  while (true) {
-    if (await isCancelled(parentJobId)) {
-      await admin.from('search_parser_jobs').update({ status: 'failed', error_message: 'Отменено пользователем' })
-        .eq('id', job.id).in('status', ['pending', 'running']);
-      throw new Error('Search cancelled');
-    }
-    const { data: current, error: readError } = await admin.from('search_parser_jobs').select('status,error_message').eq('id', job.id).single();
-    if (readError || !current) throw new Error('Search status unavailable');
-    if (current.status === 'completed') break;
-    if (current.status === 'failed') throw new Error(current.error_message || 'Search failed');
-    if (Date.now() >= deadline) throw new Error('Search is still queued or running; results remain saved');
-    if (current.status === 'pending') await runSearchParserJob(job.id);
-    else await sleep(5000);
-    if (current.status === 'pending') await sleep(1000);
-  }
+  await runSearchParserJob(job.id);
 
   const { data: results } = await admin
     .from('search_results')
@@ -279,7 +259,7 @@ async function stepParse(
     try {
       let rows: string[][] = [];
       if (p.type === 'search' && p.queries?.length) {
-        rows = await runSearchParsing(p.queries, userId, jobId);
+        rows = await runSearchParsing(p.queries, userId);
       } else if (p.type === 'yandex_maps' && ((p.cities?.length ?? 0) > 0 || (p.rubrics?.length ?? 0) > 0)) {
         rows = await runYandexMapsParsing(p, userId);
       } else if (p.type === 'hh' && p.hh_config) {

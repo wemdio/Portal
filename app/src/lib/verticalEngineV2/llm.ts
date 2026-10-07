@@ -75,15 +75,6 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },
 };
 
-/** Conservative upper token quote: UTF-8 bytes exceed the input token count.
- * Unknown model aliases cannot spend an automatic-search budget. */
-export function veLlmUpperCost(messages: LLMMessage[], model: string, maxTokens: number, responseFormat?: unknown): number | undefined {
-  const price = MODEL_PRICES[model];
-  if (!price || !Number.isSafeInteger(maxTokens) || maxTokens < 1) return undefined;
-  const inputBound = Buffer.byteLength(JSON.stringify({ messages, responseFormat }), 'utf8') + 1024;
-  return (inputBound * price.in + maxTokens * price.out) / 1_000_000 * 1.5;
-}
-
 function getApiKey(): string {
   const key = process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY;
   if (!key) {
@@ -385,8 +376,7 @@ async function rawCall(
 
     const apiKey = getApiKey();
     const rateGeneration = veLlmRateLimit.beforeRequest(model);
-    const metering = await beginProviderUsage('requesty', { requestedModel: model,
-      reservedCostUsd: veLlmUpperCost(jsonMode ? withJsonModeHint(messages) : messages, model, maxTokens, opts?.responseFormat ?? opts?.jsonSchema) });
+    const metering = await beginProviderUsage('requesty', { requestedModel: model });
     const scope = getProviderUsageScope();
     let res: Response;
     try {

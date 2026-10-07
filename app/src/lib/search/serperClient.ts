@@ -28,7 +28,7 @@ export async function serperSearch(
   if (!apiKey) return [];
   if (opts?.signal?.aborted) return [];
   const metered = getProviderUsageScope() !== undefined;
-  const metering = await beginProviderUsage('serper', { reservedCostUsd: 0.1 });
+  const metering = await beginProviderUsage('serper');
   const usage: ProviderUsageDetails = { status: 'ambiguous' };
 
   const controller = new AbortController();

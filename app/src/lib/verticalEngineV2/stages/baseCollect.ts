@@ -90,9 +90,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { addVeSearchFallback } from '../webSearchFallback';
-import { SearchPersistenceError } from '@/lib/parsers/searchExecution';
-import { ProviderBudgetWaitError, ProviderUsageWriteError } from '@/lib/providerUsage';
+import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veDryLiveSources,
@@ -686,8 +684,6 @@ export interface VeSliceProbe {
 }
 
 export interface VeCollectInfo {
-  search_budget?: true;
-  web_search?: { query: string; page: number; ready_before: number };
   adaptive_collection?: VeAdaptiveCollection;
   /** Display/audit snapshot of the last applied "addresses per company" limit; the source of truth is ve_bases.max_emails_per_company. */
   company_contact_cap?: { limit: number; over_cap_rows: number; companies: number; applied_at: string };
@@ -862,8 +858,7 @@ type VeAutoBase = VeBase & {
 };
 
 /** Таблица дочерней джобы по источнику (у реестра и ENG-источников pdl/funded/eng_hiring дочерней джобы нет). */
-const CHILD_JOB_TABLE: Record<'hh_live' | 'yandex_maps' | 'google_maps' | 'web_search', string> = {
-  web_search: 'search_parser_jobs',
+const CHILD_JOB_TABLE: Record<'hh_live' | 'yandex_maps' | 'google_maps', string> = {
   hh_live: 'parser_jobs',
   yandex_maps: 'yandex_maps_jobs',
   google_maps: 'google_maps_jobs',
@@ -1759,24 +1754,8 @@ async function dispatchTask(
   usage: VeUsage,
   save: () => Promise<void>,
   existingContactsOnly = false,
-  searchParent?: { baseId: string; jobId: string },
 ): Promise<void> {
   const { task } = state;
-
-  if (task.source === 'web_search') {
-    if (!searchParent || !task.search_query) throw new Error('Search fallback owner missing');
-    const q = task.search_query;
-    const { data, error } = await ctx.supabase.rpc('ve_enqueue_search_probe', {
-      p_base_id: searchParent.baseId, p_parent_job_id: searchParent.jobId,
-      p_query: q.query, p_locale: q.locale, p_page: q.page,
-    });
-    if (error) throw new SearchPersistenceError('Search enqueue outcome unavailable; retry the same probe');
-    if (data?.wait === 'capacity') { state.note = 'Поиск ожидает свободного места в очереди'; return; }
-    if (data?.wait === 'disabled') { state.status = 'done'; state.exhausted = true; state.note = 'Автопоиск выключен или приостановлен по бюджету'; return; }
-    if (!data?.job_id) throw new SearchPersistenceError('Search enqueue returned no task');
-    state.child_job_id = data.job_id; state.status = 'dispatched'; state.dispatched_at = new Date().toISOString();
-    return;
-  }
 
   if (task.source === 'yandex_maps') {
     if (limit < 1) { state.status = 'done'; return; }
@@ -1973,12 +1952,6 @@ async function readChildRows(
   const jobId = state.child_job_id;
   if (!jobId) return [];
 
-  if (state.source === 'web_search') {
-    const { data, error } = await ctx.supabase.from('ve_search_probes').select('results').eq('job_id', jobId).single();
-    if (error || !Array.isArray(data?.results)) throw new SearchPersistenceError('Search results unavailable');
-    return data.results.slice(0, Math.min(10, limit)) as VeUnifiedRow[];
-  }
-
   if (state.source === 'hh_live') {
     const { data, error } = await ctx.supabase
       .from('hh_vacancies')
@@ -2033,10 +2006,7 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
     .select('status, error_message, started_at')
     .eq('id', state.child_job_id)
     .maybeSingle();
-  if (error) {
-    if (state.source === 'web_search') throw new SearchPersistenceError('Search job status unavailable');
-    throw new Error(`${table} read: ${error.message}`);
-  }
+  if (error) throw new Error(`${table} read: ${error.message}`);
   if (!data) {
     state.status = 'failed';
     state.error = `дочерняя джоба ${state.child_job_id} не найдена`;
@@ -2710,7 +2680,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   if (!policy || policy.pending || info.preview_pipeline?.batches.length || !target || target.ready_rows >= target.ready_target) return;
   const tasks = info.tasks ?? [];
   const consumed = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
-  const available = tasks.filter((task) => (!info.web_search || task.source === 'web_search') && task.status !== 'failed' && (task.status !== 'done'
+  const available = tasks.filter((task) => task.status !== 'failed' && (task.status !== 'done'
     || isVeRenewableSourceTask(task)
     || (task.harvest ?? []).some((row) => (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
       && !baseRowMatchesExclusion(consumed, row))));
@@ -3762,7 +3732,6 @@ async function widenExhaustedPlan(
   /** narrow_market: план жив, но по прогнозу срез мал для базы; dry_sources: все живые источники сухие. */
   cause: 'plan_exhausted' | 'narrow_market' | 'dry_sources' = 'plan_exhausted',
 ): Promise<boolean> {
-  if (info.web_search) return false;
   const policy = info.adaptive_collection ?? newVeAdaptiveCollection();
   const widenings = policy.widenings ?? 0;
   if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
@@ -3874,7 +3843,7 @@ async function completeTargetRound(args: {
   const pendingSources = tasks.some((task) => task.status === 'pending' || task.status === 'dispatched');
   const existingFirst = info.search_policy?.phase === 'existing';
   const discoveryPaused = info.source_contact_budget?.paused === true;
-  const pendingDiscovery = !info.web_search && !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done'
+  const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done'
     && !task.task.widened && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery))
     || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) =>
@@ -4047,7 +4016,7 @@ async function completeTargetRound(args: {
       && !baseRowMatchesExclusion(consumedExisting, row)));
   // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
   const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= next.max_rounds;
-  if (existingFirst && !info.web_search && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
+  if (existingFirst && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
     info.search_policy!.phase = 'paid';
@@ -4262,18 +4231,6 @@ async function completeTargetRound(args: {
         + `(${info.adaptive_collection.widenings} из ${VE_PLAN_WIDENING_LIMIT}): новых подходящих компаний не нашлось, дальше сбор сам не расширяется.` };
     }
     // info уже держит прежний объект раунда (см. остановку по размеру рынка выше).
-    info.target_progress = next;
-  }
-  // Repeated empty acquisition is not proof that the niche has no companies.
-  // A bounded search probe is permitted only after all in-flight paid work
-  // settled; it cannot replace a provider failure or the user's review-only run.
-  if (['limited', 'exhausted'].includes(next.status) && !reviewOnly && !continueSavedReview
-    && !args.validationError && !taskError && !pipeline?.error && pendingBatches.length === 0
-    && !tasks.some((task) => task.status === 'dispatched') && targetRows < progress.ready_target
-    && cleaned.summary.status === 'complete' && !acquisitionLimited
-    && await addVeSearchFallback(ctx.supabase, base.hypothesis_id ?? null, ctx.market === 'us' ? 'en' : 'ru', info, tasks, targetRows)) {
-    next = { ...next, status: 'collecting', idle_streak: 0 };
-    delete next.reason;
     info.target_progress = next;
   }
   if (next.status === 'collecting' && !continueSavedReview) {
@@ -4667,7 +4624,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // Расширенный срез берёт только компании с готовой почтой или сайтом:
       // остальные потребовали бы платного поиска сайта ради второй очереди.
       await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
-        () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened), { baseId, jobId: job.id });
+        () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened));
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -4675,7 +4632,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       );
     } catch (e) {
       ctx.signal?.throwIfAborted();
-      if (e instanceof SearchPersistenceError || e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'VeWorkerShutdownError')) throw e;
+      if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'VeWorkerShutdownError')) throw e;
       if (state.source === 'companies_directory' && isVeTransientDirectoryError(e)) throw e;
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
@@ -4692,7 +4649,6 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     try {
       await pollTask(ctx, state, target?.max_candidates ?? limit);
     } catch (e) {
-      if (e instanceof SearchPersistenceError || e instanceof VeRelevanceCheckpointError) throw e;
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
       stageLog(ctx, `[base_collect] poll ${state.source} упал: ${state.error}`);
@@ -4714,7 +4670,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   // ─── HARVEST ───
-  const done = tasks.filter((t) => t.status === 'done' && (!info.web_search || t.source === 'web_search'));
+  const done = tasks.filter((t) => t.status === 'done');
   const failed = tasks.filter((t) => t.status === 'failed');
   // Round-robin по задачам (а не concat): ни один источник не съедает кап
   // целиком. Строки без компании и строки-мусор, чья компания схлопывается в
@@ -4723,7 +4679,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const interleaved = dedupUnifiedRows(
     interleaveTaskHarvests(
       [...done.map((t) => taggedHarvest(t).filter((r) => normalizeCompanyForDedup(r.company) !== '')),
-        ...(!info.web_search && !existingFirst && info.search_policy ? [info.search_policy.deferred_rows] : [])],
+        ...(!existingFirst && info.search_policy ? [info.search_policy.deferred_rows] : [])],
     ),
   );
 
@@ -5286,7 +5242,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     if (error instanceof VePreviewCheckpointConflict) throw error;
     // The generic worker persists Retry-After. A waiting job must not leave
     // the base's progress looking like a terminal preparation failure.
-    if (error instanceof SearchPersistenceError || error instanceof ProviderBudgetWaitError || error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error)) throw error;
+    if (error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error)) throw error;
     if (error instanceof VeRelevanceRetryScheduled) {
       return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
         tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };

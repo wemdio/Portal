@@ -238,45 +238,6 @@ beforeEach(() => {
 });
 
 describe('base_collect CONSTRUCT step order', () => {
-  it('processes only the bounded search page through normal construction and relevance checks', async () => {
-    const stale = unifiedRow({ company: 'Old directory entry', website: 'old.test' });
-    const candidate = unifiedRow({ company: 'Found Clinic', website: 'https://found.test', source_detail: 'Search: private healthcare clinic' });
-    const task = { source: 'web_search' as const, rationale: 'bounded fallback',
-      search_query: { query: 'clinics official website', locale: 'en' as const, page: 1 } };
-    const info: VeCollectInfo = { ...collectInfo([stale]), collection_mode: 'preview',
-      search_budget: true, web_search: { query: task.search_query.query, page: 1, ready_before: 0 },
-      target_progress: createCollectionTarget('preview'),
-      search_policy: { version: 1, phase: 'paid', deferred_rows: [stale] },
-    };
-    info.tasks![0].hit_ceiling = true;
-    info.tasks!.push({ source: 'web_search', task, status: 'dispatched', child_job_id: 'search-1', rows: 0 });
-    const db = seed(info, { search_parser_jobs: [{ id: 'search-1', status: 'pending',
-      started_at: '2026-01-01', progress_stage: 'budget_wait' }],
-      ve_search_probes: [{ job_id: 'search-1', results: [candidate] }] });
-    await expect(runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient }))
-      .resolves.toMatchObject({ result: { waiting: true, pending_sources: ['web_search'] } });
-    expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
-    expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.round).toBe(1);
-    await db.from('search_parser_jobs').update({ status: 'completed' }).eq('id', 'search-1');
-    await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
-    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
-    const child = db.getRows('base_constructor_jobs')[0];
-    expect(child.data).toHaveLength(2);
-    expect((child.data as string[][])[1]).toContain('https://found.test/');
-    expect(JSON.stringify(child.data)).not.toContain('old.test');
-    expect(child.selected_steps).toEqual(expect.arrayContaining(['find_emails', 'validate_emails']));
-    // A search hit alone is never counted as a ready contact.
-    expect(db.getRows('ve_bases')[0].row_count).toBe(0);
-    const output = [['Компания', 'Сайт', 'Email', 'Email Статус'],
-      [candidate.company, candidate.website, 'hello@found.test', 'ok']];
-    await db.from('base_constructor_jobs').update({ status: 'completed', data: output, result_data: output }).eq('id', child.id);
-    await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
-    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
-    expect(mockFindIrrelevantRows).toHaveBeenCalled();
-    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
-    expect(db.getRows('ve_bases')[0].row_count).toBe(1);
-  });
-
   it('resumes the saved preview behind a newer billing failure without re-collecting or counting the same round twice', async () => {
     const ready = unifiedRow({ company: 'Clinic Ready', website: 'ready.test', email: 'mail@ready.test' });
     const pending = unifiedRow({ company: 'Clinic Pending', website: 'pending.test', email: 'mail@pending.test' });
