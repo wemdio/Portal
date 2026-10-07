@@ -117,6 +117,7 @@ export function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]
             <div className="min-w-0 text-gray-800">
               <span className="mr-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{KIND_LABELS[u.kind as Kind] ?? String(u.kind)}</span>
               {String(u.title)}
+              {u.source ? <span className="ml-2 rounded-full bg-violet-50 px-2 py-0.5 text-xs text-violet-700">авто</span> : null}
               {u.event_start ? <span className="ml-2 text-xs text-gray-500">{fmtDate(String(u.event_start))}</span> : null}
               <span className="ml-2 text-xs text-gray-500">строк: {String(u.rows_total)}</span>
             </div>

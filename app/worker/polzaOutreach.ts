@@ -1,6 +1,8 @@
 import { runAutofillTick } from '@/lib/outreachAutofill/check';
 import { runPolzaOutreachJob } from '@/lib/polzaOutreach/runner';
 import { runRuOutreachJob } from '@/lib/polzaRuOutreach/runner';
+import { syncExhibitorCatalogs } from '@/lib/polzaRuOutreach/sources/exhibitorsSync';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { claimParserJob, recoverRunningParserJobs } from './parserJobs';
 import { installUndiciAssertGuard } from './_undiciAssertGuard';
@@ -33,6 +35,27 @@ async function autofillTick(): Promise<void> {
     log('error', 'Autofill tick crashed', err);
   } finally {
     autofillTicking = false;
+  }
+}
+
+/**
+ * Экспоненты выставок для источника «Выставки» (sources/exhibitorsSync.ts):
+ * раз в час смотрим, какие выставки в окне не синкались неделю, и обходим их
+ * каталоги по одной. Обход медленный (пауза между запросами), запуски не ждут:
+ * тик идёт в фоне. RU_EXHIBITORS_SYNC=off — выключить.
+ */
+const EXHIBITORS_TICK_MS = 60 * 60_000;
+let exhibitorsTicking = false;
+
+async function exhibitorsTick(): Promise<void> {
+  if (exhibitorsTicking || process.env.RU_EXHIBITORS_SYNC === 'off' || !supabaseAdmin) return;
+  exhibitorsTicking = true;
+  try {
+    await syncExhibitorCatalogs(supabaseAdmin, new Date(), log);
+  } catch (err) {
+    log('error', 'Exhibitors sync tick crashed', err);
+  } finally {
+    exhibitorsTicking = false;
   }
 }
 
@@ -94,6 +117,10 @@ async function main(): Promise<void> {
   const autofillTimer = setInterval(() => {
     if (!shouldStop()) void autofillTick();
   }, AUTOFILL_TICK_MS);
+  void exhibitorsTick();
+  const exhibitorsTimer = setInterval(() => {
+    if (!shouldStop()) void exhibitorsTick();
+  }, EXHIBITORS_TICK_MS);
 
   await pollLoop({
     log,
@@ -103,6 +130,7 @@ async function main(): Promise<void> {
     realtimeTables: ['parser_jobs'],
   });
   clearInterval(autofillTimer);
+  clearInterval(exhibitorsTimer);
 }
 
 main().catch((err) => {
