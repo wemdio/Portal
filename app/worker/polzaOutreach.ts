@@ -1,6 +1,9 @@
 import { runAutofillTick } from '@/lib/outreachAutofill/check';
 import { runPolzaOutreachJob } from '@/lib/polzaOutreach/runner';
 import { runRuOutreachJob } from '@/lib/polzaRuOutreach/runner';
+import { runGosplanSyncTick } from '@/lib/polzaRuOutreach/sources/gosplanSync';
+import { syncExhibitorCatalogs } from '@/lib/polzaRuOutreach/sources/exhibitorsSync';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { claimParserJob, recoverRunningParserJobs } from './parserJobs';
 import { installUndiciAssertGuard } from './_undiciAssertGuard';
@@ -33,6 +36,47 @@ async function autofillTick(): Promise<void> {
     log('error', 'Autofill tick crashed', err);
   } finally {
     autofillTicking = false;
+  }
+}
+
+/**
+ * Синк ГосПлан (sources/gosplanSync.ts): раз в 15 минут проверяет, загружен ли
+ * вчерашний день контрактов 44-ФЗ; сама загрузка — раз в день МСК.
+ * На тестовом сервере (10 запросов в минуту) день идёт минуты — тик не ждут.
+ */
+const GOSPLAN_TICK_MS = 15 * 60_000;
+let gosplanTicking = false;
+
+async function gosplanTick(shouldStop: () => boolean): Promise<void> {
+  if (gosplanTicking) return;
+  gosplanTicking = true;
+  try {
+    await runGosplanSyncTick(requireSupabaseAdmin(log), new Date(), log, shouldStop);
+  } catch (err) {
+    log('error', 'GosPlan sync tick crashed', err);
+  } finally {
+    gosplanTicking = false;
+  }
+}
+
+/**
+ * Экспоненты выставок для источника «Выставки» (sources/exhibitorsSync.ts):
+ * раз в час смотрим, какие выставки в окне не синкались неделю, и обходим их
+ * каталоги по одной. Обход медленный (пауза между запросами), запуски не ждут:
+ * тик идёт в фоне. RU_EXHIBITORS_SYNC=off — выключить.
+ */
+const EXHIBITORS_TICK_MS = 60 * 60_000;
+let exhibitorsTicking = false;
+
+async function exhibitorsTick(): Promise<void> {
+  if (exhibitorsTicking || process.env.RU_EXHIBITORS_SYNC === 'off' || !supabaseAdmin) return;
+  exhibitorsTicking = true;
+  try {
+    await syncExhibitorCatalogs(supabaseAdmin, new Date(), log);
+  } catch (err) {
+    log('error', 'Exhibitors sync tick crashed', err);
+  } finally {
+    exhibitorsTicking = false;
   }
 }
 
@@ -94,6 +138,14 @@ async function main(): Promise<void> {
   const autofillTimer = setInterval(() => {
     if (!shouldStop()) void autofillTick();
   }, AUTOFILL_TICK_MS);
+  void gosplanTick(shouldStop);
+  const gosplanTimer = setInterval(() => {
+    if (!shouldStop()) void gosplanTick(shouldStop);
+  }, GOSPLAN_TICK_MS);
+  void exhibitorsTick();
+  const exhibitorsTimer = setInterval(() => {
+    if (!shouldStop()) void exhibitorsTick();
+  }, EXHIBITORS_TICK_MS);
 
   await pollLoop({
     log,
@@ -103,6 +155,8 @@ async function main(): Promise<void> {
     realtimeTables: ['parser_jobs'],
   });
   clearInterval(autofillTimer);
+  clearInterval(gosplanTimer);
+  clearInterval(exhibitorsTimer);
 }
 
 main().catch((err) => {

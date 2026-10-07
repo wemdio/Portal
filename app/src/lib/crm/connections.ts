@@ -18,6 +18,10 @@ export const POLZA_CONNECTION_NAME = 'Наша AMO (Polza)';
 export const POLZA_SOURCE_FIELD_ID = 1314379;
 export const POLZA_SOURCE_TG_OUTREACH = 'Telegram Outreach';
 
+/** Поле «Контур» сделки нашей AMO и значение для TG-аутрича (просьба 06.10.2026). */
+export const POLZA_CONTOUR_FIELD_ID = 1317011;
+export const POLZA_CONTOUR_TG_OUTREACH = 'TG-outreach';
+
 export interface CrmConnectionPublic {
   id: string;
   name: string;

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { fetchReplyThread } from '@/lib/replyPersonalization/instantlyThread';
+import { fetchReplyThread, withSentDrafts } from '@/lib/replyPersonalization/instantlyThread';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 import { findReferredEmails } from '@/lib/replyPersonalization/referredContact';
 import { getThreadLanguage, listSentDrafts } from '@/lib/replyPersonalization/db';
@@ -37,34 +37,6 @@ function fallbackThread(reply: { replyBody: string | null; lastOutboundPreview: 
   if (reply.lastOutboundPreview) thread.push({ fromUs: true, text: reply.lastOutboundPreview });
   if (reply.replyBody) thread.push({ fromUs: false, text: reply.replyBody });
   return thread;
-}
-
-/**
- * Только буквы и цифры: копия письма из Instantly приходит из HTML, и знаки
- * препинания, кавычки и переносы в ней отличаются от того, что мы отправляли.
- */
-const normalize = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-
-/**
- * Дописывает в тред наши отправленные ответы, которых в нём ещё нет.
- *
- * Instantly показывает только что отправленное письмо в треде с задержкой (а
- * сам тред мы ещё и кэшируем на 5 минут), поэтому после «Отправить» переписка
- * выглядела так, будто ответа не было: менялся только статус в списке слева.
- * Журнал отправок — наш, и он точно знает, что ушло.
- *
- * Сверяем по началу текста: копия из Instantly содержит наш текст плюс
- * процитированную историю переписки, поэтому равенство строк не подходит.
- */
-function withSentDrafts(messages: ThreadMessage[], sent: { text: string; sentAt: string }[]): ThreadMessage[] {
-  const result = [...messages];
-  for (const draft of sent) {
-    const key = normalize(draft.text).slice(0, 120);
-    if (!key) continue;
-    if (result.some((m) => m.fromUs && normalize(m.text).includes(key))) continue;
-    result.push({ fromUs: true, text: draft.text, timestamp: draft.sentAt || undefined });
-  }
-  return result;
 }
 
 export const GET = withAuth(async (req: NextRequest, _user, params) => {

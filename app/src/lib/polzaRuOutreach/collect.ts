@@ -89,6 +89,49 @@ export interface CollectResult {
   pool: Candidate[];
   /** Источник упал — запуск идёт без него, причина показывается на экране. */
   sourceErrors: Partial<Record<SourceCode, string>>;
+  /** Сколько компаний не взято: их недавно уже отсеяли (recentlyRejectedDomains). */
+  skippedRecent: number;
+}
+
+/** Сколько дней не проверяем повторно компанию с окончательным отказом. */
+const REJECT_MEMORY_DAYS = 30;
+/**
+ * «Почты нет» до этой даты не помнится: тогда бесплатные адреса и второй домен
+ * компании отбрасывались (findEmail.ts), и такие компании стоит проверить заново.
+ */
+const EMAIL_RULES_SINCE = '2026-10-08T00:00:00Z';
+
+/**
+ * Домены, которые за последние 30 дней уже отсеяли окончательно: не B2B,
+ * исключённая категория, нет рабочей почты. 07.10.2026 так было 57% лимита
+ * просмотра: источник site_news берёт домены из прошлых строк, и автосбор
+ * перепроверял 2 596 уже отсеянных компаний из 3 000 — готовых из них 0.
+ * Слабый повод и «нет цепочки» не помним: новость может появиться завтра.
+ */
+async function recentlyRejectedDomains(db: SupabaseClient, now = new Date()): Promise<Set<string>> {
+  const since = new Date(now.getTime() - REJECT_MEMORY_DAYS * 86_400_000).toISOString();
+  const emailSince = since > EMAIL_RULES_SINCE ? since : EMAIL_RULES_SINCE;
+  const out = new Set<string>();
+  const page = 1000;
+  for (const [reasons, from] of [
+    [['NOT_B2B', 'EXCLUDED_CATEGORY'], since],
+    [['EMAIL_NOT_FOUND', 'EMAIL_INVALID'], emailSince],
+  ] as const) {
+    for (let offset = 0; ; offset += page) {
+      const { data, error } = await db
+        .from('polza_ru_outreach_companies')
+        .select('normalized_domain')
+        .in('reason_code', [...reasons])
+        .gte('created_at', from)
+        .not('normalized_domain', 'is', null)
+        .order('id')
+        .range(offset, offset + page - 1);
+      if (error) throw new Error(`rejected domains load failed: ${error.message}`);
+      for (const r of data ?? []) out.add(String(r.normalized_domain));
+      if (!data || data.length < page) break;
+    }
+  }
+  return out;
 }
 
 const SOURCE_POOL_LIMIT = 5000;
@@ -202,7 +245,8 @@ export async function collectCandidates(
               url,
               quote: null,
               level: 'B',
-              meta: { customer: r.details.customer ?? null, event_start: r.upload.event_start, program: r.details.program ?? r.upload.title },
+              // email — адрес из каталога выставки: поиск почты проверяет его наравне с сайтом.
+              meta: { customer: r.details.customer ?? null, event_start: r.upload.event_start, program: r.details.program ?? r.upload.title, email: r.details.email ?? null },
             }],
           }),
         );
@@ -306,14 +350,27 @@ export async function collectCandidates(
   }
 
   const merged = merge(all);
-  // Сначала компании с поводом и несколькими источниками, затем свежие; профиль — в конце.
-  const pool = merged.sort(
+  // Память отказов не должна ронять запуск: без неё он просто медленнее.
+  let rejected = new Set<string>();
+  try {
+    rejected = await recentlyRejectedDomains(db);
+  } catch {
+    /* таблица недоступна — проверяем всех, как раньше */
+  }
+  const fresh = merged.filter((c) => {
+    const domain = normalizeDomain(c.website);
+    return !domain || !rejected.has(domain);
+  });
+  // Сначала источники с лучшей доходимостью, затем компании с поводом и
+  // несколькими источниками, затем свежие; профиль — в конце.
+  const pool = fresh.sort(
     (a, b) =>
+      sourceRank(b) - sourceRank(a) ||
       Number(hasOutsideSignal(b)) - Number(hasOutsideSignal(a)) ||
       sourceWeight(b) - sourceWeight(a) ||
       latest(b) - latest(a),
   );
-  return { pool, sourceErrors };
+  return { pool, sourceErrors, skippedRecent: merged.length - fresh.length };
 }
 
 /**
@@ -327,11 +384,29 @@ export async function collectCandidates(
  * «Возврат» они по-прежнему попадают, но ждут общей очереди.
  */
 function hasOutsideSignal(c: Candidate): boolean {
-  return c.signals.some((s) => s.type !== 'crm_lost');
+  // Вакансия продажника hh — тоже повод, хоть и лежит не в signals.
+  return c.vacancies.length > 0 || c.signals.some((s) => s.type !== 'crm_lost');
 }
 
+/**
+ * «Уже видели домен» (site_news без найденной новости) — не второй источник:
+ * иначе повторный домен 2ГИС (site_news+gis) шёл раньше свежих hh и Директа.
+ */
 function sourceWeight(c: Candidate): number {
-  return c.sources.filter((s) => s !== 'crm').length;
+  return c.sources.filter((s) => s !== 'crm' && s !== 'site_news').length;
+}
+
+/**
+ * Доходимость источника до готовой строки за 2 недели до 07.10.2026: hh — 8–12%,
+ * Директ и загружаемые поводы — ~5%, прочие — 1–3%, 2ГИС без других — меньше 1%.
+ * Лучшие стоят первыми, чтобы потолок просмотра не уходил на слабые.
+ */
+function sourceRank(c: Candidate): number {
+  const has = (s: SourceCode) => c.sources.includes(s);
+  if (has('hh') && c.vacancies.length) return 4;
+  if (has('direct') || has('exhibitors') || has('contracts') || has('tenders') || has('growth')) return 3;
+  if (c.sources.every((s) => s === 'gis' || s === 'site_news')) return 1;
+  return 2;
 }
 
 function latest(c: Candidate): number {

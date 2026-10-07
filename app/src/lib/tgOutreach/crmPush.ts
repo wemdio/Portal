@@ -17,7 +17,12 @@
  * процесса, а не внутри запущенной кампании.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { POLZA_SOURCE_TG_OUTREACH } from '@/lib/crm/connections';
+import {
+  POLZA_CONTOUR_FIELD_ID,
+  POLZA_CONTOUR_TG_OUTREACH,
+  POLZA_SOURCE_FIELD_ID,
+  POLZA_SOURCE_TG_OUTREACH,
+} from '@/lib/crm/connections';
 import {
   CRM_PUSH_POLL_INTERVAL_MS,
   activeCrmSettings,
@@ -140,7 +145,10 @@ export async function processCrmPushes(db: SupabaseClient, log: LogFn): Promise<
         contact: { name: who, telegram: (row.username ?? '').trim().replace(/^@/, '') || null },
         leadName: row.campaign_name ? `${who} · ${row.campaign_name}` : who,
         tags: row.offer ? [row.offer] : [],
-        polzaSource: POLZA_SOURCE_TG_OUTREACH,
+        polzaSelects: [
+          { fieldId: POLZA_SOURCE_FIELD_ID, fieldName: 'Источник', value: POLZA_SOURCE_TG_OUTREACH },
+          { fieldId: POLZA_CONTOUR_FIELD_ID, fieldName: 'Контур', value: POLZA_CONTOUR_TG_OUTREACH },
+        ],
         label: `${who} (${row.campaign_name})`,
       };
     },

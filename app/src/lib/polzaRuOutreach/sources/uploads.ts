@@ -167,9 +167,12 @@ export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, fresh
 
   const now = Date.now();
   const day = 86_400_000;
+  const sinceDate = new Date(now - freshnessDays * day).toISOString().slice(0, 10);
   const activeUploads = (uploads ?? []).filter((u) => {
     if (kind === 'growth') return true;
-    if (kind !== 'exhibitors') return true;
+    // Контракт в окне опубликован не раньше sinceDate, а загрузка сделана после него.
+    // Отсекаем старые загрузки, иначе ежедневные из ГосПлана раздувают список id в запросе.
+    if (kind !== 'exhibitors') return String(u.created_at ?? '').slice(0, 10) >= sinceDate;
     if (!u.event_start) return false;
     const start = new Date(String(u.event_start)).getTime();
     const end = u.event_end ? new Date(String(u.event_end)).getTime() : start;
@@ -186,7 +189,6 @@ export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, fresh
       .select('id,upload_id,kind,company_name,company_website,inn,details,record_url,record_date')
       .in('upload_id', Array.from(uploadById.keys()))
       .range(from, from + PAGE - 1);
-    const sinceDate = new Date(now - freshnessDays * day).toISOString().slice(0, 10);
     if (kind === 'contracts' || kind === 'tenders') q = q.gte('record_date', sinceDate);
     const { data, error } = await q;
     if (error) throw new Error(`signal rows load failed: ${error.message}`);

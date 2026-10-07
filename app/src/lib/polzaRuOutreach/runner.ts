@@ -219,9 +219,12 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
  * строк. Было 15 на строку — при доходимости новых компаний около 6% (запуск
  * 01.10.2026: 19 готовых из 304 новых кандидатов) этого не хватало даже на
  * один лимит, и запуск упирался в потолок раньше, чем набирал норму.
+ * 30 на строку тоже мало: у автосборов октября 2026 доходит ~3,5% (100 из
+ * 2 800–3 000), и сбор на 100 упирался в 3 000. Теперь 50 — 5 000 на сотню;
+ * разбор ИИ стоит ~$0,1 на тысячу компаний.
  */
 export function maxCandidatesFor(target: number): number {
-  return Math.min(20_000, Math.max(300, target * 30));
+  return Math.min(20_000, Math.max(300, target * 50));
 }
 
 export function nextWaveSize(target: number, totals: { scanned: number; ready: number }): number {
@@ -323,7 +326,7 @@ interface Duplicate {
   owners: string[];
 }
 
-type SizeIndex = Map<string, { revenue: number | null; employees: number | null }>;
+type SizeIndex = Map<string, { revenue: number | null; employees: number | null; website: string | null }>;
 
 /**
  * Весь запуск идёт внутри контекста ИИ (lib/outreachLlm/context.ts): каждый
@@ -708,9 +711,9 @@ async function runJob(
     const exported: ExportedIndex = config.include_previously_exported
       ? { domains: new Set(), inns: new Set() }
       : await loadPreviouslyExported(db, jobId);
-    const { pool, sourceErrors } = await collectCandidates(db, config, amo, maxScan);
+    const { pool, sourceErrors, skippedRecent } = await collectCandidates(db, config, amo, maxScan);
     if (Object.keys(sourceErrors).length) log('warn', `job ${jobId}: source errors`, sourceErrors);
-    log('info', `job ${jobId}: pool=${pool.length}, target=${target}, sources=${config.sources.join(',')}`);
+    log('info', `job ${jobId}: pool=${pool.length}, skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
 
     const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
@@ -853,7 +856,7 @@ async function runJob(
     // awaiting_templates — сколько компаний ждут «Переписать цепочку».
     // worker — аренда запуска воркером: её несёт каждая запись progress_detail.
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-      wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
+      wave: waveNo, target, pool: pool.length, skipped_recent: skippedRecent, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
       offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count,
       // С бронями идущих запросов — как baseDetail; итог запуска пишет факт.
       llm: budget.snapshot({ includeReserved: true }),
@@ -1015,7 +1018,14 @@ async function runJob(
         // Каталоги Яндекс Карт — второй источник адреса: на сайте почта есть
         // не всегда (01.10.2026 — 131 отсев EMAIL_NOT_FOUND из 433 компаний).
         const catalog = await lookupCatalogEmails(db, domain);
-        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, catalog);
+        // Адрес из каталога выставки (sources/exhibitorsSync.ts) — туда же, к каталожным.
+        const sourceEmails = c.signals
+          .map((s) => s.meta?.email)
+          .filter((e): e is string => typeof e === 'string' && e.includes('@'));
+        const extra = sourceEmails.length
+          ? { emails: Array.from(new Set([...catalog.emails, ...sourceEmails])), sourceUrl: catalog.sourceUrl ?? c.signals.find((s) => s.meta?.email)?.url ?? null }
+          : catalog;
+        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, extra);
         smtpSilent = noteEmailVerdict(found.verdict);
         if (!found.email || !found.verification) {
           // Адреса на сайте есть, но все не прошли проверку, — своя причина:
@@ -1710,6 +1720,11 @@ async function runJob(
       }
       totals.scanned += wave.length;
       const size: SizeIndex = await loadSizeByInn(db, wave.map((c) => c.inn).filter((x): x is string => Boolean(x)));
+      // Сайт по ИНН из справочника компаний: у источников с одним ИНН
+      // (госконтракты, реестры) сайта нет, а без домена не найти почту.
+      for (const c of wave) {
+        if (!c.website && c.inn) c.website = size.get(c.inn)?.website ?? null;
+      }
       phase = 'finding_emails';
       await publish(phase, { wave_size: wave.length });
       log('info', `wave ${waveNo}: ${wave.length} candidates (ready ${totals.ready}/${target})`);
