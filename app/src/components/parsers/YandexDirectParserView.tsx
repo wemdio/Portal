@@ -39,6 +39,8 @@ interface YDJob {
   errors_count: number;
   error_message: string | null;
   errors_sample: YDErrorGroup[] | null;
+  /** День МСК ежедневного B2B-сбора (воркер создаёт сам); у ручных задач null. */
+  daily_day?: string | null;
   created_at: string;
 }
 
@@ -73,7 +75,8 @@ export function YandexDirectParserView() {
       if (!res.ok) return;
       const { jobs: items } = (await res.json()) as { jobs: YDJob[] };
       setJobs(items);
-      const active = items.find((j) => j.status === 'pending' || j.status === 'processing');
+      // Ежедневная задача не блокирует ручной запуск: у неё своя очередь в базе.
+      const active = items.find((j) => !j.daily_day && (j.status === 'pending' || j.status === 'processing'));
       if (active) setActiveJob(active);
       else if (activeJob) {
         setActiveJob(items.find((j) => j.id === activeJob.id) ?? null);

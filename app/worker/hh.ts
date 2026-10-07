@@ -1,6 +1,7 @@
 import { runHHParserJob } from '@/lib/parsers/hhRunner';
 import { runHHArchiveJob } from '@/lib/parsers/hhArchive/runner';
 import { runYandexDirectJob } from '@/lib/parsers/yandexDirect/runner';
+import { ensureDailyB2bJob } from '@/lib/parsers/yandexDirect/dailyB2b';
 import { runAtsParserJob } from '@/lib/parsers/atsRunner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { claimParserJob, recoverRunningParserJobs } from './parserJobs';
@@ -23,6 +24,11 @@ let yandexDirectJobActive = false;
 // ATS-парсер (Greenhouse/Lever/Ashby) — глобально один за раз: ходит по тысячам
 // внешних бордов + Clearbit, держим concurrency=1, чтобы не словить rate-limit.
 let atsJobActive = false;
+// Ежедневный B2B-сбор Директа (lib/parsers/yandexDirect/dailyB2b.ts): задачу
+// дня проверяем не чаще раза в 5 минут, причину пропуска пишем в лог при смене.
+const DAILY_B2B_CHECK_MS = 5 * 60_000;
+let dailyB2bCheckedAt = 0;
+let dailyB2bLastReason = '';
 
 async function startupRecovery(): Promise<void> {
   const db = requireSupabaseAdmin(log);
@@ -117,7 +123,30 @@ async function claimAtsJob(): Promise<string | null> {
   return claimParserJob(log, 'ats_companies');
 }
 
+/** Создаёт задачу ежедневного B2B-сбора Директа, если пора; ошибки не роняют опрос. */
+async function maybeScheduleDailyB2b(): Promise<void> {
+  if (Date.now() - dailyB2bCheckedAt < DAILY_B2B_CHECK_MS) return;
+  dailyB2bCheckedAt = Date.now();
+  try {
+    const result = await ensureDailyB2bJob(requireSupabaseAdmin(log));
+    if (result.status === 'created') {
+      dailyB2bLastReason = '';
+      log(
+        'info',
+        `Daily B2B Direct job ${result.jobId} for ${result.day}: ${result.keywords} ключей, ~${result.requests} запросов`,
+      );
+    } else if (result.reason !== dailyB2bLastReason) {
+      dailyB2bLastReason = result.reason;
+      log('info', `Daily B2B Direct: ${result.reason}`);
+    }
+  } catch (err) {
+    log('warn', 'Daily B2B Direct: проверка не удалась', err);
+  }
+}
+
 async function pollOnce(): Promise<boolean> {
+  await maybeScheduleDailyB2b();
+
   // Сначала пробуем обычный HH-парсер (concurrency=3, обычно есть свободный слот).
   if (running.size < MAX_CONCURRENCY) {
     const jobId = await claimHHJob();
