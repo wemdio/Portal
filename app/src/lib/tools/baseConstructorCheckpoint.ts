@@ -37,6 +37,27 @@ export const FOUND_EMAIL_ORIGIN_COL = '__portal_found_email_origin_v1';
 export const EMAIL_VALIDATION_CHECKPOINT_STATE_COL =
   '__portal_email_validation_state_v1';
 
+/** Completed personalization results, kept private until the step finishes. */
+export const PERSONALIZATION_CHECKPOINT_STATE_COL = '__portal_personalization_state_v1';
+
+export type PersonalizationCheckpointResult = { proposal: string; error?: string };
+
+export function parsePersonalizationCheckpointResult(
+  raw: string | undefined,
+): PersonalizationCheckpointResult | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const { proposal, error } = parsed as Record<string, unknown>;
+    if (typeof proposal !== 'string') return undefined;
+    if (error !== undefined && typeof error !== 'string') return undefined;
+    if (proposal.trim() && !error) return { proposal };
+    if (!proposal.trim() && typeof error === 'string' && error.trim()) return { proposal: '', error };
+  } catch { /* A malformed checkpoint is an unfinished row. */ }
+  return undefined;
+}
+
 /** One initial SMTP probe plus one retry for a transient/unknown response. */
 export const EMAIL_VALIDATION_MAX_ATTEMPTS = 2;
 
@@ -143,6 +164,10 @@ export function stripEmailValidationCheckpointMetadata(data: string[][]): string
   return stripCheckpointColumns(data, new Set([EMAIL_VALIDATION_CHECKPOINT_STATE_COL]));
 }
 
+export function stripPersonalizationCheckpointMetadata(data: string[][]): string[][] {
+  return stripCheckpointColumns(data, new Set([PERSONALIZATION_CHECKPOINT_STATE_COL]));
+}
+
 /**
  * Remove every known private Base Constructor column at a user-facing
  * boundary. Unlike `stripEnrichCheckpointMetadata`, this must not be used by
@@ -155,5 +180,6 @@ export function stripBaseConstructorCheckpointMetadata(data: string[][]): string
     WEBSITE_EMAIL_PREFERENCE_COL,
     FOUND_EMAIL_ORIGIN_COL,
     EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+    PERSONALIZATION_CHECKPOINT_STATE_COL,
   ]));
 }

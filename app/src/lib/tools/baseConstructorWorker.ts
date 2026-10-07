@@ -27,6 +27,7 @@ import {
   stripBaseConstructorCheckpointMetadata,
   stripEmailValidationCheckpointMetadata,
   stripFindEmailsCheckpointMetadata,
+  stripPersonalizationCheckpointMetadata,
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   FOUND_EMAIL_ORIGIN_COL,
   WEBSITE_EMAIL_PREFERENCE_COL,
@@ -45,6 +46,7 @@ const admin = supabaseAdmin!;
 interface StepConfig {
   brief?: string;
   prompt?: string;
+  personalization?: { concurrency?: number };
   column_mapping?: string;
   /**
    * Куда find_emails пишет результат (когда в файле уже есть email-колонка):
@@ -535,7 +537,10 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       onTelemetry: cfg.onTaScoringTelemetry,
       onCheckpoint: cfg.onCheckpoint,
     }),
-  personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel),
+  personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel, {
+    concurrency: cfg.personalization?.concurrency,
+    onCheckpoint: cfg.onCheckpoint,
+  }),
 };
 
 /**
@@ -915,6 +920,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         }
       }
       if (stepKey !== 'find_emails') data = stripFindEmailsCheckpointMetadata(data);
+      if (stepKey !== 'personalization') data = stripPersonalizationCheckpointMetadata(data);
 
       // On a mid-step resume the runner works only on the unprocessed tail.
       // Its local 0..100 callbacks therefore describe the tail, not the whole
@@ -984,6 +990,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         'find_emails',
         'validate_emails',
         'ta_scoring',
+        'personalization',
       ]);
       const effectiveStepConfig: StepConfig = {
         ...stepConfig,
