@@ -132,11 +132,12 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
         const done = job.total_parsed ?? 0;
         const own = isOwn(job);
         // В общем списке видно, чей запуск; в «Моих» и так ясно. Автосбор
-        // записан на включившего автодобор, но запускал его не человек.
+        // записан на включившего автодобор — пометка, что запускал не он сам.
+        const who = scope === 'all' ? (own ? 'вы' : job.author_name ?? 'коллега') : '';
         const author = job.config?.autofill
-          ? 'система · '
-          : scope === 'all'
-            ? `${own ? 'вы' : job.author_name ?? 'коллега'} · `
+          ? `${who ? `${who} (автодобор)` : 'автодобор'} · `
+          : who
+            ? `${who} · `
             : '';
         return {
           id: job.id,
