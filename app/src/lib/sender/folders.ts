@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { autofillLangByFolderKey, requestAutofillRecheck } from '@/lib/outreachAutofill/settings';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { EDITABLE_CAMPAIGN_STATUSES, SenderOpError } from './campaignOps';
 import type { MailboxStatus } from './types';
@@ -9,6 +10,10 @@ import type { MailboxStatus } from './types';
  * и «Автоаутрич EN». Папка — это настройки, которые новая рассылка
  * автоаутрича копирует себе в момент создания (lib/outreachSender/upload.ts):
  * ящики, окно отправки, паузы между письмами и задержки писем 2–4.
+ *
+ * Копия настроек — на момент создания, но ящики догоняют: добавленный в папку
+ * ящик доливается в идущие и стоящие на паузе рассылки папки, иначе он
+ * простаивал бы до следующей заливки (addMailboxesToLiveCampaigns).
  *
  * Здесь — чтение папок для вкладки кампаний, правка их настроек и ящики папки
  * для кампании, которую запускают без ящиков. Проверки правки строже формы
@@ -64,6 +69,10 @@ const FOLDER_COLUMNS =
 const FOLDER_ORDER = ['auto_ru', 'auto_en'];
 /** Ящиков за один запрос: id уезжают в адрес запроса — как MAILBOX_CHUNK в campaignOps. */
 const MAILBOX_CHUNK = 50;
+/** Рассылки, которые уже шлют: добавленный в папку ящик доливается только в них. */
+const LIVE_CAMPAIGN_STATUSES = ['running', 'paused'];
+/** Строк пула за одну вставку: рассылок папки × добавленных ящиков бывает много. */
+const POOL_CHUNK = 500;
 /** Писем после первого: цепочка обоих автоаутричей — четыре письма. */
 const FOLLOW_UPS = 3;
 /** Задержка письма — от часа до 30 дней, как у шага в форме кампании. */
@@ -230,17 +239,21 @@ export function canonicalTimezone(value: string): string | null {
  * Правка действует на рассылки, созданные после неё: уже созданная рассылка
  * живёт по своим настройкам (миграция 20260926_0002), кроме черновика без
  * ящиков — он возьмёт ящики папки при запуске (fillPoolFromFolder).
+ *
+ * Исключение — добавленные ящики: они доливаются в идущие и стоящие на паузе
+ * рассылки папки (addMailboxesToLiveCampaigns), и сколько рассылок их
+ * получило — в pooledCampaigns.
  */
 export async function updateFolder(
   id: string,
   input: FolderPatchInput,
-): Promise<{ folder: FolderView; droppedMailboxes: number }> {
+): Promise<{ folder: FolderView; droppedMailboxes: number; pooledCampaigns: number }> {
   // Кривой id дал бы 500 «invalid input syntax for type uuid» вместо «не найдена».
   if (!UUID_RE.test(id)) throw new SenderOpError('Папка не найдена', 404);
   const db = requireDb();
   const { data: current, error } = await db
     .from('sender_folders')
-    .select('id, key, name, send_hour_from, send_hour_to')
+    .select('id, key, name, send_hour_from, send_hour_to, mailbox_ids')
     .eq('id', id)
     .maybeSingle();
   if (error) throw new SenderOpError(error.message, 500);
@@ -338,6 +351,7 @@ export async function updateFolder(
   }
 
   let droppedMailboxes = 0;
+  let pooledCampaigns = 0;
   if (input.mailboxIds !== undefined) {
     const list = input.mailboxIds;
     if (!Array.isArray(list) || list.some((item) => typeof item !== 'string' || !UUID_RE.test(item))) {
@@ -350,6 +364,15 @@ export async function updateFolder(
     // отказываем во всём сохранении.
     droppedMailboxes = wanted.length - kept.length;
     patch.mailbox_ids = kept;
+
+    // Доливаем до записи папки: сбой долива оставит папку как была, и
+    // повторное сохранение снова увидит те же ящики новыми. После записи
+    // новыми их уже никто не считает, и доливать было бы нечего.
+    const was = new Set(((current.mailbox_ids ?? []) as unknown[]).map((item) => String(item).toLowerCase()));
+    pooledCampaigns = await addMailboxesToLiveCampaigns(
+      id,
+      kept.filter((mailboxId) => !was.has(mailboxId)),
+    );
   }
 
   if (Object.keys(patch).length) {
@@ -358,9 +381,60 @@ export async function updateFolder(
     if (updateError) throw new SenderOpError(updateError.message, 500);
   }
 
+  // Ящики поменялись — автодобор пересчитывает базу под новую скорость, и
+  // после записи папки, иначе воркер прочитал бы прежние ящики. Сбой гасим:
+  // настройки уже сохранены, а не пересчитанную базу доберёт проверка в
+  // 09:00/21:00 МСК — отвечать «не удалось сохранить» было бы неправдой.
+  if (input.mailboxIds !== undefined) {
+    const lang = autofillLangByFolderKey(String(current.key));
+    if (lang) await requestAutofillRecheck(lang).catch(() => undefined);
+  }
+
   const [folder] = await readFolders(id);
   if (!folder) throw new SenderOpError('Папка не найдена', 404);
-  return { folder, droppedMailboxes };
+  return { folder, droppedMailboxes, pooledCampaigns };
+}
+
+/**
+ * Добавленные в папку ящики — в пул идущих и стоящих на паузе рассылок папки.
+ * Возвращает, сколько рассылок их получило.
+ *
+ * Без этого новый ящик простаивал бы до следующей заливки: рассылка берёт
+ * ящики папки только при создании, а идущих у автоаутрича всегда несколько.
+ * Планировщик читает пул каждый проход (sender/planner.ts), так что ящик
+ * вступает в дело на следующем тике; получатели, которым ещё не писали,
+ * распределятся и на него.
+ *
+ * Только добавляем. Снятая в папке галочка идущие рассылки не трогает:
+ * ответы приходят на тот ящик, с которого ушло письмо, и отбирать его на
+ * полпути нельзя. Непроверенный ящик в пул тоже кладём — планировщик его
+ * пропускает, а после проверки он начнёт слать сам, без второго сохранения.
+ *
+ * Черновики не трогаем: пустой пул черновика — это признак «возьми ящики
+ * папки при запуске» (fillPoolFromFolder), и долив бы его стёр.
+ */
+async function addMailboxesToLiveCampaigns(folderId: string, mailboxIds: string[]): Promise<number> {
+  if (!mailboxIds.length) return 0;
+  const db = requireDb();
+  const { data, error } = await db
+    .from('sender_campaigns')
+    .select('id')
+    .eq('folder_id', folderId)
+    .in('status', LIVE_CAMPAIGN_STATUSES);
+  if (error) throw new SenderOpError(error.message, 500);
+  const campaignIds = (data ?? []).map((row) => String(row.id));
+  if (!campaignIds.length) return 0;
+
+  const rows = campaignIds.flatMap((campaignId) =>
+    mailboxIds.map((mailboxId) => ({ campaign_id: campaignId, mailbox_id: mailboxId })),
+  );
+  for (let i = 0; i < rows.length; i += POOL_CHUNK) {
+    const { error: insertError } = await db
+      .from('sender_campaign_mailboxes')
+      .upsert(rows.slice(i, i + POOL_CHUNK), { onConflict: 'campaign_id,mailbox_id', ignoreDuplicates: true });
+    if (insertError) throw new SenderOpError(insertError.message, 500);
+  }
+  return campaignIds.length;
 }
 
 // ── Ящики папки при запуске ─────────────────────────────────────────────────

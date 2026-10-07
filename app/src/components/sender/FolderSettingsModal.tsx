@@ -211,7 +211,10 @@ export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
       const dropped = res.droppedMailboxes
         ? ` ${res.droppedMailboxes} из выбранных ящиков уже удалены — они не сохранены.`
         : '';
-      await onSaved(res.folder, `Настройки папки «${res.folder.name}» сохранены.${dropped}`);
+      const pooled = res.pooledCampaigns
+        ? ` Новые ящики добавлены в идущие кампании папки (${res.pooledCampaigns}).`
+        : '';
+      await onSaved(res.folder, `Настройки папки «${res.folder.name}» сохранены.${pooled}${dropped}`);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить настройки папки');
@@ -263,7 +266,8 @@ export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
           <p className="rounded-lg bg-zinc-50 px-3.5 py-3 text-xs leading-relaxed text-zinc-600">
             Эти настройки получает каждая новая кампания, которую создаёт кнопка «Залить в Рассылку» на экране
             запуска автоаутрича. Уже созданные кампании живут по своим настройкам — их меняют в самой кампании
-            (клик по названию). Одно исключение: кампания без ящиков при запуске возьмёт ящики этой папки.
+            (клик по названию). Исключение — ящики: добавленный здесь ящик сразу идёт и в идущие кампании папки,
+            а автодобор пересчитает базу под новую скорость.
           </p>
 
           <Step
@@ -384,7 +388,7 @@ export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
       {pickerOpen ? (
         <MailboxPickerModal
           initial={mailboxes}
-          subtitle="Письма новых кампаний папки уходят по очереди со всех выбранных ящиков"
+          subtitle="Добавленный ящик начинает слать в тот же день — и в новых кампаниях папки, и в идущих"
           onClose={() => setPickerOpen(false)}
           onSave={(picked) => {
             setMailboxes(picked);

@@ -393,6 +393,93 @@ export async function countSyncedQualificationsByCampaign(
   return new Map(counts);
 }
 
+const INBOX_COLUMNS = 'email_id, account_id, campaign_id, thread_id, lead_email, eaccount, subject, body_preview, reply_timestamp';
+
+function mapInboxRow(row: Record<string, unknown>): QualificationRow {
+  return {
+    id: row.email_id as string,
+    campaignId: row.campaign_id as string,
+    campaignName: null,
+    leadEmail: row.lead_email as string,
+    companyName: null,
+    threadId: (row.thread_id as string) ?? null,
+    replySubject: (row.subject as string) ?? null,
+    replyBody: (row.body_preview as string) ?? null,
+    lastOutboundPreview: null,
+    instantlyEmailId: row.email_id as string,
+    eaccount: (row.eaccount as string) ?? null,
+    replyTimestamp: (row.reply_timestamp as string) ?? null,
+    qualificationStatus: null,
+  };
+}
+
+/**
+ * Ответы без вердикта квалификатора: наши «N. Polza_…» и история кампаний до
+ * привязки (instantly_reply_inbox, пишет lib/instantly/replyInbox.ts). id строки
+ * — id письма Instantly, как у живых писем раньше: черновики к ним уже привязаны.
+ */
+export async function listInboxReplies(
+  campaignIds: string[],
+  options: { limit: number; search?: string },
+): Promise<{ rows: QualificationRow[]; total: number }> {
+  if (!campaignIds.length) return { rows: [], total: 0 };
+  const { instantly } = requireClients();
+  let query = instantly
+    .from('instantly_reply_inbox')
+    .select(INBOX_COLUMNS, { count: 'exact' })
+    .in('campaign_id', campaignIds);
+  const search = sanitizeSearch(options.search ?? '');
+  if (search) query = query.ilike('lead_email', `%${search}%`);
+  const { data, error, count } = await query
+    .order('reply_timestamp', { ascending: false, nullsFirst: false })
+    .limit(options.limit);
+  if (error) throw new Error(`reply inbox query failed: ${error.message}`);
+  return { rows: (data ?? []).map(mapInboxRow), total: count ?? data?.length ?? 0 };
+}
+
+export async function countInboxByCampaign(campaignIds: string[], search?: string): Promise<Map<string, number>> {
+  const { instantly } = requireClients();
+  const cleaned = sanitizeSearch(search ?? '');
+  const counts = await Promise.all(
+    campaignIds.map(async (campaignId) => {
+      let query = instantly
+        .from('instantly_reply_inbox')
+        .select('email_id', { count: 'exact', head: true })
+        .eq('campaign_id', campaignId);
+      if (cleaned) query = query.ilike('lead_email', `%${cleaned}%`);
+      const { count, error } = await query;
+      if (error) throw new Error(`reply inbox count failed: ${error.message}`);
+      return [campaignId, count ?? 0] as const;
+    }),
+  );
+  return new Map(counts);
+}
+
+export async function getInboxReplyById(emailId: string): Promise<{ row: QualificationRow; accountId: string } | null> {
+  const { instantly } = requireClients();
+  const { data, error } = await instantly
+    .from('instantly_reply_inbox')
+    .select(INBOX_COLUMNS)
+    .eq('email_id', emailId)
+    .maybeSingle();
+  if (error) throw new Error(`reply inbox lookup failed: ${error.message}`);
+  return data ? { row: mapInboxRow(data), accountId: (data.account_id as string) || 'main' } : null;
+}
+
+/** Есть ли у кампаний недочитанная история — экран честно пишет, что она догружается. */
+export async function inboxHistoryPending(campaignIds: string[]): Promise<boolean> {
+  if (!campaignIds.length) return false;
+  const { instantly } = requireClients();
+  const { data, error } = await instantly
+    .from('instantly_reply_inbox_backfill')
+    .select('campaign_id, done_at')
+    .in('campaign_id', campaignIds);
+  if (error) return false;
+  const done = new Set(((data ?? []) as { campaign_id: string; done_at: string | null }[])
+    .filter((row) => row.done_at).map((row) => row.campaign_id));
+  return campaignIds.some((id) => !done.has(id));
+}
+
 export async function getQualificationById(id: string): Promise<QualificationRow | null> {
   const { instantly } = requireClients();
   const { data, error } = await instantly

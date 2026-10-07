@@ -113,6 +113,7 @@ export function ReplyPersonalizationView() {
   const [itemsLoading, setItemsLoading] = useState(false);
   /** Почему письма проекта не показаны — нет брифа; null — всё в порядке. */
   const [missingReason, setMissingReason] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [kbModalOpen, setKbModalOpen] = useState(false);
   const [globalKbModalOpen, setGlobalKbModalOpen] = useState(false);
@@ -210,6 +211,7 @@ export function ReplyPersonalizationView() {
       setTotal(res.total);
       setHasMore(res.hasMore);
       setMissingReason(res.missingReason);
+      setHistoryLoading(res.historyLoading === true);
       // Пока открыта вкладка Others, выбранное там письмо не сбиваем.
       if (tabRef.current === 'replies') {
         setSelectedId((current) =>
@@ -660,6 +662,11 @@ export function ReplyPersonalizationView() {
           {project && missingReason ? (
             <p className="border-b border-amber-100 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700">
               Нет брифа — ИИ ответит только по общим кейсам и тону, лучше вручную
+            </p>
+          ) : null}
+          {project && historyLoading && tab === 'replies' ? (
+            <p className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[11px] text-gray-500">
+              Старые письма кампаний догружаются — появятся в течение часа
             </p>
           ) : null}
           {!project ? (
