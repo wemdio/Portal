@@ -48,7 +48,7 @@ export interface OutreachLetterView {
   alt_routing?: boolean;
 }
 
-/** Столбец таблицы между «Доменом» и «Почтой» — у каждого языка свои четыре. */
+/** Столбец таблицы между «Доменом» и «Почтой» — у каждого языка свои. */
 export interface OutreachColumn<Row> {
   header: string;
   cell: (row: Row) => ReactNode;
