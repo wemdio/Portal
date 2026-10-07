@@ -11,10 +11,11 @@
  * ежедневной задачи, по кругу. Метка задачи — колонка daily_day (день МСК),
  * у строк результатов — ниша DAILY_B2B_NICHE.
  *
- * Env (контейнер worker-hh):
- *   DIRECT_DAILY_B2B_ENABLED=1       — без него задачи не создаются;
- *   DIRECT_DAILY_B2B_REQUESTS=2000   — запросов XMLStock в день (ключи × 13 городов),
- *                                      можно начать с меньшего, минимум — один ключ;
+ * Работает сам, без настроек (решение пользователя 07.10.2026). Env — только
+ * чтобы поменять поведение (контейнер worker-hh):
+ *   DIRECT_DAILY_B2B_ENABLED=0       — выключить;
+ *   DIRECT_DAILY_B2B_REQUESTS=400    — запросов XMLStock в день (ключи × 13 городов):
+ *                                      400 — круг по библиотеке примерно за неделю;
  *   DIRECT_DAILY_B2B_OWNER_ID=<uuid> — владелец задач; без него — тот, кто
  *                                      включил автодобор RU (outreach_autofill.owner_id).
  */
@@ -26,11 +27,12 @@ export const DAILY_B2B_NICHE = 'B2B ежедневно';
 export const DAILY_B2B_REGIONS = ['millionniki'];
 /** Час МСК, с которого создаётся задача дня. */
 export const DAILY_B2B_HOUR_MSK = 1;
-const DEFAULT_DAILY_REQUESTS = 2000;
+const DEFAULT_DAILY_REQUESTS = 400;
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 
+/** Включён по умолчанию; выключается явным 0/false/no/off. */
 export function dailyB2bEnabled(): boolean {
-  return /^(1|true|yes|on)$/i.test(process.env.DIRECT_DAILY_B2B_ENABLED?.trim() ?? '');
+  return !/^(0|false|no|off)$/i.test(process.env.DIRECT_DAILY_B2B_ENABLED?.trim() ?? '');
 }
 
 export function dailyB2bRequests(): number {
