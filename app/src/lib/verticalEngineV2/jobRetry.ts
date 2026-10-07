@@ -12,6 +12,8 @@
  * они умирают быстро, как раньше.
  */
 
+import { ProviderBudgetWaitError } from '@/lib/providerUsage';
+import { SearchPersistenceError } from '@/lib/parsers/searchExecution';
 import { isVeProviderBillingError, isVeProviderConfigurationError } from './collectionErrors';
 import { VeLlmRateLimitError, veRateLimitDelay, type VeLlmRateLimit } from './llmRateLimit';
 import { isVeStageDbInterruption } from './stageDb';
@@ -105,6 +107,14 @@ export interface VeJobFailurePlan {
 
 /** How the worker records a failed stage run (attempts, next run, final failure). */
 export function planVeJobFailure(job: Pick<VeJob, 'id' | 'attempts' | 'payload'> & Partial<Pick<VeJob, 'stage' | 'result'>>, error: unknown, nowMs = Date.now()): VeJobFailurePlan {
+  if (error instanceof SearchPersistenceError) return {
+    status: 'pending', attempts: job.attempts, attemptCap: RETRYABLE_MAX_ATTEMPTS, retryable: true,
+    runAfter: new Date(nowMs + 60_000).toISOString(), interruption: null,
+  };
+  if (error instanceof ProviderBudgetWaitError) return {
+    status: 'pending', attempts: job.attempts, attemptCap: RETRYABLE_MAX_ATTEMPTS, retryable: true,
+    runAfter: new Date(nowMs + 60 * 60_000).toISOString(), interruption: null,
+  };
   const msg = error instanceof Error ? error.message : String(error);
   // Only collection has durable, validated per-company decisions and bounded
   // recovery of an interrupted semantic review. Do not replay an arbitrary

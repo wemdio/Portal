@@ -116,7 +116,7 @@ export async function searchVeRelevanceWebsites(query: string, signal?: AbortSig
   if (!apiKey) throw new VeSearchProviderError('configuration');
   return withSearchCapacity(signal, async () => {
     const metered = getProviderUsageScope() !== undefined;
-    const metering = await beginProviderUsage('serper');
+    const metering = await beginProviderUsage('serper', { reservedCostUsd: 0.1 });
     const usage: ProviderUsageDetails = { status: 'ambiguous' };
     try {
       return await withVeDeadline('Serper relevance search', VE_RELEVANCE_SEARCH_TIMEOUT_MS, signal, async (requestSignal) => {

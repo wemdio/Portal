@@ -2,6 +2,7 @@ import 'server-only';
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { withProviderUsage, ProviderUsageWriteError, type ProviderUsageEvent, type ProviderUsageScope } from '@/lib/providerUsage';
+import { accountSearchSpend } from '@/lib/parsers/searchSpend';
 import type { VeJob } from './types';
 
 export const VE_USAGE_SOURCE = 've_provider_usage';
@@ -116,6 +117,7 @@ export async function withVeCostTelemetry<T>(db: SupabaseClient, job: VeJob, wor
     projectId: job.project_id, jobId: job.id, stage: job.stage,
     ...(identifier(job.payload.base_id) ? { baseId: String(job.payload.base_id) } : {}),
   };
+  const searchReservations = new Set<string>();
   const runId = randomUUID();
   let origin = job.payload.provider_usage_origin as { runId?: unknown } | undefined;
   if (origin === undefined || origin === null) {
@@ -139,7 +141,16 @@ export async function withVeCostTelemetry<T>(db: SupabaseClient, job: VeJob, wor
   let outcome: 'returned' | 'threw' = 'threw';
   try {
     const result = await withProviderUsage(scope,
-      (currentScope, event) => { onProviderEvent?.(); return append(db, currentScope, event.phase, { runId, ...eventFields(event) }); }, work);
+      async (currentScope, event) => { onProviderEvent?.();
+        // The protected DB marker is checked at each admission. A collection
+        // checkpoint reset or a probe finishing during this tick cannot bypass
+        // the budget. Ordinary bases return not_applicable without reserving.
+        if (scope.baseId && event.phase === 'started') {
+          if (await accountSearchSpend(db, scope.baseId, event)) searchReservations.add(event.attemptId);
+        } else if (scope.baseId && searchReservations.has(event.attemptId)) {
+          await accountSearchSpend(db, scope.baseId, event);
+        }
+        await append(db, currentScope, event.phase, { runId, ...eventFields(event) }); }, work);
     outcome = 'returned';
     return result;
   } finally {

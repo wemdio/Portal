@@ -3,6 +3,7 @@
  * Используется когда задан SERPER_API_KEY; избавляет от парсинга HTML и блокировок.
  */
 
+import { searchExecutionSignal } from './searchExecution';
 import type { SearchResultItem } from './searchScraper';
 
 const SERPER_API_URL = 'https://google.serper.dev/search';
@@ -52,7 +53,10 @@ export async function serperSearchDetailed(
     ...(opts?.hl ? { hl: opts.hl } : {}),
   };
 
+  const parent = searchExecutionSignal();
+  const deadline = AbortSignal.timeout(30_000);
   const res = await fetch(SERPER_API_URL, {
+    signal: parent ? AbortSignal.any([parent, deadline]) : deadline,
     method: 'POST',
     headers: {
       'X-API-KEY': apiKey,

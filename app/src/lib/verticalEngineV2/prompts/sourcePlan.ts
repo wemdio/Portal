@@ -18,7 +18,9 @@
 import type { LLMMessage } from '../llm';
 
 export interface VeCollectTask {
-  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring';
+  source: 'web_search' | 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring';
+  /** Only code may add the bounded fallback; not exposed to the planner. */
+  search_query?: { query: string; locale: 'ru' | 'en'; page: number };
   /** Что и зачем собираем, 1 строка. */
   rationale: string;
   directory_filters?: {

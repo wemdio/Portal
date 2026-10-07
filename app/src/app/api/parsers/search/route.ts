@@ -31,6 +31,7 @@ export async function GET(req: NextRequest) {
   const { data: jobs, error } = await supabase
     .from('search_parser_jobs')
     .select('*')
+    .is('config->ve_search_probe', null)
     .order('created_at', { ascending: false })
     .limit(20);
 
