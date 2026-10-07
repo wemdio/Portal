@@ -96,6 +96,8 @@ export interface RepliesResponse {
   total: number | null;
   hasMore: boolean;
   missingReason: string | null;
+  /** Старые письма кампаний ещё догружаются из Instantly в базу. */
+  historyLoading?: boolean;
 }
 
 export function fetchReplies(

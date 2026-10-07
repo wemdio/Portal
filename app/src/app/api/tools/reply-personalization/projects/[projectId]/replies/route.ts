@@ -21,7 +21,8 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const limitParam = Number(url.searchParams.get('limit'));
   const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined;
   // «Только лиды» — вердикт квалификатора, он есть лишь у синхронизированных
-  // кампаний основного аккаунта; живые письма под этим фильтром не показываем.
+  // кампаний основного аккаунта; живые письма и ящик без вердикта под этим
+  // фильтром не показываем.
   const onlyLeads = url.searchParams.get('onlyLeads') === '1';
 
   // Без брифа письма всё равно показываем (с 06.10.2026): отвечать можно
@@ -47,6 +48,7 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
     campaigns: page.campaigns,
     total: page.total,
     hasMore: page.hasMore,
+    historyLoading: page.historyLoading,
     missingReason,
   });
 });
