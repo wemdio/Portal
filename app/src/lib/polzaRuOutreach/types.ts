@@ -188,7 +188,8 @@ export const MAX_FRESHNESS_DAYS = 180;
 /** Готовые компании уходят в Instantly; 500 — решение 25.09.2026. */
 export const DEFAULT_LIMIT = 500;
 export const MAX_LIMIT = 1000;
-export const DEFAULT_WRITE_THRESHOLD = 70;
+/** 60, а не 70 (07.10.2026): при 70 «только профиль» с ЦА 7 не проходил ни разу (≈63 балла). */
+export const DEFAULT_WRITE_THRESHOLD = 60;
 export const DEFAULT_MIN_TA_SCORE = 4;
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {

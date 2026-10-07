@@ -1150,10 +1150,14 @@ async function runJob(
             broad = null;
             break;
           }
-          // Обычная вакансия продаж — не повод для SDR-цепочки: компания идёт
-          // по остальным поводам. Причину храним для отчёта «сколько ушло в общую очередь».
+          // Обычная вакансия продаж (не SDR) — тоже повод «найм», только слабее
+          // (router.ts): компания сейчас вкладывается в продажи — ровно наш клиент.
+          // До 07.10.2026 она поводом не считалась, и компании с ЦА 6 и открытой
+          // вакансией продаж отсеивались как «нет повода» — 1316 из 1424 в запуске на 500.
+          // Вакансия B2C или только входящих продаж поводом не становится (уровень C).
           broad ??= {
-            type: 'sales_hiring_broad', source: 'hh', title: card.title, date: card.publishedAt, url: card.url, quote: duty ?? null, level: 'C',
+            type: 'sales_hiring_broad', source: 'hh', title: card.title, date: card.publishedAt, url: card.url, quote: duty ?? null,
+            level: analysis.isB2b && !inboundOnly ? 'B' : 'C',
             meta: {
               sdr_override: false,
               non_sdr_reason: !sdrTitle ? 'title_not_sdr' : !duty ? 'no_b2b_outbound_duty' : inboundOnly ? 'inbound_or_b2c' : 'not_b2b',

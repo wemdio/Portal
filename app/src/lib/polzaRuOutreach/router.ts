@@ -29,9 +29,11 @@ const STRENGTH: Record<ChainType, number> = {
   automation: 0,
 };
 
-/** Какой цепочке служит повод. Типы без записи (sales_hiring_broad, sales_team, crm_lost) цепочку не выбирают. */
+/** Какой цепочке служит повод. Типы без записи (sales_team, crm_lost) цепочку не выбирают. */
 const CHAIN_OF: Partial<Record<SignalType, Exclude<ChainType, 'reactivation' | 'icp_only'>>> = {
   sales_hiring: 'hiring',
+  // Обычная вакансия продаж — тот же «найм», сила повода ниже (BROAD_HIRING_STRENGTH).
+  sales_hiring_broad: 'hiring',
   ad_running: 'ad_budget',
   trade_show_exhibitor: 'event',
   grant_or_accelerator: 'growth_event',
@@ -48,6 +50,9 @@ const CHAIN_OF: Partial<Record<SignalType, Exclude<ChainType, 'reactivation' | '
   partner_program: 'growth_event',
   dealer_search: 'growth_event',
 };
+
+/** Сила повода «найм» по обычной вакансии продаж: строгий SDR — 30, обычная — 25. */
+const BROAD_HIRING_STRENGTH = 25;
 
 /** Порядок CEO — только для равных баллов. «Автоматизация» сюда не входит: её даёт сплит. */
 const CEO_ORDER: ChainType[] = ['reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only'];
@@ -210,6 +215,7 @@ function sizePoints(chain: ChainType, i: RouteInput): number {
 
 function strengthPoints(chain: ChainType, primary: Signal | null, taScore: number): number {
   let raw = STRENGTH[chain];
+  if (chain === 'hiring' && primary?.type === 'sales_hiring_broad') raw = BROAD_HIRING_STRENGTH;
   if (chain === 'growth_event' && primary && !primary.date) raw = 15;
   if (chain === 'icp_only') raw = taScore >= 9 ? 20 : taScore >= 8 ? 15 : 10;
   return Math.round((raw / 30) * 35);
@@ -309,6 +315,7 @@ export interface Score {
 export function scoreCompany(i: ScoreInput): Score {
   const now = Date.now();
   let strength = STRENGTH[i.chain];
+  if (i.chain === 'hiring' && i.primary?.type === 'sales_hiring_broad') strength = BROAD_HIRING_STRENGTH;
   if (i.chain === 'growth_event' && i.primary && !i.primary.date) strength = 15;
   // У «Только профиль» повода нет: его «сигнал» — само сходство с клиентом Polza.
   // Без этого цепочка из таблицы CEO никогда не дотягивала бы до порогов.
