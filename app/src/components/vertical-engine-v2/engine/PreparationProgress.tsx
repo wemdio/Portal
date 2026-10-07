@@ -15,6 +15,7 @@ interface PreparationProgressProps {
   jobs: readonly VeJobSummary[];
   onContinue?: () => void;
   continueDisabled?: boolean;
+  approved?: boolean;
 }
 
 export interface PreparationPresentation {
@@ -26,6 +27,12 @@ export interface PreparationPresentation {
   canContinue?: boolean;
   continueLabel?: string;
   continueHint?: string;
+  awaitingStatus?: boolean;
+  guidance?: {
+    action: 'wait' | 'review' | 'launch' | 'continue' | 'start' | 'check';
+    title: string;
+    next: string;
+  };
 }
 
 const STEPS = ['Сбор и проверка базы', 'Разбор состава базы', 'Подготовка A/B-писем'];
@@ -58,7 +65,7 @@ const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], 
 };
 
 /** Queue evidence takes precedence over snapshots left by a previous attempt. */
-export function getPreparationPresentation({ preparation, base, jobs, context = 'base' }: PreparationProgressProps): PreparationPresentation {
+function getPreparationStage({ preparation, base, jobs, context = 'base' }: PreparationProgressProps): PreparationPresentation {
   if (!preparation) return {
     title: 'Подготовка ещё не запущена',
     description: 'Выберите гипотезы и запустите подготовку. Система соберёт и проверит базу, разберёт её состав и подготовит письма.',
@@ -145,7 +152,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   if ((letters || analyzing) && !job) return {
     title: letters ? 'Ожидаем обновления статуса писем' : 'Ожидаем обновления статуса разбора',
     description: 'Состояние этого этапа пока неизвестно. Статус обновится автоматически; повторно запускать подготовку не нужно.',
-    currentStep, tone: 'muted',
+    currentStep, tone: 'muted', awaitingStatus: true,
   };
   if (letters) return {
     title: job?.status === 'running' ? 'Готовим A/B-письма' : 'Подготовка писем в очереди',
@@ -196,7 +203,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     description: job?.status === 'pending'
       ? 'Задача создана. Обработка начнётся автоматически, когда освободится обработчик. Затем система разберёт состав базы и подготовит письма.'
       : 'Подготовка базы запрошена. Ждём подтверждения начала обработки; состояние здесь обновляется автоматически.',
-    currentStep: 0, tone: 'muted',
+    currentStep: 0, tone: 'muted', awaitingStatus: job?.status !== 'pending',
   };
   const phase = getCollectionProgress(info, job).phase;
   if (phase === 'finishing' && job?.status !== 'running') return {
@@ -218,6 +225,30 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     ? ['Продолжаем проверку сохранённых контактов', 'Система продолжает автоматическую проверку уже найденных контактов: соответствие компаний гипотезе и пригодность email для рассылки. После проверки начнётся разбор базы.']
     : COLLECT_PHASES[phase];
   return { title, description, currentStep: 0, tone: phase === 'construct_failed' ? 'err' : phase === 'construct_queued' ? 'muted' : 'info' };
+}
+
+/** Explain who acts next without treating missing queue evidence as active work. */
+export function getPreparationPresentation(props: PreparationProgressProps): PreparationPresentation & Required<Pick<PreparationPresentation, 'guidance'>> {
+  const state = getPreparationStage(props);
+  let guidance: NonNullable<PreparationPresentation['guidance']>;
+  if (!props.preparation) {
+    guidance = { action: 'start', title: 'Нужно начать подготовку', next: 'Вернитесь к гипотезам и нажмите «Подготовить письма и базы».' };
+  } else if (state.tone === 'ok' && props.approved) {
+    guidance = { action: 'launch', title: 'База и письма одобрены', next: 'Перейдите к запуску этой базы. Система подготовит кампанию в Instantly; отправку вы включите там сами.' };
+  } else if (state.tone === 'ok') {
+    guidance = { action: 'review', title: 'Теперь проверьте базу и письма', next: 'После проверки одобрите базу. Затем можно подготовить кампанию в Instantly; отправку вы включите там сами.' };
+  } else if (props.context === 'letters' && props.base?.status === 'failed' && state.tone === 'muted') {
+    guidance = { action: 'check', title: 'Нужно восстановить подготовку базы', next: 'Откройте «Базы и объём»: там указана причина остановки и доступно продолжение.' };
+  } else if (state.canContinue) {
+    guidance = { action: 'continue', title: 'Нужно продолжить подготовку', next: 'Нажмите «Продолжить подготовку» ниже. Система продолжит незавершённые этапы с сохранёнными результатами.' };
+  } else if (state.tone === 'err') {
+    guidance = { action: 'check', title: 'Подготовка не завершена', next: 'Проверьте причину ниже. Если кнопка продолжения не появится после обновления статуса, сообщите об этом администратору.' };
+  } else if (state.awaitingStatus) {
+    guidance = { action: 'check', title: 'Уточняем состояние подготовки', next: 'Пока не можем подтвердить, что обработка идёт. Повторно запускать её не нужно. Если статус не обновляется, сообщите администратору.' };
+  } else {
+    guidance = { action: 'wait', title: 'От вас сейчас ничего не требуется', next: 'Можно закрыть страницу. Когда база и письма будут готовы, здесь появится действие для проверки и одобрения.' };
+  }
+  return { ...state, guidance };
 }
 
 export function PreparationProgress(props: PreparationProgressProps) {
@@ -245,10 +276,15 @@ export function PreparationProgress(props: PreparationProgressProps) {
     <div className="ve2-preparation" role={state.tone === 'err' ? 'alert' : 'status'} aria-live="polite">
       <div className="ve2-preparation-head">
         <StatusDot tone={state.tone} />
-        <h3 className={HE.cardTitle}>{state.title}</h3>
+        <h3 className={HE.cardTitle}>{state.guidance.title}</h3>
       </div>
+      <p className="font-medium">{state.title}</p>
       {state.readiness ? <p>{state.readiness}</p> : null}
-      <p className={HE.muted}>{state.description}</p>
+      <p>{state.guidance.next}</p>
+      {state.guidance?.action === 'wait' ? <details>
+        <summary className="ve2-link cursor-pointer">Что происходит на этом этапе</summary>
+        <p className={`${HE.muted} mt-2 max-w-[70ch]`}>{state.description}</p>
+      </details> : <p className={HE.muted}>{state.description}</p>}
       {stepPercent !== null ? <div className="space-y-2">
         <p className={HE.muted}>Текущий этап обработки: {stepPercent}% · это не готовность всей базы</p>
         <progress className="w-full h-2" max={100} value={stepPercent} aria-label="Прогресс текущего этапа обработки" />
@@ -258,6 +294,9 @@ export function PreparationProgress(props: PreparationProgressProps) {
         {savedReady !== null ? <span>Прошли все проверки: {savedReady.toLocaleString('ru-RU')}</span> : null}
         {composition ? <span>{composition}</span> : null}
       </div> : null}
+      {collecting && savedReady === 0 && state.guidance?.action === 'wait' ? (
+        <p className={HE.muted}>Проверенных контактов пока нет. Найденные кандидаты появятся в готовой базе только после всех проверок.</p>
+      ) : null}
       {collecting && (elapsed || Number.isFinite(updated)) ? <p className={HE.muted}>
         {elapsed ? `Текущая попытка: ${elapsed}. ` : ''}
         {Number.isFinite(updated) ? `${progress.relevanceUpdatedAt !== null ? 'Последнее сохранение проверки:' : 'Статус обновлён'} ${new Date(updated).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', ...(progress.relevanceUpdatedAt !== null ? { second: '2-digit' } : {}) })} МСК. ` : ''}

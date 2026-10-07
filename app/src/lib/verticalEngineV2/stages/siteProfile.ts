@@ -6,7 +6,7 @@
  * переводится в 'researching'. Тонкий/JS-сайт (мало текста или заглушка
  * парсера) помечается brief.site_thin — UI просит ручное описание бизнеса
  * (business_override), которое уточняет профиль и будущие гипотезы. При
- * таймауте чтения сайта профиль можно построить по сохранённому описанию
+ * таймауте или недоступном HTML профиль можно построить по сохранённому описанию
  * или клиентскому брифу; без них ошибка сохраняется для обычного повтора.
  *
  * Дополнительно — наполнение кейс-банка (ve_cases, source='site'): по тексту
@@ -307,22 +307,25 @@ export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Prom
   const fetchText = resolveFetchText(ctx);
   stageLog(ctx, `[site_profile] фетч ${project.website_url}`);
   let siteText = '';
-  let siteTimedOut = false;
+  let siteFetchError: 'timeout' | 'unavailable' | null = null;
   try {
     siteText = await fetchText(project.website_url);
   } catch (error) {
-    // Cancellation and access checks are not a thin website. A read deadline
-    // may fall back only to actual saved business facts, never to the URL alone.
+    // Only the read deadline or the parser's explicit no-HTML result may use
+    // saved facts. Do not swallow cancellation, DNS/access or arbitrary errors.
     signal?.throwIfAborted();
-    if (!(error instanceof VeOperationTimeoutError) || error.label !== 'website extraction'
-      || !(clientBrief || businessOverride)) throw error;
-    siteTimedOut = true;
-    stageLog(ctx, '[site_profile] таймаут сайта — профиль по сохранённому описанию бизнеса/брифу');
+    const failure = error instanceof VeOperationTimeoutError && error.label === 'website extraction'
+      ? 'timeout'
+      : error instanceof Error && error.message === 'Не удалось получить HTML с сайта'
+        ? 'unavailable' : null;
+    if (!failure || !(clientBrief || businessOverride)) throw error;
+    siteFetchError = failure;
+    stageLog(ctx, `[site_profile] сайт недоступен (${failure}) — профиль по сохранённому описанию бизнеса/брифу`);
   }
   // Докачка контентных/кейс-страниц: профиль по одной главной (≤3000 символов)
   // — уровень «прочитал билборд» и даёт усреднённые гипотезы. Кейс-страницы
   // из этой же пачки уходят в refreshSiteCases (без повторных фетчей).
-  const extraPages = siteTimedOut ? { content: [], cases: [] } : await fetchExtraPages(fetchText, project.website_url);
+  const extraPages = siteFetchError ? { content: [], cases: [] } : await fetchExtraPages(fetchText, project.website_url);
   signal?.throwIfAborted();
   const corpusPages = [...extraPages.content, ...extraPages.cases];
   stageLog(
@@ -367,7 +370,7 @@ export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Prom
     site_profile: llm.data,
     site_thin: siteThin,
     site_text_chars: corpus.length,
-    site_fetch_error: siteTimedOut ? 'timeout' : null,
+    site_fetch_error: siteFetchError,
     captured_at: new Date().toISOString(),
   };
   const { error } = await ctx.supabase
@@ -377,8 +380,8 @@ export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Prom
   if (error) throw new Error(`ve_projects update brief: ${error.message}`);
 
   // No website evidence was obtained: preserve the existing case bank and
-  // do not spend another call or repeat crawling the same timed-out site.
-  if (siteTimedOut) return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+  // do not spend another call or repeat crawling the same unavailable site.
+  if (siteFetchError) return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
 
   // Кейс-банк: best-effort — сбой не должен ронять основную стадию
   // (бриф уже сохранён; ve_cases может ещё не существовать на роллауте).

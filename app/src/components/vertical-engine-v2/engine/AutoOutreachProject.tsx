@@ -145,7 +145,9 @@ export function AudienceSummary({
           ? 'Проверенные контакты можно скачать и согласовать для запуска. Добор до цели не обязателен. Откройте «Контакты базы и скачивание» ниже.'
           : data.checked_ready > 0
             ? 'Проверенные контакты можно посмотреть и скачать ниже. Готовность к согласованию зависит от завершения разбора базы и подготовки писем. Текущий этап указан выше.'
-            : 'Контактов, прошедших все проверки, пока нет. Состояние подготовки и причина остановки, если она произошла, указаны выше.'
+            : preparationState.guidance?.action === 'wait'
+              ? 'Контакты появятся здесь после проверки. Текущий этап подготовки показан выше.'
+              : 'Контактов, прошедших все проверки, пока нет. Состояние подготовки и дальнейшие действия указаны выше.'
         : preparedForLaunch}</p>
       {partial && readyForReview ? <p className={HE.muted}>{preparedForLaunch}</p> : null}
       {!partial || readyForReview ? <p className={HE.faint}>
@@ -203,6 +205,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [run, setRun] = useState<VeOutreachRun | null>(null);
   const [step, setStep] = useState(1);
   const [error, setError] = useState('');
+  const [refreshError, setRefreshError] = useState('');
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [contactLimitDraft, setContactLimitDraft] = useState<string | null>(null);
   const [launchHypothesisIds, setLaunchHypothesisIds] = useState<string[]>([]);
@@ -229,6 +234,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const refresh = useCallback(async () => {
     if (refreshBusy.current) return;
     refreshBusy.current = true;
+    setRefreshing(true);
     try {
       const results = await Promise.all([
         veEngineCall<VeProjectDetailResponse>(`${VE_API}/projects/${projectId}`),
@@ -256,8 +262,11 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           !current || (launch.data.run && launch.data.run.updated_at >= current.updated_at) ? launch.data.run : current,
         );
       const failed = results.find((r) => !r.ok);
-      if (failed) setError(failed.data.error ?? 'Не удалось обновить проект');
-      else setError('');
+      if (failed) setRefreshError('Не удалось обновить все статусы. Ниже показаны последние полученные данные.');
+      else {
+        setRefreshError('');
+        setLastRefreshedAt(Date.now());
+      }
       if (initialVisit.current && project.ok && setup.ok && launch.ok) {
         initialVisit.current = false;
         if (
@@ -273,9 +282,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           setStep(2);
       }
     } catch {
-      setError('Не удалось обновить проект. Проверьте соединение');
+      setRefreshError('Не удалось обновить статус. Проверьте соединение. Ниже показаны последние полученные данные.');
     } finally {
       refreshBusy.current = false;
+      setRefreshing(false);
     }
   }, [projectId]);
   const working =
@@ -323,9 +333,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     (!dirtyRef.current && !libraryDirtyRef.current) ||
     window.confirm('Есть несохранённые правки писем. Перейти без сохранения?');
   const jump = (next: number) => {
-    if (!guardLeave()) return;
+    if (!guardLeave()) return false;
     setStep(next);
     topRef.current?.scrollIntoView({ block: 'start' });
+    return true;
   };
   const change = async (payload: Record<string, unknown>) => {
     if (!snapshot || busy || locked) return;
@@ -364,6 +375,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   const research = async () => {
     setResearchBusy(true);
+    setError('');
     try {
       const result = await veEnginePost<VeJobResponse>(`${VE_API}/projects/${projectId}/research`);
       if (!result.ok) setError(result.data.error ?? 'Не удалось начать исследование');
@@ -388,6 +400,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
   };
   const saveOffer = async (value: string) => {
+    setError('');
     try {
       const result = await veEnginePatch<VeProjectResponse>(`${VE_API}/projects/${projectId}`, {
         offer_override: value,
@@ -399,6 +412,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
   };
   const runDossier = async (id: string) => {
+    setError('');
     try {
       const response = await veEnginePost<VeJobResponse>(`${VE_API}/verticals/${id}/dossier`);
       if (!response.ok) setError(response.data.error ?? 'Не удалось собрать досье');
@@ -409,6 +423,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   const restoreHypothesis = async (id: string) => {
     setBusy(true);
+    setError('');
     try {
       const response = await veEnginePatch<{ error?: string }>(`${VE_API}/hypotheses/${id}`, { status: 'proposed' });
       if (!response.ok) setError(response.data.error ?? 'Не удалось вернуть гипотезу');
@@ -428,6 +443,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       )
     )
       return;
+    setError('');
     try {
       const response = await veEnginePost<{ error?: string }>(`${VE_API}/projects/${projectId}/cancel`);
       if (!response.ok) setError(response.data.error ?? 'Не удалось остановить подготовку');
@@ -447,16 +463,28 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       return;
     }
     if (!guardLeave()) return;
+    setError('');
     setLaunchHypothesisIds(ids);
     setStep(4);
     topRef.current?.scrollIntoView({ block: 'start' });
   };
-  if (!detail) return <StatusBox tone={error ? 'error' : 'info'}>{error || 'Загружаем проект…'}</StatusBox>;
+  if (!detail) return <StatusBox tone={error || refreshError ? 'error' : 'info'}>{error || refreshError || 'Загружаем проект…'}</StatusBox>;
   const hasJobs = detail.jobs.some((j) => ['pending', 'running'].includes(j.status));
   const researchRunning = researchBusy || detail.project.status === 'researching';
   const launchStates = Object.fromEntries(selectedIds.map((id) => [id, getVeLaunchSelectionState(snapshot, detail.templates, id)]));
   const readyForLaunchCount = Object.values(launchStates).filter((state) => state.ready).length;
   const chosenLaunchReady = launchHypothesisIds.length > 0 && launchHypothesisIds.every((id) => launchStates[id]?.ready);
+  const statusRefresh = (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <p className={HE.muted}>
+        Статус обновляется автоматически.
+        {lastRefreshedAt ? ` Проверено в ${new Date(lastRefreshedAt).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК.` : ''}
+      </p>
+      <button type="button" className={HE.btnQuiet} disabled={refreshing} onClick={() => void refresh()}>
+        Обновить статус
+      </button>
+    </div>
+  );
   const picker =
     selectedHypotheses.length > 1 ? (
       <label className="block ve2-label mb-5">
@@ -608,6 +636,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           <StatusBox tone="error">{error}</StatusBox>
         </div>
       ) : null}
+      {refreshError ? <div className="mb-5"><StatusBox tone="error">{refreshError}</StatusBox></div> : null}
       <div className="ve2-wiz">
         <aside className="ve2-rail min-w-0">
           <StepNav
@@ -747,6 +776,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           {step === 2 ? (
             <section className="space-y-5">
               <h2 className="ve2-h2">Итоговые письма</h2>
+              {statusRefresh}
               {picker}
               {previousLetters ? <StatusBox tone="info">
                 Это ранее созданные письма этой гипотезы. Они доступны для просмотра.
@@ -767,17 +797,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     preparation={preparation}
                     base={preparationBase}
                     jobs={detail.jobs}
+                    onContinue={() => void change({ action: 'prepare', hypothesis_id: activeId })}
+                    continueDisabled={busy || locked}
                   />
-                  {(!preparation || preparation.status === 'error') && preparationBase?.status !== 'failed' ? (
-                    <button
-                      type="button"
-                      disabled={busy || locked}
-                      className={HE.btnGhost}
-                      onClick={() => void change({ action: 'prepare', hypothesis_id: activeId })}
-                    >
-                      Продолжить подготовку
-                    </button>
-                  ) : null}
+                  {!preparation ? <button type="button" className={HE.btnGhost} onClick={() => jump(1)}>К гипотезам</button> : null}
                 </>
               )}
               <button type="button" className={HE.btnPrimary} onClick={() => jump(3)}>
@@ -788,24 +811,19 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           {step === 3 ? (
             <section className="space-y-6">
               <h2 className="ve2-h2">Базы и доступный объём</h2>
-              <div className="space-y-2">
+              {statusRefresh}
+              {contactLimitUnsaved ? <StatusBox tone="info">
+                Изменение лимита ещё не применено. Перед запуском сохраните его на шаге «Гипотезы».
+                <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>К настройке лимита</button>
+              </StatusBox> : null}
+              {readyForLaunchCount > 0 ? <div className="space-y-3">
+                <h3 className="ve2-h3">Одобрены и готовы к запуску: {readyForLaunchCount}</h3>
                 <p className={HE.muted}>
-                  Сохранённый лимит адресов на компанию: {contactLimit ?? 'без ограничения'}.
-                  {' '}Запущенные базы сохраняют свои настройки.
-                </p>
-                {contactLimitUnsaved ? <p className={HE.muted}>Изменение лимита ещё не применено.</p> : null}
-                <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>
-                  Изменить на шаге «Гипотезы»
-                </button>
-              </div>
-              <div className="space-y-3">
-                <h3 className="ve2-h3">Готовы к запуску: {readyForLaunchCount} из {selectedIds.length}</h3>
-                <p className={HE.muted}>
-                  Запустите одну базу или отметьте несколько. На следующем шаге выберите клиента и настройки отправки.
-                  Подготовка и одобрения остальных гипотез сохранятся.
+                  Выберите одну или несколько одобренных баз. Остальные могут продолжать подготовку.
+                  На следующем шаге выберите клиента и подготовьте кампанию. Отправку вы включите в Instantly.
                 </p>
                 <div className="divide-y divide-[var(--ve2-line)]">
-                  {selectedHypotheses.map((h) => {
+                  {selectedHypotheses.filter((h) => launchStates[h.id]?.ready || launchHypothesisIds.includes(h.id)).map((h) => {
                     const state = launchStates[h.id];
                     const selected = launchHypothesisIds.includes(h.id);
                     const p = snapshot?.preparations.find((row) => row.hypothesis_id === h.id);
@@ -839,7 +857,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   onClick={() => configureLaunch(launchHypothesisIds)}>
                   К запуску выбранных ({launchHypothesisIds.length})
                 </button>
-              </div>
+              </div> : null}
               {selectedHypotheses.map((h) => {
                 const p = snapshot?.preparations.find((p) => p.hypothesis_id === h.id),
                   base = detail.bases.find((b) => b.id === p?.base_id);
@@ -851,9 +869,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
-                    {p?.status !== 'ready' || (base && isPartialPreview(base)) ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
+                    {!launchStates[h.id]?.launched ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} approved={approved}
                       onContinue={launchStates[h.id]?.launched ? undefined : () => void change({ action: 'prepare', hypothesis_id: h.id })}
                       continueDisabled={busy || locked} /> : null}
+                    {!p ? <button type="button" className={HE.btnPrimary} onClick={() => jump(1)}>К гипотезам</button> : null}
                     {base ? (
                       <>
                         <AudienceSummary base={base} presetId={presetId} preparationState={preparationState}
@@ -887,14 +906,16 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             <p className={HE.muted}>База уже передана в запуск.</p>
                             <button type="button" className={HE.btnGhost} onClick={() => jump(5)}>Посмотреть результаты</button>
                           </div>
-                        ) : <>
-                        <label className={`flex items-start gap-3${!review ? ' cursor-not-allowed ' + HE.muted : ''}`}>
+                        ) : review && p?.status === 'ready' ? <>
+                        <button type="button" className={HE.btnGhost} onClick={() => {
+                          if (jump(2)) setActiveHypothesis(h.id);
+                        }}>Проверить письма</button>
+                        <label className="flex items-start gap-3">
                           <input
                             type="checkbox"
                             className="ve2-cbx mt-1"
                             checked={approved}
-                            disabled={!review || busy || locked}
-                            aria-describedby={!review ? `approval-pending-${base.id}` : undefined}
+                            disabled={busy || locked}
                             onChange={(e) =>
                               void change({
                                 action: 'approve',
@@ -905,17 +926,15 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                               })
                             }
                           />
-                          <span>{review ? 'Одобряю базу для запуска' : 'Одобрение пока недоступно'}</span>
+                          <span>Базу и письма проверил, одобряю для запуска</span>
                         </label>
-                        {!review ? (
-                          <p id={`approval-pending-${base.id}`} className={HE.muted}>
-                            {preparationState.title}. Для одобрения должны быть готовы база и итоговые письма.
-                          </p>
-                        ) : null}
-                        <button type="button" className={HE.btnGhost}
-                          disabled={!launchStates[h.id]?.ready || busy || locked || contactLimitUnsaved}
+                        {launchStates[h.id]?.ready ? <button type="button" className={HE.btnPrimary}
+                          disabled={busy || locked || contactLimitUnsaved}
                           onClick={() => configureLaunch([h.id])}>К запуску этой базы</button>
-                        </>}
+                        : <p className={HE.muted}>{launchStates[h.id]?.label}</p>}
+                        </> : p?.status === 'ready' ? <p className={HE.muted}>
+                          Одобрение появится после подтверждения актуальной версии базы и писем. Статус обновляется автоматически.
+                        </p> : null}
                       </>
                     ) : null}
                   </article>
@@ -924,11 +943,18 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <p className={HE.muted}>
                 Контакты разных гипотез могут пересекаться. Перед отправкой система исключит повторы.
               </p>
-              <button type="button" className={HE.btnPrimary}
-                disabled={!chosenLaunchReady || busy || locked || contactLimitUnsaved}
-                onClick={() => configureLaunch(launchHypothesisIds)}>
-                К запуску выбранных ({launchHypothesisIds.length})
-              </button>
+              <details>
+                <summary className="ve2-link cursor-pointer">Настройки сбора</summary>
+                <div className="mt-3 space-y-2">
+                  <p className={HE.muted}>
+                    Сохранённый лимит адресов на компанию: {contactLimit ?? 'без ограничения'}.
+                    {' '}Запущенные базы сохраняют свои настройки.
+                  </p>
+                  <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>
+                    Изменить на шаге «Гипотезы»
+                  </button>
+                </div>
+              </details>
             </section>
           ) : null}
           {step === 4 && snapshot ? contactLimitUnsaved ? (

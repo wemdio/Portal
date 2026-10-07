@@ -8,6 +8,7 @@ import { extractEmail, findColumnIndex } from '@/lib/tools/dfybUtils';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { stripBaseConstructorCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 import { mergeBaseConstructorStats } from '@/lib/tools/baseConstructorMetrics';
+import { presentConstructorJob } from '@/lib/tools/baseConstructorPresentation';
 
 const admin = supabaseAdmin!;
 
@@ -179,7 +180,8 @@ export async function GET(
       if (error || !job) return NextResponse.json({ error: 'Not found' }, { status: 404 });
       if (job.user_id !== user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
-      return NextResponse.json({ job });
+      const { data: profile } = await admin.from('profiles').select('role').eq('id', user.id).single();
+      return NextResponse.json({ job: presentConstructorJob(job, profile?.role ?? null) });
     },
   );
 }
