@@ -4,6 +4,7 @@ import type { VeSegmentationAuditSummary, VeTemplate } from '@/lib/verticalEngin
 import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
 import { ContactUploadNotice } from '@/components/vertical-engine-v2/engine/ContactUploadNotice';
 import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/OutreachLaunchPanel';
+import { DeliveryTargetPanel } from '@/components/vertical-engine-v2/engine/DeliveryTargetPanel';
 
 const mockVeEnginePost = jest.fn();
 const mockVeEngineCall = jest.fn();
@@ -93,6 +94,37 @@ function renderPanel(expectedPortalPeriodId: string | null | undefined) {
 }
 
 describe('VE2 auto-outreach launch panel', () => {
+  it('shows a prominent project target, preserves edits during refresh and saves once with the displayed revision', async () => {
+    const plan = { target_contacts: 2000, revision: 4, minimum_target: 38, actual_contacted: 0,
+      committed_contacts: 38, reserved_contacts: 0, ready_contacts: 462, deadline: '2026-12-20',
+      daily_capacity: 216, schedule_days: [1,2,3,4,5], timezone: 'Europe/Kirov', has_period: false, can_edit: true };
+    mockAuthFetch.mockResolvedValue({ ok: true, json: async () => ({ plan }) });
+    const onSaved = jest.fn();
+    const user = userEvent.setup();
+    const view = render(<DeliveryTargetPanel projectId="project-1" onSaved={onSaved} />);
+    await screen.findByText('Общая цель проекта: 2 000 контактов', { exact: false });
+    await user.click(screen.getByRole('button', { name: 'Изменить цель' }));
+    const input = screen.getByRole('textbox', { name: 'Новая общая цель контактов' });
+    expect(input).toHaveFocus();
+    await user.clear(input); await user.type(input, '37');
+    expect(screen.getByRole('button', { name: 'Сохранить цель' })).toBeDisabled();
+    await user.clear(input); await user.type(input, '10000');
+    view.rerender(<DeliveryTargetPanel projectId="project-1" onSaved={onSaved} />);
+    expect(input).toHaveValue('10000');
+    mockVeEnginePost.mockResolvedValueOnce({ ok: false, data: { error: 'Цель уже изменена в другой вкладке' } });
+    await user.click(screen.getByRole('button', { name: 'Сохранить цель' }));
+    await screen.findByText('Цель уже изменена в другой вкладке');
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(input).toHaveValue('10000');
+    mockVeEnginePost.mockResolvedValueOnce({ ok: true, data: { plan: { ...plan, target_contacts: 10000, revision: 5 } } });
+    await user.click(screen.getByRole('button', { name: 'Сохранить цель' }));
+    await screen.findByText(/Общая цель сохранена/);
+    expect(mockVeEnginePost).toHaveBeenLastCalledWith('/api/tools/vertical-engine-v2/projects/project-1/delivery-target', {
+      target_contacts: 10000, expected_target: 2000, expected_revision: 4,
+    });
+    expect(onSaved).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
   beforeAll(() => {
     // jsdom не даёт crypto.randomUUID; панель берёт из него ключ идемпотентности.
     if (typeof globalThis.crypto?.randomUUID !== 'function') {

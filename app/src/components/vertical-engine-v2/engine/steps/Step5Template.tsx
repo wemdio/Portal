@@ -536,8 +536,8 @@ export function useTemplateLaunch(
           if (boundBinding && !projects.some((project) => project.id === boundBinding.portal_project_id)) {
             projects.push(portalProjectFromBinding(boundBinding, boundIssue));
           }
-          // A bound plan is immutable: keep its project and target even when
-          // the plan cannot be recalculated right now, and show why.
+          // Keep the saved project and target even when the plan cannot be
+          // recalculated. Target edits have a separate project-wide action.
           const bound = boundDeliveryPlan ?? boundBinding;
           setPortalProjects(projects);
           setPortalProjectId(bound?.portal_project_id ?? '');
@@ -840,7 +840,7 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }:
   const term = !period ? preview?.project_term ?? launch.projectTerm : null;
   const termDeadline = preview?.deadline ?? term?.deadline ?? null;
   const targetHint = launch.deliveryPlanLocked
-    ? 'Цель закреплена в созданном плане выполнения и недоступна для изменения здесь.'
+    ? 'Общую цель всех гипотез можно изменить на шаге «Результаты», в блоке «Общая цель проекта».'
     : launch.submitting || disabled ? 'Сохраняем план выполнения…'
       : !launch.selectedPortalProject ? 'Сначала выберите «Проект клиента». После этого можно указать цель контактов.'
         : null;
