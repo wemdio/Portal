@@ -15,6 +15,8 @@ import {
   type SeedProviderId,
 } from './api';
 import { SenderModal } from './SenderModal';
+import { SortableTh } from '@/components/ui/SortableTh';
+import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRows';
 
 /**
  * «Контрольные ящики»: свои ящики Яндекс, Gmail и Mail.ru. Раз в рабочий день
@@ -28,6 +30,22 @@ const PROVIDER_LABEL: Record<SeedProviderId, string> = { yandex: 'Яндекс',
 const PROVIDER_ORDER: SeedProviderId[] = ['yandex', 'gmail', 'mailru'];
 const SEED_PAGE_SIZE = 10;
 const HEALTH_PAGE_SIZE = 50;
+const NO_BOXES: SeedBoxDto[] = [];
+
+/** «Вход»: сначала рабочие, потом не проверенные, потом без входа. */
+const STATUS_RANK: Record<string, number> = { ok: 0, failed: 2 };
+
+const SEED_COLUMNS: SortColumns<SeedBoxDto> = {
+  provider: { type: 'string', getValue: (box) => PROVIDER_LABEL[box.provider] },
+  email: { type: 'string', getValue: (box) => box.email },
+  status: { type: 'number', getValue: (box) => STATUS_RANK[box.status] ?? 1 },
+};
+
+/** Ящик без проверенных писем (score —) уходит в конец при любом направлении. */
+const HEALTH_COLUMNS: SortColumns<SeedHealthDto> = {
+  email: { type: 'string', getValue: (row) => row.email },
+  score: { type: 'number', getValue: (row) => row.score },
+};
 
 /** Страница списка: номер приводится в границы, если список укоротился (удалили ящик). */
 function pageOf<T>(items: T[], page: number, size: number): { rows: T[]; page: number; pages: number } {
@@ -99,6 +117,9 @@ export function SeedBoxesTab() {
   const [passwordFor, setPasswordFor] = useState<SeedBoxDto | null>(null);
   const [seedPage, setSeedPage] = useState(1);
   const [healthPage, setHealthPage] = useState(1);
+  const boxes = data?.boxes ?? NO_BOXES;
+  const seedSort = useSortableRows(boxes, SEED_COLUMNS);
+  const healthSort = useSortableRows(health, HEALTH_COLUMNS);
 
   const load = useCallback(async () => {
     try {
@@ -163,9 +184,11 @@ export function SeedBoxesTab() {
     );
   }
 
-  const boxes = data?.boxes ?? [];
-  const seedView = pageOf(boxes, seedPage, SEED_PAGE_SIZE);
-  const healthView = pageOf(health, healthPage, HEALTH_PAGE_SIZE);
+  const seedView = pageOf(seedSort.sortedRows, seedPage, SEED_PAGE_SIZE);
+  const healthView = pageOf(healthSort.sortedRows, healthPage, HEALTH_PAGE_SIZE);
+  // Новый порядок — с первой страницы.
+  const sortSeed = (key: string) => { seedSort.toggleSort(key); setSeedPage(1); };
+  const sortHealth = (key: string) => { healthSort.toggleSort(key); setHealthPage(1); };
 
   return (
     <div className="space-y-6">
@@ -225,9 +248,9 @@ export function SeedBoxesTab() {
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase text-zinc-500">
               <tr>
-                <th className="py-2 pl-5 pr-3 font-medium">Сервис</th>
-                <th className="py-2 pr-3 font-medium">Адрес</th>
-                <th className="py-2 pr-3 font-medium">Вход</th>
+                <SortableTh label="Сервис" sortKey="provider" sort={seedSort.sort} onSort={sortSeed} className="pl-5" />
+                <SortableTh label="Адрес" sortKey="email" sort={seedSort.sort} onSort={sortSeed} className="pl-0" />
+                <SortableTh label="Вход" sortKey="status" sort={seedSort.sort} onSort={sortSeed} className="pl-0" />
                 <th className="py-2 pr-3 font-medium">Письма за 7 дней</th>
                 <th className="py-2 pr-5" />
               </tr>
@@ -276,8 +299,8 @@ export function SeedBoxesTab() {
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase text-zinc-500">
               <tr>
-                <th className="py-2 pl-5 pr-3 font-medium">Ящик</th>
-                <th className="py-2 pr-3 font-medium">Score</th>
+                <SortableTh label="Ящик" sortKey="email" sort={healthSort.sort} onSort={sortHealth} className="pl-5" />
+                <SortableTh label="Score" sortKey="score" sort={healthSort.sort} onSort={sortHealth} className="pl-0" />
                 <th className="py-2 pr-3 font-medium">Входящие / спам / не дошло</th>
                 <th className="py-2 pr-5 font-medium">Последний раз</th>
               </tr>
