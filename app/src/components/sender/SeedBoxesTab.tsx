@@ -28,6 +28,12 @@ import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRo
 const PROVIDER_LETTER: Record<SeedProviderId, string> = { yandex: 'Я', gmail: 'G', mailru: 'M' };
 const PROVIDER_LABEL: Record<SeedProviderId, string> = { yandex: 'Яндекс', gmail: 'Gmail', mailru: 'Mail.ru' };
 const PROVIDER_ORDER: SeedProviderId[] = ['yandex', 'gmail', 'mailru'];
+/** Цвет сервиса в карточке: Яндекс красный, Gmail жёлтый, Mail.ru голубой. */
+const PROVIDER_TONE: Record<SeedProviderId, { text: string; badge: string }> = {
+  yandex: { text: 'text-red-600', badge: 'bg-red-50 text-red-600' },
+  gmail: { text: 'text-amber-500', badge: 'bg-amber-50 text-amber-500' },
+  mailru: { text: 'text-sky-600', badge: 'bg-sky-50 text-sky-600' },
+};
 const SEED_PAGE_SIZE = 10;
 const HEALTH_PAGE_SIZE = 50;
 const NO_BOXES: SeedBoxDto[] = [];
@@ -206,15 +212,46 @@ export function SeedBoxesTab() {
           const own = boxes.filter((b) => b.provider === provider);
           const ok = own.filter((b) => b.status === 'ok' && b.enabled).length;
           const week = data?.providers.find((p) => p.provider === provider)?.week ?? { inbox: 0, spam: 0, missing: 0, total: 0 };
+          const done = week.inbox + week.spam + week.missing;
+          const score = done ? Math.round((week.inbox / done) * 100) : null;
+          const tone = PROVIDER_TONE[provider];
+          const share = (n: number) => `${done ? (n / done) * 100 : 0}%`;
           return (
             <div key={provider} className="rounded-xl border border-zinc-200 bg-white p-4">
-              <div className="flex items-baseline justify-between">
-                <span className="font-medium text-zinc-900">{PROVIDER_LABEL[provider]}</span>
-                <span className={`text-xs ${ok ? 'text-zinc-500' : 'text-amber-600'}`}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className={`inline-flex h-7 w-7 items-center justify-center rounded-lg text-sm font-bold ${tone.badge}`}>
+                    {PROVIDER_LETTER[provider]}
+                  </span>
+                  <span className={`text-base font-semibold ${tone.text}`}>{PROVIDER_LABEL[provider]}</span>
+                </div>
+                <span className={`rounded-full px-2 py-0.5 text-xs ${ok ? 'bg-zinc-100 text-zinc-600' : 'bg-amber-50 text-amber-600'}`}>
                   {own.length ? `в работе ${ok} из ${own.length}` : 'нет ящиков'}
                 </span>
               </div>
-              <p className="mt-2 text-xs text-zinc-500">7 дней: {weekLine(week)}</p>
+
+              <div className="mt-4 flex items-end justify-between gap-2">
+                <div>
+                  <div className={`text-3xl font-semibold tabular-nums leading-none ${scoreTone(score)}`}>
+                    {score === null ? '—' : `${score}%`}
+                  </div>
+                  <div className="mt-1 text-xs text-zinc-500">во «Входящих» · 7 дней</div>
+                </div>
+                <div className="text-right text-xs text-zinc-500">
+                  <span className="font-semibold tabular-nums text-zinc-900">{done}</span> писем
+                </div>
+              </div>
+
+              <div className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-zinc-100">
+                <div className="bg-emerald-500" style={{ width: share(week.inbox) }} />
+                <div className="bg-red-500" style={{ width: share(week.spam) }} />
+                <div className="bg-zinc-200" style={{ width: share(week.missing) }} />
+              </div>
+              <div className="mt-2 flex justify-between text-xs text-zinc-500">
+                <span><span className="font-semibold tabular-nums text-emerald-600">{week.inbox}</span> входящие</span>
+                <span><span className="font-semibold tabular-nums text-red-600">{week.spam}</span> спам</span>
+                <span><span className="font-semibold tabular-nums text-zinc-700">{week.missing}</span> не дошло</span>
+              </div>
             </div>
           );
         })}
