@@ -37,7 +37,7 @@
  */
 
 import type { DomainInfo } from '@/lib/emailValidation/shared';
-import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import { scrapeEmails, type SitePageCache } from '@/lib/enrich/emailScraper';
 import { shouldUseCachedError } from '@/lib/enrich/errorPolicy';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
@@ -86,6 +86,8 @@ export interface FindAndVerifyOptions<P extends { email: string }> {
   maxChecks?: number;
   /** Страниц обхода сайта (по умолчанию 8). */
   maxPages?: number;
+  /** Скачанные страницы сайта компании — общие с разбором сайта, чтобы не качать его второй раз. */
+  pageCache?: SitePageCache;
 }
 
 export type VerifiedPick<P extends { email: string }> = P & { verification: OutreachEmailVerification };
@@ -304,6 +306,7 @@ async function scrapeSiteEmails(
   locale: 'ru' | 'en',
   maxPages: number,
   budgetMs: number,
+  pageCache?: SitePageCache,
 ): Promise<{ emails: string[]; cutByDeadline: boolean }> {
   if (budgetMs <= 0) return { emails: [], cutByDeadline: true };
   const timeoutMs = Math.min(SITE_TIMEOUT_MS, budgetMs);
@@ -311,7 +314,7 @@ async function scrapeSiteEmails(
   let timedOut = false;
   try {
     const result = await runWithTimeout(
-      scrapeEmails(url, { locale, maxPages, timeout: PAGE_TIMEOUT_MS, signal: abort.signal }),
+      scrapeEmails(url, { locale, maxPages, timeout: PAGE_TIMEOUT_MS, signal: abort.signal, pageCache }),
       {
         timeoutMs,
         timeoutMessage: `Превышено время ожидания сайта (${Math.round(timeoutMs / 1000)}с)`,
@@ -387,7 +390,7 @@ export async function findAndVerifyCompanyEmail<P extends { email: string }>(
 
   let emails = await readCachedEmails(url, left());
   if (!emails) {
-    const scraped = await scrapeSiteEmails(url, opts.locale, opts.maxPages ?? DEFAULT_MAX_PAGES, left());
+    const scraped = await scrapeSiteEmails(url, opts.locale, opts.maxPages ?? DEFAULT_MAX_PAGES, left(), opts.pageCache);
     // Для раннера это просто «почты нет»; лог отличает «не успели» от сайта,
     // где почты правда нет.
     if (scraped.cutByDeadline) warn(`company email search hit the ${COMPANY_TIMEOUT_MS}ms cap before any address (${url})`);
