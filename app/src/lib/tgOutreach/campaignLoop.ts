@@ -22,7 +22,7 @@ import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionStri
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
-import { VBI_CAMPAIGN_ID, isVbiRoleOnlyReply, vbiRoleStageReply } from './vbiRoleGate';
+import { isRoleOnlyReply } from './roleFirstGate';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
   handleProxyError,
@@ -1055,9 +1055,9 @@ export async function handleChat(
   // то забывает, то перефразирует, и «Да, пришлите условия» оставался без
   // менеджера. Проверка упала — решает ответ модели, как раньше.
   const phrase = handoffPhrase(oai);
-  const vbiRoleOnly = campaign.id === VBI_CAMPAIGN_ID && isVbiRoleOnlyReply(chatMessages);
+  const roleOnly = isRoleOnlyReply(chatMessages);
   let interested: boolean | null = null;
-  if (phrase && !vbiRoleOnly) {
+  if (phrase && !roleOnly) {
     const check = await detectInterest(chatMessages);
     interested = check.interested;
     if (interested) {
@@ -1071,18 +1071,14 @@ export async function handleChat(
   let usedFallback = false;
   const openaiStart = Date.now();
   try {
-    replyText = vbiRoleOnly ? vbiRoleStageReply(chatMessages) : null;
-    const roleReply = Boolean(replyText);
-    if (!replyText) {
-      replyText = await openaiGenerate(oai, chatMessages, {
-        extraInstruction: vbiRoleOnly
-          ? 'Это кампания VBI. Наше последнее сообщение спрашивало только о роли собеседника и ещё НЕ предлагало услуги. Ответ о роли, встречное предложение своих услуг или вопрос «что предлагаете?» не подтверждает интереса к нашему предложению. Если это целевой сотрудник — коротко объясни, зачем написали, и спроси, интересно ли обсудить digital-маркетинг. Если человек предлагает свои услуги, вежливо заверши. Ни при каких обстоятельствах сейчас не передавай контакт менеджеру и не используй фразу передачи.'
-          : interested && phrase ? handoffInstruction(phrase) : null,
-      });
-    }
+    replyText = await openaiGenerate(oai, chatMessages, {
+      extraInstruction: roleOnly
+        ? 'Наше последнее сообщение только уточняло роль собеседника; предложение ещё не прозвучало. Ответ о роли и встречное предложение своих услуг НЕ означают интереса к нашему предложению. Если роль подтвердилась, кратко объясни повод обращения, опираясь только на системный промпт этой кампании, и спроси, интересно ли человеку это обсудить. Если роль не подтвердилась или собеседник предлагает свои услуги, вежливо заверши разговор. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
+        : interested && phrase ? handoffInstruction(phrase) : null,
+    });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
     if (replyText) {
-      log('info', `${displayName}: ${roleReply ? 'VBI сформировал ответ на вопрос о роли' : `GPT сгенерировал ответ за ${openaiSec}с`} (${replyText.length} символов)`);
+      log('info', `${displayName}: GPT сгенерировал ответ за ${openaiSec}с (${replyText.length} символов)`);
     } else {
       log('warning', `${displayName}: GPT не вернул ответ (запрос длился ${openaiSec}с) — отправлять нечего`);
     }
@@ -1115,8 +1111,8 @@ export async function handleChat(
   if (interested && phrase) {
     replyText = ensureHandoffPhrase(replyText, phrase);
   }
-  if (vbiRoleOnly && detectTrigger(replyText, oai) === 'positive') {
-    log('warning', `${displayName}: VBI — ответ на вопрос о роли ошибочно содержит фразу передачи; НЕ отправляю`);
+  if (roleOnly && detectTrigger(replyText, oai) === 'positive') {
+    log('warning', `${displayName}: ответ на вопрос о роли ошибочно содержит фразу передачи; НЕ отправляю`);
     return { replied: false, triggerType: null };
   }
 
