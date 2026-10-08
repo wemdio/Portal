@@ -22,6 +22,7 @@
  * (emails), первый из них главный.
  */
 
+import type { SitePageCache } from '@/lib/enrich/emailScraper';
 import {
   findAndVerifyCompanyEmail,
   type EmailDomainCache,
@@ -189,6 +190,8 @@ export async function findRuCompanyEmail(
   domainCache: EmailDomainCache,
   /** Адреса из наших каталогов — проверяются наравне с найденными на сайте. */
   catalog?: { emails: string[]; sourceUrl: string | null },
+  /** Скачанные страницы сайта — их же потом читает разбор сайта (analyzeSite). */
+  pageCache?: SitePageCache,
 ): Promise<RuEmailResult> {
   const search = await findAndVerifyCompanyEmail({
     website,
@@ -197,6 +200,7 @@ export async function findRuCompanyEmail(
     maxPages: MAX_PAGES,
     domainCache,
     extra: catalog,
+    pageCache,
     pick: (emails, excluded) => {
       const picked = pickRuEmail(emails, companyDomain, excluded);
       return picked.email ? { ...picked, email: picked.email } : null;
