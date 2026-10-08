@@ -5,6 +5,7 @@ import type { EChartsCoreOption } from 'echarts/core';
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import EChart from '@/components/charts/EChart';
 import { DomainDeliverability } from './DomainDeliverability';
+import { BounceCodes } from './BounceCodes';
 import type { BounceKinds } from '@/lib/sender/domainReputation';
 import {
   AXIS_FONT_SIZE,
@@ -694,6 +695,8 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
           </div>
 
           <DomainDeliverability domains={data.domains} />
+
+          <BounceCodes period={period} campaignId={campaignId} reloadKey={reloadKey} />
 
           <BreakdownTable data={data} />
         </div>
