@@ -12,6 +12,8 @@ import { ChevronRight, Copy, Download, Rocket, Sparkles } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
+import { splitVeEmailBody } from '@/lib/verticalEngineV2/emailBody';
+import { materializeVeFinalLetters, selectedVeBodies } from '@/lib/verticalEngineV2/finalLetters';
 import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
   VE_LAUNCH_MAX_LEADS,
@@ -104,6 +106,7 @@ function PreviewTokens({
   /** Цельная фраза для screen reader; визуальные токены остаются подсвеченными. */
   plainText?: string;
 }) {
+  if (plainText && splitVeEmailBody(plainText).some(part => part.href)) return <span className={className}>{splitVeEmailBody(plainText).map((part, i) => part.href ? <a key={i} href={part.href} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">{part.text}</a> : <span key={i}>{part.text}</span>)}</span>;
   const tokenNodes = tokens.map((t, i) =>
     t.kind === 'value' ? (
       <mark key={i} className="ve2-op">
@@ -141,7 +144,7 @@ export function TemplateLeadPreview({ template, baseId }: { template: VeTemplate
 
 function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate; baseId: string }) {
   const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [subjectIndex, setSubjectIndex] = useState(0);
+  const [variantIndices, setVariantIndices] = useState<number[]>([]);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const [sample, setSample] = useState<{
@@ -173,11 +176,10 @@ function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate
       .catch(() => { if (alive.current) setState('error'); });
   };
 
-  const first = template.letters[0];
-  const subjects = first?.selected_variant
-    ? (first.selected_subject_indices ?? []).map(index => first.subject_options?.[index] ?? '')
-    : first ? [first.subject ?? '', ...(first.variants ?? []).slice(0, 3).map(variant => variant.subject ?? '')] : [];
-  const subjectVariantIndex = Math.min(subjectIndex, Math.max(0, subjects.length - 1));
+  const choices = useMemo(() => {
+    try { return materializeVeFinalLetters(template.letters).map(letter => [letter, ...(letter.variants ?? [])]); }
+    catch { return []; }
+  }, [template.letters]);
   const rendered = useMemo(() => {
     if (state !== 'ready' || !sample) return { preview: null, error: null };
     try { return { preview: renderTemplatePreview({
@@ -187,11 +189,11 @@ function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate
       columns: sample.columns,
       maxRows: 3,
       rowSegments: sample.segments ?? undefined,
-      subjectVariantIndex,
+      variantIndices,
     }), error: null }; } catch {
       return { preview: null, error: 'Не удалось показать выбранную версию письма. Проверьте тексты и темы в редакторе.' };
     }
-  }, [state, sample, template, mapping, subjectVariantIndex]);
+  }, [state, sample, template, mapping, variantIndices]);
   const preview = rendered.preview;
 
   const hasVariants = template.letters.some((l) => (l.segment_variants ?? []).length > 0);
@@ -218,13 +220,14 @@ function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate
         ) : null}
         {preview && preview.rows.length > 0 && sample ? (
           <div>
-            {subjects.length > 1 ? <label className="mb-4 block text-sm font-medium text-gray-700">
-              Вариант темы для превью
-              <select value={subjectVariantIndex} aria-label="Вариант темы для превью" className={`${HE.input} mt-2 w-full`} onChange={event => setSubjectIndex(Number(event.target.value))}>
-                {subjects.map((subject, index) => <option key={index} value={index}>{index + 1}. {subject || 'Без темы'}</option>)}
+            {choices.map((variants, letterIndex) => variants.length > 1 ? <label key={letterIndex} className="mb-4 block ve2-label">
+              Письмо {letterIndex + 1}: вариант для превью
+              <select value={variantIndices[letterIndex] ?? 0} aria-label={`Вариант письма ${letterIndex + 1} для превью`} className={`${HE.input} mt-2 w-full`} onChange={event => setVariantIndices(current => {
+                const next = [...current]; next[letterIndex] = Number(event.target.value); return next;
+              })}>
+                {variants.map((variant, index) => <option key={index} value={index}>{template.letters[letterIndex].selected_variant ? selectedVeBodies(template.letters[letterIndex]).length > 1 ? selectedVeBodies(template.letters[letterIndex])[index] : `Тема ${index + 1}` : String.fromCharCode(65 + index)} · {variant.subject || variant.body.slice(0, 60)}</option>)}
               </select>
-              {first?.selected_variant ? <span className="mt-2 block text-xs font-normal text-gray-500">Все выбранные темы используют один и тот же утверждённый текст первого письма. Получатель получит один вариант.</span> : null}
-            </label> : null}
+            </label> : null)}
             <ol className="ve2-letter-sheet">
               {preview.rows.map((leadRow, leadIdx) => {
                 const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
