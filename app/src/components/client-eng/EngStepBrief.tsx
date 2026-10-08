@@ -6,14 +6,26 @@
  * генерацию писем), настройка проекта «до N адресов одной компании» и
  * «Re-run research» с дедупом на бэкенде.
  *
+ * «Re-run research» удаляет оплаченное: кластеризация пересобирает вертикали, и
+ * каскадом уходят базы, шаблоны, цепочки писем, вокабуляры и досье вертикалей.
+ * Поэтому роут отвечает 409 со списком последствий, экран показывает их в
+ * диалоге и только после явного согласия повторяет запрос с confirm: true.
+ * Запущенный проект и проект с идущей работой роут отклоняет и с
+ * подтверждением — текст отказа приходит с сервера.
+ *
  * Настройка живёт здесь, а не на шаге сборки баз: это ДЕФОЛТ ПРОЕКТА для всех
  * будущих сборок (на поставленной базе лимит уже проштампован), то есть тот же
  * уровень, что и остальные настройки проекта на этом шаге.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Save } from 'lucide-react';
-import { patchEngProject, startEngResearch, type HeJobSummary } from './api-client';
+import {
+  patchEngProject,
+  startEngResearch,
+  type EngResearchRerunConsequences,
+  type HeJobSummary,
+} from './api-client';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -58,6 +70,43 @@ const CONTACT_CAP_DEFAULT = 5;
 function contactCapOf(project: unknown): number {
   const raw = (project as { max_emails_per_company?: unknown } | null)?.max_emails_per_company;
   return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : CONTACT_CAP_DEFAULT;
+}
+
+/** «1 audience» / «3 audiences»; число — en-US. */
+function plural(n: number, one: string, many: string): string {
+  return `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
+}
+
+/**
+ * Пункты диалога — только то, что в ответе роута не ноль. Каждый пункт правдив
+ * для любого набора чисел:
+ *  - аудитория — любая база, кроме упавшей без строк (её роут в счёт не берёт).
+ *    Поэтому «audience», а не «collected audience»: в счёт входит и база, которая
+ *    ещё собирается (у неё может быть 0 строк). Строки — в скобках и только
+ *    ненулевые; `rows` — строки базы, то есть адреса, не компании, поэтому и
+ *    подпись «rows»;
+ *  - шаблоны, цепочки писем, вокабуляры и досье вертикалей — строки, которые
+ *    удалит каскад кластеризации; цепочки, вокабуляры и досье роут считает без
+ *    упавших (status 'failed'), а пишут их стадии сразу готовыми.
+ */
+function rerunConsequenceLines(c: EngResearchRerunConsequences): string[] {
+  const lines: string[] = [];
+  if (c.audiences > 0) {
+    lines.push(
+      `${plural(c.audiences, 'audience', 'audiences')}${c.rows > 0 ? ` (${plural(c.rows, 'row', 'rows')})` : ''}`,
+    );
+  }
+  if (c.templates > 0) lines.push(plural(c.templates, 'letter template', 'letter templates'));
+  if (c.letter_sequences > 0) {
+    lines.push(`${plural(c.letter_sequences, 'letter sequence', 'letter sequences')} written for your verticals`);
+  }
+  if (c.vocabularies > 0) {
+    lines.push(`${plural(c.vocabularies, 'targeting vocabulary', 'targeting vocabularies')} built for your verticals`);
+  }
+  if (c.dossiers > 0) {
+    lines.push(`${plural(c.dossiers, 'market dossier', 'market dossiers')} built for your verticals`);
+  }
+  return lines;
 }
 
 function isResearchActive(jobs: HeJobSummary[]): boolean {
@@ -121,6 +170,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
   const [researchBusy, setResearchBusy] = useState(false);
+  // Открытый диалог подтверждения повторного исследования (null — закрыт).
+  const [rerunConfirm, setRerunConfirm] = useState<EngResearchRerunConsequences | null>(null);
   const [error, setError] = useState('');
   // Селект настройки: начальное значение берём из проекта сразу (в отличие от
   // overrides, пустое поле здесь означало бы «одна компания = один адрес»).
@@ -196,19 +247,38 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
     }
   };
 
-  const onResearch = async () => {
+  // Первый клик идёт БЕЗ подтверждения: если удалять нечего, исследование
+  // просто стартует. Если есть — сервер отвечает 409 с последствиями, и
+  // открывается диалог; confirm: true уходит только из его кнопки.
+  const onResearch = async (confirmed: boolean) => {
     if (researchBusy || researchActive) return;
     setResearchBusy(true);
     setError('');
     try {
-      await startEngResearch(project.id);
+      const res = await startEngResearch(project.id, confirmed ? { confirm: true } : undefined);
+      if (res.kind === 'confirm_required') {
+        setRerunConfirm(res.consequences);
+        return;
+      }
+      setRerunConfirm(null);
       onChanged();
     } catch (e) {
+      setRerunConfirm(null);
       setError(e instanceof Error ? e.message : 'Failed to start research');
     } finally {
       setResearchBusy(false);
     }
   };
+
+  // Escape закрывает диалог, как и клик по подложке.
+  useEffect(() => {
+    if (!rerunConfirm) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setRerunConfirm(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [rerunConfirm]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -226,7 +296,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
           </span>
           <button
             type="button"
-            onClick={() => void onResearch()}
+            onClick={() => void onResearch(false)}
             disabled={researchBusy || researchActive}
             className="ds-btn-ghost ml-auto mb-2 inline-flex items-center gap-1.5 text-[11px]"
           >
@@ -381,6 +451,70 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
       {error && (
         <div className="text-sm" style={{ color: 'var(--cp-red)' }}>
           {error}
+        </div>
+      )}
+
+      {rerunConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="eng-rerun-research-title"
+          onClick={() => setRerunConfirm(null)}
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="ds-card w-full max-w-md p-5"
+            style={{ background: 'var(--cp-surface-elev)' }}
+          >
+            <h2 id="eng-rerun-research-title" className="text-base font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
+              Re-run research?
+            </h2>
+            {/* «When the new research finishes»: удаляет последняя стадия
+                (кластеризация); исследование, упавшее раньше неё, ничего не
+                удалит, поэтому безусловное «is deleted» было бы неправдой. */}
+            <p className="text-sm mb-2" style={{ color: 'var(--cp-text-m)' }}>
+              When the new research finishes, it rebuilds the verticals of this project from scratch and
+              deletes everything built on the current ones. This cannot be undone.
+            </p>
+            {rerunConsequenceLines(rerunConfirm).length > 0 && (
+              <>
+                <p className="text-sm mb-1" style={{ color: 'var(--cp-text-m)' }}>
+                  Built on the current verticals now:
+                </p>
+                <ul className="mb-3 list-disc pl-5 text-sm" style={{ color: 'var(--cp-paper)' }}>
+                  {rerunConsequenceLines(rerunConfirm).map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <p className="text-[11px] mb-4" style={{ color: 'var(--cp-text-l)' }}>
+              The verticals themselves come from the new research, so they may differ from the ones you see
+              now.
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void onResearch(true)}
+                disabled={researchBusy}
+                className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+                style={{ background: 'var(--cp-red)' }}
+              >
+                {researchBusy ? <EngSpinner className="h-3 w-3" /> : <RefreshCw className="h-3 w-3" />}
+                Delete and re-run research
+              </button>
+              <button
+                type="button"
+                onClick={() => setRerunConfirm(null)}
+                disabled={researchBusy}
+                className="ds-btn-ghost text-xs"
+              >
+                Keep everything
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

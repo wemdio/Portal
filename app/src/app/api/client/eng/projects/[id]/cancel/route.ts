@@ -6,6 +6,7 @@ import { logAudit, logError } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import { pauseHeRefillForClientCancel } from '@/lib/hypothesisEngine/autoPipeline';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import { engServerError } from '../../../_shared';
 
@@ -44,11 +45,72 @@ const CANCEL_HARVEST_CLEANUP_BASES = 2;
 const CANCEL_HARVEST_SCAN_BASES = 25;
 
 /**
- * POST — отменить все активные задачи СВОЕГО проекта (research, цепочки,
- * сборка/анализ баз, шаблоны). Зеркалит staff-роут: pending/running джобы →
- * 'cancelled', базы 'collecting'/'analyzing' → 'failed' («Cancelled by user»),
- * проект 'researching' → 'draft' (исследование можно запустить заново).
- * Уже завершённые джобы и готовые артефакты не трогаем.
+ * Позиции задач плана сборки (`collect_info.tasks[i]`), у которых бывает
+ * дочерняя джоба парсера (см. stopCancelledBaseWork). Её ставят только задачи
+ * из ответа модели-планировщика, а их не больше четырёх (HeSourcePlanSchema,
+ * `.max(4)`), и стоят они в начале списка: починка «нет каталога» и расширение
+ * плана дописывают в конец только pdl-срезы, у которых дочерней джобы нет, а
+ * проба среза заменяет каталожные задачи, порядка остальных не меняя. Весь
+ * `collect_info->tasks` не читаем: до уборки ниже в нём лежит харвест задач —
+ * до 10,26 МБ на базу.
+ */
+const CANCEL_CHILD_TASK_SLOTS = [0, 1, 2, 3] as const;
+
+/** Поля отменённой базы, по которым останавливается её платная работа вне he_jobs. */
+const CANCEL_BASE_WORK_SELECT = [
+  'id',
+  'bc_job_id:collect_info->construct->>bc_job_id',
+  ...CANCEL_CHILD_TASK_SLOTS.flatMap((i) => [
+    `task${i}_source:collect_info->tasks->${i}->>source`,
+    `task${i}_child:collect_info->tasks->${i}->>child_job_id`,
+  ]),
+].join(', ');
+
+/**
+ * POST — остановить то, что СВОЙ проект делает и будет делать сам: активные
+ * джобы he_jobs (research, цепочки, сборка/анализ баз, шаблоны, ночной долив),
+ * автопилот, ночной добор, а у отменённых баз — джобы конструктора и дочерние
+ * джобы Google Maps (шаг 5; что именно и чего он НЕ останавливает — в докблоке
+ * stopCancelledBaseWork). Уже завершённые джобы и готовые артефакты не трогаем.
+ * Записи — по порядку, и порядок несёт смысл:
+ *
+ *  1. he_projects.autopilot = false. Без этого координатор воркера
+ *     (autopilotNext, только при autopilot=true) после любой стадии, которая
+ *     успеет закончиться, ставил бы следующую платную. Координатор и
+ *     реконсилер перечитывают флаг ещё раз прямо перед каждой платной
+ *     постановкой (isHeAutopilotStillOn), поэтому запись идёт ПЕРВОЙ.
+ *     Включить обратно — «Start outreach» (POST .../autopilot); другого
+ *     выключателя автопилота у кабинета нет. Не записалось — отвечаем
+ *     отказом, ничего не тронув.
+ *  2. Пауза ночного добора — ТА ЖЕ, что ставит ёмкость рассыльщика
+ *     (he_auto_pipeline_configs.refill_paused_at, причина «клиент отменил»,
+ *     pauseHeRefillForClientCancel). Добор ведёт he_auto_pipeline_configs.enabled,
+ *     а не autopilot, и без паузы следующая ночь снова покупала бы сборку и
+ *     доливала в живую кампанию. Снимает её сотрудник той же кнопкой
+ *     staff-инструмента. Нет конфига, нет колонок (миграция 20260930_0005), сбой
+ *     — отмену не валит: исход уходит в аудит.
+ *     Пишется ДО отмены джоб: ночной тик перечитывает паузу у самой постановки
+ *     и сразу после неё, и джоба, вставленная после шага 3, на втором чтении
+ *     уже видит паузу и отзывается (autoPipeline.ts, шаг 4-).
+ *  3. pending/running джобы → 'cancelled' (идущую стадию обрывает наблюдатель
+ *     воркера, а долив дополнительно перечитывает владение прямо перед каждым
+ *     запросом к рассыльщику — stages/baseCollectRefill.ts). Сбой этой записи —
+ *     отказ (500), хотя шаги 1–2 уже легли: повторное нажатие их не портит,
+ *     обе записи идемпотентны.
+ *  4. Базы 'collecting'/'analyzing' → 'failed' («Cancelled by user») — В ТОМ
+ *     ЧИСЛЕ когда активных джоб ноль. Раньше ноль джоб давал 409 до этого шага,
+ *     и база, застрявшая в 'collecting'/'analyzing' без джобы, не отменялась
+ *     никогда: держала слот автосборки вертикали
+ *     (he_bases_one_collecting_per_vertical) и висела «в работе».
+ *  5. Платная работа баз ВНЕ he_jobs (stopCancelledBaseWork) — только когда
+ *     запись шага 4 легла; сбой не валит отмену, он журналируется.
+ *  6. Уборка харвеста отменённых баз (dropCancelledBaseHarvest) — при том же
+ *     условии и так же fail-soft.
+ *  7. Проект 'researching' → 'draft' (исследование можно запустить заново).
+ *
+ * Ответ — { ok: true, cancelled: <сколько джоб отменено> }, ноль — штатный
+ * ответ (автопилот выключен, добор поставлен на паузу, если у проекта есть его
+ * конфиг и колонки паузы из 20260930_0005, застрявшие базы остановлены).
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.cancel.post' }, async () => {
@@ -65,7 +127,31 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
-    const now = new Date().toISOString();
+    const nowDate = new Date();
+    const now = nowDate.toISOString();
+
+    // 1. Автопилот — первым (почему — докблок POST).
+    const { error: autopilotErr } = await supabaseAdmin
+      .from('he_projects')
+      .update({ autopilot: false, updated_at: now })
+      .eq('id', id);
+    if (autopilotErr) {
+      return engServerError('client.eng.cancel.autopilot_failed', autopilotErr, 'Failed to cancel the running jobs', {
+        userId: result.auth.userId,
+        projectId: id,
+      });
+    }
+
+    // 2. Ночной добор — та же пауза, что у ёмкости. Не бросает.
+    const refillPause = await pauseHeRefillForClientCancel(supabaseAdmin, id, { now: nowDate });
+    if (refillPause === 'failed') {
+      await logError('client.eng.cancel.refill_pause_failed', new Error('nightly refill pause not recorded'), {
+        userId: result.auth.userId,
+        projectId: id,
+      });
+    }
+
+    // 3. Джобы.
     const { data: cancelledJobs, error: jobsErr } = await supabaseAdmin
       .from('he_jobs')
       .update({ status: 'cancelled', finished_at: now, updated_at: now })
@@ -79,24 +165,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     const cancelled = (cancelledJobs ?? []).length;
-    if (cancelled === 0) {
-      return jsonError('No active jobs — nothing to cancel', 409);
-    }
 
-    // Базы, которые ждали отменённые джобы, — в failed, чтобы не висели «в
-    // работе» вечно и не держали слот автосборки вертикали.
-    const { error: basesErr } = await supabaseAdmin
+    // 4. Базы в работе — в failed, в том числе без джобы (см. докблок POST):
+    // иначе висят «в работе» вечно и держат слот автосборки вертикали.
+    const { data: stoppedBases, error: basesErr } = await supabaseAdmin
       .from('he_bases')
       .update({ status: 'failed', error: CANCELLED_BY_USER, updated_at: now })
       .eq('project_id', id)
-      .in('status', ['collecting', 'analyzing']);
+      .in('status', ['collecting', 'analyzing'])
+      .select('id');
+    let baseWork: CancelledBaseWorkStopped = { constructorJobs: 0, mapsJobs: 0 };
     if (basesErr) {
       await logError('client.eng.cancel.bases_failed', basesErr, { userId: result.auth.userId, projectId: id });
     } else {
+      // 5. Сначала деньги (конструктор, парсер), потом объём (харвест).
+      baseWork = await stopCancelledBaseWork(id, result.auth.userId, now);
+      // 6.
       await dropCancelledBaseHarvest(id, result.auth.userId);
     }
 
-    // Research-пайплайн отменён — проект можно запустить заново с шага Brief.
+    // 7. Research-пайплайн отменён — проект можно запустить заново с шага Brief.
     if ((owned.project as { status?: string }).status === 'researching') {
       const { error: updErr } = await supabaseAdmin
         .from('he_projects')
@@ -111,10 +199,126 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       userId: result.auth.userId,
       projectId: id,
       cancelled,
+      basesStopped: (stoppedBases ?? []).length,
+      constructorJobsStopped: baseWork.constructorJobs,
+      mapsJobsStopped: baseWork.mapsJobs,
+      autopilotOff: true,
+      refillPause,
     });
 
     return NextResponse.json({ ok: true, cancelled });
   });
+}
+
+/** Сколько джоб вне he_jobs остановил stopCancelledBaseWork (в аудит отмены). */
+interface CancelledBaseWorkStopped {
+  constructorJobs: number;
+  mapsJobs: number;
+}
+
+/**
+ * Остановить платную работу отменённых баз, которая живёт ВНЕ he_jobs.
+ *
+ * Зачем. Шаг 3 гасит джобы he_jobs, но сборка, отменённая в WAIT-CONSTRUCT,
+ * оставляет джобу конструктора (base_constructor_jobs) в его общей FIFO-очереди:
+ * она часами краулит сайты и платит SMTP-пробы, а её результат больше никто не
+ * импортирует (start-guard сборки требует 'collecting', база уже 'failed'). Так
+ * же дочерняя джоба Google Maps, поставленная фазой DISPATCH, дорабатывает свои
+ * запросы через сервис парсеров.
+ *
+ * Что останавливается:
+ *  - base_constructor_jobs по `collect_info.construct.bc_job_id`:
+ *    'pending'/'processing' → 'cancelled' + completed_at. Это та же запись, что
+ *    у cancelAbandonedConstructJob (stages/baseCollect.ts) и кнопки «Отменить»
+ *    конструктора: pending-строку воркер конструктора не заберёт (клейм по
+ *    'pending'), идущий прогон встанет на ближайшей проверке isCancelled. Id
+ *    стадия резервирует ДО вставки строки — отмена до вставки задевает ноль
+ *    строк, а вставку, легшую после отмены джобы сборки, гасит сама стадия
+ *    (self-requeue читает 'cancelled' → cancelAbandonedConstructJob, ENG);
+ *  - google_maps_jobs по `collect_info.tasks[i].child_job_id` задач с
+ *    source='google_maps' (i — CANCEL_CHILD_TASK_SLOTS): 'queued'/'running'/
+ *    'paused' → 'stopped'. Это та же запись, что у роута
+ *    api/parsers/googlemaps/[jobId]/stop: 'queued' воркер парсеров не клеймит,
+ *    а идущему прогону он, увидев 'stopped' на ближайшем событии прогресса,
+ *    командует сервису остановиться.
+ *
+ * Что НЕ останавливается: дочерние джобы hh_live (parser_jobs) и yandex_maps
+ * (yandex_maps_jobs). Статуса отмены у этих таблиц нет — их собственная кнопка
+ * «стоп» пишет 'failed' с русским текстом, тем же статусом, что и настоящий
+ * сбой парсера, — а ENG-план сборки этих источников не предлагает
+ * (prompts/sourcePlan.en.ts). Работа, сделанная до отмены, уже оплачена и
+ * пропадает: отмена останавливает только остаток.
+ *
+ * Какие базы. Те же кандидаты, что у уборки харвеста: авто-базы проекта в
+ * 'failed' с текстом отмены, самые свежие первыми, не больше
+ * CANCEL_HARVEST_SCAN_BASES. Базы, остановленные ЭТИМ запросом, среди них
+ * первые (их updated_at — время отмены), а повторное нажатие повторяет
+ * остановку — обе записи идут только поверх незавершённых статусов, и
+ * завершённые джобы прошлых отмен они не задевают.
+ *
+ * Fail-soft: отмена к этому моменту уже состоялась, сбой только журналируется,
+ * а в аудит уходит, сколько строк задела каждая запись.
+ */
+async function stopCancelledBaseWork(
+  projectId: string,
+  userId: string,
+  now: string,
+): Promise<CancelledBaseWorkStopped> {
+  const stopped: CancelledBaseWorkStopped = { constructorJobs: 0, mapsJobs: 0 };
+  if (!supabaseAdmin) return stopped;
+  const { data, error } = await supabaseAdmin
+    .from('he_bases')
+    .select(CANCEL_BASE_WORK_SELECT)
+    .eq('project_id', projectId)
+    .eq('source', 'auto')
+    .eq('status', 'failed')
+    .eq('error', CANCELLED_BY_USER)
+    .order('updated_at', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(CANCEL_HARVEST_SCAN_BASES);
+  if (error) {
+    await logError('client.eng.cancel.base_work_read_failed', error, { userId, projectId });
+    return stopped;
+  }
+  const constructorIds = new Set<string>();
+  const mapsIds = new Set<string>();
+  for (const row of (data ?? []) as unknown as Array<Record<string, unknown>>) {
+    const bcJobId = row.bc_job_id;
+    if (typeof bcJobId === 'string' && isValidUuid(bcJobId)) constructorIds.add(bcJobId);
+    for (const slot of CANCEL_CHILD_TASK_SLOTS) {
+      const childId = row[`task${slot}_child`];
+      if (row[`task${slot}_source`] === 'google_maps' && typeof childId === 'string' && isValidUuid(childId)) {
+        mapsIds.add(childId);
+      }
+    }
+  }
+  if (constructorIds.size > 0) {
+    const { data: bc, error: bcErr } = await supabaseAdmin
+      .from('base_constructor_jobs')
+      .update({ status: 'cancelled', completed_at: now })
+      .in('id', [...constructorIds])
+      .in('status', ['pending', 'processing'])
+      .select('id');
+    if (bcErr) {
+      await logError('client.eng.cancel.constructor_stop_failed', bcErr, { userId, projectId });
+    } else {
+      stopped.constructorJobs = (bc ?? []).length;
+    }
+  }
+  if (mapsIds.size > 0) {
+    const { data: maps, error: mapsErr } = await supabaseAdmin
+      .from('google_maps_jobs')
+      .update({ status: 'stopped' })
+      .in('id', [...mapsIds])
+      .in('status', ['running', 'queued', 'paused'])
+      .select('id');
+    if (mapsErr) {
+      await logError('client.eng.cancel.maps_stop_failed', mapsErr, { userId, projectId });
+    } else {
+      stopped.mapsJobs = (maps ?? []).length;
+    }
+  }
+  return stopped;
 }
 
 /**

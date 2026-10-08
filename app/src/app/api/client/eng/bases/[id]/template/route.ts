@@ -19,24 +19,51 @@ const TEMPLATE_START_FAILED = 'Failed to start the template';
 const REFILL_BASE =
   'This audience is a nightly top-up of an audience that is already launched, so it has no template of its own.';
 const TEMPLATE_EXISTS = 'This audience already has a template.';
+const TEMPLATE_RACE_FINISHED =
+  'Another request for this template has just finished. Refresh the page to see its result.';
 const LETTERS_EXHAUSTED =
   'The letters for this audience were already generated the maximum number of times for its current ' +
   'analysis. Ask your manager to look at it.';
 
+/**
+ * Активная (pending/running) template-джоба базы в клиентской проекции колонок —
+ * дедуп до вставки и ответ на 23505 после неё.
+ */
+async function findActiveTemplateJob(projectId: string, baseId: string) {
+  if (!supabaseAdmin) return { error: new Error('Server misconfigured') };
+  const { data: active, error } = await supabaseAdmin
+    .from('he_jobs')
+    .select(HE_JOB_CLIENT_COLUMNS)
+    .eq('project_id', projectId)
+    .eq('stage', 'template')
+    .in('status', ['pending', 'running']);
+  if (error) return { error };
+  const job = (active ?? []).find((j) => (j.payload as { base_id?: string } | null)?.base_id === baseId);
+  return { job: job ?? null };
+}
+
 // POST — поставить генерацию шаблона 85/15 по СВОЕЙ проанализированной базе.
 // База должна пройти анализ (status='analyzed'), иначе 409. Дедуп как у
-// staff: активная template-задача на эту базу уже есть → 200 с ней же.
+// staff: активная template-задача на эту базу уже есть → 200 с ней же. Гонку
+// двух кликов держит partial unique index he_jobs_one_active_template_per_base
+// (20261008_0001_he_active_job_unique.sql): проигравшая вставка получает 23505
+// и отвечает тем же 200 с уже стоящей джобой. Если индекс ещё не применён,
+// вторая из двух вставленных джоб всё равно не платит: воркер берёт их по
+// очереди, а стадия без payload.force возвращает уже готовый шаблон базы
+// (stages/template.ts, findReusableTemplate). force этот роут не ставит
+// никогда — пересборку писем кабинет не предлагает.
 //
 // Генерация ПЛАТНАЯ (LLM), а из кабинета этот роут сейчас никто не зовёт
 // (buildEngTemplate без вызывающего — шаблоны ставит автопилот), то есть сюда
 // приходят только прямые запросы и старые бандлы. Поэтому те же тормоза, что у
-// автопилота (autopilotNext.ts, afterBaseAnalyzeDone), плюс два, которых у
-// него нет, потому что он сам в эти состояния не попадает:
+// автопилота (autopilotNext.ts, afterBaseAnalyzeDone), плюс один, которого у
+// него нет, потому что он сам в это состояние не попадает:
 //   - refill-база («auto-refill: …») статус 'analyzed' получает без анализа —
 //     её строки уезжают доливом в уже запущенную кампанию, шаблона ей не
 //     положено (тот же признак, что у autopilotNext.ts, repairOrphanAnalyzingBase);
 //   - у базы уже есть шаблон: новая генерация по той же базе — второй платный
-//     прогон ради того, что уже есть; пересборку писем кабинет не предлагает;
+//     прогон ради того, что уже есть; пересборку писем кабинет не предлагает
+//     (тот же отказ у автопилота — итог 'skipped:template_ready');
 //   - бюджет писем поколения анализа (heTemplateGenerationBudget): без него
 //     скрипт ставил бы новую платную генерацию после каждой закончившейся.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -73,22 +100,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return jsonError(REFILL_BASE, 409);
     }
 
-    const { data: active, error: activeErr } = await supabaseAdmin
-      .from('he_jobs')
-      .select(HE_JOB_CLIENT_COLUMNS)
-      .eq('project_id', owned.base.project_id as string)
-      .eq('stage', 'template')
-      .in('status', ['pending', 'running']);
-    if (activeErr) {
-      return engServerError('client.eng.template.active_lookup_failed', activeErr, TEMPLATE_START_FAILED, {
+    const active = await findActiveTemplateJob(owned.base.project_id as string, id);
+    if (active.error) {
+      return engServerError('client.eng.template.active_lookup_failed', active.error, TEMPLATE_START_FAILED, {
         userId: result.auth.userId,
         baseId: id,
       });
     }
-    const existing = (active ?? []).find(
-      (j) => (j.payload as { base_id?: string } | null)?.base_id === id,
-    );
-    if (existing) return NextResponse.json({ ok: true, job: toClientEngJobRow(existing) });
+    if (active.job) return NextResponse.json({ ok: true, job: toClientEngJobRow(active.job) });
 
     const { data: templates, error: templatesErr } = await supabaseAdmin
       .from('he_templates')
@@ -134,6 +153,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       })
       .select(HE_JOB_CLIENT_COLUMNS)
       .single();
+    // 23505 — параллельный запрос успел раньше: тот же ответ, что у дедупа выше.
+    // Стоящей джобы уже нет — значит, она успела закончиться (готово, упала или
+    // отменена), и честный ответ — посмотреть её итог, а не ставить ещё одну.
+    if (jobErr?.code === '23505') {
+      const raced = await findActiveTemplateJob(owned.base.project_id as string, id);
+      if (raced.error) {
+        return engServerError('client.eng.template.active_lookup_failed', raced.error, TEMPLATE_START_FAILED, {
+          userId: result.auth.userId,
+          baseId: id,
+        });
+      }
+      if (raced.job) return NextResponse.json({ ok: true, job: toClientEngJobRow(raced.job) });
+      return jsonError(TEMPLATE_RACE_FINISHED, 409);
+    }
     if (jobErr || !job) {
       return engServerError('client.eng.template.enqueue_failed', jobErr, TEMPLATE_START_FAILED, {
         userId: result.auth.userId,

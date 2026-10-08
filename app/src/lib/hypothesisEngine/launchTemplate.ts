@@ -56,6 +56,14 @@
  * Имя кампании от контура НЕ зависит: оно выбирается по рынку проекта (шаг 4b),
  * потому что клиент видит его в своём рассыльщике, кто бы запуск ни нажал.
  *
+ * ДВЕ ЗАЩИТЫ АУДИТОРИИ us-проекта (шаг 4b′, с 08.10.2026), до классификатора и
+ * рассыльщика, force их не снимает: у ДРУГОГО шаблона той же базы уже есть
+ * запуск — отказ 409 с кодом 'sibling_template_launched' (вторая цепочка тем же
+ * людям); у проекта идёт повторное исследование — отказ 409 с кодом
+ * 'research_running' (кластеризация удалит шаблон вместе с записью о запуске).
+ * Признак «у шаблона есть запуск» один на ядро и research-роут кабинета:
+ * heTemplateLaunchMarked. RU-проекты эти защиты не видят.
+ *
  * Тарифных гейтов и журнала client_campaign_launches тут нет осознанно (см.
  * launchHandoff.ts): запуск HE-шаблона billing клиента не меняет.
  *
@@ -127,6 +135,7 @@ import type { HeBase, HeTemplate } from './types';
 import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from './segmentClassify';
 import { projectMarket, type HeMarket } from './market';
 import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
+import { HE_RESEARCH_STAGES } from './researchJob';
 import {
   HE_ENG_CAMPAIGN_NAMING,
   HE_LAUNCH_LEASE_MS,
@@ -172,6 +181,12 @@ interface HeLaunchMessages {
   tooManyLeads: (count: number) => string;
   /** Рынок проекта не прочитался — запуск остановлен до рассыльщика (шаг 4b). */
   marketReadFailed: string;
+  /** Другой шаблон той же базы уже запущен — второй запуск тем же людям (шаг 4b′). */
+  siblingTemplateLaunched: string;
+  /** У проекта идёт research: кластеризация удалит этот шаблон вместе с записью (шаг 4b′). */
+  researchRunning: string;
+  /** Защиты шага 4b′ не прочитались — запуск остановлен до рассыльщика. */
+  launchGuardReadFailed: string;
   /** Запуск этого шаблона идёт (или оборвался) — аренда записи жива (шаг 1). */
   launchInProgress: string;
   /** Начало запуска не записалось в шаблон — остановлено до рассыльщика (шаг 5b′). */
@@ -273,6 +288,18 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     marketReadFailed:
       'Не удалось прочитать рынок проекта — запуск остановлен до создания кампании: без рынка ' +
       'неизвестно, какие проверки адресов обязательны. Повторите попытку через минуту.',
+    // Обе защиты шага 4b′ скоупнуты на market='us', поэтому RU-проект их не
+    // видит; RU-тексты читает сотрудник, запускающий us-проект из RU-инструмента.
+    siblingTemplateLaunched:
+      'Запуск остановлен: другой шаблон этой же базы уже отправлен в запуск, и этот написал бы тем же ' +
+      'людям вторую цепочку. Кампания не создавалась. По одной базе запускается один шаблон.',
+    researchRunning:
+      'Запуск остановлен: у проекта снова идёт исследование, а его кластеризация пересобирает ' +
+      'вертикали и удаляет их базы и шаблоны вместе с записью о запуске — и этот шаблон тоже. ' +
+      'Кампания не создавалась.',
+    launchGuardReadFailed:
+      'Не удалось проверить, не идёт ли у проекта исследование и не запущен ли другой шаблон этой базы, — ' +
+      'запуск остановлен до создания кампании. Повторите попытку через минуту.',
     launchInProgress:
       'Запуск этого шаблона ещё идёт или оборвался посередине меньше ' +
       `${LEASE_MINUTES} минут назад. Подождите несколько минут и откройте шаблон снова: если часть ` +
@@ -446,6 +473,23 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     marketReadFailed:
       'The settings of this project could not be read, so the launch was stopped before any campaign ' +
       'was created. Please try again in a minute.',
+    // Шаг 4b′: правда для любого состояния записи соседа — законченный запуск,
+    // незаконченный или идущий прямо сейчас («has already been launched» —
+    // кампания соседа создана: признак — campaign_id его записи или живая
+    // аренда попытки, heTemplateLaunchMarked).
+    siblingTemplateLaunched:
+      'Another template of this audience has already been launched, so this one was not: launching it ' +
+      'too would send the same people a second sequence. No campaign was created for this template.',
+    // Шаблон существует только после кластеризации, поэтому любая активная
+    // research-стадия у такого проекта — повторное исследование. «When the
+    // research completes»: упади оно раньше кластеризации, шаблон уцелеет.
+    researchRunning:
+      'Research is running again for this project. When it completes, it rebuilds the verticals and ' +
+      'deletes their audiences and templates, this one included, so the launch was stopped before any ' +
+      'campaign was created.',
+    launchGuardReadFailed:
+      'The state of this project could not be checked, so the launch was stopped before any campaign ' +
+      'was created. Please try again in a minute.',
     launchInProgress:
       'A launch of this template is still in progress, or stopped midway less than ' +
       `${LEASE_MINUTES} minutes ago. Wait a few minutes and check this template again: if part of the ` +
@@ -609,6 +653,7 @@ const HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS: ReadonlySet<string> = new Set([
   MESSAGES.en.blocklistLoadFailed,
   MESSAGES.en.presetLoadFailed,
   MESSAGES.en.marketReadFailed,
+  MESSAGES.en.launchGuardReadFailed,
   MESSAGES.en.launchStartSaveFailed,
   MESSAGES.en.zeroAccepted,
 ]);
@@ -616,6 +661,109 @@ const HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS: ReadonlySet<string> = new Set([
 /** Можно ли показать клиенту текст 5xx ядра как есть (см. набор выше). */
 export function isHeLaunchClientSafeServerError(text: unknown): boolean {
   return typeof text === 'string' && HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS.has(text);
+}
+
+/* ───────────── «У шаблона есть запуск»: одно определение на всех ───────────── */
+
+/**
+ * КАК ЗАПИСЫВАЕТСЯ ЗАПУСК. Запуск живёт в `he_templates.launch_info` (jsonb,
+ * 20260730_0002_he_templates_launch_info.sql; NULL — шаблон в запуск не уходил).
+ * Ядро ниже пишет её ПО ХОДУ запуска: первая попытка — первой же записью сразу
+ * после того, как рассыльщик вернул id первой кампании (до загрузки адресов),
+ * с campaign_id, pending, токеном attempt и арендой running_until; потом —
+ * после каждого подтверждённого чанка; финальная запись снимает аренду. Повтор
+ * над уже существующей записью сначала берёт аренду (шаг 5b′) — к прежней
+ * записи добавляются только attempt и running_until. Все читатели записи
+ * (parseLaunchInfo) считают запуск состоявшимся по непустому campaign_id.
+ *
+ * Отсюда признак: непустой campaign_id (кампания создана — запуск законченный
+ * или нет) ЛИБО живая аренда (попытка держит запись прямо сейчас). Это то же,
+ * что parseLaunchInfo !== null, плюс идущая попытка над записью не нашего
+ * формата. Читают его две защиты: «по базе уже запущен другой шаблон» (шаг 4b′
+ * ниже) и «Re-run research удалил бы запуск» (api/client/eng/projects/[id]/research).
+ *
+ * Сама запись в выборку не идёт: у незаконченного запуска в ней лежат поимённые
+ * адреса долга (launch_info.pending[].emails) — тысячи строк на шаблон, а
+ * признаку нужны два скаляра.
+ */
+export const HE_TEMPLATE_LAUNCH_MARK_COLUMNS =
+  'id, base_id, launch_campaign_id:launch_info->>campaign_id, launch_running_until:launch_info->>running_until';
+
+/** Строка выборки HE_TEMPLATE_LAUNCH_MARK_COLUMNS (поля — как пришли из jsonb). */
+export interface HeTemplateLaunchMark {
+  id?: unknown;
+  base_id?: unknown;
+  launch_campaign_id?: unknown;
+  launch_running_until?: unknown;
+}
+
+/** У шаблона есть запуск (см. докблок HE_TEMPLATE_LAUNCH_MARK_COLUMNS). */
+export function heTemplateLaunchMarked(row: HeTemplateLaunchMark, nowMs: number = Date.now()): boolean {
+  if (typeof row.launch_campaign_id === 'string' && row.launch_campaign_id.length > 0) return true;
+  const until =
+    typeof row.launch_running_until === 'string' ? Date.parse(row.launch_running_until) : Number.NaN;
+  return Number.isFinite(until) && until > nowMs;
+}
+
+/**
+ * Машинные коды отказов шага 4b′ — тело ответа несёт их рядом с текстом
+ * (`code`), чтобы экран и скрипт различали причину не по тексту.
+ */
+export const HE_LAUNCH_REFUSAL_CODES = ['sibling_template_launched', 'research_running'] as const;
+export type HeLaunchRefusalCode = (typeof HE_LAUNCH_REFUSAL_CODES)[number];
+
+/**
+ * Две защиты аудитории us-проекта (шаг 4b′): `refusal: null` — запускать можно,
+ * код — отказ, `readError` — не прочитали (запуск не состоялся, fail-closed).
+ *
+ *  - research_running: у проекта активна research-стадия. Шаблон существует
+ *    только после кластеризации, значит это ПОВТОРНОЕ исследование, а его
+ *    кластеризация (stages/clustering.ts) удаляет he_verticals проекта — и
+ *    каскадом базы, шаблоны и записи о запуске. Кампания, созданная сейчас,
+ *    осталась бы у рассыльщика без записи: ни достройки, ни долива, ни защиты
+ *    от второго запуска по тем же людям. Защиту с другой стороны держит
+ *    research-роут кабинета: он не ставит повтор при записанном запуске.
+ *  - sibling_template_launched: у ДРУГОГО шаблона той же базы есть запуск.
+ *    Два готовых шаблона одной базы бывают (пересборка специалиста, шаблоны до
+ *    переиспользования в стадии). «Launch all (paused)» кабинета берёт один
+ *    шаблон на базу (launchableTemplates в EngStepReview.tsx), так что эту
+ *    защиту встречают второй таб, запуск специалистом и живая аренда соседа —
+ *    вторая кампания написала бы тем же людям вторую цепочку. Свой
+ *    собственный запуск этого шаблона сюда не относится — его ведёт шаг 1
+ *    (уже запущено / достройка / force).
+ *
+ * force обе защиты НЕ снимает: force — это «перезапустить ЭТОТ шаблон», а не
+ * «написать той же аудитории второй раз» и не «запустить то, что сейчас удалят».
+ *
+ * Гонку двух ОДНОВРЕМЕННЫХ первых запусков двух шаблонов одной базы (два таба)
+ * защита не закрывает: первая попытка пишет запись только после создания
+ * первой кампании, и обе могут пройти чтение до этого. «Launch all» берёт один
+ * шаблон на базу и запускает их последовательно, поэтому сам эту гонку не
+ * создаёт.
+ */
+async function heUsLaunchAudienceGuard(
+  portalDb: SupabaseClient,
+  args: { projectId: string; baseId: string; templateId: string },
+): Promise<{ refusal: HeLaunchRefusalCode | null } | { readError: unknown }> {
+  const { data: research, error: researchErr } = await portalDb
+    .from('he_jobs')
+    .select('id')
+    .eq('project_id', args.projectId)
+    .in('stage', HE_RESEARCH_STAGES)
+    .in('status', ['pending', 'running'])
+    .limit(1);
+  if (researchErr) return { readError: researchErr };
+  if ((research ?? []).length > 0) return { refusal: 'research_running' };
+
+  const { data: siblings, error: siblingsErr } = await portalDb
+    .from('he_templates')
+    .select(HE_TEMPLATE_LAUNCH_MARK_COLUMNS)
+    .eq('base_id', args.baseId)
+    .neq('id', args.templateId);
+  if (siblingsErr) return { readError: siblingsErr };
+  const now = Date.now();
+  const launched = ((siblings ?? []) as HeTemplateLaunchMark[]).some((row) => heTemplateLaunchMarked(row, now));
+  return { refusal: launched ? 'sibling_template_launched' : null };
 }
 
 /**
@@ -804,6 +952,42 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   const market: HeMarket = projectMarket(projectRow as { market?: string | null });
   // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
   const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
+
+  // 4b′. Защиты аудитории (heUsLaunchAudienceGuard): идёт повторное
+  //      исследование (оно удалит этот шаблон вместе с записью о запуске) или
+  //      у другого шаблона той же базы уже есть запуск (вторая цепочка тем же
+  //      людям). До платного классификатора (5c) и до рассыльщика (6).
+  //      Скоуп — рынок ПРОЕКТА 'us', как у гейта вердиктов: RU-проекты
+  //      ежедневного staff-инструмента запускаются как раньше (пересборка
+  //      шаблона и его запуск — привычная работа специалиста), а us-проект
+  //      защищён, кто бы ни нажал кнопку.
+  if (market === 'us') {
+    const guard = await heUsLaunchAudienceGuard(portalDb, {
+      projectId: base.project_id,
+      baseId: template.base_id,
+      templateId,
+    });
+    if ('readError' in guard) {
+      await logError(`${eventPrefix}.audience_guard_failed`, guard.readError, { userId, templateId });
+      return { status: 500, body: { error: t.launchGuardReadFailed } };
+    }
+    const refusal = guard.refusal;
+    if (refusal) {
+      await logAudit(`${eventPrefix}.refused_${refusal}`, `Launch refused: ${refusal}`, {
+        userId,
+        templateId,
+        baseId: template.base_id,
+        projectId: base.project_id,
+      });
+      return {
+        status: 409,
+        body: {
+          error: refusal === 'research_running' ? t.researchRunning : t.siblingTemplateLaunched,
+          code: refusal,
+        },
+      };
+    }
+  }
 
   const allRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
 

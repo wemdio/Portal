@@ -10,6 +10,9 @@
  *     консистентность operator_mapping (см. validateOperatorMapping);
  *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
  *  5) insert в he_templates (status 'ready', llm_model).
+ * До шага 1, без единого платного вызова: база читается только своего проекта,
+ * пустая база (row_count 0) — отказ, а готовый шаблон базы возвращается как
+ * есть (result.reused, расход 0) — см. findReusableTemplate про форс.
  * В промпты подмешиваются style_override из брифа (styleExample),
  * signature_override (дословная подпись отправителя) и winner-паттерны
  * датасета (best-effort); после генерации писем — критик-луп:
@@ -19,6 +22,7 @@
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import {
   HeBaseAnalysisSchema,
@@ -381,17 +385,103 @@ function operatorIssuesHint(issues: string[]): string {
   );
 }
 
+/** Колонки готового шаблона, которые стадия отдаёт при переиспользовании. */
+const REUSABLE_TEMPLATE_COLUMNS = 'id, fixed_block, personalization_plan, letters, created_at';
+
+interface HeReusableTemplate {
+  id: string;
+  fixed_block: string | null;
+  personalization_plan: unknown;
+  letters: unknown;
+  created_at: string;
+}
+
+/**
+ * Готовый ('ready') шаблон этой базы, который стадия обязана ВЕРНУТЬ, а не
+ * собрать заново за новые деньги. Самый свежий.
+ *
+ * Без форса — любой готовый шаблон базы: так дочейн автопилота после второго
+ * done-анализа, вторая из двух гонящихся джоб (воркер берёт их по очереди) и
+ * повтор джобы, у которой шаблон уже лёг, а done-запись — нет, не платят за
+ * письма, которые уже есть.
+ *
+ * С форсом (payload.force === true; его ставит ТОЛЬКО staff-роут «Собрать
+ * шаблон» — сознательная пересборка RU-инструмента) — только шаблон, созданный
+ * не раньше самой джобы: старые шаблоны базы форс сознательно не берёт, а свой
+ * собственный, вставленный прошлой попыткой этой же джобы (упала done-запись,
+ * рестарт пода после вставки), берёт — иначе повтор форс-джобы платил бы
+ * генерацию второй раз и оставлял базе второй готовый шаблон. Метки обе от
+ * часов БД (default now() у he_templates и he_jobs).
+ *
+ * Сбой чтения бросаем: «не знаю, есть ли шаблон» — не «шаблона нет», и платная
+ * генерация на догадке здесь ровно тот дефект, который чинится.
+ */
+async function findReusableTemplate(
+  ctx: HeStageContext,
+  job: HeJob,
+  baseId: string,
+): Promise<HeReusableTemplate | null> {
+  let query = ctx.supabase
+    .from('he_templates')
+    .select(REUSABLE_TEMPLATE_COLUMNS)
+    .eq('base_id', baseId)
+    .eq('status', 'ready');
+  if (job.payload?.force === true) {
+    // Без метки джобы «свой» шаблон от чужого не отличить — форс тогда
+    // собирает заново, как до этой правки (воркер клеймит строку целиком,
+    // created_at в ней есть всегда; ветка — страховка от неполной строки).
+    if (typeof job.created_at !== 'string' || job.created_at.length === 0) return null;
+    query = query.gte('created_at', job.created_at);
+  }
+  const { data, error } = await query.order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (error) throw new Error(`he_templates reuse read: ${error.message}`);
+  return (data as HeReusableTemplate | null) ?? null;
+}
+
 export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const baseId = payloadString(job, 'base_id');
 
+  // База — только СВОЕГО проекта: base_id приходит из payload джобы, и без
+  // скоупа джоба проекта A строила бы (и оплачивала бы проекту A) шаблон по
+  // базе проекта B.
   const { data: baseRow, error: bError } = await ctx.supabase
     .from('he_bases')
     .select('*')
     .eq('id', baseId)
+    .eq('project_id', job.project_id)
     .single();
   if (bError || !baseRow) throw new Error(`he_bases ${baseId}: ${bError?.message ?? 'not found'}`);
   const base = baseRow as HeBase;
+
+  // Пустая база — отказ ДО первого платного вызова: письма по базе без строк
+  // запускать некуда (запуск ответит «нет валидных адресов»), а план и письма
+  // уже были бы оплачены. Загрузка CSV пустой файл не принимает, поэтому у
+  // RU-инструмента сюда доходит только битая или недособранная база.
+  const rowCount = typeof base.row_count === 'number' ? base.row_count : 0;
+  if (!(rowCount > 0)) {
+    throw new Error(`he_bases ${baseId}: в базе нет строк (row_count=${rowCount}) — шаблон по пустой базе не собираем`);
+  }
+
+  const reusable = await findReusableTemplate(ctx, job, baseId);
+  if (reusable) {
+    stageLog(
+      ctx,
+      `[template] у базы уже есть готовый шаблон ${reusable.id} — возвращаем его, модель не зовём` +
+        (job.payload?.force === true ? ' (его вставила прошлая попытка этой же джобы)' : ''),
+    );
+    return {
+      result: {
+        template_id: reusable.id,
+        reused: true,
+        fixed_block: reusable.fixed_block,
+        personalization_plan: reusable.personalization_plan,
+        letters: reusable.letters,
+      },
+      tokensUsed: 0,
+      costUsd: 0,
+    };
+  }
 
   const analysisParsed = HeBaseAnalysisSchema.safeParse(base.analysis);
   if (!analysisParsed.success) {
@@ -861,9 +951,14 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     operator_mapping: operatorMapping,
   };
 
+  // fixed_block, план персонализации и письма — текст модели: один NUL или
+  // одиночный UTF-16 суррогат, и PostgREST отвергает вставку уже после всех
+  // оплаченных вызовов (план, письма, проверки, критик, рерайт) — стадия падает
+  // и на повторе покупает письма заново. Чистка трогает только эти два символа:
+  // текст без них (вся кириллица и латиница) ложится байт-в-байт тем же.
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_templates')
-    .insert({
+    .insert(stripUnstorableJsonChars({
       base_id: baseId,
       vertical_id: base.vertical_id,
       fixed_block: plan.data.fixed_block,
@@ -873,7 +968,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       llm_model: model,
       tokens_used: usage.tokensUsed,
       cost_usd: usage.costUsd,
-    })
+    }))
     .select('id')
     .single();
   if (insError || !inserted) throw new Error(`he_templates insert: ${insError?.message ?? 'unknown'}`);

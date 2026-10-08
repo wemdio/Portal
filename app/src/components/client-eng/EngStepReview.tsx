@@ -7,8 +7,10 @@
  * (GET /eng/bases/[id]/rows, первые 100 строк, компактные колонки) и статус
  * шаблона. Вверху — общий селектор пресета, ОКНО ОТПРАВКИ (пояс/часы/дни,
  * уезжает вместе с запуском) и «Launch all (paused)»: последовательный запуск
- * всех ready-шаблонов, которым есть что запускать, с прогрессом i/N; ошибка
- * одного шаблона показывается и не останавливает остальные.
+ * ready-шаблонов, которым есть что запускать, по одному на базу
+ * (launchableTemplates), со счётчиком запущенных N/M; ошибка одного шаблона
+ * показывается и не останавливает остальные — кроме отказа «идёт повторное
+ * исследование», который получил бы каждый следующий.
  *
  * «Есть что запускать» — это шаблон без записи о запуске ИЛИ шаблон, чей запуск
  * НЕ ЗАКОНЧЕН (launch_info.pending: часть аудитории осталась без кампании или
@@ -557,14 +559,22 @@ function LaunchAllPanel({
   const [presetsError, setPresetsError] = useState('');
   const [state, setState] = useState<{
     running: boolean;
-    done: number;
+    /**
+     * Сколько шаблонов ЗАПУЩЕНО (ответ 200), а не сколько обработано: строка
+     * «Launched N/M» печатает это число, и отказ в нём считаться не может.
+     */
+    launched: number;
     total: number;
     errors: string[];
-    /** Предупреждения запуска: кампания создана, но что-то требует внимания. */
+    /**
+     * Предупреждения запуска (кампания создана, но что-то требует внимания) и
+     * пропуск шаблона, у соседа которого запуск уже есть (кампания не создана,
+     * и это не сбой — см. onLaunchAll).
+     */
     notes: string[];
   }>({
     running: false,
-    done: 0,
+    launched: 0,
     total: 0,
     errors: [],
     notes: [],
@@ -602,16 +612,31 @@ function LaunchAllPanel({
     };
   }, [firstTemplateId]);
 
+  /**
+   * Отказы защиты аудитории (`res.refusal`, launchTemplate.ts, шаг 4b′) читаются
+   * по коду, и у каждого своё место:
+   *  - sibling_template_launched — у другого шаблона той же базы запуск уже есть.
+   *    Список launchable по базе уже свёрнут (launchableTemplates), поэтому сюда
+   *    это доходит, только если соседа запустили мимо этого экрана (второй таб,
+   *    менеджер) или его попытка идёт прямо сейчас (аренда без кампании
+   *    кабинету не видна). Это не сбой: кампания не создана ровно затем, чтобы
+   *    те же люди не получили вторую цепочку, — поэтому заметкой, а не ошибкой;
+   *  - research_running — у проекта идёт повторное исследование. Тот же отказ
+   *    получит КАЖДЫЙ следующий шаблон, поэтому цикл останавливается: одна
+   *    строка вместо N одинаковых и ни одного лишнего запроса.
+   */
   const onLaunchAll = async () => {
     if (state.running || !presetId || launchable.length === 0) return;
     if (!isSendingWindowUsable(windowConfig)) return;
     const errors: string[] = [];
     const notes: string[] = [];
-    setState({ running: true, done: 0, total: launchable.length, errors: [], notes: [] });
+    let launched = 0;
+    setState({ running: true, launched: 0, total: launchable.length, errors: [], notes: [] });
     // Последовательно: параллельный запуск уронил бы лимиты Instantly и
     // перемешал бы launch_info опросов.
     for (let i = 0; i < launchable.length; i++) {
       const tpl = launchable[i];
+      let stop = false;
       try {
         const res = await launchEngTemplate(tpl.id, {
           preset_id: presetId,
@@ -619,7 +644,16 @@ function LaunchAllPanel({
           // подставит английский дефолт, а не часы пресета администратора.
           ...(windowConfig ? { schedule: windowConfig.value } : {}),
         });
-        if (!res.ok) errors.push(res.error ?? `Template ${i + 1}: launch failed`);
+        if (res.refusal === 'sibling_template_launched') {
+          notes.push(res.error ?? `Template ${i + 1}: not launched`);
+        } else if (res.refusal === 'research_running') {
+          errors.push(res.error ?? `Template ${i + 1}: launch failed`);
+          stop = true;
+        } else if (!res.ok) {
+          errors.push(res.error ?? `Template ${i + 1}: launch failed`);
+        } else {
+          launched += 1;
+        }
         // Предупреждения запуска (в т.ч. «окно отправки не доехало») — не
         // ошибки: кампании созданы. Поэтому отдельным списком и другим цветом.
         for (const warning of res.warnings ?? []) notes.push(warning);
@@ -628,13 +662,14 @@ function LaunchAllPanel({
       }
       setState({
         running: true,
-        done: i + 1,
+        launched,
         total: launchable.length,
         errors: [...errors],
         notes: [...notes],
       });
+      if (stop) break;
     }
-    setState({ running: false, done: launchable.length, total: launchable.length, errors, notes });
+    setState({ running: false, launched, total: launchable.length, errors, notes });
     onChanged();
   };
 
@@ -713,7 +748,7 @@ function LaunchAllPanel({
       )}
       {state.total > 0 && (
         <div className="mt-2 text-[11px] ds-mono" style={{ color: 'var(--cp-text-m)' }}>
-          Launched {state.done}/{state.total}
+          Launched {state.launched}/{state.total}
         </div>
       )}
       {state.errors.map((err, i) => (
@@ -733,6 +768,61 @@ function LaunchAllPanel({
       )}
     </EngCard>
   );
+}
+
+/**
+ * Что запускает «Launch all (paused)» — ПО ОДНОМУ шаблону на базу.
+ *
+ * К запуску готовы ready-шаблоны без записи о запуске И те, чей запуск НЕ
+ * ЗАКОНЧЕН: в записи остались части аудитории без кампании или без адресов
+ * (launch_info.pending). Повтор их ДОСТРАИВАЕТ, а не дублирует — кампанию,
+ * которая уже приняла адреса, ядро не трогает вовсе (launchTemplate.ts, шаг
+ * 6), и force для этого не нужен. Без второй ветки частичный запуск прятал
+ * кнопку ровно тогда, когда она нужна: запись у него есть, а половина
+ * аудитории не уехала.
+ *
+ * Шаблонов у одной базы бывает несколько (пересборка, шаблоны до
+ * переиспользования в стадии), а ядро запуска us-проекта откажет шаблону, у
+ * СОСЕДА которого по базе запуск уже есть (409 sibling_template_launched,
+ * launchTemplate.ts, шаг 4b′): вторая кампания написала бы тем же людям вторую
+ * цепочку. Поэтому база решается целиком, по всем её шаблонам (статус — любой),
+ * и весь набор её форм такой:
+ *  - запуск записан у ДВУХ и более шаблонов — не берём ни одного: ядро
+ *    откажет любому из них (сосед с запуском есть у каждого);
+ *  - запуск записан у одного — берём его, если запуск не закончен и шаблон
+ *    ready (достройка); закончен — запускать по базе больше нечего;
+ *  - запусков нет — самый новый ready-шаблон базы (свежая пересборка);
+ *    ready нет — ничего.
+ * «Записан» здесь — parseLaunchInfo (кампания в записи). Аренду попытки без
+ * кампании проекция кабинету не отдаёт, и такой отказ ядра экран читает по
+ * коду (LaunchAllPanel.onLaunchAll). Порядок результата — порядок входа
+ * (деталка отдаёт шаблоны свежими первыми).
+ */
+function launchableTemplates(templates: HeTemplate[]): HeTemplate[] {
+  const byBase = new Map<string, HeTemplate[]>();
+  for (const t of templates) {
+    const list = byBase.get(t.base_id);
+    if (list) list.push(t);
+    else byBase.set(t.base_id, [t]);
+  }
+  const picked = new Set<string>();
+  for (const list of byBase.values()) {
+    const withLaunch = list.filter((t) => parseLaunchInfo((t as { launch_info?: unknown }).launch_info) !== null);
+    if (withLaunch.length > 1) continue;
+    if (withLaunch.length === 1) {
+      const only = withLaunch[0];
+      const launch = parseLaunchInfo((only as { launch_info?: unknown }).launch_info);
+      if (only.status === 'ready' && heLaunchIsIncomplete(launch)) picked.add(only.id);
+      continue;
+    }
+    let newest: HeTemplate | null = null;
+    for (const t of list) {
+      if (t.status !== 'ready') continue;
+      if (!newest || Date.parse(t.created_at) > Date.parse(newest.created_at)) newest = t;
+    }
+    if (newest) picked.add(newest.id);
+  }
+  return templates.filter((t) => picked.has(t.id));
 }
 
 /* ── Основной компонент шага ── */
@@ -766,18 +856,7 @@ export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChan
     })
     .filter((c) => c.chain || c.base || c.template);
 
-  // К запуску готовы ready-шаблоны без записи о запуске И те, чей запуск НЕ
-  // ЗАКОНЧЕН: в записи остались части аудитории без кампании или без адресов
-  // (launch_info.pending). Повтор их ДОСТРАИВАЕТ, а не дублирует — кампанию,
-  // которая уже приняла адреса, ядро не трогает вовсе (launchTemplate.ts, шаг
-  // 6), и force для этого не нужен. Без второй ветки частичный запуск прятал
-  // кнопку ровно тогда, когда она нужна: запись у него есть, а половина
-  // аудитории не уехала.
-  const launchable = templates.filter((t) => {
-    if (t.status !== 'ready') return false;
-    const launch = parseLaunchInfo((t as { launch_info?: unknown }).launch_info);
-    return !launch || heLaunchIsIncomplete(launch);
-  });
+  const launchable = launchableTemplates(templates);
 
   if (cards.length === 0) {
     return (

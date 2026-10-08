@@ -50,6 +50,8 @@
 
 import { z } from 'zod';
 
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
+
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
 import { HeSiteProfileSchema } from '../schemas';
@@ -294,8 +296,14 @@ async function refreshSiteCases(
   );
   // Дедуп по нормализованному тексту: главная и /cases часто описывают один
   // и тот же кейс — без дедупа он вставился бы дважды.
+  //
+  // Текст модели чистим ДО дедупа и вставки: один NUL или одиночный UTF-16
+  // суррогат — и PostgREST отвергает всю вставку he_cases. Порядок важен:
+  // ключ дедупа и уборки устаревших (freshKeys ниже) считается по ТОМУ ЖЕ
+  // тексту, что ляжет в строку, — иначе только что вставленный кейс читался бы
+  // «устаревшим» и удалялся. Текст без этих двух символов не меняется.
   const seen = new Set<string>();
-  const cases = llm.data.cases
+  const cases = stripUnstorableJsonChars(llm.data.cases)
     .slice(0, 8)
     .filter((c) => c.text.trim().length > 0)
     .filter((c) => {
@@ -405,9 +413,14 @@ async function patchBrief(
     .select('brief')
     .eq('id', project.id)
     .single();
+  // Патч — текст модели (site_profile) и разбор сайта: один NUL или одиночный
+  // UTF-16 суррогат, и PostgREST отвергает ВСЮ запись брифа после оплаченного
+  // профиля — стадия падает и на повторе покупает его заново. Чистим только
+  // патч: остальной бриф уже лежит в jsonb и хранимым быть обязан. Текст без
+  // этих двух символов (вся кириллица и латиница) уходит байт-в-байт тем же.
   const brief = {
     ...(((freshProject as { brief?: Record<string, unknown> } | null)?.brief) ?? project.brief ?? {}),
-    ...patch,
+    ...stripUnstorableJsonChars(patch),
   };
   const { error } = await ctx.supabase
     .from('he_projects')

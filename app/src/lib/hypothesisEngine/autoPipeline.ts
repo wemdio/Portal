@@ -5,9 +5,19 @@
  *
  * Вызывается one-shot кроном app/worker/heAutoPipelineCron.ts. Один тик:
  *   1. enabled-конфиги he_auto_pipeline_configs, проект market='us';
- *   1-. ПАУЗА ПО ЁМКОСТИ: he_auto_pipeline_configs.refill_paused_at (миграция
+ *   1--. ОДИН ОБХОД В СУТКИ: конфиг, чей last_run_at уже в сегодняшних
+ *      UTC-сутках, тик пропускает целиком ('already_ran_today',
+ *      shouldRunConfigToday) — второй за сутки запуск крона не покупает
+ *      сборки ещё раз. Обходит проверку только явный ручной прогон
+ *      (`--force` у крона → opts.force); подробности — у shouldRunConfigToday
+ *      и runForConfig. Два ОДНОВРЕМЕННЫХ запуска эта проверка не разводит
+ *      (оба читают вчерашнюю метку): вертикаль у них одна на двоих — дедуп
+ *      постановки и he_bases_one_collecting_per_vertical, — но слотов
+ *      verticals_per_run у проекта может набраться вдвое;
+ *   1-. ПАУЗА ДОБОРА: he_auto_pipeline_configs.refill_paused_at (миграция
  *      20260930_0005). Стоит — проект пропускается ЦЕЛИКОМ, до любых чтений и
- *      любых запросов к рассыльщику. Снимает её только человек кнопкой в
+ *      любых запросов к рассыльщику. Пишут её ёмкость рассыльщика и отмена
+ *      клиентом (кнопка Cancel кабинета), снимает только человек кнопкой в
  *      staff-инструменте; подробности — в блоке «ПАУЗА ПО ЁМКОСТИ» ниже;
  *   2. вертикали проекта по created_at (стабильный порядок добора);
  *   3. вертикаль eligible, когда у неё есть шаблон с launch_info.campaign_id
@@ -17,8 +27,10 @@
  *      миграция 20260930_0004 — тот же учёт, которым долив режет отправку).
  *      Ноль — сборку не получает НИ ОДНА вертикаль проекта: кап общий, а платит
  *      сборка. На ночном тике в 03:20 броней ещё нет, и проверка ничего не
- *      меняет; она про ВТОРОЙ за сутки прогон крона. Не прочиталось (нет
- *      миграции, нет прав, сбой) — работаем как раньше, обязательный fail-open;
+ *      меняет; второй за сутки прогон останавливает уже шаг 1--, а эта
+ *      проверка остаётся для ручного `--force` и для конфига, чей last_run_at
+ *      не лёг. Не прочиталось (нет миграции, нет прав, сбой) — работаем как
+ *      раньше, обязательный fail-open;
  *   3-. СУХАЯ ВЕРТИКАЛЬ: серия ночей без единого добавленного контакта читается
  *      ИЗ ЖУРНАЛА he_auto_pipeline_runs ДО постановки сборки (см. блок «СУХАЯ
  *      ВЕРТИКАЛЬ» ниже). Дошла до he_auto_pipeline_configs.dry_nights_limit —
@@ -56,9 +68,22 @@
  *      source='auto'/status='collecting' с filename «auto-refill: <вертикаль>
  *      · <дата>» и collect_info {limit, refill, campaign_id} + he_jobs
  *      base_collect с payload.refill;
+ *   4-. прямо перед постановкой пауза перечитывается: отмена клиентом, нажатая
+ *      ПОСРЕДИ тика (между чтением конфигов и постановкой проходят секунды:
+ *      журнал, шаблоны, запрос к рассыльщику), иначе получила бы сборку,
+ *      поставленную уже после её «Cancel». Стоит пауза (любая) — обход
+ *      проекта кончается. И ещё раз СРАЗУ ПОСЛЕ постановки: отмена, записанная
+ *      между этим чтением и вставкой джобы, отзывает только что поставленную
+ *      сборку (джоба 'cancelled', база 'failed' «Cancelled by user» — как у
+ *      cancel-роута); между вставкой и отзывом — миллисекунды, и воркер
+ *      такую джобу почти никогда не успевает взять (взятую обрывает его
+ *      наблюдатель отмены). Окно «отмена между чтением и вставкой» этим
+ *      закрыто, потому что cancel-роут пишет паузу РАНЬШЕ, чем отменяет джобы;
  *   5. запись he_auto_pipeline_runs 'collecting' (финал запишет refill-ветка
  *      стадии по base_id); ошибка постановки — run 'failed' с base_id NULL;
- *   6. configs.last_run_at — по завершении обхода конфига (даже пустого).
+ *   6. configs.last_run_at — по завершении обхода конфига (даже пустого), а
+ *      при падении обхода — только если сборка уже поставлена: именно эта
+ *      метка не даёт второму за сутки запуску купить ночь заново (шаг 1--).
  *
  * Дальше сборку и долив делает стадия base_collect (refill-ветка —
  * stages/baseCollectRefill.ts). Дедуп компаний при повторных сборах —
@@ -276,6 +301,22 @@ export function heVerticalDryStopEnabled(env: NodeJS.ProcessEnv = process.env): 
  * stages/baseCollectRefill.ts) на паузе не растут: обе читают только
  * ЗАВЕРШЁННЫЕ прогоны. Это осознанно — пауза наша, а не рынка, и наказывать за
  * неё вертикаль нечем.
+ *
+ * ВТОРОЙ ПОВОД ТОЙ ЖЕ ПАУЗЫ — ОТМЕНА КЛИЕНТОМ. Кнопка «Cancel all jobs»
+ * кабинета (api/client/eng/projects/[id]/cancel) пишет ТУ ЖЕ колонку
+ * refill_paused_at с причиной buildHeClientCancelPauseReason
+ * (pauseHeRefillForClientCancel ниже). Второго механизма остановки нет
+ * намеренно: тик пропускает проект тем же шагом, снимает паузу та же кнопка
+ * сотрудника. Ночной добор ведёт he_auto_pipeline_configs.enabled, а не
+ * he_projects.autopilot, поэтому без этой записи «отменить всё» не
+ * останавливало добор: следующая ночь снова покупала сборку и доливала в живую
+ * кампанию. Отличают два повода только по началу текста причины
+ * (isHeClientCancelPauseReason), и различие нужно в двух местах: тик не шлёт
+ * команде ночное напоминание «нет места у рассыльщика» про отменённый проект, а
+ * долив (stages/baseCollectRefill.ts) останавливает отправку перед
+ * провайдером только по отмене — паузу по ёмкости там проверяет сам
+ * appendLeadsToClientCampaign своим предполётом ёмкости, и остановка по ней
+ * отняла бы письма у уже оплаченной сборки, если место освободилось.
  */
 
 /**
@@ -431,7 +472,184 @@ export async function resumeHeRefillPause(
   return state.kind === 'no_config' ? 'no_config' : state.kind === 'unsupported' ? 'unsupported' : 'not_paused';
 }
 
+/**
+ * Начало текста причины паузы, которую пишет отмена клиентом. Единственный
+ * признак, по которому её отличают от паузы по ёмкости (см. «ВТОРОЙ ПОВОД ТОЙ
+ * ЖЕ ПАУЗЫ» выше); менять — только вместе с isHeClientCancelPauseReason.
+ * Текст стаффный и по-русски, как и у паузы по ёмкости. Наружу он не уходит:
+ * дашборд-роут кабинета читает refill_pause_reason только на сервере, чтобы
+ * отличить отмену ('stopped') от паузы по ёмкости ('paused'), и клиенту
+ * отдаёт одно это состояние.
+ */
+export const HE_CLIENT_CANCEL_PAUSE_NOTE = 'Клиент отменил проект кнопкой «Cancel all jobs» в ENG-кабинете';
+
+/** Текст причины паузы, записанной отменой клиентом, — для сотрудника. */
+export function buildHeClientCancelPauseReason(): string {
+  return (
+    `${HE_CLIENT_CANCEL_PAUSE_NOTE}: автопилот выключен, ночной добор остановлен до явного ` +
+    'возобновления сотрудником. Возобновлять — только если клиент сам попросил продолжить.'
+  );
+}
+
+/** Пауза записана отменой клиентом (а не ёмкостью рассыльщика). */
+export function isHeClientCancelPauseReason(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && reason.startsWith(HE_CLIENT_CANCEL_PAUSE_NOTE);
+}
+
+/**
+ * Исход записи паузы отменой клиентом — ВЕСЬ набор:
+ *  - 'paused' — паузы не было, этот вызов её поставил;
+ *  - 'already_paused' — пауза уже стоит и записана отменой (повторное нажатие);
+ *  - 'reason_amended' — пауза стоит по ёмкости: штамп оставлен прежним, а в
+ *    причину дописана отмена ПЕРВОЙ строкой (см. ниже, зачем);
+ *  - 'no_config' — конфига ночного добора у проекта нет: останавливать нечего;
+ *  - 'unsupported' — колонок паузы нет (миграция 20260930_0005 не прокатана);
+ *  - 'failed' — сбой БД: паузы нет.
+ */
+export type HeClientCancelPauseOutcome =
+  | 'paused'
+  | 'already_paused'
+  | 'reason_amended'
+  | 'no_config'
+  | 'unsupported'
+  | 'failed';
+
+/**
+ * Остановить ночной добор проекта, который клиент отменил, — той же паузой,
+ * что и у ёмкости. НИКОГДА НЕ БРОСАЕТ: отмена не должна отказывать из-за
+ * необязательной таблицы, а ни один исход ниже не хуже прежнего поведения
+ * (без паузы добор шёл и раньше).
+ *
+ * ПАУЗА ПО ЁМКОСТИ УЖЕ СТОИТ — причину ДОПИСЫВАЕМ, штамп не трогаем. Сотрудник
+ * снимает паузу, когда освободил место, и читает причину в карточке проекта;
+ * если в ней только «нет места», он вернёт в добор проект, который клиент
+ * отменил, и следующая ночь купит ему сборку. Штамп остаётся прежним по той же
+ * причине, что и у pauseHeAutoPipelineRefill: он отвечает на вопрос «сколько
+ * ночей проект стоит». Запись идёт с CAS по этому штампу: возобновление,
+ * успевшее между чтением и записью, её не получит (вернётся 'failed', и
+ * повторное нажатие поставит паузу заново).
+ */
+export async function pauseHeRefillForClientCancel(
+  supabase: SupabaseClient,
+  projectId: string,
+  opts: { now?: Date } = {},
+): Promise<HeClientCancelPauseOutcome> {
+  const reason = buildHeClientCancelPauseReason();
+  if (await pauseHeAutoPipelineRefill(supabase, projectId, reason, opts)) return 'paused';
+  try {
+    const state = await readHeRefillPause(supabase, projectId);
+    if (state.kind === 'unsupported') return 'unsupported';
+    if (state.kind === 'no_config') return 'no_config';
+    // Паузы нет, а условная запись не легла — запись отказала.
+    if (state.kind === 'running') return 'failed';
+    if (isHeClientCancelPauseReason(state.reason)) return 'already_paused';
+    const now = (opts.now ?? new Date()).toISOString();
+    const { data, error } = await supabase
+      .from('he_auto_pipeline_configs')
+      .update({
+        refill_pause_reason: `${reason} Прежняя причина паузы: ${state.reason ?? 'не записана'}`,
+        updated_at: now,
+      })
+      .eq('project_id', projectId)
+      .eq('refill_paused_at', state.pausedAt)
+      .select('id');
+    if (error) return 'failed';
+    return (data ?? []).length > 0 ? 'reason_amended' : 'failed';
+  } catch {
+    return 'failed';
+  }
+}
+
+/**
+ * Пауза проекта ПРЯМО СЕЙЧАС — для тика, который перечитывает её у самой
+ * постановки сборки (шаг 4- в шапке). null — паузы нет ЛИБО прочитать не
+ * удалось: тот же обязательный fail-open, что у loadConfigs (пауза,
+ * померещившаяся на сбое чтения, усыпила бы продукт). Отправку после отмены
+ * держит не это чтение, а проверка владения перед провайдером в доливе
+ * (stages/baseCollectRefill.ts), и она уже fail-closed.
+ */
+async function readRefillPauseNow(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<{ pausedAt: string; reason: string | null } | null> {
+  try {
+    const state = await readHeRefillPause(supabase, projectId);
+    return state.kind === 'active' ? { pausedAt: state.pausedAt, reason: state.reason } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Текст he_bases.error у базы, остановленной отменой клиентом. Тот же, что
+ * пишет cancel-роут кабинета (CANCELLED_BY_USER) и долив
+ * (REFILL_CANCELLED_ERROR): кабинет сверяет его полным совпадением.
+ */
+const HE_CLIENT_CANCELLED_BASE_ERROR = 'Cancelled by user';
+
+/**
+ * Отозвать refill-сборку, которую тик поставил уже ПОСЛЕ отмены клиентом
+ * (шаг 4- в шапке): джоба → 'cancelled', база → 'failed' «Cancelled by user» —
+ * ровно те статусы и тот же текст, что пишет cancel-роут кабинета, чтобы
+ * кабинет показал отмену, а воркер джобу не взял (она уже не 'pending'). Если
+ * он успел взять её в миллисекунды после вставки, стадию обрывает его
+ * наблюдатель отмены (до 3 с), а повтор упадёт на start-guard
+ * (`status !== 'collecting'`). База — с CAS по 'collecting': успевшую уйти
+ * дальше не перетираем.
+ *
+ * Возвращает false, если хоть одна запись не легла. Тогда джоба может
+ * исполниться и оплатить сборку, но отправить ничего не сможет: проверка
+ * владения перед провайдером в доливе видит паузу отмены.
+ */
+async function withdrawRefillAfterClientCancel(
+  supabase: SupabaseClient,
+  input: { projectId: string; baseId: string; now: Date },
+): Promise<boolean> {
+  const at = input.now.toISOString();
+  try {
+    const { error: jobErr } = await supabase
+      .from('he_jobs')
+      .update({ status: 'cancelled', finished_at: at, updated_at: at })
+      .eq('project_id', input.projectId)
+      .eq('stage', 'base_collect')
+      .in('status', ['pending', 'running'])
+      .eq('payload->>base_id', input.baseId);
+    const { error: baseErr } = await supabase
+      .from('he_bases')
+      .update({ status: 'failed', error: HE_CLIENT_CANCELLED_BASE_ERROR, updated_at: at })
+      .eq('id', input.baseId)
+      .eq('status', 'collecting');
+    return !jobErr && !baseErr;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Обходить ли конфиг в этот запуск крона: ОДИН ОБХОД НА UTC-СУТКИ.
+ *
+ * Чистая функция. `lastRunAt` — he_auto_pipeline_configs.last_run_at, которую
+ * тик пишет в конце каждого обхода конфига (и в конце упавшего обхода, если
+ * сборка уже поставлена, — см. runForConfig). Набор входов целиком:
+ *  - null / пусто / не разбирается как время → обходить (конфиг ещё не
+ *    обходили либо метка нечитаема; из двух ошибок эта — потерянная ночь
+ *    против одного лишнего обхода — выбрана в сторону прежнего поведения);
+ *  - UTC-день метки раньше сегодняшнего → обходить;
+ *  - тот же UTC-день → НЕ обходить: ночь уже куплена;
+ *  - метка из будущего (часы разъехались) → НЕ обходить: её UTC-день не
+ *    раньше сегодняшнего, а лишний обход стоит сборок.
+ * Граница — полночь UTC: 23:59:59.999 и 00:00:00.000 — разные сутки.
+ */
+export function shouldRunConfigToday(lastRunAt: string | null | undefined, now: Date): boolean {
+  if (typeof lastRunAt !== 'string' || lastRunAt.trim() === '') return true;
+  const lastMs = Date.parse(lastRunAt);
+  if (!Number.isFinite(lastMs)) return true;
+  const todayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return lastMs < todayStartMs;
+}
+
 export type HeAutoPipelineDetailStatus =
+  | 'already_ran_today'
   | 'enqueued'
   | 'existing'
   | 'no_campaign'
@@ -475,6 +693,12 @@ export interface HeAutoPipelineTickDetail {
 export interface HeAutoPipelineTickSummary {
   /** Enabled-конфиги us-проектов, обработанные за тик. */
   configs: number;
+  /**
+   * Конфигов, которые этот запуск НЕ обходил: их last_run_at уже в сегодняшних
+   * UTC-сутках (shouldRunConfigToday). Не failed: ночь уже куплена первым
+   * запуском, второй за сутки ничего не ставит. Ноль всегда при `force`.
+   */
+  alreadyRan: number;
   enqueued: number;
   /** Вертикаль уже собирается (дедуп enqueueHeBaseCollect) — слот не расходуется. */
   existing: number;
@@ -495,8 +719,9 @@ export interface HeAutoPipelineTickSummary {
    *
    * НЕ failed и не capacityBlocked: это намеренная экономия (платит сборка, а
    * бюджет всё равно не даст отправить). На обычном ночном тике счётчик
-   * нулевой — в 03:20 броней ещё нет; он бьёт по ВТОРОМУ за сутки прогону
-   * крона, ради которого и написан.
+   * нулевой — в 03:20 броней ещё нет. Второй за сутки запуск крона конфиг не
+   * обходит вовсе (alreadyRan), поэтому сюда доходят только ручной `--force` и
+   * конфиг, чья метка last_run_at не легла.
    */
   budgetExhausted: number;
   /**
@@ -533,6 +758,12 @@ interface ConfigRow {
   id: string;
   project_id: string;
   verticals_per_run: number | null;
+  /**
+   * Конец прошлого обхода конфига (пишет touchLastRun). Читает его
+   * shouldRunConfigToday: второй за UTC-сутки запуск крона конфиг не обходит.
+   * null — не обходили ни разу либо значение нечитаемо.
+   */
+  last_run_at: string | null;
   /** Дневной кап лидов проекта; null — значение нечитаемо. */
   daily_leads_cap: number | null;
   /** null — колонки ещё нет (миграция не прокатана) либо значение нечитаемо. */
@@ -868,9 +1099,12 @@ export async function resumeHeVerticalNightlyRefill(
  * SMTP-проба каждого адреса), а бюджет режет уже ОТПРАВКУ: поставить сборку
  * проекту, чей день выбран, значит заплатить за компании, строки которых
  * бюджет выбросит, и выжечь эти компании из будущих сборок. На обычном ночном
- * тике этого не бывает — в 03:20 броней нет, — но второй за сутки прогон крона
- * (ручной перезапуск, повтор после сбоя) без этой проверки покупает ночь
- * заново.
+ * тике этого не бывает — в 03:20 броней нет. Второй за сутки прогон крона
+ * останавливает раньше правило суток (shouldRunConfigToday); эта проверка
+ * остаётся для ручного `--force` и для конфига, чья метка last_run_at не
+ * легла. Она закрывает только день, который брони УЖЕ выбрали целиком: ночь,
+ * отправившая меньше капа (или вовсе не дошедшая до брони — 'no_new', отказ
+ * до долива), оставляет остаток, и по нему сборки покупаются снова.
  *
  * `null` — «не знаем, считаем что бюджет цел», и это ЕДИНСТВЕННОЕ значение для
  * всех неопределённостей: миграции нет, прав нет, сбой чтения, а также штатное
@@ -1033,9 +1267,9 @@ async function insertRun(
  * собирает, а снятие паузы не должно включать добор тому, кто выключил его сам.
  */
 async function loadConfigs(supabase: SupabaseClient): Promise<ConfigRow[]> {
-  // daily_leads_cap — колонка той же миграции, что и сама таблица
-  // (20260804_0005), поэтому в обязательной части выборки.
-  const base = 'id, project_id, verticals_per_run, daily_leads_cap';
+  // daily_leads_cap и last_run_at — колонки той же миграции, что и сама
+  // таблица (20260804_0005), поэтому в обязательной части выборки.
+  const base = 'id, project_id, verticals_per_run, daily_leads_cap, last_run_at';
   let rows: Array<Record<string, unknown>>;
   const first = await supabase
     .from('he_auto_pipeline_configs')
@@ -1055,6 +1289,7 @@ async function loadConfigs(supabase: SupabaseClient): Promise<ConfigRow[]> {
     id: asString(row.id),
     project_id: asString(row.project_id),
     verticals_per_run: asNumberOrNull(row.verticals_per_run),
+    last_run_at: asStringOrNull(row.last_run_at),
     daily_leads_cap: asNumberOrNull(row.daily_leads_cap),
     dry_nights_limit: asNumberOrNull(row.dry_nights_limit),
     refill_paused_at: asStringOrNull(row.refill_paused_at),
@@ -1062,30 +1297,81 @@ async function loadConfigs(supabase: SupabaseClient): Promise<ConfigRow[]> {
   }));
 }
 
+/**
+ * «Тик этот конфиг обошёл»: he_auto_pipeline_configs.last_run_at. Одно
+ * определение на все выходы обхода — обычный, ранний (пауза) и упавший после
+ * постановки (runForConfig): под паузой добор не идёт, но обход СОСТОЯЛСЯ, и
+ * last_run_at, застывший на дате паузы, читался бы как сломавшийся крон.
+ * Читатель метки — shouldRunConfigToday: второй за сутки запуск крона конфиг
+ * не обходит.
+ */
+async function touchConfigLastRun(supabase: SupabaseClient, configId: string, now: Date): Promise<void> {
+  const { error } = await supabase
+    .from('he_auto_pipeline_configs')
+    .update({ last_run_at: now.toISOString(), updated_at: now.toISOString() })
+    .eq('id', configId);
+  if (error) throw new Error(`he_auto_pipeline_configs last_run_at: ${error.message}`);
+}
+
+/**
+ * Обход одного конфига: ОДИН РАЗ НА UTC-СУТКИ (шаг 1-- в шапке), затем
+ * passConfig.
+ *
+ * ЧТО ДЕРЖИТ СУТКИ. Сам обход пишет last_run_at последним шагом. Упал он
+ * посреди — метка пишется, только если этот обход УЖЕ поставил хотя бы одну
+ * сборку (`paid.enqueued`): иначе второй запуск крона в те же сутки обошёл бы
+ * конфиг заново и купил сборки остальным вертикалям проекта (поставленные
+ * вертикали дедуп постановки вернёт 'existing', и слот verticals_per_run они не
+ * едят — поэтому и нужны сутки, а не дедуп). Упавший обход, который не
+ * поставил ничего, ничего и не оплатил — его повтор в те же сутки и есть
+ * починка, метку он не получает.
+ *
+ * `force` — ручной прогон (`--force` у крона): проверку суток обходит, всё
+ * остальное (пауза, дневной бюджет по броням, дедуп постановки) действует.
+ */
 async function runForConfig(
   supabase: SupabaseClient,
   config: ConfigRow,
   now: Date,
   summary: HeAutoPipelineTickSummary,
   capacityProbe: HeWorkspaceCapacityProbe,
+  opts: { force: boolean },
+): Promise<void> {
+  if (!opts.force && !shouldRunConfigToday(config.last_run_at, now)) {
+    summary.alreadyRan += 1;
+    summary.details.push({
+      configId: config.id,
+      projectId: config.project_id,
+      status: 'already_ran_today',
+      message: `last pass at ${config.last_run_at} — one pass per UTC day, rerun with --force`,
+    });
+    return;
+  }
+  const paid = { enqueued: 0 };
+  try {
+    await passConfig(supabase, config, now, summary, capacityProbe, paid);
+  } catch (e) {
+    if (paid.enqueued > 0) {
+      // Best-effort: исходная ошибка важнее, её и бросаем дальше.
+      await touchConfigLastRun(supabase, config.id, now).catch(() => undefined);
+    }
+    throw e;
+  }
+}
+
+async function passConfig(
+  supabase: SupabaseClient,
+  config: ConfigRow,
+  now: Date,
+  summary: HeAutoPipelineTickSummary,
+  capacityProbe: HeWorkspaceCapacityProbe,
+  /** Сколько НОВЫХ сборок этот обход уже поставил — читает runForConfig. */
+  paid: { enqueued: number },
 ): Promise<void> {
   const detail = (d: Omit<HeAutoPipelineTickDetail, 'configId' | 'projectId'>) => {
     summary.details.push({ configId: config.id, projectId: config.project_id, ...d });
   };
-
-  /**
-   * «Тик этот конфиг обошёл». Одно определение на оба выхода из функции —
-   * обычный и ранний (пауза по ёмкости): под паузой добор не идёт, но обход
-   * СОСТОЯЛСЯ, и last_run_at, застывший на дате паузы, читался бы как
-   * сломавшийся крон.
-   */
-  const touchLastRun = async () => {
-    const { error } = await supabase
-      .from('he_auto_pipeline_configs')
-      .update({ last_run_at: now.toISOString(), updated_at: now.toISOString() })
-      .eq('id', config.id);
-    if (error) throw new Error(`he_auto_pipeline_configs last_run_at: ${error.message}`);
-  };
+  const touchLastRun = () => touchConfigLastRun(supabase, config.id, now);
 
   const dryStopEnabled = heVerticalDryStopEnabled();
 
@@ -1111,9 +1397,11 @@ async function runForConfig(
       .not('refill_dry_since', 'is', null);
   }
 
-  // ─── ПАУЗА ПО ЁМКОСТИ (раньше всех решений: до чтения вертикалей и
+  // ─── ПАУЗА ДОБОРА (раньше всех решений: до чтения вертикалей и
   //     шаблонов, до бюджета, до рассыльщика, до денег) ───
-  // Решение принято в прошлую ночь и записано в конфиге; перепроверять его
+  // Повода два — ёмкость рассыльщика и отмена клиентом (блок «ПАУЗА ПО
+  // ЁМКОСТИ», «ВТОРОЙ ПОВОД ТОЙ ЖЕ ПАУЗЫ»), решение по ним одно.
+  // Решение принято раньше и записано в конфиге; перепроверять его
   // сегодняшним запросом к рассыльщику нельзя — ровно этот «автоматический
   // пересмотр» и превратил бы паузу обратно в пропуск одной ночи. Снимает её
   // только сотрудник (resumeHeRefillPause, staff-роут refill-pause).
@@ -1130,21 +1418,26 @@ async function runForConfig(
     });
     // Напоминание команде — раз за ночь, пока пауза стоит: клиент всё это
     // время читает «команда уже работает», а у паузы нет автоснятия. Тик
-    // одноразовый и бывает раз в сутки, поэтому «раз за тик» и есть «раз за
-    // ночь»; проекты одной ночи opsAlert сворачивает в одно сообщение-список,
-    // а отправку списка обеспечивает flushHeOpsAlerts в конце тика.
-    await notifyHeClientStop({
-      projectId: config.project_id,
-      // Тик берёт только market='us' (runHeAutoPipelineTick).
-      market: 'us',
-      stage: 'refill_paused',
-      kind: 'capacity_pause',
-      provider: 'sending',
-      reason:
-        `пауза стоит с ${config.refill_paused_at}` +
-        (config.refill_pause_reason ? `; ${config.refill_pause_reason}` : ''),
-      pauseRecorded: false,
-    });
+    // одноразовый и обходит конфиг раз в сутки (shouldRunConfigToday), поэтому
+    // «раз за обход» и есть «раз за ночь»; проекты одной ночи opsAlert
+    // сворачивает в одно сообщение-список, а отправку списка обеспечивает
+    // flushHeOpsAlerts в конце тика. Паузе, записанной ОТМЕНОЙ клиентом,
+    // напоминания нет: это не «нет места у рассыльщика», и чинить команде
+    // нечего — сотрудник видит её причину в карточке проекта.
+    if (!isHeClientCancelPauseReason(config.refill_pause_reason)) {
+      await notifyHeClientStop({
+        projectId: config.project_id,
+        // Тик берёт только market='us' (runHeAutoPipelineTick).
+        market: 'us',
+        stage: 'refill_paused',
+        kind: 'capacity_pause',
+        provider: 'sending',
+        reason:
+          `пауза стоит с ${config.refill_paused_at}` +
+          (config.refill_pause_reason ? `; ${config.refill_pause_reason}` : ''),
+        pauseRecorded: false,
+      });
+    }
     // Что именно произошло, объясняют строка ночного лога и сама пометка со
     // штампом; last_run_at при этом двигается как у любого обойдённого конфига.
     await touchLastRun();
@@ -1379,6 +1672,27 @@ async function runForConfig(
       break;
     }
 
+    // ─── ПАУЗА У САМОЙ ПОСТАНОВКИ (шаг 4- в шапке) ───
+    // Конфиг прочитан в начале тика, а до этой строки проходят секунды
+    // (журнал, шаблоны, запрос к рассыльщику). Отмена клиентом, нажатая в это
+    // окно, иначе получила бы сборку, поставленную уже после её «Cancel»; то
+    // же — пауза по ёмкости, записанной доливом соседней вертикали проекта.
+    // Пропуск строки журнала не пишет — та же причина, что у паузы в начале
+    // обхода.
+    const pauseBefore = await readRefillPauseNow(supabase, config.project_id);
+    if (pauseBefore) {
+      summary.paused += 1;
+      detail({
+        verticalId: vertical.id,
+        status: 'paused',
+        ...dryNightsDetail,
+        message:
+          `nightly refill paused during this pass (since ${pauseBefore.pausedAt})` +
+          (pauseBefore.reason ? ` — ${pauseBefore.reason}` : ''),
+      });
+      break;
+    }
+
     const result = await enqueueHeBaseCollect(supabase, {
       verticalId: vertical.id,
       projectId: config.project_id,
@@ -1414,11 +1728,43 @@ async function runForConfig(
       continue;
     }
 
+    const baseId = asString(result.base.id);
+    // ─── ОТМЕНА, ЗАПИСАННАЯ МЕЖДУ ЧТЕНИЕМ ПАУЗЫ И ПОСТАНОВКОЙ ───
+    // Последнее окно: cancel-роут пишет паузу ДО отмены джоб, поэтому джоба,
+    // вставленная после его отмены джоб, здесь уже видит паузу — и отзывается
+    // теми же статусами, что пишет роут (см. withdrawRefillAfterClientCancel).
+    // Только пауза отмены: пауза по ёмкости — забота предполёта ёмкости
+    // самого долива (appendLeadsToClientCampaign), и отзывать по ней уже
+    // поставленную сборку этот тик не берётся.
+    const pauseAfter = await readRefillPauseNow(supabase, config.project_id);
+    if (pauseAfter && isHeClientCancelPauseReason(pauseAfter.reason)) {
+      const withdrawn = await withdrawRefillAfterClientCancel(supabase, {
+        projectId: config.project_id,
+        baseId,
+        now,
+      });
+      summary.paused += 1;
+      // Не отозвалась — джоба может исполниться и оплатить сборку: для
+      // правила суток это поставленная сборка (runForConfig).
+      if (!withdrawn) paid.enqueued += 1;
+      detail({
+        verticalId: vertical.id,
+        baseId,
+        status: 'paused',
+        ...dryNightsDetail,
+        message: withdrawn
+          ? 'client cancelled during this pass — the just-enqueued refill was withdrawn before it ran'
+          : 'client cancelled during this pass — withdrawing the just-enqueued refill FAILED; ' +
+            'its send is stopped by the refill ownership check',
+      });
+      break;
+    }
+
     enqueued += 1;
+    paid.enqueued += 1;
     summary.enqueued += 1;
     // Ночь встала — её очередь (если есть) уйдёт этой ночью и закрывает день.
     carryRunning += carryQueueOf.get(vertical.id) ?? 0;
-    const baseId = asString(result.base.id);
     await insertRun(supabase, {
       config_id: config.id,
       project_id: config.project_id,
@@ -1441,7 +1787,9 @@ async function runForConfig(
     });
   }
 
-  // Тик по конфигу отработал (даже без новых постановок) — фиксируем.
+  // Тик по конфигу отработал (даже без новых постановок и под паузой,
+  // замеченной посреди обхода, — тот же исход, что пауза в его начале) —
+  // фиксируем.
   await touchLastRun();
 }
 
@@ -1449,14 +1797,19 @@ async function runForConfig(
  * Один тик ENG auto-pipeline. Ошибки чтения конфигов/проектов — фатальны
  * (бросок, крон выйдет с кодом 1); ошибки обхода отдельного конфига изолированы
  * (summary.failed + detail), остальные конфиги продолжаются.
+ *
+ * `force` — ручной прогон (`--force` у крона): обходит конфиги, уже обойдённые
+ * в эти UTC-сутки (shouldRunConfigToday). По умолчанию выключен.
  */
 export async function runHeAutoPipelineTick(
   supabase: SupabaseClient,
-  opts: { now?: Date } = {},
+  opts: { now?: Date; force?: boolean } = {},
 ): Promise<HeAutoPipelineTickSummary> {
   const now = opts.now ?? new Date();
+  const force = opts.force === true;
   const summary: HeAutoPipelineTickSummary = {
     configs: 0,
+    alreadyRan: 0,
     enqueued: 0,
     existing: 0,
     noCampaign: 0,
@@ -1494,7 +1847,7 @@ export async function runHeAutoPipelineTick(
   try {
     for (const config of eligible) {
       try {
-        await runForConfig(supabase, config, now, summary, capacityProbe);
+        await runForConfig(supabase, config, now, summary, capacityProbe, { force });
       } catch (e) {
         summary.failed += 1;
         summary.details.push({

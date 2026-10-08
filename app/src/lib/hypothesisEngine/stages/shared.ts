@@ -9,6 +9,8 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+import { sliceWholeChars } from '@/lib/jsonbSafe';
+
 import type { HeMarket } from '../market';
 import type { HeJob, HeProject, HeStage } from '../types';
 
@@ -86,9 +88,19 @@ export function stageLog(ctx: HeStageContext, msg: string): void {
   ctx.log?.(msg);
 }
 
+/**
+ * Обрезать текст до max символов с многоточием — по ЦЕЛЫМ символам
+ * (sliceWholeChars из lib/jsonbSafe.ts): простой slice резал эмодзи на краю
+ * пополам и оставлял одиночный UTF-16 суррогат, а такой текст PostgREST
+ * отвергает вместе со всей записью. Выдержки отсюда уходят в промпты и дальше
+ * в записи: site_excerpt конкурента — в he_jobs.result, выдержка источника
+ * evidence — в цитаты he_hypotheses.evidence (цитата проверяется как подстрока
+ * выдержки). Текст без суррогатных пар на границе — вся кириллица и латиница —
+ * режется байт-в-байт как раньше.
+ */
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max).trimEnd() + '…';
+  return sliceWholeChars(text, 0, max).trimEnd() + '…';
 }
 
 /** Прочитать проект или упасть с понятной ошибкой (стадия → job failed). */

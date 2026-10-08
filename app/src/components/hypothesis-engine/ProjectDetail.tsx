@@ -67,6 +67,22 @@ interface HeRefillPauseResponse {
   error?: string;
 }
 
+/**
+ * Начало причины паузы, которую пишет отмена проекта клиентом в ENG-кабинете, —
+ * ТОТ ЖЕ текст, что HE_CLIENT_CANCEL_PAUSE_NOTE (lib/hypothesisEngine/autoPipeline.ts),
+ * по которому ночной тик и долив отличают отмену от паузы по ёмкости
+ * (isHeClientCancelPauseReason). Импортировать константу сюда нельзя: это
+ * клиентский компонент, а autoPipeline тянет серверные модули (server-only).
+ * Поэтому копия, и держится она в одном тексте с оригиналом ВРУЧНУЮ —
+ * автоматической сверки нет. Разойдутся — карточка просто вернётся к тексту
+ * паузы по ёмкости (как до отмены клиентом), а не сломается.
+ */
+const HE_CLIENT_CANCEL_PAUSE_NOTE_COPY = 'Клиент отменил проект кнопкой «Cancel all jobs» в ENG-кабинете';
+
+function isClientCancelRefillPause(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && reason.startsWith(HE_CLIENT_CANCEL_PAUSE_NOTE_COPY);
+}
+
 export interface BaseUploadPayload {
   vertical_id: string;
   filename: string;
@@ -348,10 +364,15 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
    */
   const resumeRefill = useCallback(async () => {
     if (refillResuming) return;
+    // Условие возврата зависит от повода паузы: у ёмкости — освободившееся
+    // место, у отмены клиентом — его просьба продолжить.
+    const clientCancelled = isClientCancelRefillPause(refillPause?.reason);
     if (
       !window.confirm(
         'Вернуть проект в ночной добор? Ближайшая ночь снова оплатит сборку контактов. ' +
-          'Делайте это только после того, как в воркспейсе рассыльщика освободилось место.',
+          (clientCancelled
+            ? 'Клиент отменил этот проект сам — возвращайте, только если он попросил продолжить.'
+            : 'Делайте это только после того, как в воркспейсе рассыльщика освободилось место.'),
       )
     ) {
       return;
@@ -371,7 +392,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     } finally {
       setRefillResuming(false);
     }
-  }, [refillResuming, projectId, loadRefillPause]);
+  }, [refillResuming, refillPause?.reason, projectId, loadRefillPause]);
 
   const runChain = useCallback(
     async (verticalId: string, language: string) => {
@@ -692,11 +713,17 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
         ) : null}
       </div>
 
-      {/* Ночной добор остановлен переполненным воркспейсом рассыльщика.
-          Вернуть его может только человек — автоснятия по таймеру нет, иначе
-          добор пошёл бы в тот же полный воркспейс. Блок показывается ТОЛЬКО
-          на паузе: у проектов без ночного добора (все RU) ответ роута
-          configured=false, и здесь не появляется ничего. */}
+      {/* Ночной добор остановлен: переполненным воркспейсом рассыльщика либо
+          отменой проекта клиентом в ENG-кабинете (та же колонка паузы, повод —
+          по началу причины, isClientCancelRefillPause). Вернуть его может только
+          человек — автоснятия по таймеру нет, иначе добор пошёл бы в тот же
+          полный воркспейс или в проект, который клиент остановил. Блок
+          показывается ТОЛЬКО на паузе: у проектов без ночного добора (все RU)
+          ответ роута configured=false, и здесь не появляется ничего.
+          У отмены клиентом совета про место нет (место ни при чём), и нет
+          «пауза вернулась»: отмена ставится нажатием клиента, а не тем, что
+          место снова кончилось. Если отмена легла поверх паузы по ёмкости,
+          прежняя причина дописана в сам текст причины выше. */}
       {refillPause?.paused ? (
         <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -707,16 +734,24 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
               <p className="mt-1 text-xs text-amber-900">
                 {refillPause.reason ?? 'В воркспейсе рассыльщика кончилось место под контакты.'}
               </p>
-              <p className="mt-1 text-[11px] text-amber-700">
-                с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
-                вертикали проекта. Сначала освободите место в воркспейсе — иначе следующая
-                ночь снова оплатит сборку, которую некуда отправить.
-                {/* Прошлое возобновление показываем именно здесь: пауза, вернувшаяся
-                    после него, и есть признак, что место тогда не освободили. */}
-                {refillPause.resumed_at
-                  ? ` Прошлый раз возобновляли ${formatDate(refillPause.resumed_at)} — пауза вернулась.`
-                  : ''}
-              </p>
+              {isClientCancelRefillPause(refillPause.reason) ? (
+                <p className="mt-1 text-[11px] text-amber-700">
+                  с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
+                  вертикали проекта. Клиент сам отменил проект в ENG-кабинете — возобновляйте ночной
+                  добор только по его просьбе.
+                </p>
+              ) : (
+                <p className="mt-1 text-[11px] text-amber-700">
+                  с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
+                  вертикали проекта. Сначала освободите место в воркспейсе — иначе следующая
+                  ночь снова оплатит сборку, которую некуда отправить.
+                  {/* Прошлое возобновление показываем именно здесь: пауза, вернувшаяся
+                      после него, и есть признак, что место тогда не освободили. */}
+                  {refillPause.resumed_at
+                    ? ` Прошлый раз возобновляли ${formatDate(refillPause.resumed_at)} — пауза вернулась.`
+                    : ''}
+                </p>
+              )}
             </div>
             <button
               type="button"

@@ -8,7 +8,10 @@
  *
  * Работает ТОЛЬКО при he_projects.autopilot=true (флаг ставит
  * POST /api/client/eng/projects/[id]/autopilot): ручной RU-режим
- * (autopilot=false) здесь никогда ничего не ставит.
+ * (autopilot=false) здесь никогда ничего не ставит. Флаг читается дважды: на
+ * входе и ещё раз прямо перед каждой платной постановкой
+ * (isHeAutopilotStillOn) — отмена клиентом пишет autopilot=false и могла лечь
+ * между этими чтениями.
  *
  * Правила:
  *  - chain done        → сборка базы вертикали (enqueueHeBaseCollect, лимит
@@ -31,8 +34,12 @@
  *                        'analyzing' и ставит base_analyze — это звено
  *                        конвейера уже автоматично;
  *  - base_analyze done → генерация 85/15 шаблона (he_jobs stage='template',
- *                        дедуп активных template-джоб этой базы), база обязана
- *                        быть 'analyzed', и бюджет поколения анализа должен
+ *                        дедуп активных template-джоб этой базы, гонку держит
+ *                        he_jobs_one_active_template_per_base), база обязана
+ *                        быть 'analyzed', шаблона у неё ещё быть не должно
+ *                        (есть — 'skipped:template_ready', как у реконсилера:
+ *                        второй анализ базы — не повод платить за письма,
+ *                        которые уже есть), и бюджет поколения анализа должен
  *                        быть не исчерпан (heTemplateGenerationBudget);
  *  - всё остальное     → no-op.
  *
@@ -86,6 +93,47 @@ export class HeAutopilotReadError extends Error {
 /** Сбой ЧТЕНИЯ (а не решения и не записи) — по классу, не по тексту. */
 export function isHeAutopilotReadError(err: unknown): err is HeAutopilotReadError {
   return err instanceof HeAutopilotReadError;
+}
+
+/* ───────────── Автопилот всё ещё включён? ───────────── */
+
+/**
+ * he_projects.autopilot всё ещё true — перечитывается ПРЯМО ПЕРЕД каждой
+ * платной постановкой автопилота: в дочейне ниже (сборка, ремонт анализа,
+ * письма) и в реконсилере (autopilotReconcile.ts: цепочка, ремонт анализа,
+ * сборка, письма).
+ *
+ * Зачем второе чтение, если флаг уже прочитан на входе. Между тем чтением и
+ * вставкой — несколько запросов (вертикаль, гипотезы, базы, живые джобы,
+ * бюджет писем), а отмена клиентом (api/client/eng/projects/[id]/cancel)
+ * пишет autopilot=false ПЕРВОЙ записью и только потом гасит стоящие джобы.
+ * Постановка, прочитавшая флаг до отмены и вставившая джобу уже после того, как
+ * роут погасил стоящие, оплачивала стадию на отменённом проекте. Остаток —
+ * миллисекунды между ЭТИМ чтением и вставкой: чтение должно лечь раньше записи
+ * флага роутом, а вставка — позже его записи джоб (вставку, легшую раньше, роут
+ * гасит сам).
+ *
+ * Пауза ночного добора (refill_paused_at) здесь НЕ читается: добор — отдельный
+ * контур, а «Start outreach» после отмены включает автопилот снова, не снимая
+ * паузу добора (её снимает специалист), — и дочейн включённого клиентом
+ * автопилота идти обязан.
+ *
+ * RU не меняется: autopilot=true пишет только кнопка кабинета
+ * (reconcileHeAutopilotProject, trigger='client'), а проект с autopilot=false
+ * до этого чтения не доходит — enqueueAutopilotFollowups возвращается сразу
+ * после первого чтения флага.
+ *
+ * Сбой чтения бросает HeAutopilotReadError: «не знаю» платную постановку не
+ * разрешает.
+ */
+export async function isHeAutopilotStillOn(supabase: SupabaseClient, projectId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('he_projects')
+    .select('autopilot')
+    .eq('id', projectId)
+    .maybeSingle();
+  if (error) throw new HeAutopilotReadError(`autopilot re-read: ${error.message}`);
+  return (data as { autopilot?: unknown } | null)?.autopilot === true;
 }
 
 /* ───────────── Пауза автопилота: причина на строке проекта ───────────── */
@@ -438,6 +486,14 @@ export async function repairOrphanAnalyzingBase(
     status: 'pending',
     payload: { base_id: base.id },
   });
+  // 23505 — сработал he_jobs_one_active_base_analyze_per_base
+  // (20261008_0001_he_active_job_unique.sql): между дедупом выше и вставкой
+  // анализ этой базы поставил кто-то другой. Это ровно 'reanalyzed' — у базы
+  // ЕСТЬ поставленный анализ, — и перечитывать ради этого нечего. Других
+  // уникальных ограничений, способных ответить 23505 на вставку base_analyze, у
+  // he_jobs нет (PK — gen_random_uuid, остальные partial-индексы — по другим
+  // стадиям).
+  if (enqueueErr?.code === '23505') return 'reanalyzed';
   if (enqueueErr) {
     // «Отвергнута» ≠ «не легла»: ответ шлюза мог потеряться при закоммиченной
     // вставке. Перечитываем тем же дедупом; базу в 'failed' не роняем ни при
@@ -566,6 +622,7 @@ export const HE_AUTOPILOT_SKIP_REASONS = [
   'base_not_analyzed',   // база ещё не 'analyzed' — шаблон строить рано
   'template_ready',      // шаблон по базе уже есть
   'template_running',    // генерация шаблона уже идёт
+  'autopilot_off',       // автопилот выключили между входом и постановкой (isHeAutopilotStillOn)
   /** Отказы — работа дальше не пойдёт сама. */
   'no_vertical_in_job',  // в payload джобы нет vertical_id
   'vertical_missing',    // строки вертикали больше нет
@@ -611,6 +668,9 @@ export function pauseForHeAutopilotSkip(
     case 'base_not_analyzed':
     case 'template_ready':
     case 'template_running':
+      return null;
+    // Выключил клиент (отмена): это его решение, а не сбой, — паузы нет.
+    case 'autopilot_off':
       return null;
     case 'no_vertical_in_job':
     case 'vertical_missing':
@@ -675,7 +735,8 @@ export interface HeTemplateGenerationBudget {
   allowed: boolean;
   /**
    * Сколько прогонов засчитано этому поколению: попытки строк (он же счётчик
-   * he_jobs.attempts), закончившейся строке — минимум одна. Бесплатно
+   * he_jobs.attempts), закончившейся строке — минимум одна (кроме done-строки,
+   * вернувшей уже готовый шаблон без модели, — ей только её attempts). Бесплатно
    * прерванные прогоны сюда не попадают (см. HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS).
    */
   paidRuns: number;
@@ -704,7 +765,12 @@ function jobBaseId(payload: unknown): string | null {
  * (специалист перезапустил разбор, движок доставил пропавший base_analyze)
  * начинает поколение заново, и законный повтор писем по НОВОМУ анализу
  * проходит. Без привязки тормоз запретил бы и его — а это живая продуктовая
- * потребность, ради которой ручная кнопка и существует.
+ * потребность, ради которой ручная кнопка и существует. «Повтор» здесь — это
+ * генерация там, где шаблона у базы НЕТ (прошлое поколение писем упало):
+ * базу с готовым шаблоном ни дочейн, ни реконсилер, ни клиентский роут в
+ * генерацию не ставят вовсе, а стадия без форса вернула бы готовый шаблон
+ * (stages/template.ts, findReusableTemplate). Пересобрать письма поверх
+ * готовых может только специалист — staff-роут ставит payload.force.
  *
  * СЧИТАЕМ ПОПЫТКИ, А НЕ СТРОКИ — и попытка здесь приближение денег, а не
  * деньги. attempts в этом движке инкрементируется только на ЗАСЧИТАННОМ фейле:
@@ -714,7 +780,11 @@ function jobBaseId(payload: unknown): string | null {
  * модель; насколько это расходится с деньгами — в докблоке
  * HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS. Закончившейся строке (done/failed)
  * засчитываем минимум один прогон: она дошла до конца, значит модель звали хотя
- * бы раз, даже если счётчик этого не записал.
+ * бы раз, даже если счётчик этого не записал. Исключение — done-строка, которая
+ * вернула уже готовый шаблон (result.reused, stages/template.ts): модель она не
+ * звала, и засчитываются ей только её attempts — упавшие попытки до этого
+ * возврата (форс-джоба, чья первая попытка оплатила и вставила шаблон, а
+ * done-запись не легла).
  *
  * Сбой чтения БРОСАЕТСЯ HeAutopilotReadError: «не знаю, сколько потрачено» —
  * это не «не потрачено ничего». Вызывающий на этом останавливается и пробует
@@ -747,7 +817,7 @@ export async function heTemplateGenerationBudget(
 
   let templateQuery = supabase
     .from('he_jobs')
-    .select('status, attempts, payload')
+    .select('status, attempts, payload, reused:result->>reused')
     .eq('project_id', projectId)
     .eq('stage', 'template')
     .eq('payload->>base_id', baseId);
@@ -764,7 +834,9 @@ export async function heTemplateGenerationBudget(
     if (jobBaseId(row.payload) !== baseId) continue;
     const attempts = typeof row.attempts === 'number' && row.attempts > 0 ? row.attempts : 0;
     const ended = row.status === 'done' || row.status === 'failed';
-    paidRuns += ended ? Math.max(attempts, 1) : attempts;
+    // `->>` отдаёт текст: 'true' у строки, вернувшей готовый шаблон без модели.
+    const reused = row.status === 'done' && row.reused === 'true';
+    paidRuns += ended && !reused ? Math.max(attempts, 1) : attempts;
   }
 
   return { allowed: paidRuns < HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS, paidRuns, generationAt };
@@ -882,6 +954,8 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
     for (const orphan of orphans) {
       const end = ended.get(orphan.id);
       if (end) return skipped(end === 'cancelled' ? 'analysis_cancelled' : 'analysis_failed_before');
+      // Ремонт ставит ПЛАТНЫЙ анализ — флаг перечитываем прямо перед ним.
+      if (!(await isHeAutopilotStillOn(supabase, job.project_id))) return skipped('autopilot_off');
       const verdict = await repairOrphanAnalyzingBase(supabase, {
         projectId: job.project_id,
         base: orphan,
@@ -893,6 +967,8 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
     }
   }
 
+  // Сборка — часы конструктора и SMTP-пробы: флаг перечитываем прямо перед ней.
+  if (!(await isHeAutopilotStillOn(supabase, job.project_id))) return skipped('autopilot_off');
   const res = await enqueueHeBaseCollect(supabase, {
     verticalId,
     projectId: job.project_id,
@@ -927,6 +1003,9 @@ async function afterBaseAnalyzeDone(
   const rawVerticalId = (base as { vertical_id?: unknown }).vertical_id;
   const verticalId = typeof rawVerticalId === 'string' && rawVerticalId.length > 0 ? rawVerticalId : null;
   const baseStatus = (base as { status?: unknown }).status;
+  // Этот же гейт держит базу, которую анализ НЕ записал: финальная запись
+  // stages/baseAnalyze.ts — CAS, и после отмены (база 'failed') она не задевает
+  // строку, база 'analyzed' не становится, и шаблон здесь не ставится.
   if (baseStatus !== 'analyzed') {
     return { outcome: skipped(baseStatus === 'failed' ? 'base_failed' : 'base_not_analyzed'), verticalId };
   }
@@ -947,6 +1026,26 @@ async function afterBaseAnalyzeDone(
   );
   if (existing) return { outcome: 'existing', verticalId };
 
+  // Шаблон у базы УЖЕ ЕСТЬ — новый не ставим, как реконсилер
+  // (autopilotReconcile.ts, 'template_ready') и клиентский роут шаблона
+  // (TEMPLATE_EXISTS). Сюда это доезжает на ВТОРОМ done-анализе той же базы
+  // (специалист перезапустил разбор, ремонт доставил анализ базе, у которой
+  // шаблон уже лёг): раньше каждый такой анализ платил за новые письма поверх
+  // готовых и оставлял базе второй готовый шаблон — то есть вторую кампанию по
+  // тем же людям на шаге запуска. Стадия template без форса вернула бы готовый
+  // шаблон и сама (stages/template.ts, findReusableTemplate), но пустая
+  // джоба съела бы прогон бюджета и строку в очереди — не ставим её вовсе.
+  // Любой статус строки шаблона считается: стадия пишет только 'ready'.
+  const { data: templates, error: templatesErr } = await supabase
+    .from('he_templates')
+    .select('id')
+    .eq('base_id', baseId)
+    .limit(1);
+  if (templatesErr) {
+    throw new HeAutopilotReadError(`autopilot template existence read: ${templatesErr.message}`);
+  }
+  if ((templates ?? []).length > 0) return { outcome: skipped('template_ready'), verticalId };
+
   // ТОРМОЗ платной генерации писем: бюджет поколения анализа (см.
   // heTemplateGenerationBudget). Здесь он почти всегда пропускает — эта
   // постановка идёт сразу после done-джобы base_analyze, то есть поколение
@@ -958,12 +1057,20 @@ async function afterBaseAnalyzeDone(
   });
   if (!budget.allowed) return { outcome: skipped('letters_exhausted'), verticalId };
 
+  // Письма — платная генерация: флаг перечитываем прямо перед постановкой.
+  if (!(await isHeAutopilotStillOn(supabase, job.project_id))) {
+    return { outcome: skipped('autopilot_off'), verticalId };
+  }
   const { error: jobErr } = await supabase.from('he_jobs').insert({
     project_id: job.project_id,
     stage: 'template',
     status: 'pending',
     payload: { base_id: baseId },
   });
+  // 23505 — he_jobs_one_active_template_per_base: между дедупом выше и вставкой
+  // шаблон этой базы поставил кто-то другой (клиент, кнопка «Start outreach»).
+  // Это тот же итог, что у дедупа, — 'existing', а не сбой постановки.
+  if (jobErr?.code === '23505') return { outcome: 'existing', verticalId };
   if (jobErr) throw new Error(`autopilot template enqueue: ${jobErr.message}`);
   return { outcome: 'enqueued', verticalId };
 }

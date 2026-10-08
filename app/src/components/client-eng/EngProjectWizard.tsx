@@ -6,7 +6,8 @@
  * GET /api/client/eng/projects/[id]. Шаг 5 — единое окно приёмки автопилота
  * («Start outreach» на шаге 2). Поллинг каждые 4с, пока есть активные джобы
  * (research, chain, base_collect, template); «Cancel all jobs» останавливает
- * прогоны проекта.
+ * идущую работу проекта, выключает автопилот и ночной добор (роут
+ * api/client/eng/projects/[id]/cancel).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -51,6 +52,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
     return Number.isInteger(raw) && raw >= 1 && raw <= STEPS.length ? raw : 1;
   });
   const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState('');
   const loadingRef = useRef(false);
 
   const load = useCallback(
@@ -106,21 +108,67 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
     return () => clearInterval(timer);
   }, [hasActiveJobs, load]);
 
+  /**
+   * Подтверждение обязательно: отмена не только останавливает идущее, но и
+   * выключает автопилот и ночной добор, а добор клиент обратно не включит —
+   * снимает его паузу только сотрудник (staff-кнопка refill-pause). Каждая
+   * фраза подтверждения проверена по роуту отмены:
+   *  - «stops the work running on it now» — джобы pending/running →
+   *    cancelled, базы collecting/analyzing → failed, researching → draft;
+   *  - «turns its autopilot off» — первая запись роута (не легла — 500,
+   *    отмены нет);
+   *  - «stops its daily refill if it has one» — пауза добора
+   *    (pauseHeRefillForClientCancel); конфига нет — добора и не было.
+   *    Без миграции 20260930_0005 паузу записать нечем — это условие выката,
+   *    а не форма, которую экран обязан пережить;
+   *  - «Finished bases, letters and templates are kept» — роут трогает только
+   *    базы в работе, цепочек и шаблонов не трогает;
+   *  - «campaigns already launched are left as they are» — роут рассыльщика не
+   *    зовёт, а кампании ENG создаются на паузе и сами не активируются
+   *    (launchHandoff.ts), так что их состояние отмена не меняет;
+   *  - ««Start outreach» turns the autopilot back on» — POST .../autopilot;
+   *    паузу добора он не снимает, отсюда «only your manager».
+   * Сбой отмены печатается: молча проглоченный отказ выглядел бы как
+   * сработавшая отмена. Ноль отменённых джоб — штатный успех (остановлены
+   * автопилот, добор и застрявшие базы), 409 у роута больше нет.
+   */
   const onCancel = async () => {
     if (cancelling) return;
+    if (
+      !window.confirm(
+        'Cancel all jobs on this project? This stops the work running on it now, turns its autopilot off ' +
+          'and stops its daily refill if it has one. Finished bases, letters and templates are kept, and ' +
+          'campaigns already launched are left as they are. «Start outreach» turns the autopilot back on; ' +
+          'only your manager can restart the daily refill.',
+      )
+    ) {
+      return;
+    }
     setCancelling(true);
+    setCancelError('');
     try {
       await cancelEngProject(projectId);
-      await load({ silent: true });
-    } catch {
-      // 409 «нет активных задач» и гонки отмены — просто перечитываем деталку.
-      await load({ silent: true });
+    } catch (e) {
+      setCancelError(e instanceof Error ? e.message : 'Failed to cancel the running jobs');
     } finally {
+      await load({ silent: true });
       setCancelling(false);
     }
   };
 
   const project = detail?.project;
+  /**
+   * Есть ли что отменять — шире, чем «есть активные джобы»: отмена с нулём джоб
+   * штатная и нужна ровно там, где джобы нет, а работа «идёт» — база застряла
+   * в 'collecting'/'analyzing' без джобы или проект висит в 'researching'.
+   * Роут переводит и то, и другое (базы → failed, проект → draft), а без
+   * кнопки такую базу с экрана было не остановить. Иначе кнопки нет: на
+   * простаивающем проекте отменять нечего.
+   */
+  const hasCancellableWork =
+    hasActiveJobs ||
+    project?.status === 'researching' ||
+    (detail?.bases ?? []).some((b) => b.status === 'collecting' || b.status === 'analyzing');
 
   return (
     <div className="flex flex-col gap-5">
@@ -164,20 +212,26 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
             <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
               {project?.website_url}
             </span>
-            {hasActiveJobs && (
+            {hasCancellableWork && (
               <button
                 type="button"
                 onClick={() => void onCancel()}
                 disabled={cancelling}
                 className="ds-btn-secondary ml-auto inline-flex items-center gap-1.5 text-[11px]"
                 style={{ color: 'var(--cp-red)' }}
-                title="Stop all active project jobs (research, chains, base collect, templates)"
+                title="Stop the work running on this project, turn its autopilot off and stop its daily refill if it has one. Campaigns already launched are left as they are."
               >
                 <Ban className="h-3 w-3" />
                 {cancelling ? 'Cancelling…' : 'Cancel all jobs'}
               </button>
             )}
           </header>
+
+          {cancelError && (
+            <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
+              {cancelError}
+            </div>
+          )}
 
           {/* Русской прозаики стадии здесь нет ни на экране, ни в теле ответа:
               роут отдаёт код причины (toClientEngStageErrorCode), экран

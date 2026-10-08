@@ -14,6 +14,7 @@
  */
 
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { AuthExpiredError, authFetch } from '@/lib/authFetch';
 import { engErrorText, localizeEngError } from './engText';
 import type { HeChainLetterDto, HeProjectDetailResponse } from '@/components/hypothesis-engine/api';
 import type { HeChain, HeHypothesis, HeJob, HeProject } from '@/lib/hypothesisEngine/types';
@@ -50,7 +51,8 @@ import type { HeBaseSummary as HeBaseSummaryDto } from '@/components/hypothesis-
  */
 
 /**
- * Джоба движка в ответах кабинета: деталка проекта и четыре мутирующих роута.
+ * Джоба движка в ответах кабинета: деталка проекта и три мутирующих роута
+ * (создание проекта, цепочка, шаблон).
  *
  * Уже staff-DTO на `error` (сырой текст стадии, его показывать нельзя),
  * `progress` (подпись прогресса) и всё, чего нет в JOB_FIELDS, — включая
@@ -383,6 +385,26 @@ export interface EngLaunchResponse {
   schedule?: EngSendingWindow;
   warnings?: string[];
   error?: string;
+  /**
+   * Отказ защиты аудитории (409 с `code`, launchTemplate.ts, шаг 4b′): запуск
+   * не состоялся, кампания не создана, `error` — английский текст ядра. Только
+   * у этих двух кодов launchEngTemplate отвечает значением, а не бросает:
+   * «Launch all» обходится с ними по-разному (EngStepReview, LaunchAllPanel).
+   */
+  refusal?: EngLaunchRefusalCode;
+}
+
+/**
+ * Машинные коды отказов защиты аудитории — копия HE_LAUNCH_REFUSAL_CODES
+ * (launchTemplate.ts): сам модуль ядра в клиентский бандл не едет.
+ *  - sibling_template_launched — у другого шаблона той же базы уже есть запуск;
+ *  - research_running — у проекта идёт повторное исследование.
+ * Незнакомый код — обычная ошибка (бросается), как и до этих кодов.
+ */
+export type EngLaunchRefusalCode = 'sibling_template_launched' | 'research_running';
+
+function isEngLaunchRefusalCode(raw: unknown): raw is EngLaunchRefusalCode {
+  return raw === 'sibling_template_launched' || raw === 'research_running';
 }
 
 interface EngChainPatchResponse {
@@ -391,9 +413,12 @@ interface EngChainPatchResponse {
 }
 
 /**
- * Единственная дверь кабинета в /api/client: поверх общего фетча доводим текст
- * до английского (см. engText) — и у брошенной ошибки, и у поля `error` в теле
+ * Дверь кабинета в /api/client: поверх общего фетча доводим текст до
+ * английского (см. engText) — и у брошенной ошибки, и у поля `error` в теле
  * ответа, которое роуты отдают вместе с 200-м статусом (частичный запуск).
+ * Исключений два — startEngResearch и launchEngTemplate ниже: им нужно тело
+ * 409 (код отказа), которое этот фетч выбрасывает, поэтому они ходят через
+ * engApiFetchRaw и доводят тексты теми же функциями engText.
  *
  * Здесь именно `engErrorText`, а не `engStageErrorText`: это ЖИВОЙ ответ, где
  * `error` — английская константа роута (`api/client/eng/_shared.ts`). Ошибки
@@ -442,8 +467,102 @@ export async function patchEngProject(
   });
 }
 
-export async function startEngResearch(projectId: string): Promise<EngJobResponse> {
-  return engApiFetch<EngJobResponse>(`/eng/projects/${projectId}/research`, { method: 'POST' });
+/**
+ * Что удалит «Re-run research» — числа из 409 роута
+ * (api/client/eng/projects/[id]/research). Тексты из них собирает экран.
+ * Здесь ровно то, что экран печатает: запущенные шаблоны и идущая работа в
+ * 'confirm'-ответ не попадают (при них роут отказывает другим кодом), и разбирать
+ * их незачем.
+ */
+export interface EngResearchRerunConsequences {
+  audiences: number;
+  /** Строки баз (адреса), а не компании. */
+  rows: number;
+  templates: number;
+  letter_sequences: number;
+  /** Вокабуляры вертикалей (he_vocab). */
+  vocabularies: number;
+  /** Досье вертикалей (he_vertical_dossiers). */
+  dossiers: number;
+}
+
+/**
+ * Итог «Re-run research»: поставлено — или сервер просит подтверждения
+ * (409 research_rerun_confirm_required) и перечисляет, что будет удалено.
+ * Остальные отказы (уже идёт, запущено, идёт работа по вертикалям) — брошенная
+ * ошибка с английским текстом роута, как у прочих вызовов кабинета.
+ */
+export type EngResearchStartResult =
+  | { kind: 'started' }
+  | { kind: 'confirm_required'; consequences: EngResearchRerunConsequences };
+
+function rerunCount(raw: unknown): number {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : 0;
+}
+
+/**
+ * Вызов кабинета, которому нужно ТЕЛО не-2xx ответа — машинный код отказа рядом
+ * с текстом. Мимо engApiFetch намеренно: его фетч (authFetchJson) на не-2xx
+ * бросает только текст. authFetch тот же, что под ним: токен, повтор на 401 и
+ * заголовок демо-вкладки ставит он сам; 401 после повтора — та же
+ * AuthExpiredError, тексты доводятся до английского тем же
+ * localizeEngError/engErrorText (engRawErrorText ниже). Зовут его два места:
+ * startEngResearch и launchEngTemplate.
+ */
+async function engApiFetchRaw(
+  path: string,
+  init: RequestInit,
+): Promise<{ res: Response; body: Record<string, unknown> | null }> {
+  let res: Response;
+  try {
+    res = await authFetch(`/api/client${path}`, init);
+  } catch (e) {
+    throw localizeEngError(e);
+  }
+  if (res.status === 401) throw localizeEngError(new AuthExpiredError());
+  const parsed: unknown = await res.json().catch(() => null);
+  const body =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  return { res, body };
+}
+
+/** Английский текст ошибки из тела engApiFetchRaw. */
+function engRawErrorText(res: Response, body: Record<string, unknown> | null): string {
+  return engErrorText(typeof body?.error === 'string' ? body.error : `Error ${res.status}`);
+}
+
+/**
+ * POST /eng/projects/[id]/research (через engApiFetchRaw: экрану нужно тело 409
+ * — код и список последствий для диалога).
+ *
+ * confirm: true — повтор после диалога подтверждения. Флаг принимается только
+ * для 'confirm'-последствий: запуск или идущую работу он не снимает.
+ */
+export async function startEngResearch(
+  projectId: string,
+  opts?: { confirm?: boolean },
+): Promise<EngResearchStartResult> {
+  const { res, body } = await engApiFetchRaw(`/eng/projects/${projectId}/research`, {
+    method: 'POST',
+    body: JSON.stringify(opts?.confirm === true ? { confirm: true } : {}),
+  });
+  if (res.ok) return { kind: 'started' };
+  if (res.status === 409 && body?.code === 'research_rerun_confirm_required' && body.requires_confirm === true) {
+    const raw = body.consequences;
+    const c = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    return {
+      kind: 'confirm_required',
+      consequences: {
+        audiences: rerunCount(c.audiences),
+        rows: rerunCount(c.rows),
+        templates: rerunCount(c.templates),
+        letter_sequences: rerunCount(c.letter_sequences),
+        vocabularies: rerunCount(c.vocabularies),
+        dossiers: rerunCount(c.dossiers),
+      },
+    };
+  }
+  throw new Error(engRawErrorText(res, body));
 }
 
 export async function cancelEngProject(projectId: string): Promise<EngCancelResponse> {
@@ -557,14 +676,29 @@ export async function fetchEngLaunchPresets(templateId: string): Promise<HeLaunc
   return data.presets ?? [];
 }
 
+/**
+ * POST /eng/templates/[id]/launch. Через engApiFetchRaw — ради кода 409 защиты
+ * аудитории (`refusal`, см. EngLaunchResponse): его тело engApiFetch выбросил бы
+ * вместе с исключением. Остальное — как у engApiFetch: успех отдаёт тело с
+ * английским `error`, любой другой отказ бросается английским текстом.
+ */
 export async function launchEngTemplate(
   templateId: string,
   body: { preset_id: string; force?: boolean; schedule?: EngSendingWindow },
 ): Promise<EngLaunchResponse> {
-  return engApiFetch<EngLaunchResponse>(`/eng/templates/${templateId}/launch`, {
+  const { res, body: data } = await engApiFetchRaw(`/eng/templates/${templateId}/launch`, {
     method: 'POST',
     body: JSON.stringify(body),
   });
+  if (res.ok) {
+    const out = (data ?? {}) as EngLaunchResponse;
+    if (typeof out.error === 'string') out.error = engErrorText(out.error);
+    return out;
+  }
+  if (res.status === 409 && isEngLaunchRefusalCode(data?.code)) {
+    return { ok: false, error: engRawErrorText(res, data), refusal: data.code };
+  }
+  throw new Error(engRawErrorText(res, data));
 }
 
 /** Что предложить клиенту в окне отправки (работает и до запуска шаблона). */
@@ -686,9 +820,10 @@ export interface EngDashboardResponse {
      */
     autopilot_hold?: ClientEngAutopilotHold | null;
     /**
-     * Состояние ночного добора ЭТОГО проекта — `off` / `running` / `paused`
-     * (см. `HeClientRefillState`). Поля может не быть только у ответа старше
-     * этой волны; тогда экран читает его как `off`.
+     * Состояние ночного добора ЭТОГО проекта — `off` / `running` / `paused` /
+     * `stopped` (см. `HeClientRefillState`: `paused` — пауза по ёмкости,
+     * `stopped` — отмена проекта кнопкой «Cancel all jobs»). Поля может не быть
+     * только у ответа старше этой волны; тогда экран читает его как `off`.
      */
     refill?: HeClientRefillState;
   }>;

@@ -11,6 +11,8 @@
 
 import { z } from 'zod';
 
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
+
 import {
   callLLMWithSchema,
   getHeModel,
@@ -376,16 +378,21 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
     stageLog(ctx, '[vocab] вокабуляр сохранён БЕЗ верификации поиском — поиск не обслужил ни одного запроса');
   }
 
+  // Строка — текст модели целиком (термины, должности, запросы, notes): один NUL
+  // или одиночный UTF-16 суррогат, и PostgREST отвергает ВСЮ вставку уже после
+  // оплаченного вызова — стадия падает и на повторе покупает словарь заново.
+  // Чистка трогает только эти два символа: текст без них (вся кириллица и
+  // латиница) уходит байт-в-байт тем же, что и раньше.
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_vocab')
-    .insert({
+    .insert(stripUnstorableJsonChars({
       vertical_id: verticalId,
       company_types: companyTypes,
       job_titles: vocab.job_titles,
       search_queries: searchQueries,
       status: 'ready',
       llm_model: model,
-    })
+    }))
     .select('id')
     .single();
   if (insError || !inserted) throw new Error(`he_vocab insert: ${insError?.message ?? 'unknown'}`);

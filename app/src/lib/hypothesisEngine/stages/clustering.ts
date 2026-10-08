@@ -5,6 +5,8 @@
  * в he_verticals + he_hypotheses.vertical_id. Проект → status 'researched'.
  */
 
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
+
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeClusteringSchema, type HeClusteringDecision } from '../schemas';
 import { projectMarket } from '../market';
@@ -235,16 +237,22 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
 
   const written: Array<AppliedVertical & { id: string }> = [];
   for (const v of verticals) {
+    // name/summary/synonyms — текст модели: один NUL или одиночный UTF-16
+    // суррогат, и PostgREST отвергает вставку уже после оплаченного вызова и
+    // после сноса прошлых вертикалей выше. Чистка трогает только эти два
+    // символа: текст без них (вся кириллица и латиница) ложится байт-в-байт тем
+    // же. Привязка гипотез ниже идёт по memberTitles — заголовкам из he_hypotheses,
+    // а не по тексту модели, и чистка её не задевает.
     const { data: inserted, error: insError } = await ctx.supabase
       .from('he_verticals')
-      .insert({
+      .insert(stripUnstorableJsonChars({
         project_id: job.project_id,
         name: v.name,
         summary: v.summary,
         synonyms: v.synonyms,
         potential_pct: v.potential_pct,
         rank: v.rank,
-      })
+      }))
       .select('id')
       .single();
     if (insError || !inserted) throw new Error(`he_verticals insert: ${insError?.message ?? 'unknown'}`);

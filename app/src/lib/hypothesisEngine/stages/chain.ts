@@ -20,6 +20,7 @@
 import { z } from 'zod';
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages, buildChainRuleFixHint } from '../prompts/chain';
 import { checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
@@ -462,9 +463,14 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     stageLog(ctx, `[chain] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
 
+  // letters — текст модели (темы, тела, B-варианты): один NUL или одиночный
+  // UTF-16 суррогат, и PostgREST отвергает вставку уже после всех оплаченных
+  // вызовов (генерация, фикс-проход, критик, рерайт) — стадия падает и на
+  // повторе покупает цепочку заново. Чистка трогает только эти два символа:
+  // текст без них (вся кириллица и латиница) ложится байт-в-байт тем же.
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_chains')
-    .insert({
+    .insert(stripUnstorableJsonChars({
       vertical_id: verticalId,
       language,
       letters,
@@ -472,7 +478,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       llm_model: model,
       tokens_used: usage.tokensUsed,
       cost_usd: usage.costUsd,
-    })
+    }))
     .select('id')
     .single();
   if (insError || !inserted) throw new Error(`he_chains insert: ${insError?.message ?? 'unknown'}`);

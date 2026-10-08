@@ -50,6 +50,7 @@ import {
 // кодов один на оба конца провода, и расхождение ловит компилятор.
 import type {
   HeClientAutopilotHoldCode,
+  HeClientRefillState,
   HeClientStageErrorCode,
 } from '@/lib/hypothesisEngine/clientEngProjection';
 
@@ -118,7 +119,7 @@ export type EngFailureScope = 'research' | 'collection' | 'refill';
 const STAGE_CANCELLED_EN: Record<EngFailureScope, string> = {
   research: 'The research was cancelled before it finished. Press «Re-run research» on step 1 to start it again.',
   collection:
-    'The collection was cancelled before it finished, so this base will not be launched. If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse what this one had gathered.',
+    'Work on this base was cancelled before it finished, so this base will not be launched. If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse this base.',
   refill: `This refill run was cancelled before it finished. ${HE_REFILL_RUN_KEPT_EN} A refill run is not restarted by hand; the Command Center shows whether the daily refill goes on.`,
 };
 
@@ -265,15 +266,22 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
 }
 
 /**
- * Что кабинет говорит про проект, которому ночной добор остановлен нехваткой
- * места под новые контакты (`he_auto_pipeline_configs.refill_paused_at`).
+ * Что кабинет говорит про проект, которому остановлен ночной добор
+ * (`he_auto_pipeline_configs.refill_paused_at`). Поводов у одной колонки два,
+ * и проекция различает их до кабинета (HeClientRefillState): `paused` — нехватка
+ * места под новые контакты, `stopped` — проект отменён кнопкой «Cancel all jobs».
+ * Фразы у них разные, потому что правда разная; ниже — правила для `paused`,
+ * про `stopped` — у его текста.
  *
  * ПРИЧИНУ НЕ НАЗЫВАЕМ. Решение владельца 04.10.2026: про ёмкость, рассыльщика
  * и тарифы клиент не читает ни слова — только общая фраза справочника
  * (`HE_TEAM_ON_IT_EN`, `clientFailureText`), одна на все отказы, которые чинит
  * команда. «Команда уже работает» здесь правда потому, что оба места записи
- * паузы (stages/baseCollectRefill.ts, autoPipeline.ts) шлют алерт в health-бот
- * (lib/hypothesisEngine/opsAlert.ts); без этих вызовов фразу писать нельзя.
+ * паузы ПО ЁМКОСТИ (stages/baseCollectRefill.ts, autoPipeline.ts) шлют алерт в
+ * health-бот (lib/hypothesisEngine/opsAlert.ts); без этих вызовов фразу писать
+ * нельзя. Третье место записи той же колонки — отмена клиентом
+ * (pauseHeRefillForClientCancel) — алерта не шлёт, и поэтому эта фраза к ней
+ * не применяется: отмена приходит сюда состоянием `stopped`.
  *
  * Правила формулировки — те же, что у пауз автопилота выше, плюс две вещи,
  * которые эта пауза добавляет от себя:
@@ -293,9 +301,28 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * уехала в кампанию, а остаток (`stats.deferred` долива) не досылается и
  * теряется. Поэтому фраза говорит только про то, что уже в кампаниях, — это
  * верно для обеих форм отказа (целиком и наполовину).
+ *
+ * `stopped` — ОТМЕНА. Причину называем: её записал сам клиент кнопкой
+ * кабинета, и только эту кнопку пишет эта причина (pauseHeRefillForClientCancel
+ * зовёт один роут — api/client/eng/projects/[id]/cancel). Ни «временной
+ * проблемы», ни «команда уже знает» здесь нет: алерта отмена не шлёт. Кто
+ * вернёт добор — менеджер: снимает паузу только staff-кнопка (refill-pause),
+ * «Start outreach» её не трогает. Лиды из кампаний отмена не убирает (роут
+ * отмены рассыльщика не зовёт вовсе). Если «Start outreach» когда-нибудь начнёт
+ * снимать и эту паузу (открытое решение владельца), менять вместе: эту фразу и
+ * подтверждение отмены в EngProjectWizard («only your manager can restart»).
  */
-export function engRefillHoldText(): string {
-  return `The daily refill for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there and keeps sending. ${HE_REFILL_HOLD_LIFT_EN}`;
+const REFILL_HOLD_EN: Record<EngRefillHoldState, string> = {
+  paused: `The daily refill for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there and keeps sending. ${HE_REFILL_HOLD_LIFT_EN}`,
+  stopped:
+    'The daily refill for this project is stopped because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Your manager can restart the daily refill.',
+};
+
+/** Состояния добора, у которых есть что объяснить отдельным блоком. */
+export type EngRefillHoldState = Extract<HeClientRefillState, 'paused' | 'stopped'>;
+
+export function engRefillHoldText(state: EngRefillHoldState): string {
+  return REFILL_HOLD_EN[state];
 }
 
 /**

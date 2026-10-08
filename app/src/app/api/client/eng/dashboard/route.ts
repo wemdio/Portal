@@ -539,38 +539,48 @@ export async function GET(req: NextRequest) {
    * Запрос идёт ТОЛЬКО когда у клиента есть хотя бы один включённый конфиг: в
    * production `he_auto_pipeline_configs` пуста, и лишнего похода в БД на
    * 15-секундном полле у подавляющего большинства кабинетов не будет вовсе.
-   * Колонки перечислены поимённо — `refill_pause_reason` кабинету не
-   * полагается (русский текст для сотрудника с именем рассыльщика), и его
-   * здесь нет даже в выборке. Капа у запроса нет и не нужно: `project_id` у
-   * таблицы уникален (20260804_0005), а сам список проектов уже ограничен
-   * сотней строк выше — больше сотни строк отсюда не приедет.
+   * Капа у запроса нет и не нужно: `project_id` у таблицы уникален
+   * (20260804_0005), а сам список проектов уже ограничен сотней строк выше —
+   * больше сотни строк отсюда не приедет.
+   *
+   * `refill_pause_reason` ЧИТАЕТСЯ, НО НАРУЖУ НЕ УХОДИТ. Это русский текст для
+   * сотрудника с именем рассыльщика; кабинету из него нужен один бит — пауза
+   * записана отменой клиентом или ёмкостью (у них разные правдивые фразы,
+   * см. HeClientRefillState). Бит считает проекция (toClientEngRefillState), в
+   * ответ уезжает только состояние; сам текст живёт в этой функции и дальше
+   * карты не идёт. Колонка из той же миграции 20260930_0005, что и штамп:
+   * без миграции запрос отказывает целиком, и дашборд ведёт себя как раньше
+   * («паузы нет», см. выше).
    */
   const enabledConfigs = configRows.filter((c) => c.enabled === true);
-  const refillPausedAtByProjectId = new Map<string, string>();
+  const refillPauseByProjectId = new Map<string, { pausedAt: string; reason: string | null }>();
   if (enabledConfigs.length > 0) {
     const pauseRes = await supabaseAdmin
       .from('he_auto_pipeline_configs')
-      .select('project_id, refill_paused_at')
+      .select('project_id, refill_paused_at, refill_pause_reason')
       .in('project_id', projectIds);
     if (!pauseRes.error) {
       for (const raw of pauseRes.data ?? []) {
         const row = raw as Record<string, unknown>;
         const pid = str(row.project_id);
         const pausedAt = str(row.refill_paused_at);
-        if (pid && pausedAt) refillPausedAtByProjectId.set(pid, pausedAt);
+        const reason = str(row.refill_pause_reason);
+        if (pid && pausedAt) refillPauseByProjectId.set(pid, { pausedAt, reason: reason || null });
       }
     }
   }
   const refillStateByProjectId = new Map<string, HeClientRefillState>(
     configRows.map((c) => {
       const pid = str((c as Record<string, unknown>).project_id);
-      // Строка конфига как есть плюс та единственная колонка, которую
-      // пришлось читать отдельно, — решение о состоянии принимает проекция.
+      const pause = refillPauseByProjectId.get(pid);
+      // Строка конфига как есть плюс две колонки паузы, которые пришлось
+      // читать отдельно, — решение о состоянии принимает проекция.
       return [
         pid,
         toClientEngRefillState({
           ...(c as Record<string, unknown>),
-          refill_paused_at: refillPausedAtByProjectId.get(pid) ?? null,
+          refill_paused_at: pause?.pausedAt ?? null,
+          refill_pause_reason: pause?.reason ?? null,
         }),
       ];
     }),
@@ -582,8 +592,9 @@ export async function GET(req: NextRequest) {
    *
    * `daily_cap` СУММИРУЕТСЯ ТОЛЬКО ПО ИДУЩИМ проектам. Кап — обещание про
    * ближайшую ночь («daily cap N» рядом с обратным отсчётом), а проект на
-   * паузе в эту ночь не возьмёт ни одного лида: включать его кап в сумму
-   * значило бы назвать число, которого сегодня не будет.
+   * паузе или остановленный отменой (`paused` / `stopped`) в эту ночь не
+   * возьмёт ни одного лида: включать его кап в сумму значило бы назвать число,
+   * которого сегодня не будет.
    */
   const autoRefill = {
     next_run_at: nextDailyRunIso(now),

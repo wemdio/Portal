@@ -74,6 +74,7 @@ import {
   heTemplateGenerationBudget,
   isAnalyzingBaseLive,
   isHeAutopilotReadError,
+  isHeAutopilotStillOn,
   latestEndedJobByBase,
   liveBaseIdsFromJobs,
   pauseForHeAutopilotSkip,
@@ -97,6 +98,8 @@ export type HeAutopilotTrigger = 'client' | 'nightly';
 export type HeAutopilotReconcileStep =
   | 'verticals'
   | 'snapshot'
+  // Запись флага autopilot=true (кнопка) или его перечитывание перед платной
+  // постановкой (isHeAutopilotStillOn) — оба про один флаг.
   | 'flag'
   | 'chain_enqueue'
   | 'collect_enqueue'
@@ -162,7 +165,12 @@ export type HeAutopilotReconcileResult =
       ok: true;
       counts: HeAutopilotReconcileCounts;
       details: HeAutopilotVerticalDetail[];
-      /** Что записано на проект (null — причина снята). */
+      /**
+       * Что записано на проект (null — причина снята). Исключение — проход,
+       * который остановил выключенный автопилот ('autopilot_off' в details):
+       * у него null, а записи нет вовсе: на строке остаётся прежняя причина,
+       * и пересчитывает её следующий проход («Start outreach»).
+       */
       pause: HeAutopilotPauseReason | null;
     }
   | { ok: false; kind: 'refused'; refusal: HeAutopilotRefusal }
@@ -315,9 +323,12 @@ export async function reconcileHeAutopilotProject(
     /**
      * 'cancelled' читается наравне с 'failed', и по РАЗНЫМ причинам.
      *
-     * Кнопка кабинета «Cancel all jobs» переводит активные джобы в
-     * 'cancelled', проект при этом остаётся 'researched' с autopilot=true,
-     * то есть в выборке ночного прохода. Гейт, знающий только про 'failed',
+     * Отмена переводит активные джобы в 'cancelled', а проект остаётся
+     * 'researched'. Кнопка кабинета «Cancel all jobs» с 08.10.2026 ещё и
+     * пишет autopilot=false (проект из выборки ночного прохода уходит), но
+     * отмена из staff-инструмента автопилот не трогает, а «Start outreach»
+     * после отмены включает его снова — и проект возвращается в выборку
+     * вместе со своими отменёнными строками. Гейт, знающий только про 'failed',
      * не видел отменённую цепочку и ставил её заново — платный прогон
      * модели, который клиент только что остановил. Для шаблона вдобавок
      * бесполезен бюджет поколения: у отменённой строки attempts обычно 0,
@@ -396,6 +407,44 @@ export async function reconcileHeAutopilotProject(
   const details: HeAutopilotVerticalDetail[] = [];
   let pause: HeAutopilotPauseReason | null = null;
 
+  /**
+   * Автопилот всё ещё включён (isHeAutopilotStillOn) — прямо перед КАЖДОЙ
+   * платной постановкой ниже: цепочка, ремонт анализа, сборка, письма. Отмена
+   * клиентом пишет autopilot=false и могла лечь посреди этого прохода — уже
+   * после снапшота и флага выше (ночной проход отобрал проект по флагу ещё
+   * раньше). Выключен — проход кончается здесь: больше ничего не ставит и
+   * причину не пишет, а вертикаль, на которой он встал, уходит в details как
+   * 'autopilot_off'. Сбой чтения — отказ прохода с 'read_failed': «не знаю»
+   * платную постановку не разрешает.
+   *
+   * null — ставить можно; иначе — итог прохода, который надо вернуть.
+   */
+  const stopUnlessAutopilotOn = async (
+    verticalId: string,
+    baseId?: string,
+  ): Promise<HeAutopilotReconcileResult | null> => {
+    let on: boolean;
+    try {
+      on = await isHeAutopilotStillOn(supabase, projectId);
+    } catch (e) {
+      await recordHeAutopilotPause(supabase, projectId, 'read_failed');
+      return {
+        ok: false,
+        kind: 'failed',
+        step: 'flag',
+        error: e,
+        verticalId,
+        ...(baseId ? { baseId } : {}),
+        pause: 'read_failed',
+        counts,
+      };
+    }
+    if (on) return null;
+    counts.verticalsSkipped += 1;
+    details.push({ verticalId, outcome: 'skipped', reason: 'autopilot_off' });
+    return { ok: true, counts, details, pause: null };
+  };
+
   for (const vertical of verticals) {
     const verticalId = asString(vertical.id);
     if (!verticalId) continue;
@@ -440,6 +489,8 @@ export async function reconcileHeAutopilotProject(
         // человека (кнопка кабинета или специалист).
         skipReason = 'chain_failed_before';
       } else {
+        const stop = await stopUnlessAutopilotOn(verticalId);
+        if (stop) return stop;
         const { error: chainErr } = await supabase.from('he_jobs').insert({
           project_id: projectId,
           stage: 'chain',
@@ -516,6 +567,8 @@ export async function reconcileHeAutopilotProject(
           skipReason = ended === 'cancelled' ? 'analysis_cancelled' : 'analysis_failed_before';
           continue;
         }
+        const stop = await stopUnlessAutopilotOn(verticalId, asString(base.id));
+        if (stop) return stop;
         try {
           const verdict = await repairOrphanAnalyzingBase(supabase, {
             projectId,
@@ -574,6 +627,8 @@ export async function reconcileHeAutopilotProject(
           // своими потолками, а новая сборка — решение человека.
           skipReason = 'collect_failed_before';
         } else {
+          const stop = await stopUnlessAutopilotOn(verticalId);
+          if (stop) return stop;
           const collect = await enqueueHeBaseCollect(supabase, {
             verticalId,
             projectId,
@@ -655,13 +710,28 @@ export async function reconcileHeAutopilotProject(
               generationAt: budget.generationAt,
             };
           } else {
+            const stop = await stopUnlessAutopilotOn(verticalId, analyzedBaseId);
+            if (stop) return stop;
             const { error: tplErr } = await supabase.from('he_jobs').insert({
               project_id: projectId,
               stage: 'template',
               status: 'pending',
               payload: { base_id: analyzedBaseId },
             });
-            if (tplErr) {
+            if (tplErr?.code === '23505') {
+              // he_jobs_one_active_template_per_base (20261008_0001): между
+              // снапшотом активных джоб выше и этой вставкой шаблон этой базы
+              // поставил кто-то другой — дочейн воркера после base_analyze
+              // (afterBaseAnalyzeDone), клиентский роут шаблона или второй
+              // такой же проход. Это тот же исход, что у дедупа по снапшоту, —
+              // 'template_running' без паузы, а не сбой постановки: раньше
+              // здесь ложилась пауза 'enqueue_failed', и кабинет звал нажать
+              // кнопку, пока письма уже генерировались. Других уникальных
+              // ограничений, способных ответить 23505 на вставку template, у
+              // he_jobs нет (PK — gen_random_uuid, прочие partial-индексы — по
+              // другим стадиям). Без миграции 23505 не бывает, и путь прежний.
+              skipReason = 'template_running';
+            } else if (tplErr) {
               await recordHeAutopilotPause(supabase, projectId, 'enqueue_failed');
               return {
                 ok: false,
@@ -673,10 +743,11 @@ export async function reconcileHeAutopilotProject(
                 pause: 'enqueue_failed',
                 counts,
               };
+            } else {
+              counts.templatesEnqueued += 1;
+              details.push({ verticalId, outcome: 'template_enqueued', baseId: analyzedBaseId });
+              enqueued = true;
             }
-            counts.templatesEnqueued += 1;
-            details.push({ verticalId, outcome: 'template_enqueued', baseId: analyzedBaseId });
-            enqueued = true;
           }
         }
       }
@@ -725,7 +796,8 @@ export const HE_AUTOPILOT_RECONCILE_FLAG_ENV = 'HE_AUTOPILOT_RECONCILE';
  *
  * До правки аудита (F06) этим же числом ограничивалась сама ВЫБОРКА — десять
  * проектов по updated_at возрастанию. Готовый проект updated_at не двигает
- * (запуск и долив его не трогают, autopilot=false никто не пишет), и как только
+ * (запуск и долив его не трогают; autopilot=false пишет только отмена
+ * клиентом, и такой проект из выборки уходит), и как только
  * таких набиралось десять, проход каждую ночь читал одни и те же десять и до
  * проекта, которому он нужен, не доходил никогда. Теперь выборка — окно
  * HE_AUTOPILOT_RECONCILE_WINDOW со сдвигом по ночам, а это число — только

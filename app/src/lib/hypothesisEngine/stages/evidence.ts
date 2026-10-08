@@ -42,6 +42,8 @@
 
 import { z } from 'zod';
 
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
+
 import { callLLMWithSchema, getHeModel } from '../llm';
 import {
   HeEvidenceItemSchema,
@@ -468,7 +470,12 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
       potential_pct: a.potential_pct,
       status: 'proposed',
     }));
-    const { error: insError } = await ctx.supabase.from('he_hypotheses').insert(rows);
+    // Строки — текст модели (заголовок, описание, обоснование, цитаты): один NUL
+    // или одиночный UTF-16 суррогат, и PostgREST отвергает ВСЮ вставку — после
+    // уже оплаченных вердиктов по всем кандидатам и уже сделанного сноса прошлых
+    // 'proposed'. Чистка трогает только эти два символа: текст без них (вся
+    // кириллица и латиница) ложится байт-в-байт тем же.
+    const { error: insError } = await ctx.supabase.from('he_hypotheses').insert(stripUnstorableJsonChars(rows));
     if (insError) throw new Error(`he_hypotheses insert: ${insError.message}`);
   } else {
     // Молчать нельзя: снаружи (и в кабинете) прогон выглядит завершившимся, а

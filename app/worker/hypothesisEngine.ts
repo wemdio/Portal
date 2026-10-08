@@ -25,9 +25,17 @@
  * (createHeJobWatchdog). Он считает окно от ПОСЛЕДНЕЙ активности — строки лога
  * стадии, запроса к БД (withStageActivity), завершённой операции
  * ввода-вывода (ctx.onActivity, stages/io.ts) или попытки запроса к модели
- * (канал активной джобы, lib/hypothesisEngine/llm.ts) — и прерывает молчащую
- * стадию,
- * а если та игнорирует abort, процесс выходит и его перезапускает docker.
+ * (канал активной джобы, lib/hypothesisEngine/llm.ts) — и в режиме 'enforce'
+ * (дефолт, HE_STAGE_WATCHDOG_MODE) прерывает молчащую стадию,
+ * а если та игнорирует abort, процесс выходит и его перезапускает docker. В
+ * режиме 'log' сторож только пишет, что прервал бы (см. STAGE_WATCHDOG).
+ *
+ * Переходы строки he_jobs, которые пишет воркер после стадии (done и отказ), —
+ * CAS по 'running' И по токену клейма (started_at, который поставил claimJob;
+ * см. readHeJobRowAfterCasMiss): отмена, легшая между чтением статуса и
+ * записью, больше не затирается 'done', и за отменённой строкой не ставятся ни
+ * следующая стадия, ни followups. Тот же контракт обязан держать self-requeue
+ * base_collect (requeueSelf в stages/baseCollect.ts).
  *
  * Запросы стадий к БД идут ОТДЕЛЬНЫМ клиентом (stageDb ниже): у каждого есть
  * срок на заголовки и на ПАУЗУ между кусками тела, и его обрывает сигнал джобы.
@@ -38,7 +46,9 @@
  * Числа таких записей здесь нет намеренно: полный список ведёт один докблок
  * paidCheckpointDb, а копия числа в шапке воркера с ним уже разъезжалась (две
  * записи стало четыре, когда освобождение дошло до ветки долива, потом список
- * вырос снова — план, проба среза, стор плана, расширение, конструктор).
+ * вырос снова — план, проба среза, стор плана, расширение, конструктор; запись
+ * постановки конструктора с 08.10.2026 из списка ушла — её id резервируется до
+ * вставки).
  * Поэтому вставшее тело жирной строки he_bases.data кончается само за
  * HE_STAGE_DB_TIMEOUT_MS, а abort сторожа доходит до транспорта — аварийный выход
  * процесса перестаёт быть единственным способом раскрутить такое чтение. Общий
@@ -75,7 +85,7 @@ import { createHeStageSupabase, isHeStageDbInterruption, HE_STAGE_DB_TIMEOUT_MS 
 // здесь означала бы, что следующий сюрприз Postgres починят в одном из двух
 // мест. Границу сторожит tests/architecture/verticalEngineV2Isolation.test.ts:
 // запрещён только verticalEngineV2.
-import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 // «Блип БД или приговор» — нейтральный предикат (lib/db/transientError.ts, без
 // импортов), общий с конструктором баз и ENG-роутами. Читается ТОЛЬКО там, где
 // решается судьба ЗАПРОСА (повторить ту же запись) и судьба джобы, стадия
@@ -184,6 +194,56 @@ function stageIdleTimeoutMs(): number {
  * прерывание, поэтому бесплатный выход не бесконечен.
  */
 const STAGE_ABORT_GRACE_MS = 2 * 60_000;
+
+/**
+ * Режим сторожа простоя: HE_STAGE_WATCHDOG_MODE = 'enforce' | 'log'.
+ *
+ *  - 'enforce' (ДЕФОЛТ, и он же при пустом или нераспознанном значении) —
+ *    поведение волны 3: окно молчания → abort джобы (прерывание 'inactivity',
+ *    бесплатное до HE_JOB_FREE_INTERRUPTIONS подряд), стадия не ответила за
+ *    STAGE_ABORT_GRACE_MS → выход процесса;
+ *  - 'log' — сторож ничего не прерывает: на каждое окно молчания пишет строку
+ *    «прервал бы» (джоба, стадия, сколько молчит, последняя активность, чего
+ *    ждёт процесс) и смотрит дальше. Ложный abort здоровой стадии в этом режиме
+ *    невозможен — ради наблюдения за ним режим и существует. Одно исключение:
+ *    джоба, уже ОТМЕНЁННАЯ пользователем (её сигнал взведён cancel-наблюдателем),
+ *    которая молчит целое окно, идёт путём 'enforce' (grace → выход процесса):
+ *    отмена обязана выиграть, а прерывать там уже нечего — её прервал клиент.
+ *
+ * Почему дефолт — 'enforce', а не 'log' (решение по фактам, ревизия 08.10.2026).
+ * 'log' безопасен дефолтом только если КАЖДАЯ операция, которую стадия ждёт,
+ * сама кончается за ограниченное время. Ограничены: вызов модели (срок попытки
+ * llm.ts, ≤ heLlmMaxAttemptMs, и счётные повторы), поиск и чтение сайта с DNS
+ * (withHeDeadline в stages/io.ts), запросы стадии к своей БД (stageDb: срок на
+ * заголовки и на паузу в теле), ожидание дочерних джоб (self-requeue, без
+ * ожидания внутри процесса). НЕ ограничены на стороне клиента:
+ *  - запросы к датасету Instantly (lib/instantlyDataset.ts, pg): statement_timeout
+ *    серверный, а молча оборванное TCP-соединение после отправки запроса держит
+ *    `await` вечно — RU-пути hypotheses, evidence (якорь %), chain, template,
+ *    dossier;
+ *  - запросы ночного долива ENG мимо клиента стадий: supabaseInstantly
+ *    (lib/supabaseInstantly.ts: локальный PostgREST снимает таймер на
+ *    заголовках, у hosted-пути таймера нет вовсе) — пресет и блок-лист долива
+ *    (clientLaunch/appendLeads.ts), — и записи журнала доставки через общий
+ *    supabaseAdmin (срок только на заголовки, тело не ограничено). HTTP
+ *    Instantly у долива ограничен целиком: загрузка — 90 000 мс вместе с телом
+ *    (хук активности включает timeoutIncludesBody), замер присутствия —
+ *    20 000 мс на запрос и 120 000 мс на весь замер.
+ * Пока любое из этого живо, 'log' дефолтом означал бы: зависшая стадия держит
+ * односоточный воркер — то есть ВСЕ проекты обоих рынков — до ручного
+ * рестарта, при зелёном healthcheck. Поэтому 'log' — только включаемый режим
+ * для наблюдения на выкатке.
+ */
+type HeStageWatchdogMode = 'enforce' | 'log';
+
+function parseHeStageWatchdogMode(raw: string | undefined): { mode: HeStageWatchdogMode; rejected: string | null } {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value === 'log') return { mode: 'log', rejected: null };
+  if (!value || value === 'enforce') return { mode: 'enforce', rejected: null };
+  return { mode: 'enforce', rejected: raw ?? null };
+}
+
+const STAGE_WATCHDOG = parseHeStageWatchdogMode(process.env.HE_STAGE_WATCHDOG_MODE);
 
 /**
  * Сколько прерываний ПОДРЯД не тратят попытку. Прерывание — не сбой стадии:
@@ -576,6 +636,74 @@ function clearHeJobRetryState(payload: Record<string, unknown> | null | undefine
   return next;
 }
 
+/**
+ * Тот ли это прогон: started_at строки равен токену клейма джобы (started_at,
+ * который поставил claimJob и вернул в строке). Сравниваем МОМЕНТЫ, а не
+ * текст: PostgREST отдаёт «…+00:00», Date#toISOString пишет «…Z».
+ */
+function heSameClaimToken(rowStartedAt: unknown, job: HeJob): boolean {
+  if (job.started_at === null || job.started_at === undefined) {
+    return rowStartedAt === null || rowStartedAt === undefined;
+  }
+  if (typeof rowStartedAt !== 'string') return false;
+  const row = Date.parse(rowStartedAt);
+  return Number.isFinite(row) && row === Date.parse(job.started_at);
+}
+
+/** Тот же момент времени у двух записей timestamptz (формат PostgREST против toISOString). */
+function heSameInstant(a: unknown, b: string): boolean {
+  if (typeof a !== 'string') return false;
+  const left = Date.parse(a);
+  return Number.isFinite(left) && left === Date.parse(b);
+}
+
+/** Что лежит в строке he_jobs после CAS-записи, не задевшей ни одной строки. */
+type HeJobRowAfterCasMiss =
+  /** Перечитать не удалось: состояние строки неизвестно. */
+  | { kind: 'unknown'; message: string }
+  /** Строки нет (удалена вместе с проектом). */
+  | { kind: 'gone' }
+  /**
+   * Строка есть. ownRun — started_at равен токену клейма ЭТОГО прогона;
+   * updatedAt — для узнавания своей же записи, легшей без ответа.
+   */
+  | { kind: 'row'; status: string; ownRun: boolean; updatedAt: unknown };
+
+/**
+ * Перечитать строку he_jobs после того, как CAS-запись воркера (done или отказ:
+ * `status = 'running'` И `started_at = токен клейма`, у строки без токена —
+ * `started_at is null`) вернула ноль строк. Ноль — это НЕ «записано»: строку
+ * закрыли без нас (отмена пользователем, удаление, self-requeue base_collect,
+ * новый клейм) — либо наша же прошлая попытка той же записи легла, а ответ на
+ * неё потерялся (обрыв соединения после отправки). Различает их только чтение.
+ *
+ * Токен — started_at, а не только статус: строку, которую успели вернуть в
+ * очередь и заклеймить заново, статус 'running' не отличает от нашей, и
+ * запоздавшая запись этого прогона легла бы поверх нового.
+ *
+ * Сам не бросает: отказ чтения — исход 'unknown', решение за вызывающим.
+ */
+async function readHeJobRowAfterCasMiss(client: HeWorkerDb, job: HeJob): Promise<HeJobRowAfterCasMiss> {
+  try {
+    const { data, error } = await client
+      .from('he_jobs')
+      .select('status, started_at, updated_at')
+      .eq('id', job.id)
+      .maybeSingle();
+    if (error) return { kind: 'unknown', message: error.message };
+    if (!data) return { kind: 'gone' };
+    const row = data as { status?: unknown; started_at?: unknown; updated_at?: unknown };
+    return {
+      kind: 'row',
+      status: typeof row.status === 'string' ? row.status : String(row.status),
+      ownRun: heSameClaimToken(row.started_at, job),
+      updatedAt: row.updated_at,
+    };
+  } catch (e) {
+    return { kind: 'unknown', message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** Короткая сводка того, чего ждёт event loop: «TCPSocketWrap×31, Timeout×12». */
 function summarizeActiveResources(limit = 8): string {
   const resources = typeof process.getActiveResourcesInfo === 'function' ? process.getActiveResourcesInfo() : [];
@@ -600,26 +728,42 @@ function summarizeActiveResources(limit = 8): string {
  * состояние после восстановления.
  *
  * Внешний abort (отмена пользователем) окно НЕ снимает: стадия, которая
- * игнорирует отмену и висит дальше, доедет до того же таймаута и выхода.
+ * игнорирует отмену и висит дальше, доедет до того же таймаута и выхода — в
+ * обоих режимах (см. STAGE_WATCHDOG).
+ *
+ * Режим 'log' (STAGE_WATCHDOG): по окну молчания — только onWouldAbort с
+ * фактическим временем молчания и новое окно; abort, срок grace и выход процесса
+ * не взводятся, пока джоба не отменена.
  */
 function createHeJobWatchdog(options: {
   abort: AbortController;
   idleMs: number;
   graceMs: number;
+  mode: HeStageWatchdogMode;
   /** Текст причины; в нём намеренно есть «timeout» — так его классифицирует кабинет. */
   reason: string;
   onTimeout: () => void;
+  /** Режим 'log': окно молчания прошло, enforce прервал бы стадию. Получает время молчания. */
+  onWouldAbort: (idleForMs: number) => void;
   /** Получает фактически прожданное после abort время. */
   onUnresponsive: (waitedMs: number) => void;
 }): { touch: () => void; stop: () => void } {
   let idleTimer: NodeJS.Timeout | undefined;
   let recoveryTimer: NodeJS.Timeout | undefined;
   let stopped = false;
+  let lastTouchAt = Date.now();
 
   const arm = () => {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       if (stopped) return;
+      // 'log': отчёт и следующее окно. Отменённую джобу (сигнал уже взведён
+      // отменой) это не касается — её висение ведёт к выходу, как в 'enforce'.
+      if (options.mode === 'log' && !options.abort.signal.aborted) {
+        options.onWouldAbort(Date.now() - lastTouchAt);
+        arm();
+        return;
+      }
       // Сначала отчёт, потом abort: abort освобождает застрявшие await'ы и
       // стирает картину того, чего они ждали.
       try {
@@ -640,6 +784,7 @@ function createHeJobWatchdog(options: {
     // Истёкшую стадию поздняя активность не оживляет: срок аварийного выхода
     // уже идёт, продлевать его нечем — стадия обязана была закончиться.
     if (stopped || recoveryTimer) return;
+    lastTouchAt = Date.now();
     arm();
   };
 
@@ -1097,9 +1242,15 @@ function forgetStrandedJob(id: string): void {
  * пять статусов, плюс отказ чтения и пропавшая строка), и что с ним делается:
  *  - чтение отвергнуто → ничего, следующий тик; попытки не тратятся;
  *  - 'running', запись с результатом, доставку не бросали → deliverDoneRow.
- *    Блип или срок — следующий тик, до STRANDED_DELIVERY_ATTEMPTS попыток;
- *    отказ не блипом или конец попыток — доставка БРОШЕНА (abandoned), и
- *    строку закрывает failJob с HeJobResultWriteError;
+ *    Его запись — CAS по 'running' и токену клейма прогона записи, поэтому
+ *    статус, прочитанный здесь, ничего не разрешает сам: отмена, легшая между
+ *    чтением и записью, даёт исход 'closed' (расход учтён, строка вычеркнута,
+ *    дальше ничего не ставится), 'running' чужого прогона — тоже 'closed', а
+ *    своя done-запись, легшая без ответа, — 'landed' (хвост на следующем тике,
+ *    чтение увидит 'done'). Блип или срок — следующий тик, до
+ *    STRANDED_DELIVERY_ATTEMPTS попыток; отказ не блипом или конец попыток —
+ *    доставка БРОШЕНА (abandoned), и строку закрывает failJob с
+ *    HeJobResultWriteError;
  *  - 'running' без результата или с брошенной доставкой → failJob исходным
  *    отказом. Не лёг — следующий тик. Лёг у записи без результата — она
  *    вычеркнута. Лёг у брошенной доставки — запись остаётся ещё на одно чтение:
@@ -1246,6 +1397,25 @@ async function collectStrandedJobs(): Promise<void> {
             `Job ${id} (${job.stage}) брошенный результат доставлен сборщиком (попытка ${entry.deliveryTries}) — `
               + 'оплаченная стадия не повторяется',
           );
+          continue;
+        }
+        // CAS done-записи не задел строку, а строка уже 'done' этого прогона:
+        // прошлая запись легла без ответа. Хвост (расход, дочейн, followups) —
+        // со своим дедупом на следующем тике: чтение статуса увидит 'done'.
+        if (outcome.kind === 'landed') {
+          persistStrandedJobs();
+          log('info', `Job ${id} (${job.stage}) брошенный результат уже лёг done-строкой — хвост доведу следующим тиком`);
+          continue;
+        }
+        // Строку закрыли без сборщика между чтением статуса и записью (отмена,
+        // удаление, чужой прогон): done не пишем, дальше ничего не ставим, но
+        // оплаченный расход учитываем.
+        if (outcome.kind === 'closed') {
+          const closed = outcome;
+          await withPostStageDeadline(job, 'stranded spend', async (client) => {
+            await bookClosedRunSpend(client, job, delivery, closed);
+          });
+          forgetStrandedJob(id);
           continue;
         }
         if (outcome.kind === 'retry' && entry.deliveryTries < STRANDED_DELIVERY_ATTEMPTS) {
@@ -1440,7 +1610,7 @@ async function resetStuckJobs() {
 }
 
 async function claimJob(): Promise<HeJob | null> {
-  const { data: pending } = await db
+  const { data: pending, error: pendingErr } = await db
     .from('he_jobs')
     .select('*')
     .eq('status', 'pending')
@@ -1451,12 +1621,19 @@ async function claimJob(): Promise<HeJob | null> {
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle();
+  // Отказ чтения раньше выглядел пустой очередью и не оставлял следа вовсе.
+  // Поведение то же (следующий тик поллера повторит), но причина видна.
+  if (pendingErr) log('error', `Pending he_jobs could not be read: ${pendingErr.message}`);
   if (!pending) return null;
 
   // attempts здесь НЕ инкрементируем: attempts — счётчик фейлов (failJob),
   // а не клеймов. Self-requeue base_collect переводит джобу в pending десятки
   // раз подряд — инкремент на клейме сжигал все попытки за секунды ожидания.
-  const { data: claimed } = await db
+  //
+  // started_at, который ставит клейм, — ТОКЕН ПРОГОНА: done- и fail-записи
+  // воркера (deliverDoneRow, writeJobFailure) пишут только поверх 'running' с
+  // этим же started_at.
+  const { data: claimed, error: claimErr } = await db
     .from('he_jobs')
     .update({
       status: 'running',
@@ -1467,6 +1644,12 @@ async function claimJob(): Promise<HeJob | null> {
     .eq('status', 'pending')
     .select('*')
     .maybeSingle();
+  // Клейм мог лечь без ответа: строка тогда 'running' без процесса и ждёт
+  // resetStuckJobs (рестарт) — платного повтора это не даёт, но без строки в
+  // логе такая джоба выглядела бы просто «не взятой».
+  if (claimErr) {
+    log('error', `Job ${(pending as HeJob).id} (${(pending as HeJob).stage}) claim update rejected: ${claimErr.message}`);
+  }
   return (claimed as HeJob | null) ?? null;
 }
 
@@ -1530,6 +1713,20 @@ const CHAIN_ENQUEUE_RETRY_MS = 1000;
  * чтения означает не «стадии нет», а «неизвестно», и insert на этом месте
  * ставил ВТОРУЮ копию следующей стадии — второй платный прогон того же
  * research. Повтор (chainNextResearchStage) перечитает дедуп заново.
+ *
+ * Второй барьер — проект всё ещё 'researching'. CAS done-записи закрывает
+ * отмену, легшую ДО неё; отмену, легшую сразу ПОСЛЕ (cancel-роут переводит
+ * 'researching' → 'draft', если у проекта нашлась другая активная джоба),
+ * видит только чтение проекта. Без него следующая стадия вставлялась в
+ * отменённый проект, и цепочка шла до clustering — до пяти оплаченных стадий,
+ * а clustering ещё и перетирал 'draft' на 'researched'. С ним в остаточную
+ * гонку (отмена между этим чтением и insert) проходит не больше одной
+ * стадии: следующий дочейн уже увидит 'draft'. Тот же барьер стоит в хвосте
+ * легшей done-строки (landedChainBlocker) — путей к этой вставке два, и
+ * барьер на обоих. RU не меняется: research-цепочка идёт только в
+ * 'researching' (его ставят старт исследования и site_profile; 'draft' —
+ * только отмена, 'failed' — только отказ, 'researched' — clustering, после
+ * которого следующей стадии нет).
  */
 async function enqueueNextResearchStage(client: HeWorkerDb, job: HeJob) {
   const nextStage = NEXT_RESEARCH_STAGE[job.stage];
@@ -1545,6 +1742,22 @@ async function enqueueNextResearchStage(client: HeWorkerDb, job: HeJob) {
     .maybeSingle();
   if (existingErr) throw new Error(`he_jobs ${nextStage} dedup read: ${existingErr.message}`);
   if (existing) return;
+
+  const { data: project, error: projectErr } = await client
+    .from('he_projects')
+    .select('status')
+    .eq('id', job.project_id)
+    .maybeSingle();
+  if (projectErr) throw new Error(`he_projects ${job.project_id} status read before ${nextStage}: ${projectErr.message}`);
+  const projectStatus = (project as { status?: unknown } | null)?.status;
+  if (projectStatus !== 'researching') {
+    log(
+      'info',
+      `Job ${job.id} (${job.stage}) → ${nextStage} не ставим: проект ${job.project_id} уже `
+        + `'${typeof projectStatus === 'string' ? projectStatus : 'удалён'}' (отмена или отказ легли после done)`,
+    );
+    return;
+  }
 
   const { error } = await client
     .from('he_jobs')
@@ -1599,17 +1812,20 @@ async function chainNextResearchStage(client: HeWorkerDb, job: HeJob) {
     }
   }
 
-  const reason = `chain stopped: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`;
+  // Текст отказа БД пригоден для Postgres не всегда (NUL, одиночный суррогат), а
+  // срез по 500 мог разрезать пару пополам — тогда отвергалась бы и сама запись
+  // причины. Для текста без суррогатов sliceWholeChars режет ровно как slice.
+  const reason = stripUnstorableJsonChars(`chain stopped: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
   try {
     await client
       .from('he_jobs')
-      .update({ error: reason.slice(0, 500), updated_at: new Date().toISOString() })
+      .update({ error: sliceWholeChars(reason, 0, 500), updated_at: new Date().toISOString() })
       .eq('id', job.id);
     await client
       .from('he_projects')
       .update({
         status: 'failed',
-        error: `${job.stage}: ${reason}`.slice(0, 500),
+        error: sliceWholeChars(`${job.stage}: ${reason}`, 0, 500),
         updated_at: new Date().toISOString(),
       })
       .eq('id', job.project_id)
@@ -1672,12 +1888,22 @@ async function handleJob(job: HeJob) {
     abort,
     idleMs,
     graceMs: STAGE_ABORT_GRACE_MS,
+    mode: STAGE_WATCHDOG.mode,
     reason: `HE ${job.stage} inactivity timeout`,
     // Где стояла джоба: её последняя строка лога и чего ждёт процесс (сокеты,
     // DNS-запросы, чтения файлов) — после abort этой картины уже не будет.
     onTimeout: () => log(
       'error',
       `Inactivity timeout: job ${job.id} (${job.stage}) after ${idleMs}ms; `
+        + `last activity: ${lastActivity}; active resources: ${summarizeActiveResources()}`,
+    ),
+    // Режим 'log': та же картина, но стадию не трогаем. Строку ищут по
+    // «would abort» — по ней и решают, можно ли включать 'enforce' там, где он
+    // выключен, и не ложный ли это сигнал.
+    onWouldAbort: (idleForMs) => log(
+      'warn',
+      `Inactivity (log mode, would abort): job ${job.id} (${job.stage}) project ${job.project_id} `
+        + `idle ${idleForMs}ms ≥ window ${idleMs}ms — стадию НЕ прерываем; `
         + `last activity: ${lastActivity}; active resources: ${summarizeActiveResources()}`,
     ),
     onUnresponsive: (waitedMs) => {
@@ -1871,17 +2097,42 @@ async function handleJob(job: HeJob) {
   // Результат и бухгалтерия финализации — один объект: его же получит сборщик,
   // если строку придётся бросить, и по нему он знает, что уже записано.
   const delivery: HeStrandedDelivery = { result: stageResult.result, tokensUsed, costUsd, projectBooked: false };
-  const finalized = await withPostStageDeadline(job, 'finalization', async (client, signal) => {
-    if (interrupted) {
-      // Прерывание идёт той же политикой, что и в catch: бесплатно до
-      // HE_JOB_FREE_INTERRUPTIONS подряд, с паузой run_after, дальше обычная
-      // попытка. Платную работу, которую стадия успела сделать до abort,
-      // сначала записываем — повтор её не вернёт.
-      await recordStageSpend(client, job, tokensUsed, costUsd, `прерывание ${heJobInterruptionKind(abortReason)}`);
-      throw abortReason;
-    }
-    await finalizeJob(client, signal, job, delivery);
-  });
+  let finalized: boolean;
+  try {
+    finalized = await withPostStageDeadline(job, 'finalization', async (client, signal) => {
+      if (interrupted) {
+        // Прерывание идёт той же политикой, что и в catch: бесплатно до
+        // HE_JOB_FREE_INTERRUPTIONS подряд, с паузой run_after, дальше обычная
+        // попытка. Платную работу, которую стадия успела сделать до abort,
+        // сначала записываем — повтор её не вернёт.
+        await recordStageSpend(client, job, tokensUsed, costUsd, `прерывание ${heJobInterruptionKind(abortReason)}`);
+        throw abortReason;
+      }
+      await finalizeJob(client, signal, job, delivery);
+    });
+  } catch (e) {
+    // Наверх (pollOnce → failJob) уходят только два НАМЕРЕННЫХ отказа:
+    // прерывание (стадия не доработала — повтор по политике прерываний) и
+    // терминальный HeJobResultWriteError (done-запись отвергнута не блипом —
+    // 'failed' без повтора). Любой ДРУГОЙ отказ финализации ЗАВЕРШЁННОЙ стадии
+    // раньше становился обычным фейлом: attempts+1, 'pending' — и стадия,
+    // результат которой уже на руках, оплачивалась заново. Теперь он отдаёт
+    // строку с результатом сборщику: тот прочитает статус и доставит done-строку
+    // ('running'), доведёт хвост легшей ('done') или закроет строку без повтора.
+    if (interrupted || isHeJobTerminal(e)) throw e;
+    markJobStranded(job, 'finalization threw', {
+      failure: new HeJobResultWriteError(
+        `he_jobs finalization abandoned (finalization threw): ${e instanceof Error ? e.message : String(e)}`,
+      ),
+      delivery,
+    });
+    log(
+      'error',
+      `Job ${job.id} (${job.stage}) финализация бросила неожиданный отказ — стадию НЕ повторяем, `
+        + `результат доставит сборщик: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return;
+  }
   if (!finalized) {
     // Срок участка истёк: строка осталась 'running'. Раньше её не подбирал
     // никто до ближайшего рестарта процесса.
@@ -1910,6 +2161,19 @@ async function handleJob(job: HeJob) {
  * блипом или оборвана сроком), строка с ГОТОВЫМ результатом уходит сборщику
  * (markJobStranded) — он доставит её, когда БД вернётся. Терминальный отказ
  * (HeJobResultWriteError) бросается только на отказ НЕ блипом.
+ *
+ * Чтение статуса ниже — быстрый путь (self-requeue, отмена до конца стадии), а
+ * НЕ разрешение писать: между ним и done-записью может лечь отмена. Решает сама
+ * запись — CAS по 'running' и токену клейма (deliverDoneRow). Весь набор
+ * исходов и что с ним делается:
+ *  - 'delivered' — done лёг этой записью: расход, дочейн, followups;
+ *  - 'landed' — CAS не задел строку, а она уже 'done' ЭТОГО прогона: наша
+ *    прошлая попытка легла, ответ потерян (обрыв соединения после отправки).
+ *    Хвост — finishLandedDoneRow, с дедупом каждого шага; не дошёл — сборщику;
+ *  - 'closed' — строку закрыли без нас (отмена, удаление, чужой прогон):
+ *    done НЕ пишем, дочейн и followups НЕ ставим, оплаченный расход учитываем;
+ *  - 'retry' — блип или срок: сборщику с результатом;
+ *  - 'refused' — отказ не блипом: терминальный HeJobResultWriteError.
  */
 async function finalizeJob(
   client: HeWorkerDb,
@@ -1993,17 +2257,55 @@ async function finalizeJob(
       log('error', `Job ${job.id} (${job.stage}) usage/payload update failed: ${waitingErr.message}`);
     }
     delivery.projectBooked = await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
+    // Весь набор статусов he_jobs_status_check, кроме 'running': 'cancelled' —
+    // отмена; 'pending' — self-requeue base_collect (другого писателя 'pending'
+    // поверх строки, пока её прогон идёт, у single-flight воркера нет); 'done' и
+    // 'failed' — строку закрыли без этого прогона. Ни в одном случае done не
+    // пишется и ничего дальше не ставится.
     log(
       'info',
       cancelled
         ? `Job ${job.id} (${job.stage}) → cancelled пользователем (+${tokensUsed} tok до отмены)`
-        : `Job ${job.id} (${job.stage}) → waiting (self-requeue, +${tokensUsed} tok)`,
+        : current.status === 'pending'
+          ? `Job ${job.id} (${job.stage}) → waiting (self-requeue, +${tokensUsed} tok)`
+          : `Job ${job.id} (${job.stage}) → строка уже '${current.status}' без этого прогона — done не пишем, `
+            + `дальше ничего не ставим (+${tokensUsed} tok учтено)`,
     );
+    // Стадия доработала, а строку отменили: база могла остаться 'analyzing' без
+    // живой джобы (запись баз у роута отмены не легла) — тот же ремонт, что у
+    // отмены в записи отказа.
+    if (cancelled) await closeAnalyzingBaseAfterCancel(client, job);
     return;
   }
 
   const outcome = await deliverDoneRow(client, signal, job, delivery);
   if (outcome.kind === 'delivered') return;
+  if (outcome.kind === 'landed') {
+    // Наша прошлая попытка done-записи легла без ответа. Обычный хвост
+    // deliverDoneRow здесь не годится — его дедуп видит только живое, — поэтому
+    // тот же хвост, что у сборщика, с барьером на каждом шаге. Он бросает на
+    // отказе чтения дедупа: тогда строку с результатом доводит сборщик (прочитав
+    // 'done', он идёт в этот же хвост со своим счётом попыток), а не failJob —
+    // повтор оплаченной стадии здесь недопустим.
+    try {
+      await finishLandedDoneRow(client, job, delivery);
+    } catch (e) {
+      markJobStranded(job, 'landed done tail failed', {
+        failure: new HeJobResultWriteError('he_jobs finalization abandoned (landed done tail failed)'),
+        delivery,
+      });
+      log(
+        'error',
+        `Job ${job.id} (${job.stage}) done-строка легла без ответа, хвост не доведён — доведёт сборщик: `
+          + `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    return;
+  }
+  if (outcome.kind === 'closed') {
+    await bookClosedRunSpend(client, job, delivery, outcome);
+    return;
+  }
   // Расход прогона попадает в воронку НЕЗАВИСИМО от судьбы записи: вызовы
   // оплачены, и занижалась ровно та сумма, которая иначе тратится второй раз.
   // Раньше throw стоял ПЕРЕД учётом — отчёт о себестоимости терял именно
@@ -2033,16 +2335,66 @@ async function finalizeJob(
 /** Чем кончилась доставка done-строки. */
 type HeDoneWriteOutcome =
   | { kind: 'delivered' }
+  /**
+   * CAS не задел строку, а она уже 'done' этого прогона: прошлая попытка этой
+   * записи легла, ответ на неё потерян. Хвост — finishLandedDoneRow.
+   */
+  | { kind: 'landed' }
+  /**
+   * Строку закрыли без этого прогона: отмена, удаление, чужой прогон (новый
+   * клейм), self-requeue. status — что прочитано (null — строки нет); ownRun —
+   * started_at строки всё ещё токен этого прогона (отмена его не меняет).
+   */
+  | { kind: 'closed'; status: string | null; ownRun: boolean }
   /** Блип БД или срок участка: ту же запись можно повторить позже. */
   | { kind: 'retry'; message: string }
   /** Запись отвергнута не блипом: повтор её не исправит. */
   | { kind: 'refused'; message: string };
 
 /**
+ * Учёт расхода прогона, строку которого закрыли без него (исход 'closed').
+ * Вызовы модели оплачены при любом исходе строки. В he_jobs расход пишем
+ * только строке СВОЕГО прогона (ownRun: отменённой — отмена started_at не
+ * меняет): у строки чужого прогона счётчики ведёт её прогон, и наша запись от
+ * нашего снимка затёрла бы их, а удалённой строке писать некуда. В he_projects
+ * — всегда, если ещё не учтено.
+ */
+async function bookClosedRunSpend(
+  client: HeWorkerDb,
+  job: HeJob,
+  delivery: HeStrandedDelivery,
+  closed: { status: string | null; ownRun: boolean },
+): Promise<void> {
+  const seen = closed.status ?? 'удалена';
+  const why = `строка уже '${seen}' без этого прогона — done не пишем`;
+  if (closed.ownRun) {
+    await recordStageSpend(client, job, delivery.tokensUsed, delivery.costUsd, why, delivery);
+  } else if (!delivery.projectBooked) {
+    delivery.projectBooked = await accumulateProjectUsage(client, job.project_id, delivery.tokensUsed, delivery.costUsd);
+  }
+  log(
+    closed.status === 'cancelled' ? 'info' : 'warn',
+    `Job ${job.id} (${job.stage}) done-запись не легла: строка уже '${seen}'`
+      + `${closed.ownRun ? '' : ' (другой прогон или без токена клейма)'} — `
+      + `стадия оплачена, но следующую стадию и followups не ставим `
+      + `(+${delivery.tokensUsed} tok, $${delivery.costUsd.toFixed(6)}, he_projects ${delivery.projectBooked ? 'учтён' : 'НЕ учтён'})`,
+  );
+}
+
+/**
  * Записать done-строку готового результата и довести финализацию до конца
  * (расход в he_projects, дочейн, followups). Общая для финализации и сборщика
  * брошенных строк: результат один и тот же, и путь у него должен быть один.
  * Наружу не бросает: исход записи — в возвращаемом значении.
+ *
+ * Запись — CAS: `status = 'running'` И `started_at = токен клейма` (у строки
+ * без токена — `started_at is null`). Раньше это был безусловный UPDATE по id
+ * после ОТДЕЛЬНОГО чтения статуса: отмена, легшая между чтением и записью,
+ * затиралась 'done', и дальше chainNextResearchStage и
+ * enqueueAutopilotFollowups ставили НОВЫЕ платные стадии отменённому проекту.
+ * Сколько строк задето, читаем из ответа (select); ноль — перечитываем строку
+ * (readHeJobRowAfterCasMiss) и дальше ничего не ставим, если она не 'done'
+ * этого же прогона.
  */
 async function deliverDoneRow(
   client: HeWorkerDb,
@@ -2070,14 +2422,25 @@ async function deliverDoneRow(
    * бесплатным прерыванием — оплаченная стадия исполнялась заново до пяти раз);
    * потом её начали бросать наверх, и транзиентный 503 PostgREST после вызова
    * на 32768 токенов стал обычным фейлом стадии, то есть ТОТ ЖЕ вызов
-   * оплачивался ещё дважды. Повторяем то, что сломалось: запись идемпотентна и
-   * адресована по id, а стадия — нет.
+   * оплачивался ещё дважды. Повторяем то, что сломалось: запись адресована по
+   * id, а стадия — нет.
+   *
+   * С CAS повтор уже не «идемпотентен вслепую»: если прошлая попытка легла, а
+   * ответ потерялся (обрыв соединения после отправки — транспорт такой PATCH
+   * сам не повторяет), следующая попытка задевает ноль строк. Это узнаёт чтение
+   * после цикла ('landed'), а не повтор.
    */
   let doneErr: { message: string; transient: boolean } | null = null;
+  let matched = false;
   for (let attempt = 1; attempt <= DONE_WRITE_ATTEMPTS; attempt += 1) {
-    const { error, status } = await client.from('he_jobs').update(doneRow).eq('id', job.id);
+    const write = client.from('he_jobs').update(doneRow).eq('id', job.id).eq('status', 'running');
+    const { data, error, status } = await (job.started_at
+      ? write.eq('started_at', job.started_at)
+      : write.is('started_at', null)
+    ).select('id');
     if (!error) {
       doneErr = null;
+      matched = Array.isArray(data) && data.length > 0;
       break;
     }
     doneErr = { message: error.message, transient: isTransientDbError(error, status) };
@@ -2093,6 +2456,24 @@ async function deliverDoneRow(
     return signal.aborted || doneErr.transient
       ? { kind: 'retry', message: doneErr.message }
       : { kind: 'refused', message: doneErr.message };
+  }
+  if (!matched) {
+    const row = await readHeJobRowAfterCasMiss(client, job);
+    // Не знаем, что в строке, — не гадаем: сборщик перечитает статус и разберёт
+    // весь набор сам ('running' — доставит, 'done' — хвост, иначе — закроет).
+    if (row.kind === 'unknown') {
+      return { kind: 'retry', message: `done write matched no row; re-read failed: ${row.message}` };
+    }
+    if (row.kind === 'gone') return { kind: 'closed', status: null, ownRun: false };
+    // 'done' пишет ТОЛЬКО воркер, и заклеймить строку можно только из
+    // 'pending': 'done' с нашим токеном — это наша же прошлая попытка.
+    if (row.status === 'done' && row.ownRun) return { kind: 'landed' };
+    // 'running' с нашим токеном после CAS, не задевшего строку, — противоречие
+    // одного мгновения; не пишем и не ставим ничего, решит перечитывание сборщика.
+    if (row.status === 'running' && row.ownRun) {
+      return { kind: 'retry', message: 'done write matched no row while the row still reads running' };
+    }
+    return { kind: 'closed', status: row.status, ownRun: row.ownRun };
   }
 
   if (!delivery.projectBooked) {
@@ -2123,8 +2504,10 @@ async function deliverDoneRow(
 /**
  * Хвост done-строки, которая ЛЕГЛА без подтверждения: UPDATE закоммичен, а
  * ответ на него не дошёл (каждый повтор получил 502 шлюза) либо срок участка
- * оборвал финализацию уже после записи. Зовёт его сборщик, прочитав 'done' у
- * записи с результатом (collectStrandedJobs).
+ * оборвал финализацию уже после записи. Зовут его двое: сборщик, прочитав
+ * 'done' у записи с результатом (collectStrandedJobs), и сама финализация,
+ * когда CAS done-записи не задел строку, а та уже 'done' этого прогона
+ * (исход 'landed' у deliverDoneRow: прошлая попытка легла, ответ потерян).
  *
  * Шаги те же, что у deliverDoneRow после записи, но любой из них мог УЖЕ
  * случиться — финализация успела часть до обрыва, или прошлый тик сборщика
@@ -2179,7 +2562,7 @@ async function finishLandedDoneRow(
   }
   log(
     'info',
-    `Job ${job.id} (${job.stage}) → done: хвост легшей done-строки доведён сборщиком `
+    `Job ${job.id} (${job.stage}) → done: хвост легшей done-строки доведён `
       + `(+${tokensUsed} tok, $${costUsd.toFixed(6)}, he_projects ${delivery.projectBooked ? 'учтён' : 'НЕ учтён'})`,
   );
 }
@@ -2198,10 +2581,13 @@ async function finishLandedDoneRow(
  * только активных research-джоб нет, а эта уже 'done'). В обоих случаях
  * ставить нечего.
  *
- * Второе условие — проект всё ещё 'researching'. Хвост приходит позже обычной
- * финализации (минуты, а при лежащей БД и дольше), и за это время cancel-роут
- * мог перевести проект в 'draft', а отказ — в 'failed': дочейн после этого —
- * платная стадия проекта, который её не ждёт.
+ * Второе условие — проект всё ещё 'researching'. Из сборщика хвост приходит
+ * позже обычной финализации (минуты, а при лежащей БД и дольше), и за это время
+ * cancel-роут мог перевести проект в 'draft', а отказ — в 'failed': дочейн
+ * после этого — платная стадия проекта, который её не ждёт. Тот же барьер
+ * теперь стоит и в самой вставке (enqueueNextResearchStage), так что здесь он
+ * дублируется сознательно: отказ ЭТОГО чтения бросает и отдаёт хвост
+ * следующему тику, а не превращается в 'chain stopped' с проектом 'failed'.
  */
 async function landedChainBlocker(client: HeWorkerDb, job: HeJob): Promise<string | null> {
   const [newer, project] = await Promise.all([
@@ -2304,7 +2690,9 @@ async function landedFollowupBlocker(client: HeWorkerDb, job: HeJob): Promise<st
  *    закрывает сама стадия на ПЕРВОМ же повторе (её start-guard узнаёт
  *    'analyzing' с непустыми row_count/columns и бесплатно доставляет анализ),
  *    так что сюда доезжают только те базы, чья сборка не дожила до повтора
- *    вовсе — отменена, исчерпала попытки на другом отказе, умерла с подом.
+ *    вовсе — исчерпала попытки на другом отказе, умерла с подом. (Отменённая
+ *    сборка сюда не приходит: отказ отменённой строки — ветка отмены
+ *    writeJobFailure, и её базу разбирает closeAnalyzingBaseAfterCancel.)
  *    Здесь база
  *    ГОДНА к анализу, и правильный ремонт — поставить пропавшую джобу
  *    анализа, а не выбросить оплаченные строки в 'failed' ради выхода из
@@ -2347,7 +2735,8 @@ async function repairBaseAfterCollectFinalFail(
       .from('he_bases')
       .update({
         status: 'failed',
-        error: error.slice(0, 500),
+        // msg уже очищен (writeJobFailure, сборщик); срез — по целым символам.
+        error: sliceWholeChars(error, 0, 500),
         updated_at: new Date().toISOString(),
       })
       .eq('id', baseId)
@@ -2490,6 +2879,108 @@ async function repairBaseAfterCollectFinalFail(
 }
 
 /**
+ * Причина в he_bases.error у базы, остановленной отменой, — те же строки, что
+ * пишут роуты отмены (ENG: api/client/eng/projects/[id]/cancel, staff:
+ * api/tools/hypothesis-engine/projects/[id]/cancel). Кабинет узнаёт обе ПОЛНЫМ
+ * совпадением и показывает отмену, а не сбой (clientEngProjection:
+ * STAGE_CANCELLED_MARKERS): наружу уходит код 'cancelled', не сама строка.
+ */
+const HE_BASE_CANCELLED_ERROR_EN = 'Cancelled by user';
+const HE_BASE_CANCELLED_ERROR_RU = 'Отменено пользователем';
+
+/**
+ * Довести ОТМЕНУ до базы, которую отменённая джоба оставила в 'analyzing' без
+ * живой джобы: 'failed' с текстом отмены — ровно то, что роут отмены сделал бы
+ * с ней сам, не будь гонки.
+ *
+ * Откуда такая база. Роуты отмены пишут сначала джобы ('cancelled'), потом базы
+ * ('collecting'/'analyzing' → 'failed'), а стадия видит отмену только на тике
+ * наблюдателя (CANCEL_WATCH_MS, 3 с). В этом окне база оживает:
+ *  - финальная запись harvest base_collect (stages/baseCollect.ts, без барьера
+ *    по статусу — см. там) легла после записи баз роутом, а постановку анализа
+ *    отмена уже не пустила (абортнутый клиент стадий или проверка владения
+ *    assertOwnRunningJob);
+ *  - запись баз у роута не легла вовсе (он её только журналирует).
+ * Раньше такая база висела 'analyzing' НАВСЕГДА: «Analyzing the base…» в
+ * кабинете и «Разбираем…» у специалиста при отменённой джобе. У RU-инструмента
+ * её не лечит никто, а у ENG её «лечит» кнопка «Start outreach» —
+ * repairOrphanAnalyzingBase заново ставит и оплачивает анализ, который клиент
+ * только что отменил.
+ *
+ * Почему 'failed', а не новый анализ (вставка которого бесплатна, а прогон —
+ * нет): отмена — решение человека, и повторная постановка её бы перечеркнула.
+ * Новую работу по вертикали человек запускает сам — как после обычной отмены.
+ *
+ * Текст — по рынку проекта (ENG-роут пишет английский, staff-роут — русский;
+ * у ENG-проекта, отменённого из staff-инструмента, здесь будет английский —
+ * кабинет узнаёт оба). Рынок не прочитался — английский: его тоже узнают оба
+ * экрана, а русского текста в ENG-базе не будет ни при каком исходе.
+ *
+ * Что НЕ трогаем:
+ *  - базу не в 'analyzing': терминальная ('analyzed'/'failed') уже решена;
+ *    'collecting' без джобы — ремонт сироты СБОРКИ, отдельная волна
+ *    (P-C-enqueue-orphan-repair); 'uploaded' — анализ ещё не начинался;
+ *  - базу, по которой есть ЖИВАЯ джоба (например, «Start outreach» уже поставил
+ *    ей анализ — последнее слово за человеком);
+ *  - ничего при сбое любого чтения: «неизвестно» ≠ «мертва».
+ * Запись — CAS по 'analyzing'. ФИНАЛЬНО упавший (не отменённый) анализ сюда не
+ * относится: его база остаётся 'analyzing', как и раньше, потому что 'failed'
+ * открыл бы автопилоту новую ПЛАТНУЮ сборку вертикали (дочейн после chain
+ * сборку ставит, когда у вертикали нет 'analyzing'/'analyzed'-базы), а сейчас
+ * он такую базу пропускает (analysis_failed_before).
+ *
+ * Только для стадий, у которых база — предмет работы (base_collect,
+ * base_analyze), и только с base_id в payload. Никогда не бросает: зовётся из
+ * записи отказа и из финализации.
+ */
+async function closeAnalyzingBaseAfterCancel(client: HeWorkerDb, job: HeJob): Promise<void> {
+  if (job.stage !== 'base_collect' && job.stage !== 'base_analyze') return;
+  const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
+  if (!baseId) return;
+  try {
+    const { data: baseRow, error: baseErr } = await client
+      .from('he_bases')
+      .select('status')
+      .eq('id', baseId)
+      .maybeSingle();
+    if (baseErr) throw new Error(`he_bases read: ${baseErr.message}`);
+    if ((baseRow as { status?: unknown } | null)?.status !== 'analyzing') return;
+    const liveBaseIds = await liveHeJobBaseIds(client, job.project_id);
+    if (liveBaseIds.has(baseId)) {
+      log('info', `Job ${job.id} (${job.stage}) отменена; база ${baseId} в analyzing, но по ней есть живая джоба — не трогаем`);
+      return;
+    }
+    const { data: project, error: projectErr } = await client
+      .from('he_projects')
+      .select('market')
+      .eq('id', job.project_id)
+      .maybeSingle();
+    const reason = !projectErr && normalizeHeMarket((project as { market?: string } | null)?.market) !== 'us'
+      ? HE_BASE_CANCELLED_ERROR_RU
+      : HE_BASE_CANCELLED_ERROR_EN;
+    const { data: closed, error: closeErr } = await client
+      .from('he_bases')
+      .update({ status: 'failed', error: reason, updated_at: new Date().toISOString() })
+      .eq('id', baseId)
+      .eq('status', 'analyzing')
+      .select('id');
+    if (closeErr) throw new Error(`he_bases update: ${closeErr.message}`);
+    log(
+      'info',
+      Array.isArray(closed) && closed.length > 0
+        ? `Job ${job.id} (${job.stage}) отменена; база ${baseId} оставалась analyzing без живой джобы → failed («${reason}»)`
+        : `Job ${job.id} (${job.stage}) отменена; база ${baseId} уже не analyzing — не трогаем`,
+    );
+  } catch (e) {
+    log(
+      'error',
+      `Job ${job.id} (${job.stage}) отменена, но база ${baseId} не закрыта и может остаться analyzing: `
+        + `${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
  * Сколько ждать до повтора, если провайдер попросил подождать (429).
  * Попытку это НЕ экономит (см. RATE_LIMIT_PAUSE_DEFAULT_MS) — только отодвигает
  * повтор на время, которое назвал сам провайдер.
@@ -2530,7 +3021,9 @@ async function writeJobFailure(
    */
   const safeMsg = stripUnstorableJsonChars(msg);
   // Отменённая пользователем джоба: стадия упала по AbortSignal. Это не фейл —
-  // не инкрементируем attempts, не затираем 'cancelled', не валим проект/базу.
+  // не инкрементируем attempts, не затираем 'cancelled', не валим проект. Базу
+  // трогает один случай — 'analyzing', оставшаяся без живой джобы
+  // (closeAnalyzingBaseAfterCancel).
   // Чтение — быстрый путь для лога; если оно не прочиталось (или отмена легла
   // ПОСЛЕ него), 'cancelled' защищает CAS самой записи отказа ниже.
   const { data: currentBefore } = await client
@@ -2540,6 +3033,7 @@ async function writeJobFailure(
     .maybeSingle();
   if (currentBefore && (currentBefore as { status: string }).status === 'cancelled') {
     log('info', `Job ${job.id} (${job.stage}) aborted by user cancel`);
+    await closeAnalyzingBaseAfterCancel(client, job);
     return true;
   }
 
@@ -2664,7 +3158,11 @@ async function writeJobFailure(
   const failRow = {
     status: finalFail ? 'failed' : 'pending',
     attempts: nextAttempts,
-    error: safeMsg.slice(0, 500),
+    // Срез по целым символам: safeMsg уже без одиночных суррогатов, но slice(0,
+    // 500) мог разрезать эмодзи пополам и вернуть одиночный high-суррогат — и
+    // PostgREST отверг бы всю запись отказа (строка осталась бы 'running', а
+    // сборщик повторял бы ту же отвергнутую запись каждым тиком).
+    error: sliceWholeChars(safeMsg, 0, 500),
     finished_at: finalFail ? new Date().toISOString() : null,
     ...retryState,
     updated_at: new Date().toISOString(),
@@ -2674,29 +3172,44 @@ async function writeJobFailure(
    * транзиентный отказ БД стоил ЦЕЛОЙ ДЖОБЫ: апдейт отвергался, строка
    * оставалась 'running', и подобрать её было некому до следующего рестарта
    * процесса — вместе с ней стоял весь проект, потому что воркер single-flight.
-   * Повторяется ЗАПРОС: он адресован по id и идемпотентен (одни и те же
-   * attempts, run_after считается до цикла), поэтому лишних прогонов стадии не
-   * появляется ни одного. Не легла и после повторов — вызывающий отдаёт
-   * строку сборщику (pollOnce, resetStuckJobs → markJobStranded).
+   * Повторяется ЗАПРОС (одни и те же attempts, run_after считается до цикла),
+   * поэтому лишних прогонов стадии не появляется ни одного. Не легла и после
+   * повторов — вызывающий отдаёт строку сборщику (pollOnce, resetStuckJobs →
+   * markJobStranded).
    *
-   * Запись — с CAS по статусу: она ложится только поверх 'running', 'pending'
-   * (self-requeue base_collect) или 'failed' (повтор, чей первый ответ
-   * потерялся, хотя запись легла), но НИКОГДА поверх 'cancelled' и 'done'.
-   * Без CAS отмена, легшая между чтением выше и записью (или между попытками
-   * повтора), перетиралась 'pending' — отменённая работа воскресала и снова
-   * оплачивалась; а 'done' стирал бы сохранённый результат оплаченной стадии.
-   * Сколько строк задето, читаем из ответа (select): ноль — строка закрыта
-   * без нас, и проект/базу этот отказ не трогает, как и ветка отмены выше.
+   * Запись — CAS по 'running' И по токену клейма (started_at этого прогона; у
+   * строки без токена — `started_at is null`), тот же контракт, что у
+   * done-записи (deliverDoneRow). Весь набор статусов строки и исход:
+   *  - 'running' этого прогона → запись ложится;
+   *  - 'cancelled' → не ложится: отмена, легшая между чтением выше и записью,
+   *    больше не перетирается 'pending' (отменённая работа воскресала и снова
+   *    оплачивалась);
+   *  - 'done' → не ложится: результат оплаченной стадии не стирается;
+   *  - 'pending' → не ложится. Раньше CAS пускал 'pending' ради self-requeue
+   *    base_collect, но этот прогон requeue сам и сделал (requeueSelf стоит
+   *    прямо перед return), и отказ поверх него только тратил попытку и на
+   *    последней валил базу — хотя requeue лёг и следующий тик идёт штатно;
+   *  - 'failed' → не ложится; свою же запись, легшую без ответа, узнаём ниже по
+   *    чтению (статус и updated_at этой записи), а не повтором поверх 'failed';
+   *  - 'running' ДРУГОГО прогона (строку вернули в очередь и заклеймили
+   *    заново) → не ложится: запоздавший отказ не закрывает чужой прогон.
+   * Сколько строк задето, читаем из ответа (select); ноль — перечитываем
+   * строку: своя запись, легшая без ответа, → дальше как записанная; строку
+   * закрыли без нас → проект этот отказ не трогает, а базу — только когда
+   * строку отменили и база осталась 'analyzing' без живой джобы
+   * (closeAnalyzingBaseAfterCancel, как и ветка отмены выше); перечитать не
+   * удалось → как отказ записи (сборщик перечитает статус).
    */
   let failErrMsg: string | null = null;
   let failLanded = true;
+  /** Строку закрыли без нас, и перечитанный статус — 'cancelled' (см. ниже). */
+  let closedByCancel = false;
   for (let attempt = 1; attempt <= FAIL_WRITE_ATTEMPTS; attempt += 1) {
-    const { data: landed, error, status } = await client
-      .from('he_jobs')
-      .update(failRow)
-      .eq('id', job.id)
-      .in('status', ['running', 'pending', 'failed'])
-      .select('id');
+    const write = client.from('he_jobs').update(failRow).eq('id', job.id).eq('status', 'running');
+    const { data: landed, error, status } = await (job.started_at
+      ? write.eq('started_at', job.started_at)
+      : write.is('started_at', null)
+    ).select('id');
     if (!error) {
       failErrMsg = null;
       failLanded = Array.isArray(landed) && landed.length > 0;
@@ -2712,6 +3225,19 @@ async function writeJobFailure(
     );
     await sleep(FAIL_WRITE_RETRY_BASE_MS * attempt);
   }
+  if (!failErrMsg && !failLanded) {
+    const row = await readHeJobRowAfterCasMiss(client, job);
+    if (row.kind === 'unknown') {
+      failErrMsg = `fail write matched no row; re-read failed: ${row.message}`;
+    } else if (row.kind === 'row' && row.status === failRow.status && heSameInstant(row.updatedAt, failRow.updated_at)) {
+      // Прошлая попытка этой же записи легла, ответ на неё потерян: строка
+      // несёт ровно наш статус и наш updated_at (триггеров на he_jobs нет,
+      // updated_at ставит только писатель).
+      failLanded = true;
+    } else if (row.kind === 'row' && row.status === 'cancelled') {
+      closedByCancel = true;
+    }
+  }
   // Сбой записи отказа виден в логе: без него джоба осталась бы 'running' до
   // рестарта, и причина (та, что в msg) не попала бы никуда вообще.
   const failErr = failErrMsg ? { message: failErrMsg } : null;
@@ -2721,8 +3247,12 @@ async function writeJobFailure(
     log(
       'info',
       `Job ${job.id} (${job.stage}) отказ не записан: строка уже закрыта без воркера `
-        + `(отменена пользователем, завершена или удалена) — проект и базу не трогаем: ${msg}`,
+        + `(отменена пользователем, завершена или удалена) — проект не трогаем`
+        + `${closedByCancel ? ', базу — только если она осталась analyzing без живой джобы' : ' и базу не трогаем'}: ${msg}`,
     );
+    // Отмена, легшая ПОСЛЕ чтения статуса выше, — тот же случай, что ветка
+    // отмены в начале функции, и тот же ремонт базы.
+    if (closedByCancel) await closeAnalyzingBaseAfterCancel(client, job);
     return true;
   }
 
@@ -2736,15 +3266,23 @@ async function writeJobFailure(
   if (opsStop) alertTeamOnClientStop(job, opsStop, msg);
 
   // Финальный фейл research-стадии валит весь research-пайплайн проекта.
+  // CAS по 'researching' — как у записи причины в chainNextResearchStage:
+  // отмена, легшая между записью отказа и этой записью, уже перевела проект в
+  // 'draft', и затирать её фейлом нельзя. Вне этой гонки research-стадия падает
+  // в 'researching' — RU и ENG пишут то же, что раньше. Единственное другое
+  // состояние — старт исследования, чья запись 'researching' сама отказала
+  // (researchJob.ts: роут ответил ошибкой, джоба site_profile уже стоит): такой
+  // проект остаётся 'draft', а не 'failed', и запускается заново той же кнопкой.
   if (finalFail && RESEARCH_STAGES.has(job.stage)) {
     await client
       .from('he_projects')
       .update({
         status: 'failed',
-        error: `${job.stage}: ${safeMsg}`.slice(0, 500),
+        error: sliceWholeChars(`${job.stage}: ${safeMsg}`, 0, 500),
         updated_at: new Date().toISOString(),
       })
-      .eq('id', job.project_id);
+      .eq('id', job.project_id)
+      .eq('status', 'researching');
   }
 
   // Финальный фейл base_collect: без ремонта he_bases навсегда остаётся в
@@ -2796,9 +3334,16 @@ async function main() {
   // окно простоя» — то условие, без которого здоровый платный вызов снова
   // объявят зависанием. Числа читаются из llm.ts, поэтому в логе видно и
   // действующий HE_LLM_TIMEOUT_MS.
+  if (STAGE_WATCHDOG.rejected !== null) {
+    log(
+      'warn',
+      `HE_STAGE_WATCHDOG_MODE='${STAGE_WATCHDOG.rejected}' не распознан (ожидается 'enforce' или 'log') — действует 'enforce'`,
+    );
+  }
   log(
     'info',
-    `Stage watchdog: ${stageIdleTimeoutMs()}ms idle `
+    `Stage watchdog [${STAGE_WATCHDOG.mode}${STAGE_WATCHDOG.mode === 'log' ? ': только пишет, не прерывает' : ''}]: `
+      + `${stageIdleTimeoutMs()}ms idle `
       + `(≥ ${LLM_SILENCE_SAFETY_FACTOR}× LLM attempt ${heLlmMaxAttemptMs()}ms, floor ${STAGE_IDLE_FLOOR_MS}ms), `
       + `abort grace ${STAGE_ABORT_GRACE_MS}ms, free interruptions ${HE_JOB_FREE_INTERRUPTIONS}, `
       + `rate-limit pause ≤ ${RATE_LIMIT_PAUSE_MAX_MS}ms (попытка тратится), `

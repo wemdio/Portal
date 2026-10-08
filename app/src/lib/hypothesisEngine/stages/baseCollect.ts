@@ -63,8 +63,11 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     Шаг find_emails попадает в список только для бедных баз (email есть у
  *     ≤50% строк); сама фаза пропускается лишь когда завершалась ранее
  *     (construct.status='done' в collect_info) или строк нет вовсе.
- *     DISPATCH-CONSTRUCT создаёт BC-джобу (bc_job_id — в collect_info.construct)
- *     и уходит в self-requeue с паузой 60с; WAIT-CONSTRUCT опрашивает её до
+ *     DISPATCH-CONSTRUCT резервирует id BC-джобы в collect_info.construct ДО
+ *     вставки и вставляет её upsert'ом по этому id (повтор стадии второй джобы
+ *     не создаёт — см. dispatchConstructJob), затем уходит в self-requeue с
+ *     паузой 60с (CAS по своей строке: отмену не перетирает — см.
+ *     requeueSelf); WAIT-CONSTRUCT опрашивает её до
  *     терминального статуса (таймаут 6ч → база failed, у ночного долива —
  *     по серии отказов, closeHeRefillBaseUndelivered; у ENG сама BC-джоба
  *     отменяется); IMPORT мапит сетку
@@ -131,6 +134,8 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  * исключение остаётся только на мёрдже: продолжение для них требует
  * вариации поисковых запросов — future work.
  */
+
+import { randomUUID } from 'node:crypto';
 
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 // «Блип БД или приговор» — нейтральный предикат (lib/db/transientError.ts, без
@@ -821,8 +826,27 @@ export interface HeCollectTaskState {
 
 /** Состояние фазы CONSTRUCT в collect_info (обогащение конструктором баз). */
 export interface HeConstructInfo {
-  /** id джобы конструктора баз (base_constructor_jobs). */
+  /**
+   * id джобы конструктора баз (base_constructor_jobs). С 08.10.2026 его
+   * генерирует стадия и записывает ДО вставки строки (резерв, см. `inserted`).
+   */
   bc_job_id: string | null;
+  /**
+   * Строка base_constructor_jobs с этим id точно вставлена (true) или id пока
+   * только ЗАРЕЗЕРВИРОВАН (false): записан до вставки, а ответа о вставке эта
+   * сборка ещё не получила — прогон мог умереть между резервом и вставкой или
+   * потерять ответ на неё.
+   *
+   * Читатель один — фаза CONSTRUCT: при false она не ждёт джобу, а повторяет
+   * вставку ТЕМ ЖЕ id (upsert ignoreDuplicates — вставит, если строки нет, и не
+   * тронет, если она уже есть), и только потом ждёт. Без флага пропавшая строка
+   * читалась бы как «джоба конструктора потерялась» (база без обогащения), а без
+   * резерва повтор ставил бы вторую оплаченную джобу на те же компании.
+   *
+   * Ключа нет — запись сделана до 08.10.2026, когда bc_job_id писался только
+   * ПОСЛЕ вставки: такая строка вставлена, поведение прежнее.
+   */
+  inserted?: boolean;
   /**
    * dispatched — BC-джоба создана, ждём терминальный статус;
    * done/failed/cancelled — финал фазы (база ушла в analyzing):
@@ -1123,10 +1147,8 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
  *  d. ПОКУПКА РАСШИРЕНИЯ ПЛАНА (`collect_info.plan_widening` вместе с
  *     добавленной задачей). Без неё следующий тик той же базы купил бы срез
  *     второй раз.
- *  e. ПОСТАНОВКА КОНСТРУКТОРА и её ПОВТОР ради split_emails
- *     (`collect_info.construct.bc_job_id`). Строка base_constructor_jobs уже
- *     вставлена, и воркер конструктора оплатит по ней краул и SMTP-пробы;
- *     потеряв запись, повтор стадии поставит вторую джобу на те же компании.
+ * (Буквы «e» в списке больше нет: запись постановки конструктора с 08.10.2026
+ * идёт ДО вставки и клиентом стадий — почему, см. «ЧЕГО В СПИСКЕ НЕТ» ниже.)
  * Вне сборки — одна запись, и она зовёт heCheckpointSupabase напрямую (модуль
  * сборки research-стадии не импортируют):
  *  f. ЧЕКПОЙНТ ПОЭЛЕМЕНТНОГО ПЕРЕБОРА evidence и brand_cloud (stages/brandCloud.ts,
@@ -1189,13 +1211,24 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
  * постановка конструктора), к этому моменту уже записано, а повтор только
  * читает. Закладки pdl (`flush`) — работа: потерянный сдвиг стоит одного
  * лишнего скана.
+ * ПОСТАНОВКА КОНСТРУКТОРА (`collect_info.construct`, dispatchConstructJob) — тоже
+ * не деньги, хотя до 08.10.2026 была ими (бывшая «e»). Тогда id джобы
+ * конструктора записывался ПОСЛЕ вставки её строки, и потерянная запись значила
+ * вторую оплаченную джобу на те же компании. Теперь id резервируется и
+ * записывается ДО вставки, а вставка — upsert по этому id с ignoreDuplicates:
+ * повтор стадии вставляет ТУ ЖЕ строку или находит её, второй не бывает.
+ * Запись резерва ничего оплаченного не фиксирует (её отказ случается раньше
+ * вставки, и повтор начинает с того же места), а отметка «строка вставлена» после
+ * вставки теряется бесплатно (повтор снова сделает тот же upsert). Обе идут
+ * клиентом стадий НАМЕРЕННО: прерванный прогон (отмена, сторож) не должен
+ * дойти до вставки, и отвергнутая запись резерва — ровно этот барьер.
  *
  * Отметки живости сторожу эти записи не дают: сток активности навешен
  * прокси-обёрткой на КЛИЕНТ СТАДИЙ (worker/hypothesisEngine.ts:
  * withStageActivity), а здесь клиент другой. Простоя из этого не выходит: перед
  * каждой из них сторожа только что накормил вызов модели (через канал активной
- * джобы), запрос клиента стадий (вставка джобы конструктора, импорт, чтение
- * стора) или хук beforeProviderRequest на чанке отправки долива, а сами записи
+ * джобы), запрос клиента стадий (импорт, чтение стора) или хук
+ * beforeProviderRequest на чанке отправки долива, а сами записи
  * занимают миллисекунды. Сколько времени у них есть после abort'а — в докблоке
  * heCheckpointSupabase. Одиночный запрос укладывается в окно сторожа впритык;
  * несколько запросов подряд шлют три записи: финальная запись базы (до
@@ -1229,7 +1262,7 @@ async function persistCollectInfo(
      */
     paidCheckpoint?: true;
   },
-): Promise<void> {
+): Promise<boolean> {
   /**
    * Барьер по 'collecting' стоит на ОБЕИХ ветвях, и по одной причине: запись
    * прогресса базе, которая уже не собирается, не нужна никогда. Отмена в
@@ -1237,20 +1270,27 @@ async function persistCollectInfo(
    * стадии только на следующем тике наблюдателя (CANCEL_WATCH_MS), поэтому без
    * барьера стадия успевала вернуть обрезанный харвест обратно — до 10 МБ
    * jsonb на отменённой базе. Ноль затронутых строк здесь не ошибка.
+   *
+   * Возвращает, задела ли запись строку (false — база уже не 'collecting').
+   * Читает это один вызывающий — резерв джобы конструктора (dispatchConstructJob):
+   * базе, которую успели отменить, джобу конструктора не ставят.
    */
   const update = { collect_info: info, updated_at: new Date().toISOString() };
-  const { error } = options?.paidCheckpoint
+  const { data, error } = options?.paidCheckpoint
     ? await paidCheckpointDb(ctx)
         .from('he_bases')
         .update(update)
         .eq('id', baseId)
         .eq('status', 'collecting')
+        .select('id')
     : await ctx.supabase
         .from('he_bases')
         .update(update)
         .eq('id', baseId)
-        .eq('status', 'collecting');
+        .eq('status', 'collecting')
+        .select('id');
   if (error) throw new Error(`he_bases collect_info update: ${error.message}`);
+  return Array.isArray(data) && data.length > 0;
 }
 
 /**
@@ -3668,15 +3708,67 @@ async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: n
 /* ─────────────────────────── Self-requeue ─────────────────────────── */
 
 /**
+ * Чем кончился self-requeue (requeueSelf):
+ *  - 'requeued' — строка ЭТОГО прогона ушла в 'pending' с паузой run_after;
+ *  - 'cancelled' — запись не задела ни одной строки, а перечитанная строка
+ *    'cancelled': джобу отменили (клиент, специалист, отзыв ночного тика);
+ *  - 'closed' — запись не задела ни одной строки по любой другой причине
+ *    (удаление вместе с проектом, новый клейм, 'done'/'failed', перечитать не
+ *    удалось).
+ * При 'cancelled' и 'closed' тик кончается, больше ничего не делая. Различие
+ * читают ровно две точки — сразу после постановки джобы конструктора (первичной
+ * и повтора ради split_emails): у ENG только что вставленная джоба конструктора
+ * отменённой сборки отменяется (cancelAbandonedConstructJob), иначе её краул и
+ * SMTP-пробы оплачивались бы впустую.
+ */
+type HeRequeueOutcome = 'requeued' | 'cancelled' | 'closed';
+
+/**
  * Вернуть свою джобу в pending БЕЗ инкремента attempts — воркер клеймит её
  * не раньше run_after (пауза между тиками ожидания: 30с — дочерние парсеры,
  * 60с — конструктор баз; без паузы цикл claim→requeue крутился с нулевой
  * задержкой, ~10 запросов к БД на итерацию в течение всего ожидания).
  * Финальный done-апдейт воркер пропускает, видя, что строка больше не running
  * (см. app/worker/hypothesisEngine.ts).
+ *
+ * Запись — CAS по 'running' И по токену клейма (started_at, который поставил
+ * claimJob; у строки без токена — `started_at is null`): тот же контракт, что у
+ * done- и fail-записей воркера (deliverDoneRow, writeJobFailure). Раньше это был
+ * апдейт по id: отмена, легшая между тиком наблюдателя отмены воркера
+ * (CANCEL_WATCH_MS, 3 с) и этой записью, перетиралась в 'pending', отменённая
+ * сборка оживала, и её следующий тик снова шёл в стадию. Обычно его ловил
+ * start-guard (роут отмены валит и базу), и всё, что он стоил, — три пустые
+ * попытки и 'failed' вместо 'cancelled' у джобы; но если запись базы у роута
+ * не легла, тик доходил до импорта, гейта и постановки анализа — то есть
+ * отменённая сборка доплачивалась до конца.
+ *
+ * Весь набор состояний строки и исход:
+ *  - 'running' этого прогона → 'pending' с паузой, исход 'requeued';
+ *  - 'cancelled' (отмена клиентом или специалистом, отзыв ночного тика) → не
+ *    трогаем, исход 'cancelled';
+ *  - 'pending' / 'running' ДРУГОГО прогона (строку вернули в очередь —
+ *    resetStuckJobs при перекрытии деплоя — и, возможно, уже заклеймили
+ *    заново) → не трогаем, 'closed': дальше её ведёт тот прогон;
+ *  - 'done' / 'failed' → не трогаем, 'closed';
+ *  - строки нет или перечитать не удалось → 'closed'.
+ * 'cancelled' и 'closed' — не ошибка и не бросок: каждый вызывающий сразу после
+ * requeueSelf возвращает результат тика, поэтому платной работы после них нет
+ * ни в одной из пяти точек вызова. Финализацию это не меняет: воркер прочитает
+ * строку не в 'running' и done не запишет (finalizeJob), а если строка
+ * 'running' под чужим токеном — его же CAS done-записи её не заденет.
+ *
+ * Запрос идёт клиентом стадий: после аборта (отмену наблюдатель уже увидел)
+ * он отвергается, стадия бросает, и воркер разбирает отказ как отмену. Ответ,
+ * потерянный после легшей записи, тоже бросок (повтор записи транспорт делает
+ * только когда запрос не ушёл): строка тогда уже 'pending', и CAS отказа
+ * воркера её не трогает — попытка не тратится.
  */
-async function requeueSelf(ctx: HeStageContext, job: HeJob, cooldownMs = 30_000): Promise<void> {
-  const { error } = await ctx.supabase
+async function requeueSelf(
+  ctx: HeStageContext,
+  job: HeJob,
+  cooldownMs = 30_000,
+): Promise<HeRequeueOutcome> {
+  const write = ctx.supabase
     .from('he_jobs')
     .update({
       status: 'pending',
@@ -3684,8 +3776,35 @@ async function requeueSelf(ctx: HeStageContext, job: HeJob, cooldownMs = 30_000)
       run_after: new Date(Date.now() + cooldownMs).toISOString(),
       updated_at: new Date().toISOString(),
     })
-    .eq('id', job.id);
+    .eq('id', job.id)
+    .eq('status', 'running');
+  const { data, error } = await (job.started_at
+    ? write.eq('started_at', job.started_at)
+    : write.is('started_at', null)
+  ).select('id');
   if (error) throw new Error(`he_jobs requeue: ${error.message}`);
+  if (Array.isArray(data) && data.length > 0) return 'requeued';
+
+  // Чтение решает только между 'cancelled' и 'closed'; не прочиталось — 'closed'
+  // (отмену по догадке не объявляем: по 'cancelled' вызывающий ОТМЕНЯЕТ джобу
+  // конструктора, а у чужого прогона она живая).
+  let seen: string | null = null;
+  try {
+    const { data: row, error: readErr } = await ctx.supabase
+      .from('he_jobs')
+      .select('status')
+      .eq('id', job.id)
+      .maybeSingle();
+    if (!readErr) seen = row ? String((row as { status?: unknown }).status) : 'строки нет';
+  } catch {
+    // Абортнутый клиент стадий — статус остаётся непрочитанным.
+  }
+  stageLog(
+    ctx,
+    `[base_collect] self-requeue не лёг: строка джобы уже не у этого прогона (статус ${seen ?? 'не прочитан'}) — ` +
+      'тик закончен, дальше ничего не ставим и не оплачиваем',
+  );
+  return seen === 'cancelled' ? 'cancelled' : 'closed';
 }
 
 /**
@@ -3706,6 +3825,8 @@ async function requeueSelf(ctx: HeStageContext, job: HeJob, cooldownMs = 30_000)
  * — это вставка строки джобы. Если встанет тело ответа на САМУЮ вставку,
  * строка уже вставлена, а id её мы не получили; повтор вставит вторую. Так же
  * было и до 4b; тело этого ответа — один id, и встать ему практически нечем.
+ * (У джобы КОНСТРУКТОРА этого остатка нет с 08.10.2026: её id резервируется до
+ * вставки — dispatchConstructJob. Дочерние джобы парсеров так не устроены.)
  */
 function heStageInterrupted(ctx: HeStageContext, error: unknown): boolean {
   return heStageSignal(ctx)?.aborted === true || isHeStageDbInterruption(error);
@@ -4261,15 +4382,76 @@ async function readConstructJobStatus(
   };
 }
 
+/** Итог постановки джобы конструктора (dispatchConstructJob). */
+type HeConstructDispatch =
+  | {
+      kind: 'dispatched';
+      bcJobId: string;
+      locale: 'ru' | 'en';
+      steps: string[];
+      /**
+       * Строку вставил ЭТОТ вызов (true) или она уже была — её вставила прошлая
+       * попытка этой же сборки, ответ на которую потерялся (false). Читают
+       * отметка о вставке (свежий dispatched_at только у true) и строка лога
+       * стадии: «создана» и «уже стояла» — разные новости.
+       */
+      insertedNow: boolean;
+    }
+  /**
+   * База уже не 'collecting' (отмена, ремонт чужого прогона): резерв не лёг, и
+   * джоба конструктора НЕ вставлена — платить за обогащение базы, которую
+   * закрыли, некому и незачем.
+   */
+  | { kind: 'base_closed' };
+
 /**
  * Создать джобу конструктора под собранные строки. Один вход для обоих
  * случаев: первичный DISPATCH-CONSTRUCT и повтор legacy-джобы, поставленной до
  * того, как split_emails стал обязательным для ENG (см. WAIT-CONSTRUCT). Общий
  * код нужен именно затем, чтобы повтор шёл по ТЕКУЩЕМУ контракту, а не по
  * копии старого.
+ *
+ * ИДЕМПОТЕНТНО: стадия, повторённая после вставки, вторую оплаченную джобу не
+ * создаёт. Порядок записей:
+ *  1. РЕЗЕРВ — id генерирует стадия (randomUUID) и пишет его в
+ *     `collect_info.construct` с `inserted: false` ДО вставки строки. Запись —
+ *     CAS по 'collecting' (persistCollectInfo): ноль строк значит, что базу уже
+ *     закрыли, и вставки не будет (исход 'base_closed'). Повтор, нашедший такой
+ *     резерв, передаёт его в `reserved` и берёт ТОТ ЖЕ id (вместе с resplit_of
+ *     и note повтора ради split_emails).
+ *  2. ВСТАВКА — upsert по id с ignoreDuplicates (INSERT … ON CONFLICT DO
+ *     NOTHING): строки нет — вставится, уже есть (прошлая попытка легла, ответ
+ *     потерян) — останется как была: ни статус, ни прогресс идущей или
+ *     завершённой джобы не перетираются. Сколько строк вставлено, видно по
+ *     ответу (select). Перед вставкой — проверка, что строка джобы сборки ещё
+ *     'running' этого прогона (assertOwnRunningJob): отменённой сборке
+ *     конструктор не ставится.
+ *  3. ОТМЕТКА — `inserted: true` (и, если строку вставил этот вызов, свежий
+ *     `dispatched_at`: окно ожидания 6 ч считается от вставки). Её потеря
+ *     бесплатна: повтор увидит `inserted: false` и снова сделает тот же upsert,
+ *     который ничего не вставит. Поэтому её сбой стадию не валит (кроме
+ *     прерывания).
+ * Какой клиент пишет резерв и отметку и почему — у paidCheckpointDb («ЧЕГО В
+ * СПИСКЕ НЕТ»): клиент стадий, чтобы прерванный прогон до вставки не дошёл.
+ *
+ * queue_class 'interactive_preview' у V2 сюда НЕ перенесён: ENG-джоба встала бы
+ * в общей очереди конструктора впереди чужой (RU и ручной) работы.
  */
 async function dispatchConstructJob(input: {
   ctx: HeStageContext;
+  /** Джоба сборки: перед вставкой проверяется, что её строка ещё у этого прогона. */
+  job: HeJob;
+  /** База сборки: резерв пишется в её collect_info (CAS по 'collecting'). */
+  baseId: string;
+  /** collect_info тика: резерв ложится в `info.construct` и пишется целиком. */
+  info: HeCollectInfo;
+  /**
+   * Резерв прошлой попытки (`construct.inserted === false`): его id и поля
+   * переиспользуются как есть, новый резерв не пишется. Нет — новый резерв.
+   */
+  reserved?: HeConstructInfo | null;
+  /** Поля нового резерва сверх штатных: повтор ради split_emails. */
+  extra?: Pick<HeConstructInfo, 'resplit_of' | 'note'>;
   ownerId: string | null | undefined;
   baseLabel: string;
   rows: HeUnifiedRow[];
@@ -4283,8 +4465,8 @@ async function dispatchConstructJob(input: {
   market: HeMarket;
   /** Кап «адресов на компанию» этой базы (см. resolveContactCap у стадии). */
   contactCap: number;
-}): Promise<{ bcJobId: string; locale: 'ru' | 'en'; steps: string[]; construct: HeConstructInfo }> {
-  const { ctx, ownerId, baseLabel, rows, harvest, market, contactCap } = input;
+}): Promise<HeConstructDispatch> {
+  const { ctx, job, baseId, info, reserved, extra, ownerId, baseLabel, rows, harvest, market, contactCap } = input;
   if (!ownerId) {
     throw new Error('he_projects.created_by пуст — джобе конструктора некому принадлежать');
   }
@@ -4320,33 +4502,89 @@ async function dispatchConstructJob(input: {
           max_pages: CONSTRUCT_FIND_EMAILS_MAX_PAGES,
         }
       : null;
-  const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
-    user_id: ownerId,
-    workload_origin: 'automation',
-    file_name: `HE · ${baseLabel}`,
-    status: 'pending',
-    locale,
-    selected_steps: steps,
-    // Кап «до N почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
-    step_config: {
-      cap_emails_per_company: { max: contactCap },
-      ...(findEmailsConfig ? { find_emails: findEmailsConfig } : {}),
-    },
-    data: buildConstructGrid(rows, market),
-    initial_row_count: rows.length,
-    total_steps: steps.length,
-  });
-  return {
-    bcJobId,
-    locale,
-    steps,
-    construct: {
+  // 1. РЕЗЕРВ (см. докблок): id — до вставки, в collect_info. Повтор с
+  // резервом его не переписывает (резерв уже лежит в строке базы), но барьер
+  // «база ещё собирается» проверяет и он — дешёвым чтением статуса вместо
+  // перезаписи всего collect_info.
+  let construct: HeConstructInfo;
+  let bcJobId: string;
+  if (reserved?.bc_job_id) {
+    construct = reserved;
+    bcJobId = reserved.bc_job_id;
+    const { data: baseRow, error: baseErr } = await ctx.supabase
+      .from('he_bases')
+      .select('status')
+      .eq('id', baseId)
+      .maybeSingle();
+    if (baseErr) throw new Error(`he_bases ${baseId} status read: ${baseErr.message}`);
+    if ((baseRow as { status?: unknown } | null)?.status !== 'collecting') return { kind: 'base_closed' };
+  } else {
+    bcJobId = randomUUID();
+    construct = {
       bc_job_id: bcJobId,
       status: 'dispatched',
       dispatched_at: new Date().toISOString(),
       contact_cap: contactCap,
-    },
+      inserted: false,
+      ...(extra ?? {}),
+    };
+    info.construct = construct;
+    if (!(await persistCollectInfo(ctx, baseId, info))) return { kind: 'base_closed' };
+  }
+
+  // 2. ВСТАВКА тем же id — upsert без перезаписи существующей строки. Перед ней —
+  // владение строкой джобы сборки (assertOwnRunningJob): CAS резерва выше видит
+  // отмену только когда роут отмены уже дописал БАЗУ, а пишет он сначала джобы;
+  // эта проверка ловит отмену с момента записи джоб, не дожидаясь наблюдателя
+  // отмены воркера (до 3 с).
+  await assertOwnRunningJob(ctx, job, 'джобу конструктора не ставим');
+  const { data: insertedRows, error: insertErr } = await ctx.supabase
+    .from('base_constructor_jobs')
+    .upsert(
+      {
+        id: bcJobId,
+        user_id: ownerId,
+        workload_origin: 'automation',
+        file_name: `HE · ${baseLabel}`,
+        status: 'pending',
+        locale,
+        selected_steps: steps,
+        // Кап «до N почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
+        step_config: {
+          cap_emails_per_company: { max: contactCap },
+          ...(findEmailsConfig ? { find_emails: findEmailsConfig } : {}),
+        },
+        data: buildConstructGrid(rows, market),
+        initial_row_count: rows.length,
+        total_steps: steps.length,
+      },
+      { onConflict: 'id', ignoreDuplicates: true },
+    )
+    .select('id');
+  if (insertErr) throw new Error(`base_constructor_jobs insert: ${insertErr.message}`);
+  const insertedNow = Array.isArray(insertedRows) && insertedRows.length > 0;
+
+  // 3. ОТМЕТКА «строка вставлена». Потеря бесплатна (см. докблок), поэтому её
+  // отказ не валит стадию: следующий тик повторит тот же upsert и отметку.
+  // Прерывание — бросаем: прогон оборван, воркер разберёт его своей политикой.
+  // Вставил строку ЭТОТ вызов — окно ожидания (dispatched_at, 6 ч) считаем от
+  // вставки, а не от резерва: резерв мог пролежать, пока воркер стоял.
+  info.construct = {
+    ...construct,
+    inserted: true,
+    ...(insertedNow ? { dispatched_at: new Date().toISOString() } : {}),
   };
+  try {
+    await persistCollectInfo(ctx, baseId, info);
+  } catch (e) {
+    if (heStageInterrupted(ctx, e)) throw e;
+    stageLog(
+      ctx,
+      `[base_collect] construct: отметка о вставке джобы ${bcJobId} не записалась ` +
+        `(${e instanceof Error ? e.message : String(e)}) — следующий тик повторит тот же upsert без второй джобы`,
+    );
+  }
+  return { kind: 'dispatched', bcJobId, locale, steps, insertedNow };
 }
 
 export interface HeConstructImport {
@@ -4702,6 +4940,26 @@ async function judgeRowsBeforeConstruct(input: {
  * Ошибку ЧТЕНИЯ дедупа бросаем, а не глотаем: пустой список после сбоя чтения
  * означает не «джобы нет», а «неизвестно», и вставка на этом месте — платный
  * анализ «на догадке».
+ *
+ * ВЛАДЕНИЕ перед вставкой (assertOwnRunningJob): строка этой base_collect
+ * обязана быть 'running' ЭТОГО прогона. Анализ — платная стадия, которую сборка
+ * ставит сама, и отмена, легшая между последним тиком наблюдателя отмены
+ * (CANCEL_WATCH_MS, 3 с) и этой вставкой, иначе её не останавливала: роут отмены
+ * гасит только джобы, которые УЖЕ стоят, и вставленный после него анализ
+ * исполнялся и оплачивался на отменённом проекте. Остаток — миллисекунды между
+ * этим чтением и вставкой (вставку, легшую РАНЬШЕ записи джоб роутом, роут
+ * гасит сам). Анализ, вставленный в них, модель не зовёт, если запись баз
+ * роутом легла: база уже 'failed', а вход стадии base_analyze — CAS по
+ * uploaded/analyzing/analyzed (stages/baseAnalyze.ts), который отказывает до
+ * вызова модели. Не легла (роут её только журналирует) — анализ оплачивается.
+ *
+ * 23505 — сработал he_jobs_one_active_base_analyze_per_base
+ * (20261008_0001_he_active_job_unique.sql): между дедупом и вставкой анализ
+ * этой базы поставил кто-то другой (ремонт осиротевшей базы, «Start outreach»).
+ * Это 'existing', а не сбой: анализ у базы есть. Других уникальных ограничений,
+ * способных ответить 23505 на вставку base_analyze, у he_jobs нет (PK —
+ * gen_random_uuid, прочие partial-индексы — по другим стадиям). Без миграции
+ * 23505 не бывает вовсе, и путь прежний.
  */
 async function ensureBaseAnalyzeJob(
   ctx: HeStageContext,
@@ -4720,20 +4978,55 @@ async function ensureBaseAnalyzeJob(
   );
   if (queued) return 'existing';
 
+  await assertOwnRunningJob(ctx, job, 'base_analyze не ставим');
   const { error: jobError } = await ctx.supabase.from('he_jobs').insert({
     project_id: job.project_id,
     stage: 'base_analyze',
     status: 'pending',
     payload: { base_id: baseId },
   });
+  if (jobError?.code === '23505') return 'existing';
   if (jobError) throw new Error(`he_jobs base_analyze enqueue: ${jobError.message}`);
   return 'enqueued';
 }
 
 /**
+ * Строка джобы сборки всё ещё 'running' ЭТОГО прогона (токен клейма — started_at,
+ * тот же признак, что у CAS requeueSelf и записей воркера). Нет — бросок: дальше
+ * ставить платную работу некому. Отменённую джобу воркер разбирает как отмену
+ * (попытка не тратится, база, оставшаяся 'analyzing' без живой джобы, уходит в
+ * 'failed' с текстом отмены — worker/hypothesisEngine.ts:
+ * closeAnalyzingBaseAfterCancel); строку чужого прогона его CAS отказа не
+ * трогает. Сбой чтения — тоже бросок: «неизвестно» не разрешает платную
+ * вставку.
+ */
+async function assertOwnRunningJob(ctx: HeStageContext, job: HeJob, what: string): Promise<void> {
+  const { data, error } = await ctx.supabase
+    .from('he_jobs')
+    .select('status, started_at')
+    .eq('id', job.id)
+    .maybeSingle();
+  if (error) throw new Error(`he_jobs ownership read: ${error.message}`);
+  const row = data as { status?: unknown; started_at?: unknown } | null;
+  const startedAt = row?.started_at;
+  const sameToken =
+    job.started_at === null || job.started_at === undefined
+      ? startedAt === null || startedAt === undefined
+      : typeof startedAt === 'string' &&
+        Number.isFinite(Date.parse(startedAt)) &&
+        Date.parse(startedAt) === Date.parse(job.started_at);
+  if (row?.status === 'running' && sameToken) return;
+  throw new Error(
+    `he_jobs ${job.id}: строка уже не у этого прогона (статус ${row ? String(row.status) : 'строки нет'}) — ${what}`,
+  );
+}
+
+/**
  * Остановить джобу конструктора, чей результат больше никто не импортирует:
- * ENG-базу закрыл таймаут ожидания (фаза CONSTRUCT) или ремонт refill-базы
- * после финального фейла (closeHeRefillBaseAfterFinalFail). Без отмены джоба
+ * ENG-базу закрыл таймаут ожидания (фаза CONSTRUCT), ремонт refill-базы
+ * после финального фейла (closeHeRefillBaseAfterFinalFail) или отмена джобы
+ * сборки, легшая, пока эта джоба конструктора ставилась (self-requeue сразу
+ * после постановки вернул 'cancelled', см. HeRequeueOutcome). Без отмены джоба
  * стоит в общей FIFO-очереди конструктора (её делят RU и ENG), а потом
  * краулит сайты и платит SMTP-пробы впустую — и у ночного долива так копится
  * по джобе за ночь, удлиняя очередь, из-за которой и случился таймаут.
@@ -4747,12 +5040,15 @@ async function ensureBaseAnalyzeJob(
  * в lib/tools/baseConstructorWorker.ts). Сделанная до отмены работа уже
  * оплачена и пропадает — отмена останавливает только остаток.
  *
- * Зовётся только ПОСЛЕ терминальной записи базы: отменённая раньше джоба на
- * повторе стадии читалась бы как законченная (isConstructJobSettled), и
- * импортировался бы её частичный результат.
+ * Зовётся только когда повтора стадии по этой базе уже не будет: ПОСЛЕ
+ * терминальной записи базы или после того, как строка джобы сборки прочитана
+ * 'cancelled' (отменённую джобу воркер не клеймит; базу закрывает роут отмены,
+ * пишущий джобы раньше баз). Иначе отменённая джоба конструктора на повторе
+ * стадии читалась бы как законченная (isConstructJobSettled), и импортировался
+ * бы её частичный результат.
  *
- * Никогда не бросает: база уже закрыта, а несостоявшаяся отмена стоит ровно
- * того, что было до неё, — джоба доработает впустую.
+ * Никогда не бросает: сборка этой базы уже закончена, а несостоявшаяся отмена
+ * стоит ровно того, что было до неё, — джоба доработает впустую.
  */
 async function cancelAbandonedConstructJob(ctx: HeStageContext, bcJobId: string | null | undefined): Promise<void> {
   if (!bcJobId) return;
@@ -5769,11 +6065,21 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // У RU-инструмента и у ENG-сборки без пометок условие прежнее: constructRows
   // это merged, а merged здесь непуст по построению (пустой ушёл выше).
   if ((!construct && needsConstruct(constructRows)) || construct?.status === 'dispatched') {
-    if (!construct?.bc_job_id) {
+    // Резерв без подтверждённой вставки (`inserted === false`) — это тоже
+    // постановка, а не ожидание: прошлая попытка записала id и умерла до вставки
+    // или потеряла ответ на неё. Повтор вставляет ТОТ ЖЕ id (dispatchConstructJob:
+    // upsert ignoreDuplicates), второй джобы конструктора не бывает.
+    const reservedConstruct = construct?.inserted === false && construct.bc_job_id ? construct : null;
+    if (!construct?.bc_job_id || reservedConstruct) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
-      // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
+      // pending), её id — в collect_info.construct ДО вставки; дальше WAIT с
+      // паузой 60с.
       const dispatched = await dispatchConstructJob({
         ctx,
+        job,
+        baseId,
+        info,
+        reserved: reservedConstruct,
         ownerId: project.created_by,
         baseLabel: base.filename ?? baseId,
         rows: constructRows,
@@ -5782,23 +6088,28 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         market,
         contactCap,
       });
-      info.construct = dispatched.construct;
-      // ДЕНЬГИ, а не работа: строка base_constructor_jobs уже поставлена, и её
-      // заберёт воркер конструктора — краул find_emails и SMTP-пробы
-      // validate_emails оплачиваются по ней. Потеряв эту запись, повтор стадии
-      // поставит ВТОРУЮ такую строку на те же компании, а результат первой не
-      // импортирует никто. Барьер по 'collecting' внутри как раз нужен: базе,
-      // которую успели отменить, bc_job_id возвращать не надо.
-      await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
+      // Базу закрыли (отмена) раньше вставки: джобы конструктора нет, и
+      // ставить её некому. Бросок — тот же исход, что у start-guard на
+      // следующем тике; отменённую джобу воркер разбирает как отмену и попытку
+      // не тратит.
+      if (dispatched.kind === 'base_closed') {
+        throw new Error(`he_bases ${baseId}: база уже не 'collecting' — джобу конструктора не ставим`);
+      }
       stageLog(
         ctx,
-        `[base_collect] construct: создана base_constructor_jobs ${dispatched.bcJobId} ` +
+        `[base_collect] construct: ${dispatched.insertedNow ? 'создана' : 'уже стояла (повтор того же id)'} ` +
+          `base_constructor_jobs ${dispatched.bcJobId} ` +
           `(${constructRows.length} строк, locale ${dispatched.locale}, шаги ${dispatched.steps.join(' → ')}, ` +
           `кап ${contactCap} адресов на компанию` +
           (gateHeldRows.length > 0 ? `; ${gateHeldRows.length} строк вне вертикали не оплачиваем` : '') +
           `)`,
       );
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      const requeue = await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      // Отмена легла, пока ставилась джоба конструктора: её результат не
+      // импортирует никто. Только ENG — как у таймаута ниже: у RU-инструмента
+      // джоба конструктора видна сотруднику в /tools/base-constructor, и её
+      // судьбу решает он.
+      if (requeue === 'cancelled' && market === 'us') await cancelAbandonedConstructJob(ctx, dispatched.bcJobId);
       return {
         result: { waiting: true, base_id: baseId, construct: 'dispatched' },
         tokensUsed: usage.tokensUsed,
@@ -5850,8 +6161,19 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
             .eq('id', baseId);
           throw new Error(note);
         }
+        // Та же постановка, что первичная, и с той же защитой от второй джобы:
+        // резерв id (вместе с resplit_of — признаком одноразовости повтора) ДО
+        // вставки. Повтор стадии, нашедший этот резерв без отметки о вставке,
+        // доставит ТУ ЖЕ джобу веткой DISPATCH-CONSTRUCT выше.
         const replacement = await dispatchConstructJob({
           ctx,
+          job,
+          baseId,
+          info,
+          extra: {
+            resplit_of: construct.bc_job_id,
+            note: `джоба ${construct.bc_job_id} без split_emails — база пересобирается по текущему контракту`,
+          },
           ownerId: project.created_by,
           baseLabel: base.filename ?? baseId,
           rows: constructRows,
@@ -5859,21 +6181,17 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           market,
           contactCap,
         });
-        info.construct = {
-          ...replacement.construct,
-          resplit_of: construct.bc_job_id,
-          note: `джоба ${construct.bc_job_id} без split_emails — база пересобирается по текущему контракту`,
-        };
-        // Та же природа, что у первичной постановки: строка новой BC-джобы уже
-        // вставлена и будет оплачена краулом и SMTP-пробами, а потерянная
-        // запись её id привела бы к ещё одной джобе на те же компании.
-        await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
+        if (replacement.kind === 'base_closed') {
+          throw new Error(`he_bases ${baseId}: база уже не 'collecting' — повтор джобы конструктора не ставим`);
+        }
         stageLog(
           ctx,
           `[base_collect] construct: legacy job ${construct.bc_job_id} без split_emails → ` +
             `повтор ${replacement.bcJobId}`,
         );
-        await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+        const requeue = await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+        // Отмена легла во время постановки — как у первичной постановки выше.
+        if (requeue === 'cancelled' && market === 'us') await cancelAbandonedConstructJob(ctx, replacement.bcJobId);
         return {
           result: { waiting: true, base_id: baseId, construct: 're_dispatched' },
           tokensUsed: usage.tokensUsed,
@@ -6213,6 +6531,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
    * постановка анализа. Гонка «отмена пользователем прилетела ровно между
    * start-guard'ом и этой записью → база оживает в 'analyzing'» этим не создаётся:
    * так же было и до волны 4b, когда стадия работала общим клиентом без сигнала.
+   * Чем она кончается с 08.10.2026: анализ отменённой сборке не ставится
+   * (ensureBaseAnalyzeJob проверяет владение строкой джобы перед вставкой), а
+   * ожившую базу без живой джобы закрывает воркер, разбирая отмену
+   * (worker/hypothesisEngine.ts: closeAnalyzingBaseAfterCancel → 'failed' с
+   * текстом отмены).
    */
   let updErrorMsg: string | null = null;
   for (let attempt = 1; attempt <= HARVEST_WRITE_ATTEMPTS; attempt += 1) {

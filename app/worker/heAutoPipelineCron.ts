@@ -30,19 +30,37 @@
  *   docker exec portal-worker-hypothesis-engine node /app/workers/heAutoPipelineCron.js
  * (локально: cd app && node --env-file=../.env dist/workers/heAutoPipelineCron.js)
  *
+ * ОДИН ОБХОД КОНФИГА НА UTC-СУТКИ. Конфиг, обойдённый в эти сутки
+ * (he_auto_pipeline_configs.last_run_at), повторный запуск НЕ обходит — строка
+ * лога `already_ran_today`, уровень info, exit code не меняет. Иначе ручной
+ * перезапуск или повтор после сбоя покупал бы ночь второй раз: дедуп
+ * постановки отвечает 'existing' только по вертикалям, которые ЕЩЁ собираются,
+ * а остальные получают новые сборки. Обойти правило — только явно:
+ *
+ *   docker exec portal-worker-hypothesis-engine node /app/workers/heAutoPipelineCron.js --force
+ *
+ * `--force` снимает только правило суток; пауза, дневной бюджет по броням и
+ * дедуп постановки действуют как обычно. Флаг не влияет на проходы автоподъёма
+ * и реконсилера (у них свои потолки за запуск). В crontab его не ставить.
+ *
  * ПОРЯДОК РЕШЕНИЙ ТИКА по конфигу (lib/hypothesisEngine/autoPipeline.ts,
  * runForConfig) — первым срабатывает то, что стоит выше:
- *   1. ПАУЗА ПО ЁМКОСТИ (he_auto_pipeline_configs.refill_paused_at): проект
+ *   0. ПРАВИЛО СУТОК (выше): `already_ran_today`;
+ *   1. ПАУЗА ДОБОРА (he_auto_pipeline_configs.refill_paused_at): проект
  *      пропускается целиком, до чтения вертикалей и до бюджета (строка лога
- *      `paused`, уровень warn — см. ниже);
+ *      `paused`, уровень warn — см. ниже). Пишут её ёмкость рассыльщика (ниже)
+ *      и отмена клиентом — кнопка «Cancel all jobs» ENG-кабинета; у паузы
+ *      отмены нет ночного напоминания команде. Перед самой постановкой сборки
+ *      пауза перечитывается, а сразу после — ещё раз: отмена, нажатая посреди
+ *      тика, отзывает только что поставленную сборку;
  *   2. ДНЕВНОЙ БЮДЖЕТ ПРОЕКТА: сколько лидов на сегодняшние UTC-сутки ещё не
  *      занято бронями ночного добора (миграция
  *      supabase/migrations/20260930_0004_he_refill_reservations.sql). Выбран —
  *      сборку не получает ни одна вертикаль проекта (строка лога
  *      `budget_exhausted`, уровень info: это намеренная экономия, а не сбой, и
  *      exit code она не меняет). На обычном ночном прогоне в 03:20 броней ещё
- *      нет и проверка молчит; она защищает ВТОРОЙ за сутки запуск крона от
- *      оплаты сборки, которую бюджет всё равно не даст отправить;
+ *      нет и проверка молчит; второй за сутки запуск останавливает уже правило
+ *      суток, а эта проверка остаётся для `--force`;
  *   3. по каждой вертикали: нет запущенной кампании (`no_campaign`), правило
  *      сухой вертикали (`dry`), предполёт ёмкости воркспейса
  *      (`capacity_blocked`), и только потом постановка сборки.
@@ -133,7 +151,8 @@
  * отказ, а не сбой тика. `dry` и `paused` — тем более: это решения, а не
  * отказы. Отказ автоподъёма (потолок, остывание, занятая
  * вертикаль) — тоже штатный: код не меняет. Пропуск проекта реконсилером
- * (нечего ставить, ждём человека) — тоже.
+ * (нечего ставить, ждём человека) — тоже. `already_ran_today` — тоже: ночь уже
+ * куплена первым запуском.
  */
 
 import { createWorkerLogger, requireSupabaseAdmin } from './_shared';
@@ -153,9 +172,13 @@ import {
 
 const WORKER_ID = 'he-auto-pipeline-cron';
 
+/** Ручной прогон: снимает правило «один обход конфига на UTC-сутки» (см. докблок). */
+const FORCE_FLAG = '--force';
+
 async function main(): Promise<number> {
   const log = createWorkerLogger(WORKER_ID);
   const supabase = requireSupabaseAdmin(log);
+  const force = process.argv.slice(2).includes(FORCE_FLAG);
 
   const startedAt = Date.now();
 
@@ -194,10 +217,14 @@ async function main(): Promise<number> {
   }
 
   log('info', 'Loading enabled HE auto-pipeline configs…');
+  if (force) {
+    // Громко: этот запуск может купить сборки конфигам, уже обойдённым сегодня.
+    log('warn', `${FORCE_FLAG}: the one-pass-per-UTC-day rule is OFF for this run`);
+  }
 
   let summary;
   try {
-    summary = await runHeAutoPipelineTick(supabase);
+    summary = await runHeAutoPipelineTick(supabase, { force });
   } catch (err) {
     log('error', 'Tick failed fatally', err);
     return 1;
@@ -291,7 +318,8 @@ async function main(): Promise<number> {
   const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
   log(
     'info',
-    `Done: ${summary.configs} configs, ${summary.enqueued} enqueued, ${summary.existing} existing, ` +
+    `Done: ${summary.configs} configs, ${summary.alreadyRan} already_ran_today, ` +
+      `${summary.enqueued} enqueued, ${summary.existing} existing, ` +
       `${summary.noCampaign} no_campaign, ${summary.capacityBlocked} capacity_blocked, ` +
       `${summary.budgetExhausted} budget_exhausted, ${summary.paused} paused` +
       (pausedConfigIds.length > 0 ? ` (${pausedConfigIds.join(', ')})` : '') +

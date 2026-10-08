@@ -172,6 +172,19 @@
  * получил, а строка прогона помечается stats.cancelled и в серию отказов не
  * идёт. Обрыв сторожем простоя (причина сигнала — прерывание воркера) остаётся
  * обычным отказом. См. refillUserCancelled.
+ *
+ * ОТМЕНА ВЫИГРЫВАЕТ У ОТПРАВКИ. Наблюдатель воркера опрашивает статус джобы
+ * раз в 3 с, а appendLeadsToClientCampaign сигнала не знает вовсе: отмена,
+ * записанная за секунды до долива — или во время ожидания лимитера рассыльщика,
+ * которое длится минутами, — раньше всё равно уезжала в живую кампанию.
+ * Поэтому прямо перед вызовом долива и ещё раз перед КАЖДЫМ HTTP-запросом чанка
+ * (хук beforeProviderRequest — после допуска лимитера) прогон перечитывает,
+ * вправе ли он отправлять (readHeRefillOwnershipLoss, полный набор состояний —
+ * у HeRefillOwnershipLoss). Не вправе — не отправляет и уходит в тот же отказ,
+ * что и отмена по сигналу: бронь закрывается нулём, база 'failed' «Cancelled by
+ * user», компании в пул, перенесённые — обратно в очередь, stats.cancelled.
+ * Чанки, принятые ДО отмены, остаются принятыми (база 'analyzed', как у любой
+ * доставки). Остаток окна — миллисекунды между последним чтением и запросом.
  */
 
 import { AppendLeadsPartialError, appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
@@ -196,10 +209,16 @@ import {
   selectLeadsWithinLaunchCap,
 } from '../launchHandoff';
 // Пауза по ёмкости живёт рядом с тем, кто её ЧИТАЕТ (тик крона): второго
-// определения «проект остановлен» в дереве быть не должно. Бандл воркера от
-// этого не растёт — autoPipeline тянет только baseCollectEnqueue,
-// launchHandoff и instantly-клиент, а они уже здесь (через appendLeads).
-import { buildHeCapacityPauseReason, pauseHeAutoPipelineRefill } from '../autoPipeline';
+// определения «проект остановлен» в дереве быть не должно — там же и признак
+// паузы, записанной отменой клиентом (проверка владения перед провайдером).
+// Бандл воркера от этого не растёт — autoPipeline тянет только
+// baseCollectEnqueue, launchHandoff и instantly-клиент, а они уже здесь
+// (через appendLeads).
+import {
+  buildHeCapacityPauseReason,
+  isHeClientCancelPauseReason,
+  pauseHeAutoPipelineRefill,
+} from '../autoPipeline';
 // Алерт команде в health-бот: кабинет ENG пишет клиенту «команда уже
 // работает», и это правда только потому, что пауза по ёмкости сообщает о себе
 // здесь (см. alertRefillCapacityStop).
@@ -487,6 +506,92 @@ function refillUserCancelled(ctx: HeStageContext): boolean {
   return reason?.heJobInterruption !== true;
 }
 
+/**
+ * Почему прогон долива больше НЕ вправе отправлять (проверка владения перед
+ * провайдером, см. «ОТМЕНА ВЫИГРЫВАЕТ У ОТПРАВКИ» в шапке). Весь набор — и то,
+ * чего в нём нет, тоже решение:
+ *  - 'job_cancelled' — he_jobs.status = 'cancelled': отмена клиентом
+ *    (api/client/eng/projects/[id]/cancel) или сотрудником
+ *    (api/tools/hypothesis-engine/projects/[id]/cancel), которую наблюдатель
+ *    воркера ещё не успел превратить в обрыв сигнала;
+ *  - 'job_missing' — строки джобы нет (проект удалён каскадом);
+ *  - 'base_cancelled' — база 'failed' с текстом отмены одного из двух
+ *    cancel-роутов (REFILL_CANCEL_MARKERS);
+ *  - 'base_missing' — строки базы нет;
+ *  - 'refill_cancelled' — ночной добор проекта на паузе ОТМЕНЫ клиентом
+ *    (isHeClientCancelPauseReason). Роут кабинета пишет паузу раньше, чем
+ *    отменяет джобы, поэтому эта ветка ловит отмену и в миллисекунды между
+ *    его записями, и когда запись отмены джоб у него не легла вовсе.
+ * НЕ потеря владения:
+ *  - джоба 'running' — наша;
+ *  - джоба 'pending' / 'done' / 'failed' — строку переписал двойник при
+ *    перекрытии деплоя (resetStuckJobs нового процесса, затем его финал).
+ *    Отправителя между двумя живыми прогонами одной базы уже выбрала бронь
+ *    дневного бюджета: сюда доходит только 'granted'/'reclaimed', двойник
+ *    получит 'already_reserved' и ничего не отправит. Остановиться здесь
+ *    значило бы, что не отправит НИКТО, а оплаченная сборка выгорит;
+ *  - база 'analyzed' или 'failed' без текста отмены — терминал того же
+ *    двойника ('already_reserved' пишет базе 'analyzed' без отправки), довод
+ *    тот же; база 'collecting' — наша; 'uploaded'/'analyzing' у refill-базы
+ *    не пишет никто;
+ *  - пауза по ЁМКОСТИ — её проверяет сам appendLeadsToClientCampaign своим
+ *    предполётом ёмкости (pauseOnWorkspaceCapacity) перед отправкой: места нет
+ *    — не отправит ничего, место освободилось — отправит строки уже оплаченной
+ *    сборки. Остановка по ней могла бы только отнять письма.
+ */
+type HeRefillOwnershipLoss =
+  | 'job_cancelled'
+  | 'job_missing'
+  | 'base_cancelled'
+  | 'base_missing'
+  | 'refill_cancelled';
+
+/**
+ * Прочитать, вправе ли прогон отправлять (HeRefillOwnershipLoss); null —
+ * вправе. Три чтения по ключу разом, клиентом СТАДИЙ: после обрыва сигнала они
+ * отвергаются, и долив уходит в отказ, который refillUserCancelled узнаёт как
+ * отмену.
+ *
+ * FAIL-CLOSED: несостоявшееся чтение БРОСАЕТ, и долив уходит в общий отказ, не
+ * отправив ни строки, — та же сторона, что у брони дневного бюджета, которая
+ * читается тем же клиентом шагом раньше (бронь закрывается нулём, компании
+ * решает серия отказов). Отправка, которую отмена должна была остановить, не
+ * отзывается; потерянная ночь — отзывается следующей. Единственное
+ * исключение — колонок паузы нет (миграция 20260930_0005, PostgREST 42703): без
+ * них паузы отмены не бывает по определению.
+ */
+async function readHeRefillOwnershipLoss(
+  ctx: HeStageContext,
+  ids: { jobId: string; baseId: string; projectId: string },
+): Promise<HeRefillOwnershipLoss | null> {
+  const [jobRes, baseRes, configRes] = await Promise.all([
+    ctx.supabase.from('he_jobs').select('status').eq('id', ids.jobId).maybeSingle(),
+    ctx.supabase.from('he_bases').select('status, error').eq('id', ids.baseId).maybeSingle(),
+    ctx.supabase
+      .from('he_auto_pipeline_configs')
+      .select('refill_paused_at, refill_pause_reason')
+      .eq('project_id', ids.projectId)
+      .maybeSingle(),
+  ]);
+  if (jobRes.error) throw new Error(`he_jobs ownership read: ${jobRes.error.message}`);
+  const jobRow = jobRes.data as { status?: unknown } | null;
+  if (!jobRow) return 'job_missing';
+  if (jobRow.status === 'cancelled') return 'job_cancelled';
+  if (baseRes.error) throw new Error(`he_bases ownership read: ${baseRes.error.message}`);
+  const baseRow = baseRes.data as { status?: unknown; error?: unknown } | null;
+  if (!baseRow) return 'base_missing';
+  const baseError = typeof baseRow.error === 'string' ? baseRow.error.trim().toLowerCase() : '';
+  if (baseRow.status === 'failed' && REFILL_CANCEL_MARKERS.has(baseError)) return 'base_cancelled';
+  if (configRes.error) {
+    if ((configRes.error as { code?: string }).code === '42703') return null;
+    throw new Error(`he_auto_pipeline_configs ownership read: ${configRes.error.message}`);
+  }
+  const config = configRes.data as { refill_paused_at?: unknown; refill_pause_reason?: unknown } | null;
+  const paused = typeof config?.refill_paused_at === 'string' && config.refill_paused_at !== '';
+  const reason = typeof config?.refill_pause_reason === 'string' ? config.refill_pause_reason : null;
+  return paused && isHeClientCancelPauseReason(reason) ? 'refill_cancelled' : null;
+}
+
 /** Статистика воронки долива (he_auto_pipeline_runs.stats + refill_result). */
 /**
  * ЗАМЕР того, что прячет флаг `skipIfInCampaign` (шаг 4b долива).
@@ -682,9 +787,13 @@ export interface HeRefillStats {
    */
   carry_only?: true;
   /**
-   * Прогон оборван ОТМЕНОЙ клиентом (refillUserCancelled). Пишется только у
-   * отказа. Читатель — refillFailStreak: отмена — решение человека, а не
-   * свойство среза, и в серию отказов вертикали она не идёт.
+   * Прогон оборван ОТМЕНОЙ (refillUserCancelled) либо остановлен проверкой
+   * владения перед провайдером (HeRefillOwnershipLoss — отмена, замеченная
+   * раньше наблюдателя воркера). Пишется только у отказа. Читатели —
+   * refillFailStreak (отмена — решение человека, а не свойство среза, и в
+   * серию отказов вертикали она не идёт), readCarryoverByVertical тика
+   * (такая ночь не решает судьбу очереди) и лента кабинета
+   * (engDashboard: «refill cancelled»).
    */
   cancelled?: true;
   /**
@@ -3094,6 +3203,29 @@ export async function runHeRefillAppend(args: {
   /** Отдали ли строки провайдеру — решает судьбу компаний при отказе. */
   let providerTouched = false;
   /**
+   * Прогон потерял право отправлять (HeRefillOwnershipLoss) — пишет
+   * assertRefillOwnership перед броском, читает catch: это отмена, а не сбой
+   * среза. Живёт ВНЕ try по той же причине, что и бронь.
+   */
+  let ownershipLoss: HeRefillOwnershipLoss | null = null;
+  /**
+   * Проверка владения перед провайдером: прямо перед вызовом долива и в хуке
+   * перед КАЖДЫМ HTTP-запросом чанка (см. «ОТМЕНА ВЫИГРЫВАЕТ У ОТПРАВКИ» в
+   * шапке). Бросает ДО отправки; обрыв сигнала бросает его же причиной.
+   */
+  const assertRefillOwnership = async (): Promise<void> => {
+    ctx.signal?.throwIfAborted();
+    const loss = await readHeRefillOwnershipLoss(ctx, {
+      jobId: job.id,
+      baseId: base.id,
+      projectId: job.project_id,
+    });
+    if (loss) {
+      ownershipLoss = loss;
+      throw new Error(`долив остановлен перед отправкой: прогон больше не вправе отправлять (${loss})`);
+    }
+  };
+  /**
    * Кто именно увидел переполненный воркспейс — текст для причины паузы.
    * null = ёмкость не при чём. Живёт ВНЕ try, потому что оба исхода долива
    * (частичный приём и полный отказ) умеют упереться в ёмкость, а запись паузы
@@ -3511,6 +3643,10 @@ export async function runHeRefillAppend(args: {
     //    такой базы отработаны честно. Съел кап — уже не сюда: нулевой
     //    бюджет ушёл в отказ шагом 5б, а судьбу компаний решает исход брони.
     if (toSend.length > 0) {
+      // Отмена, записанная к этой секунде, не отправляет ничего (и не тратит
+      // ни запроса ёмкости, ни строки журнала доставки внутри долива). Отмену
+      // посреди долива ловит та же проверка в хуке ниже.
+      await assertRefillOwnership();
       // Пачка запоминается ДО вызова: позиции в attempted/deferred (и в снимке
       // частичного отказа) — индексы именно этого массива, а итог переноса
       // обязан знать, чей лид на какой позиции, и в catch'е тоже.
@@ -3608,8 +3744,17 @@ export async function runHeRefillAppend(args: {
         // загрузки не оставлял ни причины, ни журнала и приводил к повторной
         // отправке. Развязать три опции в appendLeads.ts было бы чище, но этот
         // файл общий с оплачиваемым RU-кабинетом — решение владельца.
+        //
+        // Тот же хук — ОГРАДА ВЛАДЕНИЯ (так он и задуман в appendLeads.ts:
+        // «runs just before each HTTP attempt, after rate admission»): перед
+        // каждым чанком прогон перечитывает, вправе ли он отправлять
+        // (assertRefillOwnership). Бросок здесь случается ДО того, как индексы
+        // чанка попадут в attemptedIndexes, поэтому снимок частичного отказа
+        // честно говорит «этот чанк не уходил»; принятые раньше чанки в нём
+        // остаются принятыми.
         beforeProviderRequest: async () => {
           ctx.onActivity?.();
+          await assertRefillOwnership();
         },
       });
       appendOutcome = appended;
@@ -3831,7 +3976,10 @@ export async function runHeRefillAppend(args: {
       }
     }
     // Отмена клиентом — не сбой среза (см. шапку файла, refillUserCancelled).
-    const cancelled = refillUserCancelled(ctx);
+    // Потеря владения перед провайдером — та же отмена, замеченная раньше
+    // наблюдателя воркера (HeRefillOwnershipLoss): тот же разбор ниже —
+    // компании в пул без серии отказов, без очереди собственных компаний.
+    const cancelled = refillUserCancelled(ctx) || ownershipLoss !== null;
     if (cancelled) runStats.cancelled = true;
     const rawMessage = e instanceof Error ? e.message : String(e);
     const message = (
@@ -3983,7 +4131,11 @@ export async function runHeRefillAppend(args: {
               ? `, кап-отрез ${runStats.capped}${runStats.capped_reason ? ` (${runStats.capped_reason})` : ''}`
               : '') +
             ']') +
-        (cancelled ? ' — отменено клиентом' : '') +
+        (ownershipLoss
+          ? ` — остановлено перед отправкой (${ownershipLoss}): отмена выигрывает у долива`
+          : cancelled
+            ? ' — отменено клиентом'
+            : '') +
         (delivered
           ? ` — строки уже у провайдера (принято ${runStats.appended}, в транспорте ${attempted}), ` +
             'база остаётся analyzed'
