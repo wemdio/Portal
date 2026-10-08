@@ -109,6 +109,10 @@ export async function fetchNewReplies(mb: ReplyMailboxRow): Promise<FetchResult 
     greetingTimeout: 12_000,
     socketTimeout: 60_000,
   });
+  // Сбой соединения ImapFlow шлёт ещё и событием 'error'; без слушателя оно
+  // роняет весь процесс. 08.10.2026 так упал воркер «Рассылки» на одном адресе
+  // и не поднялся — 5 ящиков стояли 4 часа. Ошибку и так получает await ниже.
+  client.on('error', () => undefined);
 
   await client.connect();
   try {

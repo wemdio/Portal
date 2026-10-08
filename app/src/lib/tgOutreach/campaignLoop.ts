@@ -22,6 +22,7 @@ import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionStri
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
+import { isRoleOnlyReply } from './roleFirstGate';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
   handleProxyError,
@@ -1054,12 +1055,18 @@ export async function handleChat(
   // то забывает, то перефразирует, и «Да, пришлите условия» оставался без
   // менеджера. Проверка упала — решает ответ модели, как раньше.
   const phrase = handoffPhrase(oai);
+  const roleOnly = isRoleOnlyReply(chatMessages);
+  // Квалификацию ведёт промпт кампании: сами передаём только прямую просьбу о
+  // человеке, и она передаётся даже в ответ на вопрос о роли.
+  const directOnly = oai.handoff_direct_request_only === true;
   let interested: boolean | null = null;
-  if (phrase) {
-    const check = await detectInterest(chatMessages);
+  if (phrase && (!roleOnly || directOnly)) {
+    const check = await detectInterest(chatMessages, { directRequestOnly: directOnly });
     interested = check.interested;
     if (interested) {
-      log('info', `${displayName}: в ответе явный интерес — отвечу и передам контакт менеджеру`);
+      log('info', directOnly
+        ? `${displayName}: просит связать с менеджером или созвониться — отвечу и передам контакт`
+        : `${displayName}: в ответе явный интерес — отвечу и передам контакт менеджеру`);
     } else if (interested === null) {
       log('warning', `${displayName}: проверка интереса не удалась (${check.error}) — передача только по фразе в ответе модели`);
     }
@@ -1070,7 +1077,13 @@ export async function handleChat(
   const openaiStart = Date.now();
   try {
     replyText = await openaiGenerate(oai, chatMessages, {
-      extraInstruction: interested && phrase ? handoffInstruction(phrase) : null,
+      extraInstruction: interested && phrase && directOnly
+        ? handoffInstruction(phrase)
+        : roleOnly && directOnly
+        ? 'Наше последнее сообщение уточняло роль собеседника. Продолжи по порядку квалификации из системного промпта кампании: по названной роли задай следующий вопрос. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
+        : roleOnly
+        ? 'Наше последнее сообщение только уточняло роль собеседника; предложение ещё не прозвучало. Ответ о роли и встречное предложение своих услуг НЕ означают интереса к нашему предложению. Если роль подтвердилась, кратко объясни повод обращения, опираясь только на системный промпт этой кампании, и спроси, интересно ли человеку это обсудить. Если роль не подтвердилась или собеседник предлагает свои услуги, вежливо заверши разговор. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
+        : interested && phrase ? handoffInstruction(phrase) : null,
     });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
     if (replyText) {
@@ -1106,6 +1119,10 @@ export async function handleChat(
   }
   if (interested && phrase) {
     replyText = ensureHandoffPhrase(replyText, phrase);
+  }
+  if (roleOnly && !interested && detectTrigger(replyText, oai) === 'positive') {
+    log('warning', `${displayName}: ответ на вопрос о роли ошибочно содержит фразу передачи; НЕ отправляю`);
+    return { replied: false, triggerType: null };
   }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;

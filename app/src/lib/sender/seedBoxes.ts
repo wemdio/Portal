@@ -76,8 +76,13 @@ function humanImapError(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
   const auth = (error as { authenticationFailed?: boolean })?.authenticationFailed
     || /auth|login|credential|invalid|password/i.test(text);
-  if (auth) return 'Не вошли: проверьте пароль приложения (пароль IMAP) и что в ящике включён доступ по IMAP';
-  return `Не подключились по IMAP: ${text}`.slice(0, 300);
+  // Ответ сервера отличает неверный пароль от блокировки ящика или входа с нового адреса
+  const server = (error as { responseText?: string })?.responseText?.trim();
+  if (auth) {
+    const hint = 'Не вошли: проверьте пароль приложения (пароль IMAP) и что в ящике включён доступ по IMAP';
+    return (server ? `${hint}. Ответ сервера: ${server}` : hint).slice(0, 300);
+  }
+  return `Не подключились по IMAP: ${server || text}`.slice(0, 300);
 }
 
 interface SeedBoxRow {
@@ -107,6 +112,8 @@ async function openSeedBox(box: SeedBoxRow): Promise<ImapFlow> {
     greetingTimeout: 10_000,
     socketTimeout: 30_000,
   });
+  // Без слушателя событие 'error' роняет процесс (byoMailbox/imap.ts); ошибку получает await.
+  client.on('error', () => undefined);
   await client.connect();
   return client;
 }

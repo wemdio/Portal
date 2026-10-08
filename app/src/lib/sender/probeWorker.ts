@@ -176,6 +176,8 @@ async function readDeliveredProbe(cfg: ProbeConfig, messageId: string): Promise<
     greetingTimeout: 10_000,
     socketTimeout: 30_000,
   });
+  // Без слушателя событие 'error' роняет процесс (byoMailbox/imap.ts); ошибку получает await.
+  client.on('error', () => undefined);
 
   try {
     await client.connect();
