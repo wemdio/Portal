@@ -28,11 +28,14 @@ import { useSortableRows, type SortColumns } from '@/components/ui/useSortableRo
 const PROVIDER_LETTER: Record<SeedProviderId, string> = { yandex: 'Я', gmail: 'G', mailru: 'M' };
 const PROVIDER_LABEL: Record<SeedProviderId, string> = { yandex: 'Яндекс', gmail: 'Gmail', mailru: 'Mail.ru' };
 const PROVIDER_ORDER: SeedProviderId[] = ['yandex', 'gmail', 'mailru'];
-/** Цвет сервиса в карточке: Яндекс красный, Gmail жёлтый, Mail.ru голубой. */
+/**
+ * Цвет сервиса в карточке: Яндекс красный, Gmail жёлтый, Mail.ru голубой.
+ * У Mail.ru sky-500 и прозрачный фон: тёмная тема гасит sky-600/sky-50 в серый.
+ */
 const PROVIDER_TONE: Record<SeedProviderId, { text: string; badge: string }> = {
   yandex: { text: 'text-red-600', badge: 'bg-red-50 text-red-600' },
   gmail: { text: 'text-amber-500', badge: 'bg-amber-50 text-amber-500' },
-  mailru: { text: 'text-sky-600', badge: 'bg-sky-50 text-sky-600' },
+  mailru: { text: 'text-sky-500', badge: 'bg-sky-500/15 text-sky-500' },
 };
 const SEED_PAGE_SIZE = 10;
 const HEALTH_PAGE_SIZE = 50;
@@ -244,13 +247,13 @@ export function SeedBoxesTab() {
 
               <div className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-zinc-100">
                 <div className="bg-emerald-500" style={{ width: share(week.inbox) }} />
-                <div className="bg-red-500" style={{ width: share(week.spam) }} />
-                <div className="bg-zinc-200" style={{ width: share(week.missing) }} />
+                <div className="bg-amber-400" style={{ width: share(week.spam) }} />
+                <div className="bg-red-500" style={{ width: share(week.missing) }} />
               </div>
               <div className="mt-2 flex justify-between text-xs text-zinc-500">
                 <span><span className="font-semibold tabular-nums text-emerald-600">{week.inbox}</span> входящие</span>
-                <span><span className="font-semibold tabular-nums text-red-600">{week.spam}</span> спам</span>
-                <span><span className="font-semibold tabular-nums text-zinc-700">{week.missing}</span> не дошло</span>
+                <span><span className="font-semibold tabular-nums text-amber-500">{week.spam}</span> спам</span>
+                <span><span className="font-semibold tabular-nums text-red-600">{week.missing}</span> не дошло</span>
               </div>
             </div>
           );
@@ -354,8 +357,8 @@ export function SeedBoxesTab() {
                         const last = row.last[provider];
                         const tone = !last ? 'bg-zinc-100 text-zinc-400'
                           : last.status === 'inbox' ? 'bg-emerald-100 text-emerald-700'
-                            : last.status === 'spam' ? 'bg-red-100 text-red-700'
-                              : 'bg-zinc-200 text-zinc-500';
+                            : last.status === 'spam' ? 'bg-amber-100 text-amber-700'
+                              : 'bg-red-100 text-red-700';
                         const title = !last ? `${PROVIDER_LABEL[provider]}: не проверялось`
                           : `${PROVIDER_LABEL[provider]}, ${last.day}: ${last.status === 'inbox' ? 'входящие' : last.status === 'spam' ? 'спам' : 'не дошло'}`;
                         return (

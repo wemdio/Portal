@@ -81,6 +81,7 @@ import {
   type AutoForwardMark,
 } from '@/lib/tgOutreach/autoForward';
 import { accountLabel } from '@/lib/tgOutreach/accountLabel';
+import { leadMarkLabel, type LeadByFilter } from '@/lib/tgOutreach/leadMark';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
 import {
@@ -1162,6 +1163,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
    * немногие, ради которых экран и открывают.
    */
   const [filterMessages, setFilterMessages] = useState<'all' | 'one' | 'many'>('all');
+  /** Кто сделал лидом: мои, ИИ, все ручные. Пусто — не фильтровать. */
+  const [filterLeadBy, setFilterLeadBy] = useState<LeadByFilter | ''>('');
   /**
    * Чьи диалоги показывать — пустая строка означает «всех аккаунтов».
    *
@@ -1231,13 +1234,14 @@ function DialogsTab({ campaignId, crmEnabled }: {
     if (filterAccountId) params.set('account_id', filterAccountId);
     if (filterBaseId) params.set('base_id', filterBaseId);
     if (filterMessages !== 'all') params.set('messages', filterMessages);
+    if (filterLeadBy) params.set('lead_by', filterLeadBy);
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages]);
+  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages, filterLeadBy]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
   // третьей странице прошлого фильтра бессмысленно.
@@ -1623,6 +1627,21 @@ function DialogsTab({ campaignId, crmEnabled }: {
               <option value="many" title="Разговор завязался — есть хотя бы один ответ">2 и больше</option>
             </select>
           </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Передал:</span>
+            <select
+              value={filterLeadBy}
+              onChange={(e) => { setFilterLeadBy(e.target.value as LeadByFilter | ''); setOffset(0); }}
+              aria-label="Показывать лидов по тому, кто их передал"
+              title="Кто сделал диалог лидом. Лиды до 08.10.2026 метки не имеют"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterLeadBy ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="">Все</option>
+              <option value="me">Я</option>
+              <option value="ai">ИИ</option>
+              <option value="manual">Вручную (все)</option>
+            </select>
+          </div>
           {bases.length > 1 && (
             <div className="flex items-center gap-1">
               <span className="text-xs text-gray-500">База:</span>
@@ -1661,7 +1680,9 @@ function DialogsTab({ campaignId, crmEnabled }: {
                   ? 'Диалогов с ответом пока нет — во всех переписках только наше первое сообщение.'
                   : filterMessages === 'one'
                     ? 'Диалогов без ответа нет: везде переписка завязалась.'
-                    : 'Нет диалогов'}
+                    : filterLeadBy
+                      ? 'Таких лидов пока нет. Метка ставится лидам, отмеченным после 08.10.2026.'
+                      : 'Нет диалогов'}
         </p>
       ) : (
         <div className="space-y-2">
@@ -1669,6 +1690,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
             const isExpanded = expandedId === d.id;
             const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
             const autoMark = describeAutoForward(d);
+            const leadMark = leadMarkLabel(d);
             return (
               <div key={d.id} className="rounded-xl border border-gray-200 bg-white shadow-sm">
                 <button type="button" onClick={() => setExpandedId(isExpanded ? null : d.id)}
@@ -1697,6 +1719,15 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         </span>
                       )}
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>{st.label}</span>
+                      {/* Кто сделал лидом — сразу за статусом: ИИ или сотрудник. */}
+                      {leadMark && (
+                        <span
+                          title={leadMark.title}
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${leadMark.mine ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}
+                        >
+                          {leadMark.text}
+                        </span>
+                      )}
                       {d.tg_is_bot ? (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">Бот</span>
                       ) : (

@@ -7,6 +7,7 @@ import {
   type DialogBaseRef,
 } from '@/lib/tgOutreach/dialogBase';
 import { usernameKey } from '@/lib/tgOutreach/report';
+import { parseLeadByFilter } from '@/lib/tgOutreach/leadMark';
 import { TG_SERVICE_NOTIFICATIONS_USER_ID } from '@/lib/tgOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -98,6 +99,18 @@ export async function GET(req: NextRequest) {
       }
       if (status) {
         query = query.eq('status', status);
+      }
+      /**
+       * «Передал»: мои лиды, от ИИ или все ручные (08.10.2026). Только диалоги
+       * в статусе «Лид»: метка после смены статуса не стирается. Лиды до
+       * выкладки метки не имеют и сюда не попадают.
+       */
+      const leadBy = parseLeadByFilter(url.searchParams.get('lead_by'));
+      if (leadBy) {
+        query = query.eq('status', 'lead');
+        query = leadBy === 'me'
+          ? query.eq('lead_marked_by', auth.user.id)
+          : query.eq('lead_source', leadBy);
       }
       if (accountId) {
         query = query.eq('account_id', accountId);
@@ -249,6 +262,12 @@ export async function GET(req: NextRequest) {
           });
           if (match) row.base = match;
         }
+      }
+
+      // «Это мой лид» считаем здесь: экран TG-аутрича не знает, кто вошёл, а
+      // подпись «👤 вы» и фильтр «Мои» должны совпадать.
+      for (const row of rows) {
+        row.lead_marked_by_me = row.lead_marked_by != null && row.lead_marked_by === auth.user.id;
       }
 
       return NextResponse.json({ items: rows, total: count ?? 0 });
