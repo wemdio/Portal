@@ -349,6 +349,48 @@ async function loadPreviouslyExported(db: SupabaseClient, excludeJobId: string):
   return domains;
 }
 
+/**
+ * Отказы, которые за месяц не меняются: компания без корпоративной почты, без
+ * сайта, не того размера или не B2B завтра будет такой же. no_trigger,
+ * low_score и site_unreachable сюда не входят — у новой вакансии может быть
+ * повод, а сайт может открыться.
+ */
+const LASTING_REJECTIONS = [
+  'no_corporate_email', 'email_invalid', 'domain_not_resolved', 'size_out_of_range', 'not_b2b',
+  'b2c_or_education', 'competitor', 'staffing_agency', 'generic_marketing',
+];
+const REJECTION_MEMORY_DAYS = 30;
+
+/**
+ * Компании (название в нижнем регистре, ключ selectVacancies), которые выборка
+ * пропускает: готовые в других запусках и отсеянные за месяц по неизменной
+ * причине. 08.10.2026 автосбор EN перебрал 2 772 вакансии из 2 972, уже
+ * разобранные накануне, и упёрся в потолок просмотра с 26 готовыми.
+ */
+async function loadSkippedCompanies(db: SupabaseClient, excludeJobId: string, includeExported: boolean): Promise<Set<string>> {
+  const names = new Set<string>();
+  const since = new Date(Date.now() - REJECTION_MEMORY_DAYS * 86_400_000).toISOString();
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    let query = db
+      .from('polza_outreach_companies')
+      .select('id, company_name, status, exclusion_reason')
+      .neq('job_id', excludeJobId)
+      .gte('created_at', since);
+    query = includeExported
+      ? query.eq('status', 'excluded').in('exclusion_reason', LASTING_REJECTIONS)
+      : query.or(`status.eq.ready,and(status.eq.excluded,exclusion_reason.in.(${LASTING_REJECTIONS.join(',')}))`);
+    const { data, error } = await query.order('id', { ascending: true }).range(from, from + PAGE - 1);
+    if (error) throw new Error(`rejected companies lookup failed: ${error.message}`);
+    for (const row of data ?? []) {
+      const name = String(row.company_name ?? '').trim().toLowerCase();
+      if (name) names.add(name);
+    }
+    if (!data || data.length < PAGE) break;
+  }
+  return names;
+}
+
 interface Totals {
   vacancies: number;
   domainFound: number;
@@ -790,8 +832,11 @@ async function runJob(
     templatesRef = templates;
 
     // ── S1: пул кандидатов ──
+    const skippedCompanies = config.sources.includes('hiring')
+      ? await loadSkippedCompanies(db, jobId, Boolean(config.include_previously_exported))
+      : new Set<string>();
     const vacancies = config.sources.includes('hiring')
-      ? (await selectVacancies(db, config, { want: maxCandidates })).candidates
+      ? (await selectVacancies(db, config, { want: maxCandidates, seenCompanies: skippedCompanies })).candidates
       : [];
     const ycs = config.sources.includes('yc') ? await loadYcCompanies(db, config) : [];
     const pool = mergeCandidates(vacancies, ycs);
@@ -799,7 +844,7 @@ async function runJob(
     // Повторы между запусками — домены компаний, готовых в других запусках.
     // Галочка «Брать компании, которые уже выгружались раньше» их не отсеивает.
     const exported = config.include_previously_exported ? new Set<string>() : await loadPreviouslyExported(db, jobId);
-    log('info', `job ${jobId}: pool=${pool.length} (hiring=${vacancies.length}, yc=${ycs.length}), cases=${cases.length}, previously exported=${exported.size}, target=${target}`);
+    log('info', `job ${jobId}: pool=${pool.length} (hiring=${vacancies.length}, yc=${ycs.length}), cases=${cases.length}, previously exported=${exported.size}, skipped known companies=${skippedCompanies.size}, target=${target}`);
 
     const totals: Totals = { vacancies: 0, domainFound: 0, icpPassed: 0, emailFound: 0, writeNow: 0, ready: 0 };
     // Дедуп запуска: какая строка заняла домен. Строка, возвращённая в

@@ -23,10 +23,22 @@ function isRetryable(status: number): boolean {
   return status >= 500 && status < 600;
 }
 
+/**
+ * Рамка для ответов кампании — поверх её промпта. 08.10.2026 в «АИ МОП»
+ * модель пообещала звонок «менеджера Алексея» (такого нет) и назвала
+ * собеседника именем нашего же аккаунта: он начал с «Андрей, здравствуйте»,
+ * обращаясь к нам.
+ */
+export const OUTREACH_FACTS_RULE = `Жёсткие правила поверх инструкции выше:
+- Не выдумывай о нас ничего, чего нет в инструкции: имена и должности сотрудников, телефоны, сроки и время звонка или встречи. Спросят, кто свяжется, — ответь, что напишет коллега из команды, без имени.
+- Не обещай позвонить сам. Номер телефона не давай.
+- Имя, с которым собеседник здоровается («Андрей, здравствуйте»), — это обращение к нам, а не его имя. Называй собеседника только именем, которым он сам представился.
+- Сообщение с пометкой «[Переслано …]» написал не собеседник: он показал нам чужое или наше же сообщение. Не приписывай собеседнику его слова.`;
+
 export async function openaiGenerate(
   settings: OpenAISettings,
   chatHistory: DialogMessage[],
-  opts?: { extraInstruction?: string | null },
+  opts?: { extraInstruction?: string | null; factsRule?: boolean },
 ): Promise<string | null> {
   const apiKey = process.env.OPENROUTER_TG_OUTREACH_API_KEY;
   if (!apiKey) {
@@ -41,6 +53,9 @@ export async function openaiGenerate(
       prompt = prompt.replace(/\{project_name\}/g, settings.project_name);
     }
     messages.push({ role: 'system', content: prompt });
+  }
+  if (opts?.factsRule) {
+    messages.push({ role: 'system', content: OUTREACH_FACTS_RULE });
   }
 
   for (const msg of chatHistory) {
