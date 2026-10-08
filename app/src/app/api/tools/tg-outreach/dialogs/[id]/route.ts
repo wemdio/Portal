@@ -59,18 +59,15 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           }
           update.status = body.status as DialogStatus;
         }
-        // Пре-чек владельца. Cross-specialist read разрешён
-        // (`tg_outreach_dialogs_select_all using (true)` в миграции
-        // 20260320_0003), а UPDATE остался scoped по c.user_id = auth.uid().
-        // Без явной проверки тут пользователь, открывший чужую кампанию,
-        // получал от Supabase криптовый «JSON object requested, multiple
-        // (or no) rows returned» — это UPDATE затрагивал 0 строк под RLS,
-        // и .select().single() рапортовал об этом. Теперь сначала JOIN'имся
-        // с campaigns, понимаем владельца и при чужой кампании возвращаем
-        // понятный 403 — без невнятной ошибки supabase.
+        // Диалоги любой кампании правит вся команда. Миграция 20260807_0004
+        // открыла запись в tg_outreach_dialogs всем (update_all), а здесь
+        // оставалась проверка «кампания твоя» с 403 «только просмотр» —
+        // 08.10.2026 из-за неё нельзя было отметить лида в кампаниях
+        // ушедшего специалиста. Текущую строку читаем ради can_send «до» и
+        // подписи в логе.
         const { data: existing, error: existingErr } = await auth.supabase
           .from('tg_outreach_dialogs')
-          .select('can_send, campaign_id, tg_user_id, tg_username, campaign:tg_outreach_campaigns(user_id)')
+          .select('can_send, campaign_id, tg_user_id, tg_username')
           .eq('id', id)
           .maybeSingle();
         if (existingErr) return jsonError(existingErr.message, 500);
@@ -80,20 +77,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           campaign_id: string;
           tg_user_id: number | string;
           tg_username: string | null;
-          campaign: { user_id: string } | { user_id: string }[] | null;
         };
-        // supabase-js может вернуть JOIN как массив (зависит от FK-кардинальности),
-        // нормализуем к одному объекту.
-        const campaign = Array.isArray(existingRow.campaign)
-          ? existingRow.campaign[0]
-          : existingRow.campaign;
-        if (!campaign) return jsonError('У диалога не нашлась родительская кампания', 500);
-        if (campaign.user_id !== auth.user.id) {
-          return jsonError(
-            'Кампания принадлежит другому специалисту — только просмотр. Откройте свою кампанию, чтобы менять статусы и переключать отправку.',
-            403,
-          );
-        }
 
         let canSendBefore: boolean | null = null;
         const canSendDialogMeta = {
