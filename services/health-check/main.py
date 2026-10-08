@@ -94,6 +94,16 @@ OUTREACHOS_MISSING_AFTER_UTC_HOUR = max(0, int(os.environ.get("HEALTH_OUTREACHOS
 # Auto-pipeline обновляет heartbeat_at по ходу прогона; 30 мин без heartbeat —
 # завис (воркер умер / БД-коннект ушёл).
 AUTOPIPELINE_STUCK_MINUTES = max(15, int(os.environ.get("HEALTH_AUTOPIPELINE_STUCK_MIN", "30")))
+# «Рассылка» (свои ящики): воркер адреса отправки молчит / письма не уходят /
+# ящики отвалились. Свой монитор у рассылки есть (lib/sender/monitorWorker.ts),
+# но чат ему на серверах рассылки не задан — 08.10.2026 воркер 84.21.173.12
+# лежал 4 часа, 88 писем не ушли, а в чат не пришло ничего.
+SENDER_SILENT_MINUTES = max(5, int(os.environ.get("HEALTH_SENDER_SILENT_MIN", "10")))
+SENDER_OVERDUE_MINUTES = max(5, int(os.environ.get("HEALTH_SENDER_OVERDUE_MIN", "15")))
+SENDER_OVERDUE_MIN_MESSAGES = max(1, int(os.environ.get("HEALTH_SENDER_OVERDUE_MIN_MESSAGES", "3")))
+# Пока проблема держится — напоминание раз в столько минут.
+SENDER_REPEAT_MINUTES = max(30, int(os.environ.get("HEALTH_SENDER_REPEAT_MIN", "120")))
+SENDER_ALERT_MENTION = os.environ.get("HEALTH_SENDER_ALERT_MENTION", "@kuladmedDm").strip()
 HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
     "HEALTH_CRITICAL_ENDPOINTS",
     "/,/tools,/api/user/tools",
@@ -1838,14 +1848,126 @@ async def check_pipeline_runs() -> list[str]:
         await conn.close()
 
 
+def _repeat_bucket(since) -> int:
+    """Номер окна напоминаний: ключ алерта меняется раз в SENDER_REPEAT_MINUTES от начала проблемы."""
+    if since is None:
+        return 0
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    minutes = (datetime.now(timezone.utc) - since).total_seconds() / 60
+    return int(minutes // SENDER_REPEAT_MINUTES)
+
+
+async def _check_sender(conn) -> list[str]:
+    """«Рассылка»: воркер адреса молчит, письма не уходят, ящики отвалились."""
+    problems: list[str] = []
+    hint = "Логи на сервере адреса: <code>docker ps -a | grep sender-worker</code>"
+
+    # 1. Воркер адреса отправки молчит, а за адресом есть включённые ящики.
+    try:
+        silent = await conn.fetch(
+            "SELECT e.ip, e.host, e.last_seen_at, "
+            "       (SELECT count(*) FROM public.sender_mailboxes m "
+            "         WHERE m.egress_ip = e.ip AND m.enabled) AS mailboxes "
+            "FROM public.sender_egress_ips e "
+            "WHERE coalesce(e.last_seen_at, e.created_at) < now() - make_interval(mins => $1)",
+            SENDER_SILENT_MINUTES,
+        )
+    except Exception as e:
+        print(f"[health] sender egress query skipped: {e}")
+        silent = []
+    for row in silent:
+        if not row["mailboxes"]:
+            continue
+        last = row["last_seen_at"]
+        key = f"sender:silent:{row['ip']}:{last.isoformat() if last else 'never'}:{_repeat_bucket(last)}"
+        if not await _claim_job_alert(conn, key):
+            continue
+        problems.append(
+            f"🔴 <b>Рассылка: воркер адреса {html.escape(str(row['ip']))} не отвечает</b>\n"
+            f"Сервер {html.escape(str(row['host']))}, последний раз на связи {_msk(last)}. "
+            f"Его {row['mailboxes']} ящиков не шлют письма и не читают ответы.\n"
+            f"{hint}"
+        )
+
+    # 2. Письма с прошедшим временем отправки не уходят — по адресам отправки.
+    try:
+        overdue = await conn.fetch(
+            "SELECT coalesce(m.egress_ip, 'без адреса') AS ip, count(*) AS n, "
+            "       min(s.scheduled_at) AS oldest, count(DISTINCT s.mailbox_id) AS mailboxes "
+            "FROM public.sender_messages s JOIN public.sender_mailboxes m ON m.id = s.mailbox_id "
+            "WHERE s.status = 'scheduled' AND s.scheduled_at < now() - make_interval(mins => $1) "
+            "GROUP BY 1 HAVING count(*) >= $2",
+            SENDER_OVERDUE_MINUTES,
+            SENDER_OVERDUE_MIN_MESSAGES,
+        )
+    except Exception as e:
+        print(f"[health] sender overdue query skipped: {e}")
+        overdue = []
+    for row in overdue:
+        oldest = row["oldest"]
+        key = f"sender:overdue:{row['ip']}:{oldest.isoformat() if oldest else ''}:{_repeat_bucket(oldest)}"
+        if not await _claim_job_alert(conn, key):
+            continue
+        problems.append(
+            f"🔴 <b>Рассылка: письма не уходят (адрес {html.escape(str(row['ip']))})</b>\n"
+            f"{row['n']} писем у {row['mailboxes']} ящиков ждут отправки дольше {SENDER_OVERDUE_MINUTES} мин, "
+            f"самое старое — с {_msk(oldest)}.\n"
+            f"{hint}"
+        )
+
+    # 3. Ящики перешли в «Ошибка» за последний час.
+    try:
+        failed = await conn.fetch(
+            "SELECT id::text AS id, email, last_error, updated_at FROM public.sender_mailboxes "
+            "WHERE status = 'failed' AND updated_at > now() - interval '1 hour' ORDER BY email"
+        )
+    except Exception as e:
+        print(f"[health] sender mailboxes query skipped: {e}")
+        failed = []
+    fresh = []
+    for r in failed:
+        if await _claim_job_alert(conn, f"sender:mailbox_failed:{r['id']}:{r['updated_at'].isoformat()}"):
+            fresh.append(r)
+    if fresh:
+        lines = "\n".join(
+            f"• {html.escape(str(r['email']))}: <code>{html.escape(str(r['last_error'] or 'без текста')[:200])}</code>"
+            for r in fresh[:15]
+        )
+        more = f"\n…и ещё {len(fresh) - 15}" if len(fresh) > 15 else ""
+        problems.append(f"🟠 <b>Рассылка: ящики перешли в «Ошибка» ({len(fresh)})</b>\n{lines}{more}")
+
+    return problems
+
+
+async def check_sender() -> list[str]:
+    """Монитор «Рассылки» — см. run_job_monitor."""
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        print(f"[health] sender connect error: {_normalize_network_error(e)}")
+        return []
+    try:
+        return await _check_sender(conn)
+    finally:
+        await conn.close()
+
+
 async def run_job_monitor() -> None:
     """Run parser queue/failure checks independently from general health."""
     try:
-        stuck, failed, pipelines = await asyncio.gather(
+        stuck, failed, pipelines, sender = await asyncio.gather(
             check_stuck_jobs(),
             check_failed_jobs(),
             check_pipeline_runs(),
+            check_sender(),
         )
+        if sender:
+            mention = f"\n{html.escape(SENDER_ALERT_MENTION)}" if SENDER_ALERT_MENTION else ""
+            await send_telegram(f"⚠️ <b>РАССЫЛКА</b> — {_now_msk()}\n\n" + "\n\n".join(sender) + mention)
+            print(f"[health] SENDER ALERT sent: {len(sender)} problem(s)")
         problems = [*pipelines, *stuck, *failed]
         if not problems:
             print(f"[health] job monitor OK at {_now_msk()}")
