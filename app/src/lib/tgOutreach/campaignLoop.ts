@@ -545,9 +545,12 @@ async function extractMessagesFromHistory(
     const role = isOut ? 'assistant' : 'user';
     const timestamp = msg.date ? new Date(msg.date * 1000).toISOString() : undefined;
     const mediaTag = describeMediaType(msg);
+    // Пересланное написал не собеседник: 08.10.2026 человек переслал нам наше
+    // же первое касание коллеге, тот — обратно нам, и ИИ счёл текст его словами.
+    const fwdTag = msg.fwdFrom ? '[Переслано] ' : '';
 
     if (msg.message) {
-      const content = mediaTag ? `[${mediaTag}] ${msg.message}` : msg.message;
+      const content = fwdTag + (mediaTag ? `[${mediaTag}] ${msg.message}` : msg.message);
       chatMessages.push({ role, content, timestamp });
       continue;
     }
@@ -555,13 +558,13 @@ async function extractMessagesFromHistory(
     if (!isOut && isVoiceOrAudioMessage(msg)) {
       const text = await transcribeVoice(client, msg, log, label);
       if (text) {
-        chatMessages.push({ role: 'user', content: `[Голосовое сообщение]: ${text}`, timestamp });
+        chatMessages.push({ role: 'user', content: `${fwdTag}[Голосовое сообщение]: ${text}`, timestamp });
         continue;
       }
     }
 
     if (mediaTag) {
-      chatMessages.push({ role, content: `[${mediaTag}]`, timestamp });
+      chatMessages.push({ role, content: `${fwdTag}[${mediaTag}]`, timestamp });
     }
   }
   return chatMessages;
@@ -708,6 +711,26 @@ async function isCampaignContact(
     .eq('tg_user_id', tgUserId)
     .maybeSingle();
   return Boolean(data);
+}
+
+/**
+ * То же для пачки диалогов. Догоняющие ответы и напоминания читают диалоги из
+ * базы мимо основного цикла: 08.10.2026 основной цикл писал «не из баз
+ * кампании — пропускаю», а догоняющий через минуту всё равно отвечал.
+ */
+async function campaignContactIds(
+  db: SupabaseClient,
+  campaignId: string,
+  tgUserIds: number[],
+): Promise<Set<number>> {
+  if (tgUserIds.length === 0) return new Set();
+  const { data, error } = await db
+    .from('tg_outreach_processed')
+    .select('tg_user_id')
+    .eq('campaign_id', campaignId)
+    .in('tg_user_id', tgUserIds);
+  if (error) throw new Error(`не смог сверить диалоги с базами кампании: ${error.message}`);
+  return new Set((data ?? []).map((r) => Number(r.tg_user_id)));
 }
 
 async function canSendToDialog(
@@ -1088,6 +1111,7 @@ export async function handleChat(
         : roleOnly
         ? 'Наше последнее сообщение только уточняло роль собеседника; предложение ещё не прозвучало. Ответ о роли и встречное предложение своих услуг НЕ означают интереса к нашему предложению. Если роль подтвердилась, кратко объясни повод обращения, опираясь только на системный промпт этой кампании, и спроси, интересно ли человеку это обсудить. Если роль не подтвердилась или собеседник предлагает свои услуги, вежливо заверши разговор. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
         : interested && phrase ? handoffInstruction(phrase) : null,
+      factsRule: true,
     });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
     if (replyText) {
@@ -1296,14 +1320,24 @@ async function handleFollowUp(
     skip_already_sent: 0,
     skip_openai_empty: 0,
     skip_low_value: 0,
+    skip_not_campaign: 0,
     errors: 0,
   };
+
+  let contacts: Set<number>;
+  try {
+    contacts = await campaignContactIds(db, campaign.id, dialogs.map((d) => Number(d.tg_user_id)));
+  } catch (err) {
+    log('warning', `Аккаунт ${account.session_name}: напоминания (follow-up) — ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
 
   for (const dialog of dialogs) {
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
     if (isBot) { stats.skip_bot++; continue; }
+    if (!contacts.has(Number(tgUserId))) { stats.skip_not_campaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
 
     const messages = dialog.messages as DialogMessage[];
@@ -1320,7 +1354,7 @@ async function handleFollowUp(
         { role: 'user', content: `[Система: пользователь не ответил ${delayHours}ч ${delayMinutes}мин. ${followUpPrompt}]` },
       ];
 
-      const reply = await openaiGenerate(oai, followUpMessages);
+      const reply = await openaiGenerate(oai, followUpMessages, { factsRule: true });
       if (!reply) { stats.skip_openai_empty++; continue; }
       if (isLowValueReply(reply)) {
         stats.skip_low_value++;
@@ -1375,9 +1409,11 @@ async function handleFollowUp(
         stats.skip_bot ||
         stats.skip_blocked ||
         stats.skip_openai_empty ||
-        stats.skip_low_value
+        stats.skip_low_value ||
+        stats.skip_not_campaign
         ? ' Не отправил по причинам:'
         : '') +
+      (stats.skip_not_campaign ? ` не из баз кампании — ${stats.skip_not_campaign};` : '') +
       (stats.skip_already_sent ? ` уже напоминали ранее — ${stats.skip_already_sent};` : '') +
       (stats.skip_last_not_assistant ? ` последнее сообщение не от нас — ${stats.skip_last_not_assistant};` : '') +
       (stats.skip_empty ? ` пустая история диалога — ${stats.skip_empty};` : '') +
@@ -1435,7 +1471,16 @@ async function handleMissedRepliesLastDays(
   let skipLowValue = 0;
   let skipRepeat = 0;
   let skipCloser = 0;
+  let skipNotCampaign = 0;
   let errorsCount = 0;
+
+  let contacts: Set<number>;
+  try {
+    contacts = await campaignContactIds(db, campaign.id, dialogs.map((d) => Number(d.tg_user_id)));
+  } catch (err) {
+    log('warning', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
 
   for (const dialog of dialogs) {
     if (shouldStop?.()) break;
@@ -1445,6 +1490,7 @@ async function handleMissedRepliesLastDays(
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
     if (isBot) { skipBot++; continue; }
+    if (!contacts.has(Number(tgUserId))) { skipNotCampaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
 
     const messages = Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : [];
@@ -1458,7 +1504,7 @@ async function handleMissedRepliesLastDays(
     }
 
     try {
-      const reply = await openaiGenerate(oai, messages);
+      const reply = await openaiGenerate(oai, messages, { factsRule: true });
       if (!reply) { skipOpenaiEmpty++; continue; }
       if (isLowValueReply(reply)) {
         skipLowValue++;
@@ -1524,9 +1570,10 @@ async function handleMissedRepliesLastDays(
   log(
     'info',
     `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за ${CATCHUP_LOOKBACK_DAYS} дн.) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
-      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser
+      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser || skipNotCampaign
         ? ' Не отправил по причинам:'
         : '') +
+      (skipNotCampaign ? ` не из баз кампании — ${skipNotCampaign};` : '') +
       (skipBot ? ` это боты — ${skipBot};` : '') +
       (skipBlocked ? ` в чёрном списке — ${skipBlocked};` : '') +
       (skipEmpty ? ` пустая история — ${skipEmpty};` : '') +
