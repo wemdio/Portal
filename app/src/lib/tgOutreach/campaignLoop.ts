@@ -22,6 +22,7 @@ import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionStri
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
+import { isRoleOnlyReply } from './roleFirstGate';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
   handleProxyError,
@@ -1054,8 +1055,9 @@ export async function handleChat(
   // то забывает, то перефразирует, и «Да, пришлите условия» оставался без
   // менеджера. Проверка упала — решает ответ модели, как раньше.
   const phrase = handoffPhrase(oai);
+  const roleOnly = isRoleOnlyReply(chatMessages);
   let interested: boolean | null = null;
-  if (phrase) {
+  if (phrase && !roleOnly) {
     const check = await detectInterest(chatMessages);
     interested = check.interested;
     if (interested) {
@@ -1070,7 +1072,9 @@ export async function handleChat(
   const openaiStart = Date.now();
   try {
     replyText = await openaiGenerate(oai, chatMessages, {
-      extraInstruction: interested && phrase ? handoffInstruction(phrase) : null,
+      extraInstruction: roleOnly
+        ? 'Наше последнее сообщение только уточняло роль собеседника; предложение ещё не прозвучало. Ответ о роли и встречное предложение своих услуг НЕ означают интереса к нашему предложению. Если роль подтвердилась, кратко объясни повод обращения, опираясь только на системный промпт этой кампании, и спроси, интересно ли человеку это обсудить. Если роль не подтвердилась или собеседник предлагает свои услуги, вежливо заверши разговор. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
+        : interested && phrase ? handoffInstruction(phrase) : null,
     });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
     if (replyText) {
@@ -1106,6 +1110,10 @@ export async function handleChat(
   }
   if (interested && phrase) {
     replyText = ensureHandoffPhrase(replyText, phrase);
+  }
+  if (roleOnly && detectTrigger(replyText, oai) === 'positive') {
+    log('warning', `${displayName}: ответ на вопрос о роли ошибочно содержит фразу передачи; НЕ отправляю`);
+    return { replied: false, triggerType: null };
   }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
