@@ -54,6 +54,13 @@ const pipelineRow = {
   }],
 };
 
+const emptyRetryDelta = {
+  scored_companies: 0,
+  working_score_companies: 0,
+  email_found_companies: 0,
+  validated_emails: 0,
+};
+
 function loadAnalytics(overrides: Partial<Parameters<typeof loadClientReportAnalytics>[0]> = {}) {
   return loadClientReportAnalytics({
     clientUserId: 'client-1',
@@ -74,6 +81,9 @@ describe('client reports pipeline analytics', () => {
     pipelineRpcMock.mockImplementation(async (name: string) => {
       if (name === 'client_report_large_score_rollup_active_run') {
         return { data: null, error: null };
+      }
+      if (name === 'client_report_no_email_retry_delta') {
+        return { data: [emptyRetryDelta], error: null };
       }
       return { data: [pipelineRow], error: null };
     });
@@ -140,6 +150,16 @@ describe('client reports pipeline analytics', () => {
         p_allowed_campaign_ids: ['campaign-a', 'campaign-b'],
       },
     );
+    expect(pipelineRpcMock).toHaveBeenNthCalledWith(
+      3,
+      'client_report_no_email_retry_delta',
+      {
+        p_client_user_id: 'client-1',
+        p_from: '2026-06-30T21:00:00.000Z',
+        p_to: '2026-07-31T21:00:00.000Z',
+        p_score_code: 'B',
+      },
+    );
 
     expect(result).not.toHaveProperty('metrics');
     expect(result.freshness).toEqual({ pipelineAt: '2026-07-31T11:00:00.000Z' });
@@ -176,6 +196,9 @@ describe('client reports pipeline analytics', () => {
       }
       if (name === 'client_report_pipeline_summary_shadow') {
         return { data: [pipelineRow], error: null };
+      }
+      if (name === 'client_report_no_email_retry_delta') {
+        return { data: [emptyRetryDelta], error: null };
       }
       throw new Error(`unexpected RPC ${name}`);
     });
@@ -221,6 +244,9 @@ describe('client reports pipeline analytics', () => {
       if (name === 'client_report_pipeline_summary') {
         return { data: [pipelineRow], error: null };
       }
+      if (name === 'client_report_no_email_retry_delta') {
+        return { data: [emptyRetryDelta], error: null };
+      }
       throw new Error(`unexpected RPC ${name}`);
     });
 
@@ -253,6 +279,9 @@ describe('client reports pipeline analytics', () => {
       if (name === 'client_report_pipeline_summary') {
         return { data: [pipelineRow], error: null };
       }
+      if (name === 'client_report_no_email_retry_delta') {
+        return { data: [emptyRetryDelta], error: null };
+      }
       throw new Error(`unexpected RPC ${name}`);
     });
 
@@ -278,6 +307,53 @@ describe('client reports pipeline analytics', () => {
       expect.objectContaining({ campaignId: 'campaign-a', campaignName: 'campaign-a' }),
     ]);
     expect(datasetQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('removes retry attempts from the acquisition funnel without removing accepted contacts', async () => {
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') return { data: null, error: null };
+      if (name === 'client_report_no_email_retry_delta') {
+        return { data: [{
+          scored_companies: 12,
+          working_score_companies: 12,
+          email_found_companies: 2,
+          validated_emails: 2,
+        }], error: null };
+      }
+      return { data: [pipelineRow], error: null };
+    });
+
+    const result = await loadAnalytics();
+    expect(result.funnel).toEqual(expect.objectContaining({
+      scoredCompanies: 88,
+      workingScoreCompanies: 18,
+      emailFoundCompanies: 18,
+      validatedEmails: 16,
+      submittedContacts: 10,
+      confirmedContacts: 7,
+    }));
+  });
+
+  it('fails closed when the retry correction cannot be verified', async () => {
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') return { data: null, error: null };
+      if (name === 'client_report_no_email_retry_delta') {
+        return { data: null, error: { message: 'retry delta unavailable' } };
+      }
+      return { data: [pipelineRow], error: null };
+    });
+
+    await expect(loadAnalytics()).rejects.toBeInstanceOf(ClientReportPipelineUnavailableError);
+  });
+
+  it('fails closed on an empty retry correction result', async () => {
+    pipelineRpcMock.mockImplementation(async (name: string) => {
+      if (name === 'client_report_large_score_rollup_active_run') return { data: null, error: null };
+      if (name === 'client_report_no_email_retry_delta') return { data: [], error: null };
+      return { data: [pipelineRow], error: null };
+    });
+
+    await expect(loadAnalytics()).rejects.toBeInstanceOf(ClientReportPipelineUnavailableError);
   });
 
   it.each([

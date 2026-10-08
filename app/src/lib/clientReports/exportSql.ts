@@ -216,7 +216,12 @@ WITH domain_facts AS (
     s.routed_campaign_id AS campaign_id,
     s.routed_campaign_name_snapshot AS campaign_name,
     (s.routed_campaign_id IS NOT NULL) AS campaign_identity_known,
-    s.source_kind,
+    CASE
+      WHEN s.source_kind = 'manual_scoring'
+        AND (retry_run.is_no_email_retry OR s.metadata->>'source_filename' LIKE 'no-email-retry-%-20261008.txt')
+        THEN 'no_email_retry'
+      ELSE s.source_kind
+    END AS source_kind,
     s.metadata->>'source_filename' AS source_filename,
     s.source_run_id,
     s.source_job_id,
@@ -224,6 +229,10 @@ WITH domain_facts AS (
     s.scored_at,
     s.legacy_inferred
   FROM public.client_pipeline_domain_snapshots s
+  LEFT JOIN public.client_manual_score_runs retry_run
+    ON s.source_kind = 'manual_scoring'
+   AND s.source_run_id = retry_run.id::text
+   AND s.client_user_id = retry_run.client_user_id
 
   UNION ALL
 
@@ -245,7 +254,11 @@ WITH domain_facts AS (
     NULL::text,
     NULL::text,
     false AS campaign_identity_known,
-    'manual_scoring_legacy',
+    CASE
+      WHEN r.is_no_email_retry OR r.source_filename LIKE 'no-email-retry-%-20261008.txt'
+        THEN 'no_email_retry_legacy'
+      ELSE 'manual_scoring_legacy'
+    END,
     r.source_filename,
     r.id::text,
     NULL::text,

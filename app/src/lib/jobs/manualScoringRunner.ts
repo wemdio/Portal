@@ -16,6 +16,7 @@
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getOrFetchScore, normalizeDomain } from './mailganerScoreCache';
+import { buildExcludePatterns } from './autoPipelineExclusions';
 import { validateEmailForAutoPipeline } from './autoPipelineEmailValidation';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import type { DomainInfo } from '@/lib/emailValidation/shared';
@@ -88,6 +89,14 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     .update({ status: 'processing' })
     .eq('id', opts.runId);
 
+  const { data: runMode, error: runModeError } = await supabaseAdmin
+    .from('client_manual_score_runs')
+    .select('is_no_email_retry')
+    .eq('id', opts.runId)
+    .single();
+  if (runModeError) return await markFailed(opts.runId, `Failed to load run mode: ${runModeError.message}`);
+  const isNoEmailRetry = (runMode as { is_no_email_retry?: boolean } | null)?.is_no_email_retry === true;
+
   // 2. Берём все ещё не обработанные строки этого прогона
   const { data: rowsData, error: rowsErr } = await supabaseAdmin
     .from('client_manual_score_rows')
@@ -101,6 +110,9 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
   }
 
   const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null }>;
+  if (isNoEmailRetry && rows.length > 100) {
+    return await markFailed(opts.runId, 'No-email retry runs are limited to 100 rows');
+  }
   if (rows.length === 0) {
     // Scoring already finished, but routing/snapshot persistence may have been
     // interrupted. Reconcile both before the run is allowed to complete.
@@ -214,7 +226,7 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
 
   const { data: run } = await supabaseAdmin
     .from('client_manual_score_runs')
-    .select('client_user_id, route_to_instantly')
+    .select('client_user_id, route_to_instantly, is_no_email_retry')
     .eq('id', runId)
     .single();
   const clientUserId = (run as { client_user_id?: string } | null)?.client_user_id;
@@ -224,6 +236,8 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
   // Instantly НЕ льётся. Включается явно (true) для боевых ручных доливов.
   const routeToInstantly =
     (run as { route_to_instantly?: boolean } | null)?.route_to_instantly === true;
+  const isNoEmailRetry =
+    (run as { is_no_email_retry?: boolean } | null)?.is_no_email_retry === true;
 
   const { data: rowsData, error: rowsError } = await supabaseAdmin
     .from('client_manual_score_rows')
@@ -322,10 +336,15 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
   // 4. Маршрутизация в существующие кампании по скорингу — если настроены.
   const { data: cfg, error: cfgError } = await supabaseAdmin
     .from('client_auto_pipeline_configs')
-    .select('score_buckets')
+    .select('score_buckets, hh_extra_exclude_patterns')
     .eq('client_user_id', clientUserId)
     .maybeSingle();
   if (cfgError) throw new Error(cfgError.message);
+  const exclusionPatterns = isNoEmailRetry
+    ? buildExcludePatterns(
+      ((cfg as { hh_extra_exclude_patterns?: string[] } | null)?.hh_extra_exclude_patterns ?? []),
+    )
+    : [];
   const buckets = ((cfg as { score_buckets?: unknown } | null)?.score_buckets ?? []) as Array<{
     score_min: number;
     score_max: number | null;
@@ -345,6 +364,9 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
     const r = rows[i];
     const name = cleaned[i];
     if (!name || !r.domain || r.score === null) continue;
+    if (isNoEmailRetry && [
+      name, r.domain, r.company_name, r.scraped_name, nameByDomain.get(r.domain),
+    ].some((value) => value && exclusionPatterns.some((pattern) => pattern.test(value)))) continue;
     // Готовые почты (valid/role/free/catch_all) — каждая = отдельный лид.
     // Невалидные не берём (правило «почта валидная или catch-all»).
     const validEmails: string[] = [];

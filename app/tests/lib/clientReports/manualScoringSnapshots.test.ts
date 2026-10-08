@@ -164,6 +164,46 @@ describe('manual scoring durable snapshot reconciliation', () => {
     });
   });
 
+  it('keeps built-in excluded brands out of Instantly in no-email retry mode', async () => {
+    const baseline = routeSeed();
+    mockDb = createMockSupabase({ tables: {
+      client_manual_score_runs: baseline.getRows('client_manual_score_runs').map((run) => ({
+        ...run, is_no_email_retry: true,
+      })),
+      client_manual_score_rows: baseline.getRows('client_manual_score_rows').map((row, index) => ({
+        ...row, company_name: index === 0 ? 'Сбер Тест' : null,
+      })),
+      mailganer_domain_scores: [],
+      client_auto_pipeline_configs: baseline.getRows('client_auto_pipeline_configs'),
+      client_pipeline_domain_snapshots: [],
+    } });
+    cleanCompanyNamesMock.mockResolvedValue(['Сбер Тест', 'Two']);
+    appendLeadsMock.mockResolvedValue({
+      accepted: 1, skipped: 0, acceptedIndexes: [0], identityComplete: true,
+    });
+
+    await expect(processManualRun({ runId: 'manual-run', endpoint }))
+      .resolves.toMatchObject({ status: 'completed' });
+    expect(appendLeadsMock.mock.calls[0][0].leads.map((lead) => lead.email))
+      .toEqual(['two@two.test']);
+  });
+
+  it('fails closed on a retry run larger than the pageless 100-row limit', async () => {
+    mockDb = createMockSupabase({ tables: {
+      client_manual_score_runs: [{
+        id: 'manual-run', client_user_id: 'client-1', source_filename: 'retry.csv',
+        route_to_instantly: true, is_no_email_retry: true, status: 'pending',
+      }],
+      client_manual_score_rows: Array.from({ length: 101 }, (_, index) => ({
+        id: index + 1, run_id: 'manual-run', domain: `domain-${index}.ru`, bucket: null,
+      })),
+    } });
+
+    await expect(processManualRun({ runId: 'manual-run', endpoint }))
+      .resolves.toMatchObject({ status: 'failed', error: 'No-email retry runs are limited to 100 rows' });
+    expect(appendLeadsMock).not.toHaveBeenCalled();
+  });
+
   it('keeps a failed manual append retryable and does not freeze an unrouted snapshot', async () => {
     mockDb = routeSeed();
     cleanCompanyNamesMock.mockResolvedValue(['One', 'Two']);
