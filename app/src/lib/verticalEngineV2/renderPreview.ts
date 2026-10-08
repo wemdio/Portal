@@ -251,7 +251,8 @@ export function renderTemplatePreview(input: {
     body: string;
     wait_days: number;
     segment_variants?: Array<{ when: string; text: string }>;
-    selected_variant?: 'A' | 'B';
+    selected_variant?: 'A' | 'B' | 'C';
+    selected_variants?: Array<'A' | 'B' | 'C'>;
     variants?: Array<{ subject: string | null; body: string }>;
     subject_options?: string[];
     selected_subject_indices?: number[];
@@ -264,6 +265,7 @@ export function renderTemplatePreview(input: {
   rowSegments?: Array<string | null>;
   /** Index among selected first-email subjects, not among all suggestions. */
   subjectVariantIndex?: number;
+  variantIndices?: number[];
 }): VePreviewResult {
   const maxRows = Math.max(0, input.maxRows ?? 3);
   const rows = input.rows.slice(0, maxRows);
@@ -273,7 +275,8 @@ export function renderTemplatePreview(input: {
       letters: materializeVeFinalLetters(input.letters, input.rowSegments?.[index]).map((letter, letterIndex) => {
         const segmentKey = input.rowSegments?.[index] ?? null;
         const segmentBody = selectSegmentBody(letter, segmentKey);
-        const subjectVariant = letterIndex === 0 && (input.subjectVariantIndex ?? 0) > 0 ? letter.variants?.[(input.subjectVariantIndex ?? 0) - 1] : undefined;
+        const variantIndex = input.variantIndices?.[letterIndex] ?? (letterIndex === 0 ? input.subjectVariantIndex ?? 0 : 0);
+        const subjectVariant = variantIndex > 0 ? letter.variants?.[variantIndex - 1] : undefined;
         const subject = tokenizePreviewText(letterIndex === 0 ? subjectVariant?.subject ?? letter.subject ?? '' : '', input.operatorMapping, row);
         const body = tokenizePreviewText(subjectVariant?.body ?? segmentBody ?? letter.body, input.operatorMapping, row);
         return {
