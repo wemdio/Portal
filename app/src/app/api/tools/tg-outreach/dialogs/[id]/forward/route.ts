@@ -19,6 +19,7 @@ import { checkForwardConflict, cancelBlockReason, type ExistingForward } from '@
 import { loadLeadOrigin } from '@/lib/tgOutreach/leadOrigin';
 import { logCampaign, forwardKindLabel, forwardWho } from '@/lib/tgOutreach/campaignLog';
 import { enqueueCrmPush, type EnqueueResult } from '@/lib/tgOutreach/crmPush';
+import { manualLeadMark, operatorName, type LeadMarkFields } from '@/lib/tgOutreach/leadMark';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
 
@@ -147,12 +148,13 @@ async function loadForwards(db: SupabaseClient, dialogId: string): Promise<Exist
  * Статус здесь — всё действие, поэтому его сбой — ошибка ответа, а не строка
  * в журнале, как при обычной передаче.
  */
-async function markLeadOnly(db: SupabaseClient, dialogId: string, prepared: Prepared, name: string) {
+async function markLeadOnly(db: SupabaseClient, dialogId: string, prepared: Prepared, name: string, mark: LeadMarkFields) {
+  // Метку пишем и на уже лиде: «Передать лида» — явное действие сотрудника,
+  // даже если до этого лидом его сделал ИИ.
   const { error } = await db
     .from('tg_outreach_dialogs')
-    .update({ status: 'lead' })
-    .eq('id', dialogId)
-    .neq('status', 'lead');
+    .update({ status: 'lead', ...mark })
+    .eq('id', dialogId);
   if (error) {
     await logCampaign(db, prepared.campaignId, 'error',
       `Передача (лид) ${prepared.who}: статус «Лид» не проставился — ${error.message} (нажал ${name})`);
@@ -175,15 +177,6 @@ async function markLeadOnly(db: SupabaseClient, dialogId: string, prepared: Prep
   }
 
   return NextResponse.json({ ok: true, mark_only: true, crm }, { status: 201 });
-}
-
-/** Человеческое имя того, кто нажал кнопку — для строки «передал». */
-function operatorName(user: { email?: string | null; user_metadata?: Record<string, unknown> | null }): string {
-  const meta = user.user_metadata ?? {};
-  const named = [meta.full_name, meta.name, meta.username].find(
-    (v): v is string => typeof v === 'string' && v.trim() !== '',
-  );
-  return named ?? user.email ?? 'сотрудник портала';
 }
 
 export async function GET(req: NextRequest, ctx: Ctx) {
@@ -264,7 +257,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         return jsonError(prepared.error, prepared.status);
       }
 
-      if (!prepared.targetChat) return markLeadOnly(auth.supabase, id, prepared, name);
+      if (!prepared.targetChat) {
+        return markLeadOnly(auth.supabase, id, prepared, name, await manualLeadMark(auth.supabase, auth.user));
+      }
 
       const { data, error } = await auth.supabase
         .from('tg_outreach_lead_forwards')
@@ -312,13 +307,15 @@ export async function POST(req: NextRequest, ctx: Ctx) {
        * Отмена передачи статус обратно не снимает: решение «это лид» принял
        * человек, и несостоявшаяся отправка его не отменяет — снять статус можно
        * кнопками на карточке диалога.
+       *
+       * Вместе со статусом пишем, кто передал (08.10.2026) — и на уже лиде,
+       * которого раньше отметил ИИ: передача — действие сотрудника.
        */
       if (kind === 'lead') {
         const { error: statusErr } = await auth.supabase
           .from('tg_outreach_dialogs')
-          .update({ status: 'lead' })
-          .eq('id', id)
-          .neq('status', 'lead');
+          .update({ status: 'lead', ...(await manualLeadMark(auth.supabase, auth.user)) })
+          .eq('id', id);
         if (statusErr) {
           // Передача уже в очереди — ронять её из-за статуса нельзя. Но и
           // молчать нельзя: цифра в отчёте разойдётся с реальностью, и узнать

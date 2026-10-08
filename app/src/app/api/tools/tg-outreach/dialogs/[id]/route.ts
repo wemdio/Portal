@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
+import { manualLeadMark, type LeadMarkFields } from '@/lib/tgOutreach/leadMark';
 import type { DialogStatus } from '@/lib/tgOutreach/types';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -52,7 +53,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           can_send_changed_at?: string;
           can_send_changed_by?: string;
           can_send_changed_reason?: string;
-        } = {};
+        } & LeadMarkFields = {};
         if (body.status !== undefined) {
           if (!VALID_STATUSES.includes(body.status as DialogStatus)) {
             return jsonError(`status должен быть одним из: ${VALID_STATUSES.join(', ')}`, 400);
@@ -63,21 +64,27 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         // открыла запись в tg_outreach_dialogs всем (update_all), а здесь
         // оставалась проверка «кампания твоя» с 403 «только просмотр» —
         // 08.10.2026 из-за неё нельзя было отметить лида в кампаниях
-        // ушедшего специалиста. Текущую строку читаем ради can_send «до» и
-        // подписи в логе.
+        // ушедшего специалиста. Текущую строку читаем ради can_send и статуса
+        // «до» и подписи в логе.
         const { data: existing, error: existingErr } = await auth.supabase
           .from('tg_outreach_dialogs')
-          .select('can_send, campaign_id, tg_user_id, tg_username')
+          .select('can_send, status, campaign_id, tg_user_id, tg_username')
           .eq('id', id)
           .maybeSingle();
         if (existingErr) return jsonError(existingErr.message, 500);
         if (!existing) return jsonError('Диалог не найден', 404);
         const existingRow = existing as {
           can_send: boolean;
+          status: DialogStatus;
           campaign_id: string;
           tg_user_id: number | string;
           tg_username: string | null;
         };
+        // Кнопка «Лид» — ручная отметка: на карточке будет видно, кто её
+        // поставил. Повторное нажатие на уже лиде автора не переписывает.
+        if (update.status === 'lead' && existingRow.status !== 'lead') {
+          Object.assign(update, await manualLeadMark(auth.supabase, auth.user));
+        }
 
         let canSendBefore: boolean | null = null;
         const canSendDialogMeta = {

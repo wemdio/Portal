@@ -79,12 +79,13 @@ beforeEach(() => {
 });
 
 describe('PUT /tg-outreach/dialogs/[id] — any team member may edit', () => {
-  it('marks a dialog of someone else’s campaign as a lead', async () => {
+  it('marks a dialog of someone else’s campaign as a lead and records who did it', async () => {
     dialogRow = foreignDialog(true);
 
     const res = await PUT(makePutReq({ status: 'lead' }) as never, ctx as never);
     expect(res.status).toBe(200);
-    expect(updates).toEqual([{ status: 'lead' }]);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ status: 'lead', lead_source: 'manual', lead_marked_by: AUTH_USER_ID });
   });
 
   it('toggles can_send on someone else’s campaign and records who did it', async () => {
