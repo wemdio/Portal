@@ -25,6 +25,7 @@ import { BaseRow, BaseAnalysisCards } from './steps/Step4Base';
 import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { DeliveryRatePanel } from './DeliveryRatePanel';
+import { DeliveryTargetPanel } from './DeliveryTargetPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
@@ -985,6 +986,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <h2 className="ve2-h2">{run?.status === 'waiting' && run.items.some(item => item.code === 'VE_LAUNCH_REVIEW_REQUIRED')
                 ? 'Кампании ожидают проверки специалиста' : run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
               {run?.error ? <StatusBox tone="error">{run.error}</StatusBox> : null}
+              {run?.request.target_contacts ? <DeliveryTargetPanel key={projectId} projectId={projectId}
+                disabled={busy || ['queued', 'running', 'waiting'].includes(run.status)} onSaved={() => void refresh()} /> : null}
               {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
                 presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}
                 disabled={busy || ['queued', 'running'].includes(run.status)} /> : null}
