@@ -6,7 +6,11 @@ import type { SupabaseClient } from '@supabase/supabase-js';
  * Живут в базе (sender_folders), а не в env: вкладка «Квалификация»
  * автоаутрича сохраняет их, воркер перечитывает на каждом круге, и правка
  * применяется без перезапуска. Рассылка без папки (ручная) получает значения
- * по умолчанию: оценивать и слать в чат, общие правила.
+ * по умолчанию: оценивать по общим правилам, в чат не слать.
+ *
+ * В чат «Продажи Polza» — только лиды автоаутричей (папки auto_*): с 08.10.2026
+ * ручные рассылки клиентов (AlialGroup) оцениваются «лид / не лид» для вкладки
+ * «Письма», но их лиды нашему отделу продаж не уходят.
  */
 
 export const LEAD_CRITERIA_MAX = 2000;
@@ -46,9 +50,14 @@ export const DEFAULT_LEAD_SETTINGS: LeadSettings = {
   folderKey: null,
   folderName: null,
   enabled: true,
-  telegram: true,
+  telegram: false,
   criteria: null,
 };
+
+/** Папка автоаутрича (auto_ru, auto_en) — как isAutoFolderKey в lib/sender/folders.ts. */
+function isAutoOutreachFolder(key: string): boolean {
+  return key.startsWith('auto_');
+}
 
 interface FolderRow {
   id: string;
@@ -66,7 +75,7 @@ export function settingsFromFolder(row: FolderRow): LeadSettings {
     folderKey: row.key,
     folderName: row.name,
     enabled: row.leads_enabled,
-    telegram: row.leads_telegram,
+    telegram: row.leads_telegram && isAutoOutreachFolder(row.key),
     criteria: criteria ? criteria.slice(0, LEAD_CRITERIA_MAX) : null,
   };
 }
