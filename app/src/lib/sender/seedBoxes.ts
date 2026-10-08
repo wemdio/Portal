@@ -112,6 +112,8 @@ async function openSeedBox(box: SeedBoxRow): Promise<ImapFlow> {
     greetingTimeout: 10_000,
     socketTimeout: 30_000,
   });
+  // Без слушателя событие 'error' роняет процесс (byoMailbox/imap.ts); ошибку получает await.
+  client.on('error', () => undefined);
   await client.connect();
   return client;
 }
