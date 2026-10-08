@@ -855,10 +855,56 @@ export interface SenderStatsDto {
   steps: { step: number; reached: number; replied: number }[];
 }
 
+/** Блок «Коды отказов»: code null — отказы, в тексте которых кода нет. */
+export interface BounceCodeCountDto {
+  code: string | null;
+  n: number;
+}
+
+export interface BounceCodeEventDto {
+  at: string;
+  /** bounce — письмо-отбойник во входящих; send — отказ при отправке. */
+  source: 'bounce' | 'send';
+  to_email: string | null;
+  mailbox_email: string | null;
+  /** null — письмо не из живой кампании «Рассылки». */
+  campaign_name: string | null;
+  detail: string | null;
+}
+
+/**
+ * Чьи входящие и отказы считать: ours — только письма «Рассылки»; all — всё,
+ * что пришло на наши ящики, включая ответы на отправки других инструментов.
+ */
+export type SenderStatsScope = 'ours' | 'all';
+
+function statsQuery(period: SenderStatsPeriod, campaignId: string | null, scope: SenderStatsScope) {
+  return `period=${period}${campaignId ? `&campaign=${encodeURIComponent(campaignId)}` : ''}&scope=${scope}`;
+}
+
+export function fetchBounceCodes(period: SenderStatsPeriod, campaignId: string | null, scope: SenderStatsScope) {
+  return authFetchJson<{ codes: BounceCodeCountDto[] }>(`${BASE}/stats/codes?${statsQuery(period, campaignId, scope)}`);
+}
+
+export function fetchBounceCodeEvents(
+  code: string | null,
+  period: SenderStatsPeriod,
+  campaignId: string | null,
+  scope: SenderStatsScope,
+) {
+  const value = encodeURIComponent(code ?? 'none');
+  return authFetchJson<{ events: BounceCodeEventDto[] }>(
+    `${BASE}/stats/codes?${statsQuery(period, campaignId, scope)}&code=${value}`,
+  );
+}
+
 /** campaignId null — все кампании сразу. */
-export function fetchSenderStats(period: SenderStatsPeriod, campaignId: string | null = null) {
-  const campaign = campaignId ? `&campaign=${encodeURIComponent(campaignId)}` : '';
-  return authFetchJson<SenderStatsDto>(`${BASE}/stats?period=${period}${campaign}`);
+export function fetchSenderStats(
+  period: SenderStatsPeriod,
+  campaignId: string | null = null,
+  scope: SenderStatsScope = 'ours',
+) {
+  return authFetchJson<SenderStatsDto>(`${BASE}/stats?${statsQuery(period, campaignId, scope)}`);
 }
 
 /** mode 'replace' — заменить базу; по умолчанию новые адреса добавляются к старым. */

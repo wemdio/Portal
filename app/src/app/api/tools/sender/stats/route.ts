@@ -44,10 +44,14 @@ export async function GET(req: NextRequest) {
     // ?campaign=<id> — одна кампания; без него — все сразу.
     const campaign = req.nextUrl.searchParams.get('campaign') || null;
     if (campaign && !UUID_RE.test(campaign)) return jsonError('Неизвестная кампания', 400);
+    // ?scope=all — входящие и отказы всех писем с наших ящиков, включая чужие
+    // отправки; по умолчанию только письма «Рассылки».
+    const onlyLinked = req.nextUrl.searchParams.get('scope') !== 'all';
 
     const { data, error } = await supabaseAdmin.rpc('sender_stats_dashboard', {
       p_since: since,
       p_campaign_id: campaign,
+      p_only_linked: onlyLinked,
     });
     if (error) return jsonError(error.message, 500);
 

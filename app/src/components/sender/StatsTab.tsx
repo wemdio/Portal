@@ -5,6 +5,7 @@ import type { EChartsCoreOption } from 'echarts/core';
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import EChart from '@/components/charts/EChart';
 import { DomainDeliverability } from './DomainDeliverability';
+import { BounceCodes } from './BounceCodes';
 import type { BounceKinds } from '@/lib/sender/domainReputation';
 import {
   AXIS_FONT_SIZE,
@@ -27,6 +28,7 @@ import {
   type SenderStatCounters,
   type SenderStatsDto,
   type SenderStatsPeriod,
+  type SenderStatsScope,
 } from './api';
 
 /**
@@ -533,12 +535,20 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
 
 // ─── Вкладка ────────────────────────────────────────────────────────────────
 
+const SCOPES: { id: SenderStatsScope; label: string; hint: string }[] = [
+  { id: 'ours', label: 'Письма Рассылки', hint: 'Ответы и отказы только по письмам кампаний Рассылки' },
+  { id: 'all', label: 'Все на наших ящиках', hint: 'Плюс ответы и отказы на письма других инструментов с этих же ящиков' },
+];
+
 /** initialCampaignId — кампания, из строки которой нажали «Статистика». */
 export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: string | null } = {}) {
   const [period, setPeriod] = useState<SenderStatsPeriod>('30d');
   // null — все кампании сразу.
   const [campaignId, setCampaignId] = useState<string | null>(initialCampaignId);
   const [campaignList, setCampaignList] = useState<Pick<CampaignDto, 'id' | 'name'>[]>([]);
+  // ours — входящие и отказы только по письмам «Рассылки»: наши ящики шлют и
+  // другие инструменты, их отбойники иначе портят доставляемость.
+  const [scope, setScope] = useState<SenderStatsScope>('ours');
   const [data, setData] = useState<SenderStatsDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -565,7 +575,7 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
       setLoading(true);
       setError(null);
       try {
-        const res = await fetchSenderStats(period, campaignId);
+        const res = await fetchSenderStats(period, campaignId, scope);
         if (!cancelled) setData(res);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить статистику');
@@ -576,7 +586,7 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
     return () => {
       cancelled = true;
     };
-  }, [period, campaignId, reloadKey]);
+  }, [period, campaignId, scope, reloadKey]);
 
   const t = data?.totals;
   const replyRate = t ? rate(t.replied, t.reached) : null;
@@ -614,6 +624,25 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
+          {/* С выбранной кампанией всё и так только её — переключать нечего. */}
+          {campaignId === null && (
+            <div className="inline-flex gap-1 rounded-xl border border-zinc-200 bg-white p-1" role="group" aria-label="Чьи письма считать">
+              {SCOPES.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  disabled={loading}
+                  onClick={() => setScope(s.id)}
+                  title={s.hint}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-60 ${
+                    scope === s.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <button
           type="button"
@@ -694,6 +723,8 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
           </div>
 
           <DomainDeliverability domains={data.domains} />
+
+          <BounceCodes period={period} campaignId={campaignId} scope={scope} reloadKey={reloadKey} />
 
           <BreakdownTable data={data} />
         </div>

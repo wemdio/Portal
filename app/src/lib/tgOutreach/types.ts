@@ -528,6 +528,17 @@ export interface OutreachDialog {
   auto_forward_chat?: string | null;
   auto_forward_error?: string | null;
   /**
+   * Кто сделал диалог лидом: ИИ по триггеру или сотрудник руками (кнопки
+   * «Лид» и «Передать лида»). Пишется с 08.10.2026, у прежних лидов пусто.
+   * Подпись на экране собирает `lib/tgOutreach/leadMark.ts`.
+   */
+  lead_source?: 'ai' | 'manual' | null;
+  lead_marked_by?: string | null;
+  lead_marked_by_name?: string | null;
+  lead_marked_at?: string | null;
+  /** Отметил лидом тот, кто смотрит. Проставляет роут списка, в таблице поля нет. */
+  lead_marked_by_me?: boolean;
+  /**
    * Последняя передача этого диалога — приклеивается роутом списка, в самой
    * таблице диалогов такого поля нет.
    *

@@ -39,6 +39,7 @@ import { runLeadForwardPoller, isAccountRestrictedError } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
 import { enqueueCrmPush } from './crmPush';
+import { aiLeadMark } from './leadMark';
 import { withTimeout } from './withTimeout';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
@@ -658,6 +659,8 @@ async function upsertDialog(
       last_message_at: lastMessageAt,
       tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
       ...(status ? { status } : {}),
+      // Лидом его сделал ИИ — если до этого лидом не отметил сотрудник.
+      ...(status === 'lead' && existing.status !== 'lead' ? aiLeadMark() : {}),
       ...autoForwardPayload(opts?.autoForward),
     };
     // initialCanSend применяется ТОЛЬКО при insert — иначе перезапишет ручной
@@ -679,6 +682,7 @@ async function upsertDialog(
       tg_is_bot: opts?.tgIsBot ?? false,
       can_send: opts?.canSend ?? opts?.initialCanSend ?? !(opts?.tgIsBot ?? false),
       last_message_at: lastMessageAt,
+      ...(status === 'lead' ? aiLeadMark() : {}),
       ...autoForwardPayload(opts?.autoForward),
     });
   }
