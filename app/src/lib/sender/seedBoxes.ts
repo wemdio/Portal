@@ -328,8 +328,69 @@ export async function sendDueSeedProbes(opts: { egressIp: string; log: Log }): P
 let lastCheckAt = 0;
 
 /**
- * Проверка папки (ведущий воркер, раз в 5 минут): одно IMAP-подключение на
- * контрольный ящик, поиск каждой пробы по Message-ID во «Входящих» и в спаме.
+ * Соединения с контрольными ящиками живут между проверками: вход — раз в
+ * несколько часов, а не каждые 5 минут. Частые входы Яндекс принимает за
+ * подбор пароля и время от времени отказывает. Без проверок полчаса —
+ * соединение закрываем, следующее откроется с новыми пробами.
+ */
+const CONNECTION_IDLE_CLOSE_MS = 30 * 60 * 1000;
+/** «Нет входа» — после трёх неудачных проверок подряд: одиночный отказ — шум. */
+const FAILS_BEFORE_FAILED = 3;
+
+const seedConnections = new Map<string, { client: ImapFlow; fingerprint: string; lastUsed: number }>();
+/** Неудачные проверки подряд; сбрасывается удачной и рестартом воркера. */
+const seedFailStreak = new Map<string, number>();
+
+const connectionFingerprint = (box: SeedBoxRow) =>
+  `${box.imap_host}:${box.imap_port}:${box.imap_user}:${box.secret_encrypted}`;
+
+function dropSeedConnection(boxId: string): void {
+  const entry = seedConnections.get(boxId);
+  seedConnections.delete(boxId);
+  if (entry) void entry.client.logout().catch(() => entry.client.close());
+}
+
+/** Готовое соединение и признак, что оно уже было открыто (а не только что). */
+async function seedConnection(box: SeedBoxRow): Promise<{ client: ImapFlow; reused: boolean }> {
+  const cached = seedConnections.get(box.id);
+  // Сменили пароль или адрес сервера — старое соединение уже не про этот ящик.
+  if (cached && cached.client.usable && cached.fingerprint === connectionFingerprint(box)) {
+    cached.lastUsed = Date.now();
+    return { client: cached.client, reused: true };
+  }
+  if (cached) dropSeedConnection(box.id);
+  const client = await openSeedBox(box);
+  client.on('close', () => {
+    if (seedConnections.get(box.id)?.client === client) seedConnections.delete(box.id);
+  });
+  seedConnections.set(box.id, { client, fingerprint: connectionFingerprint(box), lastUsed: Date.now() });
+  return { client, reused: false };
+}
+
+/** Где лежат пробы: поиск по Message-ID во «Входящих» и в спаме. */
+async function findProbes(
+  client: ImapFlow,
+  box: SeedBoxRow,
+  list: Array<{ id: string; message_id: string | null }>,
+): Promise<Map<string, 'inbox' | 'spam'>> {
+  const found = new Map<string, 'inbox' | 'spam'>();
+  const folders: Array<{ path: string; kind: 'inbox' | 'spam' }> = [{ path: 'INBOX', kind: 'inbox' }];
+  if (box.junk_folder) folders.push({ path: box.junk_folder, kind: 'spam' });
+  for (const folder of folders) {
+    // Повторное открытие папки и на старом соединении: сервер отдаёт свежие письма.
+    await client.mailboxOpen(folder.path, { readOnly: true });
+    for (const probe of list) {
+      if (!probe.message_id || found.has(probe.id)) continue;
+      const uids = await client.search({ header: { 'message-id': probe.message_id } }, { uid: true });
+      if (Array.isArray(uids) && uids.length) found.set(probe.id, folder.kind);
+    }
+  }
+  return found;
+}
+
+/**
+ * Проверка папки (ведущий воркер, раз в 5 минут): поиск каждой пробы по
+ * Message-ID во «Входящих» и в спаме по постоянному соединению с ящиком.
  * Ящик открывается только на чтение: письма не открываем, не помечаем и не
  * переносим — иначе сервис «научится» на наших действиях и начнёт врать.
  */
@@ -337,6 +398,9 @@ export async function checkSeedProbes(opts: { log: Log }): Promise<void> {
   if (!supabaseAdmin) return;
   if (Date.now() - lastCheckAt < CHECK_INTERVAL_MS) return;
   lastCheckAt = Date.now();
+  for (const [boxId, entry] of seedConnections) {
+    if (Date.now() - entry.lastUsed > CONNECTION_IDLE_CLOSE_MS) dropSeedConnection(boxId);
+  }
   const db = supabaseAdmin;
   const { data } = await db.from('sender_seed_probes')
     .select('id, seed_box_id, message_id, sent_at, attempts')
@@ -357,24 +421,25 @@ export async function checkSeedProbes(opts: { log: Log }): Promise<void> {
     const box = boxRow as SeedBoxRow | null;
     const nowIso = () => new Date().toISOString();
     const age = (p: (typeof list)[number]) => Date.now() - new Date(p.sent_at).getTime();
-    if (!box) continue;
+    if (!box) {
+      dropSeedConnection(seedId);
+      continue;
+    }
 
-    let client: ImapFlow | null = null;
     try {
-      client = await openSeedBox(box);
+      let found: Map<string, 'inbox' | 'spam'>;
+      const { client, reused } = await seedConnection(box);
+      try {
+        found = await findProbes(client, box, list);
+      } catch (e) {
+        // Старое соединение могло тихо умереть между проверками — одна попытка заново.
+        dropSeedConnection(box.id);
+        if (!reused) throw e;
+        found = await findProbes((await seedConnection(box)).client, box, list);
+      }
+      seedFailStreak.delete(box.id);
       if (box.status === 'failed') {
         await db.from('sender_seed_boxes').update({ status: 'ok', last_error: null, checked_at: nowIso(), updated_at: nowIso() }).eq('id', box.id);
-      }
-      const found = new Map<string, 'inbox' | 'spam'>();
-      const folders: Array<{ path: string; kind: 'inbox' | 'spam' }> = [{ path: 'INBOX', kind: 'inbox' }];
-      if (box.junk_folder) folders.push({ path: box.junk_folder, kind: 'spam' });
-      for (const folder of folders) {
-        await client.mailboxOpen(folder.path, { readOnly: true });
-        for (const probe of list) {
-          if (!probe.message_id || found.has(probe.id)) continue;
-          const uids = await client.search({ header: { 'message-id': probe.message_id } }, { uid: true });
-          if (Array.isArray(uids) && uids.length) found.set(probe.id, folder.kind);
-        }
       }
       for (const probe of list) {
         const kind = found.get(probe.id);
@@ -389,16 +454,19 @@ export async function checkSeedProbes(opts: { log: Log }): Promise<void> {
         }
       }
     } catch (e) {
+      dropSeedConnection(box.id);
       const error = humanImapError(e);
-      opts.log('warn', `Контрольный ящик ${box.email}: ${error}`);
-      await db.from('sender_seed_boxes').update({ status: 'failed', last_error: error, checked_at: nowIso(), updated_at: nowIso() }).eq('id', box.id);
+      const streak = (seedFailStreak.get(box.id) ?? 0) + 1;
+      seedFailStreak.set(box.id, streak);
+      opts.log('warn', `Контрольный ящик ${box.email} (неудача ${streak} подряд): ${error}`);
+      if (streak >= FAILS_BEFORE_FAILED) {
+        await db.from('sender_seed_boxes').update({ status: 'failed', last_error: error, checked_at: nowIso(), updated_at: nowIso() }).eq('id', box.id);
+      }
       for (const probe of list) {
         if (age(probe) > CHECK_GIVE_UP_MS) {
           await db.from('sender_seed_probes').update({ status: 'check_failed', error, updated_at: nowIso() }).eq('id', probe.id);
         }
       }
-    } finally {
-      await client?.logout().catch(() => {});
     }
   }
 }
