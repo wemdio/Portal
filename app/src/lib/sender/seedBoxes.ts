@@ -367,23 +367,46 @@ async function seedConnection(box: SeedBoxRow): Promise<{ client: ImapFlow; reus
   return { client, reused: false };
 }
 
-/** Где лежат пробы: поиск по Message-ID во «Входящих» и в спаме. */
+/** Сколько последних писем папки сверяем с пробами — спам бывает огромным. */
+const SCAN_LAST_MESSAGES = 500;
+
+const normalizeMessageId = (id: string) => id.trim().replace(/^<|>$/g, '').toLowerCase();
+
+/**
+ * Где лежат пробы — во «Входящих» или в спаме. Поиск сервера по заголовку
+ * Message-ID не используем: у Яндекса он не находил ни одной из 35 проб,
+ * когда Gmail находил все. Берём письма папки с дня самой ранней пробы и
+ * сверяем Message-ID сами — одинаково для любого сервиса.
+ */
 async function findProbes(
   client: ImapFlow,
   box: SeedBoxRow,
-  list: Array<{ id: string; message_id: string | null }>,
+  list: Array<{ id: string; message_id: string | null; sent_at: string }>,
 ): Promise<Map<string, 'inbox' | 'spam'>> {
   const found = new Map<string, 'inbox' | 'spam'>();
+  const wanted = new Map<string, string>();
+  for (const probe of list) {
+    if (probe.message_id) wanted.set(normalizeMessageId(probe.message_id), probe.id);
+  }
+  if (!wanted.size) return found;
+  // День раньше самой ранней пробы: SINCE у IMAP — по дате без времени и пояса.
+  const earliest = Math.min(...list.map((p) => new Date(p.sent_at).getTime()));
+  const since = new Date(earliest - 86_400_000);
+
   const folders: Array<{ path: string; kind: 'inbox' | 'spam' }> = [{ path: 'INBOX', kind: 'inbox' }];
   if (box.junk_folder) folders.push({ path: box.junk_folder, kind: 'spam' });
   for (const folder of folders) {
     // Повторное открытие папки и на старом соединении: сервер отдаёт свежие письма.
     await client.mailboxOpen(folder.path, { readOnly: true });
-    for (const probe of list) {
-      if (!probe.message_id || found.has(probe.id)) continue;
-      const uids = await client.search({ header: { 'message-id': probe.message_id } }, { uid: true });
-      if (Array.isArray(uids) && uids.length) found.set(probe.id, folder.kind);
+    const uids = await client.search({ since }, { uid: true });
+    if (!Array.isArray(uids) || !uids.length) continue;
+    const recent = uids.slice(-SCAN_LAST_MESSAGES);
+    for await (const msg of client.fetch(recent, { envelope: true }, { uid: true })) {
+      const id = msg.envelope?.messageId;
+      const probeId = id ? wanted.get(normalizeMessageId(id)) : undefined;
+      if (probeId && !found.has(probeId)) found.set(probeId, folder.kind);
     }
+    if (found.size === wanted.size) break;
   }
   return found;
 }
