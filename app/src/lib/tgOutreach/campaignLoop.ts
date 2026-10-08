@@ -2378,6 +2378,9 @@ export async function runCampaignLoop(
               payload: account.profile_payload as QueuedProfilePayload,
               currentUsername: account.tg_username ?? undefined,
             });
+            const restUntil = outcome.status === 'applied' && outcome.identityChanged
+              ? new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString()
+              : null;
             const { error: prErr } = await db
               .from('tg_outreach_accounts')
               .update({
@@ -2392,9 +2395,7 @@ export async function runCampaignLoop(
                 // греться в эти сутки как раз нужно. Ставим только на успешном
                 // применении: аккаунту, которому профиль не записался,
                 // отлёживаться не за что.
-                ...(outcome.status === 'applied' && outcome.identityChanged
-                  ? { profile_rest_until: new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString() }
-                  : {}),
+                ...(restUntil ? { profile_rest_until: restUntil } : {}),
                 // Что реально встало в Telegram — оттуда же, из ответа: заказ и
                 // результат расходятся, когда ник занят или значение подрезано.
                 ...(outcome.applied
@@ -2411,6 +2412,11 @@ export async function runCampaignLoop(
             if (prErr) {
               log('warning', `Аккаунт ${account.session_name}: профиль применён, но итог не записался — ${prErr.message}`);
             }
+            // И в память круга: состав перечитывается только на следующем
+            // круге, а первое касание идёт в этом же. 07.10.2026 все 40 новых
+            // аккаунтов написали незнакомому через 5–20 секунд после смены
+            // имени; 25 из них словили PEER_FLOOD на первом же сообщении.
+            if (restUntil) account.profile_rest_until = restUntil;
             log(
               outcome.status === 'applied' ? 'info' : 'warning',
               `Аккаунт ${account.session_name}: правка профиля по заказу (${who}) — ${outcome.detail}`,
@@ -2743,86 +2749,91 @@ export async function runCampaignLoop(
 
         // Первое касание — после разбора входящих и только этим же аккаунтом:
         // отвечать на ответ обязан тот, кто написал первым.
-        try {
-          const ft = await sendFirstTouchBatch({
-            db,
-            client,
-            campaignId,
-            account,
-            perDay: tg.first_touch_per_account_per_day,
-            gapMinutes: tg.first_touch_gap_minutes,
-            perGap: tg.first_touch_per_gap,
-            // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
-            cooldownHours: tg.account_cooldown_hours,
-            log,
-            shouldStop,
-            onProgress: tick,
-            gapMs: randomRange(tg.read_reply_delay_range) * 1000,
-            claimed: claimedContacts,
-            claimLock: withClaimLock,
-            checkUsernames: checkUsernamesOnTme,
-          });
-          if (ft.sent || ft.skipped || ft.postponed) {
-            log(
-              'info',
-              `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
-            );
-          }
+        //
+        // Отлёжку проверяем здесь ещё раз: её мог назначить этот же круг
+        // выше, при смене профиля, — до следующего круга аккаунт в составе.
+        if (!isResting(account, Date.now())) {
+          try {
+            const ft = await sendFirstTouchBatch({
+              db,
+              client,
+              campaignId,
+              account,
+              perDay: tg.first_touch_per_account_per_day,
+              gapMinutes: tg.first_touch_gap_minutes,
+              perGap: tg.first_touch_per_gap,
+              // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
+              cooldownHours: tg.account_cooldown_hours,
+              log,
+              shouldStop,
+              onProgress: tick,
+              gapMs: randomRange(tg.read_reply_delay_range) * 1000,
+              claimed: claimedContacts,
+              claimLock: withClaimLock,
+              checkUsernames: checkUsernamesOnTme,
+            });
+            if (ft.sent || ft.skipped || ft.postponed) {
+              log(
+                'info',
+                `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
+              );
+            }
 
-          // Ушедшее сообщение доказывает, что резолв у аккаунта работает —
-          // счётчик пустых кругов обнуляем.
-          if (ft.sent > 0) await writeBlankRounds(account, 0);
-          else if (ft.resolveBlocked) {
-            const blanks = readBlankRounds(account) + 1;
-            await writeBlankRounds(account, blanks);
-            if (blanks >= RESOLVE_BLOCKED_LIMIT) {
-              /**
-               * Раньше здесь стояло «при том что другие аккаунты кампании с той
-               * же очереди рассылают» — без всякой проверки. 24–28.09.2026 в
-               * ATOL-1 не рассылал никто: в очереди остались четыре мёртвых
-               * ника, и эта фраза стояла в карточках всех пятидесяти аккаунтов.
-               * Теперь довод называем тот, что есть: t.me подтвердил живые ники
-               * или проверить их не удалось.
-               */
-              const evidence = ft.blindOnExisting > 0
-                ? `${blanks} круга подряд не нашёл ни одного ника из порции, хотя эти люди есть в Telegram ` +
-                  '(ники проверены по t.me).'
-                : `${blanks} круга подряд ни один ник из порции не нашёлся; проверить ники по t.me не ` +
-                  'удалось, так что вывод косвенный — это могут быть и несуществующие ники в базе.';
-              const detail =
-                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${evidence} ` +
-                'Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
-                'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
-                'висит баннер с кнопкой обжалования.';
-              const parked = await parkAccountAfterLimit({
-                db,
-                account,
-                hours: tg.account_cooldown_hours,
-                reason: 'резолв юзернеймов не работает',
-                log,
-                // Бота не спрашиваем: он уже отвечал «ограничений нет» на
-                // каждом из этих кругов — про заморозку он не знает.
-                client: null,
-                inferred: { status: 'restricted', detail },
-              });
-              await writeBlankRounds(account, 0);
-              if (parked.parked) {
-                log(
-                  'warning',
-                  `Аккаунт ${account.session_name}: ${detail} Аккаунт на паузе до ` +
-                    `${new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}, ` +
-                    'контакты остаются в очереди нетронутыми.',
-                );
+            // Ушедшее сообщение доказывает, что резолв у аккаунта работает —
+            // счётчик пустых кругов обнуляем.
+            if (ft.sent > 0) await writeBlankRounds(account, 0);
+            else if (ft.resolveBlocked) {
+              const blanks = readBlankRounds(account) + 1;
+              await writeBlankRounds(account, blanks);
+              if (blanks >= RESOLVE_BLOCKED_LIMIT) {
+                /**
+                 * Раньше здесь стояло «при том что другие аккаунты кампании с той
+                 * же очереди рассылают» — без всякой проверки. 24–28.09.2026 в
+                 * ATOL-1 не рассылал никто: в очереди остались четыре мёртвых
+                 * ника, и эта фраза стояла в карточках всех пятидесяти аккаунтов.
+                 * Теперь довод называем тот, что есть: t.me подтвердил живые ники
+                 * или проверить их не удалось.
+                 */
+                const evidence = ft.blindOnExisting > 0
+                  ? `${blanks} круга подряд не нашёл ни одного ника из порции, хотя эти люди есть в Telegram ` +
+                    '(ники проверены по t.me).'
+                  : `${blanks} круга подряд ни один ник из порции не нашёлся; проверить ники по t.me не ` +
+                    'удалось, так что вывод косвенный — это могут быть и несуществующие ники в базе.';
+                const detail =
+                  `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${evidence} ` +
+                  'Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
+                  'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
+                  'висит баннер с кнопкой обжалования.';
+                const parked = await parkAccountAfterLimit({
+                  db,
+                  account,
+                  hours: tg.account_cooldown_hours,
+                  reason: 'резолв юзернеймов не работает',
+                  log,
+                  // Бота не спрашиваем: он уже отвечал «ограничений нет» на
+                  // каждом из этих кругов — про заморозку он не знает.
+                  client: null,
+                  inferred: { status: 'restricted', detail },
+                });
+                await writeBlankRounds(account, 0);
+                if (parked.parked) {
+                  log(
+                    'warning',
+                    `Аккаунт ${account.session_name}: ${detail} Аккаунт на паузе до ` +
+                      `${new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}, ` +
+                      'контакты остаются в очереди нетронутыми.',
+                  );
+                }
               }
             }
+          } catch (err) {
+            // Первое касание не должно ронять круг: аутрич по существующим
+            // диалогам важнее и уже отработал выше.
+            log(
+              'warning',
+              `Аккаунт ${account.session_name}: первое касание не отработало — ${err instanceof Error ? err.message : String(err)}`,
+            );
           }
-        } catch (err) {
-          // Первое касание не должно ронять круг: аутрич по существующим
-          // диалогам важнее и уже отработал выше.
-          log(
-            'warning',
-            `Аккаунт ${account.session_name}: первое касание не отработало — ${err instanceof Error ? err.message : String(err)}`,
-          );
         }
         tick();
 
