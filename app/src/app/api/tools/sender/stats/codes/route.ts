@@ -13,7 +13,7 @@ const PERIOD_DAYS: Record<string, number | null> = { '7d': 7, '30d': 30, '90d': 
  * Блок «Коды отказов» вкладки «Статистика»: без ?code — счётчики по кодам
  * (sender_bounce_codes), с ?code — последние письма с этим кодом
  * (sender_bounce_code_events); code=none — отказы, в которых кода нет.
- * Период и кампания — как у /stats.
+ * Период, кампания и scope — как у /stats.
  */
 export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.stats.codes' }, async () => {
@@ -28,12 +28,14 @@ export async function GET(req: NextRequest) {
     const since = days === null ? null : new Date(Date.now() - days * 86_400_000).toISOString();
     const campaign = params.get('campaign') || null;
     if (campaign && !UUID_RE.test(campaign)) return jsonError('Неизвестная кампания', 400);
+    const onlyLinked = params.get('scope') !== 'all';
 
     const code = params.get('code');
     if (code === null) {
       const { data, error } = await supabaseAdmin.rpc('sender_bounce_codes', {
         p_since: since,
         p_campaign_id: campaign,
+        p_only_linked: onlyLinked,
       });
       if (error) return jsonError(error.message, 500);
       return NextResponse.json({ codes: data ?? [] });
@@ -44,6 +46,7 @@ export async function GET(req: NextRequest) {
       p_code: code === 'none' ? null : code,
       p_since: since,
       p_campaign_id: campaign,
+      p_only_linked: onlyLinked,
       p_limit: 100,
     });
     if (error) return jsonError(error.message, 500);
