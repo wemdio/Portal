@@ -17,7 +17,7 @@
  */
 
 import { createHash } from 'crypto';
-import { fetchSitePageHtml } from '@/lib/enrich/emailScraper';
+import { fetchSitePageHtml, type SitePageCache } from '@/lib/enrich/emailScraper';
 import { detectSignals } from '@/lib/enrich/signalDetector';
 import { outreachModel } from '@/lib/outreachLlm/client';
 import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKey } from '@/lib/outreachLlm/siteAnalysisCache';
@@ -100,20 +100,21 @@ function sameSiteLinks(html: string, base: URL): string[] {
   return out;
 }
 
-export async function crawlSite(website: string): Promise<{ pages: SitePage[]; homeHtml: string | null }> {
+/** pageCache — страницы, уже скачанные поиском почты той же компании: их не качаем второй раз. */
+export async function crawlSite(website: string, pageCache?: SitePageCache): Promise<{ pages: SitePage[]; homeHtml: string | null }> {
   let base: URL;
   try {
     base = new URL(/^https?:\/\//.test(website) ? website : `https://${website}`);
   } catch {
     return { pages: [], homeHtml: null };
   }
-  const homeHtml = await fetchSitePageHtml(base.toString(), { timeout: PAGE_TIMEOUT_MS });
+  const homeHtml = await fetchSitePageHtml(base.toString(), { timeout: PAGE_TIMEOUT_MS, pageCache });
   if (!homeHtml) return { pages: [], homeHtml: null };
   const pages: SitePage[] = [{ url: base.toString(), text: htmlToText(homeHtml) }];
   const links = sameSiteLinks(homeHtml, base).slice(0, MAX_EXTRA_PAGES);
   const fetched = await Promise.all(
     links.map(async (url) => {
-      const html = await fetchSitePageHtml(url, { timeout: PAGE_TIMEOUT_MS });
+      const html = await fetchSitePageHtml(url, { timeout: PAGE_TIMEOUT_MS, pageCache });
       return html ? { url, text: htmlToText(html) } : null;
     }),
   );
@@ -237,7 +238,11 @@ function siteFromCache(raw: unknown): SiteAnalysis | null {
  * есть: раннер отличает «сайт не открылся» от «ИИ не ответил» и от
  * исчерпанного лимита.
  */
-export async function analyzeSite(website: string, domain: string | null = normalizeDomain(website)): Promise<SiteAnalysis> {
+export async function analyzeSite(
+  website: string,
+  domain: string | null = normalizeDomain(website),
+  pageCache?: SitePageCache,
+): Promise<SiteAnalysis> {
   const cacheKey: SiteAnalysisCacheKey | null = domain
     ? { lang: 'ru', domain, promptVersion: SITE_PROMPT_VERSION, model: outreachModel('ru', 'analysis') }
     : null;
@@ -246,7 +251,7 @@ export async function analyzeSite(website: string, domain: string | null = norma
     if (cached) return cached;
   }
 
-  const { pages, homeHtml } = await crawlSite(website);
+  const { pages, homeHtml } = await crawlSite(website, pageCache);
   if (!pages.length) return EMPTY_SITE;
   const hasAdPixel = homeHtml ? detectSignals(homeHtml).some((s) => s.category === 'ad_pixel') : false;
 

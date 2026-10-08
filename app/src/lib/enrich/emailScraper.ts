@@ -672,15 +672,29 @@ async function fetchPageWithRetry(
 }
 
 /**
+ * Скачанные страницы одного сайта: адрес без хвоста (#, ?, /) → HTML. Заводит
+ * вызывающий на компанию — поиск почты и разбор сайта тогда качают сайт один
+ * раз, а не дважды. Хранятся только открывшиеся страницы.
+ */
+export type SitePageCache = Map<string, string>;
+
+export function sitePageKey(url: string): string {
+  return url.replace(/[#?].*$/, '').replace(/\/+$/, '');
+}
+
+/**
  * HTML одной страницы с той же обработкой кодировок (cp1251/koi8-r) и
  * ретраями, что и обход в scrapeEmails. Нужен тем, кто читает сайт компании
  * ради текста, а не почты (сигналы «Нашего автоаутрича»).
  */
 export async function fetchSitePageHtml(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal },
+  options?: { timeout?: number; signal?: AbortSignal; pageCache?: SitePageCache },
 ): Promise<string | null> {
+  const cached = options?.pageCache?.get(sitePageKey(url));
+  if (cached !== undefined) return cached;
   const result = await fetchPageWithRetry(url, options);
+  if (result.html) options?.pageCache?.set(sitePageKey(url), result.html);
   return result.html;
 }
 
@@ -829,6 +843,8 @@ export async function scrapeEmails(
      */
     locale?: 'ru' | 'en';
     includeDescription?: boolean;
+    /** Страницы, которые уже скачаны или ещё понадобятся вызывающему (fetchSitePageHtml). */
+    pageCache?: SitePageCache;
   },
 ): Promise<ScrapeEmailsResult> {
   const url = normalizeUrl(rawUrl);
@@ -874,6 +890,8 @@ export async function scrapeEmails(
 
     checkedNormalized.add(normalized);
     checkedUrls.push(pageUrl);
+    const cached = options?.pageCache?.get(sitePageKey(pageUrl));
+    if (cached !== undefined) return cached;
     let result = await fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage });
     // Прокси тратим только на главную: если она за бот-защитой, остальные
     // страницы того же сайта за ней же, а ретраить каждую — это и есть
@@ -882,6 +900,7 @@ export async function scrapeEmails(
       result = await fetchPageWithProxyRetry(pageUrl, result, { timeout, signal, acceptLanguage });
     }
     if (isMain && !result.html && result.failure) mainFailure = result.failure;
+    if (result.html) options?.pageCache?.set(sitePageKey(pageUrl), result.html);
     return result.html;
   };
 

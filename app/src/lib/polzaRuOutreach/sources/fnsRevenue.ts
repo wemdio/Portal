@@ -6,7 +6,9 @@
  *   GET /nbo/organizations/<id>/bfo/ → отчёты; typeCorrections[0].correction.financialResult
  *       .current2110 / .previous2110 — выручка отчётного и прошлого года, тыс. ₽.
  * Ответы кэшируются в polza_ru_fns_revenue на 30 дней (и пустые тоже).
- * Запросы идут по одному с паузой — сервис государственный, не нагружаем.
+ * Запросы — не больше трёх одновременно, у каждого окна пауза после ответа:
+ * сервис государственный, не нагружаем. Одно окно на весь запуск (до
+ * 08.10.2026) стало пробкой разбора: 12 потоков ждали налоговую по очереди.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -15,6 +17,7 @@ import type { Signal } from '../types';
 const BASE = 'https://bo.nalog.gov.ru';
 const TIMEOUT_MS = 8_000;
 const PAUSE_MS = 1_000;
+const PARALLEL = 3;
 const CACHE_DAYS = 30;
 export const MIN_REVENUE_GROWTH = 0.2;
 
@@ -26,16 +29,25 @@ export interface RevenueFact {
   revenuePrev: number | null;
 }
 
-let queue: Promise<void> = Promise.resolve();
+let active = 0;
+const waiters: Array<() => void> = [];
 
-/** Последовательные запросы с паузой между ними, даже при параллельном конвейере. */
-function throttled<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queue.then(fn);
-  queue = run.then(
-    () => new Promise((r) => setTimeout(r, PAUSE_MS)),
-    () => new Promise((r) => setTimeout(r, PAUSE_MS)),
-  );
-  return run;
+/** Окно освободилось после паузы: отдаём его следующему в очереди, а нет очереди — гасим. */
+function release(): void {
+  const next = waiters.shift();
+  if (next) next();
+  else active -= 1;
+}
+
+/** Не больше PARALLEL запросов сразу на весь процесс, окно держится ещё PAUSE_MS после ответа. */
+async function throttled<T>(fn: () => Promise<T>): Promise<T> {
+  if (active < PARALLEL) active += 1;
+  else await new Promise<void>((resolve) => waiters.push(resolve));
+  try {
+    return await fn();
+  } finally {
+    setTimeout(release, PAUSE_MS);
+  }
 }
 
 async function getJson(path: string): Promise<unknown> {

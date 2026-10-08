@@ -23,8 +23,10 @@
  *     написала (ошибка, а не замечания проверки), пишется ещё раз на следующей
  *     волне или в конце запуска; снова нет и ни одного написанного — стоп.
  *
- * Волна идёт тремя пулами по очереди: почта (свой параллелизм — обход сайта и
- * SMTP-проверка больше ждут, чем работают), разбор ИИ, письма.
+ * Компания волны проходит почту (свой параллелизм — обход сайта и
+ * SMTP-проверка больше ждут, чем работают) и сразу разбор ИИ, не дожидаясь
+ * соседей; письма — когда разобрана вся волна. Волны идут внахлёст (до
+ * MAX_WAVES_IN_FLIGHT), потоки почты и разбора у них общие.
  *
  * Отсеянная строка остаётся в журнале с этапом, кодом и пояснением — по ним
  * считается воронка. Ошибка одной строки не валит запуск.
@@ -40,6 +42,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { SitePageCache } from '@/lib/enrich/emailScraper';
 import { altVariantFor, type CompanyEmail } from '@/lib/outreachEmail/companyEmails';
 import {
   smtpAvailable,
@@ -174,10 +177,21 @@ const WRITER_FAIL_OFFERS = 2;
 /** Как часто воркер смотрит, не остановили ли запуск, пока потоки ждут писателя. */
 const CANCEL_WATCH_MS = 15_000;
 
-const ENRICH_CONCURRENCY = envInt('POLZA_RU_OUTREACH_CONCURRENCY', 4, 1, 6);
+// Замер 08.10.2026: при 4 потоках разбора и 8 почты волна в 200 компаний шла
+// ~11 минут, а ИИ отвечал за секунды — потоки ждали сайты, hh, ФНС и
+// прокси. Деньги от числа потоков не зависят: вызовов ИИ столько же.
+const ENRICH_CONCURRENCY = envInt('POLZA_RU_OUTREACH_CONCURRENCY', 12, 1, 24);
 // Шаг почты: обход сайта до минуты и SMTP-проверка через прокси — потоки
 // больше ждут, чем работают, и ИИ не тратят. Поэтому свой пул, шире разбора.
-const EMAIL_CONCURRENCY = envInt('POLZA_RU_OUTREACH_EMAIL_CONCURRENCY', 8, 1, 16);
+const EMAIL_CONCURRENCY = envInt('POLZA_RU_OUTREACH_EMAIL_CONCURRENCY', 16, 1, 32);
+/**
+ * Волны идут внахлёст: следующая начинается, как только у почты появились
+ * свободные потоки, — не дожидаясь хвоста прошлой (последние сайты волны
+ * тянулись по 2 минуты при простаивающих потоках). Больше трёх сразу не
+ * держим: оценка «сколько ещё дойдут» по идущим волнам грубая.
+ */
+const MAX_WAVES_IN_FLIGHT = 3;
+const DRIVER_TICK_MS = 2_000;
 // Письма — подстановка в шаблон оффера (и необязательная гипотеза сегментов).
 // Шаблон пишется один раз на оффер: компании оффера, дошедшие до писем
 // одновременно, ждут одного писателя.
@@ -227,10 +241,40 @@ export function maxCandidatesFor(target: number): number {
   return Math.min(20_000, Math.max(300, target * 50));
 }
 
-export function nextWaveSize(target: number, totals: { scanned: number; ready: number }): number {
-  const missing = Math.max(1, target - totals.ready);
+/**
+ * Размер следующей волны по доходимости разобранных волн. inFlight — компании
+ * идущих волн: от них ждём столько готовых, сколько даёт та же доходимость.
+ * 0 — ждать хватит идущих, новая волна не нужна.
+ */
+export function nextWaveSize(target: number, totals: { scanned: number; ready: number; inFlight?: number }): number {
   const rate = totals.scanned > 0 && totals.ready > 0 ? totals.ready / totals.scanned : BLIND_YIELD_GUESS;
+  const missing = target - totals.ready - (totals.inFlight ?? 0) * rate;
+  if (missing <= 0) return 0;
   return Math.max(MIN_WAVE, Math.min(MAX_WAVE, Math.ceil(missing / Math.max(0.02, rate))));
+}
+
+/** Не больше limit задач сразу; waiting — сколько ждут места. */
+class Gate {
+  private active = 0;
+  private queue: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  get waiting(): number {
+    return this.queue.length;
+  }
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active < this.limit) this.active += 1;
+    else await new Promise<void>((resolve) => this.queue.push(resolve));
+    try {
+      return await fn();
+    } finally {
+      const next = this.queue.shift();
+      if (next) next();
+      else this.active -= 1;
+    }
+  }
 }
 
 async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
@@ -298,6 +342,8 @@ interface Prepared {
   email: RowEmail;
   /** Карточки вакансий, уже скачанные ради сайта работодателя: разбор не качает их второй раз. */
   cards: Map<string, HhVacancyCard | null>;
+  /** Страницы сайта, скачанные поиском почты: разбор сайта не качает их второй раз. */
+  pages: SitePageCache;
 }
 
 /** Всё, что известно о компании после разбора и оценки, — вход писем. */
@@ -1009,6 +1055,7 @@ async function runJob(
       // Почта — до ИИ: компания без рабочего адреса не стоит разбора. Возврату
       // берём контакт из AMO без поиска и проверки — с ним уже был разговор.
       const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
+      const pages: SitePageCache = new Map();
       let foundEmails: Array<Omit<RowEmail, 'emails'>>;
       // Серия «не удалось проверить» дошла до порога — строку дописываем, запуск валим.
       let smtpSilent = false;
@@ -1025,7 +1072,7 @@ async function runJob(
         const extra = sourceEmails.length
           ? { emails: Array.from(new Set([...catalog.emails, ...sourceEmails])), sourceUrl: catalog.sourceUrl ?? c.signals.find((s) => s.meta?.email)?.url ?? null }
           : catalog;
-        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, extra);
+        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, extra, pages);
         smtpSilent = noteEmailVerdict(found.verdict);
         if (!found.email || !found.verification) {
           // Адреса на сайте есть, но все не прошли проверку, — своя причина:
@@ -1097,7 +1144,7 @@ async function runJob(
       }
       await updateRow(id, { ...emailPatch, pipeline_stage: 'recipient_resolved' });
       reach(tally, 'recipient_resolved');
-      return { id, tally, candidate: c, domain, website: site_url, amo: amoRec, reactivation, email, cards };
+      return { id, tally, candidate: c, domain, website: site_url, amo: amoRec, reactivation, email, cards, pages };
     };
 
     // ── Шаг 2 (дешёвый ИИ): вакансии, сайт, ползунки, ФНС, новости, оффер, оценка, сомнения ──
@@ -1182,7 +1229,7 @@ async function runJob(
       // Лимит, ключ и ошибки кода — выше, в safe().
       let site: SiteAnalysis;
       try {
-        site = await analyzeSite(site_url, domain);
+        site = await analyzeSite(site_url, domain, p.pages);
       } catch (err) {
         if (!(err instanceof LlmCallError)) throw err;
         log('warn', `site analysis LLM failed for ${domain}`, err.message);
@@ -1685,15 +1732,18 @@ async function runJob(
       });
     };
 
-    // Строки, ждущие шаблон оффера, — в счёт заказанного: их поднимет
-    // «Переписать цепочку», и разбор сверх этого — выброшенные деньги.
-    while (totals.ready + awaiting.count < target && totals.scanned < maxScan && cursor < pool.length) {
-      // Лимит на ИИ исчерпан — новую волну не начинаем: её строкам нужен разбор.
-      // Внутри волны шаг почты ИИ не тратит, поэтому лимит в нём не кончается.
-      if (stopForBudget()) break;
-      await ensureNotCancelled();
+    // Волна: запись в журнал, почта и сразу разбор ИИ у каждой компании (без
+    // ожидания всей волны), потом письма. Потоки почты и разбора — общие на
+    // все идущие волны (Gate), поэтому волны внахлёст не умножают нагрузку.
+    const emailGate = new Gate(EMAIL_CONCURRENCY);
+    const aiGate = new Gate(ENRICH_CONCURRENCY);
+    // Письма волн — по очереди: шаг писем повторяет шаблоны прошлых волн и
+    // ранжирует строки волны от сильных к слабым.
+    let lettersChain: Promise<void> = Promise.resolve();
+
+    const startWave = async (want: number): Promise<{ rows: number; done: Promise<void> }> => {
       waveNo += 1;
-      const want = Math.min(nextWaveSize(target, { scanned: totals.scanned, ready: totals.ready + awaiting.count }), maxScan - totals.scanned);
+      const no = waveNo;
       const wave = pool.slice(cursor, cursor + want);
       cursor += wave.length;
 
@@ -1731,45 +1781,94 @@ async function runJob(
       }
       phase = 'finding_emails';
       await publish(phase, { wave_size: wave.length });
-      log('info', `wave ${waveNo}: ${wave.length} candidates (ready ${totals.ready}/${target})`);
+      log('info', `wave ${no}: ${wave.length} candidates (ready ${totals.ready}/${target})`);
 
-      // Шаг 1: бесплатные проверки и почта — у всей волны.
-      const prepared: Prepared[] = [];
-      await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), EMAIL_CONCURRENCY, async ({ c, id }) => {
-        if (halted) return;
-        await ensureNotCancelled();
-        const tally = newTally(id);
-        await safe(id, tally, async () => {
-          const p = await prepare(id, c, tally);
-          if (p) prepared.push(p);
-        });
-      });
-
-      // Шаг 2: разбор ИИ — только у компаний с рабочей почтой.
+      // Шаг 1 — бесплатные проверки и почта; компания с рабочей почтой сразу
+      // идёт на шаг 2, разбор ИИ, не дожидаясь остальных компаний волны.
       const qualified: Qualified[] = [];
-      phase = 'enriching';
-      await publish(phase, { with_email: prepared.length });
-      await runPool(prepared, ENRICH_CONCURRENCY, async (p) => {
-        if (halted) return;
-        if (stopForBudget()) {
-          // Лимит на ИИ исчерпан (или остался только запас под шаблоны) —
-          // разбор не начинаем. Почту строка прошла, но этот шаг бесплатный, а
-          // без разбора она ни отсеяна, ни готова: возвращаем в необработанные,
-          // как строку, которую лимит прервал (в конце уйдёт из журнала,
-          // повторный запуск возьмёт её заново) — вклад в воронку вычитаем,
-          // домен и ИНН освобождаем.
-          await returnToPool(p.id, p.tally);
-          return;
-        }
-        await ensureNotCancelled();
-        await safe(p.id, p.tally, async () => {
-          const q = await analyze(p, size);
-          if (q) qualified.push(q);
+      const company = async ({ c, id }: { c: Candidate; id: string }) => {
+        const p = await emailGate.run(async () => {
+          if (halted) return null;
+          await ensureNotCancelled();
+          const tally = newTally(id);
+          const out: { prepared: Prepared | null } = { prepared: null };
+          await safe(id, tally, async () => {
+            out.prepared = await prepare(id, c, tally);
+          });
+          return out.prepared;
         });
-      });
+        if (!p) return;
+        await aiGate.run(async () => {
+          if (halted) return;
+          if (stopForBudget()) {
+            // Лимит на ИИ исчерпан (или остался только запас под шаблоны) —
+            // разбор не начинаем. Почту строка прошла, но этот шаг бесплатный, а
+            // без разбора она ни отсеяна, ни готова: возвращаем в необработанные,
+            // как строку, которую лимит прервал (в конце уйдёт из журнала,
+            // повторный запуск возьмёт её заново) — вклад в воронку вычитаем,
+            // домен и ИНН освобождаем.
+            await returnToPool(p.id, p.tally);
+            return;
+          }
+          await ensureNotCancelled();
+          phase = 'enriching';
+          await safe(p.id, p.tally, async () => {
+            const q = await analyze(p, size);
+            if (q) qualified.push(q);
+          });
+        });
+        p.pages.clear();
+      };
+      const done = (async () => {
+        await Promise.all(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id).map(company));
+        // Шаг 3: письма.
+        const letters = lettersChain.then(() => lettersStep(qualified));
+        lettersChain = letters.catch(() => undefined);
+        await letters;
+      })();
+      return { rows: wave.length, done };
+    };
 
-      // Шаг 3: письма.
-      await lettersStep(qualified);
+    // Строки, ждущие шаблон оффера, — в счёт заказанного: их поднимет
+    // «Переписать цепочку», и разбор сверх этого — выброшенные деньги. Идущие
+    // волны тоже: от них ждём столько готовых, сколько даёт доходимость.
+    const running = new Set<Promise<void>>();
+    let runningRows = 0;
+    // Первая ошибка волны (остановка, сбой ИИ или журнала) — её бросает цикл.
+    const failure: { err: unknown; set: boolean } = { err: null, set: false };
+    for (;;) {
+      if (failure.set) throw failure.err;
+      if (halted || stopForBudget() || runAbort.signal.aborted) {
+        if (!running.size) break;
+      } else if (running.size < MAX_WAVES_IN_FLIGHT && emailGate.waiting < EMAIL_CONCURRENCY) {
+        const want = Math.min(
+          nextWaveSize(target, { scanned: totals.scanned - runningRows, ready: totals.ready + awaiting.count, inFlight: runningRows }),
+          maxScan - totals.scanned,
+        );
+        if (want > 0 && cursor < pool.length) {
+          await ensureNotCancelled();
+          const wave = await startWave(want);
+          runningRows += wave.rows;
+          const tracked: Promise<void> = wave.done
+            .catch((err: unknown) => {
+              if (failure.set) return;
+              failure.set = true;
+              failure.err = err;
+            })
+            .finally(() => {
+              running.delete(tracked);
+              runningRows -= wave.rows;
+            });
+          running.add(tracked);
+          continue;
+        }
+        // Новых волн не будет — дожидаемся идущих.
+        if (!running.size) break;
+      }
+      // Ждём, пока закончится волна или освободятся потоки почты.
+      let tick: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([...running, new Promise<void>((resolve) => { tick = setTimeout(resolve, DRIVER_TICK_MS); })]);
+      clearTimeout(tick);
     }
 
     // Волн больше не будет, а строки ждут шаблон, который модель не написала:
