@@ -23,6 +23,8 @@ type LiAccount = {
   cooldown_until: string | null;
   cooldown_reason: LiAccountCooldownReason | null;
   proxy_url: string | null;
+  /** Кампании, привязанные к аккаунту (отдаёт GET /accounts). */
+  campaigns?: Array<{ id: string; name: string; status: string }>;
 };
 
 const COOLDOWN_REASON_LABELS: Record<LiAccountCooldownReason, string> = {
@@ -37,6 +39,7 @@ const CAMPAIGN_STATUS_LABEL_RU: Record<string, string> = {
   draft: 'черновик',
   running: 'запущена',
   paused: 'пауза',
+  stopped: 'остановлена',
   completed: 'завершена',
   failed: 'ошибка',
 };
@@ -55,7 +58,7 @@ function formatCooldownRemaining(until: string): string {
   const mins = minutes % 60;
   return mins > 0 ? `${hours}ч ${mins}м` : `${hours}ч`;
 }
-type LiLeadList = { id: string; name: string; description: string | null; created_at: string; has_custom_invites?: boolean; leads_count?: number };
+type LiLeadList = { id: string; user_id?: string; owner_name?: string | null; name: string; description: string | null; created_at: string; has_custom_invites?: boolean; leads_count?: number };
 type LiLead = { id: string; name: string; first_name: string | null; last_name: string | null; position: string | null; company: string | null; profile_url: string | null; status: string; lead_list_id: string | null; invite_text: string | null; created_at: string };
 
 type DashboardCompanyRow = { company: string; total: number; new: number; invited: number; connected: number; messaged: number; replied: number; completed: number; error: number };
@@ -1698,6 +1701,11 @@ export default function LiOutreachPage() {
                           >
                             {list.name}
                             <span className="ml-2 text-xs font-normal text-gray-500">({list.leads_count ?? 0} лидов)</span>
+                            {list.owner_name && list.user_id !== currentUserId && (
+                              <span className="ml-2 text-[10px] font-normal text-purple-700" title="Кто создал список. Работать с ним может вся команда.">
+                                👤 {list.owner_name}
+                              </span>
+                            )}
                           </button>
                           <div className="flex items-center gap-3">
                             <button onClick={() => void exportLeadListCsv(list)} className="text-xs text-blue-600 hover:underline">Экспорт</button>
@@ -2146,10 +2154,20 @@ function AccountCard({
     }
   };
 
+  const linkedCampaigns = a.campaigns ?? [];
+  const runningCampaigns = linkedCampaigns.filter((c) => c.status === 'running');
+
   const remove = async () => {
-    if (!confirm(`Удалить запись аккаунта «${a.name || a.unipile_account_id}»?\n\nАккаунт в Unipile НЕ удалится — убирается только локальная карточка. Используйте для устаревших дубликатов.`)) {
-      return;
+    // Удалить может любой: удаление не блокируется даже запущенной кампанией
+    // (решение 08.10.2026), поэтому о ней предупреждаем первой строкой.
+    const lines = [`Удалить карточку «${a.name || a.unipile_account_id}»${a.owner_name ? ` (добавил ${a.owner_name})` : ''}?`];
+    if (runningCampaigns.length > 0) {
+      lines.push(`⚠ Запущенная кампания ${runningCampaigns.map((c) => `«${c.name}»`).join(', ')} останется без аккаунта и встанет, пока ей не выберут другой.`);
+    } else if (linkedCampaigns.length > 0) {
+      lines.push(`Кампании останутся без аккаунта: ${linkedCampaigns.map((c) => `«${c.name}»`).join(', ')}.`);
     }
+    lines.push('В Unipile аккаунт останется; если он подключён, карточка вернётся при синхронизации.');
+    if (!confirm(lines.join('\n\n'))) return;
     setDeleting(true);
     setMsg(null);
     try {
@@ -2174,11 +2192,12 @@ function AccountCard({
             >
               {a.name || a.unipile_account_id}
             </button>
-            {!isOwn && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-purple-100 px-1.5 py-0.5 text-[10px] font-medium text-purple-700 shrink-0" title="Аккаунт подключил другой специалист. Прокси может редактировать вся команда.">
-                👤 {a.owner_name ?? 'другой спец'}
-              </span>
-            )}
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${isOwn ? 'bg-gray-100 text-gray-600' : 'bg-purple-100 text-purple-700'}`}
+              title="Кто добавил аккаунт в портал. Действовать с аккаунтом может вся команда."
+            >
+              👤 добавил {a.owner_name ?? '—'}
+            </span>
             {errorCounts24h && errorCounts24h.error > 0 && (
               <button
                 type="button"
@@ -2204,21 +2223,23 @@ function AccountCard({
           <span className={`text-xs px-2 py-0.5 rounded ${cooling ? 'bg-amber-100 text-amber-700' : a.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
             {cooling ? 'В отлёжке' : a.is_active ? 'Активен' : 'Неактивен'}
           </span>
-          {isOwn && (
-            <button
-              onClick={() => void remove()}
-              disabled={deleting}
-              title="Удалить локальную запись аккаунта (устаревший дубликат)"
-              className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-40"
-            >
-              {deleting ? '...' : 'Удалить'}
-            </button>
-          )}
+          <button
+            onClick={() => void remove()}
+            disabled={deleting}
+            title="Удалить карточку аккаунта из портала (например, устаревший дубль)"
+            className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-40"
+          >
+            {deleting ? '...' : 'Удалить'}
+          </button>
         </div>
       </div>
-      {/* Proxy is editable by any team member since migration 20260708_0002.
-       *  Delete stays owner-only (rendered above), which is why we still
-       *  ferry `isOwn` into the card — see the delete button block. */}
+      {linkedCampaigns.length > 0 && (
+        <div className="text-xs text-gray-500 truncate" title={linkedCampaigns.map((c) => `${c.name} — ${CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status}`).join('\n')}>
+          Кампании: {linkedCampaigns.map((c) => `${c.name} (${CAMPAIGN_STATUS_LABEL_RU[c.status] ?? c.status})`).join(', ')}
+        </div>
+      )}
+      {/* Proxy, logs and delete are open to the whole team; `isOwn` only
+       *  tints the card and the «добавил» chip. */}
       <div className="flex items-end gap-2">
         <div className="flex-1">
           <label className="text-xs text-gray-500">

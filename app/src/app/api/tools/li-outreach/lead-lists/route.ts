@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, fetchOwnerNames } from '@/lib/liOutreach/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -12,23 +12,25 @@ export async function GET(req: NextRequest) {
     if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
     const admin = supabaseAdmin;
 
+    // Lead lists are shared by the whole team (08.10.2026): leads aren't
+    // confidential, and lists of a specialist who left were otherwise lost to
+    // everyone. `owner_name` only labels who created the list.
     const { data, error } = await admin
       .from('li_lead_lists')
       .select('*')
-      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false });
     if (error) return jsonError(error.message, 500);
     const lists = data ?? [];
     if (!lists.length) return NextResponse.json({ lead_lists: [] });
 
+    const ownerMap = await fetchOwnerNames(lists.map((l) => l.user_id as string));
     const withCounts = await Promise.all(
       lists.map(async (list) => {
         const { count } = await admin
           .from('li_leads')
           .select('*', { head: true, count: 'exact' })
-          .eq('user_id', auth.user.id)
           .eq('lead_list_id', list.id);
-        return { ...list, leads_count: count ?? 0 };
+        return { ...list, leads_count: count ?? 0, owner_name: ownerMap.get(list.user_id as string) ?? null };
       }),
     );
 
