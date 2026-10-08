@@ -2,9 +2,10 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { authForMailbox } from './mailboxAuth';
+import { nextGapMs, nextWindowSlot } from './sendWindow';
 import { sendSenderMail, type SendErrorCode } from './smtp';
 import { advanceRecipient } from './stepAdvance';
-import type { MailboxRow, MessageRow, RecipientRow, StepRow } from './types';
+import type { CampaignRow, MailboxRow, MessageRow, RecipientRow, StepRow } from './types';
 
 /**
  * Отправка писем из очереди. Письмо берётся атомарно (claim_sender_messages,
@@ -18,6 +19,33 @@ const MAX_ATTEMPTS = 5;
 const BACKOFF_BASE_MS = 5 * 60 * 1000;
 /** Насколько сдвигаем письмо, возвращённое из-за проблем ящика (не письма). */
 const MAILBOX_PROBLEM_DELAY_MS = 10 * 60 * 1000;
+/** Письмо, до времени которого осталось меньше, — уходит сейчас: опрос всё равно раз в 30 с. */
+const PACE_TOLERANCE_MS = 5_000;
+
+type PaceCampaign = Pick<CampaignRow, 'timezone' | 'send_hour_from' | 'send_hour_to' | 'send_weekdays' | 'gap_seconds' | 'gap_jitter_seconds'>;
+
+/**
+ * Когда письму ящика можно уйти: не раньше паузы кампании после прошлого
+ * письма ящика и только внутри окна отправки. null — можно сейчас.
+ *
+ * Планировщик и так ставит письма ящика с паузой, но очередь, накопившаяся за
+ * простой воркера, уходила залпом: 08.10.2026 после 4 часов простоя ящик
+ * отправил 14 писем за 2 минуты при паузе 3–5 минут. Письма разных кампаний на
+ * одном ящике планировщик тоже не разносит между собой.
+ */
+export function pacedSendAt(now: Date, lastSentAt: number | null, campaign: PaceCampaign): Date | null {
+  let at = now.getTime();
+  if (lastSentAt != null && campaign.gap_seconds > 0 && lastSentAt + campaign.gap_seconds * 1000 > at) {
+    at = lastSentAt + nextGapMs(campaign.gap_seconds, campaign.gap_jitter_seconds);
+  }
+  const slot = nextWindowSlot(new Date(at), {
+    timezone: campaign.timezone,
+    sendHourFrom: campaign.send_hour_from,
+    sendHourTo: campaign.send_hour_to,
+    sendWeekdays: campaign.send_weekdays,
+  });
+  return slot.getTime() > now.getTime() + PACE_TOLERANCE_MS ? slot : null;
+}
 
 function fromHeader(mailbox: MailboxRow): string {
   const name = (mailbox.display_name ?? '').trim();
@@ -115,6 +143,9 @@ export async function processSenderBatch(opts: { egressIp: string; batchSize?: n
   if (!messages.length) return false;
 
   const mailboxCache = new Map<string, MailboxRow | null>();
+  const campaignCache = new Map<string, PaceCampaign | null>();
+  // Последняя отправка ящика: из базы, потом — по отправленным в этом проходе.
+  const lastSent = new Map<string, number | null>();
   let sentCount = 0;
 
   for (const message of messages) {
@@ -141,6 +172,26 @@ export async function processSenderBatch(opts: { egressIp: string; batchSize?: n
         .from('sender_messages')
         .update({ status: 'scheduled', scheduled_at: retryAt, error: 'Ящик недоступен или не подтверждён' })
         .eq('id', message.id);
+      continue;
+    }
+
+    // Пауза ящика и окно кампании: рано — письмо обратно в очередь на своё время.
+    let campaign = campaignCache.get(message.campaign_id);
+    if (campaign === undefined) {
+      const { data } = await db
+        .from('sender_campaigns')
+        .select('timezone, send_hour_from, send_hour_to, send_weekdays, gap_seconds, gap_jitter_seconds')
+        .eq('id', message.campaign_id)
+        .maybeSingle();
+      campaign = (data as PaceCampaign | null) ?? null;
+      campaignCache.set(message.campaign_id, campaign);
+    }
+    if (!lastSent.has(mailbox.id)) {
+      lastSent.set(mailbox.id, mailbox.last_send_at ? Date.parse(mailbox.last_send_at) : null);
+    }
+    const pacedAt = campaign ? pacedSendAt(new Date(), lastSent.get(mailbox.id) ?? null, campaign) : null;
+    if (pacedAt) {
+      await db.from('sender_messages').update({ status: 'scheduled', scheduled_at: pacedAt.toISOString() }).eq('id', message.id);
       continue;
     }
 
@@ -195,6 +246,7 @@ export async function processSenderBatch(opts: { egressIp: string; batchSize?: n
         continue;
       }
       await afterSend(message, mailbox, sentAt, log);
+      lastSent.set(mailbox.id, Date.parse(sentAt));
       sentCount += 1;
       continue;
     }

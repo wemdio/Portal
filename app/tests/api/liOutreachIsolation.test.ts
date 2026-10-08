@@ -3,10 +3,10 @@
 /**
  * Security regression test for LinkedIn Outreach API routes.
  *
- * Ensures every list/aggregate/by-id endpoint scopes its Supabase query
- * by `user_id = auth.user.id` (or via owned-campaign filter) so a user
- * cannot see or mutate another user's accounts, campaigns, leads, lead
- * lists, scraper tasks, or campaign logs.
+ * Pins which endpoints scope their Supabase query by `user_id =
+ * auth.user.id` (or via owned-campaign filter) and which are team-wide.
+ * Since 08.10.2026 LinkedIn accounts, lead lists and leads are shared by the
+ * whole team; scraper tasks, the dashboard and campaign logs stay per-user.
  *
  * The test uses a chainable mock of `supabaseAdmin` that records every
  * `.eq()` / `.in()` filter call and returns deterministic data. We then
@@ -80,6 +80,7 @@ function makeBuilder(table: string) {
       return builder;
     },
     gte: () => builder,
+    not: () => builder,
     or: () => builder,
     update: () => builder,
     insert: () => builder,
@@ -126,13 +127,6 @@ jest.mock('@/lib/liOutreach/apiHelpers', () => {
     // fetchOwnerNames to label foreign rows. Stub it to an empty map — owner_name
     // resolution itself is not what these isolation tests assert.
     fetchOwnerNames: jest.fn(async () => new Map<string, string>()),
-    // Write-path account guard: mirror the real implementation against the
-    // seeded li_accounts rows so the foreign-account rejection tests below
-    // exercise the same own-vs-foreign decision the route makes.
-    userOwnsAccount: jest.fn(async (userId: string, accountId: string) => {
-      const rows = state.rowsByTable.li_accounts ?? [];
-      return rows.some((r) => r.id === accountId && r.user_id === userId);
-    }),
   };
 });
 
@@ -216,7 +210,9 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     expect(ownsUserScope('li_campaigns')).toBe(false);
   });
 
-  it('GET /lead-lists only returns rows for the authenticated user', async () => {
+  // Lead lists and leads are shared by the team (08.10.2026): not
+  // confidential, and a specialist who left took their lists with them.
+  it('GET /lead-lists returns every specialist’s lists', async () => {
     state.rowsByTable.li_lead_lists = [
       { id: 'l1', user_id: AUTH_USER_ID, name: 'Mine' },
       { id: 'l2', user_id: OTHER_USER_ID, name: 'NotMine' },
@@ -225,11 +221,11 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const { GET } = await import('@/app/api/tools/li-outreach/lead-lists/route');
     const res = await GET(makeReq('http://x/api/tools/li-outreach/lead-lists'));
     const body = await (res as Response).json();
-    expect(ownsUserScope('li_lead_lists')).toBe(true);
-    expect((body.lead_lists as Array<{ id: string }>).map((l) => l.id)).toEqual(['l1']);
+    expect(ownsUserScope('li_lead_lists')).toBe(false);
+    expect((body.lead_lists as Array<{ id: string }>).map((l) => l.id).sort()).toEqual(['l1', 'l2']);
   });
 
-  it('GET /leads only returns rows for the authenticated user', async () => {
+  it('GET /leads returns every specialist’s leads', async () => {
     state.rowsByTable.li_leads = [
       { id: 'L1', user_id: AUTH_USER_ID, name: 'Mine' },
       { id: 'L2', user_id: OTHER_USER_ID, name: 'NotMine' },
@@ -237,11 +233,11 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const { GET } = await import('@/app/api/tools/li-outreach/leads/route');
     const res = await GET(makeReq('http://x/api/tools/li-outreach/leads'));
     const body = await (res as Response).json();
-    expect(ownsUserScope('li_leads')).toBe(true);
-    expect((body.leads as Array<{ id: string }>).map((l) => l.id)).toEqual(['L1']);
+    expect(ownsUserScope('li_leads')).toBe(false);
+    expect((body.leads as Array<{ id: string }>).map((l) => l.id).sort()).toEqual(['L1', 'L2']);
   });
 
-  it('GET /leads can filter orphan leads without leaving user scope', async () => {
+  it('GET /leads can filter orphan leads', async () => {
     state.rowsByTable.li_leads = [
       { id: 'L1', user_id: AUTH_USER_ID, name: 'Listed', lead_list_id: 'list-1' },
       { id: 'L2', user_id: AUTH_USER_ID, name: 'Unlisted', lead_list_id: null },
@@ -250,12 +246,11 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const { GET } = await import('@/app/api/tools/li-outreach/leads/route');
     const res = await GET(makeReq('http://x/api/tools/li-outreach/leads?lead_list_id=__none'));
     const body = await (res as Response).json();
-    expect(ownsUserScope('li_leads')).toBe(true);
     expect(state.allIsCalls).toContainEqual({ table: 'li_leads', column: 'lead_list_id', value: null });
-    expect((body.leads as Array<{ id: string }>).map((l) => l.id)).toEqual(['L2']);
+    expect((body.leads as Array<{ id: string }>).map((l) => l.id).sort()).toEqual(['L2', 'L3']);
   });
 
-  it('GET /leads/export only includes rows for the authenticated user', async () => {
+  it('GET /leads/export includes every specialist’s leads', async () => {
     state.rowsByTable.li_leads = [
       { id: 'L1', user_id: AUTH_USER_ID, name: 'Mine' },
       { id: 'L2', user_id: OTHER_USER_ID, name: 'NotMine' },
@@ -263,9 +258,9 @@ describe('LI Outreach — user_id isolation on list endpoints', () => {
     const { GET } = await import('@/app/api/tools/li-outreach/leads/export/route');
     const res = await GET(makeReq('http://x/api/tools/li-outreach/leads/export'));
     const csv = await (res as Response).text();
-    expect(ownsUserScope('li_leads')).toBe(true);
+    expect(ownsUserScope('li_leads')).toBe(false);
     expect(csv).toContain('Mine');
-    expect(csv).not.toContain('NotMine');
+    expect(csv).toContain('NotMine');
   });
 
   it('GET /scraper/tasks only returns rows for the authenticated user', async () => {
@@ -560,13 +555,12 @@ describe('LI Outreach — admin bypass on campaign endpoints', () => {
 });
 
 /**
- * Account-ownership guard on WRITE paths. The accounts list is visible
- * cross-specialist, so the campaign/scraper account dropdowns can surface
- * another specialist's account. These routes must refuse to *use* a foreign
- * account (403) — otherwise A could run invites/scrapes through B's LinkedIn
- * account (quota theft / actions attributed to B / ban risk on B's account).
+ * Write paths that act through a LinkedIn account. Accounts are shared by the
+ * team (one Unipile workspace), so every route accepts another specialist's
+ * account: the 403 on POST /campaigns was dropped 08.10.2026, when the owner
+ * of most accounts left the company and nobody could launch on them.
  */
-describe('LI Outreach — account ownership guard on write paths', () => {
+describe('LI Outreach — any team member’s account on write paths', () => {
   function seedAccounts() {
     state.rowsByTable.li_accounts = [
       { id: 'a1', user_id: AUTH_USER_ID, name: 'Mine', is_active: true },
@@ -574,7 +568,7 @@ describe('LI Outreach — account ownership guard on write paths', () => {
     ];
   }
 
-  it('POST /campaigns rejects attaching another specialist’s account (403)', async () => {
+  it('POST /campaigns accepts another team member’s account', async () => {
     seedAccounts();
     const { POST } = await import('@/app/api/tools/li-outreach/campaigns/route');
     const res = await POST(
@@ -584,15 +578,14 @@ describe('LI Outreach — account ownership guard on write paths', () => {
         headers: { 'content-type': 'application/json' },
       }),
     );
-    expect((res as Response).status).toBe(403);
+    expect((res as Response).status).not.toBe(403);
   });
 
   // Team-wide edit access (2026-07): PUT reassigning a campaign to another
   // team member's account is now allowed. The team is trusted with each
   // other's Unipile accounts (they use one shared workspace anyway), and the
   // previous 403 blocked the legit case where a teammate edits a foreign
-  // campaign and re-submits its unchanged account_id. POST (create) still
-  // guards this because new campaigns default to the creator's own account.
+  // campaign and re-submits its unchanged account_id.
   it('PUT /campaigns/[id] allows reassigning to another team member’s account', async () => {
     state.rowsByTable.li_campaigns = [
       { id: 'c1', user_id: AUTH_USER_ID, name: 'Mine', status: 'draft', lead_list_id: null },
