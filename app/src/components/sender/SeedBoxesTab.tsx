@@ -26,6 +26,40 @@ import { SenderModal } from './SenderModal';
 const PROVIDER_LETTER: Record<SeedProviderId, string> = { yandex: 'Я', gmail: 'G', mailru: 'M' };
 const PROVIDER_LABEL: Record<SeedProviderId, string> = { yandex: 'Яндекс', gmail: 'Gmail', mailru: 'Mail.ru' };
 const PROVIDER_ORDER: SeedProviderId[] = ['yandex', 'gmail', 'mailru'];
+const SEED_PAGE_SIZE = 10;
+const HEALTH_PAGE_SIZE = 50;
+
+/** Страница списка: номер приводится в границы, если список укоротился (удалили ящик). */
+function pageOf<T>(items: T[], page: number, size: number): { rows: T[]; page: number; pages: number } {
+  const pages = Math.max(1, Math.ceil(items.length / size));
+  const safe = Math.min(Math.max(1, page), pages);
+  return { rows: items.slice((safe - 1) * size, safe * size), page: safe, pages };
+}
+
+function Pager({ page, pages, total, unit, onPage }: { page: number; pages: number; total: number; unit: string; onPage: (page: number) => void }) {
+  if (pages <= 1) return null;
+  return (
+    <div className="flex items-center justify-center gap-4 border-t border-zinc-200 px-5 py-3 text-sm">
+      <button
+        type="button"
+        onClick={() => onPage(page - 1)}
+        disabled={page <= 1}
+        className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
+      >
+        ← Назад
+      </button>
+      <span className="text-zinc-500">Стр. {page} из {pages} · {total} {unit}</span>
+      <button
+        type="button"
+        onClick={() => onPage(page + 1)}
+        disabled={page >= pages}
+        className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
+      >
+        Вперёд →
+      </button>
+    </div>
+  );
+}
 
 function weekLine(week: { inbox: number; spam: number; missing: number }): string {
   const done = week.inbox + week.spam + week.missing;
@@ -63,6 +97,8 @@ export function SeedBoxesTab() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [passwordFor, setPasswordFor] = useState<SeedBoxDto | null>(null);
+  const [seedPage, setSeedPage] = useState(1);
+  const [healthPage, setHealthPage] = useState(1);
 
   const load = useCallback(async () => {
     try {
@@ -128,6 +164,8 @@ export function SeedBoxesTab() {
   }
 
   const boxes = data?.boxes ?? [];
+  const seedView = pageOf(boxes, seedPage, SEED_PAGE_SIZE);
+  const healthView = pageOf(health, healthPage, HEALTH_PAGE_SIZE);
 
   return (
     <div className="space-y-6">
@@ -195,7 +233,7 @@ export function SeedBoxesTab() {
               </tr>
             </thead>
             <tbody>
-              {boxes.map((box) => (
+              {seedView.rows.map((box) => (
                 <tr key={box.id} className={`border-t border-zinc-100 ${box.enabled ? '' : 'opacity-50'}`}>
                   <td className="py-2 pl-5 pr-3 text-zinc-600">{PROVIDER_LABEL[box.provider]}</td>
                   <td className="py-2 pr-3 font-medium text-zinc-900">{box.email}</td>
@@ -226,6 +264,7 @@ export function SeedBoxesTab() {
         ) : (
           <p className="px-5 py-6 text-sm text-zinc-500">Ящиков пока нет — добавьте строки из выдачи продавца.</p>
         )}
+        <Pager page={seedView.page} pages={seedView.pages} total={boxes.length} unit="ящиков" onPage={setSeedPage} />
       </div>
 
       <div className="rounded-xl border border-zinc-200 bg-white">
@@ -244,7 +283,7 @@ export function SeedBoxesTab() {
               </tr>
             </thead>
             <tbody>
-              {health.map((row) => (
+              {healthView.rows.map((row) => (
                 <tr key={row.id} className="border-t border-zinc-100">
                   <td className="py-2 pl-5 pr-3 text-zinc-900">{row.email}</td>
                   <td className={`py-2 pr-3 font-semibold ${scoreTone(row.score)}`}>{row.score === null ? '—' : `${row.score}%`}</td>
@@ -274,6 +313,7 @@ export function SeedBoxesTab() {
         ) : (
           <p className="px-5 py-6 text-sm text-zinc-500">Появится после первого дня ежедневной проверки.</p>
         )}
+        <Pager page={healthView.page} pages={healthView.pages} total={health.length} unit="ящиков" onPage={setHealthPage} />
       </div>
 
       {addOpen ? (
