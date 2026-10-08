@@ -483,6 +483,13 @@ function SettingsTab({ campaign, onSave }: {
         <p className="text-[10px] text-gray-400 -mt-2">
           В чат пересылки бот отправляет сам по триггерной фразе. Пусто — контакт только помечается лидом.
         </p>
+        {/* Для кампаний, где квалификацию (роль, объём, бюджет) ведёт промпт:
+            общая проверка интереса передавала лида на «расскажите подробнее»
+            в обход промпта. См. OpenAISettings.handoff_direct_request_only. */}
+        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
+          <input type="checkbox" checked={openai.handoff_direct_request_only === true} onChange={e => setOAI('handoff_direct_request_only', e.target.checked)} className="rounded border-gray-300" />
+          Передавать сам только по прямой просьбе: менеджер, созвон, встреча
+        </label>
       </section>
 
       {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
