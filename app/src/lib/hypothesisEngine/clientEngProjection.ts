@@ -64,6 +64,10 @@ import { toHeAutopilotPause, type HeAutopilotPauseReason } from './autopilotNext
 // (см. toClientEngRefillState). Импорт значения безопасен по той же причине,
 // что и выше: экраны берут из этого модуля только типы.
 import { isHeClientCancelPauseReason } from './autoPipeline';
+// Признак паузы добора, записанной потолком расхода, — тот же, по которому
+// ночной тик шлёт напоминание своим видом (spendCeiling.ts). Модуль уже в
+// графе этой проекции через autoPipeline.
+import { isHeSpendCeilingPauseReason } from './spendCeiling';
 // Гейт писем запуска — для признака `needs_rewrite` (heTemplateNeedsRewrite):
 // та же чистая проверка, что у ядра запуска, второй копии правила нет.
 import { checkHeTemplateOperators, withHeEmptyCellFallbacks } from './templateOperatorGate';
@@ -292,7 +296,15 @@ export function toClientEngStageErrorCode(raw: unknown): HeClientStageErrorCode 
  *  - `letters_exhausted` — платные прогоны генерации писем на это поколение
  *                          анализа исчерпаны;
  *  - `target_missing`    — вести нечего: вертикаль или база исчезли, в джобе нет
- *                          цели (`setup_incomplete`).
+ *                          цели (`setup_incomplete`);
+ *  - `spend_paused`      — потолок расхода проекта достигнут (`spend_ceiling`,
+ *                          spendCeiling.ts; ПО УМОЛЧАНИЮ ПОТОЛОК ВЫКЛЮЧЕН):
+ *                          следующий шаг не поставлен, команде ушёл алерт.
+ *                          Единственный код, который пишется и без включённого
+ *                          автопилота (отказ кнопки ручного режима, в том
+ *                          числе старта исследования; начатую цепочку research
+ *                          потолок не обрывает), поэтому мастер и Command
+ *                          Center показывают его и у проекта с autopilot=false.
  *
  * ПОЧЕМУ ОТСУТСТВИЕ ПАУЗЫ — ТОЖЕ ФАКТ. Здоровые решения координатора
  * («база уже готова», «сборка уже стоит», «цепочка ещё генерируется») паузы НЕ
@@ -307,13 +319,15 @@ const CLIENT_AUTOPILOT_HOLD_BY_PAUSE: Record<HeAutopilotPauseReason, HeClientAut
   stage_failed: 'stage_stopped',
   letters_exhausted: 'letters_exhausted',
   setup_incomplete: 'target_missing',
+  spend_ceiling: 'spend_paused',
 };
 
 export type HeClientAutopilotHoldCode =
   | 'retrying'
   | 'stage_stopped'
   | 'letters_exhausted'
-  | 'target_missing';
+  | 'target_missing'
+  | 'spend_paused';
 
 /** Пауза в том виде, в каком её получает кабинет. */
 export interface ClientEngAutopilotHold {
@@ -347,7 +361,14 @@ export function toClientEngAutopilotHold(
  *  - `running` — добор включён и ночь его поставит;
  *  - `paused`  — добор включён, но остановлен переполнением ёмкости
  *                (`refill_paused_at`, миграция 20260930_0005), и ночь его НЕ
- *                поставит, пока сотрудник не вернёт проект вручную;
+ *                поставит, пока сотрудник не вернёт проект вручную. Алерт
+ *                команде — при записи и каждую ночь под паузой;
+ *  - `spend_paused` — добор включён, но остановлен ПОТОЛКОМ РАСХОДА проекта
+ *                (та же колонка, причина buildHeSpendCeilingPauseReason,
+ *                autoPipeline.ts шаг 3a-; потолок по умолчанию выключен). Ночь
+ *                его не поставит, пока сотрудник не вернёт проект той же
+ *                staff-кнопкой. Алерт команде (вид 'spend_ceiling') — при
+ *                записи и каждую ночь под паузой;
  *  - `stopped` — добор включён, но остановлен ОТМЕНОЙ проекта: кнопка «Cancel
  *                all jobs» кабинета пишет ту же колонку `refill_paused_at` с
  *                причиной отмены (pauseHeRefillForClientCancel, autoPipeline.ts).
@@ -366,20 +387,27 @@ export function toClientEngAutopilotHold(
  * команда уже знает» — и это правда, потому что оба места её записи шлют алерт
  * команде. Отмену записал сам клиент, алерта у неё нет (ночной тик про неё
  * команде не напоминает), и та же фраза про отменённый проект была бы ложью.
+ *
+ * ПОЧЕМУ `spend_paused` — НЕ `paused`. «Временная проблема на нашей стороне,
+ * команда уже работает» про потолок расхода неправда: это не сбой, и чинить
+ * команде нечего — она решает, продолжать ли проект. Карточка паузы
+ * автопилота по той же причине говорит HE_SPEND_PAUSED_EN («paused on our
+ * side… continues when they resume it»), и добор должен говорить то же.
  */
-export type HeClientRefillState = 'off' | 'running' | 'paused' | 'stopped';
+export type HeClientRefillState = 'off' | 'running' | 'paused' | 'spend_paused' | 'stopped';
 
 /**
  * Строка `he_auto_pipeline_configs` → состояние добора для кабинета.
  *
  * `refill_pause_reason` СКВОЗЬ НЕ ПРОХОДИТ И НЕ ДОЛЖЕН: в колонке лежит текст
  * для сотрудника — по-русски, с именем рассыльщика и с объяснением, что
- * счётчик ёмкости общий на весь его аккаунт вместе с чужими клиентами. Здесь
- * из него берётся ОДИН бит — записана ли пауза отменой клиентом
- * (isHeClientCancelPauseReason, тот же признак, по которому ночной тик и долив
- * отличают отмену от ёмкости), — а наружу уезжает только состояние; английскую
- * фразу кабинет пишет сам (`components/client-eng/engText.ts`), как и у пауз
- * автопилота.
+ * счётчик ёмкости общий на весь его аккаунт вместе с чужими клиентами (у
+ * потолка — суммы в долларах и порог). Здесь из него берётся только ПОВОД —
+ * отмена клиентом (isHeClientCancelPauseReason), потолок расхода
+ * (isHeSpendCeilingPauseReason) или ёмкость; это те же признаки, по которым
+ * ночной тик различает повод своего напоминания. Наружу уезжает только
+ * состояние; английскую фразу кабинет пишет сам
+ * (`components/client-eng/engText.ts`), как и у пауз автопилота.
  *
  * Колонки `refill_paused_at` может не быть вовсе (миграция не применена) — её
  * отсутствие читается как «паузы нет», и это правда: без колонок механизм
@@ -393,7 +421,8 @@ export function toClientEngRefillState(config: Row | null | undefined): HeClient
   const pausedAt = config.refill_paused_at;
   if (typeof pausedAt !== 'string' || pausedAt.trim() === '') return 'running';
   const reason = typeof config.refill_pause_reason === 'string' ? config.refill_pause_reason : null;
-  return isHeClientCancelPauseReason(reason) ? 'stopped' : 'paused';
+  if (isHeClientCancelPauseReason(reason)) return 'stopped';
+  return isHeSpendCeilingPauseReason(reason) ? 'spend_paused' : 'paused';
 }
 
 // Живая задача сборки: экран рисует источник, статус и счётчик строк. Снапшот

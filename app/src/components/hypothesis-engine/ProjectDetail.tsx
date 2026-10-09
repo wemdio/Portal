@@ -83,6 +83,21 @@ function isClientCancelRefillPause(reason: string | null | undefined): boolean {
   return typeof reason === 'string' && reason.startsWith(HE_CLIENT_CANCEL_PAUSE_NOTE_COPY);
 }
 
+/**
+ * Начало причины паузы, которую пишет ПОТОЛОК РАСХОДА ENG (ночной тик, шаг 3a-;
+ * потолок по умолчанию выключен, и такой паузы тогда нет) — ТОТ ЖЕ текст, что
+ * HE_SPEND_CEILING_PAUSE_NOTE (lib/hypothesisEngine/spendCeiling.ts,
+ * isHeSpendCeilingPauseReason; начало там объявлено неизменным машинным
+ * признаком). Копия по той же причине, что выше: spendCeiling тянет серверные
+ * модули. Разойдутся — карточка вернётся к тексту паузы по ёмкости, а не
+ * сломается.
+ */
+const HE_SPEND_CEILING_PAUSE_NOTE_COPY = 'Потолок расхода ENG достигнут';
+
+function isSpendCeilingRefillPause(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && reason.startsWith(HE_SPEND_CEILING_PAUSE_NOTE_COPY);
+}
+
 export interface BaseUploadPayload {
   vertical_id: string;
   filename: string;
@@ -713,9 +728,10 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
         ) : null}
       </div>
 
-      {/* Ночной добор остановлен: переполненным воркспейсом рассыльщика либо
-          отменой проекта клиентом в ENG-кабинете (та же колонка паузы, повод —
-          по началу причины, isClientCancelRefillPause). Вернуть его может только
+      {/* Ночной добор остановлен: переполненным воркспейсом рассыльщика,
+          отменой проекта клиентом в ENG-кабинете либо потолком расхода ENG (по
+          умолчанию выключен) — та же колонка паузы, повод — по началу причины
+          (isClientCancelRefillPause, isSpendCeilingRefillPause). Вернуть его может только
           человек — автоснятия по таймеру нет, иначе добор пошёл бы в тот же
           полный воркспейс или в проект, который клиент остановил. Блок
           показывается ТОЛЬКО на паузе: у проектов без ночного добора (все RU)
@@ -739,6 +755,21 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
                   с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
                   вертикали проекта. Клиент сам отменил проект в ENG-кабинете — возобновляйте ночной
                   добор только по его просьбе.
+                </p>
+              ) : isSpendCeilingRefillPause(refillPause.reason) ? (
+                // Пауза потолка расхода: место в воркспейсе ни при чём, совет про
+                // него был бы неверным. Порог не поднят (а суточный считается за
+                // скользящие последние 24 часа, не за календарные сутки) —
+                // следующая ночь снова поставит паузу, не купив сборку.
+                <p className="mt-1 text-[11px] text-amber-700">
+                  с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
+                  вертикали проекта. Паузу поставил потолок расхода ENG, место в воркспейсе ни при
+                  чём. Сначала поднимите порог (суточный считается за последние 24 часа и отпустит,
+                  когда расход проекта за них опустится ниже него) — иначе следующая ночь снова
+                  поставит паузу.
+                  {refillPause.resumed_at
+                    ? ` Прошлый раз возобновляли ${formatDate(refillPause.resumed_at)} — пауза вернулась.`
+                    : ''}
                 </p>
               ) : (
                 <p className="mt-1 text-[11px] text-amber-700">

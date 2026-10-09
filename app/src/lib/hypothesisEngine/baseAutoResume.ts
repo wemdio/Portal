@@ -9,13 +9,17 @@
  * SQL. Причина та же, что у V2: проход зовёт ночной крон, а базу параллельно
  * может трогать воркер, и «прочитать в TS, решить в TS, записать в TS» — это
  * гонка, в которой база поднимается дважды. Здесь остаются только флаг,
- * нормализация ответа и счёт для лога.
+ * нормализация ответа и счёт для лога — и одно решение уровня «идти ли проходу
+ * вообще»: при включённом потолке расхода (spendCeiling.ts, по умолчанию
+ * выключен) прохода нет целиком, потому что внутрь SQL проверку потолка по
+ * проекту не встроить без миграции (см. HeAutoResumeSummary.skipped).
  *
  * Читатель — app/worker/heAutoPipelineCron.ts (единственный): ночной крон
  * ENG-конвейера, проход идёт ПЕРЕД постановкой доливов.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { heSpendCeilingOn, readHeSpendCaps } from './spendCeiling';
 
 /**
  * Флаг включения. По умолчанию проход ВЫКЛЮЧЕН: у ENG нет живого клиентского
@@ -78,8 +82,17 @@ export interface HeAutoResumeRow {
 }
 
 export interface HeAutoResumeSummary {
-  /** false — флаг не выставлен, RPC не звали вовсе. */
+  /** false — флаг не выставлен (или проход пропущен, см. skipped), RPC не звали вовсе. */
   enabled: boolean;
+  /**
+   * Флаг выставлен, но проход пропущен целиком: включён потолок расхода
+   * us-проекта (spendCeiling.ts; по умолчанию выключен). RPC сам выбирает базы
+   * и сам ставит их сборку внутри SQL, а проверить потолок по проекту между
+   * выбором и постановкой там нечем без новой миграции. Поэтому при включённом
+   * потолке автоподъём не идёт вовсе: упавшую базу поднимает человек, а его
+   * кнопки потолок проверяют (клиентская) или сознательно нет (staff).
+   */
+  skipped?: 'spend_ceiling';
   resumed: number;
   refused: number;
   rows: HeAutoResumeRow[];
@@ -136,6 +149,13 @@ export async function runHeAutoResumeTransientPass(
 ): Promise<HeAutoResumeSummary> {
   if (!heAutoResumeEnabled(opts.env ?? process.env)) {
     return { enabled: false, resumed: 0, refused: 0, rows: [] };
+  }
+  // Подъём базы — новая платная сборка (потолок проверяет такую постановку
+  // на каждом машинном и клиентском пути), а RPC ставит её внутри SQL, куда проверку
+  // потолка не встроить без миграции. Потолок включён — прохода нет (см.
+  // HeAutoResumeSummary.skipped). Выключен (дефолт) — прежнее поведение.
+  if (heSpendCeilingOn(readHeSpendCaps(opts.env ?? process.env))) {
+    return { enabled: false, skipped: 'spend_ceiling', resumed: 0, refused: 0, rows: [] };
   }
 
   const { data, error } = await supabase.rpc('he_auto_resume_transient_bases', {

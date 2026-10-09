@@ -164,7 +164,15 @@ const PAUSE_AT_COLUMN = 'autopilot_error_at';
  *  - 'stage_failed'      — оплаченная стадия закончилась отказом, и сам по себе
  *                          автопилот за неё второй раз не платит;
  *  - 'setup_incomplete'  — вести нечего: вертикаль или база исчезли, в джобе нет
- *                          цели.
+ *                          цели;
+ *  - 'spend_ceiling'     — достигнут потолок расхода us-проекта (spendCeiling.ts;
+ *                          ПО УМОЛЧАНИЮ ПОТОЛОК ВЫКЛЮЧЕН, и тогда этот токен не
+ *                          пишет никто). Следующая платная стадия не поставлена,
+ *                          команда получила алерт. Снимают причину полный проход
+ *                          реконсилера, дочейн при прогрессе по правилу
+ *                          followupMayClearPause и кнопка кабинета, увидевшая
+ *                          расход ниже потолка, — через
+ *                          clearHeSpendCeilingPauseIfSafe.
  *
  * «ПОВТОРИТСЯ» У ПЕРВЫХ ДВУХ — ПРО МЕХАНИЗМ, А НЕ ПРО РАСПИСАНИЕ. Автоматический
  * ночной проход (runHeAutopilotReconcilePass) идёт только на установке с
@@ -178,6 +186,7 @@ export const HE_AUTOPILOT_PAUSE_REASONS = [
   'letters_exhausted',
   'stage_failed',
   'setup_incomplete',
+  'spend_ceiling',
 ] as const;
 
 export type HeAutopilotPauseReason = (typeof HE_AUTOPILOT_PAUSE_REASONS)[number];
@@ -258,6 +267,83 @@ export async function recordHeAutopilotPause(
     return false;
   }
 }
+
+/**
+ * Снять причину паузы, только если на проекте стоит ИМЕННО она (не чужую:
+ * 'letters_exhausted' по другой вертикали и т. п.). Те же свойства, что у
+ * recordHeAutopilotPause: не бросает, updated_at не трогает, строку без этой
+ * причины не задевает (условный UPDATE). Решение «вправе ли» — за вызывающим:
+ * единственный сегодня — clearHeSpendCeilingPauseIfSafe ниже.
+ */
+async function clearHeAutopilotPauseIf(
+  supabase: SupabaseClient,
+  projectId: string,
+  reason: HeAutopilotPauseReason,
+): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('he_projects')
+      .update({ [PAUSE_COLUMN]: null, [PAUSE_AT_COLUMN]: null })
+      .eq('id', projectId)
+      .eq(PAUSE_COLUMN, reason);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Снять устаревшую причину 'spend_ceiling' после проверки КНОПКИ кабинета,
+ * увидевшей расход ниже потолка (spendCeiling.enforceHeSpendCeiling).
+ * Возвращает, снята ли.
+ *
+ * Причина — ОДНО поле на проект, а кнопка видит одну вертикаль (или ни одной:
+ * старт исследования, письма по базе). Пауза 'spend_ceiling' на проекте с
+ * автопилотом может означать, что потолок не дал поставить шаг ДРУГОЙ
+ * вертикали, и его до сих пор никто не поставил; снять её здесь — спрятать
+ * этот шаг от кабинета («autopilot has not flagged anything»), ровно как
+ * описано у followupMayClearPause. Поэтому снимается только:
+ *  - у проекта БЕЗ автопилота — пропущенных шагов автопилота у него нет, а
+ *    причину записал отказ кнопки (ручной режим) или отказ, случившийся до
+ *    выключения автопилота: следующий шаг всё равно за клиентом;
+ *  - либо когда followupMayClearPause разрешает для `verticalId` (других
+ *    выбранных вертикалей нет). Без вертикали — не разрешает.
+ * Иначе причину снимет путь, видящий все вертикали, — «Start outreach»
+ * (reconcileHeAutopilotProject).
+ *
+ * Запросы: один SELECT строки проекта; у проекта без этой причины (обычный
+ * случай) на нём всё. Сбой чтения — не снимаем: устаревшая пауза безопаснее
+ * ложного «всё чисто». Не бросает.
+ */
+export async function clearHeSpendCeilingPauseIfSafe(
+  supabase: SupabaseClient,
+  projectId: string,
+  verticalId: string | null,
+): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from('he_projects')
+      .select(`autopilot, ${PAUSE_COLUMN}`)
+      .eq('id', projectId)
+      .maybeSingle();
+    if (error || !data) return false;
+    const row = data as Record<string, unknown>;
+    if (row[PAUSE_COLUMN] !== 'spend_ceiling') return false;
+    const mayClear = row.autopilot !== true || await followupMayClearPause(supabase, projectId, verticalId);
+    return mayClear ? clearHeAutopilotPauseIf(supabase, projectId, 'spend_ceiling') : false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ворота потолка расхода перед платной постановкой автопилота: true — ставить
+ * можно, false — потолок достигнут (пауза и алерт уже сделаны тем, кто ворота
+ * создал). Реализация — spendCeiling.createHeSpendGate; тип живёт здесь, чтобы
+ * этот модуль не тянул spendCeiling (тот сам пишет паузу через этот модуль).
+ * `stage` — что собирались поставить (строка алерта).
+ */
+export type HeSpendGate = (stage: string) => Promise<boolean>;
 
 /**
  * Лимит строк авто-сборки автопилота — 2000, как дефолт ручной кнопки
@@ -633,6 +719,7 @@ export const HE_AUTOPILOT_SKIP_REASONS = [
   'collect_failed_before', // сборка уже падала; автоматически за неё не платим
   'analysis_failed_before', // анализ базы уже падал; автоматически за него не платим
   'letters_exhausted',   // засчитанные прогоны писем на это поколение анализа дошли до порога
+  'spend_ceiling',       // потолок расхода us-проекта достигнут (spendCeiling.ts; по умолчанию выключен)
   /**
    * Решения КЛИЕНТА, а не отказы. Кнопка «Cancel all jobs» переводит джобы в
    * 'cancelled', и ночью за такую работу не платим заново: клиент её только
@@ -689,6 +776,8 @@ export function pauseForHeAutopilotSkip(
       return null;
     case 'letters_exhausted':
       return 'letters_exhausted';
+    case 'spend_ceiling':
+      return 'spend_ceiling';
     case 'orphan_repair_failed':
       return 'enqueue_failed';
     case 'orphan_repair_read_failed':
@@ -880,7 +969,11 @@ export interface AutopilotFollowupsResult {
 }
 
 /** chain done → постановка сборки базы вертикали. */
-async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<AutopilotFollowup> {
+async function afterChainDone(
+  supabase: SupabaseClient,
+  job: HeJob,
+  spendGate: HeSpendGate | undefined,
+): Promise<AutopilotFollowup> {
   const verticalId = typeof job.payload?.vertical_id === 'string' ? job.payload.vertical_id : null;
   if (!verticalId) return skipped('no_vertical_in_job');
 
@@ -969,6 +1062,12 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
 
   // Сборка — часы конструктора и SMTP-пробы: флаг перечитываем прямо перед ней.
   if (!(await isHeAutopilotStillOn(supabase, job.project_id))) return skipped('autopilot_off');
+  // Потолок расхода — последним, прямо перед постановкой: пауза пишется только
+  // там, где действительно было что ставить. Ремонт осиротевшей базы выше
+  // ворот не спрашивает НАМЕРЕННО: анализ базы, строки которой уже куплены, —
+  // хвост оплаченной сборки, и ни один путь к base_analyze потолок не проверяет
+  // (сборка ставит его сама; см. отчёт лейна потолка).
+  if (spendGate && !(await spendGate('base_collect'))) return skipped('spend_ceiling');
   const res = await enqueueHeBaseCollect(supabase, {
     verticalId,
     projectId: job.project_id,
@@ -988,6 +1087,7 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
 async function afterBaseAnalyzeDone(
   supabase: SupabaseClient,
   job: HeJob,
+  spendGate: HeSpendGate | undefined,
 ): Promise<{ outcome: AutopilotFollowup; verticalId: string | null }> {
   const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
   if (!baseId) return { outcome: skipped('no_base_in_job'), verticalId: null };
@@ -1061,6 +1161,8 @@ async function afterBaseAnalyzeDone(
   if (!(await isHeAutopilotStillOn(supabase, job.project_id))) {
     return { outcome: skipped('autopilot_off'), verticalId };
   }
+  // Потолок расхода — прямо перед постановкой писем (см. afterChainDone).
+  if (spendGate && !(await spendGate('template'))) return { outcome: skipped('spend_ceiling'), verticalId };
   const { error: jobErr } = await supabase.from('he_jobs').insert({
     project_id: job.project_id,
     stage: 'template',
@@ -1134,10 +1236,18 @@ async function followupMayClearPause(
  * Причина — сигнал кабинету и след специалисту, а НЕ состояние, из которого
  * движок делает выводы: ночной реконсилер (autopilotReconcile.ts) решает по
  * самим данным конвейера, поэтому неудавшаяся запись причины ничего не ломает.
+ *
+ * `opts.spendGate` — ворота потолка расхода (spendCeiling.createHeSpendGate),
+ * спрашиваются прямо перед платной постановкой сборки и писем. НЕОБЯЗАТЕЛЬНЫ, и
+ * без них поведение прежнее; вызывающий этой функции один — воркер
+ * (worker/hypothesisEngine.ts: deliverDoneRow и finishLandedDoneRow), и он
+ * передаёт ворота в обоих местах. Сам потолок по умолчанию выключен: тогда
+ * ворота отвечают «можно» без единого запроса.
  */
 export async function enqueueAutopilotFollowups(
   supabase: SupabaseClient,
   job: HeJob,
+  opts: { spendGate?: HeSpendGate } = {},
 ): Promise<AutopilotFollowupsResult> {
   // Только входные точки конвейера; research-стадии ведёт enqueueNextResearchStage,
   // base_collect сама ставит base_analyze, template — терминальная.
@@ -1158,12 +1268,12 @@ export async function enqueueAutopilotFollowups(
   let verticalId: string | null;
   try {
     if (job.stage === 'chain') {
-      result = { collect: await afterChainDone(supabase, job) };
+      result = { collect: await afterChainDone(supabase, job, opts.spendGate) };
       verticalId = typeof job.payload?.vertical_id === 'string' && job.payload.vertical_id.length > 0
         ? job.payload.vertical_id
         : null;
     } else {
-      const step = await afterBaseAnalyzeDone(supabase, job);
+      const step = await afterBaseAnalyzeDone(supabase, job, opts.spendGate);
       result = { template: step.outcome };
       verticalId = step.verticalId;
     }

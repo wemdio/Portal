@@ -38,6 +38,7 @@ import {
   HE_REFILL_HOLD_LIFT_EN,
   HE_REFILL_RUN_KEPT_EN,
   HE_REFILL_RUN_WHAT_TO_DO_EN,
+  HE_SPEND_PAUSED_EN,
   HE_TEAM_ON_IT_EN,
   formatHeClientFailure,
   heClientFailureFor,
@@ -247,7 +248,12 @@ export function engRefillStoppedText(): string {
  *    на шаге 2 нет, зато есть его собственная подсказка `startOutreachHint` —
  *    ровно то, чего экран ждёт; на неё текст и ссылается;
  *  - ни имён таблиц, стадий и провайдеров, ни внутренних id: наружу приехал
- *    КОД, разбирать в браузере уже нечего.
+ *    КОД, разбирать в браузере уже нечего;
+ *  - `spend_paused` (потолок расхода, по умолчанию выключен) — общая фраза
+ *    HE_SPEND_PAUSED_EN, та же, что в отказе 409 кнопок кабинета: следующий
+ *    шаг — за командой, клиенту кнопку не предлагаем (кнопка, начинающая
+ *    платную работу, упрётся в тот же потолок). Почему каждое её предложение
+ *    правда — у константы.
  */
 const AUTOPILOT_HOLD_EN: Record<HeClientAutopilotHoldCode, string> = {
   retrying:
@@ -258,6 +264,7 @@ const AUTOPILOT_HOLD_EN: Record<HeClientAutopilotHoldCode, string> = {
     'Writing the letters for this base was retried as many times as we allow for one analysis, so the autopilot stopped retrying. The base and everything collected are saved. Our team can see it — contact your manager to have the letters looked at.',
   target_missing:
     'The autopilot could not tell what to work on next for this project, so it stopped moving it forward. Nothing collected is lost. Our team can see it — contact your manager to get this project going again.',
+  spend_paused: HE_SPEND_PAUSED_EN,
 };
 
 /** Фраза про паузу автопилота по коду причины. */
@@ -267,11 +274,12 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
 
 /**
  * Что кабинет говорит про проект, которому остановлен ночной добор
- * (`he_auto_pipeline_configs.refill_paused_at`). Поводов у одной колонки два,
+ * (`he_auto_pipeline_configs.refill_paused_at`). Поводов у одной колонки три,
  * и проекция различает их до кабинета (HeClientRefillState): `paused` — нехватка
- * места под новые контакты, `stopped` — проект отменён кнопкой «Cancel all jobs».
- * Фразы у них разные, потому что правда разная; ниже — правила для `paused`,
- * про `stopped` — у его текста.
+ * места под новые контакты, `spend_paused` — потолок расхода проекта,
+ * `stopped` — проект отменён кнопкой «Cancel all jobs». Фразы у них разные,
+ * потому что правда разная; ниже — правила для `paused`, про `spend_paused` и
+ * `stopped` — у их текстов.
  *
  * ПРИЧИНУ НЕ НАЗЫВАЕМ. Решение владельца 04.10.2026: про ёмкость, рассыльщика
  * и тарифы клиент не читает ни слова — только общая фраза справочника
@@ -279,7 +287,9 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * команда. «Команда уже работает» здесь правда потому, что оба места записи
  * паузы ПО ЁМКОСТИ (stages/baseCollectRefill.ts, autoPipeline.ts) шлют алерт в
  * health-бот (lib/hypothesisEngine/opsAlert.ts); без этих вызовов фразу писать
- * нельзя. Третье место записи той же колонки — отмена клиентом
+ * нельзя. Пауза по ПОТОЛКУ РАСХОДА приходит сюда своим `spend_paused`: алерт
+ * у неё есть, но «временная проблема, уже работают» про неё неправда — это не
+ * сбой. Ещё одно место записи той же колонки — отмена клиентом
  * (pauseHeRefillForClientCancel) — алерта не шлёт, и поэтому эта фраза к ней
  * не применяется: отмена приходит сюда состоянием `stopped`.
  *
@@ -311,15 +321,42 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * отмены рассыльщика не зовёт вовсе). Если «Start outreach» когда-нибудь начнёт
  * снимать и эту паузу (открытое решение владельца), менять вместе: эту фразу и
  * подтверждение отмены в EngProjectWizard («only your manager can restart»).
+ *
+ * `spend_paused` — ПОТОЛОК РАСХОДА (lib/hypothesisEngine/spendCeiling.ts,
+ * autoPipeline.ts шаг 3a-; по умолчанию потолок выключен, и эту фразу не
+ * видит никто). Говорит то же, что HE_SPEND_PAUSED_EN у карточки паузы
+ * автопилота, только про добор; причину (деньги, порог) не называем — решение
+ * владельца 04.10.2026. Каждое предложение — правда:
+ *  - «on hold … paused on our side» — паузу записал потолок, не клиент;
+ *  - «does not start any new collection» — ночь под паузой не покупает сборку
+ *    (обход конфига кончается до покупки); уже купленную сборку пауза не
+ *    обрывает, поэтому «ничего не добавится» не пишем;
+ *  - «Our team has been notified» — запись паузы потолком и каждая ночь под
+ *    ней шлют алерт (opsAlert, вид 'spend_ceiling'); без него фразу писать
+ *    нельзя;
+ *  - «continues when they resume it» — таймера нет: снимает паузу только
+ *    staff-кнопка (суточный порог отпускает время — когда расход проекта за
+ *    скользящие последние 24 часа опустится ниже него, — но паузу добора и
+ *    тогда никто не снимает сам). Срока не называем;
+ *  - «this hold does not stop sending» — потолок кампаний не касается.
  */
 const REFILL_HOLD_EN: Record<EngRefillHoldState, string> = {
   paused: `The daily refill for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there and keeps sending. ${HE_REFILL_HOLD_LIFT_EN}`,
+  spend_paused:
+    'The daily refill for this project is on hold. It was paused on our side, so the refill does not start any new collection. Our team has been notified, and the refill continues when they resume it. Leads already in your campaigns stay there, and this hold does not stop sending.',
   stopped:
     'The daily refill for this project is stopped because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Your manager can restart the daily refill.',
 };
 
 /** Состояния добора, у которых есть что объяснить отдельным блоком. */
-export type EngRefillHoldState = Extract<HeClientRefillState, 'paused' | 'stopped'>;
+export type EngRefillHoldState = Extract<HeClientRefillState, 'paused' | 'spend_paused' | 'stopped'>;
+
+/**
+ * `spend_paused` коротко — для подписей Command Center, где полное
+ * предложение не помещается. Правда по тем же причинам, что и полный текст
+ * выше (REFILL_HOLD_EN.spend_paused), — менять их только вместе.
+ */
+export const ENG_REFILL_SPEND_PAUSED_SHORT_EN = 'paused on our side, our team has been notified';
 
 export function engRefillHoldText(state: EngRefillHoldState): string {
   return REFILL_HOLD_EN[state];

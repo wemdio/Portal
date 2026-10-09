@@ -93,6 +93,8 @@ import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 // назначается нигде.
 import { isTransientDbError } from '@/lib/db/transientError';
 import { normalizeHeMarket } from '@/lib/hypothesisEngine/market';
+import { markHeJournalGap, openHeProviderJournal, withHeProviderJournal } from '@/lib/hypothesisEngine/costTelemetry';
+import type { HeProviderJournal } from '@/lib/hypothesisEngine/costTelemetry';
 import {
   HE_ANALYZING_BASE_FIELDS,
   enqueueAutopilotFollowups,
@@ -100,7 +102,12 @@ import {
   liveHeJobBaseIds,
   repairOrphanAnalyzingBase,
 } from '@/lib/hypothesisEngine/autopilotNext';
-import type { HeAnalyzingBase } from '@/lib/hypothesisEngine/autopilotNext';
+import type { HeAnalyzingBase, HeSpendGate } from '@/lib/hypothesisEngine/autopilotNext';
+// Потолок расхода us-проекта (P-A-project-spend-ceiling). ПО УМОЛЧАНИЮ
+// ВЫКЛЮЧЕН: без HE_US_PROJECT_SPEND_CAP_USD / HE_US_PROJECT_DAY_SPEND_CAP_USD
+// ворота дочейна автопилота не делают ни одного запроса и ничего не меняют.
+// Цепочку research воркер не проверяет (см. enqueueNextResearchStage).
+import { createHeSpendGate } from '@/lib/hypothesisEngine/spendCeiling';
 import { closeHeRefillBaseAfterFinalFail } from '@/lib/hypothesisEngine/stages/baseCollect';
 import { isHeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
 import type { HeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
@@ -1727,6 +1734,13 @@ const CHAIN_ENQUEUE_RETRY_MS = 1000;
  * 'researching' (его ставят старт исследования и site_profile; 'draft' —
  * только отмена, 'failed' — только отказ, 'researched' — clustering, после
  * которого следующей стадии нет).
+ *
+ * Потолка расхода (spendCeiling.ts) здесь НЕТ намеренно: начатое исследование
+ * доводится до конца. Пауза посреди цепочки оставила бы проект 'researching'
+ * без джобы, и выйти из неё можно было бы только повтором с site_profile —
+ * заплатив второй раз за уже сделанные стадии. Потолок проверяет СТАРТ
+ * исследования (кнопка кабинета «Re-run research»); перебор от этого — не
+ * больше одного исследования (шапка spendCeiling.ts).
  */
 async function enqueueNextResearchStage(client: HeWorkerDb, job: HeJob) {
   const nextStage = NEXT_RESEARCH_STAGE[job.stage];
@@ -1764,6 +1778,26 @@ async function enqueueNextResearchStage(client: HeWorkerDb, job: HeJob) {
     .insert({ project_id: job.project_id, stage: nextStage });
   if (error) throw new Error(`he_jobs ${nextStage} enqueue: ${error.message}`);
   log('info', `Job ${job.id} (${job.stage}) → enqueued ${nextStage} for project ${job.project_id}`);
+}
+
+/**
+ * Ворота потолка расхода для дочейна автопилота после done-джобы
+ * (enqueueAutopilotFollowups спрашивает их прямо перед постановкой сборки и
+ * писем). Зовут оба места дочейна — deliverDoneRow и finishLandedDoneRow:
+ * путей к этой постановке два, и ворота на обоих. Потолок по умолчанию
+ * выключен — тогда ворота отвечают «можно» без запросов; автопилот бывает
+ * только у проекта, включённого кнопкой ENG-кабинета, поэтому RU-проект
+ * (autopilot=false) до ворот не доходит вовсе.
+ */
+function followupSpendGate(client: HeWorkerDb, job: HeJob): HeSpendGate {
+  return createHeSpendGate(client, {
+    projectId: job.project_id,
+    path: 'autopilot_followup',
+    jobId: job.id,
+    baseId: typeof job.payload?.base_id === 'string' ? job.payload.base_id : null,
+    verticalId: typeof job.payload?.vertical_id === 'string' ? job.payload.vertical_id : null,
+    warn: (msg) => log('warn', `Job ${job.id} (${job.stage}) autopilot followup: ${msg}`),
+  });
 }
 
 /**
@@ -1955,6 +1989,7 @@ async function handleJob(job: HeJob) {
   let run:
     | { ok: true; stageResult: Awaited<ReturnType<typeof runHeStage>> }
     | { ok: false; error: unknown };
+  let journal: HeProviderJournal | null = null;
   try {
     // Рынок проекта (geo поиска, язык промптов/писем) — один read на джобу.
     const { data: proj, error: projErr, status: projStatus } = await db
@@ -1982,7 +2017,15 @@ async function handleJob(job: HeJob) {
     }
     const market = normalizeHeMarket((proj as { market?: string } | null)?.market);
 
-    const stageResult = await runHeStage(job, {
+    // Журнал расхода ENG (lib/hypothesisEngine/costTelemetry.ts): только у
+    // проекта market='us' — каждое обращение стадии к Requesty и Serper даёт
+    // строку application_logs 'he_provider_usage'. Для 'ru' журнал null, и
+    // стадия зовётся как раньше, без обёртки. Пишет общим `db` (не stageDb):
+    // отмена джобы не должна обрывать запись уже оплаченного обращения. Сбой
+    // записи стадию не роняет и не задерживает — см. шапку модуля.
+    journal = openHeProviderJournal(db, market, job, (msg) =>
+      log('warn', `Job ${job.id} (${job.stage}) project ${job.project_id}: ${msg}`));
+    const stageResult = await withHeProviderJournal(journal, () => runHeStage(job, {
       // Клиент СТАДИЙ (stageDb): у каждого запроса срок на заголовки и на паузу
       // между кусками тела, и его обрывает сигнал джобы. Поверх — отметка
       // активности: каждый запрос стадии к БД признак жизни для сторожа, иначе
@@ -2007,7 +2050,7 @@ async function handleJob(job: HeJob) {
         watchdog.touch();
         log('info', `[${job.stage}] ${msg}`);
       },
-    });
+    }));
     run = { ok: true, stageResult };
   } catch (e) {
     run = { ok: false, error: stageFailureOf(e, abort.signal.reason) };
@@ -2092,11 +2135,26 @@ async function handleJob(job: HeJob) {
   const abortReason: unknown = abort.signal.reason;
   const interrupted = abort.signal.aborted && isHeJobInterruption(abortReason);
 
+  // Журнал расхода ENG: дождаться фоновых строк прогона (не дольше
+  // SETTLE_LIMIT_MS costTelemetry.ts, ~40 с при лежащей БД; обычно 0; не
+  // бросает). Ждём ПОСЛЕ снятия сторожа — ожидание не съедает окно аварийного
+  // выхода после abort — и только у вернувшегося непрерванного прогона: если
+  // его результат ляжет done-записью, в ней поедет маркер пробела journal_gap
+  // (на существующей записи, новой нет). Где done-записи не будет (прерывание,
+  // ожидание base_collect, отмена), пробел несёт следующая легшая строка
+  // проекта (lost_before). RU: journal === null — ни ожидания, ни маркера.
+  const journalLost = journal && !interrupted ? await journal.settle() : 0;
+
   // Финализация (и учёт расхода прерванного прогона) — под своим сроком:
   // сторожа здесь уже нет, см. POST_STAGE_DEADLINE_MS.
   // Результат и бухгалтерия финализации — один объект: его же получит сборщик,
   // если строку придётся бросить, и по нему он знает, что уже записано.
-  const delivery: HeStrandedDelivery = { result: stageResult.result, tokensUsed, costUsd, projectBooked: false };
+  const delivery: HeStrandedDelivery = {
+    result: journalLost ? markHeJournalGap(stageResult.result, journalLost) : stageResult.result,
+    tokensUsed,
+    costUsd,
+    projectBooked: false,
+  };
   let finalized: boolean;
   try {
     finalized = await withPostStageDeadline(job, 'finalization', async (client, signal) => {
@@ -2489,7 +2547,7 @@ async function deliverDoneRow(
   try {
     // Итог дочейна логируем: 'reanalyzed' (вместо новой сборки вылечена
     // осиротевшая база) иначе не виден в логах вообще.
-    const followups = await enqueueAutopilotFollowups(client, job);
+    const followups = await enqueueAutopilotFollowups(client, job, { spendGate: followupSpendGate(client, job) });
     const summary = Object.entries(followups)
       .map(([stage, outcome]) => `${stage}=${outcome}`)
       .join(' ');
@@ -2550,7 +2608,7 @@ async function finishLandedDoneRow(
       log('info', `Job ${job.id} (${job.stage}) хвост легшей done-строки: followups не ставим — ${blocker}`);
     } else {
       try {
-        const followups = await enqueueAutopilotFollowups(client, job);
+        const followups = await enqueueAutopilotFollowups(client, job, { spendGate: followupSpendGate(client, job) });
         const summary = Object.entries(followups)
           .map(([stage, outcome]) => `${stage}=${outcome}`)
           .join(' ');

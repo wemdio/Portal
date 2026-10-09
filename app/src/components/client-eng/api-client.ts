@@ -870,9 +870,13 @@ export interface EngDashboardResponse {
     autopilot_hold?: ClientEngAutopilotHold | null;
     /**
      * Состояние ночного добора ЭТОГО проекта — `off` / `running` / `paused` /
-     * `stopped` (см. `HeClientRefillState`: `paused` — пауза по ёмкости,
-     * `stopped` — отмена проекта кнопкой «Cancel all jobs»). Поля может не быть
-     * только у ответа старше этой волны; тогда экран читает его как `off`.
+     * `spend_paused` / `stopped` (см. `HeClientRefillState`: `paused` — пауза
+     * по ёмкости, `spend_paused` — пауза по потолку расхода проекта, `stopped`
+     * — отмена проекта кнопкой «Cancel all jobs»). Поля может не быть только у
+     * ответа старше этой волны; тогда экран читает его как `off`. Вкладка,
+     * открытая до выката раунда 4, значения `spend_paused` не знает, и до
+     * перезагрузки страницы подписи добора такого проекта у неё неверны
+     * (потолок расхода по умолчанию выключен — значения нет вовсе).
      */
     refill?: HeClientRefillState;
   }>;

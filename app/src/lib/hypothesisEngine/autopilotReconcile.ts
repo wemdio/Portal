@@ -66,6 +66,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
 import { defaultChainLanguageForMarket, normalizeHeMarket } from './market';
+import { flushHeOpsAlerts } from './opsAlert';
+import { createHeSpendGate } from './spendCeiling';
 import {
   AUTOPILOT_BASE_LIMIT,
   HE_ANALYZING_BASE_FIELDS,
@@ -198,6 +200,9 @@ export type HeAutopilotReconcileResult =
  * снизу — то, где повтор не поможет и нужен человек.
  */
 const PAUSE_SEVERITY: Record<HeAutopilotPauseReason, number> = {
+  // Выше всех: при достигнутом потолке проход кончается на первой же платной
+  // постановке (stopOnSpendCeiling), и никакая другая причина его не снимет.
+  spend_ceiling: 6,
   read_failed: 5,
   enqueue_failed: 4,
   letters_exhausted: 3,
@@ -445,6 +450,45 @@ export async function reconcileHeAutopilotProject(
     return { ok: true, counts, details, pause: null };
   };
 
+  /**
+   * Потолок расхода us-проекта (spendCeiling.ts; ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда
+   * ворота отвечают «можно» без единого запроса). Спрашивается ПОСЛЕ
+   * stopUnlessAutopilotOn у каждой платной постановки прохода — цепочки,
+   * сборки, писем — и один раз за проход (ворота запоминают ответ). Один код
+   * на обе точки входа: кнопку «Start outreach» (trigger='client') и ночной
+   * проход (trigger='nightly', только при HE_AUTOPILOT_RECONCILE). Ремонт
+   * осиротевшей базы ворот не спрашивает: анализ уже купленных строк — хвост
+   * оплаченной сборки, и ни один путь к base_analyze потолок не проверяет.
+   *
+   * Достигнут — проход кончается здесь же: ворота уже записали причину
+   * 'spend_ceiling' и отправили алерт, вертикаль уходит в details с этой
+   * причиной, а вертикали ПОСЛЕ неё в этом проходе не разбираются вовсе — в
+   * том числе ремонт их осиротевших баз (base_analyze, который потолок сам не
+   * проверяет): он откладывается до прохода под потолком, а не делается
+   * в обход него. Вертикали ДО неё разобраны как обычно. Кнопка клиента
+   * получает ту же паузу кодом 'spend_paused' (роут autopilot) и печатает
+   * «ничего не поставлено — см. карточку над шагами».
+   *
+   * Ниже потолка ворота причину 'spend_ceiling' НЕ снимают: её, как и любую
+   * другую, переписывает итог полного прохода (recordHeAutopilotPause в конце)
+   * — единственный путь, видящий все вертикали сразу.
+   */
+  const spendGate = createHeSpendGate(supabase, {
+    projectId,
+    market: project.market,
+    projectName: asString(project.name) || null,
+    path: nightly ? 'autopilot_reconcile_nightly' : 'autopilot_reconcile_client',
+  });
+  const stopOnSpendCeiling = async (
+    verticalId: string,
+    stage: string,
+  ): Promise<HeAutopilotReconcileResult | null> => {
+    if (await spendGate(stage)) return null;
+    counts.verticalsSkipped += 1;
+    details.push({ verticalId, outcome: 'skipped', reason: 'spend_ceiling' });
+    return { ok: true, counts, details, pause: 'spend_ceiling' };
+  };
+
   for (const vertical of verticals) {
     const verticalId = asString(vertical.id);
     if (!verticalId) continue;
@@ -489,7 +533,7 @@ export async function reconcileHeAutopilotProject(
         // человека (кнопка кабинета или специалист).
         skipReason = 'chain_failed_before';
       } else {
-        const stop = await stopUnlessAutopilotOn(verticalId);
+        const stop = (await stopUnlessAutopilotOn(verticalId)) ?? (await stopOnSpendCeiling(verticalId, 'chain'));
         if (stop) return stop;
         const { error: chainErr } = await supabase.from('he_jobs').insert({
           project_id: projectId,
@@ -627,7 +671,8 @@ export async function reconcileHeAutopilotProject(
           // своими потолками, а новая сборка — решение человека.
           skipReason = 'collect_failed_before';
         } else {
-          const stop = await stopUnlessAutopilotOn(verticalId);
+          const stop =
+            (await stopUnlessAutopilotOn(verticalId)) ?? (await stopOnSpendCeiling(verticalId, 'base_collect'));
           if (stop) return stop;
           const collect = await enqueueHeBaseCollect(supabase, {
             verticalId,
@@ -710,7 +755,9 @@ export async function reconcileHeAutopilotProject(
               generationAt: budget.generationAt,
             };
           } else {
-            const stop = await stopUnlessAutopilotOn(verticalId, analyzedBaseId);
+            const stop =
+              (await stopUnlessAutopilotOn(verticalId, analyzedBaseId))
+              ?? (await stopOnSpendCeiling(verticalId, 'template'));
             if (stop) return stop;
             const { error: tplErr } = await supabase.from('he_jobs').insert({
               project_id: projectId,
@@ -1062,5 +1109,9 @@ export async function runHeAutopilotReconcilePass(
   }
 
   summary.projects = summary.rows.length;
+  // Крон одноразовый: алерты потолка расхода, отложенные opsAlert в свёртку
+  // (второй и дальше проект одного окна), иначе умерли бы вместе с процессом —
+  // flushHeOpsAlerts тика добора к этому моменту уже отработал.
+  await flushHeOpsAlerts();
   return summary;
 }

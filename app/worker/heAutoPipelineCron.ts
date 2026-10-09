@@ -188,7 +188,16 @@ async function main(): Promise<number> {
   let resumeFailed = false;
   try {
     const resume = await runHeAutoResumeTransientPass(supabase);
-    if (!resume.enabled) {
+    if (resume.skipped === 'spend_ceiling') {
+      // Громко: флаг выставлен, а проход не шёл — его RPC ставит сборку внутри
+      // SQL, где потолок расхода не проверить (baseAutoResume.ts).
+      log(
+        'warn',
+        `Auto-resume pass skipped: ${HE_AUTO_RESUME_FLAG_ENV} is set, but the ENG spend ceiling is on ` +
+          '(HE_US_PROJECT_SPEND_CAP_USD / HE_US_PROJECT_DAY_SPEND_CAP_USD) and the pass cannot check it per project — ' +
+          'failed bases stay failed until a person restarts them',
+      );
+    } else if (!resume.enabled) {
       log('info', `Auto-resume pass is off (${HE_AUTO_RESUME_FLAG_ENV} is not set) — nothing resumed`);
     } else {
       for (const r of resume.rows) {

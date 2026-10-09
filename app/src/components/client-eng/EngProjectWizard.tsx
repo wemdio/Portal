@@ -281,6 +281,24 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
                 {engAutopilotIdleText()}
               </div>
             ) : null)}
+          {/* Пауза по потолку расхода ('spend_paused'; потолок по умолчанию
+              выключен) — единственная, которая пишется и БЕЗ автопилота:
+              отказ кнопки ручного режима, в том числе старта исследования
+              («Re-run research»; потолок проверяет только СТАРТ, начатую
+              цепочку research он не обрывает). Те же границы, что выше, кроме первой: без активных джоб и тем же
+              янтарём. Нейтральной ветки у неё нет — без автопилота «делать
+              нечего» не наш текст. */}
+          {project &&
+            project.autopilot !== true &&
+            !hasActiveJobs &&
+            project.autopilot_hold?.code === 'spend_paused' && (
+              <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-amber)' }}>
+                {engAutopilotHoldText(project.autopilot_hold.code)}
+                {project.autopilot_hold.at && (
+                  <span style={{ color: 'var(--cp-text-l)' }}> · {fmtDate(project.autopilot_hold.at)}</span>
+                )}
+              </div>
+            )}
 
           <nav className="flex flex-wrap gap-1.5" aria-label="Wizard steps">
             {STEPS.map((s) => (

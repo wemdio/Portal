@@ -3,7 +3,7 @@ import type { NextRequest } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { logAudit } from '@/lib/loggerServer';
+import { logAudit, logWarn } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
@@ -18,6 +18,8 @@ import {
   heTemplateLaunchMarked,
   type HeTemplateLaunchMark,
 } from '@/lib/hypothesisEngine/launchTemplate';
+import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
+import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -246,6 +248,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         { status: 409 },
       );
     }
+
+    // Потолок расхода us-проекта (lib/hypothesisEngine/spendCeiling.ts; ПО
+    // УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда ни одного запроса). Достигнут — исследование не
+    // ставим: пауза 'spend_ceiling' на проекте и алерт команде уже сделаны в
+    // enforceHeSpendCeiling, клиент читает ту же фразу, что и карточка паузы.
+    // Неизвестный расход — ставим как без потолка (fail-open).
+    // Стоит ПОСЛЕ отказов «что удалит повтор» (launched/busy/confirm): нажатие,
+    // которое не поставило бы ничего и без потолка, не пишет паузу и не шлёт
+    // алерт. Подтверждённый повтор на паузе не удаляет ничего — research не
+    // встаёт, и clustering, который удаляет, не запускается.
+    const spend = await enforceHeSpendCeiling(supabaseAdmin, {
+      projectId: id,
+      market: owned.project.market ?? null,
+      projectName: typeof owned.project.name === 'string' ? owned.project.name : null,
+      stage: 'site_profile',
+      path: 'client_button',
+      warn: (msg) => void logWarn('client.eng.research.spend_unknown', msg, { userId: result.auth.userId, projectId: id }),
+    });
+    if (!spend.allowed) return jsonError(HE_SPEND_PAUSED_EN, 409);
 
     const enqueue = await enqueueHeResearchJob(supabaseAdmin, id);
     if (!enqueue.ok) {

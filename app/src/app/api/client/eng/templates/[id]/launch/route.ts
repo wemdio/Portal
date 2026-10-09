@@ -14,6 +14,10 @@ import {
   runHeTemplateLaunch,
 } from '@/lib/hypothesisEngine/launchTemplate';
 import { toClientEngCampaignName, toClientEngLaunchInfo } from '@/lib/hypothesisEngine/clientEngProjection';
+import { openHeProviderJournal, withHeProviderJournal } from '@/lib/hypothesisEngine/costTelemetry';
+import { HE_COST_LAUNCH_STAGE } from '@/lib/hypothesisEngine/costReport';
+import { projectMarket } from '@/lib/hypothesisEngine/market';
+import type { HeJob } from '@/lib/hypothesisEngine/types';
 import { getHeClientFailure } from '@/lib/hypothesisEngine/clientErrors';
 import { parseLaunchInfo, type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
@@ -295,20 +299,47 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const owned = await loadClientHeTemplate(supabaseAdmin, id, userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
-    const outcome = await runHeTemplateLaunch({
-      portalDb: supabaseAdmin,
-      instantlyDb: supabaseInstantly,
-      templateId: id,
-      presetId,
-      force,
-      userId,
-      scopeClientUserId: userId,
-      locale: 'en',
-      eventPrefix: 'client.eng.template.launch',
-      // Окно уезжает в ядро: новые кампании создаются СРАЗУ с ним (шаг 4b⁗
-      // ядра), а не с часами пресета до второго вызова.
-      sendingWindow,
-    });
+    // Журнал расхода ENG (costTelemetry.ts) вокруг ядра запуска: классификатор
+    // сегментов (шаг 5c ядра) — платный вызов модели из роута, и без журнала
+    // он не попадал ни в отчёт себестоимости, ни в потолок расхода. Только у
+    // проекта market='us' (рынок — из уже прочитанного скоупа, без запроса);
+    // у другого рынка openHeProviderJournal отвечает null, и ядро зовётся как
+    // раньше. Запись строк фоновая и не бросает: запуск её не ждёт (settle
+    // здесь не зовётся — ожидание до 40 с при лежащей БД вытолкнуло бы ответ
+    // за maxDuration), а сбой записи стоит строки журнала, не запуска. Стадия
+    // HE_COST_LAUNCH_STAGE не из he_jobs, на месте id джобы — id шаблона
+    // (costReport.ts, шапка).
+    const journal = openHeProviderJournal(
+      supabaseAdmin,
+      projectMarket(owned.project as { market?: string | null }),
+      {
+        id,
+        project_id: String(owned.project.id),
+        stage: HE_COST_LAUNCH_STAGE as HeJob['stage'],
+        payload: {},
+      },
+      (msg) => console.warn(msg),
+    );
+    // Сужение `!supabaseAdmin || !supabaseInstantly` выше в замыкание не
+    // переходит — клиенты фиксируются здесь.
+    const portalDb = supabaseAdmin;
+    const instantlyDb = supabaseInstantly;
+    const outcome = await withHeProviderJournal(journal, () =>
+      runHeTemplateLaunch({
+        portalDb,
+        instantlyDb,
+        templateId: id,
+        presetId,
+        force,
+        userId,
+        scopeClientUserId: userId,
+        locale: 'en',
+        eventPrefix: 'client.eng.template.launch',
+        // Окно уезжает в ядро: новые кампании создаются СРАЗУ с ним (шаг 4b⁗
+        // ядра), а не с часами пресета до второго вызова.
+        sendingWindow,
+      }),
+    );
 
     // 5xx ядра запуска несут сырьё: сообщение Postgres (чтения шаблона и базы)
     // и тело ответа API рассыльщика (отказ первой кампании). Наружу — константа

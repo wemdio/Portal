@@ -36,7 +36,7 @@ import {
   type EngDashboardResponse,
   type EngDashStage,
 } from './api-client';
-import { engAutopilotHoldText, engRefillHoldText } from './engText';
+import { ENG_REFILL_SPEND_PAUSED_SHORT_EN, engAutopilotHoldText, engRefillHoldText } from './engText';
 import { HE_TEAM_ON_IT_SHORT_EN } from './clientFailureText';
 // Только тип — см. пояснение в engText.ts: набор состояний один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
@@ -229,8 +229,8 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
 }
 
 /**
- * Что кабинет говорит про ночной добор одной строкой — по ВСЕМ четырём
- * состояниям проекта, без пятого «наверное».
+ * Что кабинет говорит про ночной добор одной строкой — по ВСЕМ пяти
+ * состояниям проекта, без шестого «наверное».
  *
  * `paused` НЕ схлопывается в `not configured`: добор настроен и нужен, просто
  * сегодня его некуда грузить, и обещать «next run 03:20 UTC» проекту, который
@@ -240,6 +240,10 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
  * 04.10.2026): короткая общая фраза справочника, правдивая потому, что пауза по
  * ёмкости шлёт алерт команде (см. HE_TEAM_ON_IT_EN в clientFailureText.ts).
  *
+ * `spend_paused` — та же колонка, записанная потолком расхода проекта: алерт
+ * у неё есть, но это не сбой, и «временная проблема» про неё неправда —
+ * короткая фраза в духе HE_SPEND_PAUSED_EN (ENG_REFILL_SPEND_PAUSED_SHORT_EN).
+ *
  * `stopped` — та же колонка паузы, но записанная отменой проекта («Cancel all
  * jobs»): алерта у неё нет, проблемы на нашей стороне нет, поэтому фраза своя —
  * что произошло и кто вернёт (engRefillHoldText).
@@ -247,6 +251,7 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
 const REFILL_NEXT_LINE: Record<HeClientRefillState, string> = {
   running: 'next: daily refill 03:20 UTC',
   paused: `next: daily refill on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
+  spend_paused: `next: daily refill on hold — ${ENG_REFILL_SPEND_PAUSED_SHORT_EN}`,
   stopped: 'next: daily refill stopped — project cancelled, your manager can restart it',
   off: 'next: daily refill — not configured',
 };
@@ -255,14 +260,15 @@ const REFILL_NEXT_LINE: Record<HeClientRefillState, string> = {
 const REFILL_PIPE_EVIDENCE: Record<HeClientRefillState, string> = {
   running: 'next 03:20 UTC',
   paused: `on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
+  spend_paused: 'on hold — paused on our side',
   stopped: 'stopped — project cancelled',
   off: 'not configured',
 };
 
 /**
  * Ночной добор ПРОЕКТА идёт, но ЭТУ вертикаль правило сухой вертикали с него
- * сняло (`refill_dry`). Только для `running`: у `paused`, `stopped` и `off` своя,
- * более общая правда — добора нет у всего проекта.
+ * сняло (`refill_dry`). Только для `running`: у `paused`, `spend_paused`,
+ * `stopped` и `off` своя, более общая правда — добора нет у всего проекта.
  */
 const REFILL_DRY_NEXT_LINE = 'next: daily refill paused for this vertical — resume it on step 2';
 const REFILL_DRY_PIPE_EVIDENCE = 'paused for this vertical';
@@ -429,11 +435,12 @@ function buildPipelineRows(
       // Маркер — тоже утверждение, и под паузой оба прежних врали: зелёная
       // точка значит «живой цикл», пульсирующая янтарная — «прямо сейчас
       // работает». Остановленный добор не то и не другое, поэтому у него своя
-      // точка: янтарная, но неподвижная — и у паузы, и у отмены проекта. Сухая
-      // вертикаль — тот же «held»: проект идёт, а её ночь не берёт.
+      // точка: янтарная, но неподвижная — и у пауз (ёмкость, потолок расхода), и
+      // у отмены проекта. Сухая вертикаль — тот же «held»: проект идёт, а её
+      // ночь не берёт.
       marker: refillRunning
         ? 'amber'
-        : refill === 'paused' || refill === 'stopped' || dryHere
+        : refill === 'paused' || refill === 'spend_paused' || refill === 'stopped' || dryHere
           ? 'held'
           : 'green',
       evidence: refillRunning
@@ -767,14 +774,17 @@ export function EngDashboard() {
    *
    * Карточка «Auto-refill» одна на аккаунт, а пауза ставится проекту, поэтому
    * карточка печатает не одно состояние, а СОСТАВ: сколько проектов идёт,
-   * сколько стоит по ёмкости (`paused`) и сколько остановлено отменой
+   * сколько на паузе (по ёмкости — `paused`, по потолку расхода —
+   * `spend_paused`; «on hold» правда про обе) и сколько остановлено отменой
    * (`stopped`); `off` в состав не входит — добора у него нет. Ветки карточки
    * ниже перебирают всё: есть идущие — обратный отсчёт и рядом счётчики
-   * стоящих обоих видов; идущих нет, но есть на паузе — «on hold» (и счётчик
-   * отменённых, если они тоже есть); только отменённые — «stopped»; иначе —
-   * «off». Смешанный случай и есть тот, из-за которого одного булева флага
-   * мало: обратный отсчёт для идущих правдив, но умолчать про стоящие рядом с
-   * ним было бы тем же обещанием добора, которого не будет.
+   * стоящих; идущих нет, но есть на паузе — «on hold» с фразой своего повода
+   * (есть по ёмкости — её фраза и счётчик пауз по потолку рядом; только по
+   * потолку — его фраза) и счётчик отменённых, если они тоже есть; только
+   * отменённые — «stopped»; иначе — «off». Смешанный случай и есть тот, из-за
+   * которого одного булева флага мало: обратный отсчёт для идущих правдив, но
+   * умолчать про стоящие рядом с ним было бы тем же обещанием добора, которого
+   * не будет.
    *
    * Поля может не быть (ответ старше этой волны) — читаем как `off`: до
    * механизма паузы кабинет ровно так и считал проект без конфига.
@@ -782,16 +792,23 @@ export function EngDashboard() {
   const refillByProject = new Map<string, HeClientRefillState>(
     projects.map((p) => [p.id, p.refill ?? 'off']),
   );
-  const refillHeldProjects = projects.filter((p) => p.refill === 'paused');
+  const refillCapacityHeldCount = projects.filter((p) => p.refill === 'paused').length;
+  const refillSpendHeldCount = projects.filter((p) => p.refill === 'spend_paused').length;
+  const refillHeldCount = refillCapacityHeldCount + refillSpendHeldCount;
   const refillStoppedProjects = projects.filter((p) => p.refill === 'stopped');
   const refillRunningCount = projects.filter((p) => p.refill === 'running').length;
-  // Блок объяснений под карточками: и пауза, и отмена — каждая своей фразой.
+  // Блок объяснений под карточками: паузы и отмена — каждая своей фразой.
   const refillExplainedProjects = projects.flatMap((p) =>
-    p.refill === 'paused' || p.refill === 'stopped' ? [{ id: p.id, name: p.name, state: p.refill }] : [],
+    p.refill === 'paused' || p.refill === 'spend_paused' || p.refill === 'stopped'
+      ? [{ id: p.id, name: p.name, state: p.refill }]
+      : [],
   );
   const projectsWord = (n: number) => `${n} project${n === 1 ? '' : 's'}`;
   // Хвост подписи про стоящие проекты — только ненулевые части.
   const stoppedSuffix = refillStoppedProjects.length > 0 ? ` · ${projectsWord(refillStoppedProjects.length)} stopped` : '';
+  // Паузы по потолку рядом с фразой паузы по ёмкости: у них своя правда.
+  const spendHeldSuffix =
+    refillSpendHeldCount > 0 ? ` · ${projectsWord(refillSpendHeldCount)} paused on our side` : '';
   // Проекты, которые автопилот не продвинул на последней сверке. Роут отдаёт
   // сюда только код причины и только по проектам без активных джоб, поэтому
   // здесь остаётся отобрать непустые — и сразу с СУЖЕННЫМ кодом, чтобы экран
@@ -891,17 +908,19 @@ export function EngDashboard() {
                     <RefillCountdown nextRunAt={autoRefill.next_run_at} />
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
                       next run 03:20 UTC · daily cap {autoRefill.daily_cap.toLocaleString('en-US')}
-                      {refillHeldProjects.length > 0 ? ` · ${projectsWord(refillHeldProjects.length)} on hold` : ''}
+                      {refillHeldCount > 0 ? ` · ${projectsWord(refillHeldCount)} on hold` : ''}
                       {stoppedSuffix}
                     </span>
                   </>
-                ) : refillHeldProjects.length > 0 ? (
+                ) : refillHeldCount > 0 ? (
                   <>
                     <span className="ds-mono text-base font-medium" style={{ color: 'var(--cp-amber)' }}>
                       on hold
                     </span>
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
-                      {HE_TEAM_ON_IT_SHORT_EN}
+                      {refillCapacityHeldCount > 0
+                        ? `${HE_TEAM_ON_IT_SHORT_EN}${spendHeldSuffix}`
+                        : ENG_REFILL_SPEND_PAUSED_SHORT_EN}
                       {stoppedSuffix}
                     </span>
                   </>
@@ -955,12 +974,13 @@ export function EngDashboard() {
           )}
 
           {/* Проект, которому остановили ночной добор: из-за нехватки места под
-              новые контакты (`paused`, клиенту причина не называется) или
-              отменой проекта (`stopped`) — у каждого своя фраза
-              (engRefillHoldText). Отдельный блок, а не строка в карточке:
-              карточка отвечает «когда следующая ночь», а здесь нужно сказать,
-              что произошло и кто это разберёт, — в 10 пикселей подписи это не
-              влезает, а недосказанность здесь и была ложью.
+              новые контакты (`paused`) или потолком расхода (`spend_paused`) —
+              клиенту причина не называется — или отменой проекта (`stopped`):
+              у каждого своя фраза (engRefillHoldText). Отдельный блок, а не
+              строка в карточке: карточка отвечает «когда следующая ночь», а
+              здесь нужно сказать, что произошло и кто это разберёт, — в 10
+              пикселей подписи это не влезает, а недосказанность здесь и была
+              ложью.
               Ссылки нет намеренно, в отличие от блока автопилота: в мастере
               проекта клиенту с этим делать нечего — паузу снимает сотрудник,
               и кнопки для клиента у неё нет и не должно быть (мутирующая
@@ -974,7 +994,7 @@ export function EngDashboard() {
                 <p
                   key={p.id}
                   className="text-xs m-0"
-                  style={{ color: p.state === 'paused' ? 'var(--cp-amber)' : 'var(--cp-paper-mute)' }}
+                  style={{ color: p.state === 'stopped' ? 'var(--cp-paper-mute)' : 'var(--cp-amber)' }}
                 >
                   <span className="font-semibold">{p.name}</span> — {engRefillHoldText(p.state)}
                 </p>

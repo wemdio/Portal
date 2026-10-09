@@ -29,7 +29,17 @@
  *    каждой вертикали свой запущенный шаблон и своя починка). Второй
  *    вызывающий — крон ДО покупки (`autoPipeline.ts`, шаг 3a--, стадия
  *    'refill_preflight'): письмо не прочиталось бы ни у одной строки при любых
- *    данных, поэтому сборка не покупается, а ночь записана 'failed' без базы.
+ *    данных, поэтому сборка не покупается, а ночь записана 'failed' без базы;
+ *  - 'spend_ceiling' — известный расход us-проекта по журналу достиг потолка
+ *    (spendCeiling.ts; ПО УМОЛЧАНИЮ ПОТОЛОК ВЫКЛЮЧЕН, и тогда этот вид не шлёт
+ *    никто). Следующая платная стадия не поставлена, проект на паузе — причина
+ *    'spend_ceiling' автопилота либо пауза ночного добора. Зовут
+ *    spendCeiling.enforceHeSpendCeiling (воркер: дочейн автопилота;
+ *    реконсилер; кнопки кабинета, в том числе старт исследования) и ночной тик
+ *    (`autoPipeline.ts`, шаг 3a-, и напоминание о стоящей паузе). Провайдера
+ *    нет — `provider: 'budget'`; окно молчания — 6 ч, как у ёмкости: потолок
+ *    проекта сам не опускается, и каждая следующая попытка постановки — та же
+ *    новость.
  *
  * ТОЛЬКО market='us'. RU-инструмент живёт со своими привычками и в это решение
  * не входит: строка с market='ru' (и любым другим известным рынком) молча
@@ -115,13 +125,14 @@
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 
 /** Что остановило проект. */
-export type HeOpsStopKind = 'billing' | 'configuration' | 'capacity_pause' | 'letters_held';
+export type HeOpsStopKind = 'billing' | 'configuration' | 'capacity_pause' | 'letters_held' | 'spend_ceiling';
 
 /**
  * Чей отказ: модель (LLM-провайдер), поиск (Serper), рассыльщик (Instantly);
- * 'letters' — не провайдер, а письма запущенного шаблона (вид 'letters_held').
+ * 'letters' — не провайдер, а письма запущенного шаблона (вид 'letters_held');
+ * 'budget' — не провайдер, а потолок расхода проекта (вид 'spend_ceiling').
  */
-export type HeOpsStopProvider = 'model' | 'search' | 'sending' | 'letters';
+export type HeOpsStopProvider = 'model' | 'search' | 'sending' | 'letters' | 'budget';
 
 export interface HeOpsStop {
   projectId: string;
@@ -149,9 +160,9 @@ export interface HeOpsStop {
   /** Шаблон, если отказ случился на его запуске. */
   templateId?: string | null;
   /**
-   * Только capacity_pause: поставил ли паузу именно этот вызов
-   * (`pauseHeAutoPipelineRefill` → true), или она уже стояла / не записалась
-   * (false). null/не задано — не применимо.
+   * Только capacity_pause и spend_ceiling: поставил ли паузу именно этот вызов
+   * (`pauseHeAutoPipelineRefill` / `recordHeAutopilotPause` → true), или она уже
+   * стояла / не записалась (false). null/не задано — не применимо.
    */
   pauseRecorded?: boolean | null;
   /**
@@ -171,12 +182,14 @@ export const HE_OPS_STAGE_TEMPLATE_LAUNCH = 'template_launch';
 
 /** Окно молчания по проекту, виду и провайдеру для 'billing' / 'configuration' (см. шапку). */
 export const HE_OPS_TEAM_FIX_REPEAT_MS = 60 * 60 * 1000;
-/** То же окно для 'capacity_pause' (см. шапку). */
+/** То же окно для 'capacity_pause', 'letters_held' и 'spend_ceiling' (см. шапку). */
 export const HE_OPS_CAPACITY_REPEAT_MS = 6 * 60 * 60 * 1000;
 
 /** Окно молчания по проекту, виду отказа и провайдеру — по виду отказа. */
 export function heOpsRepeatWindowMs(kind: HeOpsStopKind): number {
-  return kind === 'capacity_pause' || kind === 'letters_held' ? HE_OPS_CAPACITY_REPEAT_MS : HE_OPS_TEAM_FIX_REPEAT_MS;
+  return kind === 'capacity_pause' || kind === 'letters_held' || kind === 'spend_ceiling'
+    ? HE_OPS_CAPACITY_REPEAT_MS
+    : HE_OPS_TEAM_FIX_REPEAT_MS;
 }
 
 /** Окно, в котором отказы одного провайдера по разным проектам сворачиваются в одно сообщение. */
@@ -199,6 +212,7 @@ const KIND_LABEL: Record<HeOpsStopKind, string> = {
   // паузы нет; про паузу говорят совет (actionFor) и строка «пауза».
   capacity_pause: 'нет места под контакты у рассыльщика',
   letters_held: 'письмо запущенной кампании прочиталось бы неверно у всех строк ночи',
+  spend_ceiling: 'известный расход проекта достиг потолка — следующая платная стадия не поставлена',
 };
 
 const PROVIDER_LABEL: Record<HeOpsStopProvider, string> = {
@@ -206,6 +220,7 @@ const PROVIDER_LABEL: Record<HeOpsStopProvider, string> = {
   search: 'Serper (поиск)',
   sending: 'Instantly (рассыльщик)',
   letters: 'письма шаблона (не провайдер)',
+  budget: 'потолок расхода ENG (не провайдер)',
 };
 
 /**
@@ -213,7 +228,8 @@ const PROVIDER_LABEL: Record<HeOpsStopProvider, string> = {
  * идёт, не уходят только письма.
  */
 function subjectHead(kind: HeOpsStopKind): string {
-  return kind === 'letters_held' ? 'ночной добор вертикали не отправил ничего' : 'клиентский проект остановлен';
+  if (kind === 'letters_held') return 'ночной добор вертикали не отправил ничего';
+  return kind === 'spend_ceiling' ? 'клиентский проект на паузе' : 'клиентский проект остановлен';
 }
 
 /** Что сделать команде — по виду отказа, провайдеру и (для ёмкости) месту отказа. */
@@ -224,6 +240,19 @@ function actionFor(kind: HeOpsStopKind, provider: HeOpsStopProvider, stage?: str
         ? 'пока ничего не сделано, ночной добор вертикали пропускается: сборка не покупается и письма не уходят'
         : 'пока ничего не сделано, ночи вертикали покупают сборку и не отправляют ни одного письма';
     return `разобрать письма запущенного шаблона вертикали (причина выше): пересобрать шаблон и запустить его — ночной добор доливает в последнюю запущенную кампанию вертикали — либо выключить ночной добор проекта (he_auto_pipeline_configs.enabled); ${meanwhile}`;
+  }
+  if (kind === 'spend_ceiling') {
+    // Что именно — по месту остановки: у ночного добора своя пауза и своя кнопка.
+    const resume =
+      stage === 'refill_preflight' || stage === 'refill_paused'
+        ? 'снять паузу ночного добора: Движок вертикалей → карточка проекта → возобновить ночной добор'
+        : 'проект продолжает «Start outreach» клиента (или ночной проход при HE_AUTOPILOT_RECONCILE), '
+          + 'не запущенное исследование — «Re-run research», по шагу — staff-инструмент';
+    return 'проверить расход (GET /api/tools/hypothesis-engine/projects/<id>/cost); продолжить — поднять '
+      + 'HE_US_PROJECT_SPEND_CAP_USD (потолок проекта) или дождаться, пока расход проекта за последние 24 часа '
+      + `опустится ниже HE_US_PROJECT_DAY_SPEND_CAP_USD (окно скользящее, не календарные сутки), затем ${resume}; `
+      + 'иначе следующая постановка снова встанет. '
+      + 'Идущая стадия, начатое исследование (вся цепочка) и уже поставленные джобы доработают — потолок их не обрывает';
   }
   if (kind === 'capacity_pause') {
     if (stage === HE_OPS_STAGE_TEMPLATE_LAUNCH) {
@@ -316,7 +345,7 @@ function sendSingle(stop: HeOpsStop, held: HeOpsHeld): Promise<void> {
       'вертикаль': stop.verticalId ?? null,
       'шаблон': stop.templateId ?? null,
       'пауза':
-        stop.kind === 'capacity_pause' && typeof stop.pauseRecorded === 'boolean'
+        (stop.kind === 'capacity_pause' || stop.kind === 'spend_ceiling') && typeof stop.pauseRecorded === 'boolean'
           ? stop.pauseRecorded
             ? 'поставлена этим отказом'
             : 'не записана этим вызовом (уже стояла, нет конфига или колонок)'

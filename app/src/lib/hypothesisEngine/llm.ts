@@ -30,11 +30,25 @@
  * выглядело для сторожа зависанием, прерывание считалось бесплатным, и самый
  * дорогой вызов проекта оплачивался заново. Второго механизма живости не
  * заводим: канал один, сток один (watchdog.touch()).
+ *
+ * Журнал расхода ENG (P-A-provider-usage-journal, costTelemetry.ts): каждое
+ * HTTP-обращение к роутеру (rawCall, включая транспортные повторы) даёт строку
+ * application_logs 'he_provider_usage' — только когда журнал открыт, то есть
+ * у проектов market='us': джобы воркера и запуск шаблона (классификатор
+ * сегментов; роуты запуска клиента и staff). RU-джобы, остальные роуты и CLI
+ * журнала не имеют: крючок там — немедленный выход. Запись фоновая и не
+ * бросает: платный вызов её не ждёт, и её сбой стадию не роняет.
  */
 
 import { z } from 'zod';
 
 import { isHeProviderBillingError, isHeProviderConfigurationError } from './clientErrors';
+import {
+  heProviderJournalActive,
+  noteHeProviderCall,
+  type HeProviderCallOutcome,
+  type HeRequestyCall,
+} from './costTelemetry';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -95,6 +109,10 @@ const unpricedLogged = new Set<string>();
  * выражается, а llm_model пишется лишь у части артефактов (chain/template/
  * dossier), у джобы gate/bulk — нет. Поэтому лог — единственный канал, и
  * молчать в нём нельзя: иначе отчёт о себестоимости занижается тихо.
+ * Исключение — проекты ENG (market='us') под журналом расхода (джобы воркера,
+ * запуск шаблона): там тот же пробел виден и в журнале строкой с
+ * price_known=false (journalRequestyCall ниже), и отчёт по журналу
+ * (costReport.ts) не называет такой итог полным.
  */
 function noteUnpriced(model: string, reason: string, detail: string): void {
   const key = `${model}|${reason}`;
@@ -155,9 +173,83 @@ function costOfCall(
     }
     return reportedCostUsd;
   }
-  if (p) return ((promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out) * REQUESTY_MARKUP;
+  if (p) return tableCostOfCall(p, promptTokens, completionTokens);
   noteUnpriced(model, 'missing', 'и роутер не вернул usage.cost — расход этого вызова НЕ попал в cost_usd, допишите ставку в hypothesisEngine/llm.ts');
   return 0;
+}
+
+/** Оценка по ставке таблицы с наценкой роутера — одна формула для he_jobs и журнала. */
+function tableCostOfCall(p: ModelPrices, promptTokens: number, completionTokens: number): number {
+  return ((promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out) * REQUESTY_MARKUP;
+}
+
+/**
+ * Строка журнала расхода ENG на ОДНО HTTP-обращение к роутеру
+ * (costTelemetry.ts). Журнал открыт только у проектов market='us': в воркере
+ * вокруг стадии и в роутах запуска шаблона вокруг ядра запуска (классификатор
+ * сегментов). Вне его (RU-проект, другие роуты, CLI) — немедленный выход,
+ * ничего не считается и не пишется. Ничего не ждёт.
+ *
+ * НИКОГДА НЕ БРОСАЕТ — по построению, а не по разбору: всё тело под
+ * try/catch. Зовётся изнутри try в rawCall, и бросок отсюда после оплаченного
+ * 200 ушёл бы в его catch — оплаченный ответ стал бы транспортным отказом и
+ * повтором за деньги, а после 4xx/5xx перекрасил бы класс отказа. Сбой журнала
+ * стоит одной строки журнала, не вызова.
+ *
+ * Цена — по тому же правилу, что costOfCall (счёт роутера → ставка таблицы),
+ * но «не знаем» здесь — null, а не 0: у he_jobs.cost_usd ноль вынужденный
+ * (numeric not null, туда прибавляют), у журнала — нет. По таблице цена
+ * считается, только если в usage есть число prompt_tokens или
+ * completion_tokens: ответ без блока usage или с одним total_tokens — без цены
+ * (0 токенов × ставка дали бы ложный «известный ноль»).
+ */
+function journalRequestyCall(
+  model: string,
+  outcome: HeProviderCallOutcome,
+  httpStatus: number | undefined,
+  response?: RequestyResponse,
+): void {
+  try {
+    if (!heProviderJournalActive()) return;
+    let usage: HeRequestyCall['usage'];
+    let costUsd: number | null = null;
+    let costSource: HeRequestyCall['costSource'] = null;
+    const raw = response?.usage;
+    if (raw && typeof raw === 'object') {
+      const finite = (n: unknown) => typeof n === 'number' && Number.isFinite(n);
+      const counted = [raw.prompt_tokens, raw.completion_tokens, raw.total_tokens].some(finite);
+      // Ставке таблицы нужны токены входа или выхода; одного total_tokens мало.
+      const priceable = [raw.prompt_tokens, raw.completion_tokens].some(finite);
+      const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response!);
+      if (counted) usage = { tokensIn: promptTokens, tokensOut: completionTokens, tokensTotal: tokensUsed };
+      const p = lookupPrices(model);
+      if (reportedCostUsd !== undefined) {
+        costUsd = reportedCostUsd;
+        costSource = 'router';
+      } else if (priceable && p) {
+        costUsd = tableCostOfCall(p, promptTokens, completionTokens);
+        costSource = 'table';
+      }
+    }
+    noteHeProviderCall({
+      provider: 'requesty',
+      model,
+      outcome,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(usage ? { usage } : {}),
+      costUsd,
+      costSource,
+    });
+  } catch {
+    // Разбор usage сорвался — строка обращения всё равно ложится, но без
+    // токенов и цены (отчёт назовёт итог нижней границей, а не полным). Не
+    // легла и она — молча: исход вызова решает только ответ провайдера.
+    try {
+      noteHeProviderCall({ provider: 'requesty', model, outcome, costUsd: null, costSource: null });
+    } catch {
+      // см. выше
+    }
+  }
 }
 
 /* ─────────────────────── Роли моделей ─────────────────────── */
@@ -768,6 +860,8 @@ async function rawCall(
     // Отсчёт от отправки ЭТОЙ попытки (пауза бэкоффа сюда не входит): по нему
     // retryWaitMs отличает отказ «на входе» от отказа после генерации.
     const sentAt = Date.now();
+    // Код ответа этой попытки — для строки журнала расхода (journalRequestyCall).
+    let httpStatus: number | undefined;
     try {
       // Признак жизни ДО запроса и сразу ПОСЛЕ ответа: между ними идёт самое
       // длинное законное молчание движка — генерация ответа моделью. Отметка на
@@ -780,6 +874,7 @@ async function rawCall(
         body,
         signal,
       });
+      httpStatus = res.status;
       noteLlmActivity();
       if (res.ok) {
         // Конверт проверяем, и у каждого его изъяна СВОЙ класс. Раньше оба
@@ -810,6 +905,9 @@ async function rawCall(
           );
         }
         const response = parsed as RequestyResponse;
+        // Ответ принят — строка журнала с токенами и ценой (до решения
+        // вызывающего о годности ответа: оплачен он в любом случае).
+        journalRequestyCall(model, 'ok', httpStatus, response);
         return { text: response.choices?.[0]?.message?.content ?? '', response };
       }
       const text = await res.text();
@@ -825,7 +923,11 @@ async function rawCall(
           ? retryAfterMs(res.headers.get('retry-after'))
           : undefined,
       );
+      journalRequestyCall(model, 'failed', httpStatus);
     } catch (err) {
+      // Пригодного ответа нет: отмена, свой срок, обрыв, тело 200 не
+      // дочиталось или не конверт чата — исполнен ли запрос, неизвестно.
+      journalRequestyCall(model, 'aborted', httpStatus);
       throwIfInterrupted(signal, err);
       // Уже классифицированный отказ (конверт 200 выше) сохраняем как есть:
       // иначе класс снова назначал бы catch-all, и «тот же запрос ответит тем

@@ -42,6 +42,9 @@ import { heClientFailureFor, type HeClientErrorCode, type HeClientFailure } from
 
 export {
   HE_CLIENT_ERROR_CODES,
+  // Фраза паузы по потолку расхода — для отказа 409 клиентских роутов
+  // (spendCeiling.ts); тот же текст печатает карточка паузы автопилота.
+  HE_SPEND_PAUSED_EN,
   formatHeClientFailure,
   heClientFailureFor,
   type HeClientErrorCode,

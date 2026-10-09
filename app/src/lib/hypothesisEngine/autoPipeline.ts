@@ -16,8 +16,9 @@
  *      verticals_per_run у проекта может набраться вдвое;
  *   1-. ПАУЗА ДОБОРА: he_auto_pipeline_configs.refill_paused_at (миграция
  *      20260930_0005). Стоит — проект пропускается ЦЕЛИКОМ, до любых чтений и
- *      любых запросов к рассыльщику. Пишут её ёмкость рассыльщика и отмена
- *      клиентом (кнопка Cancel кабинета), снимает только человек кнопкой в
+ *      любых запросов к рассыльщику. Пишут её ёмкость рассыльщика, отмена
+ *      клиентом (кнопка Cancel кабинета) и потолок расхода (шаг 3a-; по
+ *      умолчанию выключен), снимает только человек кнопкой в
  *      staff-инструменте; подробности — в блоке «ПАУЗА ПО ЁМКОСТИ» ниже;
  *   2. вертикали проекта по created_at (стабильный порядок добора);
  *   3. вертикаль eligible, когда у неё есть шаблон с launch_info.campaign_id
@@ -62,6 +63,21 @@
  *      поставлена: застрявшая в сборке ('existing') или не поставленная
  *      вертикаль уступает ночь следующей очереди, а затем и вертикалям без
  *      очереди. Подробности — у readCarryoverByVertical и в цикле вертикалей;
+ *   3a-. ПОТОЛОК РАСХОДА ПРОЕКТА (spendCeiling.ts; ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН):
+ *      один раз за обход проекта, перед первой вертикалью, которой ночь
+ *      действительно покупалась бы (после сухой, писем и переноса, до
+ *      предполёта). Известный расход проекта по журналу достиг
+ *      HE_US_PROJECT_SPEND_CAP_USD (за всё время) или суточного
+ *      HE_US_PROJECT_DAY_SPEND_CAP_USD (за скользящие последние 24 часа до
+ *      тика — как правило, в них и сборка, купленная прошлой ночью) — сборка не ставится ни
+ *      одной вертикали проекта, записывается та же durable-пауза добора (шаг
+ *      1-, причина buildHeSpendCeilingPauseReason) и уходит алерт команде (вид
+ *      'spend_ceiling'). Снимает её сотрудник той же staff-кнопкой; порог не
+ *      поднят (а суточный — расход за последние 24 часа всё ещё не ниже него) —
+ *      следующая ночь поставит паузу снова. Расход неизвестен (сбой чтения
+ *      журнала, срок проверки, неполное чтение ниже порога — последнее только
+ *      без миграции 20261009_0001) — ночь покупается как без потолка
+ *      (fail-open), причина едет в строку ночного лога;
  *   3a. ПРЕДПОЛЁТ ЁМКОСТИ: сколько контактов ещё принимает воркспейс
  *      рассыльщика. Ноль — сборка НЕ ставится (и остальные вертикали проекта
  *      тоже: воркспейс у них общий), потому что платит сборка, а не долив:
@@ -148,6 +164,16 @@ import { buildLaunchSequence, parseLaunchInfo } from './launchHandoff';
 // это правда только потому, что пауза сообщает о себе здесь и в доливе
 // (stages/baseCollectRefill.ts). Модуль лёгкий: тянет только workerAlert.
 import { flushHeOpsAlerts, notifyHeClientStop } from './opsAlert';
+// Потолок расхода us-проекта (P-A-project-spend-ceiling). ПО УМОЛЧАНИЮ
+// ВЫКЛЮЧЕН: без HE_US_PROJECT_SPEND_CAP_USD / HE_US_PROJECT_DAY_SPEND_CAP_USD
+// проверка перед покупкой ночи не делает ни одного запроса.
+import {
+  alertHeSpendCeiling,
+  buildHeSpendCeilingPauseReason,
+  checkHeSpendCeiling,
+  isHeSpendCeilingPauseReason,
+  readHeSpendCaps,
+} from './spendCeiling';
 // Гейт писем — чистый модуль без импортов значений: в бандл крона добавляется
 // только он сам, без стадии сборки.
 import {
@@ -405,6 +431,16 @@ export function heVerticalDryStopEnabled(env: NodeJS.ProcessEnv = process.env): 
  * провайдером только по отмене — паузу по ёмкости там проверяет сам
  * appendLeadsToClientCampaign своим предполётом ёмкости, и остановка по ней
  * отняла бы письма у уже оплаченной сборки, если место освободилось.
+ *
+ * ТРЕТИЙ ПОВОД — ПОТОЛОК РАСХОДА (шаг 3a- в шапке; spendCeiling.ts, ПО
+ * УМОЛЧАНИЮ ВЫКЛЮЧЕН). Та же колонка, та же staff-кнопка снятия; признак —
+ * начало причины (isHeSpendCeilingPauseReason). Ночное напоминание о стоящей
+ * паузе уходит видом 'spend_ceiling', а не «нет места у рассыльщика».
+ * Долив уже купленной сборки эта пауза НЕ останавливает (как и пауза по
+ * ёмкости): потолок не обрывает оплаченную работу, он только не покупает
+ * следующую ночь. Кабинет видит её состоянием 'spend_paused' (своя фраза,
+ * engText.ts, со словами «команда уведомлена»), и она правдива, потому что
+ * запись паузы и каждая ночь под ней шлют алерт.
  */
 
 /**
@@ -1541,8 +1577,8 @@ async function passConfig(
 
   // ─── ПАУЗА ДОБОРА (раньше всех решений: до чтения вертикалей и
   //     шаблонов, до бюджета, до рассыльщика, до денег) ───
-  // Повода два — ёмкость рассыльщика и отмена клиентом (блок «ПАУЗА ПО
-  // ЁМКОСТИ», «ВТОРОЙ ПОВОД ТОЙ ЖЕ ПАУЗЫ»), решение по ним одно.
+  // Повода три — ёмкость рассыльщика, отмена клиентом и потолок расхода (блок
+  // «ПАУЗА ПО ЁМКОСТИ», «ВТОРОЙ ПОВОД», «ТРЕТИЙ ПОВОД»), решение по ним одно.
   // Решение принято раньше и записано в конфиге; перепроверять его
   // сегодняшним запросом к рассыльщику нельзя — ровно этот «автоматический
   // пересмотр» и превратил бы паузу обратно в пропуск одной ночи. Снимает её
@@ -1567,13 +1603,16 @@ async function passConfig(
     // напоминания нет: это не «нет места у рассыльщика», и чинить команде
     // нечего — сотрудник видит её причину в карточке проекта.
     if (!isHeClientCancelPauseReason(config.refill_pause_reason)) {
+      // Пауза потолка расхода напоминает о себе своим видом: «освободить место
+      // у рассыльщика» про неё было бы неверным советом команде.
+      const spendPause = isHeSpendCeilingPauseReason(config.refill_pause_reason);
       await notifyHeClientStop({
         projectId: config.project_id,
         // Тик берёт только market='us' (runHeAutoPipelineTick).
         market: 'us',
         stage: 'refill_paused',
-        kind: 'capacity_pause',
-        provider: 'sending',
+        kind: spendPause ? 'spend_ceiling' : 'capacity_pause',
+        provider: spendPause ? 'budget' : 'sending',
         reason:
           `пауза стоит с ${config.refill_paused_at}` +
           (config.refill_pause_reason ? `; ${config.refill_pause_reason}` : ''),
@@ -1610,6 +1649,13 @@ async function passConfig(
   const dryLimit = Math.max(1, config.dry_nights_limit ?? HE_AUTO_DEFAULT_DRY_NIGHTS_LIMIT);
   const dateTag = now.toISOString().slice(0, 10);
   let enqueued = 0;
+  // Потолок расхода (шаг 3a-): проверяется один раз за обход, при первой
+  // вертикали, которой ночь действительно покупалась бы. Между постановками
+  // одного обхода расход не меняется — платит воркер, а он их ещё не взял.
+  const spendCaps = readHeSpendCaps();
+  let spendChecked = false;
+  /** «Расход неизвестен — купили как без потолка»: строка ночного лога. */
+  let spendNote: string | null = null;
 
   // Снятие пометок выключенного правила сухой вертикали стоит ВЫШЕ, до
   // проверки паузы: иначе под паузой оно не выполнялось бы ни разу (см. там же
@@ -1811,6 +1857,57 @@ async function passConfig(
       continue;
     }
 
+    // ─── ПОТОЛОК РАСХОДА ПРОЕКТА (шаг 3a- в шапке; до предполёта: запрос к
+    //     рассыльщику проекту, которому ночь всё равно не покупаем, незачем) ───
+    // ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда checkHeSpendCeiling отвечает 'off' без
+    // единого запроса. 'unknown' (журнал не прочитан, срок, неполное чтение
+    // ниже порога) — покупаем как раньше (fail-open), причина — в строку лога.
+    if (!spendChecked) {
+      spendChecked = true;
+      const spend = await checkHeSpendCeiling(supabase, {
+        projectId: config.project_id,
+        // Тик берёт только market='us' (runHeAutoPipelineTick).
+        market: 'us',
+        caps: spendCaps,
+        now,
+      });
+      if (spend.verdict.kind === 'over') {
+        // Пауза — ДО алерта и без строки he_auto_pipeline_runs: та же причина,
+        // что у паузы в начале обхода (в status нет «решили не собирать», а
+        // 'failed' выдал бы намеренную остановку за сбой).
+        const paused = await pauseHeAutoPipelineRefill(
+          supabase,
+          config.project_id,
+          buildHeSpendCeilingPauseReason(spend),
+          { now },
+        );
+        // Ждём, а не `void`: крон одноразовый (ожидание ограничено в opsAlert).
+        await alertHeSpendCeiling({
+          projectId: config.project_id,
+          check: spend,
+          stage: 'refill_preflight',
+          path: 'nightly_refill',
+          verticalId: vertical.id,
+          pauseRecorded: paused,
+          clientSees: 'состояние ночного добора «spend_paused»: «The daily refill for this project is on hold…»',
+        });
+        summary.paused += 1;
+        detail({
+          verticalId: vertical.id,
+          status: 'paused',
+          ...dryNightsDetail,
+          message:
+            `spend ceiling reached (${spend.verdict.cap}: $${spend.verdict.spendUsd.toFixed(2)} ≥ ` +
+            `$${spend.verdict.capUsd.toFixed(2)}) — no collection bought, refill pause ` +
+            (paused ? 'recorded' : 'NOT recorded (already paused, no config or no columns)'),
+        });
+        break;
+      }
+      if (spend.verdict.kind === 'unknown') {
+        spendNote = `spend ceiling unknown (${spend.failure ?? spend.verdict.cap}) — bought without it`;
+      }
+    }
+
     // ─── ПРЕДПОЛЁТ ЁМКОСТИ ВОРКСПЕЙСА (до постановки, до денег) ───
     // Платит СБОРКА: краул сайтов и SMTP-проба каждого адреса уходят задолго до
     // долива, и раньше «нет места у рассыльщика» обнаруживалось только на
@@ -1982,7 +2079,14 @@ async function passConfig(
       // действительно отработал (а не молча деградировал в «не знаем»): для
       // первой ночи под присмотром это единственный способ отличить одно от
       // другого, не заходя в рассыльщик.
-      ...(remainingCapacity === null ? {} : { message: `workspace capacity ${remainingCapacity}` }),
+      ...(remainingCapacity === null && spendNote === null
+        ? {}
+        : {
+            message: [
+              remainingCapacity === null ? null : `workspace capacity ${remainingCapacity}`,
+              spendNote,
+            ].filter(Boolean).join('; '),
+          }),
     });
   }
 

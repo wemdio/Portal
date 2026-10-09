@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { logAudit } from '@/lib/loggerServer';
+import { logAudit, logWarn } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeBase, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
@@ -11,6 +11,8 @@ import {
   HE_JOB_CLIENT_COLUMNS,
   toClientEngJobRow,
 } from '@/lib/hypothesisEngine/clientEngProjection';
+import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
+import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -139,6 +141,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     if (!budgetAllowed) return jsonError(LETTERS_EXHAUSTED, 409);
+
+    // Потолок расхода us-проекта (lib/hypothesisEngine/spendCeiling.ts; ПО
+    // УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда ни одного запроса). Достигнут — платный шаг не
+    // ставим: пауза 'spend_ceiling' на проекте и алерт команде уже сделаны в
+    // enforceHeSpendCeiling, клиент читает ту же фразу, что и карточка паузы.
+    // Неизвестный расход — ставим как без потолка (fail-open).
+    const spend = await enforceHeSpendCeiling(supabaseAdmin, {
+      projectId: owned.base.project_id as string,
+      market: owned.project.market ?? null,
+      stage: 'template',
+      path: 'client_button',
+      baseId: id,
+      warn: (msg) => void logWarn('client.eng.template.spend_unknown', msg, { userId: result.auth.userId, baseId: id }),
+    });
+    if (!spend.allowed) return jsonError(HE_SPEND_PAUSED_EN, 409);
 
     // `.select()` без аргументов вернул бы строку he_jobs целиком, вместе с
     // tokens_used/cost_usd и сырым текстом error: обе ветки роута отдают

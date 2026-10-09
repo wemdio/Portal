@@ -129,8 +129,10 @@ export const HE_REFILL_RUN_KEPT_EN = 'Contacts already in your campaigns stay th
  * opsAlert.ts (`notifyHeClientStop`). Его зовут: воркер
  * (worker/hypothesisEngine.ts, writeJobFailure) на КАЖДОМ отказе, который
  * кабинет свернёт в 'billing'/'configuration' (тот же предикат,
- * clientErrors.heTeamFixableFailureOf), и оба места, где пишется пауза по
- * ёмкости (stages/baseCollectRefill.ts, autoPipeline.ts). Убрали алерт или
+ * clientErrors.heTeamFixableFailureOf), оба места, где пишется пауза по
+ * ёмкости (stages/baseCollectRefill.ts, autoPipeline.ts), и пауза ночного
+ * добора по потолку расхода (autoPipeline.ts, шаг 3a-, вид 'spend_ceiling'; по
+ * умолчанию потолок выключен, и такой паузы не бывает). Убрали алерт или
  * любой из вызовов — убирайте и эту фразу, иначе кабинет врёт. Алерт
  * best-effort: без TELEGRAM_HEALTH_BOT_TOKEN / TELEGRAM_HEALTH_CHAT_ID в
  * контейнере движка он молчит — их наличие в предрелизной проверке. Не
@@ -155,6 +157,31 @@ export const HE_TEAM_ON_IT_SHORT_EN = 'temporary problem on our side, we are wor
  * кабинет не знает.
  */
 export const HE_REFILL_HOLD_LIFT_EN = 'Only our team can lift the hold — it does not resume on a timer.';
+
+/**
+ * Проект на паузе по ПОТОЛКУ РАСХОДА (lib/hypothesisEngine/spendCeiling.ts; по
+ * умолчанию потолок выключен, и эту фразу не видит никто). ОДНА фраза на два
+ * места: карточка паузы автопилота (`engAutopilotHoldText('spend_paused')`) и
+ * отказ 409 кнопок кабинета, которые ставят платный шаг (письма, сборка,
+ * шаблон, «Re-run research»), — чтобы они не могли разойтись.
+ *
+ * Каждое предложение — правда при каждом пути, который её показывает:
+ *  - «paused on our side, so no new step was started» — потолок только НЕ
+ *    СТАВИТ следующий шаг; идущий доработает, но карточка паузы рисуется
+ *    только без активных шагов, а 409 отвечает именно на непоставленный;
+ *  - «Our team has been notified» — паузу пишет и отказ отдаёт только
+ *    spendCeiling.enforceHeSpendCeiling, и он же в том же вызове шлёт алерт
+ *    (opsAlert, вид 'spend_ceiling'); без него фразу писать нельзя;
+ *  - «continues when they resume it» — сам проект не продолжится: ни таймера,
+ *    ни автоснятия у паузы нет (суточный порог отпускает время — когда расход
+ *    проекта за скользящие последние 24 часа опустится ниже него, — но
+ *    пропущенный шаг и тогда никто не ставит сам). Срока не называем;
+ *  - «Everything already done on it is kept» — потолок ничего не отменяет и
+ *    не удаляет. Причину (деньги, лимит) не называем — решение владельца
+ *    04.10.2026, как у HE_TEAM_ON_IT_EN.
+ */
+export const HE_SPEND_PAUSED_EN =
+  'Work on this project is paused on our side, so no new step was started. Our team has been notified, and the project continues when they resume it. Everything already done on it is kept.';
 
 /**
  * Что делать клиенту на шаге, который остановил отказ, чинимый командой
