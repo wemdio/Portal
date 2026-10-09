@@ -166,6 +166,10 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   stopped: { label: 'Остановлена', cls: 'bg-gray-100 text-gray-600' },
   running: { label: 'Запущена', cls: 'bg-emerald-100 text-emerald-700' },
   stopping: { label: 'Останавливается...', cls: 'bg-amber-100 text-amber-700 animate-pulse' },
+  // «Запускается» — задача создана, но воркер ещё не взял её в работу: между
+  // нажатием и первым сообщением проходит до минуты, и всё это время кампания
+  // не «запущена». Раньше шапка врала, что уже идёт.
+  starting: { label: 'Запускается...', cls: 'bg-emerald-50 text-emerald-700 animate-pulse' },
   paused: { label: 'Пауза', cls: 'bg-amber-100 text-amber-700' },
   error: { label: 'Ошибка', cls: 'bg-rose-100 text-rose-700' },
   // Прогрев — самостоятельное состояние, а не разновидность «остановлена»:
@@ -177,11 +181,30 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
 function statusDotClass(status: string): string {
   switch (status) {
     case 'running': return 'bg-emerald-400';
+    case 'starting': return 'bg-emerald-300 animate-pulse';
+    case 'stopping': return 'bg-amber-400 animate-pulse';
+    case 'paused': return 'bg-amber-400';
     case 'warming': return 'bg-blue-400';
     case 'error': return 'bg-rose-400';
     default: return 'bg-gray-400';
   }
 }
+
+/** Как часто шапка кампании перечитывает состояние с сервера. */
+const PHASE_POLL_MS = 4000;
+/** Сколько ждём окончания остановки, прежде чем сказать, что запуск не вышел. */
+const AUTO_START_WAIT_MS = 5 * 60_000;
+
+/** Ответ /campaigns/:id/status — состояние с учётом незавершённых задач. */
+type CampaignPhase = {
+  status: string;
+  /** running | starting | stopping | paused | stopped | error */
+  phase: string;
+  has_active_start: boolean;
+  has_active_stop: boolean;
+  can_start: boolean;
+  is_running: boolean;
+};
 
 const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   none: { label: '—', cls: 'text-gray-400' },
@@ -7043,42 +7066,128 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   onDelete: (id: string) => void;
 }) {
   const [tab, setTab] = useState<string>('dashboard');
-  const [actionLoading, setActionLoading] = useState(false);
-  const [stopping, setStopping] = useState(false);
+  const [actionLoading, setActionLoading] = useState<'start' | 'stop' | null>(null);
+  /** Текст ошибки последнего действия. Раньше ответ ручки не читали вовсе. */
+  const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * Состояние кампании с сервера: статус базы плюс незавершённые задачи
+   * (`/status`). Именно оно рисует шапку — статус в списке кампаний меняется
+   * позже, чем кампания реально останавливается или стартует.
+   */
+  const [phase, setPhase] = useState<string | null>(null);
+  /**
+   * Запуск, который ждёт окончания остановки. Пока старая start-задача висит
+   * в работе, новую создать нельзя (уникальный индекс), поэтому страница ждёт
+   * сама и повторяет — вместо оператора, который раньше жал пять раз подряд.
+   */
+  const [pendingStart, setPendingStart] = useState(false);
   /** Раскрыто ли пояснение к восклицательному знаку у статуса. */
   const [warmingHint, setWarmingHint] = useState(false);
-  const stoppingRef = useRef(false);
-
-  useEffect(() => {
-    if (!stopping) return;
-    const poll = setInterval(async () => {
-      try {
-        const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/status`);
-        if (!res.ok) return;
-        const body = await res.json() as { status: string; is_running: boolean };
-        if (!body.is_running || body.status === 'stopped') {
-          setStopping(false);
-          stoppingRef.current = false;
-          onUpdate();
-        }
-      } catch { /* ignore */ }
-    }, 3000);
-    return () => clearInterval(poll);
-  }, [stopping, campaign.id, onUpdate]);
+  /** Докуда ждём автозапуска: дальше честно говорим, что не вышло. */
+  const pendingStartUntil = useRef(0);
+  /** Последнее состояние, по которому обновляли список кампаний. */
+  const lastPhase = useRef<string | null>(null);
+  /** Запуск идёт прямо сейчас — чтобы опрос не дёрнул второй. */
+  const startingRef = useRef(false);
+  // onUpdate приходит новой функцией на каждый рендер родителя: держим её в
+  // ref, чтобы опрос не пересоздавался по кругу вместе с интервалом.
+  const onUpdateRef = useRef(onUpdate);
+  useEffect(() => { onUpdateRef.current = onUpdate; }, [onUpdate]);
 
   // Кнопка Refetch убрана с карточки кампании: ручную перезагрузку пустых
   // диалогов оператор не использует. Ручка /campaigns/:id/refetch на бэкенде
   // осталась — её дёргают точечно, минуя интерфейс.
-  const doAction = async (action: 'start' | 'stop') => {
-    setActionLoading(true);
-    await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
-    if (action === 'stop') {
-      setStopping(true);
-      stoppingRef.current = true;
+
+  /** Запрос действия. Возвращает текст ошибки или null, если всё хорошо. */
+  const callAction = useCallback(async (action: 'start' | 'stop'): Promise<{ error: string | null; code?: string }> => {
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
+      if (res.ok) return { error: null };
+      const body = await res.json().catch(() => null) as { error?: string; code?: string } | null;
+      return { error: body?.error || `Ошибка ${res.status}`, code: body?.code };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : 'Сеть недоступна' };
     }
-    setActionLoading(false);
+  }, [campaign.id]);
+
+  /** Перечитать состояние с сервера. */
+  const loadPhase = useCallback(async (): Promise<CampaignPhase | null> => {
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/status`);
+      if (!res.ok) return null;
+      return await res.json() as CampaignPhase;
+    } catch {
+      return null;
+    }
+  }, [campaign.id]);
+
+  const doAction = async (action: 'start' | 'stop') => {
+    setActionLoading(action);
+    setActionError(null);
+    const { error, code } = await callAction(action);
+    if (error && code === 'stopping' && action === 'start') {
+      // Не ошибка оператора: кампания ещё сворачивается. Ждём и запускаем сами.
+      setPendingStart(true);
+      pendingStartUntil.current = Date.now() + AUTO_START_WAIT_MS;
+    } else if (error && code === 'stopping') {
+      // Остановка уже идёт — это и покажет шапка, ругаться не на что.
+    } else if (error) {
+      setActionError(error);
+    }
+    const fresh = await loadPhase();
+    if (fresh) setPhase(fresh.phase);
+    setActionLoading(null);
     onUpdate();
   };
+
+  /**
+   * Опрос состояния, пока вкладка открыта и видима.
+   *
+   * Нужен ровно потому, что остановка и запуск не мгновенны: ручка кладёт
+   * задачу, воркер подхватывает её в течение минуты, круг сворачивается ещё
+   * минуты. Без опроса шапка показывала состояние на момент последнего клика,
+   * а список кампаний слева — тем более.
+   */
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const tick = async () => {
+      if (document.visibilityState === 'hidden') return;
+      const fresh = await loadPhase();
+      if (!active || !fresh) return;
+      setPhase(fresh.phase);
+      // Список кампаний перечитываем только когда состояние реально сменилось:
+      // иначе каждые несколько секунд перерисовывалась бы вся страница.
+      if (lastPhase.current !== null && lastPhase.current !== fresh.phase) onUpdateRef.current();
+      lastPhase.current = fresh.phase;
+
+      if (!pendingStart) return;
+      if (fresh.can_start && !startingRef.current) {
+        startingRef.current = true;
+        const { error, code } = await callAction('start');
+        startingRef.current = false;
+        if (!active) return;
+        if (!error) {
+          setPendingStart(false);
+          setActionError(null);
+          onUpdateRef.current();
+        } else if (code !== 'stopping') {
+          setPendingStart(false);
+          setActionError(error);
+        }
+      } else if (Date.now() > pendingStartUntil.current) {
+        setPendingStart(false);
+        setActionError('Запуск не удался: прошлый круг всё ещё закрывается. Попробуйте ещё раз.');
+      }
+    };
+
+    void tick();
+    timer = setInterval(() => { void tick(); }, PHASE_POLL_MS);
+    return () => { active = false; if (timer) clearInterval(timer); };
+    // onUpdate приходит из родителя новой функцией на каждый его рендер —
+    // в зависимостях он пересоздавал бы интервал по кругу; держим его в ref.
+  }, [loadPhase, callAction, pendingStart]);
 
   const saveSettings = async (openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => {
     await authFetch(`${API_BASE}/campaigns/${campaign.id}`, {
@@ -7089,9 +7198,14 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     onUpdate();
   };
 
-  const displayStatus = stopping ? 'stopping' : campaign.status;
+  // Состояние с сервера главнее статуса из списка: список мог быть прочитан
+  // до того, как воркер взялся за задачу.
+  const displayStatus = pendingStart ? 'stopping' : (phase ?? campaign.status);
   const st = STATUS_LABELS[displayStatus] ?? STATUS_LABELS.stopped;
   const warmingCount = campaign.warming_accounts ?? 0;
+  const stopping = displayStatus === 'stopping';
+  const starting = displayStatus === 'starting';
+  const running = displayStatus === 'running';
 
   return (
     <div className="space-y-4">
@@ -7128,31 +7242,45 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           {/* Пауза — не остановка: её каждые 5 минут пробует поднять
               авто-возобновление, а профили применяются только к остановленной
               кампании. Без этой кнопки из паузы нельзя было выйти в «остановлена». */}
-          {campaign.status === 'paused' && !stopping && (
-            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading}
+          {/* Пауза и «запускается» — состояния, из которых основная кнопка
+              выйти не даёт: в паузе её поднимает авто-возобновление, а в
+              «запускается» кампания ждёт воркера. Если воркер лежит, без этой
+              кнопки кампания зависла бы в ожидании навсегда. */}
+          {(displayStatus === 'paused' || starting) && (
+            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading !== null}
               className="inline-flex items-center gap-1.5 rounded-full border border-rose-300 px-4 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
               <Square className="h-3.5 w-3.5" />
               Остановить
             </button>
           )}
-          {campaign.status !== 'running' && !stopping ? (
-            <button type="button" onClick={() => void doAction('start')}
-              disabled={actionLoading}
-              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-              Запустить
-            </button>
-          ) : stopping ? (
+          {/* Переходные состояния — кнопка без действия: нажимать нечего, пока
+              воркер не доведёт прошлое до конца. Раньше кнопка «Запустить» в
+              этот момент была живой, но ручка отвечала ошибкой, которую никто
+              не показывал, — отсюда и «жму пять раз, ничего не происходит». */}
+          {stopping ? (
             <button type="button" disabled
               className="inline-flex items-center gap-1.5 rounded-full bg-amber-500 px-5 py-2.5 text-xs font-semibold text-white opacity-80 cursor-not-allowed">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Останавливается...
+              {pendingStart ? 'Останавливается, запустим сами…' : 'Останавливается…'}
+            </button>
+          ) : starting ? (
+            <button type="button" disabled
+              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500 px-5 py-2.5 text-xs font-semibold text-white opacity-80 cursor-not-allowed">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Запускается…
+            </button>
+          ) : running ? (
+            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading !== null}
+              className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {actionLoading === 'stop' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+              Остановить
             </button>
           ) : (
-            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading}
-              className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
-              Остановить
+            <button type="button" onClick={() => void doAction('start')}
+              disabled={actionLoading !== null}
+              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {actionLoading === 'start' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+              Запустить
             </button>
           )}
           <button type="button" onClick={() => onDelete(campaign.id)}
@@ -7161,6 +7289,20 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           </button>
         </div>
       </div>
+
+      {/* Отказ ручки виден оператору. До 09.10.2026 ответ не читали вовсе:
+          кампания не запускалась, а на экране не было ни слова почему. */}
+      {actionError && (
+        <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          <span className="flex-1">{actionError}</span>
+          <button type="button" onClick={() => setActionError(null)} className="text-rose-400 hover:text-rose-600 cursor-pointer">×</button>
+        </div>
+      )}
+      {pendingStart && !actionError && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Кампания ещё сворачивает прошлый круг — это занимает пару минут. Запустим её сами, как только он закроется; страницу можно не трогать.
+        </div>
+      )}
 
       <div className="flex gap-1 border-b border-gray-200">
         {TABS.map(t => {
