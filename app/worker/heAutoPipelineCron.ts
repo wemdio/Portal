@@ -65,6 +65,23 @@
  *      сухой вертикали (`dry`), предполёт ёмкости воркспейса
  *      (`capacity_blocked`), и только потом постановка сборки.
  *
+ * ПОРЯДОК ВЕРТИКАЛЕЙ (кому достаются verticals_per_run слотов ночи) — не
+ * created_at, а compareHeRefillVerticalOrder (autoPipeline.ts, блок «ПОРЯДОК
+ * ВЕРТИКАЛЕЙ НОЧИ»): раньше та, что дольше не получала слота по журналу
+ * he_auto_pipeline_runs. Порядок каждого проекта с ключами печатается строкой
+ * `config <id> vertical order: …` (уровень info) — по ней видно, почему
+ * вертикаль за пределами слотов этой ночью ничего не получила.
+ *
+ * СТОРОЖ ЖИВОСТИ этого крона — не здесь: умерший крон сам о себе не сообщит.
+ * Его смотрит health-бот (services/health-check/main.py, _check_he_refill):
+ * включённый us-конфиг без паузы, чей last_run_at (до первого обхода —
+ * created_at) старше 26 ч, и строки he_auto_pipeline_runs, стоящие
+ * 'collecting' дольше 14 ч. Поэтому last_run_at обязан двигаться у каждого
+ * обойдённого конфига — так и сделано (touchConfigLastRun, в том числе под
+ * паузой); обход, упавший до первой постановки, метку не пишет и тоже
+ * попадёт в этот алерт. Health-бот — отдельный контейнер со своим образом:
+ * правка сторожа выкатывается своим деплоем, а не деплоем воркеров.
+ *
  * Перед постановкой тик спрашивает у рассыльщика остаток ёмкости воркспейса
  * (один запрос на воркспейс за ночь) и при нуле НЕ ставит сборку: платит сборка,
  * а не долив. Такая вертикаль пишется в лог как capacity_blocked (уровень warn) и
@@ -105,8 +122,11 @@
  * Перед постановкой доливов крон делает ПРОХОД АВТОПОДЪЁМА баз, легших на
  * временном отказе провайдера (lib/hypothesisEngine/baseAutoResume →
  * RPC he_auto_resume_transient_bases). Проход выключен по умолчанию, включается
- * env-флагом HE_AUTO_RESUME_TRANSIENT=1 и только вместе с применённой миграцией
- * supabase/migrations/20260929_0001_he_base_transient_resume.sql.
+ * env-флагом HE_AUTO_RESUME_TRANSIENT=1 и только вместе с применёнными
+ * миграциями supabase/migrations/20260929_0001_he_base_transient_resume.sql и
+ * 20261009_0002_he_project_cancel_marker.sql: без второй (нет колонки
+ * he_projects.cancelled_at) проход бросает, не вызвав функцию, и ночь пишет
+ * это строкой error (exit 1), а доливы всё равно ставятся.
  *
  * Почему ДО постановки доливов, а не после. В обычном случае порядок уже ничего
  * не решает: SQL автоподъёма отказывает вертикали, у которой есть авто-база в
@@ -239,6 +259,12 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  // Порядок вертикалей — до строк вертикалей: он объясняет и тех, до кого цикл
+  // не дошёл (слоты verticals_per_run кончились раньше).
+  for (const o of summary.orders) {
+    log('info', `config ${o.configId} vertical order: ${o.order}`);
+  }
+
   // Кого именно усыпила пауза — в итоговой строке: счётчик без имён
   // заставляет искать проект по всему логу.
   const pausedConfigIds: string[] = [];
@@ -332,7 +358,7 @@ async function main(): Promise<number> {
       `${summary.noCampaign} no_campaign, ${summary.capacityBlocked} capacity_blocked, ` +
       `${summary.budgetExhausted} budget_exhausted, ${summary.paused} paused` +
       (pausedConfigIds.length > 0 ? ` (${pausedConfigIds.join(', ')})` : '') +
-      `, ${summary.dry} dry, ` +
+      `, ${summary.dry} dry, ${summary.carryCovers} carry_covers, ${summary.lettersHeld} letters_held, ` +
       `${summary.failed} failed in ${elapsedSec}s`,
   );
   return summary.failed > 0 || resumeFailed || reconcileFailed ? 1 : 0;

@@ -94,6 +94,29 @@ OUTREACHOS_MISSING_AFTER_UTC_HOUR = max(0, int(os.environ.get("HEALTH_OUTREACHOS
 # Auto-pipeline обновляет heartbeat_at по ходу прогона; 30 мин без heartbeat —
 # завис (воркер умер / БД-коннект ушёл).
 AUTOPIPELINE_STUCK_MINUTES = max(15, int(os.environ.get("HEALTH_AUTOPIPELINE_STUCK_MIN", "30")))
+# ENG: ночной добор Движка вертикалей (app/worker/heAutoPipelineCron.ts, крон на
+# хосте в 03:20 UTC). Тик пишет he_auto_pipeline_configs.last_run_at КАЖДОМУ
+# обойдённому конфигу, в том числе под паузой, поэтому у живого крона метка
+# включённого us-конфига не старше ~24 ч. 26 ч = сутки + 2 ч запаса: алерт
+# приходит около 05:20 UTC (08:20 МСК) в то утро, когда ночь пропущена.
+HE_REFILL_STALE_HOURS = max(25, int(os.environ.get("HEALTH_HE_REFILL_STALE_HOURS", "26")))
+# Сколько строка he_auto_pipeline_runs может честно стоять 'collecting'. Сроки
+# самой стадии base_collect (app/src/lib/hypothesisEngine/stages/baseCollect.ts):
+# дочерняя джоба источника — до 3 ч (CHILD_TIMEOUT_MS), расширение плана
+# добавляет ещё одну такую волну не больше раза за сборку (+3 ч), ожидание
+# конструктора — до 6 ч (CONSTRUCT_TIMEOUT_MS): 12 ч на самый длинный честный
+# путь. +2 ч — очередь воркера, тики ожидания по 60 с, паузы рассыльщика (до
+# 2 × 10 мин) и сам долив. Строка ночи 03:20 UTC даёт алерт не раньше 17:20 UTC,
+# то есть до следующей ночи.
+HE_REFILL_STUCK_HOURS = max(13, int(os.environ.get("HEALTH_HE_REFILL_STUCK_HOURS", "14")))
+# Окно поиска зависших строк: каждая строка алертится один раз, когда переходит
+# порог, а строки старше недели (например, оставшиеся до деплоя этой проверки)
+# не поднимаются.
+HE_REFILL_STUCK_WINDOW_DAYS = 7
+# Сколько проектов/строк перечислять в одном сообщении, остальное — счётчиком:
+# Telegram отвергает сообщение длиннее 4096 символов ЦЕЛИКОМ, а монитор шлёт
+# все проблемы цикла одним сообщением, и ключи дедупа к этому моменту уже взяты.
+HE_REFILL_ALERT_MAX_ITEMS = 5
 HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
     "HEALTH_CRITICAL_ENDPOINTS",
     "/,/tools,/api/user/tools",
@@ -1791,8 +1814,193 @@ async def _check_autopipeline(conn) -> list[str]:
     return problems
 
 
+# ── ENG: ночной добор Движка вертикалей ─────────────────────────────────────
+#
+# Крон heAutoPipelineCron (03:20 UTC) ставит refill-сборки us-проектам и пишет
+# he_auto_pipeline_runs 'collecting'; финал строки ('appended' / 'no_new' /
+# 'failed') пишет стадия base_collect воркера hypothesis-engine. Умерший крон
+# сам о себе не сообщает, а кабинет продолжает обещать клиенту
+# «next: daily refill 03:20 UTC». Два сигнала:
+#   1. включённый us-конфиг без паузы, чей last_run_at (до первого обхода —
+#      created_at) старше HE_REFILL_STALE_HOURS: ночь не обходилась;
+#   2. строка he_auto_pipeline_runs 'collecting' старше HE_REFILL_STUCK_HOURS:
+#      ночь не закрылась. Текст различает состояние её базы и джобы.
+# Дедуп — JOB_ALERTS_TABLE: конфиг — раз в сутки простоя, строка — один раз.
+
+_HE_REFILL_STALE_SQL = (
+    "SELECT c.id::text AS id, c.project_id::text AS project_id, "
+    "       c.last_run_at, c.created_at, p.name AS project_name "
+    "FROM public.he_auto_pipeline_configs c "
+    "JOIN public.he_projects p ON p.id = c.project_id "
+    "WHERE c.enabled AND p.market = 'us' {pause_filter}"
+    "  AND coalesce(c.last_run_at, c.created_at) < now() - make_interval(hours => $1) "
+    "ORDER BY coalesce(c.last_run_at, c.created_at)"
+)
+
+_HE_REFILL_STUCK_SQL = (
+    "SELECT r.id::text AS id, r.base_id::text AS base_id, r.created_at, "
+    "       p.name AS project_name, v.name AS vertical_name, "
+    "       b.status AS base_status, b.error AS base_error, "
+    "       j.status AS job_status, j.attempts AS job_attempts "
+    "FROM public.he_auto_pipeline_runs r "
+    "LEFT JOIN public.he_projects p ON p.id = r.project_id "
+    "LEFT JOIN public.he_verticals v ON v.id = r.vertical_id "
+    "LEFT JOIN public.he_bases b ON b.id = r.base_id "
+    "LEFT JOIN LATERAL ("
+    "  SELECT hj.status, hj.attempts FROM public.he_jobs hj "
+    "  WHERE hj.project_id = r.project_id AND hj.stage = 'base_collect' "
+    "    AND hj.payload->>'base_id' = r.base_id::text "
+    "  ORDER BY hj.created_at DESC LIMIT 1"
+    ") j ON true "
+    "WHERE r.status = 'collecting' "
+    "  AND r.created_at < now() - make_interval(hours => $1) "
+    "  AND r.created_at >= now() - make_interval(days => $2) "
+    "ORDER BY r.created_at"
+)
+
+
+def _he_refill_stuck_state(row) -> str:
+    """Что случилось с ночью, чья строка прогона так и стоит 'collecting'.
+
+    Все состояния базы (he_bases.status: uploaded/collecting/analyzing/analyzed/
+    failed, либо базы нет) и последней джобы base_collect (he_jobs.status:
+    pending/running/done/failed/cancelled, либо джобы нет).
+    """
+    base_status = row["base_status"]
+    job_status = row["job_status"]
+    job = (
+        f"джоба base_collect <code>{html.escape(str(job_status))}</code>, попыток {row['job_attempts']}"
+        if job_status else "джобы base_collect нет"
+    )
+    if base_status is None:
+        return "базы прогона больше нет (удалена) — строку закрыть некому."
+    if base_status == "collecting" and job_status in ("pending", "running"):
+        return (
+            f"сборка идёт дольше всех сроков стадии ({job}). Пока база собирается, "
+            "ночной тик этой вертикали ничего не ставит ('existing')."
+        )
+    if base_status == "collecting":
+        return (
+            f"база осталась <code>collecting</code> без живой джобы ({job}): сборку никто "
+            "не ведёт, а ночной тик каждую ночь отвечает этой вертикали 'existing'."
+        )
+    if base_status == "failed":
+        error = html.escape(str(row["base_error"] or "без текста")[:160])
+        return (
+            f"база упала (<code>{error}</code>), а финал прогона не записан. Следующая ночь "
+            "ставится как обычно; в ленте кабинета этой ночи нет."
+        )
+    return (
+        f"база уже <code>{html.escape(str(base_status))}</code>, а финал прогона не записан "
+        "(запись журнала best-effort). В ленте кабинета этой ночи нет, и предполётный "
+        "размер сборки в те же сутки не видит её принятых лидов."
+    )
+
+
+async def _check_he_refill(conn) -> list[str]:
+    """Сторож ночного добора ENG — см. блок выше."""
+    problems: list[str] = []
+    log_hint = (
+        "Проверьте: <code>crontab -l | grep heAutoPipelineCron</code> · "
+        "<code>tail -100 /var/log/portal/he-auto-pipeline.log</code> · "
+        "<code>docker logs portal-worker-hypothesis-engine --tail 100</code>"
+    )
+    now = datetime.now(timezone.utc)
+
+    # 1. Конфиги без обхода. Без колонки паузы (миграция 20260930_0005 не
+    #    применена) паузы не существует и для самого тика — берём все включённые.
+    try:
+        try:
+            stale = await conn.fetch(
+                _HE_REFILL_STALE_SQL.format(pause_filter="AND c.refill_paused_at IS NULL "),
+                HE_REFILL_STALE_HOURS,
+            )
+        except Exception as e:
+            # 42703 undefined_column — ровно «миграции нет»; остальное — сбой.
+            if getattr(e, "sqlstate", None) != "42703":
+                raise
+            stale = await conn.fetch(_HE_REFILL_STALE_SQL.format(pause_filter=""), HE_REFILL_STALE_HOURS)
+    except Exception as e:
+        print(f"[health] he-refill configs query skipped: {e}")
+        stale = []
+
+    fresh_stale: list[str] = []
+    for row in stale:
+        last_run = row["last_run_at"]
+        seen = last_run or row["created_at"]
+        if seen is None:
+            continue
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        age_h = int((now - seen).total_seconds() // 3600)
+        # Напоминание раз в сутки простоя (26 ч, 50 ч, …), а не раз в UTC-сутки:
+        # иначе второе приходило бы в полночь UTC, до следующей ночи крона.
+        bucket = max(0, (age_h - HE_REFILL_STALE_HOURS) // 24)
+        if not await _claim_job_alert(conn, f"he-refill:stale:{row['id']}:{seen.isoformat()}:{bucket}"):
+            continue
+        project = html.escape(str(row["project_name"] or row["project_id"])[:60])
+        fresh_stale.append(
+            f"• {project} · последний обход {_msk(last_run)} ({age_h} ч назад)"
+            if last_run else
+            f"• {project} · обходов не было, конфиг создан {_msk(row['created_at'])} ({age_h} ч назад)"
+        )
+    if fresh_stale:
+        shown = fresh_stale[:HE_REFILL_ALERT_MAX_ITEMS]
+        more = len(fresh_stale) - len(shown)
+        problems.append(
+            f"🟠 <b>ENG ночной добор: {len(fresh_stale)} us-проект(ов) без обхода дольше "
+            f"{HE_REFILL_STALE_HOURS} ч</b>\n"
+            "Крон heAutoPipelineCron (03:20 UTC = 06:20 МСК) не отметил обход включённых "
+            "конфигов без паузы. Либо крон не запускался, либо обход этих проектов падает "
+            "до первой постановки (строки error в логе, exit 1). Сборки не покупаются, но и "
+            "контакты в кампании не идут, а кабинет запущенных вертикалей обещает клиенту "
+            "«next: daily refill 03:20 UTC». Очередь переноса ждёт не дольше 7 суток от "
+            "подготовки, потом её компании уходят обратно в пул.\n"
+            + "\n".join(shown)
+            + (f"\n…и ещё {more}" if more > 0 else "")
+            + f"\n{log_hint}"
+        )
+
+    # 2. Ночи, не закрывшиеся за сроки стадии.
+    try:
+        stuck = await conn.fetch(_HE_REFILL_STUCK_SQL, HE_REFILL_STUCK_HOURS, HE_REFILL_STUCK_WINDOW_DAYS)
+    except Exception as e:
+        print(f"[health] he-refill runs query skipped: {e}")
+        stuck = []
+
+    fresh_stuck: list[str] = []
+    for row in stuck:
+        if not await _claim_job_alert(conn, f"he-refill:stuck:{row['id']}"):
+            continue
+        created = row["created_at"]
+        if created is not None and created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age_h = int((now - created).total_seconds() // 3600) if created is not None else 0
+        project = html.escape(str(row["project_name"] or "проект")[:60])
+        vertical = html.escape(str(row["vertical_name"] or "вертикаль")[:60])
+        fresh_stuck.append(
+            f"• {project} / {vertical} · прогон <code>#{str(row['id'])[:8]}</code> с {_msk(created)} "
+            f"({age_h} ч), база <code>{html.escape(str(row['base_id'] or '—'))}</code>: "
+            f"{_he_refill_stuck_state(row)}"
+        )
+    if fresh_stuck:
+        shown = fresh_stuck[:HE_REFILL_ALERT_MAX_ITEMS]
+        more = len(fresh_stuck) - len(shown)
+        problems.append(
+            f"🟠 <b>ENG ночной добор: {len(fresh_stuck)} ноч(ей) не закрылись за "
+            f"{HE_REFILL_STUCK_HOURS} ч</b>\n"
+            "Строка he_auto_pipeline_runs так и стоит <code>collecting</code> дольше самого "
+            "длинного честного пути стадии base_collect.\n"
+            + "\n".join(shown)
+            + (f"\n…и ещё {more} (<code>status = 'collecting'</code> в he_auto_pipeline_runs)" if more > 0 else "")
+            + "\nЛоги: <code>docker logs portal-worker-hypothesis-engine --tail 200</code>"
+        )
+
+    return problems
+
+
 async def check_pipeline_runs() -> list[str]:
-    """Монитор суточных пайплайнов (OutreachOS + Mailganer) — см. run_job_monitor."""
+    """Монитор суточных пайплайнов (OutreachOS + Mailganer + ENG-добор) — см. run_job_monitor."""
     if not DATABASE_URL:
         return []
     try:
@@ -1806,7 +2014,8 @@ async def check_pipeline_runs() -> list[str]:
         # проверка молча пропускалась каждый тик, инцидент 06.08).
         out = await _check_outreachos_pipeline(conn)
         auto = await _check_autopipeline(conn)
-        return [*out, *auto]
+        he_refill = await _check_he_refill(conn)
+        return [*out, *auto, *he_refill]
     finally:
         await conn.close()
 

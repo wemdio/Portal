@@ -64,7 +64,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { enqueueHeBaseCollect } from './baseCollectEnqueue';
+import { enqueueHeBaseCollect, isHeCollectingBaseLive } from './baseCollectEnqueue';
 import { defaultChainLanguageForMarket, normalizeHeMarket } from './market';
 import { flushHeOpsAlerts } from './opsAlert';
 import { createHeSpendGate } from './spendCeiling';
@@ -231,8 +231,14 @@ function payloadField(payload: unknown, key: 'base_id' | 'vertical_id'): string 
  * Доставить недостающие стадии конвейера по каждой КЛИЕНТ-ВЫБРАННОЙ вертикали
  * проекта (есть хотя бы одна accepted-гипотеза):
  *   нет ready-цепочки и нет активной chain-джобы → chain (язык по market);
- *   цепочка ready и нет основной auto-базы (collecting, ЖИВАЯ analyzing,
+ *   цепочка ready и нет основной auto-базы (ЖИВАЯ collecting, ЖИВАЯ analyzing,
  *     analyzed; refill-базы «auto-refill: …» не в счёт) → base_collect;
+ *   осиротевшая 'collecting'-база (ни активной джобы, ни записи строки в
+ *     пределах HE_COLLECTING_ORPHAN_GRACE_MS) при отсутствии 'analyzing'-баз →
+ *     тот же путь постановки, с теми же гейтами и воротами: дедуп
+ *     enqueueHeBaseCollect доставляет ей пропавшую джобу (или закрывает её как
+ *     отменённую — repairHeOrphanCollectingBase), а сам реконсилер базу не
+ *     пишет;
  *   осиротевшая 'analyzing'-база → доставка пропавшего base_analyze тем же
  *     общим ремонтом (строки собраны и оплачены — пересобирать нечего), но
  *     ночью — только если анализ этой базы ещё не падал и не был отменён
@@ -570,7 +576,15 @@ export async function reconcileHeAutopilotProject(
           b.source === 'auto' &&
           !asString((b as Row).filename).startsWith('auto-refill'),
       );
-      const collectingBase = autoBases.some((b) => b.status === 'collecting');
+      // 'collecting' — две разные вещи. Живая сборка (активная джоба по базе
+      // или запись её строки в пределах окна постановки — isHeCollectingBaseLive)
+      // занимает вертикаль. Без того и другого база — сирота: ниже её ведут к
+      // тому же пути постановки, что и пустую вертикаль, а чинит (или закрывает
+      // как отменённую) её enqueueHeBaseCollect.
+      const collectingBases = autoBases.filter((b) => b.status === 'collecting');
+      const collectingBase = collectingBases.some((b) =>
+        isHeCollectingBaseLive({ id: asString(b.id), updated_at: (b as Row).updated_at }, liveBaseIds),
+      );
       const analyzingBases = autoBases.filter((b) => b.status === 'analyzing');
       const analyzedBase = autoBases.find((b) => b.status === 'analyzed');
 
@@ -591,8 +605,11 @@ export async function reconcileHeAutopilotProject(
         // ровно тот же, по которому ниже идёт платная сборка. Вертикаль с
         // готовой базой уже закончена: анализ осиротевшей дал бы вторую базу
         // там, где клиент ждёт одну, за новые вызовы модели. По той же причине
-        // выходим после первой вылеченной: вертикали нужна ОДНА база.
-        if (collectingBase || analyzingLive || analyzedBase) break;
+        // выходим после первой вылеченной: вертикали нужна ОДНА база. Любая
+        // 'collecting' (и осиротевшая тоже) ремонт анализа останавливает, как и
+        // раньше; пару «сирота collecting + сирота analyzing» не чинит никто
+        // (ветка сборки ниже её тоже не берёт) — выбирать между ними человек.
+        if (collectingBases.length > 0 || analyzingLive || analyzedBase) break;
         // Анализ этой базы уже ЗАПУСКАЛСЯ — упал или отменён клиентом. Ночью
         // его не переоплачиваем: ремонт тут бесплатен сам по себе (вставка
         // строки), но джоба, которую он ставит, — ПЛАТНЫЙ прогон модели, и
@@ -658,7 +675,13 @@ export async function reconcileHeAutopilotProject(
           .find((ended): ended is HeJobEndedOutcome => ended !== undefined)
         : undefined;
 
-      if (!collectingBase && !analyzingLive && !analyzedBase) {
+      // Осиротевшая 'collecting' идёт сюда же, но только без 'analyzing'-баз
+      // (почему — у цикла ремонта анализа выше). Гейты и ворота у неё те же,
+      // что у новой сборки: ночью вертикаль с упавшей или отменённой платной
+      // сборкой сироту не чинит (это делает кнопка), а потолок и флаг
+      // автопилота спрашиваются до постановки — ремонт тоже платная сборка.
+      const orphanCollecting = collectingBases.length > 0 && !collectingBase && analyzingBases.length === 0;
+      if ((collectingBases.length === 0 || orphanCollecting) && !analyzingLive && !analyzedBase) {
         if (lastPaidFailure === 'cancelled') {
           // Сборку (или анализ) последней базы вертикали ОТМЕНИЛ клиент: роут
           // отмены перевёл базу в 'failed'. Это решение, а не отказ: паузы нет,
@@ -695,11 +718,18 @@ export async function reconcileHeAutopilotProject(
           }
           if (collect.created) {
             counts.collectsEnqueued += 1;
-            details.push({ verticalId, outcome: 'collect_enqueued' });
+            // Починенной сироте — её id: в ночном логе видно, какая база
+            // получила пропавшую джобу.
+            details.push({
+              verticalId,
+              outcome: 'collect_enqueued',
+              ...(collect.repaired ? { baseId: asString(collect.base.id) } : {}),
+            });
             enqueued = true;
           } else {
-            // Дедуп enqueueHeBaseCollect: сборка уже идёт — и именно он стоит
-            // между этим проходом и второй платной базой вертикали.
+            // Дедуп enqueueHeBaseCollect: сборка уже идёт (или сироту этот
+            // вызов не чинит — repairHeOrphanCollectingBase) — и именно он
+            // стоит между этим проходом и второй платной базой вертикали.
             skipReason = 'collect_existing';
           }
         }

@@ -2,30 +2,36 @@
  * Автоподъём ENG-базы, легшей на ВРЕМЕННОМ отказе провайдера.
  *
  * Тонкая обёртка над RPC `he_auto_resume_transient_bases`
- * (supabase/migrations/20260929_0001_he_base_transient_resume.sql). Ни одного
- * решения здесь НЕТ и быть не должно: все условия подъёма — рынок 'us', отмена
- * клиентом (по статусу джобы, не по тексту), refill, решения самого движка,
- * перманентный отказ провайдера, занятая вертикаль, потолок подъёмов — живут в
- * SQL. Причина та же, что у V2: проход зовёт ночной крон, а базу параллельно
- * может трогать воркер, и «прочитать в TS, решить в TS, записать в TS» — это
- * гонка, в которой база поднимается дважды. Здесь остаются только флаг,
- * нормализация ответа и счёт для лога — и одно решение уровня «идти ли проходу
- * вообще»: при включённом потолке расхода (spendCeiling.ts, по умолчанию
- * выключен) прохода нет целиком, потому что внутрь SQL проверку потолка по
- * проекту не встроить без миграции (см. HeAutoResumeSummary.skipped).
+ * (supabase/migrations/20260929_0001_he_base_transient_resume.sql, пересоздана
+ * в 20261009_0002_he_project_cancel_marker.sql). Ни одного решения здесь НЕТ и
+ * быть не должно: все условия подъёма — рынок 'us', отмена (по статусу джобы
+ * и по отметке отмены проекта he_projects.cancelled_at, не по тексту), refill,
+ * решения самого движка, перманентный отказ провайдера, занятая вертикаль,
+ * потолок подъёмов — живут в SQL. Причина та же, что у V2: проход зовёт ночной
+ * крон, а базу параллельно может трогать воркер, и «прочитать в TS, решить в
+ * TS, записать в TS» — это гонка, в которой база поднимается дважды. Здесь
+ * остаются только флаг, нормализация ответа и счёт для лога — и два решения
+ * уровня «идти ли проходу вообще»: при включённом потолке расхода
+ * (spendCeiling.ts, по умолчанию выключен) прохода нет целиком, потому что
+ * внутрь SQL проверку потолка по проекту не встроить без миграции (см.
+ * HeAutoResumeSummary.skipped); а без колонки отметки отмены проход бросает
+ * (см. runHeAutoResumeTransientPass).
  *
  * Читатель — app/worker/heAutoPipelineCron.ts (единственный): ночной крон
  * ENG-конвейера, проход идёт ПЕРЕД постановкой доливов.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { heProjectCancelMarkerInstalled } from './projectCancelMarker';
 import { heSpendCeilingOn, readHeSpendCaps } from './spendCeiling';
 
 /**
  * Флаг включения. По умолчанию проход ВЫКЛЮЧЕН: у ENG нет живого клиентского
  * трафика, ночной добор в production ещё не запускался ни разу, а подъём базы
  * стоит денег (новая джоба сборки = ещё до MAX_ATTEMPTS прогонов стадии).
- * Включать осознанно и только вместе с применённой миграцией.
+ * Включать осознанно и только вместе с применёнными миграциями 20260929_0001 и
+ * 20261009_0002: без второй функция в БД — прежняя, и отмену при нуле активных
+ * джоб она не видит (проход тогда не идёт — см. runHeAutoResumeTransientPass).
  */
 export const HE_AUTO_RESUME_FLAG_ENV = 'HE_AUTO_RESUME_TRANSIENT';
 
@@ -136,6 +142,14 @@ function normalizeRow(raw: unknown): HeAutoResumeRow | null {
  * Бросает ошибку наверх (в том числе «функции нет» — PGRST202, если флаг
  * включили без миграции): вызывающий крон обязан сказать об этом громко, но
  * постановку ночных доливов из-за этого не терять.
+ *
+ * Бросает и тогда, когда в БД нет колонки he_projects.cancelled_at. Колонка и
+ * новая версия функции (с условием «база упала не позже отметки отмены — не
+ * поднимается») приезжают ОДНОЙ транзакционной миграцией 20261009_0002, так
+ * что колонка есть ⇔ функция новая. Без неё в БД прежняя функция из
+ * 20260929_0001, а та поднимала бы базу, упавшую до отмены клиентом, если
+ * отмена не застала ни одной активной джобы. Сбой самой проверки — тоже бросок:
+ * «не знаю» проход не запускает.
  */
 export async function runHeAutoResumeTransientPass(
   supabase: SupabaseClient,
@@ -156,6 +170,13 @@ export async function runHeAutoResumeTransientPass(
   // HeAutoResumeSummary.skipped). Выключен (дефолт) — прежнее поведение.
   if (heSpendCeilingOn(readHeSpendCaps(opts.env ?? process.env))) {
     return { enabled: false, skipped: 'spend_ceiling', resumed: 0, refused: 0, rows: [] };
+  }
+
+  if (!(await heProjectCancelMarkerInstalled(supabase))) {
+    throw new Error(
+      'he_projects.cancelled_at is missing — apply supabase/migrations/20261009_0002_he_project_cancel_marker.sql ' +
+        'before HE_AUTO_RESUME_TRANSIENT: without it the resume function would revive bases that failed before a client cancel',
+    );
   }
 
   const { data, error } = await supabase.rpc('he_auto_resume_transient_bases', {

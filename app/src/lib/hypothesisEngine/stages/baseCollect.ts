@@ -231,6 +231,10 @@ import {
 // глотать его в catch задачи нельзя (см. runDispatch).
 import { heCheckpointSupabase, isHeStageDbInterruption } from '../stageDb';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
+// Только типы восстановления (collect_info.revalidation и
+// construct.late_import_undo): модуль сам импортирует стадию, поэтому здесь —
+// import type, без цикла в рантайме.
+import type { HeLateImportUndo, HeRevalidationState } from '../validationRetry';
 import {
   closeHeRefillBaseUndelivered,
   completeHeRefillNoNew,
@@ -862,6 +866,25 @@ export interface HeConstructInfo {
   resplit_of?: string;
   /** Пометка для UI (частичный импорт / без обогащения / таймаут). */
   note?: string;
+  /**
+   * Результат этой джобы конструктора принят ПОСЛЕ того, как стадия перестала
+   * его ждать (ISO): база стояла 'failed' без строк, а джоба потом завершилась
+   * 'completed'. Пишет только поздний импорт сотрудника
+   * (validationRetry.ts, «ПОЗДНИЙ ИМПОРТ»; market='us'). Читатель — он же:
+   * база в 'analyzing' с этой отметкой — это его собственная запись, и
+   * повторный вызов только доставляет base_analyze, если первая постановка не
+   * легла, а не импортирует второй раз. Ключа нет — результат импортировала
+   * сама стадия.
+   */
+  late_import_at?: string;
+  /**
+   * Что поздний импорт заменил своей записью (пишется той же записью, что и
+   * late_import_at): по нему импорт откатывается, если анализ ставить нельзя —
+   * клиент собрал вертикаль заново или отменил проект между записью и
+   * постановкой (validationRetry.ts, «ОТКАТ»). Пишет и читает только этот
+   * модуль; в клиентскую проекцию не входит (CONSTRUCT_FIELDS).
+   */
+  late_import_undo?: HeLateImportUndo;
 }
 
 /**
@@ -1030,6 +1053,13 @@ export interface HeCollectInfo {
   /** Фаза CONSTRUCT: состояние передачи базы конструктору (появляется после HARVEST). */
   construct?: HeConstructInfo;
   /**
+   * Повторная проверка сохранённых адресов готовой базы БЕЗ новой сборки
+   * (validationRetry.ts, «ПЕРЕПРОВЕРКА АДРЕСОВ»; market='us', staff-роут).
+   * Пишет и читает только этот модуль; стадия ключ не трогает (на собранной
+   * базе она больше не запускается), в клиентскую проекцию он не входит.
+   */
+  revalidation?: HeRevalidationState;
+  /**
    * Релевант-гейт, отработавший ДО конструктора (market='us'). Запись —
    * доказательство оплаты: пока она есть, гейт на этой базе не повторяется, а
    * её flagged_keys переживают все тики ожидания конструктора.
@@ -1044,6 +1074,12 @@ export interface HeCollectInfo {
     excluded_existing_bases: number;
     /** Реестр: строк пропущено ещё на выборке (уже собраны в других базах проекта). */
     excluded_during_fetch: number;
+    /**
+     * Строк базы с пометкой `_low_relevance` (вне вертикали). Пишет финал
+     * стадии (statsWithQuality) и поздний импорт; читает кабинет
+     * (clientEngProjection, COLLECT_STATS_FIELDS → EngStepBases).
+     */
+    low_relevance?: number;
     /**
      * Компаний в готовой базе (уникальных ключей «компания|домен»). Отличается
      * от row_count базы: после split_emails у компании столько строк, сколько
@@ -5125,10 +5161,30 @@ async function ensureBaseAnalyzeJob(
   job: HeJob,
   baseId: string,
 ): Promise<'enqueued' | 'existing'> {
+  return ensureHeBaseAnalyzeQueued(ctx, job.project_id, baseId, () =>
+    assertOwnRunningJob(ctx, job, 'base_analyze не ставим'),
+  );
+}
+
+/**
+ * Тело ensureBaseAnalyzeJob без джобы сборки: тот же дедуп по активной джобе
+ * анализа этой базы и тот же разбор 23505. Владение перед вставкой у стадии —
+ * assertOwnRunningJob; у позднего импорта сотрудника (validationRetry.ts),
+ * который идёт не из джобы, — своя проверка «база всё ещё 'analyzing'»
+ * (`beforeInsert` бросает — вставки нет). Повтор после её отказа ничего не
+ * переплачивает: вход base_analyze — CAS по uploaded/analyzing/analyzed, он
+ * отказывает закрытой базе до вызова модели.
+ */
+export async function ensureHeBaseAnalyzeQueued(
+  ctx: HeStageContext,
+  projectId: string,
+  baseId: string,
+  beforeInsert: () => Promise<void>,
+): Promise<'enqueued' | 'existing'> {
   const { data: active, error: activeErr } = await ctx.supabase
     .from('he_jobs')
     .select('id, payload')
-    .eq('project_id', job.project_id)
+    .eq('project_id', projectId)
     .eq('stage', 'base_analyze')
     .in('status', ['pending', 'running']);
   if (activeErr) throw new Error(`he_jobs base_analyze dedup read: ${activeErr.message}`);
@@ -5137,9 +5193,9 @@ async function ensureBaseAnalyzeJob(
   );
   if (queued) return 'existing';
 
-  await assertOwnRunningJob(ctx, job, 'base_analyze не ставим');
+  await beforeInsert();
   const { error: jobError } = await ctx.supabase.from('he_jobs').insert({
-    project_id: job.project_id,
+    project_id: projectId,
     stage: 'base_analyze',
     status: 'pending',
     payload: { base_id: baseId },
@@ -5307,6 +5363,141 @@ export async function closeHeRefillBaseAfterFinalFail(
       : null,
   });
   if (result && construct?.status === 'dispatched') await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
+}
+
+/** Итог подготовки позднего импорта (validationRetry.ts, «ПОЗДНИЙ ИМПОРТ»). */
+export type HeLateConstructImport =
+  /** Сетки нет или в ней нет ни одной строки с компанией — импортировать нечего. */
+  | { kind: 'empty' }
+  /** Все строки сетки — домены или адреса, которые уже лежат в других базах проекта. */
+  | { kind: 'all_in_other_bases'; gridRows: number }
+  | {
+      kind: 'rows';
+      /** Поля записи he_bases; статус, error, updated_at и CAS ставит вызывающий. */
+      patch: {
+        columns: string[];
+        sample_rows: Array<Record<string, unknown>>;
+        data: Array<Record<string, unknown>>;
+        row_count: number;
+        collect_info: HeCollectInfo;
+      };
+      gridRows: number;
+      companies: number;
+      validCount: number;
+      droppedInOtherBases: number;
+      droppedOverContactCap: number;
+      droppedOverCompanyCap: number;
+    };
+
+/**
+ * ПОЗДНИЙ ИМПОРТ: сетка джобы конструктора, которая завершилась ('completed')
+ * уже после того, как стадия перестала её ждать, → строки базы. Тот же импорт,
+ * что у фазы CONSTRUCT (importConstructRows → heRecheckImportedRows →
+ * capImportedRows → вердикты на строки → названия для писем), и ни одного
+ * платного вызова:
+ *  - харвеста у такой базы нет (терминальная запись его снимает,
+ *    dropCollectWorkState), поэтому строки берутся ТОЛЬКО из сетки. Компании,
+ *    которые гейт до конструктора вычеркнул, в сетку не попадали и в базу не
+ *    вернутся: они остаются в пуле проекта, как и сейчас при 'failed'-базе.
+ *    Отсюда low_relevance = 0 — в самой базе строк вне вертикали нет;
+ *  - суд релевантности ПОСЛЕ импорта (findIrrelevantRows) здесь не запускается:
+ *    это платный вызов модели. Вызывающий пускает сюда только базу, чей гейт до
+ *    конструктора отработал (relevance_gate.ran), — тогда в сетке одни
+ *    допущенные строки;
+ *  - `_hiring_seen_at` не восстанавливается (источник — снятый харвест); его
+ *    читает только перенос ночного долива, а refill-базы сюда не идут.
+ * Чтения — сетка джобы и `data` других не-'failed' баз проекта (ключи
+ * исключения), как у тика импорта стадии. Записей нет: базу (CAS по
+ * прочитанному updated_at) и анализ пишет вызывающий.
+ */
+export async function prepareHeLateConstructImport(
+  ctx: HeStageContext,
+  input: {
+    baseId: string;
+    projectId: string;
+    info: HeCollectInfo;
+    construct: HeConstructInfo & { bc_job_id: string };
+    /** Кап «адресов на компанию», с которым ставилась эта джоба. */
+    contactCap: number;
+    /** initial_row_count джобы — строк воронки, если у базы нет stats. */
+    gridInputRows: number | null;
+    at: string;
+  },
+): Promise<HeLateConstructImport> {
+  const { baseId, projectId, info, construct, contactCap, at } = input;
+  const imported = await importConstructRows(ctx, construct.bc_job_id);
+  if (!imported) return { kind: 'empty' };
+  const keys = await loadOtherBaseExclusionKeys(ctx, projectId, baseId, 'us');
+  const rechecked = heRecheckImportedRows({
+    rows: imported.rows,
+    emailStatuses: imported.emailStatuses,
+    keys,
+    market: 'us',
+  });
+  if (rechecked.rows.length === 0) return { kind: 'all_in_other_bases', gridRows: imported.rows.length };
+  // Кап компаний — лимит сборки, записанный постановкой (у стадии это тот же
+  // limit, по которому строилась сетка). Нет — сетка уже не больше лимита.
+  const companyCap =
+    typeof info.limit === 'number' && Number.isFinite(info.limit) && info.limit > 0 ? info.limit : MAX_ROWS_LIMIT;
+  const capped = capImportedRows({
+    rows: rechecked.rows,
+    emailStatuses: rechecked.emailStatuses,
+    contactCap,
+    companyCap,
+  });
+  type LateRow = HeUnifiedRow & HeCompanyCleanRow & { description: string; _email_status?: string };
+  const marked: LateRow[] = capped.rows.map((r, i) => {
+    const status = capped.emailStatuses[i];
+    return status ? { ...r, _email_status: status } : r;
+  });
+  const stored = withHeCleanCompanyNames(marked).rows;
+  const okContacts = stored.reduce((n, r) => n + (r._email_status === 'ok' ? 1 : 0), 0);
+  const tasks = info.tasks ?? [];
+  // Воронка до конструктора — из stats терминальной записи (таймаут пишет её),
+  // иначе из задач; строки базы и числа после импорта — свои.
+  const prior = info.stats;
+  const stats: NonNullable<HeCollectInfo['stats']> = {
+    tasks_total: prior?.tasks_total ?? tasks.length,
+    tasks_done: prior?.tasks_done ?? tasks.filter((t) => t.status === 'done').length,
+    tasks_failed: prior?.tasks_failed ?? tasks.filter((t) => t.status === 'failed').length,
+    rows_total: prior?.rows_total ?? input.gridInputRows ?? imported.rows.length,
+    excluded_existing_bases: prior?.excluded_existing_bases ?? 0,
+    excluded_during_fetch:
+      prior?.excluded_during_fetch ?? tasks.reduce((sum, t) => sum + (t.excluded_during_fetch ?? 0), 0),
+    low_relevance: 0,
+    companies_total: capped.companies,
+    ok_contacts: okContacts,
+    dropped_over_contact_cap: capped.droppedOverContactCap,
+    dropped_over_company_cap: capped.droppedOverCompanyCap,
+    dropped_in_other_bases: rechecked.droppedInOtherBases,
+    finished_at: at,
+  };
+  // Пометка без подписи для кабинета (CONSTRUCT_NOTE_LABELS её не знает — клиент
+  // её не видит): прежняя «не завершился за 6ч» после импорта была бы неправдой.
+  const nextConstruct: HeConstructInfo = {
+    ...construct,
+    status: 'done',
+    emails_found: imported.emailsFound,
+    valid_count: capped.validCount,
+    note: `результат джобы конструктора ${construct.bc_job_id} принят после того, как стадия перестала его ждать`,
+    late_import_at: at,
+  };
+  return {
+    kind: 'rows',
+    patch: {
+      columns: imported.hasDescription ? [...HE_AUTO_COLLECT_COLUMNS, 'description'] : [...HE_AUTO_COLLECT_COLUMNS],
+      sample_rows: stored.slice(0, SAMPLE_ROWS),
+      data: stored,
+      row_count: stored.length,
+      collect_info: { ...dropCollectWorkState(info), construct: nextConstruct, stats },
+    },
+    gridRows: imported.rows.length,
+    companies: capped.companies,
+    validCount: capped.validCount,
+    droppedInOtherBases: rechecked.droppedInOtherBases,
+    droppedOverContactCap: capped.droppedOverContactCap,
+    droppedOverCompanyCap: capped.droppedOverCompanyCap,
+  };
 }
 
 /**

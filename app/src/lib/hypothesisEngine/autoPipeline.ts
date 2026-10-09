@@ -20,7 +20,10 @@
  *      клиентом (кнопка Cancel кабинета) и потолок расхода (шаг 3a-; по
  *      умолчанию выключен), снимает только человек кнопкой в
  *      staff-инструменте; подробности — в блоке «ПАУЗА ПО ЁМКОСТИ» ниже;
- *   2. вертикали проекта по created_at (стабильный порядок добора);
+ *   2. вертикали проекта в порядке compareHeRefillVerticalOrder: раньше та,
+ *      что дольше не получала ночного слота (по журналу he_auto_pipeline_runs),
+ *      created_at — только последний разрыв ничьей (блок «ПОРЯДОК ВЕРТИКАЛЕЙ
+ *      НОЧИ» ниже). Слоты verticals_per_run раздаются по этому порядку;
  *   3. вертикаль eligible, когда у неё есть шаблон с launch_info.campaign_id
  *      (последний по дате запуска) — есть куда доливать;
  *   2-. ДНЕВНОЙ БЮДЖЕТ ПРОЕКТА: сколько лидов на сегодняшние UTC-сутки ещё не
@@ -892,6 +895,13 @@ export interface HeAutoPipelineTickSummary {
   lettersHeld: number;
   failed: number;
   details: HeAutoPipelineTickDetail[];
+  /**
+   * Порядок вертикалей каждого обойдённого проекта с ключами компаратора
+   * (describeHeRefillVerticalOrder) — строка ночного лога крона. Без неё «почему
+   * эта вертикаль слот не получила» объяснить нечем: до вертикалей за
+   * verticals_per_run цикл не доходит и строк деталей им не пишет.
+   */
+  orders: Array<{ configId: string; projectId: string; order: string }>;
 }
 
 interface ConfigRow {
@@ -1002,9 +1012,13 @@ function latestCampaignByVertical(
       Date.parse(launch.created_at) ||
       Date.parse(asString(row.created_at)) ||
       0;
-    // При сплите запуска по сегментам долив идёт ТОЛЬКО в основную кампанию
-    // (segment=null) — новые лиды refill по сегментам не классифицированы;
-    // сплит без основной кампании вертикаль пропускает (доливать некуда).
+    // При сплите запуска по сегментам цель ночи — основная кампания
+    // (segment=null): по ней тик находит шаблон для гейта писем (основные
+    // тексты) и пресет для предполёта ёмкости воркспейса. Строки
+    // сегментов по сегментным кампаниям того же запуска раскладывает уже сам
+    // долив (stages/baseCollectRefill.ts, routeHeRefillSegments, только 'us');
+    // сплит без основной кампании вертикаль пропускает — строкам без сегмента
+    // лечь некуда (pickRefillTemplate тоже вернёт null).
     const campaignId = launch.campaigns?.length
       ? launch.campaigns.find((c) => c.segment === null)?.campaign_id
       : launch.campaign_id;
@@ -1424,6 +1438,181 @@ async function readCarryoverByVertical(
   }
 }
 
+/* ─── ПОРЯДОК ВЕРТИКАЛЕЙ НОЧИ (P-B-refill-ranking-no-starvation) ──────────
+ *
+ * Слоты verticals_per_run раздаются в порядке compareHeRefillVerticalOrder.
+ * Раньше порядок был по he_verticals.created_at, и первые verticals_per_run
+ * вертикалей проекта забирали слоты каждую ночь: кампании остальных вертикалей
+ * не доливались никогда.
+ *
+ * КОМПАРАТОР — ключи по очереди, следующий решает только при равенстве:
+ *   1. UTC-день последней ночи, в которую вертикаль ПОЛУЧИЛА СЛОТ, — раньше
+ *      идёт первой; нет такой ночи в окне чтения (ни разу, либо старше всего
+ *      окна) — первее всех. Слот = строка he_auto_pipeline_runs с base_id: её
+ *      пишет постановка сборки (и ночь только из переноса), финал пишет стадия.
+ *      Отказы постановки без base_id (нет места у рассыльщика, письма, сбой
+ *      enqueue) и пропуски без строки ('existing', 'no_campaign', 'dry',
+ *      'carry_covers', пауза, бюджет) слота не тратят — и вертикаль остаётся
+ *      впереди. Получившая слот уходит в конец: вертикали, которые слоты
+ *      расходуют, идут по кругу;
+ *   2. в один день — вертикаль с очередью переноса раньше, старейшая очередь
+ *      первой (её компании уже оплачены и ждут не дольше срока очереди);
+ *   3. меньше лидов, принятых рассыльщиком за последние
+ *      HE_REFILL_RANK_RECENT_DAYS суток (сумма stats.appended строк окна), —
+ *      раньше: отстающая вертикаль идёт перед той, что недавно получила больше;
+ *   4. точное время той же строки (created_at) — раньше: из получивших слот в
+ *      один день первой идёт та, что тогда стояла в очереди раньше. Без этого
+ *      ключа ничьи по 1–3 решал бы created_at, и одна и та же старейшая
+ *      вертикаль выигрывала бы каждую ничью;
+ *   5. he_verticals.created_at (старше — раньше); 6. id — полный порядок.
+ *
+ * ПОЧЕМУ ПЕРЕНОС НЕ ПЕРВЫЙ КЛЮЧ. Очередь пополняет только ночь самой
+ * вертикали: компании с адресом, которым кап не дал письма (а ночь, которой
+ * бюджет дня не дал ни строки, — все свои компании с адресом). Пол сборки
+ * (HE_REFILL_MIN_COMPANIES = 100 компаний, stages/baseCollectRefill.ts) больше
+ * дефолтного капа (50 лидов на проект за сутки), и этот кап делят до
+ * verticals_per_run ночей. «Очередь первой» отдавала бы слоты тем вертикалям,
+ * что получили их вчера, — то же голодание, что у created_at, а при
+ * verticals_per_run = 1 сколько угодно долго. Там, где очередь действительно
+ * решает — очередей проекта хватает на остаток дня, — порядок прежний и стоит
+ * выше компаратора: очереди первыми, от старейшей (шаг 3a- в шапке, tickOrder).
+ *
+ * Всё, что читает компаратор, лежит в БД и переживает ночь: строки журнала
+ * (base_id, created_at, stats.appended), he_refill_carryover (prepared_at) и
+ * he_verticals (created_at, id). В памяти процесса между ночами — ничего.
+ *
+ * Журнал не прочитался — ключи 1–4 молчат у всех, и порядок сводится к
+ * прежнему created_at (fail-open: сбой чтения не должен ни останавливать ночь,
+ * ни менять её объём — количество сборок за ночь компаратор не меняет).
+ */
+
+/** Окно ключа 3 компаратора: сколько суток назад считаются «недавние» лиды. */
+export const HE_REFILL_RANK_RECENT_DAYS = 7;
+/**
+ * Сколько свежих строк журнала проекта читает порядок за обход. Вертикаль,
+ * чьей строки в окне нет, получила последний слот раньше любой строки окна
+ * (или ни разу) — для ключа 1 это и есть «раньше всех», так что обрезка его
+ * не искажает. Ключ 3 считается по строкам окна: сумма неполная, только если у
+ * проекта больше 500 слотов за HE_REFILL_RANK_RECENT_DAYS суток.
+ */
+const HE_REFILL_RANK_RUNS_LIMIT = 500;
+
+/** Что журнал прогонов говорит о вертикали для порядка ночи. */
+interface HeRefillRankFacts {
+  /** UTC-день (YYYY-MM-DD) последней строки с base_id. */
+  lastSlotDay: string;
+  /** created_at той же строки (мс). */
+  lastSlotMs: number;
+  /** Сумма stats.appended строк за последние HE_REFILL_RANK_RECENT_DAYS суток. */
+  appendedRecent: number;
+}
+
+/** Ключи компаратора одной вертикали (см. блок «ПОРЯДОК ВЕРТИКАЛЕЙ НОЧИ»). */
+export interface HeRefillOrderKey {
+  id: string;
+  /** Ключ 1; null — слота в окне журнала нет (или журнал не прочитан). */
+  lastSlotDay: string | null;
+  /** Ключ 2: prepared_at старейшей компании очереди (мс); null — очереди нет. */
+  carryOldestMs: number | null;
+  /** Ключ 3. */
+  appendedRecent: number;
+  /** Ключ 4: created_at строки последнего слота (мс); null — вместе с lastSlotDay. */
+  lastSlotMs: number | null;
+  /** Ключ 5: he_verticals.created_at (мс); NaN — нечитаемо, такая идёт последней. */
+  createdAtMs: number;
+}
+
+/** Порядок ночи — см. блок «ПОРЯДОК ВЕРТИКАЛЕЙ НОЧИ». Отрицательное — `a` раньше. */
+export function compareHeRefillVerticalOrder(a: HeRefillOrderKey, b: HeRefillOrderKey): number {
+  if (a.lastSlotDay !== b.lastSlotDay) {
+    if (a.lastSlotDay === null) return -1;
+    if (b.lastSlotDay === null) return 1;
+    return a.lastSlotDay < b.lastSlotDay ? -1 : 1;
+  }
+  if (a.carryOldestMs !== b.carryOldestMs) {
+    if (a.carryOldestMs === null) return 1;
+    if (b.carryOldestMs === null) return -1;
+    return a.carryOldestMs < b.carryOldestMs ? -1 : 1;
+  }
+  if (a.appendedRecent !== b.appendedRecent) return a.appendedRecent < b.appendedRecent ? -1 : 1;
+  // Ключ 1 равен, значит lastSlotMs у обоих null либо у обоих число.
+  if (a.lastSlotMs !== null && b.lastSlotMs !== null && a.lastSlotMs !== b.lastSlotMs) {
+    return a.lastSlotMs < b.lastSlotMs ? -1 : 1;
+  }
+  const aCreated = Number.isFinite(a.createdAtMs) ? a.createdAtMs : Number.POSITIVE_INFINITY;
+  const bCreated = Number.isFinite(b.createdAtMs) ? b.createdAtMs : Number.POSITIVE_INFINITY;
+  if (aCreated !== bCreated) return aCreated < bCreated ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** Порядок ночи одной строкой для лога крона: вертикали с их ключами. */
+function describeHeRefillVerticalOrder(
+  keys: HeRefillOrderKey[],
+  carryCompaniesOf: Map<string, number>,
+  historyRead: boolean,
+  carryCoversDay: boolean,
+): string {
+  const parts = keys.map((k) => {
+    const queue = carryCompaniesOf.get(k.id);
+    return (
+      `${k.id} (last slot ${k.lastSlotDay ?? 'never'}` +
+      (queue === undefined ? '' : `, carried ${queue}`) +
+      `, accepted ${HE_REFILL_RANK_RECENT_DAYS}d ${k.appendedRecent})`
+    );
+  });
+  return (
+    (carryCoversDay ? 'carried-over queues cover today — queued verticals first, oldest queue first, then: ' : '') +
+    (historyRead ? '' : 'run history unread — created_at order: ') +
+    parts.join(' > ')
+  );
+}
+
+/**
+ * Ключи 1 и 3 компаратора из журнала прогонов проекта. `null` — журнал не
+ * прочитан (сбой, срок): вызывающий берёт прежний порядок по created_at.
+ * НИКОГДА НЕ БРОСАЕТ — порядок не повод ронять обход проекта.
+ */
+async function readRefillRankByVertical(
+  supabase: SupabaseClient,
+  projectId: string,
+  verticalIds: string[],
+  now: Date,
+): Promise<Map<string, HeRefillRankFacts> | null> {
+  try {
+    const { data, error } = await supabase
+      .from('he_auto_pipeline_runs')
+      .select('vertical_id, created_at, stats')
+      .eq('project_id', projectId)
+      .in('vertical_id', verticalIds)
+      .not('base_id', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(HE_REFILL_RANK_RUNS_LIMIT);
+    if (error) return null;
+    const recentFromMs = now.getTime() - HE_REFILL_RANK_RECENT_DAYS * 24 * 60 * 60 * 1000;
+    const facts = new Map<string, HeRefillRankFacts>();
+    for (const row of (data ?? []) as Array<{ vertical_id?: unknown; created_at?: unknown; stats?: unknown }>) {
+      const verticalId = asString(row.vertical_id);
+      const createdMs = Date.parse(asString(row.created_at));
+      if (!verticalId || !Number.isFinite(createdMs)) continue;
+      // Строки идут от свежей к старой: первая встреченная — последний слот.
+      const entry = facts.get(verticalId) ?? {
+        lastSlotDay: new Date(createdMs).toISOString().slice(0, 10),
+        lastSlotMs: createdMs,
+        appendedRecent: 0,
+      };
+      if (createdMs >= recentFromMs) {
+        const stats = row.stats && typeof row.stats === 'object' ? (row.stats as { appended?: unknown }) : {};
+        const appended = asNumberOrNull(stats.appended);
+        if (appended !== null && appended > 0) entry.appendedRecent += appended;
+      }
+      facts.set(verticalId, entry);
+    }
+    return facts;
+  } catch {
+    return null;
+  }
+}
+
 /** Запись журнала прогонов; ошибка вставки — фейл обхода конфига. */
 async function insertRun(
   supabase: SupabaseClient,
@@ -1625,7 +1814,9 @@ async function passConfig(
     return;
   }
 
-  // Сортировка в JS (created_at asc): стабильный порядок добора вертикалей.
+  // created_at asc — только исходный порядок списка (и прежний порядок равных
+  // очередей переноса ниже). Слоты раздаёт компаратор после переноса
+  // (verticalsInOrder, блок «ПОРЯДОК ВЕРТИКАЛЕЙ НОЧИ»).
   const verticals = (await loadVerticals(supabase, config.project_id))
     .slice()
     .sort((a, b) => Date.parse(a.created_at ?? '') - Date.parse(b.created_at ?? ''));
@@ -1695,7 +1886,7 @@ async function passConfig(
   // День закрывает только очередь вертикали, чья ночь ДЕЙСТВИТЕЛЬНО поставлена
   // (carryRunning), а не очередь, которую мы надеялись отправить. Поэтому при
   // покрытом дне вертикали с очередью идут первыми (от старейшей), остальные —
-  // следом в прежнем порядке, и решение «пропустить» принимается по уже
+  // следом в порядке компаратора, и решение «пропустить» принимается по уже
   // поставленным ночам. Вертикаль, чья ночь не встала — уже собирается
   // ('existing': база застряла в сборке), сбой постановки, пометка сухой, —
   // день не закрывает: ночь получает следующая по возрасту очередь, а не
@@ -1721,6 +1912,42 @@ async function passConfig(
   const carryCoversDay = dayLeft !== null && projectCarry > 0 && projectCarry >= dayLeft;
   const carryQueueOf = new Map(carryCandidates.map((c) => [c.id, c.companies]));
   const verticalById = new Map(verticals.map((v) => [v.id, v]));
+
+  // ─── ПОРЯДОК ВЕРТИКАЛЕЙ (блок «ПОРЯДОК ВЕРТИКАЛЕЙ НОЧИ» выше) ───
+  // Ключ 2 — те же очереди, что считает перенос (carryCandidates): только
+  // вертикали, которые этой ночью могут отправить. Журнал не прочитался —
+  // ключи 1–4 не ставятся никому, и остаётся прежний порядок по created_at.
+  const rankFacts =
+    budgetExhausted || verticals.length === 0
+      ? null
+      : await readRefillRankByVertical(supabase, config.project_id, verticals.map((v) => v.id), now);
+  const carryOldestOf = new Map(carryCandidates.map((c) => [c.id, c.oldestMs]));
+  const orderKeys = verticals
+    .map((v): HeRefillOrderKey => {
+      const facts = rankFacts?.get(v.id);
+      return {
+        id: v.id,
+        lastSlotDay: facts?.lastSlotDay ?? null,
+        carryOldestMs: rankFacts ? (carryOldestOf.get(v.id) ?? null) : null,
+        appendedRecent: facts?.appendedRecent ?? 0,
+        lastSlotMs: facts?.lastSlotMs ?? null,
+        createdAtMs: Date.parse(v.created_at ?? ''),
+      };
+    })
+    .sort(compareHeRefillVerticalOrder);
+  const verticalsInOrder = orderKeys
+    .map((k) => verticalById.get(k.id))
+    .filter((v): v is (typeof verticals)[number] => v !== undefined);
+  if (!budgetExhausted && verticals.length > 0) {
+    summary.orders.push({
+      configId: config.id,
+      projectId: config.project_id,
+      order: describeHeRefillVerticalOrder(orderKeys, carryQueueOf, rankFacts !== null, carryCoversDay),
+    });
+  }
+
+  // Очередям хватает на день — они первыми, от старейшей (шаг 3a- в шапке),
+  // за ними остальные в порядке компаратора.
   const tickOrder = carryCoversDay
     ? [
         ...carryCandidates
@@ -1728,9 +1955,9 @@ async function passConfig(
           .sort((a, b) => a.oldestMs - b.oldestMs)
           .map((c) => verticalById.get(c.id))
           .filter((v): v is (typeof verticals)[number] => v !== undefined),
-        ...verticals.filter((v) => !carryQueueOf.has(v.id)),
+        ...verticalsInOrder.filter((v) => !carryQueueOf.has(v.id)),
       ]
-    : verticals;
+    : verticalsInOrder;
   /** Компании очередей вертикалей, чья ночь этим тиком действительно поставлена. */
   let carryRunning = 0;
 
@@ -2124,6 +2351,7 @@ export async function runHeAutoPipelineTick(
     lettersHeld: 0,
     failed: 0,
     details: [],
+    orders: [],
   };
 
   const configs = (await loadConfigs(supabase)).filter((c) => c.id && c.project_id);

@@ -7,6 +7,7 @@ import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { pauseHeRefillForClientCancel } from '@/lib/hypothesisEngine/autoPipeline';
+import { isHeMissingColumnError } from '@/lib/hypothesisEngine/projectCancelMarker';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import { engServerError } from '../../../_shared';
 
@@ -82,6 +83,16 @@ const CANCEL_BASE_WORK_SELECT = [
  *     Включить обратно — «Start outreach» (POST .../autopilot); другого
  *     выключателя автопилота у кабинета нет. Не записалось — отвечаем
  *     отказом, ничего не тронув.
+ *     ТОЙ ЖЕ записью — he_projects.cancelled_at = момент отмены, долговечная
+ *     отметка (lib/hypothesisEngine/projectCancelMarker.ts): отмена при нуле
+ *     активных джоб не оставляет ни одной отменённой джобы, и без отметки по
+ *     ней нельзя узнать, что базу, упавшую или осиротевшую ДО этого нажатия,
+ *     поднимать нельзя. Её читают автоподъём (he_auto_resume_transient_bases,
+ *     миграция 20261009_0002: база с updated_at <= cancelled_at не
+ *     поднимается) и ремонт осиротевшей сборки (baseCollectEnqueue). Одна
+ *     запись с флагом — чтобы «автопилот выключен, а отметки нет» не бывало.
+ *     Колонки нет (миграция не применена) — та же запись без отметки, исход
+ *     уходит в аудит (cancelMarker: 'unsupported').
  *  2. Пауза ночного добора — ТА ЖЕ, что ставит ёмкость рассыльщика
  *     (he_auto_pipeline_configs.refill_paused_at, причина «клиент отменил»,
  *     pauseHeRefillForClientCancel). Добор ведёт he_auto_pipeline_configs.enabled,
@@ -109,8 +120,9 @@ const CANCEL_BASE_WORK_SELECT = [
  *  7. Проект 'researching' → 'draft' (исследование можно запустить заново).
  *
  * Ответ — { ok: true, cancelled: <сколько джоб отменено> }, ноль — штатный
- * ответ (автопилот выключен, добор поставлен на паузу, если у проекта есть его
- * конфиг и колонки паузы из 20260930_0005, застрявшие базы остановлены).
+ * ответ (автопилот выключен, отметка отмены записана, если есть колонка из
+ * 20261009_0002, добор поставлен на паузу, если у проекта есть его конфиг и
+ * колонки паузы из 20260930_0005, застрявшие базы остановлены).
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.cancel.post' }, async () => {
@@ -130,11 +142,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const nowDate = new Date();
     const now = nowDate.toISOString();
 
-    // 1. Автопилот — первым (почему — докблок POST).
-    const { error: autopilotErr } = await supabaseAdmin
+    // 1. Автопилот — первым и вместе с отметкой отмены (почему — докблок POST).
+    let cancelMarker: 'recorded' | 'unsupported' = 'recorded';
+    let { error: autopilotErr } = await supabaseAdmin
       .from('he_projects')
-      .update({ autopilot: false, updated_at: now })
+      .update({ autopilot: false, cancelled_at: now, updated_at: now })
       .eq('id', id);
+    if (autopilotErr && isHeMissingColumnError(autopilotErr)) {
+      cancelMarker = 'unsupported';
+      ({ error: autopilotErr } = await supabaseAdmin
+        .from('he_projects')
+        .update({ autopilot: false, updated_at: now })
+        .eq('id', id));
+    }
     if (autopilotErr) {
       return engServerError('client.eng.cancel.autopilot_failed', autopilotErr, 'Failed to cancel the running jobs', {
         userId: result.auth.userId,
@@ -203,6 +223,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       constructorJobsStopped: baseWork.constructorJobs,
       mapsJobsStopped: baseWork.mapsJobs,
       autopilotOff: true,
+      cancelMarker,
       refillPause,
     });
 
@@ -335,9 +356,11 @@ async function stopCancelledBaseWork(
  *
  * Почему это ничего не переплачивает: харвест — чекпойнт НЕЗАВЕРШЁННОЙ сборки,
  * а start-guard стадии требует статус 'collecting' (база уже 'failed'), а
- * автоподъём (`he_auto_resume_transient_bases`) базу с отменённой джобой
- * исключает навсегда — по статусу джобы, а не по тексту. Повторный сбор
- * клиент запускает кнопкой, и она создаёт НОВУЮ базу.
+ * автоподъём (`he_auto_resume_transient_bases`) такую базу исключает навсегда
+ * — по статусу её отменённой джобы и, с миграцией 20261009_0002, по отметке
+ * отмены проекта (updated_at базы, записанный этим запросом, равен
+ * cancelled_at), то есть и тогда, когда активной джобы у неё не было.
+ * Повторный сбор клиент запускает кнопкой, и она создаёт НОВУЮ базу.
  *
  * Fail-soft: отмена к этому моменту уже состоялась (джобы и статусы
  * записаны), и неудачная уборка объёма не должна превращаться в отказ отмены —
