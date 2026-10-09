@@ -206,7 +206,7 @@ const LETTER4 =
 const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
   hiring: {
     title: 'Hiring for sales/GTM',
-    essence: `The company is hiring for a sales/GTM role (SDR, BDR, AE, Head of Sales). We do not write about the hire itself or about recruiting. ${POLZA_WHAT}, so new pipeline can start moving in parallel with the hire and a new rep does not spend the ramp-up on manual research.`,
+    essence: `The company is hiring for a sales/GTM role (SDR, BDR, AE, Head of Sales) or for a demand-generation role that owns new pipeline (demand gen, growth marketing, Head of Marketing). We do not write about the hire itself or about recruiting. ${POLZA_WHAT}, so new pipeline can start moving in parallel with the hire and the new hire does not spend the ramp-up on manual research.`,
     goals: [
       `{{trigger}} (the hiring fact), then {{pain}} (the likely sales bottleneck of this company while it is hiring); ${LETTER1_TAIL}. The point: a new rep should not spend the ramp-up on manual research`,
       letter2Goal('a new sales hire spends the first weeks building lists by hand', 'real conversations start late and the ramp drags'),

@@ -123,7 +123,15 @@ export function triggerPhraseVariants(company: string, t: Trigger | null): strin
   switch (t.type) {
     case 'hiring': {
       const title = shortJobTitle(t.title);
-      if (!title) return [`Saw that ${company} is hiring for sales.`, `Noticed ${company} is growing its sales team.`];
+      if (!title) {
+        // Без короткого названия говорим про область найма — и она теперь не
+        // всегда продажи: маркетинговая вакансия не должна превратиться в
+        // «увидели, что вы нанимаете продажника».
+        const marketing = /\b(marketing|demand gen|lead gen|cmo)\b/i.test(t.title ?? '');
+        return marketing
+          ? [`Saw that ${company} is hiring for demand generation.`, `Noticed ${company} is growing its marketing team.`]
+          : [`Saw that ${company} is hiring for sales.`, `Noticed ${company} is growing its sales team.`];
+      }
       return [
         `Saw that ${company} is hiring for ${title}.`,
         `Noticed the ${title} opening at ${company}.`,
@@ -171,7 +179,10 @@ export function triggerShort(t: Trigger | null): string {
 // Роль, которую можно назвать в теме и в боли: английское название продажной
 // должности. «Stage», «Alternance», «Commercial», «Responsable Commercial»
 // (французские вакансии) и стажёры давали «pipeline before your new Stage ramps».
-const SALES_ROLE_RE = /\b(?:sales|account executive|account manager|business development|sdr|bdr|ae|revenue|gtm|growth|partnerships?)\b/i;
+// 09.10.2026: + маркетинг потока (demand gen, lead gen, growth marketing, head
+// of marketing) — такие вакансии теперь тоже источник, и роль можно называть
+// в теме: «pipeline before your new Demand Generation Manager ramps».
+const SALES_ROLE_RE = /\b(?:sales|account executive|account manager|business development|sdr|bdr|ae|revenue|gtm|growth|partnerships?|marketing|demand gen(?:eration)?|lead gen(?:eration)?)\b/i;
 const NOT_A_ROLE_RE = /\b(?:intern|internship|stage|stagiaire|alternance|trainee|werkstudent|praktik\w*)\b/i;
 
 /** Роль для темы и коротких фраз: английская продажная должность не длиннее четырёх слов. */

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
+import OutcomesDashboard from '@/components/mailbox-load/OutcomesDashboard';
 import type { MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, TagStatus } from '@/lib/instantly/mailboxLoad';
 import {
   sortTags, sortSpecialists, nextSort,
@@ -366,6 +367,15 @@ export default function MailboxLoadPage() {
         <ul className="space-y-1 text-[11px] text-zinc-400">
           {data.notes.map((n, i) => <li key={i}>• {n}</li>)}
         </ul>
+      )}
+
+      {/* Исходы отправок — внизу страницы и своим запросом: таблица ящиков не
+          ждёт тяжёлых запросов к письмам, а их сбой не роняет страницу. */}
+      {!loading && !error && data?.asOfDay && (
+        <div className="border-t border-zinc-200 pt-5">
+          {/* key по дню: смена дня монтирует блок заново, со своей загрузкой */}
+          <OutcomesDashboard key={data.asOfDay} day={data.asOfDay} />
+        </div>
       )}
     </div>
   );
