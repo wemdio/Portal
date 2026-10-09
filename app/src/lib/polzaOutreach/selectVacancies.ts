@@ -13,6 +13,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isDemandMarketingTitle } from '@/lib/parsers/engHiring';
 import type { PolzaOutreachConfig, PolzaOutreachVacancyCandidate } from './types';
 
 /**
@@ -38,13 +39,22 @@ import type { PolzaOutreachConfig, PolzaOutreachVacancyCandidate } from './types
 // автосбора — добавлены остальные роли новых продаж. Account/Key Account
 // Manager не берём: это работа с текущими клиентами, разбор вакансии всё равно
 // не дал бы им повода «найм».
+// 09.10.2026 (решение Максима): + маркетинговый найм под поток заявок — Head of
+// Demand Gen, Growth Marketing, Lead Generation, Head of Marketing. Повод тот
+// же: компания вкладывается в поток новых обращений. Бренд, контент и
+// продуктовый маркетинг в кэш не попадают вовсе (isDemandMarketingTitle).
 const SDR_TITLE_TERMS = [
   'sdr', 'bdr', 'sales development', 'business development', 'outbound sales', 'account executive',
   'growth', 'partnerships', 'partnership manager', 'go-to-market', 'gtm', 'head of sales', 'vp of sales', 'vp sales',
   'sales manager', 'sales director', 'sales representative', 'sales executive', 'inside sales', 'new business',
   'lead generation', 'demand generation', 'commercial director', 'chief revenue officer', 'head of revenue',
+  'lead gen', 'demand gen', 'growth marketing', 'performance marketing', 'pipeline marketing', 'revenue marketing',
+  'head of marketing', 'director of marketing', 'marketing director', 'vp of marketing', 'vp marketing',
+  'chief marketing officer', 'cmo',
 ];
 const SDR_TITLE_RE = new RegExp(`\\b(${SDR_TITLE_TERMS.join('|')})\\b`, 'i');
+/** Название про маркетинг — такие проверяет отдельно isDemandMarketingTitle. */
+const MARKETING_RE = /\bmarketing\b|\bcmo\b/i;
 const MIN_DESCRIPTION_CHARS = 300;
 const PAGE_SIZE = 500;
 /** Сколько строк кэша просматриваем за одну волну, прежде чем сдаться. */
@@ -124,6 +134,9 @@ export async function selectVacancies(
       if (byCompany.size >= want) break;
       // Точная проверка по границам слова: база отдала более широкий набор.
       if (!SDR_TITLE_RE.test(row.vacancy_title ?? '')) continue;
+      // Маркетинг берём только про поток заявок: «Content Marketing Director»
+      // совпадает с термином «marketing director», но повода у него нет.
+      if (MARKETING_RE.test(row.vacancy_title ?? '') && !isDemandMarketingTitle(row.vacancy_title ?? '')) continue;
       const description = row.vacancy_description ?? '';
       if (description.trim().length <= MIN_DESCRIPTION_CHARS) continue;
       const company = row.company_name?.trim();
