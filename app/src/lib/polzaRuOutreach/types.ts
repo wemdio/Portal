@@ -36,7 +36,7 @@ export const LETTER_COUNT = 4;
  * v2 (02.10.2026): связка повода с предложением вместо строки о компании,
  * выгода и модель оплаты в письме 1.
  */
-export const TEMPLATE_VERSION = 'offer_templates_v2@2026-10-02';
+export const TEMPLATE_VERSION = 'offer_templates_v3@2026-10-09';
 
 /** Писем в цепочке: во всех цепочках четыре, как у CEO (решение 26.09.2026). */
 export function letterCountFor(_chain: ChainType): number {
@@ -61,6 +61,14 @@ export const TEMPLATE_PLACEHOLDERS = {
   case: '{{кейс}}',
   hypothesis: '{{гипотеза}}',
   signature: '{{подпись}}',
+  /**
+   * Предмет обсуждения — что мы предлагаем обсудить именно этой компании
+   * («поиск корпоративных клиентов на поставки автозапчастей»): одна фраза
+   * дешёвой модели на компанию (letters/topic.ts). Стоит внутри предложения.
+   */
+  topic: '{{предмет}}',
+  /** Должность из вакансии в «ёлочках» — только у цепочки «найм», внутри предложения. */
+  position: '{{должность}}',
 } as const;
 export type TemplatePlaceholder = (typeof TEMPLATE_PLACEHOLDERS)[keyof typeof TEMPLATE_PLACEHOLDERS];
 
@@ -81,6 +89,11 @@ export const TEMPLATE_SIGN_OFF = `С уважением,\n${TEMPLATE_PLACEHOLDER
  */
 export interface ChainTemplateLetters {
   subject: string;
+  /**
+   * Темы письма 1 «перешлите ответственному» (общая почта); несколько —
+   * чередуются по компании. Пусто — та же тема, что у письма лично ЛПР.
+   */
+  subjectsRouting?: string[];
   bodyDirect: string;
   bodyRouting: string;
   letter2: string;
@@ -89,18 +102,20 @@ export interface ChainTemplateLetters {
   letter4: string;
 }
 
-/** Кейс по отрасли подбирается всем цепочкам, кроме SDR (router.routeCase). */
-export function chainUsesCase(chain: ChainType): boolean {
-  return chain !== 'hiring';
+/**
+ * Кейс по отрасли подбирается всем цепочкам (router.routeCase). До 09.10.2026
+ * у SDR-цепочки кейса не было; в утверждённых текстах он есть и у неё.
+ */
+export function chainUsesCase(_chain: ChainType): boolean {
+  return true;
 }
 
 /**
- * Гипотеза сегментов — только у цепочек CEO: в письме 3 SDR-цепочки —
- * утверждённая фраза о ролях и процесс, у «Автоматизации» — механика формата.
- * Там её не считаем и за неё не платим.
+ * Гипотеза сегментов — наблюдение по сайту в письме 2 у всех цепочек
+ * (утверждённые тексты 09.10.2026). До этого её не было у SDR и «Автоматизации».
  */
-export function chainUsesHypothesis(chain: ChainType): boolean {
-  return chain !== 'hiring' && chain !== 'automation';
+export function chainUsesHypothesis(_chain: ChainType): boolean {
+  return true;
 }
 
 /** Плейсхолдеры, которые может использовать шаблон оффера. */
