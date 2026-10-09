@@ -32,7 +32,7 @@ import { callLLMText, callLLMWithSchema, getVeModel, setVeActiveJobSignal, withV
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
-import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
+import { getVeCollectionFailure, isVeTransientCatalogError } from '@/lib/verticalEngineV2/collectionErrors';
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
@@ -275,6 +275,16 @@ describe('llm rawCall retry', () => {
     expect(getVeCollectionFailure('private database error').message).not.toContain('private database');
     expect(maxAttemptsFor('Requesty 502: unavailable')).toBe(5);
     expect(maxAttemptsFor('Invalid candidate 402')).toBe(3);
+    expect(isRetryableStageError('yandex_maps catalog read: An invalid response was received from the upstream server')).toBe(true);
+    for (const permanent of ['401 unauthorized', '403 forbidden', '404 missing RPC', 'permission denied',
+      'Requesty 402: insufficient balance', 'подходящие рубрики в готовом каталоге не найдены']) {
+      expect(isVeTransientCatalogError(`yandex_maps catalog read: ${permanent}`)).toBe(false);
+    }
+    for (const transport of ['fetch failed', 'EAI_AGAIN', 'connection lost']) {
+      expect(isVeTransientCatalogError(`yandex_maps catalog read: ${transport}`)).toBe(true);
+    }
+    expect(isVeTransientCatalogError('Requesty 502: unavailable')).toBe(false);
+    expect(isVeTransientCatalogError(new VeOperationTimeoutError('Yandex catalog page', 30_000))).toBe(true);
     fetchMock.mockClear().mockResolvedValueOnce(httpResponse(429, { error: 'Insufficient funds; private account' }));
     const noFunds = await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'billing-model' })
       .catch((cause: Error) => cause);
