@@ -36,6 +36,7 @@ import { WORKER_LEASE_KEY, withoutWorkerLease, workerLeaseLive, workerLeaseOf } 
 import { dropLettersDoubts, lettersQaDoubtText, templateDoubtText, withLettersDoubt } from './doubts';
 import { journalCounts, type JournalCountRow, type JournalCounts } from './funnel';
 import { buildBridge, type BridgeRequest } from './letters/bridge';
+import { buildTopic } from './letters/topic';
 import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
 import { composeCompanyLetters, type CompanyLettersInput } from './letters/renderTemplate';
 import {
@@ -544,6 +545,19 @@ async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: W
     }
   };
 
+  // Предмет обсуждения — так же: не успели или сбой — запасная фраза.
+  const topic = async (productSummary: string | null): Promise<string | null> => {
+    const left = deadlineAt - Date.now();
+    if (left < HYPOTHESIS_MIN_LEFT_MS || budget.exhausted()) return null;
+    try {
+      return await buildTopic(productSummary, { timeoutMs: Math.min(HYPOTHESIS_TIMEOUT_MS, left - HYPOTHESIS_TIMEOUT_MS) });
+    } catch (err) {
+      if (err instanceof LlmAuthError) throw err;
+      if (!(err instanceof BudgetExceededError)) log('warn', `topic failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  };
+
   let slots = input.target - readyAtStart;
   let next = 0;
   while (next < rows.length && slots > 0) {
@@ -551,7 +565,7 @@ async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: W
     const batch = rows.slice(next, next + slots);
     next += batch.length;
     const composed = await mapPool(batch, REBUILD_POOL, (row) =>
-      composeCompanyLetters(letters, companyInput(row, chain, libraries), { sender, claims: libraries.claims, hypothesis, bridge }),
+      composeCompanyLetters(letters, companyInput(row, chain, libraries), { sender, claims: libraries.claims, hypothesis, bridge, topic }),
     );
     for (const [i, row] of batch.entries()) {
       const c = composed[i];

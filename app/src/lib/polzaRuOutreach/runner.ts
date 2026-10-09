@@ -83,6 +83,7 @@ import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, si
 import { findRuCompanyEmail } from './findEmail';
 import { journalCounts } from './funnel';
 import { buildBridge, type BridgeRequest } from './letters/bridge';
+import { buildTopic } from './letters/topic';
 import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
 import { composeCompanyLetters } from './letters/renderTemplate';
 import {
@@ -1462,6 +1463,19 @@ async function runJob(
       });
     };
 
+    // Предмет обсуждения — как связка: необязателен, при лимите на ИИ или
+    // сбое модели в письмо встаёт запасная фраза.
+    const companyTopic = async (productSummary: string | null): Promise<string | null> => {
+      lettersStillWanted();
+      if (budget.exhausted()) return null;
+      return buildTopic(productSummary).catch((err: unknown) => {
+        if (err instanceof LlmAuthError || err instanceof CancelledError) throw err;
+        lettersStillWanted();
+        if (!(err instanceof BudgetExceededError)) log('warn', `topic failed: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      });
+    };
+
     // Места в лимите готовых для писем, которые сейчас собираются. Между
     // проверкой лимита и готовой строкой — ожидание шаблона оффера (писатель
     // пишет до нескольких минут): без мест все потоки пула прошли бы проверку
@@ -1577,7 +1591,7 @@ async function runJob(
           amoStatus: q.amo?.status ?? null,
           alt: altVariantFor(q.email.emails),
         },
-        { sender, claims: libraries.claims, hypothesis: segmentsHypothesis, bridge: companyBridge },
+        { sender, claims: libraries.claims, hypothesis: segmentsHypothesis, bridge: companyBridge, topic: companyTopic },
       );
       lettersStillWanted();
       reach(q.tally, 'sequence_assembled');

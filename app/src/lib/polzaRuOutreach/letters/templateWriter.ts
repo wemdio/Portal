@@ -36,10 +36,16 @@ import {
 } from '../types';
 import { buildChain, openingSentence, type ChainInput } from './chains';
 import { intro, type LetterContext } from './common';
+import { FIXED_TEMPLATES_MODEL, fixedTemplate } from './fixedTemplates';
 
 const P = TEMPLATE_PLACEHOLDERS;
 const TABLE = 'polza_chain_templates';
 const LANG = 'ru';
+/**
+ * С 09.10.2026 шаблон оффера — утверждённые тексты (fixedTemplates.ts), а не
+ * ответ Gemini. Откат на писателя — false здесь.
+ */
+const USE_FIXED_TEMPLATES = true;
 const ROW_COLUMNS = 'id,offer_key,status,letters,qa_flags,model,cost_usd,attempt,error,updated_at';
 
 /** Первая попытка и одна повторная — с замечаниями автопроверки. */
@@ -71,6 +77,8 @@ const WRITER_PROMPT_CHARS_ESTIMATE = 12_000;
  * бронирует в лимите на ИИ под каждый вызов писателя.
  */
 export function writerAttemptWorstUsd(): number {
+  // Готовые тексты писателя не зовут — бронировать под него нечего.
+  if (USE_FIXED_TEMPLATES) return 0;
   return outreachWorstCaseUsd(LANG, 'writer', WRITER_PROMPT_CHARS_ESTIMATE, WRITER_MAX_TOKENS);
 }
 /**
@@ -468,12 +476,17 @@ export function parseTemplateLetters(raw: unknown, chain: ChainType): ChainTempl
     if (!byN.has(n)) byN.set(n, item as Record<string, unknown>);
   });
   const field = (n: number, key: string) => normalizeBody(byN.get(n)?.[key]);
+  const routingSubjects = byN.get(1)?.subjects_routing;
   return {
     subject: field(1, 'subject').replace(/\s+/g, ' '),
+    subjectsRouting: Array.isArray(routingSubjects)
+      ? routingSubjects.map((s) => normalizeBody(s).replace(/\s+/g, ' ')).filter(Boolean)
+      : undefined,
     bodyDirect: field(1, 'body_direct'),
     bodyRouting: field(1, 'body_routing'),
     letter2: field(2, 'body'),
-    bodyWithCase: chainUsesCase(chain) ? field(3, 'body_with_case') : null,
+    // Пустой вариант с кейсом — шаблон без него (у SDR-цепочки до 09.10.2026).
+    bodyWithCase: chainUsesCase(chain) ? field(3, 'body_with_case') || null : null,
     bodyWithoutCase: field(3, 'body_without_case'),
     letter4: field(4, 'body'),
   };
@@ -482,7 +495,10 @@ export function parseTemplateLetters(raw: unknown, chain: ChainType): ChainTempl
 /** Письма шаблона в контракт писателя — так они лежат в polza_chain_templates.letters. */
 export function templateLettersToJson(t: ChainTemplateLetters): Array<Record<string, unknown>> {
   return [
-    { n: 1, subject: t.subject, body_direct: t.bodyDirect, body_routing: t.bodyRouting },
+    {
+      n: 1, subject: t.subject, body_direct: t.bodyDirect, body_routing: t.bodyRouting,
+      ...(t.subjectsRouting?.length ? { subjects_routing: t.subjectsRouting } : {}),
+    },
     { n: 2, body: t.letter2 },
     t.bodyWithCase === null
       ? { n: 3, body_without_case: t.bodyWithoutCase }
@@ -607,7 +623,35 @@ export function templateQaInput(chain: ChainType, sender: SenderProfile, claims:
   };
 }
 
+/** Утверждённые тексты в занятую строку: без ИИ и без проверки шаблона — текст утверждён людьми. */
+async function writeFixedTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed: TemplateRow): Promise<ChainTemplate> {
+  const letters = fixedTemplate(chain, deps.sender);
+  const template: ChainTemplate = {
+    id: claimed.id,
+    chain,
+    status: 'ok',
+    letters,
+    qaFlags: [],
+    error: null,
+    model: FIXED_TEMPLATES_MODEL,
+    costUsd: Number(claimed.cost_usd ?? 0) || 0,
+    attempt: Number(claimed.attempt ?? 1) || 1,
+  };
+  const saved = await finishRow(deps.db, claimed, {
+    status: 'ok',
+    letters: templateLettersToJson(letters),
+    qa_flags: [],
+    model: FIXED_TEMPLATES_MODEL,
+    cost_usd: template.costUsd,
+    attempt: template.attempt,
+    error: null,
+  });
+  if (!saved) log('warn', `job ${deps.jobId}: chain ${chain} fixed template not saved (row ${claimed.id} was taken over or the DB failed)`);
+  return template;
+}
+
 async function writeTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed: TemplateRow): Promise<ChainTemplate> {
+  if (USE_FIXED_TEMPLATES) return writeFixedTemplate(deps, chain, claimed);
   const qaInput = templateQaInput(chain, deps.sender, deps.claims);
   const firstAttempt = Number(claimed.attempt ?? 1) || 1;
   let cost = 0;
