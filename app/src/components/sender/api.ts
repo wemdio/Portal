@@ -977,7 +977,7 @@ export function fetchSeedBoxes() {
 }
 
 /** Один ящик из формы или пачка строк из выдачи продавца (`lines`). */
-export function addSeedBoxes(body: { lines: string } | { provider?: SeedProviderId; email: string; password: string }) {
+export function addSeedBoxes(body: { lines: string; proxies?: string } | { provider?: SeedProviderId; email: string; password: string }) {
   return authFetchJson<{ created: { id: string; email: string }[]; skipped: string[] }>(`${BASE}/seed-boxes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
