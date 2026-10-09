@@ -8,6 +8,7 @@ import {
   SEED_PROVIDERS,
   isSeedProvider,
   parseSeedLine,
+  parseSeedProxy,
   providerForEmail,
   type SeedProvider,
 } from '@/lib/sender/seedBoxRules';
@@ -64,7 +65,9 @@ export async function GET(req: NextRequest) {
  * Добавить ящики. Два вида тела:
  *  - { provider?, email, password, imap_host? } — один ящик из формы;
  *  - { lines } — строки из выдачи продавца, по одной на ящик: адрес первым
- *    полем, пароль IMAP последним (lib/sender/seedBoxRules.ts → parseSeedLine).
+ *    полем, пароль IMAP последним (lib/sender/seedBoxRules.ts → parseSeedLine);
+ *    к ним необязательно { proxies } — по прокси на строку, по порядку ящиков,
+ *    чтобы первый же вход шёл через прокси, а не с адреса сервера.
  * Вход не проверяется здесь: экран после добавления жмёт «Проверить» по
  * каждому, чтобы запрос не висел минуту на пачке.
  */
@@ -76,11 +79,14 @@ export async function POST(req: NextRequest) {
     const db = supabaseAdmin;
 
     const body = (await req.json().catch(() => null)) as {
-      provider?: unknown; email?: unknown; password?: unknown; imap_host?: unknown; lines?: unknown;
+      provider?: unknown; email?: unknown; password?: unknown; imap_host?: unknown; lines?: unknown; proxies?: unknown;
     } | null;
     if (!body) return jsonError('Пустой запрос', 400);
 
-    const entries: Array<{ email: string; password: string; provider: SeedProvider | null; imapHost: string | null }> = [];
+    const entries: Array<{
+      email: string; password: string; provider: SeedProvider | null; imapHost: string | null;
+      proxy?: { url: string; label: string };
+    }> = [];
     const skipped: string[] = [];
     if (typeof body.lines === 'string') {
       for (const raw of body.lines.split(/\r?\n/)) {
@@ -105,6 +111,23 @@ export async function POST(req: NextRequest) {
     }
     if (!entries.length) return jsonError('Не нашёл ни одного ящика', 400);
 
+    const proxyLines = typeof body.proxies === 'string'
+      ? body.proxies.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+      : [];
+    if (proxyLines.length) {
+      if (proxyLines.length !== entries.length) {
+        return jsonError(`Ящиков ${entries.length}, прокси ${proxyLines.length} — нужно по одному прокси на ящик`, 400);
+      }
+      const labels = new Set<string>();
+      for (const [i, line] of proxyLines.entries()) {
+        const proxy = parseSeedProxy(line);
+        if (!proxy) return jsonError(`Не понял прокси в строке ${i + 1}. Пример: http://логин:пароль@1.2.3.4:8000`, 400);
+        if (labels.has(proxy.label)) return jsonError(`Прокси ${proxy.label} повторяется — один прокси на один ящик`, 400);
+        labels.add(proxy.label);
+        entries[i].proxy = proxy;
+      }
+    }
+
     const rows: Record<string, unknown>[] = [];
     for (const entry of entries) {
       const provider = entry.provider ?? providerForEmail(entry.email);
@@ -118,7 +141,8 @@ export async function POST(req: NextRequest) {
         imap_host: entry.imapHost ?? SEED_PROVIDERS[provider].imapHost,
         imap_port: 993,
         imap_user: entry.email,
-        secret_encrypted: sealMailboxSecret({ imapPassword: entry.password }),
+        secret_encrypted: sealMailboxSecret({ imapPassword: entry.password, proxyUrl: entry.proxy?.url }),
+        proxy_label: entry.proxy?.label ?? null,
         created_by: auth.user.id,
       });
     }
@@ -127,7 +151,10 @@ export async function POST(req: NextRequest) {
     for (const row of rows) {
       const { data, error } = await db.from('sender_seed_boxes').insert(row).select('id, email').maybeSingle();
       if (error) {
-        skipped.push(`${row.email} — ${error.code === '23505' ? 'уже добавлен' : error.message}`);
+        const duplicate = error.code === '23505'
+          ? (error.message.includes('proxy') ? `прокси ${row.proxy_label} уже стоит на другом ящике` : 'уже добавлен')
+          : error.message;
+        skipped.push(`${row.email} — ${duplicate}`);
         continue;
       }
       if (data) created.push({ id: String(data.id), email: String(data.email) });
