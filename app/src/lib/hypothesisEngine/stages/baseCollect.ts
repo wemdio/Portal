@@ -148,7 +148,6 @@ import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { extractEmail } from '@/lib/tools/dfybUtils';
-import { normalizeLeadWebsite } from '@/lib/instantly/leadContactValues';
 import {
   HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
   normalizeHeMaxEmailsPerCompany,
@@ -175,8 +174,27 @@ import {
 // стадию он не тащит ни БД, ни рассыльщика. Нужна, чтобы назвать вслух базу, у
 // которой адресов больше потолка запуска, — см. предупреждение в финале стадии.
 import { HE_LAUNCH_MAX_LEADS } from '../launchHandoff';
+// «Та же компания / тот же адрес» между базами проекта: имя (прежнее правило,
+// перенесено дословно), собственный домен и адрес — см. шапку модуля.
+import {
+  addHeSite,
+  heCompanySiteIdentity,
+  heEmailIdentities,
+  heSameCompanySite,
+  newHeSiteSet,
+  normalizeCompanyForDedup,
+  normalizeWebsiteForDedup,
+  type HeSiteSet,
+} from '../collectionIdentity';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
+// Набор источников по рынку (us — только ENG-источники; RU — без набора).
+import {
+  assertHeSourceAllowedForMarket,
+  gateHeSourcePlan,
+  heSourceAllowedForMarket,
+  HeSourceMarketRefusal,
+} from '../sourcePlanMarketGate';
 import { findIrrelevantRows, findOffTargetRows, heOffTargetMarkersFor } from '../relevanceGate';
 import {
   probeSliceRelevance,
@@ -524,48 +542,12 @@ function withHiringSeenAt<T extends HeUnifiedRow & HeHiringSeenRow>(
 }
 
 /**
- * Нормализация названия компании для дедупа: lowercase, срез юрформ
- * (ООО/ИП/АО/ПАО/ЗАО/ОАО/АНО/НКО и латинские LLC/LTD/INC/OOO/CORP/CORPORATION/
- * LLP/LP/LIMITED/GMBH/PLC/SARL/SA/AG/BV/NV/PTY/PTE — отдельными словами, в
- * любых кавычках; латинское IP НЕ срезаем — слишком коллизионно:
- * «IP Solutions»), удаление кавычек («»„“""'') и прочей пунктуации,
- * схлопывание пробелов. Иначе «ООО "ТЕРАБАЙТ"» из реестра и «ТЕРАБАЙТ»
- * из hh жили в базе обе, как и «Acme, Inc.» из pdl и «ACME LLC» из eng_hiring.
+ * Нормализации имени и сайта для дедупа живут в ../collectionIdentity.ts
+ * (перенесены туда дословно, вместе с новыми ключами домена и адреса).
+ * Реэкспорт — ради прежних импортов: stages/baseCollectRefill.ts берёт
+ * normalizeCompanyForDedup отсюда.
  */
-export function normalizeCompanyForDedup(name: string): string {
-  let s = ` ${name.trim().toLowerCase()} `;
-  // Пунктуация → пробел: кавычки всех стилей, дефисы, точки — всё небуквенное.
-  s = s.replace(/[^0-9a-zа-яё\s]+/gi, ' ');
-  // Юрформы отдельными словами (длинные формы раньше коротких: «пао» до «ао»).
-  s = s.replace(
-    /(^|\s)(ооо|ип|пао|зао|оао|ано|нко|ао|llc|ltd|inc|ooo|corporation|corp|limited|llp|lp|gmbh|plc|sarl|sa|ag|bv|nv|pty|pte)(?=\s|$)/g,
-    ' ',
-  );
-  return s.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Нормализация сайта для дедупа: только хост, lowercase, без www и пути
- * (https://www.x.ru/about → x.ru), срез конечной точки (x.ru. → x.ru).
- * Мусорные значения («не-сайт», localhost, произвольный текст) → пустой
- * ключ: хост без «точки + TLD» — не сайт, а punycode-мусор в ключе склеивал
- * бы разные строки одной компании не хуже пустого сайта. В строке
- * сохраняется полный website — хост используется только в ключе.
- */
-export function normalizeWebsiteForDedup(website: string): string {
-  const raw = website.trim().toLowerCase();
-  if (!raw) return '';
-  let host: string;
-  try {
-    const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
-    host = url.hostname;
-  } catch {
-    // Кривая строка (пробелы, мусор): грубый срез схемы/пути руками.
-    host = raw.replace(/^[a-z]+:\/\//, '').split(/[\s/?#]/)[0];
-  }
-  host = host.replace(/^www\./, '').replace(/\.+$/, '');
-  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(host) ? host : '';
-}
+export { normalizeCompanyForDedup, normalizeWebsiteForDedup };
 
 /**
  * Дедуп: точный ключ «компания|сайт» (первое вхождение побеждает — задачи
@@ -1078,6 +1060,22 @@ export interface HeCollectInfo {
     dropped_over_contact_cap?: number;
     /** Строк отброшено у компаний сверх лимита сборки (инвариант «≤ N компаний»). */
     dropped_over_company_cap?: number;
+    /**
+     * Строк конструктора снято повторной сверкой после импорта: их собственный
+     * домен или адрес уже лежал в другой не-'failed' базе проекта
+     * (heRecheckImportedRows, только market='us'). Ключа нет — сверка на этой
+     * сборке не запускалась (RU-инструмент; конструктор не вернул сетку; сборка
+     * до 09.10.2026).
+     *
+     * Кто читает. Staff: строка лога стадии с тем же числом и сама запись
+     * базы. Кабинет — НЕТ, нарочно, по той же причине, что и
+     * excluded_existing_bases (clientEngProjection, COLLECT_STATS_FIELDS):
+     * снятые строки лежат в другой базе проекта и на объём запуска этой не
+     * влияют. Числа, которые кабинет ЧИТАЕТ (construct.valid_count,
+     * companies_total, ok_contacts), считаются ПОСЛЕ снятия и поэтому верны
+     * без этого счётчика.
+     */
+    dropped_in_other_bases?: number;
     finished_at: string;
   };
 }
@@ -1794,9 +1792,44 @@ function heSizeOrEmpty(sizes: ReadonlySet<string>, value: unknown): boolean {
 }
 
 /**
+ * Снять из плана задачи вне набора источников рынка (sourcePlanMarketGate) и
+ * сказать об этом в лог стадии. Снятые источники дописываются в `dropped` —
+ * причина остановки, если план после снятия опустеет (см. «ПЛАН ПУСТ ПОСЛЕ
+ * НАБОРА РЫНКА» в стадии). У RU набора нет: возвращается тот же объект плана,
+ * лог молчит.
+ */
+function heGatePlanForMarket(
+  ctx: HeStageContext,
+  plan: HeSourcePlan,
+  market: HeMarket,
+  where: string,
+  dropped: string[],
+): HeSourcePlan {
+  const gated = gateHeSourcePlan(plan, market);
+  if (gated.dropped.length > 0) {
+    dropped.push(...gated.dropped);
+    stageLog(
+      ctx,
+      `[base_collect] ${where}: сняты задачи вне набора источников рынка ${market} ` +
+        `(${gated.dropped.join(', ')}) — коллекторы по ним не вызываются`,
+    );
+  }
+  return gated.plan;
+}
+
+/**
  * ПЛАТНАЯ часть планирования: вызов модели + починка «нет каталога» + проба
  * среза. Вход уже прочитан (collectPlanInput), поэтому эта функция ничего из БД
  * не читает и вызывается ТОЛЬКО когда сохранённый план взять нельзя.
+ *
+ * Набор источников рынка (sourcePlanMarketGate) накладывается ТРИЖДЫ: на ответ
+ * модели, после починки каталога и после пробы среза — каждый шаг меняет
+ * задачи плана, и проверка «на входе» не говорила бы ничего о выходе. Починка
+ * и проба добавляют только pdl (источник ставит код, а не модель), поэтому два
+ * последних наложения сегодня ничего не снимают — они держат правило, если
+ * шаг когда-нибудь начнёт возвращать задачу целиком. Снятие ДО починки —
+ * намеренно: us-план, в котором после снятия не осталось каталога (или задач
+ * вовсе), чинится ровно как план без каталога — одним вызовом за pdl-срез.
  */
 async function buildPlan(
   ctx: HeStageContext,
@@ -1808,8 +1841,11 @@ async function buildPlan(
   plan: HeSourcePlan;
   planRepair?: HePlanRepair;
   sliceProbe?: HeSliceProbe;
+  /** Источники задач, снятых набором рынка (пусто у RU и у чистого us-плана). */
+  marketDropped: string[];
 }> {
   const { promptInput } = input;
+  const marketDropped: string[] = [];
 
   const llm = await callLLMWithSchema(
     // Рынок 'us' — EN-промпт с ENG-источниками (pdl/funded/eng_hiring/google_maps).
@@ -1818,26 +1854,22 @@ async function buildPlan(
     { model: getHeModel('bulk') },
   );
   addUsage(usage, llm);
+  const answered = heGatePlanForMarket(ctx, llm.data, market, 'план модели', marketDropped);
 
   // Придуманные пороги размера снимаем ДО починки и ДО пробы среза: и та, и
   // другая должны смотреть ровно тот срез, который пойдёт в сбор.
   const planned: HeSourcePlan =
     market === 'us'
-      ? { ...llm.data, tasks: heWithoutUnfoundedSizeFilters(ctx, llm.data.tasks, promptInput) }
-      : llm.data;
+      ? { ...answered, tasks: heWithoutUnfoundedSizeFilters(ctx, answered.tasks, promptInput) }
+      : answered;
 
   const withCatalog = await ensureCatalogSource(ctx, planned, promptInput, usage, market);
+  const repaired = heGatePlanForMarket(ctx, withCatalog.plan, market, 'план после починки каталога', marketDropped);
   // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
   // не существует, а добавленный срез проверяется на общих основаниях.
-  const { plan, sliceProbe } = await ensureSliceMatchesVertical(
-    ctx,
-    withCatalog.plan,
-    vertical,
-    promptInput,
-    usage,
-    market,
-  );
-  return { plan, planRepair: withCatalog.planRepair, sliceProbe };
+  const probed = await ensureSliceMatchesVertical(ctx, repaired, vertical, promptInput, usage, market);
+  const plan = heGatePlanForMarket(ctx, probed.plan, market, 'план после пробы среза', marketDropped);
+  return { plan, planRepair: withCatalog.planRepair, sliceProbe: probed.sliceProbe, marketDropped };
 }
 
 /**
@@ -2174,9 +2206,10 @@ async function widenPlanWithPaidSlice(
     harvested: number;
     limit: number;
     usage: HeUsage;
+    market: HeMarket;
   },
 ): Promise<HeCollectTaskState | null> {
-  const { info, input, catalogStates, harvested, limit, usage } = args;
+  const { info, input, catalogStates, harvested, limit, usage, market } = args;
   const plan = info.plan;
   if (!plan) return null;
   const at = new Date().toISOString();
@@ -2229,6 +2262,16 @@ async function widenPlanWithPaidSlice(
       ctx,
       '[base_collect] расширение плана: вернулся срез, который уже дочитан, — план не тронут',
     );
+    return null;
+  }
+  // Набор источников рынка — и здесь: срез расширения тоже становится задачей
+  // плана, которую следующие ночи берут из стора. Источник ставит код (pdl),
+  // поэтому сегодня отказ здесь недостижим; если шаг начнёт брать источник из
+  // ответа модели, задача вне набора в план не попадёт, а за ответ уже
+  // заплачено — это 'failed', а не повтор покупки.
+  if (!heSourceAllowedForMarket(market, task.source)) {
+    info.plan_widening = { outcome: 'failed', error: `источник ${task.source} вне набора рынка ${market}`, at };
+    stageLog(ctx, `[base_collect] расширение плана: источник ${task.source} вне набора рынка ${market} — план не тронут`);
     return null;
   }
 
@@ -3283,8 +3326,13 @@ function createHeCatalogRun(
         return key === null || have.has(key);
       });
     },
-    async rememberPlan(plan, planKey) {
+    async rememberPlan(rawPlan, planKey) {
       if (!stored) return;
+      // В стор — только задачи из набора источников рынка: план базы, чьи
+      // задачи записаны до набора, мог донести сюда русскую задачу через запись
+      // после платного расширения. Чтение плана из стора её и так снимет, но
+      // стор, в который она не попадает вовсе, честнее.
+      const plan = gateHeSourcePlan(rawPlan, args.market).plan;
       const db = paidCheckpointDb(ctx);
       // Ключи ВСЕХ ступеней каждого среза, а не только нулевой: закладки
       // ослабленных ступеней принадлежат тем же задачам плана, и запись,
@@ -3381,6 +3429,14 @@ async function dispatchTask(
   widenMode: HeWidenMode = 'off',
 ): Promise<void> {
   const { task } = state;
+
+  // Последний рубеж набора источников рынка — ДО любого коллектора: ни
+  // дочерней джобы, ни чтения каталога, то есть ничего не оплачено. Отказ —
+  // HeSourceMarketRefusal: runDispatch переводит в 'failed' только эту задачу.
+  // Рынок — тем же выражением, что у google_maps ниже; источник — тот, по
+  // которому ветвится диспатч (task.source). У RU набора нет: assert не
+  // бросает никогда.
+  assertHeSourceAllowedForMarket(ctx.market ?? projectMarket(project), task.source);
 
   // Реестр — синхронно, без дочерней джобы: строки сразу ложатся в задачу.
   // Компании других баз проекта исключаются ещё на выборке (fetchDirectoryRows),
@@ -3847,73 +3903,111 @@ function normalizeInnForDedup(value: unknown): string {
  *  - домен (ТОЛЬКО market='us', см. useWebsite): для ENG-источников
  *    (pdl/funded/eng_hiring/google maps) сайт — это и есть удостоверение
  *    компании, ИНН у них не бывает никогда. «Acme Technologies» и «Acme» на
- *    одном домене — одна компания, хотя ключи имён у них разные;
+ *    одном домене — одна компания, хотя ключи имён у них разные. С 09.10.2026
+ *    «один домен» — это ещё и поддомен с самим доменом (shop.acme.com ↔
+ *    acme.com, правило heSameCompanySite в ../collectionIdentity.ts); два
+ *    поддомена одного домена (x.weebly.com и y.weebly.com) по-прежнему разные;
+ *  - адрес (ТОЛЬКО market='us', с 09.10.2026): тот же ящик в другой базе —
+ *    исключение, чьё бы имя ни стояло в строке: две базы проекта иначе
+ *    написали бы одному получателю дважды;
  *  - имя: если под этим именем в других базах есть ИНН и у входящей строки
  *    тоже — сравниваем юрлица точно (одноимённые компании разных регионов
  *    с разными ИНН больше НЕ вымываются); при market='us' то же уточнение
  *    делает домен (две разные фирмы «Acme» с разными сайтами больше не
  *    вымывают друг друга); если уточнять нечем — консервативный матч по
- *    имени, как раньше.
+ *    имени, как раньше. Правило имени этой правкой не менялось.
  *
- * Почему домен НЕ включён для RU: у RU-источников одна фирма легко приходит
- * с разными сайтами (реестр — корпоративный домен, карты — лендинг), а под
- * одним корпоративным сайтом живут несколько юрлиц холдинга. Там точное
- * удостоверение — ИНН, и он есть. Включение домена для RU меняло бы поведение
- * ежедневного staff-инструмента в обе стороны сразу: это отдельное решение,
- * а не побочный эффект правки ENG.
+ * Почему домен и адрес НЕ включены для RU: у RU-источников одна фирма легко
+ * приходит с разными сайтами (реестр — корпоративный домен, карты — лендинг),
+ * а под одним корпоративным сайтом живут несколько юрлиц холдинга. Там точное
+ * удостоверение — ИНН, и он есть. Включение домена или адреса для RU меняло бы
+ * поведение ежедневного staff-инструмента в обе стороны сразу: это отдельное
+ * решение, а не побочный эффект правки ENG.
  */
 export interface HeBaseExclusionKeys {
   /** нормализованное имя → ИНН'ы, встреченные под ним в других базах. */
   nameInns: Map<string, Set<string>>;
   /** Все ИНН других баз (матч «то же юрлицо, другое написание»). */
   inns: Set<string>;
-  /** нормализованное имя → домены, встреченные под ним (только useWebsite). */
-  nameSites: Map<string, Set<string>>;
-  /** Все домены других баз (матч «та же компания, другое имя»; только useWebsite). */
-  sites: Set<string>;
-  /** market='us': домен участвует в ключе. Для RU оба множества выше пусты. */
+  /** нормализованное имя → собственные сайты, встреченные под ним (только useWebsite). */
+  nameSites: Map<string, HeSiteSet>;
+  /** Все собственные сайты других баз (матч «та же компания, другое имя»; только useWebsite). */
+  sites: HeSiteSet;
+  /** Все адреса других баз, lowercase (матч «тот же ящик»; только useWebsite). */
+  emails: Set<string>;
+  /**
+   * market='us': домен и адрес участвуют в ключе. Для RU три набора выше
+   * пусты и не заполняются — RU-исключение остаётся «имя + ИНН».
+   */
   useWebsite: boolean;
 }
 
-/**
- * Домен как удостоверение компании: только собственный сайт. Соцсети,
- * сокращатели и бесплатные почтовые домены в колонке «сайт» (обычное дело у
- * google maps) принадлежат многим компаниям сразу — по ним исключение
- * вымывало бы всех, кроме первой. Отсев берём готовый,
- * normalizeLeadWebsite (instantly/leadContactValues) уже содержит этот список
- * и поддерживается: он возвращает null для не-компанейского хоста.
- */
-function companySiteKey(website: unknown): string {
-  const raw = cell(website);
-  if (!raw || !normalizeLeadWebsite(raw)) return '';
-  return normalizeWebsiteForDedup(raw);
+/** Пустые ключи исключения: RU — «имя + ИНН», us — плюс домен и адрес. */
+function emptyExclusionKeys(useWebsite: boolean): HeBaseExclusionKeys {
+  return {
+    nameInns: new Map<string, Set<string>>(),
+    inns: new Set<string>(),
+    nameSites: new Map<string, HeSiteSet>(),
+    sites: newHeSiteSet(),
+    emails: new Set<string>(),
+    useWebsite,
+  };
 }
 
-/** Строка исключена: совпал непустой ИНН, домен или имя (с уточнением, см. выше). */
+/** Тот же ящик лежит в другой базе (только useWebsite — у RU набор пуст). */
+function matchesExclusionEmail(keys: HeBaseExclusionKeys, email: unknown): boolean {
+  if (!keys.useWebsite || keys.emails.size === 0) return false;
+  return heEmailIdentities(email).some((address) => keys.emails.has(address));
+}
+
+/**
+ * Строка исключена: совпал непустой ИНН, собственный домен, адрес (два
+ * последних — только market='us') или имя (с уточнением, см. выше).
+ */
 function matchesExclusion(
   keys: HeBaseExclusionKeys,
   company: string,
   inn: unknown,
   website?: unknown,
+  email?: unknown,
 ): boolean {
   const innKey = normalizeInnForDedup(inn);
   if (innKey && keys.inns.has(innKey)) return true;
-  const siteKey = keys.useWebsite ? companySiteKey(website) : '';
-  if (siteKey && keys.sites.has(siteKey)) return true;
+  const site = keys.useWebsite ? heCompanySiteIdentity(website) : null;
+  if (site && heSameCompanySite(keys.sites, site)) return true;
+  if (matchesExclusionEmail(keys, email)) return true;
   const nameKey = normalizeCompanyForDedup(company);
   if (!nameKey) return false;
   const knownInns = keys.nameInns.get(nameKey);
   if (knownInns === undefined) return false;
   // Точное сравнение юрлиц только когда ИНН есть с обеих сторон.
   if (innKey && knownInns.size > 0) return knownInns.has(innKey);
-  if (siteKey) {
+  if (site) {
     // То же уточнение доменом: одноимённые компании с РАЗНЫМИ собственными
     // сайтами — разные компании. Когда домена нет хотя бы с одной стороны,
     // остаёмся на консервативном матче по имени.
     const knownSites = keys.nameSites.get(nameKey);
-    if (knownSites && knownSites.size > 0) return knownSites.has(siteKey);
+    if (knownSites && knownSites.hosts.size > 0) return heSameCompanySite(knownSites, site);
   }
   return true;
+}
+
+/**
+ * Повторная сверка ПОСЛЕ конструктора (только market='us'): строка, чей
+ * собственный домен или адрес уже лежит в другой не-'failed' базе проекта.
+ *
+ * Только домен и адрес, БЕЗ имени — и это граница, а не забывчивость. Имя на
+ * этом тике уже сверено: харвест пересчитан против свежих ключей, и компания,
+ * совпавшая по имени, в merged не попала. А вот строки сетки конструктора
+ * пришли из merged ПРОШЛОГО тика и с адресами, которых до конструктора не было
+ * вовсе, — их и сверяем. Новое слияние по одному имени здесь не заводится
+ * (одноимённые фирмы на разных доменах — вопрос владельца).
+ */
+function matchesExclusionContact(keys: HeBaseExclusionKeys, website: unknown, email: unknown): boolean {
+  if (!keys.useWebsite) return false;
+  const site = heCompanySiteIdentity(website);
+  if (site && heSameCompanySite(keys.sites, site)) return true;
+  return matchesExclusionEmail(keys, email);
 }
 
 /**
@@ -3921,14 +4015,15 @@ function matchesExclusion(
  * source, любой статус кроме failed; текущая база исключена). Без этого одна
  * и та же компания копилась в нескольких базах проекта через повторные
  * сборки. Компания — из колонки 'company', ИНН — из 'inn', сайт — из
- * 'website' (только market='us', см. HeBaseExclusionKeys). data jsonb чужой базы и так читается целиком (одно поле
+ * 'website' и адрес — из 'email' (оба только market='us', см.
+ * HeBaseExclusionKeys). data jsonb чужой базы и так читается целиком (одно поле
  * строки), поэтому slice до MAX_ROWS_LIMIT — лишь JS-предохранитель; он
  * обязан быть не меньше максимального размера базы: кап 10k при лимите
  * сборки до 50k отрезал хвост чужой базы из исключений, и вторая сборка
  * собирала компании 10001–50000 первой заново как «новые».
  *
- * ЦЕНА И ПОЧЕМУ ОНА ТАКАЯ. Исключению нужны три поля строки (company, inn,
- * website), а читается строка целиком — вместе с описанием компании и
+ * ЦЕНА И ПОЧЕМУ ОНА ТАКАЯ. Исключению нужны четыре поля строки (company, inn,
+ * website, email), а читается строка целиком — вместе с описанием компании и
  * вердиктами валидации. Спроецировать внутрь jsonb-МАССИВА PostgREST не умеет:
  * путь вида `collect_info->target_checkpoint` работает для объекта, для
  * `$[*].company` нужна SQL-функция или computed column, то есть миграция. Она
@@ -3979,13 +4074,7 @@ async function loadOtherBaseExclusionKeys(
   const released = market === 'us' ? await loadHeRefillReleasedCompanies(ctx, projectId) : null;
   const carryKeyOf = released && released.size > 0 ? heRefillCarryKeyFn(HE_AUTO_COLLECT_COLUMNS) : null;
 
-  const keys: HeBaseExclusionKeys = {
-    nameInns: new Map<string, Set<string>>(),
-    inns: new Set<string>(),
-    nameSites: new Map<string, Set<string>>(),
-    sites: new Set<string>(),
-    useWebsite: market === 'us',
-  };
+  const keys = emptyExclusionKeys(market === 'us');
   for (const row of (data ?? []) as Array<{ id?: unknown; data?: unknown }>) {
     const rows = Array.isArray(row.data) ? row.data.slice(0, MAX_ROWS_LIMIT) : [];
     const releasedHere =
@@ -4001,16 +4090,22 @@ async function loadOtherBaseExclusionKeys(
 }
 
 /**
- * Одна строка чужой базы → ключи исключения. Вынесено из
- * loadOtherBaseExclusionKeys без единой правки логики: тем же правилом
- * «та же компания» пользуется перенос (heCarryExclusionKeys ниже), и второго
- * определения, способного разойтись с исключением сборок, быть не должно.
+ * Одна строка чужой базы → ключи исключения. Одна на всех: тем же правилом
+ * «та же компания / тот же адрес» пользуется перенос (heCarryExclusionKeys
+ * ниже), и второго определения, способного разойтись с исключением сборок,
+ * быть не должно. С 09.10.2026 при useWebsite кладёт сайт с регистрируемым
+ * доменом (heCompanySiteIdentity) и адреса строки; ветка имени и ИНН прежняя.
  */
 function addExclusionRow(keys: HeBaseExclusionKeys, rec: Record<string, unknown> | null): void {
   const innKey = normalizeInnForDedup(rec?.inn);
   if (innKey) keys.inns.add(innKey);
-  const siteKey = keys.useWebsite ? companySiteKey(rec?.website) : '';
-  if (siteKey) keys.sites.add(siteKey);
+  const site = keys.useWebsite ? heCompanySiteIdentity(rec?.website) : null;
+  if (site) addHeSite(keys.sites, site);
+  // Адрес — отдельно от имени: строка без компании (мусорное имя) всё равно
+  // держит ящик, и письмо на него из второй базы было бы вторым письмом.
+  if (keys.useWebsite) {
+    for (const address of heEmailIdentities(rec?.email)) keys.emails.add(address);
+  }
   const company = rec?.company;
   if (typeof company !== 'string') return;
   const nameKey = normalizeCompanyForDedup(company);
@@ -4021,40 +4116,34 @@ function addExclusionRow(keys: HeBaseExclusionKeys, rec: Record<string, unknown>
     keys.nameInns.set(nameKey, bucket);
   }
   if (innKey) bucket.add(innKey);
-  if (siteKey) {
+  if (site) {
     let sites = keys.nameSites.get(nameKey);
     if (!sites) {
-      sites = new Set<string>();
+      sites = newHeSiteSet();
       keys.nameSites.set(nameKey, sites);
     }
-    sites.add(siteKey);
+    addHeSite(sites, site);
   }
 }
 
 /**
- * Ключи исключения по строкам ОДНОЙ базы, правилом market='us' (домен
- * участвует). Читатель — перенос (stages/baseCollectRefill.ts,
+ * Ключи исключения по строкам ОДНОЙ базы, правилом market='us' (домен и адрес
+ * участвуют). Читатель — перенос (stages/baseCollectRefill.ts,
  * heRefillCarryPeerConflicts): компания очереди, которую параллельная сборка
  * другой вертикали того же проекта подготовила ещё раз, узнаётся ровно тем
  * правилом, которым её исключила бы любая следующая сборка.
  */
 export function heCarryExclusionKeys(rows: readonly unknown[]): HeBaseExclusionKeys {
-  const keys: HeBaseExclusionKeys = {
-    nameInns: new Map<string, Set<string>>(),
-    inns: new Set<string>(),
-    nameSites: new Map<string, Set<string>>(),
-    sites: new Set<string>(),
-    useWebsite: true,
-  };
+  const keys = emptyExclusionKeys(true);
   for (const item of rows) {
     if (item && typeof item === 'object') addExclusionRow(keys, item as Record<string, unknown>);
   }
   return keys;
 }
 
-/** Строка совпала с ключами исключения (то же правило, что у сборки). */
+/** Строка совпала с ключами исключения (то же правило, что у сборки, включая адрес). */
 export function heCarryRowExcluded(keys: HeBaseExclusionKeys, row: Record<string, unknown>): boolean {
-  return matchesExclusion(keys, cell(row.company), row.inn, row.website);
+  return matchesExclusion(keys, cell(row.company), row.inn, row.website, row.email);
 }
 
 /**
@@ -4076,6 +4165,15 @@ export function heCarryRowExcluded(keys: HeBaseExclusionKeys, row: Record<string
  * тот же массив, что и до правки.
  *
  * Кап — после дедупа и исключения, как раньше после дедупа.
+ *
+ * Харвест задачи, чей источник не разрешён рынку (sourcePlanMarketGate: у us —
+ * только ENG-источники), в срез не входит ни при каком статусе задачи. Стадия
+ * такие задачи переводит в 'failed' ещё до DISPATCH (свип «НАБОР ИСТОЧНИКОВ
+ * РЫНКА»), а ремонт refill-базы читает collect_info как есть — для него это
+ * единственная точка отсева. У RU набора нет: срез прежний.
+ *
+ * Адрес строки (у us — google maps приносит его сразу) сверяется с адресами
+ * других баз тем же matchesExclusion.
  */
 function harvestSlice(
   done: HeCollectTaskState[],
@@ -4085,14 +4183,72 @@ function harvestSlice(
 ): { interleaved: HeUnifiedRow[]; kept: HeUnifiedRow[]; merged: HeUnifiedRow[] } {
   const interleaved = dedupUnifiedRows(
     interleaveTaskHarvests(
-      done.map((t) => {
-        const rows = (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '');
-        return market === 'us' ? contactableFirst(rows) : rows;
-      }),
+      done
+        .filter((t) => heSourceAllowedForMarket(market, t.source))
+        .map((t) => {
+          const rows = (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '');
+          return market === 'us' ? contactableFirst(rows) : rows;
+        }),
     ),
   );
-  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn, r.website));
+  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn, r.website, r.email));
   return { interleaved, kept, merged: kept.slice(0, limit) };
+}
+
+/** Итог повторной сверки строк конструктора с другими базами проекта. */
+export interface HeImportRecheck<T> {
+  rows: T[];
+  /** Вердикты, параллельные rows. */
+  emailStatuses: Array<string | null>;
+  /** Строк снято: собственный домен или адрес уже лежит в другой базе проекта. */
+  droppedInOtherBases: number;
+}
+
+/**
+ * ПОВТОРНАЯ СВЕРКА ПОСЛЕ КОНСТРУКТОРА (только market='us'; у RU — вход как есть).
+ *
+ * Сетка конструктора собрана из merged ТОГО тика, что ставил джобу, а между
+ * ним и импортом проходят часы (до 6 ч). За это время соседняя сборка проекта
+ * — вторая вертикаль той же ночи, повторная сборка клиента — успевает записать
+ * свою базу, и её компании и адреса для нашей сетки «новые» только потому, что
+ * в момент нашего харвеста её `data` была пуста (собирающаяся база держит
+ * строки только после терминальной записи). Кроме того, адреса в сетке — в
+ * основном находки самого конструктора (find_emails), и до него их не с чем
+ * было сверять вовсе.
+ *
+ * Правило: строка, чей СОБСТВЕННЫЙ ДОМЕН или АДРЕС уже лежит в другой
+ * не-'failed' базе проекта (те же ключи, что у харвеста, — keys этого тика),
+ * снимается. Имя здесь не сверяется — см. matchesExclusionContact.
+ *
+ * Цена — строки, за которые конструктор уже поработал (обход сайта,
+ * SMTP-проба): денег провайдеру за них не платили, но работа выброшена. Цена
+ * обратного — второе письмо тому же ящику из второй кампании проекта (запуск
+ * грузит лиды с skip_if_in_workspace: false, и межкампанийного дедупа у
+ * рассылки нет), то есть репутация доменов клиента. Снятые строки компанию не
+ * «теряют»: она лежит в той базе, что её держит.
+ *
+ * Чистая функция; вердикты сдвигаются вместе со строками.
+ */
+export function heRecheckImportedRows<T extends HeUnifiedRow>(input: {
+  rows: T[];
+  emailStatuses: Array<string | null>;
+  keys: HeBaseExclusionKeys;
+  market: HeMarket;
+}): HeImportRecheck<T> {
+  const { rows, emailStatuses, keys, market } = input;
+  if (market !== 'us' || !keys.useWebsite) return { rows, emailStatuses, droppedInOtherBases: 0 };
+  const keptRows: T[] = [];
+  const keptStatuses: Array<string | null> = [];
+  let dropped = 0;
+  rows.forEach((row, i) => {
+    if (matchesExclusionContact(keys, row.website, row.email)) {
+      dropped += 1;
+      return;
+    }
+    keptRows.push(row);
+    keptStatuses.push(emailStatuses[i] ?? null);
+  });
+  return { rows: keptRows, emailStatuses: keptStatuses, droppedInOtherBases: dropped };
 }
 
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
@@ -5150,6 +5306,32 @@ export async function closeHeRefillBaseAfterFinalFail(
   if (result && construct?.status === 'dispatched') await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
 }
 
+/**
+ * Свип задач collect_info по набору источников рынка (см. «НАБОР ИСТОЧНИКОВ
+ * РЫНКА» в стадии): задача вне набора в любом незавершённом или завершённом
+ * статусе → 'failed' с текстом HeSourceMarketRefusal, харвест снят, строк 0.
+ * Уже 'failed' не трогаем — её причина важнее. Дочернюю джобу 'dispatched'
+ * задачи не отменяем: это внутренний парсер (hh / Яндекс.Карты), денег он не
+ * стоит, а её строки больше никто не прочитает. Возвращает, сколько снято.
+ */
+function heRefuseForeignTasks(ctx: HeStageContext, tasks: HeCollectTaskState[], market: HeMarket): number {
+  let refused = 0;
+  for (const state of tasks) {
+    if (state.status === 'failed' || heSourceAllowedForMarket(market, state.source)) continue;
+    const prior = state.status;
+    state.status = 'failed';
+    state.error =
+      new HeSourceMarketRefusal(market, state.source).message +
+      (prior === 'done' ? ' (собранные строки в базу не идут)' : '') +
+      (prior === 'dispatched' ? ` (строки дочерней джобы ${state.child_job_id ?? '—'} не читаются)` : '');
+    delete state.harvest;
+    state.rows = 0;
+    refused += 1;
+    stageLog(ctx, `[base_collect] ${state.source} (${prior}): ${state.error}`);
+  }
+  return refused;
+}
+
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -5413,7 +5595,43 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     const planned = await collectPlanInput(job, ctx, vertical, market);
     planInput = planned;
     const catalog = await getCatalog();
-    const reusedPlan = catalog?.reusablePlan(planned.planKey) ?? null;
+    /**
+     * Источники задач, снятых набором рынка (sourcePlanMarketGate) в этой фазе:
+     * причина остановки, если план после снятия опустеет. У RU набора нет —
+     * массив пуст всегда.
+     */
+    const marketDropped: string[] = [];
+    /**
+     * СОХРАНЁННЫЙ ПЛАН — ЧЕРЕЗ НАБОР РЫНКА НА ЧТЕНИИ, каждый раз. План живёт в
+     * сторе вертикали неделями (he_catalog_cursors), и план, записанный до
+     * появления набора, исполнялся бы вечно: стор отдаёт его без планировщика
+     * и без единой проверки, кроме ключа входа. Ревизию ключа (catalogCursor
+     * HE_SOURCE_PLAN_REVISION) ради этого НЕ поднимаем: подъём заставил бы
+     * КАЖДУЮ ENG-вертикаль заново купить план и пробу среза, а отсев на чтении
+     * бесплатен и детерминирован.
+     *  - сняты не все задачи — план идёт без снятых; стор не переписывается
+     *    (следующая ночь снимет их так же бесплатно, а его запись — путь
+     *    платного расширения и нового плана);
+     *  - сняты ВСЕ — сохранённый план непригоден: планируем заново, как будто
+     *    его нет (это платный вызов, но иначе вертикаль не соберётся никогда), и
+     *    новый план ниже ложится в стор на его место.
+     * Стор читается только при market='us' (getCatalog), то есть у RU этой
+     * ветки нет вовсе.
+     */
+    const storedPlan = catalog?.reusablePlan(planned.planKey) ?? null;
+    let reusedPlan: HeSourcePlan | null = null;
+    if (storedPlan) {
+      const gatedStored = heGatePlanForMarket(ctx, storedPlan, market, 'план из закладки вертикали', marketDropped);
+      if (gatedStored.tasks.length > 0) {
+        reusedPlan = gatedStored;
+      } else {
+        stageLog(
+          ctx,
+          `[base_collect] план из закладки вертикали целиком вне набора источников рынка ${market} — ` +
+            'планируем заново (вызов планировщика оплачивается)',
+        );
+      }
+    }
     // Провенанс плана считаем всегда по ТЕКУЩЕМУ чтению гипотез, а не копией из
     // стора: иначе переиспользование показывало бы вчерашнюю разметку.
     info.hypotheses = planned.usedHypotheses;
@@ -5434,6 +5652,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       info.plan = built.plan;
       planRepair = built.planRepair;
       sliceProbe = built.sliceProbe;
+      marketDropped.push(...built.marketDropped);
     }
     if (planRepair) info.plan_repair = planRepair;
     if (sliceProbe) info.slice_probe = sliceProbe;
@@ -5456,6 +5675,46 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       // Клиент — чекпойнт оплаты: план и обе пробы уже оплачены, а потерянная
       // запись оставила бы базу 'collecting' без плана, и повтор купил бы их
       // заново (см. paidCheckpointDb).
+      await paidCheckpointDb(ctx)
+        .from('he_bases')
+        .update({
+          status: 'failed',
+          error: note.slice(0, 500),
+          collect_info: dropCollectWorkState(info),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', baseId);
+      throw new Error(note);
+    }
+    /**
+     * ПЛАН ПУСТ ПОСЛЕ НАБОРА РЫНКА (только market='us'). Модель вернула только
+     * источники вне набора (или их вернул сохранённый план, а новый — тоже), и
+     * починка «нет каталога» pdl-срез не добавила (её отказ — в plan_repair).
+     * Без этой ветки сборка ушла бы дальше с нулём задач и упала бы общим
+     * «план пуст» уже после записи плана — то есть тихо, без причины.
+     *
+     * Останавливаемся ЗДЕСЬ, тем же путём, что отказ пробы среза: база
+     * 'failed' с причиной, записанной клиентом чекпойнта оплаты (план и
+     * починка уже оплачены, а повтор джобы без этой записи купил бы их снова;
+     * с ней — упирается в start-guard и не покупает ничего). План в стор не
+     * идёт. Повтор сборки — новая база, которая спланирует заново.
+     *
+     * Что видит клиент: «Авто-сборка не дала строк» кабинет сворачивает в код
+     * `source` («источники не дали строк — запустите сборку ещё раз»). Если
+     * починка упала на отказе провайдера, его текст стоит в причине, и
+     * классификатор отдаёт `billing` / `configuration` / `provider` раньше
+     * `source`; на `billing` / `configuration` воркер тогда же шлёт алерт
+     * команде (тот же предикат, heTeamFixableFailureOf), на `provider` — нет.
+     */
+    if (market === 'us' && info.plan.tasks.length === 0) {
+      info.tasks = [];
+      const dropped = [...new Set(marketDropped)];
+      const repairError = info.plan_repair?.outcome === 'failed' ? info.plan_repair.error : undefined;
+      const note =
+        `Авто-сборка не дала строк: план пуст — ни одна задача плана не входит в набор источников рынка ${market}` +
+        (dropped.length > 0 ? ` (сняты: ${dropped.join(', ')})` : '') +
+        (repairError ? `, добавить каталожный срез не удалось: ${repairError}` : '') +
+        '. Коллекторы не вызывались.';
       await paidCheckpointDb(ctx)
         .from('he_bases')
         .update({
@@ -5497,6 +5756,18 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
   }
   const tasks = info.tasks ?? [];
+
+  /**
+   * НАБОР ИСТОЧНИКОВ РЫНКА: ЗАДАЧИ, СОХРАНЁННЫЕ ДО НЕГО. План этой базы мог быть
+   * записан в collect_info до выката набора, и его задачи вне набора лежат в
+   * любом статусе: 'pending' дошла бы до коллектора (её поймал бы и assert в
+   * dispatchTask), 'dispatched' — дочерняя джоба парсера уже идёт, и WAIT
+   * прочитал бы её строки, 'done' — строки уже в харвесте задачи и ушли бы в
+   * merged. Все три — один отказ: задача 'failed' с причиной, харвест снят,
+   * строки в базу не идут. Запись — только когда что-то снято (один раз на
+   * базу). У RU набора нет: свип ничего не находит и ничего не пишет.
+   */
+  if (heRefuseForeignTasks(ctx, tasks, market) > 0) await persistCollectInfo(ctx, baseId, info);
 
   /**
    * ТИК ЧИСТОГО ОЖИДАНИЯ КОНСТРУКТОРА — выходим до всего остального.
@@ -5675,6 +5946,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         harvested: harvestedUpperBound,
         limit,
         usage,
+        market,
       });
       // Ответ модели ничего не дал — отмечаем это У ПЛАНА, иначе завтрашняя
       // база с пустым collect_info купит ровно тот же отказ ещё раз, и так
@@ -5805,7 +6077,24 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     finished_at: new Date().toISOString(),
   };
 
-  if (merged.length === 0) {
+  /**
+   * ЗАКРЫТЬ СБОРКУ БЕЗ СТРОК — общий терминал двух мест: пустой merged (ниже,
+   * сразу после HARVEST) и тик импорта, на котором повторная сверка сняла ВСЕ
+   * оплаченные строки конструктора как уже лежащие в других базах проекта
+   * (только market='us', см. heRecheckImportedRows). Тело — прежняя ветка
+   * «merged пуст» без единой правки логики; `importReason` есть только у
+   * второго места и заменяет разбор задач в причине: задачи там отработали и
+   * дали строки, и «план пуст» / «сегмент исчерпан» были бы неправдой. Причина
+   * второго места начинается тем же «Авто-сборка не дала строк», что и у
+   * ветки «merged опустел на тике импорта» до этой правки, но кабинет их
+   * различает: оборот «уже есть в других базах проекта» сворачивается в свой
+   * код (`already_collected`, clientErrors.ts — правило стоит ВЫШЕ `source`),
+   * первое место — как раньше (`source` / `segment_exhausted`).
+   */
+  const closeWithoutRows = async (
+    closeStats: NonNullable<HeCollectInfo['stats']>,
+    importReason: string | null,
+  ): Promise<HeStageResult> => {
     // Сюда же доходит тик ИМПОРТА, если за время работы конструктора
     // межбазовое исключение выросло настолько, что merged опустел, — и
     // результат конструктора тогда не импортируется. Это сознательно, а не
@@ -5841,7 +6130,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         job,
         base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
         info: dropCollectWorkState(info),
-        stats,
+        stats: closeStats,
         finalRows: [],
         finalColumns: [...HE_AUTO_COLLECT_COLUMNS],
         emailStatuses: [],
@@ -5859,7 +6148,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         // стадии снимаем ЗДЕСЬ, до передачи, чтобы не заводить второе место,
         // которое обязано об этом помнить (dropCollectWorkState).
         info: dropCollectWorkState(info),
-        stats,
+        stats: closeStats,
       });
       return {
         result: { base_id: baseId, rows: 0, refill: refillResult },
@@ -5920,20 +6209,24 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         .filter(Boolean)
         .join('; ') ||
       'план пуст';
-    const note = segmentExhausted
-      ? 'Сегмент исчерпан: новых компаний нет'
-      : `Авто-сборка не дала строк: ${breakdown}`;
+    const note = importReason
+      ? `Авто-сборка не дала строк: ${importReason}`
+      : segmentExhausted
+        ? 'Сегмент исчерпан: новых компаний нет'
+        : `Авто-сборка не дала строк: ${breakdown}`;
     await ctx.supabase
       .from('he_bases')
       .update({
         status: 'failed',
         error: note.slice(0, 500),
-        collect_info: { ...dropCollectWorkState(info), stats },
+        collect_info: { ...dropCollectWorkState(info), stats: closeStats },
         updated_at: new Date().toISOString(),
       })
       .eq('id', baseId);
     throw new Error(note);
-  }
+  };
+
+  if (merged.length === 0) return await closeWithoutRows(stats, null);
 
   // ─── CONSTRUCT ───
   // Обогащение собранных строк конструктором баз (валидация почт ВСЕГДА,
@@ -5951,6 +6244,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // соседними исключениями: оплаченные строки не исчезают молча.
   let droppedOverContactCap = 0;
   let droppedOverCompanyCap = 0;
+  // Что сняла повторная сверка после конструктора (heRecheckImportedRows,
+  // только market='us'): null — сверка на этой сборке не запускалась (RU,
+  // конструктор не вернул сетку), и ключа в воронке нет.
+  let droppedInOtherBases: number | null = null;
   // Компаний в готовой базе. Без конструктора это сами merged-строки: их ключи
   // «компания|домен» уникальны после дедупа HARVEST, то есть строка = компания.
   let companiesTotal = merged.length;
@@ -6206,13 +6503,52 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           ? null
           : `конструктор завершился со статусом ${bcStatus}${bc?.error_message ? `: ${bc.error_message}` : ''}`;
       if (imported) {
+        // ПОВТОРНАЯ СВЕРКА с другими базами проекта — до капа, на тех же ключах,
+        // что у харвеста этого тика (existingKeys прочитаны свежими выше).
+        // Только market='us': у RU сетка импортируется как раньше.
+        const rechecked =
+          market === 'us'
+            ? heRecheckImportedRows({
+                rows: imported.rows,
+                emailStatuses: imported.emailStatuses,
+                keys: existingKeys,
+                market,
+              })
+            : null;
+        if (rechecked) {
+          droppedInOtherBases = rechecked.droppedInOtherBases;
+          if (rechecked.droppedInOtherBases > 0) {
+            stageLog(
+              ctx,
+              `[base_collect] повторная сверка после конструктора: снято ${rechecked.droppedInOtherBases} ` +
+                `из ${imported.rows.length} строк — их домен или адрес уже есть в других базах проекта`,
+            );
+          }
+          // Сверка сняла ВСЕ оплаченные строки: всё, что нашёл конструктор, у
+          // проекта уже есть. Базу из одних отложенных гейтом строк (им письмо
+          // не уйдёт) не пишем — тот же терминал, что у пустого merged.
+          if (rechecked.rows.length === 0) {
+            info.construct = {
+              ...construct,
+              status: bcStatus === 'completed' ? 'done' : bcStatus,
+              emails_found: imported.emailsFound,
+              valid_count: 0,
+              note: 'все строки конструктора уже есть в других базах проекта — импортировать нечего',
+            };
+            return await closeWithoutRows(
+              { ...stats, dropped_in_other_bases: rechecked.droppedInOtherBases },
+              `все ${imported.rows.length} строк, которые вернул конструктор, — компании и адреса, ` +
+                'которые уже есть в других базах проекта (вторая база написала бы им повторно)',
+            );
+          }
+        }
         // Оба числа клиента накладываются ЗДЕСЬ, на готовую сетку: «до N
         // адресов на компанию» и лимит сборки как кап КОМПАНИЙ. Иначе число
         // клиента зависело бы от того, дошла ли джоба до шага
         // cap_emails_per_company (см. capImportedRows).
         const capped = capImportedRows({
-          rows: imported.rows,
-          emailStatuses: imported.emailStatuses,
+          rows: rechecked ? rechecked.rows : imported.rows,
+          emailStatuses: rechecked ? rechecked.emailStatuses : imported.emailStatuses,
           contactCap,
           companyCap: limit,
         });
@@ -6426,6 +6762,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ok_contacts: okContacts,
     dropped_over_contact_cap: droppedOverContactCap,
     dropped_over_company_cap: droppedOverCompanyCap,
+    // Только когда повторная сверка запускалась (market='us' с импортом):
+    // у RU ключа нет, как и до правки.
+    ...(droppedInOtherBases !== null ? { dropped_in_other_bases: droppedInOtherBases } : {}),
     // Причина «нулевой» базы машинно, а не только в тексте he_bases.error: у
     // базы, где гейт снял ВСЁ, low_relevance == rows_total и ok_contacts == 0
     // выглядят так же, как у базы, которой конструктор не нашёл ни одного

@@ -359,6 +359,45 @@ export function engAutopilotIdleText(): string {
 }
 
 /**
+ * Письма ready-шаблона запуск откажет (признак проекции `needs_rewrite`,
+ * clientEngProjection.heTemplateNeedsRewrite: тот же гейт писем, что у ядра
+ * запуска, шаг 4b″). Один текст на шаги 4 и 5, причина — словами 409 ядра
+ * (`templateOperatorsUnresolved`): признак ловит ровно те три формы, что тот
+ * текст называет (пустое место, слово-заглушка, сырая подстановка).
+ *
+ *  - `none` — запуска не было: кампании не созданы, из шаблона не ушло ничего;
+ *  - `unfinished` — запуск до гейта, часть аудитории не уехала, а достройку
+ *    ядро откажет тем же гейтом. «Ничего не отправлено» здесь неправда (часть
+ *    уже в кампаниях), поэтому про отправленное фраза молчит.
+ *
+ * Действие — к менеджеру, как у 409: письма шаблона клиент не правит (правка
+ * цепочки на шаге 3 в готовый шаблон не попадает), а пересборку писем кабинет
+ * не запускает. Обещания «команда уже видит» нет: алерта на это нет.
+ */
+const TEMPLATE_REWRITE_WHY_EN =
+  'they contain a placeholder (such as a first name) that cannot be filled in from this audience, so ' +
+  'recipients would see a blank, a stand-in word or the raw placeholder in its place.';
+
+export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished'): string {
+  return launch === 'unfinished'
+    ? `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Ask your manager to have the letters rewritten.`
+    : `These letters cannot be launched as written: ${TEMPLATE_REWRITE_WHY_EN} Nothing has been sent from this template. Ask your manager to have the letters rewritten.`;
+}
+
+/**
+ * «Launch all» остановлен отказом, который получил бы и следующий шаблон
+ * (классификатор сегментов не ответил: он общий у всех шаблонов прогона).
+ * Дописывается к тексту отказа: без неё «Launched 1/4» не говорит, пробовали
+ * ли остальные. «Tries them as well» — правда: не тронутые прогоном шаблоны
+ * остаются в списке запуска (записи о запуске у них нет), и отказавший тоже.
+ */
+export function engLaunchRunStoppedText(notTried: number): string {
+  return notTried === 1
+    ? 'This run stopped here: 1 more template was not tried, and pressing «Launch all (paused)» again tries it as well.'
+    : `This run stopped here: ${notTried} more templates were not tried, and pressing «Launch all (paused)» again tries them as well.`;
+}
+
+/**
  * Локализует сообщение брошенной ошибки НА МЕСТЕ: экземпляр сохраняем, иначе
  * потеряется `AuthExpiredError` вместе с восстановлением сессии в формах
  * (проверка идёт по полю `code`, не по тексту, — переписать текст безопасно).

@@ -16,8 +16,8 @@ import { useMemo } from 'react';
 import { Database } from 'lucide-react';
 import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
 import { heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
-import { type EngBaseSummary } from './api-client';
-import { engRefillStoppedText, engStageErrorText } from './engText';
+import { engTemplateNeedsRewrite, type EngBaseSummary } from './api-client';
+import { engRefillStoppedText, engStageErrorText, engTemplateNeedsRewriteText } from './engText';
 import { EngBadge, EngCard, EngSpinner, baseStatusTone, fmtDate } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -248,12 +248,34 @@ function AutopilotDecisions({ base }: { base: EngBaseSummary }) {
 
 /* ── Состояние запуска готового шаблона (только отображение; запуск — шаг 5) ── */
 
+/**
+ * Письма шаблона запуск откажет (`needs_rewrite` проекции), а запускать есть
+ * что: запуска не было или он не закончен. Тот же признак, что у шага 5 (там
+ * такой шаблон не попадает в «Launch all»).
+ */
+function templateRewriteBlocksLaunch(template: HeTemplate): boolean {
+  if (!engTemplateNeedsRewrite(template)) return false;
+  const launch = parseLaunchInfo((template as { launch_info?: unknown }).launch_info);
+  return launch === null || heLaunchIsIncomplete(launch);
+}
+
 function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   const launch = parseLaunchInfo((template as { launch_info?: unknown }).launch_info);
   // Тот же предикат, что у шага 5 и у самого запуска: часть аудитории осталась
   // без кампании или без адресов. Зелёное «launched» здесь значило бы, что
   // делать нечего, а достроить запуск может только нажатие на шаге 5.
   const unfinished = launch !== null && heLaunchIsIncomplete(launch);
+  // «Ready — launch it from step 5» и «finish the launch on step 5» у такого
+  // шаблона были бы неправдой: ядро запуска откажет его письмам (шаг 4b″).
+  const needsRewrite = templateRewriteBlocksLaunch(template);
+
+  if (!launch && needsRewrite) {
+    return (
+      <div className="mt-2 rounded-md p-3 text-[11px]" style={{ border: '1px solid var(--cp-divider)', color: 'var(--cp-amber)' }}>
+        {engTemplateNeedsRewriteText('none')}
+      </div>
+    );
+  }
 
   if (!launch) {
     return (
@@ -267,9 +289,13 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
             проходит часы сборки и не должен узнавать о блокировке последним.
             Про окно отправки здесь намеренно молчим — его клиент выбирает при
             запуске (роут `templates/[id]/schedule`), пресет задаёт лишь
-            дефолт. */}
+            дефолт.
+            «Checks its letters against every address» — не обещание успеха,
+            а правда о гейте ядра (шаг 4b″, по всем строкам базы): признак
+            `needs_rewrite` смотрит только первые строки базы (sample_rows), и
+            пустая ячейка дальше них всплывает только отказом самого запуска. */}
         {template.status === 'ready'
-          ? 'Template is ready — launch it from step 5 «Review & Launch». Sending needs a preset set up for your account — the mailboxes your campaigns send from; step 5 shows whether yours is ready.'
+          ? 'Template is ready — launch it from step 5 «Review & Launch»; before anything is created, the launch checks its letters against every address in this audience. Sending needs a preset set up for your account — the mailboxes your campaigns send from; step 5 shows whether yours is ready.'
           : 'Template is being built…'}
       </div>
     );
@@ -289,7 +315,9 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
       </div>
       {unfinished && (
         <span className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>
-          Part of this audience has not gone out yet — finish the launch on step 5 «Review &amp; Launch».
+          {needsRewrite
+            ? engTemplateNeedsRewriteText('unfinished')
+            : 'Part of this audience has not gone out yet — finish the launch on step 5 «Review & Launch».'}
         </span>
       )}
       {/* White-label: сегменты — подписи, а не ссылки. Вести клиента наружу
@@ -453,7 +481,11 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                   {template && (
                     <div className="mt-2">
                       <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--cp-text-m)' }}>
-                        <EngBadge label={`template: ${template.status}`} tone={template.status === 'ready' ? 'green' : 'amber'} />
+                        {templateRewriteBlocksLaunch(template) ? (
+                          <EngBadge label="template: letters need rewriting" tone="amber" />
+                        ) : (
+                          <EngBadge label={`template: ${template.status}`} tone={template.status === 'ready' ? 'green' : 'amber'} />
+                        )}
                         <span>{template.letters.length} letter{template.letters.length === 1 ? '' : 's'}</span>
                       </div>
                       <TemplateLaunchStatus template={template} />

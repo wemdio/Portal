@@ -9,7 +9,10 @@
  *        Launch». Кабинет печатает `schedule ?? default` как текущее окно
  *        (EngStepReview.tsx), поэтому у запущенного шаблона `schedule` обязан
  *        быть правдой: сохранённый выбор клиента — только если он новее записи о
- *        запуске, иначе окно основной кампании, прочитанное у рассыльщика.
+ *        запуске (его пишут, только когда окно встало у ВСЕХ кампаний), иначе
+ *        окна ВСЕХ кампаний запуска, прочитанные у рассыльщика. Разные (или
+ *        часть не прочиталась) — `mixed: true`: окно одной кампании за окно
+ *        всего запуска не выдаём.
  * PATCH — переставить окно у кампаний, которые создал ЭТОТ запуск. Второй
  *        обязательный сценарий владельца: клиент выбрал окно при запуске и
  *        может передумать после.
@@ -60,10 +63,23 @@ const LOAD_FAILED = 'Failed to load the sending window';
 const UPDATE_FAILED = 'Failed to update the sending window';
 const NOT_LAUNCHED =
   'This template has not been launched yet — pick the sending window when you launch it.';
-/** Окно у рассыльщика переставлено, а запись выбора в кабинете не сохранилась. */
+/** Окно переставлено у ВСЕХ кампаний, а запись выбора в кабинете не сохранилась. */
 const WARNING_NOT_SAVED =
   'Your new sending window is live on the campaigns but was not saved in the cabinet, ' +
   'so this screen may show the previous window next time.';
+/**
+ * Окно встало у части кампаний, а прежняя запись выбора не снялась (см. PATCH):
+ * она новее записи о запуске, и GET напечатал бы её окном всего запуска.
+ */
+const WARNING_PARTIAL_NOT_RECORDED =
+  'The cabinet could not record that only part of this launch took the new window, so next time this ' +
+  'screen may show the previous window as if the whole launch used it.';
+
+/**
+ * Таблица выбора окна (`_launchWindow.ts`, TABLE): PATCH снимает строку, когда
+ * окно встало не у всех кампаний, — других операций с ней здесь нет.
+ */
+const SENDING_WINDOW_TABLE = 'he_launch_schedule';
 
 /** Один раз на процесс: опечатка в списке поясов молча отняла бы пункт. */
 let droppedTimezonesLogged = false;
@@ -109,6 +125,20 @@ function savedAfterLaunch(savedAt: string | null, launchCreatedAt: string): bool
   const saved = savedAt ? Date.parse(savedAt) : Number.NaN;
   const launched = launchCreatedAt ? Date.parse(launchCreatedAt) : Number.NaN;
   return Number.isFinite(saved) && Number.isFinite(launched) && saved >= launched;
+}
+
+/**
+ * Одно и то же окно. Оба значения прошли parseEngSendingWindow: дни
+ * отсортированы и без повторов, часы и пояс — строки фиксированного вида.
+ */
+function sameSendingWindow(a: ClientLaunchScheduleOverride, b: ClientLaunchScheduleOverride): boolean {
+  return (
+    a.timezone === b.timezone &&
+    a.from === b.from &&
+    a.to === b.to &&
+    a.days.length === b.days.length &&
+    a.days.every((day, i) => day === b.days[i])
+  );
 }
 
 /**
@@ -184,14 +214,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const launch = launchCampaignIds((templateRow as { launch_info?: unknown } | null)?.launch_info);
   let current: ClientLaunchScheduleOverride | null = stored.ok ? stored.window : null;
+  // Окно `current` стоит не у всех кампаний запуска (или часть не прочиталась).
+  let mixed = false;
   if (launch && !(stored.ok && stored.window && savedAfterLaunch(stored.savedAt, launch.createdAt))) {
     // Шаблон запущен, а выбора клиента про ЭТОТ запуск нет: кампании стоят с
     // часами пресета (запуск сотрудника, запуск до этой волны), со старым
-    // выбором (force поверх него) или с прежними часами (PATCH окна не дошёл).
-    // Показать здесь дефолт или старый выбор значило бы выдать за текущее
-    // окно то, по чему письма не пойдут, — читаем окно у рассыльщика. Не
-    // прочиталось — честный отказ: «не знаем окна» лучше, чем чужие часы под
-    // фразой «Emails go out only inside these hours».
+    // выбором (force поверх него), с прежними часами (PATCH окна не дошёл) или
+    // с РАЗНЫМИ часами (окно встало у части кампаний — тогда выбор не
+    // сохраняется вовсе). Показать здесь дефолт или старый выбор значило бы
+    // выдать за текущее окно то, по чему письма не пойдут, — читаем окна у
+    // рассыльщика, у ВСЕХ кампаний запуска: окно одной из них за окно всего
+    // запуска не выдаём. Основная — первой: её окно и печатаем, если она
+    // прочиталась. Ни одна не прочиталась — честный отказ: «не знаем окна»
+    // лучше, чем чужие часы под фразой «Emails go out only inside these hours».
     const requestOptions = supabaseInstantly
       ? await resolveLaunchRequestOptions({
           instantlyDb: supabaseInstantly,
@@ -200,22 +235,53 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           presetId: launch.presetId,
         })
       : null;
-    const live = requestOptions
-      ? await readEngCampaignSendingWindow({ campaignId: launch.primaryId, requestOptions })
-      : ({ ok: false, error: new Error('instantly db or preset account unavailable') } as const);
-    if (!live.ok || !live.window) {
+    if (!requestOptions) {
       return engServerError(
         'client.eng.template.schedule.live_read_failed',
-        live.ok ? new Error('campaign sending window is not representable') : live.error,
+        new Error('instantly db or preset account unavailable'),
         LOAD_FAILED,
         { userId, templateId: id },
       );
     }
-    current = live.window;
+    const order = [
+      ...launch.ids.filter((cid) => cid === launch.primaryId),
+      ...launch.ids.filter((cid) => cid !== launch.primaryId),
+    ];
+    let shown: ClientLaunchScheduleOverride | null = null;
+    let unreadable = 0;
+    let lastReadError: unknown = null;
+    for (const campaignId of order) {
+      const live = await readEngCampaignSendingWindow({ campaignId, requestOptions });
+      if (!live.ok || !live.window) {
+        unreadable += 1;
+        lastReadError = live.ok ? new Error('campaign sending window is not representable') : live.error;
+        continue;
+      }
+      if (!shown) shown = live.window;
+      else if (!sameSendingWindow(shown, live.window)) mixed = true;
+    }
+    if (!shown) {
+      return engServerError('client.eng.template.schedule.live_read_failed', lastReadError, LOAD_FAILED, {
+        userId,
+        templateId: id,
+        campaigns: order.length,
+      });
+    }
+    if (unreadable > 0) {
+      mixed = true;
+      await logError('client.eng.template.schedule.live_read_partial', lastReadError, {
+        userId,
+        templateId: id,
+        campaigns: order.length,
+        unreadable,
+      });
+    }
+    current = shown;
   }
 
   return NextResponse.json({
     schedule: current ? toClientEngSendingWindow(current) : null,
+    ...(mixed ? { mixed: true } : {}),
     default: toClientEngSendingWindow(engDefaultSendingWindow()),
     timezones: ENG_SENDING_WINDOW_TIMEZONES.map((o) => ({ value: o.value, label: o.label })),
     weekdays: ENG_SENDING_WINDOW_WEEKDAYS.map((o) => ({ value: o.value, label: o.label })),
@@ -319,19 +385,37 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         'Part of this launch kept the previous sending window. Save the window again — ' +
           'campaigns that already use the new one are not affected.',
       );
-    }
-
-    const saved = await saveEngSendingWindow(supabaseAdmin, {
-      templateId: id,
-      clientUserId: userId,
-      window: sendingWindow,
-    });
-    if (!saved.ok) {
-      await logError('client.eng.template.schedule.save_failed', saved.error, {
-        userId,
+      // Выбор НЕ сохраняем, а прежнюю строку СНИМАЕМ: строку новее записи о
+      // запуске GET печатает окном всего запуска, не спрашивая рассыльщика, —
+      // новое окно (сохранённое) или прежнее (оставленное) было бы неправдой
+      // для части кампаний. Без строки GET читает окна у самих кампаний и
+      // говорит, что они разные (`mixed`). Цена: запуск сотрудником без окна
+      // (launchSchedule.ts) берёт для этого шаблона не его последний выбор, а
+      // последний выбор клиента на другом шаблоне или дефолт кабинета.
+      const { error: clearError } = await supabaseAdmin
+        .from(SENDING_WINDOW_TABLE)
+        .delete()
+        .eq('template_id', id);
+      if (clearError) {
+        await logError('client.eng.template.schedule.partial_clear_failed', clearError, {
+          userId,
+          templateId: id,
+        });
+        warnings.push(WARNING_PARTIAL_NOT_RECORDED);
+      }
+    } else {
+      const saved = await saveEngSendingWindow(supabaseAdmin, {
         templateId: id,
+        clientUserId: userId,
+        window: sendingWindow,
       });
-      warnings.push(WARNING_NOT_SAVED);
+      if (!saved.ok) {
+        await logError('client.eng.template.schedule.save_failed', saved.error, {
+          userId,
+          templateId: id,
+        });
+        warnings.push(WARNING_NOT_SAVED);
+      }
     }
 
     await logAudit(

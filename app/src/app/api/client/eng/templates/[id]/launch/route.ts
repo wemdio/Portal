@@ -8,7 +8,11 @@ import { scrubBrand } from '@/lib/scrubBrand';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeTemplate, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
-import { isHeLaunchClientSafeServerError, runHeTemplateLaunch } from '@/lib/hypothesisEngine/launchTemplate';
+import {
+  heLaunchOutcomeCode,
+  isHeLaunchClientSafeServerError,
+  runHeTemplateLaunch,
+} from '@/lib/hypothesisEngine/launchTemplate';
 import { toClientEngCampaignName, toClientEngLaunchInfo } from '@/lib/hypothesisEngine/clientEngProjection';
 import { getHeClientFailure } from '@/lib/hypothesisEngine/clientErrors';
 import { parseLaunchInfo, type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
@@ -26,7 +30,8 @@ import {
 
 export const dynamic = 'force-dynamic';
 // До HE_LAUNCH_MAX_LEADS лидов = 2 вызова /leads/add + создание кампании
-// (+ по одному короткому PATCH на кампанию — окно отправки клиента, см. ниже).
+// (окно отправки клиента ядро ставит при создании; короткий PATCH окна — только
+// кампаниям прошлой попытки на достройке, см. ниже).
 export const maxDuration = 60;
 
 const LAUNCH_FAILED = 'Failed to launch the campaign';
@@ -91,48 +96,59 @@ const WARNING_NEEDS_ATTENTION =
 const SEGMENT_FAILED_PREFIX = 'Segment campaign failed: ';
 
 /**
- * Окно отправки клиента не доехало НИ ДО ОДНОЙ кампании. Кампании при этом
- * СОЗДАНЫ и стоят на паузе со своими прежними часами: новая — с часами пресета
- * (их заполнял администратор), кампания прошлой попытки на достройке — с теми,
- * что стояли у неё раньше. Поэтому отказом ответ не делаем — слепой повтор
- * наплодил бы дубли кампаний и лидов, — но клиент обязан узнать, что до старта
- * окно надо переставить.
+ * Окно отправки клиента не доехало НИ ДО ОДНОЙ кампании. С 09.10.2026 так
+ * бывает только на ДОСТРОЙКЕ, где в этом заходе ни одна кампания не создана:
+ * новые ядро создаёт сразу с окном клиента, а здесь остаются кампании прошлой
+ * попытки, которые уже держат адреса, — со своими прежними часами. Отказом
+ * ответ не делаем — слепой повтор наплодил бы дубли кампаний и лидов, — но
+ * клиент обязан узнать, что до старта окно надо переставить.
  *
  * Слово «default» здесь было ложью: в кабинете «default» — это 09:00–17:00
  * Eastern (engDefaultSendingWindow), а у кампаний остались часы пресета.
  * Посмотреть настоящие часы клиент может там же, куда его отправляет фраза:
  * GET .../schedule, не найдя сохранённого выбора новее этого запуска, читает
- * окно основной кампании у рассыльщика.
+ * окна кампаний запуска у рассыльщика (разные — говорит и это). «Save the
+ * hours you want», а не «save your window again»: форма покажет прочитанные
+ * часы кампаний, а не выбор, который до них не доехал.
  */
 const WARNING_SCHEDULE_NOT_APPLIED =
   'The campaigns were created, but the sending window you picked did not reach them, so they kept ' +
   'their earlier sending hours. They stay paused — open the sending window of this template to see ' +
-  'those hours, and save your window again before anyone starts them.';
+  'those hours, and save the hours you want before anyone starts them.';
 
 /**
  * Окно доехало до ЧАСТИ кампаний запуска (сплит по сегментам базы создаёт их
- * несколько). Называем именно те, где осталось прежнее окно: клиент различает
+ * несколько; на достройке часть кампаний — от прошлой попытки). Называем
+ * именно те, где осталось прежнее окно, — это только кампании, которым окно
+ * ставил ЭТОТ роут и рассыльщик его не принял: созданные ядром несут окно с
+ * момента создания. Клиент различает
  * кампании запуска только по имени, и «часть» без имён не даёт ему проверить
  * результат повторного сохранения. Имя идёт через тот же проектор, что и
  * launch_info ответа (внутренний префикс и русский фолбэк срезаны), id кампаний
  * наружу не уходят.
+ *
+ * Выбор при частичной перестановке НЕ сохраняется (см. блок «Окно отправки»
+ * ниже), и форма окна на этом шаге показывает часы, прочитанные у кампаний, с
+ * пометкой, что они у кампаний разные, — поэтому «save the hours you want», а
+ * не «save it again»: выбранного окна в форме может не быть.
  */
-function scheduleAppliedPartlyWarning(keptDefaultWindow: string[]): string {
-  const named = keptDefaultWindow.filter((name) => name.length > 0).join(', ').slice(0, 300);
+function scheduleAppliedPartlyWarning(keptEarlierWindow: string[]): string {
+  const named = keptEarlierWindow.filter((name) => name.length > 0).join(', ').slice(0, 300);
   return (
     'The sending window you picked reached only part of this launch. ' +
     (named
       ? `These campaigns kept their earlier sending hours: ${named}. `
       : 'Some campaigns kept their earlier sending hours. ') +
-    'They stay paused — open the sending window on this step and save it again before anyone starts them.'
+    'They stay paused — open the sending window on this step and save the hours you want before anyone ' +
+    'starts them.'
   );
 }
 
 /**
- * Окно у рассыльщика стоит, а в кабинете не сохранилось (запись выбора).
- * Прежнее «this screen may show the default window» стало неправдой: без
- * сохранённого выбора новее запуска GET .../schedule читает окно основной
- * кампании у рассыльщика, то есть показывает то, что там стоит.
+ * Окно стоит у ВСЕХ кампаний запуска, а в кабинете не сохранилось (запись
+ * выбора). Прежнее «this screen may show the default window» стало неправдой:
+ * без сохранённого выбора новее запуска GET .../schedule читает окна кампаний
+ * запуска у рассыльщика, то есть показывает то, что там стоит.
  */
 const WARNING_SCHEDULE_NOT_SAVED =
   'Your sending window is live on the campaigns but could not be saved in the cabinet, so the ' +
@@ -236,8 +252,9 @@ export async function GET(req: NextRequest) {
 // ответ ядра не отдаём как есть — сужаем белым списком (см. выше): в нём
 // ссылка на панель рассыльщика, id пресета и предупреждения, написанные для
 // внутреннего контура. Плюс своё, чего у staff-запуска нет: клиент выбирает
-// ОКНО ОТПРАВКИ (пояс/часы/дни) — см. блок «Окно отправки» ниже и
-// `api/client/eng/templates/[id]/schedule` для правки уже созданных кампаний.
+// ОКНО ОТПРАВКИ (пояс/часы/дни) — ядро создаёт кампании сразу с ним, см. блок
+// «Окно отправки» ниже и `api/client/eng/templates/[id]/schedule` для правки
+// уже созданных кампаний.
 // TODO(tariffs): гейт запуска по тарифу — пока доступен любому клиенту.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.launch.post' }, async () => {
@@ -288,6 +305,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       scopeClientUserId: userId,
       locale: 'en',
       eventPrefix: 'client.eng.template.launch',
+      // Окно уезжает в ядро: новые кампании создаются СРАЗУ с ним (шаг 4b⁗
+      // ядра), а не с часами пресета до второго вызова.
+      sendingWindow,
     });
 
     // 5xx ядра запуска несут сырьё: сообщение Postgres (чтения шаблона и базы)
@@ -301,7 +321,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // адреса, кампании на паузе». Подменённые общей «Failed to launch the
     // campaign», они не давали клиенту отличить безопасный повтор от сбоя
     // посреди запуска. Сырья в них нет, это литералы словаря ядра.
+    //
+    // Отказ классификатора сегментов (503 segment_classification_incomplete)
+    // уходит СО СВОИМ КОДОМ и статусом: «Launch all» по коду останавливает
+    // прогон (EngStepReview). Классификатор общий у всех шаблонов, и через
+    // engServerError (500, без кода) прогон шёл дальше — каждый следующий
+    // шаблон с сегментами оплачивал классификацию всей своей аудитории ради
+    // того же отказа. Текст — та же безопасная константа ядра.
     if (outcome.status >= 500 && typeof outcome.body.error === 'string') {
+      const outcomeCode = heLaunchOutcomeCode(outcome);
+      if (
+        outcomeCode === 'segment_classification_incomplete' &&
+        isHeLaunchClientSafeServerError(outcome.body.error)
+      ) {
+        await logError('client.eng.template.launch_failed', new Error(outcome.body.error), {
+          userId,
+          templateId: id,
+          status: outcome.status,
+          code: outcomeCode,
+        });
+        return NextResponse.json({ error: outcome.body.error, code: outcomeCode }, { status: 503 });
+      }
       const outward = isHeLaunchClientSafeServerError(outcome.body.error) ? outcome.body.error : LAUNCH_FAILED;
       return engServerError('client.eng.template.launch_failed', new Error(outcome.body.error), outward, {
         userId,
@@ -318,38 +358,41 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // наружу он НЕ уходит: в его `error` лежит текст ответа рассыльщика.
     const segmentFailures = readSegmentFailures(responseBody.segment_failures);
     delete responseBody.segment_failures;
+    // Кампании, которые получили окно уже в ядре (созданы с ним или
+    // переставлены PATCH'ем цепочки), — служебный список ядра: id наружу не
+    // уходят, ключ удаляем.
+    const windowAppliedInCore = new Set(
+      Array.isArray(responseBody.window_campaign_ids)
+        ? (responseBody.window_campaign_ids as unknown[]).filter((v): v is string => typeof v === 'string')
+        : [],
+    );
+    delete responseBody.window_campaign_ids;
     if (typeof responseBody.error === 'string') {
       responseBody.error = scrubBrand(responseBody.error);
     }
 
-    // ── Окно отправки на созданные кампании ──
+    // ── Окно отправки на кампании запуска ──
     //
-    // Ядро запуска общее со staff-инструментом и расписания не знает: кампания
-    // создаётся с окном ПРЕСЕТА. Поэтому сразу после создания переставляем
-    // расписание выбором клиента — тем же `campaign_schedule`, которым его
-    // правит остальной портал (`lib/clientLaunch/scheduleMapping`).
-    //
-    // Почему безопасно делать это ВТОРЫМ вызовом, а не в момент создания:
-    // кампании создаются НА ПАУЗЕ и автоматически не активируются никогда
-    // (launchTemplate.ts), то есть между созданием и правкой окна ни одно письмо
-    // по чужим часам уйти не может.
+    // С 09.10.2026 окно ставит ЯДРО: новые кампании создаются сразу с окном
+    // клиента, а пустая кампания прошлой попытки получает его тем же PATCH'ем,
+    // что и цепочку (`window_campaign_ids` ответа ядра). Здесь остаётся только
+    // то, что ядро не трогает: кампании, которые на ДОСТРОЙКЕ уже держат адреса
+    // (ядро их не меняет — их получатели могут быть в рассылке), и кампании
+    // прошлой попытки, которым в этом заходе не нашлось группы. Окно одно на
+    // шаблон, PATCH идемпотентен (в нём только campaign_schedule), кампании на
+    // паузе, поэтому переставить им окно безопасно — и пропустить их значило
+    // бы оставить часть запуска на часах, которые клиент уже переставил.
     //
     // Только на успешном запуске (200). 409 «уже запущено» не создаёт кампаний, и
     // переставлять окно у чужого прошлого запуска этот ответ не должен — для
     // этого есть PATCH .../schedule.
-    //
-    // ДОСТРОЙКА незакончённого запуска отвечает тем же 200, и окно уезжает во
-    // ВСЕ кампании записи — не только в созданные этим заходом. Так и надо:
-    // окно одно на шаблон, PATCH идемпотентен (в нём только campaign_schedule),
-    // а кампании стоят на паузе; пропустить перенесённые значило бы оставить
-    // половину запуска на часах, которые клиент уже переставил.
     const scheduleWarnings: string[] = [];
     if (outcome.status === 200) {
       const launched = parseLaunchInfo(outcome.body.launch);
       // Сегментный сплит делает по кампании на сегмент: окно выбрано одно на
-      // шаблон, значит ставим его всем созданным кампаниям. Имя несём рядом с
+      // шаблон, значит ставим его всем кампаниям запуска. Имя несём рядом с
       // id: если рассыльщик окно не принял, клиенту надо сказать, У КАКОЙ
-      // кампании остались чужие часы.
+      // кампании остались прежние часы.
       const launchedCampaigns: Array<{ campaign_id: string; campaign_name: string }> = launched
         ? (launched.campaigns ?? [
             { campaign_id: launched.campaign_id, campaign_name: launched.campaign_name },
@@ -358,74 +401,92 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const campaigns = launchedCampaigns
         .filter((c) => typeof c.campaign_id === 'string' && c.campaign_id.length > 0)
         .map((c) => ({ id: c.campaign_id, name: toClientEngCampaignName(c.campaign_name) }));
+      // Окно уже стоит (ядро) — второй вызов им не нужен.
+      const needWindow = campaigns.filter((c) => !windowAppliedInCore.has(c.id));
 
-      // Аккаунт рассыльщика — тот же, в котором ядро создало кампанию: он задан
-      // пресетом ЗАПИСИ о запуске (скоуп владельца, чужой пресет невидим), а не
-      // выбранным в запросе — достройку ядро ведёт пресетом, с которым запуск
-      // начат (launchTemplate.ts, шаг 3). Промах аккаунтом означал бы PATCH в
-      // чужой воркспейс.
-      const launchPresetId = launched?.preset_id || presetId;
-      const { data: presetAccountRow, error: presetAccountErr } = await supabaseInstantly
-        .from('client_campaign_presets')
-        .select('instantly_account_id')
-        .eq('id', launchPresetId)
-        .eq('client_user_id', userId)
-        .maybeSingle();
-      if (presetAccountErr) {
-        await logError('client.eng.template.launch.schedule_preset_failed', presetAccountErr, {
-          userId,
-          templateId: id,
-        });
-      }
-
-      // Сколько кампаний РЕАЛЬНО приняли окно: от этого зависит и текст
+      // Сколько кампаний РЕАЛЬНО несут окно: от этого зависит и текст
       // предупреждения, и попадёт ли окно в ответ (см. ниже).
-      let scheduleAppliedTo = 0;
-      if (campaigns.length === 0 || presetAccountErr) {
-        scheduleWarnings.push(WARNING_SCHEDULE_NOT_APPLIED);
-      } else {
-        const requestOptions = {
-          accountId: resolveInstantlyAccountId(
-            (presetAccountRow as { instantly_account_id?: string | null } | null)
-              ?.instantly_account_id ?? null,
-          ),
-        };
-        // По ОДНОЙ кампании за вызов: applyEngSendingWindow отдаёт только
-        // счётчики, а клиенту нужно имя той, у которой окно не переставилось.
-        // Число обращений к рассыльщику то же (внутри был такой же цикл), а сам
-        // вызов идемпотентен — в PATCH уходит только campaign_schedule.
-        const keptDefaultWindow: string[] = [];
-        let lastError: unknown = null;
-        for (const campaign of campaigns) {
-          const one = await applyEngSendingWindow({
-            campaignIds: [campaign.id],
-            window: sendingWindow,
-            requestOptions,
-          });
-          if (one.updated > 0) {
-            scheduleAppliedTo += 1;
-            continue;
-          }
-          keptDefaultWindow.push(campaign.name);
-          lastError = one.lastError;
-        }
-        if (keptDefaultWindow.length > 0) {
-          // Текст отказа рассыльщика клиенту не показываем (бренд, коды, тело
-          // ответа) — он уходит в application_logs; наружу идут константа и
-          // очищенные проектором имена кампаний.
-          await logError('client.eng.template.launch.schedule_apply_failed', lastError, {
+      let scheduleAppliedTo = campaigns.length - needWindow.length;
+      // Кампании, у которых окно переставить не вышло: только они «остались на
+      // прежних часах» — у созданных ядром окно стоит с первой секунды.
+      const keptEarlierWindow: string[] = [];
+      let lastError: unknown = null;
+
+      if (needWindow.length > 0) {
+        // Аккаунт рассыльщика — тот же, в котором ядро создало кампанию: он задан
+        // пресетом ЗАПИСИ о запуске (скоуп владельца, чужой пресет невидим), а не
+        // выбранным в запросе — достройку ядро ведёт пресетом, с которым запуск
+        // начат (launchTemplate.ts, шаг 3). Промах аккаунтом означал бы PATCH в
+        // чужой воркспейс.
+        const launchPresetId = launched?.preset_id || presetId;
+        const { data: presetAccountRow, error: presetAccountErr } = await supabaseInstantly
+          .from('client_campaign_presets')
+          .select('instantly_account_id')
+          .eq('id', launchPresetId)
+          .eq('client_user_id', userId)
+          .maybeSingle();
+        if (presetAccountErr) {
+          await logError('client.eng.template.launch.schedule_preset_failed', presetAccountErr, {
             userId,
             templateId: id,
-            campaigns: campaigns.length,
-            failed: keptDefaultWindow.length,
           });
-          scheduleWarnings.push(
-            scheduleAppliedTo > 0
-              ? scheduleAppliedPartlyWarning(keptDefaultWindow)
-              : WARNING_SCHEDULE_NOT_APPLIED,
-          );
+          lastError = presetAccountErr;
+          for (const campaign of needWindow) keptEarlierWindow.push(campaign.name);
+        } else {
+          const requestOptions = {
+            accountId: resolveInstantlyAccountId(
+              (presetAccountRow as { instantly_account_id?: string | null } | null)
+                ?.instantly_account_id ?? null,
+            ),
+          };
+          // По ОДНОЙ кампании за вызов: applyEngSendingWindow отдаёт только
+          // счётчики, а клиенту нужно имя той, у которой окно не переставилось.
+          // Вызов идемпотентен — в PATCH уходит только campaign_schedule.
+          for (const campaign of needWindow) {
+            const one = await applyEngSendingWindow({
+              campaignIds: [campaign.id],
+              window: sendingWindow,
+              requestOptions,
+            });
+            if (one.updated > 0) {
+              scheduleAppliedTo += 1;
+              continue;
+            }
+            keptEarlierWindow.push(campaign.name);
+            lastError = one.lastError;
+          }
         }
-        if (scheduleAppliedTo > 0) {
+      }
+
+      if (campaigns.length === 0) {
+        scheduleWarnings.push(WARNING_SCHEDULE_NOT_APPLIED);
+      } else if (keptEarlierWindow.length > 0) {
+        // Текст отказа рассыльщика клиенту не показываем (бренд, коды, тело
+        // ответа) — он уходит в application_logs; наружу идут константа и
+        // очищенные проектором имена кампаний.
+        await logError('client.eng.template.launch.schedule_apply_failed', lastError, {
+          userId,
+          templateId: id,
+          campaigns: campaigns.length,
+          failed: keptEarlierWindow.length,
+        });
+        scheduleWarnings.push(
+          scheduleAppliedTo > 0
+            ? scheduleAppliedPartlyWarning(keptEarlierWindow)
+            : WARNING_SCHEDULE_NOT_APPLIED,
+        );
+      }
+      // Окно стоит у ВСЕХ кампаний запуска — только тогда оно правда «окно
+      // этого запуска» (и поле `schedule` ниже, и сохранённый выбор).
+      const appliedToAll = campaigns.length > 0 && scheduleAppliedTo === campaigns.length;
+      if (scheduleAppliedTo > 0) {
+        // Выбор сохраняем, только если окно встало у всех кампаний: сохранённую
+        // строку новее записи о запуске GET .../schedule печатает окном ВСЕГО
+        // запуска, не спрашивая рассыльщика. При частичной перестановке строки
+        // новее записи нет (прежняя — старше этой попытки: ядро пишет
+        // created_at записи временем её начала), и GET читает окна у самих
+        // кампаний — то есть видит, что они разные.
+        if (appliedToAll) {
           const saved = await saveEngSendingWindow(supabaseAdmin, {
             templateId: id,
             clientUserId: userId,
@@ -440,30 +501,32 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             });
             scheduleWarnings.push(WARNING_SCHEDULE_NOT_SAVED);
           }
-          await logAudit(
-            'client.eng.template.launch.schedule_applied',
-            'ENG client picked the sending window for a launch',
-            {
-              userId,
-              templateId: id,
-              timezone: sendingWindow.timezone,
-              from: sendingWindow.from,
-              to: sendingWindow.to,
-              days: sendingWindow.days,
-              campaigns: scheduleAppliedTo,
-            },
-          );
         }
+        await logAudit(
+          'client.eng.template.launch.schedule_applied',
+          'ENG client picked the sending window for a launch',
+          {
+            userId,
+            templateId: id,
+            timezone: sendingWindow.timezone,
+            from: sendingWindow.from,
+            to: sendingWindow.to,
+            days: sendingWindow.days,
+            campaigns: scheduleAppliedTo,
+            atCreation: campaigns.length - needWindow.length,
+            failed: keptEarlierWindow.length,
+          },
+        );
       }
 
       // Клиенту — ровно четыре поля выбора (проекция), и ТОЛЬКО если окно
-      // действительно стоит хотя бы у одной кампании: поле означает «часы, с
-      // которыми кампании уехали», а до этой правки оно повторяло запрос даже
-      // когда PATCH рассыльщика не удался — кабинет показывал часы, по которым
-      // письма не поедут. Ни одной переставленной кампании — поля нет (оно
-      // необязательное), и единственное, что клиент читает про окно, это
-      // предупреждение выше.
-      if (scheduleAppliedTo > 0) {
+      // стоит у ВСЕХ кампаний запуска: поле означает «часы, с которыми
+      // кампании уехали». Раньше оно уходило, если окно встало хотя бы у одной,
+      // — то есть при частичной перестановке ответ утверждал окно для всего
+      // запуска, хотя часть кампаний осталась на прежних часах (их называет
+      // предупреждение выше). Нет поля — единственное, что клиент читает про
+      // окно, это предупреждение.
+      if (appliedToAll) {
         responseBody.schedule = toClientEngSendingWindow(sendingWindow);
       }
     }

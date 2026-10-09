@@ -64,6 +64,11 @@ import { toHeAutopilotPause, type HeAutopilotPauseReason } from './autopilotNext
 // (см. toClientEngRefillState). Импорт значения безопасен по той же причине,
 // что и выше: экраны берут из этого модуля только типы.
 import { isHeClientCancelPauseReason } from './autoPipeline';
+// Гейт писем запуска — для признака `needs_rewrite` (heTemplateNeedsRewrite):
+// та же чистая проверка, что у ядра запуска, второй копии правила нет.
+import { checkHeTemplateOperators, withHeEmptyCellFallbacks } from './templateOperatorGate';
+import { projectMarket, type HeMarket } from './market';
+import type { HeOperatorMapping } from './types';
 
 type Row = Record<string, unknown>;
 
@@ -574,7 +579,8 @@ const EMAIL_STATUS_INVALID = 'invalid';
 const EMAIL_STATUS_UNVERIFIED = 'unverified';
 
 // personalization_plan (маппинг операторов) и fixed_block — внутренняя кухня
-// генерации; letters клиент и так читает.
+// генерации; letters клиент и так читает. Маппинг проекция ЧИТАЕТ (признак
+// `needs_rewrite`, heTemplateNeedsRewrite), но не отдаёт.
 const TEMPLATE_FIELDS = [
   'id',
   'base_id',
@@ -603,7 +609,8 @@ const LAUNCH_CAMPAIGN_FIELDS = ['campaign_id', 'campaign_name', 'segment', 'lead
 
 /**
  * Сегменты НЕЗАКОНЧЕННОГО запуска (`launch_info.pending`): части аудитории, у
- * которых кампании нет вовсе либо она создана, но адреса в неё не загрузились
+ * которых кампании нет вовсе, она создана, но адреса в неё не загрузились, или
+ * (us, с 09.10.2026) адреса отложены классификатором сегментов
  * (launchHandoff.ts, HeTemplateLaunchPending).
  *
  * Зачем кабинету: по этому ключу шаг «Review & Launch» узнаёт, что запуск можно
@@ -613,9 +620,9 @@ const LAUNCH_CAMPAIGN_FIELDS = ['campaign_id', 'campaign_name', 'segment', 'lead
  * хотя API повтор уже разрешал, — вся механика достройки была недостижима.
  *
  * `segment` наружу уже уходит в LAUNCH_CAMPAIGN_FIELDS (это условие из шаблона
- * САМОГО клиента), `stage` — два нейтральных слова ('campaign' | 'leads') без
- * следа рассыльщика и наших таблиц. Остальное записи (счётчики попыток,
- * preset_id) по-прежнему не отдаётся.
+ * САМОГО клиента), `stage` — нейтральное слово ('campaign' | 'leads' |
+ * 'classify') без следа рассыльщика и наших таблиц. Остальное записи (адреса
+ * долга, счётчики попыток, preset_id) по-прежнему не отдаётся.
  */
 const LAUNCH_PENDING_FIELDS = ['segment', 'stage'] as const;
 
@@ -927,9 +934,54 @@ export function toClientEngLaunchInfo(raw: unknown): Row | null {
   return out;
 }
 
-function toClientTemplate(template: Row): Row {
+/**
+ * `needs_rewrite` — ВЫЧИСЛЕННЫЙ булев признак шаблона (как `site_unreachable`
+ * у брифа): письма этого ready-шаблона us-проекта ядро запуска откажет кодом
+ * template_unresolved_operators (launchTemplate.ts, шаг 4b″) — в них
+ * подстановка, которую база не наполнит. Шаблоны, записанные до гейта стадии
+ * (09.10.2026), лежат 'ready' по-прежнему, и без признака шаг 4 звал клиента
+ * «launch it from step 5», а «Launch all» гнал их в запуск ради отказа.
+ *
+ * Проверка та же, что у запуска, и в том же порядке: замены пустых ячеек
+ * (withHeEmptyCellFallbacks) по колонкам базы шаблона, затем
+ * checkHeTemplateOperators по письмам, колонкам, маппингу и строкам с
+ * колонкой адреса (findEmailColumn). Отличие одно — СТРОКИ: деталка `data` не
+ * читает (HE_BASE_LIST_COLUMNS: мегабайты на опрос раз в 4 с), и гейт идёт по
+ * `sample_rows` — первым строкам той же `data`, записанным тем же апдейтом
+ * (stages/baseCollect, baseCollectRefill, ручная загрузка). Признак поэтому
+ * только В ОДНУ СТОРОНУ: пустая ячейка в выборке есть и в `data`, и запуск
+ * откажет так же (true — правда всегда); пустая ячейка только дальше выборки
+ * признака не даёт — такой отказ клиент читает текстом 409 самого запуска.
+ * Три списка, не зависящие от строк (оператор темы без колонки, оператор без
+ * колонки и fallback, битые скобки), считаются точно.
+ *
+ * Базы шаблона в деталке нет — false: запуск откажет ему по другой причине
+ * («база не найдена»), и «перепишите письма» было бы неправдой. RU — false:
+ * у RU-запуска этого гейта нет. Наружу уходит только булев признак — ни писем,
+ * ни колонок, ни строк сверх того, что проекция уже отдаёт.
+ */
+function heTemplateNeedsRewrite(template: Row, base: Row | undefined, market: HeMarket): boolean {
+  if (market !== 'us' || template.status !== 'ready' || !base || !Array.isArray(base.columns)) return false;
+  const columns = base.columns.filter((c): c is string => typeof c === 'string');
+  const rows = Array.isArray(base.sample_rows)
+    ? base.sample_rows.map(asRow).filter((r): r is Row => r !== null)
+    : [];
+  const plan = asRow(template.personalization_plan);
+  const mapping = Array.isArray(plan?.operator_mapping) ? (plan.operator_mapping as HeOperatorMapping[]) : null;
+  const operatorMapping = withHeEmptyCellFallbacks(mapping, base.columns).mapping;
+  return !checkHeTemplateOperators({
+    letters: template.letters,
+    columns: base.columns,
+    operatorMapping,
+    rows,
+    emailColumn: findEmailColumn(columns, rows),
+  }).ok;
+}
+
+function toClientTemplate(template: Row, needsRewrite: boolean): Row {
   const out = pick(template, TEMPLATE_FIELDS);
   if ('launch_info' in template) out.launch_info = toClientEngLaunchInfo(template.launch_info);
+  out.needs_rewrite = needsRewrite;
   return out;
 }
 
@@ -1103,13 +1155,26 @@ export function toClientEngBaseDataRow(row: Row): Row {
  * в клиентском роуте.
  */
 export function toClientEngProjectDetail(detail: HeProjectDetail): ClientEngProjectDetail {
+  // Базы — СЫРЫЕ строки (до toClientEngBase): гейт запуска читает
+  // he_bases.columns как есть, и признак обязан считаться по тому же набору.
+  const market = projectMarket(detail.project as { market?: string | null });
+  const baseById = new Map<string, Row>();
+  for (const raw of Array.isArray(detail.bases) ? detail.bases : []) {
+    const base = asRow(raw);
+    if (base && typeof base.id === 'string') baseById.set(base.id, base);
+  }
   return {
     project: toClientEngProjectRow(detail.project),
     hypotheses: pickList(detail.hypotheses, toClientEngHypothesisRow),
     verticals: pickList(detail.verticals, (v) => pick(v, VERTICAL_FIELDS)),
     chains: pickList(detail.chains, (c) => pick(c, CHAIN_FIELDS)),
     bases: pickList(detail.bases, toClientEngBase),
-    templates: pickList(detail.templates, toClientTemplate),
+    templates: pickList(detail.templates, (t) =>
+      toClientTemplate(
+        t,
+        typeof t.base_id === 'string' && heTemplateNeedsRewrite(t, baseById.get(t.base_id), market),
+      ),
+    ),
     jobs: pickList(detail.jobs, toClientEngJobRow),
   };
 }

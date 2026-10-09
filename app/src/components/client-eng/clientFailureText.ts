@@ -40,6 +40,13 @@ export type HeClientErrorCode =
   | 'audience_mismatch'
   /** В источниках не осталось новых компаний после исключения уже собранных. */
   | 'segment_exhausted'
+  /**
+   * Всё, что вернул конструктор этой сборки, — компании и адреса, которые уже
+   * лежат в других базах проекта (повторная сверка после импорта,
+   * stages/baseCollect.ts): сохранить их во вторую базу значило бы написать им
+   * дважды.
+   */
+  | 'already_collected'
   /** Источник не отдал строк (ошибка чтения каталога или пустая выдача). */
   | 'source'
   /** Сайт самого клиента не открылся — исследованию нечего было читать. */
@@ -217,6 +224,21 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved: 'Companies collected earlier stay in the bases you already have.',
     whatToDo:
       'This does not mean the market is exhausted — only these sources are. To keep «Start outreach» from trying this vertical again, reject its hypotheses on step 2; to collect another vertical, accept its hypotheses there and press «Start outreach».',
+  },
+  // Не «источники не дали строк» (это был бы `source`): строки были, но все
+  // они — компании и адреса, которые уже держит другая база проекта. Сбор
+  // заново не повторяет их — исключение по другим базам проекта стоит на
+  // каждой сборке, — поэтому «Start outreach» правдив как действие. Строка
+  // снимается и по одному АДРЕСУ (общий ящик у компании с другим именем и
+  // доменом), поэтому текст говорит «компания или её адрес», а не только
+  // «компания».
+  already_collected: {
+    title:
+      'Every company this collection found, or its email address, is already in your other audiences for this project.',
+    whatIsSaved:
+      'Those companies and addresses stay in the audiences that already hold them; this collection does not add them a second time.',
+    whatToDo:
+      'Press «Start outreach» on step 2 to collect this vertical again — a new collection skips the companies you already have; if it keeps coming back empty, contact your manager.',
   },
   source: {
     title: 'The company sources did not return any rows for this vertical.',

@@ -4,15 +4,28 @@
  * условные блоки, поэтому запуск сплитит лиды на кампании по сегментам).
  *
  * Каждая строка → условие сегмента (`when` дословно) или null (дефолтный
- * текст письма). Модель — bulk (sonnet), батчи по 40 строк, до 6 параллельно.
- * Контракт: частичные сбои переживаем (батч → лог, остальные продолжаются);
- * системный сбой (упали ВСЕ батчи) → null: вызывающий идёт по старому пути
- * (одна кампания, сегментные варианты выкинуты с предупреждением).
+ * текст письма). Модель — роль gate (мини-модель, getHeModel('gate')), батчи
+ * по 40 строк, до 6 параллельно. Частичные сбои переживаем (батч → лог,
+ * остальные продолжаются); что значит строка без ответа — зависит от
+ * контракта (ниже).
  *
  * Полнота ответа обязательна (`requireCompleteJson`): для классификатора
  * отремонтированный обрубок — это короткий список, который выглядит уверенным.
- * Такой батч повторяется, а если и повтор обрезан — честно падает в лог, и
- * его строки уезжают в дефолтный текст письма, а не в чужой сегмент.
+ * Такой батч повторяется, а если и повтор обрезан — честно падает в лог.
+ *
+ * ДВА КОНТРАКТА (с 09.10.2026), и развилка — у вызывающего (launchTemplate.ts,
+ * шаг 5c), по рынку проекта:
+ *  - classifyBaseRowsIntoSegmentsDetailed — для market='us'. «Нет ответа» НЕ
+ *    равно дефолтному сегменту: явный ответ модели (условие или null — «ни одно
+ *    не подходит») лежит в assignments, а строки упавшего батча, строки, которые
+ *    модель не разметила, и строки с условием не из списка — в unanswered.
+ *    Запуск их ОТКЛАДЫВАЕТ (не шлёт дефолтный текст), а не угадывает. Плюс
+ *    расход модели (usage) — его пишет аудит запуска.
+ *  - heLegacySegmentAssignments поверх того же вызова (с unansweredFate
+ *    'default') — прежний контракт RU-инструмента, байт в байт по поведению
+ *    (до 09.10.2026 — classifyBaseRowsIntoSegments): строки без ответа уходят
+ *    в дефолтный текст письма, null — только когда упали ВСЕ батчи. Промпт,
+ *    батчи и модель у обоих контрактов одни.
  */
 
 import { z } from 'zod';
@@ -53,6 +66,38 @@ export interface SegmentClassifyInput {
   log?: (msg: string) => void;
 }
 
+/** Расход модели классификатора: удачные ответы + оплаченные и отброшенные попытки. */
+export interface SegmentClassifyUsage {
+  tokensUsed: number;
+  costUsd: number;
+}
+
+/**
+ * Полный результат классификации (контракт market='us', см. шапку).
+ *
+ * assignments — только ЯВНЫЕ ответы модели: условие сегмента (дословно, как в
+ * шаблоне) или null — «ни одно условие не подходит», то есть дефолтный текст
+ * по решению модели. unanswered — индексы строк без годного ответа (батч упал,
+ * строка не размечена, условие не из списка, пустая строка вместо null); они
+ * НИКОГДА не маскируются под дефолт.
+ */
+export interface HeSegmentClassification {
+  assignments: Map<number, string | null>;
+  unanswered: number[];
+  failedBatches: number;
+  totalBatches: number;
+  /** Класс сбоя каждого упавшего батча (failureLabel) — для аудита запуска. */
+  failureKinds: string[];
+  usage: SegmentClassifyUsage;
+}
+
+/**
+ * Что вызывающий сделает со строкой без ответа — от этого зависит только
+ * хвост строки лога: 'default' (RU-контракт, строка уйдёт в дефолтный текст)
+ * или 'held' (us-контракт, строка отложена до следующего запуска).
+ */
+type UnansweredFate = 'default' | 'held';
+
 /**
  * Класс сбоя батча — по ТИПУ ошибки, а не по её тексту (см. llm.ts). В логе это
  * разные новости: `rate_limit` и `transient` значат «повторите запуск», а
@@ -67,6 +112,26 @@ function failureLabel(error: unknown): string {
   // обязательна, и её отсутствие — не «сеть», а ответ модели.
   if (error instanceof LLMValidationError) return 'invalid_answer';
   return 'unknown';
+}
+
+/**
+ * Оплаченное и выброшенное внутри llm.ts, когда вызов в итоге отказал
+ * (копия правила relevanceGate.discardedSpendOf): канал единственный и он
+ * текстовый — LLMValidationError несёт свою сумму строкой в сообщении. Разбор
+ * ТОЛЬКО ради бухгалтерии: ни одно решение здесь на текст не опирается. Не
+ * нашли — ноль, а не выдумка.
+ */
+function discardedSpendOf(error: unknown): SegmentClassifyUsage {
+  const match = /\[оплачено и отброшено: (\d+) tok, \$([\d.]+)\]/.exec(
+    error instanceof Error ? error.message : '',
+  );
+  if (!match) return { tokensUsed: 0, costUsd: 0 };
+  const tokensUsed = Number(match[1]);
+  const costUsd = Number(match[2]);
+  return {
+    tokensUsed: Number.isFinite(tokensUsed) ? tokensUsed : 0,
+    costUsd: Number.isFinite(costUsd) ? costUsd : 0,
+  };
 }
 
 function truncateCell(value: unknown): string {
@@ -108,21 +173,34 @@ function buildClassifyMessages(
 }
 
 /**
- * Классифицировать строки. Возвращает Map «индекс строки во входном массиве →
- * условие сегмента (дословное)». Строки без уверенного матча в Map не
- * попадают (= дефолтный текст). null — системный сбой (все батчи упали).
+ * Классифицировать строки — полный результат (контракт market='us', см.
+ * шапку). Промпт, батчи, модель и требование полноты — те же, что у
+ * прежнего контракта: он теперь обёртка над этой функцией.
+ *
+ * Повторный ответ по одной строке: условие сегмента перекрывает прежний ответ,
+ * явный null — только если ответа по строке ещё нет. Так прежний контракт
+ * (heLegacySegmentAssignments) остаётся прежним и на этом крае: у
+ * classifyBaseRowsIntoSegments null никогда не стирал уже названный сегмент.
  */
-export async function classifyBaseRowsIntoSegments(
-  input: SegmentClassifyInput,
-): Promise<Map<number, string> | null> {
+export async function classifyBaseRowsIntoSegmentsDetailed(
+  input: SegmentClassifyInput & { unansweredFate?: UnansweredFate },
+): Promise<HeSegmentClassification> {
   const { rows, segments, language } = input;
+  const fate: UnansweredFate = input.unansweredFate ?? 'held';
   // Путь запуска (launchTemplate) лог не передаёт, а молчащий сбой
-  // классификатора — это тихая потеря сегментных вариантов: строки уезжают в
-  // дефолтный текст, и узнать об этом негде. Поэтому по умолчанию — в лог
-  // процесса (воркер/роут), а не в никуда.
+  // классификатора — это тихая потеря сегментных вариантов. Поэтому по
+  // умолчанию — в лог процесса (воркер/роут), а не в никуда.
   const log = input.log ?? ((msg: string) => console.warn(msg));
   const cleaned = [...new Set(segments.map((s) => s.trim()).filter(Boolean))];
-  if (rows.length === 0 || cleaned.length === 0) return new Map();
+  const result: HeSegmentClassification = {
+    assignments: new Map(),
+    unanswered: [],
+    failedBatches: 0,
+    totalBatches: 0,
+    failureKinds: [],
+    usage: { tokensUsed: 0, costUsd: 0 },
+  };
+  if (rows.length === 0 || cleaned.length === 0) return result;
 
   const canonical = new Map(cleaned.map((s) => [s.toLowerCase(), s]));
 
@@ -139,9 +217,8 @@ export async function classifyBaseRowsIntoSegments(
     });
     batches.push({ start, items });
   }
+  result.totalBatches = batches.length;
 
-  const result = new Map<number, string>();
-  let failedBatches = 0;
   for (let wave = 0; wave < batches.length; wave += CONCURRENCY) {
     const group = batches.slice(wave, wave + CONCURRENCY);
     await Promise.all(
@@ -155,27 +232,47 @@ export async function classifyBaseRowsIntoSegments(
             // хвост батча по дефолтному тексту (см. шапку файла).
             { model: getHeModel('gate'), maxTokens: 4096, requireCompleteJson: true },
           );
+          result.usage.tokensUsed += llm.tokensUsed;
+          result.usage.costUsd += llm.costUsd;
           const validRows = new Set(batch.items.map((it) => it.index));
-          const answered = new Set<number>();
+          // Любое упоминание строки — для строки лога прежнего контракта.
+          const mentioned = new Set<number>();
           for (const a of llm.data.assignments) {
             if (!validRows.has(a.row)) continue;
-            answered.add(a.row);
-            const key = a.segment?.trim().toLowerCase();
+            mentioned.add(a.row);
+            if (a.segment === null) {
+              if (!result.assignments.has(a.row)) result.assignments.set(a.row, null);
+              continue;
+            }
+            const key = a.segment.trim().toLowerCase();
             if (!key) continue;
             const condition = canonical.get(key);
-            if (condition) result.set(a.row, condition);
+            if (condition) result.assignments.set(a.row, condition);
           }
-          // Ответ уложился в лимит, но строки в нём не все: формально это не
-          // сбой (непокрытые уедут в дефолтный текст), и потому единственный
-          // способ узнать о потере — сказать о ней.
-          if (answered.size < batch.items.length) {
+          const answered = batch.items.filter((it) => result.assignments.has(it.index)).length;
+          if (fate === 'default') {
+            // RU-контракт, строка лога прежняя. Ответ уложился в лимит, но строки
+            // в нём не все: формально это не сбой (непокрытые уедут в дефолтный
+            // текст), и потому единственный способ узнать о потере — сказать о ней.
+            if (mentioned.size < batch.items.length) {
+              log(
+                `[segmentClassify] батч ${batch.start}–${batch.start + batch.items.length - 1}: ` +
+                  `модель разметила ${mentioned.size} из ${batch.items.length} строк — остальные уйдут в дефолтный текст`,
+              );
+            }
+          } else if (answered < batch.items.length) {
             log(
               `[segmentClassify] батч ${batch.start}–${batch.start + batch.items.length - 1}: ` +
-                `модель разметила ${answered.size} из ${batch.items.length} строк — остальные уйдут в дефолтный текст`,
+                `годный ответ по ${answered} из ${batch.items.length} строк — остальные отложены, ` +
+                'в этом запуске не уйдут',
             );
           }
         } catch (e) {
-          failedBatches += 1;
+          result.failedBatches += 1;
+          result.failureKinds.push(failureLabel(e));
+          const spent = discardedSpendOf(e);
+          result.usage.tokensUsed += spent.tokensUsed;
+          result.usage.costUsd += spent.costUsd;
           log(
             `[segmentClassify] батч ${batch.start}–${batch.start + batch.items.length - 1} упал ` +
               `[${failureLabel(e)}]: ${e instanceof Error ? e.message : String(e)}`,
@@ -185,7 +282,25 @@ export async function classifyBaseRowsIntoSegments(
     );
   }
 
-  if (failedBatches === batches.length) return null;
+  rows.forEach((_, index) => {
+    if (!result.assignments.has(index)) result.unanswered.push(index);
+  });
+  return result;
+}
+
+/**
+ * Прежний контракт из полного результата: Map «строка → условие сегмента»
+ * (явный null и строки без ответа в Map не попадают = дефолтный текст); null
+ * — системный сбой, упали ВСЕ батчи. Читатель — запуск RU-проекта
+ * (launchTemplate.ts, шаг 5c): ему нужен и прежний результат, и расход для
+ * аудита.
+ */
+export function heLegacySegmentAssignments(detailed: HeSegmentClassification): Map<number, string> | null {
+  if (detailed.totalBatches > 0 && detailed.failedBatches === detailed.totalBatches) return null;
+  const result = new Map<number, string>();
+  for (const [row, segment] of detailed.assignments) {
+    if (segment !== null) result.set(row, segment);
+  }
   return result;
 }
 

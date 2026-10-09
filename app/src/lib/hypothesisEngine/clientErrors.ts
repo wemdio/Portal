@@ -174,6 +174,12 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   if (/конструктор завершился со статусом|конструктор вернул пустые данные/i.test(message)) return 'enrichment';
   if (/timed? ?out|ETIMEDOUT|AbortError|The operation was aborted/i.test(message)) return 'timeout';
 
+  // ВЫШЕ `source`: причина начинается с «Авто-сборка не дала строк», но строки
+  // были — все они уже лежат в других базах проекта (повторная сверка после
+  // импорта конструктора, stages/baseCollect.ts, closeWithoutRows). Текст
+  // `source` («источники не вернули строк») про такую базу — неправда.
+  if (/уже есть в других базах проекта/i.test(message)) return 'already_collected';
+
   if (
     /Авто-сборка не дала строк|план пуст/i.test(message) ||
     /\b(?:pdl_companies|funded_companies|eng_hiring_cache|companies_directory|hh_vacancies|hh_live|yandex_maps|google_maps|yandex_maps_organizations|google_maps_places)\b/i.test(

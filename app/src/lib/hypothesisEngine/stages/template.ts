@@ -9,7 +9,16 @@
  *  3) пост-проверки с одним retry каждая: длина тел (≤80 слов, письмо 1 ≤70) и
  *     консистентность operator_mapping (см. validateOperatorMapping);
  *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
- *  5) insert в he_templates (status 'ready', llm_model).
+ *  4b) ТОЛЬКО рынок 'us' — гейт отправки (templateOperatorGate): бесплатная
+ *      починка строки приветствия («Hello {{firstName}},» без колонки имени →
+ *      «Hello,») и замена пустой ячейки по виду колонки («your website») в
+ *      fallback маппинга; письма, где после них остался оператор без данных
+ *      (в теме письма 1 без колонки, где угодно без колонки и fallback, битые
+ *      {{…}}, пустая ячейка без замены или с заменой не к месту), в
+ *      he_templates НЕ пишутся: стадия падает HeTemplateOperatorGateError.
+ *      RU — как раньше: дыры маппинга только в логе, шаблон 'ready';
+ *  5) insert в he_templates (status 'ready', llm_model) — другого статуса
+ *     стадия не пишет.
  * До шага 1, без единого платного вызова: база читается только своего проекта,
  * пустая база (row_count 0) — отказ, а готовый шаблон базы возвращается как
  * есть (result.reused, расход 0) — см. findReusableTemplate про форс.
@@ -47,6 +56,15 @@ import {
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { projectMarket } from '../market';
+import { findEmailColumn } from '../launchHandoff';
+import {
+  HE_OPERATOR_PATTERN,
+  HeTemplateOperatorGateError,
+  checkHeTemplateOperators,
+  describeHeTemplateOperatorGate,
+  repairHeNameGreetings,
+  withHeEmptyCellFallbacks,
+} from '../templateOperatorGate';
 import type {
   HeBase,
   HeChain,
@@ -78,7 +96,8 @@ import {
 
 /* ───────────────── Pure-часть: операторы персонализации ───────────────── */
 
-const OPERATOR_RE = /\{\{\s*([A-Za-zА-Яа-яЁё0-9_.-]+)\s*\}\}/g;
+// Синтаксис оператора один на стадию и гейт отправки (templateOperatorGate).
+const OPERATOR_RE = new RegExp(HE_OPERATOR_PATTERN, 'g');
 
 /** Все уникальные операторы {{var}} в тексте, в порядке первого появления. */
 export function extractPersonalizationOperators(text: string): string[] {
@@ -937,6 +956,74 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   });
   if (mappingIssues.length) {
     stageLog(ctx, `[template] operator_mapping issues (best effort): ${mappingIssues.join(' | ')}`);
+  }
+
+  // Шаг 3b: гейт отправки — ТОЛЬКО рынок 'us' (ENG-кабинет). RU-инструмент
+  // ведёт специалист: он видит дыры маппинга и правит сам, поэтому для 'ru'
+  // этот блок не исполняется вовсе — письма, маппинг и статус прежние.
+  //
+  // Сначала бесплатная починка строки приветствия: оператор с именем человека
+  // без колонки (в ENG-базах её нет никогда) убирается из первой строки тела —
+  // «Hello {{firstName}},» → «Hello,». Маппинг после неё пересобирается: он
+  // обязан описывать те письма, которые ляжут в he_templates.
+  //
+  // Что осталось без данных — оператор в отправляемой теме без колонки, оператор
+  // без колонки и fallback, битый {{…}} — ушло бы получателю пустотой
+  // («Hello ,», «Quick question about »). Такой шаблон НЕ пишется ни в каком
+  // статусе (he_templates.status: 'draft' | 'ready' | 'failed'). Строку
+  // НЕ-ready шаблона кабинет и автопилот читают как «шаблон есть»: шаг Bases
+  // пишет про неё «Template is being built…», а автопилот, кнопка «Start
+  // outreach» и клиентский роут шаблона базе с любой строкой шаблона новой
+  // генерации не ставят — письма встали бы навсегда. Провал БЕЗ строки — уже
+  // разобранный ими путь «письма не собрались»: «template build failed» в
+  // ленте, повтор кнопкой и тормоз писем. Ошибка не терминальная: воркер
+  // повторит стадию новой генерацией (MAX_ATTEMPTS), и каждый прогон засчитан
+  // тормозу писем (heTemplateGenerationBudget).
+  if (market === 'us') {
+    const repaired = repairHeNameGreetings(letters, columns, operatorMapping);
+    if (repaired.repairs.length) {
+      letters = repaired.letters;
+      stageLog(
+        ctx,
+        `[template] приветствие без имени (колонки с именем в базе нет): ${repaired.repairs
+          .map((r) => `письмо ${r.letter} ${r.variant}: «${r.before.trim()}» → «${r.after.trim()}»`)
+          .join('; ')}`,
+      );
+      ops = collectOperators(letters);
+      operatorMapping = buildMapping(ops.allOperators);
+      mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
+        subjectOperators: ops.subjectOperators,
+      });
+    }
+    // Пустые ячейки колонок (templateOperatorGate, «ПУСТАЯ ЯЧЕЙКА»): каждому
+    // оператору с колонкой — замена по виду колонки из закрытой карты, и она
+    // ложится в operator_mapping. Так её получают ВСЕ, кто строит лидов по
+    // маппингу шаблона: запуск, ночной долив и перенос (mapBaseRowsToLeads —
+    // пустая ячейка → fallback). Гейт смотрит строки базы с адресом: пустую
+    // ячейку без замены или с заменой не к месту получатель прочёл бы
+    // неверно — такой шаблон не пишется, как и прочие провалы гейта.
+    const standIns = withHeEmptyCellFallbacks(operatorMapping, columns);
+    operatorMapping = standIns.mapping;
+    const baseRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
+    const gate = checkHeTemplateOperators({
+      letters,
+      columns,
+      operatorMapping,
+      rows: baseRows,
+      emailColumn: findEmailColumn(columns, baseRows),
+    });
+    if (gate.standIns.length) {
+      stageLog(
+        ctx,
+        `[template] пустые ячейки закрыты заменой: ${gate.standIns
+          .map((u) => `{{${u.operator}}} → «${u.standIn}» (пусто у ${u.emptyRows} из ${u.rows} строк с адресом)`)
+          .join('; ')}`,
+      );
+    }
+    if (!gate.ok) {
+      stageLog(ctx, `[template] гейт отправки: шаблон не сохраняем — ${describeHeTemplateOperatorGate(gate, 20)}`);
+      throw new HeTemplateOperatorGateError(gate);
+    }
   }
 
   const segmentWarnings = validateSegmentVariants(letters, analysis);

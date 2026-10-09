@@ -359,8 +359,18 @@ export interface EngSendingWindowWeekdayOption {
  * запуск отвечает отказом). Пустой ответ (демо-фикстура) — поле отсутствует.
  */
 export interface EngSendingWindowResponse {
-  /** Сохранённый выбор клиента; null — ещё не выбирал. */
+  /**
+   * Окно, которое печатать текущим: у запущенного шаблона — сохранённый выбор
+   * клиента, если он новее записи о запуске, иначе окно, прочитанное у
+   * кампаний запуска; до запуска — сохранённый выбор. null — выбора нет.
+   */
   schedule?: EngSendingWindow | null;
+  /**
+   * true — кампании запуска сейчас НЕ все на окне `schedule`: у части другое
+   * окно или его не удалось прочитать (частичная перестановка окна). Нет поля —
+   * `schedule` стоит у всех кампаний запуска (или запуска нет).
+   */
+  mixed?: boolean;
   default?: EngSendingWindow;
   timezones?: EngSendingWindowTimezoneOption[];
   weekdays?: EngSendingWindowWeekdayOption[];
@@ -381,30 +391,61 @@ export interface EngSendingWindowUpdateResponse {
 export interface EngLaunchResponse {
   ok?: boolean;
   launch?: EngTemplateLaunchInfo;
-  /** Окно отправки, с которым уехали созданные кампании. */
+  /**
+   * Окно отправки, которое стоит у ВСЕХ кампаний запуска. Нет поля — окно
+   * встало не у всех (их называет предупреждение) или ни у одной.
+   */
   schedule?: EngSendingWindow;
   warnings?: string[];
   error?: string;
   /**
-   * Отказ защиты аудитории (409 с `code`, launchTemplate.ts, шаг 4b′): запуск
-   * не состоялся, кампания не создана, `error` — английский текст ядра. Только
-   * у этих двух кодов launchEngTemplate отвечает значением, а не бросает:
-   * «Launch all» обходится с ними по-разному (EngStepReview, LaunchAllPanel).
+   * Отказ ядра запуска с машинным кодом (409 или 503 с `code`,
+   * launchTemplate.ts): запуск не состоялся, кампания не создана, `error` —
+   * английский текст ядра. Только у этих кодов launchEngTemplate отвечает
+   * значением, а не бросает: «Launch all» обходится с ними по-разному
+   * (EngStepReview, LaunchAllPanel).
    */
   refusal?: EngLaunchRefusalCode;
 }
 
 /**
- * Машинные коды отказов защиты аудитории — копия HE_LAUNCH_REFUSAL_CODES
- * (launchTemplate.ts): сам модуль ядра в клиентский бандл не едет.
+ * Машинные коды отказов, которые экран различает, — копия части
+ * HE_LAUNCH_REFUSAL_CODES и HE_LAUNCH_PREFLIGHT_REFUSAL_CODES (launchTemplate.ts):
+ * сам модуль ядра в клиентский бандл не едет.
  *  - sibling_template_launched — у другого шаблона той же базы уже есть запуск;
- *  - research_running — у проекта идёт повторное исследование.
- * Незнакомый код — обычная ошибка (бросается), как и до этих кодов.
+ *  - research_running — у проекта идёт повторное исследование;
+ *  - preset_no_mailboxes — в пресете нет ни одного ящика отправки (пресет
+ *    один на всю пачку «Launch all», следующий шаблон получил бы то же);
+ *  - segment_classification_incomplete — 503: классификатор сегментов не
+ *    ответил по слишком большой доле адресов. Он общий у всех шаблонов, и
+ *    следующий шаблон с сегментами снова оплатил бы классификацию всей своей
+ *    аудитории ради того же отказа.
+ * template_unresolved_operators экрану различать незачем: это ошибка одного
+ * шаблона (бросается), а шаблоны, которые она ждёт, «Launch all» и не берёт
+ * (`needs_rewrite`, engTemplateNeedsRewrite).
  */
-export type EngLaunchRefusalCode = 'sibling_template_launched' | 'research_running';
+export type EngLaunchRefusalCode =
+  | 'sibling_template_launched'
+  | 'research_running'
+  | 'preset_no_mailboxes'
+  | 'segment_classification_incomplete';
 
 function isEngLaunchRefusalCode(raw: unknown): raw is EngLaunchRefusalCode {
-  return raw === 'sibling_template_launched' || raw === 'research_running';
+  return (
+    raw === 'sibling_template_launched' ||
+    raw === 'research_running' ||
+    raw === 'preset_no_mailboxes' ||
+    raw === 'segment_classification_incomplete'
+  );
+}
+
+/**
+ * Признак проекции `needs_rewrite` (clientEngProjection, heTemplateNeedsRewrite):
+ * письма ready-шаблона ядро запуска откажет гейтом писем. Нет поля (демо,
+ * старый ответ) — false: тогда о письмах скажет сам отказ запуска.
+ */
+export function engTemplateNeedsRewrite(template: unknown): boolean {
+  return (template as { needs_rewrite?: unknown } | null)?.needs_rewrite === true;
 }
 
 interface EngChainPatchResponse {
@@ -677,10 +718,11 @@ export async function fetchEngLaunchPresets(templateId: string): Promise<HeLaunc
 }
 
 /**
- * POST /eng/templates/[id]/launch. Через engApiFetchRaw — ради кода 409 защиты
- * аудитории (`refusal`, см. EngLaunchResponse): его тело engApiFetch выбросил бы
- * вместе с исключением. Остальное — как у engApiFetch: успех отдаёт тело с
- * английским `error`, любой другой отказ бросается английским текстом.
+ * POST /eng/templates/[id]/launch. Через engApiFetchRaw — ради кода отказа
+ * (409 защиты аудитории и пресета, 503 классификатора; `refusal`, см.
+ * EngLaunchResponse): его тело engApiFetch выбросил бы вместе с исключением.
+ * Остальное — как у engApiFetch: успех отдаёт тело с английским `error`, любой
+ * другой отказ бросается английским текстом.
  */
 export async function launchEngTemplate(
   templateId: string,
@@ -695,7 +737,7 @@ export async function launchEngTemplate(
     if (typeof out.error === 'string') out.error = engErrorText(out.error);
     return out;
   }
-  if (res.status === 409 && isEngLaunchRefusalCode(data?.code)) {
+  if ((res.status === 409 || res.status === 503) && isEngLaunchRefusalCode(data?.code)) {
     return { ok: false, error: engRawErrorText(res, data), refusal: data.code };
   }
   throw new Error(engRawErrorText(res, data));

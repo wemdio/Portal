@@ -10,7 +10,8 @@
  *   - кампания: collect_info.campaign_id (снапшот на постановке), фолбэк —
  *     последний по дате запуска шаблон вертикали с launch_info; маппинг
  *     колонок → переменные — operator_mapping того же шаблона (как при
- *     первичном запуске, mapBaseRowsToLeads из launchHandoff);
+ *     первичном запуске, mapBaseRowsToLeads из launchHandoff); у market='us'
+ *     — с заменами пустых ячеек, как у запуска (heRefillOperatorMapping);
  *   - лиды: только строки с email И ДОПУЩЕННЫМ вердиктом валидации. Список
  *     допущенных вердиктов и их ранжирование здесь НЕ дублируются — вердикт
  *     считает heLaunchEmailVerdict (launchHandoff.ts), тот же, что у ручного
@@ -223,6 +224,7 @@ import {
 // работает», и это правда только потому, что пауза по ёмкости сообщает о себе
 // здесь (см. alertRefillCapacityStop).
 import { notifyHeClientStop } from '../opsAlert';
+import { withHeEmptyCellFallbacks } from '../templateOperatorGate';
 import type { HeMarket } from '../market';
 import type { HeJob, HeOperatorMapping } from '../types';
 import { stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
@@ -1756,6 +1758,26 @@ interface RefillTemplatePick {
   campaignId: string;
   presetId: string;
   operatorMapping: HeOperatorMapping[] | undefined;
+}
+
+/**
+ * Маппинг, по которому долив и перенос строят лидов (mapBaseRowsToLeads). У
+ * market='us' — с заменами пустых ячеек по виду колонки (templateOperatorGate,
+ * withHeEmptyCellFallbacks; колонки — той базы, чьи строки уходят). Шаблон,
+ * записанный до 09.10.2026, хранит маппинг без замен, а запуск кладёт их в
+ * памяти (launchTemplate.ts, шаг 4b″): без той же замены строка долива с
+ * пустой ячейкой ушла бы в ту же кампанию пустотой («I looked at  and…»). У
+ * шаблона, записанного позже, замены уже лежат в маппинге, и вызов ничего не
+ * меняет. Место замены в письмах гейт проверял по пустым ячейкам базы запуска
+ * (или стадии template), строк долива он не видел. Иной рынок — маппинг как
+ * записан.
+ */
+function heRefillOperatorMapping(
+  operatorMapping: HeOperatorMapping[] | undefined,
+  columns: string[],
+  market: HeMarket | undefined,
+): HeOperatorMapping[] | undefined {
+  return market === 'us' ? withHeEmptyCellFallbacks(operatorMapping, columns).mapping : operatorMapping;
 }
 
 /**
@@ -3405,7 +3427,7 @@ export async function runHeRefillAppend(args: {
     const { leads, leadRowIndices: leadSourceRows } = mapBaseRowsToLeads({
       rows: leadRows,
       columns: finalColumns,
-      operatorMapping: pick.operatorMapping,
+      operatorMapping: heRefillOperatorMapping(pick.operatorMapping, finalColumns, args.market),
       // Связь «доставленный лид → строка базы». Дальше значение подхватит
       // построчный журнал доставки (client_campaign_contact_ledger.source_row_id)
       // — второго журнала мы не заводим, а заполняем колонку, которая у ENG
@@ -3468,7 +3490,7 @@ export async function runHeRefillAppend(args: {
           const mapped = mapBaseRowsToLeads({
             rows: picked.leadRows,
             columns: company.columns,
-            operatorMapping: pick.operatorMapping,
+            operatorMapping: heRefillOperatorMapping(pick.operatorMapping, company.columns, args.market),
             sourceRowId: (index) => {
               const row = picked.leadRows[index];
               const companyKey = row ? normalizeCompanyForDedup(row.company) : '';

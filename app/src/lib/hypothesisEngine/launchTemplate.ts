@@ -106,9 +106,31 @@
  * segment_variants, строки базы классифицируются по условиям сегментов
  * (segmentClassify, bulk-модель) и запуск сплитится — одна paused-кампания
  * на сегмент с текстами его вариантов + основная с дефолтными текстами.
- * Системный сбой классификатора → легаси-путь: одна кампания, варианты
- * выкинуты с явным предупреждением. launch_info.campaigns хранит весь
- * список; скалярные поля — основная кампания (их читает refill-долив).
+ * launch_info.campaigns хранит весь список; скалярные поля — основная
+ * кампания (их читает refill-долив). Что делать со строкой БЕЗ ответа
+ * классификатора, решает рынок проекта (шаг 5c):
+ *  - RU (как до 09.10.2026): строка уходит в дефолтный текст; системный сбой
+ *    (упали все батчи) → легаси-путь: одна кампания, варианты выкинуты с
+ *    явным предупреждением;
+ *  - us (с 09.10.2026): «нет ответа» ≠ дефолтный сегмент. Такие строки
+ *    ОТКЛАДЫВАЮТСЯ — не уходят в этом запуске и лежат в launch_info.pending
+ *    стадией 'classify' поимённо; запуск записан незаконченным, и повтор
+ *    («Launch all (paused)») классифицирует ровно их — это вторая и последняя
+ *    попытка: что и она не разметила, уходит с основным текстом. Если без
+ *    ответа больше HE_SEGMENT_HOLD_REFUSE_SHARE строк, запуск без такого
+ *    долга (первый или force) отказывает до рассыльщика.
+ *
+ * ПРЕДПОЛЁТ us-ПРОЕКТА (с 09.10.2026, шаги 4b″–4b⁗), до классификатора и
+ * рассыльщика, на любом пути к отправке через это ядро — запуск из кабинета,
+ * запуск us-шаблона сотрудником из RU-инструмента, достройка незаконченного
+ * запуска и force-перезапуск:
+ *  - письма с подстановкой, которую база не наполнит (templateOperatorGate),
+ *    — отказ 409 'template_unresolved_operators';
+ *  - пресет без ящиков отправки — отказ 409 'preset_no_mailboxes';
+ *  - окно отправки новых кампаний — выбор клиента, иначе дефолт кабинета, а не
+ *    часы пресета (launchSchedule.ts).
+ * Ночной долив (stages/baseCollectRefill) этим ядром не идёт: он доливает
+ * адреса в кампанию, созданную здесь, — с её письмами, ящиками и окном.
  *
  * ОТКАЗ ПО МЕСТУ ПОД КОНТАКТЫ (решение владельца 04.10.2026). ENG-кабинет
  * читает нейтральную фразу без слова про место и рассыльщика (EN
@@ -131,8 +153,21 @@ import { logAudit, logError } from '@/lib/loggerServer';
 // Справочник клиентских текстов без зависимостей: нейтральная фраза про отказ,
 // который чинит команда (решение владельца 04.10.2026).
 import { HE_TEAM_ON_IT_EN } from '@/components/client-eng/clientFailureText';
+import type { ClientLaunchScheduleOverride } from '@/lib/clientLaunch/types';
 import type { HeBase, HeTemplate } from './types';
-import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from './segmentClassify';
+import {
+  classifyBaseRowsIntoSegmentsDetailed,
+  detectSegmentLanguage,
+  heLegacySegmentAssignments,
+  type HeSegmentClassification,
+} from './segmentClassify';
+import {
+  checkHeTemplateOperators,
+  describeHeTemplateOperatorGate,
+  withHeEmptyCellFallbacks,
+  type HeTemplateStandInUse,
+} from './templateOperatorGate';
+import { describeHeLaunchWindow, resolveHeLaunchSendingWindow, type HeLaunchWindowSource } from './launchSchedule';
 import { projectMarket, type HeMarket } from './market';
 import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
 import { HE_RESEARCH_STAGES } from './researchJob';
@@ -251,7 +286,54 @@ interface HeLaunchMessages {
    * «команда уже работает». RU-текст его не читает.
    */
   capacityStopNote: (segments: number, teamAlerted: boolean) => string;
+  /**
+   * Письма us-шаблона несут подстановку, которую база не наполнит (шаг 4b″).
+   * Аргумент — сводка гейта для staff (describeHeTemplateOperatorGate); EN его
+   * не печатает: в сводке имена операторов и колонок.
+   */
+  templateOperatorsUnresolved: (detail: string) => string;
+  /** В пресете us-запуска нет ни одного ящика отправки (шаг 4b‴). */
+  presetNoMailboxes: string;
+  /**
+   * Классификатор сегментов не ответил по слишком большой доле строк us-запуска
+   * (шаг 5c) — запуск не начат. EN — константа без чисел (её роут кабинета
+   * пропускает как есть, HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS).
+   */
+  segmentClassifyIncomplete: (unanswered: number, total: number) => string;
+  /** Строки us-запуска без ответа классификатора отложены до повтора (шаг 5c). */
+  segmentRowsHeldNote: (held: number) => string;
+  /**
+   * Достройка us-запуска: отложенные адреса и на этой попытке классификатора
+   * (номер `attempt`, последняя) остались без ответа — им основной текст (шаг 5c).
+   */
+  segmentRowsMainTextNote: (count: number, attempt: number) => string;
+  /**
+   * us: сегментные варианты есть, но ни один ОТПРАВЛЕННЫЙ адрес этого запуска в
+   * сегмент не попал — все они получили основной текст (отложенные
+   * классификатором не отправлены, о них segmentRowsHeldNote). Причина — ответ классификатора, а не
+   * «рассыльщик не умеет условные блоки» (её у us больше не бывает: полный
+   * сбой классификатора у us — отказ, а не легаси-путь).
+   */
+  segmentNoMatchNote: (dropped: number, lettersCount: number) => string;
+  /**
+   * Новые кампании us-запуска созданы с окном, которое выбрало ядро (окно не
+   * передано — запуск сотрудником, достройка без кабинета): какое и откуда.
+   */
+  launchWindowNote: (window: string, source: HeLaunchWindowSource) => string;
+  /** Сохранённое окно клиента не прочиталось — взят следующий источник. */
+  launchWindowReadFailedNote: string;
 }
+
+/**
+ * Отказ классификатора сегментов клиенту — ОДНА английская константа без
+ * чисел: роут кабинета показывает 5xx ядра, только если текст совпал с
+ * константой (HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS). Числа — в аудите и в
+ * тексте staff.
+ */
+const SEGMENT_CLASSIFY_INCOMPLETE_EN =
+  'We could not work out which segment of these letters fits too many of the addresses in this launch, so ' +
+  'it was stopped before anything was sent or changed. Please try again in a few minutes; if it keeps ' +
+  'happening, contact your manager.';
 
 /** Аренда запуска в минутах — для текстов: число в них обязано следовать константе. */
 const LEASE_MINUTES = Math.round(HE_LAUNCH_LEASE_MS / 60_000);
@@ -416,6 +498,47 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'В воркспейсе Instantly кончилось место под контакты, поэтому ' +
       `${segments.toLocaleString('ru-RU')} сегментов этого запуска не создавались вовсе. ` +
       'Освободите место и повторите запуск: уже созданные кампании повтор не дублирует.',
+    // Тексты ниже достижимы только у us-проекта (их условия скоупнуты на
+    // market='us'); RU-тексты читает сотрудник, запускающий us-шаблон из
+    // RU-инструмента.
+    templateOperatorsUnresolved: (detail) =>
+      'Запуск остановлен: в письмах шаблона us-проекта есть подстановки, которые база не наполнит, — ' +
+      `получатель увидел бы пустое место, слово-заглушку или сырой шаблон (${detail}). ` +
+      'Ничего не отправлено и не изменено. Пересоберите шаблон: новая сборка проходит эту проверку до сохранения.',
+    presetNoMailboxes:
+      'Запуск остановлен: в пресете нет ни одного ящика отправки (email_account_ids пуст) — кампания ' +
+      'us-проекта не отправила бы ни письма. Ничего не отправлено и не изменено. Привяжите ящики к пресету ' +
+      'клиента и повторите запуск.',
+    segmentClassifyIncomplete: (unanswered, total) =>
+      `Запуск остановлен: классификатор сегментов не дал ответа по ${unanswered.toLocaleString('ru-RU')} из ` +
+      `${total.toLocaleString('ru-RU')} адресов — больше допустимой доли. Дефолтный текст вместо их сегмента ` +
+      'us-проекту не отправляется, а запускать меньшую часть при лежащем классификаторе незачем. ' +
+      'Ничего не отправлено и не изменено, повтор безопасен; класс сбоя батчей — в аудите запуска.',
+    segmentRowsHeldNote: (held) =>
+      `Отложено адресов: ${held.toLocaleString('ru-RU')} — классификатор сегментов не дал по ним ответа ` +
+      '(упавший батч или неразмеченная строка), а дефолтный текст вместо их сегмента с первой попытки ' +
+      'us-проекту не отправляется. Они не отправлены и записаны в запуск поимённо: запуск помечен ' +
+      'незаконченным, и повтор (POST этого шаблона …/launch или «Launch all (paused)» в кабинете клиента) ' +
+      'классифицирует ровно их и доложит в кампании их сегментов. Это последняя попытка: адреса, по которым ' +
+      'классификатор не ответит и на ней, уйдут с основным текстом писем.',
+    segmentRowsMainTextNote: (count, attempt) =>
+      `С основным текстом вместо сегментного: ${count.toLocaleString('ru-RU')} адр. — классификатор ` +
+      `сегментов не дал по ним ответа ни при запуске, который их отложил, ни на этом повторе (попыток: ` +
+      `${attempt}). Третьей платной попытки нет: основной текст писем читается верно, он лишь не сегментный.`,
+    segmentNoMatchNote: (dropped, lettersCount) =>
+      `Сегментные варианты (${dropped} шт. в ${lettersCount} письмах) не понадобились: ни один отправленный ` +
+      'в этом запуске адрес классификатор не отнёс ни к одному сегменту — все они получили основной текст писем.',
+    launchWindowNote: (window, source) =>
+      `Окно отправки новых кампаний us-запуска: ${window} — ` +
+      (source === 'template'
+        ? 'выбор клиента для этого шаблона'
+        : source === 'client'
+          ? 'последний выбор клиента на другом его шаблоне'
+          : 'дефолт ENG-кабинета') +
+      '. Часы пресета us-проекту не ставятся.',
+    launchWindowReadFailedNote:
+      'Сохранённые окна отправки клиента не прочитались — новые кампании созданы с окном из строки выше. ' +
+      'Если клиент выбирал своё окно, сверьте его до активации.',
   },
   en: {
     templateNotFound: 'Template not found',
@@ -586,14 +709,20 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'Nothing in your audience was marked as contacted, so those addresses can still be used. ' +
       'Ask your manager to look at this launch before anyone uploads them a second time — an address ' +
       'that is already in a campaign would get two letters.',
+    // Число в фразах ниже бывает и 1: достройка отложенных классификатором
+    // адресов (шаг 5c) обычно дозаполняет одну кампанию и оставляет остальные.
+    // Не «kept exactly as it was»: роут кабинета после ядра ставит окно
+    // отправки и таким кампаниям (PATCH campaign_schedule) — неизменны только
+    // их существование и контакты.
     relaunchKeptCampaignsNote: (kept) =>
-      `This launch was repeated: ${kept.toLocaleString('en-US')} campaigns of this template already ` +
-      'existed from an earlier attempt. They were kept exactly as they were — not created again, and no ' +
-      'contacts were added to them.',
+      `This launch was repeated: ${kept.toLocaleString('en-US')} campaign${kept === 1 ? '' : 's'} of this ` +
+      `template already existed from an earlier attempt. ${kept === 1 ? 'It was' : 'They were'} not created ` +
+      `again, and no contacts were added to ${kept === 1 ? 'it' : 'them'}.`,
     relaunchRefilledCampaignsNote: (refilled) =>
-      `This launch was repeated: ${refilled.toLocaleString('en-US')} campaigns that an earlier attempt ` +
-      'created but did not finish filling were completed now, instead of creating a second campaign with ' +
-      'the same name. Addresses that are already in a campaign are skipped, so nobody gets two letters.',
+      `This launch was repeated: ${refilled.toLocaleString('en-US')} campaign${refilled === 1 ? '' : 's'} ` +
+      `that an earlier attempt created but did not finish filling ${refilled === 1 ? 'was' : 'were'} ` +
+      'completed now, instead of creating a second campaign with the same name. Addresses that are already ' +
+      'in a campaign are skipped, so nobody gets two letters.',
     relaunchCreatedCampaignsNote: (created) =>
       `This launch was repeated: ${created.toLocaleString('en-US')} campaign${created === 1 ? '' : 's'} ` +
       `${created === 1 ? 'was' : 'were'} created now, for the part${created === 1 ? '' : 's'} of your ` +
@@ -637,6 +766,77 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
         : 'This stopped because of a temporary problem on our side. Ask your manager when to launch ' +
           'again with «Launch all (paused)»') +
       '; repeating this launch does not duplicate the campaigns that were already created.',
+    // Правда для всех трёх форм гейта (templateOperatorGate): подстановка без
+    // колонки в теме (пусто), без колонки и fallback в теле (пусто), имя
+    // человека с fallback («there» — слово-заглушка), битый фрагмент вида
+    // «{company}» (сырой шаблон). Сводку для staff клиенту не печатаем: в ней
+    // имена операторов и колонок. Действие — к менеджеру: письма шаблона клиент
+    // не правит (правка цепочки на шаге 3 в готовый шаблон не попадает).
+    templateOperatorsUnresolved: () =>
+      'These letters contain a placeholder (such as a first name) that cannot be filled in from this ' +
+      'audience, so recipients would see a blank, a stand-in word or the raw placeholder in its place. ' +
+      'This launch was stopped before anything was sent or changed. Ask your manager to have the letters ' +
+      'rewritten.',
+    // Пресет клиент не правит (его заводит администратор), поэтому — к менеджеру.
+    // «Before anything was sent or changed» — правда и для первого запуска, и
+    // для достройки (её кампании уже есть, но эта попытка их не трогала).
+    presetNoMailboxes:
+      'Your sending preset has no mailboxes connected, so a campaign launched with it could not send a ' +
+      'single email. This launch was stopped before anything was sent or changed. Ask your manager to ' +
+      'connect your mailboxes to the sending preset, then launch again.',
+    // Правда при любом исходе: отказ бывает только у попытки без поимённого
+    // долга (первый запуск, force), и он до рассыльщика — кампаний этой
+    // попытки нет, прежняя запись (у force) возвращена как была.
+    segmentClassifyIncomplete: () => SEGMENT_CLASSIFY_INCOMPLETE_EN,
+    // «Launch all (paused)» снова предлагает такой шаблон: запуск записан
+    // незаконченным (heLaunchIsIncomplete), а панель запуска не исчезает после
+    // прогона (EngStepReview.tsx). Повтор шлёт с skip_if_in_campaign и —
+    // вторая и последняя попытка — отдаёт неразмеченным основной текст (шаг 5c).
+    segmentRowsHeldNote: (held) => {
+      const it = held === 1 ? 'it' : 'them';
+      return (
+        `${held.toLocaleString('en-US')} ${held === 1 ? 'address' : 'addresses'} of this audience did not go ` +
+        `out in this launch: we could not yet work out which segment of these letters fits ${it}, so ` +
+        `${held === 1 ? 'it waits' : 'they wait'} for one more try instead of getting the main letter text ` +
+        `straight away. Nobody was contacted for ${it} and your audience keeps ${it}. Press «Launch all ` +
+        `(paused)» again to send ${it}: we try once more, and ` +
+        (held === 1
+          ? 'if we still cannot place it, it gets the main letter text. '
+          : 'any we still cannot place get the main letter text. ') +
+        'The campaigns already created are reused, so nobody is contacted twice.'
+      );
+    },
+    // «get»: адреса уже отданы основной группе этой попытки; не доехали сейчас
+    // — остались её долгом с тем же основным текстом (pending основной кампании).
+    segmentRowsMainTextNote: (count, attempt) => {
+      const it = count === 1 ? 'it' : 'them';
+      return (
+        `${count.toLocaleString('en-US')} ${count === 1 ? 'address' : 'addresses'} of this audience ` +
+        `${count === 1 ? 'gets' : 'get'} the main letter text instead of a segment version: we tried ` +
+        `${attempt === 2 ? 'twice' : `${attempt.toLocaleString('en-US')} times`} and could not work out which ` +
+        `segment of these letters fits ${it}.`
+      );
+    },
+    // «sent»: отложенные классификатором адреса (segmentRowsHeldNote рядом)
+    // не уехали и основного текста не получили — фраза только про уехавшие.
+    segmentNoMatchNote: (dropped, lettersCount) =>
+      'None of the addresses sent in this launch matched a segment these letters were written for, so all of ' +
+      `them got the main letter text; the ${dropped.toLocaleString('en-US')} segment ` +
+      `${dropped === 1 ? 'version' : 'versions'} across ${lettersCount.toLocaleString('en-US')} ` +
+      `${lettersCount === 1 ? 'letter was' : 'letters were'} not used.`,
+    // Из кабинета окно приходит явным (роут), и эта фраза не печатается;
+    // текст нужен словарю и честен для любого источника.
+    launchWindowNote: (window, source) =>
+      `New campaigns of this launch use the sending window ${window} — ` +
+      (source === 'template'
+        ? 'the one picked for this template'
+        : source === 'client'
+          ? 'the one picked most recently for your other campaigns'
+          : 'the default for US campaigns') +
+      '. You can change it in the sending window of this template.',
+    launchWindowReadFailedNote:
+      'Your saved sending windows could not be read, so the new campaigns of this launch use the window ' +
+      'named above. Check the sending window of this template before the campaigns are started.',
   },
 };
 
@@ -650,6 +850,8 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
  * ответа рассыльщика и наружу не уходят (api/client/eng/templates/[id]/launch).
  */
 const HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS: ReadonlySet<string> = new Set([
+  // 503 классификатора сегментов: ничего не отправлено и не изменено, повтор безопасен.
+  SEGMENT_CLASSIFY_INCOMPLETE_EN,
   MESSAGES.en.blocklistLoadFailed,
   MESSAGES.en.presetLoadFailed,
   MESSAGES.en.marketReadFailed,
@@ -711,6 +913,79 @@ export function heTemplateLaunchMarked(row: HeTemplateLaunchMark, nowMs: number 
  */
 export const HE_LAUNCH_REFUSAL_CODES = ['sibling_template_launched', 'research_running'] as const;
 export type HeLaunchRefusalCode = (typeof HE_LAUNCH_REFUSAL_CODES)[number];
+
+/**
+ * Машинные коды отказов предполёта us-проекта (шаги 4b″, 4b‴ и 5c) — тоже в
+ * `code` рядом с текстом. Все три — ДО первого вызова рассыльщика:
+ *  - template_unresolved_operators (409) — в письмах подстановка, которую база
+ *    не наполнит (templateOperatorGate.checkHeTemplateOperators);
+ *  - preset_no_mailboxes (409) — в пресете нет ни одного ящика отправки;
+ *  - segment_classification_incomplete (503) — классификатор сегментов не
+ *    ответил по доле строк выше HE_SEGMENT_HOLD_REFUSE_SHARE. Только у
+ *    попытки без поимённого долга (первый запуск, force): достройка
+ *    отложенных не отказывает — вторая попытка без ответа отдаёт им основной
+ *    текст (шаг 5c).
+ * Кабинет различает по коду preset_no_mailboxes и
+ * segment_classification_incomplete (api-client.ts, EngStepReview.tsx: пресет
+ * и классификатор общие у всей пачки «Launch all», и следующий шаблон получил
+ * бы тот же отказ); 503 роут кабинета отдаёт с кодом, читая его
+ * heLaunchOutcomeCode (ниже). template_unresolved_operators кабинет по коду не
+ * различает: такие шаблоны он в «Launch all» не берёт (признак проекции
+ * `needs_rewrite`).
+ */
+export const HE_LAUNCH_PREFLIGHT_REFUSAL_CODES = [
+  'template_unresolved_operators',
+  'preset_no_mailboxes',
+  'segment_classification_incomplete',
+] as const;
+export type HeLaunchPreflightRefusalCode = (typeof HE_LAUNCH_PREFLIGHT_REFUSAL_CODES)[number];
+
+/** Любой машинный код отказа ядра — защиты аудитории (4b′) и предполёт us (4b″–5c). */
+export type HeLaunchOutcomeCode = HeLaunchRefusalCode | HeLaunchPreflightRefusalCode;
+
+const HE_LAUNCH_OUTCOME_CODES: ReadonlySet<string> = new Set<string>([
+  ...HE_LAUNCH_REFUSAL_CODES,
+  ...HE_LAUNCH_PREFLIGHT_REFUSAL_CODES,
+]);
+
+/**
+ * Код отказа из исхода ядра — типизированно, для роутов. Ядро кладёт его в
+ * `body.code` рядом с текстом; здесь он сверяется с двумя списками выше, и
+ * роут получает только код из словаря ядра. Нет кода (успех, отказ без кода,
+ * 5xx с сырьём) — null.
+ *
+ * Зачем отдельная функция: 5xx ядра роут кабинета отдаёт константой без тела
+ * (engServerError), а единственный 5xx с кодом — 503
+ * segment_classification_incomplete (refuseSegmentClassification, шаг 5c) —
+ * он отдаёт со статусом и кодом. Код роут читает ЭТОЙ функцией, а не разбором
+ * текста.
+ */
+export function heLaunchOutcomeCode(outcome: HeTemplateLaunchOutcome): HeLaunchOutcomeCode | null {
+  const code = outcome.body.code;
+  return typeof code === 'string' && HE_LAUNCH_OUTCOME_CODES.has(code) ? (code as HeLaunchOutcomeCode) : null;
+}
+
+/**
+ * ПОРОГ ОТКАЗА по классификатору сегментов (us, шаг 5c): запуск не начинается,
+ * если строк БЕЗ годного ответа больше этой доли от классифицированных. Ниже
+ * порога такие строки откладываются (pending стадии 'classify'), остальные
+ * уезжают.
+ *
+ * Почему не ноль, как у V2 (verticalEngineV2/launchTemplate: любой сбой —
+ * отказ): батч — 40 строк, у потолка запуска их 50, и один флап одного батча
+ * (429, таймаут, обрезанный ответ) блокировал бы весь запуск, а повтор
+ * заплатил бы за ВСЕ батчи заново. Отложенные строки ничего не теряют: они
+ * записаны поимённо, повтор классифицирует только их и платит только за них.
+ *
+ * Почему не «никогда не отказывать»: когда без ответа больше половины, это не
+ * флап, а лежащий классификатор (биллинг, ключ, авария — батчи идут волнами по
+ * 6 параллельно, и сбой бьёт волну целиком). Запуск меньшей части тогда создаёт
+ * кампании всех сегментов почти пустыми и оставляет большую часть аудитории
+ * ждать сервис, который не отвечает. Отказ до рассыльщика не создаёт ничего, а
+ * цена — повторная оплата батчей ответившего меньшинства мини-модели (центы).
+ * При отказе всех батчей запуск отказывает при любом пороге: отправлять нечего.
+ */
+export const HE_SEGMENT_HOLD_REFUSE_SHARE = 0.5;
 
 /**
  * Две защиты аудитории us-проекта (шаг 4b′): `refusal: null` — запускать можно,
@@ -802,6 +1077,13 @@ export interface HeTemplateLaunchInput {
   locale: HeLaunchLocale;
   /** Префикс событий логирования/аудита своего контура. */
   eventPrefix: string;
+  /**
+   * Окно отправки, выбранное клиентом (кабинет: тело запроса, иначе дефолт
+   * кабинета). Необязательно: staff-роут его не передаёт, и тогда у us-проекта
+   * окно выбирает ядро (launchSchedule.ts), а у RU-проекта остаётся окно пресета
+   * — ровно как до 09.10.2026. Новые кампании создаются сразу с этим окном.
+   */
+  sendingWindow?: ClientLaunchScheduleOverride | null;
 }
 
 export interface HeTemplateLaunchOutcome {
@@ -989,7 +1271,140 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     }
   }
 
+  // Строки базы, её колонки и колонка адреса — ДО предполёта: гейт писем
+  // (4b″) проверяет пустые ячейки по тем же строкам с адресом, из которых шаг
+  // 5 строит лидов. Всё здесь чистое (без БД и сети) и считалось бы ниже так
+  // же — у RU-проекта меняется только место вычисления.
   const allRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
+  const columns = Array.isArray(base.columns)
+    ? base.columns.filter((c): c is string => typeof c === 'string')
+    : [];
+  // Колонка адреса ищется ОДИН раз и по ОДНОМУ набору строк — по ПОЛНОЙ базе
+  // (allRows), — и это же значение уходит в гейт писем (4b″), гейт вердиктов
+  // и маппинг лидов (шаг 5). Гейтам колонка нужна ДО фильтра, маппингу —
+  // после, а детекция по содержимому (findEmailColumn: доля похожих значений
+  // среди первых непустых) зависит от НАБОРА строк: посчитанная второй раз по
+  // остатку, она могла назвать другую колонку или не найти ничего у базы, где
+  // гейт снял как раз строки с адресами, — и ответ был бы «в базе не найдена
+  // колонка с email» вместо честной причины отсева. Полная база — правильный
+  // набор для всех: она не зависит от того, что именно снял гейт.
+  const detectedEmailColumn = findEmailColumn(columns, allRows);
+
+  // 4b″. ПИСЬМА, КОТОРЫЕ ПРОЧИТАЮТСЯ НЕВЕРНО (us). Гейт стадии template
+  //      (templateOperatorGate.ts) не пускает в 'ready' новые us-шаблоны с
+  //      подстановкой, которую база не наполнит, — но шаблоны, записанные до
+  //      него, лежат 'ready' по-прежнему, а у одного шаблона один запуск на все
+  //      пути. Поэтому тот же гейт стоит здесь, на ВСЕХ путях этого ядра:
+  //      кабинет, запуск us-шаблона сотрудником, достройка и force. Считается
+  //      от писем шаблона и колонок ЕГО базы, а маппинг читается только затем,
+  //      чтобы узнать колонку и fallback, которые возьмёт mapBaseRowsToLeads
+  //      ниже, — то есть ровно то, что получит рассыльщик. Бесплатно, до
+  //      платного классификатора и до рассыльщика; force не снимает.
+  //      RU не трогаем: у специалиста дыра в письме видна в превью шаблона, и
+  //      запрещать ему привычный запуск никто не просил.
+  //
+  //      ПУСТЫЕ ЯЧЕЙКИ — та же функция, что у стадии (withHeEmptyCellFallbacks
+  //      + строки с адресом в гейте). У шаблона, записанного после 09.10.2026,
+  //      замены уже лежат в маппинге, и вызов ничего не меняет. У записанного
+  //      раньше замены кладутся В ПАМЯТИ этого запуска: письма шаблона те же,
+  //      меняется только значение переменной у строки с пустой ячейкой
+  //      («your website» вместо пустоты). Отказ здесь стоил бы платной
+  //      пересборки писем ради того, что детерминированно и бесплатно.
+  //      Записанный маппинг такого шаблона не меняется; ночной долив и перенос
+  //      кладут ту же замену в памяти (stages/baseCollectRefill,
+  //      heRefillOperatorMapping).
+  let operatorMapping = template.personalization_plan?.operator_mapping;
+  let standInsAddedAtLaunch: Array<{ operator: string; column: string; fallback: string }> = [];
+  let standInsUsed: HeTemplateStandInUse[] = [];
+  if (market === 'us') {
+    const withStandIns = withHeEmptyCellFallbacks(operatorMapping, columns);
+    operatorMapping = withStandIns.mapping;
+    standInsAddedAtLaunch = withStandIns.added;
+    const operatorGate = checkHeTemplateOperators({
+      letters: template.letters,
+      columns: base.columns,
+      operatorMapping,
+      rows: allRows,
+      emailColumn: detectedEmailColumn,
+    });
+    standInsUsed = operatorGate.standIns;
+    if (!operatorGate.ok) {
+      const detail = describeHeTemplateOperatorGate(operatorGate);
+      await logAudit(
+        `${eventPrefix}.refused_template_unresolved_operators`,
+        'Launch refused: template letters use placeholders the base cannot fill',
+        {
+          userId,
+          templateId,
+          baseId: base.id,
+          projectId: base.project_id,
+          subjectUnresolved: operatorGate.subjectUnresolved.length,
+          unbacked: operatorGate.unbacked.length,
+          malformed: operatorGate.malformed.length,
+          emptyCells: operatorGate.emptyCells.length,
+          detail,
+        },
+      );
+      return {
+        status: 409,
+        body: { error: t.templateOperatorsUnresolved(detail), code: 'template_unresolved_operators' satisfies HeLaunchPreflightRefusalCode },
+      };
+    }
+  }
+
+  // 4b‴. ЯЩИКИ ОТПРАВКИ (us). Пресет без единого ящика создаёт кампанию,
+  //      которая не отправит ни письма, а запуск тем не менее грузит в неё
+  //      адреса и пишет запись «launched» — ENG-клиент ящики в пресет не
+  //      добавляет (их привязывает администратор), то есть узнал бы об этом
+  //      никогда. Правило то же, что у RU-клиентского запуска
+  //      (lib/clientLaunch/validateLaunchInput.ts: «в пресете нет привязанных
+  //      email-аккаунтов»), переписано здесь, а не импортировано: то —
+  //      внутренность клиентского контура со своим словарём. Пустые строки в
+  //      списке ящиком не считаются. Пресет — тот, с которым кампании реально
+  //      создаются (у достройки — пресет записи). RU-инструмент как раньше:
+  //      там сотрудник сам проверяет и активирует кампанию в рассыльщике.
+  if (market === 'us') {
+    const mailboxIds = Array.isArray(preset.email_account_ids)
+      ? preset.email_account_ids.filter((id) => typeof id === 'string' && id.trim() !== '')
+      : [];
+    if (mailboxIds.length === 0) {
+      await logAudit(`${eventPrefix}.refused_preset_no_mailboxes`, 'Launch refused: sending preset has no mailboxes', {
+        userId,
+        templateId,
+        presetId: effectivePresetId,
+        projectId: base.project_id,
+      });
+      return {
+        status: 409,
+        body: { error: t.presetNoMailboxes, code: 'preset_no_mailboxes' satisfies HeLaunchPreflightRefusalCode },
+      };
+    }
+  }
+
+  // 4b⁗. ОКНО ОТПРАВКИ новых кампаний (launchSchedule.ts). Явное окно (выбор
+  //      клиента в кабинете) — как есть; у us-проекта без явного окна (запуск
+  //      сотрудником, достройка не из кабинета) — сохранённый выбор клиента,
+  //      иначе дефолт кабинета, но НЕ часы пресета; у RU без явного окна —
+  //      null, то есть окно пресета, как было (и без лишнего чтения БД).
+  const windowPlan = await resolveHeLaunchSendingWindow({
+    db: portalDb,
+    market,
+    templateId,
+    clientUserId: typeof preset.client_user_id === 'string' ? preset.client_user_id.trim() : '',
+    explicit: input.sendingWindow ?? null,
+  });
+  if (windowPlan.readError) {
+    await logError(`${eventPrefix}.sending_window_read_failed`, windowPlan.readError, {
+      userId,
+      templateId,
+      source: windowPlan.source,
+    });
+  }
+  const sendingWindow = windowPlan.window;
+  // Кампании этой попытки, которые получили окно в момент создания (или
+  // PATCH'ем вместе с цепочкой): роут кабинета не переставляет им окно второй
+  // раз и не называет их «оставшимися на прежних часах».
+  const windowCampaignIds: string[] = [];
 
   // 4c. ЧЕЙ вердикт лежит на строке. Гейт ниже верит колонке `_email_status`,
   //     но у базы us-проекта, собранной ДО 26.09.2026, этой веры она не
@@ -1064,22 +1479,11 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //    сколько строк уехало без вердикта, говорит unverifiedSentNote.
   //    Ручная RU-загрузка (source !== 'auto' у ru-проекта) фильтр не проходит
   //    вовсе — у CSV специалиста вердиктов нет по определению.
-  const columns = Array.isArray(base.columns)
-    ? base.columns.filter((c): c is string => typeof c === 'string')
-    : [];
+  //    Колонки базы, её строки (allRows) и колонка адреса (detectedEmailColumn)
+  //    посчитаны до шага 4b″ — их читает и гейт писем.
   const isAutoBase = base.source === 'auto';
   const requireEmailVerdict = market === 'us';
   const filterRows = isAutoBase || requireEmailVerdict;
-  // Колонка адреса ищется ОДИН раз и по ОДНОМУ набору строк — по ПОЛНОЙ базе
-  // (allRows), — и это же значение уходит в маппинг лидов ниже. Гейту колонка
-  // нужна ДО фильтра, маппингу — после, а детекция по содержимому
-  // (findEmailColumn: доля похожих значений среди первых непустых) зависит от
-  // НАБОРА строк: посчитанная второй раз по остатку, она могла назвать другую
-  // колонку или не найти ничего у базы, где гейт снял как раз строки с
-  // адресами, — и ответ был бы «в базе не найдена колонка с email» вместо
-  // честной причины отсева. Полная база — правильный набор для обеих: она не
-  // зависит от того, что именно снял гейт.
-  const detectedEmailColumn = findEmailColumn(columns, allRows);
   // Гейту колонка нужна, чтобы не требовать вердикт со строк, где адреса нет
   // вовсе: у автосборки это штатная компания без найденной почты (их бывает
   // большинство), и записать их в «сняты без вердикта» значило бы соврать в
@@ -1127,7 +1531,8 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     rows,
     columns,
     emailColumn: detectedEmailColumn,
-    operatorMapping: template.personalization_plan?.operator_mapping,
+    // us — с заменами пустых ячеек (шаг 4b″); RU — записанный маппинг как есть.
+    operatorMapping,
     // СТАНДАРТНЫЕ поля лида (company_name/website/phone) — в ОБОИХ контурах, не
     // только у market='us'. Проверено, кто их читает, прежде чем включать:
     //   - собственные переменные рассыльщика в письме ({{companyName}},
@@ -1226,7 +1631,19 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     });
     return { status: 500, body: { error: t.blocklistLoadFailed } };
   }
-  if (leads.length === 0 && !owedByEmails) return { status: 400, body: { error: t.allContactsBlocked } };
+  if (leads.length === 0 && !owedByEmails) {
+    // Счёт снятых чёрным списком — в аудит и на этом отказе, а не только в
+    // аудите успеха: «запуск не состоялся, потому что все адреса в блоке» без
+    // числа по журналу не отличить от пустой базы.
+    await logAudit(`${eventPrefix}.refused_all_contacts_blocked`, 'Launch refused: every address is on the client blocklist', {
+      userId,
+      templateId,
+      baseId: base.id,
+      presetId: effectivePresetId,
+      blockedContacts,
+    });
+    return { status: 400, body: { error: t.allContactsBlocked } };
+  }
 
   // 5a′. ДОСТРОЙКА — ТОЛЬКО ДОЛЖНОЕ. Повтор незакончённого запуска с поимённым
   //      долгом шлёт ровно адреса из launch_info.pending, а не всю базу: всё
@@ -1457,27 +1874,137 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //
   //     ДОСТРОЙКА С ПОИМЁННЫМ ДОЛГОМ: группы — это сегменты из
   //     launch_info.pending с их адресами (тем, что от них осталось после
-  //     шага 5a′). Классификатор НЕ зовётся: раскладка уже сделана и оплачена
-  //     прошлой попыткой, а его повторный ответ мог бы разложить базу иначе —
-  //     сегмент без группы молча выпадал из долга, и запуск записывался
-  //     законченным с незагруженными адресами.
+  //     шага 5a′). Классификатор по ним НЕ зовётся: раскладка уже сделана и
+  //     оплачена прошлой попыткой, а его повторный ответ мог бы разложить базу
+  //     иначе — сегмент без группы молча выпадал из долга, и запуск записывался
+  //     законченным с незагруженными адресами. Зовётся он только по адресам
+  //     стадии 'classify' — тем, по которым прошлая попытка ответа не получила
+  //     (us, см. ниже): их сегмент ещё неизвестен.
   //
   //     ИНАЧЕ — материализация 15%: сплит лидов по сегментам базы.
-  //     Классификатор — LLM (bulk-модель, батчами); системный сбой → null →
-  //     легаси-путь: одна кампания, сегментные варианты выкинуты с
-  //     предупреждением.
+  //     Классификатор — LLM (мини-модель, батчами). Строка БЕЗ ответа:
+  //      - RU (как до 09.10.2026): дефолтный текст; системный сбой (упали все
+  //        батчи) → легаси-путь: одна кампания, сегментные варианты выкинуты
+  //        с предупреждением;
+  //      - us: ОТКЛАДЫВАЕТСЯ — не уходит в этом запуске, а ложится в
+  //        launch_info.pending стадией 'classify' поимённо (запуск записан
+  //        незаконченным, повтор берёт ровно их; что не разметил и повтор —
+  //        основной текст, без третьей платной попытки). Без ответа больше
+  //        HE_SEGMENT_HOLD_REFUSE_SHARE строк — отказ до рассыльщика (503
+  //        segment_classification_incomplete): кампаний нет, аренда снята.
+  //     Расход классификатора — в аудит запуска (успех и отказ): других
+  //     записей о расходе у запуска нет, а he_projects.cost_usd пишет воркер
+  //     чтением-изменением-записью и параллельной записи из роута не переживёт.
   interface LeadGroup {
     segment: string | null;
     leadIdx: number[];
   }
   let groups: LeadGroup[] = [];
   let segmentsMaterialized = false;
+  const classifier = {
+    ran: false,
+    rows: 0,
+    batches: 0,
+    failedBatches: 0,
+    failureKinds: [] as string[],
+    tokensUsed: 0,
+    costUsd: 0,
+  };
+  const noteClassification = (detailed: HeSegmentClassification): void => {
+    classifier.batches += detailed.totalBatches;
+    classifier.failedBatches += detailed.failedBatches;
+    classifier.failureKinds.push(...detailed.failureKinds);
+    classifier.tokensUsed += detailed.usage.tokensUsed;
+    classifier.costUsd += detailed.usage.costUsd;
+  };
+  // Адреса, отложенные классификатором (us): в запись — pending стадии 'classify'.
+  let heldEmails: string[] = [];
+  // Достройка (us): номер попытки классификатора по отложенным адресам и
+  // сколько из них и на ней остались без ответа — они уходят с основным текстом.
+  let heldAttempt = 0;
+  let heldMainText = 0;
+
+  /**
+   * us: классифицировать лидов по позициям в `leads`. Ответы — по позиции
+   * (условие сегмента или null — «ни одно не подходит»), held — позиции без
+   * годного ответа. Непредвиденный бросок самого классификатора (сбои батчей
+   * он не бросает, они в failedBatches) — «ответа нет ни по одной строке».
+   */
+  const classifyUsLeads = async (
+    positions: number[],
+  ): Promise<{ answers: Map<number, string | null>; held: number[] }> => {
+    classifier.ran = true;
+    classifier.rows += positions.length;
+    try {
+      const detailed = await classifyBaseRowsIntoSegmentsDetailed({
+        rows: positions.map((pos) => rows[leadRowIndices[pos]] ?? {}),
+        segments: segmentWhens,
+        language: detectSegmentLanguage(segmentWhens),
+      });
+      noteClassification(detailed);
+      const answers = new Map<number, string | null>();
+      detailed.assignments.forEach((segment, idx) => answers.set(positions[idx], segment));
+      return { answers, held: detailed.unanswered.map((idx) => positions[idx]) };
+    } catch (err) {
+      await logError(`${eventPrefix}.segment_classify_failed`, err, { userId, templateId });
+      classifier.failureKinds.push('unknown');
+      return { answers: new Map(), held: [...positions] };
+    }
+  };
+
+  /** Отказ классификатора (us): ничего не создано и не изменено. */
+  const refuseSegmentClassification = async (unanswered: number, total: number): Promise<HeTemplateLaunchOutcome> => {
+    await releaseClaim();
+    await logAudit(
+      `${eventPrefix}.refused_segment_classification_incomplete`,
+      'Launch refused: the segment classifier left too many addresses without an answer',
+      {
+        userId,
+        templateId,
+        baseId: base.id,
+        projectId: base.project_id,
+        resumeLaunch,
+        unanswered,
+        total,
+        refuseShare: HE_SEGMENT_HOLD_REFUSE_SHARE,
+        classifierBatches: classifier.batches,
+        classifierFailedBatches: classifier.failedBatches,
+        classifierFailureKinds: classifier.failureKinds,
+        classifierTokens: classifier.tokensUsed,
+        classifierCostUsd: classifier.costUsd,
+      },
+    );
+    return {
+      status: 503,
+      body: {
+        error: t.segmentClassifyIncomplete(unanswered, total),
+        code: 'segment_classification_incomplete' satisfies HeLaunchPreflightRefusalCode,
+      },
+    };
+  };
+
   if (owedByEmails) {
     const posByEmail = new Map<string, number>();
     leads.forEach((lead, i) => posByEmail.set(lead.email, i));
     const owedGroups = new Map<string, LeadGroup>();
     const taken = new Set<number>();
+    const heldPositions: number[] = [];
+    // Сколько попыток классификатора уже не дали ответа по отложенным адресам
+    // (HeTemplateLaunchPending.classify_attempts; ключа нет — 1).
+    let heldFailedBefore = 0;
     for (const entry of owed) {
+      // Отложенные классификатором: сегмента у них нет, и по `segment: null`
+      // их нельзя класть в основную кампанию — сначала классификация (ниже).
+      if (entry.stage === 'classify') {
+        heldFailedBefore = Math.max(heldFailedBefore, entry.classify_attempts ?? 1);
+        for (const email of entry.emails ?? []) {
+          const pos = posByEmail.get(email);
+          if (pos === undefined || taken.has(pos)) continue;
+          taken.add(pos);
+          heldPositions.push(pos);
+        }
+        continue;
+      }
       const key = entry.segment ?? '';
       const group = owedGroups.get(key) ?? { segment: entry.segment, leadIdx: [] };
       for (const email of entry.emails ?? []) {
@@ -1488,6 +2015,34 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       }
       owedGroups.set(key, group);
     }
+    if (heldPositions.length > 0) {
+      // Условий сегментов у писем нет — дефолтный текст и есть верный ответ
+      // для каждого адреса (шаблон неизменен, так что это лишь страховка).
+      const { answers, held } =
+        segmentWhens.length > 0
+          ? await classifyUsLeads(heldPositions)
+          : { answers: new Map<number, string | null>(heldPositions.map((pos) => [pos, null])), held: [] };
+      for (const [pos, segment] of answers) {
+        const key = segment ?? '';
+        const group = owedGroups.get(key) ?? { segment, leadIdx: [] };
+        group.leadIdx.push(pos);
+        owedGroups.set(key, group);
+      }
+      // ВТОРАЯ попытка без ответа — последняя (HeTemplateLaunchPending.
+      // classify_attempts): такие адреса уходят с ОСНОВНЫМ текстом в основную
+      // кампанию, а не откладываются снова. Иначе адрес, по которому модель не
+      // отвечает никогда, держал бы запуск «незаконченным» вечно, и каждое
+      // нажатие заново платило бы за его батч. Основной текст читается верно —
+      // он лишь не сегментный (так до 09.10.2026 уходила каждая строка без
+      // ответа, только молча); об этих адресах говорит segmentRowsMainTextNote.
+      if (segmentWhens.length > 0) heldAttempt = heldFailedBefore + 1;
+      if (held.length > 0) {
+        const main = owedGroups.get('') ?? { segment: null, leadIdx: [] };
+        main.leadIdx.push(...held);
+        owedGroups.set('', main);
+        heldMainText = held.length;
+      }
+    }
     // Пустая группа — сегмент, чей долг целиком стал неотправляемым (5a′): его
     // кампания, если есть, переносится как есть, а в долг он не возвращается.
     groups = [...owedGroups.values()]
@@ -1495,14 +2050,50 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       .map((g) => ({ segment: g.segment, leadIdx: [...g.leadIdx].sort((a, b) => a - b) }));
   } else {
     groups = [{ segment: null, leadIdx: leads.map((_, i) => i) }];
-    if (segmentWhens.length > 0) {
+    if (segmentWhens.length > 0 && market === 'us') {
+      const { answers, held } = await classifyUsLeads(leads.map((_, i) => i));
+      if (held.length > 0 && held.length > leads.length * HE_SEGMENT_HOLD_REFUSE_SHARE) {
+        return refuseSegmentClassification(held.length, leads.length);
+      }
+      const defaultIdx: number[] = [];
+      const bySegment = new Map<string, number[]>();
+      [...answers.keys()]
+        .sort((a, b) => a - b)
+        .forEach((leadPos) => {
+          const seg = answers.get(leadPos);
+          if (!seg) {
+            defaultIdx.push(leadPos);
+            return;
+          }
+          const list = bySegment.get(seg) ?? [];
+          list.push(leadPos);
+          bySegment.set(seg, list);
+        });
+      const next: LeadGroup[] = [];
+      if (defaultIdx.length > 0) next.push({ segment: null, leadIdx: defaultIdx });
+      for (const when of segmentWhens) {
+        const idxs = bySegment.get(when);
+        if (idxs && idxs.length > 0) next.push({ segment: when, leadIdx: idxs });
+      }
+      groups = next;
+      heldEmails = held.map((pos) => leads[pos].email);
+      segmentsMaterialized = segmentWhens.some((w) => (bySegment.get(w) ?? []).length > 0);
+    } else if (segmentWhens.length > 0) {
+      // RU — прежний контракт по поведению байт в байт: heLegacySegmentAssignments
+      // отдаёт ровно то, что до 09.10.2026 возвращал classifyBaseRowsIntoSegments
+      // (тот же промпт, батчи и строки лога); детальный вызов — ради расхода в аудите.
+      classifier.ran = true;
+      classifier.rows += leads.length;
       let assignments: Map<number, string> | null = null;
       try {
-        assignments = await classifyBaseRowsIntoSegments({
+        const detailed = await classifyBaseRowsIntoSegmentsDetailed({
           rows: leadRowIndices.map((ri) => rows[ri] ?? {}),
           segments: segmentWhens,
           language: detectSegmentLanguage(segmentWhens),
+          unansweredFate: 'default',
         });
+        noteClassification(detailed);
+        assignments = heLegacySegmentAssignments(detailed);
       } catch {
         assignments = null;
       }
@@ -1530,12 +2121,20 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       }
     }
   }
+  // Отложенные адреса — одной записью pending без сегмента (см.
+  // HeTemplateLaunchPending, стадия 'classify'); пустой — ключа нет.
+  // Откладывает их только ветка без поимённого долга (первый запуск, force по
+  // законченному запуску, запись без адресов) — после ОДНОЙ попытки
+  // классификатора по этим адресам: classify_attempts = 1. Достройка их не
+  // откладывает (выше), поэтому больше 1 здесь не бывает.
+  const heldPending: HeTemplateLaunchPending[] =
+    heldEmails.length > 0 ? [{ segment: null, stage: 'classify', emails: heldEmails, classify_attempts: 1 }] : [];
 
   // Классификатор (LLM, батчами) мог идти минутами — аренду, взятую до него,
   // продлеваем перед первым обращением к рассыльщику, чтобы её срок считался
   // от загрузок, а не от начала попытки. Перехватили, пока шла классификация,
   // — дальше не идём: у рассыльщика эта попытка ещё ничего не сделала.
-  if (hasStartRecord && !owedByEmails && segmentWhens.length > 0) {
+  if (hasStartRecord && classifier.ran) {
     const renewed = await saveRecord({ ...startFields, attempt: attemptToken, running_until: leaseUntil() });
     if (renewed === 'taken') return { status: 409, body: { error: t.launchInProgress } };
   }
@@ -1699,6 +2298,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       ...(inFlight ? [inFlight] : []),
       ...groups.slice(nextGroup).filter((g) => !isKeptGroup(g)).map(owedEntryForGroup),
       ...carriedOwed,
+      ...heldPending,
     ];
     let leadsCount = 0;
     let leadsRequested = 0;
@@ -1816,9 +2416,12 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       netRequested: number;
     } = { campaign: null, reused: false, sentUpTo: 0, accepted: 0, netRequested: 0 };
     try {
+      // Окно (шаг 4b⁗) — в момент создания: кампания не существует ни
+      // секунды с часами пресета. Нет окна (RU без явного) — вызов прежний.
       const payload = buildCampaignPayloadFromPreset({
         preset,
         sequence: { name: campaignName, steps: sequence.steps },
+        ...(sendingWindow ? { scheduleOverride: sendingWindow } : {}),
       });
 
       // Новая кампания: в запись — СРАЗУ, как узнан id, и только потом PATCH
@@ -1832,6 +2435,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         }
         createdCampaigns += 1;
         createdCampaignIds.push(createdId);
+        if (sendingWindow) windowCampaignIds.push(createdId);
         const fresh: HeTemplateLaunchCampaign = {
           campaign_id: createdId,
           campaign_name: campaignName,
@@ -1880,8 +2484,19 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
           // на самом этом PATCH'е. У кампании с подтверждёнными адресами
           // PATCH'а нет: цепочка в ней уже стоит, и её получатели могут быть в
           // рассылке.
+          // Окно — тем же PATCH'ем: пустую кампанию прошлой попытки (у
+          // us-проекта до 09.10.2026 — с часами пресета) нечем было бы иначе
+          // привести к окну этого запуска на пути без кабинета.
           try {
-            await updateCampaign(reuse.campaign_id, { sequences: payload.sequences }, instantlyRequestOptions);
+            await updateCampaign(
+              reuse.campaign_id,
+              {
+                sequences: payload.sequences,
+                ...(sendingWindow ? { campaign_schedule: payload.campaign_schedule } : {}),
+              },
+              instantlyRequestOptions,
+            );
+            if (sendingWindow) windowCampaignIds.push(reuse.campaign_id);
           } catch (patchErr) {
             if (!isInstantlyNotFound(patchErr)) throw patchErr;
             missing = true;
@@ -2137,15 +2752,41 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   }
   if (segmentWhens.length > 0 && !segmentsMaterialized) {
     const legacy = buildLaunchSequence(templateLetters);
+    // us: полного сбоя классификатора здесь уже не бывает (это отказ, шаг
+    // 5c), поэтому «варианты не попали» значит одно — ни один адрес этого
+    // запуска модель не отнесла к сегменту. Прежняя фраза про условные блоки
+    // рассыльщика назвала бы клиенту не ту причину. RU — как было.
     const segWarning =
-      locale === 'en'
+      market === 'us'
         ? legacy && legacy.droppedSegmentVariants > 0
-          ? t.segmentVariantsWarning(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants)
+          ? t.segmentNoMatchNote(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants)
           : null
-        : legacy
-          ? segmentVariantsWarning(legacy)
-          : null;
+        : locale === 'en'
+          ? legacy && legacy.droppedSegmentVariants > 0
+            ? t.segmentVariantsWarning(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants)
+            : null
+          : legacy
+            ? segmentVariantsWarning(legacy)
+            : null;
     if (segWarning) warnings.push(segWarning);
+  }
+  // Отложенные классификатором (us, шаг 5c) — не уехали, лежат в записи
+  // поимённо; повтор возьмёт ровно их.
+  if (heldEmails.length > 0) {
+    warnings.push(t.segmentRowsHeldNote(heldEmails.length));
+  }
+  if (heldMainText > 0) {
+    warnings.push(t.segmentRowsMainTextNote(heldMainText, heldAttempt));
+  }
+  // Окно выбрало ядро (не передано явно) — назвать его и источник, и только
+  // если хоть одна кампания этой попытки его действительно получила.
+  if (
+    sendingWindow &&
+    windowCampaignIds.length > 0 &&
+    (windowPlan.source === 'template' || windowPlan.source === 'client' || windowPlan.source === 'default')
+  ) {
+    warnings.push(t.launchWindowNote(describeHeLaunchWindow(sendingWindow), windowPlan.source));
+    if (windowPlan.readError) warnings.push(t.launchWindowReadFailedNote);
   }
   if (segmentsMaterialized && (launchInfo.campaigns ?? []).length > 1) {
     warnings.push(t.segmentSplitInfo((launchInfo.campaigns ?? []).length));
@@ -2246,6 +2887,30 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       capacitySkippedSegments,
       progressSaveFailures,
       force,
+      // Классификатор сегментов (шаг 5c): сколько строк размечалось, сколько
+      // отложено (us), батчи, классы сбоев и РАСХОД — у запуска другой записи
+      // о расходе нет (he_projects.cost_usd ведёт воркер).
+      classifierRows: classifier.rows,
+      classifierBatches: classifier.batches,
+      classifierFailedBatches: classifier.failedBatches,
+      classifierFailureKinds: classifier.failureKinds,
+      classifierTokens: classifier.tokensUsed,
+      classifierCostUsd: classifier.costUsd,
+      heldForClassification: heldEmails.length,
+      // Достройка: отложенные, что и на этой (последней) попытке остались без
+      // ответа и ушли с основным текстом, и номер попытки.
+      heldSentMainText: heldMainText,
+      heldClassifyAttempt: heldAttempt,
+      // Пустые ячейки (шаг 4b″, us): какие операторы части строк дали замену
+      // вместо значения, и какие замены положены в памяти этого запуска
+      // (шаблон записан до 09.10.2026, в его маппинге их нет).
+      emptyCellStandIns: standInsUsed,
+      standInsAddedAtLaunch,
+      // Окно отправки новых кампаний (шаг 4b⁗): откуда и какое; 'preset' —
+      // окно пресета (RU без явного окна).
+      sendingWindowSource: windowPlan.source,
+      sendingWindow,
+      windowCampaigns: windowCampaignIds.length,
     },
   );
 
@@ -2259,6 +2924,14 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       // наружу): в error лежит сырьё рассыльщика, а имя сегмента нужно, чтобы
       // сказать клиенту, какая именно часть аудитории не поехала.
       ...(segmentFailures.length > 0 ? { segment_failures: segmentFailures } : {}),
+      // Тоже только для роута кабинета (он ключ удаляет): кампании, которые
+      // получили ПЕРЕДАННОЕ им окно (source 'explicit') в момент создания или
+      // PATCH'ем цепочки, — ставить им окно второй раз не нужно, и «остались на
+      // прежних часах» про них неправда. Окно, выбранное самим ядром, сюда не
+      // попадает: роут сверяет кампании со СВОИМ окном. id наружу не уходят.
+      ...(windowPlan.source === 'explicit' && windowCampaignIds.length > 0
+        ? { window_campaign_ids: [...windowCampaignIds] }
+        : {}),
     },
   };
 }
