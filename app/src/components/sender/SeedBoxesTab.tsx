@@ -433,6 +433,7 @@ function AddSeedBoxesModal({
   onAdded: (ids: string[], skipped: string[]) => void | Promise<void>;
 }) {
   const [lines, setLines] = useState('');
+  const [proxies, setProxies] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -440,7 +441,7 @@ function AddSeedBoxesModal({
     setBusy(true);
     setError(null);
     try {
-      const res = await addSeedBoxes({ lines });
+      const res = await addSeedBoxes({ lines, proxies });
       await onAdded(res.created.map((c) => c.id), res.skipped);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось добавить ящики');
@@ -484,6 +485,16 @@ function AddSeedBoxesModal({
       <p className="mt-2 text-xs text-zinc-500">
         Берём адрес и последнее поле — пароль IMAP или пароль приложения. Остальное не сохраняется.
       </p>
+      <label className="mt-4 block text-sm font-medium text-zinc-700">Прокси — необязательно</label>
+      <textarea
+        value={proxies}
+        onChange={(e) => setProxies(e.target.value)}
+        rows={4}
+        spellCheck={false}
+        placeholder={'http://логин:пароль@1.2.3.4:10001\nhttp://логин:пароль@1.2.3.4:10002'}
+        className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs text-zinc-900"
+      />
+      <p className="mt-1 text-xs text-zinc-500">По строке на ящик, в том же порядке — первый вход сразу через прокси</p>
     </SenderModal>
   );
 }
