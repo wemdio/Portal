@@ -29,7 +29,8 @@ import {
   type Signal,
 } from '../types';
 import { fallbackBridge, type BridgeRequest } from './bridge';
-import { hypothesisText, openingSentence, type ChainInput, type SegmentsHypothesis } from './chains';
+import { hypothesisText, openingSentence, siteObservationText, type ChainInput, type SegmentsHypothesis } from './chains';
+import { FALLBACK_TOPIC } from './topic';
 
 const P = TEMPLATE_PLACEHOLDERS;
 const ANY_PLACEHOLDER = /\{\{[^{}]*\}\}/g;
@@ -48,6 +49,20 @@ export interface TemplateValues {
   signature: string;
   /** Общая почта: письмо 1 — «перешлите ответственному». */
   isRouting: boolean;
+  /** Предмет обсуждения ({{предмет}}); стоит внутри предложения — пустым не бывает. */
+  topic?: string;
+  /** Должность из вакансии в «ёлочках» ({{должность}}) — у цепочки «найм». */
+  position?: string | null;
+}
+
+/** Должность, если у вакансии нет названия: стоит внутри предложения. */
+const FALLBACK_POSITION = 'сотрудника в отдел продаж';
+
+/** Одна из тем по компании — стабильно: у пересборки писем та же тема. */
+function pickByBrand(options: string[], brand: string): string {
+  let hash = 0;
+  for (const ch of brand) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return options[hash % options.length];
 }
 
 function escapeRe(text: string): string {
@@ -91,9 +106,13 @@ export function renderTemplate(template: ChainTemplateLetters, v: TemplateValues
     [P.case]: v.caseText,
     [P.hypothesis]: v.hypothesis,
     [P.signature]: v.signature,
+    [P.topic]: v.topic ?? FALLBACK_TOPIC,
+    [P.position]: v.position ?? FALLBACK_POSITION,
   };
   const withCase = Boolean(v.caseText) && template.bodyWithCase !== null;
-  const subject = template.subject
+  const routingSubjects = template.subjectsRouting?.filter((s) => s.trim()) ?? [];
+  const subjectTemplate = v.isRouting && routingSubjects.length ? pickByBrand(routingSubjects, v.brand) : template.subject;
+  const subject = subjectTemplate
     .replace(ANY_PLACEHOLDER, (found) => (found === P.brand ? v.brand : found))
     .replace(/\s+/g, ' ')
     .trim();
@@ -157,6 +176,11 @@ export interface CompanyLettersDeps {
    * останавливают.
    */
   bridge: (req: BridgeRequest) => Promise<string | null>;
+  /**
+   * Предмет обсуждения дешёвой моделью (letters/topic.ts). null — запасная
+   * фраза FALLBACK_TOPIC: лимит на ИИ или сбой модели строку не останавливают.
+   */
+  topic: (productSummary: string | null) => Promise<string | null>;
 }
 
 /**
@@ -187,14 +211,20 @@ export async function composeCompanyLetters(
     : null;
   const caseText = input.caseRecord?.case_text_short.trim() || null;
   const withCase = Boolean(caseText) && template.bodyWithCase !== null;
-  // Гипотезу считаем, только когда она попадёт в письмо: вариант без кейса с
-  // {{гипотеза}} и подтверждённый рынок. Иначе платили бы за текст, которого
-  // никто не увидит (раньше так и было у SDR-цепочки).
+  // Гипотезу считаем, только когда она попадёт в письмо и рынок подтверждён:
+  // в утверждённых текстах (09.10.2026) — наблюдение по сайту в письме 2
+  // всегда, в прежних шаблонах — абзац письма 3 без кейса. Иначе платили бы
+  // за текст, которого никто не увидит.
   const marketQuote = input.marketQuote;
-  const hypothesis = !withCase && marketQuote && template.bodyWithoutCase.includes(P.hypothesis)
+  const inLetter2 = template.letter2.includes(P.hypothesis);
+  const hypothesis = marketQuote && (inLetter2 || (!withCase && template.bodyWithoutCase.includes(P.hypothesis)))
     ? await deps.hypothesis({ brand: input.brand, productSummary: input.productSummary, marketQuote })
     : null;
-  const hypoText = hypothesis ? hypothesisText(input.brand, hypothesis) : null;
+  const hypoText = hypothesis ? (inLetter2 ? siteObservationText(input.brand, hypothesis) : hypothesisText(input.brand, hypothesis)) : null;
+  // Предмет обсуждения — только если шаблон его ставит (прежние шаблоны — нет).
+  const allBodies = [template.bodyDirect, template.bodyRouting, template.letter2].join('\n');
+  const topic = allBodies.includes(P.topic) ? (await deps.topic(input.productSummary)) ?? FALLBACK_TOPIC : FALLBACK_TOPIC;
+  const position = input.chain === 'hiring' && input.primary?.title?.trim() ? `«${input.primary.title.trim()}»` : null;
 
   const values: TemplateValues = {
     brand: input.brand,
@@ -204,6 +234,8 @@ export async function composeCompanyLetters(
     hypothesis: hypoText,
     signature: formatSignature(deps.sender),
     isRouting: input.isRouting,
+    topic,
+    position,
   };
   const rendered = renderTemplate(template, values);
   // Второй вариант письма 1 — тот вид, которого нет у главного адреса: у
@@ -227,6 +259,8 @@ export async function composeCompanyLetters(
       // Отправитель представляется в письмах 2–3 текстом шаблона.
       deps.sender.company_name,
       ...(opening ? [opening] : []),
+      topic,
+      ...(position ? [position] : []),
       ...input.signals.flatMap((s) => [s.title, s.quote ?? '']).filter(Boolean),
       ...(marketQuote ? [marketQuote] : []),
     ],

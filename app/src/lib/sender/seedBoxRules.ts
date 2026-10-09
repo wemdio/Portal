@@ -57,8 +57,9 @@ export function parseSeedProxy(line: string): { url: string; label: string } | n
   let raw = line.trim();
   if (!raw) return null;
   if (!/^[a-z0-9]+:\/\//i.test(raw)) {
-    // адрес:порт:логин:пароль — пароль может содержать «:» и «@».
-    const hostFirst = raw.match(/^([^:@\s]+):(\d+):([^:]+):(.+)$/);
+    // адрес:порт:логин:пароль и адрес:порт@логин:пароль (так отдаёт proxy.market) —
+    // пароль может содержать «:» и «@».
+    const hostFirst = raw.match(/^([^:@\s]+):(\d+)[:@]([^:]+):(.+)$/);
     raw = hostFirst
       ? `http://${encodeURIComponent(hostFirst[3])}:${encodeURIComponent(hostFirst[4])}@${hostFirst[1]}:${hostFirst[2]}`
       : `http://${raw}`;

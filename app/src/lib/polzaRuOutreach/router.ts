@@ -354,10 +354,9 @@ export function decide(total: number, writeThreshold: number): Decision {
 
 /** Кейс по отраслевой группе; только утверждённые и разрешённые для этой цепочки. */
 export function routeCase(cases: CaseRecord[], group: IndustryGroup | null, chain: ChainType): { record: CaseRecord; reason: string } | null {
-  // SDR-цепочке отраслевой кейс не подбираем: доказательство там — роли, до
-  // которых доходили в клиентских кампаниях, и только с апрувом
-  // (SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §2).
-  if (!group || chain === 'hiring') return null;
+  // С 09.10.2026 кейс по отрасли есть и в письме 3 цепочки «найм»
+  // (утверждённые тексты); раньше SDR-цепочке его не подбирали.
+  if (!group) return null;
   const hit = cases.find((c) => c.industry_groups.includes(group) && (!c.allowed_chains.length || c.allowed_chains.includes(chain)));
   return hit ? { record: hit, reason: `отраслевая группа «${group}»` } : null;
 }

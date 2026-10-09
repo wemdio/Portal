@@ -46,7 +46,8 @@ export interface QaInput {
   recipientEmail: string | null;
 }
 
-const TEMPLATE_NUMBERS = ['15 минут', '2–3', '2-3', 'B2B', 'b2b'];
+// «минут на 15» и «3–5 компаний» — из утверждённых текстов 09.10.2026.
+const TEMPLATE_NUMBERS = ['15 минут', 'минут на 15', '2–3', '2-3', '3–5', '3-5', 'B2B', 'b2b'];
 
 const FORBIDDEN: Array<[RegExp, string]> = [
   [/срочн/i, 'forbidden:urgency'],

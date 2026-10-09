@@ -61,6 +61,7 @@ export async function enqueueCrmPush(db: SupabaseClient, args: {
   campaignId: string;
   dialogId?: string;
   tgUserId?: number;
+  accountId?: string;
   messageText?: string | null;
   log?: LogFn;
 }): Promise<EnqueueResult> {
@@ -81,7 +82,14 @@ export async function enqueueCrmPush(db: SupabaseClient, args: {
       .select('id, tg_user_id, tg_username, messages')
       .eq('campaign_id', args.campaignId);
     if (args.dialogId) dialogQuery = dialogQuery.eq('id', args.dialogId);
-    else if (args.tgUserId !== undefined) dialogQuery = dialogQuery.eq('tg_user_id', args.tgUserId);
+    else if (args.tgUserId !== undefined) {
+      // У одного человека в кампании бывает несколько диалогов — с разных
+      // аккаунтов. Берём диалог аккаунта, который передал лида, а без аккаунта —
+      // самый свежий: иначе maybeSingle падает на дублях и лид не доходит до CRM.
+      dialogQuery = dialogQuery.eq('tg_user_id', args.tgUserId);
+      if (args.accountId) dialogQuery = dialogQuery.eq('account_id', args.accountId);
+      dialogQuery = dialogQuery.order('last_message_at', { ascending: false, nullsFirst: false }).limit(1);
+    }
     else throw new Error('не указан диалог');
     const { data: dialogData, error: dlgErr } = await dialogQuery.maybeSingle();
     if (dlgErr) throw new Error(dlgErr.message);
