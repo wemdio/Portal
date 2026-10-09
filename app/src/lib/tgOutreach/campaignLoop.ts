@@ -1251,7 +1251,7 @@ export async function handleChat(
     // того, дошла ли карточка в чат: лид настоящий в любом случае. Карточку
     // соберёт сама очередь из только что записанного диалога.
     if (triggerType === 'positive') {
-      await enqueueCrmPush(db, { campaignId: campaign.id, tgUserId, log });
+      await enqueueCrmPush(db, { campaignId: campaign.id, tgUserId, accountId: account.id, log });
     }
   } else {
     await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
