@@ -68,18 +68,20 @@ export async function deliveryDaySettled(
   if (error || !run) return false;
   if (run.status !== 'completed' || run.upload_blocked_at || run.upload_retry_requested_at || run.recovery_retry_requested_at) return false;
   if (run.reservation_status === 'not_scheduled') return true;
-  if (run.reservation_status !== 'reserved') return false;
+  if (run.reservation_status === 'reserved') {
+    const { count: inFlight, error: inFlightError } = await portalDb
+      .from('ve_contact_delivery_rows')
+      .select('id', { count: 'exact', head: true })
+      .eq('run_id', run.id)
+      .in('status', ['reserved', 'attempting']);
+    if (inFlightError || inFlight == null || inFlight > 0) return false;
 
-  const { count: inFlight, error: inFlightError } = await portalDb
-    .from('ve_contact_delivery_rows')
-    .select('id', { count: 'exact', head: true })
-    .eq('run_id', run.id)
-    .in('status', ['reserved', 'attempting']);
-  if (inFlightError || inFlight == null || inFlight > 0) return false;
-
-  const quota = Math.min(Number(run.required_daily), Number(run.sender_daily_capacity), Number(project.sender_daily_capacity));
-  if (!Number.isFinite(quota)) return false;
-  if (Number(run.reserved_count) >= quota) return true;
+    const quota = Math.min(Number(run.required_daily), Number(run.sender_daily_capacity), Number(project.sender_daily_capacity));
+    if (!Number.isFinite(quota)) return false;
+    if (Number(run.reserved_count) >= quota) return true;
+  } else if (run.reservation_status !== 'no_ready_rows') {
+    return false;
+  }
 
   const { data: items, error: itemsError } = await portalDb
     .from('ve_launch_queue_items')

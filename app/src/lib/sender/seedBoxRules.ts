@@ -45,6 +45,34 @@ export function parseSeedLine(line: string): { email: string; password: string }
   return password ? { email, password } : null;
 }
 
+const PROXY_SCHEMES = new Set(['http:', 'https:', 'socks:', 'socks4:', 'socks5:']);
+
+/**
+ * Строка прокси для входа в контрольный ящик → URL для imapflow и подпись
+ * «адрес:порт» для экрана (без логина и пароля). Принимает
+ * scheme://логин:пароль@адрес:порт, логин:пароль@адрес:порт,
+ * адрес:порт:логин:пароль и адрес:порт; без схемы — HTTP.
+ */
+export function parseSeedProxy(line: string): { url: string; label: string } | null {
+  let raw = line.trim();
+  if (!raw) return null;
+  if (!/^[a-z0-9]+:\/\//i.test(raw)) {
+    // адрес:порт:логин:пароль — пароль может содержать «:» и «@».
+    const hostFirst = raw.match(/^([^:@\s]+):(\d+):([^:]+):(.+)$/);
+    raw = hostFirst
+      ? `http://${encodeURIComponent(hostFirst[3])}:${encodeURIComponent(hostFirst[4])}@${hostFirst[1]}:${hostFirst[2]}`
+      : `http://${raw}`;
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (!PROXY_SCHEMES.has(url.protocol) || !url.hostname || !url.port) return null;
+  return { url: url.toString().replace(/\/$/, ''), label: `${url.hostname}:${url.port}` };
+}
+
 const JUNK_NAMES = ['spam', 'спам', 'junk', 'junk e-mail', '[gmail]/spam', '[gmail]/спам', 'нежелательная почта', 'bulk mail'];
 
 /** Папка спама: сначала по отметке \Junk, затем по известным именам. */
