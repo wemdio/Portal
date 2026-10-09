@@ -50,10 +50,13 @@ import {
 // ни одного байта модуля в клиентском чанке не появляется. Взамен словарь
 // кодов один на оба конца провода, и расхождение ловит компилятор.
 import type {
+  ClientEngTemplatePlaceholder,
   HeClientAutopilotHoldCode,
   HeClientRefillState,
   HeClientStageErrorCode,
 } from '@/lib/hypothesisEngine/clientEngProjection';
+// Тоже только тип: набор причин этапа 'attention' один на оба конца провода.
+import type { EngDashAttention } from '@/lib/hypothesisEngine/engDashboard';
 
 /** Нейтральная английская подстановка вместо русской из scrubBrand. */
 const SENDING_SERVICE_EN = 'sending service';
@@ -211,6 +214,46 @@ export function engStageErrorText(code: HeClientStageErrorCode, scope: EngFailur
 }
 
 /**
+ * Почему карточка вертикали Command Center в этапе 'attention' — только «что
+ * произошло» (у кодов, которые чинит команда, это два предложения
+ * HE_TEAM_ON_IT_EN); «что делать» карточка говорит строкой «next: …» и ведёт
+ * туда, где полный текст (шаг 4 для базы, шапка проекта и шаг 1 для research).
+ *
+ * Собирается только из констант: заголовок справочника по коду
+ * (`heClientFailureFor(code).title` — та же фраза, с которой начинается
+ * объяснение базы на шаге 4 и «Last error» шапки проекта, поэтому экраны не
+ * расходятся) либо своя фраза для отмены, отсутствующей причины и пустой
+ * базы. Каждая правдива для любой строки своей причины:
+ *  - отмена ('cancelled') — базу пишут 'failed' оба cancel-роута, и это
+ *    не сбой, а решение человека: «was cancelled», без «failed»;
+ *  - причины нет (`code` null) — колонка ошибки пуста: «without a recorded
+ *    reason», ничего не выдумываем;
+ *  - `base_empty` — последняя своя база 'analyzed' с нулём строк: запускать из
+ *    неё нечего, и это всё, что про неё известно (причины у такой базы нет).
+ */
+const ATTENTION_CANCELLED_BASE_EN =
+  'Work on the latest base of this vertical was cancelled before it finished, so that base will not be launched.';
+const ATTENTION_NO_REASON_BASE_EN =
+  'Collecting the latest base of this vertical stopped without a recorded reason, so that base will not be launched.';
+const ATTENTION_EMPTY_BASE_EN =
+  'The latest base of this vertical came back with no rows, so there is nothing to launch from it.';
+const ATTENTION_CANCELLED_RESEARCH_EN = 'The research of this project was cancelled before it finished.';
+const ATTENTION_NO_REASON_RESEARCH_EN = 'The research of this project stopped without a recorded reason.';
+
+export function engDashAttentionText(attention: EngDashAttention): string {
+  switch (attention.reason) {
+    case 'base_empty':
+      return ATTENTION_EMPTY_BASE_EN;
+    case 'base_stopped':
+      if (attention.code === 'cancelled') return ATTENTION_CANCELLED_BASE_EN;
+      return attention.code ? heClientFailureFor(attention.code).title : ATTENTION_NO_REASON_BASE_EN;
+    case 'project_failed':
+      if (attention.code === 'cancelled') return ATTENTION_CANCELLED_RESEARCH_EN;
+      return attention.code ? heClientFailureFor(attention.code).title : ATTENTION_NO_REASON_RESEARCH_EN;
+  }
+}
+
+/**
  * Прогон долива упал, а причины в колонке нет (стадию убили вместе с подом,
  * легаси-строка). Тот же доливный ответ, что и у кодов без своего действия.
  */
@@ -310,7 +353,10 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * написать нельзя: если место кончилось на ПОЛПУТИ, часть строк той ночи уже
  * уехала в кампанию, а остаток (`stats.deferred` долива) не досылается и
  * теряется. Поэтому фраза говорит только про то, что уже в кампаниях, — это
- * верно для обеих форм отказа (целиком и наполовину).
+ * верно для обеих форм отказа (целиком и наполовину). И не говорит, что эти
+ * контакты «keep sending»: кампании создаются на паузе и стартует их менеджер,
+ * а их статус у рассыльщика кабинет не читает, — правда только то, что пауза
+ * добора отправку не останавливает (та же фраза, что у `spend_paused`).
  *
  * `stopped` — ОТМЕНА. Причину называем: её записал сам клиент кнопкой
  * кабинета, и только эту кнопку пишет эта причина (pauseHeRefillForClientCancel
@@ -341,7 +387,7 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  *  - «this hold does not stop sending» — потолок кампаний не касается.
  */
 const REFILL_HOLD_EN: Record<EngRefillHoldState, string> = {
-  paused: `The daily refill for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there and keeps sending. ${HE_REFILL_HOLD_LIFT_EN}`,
+  paused: `The daily refill for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there, and this hold does not stop sending. ${HE_REFILL_HOLD_LIFT_EN}`,
   spend_paused:
     'The daily refill for this project is on hold. It was paused on our side, so the refill does not start any new collection. Our team has been notified, and the refill continues when they resume it. Leads already in your campaigns stay there, and this hold does not stop sending.',
   stopped:
@@ -419,6 +465,62 @@ export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished'): stri
   return launch === 'unfinished'
     ? `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Ask your manager to have the letters rewritten.`
     : `These letters cannot be launched as written: ${TEMPLATE_REWRITE_WHY_EN} Nothing has been sent from this template. Ask your manager to have the letters rewritten.`;
+}
+
+/**
+ * Подпись редактора цепочки (ChainEditor, шаги 3 и 5): это ЧЕРНОВИК, а в
+ * кампанию уходят письма шаблона (he_templates.letters). Стадия template пишет
+ * их ИЗ цепочки и анализа базы и потом цепочку не перечитывает: правка цепочки
+ * готовый шаблон не меняет (правки итоговых писем в кабинете нет). Каждая
+ * фраза правдива для любой строки своей ветки:
+ *  - шаблона по вертикали ещё нет — «written from it later, together with
+ *    what we learn about its base»: стадия читает последнюю цепочку вертикали
+ *    и анализ базы; «later» ничего не обещает о том, когда (и будет ли вообще —
+ *    без собранной базы шаблона нет). «Keeps the wait … with the same number»
+ *    — chainTiming.ts: шаблон us-проекта берёт паузу письма цепочки с тем же
+ *    номером (кабинет — только us), лесенка остаётся только там, где у цепочки
+ *    письма с таким номером нет или его пауза не число либо меньше 1 дня, —
+ *    тогда и «set here» нечего держать: такую паузу кабинет задать не даёт, а
+ *    пришедшую с сервера редактор помечает как негодную
+ *    (heClientChainLettersProblem);
+ *  - шаблон есть — «already been written … does not change them»: шаблоны не
+ *    перечитывают цепочку. Что правка дойдёт до шаблона, который соберут
+ *    позже (новая база вертикали), фраза не отрицает и не обещает.
+ * `review` — на шаге 5, где итоговые письма показаны прямо над редактором.
+ */
+export function engChainDraftText(hasTemplate: boolean, place: 'letters' | 'review'): string {
+  if (!hasTemplate) {
+    return 'This is a draft. The final letters for this vertical are written from it later, together with what we learn about its base, and each final letter keeps the wait set here for the letter with the same number.';
+  }
+  return place === 'review'
+    ? 'This is a draft. The final letters above have already been written, and changing this draft does not change them.'
+    : 'This is a draft. The final letters for this vertical have already been written (see step 5 «Review & Launch»), and changing this draft does not change them.';
+}
+
+/**
+ * Подпись подстановки `{{name}}` в итоговых письмах шага 5 — по виду
+ * наполнения из проекции (toClientEngTemplatePlaceholders: то же правило, что у
+ * гейта писем запуска). Правдиво для любой строки своего вида:
+ *  - per_recipient — значение берётся из строки базы получателя (у колонки
+ *    компании — очищенное название той же строки); при пустой ячейке —
+ *    `stand_in`. Без замены строку с пустой ячейкой не пускает гейт запуска и
+ *    долива, поэтому «пусто» получатель не прочтёт и про это фраза молчит;
+ *  - same_for_all — колонки нет, всем одна фраза;
+ *  - unfilled — база это не наполняет (запуск us-шаблона такие письма
+ *    откажет; почему — пишет фраза `needs_rewrite` над письмами).
+ */
+export function engPlaceholderText(placeholder: ClientEngTemplatePlaceholder): string {
+  const token = `{{${placeholder.name}}}`;
+  switch (placeholder.fill) {
+    case 'per_recipient':
+      return placeholder.stand_in
+        ? `${token} — taken from each recipient's row in your base; where that row has no value, the letter says «${placeholder.stand_in}».`
+        : `${token} — taken from each recipient's row in your base.`;
+    case 'same_for_all':
+      return `${token} — every recipient reads «${placeholder.stand_in ?? ''}» here.`;
+    case 'unfilled':
+      return `${token} — nothing in your base fills this in.`;
+  }
 }
 
 /**

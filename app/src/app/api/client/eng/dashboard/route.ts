@@ -7,10 +7,11 @@ import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import {
   heTemplateNeedsRewrite,
   toClientEngAutopilotHold,
+  toClientEngBase,
   toClientEngCampaignName,
-  toClientEngCollectInfo,
   toClientEngJobProgressLabel,
   toClientEngRefillState,
+  toClientEngStageErrorCode,
   type ClientEngAutopilotHold,
   type HeClientRefillState,
 } from '@/lib/hypothesisEngine/clientEngProjection';
@@ -18,11 +19,18 @@ import { projectMarket } from '@/lib/hypothesisEngine/market';
 import { requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { reconcileProjectVerticals } from '@/lib/hypothesisEngine/actualsReconcile';
 import {
+  isAnalyzingBaseLive,
+  latestEndedJobByBase,
+  liveBaseIdsFromJobs,
+} from '@/lib/hypothesisEngine/autopilotNext';
+import {
   buildEngDashboardEvents,
   deriveEngVerticalStage,
   engDashRewriteCandidateIds,
+  engDashSelectionByVertical,
   nextDailyRunIso,
   utcDayStartIso,
+  type EngDashSelection,
 } from '@/lib/hypothesisEngine/engDashboard';
 import { engServerError } from '../_shared';
 
@@ -36,7 +44,7 @@ const DASHBOARD_LOAD_FAILED = 'Failed to load the dashboard';
  * экран по ВСЕМ своим ENG-проектам (created_by = user id).
  *
  * Один ответ без N+1: проекты → волна батч-запросов по project_id
- * (verticals/bases/jobs/configs/runs) → вторая волна по vertical_id
+ * (verticals/bases/jobs/configs/runs/hypotheses) → вторая волна по vertical_id
  * (chains/templates) → склейка в JS (lib/hypothesisEngine/engDashboard).
  * Запросы — индексированные eq/in по id; count(*) по большим таблицам нет.
  * Скоуп владельца — как у остальных client/eng роутов: чужие строки не
@@ -51,6 +59,9 @@ const RUNS_EVENT_HORIZON_DAYS = 6;
 const FINISHED_JOBS_LIMIT = 30;
 const ACTIVE_JOBS_LIMIT = 50;
 const RUNS_LIMIT = 100;
+// Гипотезы — только ради выбора вертикалей (EngDashSelection). Выборка, упёршаяся
+// в кап, неполна: выбор тогда не выводится вовсе (см. selectionOf ниже).
+const HYPOTHESES_LIMIT = 1000;
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -66,11 +77,11 @@ function ts(v: unknown): number {
 }
 
 /**
- * Имя кампании чистится на ВХОДЕ в склейку, а не в трёх местах на выходе:
- * из `launch_info.campaign_name` оно расходится по дашборду тремя путями —
- * `stageDetail` («live: <имя>», engDashboard.ts:156-158), карточка Launch
- * (`launch.campaign_name` ниже) и лента активности («campaign launched
- * (paused): <имя>», engDashboard.ts:366). У запусков до этой волны в имени
+ * Имя кампании чистится на ВХОДЕ в склейку, а не в каждом месте на выходе:
+ * из `launch_info.campaign_name` оно расходится по дашборду двумя путями —
+ * карточка Launch (`launch.campaign_name` ниже) и лента активности («campaign
+ * launched (paused): <имя>», buildEngDashboardEvents); `stageDetail` этапа
+ * 'launched' имени больше не несёт. У запусков до этой волны в имени
  * лежит внутренний префикс `HE · ` и русский фолбэк «база»: гейт на записи
  * (launchTemplate.ts) задал новые имена, но старые строки остались как были.
  *
@@ -134,7 +145,10 @@ export async function GET(req: NextRequest) {
 
   const { data: projects, error: projErr } = await supabaseAdmin
     .from('he_projects')
-    .select('id, name, status, market, created_at')
+    // `error` — только ради кода причины упавшего проекта (этап 'attention'
+    // карточек его вертикалей, см. projectErrorCode ниже); сырой текст наружу
+    // не уходит.
+    .select('id, name, status, market, error, created_at')
     .eq('created_by', userId)
     .order('created_at', { ascending: false })
     .limit(100);
@@ -161,7 +175,7 @@ export async function GET(req: NextRequest) {
   }
 
   // Первая волна: всё по project_id (индексы на месте — см. миграции he_*).
-  const [verticalsRes, basesRes, activeJobsRes, finishedJobsRes, configsRes, runsRes] =
+  const [verticalsRes, basesRes, activeJobsRes, finishedJobsRes, configsRes, runsRes, hypothesesRes] =
     await Promise.all([
       supabaseAdmin
         .from('he_verticals')
@@ -169,7 +183,7 @@ export async function GET(req: NextRequest) {
         .in('project_id', projectIds),
       supabaseAdmin
         .from('he_bases')
-        .select('id, project_id, vertical_id, status, source, row_count, collect_info, created_at, updated_at')
+        .select('id, project_id, vertical_id, status, source, row_count, error, filename, collect_info, created_at, updated_at')
         .in('project_id', projectIds),
       supabaseAdmin
         .from('he_jobs')
@@ -195,12 +209,33 @@ export async function GET(req: NextRequest) {
         .gte('created_at', runsSinceIso)
         .order('created_at', { ascending: false })
         .limit(RUNS_LIMIT),
+      // Выбор вертикалей: те же колонки и тот же скоуп (project_id), что у
+      // снапшота автопилота (autopilotReconcile.ts), — предикат один.
+      supabaseAdmin
+        .from('he_hypotheses')
+        .select('id, vertical_id, status')
+        .in('project_id', projectIds)
+        .limit(HYPOTHESES_LIMIT),
     ]);
   for (const res of [verticalsRes, basesRes, activeJobsRes, finishedJobsRes, configsRes, runsRes]) {
     if (res.error) {
       return engServerError('client.eng.dashboard.aggregate_failed', res.error, DASHBOARD_LOAD_FAILED, { userId });
     }
   }
+  /**
+   * Выбор вертикали — best-effort, а не причина уронить весь агрегат: не
+   * прочитали (или упёрлись в кап и прочли не всё) — `undefined`, и этап
+   * вертикали выводится как без выбора (deriveEngVerticalStage), а оценка
+   * «market fit» не печатается. Прочитали — вертикаль без строк гипотез это
+   * `no_hypotheses`.
+   */
+  const hypothesisRows = hypothesesRes.error ? null : ((hypothesesRes.data ?? []) as Array<Record<string, unknown>>);
+  const selectionByVertical =
+    hypothesisRows !== null && hypothesisRows.length < HYPOTHESES_LIMIT
+      ? engDashSelectionByVertical(hypothesisRows)
+      : null;
+  const selectionOf = (verticalId: string): EngDashSelection | undefined =>
+    selectionByVertical ? (selectionByVertical.get(verticalId) ?? 'no_hypotheses') : undefined;
 
   const verticalRows = verticalsRes.data ?? [];
   const verticalIds = verticalRows.map((v) => v.id as string);
@@ -211,15 +246,25 @@ export async function GET(req: NextRequest) {
   // в collect_info лежит по построению — это чекпойнт мёрджа между тиками.
   // Всё остальное — клиентская проекция (план сорсинга с pdl_filters, id джоб
   // конструктора и состояние долива дашборду не нужны и клиенту не полагаются).
-  // toClientEngBase здесь НЕ годится: дашборду нужны project_id/updated_at,
-  // которых нет в белом списке мастера.
+  // Строкой toClientEngBase дашборд не заменяет: ему нужны project_id/updated_at,
+  // которых нет в белом списке мастера. Но три поля берёт ИМЕННО из неё, чтобы
+  // шаг 4 и карточка Command Center говорили про одну базу одно и то же:
+  // `collect_info` (та же проекция), `refill` (прогон долива, а не база
+  // вертикали — по collect_info.refill или имени «auto-refill») и `error_code`
+  // (код причины he_bases.error, в том числе 'cancelled'). Сырые `error` и
+  // `filename` в склейку не идут: они выбраны только ради этих двух признаков.
   const baseRows = (basesRes.data ?? []).map((b) => {
     const row = stripTaskHarvest(b as Record<string, unknown>);
-    const info = row.collect_info;
-    if (info && typeof info === 'object' && !Array.isArray(info)) {
-      return { ...row, collect_info: toClientEngCollectInfo(info as Record<string, unknown>) };
-    }
-    return row;
+    const client = toClientEngBase(row);
+    const out: Record<string, unknown> = {
+      ...row,
+      collect_info: client.collect_info ?? null,
+      refill: client.refill === true,
+      error_code: client.error_code ?? null,
+    };
+    delete out.error;
+    delete out.filename;
+    return out;
   });
   // Счётчик компаний строится по СЫРЫМ строкам баз (см. companiesTotalOf):
   // спроецированный `collect_info` ключа `companies_total` уже не несёт.
@@ -231,6 +276,66 @@ export async function GET(req: NextRequest) {
   );
   const activeJobRows = activeJobsRes.data ?? [];
   const finishedJobRows = finishedJobsRes.data ?? [];
+  /**
+   * Активные джобы для СУДА этапа вертикали (deriveEngVerticalStage), а не для
+   * показа. Этап 'attention' («вертикаль встала») ставится только без идущей
+   * работы вертикали, а `activeJobRows` капнут ACTIVE_JOBS_LIMIT на все проекты
+   * пользователя: упёрлась выборка в кап — отсутствие в ней джобы вертикали
+   * ничего не доказывает. Тогда — второе чтение тех же джоб без капа, только
+   * стадия и payload (по ним джоба относится к вертикали). Не прочиталось —
+   * null: идёт ли работа, неизвестно, и 'attention' не ставится никому
+   * (`liveWorkUnknown`). Без капа (обычный случай) лишнего запроса нет.
+   */
+  let liveJobRows: Array<Record<string, unknown>> | null = activeJobRows;
+  if (activeJobRows.length >= ACTIVE_JOBS_LIMIT) {
+    const liveRes = await supabaseAdmin
+      .from('he_jobs')
+      .select('stage, payload')
+      .in('project_id', projectIds)
+      .in('status', ['pending', 'running']);
+    liveJobRows = liveRes.error ? null : ((liveRes.data ?? []) as Array<Record<string, unknown>>);
+  }
+
+  /**
+   * 'analyzing'-базы, АНАЛИЗ КОТОРЫХ НЕ ИДЁТ. Финальный фейл base_analyze базу
+   * не трогает (она остаётся 'analyzing'), и карточка печатала «analyzing the
+   * base…» вечно. Живость — общим предикатом воркера, автопилота и «Start
+   * outreach» (isAnalyzingBaseLive: активная джоба любой стадии на её base_id
+   * или запись строки в пределах окна постановки), по ПОЛНОМУ списку активных
+   * джоб (liveJobRows); список неизвестен — не проверяем, и база читается
+   * идущей, как раньше.
+   *
+   * Для каждой такой базы — исход ПОСЛЕДНЕГО упавшего или отменённого
+   * base_analyze (latestEndedJobByBase, то же правило «решает поздний», что у
+   * автопилота): отмена печатается как отмена, а не как сбой. Чтение только
+   * когда такие базы есть (обычно их нет вовсе); отказ чтения — исход
+   * неизвестен (null), а что анализ не идёт, всё равно известно.
+   */
+  const stalledAnalysis = new Map<string, 'cancelled' | null>();
+  if (liveJobRows !== null) {
+    const liveBaseIds = liveBaseIdsFromJobs(liveJobRows);
+    const stalledIds = baseRows
+      .filter(
+        (b) =>
+          str(b.status) === 'analyzing' &&
+          str(b.id) !== '' &&
+          !isAnalyzingBaseLive({ id: str(b.id), updated_at: str(b.updated_at) || null }, liveBaseIds),
+      )
+      .map((b) => str(b.id));
+    if (stalledIds.length > 0) {
+      const endedRes = await supabaseAdmin
+        .from('he_jobs')
+        .select('id, stage, status, payload, created_at')
+        .in('project_id', projectIds)
+        .eq('stage', 'base_analyze')
+        .in('status', ['failed', 'cancelled'])
+        .in('payload->>base_id', stalledIds);
+      const ended = endedRes.error
+        ? new Map<string, 'failed' | 'cancelled'>()
+        : latestEndedJobByBase((endedRes.data ?? []) as Array<Record<string, unknown>>, ['base_analyze']);
+      for (const id of stalledIds) stalledAnalysis.set(id, ended.get(id) === 'cancelled' ? 'cancelled' : null);
+    }
+  }
 
   /**
    * Пауза автопилота — ОТДЕЛЬНЫМ запросом и best-effort, а не колонкой в
@@ -272,11 +377,23 @@ export async function GET(req: NextRequest) {
    * нельзя), а не показываем всё.
    */
   const autopilotHoldByProjectId = new Map<string, ClientEngAutopilotHold>();
+  /**
+   * Проекты с ЗАПИСАННОЙ паузой по потолку расхода ('spend_paused'), без
+   * фильтров карточки выше (автопилот, занятость): этот набор читает не
+   * карточка паузы, а `requeues` остановленного анализа (engDashAttentionOf).
+   * Ремонт осиротевшей базы сам потолок не спрашивает, но проход «Start
+   * outreach» над потолком кончается на первой платной постановке любой
+   * вертикали (autopilotReconcile, stopOnSpendCeiling), и до ремонта этой
+   * вертикали он может не дойти — «queues the analysis again» не доказано.
+   * null — паузы не прочитаны: «не доказано» тоже, `requeues` ложно.
+   */
+  let spendPausedProjectIds: Set<string> | null = null;
   const holdsRes = await supabaseAdmin
     .from('he_projects')
     .select('id, autopilot, autopilot_error, autopilot_error_at')
     .in('id', projectIds);
   if (!holdsRes.error) {
+    spendPausedProjectIds = new Set<string>();
     for (const raw of holdsRes.data ?? []) {
       const row = raw as Record<string, unknown>;
       const pid = str(row.id);
@@ -287,6 +404,7 @@ export async function GET(req: NextRequest) {
       // старта исследования; начатую цепочку research потолок не обрывает), и
       // та же карточка мастера показывает её у такого проекта.
       const hold = toClientEngAutopilotHold(row);
+      if (hold?.code === 'spend_paused') spendPausedProjectIds.add(pid);
       if (!hold || (row.autopilot !== true && hold.code !== 'spend_paused')) continue;
       autopilotHoldByProjectId.set(pid, hold);
     }
@@ -521,7 +639,8 @@ export async function GET(req: NextRequest) {
       const vBases = baseRows.filter((b) => b.vertical_id === vid);
       const vTemplates = templateRows.filter((t) => t.vertical_id === vid);
       const vChains = chainRows.filter((c) => c.vertical_id === vid);
-      const vActiveJobs = activeJobRows.filter((j) => {
+      // Из полного списка, если кап пришлось дочитывать (liveJobRows выше).
+      const vActiveJobs = (liveJobRows ?? activeJobRows).filter((j) => {
         const payload =
           j.payload && typeof j.payload === 'object'
             ? (j.payload as Record<string, unknown>)
@@ -530,14 +649,29 @@ export async function GET(req: NextRequest) {
         const b = baseById.get(str(payload.base_id));
         return b ? b.vertical_id === vid : false;
       });
+      const selection = selectionOf(vid);
 
       const derived = deriveEngVerticalStage({
         projectStatus: str(project?.status),
+        // Код причины — только у упавшего проекта: у живого колонка error может
+        // хранить прошлый сбой, а этап 'attention' читает его лишь при 'failed'.
+        projectErrorCode:
+          str(project?.status) === 'failed'
+            ? toClientEngStageErrorCode((project as { error?: unknown } | undefined)?.error)
+            : null,
         chains: vChains,
         bases: vBases,
         templates: vTemplates,
         activeJobs: vActiveJobs,
+        liveWorkUnknown: liveJobRows === null,
+        // Без полного списка активных джоб живость не проверялась — поля нет.
+        ...(liveJobRows !== null ? { stalledAnalysis } : {}),
+        selection,
         rewriteTemplateIds,
+        // Не прочитано — поля нет, и `requeues` ложно (не доказано).
+        ...(spendPausedProjectIds !== null
+          ? { spendPaused: spendPausedProjectIds.has(v.project_id as string) }
+          : {}),
       });
 
       const mainInfo =
@@ -577,8 +711,14 @@ export async function GET(req: NextRequest) {
         // только имя кампании (EngDashboard: vertical.launch?.campaign_name),
         // ссылок наружу в кабинете нет.
         launch: derived.launch ? { campaign_name: derived.launch.campaign_name } : null,
-        // Прогноз vs факт (петля actualsReconcile, 24ч свежесть).
-        forecast: typeof v.potential_pct === 'number' ? { pct: v.potential_pct } : null,
+        // Прогноз vs факт (петля actualsReconcile, 24ч свежесть). Имя поля
+        // прежнее, но это оценка модели 0–100 (potential_pct), а не прогноз
+        // доли ответов: карточка подписывает её «market fit» (EngDashboard.tsx).
+        // Только у ВЫБРАННОЙ вертикали: пересчёт разметки (reviewRecompute)
+        // пишет 0, когда все гипотезы отклонены, и «market fit 0/100 — a model
+        // score» был бы неправдой; невыбранная вертикаль в работу не идёт, а выбор
+        // не прочитан — оценку не печатаем вовсе.
+        forecast: selection === 'selected' && typeof v.potential_pct === 'number' ? { pct: v.potential_pct } : null,
         actual:
           typeof v.actual_reply_pct === 'number'
             ? {
@@ -592,6 +732,11 @@ export async function GET(req: NextRequest) {
         // откажет — карточка пишет «letters need rewriting» вместо «ready to
         // launch» / «finish the launch» (EngDashboard.tsx).
         letters_need_rewrite: derived.lettersNeedRewrite,
+        // Этап 'attention': причина и код (машинный код словаря кабинета, без
+        // сырого текста стадии). У остальных этапов — null.
+        attention: derived.attention,
+        // Выбор вертикали клиентом (EngDashSelection); null — не прочитан.
+        selection: selection ?? null,
       };
     });
 

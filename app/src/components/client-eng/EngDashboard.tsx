@@ -4,7 +4,7 @@
  * Command Center (/client/eng/dashboard): общий экран по всем ENG-проектам
  * клиента. IA карточки вертикали — «карта пайплайна»: вертикальный список
  * стадий человеческими именами (Research → Letters → Lead base → Email
- * enrichment → Analysis → Template → Launch, у live-вертикали + Daily refill)
+ * enrichment → Analysis → Template → Launch, у запущенной вертикали + Daily refill)
  * с маркерами done/current/future и короткими доказательствами цифрами из
  * агрегата; строка «next: …» внизу — следующий шаг конвейера.
  *
@@ -34,22 +34,33 @@ import {
   type EngDashboardEvent,
   type EngDashboardVertical,
   type EngDashboardResponse,
-  type EngDashStage,
 } from './api-client';
-import { ENG_REFILL_SPEND_PAUSED_SHORT_EN, engAutopilotHoldText, engRefillHoldText } from './engText';
+import {
+  ENG_REFILL_SPEND_PAUSED_SHORT_EN,
+  engAutopilotHoldText,
+  engDashAttentionText,
+  engRefillHoldText,
+} from './engText';
 import { HE_TEAM_ON_IT_SHORT_EN } from './clientFailureText';
 // Только тип — см. пояснение в engText.ts: набор состояний один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
 import type { HeClientRefillState } from '@/lib/hypothesisEngine/clientEngProjection';
+// Тоже только тип, и по той же причине: набор этапов и причин 'attention' —
+// один на роут и экран, его знает engDashboard.ts (deriveEngVerticalStage).
+import type { EngDashAttentionInfo, EngDashStage } from '@/lib/hypothesisEngine/engDashboard';
 import { EngCard, EngSpinner } from './ui';
 
 const POLL_INTERVAL_MS = 15000;
 
 /* ── Статус вертикали: dot + uppercase mono-tag (status-tag из DESIGN.md).
    Цвет — только как данные: amber — работа идёт или нужен шаг клиента,
-   grey — этап пройден, конвейер ждёт следующего, green — вертикаль live. ── */
+   grey — этап пройден, конвейер ждёт следующего, или вертикаль не выбрана
+   ('not_selected'), red — вертикаль встала на сбое ('attention'). Зелёного
+   тега нет: «идёт рассылка» кабинет из своих данных не знает (см. 'launched'). ── */
 
-const STAGE_STATUS: Record<EngDashStage, { tag: string; dot: string; text: string }> = {
+type StageStatus = { tag: string; dot: string; text: string };
+
+const STAGE_STATUS: Record<EngDashStage, StageStatus> = {
   research: { tag: 'research', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   letters: { tag: 'letters', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   collecting: { tag: 'collecting', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
@@ -59,8 +70,75 @@ const STAGE_STATUS: Record<EngDashStage, { tag: string; dot: string; text: strin
   template: { tag: 'ready to launch', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   // Запуск записан, но не закончен — нужен шаг клиента (шаг 5), поэтому amber.
   launch_unfinished: { tag: 'launch unfinished', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
-  launched: { tag: 'live', dot: 'var(--cp-green)', text: 'var(--cp-green)' },
+  // Не «live»: кампании созданы на паузе, стартует их менеджер, а статус у
+  // рассыльщика кабинет не читает. «created paused» верно и до старта, и
+  // после; серый — этап пройден, следующий шаг за командой.
+  launched: { tag: 'created paused', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
+  // Умолчание этапа; подпись по причине — attentionStatus ниже.
+  attention: { tag: 'needs attention', dot: 'var(--cp-red)', text: 'var(--cp-red)' },
+  // Решение клиента, а не сбой и не работа: серый, без пульса и без «next».
+  not_selected: { tag: 'not selected', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
 };
+
+/**
+ * Тег этапа 'attention' по причине. Красный — сбой (упавшая база, упавший
+ * research); янтарь — тупик без сбоя (база вернулась пустой: решает менеджер);
+ * серый — отмена, это решение человека, а не поломка.
+ */
+function attentionStatus(attention: EngDashAttentionInfo | null | undefined): StageStatus {
+  if (!attention) return STAGE_STATUS.attention;
+  if (attention.code === 'cancelled') {
+    return { tag: 'cancelled', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' };
+  }
+  if (attention.reason === 'base_empty') {
+    return { tag: 'needs attention', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
+  }
+  return STAGE_STATUS.attention;
+}
+
+/**
+ * Следующий шаг вертикали в 'attention' — туда, где полный текст причины и
+ * действия, а не пересказ его здесь:
+ *  - база (сбой или отмена) — шаг 4 печатает у упавшей базы объяснение по коду
+ *    причины вместе с «что делать» (engStageErrorText), а без причины — свою
+ *    фразу с действием;
+ *  - пустая база — у клиента хода нет: автопилот считает 'analyzed'-базу
+ *    готовой и новую сборку не ставит, а шаблон по пустой базе не строится;
+ *  - research — перезапускается «Re-run research» шага 1 (там же «Last error»
+ *    шапки проекта, если причина записана);
+ *  - остановленный анализ — «Start outreach» шага 2: при `requeues` кнопка
+ *    ставит базе base_analyze заново, строки не покупаются второй раз
+ *    (autopilotReconcile.ts, ремонт осиротевшей базы); иначе результат нажатия
+ *    зависит от формы (цепочка, новая сборка, пауза по потолку расхода — под
+ *    ней `requeues` ложно), и строка называет только саму кнопку — что ещё
+ *    нужно (принять гипотезу, перезапустить research), пишет шаг 2.
+ */
+function attentionNextLine(attention: EngDashAttentionInfo | null | undefined): string {
+  switch (attention?.reason) {
+    case 'base_empty':
+      return 'next: ask your manager what to do with this vertical';
+    case 'project_failed':
+      return 'next: open step 1 «Brief» — the research is restarted from there';
+    case 'analysis_stopped':
+      return attention.requeues
+        ? 'next: «Start outreach» on step 2 queues the analysis again'
+        : 'next: «Start outreach» on step 2';
+    default:
+      return 'next: step 4 «Bases & Launch» says what to do';
+  }
+}
+
+/**
+ * Почему анализ базы не идёт — одна фраза под картой пайплайна. Причины в
+ * колонке у такой базы нет (финальный фейл анализа базу не пишет), поэтому
+ * текст свой: отмена — отменой, остальное (упал, не был поставлен, исход не
+ * прочитан) — «остановился, не закончив».
+ */
+function analysisStoppedText(code: 'cancelled' | null): string {
+  return code === 'cancelled'
+    ? 'Analyzing the latest base of this vertical was cancelled before it finished.'
+    : 'Analyzing the latest base of this vertical stopped before it finished.';
+}
 
 /**
  * Письма шаблона этапа запуск откажет (`letters_need_rewrite` агрегата: роут
@@ -73,7 +151,11 @@ function lettersNeedRewrite(vertical: EngDashboardVertical): boolean {
 }
 
 /** Тег вместо «ready to launch»: шаблон есть, но запуск его письма откажет. */
-const LETTERS_REWRITE_STATUS = { tag: 'letters need rewriting', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
+const LETTERS_REWRITE_STATUS: StageStatus = {
+  tag: 'letters need rewriting',
+  dot: 'var(--cp-amber)',
+  text: 'var(--cp-amber)',
+};
 /** Следующий шаг такой вертикали — за менеджером, а не за кнопкой запуска. */
 const LETTERS_REWRITE_NEXT_LINE = 'next: ask your manager to rewrite the letters';
 
@@ -96,8 +178,8 @@ const JOB_STAGE_LABELS: Record<string, string> = {
  * Шаг мастера проекта, куда ведёт кнопка вертикали. Сухая вертикаль ведёт на
  * шаг 2: кнопка «Resume auto-refill» живёт там.
  */
-function wizardStepFor(stage: EngDashStage, refillHeldHere: boolean): number {
-  switch (stage) {
+function wizardStepFor(vertical: EngDashboardVertical, refillHeldHere: boolean): number {
+  switch (vertical.stage) {
     case 'research':
       return 2; // Verticals: там живёт прогресс research
     case 'letters':
@@ -106,6 +188,16 @@ function wizardStepFor(stage: EngDashStage, refillHeldHere: boolean): number {
       return 5; // Review & Launch: там достраивается запуск
     case 'launched':
       return refillHeldHere ? 2 : 4;
+    case 'not_selected':
+      return 2; // Verticals: там принимают гипотезы
+    case 'attention':
+      // Research — шаг 1 («Re-run research»); остановленный анализ — шаг 2
+      // («Start outreach»); база — шаг 4, где её причина.
+      return vertical.attention?.reason === 'project_failed'
+        ? 1
+        : vertical.attention?.reason === 'analysis_stopped'
+          ? 2
+          : 4;
     default:
       return 4; // Bases & Launch
   }
@@ -195,9 +287,10 @@ interface PipeRow {
   /**
    * Маркер текущей строки: amber — работа идёт (точка пульсирует), held —
    * остановлено и само не возобновится (точка янтарная, неподвижная),
-   * green — остальные состояния живой вертикали (точка зелёная, неподвижная).
+   * green — идущий ночной добор (точка зелёная, неподвижная), red — вертикаль
+   * встала на сбое, quiet — остановлена отменой (обе неподвижные).
    */
-  marker?: 'amber' | 'green' | 'held';
+  marker?: 'amber' | 'green' | 'held' | 'red' | 'quiet';
   /** Короткое доказательство цифрами; только то, что есть в агрегате. */
   evidence?: React.ReactNode;
 }
@@ -207,6 +300,17 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
   switch (vertical.stage) {
     case 'research':
       return 0;
+    case 'attention':
+      // Встало там, где остановилось: research — строка Research, анализ —
+      // строка Analysis, остальное про базу — строка Lead base.
+      return vertical.attention?.reason === 'project_failed'
+        ? 0
+        : vertical.attention?.reason === 'analysis_stopped'
+          ? 4
+          : 2;
+    case 'not_selected':
+      // Текущей строки нет: вертикаль никуда не движется (buildPipelineRows).
+      return -1;
     case 'letters':
       // Цепочка уже готова (вторая точка агрегата) — фронт работы сместился
       // на сбор базы; сами письма при этом показываем пройденными.
@@ -274,7 +378,8 @@ const REFILL_DRY_NEXT_LINE = 'next: daily refill paused for this vertical — re
 const REFILL_DRY_PIPE_EVIDENCE = 'paused for this vertical';
 
 /** Строка «next: …» — следующий шаг конвейера из текущей стадии. */
-function nextLineFor(stage: EngDashStage, refill: HeClientRefillState, dry: boolean, rewrite: boolean): string {
+function nextLineFor(vertical: EngDashboardVertical, refill: HeClientRefillState, dry: boolean, rewrite: boolean): string {
+  const stage = vertical.stage;
   // Шаблон этапа запуск откажет: ни «launch», ни «finish the launch» не сработают.
   if (rewrite && (stage === 'template' || stage === 'launch_unfinished')) return LETTERS_REWRITE_NEXT_LINE;
   switch (stage) {
@@ -289,13 +394,20 @@ function nextLineFor(stage: EngDashStage, refill: HeClientRefillState, dry: bool
     case 'analyzing':
       return 'next: template';
     case 'analyzed':
-      return 'next: 85/15 template';
+      // Без внутреннего «85/15» — это доля текста шаблона, а не шаг клиента.
+      return 'next: template';
     case 'template':
       return 'next: launch from Review & Launch';
     case 'launch_unfinished':
       return 'next: finish the launch on step 5 «Review & Launch»';
     case 'launched':
       return refill === 'running' && dry ? REFILL_DRY_NEXT_LINE : REFILL_NEXT_LINE[refill];
+    case 'attention':
+      return attentionNextLine(vertical.attention);
+    case 'not_selected':
+      // Не «next: …»: шага конвейера нет, есть только выбор клиента — фраза
+      // роута (engDashboard.ts), верная и для «гипотез нет вовсе».
+      return vertical.stageDetail;
   }
 }
 
@@ -308,12 +420,35 @@ function buildPipelineRows(
   const fmt = (n: number) => n.toLocaleString('en-US');
   const launched = vertical.stage === 'launched';
   const launchUnfinished = vertical.stage === 'launch_unfinished';
+  const attention = vertical.stage === 'attention';
+  const notSelected = vertical.stage === 'not_selected';
+  // Маркер строки, на которой вертикаль встала: тот же цвет, что у тега
+  // (attentionStatus) — отмена серая, пустая база янтарная, сбой красный.
+  const attentionMarker: PipeRow['marker'] =
+    vertical.attention?.code === 'cancelled'
+      ? 'quiet'
+      : vertical.attention?.reason === 'base_empty'
+        ? 'held'
+        : 'red';
   // Признак ставится только шаблону этапа 'template' / 'launch_unfinished'.
   const rewrite = lettersNeedRewrite(vertical) && (vertical.stage === 'template' || launchUnfinished);
   const dryHere = refill === 'running' && vertical.refill_dry === true;
   const cur = currentIndexFor(vertical);
+  // Невыбранная вертикаль: пройдено то, что уже есть (точки агрегата: research,
+  // письма, база со строками — сборка, обогащение и анализ), остальное —
+  // впереди; текущей строки, а значит и пульса, нет.
+  const notSelectedDone = (i: number): boolean =>
+    i === 0 ? vertical.dots[0] === true : i === 1 ? vertical.dots[1] === true : i <= 4 ? vertical.dots[2] === true : false;
   const stateOf = (i: number): PipeRow['state'] =>
-    launched || i < cur ? 'done' : i === cur ? 'current' : 'future';
+    notSelected
+      ? notSelectedDone(i)
+        ? 'done'
+        : 'future'
+      : launched || i < cur
+        ? 'done'
+        : i === cur
+          ? 'current'
+          : 'future';
 
   // ETA — только из данных: done/total активной джобы → «~N% done». Если
   // stageDetail уже несёт дробь («task 1/2», «87/147 valid»), не дублируем.
@@ -341,8 +476,14 @@ function buildPipelineRows(
       key: 'research',
       label: 'Research',
       state: stateOf(0),
+      ...(attention && cur === 0 ? { marker: attentionMarker } : {}),
       // У research почти нет своих цифр — done-строка честно остаётся пустой.
-      evidence: vertical.stage === 'research' ? withEta(vertical.stageDetail) : '',
+      evidence:
+        vertical.stage === 'research'
+          ? withEta(vertical.stageDetail)
+          : attention && cur === 0
+            ? vertical.stageDetail
+            : '',
     },
     {
       key: 'letters',
@@ -358,12 +499,15 @@ function buildPipelineRows(
       key: 'lead-base',
       label: 'Lead base',
       state: stateOf(2),
+      ...(attention && cur === 2 ? { marker: attentionMarker } : {}),
       evidence:
         vertical.stage === 'collecting'
           ? withEta(vertical.stageDetail)
-          : stateOf(2) === 'done'
-            ? collected('')
-            : '',
+          : attention && cur === 2
+            ? vertical.stageDetail
+            : stateOf(2) === 'done'
+              ? collected('')
+              : '',
     },
     {
       key: 'enrichment',
@@ -380,12 +524,15 @@ function buildPipelineRows(
       key: 'analysis',
       label: 'Analysis',
       state: stateOf(4),
+      ...(attention && cur === 4 ? { marker: attentionMarker } : {}),
       evidence:
         vertical.stage === 'analyzing'
           ? withEta(vertical.stageDetail)
-          : stateOf(4) === 'done'
-            ? collected('analyzed ')
-            : '',
+          : attention && cur === 4
+            ? vertical.stageDetail
+            : stateOf(4) === 'done'
+              ? collected('analyzed ')
+              : '',
     },
     {
       key: 'template',
@@ -468,11 +615,20 @@ function PipelineRows({ rows }: { rows: PipeRow[] }) {
                 <span
                   className="inline-block h-1.5 w-1.5 rounded-full"
                   style={{
-                    background: row.marker === 'green' ? 'var(--cp-green)' : 'var(--cp-amber)',
+                    background:
+                      row.marker === 'green'
+                        ? 'var(--cp-green)'
+                        : row.marker === 'red'
+                          ? 'var(--cp-red)'
+                          : row.marker === 'quiet'
+                            ? 'var(--cp-grey)'
+                            : 'var(--cp-amber)',
+                    // Пульсирует только идущая работа (amber и строка без
+                    // маркера); остальные маркеры — неподвижные.
                     animation:
-                      row.marker === 'green' || row.marker === 'held'
-                        ? undefined
-                        : 'eng-dash-pulse 1.6s ease-in-out infinite',
+                      row.marker === undefined || row.marker === 'amber'
+                        ? 'eng-dash-pulse 1.6s ease-in-out infinite'
+                        : undefined,
                   }}
                 />
               ) : (
@@ -587,7 +743,8 @@ function ActiveJobsCard({
         </div>
         <ul className="mt-1 flex flex-col">
           {jobs.map((job, i) => {
-            const label = JOB_STAGE_LABELS[job.stage] ?? job.stage;
+            // Незнакомая стадия — общее слово, а не сырое имя стадии из he_jobs.
+            const label = JOB_STAGE_LABELS[job.stage] ?? 'working on your project';
             const verticalName = job.vertical_id ? (verticalNames.get(job.vertical_id) ?? '') : '';
             const progress =
               job.progress && (job.progress.total ?? 0) > 0
@@ -639,14 +796,34 @@ function VerticalCard({
   refill: HeClientRefillState;
 }) {
   const dryHere = refill === 'running' && vertical.refill_dry === true;
-  const step = wizardStepFor(vertical.stage, dryHere);
+  const step = wizardStepFor(vertical, dryHere);
   const launched = vertical.stage === 'launched';
   const rewrite = lettersNeedRewrite(vertical);
   // Незаконченный запуск остаётся «launch unfinished» (это правда и с
   // признаком) — меняются его строка Launch и «next»; готовый шаблон теряет
   // «ready to launch».
-  const status = rewrite && vertical.stage === 'template' ? LETTERS_REWRITE_STATUS : STAGE_STATUS[vertical.stage];
+  const status =
+    vertical.stage === 'attention'
+      ? attentionStatus(vertical.attention)
+      : rewrite && vertical.stage === 'template'
+        ? LETTERS_REWRITE_STATUS
+        : STAGE_STATUS[vertical.stage];
   const rows = buildPipelineRows(vertical, activeJob, refill);
+  // Одна фраза под картой пайплайна — только там, где строке карты её не
+  // вместить: почему вертикаль встала (engDashAttentionText) и что запуск
+  // создан на паузе (stageDetail этапа 'launched', engDashboard.ts).
+  const note =
+    vertical.stage === 'attention' && vertical.attention
+      ? {
+          text:
+            vertical.attention.reason === 'analysis_stopped'
+              ? analysisStoppedText(vertical.attention.code)
+              : engDashAttentionText(vertical.attention),
+          color: status.text,
+        }
+      : launched
+        ? { text: vertical.stageDetail, color: 'var(--cp-paper-mute)' }
+        : null;
 
   return (
     <div
@@ -667,14 +844,27 @@ function VerticalCard({
 
       <PipelineRows rows={rows} />
 
+      {note && note.text && (
+        <p className="text-xs m-0" style={{ color: note.color }}>
+          {note.text}
+        </p>
+      )}
+
       {(vertical.forecast || vertical.actual) && (
         <div
           className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] ds-mono"
           style={{ color: 'var(--cp-paper-faint)' }}
         >
+          {/* `forecast.pct` — potential_pct, ОЦЕНКА модели 0–100 (насколько
+              вертикаль подходит рынку), а не прогноз доли ответов. Рядом с
+              «actual N% replies» подпись «forecast N%» читалась как обещанная
+              доля ответов — поэтому другое имя, без «%», и прямая оговорка.
+              Сверка с фактом (actualsReconcile) не меняется: «actual» — та же
+              строка рядом. */}
           {vertical.forecast && (
             <span>
-              forecast <b style={{ color: 'var(--cp-paper-mute)' }}>{vertical.forecast.pct}%</b>
+              market fit <b style={{ color: 'var(--cp-paper-mute)' }}>{vertical.forecast.pct}</b>/100 — a model
+              score, not a predicted reply rate
             </span>
           )}
           {vertical.actual && (
@@ -695,7 +885,7 @@ function VerticalCard({
 
       <div className="pt-2.5" style={{ borderTop: '1px solid var(--cp-divider)' }}>
         <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-          {nextLineFor(vertical.stage, refill, vertical.refill_dry === true, rewrite)}
+          {nextLineFor(vertical, refill, vertical.refill_dry === true, rewrite)}
         </span>
       </div>
 
@@ -750,7 +940,7 @@ export function EngDashboard() {
   }, [load]);
 
   const projects = data?.projects ?? [];
-  const verticals = data?.verticals ?? [];
+  const verticals: EngDashboardVertical[] = data?.verticals ?? [];
   const events = data?.events ?? [];
   const activeJobs = data?.activeJobs ?? [];
   const today = data?.today ?? { appended: 0, valid: 0, collected: 0 };
@@ -1009,9 +1199,14 @@ export function EngDashboard() {
               <p className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
                 No verticals yet — create a project
               </p>
+              {/* Кампании создаёт только «Launch all (paused)» шага 5 (на паузе);
+                  письма, базу и шаблон автопилот строит после «Start outreach»
+                  и только по вертикалям с принятой гипотезой. */}
               <p className="text-xs m-0 max-w-md" style={{ color: 'var(--cp-paper-mute)' }}>
-                The engine researches your market, drafts letters, collects a base and launches
-                campaigns — every vertical shows up here live.
+                The engine researches your market. Accept the hypotheses you want on step 2 and press «Start
+                outreach» — it drafts letters, collects a base and builds a template for each vertical you
+                picked. «Launch all (paused)» on step 5 then creates the campaigns, paused. Every vertical shows
+                up here.
               </p>
               <Link
                 href={'/client/eng?list=1' as Route}

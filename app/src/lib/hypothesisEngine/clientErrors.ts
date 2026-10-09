@@ -123,6 +123,28 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   if (/\b(?:Requesty|Serper|OpenRouter)\s*(?:HTTP\s*)?[:(]?\s*(?:429|5\d\d)\b/i.test(message)) return 'provider';
   if (/\bSerper transient:/i.test(message)) return 'provider';
 
+  // Осознанные остановки сборки — СРАЗУ после правил провайдера, выше тарифных
+  // и всех остальных. Оба якоря пишет только наш код (stages/baseCollect.ts:
+  // отказ пробы среза и терминал «релевант-гейт снял все строки»,
+  // offTargetNote), и в оба текста ПЕРЕД якорем подставлено имя вертикали в
+  // «…», а в текст пробы — ещё и примеры компаний мимо среза. Стоя ниже
+  // тарифных правил, имя вроде «Email warm-up tools» сворачивало осознанную
+  // остановку в subscription_warmup по /прогрев почт|warm-?up/ (так же — имя с
+  // «лимит контактов» или «Подписка не активна», и всё, что ловят правила
+  // долива, ёмкости и сайта между ними). Тексты, которые пишут для тех правил
+  // (ClientLaunchError в clientLaunch/appendLeads, тексты долива и ёмкости в
+  // stages/baseCollectRefill.ts и autoPipeline.ts, HeSiteUnreachableError),
+  // этих якорей не содержат, поэтому их классификация от перестановки не
+  // меняется. Провайдерские правила остаются первыми: их якорь — имя
+  // подрядчика вместе с кодом ответа или служебной фразой.
+  //
+  // Терминал «гейт снял всё» при цели по гипотезам (флаг
+  // HE_GATE_HYPOTHESIS_SCOPE; stages/baseCollect.ts, offTargetNote). Оборот
+  // «не покрывается каталогом» в этом тексте НЕ встречается: про такую базу он
+  // неправда — компании могли принадлежать вертикали.
+  if (/не подходит под гипотезы вертикали/i.test(message)) return 'hypothesis_mismatch';
+  if (/не покрывается каталогом/i.test(message)) return 'audience_mismatch';
+
   // Тарифные отказы (ClientLaunchError из clientLaunch/appendLeads) доезжают
   // до кабинета через refill_result и журнал прогонов долива.
   if (/прогрев почт|warm-?up/i.test(message)) return 'subscription_warmup';
@@ -169,7 +191,6 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // ещё раз» — совет, который мёртвому домену не помогает никогда.
   if (/Сайт клиента недоступен \((?:dns|no_html)\)/i.test(message)) return 'website_unreachable';
 
-  if (/не покрывается каталогом/i.test(message)) return 'audience_mismatch';
   if (/Сегмент исчерпан|не осталось новых/i.test(message)) return 'segment_exhausted';
 
   // Конструктор баз: таймаут ожидания отделяем от прочих его исходов.

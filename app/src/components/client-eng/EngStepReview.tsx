@@ -2,8 +2,10 @@
 
 /**
  * Шаг 5 «Review & Launch»: единое окно приёмки автопилота. По каждой вертикали
- * с готовой цепочкой/базой — письма цепочки (просмотр + инлайн-правка через
- * ChainEditor шага Letters, PATCH /eng/chains/[id]), ленивое превью базы
+ * с готовой цепочкой/базой — ИТОГОВЫЕ письма шаблона, только чтение (то, что
+ * запуск кладёт в кампанию: FinalLetters), черновик-цепочка (инлайн-правка
+ * через ChainEditor шага Letters, PATCH /eng/chains/[id]; подписан как
+ * черновик — на готовый шаблон правка не влияет), ленивое превью базы
  * (GET /eng/bases/[id]/rows, первые 100 строк, компактные колонки) и статус
  * шаблона. Вверху — общий селектор пресета, ОКНО ОТПРАВКИ (пояс/часы/дни,
  * уезжает вместе с запуском) и «Launch all (paused)»: последовательный запуск
@@ -35,9 +37,10 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import { Clock, Eye, Rocket } from 'lucide-react';
 import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
-import { heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
+import { buildLaunchSequence, heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 import {
   engTemplateNeedsRewrite,
+  engTemplatePlaceholders,
   fetchEngBaseRows,
   fetchEngLaunchPresets,
   fetchEngSendingWindow,
@@ -51,8 +54,13 @@ import {
   type HeLaunchPresetOption,
   type HeJobSummary,
 } from './api-client';
-import { EngBadge, EngCard, EngSpinner, baseStatusTone } from './ui';
-import { engLaunchRunStoppedText, engTemplateNeedsRewriteText } from './engText';
+import { EngBadge, EngBaseStatusBadge, EngCard, EngSpinner } from './ui';
+import {
+  engChainDraftText,
+  engLaunchRunStoppedText,
+  engPlaceholderText,
+  engTemplateNeedsRewriteText,
+} from './engText';
 import { ChainEditor } from './EngStepLetters';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -489,6 +497,167 @@ function LaunchedSendingWindow({ templateId }: { templateId: string }) {
   );
 }
 
+/* ── Итоговые письма шаблона (то, что уходит в кампанию) ── */
+
+/**
+ * Что сейчас значат письма шаблона карточки — одна фраза над ними. Состояние
+ * считает карточка (VerticalReviewCard) по тем же предикатам, что и запуск:
+ *  - `launched` — запуск записан и закончен: кампании созданы с этими
+ *    письмами (письма шаблона после запуска не меняются — правки итоговых
+ *    писем в кабинете нет);
+ *  - `unfinished` — запуск записан, но часть аудитории не уехала, и шаблон в
+ *    списке «Launch all» (launchableTemplates): достройка берёт письма того же
+ *    шаблона;
+ *  - `next_launch` — запуска нет, шаблон в списке «Launch all»: панель запуска
+ *    на экране, и создаст она кампании именно с этими письмами;
+ *  - `rewrite_none` / `rewrite_unfinished` — письма запуск откажет
+ *    (`needs_rewrite`), причину пишет фраза engTemplateNeedsRewriteText прямо
+ *    над письмами;
+ *  - `not_next` — остальное: шаблон не ready или у его базы запуск уже записан
+ *    у другого шаблона. В ближайший запуск эти письма не идут — и только это
+ *    фраза утверждает.
+ */
+type FinalLettersState =
+  | 'launched'
+  | 'unfinished'
+  | 'next_launch'
+  | 'rewrite_none'
+  | 'rewrite_unfinished'
+  | 'not_next';
+
+const FINAL_LETTERS_STATE_TEXT: Record<FinalLettersState, string> = {
+  launched: 'The campaigns of this launch were created with these letters.',
+  unfinished:
+    'This launch has already created campaigns with these letters, and part of this audience has not gone in yet; «Launch all (paused)» finishes it with the same letters.',
+  next_launch: '«Launch all (paused)» creates the campaigns for this audience with these letters.',
+  rewrite_none: 'These letters cannot be launched as they are — see the note above.',
+  rewrite_unfinished:
+    'The campaigns already created use these letters, but they cannot finish the launch as they are — see the note above.',
+  not_next: 'These letters are not part of the next launch.',
+};
+
+/** «waits N days after letter M» — пауза письма так, как её получает кампания. */
+function waitText(days: number, previousLetter: number): string {
+  return `waits ${days} day${days === 1 ? '' : 's'} after letter ${previousLetter}`;
+}
+
+/**
+ * Письма шаблона ТАК, КАК ИХ ОТДАЁТ ЗАПУСК: последовательность собирает та же
+ * buildLaunchSequence (launchHandoff.ts), что и запуск, — тема только у
+ * письма 1 и его вариантов (у писем 2+ запуск тему обнуляет, и они идут в той
+ * же ветке), варианты B — те же и в том же числе, пауза — wait_days письма
+ * (у кампании это задержка перед ним). Сегментные варианты запуск ставит на
+ * место основного текста (версии A) в кампании сегмента — здесь они показаны
+ * под письмом именно так. Подстановки и их замены — из проекции
+ * (`placeholders`), без маппинга: null — сервер их не посчитал, тогда о
+ * подстановках экран ничего не утверждает.
+ */
+function FinalLetters({ template, state }: { template: HeTemplate; state: FinalLettersState }) {
+  const letters = Array.isArray(template.letters) ? template.letters : [];
+  const sequence = buildLaunchSequence(letters);
+  const placeholders = engTemplatePlaceholders(template);
+  return (
+    <div className="mt-3 rounded-md p-3" style={{ border: '1px solid var(--cp-divider)' }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-paper)' }}>
+          Final letters
+        </span>
+        <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          read-only
+        </span>
+      </div>
+      <p className="mt-1 mb-0 text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+        {FINAL_LETTERS_STATE_TEXT[state]}
+      </p>
+      {!sequence ? (
+        <p className="mt-2 mb-0 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          This template has no letters.
+        </p>
+      ) : (
+        <div className="mt-2 flex flex-col gap-2">
+          {sequence.steps.map((step, i) => {
+            // jsonb шаблона формы не гарантирует: тема и тело — строкой.
+            const versions = [
+              { subject: String(step.subject ?? ''), body: String(step.body ?? '') },
+              ...(step.variants ?? []).map((v) => ({ subject: String(v.subject ?? ''), body: String(v.body ?? '') })),
+            ];
+            const segments = (Array.isArray(letters[i]?.segment_variants) ? letters[i].segment_variants! : []).filter(
+              (v) => typeof v?.when === 'string' && v.when.trim() !== '' && typeof v.text === 'string',
+            );
+            return (
+              <div key={i} className="rounded-md p-3" style={{ border: '1px solid var(--cp-divider)' }}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    Letter {i + 1}
+                  </span>
+                  {i > 0 && (
+                    <span className="ml-auto text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                      {waitText(step.wait_days, i)}
+                    </span>
+                  )}
+                </div>
+                {i > 0 && (
+                  <div className="mt-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    Same thread as letter 1 — no subject line of its own.
+                  </div>
+                )}
+                {versions.length > 1 && (
+                  <div className="mt-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    Each recipient gets one of these {versions.length} versions.
+                  </div>
+                )}
+                {versions.map((v, k) => (
+                  <div key={k} className="mt-2">
+                    {versions.length > 1 && (
+                      <div className="ds-mono text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+                        Version {String.fromCharCode(65 + k)}
+                      </div>
+                    )}
+                    {i === 0 && (
+                      <div className="text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                        Subject: {v.subject.trim() ? v.subject : '(empty)'}
+                      </div>
+                    )}
+                    <div className="mt-1 whitespace-pre-wrap text-xs" style={{ color: 'var(--cp-paper)' }}>
+                      {v.body}
+                    </div>
+                  </div>
+                ))}
+                {segments.map((seg, k) => (
+                  <div key={`s${k}`} className="mt-2 rounded-md p-2" style={{ border: '1px dashed var(--cp-divider)' }}>
+                    <div className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                      Companies sorted into «{seg.when.trim()}» get this text in place of{' '}
+                      {versions.length > 1 ? 'version A' : 'the text above'}:
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap text-xs" style={{ color: 'var(--cp-paper)' }}>
+                      {seg.text}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {placeholders && placeholders.length > 0 && (
+        <div className="mt-2">
+          <div className="text-[11px] font-semibold" style={{ color: 'var(--cp-paper)' }}>
+            Placeholders
+          </div>
+          <p className="mt-1 mb-0 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+            Words in double curly braces are placeholders:
+          </p>
+          <ul className="mt-1 mb-0 flex flex-col gap-0.5 pl-4 text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+            {placeholders.map((p) => (
+              <li key={p.name}>{engPlaceholderText(p)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Карточка вертикали ── */
 
 function VerticalReviewCard({
@@ -497,6 +666,7 @@ function VerticalReviewCard({
   base,
   template,
   templateBusy,
+  inLaunchAll,
   onChanged,
 }: {
   vertical: HeVertical;
@@ -504,6 +674,8 @@ function VerticalReviewCard({
   base: EngBaseSummary | undefined;
   template: HeTemplate | undefined;
   templateBusy: boolean;
+  /** Шаблон карточки — в списке «Launch all (paused)» (launchableTemplates). */
+  inLaunchAll: boolean;
   onChanged: () => void;
 }) {
   const launch = template ? parseLaunchInfo((template as { launch_info?: unknown }).launch_info) : null;
@@ -514,6 +686,18 @@ function VerticalReviewCard({
   // было или он не закончен. У законченного запуска шаг 5 ничего не запускает.
   const rewriteBlocksLaunch =
     template !== undefined && engTemplateNeedsRewrite(template) && (launch === null || launchUnfinished);
+  const finalState: FinalLettersState =
+    launch !== null && !launchUnfinished
+      ? 'launched'
+      : rewriteBlocksLaunch
+        ? launch !== null
+          ? 'rewrite_unfinished'
+          : 'rewrite_none'
+        : inLaunchAll
+          ? launch !== null
+            ? 'unfinished'
+            : 'next_launch'
+          : 'not_next';
   return (
     <EngCard>
       <div className="flex flex-wrap items-center gap-2">
@@ -526,10 +710,14 @@ function VerticalReviewCard({
             tone={template.status === 'ready' && !rewriteBlocksLaunch ? 'green' : 'amber'}
           />
         )}
+        {/* «created paused», а не «launched (paused)» зелёным: запуск создаёт
+            кампании на паузе, стартует их команда, а статус кампании у
+            рассыльщика кабинет не читает — подпись верна и до старта, и после
+            (та же, что у Command Center). */}
         {launch && (
           <EngBadge
-            label={launchUnfinished ? 'launch unfinished' : 'launched (paused)'}
-            tone={launchUnfinished ? 'amber' : 'green'}
+            label={launchUnfinished ? 'launch unfinished' : 'created paused'}
+            tone={launchUnfinished ? 'amber' : 'neutral'}
           />
         )}
         {!template && templateBusy && (
@@ -572,12 +760,20 @@ function VerticalReviewCard({
           запуска — правка едет в те самые кампании, которые он создал. */}
       {launch && template && <LaunchedSendingWindow templateId={template.id} />}
 
+      {template && <FinalLetters template={template} state={finalState} />}
+
       {chain ? (
-        <ChainEditor chain={chain} onSaved={onChanged} />
+        <ChainEditor
+          chain={chain}
+          draftNote={engChainDraftText(template !== undefined, 'review')}
+          onSaved={onChanged}
+        />
       ) : (
-        <p className="mt-2 text-xs" style={{ color: 'var(--cp-text-l)' }}>
-          No ready letters for this vertical yet.
-        </p>
+        !template && (
+          <p className="mt-2 text-xs" style={{ color: 'var(--cp-text-l)' }}>
+            No ready letters for this vertical yet.
+          </p>
+        )
       )}
 
       {base && (
@@ -589,7 +785,9 @@ function VerticalReviewCard({
             <span className="truncate text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>
               {base.filename}
             </span>
-            <EngBadge label={base.status} tone={baseStatusTone(base.status)} />
+            {/* У 'analyzing'-базы без идущего анализа — «analysis stopped»,
+                тем же правилом, что у шага 4 (engBaseAnalysisStopped). */}
+            <EngBaseStatusBadge base={base} />
             <span className="ml-auto ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
               {base.row_count.toLocaleString('en-US')} rows
             </span>
@@ -976,8 +1174,13 @@ export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChan
   if (cards.length === 0) {
     return (
       <EngCard>
+        {/* Без единой принятой гипотезы автопилоту делать нечего (вертикали
+            без них «Start outreach» пропускает), и «still working» было бы
+            неправдой. */}
         <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          Autopilot is still working — letters, bases and templates will appear here once they are ready.
+          {(detail.hypotheses ?? []).some((h) => h.status === 'accepted')
+            ? 'Autopilot is still working — letters, bases and templates will appear here once they are ready.'
+            : 'Nothing to review yet — no hypothesis is accepted. Accept the ones you want on step 2; letters, bases and templates appear here after «Start outreach».'}
         </p>
         <Link
           href={'/client/eng/dashboard' as Route}
@@ -1016,6 +1219,7 @@ export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChan
             base={base}
             template={template}
             templateBusy={templateBusy}
+            inLaunchAll={template !== undefined && launchable.some((t) => t.id === template.id)}
             onChanged={onChanged}
           />
         );

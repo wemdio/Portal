@@ -3,8 +3,13 @@
 /**
  * Шаг 1 «Brief» клиентского ENG-кабинета: карточки site_profile (что движок
  * понял с сайта), редактируемые offer/style/signature overrides (уточняют
- * генерацию писем), настройка проекта «до N адресов одной компании» и
- * «Re-run research» с дедупом на бэкенде.
+ * генерацию писем), рамка ЦА клиента (brief.icp — указание EN-промпту гипотез,
+ * lib/hypothesisEngine/icpFrame), настройка проекта «до N адресов одной
+ * компании» и «Re-run research» с дедупом на бэкенде.
+ *
+ * Все три формы шага держат черновики поверх значений сервера
+ * (useServerDrafts ниже): открываются с сохранённым, полл не трогает
+ * набираемое, на сервер уходит только изменённое.
  *
  * «Re-run research» удаляет оплаченное: кластеризация пересобирает вертикали, и
  * каскадом уходят базы, шаблоны, цепочки писем, вокабуляры и досье вертикалей.
@@ -21,8 +26,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Save } from 'lucide-react';
 import {
+  HE_ICP_ENTRY_MAX_CHARS,
+  HE_ICP_LINE_MAX_CHARS,
+  HE_ICP_LIST_MAX_ENTRIES,
+  parseHeIcpFramePatch,
+  readHeIcpFrame,
+  type HeIcpField,
+  type HeIcpFrameInputError,
+} from '@/lib/hypothesisEngine/icpFrame';
+import {
   patchEngProject,
   startEngResearch,
+  type EngBriefPatch,
   type EngResearchRerunConsequences,
   type HeJobSummary,
 } from './api-client';
@@ -148,6 +163,164 @@ function businessDescriptionHint(brief: Record<string, unknown>): string {
   return '';
 }
 
+/** Поля overrides — ключи brief и тела PATCH. */
+const OVERRIDE_FIELDS = ['business_override', 'offer_override', 'style_override', 'signature_override'] as const;
+type OverrideField = (typeof OVERRIDE_FIELDS)[number];
+
+/** Сохранённые overrides: нет ключа или не строка — ''. */
+function overridesOf(brief: Record<string, unknown>): Record<OverrideField, string> {
+  const out = {} as Record<OverrideField, string>;
+  for (const field of OVERRIDE_FIELDS) {
+    const value = brief[field];
+    out[field] = typeof value === 'string' ? value : '';
+  }
+  return out;
+}
+
+/** Подполя рамки ЦА в форме: списки — textarea по пункту на строку. */
+type IcpField = HeIcpField;
+
+const ICP_LABELS: Record<IcpField, string> = {
+  include: 'Target',
+  exclude: 'Never target',
+  size: 'Company size',
+  geo: 'Geography',
+};
+
+/**
+ * Сохранённая рамка как текст формы. Через тот же читатель, что у роута и
+ * стадии: что бы ни пришло в brief.icp, форма показывает рамку нужной формы.
+ */
+function icpTextOf(brief: Record<string, unknown>): Record<IcpField, string> {
+  const frame = readHeIcpFrame(brief.icp);
+  return {
+    include: frame ? frame.include.join('\n') : '',
+    exclude: frame ? frame.exclude.join('\n') : '',
+    size: frame?.size ?? '',
+    geo: frame?.geo ?? '',
+  };
+}
+
+/**
+ * Отказ проверки формы — подписями полей с экрана. Проверка та же, что у
+ * роута (parseHeIcpFramePatch), поэтому до сервера доходит только то, что он
+ * примет. `bad_shape`/`bad_type` из формы недостижимы: она шлёт строки и
+ * только изменённые подполя, а пустой правки не шлёт вовсе.
+ */
+function icpErrorText(err: HeIcpFrameInputError): string {
+  switch (err.code) {
+    case 'too_many':
+      return `${ICP_LABELS[err.field]}: up to ${err.max} lines.`;
+    case 'too_long':
+      return err.field === 'include' || err.field === 'exclude'
+        ? `${ICP_LABELS[err.field]}: each line can be up to ${err.max} characters.`
+        : `${ICP_LABELS[err.field]}: up to ${err.max} characters.`;
+    default:
+      return 'The target audience could not be saved.';
+  }
+}
+
+/**
+ * Поля формы поверх значений сервера.
+ *
+ * Было: overrides стартовали пустыми (форма открывалась без сохранённого),
+ * полл с новым updated_at перезаписывал их значениями сервера (стирая
+ * набираемое), а «Save» слал все четыре поля — и поле, оставшееся пустым,
+ * удаляло сохранённый override (projectBriefPatch: пустая строка = удалить).
+ *
+ * Стало: `base` — последнее известное значение сервера (на монтировании — из
+ * деталки, дальше — из каждой деталки с изменившимися значениями и из ответа
+ * PATCH); `drafts` — то, что клиент правил, и наличие ключа там и есть флаг
+ * «поле тронуто». На экране черновик, если он есть, иначе base: полл меняет
+ * только нетронутые поля. Изменённое поле — черновик, отличный от base; на
+ * сервер уходят только такие.
+ *
+ * Деталку сверяем по значениям, а не по updated_at: запись брифа
+ * (patchHeProjectBrief) updated_at не трогает, и чужая правка тех же полей
+ * (вторая вкладка, сотрудник) по нему не видна вовсе.
+ */
+function useServerDrafts<K extends string>(server: Record<K, string>) {
+  const serverKey = JSON.stringify(server);
+  const [seenKey, setSeenKey] = useState(serverKey);
+  const [base, setBase] = useState(server);
+  const [drafts, setDrafts] = useState<Partial<Record<K, string>>>({});
+  // Правка state при смене пропа во время рендера (как было здесь же и в
+  // client/layout) — без set-state-in-effect.
+  if (serverKey !== seenKey) {
+    setSeenKey(serverKey);
+    setBase(server);
+    // Сервер догнал черновик (то же сохранили из другой вкладки, сотрудник,
+    // или деталка принесла наше же сохранение) — черновик снимается, как при
+    // «вернул к сохранённому» ниже. Иначе он оставался бы скрытым (равен base —
+    // поле не считается изменённым), а после следующей правки того же поля на
+    // сервере экран показал бы этот старый черновик вместо нового значения, и
+    // «Save» записал бы его обратно.
+    setDrafts((current) => {
+      let next: Partial<Record<K, string>> | null = null;
+      for (const key of Object.keys(current) as K[]) {
+        if (current[key] === server[key]) {
+          next ??= { ...current };
+          delete next[key];
+        }
+      }
+      return next ?? current;
+    });
+  }
+  const keys = Object.keys(server) as K[];
+  const value = (key: K): string => drafts[key] ?? base[key];
+  const changed = keys.filter((key) => drafts[key] !== undefined && drafts[key] !== base[key]);
+  // Вернул поле к сохранённому — черновик снимается: иначе поле осталось бы
+  // «тронутым», и чужая правка того же поля с сервера на экран не попала бы.
+  const edit = (key: K, next: string) =>
+    setDrafts((current) => {
+      const copy = { ...current };
+      if (next === base[key]) delete copy[key];
+      else copy[key] = next;
+      return copy;
+    });
+  /**
+   * Сохранено. base — то, что записал сервер (ответ PATCH, после его чистки);
+   * без значений в ответе — то, что отправили. Черновик снимается, только если
+   * его не правили, пока запрос шёл: иначе набранное за это время пропало бы.
+   */
+  const saved = (stored: Record<K, string> | null, sent: Partial<Record<K, string>>) => {
+    setBase((current) => stored ?? { ...current, ...sent });
+    setDrafts((current) => {
+      const copy = { ...current };
+      for (const key of Object.keys(sent) as K[]) {
+        if (copy[key] === sent[key]) delete copy[key];
+      }
+      return copy;
+    });
+  };
+  return { value, changed, edit, saved };
+}
+
+/**
+ * Подпись рядом с кнопкой сохранения. Состояния: идёт сохранение — пусто
+ * (спиннер на кнопке); есть несохранённые правки — «Unsaved changes» (в том
+ * числе после удачного сохранения: значит, правили снова); сохраняли и правок
+ * нет — «Saved»; иначе пусто.
+ */
+function SaveStatus({ saving, savedAt, unsaved }: { saving: boolean; savedAt: number; unsaved: boolean }) {
+  if (saving) return null;
+  if (unsaved) {
+    return (
+      <span className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+        Unsaved changes
+      </span>
+    );
+  }
+  if (savedAt > 0) {
+    return (
+      <span className="text-[11px]" style={{ color: 'var(--cp-green)' }}>
+        Saved
+      </span>
+    );
+  }
+  return null;
+}
+
 /** Значение поля site_profile → строка (массивы — списком через точку с запятой). */
 function profileValue(value: unknown): string {
   if (Array.isArray(value)) {
@@ -163,34 +336,22 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
   const siteProfile = (brief.site_profile ?? null) as Record<string, unknown> | null;
   const businessHint = businessDescriptionHint(brief);
 
-  const [offer, setOffer] = useState('');
-  const [style, setStyle] = useState('');
-  const [signature, setSignature] = useState('');
-  const [business, setBusiness] = useState('');
+  const overrides = useServerDrafts(overridesOf(brief));
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
+  const icp = useServerDrafts(icpTextOf(brief));
+  const [icpSaving, setIcpSaving] = useState(false);
+  const [icpSavedAt, setIcpSavedAt] = useState(0);
   const [researchBusy, setResearchBusy] = useState(false);
   // Открытый диалог подтверждения повторного исследования (null — закрыт).
   const [rerunConfirm, setRerunConfirm] = useState<EngResearchRerunConsequences | null>(null);
   const [error, setError] = useState('');
-  // Селект настройки: начальное значение берём из проекта сразу (в отличие от
-  // overrides, пустое поле здесь означало бы «одна компания = один адрес»).
-  const [cap, setCap] = useState(() => contactCapOf(project));
+  // Селект настройки — та же схема черновика. Пустого значения у него нет:
+  // база — действующее число (пустая колонка проекта = дефолт движка).
+  const capForm = useServerDrafts({ cap: String(contactCapOf(project)) });
+  const cap = Number(capForm.value('cap'));
   const [capSaving, setCapSaving] = useState(false);
   const [capSavedAt, setCapSavedAt] = useState(0);
-
-  // Перечитываем overrides из деталки (первый рендер и после поллов) —
-  // React-паттерн «правка state при смене пропа во время рендера», как в
-  // client/layout (prevActiveId), без set-state-in-effect.
-  const [prevUpdatedAt, setPrevUpdatedAt] = useState(project.updated_at);
-  if (project.updated_at !== prevUpdatedAt) {
-    setPrevUpdatedAt(project.updated_at);
-    setOffer(typeof brief.offer_override === 'string' ? brief.offer_override : '');
-    setStyle(typeof brief.style_override === 'string' ? brief.style_override : '');
-    setSignature(typeof brief.signature_override === 'string' ? brief.signature_override : '');
-    setBusiness(typeof brief.business_override === 'string' ? brief.business_override : '');
-    setCap(contactCapOf(project));
-  }
 
   const researchActive = useMemo(() => isResearchActive(jobs), [jobs]);
 
@@ -201,17 +362,24 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
     [cap],
   );
 
+  // Обе карточки пишут один jsonb brief, а роут делает read-merge-write без
+  // сверки версии (patchHeProjectBrief): два запроса в полёте читают один и тот
+  // же brief, и записанный последним возвращает поле первого к прежнему
+  // значению. Поэтому, пока идёт одно сохранение брифа, второе не уходит.
+  const briefSaving = saving || icpSaving;
+
+  // Только изменённые поля: присланное роут перезаписывает (пустое — удаляет),
+  // неприсланное не трогает.
   const onSave = async () => {
-    if (saving) return;
+    if (briefSaving || overrides.changed.length === 0) return;
+    const sent: Partial<Record<OverrideField, string>> = {};
+    for (const field of overrides.changed) sent[field] = overrides.value(field);
     setSaving(true);
     setError('');
     try {
-      await patchEngProject(project.id, {
-        offer_override: offer,
-        style_override: style,
-        signature_override: signature,
-        business_override: business,
-      });
+      const res = await patchEngProject(project.id, sent);
+      const storedBrief = res?.project?.brief;
+      overrides.saved(storedBrief ? overridesOf(storedBrief as Record<string, unknown>) : null, sent);
       setSavedAt(Date.now());
       onChanged();
     } catch (e) {
@@ -221,8 +389,41 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
     }
   };
 
+  // Рамка ЦА: только изменённые подполя (роут сливает их с сохранённой
+  // рамкой), проверка — та же, что у роута, до отправки.
+  const onSaveIcp = async () => {
+    if (briefSaving || icp.changed.length === 0) return;
+    const sent: Partial<Record<IcpField, string>> = {};
+    const patch: NonNullable<EngBriefPatch['icp']> = {};
+    for (const field of icp.changed) {
+      const text = icp.value(field);
+      sent[field] = text;
+      if (field === 'include' || field === 'exclude') patch[field] = text.split('\n');
+      else patch[field] = text;
+    }
+    const checked = parseHeIcpFramePatch(patch);
+    if (!checked.ok) {
+      setError(icpErrorText(checked.error));
+      return;
+    }
+    setIcpSaving(true);
+    setError('');
+    try {
+      const res = await patchEngProject(project.id, { icp: patch });
+      const storedBrief = res?.project?.brief;
+      icp.saved(storedBrief ? icpTextOf(storedBrief as Record<string, unknown>) : null, sent);
+      setIcpSavedAt(Date.now());
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally {
+      setIcpSaving(false);
+    }
+  };
+
   const onSaveCap = async () => {
     if (capSaving) return;
+    const sentCap = capForm.value('cap');
     setCapSaving(true);
     setError('');
     try {
@@ -230,14 +431,12 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
       // на месте вызова, чтобы не править общий модуль чужой полосы (см.
       // handoff в отчёте). На провод уезжает { max_emails_per_company: <число> }.
       const body: Parameters<typeof patchEngProject>[1] & { max_emails_per_company: number } = {
-        max_emails_per_company: cap,
+        max_emails_per_company: Number(sentCap),
       };
       const saved = await patchEngProject(project.id, body);
       // Показываем то, что БД действительно сохранила (ответ идёт через ту же
-      // клиентскую проекцию, что и деталка): `updated_at` у he_projects по этой
-      // записи не меняется, поэтому блок перечитывания деталки выше не
-      // сработает и синхронизировать селект больше нечему.
-      setCap(contactCapOf(saved?.project));
+      // клиентскую проекцию, что и деталка), не дожидаясь перечитывания деталки.
+      capForm.saved(saved?.project ? { cap: String(contactCapOf(saved.project)) } : null, { cap: sentCap });
       setCapSavedAt(Date.now());
       onChanged();
     } catch (e) {
@@ -347,8 +546,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               {businessHint}
             </span>
             <textarea
-              value={business}
-              onChange={(e) => setBusiness(e.target.value)}
+              value={overrides.value('business_override')}
+              onChange={(e) => overrides.edit('business_override', e.target.value)}
               rows={4}
               maxLength={3000}
               placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin, JS-heavy, or could not be opened at all."
@@ -360,8 +559,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               Offer override
             </span>
             <textarea
-              value={offer}
-              onChange={(e) => setOffer(e.target.value)}
+              value={overrides.value('offer_override')}
+              onChange={(e) => overrides.edit('offer_override', e.target.value)}
               rows={2}
               placeholder="e.g. 4–6 qualified meetings per month with US clinic owners, pay-per-meeting"
               className="ds-input w-full resize-y"
@@ -372,8 +571,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               Style reference (1–2 “perfect” emails to imitate)
             </span>
             <textarea
-              value={style}
-              onChange={(e) => setStyle(e.target.value)}
+              value={overrides.value('style_override')}
+              onChange={(e) => overrides.edit('style_override', e.target.value)}
               rows={4}
               placeholder="Paste an email whose tone the generator should copy"
               className="ds-input w-full resize-y"
@@ -384,8 +583,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               Sender signature (used verbatim at the end of every letter)
             </span>
             <textarea
-              value={signature}
-              onChange={(e) => setSignature(e.target.value)}
+              value={overrides.value('signature_override')}
+              onChange={(e) => overrides.edit('signature_override', e.target.value)}
               rows={2}
               placeholder="Jane Doe, Acme, acme.com"
               className="ds-input w-full resize-y"
@@ -395,20 +594,99 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
             <button
               type="button"
               onClick={() => void onSave()}
-              disabled={saving}
+              disabled={briefSaving || overrides.changed.length === 0}
               className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
             >
               {saving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
               Save overrides
             </button>
-            {savedAt > 0 && !saving && (
-              <span className="text-[11px]" style={{ color: 'var(--cp-green)' }}>
-                Saved
-              </span>
-            )}
+            <SaveStatus saving={saving} savedAt={savedAt} unsaved={overrides.changed.length > 0} />
           </div>
         </div>
       </EngCard>
+
+      {/* Рамка ЦА читается только EN-промптом гипотез (рынок us); роут на
+          другом рынке её не принимает, поэтому и формы там нет. */}
+      {project.market === 'us' && (
+        <EngCard>
+          <EngEyebrow>Target audience</EngEyebrow>
+          {/* Каждая фраза — про механизм как он есть. Рамку читает только
+              стадия гипотез, в начале своего прогона (stages/hypotheses.ts,
+              EN-промпт prompts/hypotheses.en.ts): по ней модель выбирает и
+              запрещает сегменты (шаг 2). Размер и география — указание модели
+              вписать их условием отбора в описание каждой гипотезы внутри
+              рамки; описания читает планировщик источников
+              (prompts/sourcePlan.en.ts: фильтры стран и штата), а порог штата
+              из плана, когда размер в них не назван, сборка снимает (кроме
+              среза, у которого без него не осталось бы других фильтров —
+              heSizeBasisEn и heTaskWithoutUnfoundedSize, stages/baseCollect.ts). Вписывает их модель, кодом гипотеза с
+              рамкой не сверяется, отсюда «usually». География — уже, чем
+              размер: pdl, funded и eng_hiring фильтруют только по СТРАНЕ, место
+              мельче страны (штат, регион, город) несёт лишь гео запроса
+              google_maps, а релевант-гейт географию не проверяет вовсе. Поэтому
+              про страну — «usually … a filter», про штат/город — только карты и
+              честное «companies from elsewhere can still appear». Сохранённое
+              после старта стадии войдёт в следующий прогон research. */}
+          <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+            Who the research should aim at. These answers steer which market hypotheses the research
+            proposes. The company size you name here usually becomes a condition for which companies are
+            collected for those hypotheses. A country usually becomes a filter for the companies collected,
+            while a state, region or city can be used only when searching local businesses on maps, so
+            companies from elsewhere can still appear. The research reads these answers when it drafts the
+            hypotheses, so answers saved after that apply the next time it runs.
+          </p>
+          <div className="flex flex-col gap-3">
+            {(['include', 'exclude'] as const).map((field) => (
+              <label key={field} className="flex flex-col gap-1">
+                <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+                  {ICP_LABELS[field]} (one per line, up to {HE_ICP_LIST_MAX_ENTRIES} lines of{' '}
+                  {HE_ICP_ENTRY_MAX_CHARS} characters)
+                </span>
+                <textarea
+                  value={icp.value(field)}
+                  onChange={(e) => icp.edit(field, e.target.value)}
+                  rows={3}
+                  placeholder={
+                    field === 'include'
+                      ? 'e.g. Multi-location dental groups\nIndependent orthodontic practices'
+                      : 'e.g. Hospitals\nDental schools'
+                  }
+                  className="ds-input w-full resize-y"
+                />
+              </label>
+            ))}
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(['size', 'geo'] as const).map((field) => (
+                <label key={field} className="flex flex-col gap-1">
+                  <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+                    {ICP_LABELS[field]}
+                  </span>
+                  <input
+                    type="text"
+                    value={icp.value(field)}
+                    onChange={(e) => icp.edit(field, e.target.value)}
+                    maxLength={HE_ICP_LINE_MAX_CHARS}
+                    placeholder={field === 'size' ? 'e.g. 20–500 employees' : 'e.g. Texas and Florida'}
+                    className="ds-input w-full"
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void onSaveIcp()}
+                disabled={briefSaving || icp.changed.length === 0}
+                className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+              >
+                {icpSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                Save target audience
+              </button>
+              <SaveStatus saving={icpSaving} savedAt={icpSavedAt} unsaved={icp.changed.length > 0} />
+            </div>
+          </div>
+        </EngCard>
+      )}
 
       <EngCard>
         <EngEyebrow>Contacts per company</EngEyebrow>
@@ -421,7 +699,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
             Email addresses per company
             <select
               value={cap}
-              onChange={(e) => setCap(Number(e.target.value))}
+              onChange={(e) => capForm.edit('cap', e.target.value)}
               className="ds-input mt-1 w-full text-xs"
             >
               {capOptions.map((n) => (
@@ -440,11 +718,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
             {capSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
             Save
           </button>
-          {capSavedAt > 0 && !capSaving && (
-            <span className="text-[11px]" style={{ color: 'var(--cp-green)' }}>
-              Saved
-            </span>
-          )}
+          <SaveStatus saving={capSaving} savedAt={capSavedAt} unsaved={capForm.changed.length > 0} />
         </div>
       </EngCard>
 

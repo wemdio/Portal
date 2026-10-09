@@ -135,6 +135,11 @@
  * поэтому наличие TELEGRAM_HEALTH_BOT_TOKEN / TELEGRAM_HEALTH_CHAT_ID в
  * контейнере движка (воркер и крон) И в веб-контейнере `portal` (запуск
  * шаблона из кабинета) входит в предрелизную проверку.
+ *
+ * Второе, что модуль сообщает команде, — не остановка, а успешный запуск
+ * шаблона из ENG-кабинета (`notifyHeClientLaunch`, в конце файла): кампании
+ * создаются на паузе, и стартует их сотрудник. Своя тема, свой ключ
+ * дедупликации и своя свёртка — по проекту; транспорт и правило рынка общие.
  */
 
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
@@ -543,9 +548,186 @@ export function notifyHeClientStop(stop: HeOpsStop, opts: { now?: number } = {})
 /**
  * Отправить всё, что копится в окнах свёртки, не дожидаясь их конца. Для
  * штатной остановки воркера и для конца одноразового крона: иначе список
- * проектов, остановленных тем же отказом, умрёт вместе с процессом.
+ * проектов, остановленных тем же отказом, умрёт вместе с процессом. Заодно —
+ * свёртки запусков из кабинета (notifyHeClientLaunch ниже).
  */
 export function flushHeOpsAlerts(): Promise<void> {
   const keys = [...bursts.keys()];
-  return Promise.all(keys.map((key) => flushBurst(key))).then(() => undefined, () => undefined);
+  const launchKeys = [...launchBursts.keys()];
+  return Promise.all([...keys.map((key) => flushBurst(key)), ...launchKeys.map((key) => flushLaunchBurst(key))]).then(
+    () => undefined,
+    () => undefined,
+  );
+}
+
+/* ─────────────── Запуск из ENG-кабинета: команде — проверить и стартовать ─────────────── */
+
+/**
+ * Клиент запустил шаблон из ENG-кабинета (POST /api/client/eng/templates/[id]/launch,
+ * ответ 200). Это НЕ отказ и не остановка, поэтому не вид HeOpsStopKind: у
+ * notifyHeClientStop другая тема, другой совет и окна по проекту, которые
+ * погасили бы второй шаблон того же проекта.
+ *
+ * Зачем: ядро запуска создаёт кампании НА ПАУЗЕ и не активирует их никогда
+ * (launchHandoff.ts, шапка; activateCampaign в hypothesisEngine не вызывается),
+ * стартует их сотрудник у рассыльщика. Кабинет так и говорит клиенту («created
+ * paused — your manager reviews it and starts sending», Command Center; «the
+ * team reviews and starts it manually», шаг 4). Без этого сообщения клиентский
+ * запуск стоял бы на паузе, пока кто-нибудь случайно не заглянет к рассыльщику.
+ * Клиентские тексты на алерт НЕ опираются (они про процесс, а не про «команда
+ * уже знает»), поэтому без кредов Telegram кабинет не врёт — просто команда
+ * узнаёт позже.
+ *
+ * Только market='us' — тем же правилом, что и у остановок (шапка файла):
+ * null уходит с пометкой «рынок не прочитан».
+ *
+ * ДЕДУПЛИКАЦИЯ — в памяти процесса, тем же приёмом, что у остановок:
+ *  1. ключ «шаблон | набор кампаний записи | законченность»: тот же набор в том
+ *     же состоянии в течение HE_OPS_CAPACITY_REPEAT_MS (6 ч) — та же новость и
+ *     не пишется. Новые кампании (повтор с force, достройка, создавшая
+ *     сегменты) и переход «незаконченный → законченный» — новая новость. Окно
+ *     держится, только если сообщение принял чат (sendBounded снимает его иначе);
+ *  2. свёртка ПО ПРОЕКТУ: первое сообщение проекта уходит сразу, остальные
+ *     запуски того же проекта в течение HE_OPS_BURST_WINDOW_MS (10 мин) —
+ *     одним списком в конце окна. «Launch all (paused)» запускает шаблоны
+ *     подряд, и это одна новость про проект, а не восемь.
+ * Цена памяти та же, что у остановок: после рестарта веб-процесса тот же
+ * запуск может прийти ещё раз, а накопленный и не отправленный список
+ * теряется, если процесс умер без flushHeOpsAlerts() (веб-процесс шлёт его по
+ * таймеру).
+ *
+ * Не бросает и не держит вызывающего дольше HE_OPS_SEND_TIMEOUT_MS; роут
+ * запуска его не ждёт (`void`): ответ клиенту от Telegram не зависит.
+ */
+export interface HeOpsClientLaunch {
+  projectId: string;
+  /** Рынок проекта; алерт уходит только для 'us' (null — с пометкой). */
+  market: string | null;
+  templateId: string;
+  verticalId?: string | null;
+  /** id всех кампаний записи о запуске (основная и сегментные). */
+  campaignIds: string[];
+  /** Адресов в кампаниях запуска по записи (`launch_info.leads_count`). */
+  leads: number;
+  /** Часть аудитории не уехала (heLaunchIsIncomplete): клиент достраивает с шага 5. */
+  unfinished: boolean;
+  /** Повторный запуск с force: прежние кампании шаблона остались у рассыльщика. */
+  forced: boolean;
+}
+
+const LAUNCH_WORKER_ID = 'hypothesis-engine · ENG';
+
+const LAUNCH_ACTION =
+  'проверить кампании запуска у рассыльщика (письма, адреса, окно отправки) и запустить их — кабинет создаёт их на ' +
+  'паузе и сам не активирует никогда; клиент видит «created paused — your manager reviews it and starts sending»';
+
+function launchLine(launch: HeOpsClientLaunch): string {
+  return (
+    `шаблон ${launch.templateId}${launch.verticalId ? `, вертикаль ${launch.verticalId}` : ''}: ` +
+    `кампаний ${launch.campaignIds.length}, адресов ${launch.leads}` +
+    (launch.unfinished ? ', запуск НЕ закончен (часть аудитории не уехала, клиент достраивает с шага 5)' : '') +
+    (launch.forced ? ', повторный запуск с force — прежние кампании шаблона остались у рассыльщика' : '') +
+    (launch.market ? '' : ' (рынок не прочитан — проверь, что это ENG)')
+  );
+}
+
+function sendLaunchSingle(launch: HeOpsClientLaunch, held: HeOpsHeld): Promise<void> {
+  return sendBounded(
+    {
+      workerId: LAUNCH_WORKER_ID,
+      subject: 'клиент запустил шаблон из кабинета — кампании созданы на паузе и ждут сотрудника',
+      error: launchLine(launch),
+      context: {
+        'проект': launch.projectId,
+        'кампании': launch.campaignIds.join(', ') || null,
+        'сделать': LAUNCH_ACTION,
+      },
+    },
+    [held],
+  );
+}
+
+interface HeOpsLaunchPending {
+  launch: HeOpsClientLaunch;
+  held: HeOpsHeld;
+}
+
+interface HeOpsLaunchBurst {
+  leadAt: number;
+  pending: HeOpsLaunchPending[];
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+/** Открытые окна свёртки запусков — по проекту. */
+const launchBursts = new Map<string, HeOpsLaunchBurst>();
+
+function flushLaunchBurst(projectId: string): Promise<void> {
+  const burst = launchBursts.get(projectId);
+  if (!burst) return Promise.resolve();
+  launchBursts.delete(projectId);
+  if (burst.timer) clearTimeout(burst.timer);
+  if (!burst.pending.length) return Promise.resolve();
+  const shown = burst.pending.slice(0, HE_OPS_BURST_LIST_MAX);
+  const lines = shown.map((p) => launchLine(p.launch));
+  if (burst.pending.length > shown.length) lines.push(`и ещё ${burst.pending.length - shown.length}`);
+  return sendBounded(
+    {
+      workerId: LAUNCH_WORKER_ID,
+      subject: `тот же клиент запустил из кабинета ещё ${burst.pending.length} — кампании созданы на паузе`,
+      error: lines.join('\n'),
+      context: {
+        'проект': projectId,
+        'сделать': LAUNCH_ACTION,
+      },
+    },
+    burst.pending.map((p) => p.held),
+  );
+}
+
+/**
+ * Сообщить команде о запуске из ENG-кабинета (см. блок выше). Решение «слать /
+ * молчать / копить» — синхронно, до первого await, как у notifyHeClientStop.
+ */
+export function notifyHeClientLaunch(launch: HeOpsClientLaunch, opts: { now?: number } = {}): Promise<void> {
+  try {
+    if (launch.market !== null && launch.market !== 'us') return Promise.resolve();
+    const now = opts.now ?? Date.now();
+
+    for (const [key, hold] of silentUntilByProjectKind) {
+      if (now >= hold.until) silentUntilByProjectKind.delete(key);
+    }
+    // Окна свёртки — по проекту, поэтому отжившие пустые окна чистим здесь:
+    // иначе карта копила бы по записи на каждый проект, хоть раз запускавший.
+    for (const [projectId, burst] of launchBursts) {
+      if (!burst.pending.length && now - burst.leadAt >= HE_OPS_BURST_WINDOW_MS) launchBursts.delete(projectId);
+    }
+    const launchKey =
+      `launch|${launch.templateId}|${[...launch.campaignIds].sort().join(',')}|` +
+      (launch.unfinished ? 'unfinished' : 'complete');
+    const current = silentUntilByProjectKind.get(launchKey);
+    if (current !== undefined && now < current.until) return Promise.resolve();
+    const held: HeOpsHeld = { key: launchKey, hold: { until: now + HE_OPS_CAPACITY_REPEAT_MS } };
+    silentUntilByProjectKind.set(launchKey, held.hold);
+
+    const open = launchBursts.get(launch.projectId);
+    if (open && now - open.leadAt < HE_OPS_BURST_WINDOW_MS) {
+      open.pending.push({ launch, held });
+      if (!open.timer) {
+        open.timer = setTimeout(
+          () => {
+            void flushLaunchBurst(launch.projectId);
+          },
+          Math.max(0, open.leadAt + HE_OPS_BURST_WINDOW_MS - now),
+        );
+        (open.timer as { unref?: () => void }).unref?.();
+      }
+      return Promise.resolve();
+    }
+    const previous = open ? flushLaunchBurst(launch.projectId) : Promise.resolve();
+    launchBursts.set(launch.projectId, { leadAt: now, pending: [], timer: null });
+    return Promise.all([previous, sendLaunchSingle(launch, held)]).then(() => undefined, () => undefined);
+  } catch (e) {
+    console.warn('[he-ops-alert] алерт о запуске не собран:', e);
+    return Promise.resolve();
+  }
 }

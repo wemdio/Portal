@@ -198,7 +198,14 @@ import {
   heSourceAllowedForMarket,
   HeSourceMarketRefusal,
 } from '../sourcePlanMarketGate';
-import { findIrrelevantRows, findOffTargetRows, heOffTargetMarkersFor } from '../relevanceGate';
+import {
+  findIrrelevantRows,
+  findOffTargetRows,
+  heGateHypothesisScopeEnabled,
+  heOffTargetMarkersFor,
+  type HeGateHypothesis,
+  type HeGateHypothesisScopeUsed,
+} from '../relevanceGate';
 import {
   probeSliceRelevance,
   sliceProbeRejectBelow,
@@ -932,6 +939,20 @@ export interface HeRelevanceGateInfo {
    * Запись с ran=true = второй раз не платим.
    */
   judged_at: string;
+  /**
+   * Модель судила целью по гипотезам вертикали (флаг HE_GATE_HYPOTHESIS_SCOPE,
+   * по умолчанию выключен): сколько гипотез ей показано и сколько не влезло в
+   * потолок. Ключа нет — вопрос был «принадлежит вертикали». Пишется вместе с
+   * записью гейта, а не перечитывается из флага: суд и терминал сборки —
+   * разные тики, и причина обязана описывать тот суд, который был.
+   *
+   * Читатель — терминал «гейт снял все строки» ниже (allOffTarget): по ключу
+   * он пишет he_bases.error «не подходит под гипотезы вертикали» (кабинет:
+   * hypothesis_mismatch) вместо «не покрывается каталогом»
+   * (audience_mismatch), который про такую базу неправда. Ещё по нему
+   * выбирают слова строки лога гейта («вне гипотез вертикали»).
+   */
+  hypothesis_scope?: HeGateHypothesisScopeUsed;
 }
 
 /** Провенанс починки плана: почему её запускали и чем кончилось. */
@@ -5017,6 +5038,89 @@ export function capImportedRows<T extends HeUnifiedRow>(input: {
 }
 
 /**
+ * Гипотезы вертикали — цель EN-гейта (вход `hypotheses` у
+ * findIrrelevantRows). Только market='us' и только при включённом
+ * HE_GATE_HYPOTHESIS_SCOPE (по умолчанию ВЫКЛЮЧЕН): при выключенном флаге
+ * функция ничего не читает и возвращает пустой список, а RU-путь её не зовёт
+ * вовсе.
+ *
+ * Набор — ВСЕ НЕОТКЛОНЁННЫЕ гипотезы вертикали, принятые и предложенные, а не
+ * провенанс плана и не одни принятые. Причина — постоянство среза: строку,
+ * которую гейт вычеркнул, выбрасывают запуск, долив и повторная валидация, и
+ * никто её не вернёт, а разметка гипотез меняется и после сборки. Цель «только
+ * принятые на момент сборки» вычёркивала бы компании гипотезы, которую клиент
+ * примет завтра, — навсегда. Отклонённая гипотеза в цель не попадает: это
+ * единственный статус, которым сказано «этим не пишем». Чего это стоит и что
+ * при этом мягче цели по плану — в relevanceGate (buildRelevanceMessages).
+ *
+ * Порядок — сначала принятые, потом предложенные, внутри каждой группы по
+ * убыванию потенциала: в потолок гейта (8 гипотез) первыми попадают те, по
+ * которым план собирал строки (collectPlanInput строит его по принятым, когда
+ * они есть). Не влезшие не теряются: гейт называет их число и тогда оставляет
+ * и строки, принадлежащие самой вертикали.
+ *
+ * Бесплатное чтение БД, never-throw. Сбой чтения, ни одной гипотезы у
+ * вертикали, все отклонены, у всех пустое название → пустой список, и гейт
+ * задаёт прежний вопрос «принадлежит вертикали» (МЯГЧЕ любой цели по
+ * гипотезам; почему «все отклонены» не превращается в «вычеркнуть всё» —
+ * там же, в relevanceGate). Строка лога есть у каждого исхода с чтением.
+ */
+async function heGateHypothesesFor(
+  ctx: HeStageContext,
+  projectId: string,
+  verticalId: string,
+): Promise<HeGateHypothesis[]> {
+  if (!heGateHypothesisScopeEnabled()) return [];
+  try {
+    const { data, error } = await ctx.supabase
+      .from('he_hypotheses')
+      .select('id, title, description, status')
+      .eq('project_id', projectId)
+      .eq('vertical_id', verticalId)
+      .order('potential_pct', { ascending: false });
+    if (error) throw new Error(error.message);
+    const accepted: HeGateHypothesis[] = [];
+    const proposed: HeGateHypothesis[] = [];
+    let total = 0;
+    let rejected = 0;
+    for (const raw of data ?? []) {
+      const row = raw as { title?: unknown; description?: unknown; status?: unknown };
+      total += 1;
+      if (row.status === 'rejected') {
+        rejected += 1;
+        continue;
+      }
+      if (typeof row.title !== 'string' || !row.title.trim()) continue;
+      const hypothesis: HeGateHypothesis = {
+        title: row.title,
+        description: typeof row.description === 'string' ? row.description : null,
+      };
+      if (row.status === 'accepted') accepted.push(hypothesis);
+      else proposed.push(hypothesis);
+    }
+    const out = [...accepted, ...proposed];
+    stageLog(
+      ctx,
+      out.length > 0
+        ? `[base_collect] релевант-гейт судит по неотклонённым гипотезам вертикали: ${out.length} ` +
+            `(принятых ${accepted.length}, предложенных ${proposed.length}, отклонено ${rejected})`
+        : total > 0 && rejected === total
+          ? `[base_collect] все гипотезы вертикали отклонены (${total}) — релевант-гейт судит по вертикали`
+          : `[base_collect] у вертикали нет неотклонённых гипотез с названием (всего ${total}, отклонено ${rejected}) — ` +
+            'релевант-гейт судит по вертикали',
+    );
+    return out;
+  } catch (e) {
+    stageLog(
+      ctx,
+      `[base_collect] гипотезы вертикали для релевант-гейта не прочитаны (${e instanceof Error ? e.message : String(e)}) — ` +
+        'гейт судит по вертикали',
+    );
+    return [];
+  }
+}
+
+/**
  * Релевант-гейт ENG-сборки, отработавший ДО конструктора: дешёвый префильтр без
  * модели, затем мини-модель по merged-строкам, и обе пометки — в один набор
  * ключей компаний для collect_info.
@@ -5034,6 +5138,24 @@ export function capImportedRows<T extends HeUnifiedRow>(input: {
  * вычеркнутая строка успевала пройти весь конструктор — при том, что и запуск
  * (launchTemplate), и ночной долив (baseCollectRefill) всё равно выбрасывают её
  * по _low_relevance.
+ *
+ * Описание компании ИЗ ИСТОЧНИКА на этом пути доходит до гейта ровно одним
+ * способом — у строки eng_hiring в `category` (mapEngHiringRow, обрезано до
+ * 200 символов и ещё раз гейтом), и сегодня у jobhive оно пустое всегда. У
+ * каталогов текст о компании в таблицах есть (pdl_companies.description —
+ * его возвращает search_pdl_companies; funded_companies.description и
+ * short_description), но mapPdlRow и mapFundedRow его не переносят, а выборка
+ * funded его не читает, — до строки, а значит и до гейта, он не доезжает.
+ *
+ * ЦЕЛЬ. По умолчанию (HE_GATE_HYPOTHESIS_SCOPE выключен) — прежний вопрос
+ * «принадлежит вертикали»: `hypotheses` пуст, а гейт сам игнорирует и его, и
+ * другие имена вертикали. При включённом флаге — неотклонённые гипотезы
+ * вертикали (см. heGateHypothesesFor) и другие имена вертикали: гейт
+ * спрашивает, может ли компания быть покупателем хотя бы по одной из них
+ * (правило и его направление — в relevanceGate, buildRelevanceMessages);
+ * пустой список и тогда — вопрос «принадлежит вертикали». Каким вопросом
+ * судили, пишется в запись гейта (`hypothesis_scope`) — по нему терминал
+ * «гейт снял всё» выбирает причину.
  *
  * Что именно на ней тратилось — БЕЗ преувеличений: платных провайдеров шаги
  * конструктора не зовут (поиск почт — свой краул, валидация — node dns/net),
@@ -5064,8 +5186,9 @@ async function judgeRowsBeforeConstruct(input: {
   rows: HeUnifiedRow[];
   vertical: HeVertical;
   brief?: Record<string, unknown> | null;
+  hypotheses: HeGateHypothesis[];
 }): Promise<HeRelevanceGateInfo> {
-  const { ctx, rows, vertical, brief } = input;
+  const { ctx, rows, vertical, brief, hypotheses } = input;
   const judgedAt = new Date().toISOString();
   // Префильтр — до модели: его строки модели не отдаём, это единственная
   // экономия, которую он приносит (и она нулевая, пока маркеров нет, см.
@@ -5078,6 +5201,7 @@ async function judgeRowsBeforeConstruct(input: {
   let judgedRows = 0;
   let tokensUsed = 0;
   let costUsd = 0;
+  let hypothesisScope: HeGateHypothesisScopeUsed | null = null;
   let error: string | null = null;
   try {
     const gate = await findIrrelevantRows({
@@ -5085,12 +5209,15 @@ async function judgeRowsBeforeConstruct(input: {
       verticalName: vertical.name,
       verticalSummary: vertical.summary ?? '',
       language: 'en',
+      hypotheses,
+      synonyms: vertical.synonyms,
       log: (m) => stageLog(ctx, m),
     });
     checked = gate.checkedRows;
     judgedRows = gate.judgedRows;
     tokensUsed = gate.tokensUsed;
     costUsd = gate.costUsd;
+    hypothesisScope = gate.hypothesisScope;
     // Индексы гейта — во входном массиве judged, поэтому ключ берём из него же.
     for (const i of gate.flagged) flaggedKeys.add(heCompanyRowKey(judged[i]));
     // Ни одного вердикта на непустом входе: модуль глотает падение батча сам
@@ -5119,6 +5246,7 @@ async function judgeRowsBeforeConstruct(input: {
     tokens_used: tokensUsed,
     cost_usd: costUsd,
     judged_at: judgedAt,
+    ...(hypothesisScope ? { hypothesis_scope: hypothesisScope } : {}),
   };
 }
 
@@ -6472,6 +6600,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       rows: merged,
       vertical,
       brief: project.brief,
+      hypotheses: await heGateHypothesesFor(ctx, job.project_id, vertical.id),
     });
     info.relevance_gate = relevanceGate;
     // Пишем ДО диспатча и КЛИЕНТОМ БЕЗ СИГНАЛА ДЖОБЫ (paidCheckpoint): это запись
@@ -6488,7 +6617,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       ctx,
       relevanceGate.ran
         ? `[base_collect] релевант-гейт до конструктора: судили ${relevanceGate.judged} из ${merged.length} строк, ` +
-            `вне вертикали ${relevanceGate.flagged_keys.length}` +
+            `${relevanceGate.hypothesis_scope ? 'вне гипотез вертикали' : 'вне вертикали'} ${relevanceGate.flagged_keys.length}` +
             (relevanceGate.off_target > 0 ? ` (из них ${relevanceGate.off_target} — префильтром, без модели)` : '')
         : `[base_collect] релевант-гейт до конструктора НЕ отработал (${relevanceGate.error ?? 'без причины'}): ` +
             `${merged.length} строк уходят конструктору целиком, проверка — после импорта`,
@@ -6515,7 +6644,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
    * обогащения было нечем. Поэтому финальная запись ниже уводит такую базу в
    * терминальный 'failed' с причиной (формулировка классифицируется кабинетом
    * как audience_mismatch — «срез не про эту вертикаль, это осознанная
-   * остановка»), а строки и воронка пишутся в неё ровно так же, как у любой
+   * остановка»; если гейт судил целью по гипотезам, флаг
+   * HE_GATE_HYPOTHESIS_SCOPE, — как hypothesis_mismatch, см. offTargetNote
+   * ниже), а строки и воронка пишутся в неё ровно так же, как у любой
    * другой сборки: пометки _low_relevance на всех строках, low_relevance = все,
    * ok_contacts = 0.
    *
@@ -6539,7 +6670,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   if (allOffTarget) {
     stageLog(
       ctx,
-      `[base_collect] релевант-гейт вне вертикали ВСЕ ${merged.length} строк: конструктор не запускаем, ` +
+      `[base_collect] релевант-гейт ${relevanceGate?.hypothesis_scope ? 'вне гипотез вертикали' : 'вне вертикали'} ` +
+        `ВСЕ ${merged.length} строк: конструктор не запускаем, ` +
         (isRefill
           ? 'обогащать нечего — долив закончится нулём, компании остаются исключёнными'
           : 'база уходит в failed с причиной — обогащать нечего'),
@@ -6903,7 +7035,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     );
     stageLog(
       ctx,
-      `[base_collect] релевант-гейт (до конструктора): помечено ${gateFlaggedKeys.size} компаний вне вертикали`,
+      `[base_collect] релевант-гейт (до конструктора): помечено ${gateFlaggedKeys.size} компаний ` +
+        `${relevanceGate?.hypothesis_scope ? 'вне гипотез вертикали' : 'вне вертикали'}`,
     );
   }
   if (!gateRan) {
@@ -6919,11 +7052,22 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         .eq('id', base.vertical_id)
         .maybeSingle();
       const verticalName = (vrow as { name?: string } | null)?.name ?? '';
+      // Цель по неотклонённым гипотезам вертикали и другим её именам — та же,
+      // что у гейта до конструктора (judgeRowsBeforeConstruct): только у
+      // market='us' и только при включённом HE_GATE_HYPOTHESIS_SCOPE (по
+      // умолчанию выключен — тогда гипотезы не читаются, а гейт игнорирует и
+      // другие имена). RU-вызов прежний байт-в-байт, без лишнего чтения.
       const gate = await findIrrelevantRows({
         rows: storedRows,
         verticalName,
         verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
         language: market === 'us' ? 'en' : 'ru',
+        ...(market === 'us'
+          ? {
+              hypotheses: await heGateHypothesesFor(ctx, job.project_id, base.vertical_id),
+              synonyms: vertical.synonyms,
+            }
+          : {}),
         log: (m) => stageLog(ctx, m),
       });
       usage.tokensUsed += gate.tokensUsed;
@@ -6932,7 +7076,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         storedRows = storedRows.map((r, i) =>
           gate.flagged.has(i) ? { ...r, _low_relevance: true } : r,
         );
-        stageLog(ctx, `[base_collect] релевант-гейт: помечено ${gate.flagged.size} строк вне вертикали`);
+        stageLog(
+          ctx,
+          `[base_collect] релевант-гейт: помечено ${gate.flagged.size} строк ` +
+            `${gate.hypothesisScope ? 'вне гипотез вертикали' : 'вне вертикали'}`,
+        );
       }
     } catch (e) {
       stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
@@ -7043,12 +7191,31 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // же код и тот же текст, что у отказа пробы среза, который останавливает
   // сборку по той же причине, только раньше. Русский текст остаётся staff'у,
   // клиент видит только код. Переформулировать — сверившись с классификатором.
-  const offTargetNote = allOffTarget
-    ? `Вертикаль «${vertical.name}» не покрывается каталогом: релевант-гейт снял все ` +
-      `${storedRows.length} собранных компаний как не принадлежащие вертикали. ` +
-      'Поиск и проверка адресов не запускались — рассылка по такому срезу навредила бы ' +
-      'рабочим вертикалям.'
-    : null;
+  //
+  // Гейт судил целью по гипотезам (relevance_gate.hypothesis_scope; только при
+  // включённом HE_GATE_HYPOTHESIS_SCOPE) — текст другой, потому что
+  // «не принадлежат вертикали» про такую базу неправда: компании могли быть
+  // вертикали, но не подойти ни под одну неотклонённую её гипотезу. Оборот
+  // «не подходит под гипотезы вертикали» кабинет сворачивает в
+  // hypothesis_mismatch. Если гипотез было больше потолка, модель видела не
+  // все, а за остальные отвечал вопрос о самой вертикали — тогда сказано и
+  // это: ни одна компания не принадлежит и самой вертикали.
+  const gateHypothesisScope = relevanceGate?.hypothesis_scope ?? null;
+  const offTargetNote = !allOffTarget
+    ? null
+    : gateHypothesisScope
+      ? `Вертикаль «${vertical.name}»: ни одна из ${storedRows.length} собранных компаний не подходит под ` +
+        'гипотезы вертикали — релевант-гейт снял все' +
+        (gateHypothesisScope.unlisted > 0
+          ? ` (модели показаны ${gateHypothesisScope.listed} из ` +
+            `${gateHypothesisScope.listed + gateHypothesisScope.unlisted} неотклонённых гипотез, за остальные ` +
+            'отвечал вопрос о самой вертикали, и ей не принадлежит ни одна). '
+          : ` (судил по ${gateHypothesisScope.listed} неотклонённым гипотезам). `) +
+        'Поиск и проверка адресов не запускались.'
+      : `Вертикаль «${vertical.name}» не покрывается каталогом: релевант-гейт снял все ` +
+        `${storedRows.length} собранных компаний как не принадлежащие вертикали. ` +
+        'Поиск и проверка адресов не запускались — рассылка по такому срезу навредила бы ' +
+        'рабочим вертикалям.';
   const harvestRow = {
     columns: finalColumns,
     sample_rows: storedRows.slice(0, SAMPLE_ROWS),

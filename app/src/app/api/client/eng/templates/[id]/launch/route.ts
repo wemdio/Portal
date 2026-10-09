@@ -19,7 +19,8 @@ import { HE_COST_LAUNCH_STAGE } from '@/lib/hypothesisEngine/costReport';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import type { HeJob } from '@/lib/hypothesisEngine/types';
 import { getHeClientFailure } from '@/lib/hypothesisEngine/clientErrors';
-import { parseLaunchInfo, type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
+import { heLaunchIsIncomplete, parseLaunchInfo, type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
+import { notifyHeClientLaunch } from '@/lib/hypothesisEngine/opsAlert';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
@@ -582,6 +583,31 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (scheduleWarnings.length > 0) {
       const existing = Array.isArray(responseBody.warnings) ? (responseBody.warnings as string[]) : [];
       responseBody.warnings = [...existing, ...scheduleWarnings];
+    }
+
+    // Команде — что клиент создал кампании и их надо проверить и стартовать:
+    // ядро создаёт их на паузе и не активирует никогда (launchHandoff.ts), а
+    // кабинет обещает клиенту, что их стартует менеджер. Только успешный
+    // запуск (200, запись о запуске в ответе ядра) — и законченный, и
+    // незаконченный: созданные кампании ждут сотрудника в обоих случаях. Не
+    // ждём (`void`): ответ клиенту от Telegram не зависит, notifyHeClientLaunch
+    // не бросает; дедупликация и свёртка «Launch all» — в opsAlert.ts.
+    if (outcome.status === 200) {
+      const record = parseLaunchInfo(outcome.body.launch);
+      if (record) {
+        void notifyHeClientLaunch({
+          projectId: String(owned.project.id),
+          market: projectMarket(owned.project as { market?: string | null }),
+          templateId: id,
+          verticalId: typeof owned.template.vertical_id === 'string' ? owned.template.vertical_id : null,
+          // Все кампании записи; у записи без списка (до сплита) — основная.
+          campaignIds: (record.campaigns?.length ? record.campaigns.map((c) => c.campaign_id) : [record.campaign_id])
+            .filter((cid) => cid.length > 0),
+          leads: record.leads_count,
+          unfinished: heLaunchIsIncomplete(record),
+          forced: force,
+        });
+      }
     }
 
     return NextResponse.json(responseBody, { status: outcome.status });

@@ -4,13 +4,15 @@
  * Мастер проекта клиентского ENG-кабинета: 5 шагов (Brief → Verticals →
  * Letters → Bases & Launch → Review & Launch) поверх деталки
  * GET /api/client/eng/projects/[id]. Шаг 5 — единое окно приёмки автопилота
- * («Start outreach» на шаге 2). Поллинг каждые 4с, пока есть активные джобы
- * (research, chain, base_collect, template); «Cancel all jobs» останавливает
- * идущую работу проекта, выключает автопилот и ночной добор (роут
- * api/client/eng/projects/[id]/cancel).
+ * («Start outreach» на шаге 2). Поллинг всегда, пока деталка загружена: каждые
+ * 4с, пока по проекту идёт работа (engWizardLiveWork, плюс короткий запас на
+ * зазор между стадиями автопилота — engAutopilotUnfinished), иначе раз в 30с;
+ * в скрытой вкладке опроса нет, а при возврате в неё — сразу свежие данные.
+ * «Cancel all jobs» останавливает идущую работу проекта, выключает автопилот и
+ * ночной добор (роут api/client/eng/projects/[id]/cancel).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Ban, LayoutDashboard } from 'lucide-react';
 import Link from 'next/link';
 import type { Route } from 'next';
@@ -29,7 +31,26 @@ import { EngStepLetters } from './EngStepLetters';
 import { EngStepBases } from './EngStepBases';
 import { EngStepReview } from './EngStepReview';
 
-const POLL_INTERVAL_MS = 4000;
+/** Опрос деталки, пока по проекту идёт работа. */
+const POLL_WORKING_MS = 4000;
+/**
+ * Опрос, когда работы не видно. Раньше его не было вовсе: мастер замирал на
+ * последнем ответе, и то, что сдвинулось без него (починка застрявшей базы,
+ * ночной проход, кнопка менеджера), клиент видел только после перезагрузки.
+ */
+const POLL_IDLE_MS = 30_000;
+/**
+ * Сколько опросов подряд мастер ещё держит частым после того, как живая
+ * работа кончилась, если автопилот не довёл выбранные вертикали
+ * (engAutopilotUnfinished). Следующую стадию координатор ставит сразу после
+ * done-записи предыдущей (autopilotNext.ts), и опрос, попавший в этот зазор,
+ * иначе сбросил бы мастер на 30 с. Счёт — опросами, а не часами: сравнивать
+ * время браузера с метками БД нельзя (часы клиента могут уходить на минуты).
+ * Пять опросов по 4 с — 20 с; не поставил автопилот за это время ничего —
+ * значит, сам он следующую стадию не поставил (почему — говорит пауза
+ * autopilot_hold, если он её записал: карточка ниже), и мастер уходит на 30 с.
+ */
+const AUTOPILOT_HANDOFF_POLLS = 5;
 
 const STEPS = [
   { id: 1, label: 'Brief' },
@@ -40,6 +61,58 @@ const STEPS = [
 ] as const;
 
 export type EngDetail = EngProjectDetailResponse & { project: EngProject };
+
+/**
+ * Занят ли проект — ОТВЕТОМ СЕРВЕРА (`has_active_jobs`, отдельный ids-only
+ * запрос в роуте деталки), а не пересчётом по `jobs`.
+ *
+ * Список `jobs` капнут тридцатью самыми свежими строками, и проект,
+ * накопивший больше тридцати новых записей, пока идёт долгая сборка базы,
+ * читался отсюда как простаивающий. Ценой этого были не только «working…» и
+ * поллинг: этот же флаг — вторая граница обеих карточек автопилота ниже,
+ * то есть кабинет показывал старую паузу или «ничего не идёт» поверх
+ * работающего конвейера.
+ *
+ * Запасной путь — прежний подсчёт по списку: ключа нет там, где сервер факт
+ * не прочитал, и в демо-выдаче.
+ */
+function engHasActiveJobs(detail: EngDetail): boolean {
+  return (
+    detail.has_active_jobs ??
+    (detail.jobs ?? []).some((j) => j.status === 'pending' || j.status === 'running')
+  );
+}
+
+/**
+ * Работа, видимая в данных: живая задача, research в ходу или база в сборке/
+ * разборе. Тот же набор, что у «есть что отменять» (hasCancellableWork ниже):
+ * база 'collecting'/'analyzing' без живой задачи (застряла, ждёт починки) — тоже
+ * сюда, иначе мастер замирал ровно на ней.
+ */
+function engWizardLiveWork(detail: EngDetail): boolean {
+  return (
+    engHasActiveJobs(detail) ||
+    detail.project.status === 'researching' ||
+    (detail.bases ?? []).some((b) => b.status === 'collecting' || b.status === 'analyzing')
+  );
+}
+
+/**
+ * Автопилот включён, паузы не записал, и у него есть недоведённая ВЫБРАННАЯ
+ * вертикаль: та, у которой есть принятая гипотеза (так вертикали выбирает и
+ * сам автопилот, autopilotReconcile.ts), а готового шаблона ещё нет — шаблон
+ * последняя стадия, которую автопилот ставит сам; запуск — уже кнопка клиента.
+ * Только 'researched': до этого автопилот вертикали не ведёт.
+ */
+function engAutopilotUnfinished(detail: EngDetail): boolean {
+  const project = detail.project;
+  if (project.autopilot !== true || project.autopilot_hold || project.status !== 'researched') return false;
+  const verticals = new Set((detail.verticals ?? []).map((v) => v.id));
+  const ready = new Set((detail.templates ?? []).filter((t) => t.status === 'ready').map((t) => t.vertical_id));
+  return (detail.hypotheses ?? []).some(
+    (h) => h.status === 'accepted' && h.vertical_id !== null && verticals.has(h.vertical_id) && !ready.has(h.vertical_id),
+  );
+}
 
 export function EngProjectWizard({ projectId }: { projectId: string }) {
   const searchParams = useSearchParams();
@@ -54,23 +127,56 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState('');
   const loadingRef = useRef(false);
+  // Вызов, пришедший, пока шло чтение (кроме тика таймера), — ещё одно тихое
+  // чтение сразу после текущего (см. load).
+  const reloadQueuedRef = useRef(false);
+  // Частых опросов в запасе после конца живой работы (AUTOPILOT_HANDOFF_POLLS).
+  const [handoffPolls, setHandoffPolls] = useState(0);
+  // Была ли живая работа в прошлом ответе: зазор автопилота виден только как
+  // переход «шла → не идёт».
+  const wasLiveRef = useRef(false);
 
+  /**
+   * Чтение деталки; параллельно идёт не больше одного. Вызов, пришедший во
+   * время чтения:
+   *  - тик таймера (`tick`) отбрасывается — следующий придёт сам;
+   *  - любой другой (обновление после кнопки шага или отмены, возврат во
+   *    вкладку, монтирование) ставит ОДНО тихое чтение сразу после текущего.
+   *    Текущее могло уйти на сервер ДО действия кнопки, и без повтора её
+   *    результат экран показал бы только через интервал опроса (до 30 с).
+   *    Несколько таких вызовов за одно чтение дают одно повторное.
+   */
   const load = useCallback(
-    async (opts: { silent?: boolean } = {}) => {
-      // Тихий полл не должен плодить параллельные запросы при медленной БД.
-      if (loadingRef.current) return;
+    async (opts: { silent?: boolean; tick?: boolean } = {}) => {
+      if (loadingRef.current) {
+        if (!opts.tick) reloadQueuedRef.current = true;
+        return;
+      }
       loadingRef.current = true;
+      let silent = opts.silent === true;
       try {
-        const data = await fetchEngProjectDetail(projectId);
-        if (data.project) {
-          setDetail(data as EngDetail);
-          setError('');
-        } else if (!opts.silent) {
-          setError(data.error ?? 'Project not found');
-        }
-      } catch (e) {
-        if (!opts.silent) {
-          setError(e instanceof Error ? e.message : 'Failed to load the project');
+        for (;;) {
+          reloadQueuedRef.current = false;
+          try {
+            const data = await fetchEngProjectDetail(projectId);
+            if (data.project) {
+              const next = data as EngDetail;
+              const live = engWizardLiveWork(next);
+              const handoff = !live && wasLiveRef.current && engAutopilotUnfinished(next);
+              wasLiveRef.current = live;
+              setHandoffPolls((left) => (live ? 0 : handoff ? AUTOPILOT_HANDOFF_POLLS : Math.max(0, left - 1)));
+              setDetail(next);
+              setError('');
+            } else if (!silent) {
+              setError(data.error ?? 'Project not found');
+            }
+          } catch (e) {
+            if (!silent) {
+              setError(e instanceof Error ? e.message : 'Failed to load the project');
+            }
+          }
+          if (!reloadQueuedRef.current) break;
+          silent = true;
         }
       } finally {
         loadingRef.current = false;
@@ -83,30 +189,33 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
     void load();
   }, [load]);
 
-  const jobs = useMemo(() => detail?.jobs ?? [], [detail]);
-  /**
-   * Занят ли проект — ОТВЕТОМ СЕРВЕРА (`has_active_jobs`, отдельный ids-only
-   * запрос в роуте деталки), а не пересчётом по `jobs`.
-   *
-   * Список `jobs` капнут тридцатью самыми свежими строками, и проект,
-   * накопивший больше тридцати новых записей, пока идёт долгая сборка базы,
-   * читался отсюда как простаивающий. Ценой этого были не только «working…» и
-   * поллинг: этот же флаг — вторая граница обеих карточек автопилота ниже,
-   * то есть кабинет показывал старую паузу или «ничего не идёт» поверх
-   * работающего конвейера.
-   *
-   * Запасной путь — прежний подсчёт по списку: ключа нет там, где сервер факт
-   * не прочитал, и в демо-выдаче.
-   */
-  const hasActiveJobs =
-    detail?.has_active_jobs ?? jobs.some((j) => j.status === 'pending' || j.status === 'running');
+  // «working…» в шапке и границы карточек автопилота — по живым задачам
+  // (engHasActiveJobs); частота опроса — по более широкому «идёт работа».
+  const hasActiveJobs = detail ? engHasActiveJobs(detail) : false;
+  const working = detail ? engWizardLiveWork(detail) || handoffPolls > 0 : false;
+  const loaded = detail !== null;
 
-  // Поллим, пока есть активные джобы — прогресс шагов подъезжает сам.
+  // Опрос — всегда, пока деталка загружена: 4 с при работе, 30 с без неё.
+  // Без загруженной деталки (первая загрузка, проект не найден) не опрашиваем —
+  // как и раньше. Скрытая вкладка сервер не дёргает (как дашборд).
   useEffect(() => {
-    if (!hasActiveJobs) return;
-    const timer = setInterval(() => void load({ silent: true }), POLL_INTERVAL_MS);
+    if (!loaded) return;
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void load({ silent: true, tick: true });
+    }, working ? POLL_WORKING_MS : POLL_IDLE_MS);
     return () => clearInterval(timer);
-  }, [hasActiveJobs, load]);
+  }, [loaded, working, load]);
+
+  // Вкладку открыли снова — данные сразу, а не через полный интервал.
+  useEffect(() => {
+    if (!loaded || typeof document === 'undefined') return;
+    const onVisible = () => {
+      if (!document.hidden) void load({ silent: true });
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [loaded, load]);
 
   /**
    * Подтверждение обязательно: отмена не только останавливает идущее, но и
@@ -163,12 +272,10 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
    * в 'collecting'/'analyzing' без джобы или проект висит в 'researching'.
    * Роут переводит и то, и другое (базы → failed, проект → draft), а без
    * кнопки такую базу с экрана было не остановить. Иначе кнопки нет: на
-   * простаивающем проекте отменять нечего.
+   * простаивающем проекте отменять нечего. Это тот же предикат, что держит
+   * частый опрос (engWizardLiveWork), — один на оба места.
    */
-  const hasCancellableWork =
-    hasActiveJobs ||
-    project?.status === 'researching' ||
-    (detail?.bases ?? []).some((b) => b.status === 'collecting' || b.status === 'analyzing');
+  const hasCancellableWork = detail ? engWizardLiveWork(detail) : false;
 
   return (
     <div className="flex flex-col gap-5">
@@ -322,7 +429,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
 
           <div className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
             Updated {fmtDate(project?.updated_at)}
-            {hasActiveJobs ? ' · auto-refreshing every 4s' : ''}
+            {working ? ' · auto-refreshing every 4s' : ' · auto-refreshing every 30s'}
           </div>
         </>
       )}

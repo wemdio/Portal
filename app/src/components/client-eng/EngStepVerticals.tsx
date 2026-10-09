@@ -4,7 +4,11 @@
  * Шаг 2 «Verticals»: доска вертикалей с гипотезами. Кнопки Accept/Reject
  * размечают гипотезы (PATCH /api/client/eng/hypotheses/[id], % и rank
  * вертикалей пересчитываются на бэкенде). Accepted-гипотезы — основа
- * авто-сборки базы на шаге 4.
+ * авто-сборки базы на шаге 4. Вердикт можно поменять в любую сторону: роут
+ * принимает и accept, и reject при любом статусе, а без этого не было бы
+ * правдой ни «reject its hypotheses on step 2» у отказов базы на шаге 4, ни
+ * «accept one of its hypotheses on step 2» у невыбранной вертикали в Command
+ * Center.
  */
 
 import { useMemo, useState } from 'react';
@@ -39,8 +43,10 @@ function HypothesisCard({
           {hypothesis.title}
         </span>
         <EngBadge label={TIER_LABELS[hypothesis.tier] ?? `Tier ${hypothesis.tier}`} tone="neutral" />
+        {/* Оценка модели 0–100, а не доля ответов — та же подпись, что у
+            Command Center («market fit N/100»). */}
         <span className="ml-auto ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
-          {hypothesis.potential_pct}%
+          {hypothesis.potential_pct}/100 market fit
         </span>
         <EngBadge label={hypothesis.status} tone={hypothesisStatusTone(hypothesis.status)} />
       </div>
@@ -54,8 +60,13 @@ function HypothesisCard({
           {hypothesis.fit_rationale}
         </p>
       )}
-      {hypothesis.status === 'proposed' && (
-        <div className="flex gap-1.5">
+      {/* Предложенная — обе кнопки; принятую можно отклонить, отклонённую —
+          принять. Отклонение убирает вертикаль без других принятых гипотез из
+          «Start outreach» (реконсилер пропускает её как 'not_selected'), но
+          не останавливает уже идущую стадию и дочейн автопилота после неё:
+          дочейн без принятых гипотез не останавливается (autopilotNext.ts). */}
+      <div className="flex gap-1.5">
+        {hypothesis.status !== 'accepted' && (
           <button
             type="button"
             onClick={() => onVerdict(hypothesis.id, 'accept')}
@@ -65,17 +76,19 @@ function HypothesisCard({
             {busy ? <EngSpinner className="h-3 w-3" /> : <Check className="h-3 w-3" />}
             Accept
           </button>
+        )}
+        {hypothesis.status !== 'rejected' && (
           <button
             type="button"
             onClick={() => onVerdict(hypothesis.id, 'reject')}
             disabled={busy}
             className="ds-btn-ghost inline-flex items-center gap-1 text-[11px]"
           >
-            <X className="h-3 w-3" />
+            {busy && hypothesis.status === 'accepted' ? <EngSpinner className="h-3 w-3" /> : <X className="h-3 w-3" />}
             Reject
           </button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -343,6 +356,10 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
       {verticals.map((v) => {
         const own = hypotheses.filter((h) => h.vertical_id === v.id);
         const accepted = own.filter((h) => h.status === 'accepted').length;
+        // Оценка вертикали — по неотклонённым гипотезам (reviewRecompute); когда
+        // таких нет, пересчёт пишет 0, и «0/100 market fit» оценкой модели не
+        // был бы — числа нет.
+        const scored = own.some((h) => h.status !== 'rejected');
         const pause = refillPauseNote(v);
         const resumed = refillResumedIds.includes(v.id);
         return (
@@ -354,9 +371,11 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
               <h4 className="text-sm font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
                 {v.name}
               </h4>
-              <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
-                {v.potential_pct}%
-              </span>
+              {scored && (
+                <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+                  {v.potential_pct}/100 market fit
+                </span>
+              )}
               <span className="ml-auto text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
                 {accepted}/{own.length} accepted
               </span>

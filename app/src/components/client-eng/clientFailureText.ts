@@ -38,6 +38,13 @@ export type HeClientErrorCode =
   | 'provider'
   /** Проба каталожного среза: сегмент не про эту вертикаль, база не собиралась. */
   | 'audience_mismatch'
+  /**
+   * Релевант-гейт, судивший целью по гипотезам (флаг HE_GATE_HYPOTHESIS_SCOPE,
+   * по умолчанию выключен), снял ВСЕ компании сборки: ни одна не подходит под
+   * неотклонённые гипотезы вертикали. Не audience_mismatch: компании могли
+   * принадлежать вертикали.
+   */
+  | 'hypothesis_mismatch'
   /** В источниках не осталось новых компаний после исключения уже собранных. */
   | 'segment_exhausted'
   /**
@@ -245,6 +252,55 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved: 'No contacts were bought for this vertical.',
     whatToDo:
       'This was a deliberate stop — mailing such a list would hurt the verticals that do work. To keep «Start outreach» from trying this vertical again, reject its hypotheses on step 2; to collect another vertical, accept its hypotheses there and press «Start outreach».',
+  },
+  /**
+   * Сборка, в которой релевант-гейт снял все компании, судя целью по
+   * гипотезам (stages/baseCollect.ts, offTargetNote; только при включённом
+   * HE_GATE_HYPOTHESIS_SCOPE). Терминальная запись этой сборки — та же, что у
+   * любой другой (harvestRow): собранные строки ЛЕЖАТ в базе (data, row_count,
+   * все с пометкой _low_relevance), меняется только статус — 'failed' с этой
+   * причиной. Поэтому «no base was built» здесь неправда. Каждое предложение —
+   * правда при любой такой базе:
+   *  - «fit the hypotheses it had accepted or suggested when they were
+   *    checked» — цель гейта ровно такая: неотклонённые гипотезы вертикали на
+   *    момент суда (записываются вместе с ним, relevance_gate.hypothesis_scope),
+   *    «suggested» — слово, которым кабинет показывает статус proposed (ui.tsx).
+   *    Отклонённые не проверялись, а вердикты с тех пор могли поменяться —
+   *    отсюда «when they were checked». Если гипотез было больше потолка,
+   *    остальные заменял вопрос о самой вертикали, и ей не принадлежит ни
+   *    одна из компаний — им не подходят и эти гипотезы;
+   *  - «this base will not be launched» — запуск берёт только 'analyzed'-базу,
+   *    а «Start outreach» упавшую базу не поднимает (ставит новую сборку);
+   *  - «saved with this base» — строки записаны той же финальной записью, что
+   *    и статус: без неё базы с этой причиной не бывает;
+   *  - «this collection did not look up any emails» — конструктор (поиск и
+   *    проверка адресов) у такой сборки не запускается вовсе (allOffTarget
+   *    требует, чтобы его джобы ещё не было). Не «no emails were looked up for
+   *    these companies»: упавшая база выпадает из кросс-базового исключения, и
+   *    те же компании могла обогащать прежняя сборка. «No contacts were bought
+   *    for this vertical», как у audience_mismatch, тоже не пишем: у вертикали
+   *    могут быть другие, раньше собранные базы;
+   *  - «your other bases and campaigns are not affected» — без «running»:
+   *    кампании создаются на паузе, а их статус у рассыльщика кабинет не читает;
+   *  - про повтор — «may»: нажатие «Start outreach» собирает заново вертикаль
+   *    с принятой гипотезой и упавшей базой (autopilotReconcile: у клиентского
+   *    нажатия гейта «сборка уже падала» нет), и новая сборка может
+   *    остановиться так же. «Будет судиться тем же правилом» не пишем: флаг и
+   *    вердикты гипотез к следующему суду могут поменяться;
+   *  - «reject its hypotheses on step 2» — тот же выход, что у
+   *    audience_mismatch: шаг 2 даёт Reject и у принятой гипотезы
+   *    (EngStepVerticals), а вертикаль без принятой гипотезы «Start outreach»
+   *    пропускает ('not_selected', autopilotReconcile). Уже идущую стадию и
+   *    ночной долив запущенной вертикали отклонение не останавливает — фраза
+   *    говорит только про кнопку.
+   */
+  hypothesis_mismatch: {
+    title:
+      'None of the companies found for this vertical fit the hypotheses it had accepted or suggested when they were checked, so this base will not be launched.',
+    whatIsSaved:
+      'The companies found are saved with this base, but this collection did not look up any emails for them. Your other bases and campaigns are not affected.',
+    whatToDo:
+      'This was a deliberate stop, not a technical problem. «Start outreach» on step 2 can collect this vertical again, and a new collection may stop here the same way. To keep «Start outreach» from trying this vertical again, reject its hypotheses on step 2.',
   },
   segment_exhausted: {
     title: 'The sources have no new companies left for this vertical.',

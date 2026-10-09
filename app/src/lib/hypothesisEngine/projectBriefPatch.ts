@@ -12,11 +12,14 @@
  * Незнакомые поля верхнего уровня игнорируем.
  *
  * Вынесено из PATCH api/tools/hypothesis-engine/projects/[id] — клиентский
- * ENG-контур патчит те же поля (api/client/eng/projects/[id]). Ошибки
- * возвращаем машинными кодами, текст локализует роут (staff — RU, клиент — EN).
+ * ENG-контур патчит те же поля (api/client/eng/projects/[id]) и вдобавок
+ * рамку ЦА brief.icp (HeBriefPatchClientFields ниже; staff её не пишет).
+ * Ошибки возвращаем машинными кодами, текст локализует роут (staff — RU,
+ * клиент — EN).
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { mergeHeIcpFrame, type HeIcpFramePatch } from './icpFrame';
 
 // Максимум символов эталона стиля (brief.style_override) — после trim.
 export const STYLE_OVERRIDE_MAX_LENGTH = 8000;
@@ -30,7 +33,7 @@ export const BUSINESS_OVERRIDE_MAX_LENGTH = 3000;
 export type HeBriefField = 'offer_override' | 'style_override' | 'signature_override' | 'business_override';
 
 export type HeBriefPatchError =
-  /** Ни одного из четырёх полей в теле. */
+  /** Ни одного из четырёх полей в теле (и, у клиентского роута, без рамки ЦА). */
   | { code: 'no_fields' }
   /** Поле передано не строкой. */
   | { code: 'bad_type'; field: HeBriefField }
@@ -50,21 +53,41 @@ export interface HeBriefPatchBody {
   business_override?: unknown;
 }
 
+/**
+ * Ключи brief, которые пишет ТОЛЬКО клиентский ENG-роут
+ * (api/client/eng/projects/[id]). Отдельным аргументом, а не полем тела:
+ * staff-роут RU-инструмента зовёт функцию с тремя аргументами, и `icp` из его
+ * тела сюда не попадает — его запросы ведут себя ровно как раньше (тело с
+ * одним `icp` у него по-прежнему `no_fields`). Значение уже проверено
+ * вызывающим (parseHeIcpFramePatch в icpFrame.ts).
+ */
+export interface HeBriefPatchClientFields {
+  /**
+   * Правка рамки ЦА: присланные подполя заменяются, остальные сохраняются;
+   * null — снять рамку целиком. Сливается с сохранённой рамкой в той же
+   * записи, что и overrides, — один read-merge-write на запрос.
+   */
+  icp?: HeIcpFramePatch | null;
+}
+
 /** Хотя бы одно поле обязано присутствовать; применяются только строковые. */
 export async function patchHeProjectBrief(
   supabase: SupabaseClient,
   projectId: string,
   body: HeBriefPatchBody,
+  clientFields?: HeBriefPatchClientFields,
 ): Promise<HeBriefPatchResult> {
   const offerRaw = body?.offer_override;
   const styleRaw = body?.style_override;
   const signatureRaw = body?.signature_override;
   const businessRaw = body?.business_override;
+  const icpPatch = clientFields?.icp;
   if (
     offerRaw === undefined &&
     styleRaw === undefined &&
     signatureRaw === undefined &&
-    businessRaw === undefined
+    businessRaw === undefined &&
+    icpPatch === undefined
   ) {
     return { ok: false, error: { code: 'no_fields' } };
   }
@@ -125,6 +148,11 @@ export async function patchHeProjectBrief(
     const business = businessRaw.trim();
     if (business) brief.business_override = business;
     else delete brief.business_override;
+  }
+  if (icpPatch !== undefined) {
+    const icp = mergeHeIcpFrame(brief.icp, icpPatch);
+    if (icp) brief.icp = icp;
+    else delete brief.icp;
   }
 
   const { data: project, error } = await supabase

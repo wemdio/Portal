@@ -5,7 +5,9 @@
  *     у письма 1 — A/B-вариант ---LETTER 1 B---): основной текст — дефолт для
  *     всей базы, сегментные варианты хранятся отдельно
  *     (letters[].segment_variants), B-вариант — в letters[].variants,
- *     wait_days — лесенка CHAIN_WAIT_DAYS из stages/chain;
+ *     wait_days — лесенка CHAIN_WAIT_DAYS из stages/chain, а у 'us' перед
+ *     записью — паузы he_chains.letters по номеру письма, лесенка только там,
+ *     где у цепочки паузы нет (chainTiming.ts);
  *  3) пост-проверки с одним retry каждая: длина тел (≤80 слов, письмо 1 ≤70) и
  *     консистентность operator_mapping (см. validateOperatorMapping); у 'us'
  *     повтор по операторам запускает и предсказанный отказ гейта отправки
@@ -85,6 +87,7 @@ import { selectCaseForVertical, type HeCase } from '../caseBank';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { projectMarket } from '../market';
 import { findEmailColumn } from '../launchHandoff';
+import { applyHeChainTiming } from '../chainTiming';
 import {
   HE_OPERATOR_PATTERN,
   HeTemplateOperatorGateError,
@@ -772,7 +775,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     const seg = extractSegmentVariants(ab.cleaned);
     const parsed = parseLettersFromModelOutput(seg.cleaned);
     const sliced = parsed.slice(0, TEMPLATE_MAX_LETTERS);
-    // wait_days — лесенка цепочки CHAIN_WAIT_DAYS (внутри parsedToChainLetters), по индексу письма.
+    // wait_days — лесенка цепочки CHAIN_WAIT_DAYS (внутри parsedToChainLetters), по индексу письма;
+    // у 'us' перед записью её заменяют паузы цепочки (applyHeChainTiming ниже).
     const letters = parsedToChainLetters(sliced).map((l, i): HeChainLetterAB => {
       const { variants: _legacy, ...rest } = l;
       const idx = sliced[i]?.letter_index ?? i + 1;
@@ -1409,6 +1413,21 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         .slice(0, 5)
         .map((v) => v.detail)
         .join('; ')}`,
+    );
+  }
+
+  // Только 'us': паузы между письмами — из цепочки, которую клиент видел и
+  // правил на шаге Letters кабинета, по номеру письма; лесенка CHAIN_WAIT_DAYS
+  // (её уже дал parsedToChainLetters) остаётся там, где у цепочки нет паузы с
+  // таким номером (chainTiming.ts). Последним шагом перед записью: ни одна
+  // проверка выше паузы не читает, а повторы и рерайт собирают письма заново
+  // через parsedToChainLetters. RU/PL — лесенка, как раньше.
+  if (market === 'us') {
+    const timing = applyHeChainTiming(letters, chainLetters);
+    letters = timing.letters;
+    stageLog(
+      ctx,
+      `[template] паузы писем: из цепочки ${timing.fromChain}, по лесенке ${timing.fromLadder} (первое письмо без паузы)`,
     );
   }
 

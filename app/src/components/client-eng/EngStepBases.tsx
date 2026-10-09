@@ -16,9 +16,12 @@ import { useMemo } from 'react';
 import { Database } from 'lucide-react';
 import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
 import { heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
+// Тот же предикат «кнопка поставит анализ заново», что у Command Center
+// (чистая функция без зависимостей, кроме этого модуля и launchHandoff).
+import { engAnalysisRequeues } from '@/lib/hypothesisEngine/engDashboard';
 import { engTemplateNeedsRewrite, type EngBaseSummary } from './api-client';
 import { engRefillStoppedText, engStageErrorText, engTemplateNeedsRewriteText } from './engText';
-import { EngBadge, EngCard, EngSpinner, baseStatusTone, fmtDate } from './ui';
+import { EngBadge, EngBaseStatusBadge, EngCard, EngSpinner, engBaseAnalysisStopped, fmtDate } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
 /* ── Прогресс авто-сборки (collecting-база) ── */
@@ -181,7 +184,12 @@ function SendVolume({ base }: { base: EngBaseSummary }) {
     >
       <div className="ds-mono">
         {verified.toLocaleString('en-US')} of {base.row_count.toLocaleString('en-US')} rows with a verified email
-        {flagged > 0 ? ` · ${flagged.toLocaleString('en-US')} flagged as outside this vertical` : ''}
+        {/* «not a fit», а не «outside this vertical»: при включённом
+            HE_GATE_HYPOTHESIS_SCOPE (по умолчанию выключен) гейт судит по
+            неотклонённым гипотезам вертикали (relevanceGate, gateScopeEn) и
+            помечает и компанию из самой вертикали, не подходящую ни под одну из
+            них. Фраза верна при обоих правилах гейта. */}
+        {flagged > 0 ? ` · ${flagged.toLocaleString('en-US')} flagged as not a fit for this vertical` : ''}
       </div>
       <div style={{ color: 'var(--cp-text-l)' }}>
         {verified === 0
@@ -304,9 +312,11 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   return (
     <div className="mt-2 rounded-md p-3 text-xs flex flex-col gap-1" style={{ border: '1px solid var(--cp-divider)' }}>
       <div className="flex items-center gap-2">
+        {/* «created paused» — верно при любом статусе кампании у рассыльщика
+            (кабинет его не читает); тот же тег, что у шага 5 и Command Center. */}
         <EngBadge
-          label={unfinished ? 'launch unfinished' : 'launched (paused)'}
-          tone={unfinished ? 'amber' : 'green'}
+          label={unfinished ? 'launch unfinished' : 'created paused'}
+          tone={unfinished ? 'amber' : 'neutral'}
         />
         <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>{launch.campaign_name}</span>
       </div>
@@ -345,6 +355,35 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   );
 }
 
+/* ── 'analyzing'-база: идёт ли анализ ── */
+
+// Идёт ли анализ 'analyzing'-базы, решает СЕРВЕР (`analysis_live` деталки,
+// общий предикат isAnalyzingBaseLive с окном постановки
+// ANALYZING_ORPHAN_GRACE_MS — тот же, что у Command Center и реконсилера
+// «Start outreach»), а экран читает его через engBaseAnalysisStopped (ui.tsx) —
+// одно правило на бейдж и на фразу ниже. Прежний вывод здесь по капнутому
+// списку `jobs` окна не знал и объявлял свежую базу (щель harvest-финала между
+// статусом и вставкой анализа) остановленной раньше дашборда и кнопки.
+
+type DetailJob = NonNullable<EngDetail['jobs']>[number];
+
+function jobBaseId(job: DetailJob): string {
+  const baseId = (job.payload as { base_id?: unknown } | null | undefined)?.base_id;
+  return typeof baseId === 'string' ? baseId : '';
+}
+
+/**
+ * Последний закончившийся base_analyze базы отменён («Cancel all jobs» обогнал
+ * запись стадии). Список свежими первыми, поэтому первая найденная строка —
+ * последняя; нет её в 30 строках — не знаем, и текст говорит «остановился».
+ */
+function analysisCancelled(detail: EngDetail, baseId: string): boolean {
+  const last = (detail.jobs ?? []).find(
+    (j) => j.stage === 'base_analyze' && (j.status === 'failed' || j.status === 'cancelled') && jobBaseId(j) === baseId,
+  );
+  return last?.status === 'cancelled';
+}
+
 /* ── Основной компонент шага ── */
 
 export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => void }) {
@@ -352,6 +391,8 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
   const bases = useMemo(() => (detail.bases ?? []) as EngBaseSummary[], [detail]);
   const templates = useMemo(() => (detail.templates ?? []) as HeTemplate[], [detail]);
   const jobs = useMemo(() => detail.jobs ?? [], [detail]);
+  const chains = useMemo(() => (detail.chains ?? []) as unknown as Array<Record<string, unknown>>, [detail]);
+  const hypotheses = useMemo(() => detail.hypotheses ?? [], [detail]);
 
   if (verticals.length === 0) {
     return (
@@ -368,6 +409,21 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
       {verticals.map((v) => {
         const ownBases = bases.filter((b) => b.vertical_id === v.id);
         const collecting = ownBases.find((b) => b.status === 'collecting');
+        // Выбрана ли вертикаль — предикат автопилота (accepted-гипотеза):
+        // невыбранную «Start outreach» не трогает вовсе, и ни сборку, ни
+        // повтор анализа ей не обещаем. Кнопка есть только у researched-проекта.
+        // Под записанной паузой по потолку расхода ('spend_paused', по
+        // умолчанию потолок выключен) повтор анализа тоже не обещаем: проход
+        // кнопки над потолком кончается на первой платной постановке любой
+        // вертикали и до ремонта этой может не дойти — то же правило, что у
+        // `requeues` Command Center (engDashboard.ts, spendPaused). Ключа
+        // паузы нет — колонку не читали (её нет), записанной паузы быть не может.
+        const selected = hypotheses.some((h) => h.vertical_id === v.id && h.status === 'accepted' && Boolean(h.id));
+        const startOutreachReaches =
+          detail.project.status === 'researched' &&
+          selected &&
+          detail.project.autopilot_hold?.code !== 'spend_paused';
+        const verticalChains = chains.filter((c) => c.vertical_id === v.id);
 
         return (
           <EngCard key={v.id}>
@@ -403,7 +459,7 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                     <span className="truncate text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>
                       {b.filename}
                     </span>
-                    <EngBadge label={b.status} tone={baseStatusTone(b.status)} />
+                    <EngBaseStatusBadge base={b} />
                     <span className="ml-auto ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
                       {b.row_count.toLocaleString('en-US')} rows
                     </span>
@@ -412,8 +468,8 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                   {refill && b.status !== 'failed' && (
                     <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
                       This is a daily refill run, not a base to launch: whatever it adds goes straight into the
-                      running campaign, and only addresses with a verified email are added. Recent activity on
-                      the Command Center shows what each run added.
+                      campaign, and only addresses with a verified email are added. Recent activity on the
+                      Command Center shows what each run added.
                     </div>
                   )}
 
@@ -455,9 +511,28 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                     </div>
                   )}
 
-                  {b.status === 'analyzing' && (
+                  {b.status === 'analyzing' && !engBaseAnalysisStopped(b) && (
                     <div className="mt-2 text-[11px] inline-flex items-center gap-1.5" style={{ color: 'var(--cp-amber)' }}>
                       <EngSpinner className="h-3 w-3" /> Analyzing the base…
+                    </div>
+                  )}
+
+                  {/* Анализ не идёт, а база 'analyzing' (финальный фейл анализа её
+                      не пишет): без этой ветки спиннер крутился вечно. «Не идёт» —
+                      ответ сервера тем же предикатом и с тем же окном
+                      постановки, что у Command Center (engBaseAnalysisStopped);
+                      бейдж выше говорит то же самое. Действие названо, только
+                      когда кнопка поставит анализ заново (engAnalysisRequeues —
+                      тот же предикат, что у Command Center); иначе — один факт. */}
+                  {engBaseAnalysisStopped(b) && (
+                    <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+                      {analysisCancelled(detail, b.id)
+                        ? 'Analyzing this base was cancelled before it finished.'
+                        : 'Analyzing this base stopped before it finished.'}
+                      {startOutreachReaches &&
+                      engAnalysisRequeues(b as unknown as Record<string, unknown>, ownBases as unknown as Array<Record<string, unknown>>, verticalChains)
+                        ? ' «Start outreach» on step 2 queues its analysis again; the rows already collected are not bought again.'
+                        : ''}
                     </div>
                   )}
 
@@ -495,9 +570,22 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
               );
             })}
 
+            {/* Совет «accept one of its hypotheses» — только у 'researched'
+                (кнопка «Start outreach» есть лишь там); у 'draft' — та же
+                фраза, что у шага 2 и Command Center (engDashboard.ts,
+                этап not_selected); у research в ходу или упавшего — один факт,
+                а что делать, говорит шаг 2 (startOutreachHintFor). */}
             {ownBases.length === 0 && !collecting && (
               <p className="mt-2 text-xs" style={{ color: 'var(--cp-text-l)' }}>
-                No base yet — the autopilot collects one after «Start outreach» on step 2.
+                {selected
+                  ? 'No base yet — the autopilot collects one after «Start outreach» on step 2.'
+                  : !hypotheses.some((h) => h.vertical_id === v.id)
+                    ? 'No base yet — this vertical is not selected and has no hypotheses to accept.'
+                    : detail.project.status === 'researched'
+                      ? 'No base yet — this vertical is not selected: accept one of its hypotheses on step 2 to include it.'
+                      : detail.project.status === 'draft'
+                        ? 'No base yet — this vertical is not selected, and research is not running: open step 1 and press «Re-run research» to start it.'
+                        : 'No base yet — this vertical is not selected.'}
               </p>
             )}
           </EngCard>

@@ -18,6 +18,7 @@ import { AuthExpiredError, authFetch } from '@/lib/authFetch';
 import { engErrorText, localizeEngError } from './engText';
 import type { HeChainLetterDto, HeProjectDetailResponse } from '@/components/hypothesis-engine/api';
 import type { HeChain, HeHypothesis, HeJob, HeProject } from '@/lib/hypothesisEngine/types';
+import type { HeIcpFrame } from '@/lib/hypothesisEngine/icpFrame';
 import type {
   HeLaunchPresetOption,
   HeTemplateLaunchCampaign,
@@ -27,10 +28,20 @@ import type {
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
 import type {
   ClientEngAutopilotHold,
+  ClientEngTemplatePlaceholder,
   HeClientAutopilotHoldCode,
   HeClientRefillState,
   HeClientStageErrorCode,
 } from '@/lib/hypothesisEngine/clientEngProjection';
+// Тоже только типы: этап и причина карточки дашборда — один словарь на роут
+// (lib/hypothesisEngine/engDashboard) и на экран.
+import type {
+  EngDashAnalysisStopped,
+  EngDashAttention,
+  EngDashAttentionInfo,
+  EngDashSelection,
+  EngDashStage,
+} from '@/lib/hypothesisEngine/engDashboard';
 
 // `HeBaseSummary`/`HeProjectDetailResponse` отсюда БОЛЬШЕ НЕ реэкспортируются:
 // оба обещают `error: string` — сырой текст стадии, которого в ответе кабинета
@@ -226,6 +237,16 @@ export type EngBaseSummary = Omit<
    * `collect_info` и `filename`.
    */
   refill?: boolean;
+  /**
+   * Только у 'analyzing'-базы в деталке проекта (GET /eng/projects/[id]): идёт
+   * ли её анализ — ответ СЕРВЕРА общим предикатом isAnalyzingBaseLive
+   * (активная джоба на её base_id или окно постановки
+   * ANALYZING_ORPHAN_GRACE_MS), тем же, что у Command Center и «Start
+   * outreach». Финальный фейл анализа статус базы не меняет, поэтому статус
+   * на этот вопрос не отвечает. Ключа нет — живость не прочитана (сбой
+   * чтения, демо, ответ старше): экран читает анализ идущим.
+   */
+  analysis_live?: boolean;
 };
 
 /** Строка списка проектов кабинета (GET /eng/projects). */
@@ -448,6 +469,19 @@ export function engTemplateNeedsRewrite(template: unknown): boolean {
   return (template as { needs_rewrite?: unknown } | null)?.needs_rewrite === true;
 }
 
+export type EngTemplatePlaceholder = ClientEngTemplatePlaceholder;
+
+/**
+ * Подстановки отправляемых писем шаблона и чем каждая наполнится у получателя
+ * (clientEngProjection, toClientEngTemplatePlaceholders). null — сервер их не
+ * посчитал (базы шаблона нет в деталке) или поля нет вовсе (ответ старше):
+ * тогда шаг 5 о подстановках ничего не утверждает.
+ */
+export function engTemplatePlaceholders(template: unknown): EngTemplatePlaceholder[] | null {
+  const raw = (template as { placeholders?: unknown } | null)?.placeholders;
+  return Array.isArray(raw) ? (raw as EngTemplatePlaceholder[]) : null;
+}
+
 interface EngChainPatchResponse {
   letters?: HeChainLetterDto[];
   error?: string;
@@ -498,9 +532,26 @@ export async function fetchEngProjectDetail(projectId: string): Promise<EngProje
   return engApiFetch<EngProjectDetailResponse>(`/eng/projects/${projectId}`);
 }
 
+/**
+ * Тело PATCH брифа. Каждое поле — «заменить»; пустая строка удаляет override.
+ * Шлётся только то, что клиент изменил (EngStepBrief): присланное поле роут
+ * перезаписывает, в том числе пустым.
+ *
+ * `icp` — частичная правка рамки ЦА (`brief.icp`, lib/hypothesisEngine/icpFrame):
+ * присланные подполя заменяются, остальные сохраняются; null — снять рамку
+ * целиком. В ответе brief.icp приходит рамкой нужной формы или null.
+ */
+export interface EngBriefPatch {
+  offer_override?: string;
+  style_override?: string;
+  signature_override?: string;
+  business_override?: string;
+  icp?: Partial<HeIcpFrame> | null;
+}
+
 export async function patchEngProject(
   projectId: string,
-  body: { offer_override?: string; style_override?: string; signature_override?: string; business_override?: string },
+  body: EngBriefPatch,
 ): Promise<EngPatchResponse> {
   return engApiFetch<EngPatchResponse>(`/eng/projects/${projectId}`, {
     method: 'PATCH',
@@ -762,29 +813,28 @@ export async function updateEngSendingWindow(
 /* ── ENG Command Center (GET /eng/dashboard) ── */
 
 /**
- * Этап вертикали на дашборде (порядок конвейера research → … → launched).
+ * Этап вертикали на дашборде (порядок конвейера research → … → launched, плюс
+ * `attention` — дальше без человека не двинуться, и `not_selected` — клиент
+ * вертикаль не выбрал). Типы — РЕЭКСПОРТ роутовых
+ * (lib/hypothesisEngine/engDashboard), а не копия: копия отстала от роута на
+ * этап `attention`, и компилятор этого не видел.
  * `launch_unfinished` — запись о запуске есть, но часть аудитории не уехала
- * (`heLaunchIsIncomplete`): это не «live», его достраивают на шаге 5.
+ * (`heLaunchIsIncomplete`): его достраивают на шаге 5.
  */
-export type EngDashStage =
-  | 'research'
-  | 'letters'
-  | 'collecting'
-  | 'construct'
-  | 'analyzing'
-  | 'analyzed'
-  | 'template'
-  | 'launch_unfinished'
-  | 'launched';
+export type { EngDashAnalysisStopped, EngDashAttention, EngDashAttentionInfo, EngDashSelection, EngDashStage };
 
 export interface EngDashboardVertical {
   id: string;
   project_id: string;
   name: string;
   stage: EngDashStage;
-  /** Короткая живой строки этапа ('constructor: 87/147 valid'). */
+  /** Короткая строка этапа ('email enrichment: 87/147 valid'). */
   stageDetail: string;
-  /** Пять точек прогресса: research → letters → base → template → launched. */
+  /**
+   * Пять точек прогресса: research → letters → base → template → sending.
+   * Пятую не ставит ни один этап: статус кампании у рассыльщика кабинет не
+   * читает (engDashboard.ts, EngDashDots).
+   */
   dots: boolean[];
   /**
    * Числа карточки. Этот DTO написан руками и компилятором с роутом НЕ сверяется
@@ -814,7 +864,10 @@ export interface EngDashboardVertical {
   };
   /** Только имя кампании: ссылка наружу — бренд рассыльщика, в кабинет не едет. */
   launch: { campaign_name: string } | null;
-  /** Прогноз движка (potential_pct), если был выставлен. */
+  /**
+   * Оценка модели 0–100 (potential_pct, подпись «market fit»), а не прогноз
+   * доли ответов. null — оценки нет, вертикаль не выбрана или выбор не прочитан.
+   */
   forecast: { pct: number } | null;
   /** Факт по запущенной кампании (петля actualsReconcile, свежесть 24ч). */
   actual: { reply_pct: number; sent: number; measured_at: string } | null;
@@ -831,6 +884,13 @@ export interface EngDashboardVertical {
    * карточки прежние.
    */
   letters_need_rewrite?: boolean;
+  /**
+   * Почему вертикаль стоит (этап `attention`); у других этапов `null`. Поля
+   * нет у ответа старше этого этапа — карточка тогда печатает этап как есть.
+   */
+  attention?: EngDashAttentionInfo | null;
+  /** Выбор вертикали клиентом (EngDashSelection); `null` или нет поля — не прочитан. */
+  selection?: EngDashSelection | null;
 }
 
 export interface EngDashboardEvent {

@@ -13,6 +13,7 @@
  */
 
 import { heLaunchIsIncomplete, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
+import type { HeClientStageErrorCode } from './clientEngProjection';
 // Справочник клиентских текстов без зависимостей (тот же, что реэкспортирует
 // clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда.
 import { HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
@@ -64,6 +65,31 @@ export function nextDailyRunIso(now: Date): string {
  * говорит «ещё не уехала» (has not gone out yet), а не «не уехала»: она верна
  * и посреди запуска, и после обрыва. Нажатие на шаге 5, пока аренда жива,
  * получает честный 409 «запуск ещё идёт или оборвался меньше 15 минут назад».
+ *
+ * `launched` — запись о запуске законченная. Это НЕ «кампания идёт»: ядро
+ * создаёт кампании на паузе и не активирует их никогда (launchHandoff.ts,
+ * шапка; во всём hypothesisEngine нет ни одного вызова activateCampaign),
+ * стартует их сотрудник у рассыльщика. Статус кампании у рассыльщика кабинет не
+ * читает (это отдельное решение владельца, P-D-remote-campaign-status), поэтому
+ * из локальных данных «live» не выводится никогда: подпись этапа говорит то,
+ * что верно при ЛЮБОМ удалённом статусе, — кампании созданы на паузе, а
+ * запускает их менеджер.
+ *
+ * `attention` — вертикаль встала на ТЕРМИНАЛЬНОМ состоянии и сама не поедет:
+ * последняя своя база упала или отменена, проанализирована с нулём строк, её
+ * анализ не идёт (см. EngDashAnalysisStopped), либо упал сам проект (research).
+ * Причина и код — в `EngDashStageInfo.attention`. Только без идущей работы
+ * вертикали (см. engDashAttentionOf): воркер повторяет джобу через 'pending',
+ * не трогая статус базы, и промежуточный сбой сюда не доезжает.
+ *
+ * `not_selected` — у вертикали нет ни одной accepted-гипотезы (тот же
+ * предикат, по которому автопилот пропускает её как 'not_selected',
+ * autopilotReconcile.ts), и работы по ней сейчас нет. «Start outreach» и ночной
+ * проход её не трогают, поэтому ни «needs attention», ни «next: …» про неё
+ * неправда: клиент её не выбрал или снял сам (шаг 4 советует отклонить
+ * гипотезы вертикали при audience_mismatch / segment_exhausted). Запуск, готовый
+ * шаблон и идущая работа этот этап перекрывают: «Launch all (paused)» и ночной
+ * долив выбор не читают, а начатая джоба доработает.
  */
 export type EngDashStage =
   | 'research'
@@ -74,18 +100,150 @@ export type EngDashStage =
   | 'analyzed'
   | 'template'
   | 'launch_unfinished'
-  | 'launched';
+  | 'launched'
+  | 'attention'
+  | 'not_selected';
 
-/** Пять точек прогресса карточки: research → letters → base → template → launched. */
+/**
+ * Выбор вертикали клиентом по he_hypotheses (роут, один батч по project_id):
+ *  - `selected` — есть accepted-гипотеза (автопилот её ведёт);
+ *  - `not_selected` — гипотезы есть, accepted среди них нет;
+ *  - `no_hypotheses` — гипотез у вертикали нет вовсе (тоже не выбрана: принять
+ *    на шаге 2 нечего).
+ * Нет значения (undefined) — выбор не прочитан: этап выводится как до выбора.
+ */
+export type EngDashSelection = 'selected' | 'not_selected' | 'no_hypotheses';
+
+/**
+ * Выбор каждой вертикали из строк he_hypotheses (id, vertical_id, status).
+ * Предикат — РОВНО автопилотный (autopilotReconcile.ts, 'not_selected'):
+ * `vertical_id === вертикаль && status === 'accepted'`, затем непустой id.
+ * Вертикали без строк в карте нет — у вызывающего это `no_hypotheses`.
+ */
+export function engDashSelectionByVertical(
+  hypotheses: ReadonlyArray<Record<string, unknown>>,
+): Map<string, EngDashSelection> {
+  const out = new Map<string, EngDashSelection>();
+  for (const h of hypotheses) {
+    const vid = asStr(h.vertical_id);
+    if (!vid) continue;
+    if (h.status === 'accepted' && asStr(h.id).length > 0) out.set(vid, 'selected');
+    else if (!out.has(vid)) out.set(vid, 'not_selected');
+  }
+  return out;
+}
+
+/**
+ * Почему вертикаль в `attention`:
+ *  - `base_stopped` — последняя своя (не доливная) база в 'failed': сбой стадии
+ *    или отмена (код 'cancelled' — отмена отличается от сбоя только строкой
+ *    причины, см. toClientEngStageErrorCode);
+ *  - `base_empty` — последняя своя база 'analyzed' с row_count = 0. Автопилот
+ *    считает любую 'analyzed'-базу готовой (autopilotNext: 'base_ready') и
+ *    новую сборку не ставит, а шаблон по пустой базе не строится, — дальше
+ *    решает человек;
+ *  - `project_failed` — he_projects.status = 'failed' (его пишут только
+ *    research-стадии и сбой их дочейна, worker/hypothesisEngine.ts).
+ */
+export type EngDashAttentionReason = 'base_stopped' | 'base_empty' | 'project_failed';
+
+export interface EngDashAttention {
+  reason: EngDashAttentionReason;
+  /**
+   * Код причины из проекции (`toClientEngStageErrorCode` по he_bases.error или
+   * he_projects.error): только машинный код словаря кабинета, сырой текст
+   * стадии наружу не уходит. null — причина не записана (и всегда у
+   * `base_empty`: это не сбой, причины у него нет).
+   */
+  code: HeClientStageErrorCode | null;
+}
+
+/**
+ * `analysis_stopped` — последняя своя база вертикали висит в 'analyzing', а
+ * анализ её не идёт: ни одна активная джоба не держит её base_id и окно
+ * постановки (ANALYZING_ORPHAN_GRACE_MS) прошло — общий предикат
+ * isAnalyzingBaseLive автопилота, по нему же «Start outreach» решает, что база
+ * осиротела. Финальный фейл base_analyze базу не трогает (она так и остаётся
+ * 'analyzing'), поэтому без этой причины карточка печатала «analyzing the
+ * base…» вечно.
+ *
+ * Отдельным типом, а не четвёртым значением EngDashAttentionReason: тексты трёх
+ * причин выше собирает engText.engDashAttentionText (switch по причине), а эту
+ * причину карточка разбирает сама (EngDashboard.tsx).
+ */
+export interface EngDashAnalysisStopped {
+  reason: 'analysis_stopped';
+  /**
+   * 'cancelled' — последний закончившийся base_analyze этой базы отменён
+   * («Cancel all jobs» обогнал запись стадии). null — последний упал, не
+   * закончился ни один (анализ так и не поставили) или исход не прочитан.
+   */
+  code: 'cancelled' | null;
+  /**
+   * true — нажатие «Start outreach» поставит ей base_analyze заново: вертикаль
+   * выбрана, проект 'researched', паузы по потолку расхода у проекта нет
+   * (`spendPaused` прочитан и ложен) и выполнены условия ремонта осиротевшей
+   * базы (engAnalysisRequeues). false — кнопка поведёт вертикаль другим путём
+   * (цепочка, новая сборка) либо это не доказано, и карточка называет только
+   * саму кнопку.
+   */
+  requeues: boolean;
+}
+
+/** Причина этапа 'attention' — одна из трёх выше или остановленный анализ. */
+export type EngDashAttentionInfo = EngDashAttention | EngDashAnalysisStopped;
+
+/**
+ * Пять точек прогресса карточки: research → letters → base → template →
+ * sending. Пятая — «кампания отправляет», а этого кабинет из своих данных не
+ * знает (см. `launched` выше), поэтому сейчас она не ставится ни одним этапом.
+ */
 export type EngDashDots = [boolean, boolean, boolean, boolean, boolean];
 
 export interface EngDashVerticalSlice {
   projectStatus: string;
+  /**
+   * Код причины he_projects.error (toClientEngStageErrorCode) — роут считает
+   * его только у проекта в 'failed'. Нет — причина не записана или не нужна.
+   */
+  projectErrorCode?: HeClientStageErrorCode | null;
   chains: Array<Record<string, unknown>>;
+  /**
+   * Строки баз вертикали. Кроме колонок he_bases роут кладёт в каждую два
+   * поля проекции мастера (toClientEngBase — те же, что видит шаг 4):
+   * `refill` (прогон ночного долива, а не база вертикали) и `error_code` (код
+   * причины he_bases.error). Без них (`undefined`) база считается своей и без
+   * записанной причины.
+   */
   bases: Array<Record<string, unknown>>;
   templates: Array<Record<string, unknown>>;
   /** Активные джобы вертикали (pending/running) — для живых подписей. */
   activeJobs: Array<Record<string, unknown>>;
+  /**
+   * true — список `activeJobs` мог оказаться неполным (роут упёрся в кап
+   * выборки и не дочитал остальное): что работы у вертикали нет, не доказано,
+   * и этап 'attention' не ставится (engDashAttentionOf).
+   */
+  liveWorkUnknown?: boolean;
+  /**
+   * 'analyzing'-базы вертикали, анализ которых НЕ идёт (роут: общий предикат
+   * isAnalyzingBaseLive по полному списку активных джоб), → код исхода их
+   * последнего закончившегося base_analyze ('cancelled' или null, см.
+   * EngDashAnalysisStopped). Такая база — не идущая работа: этап 'analyzing' по
+   * ней не ставится. Нет поля — роут живость не проверял (список активных джоб
+   * неполон), и любая 'analyzing'-база читается идущей, как раньше.
+   */
+  stalledAnalysis?: ReadonlyMap<string, 'cancelled' | null>;
+  /** Выбор вертикали клиентом (EngDashSelection); нет — не прочитан. */
+  selection?: EngDashSelection;
+  /**
+   * У проекта записана пауза по потолку расхода (toClientEngAutopilotHold, код
+   * 'spend_paused'; потолок по умолчанию выключен). Читает только `requeues`
+   * остановленного анализа: проход «Start outreach» над потолком кончается на
+   * первой платной постановке и до ремонта этой вертикали может не дойти.
+   * Нет поля — паузы не прочитаны, и `requeues` ложно (не доказано).
+   */
+  spendPaused?: boolean;
   /**
    * id шаблонов, чьи письма ядро запуска откажет (признак `needs_rewrite`
    * проекции — clientEngProjection.heTemplateNeedsRewrite, тот же гейт писем,
@@ -124,6 +282,8 @@ export interface EngDashStageInfo {
    * У остальных этапов — false.
    */
   lettersNeedRewrite: boolean;
+  /** Причина этапа 'attention'; у остальных этапов — null. */
+  attention: EngDashAttentionInfo | null;
 }
 
 function asStr(v: unknown): string {
@@ -202,12 +362,134 @@ function latestReadyUnlaunched(templates: Array<Record<string, unknown>>): Recor
 }
 
 /**
+ * Поставит ли клиентское «Start outreach» этой 'analyzing'-базе, чей анализ не
+ * идёт, base_analyze заново (бесплатная вставка джобы; строки второй раз не
+ * покупаются). Ровно условия ремонта осиротевшей базы в autopilotReconcile.ts
+ * по базам вертикали (`verticalBases`) и её цепочкам:
+ *  - база своя (не доливная) авто-сборки и со строками — у загруженного файла
+ *    кнопка базу не видит, а базу без строк ремонт закрывает 'failed', и
+ *    кнопка ставит новую сборку;
+ *  - она ЕДИНСТВЕННАЯ своя авто-база в 'analyzing': живая соседняя ремонт
+ *    останавливает, а чинится только самая свежая из осиротевших (живость
+ *    соседей отсюда не видна — при соседях ответ false);
+ *  - у вертикали нет своей авто-базы в 'collecting' или 'analyzed' — любая из
+ *    них ремонт останавливает;
+ *  - у вертикали есть готовая цепочка — без неё кнопка ставит цепочку.
+ * Выбор вертикали (accepted-гипотеза), статус проекта ('researched' — иначе
+ * кнопки нет) и паузу по потолку расхода (`spendPaused`) проверяет
+ * вызывающий. Колонки базы не проверяются: строки и колонки пишет одна и та
+ * же запись финала сборки.
+ */
+export function engAnalysisRequeues(
+  base: Record<string, unknown>,
+  verticalBases: ReadonlyArray<Record<string, unknown>>,
+  chains: ReadonlyArray<Record<string, unknown>>,
+): boolean {
+  const ownAuto = verticalBases.filter((b) => b.refill !== true && asStr(b.source) === 'auto');
+  const ownAutoAnalyzing = ownAuto.filter((b) => asStr(b.status) === 'analyzing');
+  const baseId = asStr(base.id);
+  return (
+    baseId !== '' &&
+    asNum(base.row_count) > 0 &&
+    ownAutoAnalyzing.length === 1 &&
+    asStr(ownAutoAnalyzing[0].id) === baseId &&
+    !ownAuto.some((b) => asStr(b.status) === 'collecting' || asStr(b.status) === 'analyzed') &&
+    chains.some((c) => asStr(c.status) === 'ready')
+  );
+}
+
+/** Код причины, который роут положил в строку базы (`error_code`); иначе null. */
+function baseErrorCode(base: Record<string, unknown>): HeClientStageErrorCode | null {
+  return typeof base.error_code === 'string' && base.error_code ? (base.error_code as HeClientStageErrorCode) : null;
+}
+
+/**
+ * Встала ли вертикаль на терминальном состоянии (этап 'attention').
+ *
+ * Зовётся ТОЛЬКО когда у вертикали нет ни записи о запуске, ни готового
+ * шаблона, ни базы в 'collecting', ни 'analyzing'-базы с идущим анализом, ни
+ * своей 'analyzed'-базы со строками, и она выбрана или выбор не прочитан
+ * (deriveEngVerticalStage проверяет всё это раньше), то есть когда пути
+ * вперёд у неё уже нет. Дальше три гейта «работа ещё идёт», при любом из них
+ * ответ null и карточка печатает прежний этап:
+ *  - проект в 'researching': research вертикали проекта пересоздаёт, а
+ *    упавшая база старой вертикали ничего не решает;
+ *  - у вертикали есть активная джоба (pending/running по её vertical_id или
+ *    base_id): повтор или подъём ещё в полёте, состояние не терминальное;
+ *  - список активных джоб неполон (`liveWorkUnknown`): идёт ли работа,
+ *    неизвестно, а «встала» без этого знания — неправда.
+ *
+ * Порядок причин: упавший проект — первым. Пока он 'failed', «Start outreach»
+ * шага 2 недоступен (кнопке нужен 'researched'), и совет про базу был бы
+ * неправдой; дальше — ПОСЛЕДНЯЯ своя база (доливные прогоны не считаются: их
+ * исход — лента событий и блок добора, а не этап вертикали). Старая упавшая
+ * база под более новой 'uploaded' — не причина: решает последняя. Последняя
+ * своя в 'analyzing' — причина только из `stalledAnalysis` (анализ не идёт).
+ */
+function engDashAttentionOf(input: EngDashVerticalSlice): EngDashAttentionInfo | null {
+  if (input.liveWorkUnknown === true || input.projectStatus === 'researching' || input.activeJobs.length > 0) {
+    return null;
+  }
+  if (input.projectStatus === 'failed') {
+    return { reason: 'project_failed', code: input.projectErrorCode ?? null };
+  }
+  const own = input.bases.filter((b) => b.refill !== true);
+  const lastOwn = latest(own);
+  if (!lastOwn) return null;
+  const status = asStr(lastOwn.status);
+  if (status === 'failed') return { reason: 'base_stopped', code: baseErrorCode(lastOwn) };
+  if (status === 'analyzed' && asNum(lastOwn.row_count) === 0) return { reason: 'base_empty', code: null };
+  const lastOwnId = asStr(lastOwn.id);
+  if (status === 'analyzing' && input.stalledAnalysis?.has(lastOwnId) === true) {
+    return {
+      reason: 'analysis_stopped',
+      code: input.stalledAnalysis.get(lastOwnId) ?? null,
+      // Кнопка есть только у 'researched'-проекта, а невыбранную вертикаль
+      // (или вертикаль с непрочитанным выбором) она не трогает вовсе. Под
+      // записанной паузой по потолку расхода (или с непрочитанными паузами)
+      // повтор анализа не доказан — см. `spendPaused`.
+      requeues:
+        input.selection === 'selected' &&
+        input.projectStatus === 'researched' &&
+        input.spendPaused === false &&
+        engAnalysisRequeues(lastOwn, input.bases, input.chains),
+    };
+  }
+  return null;
+}
+
+/** Короткая строка этапа 'attention' (подпись строки карты пайплайна). */
+function attentionDetail(attention: EngDashAttentionInfo): string {
+  switch (attention.reason) {
+    case 'project_failed':
+      return attention.code === 'cancelled' ? 'research cancelled' : 'research stopped';
+    case 'base_stopped':
+      return attention.code === 'cancelled' ? 'collection cancelled' : 'collection stopped';
+    case 'base_empty':
+      return 'base came back with no rows';
+    case 'analysis_stopped':
+      return attention.code === 'cancelled' ? 'analysis cancelled' : 'analysis stopped';
+  }
+}
+
+/**
  * Этап вертикали из сущностей (порядок конвейера: research → letters →
  * base (collecting → construct → analyzing) → template → launched; дальше
  * ежедневный refill — отдельным блоком дашборда). Приоритет: запущенное
  * всегда сверху; активная работа базы (collecting/construct/analyzing)
  * важнее «статичного» analyzed — ре-collect той же вертикали честно
- * показывает прогресс, а не вчерашний финиш.
+ * показывает прогресс, а не вчерашний финиш. Когда пути вперёд нет вовсе (ни
+ * запуска, ни шаблона, ни идущей базы, ни своей базы со строками) —
+ * 'attention' по терминальному состоянию (engDashAttentionOf), а не «letters
+ * ready — collect a base», которое читалось как бесконечная работа. Перед
+ * этим — 'not_selected': невыбранную вертикаль без запуска, шаблона и идущей
+ * работы автопилот не двигает, и ни «next: …», ни «needs attention» про неё
+ * неправда.
+ *
+ * 'analyzing'-база из `stalledAnalysis` идущей работой не считается: её этап —
+ * 'attention' (analysis_stopped), если причина выводится, иначе прежний
+ * 'analyzing' (у вертикали идёт другая джоба, проект в research или последняя
+ * своя база — другая).
  */
 export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStageInfo {
   const { projectStatus, chains, bases, templates, activeJobs } = input;
@@ -216,16 +498,25 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   const readyTemplate = latestReadyUnlaunched(templates);
   const needsRewrite = (row: Record<string, unknown>): boolean =>
     input.rewriteTemplateIds?.has(asStr(row.id)) === true;
-  const analyzingBase = latest(bases.filter((b) => asStr(b.status) === 'analyzing'));
+  const isStalled = (b: Record<string, unknown>): boolean => input.stalledAnalysis?.has(asStr(b.id)) === true;
+  const analyzingBase = latest(bases.filter((b) => asStr(b.status) === 'analyzing' && !isStalled(b)));
+  const stalledAnalyzingBase = latest(bases.filter((b) => asStr(b.status) === 'analyzing' && isStalled(b)));
   const collectingBase = latest(bases.filter((b) => asStr(b.status) === 'collecting'));
   const analyzedBase = latest(bases.filter((b) => asStr(b.status) === 'analyzed'));
+  // Своя (не доливная) 'analyzed'-база со строками — та, из которой вертикаль
+  // ещё может получить шаблон. Пустая или доливная этого пути не даёт.
+  const usableAnalyzedBase = latest(
+    bases.filter((b) => b.refill !== true && asStr(b.status) === 'analyzed' && asNum(b.row_count) > 0),
+  );
   const hasReadyChain = chains.some((c) => asStr(c.status) === 'ready');
 
   // База-«паспорт» вертикали: из которой собран запущенный/готовый шаблон,
-  // иначе свежая analyzed, иначе текущая собирающаяся.
+  // иначе свежая своя analyzed со строками, иначе свежая analyzed, иначе
+  // текущая собирающаяся.
   const templateBaseId = asStr((launched?.row ?? readyTemplate)?.base_id);
   const mainBase =
     (templateBaseId ? bases.find((b) => asStr(b.id) === templateBaseId) : undefined) ??
+    usableAnalyzedBase ??
     analyzedBase ??
     collectingBase ??
     latest(bases);
@@ -243,18 +534,22 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       mainBase,
       launch: launched.launch,
       lettersNeedRewrite: rewrite,
+      attention: null,
     };
   }
   if (launched) {
+    // Не «live»: кампании созданы на паузе, стартует их менеджер, а их статус
+    // у рассыльщика кабинет не читает (см. EngDashStage). Подпись верна при
+    // любом удалённом статусе — и до старта, и после, — поэтому без имени
+    // кампании и без утверждения, что она отправляет; пятая точка не ставится.
     return {
       stage: 'launched',
-      stageDetail: launched.launch.campaign_name
-        ? `live: ${launched.launch.campaign_name}`
-        : 'campaign launched',
-      dots: [true, true, true, true, true],
+      stageDetail: 'created paused — your manager reviews it and starts sending',
+      dots: [true, true, true, true, false],
       mainBase,
       launch: launched.launch,
       lettersNeedRewrite: false,
+      attention: null,
     };
   }
   if (readyTemplate) {
@@ -268,18 +563,19 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       mainBase,
       launch: null,
       lettersNeedRewrite: rewrite,
+      attention: null,
     };
   }
-  if (analyzingBase) {
-    return {
-      stage: 'analyzing',
-      stageDetail: 'analyzing the base…',
-      dots: [true, true, false, false, false],
-      mainBase,
-      launch: null,
-      lettersNeedRewrite: false,
-    };
-  }
+  const analyzingStage: EngDashStageInfo = {
+    stage: 'analyzing',
+    stageDetail: 'analyzing the base…',
+    dots: [true, true, false, false, false],
+    mainBase,
+    launch: null,
+    lettersNeedRewrite: false,
+    attention: null,
+  };
+  if (analyzingBase) return analyzingStage;
   if (collectingBase) {
     const info = collectInfo(collectingBase);
     const construct =
@@ -291,12 +587,15 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       const valid = asNum(construct.valid_count);
       return {
         stage: 'construct',
+        // Имя шага — как у строки карты пайплайна («Email enrichment»), а не
+        // внутреннее «constructor».
         stageDetail:
-          emails > 0 ? `constructor: ${valid}/${emails} valid` : 'constructor: finding emails…',
+          emails > 0 ? `email enrichment: ${valid}/${emails} valid` : 'email enrichment: finding emails…',
         dots: [true, true, false, false, false],
         mainBase,
         launch: null,
         lettersNeedRewrite: false,
+        attention: null,
       };
     }
     const stats =
@@ -310,19 +609,89 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
+      attention: null,
     };
   }
-  if (analyzedBase) {
+  // Невыбранная вертикаль: дальше её двигает только выбор клиента. Не во время
+  // research (вертикали пересоздаются, все гипотезы ещё 'proposed') и не у
+  // упавшего проекта (его причина — 'attention' ниже, и «Start outreach» там
+  // недоступен); при живой или неизвестной работе — прежний этап.
+  //
+  // Совет «accept one of its hypotheses» — только у 'researched': кнопка
+  // «Start outreach» есть лишь там (EngStepVerticals, canStartOutreach). У
+  // 'draft' (новый проект или отменённый research, cancel-роут) принятие
+  // гипотезы ничего не двигает — research не идёт и сам не начнётся; фраза та
+  // же, что у шага 2 для 'draft' (startOutreachHintFor), и без «сначала …,
+  // потом примите»: перезапуск research пересобирает вертикали, и этой
+  // вертикали после него может не быть. Иной статус сюда не доходит (выше
+  // отсечены 'researching' и 'failed'); незнакомый — одним фактом.
+  if (
+    input.selection !== undefined &&
+    input.selection !== 'selected' &&
+    input.liveWorkUnknown !== true &&
+    activeJobs.length === 0 &&
+    projectStatus !== 'researching' &&
+    projectStatus !== 'failed'
+  ) {
+    return {
+      stage: 'not_selected',
+      stageDetail:
+        input.selection === 'no_hypotheses'
+          ? 'not selected — this vertical has no hypotheses to accept'
+          : projectStatus === 'researched'
+            ? 'not selected — accept one of its hypotheses on step 2 to include it'
+            : projectStatus === 'draft'
+              ? 'not selected — research is not running; open step 1 and press «Re-run research» to start it'
+              : 'not selected',
+      dots: [true, hasReadyChain, usableAnalyzedBase !== null, false, false],
+      mainBase,
+      launch: null,
+      lettersNeedRewrite: false,
+      attention: null,
+    };
+  }
+  if (usableAnalyzedBase) {
     return {
       stage: 'analyzed',
       // «rows», а не «companies»: см. mainBase в EngDashStageInfo. Слово взято
       // у шага 4 мастера (EngStepBases: «{row_count} rows»), чтобы у одного и
       // того же числа в кабинете было одно имя.
+      stageDetail: `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows`,
+      dots: [true, true, true, false, false],
+      mainBase,
+      launch: null,
+      lettersNeedRewrite: false,
+      attention: null,
+    };
+  }
+  const attention = engDashAttentionOf(input);
+  if (attention) {
+    return {
+      stage: 'attention',
+      stageDetail: attentionDetail(attention),
+      dots: [attention.reason !== 'project_failed', hasReadyChain, false, false, false],
+      mainBase,
+      launch: null,
+      lettersNeedRewrite: false,
+      attention,
+    };
+  }
+  // Остановленный анализ, по которому причину не вывели (идёт другая джоба
+  // вертикали, проект в research, последняя своя база — другая): прежний этап.
+  if (stalledAnalyzingBase) return analyzingStage;
+  // Сюда доходит 'analyzed'-база без строк или доливная, которую attention не
+  // взял: у вертикали идёт джоба, проект в research, последняя своя база не
+  // терминальна ('uploaded') или 'analyzed' у вертикали — только доливные
+  // прогоны. Подпись прежняя.
+  if (analyzedBase) {
+    return {
+      stage: 'analyzed',
       stageDetail: `base analyzed: ${asNum(analyzedBase.row_count)} rows`,
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
+      attention: null,
     };
   }
   if (hasReadyChain) {
@@ -333,6 +702,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
+      attention: null,
     };
   }
   if (projectStatus === 'researching') {
@@ -343,16 +713,20 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
+      attention: null,
     };
   }
   const chainJobActive = activeJobs.some((j) => asStr(j.stage) === 'chain');
   return {
     stage: 'letters',
-    stageDetail: chainJobActive ? 'writing letters…' : 'letters pending — generate a chain',
+    // Без «generate a chain»: такой кнопки у клиента нет — письма пишет
+    // автопилот после «Start outreach» (те же слова, что у шага 3, EngStepLetters).
+    stageDetail: chainJobActive ? 'writing letters…' : 'no letters yet — written after «Start outreach» on step 2',
     dots: [true, false, false, false, false],
     mainBase,
     launch: null,
     lettersNeedRewrite: false,
+    attention: null,
   };
 }
 
@@ -397,7 +771,7 @@ const JOB_STAGE_LABELS: Record<string, string> = {
   clustering: 'clustering',
   chain: 'letter writing',
   vocab: 'vocabulary',
-  base_collect: 'base collect',
+  base_collect: 'base collection',
   base_analyze: 'base analysis',
   template: 'template build',
   dossier: 'dossier',
@@ -446,7 +820,8 @@ export function buildEngDashboardEvents(input: {
     if (status === 'failed') {
       events.push({
         type: 'failed',
-        text: withVertical(`${JOB_STAGE_LABELS[stage] ?? stage} failed`, vname),
+        // Незнакомая стадия — общее слово, а не сырое имя стадии из he_jobs.
+        text: withVertical(`${JOB_STAGE_LABELS[stage] ?? 'a step'} failed`, vname),
         at,
       });
       continue;

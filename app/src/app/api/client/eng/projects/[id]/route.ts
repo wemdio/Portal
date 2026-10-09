@@ -11,10 +11,17 @@ import {
   toClientEngProjectRow,
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import { isAnalyzingBaseLive, liveBaseIdsFromJobs } from '@/lib/hypothesisEngine/autopilotNext';
+import { projectMarket } from '@/lib/hypothesisEngine/market';
 import {
   patchHeProjectBrief,
   type HeBriefPatchBody,
 } from '@/lib/hypothesisEngine/projectBriefPatch';
+import {
+  parseHeIcpFramePatch,
+  type HeIcpFrameInputError,
+  type HeIcpFramePatch,
+} from '@/lib/hypothesisEngine/icpFrame';
 import {
   HE_MAX_EMAILS_PER_COMPANY_MAX,
   HE_MAX_EMAILS_PER_COMPANY_MIN,
@@ -29,11 +36,11 @@ const BRIEF_SAVE_FAILED = 'Failed to save the brief';
 const SETTING_SAVE_FAILED = 'Failed to save the project setting';
 
 /**
- * Тело PATCH: поля брифа (общие со staff) плюс настройка проекта «до N адресов
- * одной компании». Значение приходит `unknown` — проверяет его нормализатор
- * сборки, а не тип запроса.
+ * Тело PATCH: поля брифа (общие со staff), рамка ЦА клиента (`icp`, только
+ * этот роут) и настройка проекта «до N адресов одной компании». Значения
+ * приходят `unknown` — проверяют их нормализаторы, а не тип запроса.
  */
-type EngProjectPatchBody = HeBriefPatchBody & { max_emails_per_company?: unknown };
+type EngProjectPatchBody = HeBriefPatchBody & { max_emails_per_company?: unknown; icp?: unknown };
 
 /**
  * Единственный текст отказа по значению настройки. Границы подставляются из
@@ -46,12 +53,45 @@ const CONTACT_CAP_RANGE =
   + ` to ${HE_MAX_EMAILS_PER_COMPANY_MAX}, or null to use the default`;
 
 const NO_FIELDS =
-  'Provide offer_override, style_override, signature_override, business_override or max_emails_per_company';
+  'Provide offer_override, style_override, signature_override, business_override, icp or max_emails_per_company';
+
+/**
+ * Рамку ЦА читает только EN-промпт гипотез (рынок us, stages/hypotheses.ts).
+ * На проекте другого рынка она легла бы в brief и не была бы прочитана
+ * никогда, поэтому роут её там не принимает. Кабинет создаёт проекты только
+ * с market='us' и форму рамки на другом рынке не показывает: сюда доходит
+ * лишь запрос в обход формы.
+ */
+const ICP_MARKET_ONLY_US = 'The target audience fields apply only to projects in the US market';
+
+/**
+ * Отказ по рамке ЦА. Имена — ключи тела запроса (как у отказов по overrides
+ * ниже), лимит — из ошибки нормализатора, а не цифрой: форма кабинета
+ * проверяет те же константы (icpFrame.ts) до отправки, и сюда доходит только
+ * запрос в обход формы.
+ */
+function icpInputErrorText(err: HeIcpFrameInputError): string {
+  switch (err.code) {
+    case 'bad_shape':
+      return 'icp must be an object with include, exclude, size or geo, or null to clear it';
+    case 'bad_type':
+      return err.field === 'include' || err.field === 'exclude'
+        ? `icp.${err.field} must be a list of strings`
+        : `icp.${err.field} must be a string`;
+    case 'too_many':
+      return `icp.${err.field}: at most ${err.max} entries`;
+    case 'too_long':
+      return err.field === 'include' || err.field === 'exclude'
+        ? `icp.${err.field}: each entry is at most ${err.max} characters`
+        : `icp.${err.field}: maximum ${err.max} characters`;
+  }
+}
 
 // GET — деталка СВОЕГО проекта (та же сборка, что у staff-роута, но со скоупом
 // владельца: чужой проект отвечает 404, существование не раскрываем) —
-// суженная клиентской проекцией. Поллится каждые 4 секунды из мастера, поэтому
-// withToolTrace здесь НЕТ: два лишних запроса к trace_spans на каждый полл.
+// суженная клиентской проекцией. Поллится из мастера (каждые 4 с, пока по
+// проекту идёт работа, иначе раз в 30 с), поэтому withToolTrace здесь НЕТ: два
+// лишних запроса к trace_spans на каждый полл.
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
@@ -107,17 +147,80 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .in('status', ['pending', 'running'])
     .limit(1);
 
+  // ИДЁТ ЛИ АНАЛИЗ 'analyzing'-БАЗ — тем же правилом, что у Command Center и
+  // реконсилера «Start outreach»: общий предикат isAnalyzingBaseLive
+  // (autopilotNext.ts) — активная джоба любой стадии на её base_id ИЛИ запись
+  // строки в пределах окна постановки ANALYZING_ORPHAN_GRACE_MS (щель
+  // harvest-финала между статусом 'analyzing' и вставкой base_analyze).
+  // Финальный фейл анализа базу не трогает, поэтому статус базы на вопрос не
+  // отвечает, а вывод на экране по капнутому списку `jobs` и без окна объявлял
+  // свежую базу остановленной раньше, чем это сделали бы дашборд и кнопка.
+  //
+  // Оба чтения — только когда у проекта есть 'analyzing'-база (обычно её нет, и
+  // лишнего запроса нет): активные джобы БЕЗ капа (одна колонка, строк столько,
+  // сколько активных джоб проекта) и updated_at самих баз — его нет в общем со
+  // staff списке колонок деталки (HE_BASE_LIST_COLUMNS), и выдачу легаси-
+  // инструмента ради него не трогаем. Сбой любого чтения — признака нет вовсе:
+  // экран читает базу идущей, как предикат читает «неизвестно».
+  const analyzingBaseIds = (Array.isArray(detail.detail.bases) ? detail.detail.bases : [])
+    .map((raw) => raw as { id?: unknown; status?: unknown })
+    .filter((b) => b.status === 'analyzing' && typeof b.id === 'string' && b.id !== '')
+    .map((b) => b.id as string);
+  const analysisLive = new Map<string, boolean>();
+  if (analyzingBaseIds.length > 0) {
+    const [liveJobsRes, stampsRes] = await Promise.all([
+      supabaseAdmin
+        .from('he_jobs')
+        .select('payload')
+        .eq('project_id', id)
+        .in('status', ['pending', 'running']),
+      supabaseAdmin
+        .from('he_bases')
+        .select('id, updated_at')
+        .eq('project_id', id)
+        .in('id', analyzingBaseIds),
+    ]);
+    if (!liveJobsRes.error && !stampsRes.error) {
+      const liveBaseIds = liveBaseIdsFromJobs((liveJobsRes.data ?? []) as Array<{ payload?: unknown }>);
+      const updatedAtById = new Map<string, string | null>();
+      for (const row of (stampsRes.data ?? []) as Array<{ id?: unknown; updated_at?: unknown }>) {
+        if (typeof row.id === 'string') {
+          updatedAtById.set(row.id, typeof row.updated_at === 'string' ? row.updated_at : null);
+        }
+      }
+      for (const baseId of analyzingBaseIds) {
+        analysisLive.set(
+          baseId,
+          isAnalyzingBaseLive({ id: baseId, updated_at: updatedAtById.get(baseId) ?? null }, liveBaseIds),
+        );
+      }
+    }
+  }
+
   // Белый список полей: себестоимость, модели, план сорсинга и id внутренних
   // джоб в кабинет не едут (lib/hypothesisEngine/clientEngProjection).
+  // Рамку ЦА (brief.icp) проектор ставит сам (toClientEngProjectRow,
+  // readHeIcpFrame) — на всех трёх ответах роута с brief одинаково.
+  // `analysis_live` — вычисленный булев признак, а не колонка: ключ только у
+  // 'analyzing'-баз, чья живость прочитана.
+  const projected = toClientEngProjectDetail(detail.detail);
   return NextResponse.json({
-    ...toClientEngProjectDetail(detail.detail),
+    ...projected,
+    bases:
+      analysisLive.size === 0
+        ? projected.bases
+        : projected.bases.map((b) => {
+            const live = typeof b.id === 'string' ? analysisLive.get(b.id) : undefined;
+            return live === undefined ? b : { ...b, analysis_live: live };
+          }),
     ...(busyRes.error ? {} : { has_active_jobs: (busyRes.data ?? []).length > 0 }),
   });
 }
 
 // PATCH — offer_override / style_override / signature_override / business_override мержатся в
 // he_projects.brief (та же логика, что у staff, со скоупом владельца до записи),
-// max_emails_per_company пишется колонкой проекта.
+// icp (рамка ЦА, только этот роут) — частичной правкой в brief.icp той же
+// записью, max_emails_per_company пишется колонкой проекта.
 //
 // Настройка «до N адресов одной компании» (волна 1: миграция 20260926_0001,
 // штамп на постановке сборки, применение конструктором) до этой правки не
@@ -160,6 +263,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       if (cap === null) return jsonError(CONTACT_CAP_RANGE, 400);
     }
 
+    // Рамка ЦА — тоже до БД и тоже строго: лишнее отклоняется, а не режется
+    // молча (parseHeIcpFramePatch). `null` — снять рамку целиком.
+    const icpRequested = body?.icp !== undefined;
+    let icpPatch: HeIcpFramePatch | null = null;
+    if (icpRequested) {
+      const parsed = parseHeIcpFramePatch(body.icp);
+      if (!parsed.ok) return jsonError(icpInputErrorText(parsed.error), 400);
+      icpPatch = parsed.patch;
+    }
+
     // Поля брифа мержит общий со staff `patchHeProjectBrief`, и он же отвечает
     // `no_fields` на пустое тело. Звать его на запрос ТОЛЬКО с настройкой
     // нельзя — вернул бы 400 на корректный запрос, поэтому наличие полей
@@ -167,11 +280,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const briefRequested = body?.offer_override !== undefined
       || body?.style_override !== undefined
       || body?.signature_override !== undefined
-      || body?.business_override !== undefined;
+      || body?.business_override !== undefined
+      || icpRequested;
     if (!capRequested && !briefRequested) return jsonError(NO_FIELDS, 400);
 
     const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+    // До записи настройки: отказ по рамке не должен оставлять половину запроса
+    // сохранённой.
+    if (icpRequested && projectMarket(owned.project as { market?: string | null }) !== 'us') {
+      return jsonError(ICP_MARKET_ONLY_US, 409);
+    }
 
     // Настройка пишется ПЕРВОЙ: ответ обеих ветвей собирается из строки,
     // прочитанной после записи, поэтому кабинет не увидит старое значение.
@@ -211,9 +330,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
 
     // Запрос только с настройкой: отвечаем той же проекцией, что и ниже.
-    if (!briefRequested) return NextResponse.json({ project: toClientEngProjectRow(projectRow) });
+    if (!briefRequested) {
+      return NextResponse.json({ project: toClientEngProjectRow(projectRow) });
+    }
 
-    const patch = await patchHeProjectBrief(supabaseAdmin, id, body);
+    // Рамка ЦА уходит отдельным аргументом: overrides и рамка ложатся одной
+    // записью brief (один read-merge-write), а staff-роут, который зовёт
+    // ту же функцию без него, `icp` не пишет вовсе.
+    const patch = await patchHeProjectBrief(supabaseAdmin, id, body, icpRequested ? { icp: icpPatch } : undefined);
     if (!patch.ok) {
       const err = patch.error;
       switch (err.code) {

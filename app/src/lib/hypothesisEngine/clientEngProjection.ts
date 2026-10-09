@@ -50,6 +50,7 @@
 import type { HeProjectDetail } from './projectDetail';
 import {
   HE_ENG_CAMPAIGN_NAMING,
+  buildLaunchSequence,
   findEmailColumn,
   heConstructContactCap,
   heLaunchEmailVerdict,
@@ -69,10 +70,19 @@ import { isHeClientCancelPauseReason } from './autoPipeline';
 // графе этой проекции через autoPipeline.
 import { isHeSpendCeilingPauseReason } from './spendCeiling';
 // Гейт писем запуска — для признака `needs_rewrite` (heTemplateNeedsRewrite):
-// та же чистая проверка, что у ядра запуска, второй копии правила нет.
-import { checkHeTemplateOperators, withHeEmptyCellFallbacks } from './templateOperatorGate';
+// та же чистая проверка, что у ядра запуска, второй копии правила нет. Синтаксис
+// оператора, признак «имя человека» и замены пустых ячеек — ещё и для подписи
+// подстановок шаблона (toClientEngTemplatePlaceholders).
+import {
+  HE_OPERATOR_PATTERN,
+  checkHeTemplateOperators,
+  isHeNameOperator,
+  withHeEmptyCellFallbacks,
+} from './templateOperatorGate';
+// Рамка ЦА клиента (brief.icp): нужной формы или null, что бы ни лежало в jsonb.
+import { readHeIcpFrame } from './icpFrame';
 import { projectMarket, type HeMarket } from './market';
-import type { HeOperatorMapping } from './types';
+import type { HeChainLetter, HeOperatorMapping } from './types';
 
 type Row = Record<string, unknown>;
 
@@ -123,6 +133,10 @@ const PROJECT_FIELDS = [
 // unreachableMark). Кабинет получает вместо неё ВЫЧИСЛЕННЫЙ БУЛЕВ признак того же
 // имени — см. toClientEngProjectRow, где он ставится ПОСЛЕ pick и поэтому
 // перекрыл бы сырую пометку, даже если ключ когда-нибудь окажется в этом списке.
+//
+// `icp` (рамка ЦА клиента) в списке тоже НЕТ по той же схеме: toClientEngProjectRow
+// ставит его ПОСЛЕ pick через readHeIcpFrame — рамкой нужной формы или null,
+// а не тем, что лежит в jsonb.
 const BRIEF_FIELDS = [
   'site_profile',
   'site_thin',
@@ -609,7 +623,8 @@ const EMAIL_STATUS_UNVERIFIED = 'unverified';
 
 // personalization_plan (маппинг операторов) и fixed_block — внутренняя кухня
 // генерации; letters клиент и так читает. Маппинг проекция ЧИТАЕТ (признак
-// `needs_rewrite`, heTemplateNeedsRewrite), но не отдаёт.
+// `needs_rewrite`, heTemplateNeedsRewrite, и подписи подстановок
+// `placeholders`, toClientEngTemplatePlaceholders), но не отдаёт.
 const TEMPLATE_FIELDS = [
   'id',
   'base_id',
@@ -1007,10 +1022,122 @@ export function heTemplateNeedsRewrite(template: Row, base: Row | undefined, mar
   }).ok;
 }
 
-function toClientTemplate(template: Row, needsRewrite: boolean): Row {
+/**
+ * Чем наполнится подстановка `{{var}}` у получателя:
+ *  - `per_recipient` — значением из строки базы этого получателя (колонка есть
+ *    среди колонок базы); `stand_in` — что он прочтёт, если ячейка пуста
+ *    (null — замены нет: такую строку гейт писем запуска и долива не пустит);
+ *  - `same_for_all` — колонки нет, и каждый получатель читает `stand_in`;
+ *  - `unfilled` — ни колонки, ни годной замены (или это имя человека без
+ *    колонки): база эту подстановку не наполняет, и запуск us-шаблона такие
+ *    письма откажет (`needs_rewrite`).
+ */
+export type HeClientPlaceholderFill = 'per_recipient' | 'same_for_all' | 'unfilled';
+
+export interface ClientEngTemplatePlaceholder {
+  /** Имя подстановки без скобок — как в тексте письма (первое написание). */
+  name: string;
+  fill: HeClientPlaceholderFill;
+  stand_in: string | null;
+}
+
+/**
+ * Подстановки ОТПРАВЛЯЕМЫХ текстов шаблона — для показа писем шаблона на шаге
+ * «Review & Launch». Наружу уходит только имя, вид наполнения и фраза-замена,
+ * то есть ровно то, что прочтёт получатель; ни маппинга (`operator_mapping`,
+ * колонки, matched), ни остального `personalization_plan` в ответе нет.
+ *
+ * Отправляемые тексты — buildLaunchSequence, та же функция, что собирает
+ * последовательность кампании у запуска: тема только у письма 1 (и его B),
+ * тела писем и их вариантов B, плюс тексты сегментных вариантов (в кампании
+ * сегмента они заменяют тело). Подстановка из темы письма 2+ сюда не попадает:
+ * её никто не прочтёт.
+ *
+ * Разбор подстановки — по правилу makeResolver гейта (templateOperatorGate.ts):
+ * запись маппинга по имени без регистра (первая побеждает), колонка
+ * засчитывается, только если запись matched и колонка есть среди колонок
+ * базы, fallback — после trim; fallback у имени человека без колонки не в
+ * счёт. Маппинг у 'us' — с заменами пустых ячеек (withHeEmptyCellFallbacks),
+ * как его достраивают запуск и ночной долив; у других рынков — как записан.
+ * Поменяется правило гейта — менять и здесь.
+ *
+ * null — посчитать нечем: базы шаблона нет в деталке или у неё нет списка
+ * колонок. Писем нет — пустой список.
+ */
+export function toClientEngTemplatePlaceholders(
+  template: Row,
+  base: Row | undefined,
+  market: HeMarket,
+): ClientEngTemplatePlaceholder[] | null {
+  if (!base || !Array.isArray(base.columns)) return null;
+  const letters = Array.isArray(template.letters) ? (template.letters as HeChainLetter[]) : [];
+  const sequence = buildLaunchSequence(letters);
+  if (!sequence) return [];
+
+  // В порядке экрана: письмо за письмом — тема, тело, варианты B, сегментные
+  // тексты (шаги последовательности идут один к одному с письмами). Сегмент
+  // без условия запуск не создаёт никогда (launchTemplate.ts, segmentWhens), и
+  // экран его не показывает — его текст здесь не считается.
+  const texts: string[] = [];
+  sequence.steps.forEach((step, i) => {
+    texts.push(step.subject, step.body);
+    for (const v of step.variants ?? []) texts.push(v.subject ?? '', v.body);
+    const segments = asRow(letters[i])?.segment_variants;
+    for (const raw of Array.isArray(segments) ? segments : []) {
+      const segment = asRow(raw);
+      if (typeof segment?.when === 'string' && segment.when.trim() !== '' && typeof segment.text === 'string') {
+        texts.push(segment.text);
+      }
+    }
+  });
+
+  const plan = asRow(template.personalization_plan);
+  const stored = Array.isArray(plan?.operator_mapping) ? (plan.operator_mapping as HeOperatorMapping[]) : null;
+  const mapping = market === 'us' ? withHeEmptyCellFallbacks(stored, base.columns).mapping : (stored ?? []);
+  const columns = new Set(base.columns.filter((c): c is string => typeof c === 'string'));
+  const byKey = new Map<string, { column: boolean; fallback: string }>();
+  for (const raw of mapping) {
+    const m = asRow(raw) as Partial<HeOperatorMapping> | null;
+    if (!m || typeof m.operator !== 'string' || !m.operator.trim()) continue;
+    const key = m.operator.trim().toLowerCase();
+    if (byKey.has(key)) continue;
+    byKey.set(key, {
+      column: m.matched === true && typeof m.column === 'string' && columns.has(m.column),
+      fallback: typeof m.fallback === 'string' ? m.fallback.trim() : '',
+    });
+  }
+
+  const out: ClientEngTemplatePlaceholder[] = [];
+  const seen = new Set<string>();
+  const operatorRe = new RegExp(HE_OPERATOR_PATTERN, 'g');
+  for (const text of texts) {
+    for (const m of text.matchAll(operatorRe)) {
+      const name = (m[1] ?? '').trim();
+      const key = name.toLowerCase();
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+      const resolved = byKey.get(key) ?? { column: false, fallback: '' };
+      if (resolved.column) {
+        out.push({ name, fill: 'per_recipient', stand_in: resolved.fallback || null });
+      } else if (resolved.fallback && !isHeNameOperator(name)) {
+        out.push({ name, fill: 'same_for_all', stand_in: resolved.fallback });
+      } else {
+        out.push({ name, fill: 'unfilled', stand_in: null });
+      }
+    }
+  }
+  return out;
+}
+
+function toClientTemplate(
+  template: Row,
+  needsRewrite: boolean,
+  placeholders: ClientEngTemplatePlaceholder[] | null,
+): Row {
   const out = pick(template, TEMPLATE_FIELDS);
   if ('launch_info' in template) out.launch_info = toClientEngLaunchInfo(template.launch_info);
   out.needs_rewrite = needsRewrite;
+  out.placeholders = placeholders;
   return out;
 }
 
@@ -1128,6 +1255,10 @@ export function toClientEngProjectRow(project: Row): Row {
        * что это объект, а не просто наличие ключа.
        */
       clientBrief.site_unreachable = asRow(brief.site_unreachable) !== null;
+      // Рамка ЦА клиента (brief.icp) — тоже вычисленным значением, а не сырьём:
+      // jsonb отдаёт что угодно, экран шага Brief ждёт рамку нужной формы
+      // (readHeIcpFrame: лимиты и чистка те же, что у записи) или null.
+      clientBrief.icp = readHeIcpFrame(brief.icp);
       out.brief = clientBrief;
     } else {
       out.brief = project.brief;
@@ -1198,12 +1329,14 @@ export function toClientEngProjectDetail(detail: HeProjectDetail): ClientEngProj
     verticals: pickList(detail.verticals, (v) => pick(v, VERTICAL_FIELDS)),
     chains: pickList(detail.chains, (c) => pick(c, CHAIN_FIELDS)),
     bases: pickList(detail.bases, toClientEngBase),
-    templates: pickList(detail.templates, (t) =>
-      toClientTemplate(
+    templates: pickList(detail.templates, (t) => {
+      const base = typeof t.base_id === 'string' ? baseById.get(t.base_id) : undefined;
+      return toClientTemplate(
         t,
-        typeof t.base_id === 'string' && heTemplateNeedsRewrite(t, baseById.get(t.base_id), market),
-      ),
-    ),
+        typeof t.base_id === 'string' && heTemplateNeedsRewrite(t, base, market),
+        toClientEngTemplatePlaceholders(t, base, market),
+      );
+    }),
     jobs: pickList(detail.jobs, toClientEngJobRow),
   };
 }

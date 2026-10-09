@@ -10,6 +10,7 @@ import { HeHypothesesBatchSchema, type HeBrandCloudOutput, type HeSiteProfileOut
 import { projectMarket, type HeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
 import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
+import { readHeIcpFrame } from '../icpFrame';
 import { getPortfolioProfile, type HePortfolioEntry } from '../datasetStats';
 import type { HeJob } from '../types';
 import {
@@ -204,6 +205,20 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     loadActualsHistory(ctx, market),
   ]);
 
+  // Рамка ЦА клиента (brief.icp — шаг «Brief» ENG-кабинета) — только в
+  // EN-промпт и только как указание модели: после вызова ни один код гипотезы
+  // с рамкой не сверяет (см. icpFrame.ts). На RU-рынке не читается вовсе, и
+  // RU-вход промпта остаётся прежним. Читается вместе с проектом в начале
+  // стадии: рамка, сохранённая после этого, войдёт в следующий прогон.
+  const icpFrame = market === 'us' ? readHeIcpFrame(project.brief?.icp) : null;
+  if (icpFrame) {
+    stageLog(
+      ctx,
+      `[hypotheses] рамка ЦА клиента в промпте: target ${icpFrame.include.length}, exclude ${icpFrame.exclude.length}, `
+        + `size ${icpFrame.size ? 'да' : 'нет'}, geo ${icpFrame.geo ? 'да' : 'нет'}`,
+    );
+  }
+
   stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
   // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
@@ -220,6 +235,7 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     ...(typeof project.brief?.business_override === 'string' && project.brief.business_override.trim()
       ? { businessOverride: project.brief.business_override.trim() }
       : {}),
+    ...(icpFrame ? { icpFrame } : {}),
   };
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),

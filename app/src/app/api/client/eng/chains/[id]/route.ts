@@ -6,6 +6,7 @@ import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeChain, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { normalizeHeChainLetters } from '@/lib/hypothesisEngine/chainLetters';
+import { heClientChainLettersProblem } from '@/lib/hypothesisEngine/chainTiming';
 import { engServerError } from '../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -15,6 +16,11 @@ const LETTERS_SAVE_FAILED = 'Failed to save the letters';
 // PATCH — полная замена писем цепочки { letters: [...] } из инлайн-редактора
 // шага Letters кабинета. Валидация/нормализация — общая со staff
 // (normalizeHeChainLetters); A/B-swap-контракт staff-роута кабинету не нужен.
+// Сверх неё — правила кабинета (heClientChainLettersProblem, та же проверка и
+// тот же английский текст, что у редактора): не меньше 3 писем (решение
+// владельца 2026-10-10) и у письма 2+ пауза целым числом 1..90 — 0 или пусто
+// нормализатор сохранил бы нулём, а шаблон взял бы вместо него лесенку.
+// Staff-роут этих правил не знает.
 // Скоуп: цепочка → вертикаль → проект-владелец, чужая — 404.
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.chain.letters.patch' }, async () => {
@@ -38,6 +44,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (!Array.isArray(body?.letters)) {
       return jsonError('letters must be an array', 400);
     }
+    const clientProblem = heClientChainLettersProblem(body.letters);
+    if (clientProblem) return jsonError(clientProblem, 400);
     const { letters: nextLetters, error: normError } = normalizeHeChainLetters(body.letters);
     if (!nextLetters) {
       // Детальная RU-формулировка валидатора остаётся серверной, клиенту —
