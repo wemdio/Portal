@@ -124,6 +124,7 @@ export function SeedBoxesTab() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [passwordFor, setPasswordFor] = useState<SeedBoxDto | null>(null);
+  const [proxyFor, setProxyFor] = useState<SeedBoxDto | null>(null);
   const [seedPage, setSeedPage] = useState(1);
   const [healthPage, setHealthPage] = useState(1);
   const boxes = data?.boxes ?? NO_BOXES;
@@ -299,7 +300,10 @@ export function SeedBoxesTab() {
               {seedView.rows.map((box) => (
                 <tr key={box.id} className={`border-t border-zinc-100 ${box.enabled ? '' : 'opacity-50'}`}>
                   <td className="py-2 pl-5 pr-3 text-zinc-600">{PROVIDER_LABEL[box.provider]}</td>
-                  <td className="py-2 pr-3 font-medium text-zinc-900">{box.email}</td>
+                  <td className="py-2 pr-3">
+                    <div className="font-medium text-zinc-900">{box.email}</div>
+                    {box.proxy_label ? <div className="text-xs text-zinc-400">через прокси {box.proxy_label}</div> : null}
+                  </td>
                   <td className="py-2 pr-3">
                     {busyId === box.id ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" /> : <StatusChip box={box} />}
                   </td>
@@ -311,6 +315,9 @@ export function SeedBoxesTab() {
                       </button>
                       <button type="button" onClick={() => setPasswordFor(box)} className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100">
                         Пароль
+                      </button>
+                      <button type="button" onClick={() => setProxyFor(box)} className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100">
+                        Прокси
                       </button>
                       <button type="button" onClick={() => void toggle(box)} className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100">
                         {box.enabled ? 'Выключить' : 'Включить'}
@@ -397,6 +404,18 @@ export function SeedBoxesTab() {
           onSaved={async () => {
             const id = passwordFor.id;
             setPasswordFor(null);
+            await checkMany([id]);
+          }}
+        />
+      ) : null}
+      {proxyFor ? (
+        <ProxyModal
+          box={proxyFor}
+          onClose={() => setProxyFor(null)}
+          onSaved={async () => {
+            const id = proxyFor.id;
+            setProxyFor(null);
+            await load();
             await checkMany([id]);
           }}
         />
@@ -519,6 +538,72 @@ function PasswordModal({ box, onClose, onSaved }: { box: SeedBoxDto; onClose: ()
         placeholder="Пароль IMAP / пароль приложения"
         className="w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm text-zinc-900"
       />
+    </SenderModal>
+  );
+}
+
+/** Свой прокси на ящик: Яндекс пускает купленные ящики только с российских адресов. */
+function ProxyModal({ box, onClose, onSaved }: { box: SeedBoxDto; onClose: () => void; onSaved: () => void | Promise<void> }) {
+  const [proxy, setProxy] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async (value: string | null) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await updateSeedBox(box.id, { proxy: value });
+      await onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить прокси');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <SenderModal
+      title="Прокси для входа"
+      subtitle={box.proxy_label ? `${box.email} · сейчас ${box.proxy_label}` : box.email}
+      onClose={onClose}
+      footer={
+        <>
+          {error ? <span className="mr-auto text-sm text-red-600">{error}</span> : null}
+          {box.proxy_label ? (
+            <button
+              type="button"
+              onClick={() => void save(null)}
+              disabled={busy}
+              className="rounded-lg px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
+            >
+              Убрать прокси
+            </button>
+          ) : null}
+          <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-zinc-600 hover:bg-zinc-100">
+            Отмена
+          </button>
+          <button
+            type="button"
+            onClick={() => void save(proxy)}
+            disabled={busy || !proxy.trim()}
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Сохранить и проверить
+          </button>
+        </>
+      }
+    >
+      <input
+        autoFocus
+        value={proxy}
+        onChange={(e) => setProxy(e.target.value)}
+        autoComplete="off"
+        spellCheck={false}
+        placeholder="http://логин:пароль@1.2.3.4:8000 или 1.2.3.4:8000:логин:пароль"
+        className="w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm text-zinc-900"
+      />
+      <p className="mt-2 text-xs text-zinc-500">Российский, один прокси на один ящик</p>
     </SenderModal>
   );
 }

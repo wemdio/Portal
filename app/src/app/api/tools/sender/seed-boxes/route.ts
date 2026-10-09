@@ -14,7 +14,7 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-const PUBLIC_COLUMNS = 'id, provider, email, imap_host, imap_port, enabled, status, last_error, checked_at, junk_folder, created_at';
+const PUBLIC_COLUMNS = 'id, provider, email, imap_host, imap_port, enabled, status, last_error, checked_at, junk_folder, proxy_label, created_at';
 
 /**
  * Контрольные ящики «Рассылки»: список (без паролей) и сводка проб по
