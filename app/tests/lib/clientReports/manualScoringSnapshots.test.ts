@@ -112,6 +112,30 @@ describe('manual scoring durable snapshot reconciliation', () => {
     expect(mockDb.getRows('client_manual_score_runs')[0]).toMatchObject({ status: 'failed' });
   });
 
+  it('preserves the explicit retry marker after temporary manual runs are removed', async () => {
+    const baseline = seed();
+    mockDb = createMockSupabase({ tables: {
+      client_manual_score_runs: baseline.getRows('client_manual_score_runs').map((run) => ({
+        ...run, is_no_email_retry: true,
+      })),
+      client_manual_score_rows: baseline.getRows('client_manual_score_rows'),
+      client_pipeline_domain_snapshots: [],
+    } });
+
+    await expect(processManualRun({ runId: 'manual-run', endpoint }))
+      .resolves.toMatchObject({ status: 'completed' });
+    await mockDb.from('client_manual_score_runs').delete().eq('id', 'manual-run');
+    await mockDb.from('client_manual_score_rows').delete().eq('run_id', 'manual-run');
+
+    expect(mockDb.getRows('client_manual_score_runs')).toHaveLength(0);
+    expect(mockDb.getRows('client_pipeline_domain_snapshots')).toHaveLength(1);
+    expect(mockDb.getRows('client_pipeline_domain_snapshots')[0]).toMatchObject({
+      source_kind: 'manual_scoring',
+      metadata: expect.objectContaining({ source_filename: 'manual.csv', is_no_email_retry: true }),
+    });
+    expect(appendLeadsMock).not.toHaveBeenCalled();
+  });
+
   it('fails closed when processed rows cannot be loaded for routing', async () => {
     mockDb = routeSeed({
       client_manual_score_rows: {
@@ -145,7 +169,7 @@ describe('manual scoring durable snapshot reconciliation', () => {
     mockDb = routeSeed();
     cleanCompanyNamesMock.mockResolvedValue(['One', 'Two']);
     appendLeadsMock.mockResolvedValue({
-      accepted: 1, skipped: 1, acceptedIndexes: [1], identityComplete: true,
+      accepted: 1, skipped: 1, acceptedIndexes: [1], attemptedIndexes: [0, 1], identityComplete: true,
     });
 
     await expect(processManualRun({ runId: 'manual-run', endpoint }))
@@ -179,7 +203,7 @@ describe('manual scoring durable snapshot reconciliation', () => {
     } });
     cleanCompanyNamesMock.mockResolvedValue(['Сбер Тест', 'Two']);
     appendLeadsMock.mockResolvedValue({
-      accepted: 1, skipped: 0, acceptedIndexes: [0], identityComplete: true,
+      accepted: 1, skipped: 0, acceptedIndexes: [0], attemptedIndexes: [0], identityComplete: true,
     });
 
     await expect(processManualRun({ runId: 'manual-run', endpoint }))
@@ -214,7 +238,7 @@ describe('manual scoring durable snapshot reconciliation', () => {
     expect(mockDb.getRows('client_pipeline_domain_snapshots')).toHaveLength(0);
 
     appendLeadsMock.mockResolvedValueOnce({
-      accepted: 2, skipped: 0, acceptedIndexes: [0, 1], identityComplete: true,
+      accepted: 2, skipped: 0, acceptedIndexes: [0, 1], attemptedIndexes: [0, 1], identityComplete: true,
     });
     await expect(processManualRun({ runId: 'manual-run', endpoint }))
       .resolves.toMatchObject({ status: 'completed' });
@@ -234,6 +258,7 @@ describe('manual scoring durable snapshot reconciliation', () => {
         accepted: 1,
         skipped: 1,
         acceptedIndexes: [1],
+        attemptedIndexes: [0, 1],
         identityComplete: true,
       },
     });
@@ -246,7 +271,7 @@ describe('manual scoring durable snapshot reconciliation', () => {
     ]);
 
     appendLeadsMock.mockResolvedValueOnce({
-      accepted: 1, skipped: 0, acceptedIndexes: [0], identityComplete: true,
+      accepted: 1, skipped: 0, acceptedIndexes: [0], attemptedIndexes: [0], identityComplete: true,
     });
     await expect(processManualRun({ runId: 'manual-run', endpoint }))
       .resolves.toMatchObject({ status: 'completed' });
@@ -284,10 +309,10 @@ describe('manual scoring durable snapshot reconciliation', () => {
     } });
     cleanCompanyNamesMock.mockImplementation(async (items) => items.map((item) => item.name ?? ''));
     appendLeadsMock
-      .mockResolvedValueOnce({ accepted: 1, skipped: 0, acceptedIndexes: [0], identityComplete: true })
+      .mockResolvedValueOnce({ accepted: 1, skipped: 0, acceptedIndexes: [0], attemptedIndexes: [0], identityComplete: true })
       .mockRejectedValueOnce(Object.assign(new Error('aggregate-only'), {
         partialResult: {
-          accepted: 1, skipped: 0, acceptedIndexes: null, identityComplete: false,
+          accepted: 1, skipped: 0, acceptedIndexes: null, attemptedIndexes: [0], identityComplete: false,
         },
       }));
 

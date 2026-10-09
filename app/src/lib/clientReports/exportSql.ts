@@ -218,7 +218,9 @@ WITH domain_facts AS (
     (s.routed_campaign_id IS NOT NULL) AS campaign_identity_known,
     CASE
       WHEN s.source_kind = 'manual_scoring'
-        AND (retry_run.is_no_email_retry OR s.metadata->>'source_filename' LIKE 'no-email-retry-%-20261008.txt')
+        AND (s.metadata->>'is_no_email_retry' = 'true'
+          OR retry_run.is_no_email_retry
+          OR s.metadata->>'source_filename' LIKE 'no-email-retry-%')
         THEN 'no_email_retry'
       ELSE s.source_kind
     END AS source_kind,
@@ -255,7 +257,7 @@ WITH domain_facts AS (
     NULL::text,
     false AS campaign_identity_known,
     CASE
-      WHEN r.is_no_email_retry OR r.source_filename LIKE 'no-email-retry-%-20261008.txt'
+      WHEN r.is_no_email_retry OR r.source_filename LIKE 'no-email-retry-%'
         THEN 'no_email_retry_legacy'
       ELSE 'manual_scoring_legacy'
     END,

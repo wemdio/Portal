@@ -461,13 +461,14 @@ async function persistManualRunSnapshots(
 
   const { data: run, error: runError } = await supabaseAdmin
     .from('client_manual_score_runs')
-    .select('client_user_id, source_filename')
+    .select('client_user_id, source_filename, is_no_email_retry')
     .eq('id', runId)
     .single();
   if (runError) throw new Error(`Failed to load manual score run: ${runError.message}`);
   const runDetails = run as {
     client_user_id?: string;
     source_filename?: string | null;
+    is_no_email_retry?: boolean;
   } | null;
   const clientUserId = runDetails?.client_user_id;
   if (!clientUserId) throw new Error('Manual score run has no client owner');
@@ -516,6 +517,7 @@ async function persistManualRunSnapshots(
         email2: row.email2,
         email2ValidationStatus: row.email2_validation_status,
         sourceFilename: runDetails?.source_filename ?? null,
+        isNoEmailRetry: runDetails?.is_no_email_retry === true,
         scoredAt: row.processed_at,
         routedCampaignId: route?.campaignId ?? null,
         routedCampaignName: route?.campaignName ?? null,
