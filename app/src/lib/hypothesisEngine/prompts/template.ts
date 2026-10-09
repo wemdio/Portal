@@ -18,7 +18,9 @@
  * Проход 2 (критик/рерайт финальных писем) — template-фасад над общими
  * билдерами chain: buildTemplateCriticMessages / buildTemplateRewriteMessages.
  * Опциональные инжекты (styleExample / winnerPatterns) принимают все
- * сборщики этого файла — см. HePromptInjections в ./chain.
+ * сборщики этого файла — см. HePromptInjections в ./chain. Слова клиента из
+ * брифа (clientWords → блок «CLIENT'S OWN WORDS») принимают план, письма,
+ * критик и рерайт; рендерят только для EN.
  */
 
 import type { LLMMessage } from '../llm';
@@ -29,9 +31,11 @@ import {
   CHAIN_REGULATIONS,
   buildChainCriticMessages,
   buildChainRewriteMessages,
+  renderClientWordsBlockEn,
   renderSignatureBlock,
   renderStyleExampleBlock,
   renderWinnerPatternsBlock,
+  type HeClientWords,
   type HePromptInjections,
 } from './chain';
 
@@ -80,6 +84,8 @@ Rules:
 - The vertical's hypotheses (if present in the materials) are the PRIMARY source of pains, angles and proofs for fixed_block: those marked "✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ" are human-confirmed and take priority; do not introduce market angles and pains that contradict the list; specialist-rejected hypotheses are simply absent from the materials — never mention their existence.
 - fixed_block builds on the vertical's ready sequence (below) — keep its strong moves, strengthen the weak ones.
 - Specify the client's offer in fixed_block using the mandatory four-part structure: (1) the service in plain words — one phrase a stranger understands ("done-for-you email outreach", "a staffing agency for mass hiring"); vague labels ("an external team", "a growth partner") are banned; (2) the outcome for the recipient in their units — meetings/leads/deals with named target roles per period, NOT the sender's process ("we write emails", "we do outreach"); (3) the start — a low-commitment first step ("a test on a narrow segment"); (4) proof — one case from the materials, assigned to exactly one email of the sequence.
+- If the materials contain a "CLIENT'S OWN WORDS" block — fixed_block states the client's offer and every fact or figure about the client in those words, verbatim (translated faithfully if they are in another language): no paraphrase into a different claim, no rounded or converted number. It outranks the source sequence wherever they differ about the client.
+- Never specify a CTA or a line that offers, promises or implies a report, example, sample, case study, audit or any other asset that the materials do not provide.
 - If the materials contain a "КЕЙС КЛИЕНТА" block — that is the single case slot of the sequence (cases from the sequence/brief are a fallback when the block is absent): specify it in fixed_block for exactly one email and ONLY IF it is relevant to the world of the base recipients (the case's industry/domain is plausibly close to the vertical). Introduce through relevance: "we're in your space: we did <what, with what result> for <client>" — a bare "we worked with X" sticker is banned. A case from a far-away industry → specify a nameless wording ("for a corporate software vendor") or do not use a case at all (the case slot may stay empty). Real numbers — only from the block, and never attribute the case to an industry other than the one stated in the block.
 - Specify each email's REASON FOR WRITING explicitly and take it from the BASE ANALYSIS: the nature of the base dictates the reason (a job-postings base → their hiring; a skew toward regions → the companies' geography; an industry mix → their segment). A generic segment truism as the reason is banned ("everyone in the segment has problem X", "sales are hitting a traffic ceiling"). Each email of the sequence has its own concrete reason: a new email angle = a new fact-reason, not "reminding about myself".
 - Specify email 1 by the mandatory beats, as human dialogue, not a pitch: GREETING → REASON (softly and personally, in one calm sentence: why I am writing to these recipients now — a fact from the base analysis about their world, not "You sell into X") → what I offer (one simple line: the service in plain words + for whom) → how and why I can help (proof/relevance, the outcome via roles/segments, no marketing numbers) → one soft question (hybrid CTA per the regulations: one fork in a lively wording "Is this relevant to you, or could you point me to who owns <topic> on your team?") → the sender's SIGNATURE. Email 1 must pass the 5-second test: a stranger instantly understands who is writing, what is offered and how it helps them. Sender-process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
@@ -124,6 +130,12 @@ export interface TemplatePlanPromptInput extends HePromptInjections {
    * правило: один кейс из цепочки/брифа или безымянно.
    */
   clientCase?: HeCaseDraft | null;
+  /**
+   * Опционально: слова клиента из брифа (clientWordsFromBrief) — оффер и
+   * описание бизнеса. Рендерятся блоком «CLIENT'S OWN WORDS» только при
+   * language === 'en'; RU/PL-промпт поле игнорирует и не меняется.
+   */
+  clientWords?: HeClientWords | null;
 }
 
 function renderChainLetters(letters: HeChainLetter[]): string {
@@ -141,13 +153,15 @@ ${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h
 `
     : '';
   const clientCaseBlock = input.clientCase ? `${renderClientCaseBlock(input.clientCase)}\n\n` : '';
+  // Слова клиента — только EN (для RU/PL пустая строка, промпт байт-в-байт прежний).
+  const clientWordsBlock = lang === 'en' ? renderClientWordsBlockEn(input.clientWords) : '';
   const signatureBlock = renderSignatureBlock(input.signatureOverride);
   const styleBlock = renderStyleExampleBlock(input.styleExample);
   const winnersBlock = renderWinnerPatternsBlock(input.winnerPatterns);
   const user = `ВЕРТИКАЛЬ: ${input.verticalName}
 ${input.verticalSummary}
 
-${hypothesesBlock}${clientCaseBlock}${signatureBlock}${styleBlock}${winnersBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
+${hypothesesBlock}${clientCaseBlock}${clientWordsBlock}${signatureBlock}${styleBlock}${winnersBlock}ИСХОДНАЯ ЦЕПОЧКА ВЕРТИКАЛИ (базовый костяк):
 ${renderChainLetters(input.chainLetters)}
 
 АНАЛИЗ ЗАГРУЖЕННОЙ БАЗЫ:
@@ -221,6 +235,7 @@ Additional template rules:
 - Do NOT weave segment variants (15%) into the main text: the main email text is the default for the whole base and contains no segment specifics. For each variant from the plan write a SEPARATE "---SEGMENT: <when>---" block right after the corresponding email — the full body variant of that email for the segment (shared subject, also ≤ 80 words). Each segment variant opens with its own reason for its segment.
 - Insert personalization operators strictly in the {{var}} format — exactly the names given in the plan, and no others: an operator that is not in the plan has no data and reaches the recipient as an empty gap ("Hello ,"). No more than 1–2 distinct ones per email; if the plan gives no operators, write without any {{var}}.
 - The offer in plain words: the client's service is named with one phrase a stranger understands, from fixed_block/the source sequence — vague labels ("an external team", "a growth partner") are banned. The benefit is the outcome for the recipient in their units (meetings/leads/deals with named target roles), NOT the sender's process ("we write emails", "we do outreach").
+- If the materials contain a "CLIENT'S OWN WORDS" block — whatever an email says about the client (the offer, a fact, a figure) follows those words verbatim, per the block's rule: no paraphrase into a different claim, no rounded or converted number. Where fixed_block or the source sequence say something different about the client, the client's words win.
 - Tone — human dialogue, not advertising: the email reads as a message from one person to another ("I'm writing", "we", conversational language, short sentences), not like a landing page. Advertising clichés are banned: "leader", "best", "effective", "stream of leads", "we guarantee", "profitable", "free", "team of professionals", "individual approach" and the like. In email 1 — no marketing numbers (digits in the body — minus 63% reply): phrase the recipient's outcome via roles/segments ("meetings with HR directors at large employers"), not a cadence like "3–5 meetings a month". Dashes ("—", "–") in subjects and bodies are banned: they are a marker of machine text; replace with a comma, colon, period or parentheses.
 - REASON: every email opens with a natural greeting that reads right without a name ("Hello,", "Hi there,", "Good afternoon,"), followed by a concrete reason from the base analysis — why we are writing to these recipients now. The nature of the base dictates the reason: a job-postings base → their hiring; a skew toward regions → the companies' geography; an industry mix → their segment. A generic segment truism as the reason is banned ("everyone in the segment has problem X", "sales are hitting a traffic ceiling"). Each email has its own reason: a new angle = a new fact-reason, not "reminding about myself".
 - SIGNATURE: every email closes with the sender's signature (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <client company> team" — NEVER invent a person's name). The first line of an email is a greeting, never an in-your-face assertion about the recipient's business or market ("Your market is X", "You sell Y", "Sales are hitting…"): the reason after the greeting goes softly and personally, in one calm sentence, without pathos or lectures about someone else's market.
@@ -230,11 +245,11 @@ Additional template rules:
 - At least one email of the sequence must contain one concrete proof element from the provided materials (fixed_block / source sequence): a named client OR a concrete numeric fact — only if it actually exists in the materials. The same case/client name — in at most one email of the sequence. Inventing client names and numbers is forbidden (see the regulations); if there is no suitable case — write nameless.
 - If the materials contain a "КЕЙС КЛИЕНТА" block — that is the single case slot of the sequence (cases from the source sequence are a fallback when the block is absent): use it once and ONLY IF relevant to the world of the base recipients (the industry/domain is plausibly close). Introduce through relevance: "we're in your space: we did <what, with what result> for <client>" — never as a bare "we worked with X" sticker. A case from a far-away industry → nameless ("for a corporate software vendor") or skip the case entirely. Real numbers — only from the block, in at most ONE email, and never attribute it to an industry other than the one stated in the block.
 - The emails must read as a real 1:1 correspondence with a representative of the base segment.
-- Before delivering, read each email aloud: grammar and agreement must be flawless. Check: every email has a greeting at the start and the sender's signature at the end; the first line is a greeting, not an in-your-face assertion about the recipient's business or market; no subject and no body contains a dash ("—", "–"); every email has exactly one CTA question (zero CTAs — a violation).
+- Before delivering, read each email aloud: grammar and agreement must be flawless. Check: every email has a greeting at the start and the sender's signature at the end; the first line is a greeting, not an in-your-face assertion about the recipient's business or market; no subject and no body contains a dash ("—", "–"); every email has exactly one CTA question (zero CTAs — a violation); the greeting, the message, the question and the signature are separated by blank lines, and the question is its own paragraph right before the signature; no email offers, promises or implies a report, example, sample, case study, audit or any other asset that the materials do not provide.
 
 EXAMPLE — how not to and how to (a structure example, not text to copy):
 BAD: "Software vendors' sales are hitting a traffic ceiling. We are Polza: we write cold emails for a company that sells a complex product to other businesses, and we drive it to a conversation with decision-makers. That's how we worked with BPMSoft. Send a sample sequence for {{company}}?"
-Why bad: no greeting, no signature, and the first line is an in-your-face assertion about someone else's market: a pitch, not a note from a person; the reason is a generic segment truism (the "traffic ceiling" platitude is true for everyone and no one in particular); the service is not named in plain words, the client is described through nested clauses; the "That's how we worked with BPMSoft" case is a context-free sticker: unclear what was done and what it has to do with the recipient.
+Why bad: no greeting, no signature, and the first line is an in-your-face assertion about someone else's market: a pitch, not a note from a person; the reason is a generic segment truism (the "traffic ceiling" platitude is true for everyone and no one in particular); the service is not named in plain words, the client is described through nested clauses; the "That's how we worked with BPMSoft" case is a context-free sticker: unclear what was done and what it has to do with the recipient; the CTA "Send a sample sequence for {{company}}?" offers an asset that no material provides (offering or promising a sample, report, case study or audit that is not in the materials is banned), and it has no referral branch.
 GOOD: "Good afternoon.
 
 I saw a figure for your industry: the share of deals stuck at the pilot stage grew 1.7x over the year, and I thought of you.
@@ -244,8 +259,8 @@ At Polza we do done-for-you email outreach: we find companies that need your pro
 Is this relevant to you, or could you point me to who owns new business at {{company}}?
 
 Best regards,
-Sergey, Polza"
-Why good: opens with a greeting; the reason is soft and personal, anchored on a number from the materials, not an in-your-face assertion; the service is named in plain words; the case is introduced through relevance ("we're in your space") with a clear result, not as a sticker; the CTA is a single hybrid question in a lively wording; there is a sender's signature; not a single dash.`;
+The Polza team"
+Why good: opens with a greeting; the reason is soft and personal, anchored on a number from the materials, not an in-your-face assertion; the service is named in plain words; the case is introduced through relevance ("we're in your space") with a clear result, not as a sticker; the CTA is a single hybrid question in a lively wording that offers nothing the materials lack; each part is its own paragraph, the question right before the signature; the signature is the team, with no invented person's name (a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block would be used verbatim instead); not a single dash.`;
 
 /** Системный блок финальных писем по языку цепочки (PL — RU-вариант, перевода нет). */
 const LETTERS_SYSTEM: Record<HeChainLanguage, string> = {
@@ -343,6 +358,11 @@ export interface TemplateLettersPromptInput extends HePromptInjections {
   baseAnalysis: HeBaseAnalysisOutput;
   /** Опционально: выбранный кейс клиента (he_cases) — ГЛАВНОЕ доказательство цепочки. */
   clientCase?: HeCaseDraft | null;
+  /**
+   * Опционально: слова клиента из брифа (clientWordsFromBrief). Блок «CLIENT'S
+   * OWN WORDS» — только при language === 'en'; RU/PL поле игнорируют.
+   */
+  clientWords?: HeClientWords | null;
 }
 
 /** Сообщения для генерации финальных писем по плану 85/15. */
@@ -373,7 +393,7 @@ FIXED BLOCK (~85%, обязательный костяк):
 ${input.plan.fixed_block}
 """
 ${input.clientCase ? `\n${renderClientCaseBlock(input.clientCase)}\n` : ''}
-${renderStyleExampleBlock(input.styleExample)}${renderWinnerPatternsBlock(input.winnerPatterns)}${renderSignatureBlock(input.signatureOverride)}СЕГМЕНТНЫЕ ВАРИАНТЫ (~15%, условные — для каждого отдельный блок ---SEGMENT: <when>--- после письма; в основной текст НЕ включать):
+${lang === 'en' ? renderClientWordsBlockEn(input.clientWords) : ''}${renderStyleExampleBlock(input.styleExample)}${renderWinnerPatternsBlock(input.winnerPatterns)}${renderSignatureBlock(input.signatureOverride)}СЕГМЕНТНЫЕ ВАРИАНТЫ (~15%, условные — для каждого отдельный блок ---SEGMENT: <when>--- после письма; в основной текст НЕ включать):
 ${variants || '(нет)'}${legacyAdditions ? `\nДополнительные углы из плана (тоже только в сегментные варианты, не в основной текст):\n${legacyAdditions}` : ''}
 
 ОПЕРАТОРЫ ПЕРСОНАЛИЗАЦИИ (вставлять как есть, формат {{var}}):
@@ -420,6 +440,8 @@ export interface HeTemplateCritique {
 /**
  * Сообщения критик-прохода для финальных писем шаблона.
  * Ответ — JSON HeTemplateCritique (вызов через callLLMWithSchema).
+ * clientWords — только EN: блок «CLIENT'S OWN WORDS» рендерит
+ * buildChainCriticMessages в EN-ветке; RU/PL поле игнорируют.
  */
 export function buildTemplateCriticMessages(input: {
   verticalName: string;
@@ -428,6 +450,7 @@ export function buildTemplateCriticMessages(input: {
   language: 'ru' | 'en' | 'pl';
   styleExample?: string | null;
   winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+  clientWords?: HeClientWords | null;
 }): LLMMessage[] {
   return buildChainCriticMessages(input);
 }
@@ -436,6 +459,8 @@ export function buildTemplateCriticMessages(input: {
  * Сообщения рерайт-прохода для финальных писем шаблона: переписываются
  * только письма из issues критики, остальные возвращаются дословно; вывод —
  * маркерами ---LETTER N--- (парсит letterParser).
+ * clientWords — только EN: блок «CLIENT'S OWN WORDS» в материалах рерайта
+ * рендерит buildChainRewriteMessages в EN-ветке; RU/PL поле игнорируют.
  */
 export function buildTemplateRewriteMessages(input: {
   verticalName: string;
@@ -445,6 +470,7 @@ export function buildTemplateRewriteMessages(input: {
   styleExample?: string | null;
   winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
   signatureOverride?: string | null;
+  clientWords?: HeClientWords | null;
 }): LLMMessage[] {
   return buildChainRewriteMessages(input);
 }

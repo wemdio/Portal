@@ -11,7 +11,11 @@
  *     последний по дате запуска шаблон вертикали с launch_info; маппинг
  *     колонок → переменные — operator_mapping того же шаблона (как при
  *     первичном запуске, mapBaseRowsToLeads из launchHandoff); у market='us'
- *     — с заменами пустых ячеек, как у запуска (heRefillOperatorMapping);
+ *     — с заменами пустых ячеек, как у запуска (heRefillOperatorMapping), и
+ *     без строк, которым письмо кампании прочиталось бы неверно
+ *     (heRefillUnfilledRows: тот же гейт писем, что у запуска; такие строки
+ *     остаются в базе и считаются в stats.held_unfilled; снята ВСЯ ночь —
+ *     алерт команде, alertRefillLettersHeld);
  *   - лиды: только строки с email И ДОПУЩЕННЫМ вердиктом валидации. Список
  *     допущенных вердиктов и их ранжирование здесь НЕ дублируются — вердикт
  *     считает heLaunchEmailVerdict (launchHandoff.ts), тот же, что у ручного
@@ -202,6 +206,7 @@ import {
   normalizeHeMaxEmailsPerCompany,
 } from '../baseCollectEnqueue';
 import {
+  buildLaunchSequence,
   findCompanyKeyColumns,
   heLaunchCompanyKey,
   heLaunchEmailVerdict,
@@ -213,20 +218,29 @@ import {
 // определения «проект остановлен» в дереве быть не должно — там же и признак
 // паузы, записанной отменой клиентом (проверка владения перед провайдером).
 // Бандл воркера от этого не растёт — autoPipeline тянет только
-// baseCollectEnqueue, launchHandoff и instantly-клиент, а они уже здесь
-// (через appendLeads).
+// baseCollectEnqueue, launchHandoff, templateOperatorGate и instantly-клиент, а
+// они уже здесь (через appendLeads и импорты ниже). Оттуда же — колонки базы
+// долива и причина «писем нет», общие с предпроверкой писем тика.
 import {
   buildHeCapacityPauseReason,
+  HE_REFILL_BASE_COLUMNS,
+  HE_REFILL_NO_LETTERS_DETAIL,
   isHeClientCancelPauseReason,
   pauseHeAutoPipelineRefill,
 } from '../autoPipeline';
 // Алерт команде в health-бот: кабинет ENG пишет клиенту «команда уже
 // работает», и это правда только потому, что пауза по ёмкости сообщает о себе
-// здесь (см. alertRefillCapacityStop).
+// здесь (см. alertRefillCapacityStop). Тем же каналом — ночь, все строки
+// которой сняты из-за писем (alertRefillLettersHeld).
 import { notifyHeClientStop } from '../opsAlert';
-import { withHeEmptyCellFallbacks } from '../templateOperatorGate';
+import {
+  checkHeTemplateOperators,
+  describeHeTemplateOperatorGate,
+  heTemplateGateHoldsEveryRow,
+  withHeEmptyCellFallbacks,
+} from '../templateOperatorGate';
 import type { HeMarket } from '../market';
-import type { HeJob, HeOperatorMapping } from '../types';
+import type { HeChainLetter, HeJob, HeOperatorMapping } from '../types';
 import { stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
 import {
   // Клиент БЕЗ сигнала джобы — только под записи, ФИКСИРУЮЩИЕ УЖЕ СДЕЛАННУЮ
@@ -681,6 +695,19 @@ export interface HeRefillStats {
    * пересборкой базы, «адрес отклонён» — ничем, и в отчёте это разные строки.
    */
   unverified: number;
+  /**
+   * Адресов (строк с допущенным вердиктом, своих и перенесённых), которые долив
+   * НЕ отдал провайдеру: письмо основной кампании подставило бы в них пустоту
+   * или замену не на месте (шаг 3a, heRefillUnfilledRows — тот же гейт, что у
+   * запуска). Строки остаются в своей базе; в бронь дня и в попытки не входят,
+   * и перенос их тоже не отправит: компания без иного лида в очередь не
+   * ложится, а строки компании из очереди проходят тот же отбор. Только
+   * market='us'; нет ключа — таких не было.
+   * Читатели — строки лога прогона (отдельная строка шага 3a и итоговая,
+   * успешная и отказная) и лента Command Center
+   * (engDashboard.buildEngDashboardEvents: «N skipped…» у ночи 'appended').
+   */
+  held_unfilled?: number;
   /** Принято Instantly. */
   appended: number;
   /** Отрезано blocklist'ом владельца пресета. */
@@ -1607,6 +1634,53 @@ function alertRefillCapacityStop(ctx: HeStageContext, job: HeJob, baseId: string
 }
 
 /**
+ * Алерт команде: шаг 3a снял ВСЕ строки ночи — письмо запущенной кампании
+ * прочиталось бы у каждой неверно (heRefillUnfilledRows), отправлять нечего.
+ * Сборка этой ночи уже куплена (кроме ночи только из переноса, carryOnly —
+ * это пишется в причине), а ночь запишется 'appended' с нулём и в серию
+ * сухих ночей не пойдёт: это проблема писем, а не рынка, и пометкой сухой
+ * вертикали её не лечить. Без алерта команда видела бы это только в логах
+ * воркера, а клиент — строку ленты «+0 leads, N skipped» каждую ночь.
+ * Отказ писем, не зависящий от строк, тик крона ловит ещё до покупки (шаг
+ * 3a-- в autoPipeline.ts, тот же вид алерта) — сюда доходят пустые ячейки у
+ * всех строк ночи и то, чего тик видеть не мог: колонка, которой у этой базы
+ * не оказалось, или шаблон, запущенный между тиком и доливом.
+ *
+ * Зовётся сразу после отбора (до чёрного списка и брони): исход ночи от
+ * дальнейших шагов не зависит — лидов для отправки уже нет. Повтор той же
+ * вертикали в течение 6 ч гасит дедупликация opsAlert (вид 'letters_held');
+ * следующая ночь пишет снова. `void` — как у alertRefillCapacityStop; рынок —
+ * тот, по которому шаг 3a вообще снимает строки (args.market, только 'us').
+ */
+function alertRefillLettersHeld(
+  job: HeJob,
+  base: { id: string; vertical_id: string },
+  market: HeMarket | undefined,
+  campaignId: string,
+  held: number,
+  details: string,
+  carryOnly: boolean,
+): void {
+  void notifyHeClientStop({
+    projectId: job.project_id,
+    market: market ?? null,
+    stage: 'base_collect (refill)',
+    kind: 'letters_held',
+    provider: 'letters',
+    // Причина письма — первой: opsAlert режет текст до HE_OPS_REASON_MAX.
+    reason:
+      `${details} (снято ${held} из ${held} адр. ночи; кампания ${campaignId}` +
+      `${carryOnly ? '; ночь только из переноса, сборка не покупалась' : ''})`,
+    jobId: job.id,
+    baseId: base.id,
+    verticalId: base.vertical_id,
+    clientSees:
+      `строку ленты «refill: +0 leads, ${held} skipped (the letters would not read right for ` +
+      `${held === 1 ? 'this contact' : 'these contacts'})»; вертикаль остаётся «live»`,
+  });
+}
+
+/**
  * Как строка журнала прогонов решает серию отказов (refillFailStreak):
  * 'failure' — отказ среза, 'success' — серию обрывает, 'skip' — серию не
  * решает вовсе (ни отказ, ни успех).
@@ -1758,6 +1832,12 @@ interface RefillTemplatePick {
   campaignId: string;
   presetId: string;
   operatorMapping: HeOperatorMapping[] | undefined;
+  /**
+   * he_templates.letters как есть — письма, из которых запуск собрал кампанию
+   * (после вставки шаблона их не переписывает ни один путь). Читает только
+   * проверка незаполняемых строк (heRefillUnfilledRows).
+   */
+  letters: unknown;
 }
 
 /**
@@ -1768,9 +1848,9 @@ interface RefillTemplatePick {
  * памяти (launchTemplate.ts, шаг 4b″): без той же замены строка долива с
  * пустой ячейкой ушла бы в ту же кампанию пустотой («I looked at  and…»). У
  * шаблона, записанного позже, замены уже лежат в маппинге, и вызов ничего не
- * меняет. Место замены в письмах гейт проверял по пустым ячейкам базы запуска
- * (или стадии template), строк долива он не видел. Иной рынок — маппинг как
- * записан.
+ * меняет. Место замены в письмах гейт запуска проверял по пустым ячейкам базы
+ * запуска (или стадии template); строки долива по этому маппингу проверяет
+ * heRefillUnfilledRows ниже. Иной рынок — маппинг как записан.
  */
 function heRefillOperatorMapping(
   operatorMapping: HeOperatorMapping[] | undefined,
@@ -1778,6 +1858,78 @@ function heRefillOperatorMapping(
   market: HeMarket | undefined,
 ): HeOperatorMapping[] | undefined {
   return market === 'us' ? withHeEmptyCellFallbacks(operatorMapping, columns).mapping : operatorMapping;
+}
+
+/**
+ * Колонки, по которым тик крона заранее сверяет письма (HE_REFILL_BASE_COLUMNS
+ * в autoPipeline.ts — копия ради бандла крона), обязаны совпадать с колонками,
+ * которые база долива получает на деле: контракт авто-сборки и колонка
+ * описаний конструктора. Разойдутся — здесь ошибка типов. Копия без колонки
+ * настоящей базы дала бы тику лишние отказы, то есть ночи, не купленные зря.
+ */
+const _refillBaseColumnsMatch: readonly [...typeof HE_AUTO_COLLECT_COLUMNS, 'description'] = HE_REFILL_BASE_COLUMNS;
+
+/**
+ * Строки долива, которым письмо кампании прочиталось бы неверно (только
+ * market='us'; вызывающие скоупят). Замены пустых ячеек (heRefillOperatorMapping)
+ * есть не у каждого вида колонки: у vacancy_title, phone, address, employees,
+ * revenue их нет, и mapBaseRowsToLeads кладёт в переменную `val || fallback ||
+ * ''` — пустоту («hiring a  for…»). А там, где замена есть, она может встать
+ * туда, где читается неверно (начало предложения, после артикля): гейт запуска
+ * проверял её место только по пустым ячейкам БАЗЫ ЗАПУСКА, строк долива он не
+ * видел. Поэтому здесь тот же гейт, что у запуска (checkHeTemplateOperators, шаг
+ * 4b″ launchTemplate.ts), но по ОТПРАВЛЯЕМЫМ текстам основной кампании — долив
+ * кладёт строки только в неё (pickRefillTemplate), и сегментные тексты ей не
+ * уходят: тема письма 1, тела писем и их вариантов ровно так, как их собирает
+ * buildLaunchSequence без сегмента.
+ *
+ * Строка снимается, если в ней пуста колонка, по которой гейт нашёл пустую
+ * ячейку без замены или с заменой не на месте (emptyCells): вывод гейта о
+ * такой колонке не зависит от того, какая именно строка пуста, — только от
+ * текста письма и маппинга. Списки, не зависящие от строк (оператор темы без
+ * колонки, оператор без колонки и fallback или с fallback не к месту, битые
+ * скобки), снимают ВСЕ строки: запуск такой шаблон отказал бы целиком. У
+ * шаблона, прошедшего нынешний гейт стадии и запуска, такое возможно, только
+ * если у базы долива нет колонки, которая была у базы запуска; у шаблона,
+ * запущенного до него (гейт с тех пор строже), — и по самим письмам.
+ * Писем нет (buildLaunchSequence → null; у запущенного шаблона так не бывает) —
+ * сверить нечего, и строки тоже снимаются: незнание здесь = не отправлять.
+ * Эти два случая (снято всё при любых строках) тик крона проверяет ДО покупки
+ * сборки по всем колонкам, какие бывают у базы долива, и такую ночь не ставит
+ * (heRefillLettersHoldEveryRow в autoPipeline.ts); здесь они остаются
+ * страховкой на то, чего тик видеть не мог (см. alertRefillLettersHeld).
+ *
+ * Снятая строка не теряется: она остаётся в he_bases.data своей базы (долив
+ * пишет базу целиком), просто в кампанию её не кладёт ни эта ночь, ни перенос
+ * (в очередь идут только компании с лидом после этого отбора, и строки
+ * компании из очереди проходят его снова). В бронь дневного бюджета и в
+ * попытки она не входит — отбор идёт до чёрного списка.
+ * Чистая функция, без запросов и моделей.
+ */
+function heRefillUnfilledRows(input: {
+  letters: unknown;
+  columns: string[];
+  operatorMapping: HeOperatorMapping[] | undefined;
+  rows: ReadonlyArray<Record<string, unknown>>;
+  emailColumn: string | null;
+}): { held: (row: Record<string, unknown>) => boolean; detail: string } {
+  const sequence = buildLaunchSequence(Array.isArray(input.letters) ? (input.letters as HeChainLetter[]) : null);
+  if (!sequence) return { held: () => true, detail: HE_REFILL_NO_LETTERS_DETAIL };
+  const gate = checkHeTemplateOperators({
+    letters: sequence.steps,
+    columns: input.columns,
+    operatorMapping: input.operatorMapping,
+    rows: input.rows,
+    emailColumn: input.emailColumn,
+  });
+  if (gate.ok) return { held: () => false, detail: '' };
+  const detail = describeHeTemplateOperatorGate(gate, 4);
+  if (heTemplateGateHoldsEveryRow(gate)) return { held: () => true, detail };
+  const emptyColumns = [...new Set(gate.emptyCells.map((issue) => issue.column))];
+  return {
+    held: (row) => emptyColumns.some((column) => String(row[column] ?? '').trim() === ''),
+    detail,
+  };
 }
 
 /**
@@ -1799,7 +1951,7 @@ export function pickRefillTemplate(
         Date.parse(launch.created_at) ||
         Date.parse(typeof t.created_at === 'string' ? t.created_at : '') ||
         0;
-      return { launch, operatorMapping: plan?.operator_mapping, ts };
+      return { launch, operatorMapping: plan?.operator_mapping, letters: t.letters, ts };
     })
     .filter((t): t is NonNullable<typeof t> => t !== null);
   if (launched.length === 0) return null;
@@ -1812,12 +1964,18 @@ export function pickRefillTemplate(
     if (t.launch.campaigns?.length) {
       const main = t.launch.campaigns.find((c) => c.segment === null);
       if (!main) return null;
-      return { campaignId: main.campaign_id, presetId: t.launch.preset_id, operatorMapping: t.operatorMapping };
+      return {
+        campaignId: main.campaign_id,
+        presetId: t.launch.preset_id,
+        operatorMapping: t.operatorMapping,
+        letters: t.letters,
+      };
     }
     return {
       campaignId: t.launch.campaign_id,
       presetId: t.launch.preset_id,
       operatorMapping: t.operatorMapping,
+      letters: t.letters,
     };
   };
 
@@ -2884,7 +3042,8 @@ interface HeRefillCarrySettle {
  *  - до чёрного списка не дошли (`inKept` = null: ночь упала раньше) или у
  *    компании остался лид после него → 'pending' (обратно в очередь);
  *  - у компании не осталось ни одного лида (весь адресный набор в чёрном
- *    списке владельца или ни один адрес не разобрался) → 'dropped'.
+ *    списке владельца, ни один адрес не разобрался или каждому письмо
+ *    прочиталось бы неверно — шаг 3a) → 'dropped'.
  */
 function planHeRefillCarrySettle(input: {
   companies: readonly HeRefillCarryCompany[];
@@ -3188,6 +3347,8 @@ export async function runHeRefillAppend(args: {
   const { ctx, job, base, info, stats, finalRows, finalColumns, emailStatuses, usage } = args;
   /** Перенос неотправленных компаний — только ENG (блок «ПЕРЕНОС»). */
   const carryEnabled = args.market === 'us';
+  /** Отбор строк, которым письмо прочиталось бы неверно (шаг 3a), — только ENG. */
+  const usLetterGate = args.market === 'us';
 
   const done = (refill: HeRefillResult): HeStageResult => ({
     result: { base_id: base.id, rows: finalRows.length, refill },
@@ -3346,7 +3507,7 @@ export async function runHeRefillAppend(args: {
     // 1. Кампания и маппинг — из запущенного шаблона вертикали.
     const { data: templateRows, error: tErr } = await ctx.supabase
       .from('he_templates')
-      .select('id, launch_info, personalization_plan, created_at')
+      .select('id, launch_info, personalization_plan, letters, created_at')
       .eq('vertical_id', base.vertical_id)
       .not('launch_info', 'is', null);
     if (tErr) throw new Error(`he_templates read: ${tErr.message}`);
@@ -3424,10 +3585,11 @@ export async function runHeRefillAppend(args: {
             `(конструктор завершился со статусом ${construct.status}) — долив остановлен`,
       );
     }
-    const { leads, leadRowIndices: leadSourceRows } = mapBaseRowsToLeads({
+    const ownMapping = heRefillOperatorMapping(pick.operatorMapping, finalColumns, args.market);
+    const ownMapped = mapBaseRowsToLeads({
       rows: leadRows,
       columns: finalColumns,
-      operatorMapping: heRefillOperatorMapping(pick.operatorMapping, finalColumns, args.market),
+      operatorMapping: ownMapping,
       // Связь «доставленный лид → строка базы». Дальше значение подхватит
       // построчный журнал доставки (client_campaign_contact_ledger.source_row_id)
       // — второго журнала мы не заводим, а заполняем колонку, которая у ENG
@@ -3450,6 +3612,34 @@ export async function runHeRefillAppend(args: {
         const rowIndex = leadRowIndexes[index];
         return rowIndex === undefined ? null : `${base.id}:#${rowIndex}`;
       },
+    });
+    // 3a. Строки, которым письмо кампании прочиталось бы неверно (только
+    //     market='us', heRefillUnfilledRows): в пачку не идут, в базе остаются.
+    //     Отбор — ДО чёрного списка и брони: снятая строка не просит бюджета
+    //     дня и не считается попыткой отправки. Иной рынок — ровно прежние лиды
+    //     в прежнем порядке.
+    let heldUnfilled = 0;
+    const heldUnfilledDetails = new Set<string>();
+    const ownUnfilled = usLetterGate
+      ? heRefillUnfilledRows({
+          letters: pick.letters,
+          columns: finalColumns,
+          operatorMapping: ownMapping,
+          rows: leadRows,
+          emailColumn: ownMapped.emailColumn,
+        })
+      : null;
+    const leads: typeof ownMapped.leads = [];
+    const leadSourceRows: number[] = [];
+    ownMapped.leads.forEach((lead, i) => {
+      const rowIndex = ownMapped.leadRowIndices[i];
+      if (ownUnfilled && ownUnfilled.held(leadRows[rowIndex])) {
+        heldUnfilled += 1;
+        heldUnfilledDetails.add(ownUnfilled.detail);
+        return;
+      }
+      leads.push(lead);
+      leadSourceRows.push(rowIndex);
     });
 
     // 3b. ПЕРЕНОС (только market='us', блок «ПЕРЕНОС» выше): компании очереди
@@ -3487,17 +3677,36 @@ export async function runHeRefillAppend(args: {
           carriedValid += picked.valid;
           const offset = carriedRows.length;
           carriedRows.push(...picked.leadRows);
+          const carriedMapping = heRefillOperatorMapping(pick.operatorMapping, company.columns, args.market);
           const mapped = mapBaseRowsToLeads({
             rows: picked.leadRows,
             columns: company.columns,
-            operatorMapping: heRefillOperatorMapping(pick.operatorMapping, company.columns, args.market),
+            operatorMapping: carriedMapping,
             sourceRowId: (index) => {
               const row = picked.leadRows[index];
               const companyKey = row ? normalizeCompanyForDedup(row.company) : '';
               return companyKey ? `${company.sourceBaseId}:${companyKey}` : null;
             },
           });
+          // Тот же отбор, что у своих строк (3a), по колонкам базы-источника.
+          // Компания, у которой не осталось ни одного лида, в пачку не попадает;
+          // дошла ночь до чёрного списка — снимается из очереди как
+          // 'no_sendable_address' (planHeRefillCarrySettle), не дошла — ждёт дальше.
+          const carriedUnfilled = usLetterGate
+            ? heRefillUnfilledRows({
+                letters: pick.letters,
+                columns: company.columns,
+                operatorMapping: carriedMapping,
+                rows: picked.leadRows,
+                emailColumn: mapped.emailColumn,
+              })
+            : null;
           mapped.leads.forEach((lead, i) => {
+            if (carriedUnfilled && carriedUnfilled.held(picked.leadRows[mapped.leadRowIndices[i]])) {
+              heldUnfilled += 1;
+              heldUnfilledDetails.add(carriedUnfilled.detail);
+              return;
+            }
             carriedLeads.push(lead);
             carriedSourceRows.push(offset + mapped.leadRowIndices[i]);
             carriedLeadOwner.set(lead, company.id);
@@ -3515,6 +3724,30 @@ export async function runHeRefillAppend(args: {
           sendLeadSourceRows.push(carriedRows.length + leadSourceRows[i]);
         });
         sendLeadRows = [...carriedRows, ...leadRows];
+      }
+    }
+    if (heldUnfilled > 0) {
+      runStats.held_unfilled = heldUnfilled;
+      stageLog(
+        ctx,
+        `[base_collect] refill: не отправлено ${heldUnfilled} адр. — письмо кампании прочиталось бы у них ` +
+          `неверно (${[...heldUnfilledDetails].join('; ')}); строки остаются в своих базах, ` +
+          'в кампанию их не кладёт ни эта ночь, ни перенос',
+      );
+      // Снято ВСЁ, что ночь могла отправить (held_unfilled равен допущенным
+      // строкам — своим и перенесённым — за вычетом тех, что лидом не стали бы
+      // и так: пустой, кривой или повторный адрес). Ночь не отправит ничего —
+      // команде нужен алерт, а не только строка лога.
+      if (sendLeads.length === 0) {
+        alertRefillLettersHeld(
+          job,
+          base,
+          args.market,
+          pick.campaignId,
+          heldUnfilled,
+          [...heldUnfilledDetails].join('; '),
+          args.carryOnly === true,
+        );
       }
     }
 
@@ -3836,7 +4069,10 @@ export async function runHeRefillAppend(args: {
     }
     // 'no_new' — только когда отправлять было нечего НИ из своей сетки, НИ из
     // очереди переноса: ночь, отправившая перенесённые компании, добавила
-    // контакты, и правило сухой вертикали обязано это видеть.
+    // контакты, и правило сухой вертикали обязано это видеть. Ночь, у которой
+    // шаг 3a снял ВСЕ допущенные строки, — тоже 'appended' (с нулём): рынок
+    // строки дал, не годятся письма, и сухой её не считаем; о ней уже
+    // сообщил алерт команде (alertRefillLettersHeld).
     const outcome: HeRefillResult['status'] =
       valid === 0 && carriedValid === 0 ? 'no_new' : 'appended';
 
@@ -3894,6 +4130,7 @@ export async function runHeRefillAppend(args: {
       ctx,
       `[base_collect] refill ${outcome}: кампания ${pick.campaignId}, лидов ${runStats.appended} ` +
         `(valid ${runStats.valid}, без вердикта ${runStats.unverified}, ` +
+        (runStats.held_unfilled ? `письмо прочиталось бы неверно ${runStats.held_unfilled}, ` : '') +
         `blocklist ${runStats.skipped_blocklist}, кап-отрез ${runStats.capped}` +
         // Причина отреза и сколько КОМПАНИЙ остались без письма — рядом с
         // числом строк: «отрезано 150» без них не отличает дневной кап от
@@ -4153,6 +4390,9 @@ export async function runHeRefillAppend(args: {
               ? `, кап-отрез ${runStats.capped}${runStats.capped_reason ? ` (${runStats.capped_reason})` : ''}`
               : '') +
             ']') +
+        (runStats.held_unfilled
+          ? ` [не отправлено из-за писем ${runStats.held_unfilled} адр., строки в базе]`
+          : '') +
         (ownershipLoss
           ? ` — остановлено перед отправкой (${ownershipLoss}): отмена выигрывает у долива`
           : cancelled

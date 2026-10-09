@@ -313,8 +313,12 @@ interface HeLaunchMessages {
    * классификатором не отправлены, о них segmentRowsHeldNote). Причина — ответ классификатора, а не
    * «рассыльщик не умеет условные блоки» (её у us больше не бывает: полный
    * сбой классификатора у us — отказ, а не легаси-путь).
+   * `unanswered` > 0 — достройка отдала основной текст адресам, по которым
+   * классификатор не ответил и на второй попытке (о них segmentRowsMainTextNote):
+   * фраза говорит только про адреса, по которым ответ БЫЛ, иначе «ни один не
+   * подошёл» спорило бы с «не смогли определить».
    */
-  segmentNoMatchNote: (dropped: number, lettersCount: number) => string;
+  segmentNoMatchNote: (dropped: number, lettersCount: number, unanswered: number) => string;
   /**
    * Новые кампании us-запуска созданы с окном, которое выбрало ядро (окно не
    * передано — запуск сотрудником, достройка без кабинета): какое и откуда.
@@ -525,9 +529,12 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `С основным текстом вместо сегментного: ${count.toLocaleString('ru-RU')} адр. — классификатор ` +
       `сегментов не дал по ним ответа ни при запуске, который их отложил, ни на этом повторе (попыток: ` +
       `${attempt}). Третьей платной попытки нет: основной текст писем читается верно, он лишь не сегментный.`,
-    segmentNoMatchNote: (dropped, lettersCount) =>
-      `Сегментные варианты (${dropped} шт. в ${lettersCount} письмах) не понадобились: ни один отправленный ` +
-      'в этом запуске адрес классификатор не отнёс ни к одному сегменту — все они получили основной текст писем.',
+    segmentNoMatchNote: (dropped, lettersCount, unanswered) =>
+      unanswered > 0
+        ? `Сегментные варианты (${dropped} шт. в ${lettersCount} письмах) не использованы: ни один адрес этого ` +
+          'запуска, по которому классификатор ответил, не попал ни в один сегмент.'
+        : `Сегментные варианты (${dropped} шт. в ${lettersCount} письмах) не понадобились: ни один отправленный ` +
+          'в этом запуске адрес классификатор не отнёс ни к одному сегменту — все они получили основной текст писем.',
     launchWindowNote: (window, source) =>
       `Окно отправки новых кампаний us-запуска: ${window} — ` +
       (source === 'template'
@@ -819,11 +826,20 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     },
     // «sent»: отложенные классификатором адреса (segmentRowsHeldNote рядом)
     // не уехали и основного текста не получили — фраза только про уехавшие.
-    segmentNoMatchNote: (dropped, lettersCount) =>
-      'None of the addresses sent in this launch matched a segment these letters were written for, so all of ' +
-      `them got the main letter text; the ${dropped.toLocaleString('en-US')} segment ` +
+    // Достройка с адресами без ответа (segmentRowsMainTextNote рядом): они тоже
+    // уехали с основным текстом, но не потому, что не подошли, — фраза только
+    // про те, что удалось проверить; «this launch» верно и про весь запуск, и
+    // про это нажатие. Глагол согласуется с вариантами, а не с письмами
+    // («2 segment versions across 1 letter were», а не «… letter was»).
+    segmentNoMatchNote: (dropped, lettersCount, unanswered) =>
+      (unanswered > 0
+        ? 'Of the addresses in this launch we could check, none matched a segment these letters were written ' +
+          'for, so the '
+        : 'None of the addresses sent in this launch matched a segment these letters were written for, so all of ' +
+          'them got the main letter text; the ') +
+      `${dropped.toLocaleString('en-US')} segment ` +
       `${dropped === 1 ? 'version' : 'versions'} across ${lettersCount.toLocaleString('en-US')} ` +
-      `${lettersCount === 1 ? 'letter was' : 'letters were'} not used.`,
+      `${lettersCount === 1 ? 'letter' : 'letters'} ${dropped === 1 ? 'was' : 'were'} not used.`,
     // Из кабинета окно приходит явным (роут), и эта фраза не печатается;
     // текст нужен словарю и честен для любого источника.
     launchWindowNote: (window, source) =>
@@ -2759,7 +2775,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     const segWarning =
       market === 'us'
         ? legacy && legacy.droppedSegmentVariants > 0
-          ? t.segmentNoMatchNote(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants)
+          ? t.segmentNoMatchNote(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants, heldMainText)
           : null
         : locale === 'en'
           ? legacy && legacy.droppedSegmentVariants > 0

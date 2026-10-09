@@ -1,5 +1,6 @@
 /**
- * Стадия chain: вертикаль + бриф проекта → цепочка из 3–5 писем.
+ * Стадия chain: вертикаль + бриф проекта → цепочка из 3–5 писем (EN — ровно
+ * 4: цель промпта и порог повтора, см. HE_CHAIN_TARGET_LETTERS_EN).
  * Промпт-архитектура emailSequenceV2 (материалы → праймер → задача) +
  * CHAIN_REGULATIONS; ответ парсится маркерами ---LETTER N--- через
  * letterParser, A/B-варианты (---LETTER N B---, у каждого письма второй
@@ -15,6 +16,10 @@
  * материалов; нарушения чинятся одним фикс-проходом. После — критик-луп:
  * одна оценка цепочки (только основной вариант A) + максимум один rewrite
  * по её замечаниям; B-варианты после рерайта восстанавливаются из исходных.
+ * EN: ответ фикс-прохода, в котором чисел не из материалов больше, чем в
+ * письмах до него, не принимается; критик и рерайт видят «CLIENT'S OWN
+ * WORDS», а рерайт, после которого чисел не из материалов стало больше,
+ * откатывается (см. критик-луп ниже).
  */
 
 import { z } from 'zod';
@@ -22,8 +27,14 @@ import { z } from 'zod';
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
-import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages, buildChainRuleFixHint } from '../prompts/chain';
-import { checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
+import {
+  buildChainCriticMessages,
+  buildChainMessages,
+  buildChainRewriteMessages,
+  buildChainRuleFixHint,
+  clientWordsFromBrief,
+} from '../prompts/chain';
+import { checkLetterParagraphs, checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { projectMarket } from '../market';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
@@ -200,6 +211,21 @@ export const HeChainCritiqueSchema = z.object({
 
 const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно 3–5 писем, каждое блоком «---LETTER N---» + строка темы, плюс вариант B каждого письма блоком «---LETTER N B---» сразу после него. Верни цепочку заново, целиком, без пояснений.`;
 
+/**
+ * EN-цепочка — цель ровно 4 письма (пункт переноса D2-letters-chain-exactly-four;
+ * сам кабинет ENG числа не навязывает: показывает и отправляет столько шагов,
+ * сколько писем в цепочке). Ответ короче — один повтор с английской
+ * подсказкой, из двух ответов берётся тот, где писем больше (при равенстве —
+ * повтор). Ответ длиннее 4 принимается
+ * как есть: повтор стоил бы ещё один платный вызов, а обрезка выкинула бы
+ * последнее (реферальное) письмо. RU/PL — прежний порог «меньше 3 → повтор»;
+ * нижний порог отказа (меньше 3 писем после повтора) общий для всех языков.
+ */
+export const HE_CHAIN_TARGET_LETTERS_EN = 4;
+
+/** Подсказка повтора EN-цепочки: английская, иначе русский текст уходит посреди английской генерации. */
+const RETRY_HINT_EN = `You returned too few emails or broke the format. The sequence needs exactly ${HE_CHAIN_TARGET_LETTERS_EN} emails, each as a "---LETTER N---" block with a "Subject:" line, plus each email's B variant as a "---LETTER N B---" block right after it. Return the whole sequence again, with no explanations.`;
+
 export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const verticalId = payloadString(job, 'vertical_id');
@@ -235,6 +261,12 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
   // в материалах.
   const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
+  // EN: business_override тоже уходит отдельным блоком («CLIENT'S OWN WORDS»
+  // вместе с оффером) — из JSON брифа EN-промпта его вырезаем. RU/PL видят
+  // бриф как раньше (business_override внутри JSON).
+  const { business_override: _biz, ...briefRestEn } = briefRest;
+  const briefForPrompt = language === 'en' ? briefRestEn : briefRest;
+  const businessOverride = typeof brief.business_override === 'string' ? brief.business_override : undefined;
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
   // цепочки. Best-effort: сбой чтения he_cases не роняет генерацию.
@@ -288,8 +320,9 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       confirmed: h.status === 'accepted',
       evidence: (Array.isArray(h.evidence) ? h.evidence : []) as HeEvidenceItem[],
     })),
-    briefText: JSON.stringify(briefRest),
+    briefText: JSON.stringify(briefForPrompt),
     offerOverride: typeof brief.offer_override === 'string' ? brief.offer_override : undefined,
+    businessOverride,
     operatorsHint: typeof job.payload?.operators_hint === 'string' ? job.payload.operators_hint : undefined,
     clientCase,
     styleExample,
@@ -302,16 +335,27 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   addUsage(usage, llm);
   let { parsed, letters } = buildChainLetters(llm.text);
 
-  if (parsed.length < 3) {
-    stageLog(ctx, `[chain] распознано ${parsed.length} писем — retry с фидбэком`);
+  // Порог повтора: EN — меньше 4 писем (цепочка ровно из 4), RU/PL — меньше 3.
+  const retryBelow = language === 'en' ? HE_CHAIN_TARGET_LETTERS_EN : 3;
+  if (parsed.length < retryBelow) {
+    stageLog(
+      ctx,
+      language === 'en'
+        ? `[chain] распознано ${parsed.length} писем из ${HE_CHAIN_TARGET_LETTERS_EN} — retry с фидбэком`
+        : `[chain] распознано ${parsed.length} писем — retry с фидбэком`,
+    );
+    const first = { parsed, letters, llm };
     const retryMessages: LLMMessage[] = [
       ...messages,
       { role: 'assistant', content: llm.text.slice(0, 2000) },
-      { role: 'user', content: RETRY_HINT },
+      { role: 'user', content: language === 'en' ? RETRY_HINT_EN : RETRY_HINT },
     ];
     llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildChainLetters(llm.text));
+    // EN: из двух оплаченных ответов оставляем тот, где писем больше (как V2):
+    // повтор, вернувший меньше, не должен отнять уже годную цепочку из 3.
+    if (language === 'en' && parsed.length < first.parsed.length) ({ parsed, letters, llm } = first);
   }
   if (parsed.length < 3) {
     // Диагностика в ошибку (пишется в he_jobs.error): начало сырого ответа,
@@ -347,23 +391,35 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     vertical.name,
     vertical.summary ?? '',
     clientCase ? JSON.stringify(clientCase) : '',
-    JSON.stringify(briefRest),
+    JSON.stringify(briefForPrompt),
     typeof brief.offer_override === 'string' ? brief.offer_override : '',
+    // EN: business_override вырезан из JSON брифа выше — цифры клиента из
+    // его описания бизнеса возвращаем в корпус явно, иначе они станут
+    // «выдуманными». У RU/PL он и так внутри JSON брифа — корпус прежний.
+    ...(language === 'en' ? [businessOverride ?? ''] : []),
     styleExample ?? '',
     signatureOverride ?? '',
     JSON.stringify(winnerPatterns),
   ].join('\n');
-  const facts = extractNumberFacts(factCorpus);
+  // EN читает числа по-английски («10,000» — 10000); письма сверяются тем же
+  // чтением (letterChecks помнит, как прочитан корпус).
+  const facts = extractNumberFacts(factCorpus, language);
+  // letterIndex — номер письма в цепочке для detail нарушений (учитывается для EN).
   const lettersForCheck = (ls: HeChainLetterAB[]): HeLetterForCheck[] =>
-    ls.flatMap((l) => [
-      { subject: l.subject ?? '', body: l.body, variant: 'A' },
-      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B' })),
+    ls.flatMap((l, i) => [
+      { subject: l.subject ?? '', body: l.body, variant: 'A', letterIndex: i + 1 },
+      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B', letterIndex: i + 1 })),
     ]);
   const ruleViolations = checkLetterRules(lettersForCheck(letters), language, facts);
   if (ruleViolations.length > 0) {
     stageLog(ctx, `[chain] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
     // Принятие фикса: то же число писем и НЕ меньше B-вариантов (модель могла
-    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя).
+    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя). EN — и
+    // не больше чисел не из материалов, чем в письмах до него: фикс
+    // переписывает цепочку целиком и мог вписать цифру, которой в материалах
+    // нет, а рерайт ниже сравнивает числа уже с письмами после фикса. Письма
+    // цепочки стадия template кладёт в свой корпус фактов, и такая цифра там
+    // считалась бы проверенной. Вызов фикса уже оплачен; новых вызовов нет.
     const countB = (ls: HeChainLetterAB[]) => ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0);
     try {
       const fixMessages: LLMMessage[] = [
@@ -375,16 +431,28 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       addUsage(usage, fix);
       const fixed = buildChainLetters(fix.text);
       if (fixed.parsed.length >= 3 && fixed.letters.length === letters.length && countB(fixed.letters) >= countB(letters)) {
-        letters = fixed.letters;
-        const remaining = checkLetterRules(lettersForCheck(letters), language, facts);
-        if (remaining.length > 0) {
+        const remaining = checkLetterRules(lettersForCheck(fixed.letters), language, facts);
+        const numbersBefore = language === 'en' ? ruleViolations.filter((v) => v.rule === 'unverified_number').length : 0;
+        const numbersAfter = language === 'en' ? remaining.filter((v) => v.rule === 'unverified_number') : [];
+        if (numbersAfter.length > numbersBefore) {
           stageLog(
             ctx,
-            `[chain] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+            `[chain] фикс-проход: чисел не из материалов ${numbersAfter.length} (было ${numbersBefore}) — оставляем исходные; ${numbersAfter
               .slice(0, 3)
               .map((v) => v.detail)
               .join('; ')}`,
           );
+        } else {
+          letters = fixed.letters;
+          if (remaining.length > 0) {
+            stageLog(
+              ctx,
+              `[chain] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+                .slice(0, 3)
+                .map((v) => v.detail)
+                .join('; ')}`,
+            );
+          }
         }
       } else {
         stageLog(
@@ -404,6 +472,22 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // восстанавливаются из исходных писем по индексу. Без цикла. Сбой критика,
   // а также нечитаемый, урезанный или раздутый rewrite → остаются исходные
   // письма (стадию это не валит).
+  //
+  // EN: критик и рерайт получают «CLIENT'S OWN WORDS» (сборщики промптов
+  // читают clientWords только для 'en'). Рерайт фикс-проход уже не проходит,
+  // поэтому его письма заново сверяются checkLetterRules с тем же корпусом
+  // фактов (бесплатно, без вызова модели), и рерайт ОТКАТЫВАЕТСЯ к письмам до
+  // него, когда нарушений 'unverified_number' стало больше: «$35,000» →
+  // «$35k», «we helped 40 clinics». Решает только это правило. Число в
+  // цепочке — не только текст на шаге Letters: стадия template кладёт письма
+  // цепочки в свой корпус фактов, и выдуманная здесь цифра там уже считалась
+  // бы проверенной. Тире, приветствие, «?» и абзацы рерайт не откатывают: их
+  // письма шаблона проверяют сами, а откат по ним выбросил бы и правки
+  // критика по смыслу (например, снятое обещание несуществующего отчёта).
+  // Сам рерайт к этому моменту уже оплачен. RU/PL — как раньше.
+  const clientWords = clientWordsFromBrief(brief);
+  const unverifiedNumbers = (ls: HeChainLetterAB[]) =>
+    checkLetterRules(lettersForCheck(ls), language, facts).filter((v) => v.rule === 'unverified_number');
   let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
@@ -415,6 +499,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         language,
         styleExample,
         winnerPatterns,
+        clientWords,
       }),
       HeChainCritiqueSchema,
       { model, maxTokens: 4096 },
@@ -437,6 +522,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           styleExample,
           winnerPatterns,
           signatureOverride,
+          clientWords,
         }),
         { model, maxTokens: 16384 },
       );
@@ -449,18 +535,47 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       // ломаются лесенка wait_days и индексация писем.
       if (rewritten.length === letters.length) {
         const originalLetters = letters;
-        letters = parsedToChainLetters(rewritten.slice(0, 6)).map((l, i): HeChainLetterAB => {
+        const candidate = parsedToChainLetters(rewritten.slice(0, 6)).map((l, i): HeChainLetterAB => {
           const { variants: _legacy, ...rest } = l;
           const bv = originalLetters[i]?.variants;
           return bv?.length ? { ...rest, variants: bv } : rest;
         });
-        critiqueInfo.rewritten = true;
+        // EN: числа не из материалов — до рерайта и после (B-варианты в обоих
+        // наборах одни и те же, исходные).
+        const numbersBefore = language === 'en' ? unverifiedNumbers(originalLetters).length : 0;
+        const numbersAfter = language === 'en' ? unverifiedNumbers(candidate) : [];
+        if (numbersAfter.length > numbersBefore) {
+          stageLog(
+            ctx,
+            `[chain] rewrite критика откатили к письмам до него: чисел не из материалов ${numbersAfter.length} ` +
+              `(было ${numbersBefore}) — ${numbersAfter
+                .slice(0, 3)
+                .map((v) => v.detail)
+                .join('; ')}`,
+          );
+        } else {
+          letters = candidate;
+          critiqueInfo.rewritten = true;
+        }
       } else {
         stageLog(ctx, `[chain] rewrite критика: ${rewritten.length} писем вместо ${letters.length} — оставляем исходные`);
       }
     }
   } catch (e) {
     stageLog(ctx, `[chain] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
+  }
+
+  // Абзацы EN-писем: только предупреждение в логе стадии, без фикс-прохода и
+  // без блокировки (letterChecks.checkLetterParagraphs; RU/PL — пустой список).
+  const paragraphWarnings = checkLetterParagraphs(lettersForCheck(letters), language);
+  if (paragraphWarnings.length > 0) {
+    stageLog(
+      ctx,
+      `[chain] абзацы (предупреждение, без фикс-прохода): ${paragraphWarnings.length} вариантов — ${paragraphWarnings
+        .slice(0, 3)
+        .map((v) => v.detail)
+        .join('; ')}`,
+    );
   }
 
   // letters — текст модели (темы, тела, B-варианты): один NUL или одиночный

@@ -19,9 +19,14 @@
  *    показывает пустоту;
  *  - unmatched-оператор с fallback → подставляется fallback (как обещает
  *    таблица маппинга «Подставим: …»), токен kind='fallback';
- *  - unmatched без fallback и операторы вне маппинга → как есть + unresolved.
+ *  - unmatched без fallback и операторы вне маппинга → как есть + unresolved;
+ *  - колонка `company` строки ENG-базы, которой сборка дописала очищенное
+ *    название (`_company_clean`, companyNames.ts), подставляет его — то же,
+ *    что уходит в письмо. Подпись лида (previewRowLabel) остаётся исходной
+ *    ячейкой: это имя строки базы, а не текст письма.
  */
 
+import { heLetterCompanyName } from './companyNames';
 import type { HeOperatorMapping } from './types';
 
 /**
@@ -104,7 +109,9 @@ function resolveOperator(
 ): ResolvedOperator {
   const m = mapping.get(name.toLowerCase());
   if (m && m.matched && m.column) {
-    const value = stringifyCell(row[m.column]);
+    // Колонка компании ENG-базы — очищенное название, ровно как у запуска
+    // (mapBaseRowsToLeads читает его той же heLetterCompanyName).
+    const value = heLetterCompanyName(row, m.column) ?? stringifyCell(row[m.column]);
     if (value) return { kind: 'value', text: value };
     // Колонка есть, ячейка пуста → значение переменной лида: fallback маппинга
     // (у us — замена пустой ячейки, «your website»), иначе пустая строка, а не

@@ -960,7 +960,7 @@ export function toClientEngLaunchInfo(raw: unknown): Row | null {
  * у RU-запуска этого гейта нет. Наружу уходит только булев признак — ни писем,
  * ни колонок, ни строк сверх того, что проекция уже отдаёт.
  */
-function heTemplateNeedsRewrite(template: Row, base: Row | undefined, market: HeMarket): boolean {
+export function heTemplateNeedsRewrite(template: Row, base: Row | undefined, market: HeMarket): boolean {
   if (market !== 'us' || template.status !== 'ready' || !base || !Array.isArray(base.columns)) return false;
   const columns = base.columns.filter((c): c is string => typeof c === 'string');
   const rows = Array.isArray(base.sample_rows)

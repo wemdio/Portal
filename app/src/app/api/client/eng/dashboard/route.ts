@@ -5,6 +5,7 @@ import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import {
+  heTemplateNeedsRewrite,
   toClientEngAutopilotHold,
   toClientEngCampaignName,
   toClientEngCollectInfo,
@@ -13,11 +14,13 @@ import {
   type ClientEngAutopilotHold,
   type HeClientRefillState,
 } from '@/lib/hypothesisEngine/clientEngProjection';
+import { projectMarket } from '@/lib/hypothesisEngine/market';
 import { requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { reconcileProjectVerticals } from '@/lib/hypothesisEngine/actualsReconcile';
 import {
   buildEngDashboardEvents,
   deriveEngVerticalStage,
+  engDashRewriteCandidateIds,
   nextDailyRunIso,
   utcDayStartIso,
 } from '@/lib/hypothesisEngine/engDashboard';
@@ -131,7 +134,7 @@ export async function GET(req: NextRequest) {
 
   const { data: projects, error: projErr } = await supabaseAdmin
     .from('he_projects')
-    .select('id, name, status, created_at')
+    .select('id, name, status, market, created_at')
     .eq('created_by', userId)
     .order('created_at', { ascending: false })
     .limit(100);
@@ -330,6 +333,71 @@ export async function GET(req: NextRequest) {
   }
 
   const projectById = new Map(projectRows.map((p) => [p.id as string, p]));
+
+  /**
+   * ПИСЬМА, КОТОРЫЕ ЗАПУСК ОТКАЖЕТ (`needs_rewrite`). Шаблоны, записанные до
+   * гейта писем стадии (09.10.2026), лежат 'ready', но ядро запуска откажет им
+   * кодом template_unresolved_operators (шаг 4b″), и достройку тоже. Без
+   * признака карточка звала такой шаблон «ready to launch / launch from Review &
+   * Launch», а незаконченный запуск — «finish the launch on step 5».
+   *
+   * Признак — функция проекции деталки (heTemplateNeedsRewrite), а не копия:
+   * шаги 4/5 и дашборд обязаны говорить одно и то же про один шаблон. Ей нужны
+   * письма и маппинг шаблона и колонки с первыми строками (sample_rows) его
+   * базы, а выборки выше их не несут: ради шаблонов, о которых карточка может
+   * сказать «запускай» или «достраивай» (не больше одного на вертикаль,
+   * engDashRewriteCandidateIds), не тащим письма каждого шаблона аккаунта на
+   * 15-секундном полле. Только проекты market='us' (у RU-запуска гейта нет, и
+   * функция для них всё равно false). Отказ чтения — тот же ответ, что у
+   * остальных выборок агрегата: печатать «ready to launch» по непрочитанному
+   * нельзя.
+   */
+  const usProjectIds = new Set(
+    projectRows.filter((p) => projectMarket(p as { market?: string | null }) === 'us').map((p) => p.id as string),
+  );
+  const projectOfVertical = new Map(verticalRows.map((v) => [v.id as string, str(v.project_id)]));
+  const rewriteCandidates = engDashRewriteCandidateIds(
+    templateRows.filter((t) => usProjectIds.has(projectOfVertical.get(str(t.vertical_id)) ?? '')),
+  );
+  const rewriteTemplateIds = new Set<string>();
+  if (rewriteCandidates.length > 0) {
+    const candidateRows = templateRows.filter((t) => rewriteCandidates.includes(str(t.id)));
+    const candidateBaseIds = [...new Set(candidateRows.map((t) => str(t.base_id)).filter(Boolean))];
+    const [lettersRes, baseColumnsRes] = await Promise.all([
+      supabaseAdmin
+        .from('he_templates')
+        .select('id, letters, personalization_plan')
+        .in('id', rewriteCandidates),
+      candidateBaseIds.length > 0
+        ? supabaseAdmin.from('he_bases').select('id, columns, sample_rows').in('id', candidateBaseIds)
+        : Promise.resolve({ data: [] as Array<Record<string, unknown>>, error: null }),
+    ]);
+    if (lettersRes.error) {
+      return engServerError('client.eng.dashboard.template_letters_failed', lettersRes.error, DASHBOARD_LOAD_FAILED, {
+        userId,
+      });
+    }
+    if (baseColumnsRes.error) {
+      return engServerError('client.eng.dashboard.base_columns_failed', baseColumnsRes.error, DASHBOARD_LOAD_FAILED, {
+        userId,
+      });
+    }
+    const lettersById = new Map(
+      (lettersRes.data ?? []).map((t) => [str((t as Record<string, unknown>).id), t as Record<string, unknown>]),
+    );
+    const gateBaseById = new Map(
+      (baseColumnsRes.data ?? []).map((b) => [str((b as Record<string, unknown>).id), b as Record<string, unknown>]),
+    );
+    for (const t of candidateRows) {
+      const extra = lettersById.get(str(t.id));
+      // Строки шаблона нет во второй выборке (удалён между запросами) —
+      // признак не ставим: шаблона, которому он адресован, уже нет.
+      if (!extra) continue;
+      if (heTemplateNeedsRewrite({ ...t, ...extra }, gateBaseById.get(str(t.base_id)), 'us')) {
+        rewriteTemplateIds.add(str(t.id));
+      }
+    }
+  }
   const verticalNames = new Map(verticalRows.map((v) => [v.id as string, str(v.name)]));
   const baseById = new Map(baseRows.map((b) => [str(b.id), b]));
 
@@ -465,6 +533,7 @@ export async function GET(req: NextRequest) {
         bases: vBases,
         templates: vTemplates,
         activeJobs: vActiveJobs,
+        rewriteTemplateIds,
       });
 
       const mainInfo =
@@ -515,6 +584,10 @@ export async function GET(req: NextRequest) {
               }
             : null,
         refill_dry: dryVerticalIds.has(vid),
+        // Письма шаблона этапа ('template' / 'launch_unfinished') запуск
+        // откажет — карточка пишет «letters need rewriting» вместо «ready to
+        // launch» / «finish the launch» (EngDashboard.tsx).
+        letters_need_rewrite: derived.lettersNeedRewrite,
       };
     });
 

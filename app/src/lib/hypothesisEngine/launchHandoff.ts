@@ -43,6 +43,8 @@ import { extractEmails } from '@/lib/tools/dfybUtils';
 // шаг 5 staff-инструмента), а market.ts своих зависимостей не имеет вовсе.
 import type { HeMarket } from './market';
 import type { HeChainLetter, HeOperatorMapping } from './types';
+// Очищенное название компании для писем ENG-базы; модуль чистый, как и этот.
+import { heLetterCompanyName } from './companyNames';
 
 /** Максимум лидов за один запуск из мастера (v1-ограничение роута, 413 сверх). */
 export const HE_LAUNCH_MAX_LEADS = 2000;
@@ -788,6 +790,11 @@ export interface MapBaseRowsResult {
  *     (renderPreview) обещает именно подстановку — реальность обязана ей
  *     соответствовать). Unmatched-оператор с fallback → fallback у всех лидов;
  *   - остальные колонки проходят в custom_variables под своими именами;
+ *   - колонка `company` строки, которой сборка ENG-базы дописала очищенное
+ *     название (`_company_clean`, companyNames.ts), отдаёт его — и в
+ *     переменные письма, и в стандартное поле company_name. Ключ компании
+ *     у потолка запуска (heLaunchCompanyKey) и пометка доставки читают
+ *     исходную ячейку, как и раньше;
  *   - по желанию вызывающего (sourceRowId) к лиду добавляется пометка
  *     «из какой строки базы он вырос» — см. HE_SOURCE_ROW_ID_VARIABLE.
  */
@@ -851,11 +858,19 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
 
     const lead: LeadCreatePayload = { email };
     const customVars: Record<string, string> = {};
+    // Значение ячейки для лида. Колонка компании ENG-базы отдаёт очищенное
+    // название (companyNames.ts, heLetterCompanyName), если сборка его
+    // записала; иначе — ячейка как есть. ОДНО чтение на все три места ниже
+    // (переменные колонок, переменные операторов, стандартное поле
+    // company_name): прочитанные по-разному, они дали бы ложную коллизию
+    // стандартного поля с переменной письма. У строк без поля (RU, ручная
+    // загрузка, ENG-база до этой правки) результат прежний.
+    const cellOf = (col: string): string => heLetterCompanyName(row, col) ?? String(row[col] ?? '').trim();
 
     for (const col of columns) {
       if (col === emailColumn) continue;
       if (claimedColumns.has(col)) continue;
-      const val = String(row[col] ?? '').trim();
+      const val = cellOf(col);
       if (!val) continue;
       customVars[col] = val;
     }
@@ -863,7 +878,7 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
     // на одну колонку ({{company}} и {{companyName}}) должны оба подставиться,
     // а не только первый. Пустая ячейка → fallback, иначе пустая строка.
     for (const [op, spec] of matchedOperators) {
-      const val = String(row[spec.column] ?? '').trim();
+      const val = cellOf(spec.column);
       customVars[op] = val || spec.fallback || '';
     }
     for (const [op, fallback] of unmatchedFallbacks) {
@@ -894,7 +909,7 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
       // ПОЛЕ, а не формы: «сколько полей осталось пустыми» — его прежний смысл.
       const takeStandard = (column: string | null, forms: readonly string[]): string | null => {
         if (!column) return null;
-        const value = String(row[column] ?? '').trim();
+        const value = cellOf(column);
         if (!value) return null;
         for (const form of forms) {
           const collided = varsByProviderKey.get(providerVariableKey(form));

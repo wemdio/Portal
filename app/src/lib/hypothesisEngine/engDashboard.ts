@@ -86,6 +86,14 @@ export interface EngDashVerticalSlice {
   templates: Array<Record<string, unknown>>;
   /** Активные джобы вертикали (pending/running) — для живых подписей. */
   activeJobs: Array<Record<string, unknown>>;
+  /**
+   * id шаблонов, чьи письма ядро запуска откажет (признак `needs_rewrite`
+   * проекции — clientEngProjection.heTemplateNeedsRewrite, тот же гейт писем,
+   * что у шага 4b″ launchTemplate.ts). Роут считает его только для шаблонов из
+   * engDashRewriteCandidateIds. Нет — признак не считался (тогда и подписи
+   * прежние).
+   */
+  rewriteTemplateIds?: ReadonlySet<string>;
 }
 
 export interface EngDashStageInfo {
@@ -109,6 +117,13 @@ export interface EngDashStageInfo {
    */
   mainBase: Record<string, unknown> | null;
   launch: HeTemplateLaunchInfo | null;
+  /**
+   * Шаблон этапа ('template' — готовый незапущенный, 'launch_unfinished' —
+   * запущенный не до конца) в `rewriteTemplateIds`: его письма запуск
+   * откажет, и ни «launch when set», ни «finish the launch» правдой не будут.
+   * У остальных этапов — false.
+   */
+  lettersNeedRewrite: boolean;
 }
 
 function asStr(v: unknown): string {
@@ -153,6 +168,40 @@ function collectInfo(base: Record<string, unknown> | null): Record<string, unkno
 }
 
 /**
+ * Шаблоны, о которых этап вертикали может сказать «запускай» или «достраивай»
+ * (deriveEngVerticalStage): по каждой вертикали — свежий запущенный, если его
+ * запуск не закончен, а без запущенного — свежий готовый незапущенный. Ровно
+ * их роут дашборда проверяет гейтом писем: письма и строки баз нужны только
+ * им, а не каждому шаблону аккаунта на 15-секундном полле.
+ */
+export function engDashRewriteCandidateIds(templates: Array<Record<string, unknown>>): string[] {
+  const byVertical = new Map<string, Array<Record<string, unknown>>>();
+  for (const t of templates) {
+    const vid = asStr(t.vertical_id);
+    const list = byVertical.get(vid);
+    if (list) list.push(t);
+    else byVertical.set(vid, [t]);
+  }
+  const ids: string[] = [];
+  for (const list of byVertical.values()) {
+    const launched = latestLaunchedTemplate(list);
+    const row = launched
+      ? heLaunchIsIncomplete(launched.launch)
+        ? launched.row
+        : null
+      : latestReadyUnlaunched(list);
+    const id = asStr(row?.id);
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+/** Свежий готовый шаблон без записи о запуске — тот, что этап 'template' зовёт запускать. */
+function latestReadyUnlaunched(templates: Array<Record<string, unknown>>): Record<string, unknown> | null {
+  return latest(templates.filter((t) => asStr(t.status) === 'ready' && !parseLaunchInfo(t.launch_info)));
+}
+
+/**
  * Этап вертикали из сущностей (порядок конвейера: research → letters →
  * base (collecting → construct → analyzing) → template → launched; дальше
  * ежедневный refill — отдельным блоком дашборда). Приоритет: запущенное
@@ -164,9 +213,9 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   const { projectStatus, chains, bases, templates, activeJobs } = input;
 
   const launched = latestLaunchedTemplate(templates);
-  const readyTemplate = latest(
-    templates.filter((t) => asStr(t.status) === 'ready' && !parseLaunchInfo(t.launch_info)),
-  );
+  const readyTemplate = latestReadyUnlaunched(templates);
+  const needsRewrite = (row: Record<string, unknown>): boolean =>
+    input.rewriteTemplateIds?.has(asStr(row.id)) === true;
   const analyzingBase = latest(bases.filter((b) => asStr(b.status) === 'analyzing'));
   const collectingBase = latest(bases.filter((b) => asStr(b.status) === 'collecting'));
   const analyzedBase = latest(bases.filter((b) => asStr(b.status) === 'analyzed'));
@@ -182,12 +231,18 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     latest(bases);
 
   if (launched && heLaunchIsIncomplete(launched.launch)) {
+    // Достройку ядро откажет тем же гейтом писем (4b″), поэтому подпись про
+    // письма, а не «ещё не уехала» с намёком «нажми ещё раз».
+    const rewrite = needsRewrite(launched.row);
     return {
       stage: 'launch_unfinished',
-      stageDetail: 'launch unfinished — part of the audience has not gone out yet',
+      stageDetail: rewrite
+        ? 'launch unfinished — these letters cannot finish it and need rewriting'
+        : 'launch unfinished — part of the audience has not gone out yet',
       dots: [true, true, true, true, false],
       mainBase,
       launch: launched.launch,
+      lettersNeedRewrite: rewrite,
     };
   }
   if (launched) {
@@ -199,15 +254,20 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       dots: [true, true, true, true, true],
       mainBase,
       launch: launched.launch,
+      lettersNeedRewrite: false,
     };
   }
   if (readyTemplate) {
+    const rewrite = needsRewrite(readyTemplate);
     return {
       stage: 'template',
-      stageDetail: 'template ready — launch when set',
+      stageDetail: rewrite
+        ? 'letters need rewriting — ask your manager to rewrite them'
+        : 'template ready — launch when set',
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
+      lettersNeedRewrite: rewrite,
     };
   }
   if (analyzingBase) {
@@ -217,6 +277,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       dots: [true, true, false, false, false],
       mainBase,
       launch: null,
+      lettersNeedRewrite: false,
     };
   }
   if (collectingBase) {
@@ -235,6 +296,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
         dots: [true, true, false, false, false],
         mainBase,
         launch: null,
+        lettersNeedRewrite: false,
       };
     }
     const stats =
@@ -247,6 +309,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       dots: [true, true, false, false, false],
       mainBase,
       launch: null,
+      lettersNeedRewrite: false,
     };
   }
   if (analyzedBase) {
@@ -259,6 +322,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
+      lettersNeedRewrite: false,
     };
   }
   if (hasReadyChain) {
@@ -268,6 +332,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       dots: [true, true, false, false, false],
       mainBase,
       launch: null,
+      lettersNeedRewrite: false,
     };
   }
   if (projectStatus === 'researching') {
@@ -277,6 +342,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       dots: [false, false, false, false, false],
       mainBase,
       launch: null,
+      lettersNeedRewrite: false,
     };
   }
   const chainJobActive = activeJobs.some((j) => asStr(j.stage) === 'chain');
@@ -286,6 +352,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     dots: [true, false, false, false, false],
     mainBase,
     launch: null,
+    lettersNeedRewrite: false,
   };
 }
 
@@ -462,9 +529,20 @@ export function buildEngDashboardEvents(input: {
         deferred > 0 && asStr(stats.deferred_reason) === 'instantly_capacity'
           ? `, ${deferred} not sent (${HE_TEAM_ON_IT_SHORT_EN})`
           : '';
+      // Адреса, которые долив снял сам: письмо кампании прочиталось бы у них
+      // неверно — пустота на месте подстановки или замена не на месте
+      // (stats.held_unfilled, stages/baseCollectRefill.ts, шаг 3a). «skipped»,
+      // а не «not sent yet»: эти строки не уедут ни следующей ночью, ни
+      // переносом — они остаются в базе. Только у 'appended': у 'no_new'
+      // допущенных строк нет вовсе, а у отказа ленте важнее его причина.
+      const unfilled = asNum(stats.held_unfilled);
+      const skipped =
+        unfilled > 0
+          ? `, ${unfilled} skipped (the letters would not read right for ${unfilled === 1 ? 'this contact' : 'these contacts'})`
+          : '';
       events.push({
         type: 'refill_appended',
-        text: withVertical(`refill: +${asNum(stats.appended)} leads${heldBack}`, vname),
+        text: withVertical(`refill: +${asNum(stats.appended)} leads${heldBack}${skipped}`, vname),
         at,
       });
     } else if (status === 'no_new') {
@@ -512,6 +590,9 @@ export function buildEngDashboardEvents(input: {
         );
         continue;
       }
+      // stats.error_kind='letters_held' пишет крон до покупки сборки
+      // (autoPipeline.ts, шаг 3a--): письмо запущенного шаблона прочиталось бы
+      // неверно у любой строки, ночь пропущена, команде ушёл алерт.
       events.push(
         asStr(stats.error_kind) === 'instantly_capacity'
           ? {
@@ -519,6 +600,12 @@ export function buildEngDashboardEvents(input: {
               text: withVertical(`refill stopped: ${HE_TEAM_ON_IT_SHORT_EN}`, vname),
               at,
             }
+          : asStr(stats.error_kind) === 'letters_held'
+            ? {
+                type: 'refill_empty',
+                text: withVertical('refill paused: the letters need rewriting — ask your manager to rewrite them', vname),
+                at,
+              }
           : budgetOutcome === 'cap_exhausted'
             ? {
                 type: 'refill_empty',

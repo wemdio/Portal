@@ -824,6 +824,13 @@ export interface EngDashboardVertical {
    * нет (ответ старше) либо `false` — пометки нет или её не прочитали.
    */
   refill_dry?: boolean;
+  /**
+   * Письма шаблона этапа запуск откажет: роут ставит признак проекции
+   * `needs_rewrite` (heTemplateNeedsRewrite) шаблону этапа 'template' или
+   * 'launch_unfinished'. Поля нет (ответ старше) либо `false` — подписи
+   * карточки прежние.
+   */
+  letters_need_rewrite?: boolean;
 }
 
 export interface EngDashboardEvent {

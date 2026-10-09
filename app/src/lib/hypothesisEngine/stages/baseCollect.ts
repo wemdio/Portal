@@ -186,6 +186,9 @@ import {
   normalizeWebsiteForDedup,
   type HeSiteSet,
 } from '../collectionIdentity';
+// Название компании для писем ENG-базы (только детерминированные правила).
+import { withHeCleanCompanyNames } from '../companyNameCleanup';
+import type { HeCompanyCleanRow } from '../companyNames';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
 // Набор источников по рынку (us — только ENG-источники; RU — без набора).
@@ -6684,7 +6687,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // суд ПОСЛЕ импорта идёт ровно тогда, когда суда до конструктора не было
   // (gateRan=false): RU-инструмент, ENG-база с фазой CONSTRUCT от прошлой
   // сборки и ENG-база, у которой гейт до конструктора отказал.
-  type StoredRow = HeUnifiedRow & HeHiringSeenRow & { _email_status?: string; _low_relevance?: boolean };
+  type StoredRow = HeUnifiedRow &
+    HeHiringSeenRow &
+    HeCompanyCleanRow & { _email_status?: string; _low_relevance?: boolean };
   let storedRows: StoredRow[] = finalRows;
   if (finalEmailStatuses) {
     storedRows = storedRows.map((r, i) => {
@@ -6792,6 +6797,24 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         `компании, пока не наберёт потолок, остальные адреса не уедут. ` +
         `Компаний ${companiesTotal}, кап ${contactCap} адресов на компанию`,
     );
+  }
+
+  // ENG: название компании для писем («ACME LOGISTICS, INC.» → «Acme
+  // Logistics») — в скрытом поле строки рядом с исходной ячейкой, сама ячейка
+  // `company` не меняется: по ней база узнаёт компанию (дедуп, исключения
+  // других баз, ключ потолка запуска, пометка доставки). Читают поле запуск,
+  // долив с переносом (launchHandoff.ts, mapBaseRowsToLeads) и превью писем
+  // (renderPreview.ts); поля нет — в письмо идёт исходное название.
+  // Здесь, а не раньше: строки уже прошли релевант-гейт (его вход не меняется)
+  // и дальше уходят в обе записи — финал ниже и долив (runHeRefillAppend).
+  // Только детерминированные правила (companyNameCleanup.ts): модель не
+  // зовётся, повтор стадии ничего не переплачивает. RU-строки не трогаются.
+  if (market === 'us') {
+    const named = withHeCleanCompanyNames(storedRows);
+    storedRows = named.rows;
+    if (named.changed > 0) {
+      stageLog(ctx, `[base_collect] названия для писем: очищено ${named.changed} из ${storedRows.length} строк`);
+    }
   }
 
   // ─── REFILL (ENG auto-pipeline) ───

@@ -38,6 +38,19 @@
  *      пометку снимает клиент из кабинета. Правило выключено по умолчанию
  *      (флаг окружения HE_VERTICAL_DRY_STOP); без флага серия только считается
  *      в ночной лог;
+ *   3a--. ПИСЬМА ЗАПУЩЕННОГО ШАБЛОНА (до переноса, до предполёта, до денег):
+ *      письма, в которые ночь доливает, отбор долива (шаг 3a в
+ *      stages/baseCollectRefill.ts) снял бы у ВСЕХ строк при любых строках —
+ *      оператор темы без колонки, оператор без колонки и fallback или с
+ *      fallback не к месту, битые скобки, писем нет (heRefillLettersHoldEveryRow).
+ *      Раньше это узнавалось только после купленной сборки: все строки
+ *      снимались, а компании оставались исключёнными в 'analyzed'-базе, куда
+ *      никто не возвращается, — каждую ночь, пока письма не починят. Теперь
+ *      сборка не ставится, слот verticals_per_run не расходуется, а ночь
+ *      пишется строкой журнала 'failed' без base_id (stats.error_kind =
+ *      'letters_held') и тем же алертом команде, что у долива (вид
+ *      'letters_held', opsAlert.ts). Очередь переноса такой вертикали день не
+ *      закрывает: её строки тоже были бы сняты;
  *   3a-. ПЕРЕНОС (решение владельца 04.10.2026): компании, которым прошлые
  *      ночи не досталось ни одного письма, ждут в he_refill_carryover и уходят
  *      первыми. Хватает их у проекта на остаток дня — ночь получают ТОЛЬКО
@@ -129,12 +142,21 @@ import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAcco
 import type { InstantlyRequestOptions } from '@/lib/instantly/accounts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
-import { parseLaunchInfo } from './launchHandoff';
+import { buildLaunchSequence, parseLaunchInfo } from './launchHandoff';
 // Алерт команде в health-бот (решение владельца 04.10.2026): кабинет ENG пишет
 // клиенту «временная проблема, команда уже работает», и при паузе по ёмкости
 // это правда только потому, что пауза сообщает о себе здесь и в доливе
 // (stages/baseCollectRefill.ts). Модуль лёгкий: тянет только workerAlert.
 import { flushHeOpsAlerts, notifyHeClientStop } from './opsAlert';
+// Гейт писем — чистый модуль без импортов значений: в бандл крона добавляется
+// только он сам, без стадии сборки.
+import {
+  checkHeTemplateOperators,
+  describeHeTemplateOperatorGate,
+  heTemplateGateHoldsEveryRow,
+  withHeEmptyCellFallbacks,
+} from './templateOperatorGate';
+import type { HeChainLetter, HeOperatorMapping } from './types';
 
 /**
  * Потолок КОМПАНИЙ одной refill-сборки (на вертикаль за тик), а не строк — имя
@@ -147,6 +169,67 @@ import { flushHeOpsAlerts, notifyHeClientStop } from './opsAlert';
 export const HE_AUTO_REFILL_ROWS_LIMIT = 200;
 /** Дефолт verticals_per_run — зеркало DEFAULT миграции 20260804_0005. */
 export const HE_AUTO_DEFAULT_VERTICALS_PER_RUN = 3;
+
+/**
+ * Все колонки, какие может получить база ночного долива: контракт авто-сборки
+ * HE_AUTO_COLLECT_COLUMNS (stages/baseCollect.ts) и 'description', когда
+ * конструктор вернул описания (у очереди переноса — колонки тех же баз). Ими
+ * тик сверяет письма до покупки (heRefillLettersHoldEveryRow). Копия, а не
+ * импорт: stages/baseCollect.ts затащил бы в бандл крона всю стадию сборки.
+ * Разойтись с контрактом копия не может — её сверяет компилятор
+ * (stages/baseCollectRefill.ts, _refillBaseColumnsMatch).
+ */
+export const HE_REFILL_BASE_COLUMNS = [
+  'company',
+  'website',
+  'email',
+  'phone',
+  'vacancy_title',
+  'address',
+  'category',
+  'employees',
+  'revenue',
+  'inn',
+  'source_detail',
+  'description',
+] as const;
+
+/** Причина снятия всех строк, когда у запущенного шаблона нет писем (тик и долив). */
+export const HE_REFILL_NO_LETTERS_DETAIL = 'у шаблона кампании нет писем — сверить строки не с чем';
+
+/**
+ * Снял бы отбор долива (шаг 3a в stages/baseCollectRefill.ts,
+ * heRefillUnfilledRows) ВСЕ строки ночи при ЛЮБЫХ строках? Причина для лога и
+ * алерта — или null. Только та часть отбора, что от строк не зависит: писем нет
+ * либо гейт писем отказывает списком, который задевает каждую строку
+ * (heTemplateGateHoldsEveryRow). Писем — отправляемые тексты основной кампании,
+ * как их собирает buildLaunchSequence без сегмента; маппинг — с заменами пустых
+ * ячеек, как у долива (heRefillOperatorMapping, market='us').
+ *
+ * Колонки — HE_REFILL_BASE_COLUMNS, все возможные у базы долива. У настоящей
+ * базы ночи их столько же или меньше, а меньше колонок — больше операторов без
+ * колонки, то есть отказ здесь — отказ и у ночи. Обратное неверно, и это
+ * намеренно (ошибка в эту сторону — купленная ночь, как до этой проверки, а в
+ * обратную — потерянная): пустые ячейки (emptyCells) и колонка, которой у ночи
+ * не окажется ('description'), видны только после сборки, их ловит шаг 3a.
+ * Чистая функция.
+ */
+export function heRefillLettersHoldEveryRow(template: {
+  letters: unknown;
+  personalization_plan: unknown;
+}): string | null {
+  const sequence = buildLaunchSequence(
+    Array.isArray(template.letters) ? (template.letters as HeChainLetter[]) : null,
+  );
+  if (!sequence) return HE_REFILL_NO_LETTERS_DETAIL;
+  const plan = template.personalization_plan as { operator_mapping?: HeOperatorMapping[] } | null;
+  const gate = checkHeTemplateOperators({
+    letters: sequence.steps,
+    columns: [...HE_REFILL_BASE_COLUMNS],
+    operatorMapping: withHeEmptyCellFallbacks(plan?.operator_mapping, HE_REFILL_BASE_COLUMNS).mapping,
+  });
+  return heTemplateGateHoldsEveryRow(gate) ? describeHeTemplateOperatorGate(gate, 4) : null;
+}
 
 /* ─── СУХАЯ ВЕРТИКАЛЬ ─────────────────────────────────────────────────────
  *
@@ -176,9 +259,13 @@ export const HE_AUTO_DEFAULT_VERTICALS_PER_RUN = 3;
  *     stages/baseCollectRefill.ts); ключа нет — значит ночь записал писатель,
  *     который об этом различии не знал, и приговор по ней не выносится.
  *   * 'appended' — серию ОБРЫВАЕТ, даже когда stats.appended = 0. Ноль там
- *     означает наш собственный отрез: дневной кап проекта (capped) или
- *     блок-лист владельца пресета (skipped_blocklist). Считать его сухой ночью
- *     значило бы заглушить вертикаль за наш бюджет и за выбор самого клиента.
+ *     означает наш собственный отрез: дневной кап проекта (capped),
+ *     блок-лист владельца пресета (skipped_blocklist) или строки, которым
+ *     письмо запущенной кампании прочиталось бы неверно (held_unfilled, шаг
+ *     3a в stages/baseCollectRefill.ts; сняты все — алерт команде
+ *     'letters_held', opsAlert.ts). Считать его сухой ночью значило бы
+ *     заглушить вертикаль за наш бюджет, за выбор самого клиента или за наши
+ *     письма: рынок строки дал, лечится это починкой писем, а не пометкой.
  *   * 'failed' — серию ОБРЫВАЕТ и сухой ночью НЕ считается. Сбой конструктора,
  *     ошибка долива, отказ провайдера дают ровно этот статус, и про рынок он не
  *     говорит НИЧЕГО. Обрыв (а не «прозрачный пропуск») выбран сознательно: мы
@@ -187,7 +274,8 @@ export const HE_AUTO_DEFAULT_VERTICALS_PER_RUN = 3;
  *   * 'collecting' — прогон не завершён (идёт сейчас либо повис от упавшей
  *     стадии). В окно не попадает вовсе: вердикта у него нет.
  *   * строки без base_id — отказы САМОЙ постановки (нет места у рассыльщика,
- *     сбой enqueue). Сбора не было, про срез они молчат — в окно не попадают.
+ *     сбой enqueue, письма запущенного шаблона сняли бы все строки — шаг 3a--).
+ *     Сбора не было, про срез они молчат — в окно не попадают.
  *     Тот же отбор, что у refillFailStreak в stages/baseCollectRefill.ts.
  *
  * ПОЧЕМУ ПОРОГ ИЗ КОНФИГА. he_auto_pipeline_configs ПУСТ, ночной добор в
@@ -658,7 +746,16 @@ export type HeAutoPipelineDetailStatus =
   | 'paused'
   | 'dry'
   | 'carry_covers'
+  | 'letters_held'
   | 'failed';
+
+/**
+ * Текст ошибки строки журнала, когда тик не купил ночь из-за писем (шаг 3a--
+ * в шапке); за ним — причина гейта. Машинная причина — stats.error_kind
+ * 'letters_held': по тексту её никто не разбирает.
+ */
+const LETTERS_HELD_ERROR =
+  'письма запущенного шаблона сняли бы все строки ночи — сборка не ставилась, деньги не потрачены';
 
 /**
  * Текст отказа предполёта — БЛИЗНЕЦ REFILL_CAPACITY_NOTE в
@@ -750,6 +847,13 @@ export interface HeAutoPipelineTickSummary {
    * равно уйдёт перенесённым компаниям.
    */
   carryCovers: number;
+  /**
+   * Вертикалей, чья ночь не куплена, потому что письма запущенного шаблона
+   * отбор долива снял бы у всех строк (шаг 3a-- в шапке). НЕ failed: сбоя тика
+   * нет, а exit code крона, падающий каждую ночь до починки писем, ничего не
+   * добавил бы к алерту команде и строке журнала.
+   */
+  lettersHeld: number;
   failed: number;
   details: HeAutoPipelineTickDetail[];
 }
@@ -877,6 +981,43 @@ function latestCampaignByVertical(
   return new Map(
     [...best.entries()].map(([k, v]) => [k, { campaignId: v.campaignId, presetId: v.presetId }]),
   );
+}
+
+/**
+ * Вертикали, чью ночь отбор долива снял бы целиком (шаг 3a-- в шапке):
+ * вертикаль → причина. Шаблон ночи долив выбирает по кампании, в которую
+ * доливает (pickRefillTemplate: шаблон, чей запуск несёт этот campaign_id),
+ * поэтому сверяются ВСЕ запущенные шаблоны вертикали с этой кампанией, и
+ * вертикаль попадает сюда, только если снят был бы каждый: какой из них
+ * возьмёт долив, тик не знает. Обычно такой шаблон один.
+ */
+function lettersHeldByVertical(
+  templateRows: Array<Record<string, unknown>>,
+  campaignByVertical: ReadonlyMap<string, VerticalLaunchTarget>,
+): Map<string, string> {
+  const held = new Map<string, string>();
+  const sendable = new Set<string>();
+  for (const row of templateRows) {
+    const verticalId = asString(row.vertical_id);
+    const target = campaignByVertical.get(verticalId);
+    const launch = parseLaunchInfo(row.launch_info);
+    if (!target || !launch || sendable.has(verticalId)) continue;
+    const carriesCampaign =
+      launch.campaign_id === target.campaignId ||
+      (launch.campaigns ?? []).some((c) => c.campaign_id === target.campaignId);
+    if (!carriesCampaign) continue;
+    const reason = heRefillLettersHoldEveryRow({
+      letters: row.letters,
+      personalization_plan: row.personalization_plan,
+    });
+    if (reason === null) {
+      sendable.add(verticalId);
+      held.delete(verticalId);
+    } else if (!held.has(verticalId)) {
+      held.set(verticalId, reason);
+    }
+  }
+  return held;
 }
 
 /**
@@ -1024,7 +1165,8 @@ async function readDryNightStreak(
     let streak = 0;
     for (const row of (data ?? []) as Array<{ status?: unknown; stats?: unknown }>) {
       // Любой исход, кроме 'no_new', серию обрывает — включая 'failed'
-      // (наш сбой) и 'appended' с нулём (наш кап либо блок-лист клиента).
+      // (наш сбой) и 'appended' с нулём (наш кап, блок-лист клиента либо
+      // строки, снятые из-за писем кампании — held_unfilled).
       if (row.status !== 'no_new') break;
       // ...и 'no_new' ночи, у которой каталог остался недочитанным: её ноль
       // про наш предохранитель, а не про источник.
@@ -1450,14 +1592,18 @@ async function passConfig(
     .sort((a, b) => Date.parse(a.created_at ?? '') - Date.parse(b.created_at ?? ''));
 
   let campaignByVertical = new Map<string, VerticalLaunchTarget>();
+  // Вертикаль → почему её ночь не покупается из-за писем (шаг 3a-- в шапке).
+  let heldLetters = new Map<string, string>();
   if (verticals.length > 0) {
     const { data: templateRows, error: tErr } = await supabase
       .from('he_templates')
-      .select('vertical_id, launch_info, created_at')
+      .select('vertical_id, launch_info, created_at, letters, personalization_plan')
       .in('vertical_id', verticals.map((v) => v.id))
       .not('launch_info', 'is', null);
     if (tErr) throw new Error(`he_templates read: ${tErr.message}`);
-    campaignByVertical = latestCampaignByVertical((templateRows ?? []) as Array<Record<string, unknown>>);
+    const launchedTemplates = (templateRows ?? []) as Array<Record<string, unknown>>;
+    campaignByVertical = latestCampaignByVertical(launchedTemplates);
+    heldLetters = lettersHeldByVertical(launchedTemplates, campaignByVertical);
   }
 
   const perRun = Math.max(1, config.verticals_per_run ?? HE_AUTO_DEFAULT_VERTICALS_PER_RUN);
@@ -1518,6 +1664,9 @@ async function passConfig(
   for (const vertical of verticals) {
     if (!carryByVertical || !campaignByVertical.has(vertical.id)) continue;
     if (dryStopEnabled && vertical.refill_dry_since) continue;
+    // Ночь этой вертикали не ставится (шаг 3a--), а её очередь отбор долива
+    // снял бы целиком: день она не закрывает.
+    if (heldLetters.has(vertical.id)) continue;
     const queue = carryByVertical.get(vertical.id);
     if (queue && queue.companies > 0) carryCandidates.push({ id: vertical.id, ...queue });
   }
@@ -1590,6 +1739,56 @@ async function passConfig(
         detail({ verticalId: vertical.id, status: 'dry', ...dryNightsDetail });
         continue;
       }
+    }
+
+    // ─── ПИСЬМА ЗАПУЩЕННОГО ШАБЛОНА (шаг 3a-- в шапке; до переноса, до
+    //     предполёта, до постановки, до денег) ───
+    // Отбор долива снял бы все строки ночи при любых строках — сборку не
+    // ставим, слот не расходуем. Ночь — строкой журнала без base_id, как отказ
+    // предполёта ёмкости: дневную бронь она не трогает (бронь берёт только
+    // сам долив), в серию сухих ночей и в серию отказов вертикали не входит
+    // (обе читают только строки с base_id). Каждую ночь, пока письма не
+    // починят: ни пометки, ни паузы здесь нет — пересобранный и запущенный
+    // шаблон снимает отказ сам, следующей же ночью (тик сверяет шаблон
+    // последнего запуска вертикали).
+    const lettersHeld = heldLetters.get(vertical.id);
+    if (lettersHeld !== undefined) {
+      summary.lettersHeld += 1;
+      detail({
+        verticalId: vertical.id,
+        status: 'letters_held',
+        ...dryNightsDetail,
+        message: `letters of the launched template would hold every row (${lettersHeld}) — no collection bought`,
+      });
+      // Тот же алерт, что у долива, снявшего все строки (alertRefillLettersHeld
+      // в stages/baseCollectRefill.ts): вид 'letters_held', окно молчания по
+      // вертикали. Ждём, а не `void`: крон одноразовый (ожидание ограничено
+      // внутри opsAlert). До записи журнала: команде важнее узнать, чем строке лечь.
+      await notifyHeClientStop({
+        projectId: config.project_id,
+        // Тик берёт только market='us' (runHeAutoPipelineTick).
+        market: 'us',
+        stage: 'refill_preflight',
+        kind: 'letters_held',
+        provider: 'letters',
+        // «Не куплена» — первым: opsAlert режет текст до HE_OPS_REASON_MAX, а
+        // причина гейта бывает длиннее (у долива порядок обратный: там сборка
+        // куплена, и важнее причина).
+        reason: `ночь НЕ куплена, письма сняли бы все строки ещё до сборки (кампания ${campaignId}): ${lettersHeld}`,
+        verticalId: vertical.id,
+        clientSees: 'строку ленты «refill failed»; вертикаль остаётся «live»',
+      });
+      await insertRun(supabase, {
+        config_id: config.id,
+        project_id: config.project_id,
+        vertical_id: vertical.id,
+        base_id: null,
+        status: 'failed',
+        stats: { error_kind: 'letters_held' },
+        error: `${LETTERS_HELD_ERROR}: ${lettersHeld}`.slice(0, 500),
+        completed_at: now.toISOString(),
+      });
+      continue;
     }
 
     // ─── ПЕРЕНОС ЗАКРЫВАЕТ ДЕНЬ (до предполёта: запрос к рассыльщику не
@@ -1818,6 +2017,7 @@ export async function runHeAutoPipelineTick(
     paused: 0,
     dry: 0,
     carryCovers: 0,
+    lettersHeld: 0,
     failed: 0,
     details: [],
   };

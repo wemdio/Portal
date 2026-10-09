@@ -7,7 +7,9 @@
  *     (letters[].segment_variants), B-вариант — в letters[].variants,
  *     wait_days — лесенка CHAIN_WAIT_DAYS из stages/chain;
  *  3) пост-проверки с одним retry каждая: длина тел (≤80 слов, письмо 1 ≤70) и
- *     консистентность operator_mapping (см. validateOperatorMapping);
+ *     консистентность operator_mapping (см. validateOperatorMapping); у 'us'
+ *     повтор по операторам запускает и предсказанный отказ гейта отправки
+ *     (шаг 4b), с его английским описанием в подсказке;
  *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
  *  4b) ТОЛЬКО рынок 'us' — гейт отправки (templateOperatorGate): бесплатная
  *      починка строки приветствия («Hello {{firstName}},» без колонки имени →
@@ -24,10 +26,35 @@
  * есть (result.reused, расход 0) — см. findReusableTemplate про форс.
  * В промпты подмешиваются style_override из брифа (styleExample),
  * signature_override (дословная подпись отправителя) и winner-паттерны
- * датасета (best-effort); после генерации писем — критик-луп:
- * одна оценка (только основной вариант A) + максимум один rewrite по её
- * замечаниям; B-вариант и сегментные варианты после рерайта восстанавливаются
- * из исходных писем.
+ * датасета (best-effort); у EN — ещё слова клиента из брифа (offer_override,
+ * business_override → блок «CLIENT'S OWN WORDS» плана, писем, критика и
+ * рерайта). После генерации писем — критик-луп: одна оценка (только основной
+ * вариант A) + максимум один rewrite по её замечаниям; B-вариант и сегментные
+ * варианты после рерайта восстанавливаются из исходных писем.
+ *
+ * Только EN (language 'en'), RU/PL как раньше:
+ *  - шаблон не короче цепочки, насколько это даёт один повтор: писем меньше,
+ *    чем в he_chains.letters, → тот же один повтор генерации, что и при < 3
+ *    писем, с английской подсказкой (короче цепочки, но не меньше 3, шаблон
+ *    после него принимается — только с записью в лог); из двух ответов —
+ *    ближайший к числу писем цепочки, но не меньше 3; укороченный
+ *    ответ сокращения тел (шаг 2b) не принимается, если он дальше от цели;
+ *  - все подсказки повторов модели — по-английски;
+ *  - ответ фикс-прохода (шаг 2c), в котором непроверенных чисел больше, чем
+ *    в письмах до него, не принимается: остаются письма до него;
+ *  - рерайт критика откатывается к письмам до него только за рост числа
+ *    непроверенных чисел (и, у 'us', за сломанный гейт — ниже). Тире,
+ *    приветствие, «?», стоп-фразы и абзацы его не откатывают: откат выбросил
+ *    бы и правки критика по смыслу (обещание без опоры, утверждение о рынке
+ *    получателя, которого отправитель знать не может). Регламент финальных
+ *    писем, с абзацами, — только предупреждение: personalization_plan.rule_violations
+ *    (staff-экран шаблона) и лог.
+ * Только 'us': модель плана не видит колонок с пустыми ячейками без замены
+ * (heColumnsWithoutStandIn); повтор по операторам, после которого гейт
+ * отправки перестал пропускать письма (или нашёл больше проблем), тоже
+ * откатывается, а снявший его отказ принимается, если не добавил
+ * непроверенных чисел (lettersRegression); рерайт критика откатывается, если
+ * гейт пропускал письма до него и не пропускает после.
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
@@ -45,8 +72,9 @@ import {
   buildTemplatePlanMessages,
   buildTemplateRewriteMessages,
 } from '../prompts/template';
-import { buildChainRuleFixHint } from '../prompts/chain';
+import { buildChainRuleFixHint, clientWordsFromBrief } from '../prompts/chain';
 import {
+  checkLetterParagraphs,
   checkLetterRules,
   extractNumberFacts,
   findUnverifiedNumbers,
@@ -62,8 +90,11 @@ import {
   HeTemplateOperatorGateError,
   checkHeTemplateOperators,
   describeHeTemplateOperatorGate,
+  heColumnsWithoutStandIn,
+  heTemplateOperatorGateProblemsEn,
   repairHeNameGreetings,
   withHeEmptyCellFallbacks,
+  type HeTemplateOperatorGateResult,
 } from '../templateOperatorGate';
 import type {
   HeBase,
@@ -72,6 +103,7 @@ import type {
   HeChainLetter,
   HeHypothesis,
   HeJob,
+  HeLetterRuleWarning,
   HeOperatorMapping,
   HePersonalizationPlan,
   HeSegmentVariant,
@@ -298,22 +330,27 @@ export function validateSegmentVariants(
  *    явно unmatched с fallback);
  *  - unmatched-оператор обязан иметь fallback (иначе подставлять нечего);
  *  - оператор в теме обязан быть matched (fallback в теме невозможен).
- * Возвращает список проблем (пустой — всё чисто).
+ * Возвращает список проблем (пустой — всё чисто). opts.language === 'en' —
+ * тексты по-английски (их стадия кладёт в подсказку повтора EN-генерации);
+ * иначе — по-русски, как раньше.
  */
 export function validateOperatorMapping(
   mapping: HeOperatorMapping[],
   columns: string[],
   plan: HeTemplatePlanOutput,
-  opts?: { subjectOperators?: string[] },
+  opts?: { subjectOperators?: string[]; language?: HeChainLanguage },
 ): string[] {
   const issues: string[] = [];
+  const en = opts?.language === 'en';
   const columnKeys = new Set(columns.map(normalizeKey));
   const byOperator = new Map(mapping.map((m) => [m.operator.toLowerCase(), m]));
 
   for (const m of mapping) {
     if (m.matched && (!m.column || !columnKeys.has(normalizeKey(m.column)))) {
       issues.push(
-        `Оператор {{${m.operator}}} замаплен на колонку «${m.column ?? '—'}», которой нет среди колонок базы`,
+        en
+          ? `{{${m.operator}}} is mapped to the column "${m.column ?? '—'}", which is not among the base columns`
+          : `Оператор {{${m.operator}}} замаплен на колонку «${m.column ?? '—'}», которой нет среди колонок базы`,
       );
     }
   }
@@ -321,14 +358,22 @@ export function validateOperatorMapping(
   for (const lp of plan.personalization_plan ?? []) {
     for (const op of lp.operators ?? []) {
       if (!byOperator.has(op.var.toLowerCase())) {
-        issues.push(`Оператор {{${op.var}}} из плана (письмо ${lp.letter_index}) отсутствует в operator_mapping`);
+        issues.push(
+          en
+            ? `{{${op.var}}} from the plan (email ${lp.letter_index}) is missing from the operator mapping`
+            : `Оператор {{${op.var}}} из плана (письмо ${lp.letter_index}) отсутствует в operator_mapping`,
+        );
       }
     }
   }
 
   for (const m of mapping) {
     if (!m.matched && !m.fallback) {
-      issues.push(`Оператор {{${m.operator}}} не замаплен на колонку базы и не имеет fallback`);
+      issues.push(
+        en
+          ? `{{${m.operator}}} maps to no base column and has no fallback`
+          : `Оператор {{${m.operator}}} не замаплен на колонку базы и не имеет fallback`,
+      );
     }
   }
 
@@ -336,7 +381,9 @@ export function validateOperatorMapping(
     const m = byOperator.get(op.toLowerCase());
     if (m && !m.matched) {
       issues.push(
-        `Оператор {{${m.operator}}} используется в теме письма, но не замаплен на колонку (fallback в теме невозможен)`,
+        en
+          ? `{{${m.operator}}} is used in a subject but maps to no base column (a subject cannot use a fallback)`
+          : `Оператор {{${m.operator}}} используется в теме письма, но не замаплен на колонку (fallback в теме невозможен)`,
       );
     }
   }
@@ -385,7 +432,52 @@ export function collectLengthWarnings(letters: HeChainLetterAB[]): string[] {
 
 const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно столько же писем, сколько в исходной цепочке (3–5), каждое блоком «---LETTER N---» + строка темы; у письма 1 — вариант B блоком «---LETTER 1 B---»; сегментные варианты — блоками «---SEGMENT: <when>---» после письма. Верни шаблон заново, целиком, без пояснений.`;
 
-function shortenRetryHint(letters: HeChainLetterAB[]): string {
+/** Больше писем стадия не берёт (buildLetters режет ответ модели до стольких). */
+const TEMPLATE_MAX_LETTERS = 6;
+
+/** Меньше писем шаблон не бывает: ответ короче — повтор, затем отказ стадии. */
+const TEMPLATE_MIN_LETTERS = 3;
+
+/**
+ * Насколько число писем ответа далеко от цели (числа писем цепочки). Ответ
+ * короче TEMPLATE_MIN_LETTERS не годится вовсе — бесконечно далеко.
+ */
+function letterCountDistance(count: number, target: number): number {
+  return count < TEMPLATE_MIN_LETTERS ? Number.POSITIVE_INFINITY : Math.abs(count - target);
+}
+
+function emailsEn(n: number): string {
+  return `${n} email${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * EN: подсказка повтора генерации, когда писем меньше, чем в цепочке
+ * (he_chains.letters), или формат сломан. Цепочка короче минимума шаблона
+ * (клиент оставил 1–2 письма) — просим минимум и дописать письма после них:
+ * меньше трёх писем стадия не примет.
+ */
+function lengthRetryHintEn(target: number, got: number): string {
+  const want = Math.max(TEMPLATE_MIN_LETTERS, target);
+  const count =
+    target < want
+      ? `The source sequence has ${emailsEn(target)}, and a template needs at least ${want}: keep its emails in the same order and add follow-ups after them.`
+      : `The template needs exactly ${emailsEn(want)}, one for each email of the source sequence and in the same order.`;
+  return (
+    `We could read ${emailsEn(got)} in your answer. ${count} ` +
+    `Write each email as a "---LETTER N---" block with a "Subject:" line; email 1 also gets its B variant as a "---LETTER 1 B---" block; ` +
+    `segment variants go in "---SEGMENT: <when>---" blocks right after their email. Return the whole template again, with no explanations.`
+  );
+}
+
+function shortenRetryHint(letters: HeChainLetterAB[], language: HeChainLanguage): string {
+  if (language === 'en') {
+    const countsEn = letters.map((l, i) => `email ${i + 1}: ${countWords(l.body)} words`).join(', ');
+    return (
+      `Some email bodies are longer than the regulations allow (${countsEn}). The regulations are not negotiable: body ≤ 80 words, email 1 ≤ 70 words. ` +
+      `Shorten every long email, keeping its meaning, the {{var}} operators, the "---LETTER 1 B---" block and the "---SEGMENT: <when>---" blocks. ` +
+      `Return the whole template again, in the same format.`
+    );
+  }
   const counts = letters.map((l, i) => `письмо ${i + 1}: ${countWords(l.body)} слов`).join(', ');
   return (
     `Тела писем длиннее регламента (${counts}). Регламент непреодолим: тело ≤ 80 слов, первое письмо ≤ 70 слов. ` +
@@ -402,6 +494,27 @@ function operatorIssuesHint(issues: string[]): string {
     `в темах — только операторы с реальной колонкой (fallback в теме невозможен). ` +
     `Верни шаблон заново, целиком, в том же формате (---LETTER N--- / ---SEGMENT: <when>---).`
   );
+}
+
+/**
+ * EN-вариант operatorIssuesHint. В списке — проблемы маппинга по-английски и
+ * (us) отказы гейта отправки с тем, что исправить (heTemplateOperatorGateProblemsEn):
+ * часть из них велит оператор убрать, поэтому «каждый оператор из плана» здесь —
+ * каждый ДРУГОЙ.
+ */
+function operatorIssuesHintEn(issues: string[]): string {
+  return (
+    `The template has problems with personalization operators:\n` +
+    issues.map((i) => `- ${i}`).join('\n') +
+    `\n\nFix each item as it says. Every other operator in the plan must actually be used in the emails and map to a real base column; ` +
+    `subjects may only use operators backed by a real column (no fallback is possible in a subject). ` +
+    `Return the whole template again, in the same format (---LETTER N--- / ---SEGMENT: <when>---).`
+  );
+}
+
+/** Сколько проблем нашёл гейт отправки — мера «лучше/хуже» для повторов и рерайта. */
+function gateIssueCount(gate: HeTemplateOperatorGateResult): number {
+  return gate.subjectUnresolved.length + gate.unbacked.length + gate.malformed.length + gate.emptyCells.length;
 }
 
 /** Колонки готового шаблона, которые стадия отдаёт при переиспользовании. */
@@ -571,6 +684,10 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
   const signatureOverride =
     typeof brief.signature_override === 'string' ? brief.signature_override : undefined;
+  // Слова клиента (offer_override, business_override) — в план, письма, критик
+  // и рерайт. Блок «CLIENT'S OWN WORDS» сборщики рендерят только для EN:
+  // RU/PL-промпты то же поле игнорируют и не меняются.
+  const clientWords = clientWordsFromBrief(brief);
 
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
@@ -591,6 +708,24 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
 
   const columns = Array.isArray(base.columns) ? base.columns : [];
 
+  // Только 'us': строки базы и колонка адреса — вход гейта отправки (шаг 3b и
+  // его предсказание на шагах 2d/2e). RU их не читает.
+  const baseRows =
+    market === 'us' && Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
+  const emailColumn = market === 'us' ? findEmailColumn(columns, baseRows) : null;
+  // Только 'us': колонку, пустую хотя бы у одного адреса и без замены по виду
+  // (vacancy_title, phone, address, …), гейт отправки откажет (пустая ячейка
+  // без замены), и платная генерация ушла бы в отказ при каждом повторе. Модель
+  // плана таких колонок не видит; маппинг и гейт по-прежнему считают по всем.
+  const hiddenColumns = market === 'us' ? heColumnsWithoutStandIn({ columns, rows: baseRows, emailColumn }) : [];
+  const planColumns = hiddenColumns.length ? columns.filter((c) => !hiddenColumns.includes(c)) : columns;
+  if (hiddenColumns.length) {
+    stageLog(
+      ctx,
+      `[template] колонки с пустыми ячейками у адресов и без замены не показываем модели плана: ${hiddenColumns.join(', ')}`,
+    );
+  }
+
   // Язык всех промптов стадии наследуется от цепочки вертикали (he_chains.language).
   const language = (chain.language === 'en' || chain.language === 'pl' ? chain.language : 'ru') as HeChainLanguage;
 
@@ -602,11 +737,12 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       verticalSummary: vertical.summary ?? '',
       chainLetters,
       baseAnalysis: analysis,
-      columns,
+      columns: planColumns,
       hypotheses,
       clientCase,
       styleExample,
       signatureOverride,
+      clientWords,
     }),
     HeTemplatePlanSchema,
     { model: getHeModel('chain'), maxTokens: 8192 },
@@ -625,6 +761,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     styleExample,
     winnerPatterns,
     signatureOverride,
+    clientWords,
   });
 
   /** Сырой ответ модели → письма с приклеенными сегментными и B-вариантами. */
@@ -634,7 +771,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     const ab = extractLetterBVariants(raw);
     const seg = extractSegmentVariants(ab.cleaned);
     const parsed = parseLettersFromModelOutput(seg.cleaned);
-    const sliced = parsed.slice(0, 6);
+    const sliced = parsed.slice(0, TEMPLATE_MAX_LETTERS);
     // wait_days — лесенка цепочки CHAIN_WAIT_DAYS (внутри parsedToChainLetters), по индексу письма.
     const letters = parsedToChainLetters(sliced).map((l, i): HeChainLetterAB => {
       const { variants: _legacy, ...rest } = l;
@@ -654,37 +791,74 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   addUsage(usage, llm);
   let { parsed, letters } = buildLetters(llm.text);
 
-  if (parsed.length < 3) {
-    stageLog(ctx, `[template] распознано ${parsed.length} писем — retry с фидбэком`);
+  // EN: шаблон не имеет права укоротить цепочку. Цель — число писем
+  // he_chains.letters (их клиент видел и правил на шаге Letters; второго
+  // источника числа нет), не больше того, что стадия берёт вообще. Писем меньше
+  // цели → тот же ОДИН повтор, что и при < 3, с английской подсказкой; из двух
+  // ответов — ближайший к цели, но не меньше 3 (ничья — повтор). Отказа «по
+  // длине» нет: стадия падает, только если и после повтора меньше 3 писем, как
+  // раньше. RU/PL — прежний порог < 3 и русская подсказка.
+  const targetLetters = Math.min(chainLetters.length, TEMPLATE_MAX_LETTERS);
+  const retryBelow = language === 'en' ? Math.max(TEMPLATE_MIN_LETTERS, targetLetters) : TEMPLATE_MIN_LETTERS;
+  if (parsed.length < retryBelow) {
+    stageLog(
+      ctx,
+      language === 'en'
+        ? `[template] распознано ${parsed.length} писем, в цепочке ${targetLetters} — retry с фидбэком`
+        : `[template] распознано ${parsed.length} писем — retry с фидбэком`,
+    );
+    const first = { llm, parsed, letters };
     const retryMessages: LLMMessage[] = [
       ...messages,
       { role: 'assistant', content: llm.text.slice(0, 2000) },
-      { role: 'user', content: RETRY_HINT },
+      { role: 'user', content: language === 'en' ? lengthRetryHintEn(targetLetters, parsed.length) : RETRY_HINT },
     ];
     llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildLetters(llm.text));
+    if (
+      language === 'en' &&
+      letterCountDistance(first.letters.length, targetLetters) < letterCountDistance(letters.length, targetLetters)
+    ) {
+      stageLog(
+        ctx,
+        `[template] повтор вернул ${letters.length} писем — оставляем первый ответ (${first.letters.length}), он ближе к ${targetLetters}`,
+      );
+      ({ llm, parsed, letters } = first);
+    }
   }
   if (parsed.length < 3) {
     throw new Error(`Шаблон не распарсился: ${parsed.length} писем после retry`);
   }
+  if (language === 'en' && letters.length !== targetLetters) {
+    stageLog(ctx, `[template] писем в шаблоне ${letters.length}, в цепочке ${targetLetters} — число писем расходится`);
+  }
 
   // Шаг 2b: длина тел — регламент ≤80 слов (письмо 1 ≤70); >85 слов → один retry на сокращение.
+  // EN: сокращённый ответ не принимается, если он дальше от числа писем цепочки.
   if (letters.some((l) => countWords(l.body) > SHORTEN_RETRY_WORDS)) {
     stageLog(ctx, '[template] тела писем длиннее регламента — retry на сокращение');
     const retryLlm = await callLLMText(
       [
         ...messages,
         { role: 'assistant', content: llm.text.slice(0, 2000) },
-        { role: 'user', content: shortenRetryHint(letters) },
+        { role: 'user', content: shortenRetryHint(letters, language) },
       ],
       { model, maxTokens: 16384 },
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);
-    if (rebuilt.parsed.length >= 3) {
+    const keepsLength =
+      language !== 'en' ||
+      letterCountDistance(rebuilt.letters.length, targetLetters) <= letterCountDistance(letters.length, targetLetters);
+    if (rebuilt.parsed.length >= 3 && keepsLength) {
       llm = retryLlm;
       ({ parsed, letters } = rebuilt);
+    } else if (rebuilt.parsed.length >= 3) {
+      stageLog(
+        ctx,
+        `[template] сокращённый вариант: ${rebuilt.letters.length} писем вместо ${letters.length} (в цепочке ${targetLetters}) — оставляем исходные письма`,
+      );
     } else {
       stageLog(ctx, '[template] сокращённый вариант не распарсился — оставляем исходные письма');
     }
@@ -705,12 +879,20 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     JSON.stringify(brief),
     JSON.stringify(winnerPatterns),
     plan.data.fixed_block,
+    // EN: слова клиента сырым текстом. Внутри JSON брифа выше они уже есть;
+    // здесь — чтобы цифры клиента, которые EN-промпт велит цитировать
+    // дословно, оставались в корпусе, даже если бриф из него когда-то уберут
+    // (стадия chain у EN так и сделала). RU/PL — корпус прежний.
+    ...(language === 'en' ? [clientWords.offerOverride ?? '', clientWords.businessOverride ?? ''] : []),
   ].join('\n');
-  const facts = extractNumberFacts(factCorpus);
+  // Язык чтения чисел: 'en' — запятая разделяет тысячи (letterChecks); RU/PL —
+  // прежнее чтение. Письма сверяются так же, как прочитан корпус.
+  const facts = extractNumberFacts(factCorpus, language);
+  // letterIndex — номер письма в detail нарушения (учитывается только для 'en').
   const lettersForCheck = (ls: HeChainLetterAB[]): HeLetterForCheck[] =>
-    ls.flatMap((l) => [
-      { subject: l.subject ?? '', body: l.body, variant: 'A' },
-      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B' })),
+    ls.flatMap((l, i) => [
+      { subject: l.subject ?? '', body: l.body, variant: 'A', letterIndex: i + 1 },
+      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B', letterIndex: i + 1 })),
     ]);
   const segmentNumberViolations = (ls: HeChainLetterAB[]): HeLetterRuleViolation[] =>
     ls.flatMap((l, i) =>
@@ -718,7 +900,10 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         findUnverifiedNumbers(sv.text, facts).map((token) => ({
           letter: i + 1,
           rule: 'unverified_number' as const,
-          detail: `письмо ${i + 1}, сегментный вариант: число «${token}» отсутствует в материалах — удали или замени фактом из материалов`,
+          detail:
+            language === 'en'
+              ? `letter ${i + 1}, segment variant: the number "${token}" is not in the materials; remove it or replace it with a figure from the materials`
+              : `письмо ${i + 1}, сегментный вариант: число «${token}» отсутствует в материалах — удали или замени фактом из материалов`,
         })),
       ),
     );
@@ -726,11 +911,19 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     ...checkLetterRules(lettersForCheck(ls), language, facts),
     ...segmentNumberViolations(ls),
   ];
+  /** Сколько нарушений — числа не из материалов (unverified_number). */
+  const unverifiedCount = (violations: HeLetterRuleViolation[]) =>
+    violations.filter((v) => v.rule === 'unverified_number').length;
   const ruleViolations = collectRuleViolations(letters);
   if (ruleViolations.length > 0) {
     stageLog(ctx, `[template] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
     // Принятие фикса: то же число писем и не меньше B/сегментных вариантов
     // (модель могла молча выкинуть блоки ---LETTER N B--- / ---SEGMENT---).
+    // EN — и не больше непроверенных чисел, чем в письмах до него: фикс
+    // переписывает шаблон целиком и мог вписать цифру, которой нет в
+    // материалах, а повтор и рерайт ниже сравнивают числа уже с письмами
+    // после фикса — такая цифра ушла бы получателю (rule_violations — только
+    // предупреждение). Вызов фикса уже оплачен; новых вызовов нет.
     const countVariants = (ls: HeChainLetterAB[]) => ({
       b: ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0),
       seg: ls.reduce((acc, l) => acc + (l.segment_variants?.length ?? 0), 0),
@@ -754,18 +947,31 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         after.b >= before.b &&
         after.seg >= before.seg
       ) {
-        llm = fix;
-        parsed = rebuilt.parsed;
-        letters = rebuilt.letters;
-        const remaining = collectRuleViolations(letters);
-        if (remaining.length > 0) {
+        const remaining = collectRuleViolations(rebuilt.letters);
+        const numbersBefore = language === 'en' ? unverifiedCount(ruleViolations) : 0;
+        const numbersAfter = language === 'en' ? unverifiedCount(remaining) : 0;
+        if (numbersAfter > numbersBefore) {
           stageLog(
             ctx,
-            `[template] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+            `[template] фикс-проход: непроверенных чисел ${numbersAfter} (было ${numbersBefore}) — оставляем исходные письма; ${remaining
+              .filter((v) => v.rule === 'unverified_number')
               .slice(0, 3)
               .map((v) => v.detail)
               .join('; ')}`,
           );
+        } else {
+          llm = fix;
+          parsed = rebuilt.parsed;
+          letters = rebuilt.letters;
+          if (remaining.length > 0) {
+            stageLog(
+              ctx,
+              `[template] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+                .slice(0, 3)
+                .map((v) => v.detail)
+                .join('; ')}`,
+            );
+          }
         }
       } else {
         stageLog(
@@ -829,35 +1035,138 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     );
   };
 
+  // Гейт отправки 'us' (шаг 3b) по любым письмам — ровно та цепочка, что перед
+  // записью: маппинг → бесплатная починка приветствия (и маппинг заново) →
+  // замены пустых ячеек → checkHeTemplateOperators по строкам с адресом.
+  // Чистая функция, без модели: шаги 2d и 2e зовут её, чтобы заранее знать,
+  // откажет ли гейт, а шаг 3b — для самого решения.
+  const sendGate = (ls: HeChainLetterAB[]) => {
+    let sentOps = collectOperators(ls);
+    let mapping = buildMapping(sentOps.allOperators);
+    const repaired = repairHeNameGreetings(ls, columns, mapping);
+    if (repaired.repairs.length) {
+      sentOps = collectOperators(repaired.letters);
+      mapping = buildMapping(sentOps.allOperators);
+    }
+    const withStandIns = withHeEmptyCellFallbacks(mapping, columns).mapping;
+    const gate = checkHeTemplateOperators({
+      letters: repaired.letters,
+      columns,
+      operatorMapping: withStandIns,
+      rows: baseRows,
+      emailColumn,
+    });
+    return { letters: repaired.letters, repairs: repaired.repairs, ops: sentOps, mapping, withStandIns, gate };
+  };
+
+  // Чем письма повтора по операторам (шаг 2d) хуже писем до него — бесплатно,
+  // по детерминированным проверкам; null — принять новые письма. Рерайт
+  // критика (шаг 2e) судится своим, более узким правилом
+  // (rewriteRollbackReason). Порядок:
+  //  1) 'us' — гейт отправки. Провал на шаге 3b стоит всей оплаченной
+  //     генерации, поэтому письма, которые он пропускает, лучше: проходил до и
+  //     не проходит после — откат; не проходил и проходит — принимаем, если
+  //     только повтор не добавил непроверенных чисел (письмо не должно
+  //     утверждать того, чего нет в материалах); не проходит ни там, ни там —
+  //     откат, если проблем гейта больше.
+  //  2) регламент — collectRuleViolations (letterChecks + числа сегментных
+  //     вариантов; абзацы сюда НЕ входят: они только предупреждение). EN:
+  //     сначала непроверенные числа (их больше — откат, даже если всего
+  //     нарушений столько же или меньше; меньше — принимаем), затем общее
+  //     число; RU/PL — общее число, как раньше.
+  type LetterStanding = { gate: HeTemplateOperatorGateResult | null; rules: number; numbers: number };
+  const standingOf = (ls: HeChainLetterAB[], gate: HeTemplateOperatorGateResult | null): LetterStanding => {
+    const violations = collectRuleViolations(ls);
+    return {
+      gate,
+      rules: violations.length,
+      numbers: unverifiedCount(violations),
+    };
+  };
+  const lettersStanding = (ls: HeChainLetterAB[]) => standingOf(ls, market === 'us' ? sendGate(ls).gate : null);
+  type LettersRegression =
+    | { kind: 'gate'; was: number; now: number }
+    | { kind: 'numbers'; was: number; now: number }
+    | { kind: 'rules'; was: number; now: number };
+  const lettersRegression = (before: LetterStanding, after: LetterStanding): LettersRegression | null => {
+    const numbersUp = after.numbers > before.numbers;
+    if (before.gate && after.gate && before.gate.ok !== after.gate.ok) {
+      if (before.gate.ok) return { kind: 'gate', was: 0, now: gateIssueCount(after.gate) };
+      return numbersUp ? { kind: 'numbers', was: before.numbers, now: after.numbers } : null;
+    }
+    if (before.gate && after.gate && !after.gate.ok) {
+      const was = gateIssueCount(before.gate);
+      const now = gateIssueCount(after.gate);
+      if (now > was) return { kind: 'gate', was, now };
+    }
+    if (language === 'en' && after.numbers !== before.numbers) {
+      return numbersUp ? { kind: 'numbers', was: before.numbers, now: after.numbers } : null;
+    }
+    return after.rules > before.rules ? { kind: 'rules', was: before.rules, now: after.rules } : null;
+  };
+
   let ops = collectOperators(letters);
   let operatorMapping = buildMapping(ops.allOperators);
   let mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
     subjectOperators: ops.subjectOperators,
   });
 
-  if (mappingIssues.length) {
-    stageLog(ctx, `[template] operator_mapping: ${mappingIssues.length} проблем — retry с фидбэком`);
-    // Принимаем регенерацию только с тем же числом писем и без НОВЫХ
-    // нарушений детерминированного контроля: retry переписывает шаблон
-    // целиком и мог вернуть тире/лишние CTA уже после фикс-прохода.
-    const preRetryViolations = collectRuleViolations(letters).length;
+  // 'us': откажет ли этим письмам гейт отправки — бесплатно, ДО платного
+  // повтора. Отказ гейта тоже запускает этот (единственный) повтор, и его
+  // описание идёт в подсказку: иначе детерминированную причину (оператор в
+  // начале предложения, колонка без замены) модель повторяла бы в каждой
+  // следующей платной генерации, и шаблон не лёг бы ни разу. RU — как раньше.
+  const gateBeforeRetry = market === 'us' ? sendGate(letters).gate : null;
+  const refusingGate = gateBeforeRetry && !gateBeforeRetry.ok ? gateBeforeRetry : null;
+
+  if (mappingIssues.length || refusingGate) {
+    if (mappingIssues.length) {
+      stageLog(ctx, `[template] operator_mapping: ${mappingIssues.length} проблем — retry с фидбэком`);
+    }
+    if (refusingGate) {
+      stageLog(
+        ctx,
+        `[template] гейт отправки отказал бы этим письмам — retry с фидбэком: ${describeHeTemplateOperatorGate(refusingGate, 6)}`,
+      );
+    }
+    // Принимаем регенерацию только с тем же числом писем и не хуже прежней
+    // (lettersRegression, с регламентом): retry переписывает шаблон целиком и
+    // мог вернуть тире/лишние CTA уже после фикс-прохода, а у 'us' — сломать
+    // гейт отправки.
+    const preRetryStanding = standingOf(letters, gateBeforeRetry);
     const preRetry = { letters, ops, operatorMapping, mappingIssues };
+    const hint =
+      language === 'en'
+        ? operatorIssuesHintEn([
+            ...validateOperatorMapping(operatorMapping, columns, plan.data, {
+              subjectOperators: ops.subjectOperators,
+              language,
+            }),
+            ...(refusingGate ? heTemplateOperatorGateProblemsEn(refusingGate) : []),
+          ])
+        : operatorIssuesHint(
+            refusingGate ? [...mappingIssues, describeHeTemplateOperatorGate(refusingGate, 12)] : mappingIssues,
+          );
     const retryLlm = await callLLMText(
       [
         ...messages,
         { role: 'assistant', content: llm.text.slice(0, 2000) },
-        { role: 'user', content: operatorIssuesHint(mappingIssues) },
+        { role: 'user', content: hint },
       ],
       { model, maxTokens: 16384 },
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);
     if (rebuilt.parsed.length >= 3 && rebuilt.letters.length === letters.length) {
-      const newViolations = collectRuleViolations(rebuilt.letters).length;
-      if (newViolations > preRetryViolations) {
+      const worse = lettersRegression(preRetryStanding, lettersStanding(rebuilt.letters));
+      if (worse) {
         stageLog(
           ctx,
-          `[template] retry по операторам вернул ${newViolations} нарушений регламента (было ${preRetryViolations}) — оставляем прежние письма`,
+          worse.kind === 'rules'
+            ? `[template] retry по операторам вернул ${worse.now} нарушений регламента (было ${worse.was}) — оставляем прежние письма`
+            : worse.kind === 'numbers'
+              ? `[template] retry по операторам вернул ${worse.now} непроверенных чисел (было ${worse.was}) — оставляем прежние письма`
+              : `[template] retry по операторам: гейт отправки нашёл ${worse.now} проблем (было ${worse.was}) — оставляем прежние письма`,
         );
         ({ letters, ops, operatorMapping, mappingIssues } = preRetry);
       } else {
@@ -883,7 +1192,46 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // урезанный или раздутый rewrite → остаются исходные письма. Критик идёт
   // ПОСЛЕ фикс-прохода и маппинга операторов — он ревюит финальную механику
   // текста; маппинг после рерайта пересобирается детерминированно (ниже).
+  // EN: критик и рерайт видят «CLIENT'S OWN WORDS» (clientWords; сборщики
+  // читают поле только для 'en') — чтобы критик сверял сказанное о клиенте с
+  // его словами, а рерайт брал конкретику оттуда, а не выдумывал.
+  //
+  // Фикс-проход был до рерайта, а сам рерайт регламент не проходит. Поэтому
+  // рерайт сверяется с письмами до него — бесплатно, детерминированными
+  // проверками — и откатывается (сам он уже оплачен) только в двух случаях:
+  //  а) 'us': гейт отправки письма до него пропускал, а после него — нет
+  //     (провал на шаге 3b стоил бы всей оплаченной генерации);
+  //  б) EN: чисел не из материалов (unverified_number, с сегментными
+  //     вариантами) стало больше — письмо не должно утверждать того, чего нет
+  //     в материалах.
+  // Тире, приветствие, «?», стоп-фразы, абзацы и гейт, который не пропускает
+  // письма ни до рерайта, ни после (шаг 3b шаблон тогда не запишет при любом
+  // выборе), рерайт не откатывают: критик — единственная проверка писем по
+  // смыслу (обещание без опоры, утверждение о рынке получателя, которого
+  // отправитель знать не может), и откат за стиль выбросил бы его правки.
+  // Нарушения регламента принятого рерайта ложатся в
+  // personalization_plan.rule_violations (ниже). RU/PL на рынке 'ru' — как
+  // раньше (принимается).
+  const rewriteRollbackReason = (before: HeChainLetterAB[], after: HeChainLetterAB[]): string | null => {
+    if (language !== 'en' && market !== 'us') return null;
+    if (market === 'us' && sendGate(before).gate.ok) {
+      const gateAfter = sendGate(after).gate;
+      if (!gateAfter.ok) {
+        return `гейт отправки письма до него пропускал, после него — ${gateIssueCount(gateAfter)} проблем`;
+      }
+    }
+    if (language === 'en') {
+      const was = unverifiedCount(collectRuleViolations(before));
+      const now = unverifiedCount(collectRuleViolations(after));
+      if (now > was) return `непроверенных чисел ${now} (было ${was})`;
+    }
+    return null;
+  };
   let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
+  // EN: замечания критика, чей рерайт откатили, — письма ушли в шаблон без
+  // его правки. Ложатся в rule_violations (staff-экран шаблона), иначе
+  // помеченная критиком неправда уходила бы молча (только строка лога).
+  let rolledBackCriticIssues: HeLetterRuleWarning[] = [];
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
     const critique = await callLLMWithSchema(
@@ -894,6 +1242,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         language,
         styleExample,
         winnerPatterns,
+        clientWords,
       }),
       HeChainCritiqueSchema,
       { model, maxTokens: 4096 },
@@ -916,6 +1265,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
           styleExample,
           winnerPatterns,
           signatureOverride,
+          clientWords,
         }),
         { model, maxTokens: 16384 },
       );
@@ -924,13 +1274,11 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       // Принимаем rewrite только при точном совпадении числа писем: иначе
       // ломаются лесенка wait_days и индексация сегментных вариантов.
       if (rebuilt.parsed.length === letters.length) {
-        llm = rewrite;
-        parsed = rebuilt.parsed;
         // Рерайт выводит только тему+тело основного варианта (---SEGMENT--- и
         // ---LETTER N B--- блоков в нём нет): варианты восстанавливаем
         // детерминированно из исходных писем по индексу.
         const originalLetters = letters;
-        letters = rebuilt.letters.map((l, i): HeChainLetterAB => {
+        const rewritten = rebuilt.letters.map((l, i): HeChainLetterAB => {
           const orig = originalLetters[i];
           return {
             ...l,
@@ -938,7 +1286,22 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
             ...(orig?.variants?.length ? { variants: orig.variants } : {}),
           };
         });
-        critiqueInfo.rewritten = true;
+        const rollback = rewriteRollbackReason(originalLetters, rewritten);
+        if (rollback) {
+          stageLog(ctx, `[template] rewrite критика откатили к письмам до него: ${rollback}`);
+          if (language === 'en') {
+            rolledBackCriticIssues = issues.map((i) => ({
+              rule: 'critic' as const,
+              letter: i.letter_index,
+              detail: `letter ${i.letter_index}: the critic flagged "${i.problem}", but its rewrite was not used`,
+            }));
+          }
+        } else {
+          llm = rewrite;
+          parsed = rebuilt.parsed;
+          letters = rewritten;
+          critiqueInfo.rewritten = true;
+        }
       } else {
         stageLog(ctx, `[template] rewrite критика: ${rebuilt.parsed.length} писем вместо ${letters.length} — оставляем исходные`);
       }
@@ -980,18 +1343,19 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // повторит стадию новой генерацией (MAX_ATTEMPTS), и каждый прогон засчитан
   // тормозу писем (heTemplateGenerationBudget).
   if (market === 'us') {
-    const repaired = repairHeNameGreetings(letters, columns, operatorMapping);
-    if (repaired.repairs.length) {
-      letters = repaired.letters;
+    // Цепочка гейта — sendGate (выше): маппинг этих писем (тот же, что шаг 3
+    // только что собрал) → починка приветствия → маппинг заново → замены.
+    const sent = sendGate(letters);
+    if (sent.repairs.length) {
+      letters = sent.letters;
       stageLog(
         ctx,
-        `[template] приветствие без имени (колонки с именем в базе нет): ${repaired.repairs
+        `[template] приветствие без имени (колонки с именем в базе нет): ${sent.repairs
           .map((r) => `письмо ${r.letter} ${r.variant}: «${r.before.trim()}» → «${r.after.trim()}»`)
           .join('; ')}`,
       );
-      ops = collectOperators(letters);
-      operatorMapping = buildMapping(ops.allOperators);
-      mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
+      ops = sent.ops;
+      mappingIssues = validateOperatorMapping(sent.mapping, columns, plan.data, {
         subjectOperators: ops.subjectOperators,
       });
     }
@@ -1002,16 +1366,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     // пустая ячейка → fallback). Гейт смотрит строки базы с адресом: пустую
     // ячейку без замены или с заменой не к месту получатель прочёл бы
     // неверно — такой шаблон не пишется, как и прочие провалы гейта.
-    const standIns = withHeEmptyCellFallbacks(operatorMapping, columns);
-    operatorMapping = standIns.mapping;
-    const baseRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
-    const gate = checkHeTemplateOperators({
-      letters,
-      columns,
-      operatorMapping,
-      rows: baseRows,
-      emailColumn: findEmailColumn(columns, baseRows),
-    });
+    operatorMapping = sent.withStandIns;
+    const gate = sent.gate;
     if (gate.standIns.length) {
       stageLog(
         ctx,
@@ -1031,11 +1387,37 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const lengthWarnings = collectLengthWarnings(letters);
   if (lengthWarnings.length) stageLog(ctx, `[template] length_warnings: ${lengthWarnings.join(' | ')}`);
 
+  // EN: регламент ФИНАЛЬНЫХ писем (тех, что ложатся в he_templates; абзацы
+  // здесь тоже) — только предупреждение, статус 'ready' он не меняет. Список
+  // ложится в personalization_plan.rule_violations, только если он не пуст:
+  // его показывает staff-экран шаблона (Step5Template); клиенту
+  // personalization_plan не отдаётся (clientEngProjection, TEMPLATE_FIELDS).
+  // RU/PL — ни списка, ни строки лога.
+  const finalRuleViolations: HeLetterRuleWarning[] =
+    language === 'en'
+      ? [
+          ...[...collectRuleViolations(letters), ...checkLetterParagraphs(lettersForCheck(letters), language)].map(
+            ({ rule, letter, detail }) => ({ rule, letter, detail }),
+          ),
+          ...rolledBackCriticIssues,
+        ]
+      : [];
+  if (finalRuleViolations.length) {
+    stageLog(
+      ctx,
+      `[template] регламент финальных писем (предупреждение, шаблон сохраняем): ${finalRuleViolations.length} нарушений — ${finalRuleViolations
+        .slice(0, 5)
+        .map((v) => v.detail)
+        .join('; ')}`,
+    );
+  }
+
   const personalizationPlan: HePersonalizationPlan = {
     letters: plan.data.personalization_plan,
     additions: plan.data.segment_additions,
     segment_variants: plan.data.letters,
     operator_mapping: operatorMapping,
+    ...(finalRuleViolations.length ? { rule_violations: finalRuleViolations } : {}),
   };
 
   // fixed_block, план персонализации и письма — текст модели: один NUL или

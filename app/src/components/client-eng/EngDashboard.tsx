@@ -62,6 +62,21 @@ const STAGE_STATUS: Record<EngDashStage, { tag: string; dot: string; text: strin
   launched: { tag: 'live', dot: 'var(--cp-green)', text: 'var(--cp-green)' },
 };
 
+/**
+ * Письма шаблона этапа запуск откажет (`letters_need_rewrite` агрегата: роут
+ * считает признак проекции `needs_rewrite`, heTemplateNeedsRewrite, для
+ * шаблона этапа 'template' или 'launch_unfinished'). Нет поля (ответ старше)
+ * — false, подписи прежние.
+ */
+function lettersNeedRewrite(vertical: EngDashboardVertical): boolean {
+  return vertical.letters_need_rewrite === true;
+}
+
+/** Тег вместо «ready to launch»: шаблон есть, но запуск его письма откажет. */
+const LETTERS_REWRITE_STATUS = { tag: 'letters need rewriting', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
+/** Следующий шаг такой вертикали — за менеджером, а не за кнопкой запуска. */
+const LETTERS_REWRITE_NEXT_LINE = 'next: ask your manager to rewrite the letters';
+
 const JOB_STAGE_LABELS: Record<string, string> = {
   site_profile: 'profiling the site',
   competitors: 'mapping competitors',
@@ -253,7 +268,9 @@ const REFILL_DRY_NEXT_LINE = 'next: daily refill paused for this vertical — re
 const REFILL_DRY_PIPE_EVIDENCE = 'paused for this vertical';
 
 /** Строка «next: …» — следующий шаг конвейера из текущей стадии. */
-function nextLineFor(stage: EngDashStage, refill: HeClientRefillState, dry: boolean): string {
+function nextLineFor(stage: EngDashStage, refill: HeClientRefillState, dry: boolean, rewrite: boolean): string {
+  // Шаблон этапа запуск откажет: ни «launch», ни «finish the launch» не сработают.
+  if (rewrite && (stage === 'template' || stage === 'launch_unfinished')) return LETTERS_REWRITE_NEXT_LINE;
   switch (stage) {
     case 'research':
       return 'next: verticals review';
@@ -285,6 +302,8 @@ function buildPipelineRows(
   const fmt = (n: number) => n.toLocaleString('en-US');
   const launched = vertical.stage === 'launched';
   const launchUnfinished = vertical.stage === 'launch_unfinished';
+  // Признак ставится только шаблону этапа 'template' / 'launch_unfinished'.
+  const rewrite = lettersNeedRewrite(vertical) && (vertical.stage === 'template' || launchUnfinished);
   const dryHere = refill === 'running' && vertical.refill_dry === true;
   const cur = currentIndexFor(vertical);
   const stateOf = (i: number): PipeRow['state'] =>
@@ -368,7 +387,9 @@ function buildPipelineRows(
       state: stateOf(5),
       evidence:
         stateOf(5) === 'done'
-          ? 'template ready'
+          ? rewrite
+            ? 'letters need rewriting'
+            : 'template ready'
           : vertical.stage === 'analyzed' && job?.stage === 'template'
             ? withEta('building template…')
             : '',
@@ -378,11 +399,14 @@ function buildPipelineRows(
       label: 'Launch',
       state: stateOf(6),
       // Незаконченный запуск сам не достроится — точка неподвижная (held), а
-      // не «идёт работа».
-      ...(launchUnfinished ? { marker: 'held' as const } : {}),
+      // не «идёт работа». Так же у шаблона, чьи письма запуск откажет: до
+      // переписки писем запуска не будет.
+      ...(launchUnfinished || rewrite ? { marker: 'held' as const } : {}),
       // White-label: имя кампании — подпись, а не ссылка. Наружу вести некуда:
       // у клиента нет своего входа в рассыльщик, а сама ссылка светила бы бренд.
-      evidence: launchUnfinished ? 'unfinished — finish it on step 5' : launched ? (
+      evidence: launchUnfinished ? (
+        rewrite ? 'unfinished — these letters cannot finish it' : 'unfinished — finish it on step 5'
+      ) : launched ? (
         <>
           {s.leads_launched > 0 ? `${fmt(s.leads_launched)} leads` : ''}
           {s.leads_launched > 0 && vertical.launch?.campaign_name ? ' · ' : ''}
@@ -610,7 +634,11 @@ function VerticalCard({
   const dryHere = refill === 'running' && vertical.refill_dry === true;
   const step = wizardStepFor(vertical.stage, dryHere);
   const launched = vertical.stage === 'launched';
-  const status = STAGE_STATUS[vertical.stage];
+  const rewrite = lettersNeedRewrite(vertical);
+  // Незаконченный запуск остаётся «launch unfinished» (это правда и с
+  // признаком) — меняются его строка Launch и «next»; готовый шаблон теряет
+  // «ready to launch».
+  const status = rewrite && vertical.stage === 'template' ? LETTERS_REWRITE_STATUS : STAGE_STATUS[vertical.stage];
   const rows = buildPipelineRows(vertical, activeJob, refill);
 
   return (
@@ -660,7 +688,7 @@ function VerticalCard({
 
       <div className="pt-2.5" style={{ borderTop: '1px solid var(--cp-divider)' }}>
         <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-          {nextLineFor(vertical.stage, refill, vertical.refill_dry === true)}
+          {nextLineFor(vertical.stage, refill, vertical.refill_dry === true, rewrite)}
         </span>
       </div>
 

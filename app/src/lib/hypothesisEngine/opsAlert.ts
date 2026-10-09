@@ -18,7 +18,18 @@
  *    `autoPipeline.ts`) и запуск шаблона из ENG-кабинета
  *    (`launchTemplate.ts`, стадия HE_OPS_STAGE_TEMPLATE_LAUNCH): там паузы
  *    добора нет, но остальные сегменты запуска не создаются, и клиент читает
- *    ту же нейтральную фразу.
+ *    ту же нейтральную фразу;
+ *  - 'letters_held' — ночной добор снял ВСЕ строки ночи: письмо запущенной
+ *    кампании прочиталось бы у них неверно (stats.held_unfilled,
+ *    `stages/baseCollectRefill.ts`, alertRefillLettersHeld). Сборка куплена,
+ *    отправлено 0, ночь записана 'appended', а не сухой: это проблема писем, а
+ *    не рынка, и чинит её только команда (клиент читает в ленте «N skipped
+ *    (the letters would not read right…)»). Провайдера у этого вида нет —
+ *    `provider: 'letters'`; окно молчания — по ВЕРТИКАЛИ, а не по проекту (у
+ *    каждой вертикали свой запущенный шаблон и своя починка). Второй
+ *    вызывающий — крон ДО покупки (`autoPipeline.ts`, шаг 3a--, стадия
+ *    'refill_preflight'): письмо не прочиталось бы ни у одной строки при любых
+ *    данных, поэтому сборка не покупается, а ночь записана 'failed' без базы.
  *
  * ТОЛЬКО market='us'. RU-инструмент живёт со своими привычками и в это решение
  * не входит: строка с market='ru' (и любым другим известным рынком) молча
@@ -55,6 +66,9 @@
  *         джоба сборки, между ними часы) или повторные нажатия запуска — одна
  *         новость. Цена: место освободили, а оно снова кончилось у того же
  *         проекта в течение 6 ч в том же процессе — второй раз чат молчит;
+ *       - 'letters_held' — те же 6 ч, но ключ ещё и с вертикалью: повтор той
+ *         же ночи (перезапуск сборки вертикали) гасится, а следующая ночь
+ *         (сутки спустя) пишет снова, пока письма не починили;
  *  2. провайдер + вид отказа: первое сообщение уходит сразу, а остальные
  *     проекты с тем же отказом в течение HE_OPS_BURST_WINDOW_MS (10 мин)
  *     копятся и уходят ОДНИМ сообщением-списком в конце окна — кончившийся
@@ -101,10 +115,13 @@
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 
 /** Что остановило проект. */
-export type HeOpsStopKind = 'billing' | 'configuration' | 'capacity_pause';
+export type HeOpsStopKind = 'billing' | 'configuration' | 'capacity_pause' | 'letters_held';
 
-/** Чей отказ: модель (LLM-провайдер), поиск (Serper), рассыльщик (Instantly). */
-export type HeOpsStopProvider = 'model' | 'search' | 'sending';
+/**
+ * Чей отказ: модель (LLM-провайдер), поиск (Serper), рассыльщик (Instantly);
+ * 'letters' — не провайдер, а письма запущенного шаблона (вид 'letters_held').
+ */
+export type HeOpsStopProvider = 'model' | 'search' | 'sending' | 'letters';
 
 export interface HeOpsStop {
   projectId: string;
@@ -124,6 +141,11 @@ export interface HeOpsStop {
   httpStatus?: number | null;
   jobId?: string | null;
   baseId?: string | null;
+  /**
+   * Вертикаль. У 'letters_held' входит в ключ окна молчания (см. шапку); у
+   * остальных видов — только строка сообщения.
+   */
+  verticalId?: string | null;
   /** Шаблон, если отказ случился на его запуске. */
   templateId?: string | null;
   /**
@@ -154,7 +176,7 @@ export const HE_OPS_CAPACITY_REPEAT_MS = 6 * 60 * 60 * 1000;
 
 /** Окно молчания по проекту, виду отказа и провайдеру — по виду отказа. */
 export function heOpsRepeatWindowMs(kind: HeOpsStopKind): number {
-  return kind === 'capacity_pause' ? HE_OPS_CAPACITY_REPEAT_MS : HE_OPS_TEAM_FIX_REPEAT_MS;
+  return kind === 'capacity_pause' || kind === 'letters_held' ? HE_OPS_CAPACITY_REPEAT_MS : HE_OPS_TEAM_FIX_REPEAT_MS;
 }
 
 /** Окно, в котором отказы одного провайдера по разным проектам сворачиваются в одно сообщение. */
@@ -176,16 +198,33 @@ const KIND_LABEL: Record<HeOpsStopKind, string> = {
   // Без «добор на паузе»: тот же вид отказа шлёт и запуск шаблона, у которого
   // паузы нет; про паузу говорят совет (actionFor) и строка «пауза».
   capacity_pause: 'нет места под контакты у рассыльщика',
+  letters_held: 'письмо запущенной кампании прочиталось бы неверно у всех строк ночи',
 };
 
 const PROVIDER_LABEL: Record<HeOpsStopProvider, string> = {
   model: 'LLM-провайдер (модель)',
   search: 'Serper (поиск)',
   sending: 'Instantly (рассыльщик)',
+  letters: 'письма шаблона (не провайдер)',
 };
+
+/**
+ * Начало темы сообщения. 'letters_held' проект не останавливает: ночной добор
+ * идёт, не уходят только письма.
+ */
+function subjectHead(kind: HeOpsStopKind): string {
+  return kind === 'letters_held' ? 'ночной добор вертикали не отправил ничего' : 'клиентский проект остановлен';
+}
 
 /** Что сделать команде — по виду отказа, провайдеру и (для ёмкости) месту отказа. */
 function actionFor(kind: HeOpsStopKind, provider: HeOpsStopProvider, stage?: string): string {
+  if (kind === 'letters_held') {
+    const meanwhile =
+      stage === 'refill_preflight'
+        ? 'пока ничего не сделано, ночной добор вертикали пропускается: сборка не покупается и письма не уходят'
+        : 'пока ничего не сделано, ночи вертикали покупают сборку и не отправляют ни одного письма';
+    return `разобрать письма запущенного шаблона вертикали (причина выше): пересобрать шаблон и запустить его — ночной добор доливает в последнюю запущенную кампанию вертикали — либо выключить ночной добор проекта (he_auto_pipeline_configs.enabled); ${meanwhile}`;
+  }
   if (kind === 'capacity_pause') {
     if (stage === HE_OPS_STAGE_TEMPLATE_LAUNCH) {
       return 'освободить место в воркспейсе рассыльщика, затем повторить запуск шаблона (клиент — «Launch all (paused)» на шаге 5): повтор создаёт только несозданные сегменты и не дублирует уже созданные кампании';
@@ -265,7 +304,7 @@ async function sendBounded(alert: Parameters<typeof sendWorkerAlert>[0], holds: 
 function sendSingle(stop: HeOpsStop, held: HeOpsHeld): Promise<void> {
   return sendBounded({
     workerId: WORKER_ID,
-    subject: `клиентский проект остановлен — ${KIND_LABEL[stop.kind]}, ${PROVIDER_LABEL[stop.provider]}`,
+    subject: `${subjectHead(stop.kind)} — ${KIND_LABEL[stop.kind]}, ${PROVIDER_LABEL[stop.provider]}`,
     error: heOpsReasonText(stop.reason),
     context: {
       'проект': projectLabel(stop),
@@ -274,6 +313,7 @@ function sendSingle(stop: HeOpsStop, held: HeOpsHeld): Promise<void> {
       'HTTP-статус': stop.httpStatus ?? null,
       'джоба': stop.jobId ?? null,
       'база': stop.baseId ?? null,
+      'вертикаль': stop.verticalId ?? null,
       'шаблон': stop.templateId ?? null,
       'пауза':
         stop.kind === 'capacity_pause' && typeof stop.pauseRecorded === 'boolean'
@@ -290,14 +330,20 @@ function sendSingle(stop: HeOpsStop, held: HeOpsHeld): Promise<void> {
 function sendBurst(provider: HeOpsStopProvider, kind: HeOpsStopKind, pending: HeOpsPending[]): Promise<void> {
   const stops = pending.map((p) => p.stop);
   const shown = stops.slice(0, HE_OPS_BURST_LIST_MAX);
-  const lines = shown.map((s) => `${projectLabel(s)} — ${s.stage}${s.market ? '' : ' (рынок не прочитан)'}`);
+  const lines = shown.map(
+    (s) =>
+      `${projectLabel(s)} — ${s.stage}${s.verticalId ? `, вертикаль ${s.verticalId}` : ''}${s.market ? '' : ' (рынок не прочитан)'}`,
+  );
   if (stops.length > shown.length) lines.push(`и ещё ${stops.length - shown.length}`);
   // Советы всех мест отказа в списке, без повторов: у ёмкости ночной добор и
   // запуск шаблона чинятся по-разному.
   const actions = [...new Set(stops.map((s) => actionFor(kind, provider, s.stage)))];
   return sendBounded({
     workerId: WORKER_ID,
-    subject: `тем же отказом остановлено ещё ${stops.length} — ${KIND_LABEL[kind]}, ${PROVIDER_LABEL[provider]}`,
+    subject:
+      kind === 'letters_held'
+        ? `то же ещё у ${stops.length} — ${KIND_LABEL[kind]}`
+        : `тем же отказом остановлено ещё ${stops.length} — ${KIND_LABEL[kind]}, ${PROVIDER_LABEL[provider]}`,
     error: lines.join('\n'),
     context: {
       'первая причина': heOpsReasonText(stops[0]?.reason),
@@ -381,7 +427,10 @@ export function notifyHeClientStop(stop: HeOpsStop, opts: { now?: number } = {})
     for (const [key, hold] of silentUntilByProjectKind) {
       if (now >= hold.until) silentUntilByProjectKind.delete(key);
     }
-    const projectKey = `${stop.projectId}|${stop.kind}|${stop.provider}`;
+    // 'letters_held' — окно по вертикали (см. шапку), остальные виды — по проекту.
+    const projectKey =
+      `${stop.projectId}|${stop.kind}|${stop.provider}` +
+      (stop.kind === 'letters_held' ? `|${stop.verticalId ?? ''}` : '');
     const current = silentUntilByProjectKind.get(projectKey);
     if (current !== undefined && now < current.until) return Promise.resolve();
     // Занимаем окно сразу (решение синхронное), но держится оно, только если

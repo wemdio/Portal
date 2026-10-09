@@ -26,7 +26,12 @@
  *  - unbacked — оператор в отправляемом тексте без колонки и без fallback.
  *    Оператор с ИМЕНЕМ ЧЕЛОВЕКА (firstName и т.п.) без колонки сюда попадает
  *    и с fallback: «there, does this fit?» посреди письма читается неверно, а
- *    строку приветствия чинит repairHeNameGreetings;
+ *    строку приветствия чинит repairHeNameGreetings. И оператор без колонки,
+ *    чей fallback (его получает КАЖДЫЙ получатель) в теле встал бы туда, где
+ *    читается неверно, — проверка места, как у пустой ячейки с fallback
+ *    модели, но с поблажками по тексту самого fallback (заглавная буква в
+ *    начале предложения, «Hi there,», последнее слово перед следующим; см.
+ *    standInContextProblem; поля fallback/fallbackProblem);
  *  - malformed — литеральные {{…}}, которые не являются правильным
  *    оператором («{{first name}}», «{{RANDOM | a | b}}»), и любые оставшиеся
  *    фигурные скобки («{company}», «{{firstName}»): запуск их не наполняет,
@@ -55,8 +60,13 @@
  *  - четвёртый список гейта, emptyCells, — оператор, у которого колонка пуста
  *    хотя бы в одной строке С АДРЕСОМ (rows + emailColumn), а замены нет (вид
  *    колонки не в карте) или она встала бы туда, где читается неверно (начало
- *    предложения, после артикля, вплотную к слову, в строке приветствия, у
+ *    предложения, после артикля или квантора — вплотную или через
+ *    прилагательное, вплотную к слову, в строке приветствия, у
  *    фраз-существительных — перед существительным). Без rows список пуст.
+ *
+ * Стадия template (us) зовёт ещё два помощника отсюда: heColumnsWithoutStandIn —
+ * какие колонки не показывать модели плана, и heTemplateOperatorGateProblemsEn —
+ * английское описание отказа для подсказки платного повтора по операторам.
  *
  * Модуль не трогает словарь синонимов колонок (OPERATOR_ALIASES в
  * stages/template.ts): он общий с RU, и «industry → category» подставил бы
@@ -85,6 +95,12 @@ export interface HeTemplateOperatorIssue {
   fragment?: string;
   /** Условие сегмента — у variant 'segment'. */
   segment?: string;
+  /**
+   * Только у unbacked: оператор без колонки, чей fallback (его получает КАЖДЫЙ
+   * получатель) стоит там, где читается неверно, — сам fallback и причина.
+   */
+  fallback?: string;
+  fallbackProblem?: Exclude<HeEmptyCellReason, 'no_stand_in'>;
 }
 
 /** Почему пустая ячейка колонки прочиталась бы неверно (см. standInContextProblem). */
@@ -345,6 +361,105 @@ export function withHeEmptyCellFallbacks<M extends HeOperatorMapping>(
  * that your company is hiring» читается).
  */
 const DETERMINER_BEFORE_RE = /\b(?:the|a|an|this|these|those|your|our|their|my|his|her|its)[ \t]+$/i;
+/**
+ * Артикли, местоимения и кванторы, которые ОПРЕДЕЛЯЮТ оператор, стоя вплотную
+ * («each your company») или через одно прилагательное («the local your area»).
+ * «that» нет — по той же причине, что в DETERMINER_BEFORE_RE. Fail-closed:
+ * «both/all/either/neither your company» вплотную по-английски читается, но
+ * такой оборот в письме редок, а пропуск «each your company» ушёл бы
+ * получателю.
+ */
+const DETERMINER_WORDS = new Set([
+  'the', 'a', 'an', 'this', 'these', 'those', 'your', 'our', 'their', 'my', 'his', 'her', 'its',
+  'each', 'every', 'any', 'some', 'no', 'all', 'other', 'another', 'most', 'many', 'such', 'both', 'either',
+  'neither', 'fellow',
+]);
+/**
+ * Прилагательные, через которые артикль/квантор ещё определяет оператор
+ * («the local {{city}} market», «a similar {{industry}} firm»). Список закрытый,
+ * плюс суффиксы, почти всегда прилагательные (-ous, -ful, -less). Слово не из
+ * списка между ними — существительное, и оператор начинает новую группу:
+ * «a way {{company}} could», «the team {{company}} built», «this year
+ * {{company}} grew», «such as {{company}}», «each of {{company}}'s» читаются.
+ * Прилагательное не из списка («the dental {{city}} market») гейт пропустит.
+ */
+const ADJECTIVE_WORDS = new Set([
+  'local', 'regional', 'national', 'nearby', 'same', 'whole', 'entire', 'own', 'new', 'old', 'big', 'small',
+  'large', 'little', 'top', 'best', 'biggest', 'largest', 'smallest', 'latest', 'fastest', 'newest', 'oldest',
+  'bigger', 'larger', 'smaller', 'leading', 'growing', 'established', 'existing', 'independent', 'typical',
+  'average', 'similar', 'different', 'certain', 'major', 'main', 'key', 'current', 'busy', 'first', 'next',
+  'last', 'few', 'several', 'single', 'specific', 'particular', 'right', 'good', 'great',
+]);
+const ADJECTIVE_SUFFIX_RE = /(?:ous|ful|less)$/;
+/** Граница части предложения: знак препинания, скобка, кавычка, тире или « - ». */
+const CLAUSE_BREAK_RE = /[.,;:!?()[\]{}"“”«»—–]|\s-\s/;
+
+/**
+ * Артикль/квантор определяет оператор в той же части предложения: вплотную
+ * («each {{company}}») или через одно прилагательное («the local {{city}}»,
+ * «any other {{industry}}» — «other» и сам квантор). `lead` — текст строки до
+ * оператора.
+ */
+function determinerGovernsOperator(lead: string): boolean {
+  const clause = lead.split(CLAUSE_BREAK_RE).pop() ?? '';
+  const words = (clause.match(/[A-Za-z'’]+/g) ?? []).map((w) => w.toLowerCase());
+  const last = words[words.length - 1];
+  const beforeLast = words[words.length - 2];
+  if (last === undefined) return false;
+  if (DETERMINER_WORDS.has(last)) return true;
+  return (
+    beforeLast !== undefined &&
+    DETERMINER_WORDS.has(beforeLast) &&
+    (ADJECTIVE_WORDS.has(last) || ADJECTIVE_SUFFIX_RE.test(last))
+  );
+}
+
+/**
+ * Fallback, которым приветствие читается и без имени: «Hi there,», «Hi team,»,
+ * «Dear all,». «there» — только после hi/hello/hey («Dear there» не
+ * читается).
+ */
+const GREETING_SAFE_FALLBACKS: ReadonlyMap<string, RegExp> = new Map([
+  ['there', /^(?:hello|hi|hey)$/i],
+  ['team', /.*/],
+  ['all', /.*/],
+]);
+/** Строка до оператора — ровно приветствие: «Hi », «Hello, », «Good morning ». */
+const GREETING_ONLY_LEAD_RE = /^[ \t]*(hello|hi|hey|dear|greetings|good\s+(?:morning|afternoon|evening|day))[ \t]*,?[ \t]*$/i;
+/**
+ * Последние слова фраз карты, которые читаются и перед существительным
+ * («your company team», «your website traffic»: nounOnly false у HE_STAND_INS).
+ * Fallback с таким последним словом проверяется так же.
+ */
+const ADJUNCT_LAST_WORDS = new Set(['company', 'website']);
+/**
+ * Местоимения, которые не определяют следующее слово: после fallback «yours»
+ * идёт сказуемое («teams like yours hire»), и читается он, только если
+ * следующее слово — глагол или служебное слово. Существительное («businesses
+ * like yours owners») — отказ, как и любое слово не из списков (fail-closed).
+ */
+const STANDALONE_PRONOUNS = new Set(['yours', 'ours', 'theirs', 'mine', 'you', 'them', 'us', 'it']);
+const VERBS_AFTER_PRONOUN = new Set([
+  'hire', 'hires', 'hired', 'hiring', 'need', 'needs', 'needed', 'use', 'uses', 'used', 'run', 'runs', 'ran',
+  'grow', 'grows', 'grew', 'get', 'gets', 'got', 'see', 'sees', 'saw', 'handle', 'handles', 'handled', 'face',
+  'faces', 'faced', 'want', 'wants', 'wanted', 'spend', 'spends', 'spent', 'struggle', 'struggles', 'struggled',
+  'rely', 'relies', 'relied', 'lose', 'loses', 'lost', 'miss', 'misses', 'missed', 'pay', 'pays', 'paid', 'keep',
+  'keeps', 'kept', 'find', 'finds', 'found', 'work', 'works', 'worked', 'look', 'looks', 'looked', 'tend',
+  'tends', 'tended', 'usually', 'often', 'typically', 'already', 'still', 'rarely', 'just', 'now',
+]);
+
+/**
+ * Читается ли следующее слово после fallback, по его ПОСЛЕДНЕМУ слову (см.
+ * standInContextProblem, modifier): слово карты, что читается перед
+ * существительным, — да; местоимение — только перед глаголом или служебным
+ * словом; иначе — только перед служебным словом (NOUN_FOLLOWERS).
+ */
+function fallbackReadsBefore(fallback: string, next: string): boolean {
+  const lastWord = /([A-Za-z]+)[^A-Za-z]*$/.exec(fallback)?.[1]?.toLowerCase() ?? '';
+  if (NOUN_FOLLOWERS.has(next)) return true;
+  if (ADJUNCT_LAST_WORDS.has(lastWord)) return true;
+  return STANDALONE_PRONOUNS.has(lastWord) && VERBS_AFTER_PRONOUN.has(next);
+}
 /** Конец предложения перед вхождением: «…today. {{company}} is» → «…today. your company is». */
 const SENTENCE_END_BEFORE_RE = /[.!?]["'”’)\]]*[ \t]+$/;
 /** Строка приветствия письма (та же, что чинит GREETING_LINE_RE, но с любым продолжением). */
@@ -369,27 +484,45 @@ const NOUN_FOLLOWERS = new Set([
  * оператора [start, end) в отправляемом тексте:
  *  - sentence_start — начало строки/темы или после «. ! ?»: фраза со строчной
  *    («your company caught my eye»);
- *  - after_determiner — сразу после артикля или местоимения («the your website»);
+ *  - after_determiner — артикль, местоимение или квантор определяет оператор:
+ *    вплотную («the your website», «each your company») или через одно
+ *    прилагательное («the local your area»), в той же части предложения
+ *    (determinerGovernsOperator);
  *  - glued — вплотную к букве, цифре или знаку адреса с любой стороны
  *    («www.{{website}}», «{{city}}-based», «{{category}}s»); «'s» после — можно;
  *  - greeting — в строке приветствия тела («Hi your company team,»);
  *  - repeats — рядом слово того же смысла (HeStandIn.near): «your site
  *    {{website}}» → «your site your website»;
  *  - modifier — у nounOnly-фразы следующее слово не из NOUN_FOLLOWERS.
- * Fallback не из карты (standIn null) проверяется как существительное и без
- * repeats: его слов карта не знает.
+ * Фраза карты (standIn) — фиксированная группа «your …»: проверяется строго,
+ * как выше. Fallback не из карты (standIn null) — без repeats: его слов карта
+ * не знает. У fallback модели для колонки с пустыми ячейками остальное так же
+ * строго, как у фразы-существительного: его вид неизвестен, а «a local company
+ * owners» или «Teams like yours is» ушли бы строкам с пустой ячейкой. Мягче —
+ * только fallback оператора БЕЗ колонки (`unmatchedFallback`, его получает
+ * каждый получатель; до 09.10.2026 его место не проверялось вовсе), по его
+ * тексту:
+ *  - с заглавной буквы («Local businesses») в начале предложения читается;
+ *  - «there»/«team»/«all» сразу после приветствия и перед знаком или концом
+ *    строки — тоже («Hi there,», «Hi team,»), см. GREETING_SAFE_FALLBACKS;
+ *  - modifier решает его последнее слово (fallbackReadsBefore).
  */
 function standInContextProblem(
   t: SentText,
   start: number,
   end: number,
   standIn: HeStandIn | null,
+  unmatchedFallback = '',
 ): Exclude<HeEmptyCellReason, 'no_stand_in'> | null {
   const before = t.text.slice(0, start);
   const lineStart = before.lastIndexOf('\n') + 1;
   const lead = before.slice(lineStart);
-  if (lead.trim() === '' || SENTENCE_END_BEFORE_RE.test(lead)) return 'sentence_start';
-  if (DETERMINER_BEFORE_RE.test(lead)) return 'after_determiner';
+  const fallback = standIn ? '' : unmatchedFallback;
+  const ownText = fallback !== '';
+  if ((lead.trim() === '' || SENTENCE_END_BEFORE_RE.test(lead)) && !(ownText && /^\p{Lu}/u.test(fallback))) {
+    return 'sentence_start';
+  }
+  if (DETERMINER_BEFORE_RE.test(lead) || determinerGovernsOperator(lead)) return 'after_determiner';
   if (standIn) {
     // Только в той же строке: слово следующего абзаца соседом не считается.
     const wordBefore = /([A-Za-z]+)[ \t,:;(\[\-–—"'“‘]*$/.exec(lead)?.[1]?.toLowerCase();
@@ -409,12 +542,18 @@ function standInContextProblem(
     const firstLineEnd = firstLineStart < 0 ? -1 : t.text.indexOf('\n', firstLineStart);
     const inFirstLine = firstLineStart >= 0 && start >= firstLineStart && (firstLineEnd < 0 || start < firstLineEnd);
     if (inFirstLine && GREETING_START_RE.test(t.text.slice(firstLineStart, firstLineEnd < 0 ? undefined : firstLineEnd))) {
-      return 'greeting';
+      const greeting = ownText ? GREETING_ONLY_LEAD_RE.exec(lead)?.[1] : undefined;
+      const safeAfter = GREETING_SAFE_FALLBACKS.get(fallback.toLowerCase());
+      const endsGreeting = /^[ \t]*(?:[,!.:;]|\r?$)/.test(t.text.slice(end).split('\n')[0] ?? '');
+      if (!(greeting && safeAfter?.test(greeting) && endsGreeting)) return 'greeting';
     }
   }
   if (standIn?.nounOnly ?? true) {
     const word = /^[ \t]+([A-Za-z]+)/.exec(t.text.slice(end));
-    if (word && !NOUN_FOLLOWERS.has(word[1].toLowerCase())) return 'modifier';
+    const nextWord = word?.[1]?.toLowerCase();
+    if (nextWord && !(ownText ? fallbackReadsBefore(fallback, nextWord) : NOUN_FOLLOWERS.has(nextWord))) {
+      return 'modifier';
+    }
   }
   return null;
 }
@@ -515,16 +654,31 @@ export function checkHeTemplateOperators(input: HeTemplateOperatorGateInput): He
     const seen = new Set<string>();
     // Одна причина пустой ячейки на оператор и текст: сводке хватит первой.
     const emptyReported = new Set<string>();
+    // То же для fallback оператора без колонки, вставшего не к месту.
+    const fallbackReported = new Set<string>();
     for (const m of t.text.matchAll(operatorRe)) {
       const operator = (m[1] ?? '').trim();
       const key = operator.toLowerCase();
       if (!operator) continue;
       const { column, fallback } = resolve(operator);
+      const fallbackCounts = fallback !== '' && !isHeNameOperator(operator);
       if (!seen.has(key)) {
         seen.add(key);
         if (t.field === 'subject' && !column) subjectUnresolved.push({ ...where, operator });
-        const fallbackCounts = fallback !== '' && !isHeNameOperator(operator);
         if (!column && !fallbackCounts) unbacked.push({ ...where, operator });
+      }
+      // Оператор без колонки с fallback: fallback получает КАЖДЫЙ получатель,
+      // и его место проверяется у каждого вхождения проверкой fallback не из
+      // карты — без repeats и с поблажками по тексту самого fallback
+      // (standInContextProblem, unmatchedFallback). Не к месту — оператор не
+      // наполнится верно ни у кого: unbacked. Тема здесь не проверяется —
+      // оператор темы без колонки уже в subjectUnresolved.
+      if (!column && fallbackCounts && t.field === 'body' && !fallbackReported.has(key)) {
+        const fallbackProblem = standInContextProblem(t, m.index, m.index + m[0].length, null, fallback);
+        if (fallbackProblem) {
+          unbacked.push({ ...where, operator, fallback, fallbackProblem });
+          fallbackReported.add(key);
+        }
       }
       // Пустые ячейки — у КАЖДОГО вхождения: место замены в тексте у каждого своё.
       if (!column || emptyReported.has(key)) continue;
@@ -536,7 +690,8 @@ export function checkHeTemplateOperators(input: HeTemplateOperatorGateInput): He
         emptyReported.add(key);
         continue;
       }
-      // Fallback не из карты (его вид неизвестен) проверяется строже — как существительное.
+      // Fallback не из карты (его вид неизвестен) проверяется строже — как
+      // существительное и без repeats (standInContextProblem без unmatchedFallback).
       const mapped = STAND_IN_BY_COLUMN_KEY.get(compactOperator(column));
       const standIn = mapped && mapped.phrase === fallback ? mapped : null;
       const reason = standInContextProblem(t, m.index, m.index + m[0].length, standIn);
@@ -561,6 +716,18 @@ export function checkHeTemplateOperators(input: HeTemplateOperatorGateInput): He
     emptyCells,
     standIns: [...standInByOperator.values()],
   };
+}
+
+/**
+ * Отказ гейта, который не зависит от строк базы: оператор темы без колонки,
+ * оператор без колонки и fallback или с fallback не к месту, битые скобки. Он
+ * задевает КАЖДУЮ строку с адресом, какой бы она ни была (emptyCells — только
+ * строки с пустой ячейкой). Одно определение на оба места, где так решают:
+ * отбор строк ночного долива (stages/baseCollectRefill.ts, heRefillUnfilledRows)
+ * и предпроверка писем тика до покупки сборки (autoPipeline.ts).
+ */
+export function heTemplateGateHoldsEveryRow(gate: HeTemplateOperatorGateResult): boolean {
+  return gate.subjectUnresolved.length > 0 || gate.unbacked.length > 0 || gate.malformed.length > 0;
 }
 
 /* ── Бесплатная починка строки приветствия ── */
@@ -675,7 +842,7 @@ function placeOf(issue: HeTemplateOperatorIssue): string {
 
 const EMPTY_CELL_REASON_RU: Record<Exclude<HeEmptyCellReason, 'no_stand_in'>, string> = {
   sentence_start: 'встала бы в начало предложения со строчной буквы',
-  after_determiner: 'встала бы после артикля или местоимения («the your website»)',
+  after_determiner: 'встала бы после артикля, местоимения или квантора («the your website», «each your company», «the local your area»)',
   glued: 'склеилась бы с соседним словом или адресом',
   greeting: 'встала бы в строку приветствия («Hi your company team»)',
   repeats: 'встала бы рядом со словом того же смысла («your site your website»)',
@@ -695,9 +862,11 @@ export function describeHeTemplateOperatorGate(gate: HeTemplateOperatorGateResul
     ...gate.unbacked
       .filter((i) => i.field !== 'subject')
       .map((i) =>
-        isHeNameOperator(i.operator ?? '')
-          ? `${placeOf(i)}: {{${i.operator}}} — имени человека в базе нет`
-          : `${placeOf(i)}: {{${i.operator}}} без колонки и без fallback`,
+        i.fallbackProblem
+          ? `${placeOf(i)}: {{${i.operator}}} без колонки — подстановка «${i.fallback ?? ''}» уходит всем получателям и ${EMPTY_CELL_REASON_RU[i.fallbackProblem]}`
+          : isHeNameOperator(i.operator ?? '')
+            ? `${placeOf(i)}: {{${i.operator}}} — имени человека в базе нет`
+            : `${placeOf(i)}: {{${i.operator}}} без колонки и без fallback`,
       ),
     ...gate.malformed.map((i) => `${placeOf(i)}: битый фрагмент «${i.fragment}»`),
     ...gate.emptyCells.map(
@@ -710,6 +879,79 @@ export function describeHeTemplateOperatorGate(gate: HeTemplateOperatorGateResul
   ];
   const shown = parts.slice(0, limit).join('; ');
   return parts.length > limit ? `${shown}; и ещё ${parts.length - limit}` : shown;
+}
+
+/* ── Текст причины для модели (EN-генерация, подсказка повтора стадии template) ── */
+
+function placeOfEn(issue: HeTemplateOperatorIssue): string {
+  const where =
+    issue.variant === 'segment'
+      ? `email ${issue.letter}, segment version "${(issue.segment ?? '').slice(0, 40)}"`
+      : `email ${issue.letter}${issue.variant === 'B' ? ' B' : ''}`;
+  return `${where}, ${issue.field}`;
+}
+
+const EMPTY_CELL_REASON_EN: Record<Exclude<HeEmptyCellReason, 'no_stand_in'>, string> = {
+  sentence_start: 'at the start of a sentence, where it would begin with a lowercase letter',
+  after_determiner: 'after an article, determiner or quantifier ("the your website", "each your company", "the local your area")',
+  glued: 'glued to the next or previous word, number or web address',
+  greeting: 'in the greeting line ("Hi your company team")',
+  repeats: 'next to a word with the same meaning ("your site your website")',
+  modifier: 'in front of a noun it would have to describe ("your area clinics")',
+};
+
+/**
+ * Проблемы гейта по-английски, по одной строке на проблему, с тем, что
+ * исправить, — их стадия template кладёт в подсказку платного повтора по
+ * операторам у EN-генерации (шаг 2d), чтобы этот повтор исправил ровно то, на
+ * чём гейт отказал бы. Не больше `limit` строк, остаток — одной строкой.
+ * Получатель и клиент этого текста не видят.
+ */
+export function heTemplateOperatorGateProblemsEn(gate: HeTemplateOperatorGateResult, limit = 12): string[] {
+  const lines = [
+    ...gate.subjectUnresolved.map(
+      (i) => `${placeOfEn(i)}: {{${i.operator}}} has no column in the base, and a subject cannot use a fallback; remove it from the subject`,
+    ),
+    ...gate.unbacked
+      .filter((i) => i.field !== 'subject')
+      .map((i) =>
+        i.fallbackProblem
+          ? `${placeOfEn(i)}: {{${i.operator}}} has no column in the base, so every recipient gets "${i.fallback ?? ''}" in its place, and here it would sit ${EMPTY_CELL_REASON_EN[i.fallbackProblem]}; rewrite the sentence so "${i.fallback ?? ''}" reads right there, or remove the operator`
+          : isHeNameOperator(i.operator ?? '')
+            ? `${placeOfEn(i)}: {{${i.operator}}} is a person's name, and the base has no names; write the sentence without it`
+            : `${placeOfEn(i)}: {{${i.operator}}} has no column in the base and no fallback; remove it`,
+      ),
+    ...gate.malformed.map(
+      (i) => `${placeOfEn(i)}: "${i.fragment ?? ''}" is not a valid {{var}} operator; remove it or use an operator from the plan`,
+    ),
+    ...gate.emptyCells.map((i) =>
+      i.reason === 'no_stand_in'
+        ? `${placeOfEn(i)}: {{${i.operator}}} reads the "${i.column}" column, which is empty for ${i.emptyRows} of ${i.rows} recipients, and nothing can stand in for it; do not use this operator, and rewrite the sentence so it reads right without it`
+        : `${placeOfEn(i)}: {{${i.operator}}} reads the "${i.column}" column, which is empty for ${i.emptyRows} of ${i.rows} recipients; they get "${i.standIn ?? ''}" instead, and here it would sit ${EMPTY_CELL_REASON_EN[i.reason]}; move the operator to a spot where "${i.standIn ?? ''}" reads right too (mid-sentence, for example after "at" or "for"), or remove it`,
+    ),
+  ];
+  return lines.length > limit ? [...lines.slice(0, limit), `and ${lines.length - limit} more of the same kind`] : lines;
+}
+
+/* ── Колонки, которые модели лучше не показывать (стадия template, us) ── */
+
+/**
+ * Колонки базы, у которых есть пустая ячейка в строке С АДРЕСОМ (тот же счёт,
+ * что у emptyCells) и нет замены по виду колонки (HE_STAND_INS): оператор по
+ * такой колонке без fallback гейт отказывает (no_stand_in), а fallback модели
+ * проверяется строго. Стадия template (us) убирает их из списка колонок,
+ * который видит модель плана. Без rows или emailColumn — пустой список, как и
+ * проверка emptyCells.
+ */
+export function heColumnsWithoutStandIn(input: {
+  columns: unknown;
+  rows?: unknown;
+  emailColumn?: string | null;
+}): string[] {
+  const emptyOf = emptyCellCounter(input.rows, input.emailColumn);
+  return asList(input.columns)
+    .filter((c): c is string => typeof c === 'string')
+    .filter((column) => heEmptyCellStandIn(column) === null && emptyOf(column).empty > 0);
 }
 
 /**
