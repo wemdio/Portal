@@ -64,8 +64,10 @@ export interface TargetCheck {
   reason?: 'port' | 'host' | 'dns';
 }
 
-async function assertSafeTarget(host: string, port: number, allowedPorts: Set<number>): Promise<TargetCheck> {
-  if (!allowedPorts.has(port)) return { ok: false, reason: 'port' };
+async function assertSafeTarget(host: string, port: number, allowedPorts: Set<number> | null): Promise<TargetCheck> {
+  if (allowedPorts ? !allowedPorts.has(port) : !(Number.isInteger(port) && port > 0 && port < 65536)) {
+    return { ok: false, reason: 'port' };
+  }
   const h = (host ?? '').trim().toLowerCase();
   if (!h) return { ok: false, reason: 'host' };
 
@@ -89,6 +91,11 @@ async function assertSafeTarget(host: string, port: number, allowedPorts: Set<nu
 /** Проверяет, что SMTP-цель безопасна (публичный адрес + стандартный submission-порт). */
 export async function assertSafeSmtpTarget(host: string, port: number): Promise<TargetCheck> {
   return assertSafeTarget(host, port, SMTP_ALLOWED_PORTS);
+}
+
+/** Прокси для входа в ящик: публичный адрес, порт любой — у прокси нет стандартного. */
+export async function assertSafeProxyTarget(host: string, port: number): Promise<TargetCheck> {
+  return assertSafeTarget(host, port, null);
 }
 
 /** Проверяет, что IMAP-цель безопасна (публичный адрес + порт 993). */

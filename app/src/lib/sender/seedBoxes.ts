@@ -2,7 +2,7 @@ import 'server-only';
 
 import { ImapFlow } from 'imapflow';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { assertSafeImapTarget } from '@/lib/byoMailbox/netGuard';
+import { assertSafeImapTarget, assertSafeProxyTarget } from '@/lib/byoMailbox/netGuard';
 import { unsealMailboxSecret } from '@/lib/byoMailbox/credentials';
 import { buildMessageId } from '@/lib/mail/message';
 import { authForMailbox } from './mailboxAuth';
@@ -102,11 +102,19 @@ async function openSeedBox(box: SeedBoxRow): Promise<ImapFlow> {
   const guard = await assertSafeImapTarget(box.imap_host, box.imap_port);
   if (!guard.ok) throw new Error(`IMAP-адрес отклонён (${guard.reason})`);
   const secret = unsealMailboxSecret(box.secret_encrypted);
+  // Свой прокси на ящик: Яндекс пускает купленные ящики только с российских
+  // адресов и по одному ящику на адрес.
+  if (secret.proxyUrl) {
+    const proxy = new URL(secret.proxyUrl);
+    const proxyGuard = await assertSafeProxyTarget(proxy.hostname, Number(proxy.port));
+    if (!proxyGuard.ok) throw new Error(`Прокси отклонён (${proxyGuard.reason})`);
+  }
   const client = new ImapFlow({
     host: box.imap_host,
     port: box.imap_port,
     secure: true,
     auth: { user: box.imap_user, pass: secret.imapPassword ?? '' },
+    ...(secret.proxyUrl ? { proxy: secret.proxyUrl } : {}),
     logger: false,
     connectionTimeout: 15_000,
     greetingTimeout: 10_000,

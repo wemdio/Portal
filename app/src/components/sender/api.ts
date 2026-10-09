@@ -949,6 +949,8 @@ export interface SeedBoxDto {
   last_error: string | null;
   checked_at: string | null;
   junk_folder: string | null;
+  /** «адрес:порт» прокси, через который входим; null — без прокси. */
+  proxy_label: string | null;
   created_at: string;
   week: SeedWeekDto;
 }
@@ -989,7 +991,7 @@ export function checkSeedBox(id: string) {
   });
 }
 
-export function updateSeedBox(id: string, patch: { enabled?: boolean; password?: string }) {
+export function updateSeedBox(id: string, patch: { enabled?: boolean; password?: string; proxy?: string | null }) {
   return authFetchJson<{ ok: true }>(`${BASE}/seed-boxes/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
