@@ -13,7 +13,14 @@
 
 import { POLZA_OUTREACH_PRIORITY_COUNTRIES } from './types';
 
-export type TriggerType = 'hiring' | 'yc' | 'launch' | 'tech_stack';
+/**
+ * 10.10.2026: к найму, YC, запуску и стеку добавлены поводы, которые разбор
+ * достаёт с самого сайта, — раунд, выход на новый рынок, участие в
+ * конференции. Повод находился у 14% компаний, а без повода строка
+ * отсеивается; для справочника на миллион компаний это и было главным
+ * ограничением.
+ */
+export type TriggerType = 'hiring' | 'yc' | 'funding' | 'launch' | 'event' | 'expansion' | 'tech_stack';
 
 export interface Trigger {
   type: TriggerType;
@@ -25,7 +32,13 @@ export interface Trigger {
   quote: string | null;
 }
 
-const TRIGGER_POINTS: Record<TriggerType, number> = { hiring: 15, yc: 15, launch: 10, tech_stack: 5 };
+// Баллы по силе повода: найм и YC — прямая речь о росте продаж; раунд почти
+// так же силён; запуск и конференция — повод говорить сейчас; выход на новый
+// рынок слабее (может быть годовой давности); стек — лишь признак, что продажи
+// вообще есть.
+const TRIGGER_POINTS: Record<TriggerType, number> = {
+  hiring: 15, yc: 15, funding: 12, launch: 10, event: 8, expansion: 8, tech_stack: 5,
+};
 
 export interface ScoreInput {
   isB2b: boolean;
@@ -94,7 +107,7 @@ export function leadStatus(total: number, t: { write: number }): LeadStatus {
 
 /** Главный повод: найм и YC — «очень сильные», затем запуск, затем стек. */
 export function primaryTrigger(triggers: Trigger[]): Trigger | null {
-  const order: TriggerType[] = ['hiring', 'yc', 'launch', 'tech_stack'];
+  const order: TriggerType[] = ['hiring', 'yc', 'funding', 'launch', 'event', 'expansion', 'tech_stack'];
   for (const type of order) {
     const hit = triggers.find((t) => t.type === type);
     if (hit) return hit;
