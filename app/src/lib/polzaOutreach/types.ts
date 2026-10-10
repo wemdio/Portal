@@ -38,7 +38,12 @@ export const POLZA_OUTREACH_PRIORITY_COUNTRIES = ['us', 'gb', 'ca', 'de', 'nl', 
 
 export const POLZA_OUTREACH_DEFAULT_COUNTRIES: string[] = [...POLZA_OUTREACH_PRIORITY_COUNTRIES];
 
-export const POLZA_OUTREACH_SOURCES = ['hiring', 'yc'] as const;
+/**
+ * 10.10.2026 третий источник — справочник компаний (pdl_companies). Вакансии и
+ * YC кончаются за два автосбора, справочник — около миллиона подходящих
+ * компаний; повод ему даёт разбор сайта (siteProfile.occasions).
+ */
+export const POLZA_OUTREACH_SOURCES = ['hiring', 'yc', 'directory'] as const;
 export type PolzaOutreachSource = (typeof POLZA_OUTREACH_SOURCES)[number];
 
 export const POLZA_OUTREACH_DEFAULT_POSTED_WITHIN_DAYS = 30;
@@ -218,13 +223,16 @@ export interface PolzaLetterGuardResult {
  * отсеиваются до писем (no_trigger), ключ есть, чтобы строка без повода не
  * осталась без цепочки, если отсев когда-нибудь смягчат.
  */
-export const POLZA_OFFER_KEYS = ['hiring', 'yc', 'launch', 'tech_stack', 'none'] as const;
+export const POLZA_OFFER_KEYS = ['hiring', 'yc', 'funding', 'launch', 'event', 'expansion', 'tech_stack', 'none'] as const;
 export type PolzaOfferKey = (typeof POLZA_OFFER_KEYS)[number];
 
 export const POLZA_OFFER_LABELS: Record<PolzaOfferKey, string> = {
   hiring: 'Найм в sales/GTM',
   yc: 'Стартап YC',
+  funding: 'Привлекли раунд',
   launch: 'Запуск продукта',
+  event: 'Участие в конференции',
+  expansion: 'Выход на новый рынок',
   tech_stack: 'Стек продаж',
   none: 'Без повода',
 };

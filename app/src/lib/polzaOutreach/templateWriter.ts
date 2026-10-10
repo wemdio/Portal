@@ -244,6 +244,36 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
       LETTER4,
     ],
   },
+  funding: {
+    title: 'Raised a new round',
+    essence: `The company has announced new funding. Money usually turns into hiring and growth targets, and new pipeline is expected to appear faster than the team can build it by hand. ${POLZA_WHAT}.`,
+    goals: [
+      `{{trigger}} (the funding fact), then {{pain}} (the likely sales bottleneck of this company after a round); ${LETTER1_TAIL}. The point: the new budget needs accounts to spend it on, not more manual research`,
+      letter2Goal('after a round the team hires first and builds the account list by hand later', 'the first months go into research instead of conversations'),
+      LETTER3,
+      LETTER4,
+    ],
+  },
+  event: {
+    title: 'Taking part in an industry event',
+    essence: `The company is taking part in an industry event. The value of a booth or a talk is decided by who is in the meetings around it, and those meetings have to be booked in advance. ${POLZA_WHAT}.`,
+    goals: [
+      `{{trigger}} (the event fact), then {{pain}} (the likely sales bottleneck of this company around an event); ${LETTER1_TAIL}. The point: meetings with the right accounts are booked before the event, not at the booth`,
+      letter2Goal('around an event the calendar fills with whoever walks by the booth', 'the best accounts are met by chance, not on purpose'),
+      LETTER3,
+      LETTER4,
+    ],
+  },
+  expansion: {
+    title: 'Entering a new market',
+    essence: `The company is entering a new market or region. There it has no referrals and no inbound yet, so the first conversations have to be made on purpose. ${POLZA_WHAT}.`,
+    goals: [
+      `{{trigger}} (the new market fact), then {{pain}} (the likely sales bottleneck of this company in a market where nobody knows it); ${LETTER1_TAIL}. The point: the first accounts in a new market are chosen, not stumbled upon`,
+      letter2Goal('in a new market the first accounts are picked from whoever answers', 'the team learns the market from the wrong conversations'),
+      LETTER3,
+      LETTER4,
+    ],
+  },
   none: {
     title: 'No specific trigger',
     essence: `There is no specific signal: the company looks like a Polza client — it sells B2B to a clear audience. Offer outbound as a channel for new B2B pipeline: ${POLZA_WHAT}.`,
@@ -272,6 +302,9 @@ const EXAMPLE_TRIGGERS: Record<PolzaOfferKey, Trigger[]> = {
   yc: [{ type: 'yc', title: 'W24', url: null, date: null, quote: null }],
   launch: [{ type: 'launch', title: 'Acme launched its self-serve workspace', url: null, date: null, quote: null }],
   tech_stack: [{ type: 'tech_stack', title: 'HubSpot, Apollo', url: null, date: null, quote: null }],
+  funding: [{ type: 'funding', title: 'raised a Series A', url: null, date: null, quote: null }],
+  event: [{ type: 'event', title: 'exhibiting at an industry event', url: null, date: null, quote: null }],
+  expansion: [{ type: 'expansion', title: 'entering a new market', url: null, date: null, quote: null }],
   none: [],
 };
 
@@ -296,6 +329,13 @@ const EXAMPLE_FRAGMENTS = [
   'is a YC',
   'launch news',
   'just launched something new',
+  // Хвосты фраз-поводов с сайта (10.10.2026).
+  'raised a new round',
+  'funding news',
+  'moving into a new market',
+  'expanding beyond its home market',
+  'taking part in an industry event',
+  'on the lineup of an industry event',
   // Напоминание {{followup}}: его подставит код.
   'Following up on my note',
   // Пример {{pain}} из промпта писателя.

@@ -54,15 +54,47 @@ import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKe
 import { acceptQuote } from '@/lib/polzaRuOutreach/evidence';
 import { crawlSite, parseRuDate } from '@/lib/polzaRuOutreach/sources/siteSignals';
 import { INDUSTRY_GROUPS, type IndustryGroup } from '@/lib/polzaRuOutreach/types';
+import { isOutreachSourceTitle } from '@/lib/parsers/engHiring';
 import { normalizeDomain } from './resolveDomain';
 
 const PAGE_TEXT_CHARS = 3500;
 // Страницы длиннее — уже описание компании (блок «данные» в Lead Score).
 const DESCRIPTIVE_PAGE_CHARS = 300;
 
-const OUTBOUND_TOOLS_RE = /\b(apollo\.io|clay\.com|instantly\.ai|outreach\.io|lemlist|salesloft|smartlead)\b/i;
+/**
+ * Инструменты продаж в коде сайта.
+ *
+ * 10.10.2026 список расширен с семи аутрич-сервисов до всего, что говорит
+ * «у компании есть машина продаж»: CRM, автоматизация маркетинга, запись на
+ * встречи, разбор звонков. Повод с сайта находился у 14% компаний, и этого
+ * мало — справочник на миллион компаний при таком проценте превращается в
+ * сто тысяч. Рекламные пиксели сюда намеренно НЕ входят: они стоят почти
+ * везде, и повод «у вас есть Google Ads» не повод вовсе.
+ */
+const OUTBOUND_TOOLS_RE =
+  /\b(apollo\.io|clay\.com|instantly\.ai|outreach\.io|lemlist|salesloft|smartlead|zoominfo|lusha|cognism|gong\.io|chorus\.ai|chilipiper|calendly|marketo|pardot|klaviyo|activecampaign|mailchimp|dripify|expandi|phantombuster)\b/i;
+
+/** CRM и чаты из общего детектора: те, что значат отдел продаж, а не аналитику. */
+const STACK_SIGNAL_IDS = new Set([
+  'hubspot', 'salesforce', 'pipedrive', 'zohocrm', 'creatio', 'amocrm', 'bitrix24', 'megaplan', 'planfix',
+  'intercom', 'drift', 'tidio',
+]);
 
 export type SiteExclusion = 'staffing' | 'job_board' | 'lead_gen_agency' | 'marketing_agency' | 'b2c' | 'local_service' | 'course';
+
+/** Разделы с вакансиями — их страницы обходим ради повода «нанимают в продажи». */
+const CAREERS_HINT = /(careers?|jobs?|vacanc|join-?us|we-?are-?hiring|work-?with-?us|open-?roles?|positions?)/i;
+
+/** Тип повода, найденного на сайте (кроме запуска и стека — у них свои поля). */
+export type SiteOccasionType = 'hiring' | 'funding' | 'expansion' | 'event';
+
+export interface SiteOccasionFound {
+  type: SiteOccasionType;
+  /** Название вакансии или дословная цитата со страницы. */
+  title: string;
+  url: string;
+  date: string | null;
+}
 
 export interface SiteProfile {
   reachable: boolean;
@@ -76,6 +108,17 @@ export interface SiteProfile {
   brandName: string | null;
   /** Боль компании для письма 1 ({{pain}}) с учётом повода; прошла проверку painLineOf. */
   painLine: string | null;
+  /**
+   * Поводы, найденные на самом сайте, — кроме запуска (он отдельным полем
+   * ради совместимости со старым кэшем) и стека (он без ИИ, по коду страницы).
+   *
+   * 10.10.2026: до этого с сайта доставались ровно два повода — запуск и стек,
+   * и повод находился у 14% компаний. Для справочника это приговор: без повода
+   * строка отсеивается (`no_trigger`), то есть миллион компаний превращался бы
+   * в сто с небольшим тысяч. Эти поводы приходят тем же одним вызовом ИИ, то
+   * есть бесплатно, а цитата сверяется со страницей дословно.
+   */
+  occasions: SiteOccasionFound[];
   companyContext: string | null;
   likelyGtmProblem: string | null;
   outreachAngle: string | null;
@@ -96,6 +139,7 @@ export const EMPTY_PROFILE: SiteProfile = {
   exclusion: null,
   brandName: null,
   painLine: null,
+  occasions: [],
   companyContext: null,
   likelyGtmProblem: null,
   outreachAngle: null,
@@ -121,7 +165,11 @@ const SYSTEM = `You analyze a company's website for Polza Agency, a B2B outbound
   "segments": [string, string, string], // three target customer segments THIS company could sell to, 2–7 words each, no numbers
   "pain_line": string,            // ONE sentence for a cold email from an outbound agency to this company, 14–36 words. It is about THIS COMPANY'S OWN SELLING — how its team finds, reaches and wins its buyers (the segments above) — in the situation of the OCCASION from the message. Pattern: "When [their sales situation from the occasion], the bottleneck is usually not [the obvious thing] but [the real sales obstacle]." The real obstacle is a selling one: knowing which accounts to go after first, reaching the right people at their buyers, getting enough first conversations, a list the new hire can work from day one. Name their buyers in plain words, never their product. It is NEVER the problem their product solves for their customers and NEVER about recruiting: for a hiring occasion the obvious thing is "the hire itself", not candidates, talent or culture. Plain spoken English; no numbers, questions, quotes, brackets or praise; never retell what the company does ("you provide", "you offer"); never "we"/"our"; "" if the pages do not say clearly what they sell and to whom. See PAIN_LINE EXAMPLES below
   "industry_group": string,       // one of ${JSON.stringify(INDUSTRY_GROUPS)} or "": it_saas = SaaS/AI/software/MarTech; manufacturing = industrial/equipment/hardware; hr_education = HR tech/recruiting software/workforce; horeca = hospitality/local networks; auto_logistics = marketplaces/service platforms/automotive/logistics; digital_agency = digital/event/marketing/production agencies
-  "launch": { "quote": string, "url": string, "date_text": string } // a RECENT product launch/new product announcement: verbatim quote, page URL, verbatim date text; empty strings if none
+  "launch": { "quote": string, "url": string, "date_text": string }, // a RECENT product launch/new product announcement: verbatim quote, page URL, verbatim date text; empty strings if none
+  "hiring": { "title": string, "url": string },   // an OPEN SALES / GTM / demand-generation role listed on the site (careers page): the job title copied VERBATIM (e.g. "Account Executive", "Head of Demand Generation") and the page URL. Only roles that sell or generate pipeline — never engineering, support, finance or HR. Empty strings if none
+  "funding": { "quote": string, "url": string, "date_text": string }, // the company raising money: a verbatim quote naming a round or an investor ("raised $4M Series A", "backed by …"); empty strings if none
+  "expansion": { "quote": string, "url": string, "date_text": string }, // entering a NEW market, country, region or opening a new office: verbatim quote; empty strings if none
+  "event": { "quote": string, "url": string, "date_text": string } // the company taking part in a conference/trade show/webinar ("meet us at …", "visit our booth"): verbatim quote; empty strings if none
 }
 Rules: quotes are copied character-for-character from the page text; never invent; prefer "" over a guess.
 
@@ -141,7 +189,7 @@ PAIN_LINE EXAMPLES (do not copy the wording, write your own for this company):
  * чистка сегментов, даты). Правка промпта меняет ключ кэша сама (хэш ниже), а
  * правку разбора код не видит — её отмечаем, подняв это значение.
  */
-const SITE_PARSER_VERSION = 'p4';
+const SITE_PARSER_VERSION = 'p5';
 
 /**
  * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
@@ -197,6 +245,8 @@ function profileFromCache(raw: unknown, fallbackDescription: string | null): Sit
     ...EMPTY_PROFILE,
     ...cached,
     reachable: true,
+    // Профили, записанные до 10.10.2026, поля поводов не знают вовсе.
+    occasions: Array.isArray(cached.occasions) ? cached.occasions : [],
     hasDescription: cached.hasDescription === true || Boolean(fallbackDescription),
   };
 }
@@ -310,11 +360,15 @@ export function painLineOf(value: unknown): string | null {
 function detectTechStack(html: string): string[] {
   const stack = new Set<string>();
   for (const s of detectSignals(html)) {
-    if (s.id === 'hubspot' || s.id === 'salesforce') stack.add(s.name);
+    if (STACK_SIGNAL_IDS.has(s.id)) stack.add(s.name);
   }
-  const m = html.match(OUTBOUND_TOOLS_RE);
-  if (m) stack.add(m[1].toLowerCase());
-  return Array.from(stack);
+  // Все совпадения, а не первое: «HubSpot + Apollo» — более узнаваемый повод,
+  // чем один инструмент, и в письме он звучит конкретнее.
+  for (const m of html.matchAll(new RegExp(OUTBOUND_TOOLS_RE.source, 'gi'))) {
+    stack.add(m[1].toLowerCase());
+    if (stack.size >= 3) break;
+  }
+  return Array.from(stack).slice(0, 3);
 }
 
 /**
@@ -339,7 +393,7 @@ export async function buildSiteProfile(
     if (cached) return cached;
   }
 
-  const { pages, homeHtml } = await crawlSite(website);
+  const { pages, homeHtml } = await crawlSite(website, undefined, CAREERS_HINT);
   if (!pages.length) return EMPTY_PROFILE;
 
   const user = [
@@ -373,6 +427,44 @@ ${occasionText(occasion)}`,
     launch = { quote: launchQuote, url: page.url, date: dateText && acceptQuote(page.text, dateText, 12) ? parseEnDate(dateText) : null };
   }
 
+  /**
+   * Повод с цитатой: берём только то, что дословно есть на названной странице.
+   * Модель, придумавшая раунд или конференцию, повода не создаёт — у неё не
+   * сойдётся цитата. Страница не из обхода — тоже мимо: ссылку можно выдумать.
+   */
+  const quotedOccasion = (type: 'funding' | 'expansion' | 'event'): SiteOccasionFound | null => {
+    const node = (raw[type] ?? {}) as Record<string, unknown>;
+    const src = pageByUrl.get(asString(node.url).replace(/\/+$/, ''));
+    if (!src) return null;
+    const quote = acceptQuote(src.text, asString(node.quote));
+    if (!quote) return null;
+    const dateText = asString(node.date_text);
+    return {
+      type,
+      title: quote,
+      url: src.url,
+      date: dateText && acceptQuote(src.text, dateText, 12) ? parseEnDate(dateText) : null,
+    };
+  };
+
+  const occasions: SiteOccasionFound[] = [];
+
+  /**
+   * Вакансия с их собственной страницы вакансий. Название проверяем тем же
+   * фильтром, что и вакансии из Jobhive: модель охотно называет «Software
+   * Engineer» ролью продаж, если других вакансий на странице нет.
+   */
+  const h = (raw.hiring ?? {}) as Record<string, unknown>;
+  const hiringPage = pageByUrl.get(asString(h.url).replace(/\/+$/, ''));
+  const hiringTitle = hiringPage ? acceptQuote(hiringPage.text, asString(h.title), 12) : null;
+  if (hiringPage && hiringTitle && isOutreachSourceTitle(hiringTitle)) {
+    occasions.push({ type: 'hiring', title: hiringTitle, url: hiringPage.url, date: null });
+  }
+  for (const type of ['funding', 'expansion', 'event'] as const) {
+    const found = quotedOccasion(type);
+    if (found) occasions.push(found);
+  }
+
   const clean = (v: unknown, maxWords: number) => {
     const t = asString(v).replace(/\s+/g, ' ').trim();
     return t && t.split(' ').length <= maxWords ? t : null;
@@ -398,6 +490,7 @@ ${occasionText(occasion)}`,
     exclusion: ['staffing', 'job_board', 'lead_gen_agency', 'marketing_agency', 'b2c', 'local_service', 'course'].includes(exclusion) ? exclusion : null,
     brandName: brandNameOf(raw.brand_name, allText),
     painLine,
+    occasions,
     companyContext: clean(raw.company_context, 18),
     likelyGtmProblem: clean(raw.likely_gtm_problem, 24),
     outreachAngle: clean(raw.outreach_angle, 18),

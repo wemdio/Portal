@@ -86,7 +86,9 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart, mode
   const [days, setDays] = useState<number>(initial?.posted_within_days ?? 30);
   const [limit, setLimit] = useState(String(initial?.limit ?? 500));
   const [geoOpen, setGeoOpen] = useState(false);
-  const [sources, setSources] = useState<Array<'hiring' | 'yc'>>(initial?.sources ?? ['hiring', 'yc']);
+  // Справочник включён по умолчанию у нового запуска: вакансий и YC хватает
+  // на две-три сотни кандидатов, дальше прогон простаивал бы (10.10.2026).
+  const [sources, setSources] = useState<Array<'hiring' | 'yc' | 'directory'>>(initial?.sources ?? ['hiring', 'yc', 'directory']);
   const [ycFrom, setYcFrom] = useState(String(initial?.yc_batch_from_year ?? 2023));
   const [minEmp, setMinEmp] = useState(String(initial?.min_employees ?? 3));
   const [maxEmp, setMaxEmp] = useState(String(initial?.max_employees ?? 200));
@@ -149,7 +151,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart, mode
     }
   };
 
-  const toggleSource = (s: 'hiring' | 'yc') => setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  const toggleSource = (s: 'hiring' | 'yc' | 'directory') => setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
 
   // Список закрывается по клику мимо. Esc здесь не перехватываем: панель
   // закрывается по Esc сама, и два обработчика на одну клавишу дали бы
@@ -378,6 +380,10 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart, mode
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={sources.includes('yc')} onChange={() => toggleSource('yc')} />
               Стартапы YC
+            </label>
+            <label className="flex items-center gap-2" title="Справочник B2B-компаний: повод ищет разбор их сайта">
+              <input type="checkbox" checked={sources.includes('directory')} onChange={() => toggleSource('directory')} />
+              Справочник компаний
             </label>
           </div>
         </div>
