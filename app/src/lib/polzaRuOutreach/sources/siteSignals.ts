@@ -76,7 +76,7 @@ export const EMPTY_SITE: SiteAnalysis = {
   facts: [],
 };
 
-function sameSiteLinks(html: string, base: URL): string[] {
+function sameSiteLinks(html: string, base: URL, extraHint?: RegExp): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const re = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -91,7 +91,9 @@ function sameSiteLinks(html: string, base: URL): string[] {
     if (url.hostname.replace(/^www\./, '') !== base.hostname.replace(/^www\./, '')) continue;
     if (/\.(pdf|jpe?g|png|gif|zip|docx?|xlsx?)$/i.test(url.pathname)) continue;
     const anchor = m[2].replace(/<[^>]+>/g, ' ');
-    if (!SECTION_HINT.test(url.pathname) && !SECTION_HINT.test(anchor)) continue;
+    const hinted = SECTION_HINT.test(url.pathname) || SECTION_HINT.test(anchor)
+      || Boolean(extraHint && (extraHint.test(url.pathname) || extraHint.test(anchor)));
+    if (!hinted) continue;
     const key = `${url.origin}${url.pathname}`.replace(/\/+$/, '');
     if (seen.has(key) || key === base.origin) continue;
     seen.add(key);
@@ -100,8 +102,19 @@ function sameSiteLinks(html: string, base: URL): string[] {
   return out;
 }
 
-/** pageCache — страницы, уже скачанные поиском почты той же компании: их не качаем второй раз. */
-export async function crawlSite(website: string, pageCache?: SitePageCache): Promise<{ pages: SitePage[]; homeHtml: string | null }> {
+/**
+ * Обход сайта: главная плюс до шести внутренних страниц по подсказкам разделов.
+ *
+ * pageCache — страницы, уже скачанные поиском почты той же компании: их не
+ * качаем второй раз. extraHint — дополнительные разделы для конкретного
+ * вызывающего: английский аутрич добавляет страницы вакансий, чтобы вытянуть
+ * повод «нанимают в продажи» с самого сайта компании. Без него обход прежний.
+ */
+export async function crawlSite(
+  website: string,
+  pageCache?: SitePageCache,
+  extraHint?: RegExp,
+): Promise<{ pages: SitePage[]; homeHtml: string | null }> {
   let base: URL;
   try {
     base = new URL(/^https?:\/\//.test(website) ? website : `https://${website}`);
@@ -111,7 +124,7 @@ export async function crawlSite(website: string, pageCache?: SitePageCache): Pro
   const homeHtml = await fetchSitePageHtml(base.toString(), { timeout: PAGE_TIMEOUT_MS, pageCache });
   if (!homeHtml) return { pages: [], homeHtml: null };
   const pages: SitePage[] = [{ url: base.toString(), text: htmlToText(homeHtml) }];
-  const links = sameSiteLinks(homeHtml, base).slice(0, MAX_EXTRA_PAGES);
+  const links = sameSiteLinks(homeHtml, base, extraHint).slice(0, MAX_EXTRA_PAGES);
   const fetched = await Promise.all(
     links.map(async (url) => {
       const html = await fetchSitePageHtml(url, { timeout: PAGE_TIMEOUT_MS, pageCache });

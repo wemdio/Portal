@@ -144,6 +144,14 @@ export function triggerPhraseVariants(company: string, t: Trigger | null): strin
       return [`Saw the recent launch news on the ${company} site.`, `Noticed ${company} has just launched something new.`];
     case 'tech_stack':
       return [`Looks like ${company} already runs ${t.title}.`, `Noticed ${t.title} on the ${company} site.`];
+    // Поводы с сайта (10.10.2026). Цитата со страницы в письмо не идёт: в ней
+    // бывает и полстраницы текста. Говорим факт своими словами — он проверен.
+    case 'funding':
+      return [`Saw that ${company} has raised a new round.`, `Noticed the funding news on the ${company} site.`];
+    case 'expansion':
+      return [`Saw that ${company} is moving into a new market.`, `Noticed ${company} is expanding beyond its home market.`];
+    case 'event':
+      return [`Saw that ${company} is taking part in an industry event.`, `Noticed ${company} on the lineup of an industry event.`];
   }
 }
 
@@ -171,6 +179,12 @@ export function triggerShort(t: Trigger | null): string {
       return 'launching a new product';
     case 'tech_stack':
       return 'already running outbound tools';
+    case 'funding':
+      return 'putting a new round to work';
+    case 'expansion':
+      return 'opening up a new market';
+    case 'event':
+      return 'getting ready for an industry event';
     default:
       return 'looking for new B2B pipeline';
   }
@@ -234,6 +248,12 @@ export function subjectVariants(company: string, t: Trigger | null): string[] {
       return [`target accounts for the ${company} launch`, 'first accounts for the new launch', `outbound segments for ${company}`];
     case 'tech_stack':
       return [`target accounts for ${company}`, `outbound segments for ${company}`, `account list for ${company}`];
+    case 'funding':
+      return [`pipeline to match ${possessive(company)} new round`, `target accounts for ${company}`, 'first accounts after the round'];
+    case 'expansion':
+      return [`first accounts in the new market`, `target accounts for ${company}`, `pipeline in ${possessive(company)} new market`];
+    case 'event':
+      return [`meetings before the event`, `target accounts for ${company}`, `pipeline around the event`];
     default:
       return [`target accounts for ${company}`, `outbound segments for ${company}`, `new pipeline for ${company}`];
   }
@@ -290,6 +310,12 @@ export function fallbackPain(company: string, t: Trigger | null): string {
         return ['After a launch, the bottleneck is usually not the product but getting it in front of new accounts while the news is fresh.'];
       case 'tech_stack':
         return ['With the tools already in place, the bottleneck is usually not sending but deciding which accounts to write to and why.'];
+      case 'funding':
+        return ['After a round, the bottleneck is usually not the budget but a steady flow of the right accounts to spend it on.'];
+      case 'expansion':
+        return ['In a new market, the bottleneck is usually not the offer but knowing which companies there are worth the first conversations.'];
+      case 'event':
+        return ['Around an event, the bottleneck is usually not the booth but having meetings booked with the right accounts before it starts.'];
       default:
         return ['For most B2B teams, the bottleneck is usually not the offer but a steady flow of conversations with the right accounts.'];
     }
@@ -308,6 +334,12 @@ function followupProblem(t: Trigger | null): string {
       return 'A common issue after a launch: the news reaches the existing audience and stops there. As a result, the window closes without new conversations.';
     case 'tech_stack':
       return 'A common issue with the tools already in place: one generic email goes to a broad list. As a result, the domain wears out and the team burns time on the wrong accounts.';
+    case 'funding':
+      return 'A common issue after a round: hiring comes first and the account list is built later, by hand. As a result, the new team spends its first months on research instead of conversations.';
+    case 'expansion':
+      return 'A common issue in a new market: the first accounts are picked from whoever answers. As a result, the team learns the market from the wrong conversations.';
+    case 'event':
+      return 'A common issue around an event: the calendar fills with whoever walks by the booth. As a result, the best accounts are met by chance, not on purpose.';
     default:
       return 'A common issue we see: one generic email goes to a broad list and nobody has a reason to reply. As a result, the domain wears out and the team burns time on the wrong accounts.';
   }

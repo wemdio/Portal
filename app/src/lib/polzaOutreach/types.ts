@@ -218,13 +218,16 @@ export interface PolzaLetterGuardResult {
  * отсеиваются до писем (no_trigger), ключ есть, чтобы строка без повода не
  * осталась без цепочки, если отсев когда-нибудь смягчат.
  */
-export const POLZA_OFFER_KEYS = ['hiring', 'yc', 'launch', 'tech_stack', 'none'] as const;
+export const POLZA_OFFER_KEYS = ['hiring', 'yc', 'funding', 'launch', 'event', 'expansion', 'tech_stack', 'none'] as const;
 export type PolzaOfferKey = (typeof POLZA_OFFER_KEYS)[number];
 
 export const POLZA_OFFER_LABELS: Record<PolzaOfferKey, string> = {
   hiring: 'Найм в sales/GTM',
   yc: 'Стартап YC',
+  funding: 'Привлекли раунд',
   launch: 'Запуск продукта',
+  event: 'Участие в конференции',
+  expansion: 'Выход на новый рынок',
   tech_stack: 'Стек продаж',
   none: 'Без повода',
 };

@@ -122,6 +122,12 @@ const MIN_WAVE = 25;
 const MAX_WAVE = 250;
 const BLIND_YIELD_GUESS = 0.12;
 const LAUNCH_MAX_AGE_DAYS = 180;
+/** Раунд годичной давности ещё повод: деньги тратят не в день объявления. */
+const FUNDING_MAX_AGE_DAYS = 365;
+/** Конференция — повод только пока она близко: прошлогодняя звучит нелепо. */
+const EVENT_MAX_AGE_DAYS = 60;
+/** И не дальше полугода вперёд. */
+const EVENT_MAX_AHEAD_DAYS = 180;
 const DAY = 86_400_000;
 
 class PolzaOutreachCancelledError extends Error {
@@ -1188,6 +1194,35 @@ async function runJob(
       if (c.yc) triggers.push({ type: 'yc', title: c.yc.batch, url: c.yc.sourceUrl, date: null, quote: null });
       if (site.launch && site.launch.date && Date.now() - new Date(site.launch.date).getTime() <= LAUNCH_MAX_AGE_DAYS * DAY) {
         triggers.push({ type: 'launch', title: site.launch.quote, url: site.launch.url, date: site.launch.date, quote: site.launch.quote });
+      }
+      /**
+       * Поводы с самого сайта (разбор, 10.10.2026): вакансия продаж на их
+       * странице вакансий, раунд, выход на новый рынок, конференция.
+       *
+       * Найм с сайта не дублирует вакансию из кэша — если она уже дала повод,
+       * второй раз о найме не пишем. Для события и раунда важна свежесть:
+       * «увидели, что вы выступаете» про прошлогоднюю конференцию — худший
+       * вид повода, чем его отсутствие. У выхода на рынок даты часто нет, и
+       * это нормально: формулировка письма не привязана ко «вчера».
+       */
+      const hasHiring = triggers.some((t) => t.type === 'hiring');
+      for (const occasion of site.occasions) {
+        if (occasion.type === 'hiring' && hasHiring) continue;
+        if (occasion.type === 'funding' || occasion.type === 'event') {
+          if (!occasion.date) continue;
+          const age = Date.now() - new Date(occasion.date).getTime();
+          if (occasion.type === 'funding' && age > FUNDING_MAX_AGE_DAYS * DAY) continue;
+          // Конференция бывает и впереди («meet us at …») — это лучший её
+          // вариант, но «увидимся через полтора года» поводом не считаем.
+          if (occasion.type === 'event' && (age > EVENT_MAX_AGE_DAYS * DAY || age < -EVENT_MAX_AHEAD_DAYS * DAY)) continue;
+        }
+        triggers.push({
+          type: occasion.type,
+          title: occasion.title,
+          url: occasion.url,
+          date: occasion.date,
+          quote: occasion.type === 'hiring' ? null : occasion.title,
+        });
       }
       if (site.techStack.length) triggers.push({ type: 'tech_stack', title: site.techStack.join(', '), url: website, date: null, quote: null });
 
