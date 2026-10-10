@@ -38,7 +38,12 @@ export const POLZA_OUTREACH_PRIORITY_COUNTRIES = ['us', 'gb', 'ca', 'de', 'nl', 
 
 export const POLZA_OUTREACH_DEFAULT_COUNTRIES: string[] = [...POLZA_OUTREACH_PRIORITY_COUNTRIES];
 
-export const POLZA_OUTREACH_SOURCES = ['hiring', 'yc'] as const;
+/**
+ * 10.10.2026 третий источник — справочник компаний (pdl_companies). Вакансии и
+ * YC кончаются за два автосбора, справочник — около миллиона подходящих
+ * компаний; повод ему даёт разбор сайта (siteProfile.occasions).
+ */
+export const POLZA_OUTREACH_SOURCES = ['hiring', 'yc', 'directory'] as const;
 export type PolzaOutreachSource = (typeof POLZA_OUTREACH_SOURCES)[number];
 
 export const POLZA_OUTREACH_DEFAULT_POSTED_WITHIN_DAYS = 30;
