@@ -23,6 +23,7 @@
  * (prompts/siteProfile.en), иначе — RU (обратная совместимость).
  */
 
+import { readVePriorityNiches } from '../priorityNiches';
 import { z } from 'zod';
 
 import { callLLMWithSchema, getVeActiveJobSignal, getVeModel } from '../llm';
@@ -346,7 +347,7 @@ export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Prom
   // сайт «в разработке».
   if (clientBrief) stageLog(ctx, '[site_profile] бриф клиента подмешан в профиль');
 
-  const profileInput = { websiteUrl: project.website_url, siteText: corpus, clientBrief, businessOverride };
+  const profileInput = { websiteUrl: project.website_url, siteText: corpus, clientBrief, businessOverride, priorityNiches: readVePriorityNiches(project.brief) };
   const llm = await callLLMWithSchema(
     market === 'us' ? buildSiteProfileMessagesEn(profileInput) : buildSiteProfileMessages(profileInput),
     VeSiteProfileSchema,
@@ -355,29 +356,34 @@ export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Prom
   signal?.throwIfAborted();
   addUsage(usage, llm);
 
-  // Brief перечитываем прямо перед записью: за минуты LLM-вызовов пользователь
-  // мог сохранить overrides (offer/style/signature/business) через PATCH —
-  // спред от протухшего снапшота их бы затёр.
-  const { data: freshProject } = await ctx.supabase
-    .from('ve_projects')
-    .select('brief')
-    .eq('id', project.id)
-    .single();
+  // The DB merges only stage-owned keys under the project lock: a concurrent
+  // specialist brief save cannot overwrite the profile or lose unrelated fields.
+  const { data: updatedProject, error } = await ctx.supabase.rpc('ve_patch_project_brief', {
+    p_project_id: project.id,
+    p_patch: {
+      website_url: project.website_url,
+      site_profile: llm.data,
+      site_thin: siteThin,
+      site_text_chars: corpus.length,
+      site_fetch_error: siteFetchError,
+      captured_at: new Date().toISOString(),
+    },
+  });
   signal?.throwIfAborted();
-  const brief = {
-    ...(((freshProject as { brief?: Record<string, unknown> } | null)?.brief) ?? project.brief ?? {}),
-    website_url: project.website_url,
-    site_profile: llm.data,
-    site_thin: siteThin,
-    site_text_chars: corpus.length,
-    site_fetch_error: siteFetchError,
-    captured_at: new Date().toISOString(),
-  };
-  const { error } = await ctx.supabase
-    .from('ve_projects')
-    .update({ brief, status: 'researching', updated_at: new Date().toISOString() })
-    .eq('id', project.id);
-  if (error) throw new Error(`ve_projects update brief: ${error.message}`);
+  if (error || updatedProject?.id !== project.id || !updatedProject?.brief?.site_profile) {
+    throw new Error(`ve_projects update brief: ${error?.message ?? 'database response did not confirm the saved profile'}`);
+  }
+
+  // Preserve the stage's previous status repair if enqueue inserted the job
+  // but its separate project update failed. This does not rewrite the brief.
+  signal?.throwIfAborted();
+  const { data: statusProject, error: statusError } = await ctx.supabase.from('ve_projects')
+    .update({ status: 'researching', updated_at: new Date().toISOString() })
+    .eq('id', project.id).select('id').single();
+  signal?.throwIfAborted();
+  if (statusError || statusProject?.id !== project.id) {
+    throw new Error(`ve_projects update status: ${statusError?.message ?? 'database response did not confirm the project'}`);
+  }
 
   // No website evidence was obtained: preserve the existing case bank and
   // do not spend another call or repeat crawling the same unavailable site.
