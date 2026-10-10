@@ -289,7 +289,8 @@ export interface PolzaOutreachConfig {
   countries: string[];
   posted_within_days: number;
   limit: number;
-  sources?: Array<'hiring' | 'yc'>;
+  /** 'directory' — справочник компаний (pdl_companies), с 10.10.2026. */
+  sources?: Array<'hiring' | 'yc' | 'directory'>;
   yc_batch_from_year?: number;
   min_employees?: number;
   max_employees?: number;

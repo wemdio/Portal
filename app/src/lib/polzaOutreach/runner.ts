@@ -95,6 +95,7 @@ import {
   type PolzaOutreachVacancyCandidate,
   type PolzaVacancyAnalysis,
 } from './types';
+import { loadDirectoryCompanies, type DirectoryCompany } from './directoryCandidates';
 import { loadYcCompanies, type YcCompany } from './ycCandidates';
 
 /** Целое из env в рамках. Пусто или мусор — значение по умолчанию: NaN в пуле дал бы ноль потоков. */
@@ -286,6 +287,8 @@ interface Candidate {
   companyName: string;
   vacancy: PolzaOutreachVacancyCandidate | null;
   yc: YcCompany | null;
+  /** Компания из справочника: повода заранее нет, его ищет разбор сайта. */
+  directory: DirectoryCompany | null;
 }
 
 /**
@@ -307,7 +310,11 @@ function nameKey(name: string): string {
 
 const COUNTRY_CODE_BY_NAME = Object.fromEntries(Object.entries(PDL_COUNTRY_BY_CODE).map(([code, name]) => [name, code]));
 
-function mergeCandidates(vacancies: PolzaOutreachVacancyCandidate[], ycs: YcCompany[]): Candidate[] {
+function mergeCandidates(
+  vacancies: PolzaOutreachVacancyCandidate[],
+  ycs: YcCompany[],
+  directory: DirectoryCompany[] = [],
+): Candidate[] {
   const ycByDomain = new Map(ycs.map((y) => [y.domain, y]));
   const ycByName = new Map(ycs.map((y) => [nameKey(y.name), y]));
   const usedYc = new Set<YcCompany>();
@@ -318,14 +325,26 @@ function mergeCandidates(vacancies: PolzaOutreachVacancyCandidate[], ycs: YcComp
     const yc = (domain && ycByDomain.get(domain)) || ycByName.get(nameKey(v.companyName)) || null;
     if (yc && !usedYc.has(yc)) {
       usedYc.add(yc);
-      both.push({ companyName: v.companyName, vacancy: v, yc });
+      both.push({ companyName: v.companyName, vacancy: v, yc, directory: null });
     } else {
-      hiringOnly.push({ companyName: v.companyName, vacancy: v, yc: null });
+      hiringOnly.push({ companyName: v.companyName, vacancy: v, yc: null, directory: null });
     }
   }
-  const ycOnly = ycs.filter((y) => !usedYc.has(y)).map((y) => ({ companyName: y.name, vacancy: null, yc: y }));
-  // Два сильных повода сразу — первыми: это прямой путь к write now.
-  return [...both, ...hiringOnly, ...ycOnly];
+  const ycOnly = ycs
+    .filter((y) => !usedYc.has(y))
+    .map((y) => ({ companyName: y.name, vacancy: null, yc: y, directory: null }));
+  // Компании вакансий и YC — первыми: у них повод известен заранее и письмо
+  // сильнее. Справочник идёт сразу за ними, а не «если останется место»:
+  // вакансии кончаются на второй-третьей сотне кандидатов, и без этого
+  // остальной прогон простаивал бы (решение 10.10.2026).
+  const knownDomains = new Set<string>([
+    ...ycs.map((y) => y.domain),
+    ...vacancies.map((v) => normalizeDomain(String(v.companySiteUrl ?? ''))).filter(Boolean),
+  ]);
+  const directoryOnly = directory
+    .filter((d) => !knownDomains.has(d.domain))
+    .map((d) => ({ companyName: d.name, vacancy: null, yc: null, directory: d }));
+  return [...both, ...hiringOnly, ...ycOnly, ...directoryOnly];
 }
 
 /**
@@ -395,6 +414,45 @@ async function loadSkippedCompanies(db: SupabaseClient, excludeJobId: string, in
     if (!data || data.length < PAGE) break;
   }
   return names;
+}
+
+/**
+ * Отказы, которые для компании ИЗ СПРАВОЧНИКА тоже месяц не меняются.
+ *
+ * У компании из справочника нет вакансии, которая завтра появится: её повод —
+ * то, что написано на её же сайте. Не нашлось повода, низкая оценка, сайт не
+ * открылся — завтра будет то же самое, а разбор сайта стоит денег. Для
+ * вакансий эти причины остаются «временными»: новая вакансия — новый повод.
+ */
+const DIRECTORY_LASTING_REJECTIONS = [...LASTING_REJECTIONS, 'no_trigger', 'low_score', 'site_unreachable'];
+
+/**
+ * Домены, которые справочнику брать не надо: компания уже готова в другом
+ * запуске либо недавно отсеяна по причине, которая сама не изменится.
+ */
+async function loadSkippedDomains(db: SupabaseClient, excludeJobId: string, includeExported: boolean): Promise<Set<string>> {
+  const domains = new Set<string>();
+  const since = new Date(Date.now() - REJECTION_MEMORY_DAYS * 86_400_000).toISOString();
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    let query = db
+      .from('polza_outreach_companies')
+      .select('id, normalized_domain, status, exclusion_reason')
+      .neq('job_id', excludeJobId)
+      .gte('created_at', since)
+      .not('normalized_domain', 'is', null);
+    query = includeExported
+      ? query.eq('status', 'excluded').in('exclusion_reason', DIRECTORY_LASTING_REJECTIONS)
+      : query.or(`status.eq.ready,and(status.eq.excluded,exclusion_reason.in.(${DIRECTORY_LASTING_REJECTIONS.join(',')}))`);
+    const { data, error } = await query.order('id', { ascending: true }).range(from, from + PAGE - 1);
+    if (error) throw new Error(`directory skip lookup failed: ${error.message}`);
+    for (const row of data ?? []) {
+      const domain = String(row.normalized_domain ?? '').trim().toLowerCase();
+      if (domain) domains.add(domain);
+    }
+    if (!data || data.length < PAGE) break;
+  }
+  return domains;
 }
 
 interface Totals {
@@ -845,12 +903,24 @@ async function runJob(
       ? (await selectVacancies(db, config, { want: maxCandidates, seenCompanies: skippedCompanies })).candidates
       : [];
     const ycs = config.sources.includes('yc') ? await loadYcCompanies(db, config) : [];
-    const pool = mergeCandidates(vacancies, ycs);
+    /**
+     * Справочник добирает пул до потолка просмотра: вакансий и YC на весь
+     * прогон не хватает, а сканировать меньше, чем разрешено, смысла нет.
+     * Домены, уже готовые или недавно отсеянные наглухо, не берём — за них
+     * платить разбором второй раз незачем.
+     */
+    const directory = config.sources.includes('directory')
+      ? await loadDirectoryCompanies(db, config, {
+        want: Math.max(0, maxCandidates - vacancies.length - ycs.length),
+        skipDomains: await loadSkippedDomains(db, jobId, Boolean(config.include_previously_exported)),
+      })
+      : [];
+    const pool = mergeCandidates(vacancies, ycs, directory);
     const cases = await loadEnCases(db);
     // Повторы между запусками — домены компаний, готовых в других запусках.
     // Галочка «Брать компании, которые уже выгружались раньше» их не отсеивает.
     const exported = config.include_previously_exported ? new Set<string>() : await loadPreviouslyExported(db, jobId);
-    log('info', `job ${jobId}: pool=${pool.length} (hiring=${vacancies.length}, yc=${ycs.length}), cases=${cases.length}, previously exported=${exported.size}, skipped known companies=${skippedCompanies.size}, target=${target}`);
+    log('info', `job ${jobId}: pool=${pool.length} (hiring=${vacancies.length}, yc=${ycs.length}, directory=${directory.length}), cases=${cases.length}, previously exported=${exported.size}, skipped known companies=${skippedCompanies.size}, target=${target}`);
 
     const totals: Totals = { vacancies: 0, domainFound: 0, icpPassed: 0, emailFound: 0, writeNow: 0, ready: 0 };
     // Дедуп запуска: какая строка заняла домен. Строка, возвращённая в
@@ -1010,8 +1080,8 @@ async function runJob(
     const prepare = async (id: string, c: Candidate, tally: Tally): Promise<Prepared | null> => {
       // S2 домен и профиль PDL — не больше DOMAIN_CONCURRENCY строк сразу.
       const resolved = await domainSlot(async () => {
-        let foundDomain: string | null = c.yc?.domain ?? null;
-        let foundWebsite: string | null = c.yc?.website ?? null;
+        let foundDomain: string | null = c.yc?.domain ?? c.directory?.domain ?? null;
+        let foundWebsite: string | null = c.yc?.website ?? c.directory?.website ?? null;
         if (!foundDomain && c.vacancy) {
           const res = await resolveCompanyDomain(db, c.companyName, c.vacancy.jobCountryCode, c.vacancy.companySiteUrl);
           foundDomain = res.normalizedDomain;
@@ -1023,14 +1093,14 @@ async function runJob(
       if (!resolved) return excludeRow(id, ST.s2Domain, 'domain_not_resolved');
       const { domain, website, pdl } = resolved;
       count(tally, 'domainFound');
-      const employees = c.yc?.teamSize ?? employeesFromBucket(pdl.size);
-      const countryName = c.yc?.country ?? pdl.country ?? null;
+      const employees = c.yc?.teamSize ?? employeesFromBucket(pdl.size ?? c.directory?.size ?? null);
+      const countryName = c.yc?.country ?? pdl.country ?? c.directory?.country ?? null;
       const countryCode = c.vacancy?.jobCountryCode || (countryName ? COUNTRY_CODE_BY_NAME[countryName.toLowerCase()] ?? null : null);
       await updateRow(id, {
         normalized_domain: domain,
         company_website: website,
-        employee_range: c.yc?.teamSize != null ? String(c.yc.teamSize) : pdl.size,
-        industry: pdl.industry ?? c.yc?.industry ?? null,
+        employee_range: c.yc?.teamSize != null ? String(c.yc.teamSize) : (pdl.size ?? c.directory?.size ?? null),
+        industry: pdl.industry ?? c.yc?.industry ?? c.directory?.industry ?? null,
         country: countryName,
         status: 'normalized',
         stage: ST.s2Domain,
@@ -1042,7 +1112,7 @@ async function runJob(
       const icp = icpFilter(
         {
           companyName: c.companyName,
-          companyDescription: c.vacancy?.companyDescription ?? c.yc?.description ?? null,
+          companyDescription: c.vacancy?.companyDescription ?? c.yc?.description ?? c.directory?.description ?? null,
           vacancyDescription: c.vacancy?.vacancyDescription ?? null,
           normalizedDomain: domain,
           employees,
@@ -1232,7 +1302,7 @@ async function runJob(
       const brandName = site.brandName ?? c.yc?.name ?? null;
       const common = {
         ...analysisPatch,
-        source_list: [c.vacancy ? 'hiring' : null, c.yc ? 'yc' : null].filter(Boolean),
+        source_list: [c.vacancy ? 'hiring' : null, c.yc ? 'yc' : null, c.directory ? 'directory' : null].filter(Boolean),
         trigger_list: triggers,
         company_context: site.companyContext,
         likely_gtm_problem: site.likelyGtmProblem,
@@ -1477,7 +1547,7 @@ async function runJob(
           .insert(
             wave.slice(i, i + DB_CHUNK).map((c) => ({
               job_id: jobId,
-              source_type: c.vacancy && c.yc ? 'hiring+yc' : c.vacancy ? 'hiring' : 'yc',
+              source_type: c.vacancy && c.yc ? 'hiring+yc' : c.vacancy ? 'hiring' : c.yc ? 'yc' : 'directory',
               vacancy_id: c.vacancy?.vacancyId ?? null,
               job_title: c.vacancy?.jobTitle ?? null,
               job_source_url: c.vacancy?.jobSourceUrl ?? c.yc?.sourceUrl ?? null,
