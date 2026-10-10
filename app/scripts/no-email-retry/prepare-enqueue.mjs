@@ -41,6 +41,7 @@ const statements = [
   'BEGIN;',
   "SET LOCAL statement_timeout = '180s';",
   'CREATE TEMP TABLE retry_plan (batch_no integer NOT NULL, domain text PRIMARY KEY) ON COMMIT DROP;',
+  "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM public.portal_migrations WHERE name = '20261010_0001_client_no_email_retry_live_email_counts.sql') THEN RAISE EXCEPTION 'Deploy the no-email retry live email-count fix before enqueueing'; END IF; END $$;",
 ];
 for (let start = 0; start < batches.length; start += 10) {
   const values = batches.slice(start, start + 10).flatMap((batch, index) =>
