@@ -19,9 +19,10 @@ export interface PriorityNichesEditorHandle {
 export const PriorityNichesEditor = forwardRef<PriorityNichesEditorHandle, {
   project: VeProject;
   disabled: boolean;
+  disabledReason?: string;
   onSaved: (project: VeProject) => void;
   onDirtyChange?: (dirty: boolean) => void;
-}>(function PriorityNichesEditor({ project, disabled, onSaved, onDirtyChange }, ref) {
+}>(function PriorityNichesEditor({ project, disabled, disabledReason, onSaved, onDirtyChange }, ref) {
   // Polls update saved preferences without replacing a specialist's draft.
   const [draft, setDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -34,9 +35,12 @@ export const PriorityNichesEditor = forwardRef<PriorityNichesEditorHandle, {
   const parsed = VePriorityNichesSchema.safeParse(text.split(/\r?\n/));
   const dirty = !parsed.success || JSON.stringify(parsed.data) !== JSON.stringify(stored);
   const invalid = !parsed.success;
-  const validationError = invalid
-    ? `До ${VE_PRIORITY_NICHES_MAX} ниш, не более ${VE_PRIORITY_NICHE_MAX_LENGTH} символов в каждой.`
-    : '';
+  const issue = parsed.success ? null : parsed.error.issues[0];
+  const validationError = !issue ? '' : issue.code === 'too_big'
+    ? issue.path.length > 0
+      ? `В каждой нише не более ${VE_PRIORITY_NICHE_MAX_LENGTH} символов.`
+      : `Можно указать до ${VE_PRIORITY_NICHES_MAX} ниш.`
+    : issue.message;
 
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
@@ -82,8 +86,10 @@ export const PriorityNichesEditor = forwardRef<PriorityNichesEditorHandle, {
     <div className="mb-6 max-w-2xl" aria-busy={saving || undefined}>
       <label htmlFor="ve2-priority-niches" className="ve2-label block">Приоритетные ниши</label>
       <p id="ve2-priority-niches-hint" className={`mt-1 text-sm ${HE.muted}`}>
-        {project.status === 'researched' ? 'Для следующего исследования. ' : ''}
-        По одной нише на строке, до {VE_PRIORITY_NICHES_MAX}.
+        {disabled && disabledReason ? disabledReason : <>
+          {project.status === 'researched' ? 'Для следующего исследования. ' : ''}
+          По одной нише на строке, до {VE_PRIORITY_NICHES_MAX}.
+        </>}
       </p>
       <textarea
         ref={fieldRef}

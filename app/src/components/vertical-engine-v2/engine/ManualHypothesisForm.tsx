@@ -11,10 +11,12 @@ type CreateResponse = Partial<CreatedHypothesis> & { ok?: boolean; existing?: bo
 export function ManualHypothesisForm({
   projectId,
   disabled,
+  disabledReason,
   onCreated,
 }: {
   projectId: string;
   disabled: boolean;
+  disabledReason?: string;
   onCreated: (created: CreatedHypothesis) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -91,10 +93,12 @@ export function ManualHypothesisForm({
         disabled={disabled || saving}
         aria-expanded={open}
         aria-controls="ve2-manual-hypothesis-form"
+        aria-describedby={disabled && disabledReason ? 've2-manual-hypothesis-unavailable' : undefined}
         onClick={() => { setOpen(!open); setSaved(''); }}
       >
         Добавить свою гипотезу
       </button>
+      {disabled && disabledReason ? <p id="ve2-manual-hypothesis-unavailable" className={`mt-2 text-sm ${HE.muted}`}>{disabledReason}</p> : null}
       {saved ? <p className={`mt-2 ${HE.muted}`} role="status">{saved}</p> : null}
       <form
         id="ve2-manual-hypothesis-form"

@@ -364,7 +364,7 @@ describe('llm rawCall retry', () => {
           const current = db.getRows('ve_projects').find((row) => row.id === params.p_project_id);
           const brief = { ...(current?.brief as Record<string, unknown> ?? {}), ...(params.p_patch as Record<string, unknown>) };
           await db.from('ve_projects').update({ brief }).eq('id', params.p_project_id);
-          return { data: { ...current, brief }, error: null };
+          return { data: { ...current, brief } };
         },
       } });
       return { db, priorCase, job: { project_id: 'project' } as VeJob,

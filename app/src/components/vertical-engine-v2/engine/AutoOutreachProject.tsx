@@ -533,6 +533,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     requesting: broadRequesting,
     researchRunning,
   });
+  const contextMutationBusy = researchRunning || broadAction.running;
+  const contextMutationReason = broadAction.running
+    ? 'Дождитесь завершения генерации широких гипотез.' : undefined;
   // Широкие дописываются только к исследованному проекту: без вертикалей кнопки нет.
   const broadControl = detail.verticals.length ? (
     <div className="ve2-broad-action">
@@ -642,7 +645,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
             key={projectId}
             ref={priorityNichesRef}
             project={detail.project}
-            disabled={researchRunning}
+            disabled={contextMutationBusy}
+            disabledReason={contextMutationReason}
             onDirtyChange={setPriorityNichesDirty}
             onSaved={(project) => {
               detailMutationRevision.current += 1;
@@ -702,7 +706,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 <ManualHypothesisForm
                   key={projectId}
                   projectId={projectId}
-                  disabled={researchRunning}
+                  disabled={contextMutationBusy}
+                  disabledReason={contextMutationReason}
                   onCreated={({ hypothesis, vertical }) => {
                     detailMutationRevision.current += 1;
                     setDetail((current) => current ? {
