@@ -12,7 +12,7 @@
  * они умирают быстро, как раньше.
  */
 
-import { isVeProviderBillingError, isVeProviderConfigurationError } from './collectionErrors';
+import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientCatalogError } from './collectionErrors';
 import { VeLlmRateLimitError, veRateLimitDelay, type VeLlmRateLimit } from './llmRateLimit';
 import { isVeStageDbInterruption } from './stageDb';
 import type { VeJob } from './types';
@@ -31,6 +31,7 @@ const RETRY_BACKOFF_MAX_MS = 120_000;
 export function isRetryableStageError(msg: string): boolean {
   if (isVeProviderBillingError(msg) || isVeProviderConfigurationError(msg)) return false;
   return (
+    isVeTransientCatalogError(msg) ||
     /\bSerper transient:/i.test(msg) ||
     /\b(5\d\d|429)\b/.test(msg) ||
     /provider is currently unavailable/i.test(msg) ||

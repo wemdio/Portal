@@ -155,6 +155,11 @@ async function resumeFailedPreview(
     info.validation_retry = true;
     info.relevance_review_requested = true;
   }
+  if (info.company_name_recovery?.validation_error && info.relevance_review_requested === true) {
+    // An explicit retry must finish BOTH interrupted phases. Name cleanup can
+    // succeed while the saved validation error still needs a fresh check.
+    info.company_name_recovery = { ...info.company_name_recovery, retry_validation_after_cleanup: true };
+  }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
   // Каталожный сбой — единственный вид восстановления, который может застать
