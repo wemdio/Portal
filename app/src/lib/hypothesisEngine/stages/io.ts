@@ -22,7 +22,9 @@
  * (lib/enrich/websiteParser.ts) держит русские значения дефолтами.
  */
 
+import { lookup } from 'node:dns/promises';
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
+import { WebsiteFetchError } from '@/lib/clientBrief/autofill/fetchWebsiteHtml';
 import { DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
 import {
   fetchAndExtract,
@@ -128,11 +130,17 @@ const WEBSITE_TIMEOUT_MS = websiteTimeoutMs();
 const SEARCH_TIMEOUT_MS = HE_SEARCH_TIMEOUT_MS;
 
 /**
- * Сайт клиента недоступен — это ФАКТ О САЙТЕ, а не сбой движка. Два рода:
+ * Сайт клиента недоступен — исход чтения сайта, а не поломка стадии. Два рода:
  *  - `dns` — гейт не пустил к первому запросу: домен не резолвится, адрес
- *    невалидный либо приватный (`assertPublicWebsite`);
+ *    невалидный либо приватный (`assertPublicWebsite`) — факт об адресе. У
+ *    рынка 'us' «не резолвится» — только ENOTFOUND/ENODATA, а сбой самого
+ *    резолвера (EAI_AGAIN и др.) сюда не попадает (usDnsFailure ниже);
  *  - `no_html` — хост принял соединение, но ни один адрес origin'а не отдал
- *    HTML (`WebsiteNoHtmlError` из websiteParser).
+ *    HTML (`WebsiteNoHtmlError` из websiteParser). Так же выглядит и наш
+ *    маршрут чтения, который не дошёл (прокси, бот-защита сайта), поэтому
+ *    кабинет считает этот род техническим сбоем (`website_no_html`).
+ * Стадии оба рода одинаковы (повторять пути origin'а незачем); различает их
+ * только кабинет — по роду в тексте.
  *
  * Зачем свой класс поверх чужих ошибок. Стадии нужно три разных решения на три
  * исхода одного вызова: истёк срок (транзиент, повторяем), отменили (конец
@@ -144,8 +152,10 @@ const SEARCH_TIMEOUT_MS = HE_SEARCH_TIMEOUT_MS;
  * Текст РУССКИЙ: его читают `he_jobs.error`/`he_projects.error` и ежедневный
  * staff-инструмент /tools/hypothesis-engine. В английский кабинет ни один байт
  * этой строки не уезжает — роут сворачивает её в код причины
- * (`clientEngProjection.toClientEngStageErrorCode` → `clientErrors`, код
- * `website_unreachable`), и экран печатает английскую константу справочника.
+ * (`clientEngProjection.toClientEngStageErrorCode` → `clientErrors`: род `dns` —
+ * код `website_unreachable`, род `no_html` — технический `website_no_html`,
+ * у которого в кабинете есть «Try again»), и экран печатает английскую
+ * константу справочника.
  *
  * АСИММЕТРИЯ, которую надо знать читателю логов: слова «Сайт клиента» в тексте
  * верны не всегда, а класс всё равно один. Ошибку бросает `defaultFetchText` для
@@ -159,7 +169,8 @@ const SEARCH_TIMEOUT_MS = HE_SEARCH_TIMEOUT_MS;
  * имеют права; а разделить текст на «свой» и «чужой» значило бы либо два
  * сообщения под один якорь, либо перенос якоря вместе с правилом.
  * Цена асимметрии при этом ограничена ОДНИМ местом: наружу — в
- * `he_projects.error`/`he_jobs.error` и дальше в код `website_unreachable` —
+ * `he_projects.error`/`he_jobs.error` и дальше в коды `website_unreachable` /
+ * `website_no_html` —
  * ошибка уходит только из стадии site_profile, и только про
  * `project.website_url`, то есть там формулировка честна буквально. Три стадии с
  * чужими адресами ловят её в своём catch и печатают ОДНОЙ СТРОКОЙ ЛОГА рядом с
@@ -233,6 +244,56 @@ const ENG_WEBSITE_ROUTE: { routeOrder: WebsiteFetchRouteOrder; acceptLanguage: s
 };
 
 /**
+ * Коды ответа резолвера, которые значат «такого имени нет» (getaddrinfo
+ * EAI_NONAME/EAI_NODATA → ENOTFOUND, «записей нет» → ENODATA). Только они —
+ * факт об адресе. Остальное (EAI_AGAIN, EAI_FAIL, ESERVFAIL, ECONNREFUSED у
+ * резолвера…) — наш резолвер не ответил, это не про сайт клиента.
+ */
+const DNS_NAME_NOT_FOUND_CODES = new Set(['ENOTFOUND', 'ENODATA']);
+
+/**
+ * Провал DNS-резолва у гейта assertPublicWebsite — у рынка 'us' уточнённый.
+ *
+ * Общий гейт (lib/clientDemo/personalize.ts: его делят демо-персонализация RU и
+ * verticalEngineV2) любой провал lookup превращает в одну и ту же
+ * WebsiteFetchError «Не удалось найти такой сайт (DNS)» со статусом 502 и код
+ * резолвера выбрасывает. Для ENG-кабинета это решало судьбу проекта: род `dns`
+ * → website_unreachable — НЕ технический, «Try again» нет, клиент заперт, даже
+ * если упал наш резолвер (EAI_AGAIN). Сам гейт не трогаем — его вывод в RU и v2
+ * остаётся байт-в-байт прежним; вместо этого на ЭТОЙ ветке (только 502 гейта,
+ * только 'us') спрашиваем резолвер ещё раз, уже с кодом:
+ *  - ENOTFOUND / ENODATA — имени нет: прежний род `dns`;
+ *  - имя на этот раз нашлось — первый провал был сбоем резолвера;
+ *  - любой другой код — резолвер не ответил.
+ * Последние два — обычная Error с кодом резолвера, НЕ HeSiteUnreachableError:
+ * site_profile её не переживает, а бросает, воркер повторяет стадию по своей
+ * политике, а кабинет читает исход техническим сбоем («Try again» есть).
+ * Невалидный, приватный или служебный адрес (400 гейта) остаётся родом `dns`.
+ * Рынок 'ru' сюда не заходит — у него всё как до этой правки.
+ */
+async function usDnsFailure(gateError: unknown, normalized: string): Promise<unknown> {
+  if (!(gateError instanceof WebsiteFetchError) || gateError.status !== 502) return gateError;
+  let host: string;
+  try {
+    host = new URL(normalized).hostname.toLowerCase();
+  } catch {
+    return gateError;
+  }
+  try {
+    await lookup(host, { all: true, verbatim: true });
+  } catch (e) {
+    const code = (e as { code?: unknown } | null)?.code;
+    if (typeof code === 'string' && DNS_NAME_NOT_FOUND_CODES.has(code)) return gateError;
+    return new Error(`DNS-резолвер не ответил для ${host} (${typeof code === 'string' ? code : 'без кода'})`, {
+      cause: e,
+    });
+  }
+  return new Error(`DNS-резолвер не ответил для ${host} с первой попытки (повторный запрос прошёл)`, {
+    cause: gateError,
+  });
+}
+
+/**
  * Дефолтный фетч: нормализация URL → SSRF-гейт (DNS/приватные адреса режем
  * до первого запроса) → fetchAndExtract (главная + «о компании», ≤3000 символов).
  * Оба шага дают собственный род недоступности — см. HeSiteUnreachableError.
@@ -252,6 +313,14 @@ export async function defaultFetchText(
         assertPublicWebsite(normalized),
       );
     } catch (e) {
+      if (market !== 'us' || signal.aborted || isHeOperationTimeout(e)) {
+        throw asSiteUnreachable(e, 'dns', normalized, signal);
+      }
+      // Повторный lookup — под тем же бюджетом DNS, что и первый.
+      const failure = await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
+        usDnsFailure(e, normalized),
+      );
+      if (failure !== e) throw failure;
       throw asSiteUnreachable(e, 'dns', normalized, signal);
     }
     // DNS-резолв не прерывается: его поздний результат не должен начать HTTP.

@@ -50,6 +50,13 @@ const SENDING_STATUSES = new Set(['not_registered', 'registered', 'failed', 'rem
  */
 const SENDING_ERROR_PERMANENT =
   'This mailbox could not be set up for sending. Reconnect it with a fresh app password; if it keeps failing, contact your manager.';
+/**
+ * То же для ENG-кабинета: он self-serve, менеджера у его клиента нет —
+ * Support (чат кабинета; страница /client/eng/mailboxes печатает слово ссылкой
+ * через EngSupportText). RU-текст выше не меняется.
+ */
+const SENDING_ERROR_PERMANENT_ENG =
+  'This mailbox could not be set up for sending. Reconnect it with a fresh app password; if it keeps failing, message Support.';
 const SENDING_ERROR_RETRY =
   'This mailbox is not ready for sending yet. We retry automatically; if the status does not change, reconnect it.';
 
@@ -68,9 +75,10 @@ function sendingStatusOf(value: unknown): string | null {
   return typeof value === 'string' && SENDING_STATUSES.has(value) ? value : null;
 }
 
-function sendingErrorOf(status: unknown, error: unknown): string | null {
+function sendingErrorOf(status: unknown, error: unknown, forEng: boolean): string | null {
   if (!error) return null;
-  return status === 'failed' ? SENDING_ERROR_PERMANENT : SENDING_ERROR_RETRY;
+  if (status !== 'failed') return SENDING_ERROR_RETRY;
+  return forEng ? SENDING_ERROR_PERMANENT_ENG : SENDING_ERROR_PERMANENT;
 }
 
 /**
@@ -164,7 +172,7 @@ function toClientMailbox(row: Record<string, unknown>, forEng: boolean): Record<
     daily_limit: row.daily_limit,
     created_at: row.created_at,
     sendingStatus: sendingStatusOf(row.instantly_status),
-    sendingError: sendingErrorOf(row.instantly_status, row.instantly_error),
+    sendingError: sendingErrorOf(row.instantly_status, row.instantly_error, forEng),
   };
 }
 
@@ -390,7 +398,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     mailbox: toClientMailbox({ ...(data as Record<string, unknown>), ...regPatch }, market === ENG_MARKET),
     sendingReady: reg.ok,
-    sendingError: reg.ok ? undefined : sendingErrorOf(regPatch.instantly_status, reg.error),
+    sendingError: reg.ok ? undefined : sendingErrorOf(regPatch.instantly_status, reg.error, market === ENG_MARKET),
     warning,
   });
 }

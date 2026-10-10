@@ -23,7 +23,8 @@
  * автопродолжения, которого нет (провайдерский отказ терминален сразу, ночной
  * реконсилер и авто-резюм выключены по умолчанию и упавшую работу не
  * переоплачивают), ни кнопок, которых в кабинете нет. Действия называются теми
- * же словами, что и кнопки: «Re-run research» (шаг 1), «Start outreach»
+ * же словами, что и кнопки: «Try again» (шаг 1, только у research, вставшего
+ * техническим сбоем — heResearchRetryAllowed ниже), «Start outreach»
  * (шаг 2) и «Collect again» (шаг 4, только у остановок
  * HE_COLLECT_STOP_REPEATS_CODES). Повтор собирает НОВУЮ базу, а не продолжает
  * упавшую (упавшая база не переиспользуется), поэтому «всё собранное
@@ -57,8 +58,18 @@ export type HeClientErrorCode =
   | 'already_collected'
   /** Источник не отдал строк (ошибка чтения каталога или пустая выдача). */
   | 'source'
-  /** Сайт самого клиента не открылся — исследованию нечего было читать. */
+  /**
+   * Адрес сайта клиента не привёл к публичному серверу (род `dns`
+   * HeSiteUnreachableError: домен не резолвится, адрес невалидный или
+   * приватный) — исследованию нечего было читать.
+   */
   | 'website_unreachable'
+  /**
+   * Сайт клиента принял соединение, но ни один его адрес не отдал HTML (род
+   * `no_html` HeSiteUnreachableError). Бывает и из-за наших маршрутов чтения
+   * (прокси, блокировка ботов), поэтому — технический сбой.
+   */
+  | 'website_no_html'
   /** Конструктор баз не обогатил строки почтами. */
   | 'enrichment'
   /** Шаг не уложился в отведённое время. */
@@ -127,6 +138,88 @@ export function heCollectStopRepeats(code: unknown): boolean {
 }
 
 /**
+ * ПОВТОР RESEARCH ТОЛЬКО ПОСЛЕ ТЕХНИЧЕСКОГО СБОЯ — решение владельца 10.10.2026:
+ * research проекта клиент запускает ещё раз только после сбоя («Try again» шага
+ * 1 и роут api/client/eng/projects/[id]/research), а не кнопкой когда угодно.
+ *
+ * СПИСОК ПЕРЕВЁРНУТ: перечислены НЕ технические остановки research, всё прочее
+ * — сбой. Причина — источник кода. Код причины проекта даёт классификатор по
+ * ТЕКСТУ (clientErrors.classifyHeClientError), и его правила написаны в
+ * основном для баз, долива и тарифа. Ошибка research, в которой случайно
+ * встретилась их подстрока («JSON.parse failed: … warm-up …» →
+ * subscription_warmup), при списке «технических» кодов навсегда запирала бы
+ * клиента — без «Try again», с Support как единственным выходом. Здесь цена
+ * ошибки обратная и ограничена: лишний повтор, который держит дневной лимит
+ * стартов (HE_US_MAX_RESEARCH_PER_DAY, гейт роута под замком).
+ *
+ * Не технические остановки research:
+ *  - website_unreachable — ТОЛЬКО род `dns` HeSiteUnreachableError
+ *    (stages/io.ts, assertPublicWebsite): адрес, который дал клиент, не привёл
+ *    к публичному серверу — имени нет (у рынка 'us' — только ENOTFOUND /
+ *    ENODATA резолвера; сбой самого резолвера — `internal`), адрес невалидный
+ *    или приватный. Правило кабинета, а не вывод о виновнике: повтор того же
+ *    адреса дал бы тот же исход. Род `no_html` сюда не входит (он
+ *    `website_no_html`: так же выглядит и наш маршрут чтения, который не
+ *    дошёл); истёкший срок чтения — `timeout`;
+ *  - `cancelled` (код проекции, не этого словаря) — проект остановили руками.
+ *    Ту же отмену чаще видно по последней research-джобе 'cancelled' — её
+ *    проверяет вердикт (researchJob.ts, engResearchRetryVerdict).
+ * Причины нет (`null`/нет ключа) — «остановился без записанной причины»: тоже
+ * сбой.
+ *
+ * Всё остальное — повтор положен, в том числе коды, которые research сам не
+ * пишет (audience_mismatch, segment_exhausted, subscription_*, refill_* и
+ * т. д.): на проекте такой код — почти наверняка неверно прочитанный текст.
+ */
+export const HE_RESEARCH_FINAL_STOP_CODES = ['website_unreachable', 'cancelled'] as const;
+
+/**
+ * Можно ли клиенту запустить research упавшего ('failed') проекта ещё раз —
+ * по коду причины из проекции (toClientEngStageErrorCode). Один предикат на
+ * роут исследования и экран шага 1: разойдись они, кабинет рисовал бы кнопку,
+ * которую роут откажет.
+ */
+export function heResearchRetryAllowed(errorCode: unknown): boolean {
+  return !(HE_RESEARCH_FINAL_STOP_CODES as readonly unknown[]).includes(errorCode);
+}
+
+/**
+ * Коды, которые research-стадии действительно пишут проекту: у них заголовок
+ * справочника говорит правду о research, и шаг 1 ставит его перед «Try again».
+ * У любого другого кода на проекте (неверно прочитанный текст, см. выше)
+ * заголовок рассказывал бы про базы или тариф — шаг 1 говорит нейтрально.
+ */
+export const HE_RESEARCH_STOP_CODES = [
+  'billing',
+  'configuration',
+  'provider',
+  'timeout',
+  'website_unreachable',
+  'website_no_html',
+  'internal',
+  'unknown',
+] as const satisfies readonly HeClientErrorCode[];
+
+export function heResearchStopCode(code: unknown): code is (typeof HE_RESEARCH_STOP_CODES)[number] {
+  return (HE_RESEARCH_STOP_CODES as readonly unknown[]).includes(code);
+}
+
+/**
+ * Сколько research-проект 'researching' без живой research-джобы ждёт, прежде
+ * чем клиенту можно «Try again» (вердикт 'retry_stalled', researchJob.ts).
+ * Воркер ставит следующую стадию сразу после done-записи предыдущей, и между
+ * ними живой джобы нет — окно отделяет эту щель от вставшей цепочки.
+ *
+ * ОДНА константа на роут исследования (он решает), деталку проекта (она
+ * отдаёт вердикт экрану) и текст шага 1 (он называет число минут), поэтому
+ * живёт здесь — в модуле без зависимостей, который берут и сервер, и браузер.
+ * Значение то же, что у сирот баз (ANALYZING_ORPHAN_GRACE_MS, autopilotNext.ts),
+ * и по той же причине — с запасом на любой ответ, который вообще доходит;
+ * импортировать ту константу браузер не может (модуль серверный).
+ */
+export const HE_RESEARCH_STALL_GRACE_MS = 10 * 60 * 1000;
+
+/**
  * «Что делать» у этих остановок — одно предложение на три кода, и каждое его
  * слово правда при любой базе, у которой его показывают (в том числе у
  * старой, над которой уже есть новая база): кнопка описана условием, при
@@ -137,15 +230,25 @@ const COLLECT_AGAIN_EN =
 
 /**
  * Где клиент перезапускает остановившийся шаг. Кнопок две, у каждой своя
- * область: research перезапускает «Re-run research» шага 1, упавшую сборку
+ * область: research перезапускает «Try again» шага 1, упавшую сборку
  * базы — «Start outreach» шага 2 (клиентское нажатие ставит новую сборку
  * вертикали, у которой нет живой или готовой базы; упавшая база этому не
  * мешает — кроме остановок HE_COLLECT_STOP_REPEATS_CODES, у которых свой текст
  * и своя кнопка). Один код причины бывает и у проекта, и у базы, поэтому
  * названы обе.
+ *
+ * «Try again» есть у research, остановленного с любым кодом, кроме
+ * HE_RESEARCH_FINAL_STOP_CODES (heResearchRetryAllowed), поэтому фраза стоит
+ * у кодов, которые research пишет как сбой (billing, configuration, provider,
+ * timeout, internal, unknown): у них кнопка на шаге 1 есть, когда research
+ * остановился с этим кодом. Одно исключение — гонка с отменой: последняя
+ * research-джоба проекта 'cancelled' (engResearchRetryVerdict, researchJob.ts),
+ * и тогда кнопки нет. Код проекта при этом обычно пуст (cancel-роут пишет
+ * error = null), так что эту фразу клиент там почти никогда не видит.
+ * website_no_html своё действие называет сам.
  */
 const WHERE_TO_RESTART =
-  '«Re-run research» on step 1 if the research stopped, «Start outreach» on step 2 if a base collection stopped';
+  '«Try again» on step 1 if the research stopped, «Start outreach» on step 2 if a base collection stopped';
 
 /**
  * Что уцелело при остановке шага движка. Ровно то, что правда для любой формы:
@@ -212,7 +315,7 @@ export const HE_REFILL_HOLD_LIFT_EN = 'Only our team can lift the hold — it do
  * умолчанию потолок выключен, и эту фразу не видит никто). ОДНА фраза на два
  * места: карточка паузы автопилота (`engAutopilotHoldText('spend_paused')`) и
  * отказ 409 кнопок кабинета, которые ставят платный шаг (письма, сборка,
- * шаблон, «Re-run research»), — чтобы они не могли разойтись.
+ * шаблон, «Try again» исследования), — чтобы они не могли разойтись.
  *
  * Каждое предложение — правда при каждом пути, который её показывает:
  *  - «paused on our side, so no new step was started» — потолок только НЕ
@@ -368,18 +471,54 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
       'Press «Start outreach» on step 2 to collect this vertical again; if it keeps coming back empty, message Support.',
   },
   /**
-   * Единственный код, где виноват не наш контур: сайт, который клиент указал
-   * сам, не открылся (домена нет в DNS либо ни один адрес не отдал HTML —
-   * lib/hypothesisEngine/stages/io.ts, HeSiteUnreachableError). Поэтому здесь,
-   * в отличие от соседей, есть шаг, который клиент реально может сделать: адрес
-   * он задаёт при создании проекта, а описание бизнеса — на шаге «Brief», и
-   * ровно оно снимает отказ на следующем прогоне research.
+   * Адрес сайта, который клиент указал сам, не привёл к публичному серверу —
+   * ТОЛЬКО род `dns` HeSiteUnreachableError (lib/hypothesisEngine/stages/io.ts,
+   * assertPublicWebsite: домен не резолвится, адрес невалидный или
+   * приватный). Код НЕ технический (HE_RESEARCH_FINAL_STOP_CODES): «Try again» у
+   * такого research нет, и кабинет его заново не запускает — поэтому действие
+   * — Support. Каждая фраза правдива для любой такой строки:
+   *  - «We could not open the website you gave us» — до сайта чтение не дошло;
+   *  - «does not start the research again after this kind of stop» — правило
+   *    кабинета, а не вывод о виновнике;
+   *  - «If the site opens for you but stays closed to us» — условие, а не
+   *    утверждение: DNS, который видим мы, и DNS клиента бывают разными;
+   *  - «the research can work from that description instead of the site» —
+   *    стадия site_profile, не открыв сайт, строит профиль по ручному описанию
+   *    бизнеса (business_override), а без него отказывает; запустить research
+   *    заново может только команда (staff-инструмент), и описание с шага
+   *    «Brief» она застанет. Нового проекта текст не предлагает: один аккаунт —
+   *    один сайт (решение владельца 10.10.2026).
+   * Род `no_html` — отдельный технический код `website_no_html` ниже.
    */
   website_unreachable: {
     title: 'We could not open the website you gave us, so the research had nothing to read.',
     whatIsSaved: 'The project and everything you entered are saved.',
     whatToDo:
-      'Open the address in a browser to check it: if it does not open, start a new project with the correct one. If it opens but stays closed to us, describe your business in a few sentences in the Brief step and re-run the research.',
+      'Open the address in a browser to check it. This cabinet does not start the research again after this kind of stop, so message Support. If the site opens for you but stays closed to us, describe your business in a few sentences in the Brief step first — the research can work from that description instead of the site.',
+  },
+  /**
+   * Сайт клиента принял соединение, но ни один его адрес не отдал HTML — род
+   * `no_html` HeSiteUnreachableError (stages/io.ts, WebsiteNoHtmlError
+   * websiteParser). Код ТЕХНИЧЕСКИЙ (не в HE_RESEARCH_FINAL_STOP_CODES): чья это
+   * поломка, запись не говорит — так же выглядит и наш маршрут чтения, который
+   * не дошёл. Поэтому у проекта с этим кодом на шаге 1 есть «Try again», и
+   * текст правдив при любом виновнике:
+   *  - «This can be a problem on our side as well as on the site» — ровно то,
+   *    что известно;
+   *  - «press «Try again» on step 1» — кнопка есть у 'failed' с техническим
+   *    кодом (кроме гонки с отменой — см. WHERE_TO_RESTART); дневной лимит
+   *    стартов кнопку не прячет, а отвечает на нажатие своим текстом;
+   *  - «the research can then work from that description» — site_profile
+   *    строит профиль по business_override при ЛЮБОМ роде недоступного сайта
+   *    (stages/siteProfile.ts), а «Try again» начинает research с неё.
+   * Встречается только у проекта: наружу эту ошибку пишет одна стадия
+   * site_profile (шапка HeSiteUnreachableError в stages/io.ts).
+   */
+  website_no_html: {
+    title: 'We could not read any page of the website you gave us, so the research had nothing to read.',
+    whatIsSaved: 'The project and everything you entered are saved.',
+    whatToDo:
+      'This can be a problem on our side as well as on the site. Check that the address opens in a browser, then press «Try again» on step 1. If it stops this way again, describe your business in a few sentences in the Brief step and press «Try again» once more — the research can then work from that description instead of the site. If it still stops, message Support.',
   },
   /**
    * На упавшей базе этот код значит одно: ни одна строка не получила вердикта,

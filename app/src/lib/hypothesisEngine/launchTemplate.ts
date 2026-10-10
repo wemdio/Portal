@@ -927,7 +927,7 @@ export function isHeLaunchUnpaidServerError(text: unknown): boolean {
  * или нет) ЛИБО живая аренда (попытка держит запись прямо сейчас). Это то же,
  * что parseLaunchInfo !== null, плюс идущая попытка над записью не нашего
  * формата. Читают его две защиты: «по базе уже запущен другой шаблон» (шаг 4b′
- * ниже) и «Re-run research удалил бы запуск» (api/client/eng/projects/[id]/research).
+ * ниже) и «повтор research удалил бы запуск» (api/client/eng/projects/[id]/research).
  *
  * Сама запись в выборку не идёт: у незаконченного запуска в ней лежат поимённые
  * адреса долга (launch_info.pending[].emails) — тысячи строк на шаблон, а

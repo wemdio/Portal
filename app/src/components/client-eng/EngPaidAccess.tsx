@@ -8,11 +8,10 @@
  *    английский и называет действие) и, у неподтверждённой почты, кнопка
  *    «Send confirmation link» прямо под ним плюс ссылка на страницу
  *    подтверждения. Остальные коды несут действие в самом тексте: лимит
- *    стартов исследования — «после полуночи UTC», потолок — Support, лимит
- *    проектов — удалить ненужный проект или Support (под текстом — ссылка на
- *    список проектов, где у каждого есть «Delete project»; при заданном
- *    потолке расхода удаление закрыто — только Support, без ссылки),
- *    'unavailable' — «обновите страницу». У профиля без адреса кнопки
+ *    стартов исследования — «после полуночи UTC», потолок — Support, «один
+ *    аккаунт — один сайт» (project_limit) — Support, чтобы сменить сайт,
+ *    'unavailable' — «обновите страницу» (у создания проекта без функции под
+ *    замком — сбой у нас и Support). У профиля без адреса кнопки
  *    отправки нет — текст ведёт в Support.
  *  - EngSupportText — слово «Support» в тексте кабинета ссылкой на чат
  *    поддержки (/client/support, пункт «Support» меню ENG-кабинета). Им
@@ -40,8 +39,6 @@ import { EngSpinner, fmtDate } from './ui';
 
 const VERIFY_PAGE = '/client/eng/verify-email' as Route;
 const SUPPORT_PAGE = '/client/support' as Route;
-/** Список проектов без авто-перехода на Command Center (EngProjectsList, ?list=1). */
-const PROJECTS_LIST = '/client/eng?list=1' as Route;
 
 /** «Support» отдельным словом с заглавной — имя пункта меню. */
 const SUPPORT_WORD_RE = /\bSupport\b/;
@@ -128,32 +125,17 @@ function ResendControls({ onDone }: { onDone?: () => void }) {
 }
 
 /**
- * Отказ гейта у кнопки: текст роута и действие (у почты — отправка ссылки, у
- * лимита проектов — ссылка на список проектов, где их удаляют).
- * `onProjectsList` — отказ показан на самом списке проектов, ссылка на него
- * не нужна. Действия нет, когда оно не сработает: у профиля без адреса
- * (`emailMissing` — текст ведёт в Support) и когда удаление проектов закрыто
- * потолком расхода (`projectDeleteAvailable` false — текст тоже ведёт в
- * Support).
+ * Отказ гейта у кнопки: текст роута и действие — у почты отправка ссылки
+ * (кроме профиля без адреса: `emailMissing`, текст ведёт в Support); у
+ * остальных кодов действие в самом тексте, «Support» в нём — ссылка.
  */
-export function EngPaidAccessNotice({
-  refusal,
-  onProjectsList = false,
-}: {
-  refusal: EngPaidAccessError;
-  onProjectsList?: boolean;
-}) {
+export function EngPaidAccessNotice({ refusal }: { refusal: EngPaidAccessError }) {
   return (
     <div className="flex flex-col gap-2 text-sm" style={{ color: 'var(--cp-red)' }}>
       <span>
         <EngSupportText text={refusal.message} />
       </span>
       {refusal.code === 'email_not_verified' && !refusal.emailMissing && <ResendControls />}
-      {refusal.code === 'project_limit' && refusal.projectDeleteAvailable && !onProjectsList && (
-        <Link href={PROJECTS_LIST} prefetch={false} className="text-[11px] underline" style={{ color: 'var(--cp-text-m)' }}>
-          Open your projects to delete one
-        </Link>
-      )}
     </div>
   );
 }

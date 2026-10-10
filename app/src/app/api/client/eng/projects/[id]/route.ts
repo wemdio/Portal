@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
-import { logAudit, logWarn } from '@/lib/loggerServer';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { isValidUuid } from '@/lib/apiValidation';
@@ -11,25 +9,23 @@ import { loadHeProjectDetail } from '@/lib/hypothesisEngine/projectDetail';
 import {
   toClientEngProjectDetail,
   toClientEngProjectRow,
+  toClientEngStageErrorCode,
 } from '@/lib/hypothesisEngine/clientEngProjection';
+import {
+  HE_RESEARCH_STALL_GRACE_MS,
+  engResearchRetryVerdict,
+  readLatestHeResearchJob,
+} from '@/lib/hypothesisEngine/researchJob';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { isAnalyzingBaseLive, liveBaseIdsFromJobs } from '@/lib/hypothesisEngine/autopilotNext';
-import { engProjectDeleteAvailable } from '@/lib/hypothesisEngine/engPaidAccess';
-import { findHeEngRateHits } from '@/lib/hypothesisEngine/engRateLimit';
-import { HE_LAUNCH_LEASE_MS } from '@/lib/hypothesisEngine/launchHandoff';
-import {
-  HE_TEMPLATE_LAUNCH_MARK_COLUMNS,
-  heTemplateLaunchMarked,
-  type HeTemplateLaunchMark,
-} from '@/lib/hypothesisEngine/launchTemplate';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import {
   patchHeProjectBrief,
   type HeBriefPatchBody,
 } from '@/lib/hypothesisEngine/projectBriefPatch';
 import {
+  heIcpFrameInputErrorText,
   parseHeIcpFramePatch,
-  type HeIcpFrameInputError,
   type HeIcpFramePatch,
 } from '@/lib/hypothesisEngine/icpFrame';
 import {
@@ -46,8 +42,8 @@ const BRIEF_SAVE_FAILED = 'Failed to save the brief';
 const SETTING_SAVE_FAILED = 'Failed to save the project setting';
 
 /**
- * Тело PATCH: поля брифа (общие со staff), рамка ЦА клиента (`icp`, только
- * этот роут) и настройка проекта «до N адресов одной компании». Значения
+ * Тело PATCH: поля брифа (общие со staff), рамка ЦА клиента (`icp`, из
+ * PATCH-роутов только этот) и настройка проекта «до N адресов одной компании». Значения
  * приходят `unknown` — проверяют их нормализаторы, а не тип запроса.
  */
 type EngProjectPatchBody = HeBriefPatchBody & { max_emails_per_company?: unknown; icp?: unknown };
@@ -73,29 +69,6 @@ const NO_FIELDS =
  * лишь запрос в обход формы.
  */
 const ICP_MARKET_ONLY_US = 'The target audience fields apply only to projects in the US market';
-
-/**
- * Отказ по рамке ЦА. Имена — ключи тела запроса (как у отказов по overrides
- * ниже), лимит — из ошибки нормализатора, а не цифрой: форма кабинета
- * проверяет те же константы (icpFrame.ts) до отправки, и сюда доходит только
- * запрос в обход формы.
- */
-function icpInputErrorText(err: HeIcpFrameInputError): string {
-  switch (err.code) {
-    case 'bad_shape':
-      return 'icp must be an object with include, exclude, size or geo, or null to clear it';
-    case 'bad_type':
-      return err.field === 'include' || err.field === 'exclude'
-        ? `icp.${err.field} must be a list of strings`
-        : `icp.${err.field} must be a string`;
-    case 'too_many':
-      return `icp.${err.field}: at most ${err.max} entries`;
-    case 'too_long':
-      return err.field === 'include' || err.field === 'exclude'
-        ? `icp.${err.field}: each entry is at most ${err.max} characters`
-        : `icp.${err.field}: maximum ${err.max} characters`;
-  }
-}
 
 // GET — деталка СВОЕГО проекта (та же сборка, что у staff-роута, но со скоупом
 // владельца: чужой проект отвечает 404, существование не раскрываем) —
@@ -150,12 +123,42 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // Общий с RU-инструментом loadHeProjectDetail при этом НЕ тронут: запрос
   // живёт в клиентском роуте, и выдача /api/tools/hypothesis-engine остаётся
   // байт-в-байт прежней.
-  const busyRes = await supabaseAdmin
-    .from('he_jobs')
-    .select('id')
-    .eq('project_id', id)
-    .in('status', ['pending', 'running'])
-    .limit(1);
+  //
+  // ПОВТОР RESEARCH — ВЕРДИКТОМ СЕРВЕРА (`research_retry`), а не выводом экрана.
+  // «Try again» шага 1 обязан стоять ровно там, где роут исследования повтор
+  // примет, а роут решает по последней research-джобе БЕЗ капа и по её
+  // updated_at/created_at — ни того, ни другого в капнутом списке `jobs` нет
+  // (HE_JOB_LIST_COLUMNS общий со staff). Поэтому то же чтение
+  // (readLatestHeResearchJob) и та же функция (engResearchRetryVerdict) с тем же
+  // окном, что у POST /research; экран рисует кнопку по вердикту, и она
+  // появляется, когда истекло окно «цепочка встала», с ближайшим поллом
+  // ('researching' мастер поллит каждые 4 с). `latest_job_status` — статус той
+  // же джобы: по нему шаг 1 говорит «research отменён». Сбой чтения — ключа
+  // нет, экран считает осторожно (кнопки у 'researching' без вердикта нет).
+  const [busyRes, latestResearchJob] = await Promise.all([
+    supabaseAdmin
+      .from('he_jobs')
+      .select('id')
+      .eq('project_id', id)
+      .in('status', ['pending', 'running'])
+      .limit(1),
+    readLatestHeResearchJob(supabaseAdmin, id),
+  ]);
+  const rawProject = (detail.detail.project ?? {}) as Record<string, unknown>;
+  const researchRetry = latestResearchJob.ok
+    ? {
+        verdict: engResearchRetryVerdict({
+          status: rawProject.status,
+          errorCode: toClientEngStageErrorCode(rawProject.error),
+          lastResearchJob: latestResearchJob.job,
+          project: rawProject,
+          now: Date.now(),
+          graceMs: HE_RESEARCH_STALL_GRACE_MS,
+        }),
+        latest_job_status:
+          typeof latestResearchJob.job?.status === 'string' ? latestResearchJob.job.status : null,
+      }
+    : null;
 
   // ИДЁТ ЛИ АНАЛИЗ 'analyzing'-БАЗ — тем же правилом, что у Command Center и
   // реконсилера «Start outreach»: общий предикат isAnalyzingBaseLive
@@ -224,12 +227,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
             return live === undefined ? b : { ...b, analysis_live: live };
           }),
     ...(busyRes.error ? {} : { has_active_jobs: (busyRes.data ?? []).length > 0 }),
+    ...(researchRetry ? { research_retry: researchRetry } : {}),
   });
 }
 
 // PATCH — offer_override / style_override / signature_override / business_override мержатся в
 // he_projects.brief (та же логика, что у staff, со скоупом владельца до записи),
-// icp (рамка ЦА, только этот роут) — частичной правкой в brief.icp той же
+// icp (рамка ЦА; из PATCH-роутов только этот) — частичной правкой в brief.icp той же
 // записью, max_emails_per_company пишется колонкой проекта.
 //
 // Настройка «до N адресов одной компании» (волна 1: миграция 20260926_0001,
@@ -279,7 +283,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     let icpPatch: HeIcpFramePatch | null = null;
     if (icpRequested) {
       const parsed = parseHeIcpFramePatch(body.icp);
-      if (!parsed.ok) return jsonError(icpInputErrorText(parsed.error), 400);
+      // Текст — общий с POST создания (icpFrame.ts): имена ключей тела, лимит
+      // из ошибки; форма кабинета проверяет те же константы до отправки.
+      if (!parsed.ok) return jsonError(heIcpFrameInputErrorText(parsed.error), 400);
       icpPatch = parsed.patch;
     }
 
@@ -370,345 +376,5 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // patchHeProjectBrief отдаёт строку из .select() целиком — проецируем, как
     // и деталку: cost_usd/tokens_used/llm_model кабинету не нужны.
     return NextResponse.json({ project: toClientEngProjectRow(patch.project) });
-  });
-}
-
-/* ─────────────── DELETE: удаление проекта клиентом ─────────────── */
-
-const PROJECT_DELETE_FAILED = 'Failed to delete the project';
-
-/**
- * Тексты отказов DELETE. Каждый правдив для любой формы, которая до него
- * доходит, и называет, что делать:
- *  - SPEND_CAP — задан потолок расхода клиента (HE_US_CLIENT_SPEND_CAP_USD /
- *    HE_US_CLIENT_DAY_SPEND_CAP_USD, ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда отказа нет).
- *    Его сумма складывается по строкам he_projects клиента
- *    (he_client_provider_spend_sum, 20261010_0001), и удалённый проект унёс бы
- *    из неё свой расход — потолок перестал бы держать. Отказ любому проекту,
- *    пока потолок задан: расход есть у любого проекта, дошедшего до research;
- *  - LAUNCHED — в записи о запуске шаблона есть кампания (campaign_id
- *    he_templates.launch_info): кампании живут у рассыльщика, а запись о том,
- *    кто в них попал, ушла бы вместе с проектом. Отказ постоянный;
- *  - LAUNCHING — запуск шаблона идёт: живая аренда записи (running_until,
- *    heTemplateLaunchMarked — тот же признак, что у «Re-run research») или
- *    отметка 'launch_in_flight' роута запуска кабинета (engRateLimit). Обе
- *    гаснут не позже HE_LAUNCH_LEASE_MS после конца запуска, отсюда «or ended
- *    less than N minutes ago». Создаст запуск кампанию — дальше LAUNCHED;
- *  - RESEARCH_TODAY — у проекта есть site_profile, созданная с 00:00 UTC.
- *    Лимит исследований за UTC-сутки (engPaidAccess.ts и его замок) считает
- *    ровно эти строки he_jobs по проектам клиента, а каскад удалил бы их, и
- *    сегодняшний лимит отпустил бы новые платные исследования. С полуночи UTC
- *    строка в счёт не идёт, и её удаление ничего не отпускает;
- *  - BUSY — идёт работа (см. readDeleteSnapshot). Кнопка «Cancel all jobs»
- *    мастера рисуется не при каждой такой работе (engWizardLiveWork не видит
- *    джоб конструктора и Google Maps), поэтому — «when that button is shown»;
- *  - CHANGED — удаление условно (статус проекта тот, что судил снимок), и ноль
- *    строк при живом проекте значит, что статус сменился между снимком и
- *    удалением (например, началось исследование). Что именно — снимок уже не
- *    скажет, поэтому текст не называет причину, а просит перечитать.
- */
-const DELETE_SPEND_CAP_TEXT =
-  "Projects cannot be deleted on this account: it has a usage limit, and deleting a project would take that project's "
-  + 'usage out of the total the limit counts. Message Support if you need room for another project.';
-const DELETE_LAUNCHED_TEXT =
-  'This project cannot be deleted because a campaign has already been launched from it — deleting it would delete '
-  + 'the record of which contacts went into those campaigns. To make room for a new project, delete one without '
-  + 'launched campaigns, or message Support to raise the limit.';
-const LEASE_MINUTES = Math.round(HE_LAUNCH_LEASE_MS / 60_000);
-const DELETE_LAUNCHING_TEXT =
-  `A campaign launch from this project is running, or ended less than ${LEASE_MINUTES} minutes ago, so the project `
-  + 'cannot be deleted yet. Try again later. If the launch created a campaign, the project cannot be deleted at all: '
-  + 'deleting it would delete the record of which contacts went into that campaign.';
-const DELETE_RESEARCH_TODAY_TEXT =
-  'Research on this project was started today, and research started today counts toward your daily research limit '
-  + 'until midnight UTC, so this project cannot be deleted before then.';
-const DELETE_BUSY_TEXT =
-  'Work on this project is still in progress, so it cannot be deleted yet. Wait until it finishes, or stop it with '
-  + '«Cancel all jobs» on the project page when that button is shown, then delete the project.';
-const DELETE_CHANGED_TEXT =
-  'This project changed while it was being deleted, so it was not deleted. Reload the page to see its current '
-  + 'state, then try again.';
-
-/**
- * Позиции задач плана сборки с дочерней джобой парсера — те же, что у отмены
- * (cancel/route.ts, CANCEL_CHILD_TASK_SLOTS: ставят их только задачи
- * модели-планировщика, не больше четырёх, в начале списка).
- */
-const DELETE_CHILD_TASK_SLOTS = [0, 1, 2, 3] as const;
-
-/**
- * Поля базы для снимка: статус, updated_at (живость 'analyzing'), id джоб
- * конструктора — сборки (construct) и раунда перепроверки адресов
- * (validationRetry.ts, revalidation.round) — и дочерних джоб задач плана.
- * Без `data` и без самого collect_info: в них мегабайты строк и харвеста.
- */
-const DELETE_BASE_COLUMNS = [
-  'id',
-  'status',
-  'updated_at',
-  'bc_job_id:collect_info->construct->>bc_job_id',
-  'revalidation_bc_job_id:collect_info->revalidation->round->>bc_job_id',
-  ...DELETE_CHILD_TASK_SLOTS.flatMap((i) => [
-    `task${i}_source:collect_info->tasks->${i}->>source`,
-    `task${i}_child:collect_info->tasks->${i}->>child_job_id`,
-  ]),
-].join(', ');
-
-interface DeleteSnapshot {
-  /** У шаблона проекта в записи о запуске есть кампания. */
-  launched: boolean;
-  /** Запуск шаблона идёт: живая аренда записи или отметка роута запуска. */
-  launching: boolean;
-  researchStartedToday: boolean;
-  busy: boolean;
-  /** Для аудита: что ушло каскадом. */
-  verticals: number;
-  bases: number;
-  templates: number;
-}
-
-/**
- * Снимок проекта для отказов DELETE. «Идёт работа» (busy):
- *  - активные (pending/running) he_jobs проекта — любая стадия;
- *  - база 'collecting';
- *  - база 'analyzing', чей анализ жив (isAnalyzingBaseLive — тот же предикат,
- *    что у GET выше и у Command Center; активных джоб в этой ветке нет, так
- *    что живой её делает только окно постановки). Остановившийся анализ
- *    ничего не делает, и удалению не мешает;
- *  - джоба конструктора баз (base_constructor_jobs 'pending'/'processing') у
- *    сборки или перепроверки адресов любой базы проекта и дочерняя джоба
- *    Google Maps ('queued'/'running'/'paused') — те же записи и статусы, что
- *    останавливает отмена (cancel/route.ts, stopCancelledBaseWork). Они
- *    платят вне he_jobs, и удаление базы их не остановит: оплаченный итог
- *    лечь будет некуда. hh_live и yandex_maps ENG-план не ставит (там же).
- * Проект 'researching' — тоже работа; это решает роут по уже прочитанной строке.
- * Запуск шаблона — не he_job, у него свои признаки (launched / launching, см.
- * тексты выше). Отметку 'launch_in_flight' читает findHeEngRateHits: её нет в
- * БД (миграция 20261010_0001 не применена) — отметок не бывает, строка warn.
- * Сбой любого чтения — ошибка: «не знаю, идёт ли работа» не равно «не идёт».
- */
-async function readDeleteSnapshot(
-  db: SupabaseClient,
-  projectId: string,
-  now: Date,
-): Promise<{ snapshot: DeleteSnapshot } | { error: unknown }> {
-  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const [verticalsRes, basesRes, activeJobsRes, researchTodayRes] = await Promise.all([
-    db.from('he_verticals').select('id').eq('project_id', projectId),
-    db.from('he_bases').select(DELETE_BASE_COLUMNS).eq('project_id', projectId),
-    db.from('he_jobs').select('id').eq('project_id', projectId).in('status', ['pending', 'running']).limit(1),
-    db
-      .from('he_jobs')
-      .select('id')
-      .eq('project_id', projectId)
-      .eq('stage', 'site_profile')
-      .gte('created_at', dayStart.toISOString())
-      .limit(1),
-  ]);
-  if (verticalsRes.error) return { error: verticalsRes.error };
-  if (basesRes.error) return { error: basesRes.error };
-  if (activeJobsRes.error) return { error: activeJobsRes.error };
-  if (researchTodayRes.error) return { error: researchTodayRes.error };
-
-  const verticalIds = (verticalsRes.data ?? [])
-    .map((v) => (v as { id?: unknown }).id)
-    .filter((v): v is string => typeof v === 'string' && v.length > 0);
-  let templates: HeTemplateLaunchMark[] = [];
-  if (verticalIds.length > 0) {
-    const templatesRes = await db.from('he_templates').select(HE_TEMPLATE_LAUNCH_MARK_COLUMNS).in('vertical_id', verticalIds);
-    if (templatesRes.error) return { error: templatesRes.error };
-    templates = (templatesRes.data ?? []) as HeTemplateLaunchMark[];
-  }
-  const nowMs = now.getTime();
-  const templateIds = templates
-    .map((t) => t.id)
-    .filter((v): v is string => typeof v === 'string' && v.length > 0);
-  // Первый запуск шаблона пишет запись только с первой кампанией, а платный
-  // классификатор идёт раньше — до этого его видно только по отметке роута.
-  const inFlight = await findHeEngRateHits(db, 'launch_in_flight', templateIds, nowMs - HE_LAUNCH_LEASE_MS);
-  if (inFlight.kind === 'error') return { error: new Error(inFlight.message) };
-  if (inFlight.kind === 'table_missing') {
-    void logWarn(
-      'client.eng.project.delete_in_flight_unreadable',
-      'he_eng_rate_events is missing (migration 20261010_0001 not applied) — a first launch in progress is not seen by delete',
-      { projectId },
-    );
-  }
-
-  const bases = (basesRes.data ?? []) as unknown as Array<Record<string, unknown>>;
-  const text = (value: unknown): string | null => (typeof value === 'string' && value.length > 0 ? value : null);
-  let busy = (activeJobsRes.data ?? []).length > 0;
-  if (!busy) {
-    busy = bases.some((b) =>
-      b.status === 'collecting'
-      || (b.status === 'analyzing'
-        && isAnalyzingBaseLive({ id: String(b.id ?? ''), updated_at: text(b.updated_at) }, new Set<string>())),
-    );
-  }
-  if (!busy) {
-    const constructorIds = new Set<string>();
-    const mapsIds = new Set<string>();
-    for (const b of bases) {
-      for (const id of [text(b.bc_job_id), text(b.revalidation_bc_job_id)]) if (id) constructorIds.add(id);
-      for (const i of DELETE_CHILD_TASK_SLOTS) {
-        const child = text(b[`task${i}_child`]);
-        if (child && b[`task${i}_source`] === 'google_maps') mapsIds.add(child);
-      }
-    }
-    const [constructorRes, mapsRes] = await Promise.all([
-      constructorIds.size > 0
-        ? db.from('base_constructor_jobs').select('id').in('id', [...constructorIds]).in('status', ['pending', 'processing']).limit(1)
-        : null,
-      mapsIds.size > 0
-        ? db.from('google_maps_jobs').select('id').in('id', [...mapsIds]).in('status', ['queued', 'running', 'paused']).limit(1)
-        : null,
-    ]);
-    if (constructorRes?.error) return { error: constructorRes.error };
-    if (mapsRes?.error) return { error: mapsRes.error };
-    busy = (constructorRes?.data ?? []).length > 0 || (mapsRes?.data ?? []).length > 0;
-  }
-
-  return {
-    snapshot: {
-      launched: templates.some((t) => typeof t.launch_campaign_id === 'string' && t.launch_campaign_id.length > 0),
-      launching: inFlight.kind === 'found' || templates.some((t) => heTemplateLaunchMarked(t, nowMs)),
-      researchStartedToday: (researchTodayRes.data ?? []).length > 0,
-      busy,
-      verticals: verticalIds.length,
-      bases: bases.length,
-      templates: templates.length,
-    },
-  };
-}
-
-// DELETE — удалить СВОЙ проект целиком (кнопка «Delete project» в списке
-// проектов кабинета). Лимит проектов (engPaidAccess.ts) считает строки
-// he_projects клиента, и удаление — самостоятельный способ освободить место.
-//
-// ЧТО УДАЛЯЕТСЯ. Одна строка he_projects; остальное уходит каскадом внешних
-// ключей (on delete cascade). Staff-роута удаления проекта нет — это та же
-// цепочка каскадов, на которой стоит кластеризация «Re-run research»
-// (researchJob.ts), только от проекта, а не от его вертикалей:
-//   - от he_projects: he_jobs, he_hypotheses, he_verticals, he_bases,
-//     he_cases, he_vertical_dossiers (20260724_0001, 20260728_0001),
-//     he_auto_pipeline_configs → he_auto_pipeline_runs (20260804_0005),
-//     he_refill_daily_budgets, he_refill_daily_reservations (20260930_0004),
-//     he_refill_carryover (20261004_0001);
-//   - от he_verticals: he_chains, he_vocab, he_bases, he_templates,
-//     he_vertical_dossiers, he_catalog_cursors (20260930_0002),
-//     he_refill_carryover;
-//   - от he_bases и he_templates: he_templates, he_refill_carryover,
-//     he_launch_schedule (20260926_0002).
-// НЕ удаляется: журнал расхода и аудит (application_logs, request_id = id
-// проекта), trace_spans, строки законченных джоб конструктора и парсеров
-// (base_constructor_jobs, google_maps_jobs, parser_jobs) и кампании у
-// рассыльщика. Проект, у шаблона которого в записи о запуске есть кампания
-// или виден идущий запуск, не удаляется; кампания, которую создал запуск,
-// невидимый удалению (ниже), остаётся у рассыльщика.
-//
-// Отказы 409 (тексты выше) — до удаления и в этом порядке: потолок клиента
-// (без чтения БД), запуск (кампания в записи), идущий запуск, исследование
-// сегодня, идущая работа. Постоянные причины — раньше временных, а
-// «исследование сегодня» — раньше «идёт работа»: иначе клиент остановил бы
-// идущую оплаченную работу ради удаления, которое до полуночи UTC всё равно
-// не пройдёт.
-//
-// ЗАПУСК — НЕ he_job. Первый запуск шаблона пишет he_templates.launch_info
-// только после того, как рассыльщик создал первую кампанию, а платный
-// классификатор сегментов идёт раньше — минуты. Это окно удаление видит по
-// отметке 'launch_in_flight', которую роут запуска кабинета ставит до ядра и
-// снимает после (engRateLimit; гаснет сама через HE_LAUNCH_LEASE_MS); запуск
-// поверх уже существующей записи — ещё и по её аренде. Не видны: запуск,
-// который сотрудник жмёт из внутреннего инструмента (отметки нет), и запуск
-// кабинета, чья отметка не легла в БД (миграции 20261010_0001 нет, блип — она
-// осталась в памяти процесса). Удалённый посреди такого запуска проект запуск
-// обнаружит на первой записи: шаблона нет — он останавливается, созданная
-// кампания остаётся у рассыльщика на паузе и пустой (её id — в логе
-// taken_over), а классификация оплачена зря.
-//
-// Остаток гонки: снимок и удаление — несколько запросов подряд, замка между
-// ними нет. Само удаление условно: статус проекта — тот, что судил снимок;
-// сменился (например, началось исследование) — ноль строк, проект перечитан,
-// и живой проект получает 409 CHANGED, а не 404. То, что статус не меняет и
-// появилось в миллисекунды между снимком и удалением, не видно: he_job
-// (ночной проход, второй таб) либо уходит каскадом до оплаты (pending), либо,
-// если воркер успел её взять, оплачивает одну стадию, итог которой записать
-// некуда; запуск, прочитавший шаблон до удаления, идёт как сказано выше.
-export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  return withToolTrace({ request: req, operation: 'client.eng.project.delete' }, async () => {
-    const result = await requireClientAuth(req);
-    if ('error' in result) return result.error;
-    if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
-
-    const { id } = await params;
-    if (!isValidUuid(id)) return jsonError('Invalid id', 400);
-
-    const gate = await requireEngMarket(supabaseAdmin, result.auth.userId);
-    if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
-
-    const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
-    if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
-
-    const refuse = (verdict: string, text: string) => {
-      void logAudit('client.eng.project.delete_refused', `ENG cabinet project delete refused: ${verdict}`, {
-        userId: result.auth.userId,
-        projectId: id,
-        verdict,
-      });
-      return jsonError(text, 409);
-    };
-
-    // Тот же предикат решает текст отказа лимита проектов (engPaidAccess.ts).
-    if (!engProjectDeleteAvailable()) return refuse('spend_cap', DELETE_SPEND_CAP_TEXT);
-
-    const read = await readDeleteSnapshot(supabaseAdmin, id, new Date());
-    if ('error' in read) {
-      return engServerError('client.eng.projects.delete_snapshot_failed', read.error, PROJECT_DELETE_FAILED, {
-        userId: result.auth.userId,
-        projectId: id,
-      });
-    }
-    const snapshot = read.snapshot;
-    if (snapshot.launched) return refuse('launched', DELETE_LAUNCHED_TEXT);
-    if (snapshot.launching) return refuse('launching', DELETE_LAUNCHING_TEXT);
-    if (snapshot.researchStartedToday) return refuse('research_today', DELETE_RESEARCH_TODAY_TEXT);
-    if (snapshot.busy || owned.project.status === 'researching') return refuse('busy', DELETE_BUSY_TEXT);
-
-    // Удаление условно — по статусу, который судили выше (см. «Остаток гонки»).
-    const judgedStatus = typeof owned.project.status === 'string' ? owned.project.status : null;
-    let deleteQuery = supabaseAdmin
-      .from('he_projects')
-      .delete()
-      .eq('id', id)
-      // Второй барьер к скоупу владельца, между чтением выше и удалением.
-      .eq('created_by', result.auth.userId);
-    deleteQuery = judgedStatus === null ? deleteQuery.is('status', null) : deleteQuery.eq('status', judgedStatus);
-    const { data: deleted, error: deleteErr } = await deleteQuery.select('id');
-    if (deleteErr) {
-      return engServerError('client.eng.projects.delete_failed', deleteErr, PROJECT_DELETE_FAILED, {
-        userId: result.auth.userId,
-        projectId: id,
-      });
-    }
-    // Ноль строк — проект исчез, сменил владельца или статус между снимком и
-    // удалением. Перечитываем: нет проекта — 404; есть — он изменился, 409.
-    if ((deleted ?? []).length === 0) {
-      const again = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
-      if (!again.ok) return jsonError(again.failure.message, again.failure.status);
-      return refuse('changed', DELETE_CHANGED_TEXT);
-    }
-
-    // След для разбора «куда делся проект»: что именно ушло каскадом.
-    void logAudit('client.eng.project.deleted', 'ENG cabinet project deleted', {
-      userId: result.auth.userId,
-      projectId: id,
-      name: typeof owned.project.name === 'string' ? owned.project.name : null,
-      websiteUrl: typeof owned.project.website_url === 'string' ? owned.project.website_url : null,
-      status: typeof owned.project.status === 'string' ? owned.project.status : null,
-      verticals: snapshot.verticals,
-      bases: snapshot.bases,
-      templates: snapshot.templates,
-    });
-    return NextResponse.json({ ok: true });
   });
 }

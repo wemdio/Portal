@@ -106,8 +106,9 @@ function attentionStatus(attention: EngDashAttentionInfo | null | undefined): St
  *  - пустая база — у клиента хода нет: автопилот считает 'analyzed'-базу
  *    готовой и новую сборку не ставит, а шаблон по пустой базе не строится —
  *    поэтому Support (чат кабинета, отвечает команда);
- *  - research — перезапускается «Re-run research» шага 1 (там же «Last error»
- *    шапки проекта, если причина записана);
+ *  - research — шаг 1: «Try again» там есть только после технического сбоя
+ *    (решение владельца 10.10.2026), иначе шаг говорит, почему повтора нет
+ *    (там же «Last error» шапки проекта, если причина записана);
  *  - остановленный анализ — «Start outreach» шага 2: при `requeues` кнопка
  *    ставит базе base_analyze заново, строки не покупаются второй раз
  *    (autopilotReconcile.ts, ремонт осиротевшей базы); иначе результат нажатия
@@ -120,7 +121,7 @@ function attentionNextLine(attention: EngDashAttentionInfo | null | undefined): 
     case 'base_empty':
       return 'next: message Support about this vertical';
     case 'project_failed':
-      return 'next: open step 1 «Brief» — the research is restarted from there';
+      return 'next: open step 1 «Brief» — it shows whether the research can be tried again';
     case 'analysis_stopped':
       return attention.requeues
         ? 'next: «Start outreach» on step 2 queues the analysis again'
@@ -193,7 +194,7 @@ function wizardStepFor(vertical: EngDashboardVertical, refillHeldHere: boolean):
     case 'not_selected':
       return 2; // Verticals: там принимают гипотезы
     case 'attention':
-      // Research — шаг 1 («Re-run research»); остановленный анализ — шаг 2
+      // Research — шаг 1 («Try again» или почему его нет); остановленный анализ — шаг 2
       // («Start outreach»); база — шаг 4, где её причина.
       return vertical.attention?.reason === 'project_failed'
         ? 1
@@ -1200,8 +1201,11 @@ export function EngDashboard() {
           {verticals.length === 0 ? (
             <EngCard className="flex flex-col items-center gap-3 py-10 text-center">
               <Rocket className="h-8 w-8" style={{ color: 'var(--cp-paper-faint)' }} />
+              {/* Один аккаунт — один сайт: «создать проект» — только когда
+                  проектов нет; есть — путь в него (несколько — у аккаунта,
+                  создавшего их до этого правила, — в список). */}
               <p className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
-                No verticals yet — create a project
+                {projects.length === 0 ? 'No project yet' : 'No verticals yet'}
               </p>
               {/* Кампании создаёт только «Launch all (paused)» шага 5 (на паузе);
                   письма, базу и шаблон автопилот строит после «Start outreach»
@@ -1213,11 +1217,21 @@ export function EngDashboard() {
                 up here.
               </p>
               <Link
-                href={'/client/eng?list=1' as Route}
+                href={
+                  (projects.length === 0
+                    ? '/client/eng'
+                    : projects.length === 1
+                      ? `/client/eng/projects/${projects[0].id}`
+                      : '/client/eng?list=1') as Route
+                }
                 prefetch={false}
                 className="ds-btn-primary inline-flex items-center gap-2"
               >
-                Create a project
+                {projects.length === 0
+                  ? 'Create your project'
+                  : projects.length === 1
+                    ? 'Open your project'
+                    : 'Open your projects'}
                 <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </EngCard>

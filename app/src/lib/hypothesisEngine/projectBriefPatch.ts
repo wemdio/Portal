@@ -14,6 +14,7 @@
  * Вынесено из PATCH api/tools/hypothesis-engine/projects/[id] — клиентский
  * ENG-контур патчит те же поля (api/client/eng/projects/[id]) и вдобавок
  * рамку ЦА brief.icp (HeBriefPatchClientFields ниже; staff её не пишет).
+ * Бриф нового проекта ENG-кабинета собирает buildHeEngCreateBrief (внизу).
  * Ошибки возвращаем машинными кодами, текст локализует роут (staff — RU,
  * клиент — EN).
  */
@@ -164,4 +165,47 @@ export async function patchHeProjectBrief(
   if (error) return { ok: false, error: { code: 'db', message: error.message } };
 
   return { ok: true, project: project as Record<string, unknown> };
+}
+
+/** Отказы buildHeEngCreateBrief — те же коды, что у правки. */
+export type HeEngCreateBriefError = Extract<HeBriefPatchError, { code: 'bad_type' | 'too_long' }>;
+
+/**
+ * Бриф НОВОГО проекта клиентского ENG-кабинета (POST api/client/eng/projects):
+ * ответы формы создания, которые исследование читает и которые поэтому нужны
+ * ДО него — повторить исследование кликом клиент не может (решение владельца
+ * 10.10.2026). Ровно то, что читают стадии исследования:
+ *  - business_override — стадия hypotheses кладёт его в промпт поверх профиля
+ *    сайта, стадия site_profile строит по нему профиль, когда сайт не открылся
+ *    (без него такой прогон падает);
+ *  - icp — рамка ЦА, её читает стадия hypotheses на рынке us (проект кабинета
+ *    всегда us).
+ * offer/style/signature исследование не читает (их читают письма и шаблон) —
+ * они остаются на шаге «Brief».
+ *
+ * Проверка business_override — та же, что у patchHeProjectBrief: строка,
+ * trim, BUSINESS_OVERRIDE_MAX_LENGTH, те же коды. Рамку вызывающий уже
+ * проверил (parseHeIcpFramePatch), здесь она ложится на пустую рамку тем же
+ * mergeHeIcpFrame, что и правка. Пустое не пишется: нет ни одного ответа —
+ * null, и колонка brief остаётся пустой, как у проекта, созданного без них.
+ */
+export function buildHeEngCreateBrief(
+  body: { business_override?: unknown },
+  clientFields: HeBriefPatchClientFields = {},
+): { ok: true; brief: Record<string, unknown> | null } | { ok: false; error: HeEngCreateBriefError } {
+  const businessRaw = body?.business_override;
+  if (businessRaw !== undefined && typeof businessRaw !== 'string') {
+    return { ok: false, error: { code: 'bad_type', field: 'business_override' } };
+  }
+  const business = typeof businessRaw === 'string' ? businessRaw.trim() : '';
+  if (business.length > BUSINESS_OVERRIDE_MAX_LENGTH) {
+    return { ok: false, error: { code: 'too_long', field: 'business_override', max: BUSINESS_OVERRIDE_MAX_LENGTH } };
+  }
+  const brief: Record<string, unknown> = {};
+  if (business) brief.business_override = business;
+  if (clientFields.icp !== undefined) {
+    const icp = mergeHeIcpFrame(undefined, clientFields.icp);
+    if (icp) brief.icp = icp;
+  }
+  return { ok: true, brief: Object.keys(brief).length > 0 ? brief : null };
 }

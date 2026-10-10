@@ -619,12 +619,16 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   //
   // Совет «accept one of its hypotheses» — только у 'researched': кнопка
   // «Start outreach» есть лишь там (EngStepVerticals, canStartOutreach). У
-  // 'draft' (новый проект или отменённый research, cancel-роут) принятие
-  // гипотезы ничего не двигает — research не идёт и сам не начнётся; фраза та
-  // же, что у шага 2 для 'draft' (startOutreachHintFor), и без «сначала …,
-  // потом примите»: перезапуск research пересобирает вертикали, и этой
-  // вертикали после него может не быть. Иной статус сюда не доходит (выше
-  // отсечены 'researching' и 'failed'); незнакомый — одним фактом.
+  // 'draft' (отменённый research, cancel-роут) принятие гипотезы ничего не
+  // двигает — research не идёт и сам не начнётся, а кабинет запускает его
+  // заново только после технического сбоя (решение владельца 10.10.2026;
+  // отмена — не сбой; повтор есть лишь у 'draft' без research-джоб или с
+  // упавшей последней). Поэтому кнопку не называем, а отправляем на шаг 1:
+  // текст «что делать» там есть у каждой формы 'draft' — «Try again» либо
+  // Support; ПОЧЕМУ research не идёт, шаг 1 знает не всегда, поэтому «what to
+  // do», а не «why». Иной статус
+  // сюда не доходит (выше отсечены 'researching' и 'failed'); незнакомый —
+  // одним фактом.
   if (
     input.selection !== undefined &&
     input.selection !== 'selected' &&
@@ -641,7 +645,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
           : projectStatus === 'researched'
             ? 'not selected — accept one of its hypotheses on step 2 to include it'
             : projectStatus === 'draft'
-              ? 'not selected — research is not running; open step 1 and press «Re-run research» to start it'
+              ? 'not selected — research is not running on this project; step 1 says what to do'
               : 'not selected',
       dots: [true, hasReadyChain, usableAnalyzedBase !== null, false, false],
       mainBase,

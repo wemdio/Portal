@@ -741,7 +741,7 @@ export function EngStepBases({ detail, onChanged }: { detail: EngDetail; onChang
                     : detail.project.status === 'researched'
                       ? 'No base yet — this vertical is not selected: accept one of its hypotheses on step 2 to include it.'
                       : detail.project.status === 'draft'
-                        ? 'No base yet — this vertical is not selected, and research is not running: open step 1 and press «Re-run research» to start it.'
+                        ? 'No base yet — this vertical is not selected, and research is not running on this project (step 1 says what to do).'
                         : 'No base yet — this vertical is not selected.'}
               </p>
             )}

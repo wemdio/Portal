@@ -65,7 +65,7 @@ function readSignupUtm(req: NextRequest): Record<string, string> | null {
  * ТОЛЬКО ENG-хост (app.outreachos.xyz). Ниже две вещи, которых у RU-регистрации
  * нет и не появляется: RU-ветка этого роута проходит мимо обеих.
  *
- * 1. Счётчик регистраций (lib/hypothesisEngine/engRateLimit): не больше 5 с
+ * 1. Счётчик регистраций (lib/hypothesisEngine/engRateLimit): не больше 3 с
  *    одного IP и 3 попыток на один адрес в час. IP — X-Real-IP, который nginx
  *    ENG-хоста ставит из $remote_addr (deploy/nginx/app.outreachos.xyz.conf),
  *    иначе последний адрес X-Forwarded-For (его дописывает nginx); IP нет —

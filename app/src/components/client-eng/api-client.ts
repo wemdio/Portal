@@ -36,6 +36,7 @@ import type {
 // Только тип: код отказа гейта платных шагов (lib/hypothesisEngine/engPaidAccess)
 // — один словарь на роуты и на экран; сам модуль в клиентский бандл не едет.
 import type { EngPaidAccessCode } from '@/lib/hypothesisEngine/engPaidAccess';
+import type { EngResearchRetryVerdict } from '@/lib/hypothesisEngine/researchJob';
 // Тоже только типы: этап и причина карточки дашборда — один словарь на роут
 // (lib/hypothesisEngine/engDashboard) и на экран.
 import type {
@@ -292,6 +293,15 @@ export type EngProjectDetailResponse = Omit<
    * как считал раньше.
    */
   has_active_jobs?: boolean;
+  /**
+   * Положен ли клиенту повтор research — вердикт СЕРВЕРА, посчитанный тем же
+   * чтением и той же функцией (engResearchRetryVerdict, researchJob.ts), что у
+   * POST /research: «Try again» шага 1 рисуется ровно там, где роут его примет.
+   * `latest_job_status` — статус последней research-джобы проекта (без капа
+   * списка `jobs`), null — research-джоб не было. Ключа нет, когда сервер не
+   * прочитал джобу, и в демо-выдаче — тогда шаг 1 считает осторожно.
+   */
+  research_retry?: { verdict: EngResearchRetryVerdict; latest_job_status: string | null };
 };
 
 interface EngProjectsResponse {
@@ -525,9 +535,17 @@ export async function fetchEngProjects(): Promise<EngProjectListItem[]> {
   return data.projects ?? [];
 }
 
+/**
+ * Создание проекта. `business_override` и `icp` — ответы, которые читает само
+ * исследование (описание бизнеса и рамка ЦА — те же ключи brief, что правит
+ * шаг «Brief»); шлётся только заполненное. Отказ «один аккаунт — один сайт»
+ * приходит отказом гейта (EngPaidAccessError, код project_limit).
+ */
 export async function createEngProject(input: {
   website_url: string;
   name?: string;
+  business_override?: string;
+  icp?: Partial<HeIcpFrame>;
 }): Promise<EngProjectCreateResponse> {
   return engPaidApiFetch<EngProjectCreateResponse>('/eng/projects', {
     method: 'POST',
@@ -537,16 +555,6 @@ export async function createEngProject(input: {
 
 export async function fetchEngProjectDetail(projectId: string): Promise<EngProjectDetailResponse> {
   return engApiFetch<EngProjectDetailResponse>(`/eng/projects/${projectId}`);
-}
-
-/**
- * Удалить СВОЙ проект целиком (DELETE /api/client/eng/projects/[id]; что
- * уходит каскадом и когда роут отказывает — у роута). Тело ответа экрану не
- * нужно: список проектов перечитывается. Отказ — брошенная ошибка с
- * английским текстом роута, как у прочих вызовов кабинета.
- */
-export async function deleteEngProject(projectId: string): Promise<void> {
-  await engApiFetch<unknown>(`/eng/projects/${projectId}`, { method: 'DELETE' });
 }
 
 /**
@@ -577,7 +585,7 @@ export async function patchEngProject(
 }
 
 /**
- * Что удалит «Re-run research» — числа из 409 роута
+ * Что удалит повтор research («Try again» шага 1) — числа из 409 роута
  * (api/client/eng/projects/[id]/research). Тексты из них собирает экран.
  * Здесь ровно то, что экран печатает: запущенные шаблоны и идущая работа в
  * 'confirm'-ответ не попадают (при них роут отказывает другим кодом), и разбирать
@@ -596,7 +604,7 @@ export interface EngResearchRerunConsequences {
 }
 
 /**
- * Итог «Re-run research»: поставлено — или сервер просит подтверждения
+ * Итог «Try again» шага 1: поставлено — или сервер просит подтверждения
  * (409 research_rerun_confirm_required) и перечисляет, что будет удалено.
  * Остальные отказы (уже идёт, запущено, идёт работа по вертикалям) — брошенная
  * ошибка с английским текстом роута, как у прочих вызовов кабинета.
@@ -671,11 +679,6 @@ export class EngPaidAccessError extends Error {
   /** Секунд до повтора (research_limit — до 00:00 UTC); null — не задано. */
   readonly retryAfterSeconds: number | null;
   /**
-   * project_limit: может ли клиент сам удалить проект (`project_delete_available`
-   * гейта; нет поля — true, как до него). false — ссылки на удаление нет.
-   */
-  readonly projectDeleteAvailable: boolean;
-  /**
    * email_not_verified: в профиле нет адреса (`email_missing` гейта) — ссылку
    * послать некуда, кнопки отправки нет.
    */
@@ -685,13 +688,12 @@ export class EngPaidAccessError extends Error {
     message: string,
     code: EngPaidAccessCode,
     retryAfterSeconds: number | null,
-    flags: { projectDeleteAvailable?: boolean; emailMissing?: boolean } = {},
+    flags: { emailMissing?: boolean } = {},
   ) {
     super(message);
     this.name = 'EngPaidAccessError';
     this.code = code;
     this.retryAfterSeconds = retryAfterSeconds;
-    this.projectDeleteAvailable = flags.projectDeleteAvailable ?? true;
     this.emailMissing = flags.emailMissing ?? false;
   }
 }
@@ -710,10 +712,7 @@ function engPaidAccessErrorFrom(res: Response, body: Record<string, unknown> | n
     engRawErrorText(res, body),
     code as EngPaidAccessCode,
     typeof retry === 'number' && Number.isFinite(retry) && retry > 0 ? retry : null,
-    {
-      projectDeleteAvailable: body?.project_delete_available !== false,
-      emailMissing: body?.email_missing === true,
-    },
+    { emailMissing: body?.email_missing === true },
   );
 }
 

@@ -12,6 +12,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { PROVIDER_PRESETS, type MailboxProvider } from '@/lib/byoMailbox/providers';
 import { mailboxSendingView } from '@/lib/byoMailbox/sendingStatusView';
 import { engSafeText } from '@/components/client-eng/engText';
+import { EngSupportText } from '@/components/client-eng/EngPaidAccess';
 import { EngBadge, EngCard, EngSpinner, type EngTone } from '@/components/client-eng/ui';
 
 /**
@@ -78,8 +79,10 @@ const CONNECT_ERROR_BY_CODE: Record<string, string> = {
     'Enter the app password for this mailbox. It is the one you generate in Google Account → Security → App passwords, not the password you sign in with.',
   // Хост берётся из пресета провайдера, поэтому с этой формы код практически
   // недостижим — но текст даём честный: чинится он не в форме, а у нас.
+  // Менеджера у self-serve кабинета нет — Support (чат кабинета; слово —
+  // ссылка, экран печатает отказ через EngSupportText).
   SMTP_TARGET_REQUIRED:
-    'We could not work out the sending server for this address. Send the address to your manager and we will set it up.',
+    'We could not work out the sending server for this address. Message Support with this address so it can be set up.',
   SMTP_VERIFY_FAILED:
     'Could not sign in to this mailbox. Check the host and the port, and make sure the password is an app password created with 2-step verification turned on — the normal account password will not work.',
   SMTP_SEND_FAILED:
@@ -96,7 +99,7 @@ const CONNECT_ERROR_FALLBACK =
 
 /** Заведение ящика у отправляющего провайдера — отдельный шаг и отдельный текст. */
 const SENDING_ERROR_FALLBACK =
-  'Not registered for sending yet. Try reconnecting this mailbox; if it keeps failing, contact your manager.';
+  'Not registered for sending yet. Try reconnecting this mailbox; if it keeps failing, message Support.';
 
 function connectErrorText(status: number, code: string | undefined, raw: string | undefined): string {
   const byCode = code ? CONNECT_ERROR_BY_CODE[code] : undefined;
@@ -106,7 +109,7 @@ function connectErrorText(status: number, code: string | undefined, raw: string 
   // статусу. 503 разбираем отдельно от общего фолбэка намеренно: блип БД чинится
   // ожиданием, а фолбэк отправил бы клиента перепроверять хост и пароль —
   // единственное, что здесь точно ни при чём.
-  if (status === 403) return 'This account cannot connect mailboxes yet. Ask your manager to enable it.';
+  if (status === 403) return 'This account cannot connect mailboxes yet. Message Support to have it enabled.';
   if (status === 401) return 'Your session has expired. Sign in again, then reconnect the mailbox.';
   if (status === 503) return 'The service is busy right now. Wait a moment and connect the mailbox again.';
   // Остальное (отказ БД, прочие 5xx) — текст роута годится, только если он уже
@@ -327,10 +330,14 @@ export default function EngMailboxesPage() {
             Send a test email to this same address
           </label>
           {formError && (
-            <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-red)' }}>{formError}</p>
+            <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-red)' }}>
+              <EngSupportText text={formError} />
+            </p>
           )}
           {okMsg && (
-            <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-green)' }}>{okMsg}</p>
+            <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-green)' }}>
+              <EngSupportText text={okMsg} />
+            </p>
           )}
           <button
             type="submit"
@@ -390,7 +397,7 @@ export default function EngMailboxesPage() {
                       )}
                       {row.sendingError && (
                         <p className="mt-2 text-xs m-0" style={{ color: 'var(--cp-red)' }}>
-                          {sendingErrorText(row.sendingError, SENDING_ERROR_FALLBACK)}
+                          <EngSupportText text={sendingErrorText(row.sendingError, SENDING_ERROR_FALLBACK)} />
                         </p>
                       )}
                     </div>

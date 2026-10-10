@@ -117,7 +117,10 @@ const CANCEL_BASE_WORK_SELECT = [
  *     запись шага 4 легла; сбой не валит отмену, он журналируется.
  *  6. Уборка харвеста отменённых баз (dropCancelledBaseHarvest) — при том же
  *     условии и так же fail-soft.
- *  7. Проект 'researching' → 'draft' (исследование можно запустить заново).
+ *  7. Проект 'researching' → 'draft'. Кабинет такой research заново не
+ *     запускает (повтор — только после технического сбоя, решение владельца
+ *     10.10.2026; отмена — не сбой): запустить его снова может команда
+ *     (staff-инструмент).
  *
  * Ответ — { ok: true, cancelled: <сколько джоб отменено> }, ноль — штатный
  * ответ (автопилот выключен, отметка отмены записана, если есть колонка из
@@ -204,7 +207,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       await dropCancelledBaseHarvest(id, result.auth.userId);
     }
 
-    // 7. Research-пайплайн отменён — проект можно запустить заново с шага Brief.
+    // 7. Research-пайплайн отменён — заново его запускает только команда
+    // (staff-инструмент): кабинет повторяет research лишь после технического сбоя.
     if ((owned.project as { status?: string }).status === 'researching') {
       const { error: updErr } = await supabaseAdmin
         .from('he_projects')

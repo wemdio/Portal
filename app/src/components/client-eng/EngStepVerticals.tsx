@@ -148,8 +148,13 @@ function refillPauseNote(vertical: HeVertical): { headline: string; since: strin
  * Без этой подсказки шаг 2 — тупик: кнопка просто исчезает, и клиент видит
  * доску без единого следующего шага. У каждой ветки поэтому названо ДЕЙСТВИЕ,
  * которое в кабинете действительно есть: вердикты над гипотезами здесь же либо
- * «Re-run research» на шаге 1. Выдуманных сроков нет — когда закончится
- * исследование, экран не знает.
+ * шаг 1, где сказано, что делать: «Try again» (он есть только после
+ * технического сбоя — решение владельца 10.10.2026) либо Support. «What to
+ * do», а не «why»: почему research у 'draft' не идёт, шаг 1 знает не всегда
+ * (повторяемый 'draft' — без research-джоб или с упавшей последней — он
+ * показывает с «Try again», не называя причины).
+ * Выдуманных сроков нет — когда закончится исследование, экран не
+ * знает.
  *
  * ВЕТКИ ИСЧЕРПЫВАЮЩИЕ, и это не аккуратность ради аккуратности: `switch` по
  * `HeProjectStatus` с `never` в конце заставит компилятор потребовать текст для
@@ -170,11 +175,11 @@ function refillPauseNote(vertical: HeVertical): { headline: string; since: strin
 function startOutreachHintFor(status: HeProjectStatus): string {
   switch (status) {
     case 'draft':
-      return 'The research is not running on this project — open step 1 and press «Re-run research» to start it. «Start outreach» opens once it finishes.';
+      return 'The research is not running on this project, and «Start outreach» opens only on a researched project — step 1 says what to do.';
     case 'researching':
       return '«Start outreach» opens as soon as the research finishes.';
     case 'failed':
-      return '«Start outreach» opens on a researched project — step 1 shows what stopped the research and lets you run it again.';
+      return '«Start outreach» opens on a researched project — step 1 shows what stopped the research and whether it can be tried again.';
     case 'researched':
       return 'Accept at least one hypothesis below — «Start outreach» needs one to build a base from.';
     default: {
@@ -322,7 +327,7 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
               Остальные статусы оставлены как были: там research либо идёт, либо
               его разбирает шаг 1 своей карточкой отказа. */}
           {detail.project.status === 'draft'
-            ? 'No verticals yet, and no research is running — open step 1 and press «Re-run research» to start it.'
+            ? 'No verticals yet, and no research is running on this project — step 1 says what to do.'
             : 'No verticals yet — they appear once the research finishes (step 1).'}
         </p>
       </EngCard>

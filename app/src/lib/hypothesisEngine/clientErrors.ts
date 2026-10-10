@@ -45,6 +45,11 @@ export {
   // Фраза паузы по потолку расхода — для отказа 409 клиентских роутов
   // (spendCeiling.ts); тот же текст печатает карточка паузы автопилота.
   HE_SPEND_PAUSED_EN,
+  // «research можно запустить ещё раз» — один предикат на роут исследования
+  // кабинета и шаг 1 (не технические остановки — HE_RESEARCH_FINAL_STOP_CODES),
+  // и окно «цепочка встала» — одно число на роут, деталку и текст шага 1.
+  heResearchRetryAllowed,
+  HE_RESEARCH_STALL_GRACE_MS,
   formatHeClientFailure,
   heClientFailureFor,
   type HeClientErrorCode,
@@ -189,7 +194,13 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // общих: в хвост сообщения подставлена причина чужого модуля, и «…: Не удалось
   // загрузить сайт: … timed out» съехало бы в 'timeout', то есть в «попробуйте
   // ещё раз» — совет, который мёртвому домену не помогает никогда.
-  if (/Сайт клиента недоступен \((?:dns|no_html)\)/i.test(message)) return 'website_unreachable';
+  // Два рода — два кода (HE_RESEARCH_FINAL_STOP_CODES, clientFailureText.ts):
+  // `dns` (адрес не привёл к публичному серверу) — не технический
+  // website_unreachable; `no_html` (соединение было, HTML не пришёл ни с одного
+  // адреса — так же выглядит и наш маршрут чтения, который не дошёл) —
+  // технический website_no_html, у него на шаге 1 есть «Try again».
+  if (/Сайт клиента недоступен \(no_html\)/i.test(message)) return 'website_no_html';
+  if (/Сайт клиента недоступен \(dns\)/i.test(message)) return 'website_unreachable';
 
   if (/Сегмент исчерпан|не осталось новых/i.test(message)) return 'segment_exhausted';
 
@@ -212,6 +223,10 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   ) {
     return 'source';
   }
+
+  // Наш DNS-резолвер не ответил на адрес сайта (stages/io.ts, usDnsFailure —
+  // только рынок 'us'): не факт о сайте клиента, а сбой у нас.
+  if (/DNS-резолвер не ответил/i.test(message)) return 'internal';
 
   if (
     /\bhe_[a-z_]+\b/i.test(message) ||

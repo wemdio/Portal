@@ -293,7 +293,8 @@ function actionFor(kind: HeOpsStopKind, provider: HeOpsStopProvider, stage?: str
       stage === 'refill_preflight' || stage === 'refill_paused'
         ? 'снять паузу ночного добора: Движок вертикалей → карточка проекта → возобновить ночной добор'
         : 'проект продолжает «Start outreach» клиента (или ночной проход при HE_AUTOPILOT_RECONCILE), '
-          + 'не запущенное исследование — «Re-run research», по шагу — staff-инструмент';
+          + 'не запущенное исследование — «Try again» клиента на шаге 1 (он остаётся у research, вставшего '
+          + 'техническим сбоем), по шагу — staff-инструмент';
     return 'проверить расход (GET /api/tools/hypothesis-engine/projects/<id>/cost); продолжить — поднять '
       + 'HE_US_PROJECT_SPEND_CAP_USD (потолок проекта) или дождаться, пока расход проекта за последние 24 часа '
       + `опустится ниже HE_US_PROJECT_DAY_SPEND_CAP_USD (окно скользящее, не календарные сутки), затем ${resume}; `

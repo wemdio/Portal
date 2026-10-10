@@ -336,12 +336,6 @@ export async function GET(req: NextRequest) {
 // см. блок перед журналом. Не считаются 5xx ядра ДО классификатора
 // (isHeLaunchUnpaidServerError: пресет, рынок, защиты, чёрный список, аренда
 // не прочитались) — они ничего не оплатили и зовут повторить через минуту.
-//
-// Отметка «запуск идёт» ('launch_in_flight', engRateLimit) — на всё время
-// ядра: первый запуск шаблона пишет he_templates.launch_info только после
-// того, как рассыльщик создал первую кампанию, а платный классификатор идёт
-// раньше (минуты). Удаление проекта (DELETE api/client/eng/projects/[id])
-// читает эту отметку и до конца запуска отвечает «занято».
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.launch.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -416,19 +410,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       );
     }
 
-    // Отметка «запуск идёт» (см. докблок POST) — до ядра, возвращается в
-    // finally при любом исходе. Отказ лимита отметки запуск не останавливает:
-    // её лимит — только потолок роста таблицы. Не легла в БД (миграции нет,
-    // блип) — удаление проекта её не увидит, строка warn.
-    const inFlightHit = await hitHeEngRateLimit(supabaseAdmin, 'launch_in_flight', id);
-    if (inFlightHit.fallbackReason) {
-      void logWarn(
-        'client.eng.template.launch.in_flight_mark_fallback',
-        `launch-in-flight mark kept in process memory only (project delete cannot see it): ${inFlightHit.fallbackReason}`,
-        { userId, templateId: id },
-      );
-    }
-
     // Журнал расхода ENG (costTelemetry.ts) вокруг ядра запуска: классификатор
     // сегментов (шаг 5c ядра) — платный вызов модели из роута, и без журнала
     // он не попадал ни в отчёт себестоимости, ни в потолок расхода. Только у
@@ -486,15 +467,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             templateId: id,
           });
         }
-      }
-      // Отметка «запуск идёт» — при любом исходе. Не вышло — она гаснет сама
-      // через аренду запуска (15 мин), до того удаление проекта отвечает «занято».
-      const markFailure = await releaseHeEngRateHit(portalDb, 'launch_in_flight', id, inFlightHit);
-      if (markFailure) {
-        void logWarn('client.eng.template.launch.in_flight_mark_release_failed', `mark kept: ${markFailure}`, {
-          userId,
-          templateId: id,
-        });
       }
     }
 

@@ -239,19 +239,40 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
    *  - ««Start outreach» turns the autopilot back on» — POST .../autopilot;
    *    паузу добора он не снимает — её снимает только staff-кнопка команды,
    *    отсюда «only by our team, through Support» (window.confirm — простой
-   *    текст, ссылки в нём нет; Support — пункт меню кабинета).
+   *    текст, ссылки в нём нет; Support — пункт меню кабинета);
+   *  - проект 'researching' — ещё одна фраза: отмена переводит его в 'draft'
+   *    (cancel-роут), а research кабинет запускает заново только после
+   *    технического сбоя (решение владельца 10.10.2026; отмена — не сбой).
+   *    Будет ли после отмены «Try again», решает вердикт
+   *    (engResearchRetryVerdict, researchJob.ts): research, который к отмене
+   *    УЖЕ встал сам — последняя research-джоба упала, research-джоб не было,
+   *    или цепочка стояла дольше окна HE_RESEARCH_STALL_GRACE_MS, — повтор
+   *    сохраняет; отмена идущей стадии или щели между стадиями — нет, и тогда
+   *    запустить research снова может только команда (staff-инструмент).
+   *    Поэтому фраза называет ровно это условие, а не обещает исход: экран в
+   *    момент нажатия не знает, что успеет случиться до записи отмены.
+   *    Условие показа — статус из последней деталки: research, закончившийся
+   *    между ней и нажатием, отмена не трогает (роут переводит в 'draft'
+   *    только 'researching').
    * Сбой отмены печатается: молча проглоченный отказ выглядел бы как
    * сработавшая отмена. Ноль отменённых джоб — штатный успех (остановлены
    * автопилот, добор и застрявшие базы), 409 у роута больше нет.
    */
   const onCancel = async () => {
     if (cancelling) return;
+    const researchNote =
+      detail?.project.status === 'researching'
+        ? ' This also stops the research of this project, and a cancel does not count as a technical failure: ' +
+          'afterwards step 1 offers «Try again» only if the research had already stopped on its own; otherwise ' +
+          'only our team can start it again, through Support.'
+        : '';
     if (
       !window.confirm(
         'Cancel all jobs on this project? This stops the work running on it now, turns its autopilot off ' +
           'and stops its daily refill if it has one. Finished bases, letters and templates are kept, and ' +
           'campaigns already launched are left as they are. «Start outreach» turns the autopilot back on; ' +
-          'the daily refill can be restarted only by our team, through Support.',
+          'the daily refill can be restarted only by our team, through Support.' +
+          researchNote,
       )
     ) {
       return;
@@ -396,7 +417,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
           {/* Пауза по потолку расхода ('spend_paused'; потолок по умолчанию
               выключен) — единственная, которая пишется и БЕЗ автопилота:
               отказ кнопки ручного режима, в том числе старта исследования
-              («Re-run research»; потолок проверяет только СТАРТ, начатую
+              («Try again» шага 1; потолок проверяет только СТАРТ, начатую
               цепочку research он не обрывает). Те же границы, что выше, кроме первой: без активных джоб и тем же
               янтарём. Нейтральной ветки у неё нет — без автопилота «делать
               нечего» не наш текст. */}

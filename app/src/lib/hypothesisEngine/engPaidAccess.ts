@@ -10,14 +10,21 @@
  *
  * ЧТО ПРОВЕРЯЕТ — по действию (порядок проверок = порядок строк):
  *
- *   действие          почта  проектов≤N  исследований/сутки  расход клиента
- *   create_project      ✓        ✓              ✓                  ✓
+ *   действие          почта  один сайт  исследований/сутки  расход клиента
+ *   create_project      ✓        ✓                                 ✓
  *   research            ✓                       ✓                  ✓
  *   start_outreach      ✓                                          ✓
  *   collect             ✓                                          ✓
  *   letters             ✓                                          ✓
  *   resume_refill       ✓                                          ✓
  *   launch              ✓                                          ✓
+ *
+ * create_project — только создание НОВОГО проекта (POST api/client/eng/
+ * projects). Исследование уже существующего проекта в любом статусе, в том
+ * числе повтор упавшего, — действие 'research': проект в счёт «одного сайта»
+ * уже входит, и повтор его не добавляет. Лимит стартов исследования у
+ * create_project не проверяется: создать проект может только клиент без
+ * проектов, а у него нет ни одной джобы site_profile.
  *
  * Запуск — тоже платный шаг: у шаблона с сегментными вариантами писем ядро
  * запуска зовёт классификатор сегментов (модель по всей аудитории запуска,
@@ -37,13 +44,11 @@
  *    — проверка пропускается (как до этой правки), строка warn; сбой чтения —
  *    503 'unavailable'. Нет адреса в профиле — отказ с `emailMissing`: ссылку
  *    послать некуда, и кабинет не рисует кнопку отправки;
- *  - проектов: he_projects клиента рынка 'us' со статусом не 'failed'
- *    (draft / researching / researched) не больше HE_US_MAX_PROJECTS_PER_CLIENT
- *    (дефолт 3) — у create_project новый проект должен влезть, то есть
- *    отказ, когда их уже N или больше. Текст отказа ведёт к «Delete project»
- *    списка проектов и в Support — к удалению только пока оно возможно
- *    (engProjectDeleteAvailable: не при заданном потолке расхода клиента).
- *    Сбой чтения — 503;
+ *  - один сайт (решение владельца 10.10.2026: «один аккаунт — один сайт»):
+ *    у клиента уже есть строка he_projects (created_by = клиент) — любого
+ *    рынка и любого статуса, упавший тоже: его повторяют, а не заменяют, —
+ *    отказ create_project. Удалить проект клиент сам не может (такого роута
+ *    нет), сменить сайт — только через Support. Сбой чтения — 503;
  *  - исследований: джобы he_jobs стадии site_profile (первая стадия
  *    исследования; повтор упавшей стадии — та же строка, attempts+1, а не
  *    новая) по us-проектам клиента, созданные с 00:00 UTC, не больше
@@ -53,18 +58,20 @@
  *    Неизвестный расход (нет функции, сбой, срок) — пускаем, строка warn.
  *
  * ГОНКА. Сами проверки здесь читают, а не бронируют: N одновременных
- * запросов одного клиента прошли бы лимит проектов или исследований на N−1
- * сверх него (двойной клик «Create & start research» на последнем месте — два
- * проекта и два исследования). Поэтому для роли 'client' результат несёт
- * `limits`, и роуты создания проекта и исследования решают оба лимита
- * повторно ПОД ЗАМКОМ на клиента — createEngProjectLocked /
- * startEngResearchLocked ниже (функции he_eng_create_project /
- * he_eng_start_research, миграция 20261010_0002): пересчёт и вставка одной
- * транзакцией, второй запрос видит то, что вставил первый. Чтение здесь
- * остаётся предпроверкой: роут исследования по нему отказывает ещё до потолка
- * проекта, который пишет паузу и шлёт алерт. Пока миграция не применена, роуты
- * идут прежним путём (чтение, затем вставка) и гонка открыта, как до этой
- * правки; строка warn.
+ * запросов одного клиента прошли бы «один сайт» или лимит исследований на
+ * N−1 сверх него (двойной клик «Create & start research» — два проекта и два
+ * исследования). Поэтому для роли 'client' результат несёт `limits`, и роуты
+ * создания проекта и исследования решают свою проверку повторно ПОД ЗАМКОМ на
+ * клиента — createEngProjectLocked / startEngResearchLocked ниже (функции
+ * he_eng_create_project / he_eng_start_research, миграция 20261010_0002):
+ * пересчёт и вставка одной транзакцией, второй запрос видит то, что вставил
+ * первый. Чтение здесь остаётся предпроверкой: роут исследования по нему
+ * отказывает ещё до потолка проекта, который пишет паузу и шлёт алерт. Пока
+ * миграция не применена: создание проекта клиенту отказывает 503 (ничего не
+ * вставив — «один сайт» без замка не держится,
+ * engCreateProjectUnavailableRefusal), а роут исследования идёт прежним путём
+ * (чтение, затем вставка) с открытой гонкой лимита исследований, как до этой
+ * правки; строка warn у обоих.
  *
  * Пути без пользователя (воркер, реконсилер, ночной добор) этот гейт не зовут
  * — для них расход клиента по id проекта: engClientSpend.
@@ -75,7 +82,7 @@ import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { readHeEngEmailStatus } from './engEmailVerification';
-import { checkHeClientSpendCeiling, heClientSpendCeilingOn, readHeClientSpendCaps } from './engClientSpend';
+import { checkHeClientSpendCeiling, readHeClientSpendCaps } from './engClientSpend';
 import { HE_RESEARCH_STAGES } from './researchJob';
 
 export type EngPaidAction =
@@ -103,11 +110,6 @@ export interface EngPaidAccessRefusal {
   /** Только research_limit: секунд до 00:00 UTC. */
   retryAfterSeconds?: number;
   /**
-   * Только project_limit: может ли клиент сам удалить проект
-   * (engProjectDeleteAvailable). false — кабинет не предлагает удаление.
-   */
-  projectDeleteAvailable?: boolean;
-  /**
    * Только email_not_verified: в профиле нет адреса — ссылку послать некуда,
    * кабинет не рисует «Send confirmation link».
    */
@@ -123,33 +125,13 @@ export type EngPaidAccessResult =
   | { ok: true; limits: EngPaidAccessLimits | null }
   | { ok: false; refusal: EngPaidAccessRefusal };
 
-export const HE_US_MAX_PROJECTS_PER_CLIENT_ENV = 'HE_US_MAX_PROJECTS_PER_CLIENT';
 export const HE_US_MAX_RESEARCH_PER_DAY_ENV = 'HE_US_MAX_RESEARCH_PER_DAY';
-export const HE_US_MAX_PROJECTS_PER_CLIENT_DEFAULT = 3;
 export const HE_US_MAX_RESEARCH_PER_DAY_DEFAULT = 5;
 
 export interface EngPaidAccessLimits {
-  maxProjects: number;
   maxResearchPerDay: number;
-  /**
-   * Может ли клиент сам удалить проект (engProjectDeleteAvailable) — от этого
-   * зависит текст отказа project_limit и на пути под замком.
-   */
-  projectDeleteAvailable: boolean;
   /** Переменные с нечитаемым значением — взят дефолт. */
   rejected: string[];
-}
-
-/**
- * Удаляет ли DELETE api/client/eng/projects/[id] проекты клиента вообще: нет,
- * пока задан потолок расхода клиента (HE_US_CLIENT_SPEND_CAP_USD /
- * HE_US_CLIENT_DAY_SPEND_CAP_USD) — его сумма идёт по строкам he_projects, и
- * удаление унесло бы расход проекта из неё. Один предикат на роут удаления и
- * на текст отказа лимита проектов: разойдись они, кабинет предлагал бы
- * удаление, которое роут откажет.
- */
-export function engProjectDeleteAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
-  return !heClientSpendCeilingOn(readHeClientSpendCaps(env));
 }
 
 /** Целое ≥ 1; пусто — дефолт; «0», минус, дробь, мусор — дефолт с пометкой. */
@@ -164,9 +146,7 @@ export function readEngPaidAccessLimits(env: NodeJS.ProcessEnv = process.env): E
     return fallback;
   };
   return {
-    maxProjects: read(HE_US_MAX_PROJECTS_PER_CLIENT_ENV, HE_US_MAX_PROJECTS_PER_CLIENT_DEFAULT),
     maxResearchPerDay: read(HE_US_MAX_RESEARCH_PER_DAY_ENV, HE_US_MAX_RESEARCH_PER_DAY_DEFAULT),
-    projectDeleteAvailable: engProjectDeleteAvailable(env),
     rejected,
   };
 }
@@ -185,6 +165,15 @@ const ACTION_PHRASE: Record<EngPaidAction, string> = {
 };
 
 export const ENG_PAID_UNAVAILABLE_TEXT = 'Service temporarily unavailable — refresh the page';
+
+/**
+ * Создание проекта клиентом без функции под замком (he_eng_create_project,
+ * миграция 20261010_0002 не применена). «Обновите страницу» здесь было бы
+ * неправдой: перезагрузка функцию не создаст, чинит выкатка. Поэтому — сбой у
+ * нас и Support («Support» кабинет рисует ссылкой, EngSupportText).
+ */
+export const ENG_CREATE_PROJECT_UNAVAILABLE_TEXT =
+  'A new project cannot be created right now because of a problem on our side. Message Support.';
 
 /**
  * Почта не подтверждена. Две формы — по тому, лежит ли у клиента ДЕЙСТВУЮЩАЯ
@@ -208,20 +197,14 @@ export function engEmailNotVerifiedText(action: EngPaidAction, email: string | n
 }
 
 /**
- * Текст владельца (10.10.2026). Удаление — кнопка «Delete project» в списке
- * проектов (DELETE api/client/eng/projects/[id]); «Support» кабинет рисует
- * ссылкой на чат (EngSupportText). `active` в тексте не нужен — он в аудите.
- * `deleteAvailable` = engProjectDeleteAvailable: при заданном потолке расхода
- * клиента роут удаления откажет любому проекту, и предлагать его нельзя.
+ * «Один аккаунт — один сайт» (решение владельца 10.10.2026). «Has a project»,
+ * а не «its project»: аккаунт, создавший несколько проектов до этого правила,
+ * получает тот же отказ. «Support» кабинет рисует ссылкой на чат
+ * (EngSupportText). Число проектов — в аудите отказа, не в тексте.
  */
-export function engProjectLimitText(_active: number, max: number, deleteAvailable: boolean): string {
-  return (
-    `You can have up to ${max} project${max === 1 ? '' : 's'} at a time. `
-    + (deleteAvailable
-      ? 'Delete a project you no longer need, or message Support to raise the limit.'
-      : 'Message Support to raise the limit.')
-  );
-}
+export const ENG_PROJECT_LIMIT_TEXT =
+  'Each account works with one website, and this account already has a project. '
+  + 'To work on a different website, message Support.';
 
 export function engResearchLimitText(started: number, max: number): string {
   return (
@@ -271,13 +254,22 @@ function startOfUtcDay(now: Date): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
-function projectLimitRefusal(active: number, limits: EngPaidAccessLimits): EngPaidAccessRefusal {
-  return {
-    code: 'project_limit',
-    status: 409,
-    message: engProjectLimitText(active, limits.maxProjects, limits.projectDeleteAvailable),
-    projectDeleteAvailable: limits.projectDeleteAvailable,
-  };
+/**
+ * 503 создания проекта клиентом, когда функции под замком нет (роут
+ * api/client/eng/projects, createEngProjectLocked → 'rpc_missing'). Пишется
+ * строкой warn 'unavailable', как остальные 503 гейта.
+ */
+export function engCreateProjectUnavailableRefusal(userId: string): EngPaidAccessRefusal {
+  return logRefusal(
+    userId,
+    'create_project',
+    { code: 'unavailable', status: 503, message: ENG_CREATE_PROJECT_UNAVAILABLE_TEXT },
+    { reason: `${HE_ENG_CREATE_PROJECT_RPC} missing` },
+  );
+}
+
+function projectLimitRefusal(): EngPaidAccessRefusal {
+  return { code: 'project_limit', status: 409, message: ENG_PROJECT_LIMIT_TEXT };
 }
 
 function researchLimitRefusal(started: number, max: number, dayStart: Date, now: Date): EngPaidAccessRefusal {
@@ -294,8 +286,8 @@ function researchLimitRefusal(started: number, max: number, dayStart: Date, now:
 
 const PROJECT_ID_BATCH = 150;
 
-const CHECKS_PROJECTS: ReadonlySet<EngPaidAction> = new Set(['create_project']);
-const CHECKS_RESEARCH: ReadonlySet<EngPaidAction> = new Set(['create_project', 'research']);
+const CHECKS_ONE_SITE: ReadonlySet<EngPaidAction> = new Set(['create_project']);
+const CHECKS_RESEARCH: ReadonlySet<EngPaidAction> = new Set(['research']);
 const CHECKS_SPEND: ReadonlySet<EngPaidAction> = new Set([
   'create_project',
   'research',
@@ -335,25 +327,32 @@ export async function requireEngPaidAccess(
     warnDegraded(`limits_rejected:${limits.rejected.join(',')}`, `unreadable ${limits.rejected.join(', ')} — default used`, { action });
   }
 
-  // 2–3. Проекты и исследования: один список us-проектов клиента.
-  if (CHECKS_PROJECTS.has(action) || CHECKS_RESEARCH.has(action)) {
+  // 2. Один сайт: любой проект клиента — любого рынка и статуса. Тот же
+  // фильтр, что у списка проектов кабинета (GET api/client/eng/projects):
+  // проект, который клиент видит, в счёт входит.
+  if (CHECKS_ONE_SITE.has(action)) {
+    const { count: projects, error: projectsErr } = await supabase
+      .from('he_projects')
+      .select('id', { count: 'exact', head: true })
+      .eq('created_by', userId);
+    if (projectsErr || typeof projects !== 'number') {
+      return unavailable(userId, action, `he_projects count: ${projectsErr?.code ?? 'no count'}`);
+    }
+    if (projects > 0) return refuse(userId, action, projectLimitRefusal(), { projects });
+  }
+
+  // 3. Исследования: стартов site_profile по us-проектам клиента за UTC-сутки.
+  if (CHECKS_RESEARCH.has(action)) {
     const { data: projects, error: projectsErr } = await supabase
       .from('he_projects')
-      .select('id, status')
+      .select('id')
       .eq('created_by', userId)
       .eq('market', 'us')
       .limit(1000);
     if (projectsErr) return unavailable(userId, action, `he_projects read: ${projectsErr.code ?? 'error'}`);
-    const rows = (projects ?? []) as Array<{ id: string; status: string | null }>;
+    const rows = (projects ?? []) as Array<{ id: string }>;
 
-    if (CHECKS_PROJECTS.has(action)) {
-      const active = rows.filter((p) => p.status !== 'failed').length;
-      if (active >= limits.maxProjects) {
-        return refuse(userId, action, projectLimitRefusal(active, limits), { active, max: limits.maxProjects });
-      }
-    }
-
-    if (CHECKS_RESEARCH.has(action) && rows.length > 0) {
+    if (rows.length > 0) {
       const dayStart = startOfUtcDay(now);
       // Пачками по 150 id: длинный список в `in` упёрся бы в длину строки
       // запроса у клиента со многими упавшими проектами.
@@ -435,7 +434,9 @@ async function callLocked(
       if (error.code === '42883' || error.code === 'PGRST202') {
         warnDegraded(
           `${rpc}_missing`,
-          `${rpc} is missing (migration 20261010_0002 not applied) — project and research limits are read without a lock`,
+          rpc === HE_ENG_CREATE_PROJECT_RPC
+            ? `${rpc} is missing (migration 20261010_0002 not applied) — client project creation is refused (503)`
+            : `${rpc} is missing (migration 20261010_0002 not applied) — the research limit is read without a lock`,
           { action },
         );
         return { kind: 'rpc_missing' };
@@ -450,70 +451,45 @@ async function callLocked(
   }
 }
 
-/** Отказ лимита из ответа функции (null — ответ не про лимит). */
-function lockedLimitRefusal(
-  userId: string,
-  action: EngPaidAction,
-  answer: Record<string, unknown>,
-  limits: EngPaidAccessLimits,
-  dayStart: Date,
-  now: Date,
-): EngPaidAccessRefusal | null {
-  const count = (key: string, fallback: number): number => {
-    const value = Number(answer[key]);
-    return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
-  };
-  if (answer.outcome === 'project_limit') {
-    const active = count('active', limits.maxProjects);
-    return logRefusal(userId, action, projectLimitRefusal(active, limits), {
-      active,
-      max: limits.maxProjects,
-      locked: true,
-    });
-  }
-  if (answer.outcome === 'research_limit') {
-    const started = count('started', limits.maxResearchPerDay);
-    return logRefusal(userId, action, researchLimitRefusal(started, limits.maxResearchPerDay, dayStart, now), {
-      started,
-      max: limits.maxResearchPerDay,
-      locked: true,
-    });
-  }
-  return null;
+/** Число из ответа функции: целое ≥ 0, иначе `fallback`. */
+function answerCount(answer: Record<string, unknown>, key: string, fallback: number): number {
+  const value = Number(answer[key]);
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
 export type EngCreateProjectLockedResult =
   /** Проект и его site_profile вставлены одной транзакцией; строки целиком. */
   | { kind: 'created'; project: Record<string, unknown>; job: Record<string, unknown> }
   | { kind: 'refused'; refusal: EngPaidAccessRefusal }
-  /** Миграции нет — роут идёт прежним путём (вставка без брони). */
+  /** Миграции нет — роут отказывает клиенту 503 (engCreateProjectUnavailableRefusal). */
   | { kind: 'rpc_missing' }
   | { kind: 'error'; message: string };
 
 /**
- * Создание проекта клиента (действие 'create_project') под замком: лимит
- * проектов и лимит исследований пересчитываются и проект с его site_profile
- * вставляется одной транзакцией (he_eng_create_project). Зовётся после
+ * Создание проекта клиента (действие 'create_project') под замком
+ * (he_eng_create_project): «один сайт» пересчитывается по ВСЕМ проектам
+ * клиента, и проект с брифом и его site_profile вставляется одной
+ * транзакцией. `brief` — бриф нового проекта (buildHeEngCreateBrief,
+ * projectBriefPatch.ts) или null — колонка остаётся пустой, как у проекта,
+ * созданного без ответов. Зовётся только для клиента — после
  * requireEngPaidAccess, вернувшего limits.
  */
 export async function createEngProjectLocked(
   supabase: SupabaseClient,
   userId: string,
-  opts: { name: string; websiteUrl: string; limits: EngPaidAccessLimits; now?: Date },
+  opts: { name: string; websiteUrl: string; brief: Record<string, unknown> | null },
 ): Promise<EngCreateProjectLockedResult> {
-  const now = opts.now ?? new Date();
-  const dayStart = startOfUtcDay(now);
   const call = await callLocked(supabase, HE_ENG_CREATE_PROJECT_RPC, {
     p_user_id: userId,
     p_name: opts.name,
     p_website_url: opts.websiteUrl,
-    p_max_projects: opts.limits.maxProjects,
-    p_max_research_per_day: opts.limits.maxResearchPerDay,
-    p_day_start: dayStart.toISOString(),
+    p_brief: opts.brief,
   }, 'create_project');
   if (call.kind !== 'answer') return call;
-  const refusal = lockedLimitRefusal(userId, 'create_project', call.answer, opts.limits, dayStart, now);
-  if (refusal) return { kind: 'refused', refusal };
+  if (call.answer.outcome === 'project_limit') {
+    const projects = answerCount(call.answer, 'projects', 1);
+    return { kind: 'refused', refusal: logRefusal(userId, 'create_project', projectLimitRefusal(), { projects, locked: true }) };
+  }
   const project = asObject(call.answer.project);
   const job = asObject(call.answer.job);
   if (call.answer.outcome === 'created' && project && typeof project.id === 'string' && job) {
@@ -536,11 +512,11 @@ export type EngStartResearchLockedResult =
 
 /**
  * Старт исследования проекта клиента под замком (he_eng_start_research):
- * лимит проектов (только у проекта в 'failed' — по статусу под замком),
  * лимит исследований, дедуп активной research-стадии (HE_RESEARCH_STAGES),
  * вставка site_profile и перевод проекта в 'researching' — одной транзакцией.
- * `action` — тот же, с которым роут звал requireEngPaidAccess (для журнала
- * отказа).
+ * «Один сайт» здесь не проверяется: проект уже есть и в счёт уже входит,
+ * исследование его не добавляет. `action` — тот же, с которым роут звал
+ * requireEngPaidAccess (для журнала отказа).
  */
 export async function startEngResearchLocked(
   supabase: SupabaseClient,
@@ -553,13 +529,21 @@ export async function startEngResearchLocked(
     p_user_id: userId,
     p_project_id: opts.projectId,
     p_research_stages: HE_RESEARCH_STAGES,
-    p_max_projects: opts.limits.maxProjects,
     p_max_research_per_day: opts.limits.maxResearchPerDay,
     p_day_start: dayStart.toISOString(),
   }, opts.action);
   if (call.kind !== 'answer') return call;
-  const refusal = lockedLimitRefusal(userId, opts.action, call.answer, opts.limits, dayStart, now);
-  if (refusal) return { kind: 'refused', refusal };
+  if (call.answer.outcome === 'research_limit') {
+    const started = answerCount(call.answer, 'started', opts.limits.maxResearchPerDay);
+    return {
+      kind: 'refused',
+      refusal: logRefusal(userId, opts.action, researchLimitRefusal(started, opts.limits.maxResearchPerDay, dayStart, now), {
+        started,
+        max: opts.limits.maxResearchPerDay,
+        locked: true,
+      }),
+    };
+  }
   if (call.answer.outcome === 'conflict') return { kind: 'conflict' };
   if (call.answer.outcome === 'not_found') return { kind: 'not_found' };
   const job = asObject(call.answer.job);
@@ -567,17 +551,13 @@ export async function startEngResearchLocked(
   return { kind: 'error', message: `${HE_ENG_START_RESEARCH_RPC}: unexpected outcome ${String(call.answer.outcome).slice(0, 40)}` };
 }
 
-/**
- * Тело отказа для роута: `{ error, code, retry_after_seconds?,
- * project_delete_available?, email_missing? }`.
- */
+/** Тело отказа для роута: `{ error, code, retry_after_seconds?, email_missing? }`. */
 export function engPaidAccessResponse(refusal: EngPaidAccessRefusal): NextResponse {
   return NextResponse.json(
     {
       error: refusal.message,
       code: refusal.code,
       ...(refusal.retryAfterSeconds !== undefined ? { retry_after_seconds: refusal.retryAfterSeconds } : {}),
-      ...(refusal.projectDeleteAvailable !== undefined ? { project_delete_available: refusal.projectDeleteAvailable } : {}),
       ...(refusal.emailMissing ? { email_missing: true } : {}),
     },
     {

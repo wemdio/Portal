@@ -5,10 +5,12 @@
  * нет: рамка — ещё один ключ рядом с offer/style/signature/business_override.
  *
  * Кто пишет и кто читает — ровно три места:
- *  - пишет только клиентский PATCH (api/client/eng/projects/[id]) через
- *    patchHeProjectBrief (projectBriefPatch.ts); staff-роут RU-инструмента
- *    этот ключ не пишет и не читает;
- *  - тот же роут читает её, чтобы показать клиенту сохранённое (шаг «Brief»);
+ *  - пишут только клиентские роуты: PATCH (api/client/eng/projects/[id]) через
+ *    patchHeProjectBrief и создание проекта (POST api/client/eng/projects)
+ *    через buildHeEngCreateBrief (оба — projectBriefPatch.ts); staff-роут
+ *    RU-инструмента этот ключ не пишет и не читает;
+ *  - роут проекта (api/client/eng/projects/[id]) читает её, чтобы показать
+ *    клиенту сохранённое (шаг «Brief»);
  *  - стадия hypotheses на рынке us кладёт её в EN-промпт гипотез
  *    (prompts/hypotheses.en.ts). RU-промпт её не получает.
  *
@@ -57,6 +59,29 @@ export type HeIcpFrameInputError =
   | { code: 'too_many'; field: HeIcpListField; max: number }
   /** Пункт или строка длиннее лимита — после чистки пробелов. */
   | { code: 'too_long'; field: HeIcpField; max: number };
+
+/**
+ * Отказ по рамке для API клиентских роутов (PATCH и POST создания проекта):
+ * имена — ключи тела запроса, лимит — из ошибки, а не цифрой. Формы кабинета
+ * проверяют те же константы до отправки своими подписями полей, поэтому эти
+ * тексты получает только запрос в обход формы.
+ */
+export function heIcpFrameInputErrorText(err: HeIcpFrameInputError): string {
+  switch (err.code) {
+    case 'bad_shape':
+      return 'icp must be an object with include, exclude, size or geo, or null for none';
+    case 'bad_type':
+      return err.field === 'include' || err.field === 'exclude'
+        ? `icp.${err.field} must be a list of strings`
+        : `icp.${err.field} must be a string`;
+    case 'too_many':
+      return `icp.${err.field}: at most ${err.max} entries`;
+    case 'too_long':
+      return err.field === 'include' || err.field === 'exclude'
+        ? `icp.${err.field}: each entry is at most ${err.max} characters`
+        : `icp.${err.field}: maximum ${err.max} characters`;
+  }
+}
 
 const LIST_FIELDS: readonly HeIcpListField[] = ['include', 'exclude'];
 const LINE_FIELDS: readonly HeIcpLineField[] = ['size', 'geo'];

@@ -6,8 +6,10 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit } from '@/lib/loggerServer';
 import { withToolTrace } from '@/lib/toolTrace';
 import { engPaidAccessResponse, requireEngMarket, requireEngPaidAccess } from '@/lib/hypothesisEngine/apiGuards';
-import { createEngProjectLocked } from '@/lib/hypothesisEngine/engPaidAccess';
+import { createEngProjectLocked, engCreateProjectUnavailableRefusal } from '@/lib/hypothesisEngine/engPaidAccess';
 import { normalizeWebsiteInput } from '@/lib/hypothesisEngine/websiteUrl';
+import { buildHeEngCreateBrief } from '@/lib/hypothesisEngine/projectBriefPatch';
+import { heIcpFrameInputErrorText, parseHeIcpFramePatch, type HeIcpFramePatch } from '@/lib/hypothesisEngine/icpFrame';
 import { enqueueHeResearchJob } from '@/lib/hypothesisEngine/researchJob';
 import {
   HE_PROJECT_CLIENT_COLUMNS,
@@ -26,11 +28,14 @@ export const runtime = 'nodejs';
  * Рыночный гейт (ru-клиент сюда не ходит) — requireEngMarket. Создание проекта
  * сразу ставит ПЛАТНОЕ исследование, поэтому POST проходит и гейт платных
  * шагов (requireEngPaidAccess, действие 'create_project'): подтверждённая
- * почта, число активных проектов, число стартов исследования за UTC-сутки и
- * потолок расхода клиента (engPaidAccess.ts). Оба лимита клиент проходит
+ * почта, «один аккаунт — один сайт» (у клиента нет ни одного проекта) и
+ * потолок расхода клиента (engPaidAccess.ts). «Один сайт» клиент проходит
  * второй раз под замком на пользователя, вместе со вставкой проекта и его
- * исследования (createEngProjectLocked). Оплаты (тарифа) ENG-продукта пока
- * нет — гейт по оплате появится вместе с ней.
+ * исследования (createEngProjectLocked); без функции под замком (миграция
+ * 20261010_0002 не применена) клиенту — 503, без вставки: чтение без замка
+ * пропускает параллельные создания. Удалить проект клиент не может —
+ * DELETE у роута проекта нет. Оплаты (тарифа) ENG-продукта пока нет — гейт по
+ * оплате появится вместе с ней.
  */
 
 /** Тексты 5xx — константы контура: ни Postgres, ни провайдер наружу не едут. */
@@ -142,9 +147,13 @@ export async function GET(req: NextRequest) {
   });
 }
 
-// POST — создать проект { website_url, name? }: market='us' принудительно,
-// имя по умолчанию — hostname; research (site_profile) ставится сразу,
-// чтобы мастер кабинета начинал с прогресса исследования.
+// POST — создать проект { website_url, name?, business_override?, icp? }:
+// market='us' принудительно, имя по умолчанию — hostname; research
+// (site_profile) ставится сразу, чтобы мастер кабинета начинал с прогресса
+// исследования. business_override и icp — ответы формы создания, которые
+// читает само исследование (buildHeEngCreateBrief, projectBriefPatch.ts):
+// повторить его кликом клиент не может, поэтому они нужны до старта и
+// ложатся в he_projects.brief той же вставкой, что и проект.
 export async function POST(req: NextRequest) {
   // Трассируем только мутирующие роуты кабинета: withToolTrace — это INSERT +
   // UPDATE в trace_spans вокруг каждого запроса, а мастер и дашборд поллят
@@ -158,9 +167,9 @@ export async function POST(req: NextRequest) {
     const gate = await requireEngMarket(supabaseAdmin, userId);
     if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
 
-    let body: { website_url?: unknown; name?: unknown };
+    let body: { website_url?: unknown; name?: unknown; business_override?: unknown; icp?: unknown };
     try {
-      body = (await req.json()) as { website_url?: unknown; name?: unknown };
+      body = (await req.json()) as typeof body;
     } catch {
       return jsonError('Invalid body', 400);
     }
@@ -176,36 +185,55 @@ export async function POST(req: NextRequest) {
         ? body.name.trim().slice(0, 300)
         : normalized.hostname;
 
-    // ДО вставки he_projects: отказанный черновик иначе сам занял бы место в
-    // лимите проектов. Здесь проверки читают, а не бронируют.
+    // Ответы для исследования — до гейта и до БД, строго: лишнее отклоняется,
+    // а не режется молча. Тексты отказов — те же, что у PATCH проекта; форма
+    // кабинета проверяет те же лимиты до отправки.
+    let icpPatch: HeIcpFramePatch | null | undefined;
+    if (body?.icp !== undefined) {
+      const parsed = parseHeIcpFramePatch(body.icp);
+      if (!parsed.ok) return jsonError(heIcpFrameInputErrorText(parsed.error), 400);
+      icpPatch = parsed.patch;
+    }
+    const built = buildHeEngCreateBrief(body, { icp: icpPatch });
+    if (!built.ok) {
+      return built.error.code === 'bad_type'
+        ? jsonError(`${built.error.field} must be a string`, 400)
+        : jsonError(`${built.error.field}: maximum ${built.error.max} characters`, 413);
+    }
+    const brief = built.brief;
+
+    // ДО вставки he_projects: проект, вставленный до отказа, сам занял бы
+    // единственное место аккаунта. Здесь проверки читают, а не бронируют.
     const access = await requireEngPaidAccess(supabaseAdmin, userId, { action: 'create_project' });
     if (!access.ok) return engPaidAccessResponse(access.refusal);
 
-    // Клиент (access.limits) — лимиты решаются ещё раз ПОД ЗАМКОМ на
-    // пользователя, и проект с его site_profile вставляется той же транзакцией
-    // (he_eng_create_project, миграция 20261010_0002): из N одновременных
-    // запросов на последнем месте проходит один, остальные получают тот же
-    // отказ лимита. Сотрудник (limits === null) лимитов не имеет — прежний
-    // путь ниже. Функции нет (миграция не применена) — тоже прежний путь:
-    // чтение выше, затем вставка, и двойной клик на последнем месте проходит
-    // лимит, как до этой правки.
+    // Клиент (access.limits) — «один сайт» решается ещё раз ПОД ЗАМКОМ на
+    // пользователя, и проект с брифом и его site_profile вставляется той же
+    // транзакцией (he_eng_create_project, миграция 20261010_0002): из N
+    // одновременных запросов проходит один, остальные получают тот же отказ.
+    // Функции нет (миграция не применена) — клиенту 503 'unavailable', и
+    // НИЧЕГО не вставляется: «один аккаунт — один сайт» — жёсткое правило, а
+    // чтение выше без замка пропускает параллельные создания (двойной клик —
+    // два проекта и два платных исследования). Прежний путь ниже — только для
+    // сотрудника (limits === null): лимитов у него нет, гонке нечего нарушать.
     if (access.limits) {
       const locked = await createEngProjectLocked(supabaseAdmin, userId, {
         name,
         websiteUrl: normalized.url,
-        limits: access.limits,
+        brief,
       });
       if (locked.kind === 'refused') return engPaidAccessResponse(locked.refusal);
+      if (locked.kind === 'rpc_missing') return engPaidAccessResponse(engCreateProjectUnavailableRefusal(userId));
       if (locked.kind === 'error') {
         return engServerError('client.eng.projects.create_failed', new Error(locked.message), PROJECT_CREATE_FAILED, {
           userId,
         });
       }
-      if (locked.kind === 'created') {
-        return projectCreatedResponse(userId, normalized.url, inClientProjectColumns(locked.project), locked.job);
-      }
+      return projectCreatedResponse(userId, normalized.url, inClientProjectColumns(locked.project), locked.job);
     }
 
+    // Сотрудник (отладка ENG-кабинета): прежний путь — вставка, затем
+    // постановка исследования отдельной записью.
     const { data: project, error } = await supabaseAdmin
       .from('he_projects')
       .insert({
@@ -214,6 +242,8 @@ export async function POST(req: NextRequest) {
         website_url: normalized.url,
         status: 'draft',
         market: 'us',
+        // Ответов нет — ключа нет, колонка пустая, как до этой правки.
+        ...(brief ? { brief } : {}),
       })
       .select(HE_PROJECT_CLIENT_COLUMNS)
       .single();
@@ -222,7 +252,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Для свежего проекта активных research-джоб нет — конфликт невозможен,
-    // но постановку делаем тем же helper'ом, что и «Re-run research». Unique
+    // но постановку делаем тем же helper'ом, что и повтор research («Try again»). Unique
     // index he_jobs_one_active_site_profile этого не меняет: id проекта только
     // что выдан gen_random_uuid(), сослаться на него никакая джоба не может.
     const enqueue = await enqueueHeResearchJob(supabaseAdmin, project.id as string);

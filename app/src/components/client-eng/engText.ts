@@ -96,8 +96,9 @@ const PROVIDER_TRACE_RE =
  * Где показана ошибка стадии — от этого зависит, какое действие у клиента
  * вообще есть:
  *  - `research`   — шапка мастера и список проектов (`he_projects.error`, его
- *                   пишут только research-стадии); перезапуск — «Re-run
- *                   research» шага 1;
+ *                   пишут только research-стадии); повтор — «Try again»
+ *                   шага 1, и только после технического сбоя
+ *                   (heResearchRetryAllowed, clientFailureText.ts);
  *  - `collection` — карточка основной базы вертикали; новую сборку ставит
  *                   «Start outreach» шага 2;
  *  - `refill`     — карточка прогона ежедневного долива («auto-refill: …»).
@@ -123,8 +124,14 @@ export type EngFailureScope = 'research' | 'collection' | 'refill';
 const CANCELLED_BASE_HEAD_EN =
   'Work on this base was cancelled before it finished, so this base will not be launched.';
 
+/**
+ * Отменённый research кабинет заново не запускает: повтор — только после
+ * технического сбоя (решение владельца 10.10.2026), а отмена — решение
+ * человека. Поэтому действие — Support (запустить заново может команда).
+ */
 const STAGE_CANCELLED_EN: Record<EngFailureScope, string> = {
-  research: 'The research was cancelled before it finished. Press «Re-run research» on step 1 to start it again.',
+  research:
+    'The research was cancelled before it finished. This cabinet starts research again only when it stops because of a technical problem, so message Support if you need it researched.',
   collection:
     `${CANCELLED_BASE_HEAD_EN} If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse this base.`,
   refill: `This refill run was cancelled before it finished. ${HE_REFILL_RUN_KEPT_EN} A refill run is not restarted by hand; the Command Center shows whether the daily refill goes on.`,
@@ -315,8 +322,9 @@ export function engRefillStoppedText(): string {
  *    ШАГ 2, а не обещает кнопку на нём. Кнопка рисуется только при
  *    `canStartOutreach` (`EngStepVerticals`: `status === 'researched'` И хотя бы
  *    одна accepted-гипотеза), а пауза с автопилотом=true доживает и до других
- *    состояний: клиент вправе отклонить все гипотезы или перезапустить и отменить
- *    research (cancel-роут возвращает проект в 'draft'). В обоих случаях кнопки
+ *    состояний: клиент вправе отклонить все гипотезы, а research проекта может
+ *    оказаться не законченным (повтор после технического сбоя или сотрудником,
+ *    отмена — cancel-роут возвращает проект в 'draft'). В обоих случаях кнопки
  *    на шаге 2 нет, зато есть его собственная подсказка `startOutreachHint` —
  *    ровно то, чего экран ждёт; на неё текст и ссылается;
  *  - ни имён таблиц, стадий и провайдеров, ни внутренних id: наружу приехал
