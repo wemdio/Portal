@@ -11,12 +11,13 @@
  * остальные ключи brief не трогаем — мержим поверх текущего значения.
  * Незнакомые поля верхнего уровня игнорируем.
  *
- * Вынесено из PATCH api/tools/vertical-engine-v2/projects/[id] — клиентский
- * ENG-контур патчит те же поля (api/client/eng/projects/[id]). Ошибки
- * возвращаем машинными кодами, текст локализует роут (staff — RU, клиент — EN).
+ * Вынесено из PATCH api/tools/vertical-engine-v2/projects/[id].
+ * Этот модуль относится только к VE2; у клиентского ENG собственная реализация.
+ * Ошибки возвращаем машинными кодами, текст локализует внутренний роут.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { VePriorityNichesSchema } from './priorityNiches';
 
 // Максимум символов эталона стиля (brief.style_override) — после trim.
 export const STYLE_OVERRIDE_MAX_LENGTH = 8000;
@@ -27,15 +28,17 @@ export const SIGNATURE_OVERRIDE_MAX_LENGTH = 500;
 // Максимум символов ручного описания бизнеса (brief.business_override) — после trim.
 export const BUSINESS_OVERRIDE_MAX_LENGTH = 3000;
 
-export type VeBriefField = 'offer_override' | 'style_override' | 'signature_override' | 'business_override';
+export type VeBriefField = 'offer_override' | 'style_override' | 'signature_override' | 'business_override' | 'priority_niches';
 
 export type VeBriefPatchError =
-  /** Ни одного из четырёх полей в теле. */
+  /** Ни одного из редактируемых полей в теле. */
   | { code: 'no_fields' }
   /** Поле передано не строкой. */
   | { code: 'bad_type'; field: VeBriefField }
   /** style/signature/business длиннее лимита после trim. */
   | { code: 'too_long'; field: 'style_override' | 'signature_override' | 'business_override'; max: number }
+  | { code: 'invalid_niches'; message: string }
+  | { code: 'research_busy' }
   | { code: 'not_found' }
   | { code: 'db'; message: string };
 
@@ -48,9 +51,10 @@ export interface VeBriefPatchBody {
   style_override?: unknown;
   signature_override?: unknown;
   business_override?: unknown;
+  priority_niches?: unknown;
 }
 
-/** Хотя бы одно поле обязано присутствовать; применяются только строковые. */
+/** Применяет только явно переданные поля; направления — массив строк. */
 export async function patchVeProjectBrief(
   supabase: SupabaseClient,
   projectId: string,
@@ -60,11 +64,13 @@ export async function patchVeProjectBrief(
   const styleRaw = body?.style_override;
   const signatureRaw = body?.signature_override;
   const businessRaw = body?.business_override;
+  const nichesRaw = body?.priority_niches;
   if (
     offerRaw === undefined &&
     styleRaw === undefined &&
     signatureRaw === undefined &&
-    businessRaw === undefined
+    businessRaw === undefined &&
+    nichesRaw === undefined
   ) {
     return { ok: false, error: { code: 'no_fields' } };
   }
@@ -90,50 +96,45 @@ export async function patchVeProjectBrief(
     return { ok: false, error: { code: 'too_long', field: 'business_override', max: BUSINESS_OVERRIDE_MAX_LENGTH } };
   }
 
-  const { data: current, error: loadErr } = await supabase
-    .from('ve_projects')
-    .select('brief')
-    .eq('id', projectId)
-    .single();
-  if (loadErr) {
-    return {
-      ok: false,
-      error:
-        loadErr.code === 'PGRST116'
-          ? { code: 'not_found' }
-          : { code: 'db', message: loadErr.message },
-    };
+  const parsedNiches = nichesRaw === undefined ? null : VePriorityNichesSchema.safeParse(nichesRaw);
+  if (parsedNiches && !parsedNiches.success) {
+    return { ok: false, error: { code: 'invalid_niches', message: 'Укажите до 8 направлений, каждое — до 120 символов' } };
   }
-
-  const brief = { ...((current?.brief as Record<string, unknown> | null) ?? {}) };
+  const brief: Record<string, unknown> = {};
+  const removeKeys: string[] = [];
   if (typeof offerRaw === 'string') {
     const offer = offerRaw.trim();
     if (offer) brief.offer_override = offer;
-    else delete brief.offer_override;
+    else removeKeys.push('offer_override');
   }
   if (typeof styleRaw === 'string') {
     const style = styleRaw.trim();
     if (style) brief.style_override = style;
-    else delete brief.style_override;
+    else removeKeys.push('style_override');
   }
   if (typeof signatureRaw === 'string') {
     const signature = signatureRaw.trim();
     if (signature) brief.signature_override = signature;
-    else delete brief.signature_override;
+    else removeKeys.push('signature_override');
   }
   if (typeof businessRaw === 'string') {
     const business = businessRaw.trim();
     if (business) brief.business_override = business;
-    else delete brief.business_override;
+    else removeKeys.push('business_override');
   }
 
-  const { data: project, error } = await supabase
-    .from('ve_projects')
-    .update({ brief })
-    .eq('id', projectId)
-    .select()
-    .single();
-  if (error) return { ok: false, error: { code: 'db', message: error.message } };
-
+  if (parsedNiches?.success) brief.priority_niches = parsedNiches.data;
+  const { data: project, error } = await supabase.rpc('ve_patch_project_brief', {
+    p_project_id: projectId,
+    p_patch: brief,
+    p_remove_keys: removeKeys,
+    p_require_idle_research: nichesRaw !== undefined,
+  });
+  if (error) {
+    if (error.message.includes('ve_brief_research_busy')) return { ok: false, error: { code: 'research_busy' } };
+    if (error.message.includes('ve_project_not_found')) return { ok: false, error: { code: 'not_found' } };
+    return { ok: false, error: { code: 'db', message: error.message } };
+  }
+  if (!project || project.id !== projectId) return { ok: false, error: { code: 'db', message: 'Не удалось подтвердить сохранение проекта' } };
   return { ok: true, project: project as Record<string, unknown> };
 }

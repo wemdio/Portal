@@ -359,6 +359,13 @@ describe('llm rawCall retry', () => {
       const db = createMockSupabase({ tables: {
         ve_projects: [{ id: 'project', website_url: 'https://gateway.test/', market, status: 'researching', brief }],
         ve_cases: [priorCase],
+      }, rpcHandlers: {
+        ve_patch_project_brief: async (params, db) => {
+          const current = db.getRows('ve_projects').find((row) => row.id === params.p_project_id);
+          const brief = { ...(current?.brief as Record<string, unknown> ?? {}), ...(params.p_patch as Record<string, unknown>) };
+          await db.from('ve_projects').update({ brief }).eq('id', params.p_project_id);
+          return { data: { ...current, brief }, error: null };
+        },
       } });
       return { db, priorCase, job: { project_id: 'project' } as VeJob,
         ctx: { supabase: db as unknown as SupabaseClient, log: jest.fn() } as VeStageContext };
