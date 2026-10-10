@@ -14,6 +14,11 @@ const retentionSql = fs.readFileSync(path.resolve(
   '../../../supabase/migrations/20261009_0002_client_no_email_retry_retention.sql',
 ), 'utf8').replace(/\s+/g, ' ').toLowerCase();
 
+const liveEmailSql = fs.readFileSync(path.resolve(
+  __dirname,
+  '../../../supabase/migrations/20261010_0001_client_no_email_retry_live_email_counts.sql',
+), 'utf8').replace(/\s+/g, ' ').toLowerCase();
+
 describe('no-email retry reporting isolation', () => {
   it('requires an explicit run marker and keeps names idempotent', () => {
     expect(sql).toContain('is_no_email_retry boolean not null default false');
@@ -45,6 +50,41 @@ describe('no-email retry reporting isolation', () => {
     expect(retentionSql).toContain('and not exists');
     expect(retentionSql).not.toContain('20261008');
     expect(retentionSql).not.toContain('client_campaign_contact_ledger');
+  });
+
+  it('counts interim single addresses without nullable status arithmetic', () => {
+    const interimBranch = liveEmailSql.split('union all')[1];
+    expect(interimBranch).toContain('email_counts.found_count, email_counts.validated_count');
+    expect(interimBranch).toContain('count(*) filter (where normalized_email.is_ready)');
+    expect(interimBranch).toContain("(nullif(btrim(m.email), ''), m.email_validation_status)");
+    expect(interimBranch).toContain("(nullif(btrim(m.email2), ''), m.email2_validation_status)");
+    expect(interimBranch).toContain('bool_or( candidate.validation_status in');
+    expect(interimBranch).toContain('group by lower(btrim(candidate.email))');
+    expect(interimBranch).toContain("where nullif(btrim(candidate.email), '') is not null");
+    expect(interimBranch).toContain("and nullif(btrim(m.domain), '') is not null");
+    expect(interimBranch).not.toContain(')::int +');
+  });
+
+  it('preserves durable retry classification, snapshot dedup and restricted grants in the live fix', () => {
+    expect(liveEmailSql).toContain('left join public.client_manual_score_runs as r');
+    expect(liveEmailSql).toContain("s.metadata->>'is_no_email_retry' = 'true'");
+    expect(liveEmailSql).toContain("s.metadata->>'source_filename' like 'no-email-retry-%'");
+    expect(liveEmailSql).toContain('and not exists');
+    expect(liveEmailSql).toContain('s.source_row_id = m.id::text');
+    expect(liveEmailSql).toContain('grant execute on function public.client_report_no_email_retry_delta');
+    expect(liveEmailSql).toContain('to service_role');
+    expect(liveEmailSql).not.toContain('client_campaign_contact_ledger');
+    expect(liveEmailSql).not.toContain('client_campaign_append_batches');
+  });
+
+  it('requires the live-count fix before the generated SQL can enqueue more runs', () => {
+    const prepareScript = fs.readFileSync(path.resolve(
+      __dirname, '../../scripts/no-email-retry/prepare-enqueue.mjs',
+    ), 'utf8');
+    expect(prepareScript).toContain('SELECT 1 FROM public.portal_migrations');
+    expect(prepareScript).toContain('20261010_0001_client_no_email_retry_live_email_counts.sql');
+    expect(prepareScript.indexOf('Deploy the no-email retry live email-count fix'))
+      .toBeLessThan(prepareScript.indexOf('INSERT INTO public.client_manual_score_runs'));
   });
 
   it('keeps the retry label in exports after run cleanup for later dates too', () => {

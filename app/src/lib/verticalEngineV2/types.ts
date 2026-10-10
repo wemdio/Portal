@@ -184,6 +184,8 @@ export interface VeHypothesis {
   seasonality?: VeRuSeasonality | null;
   potential_pct: number;
   status: VeHypothesisStatus;
+  /** Автор аудитории: ручной ввод не является оценкой или доказательством модели. */
+  origin?: 'generated' | 'manual';
   /** Широкая гипотеза уровня сектора для ежедневного добора; нет до миграции 20260923_0001. */
   broad?: boolean;
   created_at: string;

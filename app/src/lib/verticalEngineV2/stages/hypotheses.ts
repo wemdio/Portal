@@ -14,9 +14,9 @@ import {
 } from '../clientBriefIntake';
 import {
   VeHypothesesBatchSchema,
+  combineVeHypothesisCandidates,
+  createVePriorityHypothesesSchema,
   type VeBrandCloudOutput,
-  type VeHypothesesBatchOutput,
-  type VeHypothesisCandidate,
   type VeSiteProfileOutput,
 } from '../schemas';
 import { projectMarket, type VeMarket } from '../market';
@@ -24,6 +24,7 @@ import { buildHypothesesInstantMessages, type HypothesesClientContextInput } fro
 import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
 import { getPortfolioProfile, type VePortfolioEntry } from '../datasetStats';
 import { VE_BROAD_HYPOTHESES_MAX } from '../broadHypotheses';
+import { readVePriorityNiches, vePriorityNicheKey } from '../priorityNiches';
 import type { VeJob, VeProject } from '../types';
 import {
   addUsage,
@@ -41,31 +42,8 @@ import type { VeCompetitorEntry } from './competitors';
 
 export { VE_BROAD_HYPOTHESES_MAX };
 
-function candidateTitleKey(title: string): string {
-  return title.toLowerCase().replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Кандидаты стадии из ответа модели: широкие первыми и с признаком broad,
- * узкие — как раньше и без него. Широкая с названием узкой или другой широкой
- * отбрасывается: гипотезы проекта связываются с вертикалями по названию.
- */
-export function combineHypothesisCandidates(output: VeHypothesesBatchOutput): VeHypothesisCandidate[] {
-  const narrow = output.hypotheses.map((candidate) => {
-    const copy: VeHypothesisCandidate = { ...candidate };
-    delete copy.broad;
-    return copy;
-  });
-  const seen = new Set(narrow.map((candidate) => candidateTitleKey(candidate.title)));
-  const broad: VeHypothesisCandidate[] = [];
-  for (const candidate of output.broad_hypotheses ?? []) {
-    const key = candidateTitleKey(candidate.title);
-    if (!key || seen.has(key) || broad.length >= VE_BROAD_HYPOTHESES_MAX) continue;
-    seen.add(key);
-    broad.push({ ...candidate, tier: 1, broad: true });
-  }
-  return [...broad, ...narrow];
-}
+/** Same candidate selection is shared with priority coverage validation. */
+export const combineHypothesisCandidates = combineVeHypothesisCandidates;
 
 /* ─────────────── калибровочные данные (best-effort) ─────────────── */
 
@@ -233,6 +211,7 @@ export async function loadHypothesesClientContext(
 
   return {
     profile,
+    priorityNiches: readVePriorityNiches(project.brief),
     websiteUrl: project.website_url,
     brandCloud,
     competitors,
@@ -271,9 +250,12 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
     ...(markupHistory ? { markupHistory } : {}),
     ...(actualsHistory ? { actualsHistory } : {}),
   };
+  const priorityNiches = readVePriorityNiches(project.brief);
+  const messages = (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput);
+  const schema = priorityNiches.length ? createVePriorityHypothesesSchema(priorityNiches) : VeHypothesesBatchSchema;
   const llm = await callLLMWithSchema(
-    (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),
-    VeHypothesesBatchSchema,
+    messages,
+    schema,
     // 25–40 гипотез с description/fit_rationale/rationale/search_queries на
     // русском — кириллические BPE-токены дорогие, 8–16k обрезало бы JSON
     // посередине (поймали на проде: Unterminated string).
@@ -282,6 +264,10 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
   addUsage(usage, llm);
 
   const candidates = combineHypothesisCandidates(llm.data);
+  const coverage = priorityNiches.length ? createVePriorityHypothesesSchema(priorityNiches).parse(llm.data).priority_niche_results : [];
+  const priorityResults = priorityNiches.map((niche) => ({
+    ...coverage.find((item) => vePriorityNicheKey(item.niche) === vePriorityNicheKey(niche))!, niche,
+  }));
   const broadCount = candidates.filter((h) => h.broad).length;
   const tierCounts = candidates.filter((h) => !h.broad).reduce<Record<number, number>>((acc, h) => {
     acc[h.tier] = (acc[h.tier] ?? 0) + 1;
@@ -291,7 +277,8 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
   if (!broadCount) stageLog(ctx, '[hypotheses] модель не вернула широких гипотез — в проекте будут только узкие');
 
   return {
-    result: { candidates, tier_counts: tierCounts, broad_count: broadCount },
+    result: { candidates, tier_counts: tierCounts, broad_count: broadCount,
+      ...(priorityNiches.length ? { priority_niches: priorityNiches, priority_niche_results: priorityResults } : {}) },
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,
   };

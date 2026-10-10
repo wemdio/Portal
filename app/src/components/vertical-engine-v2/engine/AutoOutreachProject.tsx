@@ -28,6 +28,8 @@ import { DeliveryRatePanel } from './DeliveryRatePanel';
 import { DeliveryTargetPanel } from './DeliveryTargetPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
+import { ManualHypothesisForm } from './ManualHypothesisForm';
+import { PriorityNichesEditor, PriorityNicheResults, type PriorityNichesEditorHandle } from './PriorityNichesEditor';
 import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
 import { collectCount, isPartialPreview } from './collectionProgress';
@@ -217,6 +219,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     setCheckedContactCounts((current) => current[baseId] === count ? current : { ...current, [baseId]: count });
   }, []);
   const [researchBusy, setResearchBusy] = useState(false);
+  const researchRequestRef = useRef(false);
+  const priorityNichesRef = useRef<PriorityNichesEditorHandle>(null);
+  const [priorityNichesDirty, setPriorityNichesDirty] = useState(false);
   const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
   const [presetId, setPresetId] = useState('');
@@ -232,10 +237,13 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const topRef = useRef<HTMLDivElement | null>(null);
   const initialVisit = useRef(true);
   const refreshBusy = useRef(false);
+  // A GET already in flight must not erase an additive save that completed later.
+  const detailMutationRevision = useRef(0);
   const refresh = useCallback(async () => {
     if (refreshBusy.current) return;
     refreshBusy.current = true;
     setRefreshing(true);
+    const readRevision = detailMutationRevision.current;
     try {
       const results = await Promise.all([
         veEngineCall<VeProjectDetailResponse>(`${VE_API}/projects/${projectId}`),
@@ -243,7 +251,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         veEngineCall<{ run: VeOutreachRun | null; error?: string }>(`${VE_API}/projects/${projectId}/outreach/start`),
       ]);
       const [project, setup, launch] = results;
-      if (project.ok && project.data.project)
+      if (project.ok && project.data.project && readRevision === detailMutationRevision.current)
         setDetail({
           project: project.data.project,
           jobs: project.data.jobs ?? [],
@@ -375,15 +383,19 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
   };
   const research = async () => {
-    setResearchBusy(true);
+    if (researchRequestRef.current) return;
+    researchRequestRef.current = true;
     setError('');
     try {
+      if (priorityNichesRef.current && !(await priorityNichesRef.current.save())) return;
+      setResearchBusy(true);
       const result = await veEnginePost<VeJobResponse>(`${VE_API}/projects/${projectId}/research`);
       if (!result.ok) setError(result.data.error ?? 'Не удалось начать исследование');
       else await refresh();
     } catch {
       setError('Не удалось начать исследование. Проверьте соединение');
     } finally {
+      researchRequestRef.current = false;
       setResearchBusy(false);
     }
   };
@@ -471,7 +483,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   if (!detail) return <StatusBox tone={error || refreshError ? 'error' : 'info'}>{error || refreshError || 'Загружаем проект…'}</StatusBox>;
   const hasJobs = detail.jobs.some((j) => ['pending', 'running'].includes(j.status));
-  const researchRunning = researchBusy || detail.project.status === 'researching';
+  const researchRunning = researchBusy || detail.project.status === 'researching' || detail.jobs.some((job) =>
+    ['site_profile', 'competitors', 'brand_cloud', 'hypotheses', 'evidence', 'clustering'].includes(job.stage) &&
+    ['pending', 'running'].includes(job.status));
   const launchStates = Object.fromEntries(selectedIds.map((id) => [id, getVeLaunchSelectionState(snapshot, detail.templates, id)]));
   const readyForLaunchCount = Object.values(launchStates).filter((state) => state.ready).length;
   const chosenLaunchReady = launchHypothesisIds.length > 0 && launchHypothesisIds.every((id) => launchStates[id]?.ready);
@@ -506,13 +520,22 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         </select>
       </label>
     ) : null;
-  const hypothesisGroups = groupVeHypotheses(detail.verticals, detail.hypotheses);
+  const manualHypotheses = detail.hypotheses.filter((hypothesis) =>
+    hypothesis.origin === 'manual' && detail.verticals.some((vertical) => vertical.id === hypothesis.vertical_id));
+  const generatedHypotheses = detail.hypotheses.filter((hypothesis) => hypothesis.origin !== 'manual');
+  const manualVerticalIds = new Set(manualHypotheses.map((hypothesis) => hypothesis.vertical_id));
+  const generatedVerticals = detail.verticals.filter((vertical) =>
+    !manualVerticalIds.has(vertical.id) || generatedHypotheses.some((hypothesis) => hypothesis.vertical_id === vertical.id));
+  const hypothesisGroups = groupVeHypotheses(generatedVerticals, generatedHypotheses);
   const broadAction = veBroadHypothesesAction({
     jobs: detail.jobs,
     hypotheses: detail.hypotheses,
     requesting: broadRequesting,
     researchRunning,
   });
+  const contextMutationBusy = researchRunning || broadAction.running;
+  const contextMutationReason = broadAction.running
+    ? 'Дождитесь завершения генерации широких гипотез.' : undefined;
   // Широкие дописываются только к исследованному проекту: без вертикалей кнопки нет.
   const broadControl = detail.verticals.length ? (
     <div className="ve2-broad-action">
@@ -570,7 +593,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
             Вернуть отклонённую гипотезу
           </button>
         ) : null}
-        <details className="ve2-hypothesis-evidence">
+        {h.origin === 'manual' ? <span className={`text-sm ${HE.muted}`}>Добавлена специалистом</span> : null}
+        {h.origin !== 'manual' || h.evidence?.length ? <details className="ve2-hypothesis-evidence">
           <summary className="ve2-link">Доказательства · {h.evidence?.length ?? 0}</summary>
           <div className="ve2-evidence-content">
             {h.fit_rationale ? <p className={HE.muted}>{h.fit_rationale}</p> : null}
@@ -589,7 +613,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <p className={HE.muted}>Подтверждающих источников пока нет.</p>
             ) : null}
           </div>
-        </details>
+        </details> : null}
       </div>
     </div>
   );
@@ -617,6 +641,18 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       <details className="ve2-panel-line mb-6" open={detail.project.status !== 'researched'}>
         <summary className="ve2-link cursor-pointer p-4">Данные клиента и исследование</summary>
         <div className="p-4">
+          <PriorityNichesEditor
+            key={projectId}
+            ref={priorityNichesRef}
+            project={detail.project}
+            disabled={contextMutationBusy}
+            disabledReason={contextMutationReason}
+            onDirtyChange={setPriorityNichesDirty}
+            onSaved={(project) => {
+              detailMutationRevision.current += 1;
+              setDetail((current) => current ? { ...current, project } : current);
+            }}
+          />
           <Step1Research
             project={detail.project}
             jobs={detail.jobs}
@@ -666,7 +702,38 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   Можно выбрать гипотезы из нескольких вертикалей. Доказательства и досье помогут проверить выбор.
                 </p>
               </header>
+              {detail.project.status === 'researched' && detail.verticals.length > 0 ? (
+                <ManualHypothesisForm
+                  key={projectId}
+                  projectId={projectId}
+                  disabled={contextMutationBusy}
+                  disabledReason={contextMutationReason}
+                  onCreated={({ hypothesis, vertical }) => {
+                    detailMutationRevision.current += 1;
+                    setDetail((current) => current ? {
+                      ...current,
+                      hypotheses: current.hypotheses.some((item) => item.id === hypothesis.id)
+                        ? current.hypotheses : [...current.hypotheses, hypothesis],
+                      verticals: current.verticals.some((item) => item.id === vertical.id)
+                        ? current.verticals : [...current.verticals, vertical],
+                    } : current);
+                    void refresh();
+                  }}
+                />
+              ) : null}
+              {!priorityNichesDirty ? <PriorityNicheResults brief={detail.project.brief} /> : null}
               <div className="ve2-vertical-list">
+                {manualHypotheses.length > 0 ? (
+                  <section className="ve2-vertical-group" aria-labelledby="manual-hypotheses-title">
+                    <header className="ve2-vertical-header">
+                      <div className="ve2-vertical-title-row">
+                        <h3 id="manual-hypotheses-title" className="ve2-vertical-title">Свои гипотезы</h3>
+                        <span className="ve2-vertical-count">Гипотез: {manualHypotheses.length}</span>
+                      </div>
+                    </header>
+                    <div className="ve2-hypothesis-list">{manualHypotheses.map(renderHypothesis)}</div>
+                  </section>
+                ) : null}
                 {hypothesisGroups.broad.length ? (
                   <section className="ve2-vertical-group ve2-broad-group" aria-labelledby="broad-hypotheses-title">
                     <header className="ve2-vertical-header">
