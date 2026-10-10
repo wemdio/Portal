@@ -14,8 +14,10 @@
  *     — с заменами пустых ячеек, как у запуска (heRefillOperatorMapping), и
  *     без строк, которым письмо кампании прочиталось бы неверно
  *     (heRefillUnfilledRows: тот же гейт писем, что у запуска; такие строки
- *     остаются в базе и считаются в stats.held_unfilled; снята ВСЯ ночь —
- *     алерт команде, alertRefillLettersHeld);
+ *     считаются в stats.held_unfilled, а компании, у которых других адресов
+ *     нет, у market='us' ждут в очереди переноса с пометкой «ждёт писем» —
+ *     блок «ПЕРЕНОС», HE_REFILL_CARRY_HELD_REASON; снята ВСЯ ночь — алерт
+ *     команде, alertRefillLettersHeld);
  *   - кампания — ОСНОВНАЯ кампания запуска (segment=null). У market='us' и
  *     запуска, сплитнутого по сегментам, пачка ночи, уже срезанная дневным
  *     капом, раскладывается по сегментным кампаниям того же запуска тем же
@@ -102,12 +104,14 @@
  *   - ПЕРЕНОС НЕОТПРАВЛЕННЫХ КОМПАНИЙ (решение владельца 04.10.2026, только
  *     market='us', миграция 20261004_0001). Компания ночи, которой не досталось
  *     ни одного письма — её срезал дневной кап, её адреса провайдер не взял по
- *     ёмкости, бюджет дня не дал ночи ни строки или ночь упала после частичной
- *     доставки, — больше не выжигается: её допущенные строки ложатся в
- *     he_refill_carryover, а следующая ночь вертикали предлагает их ПЕРВЫМИ,
- *     раньше новых компаний, и не покупает сборку вовсе, если перенесённых
- *     компаний хватает на остаток дня (resolveHeRefillCollectCompanies →
- *     carryOnly). Полный разбор — блок «ПЕРЕНОС» ниже;
+ *     ёмкости, бюджет дня не дал ночи ни строки, ночь упала после частичной
+ *     доставки или письмо кампании прочиталось бы неверно у каждого её адреса
+ *     (решение владельца 10.10.2026), — больше не выжигается: её допущенные
+ *     строки ложатся в he_refill_carryover, а следующая ночь вертикали
+ *     предлагает их ПЕРВЫМИ, раньше новых компаний, и не покупает сборку
+ *     вовсе, если перенесённых компаний, которые письма не держат, хватает на
+ *     остаток дня (resolveHeRefillCollectCompanies → carryOnly). Полный
+ *     разбор — блок «ПЕРЕНОС» ниже;
  *   - долив грузит лидов с skipIfInCampaign=true, а этот флаг у Instantly (по
  *     нашему собственному свидетельству, докблок в clientLaunch/appendLeads.ts)
  *     работает НА ВЕСЬ ВОРКСПЕЙС: адрес отсеивается, если он есть в ЛЮБОЙ
@@ -374,7 +378,8 @@ export interface HeRefillCollectSizing {
   /** Лимит компаний сборки — как раньше: min(лимит постановки, расчёт из остатка). */
   limit: number;
   /**
-   * Перенесённых компаний вертикали в очереди (pending, срок не вышел). Только
+   * Перенесённых компаний вертикали в очереди (pending, срок не вышел), КРОМЕ
+   * помеченных «ждёт писем» (HE_REFILL_CARRY_HELD_REASON). Только
    * market='us'; 0 — очереди нет, она не прочиталась или рынок другой.
    */
   carriedCompanies: number;
@@ -400,6 +405,11 @@ export interface HeRefillCollectSizing {
  *  - не хватает → сборка считается от остатка МИНУС компании очереди (пол
  *    HE_REFILL_MIN_COMPANIES остаётся, лишнее уйдёт в очередь, а не в потерю).
  * Очередь не прочиталась — ноль перенесённых, то есть ровно прежний расчёт.
+ * Компании с пометкой «ждёт писем» (HE_REFILL_CARRY_HELD_REASON) здесь НЕ
+ * считаются: письмо кампании прочиталось бы у них неверно на прошлой ночи, и
+ * ночь, рассчитавшая на них остаток дня, не отправила бы ничего. Их ночь всё
+ * равно берёт и перепроверяет (захват — вся очередь), а сборка покупается так,
+ * будто их нет, — ровно как до того, как они стали попадать в очередь.
  *
  * Best-effort как и сам loadRefillConfig: кап не прочитался или конфига нет —
  * берётся дефолт движка, тот же, по которому долив ниже будет резать объём,
@@ -462,7 +472,9 @@ export async function resolveHeRefillCollectCompanies(
   }
   const remainingLeadsCap = Math.max(0, dailyLeadsCap - appendedToday);
   const carriedCompanies =
-    input.market === 'us' ? await countHeRefillCarryover(ctx, input.verticalId, input.baseId) : 0;
+    input.market === 'us'
+      ? await countHeRefillCarryover(ctx, input.verticalId, input.baseId, { sendableOnly: true })
+      : 0;
   return {
     limit: Math.min(
       input.payloadLimit,
@@ -719,10 +731,13 @@ export interface HeRefillStats {
    * Адресов (строк с допущенным вердиктом, своих и перенесённых), которые долив
    * НЕ отдал провайдеру: письмо основной кампании подставило бы в них пустоту
    * или замену не на месте (шаг 3a, heRefillUnfilledRows — тот же гейт, что у
-   * запуска). Строки остаются в своей базе; в бронь дня и в попытки не входят,
-   * и перенос их тоже не отправит: компания без иного лида в очередь не
-   * ложится, а строки компании из очереди проходят тот же отбор. Только
-   * market='us'; нет ключа — таких не было.
+   * запуска). В бронь дня и в попытки не входят. Компания, у которой других
+   * лидов нет, ложится в очередь переноса с пометкой «ждёт писем» (своя — от
+   * этой ночи, `carryover.queued_held`; перенесённая — обратно,
+   * `carryover.returned_held`), и каждая следующая ночь вертикали проверяет
+   * её строки тем же отбором по письмам ТЕКУЩЕЙ кампании: прошли — уходят,
+   * нет — ждут дальше до срока очереди. Только market='us'; нет ключа — таких
+   * не было.
    * Читатели — строки лога прогона (отдельная строка шага 3a и итоговая,
    * успешная и отказная) и лента Command Center
    * (engDashboard.buildEngDashboardEvents: «N skipped…» у ночи 'appended').
@@ -833,8 +848,11 @@ export interface HeRefillStats {
    * было и класть в неё нечего). Все числа — КОМПАНИИ:
    *  - `offered` — взято из очереди и предложено первыми;
    *  - `sent` — из них хотя бы один адрес отдан провайдеру;
-   *  - `returned` — не дошли до провайдера (кап, ёмкость, отказ ночи) и
-   *    вернулись в очередь со своим прежним сроком;
+   *  - `returned` — не дошли до провайдера (кап, ёмкость, отказ ночи, письма)
+   *    и вернулись в очередь со своим прежним сроком;
+   *  - `returned_held` — из `returned` те, что вернулись с пометкой «ждёт
+   *    писем»: письмо текущей кампании прочиталось бы неверно у каждого их
+   *    адреса, не снятого чёрным списком. Нет ключа — таких не было;
    *  - `dropped` — сняты навсегда: все адреса в чёрном списке, база-источник
    *    ушла в 'failed', либо судьба неизвестна (бронь держал прошлый прогон);
    *  - `released` — срок вышел, компания вернулась в пул сборки;
@@ -842,10 +860,13 @@ export interface HeRefillStats {
    *    в очередь: у успешной ночи, у ночи без бюджета ('cap_exhausted') и у
    *    отказа после частичной доставки. Число — то, что ушло в запись; если
    *    запись не легла, строка лога прогона говорит об этом;
+   *  - `queued_held` — из `queued` те, что легли с пометкой «ждёт писем» (все
+   *    их адреса сняты отбором писем, шаг 3a). Нет ключа — таких не было;
    *  - `released_hiring` — собственные компании ночи без письма, которые НЕ
    *    поставлены в очередь, а сразу возвращены в пул: их крючок найма не
    *    доживёт до отправки свежим или его возраст неизвестен
    *    (heRefillCarryExpiry). Нет ключа — таких не было.
+   * Читатель `*_held` — строка лога переноса (успешная и отказная).
    * В кабинет поле не уезжает: «Valid today» и «Collected today» считают
    * только собственные строки ночи (`valid`, `collected`), чтобы адрес,
    * проверенный вчера, не засчитывался сегодня второй раз; `appended` — все
@@ -855,9 +876,11 @@ export interface HeRefillStats {
     offered: number;
     sent: number;
     returned: number;
+    returned_held?: number;
     dropped: number;
     released: number;
     queued: number;
+    queued_held?: number;
     released_hiring?: number;
   };
   /**
@@ -1749,10 +1772,17 @@ function alertRefillCapacityStop(ctx: HeStageContext, job: HeJob, baseId: string
  * Алерт команде: шаг 3a снял ВСЕ строки ночи — письмо запущенной кампании
  * прочиталось бы у каждой неверно (heRefillUnfilledRows), отправлять нечего.
  * Сборка этой ночи уже куплена (кроме ночи только из переноса, carryOnly —
- * это пишется в причине), а ночь запишется 'appended' с нулём и в серию
- * сухих ночей не пойдёт: это проблема писем, а не рынка, и пометкой сухой
- * вертикали её не лечить. Без алерта команда видела бы это только в логах
- * воркера, а клиент — строку ленты «+0 leads, N skipped» каждую ночь.
+ * это пишется в причине). Ночь со своими строками запишется 'appended' с
+ * нулём и в серию сухих ночей не пойдёт: это проблема писем, а не рынка, и
+ * пометкой сухой вертикали её не лечить. Ночь без своих строк, у которой
+ * сняты только компании очереди переноса (`noNew`: они ждут писем с прошлых
+ * ночей), — 'no_new', как и до их переноса: новых компаний рынок не дал.
+ * Без алерта команда видела бы это только в логах воркера, а клиент — строку
+ * ленты каждую ночь. Компании без иного адреса ночь кладёт (свои) или
+ * возвращает (перенесённые) в очередь переноса с пометкой «ждёт писем», если
+ * дойдёт до итога без отказа (блок «ПЕРЕНОС», шаги 1 и 5): переписанный и
+ * перезапущенный шаблон отправит их следующей же ночью вертикали, пока не
+ * вышел срок очереди.
  * Отказ писем, не зависящий от строк, тик крона ловит ещё до покупки (шаг
  * 3a-- в autoPipeline.ts, тот же вид алерта) — сюда доходят пустые ячейки у
  * всех строк ночи и то, чего тик видеть не мог: колонка, которой у этой базы
@@ -1772,6 +1802,7 @@ function alertRefillLettersHeld(
   held: number,
   details: string,
   carryOnly: boolean,
+  noNew: boolean,
 ): void {
   void notifyHeClientStop({
     projectId: job.project_id,
@@ -1786,9 +1817,10 @@ function alertRefillLettersHeld(
     jobId: job.id,
     baseId: base.id,
     verticalId: base.vertical_id,
-    clientSees:
-      `строку ленты «refill: +0 leads, ${held} skipped (the letters would not read right for ` +
-      `${held === 1 ? 'this contact' : 'these contacts'})»; вертикаль остаётся «live»`,
+    clientSees: noNew
+      ? 'строку ленты «refill: nothing new to send»; вертикаль остаётся «live»'
+      : `строку ленты «refill: +0 leads, ${held} skipped (the letters would not read right for ` +
+        `${held === 1 ? 'this contact' : 'these contacts'})»; вертикаль остаётся «live»`,
   });
 }
 
@@ -1857,6 +1889,20 @@ function alertRefillSegmentRefused(
     mainCampaignId: refusal.mainCampaignId,
     clientSees,
   });
+}
+
+/**
+ * Хвост строки лога переноса: сколько компаний из вернувшихся и из положенных
+ * этой ночью ждут писем (пометка HE_REFILL_CARRY_HELD_REASON, блок «ПЕРЕНОС»).
+ * Пусто — таких не было.
+ */
+function refillCarryHeldNote(c: NonNullable<HeRefillStats['carryover']>): string {
+  if (!c.returned_held && !c.queued_held) return '';
+  return (
+    '; ждут писем (письмо кампании прочиталось бы неверно; следующие ночи вертикали ' +
+    'перепроверят их до срока очереди): ' +
+    `из вернувшихся ${c.returned_held ?? 0}, из положенных этой ночью ${c.queued_held ?? 0}`
+  );
 }
 
 /** Хвост итоговой строки лога прогона про отказавшие сегментные кампании (п. 7 «РАСКЛАДКИ»); пусто — отказов не было. */
@@ -2112,11 +2158,15 @@ const _refillBaseColumnsMatch: readonly [...typeof HE_AUTO_COLLECT_COLUMNS, 'des
  * «в кампанию этого сегмента никого»: строки уходят в основную кампанию.
  *
  * Снятая ОСНОВНЫМ текстом строка (шаг 3a) не теряется: она остаётся в
- * he_bases.data своей базы (долив пишет базу целиком), просто в кампанию её не
- * кладёт ни эта ночь, ни перенос (в очередь идут только компании с лидом после
- * этого отбора, и строки компании из очереди проходят его снова). В бронь
- * дневного бюджета и в попытки она не входит — отбор идёт до чёрного списка.
- * Чистая функция, без запросов и моделей.
+ * he_bases.data своей базы (долив пишет базу целиком), а её компания, если
+ * других лидов у неё нет, у market='us' ложится в очередь переноса с пометкой
+ * «ждёт писем» (HE_REFILL_CARRY_HELD_REASON, блок «ПЕРЕНОС»). Каждая ночь
+ * вертикали прогоняет строки такой компании через этот же отбор заново — по
+ * письмам кампании, в которую доливает ЭТА ночь: шаблон переписали и
+ * перезапустили — строки проходят и уходят; не переписали — ждут до срока
+ * очереди и потом отпускаются в пул. В бронь дневного бюджета и в попытки
+ * снятая строка не входит — отбор идёт до чёрного списка. Чистая функция, без
+ * запросов и моделей.
  */
 function heRefillUnfilledRows(input: {
   letters: unknown;
@@ -3296,9 +3346,16 @@ async function measureRefillSkipExposure(
  * второй раз некому.
  *
  * ЖИЗНЕННЫЙ ЦИКЛ строки he_refill_carryover (миграция 20261004_0001):
- *  1. КЛАДЁТ ночь вертикали собственные компании, у которых после чёрного
- *     списка остался хоть один лид и ни один лид не дошёл до провайдера
- *     (ownUnsentRefillCompanies). ИСХОДЫ НОЧИ — ВЕСЬ НАБОР:
+ *  1. КЛАДЁТ ночь вертикали собственные компании, у которых ни один лид не
+ *     дошёл до провайдера и либо после чёрного списка остался хоть один лид,
+ *     либо хоть один лид снят отбором писем (шаг 3a; решение владельца
+ *     10.10.2026) — ownUnsentRefillCompanies. Компания, у которой лидов после
+ *     чёрного списка нет, а есть только снятые письмами, ложится с пометкой
+ *     «ждёт писем» (settle_reason = HE_REFILL_CARRY_HELD_REASON у 'pending').
+ *     Помеченная живёт как любая 'pending': тот же срок, тот же отпуск в пул по
+ *     сроку, то же исключение из сборок, та же сверка с параллельными базами и
+ *     тот же захват — отличается она только тем, что не считается очередью,
+ *     закрывающей день (шаг 2). ИСХОДЫ НОЧИ — ВЕСЬ НАБОР:
  *       · 'appended' — кладёт: их срезал кап, провайдер отказал по ёмкости,
  *         отправка до них не дошла. Пишет ПОСЛЕ терминальной записи базы;
  *       · отказ ПОСЛЕ доставки (delivered: принято > 0, попытка без явного
@@ -3308,10 +3365,11 @@ async function measureRefillSkipExposure(
  *         Отменённый клиентом прогон не кладёт (ни здесь, ни ниже): его
  *         компании решает прежнее правило;
  *       · отказ 'cap_exhausted' (бюджет дня не дал ни строки) — кладёт ВСЕ
- *         свои компании с лидом, и база становится 'analyzed', а не 'failed'
- *         (решение владельца 04.10.2026). Пишет ДО терминальной записи базы,
- *         одним запросом: не легла очередь — база 'failed', прежний возврат в
- *         пул, то есть хуже, чем до переноса, не бывает;
+ *         свои компании с лидом (и с лидом, снятым письмами), и база
+ *         становится 'analyzed', а не 'failed' (решение владельца 04.10.2026).
+ *         Пишет ДО терминальной записи базы, одним запросом: не легла очередь
+ *         — база 'failed', прежний возврат в пул, то есть хуже, чем до
+ *         переноса, не бывает;
  *       · отказ 'already_reserved' — НЕ кладёт и не возвращает: прошлый прогон
  *         этой же базы мог отправить её компании, и любая повторная отправка
  *         могла бы стать вторым письмом;
@@ -3326,10 +3384,23 @@ async function measureRefillSkipExposure(
  *     дня — сборку не покупает. Тик крона (autoPipeline.ts) той же арифметикой
  *     по проекту не ставит сборку вертикалям без очереди, пока день покрывают
  *     очереди вертикалей, чья ночь этим тиком действительно поставлена
- *     (застрявшая в сборке вертикаль день не закрывает).
+ *     (застрявшая в сборке вертикаль день не закрывает). Помеченные «ждёт
+ *     писем» не считает НИ ОДИН из двух (countHeRefillCarryover с
+ *     sendableOnly и readCarryoverByVertical — оба по settle_reason IS NULL):
+ *     письмо, которое вчера прочиталось бы у них неверно, при тех же письмах
+ *     сегодня тоже не уйдёт, и ночь, рассчитавшая на них день, не отправила бы
+ *     ничего, а проект не купил бы сборку ни одной вертикали — до 7 суток
+ *     подряд. Покупка сборки поэтому ровно та же, что до того, как такие
+ *     компании стали попадать в очередь. Пустой харвест — отдельный путь: там
+ *     долив идёт, если в очереди есть ХОТЬ ЧТО-ТО, помеченные тоже
+ *     (countHeRefillCarryover без флага, stages/baseCollect.ts), иначе у сухой
+ *     вертикали их бы никто не перепроверял.
  *  3. БЕРЁТ ночь вертикали в доливе (claimHeRefillCarryover): 'pending' →
- *     'claimed' с id своей базы. Конкурентов нет: собирающаяся база у вертикали
- *     одна (he_bases_one_collecting_per_vertical), поэтому чужой 'claimed' —
+ *     'claimed' с id своей базы — до HE_REFILL_CARRYOVER_CLAIM_MAX компаний,
+ *     сначала непомеченные (их и считал шаг 2), потом помеченные «ждёт
+ *     писем», внутри каждой группы — по дате подготовки. Конкурентов нет:
+ *     собирающаяся база у вертикали одна
+ *     (he_bases_one_collecting_per_vertical), поэтому чужой 'claimed' —
  *     всегда брошенный (его ночь умерла до записи итога) и уходит в 'dropped':
  *     был ли он отправлен, неизвестно, а второе письмо дороже потерянной
  *     компании. Перед захватом компания сверяется с ПАРАЛЛЕЛЬНЫМИ базами
@@ -3340,13 +3411,19 @@ async function measureRefillSkipExposure(
  *     очереди остаётся одна — базы с меньшим id.
  *  4. ОТПРАВЛЯЕТ тем же путём, что и свои строки: вердикт перепроверяется
  *     (selectRefillLeadRows → heLaunchEmailVerdict, отправляется только
- *     'accepted'), чёрный список, бронь дня, отрез по компаниям — перенесённые
- *     компании стоят в пачке ПЕРВЫМИ, поэтому их первые адреса идут раньше
- *     первых адресов новых компаний.
+ *     'accepted'), отбор писем (шаг 3a — по письмам кампании, в которую
+ *     доливает ЭТА ночь, то есть после перезапуска шаблона — по новым),
+ *     чёрный список, бронь дня, отрез по компаниям — перенесённые компании
+ *     стоят в пачке ПЕРВЫМИ, поэтому их первые адреса идут раньше первых
+ *     адресов новых компаний. Лид, снятый отбором писем, в пачку не идёт,
+ *     брони дня не просит и попыткой не считается.
  *  5. ЗАКРЫВАЕТ (settleHeRefillCarryover) по тому, что известно о пачке:
  *     адрес дошёл до провайдера (или мог дойти) → 'sent'; не дошёл → обратно
- *     'pending' со СТАРЫМ сроком; отправлять нечего (всё в чёрном списке) или
- *     судьба неизвестна (бронь держал прошлый прогон этой же базы) →
+ *     'pending' со СТАРЫМ сроком — с пометкой «ждёт писем», если после
+ *     чёрного списка у компании не осталось лида, а снятый письмами есть, без
+ *     пометки, если лид остался (ночь, упавшая до чёрного списка, пометку не
+ *     трогает); отправлять нечего (всё в чёрном списке, снятых письмами нет)
+ *     или судьба неизвестна (бронь держал прошлый прогон этой же базы) →
  *     'dropped'.
  *  6. СРОК — HE_REFILL_CARRYOVER_MAX_AGE_DAYS от подготовки, а у компании с
  *     крючком найма — не позже момента, когда фид последний раз видел её
@@ -3392,6 +3469,25 @@ async function measureRefillSkipExposure(
 export const HE_REFILL_CARRYOVER_MAX_AGE_DAYS = 7;
 
 const DAY_MS = 86_400_000;
+
+/**
+ * Пометка «ждёт писем» у строки очереди: settle_reason у 'pending' (и у
+ * 'claimed', которую из неё взяли — захват колонку не трогает). Компания
+ * ждёт не бюджета, а писем: каждый её лид, не снятый чёрным списком, отбор
+ * писем кампании (шаг 3a, heRefillUnfilledRows) снял на последней ночи,
+ * которая её проверяла. Решение владельца 10.10.2026: такие компании — в
+ * очередь переноса, а не в 'analyzed'-базу, куда никто не возвращается.
+ *
+ * У 'pending'/'claimed' в settle_reason бывает ровно два значения: NULL и эта
+ * пометка (обе пишутся только в этом файле — planHeRefillCarryQueue и
+ * settleHeRefillCarryover); итоговые статусы пишут свою причину поверх. Поэтому
+ * «не помечена» читается как `settle_reason IS NULL` — так её читают оба
+ * счёта, закрывающих день (countHeRefillCarryover с sendableOnly и тик крона,
+ * readCarryoverByVertical в autoPipeline.ts). Миграция не нужна: колонка без
+ * CHECK, а срок, отпуск в пул, исключение из сборок, сверка с параллельными
+ * базами и захват у помеченной строки те же, что у любой 'pending'.
+ */
+const HE_REFILL_CARRY_HELD_REASON = 'letters_unfilled';
 
 /**
  * Срок строки очереди (шаг 6 блока «ПЕРЕНОС») — по ВСЕМУ набору форм строк
@@ -3532,23 +3628,32 @@ export function heRefillCarryKeyFn(columns: readonly string[]): (row: Record<str
  * Сколько компаний вертикали ждёт в очереди (pending, срок не вышел) — плюс те,
  * что уже держит ЭТА база (`baseId`): повтор прогона после смерти воркера
  * должен видеть свой прошлый захват, иначе он решил бы, что очереди нет, и
- * купил бы сборку, которую очередь покрывала. Только для размера сборки:
- * оценка, а не захват. Не бросает: не прочиталось — ноль, то есть размер как
- * до переноса.
+ * купил бы сборку, которую очередь покрывала. Оценка, а не захват. Не бросает:
+ * не прочиталось — ноль, то есть поведение как до переноса.
+ *
+ * Читателей два, и вопрос у них разный:
+ *  - размер сборки (resolveHeRefillCollectCompanies) — `sendableOnly`: только
+ *    компании, которые могут уйти этой ночью; помеченные «ждёт писем»
+ *    (HE_REFILL_CARRY_HELD_REASON) остаток дня не закрывают;
+ *  - пустой харвест (stages/baseCollect.ts) — без флага: «есть ли кого
+ *    перепроверить», и помеченные считаются — иначе у вертикали без новых
+ *    компаний их не перепроверила бы ни одна ночь.
  */
 export async function countHeRefillCarryover(
   ctx: HeStageContext,
   verticalId: string,
   baseId: string,
+  opts?: { sendableOnly?: boolean },
 ): Promise<number> {
   try {
-    const { data, error } = await ctx.supabase
+    let query = ctx.supabase
       .from('he_refill_carryover')
       .select('status, claimed_base_id')
       .eq('vertical_id', verticalId)
       .in('status', ['pending', 'claimed'])
-      .gt('expires_at', new Date().toISOString())
-      .limit(HE_REFILL_CARRYOVER_CLAIM_MAX);
+      .gt('expires_at', new Date().toISOString());
+    if (opts?.sendableOnly) query = query.is('settle_reason', null);
+    const { data, error } = await query.limit(HE_REFILL_CARRYOVER_CLAIM_MAX);
     if (error) throw new Error(error.message);
     return ((data ?? []) as Array<{ status?: unknown; claimed_base_id?: unknown }>).filter(
       (row) => row.status === 'pending' || row.claimed_base_id === baseId,
@@ -3779,16 +3884,30 @@ async function claimHeRefillCarryover(
   /** Компании, которые подготовила ещё и параллельная база проекта. */
   let conflicts = new Set<string>();
   try {
-    const { data, error } = await ctx.supabase
-      .from('he_refill_carryover')
-      .select('id, source_base_id, company_key, lead_rows, lead_columns, status, claimed_base_id')
-      .eq('vertical_id', input.verticalId)
-      .in('status', ['pending', 'claimed'])
-      .gt('expires_at', now)
-      .order('prepared_at', { ascending: true })
-      .limit(HE_REFILL_CARRYOVER_CLAIM_MAX);
-    if (error) throw new Error(error.message);
-    candidates = (data ?? [])
+    // Сначала строки без пометки «ждёт писем», потом помеченные — до потолка.
+    // Размер сборки и тик крона считают только непомеченные (countHeRefillCarryover
+    // с sendableOnly, readCarryoverByVertical), и помеченные, окажись они
+    // старше, не должны вытеснять из захвата те, на которые ночь рассчитала
+    // день: при одном общем «500 самых старых» сотня помеченных строк
+    // забирала бы место сотни отправляемых, а сборка уже не куплена.
+    const readCandidates = async (marked: boolean, limit: number): Promise<unknown[]> => {
+      let query = ctx.supabase
+        .from('he_refill_carryover')
+        .select('id, source_base_id, company_key, lead_rows, lead_columns, status, claimed_base_id')
+        .eq('vertical_id', input.verticalId)
+        .in('status', ['pending', 'claimed'])
+        .gt('expires_at', now);
+      query = marked ? query.not('settle_reason', 'is', null) : query.is('settle_reason', null);
+      const { data, error } = await query.order('prepared_at', { ascending: true }).limit(limit);
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    };
+    const unmarked = await readCandidates(false, HE_REFILL_CARRYOVER_CLAIM_MAX);
+    const marked =
+      unmarked.length < HE_REFILL_CARRYOVER_CLAIM_MAX
+        ? await readCandidates(true, HE_REFILL_CARRYOVER_CLAIM_MAX - unmarked.length)
+        : [];
+    candidates = [...unmarked, ...marked]
       .map(parseCarryCompany)
       .filter((c): c is NonNullable<typeof c> => c !== null)
       // Свой прошлый захват (повтор этой же базы) — берём; чужой сюда попадает,
@@ -3910,7 +4029,13 @@ function refillReachedPositions(
 
 interface HeRefillCarrySettle {
   sent: string[];
-  returned: string[];
+  /**
+   * Обратно в 'pending'. `held` — пометка «ждёт писем»
+   * (HE_REFILL_CARRY_HELD_REASON): true — ставится, false — снимается, null —
+   * ночь упала до чёрного списка и не знает, держат ли компанию письма:
+   * пометка остаётся, какой была.
+   */
+  returned: Array<{ id: string; held: boolean | null }>;
   dropped: Array<{ id: string; reason: string }>;
 }
 
@@ -3920,16 +4045,22 @@ interface HeRefillCarrySettle {
  *  - хотя бы один лид компании дошёл (или мог дойти) до провайдера → 'sent';
  *  - судьба неизвестна (`unknown`: бронь держал прошлый прогон этой же базы,
  *    а он мог эту компанию уже отправить) → 'dropped';
- *  - до чёрного списка не дошли (`inKept` = null: ночь упала раньше) или у
- *    компании остался лид после него → 'pending' (обратно в очередь);
- *  - у компании не осталось ни одного лида (весь адресный набор в чёрном
- *    списке владельца, ни один адрес не разобрался или каждому письмо
- *    прочиталось бы неверно — шаг 3a) → 'dropped'.
+ *  - до чёрного списка не дошли (`inKept` = null: ночь упала раньше) →
+ *    'pending' (обратно в очередь), пометка «ждёт писем» не трогается;
+ *  - у компании остался лид после чёрного списка → 'pending' без пометки;
+ *  - лида после чёрного списка нет, но хоть один лид снят отбором писем этой
+ *    ночи (`held`, шаг 3a) → 'pending' с пометкой «ждёт писем»: снятый
+ *    письмами адрес уйдёт, когда письма кампании позволят (решение владельца
+ *    10.10.2026), а адрес из чёрного списка не уйдёт никогда;
+ *  - лида нет и снятых письмами нет (весь адресный набор в чёрном списке
+ *    владельца или ни один адрес не разобрался) → 'dropped'.
  */
 function planHeRefillCarrySettle(input: {
   companies: readonly HeRefillCarryCompany[];
   ownerOf: ReadonlyMap<object, string>;
   inKept: ReadonlySet<string> | null;
+  /** Компании, у которых шаг 3a этой ночи снял хоть один лид. */
+  held: ReadonlySet<string>;
   batch: readonly object[];
   reached: ReadonlySet<number>;
   unknown: ReadonlySet<string> | null;
@@ -3944,7 +4075,9 @@ function planHeRefillCarrySettle(input: {
   for (const company of input.companies) {
     if (reachedIds.has(company.id)) out.sent.push(company.id);
     else if (input.unknown?.has(company.id)) out.dropped.push({ id: company.id, reason: 'fate_unknown' });
-    else if (input.inKept === null || input.inKept.has(company.id)) out.returned.push(company.id);
+    else if (input.inKept === null) out.returned.push({ id: company.id, held: null });
+    else if (input.inKept.has(company.id)) out.returned.push({ id: company.id, held: false });
+    else if (input.held.has(company.id)) out.returned.push({ id: company.id, held: true });
     else out.dropped.push({ id: company.id, reason: 'no_sendable_address' });
   }
   return out;
@@ -3988,7 +4121,14 @@ async function settleHeRefillCarryover(
   // 'sent' первым: из трёх записей только её потеря могла бы стоить письма,
   // если бы брошенный захват не снимался в 'dropped'.
   await apply(settle.sent, { status: 'sent', settled_at: now, settle_reason: null, updated_at: now });
-  await apply(settle.returned, { status: 'pending', claimed_base_id: null, claimed_at: null, updated_at: now });
+  const back = { status: 'pending', claimed_base_id: null, claimed_at: null, updated_at: now };
+  for (const [held, patch] of [
+    [true, { ...back, settle_reason: HE_REFILL_CARRY_HELD_REASON }],
+    [false, { ...back, settle_reason: null }],
+    [null, back],
+  ] as const) {
+    await apply(settle.returned.filter((r) => r.held === held).map((r) => r.id), patch);
+  }
   const byReason = new Map<string, string[]>();
   for (const { id, reason } of settle.dropped) byReason.set(reason, [...(byReason.get(reason) ?? []), id]);
   for (const [reason, ids] of byReason) {
@@ -3999,10 +4139,17 @@ async function settleHeRefillCarryover(
 
 /**
  * Собственные компании ЭТОЙ ночи, которым не досталось ни одного письма (шаг 1
- * блока «ПЕРЕНОС»): после чёрного списка у компании остался лид, и ни один её
- * лид не дошёл до провайдера. Чистая функция. Строки компании — все её
- * допущенные строки (`rows` — leadRows ночи): чёрный список и вердикт следующая
- * ночь применит заново.
+ * блока «ПЕРЕНОС»): ни один лид компании не дошёл до провайдера, и либо после
+ * чёрного списка у неё остался лид, либо хоть один её лид снят отбором писем
+ * (`held` — индексы его строк в `rows`, шаг 3a). Чистая функция. Строки
+ * компании — все её допущенные строки (`rows` — leadRows ночи): чёрный список,
+ * вердикт и отбор писем следующая ночь применит заново.
+ *
+ * `held` в ответе — у компании нет лида после чёрного списка, есть только
+ * снятые письмами: она ложится с пометкой «ждёт писем»
+ * (HE_REFILL_CARRY_HELD_REASON). Компания, у которой лид после чёрного списка
+ * есть, ложится без пометки, даже если часть её адресов снята письмами: она
+ * может уйти следующей же ночью.
  *
  * Компания без ключа (ни имени, ни сайта) не переносится: отрез считает её
  * отдельной компанией по строке, а исключению сборок отпустить её по истечении
@@ -4012,19 +4159,27 @@ function ownUnsentRefillCompanies(input: {
   rows: readonly HeRefillCarryRow[];
   rowOf: ReadonlyMap<object, number>;
   kept: readonly object[];
+  held: readonly number[];
   batch: readonly object[];
   reached: ReadonlySet<number>;
   columns: readonly string[];
-}): Array<{ key: string; rows: HeRefillCarryRow[] }> {
+}): Array<{ key: string; rows: HeRefillCarryRow[]; held: boolean }> {
   const keyOf = heRefillCarryKeyFn(input.columns);
   const keyOfLead = (lead: object | undefined): string => {
     const index = lead ? input.rowOf.get(lead) : undefined;
     const row = index === undefined ? undefined : input.rows[index];
     return row ? keyOf(row) : '';
   };
-  const waiting = new Set<string>();
+  /** Компании с лидом после чёрного списка. */
+  const sendable = new Set<string>();
   for (const lead of input.kept) {
     const key = keyOfLead(lead);
+    if (key) sendable.add(key);
+  }
+  const waiting = new Set(sendable);
+  for (const index of input.held) {
+    const row = input.rows[index];
+    const key = row ? keyOf(row) : '';
     if (key) waiting.add(key);
   }
   for (const position of input.reached) {
@@ -4040,7 +4195,7 @@ function ownUnsentRefillCompanies(input: {
     if (list) list.push(row);
     else byKey.set(key, [row]);
   }
-  return [...byKey.entries()].map(([key, rows]) => ({ key, rows }));
+  return [...byKey.entries()].map(([key, rows]) => ({ key, rows, held: !sendable.has(key) }));
 }
 
 /** Что ночь кладёт в he_refill_carryover: записи и их счёт для воронки. */
@@ -4048,6 +4203,8 @@ interface HeRefillCarryQueuePlan {
   records: Array<Record<string, unknown>>;
   /** Компаний, которые ждут ('pending'). */
   queued: number;
+  /** Из `queued` — с пометкой «ждёт писем» (HE_REFILL_CARRY_HELD_REASON). */
+  queuedHeld: number;
   /** Компаний, отпущенных сразу (крючок найма не доживёт свежим, heRefillCarryExpiry). */
   releasedHiring: number;
 }
@@ -4058,23 +4215,28 @@ interface HeRefillCarryQueuePlan {
  * бюджета, до) них. Срок каждой компании — heRefillCarryExpiry: компания, чей
  * крючок найма не доживёт до отправки свежим, пишется сразу 'released' —
  * исключение сборок её больше не держит (loadHeRefillReleasedCompanies), а
- * захват её не предложит.
+ * захват её не предложит. Компания, которую держат только письма (`held`),
+ * ждёт с пометкой «ждёт писем» — тот же срок, то же правило крючка найма.
  */
 function planHeRefillCarryQueue(input: {
   projectId: string;
   verticalId: string;
   baseId: string;
   columns: string[];
-  companies: Array<{ key: string; rows: HeRefillCarryRow[] }>;
+  companies: Array<{ key: string; rows: HeRefillCarryRow[]; held: boolean }>;
   nowMs: number;
 }): HeRefillCarryQueuePlan {
   const preparedAt = new Date(input.nowMs).toISOString();
   let queued = 0;
+  let queuedHeld = 0;
   let releasedHiring = 0;
   const records = input.companies.map((company) => {
     const expiry = heRefillCarryExpiry(company.rows, input.nowMs);
     if (expiry.release) releasedHiring += 1;
-    else queued += 1;
+    else {
+      queued += 1;
+      if (company.held) queuedHeld += 1;
+    }
     return {
       project_id: input.projectId,
       vertical_id: input.verticalId,
@@ -4088,10 +4250,10 @@ function planHeRefillCarryQueue(input: {
       // отсутствующий ключ NULL'ом, а не DEFAULT'ом колонки (status NOT NULL).
       status: expiry.release ? 'released' : 'pending',
       settled_at: expiry.release ? preparedAt : null,
-      settle_reason: expiry.release,
+      settle_reason: expiry.release ?? (company.held ? HE_REFILL_CARRY_HELD_REASON : null),
     };
   });
-  return { records, queued, releasedHiring };
+  return { records, queued, queuedHeld, releasedHiring };
 }
 
 /**
@@ -4313,6 +4475,8 @@ export async function runHeRefillAppend(args: {
   const carriedLeadOwner = new Map<object, string>();
   /** null — до чёрного списка долив не дошёл. */
   let carriedInKept: Set<string> | null = null;
+  /** Перенесённые компании, у которых шаг 3a этой ночи снял хоть один лид. */
+  const carriedHeld = new Set<string>();
   /** Пачка, отданная провайдеру (позиции = индексы attempted/deferred). */
   let sentBatch: readonly object[] = [];
   /**
@@ -4324,6 +4488,8 @@ export async function runHeRefillAppend(args: {
   let ownLeadRows: HeRefillCarryRow[] = [];
   const ownLeadRow = new Map<object, number>();
   let ownKept: readonly object[] | null = null;
+  /** Индексы (в ownLeadRows) своих строк, чей лид снял шаг 3a. */
+  const ownHeldRows: number[] = [];
   /** Результат долива, если appendLeads вернулся штатно. */
   let appendOutcome: { attemptedIndexes: readonly number[]; deferredIndexes?: readonly number[] } | null = null;
   const runStats: HeRefillStats = {
@@ -4342,9 +4508,10 @@ export async function runHeRefillAppend(args: {
   };
   /**
    * Очередь собственных компаний ночи (шаг 1 блока «ПЕРЕНОС»): компании, у
-   * которых после чёрного списка остался лид и ни один лид не дошёл до
-   * провайдера (`reached` — позиции пачки, которые дошли или могли дойти).
-   * null — класть нечего (не 'us', до чёрного списка не дошли, все охвачены).
+   * которых после чёрного списка остался лид или лид снят отбором писем, и ни
+   * один лид не дошёл до провайдера (`reached` — позиции пачки, которые дошли
+   * или могли дойти). null — класть нечего (не 'us', до чёрного списка не
+   * дошли, все охвачены).
    */
   const planOwnQueue = (reached: ReadonlySet<number>): HeRefillCarryQueuePlan | null => {
     if (!carryEnabled || ownKept === null) return null;
@@ -4352,6 +4519,7 @@ export async function runHeRefillAppend(args: {
       rows: ownLeadRows,
       rowOf: ownLeadRow,
       kept: ownKept,
+      held: ownHeldRows,
       batch: sentBatch,
       reached,
       columns: finalColumns,
@@ -4370,16 +4538,20 @@ export async function runHeRefillAppend(args: {
   const noteCarryStats = (settle: HeRefillCarrySettle | null, queue: HeRefillCarryQueuePlan | null): void => {
     const claim = carryClaim;
     const queued = queue?.queued ?? 0;
+    const queuedHeld = queue?.queuedHeld ?? 0;
     const releasedHiring = queue?.releasedHiring ?? 0;
+    const returnedHeld = settle?.returned.filter((r) => r.held === true).length ?? 0;
     const touched = (claim?.released ?? 0) + (claim?.dropped ?? 0) + queued + releasedHiring;
     if (!settle && touched === 0) return;
     runStats.carryover = {
       offered: claim?.companies.length ?? 0,
       sent: settle?.sent.length ?? 0,
       returned: settle?.returned.length ?? 0,
+      ...(returnedHeld > 0 ? { returned_held: returnedHeld } : {}),
       dropped: (settle?.dropped.length ?? 0) + (claim?.dropped ?? 0),
       released: claim?.released ?? 0,
       queued,
+      ...(queuedHeld > 0 ? { queued_held: queuedHeld } : {}),
       ...(releasedHiring > 0 ? { released_hiring: releasedHiring } : {}),
     };
   };
@@ -4495,10 +4667,11 @@ export async function runHeRefillAppend(args: {
       },
     });
     // 3a. Строки, которым письмо кампании прочиталось бы неверно (только
-    //     market='us', heRefillUnfilledRows): в пачку не идут, в базе остаются.
-    //     Отбор — ДО чёрного списка и брони: снятая строка не просит бюджета
-    //     дня и не считается попыткой отправки. Иной рынок — ровно прежние лиды
-    //     в прежнем порядке.
+    //     market='us', heRefillUnfilledRows): в пачку не идут, в базе остаются,
+    //     а их компания без иного лида ложится в очередь переноса с пометкой
+    //     «ждёт писем» (ownHeldRows → planOwnQueue). Отбор — ДО чёрного списка
+    //     и брони: снятая строка не просит бюджета дня и не считается попыткой
+    //     отправки. Иной рынок — ровно прежние лиды в прежнем порядке.
     let heldUnfilled = 0;
     const heldUnfilledDetails = new Set<string>();
     const ownUnfilled = usLetterGate
@@ -4523,6 +4696,7 @@ export async function runHeRefillAppend(args: {
       if (ownUnfilled && ownUnfilled.held(leadRows[rowIndex])) {
         heldUnfilled += 1;
         heldUnfilledDetails.add(ownUnfilled.detail);
+        ownHeldRows.push(rowIndex);
         return;
       }
       leads.push(lead);
@@ -4543,6 +4717,8 @@ export async function runHeRefillAppend(args: {
     //     selectRefillLeadRows (уходит только 'accepted', строки вне вертикали
     //     — нет), маппинг — колонками её базы-источника, а пометка доставки
     //     показывает на строку именно той базы, где компания лежит.
+    //     Компании с пометкой «ждёт писем» берутся так же: отбор писем (3a) у
+    //     них — по письмам кампании, в которую доливает ЭТА ночь.
     //     Без очереди (или не 'us') пачка — ровно прежняя: те же лиды в том же
     //     порядке.
     let sendLeads = leads;
@@ -4551,7 +4727,13 @@ export async function runHeRefillAppend(args: {
     // Свой лид → индекс его строки в leadRows (очередь собственных компаний).
     ownLeadRows = leadRows;
     leads.forEach((lead, i) => ownLeadRow.set(lead, leadSourceRows[i]));
-    /** Допущенных строк у перенесённых компаний — для исхода 'no_new' / 'appended'. */
+    /**
+     * Допущенных строк у перенесённых компаний за вычетом снятых отбором писем
+     * этой ночи — для исхода 'no_new' / 'appended'. Снятые не считаются: у
+     * ночи без своих строк, чья очередь — только компании, которые письма
+     * держат и сегодня, отправить нечего, и это та же 'no_new', что была у неё
+     * до того, как такие компании стали попадать в очередь.
+     */
     let carriedValid = 0;
     if (carryEnabled) {
       carryClaim = await claimHeRefillCarryover(ctx, {
@@ -4568,7 +4750,7 @@ export async function runHeRefillAppend(args: {
             company.rows,
             company.rows.map((row) => (typeof row._email_status === 'string' ? row._email_status : null)),
           );
-          carriedValid += picked.valid;
+          let heldHere = 0;
           const offset = carriedRows.length;
           carriedRows.push(...picked.leadRows);
           const carriedMapping = heRefillOperatorMapping(pick.operatorMapping, company.columns, args.market);
@@ -4582,10 +4764,12 @@ export async function runHeRefillAppend(args: {
               return companyKey ? `${company.sourceBaseId}:${companyKey}` : null;
             },
           });
-          // Тот же отбор, что у своих строк (3a), по колонкам базы-источника.
-          // Компания, у которой не осталось ни одного лида, в пачку не попадает;
-          // дошла ночь до чёрного списка — снимается из очереди как
-          // 'no_sendable_address' (planHeRefillCarrySettle), не дошла — ждёт дальше.
+          // Тот же отбор, что у своих строк (3a), по колонкам базы-источника и
+          // письмам кампании этой ночи. Компания, у которой не осталось ни
+          // одного лида, в пачку не попадает; снят хоть один её лид письмами —
+          // возвращается в очередь с пометкой «ждёт писем» (carriedHeld →
+          // planHeRefillCarrySettle); лидов нет совсем и ночь дошла до чёрного
+          // списка — снимается как 'no_sendable_address'; не дошла — ждёт дальше.
           const carriedUnfilled = usLetterGate
             ? heRefillUnfilledRows({
                 letters: pick.letters,
@@ -4598,7 +4782,9 @@ export async function runHeRefillAppend(args: {
           mapped.leads.forEach((lead, i) => {
             if (carriedUnfilled && carriedUnfilled.held(picked.leadRows[mapped.leadRowIndices[i]])) {
               heldUnfilled += 1;
+              heldHere += 1;
               heldUnfilledDetails.add(carriedUnfilled.detail);
+              carriedHeld.add(company.id);
               return;
             }
             carriedLeads.push(lead);
@@ -4612,6 +4798,8 @@ export async function runHeRefillAppend(args: {
               sourceKey: `carry:${company.id}`,
             });
           });
+          // Снятых лидов не больше допущенных строк: лид растёт из строки.
+          carriedValid += picked.valid - heldHere;
         }
         // Один адрес — один лид: свой лид с адресом, который уже несёт
         // перенесённая компания, в пачку не идёт (провайдер отсеял бы его как
@@ -4632,8 +4820,9 @@ export async function runHeRefillAppend(args: {
       stageLog(
         ctx,
         `[base_collect] refill: не отправлено ${heldUnfilled} адр. — письмо кампании прочиталось бы у них ` +
-          `неверно (${[...heldUnfilledDetails].join('; ')}); строки остаются в своих базах, ` +
-          'в кампанию их не кладёт ни эта ночь, ни перенос',
+          `неверно (${[...heldUnfilledDetails].join('; ')}); строки остаются в своих базах, компании ` +
+          'без иного адреса идут в очередь переноса с пометкой «ждёт писем» по правилам итога ночи ' +
+          '(строка «перенос» ниже), и следующие ночи перепроверяют их по письмам своей кампании',
       );
       // Снято ВСЁ, что ночь могла отправить (held_unfilled равен допущенным
       // строкам — своим и перенесённым — за вычетом тех, что лидом не стали бы
@@ -4648,6 +4837,8 @@ export async function runHeRefillAppend(args: {
           heldUnfilled,
           [...heldUnfilledDetails].join('; '),
           args.carryOnly === true,
+          // Тот же признак, что у исхода ночи ниже ('no_new').
+          valid === 0 && carriedValid === 0,
         );
       }
     }
@@ -5145,9 +5336,11 @@ export async function runHeRefillAppend(args: {
     // 'no_new' — только когда отправлять было нечего НИ из своей сетки, НИ из
     // очереди переноса: ночь, отправившая перенесённые компании, добавила
     // контакты, и правило сухой вертикали обязано это видеть. Ночь, у которой
-    // шаг 3a снял ВСЕ допущенные строки, — тоже 'appended' (с нулём): рынок
-    // строки дал, не годятся письма, и сухой её не считаем; о ней уже
-    // сообщил алерт команде (alertRefillLettersHeld).
+    // шаг 3a снял ВСЕ допущенные СВОИ строки, — тоже 'appended' (с нулём):
+    // рынок строки дал, не годятся письма, и сухой её не считаем; о ней уже
+    // сообщил алерт команде (alertRefillLettersHeld). Перенесённые компании,
+    // которые письма держат и этой ночью, в carriedValid не входят: ночь без
+    // своих строк с такой очередью — 'no_new', как и до их переноса.
     const outcome: HeRefillResult['status'] =
       valid === 0 && carriedValid === 0 ? 'no_new' : 'appended';
 
@@ -5162,6 +5355,7 @@ export async function runHeRefillAppend(args: {
           companies: carryClaim.companies,
           ownerOf: carriedLeadOwner,
           inKept: carriedInKept,
+          held: carriedHeld,
           batch: sentBatch,
           reached,
           // Успешная ветка: бронь выдана этому прогону, неизвестных нет.
@@ -5249,6 +5443,7 @@ export async function runHeRefillAppend(args: {
           `в очередь от этой ночи ${c.queued}` +
           (c.released_hiring ? `, сразу в пул (крючок найма не доживёт свежим) ${c.released_hiring}` : '') +
           (ownQueued ? '' : ' — ЗАПИСЬ НЕ ЛЕГЛА, эти компании остаются исключёнными') +
+          refillCarryHeldNote(c) +
           (runStats.carry_only ? '; сборка этой ночью не покупалась' : ''),
       );
     }
@@ -5405,6 +5600,7 @@ export async function runHeRefillAppend(args: {
         companies: carryClaim.companies,
         ownerOf: carriedLeadOwner,
         inKept: carriedInKept,
+        held: carriedHeld,
         batch: sentBatch,
         reached,
         unknown: predecessorHoldsBudget ? carryClaim.heldBefore : null,
@@ -5525,7 +5721,8 @@ export async function runHeRefillAppend(args: {
           `(ушли ${c.sent}, вернулись в очередь ${c.returned}, сняты ${c.dropped}, срок вышел ${c.released}); ` +
           `в очередь от этой ночи ${c.queued}` +
           (c.released_hiring ? `, сразу в пул (крючок найма не доживёт свежим) ${c.released_hiring}` : '') +
-          (ownQueued ? '' : ' — ЗАПИСЬ НЕ ЛЕГЛА, эти компании остаются исключёнными'),
+          (ownQueued ? '' : ' — ЗАПИСЬ НЕ ЛЕГЛА, эти компании остаются исключёнными') +
+          refillCarryHeldNote(c),
       );
     }
     // Последним шагом, после всех записей о потраченном: отказ по ЁМКОСТИ

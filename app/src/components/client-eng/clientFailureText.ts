@@ -23,10 +23,11 @@
  * автопродолжения, которого нет (провайдерский отказ терминален сразу, ночной
  * реконсилер и авто-резюм выключены по умолчанию и упавшую работу не
  * переоплачивают), ни кнопок, которых в кабинете нет. Действия называются теми
- * же словами, что и кнопки: «Re-run research» (шаг 1) и «Start outreach»
- * (шаг 2). Повтор собирает НОВУЮ базу, а не продолжает упавшую (упавшая база не
- * переиспользуется), поэтому «всё собранное сохранено» здесь не пишется —
- * сохранено то, что уже было закончено.
+ * же словами, что и кнопки: «Re-run research» (шаг 1), «Start outreach»
+ * (шаг 2) и «Collect again» (шаг 4, только у остановок
+ * HE_COLLECT_STOP_REPEATS_CODES). Повтор собирает НОВУЮ базу, а не продолжает
+ * упавшую (упавшая база не переиспользуется), поэтому «всё собранное
+ * сохранено» здесь не пишется — сохранено то, что уже было закончено.
  */
 
 export type HeClientErrorCode =
@@ -96,11 +97,52 @@ export interface HeClientFailure {
 }
 
 /**
+ * Остановки сборки, которые НОВАЯ сборка той же вертикали почти наверняка
+ * повторит: решение движка о самом срезе (проба среза или релевант-гейт снял
+ * все компании — audience_mismatch / hypothesis_mismatch) и источники, в
+ * которых не осталось новых компаний (segment_exhausted). Провайдер, срок,
+ * конструктор, отмена и прочее сюда не входят — их повтор может пройти.
+ *
+ * Читатели — три места одного правила, поэтому список здесь, в модуле без
+ * зависимостей, который тянут и сервер, и браузер:
+ *  - «Start outreach» (autopilotReconcile.ts, нажатие клиента): вертикаль,
+ *    чья ПОСЛЕДНЯЯ своя база кончилась таким кодом, новую сборку не получает
+ *    (пропуск 'collect_stop_repeats'); раньше каждое нажатие покупало её
+ *    заново — до AUTOPILOT_BASE_LIMIT (2 000) строк сборки на такую вертикаль;
+ *  - кнопка «Collect again» шага 4 (EngStepBases.tsx) — явный повтор этой
+ *    вертикали, рисуется у такой базы;
+ *  - роут этой кнопки (POST /api/client/eng/verticals/[id]/collect) повтор
+ *    разрешает — это и есть явное решение клиента.
+ * Ночной проход повтор ЛЮБОЙ упавшей сборки не покупает и так
+ * ('collect_failed_before').
+ */
+export const HE_COLLECT_STOP_REPEATS_CODES = [
+  'audience_mismatch',
+  'hypothesis_mismatch',
+  'segment_exhausted',
+] as const satisfies readonly HeClientErrorCode[];
+
+export function heCollectStopRepeats(code: unknown): boolean {
+  return (HE_COLLECT_STOP_REPEATS_CODES as readonly unknown[]).includes(code);
+}
+
+/**
+ * «Что делать» у этих остановок — одно предложение на три кода, и каждое его
+ * слово правда при любой базе, у которой его показывают (в том числе у
+ * старой, над которой уже есть новая база): кнопка описана условием, при
+ * котором она есть, а не обещана.
+ */
+const COLLECT_AGAIN_EN =
+  '«Start outreach» does not collect a vertical again while its latest collection ended this way. To try once more anyway, use «Collect again» on step 4 — it appears on the latest stopped collection of a vertical you have selected; a new collection is checked the same way and may stop here again.';
+
+/**
  * Где клиент перезапускает остановившийся шаг. Кнопок две, у каждой своя
  * область: research перезапускает «Re-run research» шага 1, упавшую сборку
  * базы — «Start outreach» шага 2 (клиентское нажатие ставит новую сборку
  * вертикали, у которой нет живой или готовой базы; упавшая база этому не
- * мешает). Один код причины бывает и у проекта, и у базы, поэтому названы обе.
+ * мешает — кроме остановок HE_COLLECT_STOP_REPEATS_CODES, у которых свой текст
+ * и своя кнопка). Один код причины бывает и у проекта, и у базы, поэтому
+ * названы обе.
  */
 const WHERE_TO_RESTART =
   '«Re-run research» on step 1 if the research stopped, «Start outreach» on step 2 if a base collection stopped';
@@ -195,10 +237,12 @@ export const HE_SPEND_PAUSED_EN =
  * ('billing'/'configuration'). Шаг сам не продолжается (отказ терминален с
  * первого ответа, авто-резюм и ночной реконсилер выключены по умолчанию и
  * такие отказы не поднимают), а нажать кнопку до починки — значит упереться в
- * тот же отказ, поэтому сверка с менеджером стоит раньше кнопки.
+ * тот же отказ, поэтому вопрос в Support стоит раньше кнопки. Менеджера у
+ * self-serve кабинета нет; Support — чат кабинета (пункт меню «Support»,
+ * /client/support), в нём отвечает команда.
  */
 const TEAM_FIX_WHAT_TO_DO =
-  `This step does not restart by itself. Your manager can tell you when it is fixed — then start it again: ${WHERE_TO_RESTART}.`;
+  `This step does not restart by itself. Message Support to find out when it is fixed — then start it again: ${WHERE_TO_RESTART}.`;
 
 /**
  * Что делать с остановившимся прогоном ежедневного долива, если у кода нет
@@ -207,7 +251,7 @@ const TEAM_FIX_WHAT_TO_DO =
  * карточка базы не видит; их показывает Command Center.
  */
 export const HE_REFILL_RUN_WHAT_TO_DO_EN =
-  'This was one run of the daily refill, and a refill run is not restarted by hand; the Command Center shows whether the daily refill goes on. Contact your manager if it keeps stopping.';
+  'This was one run of the daily refill, and a refill run is not restarted by hand; the Command Center shows whether the daily refill goes on. Message Support if it keeps stopping.';
 
 const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
   // 'billing' и 'configuration' читаются клиентом ОДИНАКОВО (HE_TEAM_ON_IT_EN):
@@ -238,20 +282,19 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
   provider: {
     title: 'This stopped early because of a temporary problem on our side.',
     whatIsSaved: FINISHED_WORK_KEPT,
-    whatToDo: `Trying again a little later usually helps: wait a few minutes, then start it again — ${WHERE_TO_RESTART}. If it keeps failing, contact your manager.`,
+    whatToDo: `Trying again a little later usually helps: wait a few minutes, then start it again — ${WHERE_TO_RESTART}. If it keeps failing, message Support.`,
   },
   /**
    * Действия — только те, что в ENG-кабинете есть. Загрузки своего списка в
    * кабинете нет, а us-запуск базы без построчного вердикта всё равно откажет.
-   * Отклонить гипотезы вертикали — единственный способ не дать «Start outreach»
-   * снова заплатить за ту же пробу: клиентское нажатие упавшей базой не
-   * останавливается.
+   * «Start outreach» такую вертикаль второй раз не собирает
+   * (HE_COLLECT_STOP_REPEATS_CODES), повтор — явная «Collect again».
    */
   audience_mismatch: {
     title: 'The catalog slice we could build for this vertical did not match it, so no base was built.',
     whatIsSaved: 'No contacts were bought for this vertical.',
     whatToDo:
-      'This was a deliberate stop — mailing such a list would hurt the verticals that do work. To keep «Start outreach» from trying this vertical again, reject its hypotheses on step 2; to collect another vertical, accept its hypotheses there and press «Start outreach».',
+      `This was a deliberate stop — mailing such a list would hurt the verticals that do work. ${COLLECT_AGAIN_EN} To collect another vertical instead, accept its hypotheses on step 2 and press «Start outreach».`,
   },
   /**
    * Сборка, в которой релевант-гейт снял все компании, судя целью по
@@ -282,17 +325,12 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
    *    могут быть другие, раньше собранные базы;
    *  - «your other bases and campaigns are not affected» — без «running»:
    *    кампании создаются на паузе, а их статус у рассыльщика кабинет не читает;
-   *  - про повтор — «may»: нажатие «Start outreach» собирает заново вертикаль
-   *    с принятой гипотезой и упавшей базой (autopilotReconcile: у клиентского
-   *    нажатия гейта «сборка уже падала» нет), и новая сборка может
-   *    остановиться так же. «Будет судиться тем же правилом» не пишем: флаг и
-   *    вердикты гипотез к следующему суду могут поменяться;
-   *  - «reject its hypotheses on step 2» — тот же выход, что у
-   *    audience_mismatch: шаг 2 даёт Reject и у принятой гипотезы
-   *    (EngStepVerticals), а вертикаль без принятой гипотезы «Start outreach»
-   *    пропускает ('not_selected', autopilotReconcile). Уже идущую стадию и
-   *    ночной долив запущенной вертикали отклонение не останавливает — фраза
-   *    говорит только про кнопку.
+   *  - про повтор — «may»: «Start outreach» эту вертикаль заново не собирает
+   *    (HE_COLLECT_STOP_REPEATS_CODES, autopilotReconcile), повтор — явная
+   *    «Collect again» шага 4, и новая сборка может остановиться так же. «Будет
+   *    судиться тем же правилом» не пишем: флаг и вердикты гипотез к
+   *    следующему суду могут поменяться — поэтому и сказано, что гипотезы
+   *    можно поменять на шаге 2 до повтора.
    */
   hypothesis_mismatch: {
     title:
@@ -300,13 +338,13 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved:
       'The companies found are saved with this base, but this collection did not look up any emails for them. Your other bases and campaigns are not affected.',
     whatToDo:
-      'This was a deliberate stop, not a technical problem. «Start outreach» on step 2 can collect this vertical again, and a new collection may stop here the same way. To keep «Start outreach» from trying this vertical again, reject its hypotheses on step 2.',
+      `This was a deliberate stop, not a technical problem. ${COLLECT_AGAIN_EN} Before that, you can change which of its hypotheses are accepted on step 2.`,
   },
   segment_exhausted: {
     title: 'The sources have no new companies left for this vertical.',
     whatIsSaved: 'Companies collected earlier stay in the bases you already have.',
     whatToDo:
-      'This does not mean the market is exhausted — only these sources are. To keep «Start outreach» from trying this vertical again, reject its hypotheses on step 2; to collect another vertical, accept its hypotheses there and press «Start outreach».',
+      `This does not mean the market is exhausted — only these sources are. ${COLLECT_AGAIN_EN} To collect another vertical instead, accept its hypotheses on step 2 and press «Start outreach».`,
   },
   // Не «источники не дали строк» (это был бы `source`): строки были, но все
   // они — компании и адреса, которые уже держит другая база проекта. Сбор
@@ -321,13 +359,13 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved:
       'Those companies and addresses stay in the audiences that already hold them; this collection does not add them a second time.',
     whatToDo:
-      'Press «Start outreach» on step 2 to collect this vertical again — a new collection skips the companies you already have; if it keeps coming back empty, contact your manager.',
+      'Press «Start outreach» on step 2 to collect this vertical again — a new collection skips the companies you already have; if it keeps coming back empty, message Support.',
   },
   source: {
     title: 'The company sources did not return any rows for this vertical.',
     whatIsSaved: FINISHED_WORK_KEPT,
     whatToDo:
-      'Press «Start outreach» on step 2 to collect this vertical again; if it keeps coming back empty, contact your manager.',
+      'Press «Start outreach» on step 2 to collect this vertical again; if it keeps coming back empty, message Support.',
   },
   /**
    * Единственный код, где виноват не наш контур: сайт, который клиент указал
@@ -354,12 +392,12 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved:
       'No address in this base has a verified email, so it cannot be mailed; your other bases and running campaigns are not affected.',
     whatToDo:
-      'Press «Start outreach» on step 2 to collect this vertical again — a new collection checks every address from the start. If it fails again, contact your manager.',
+      'Press «Start outreach» on step 2 to collect this vertical again — a new collection checks every address from the start. If it fails again, message Support.',
   },
   timeout: {
     title: 'The step did not finish in time and was stopped.',
     whatIsSaved: FINISHED_WORK_KEPT,
-    whatToDo: `Start it again — ${WHERE_TO_RESTART}. If it times out twice, contact your manager.`,
+    whatToDo: `Start it again — ${WHERE_TO_RESTART}. If it times out twice, message Support.`,
   },
   subscription_warmup: {
     title: 'Your mailboxes are still warming up, so sending is on hold.',
@@ -425,12 +463,12 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
   internal: {
     title: 'The step stopped because of a technical problem on our side.',
     whatIsSaved: FINISHED_WORK_KEPT,
-    whatToDo: `Start it again — ${WHERE_TO_RESTART}. If it happens twice, contact your manager.`,
+    whatToDo: `Start it again — ${WHERE_TO_RESTART}. If it happens twice, message Support.`,
   },
   unknown: {
     title: 'The step stopped because of a technical problem.',
     whatIsSaved: FINISHED_WORK_KEPT,
-    whatToDo: `Start it again — ${WHERE_TO_RESTART}. If it happens twice, contact your manager.`,
+    whatToDo: `Start it again — ${WHERE_TO_RESTART}. If it happens twice, message Support.`,
   },
 };
 

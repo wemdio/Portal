@@ -39,6 +39,8 @@ import { Clock, Eye, Rocket } from 'lucide-react';
 import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
 import { buildLaunchSequence, heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 import {
+  EngLaunchServerError,
+  EngPaidAccessError,
   engTemplateNeedsRewrite,
   engTemplatePlaceholders,
   fetchEngBaseRows,
@@ -55,6 +57,7 @@ import {
   type HeJobSummary,
 } from './api-client';
 import { EngBadge, EngBaseStatusBadge, EngCard, EngSpinner } from './ui';
+import { EngPaidAccessNotice, EngSupportText } from './EngPaidAccess';
 import {
   engChainDraftText,
   engLaunchRunStoppedText,
@@ -741,9 +744,12 @@ function VerticalReviewCard({
           кабинет её клиенту не предлагает. */}
       {!template && !templateBusy && base?.status === 'analyzed' && (
         <p className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
-          The base for this vertical is ready, but its template has not been built yet. Nothing
-          collected is lost — our team can see it. Contact your manager if this vertical stays this
-          way.
+          <EngSupportText
+            text={
+              'The base for this vertical is ready, but its template has not been built yet. Nothing ' +
+              'collected is lost — our team can see it. Message Support if this vertical stays this way.'
+            }
+          />
         </p>
       )}
 
@@ -752,7 +758,7 @@ function VerticalReviewCard({
           молча выпадала бы из запуска. */}
       {rewriteBlocksLaunch && (
         <p className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
-          {engTemplateNeedsRewriteText(launch === null ? 'none' : 'unfinished')}
+          <EngSupportText text={engTemplateNeedsRewriteText(launch === null ? 'none' : 'unfinished')} />
         </p>
       )}
 
@@ -819,6 +825,12 @@ function LaunchAllPanel({
   const [presets, setPresets] = useState<HeLaunchPresetOption[] | null>(null);
   const [presetId, setPresetId] = useState('');
   const [presetsError, setPresetsError] = useState('');
+  /**
+   * Отказ гейта платных шагов (почта не подтверждена, гейт не прочитал свои
+   * данные): его получил бы и каждый следующий шаблон, поэтому прогон на нём
+   * останавливается, а экран показывает действие (EngPaidAccessNotice).
+   */
+  const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
   const [state, setState] = useState<{
     running: boolean;
     /**
@@ -894,6 +906,11 @@ function LaunchAllPanel({
    *    аудитории ради того же отказа, — цикл останавливается, а строка отказа
    *    говорит, сколько шаблонов прогон не попробовал (иначе «Launched 1/4»
    *    не отличить от трёх отказов).
+   * Отказ гейта платных шагов (EngPaidAccessError: почта не подтверждена,
+   * гейт не прочитал данные) — тоже стоп: он про клиента, а не про шаблон.
+   * И 5xx без кода (EngLaunchServerError: сбой ядра или рассыльщика, лимит
+   * неудачных запусков шаблона за час) — стоп: сбой после классификатора
+   * следующий шаблон оплатил бы заново, не узнав ничего нового.
    */
   const onLaunchAll = async () => {
     if (state.running || !presetId || launchable.length === 0) return;
@@ -902,6 +919,7 @@ function LaunchAllPanel({
     const notes: string[] = [];
     let launched = 0;
     onRunStart();
+    setRefusal(null);
     setState({ running: true, launched: 0, total: launchable.length, errors: [], notes: [] });
     // Последовательно: параллельный запуск уронил бы лимиты Instantly и
     // перемешал бы launch_info опросов.
@@ -934,7 +952,24 @@ function LaunchAllPanel({
         // ошибки: кампании созданы. Поэтому отдельным списком и другим цветом.
         for (const warning of res.warnings ?? []) notes.push(warning);
       } catch (e) {
-        errors.push(e instanceof Error ? e.message : `Template ${i + 1}: launch failed`);
+        if (e instanceof EngPaidAccessError) {
+          // Гейт отвечает одинаково на любой шаблон этого клиента: дальше не
+          // пробуем, текст и действие — в EngPaidAccessNotice ниже.
+          setRefusal(e);
+          const notTried = launchable.length - i - 1;
+          if (notTried > 0) errors.push(engLaunchRunStoppedText(notTried));
+          stop = true;
+        } else if (e instanceof EngLaunchServerError) {
+          // 5xx без кода: сбой на нашей стороне (после классификатора сегментов
+          // — первая кампания не создалась) или лимит неудачных запусков
+          // шаблона. Следующий шаблон оплатил бы классификацию ради того же
+          // сбоя — прогон останавливается, как на отказе классификатора.
+          const notTried = launchable.length - i - 1;
+          errors.push(notTried > 0 ? `${e.message} ${engLaunchRunStoppedText(notTried)}` : e.message);
+          stop = true;
+        } else {
+          errors.push(e instanceof Error ? e.message : `Template ${i + 1}: launch failed`);
+        }
       }
       setState({
         running: true,
@@ -962,14 +997,19 @@ function LaunchAllPanel({
             Launched {state.launched}/{state.total}
           </div>
         )}
+        {refusal && (
+          <div className="mt-2">
+            <EngPaidAccessNotice refusal={refusal} />
+          </div>
+        )}
         {state.errors.map((err, i) => (
           <div key={i} className="mt-1 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-            {err}
+            <EngSupportText text={err} />
           </div>
         ))}
         {state.notes.map((note, i) => (
           <div key={i} className="mt-1 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
-            {note}
+            <EngSupportText text={note} />
           </div>
         ))}
       </EngCard>
@@ -985,7 +1025,9 @@ function LaunchAllPanel({
           </span>
         ) : presets && presets.length === 0 ? (
           <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-            No sending preset configured yet — ask your manager to set one up.
+            {/* Пресеты заводит команда: клиентского создания пресета нет
+                (api/client/preset — только чтение). */}
+            <EngSupportText text="No sending preset is set up for your account yet. Presets are set up by our team — message Support to have one set up." />
           </span>
         ) : (
           <>
@@ -1054,14 +1096,19 @@ function LaunchAllPanel({
           Launched {state.launched}/{state.total}
         </div>
       )}
+      {refusal && (
+        <div className="mt-2">
+          <EngPaidAccessNotice refusal={refusal} />
+        </div>
+      )}
       {state.errors.map((err, i) => (
         <div key={i} className="mt-1 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-          {err}
+          <EngSupportText text={err} />
         </div>
       ))}
       {state.notes.map((note, i) => (
         <div key={i} className="mt-1 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
-          {note}
+          <EngSupportText text={note} />
         </div>
       ))}
       {presetsError && (

@@ -350,7 +350,10 @@ export const CLIENT_NAV_ENG: ClientNavItem = {
   label: 'Outreach',
   labelEn: 'Outreach',
   href: '/client/eng',
-  description: 'Движок вертикалей для ENG-рынка (EN-интерфейс)',
+  // Пункт рисуется только ENG-клиенту (ветка market='eng' в ClientNavList),
+  // а подсказка выбирается по locale профиля, который у него бывает и 'ru' —
+  // поэтому английская в обоих полях, как у пунктов ниже.
+  description: 'Verticals engine for the US market (English UI)',
   descriptionEn: 'Verticals engine for the US market (English UI)',
 };
 
@@ -365,6 +368,23 @@ export const CLIENT_NAV_ENG_MAILBOXES: ClientNavItem = {
   href: '/client/eng/mailboxes',
   description: 'Connect your outreach mailboxes',
   descriptionEn: 'Connect your outreach mailboxes',
+};
+
+/**
+ * Чат поддержки в ENG-кабинете — тот же /client/support, что и
+ * CLIENT_NAV_SUPPORT, с тем же id: подсветку даёт resolveActiveNavId, бейдж
+ * непрочитанных и его сброс — layout (оба сверяют id 'support'). Отличаются
+ * только подписи: у ENG-пунктов обе английские (label не зависит от locale
+ * профиля, как у CLIENT_NAV_ENG), а описание не обещает «менеджера» — кабинет
+ * self-serve, отвечает команда в этом же чате. Middleware пускает
+ * eng-клиента на /client/support отдельным исключением.
+ */
+export const CLIENT_NAV_ENG_SUPPORT: ClientNavItem = {
+  ...CLIENT_NAV_SUPPORT,
+  label: 'Support',
+  labelEn: 'Support',
+  description: 'Message our team — replies come to this chat',
+  descriptionEn: 'Message our team — replies come to this chat',
 };
 
 /**

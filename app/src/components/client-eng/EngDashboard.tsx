@@ -41,6 +41,7 @@ import {
   engDashAttentionText,
   engRefillHoldText,
 } from './engText';
+import { EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
 import { HE_TEAM_ON_IT_SHORT_EN } from './clientFailureText';
 // Только тип — см. пояснение в engText.ts: набор состояний один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
@@ -70,7 +71,7 @@ const STAGE_STATUS: Record<EngDashStage, StageStatus> = {
   template: { tag: 'ready to launch', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   // Запуск записан, но не закончен — нужен шаг клиента (шаг 5), поэтому amber.
   launch_unfinished: { tag: 'launch unfinished', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
-  // Не «live»: кампании созданы на паузе, стартует их менеджер, а статус у
+  // Не «live»: кампании созданы на паузе, стартует их команда, а статус у
   // рассыльщика кабинет не читает. «created paused» верно и до старта, и
   // после; серый — этап пройден, следующий шаг за командой.
   launched: { tag: 'created paused', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
@@ -82,7 +83,7 @@ const STAGE_STATUS: Record<EngDashStage, StageStatus> = {
 
 /**
  * Тег этапа 'attention' по причине. Красный — сбой (упавшая база, упавший
- * research); янтарь — тупик без сбоя (база вернулась пустой: решает менеджер);
+ * research); янтарь — тупик без сбоя (база вернулась пустой: решает команда через Support);
  * серый — отмена, это решение человека, а не поломка.
  */
 function attentionStatus(attention: EngDashAttentionInfo | null | undefined): StageStatus {
@@ -103,7 +104,8 @@ function attentionStatus(attention: EngDashAttentionInfo | null | undefined): St
  *    причины вместе с «что делать» (engStageErrorText), а без причины — свою
  *    фразу с действием;
  *  - пустая база — у клиента хода нет: автопилот считает 'analyzed'-базу
- *    готовой и новую сборку не ставит, а шаблон по пустой базе не строится;
+ *    готовой и новую сборку не ставит, а шаблон по пустой базе не строится —
+ *    поэтому Support (чат кабинета, отвечает команда);
  *  - research — перезапускается «Re-run research» шага 1 (там же «Last error»
  *    шапки проекта, если причина записана);
  *  - остановленный анализ — «Start outreach» шага 2: при `requeues` кнопка
@@ -116,7 +118,7 @@ function attentionStatus(attention: EngDashAttentionInfo | null | undefined): St
 function attentionNextLine(attention: EngDashAttentionInfo | null | undefined): string {
   switch (attention?.reason) {
     case 'base_empty':
-      return 'next: ask your manager what to do with this vertical';
+      return 'next: message Support about this vertical';
     case 'project_failed':
       return 'next: open step 1 «Brief» — the research is restarted from there';
     case 'analysis_stopped':
@@ -156,8 +158,8 @@ const LETTERS_REWRITE_STATUS: StageStatus = {
   dot: 'var(--cp-amber)',
   text: 'var(--cp-amber)',
 };
-/** Следующий шаг такой вертикали — за менеджером, а не за кнопкой запуска. */
-const LETTERS_REWRITE_NEXT_LINE = 'next: ask your manager to rewrite the letters';
+/** Следующий шаг такой вертикали — за командой (через Support), а не за кнопкой запуска. */
+const LETTERS_REWRITE_NEXT_LINE = 'next: message Support to have the letters rewritten';
 
 const JOB_STAGE_LABELS: Record<string, string> = {
   site_profile: 'profiling the site',
@@ -356,7 +358,7 @@ const REFILL_NEXT_LINE: Record<HeClientRefillState, string> = {
   running: 'next: daily refill 03:20 UTC',
   paused: `next: daily refill on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
   spend_paused: `next: daily refill on hold — ${ENG_REFILL_SPEND_PAUSED_SHORT_EN}`,
-  stopped: 'next: daily refill stopped — project cancelled, your manager can restart it',
+  stopped: 'next: daily refill stopped — project cancelled; message Support to restart it',
   off: 'next: daily refill — not configured',
 };
 
@@ -711,7 +713,7 @@ function EventRow({ event, withBorder }: { event: EngDashboardEvent; withBorder:
     >
       <Icon className="h-3.5 w-3.5 shrink-0" style={{ color }} />
       <span className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
-        {event.text}
+        <EngSupportText text={event.text} />
       </span>
       <span className="shrink-0 text-[10px] ds-mono" style={{ color: 'var(--cp-paper-faint)' }}>
         {relTime(event.at)}
@@ -846,7 +848,7 @@ function VerticalCard({
 
       {note && note.text && (
         <p className="text-xs m-0" style={{ color: note.color }}>
-          {note.text}
+          <EngSupportText text={note.text} />
         </p>
       )}
 
@@ -885,7 +887,7 @@ function VerticalCard({
 
       <div className="pt-2.5" style={{ borderTop: '1px solid var(--cp-divider)' }}>
         <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-          {nextLineFor(vertical, refill, vertical.refill_dry === true, rewrite)}
+          <EngSupportText text={nextLineFor(vertical, refill, vertical.refill_dry === true, rewrite)} />
         </span>
       </div>
 
@@ -1044,6 +1046,8 @@ export function EngDashboard() {
         </Link>
       </header>
 
+      <EngVerifyEmailBanner />
+
       {error && !data ? (
         <div className="ds-card p-5 text-sm" style={{ color: 'var(--cp-red)' }}>
           {error}
@@ -1120,8 +1124,8 @@ export function EngDashboard() {
                       stopped
                     </span>
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
-                      {refillStoppedProjects.length === 1 ? 'project' : 'projects'} cancelled — your manager can
-                      restart the daily refill
+                      {refillStoppedProjects.length === 1 ? 'project' : 'projects'} cancelled —{' '}
+                      <EngSupportText text="message Support to restart the daily refill" />
                     </span>
                   </>
                 ) : (
@@ -1186,7 +1190,7 @@ export function EngDashboard() {
                   className="text-xs m-0"
                   style={{ color: p.state === 'stopped' ? 'var(--cp-paper-mute)' : 'var(--cp-amber)' }}
                 >
-                  <span className="font-semibold">{p.name}</span> — {engRefillHoldText(p.state)}
+                  <span className="font-semibold">{p.name}</span> — <EngSupportText text={engRefillHoldText(p.state)} />
                 </p>
               ))}
             </EngCard>

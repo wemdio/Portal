@@ -120,10 +120,13 @@ export type EngFailureScope = 'research' | 'collection' | 'refill';
  * «Start outreach» не переиспользует: упавшая база новую сборку не
  * останавливает, и та собирает заново.
  */
+const CANCELLED_BASE_HEAD_EN =
+  'Work on this base was cancelled before it finished, so this base will not be launched.';
+
 const STAGE_CANCELLED_EN: Record<EngFailureScope, string> = {
   research: 'The research was cancelled before it finished. Press «Re-run research» on step 1 to start it again.',
   collection:
-    'Work on this base was cancelled before it finished, so this base will not be launched. If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse this base.',
+    `${CANCELLED_BASE_HEAD_EN} If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse this base.`,
   refill: `This refill run was cancelled before it finished. ${HE_REFILL_RUN_KEPT_EN} A refill run is not restarted by hand; the Command Center shows whether the daily refill goes on.`,
 };
 
@@ -151,7 +154,7 @@ const REFILL_OWN_ACTION_CODES: ReadonlySet<HeClientErrorCode> = new Set<HeClient
  * Поэтому здесь одна честная фраза про запрос, а не про стадию.
  */
 const LIVE_FAILED_EN =
-  'The request did not go through because of a problem on our side. Try again in a minute; if it keeps failing, contact your manager.';
+  'The request did not go through because of a problem on our side. Try again in a minute; if it keeps failing, message Support.';
 
 /**
  * Скраб без подстановки объяснения: `null`, если текст и после скраба показывать
@@ -213,6 +216,31 @@ export function engStageErrorText(code: HeClientStageErrorCode, scope: EngFailur
   });
 }
 
+/** Первое предложение основной базы, упавшей без записанной причины (шаг 4). */
+export const ENG_NO_REASON_BASE_HEAD_EN =
+  'This collection stopped without a recorded reason, so this base will not be launched.';
+
+/**
+ * Остановленная основная база, которая НЕ решает, что дальше с вертикалью: у
+ * вертикали есть своя авто-база новее, либо собирающаяся, анализирующаяся или
+ * проанализированная (EngStepBases, `stopTextOffersRestart`). «Start outreach» решает
+ * по ПОСЛЕДНЕЙ своей базе — новой сборки при живой или готовой базе не ставит,
+ * а после остановки HE_COLLECT_STOP_REPEATS_CODES не ставит вовсе
+ * (autopilotReconcile.ts), — а «Collect again» рисуется только у последней
+ * остановленной. Поэтому у такой базы совет «перезапустите» был бы неправдой:
+ * вместо «что делать» — одна фраза, действие показано на той, другой базе.
+ * Заголовок и «что уцелело» — те же, что у полного текста (`engStageErrorText`).
+ */
+const EARLIER_BASE_NOTE_EN =
+  'Another base of this vertical is newer, still being collected or already collected, so this stopped one needs nothing from you.';
+
+export function engEarlierBaseStopText(code: HeClientStageErrorCode | null): string {
+  if (code === null) return `${ENG_NO_REASON_BASE_HEAD_EN} ${EARLIER_BASE_NOTE_EN}`;
+  if (code === 'cancelled') return `${CANCELLED_BASE_HEAD_EN} ${EARLIER_BASE_NOTE_EN}`;
+  const failure = heClientFailureFor(code);
+  return `${failure.title} ${failure.whatIsSaved} ${EARLIER_BASE_NOTE_EN}`;
+}
+
 /**
  * Почему карточка вертикали Command Center в этапе 'attention' — только «что
  * произошло» (у кодов, которые чинит команда, это два предложения
@@ -271,7 +299,8 @@ export function engRefillStoppedText(): string {
  *
  * Правила формулировок:
  *  - у КАЖДОГО кода назван следующий шаг: у `retrying` — уже существующая
- *    кнопка «Start outreach» шага 2, у остальных трёх — менеджер. НОВОЙ кнопки,
+ *    кнопка «Start outreach» шага 2, у остальных трёх — Support (чат кабинета,
+ *    отвечает команда; менеджера у self-serve кабинета нет). НОВОЙ кнопки,
  *    запускающей платную работу, кабинет для них не предлагает и не должен;
  *  - про автоматический повтор здесь НЕ обещано ничего, хотя у `read_failed` и
  *    `enqueue_failed` он предусмотрен: ночной проход
@@ -300,13 +329,13 @@ export function engRefillStoppedText(): string {
  */
 const AUTOPILOT_HOLD_EN: Record<HeClientAutopilotHoldCode, string> = {
   retrying:
-    'We could not read or save the state of this project on the last check, so the next stage was not started. Nothing is lost and nothing was cancelled. Open step 2 and press «Start outreach» to move it on — it picks up where the project stopped and does not repeat work that is already done. If that button is not on step 2, step 2 says what it is waiting for first. If it keeps coming back, contact your manager.',
+    'We could not read or save the state of this project on the last check, so the next stage was not started. Nothing is lost and nothing was cancelled. Open step 2 and press «Start outreach» to move it on — it picks up where the project stopped and does not repeat work that is already done. If that button is not on step 2, step 2 says what it is waiting for first. If it keeps coming back, message Support.',
   stage_stopped:
-    'A paid step of this project stopped with an error earlier, and the autopilot does not pay for the same step twice on its own. Everything collected so far is saved. Our team can see it — contact your manager if you want this project picked up again.',
+    'A paid step of this project stopped with an error earlier, and the autopilot does not pay for the same step twice on its own. Everything collected so far is saved. Our team can see it — message Support if you want this project picked up again.',
   letters_exhausted:
-    'Writing the letters for this base was retried as many times as we allow for one analysis, so the autopilot stopped retrying. The base and everything collected are saved. Our team can see it — contact your manager to have the letters looked at.',
+    'Writing the letters for this base was retried as many times as we allow for one analysis, so the autopilot stopped retrying. The base and everything collected are saved. Our team can see it — message Support to have the letters looked at.',
   target_missing:
-    'The autopilot could not tell what to work on next for this project, so it stopped moving it forward. Nothing collected is lost. Our team can see it — contact your manager to get this project going again.',
+    'The autopilot could not tell what to work on next for this project, so it stopped moving it forward. Nothing collected is lost. Our team can see it — message Support to get this project going again.',
   spend_paused: HE_SPEND_PAUSED_EN,
 };
 
@@ -354,7 +383,7 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * уехала в кампанию, а остаток (`stats.deferred` долива) не досылается и
  * теряется. Поэтому фраза говорит только про то, что уже в кампаниях, — это
  * верно для обеих форм отказа (целиком и наполовину). И не говорит, что эти
- * контакты «keep sending»: кампании создаются на паузе и стартует их менеджер,
+ * контакты «keep sending»: кампании создаются на паузе и стартует их команда,
  * а их статус у рассыльщика кабинет не читает, — правда только то, что пауза
  * добора отправку не останавливает (та же фраза, что у `spend_paused`).
  *
@@ -362,11 +391,12 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * кабинета, и только эту кнопку пишет эта причина (pauseHeRefillForClientCancel
  * зовёт один роут — api/client/eng/projects/[id]/cancel). Ни «временной
  * проблемы», ни «команда уже знает» здесь нет: алерта отмена не шлёт. Кто
- * вернёт добор — менеджер: снимает паузу только staff-кнопка (refill-pause),
- * «Start outreach» её не трогает. Лиды из кампаний отмена не убирает (роут
+ * вернёт добор — только команда: снимает паузу только staff-кнопка
+ * (refill-pause), «Start outreach» её не трогает, поэтому действие клиента —
+ * Support. Лиды из кампаний отмена не убирает (роут
  * отмены рассыльщика не зовёт вовсе). Если «Start outreach» когда-нибудь начнёт
  * снимать и эту паузу (открытое решение владельца), менять вместе: эту фразу и
- * подтверждение отмены в EngProjectWizard («only your manager can restart»).
+ * подтверждение отмены в EngProjectWizard («only by our team, through Support»).
  *
  * `spend_paused` — ПОТОЛОК РАСХОДА (lib/hypothesisEngine/spendCeiling.ts,
  * autoPipeline.ts шаг 3a-; по умолчанию потолок выключен, и эту фразу не
@@ -391,7 +421,7 @@ const REFILL_HOLD_EN: Record<EngRefillHoldState, string> = {
   spend_paused:
     'The daily refill for this project is on hold. It was paused on our side, so the refill does not start any new collection. Our team has been notified, and the refill continues when they resume it. Leads already in your campaigns stay there, and this hold does not stop sending.',
   stopped:
-    'The daily refill for this project is stopped because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Your manager can restart the daily refill.',
+    'The daily refill for this project is stopped because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Only our team can restart the daily refill — message Support to have it restarted.',
 };
 
 /** Состояния добора, у которых есть что объяснить отдельным блоком. */
@@ -453,7 +483,7 @@ export function engAutopilotIdleText(): string {
  *    ядро откажет тем же гейтом. «Ничего не отправлено» здесь неправда (часть
  *    уже в кампаниях), поэтому про отправленное фраза молчит.
  *
- * Действие — к менеджеру, как у 409: письма шаблона клиент не правит (правка
+ * Действие — Support, как у 409: письма шаблона клиент не правит (правка
  * цепочки на шаге 3 в готовый шаблон не попадает), а пересборку писем кабинет
  * не запускает. Обещания «команда уже видит» нет: алерта на это нет.
  */
@@ -463,8 +493,8 @@ const TEMPLATE_REWRITE_WHY_EN =
 
 export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished'): string {
   return launch === 'unfinished'
-    ? `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Ask your manager to have the letters rewritten.`
-    : `These letters cannot be launched as written: ${TEMPLATE_REWRITE_WHY_EN} Nothing has been sent from this template. Ask your manager to have the letters rewritten.`;
+    ? `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Message Support to have the letters rewritten.`
+    : `These letters cannot be launched as written: ${TEMPLATE_REWRITE_WHY_EN} Nothing has been sent from this template. Message Support to have the letters rewritten.`;
 }
 
 /**
@@ -525,15 +555,19 @@ export function engPlaceholderText(placeholder: ClientEngTemplatePlaceholder): s
 
 /**
  * «Launch all» остановлен отказом, который получил бы и следующий шаблон
- * (классификатор сегментов не ответил: он общий у всех шаблонов прогона).
+ * (классификатор сегментов не ответил: он общий у всех шаблонов прогона;
+ * гейт платных шагов — он про клиента, а не про шаблон).
  * Дописывается к тексту отказа: без неё «Launched 1/4» не говорит, пробовали
- * ли остальные. «Tries them as well» — правда: не тронутые прогоном шаблоны
- * остаются в списке запуска (записи о запуске у них нет), и отказавший тоже.
+ * ли остальные. Обещания «следующее нажатие их попробует» нет: прогон снова
+ * начнёт с отказавшего шаблона и, пока причина та же (почта не подтверждена,
+ * окно повторов классификатора полно), снова встанет на нём. Правда при любом
+ * исходе — только то, что не тронутые прогоном шаблоны остаются в списке
+ * запуска (записи о запуске у них нет).
  */
 export function engLaunchRunStoppedText(notTried: number): string {
   return notTried === 1
-    ? 'This run stopped here: 1 more template was not tried, and pressing «Launch all (paused)» again tries it as well.'
-    : `This run stopped here: ${notTried} more templates were not tried, and pressing «Launch all (paused)» again tries them as well.`;
+    ? 'This run stopped here: 1 more template was not tried. It stays in the list for the next «Launch all (paused)».'
+    : `This run stopped here: ${notTried} more templates were not tried. They stay in the list for the next «Launch all (paused)».`;
 }
 
 /**

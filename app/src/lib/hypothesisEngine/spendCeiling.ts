@@ -2,8 +2,10 @@
  * Потолок расхода ENG (P-A-project-spend-ceiling). ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН.
  *
  * ВЫКЛЮЧЕН — ЗНАЧИТ НИЧЕГО. Пока ни HE_US_PROJECT_SPEND_CAP_USD, ни
- * HE_US_PROJECT_DAY_SPEND_CAP_USD не заданы (пусто или переменной нет — это
- * дефолт), каждая проверка ниже возвращает 'off' ДО первого запроса к БД: ни
+ * HE_US_PROJECT_DAY_SPEND_CAP_USD, ни два порога клиента
+ * (HE_US_CLIENT_SPEND_CAP_USD, HE_US_CLIENT_DAY_SPEND_CAP_USD) не заданы (пусто
+ * или переменной нет — это дефолт), каждая проверка ниже возвращает 'off' ДО
+ * первого запроса к БД: ни
  * чтения журнала, ни записи паузы, ни алерта. Поведение любого рынка в дефолтной
  * конфигурации — прежнее, байт в байт по запросам.
  *
@@ -20,6 +22,19 @@
  *    эти сутки не потратили ничего, а снимать паузу добора пришлось бы по
  *    каждому руками. Общий счёт денег провайдера держат его собственные
  *    лимиты и балансы.
+ *  - потолок КЛИЕНТА — сумма по ВСЕМ us-проектам владельца проекта
+ *    (he_projects.created_by), за всё время (HE_US_CLIENT_SPEND_CAP_USD) и за
+ *    скользящие 24 часа (HE_US_CLIENT_DAY_SPEND_CAP_USD). Считает его
+ *    engClientSpend.ts (checkHeClientSpendCeilingForProject), здесь он только
+ *    ЗОВЁТСЯ — внутри checkHeSpendCeiling, и поэтому действует везде, где
+ *    действует потолок проекта: кнопки кабинета (enforceHeSpendCeiling),
+ *    ворота дочейна воркера и реконсилера (createHeSpendGate), ночной тик
+ *    добора (autoPipeline.ts) и выключение прохода автоподъёма баз
+ *    (baseAutoResume.ts, heSpendCeilingOn). Без него десять проектов одного
+ *    клиента обходили потолок проекта в десять раз. 'over' клиента делает то
+ *    же, что 'over' проекта (пауза ЭТОГО проекта + алерт), — другие проекты
+ *    клиента встанут на своей следующей платной постановке. Выключен (дефолт)
+ *    — ни одного лишнего запроса.
  *
  * КАК СЧИТАЕТСЯ РАСХОД. Только журнал ENG (costTelemetry.readHeProviderSpend,
  * источник application_logs 'he_provider_usage'), а не he_jobs.cost_usd: тот не
@@ -77,12 +92,15 @@
  * то есть заплатив ещё раз за уже сделанные стадии. Цена — перебор не больше
  * ОДНОГО исследования (с повторами упавших стадий, как у любой стадии): старт
  * видит расход чуть ниже порога, и цепочка из шести стадий (site_profile …
- * clustering) проходит целиком. Создание проекта (первое исследование) не
- * проверяется: у нового проекта журнала нет, порог недостижим. Staff-кнопка
+ * clustering) проходит целиком. Создание проекта (первое исследование)
+ * потолком ПРОЕКТА не проверяется: у нового проекта журнала нет, порог
+ * недостижим; потолок КЛИЕНТА его проверяет — гейт платных шагов кабинета
+ * (engPaidAccess.requireEngPaidAccess, действие 'create_project'). Staff-кнопка
  * исследования не проверяется намеренно (см. ниже про staff-инструмент).
  *
  * КТО СНИМАЕТ ПАУЗУ. Таймера нет ни у одной. Потолок проекта не опускается
- * сам — нужен поднятый HE_US_PROJECT_SPEND_CAP_USD; потолок суток отпускает
+ * сам — нужен поднятый HE_US_PROJECT_SPEND_CAP_USD (потолок клиента —
+ * поднятый HE_US_CLIENT_SPEND_CAP_USD); потолки суток отпускает
  * время — когда расход проекта за последние 24 часа опустится ниже порога, —
  * но и тогда никто не ставит пропущенную стадию сам. Возобновляет человек тем
  * же путём, что и любую паузу автопилота: «Start outreach» клиента
@@ -114,6 +132,14 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { clearHeSpendCeilingPauseIfSafe, recordHeAutopilotPause } from './autopilotNext';
 import type { HeSpendGate } from './autopilotNext';
 import { readHeProviderSpend, type HeProviderSpend } from './costTelemetry';
+// Цикл импортов с engClientSpend намеренный и безопасный: обе стороны читают
+// чужие экспорты только внутри функций, ни одного на верхнем уровне модуля.
+import {
+  HE_US_CLIENT_DAY_SPEND_CAP_ENV,
+  HE_US_CLIENT_SPEND_CAP_ENV,
+  checkHeClientSpendCeilingForProject,
+  type HeClientSpend,
+} from './engClientSpend';
 import { normalizeHeMarket } from './market';
 import { notifyHeClientStop } from './opsAlert';
 
@@ -149,6 +175,10 @@ export interface HeSpendCaps {
   projectCapUsd: number | null;
   /** null — потолок суток выключен. */
   dayCapUsd: number | null;
+  /** Потолок КЛИЕНТА за всё время (HE_US_CLIENT_SPEND_CAP_USD); null — выключен. */
+  clientCapUsd: number | null;
+  /** Потолок клиента за последние 24 часа (HE_US_CLIENT_DAY_SPEND_CAP_USD); null — выключен. */
+  clientDayCapUsd: number | null;
   /** null — Serper не оценивается. */
   serperUsdPer1000: number | null;
   /** Переменные, заданные нечитаемым значением (0, минус, не число) — считаются не заданными. */
@@ -180,14 +210,31 @@ export function readHeSpendCaps(env: NodeJS.ProcessEnv = process.env): HeSpendCa
   return {
     projectCapUsd: read(HE_US_PROJECT_SPEND_CAP_ENV),
     dayCapUsd: read(HE_US_PROJECT_DAY_SPEND_CAP_ENV),
+    clientCapUsd: read(HE_US_CLIENT_SPEND_CAP_ENV),
+    clientDayCapUsd: read(HE_US_CLIENT_DAY_SPEND_CAP_ENV),
     serperUsdPer1000: read(HE_US_SERPER_TARIFF_ENV),
     rejected,
   };
 }
 
-/** Включён ли потолок хоть одним порогом (тариф Serper сам по себе его не включает). */
-export function heSpendCeilingOn(caps: Pick<HeSpendCaps, 'projectCapUsd' | 'dayCapUsd'>): boolean {
+/**
+ * Включён ли потолок хоть одним порогом — проекта или клиента (тариф Serper сам
+ * по себе его не включает). Читатели «включён ли вообще»: ранний выход
+ * checkHeSpendCeiling и выключение прохода автоподъёма баз (baseAutoResume.ts),
+ * который ставит сборку внутри SQL, мимо этой проверки.
+ */
+export function heSpendCeilingOn(
+  caps: Pick<HeSpendCaps, 'projectCapUsd' | 'dayCapUsd' | 'clientCapUsd' | 'clientDayCapUsd'>,
+): boolean {
+  return heProjectCapsOn(caps) || heClientCapsOn(caps);
+}
+
+function heProjectCapsOn(caps: Pick<HeSpendCaps, 'projectCapUsd' | 'dayCapUsd'>): boolean {
   return caps.projectCapUsd !== null || caps.dayCapUsd !== null;
+}
+
+function heClientCapsOn(caps: Pick<HeSpendCaps, 'clientCapUsd' | 'clientDayCapUsd'>): boolean {
+  return caps.clientCapUsd !== null || caps.clientDayCapUsd !== null;
 }
 
 /* ─────────────── Чистое решение ─────────────── */
@@ -203,7 +250,8 @@ export interface HeSpendCeilingInput {
   dayCapUsd: number | null;
 }
 
-export type HeSpendCap = 'project' | 'day';
+/** 'client' / 'client_day' — потолки клиента (сумма по всем его us-проектам). */
+export type HeSpendCap = 'project' | 'day' | 'client' | 'client_day';
 
 /**
  *  - 'off'     — оба порога выключены (расход не смотрится вовсе);
@@ -261,6 +309,10 @@ export interface HeSpendCheck {
   projectSpend: HeProviderSpend | null;
   /** Журнал проекта за последние 24 часа (только при включённом потолке суток). */
   daySpend: HeProviderSpend | null;
+  /** Расход клиента за всё время (только при включённом потолке клиента). */
+  clientSpend: HeClientSpend | null;
+  /** Расход клиента за последние 24 часа (только при включённом потолке клиента за сутки). */
+  clientDaySpend: HeClientSpend | null;
   /** Почему расход неизвестен (безопасный текст для лога); null — прочитан. */
   failure: string | null;
 }
@@ -291,37 +343,129 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | 'timeout'> {
   });
 }
 
+interface HeSpendCheckArgs {
+  projectId: string;
+  /** Рынок, если вызывающий его уже прочитал (тогда без лишнего SELECT). */
+  market?: unknown;
+  projectName?: string | null;
+  caps?: HeSpendCaps;
+  now?: Date;
+  timeoutMs?: number;
+}
+
 /**
- * Проверить потолок проекта. НИКОГДА НЕ БРОСАЕТ и не ждёт дольше `timeoutMs`.
+ * Проверить потолки проекта И клиента. НИКОГДА НЕ БРОСАЕТ и не ждёт дольше
+ * `timeoutMs` (обе проверки идут параллельно, у каждой свой срок).
  *
- * Запросы: при выключенном потолке — ноль. При включённом: рынок и имя проекта
- * (один SELECT, если вызывающий не передал рынок), затем журнал — за всё время
- * (потолок проекта) и за последние 24 часа до `now` (потолок суток),
- * параллельно, по одной сумме на сервере (без миграции — постранично). Рынок
- * не 'us' — журнал не читается.
+ * Запросы: при выключенных потолках — ноль. Потолок проекта: рынок и имя
+ * проекта (один SELECT, если вызывающий не передал рынок), затем журнал — за
+ * всё время (потолок проекта) и за последние 24 часа до `now` (потолок суток),
+ * параллельно, по одной сумме на сервере (без миграции — постранично).
+ * Потолок клиента: владелец и рынок проекта (один SELECT), затем по одной
+ * сумме на сервере на каждый включённый порог (engClientSpend.ts). Рынок не
+ * 'us' — журнал не читается.
+ *
+ * Сведение двух ответов: доказанное 'over' важнее всего (порог проекта
+ * называется первым, как и раньше), затем 'unknown' (пускаем, fail-open),
+ * затем 'not_us', затем 'under'.
  */
 export async function checkHeSpendCeiling(
   db: SupabaseClient,
-  args: {
-    projectId: string;
-    /** Рынок, если вызывающий его уже прочитал (тогда без лишнего SELECT). */
-    market?: unknown;
-    projectName?: string | null;
-    caps?: HeSpendCaps;
-    now?: Date;
-    timeoutMs?: number;
-  },
+  args: HeSpendCheckArgs,
 ): Promise<HeSpendCheck> {
   const caps = args.caps ?? readHeSpendCaps();
+  const base: HeSpendCheck = {
+    verdict: { kind: 'off' },
+    caps,
+    projectName: args.projectName ?? null,
+    projectSpend: null,
+    daySpend: null,
+    clientSpend: null,
+    clientDaySpend: null,
+    failure: null,
+  };
+  if (!heSpendCeilingOn(caps)) return base;
+  // Рынок уже известен и он не 'us' — ни одна из проверок не нужна.
+  if (args.market !== undefined && normalizeHeMarket(args.market) !== 'us') {
+    return { ...base, verdict: { kind: 'not_us' } };
+  }
+  const [project, client] = await Promise.all([
+    heProjectCapsOn(caps) ? checkHeProjectCaps(db, { ...args, caps }) : Promise.resolve(null),
+    heClientCapsOn(caps) ? checkHeClientCaps(db, { ...args, caps }) : Promise.resolve(null),
+  ]);
+  const merged: HeSpendCheck = {
+    ...base,
+    projectName: project?.projectName ?? base.projectName,
+    projectSpend: project?.projectSpend ?? null,
+    daySpend: project?.daySpend ?? null,
+    clientSpend: client?.clientSpend ?? null,
+    clientDaySpend: client?.clientDaySpend ?? null,
+    failure: [project?.failure, client?.failure].filter(Boolean).join('; ') || null,
+  };
+  const pv = project?.verdict ?? null;
+  const cv = client?.verdict ?? null;
+  const verdict: HeSpendCheck['verdict'] =
+    pv?.kind === 'over' ? pv
+      : cv?.kind === 'over' ? cv
+        : pv?.kind === 'unknown' ? pv
+          : cv?.kind === 'unknown' ? cv
+            : pv?.kind === 'not_us' || cv?.kind === 'not_us' ? { kind: 'not_us' }
+              : pv?.kind === 'under' || cv?.kind === 'under' ? { kind: 'under' }
+                : { kind: 'off' };
+  return { ...merged, verdict };
+}
+
+/**
+ * Потолок клиента по id проекта — вызов engClientSpend.checkHeClientSpendCeilingForProject
+ * и перевод его ответа в словарь этого модуля. Не бросает (вызываемая не бросает).
+ * 'off' от неё при включённом пороге значит одно — проект не 'us'.
+ */
+async function checkHeClientCaps(
+  db: SupabaseClient,
+  args: HeSpendCheckArgs & { caps: HeSpendCaps },
+): Promise<Pick<HeSpendCheck, 'verdict' | 'clientSpend' | 'clientDaySpend' | 'failure'>> {
+  const check = await checkHeClientSpendCeilingForProject(db, {
+    projectId: args.projectId,
+    caps: {
+      totalCapUsd: args.caps.clientCapUsd,
+      dayCapUsd: args.caps.clientDayCapUsd,
+      serperUsdPer1000: args.caps.serperUsdPer1000,
+      rejected: [],
+    },
+    now: args.now,
+    timeoutMs: args.timeoutMs,
+  });
+  const v = check.verdict;
+  const cap = (c: 'total' | 'day'): HeSpendCap => (c === 'total' ? 'client' : 'client_day');
+  const verdict: HeSpendCheck['verdict'] =
+    v.kind === 'over' ? { kind: 'over', cap: cap(v.cap), spendUsd: v.spendUsd, capUsd: v.capUsd }
+      : v.kind === 'unknown' ? { kind: 'unknown', cap: cap(v.cap) }
+        : v.kind === 'under' ? { kind: 'under' }
+          : { kind: 'not_us' };
+  return {
+    verdict,
+    clientSpend: check.total,
+    clientDaySpend: check.day,
+    failure: check.failure ? `client: ${check.failure}` : null,
+  };
+}
+
+/** Потолок ПРОЕКТА — прежняя проверка (см. checkHeSpendCeiling). Не бросает. */
+async function checkHeProjectCaps(
+  db: SupabaseClient,
+  args: HeSpendCheckArgs & { caps: HeSpendCaps },
+): Promise<HeSpendCheck> {
+  const caps = args.caps;
   const result: HeSpendCheck = {
     verdict: { kind: 'off' },
     caps,
     projectName: args.projectName ?? null,
     projectSpend: null,
     daySpend: null,
+    clientSpend: null,
+    clientDaySpend: null,
     failure: null,
   };
-  if (!heSpendCeilingOn(caps)) return result;
 
   const unknown = (failure: string): HeSpendCheck => ({
     ...result,
@@ -414,12 +558,39 @@ function usd(value: number): string {
 }
 
 /** Причина для алерта: какой порог, сколько известно, что не поставлено. */
+/**
+ * Подпись порога для алерта. Функцией, а не таблицей на верхнем уровне модуля:
+ * имена порогов клиента импортируются из engClientSpend, а он импортирует этот
+ * модуль — таблица, вычисленная при загрузке, прочла бы их до инициализации.
+ */
+function capLabel(cap: HeSpendCap): string {
+  switch (cap) {
+    case 'project':
+      return `потолок проекта ${HE_US_PROJECT_SPEND_CAP_ENV}`;
+    case 'day':
+      return `потолок за последние 24 ч ${HE_US_PROJECT_DAY_SPEND_CAP_ENV}`;
+    case 'client':
+      return `потолок клиента (все его us-проекты) ${HE_US_CLIENT_SPEND_CAP_ENV}`;
+    case 'client_day':
+      return `потолок клиента за последние 24 ч ${HE_US_CLIENT_DAY_SPEND_CAP_ENV}`;
+  }
+}
+
 export function describeHeSpendStop(check: HeSpendCheck, stage: string, path: HeSpendPath): string {
   const verdict = check.verdict;
-  const spend = verdict.kind === 'over' && verdict.cap === 'day' ? check.daySpend : check.projectSpend;
+  const spend: Pick<HeProviderSpend, 'calls' | 'unpricedCalls' | 'lostRows' | 'skippedRows'> | null =
+    verdict.kind !== 'over'
+      ? check.projectSpend
+      : verdict.cap === 'day'
+        ? check.daySpend
+        : verdict.cap === 'client'
+          ? check.clientSpend
+          : verdict.cap === 'client_day'
+            ? check.clientDaySpend
+            : check.projectSpend;
   const head =
     verdict.kind === 'over'
-      ? `${verdict.cap === 'project' ? `потолок проекта ${HE_US_PROJECT_SPEND_CAP_ENV}` : `потолок за последние 24 ч ${HE_US_PROJECT_DAY_SPEND_CAP_ENV}`}: ` +
+      ? `${capLabel(verdict.cap)}: ` +
         `известно ${usd(verdict.spendUsd)} ≥ ${usd(verdict.capUsd)}` +
         (spend ? ` по ${spend.calls} обращ.` : '')
       : `потолок: ${verdict.kind}`;
@@ -556,7 +727,7 @@ export async function enforceHeSpendCeiling(
     }
   } else if (verdict.kind === 'unknown' && args.warn) {
     args.warn(
-      `[he-spend] расход проекта ${args.projectId} неизвестен (${check.failure ?? verdict.cap}) — ` +
+      `[he-spend] расход проекта ${args.projectId} или его клиента неизвестен (${check.failure ?? verdict.cap}) — ` +
         `${args.stage} ставим без потолка (fail-open)`,
     );
   }
@@ -609,7 +780,7 @@ export function buildHeSpendCeilingPauseReason(check: HeSpendCheck): string {
   return (
     `${HE_SPEND_CEILING_PAUSE_NOTE}: ${describeHeSpendStop(check, 'base_collect', 'nightly_refill')}. ` +
     'Ночной добор остановлен до явного возобновления сотрудником; если порог не поднят (а для суточного — ' +
-    'если расход проекта за последние 24 часа всё ещё не ниже него), следующая ночь поставит паузу снова.'
+    'если расход проекта или клиента за последние 24 часа всё ещё не ниже него), следующая ночь поставит паузу снова.'
   );
 }
 

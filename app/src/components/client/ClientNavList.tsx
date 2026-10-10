@@ -10,6 +10,7 @@ import {
   CLIENT_NAV_GIS_SIGNALS,
   CLIENT_NAV_ENG,
   CLIENT_NAV_ENG_MAILBOXES,
+  CLIENT_NAV_ENG_SUPPORT,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
   CLIENT_NAV_OFFER,
@@ -141,6 +142,20 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
           locale={locale}
           onItemClick={onItemClick}
         />
+        {/* Чат поддержки: кабинет self-serve, и отказы кабинета ведут сюда.
+            Нижний блок с разделителем — как у RU-рендера ниже; бейдж тот же. */}
+        <div
+          className="mt-5 pt-4 border-t flex flex-col gap-0.5"
+          style={{ borderColor: 'var(--cp-divider)' }}
+        >
+          <NavItemRow
+            item={CLIENT_NAV_ENG_SUPPORT}
+            active={activeId === CLIENT_NAV_ENG_SUPPORT.id}
+            locale={locale}
+            onItemClick={onItemClick}
+            badge={supportBadge}
+          />
+        </div>
       </nav>
     );
   }

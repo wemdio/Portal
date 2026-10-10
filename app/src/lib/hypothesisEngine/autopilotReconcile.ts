@@ -49,6 +49,19 @@
  *     he_bases.error: отменённая клиентом сборка паузы «платный шаг упал» не
  *     даёт, а база, за которую ничего не платили (сорвавшаяся постановка),
  *     провалом не считается вовсе.
+ * КНОПКА ТОЖЕ НЕ ПЛАТИТ ЗА СБОРКУ, КОТОРАЯ ОСТАНОВИТСЯ ТАК ЖЕ. Если ПОСЛЕДНЯЯ
+ * своя (не доливная) база вертикали кончилась решением, которое новая сборка
+ * повторит (код причины из HE_COLLECT_STOP_REPEATS_CODES: срез не про
+ * вертикаль, гейт снял все компании, источники исчерпаны — классификатор тот
+ * же, что у кабинета, classifyHeClientError), нажатие «Start outreach» эту
+ * вертикаль пропускает с причиной 'collect_stop_repeats' (паузы проекта нет:
+ * это решение, а не сбой; код причины едет в details). До этой правки каждое
+ * нажатие — а оно у клиента одно на весь проект — заново покупало сборку до
+ * AUTOPILOT_BASE_LIMIT строк для КАЖДОЙ такой вертикали. Повтор теперь —
+ * только явная кнопка «Collect again» шага 4 (POST
+ * /api/client/eng/verticals/[id]/collect). Временные отказы (провайдер, срок,
+ * конструктор) и отмена клиентом кнопка по-прежнему повторяет.
+ *
  * Тормоз писем (heTemplateGenerationBudget) применяется в ОБОИХ режимах: там
  * бюджет считается по поколению анализа, и повторная кнопка тоже не должна
  * ставить новую генерацию по анализу, на котором порог уже достигнут.
@@ -65,6 +78,8 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { enqueueHeBaseCollect, isHeCollectingBaseLive } from './baseCollectEnqueue';
+import { classifyHeClientError, type HeClientErrorCode } from './clientErrors';
+import { heCollectStopRepeats } from '@/components/client-eng/clientFailureText';
 import { defaultChainLanguageForMarket, normalizeHeMarket } from './market';
 import { flushHeOpsAlerts } from './opsAlert';
 import { createHeSpendGate } from './spendCeiling';
@@ -112,6 +127,25 @@ export type HeAutopilotReconcileStep =
 export type HeAutopilotRefusal = 'not_researched' | 'no_verticals';
 
 /**
+ * Причина пропуска вертикали в этом пути: общий словарь автопилота
+ * (HeAutopilotSkipReason, autopilotNext.ts) плюс одна своя —
+ * 'collect_stop_repeats': последняя своя база вертикали остановилась решением,
+ * которое новая сборка повторит (HE_COLLECT_STOP_REPEATS_CODES), и кнопка
+ * сборку не покупает (докблок файла). Своя, а не общая: её решает только
+ * клиентское нажатие этого пути; воркер её не встречает. Паузы проекта не
+ * даёт (pauseForReconcileSkip).
+ */
+export type HeAutopilotReconcileSkipReason = HeAutopilotSkipReason | 'collect_stop_repeats';
+
+function pauseForReconcileSkip(reason: HeAutopilotReconcileSkipReason): HeAutopilotPauseReason | null {
+  // Решение, а не сбой: причину клиент читает у самой базы (код причины на
+  // шаге 4) вместе с кнопкой «Collect again», а карточка паузы проекта
+  // говорила бы про остановленный платный шаг.
+  if (reason === 'collect_stop_repeats') return null;
+  return pauseForHeAutopilotSkip(reason);
+}
+
+/**
  * Чем решил тормоз писем — ЧИСЛАМИ, а не одним вердиктом.
  *
  * `heTemplateGenerationBudget` считает оба, и без них «letters_exhausted»
@@ -145,7 +179,9 @@ export interface HeAutopilotVerticalDetail {
     | 'analysis_requeued'
     | 'skipped';
   /** Причина пропуска (у outcome='skipped' — всегда). */
-  reason?: HeAutopilotSkipReason;
+  reason?: HeAutopilotReconcileSkipReason;
+  /** Код остановки последней базы (только у reason='collect_stop_repeats'). */
+  stopCode?: HeClientErrorCode;
   /** База, к которой относится итог (ремонт анализа, постановка шаблона). */
   baseId?: string;
   /** Входные числа тормоза писем (только у reason='letters_exhausted'). */
@@ -290,7 +326,9 @@ export async function reconcileHeAutopilotProject(
       .from('he_bases')
       // HE_ANALYZING_BASE_FIELDS — поля общего предиката/ремонта осиротевшей
       // 'analyzing'-базы; `data` (строки базы) сюда не попадает.
-      .select(`${HE_ANALYZING_BASE_FIELDS}, vertical_id, source`)
+      // `error` — короткая причина остановки (≤ 500 символов): по ней кнопка
+      // решает, повторит ли новая сборка остановку последней базы.
+      .select(`${HE_ANALYZING_BASE_FIELDS}, vertical_id, source, error`)
       .eq('project_id', projectId)
       .order('created_at', { ascending: false }),
     supabase.from('he_templates').select('id, vertical_id, base_id').in('vertical_id', verticalIds),
@@ -309,7 +347,9 @@ export async function reconcileHeAutopilotProject(
 
   // Упавшие платные стадии нужны только ночному проходу: он за упавшую стадию
   // второй раз не платит (докблок файла). Кнопка клиента читает их незачем —
-  // повтор там и есть смысл нажатия.
+  // повтор там и есть смысл нажатия; исключение кнопки — сборка, последняя
+  // база которой остановилась решением, которое повторится (repeatStop ниже),
+  // и оно читается из снапшота баз, а не из этих джоб.
   //
   // Стадий тут ЧЕТЫРЕ, и у двух «базовых» своя причина:
   //  - base_analyze — без неё ночной проход платил бы вечно. Финальный фейл
@@ -507,7 +547,8 @@ export async function reconcileHeAutopilotProject(
     // ('analyzed') база, а шаг писем разбирается только при ней, и ветка
     // сборки требует её отсутствия.
     let enqueued = false;
-    let skipReason: HeAutopilotSkipReason | null = null;
+    let skipReason: HeAutopilotReconcileSkipReason | null = null;
+    let skipStopCode: HeClientErrorCode | undefined;
     let skipMessage: string | undefined;
     let skipLetters: HeAutopilotLettersBudget | undefined;
 
@@ -547,7 +588,17 @@ export async function reconcileHeAutopilotProject(
           status: 'pending',
           payload: { vertical_id: verticalId, language },
         });
-        if (chainErr) {
+        if (chainErr?.code === '23505') {
+          // he_jobs_one_active_chain_per_vertical (20261010_0003): между
+          // снапшотом активных джоб выше и этой вставкой цепочку вертикали
+          // поставил кто-то другой — роут цепочки кабинета или специалиста,
+          // второй такой же проход. Тот же исход, что у дедупа по снапшоту, —
+          // 'chain_running' без паузы, а не сбой постановки. Других уникальных
+          // ограничений, способных ответить 23505 на вставку chain, у he_jobs
+          // нет (PK — gen_random_uuid, прочие partial-индексы — по другим
+          // стадиям). Без миграции 23505 не бывает, и путь прежний.
+          skipReason = 'chain_running';
+        } else if (chainErr) {
           await recordHeAutopilotPause(supabase, projectId, 'enqueue_failed');
           return {
             ok: false,
@@ -558,10 +609,11 @@ export async function reconcileHeAutopilotProject(
             pause: 'enqueue_failed',
             counts,
           };
+        } else {
+          counts.chainsEnqueued += 1;
+          details.push({ verticalId, outcome: 'chain_enqueued' });
+          enqueued = true;
         }
-        counts.chainsEnqueued += 1;
-        details.push({ verticalId, outcome: 'chain_enqueued' });
-        enqueued = true;
       }
     } else if (!readyChain) {
       // Цепочка ещё генерируется — ниже по конвейеру делать нечего.
@@ -655,8 +707,9 @@ export async function reconcileHeAutopilotProject(
       }
 
       // ПОСЛЕДНЯЯ платная попытка вертикали, закончившаяся базой 'failed', —
-      // по статусу СВОЕЙ джобы, а не по тексту he_bases.error (ночью; кнопке
-      // это незачем). Свежая база — первой (выборка по created_at desc).
+      // по статусу СВОЕЙ джобы, а не по тексту he_bases.error (ночью; у кнопки
+      // свой, более узкий гейт — repeatStop ниже). Свежая база — первой
+      // (выборка по created_at desc).
       // Формы 'failed'-базы (refill сюда не входит) по последней
       // упавшей/отменённой джобе её сборки или анализа:
       //  - сборка 'failed' (стадия сама отказала: ноль строк, проба среза,
@@ -674,6 +727,16 @@ export async function reconcileHeAutopilotProject(
           .map((b) => baseJobEnded.get(asString(b.id)))
           .find((ended): ended is HeJobEndedOutcome => ended !== undefined)
         : undefined;
+
+      // Гейт КНОПКИ (докблок файла): последняя своя база вертикали — самая
+      // свежая из autoBases — 'failed' с остановкой, которую новая сборка
+      // повторит. Только последняя: если после такой остановки была ещё
+      // сборка (явная «Collect again»), решает её исход. Отмена клиентом
+      // ('Cancelled by user') и пустая причина классифицируются иначе и
+      // повтор не останавливают. Ночью не нужен: ночной гейт выше шире.
+      const latestAuto = autoBases[0] as Row | undefined;
+      const repeatStop =
+        !nightly && latestAuto?.status === 'failed' ? classifyHeClientError(latestAuto.error) : null;
 
       // Осиротевшая 'collecting' идёт сюда же, но только без 'analyzing'-баз
       // (почему — у цикла ремонта анализа выше). Гейты и ворота у неё те же,
@@ -693,6 +756,11 @@ export async function reconcileHeAutopilotProject(
           // поднять упавшую базу умеет отдельный проход (baseAutoResume) со
           // своими потолками, а новая сборка — решение человека.
           skipReason = 'collect_failed_before';
+        } else if (repeatStop !== null && heCollectStopRepeats(repeatStop)) {
+          // Новая сборка остановилась бы так же — не покупаем; повтор —
+          // явная «Collect again» на шаге 4 кабинета.
+          skipReason = 'collect_stop_repeats';
+          skipStopCode = repeatStop;
         } else {
           const stop =
             (await stopUnlessAutopilotOn(verticalId)) ?? (await stopOnSpendCeiling(verticalId, 'base_collect'));
@@ -834,15 +902,16 @@ export async function reconcileHeAutopilotProject(
       counts.verticalsSkipped += 1;
       // Причины нет ровно в одном случае: цепочка готова, база живая и
       // ставить нечего — это и есть 'base_in_progress'.
-      const reason: HeAutopilotSkipReason = skipReason ?? 'base_in_progress';
+      const reason: HeAutopilotReconcileSkipReason = skipReason ?? 'base_in_progress';
       details.push({
         verticalId,
         outcome: 'skipped',
         reason,
+        ...(skipStopCode ? { stopCode: skipStopCode } : {}),
         ...(skipLetters ? { letters: skipLetters } : {}),
         ...(skipMessage ? { message: skipMessage } : {}),
       });
-      pause = worstPause(pause, pauseForHeAutopilotSkip(reason));
+      pause = worstPause(pause, pauseForReconcileSkip(reason));
     }
   }
 

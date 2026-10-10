@@ -717,6 +717,32 @@ services:
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=hypothesis-engine
+      # Потолок V8 old space — 75% лимита контейнера (deploy ниже), та же
+      # ступень, на которую VE2 перешёл после OOM 15.09.2026
+      # (docs/incidents/2026-09-15-ve2-resume-oom-and-parallel-projects.md):
+      # без флага при лимите 512M V8 давал себе около 259 MiB. Флаг и лимит
+      # меняются только вместе: потолок кучи выше лимита превращает внятный
+      # V8-фатал в OOM-kill без строки в логе.
+      - NODE_OPTIONS=--max-old-space-size=1536
+    # Срок между SIGTERM и SIGKILL. Становится StopTimeout контейнера при его
+    # создании и живёт в контейнере, а не в этом файле: ветка Hypothesis
+    # Engine в drain-worker.sh зовёт `docker compose stop` без -t, то есть
+    # ждёт StopTimeout ТЕКУЩЕГО контейнера (созданного прошлым пересозданием).
+    # Правка значения действует на дренаж только после `up -d
+    # --force-recreate` этого сервиса, то есть со следующего деплоя. Свои
+    # потолки (StopTimeout + 60 с — HTTP-таймауты compose/docker, + 90 с —
+    # `timeout`) скрипт берёт из `docker inspect` контейнера; не прочитал —
+    # считает 300 с. SIGTERM → воркер перед каждым клеймом проверяет флаг и
+    # новых джоб не берёт (клейм, уже начатый к сигналу, доходит до конца),
+    # доигрывает текущую и выходит; не уложился — SIGKILL, и на старте
+    # resetStuckJobs возвращает строку в очередь прерыванием 'restart'
+    # (попытку не тратит, до пяти подряд). Худший дренаж этой ветки — этот
+    # срок + около 140 с: два чтения he_jobs по ≤ 15 с, inspect ≤ 20 с, stop ≤
+    # срок + 90 с (и ещё 10 с, если клиент compose придётся убить). Плюс
+    # ≈25,5 мин остальных веток (VE2 5 мин + auto-pipeline 20 мин + 20 с) —
+    # только пока их чтения отвечают: у fetch_running_rows таймаута нет. Всё
+    # это — внутри 60-минутного лимита джобы деплоя вместе с pull и рестартами
+    # (.semaphore/scheduled-deploy.yml).
     stop_grace_period: 5m
     # autoheal + heartbeat healthcheck — защита от event-loop hang'ов
     # (паттерн worker-yandexmaps, инцидент 27.07.2026: процесс жив, а event
@@ -735,7 +761,16 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          # 512M → 2 GiB (решение владельца 10.10.2026). Воркер один на оба
+          # рынка (ENG-кабинет и RU-инструмент /tools/hypothesis-engine) и
+          # разбирает в памяти целиком data других баз проекта и сетку
+          # конструктора (stages/baseCollect.ts); при 512M на том же образе
+          # VE2 падал «heap out of memory». Убийство по памяти обрывает стадию
+          # посередине, и её прогон повторяется (с чекпоинта — только у
+          # base_collect и у us-стадий evidence/brand_cloud). Лимит не
+          # резервирует память заранее; вступает в силу только после
+          # `up -d --force-recreate` (CLAUDE.md).
+          memory: 2048M
           cpus: '0.5'
     restart: unless-stopped
     networks:

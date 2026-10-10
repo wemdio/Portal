@@ -5,7 +5,12 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
-import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import {
+  engPaidAccessResponse,
+  loadClientHeProject,
+  requireEngMarket,
+  requireEngPaidAccess,
+} from '@/lib/hypothesisEngine/apiGuards';
 import { reconcileHeAutopilotProject } from '@/lib/hypothesisEngine/autopilotReconcile';
 import type {
   HeAutopilotReconcileStep,
@@ -54,9 +59,19 @@ const FAILURE_EVENT: Record<HeAutopilotReconcileStep, string> = {
 // «Start outreach» после отмены включает автопилот снова, но паузу ночного
 // добора НЕ снимает: её возвращает сотрудник (staff-инструмент).
 //
-// Отличие ручного вызова от ночного ровно одно (см. докблок модуля): человек
-// вправе оплатить повтор упавшей стадии, машина — нет. Тормоз бесконечной
+// Отличие ручного вызова от ночного (см. докблок модуля): человек вправе
+// оплатить повтор упавшей стадии, машина — нет. Исключение и для человека —
+// сборка вертикали, чья последняя база остановилась решением, которое новая
+// сборка повторит (HE_COLLECT_STOP_REPEATS_CODES): её «Start outreach» не
+// покупает, повтор — явная «Collect again» (POST .../verticals/[id]/collect);
+// такие вертикали считает collect_again_verticals ответа. Тормоз бесконечной
 // генерации писем (бюджет поколения анализа) действует в обоих режимах.
+//
+// ГЕЙТ ПЛАТНЫХ ШАГОВ (requireEngPaidAccess, действие 'start_outreach'):
+// подтверждённая почта и потолок расхода клиента — ДО реконсилера, потому что
+// каждое его действие (цепочка, сборка, ремонт анализа, письма) платное.
+// Отказ — типизированный 4xx с английским текстом и кодом (engPaidAccess.ts).
+// Потолки проекта и клиента реконсилер проверяет и сам (createHeSpendGate).
 //
 // Границы: проект обязан быть status='researched' (verticals/гипотезы уже есть)
 // и иметь хотя бы одну вертикаль — иначе 409. Рынок НЕ ограничиваем: флаг и
@@ -83,6 +98,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+
+    const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'start_outreach' });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
 
     const reconciled = await reconcileHeAutopilotProject(supabaseAdmin, {
       projectId: id,
@@ -123,6 +141,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const lettersBudget = reconciled.details.flatMap((detail) =>
       detail.letters ? [{ verticalId: detail.verticalId, ...detail.letters }] : [],
     );
+    // Вертикали, которым это нажатие НЕ купило новую сборку, потому что их
+    // последняя база остановилась решением, которое повторится: след в аудите
+    // (вертикаль и код причины) и число для кабинета.
+    const collectStopRepeats = reconciled.details.flatMap((detail) =>
+      detail.reason === 'collect_stop_repeats'
+        ? [{ verticalId: detail.verticalId, code: detail.stopCode ?? null }]
+        : [],
+    );
 
     void logAudit('client.eng.autopilot.enabled', 'ENG cabinet autopilot enabled', {
       userId: result.auth.userId,
@@ -134,6 +160,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       verticalsSkipped: reconciled.counts.verticalsSkipped,
       ...(reconciled.pause ? { autopilotPause: reconciled.pause } : {}),
       ...(lettersBudget.length > 0 ? { lettersBudget } : {}),
+      ...(collectStopRepeats.length > 0 ? { collectStopRepeats } : {}),
     });
 
     // Пауза уезжает в ответ КОДОМ кабинета, а не причиной движка: словарь
@@ -160,6 +187,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       templates_enqueued: reconciled.counts.templatesEnqueued,
       analyses_requeued: reconciled.counts.analysesRequeued,
       verticals_skipped: reconciled.counts.verticalsSkipped,
+      // Сколько из пропущенных — «повтор остановится так же»: кабинет говорит
+      // о них отдельной фразой и ведёт к «Collect again» на шаге 4
+      // (EngStepVerticals), иначе пропуск читался бы как «всё уже готово».
+      collect_again_verticals: collectStopRepeats.length,
       autopilot_hold_code: hold?.code ?? null,
     });
   });

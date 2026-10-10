@@ -408,4 +408,94 @@ if should_drain_baseconstructor_workers; then
   fi
 fi
 
+# Hypothesis Engine: one single-flight worker behind both the English client
+# cabinet (/client/eng) and the RU staff tool (/tools/hypothesis-engine).
+# Without this branch the deploy reached it only through force_rm_svc
+# (`docker rm -f`, SIGKILL): the stage in flight died mid-call, resetStuckJobs
+# re-queued it on start, and a stage without a checkpoint ran - and was paid
+# for - a second time.
+#
+# `docker compose stop` sends SIGTERM. The worker checks the stop flag before
+# every claim, so it claims no further job; a claim already in flight when the
+# signal lands (read + update in claimJob) completes, and that job runs like
+# the current one. It finishes the current job (an idle worker exits within
+# about 30s), makes its last stranded-row pass (at most 60s) and exits.
+# Docker waits up to the StopTimeout of the container that is running now and
+# then SIGKILLs; a stage still running at that point is re-queued on start
+# exactly as before this branch existed.
+#
+# Which wait: `stop` without -t uses the running container's StopTimeout. It
+# was fixed when that container was created (from the service's
+# stop_grace_period at that time); the file in place now does not change it
+# until the container is recreated. The client caps below are therefore sized
+# from `docker inspect` of that container (wait + 60s for the Compose/Docker
+# HTTP timeouts, wait + 90s for `timeout`); unreadable -> sized for 300s.
+#
+# he_jobs is deliberately NOT in tracked_tables above: that bulk
+# running->pending update runs while this worker is alive; after its stage the
+# worker would find its row no longer 'running', write no 'done' and queue no
+# next research stage, and the stage would run (and be paid for) twice.
+#
+# Why last: every branch above keeps its order and timing, and this worker is
+# alive through them exactly as before. Why a failed stop does not abort the
+# deploy (unlike VE2 and auto-pipeline): the workers above are already stopped
+# and an aborted deploy would leave them down; force_rm_svc then removes this
+# worker the old way.
+
+# Running he_jobs ids for the deploy log only (never written). Bounded, unlike
+# fetch_running_rows above: a PostgREST that accepts the connection but never
+# answers would otherwise hold the drain - and the deploy - with no limit.
+# --fail makes an HTTP error a failed read rather than a body counted as 0.
+fetch_running_he_jobs() {
+  curl -sS --fail --max-time 15 \
+    "${SUPABASE_URL}/rest/v1/he_jobs?status=eq.running&select=id" "${auth_headers[@]}"
+}
+
+if should_drain_worker "worker-hypothesis-engine"; then
+  if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+    if he_rows="$(fetch_running_he_jobs 2>/dev/null)"; then
+      echo "[drain] he_jobs running before stop: $(printf '%s' "$he_rows" | count_json_rows)"
+    else
+      echo "[drain] he_jobs running before stop: unknown (read failed or took over 15s)"
+    fi
+  fi
+  he_grace="$(timeout --kill-after=5s 15s docker inspect --format '{{.Config.StopTimeout}}' portal-worker-hypothesis-engine 2>/dev/null || true)"
+  case "$he_grace" in
+    '')
+      he_grace_note="unknown (no value from docker inspect within 15s); client caps sized for 300s"
+      he_grace=300
+      ;;
+    *[!0-9]*|???????*)
+      he_grace_note="unusable StopTimeout '${he_grace}'; client caps sized for 300s"
+      he_grace=300
+      ;;
+    *)
+      he_grace=$((10#$he_grace))
+      he_grace_note="${he_grace}s (container StopTimeout)"
+      ;;
+  esac
+  he_http_timeout=$((he_grace + 60))
+  echo "[drain] Gracefully stopping Hypothesis Engine (grace period: ${he_grace_note})..."
+  he_stop_code=0
+  COMPOSE_HTTP_TIMEOUT="$he_http_timeout" DOCKER_CLIENT_TIMEOUT="$he_http_timeout" \
+    timeout --kill-after=10s "$((he_grace + 90))s" \
+    docker compose --env-file .env -p portal -f docker-compose.prod.yml stop worker-hypothesis-engine \
+    || he_stop_code=$?
+  if [ "$he_stop_code" -ne 0 ]; then
+    echo "[drain] WARNING: Hypothesis Engine graceful stop failed (exit ${he_stop_code}); the deploy removes it by force as before"
+  else
+    echo "[drain] Hypothesis Engine stopped"
+    if [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+      if he_rows="$(fetch_running_he_jobs 2>/dev/null)"; then
+        he_left="$(printf '%s' "$he_rows" | count_json_rows)"
+        if [ "$he_left" -gt 0 ]; then
+          echo "[drain] he_jobs still running after stop: ${he_left}; ids=$(printf '%s' "$he_rows" | extract_ids_csv) (re-queued on start by resetStuckJobs; a stage without a checkpoint runs again)"
+        fi
+      else
+        echo "[drain] he_jobs after stop: unknown (read failed or took over 15s)"
+      fi
+    fi
+  fi
+fi
+
 echo "[drain] Workers stopped (jobs are paused or marked for immediate resume)"

@@ -400,23 +400,32 @@ const shouldStop = setupGracefulShutdown(log);
  * продукта били по другому: ночной долив ENG и ручной прогон специалиста в
  * V2 делили лимит запросов.
  *
- * Если задан HE_OPENROUTER_API_KEY — этот процесс работает по нему: значение
- * подставляется в переменную, которую читает getApiKey() в
- * lib/hypothesisEngine/llm.ts (читает при каждом вызове, не на импорте).
- * Переменная не задана — всё как раньше, общий ключ; ломаться нечему.
+ * Если задан HE_OPENROUTER_API_KEY — его значение подставляется в переменную
+ * OPENROUTER_HYPOTHESIS_ENGINE_API_KEY, которую читает getApiKey() в
+ * lib/hypothesisEngine/llm.ts (читает при каждом вызове, не на импорте), и
+ * общий ключ этот процесс больше не отправляет. По нему идут вызовы модели
+ * всех стадий, КРОМЕ стадий проектов market='us' при заданном
+ * HE_US_REQUESTY_API_KEY: такие стадии идут под журналом расхода ENG, и
+ * getApiKey берёт их собственный ключ раньше этой переменной
+ * (providerKeys.ts). Переменная не задана — всё как раньше: общий ключ
+ * (OPENROUTER_HYPOTHESIS_ENGINE_API_KEY, нет его — OPENROUTER_BRIEF_API_KEY),
+ * а у стадий us — HE_US_REQUESTY_API_KEY, если он задан; ломаться нечему.
  * Правки compose не требует: оба воркера подключают весь .env через env_file,
  * а читает HE_OPENROUTER_API_KEY только этот файл.
  *
- * В лог уходит ТОЛЬКО имя выбранной переменной, никогда значение.
+ * В лог уходят ТОЛЬКО имена переменных, никогда значения. Задан ли
+ * HE_US_REQUESTY_API_KEY, отсюда не видно: это пишет providerKeys.ts строкой
+ * [he-keys] при первом вызове модели в стадии us-проекта.
  */
 function applyEngineProviderKey(): void {
+  const usNote = 'стадии проектов market=us — по HE_US_REQUESTY_API_KEY, если он задан (строка [he-keys] при первом вызове модели в такой стадии)';
   const dedicated = (process.env.HE_OPENROUTER_API_KEY ?? '').trim();
   if (!dedicated) {
-    log('info', 'Provider key: HE_OPENROUTER_API_KEY не задан → общий OPENROUTER_HYPOTHESIS_ENGINE_API_KEY');
+    log('info', `Provider key (модель, Requesty): HE_OPENROUTER_API_KEY не задан → общий OPENROUTER_HYPOTHESIS_ENGINE_API_KEY (нет его — OPENROUTER_BRIEF_API_KEY); ${usNote}`);
     return;
   }
   process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = dedicated;
-  log('info', 'Provider key: свой ключ движка HE_OPENROUTER_API_KEY (общий ключ этим воркером не используется)');
+  log('info', `Provider key (модель, Requesty): HE_OPENROUTER_API_KEY вместо общего ключа (общий этим воркером не отправляется); ${usNote}`);
 }
 
 /**
@@ -3360,6 +3369,16 @@ async function pollOnce(): Promise<boolean> {
   // Брошенные строки закрываем ДО клейма: пока такая строка висит в 'running',
   // её проект стоит, а воркер один на всех.
   await collectStrandedJobs();
+  // SIGTERM, пришедший во время прохода сборщика (он ходит в БД, при лежащей
+  // БД — подолгу), новой платной стадии уже не открывает: pollLoop проверяет
+  // флаг только между тиками, и без этой строки остановка при деплое
+  // (drain-worker.sh → docker compose stop) клеймила бы стадию уже после
+  // сигнала — её мог оборвать SIGKILL по StopTimeout, и стадия без чекпоинта
+  // оплачивалась бы второй раз. false — «джобы нет»: pollLoop дождётся своего
+  // тика (при дефолтном WORKER_POLL_INTERVAL_MS — не дольше 30 с) и выйдет по
+  // флагу. Клейм, уже начатый к сигналу (чтение и апдейт в claimJob), доходит
+  // до конца, и эта джоба исполняется как текущая.
+  if (shouldStop()) return false;
   const job = await claimJob();
   if (!job) return false;
   // Клейм прошёл только поверх 'pending' — значит брошенная запись по этой

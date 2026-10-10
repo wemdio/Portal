@@ -15,6 +15,18 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { logError, logWarn } from '@/lib/loggerServer';
 import type { ClientMarket } from '@/lib/engMarket';
 
+// Гейт платных шагов (почта, лимиты, расход клиента) — рядом с рыночным:
+// роуты контура берут оба отсюда. Реализация и таблица «действие → проверки»
+// — engPaidAccess.ts.
+export {
+  requireEngPaidAccess,
+  engPaidAccessResponse,
+  type EngPaidAction,
+  type EngPaidAccessCode,
+  type EngPaidAccessRefusal,
+  type EngPaidAccessResult,
+} from './engPaidAccess';
+
 export interface HeScopeFailure {
   status: number;
   message: string;

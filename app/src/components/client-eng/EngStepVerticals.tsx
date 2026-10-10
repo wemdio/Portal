@@ -6,15 +6,16 @@
  * вертикалей пересчитываются на бэкенде). Accepted-гипотезы — основа
  * авто-сборки базы на шаге 4. Вердикт можно поменять в любую сторону: роут
  * принимает и accept, и reject при любом статусе, а без этого не было бы
- * правдой ни «reject its hypotheses on step 2» у отказов базы на шаге 4, ни
- * «accept one of its hypotheses on step 2» у невыбранной вертикали в Command
- * Center.
+ * правдой ни «change which of its hypotheses are accepted on step 2» у
+ * остановки hypothesis_mismatch на шаге 4, ни «accept one of its hypotheses on
+ * step 2» у невыбранной вертикали в Command Center.
  */
 
 import { useMemo, useState } from 'react';
 import { Check, RotateCcw, Rocket, X } from 'lucide-react';
 import type { HeHypothesis, HeProjectStatus, HeVertical } from '@/lib/hypothesisEngine/types';
-import { patchEngHypothesis, resumeEngVerticalRefill, startEngAutopilot } from './api-client';
+import { EngPaidAccessError, patchEngHypothesis, resumeEngVerticalRefill, startEngAutopilot } from './api-client';
+import { EngPaidAccessNotice } from './EngPaidAccess';
 import { EngBadge, EngCard, EngSpinner, hypothesisStatusTone } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -190,6 +191,8 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
   const jobs = useMemo(() => detail.jobs ?? [], [detail]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  /** Отказ гейта платных шагов («Start outreach», «Resume auto-refill») — с действием. */
+  const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
   const [autopilotBusy, setAutopilotBusy] = useState(false);
   const [autopilotSummary, setAutopilotSummary] = useState('');
   /**
@@ -215,6 +218,7 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
     if (autopilotBusy || autopilotRunning) return;
     setAutopilotBusy(true);
     setError('');
+    setRefusal(null);
     setAutopilotSummary('');
     setAutopilotHeld(false);
     try {
@@ -239,20 +243,37 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
         // Причину не пересказываем: её полностью объясняет карточка над шагами,
         // и второй копии этого текста быть не должно.
         const held = parts.length === 0 && Boolean(res.autopilot_hold_code);
-        setAutopilotHeld(held);
+        // Вертикали, которые нажатие НЕ собрало заново: их последняя сборка
+        // остановилась решением, которое новая повторит
+        // (HE_COLLECT_STOP_REPEATS_CODES). Без этой строки такое нажатие
+        // говорило бы «всё уже стоит или готово». Где именно «Collect again»,
+        // не обещаем — шаг 4 говорит это у самой базы.
+        const again = res.collect_again_verticals ?? 0;
+        const againNote =
+          again === 0
+            ? ''
+            : `${again === 1 ? '1 vertical was' : `${again} verticals were`} not collected again: ` +
+              `${again === 1 ? 'its latest collection' : 'the latest collection of each'} stopped for a reason a new ` +
+              'collection would most likely repeat. Step 4 shows why and how to try again.';
+        setAutopilotHeld(parts.length === 0 && (held || again > 0));
         setAutopilotSummary(
           parts.length > 0
-            ? `Autopilot started — queued ${parts.join(' · ')}. Review & Launch fills in as stages finish.`
+            ? `Autopilot started — queued ${parts.join(' · ')}. Review & Launch fills in as stages finish.` +
+                (againNote ? ` ${againNote}` : '')
             : held
-              ? 'Autopilot is on, but this press queued nothing — the note above the steps says what it is waiting for.'
-              : 'Autopilot is on — everything is already queued or done. See Review & Launch.',
+              ? 'Autopilot is on, but this press queued nothing — the note above the steps says what it is waiting for.' +
+                (againNote ? ` ${againNote}` : '')
+              : againNote
+                ? `Autopilot is on, but this press queued nothing. ${againNote}`
+                : 'Autopilot is on — everything is already queued or done. See Review & Launch.',
         );
       } else {
         setError(res.error ?? 'Failed to start the autopilot');
       }
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to start the autopilot');
+      if (e instanceof EngPaidAccessError) setRefusal(e);
+      else setError(e instanceof Error ? e.message : 'Failed to start the autopilot');
     } finally {
       setAutopilotBusy(false);
     }
@@ -262,12 +283,14 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
     if (refillBusyId) return;
     setRefillBusyId(verticalId);
     setError('');
+    setRefusal(null);
     try {
       await resumeEngVerticalRefill(verticalId);
       setRefillResumedIds((prev) => (prev.includes(verticalId) ? prev : [...prev, verticalId]));
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to resume the auto-refill');
+      if (e instanceof EngPaidAccessError) setRefusal(e);
+      else setError(e instanceof Error ? e.message : 'Failed to resume the auto-refill');
     } finally {
       setRefillBusyId(null);
     }
@@ -352,6 +375,10 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
           {autopilotSummary}
         </div>
       )}
+
+      {/* Отказ гейта — у кнопки «Start outreach», а не внизу доски: его
+          действие (отправить ссылку подтверждения) нужно здесь же. */}
+      {refusal && <EngPaidAccessNotice refusal={refusal} />}
 
       {verticals.map((v) => {
         const own = hypotheses.filter((h) => h.vertical_id === v.id);

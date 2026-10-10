@@ -33,6 +33,9 @@ import type {
   HeClientRefillState,
   HeClientStageErrorCode,
 } from '@/lib/hypothesisEngine/clientEngProjection';
+// Только тип: код отказа гейта платных шагов (lib/hypothesisEngine/engPaidAccess)
+// — один словарь на роуты и на экран; сам модуль в клиентский бандл не едет.
+import type { EngPaidAccessCode } from '@/lib/hypothesisEngine/engPaidAccess';
 // Тоже только типы: этап и причина карточки дашборда — один словарь на роут
 // (lib/hypothesisEngine/engDashboard) и на экран.
 import type {
@@ -440,7 +443,8 @@ export interface EngLaunchResponse {
  *  - segment_classification_incomplete — 503: классификатор сегментов не
  *    ответил по слишком большой доле адресов. Он общий у всех шаблонов, и
  *    следующий шаблон с сегментами снова оплатил бы классификацию всей своей
- *    аудитории ради того же отказа.
+ *    аудитории ради того же отказа. Отказ лимита неудачных запусков шаблона
+ *    (тоже 503) приходит БЕЗ кода — это EngLaunchServerError.
  * template_unresolved_operators экрану различать незачем: это ошибка одного
  * шаблона (бросается), а шаблоны, которые она ждёт, «Launch all» и не берёт
  * (`needs_rewrite`, engTemplateNeedsRewrite).
@@ -491,9 +495,12 @@ interface EngChainPatchResponse {
  * Дверь кабинета в /api/client: поверх общего фетча доводим текст до
  * английского (см. engText) — и у брошенной ошибки, и у поля `error` в теле
  * ответа, которое роуты отдают вместе с 200-м статусом (частичный запуск).
- * Исключений два — startEngResearch и launchEngTemplate ниже: им нужно тело
- * 409 (код отказа), которое этот фетч выбрасывает, поэтому они ходят через
- * engApiFetchRaw и доводят тексты теми же функциями engText.
+ * Исключения — вызовы, которым нужен машинный код отказа из тела не-2xx,
+ * который этот фетч выбрасывает: startEngResearch и launchEngTemplate (свои
+ * 409) и все вызовы, которые может остановить гейт платных шагов
+ * (engPaidApiFetch: создание проекта, «Start outreach», «Collect again»,
+ * «Resume auto-refill»). Они ходят через engApiFetchRaw и доводят тексты теми
+ * же функциями engText.
  *
  * Здесь именно `engErrorText`, а не `engStageErrorText`: это ЖИВОЙ ответ, где
  * `error` — английская константа роута (`api/client/eng/_shared.ts`). Ошибки
@@ -522,7 +529,7 @@ export async function createEngProject(input: {
   website_url: string;
   name?: string;
 }): Promise<EngProjectCreateResponse> {
-  return engApiFetch<EngProjectCreateResponse>('/eng/projects', {
+  return engPaidApiFetch<EngProjectCreateResponse>('/eng/projects', {
     method: 'POST',
     body: JSON.stringify(input),
   });
@@ -530,6 +537,16 @@ export async function createEngProject(input: {
 
 export async function fetchEngProjectDetail(projectId: string): Promise<EngProjectDetailResponse> {
   return engApiFetch<EngProjectDetailResponse>(`/eng/projects/${projectId}`);
+}
+
+/**
+ * Удалить СВОЙ проект целиком (DELETE /api/client/eng/projects/[id]; что
+ * уходит каскадом и когда роут отказывает — у роута). Тело ответа экрану не
+ * нужно: список проектов перечитывается. Отказ — брошенная ошибка с
+ * английским текстом роута, как у прочих вызовов кабинета.
+ */
+export async function deleteEngProject(projectId: string): Promise<void> {
+  await engApiFetch<unknown>(`/eng/projects/${projectId}`, { method: 'DELETE' });
 }
 
 /**
@@ -598,8 +615,9 @@ function rerunCount(raw: unknown): number {
  * бросает только текст. authFetch тот же, что под ним: токен, повтор на 401 и
  * заголовок демо-вкладки ставит он сам; 401 после повтора — та же
  * AuthExpiredError, тексты доводятся до английского тем же
- * localizeEngError/engErrorText (engRawErrorText ниже). Зовут его два места:
- * startEngResearch и launchEngTemplate.
+ * localizeEngError/engErrorText (engRawErrorText ниже). Зовут его
+ * startEngResearch, launchEngTemplate, engPaidApiFetch и вызовы подтверждения
+ * почты.
  */
 async function engApiFetchRaw(
   path: string,
@@ -621,6 +639,155 @@ async function engApiFetchRaw(
 /** Английский текст ошибки из тела engApiFetchRaw. */
 function engRawErrorText(res: Response, body: Record<string, unknown> | null): string {
   return engErrorText(typeof body?.error === 'string' ? body.error : `Error ${res.status}`);
+}
+
+/* ── Отказ гейта платных шагов (requireEngPaidAccess) ── */
+
+export type { EngPaidAccessCode };
+
+/**
+ * Коды отказа гейта (engPaidAccess.ts). Копия словаря значениями: модуль гейта
+ * серверный, в бандл кабинета едет только его тип, а сверку значений с типом
+ * делает `satisfies`.
+ */
+const ENG_PAID_ACCESS_CODES = [
+  'email_not_verified',
+  'project_limit',
+  'research_limit',
+  'spend_limit',
+  'spend_day_limit',
+  'unavailable',
+] as const satisfies readonly EngPaidAccessCode[];
+
+/**
+ * Платный шаг не начат: гейт отказал (почта не подтверждена, лимит проектов
+ * или стартов исследования, потолок расхода, гейт не прочитал свои данные).
+ * `message` — английский текст роута с действием; `code` — по нему экран
+ * рисует кнопку действия (EngPaidAccessNotice: «Send confirmation link» у
+ * неподтверждённой почты).
+ */
+export class EngPaidAccessError extends Error {
+  readonly code: EngPaidAccessCode;
+  /** Секунд до повтора (research_limit — до 00:00 UTC); null — не задано. */
+  readonly retryAfterSeconds: number | null;
+  /**
+   * project_limit: может ли клиент сам удалить проект (`project_delete_available`
+   * гейта; нет поля — true, как до него). false — ссылки на удаление нет.
+   */
+  readonly projectDeleteAvailable: boolean;
+  /**
+   * email_not_verified: в профиле нет адреса (`email_missing` гейта) — ссылку
+   * послать некуда, кнопки отправки нет.
+   */
+  readonly emailMissing: boolean;
+
+  constructor(
+    message: string,
+    code: EngPaidAccessCode,
+    retryAfterSeconds: number | null,
+    flags: { projectDeleteAvailable?: boolean; emailMissing?: boolean } = {},
+  ) {
+    super(message);
+    this.name = 'EngPaidAccessError';
+    this.code = code;
+    this.retryAfterSeconds = retryAfterSeconds;
+    this.projectDeleteAvailable = flags.projectDeleteAvailable ?? true;
+    this.emailMissing = flags.emailMissing ?? false;
+  }
+}
+
+/**
+ * Отказ гейта из тела не-2xx ответа; null — это не он. Код 'unavailable'
+ * засчитывается только с 503: этим же словом роуты подтверждения почты
+ * называют свой отказ, а гейт отвечает им только 503.
+ */
+function engPaidAccessErrorFrom(res: Response, body: Record<string, unknown> | null): EngPaidAccessError | null {
+  const code = body?.code;
+  if (typeof code !== 'string' || !(ENG_PAID_ACCESS_CODES as readonly string[]).includes(code)) return null;
+  if (code === 'unavailable' && res.status !== 503) return null;
+  const retry = body?.retry_after_seconds;
+  return new EngPaidAccessError(
+    engRawErrorText(res, body),
+    code as EngPaidAccessCode,
+    typeof retry === 'number' && Number.isFinite(retry) && retry > 0 ? retry : null,
+    {
+      projectDeleteAvailable: body?.project_delete_available !== false,
+      emailMissing: body?.email_missing === true,
+    },
+  );
+}
+
+/**
+ * Вызов кабинета, который может упереться в гейт платных шагов: как
+ * engApiFetch, но отказ гейта бросается EngPaidAccessError с кодом (общий
+ * фетч код выбросил бы). Остальные отказы — Error с английским текстом роута.
+ */
+async function engPaidApiFetch<T>(path: string, init: RequestInit): Promise<T> {
+  const { res, body } = await engApiFetchRaw(path, init);
+  if (!res.ok) {
+    throw engPaidAccessErrorFrom(res, body) ?? new Error(engRawErrorText(res, body));
+  }
+  const out = (body ?? {}) as T & { error?: unknown };
+  if (typeof out.error === 'string') out.error = engErrorText(out.error);
+  return out;
+}
+
+/* ── Подтверждение почты (/api/client/eng-email/status и /resend) ── */
+
+/** Ответ GET /eng-email/status (роут verify-guard: 'unavailable' — сказать нельзя). */
+export interface EngEmailStatus {
+  state: 'verified' | 'pending' | 'not_required' | 'unavailable';
+  email: string | null;
+  /** Когда ушла ссылка, которая ещё действует (срок считает сервер). */
+  last_sent_at: string | null;
+  /** Когда ушла ссылка, срок которой вышел; задано не больше одного из двух. */
+  expired_link_sent_at: string | null;
+}
+
+/** Статус подтверждения почты; null — не прочитан (сбой сети, не-2xx, чужая форма). */
+export async function fetchEngEmailStatus(): Promise<EngEmailStatus | null> {
+  try {
+    const { res, body } = await engApiFetchRaw('/eng-email/status', { method: 'GET' });
+    const state = body?.state;
+    if (!res.ok || (state !== 'verified' && state !== 'pending' && state !== 'not_required' && state !== 'unavailable')) {
+      return null;
+    }
+    return {
+      state,
+      email: typeof body?.email === 'string' ? body.email : null,
+      last_sent_at: typeof body?.last_sent_at === 'string' ? body.last_sent_at : null,
+      expired_link_sent_at: typeof body?.expired_link_sent_at === 'string' ? body.expired_link_sent_at : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Итог «Send confirmation link»: ушла (на какой адрес), отправлять не нужно
+ * (почта уже подтверждена или этому аккаунту не требуется) — либо отказ с
+ * английским текстом роута (слишком рано, отправка не удалась, недоступно).
+ */
+export type EngEmailResendResult =
+  | { kind: 'sent'; email: string | null }
+  | { kind: 'not_needed' }
+  | { kind: 'failed'; text: string };
+
+const RESEND_FAILED_EN = 'We could not send the email. Try again in a few minutes.';
+
+export async function resendEngEmailLink(): Promise<EngEmailResendResult> {
+  try {
+    const { res, body } = await engApiFetchRaw('/eng-email/resend', { method: 'POST', body: '{}' });
+    if (res.ok && body?.status === 'sent') {
+      return { kind: 'sent', email: typeof body.email === 'string' ? body.email : null };
+    }
+    if (res.ok && (body?.status === 'already_verified' || body?.status === 'not_required')) {
+      return { kind: 'not_needed' };
+    }
+    return { kind: 'failed', text: typeof body?.error === 'string' ? engErrorText(body.error) : RESEND_FAILED_EN };
+  } catch (e) {
+    return { kind: 'failed', text: e instanceof Error ? e.message : RESEND_FAILED_EN };
+  }
 }
 
 /**
@@ -654,7 +821,7 @@ export async function startEngResearch(
       },
     };
   }
-  throw new Error(engRawErrorText(res, body));
+  throw engPaidAccessErrorFrom(res, body) ?? new Error(engRawErrorText(res, body));
 }
 
 export async function cancelEngProject(projectId: string): Promise<EngCancelResponse> {
@@ -672,6 +839,13 @@ export interface EngAutopilotResponse {
   analyses_requeued?: number;
   verticals_skipped?: number;
   /**
+   * Сколько выбранных вертикалей нажатие НЕ собрало заново, потому что их
+   * последняя база остановилась решением, которое повторится
+   * (HE_COLLECT_STOP_REPEATS_CODES). Повтор — «Collect again» на шаге 4. Нет
+   * ключа — ответ старше этого поля.
+   */
+  collect_again_verticals?: number;
+  /**
    * Пауза, записанная этим же нажатием: `null`/нет ключа — проект не на
    * паузе. КОД, а не причина движка и не текст — тот же закрытый словарь, что
    * у `EngProject.autopilot_hold`. Метки времени здесь нет намеренно: нажатие
@@ -683,7 +857,7 @@ export interface EngAutopilotResponse {
 }
 
 export async function startEngAutopilot(projectId: string): Promise<EngAutopilotResponse> {
-  return engApiFetch<EngAutopilotResponse>(`/eng/projects/${projectId}/autopilot`, { method: 'POST' });
+  return engPaidApiFetch<EngAutopilotResponse>(`/eng/projects/${projectId}/autopilot`, { method: 'POST' });
 }
 
 /* ── Превью строк базы (GET /eng/bases/[id]/rows) ── */
@@ -725,13 +899,14 @@ export async function generateEngChain(verticalId: string, language?: string): P
   });
 }
 
-export async function collectEngBase(
-  verticalId: string,
-  body: { limit: number; hypothesis_ids?: string[] },
-): Promise<EngBaseCollectResponse> {
-  return engApiFetch<EngBaseCollectResponse>(`/eng/verticals/${verticalId}/collect`, {
+/**
+ * «Collect again» шага 4 — новая сборка вертикали (до 2 000 компаний, по
+ * гипотезам, принятым на шаге 2: лимит и гипотезы решает сервер, тело пустое).
+ */
+export async function collectEngBase(verticalId: string): Promise<EngBaseCollectResponse> {
+  return engPaidApiFetch<EngBaseCollectResponse>(`/eng/verticals/${verticalId}/collect`, {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: '{}',
   });
 }
 
@@ -744,7 +919,7 @@ export async function collectEngBase(
  * источника у пометки быть не должно.
  */
 export async function resumeEngVerticalRefill(verticalId: string): Promise<{ ok?: boolean; error?: string }> {
-  return engApiFetch<{ ok?: boolean; error?: string }>(`/eng/verticals/${verticalId}/refill`, {
+  return engPaidApiFetch<{ ok?: boolean; error?: string }>(`/eng/verticals/${verticalId}/refill`, {
     method: 'POST',
   });
 }
@@ -769,15 +944,33 @@ export async function fetchEngLaunchPresets(templateId: string): Promise<HeLaunc
 }
 
 /**
+ * Запуск шаблона не прошёл на нашей стороне: 5xx роута запуска без кода
+ * отказа (сбой ядра или рассыльщика, лимит неудачных запусков шаблона за
+ * час). «Launch all» на нём останавливает прогон (EngStepReview): сбой после
+ * классификатора сегментов следующий шаблон оплатил бы заново, не узнав
+ * ничего нового. `message` — английский текст роута.
+ */
+export class EngLaunchServerError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'EngLaunchServerError';
+    this.status = status;
+  }
+}
+
+/**
  * POST /eng/templates/[id]/launch. Через engApiFetchRaw — ради кода отказа
  * (409 защиты аудитории и пресета, 503 классификатора; `refusal`, см.
  * EngLaunchResponse): его тело engApiFetch выбросил бы вместе с исключением.
- * Остальное — как у engApiFetch: успех отдаёт тело с английским `error`, любой
- * другой отказ бросается английским текстом.
+ * Остальное — как у engApiFetch: успех отдаёт тело с английским `error`;
+ * отказ гейта платных шагов бросается EngPaidAccessError, прочий 5xx —
+ * EngLaunchServerError, любой другой отказ — Error с английским текстом.
  */
 export async function launchEngTemplate(
   templateId: string,
-  body: { preset_id: string; force?: boolean; schedule?: EngSendingWindow },
+  body: { preset_id: string; schedule?: EngSendingWindow },
 ): Promise<EngLaunchResponse> {
   const { res, body: data } = await engApiFetchRaw(`/eng/templates/${templateId}/launch`, {
     method: 'POST',
@@ -791,6 +984,9 @@ export async function launchEngTemplate(
   if ((res.status === 409 || res.status === 503) && isEngLaunchRefusalCode(data?.code)) {
     return { ok: false, error: engRawErrorText(res, data), refusal: data.code };
   }
+  const paidAccess = engPaidAccessErrorFrom(res, data);
+  if (paidAccess) throw paidAccess;
+  if (res.status >= 500) throw new EngLaunchServerError(engRawErrorText(res, data), res.status);
   throw new Error(engRawErrorText(res, data));
 }
 

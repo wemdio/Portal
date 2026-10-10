@@ -24,6 +24,12 @@ export interface SerperSearchOptions {
   hl?: string;
   signal?: AbortSignal;
   timeout?: number;
+  /**
+   * Ключ ЭТОГО запроса вместо SERPER_API_KEY. Нет или пусто — SERPER_API_KEY,
+   * как у всех вызывающих до правки. Передаёт только поиск ENG
+   * (hypothesisEngine/stages/searchIo.ts) для проектов market='us'.
+   */
+  apiKey?: string;
 }
 
 /**
@@ -162,7 +168,7 @@ async function runSerperSearch(
   opts: SerperSearchOptions | undefined,
   classify: boolean,
 ): Promise<SerperSearchOutcome> {
-  const apiKey = (process.env.SERPER_API_KEY ?? '').trim();
+  const apiKey = (opts?.apiKey ?? '').trim() || (process.env.SERPER_API_KEY ?? '').trim();
   // Нет ключа — это не пустая выдача и не сбой сети: правка конфигурации.
   // Журнал расхода не открываем: платить не за что.
   if (!apiKey) return { items: [], failure: { kind: 'configuration', message: MISSING_KEY_MESSAGE } };

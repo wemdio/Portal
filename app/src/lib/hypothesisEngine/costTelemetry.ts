@@ -177,6 +177,12 @@ interface HeJournalScope {
 
 interface HeJournalState {
   db: SupabaseClient;
+  /**
+   * Рынок проекта, по которому идёт работа под журналом. Сегодня всегда 'us'
+   * (openHeProviderJournal для другого рынка журнала не открывает). Читатель —
+   * heProviderJournalMarket → providerKeys.ts: свои ключи провайдеров ENG.
+   */
+  market: 'us';
   scope: HeJournalScope;
   pending: Set<Promise<void>>;
   /** Строк ЭТОГО прогона, которые не легли (они же уходят в перенос carriedLosses). */
@@ -216,10 +222,13 @@ export function openHeProviderJournal(
   job: Pick<HeJob, 'id' | 'project_id' | 'stage' | 'payload'>,
   warn: (msg: string) => void,
 ): HeProviderJournal | null {
+  // Это же условие решает, чья работа идёт по своим ключам ENG (providerKeys.ts
+  // читает рынок журнала): журнал для другого рынка не открываем.
   if (market !== 'us') return null;
   const baseId = identifier(job.payload?.base_id);
   const state: HeJournalState = {
     db,
+    market,
     scope: { projectId: job.project_id, jobId: job.id, stage: job.stage, ...(baseId ? { baseId } : {}) },
     pending: new Set(),
     lost: 0,
@@ -255,6 +264,14 @@ export function withHeProviderJournal<T>(journal: HeProviderJournal | null, work
 /** Открыт ли журнал в текущем контексте (llm.ts: без него ничего не считает). */
 export function heProviderJournalActive(): boolean {
   return storage.getStore() !== undefined;
+}
+
+/**
+ * Рынок проекта текущей работы, если она под журналом; иначе undefined
+ * (RU-проект, роут без журнала, CLI, другой продукт). Читает providerKeys.ts.
+ */
+export function heProviderJournalMarket(): 'us' | undefined {
+  return storage.getStore()?.market;
 }
 
 /**

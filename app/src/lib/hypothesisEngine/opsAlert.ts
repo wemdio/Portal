@@ -571,7 +571,8 @@ export function flushHeOpsAlerts(): Promise<void> {
  * Зачем: ядро запуска создаёт кампании НА ПАУЗЕ и не активирует их никогда
  * (launchHandoff.ts, шапка; activateCampaign в hypothesisEngine не вызывается),
  * стартует их сотрудник у рассыльщика. Кабинет так и говорит клиенту («created
- * paused — your manager reviews it and starts sending», Command Center; «the
+ * paused — our team reviews it and starts sending; message Support to ask
+ * about it», Command Center; «the
  * team reviews and starts it manually», шаг 4). Без этого сообщения клиентский
  * запуск стоял бы на паузе, пока кто-нибудь случайно не заглянет к рассыльщику.
  * Клиентские тексты на алерт НЕ опираются (они про процесс, а не про «команда
@@ -619,7 +620,8 @@ const LAUNCH_WORKER_ID = 'hypothesis-engine · ENG';
 
 const LAUNCH_ACTION =
   'проверить кампании запуска у рассыльщика (письма, адреса, окно отправки) и запустить их — кабинет создаёт их на ' +
-  'паузе и сам не активирует никогда; клиент видит «created paused — your manager reviews it and starts sending»';
+  'паузе и сам не активирует никогда; клиент видит «created paused — our team reviews it and starts sending; ' +
+  'message Support to ask about it»';
 
 function launchLine(launch: HeOpsClientLaunch): string {
   return (

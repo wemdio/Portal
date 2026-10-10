@@ -35,12 +35,14 @@ import {
   type HeIcpFrameInputError,
 } from '@/lib/hypothesisEngine/icpFrame';
 import {
+  EngPaidAccessError,
   patchEngProject,
   startEngResearch,
   type EngBriefPatch,
   type EngResearchRerunConsequences,
   type HeJobSummary,
 } from './api-client';
+import { EngPaidAccessNotice } from './EngPaidAccess';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -346,6 +348,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
   // Открытый диалог подтверждения повторного исследования (null — закрыт).
   const [rerunConfirm, setRerunConfirm] = useState<EngResearchRerunConsequences | null>(null);
   const [error, setError] = useState('');
+  /** Отказ гейта платных шагов на «Re-run research» — с действием. */
+  const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
   // Селект настройки — та же схема черновика. Пустого значения у него нет:
   // база — действующее число (пустая колонка проекта = дефолт движка).
   const capForm = useServerDrafts({ cap: String(contactCapOf(project)) });
@@ -453,6 +457,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
     if (researchBusy || researchActive) return;
     setResearchBusy(true);
     setError('');
+    setRefusal(null);
     try {
       const res = await startEngResearch(project.id, confirmed ? { confirm: true } : undefined);
       if (res.kind === 'confirm_required') {
@@ -463,7 +468,8 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
       onChanged();
     } catch (e) {
       setRerunConfirm(null);
-      setError(e instanceof Error ? e.message : 'Failed to start research');
+      if (e instanceof EngPaidAccessError) setRefusal(e);
+      else setError(e instanceof Error ? e.message : 'Failed to start research');
     } finally {
       setResearchBusy(false);
     }
@@ -727,6 +733,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
           {error}
         </div>
       )}
+      {refusal && <EngPaidAccessNotice refusal={refusal} />}
 
       {rerunConfirm && (
         <div

@@ -7,12 +7,25 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { scrubBrand } from '@/lib/scrubBrand';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
-import { loadClientHeTemplate, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import {
+  engPaidAccessResponse,
+  loadClientHeTemplate,
+  requireEngMarket,
+  requireEngPaidAccess,
+} from '@/lib/hypothesisEngine/apiGuards';
 import {
   heLaunchOutcomeCode,
   isHeLaunchClientSafeServerError,
+  isHeLaunchUnpaidServerError,
   runHeTemplateLaunch,
+  type HeTemplateLaunchOutcome,
 } from '@/lib/hypothesisEngine/launchTemplate';
+import {
+  HE_ENG_RATE_RULES,
+  heEngRetryMinutes,
+  hitHeEngRateLimit,
+  releaseHeEngRateHit,
+} from '@/lib/hypothesisEngine/engRateLimit';
 import { toClientEngCampaignName, toClientEngLaunchInfo } from '@/lib/hypothesisEngine/clientEngProjection';
 import { openHeProviderJournal, withHeProviderJournal } from '@/lib/hypothesisEngine/costTelemetry';
 import { HE_COST_LAUNCH_STAGE } from '@/lib/hypothesisEngine/costReport';
@@ -22,7 +35,7 @@ import { getHeClientFailure } from '@/lib/hypothesisEngine/clientErrors';
 import { heLaunchIsIncomplete, parseLaunchInfo, type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
 import { notifyHeClientLaunch } from '@/lib/hypothesisEngine/opsAlert';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
-import { logAudit, logError } from '@/lib/loggerServer';
+import { logAudit, logError, logWarn } from '@/lib/loggerServer';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { engServerError } from '../../../_shared';
 import {
@@ -40,6 +53,53 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
 const LAUNCH_FAILED = 'Failed to launch the campaign';
+
+/**
+ * Повтор ЗАКОНЧЕННОГО запуска (force у ядра: новые кампании для той же
+ * аудитории и новая классификация сегментов) кабинету не нужен — «Launch all»
+ * его не шлёт никогда, а незаконченный запуск ядро достраивает без force.
+ */
+const FORCE_NOT_AVAILABLE = 'A finished launch cannot be repeated from your account.';
+/**
+ * Отказ ядра «уже запущено» (409 с записью о запуске) говорит про force —
+ * словарь staff. Клиенту — что произошло, без него.
+ */
+const ALREADY_LAUNCHED = 'This template has already been launched, so it was not launched again.';
+
+/** Лимит неудачных запусков шаблона (см. POST) — числом в текстах ниже. */
+const LAUNCH_FAILED_LIMIT = HE_ENG_RATE_RULES.launch_failed.limit;
+
+/**
+ * Отказ классификатора сегментов (503 segment_classification_incomplete,
+ * шаг 5c ядра) — текст роута, а не константа ядра: та отправляет клиента к
+ * менеджеру, а кабинет self-serve. Ничего не создано и не изменено.
+ *
+ * Срока повтора («через несколько минут») здесь нет: этот же отказ может
+ * оказаться последним местом в лимите неудачных запусков шаблона (см. POST),
+ * и тогда следующее нажатие откажет до конца часа. Поэтому фраза называет
+ * само правило лимита — она правда и до него, и на нём. Окно лимита — час
+ * (HE_ENG_RATE_RULES.launch_failed).
+ */
+const SEGMENT_CHECK_STOPPED =
+  'We could not work out which segment of these letters fits too many of the addresses in this launch, so ' +
+  'it was stopped before anything was sent or changed. You can try again later: once launching a template ' +
+  `has not gone through ${LAUNCH_FAILED_LIMIT} times within an hour, its next try waits until an hour has ` +
+  'passed since the first of them. If it keeps stopping, contact Support.';
+
+/**
+ * Запуск НЕ начат: у этого шаблона за час уже LAUNCH_FAILED_LIMIT запусков не
+ * прошли после платной части (счётчик 'launch_failed', см. POST) — отказ
+ * классификатора или сбой после него. Каждый повтор заново оплачивал бы
+ * классификацию всей аудитории. «can check» — у шаблона без сегментных
+ * вариантов классификатора нет. Число минут — до освобождения места в окне.
+ */
+function launchRetryLimitedText(minutes: number): string {
+  return (
+    `Launching this template has not gone through ${LAUNCH_FAILED_LIMIT} times within the last hour. Each try ` +
+    'can check its whole audience again, so this try was not started. Nothing was sent or changed. You can try ' +
+    `again in about ${minutes} minute${minutes === 1 ? '' : 's'}; if it keeps stopping, contact Support.`
+  );
+}
 
 /* ── Проекция ответа запуска ── */
 
@@ -65,7 +125,7 @@ const WARNING_MAIN_CAMPAIGN_FAILED =
  *
  * Зачем вообще имя: кампании запуска клиент различает только по сегменту, и
  * «один сегмент не поехал» у шаблона с тремя сегментами не даёт ему ни проверить
- * результат, ни назвать менеджеру, чего не хватает.
+ * результат, ни сказать Support, чего не хватает.
  */
 function segmentFailedWarning(segment: string | null): string {
   if (segment === null) return WARNING_MAIN_CAMPAIGN_FAILED;
@@ -95,7 +155,7 @@ function readSegmentFailures(raw: unknown): Array<string | null> {
  * созданы, но повторный запуск этим текстом не защищён.
  */
 const WARNING_NEEDS_ATTENTION =
-  'Part of the launch reported a problem on our side. The campaigns that were created stay paused — ask your manager to check them before launching this template again.';
+  'Part of the launch reported a problem on our side. The campaigns that were created stay paused — contact Support to have them checked before launching this template again.';
 
 /** Префикс отказа сегментной группы в английском контуре (launchTemplate.ts:429). */
 const SEGMENT_FAILED_PREFIX = 'Segment campaign failed: ';
@@ -251,8 +311,8 @@ export async function GET(req: NextRequest) {
 
 // POST — «Launch (paused)»: ДЕЛЕГИРУЕМ в общее ядро runHeTemplateLaunch (та
 // же механика, что у staff: PAUSED-кампания, лиды базы, launch_info в
-// шаблоне, повтор законченного запуска только с force, незаконченный —
-// достраивается). Отличия клиентского контура: пресет читается
+// шаблоне, незаконченный запуск достраивается). Отличия клиентского контура:
+// повтора законченного запуска (force) нет — 400 FORCE_NOT_AVAILABLE; пресет читается
 // со скоупом владельца, тексты EN, бренд рассыльщика скрабим из ошибок, а
 // ответ ядра не отдаём как есть — сужаем белым списком (см. выше): в нём
 // ссылка на панель рассыльщика, id пресета и предупреждения, написанные для
@@ -260,7 +320,28 @@ export async function GET(req: NextRequest) {
 // ОКНО ОТПРАВКИ (пояс/часы/дни) — ядро создаёт кампании сразу с ним, см. блок
 // «Окно отправки» ниже и `api/client/eng/templates/[id]/schedule` для правки
 // уже созданных кампаний.
-// TODO(tariffs): гейт запуска по тарифу — пока доступен любому клиенту.
+//
+// Гейт платных шагов (requireEngPaidAccess, действие 'launch') — до журнала и
+// ядра: подтверждённая почта (письма уходят живым людям) и потолок расхода
+// клиента (по умолчанию выключен; таблица действий в engPaidAccess.ts).
+// Платная часть самого запуска — классификатор сегментов (шаг 5c ядра). Его
+// повтор у законченного запуска закрыт отказом force; а запуск, который НЕ
+// ПРОШЁЛ после него, — отказ классификатора (503
+// segment_classification_incomplete, без ответа больше половины адресов) или
+// сбой после классификации (первая кампания у рассыльщика не создалась —
+// 500 без кода; бросок ядра), — записи о запуске не оставляет, и каждое
+// следующее нажатие заново оплачивало классификацию всей аудитории. Поэтому
+// такие запуски считаются по шаблону: не больше 3 за час (engRateLimit,
+// 'launch_failed'), следующее нажатие в окне отвечает 503 без вызова ядра —
+// см. блок перед журналом. Не считаются 5xx ядра ДО классификатора
+// (isHeLaunchUnpaidServerError: пресет, рынок, защиты, чёрный список, аренда
+// не прочитались) — они ничего не оплатили и зовут повторить через минуту.
+//
+// Отметка «запуск идёт» ('launch_in_flight', engRateLimit) — на всё время
+// ядра: первый запуск шаблона пишет he_templates.launch_info только после
+// того, как рассыльщик создал первую кампанию, а платный классификатор идёт
+// раньше (минуты). Удаление проекта (DELETE api/client/eng/projects/[id])
+// читает эту отметку и до конца запуска отвечает «занято».
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.launch.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -282,7 +363,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
     const presetId = typeof body?.preset_id === 'string' ? body.preset_id.trim() : '';
     if (!presetId) return jsonError('Provide preset_id', 400);
-    const force = body?.force === true;
+    if (body?.force !== undefined && body.force !== false) return jsonError(FORCE_NOT_AVAILABLE, 400);
 
     // Окно отправки выбирает КЛИЕНТ (пояс, часы, дни). Поля нет в теле —
     // ставим английский дефолт, а НЕ окно пресета: пресет заполнял
@@ -299,6 +380,54 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Скоуп шаблона ДО запуска: чужой — 404, существование не раскрываем.
     const owned = await loadClientHeTemplate(supabaseAdmin, id, userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+
+    const access = await requireEngPaidAccess(supabaseAdmin, userId, { action: 'launch' });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
+
+    // Неудачные запуски этого шаблона за час. Попадание пишется ДО ядра (два
+    // параллельных нажатия не проходят оба последнее место) и остаётся, если
+    // запуск не прошёл после платной части: отказ классификатора, любой
+    // другой 5xx ядра, кроме отказов до классификатора, или бросок ядра
+    // (ниже, finally). Успех, 4xx и 5xx до классификатора его возвращают.
+    // Окно полно — запуск не начат, ответ 503 без кода: «Launch all» на 5xx
+    // без кода останавливает прогон (EngStepReview), чтобы следующий шаблон не
+    // оплатил классификацию ради того же сбоя. Без миграции 20261010_0001
+    // счёт — в памяти процесса (engRateLimit), строка warn.
+    const failedHit = await hitHeEngRateLimit(supabaseAdmin, 'launch_failed', id);
+    if (failedHit.fallbackReason) {
+      void logWarn(
+        'client.eng.template.launch.failed_limit_fallback',
+        `failed-launch count decided in process memory: ${failedHit.fallbackReason}`,
+        { userId, templateId: id },
+      );
+    }
+    if (!failedHit.allowed) {
+      void logAudit(
+        'client.eng.template.launch.retry_limited',
+        'ENG launch not started: launches of this template failed after their paid part too often within the hour',
+        { userId, templateId: id, retryAfterSeconds: failedHit.retryAfterSeconds },
+      );
+      return NextResponse.json(
+        {
+          error: launchRetryLimitedText(heEngRetryMinutes(failedHit.retryAfterSeconds)),
+          retry_after_seconds: failedHit.retryAfterSeconds,
+        },
+        { status: 503, headers: { 'Retry-After': String(failedHit.retryAfterSeconds) } },
+      );
+    }
+
+    // Отметка «запуск идёт» (см. докблок POST) — до ядра, возвращается в
+    // finally при любом исходе. Отказ лимита отметки запуск не останавливает:
+    // её лимит — только потолок роста таблицы. Не легла в БД (миграции нет,
+    // блип) — удаление проекта её не увидит, строка warn.
+    const inFlightHit = await hitHeEngRateLimit(supabaseAdmin, 'launch_in_flight', id);
+    if (inFlightHit.fallbackReason) {
+      void logWarn(
+        'client.eng.template.launch.in_flight_mark_fallback',
+        `launch-in-flight mark kept in process memory only (project delete cannot see it): ${inFlightHit.fallbackReason}`,
+        { userId, templateId: id },
+      );
+    }
 
     // Журнал расхода ENG (costTelemetry.ts) вокруг ядра запуска: классификатор
     // сегментов (шаг 5c ядра) — платный вызов модели из роута, и без журнала
@@ -325,22 +454,49 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // переходит — клиенты фиксируются здесь.
     const portalDb = supabaseAdmin;
     const instantlyDb = supabaseInstantly;
-    const outcome = await withHeProviderJournal(journal, () =>
-      runHeTemplateLaunch({
-        portalDb,
-        instantlyDb,
-        templateId: id,
-        presetId,
-        force,
-        userId,
-        scopeClientUserId: userId,
-        locale: 'en',
-        eventPrefix: 'client.eng.template.launch',
-        // Окно уезжает в ядро: новые кампании создаются СРАЗУ с ним (шаг 4b⁗
-        // ядра), а не с часами пресета до второго вызова.
-        sendingWindow,
-      }),
-    );
+    // Вернуть попадание 'launch_failed' — только когда исход известен и он не
+    // «не прошёл после платной части». Бросок ядра оставляет его.
+    let releaseFailedHit = false;
+    let outcome: HeTemplateLaunchOutcome;
+    try {
+      outcome = await withHeProviderJournal(journal, () =>
+        runHeTemplateLaunch({
+          portalDb,
+          instantlyDb,
+          templateId: id,
+          presetId,
+          force: false,
+          userId,
+          scopeClientUserId: userId,
+          locale: 'en',
+          eventPrefix: 'client.eng.template.launch',
+          // Окно уезжает в ядро: новые кампании создаются СРАЗУ с ним (шаг 4b⁗
+          // ядра), а не с часами пресета до второго вызова.
+          sendingWindow,
+        }),
+      );
+      releaseFailedHit = outcome.status < 500 || isHeLaunchUnpaidServerError(outcome.body.error);
+    } finally {
+      // Не вышло вернуть — попадание считается до конца окна, строка warn.
+      if (releaseFailedHit) {
+        const failure = await releaseHeEngRateHit(portalDb, 'launch_failed', id, failedHit);
+        if (failure) {
+          void logWarn('client.eng.template.launch.failed_limit_release_failed', `hit kept: ${failure}`, {
+            userId,
+            templateId: id,
+          });
+        }
+      }
+      // Отметка «запуск идёт» — при любом исходе. Не вышло — она гаснет сама
+      // через аренду запуска (15 мин), до того удаление проекта отвечает «занято».
+      const markFailure = await releaseHeEngRateHit(portalDb, 'launch_in_flight', id, inFlightHit);
+      if (markFailure) {
+        void logWarn('client.eng.template.launch.in_flight_mark_release_failed', `mark kept: ${markFailure}`, {
+          userId,
+          templateId: id,
+        });
+      }
+    }
 
     // 5xx ядра запуска несут сырьё: сообщение Postgres (чтения шаблона и базы)
     // и тело ответа API рассыльщика (отказ первой кампании). Наружу — константа
@@ -355,24 +511,24 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // посреди запуска. Сырья в них нет, это литералы словаря ядра.
     //
     // Отказ классификатора сегментов (503 segment_classification_incomplete)
-    // уходит СО СВОИМ КОДОМ и статусом: «Launch all» по коду останавливает
-    // прогон (EngStepReview). Классификатор общий у всех шаблонов, и через
-    // engServerError (500, без кода) прогон шёл дальше — каждый следующий
-    // шаблон с сегментами оплачивал классификацию всей своей аудитории ради
-    // того же отказа. Текст — та же безопасная константа ядра.
+    // уходит СО СВОИМ КОДОМ и статусом: «Launch all» останавливает прогон
+    // (EngStepReview) — классификатор общий у всех шаблонов, и следующий
+    // шаблон с сегментами оплатил бы классификацию всей своей аудитории ради
+    // того же отказа. На любом другом 5xx (engServerError, 500 без кода)
+    // прогон теперь тоже останавливается — по статусу. Код — из словаря ядра
+    // (heLaunchOutcomeCode), текст — свой (SEGMENT_CHECK_STOPPED): он
+    // называет правило лимита неудачных запусков, а у ядра — срок повтора,
+    // который на последнем месте лимита неправда.
     if (outcome.status >= 500 && typeof outcome.body.error === 'string') {
       const outcomeCode = heLaunchOutcomeCode(outcome);
-      if (
-        outcomeCode === 'segment_classification_incomplete' &&
-        isHeLaunchClientSafeServerError(outcome.body.error)
-      ) {
+      if (outcomeCode === 'segment_classification_incomplete') {
         await logError('client.eng.template.launch_failed', new Error(outcome.body.error), {
           userId,
           templateId: id,
           status: outcome.status,
           code: outcomeCode,
         });
-        return NextResponse.json({ error: outcome.body.error, code: outcomeCode }, { status: 503 });
+        return NextResponse.json({ error: SEGMENT_CHECK_STOPPED, code: outcomeCode }, { status: 503 });
       }
       const outward = isHeLaunchClientSafeServerError(outcome.body.error) ? outcome.body.error : LAUNCH_FAILED;
       return engServerError('client.eng.template.launch_failed', new Error(outcome.body.error), outward, {
@@ -401,6 +557,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     delete responseBody.window_campaign_ids;
     if (typeof responseBody.error === 'string') {
       responseBody.error = scrubBrand(responseBody.error);
+    }
+    // 409 с записью о запуске у ядра ровно один — «уже запущено».
+    if (outcome.status === 409 && 'launch' in responseBody) {
+      responseBody.error = ALREADY_LAUNCHED;
     }
 
     // ── Окно отправки на кампании запуска ──
@@ -605,7 +765,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             .filter((cid) => cid.length > 0),
           leads: record.leads_count,
           unfinished: heLaunchIsIncomplete(record),
-          forced: force,
+          forced: false,
         });
       }
     }

@@ -6,7 +6,13 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
-import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import {
+  engPaidAccessResponse,
+  loadClientHeProject,
+  requireEngMarket,
+  requireEngPaidAccess,
+} from '@/lib/hypothesisEngine/apiGuards';
+import { startEngResearchLocked, type EngPaidAction } from '@/lib/hypothesisEngine/engPaidAccess';
 import {
   HE_RESEARCH_STAGES,
   engResearchRerunBlockers,
@@ -25,6 +31,7 @@ import { engServerError } from '../../../_shared';
 export const dynamic = 'force-dynamic';
 
 const RESEARCH_START_FAILED = 'Failed to start research';
+const RESEARCH_RUNNING = 'Research is already running for this project';
 
 /**
  * Машинный код у 409 этого роута ОДИН — `research_rerun_confirm_required`: это
@@ -64,7 +71,7 @@ const RERUN_CONFIRM_TEXT =
 const RERUN_LAUNCHED_TEXT =
   'Research cannot be re-run on this project because a campaign has already been launched from it, or is ' +
   'being launched right now. Re-running it would delete the launched templates together with the record of ' +
-  'which contacts went into those campaigns. If the research needs redoing, ask your manager.';
+  'which contacts went into those campaigns. To research this market again from scratch, create a new project.';
 const RERUN_BUSY_TEXT =
   'Work for this project is still running. Re-running research now would throw that work away. Wait until ' +
   'it finishes, or stop it with «Cancel all jobs», then re-run research.';
@@ -147,9 +154,11 @@ async function readRerunSnapshot(
 
 // POST — перезапустить research-пайплайн СВОЕГО проекта (кнопка «Re-run
 // research» шага Brief). Дедуп тот же, что у staff: активная research-стадия → 409.
-// С этой же 409 приходит и проигравший гонки двойной клик: unique index
-// he_jobs_one_active_site_profile отдаёт хелперу 23505, хелпер — 'conflict'.
-// Текст один на оба случая и оба верны: research у проекта действительно идёт.
+// С этой же 409 приходит и проигравший гонки двойной клик: у клиента его
+// второй запрос ждёт замок he_eng_start_research и видит джобу первого, а на
+// прежнем пути (сотрудник, миграция 20261010_0002 не применена) unique index
+// he_jobs_one_active_site_profile отдаёт 23505, и оба пути отвечают 'conflict'.
+// Текст один на все случаи и все верны: research у проекта действительно идёт.
 //
 // ПОВТОР УДАЛЯЕТ ОПЛАЧЕННОЕ (engResearchRerunBlockers, researchJob.ts, плюс
 // RerunVerticalPrep выше): кластеризация сносит вертикали проекта, и каскадом
@@ -249,6 +258,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       );
     }
 
+    // Гейт платных шагов (engPaidAccess.ts): почта, стартов исследования за
+    // UTC-сутки, потолок расхода клиента. После отказов «что удалит повтор»
+    // (нажатие, которое ничего бы не поставило, гейт не спрашивает) и до
+    // потолка проекта. Проект в 'failed' лимит активных проектов не занимает,
+    // а повтор исследования делает его снова активным — поэтому у него
+    // действие 'create_project': тот же набор проверок плюс лимит проектов
+    // (фраза отказа по почте у обоих действий одна — «start research»).
+    // Здесь проверки читают, а не бронируют; клиент проходит оба лимита ещё раз
+    // под замком при постановке ниже.
+    const action: EngPaidAction = owned.project.status === 'failed' ? 'create_project' : 'research';
+    const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
+
     // Потолок расхода us-проекта (lib/hypothesisEngine/spendCeiling.ts; ПО
     // УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда ни одного запроса). Достигнут — исследование не
     // ставим: пауза 'spend_ceiling' на проекте и алерт команде уже сделаны в
@@ -268,26 +290,60 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     });
     if (!spend.allowed) return jsonError(HE_SPEND_PAUSED_EN, 409);
 
-    const enqueue = await enqueueHeResearchJob(supabaseAdmin, id);
-    if (!enqueue.ok) {
-      if (enqueue.reason === 'conflict') {
-        // Про чужую джобу не говорим ничего, кроме факта «идёт»: id победителя
-        // (в гонке он может быть и не этого пользователя — staff со своей
-        // стороны) наружу не уезжает.
-        return jsonError('Research is already running for this project', 409);
+    // Постановка. Клиент (access.limits) — he_eng_start_research (миграция
+    // 20261010_0002): под замком на пользователя лимит проектов (у проекта в
+    // 'failed' — по статусу под замком), лимит исследований, дедуп активной
+    // research-стадии, вставка site_profile и перевод проекта в 'researching'
+    // одной транзакцией; из N одновременных запросов на последнем месте
+    // проходит один. Сотрудник (limits === null) и установка без функции
+    // (миграция не применена) — прежний enqueueHeResearchJob: лимиты прочитаны
+    // выше без брони, двойной клик на последнем месте проходит их, как до
+    // этой правки. На «уже идёт» оба пути отвечают одним 409: про чужую
+    // джобу не говорим ничего, кроме факта «идёт» — id победителя (в гонке он
+    // может быть и не этого пользователя — staff со своей стороны) наружу не
+    // уезжает.
+    let jobId: unknown = null;
+    let enqueued = false;
+    if (access.limits) {
+      const locked = await startEngResearchLocked(supabaseAdmin, result.auth.userId, {
+        projectId: id,
+        action,
+        limits: access.limits,
+      });
+      if (locked.kind === 'refused') return engPaidAccessResponse(locked.refusal);
+      if (locked.kind === 'conflict') return jsonError(RESEARCH_RUNNING, 409);
+      if (locked.kind === 'not_found') return jsonError('Project not found', 404);
+      if (locked.kind === 'error') {
+        return engServerError(
+          'client.eng.research.enqueue_failed',
+          new Error(locked.message),
+          RESEARCH_START_FAILED,
+          { userId: result.auth.userId, projectId: id },
+        );
       }
-      return engServerError(
-        'client.eng.research.enqueue_failed',
-        new Error(enqueue.message),
-        RESEARCH_START_FAILED,
-        { userId: result.auth.userId, projectId: id },
-      );
+      if (locked.kind === 'started') {
+        enqueued = true;
+        jobId = locked.job.id;
+      }
+    }
+    if (!enqueued) {
+      const enqueue = await enqueueHeResearchJob(supabaseAdmin, id);
+      if (!enqueue.ok) {
+        if (enqueue.reason === 'conflict') return jsonError(RESEARCH_RUNNING, 409);
+        return engServerError(
+          'client.eng.research.enqueue_failed',
+          new Error(enqueue.message),
+          RESEARCH_START_FAILED,
+          { userId: result.auth.userId, projectId: id },
+        );
+      }
+      jobId = enqueue.job.id;
     }
 
     void logAudit('client.eng.research.started', 'ENG cabinet research started', {
       userId: result.auth.userId,
       projectId: id,
-      jobId: enqueue.job.id,
+      jobId,
       // Подтверждённый повтор — с тем, что он удалит: след для разбора «куда
       // делись базы» без выгрузки удалённого.
       ...(verdict === 'confirm' ? { confirmedRerun: true, ...consequences } : {}),

@@ -5,7 +5,12 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
-import { loadClientHeBase, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import {
+  engPaidAccessResponse,
+  loadClientHeBase,
+  requireEngMarket,
+  requireEngPaidAccess,
+} from '@/lib/hypothesisEngine/apiGuards';
 import { heTemplateGenerationBudget } from '@/lib/hypothesisEngine/autopilotNext';
 import {
   HE_JOB_CLIENT_COLUMNS,
@@ -25,7 +30,7 @@ const TEMPLATE_RACE_FINISHED =
   'Another request for this template has just finished. Refresh the page to see its result.';
 const LETTERS_EXHAUSTED =
   'The letters for this audience were already generated the maximum number of times for its current ' +
-  'analysis. Ask your manager to look at it.';
+  'analysis, so they are not generated again. Contact Support if you need new letters for it.';
 
 /**
  * Активная (pending/running) template-джоба базы в клиентской проекции колонок —
@@ -68,6 +73,8 @@ async function findActiveTemplateJob(projectId: string, baseId: string) {
 //     (тот же отказ у автопилота — итог 'skipped:template_ready');
 //   - бюджет писем поколения анализа (heTemplateGenerationBudget): без него
 //     скрипт ставил бы новую платную генерацию после каждой закончившейся.
+// И гейт платных шагов (requireEngPaidAccess, 'letters'): почта и потолок
+// расхода клиента — после этих отказов, до потолка проекта и постановки.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.template.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -141,6 +148,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     if (!budgetAllowed) return jsonError(LETTERS_EXHAUSTED, 409);
+
+    const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'letters' });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
 
     // Потолок расхода us-проекта (lib/hypothesisEngine/spendCeiling.ts; ПО
     // УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда ни одного запроса). Достигнут — платный шаг не

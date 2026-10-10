@@ -466,12 +466,19 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL('/client/eng', request.url))
     }
     // (а) eng-клиент вне ENG-раздела → в ENG-кабинет (на любом хосте).
+    // Исключение — чат поддержки /client/support: ENG-кабинет self-serve, и
+    // его отказы ведут в Support. Страница говорит с eng-клиентом
+    // по-английски (ENG-хост или рынок профиля — app/client/support), её API
+    // (/api/client/support/*) сюда не доходит вовсе — /api/client/* отвечен
+    // выше, рынок он не проверяет. RU-клиента правило (а) не касается.
+    const isSupportPath = pathname === '/client/support' || pathname.startsWith('/client/support/')
     if (
       user
       && userRole === 'client'
       && userMarket === 'eng'
       && pathname.startsWith('/client')
       && !isEngCabinetPath
+      && !isSupportPath
     ) {
       return NextResponse.redirect(new URL('/client/eng', request.url))
     }

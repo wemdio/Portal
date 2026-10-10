@@ -19,7 +19,9 @@ const LANGUAGES: HeChainLanguage[] = ['ru', 'en', 'pl'];
 
 // POST — поставить генерацию цепочки писем для вертикали.
 // Дедуп: активная (pending/running) chain-задача на эту вертикаль уже есть →
-// возвращаем её со статусом 200, новую не создаём.
+// возвращаем её со статусом 200, новую не создаём. Тем же ответом — проигравший
+// гонки двух постановок: 23505 от he_jobs_one_active_chain_per_vertical
+// (20261010_0003).
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.chain.post' },
@@ -92,6 +94,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         })
         .select()
         .single();
+      // 23505 — параллельный клик или «Start outreach» успели раньше
+      // (he_jobs_one_active_chain_per_vertical): отвечаем как дедуп выше — его
+      // джобой.
+      if (jobErr?.code === '23505') {
+        const { data: racedRows, error: racedErr } = await supabaseAdmin
+          .from('he_jobs')
+          .select('*')
+          .eq('project_id', vertical.project_id)
+          .eq('stage', 'chain')
+          .in('status', ['pending', 'running']);
+        if (racedErr) return jsonError(racedErr.message, 500);
+        const raced = (racedRows ?? []).find(
+          (j) => (j.payload as { vertical_id?: string } | null)?.vertical_id === id,
+        );
+        if (raced) return NextResponse.json({ ok: true, job: raced });
+        return jsonError('Цепочка писем по этой вертикали только что поставлена другим запросом — обновите страницу', 409);
+      }
       if (jobErr || !job) {
         await logError('tools.hypothesis-engine.chain.enqueue_failed', jobErr, { userId, verticalId: id });
         return jsonError(jobErr?.message ?? 'Не удалось поставить задачу', 500);

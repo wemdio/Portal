@@ -5,6 +5,8 @@
  *
  * Отличия от salesAiAnalysis:
  *  - свой ключ: OPENROUTER_HYPOTHESIS_ENGINE_API_KEY (fallback OPENROUTER_BRIEF_API_KEY);
+ *    у работы проектов market='us' — HE_US_REQUESTY_API_KEY, если задан
+ *    (providerKeys.ts, getApiKey ниже);
  *  - четыре роли моделей (см. getHeModel): research / chain / bulk / gate;
  *  - дополнительный callLLMText — свободный текст без json_object
  *    (цепочки писем парсятся маркерами ---LETTER N---, а не схемой).
@@ -49,6 +51,7 @@ import {
   type HeProviderCallOutcome,
   type HeRequestyCall,
 } from './costTelemetry';
+import { HE_US_REQUESTY_KEY_ENV, heUsProviderKey } from './providerKeys';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -121,7 +124,14 @@ function noteUnpriced(model: string, reason: string, detail: string): void {
   console.error(`[he-llm] нет ставки в MODEL_PRICES для модели '${model}': ${detail}`);
 }
 
+/**
+ * Ключ роутера для ЭТОГО вызова. Работа проекта market='us' (под журналом
+ * расхода ENG) идёт по своему ключу HE_US_REQUESTY_API_KEY, если он задан;
+ * иначе — и у любого вызова вне журнала — прежний общий ключ (providerKeys.ts).
+ */
 function getApiKey(): string {
+  const engKey = heUsProviderKey(HE_US_REQUESTY_KEY_ENV);
+  if (engKey) return engKey;
   const key = process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY;
   if (!key) {
     throw new Error('OPENROUTER_HYPOTHESIS_ENGINE_API_KEY не задан (и нет fallback OPENROUTER_BRIEF_API_KEY)');

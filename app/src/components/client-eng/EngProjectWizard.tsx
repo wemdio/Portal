@@ -30,6 +30,7 @@ import { EngStepVerticals } from './EngStepVerticals';
 import { EngStepLetters } from './EngStepLetters';
 import { EngStepBases } from './EngStepBases';
 import { EngStepReview } from './EngStepReview';
+import { EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
 
 /** Опрос деталки, пока по проекту идёт работа. */
 const POLL_WORKING_MS = 4000;
@@ -236,7 +237,9 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
    *    зовёт, а кампании ENG создаются на паузе и сами не активируются
    *    (launchHandoff.ts), так что их состояние отмена не меняет;
    *  - ««Start outreach» turns the autopilot back on» — POST .../autopilot;
-   *    паузу добора он не снимает, отсюда «only your manager».
+   *    паузу добора он не снимает — её снимает только staff-кнопка команды,
+   *    отсюда «only by our team, through Support» (window.confirm — простой
+   *    текст, ссылки в нём нет; Support — пункт меню кабинета).
    * Сбой отмены печатается: молча проглоченный отказ выглядел бы как
    * сработавшая отмена. Ноль отменённых джоб — штатный успех (остановлены
    * автопилот, добор и застрявшие базы), 409 у роута больше нет.
@@ -248,7 +251,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
         'Cancel all jobs on this project? This stops the work running on it now, turns its autopilot off ' +
           'and stops its daily refill if it has one. Finished bases, letters and templates are kept, and ' +
           'campaigns already launched are left as they are. «Start outreach» turns the autopilot back on; ' +
-          'only your manager can restart the daily refill.',
+          'the daily refill can be restarted only by our team, through Support.',
       )
     ) {
       return;
@@ -295,6 +298,8 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
           <LayoutDashboard className="h-3 w-3" /> Command Center
         </Link>
       </div>
+
+      <EngVerifyEmailBanner />
 
       {error && !detail ? (
         <div className="ds-card p-5 text-sm" style={{ color: 'var(--cp-red)' }}>
@@ -347,7 +352,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
               проект в 'draft', — поэтому префикс «Last error» здесь честен. */}
           {project?.error_code && (
             <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
-              Last error: {engStageErrorText(project.error_code, 'research')}
+              Last error: <EngSupportText text={engStageErrorText(project.error_code, 'research')} />
             </div>
           )}
 
@@ -378,7 +383,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
             !hasActiveJobs &&
             (project.autopilot_hold ? (
               <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-amber)' }}>
-                {engAutopilotHoldText(project.autopilot_hold.code)}
+                <EngSupportText text={engAutopilotHoldText(project.autopilot_hold.code)} />
                 {project.autopilot_hold.at && (
                   <span style={{ color: 'var(--cp-text-l)' }}> · {fmtDate(project.autopilot_hold.at)}</span>
                 )}
@@ -400,7 +405,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
             !hasActiveJobs &&
             project.autopilot_hold?.code === 'spend_paused' && (
               <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-amber)' }}>
-                {engAutopilotHoldText(project.autopilot_hold.code)}
+                <EngSupportText text={engAutopilotHoldText(project.autopilot_hold.code)} />
                 {project.autopilot_hold.at && (
                   <span style={{ color: 'var(--cp-text-l)' }}> · {fmtDate(project.autopilot_hold.at)}</span>
                 )}

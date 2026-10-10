@@ -5,7 +5,12 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
-import { loadClientHeVertical, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import {
+  engPaidAccessResponse,
+  loadClientHeVertical,
+  requireEngMarket,
+  requireEngPaidAccess,
+} from '@/lib/hypothesisEngine/apiGuards';
 import { resumeHeVerticalNightlyRefill } from '@/lib/hypothesisEngine/autoPipeline';
 import { engServerError } from '../../../_shared';
 
@@ -37,6 +42,11 @@ const RESUME_FAILED = 'Failed to resume the auto-refill';
 // существование её не раскрывается. Статуса проекта здесь нет: пометка может
 // стоять на вертикали любого запущенного проекта, и запрещать возврат по
 // состоянию конвейера было бы отказом без причины.
+//
+// Сам возврат ничего не покупает, но делает вертикаль снова кандидатом НОЧНОЙ
+// платной сборки, поэтому стоит гейт платных шагов (requireEngPaidAccess,
+// 'resume_refill'): почта и потолок расхода клиента. Ночная покупка проверяет
+// потолки проекта и клиента ещё раз сама (autoPipeline.ts, шаг 3a-).
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.refill_resume.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -51,6 +61,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const owned = await loadClientHeVertical(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+
+    const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'resume_refill' });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
 
     try {
       await resumeHeVerticalNightlyRefill(supabaseAdmin, id);

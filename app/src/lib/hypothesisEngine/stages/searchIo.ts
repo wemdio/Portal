@@ -19,6 +19,7 @@ import {
 } from '@/lib/search/serperClient';
 import { serperGeoForMarket, type HeMarket } from '../market';
 import { isHeOperationTimeout } from '../operationDeadline';
+import { HE_US_SERPER_KEY_ENV, heUsProviderKey } from '../providerKeys';
 
 export type HeSearchResults = Array<{ title: string; link: string; snippet?: string }>;
 
@@ -96,6 +97,10 @@ export function isHeSearchProviderError(e: unknown): e is HeSearchProviderError 
  * signal — отмена задачи и срок операции (io.ts): молчащий поиск обрывается
  * вместе с запросом, а не после него. Отмена проверяется ДО разбора отказа:
  * остановленная работа не должна выглядеть как сбой провайдера.
+ *
+ * Ключ: работа проекта market='us' (под журналом расхода ENG) ищет по своему
+ * ключу HE_US_SERPER_API_KEY, если он задан; иначе — общий SERPER_API_KEY
+ * клиента Serper, как до правки (providerKeys.ts).
  */
 export async function defaultSearch(
   q: string,
@@ -104,7 +109,14 @@ export async function defaultSearch(
 ): Promise<HeSearchResults> {
   signal?.throwIfAborted();
   const geo = serperGeoForMarket(market);
-  const outcome = await serperSearchOutcome(q, { num: 10, gl: geo.gl, hl: geo.hl, signal });
+  const engKey = heUsProviderKey(HE_US_SERPER_KEY_ENV);
+  const outcome = await serperSearchOutcome(q, {
+    num: 10,
+    gl: geo.gl,
+    hl: geo.hl,
+    signal,
+    ...(engKey ? { apiKey: engKey } : {}),
+  });
   signal?.throwIfAborted();
   if (outcome.failure) {
     throw new HeSearchProviderError(outcome.failure.kind, outcome.failure.message, outcome.failure.httpStatus);

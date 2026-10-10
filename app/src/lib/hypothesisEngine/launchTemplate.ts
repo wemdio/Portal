@@ -332,12 +332,15 @@ interface HeLaunchMessages {
  * Отказ классификатора сегментов клиенту — ОДНА английская константа без
  * чисел: роут кабинета показывает 5xx ядра, только если текст совпал с
  * константой (HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS). Числа — в аудите и в
- * тексте staff.
+ * тексте staff. Срока повтора нет: роут кабинета ограничивает неудачные
+ * запуски шаблона за час и отдаёт свой текст с этим правилом
+ * (api/client/eng/templates/[id]/launch, SEGMENT_CHECK_STOPPED), а «через
+ * несколько минут» на последнем месте этого лимита было бы неправдой.
  */
 const SEGMENT_CLASSIFY_INCOMPLETE_EN =
   'We could not work out which segment of these letters fits too many of the addresses in this launch, so ' +
-  'it was stopped before anything was sent or changed. Please try again in a few minutes; if it keeps ' +
-  'happening, contact your manager.';
+  'it was stopped before anything was sent or changed. You can try again later; if it keeps happening, ' +
+  'contact Support.';
 
 /** Аренда запуска в минутах — для текстов: число в них обязано следовать константе. */
 const LEASE_MINUTES = Math.round(HE_LAUNCH_LEASE_MS / 60_000);
@@ -558,38 +561,41 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     // пропасть тот может, пока экран открыт. Текст ОДИН на оба случая («такого
     // id нет» и «id не твой») — расщепление выдало бы существование чужого id
     // и было бы регрессом к волне 0. Действие — то, которое в кабинете ЕСТЬ:
-    // перечитать список, а если он пуст, попросить менеджера — той же фразой,
-    // что печатает пустой список на шаге 5 (EngStepReview.tsx).
+    // перечитать список, а если он пуст, написать в Support (пресеты заводит
+    // команда) — той же фразой, что печатает пустой список на шаге 5
+    // (EngStepReview.tsx).
     presetNotFound:
       'This sending preset is no longer available. Refresh the page and pick a sending preset again — '
-      + 'if none is offered, ask your manager to set one up.',
+      + 'if none is offered, message Support to have one set up.',
     noLetters: 'The template has no letters to launch',
     noEmailColumn: 'No email column found in the collected base',
     noValidEmails: 'The base contains no valid email addresses',
     // Действие — то, которое в кабинете ЕСТЬ. Пересобрать базу клиент из
     // кабинета не может: шаг 4 — витрина, UI-вызова POST /verticals/[id]/collect
-    // нет, а «Start outreach» новой сборки при готовой базе не ставит. Поэтому
-    // просим менеджера — той же фразой, что и карточка базы на шаге 4
-    // (EngStepBases.tsx) и пустой пресет на шаге 5: два экрана про одну и ту же
-    // беду обязаны просить одного и того же.
+    // нет для готовой базы («Collect again» — только у остановленной сборки), а
+    // «Start outreach» новой сборки при готовой базе не ставит. Поэтому —
+    // Support (сборку заново ставит команда), той же фразой, что и карточка
+    // базы на шаге 4 (EngStepBases.tsx): два экрана про одну и ту же беду
+    // обязаны вести к одному и тому же.
     baseNotVerified: (unverified) =>
       'Launch stopped: not a single address in this base has passed email validation. ' +
       `Rows without a validation verdict: ${unverified.toLocaleString('en-US')}. ` +
       'An unverified address is never contacted, because the bounces would hit your sending domain. ' +
-      'Ask your manager to collect this audience again — a new collection runs the email check to the end.',
+      'Message Support to have this audience collected again — a new collection runs the email check to the end.',
     // Клиенту — без имён шагов, таблиц и дат нашего релиза: ему важны факт,
     // причина и действие. Слово instantly в тексте недопустимо (scrubBrand
-    // заменил бы его русской фразой на английском экране). Действие — просьба
-    // к менеджеру по той же причине, что у baseNotVerified выше: кнопки
-    // «собрать заново» в кабинете нет.
+    // заменил бы его русской фразой на английском экране). Действие — Support
+    // по той же причине, что у baseNotVerified выше: собрать готовую базу
+    // заново из кабинета нельзя. Обещания «и этот шаблон запустится» нет: новая
+    // сборка — новая база, и шаблон у неё свой.
     baseCollectedBeforeSplit:
       'Launch stopped: this audience was collected by an earlier version of our collection pipeline. ' +
       'Back then one row could hold several addresses of the same company, and the email check saved a ' +
       'single result for the whole group — the best one of them. ' +
       'So we cannot prove that the address left on a row is the one that passed the check, and writing to ' +
       'the wrong one would put bounces on your sending domain. ' +
-      'Ask your manager to collect this audience again — a new collection keeps one address per row with ' +
-      'its own check result — and this template launches after that.',
+      'Message Support to have this audience collected again — a new collection keeps one address per row ' +
+      'with its own check result.',
     blocklistLoadFailed:
       'Your blocked-contacts list could not be read, so the launch was stopped before any campaign was created. ' +
       'Please try again in a minute.',
@@ -629,7 +635,7 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'created or changed. Please try again in a minute.',
     resumePresetMissing:
       'This launch is unfinished, and the sending preset it was started with is no longer available, ' +
-      'so it cannot be finished from here. Ask your manager to look at this launch.',
+      'so it cannot be finished from here. Message Support about this launch.',
     resumePresetPinnedNote:
       'This unfinished launch was finished with the sending preset it was started with, not the one ' +
       'picked now, because its campaigns live there.',
@@ -696,14 +702,14 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       intermediateSaved
         ? 'The campaigns were created, but the final record of this launch could not be saved, so the ' +
           'template keeps an earlier record of it. Launching again within the next ' +
-          `${LEASE_MINUTES} minutes is refused as still in progress; ask your manager to compare the ` +
-          'campaigns with that record before launching again.'
+          `${LEASE_MINUTES} minutes is refused as still in progress. Before launching it again, message ` +
+          'Support so our team can compare the campaigns with that record.'
         : 'The campaign was created, but the launch record was not saved to the template (the he_templates.launch_info migration is probably not applied) — a re-launch will not be blocked.',
     segmentVariantsWarning: (dropped, lettersCount) =>
       `Segment variants (${dropped} across ${lettersCount} letters) were not included in the campaign: ` +
       'the mailing system cannot run conditional blocks — the main letter text was used instead.',
     // Клиенту важно, что остаток НЕ сожжён, и что второй загрузкой мы не рискуем
-    // отправить кому-то второе письмо. Действие — к менеджеру, как и в других
+    // отправить кому-то второе письмо. Действие — Support, как и в других
     // текстах этого файла: кнопки повторной загрузки в кабинете нет.
     partialImportNote: (requested, accepted, alreadyPresent) =>
       `The mailing system confirmed ${accepted.toLocaleString('en-US')} of the ` +
@@ -714,7 +720,7 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       ', so ' +
       `${(requested - accepted - alreadyPresent).toLocaleString('en-US')} of them did not get into the campaign. ` +
       'Nothing in your audience was marked as contacted, so those addresses can still be used. ' +
-      'Ask your manager to look at this launch before anyone uploads them a second time — an address ' +
+      'Message Support about this launch before anyone uploads them a second time — an address ' +
       'that is already in a campaign would get two letters.',
     // Число в фразах ниже бывает и 1: достройка отложенных классификатором
     // адресов (шаг 5c) обычно дозаполняет одну кампанию и оставляет остальные.
@@ -768,29 +774,30 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `${segments.toLocaleString('en-US')} more segment${segments === 1 ? '' : 's'} of your audience ` +
       'did not go out in this launch. ' +
       (teamAlerted
-        ? `${HE_TEAM_ON_IT_EN} Your manager can tell you when it is fixed — then launch again with ` +
+        ? `${HE_TEAM_ON_IT_EN} Message Support to find out when it is fixed — then launch again with ` +
           '«Launch all (paused)»'
-        : 'This stopped because of a temporary problem on our side. Ask your manager when to launch ' +
-          'again with «Launch all (paused)»') +
+        : 'This stopped because of a temporary problem on our side. Message Support to find out when to ' +
+          'launch again with «Launch all (paused)»') +
       '; repeating this launch does not duplicate the campaigns that were already created.',
     // Правда для всех трёх форм гейта (templateOperatorGate): подстановка без
     // колонки в теме (пусто), без колонки и fallback в теле (пусто), имя
     // человека с fallback («there» — слово-заглушка), битый фрагмент вида
     // «{company}» (сырой шаблон). Сводку для staff клиенту не печатаем: в ней
-    // имена операторов и колонок. Действие — к менеджеру: письма шаблона клиент
+    // имена операторов и колонок. Действие — Support: письма шаблона клиент
     // не правит (правка цепочки на шаге 3 в готовый шаблон не попадает).
     templateOperatorsUnresolved: () =>
       'These letters contain a placeholder (such as a first name) that cannot be filled in from this ' +
       'audience, so recipients would see a blank, a stand-in word or the raw placeholder in its place. ' +
-      'This launch was stopped before anything was sent or changed. Ask your manager to have the letters ' +
+      'This launch was stopped before anything was sent or changed. Message Support to have the letters ' +
       'rewritten.',
-    // Пресет клиент не правит (его заводит администратор), поэтому — к менеджеру.
+    // Пресет клиент не правит (его заводит администратор; подключение ящика на
+    // странице почты кабинета в пресет его не добавляет), поэтому — Support.
     // «Before anything was sent or changed» — правда и для первого запуска, и
     // для достройки (её кампании уже есть, но эта попытка их не трогала).
     presetNoMailboxes:
       'Your sending preset has no mailboxes connected, so a campaign launched with it could not send a ' +
-      'single email. This launch was stopped before anything was sent or changed. Ask your manager to ' +
-      'connect your mailboxes to the sending preset, then launch again.',
+      'single email. This launch was stopped before anything was sent or changed. Message Support to have ' +
+      'your mailboxes connected to the sending preset, then launch again.',
     // Правда при любом исходе: отказ бывает только у попытки без поимённого
     // долга (первый запуск, force), и он до рассыльщика — кампаний этой
     // попытки нет, прежняя запись (у force) возвращена как была.
@@ -879,6 +886,28 @@ const HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS: ReadonlySet<string> = new Set([
 /** Можно ли показать клиенту текст 5xx ядра как есть (см. набор выше). */
 export function isHeLaunchClientSafeServerError(text: unknown): boolean {
   return typeof text === 'string' && HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS.has(text);
+}
+
+/**
+ * 5xx ядра (английский словарь), которые случаются ДО классификатора сегментов
+ * (шаг 5c) — значит, до любой платной работы запуска: пресет (шаг 3), рынок
+ * проекта (4b), защиты аудитории (4b′), чёрный список (5a) и аренда записи
+ * (5b′) не прочитались или не записались. Четыре из пяти текстов зовут
+ * повторить через минуту. Роут кабинета не считает такие отказы в лимите
+ * неудачных запусков шаблона (api/client/eng/templates/[id]/launch): повтор
+ * ничего не оплачивает заново, и «через минуту» должно оставаться правдой.
+ */
+const HE_LAUNCH_UNPAID_SERVER_ERRORS: ReadonlySet<string> = new Set([
+  MESSAGES.en.presetLoadFailed,
+  MESSAGES.en.marketReadFailed,
+  MESSAGES.en.launchGuardReadFailed,
+  MESSAGES.en.blocklistLoadFailed,
+  MESSAGES.en.launchStartSaveFailed,
+]);
+
+/** 5xx ядра до платной части запуска (см. набор выше). */
+export function isHeLaunchUnpaidServerError(text: unknown): boolean {
+  return typeof text === 'string' && HE_LAUNCH_UNPAID_SERVER_ERRORS.has(text);
 }
 
 /* ───────────── «У шаблона есть запуск»: одно определение на всех ───────────── */

@@ -5,7 +5,8 @@ import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit } from '@/lib/loggerServer';
 import { withToolTrace } from '@/lib/toolTrace';
-import { requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import { engPaidAccessResponse, requireEngMarket, requireEngPaidAccess } from '@/lib/hypothesisEngine/apiGuards';
+import { createEngProjectLocked } from '@/lib/hypothesisEngine/engPaidAccess';
 import { normalizeWebsiteInput } from '@/lib/hypothesisEngine/websiteUrl';
 import { enqueueHeResearchJob } from '@/lib/hypothesisEngine/researchJob';
 import {
@@ -22,15 +23,68 @@ export const runtime = 'nodejs';
 /**
  * Клиентский ENG-контур «Движка вертикалей» (кабинет с EN-UI):
  * проекты всегда market='us' и строго свои (created_by = user id).
- * TODO(tariffs): гейт доступа по тарифу/флагу — сейчас раздел открыт любому
- * ENG-клиенту, заводим вместе с тарифной обвязкой ENG-продукта. Рыночный гейт
- * (ru-клиент сюда не ходит) уже стоит — requireEngMarket.
+ * Рыночный гейт (ru-клиент сюда не ходит) — requireEngMarket. Создание проекта
+ * сразу ставит ПЛАТНОЕ исследование, поэтому POST проходит и гейт платных
+ * шагов (requireEngPaidAccess, действие 'create_project'): подтверждённая
+ * почта, число активных проектов, число стартов исследования за UTC-сутки и
+ * потолок расхода клиента (engPaidAccess.ts). Оба лимита клиент проходит
+ * второй раз под замком на пользователя, вместе со вставкой проекта и его
+ * исследования (createEngProjectLocked). Оплаты (тарифа) ENG-продукта пока
+ * нет — гейт по оплате появится вместе с ней.
  */
 
 /** Тексты 5xx — константы контура: ни Postgres, ни провайдер наружу не едут. */
 const PROJECTS_LOAD_FAILED = 'Failed to load your projects';
 const PROJECT_CREATE_FAILED = 'Failed to create the project';
 const RESEARCH_START_FAILED = 'Failed to start research';
+
+/**
+ * Строка в колонках `HE_PROJECT_CLIENT_COLUMNS` — та же форма, что отдаёт
+ * `.select(HE_PROJECT_CLIENT_COLUMNS)`: функция под замком возвращает строку
+ * he_projects целиком, а проектор по наличию ключей (`brief`,
+ * `autopilot_error`) добавил бы в ответ создания поля, которых в нём не было.
+ */
+function inClientProjectColumns(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const column of HE_PROJECT_CLIENT_COLUMNS.split(',')) {
+    const key = column.trim();
+    if (key in row) out[key] = row[key];
+  }
+  return out;
+}
+
+/** 201 создания: проект, только что поставленный в research, и его джоба. */
+function projectCreatedResponse(
+  userId: string,
+  websiteUrl: string,
+  project: Record<string, unknown>,
+  job: Record<string, unknown>,
+): NextResponse {
+  void logAudit('client.eng.projects.created', 'ENG cabinet project created', {
+    userId,
+    projectId: project.id,
+    websiteUrl,
+  });
+
+  return NextResponse.json(
+    {
+      // Проекция как у деталки: в строке из insert().select() едут
+      // cost_usd/tokens_used/llm_model, кабинету они не нужны. Причина
+      // падения — код (`error_code`), а не текст стадии; у свежего проекта
+      // её нет.
+      project: {
+        ...toClientEngProjectRow(project),
+        status: 'researching',
+        error_code: null,
+      },
+      // Строку джобы оба пути читают целиком (enqueueHeResearchJob —
+      // researchJob.ts:50, функция под замком — to_jsonb) — сужаем на границе
+      // контура.
+      job: toClientEngJobRow(job),
+    },
+    { status: 201 },
+  );
+}
 
 // GET — список СВОИХ проектов со счётчиками вертикалей и баз.
 export async function GET(req: NextRequest) {
@@ -122,6 +176,36 @@ export async function POST(req: NextRequest) {
         ? body.name.trim().slice(0, 300)
         : normalized.hostname;
 
+    // ДО вставки he_projects: отказанный черновик иначе сам занял бы место в
+    // лимите проектов. Здесь проверки читают, а не бронируют.
+    const access = await requireEngPaidAccess(supabaseAdmin, userId, { action: 'create_project' });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
+
+    // Клиент (access.limits) — лимиты решаются ещё раз ПОД ЗАМКОМ на
+    // пользователя, и проект с его site_profile вставляется той же транзакцией
+    // (he_eng_create_project, миграция 20261010_0002): из N одновременных
+    // запросов на последнем месте проходит один, остальные получают тот же
+    // отказ лимита. Сотрудник (limits === null) лимитов не имеет — прежний
+    // путь ниже. Функции нет (миграция не применена) — тоже прежний путь:
+    // чтение выше, затем вставка, и двойной клик на последнем месте проходит
+    // лимит, как до этой правки.
+    if (access.limits) {
+      const locked = await createEngProjectLocked(supabaseAdmin, userId, {
+        name,
+        websiteUrl: normalized.url,
+        limits: access.limits,
+      });
+      if (locked.kind === 'refused') return engPaidAccessResponse(locked.refusal);
+      if (locked.kind === 'error') {
+        return engServerError('client.eng.projects.create_failed', new Error(locked.message), PROJECT_CREATE_FAILED, {
+          userId,
+        });
+      }
+      if (locked.kind === 'created') {
+        return projectCreatedResponse(userId, normalized.url, inClientProjectColumns(locked.project), locked.job);
+      }
+    }
+
     const { data: project, error } = await supabaseAdmin
       .from('he_projects')
       .insert({
@@ -153,28 +237,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    void logAudit('client.eng.projects.created', 'ENG cabinet project created', {
-      userId,
-      projectId: project.id,
-      websiteUrl: normalized.url,
-    });
-
-    return NextResponse.json(
-      {
-        // Проекция как у деталки: в строке из insert().select() едут
-        // cost_usd/tokens_used/llm_model, кабинету они не нужны. Причина
-        // падения — код (`error_code`), а не текст стадии; у свежего проекта
-        // её нет.
-        project: {
-          ...toClientEngProjectRow(project as Record<string, unknown>),
-          status: 'researching',
-          error_code: null,
-        },
-        // enqueueHeResearchJob общий со staff и читает джобу целиком
-        // (researchJob.ts:50) — сужаем на границе контура.
-        job: toClientEngJobRow(enqueue.job),
-      },
-      { status: 201 },
-    );
+    return projectCreatedResponse(userId, normalized.url, project as Record<string, unknown>, enqueue.job);
   });
 }

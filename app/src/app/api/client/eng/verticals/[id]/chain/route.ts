@@ -1,11 +1,17 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
-import { loadClientHeVertical, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import {
+  engPaidAccessResponse,
+  loadClientHeVertical,
+  requireEngMarket,
+  requireEngPaidAccess,
+} from '@/lib/hypothesisEngine/apiGuards';
 import { defaultChainLanguageForMarket, projectMarket } from '@/lib/hypothesisEngine/market';
 import type { HeChainLanguage } from '@/lib/hypothesisEngine/types';
 import {
@@ -18,14 +24,56 @@ import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
 
-const LANGUAGES: HeChainLanguage[] = ['ru', 'en', 'pl'];
-
 const LETTERS_START_FAILED = 'Failed to start the letters';
+const LETTERS_EXIST =
+  'Letters for this vertical already exist, so new ones were not generated. Step 3 shows them.';
+// 23505 без стоящей джобы: запуск победителя гонки успел закончиться (готово,
+// упал или отменён) — «уже закончился» верно для всех трёх.
+const LETTERS_RACE_FINISHED =
+  'Letters for this vertical were just started by another request, and that run has already ended. ' +
+  'Refresh the page to see its result.';
+
+/**
+ * Активная (pending/running) chain-джоба вертикали в колонках кабинета.
+ * Одна на вертикаль держится индексом he_jobs_one_active_chain_per_vertical
+ * (миграция 20261010_0003); до него их могло быть две — берётся первая.
+ */
+async function findActiveChainJob(
+  db: SupabaseClient,
+  projectId: string,
+  verticalId: string,
+): Promise<{ job: Record<string, unknown> | null; error: unknown }> {
+  const { data, error } = await db
+    .from('he_jobs')
+    .select(HE_JOB_CLIENT_COLUMNS)
+    .eq('project_id', projectId)
+    .eq('stage', 'chain')
+    .in('status', ['pending', 'running']);
+  if (error) return { job: null, error };
+  const job = ((data ?? []) as Array<Record<string, unknown>>).find(
+    (j) => (j.payload as { vertical_id?: string } | null)?.vertical_id === verticalId,
+  );
+  return { job: job ?? null, error: null };
+}
 
 // POST — поставить генерацию цепочки писем для СВОЕЙ вертикали.
-// Дефолт языка — по рынку проекта (кабинет всегда market='us' → 'en'); явный
-// language (ru/en/pl) в приоритете. Дедуп как у staff: активная chain-задача
-// на эту вертикаль уже есть → возвращаем её со статусом 200.
+//
+// Кабинет этот роут НЕ зовёт (generateEngChain без вызывающего: письма ставит
+// «Start outreach» — autopilotReconcile.ts), сюда приходят только прямые
+// запросы и старые бандлы. Поэтому каждая платная возможность сверх того, что
+// делает «Start outreach», закрыта:
+//  - язык — только язык рынка проекта (us → 'en', defaultChainLanguageForMarket);
+//    прежний выбор ru/pl английскому кабинету не нужен;
+//  - у вертикали уже есть готовая ('ready') цепочка → 409 LETTERS_EXIST:
+//    перегенерация — второй платный прогон ради того, что уже есть, а кнопки
+//    «переписать письма» в кабинете нет. Упавшую или незаконченную цепочку
+//    повтор поднимает — так же, как «Start outreach».
+// Дедуп как у staff: активная chain-задача на эту вертикаль уже есть →
+// возвращаем её со статусом 200. Тем же ответом — проигравший гонки двух
+// постановок: 23505 от he_jobs_one_active_chain_per_vertical (20261010_0003).
+//
+// ГЕЙТ ПЛАТНЫХ ШАГОВ (requireEngPaidAccess, 'letters'): почта и потолок
+// расхода клиента — до потолка проекта и постановки.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.chain.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -38,16 +86,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const gate = await requireEngMarket(supabaseAdmin, result.auth.userId);
     if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
 
-    // null = язык явно не задан — дефолт вычислим по рынку проекта ниже.
-    let language: HeChainLanguage | null = null;
+    // Язык — по рынку проекта; присланный в теле обязан с ним совпасть.
+    let requested: unknown;
     try {
-      const body = (await req.json()) as { language?: unknown };
-      if (body?.language !== undefined) {
-        if (typeof body.language !== 'string' || !LANGUAGES.includes(body.language as HeChainLanguage)) {
-          return jsonError('language must be ru, en or pl', 400);
-        }
-        language = body.language as HeChainLanguage;
-      }
+      requested = ((await req.json()) as { language?: unknown } | null)?.language;
     } catch {
       // Пустое/битое тело = язык по умолчанию.
     }
@@ -55,26 +97,36 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const owned = await loadClientHeVertical(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
-    const { data: active, error: activeErr } = await supabaseAdmin
-      .from('he_jobs')
-      .select(HE_JOB_CLIENT_COLUMNS)
-      .eq('project_id', owned.vertical.project_id as string)
-      .eq('stage', 'chain')
-      .in('status', ['pending', 'running']);
-    if (activeErr) {
-      return engServerError('client.eng.chain.active_lookup_failed', activeErr, LETTERS_START_FAILED, {
+    const language: HeChainLanguage = defaultChainLanguageForMarket(projectMarket(owned.project));
+    if (requested !== undefined && requested !== language) {
+      return jsonError(`language must be ${language}`, 400);
+    }
+
+    const active = await findActiveChainJob(supabaseAdmin, owned.vertical.project_id as string, id);
+    if (active.error) {
+      return engServerError('client.eng.chain.active_lookup_failed', active.error, LETTERS_START_FAILED, {
         userId: result.auth.userId,
         verticalId: id,
       });
     }
-    const existing = (active ?? []).find(
-      (j) => (j.payload as { vertical_id?: string } | null)?.vertical_id === id,
-    );
-    if (existing) return NextResponse.json({ ok: true, job: toClientEngJobRow(existing) });
+    if (active.job) return NextResponse.json({ ok: true, job: toClientEngJobRow(active.job) });
 
-    if (language === null) {
-      language = defaultChainLanguageForMarket(projectMarket(owned.project));
+    const { data: ready, error: readyErr } = await supabaseAdmin
+      .from('he_chains')
+      .select('id')
+      .eq('vertical_id', id)
+      .eq('status', 'ready')
+      .limit(1);
+    if (readyErr) {
+      return engServerError('client.eng.chain.ready_lookup_failed', readyErr, LETTERS_START_FAILED, {
+        userId: result.auth.userId,
+        verticalId: id,
+      });
     }
+    if ((ready ?? []).length > 0) return jsonError(LETTERS_EXIST, 409);
+
+    const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'letters' });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
 
     // Потолок расхода us-проекта (lib/hypothesisEngine/spendCeiling.ts; ПО
     // УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда ни одного запроса). Достигнут — платный шаг не
@@ -104,6 +156,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       })
       .select(HE_JOB_CLIENT_COLUMNS)
       .single();
+    // 23505 — he_jobs_one_active_chain_per_vertical (20261010_0003): между
+    // дедупом выше и этой вставкой цепочку вертикали поставил другой запрос
+    // (второй клик, «Start outreach», специалист). Вставки не было — отвечаем
+    // как дедуп: его джобой. Других уникальных ограничений, способных ответить
+    // 23505 на вставку chain, у he_jobs нет (PK — gen_random_uuid, прочие
+    // partial-индексы — по другим стадиям). Без миграции 23505 не бывает.
+    if (jobErr?.code === '23505') {
+      const raced = await findActiveChainJob(supabaseAdmin, owned.vertical.project_id as string, id);
+      if (raced.error) {
+        return engServerError('client.eng.chain.active_lookup_failed', raced.error, LETTERS_START_FAILED, {
+          userId: result.auth.userId,
+          verticalId: id,
+        });
+      }
+      if (raced.job) return NextResponse.json({ ok: true, job: toClientEngJobRow(raced.job) });
+      return jsonError(LETTERS_RACE_FINISHED, 409);
+    }
     if (jobErr || !job) {
       return engServerError('client.eng.chain.enqueue_failed', jobErr, LETTERS_START_FAILED, {
         userId: result.auth.userId,

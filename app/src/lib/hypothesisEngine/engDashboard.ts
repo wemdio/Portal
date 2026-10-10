@@ -73,7 +73,7 @@ export function nextDailyRunIso(now: Date): string {
  * читает (это отдельное решение владельца, P-D-remote-campaign-status), поэтому
  * из локальных данных «live» не выводится никогда: подпись этапа говорит то,
  * что верно при ЛЮБОМ удалённом статусе, — кампании созданы на паузе, а
- * запускает их менеджер.
+ * запускает их команда (вопросы — в Support).
  *
  * `attention` — вертикаль встала на ТЕРМИНАЛЬНОМ состоянии и сама не поедет:
  * последняя своя база упала или отменена, проанализирована с нулём строк, её
@@ -86,8 +86,7 @@ export function nextDailyRunIso(now: Date): string {
  * предикат, по которому автопилот пропускает её как 'not_selected',
  * autopilotReconcile.ts), и работы по ней сейчас нет. «Start outreach» и ночной
  * проход её не трогают, поэтому ни «needs attention», ни «next: …» про неё
- * неправда: клиент её не выбрал или снял сам (шаг 4 советует отклонить
- * гипотезы вертикали при audience_mismatch / segment_exhausted). Запуск, готовый
+ * неправда: клиент её не выбрал или снял сам. Запуск, готовый
  * шаблон и идущая работа этот этап перекрывают: «Launch all (paused)» и ночной
  * долив выбор не читают, а начатая джоба доработает.
  */
@@ -538,13 +537,14 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     };
   }
   if (launched) {
-    // Не «live»: кампании созданы на паузе, стартует их менеджер, а их статус
-    // у рассыльщика кабинет не читает (см. EngDashStage). Подпись верна при
-    // любом удалённом статусе — и до старта, и после, — поэтому без имени
-    // кампании и без утверждения, что она отправляет; пятая точка не ставится.
+    // Не «live»: кампании созданы на паузе, стартует их команда (клиентской
+    // кнопки старта нет — поэтому и Support), а их статус у рассыльщика
+    // кабинет не читает (см. EngDashStage). Подпись верна при любом удалённом
+    // статусе — и до старта, и после, — поэтому без имени кампании и без
+    // утверждения, что она отправляет; пятая точка не ставится.
     return {
       stage: 'launched',
-      stageDetail: 'created paused — your manager reviews it and starts sending',
+      stageDetail: 'created paused — our team reviews it and starts sending; message Support to ask about it',
       dots: [true, true, true, true, false],
       mainBase,
       launch: launched.launch,
@@ -557,7 +557,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     return {
       stage: 'template',
       stageDetail: rewrite
-        ? 'letters need rewriting — ask your manager to rewrite them'
+        ? 'letters need rewriting — message Support to have them rewritten'
         : 'template ready — launch when set',
       dots: [true, true, true, false, false],
       mainBase,
@@ -907,8 +907,11 @@ export function buildEngDashboardEvents(input: {
       // Адреса, которые долив снял сам: письмо кампании прочиталось бы у них
       // неверно — пустота на месте подстановки или замена не на месте
       // (stats.held_unfilled, stages/baseCollectRefill.ts, шаг 3a). «skipped»,
-      // а не «not sent yet»: эти строки не уедут ни следующей ночью, ни
-      // переносом — они остаются в базе. Только у 'appended': у 'no_new'
+      // а не «not sent yet»: число — про ЭТУ ночь, и уедут ли они, зависит от
+      // писем — компания без иного адреса ждёт в очереди переноса с пометкой
+      // «ждёт писем» и уходит, только если до конца её срока шаблон вертикали
+      // переписали и перезапустили, иначе срок выходит и её отпускают в пул
+      // (блок «ПЕРЕНОС» в stages/baseCollectRefill.ts). Только у 'appended': у 'no_new'
       // допущенных строк нет вовсе, а у отказа ленте важнее его причина.
       const unfilled = asNum(stats.held_unfilled);
       const skipped =
@@ -978,7 +981,7 @@ export function buildEngDashboardEvents(input: {
           : asStr(stats.error_kind) === 'letters_held'
             ? {
                 type: 'refill_empty',
-                text: withVertical('refill paused: the letters need rewriting — ask your manager to rewrite them', vname),
+                text: withVertical('refill paused: the letters need rewriting — message Support to have them rewritten', vname),
                 at,
               }
           : budgetOutcome === 'cap_exhausted'

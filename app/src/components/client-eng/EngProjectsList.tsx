@@ -9,18 +9,26 @@
  * Дефолтная точка ENG-кабинета — Command Center (/client/eng/dashboard):
  * если проекты уже есть, список перенаправляет туда (обратно — «All projects»
  * с дашборда, он же ?list=1, который редирект отключает).
+ *
+ * «Delete project» под карточкой — DELETE /api/client/eng/projects/[id]:
+ * так клиент сам освобождает место под лимит проектов (отказ создания по
+ * лимиту ведёт сюда же). Что удаляется и когда роут отказывает — у роута;
+ * отказ печатается под карточкой своего проекта, «Support» в нём — ссылка.
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { ArrowRight, Globe, LayoutDashboard } from 'lucide-react';
+import { ArrowRight, Globe, LayoutDashboard, Trash2 } from 'lucide-react';
 import {
+  EngPaidAccessError,
   createEngProject,
+  deleteEngProject,
   fetchEngProjects,
   type EngProjectListItem,
 } from './api-client';
+import { EngPaidAccessNotice, EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
 import { engStageErrorText } from './engText';
 import { EngBadge, EngCard, EngSpinner, fmtDate, projectStatusTone } from './ui';
 
@@ -35,6 +43,12 @@ export function EngProjectsList() {
   const [website, setWebsite] = useState('');
   const [name, setName] = useState('');
   const [creating, setCreating] = useState(false);
+  /** Отказ гейта платных шагов на создании (почта, лимиты, потолок) — с действием. */
+  const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
+  /** Проект, который сейчас удаляется; пока идёт одно удаление, кнопки остальных выключены. */
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  /** Отказ или сбой последнего удаления — под карточкой своего проекта. */
+  const [deleteError, setDeleteError] = useState<{ projectId: string; text: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -58,11 +72,47 @@ export function EngProjectsList() {
 
   const redirecting = !forceList && projects !== null && projects.length > 0;
 
+  /**
+   * Диалог перечисляет то, что уходит каскадом вместе с проектом, словами
+   * кабинета (he_jobs research-стадий, вертикали и гипотезы, цепочки писем,
+   * базы, шаблоны и их окна отправки, автопилот и конфиг ночного добора).
+   * Отказ роута проект не трогает — список перечитывается только после успеха.
+   * Успех снимает и отказ создания: лимит проектов после удаления мог уже не
+   * держать.
+   */
+  const onDelete = async (project: EngProjectListItem) => {
+    if (deletingId) return;
+    if (
+      !window.confirm(
+        `Delete «${project.name}»? This permanently deletes the project and everything in it: its research, ` +
+          'verticals and hypotheses, letters, collected bases, templates with their sending windows, and its ' +
+          'autopilot and daily refill settings. It cannot be undone.',
+      )
+    ) {
+      return;
+    }
+    setDeletingId(project.id);
+    setDeleteError(null);
+    try {
+      await deleteEngProject(project.id);
+      setRefusal(null);
+      await load();
+    } catch (err) {
+      setDeleteError({
+        projectId: project.id,
+        text: err instanceof Error ? err.message : 'Failed to delete the project',
+      });
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const onCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (creating || !website.trim()) return;
     setCreating(true);
     setError('');
+    setRefusal(null);
     try {
       const res = await createEngProject({ website_url: website.trim(), name: name.trim() || undefined });
       if (res.project?.id) {
@@ -71,7 +121,8 @@ export function EngProjectsList() {
       }
       setError(res.error ?? 'Failed to create the project');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create the project');
+      if (err instanceof EngPaidAccessError) setRefusal(err);
+      else setError(err instanceof Error ? err.message : 'Failed to create the project');
     } finally {
       setCreating(false);
     }
@@ -79,6 +130,8 @@ export function EngProjectsList() {
 
   return (
     <div className="flex flex-col gap-5">
+      <EngVerifyEmailBanner />
+
       {/* New project */}
       <EngCard>
         <h3 className="ds-eyebrow mb-3">New project</h3>
@@ -127,6 +180,7 @@ export function EngProjectsList() {
           {error}
         </div>
       )}
+      {refusal && <EngPaidAccessNotice refusal={refusal} onProjectsList />}
 
       {/* Projects list */}
       {projects === null && !error ? (
@@ -159,8 +213,8 @@ export function EngProjectsList() {
           )}
         <div className="grid gap-3 md:grid-cols-2">
           {(projects ?? []).map((p) => (
+            <div key={p.id} className="flex flex-col gap-1.5">
             <Link
-              key={p.id}
               href={`/client/eng/projects/${p.id}` as Route}
               prefetch={false}
               className="ds-card ds-card-pressable p-4 flex flex-col gap-2"
@@ -197,6 +251,25 @@ export function EngProjectsList() {
                 </div>
               )}
             </Link>
+            {/* Вне ссылки карточки: кнопка внутри <a> — невалидная разметка. */}
+            <div className="flex flex-col items-end gap-1 px-1">
+              <button
+                type="button"
+                onClick={() => void onDelete(p)}
+                disabled={deletingId !== null}
+                className="inline-flex items-center gap-1 text-[11px] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ color: 'var(--cp-text-l)' }}
+              >
+                {deletingId === p.id ? <EngSpinner className="h-3 w-3" /> : <Trash2 className="h-3 w-3" />}
+                {deletingId === p.id ? 'Deleting…' : 'Delete project'}
+              </button>
+              {deleteError?.projectId === p.id && (
+                <span className="text-right text-[11px]" style={{ color: 'var(--cp-red)' }}>
+                  <EngSupportText text={deleteError.text} />
+                </span>
+              )}
+            </div>
+            </div>
           ))}
         </div>
         </div>
