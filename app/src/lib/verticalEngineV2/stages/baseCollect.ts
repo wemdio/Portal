@@ -3871,6 +3871,8 @@ async function completeTargetRound(args: {
   const discoveryChecked = Object.values(info.source_contact_recovery?.checked ?? {});
   const discoverySites = discoveryChecked.filter((entry) => entry.website.trim().length > 0).length;
   const discoveryContacts = countVeSourceDiscoveryContacts(contactRows);
+  const pendingRequestedReview = args.continueRequestedReview === true
+    && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const finish = (readyCount: number, nameError?: string) => {
     const phaseError = args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null);
     const result = finishCollectionRound(progress, {
@@ -3884,7 +3886,11 @@ async function completeTargetRound(args: {
     // The other child is already paid for. Drain it even if this batch reaches
     // the goal or fails; do not orphan its results or start replacement work.
     if (pipeline && pendingBatches.length > 0 && !nameError && !reviewOnly) {
-      if (phaseError) pipeline.error = phaseError;
+      // An explicit continuation has already cleared the old pipeline error.
+      // Name recovery still carries that validation error until the saved
+      // reserve is rechecked; do not restore it as a new failure while draining
+      // another paid batch. A fresh failure on the following review is retained.
+      if (phaseError && !(pendingRequestedReview && phaseError === args.validationError)) pipeline.error = phaseError;
       return { ...result, status: 'collecting' as const, reason: undefined, round: progress.round + 1 };
     }
     if (discoveryPaused && result.status === 'limited') return { ...result,
@@ -4007,8 +4013,6 @@ async function completeTargetRound(args: {
   if (stalledReview) stageLog(ctx, `[base_collect] уточнение сохранённых контактов не продвигается: ${automaticBatch?.companies ?? 0} компаний повторно получают тот же сохранённый итог; они остаются в резерве, раунд завершается`);
   const pendingAutomaticReview = reviewEligible
     && (pendingAutomaticEmails || (Boolean(automaticBatch?.rows.length) && !stalledReview));
-  const pendingRequestedReview = args.continueRequestedReview === true
-    && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const drainingSavedEmailChild = Boolean(info.saved_email_recovery?.batch) && !args.validationError && !taskError;
   let continueSavedReview = cleaned.summary.status === 'complete'
     && (pendingAutomaticReview || pendingRequestedReview || drainingSavedEmailChild);

@@ -353,13 +353,19 @@ describe('base_collect CONSTRUCT step order', () => {
     // A continuation of BOTH failed validation and unfinished names must not
     // replay the old 402 after successfully cleaning names. A fresh 402 still
     // stops the next validation pass instead of becoming an automatic paid loop.
-    for (const billingRestored of [true, false]) {
+    for (const { billingRestored, pendingBatch } of [
+      { billingRestored: true, pendingBatch: false }, { billingRestored: false, pendingBatch: false },
+      { billingRestored: true, pendingBatch: true }, { billingRestored: false, pendingBatch: true },
+    ]) {
+      const paid = unifiedRow({ company: 'Paid clinic', website: 'https://paid.test', email: 'info@paid.test' });
       const billingError = 'Requesty 402: insufficient balance';
       const interrupted: VeCollectInfo = {
         ...collectInfo([ready, pending], { status: 'done', bc_job_id: 'bc-names-and-review' }),
         collection_mode: 'preview',
         adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
-        preview_pipeline: { version: 1, revision: 0, batches: [], job_ids: ['old-child'], error: billingError },
+        preview_pipeline: { version: 1, revision: 0, batches: pendingBatch
+          ? [{ id: 'paid-child', rows: [paid], inserted: true, dispatched_at: '2026-10-09T17:00:00Z' }] : [],
+          job_ids: ['old-child', ...(pendingBatch ? ['paid-child'] : [])], error: billingError },
         target_progress: { ...createCollectionTarget('preview'), status: 'error', candidates_processed: 2 },
         target_checkpoint: { completed_round: 1, seen_rows: [ready, pending], processed_rows: 2 },
         relevance_reserve: { version: 1, rows: [{ ...pending, _email_status: 'ok', _relevance_unchecked: true }] },
@@ -372,7 +378,10 @@ describe('base_collect CONSTRUCT step order', () => {
         data: [{ ...ready, _email_status: 'ok', _ve_relevance: { version: 2, status: 'relevant',
           reason: 'Verified clinic', context_hash: 'a'.repeat(64), evidence: [{ field: 'description', quote: 'Clinic' }] },
           _ve_company_name: { version: 1, source: ready.company, website: ready.website, status: 'failed', value: '' } }],
-      }], base_constructor_jobs: [{ id: 'bc-names-and-review', status: 'completed' }] });
+      }], base_constructor_jobs: [{ id: 'bc-names-and-review', status: 'completed' }, ...(pendingBatch ? [{
+        id: 'paid-child', status: 'completed', selected_steps: ['split_emails', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'Email Статус'], [paid.company, paid.website, paid.email, 'ok']],
+      }] : [])] });
       const retryClient = retryDb as unknown as SupabaseClient;
       await expect(enqueueVeBaseCollect(retryClient, enqueueInput)).resolves.toMatchObject({ ok: true, base: { id: 'b1' } });
       expect((retryDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).company_name_recovery)
@@ -392,18 +401,34 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(afterNames.company_name_cleanup?.status).toBe('complete');
       expect(afterNames.company_name_recovery).toBeUndefined();
       expect(afterNames.relevance_review_requested).toBe(true);
-      if (!billingRestored) mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(), unchecked: new Set([0]),
-        coverage: { checkedCompanies: 0, totalCompanies: 1, complete: false }, error: billingError, tokensUsed: 0, costUsd: 0 });
+      // Finishing old names must not resurrect the old error while an already
+      // purchased neighbour waits; the next pass still checks the saved rows.
+      expect(afterNames.preview_pipeline).not.toHaveProperty('error');
+      if (!billingRestored) mockFindIrrelevantRows.mockImplementation(async (input: { rows: unknown[] }) => ({
+        flagged: new Set(), unchecked: new Set(input.rows.map((_, index) => index)),
+        coverage: { checkedCompanies: 0, totalCompanies: input.rows.length, complete: false },
+        error: billingError, tokensUsed: 0, costUsd: 0,
+      }));
       await retryClient.from('ve_jobs').update({ status: 'running' }).eq('id', retryJob.id);
       await runBaseCollectStage({ ...retryJob }, { supabase: retryClient });
+      for (let wake = 0; pendingBatch && wake < 4 && retryDb.getRows('ve_bases')[0].status === 'collecting'; wake++) {
+        await retryClient.from('ve_jobs').update({ status: 'running' }).eq('id', retryJob.id);
+        await runBaseCollectStage({ ...retryJob }, { supabase: retryClient });
+      }
       const completed = retryDb.getRows('ve_bases')[0];
-      expect(completed).toMatchObject({ status: billingRestored ? 'analyzing' : 'failed', row_count: billingRestored ? 2 : 1 });
+      expect(completed).toMatchObject({ status: billingRestored ? 'analyzing' : 'failed',
+        row_count: billingRestored ? 2 + Number(pendingBatch) : 1 });
       expect(completed.error).toBe(billingRestored ? null : billingError);
-      expect((completed.collect_info as VeCollectInfo).target_progress).toMatchObject({ round: 1, candidates_processed: 2 });
+      expect((completed.collect_info as VeCollectInfo).target_progress).toMatchObject({ round: pendingBatch ? 2 : 1, candidates_processed: pendingBatch ? 3 : 2 });
       expect((completed.collect_info as VeCollectInfo).relevance_review_requested).toBeUndefined();
-      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(1);
-      expect(retryDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(pendingBatch ? 2 : 1);
+      expect(retryDb.getRows('base_constructor_jobs')).toHaveLength(pendingBatch ? 2 : 1);
       expect(searchRows).not.toHaveBeenCalled();
+      mockFindIrrelevantRows.mockImplementation(async (input: { rows: unknown[] }) => ({
+        flagged: new Set<number>(), unchecked: new Set<number>(),
+        coverage: { checkedCompanies: input.rows.length, totalCompanies: input.rows.length, complete: true },
+        tokensUsed: 0, costUsd: 0,
+      }));
     }
 
     // Restarting after an outage must buy a NEW validation child for unknowns,
