@@ -87,6 +87,8 @@ import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngine
 import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { planVeJobFailure } from '@/lib/verticalEngineV2/jobRetry';
+import { isVeRenewableSourceTask } from '@/lib/verticalEngineV2/sourceRenewal';
 import { resolveVeYandexCatalogFilters } from '@/lib/verticalEngineV2/yandexCatalog';
 import { newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys, summarizeVeBatchSpend, readVeBatchSpend, veAdaptiveCandidateLimit } from '@/lib/verticalEngineV2/adaptiveCollection';
 import { prioritizeVeCandidates } from '@/lib/verticalEngineV2/candidatePriority';
@@ -346,6 +348,62 @@ describe('base_collect CONSTRUCT step order', () => {
       }
       expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
       expect(namesDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
+
+    // A continuation of BOTH failed validation and unfinished names must not
+    // replay the old 402 after successfully cleaning names. A fresh 402 still
+    // stops the next validation pass instead of becoming an automatic paid loop.
+    for (const billingRestored of [true, false]) {
+      const billingError = 'Requesty 402: insufficient balance';
+      const interrupted: VeCollectInfo = {
+        ...collectInfo([ready, pending], { status: 'done', bc_job_id: 'bc-names-and-review' }),
+        collection_mode: 'preview',
+        adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
+        preview_pipeline: { version: 1, revision: 0, batches: [], job_ids: ['old-child'], error: billingError },
+        target_progress: { ...createCollectionTarget('preview'), status: 'error', candidates_processed: 2 },
+        target_checkpoint: { completed_round: 1, seen_rows: [ready, pending], processed_rows: 2 },
+        relevance_reserve: { version: 1, rows: [{ ...pending, _email_status: 'ok', _relevance_unchecked: true }] },
+        company_name_recovery: { validation_error: billingError, has_buffered_candidates: false,
+          round_low_relevance: 0, round_relevance_unchecked: 1 },
+      };
+      interrupted.tasks![0].exhausted = true;
+      const retryDb = seed(interrupted, { ve_jobs: [], ve_bases: [{ ...makeBase(interrupted),
+        status: 'failed', error: billingError, row_count: 1, columns: [...VE_AUTO_COLLECT_COLUMNS],
+        data: [{ ...ready, _email_status: 'ok', _ve_relevance: { version: 2, status: 'relevant',
+          reason: 'Verified clinic', context_hash: 'a'.repeat(64), evidence: [{ field: 'description', quote: 'Clinic' }] },
+          _ve_company_name: { version: 1, source: ready.company, website: ready.website, status: 'failed', value: '' } }],
+      }], base_constructor_jobs: [{ id: 'bc-names-and-review', status: 'completed' }] });
+      const retryClient = retryDb as unknown as SupabaseClient;
+      await expect(enqueueVeBaseCollect(retryClient, enqueueInput)).resolves.toMatchObject({ ok: true, base: { id: 'b1' } });
+      expect((retryDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).company_name_recovery)
+        .toMatchObject({ retry_validation_after_cleanup: true, validation_error: billingError });
+      const queued = retryDb.getRows('ve_jobs')[0];
+      const retryJob = { ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] };
+      mockFindIrrelevantRows.mockClear();
+      // One interrupted name wake must retain the explicit continuation marker.
+      jest.mocked(callLLMWithSchema).mockRejectedValueOnce(new Error('Requesty 429: temporarily limited'));
+      for (let wake = 0; wake < 2; wake++) {
+        await retryClient.from('ve_jobs').update({ status: 'running' }).eq('id', retryJob.id);
+        await runBaseCollectStage({ ...retryJob }, { supabase: retryClient });
+        expect(retryDb.getRows('ve_bases')[0].status).toBe('collecting');
+      }
+      expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
+      const afterNames = retryDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      expect(afterNames.company_name_cleanup?.status).toBe('complete');
+      expect(afterNames.company_name_recovery).toBeUndefined();
+      expect(afterNames.relevance_review_requested).toBe(true);
+      if (!billingRestored) mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(), unchecked: new Set([0]),
+        coverage: { checkedCompanies: 0, totalCompanies: 1, complete: false }, error: billingError, tokensUsed: 0, costUsd: 0 });
+      await retryClient.from('ve_jobs').update({ status: 'running' }).eq('id', retryJob.id);
+      await runBaseCollectStage({ ...retryJob }, { supabase: retryClient });
+      const completed = retryDb.getRows('ve_bases')[0];
+      expect(completed).toMatchObject({ status: billingRestored ? 'analyzing' : 'failed', row_count: billingRestored ? 2 : 1 });
+      expect(completed.error).toBe(billingRestored ? null : billingError);
+      expect((completed.collect_info as VeCollectInfo).target_progress).toMatchObject({ round: 1, candidates_processed: 2 });
+      expect((completed.collect_info as VeCollectInfo).relevance_review_requested).toBeUndefined();
+      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(1);
+      expect(retryDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(searchRows).not.toHaveBeenCalled();
     }
 
     // Restarting after an outage must buy a NEW validation child for unknowns,
@@ -3282,20 +3340,69 @@ describe('base_collect: старая задача карт продолжает�
     expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
   });
 
-  it('пустой выбор рубрик — ошибка задачи с причиной, а не «каталог исчерпан»', async () => {
-    // В справочнике только пустые в России формы запроса, модель выбирает их же.
-    const lonely = { ...REALTY_MAPS, maps_query: { geo: 'Россия', queries: ['агентство недвижимости'] } };
-    const info: VeCollectInfo = { plan: { tasks: [lonely] }, tasks: [{ source: 'yandex_maps', status: 'pending',
-      child_job_id: null, rows: 0, task: lonely }] };
-    const db = installCatalog(seed(info), [['агентство недвижимости', 34], ['Агентство недвижимости', 101]]);
-    jest.mocked(callLLMWithSchema).mockResolvedValueOnce({ data: { category_ids: [0, 1], place_ids: [] }, tokensUsed: 0,
-      costUsd: 0, promptTokens: 0, completionTokens: 0, rawResponse: '' });
-    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient }).catch(() => undefined);
-    const task = (db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0];
-    expect(task.status).toBe('failed');
-    expect(task.exhausted).not.toBe(true);
-    expect(task.error).toContain('нет организаций по рубрикам «агентство недвижимости», «Агентство недвижимости» в географии «Россия»');
-    expect(db.rpcCalls.some((call) => call.fn === 'yandex_maps_catalog_search')).toBe(false);
+  it('неподходящий каталог сохраняет причину и не блокирует другой источник; временный сбой продолжает ту же страницу', async () => {
+    for (const missingRubric of [false, true]) {
+      const lonely = { ...REALTY_MAPS, maps_query: { geo: 'Россия', queries: ['агентство недвижимости'] } };
+      const info: VeCollectInfo = { collection_mode: 'preview', target_progress: createCollectionTarget('preview'),
+        adaptive_collection: { ...newVeAdaptiveCollection(), active_source: veSourceStrategyKey(lonely) },
+        plan: { tasks: [lonely, REALTY_DIRECTORY] }, tasks: [
+          { source: 'yandex_maps', status: 'pending', child_job_id: null, rows: 0, task: lonely },
+          { source: 'companies_directory', status: 'pending', child_job_id: null, rows: 0, task: REALTY_DIRECTORY },
+        ] };
+      const db = installCatalog(seed(info), missingRubric ? [['Кафе', 100]]
+        : [['агентство недвижимости', 34], ['Агентство недвижимости', 101]]);
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce({ data: { category_ids: missingRubric ? [] : [0, 1], place_ids: [] },
+        tokensUsed: 0, costUsd: 0, promptTokens: 0, completionTokens: 0, rawResponse: '' });
+      const outcome = await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+      const base = db.getRows('ve_bases')[0], saved = base.collect_info as VeCollectInfo;
+      const task = saved.tasks![0];
+      expect(task).toMatchObject({ status: 'done', unavailable: true });
+      expect(task.exhausted).not.toBe(true);
+      expect(task.error).toBeUndefined();
+      expect(task.note).toContain(missingRubric ? 'подходящие рубрики' : 'нет организаций по рубрикам');
+      expect(isVeRenewableSourceTask(task)).toBe(false);
+      expect(base.status).toBe('collecting');
+      expect(outcome.result).toMatchObject({ waiting: true, next_source: 'companies_directory' });
+      expect(saved.adaptive_collection?.active_source).toBe(veSourceStrategyKey(REALTY_DIRECTORY));
+      expect(db.rpcCalls.some((call) => call.fn === 'yandex_maps_catalog_search')).toBe(false);
+      expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
+    }
+
+    const info: VeCollectInfo = { collection_mode: 'preview', target_progress: createCollectionTarget('preview'),
+      plan: { tasks: [REALTY_MAPS] }, tasks: [{ source: 'yandex_maps', status: 'pending', child_job_id: null,
+        rows: 0, task: REALTY_MAPS, catalog: { version: 1,
+          filters: { categories: ['Агентства недвижимости'], countries: ['Россия'] } } }] };
+    const db = installCatalog(seed(info));
+    const originalRpc = db.rpc;
+    let reads = 0;
+    db.rpc = ((name: string, params: Record<string, unknown>) => {
+      if (name !== 'yandex_maps_catalog_search') return originalRpc(name, params);
+      reads++;
+      db.rpcCalls.push({ fn: name, params });
+      const operation = Promise.resolve(reads === 1 ? { data: [ORGANIZATIONS[0]], error: null }
+        : { data: null, error: { message: 'An invalid response was received from the upstream server' } });
+      return Object.assign(operation, { abortSignal: () => operation });
+    }) as typeof db.rpc;
+    const failure = await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient })
+      .then(() => { throw new Error('Expected transient catalog failure'); }, (error: Error) => error);
+    expect(failure.message).toContain('invalid response was received');
+    const saved = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(saved.target_progress?.status).toBe('collecting');
+    expect(saved.tasks![0]).toMatchObject({ status: 'pending', rows: 1,
+      catalog: { after: ORGANIZATIONS[0].yandex_id } });
+    expect(saved.tasks![0].harvest).toHaveLength(1);
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
+    const now = Date.parse('2026-10-09T13:00:00Z');
+    expect(planVeJobFailure({ ...makeJob(), attempts: 0 }, failure, now)).toMatchObject({
+      status: 'pending', attempts: 1, attemptCap: 5, retryable: true, runAfter: new Date(now + 30_000).toISOString() });
+    expect(planVeJobFailure({ ...makeJob(), attempts: 4 }, failure, now)).toMatchObject({ status: 'failed', attempts: 5 });
+    db.rpc = originalRpc;
+    const priorCalls = db.rpcCalls.length;
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const retryReads = db.rpcCalls.slice(priorCalls).filter((call) => call.fn === 'yandex_maps_catalog_search');
+    expect(retryReads[0].params).toMatchObject({ p_after: ORGANIZATIONS[0].yandex_id });
+    expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0].harvest).toHaveLength(2);
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
   });
 });
 

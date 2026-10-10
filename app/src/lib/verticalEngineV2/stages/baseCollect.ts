@@ -91,7 +91,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
 
 import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
-import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError } from '../collectionErrors';
+import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError, isVeTransientCatalogError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
@@ -105,7 +105,7 @@ import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
-import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, veRuMapsUseCatalog, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
+import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, VeYandexCatalogUnavailableError, veRuMapsUseCatalog, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
 import { isVeLegacyMapsTask, isVeRenewableSourceTask, reopenVeSourceTask } from '../sourceRenewal';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
 import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, countVeSourceDiscoveryContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
@@ -613,6 +613,8 @@ export interface VeCollectTaskState {
   directory_cursors?: Record<string, number>;
   /** Реестр: выдача под фильтры кончилась раньше limit — сегмент собран целиком. */
   exhausted?: boolean;
+  /** Valid catalog lookup found no matching audience; do not renew the same query. */
+  unavailable?: boolean;
   /**
    * Реестр: стоп по потолку MAX_DIRECTORY_PAGES (200k просканированных строк)
    * раньше limit — НЕ исчерпание: выдача ещё есть, повторная сборка продолжит.
@@ -742,6 +744,8 @@ export interface VeCollectInfo {
   company_name_recovery?: {
     has_buffered_candidates: boolean;
     validation_error: string | null;
+    /** Explicit continuation only; consumed after names finish. */
+    retry_validation_after_cleanup?: boolean;
     round_low_relevance: number;
     round_relevance_unchecked: number;
   };
@@ -1761,9 +1765,23 @@ async function dispatchTask(
     if (limit < 1) { state.status = 'done'; return; }
     if (!task.maps_query?.queries?.length) throw new Error('yandex_maps: в задаче нет maps_query.queries');
     if (!state.catalog) {
-      const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
-        context: task.rationale, signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
-      state.catalog = { version: 1, filters };
+      try {
+        const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
+          context: task.rationale, signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
+        state.catalog = { version: 1, filters };
+      } catch (error) {
+        ctx.signal?.throwIfAborted();
+        if (!(error instanceof VeYandexCatalogUnavailableError)) throw error;
+        // A source that cannot cover the hypothesis must not veto the rest of
+        // the plan or be remapped every round. Do not invent broader rubrics.
+        state.status = 'done';
+        state.unavailable = true;
+        state.note = error.message;
+        state.child_job_id = null;
+        delete state.error;
+        await save();
+        return;
+      }
       await save(); // Reuse the resolved filter after a read failure/redeploy.
     }
     const excluded = await getExcludedKeys();
@@ -3663,7 +3681,7 @@ async function resumeSavedCompanyNames(
       ...info.stats, low_relevance: recovery.round_low_relevance,
       relevance_unchecked: recovery.round_relevance_unchecked },
     hasBufferedCandidates: recovery.has_buffered_candidates, validationError: recovery.validation_error, usage,
-    continueManualReview: job.payload?.review_relevance === true,
+    continueRequestedReview: job.payload?.review_relevance === true || recovery.retry_validation_after_cleanup === true,
   });
 }
 
@@ -3769,7 +3787,7 @@ async function completeTargetRound(args: {
   stats: NonNullable<VeCollectInfo['stats']>; hasBufferedCandidates: boolean;
   validationError: string | null; usage: VeUsage;
   /** Completing old name work must not consume the user's new reserve-review request. */
-  continueManualReview?: boolean;
+  continueRequestedReview?: boolean;
 }): Promise<VeStageResult> {
   const { ctx, job, base, info } = args;
   // Apply the new preview goal only after this round's input has been fully
@@ -3898,6 +3916,7 @@ async function completeTargetRound(args: {
     ...row, [VE_COMPANY_NAME_FIELD]: { version: 1, ...companyNameSource(row), status: 'failed', value: '' },
   });
   info.company_name_recovery = {
+    ...(info.company_name_recovery?.retry_validation_after_cleanup ? { retry_validation_after_cleanup: true } : {}),
     has_buffered_candidates: args.hasBufferedCandidates, validation_error: args.validationError,
     round_low_relevance: args.stats.low_relevance ?? 0,
     round_relevance_unchecked: args.stats.relevance_unchecked ?? 0,
@@ -3988,11 +4007,11 @@ async function completeTargetRound(args: {
   if (stalledReview) stageLog(ctx, `[base_collect] уточнение сохранённых контактов не продвигается: ${automaticBatch?.companies ?? 0} компаний повторно получают тот же сохранённый итог; они остаются в резерве, раунд завершается`);
   const pendingAutomaticReview = reviewEligible
     && (pendingAutomaticEmails || (Boolean(automaticBatch?.rows.length) && !stalledReview));
-  const pendingManualReview = args.continueManualReview === true
+  const pendingRequestedReview = args.continueRequestedReview === true
     && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const drainingSavedEmailChild = Boolean(info.saved_email_recovery?.batch) && !args.validationError && !taskError;
   let continueSavedReview = cleaned.summary.status === 'complete'
-    && (pendingAutomaticReview || pendingManualReview || drainingSavedEmailChild);
+    && (pendingAutomaticReview || pendingRequestedReview || drainingSavedEmailChild);
   if (continueSavedReview) {
     // Same acquisition round, same candidates: the next job wake only improves
     // already paid-for contacts. This marker is saved atomically with rows.
@@ -4633,7 +4652,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     } catch (e) {
       ctx.signal?.throwIfAborted();
       if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'VeWorkerShutdownError')) throw e;
-      if (state.source === 'companies_directory' && isVeTransientDirectoryError(e)) throw e;
+      if ((state.source === 'companies_directory' && isVeTransientDirectoryError(e))
+        || (state.source === 'yandex_maps' && isVeTransientCatalogError(e))) throw e;
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
       stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
@@ -5242,7 +5262,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     if (error instanceof VePreviewCheckpointConflict) throw error;
     // The generic worker persists Retry-After. A waiting job must not leave
     // the base's progress looking like a terminal preparation failure.
-    if (error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error)) throw error;
+    if (error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error) || isVeTransientCatalogError(error)) throw error;
     if (error instanceof VeRelevanceRetryScheduled) {
       return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
         tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };

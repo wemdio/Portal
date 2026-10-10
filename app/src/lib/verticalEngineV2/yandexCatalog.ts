@@ -5,6 +5,11 @@ import type { VeSourcePlan } from './prompts/sourcePlan';
 import { callLLMWithSchema, getVeModel, veNativeJsonSchema, type LLMUsage } from './llm';
 import { withVeDeadline } from './operationDeadline';
 
+/** A valid lookup found no audience in this catalog; other sources may still work. */
+export class VeYandexCatalogUnavailableError extends Error {
+  readonly name = 'VeYandexCatalogUnavailableError';
+}
+
 export interface VeYandexCatalogCheckpoint {
   version: 1;
   filters: YandexMapsCatalogFilters;
@@ -76,10 +81,20 @@ function rubricCandidates(rubrics: VeCatalogRubric[], queries: string[]): VeCata
   return ranked.length ? ranked.slice(0, 120).map((item) => item.rubric) : rubrics;
 }
 
+/** Scope thrown network errors too; PostgREST may reject instead of returning error. */
+async function catalogRead<T>(operation: 'dictionary' | 'count' | 'read', label: string,
+  signal: AbortSignal | undefined, work: (abort: AbortSignal) => Promise<T>): Promise<T> {
+  try { return await withVeDeadline(label, 30_000, signal, work); }
+  catch (error) {
+    signal?.throwIfAborted();
+    throw new Error(`yandex_maps catalog ${operation}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function dictionary(db: SupabaseClient, table: string, columns: string, order: string, signal?: AbortSignal) {
   const rows: Record<string, unknown>[] = [];
   for (let offset = 0; offset < 20_000;) {
-    const { data, error } = await withVeDeadline('Yandex catalog dictionary', 30_000, signal, async (abort) => {
+    const { data, error } = await catalogRead('dictionary', 'Yandex catalog dictionary', signal, async (abort) => {
       let query = db.from(table).select(columns).order(order);
       if (table === 'yandex_maps_catalog_places') query = query.order('region').order('city');
       return await query.range(offset, offset + 999).abortSignal(abort);
@@ -97,7 +112,7 @@ type VeCatalogScope = Pick<YandexMapsCatalogFilters, 'countries' | 'cities'>;
 /** Есть ли у рубрики хоть одна организация в выбранной географии. Счёт с
  * потолком 1 идёт по индексу рубрик: миллисекунды, без чтения строк. */
 async function rubricHasOrganizations(db: SupabaseClient, rubric: string, scope: VeCatalogScope, signal?: AbortSignal) {
-  const { data, error } = await withVeDeadline('Yandex catalog rubric check', 30_000, signal, async (abort) =>
+  const { data, error } = await catalogRead('count', 'Yandex catalog rubric check', signal, async (abort) =>
     await db.rpc('yandex_maps_catalog_count', {
       p_cities: scope.cities ?? null, p_categories: [rubric], p_countries: scope.countries ?? null, p_cap: 1,
     }).abortSignal(abort));
@@ -183,11 +198,11 @@ export async function resolveVeYandexCatalogFilters(input: {
   const picked = [...new Set(selected.category_ids.map((id) => categories[id].label))]
     .filter((label) => sharesRootWith(label, context));
   const candidates = [...new Set([...variants.flat(), ...picked])];
-  if (!candidates.length) throw new Error('yandex_maps: подходящие рубрики в готовом каталоге не найдены');
+  if (!candidates.length) throw new VeYandexCatalogUnavailableError('yandex_maps: подходящие рубрики в готовом каталоге не найдены');
   const kept = await populated(candidates, scope);
-  // Пустой выбор — ошибка задачи с понятной причиной, а не «каталог исчерпан».
+  // The catalog has no coverage here; keep the reason without widening the audience.
   if (!kept.length) {
-    throw new Error(`yandex_maps: в готовом каталоге нет организаций по рубрикам «${candidates.slice(0, 5).join('», «')}» `
+    throw new VeYandexCatalogUnavailableError(`yandex_maps: в готовом каталоге нет организаций по рубрикам «${candidates.slice(0, 5).join('», «')}» `
       + `в географии «${input.query.geo || 'Россия'}»`);
   }
   return { categories: kept, ...scope };
@@ -215,7 +230,7 @@ export function veRuMapsUseCatalog(plan: VeSourcePlan): { plan: VeSourcePlan; re
 /** Read-only keyset RPC already used by the catalog UI. No parser or proxy. */
 export async function readVeYandexCatalogPage(db: SupabaseClient, checkpoint: VeYandexCatalogCheckpoint, limit: number, signal?: AbortSignal) {
   if (!checkpoint.filters.categories?.length) throw new Error('yandex_maps: выборка каталога без рубрик запрещена');
-  const { data, error } = await withVeDeadline('Yandex catalog page', 30_000, signal, async (abort) =>
+  const { data, error } = await catalogRead('read', 'Yandex catalog page', signal, async (abort) =>
     await db.rpc('yandex_maps_catalog_search', {
       p_categories: checkpoint.filters.categories, p_cities: checkpoint.filters.cities ?? null,
       p_countries: checkpoint.filters.countries ?? null, p_limit: limit, p_offset: 0, p_after: checkpoint.after ?? null,

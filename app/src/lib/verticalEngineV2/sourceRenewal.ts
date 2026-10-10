@@ -17,6 +17,7 @@ interface VeRenewableTaskState {
   catalog?: unknown;
   directory_cursors?: unknown;
   exhausted?: unknown;
+  unavailable?: unknown;
   hit_ceiling?: unknown;
   task?: unknown;
 }
@@ -24,14 +25,14 @@ interface VeRenewableTaskState {
 /** Старая задача карт: закрыта, каталог по её запросам ещё не читали. */
 export function isVeLegacyMapsTask(state: VeRenewableTaskState | null | undefined): boolean {
   if (!state || state.source !== 'yandex_maps' || state.status !== 'done' || state.catalog
-    || state.exhausted || state.hit_ceiling) return false;
+    || state.exhausted || state.hit_ceiling || state.unavailable) return false;
   const queries = (state.task as { maps_query?: { queries?: unknown } } | undefined)?.maps_query?.queries;
   return Array.isArray(queries) && queries.some((query) => typeof query === 'string' && query.trim().length > 0);
 }
 
 /** Закрытая задача, у которой источник ещё не исчерпан. */
 export function isVeRenewableSourceTask(state: VeRenewableTaskState | null | undefined): boolean {
-  return !!state && state.status === 'done' && !state.exhausted && !state.hit_ceiling
+  return !!state && state.status === 'done' && !state.exhausted && !state.hit_ceiling && !state.unavailable
     && (state.source === 'companies_directory' || !!state.catalog || isVeLegacyMapsTask(state));
 }
 

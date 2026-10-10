@@ -51,6 +51,7 @@ import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { findNewHhEmployers, deriveDomain, type HhEmployer } from './hhAutoParser';
 import { ensureArchiveSinkJob, buildHhArchiveSinkCallback } from '@/lib/parsers/hhArchiveSink';
 import { getOrFetchScore, emptyCacheStats } from './mailganerScoreCache';
+import { buildExcludePatterns } from './autoPipelineExclusions';
 import { resolveMailganerScoringConcurrency } from './mailganerScoringThrottle';
 import { validateEmailForAutoPipeline, type AutoPipelineEmailValidation } from './autoPipelineEmailValidation';
 import { calcPacing } from './autoPipelinePacing';
@@ -195,26 +196,7 @@ export function acceptedAutoRouteDomains(
 // Жирные федеральные бренды, которым нельзя слать холодные письма ни одному
 // клиенту. Можно расширить через config.hh_extra_exclude_patterns.
 
-const BUILT_IN_EXCLUDE_PATTERNS: RegExp[] = [
-  /сбер/i, /тинькофф/i, /т-банк/i, /альфа.?банк/i, /втб/i, /газпром/i,
-  /яндекс/i, /мтс\b/i, /мегафон/i, /билайн/i, /ростелеком/i,
-  /магнит/i, /пятёрочка|пятерочка/i, /x5|перекр(е|ё)сток/i,
-  /wildberries/i, /ozon\b/i, /авито|avito/i,
-];
-
-export function buildExcludePatterns(extras: string[]): RegExp[] {
-  const compiled = [...BUILT_IN_EXCLUDE_PATTERNS];
-  for (const raw of extras) {
-    const trimmed = (raw ?? '').trim();
-    if (!trimmed) continue;
-    try {
-      compiled.push(new RegExp(trimmed, 'i'));
-    } catch {
-      // Невалидный regex — игнорируем, не падаем.
-    }
-  }
-  return compiled;
-}
+export { buildExcludePatterns } from './autoPipelineExclusions';
 
 // ── DB helpers ───────────────────────────────────────────────────────────
 
