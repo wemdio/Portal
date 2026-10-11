@@ -15,6 +15,8 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
 import { isVeRubricVariant, resolveVeYandexCatalogFilters, veRuMapsUseCatalog } from '@/lib/verticalEngineV2/yandexCatalog';
+import type { VeCollectTask } from '@/lib/verticalEngineV2/prompts/sourcePlan';
+import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheDirectoryNameTerms, veNicheRubricAllowed } from '@/lib/verticalEngineV2/nicheSourcePolicy';
 
 /** Справочник и счёт «есть ли организации рубрики в стране», как у настоящей
  * функции каталога: рубрики сравниваются без учёта регистра. */
@@ -122,6 +124,101 @@ describe('готовый каталог Яндекс Карт: выбор руб
     const filters = await resolveVeYandexCatalogFilters({ db, query: { geo: 'Россия', queries: ['детская неврологическая клиника',
       'детская психиатрическая клиника', 'генетическая клиника', 'детская телемедицина'] } });
     expect(filters.categories).toEqual(['Психиатрические клиники', 'Детские клиники', 'Медицинские центры и клиники']);
+
+    // An exact query or the model's fallback must not restore a broader
+    // business model forbidden by the hypothesis source policy.
+    const payments = catalog([
+      ['Денежные переводы', 25_000], ['Платёжные системы', 120], ['Банки', 30_000],
+    ], { 'денежные переводы': 24_000, 'платёжные системы': 100, банки: 29_000 });
+    const rubricAllowed = (label: string) => label === 'Платёжные системы';
+    const audience = 'Финтех и платёжное посредничество: провайдеры платёжных систем, не отделения денежных переводов';
+    modelPicks(['Денежные переводы', 'Платёжные системы']);
+    await expect(resolveVeYandexCatalogFilters({ db: payments.db,
+      query: { queries: ['денежные переводы'], geo: 'Россия' }, context: audience, rubricAllowed,
+    })).resolves.toEqual({ categories: ['Платёжные системы'], countries: ['Россия'] });
+    const mappedInput = JSON.parse(String(jest.mocked(callLLMWithSchema).mock.calls.at(-1)?.[0].at(-1)?.content));
+    expect(mappedInput.audience_context).toBe(audience);
+    expect(shortlist()).toEqual(['Платёжные системы']);
+    expect(payments.counted).toEqual(['Платёжные системы']);
+
+    modelPicks(['Денежные переводы']);
+    await expect(resolveVeYandexCatalogFilters({ db: payments.db,
+      query: { queries: ['денежные переводы'], geo: 'Россия' }, rubricAllowed,
+    })).rejects.toThrow('подходящие рубрики');
+    const modelCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
+    await expect(resolveVeYandexCatalogFilters({ db: payments.db,
+      query: { queries: ['денежные переводы'], geo: 'Россия' }, rubricAllowed: () => false,
+    })).rejects.toThrow('подходящие рубрики');
+    await expect(resolveVeYandexCatalogFilters({ db: payments.db,
+      query: { queries: ['платёжные системы'], geo: 'Россия' }, rubricAllowed,
+    })).resolves.toEqual({ categories: ['Платёжные системы'], countries: ['Россия'] });
+    expect(callLLMWithSchema).toHaveBeenCalledTimes(modelCalls);
+
+
+    // Source policy is tied to an explicit audience, not to the client's offer
+    // in its description; ordinary hypotheses retain their original sources.
+    const profiles = [
+      ['Финтех и платежное посредничество', 'payments'],
+      ['Платформы эзотерики и астрологических консультаций', 'esoteric_platform'],
+      ['Платформы веб-моделей и взрослого контента', 'adult_platform'],
+      ['Трансграничная электронная коммерция', 'crossborder_ecommerce'],
+      ['Трансграничные сервисы доставки товаров (байеры)', 'crossborder_buyers'],
+    ] as const;
+    for (const [title, profile] of profiles) {
+      expect(detectVeNicheSourceProfile([{ title }])).toBe(profile);
+      expect(detectVeNicheSourceProfile([{ title }, { title }])).toBe(profile);
+      expect(detectVeNicheSourceProfile([{ title }, { title: 'Энергетические компании' }])).toBeNull();
+      const terms = veNicheDirectoryNameTerms(profile);
+      expect(terms.length).toBeLessThanOrEqual(12);
+      expect(terms.every((term) => term.length >= 3 && !/[%_*(),]/.test(term))).toBe(true);
+      terms.length = 0;
+      expect(veNicheDirectoryNameTerms(profile).length).toBeGreaterThan(0);
+      const tasks: VeCollectTask[] = [
+        { source: 'companies_directory', rationale: 'Реестр', directory_filters: {
+          okvedCodes: ['47', '47.1', '47.9', '46'], regionCodes: ['77'], employeesFrom: 3, employeesTo: 20,
+          revenueFrom: 10, revenueTo: 100, hasEmail: true, includeIp: false, sizeOrUnknown: { employeesFrom: 3 },
+        } },
+        { source: 'yandex_maps', rationale: 'Каталог', maps_query: { queries: ['банки'], geo: 'Казань' } },
+        { source: 'hh_live', rationale: 'Вакансии', hh_query: {
+          text: 'менеджер', area: '1', date_from: '2026-01-01', date_to: '2026-10-01',
+        } },
+      ];
+      const original = JSON.stringify(tasks);
+      const adjusted = tasks.map((task) => normalizeVeNicheSourceTask(task, profile));
+      expect(JSON.stringify(tasks)).toBe(original);
+      expect(adjusted).toHaveLength(tasks.length);
+      expect(adjusted.map((task) => task.source)).toEqual(tasks.map((task) => task.source));
+      expect(adjusted[0].directory_filters).toEqual({ ...tasks[0].directory_filters,
+        okvedCodes: profile.startsWith('crossborder_') ? ['47.91', '46'] : ['47', '47.1', '47.9', '46'],
+        nameTerms: veNicheDirectoryNameTerms(profile),
+      });
+      expect(adjusted[1].maps_query?.geo).toBe('Казань');
+      expect(adjusted[1].maps_query?.queries.length).toBeLessThanOrEqual(1);
+      expect(adjusted[2].hh_query).toMatchObject({ area: '1', date_from: '2026-01-01', date_to: '2026-10-01' });
+      expect(adjusted[2].hh_query?.text.length).toBeLessThanOrEqual(300);
+      expect(adjusted.map((task) => normalizeVeNicheSourceTask(task, profile))).toEqual(adjusted);
+    }
+    expect(detectVeNicheSourceProfile([])).toBeNull();
+    expect(detectVeNicheSourceProfile(profiles.map(([title]) => ({ title })))).toBeNull();
+    for (const title of ['Энергетические компании', 'Финтех-компании', 'HR для финтеха', 'Разработчики платежных систем',
+      'Вебкам-студии', 'Астрологические консультации', 'Эзотерические центры', 'Интернет-магазины', 'Байерские агентства',
+      'Платёжные терминалы', 'Разработчики трансграничных интернет-магазинов', 'Клиенты платежных агрегаторов',
+      'CRM для платёжных провайдеров', 'Платформы обучения веб-моделей', 'Школы трансграничной электронной коммерции']) {
+      expect(detectVeNicheSourceProfile([{ title,
+        description: 'Наш продукт — платформа PSP. Поможем выйти на зарубежные рынки и принимать платежи.',
+      }])).toBeNull();
+    }
+    for (const label of ['Платежные небанковские кредитные организации', 'Банковские платёжные агенты',
+      'Платёжные системы', 'Процессинговые компании']) expect(veNicheRubricAllowed('payments', label)).toBe(true);
+    for (const label of ['Денежные переводы', 'Банки', 'Платёжные терминалы', 'Разработка платёжных систем'])
+      expect(veNicheRubricAllowed('payments', label)).toBe(false);
+    expect(veNicheRubricAllowed('adult_platform', 'Вебкам студии')).toBe(false);
+    expect(veNicheRubricAllowed('esoteric_platform', 'Эзотерические центры')).toBe(false);
+    expect(veNicheRubricAllowed('crossborder_buyers', 'Доставка покупок из-за рубежа')).toBe(true);
+    expect(veNicheRubricAllowed('crossborder_buyers', 'Выкуп автомобилей из Европы')).toBe(false);
+    expect(veNicheRubricAllowed('crossborder_buyers', 'Международная доставка грузов')).toBe(false);
+    expect(veNicheRubricAllowed('crossborder_ecommerce', 'Интернет-магазины')).toBe(true);
+    expect(veNicheRubricAllowed('crossborder_ecommerce', 'Разработка интернет-магазинов')).toBe(false);
   });
 
   it('рынок РФ: Google Maps в плане заменяется готовым каталогом, дубль запроса не множится', () => {
