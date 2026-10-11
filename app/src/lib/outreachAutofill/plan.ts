@@ -70,6 +70,31 @@ export function mskDay(now: Date): string {
   return new Date(now.getTime() + MSK_OFFSET_MS).toISOString().slice(0, 10);
 }
 
+/**
+ * Ближайший час проверки (09:00 или 21:00 МСК) ПОСЛЕ now.
+ *
+ * Нужен только для текста сообщения: «доберу вечером» или «доберу завтра».
+ * Раньше в чат всегда уходило «завтра доберу», даже когда следующая проверка
+ * была в тот же день через двенадцать часов.
+ */
+export function nextCheckSlot(now: Date): Date {
+  const msk = new Date(now.getTime() + MSK_OFFSET_MS);
+  const hours = [...AUTOFILL_CHECK_HOURS_MSK].sort((a, b) => a - b);
+  for (let ahead = 0; ahead < 2; ahead += 1) {
+    const base = Date.UTC(msk.getUTCFullYear(), msk.getUTCMonth(), msk.getUTCDate() + ahead);
+    for (const hour of hours) {
+      const slot = base + hour * 60 * 60 * 1000 - MSK_OFFSET_MS;
+      if (slot > now.getTime()) return new Date(slot);
+    }
+  }
+  return new Date(now.getTime() + DAY_MS);
+}
+
+/** Следующая проверка — сегодня же (а не завтра утром). */
+export function nextCheckIsToday(now: Date): boolean {
+  return mskDay(nextCheckSlot(now)) === mskDay(now);
+}
+
 /** Последний час проверки (09:00 или 21:00 МСК) не позже now. */
 export function latestCheckSlot(now: Date): Date {
   const msk = new Date(now.getTime() + MSK_OFFSET_MS);

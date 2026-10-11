@@ -82,8 +82,8 @@ export async function updateAutofill(lang: AutofillLang, patch: Partial<Omit<Aut
  * «новых в день» зависит и скорость рассылки, и сколько компаний заказывать
  * автосбору, — без пересчёта новые ящики остались бы без базы до вечера.
  *
- * Второго автосбора за день это не даёт: его держит отдельная проверка по дню
- * последнего сбора (last_job_day).
+ * Второго автосбора в том же окне проверки это не даёт: checkBase сверяет
+ * время прошлого сбора с началом текущего окна (09:00/21:00 МСК).
  */
 export async function requestAutofillRecheck(lang: AutofillLang): Promise<void> {
   await updateAutofill(lang, { last_check_at: null });
