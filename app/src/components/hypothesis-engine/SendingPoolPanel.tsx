@@ -8,8 +8,10 @@
  *
  * Что умеет:
  *  - список ящиков со статусом и проектом, сводка свободных по воркспейсам;
- *  - добавить ящики (по адресу и воркспейсу; каждый адрес — свой запрос и своя
- *    строка ответа: проверка у рассыльщика идёт по одному);
+ *  - добавить ящики (по адресу; воркспейс — только воркспейс пула, второй
+ *    аккаунт рассыльщика: HE_US_POOL_WORKSPACE, по умолчанию account-2, никогда
+ *    main — lib/hypothesisEngine/sendingPool.ts, «Воркспейс пула»; каждый адрес —
+ *    свой запрос и своя строка ответа: проверка у рассыльщика идёт по одному);
  *  - выключить свободный / включить выключенный;
  *  - вернуть ящики проекта в пул (только у проекта без запуска — роут
  *    отказывает 409 и объясняет).
@@ -42,6 +44,10 @@ interface PoolResponse {
   per_project_rejected?: boolean;
   workspaces?: Array<{ id: string; label: string; isDefault: boolean }>;
   workspaces_error?: string | null;
+  /** Куда экран добавляет ящики (HE_US_POOL_WORKSPACE, по умолчанию account-2) — или почему некуда. */
+  pool_workspace?: { id: string; ok: boolean; from_env: boolean; problem: string | null };
+  /** Из каких воркспейсов выдача берёт ящики: настроенные, кроме main. */
+  assignable_workspaces?: string[];
   rows?: PoolRow[];
   truncated?: boolean;
   counts?: Record<string, Record<PoolStatus, number>>;
@@ -99,17 +105,27 @@ export function SendingPoolPanel() {
     };
   }, [applyLoad]);
 
-  const workspaces = useMemo(() => data?.workspaces ?? [], [data]);
-  // Выбор по умолчанию — первый настроенный воркспейс, пока сотрудник не выбрал свой.
-  const selectedWorkspace = workspace || workspaces[0]?.id || '';
+  // Добавлять можно только в воркспейс пула (роут отказывает в любой другой и
+  // всегда — в main), поэтому в списке только он; не годится — список пуст, и
+  // экран пишет причину.
+  const pool = data?.pool_workspace ?? null;
+  const workspaces = useMemo(
+    () => (data?.pool_workspace?.ok ? (data.workspaces ?? []).filter((w) => w.id === data.pool_workspace?.id) : []),
+    [data],
+  );
+  const selectedWorkspace = workspaces.some((w) => w.id === workspace) ? workspace : workspaces[0]?.id ?? '';
 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const perProject = data?.per_project ?? 3;
+  // Свободные в main и в ненастроенных воркспейсах выдача не берёт — не считаем.
+  const assignable = useMemo(() => new Set(data?.assignable_workspaces ?? []), [data]);
   const bestFree = useMemo(() => {
     let best = 0;
-    for (const c of Object.values(data?.counts ?? {})) best = Math.max(best, c.available ?? 0);
+    for (const [ws, c] of Object.entries(data?.counts ?? {})) {
+      if (assignable.has(ws)) best = Math.max(best, c.available ?? 0);
+    }
     return best;
-  }, [data]);
+  }, [data, assignable]);
 
   const projects = useMemo(() => {
     const byProject = new Map<string, { project: PoolRow['project']; rows: PoolRow[] }>();
@@ -203,10 +219,19 @@ export function SendingPoolPanel() {
       <p className={`text-sm ${HE.muted2}`}>
         Наши прогретые ящики, из которых пишут кампании английского кабинета. Каждый новый проект клиента при первом
         запуске получает ящики из одного воркспейса (сейчас — {perProject} шт.), и они только его. Если свободных не
-        хватает, запуск клиента отказывается, а команде уходит сообщение в health-бот.
+        хватает, запуск клиента отказывается, а команде уходит сообщение в health-бот. Пул живёт во втором аккаунте
+        рассыльщика — там, где клиенты RU-кабинета outreachOS
+        {pool ? <> (воркспейс «{pool.id}», {pool.from_env ? 'из HE_US_POOL_WORKSPACE' : 'по умолчанию'})</> : null}; в
+        «main» ящиков пула нет.
       </p>
 
       {loadError && <StatusBox tone="error">{loadError}</StatusBox>}
+      {pool && !pool.ok && (
+        <StatusBox tone="error">
+          Воркспейс пула не настроен — {pool.problem}. Добавлять ящики некуда: задайте HE_US_POOL_WORKSPACE (id второго
+          аккаунта рассыльщика) и его ключ в INSTANTLY_ACCOUNTS_JSON контейнера portal.
+        </StatusBox>
+      )}
       {data?.supported === false && (
         <StatusBox tone="error">
           Пул недоступен: не применена миграция 20261011_0001_he_sending_pool.sql. Пока её нет, запуск любого
@@ -235,6 +260,7 @@ export function SendingPoolPanel() {
           {Object.entries(data.counts ?? {}).map(([ws, c]) => (
             <span key={ws} className={HE.chip}>
               {ws}: свободно {c.available}, отдано {c.assigned}, выключено {c.disabled}
+              {!assignable.has(ws) && ' — не выдаётся'}
             </span>
           ))}
         </div>
@@ -245,8 +271,8 @@ export function SendingPoolPanel() {
         <p className={HE.secTitle}>Добавить ящики</p>
         <p className={`text-xs ${HE.muted2}`}>
           Адреса по одному на строку. Каждый проверяется у рассыльщика: есть в выбранном воркспейсе, активен, прогрев не
-          в бане. Ящик, который уже стоит в пресете любого клиента или в живом запуске RU-кабинета, не добавляется. Воркспейс «main» общий с RU-клиентами
-          (лимит запросов и место под контакты) — для ENG лучше отдельный.
+          в бане. Ящик, который уже стоит в пресете любого клиента или в живом запуске RU-кабинета, не добавляется. Ящики
+          добавляются только в воркспейс пула; в «main» — никогда.
         </p>
         <div className="grid gap-3 sm:grid-cols-[220px_1fr]">
           <select

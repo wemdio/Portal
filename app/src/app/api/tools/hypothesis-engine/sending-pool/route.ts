@@ -10,9 +10,13 @@ import {
   checkHeSendingPoolMailboxAtProvider,
   describeHeSendingPoolMailboxUses,
   findHeSendingPoolMailboxUses,
+  heSendingPoolAssignableWorkspaces,
   normalizeHeSendingPoolEmail,
   readHeSendingPoolSize,
+  readHeSendingPoolWorkspace,
+  HE_SENDING_POOL_FORBIDDEN_WORKSPACE,
   HE_SENDING_POOL_TABLE,
+  HE_US_POOL_WORKSPACE_ENV,
   type HeSendingPoolStatus,
 } from '@/lib/hypothesisEngine/sendingPool';
 
@@ -40,9 +44,11 @@ const LIST_LIMIT = 2000;
  * 20261011_0001 и lib/hypothesisEngine/sendingPool.ts).
  *
  * GET — весь пул (до LIST_LIMIT строк) с проектом у отданных, сводка по
- * воркспейсам, сколько ящиков получает новый проект и какие воркспейсы
- * настроены. Таблицы нет — { supported: false } (экран пишет «миграция не
- * применена», а не «пул пуст»).
+ * воркспейсам, сколько ящиков получает новый проект, какие воркспейсы
+ * настроены, воркспейс пула (pool_workspace: куда экран добавляет ящики, или
+ * почему некуда) и из каких воркспейсов выдача берёт ящики
+ * (assignable_workspaces — все настроенные, кроме main). Таблицы нет —
+ * { supported: false } (экран пишет «миграция не применена», а не «пул пуст»).
  */
 export async function GET(req: NextRequest) {
   return withToolTrace(
@@ -60,6 +66,15 @@ export async function GET(req: NextRequest) {
         workspacesError = e instanceof Error ? e.message : 'INSTANTLY_ACCOUNTS_JSON не читается';
       }
       const size = readHeSendingPoolSize();
+      const configured = workspacesError ? null : workspaces.map((w) => w.id);
+      const pool = readHeSendingPoolWorkspace(configured);
+      const poolWorkspace = {
+        id: pool.id,
+        ok: pool.ok,
+        from_env: pool.fromEnv,
+        problem: pool.ok ? null : pool.problem,
+      };
+      const assignableWorkspaces = configured ? heSendingPoolAssignableWorkspaces(configured) : [];
 
       const { data, error } = await supabaseAdmin
         .from(HE_SENDING_POOL_TABLE)
@@ -77,6 +92,8 @@ export async function GET(req: NextRequest) {
             per_project_rejected: size.rejected,
             workspaces,
             workspaces_error: workspacesError,
+            pool_workspace: poolWorkspace,
+            assignable_workspaces: assignableWorkspaces,
             rows: [],
             counts: {},
           });
@@ -98,6 +115,8 @@ export async function GET(req: NextRequest) {
         per_project_rejected: size.rejected,
         workspaces,
         workspaces_error: workspacesError,
+        pool_workspace: poolWorkspace,
+        assignable_workspaces: assignableWorkspaces,
         rows,
         truncated: rows.length >= LIST_LIMIT,
         counts,
@@ -113,7 +132,10 @@ export async function GET(req: NextRequest) {
  * рассыльщика).
  *
  * Проверки по порядку (первая не прошедшая — отказ, ничего не записано):
- *  1. адрес похож на адрес, воркспейс настроен в окружении;
+ *  1. адрес похож на адрес; воркспейс не main (пул ENG живёт во втором
+ *     аккаунте рассыльщика — sendingPool.ts, «Воркспейс пула»), настроен в
+ *     окружении и это воркспейс пула (HE_US_POOL_WORKSPACE, по умолчанию
+ *     account-2); воркспейс пула не годится — отказ с причиной;
  *  2. адреса ещё нет в пуле (в любом статусе);
  *  3. адреса нет ни в одном пресете клиента и ни в одном живом запуске
  *     RU-кабинета с выбранными ящиками (findHeSendingPoolMailboxUses: без
@@ -148,6 +170,13 @@ export async function POST(req: NextRequest) {
         return jsonError('Укажите воркспейс рассыльщика', 400);
       }
       const instantlyAccountId = resolveInstantlyAccountId(body.instantly_account_id);
+      if (instantlyAccountId === HE_SENDING_POOL_FORBIDDEN_WORKSPACE) {
+        return jsonError(
+          'В воркспейс «main» ящики пула не добавляются: пул ENG живёт во втором аккаунте рассыльщика ' +
+            '(там, где клиенты RU-кабинета outreachOS)',
+          400,
+        );
+      }
       let configured: string[];
       try {
         configured = listInstantlyAccounts().map((a) => a.id);
@@ -157,6 +186,17 @@ export async function POST(req: NextRequest) {
       }
       if (!configured.includes(instantlyAccountId)) {
         return jsonError(`Воркспейс «${instantlyAccountId}» не настроен в окружении`, 400);
+      }
+      const pool = readHeSendingPoolWorkspace(configured);
+      if (!pool.ok) {
+        return jsonError(`Воркспейс пула не настроен — ${pool.problem}. Ящик не добавлен`, 409);
+      }
+      if (instantlyAccountId !== pool.id) {
+        return jsonError(
+          `Ящики в пул добавляются только в воркспейс пула «${pool.id}» (${HE_US_POOL_WORKSPACE_ENV}), ` +
+            `а не в «${instantlyAccountId}»`,
+          400,
+        );
       }
 
       let notes: string | null = null;

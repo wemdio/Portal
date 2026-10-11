@@ -358,20 +358,27 @@ export const CLIENT_NAV_ENG: ClientNavItem = {
 };
 
 /**
- * Ящики, которые ENG-клиент подключил сам. Живёт под /client/eng/*,
- * иначе middleware уводит eng-клиента обратно в /client/eng. С S2 кампании
- * кабинета шлют из ящиков пула проекта, а не из подключённых, и новые ящики
- * экран не подключает (app/client/eng/mailboxes/page.tsx) — поэтому ни
- * «Sending», ни «Connect» в подписи нет.
+ * Ответы на кампании ENG-клиента (только чтение, app/client/eng/replies). Живёт
+ * под /client/eng/*, иначе middleware уводит eng-клиента обратно в /client/eng.
+ * Подписи английские в обоих полях — как у CLIENT_NAV_ENG.
  */
-export const CLIENT_NAV_ENG_MAILBOXES: ClientNavItem = {
-  id: 'eng-mailboxes',
-  label: 'Connected mailboxes',
-  labelEn: 'Connected mailboxes',
-  href: '/client/eng/mailboxes',
-  description: 'Mailboxes you connected earlier — campaigns you launch send from mailboxes we provide',
-  descriptionEn: 'Mailboxes you connected earlier — campaigns you launch send from mailboxes we provide',
+export const CLIENT_NAV_ENG_REPLIES: ClientNavItem = {
+  id: 'eng-replies',
+  label: 'Replies',
+  labelEn: 'Replies',
+  href: '/client/eng/replies',
+  description: 'Replies to your campaigns',
+  descriptionEn: 'Replies to your campaigns',
 };
+
+/*
+ * Пункта «ящики клиента» в ENG-меню нет (решение владельца 11.10.2026): кампании
+ * кабинета шлют только из ящиков нашего пула, подключать свои клиенту незачем.
+ * /client/eng/mailboxes уводит на /client/eng/dashboard
+ * (app/client/eng/mailboxes/page.tsx); подключённые раньше строки
+ * client_mailbox_accounts остаются в БД как есть. RU-пункт CLIENT_NAV_MAILBOXES
+ * выше не меняется.
+ */
 
 /**
  * Чат поддержки в ENG-кабинете — тот же /client/support, что и
@@ -460,14 +467,14 @@ export function resolveActiveNavId(pathname: string): string | null {
   ) {
     return 'manual-scoring';
   }
-  if (pathname === '/client/eng/mailboxes' || pathname.startsWith('/client/eng/mailboxes/')) {
-    return 'eng-mailboxes';
-  }
   if (pathname === '/client/mailboxes' || pathname.startsWith('/client/mailboxes/')) {
     return 'mailboxes';
   }
   if (pathname === '/client/gis-signals' || pathname.startsWith('/client/gis-signals/')) {
     return 'gis-signals';
+  }
+  if (pathname === CLIENT_NAV_ENG_REPLIES.href || pathname.startsWith(`${CLIENT_NAV_ENG_REPLIES.href}/`)) {
+    return CLIENT_NAV_ENG_REPLIES.id;
   }
   if (pathname === '/client/eng' || pathname.startsWith('/client/eng/')) {
     return 'eng';

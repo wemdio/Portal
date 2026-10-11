@@ -86,8 +86,10 @@ import {
   assignHeSendingPool,
   describeHeSendingPoolMailboxUses,
   findHeSendingPoolMailboxUses,
+  heSendingPoolAssignableWorkspaces,
   notifyHeSendingPool,
   readHeSendingPoolSize,
+  readHeSendingPoolWorkspace,
   HE_US_POOL_MAILBOXES_PER_PROJECT_ENV,
 } from './sendingPool';
 
@@ -284,7 +286,10 @@ export async function ensureHeEngPresetForProject(
       return fail('not_eng_client', `role ${String(profile?.role ?? 'none')}, market ${String(profile?.market ?? 'none')}`, ctx);
     }
 
-    // 3. Сколько ящиков и какие воркспейсы код знает.
+    // 3. Сколько ящиков и из каких воркспейсов: настроенные, кроме 'main' — ящиков
+    //    пула в main не бывает (sendingPool.ts, «Воркспейс пула»). Воркспейс пула
+    //    (HE_US_POOL_WORKSPACE) выдачу не ограничивает — он нужен алертам: куда
+    //    добавлять ящики или почему некуда.
     const size = readHeSendingPoolSize(env);
     if (size.rejected) {
       void logWarn('he.eng_sending_preset.size_rejected', `unreadable ${HE_US_POOL_MAILBOXES_PER_PROJECT_ENV} — default used`, {
@@ -292,14 +297,18 @@ export async function ensureHeEngPresetForProject(
         count: size.count,
       });
     }
+    let configured: string[] | null = null;
     let workspaces: string[] = [];
     let workspacesProblem: string | null = null;
     try {
-      workspaces = listInstantlyAccounts().map((a) => a.id);
-      if (workspaces.length === 0) workspacesProblem = 'no sending workspace is configured';
+      configured = listInstantlyAccounts().map((a) => a.id);
+      workspaces = heSendingPoolAssignableWorkspaces(configured);
+      if (configured.length === 0) workspacesProblem = 'no sending workspace is configured';
+      else if (workspaces.length === 0) workspacesProblem = 'only the main workspace is configured, and the ENG pool never uses main';
     } catch (e) {
       workspacesProblem = `INSTANTLY_ACCOUNTS_JSON: ${e instanceof Error ? e.message : 'unreadable'}`;
     }
+    const poolWorkspace = readHeSendingPoolWorkspace(configured, env);
     if (workspacesProblem) {
       void notifyHeSendingPool({ kind: 'unavailable', projectId, cause: 'workspaces', reason: workspacesProblem });
       return fail('workspaces_unconfigured', workspacesProblem, ctx);
@@ -335,6 +344,7 @@ export async function ensureHeEngPresetForProject(
           bestFree: assigned.bestFree,
           pinnedWorkspace: assigned.pinnedWorkspace,
           byWorkspace: assigned.byWorkspace,
+          poolWorkspace,
         });
         void logWarn('he.eng_sending_preset.shortage', 'ENG sending pool shortage: launch refused', {
           projectId,
@@ -342,6 +352,8 @@ export async function ensureHeEngPresetForProject(
           need: assigned.need,
           bestFree: assigned.bestFree,
           pinnedWorkspace: assigned.pinnedWorkspace,
+          poolWorkspace: poolWorkspace.id,
+          poolWorkspaceProblem: poolWorkspace.ok ? null : poolWorkspace.problem,
         });
         return {
           kind: 'shortage',
@@ -353,7 +365,10 @@ export async function ensureHeEngPresetForProject(
       case 'workspace_conflict': {
         const detail =
           `${assigned.reason}; pool workspace ${assigned.instantlyAccountId ?? '—'}; ` +
-          `preset workspace ${assigned.presetWorkspace ?? presetWorkspace ?? 'none'}`;
+          `preset workspace ${assigned.presetWorkspace ?? presetWorkspace ?? 'none'}` +
+          (assigned.reason === 'unconfigured'
+            ? `; выдача берёт ящики только из ${workspaces.join(', ')} (main — никогда)`
+            : '');
         void notifyHeSendingPool({ kind: 'conflict', projectId, reason: assigned.reason, detail });
         return fail('workspace_conflict', detail, ctx);
       }
@@ -390,6 +405,7 @@ export async function ensureHeEngPresetForProject(
           instantlyAccountId: ws,
           freeLeft: assigned.freeLeft,
           perProject: size.count,
+          poolWorkspace,
         });
       }
     }

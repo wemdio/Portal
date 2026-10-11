@@ -9,7 +9,7 @@ import {
   CLIENT_NAV_MAILBOXES,
   CLIENT_NAV_GIS_SIGNALS,
   CLIENT_NAV_ENG,
-  CLIENT_NAV_ENG_MAILBOXES,
+  CLIENT_NAV_ENG_REPLIES,
   CLIENT_NAV_ENG_SUPPORT,
   CLIENT_NAV_DASHBOARD,
   CLIENT_NAV_GROUPS,
@@ -137,8 +137,8 @@ export function ClientNavList({ activeId, locale, mode = 'manual', onItemClick }
           onItemClick={onItemClick}
         />
         <NavItemRow
-          item={CLIENT_NAV_ENG_MAILBOXES}
-          active={activeId === CLIENT_NAV_ENG_MAILBOXES.id}
+          item={CLIENT_NAV_ENG_REPLIES}
+          active={activeId === CLIENT_NAV_ENG_REPLIES.id}
           locale={locale}
           onItemClick={onItemClick}
         />

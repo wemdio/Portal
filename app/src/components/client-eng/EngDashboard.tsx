@@ -1100,15 +1100,17 @@ const TOP_UP_TAG: Record<HeClientRefillState, { label: string; tone: 'green' | '
  * Фраза состояния. `running` и `off` — свои; паузы и отмена — справочник
  * кабинета (engRefillHoldText), тот же, что был у блока объяснений: правда
  * про паузы у них одна. Каждая фраза верна при любом статусе кампаний: что
- * ночь пропускает вертикаль, чья основная кампания не отправляет, говорит
- * строка «next» её карточки (topUpSkipFor), и `running` на неё ссылается.
+ * ночь пропускает вертикаль, чья основная кампания контакты не берёт (не
+ * отправляет — кроме завершённой, которую ночь стартует снова: блок
+ * «ЗАВЕРШЁННАЯ ОСНОВНАЯ» в autoPipeline.ts), говорит строка «next» её карточки
+ * (topUpSkipFor), и `running` на неё ссылается.
  */
 function topUpStateText(state: HeClientRefillState): string {
   switch (state) {
     case 'running':
-      return 'On — each night from 03:20 UTC we look for new contacts and add them to the campaigns of this project; a vertical whose campaigns are not sending is skipped, and its «next» line says why.';
+      return 'On — each night from 03:20 UTC we look for new contacts and add them to the campaigns of this project; a vertical whose campaigns cannot take new contacts is skipped, and its «next» line says why.';
     case 'off':
-      return 'Off — no new contacts are added to the campaigns of this project. Turn it on to look for new contacts each night (from 03:20 UTC) and add them to the campaigns that are sending.';
+      return 'Off — no new contacts are added to the campaigns of this project. Turn it on to look for new contacts each night (from 03:20 UTC) and add them to the campaigns that can take them.';
     default:
       return engRefillHoldText(state);
   }
@@ -1351,9 +1353,17 @@ export function EngDashboard() {
           </p>
         </div>
         <Link
-          href={'/client/eng?list=1' as Route}
+          href={'/client/eng/replies' as Route}
           prefetch={false}
           className="ds-btn-ghost ml-auto inline-flex items-center gap-1.5"
+        >
+          <Mail className="h-3.5 w-3.5" />
+          Replies
+        </Link>
+        <Link
+          href={'/client/eng?list=1' as Route}
+          prefetch={false}
+          className="ds-btn-ghost inline-flex items-center gap-1.5"
         >
           <LayoutGrid className="h-3.5 w-3.5" />
           All projects

@@ -5,11 +5,13 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import {
   checkHeSendingPoolMailboxAtProvider,
   describeHeSendingPoolMailboxUses,
   findHeSendingPoolMailboxUses,
   setHeSendingPoolMailboxStatus,
+  HE_SENDING_POOL_FORBIDDEN_WORKSPACE,
   HE_SENDING_POOL_TABLE,
 } from '@/lib/hypothesisEngine/sendingPool';
 
@@ -36,7 +38,9 @@ const MIGRATION_MISSING_TEXT = 'Пул ящиков ENG недоступен: н
  * Включение снова проверяет ящик: что его не вписали в пресет или живой
  * запуск RU-кабинета другого клиента (findHeSendingPoolMailboxUses — та же
  * проверка, что при добавлении) и что у рассыльщика он жив (мог сломаться,
- * пока был выключен): включённый ящик получит следующий новый проект.
+ * пока был выключен): включённый ящик получит следующий новый проект. Ящик в
+ * воркспейсе main не включается вовсе: выдача main не читает (sendingPool.ts,
+ * «Воркспейс пула»), включённый там ящик лежал бы свободным без пользы.
  */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
@@ -75,6 +79,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (!row) return jsonError('Ящика с таким id в пуле нет', 404);
         const mailbox = row as { email: string; instantly_account_id: string; status: string };
         if (mailbox.status === 'disabled') {
+          if (resolveInstantlyAccountId(mailbox.instantly_account_id) === HE_SENDING_POOL_FORBIDDEN_WORKSPACE) {
+            return jsonError(
+              'Ящик в воркспейсе «main» не включается: пул ENG живёт во втором аккаунте рассыльщика, из main ящики не выдаются',
+              409,
+            );
+          }
           if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
           const uses = await findHeSendingPoolMailboxUses(supabaseInstantly, [mailbox.email]);
           if (uses.kind === 'error') {

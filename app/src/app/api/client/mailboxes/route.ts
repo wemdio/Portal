@@ -1,7 +1,7 @@
 import 'server-only';
 
 import { NextResponse, type NextRequest } from 'next/server';
-import { requireByoMailboxClient } from '@/lib/byoMailbox/access';
+import { refuseOwnMailboxConnectForEng, requireByoMailboxClient } from '@/lib/byoMailbox/access';
 import { sealMailboxSecret } from '@/lib/byoMailbox/credentials';
 import { verifySmtp, sendTestEmail } from '@/lib/byoMailbox/smtp';
 import { assertSafeSmtpTarget, assertSafeImapTarget } from '@/lib/byoMailbox/netGuard';
@@ -226,6 +226,9 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const res = await requireByoMailboxClient(req);
   if ('error' in res) return res.error;
+  // ENG-клиент свои ящики не подключает (byoMailbox/accessPolicy.ts); RU — дальше как было.
+  const engRefusal = refuseOwnMailboxConnectForEng(res.auth);
+  if (engRefusal) return engRefusal;
   if (!supabaseAdmin) {
     return NextResponse.json({ error: 'Server misconfigured', code: 'SERVER_MISCONFIGURED' }, { status: 500 });
   }

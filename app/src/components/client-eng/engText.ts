@@ -433,7 +433,7 @@ const REFILL_HOLD_EN: Record<EngRefillHoldState, string> = {
   spend_paused:
     'The daily top-up for this project is on hold. It was paused on our side, so the top-up does not start any new collection. Our team has been notified, and the top-up continues when they resume it. Leads already in your campaigns stay there, and this hold does not stop sending.',
   stopped:
-    'The daily top-up for this project is off because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Turn it on to look for new contacts each night again and add them to the campaigns that are sending.',
+    'The daily top-up for this project is off because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Turn it on to look for new contacts each night again and add them to the campaigns that can take them.',
 };
 
 /** Состояния добора, у которых есть что объяснить отдельным блоком. */

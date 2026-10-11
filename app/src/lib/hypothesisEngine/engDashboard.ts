@@ -17,7 +17,7 @@ import type { HeClientStageErrorCode } from './clientEngProjection';
 // Только типы: набор причин пропуска одна на тик, долив и ленту, вердикт
 // основной кампании — тот же, что у гейта ночи, а модуль тика (instantly-клиент,
 // кэш статусов) в агрегат дашборда не едет.
-import type { HeRefillCampaignVerdict, HeRefillSendSkipReason } from './autoPipeline';
+import type { HeRefillMainRestartOutcome, HeRefillMainVerdict, HeRefillSendSkipReason } from './autoPipeline';
 import type { HeEngClientState, HeEngSendingAccessView } from './engCampaignStatus';
 // Справочник клиентских текстов без зависимостей (тот же, что реэкспортирует
 // clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда.
@@ -47,7 +47,13 @@ const TOP_UP_SKIP_EN: Record<HeRefillSendSkipReason, string> = {
   // Гейт ночи судит ОСНОВНУЮ кампанию запуска (сегментные ночь не отменяют) —
   // фраза называет именно её. Те же фразы цитируют алерты команде
   // (autoPipeline.holdAlertBody: 'main_completed', 'main_stopped') — менять вместе.
-  campaign_completed: 'daily top-up skipped — the main campaign of this vertical has completed; message Support to continue it',
+  // Завершённую основную ночь обычно продолжает сама (стартует её после
+  // долива); пропуск 'campaign_completed' пишется, только когда сами мы её не
+  // продолжаем: запуск кабинет не стартовал или её прошлый повторный старт не
+  // удался (блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» в autoPipeline.ts).
+  campaign_completed:
+    'daily top-up skipped — the main campaign of this vertical has completed and is not restarted automatically; ' +
+    'message Support to continue it',
   campaign_stopped:
     'daily top-up skipped — our sending service stopped or removed the main campaign of this vertical; message Support',
   campaign_not_sending: 'daily top-up skipped — the main campaign of this vertical was not sending',
@@ -57,6 +63,32 @@ const TOP_UP_SKIP_EN: Record<HeRefillSendSkipReason, string> = {
   // не из ящиков пула проекта (запуск до self-serve, чужие адреса): фраза
   // верна для обоих — подтвердить, что кампании можно доливать, не вышло.
   unavailable: 'daily top-up skipped — we could not confirm these campaigns can take new contacts; message Support if this repeats',
+};
+
+/**
+ * Хвост строки ленты «daily top-up: +N leads» у ночи, продолжавшей
+ * завершённую основную кампанию (stats.main_restart — пишет
+ * stages/baseCollectRefill.ts, «ПОВТОРНЫЙ СТАРТ»; исходы —
+ * HeRefillMainRestartOutcome). null — добавить нечего: она уже отправляла
+ * ('not_needed'), в неё ничего не принято ('nothing_accepted' — «+N leads»
+ * правдиво и так), отмена ('cancelled' — у отменённой ночи своя строка).
+ * 'failed' — «работаем» правда: долив шлёт алерт команде
+ * ('main_restart_failed', autoPipeline.holdAlertBody цитирует эту фразу —
+ * менять вместе).
+ */
+const MAIN_RESTART_FEED_EN: Record<HeRefillMainRestartOutcome, string | null> = {
+  restarted: 'its completed campaign started sending again',
+  not_needed: null,
+  nothing_accepted: null,
+  client_paused: 'you had paused this vertical, so its completed campaign was not started again',
+  // Старт уже отправил кампании POST /activate, Pause пришёл во время него, а
+  // пауза не подтвердилась: «не стартовали» было бы неправдой. «Stopping it» —
+  // правда: команде ушёл алерт 'pause_failed' (engCampaignSending.ts, шаг 9).
+  pause_failed:
+    'you paused this vertical while its completed campaign was being started again; it was started and could not be paused yet, so it may still be sending (our team is stopping it)',
+  access_off: 'sending was off for your account, so its completed campaign was not started again',
+  cancelled: null,
+  failed: `its completed campaign did not start sending again (${HE_TEAM_ON_IT_SHORT_EN})`,
 };
 
 /**
@@ -80,10 +112,15 @@ const TOP_UP_SKIP_EN: Record<HeRefillSendSkipReason, string> = {
  *  6. основной кампании нет (сплит по сегментам без неё) → 'no_main': тик такую
  *     вертикаль не берёт вовсе;
  *  7. вердикт ОСНОВНОЙ кампании по кэшу (readHeRefillMainVerdicts, то же
- *     правило, что у гейта): 'sending' → ночь её берёт; 'completed' / 'stopped' /
- *     'not_sending' → пропуск; 'unknown' (не читался, старше 30 минут) — тик
- *     перед решением читает её сам, поэтому исход не известен, и строки
- *     кабинета говорят это условно. Кэш не читается → 'unavailable'.
+ *     правило, что у гейта): 'sending' → ночь её берёт; 'completed' при
+ *     желании клиента 'sending' → тоже берёт (ночь продолжает завершённую:
+ *     стартует её после долива — блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» в
+ *     autoPipeline.ts), без желания (кабинет запуск не стартовал) или
+ *     'completed_held' (прошлый повторный старт не удался) → пропуск
+ *     'campaign_completed'; 'stopped' / 'not_sending' → пропуск; 'unknown'
+ *     (не читался, старше 30 минут) — тик перед решением читает её сам,
+ *     поэтому исход не известен, и строки кабинета говорят это условно. Кэш,
+ *     шаблоны или журнал прогонов не читаются → 'unavailable'.
  * Не повторяет живую проверку адресов основной кампании (шаг 7 гейта): адресов
  * в кэше нет; такой пропуск кабинет видит строкой ленты ночи.
  */
@@ -106,10 +143,12 @@ export interface EngDashTopUp {
   split: boolean;
 }
 
-const TOP_UP_MAIN_VERDICT: Record<HeRefillCampaignVerdict, EngDashTopUpVerdict> = {
+const TOP_UP_MAIN_VERDICT: Record<HeRefillMainVerdict, EngDashTopUpVerdict> = {
   sending: 'sending',
   unknown: 'unknown',
+  // Без желания клиента 'sending' (его проверяет deriveEngTopUpVerdict).
   completed: 'campaign_completed',
+  completed_held: 'campaign_completed',
   stopped: 'campaign_stopped',
   not_sending: 'campaign_not_sending',
 };
@@ -124,7 +163,7 @@ export function deriveEngTopUpVerdict(input: {
   /** Запуск до self-serve отправки проекта (heEngLaunchPredatesSelfServe); 'unreadable' — пул не читается. */
   preSelfServe: boolean | 'unreadable';
   /** Вердикт основной кампании; 'no_main' — её нет; null — кэш не читается. */
-  main: HeRefillCampaignVerdict | 'no_main' | null;
+  main: HeRefillMainVerdict | 'no_main' | null;
 }): EngDashTopUpVerdict {
   if (input.access === 'not_enabled') return 'access_not_enabled';
   if (input.access === 'turned_off') return 'access_turned_off';
@@ -136,6 +175,8 @@ export function deriveEngTopUpVerdict(input: {
   if (input.preSelfServe) return 'pre_self_serve';
   if (input.main === 'no_main') return 'no_main';
   if (input.main === null) return 'unavailable';
+  // Завершённую основную ночь продолжает сама, если клиент просил отправку.
+  if (input.main === 'completed' && input.clientState === 'sending') return 'sending';
   return TOP_UP_MAIN_VERDICT[input.main];
 }
 
@@ -1050,9 +1091,18 @@ export function buildEngDashboardEvents(input: {
         unfilled > 0
           ? `, ${unfilled} skipped (the letters would not read right for ${unfilled === 1 ? 'this contact' : 'these contacts'})`
           : '';
+      // Ночь продолжала завершённую основную кампанию (stats.main_restart).
+      const restartOutcome =
+        stats.main_restart && typeof stats.main_restart === 'object'
+          ? asStr((stats.main_restart as Record<string, unknown>).outcome)
+          : '';
+      const restartText = Object.prototype.hasOwnProperty.call(MAIN_RESTART_FEED_EN, restartOutcome)
+        ? MAIN_RESTART_FEED_EN[restartOutcome as HeRefillMainRestartOutcome]
+        : null;
+      const restarted = restartText ? `, ${restartText}` : '';
       events.push({
         type: 'refill_appended',
-        text: withVertical(`daily top-up: +${asNum(stats.appended)} leads${heldBack}${skipped}`, vname),
+        text: withVertical(`daily top-up: +${asNum(stats.appended)} leads${heldBack}${skipped}${restarted}`, vname),
         at,
       });
     } else if (status === 'no_new') {

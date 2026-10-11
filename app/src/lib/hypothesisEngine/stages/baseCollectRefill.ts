@@ -138,8 +138,12 @@
  *   - до брони и до провайдера (шаг 4c) долив спрашивает, берут ли кампании
  *     запуска контакты (S2, checkHeRefillSendTarget в autoPipeline.ts: пауза
  *     клиента, выключенный «Daily top-up», выключенная отправка аккаунта,
- *     основная кампания завершена, остановлена, шлёт не из ящиков пула
- *     проекта или её статус не подтверждён — по свежему статусу). Нет — долив
+ *     основная кампания завершена, а продолжить её нельзя, остановлена, шлёт
+ *     не из ящиков пула проекта или её статус не подтверждён — по свежему
+ *     статусу). Завершённую основную, которую продолжить можно (желание
+ *     клиента «отправлять», блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» в autoPipeline.ts),
+ *     долив, приняв в неё контакты, стартует снова («ПОВТОРНЫЙ СТАРТ» у
+ *     runHeRefillAppend; итог — stats.main_restart). Нет — долив
  *     пропущен отказом без единого запроса на загрузку: компании ночи у
  *     market='us' ждут в очереди переноса, как у ночи без бюджета
  *     (stats.sending_skip, в серию отказов не идёт). Строки неотправляющей
@@ -267,8 +271,14 @@ import {
   notifyHeRefillHold,
   pauseHeAutoPipelineRefill,
   type HeRefillCampaignVerdictDetail,
+  type HeRefillMainRestart,
+  type HeRefillMainRestartOutcome,
   type HeRefillSendSkipReason,
 } from '../autoPipeline';
+// Повторный старт завершённой основной кампании после долива (S2, «ПОВТОРНЫЙ
+// СТАРТ» ниже) — единственное место ENG, которое стартует кампании, со всеми
+// его проверками (выключатель, желание клиента, ящики пула, компенсация паузы).
+import { startHeEngLaunchSending, type HeEngStartResult } from '../engCampaignSending';
 // Желание клиента по шаблону запуска (Pause / Resume кабинета) — его
 // перечитывает хук владения перед каждым чанком (readHeRefillOwnershipLoss).
 import { readHeEngClientStates } from '../engCampaignStatus';
@@ -301,7 +311,11 @@ import {
   // докблоке самой функции (stages/baseCollect.ts). Здесь их четыре:
   // терминальная запись базы, строка прогона, итог перенесённых компаний и
   // очередь переноса (persistRefillBase / writeRefillRun /
-  // settleHeRefillCarryover / queueHeRefillCarryover).
+  // settleHeRefillCarryover / queueHeRefillCarryover). Пятый пользователь —
+  // повторный старт завершённой основной (restartCompletedMain): он не запись,
+  // но выпускает в отправку уже оплаченные и принятые контакты, а обрыв посреди
+  // него превращал удачный старт в провал с паузой и держанием вертикали
+  // (докблок там).
   paidCheckpointDb,
   SAMPLE_ROWS,
   type HeCollectInfo,
@@ -1042,6 +1056,18 @@ export interface HeRefillStats {
    * кабинета (engDashboard: «daily top-up skipped — …»).
    */
   sending_skip?: HeRefillSendSkipReason;
+  /**
+   * Основная кампания была завершена (3), и ночь её продолжала (шаг 4c:
+   * `mainCompleted`): исход повторного старта после долива («ПОВТОРНЫЙ
+   * СТАРТ» у runHeRefillAppend, исходы — HeRefillMainRestartOutcome в
+   * autoPipeline.ts). Нет ключа — основная отправляла, долив до загрузки не
+   * дошёл или это не market='us'. Пишется только в строку прогона: базу
+   * долив пишет раньше старта (терминальная запись не ждёт рассыльщика).
+   * Читатели: гейт ночи и кабинет ('failed' держит следующие ночи вертикали —
+   * readHeRefillRestartHold), лента кабинета (engDashboard.ts) и строка лога
+   * долива.
+   */
+  main_restart?: HeRefillMainRestart;
   /**
    * Исход брони дневного бюджета (he_reserve_refill_daily_budget). Пишется,
    * когда бронь запрашивалась; нет ключа — отправлять было нечего и бронь не
@@ -4629,6 +4655,56 @@ export async function loadHeRefillReleasedCompanies(
 }
 
 /**
+ * Срок повторного старта завершённой основной кампании после долива: одна
+ * кампания (чтение, старт, проверочное чтение — по срокам engCampaignSending,
+ * старт начинается, только если до срока остаётся его бюджет на кампанию).
+ */
+const HE_REFILL_RESTART_DEADLINE_MS = 45_000;
+
+/**
+ * Исход повторного старта ОДНОЙ основной кампании по ответу
+ * startHeEngLaunchSending (via 'refill'; исходы — HeRefillMainRestartOutcome в
+ * autoPipeline.ts). Клиентское решение — не провал: Pause до или во время
+ * старта ('client_paused'), выключенная или не включённая отправка аккаунта
+ * ('access_off'). Pause во время старта, когда компенсирующая пауза кампании,
+ * которой старт уже отправил POST /activate, НЕ подтвердилась
+ * (`compensationFailed` > 0), — 'pause_failed', а не 'client_paused': кампания
+ * стартована и может отправлять, и фраза «не стартовали» была бы неправдой.
+ * Алерт команде по нему уже ушёл из самого старта ('pause_failed',
+ * engCampaignSending.ts, шаг 9) — второй отсюда не шлётся. Провал ('failed',
+ * `code` — код отказа или кампании):
+ * выключатель не читается, ящики пула, воркспейс, письма, запуск до self-serve
+ * или идущий, кампания не прочитана, не стартовала, стоит (0/2: её
+ * остановили мимо долива — 'not_completed'), остановлена рассыльщиком или
+ * удалена, неясный старт, не хватило срока.
+ */
+export function heRefillMainRestartVerdict(
+  result: HeEngStartResult,
+): { outcome: Exclude<HeRefillMainRestartOutcome, 'nothing_accepted' | 'cancelled'>; code?: string } {
+  if (result.kind === 'refused') {
+    if (result.code === 'client_paused_meanwhile') return { outcome: 'client_paused' };
+    if (result.code === 'sending_turned_off' || result.code === 'sending_not_enabled') return { outcome: 'access_off' };
+    return { outcome: 'failed', code: result.code };
+  }
+  if (result.compensationFailed > 0) return { outcome: 'pause_failed' };
+  if (result.clientPaused || result.compensated > 0) return { outcome: 'client_paused' };
+  if (result.started > 0) return { outcome: 'restarted' };
+  if (result.alreadySending > 0 && result.failed.length === 0) return { outcome: 'not_needed' };
+  const code =
+    result.failed[0]?.code ??
+    (result.unconfirmed > 0
+      ? 'start_unconfirmed'
+      : result.notAttempted > 0
+        ? 'not_attempted'
+        : result.left > 0
+          ? 'not_completed'
+          : result.campaigns === 0
+            ? 'no_campaign'
+            : 'not_started');
+  return { outcome: 'failed', code };
+}
+
+/**
  * Долив собранной базы в запущенную кампанию (вызывается вместо финального
  * блока «analyzing + base_analyze»). Никогда не бросает refill-ошибки наружу
  * (см. шапку); бросает только ошибку финального апдейта самой базы — как
@@ -4722,6 +4798,19 @@ export async function runHeRefillAppend(args: {
    * catch'е. Живёт ВНЕ try, как ownershipLoss.
    */
   let sendStop: HeRefillSendStop | null = null;
+  /**
+   * Завершённая основная кампания, которую ночь продолжает (шаг 4c,
+   * `mainCompleted`): кого стартовать после долива («ПОВТОРНЫЙ СТАРТ» ниже).
+   * null — основная отправляла, шаг 4c не пройден или рынок не 'us'. Живёт ВНЕ
+   * try: старт нужен и отказу после частичной доставки (catch).
+   */
+  let restartTarget: { templateId: string; campaignId: string; ownerUserId: string } | null = null;
+  /**
+   * Сколько контактов приняла этой ночью ОСНОВНАЯ кампания: её группа пачки и
+   * переотправка строк отказавшего сегмента (п. 7 «РАСКЛАДКИ»), в том числе
+   * принятое до броска. Читает «ПОВТОРНЫЙ СТАРТ»: ноль — стартовать нечего.
+   */
+  let mainAccepted = 0;
   /**
    * Проверка владения перед провайдером: прямо перед вызовом долива и в хуке
    * перед КАЖДЫМ HTTP-запросом чанка (см. «ОТМЕНА ВЫИГРЫВАЕТ У ОТПРАВКИ» в
@@ -4855,6 +4944,130 @@ export async function runHeRefillAppend(args: {
       ...(queuedHeld > 0 ? { queued_held: queuedHeld } : {}),
       ...(releasedHiring > 0 ? { released_hiring: releasedHiring } : {}),
     };
+  };
+  /**
+   * ПОВТОРНЫЙ СТАРТ ЗАВЕРШЁННОЙ ОСНОВНОЙ (S2; решение владельца 11.10.2026 —
+   * блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» в autoPipeline.ts). Новые контакты в
+   * завершённой кампании сами не уходят: ночь, принявшая в неё хоть один,
+   * стартует её снова — engCampaignSending.startHeEngLaunchSending, via
+   * 'refill', только эту кампанию. Проверки — все его: выключатель аккаунта,
+   * желание клиента 'sending' (и прямо перед POST /activate, и после: Pause
+   * посреди старта — компенсирующая пауза), ящики пула и их занятость,
+   * воркспейс пресета клиента, письма шаблона, адреса кампании ⊆ ящики пула;
+   * стартует только завершённую (3) — стоящую (0/2) и остановленную
+   * рассыльщиком (-99/-1/-2, 404) нет; повтор видит 1/4 и ничего не делает
+   * (идемпотентно). Контакты — тем, что уже принято, ни одного запроса на
+   * загрузку старт не делает.
+   * Без вызова: ночь не приняла в основную ни одного контакта
+   * ('nothing_accepted' — отправлять нечего) или прогон отменён клиентом
+   * ('cancelled'). Зовут обе ветки — успешная и отказ после частичной доставки
+   * — ПОСЛЕ терминальной записи базы и закрытия брони (они не ждут
+   * рассыльщика), ДО строки прогона: строка несёт исход (stats.main_restart).
+   * Не удалось ('failed') — алерт команде ('main_restart_failed'), и гейт
+   * держит следующие ночи вертикали, пока кампания не отправляет
+   * (readHeRefillRestartHold).
+   *
+   * КЛИЕНТ БЕЗ СИГНАЛА (paidCheckpointDb). Старт и его компенсирующая пауза
+   * читают и пишут основную БД (выключатель, желание клиента до и после POST
+   * /activate, запись запуска). Клиентом стадий отмена, сторож простоя или
+   * остановка воркера на деплое обрывали эти чтения посреди старта: кампания
+   * уже получила POST /activate, чтение желания клиента после него падало, и
+   * старт по fail-closed ставил её обратно на паузу и отвечал отказом — ночь
+   * писала 'failed', команде уходил алерт, гейт держал вертикаль, хотя клиент
+   * хотел отправку (обрыв до POST /activate — тот же 'failed' без старта).
+   * Теперь старт доходит до конца (его срок — HE_REFILL_RESTART_DEADLINE_MS),
+   * а отмена проверяется явно ДВАЖДЫ:
+   *  - до старта — сигнал (отмена, уже увиденная наблюдателем) ИЛИ
+   *    he_jobs.status 'cancelled' (cancel-роут записал, наблюдатель ещё нет):
+   *    вызова нет, исход 'cancelled';
+   *  - после — тем же чтением: отмена пришла во время старта. Исход пишется
+   *    как есть (старт уже случился, «отменён» было бы неправдой) с пометкой
+   *    `cancelled_during`; кампании, которые к отмене уже отправляли, отмена
+   *    не останавливает (cancel-роут их не трогает), — эта ничем не отличается.
+   * НЕ БРОСАЕТ.
+   */
+  const restartCompletedMain = async (cancelledRun: boolean): Promise<void> => {
+    const target = restartTarget;
+    if (!target) return;
+    const record = (outcome: HeRefillMainRestartOutcome, code?: string, cancelledDuring = false): void => {
+      runStats.main_restart = {
+        campaign_id: target.campaignId,
+        outcome,
+        accepted: mainAccepted,
+        ...(code ? { code } : {}),
+        ...(cancelledDuring ? { cancelled_during: true as const } : {}),
+      };
+    };
+    // Старт идёт клиентом без сигнала — отмену он сам не увидит (докблок выше).
+    const restartDb = paidCheckpointDb(ctx);
+    const runCancelled = async (): Promise<boolean> => {
+      if (refillUserCancelled(ctx)) return true;
+      try {
+        const { data, error } = await restartDb.from('he_jobs').select('status').eq('id', job.id).maybeSingle();
+        // Не прочиталось — решает сигнал (выше): старт сам fail-closed на
+        // каждом своём чтении.
+        return !error && (data as { status?: unknown } | null)?.status === 'cancelled';
+      } catch {
+        return false;
+      }
+    };
+    let cancelledDuring = false;
+    if (mainAccepted === 0) {
+      record('nothing_accepted');
+    } else if (cancelledRun || (await runCancelled())) {
+      record('cancelled');
+    } else {
+      ctx.onActivity?.();
+      let result: HeEngStartResult;
+      if (!supabaseInstantly) {
+        result = { kind: 'refused', status: 503, code: 'instantly_db_unconfigured', message: '' };
+      } else {
+        try {
+          result = await startHeEngLaunchSending({
+            portalDb: restartDb,
+            instantlyDb: supabaseInstantly,
+            clientUserId: target.ownerUserId,
+            projectId: job.project_id,
+            templateId: target.templateId,
+            via: 'refill',
+            onlyCampaignIds: [target.campaignId],
+            deadlineMs: Date.now() + HE_REFILL_RESTART_DEADLINE_MS,
+          });
+        } catch (e) {
+          // startHeEngLaunchSending не бросает; страховка — тот же провал.
+          result = { kind: 'refused', status: 500, code: 'start_threw', message: e instanceof Error ? e.message : '' };
+        }
+      }
+      cancelledDuring = await runCancelled();
+      const verdict = heRefillMainRestartVerdict(result);
+      record(verdict.outcome, verdict.code, cancelledDuring);
+      if (verdict.outcome === 'failed') {
+        void notifyHeRefillHold({
+          projectId: job.project_id,
+          verticalId: base.vertical_id,
+          templateId: target.templateId,
+          where: 'refill',
+          baseId: base.id,
+          alert: {
+            kind: 'main_restart_failed',
+            campaignId: target.campaignId,
+            accepted: mainAccepted,
+            code: verdict.code ?? 'unknown',
+          },
+        });
+      }
+    }
+    const restart = runStats.main_restart;
+    stageLog(
+      ctx,
+      `[base_collect] refill: основная кампания ${target.campaignId} была завершена — принято в неё ${mainAccepted}, ` +
+        `повторный старт: ${restart?.outcome ?? '?'}${restart?.code ? ` (${restart.code})` : ''}` +
+        (restart?.outcome === 'failed' ? ' — команде алерт, следующие ночи вертикали держатся до отправки кампании' : '') +
+        (restart?.outcome === 'pause_failed'
+          ? ' — клиент нажал Pause во время старта, пауза кампании не подтвердилась (алерт pause_failed ушёл из старта)'
+          : '') +
+        (cancelledDuring ? ' — отмена прогона пришла во время старта, старт доведён до конца, исход как есть' : ''),
+    );
   };
 
   try {
@@ -5212,6 +5425,7 @@ export async function runHeRefillAppend(args: {
     let segmentVerdicts: ReadonlyMap<string, HeRefillCampaignVerdictDetail> = new Map();
     if (kept.length > 0) {
       const sendTarget = await checkHeRefillSendTarget(ctx.supabase, job.project_id, {
+        verticalId: base.vertical_id,
         templateId: pick.templateId,
         presetId: pick.presetId,
         mainCampaignId: pick.campaignId,
@@ -5233,6 +5447,16 @@ export async function runHeRefillAppend(args: {
       }
       segmentVerdicts = sendTarget.segmentVerdicts;
       if (args.market === 'us') clientPauseTemplateId = pick.templateId || null;
+      // Завершённая основная, которую можно продолжить: приняв в неё контакты,
+      // долив стартует её снова («ПОВТОРНЫЙ СТАРТ»).
+      if (sendTarget.mainCompleted && args.market === 'us') {
+        restartTarget = { templateId: pick.templateId, campaignId: pick.campaignId, ownerUserId };
+        stageLog(
+          ctx,
+          `[base_collect] refill: основная кампания ${pick.campaignId} завершена — после долива её стартуем снова ` +
+            '(если в неё примется хоть один контакт)',
+        );
+      }
       const notSending = [...segmentVerdicts].filter(([, v]) => v.verdict !== 'sending');
       if (notSending.length > 0) {
         stageLog(
@@ -5547,7 +5771,10 @@ export async function runHeRefillAppend(args: {
           if (index > 0 || routing.worked) await assertRefillOwnership();
           part = await appendGroup(group.campaignId, group.leads);
           if (group.segment === null && part.attemptedIndexes.length > 0) mainAnswered = true;
+          if (group.segment === null) mainAccepted += part.accepted;
         } catch (e) {
+          // Принятое основной до броска — тоже в ней («ПОВТОРНЫЙ СТАРТ»).
+          if (group.segment === null && e instanceof AppendLeadsPartialError) mainAccepted += e.partialResult.accepted;
           // ПАУЗА КЛИЕНТА ВО ВРЕМЯ ЗАГРУЗКИ: проверка владения увидела Pause
           // (перед этой кампанией или перед её чанком) и бросила ДО запроса —
           // дальше не шлём ничего. Принятое раньше — итог ночи (разбор после
@@ -5629,6 +5856,7 @@ export async function runHeRefillAppend(args: {
               await assertRefillOwnership();
               resent = await appendGroup(pick.campaignId, resendAt.map((i) => group.leads[i]));
             } catch (resendError) {
+              if (resendError instanceof AppendLeadsPartialError) mainAccepted += resendError.partialResult.accepted;
               const remapped =
                 resendError instanceof AppendLeadsPartialError
                   ? new AppendLeadsPartialError(
@@ -5666,6 +5894,7 @@ export async function runHeRefillAppend(args: {
               );
             }
             if (resent.attemptedIndexes.length > 0) mainAnswered = true;
+            mainAccepted += resent.accepted;
             part = refillAddReachedPositions(refillRemapAppendResult(resent, resendAt), pinnedAt);
             reportRefusal(
               'main',
@@ -5812,6 +6041,9 @@ export async function runHeRefillAppend(args: {
       baseId: base.id,
       consumed: runStats.appended,
     });
+    // Завершённая основная приняла контакты — стартуем её снова (исход — в
+    // строку прогона ниже).
+    await restartCompletedMain(false);
     await writeRefillRun(ctx, {
       configId: config?.id ?? null,
       projectId: job.project_id,
@@ -6108,6 +6340,9 @@ export async function runHeRefillAppend(args: {
       baseId: base.id,
       consumed: Math.max(runStats.appended, attempted),
     });
+    // Отказ после частичной доставки: принятое завершённой основной — тоже
+    // стартуем (без приёма вызова нет; отмена — без старта).
+    await restartCompletedMain(cancelled);
     await writeRefillRun(ctx, {
       configId: config?.id ?? null,
       projectId: job.project_id,

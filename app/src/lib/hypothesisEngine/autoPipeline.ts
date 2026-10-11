@@ -75,15 +75,17 @@
  *      очереди. Подробности — у readCarryoverByVertical и в цикле вертикалей;
  *   3a-. КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ? (S2; после писем и переноса, до
  *      потолка расхода, предполёта и денег): основная кампания запуска
- *      вертикали отправляет (1/4) по свежему статусу, клиент её не поставил на
- *      паузу, отправка аккаунта не выключена, переключатель «Daily top-up»
- *      включён, у ENG-клиента она шлёт только из ящиков пула проекта. Иначе
- *      ночь не покупается, слот не расходуется, а пропуск
+ *      вертикали отправляет (1/4) по свежему статусу — или завершена (3) у
+ *      запуска, где ENG-клиент сам включил отправку (её долив стартует снова,
+ *      приняв в неё новые контакты, блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» ниже), — клиент
+ *      её не поставил на паузу, отправка аккаунта не выключена, переключатель
+ *      «Daily top-up» включён, у ENG-клиента она шлёт только из ящиков пула
+ *      проекта. Иначе ночь не покупается, слот не расходуется, а пропуск
  *      пишется строкой журнала 'failed' без base_id (stats.sending_skip —
  *      причина; лента кабинета печатает её «daily top-up skipped — …»,
- *      engDashboard.ts); то, что чинит только команда (кампания завершена,
- *      остановлена рассыльщиком, ящики не из пула), — ещё и алерт
- *      (notifyHeRefillHold). Полный набор
+ *      engDashboard.ts); то, что чинит только команда (завершённую кампанию
+ *      сами не продолжаем, остановлена рассыльщиком, ящики не из пула), — ещё
+ *      и алерт (notifyHeRefillHold). Полный набор
  *      причин — блок «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?» ниже; та же проверка стоит
  *      и перед самим доливом (stages/baseCollectRefill.ts, шаг 4c);
  *   3a-. ПОТОЛОК РАСХОДА ПРОЕКТА (spendCeiling.ts; ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН):
@@ -1183,7 +1185,8 @@ export async function switchHeUsRefill(
  *
  * ПРАВИЛО. Ночной добор не добавляет контакты в кампанию, которая их не
  * отправит, и не покупает под неё сборку: кампанию клиент поставил на паузу,
- * она завершена, остановлена рассыльщиком или удалена, отправка аккаунта
+ * она завершена и сами мы её не стартуем (блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» ниже),
+ * остановлена рассыльщиком или удалена, отправка аккаунта
  * выключена, переключатель «Daily top-up» выключен, кампания ENG-клиента шлёт
  * не из ящиков пула его проекта — или мы не можем это подтвердить.
  * Неизвестное = «не доливаем» (fail-closed): пропущенная ночь обратима, а
@@ -1208,7 +1211,8 @@ export async function switchHeUsRefill(
  *     ящиков пула у него нет, и шаги 3, 5 и 7 пропускаются;
  *  3. желание клиента по шаблону запуска (he_eng_launch_sending): 'paused' →
  *     'client_paused'; таблица не читается → 'unavailable'. Желания нет
- *     (запуск до S2) — решает статус кампании;
+ *     (запуск до S2) — решает статус кампании; 'sending' — ещё и условие
+ *     продолжения завершённой основной (шаг 6);
  *  4. воркспейс пресета записи о запуске; у ENG-клиента пресет обязан быть
  *     его собственным (тот же, в чьём воркспейсе ядро создало кампании, —
  *     engCampaignSending.launchWorkspace) → иначе 'unavailable';
@@ -1236,11 +1240,14 @@ export async function switchHeUsRefill(
  *     /campaigns/analytics), затем кэш he_eng_campaign_status. ОСНОВНАЯ
  *     кампания (heRefillCampaignVerdict; у ENG-клиента — по чтению шага 5):
  *     1/4 и прочитана не раньше HE_REFILL_STATUS_MAX_AGE_MS → дальше;
- *     3 → 'campaign_completed'; -99/-1/-2 или 404 → 'campaign_stopped' (оба
- *     с алертом команде); 0/2 → 'campaign_not_sending'; строки нет, статус не
+ *     3 → дальше с `mainCompleted`, если её можно продолжить (блок
+ *     «ЗАВЕРШЁННАЯ ОСНОВНАЯ» ниже), иначе 'campaign_completed' с алертом
+ *     команде; -99/-1/-2 или 404 → 'campaign_stopped' (с алертом команде);
+ *     0/2 → 'campaign_not_sending'; строки нет, статус не
  *     читался, старше срока или незнакомое число → 'status_unknown'. Таблицы
  *     или функции аренды нет (миграция 20261011_0002) → 'unavailable';
- *  7. АДРЕСА ОСНОВНОЙ (ENG-клиент): email_list шага 5 — непустое
+ *  7. АДРЕСА ОСНОВНОЙ (ENG-клиент; и у отправляющей, и у завершённой):
+ *     email_list шага 5 — непустое
  *     подмножество ящиков пула проекта, кампания в их воркспейсе
  *     (checkHeCampaignAgainstAssignment, та же проверка, что у старта) →
  *     иначе 'unavailable' с алертом команде.
@@ -1258,12 +1265,26 @@ export async function switchHeUsRefill(
  * при любом статусе: её строки держатся и в основную не уходят. Основная
  * кампания проверяется по-прежнему — живым чтением шага 5 и шагом 7.
  *
- * ЗАВЕРШЁННАЯ основная (3) — тоже «не доливаем», и это решение, а не сбой:
- * новые адреса в завершённой кампании сами не уходят, а её повторный старт
- * после долива (startHeEngLaunchSending, via 'refill') в долив не вшит. Добор
- * вертикали стоит, пока кампанию не вернут в отправку: каждую ночь — строка
- * пропуска и алерт команде с действием (notifyHeRefillHold). Клиент видит
- * пропуск с советом написать в Support.
+ * ЗАВЕРШЁННАЯ ОСНОВНАЯ (3; решение владельца 11.10.2026: «кампания отправила
+ * всё — она продолжается сама, пока есть контакты»). Новые адреса в
+ * завершённой кампании сами не уходят: её стартует долив, ПРИНЯВ в неё
+ * контакты этой ночи (stages/baseCollectRefill.ts, «ПОВТОРНЫЙ СТАРТ» —
+ * engCampaignSending.startHeEngLaunchSending, via 'refill', со всеми его
+ * проверками). Гейт пропускает такую кампанию (`mainCompleted: true`, затем
+ * шаг 7), только если старт после долива возможен:
+ *  - проект ENG-клиента ('enabled' / 'not_required' шага 2), и её прочитал
+ *    шаг 5;
+ *  - желание клиента по шаблону — 'sending' (шаг 3): старт после долива
+ *    требует его же; у запуска, который кабинет не стартовал (до S2, запуск
+ *    или проект сотрудника), желания нет;
+ *  - прошлый повторный старт этой кампании не провалился
+ *    (readHeRefillRestartHold: последняя законченная ночь вертикали с базой
+ *    записала stats.main_restart.outcome 'failed' по этой кампании → её
+ *    контакты лежат в завершённой кампании, и новые ночи не покупаются, пока
+ *    кампания не отправляет; не прочитано → 'unavailable').
+ * Иначе — 'campaign_completed' и алерт команде (`why`: 'no_client_intent' /
+ * 'restart_failed') с действием; клиент видит пропуск с советом написать в
+ * Support.
  *
  * АЛЕРТ. Пропуск, который сам не пройдёт и который чинит только команда,
  * несёт `alert` (HeRefillHoldAlert); отправляет его вызывающий
@@ -1353,40 +1374,180 @@ export function heRefillMainCampaignId(launch: HeTemplateLaunchInfo): string {
 }
 
 /**
+ * Повторный старт завершённой основной кампании после долива — его исход
+ * (stats.main_restart строки he_auto_pipeline_runs; пишет
+ * stages/baseCollectRefill.ts, «ПОВТОРНЫЙ СТАРТ»; блок «ЗАВЕРШЁННАЯ
+ * ОСНОВНАЯ» выше):
+ *  - 'restarted' — старт подтверждён (1/4);
+ *  - 'not_needed' — к старту она уже отправляла (стартовали мимо долива);
+ *  - 'nothing_accepted' — ночь не приняла в неё ни одного контакта: стартовать
+ *    нечего, вызова нет;
+ *  - 'client_paused' — клиент поставил вертикаль на паузу до старта или во
+ *    время него: не стартована или поставлена обратно на паузу;
+ *  - 'pause_failed' — клиент нажал Pause во время старта, кампания уже
+ *    получила POST /activate, а её компенсирующая пауза не подтвердилась: она
+ *    может отправлять; команде ушёл алерт 'pause_failed' из самого старта
+ *    (engCampaignSending.ts, шаг 9). Гейт ночи не держит: следующие ночи и так
+ *    пропускает пауза клиента;
+ *  - 'access_off' — отправка аккаунта к старту выключена или не включена;
+ *  - 'cancelled' — прогон отменён клиентом («Cancel all jobs»): вызова нет;
+ *  - 'failed' — старт не удался (`code`): алерт команде, и следующие ночи
+ *    вертикали держит гейт (readHeRefillRestartHold).
+ * Читатели: гейт и кабинет ('failed' — readHeRefillRestartHold), лента
+ * кабинета (engDashboard.ts) и строка лога долива.
+ */
+export type HeRefillMainRestartOutcome =
+  | 'restarted'
+  | 'not_needed'
+  | 'nothing_accepted'
+  | 'client_paused'
+  | 'pause_failed'
+  | 'access_off'
+  | 'cancelled'
+  | 'failed';
+
+export interface HeRefillMainRestart {
+  campaign_id: string;
+  outcome: HeRefillMainRestartOutcome;
+  /** Контактов, принятых этой ночью в эту кампанию. */
+  accepted: number;
+  /** Только 'failed': код отказа или неудачи старта. */
+  code?: string;
+  /**
+   * Отмена прогона пришла, пока шёл старт (проверка после него): старт доведён
+   * до конца клиентом без сигнала, `outcome` — что случилось на самом деле.
+   */
+  cancelled_during?: true;
+}
+
+/** null — журнал прогонов не прочитан. */
+export type HeRefillRestartHold =
+  | { held: false }
+  | { held: true; at: string | null; code: string; accepted: number };
+
+/**
+ * Держит ли проваленный повторный старт основную кампанию вертикали (блок
+ * «ЗАВЕРШЁННАЯ ОСНОВНАЯ»): последняя ЗАКОНЧЕННАЯ ночь вертикали с базой (не
+ * 'collecting'; строки пропуска тика без base_id не в счёт — они в кампанию
+ * ничего не грузили) записала stats.main_restart.outcome 'failed' по ЭТОЙ
+ * кампании. Пометку снимает следующая законченная ночь с базой — она бывает,
+ * только когда гейт её пропустил: кампания снова отправляла (её стартовали у
+ * рассыльщика) или запуск сменил кампанию. null — журнал не прочитан.
+ * НЕ БРОСАЕТ.
+ */
+export async function readHeRefillRestartHold(
+  db: SupabaseClient,
+  verticalId: string,
+  campaignId: string,
+): Promise<HeRefillRestartHold | null> {
+  if (!verticalId || !campaignId) return null;
+  try {
+    const { data, error } = await db
+      .from('he_auto_pipeline_runs')
+      .select('stats, completed_at, created_at')
+      .eq('vertical_id', verticalId)
+      .not('base_id', 'is', null)
+      .neq('status', 'collecting')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) return null;
+    const last = ((data ?? []) as Array<{ stats?: unknown; completed_at?: unknown }>)[0];
+    const stats = last?.stats && typeof last.stats === 'object' ? (last.stats as Record<string, unknown>) : null;
+    const restart =
+      stats?.main_restart && typeof stats.main_restart === 'object'
+        ? (stats.main_restart as Record<string, unknown>)
+        : null;
+    if (!restart || restart.outcome !== 'failed' || restart.campaign_id !== campaignId) return { held: false };
+    return {
+      held: true,
+      at: asStringOrNull(last?.completed_at),
+      code: asString(restart.code) || 'unknown',
+      accepted: typeof restart.accepted === 'number' && Number.isFinite(restart.accepted) ? restart.accepted : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Вердикт основной кампании для кабинета: вердикт кампании плюс
+ * 'completed_held' — завершена, а её прошлый повторный старт после долива
+ * провалился (readHeRefillRestartHold): ночи её не продолжают, пока она снова
+ * не отправляет.
+ */
+export type HeRefillMainVerdict = HeRefillCampaignVerdict | 'completed_held';
+
+export interface HeRefillMainVerdictDetail {
+  verdict: HeRefillMainVerdict;
+  detail: string;
+}
+
+/**
  * Вердикт ОСНОВНОЙ кампании запусков — для кабинета (строка «next» вертикали
  * и строка «Daily top-up» конвейера): ночь решает основная кампания, а не
  * сводка отправки (HeEngSendingSummary.state 'sending' значит «отправляет ХОТЬ
- * ОДНА кампания» — при завершённой основной и живом сегменте сводка говорит
+ * ОДНА кампания» — при стоящей основной и живом сегменте сводка говорит
  * 'sending', а ночь пропускается). Только кэш he_eng_campaign_status — ни
  * одного запроса к рассыльщику (кэш освежают кабинет и сама ночь); то же
  * правило, что у гейта (heRefillCampaignVerdict, срок
- * HE_REFILL_STATUS_MAX_AGE_MS: старше — 'unknown'). Ящики пула здесь не
- * проверяются: email_list в кэше нет, пропуск по ящикам кабинет видит строкой
- * журнала ночи. Ключ — id шаблона; запуска без основной кампании в ответе нет.
- * null — кэш не читается. НЕ БРОСАЕТ.
+ * HE_REFILL_STATUS_MAX_AGE_MS: старше — 'unknown'). Завершённая — ещё и
+ * пометка проваленного повторного старта (readHeRefillRestartHold, тот же
+ * предикат, что у гейта; шаблон → вертикаль одним чтением he_templates):
+ * держит — 'completed_held'. Желание клиента решает deriveEngTopUpVerdict
+ * (engDashboard.ts). Ящики пула здесь не проверяются: email_list в кэше нет,
+ * пропуск по ящикам кабинет видит строкой журнала ночи. Ключ — id шаблона;
+ * запуска без основной кампании в ответе нет. null — кэш, шаблоны или журнал
+ * прогонов не читаются. НЕ БРОСАЕТ.
  */
 export async function readHeRefillMainVerdicts(
   db: SupabaseClient,
   launches: ReadonlyArray<{ templateId: string; launch: HeTemplateLaunchInfo }>,
   nowMs: number = Date.now(),
-): Promise<Map<string, HeRefillCampaignVerdictDetail> | null> {
+): Promise<Map<string, HeRefillMainVerdictDetail> | null> {
   const mainOf = new Map<string, string>();
   for (const { templateId, launch } of launches) {
     const id = heRefillMainCampaignId(launch);
     if (templateId && id) mainOf.set(templateId, id);
   }
-  const out = new Map<string, HeRefillCampaignVerdictDetail>();
+  const out = new Map<string, HeRefillMainVerdictDetail>();
   if (mainOf.size === 0) return out;
   const rows = await readHeEngCampaignStatusRows(db, [...mainOf.values()]);
   if (rows === null) return null;
+  const completed: string[] = [];
   for (const [templateId, campaignId] of mainOf) {
-    out.set(templateId, heRefillCampaignVerdict(rows.get(campaignId), nowMs));
+    const verdict = heRefillCampaignVerdict(rows.get(campaignId), nowMs);
+    out.set(templateId, verdict);
+    if (verdict.verdict === 'completed') completed.push(templateId);
   }
-  return out;
+  if (completed.length === 0) return out;
+  try {
+    const { data, error } = await db.from('he_templates').select('id, vertical_id').in('id', completed);
+    if (error) return null;
+    const verticalOf = new Map(
+      ((data ?? []) as Array<Record<string, unknown>>).map((t) => [asString(t.id), asString(t.vertical_id)] as const),
+    );
+    const holds = await Promise.all(
+      completed.map((templateId) =>
+        readHeRefillRestartHold(db, verticalOf.get(templateId) ?? '', mainOf.get(templateId) ?? ''),
+      ),
+    );
+    for (const [i, templateId] of completed.entries()) {
+      const hold = holds[i];
+      if (!hold) return null;
+      if (hold.held) {
+        out.set(templateId, { verdict: 'completed_held', detail: `повторный старт не удался (${hold.code})` });
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 /** Кампании одного запуска, в которые ночь может долить. */
 export interface HeRefillSendCampaigns {
+  /** Вертикаль — её журнал ночей читает пометка проваленного старта (readHeRefillRestartHold). */
+  verticalId: string;
   /** Шаблон запуска — у него желание клиента (he_eng_launch_sending). */
   templateId: string;
   /** Пресет записи о запуске — его воркспейс читается. */
@@ -1399,7 +1560,13 @@ export interface HeRefillSendCampaigns {
 
 /**
  * Что добор вертикали держит и что чинит только команда (notifyHeRefillHold):
- *  - 'main_completed' — основная кампания запуска завершена (3);
+ *  - 'main_completed' — основная кампания запуска завершена (3), и сами мы её
+ *    не продолжаем (`why`, блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ»): у запуска нет
+ *    желания клиента 'sending' (кабинет его не стартовал, проект сотрудника)
+ *    или её прошлый повторный старт после долива провалился (`detail` — когда
+ *    и почему);
+ *  - 'main_restart_failed' — только долив: ночь приняла контакты в
+ *    завершённую основную, а её повторный старт не удался (`code`);
  *  - 'main_stopped' — основная остановлена рассыльщиком (-99/-1/-2) или
  *    удалена (404);
  *  - 'mailboxes' — у проекта ENG-клиента нет ящиков пула, они в разных
@@ -1409,7 +1576,8 @@ export interface HeRefillSendCampaigns {
  *    удалены или стоят (0/2): их строки долив держит (только долив).
  */
 export type HeRefillHoldAlert =
-  | { kind: 'main_completed'; campaignId: string }
+  | { kind: 'main_completed'; campaignId: string; why: 'no_client_intent' | 'restart_failed'; detail: string }
+  | { kind: 'main_restart_failed'; campaignId: string; accepted: number; code: string }
   | { kind: 'main_stopped'; campaignId: string; detail: string }
   | { kind: 'mailboxes'; campaignId: string; detail: string }
   | {
@@ -1421,7 +1589,17 @@ export type HeRefillHoldAlert =
     };
 
 export type HeRefillSendTarget =
-  | { allowed: true; segmentVerdicts: ReadonlyMap<string, HeRefillCampaignVerdictDetail> }
+  | {
+      allowed: true;
+      segmentVerdicts: ReadonlyMap<string, HeRefillCampaignVerdictDetail>;
+      /**
+       * Основная кампания завершена (3), и её можно продолжить (блок
+       * «ЗАВЕРШЁННАЯ ОСНОВНАЯ»): долив, приняв в неё контакты, стартует её
+       * снова (stages/baseCollectRefill.ts, «ПОВТОРНЫЙ СТАРТ»). false — она
+       * отправляет (1/4).
+       */
+      mainCompleted: boolean;
+    }
   | { allowed: false; reason: HeRefillSendSkipReason; detail: string; alert: HeRefillHoldAlert | null };
 
 type HeRefillSendOwner =
@@ -1576,12 +1754,16 @@ export function createHeRefillSendGate(
       if (!owner.ok) return skip(owner.reason, owner.detail);
 
       // 3. Пауза клиента — только у ENG-клиента (у проекта сотрудника её нет).
+      //    Желание 'sending' — условие продолжения завершённой основной (шаг 6).
+      let clientIntentSending = false;
       if (owner.engClient) {
         const states = await readHeEngClientStates(db, [campaigns.templateId]);
         if (states === null) return skip('unavailable', 'желание клиента (he_eng_launch_sending) не читается');
-        if (states.get(campaigns.templateId)?.state === 'paused') {
+        const intent = states.get(campaigns.templateId)?.state ?? null;
+        if (intent === 'paused') {
           return skip('client_paused', `клиент поставил запуск шаблона ${campaigns.templateId} на паузу`);
         }
+        clientIntentSending = intent === 'sending';
       }
 
       // 4. Воркспейс пресета записи о запуске.
@@ -1653,17 +1835,44 @@ export function createHeRefillSendGate(
       if (rows === null) return skip('unavailable', 'кэш статусов кампаний (he_eng_campaign_status) не читается');
       const nowMs = clock().getTime();
       const main = heRefillCampaignVerdict(mainLive?.row ?? rows.get(mainId), nowMs);
-      if (main.verdict !== 'sending') {
+      // Завершённая основная — дальше, только если её можно продолжить (блок
+      // «ЗАВЕРШЁННАЯ ОСНОВНАЯ»): ENG-клиент, её прочитал шаг 5, желание
+      // клиента 'sending', прошлый повторный старт не провалился.
+      if (main.verdict === 'completed') {
+        if (!owner.engClient || !mainLive || !clientIntentSending) {
+          const detail =
+            'у запуска нет желания клиента «отправлять» (he_eng_launch_sending): кабинет его не стартовал ' +
+            '(запуск до S2, запуск или проект сотрудника) — после долива её не стартуем';
+          return skip('campaign_completed', `основная кампания ${mainId}: ${main.detail}; ${detail}`, {
+            kind: 'main_completed',
+            campaignId: mainId,
+            why: 'no_client_intent',
+            detail,
+          });
+        }
+        const hold = await readHeRefillRestartHold(db, campaigns.verticalId, mainId);
+        if (hold === null) {
+          return skip('unavailable', `основная кампания ${mainId} завершена, а журнал прошлых ночей вертикали не прочитан`);
+        }
+        if (hold.held) {
+          const detail =
+            `прошлый повторный старт после долива не удался (${hold.code}${hold.at ? `, ${hold.at}` : ''}): ` +
+            `принятые тогда контакты (${hold.accepted}) лежат в завершённой кампании и не уходят`;
+          return skip('campaign_completed', `основная кампания ${mainId}: ${main.detail}; ${detail}`, {
+            kind: 'main_completed',
+            campaignId: mainId,
+            why: 'restart_failed',
+            detail,
+          });
+        }
+      } else if (main.verdict !== 'sending') {
         const alert: HeRefillHoldAlert | null =
-          main.verdict === 'completed'
-            ? { kind: 'main_completed', campaignId: mainId }
-            : main.verdict === 'stopped'
-              ? { kind: 'main_stopped', campaignId: mainId, detail: main.detail }
-              : null;
+          main.verdict === 'stopped' ? { kind: 'main_stopped', campaignId: mainId, detail: main.detail } : null;
         return skip(VERDICT_SKIP_REASON[main.verdict], `основная кампания ${mainId}: ${main.detail}`, alert);
       }
 
-      // 7. Адреса основной — ящики пула проекта (ENG-клиент).
+      // 7. Адреса основной — ящики пула проекта (ENG-клиент; у завершённой —
+      //    тоже: её стартует долив, и старт проверит то же самое).
       if (pool && mainLive) {
         const check = checkHeCampaignAgainstAssignment(pool, {
           instantlyAccountId: workspace.accountId,
@@ -1687,6 +1896,7 @@ export function createHeRefillSendGate(
       // ящиков пула, и это был бы обход проверки).
       return {
         allowed: true,
+        mainCompleted: main.verdict === 'completed',
         segmentVerdicts: new Map(
           campaigns.segmentCampaignIds
             .filter((id) => id && id !== mainId)
@@ -1782,20 +1992,57 @@ function holdAlertBody(notice: HeRefillHoldNotice): {
   switch (a.kind) {
     case 'main_completed':
       return {
-        subject: 'ENG: основная кампания запуска завершена — ночной добор вертикали стоит',
+        subject:
+          a.why === 'restart_failed'
+            ? 'ENG: завершённая основная кампания не стартовала после прошлого долива — ночной добор вертикали стоит'
+            : 'ENG: основная кампания запуска завершена, а сами мы её не продолжаем — ночной добор вертикали стоит',
         error:
-          `основная кампания завершена (статус 3): все её адреса прошли цепочку, а в завершённую кампанию ` +
-          `добор контакты не грузит; ${night}. Так каждую ночь, пока кампания не отправляет снова`,
+          `основная кампания завершена (статус 3): ${heOpsReasonText(a.detail)}; ${night}. ` +
+          'Так каждую ночь, пока кампания не отправляет снова',
         context: {
           ...ids,
           'кампания': a.campaignId,
+          // Полностью: причина выше обрезана и вымарана.
+          'подробно': a.detail.slice(0, 600),
+          // Фраза ленты — TOP_UP_SKIP_EN.campaign_completed (engDashboard.ts), менять вместе.
           'клиент видит':
-            'daily top-up skipped — the main campaign of this vertical has completed; message Support to continue it',
+            'daily top-up skipped — the main campaign of this vertical has completed and is not restarted ' +
+            'automatically; message Support to continue it (лента); строка «next» вертикали — пропуск с советом ' +
+            'написать в Support',
           'сделать':
-            'продолжить вертикаль: добавить новые контакты в эту же кампанию у рассыльщика и активировать её там ' +
-            '(статус 1) — следующая ночь увидит отправку и продолжит добор сама; либо написать клиенту в чат ' +
-            `поддержки и решить с ним, продолжать ли вертикаль. ${NO_FORCE_RELAUNCH}. Не продолжать — выключить ` +
-            'ночной добор проекта (he_auto_pipeline_configs.enabled или переключатель клиента «Daily top-up»)',
+            a.why === 'restart_failed'
+              ? 'посмотреть у рассыльщика, почему кампания не стартовала (код выше: ящики не из пула, кампания ' +
+                'остановлена или удалена, выключена отправка аккаунта, сбой), устранить причину и активировать ' +
+                'кампанию там (статус 1) — контакты, принятые в неё прошлой ночью, уйдут, а следующая ночь увидит ' +
+                `отправку и продолжит добор сама. ${NO_FORCE_RELAUNCH}. Не продолжать — выключить ночной добор ` +
+                'проекта (he_auto_pipeline_configs.enabled или переключатель клиента «Daily top-up»)'
+              : 'продолжить вертикаль: добавить новые контакты в эту же кампанию у рассыльщика и активировать её там ' +
+                '(статус 1) — следующая ночь увидит отправку и продолжит добор сама; либо написать клиенту в чат ' +
+                `поддержки и решить с ним, продолжать ли вертикаль. ${NO_FORCE_RELAUNCH}. Не продолжать — выключить ` +
+                'ночной добор проекта (he_auto_pipeline_configs.enabled или переключатель клиента «Daily top-up»)',
+        },
+      };
+    case 'main_restart_failed':
+      return {
+        subject: 'ENG: завершённая основная кампания не стартовала после долива — новые контакты в ней не уходят',
+        error:
+          `основная кампания была завершена (статус 3); этой ночью долив принял в неё ${a.accepted} контакт., а её ` +
+          `повторный старт не удался (${heOpsReasonText(a.code)}). Контакты лежат в завершённой кампании и не уходят; ` +
+          'следующие ночи вертикали не покупаются, пока кампания не отправляет',
+        context: {
+          ...ids,
+          'кампания': a.campaignId,
+          'код': a.code,
+          // Хвост строки ленты — MAIN_RESTART_FEED_EN.failed (engDashboard.ts), менять вместе.
+          'клиент видит':
+            'daily top-up: +N leads, its completed campaign did not start sending again (temporary problem on ' +
+            'our side, we are working on it) (лента); строка «next» вертикали — пропуск с советом написать в Support',
+          'сделать':
+            'посмотреть у рассыльщика, почему кампания не стартовала (код: mailboxes_changed — ящики не из пула ' +
+            'проекта; needs_attention / not_found — остановлена или удалена; read_failed / start_failed / ' +
+            'start_unconfirmed / not_attempted — сбой или срок; ответ отказа — проверки старта), устранить причину и ' +
+            'активировать кампанию там (статус 1) — эти контакты уйдут, а следующая ночь увидит отправку и ' +
+            `продолжит добор сама. ${NO_FORCE_RELAUNCH}`,
         },
       };
     case 'main_stopped':
@@ -3290,9 +3537,12 @@ async function passConfig(
     // сухих ночей, отказов вертикали и порядок вертикалей её не видят (все
     // читают только строки с base_id). Строка не легла — ночь всё равно не
     // покупается, причина остаётся в ночном логе. Пропуск, который чинит только
-    // команда (основная завершена, остановлена рассыльщиком, ящики не из пула),
-    // ещё и алерт — после строки журнала; ждём: крон одноразовый.
+    // команда (основная завершена, а сами мы её не продолжаем; остановлена
+    // рассыльщиком; ящики не из пула), ещё и алерт — после строки журнала;
+    // ждём: крон одноразовый. Завершённую, которую продолжить можно, гейт
+    // пропускает (`mainCompleted`): её стартует долив.
     const send = await sendGate({
+      verticalId: vertical.id,
       templateId: target.templateId,
       presetId: target.presetId,
       mainCampaignId: campaignId,
@@ -3563,12 +3813,15 @@ async function passConfig(
       // действительно отработал (а не молча деградировал в «не знаем»): для
       // первой ночи под присмотром это единственный способ отличить одно от
       // другого, не заходя в рассыльщик.
-      ...(remainingCapacity === null && spendNote === null
+      // Завершённая основная (блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ»): её стартует долив,
+      // приняв в неё контакты, — строка лога говорит, чего ждать от ночи.
+      ...(remainingCapacity === null && spendNote === null && !send.mainCompleted
         ? {}
         : {
             message: [
               remainingCapacity === null ? null : `workspace capacity ${remainingCapacity}`,
               spendNote,
+              send.mainCompleted ? 'main campaign completed — the refill starts it again after adding contacts' : null,
             ].filter(Boolean).join('; '),
           }),
     });

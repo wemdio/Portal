@@ -5,9 +5,11 @@
  *
  * Общее ядро запуска (launchTemplate.runHeTemplateLaunch) кампании НЕ
  * стартует — его зовёт и RU staff-инструмент. Стартует только этот модуль, и
- * зовут его только роуты английского кабинета: запуск
+ * зовут его роуты английского кабинета: запуск
  * (api/client/eng/templates/[id]/launch) — после успешного ядра, и
- * «Start sending» / «Resume» (api/client/eng/templates/[id]/sending).
+ * «Start sending» / «Resume» (api/client/eng/templates/[id]/sending), — и
+ * ночной долив ENG (stages/baseCollectRefill.ts, via 'refill'): завершённую
+ * основную кампанию, в которую он принял новые контакты.
  *
  * СТАРТ (startHeEngLaunchSending) — fail-closed, по порядку, до первого вызова
  * рассыльщика:
@@ -40,7 +42,8 @@
  * Затем по кампаниям с адресами, по одной: живое чтение (GET /campaigns/{id}),
  * адреса кампании ⊆ ящики проекта и тот же воркспейс
  * (checkHeCampaignAgainstAssignment), статус: 1/4 — уже отправляет (ничего не
- * делаем), 3 — завершена (не трогаем), 0/2 — POST /activate, -99/-1/-2 — никогда
+ * делаем), 3 — завершена (не трогаем; у 'refill' — POST /activate, а 0/2 он не
+ * трогает), 0/2 — POST /activate, -99/-1/-2 — никогда
  * не стартуем (команде алерт), прочее — не стартуем. Прямо перед КАЖДЫМ POST
  * /activate выключатель аккаунта и желание клиента читаются заново: сотрудник
  * мог выключить отправку, клиент — нажать Pause, пока шёл цикл (старт длится
@@ -524,18 +527,23 @@ export async function startHeEngLaunchSending(input: {
   templateId: string;
   /**
    * 'launch' — сразу после ядра запуска; 'start' — кнопки «Start sending» /
-   * «Resume»; 'refill' — повторный старт после ночного долива: только у
-   * запуска, где клиент просил отправку, стартует только ЗАВЕРШЁННЫЕ (3)
-   * кампании из `onlyCampaignIds` — новые адреса в завершённой кампании сами
-   * не уходят; стоящие (0/2) не трогает. ДОЛИВ ЭТОТ ВЫЗОВ НЕ ДЕЛАЕТ: проверка
-   * «кампании запуска отправляют?» (autoPipeline.ts) завершённую кампанию
-   * пропускает ('campaign_completed') и адресов в неё не грузит, так что
-   * 'refill' сейчас не зовёт никто.
+   * «Resume»; 'refill' — повторный старт после ночного долива
+   * (stages/baseCollectRefill.ts, «ПОВТОРНЫЙ СТАРТ»: ночь приняла контакты в
+   * ЗАВЕРШЁННУЮ основную кампанию — новые адреса в завершённой кампании сами
+   * не уходят): только у запуска, где клиент просил отправку (желание
+   * 'sending'; его не пишет), стартует только завершённые (3) кампании из
+   * `onlyCampaignIds`; стоящие (0/2) не трогает (`left`), остановленные
+   * рассыльщиком — никогда; отправляющая (1/4) — `alreadySending`, повтор
+   * ничего не делает. Все прочие проверки — те же, что у кнопки.
    */
   via: 'launch' | 'start' | 'refill';
   /** Только 'launch': кампании ответа ядра — все обязаны быть в записи БД. */
   expectedCampaignIds?: string[];
-  /** Ограничить кампании записи этими id (долив: куда он загрузил адреса). */
+  /**
+   * Ограничить кампании записи этими id. У 'refill' — кампании, в которые
+   * долив этой ночью ПРИНЯЛ адреса: они идут в старт и тогда, когда счёт
+   * адресов записи о запуске у них нулевой (запись счёт ночей не ведёт).
+   */
   onlyCampaignIds?: string[];
   deadlineMs: number;
 }): Promise<HeEngStartResult> {
@@ -594,11 +602,14 @@ export async function startHeEngLaunchSending(input: {
     }
 
     // 4. Выключатель аккаунта. Долив клиента не ждёт и команду не зовёт —
-    //    только читает выключатель.
+    //    только читает выключатель; код отказа — тот же, что у кнопки
+    //    (выключена / не включена / не читается): долив по нему решает, держать
+    //    ли следующие ночи (stages/baseCollectRefill.ts, heRefillMainRestartVerdict).
     if (via === 'refill') {
       const access = await readHeEngSendingAccess(portalDb, clientUserId);
       if (!heEngSendingAccessAllows(access.state)) {
-        return refused(403, 'sending_not_allowed', ENG_SENDING_ACCESS_PROBLEM_TEXT);
+        const refusal = heEngSendingAccessRefusal(access.state);
+        return refused(refusal?.status ?? 503, refusal?.code ?? 'sending_access_unavailable', ENG_SENDING_ACCESS_PROBLEM_TEXT);
       }
     } else {
       const gate = await requireHeEngSendingAccess(portalDb, clientUserId, { projectId, via });
@@ -610,7 +621,10 @@ export async function startHeEngLaunchSending(input: {
     if (states === null) return refused(503, 'sending_state_unavailable', ENG_SENDING_ACCESS_PROBLEM_TEXT);
     const current = states.get(templateId)?.state ?? null;
     const only = input.onlyCampaignIds ? new Set(input.onlyCampaignIds) : null;
-    const withLeads = campaigns.filter((c) => c.leads > 0 && (!only || only.has(c.campaignId)));
+    // Долив: адреса в кампаниях `onlyCampaignIds` он только что принял сам.
+    const withLeads = campaigns.filter((c) =>
+      via === 'refill' && only ? only.has(c.campaignId) : c.leads > 0 && (!only || only.has(c.campaignId)),
+    );
     const done: HeEngStartDone = {
       kind: 'done',
       campaigns: withLeads.length,

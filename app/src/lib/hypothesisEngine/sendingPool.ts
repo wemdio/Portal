@@ -3,7 +3,9 @@
  *
  * Клиент ENG ящики не подключает. Каждый us-проект получает из пула
  * HE_US_POOL_MAILBOXES_PER_PROJECT ящиков (по умолчанию 3) из ОДНОГО воркспейса
- * рассыльщика, и они принадлежат только ему. Таблица he_sending_pool и функции
+ * рассыльщика, и они принадлежат только ему. Пул пополняется во втором аккаунте
+ * рассыльщика, в 'main' его нет (HE_US_POOL_WORKSPACE, раздел «Воркспейс пула»
+ * ниже). Таблица he_sending_pool и функции
  * выдачи / возврата / смены статуса — миграция 20261011_0001 (её шапка —
  * переходы состояний, правило закрепления воркспейса и ответы функций). Здесь —
  * обёртки, которые НИКОГДА не бросают и переводят ответ функции в
@@ -70,6 +72,80 @@ export function readHeSendingPoolSize(env: NodeJS.ProcessEnv = process.env): { c
     return { count: value, rejected: false };
   }
   return { count: HE_US_POOL_MAILBOXES_PER_PROJECT_DEFAULT, rejected: true };
+}
+
+/* ─────────────── Воркспейс пула ─────────────── */
+
+/**
+ * ГДЕ ЖИВЁТ ПУЛ (ответ владельца 11.10.2026): во ВТОРОМ аккаунте рассыльщика —
+ * там, где кампании клиентов RU-кабинета outreachOS, — а не в 'main' (там
+ * рассылки агентства). Id второго аккаунта в INSTANTLY_ACCOUNTS_JSON —
+ * 'account-2': под этим id его воркспейс пишут каталог кампаний и миграции по
+ * его данным (supabase/instantly-migrations/20260923_0002, заметка
+ * 20260922_0002 про «account-2 client cabinet»). Другой id — env
+ * HE_US_POOL_WORKSPACE (значение нормализуется как resolveInstantlyAccountId).
+ *
+ * Что держит правило:
+ *  - staff-роут добавления (api/tools/hypothesis-engine/sending-pool) кладёт ящик
+ *    ТОЛЬКО в этот воркспейс; экран сотрудника выбирает его по умолчанию;
+ *  - в 'main' ящиков пула нет никогда: добавление и включение там отказывают,
+ *    выдача (engSendingPreset) берёт свободные ящики из настроенных воркспейсов
+ *    КРОМЕ 'main' (heSendingPoolAssignableWorkspaces). Ящики, добавленные в
+ *    прежний воркспейс пула до смены env, выдаются и дальше, а проекты с ящиками
+ *    там работают как раньше;
+ *  - алерты shortage / low называют, куда добавлять ящики, или почему некуда.
+ * Воркспейс пула не годится (env = 'main', id нет в INSTANTLY_ACCOUNTS_JSON,
+ * окружение не читается) — добавить ящик нельзя, экран сотрудника и алерт
+ * говорят причину; запуск без свободных ящиков отказывает (shortage) —
+ * fail-closed.
+ */
+export const HE_US_POOL_WORKSPACE_ENV = 'HE_US_POOL_WORKSPACE';
+export const HE_US_POOL_WORKSPACE_DEFAULT = 'account-2';
+/** Основной воркспейс рассыльщика — ящиков пула в нём не бывает. */
+export const HE_SENDING_POOL_FORBIDDEN_WORKSPACE = 'main';
+
+export type HeSendingPoolWorkspace =
+  | { ok: true; id: string; fromEnv: boolean }
+  /** problem — причина для сотрудника (по-русски). */
+  | { ok: false; id: string; fromEnv: boolean; problem: string };
+
+/**
+ * Воркспейс пула: env HE_US_POOL_WORKSPACE или 'account-2'. `configured` — id
+ * из listInstantlyAccounts; null — окружение не прочиталось.
+ */
+export function readHeSendingPoolWorkspace(
+  configured: readonly string[] | null,
+  env: NodeJS.ProcessEnv = process.env,
+): HeSendingPoolWorkspace {
+  const raw = (env[HE_US_POOL_WORKSPACE_ENV] ?? '').trim();
+  const fromEnv = raw !== '';
+  const id = resolveInstantlyAccountId(fromEnv ? raw : HE_US_POOL_WORKSPACE_DEFAULT);
+  const source = fromEnv ? `${HE_US_POOL_WORKSPACE_ENV}=${raw.slice(0, 64)}` : `по умолчанию, ${HE_US_POOL_WORKSPACE_ENV} не задан`;
+  if (id === HE_SENDING_POOL_FORBIDDEN_WORKSPACE) {
+    return {
+      ok: false,
+      id,
+      fromEnv,
+      problem: `воркспейс пула «main» (${source}) не годится: пул ENG живёт во втором аккаунте рассыльщика, не в main`,
+    };
+  }
+  if (!configured) {
+    return { ok: false, id, fromEnv, problem: 'воркспейсы рассыльщика не читаются из окружения (INSTANTLY_ACCOUNTS_JSON)' };
+  }
+  if (!configured.includes(id)) {
+    return {
+      ok: false,
+      id,
+      fromEnv,
+      problem: `воркспейс пула «${id}» (${source}) не настроен: его ключа нет в INSTANTLY_ACCOUNTS_JSON контейнера portal`,
+    };
+  }
+  return { ok: true, id, fromEnv };
+}
+
+/** Воркспейсы, из которых выдача берёт ящики пула: все настроенные, кроме 'main'. */
+export function heSendingPoolAssignableWorkspaces(configured: readonly string[]): string[] {
+  return configured.filter((id) => resolveInstantlyAccountId(id) !== HE_SENDING_POOL_FORBIDDEN_WORKSPACE);
 }
 
 /* ─────────────── Строка пула ─────────────── */
@@ -669,7 +745,10 @@ export async function checkHeSendingPoolMailboxAtProvider(
  *    engSendingPreset.ts);
  *  - 'unavailable' — отказан любой запуск ENG-клиента: пул недоступен
  *    (cause 'pool_missing' — миграция 20261011_0001 не применена) или
- *    воркспейсы рассыльщика не читаются из окружения (cause 'workspaces').
+ *    воркспейсы рассыльщика не читаются из окружения либо настроен только
+ *    'main' (cause 'workspaces').
+ * shortage и low несут воркспейс пула (readHeSendingPoolWorkspace): «сделать»
+ * называет, куда добавлять ящики, или что сначала поправить в окружении.
  * Клиентские фразы на этот алерт НЕ опираются (они про «напишите в Support»,
  * а не про «команда уже знает»), поэтому без кредов Telegram кабинет не врёт.
  */
@@ -681,8 +760,17 @@ export type HeSendingPoolAlert =
       bestFree: number;
       pinnedWorkspace: string | null;
       byWorkspace: Record<string, number>;
+      /** Куда сотрудник добавляет ящики — или почему некуда (readHeSendingPoolWorkspace). */
+      poolWorkspace: HeSendingPoolWorkspace;
     }
-  | { kind: 'low'; projectId: string; instantlyAccountId: string; freeLeft: number; perProject: number }
+  | {
+      kind: 'low';
+      projectId: string;
+      instantlyAccountId: string;
+      freeLeft: number;
+      perProject: number;
+      poolWorkspace: HeSendingPoolWorkspace;
+    }
   | { kind: 'conflict'; projectId: string; reason: string; detail?: string | null }
   | { kind: 'unavailable'; projectId: string; cause: 'pool_missing' | 'workspaces'; reason: string };
 
@@ -715,6 +803,29 @@ function alertKey(alert: HeSendingPoolAlert): string {
   }
 }
 
+/**
+ * «Сделать» для shortage / low: куда добавлять ящики. Воркспейс пула не годится —
+ * сначала окружение (добавить ящик экран тогда не даст). Проект закреплён за
+ * другим воркспейсом (у клиента есть запуск там) — экран туда не добавляет,
+ * решает владелец.
+ */
+function poolTopUpAdvice(pool: HeSendingPoolWorkspace, pinnedWorkspace: string | null): string {
+  if (!pool.ok) {
+    return (
+      `сначала настроить воркспейс пула — ${pool.problem}: задать ${HE_US_POOL_WORKSPACE_ENV} = id второго аккаунта ` +
+      `рассыльщика (по коду ${HE_US_POOL_WORKSPACE_DEFAULT}) и его ключ в INSTANTLY_ACCOUNTS_JSON контейнера portal, ` +
+      'затем добавить прогретые ящики: Движок вертикалей v1 → «Пул ящиков ENG»'
+    );
+  }
+  if (pinnedWorkspace && pinnedWorkspace !== pool.id) {
+    return (
+      `проект закреплён за воркспейсом ${pinnedWorkspace} (у клиента есть запуск там), а пул пополняется в ${pool.id} ` +
+      `(${HE_US_POOL_WORKSPACE_ENV}) — добавить ящики в ${pinnedWorkspace} экран не даст, решить с владельцем`
+    );
+  }
+  return `добавить прогретые ящики в пул: Движок вертикалей v1 → «Пул ящиков ENG» (воркспейс ${pool.id})`;
+}
+
 function alertBody(alert: HeSendingPoolAlert): { subject: string; error: string; context: Record<string, string | number | null> } {
   switch (alert.kind) {
     case 'shortage': {
@@ -722,15 +833,13 @@ function alertBody(alert: HeSendingPoolAlert): { subject: string; error: string;
       return {
         subject: 'пул ящиков ENG: не хватило ящиков — запуск клиента отказан',
         error: `нужно ${alert.need} в одном воркспейсе, есть ${alert.bestFree}` +
-          (alert.pinnedWorkspace ? ` (проект закреплён за воркспейсом ${alert.pinnedWorkspace}: у клиента есть запуск)` : ''),
+          (alert.pinnedWorkspace ? ` (проект закреплён за воркспейсом ${alert.pinnedWorkspace}: у клиента есть запуск)` : '') +
+          (alert.poolWorkspace.ok ? '' : `; воркспейс пула не настроен: ${alert.poolWorkspace.problem}`),
         context: {
           'проект': alert.projectId,
           'свободно по воркспейсам': free,
           'клиент видит': 'нет свободных ящиков отправки — напишите в Support',
-          'сделать':
-            'добавить прогретые ящики в пул: Движок вертикалей v1 → «Пул ящиков ENG»' +
-            (alert.pinnedWorkspace ? ` (в воркспейс ${alert.pinnedWorkspace})` : '') +
-            '; клиент повторяет запуск сам',
+          'сделать': `${poolTopUpAdvice(alert.poolWorkspace, alert.pinnedWorkspace)}; клиент повторяет запуск сам`,
         },
       };
     }
@@ -740,7 +849,7 @@ function alertBody(alert: HeSendingPoolAlert): { subject: string; error: string;
         error: `в воркспейсе ${alert.instantlyAccountId} свободно ${alert.freeLeft}, новому проекту нужно ${alert.perProject}`,
         context: {
           'проект, получивший ящики': alert.projectId,
-          'сделать': 'добавить прогретые ящики в пул: Движок вертикалей v1 → «Пул ящиков ENG»',
+          'сделать': poolTopUpAdvice(alert.poolWorkspace, null),
         },
       };
     case 'conflict':
@@ -769,7 +878,8 @@ function alertBody(alert: HeSendingPoolAlert): { subject: string; error: string;
           'клиент видит': 'проблема на нашей стороне — напишите в Support',
           'сделать':
             alert.cause === 'workspaces'
-              ? 'проверить INSTANTLY_API_KEY и INSTANTLY_ACCOUNTS_JSON в контейнере portal'
+              ? 'проверить INSTANTLY_API_KEY и INSTANTLY_ACCOUNTS_JSON в контейнере portal: пулу нужен воркспейс, ' +
+                `кроме main, — второй аккаунт рассыльщика (${HE_US_POOL_WORKSPACE_ENV}, по коду ${HE_US_POOL_WORKSPACE_DEFAULT})`
               : 'применить миграцию 20261011_0001_he_sending_pool.sql',
         },
       };
