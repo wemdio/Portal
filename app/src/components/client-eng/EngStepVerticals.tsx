@@ -105,8 +105,8 @@ function HypothesisCard({
  *     единственный признак: именно по нему правило решает, выдавать ли слот;
  *   * штамп есть, число ночей меньше единицы (нет ключа, null, ноль, дробь
  *     вроде 0.5 — всё это после округления вниз даёт 0) → фраза БЕЗ числа:
- *     «0 daily refills in a row» было бы ложью о причине. Дробь БОЛЬШЕ
- *     единицы округляется вниз и печатается (1.7 → «1 daily refill»): такое
+ *     «0 daily top-ups in a row» было бы ложью о причине. Дробь БОЛЬШЕ
+ *     единицы округляется вниз и печатается (1.7 → «1 daily top-up»): такое
  *     число занижает серию, но не выдумывает её;
  *   * штамп есть, но не парсится как дата → фраза без даты, пометка остаётся.
  * Ни в одной ветке текст не обещает того, чего не знает.
@@ -120,7 +120,7 @@ function HypothesisCard({
  *   * конфиг включён — до первого прохода, то есть максимум одна ночь,
  *     карточка может показывать паузу, которой уже нет;
  *   * конфиг выключен или его нет — пометка не снимается вовсе, пока клиент
- *     не нажмёт «Resume auto-refill» или конфиг снова не включат. Ложью фраза
+ *     не нажмёт «Resume daily top-up» или конфиг снова не включат. Ложью фраза
  *     от этого не становится: ночного добора у такого проекта нет целиком, а
  *     кнопка пометку снимает.
  * Проверять флаг здесь нельзя: у кабинета и у воркера разные процессы и
@@ -133,8 +133,8 @@ function refillPauseNote(vertical: HeVertical): { headline: string; since: strin
   const nights = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : 0;
   const headline =
     nights >= 1
-      ? `Auto-refill is paused for this vertical — ${nights} daily refill${nights === 1 ? '' : 's'} in a row brought no new contacts.`
-      : 'Auto-refill is paused for this vertical — its recent daily refills brought no new contacts.';
+      ? `The daily top-up is paused for this vertical — ${nights} daily top-up${nights === 1 ? '' : 's'} in a row brought no new contacts.`
+      : 'The daily top-up is paused for this vertical — its recent daily top-ups brought no new contacts.';
   const parsed = Date.parse(since);
   const stamp = Number.isNaN(parsed)
     ? ''
@@ -196,7 +196,7 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
   const jobs = useMemo(() => detail.jobs ?? [], [detail]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState('');
-  /** Отказ гейта платных шагов («Start outreach», «Resume auto-refill») — с действием. */
+  /** Отказ гейта платных шагов («Start outreach», «Resume daily top-up») — с действием. */
   const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
   const [autopilotBusy, setAutopilotBusy] = useState(false);
   const [autopilotSummary, setAutopilotSummary] = useState('');
@@ -295,7 +295,7 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
       onChanged();
     } catch (e) {
       if (e instanceof EngPaidAccessError) setRefusal(e);
-      else setError(e instanceof Error ? e.message : 'Failed to resume the auto-refill');
+      else setError(e instanceof Error ? e.message : 'Failed to resume the daily top-up for this vertical');
     } finally {
       setRefillBusyId(null);
     }
@@ -437,17 +437,17 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
                     onClick={() => void onResumeRefill(v.id)}
                     disabled={refillBusyId === v.id}
                     className="ds-btn-secondary inline-flex items-center gap-1 text-[11px]"
-                    title="Put this vertical back into the daily refill"
+                    title="Put this vertical back into the daily top-up"
                   >
                     {refillBusyId === v.id ? (
                       <EngSpinner className="h-3 w-3" />
                     ) : (
                       <RotateCcw className="h-3 w-3" />
                     )}
-                    Resume auto-refill
+                    Resume daily top-up
                   </button>
                   <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-                    It becomes eligible for the daily refill again.
+                    It becomes eligible for the daily top-up again.
                   </span>
                 </div>
               </div>
@@ -456,7 +456,7 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
                 и без этой строки нажатие выглядело бы как «ничего не произошло». */}
             {!pause && resumed && (
               <p className="mt-2 text-xs" style={{ color: 'var(--cp-green)' }}>
-                Auto-refill resumed — this vertical is eligible for the daily refill again.
+                Daily top-up resumed — this vertical is eligible for the daily top-up again.
               </p>
             )}
             <div className="mt-3 flex flex-col gap-2">

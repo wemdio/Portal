@@ -906,6 +906,58 @@ function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string
   );
 }
 
+/** Ответ GET/POST /api/admin/users/[id]/eng-sending (выключатель отправки ENG-аккаунта). */
+interface AdminEngSendingState {
+  applicable: boolean;
+  required: boolean;
+  state: 'enabled' | 'not_enabled' | 'revoked' | 'unavailable' | 'error';
+  requested_at: string | null;
+  enabled_at: string | null;
+  revoked_at: string | null;
+  email_sent_at: string | null;
+}
+
+/**
+ * Отправка аккаунта сейчас разрешена: включена сотрудником или — при снятом
+ * требовании (HE_US_SENDING_REQUIRES_ACTIVATION=0) — не выключена (гейты
+ * читают такой аккаунт как 'not_required'). Тогда кнопка — «Выключить».
+ */
+function engSendingAllowed(s: AdminEngSendingState): boolean {
+  return s.state === 'enabled' || (!s.required && s.state === 'not_enabled');
+}
+
+/** «запуск / запуска / запусков» — по числу. */
+function ruLaunches(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'запуск';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'запуска';
+  return 'запусков';
+}
+
+function engSendingTitle(s: AdminEngSendingState): string {
+  const at = (iso: string | null) => (iso ? new Date(iso).toLocaleString('ru-RU') : null);
+  const parts: string[] = [];
+  if (!s.required) {
+    parts.push(
+      'Требование снято (HE_US_SENDING_REQUIRES_ACTIVATION=0) — включать не нужно; «Выключить» всё равно останавливает отправку аккаунта',
+    );
+  }
+  if (s.state === 'enabled') parts.push(`Включена ${at(s.enabled_at) ?? ''}`.trim());
+  if (s.state === 'revoked') parts.push(`Выключена ${at(s.revoked_at) ?? ''}`.trim());
+  // Клиент ждёт — только пока отправку не включали, и его запрос новее
+  // выключения (запрос до выключения — история, а не ожидание).
+  if (
+    s.state === 'not_enabled' &&
+    s.requested_at &&
+    (!s.revoked_at || Date.parse(s.requested_at) > Date.parse(s.revoked_at))
+  ) {
+    parts.push(`Клиент ждёт с ${at(s.requested_at)}`);
+  }
+  if (s.email_sent_at) parts.push(`Письмо «Sending is on» ушло ${at(s.email_sent_at)}`);
+  return parts.join('\n');
+}
+
 export default function UsersPage() {
   const isTma = useIsTma();
   const { userId: currentUserId, userRole: currentUserRole } = useUser();
@@ -963,6 +1015,10 @@ export default function UsersPage() {
   const [accountProtected, setAccountProtected] = useState(false);
   const [blockStatusLoaded, setBlockStatusLoaded] = useState(false);
   const [blocking, setBlocking] = useState(false);
+  // Выключатель отправки ENG-аккаунта (GET/POST /api/admin/users/[id]/eng-sending):
+  // null — не прочитан или не ENG-клиент (кнопки нет).
+  const [engSending, setEngSending] = useState<AdminEngSendingState | null>(null);
+  const [engSendingSaving, setEngSendingSaving] = useState(false);
 
   const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
   const [clientCampaignBaseline, setClientCampaignBaseline] = useState<string[]>([]);
@@ -1216,13 +1272,14 @@ export default function UsersPage() {
     setAccountBlocked(false);
     setAccountProtected(false);
     setBlockStatusLoaded(false);
+    setEngSending(null);
     try {
       const isClient = user.role === 'client';
       // Per-call catch so one failing endpoint does not blow away state derived
       // from the others. Without this, a 500 on /client-access would reset the
       // already-loaded tariff/subscription back to "Не оплачена" defaults via
       // the outer catch, even though the tariff fetch itself succeeded.
-      const [toolsRes, accessRes, tariffRes, blockRes] = await Promise.all([
+      const [toolsRes, accessRes, tariffRes, blockRes, engSendingRes] = await Promise.all([
         apiFetch<{ visibility: Record<string, boolean> }>(
           `/api/admin/users/${user.id}/tools`
         ).catch((err) => {
@@ -1253,7 +1310,14 @@ export default function UsersPage() {
           void logError('admin.users.modal.block-status.fetch.failed', err, { targetUserId: user.id });
           return null;
         }),
+        isClient
+          ? apiFetch<AdminEngSendingState>(`/api/admin/users/${user.id}/eng-sending`).catch((err) => {
+              void logError('admin.users.modal.eng-sending.fetch.failed', err, { targetUserId: user.id });
+              return null;
+            })
+          : Promise.resolve(null),
       ]);
+      setEngSending(engSendingRes?.applicable ? engSendingRes : null);
       setToolVisibility(toolsRes.visibility ?? {});
       setAccountBlocked(blockRes?.blocked === true);
       setAccountProtected(blockRes?.protected === true);
@@ -1601,6 +1665,85 @@ export default function UsersPage() {
       setError(getErrorMessage(err) || 'Ошибка изменения блокировки');
     } finally {
       setBlocking(false);
+    }
+  }
+
+  /**
+   * Включить / выключить отправку ENG. `redeliver` — у уже выключенного
+   * аккаунта: «Выключить ещё раз» снова ставит на паузу кампании всех его
+   * запусков (роут делает паузу при любом выключенном состоянии, не только при
+   * смене) — для кампаний, которые с первого раза не встали.
+   */
+  async function handleToggleEngSending(redeliver = false) {
+    if (!actionModalUserId || !engSending || engSendingSaving) return;
+    const nextEnabled = redeliver ? false : !engSendingAllowed(engSending);
+    if (!nextEnabled && !window.confirm(
+      redeliver
+        ? 'Отправка ENG-аккаунта уже выключена. Поставить кампании всех его запусков на паузу ещё раз (что не ' +
+            'встанет — покажем)?'
+        : 'Выключить отправку ENG-аккаунта? Кампании всех его запусков будут поставлены на паузу (что не встанет — ' +
+            'покажем), а запуск, «Start sending» / «Resume» и ночной добор аккаунта будут отказаны — и при снятом ' +
+            'требовании HE_US_SENDING_REQUIRES_ACTIVATION=0.',
+    )) {
+      return;
+    }
+    setEngSendingSaving(true);
+    setError('');
+    setSaveSuccessMessage(null);
+    try {
+      const result = await apiFetch<AdminEngSendingState & {
+        changed: boolean;
+        email: 'sent' | 'no_email' | 'failed' | null;
+        paused: {
+          launches: number;
+          paused: number;
+          failed: number;
+          notAttempted: number;
+          unreadLaunches?: number;
+          readFailed: boolean;
+        } | null;
+      }>(`/api/admin/users/${actionModalUserId}/eng-sending`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled: nextEnabled }),
+      });
+      setEngSending(result.applicable ? result : null);
+      if (nextEnabled) {
+        setSaveSuccessMessage(
+          result.email === 'sent'
+            ? 'Отправка ENG включена, клиенту ушло письмо'
+            : result.email === 'no_email'
+              ? 'Отправка ENG включена; адреса в профиле нет — напишите клиенту в чат поддержки'
+              : result.email === 'failed'
+                ? 'Отправка ENG включена, но письмо клиенту не ушло — напишите ему в чат поддержки'
+                : 'Отправка ENG уже была включена',
+        );
+      } else {
+        const p = result.paused;
+        const unread = p?.unreadLaunches ?? 0;
+        const notStopped = p ? p.failed + p.notAttempted : 0;
+        // Запуски, чья запись не прочиталась, — отдельно от кампаний: сколько
+        // в них кампаний, неизвестно (по каждому ушёл алерт с id шаблона).
+        const problems = [
+          notStopped > 0 ? `не остановлены ${notStopped}` : null,
+          unread > 0 ? `${ruLaunches(unread) === 'запуск' ? 'не прочитан' : 'не прочитаны'} ${unread} ${ruLaunches(unread)}` : null,
+        ].filter((x): x is string => x !== null);
+        const head = result.changed ? 'Отправка ENG выключена' : 'Отправка ENG уже была выключена, пауза доставлена ещё раз';
+        setSaveSuccessMessage(
+          !p
+            ? 'Отправка ENG уже была выключена'
+            : p.readFailed
+              ? `${head}, но запуски аккаунта не прочитались — поставьте его кампании на паузу у рассыльщика`
+              : problems.length > 0
+                ? `${head}; на паузе ${p.paused}, ${problems.join(', ')} — поставьте ` +
+                  `${unread > 0 ? 'их кампании' : 'их'} на паузу у рассыльщика`
+                : `${head}; кампаний на паузе: ${p.paused}`,
+        );
+      }
+    } catch (err: unknown) {
+      void logError('admin.users.eng-sending-toggle.failed', err, { targetUserId: actionModalUserId, enabled: nextEnabled });
+      setError(getErrorMessage(err) || 'Ошибка изменения отправки ENG');
+    } finally {
+      setEngSendingSaving(false);
     }
   }
 
@@ -2393,6 +2536,40 @@ export default function UsersPage() {
                     >
                       Бриф клиента
                     </Link>
+                    {engSending && (
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleEngSending()}
+                        disabled={engSendingSaving || engSending.state === 'unavailable' || engSending.state === 'error'}
+                        title={engSendingTitle(engSending)}
+                        className={`px-3 py-2 border rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed ${
+                          engSendingAllowed(engSending)
+                            ? 'border-amber-200 text-amber-700 hover:bg-amber-50'
+                            : 'border-green-200 text-green-700 hover:bg-green-50'
+                        }`}
+                      >
+                        {engSendingSaving
+                          ? 'Сохранение...'
+                          : engSending.state === 'unavailable'
+                            ? 'Отправка ENG: миграция не применена'
+                            : engSending.state === 'error'
+                              ? 'Отправка ENG: не прочиталась'
+                              : engSendingAllowed(engSending)
+                                ? 'Выключить отправку ENG'
+                                : 'Включить отправку ENG'}
+                      </button>
+                    )}
+                    {engSending?.state === 'revoked' && (
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleEngSending(true)}
+                        disabled={engSendingSaving}
+                        title="Отправка уже выключена: поставить кампании всех запусков аккаунта на паузу ещё раз — для тех, что не встали с первого раза"
+                        className="px-3 py-2 border rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed border-amber-200 text-amber-700 hover:bg-amber-50"
+                      >
+                        {engSendingSaving ? 'Сохранение...' : 'Выключить ещё раз / доставить паузу'}
+                      </button>
+                    )}
                   </>
                 )}
                 {actionModalUserId !== currentUserId && (

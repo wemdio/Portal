@@ -313,22 +313,16 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   if (!launch) {
     return (
       <div className="mt-2 rounded-md p-3 text-[11px]" style={{ border: '1px solid var(--cp-divider)', color: 'var(--cp-text-m)' }}>
-        {/* Запуску нужен пресет отправки (`client_campaign_presets`): без него
-            POST /eng/templates/[id]/launch отвечает «Sending preset not found»,
-            а селектор шага 5 просто пуст. Сам клиент пресет НЕ создаёт — его
-            заводит администратор студии (api/admin/clients/[id]/preset), и
-            самообслуживания здесь не будет: в пресете живут ящики рассылки.
-            Поэтому про условие сказано заранее, на шаге 4: до шага 5 клиент
-            проходит часы сборки и не должен узнавать о блокировке последним.
-            Про окно отправки здесь намеренно молчим — его клиент выбирает при
-            запуске (роут `templates/[id]/schedule`), пресет задаёт лишь
-            дефолт.
+        {/* Пресет отправки клиент не выбирает и не заводит: запуск собирает
+            его из ящиков пула проекта (ensureHeEngPresetForProject, роут
+            POST /eng/templates/[id]/launch). Про окно отправки здесь
+            намеренно молчим — его клиент выбирает при запуске.
             «Checks its letters against every address» — не обещание успеха,
             а правда о гейте ядра (шаг 4b″, по всем строкам базы): признак
             `needs_rewrite` смотрит только первые строки базы (sample_rows), и
             пустая ячейка дальше них всплывает только отказом самого запуска. */}
         {template.status === 'ready'
-          ? 'Template is ready — launch it from step 5 «Review & Launch»; before anything is created, the launch checks its letters against every address in this audience. Sending needs a preset set up for your account — the mailboxes your campaigns send from; step 5 shows whether yours is ready.'
+          ? 'Template is ready — launch it from step 5 «Review & Launch»; before anything is created, the launch checks its letters against every address in this audience. Launching sends from mailboxes we set up for your project.'
           : 'Template is being built…'}
       </div>
     );
@@ -337,10 +331,11 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   return (
     <div className="mt-2 rounded-md p-3 text-xs flex flex-col gap-1" style={{ border: '1px solid var(--cp-divider)' }}>
       <div className="flex items-center gap-2">
-        {/* «created paused» — верно при любом статусе кампании у рассыльщика
-            (кабинет его не читает); тот же тег, что у шага 5 и Command Center. */}
+        {/* «launched» — верно при любом статусе кампаний у рассыльщика;
+            настоящий статус отправки и Pause / Resume — на шаге 5 и в Command
+            Center. */}
         <EngBadge
-          label={unfinished ? 'launch unfinished' : 'created paused'}
+          label={unfinished ? 'launch unfinished' : 'launched'}
           tone={unfinished ? 'amber' : 'neutral'}
         />
         <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>{launch.campaign_name}</span>
@@ -376,7 +371,7 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
         </div>
       ) : null}
       <span className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
-        The campaign stays paused — the team reviews and starts it manually.
+        Sending status and its buttons are on step 5 «Review &amp; Launch» and in the Command Center.
       </span>
     </div>
   );
@@ -580,8 +575,8 @@ export function EngStepBases({ detail, onChanged }: { detail: EngDetail; onChang
 
                   {refill && b.status !== 'failed' && (
                     <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-                      This is a daily refill run, not a base to launch: whatever it adds goes straight into the
-                      campaign, and only addresses with a verified email are added. Recent activity on the
+                      This is a daily top-up run, not a base to launch: whatever it adds goes straight into the
+                      campaign, and only addresses with a verified email are added. «Recent activity» in the
                       Command Center shows what each run added.
                     </div>
                   )}

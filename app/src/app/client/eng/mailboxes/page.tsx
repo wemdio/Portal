@@ -1,10 +1,18 @@
 'use client';
 
 /**
- * /client/eng/mailboxes — ENG-клиент подключает свои ящики паролем приложения.
- * Заведение у отправляющего провайдера уже есть на POST /api/client/mailboxes;
- * имя провайдера в UI не показываем. OAuth здесь нет: его экран согласия
- * как раз и светит чужой бренд.
+ * /client/eng/mailboxes — ящики, которые ENG-клиент подключил паролем
+ * приложения. Заведение у отправляющего провайдера уже есть на POST
+ * /api/client/mailboxes; имя провайдера в UI не показываем. OAuth здесь нет:
+ * его экран согласия как раз и светит чужой бренд.
+ *
+ * С S2 запуск шага 5 собирает пресет отправки только из ящиков пула проекта
+ * (engSendingPreset.ensureHeEngPresetForProject), а старт кампании отказывает,
+ * если её адреса не из этого пула (engCampaignSending). Подключённый здесь ящик
+ * ни в одну кампанию, запущенную кабинетом, не попадает: новое подключение
+ * завело бы ящик у провайдера и строку, которую никто не читает. Поэтому форма
+ * подключения скрыта (ENG_CONNECT_FORM_SHOWN), а список подключённых раньше
+ * ящиков и их удаление остались — данные клиента экран не прячет.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -42,8 +50,19 @@ interface Mailbox {
   created_at: string;
 }
 
+/**
+ * Форма подключения ящика — см. шапку: кампании кабинета подключённые ящики не
+ * используют. Код формы оставлен целиком: если ящики клиента снова начнут
+ * попадать в кампании, форма возвращается этим флагом вместе с текстами шапки.
+ */
+const ENG_CONNECT_FORM_SHOWN = false;
+
+/**
+ * Бейдж — состояние заведения ящика у провайдера, не отправка: «Ready to send»
+ * рядом со словами шапки «кампании шлют не отсюда» читалось бы как обещание.
+ */
 function sendingLabel(row: Mailbox): { label: string; tone: EngTone } {
-  if (row.sendingStatus === 'registered') return { label: 'Ready to send', tone: 'green' };
+  if (row.sendingStatus === 'registered') return { label: 'Registered', tone: 'green' };
   if (row.sendingStatus === 'failed') return { label: 'Not registered', tone: 'red' };
   if (row.status === 'verified') return { label: 'Connected', tone: 'amber' };
   if (row.status === 'failed') return { label: 'Failed', tone: 'red' };
@@ -98,8 +117,7 @@ const CONNECT_ERROR_FALLBACK =
   'Could not connect this mailbox. Check the address, the host and the port, and the app password, then try again.';
 
 /** Заведение ящика у отправляющего провайдера — отдельный шаг и отдельный текст. */
-const SENDING_ERROR_FALLBACK =
-  'Not registered for sending yet. Try reconnecting this mailbox; if it keeps failing, message Support.';
+const SENDING_ERROR_FALLBACK = 'Not registered for sending. Your campaigns do not use this mailbox.';
 
 function connectErrorText(status: number, code: string | undefined, raw: string | undefined): string {
   const byCode = code ? CONNECT_ERROR_BY_CODE[code] : undefined;
@@ -124,7 +142,7 @@ function connectErrorText(status: number, code: string | undefined, raw: string 
  * форме: экран перезапрашивает список после каждого подключения и удаления.
  */
 function listErrorText(status: number): string {
-  if (status === 403) return 'This account cannot connect mailboxes yet.';
+  if (status === 403) return 'This account has no access to connected mailboxes.';
   if (status === 401) return 'Your session has expired. Sign in again to see your mailboxes.';
   if (status === 503) return 'The service is busy right now. Refresh the page in a moment.';
   return `Could not load mailboxes (${status})`;
@@ -166,7 +184,7 @@ export default function EngMailboxesPage() {
     try {
       const headers = await authHeaders();
       if (!headers) {
-        setListError('Sign in to connect a mailbox.');
+        setListError('Sign in to see your mailboxes.');
         setLoading(false);
         return;
       }
@@ -262,93 +280,105 @@ export default function EngMailboxesPage() {
     <div className="mx-auto max-w-3xl">
       <header className="mb-6 sm:mb-8">
         <h1 className="text-xl sm:text-2xl font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
-          Sending mailboxes
+          Connected mailboxes
         </h1>
+        {/* С S2 кампании, запущенные кабинетом, шлют только из ящиков пула
+            проекта (см. шапку файла), и прежние фразы «Campaigns will send from
+            your addresses, not ours» и «Connect Google Workspace mailboxes»
+            стали неправдой. «Campaigns you launch» — а не «your campaigns»:
+            из каких ящиков шлёт кампания, созданная до S2 из пресета
+            команды, экран не знает. */}
         <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          Connect Google Workspace mailboxes with an app password. Campaigns will send from your addresses, not ours.
+          Campaigns you launch on step 5 «Review &amp; Launch» send from mailboxes we provide, not from mailboxes
+          connected here, so this page no longer connects new ones. Mailboxes you connected earlier, if any, are
+          listed below, and you can remove them.
         </p>
       </header>
 
-      <EngCard className="mb-5">
-        <p className="text-sm m-0" style={{ color: 'var(--cp-paper-mute)' }}>
-          Use a dedicated outreach domain, not the one your business email already lives on.
-          Turn on 2FA, create an app password in Google Account → Security, then paste it below.
-          A personal @gmail.com address will connect, but cold email from it burns quickly.
-        </p>
-      </EngCard>
-
-      <form onSubmit={onConnect} className="mb-8">
-        <EngCard>
-          <h2 className="text-sm font-semibold m-0 mb-3" style={{ color: 'var(--cp-paper)' }}>
-            Connect a mailbox
-          </h2>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="text-sm sm:col-span-2">
-              <span className="mb-1 block" style={{ color: 'var(--cp-text-m)' }}>Email</span>
-              <input
-                className={inputCls}
-                style={inputStyle}
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="john@getyourbrand.com"
-                required
-              />
-            </label>
-            <label className="text-sm">
-              <span className="mb-1 block" style={{ color: 'var(--cp-text-m)' }}>From name (optional)</span>
-              <input
-                className={inputCls}
-                style={inputStyle}
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="John at Acme"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="mb-1 block" style={{ color: 'var(--cp-text-m)' }}>App password</span>
-              <input
-                className={inputCls}
-                style={inputStyle}
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="new-password"
-                required
-              />
-              <span className="mt-1 block text-xs" style={{ color: 'var(--cp-text-m)' }}>
-                {PROVIDER_PRESETS.gmail.hint}
-              </span>
-            </label>
-          </div>
-          <label className="mt-3 flex items-center gap-2 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-            <input
-              type="checkbox"
-              checked={sendTest}
-              onChange={(e) => setSendTest(e.target.checked)}
-            />
-            Send a test email to this same address
-          </label>
-          {formError && (
-            <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-red)' }}>
-              <EngSupportText text={formError} />
-            </p>
-          )}
-          {okMsg && (
-            <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-green)' }}>
-              <EngSupportText text={okMsg} />
-            </p>
-          )}
-          <button
-            type="submit"
-            disabled={busy}
-            className="mt-4 rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50"
-            style={{ background: 'var(--cp-paper)', color: 'var(--cp-bg)' }}
-          >
-            {busy ? 'Connecting…' : 'Connect mailbox'}
-          </button>
+      {ENG_CONNECT_FORM_SHOWN && (
+        <EngCard className="mb-5">
+          <p className="text-sm m-0" style={{ color: 'var(--cp-paper-mute)' }}>
+            Use a dedicated outreach domain, not the one your business email already lives on.
+            Turn on 2FA, create an app password in Google Account → Security, then paste it below.
+            A personal @gmail.com address will connect, but cold email from it burns quickly.
+          </p>
         </EngCard>
-      </form>
+      )}
+
+      {ENG_CONNECT_FORM_SHOWN && (
+        <form onSubmit={onConnect} className="mb-8">
+          <EngCard>
+            <h2 className="text-sm font-semibold m-0 mb-3" style={{ color: 'var(--cp-paper)' }}>
+              Connect a mailbox
+            </h2>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-sm sm:col-span-2">
+                <span className="mb-1 block" style={{ color: 'var(--cp-text-m)' }}>Email</span>
+                <input
+                  className={inputCls}
+                  style={inputStyle}
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="john@getyourbrand.com"
+                  required
+                />
+              </label>
+              <label className="text-sm">
+                <span className="mb-1 block" style={{ color: 'var(--cp-text-m)' }}>From name (optional)</span>
+                <input
+                  className={inputCls}
+                  style={inputStyle}
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="John at Acme"
+                />
+              </label>
+              <label className="text-sm">
+                <span className="mb-1 block" style={{ color: 'var(--cp-text-m)' }}>App password</span>
+                <input
+                  className={inputCls}
+                  style={inputStyle}
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
+                  required
+                />
+                <span className="mt-1 block text-xs" style={{ color: 'var(--cp-text-m)' }}>
+                  {PROVIDER_PRESETS.gmail.hint}
+                </span>
+              </label>
+            </div>
+            <label className="mt-3 flex items-center gap-2 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
+              <input
+                type="checkbox"
+                checked={sendTest}
+                onChange={(e) => setSendTest(e.target.checked)}
+              />
+              Send a test email to this same address
+            </label>
+            {formError && (
+              <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-red)' }}>
+                <EngSupportText text={formError} />
+              </p>
+            )}
+            {okMsg && (
+              <p className="mt-3 text-sm m-0" style={{ color: 'var(--cp-green)' }}>
+                <EngSupportText text={okMsg} />
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={busy}
+              className="mt-4 rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50"
+              style={{ background: 'var(--cp-paper)', color: 'var(--cp-bg)' }}
+            >
+              {busy ? 'Connecting…' : 'Connect mailbox'}
+            </button>
+          </EngCard>
+        </form>
+      )}
 
       <section>
         <h2 className="text-sm font-semibold mb-3" style={{ color: 'var(--cp-paper)' }}>
@@ -361,7 +391,7 @@ export default function EngMailboxesPage() {
         ) : listError ? (
           <p className="text-sm" style={{ color: 'var(--cp-red)' }}>{listError}</p>
         ) : mailboxes.length === 0 ? (
-          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>No mailboxes yet.</p>
+          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>No mailboxes connected.</p>
         ) : (
           <ul className="flex flex-col gap-2 p-0 m-0 list-none">
             {mailboxes.map((row) => {

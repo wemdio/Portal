@@ -57,6 +57,8 @@ import type {
 } from '@/lib/hypothesisEngine/clientEngProjection';
 // Тоже только тип: набор причин этапа 'attention' один на оба конца провода.
 import type { EngDashAttention } from '@/lib/hypothesisEngine/engDashboard';
+// Тоже только типы: сводка отправки запуска и коды неудачного старта.
+import type { HeEngSendingSummary, HeEngStartErrorCode } from '@/lib/hypothesisEngine/engCampaignStatus';
 
 /** Нейтральная английская подстановка вместо русской из scrubBrand. */
 const SENDING_SERVICE_EN = 'sending service';
@@ -134,7 +136,10 @@ const STAGE_CANCELLED_EN: Record<EngFailureScope, string> = {
     'The research was cancelled before it finished. This cabinet starts research again only when it stops because of a technical problem, so message Support if you need it researched.',
   collection:
     `${CANCELLED_BASE_HEAD_EN} If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse this base.`,
-  refill: `This refill run was cancelled before it finished. ${HE_REFILL_RUN_KEPT_EN} A refill run is not restarted by hand; the Command Center shows whether the daily refill goes on.`,
+  // «stopped», а не «cancelled»: тот же маркер базе прогона пишет и пропуск
+  // ночи, чьи кампании не брали контакты (stages/baseCollectRefill.ts, отказ
+  // с stats.sending_skip без очереди переноса), — его никто не отменял.
+  refill: `This top-up run stopped before it finished. ${HE_REFILL_RUN_KEPT_EN} A top-up run is not restarted by hand; «Daily top-up» in the Command Center shows whether the daily top-up goes on.`,
 };
 
 /**
@@ -293,7 +298,7 @@ export function engDashAttentionText(attention: EngDashAttention): string {
  * легаси-строка). Тот же доливный ответ, что и у кодов без своего действия.
  */
 export function engRefillStoppedText(): string {
-  return `This refill run stopped without a recorded reason. ${HE_REFILL_RUN_KEPT_EN} ${HE_REFILL_RUN_WHAT_TO_DO_EN}`;
+  return `This top-up run stopped without a recorded reason. ${HE_REFILL_RUN_KEPT_EN} ${HE_REFILL_RUN_WHAT_TO_DO_EN}`;
 }
 
 /**
@@ -391,20 +396,19 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * уехала в кампанию, а остаток (`stats.deferred` долива) не досылается и
  * теряется. Поэтому фраза говорит только про то, что уже в кампаниях, — это
  * верно для обеих форм отказа (целиком и наполовину). И не говорит, что эти
- * контакты «keep sending»: кампании создаются на паузе и стартует их команда,
- * а их статус у рассыльщика кабинет не читает, — правда только то, что пауза
- * добора отправку не останавливает (та же фраза, что у `spend_paused`).
+ * контакты «keep sending»: кампании вертикали клиент мог сам поставить на
+ * паузу (S2, кнопка Pause), — правда только то, что пауза добора отправку не
+ * останавливает (та же фраза, что у `spend_paused`).
  *
  * `stopped` — ОТМЕНА. Причину называем: её записал сам клиент кнопкой
  * кабинета, и только эту кнопку пишет эта причина (pauseHeRefillForClientCancel
  * зовёт один роут — api/client/eng/projects/[id]/cancel). Ни «временной
- * проблемы», ни «команда уже знает» здесь нет: алерта отмена не шлёт. Кто
- * вернёт добор — только команда: снимает паузу только staff-кнопка
- * (refill-pause), «Start outreach» её не трогает, поэтому действие клиента —
- * Support. Лиды из кампаний отмена не убирает (роут
- * отмены рассыльщика не зовёт вовсе). Если «Start outreach» когда-нибудь начнёт
- * снимать и эту паузу (открытое решение владельца), менять вместе: эту фразу и
- * подтверждение отмены в EngProjectWizard («only by our team, through Support»).
+ * проблемы», ни «команда уже знает» здесь нет: алерта отмена не шлёт. Вернуть
+ * добор может сам клиент — переключатель «Daily top-up» дашборда снимает
+ * именно эту паузу (S2, switchHeUsRefill в autoPipeline.ts; паузы ёмкости и
+ * потолка он не трогает), «Start outreach» её не трогает. Лиды из кампаний
+ * отмена не убирает (роут отмены рассыльщика не зовёт вовсе). Менять вместе с
+ * подтверждением отмены в EngProjectWizard.
  *
  * `spend_paused` — ПОТОЛОК РАСХОДА (lib/hypothesisEngine/spendCeiling.ts,
  * autoPipeline.ts шаг 3a-; по умолчанию потолок выключен, и эту фразу не
@@ -425,11 +429,11 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  *  - «this hold does not stop sending» — потолок кампаний не касается.
  */
 const REFILL_HOLD_EN: Record<EngRefillHoldState, string> = {
-  paused: `The daily refill for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there, and this hold does not stop sending. ${HE_REFILL_HOLD_LIFT_EN}`,
+  paused: `The daily top-up for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there, and this hold does not stop sending. ${HE_REFILL_HOLD_LIFT_EN}`,
   spend_paused:
-    'The daily refill for this project is on hold. It was paused on our side, so the refill does not start any new collection. Our team has been notified, and the refill continues when they resume it. Leads already in your campaigns stay there, and this hold does not stop sending.',
+    'The daily top-up for this project is on hold. It was paused on our side, so the top-up does not start any new collection. Our team has been notified, and the top-up continues when they resume it. Leads already in your campaigns stay there, and this hold does not stop sending.',
   stopped:
-    'The daily refill for this project is stopped because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Only our team can restart the daily refill — message Support to have it restarted.',
+    'The daily top-up for this project is off because the project was cancelled with «Cancel all jobs». Leads already added to your campaigns stay there. Turn it on to look for new contacts each night again and add them to the campaigns that are sending.',
 };
 
 /** Состояния добора, у которых есть что объяснить отдельным блоком. */
@@ -574,8 +578,522 @@ export function engPlaceholderText(placeholder: ClientEngTemplatePlaceholder): s
  */
 export function engLaunchRunStoppedText(notTried: number): string {
   return notTried === 1
-    ? 'This run stopped here: 1 more template was not tried. It stays in the list for the next «Launch all (paused)».'
-    : `This run stopped here: ${notTried} more templates were not tried. They stay in the list for the next «Launch all (paused)».`;
+    ? 'This run stopped here: 1 more template was not tried. It stays in the list for the next «Launch all».'
+    : `This run stopped here: ${notTried} more templates were not tried. They stay in the list for the next «Launch all».`;
+}
+
+/* ── Отправка кампаний запуска (S2) ── */
+
+const plural = (n: number, one: string, many: string) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
+
+function shortTime(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * Кнопка СТАРТА, которая стоит на карточке при этой сводке (EngSendingBlock):
+ * вторая рядом с Pause — «Start the rest» (`secondary_action`), иначе
+ * единственная — «Start sending» / «Resume» (`action`). null — кнопки старта
+ * нет: аккаунт выключен, запуск до self-serve отправки, клиент поставил паузу,
+ * а часть кампаний ещё отправляет. Каждая фраза, которая зовёт нажать старт,
+ * называет ровно эту кнопку, а без неё зовёт Support — иначе она отправляла бы
+ * к кнопке, которой на экране нет.
+ */
+export type EngStartButton = 'Start sending' | 'Start the rest' | 'Resume';
+
+export function engStartButtonOf(summary: HeEngSendingSummary): EngStartButton | null {
+  if (summary.secondary_action === 'start_rest') return 'Start the rest';
+  if (summary.action === 'start') return 'Start sending';
+  if (summary.action === 'resume') return 'Resume';
+  return null;
+}
+
+/**
+ * Кнопка старта ПОСЛЕ старта, когда свежей сводки нет (итог запуска из роута
+ * запуска: в его ответе сводки нет, а блок отправки дочитает её сам). Тот же
+ * выбор, что у сводки (engStartButtonOf / summarizeHeEngSending), по итогу:
+ * пауза клиента посреди старта — «Resume»; что-то отправляет — «Start the
+ * rest»; ничего — «Start sending». Аккаунт и запуск до self-serve этот путь
+ * уже прошли: старт без них не начинается.
+ */
+function startButtonAfter(r: {
+  started: number;
+  compensated: number;
+  compensation_failed?: number;
+  already_sending: number;
+}): EngStartButton {
+  if (r.compensated > 0 || (r.compensation_failed ?? 0) > 0) return 'Resume';
+  return r.started - r.compensated + r.already_sending > 0 ? 'Start the rest' : 'Start sending';
+}
+
+/**
+ * Почему стоящие кампании не стартовали — по коду старта (engCampaignStatus,
+ * HeEngStartErrorCode). Продолжение фразы после «N campaigns were not started:»
+ * или «… not sending:», поэтому со строчной буквы и без повтора «not started»;
+ * `count` — сколько кампаний в этой голове. Код в сводке несёт
+ * ХОТЬ ОДНА стоящая кампания (problem_campaigns ≥ 1, не обязательно все), а
+ * итог старта отдаёт код первой из неудачных, — поэтому у нескольких кампаний
+ * «one or more of them», а не «they all». Каждая фраза правдива для любой
+ * кампании с этим кодом:
+ *  - mailboxes_changed — адреса живой кампании не из ящиков проекта или она в
+ *    другом воркспейсе: старт отказан проверкой, команде ушёл алерт;
+ *  - needs_attention / not_found — рассыльщик остановил кампанию или её нет;
+ *  - read_failed — перед стартом кампанию не прочитали, старта не было;
+ *  - start_failed — старт отправлен, но проверочное чтение не показало
+ *    отправку (или статус не стартуемый);
+ *  - start_unconfirmed — ответа на старт нет и проверочное чтение не удалось:
+ *    кампания могла начать отправку (не «не стартована»).
+ * Повтор (read_failed, start_failed) — той кнопкой, что стоит на карточке
+ * (`button`, engStartButtonOf); кнопки нет — Support.
+ * `others` — сколько стоящих кампаний этой головы причины НЕ несут (сводка:
+ * startable − problem_campaigns); больше нуля и кнопка старта есть — фраза
+ * добавляет, что кнопка стартует их (номером, а не «the others»: в голове
+ * «These campaigns» бывают и завершённые). Иначе этой части нет.
+ */
+export function engSendingProblemText(
+  code: HeEngStartErrorCode,
+  button: EngStartButton | null,
+  count: number,
+  others = 0,
+): string {
+  const one = count === 1;
+  const retry = button
+    ? `Try «${button}» again in a minute; if it keeps failing, message Support.`
+    : 'Message Support if this stays this way.';
+  const rest =
+    button && others > 0 && !one
+      ? ` — press «${button}» to start the other ${others === 1 ? 'one' : others.toLocaleString('en-US')}`
+      : '';
+  switch (code) {
+    case 'mailboxes_changed':
+      return one
+        ? 'it sends from mailboxes that are not the ones set up for your project. Message Support.'
+        : `one or more of them send from mailboxes that are not the ones set up for your project${rest}. Message Support.`;
+    case 'needs_attention':
+    case 'not_found':
+      return one
+        ? 'our sending service stopped or removed it. Message Support.'
+        : `our sending service stopped or removed one or more of them${rest}. Message Support.`;
+    case 'read_failed':
+      return one
+        ? `we could not check it before starting it. ${retry}`
+        : `we could not check one or more of them before starting them${rest}. ${retry}`;
+    case 'start_failed':
+      return one
+        ? `the sending service did not confirm its start. ${retry}`
+        : `the sending service did not confirm the start of one or more of them${rest}. ${retry}`;
+    case 'start_unconfirmed':
+      // Код живёт у кампании со статусом «не знаем»; живое чтение заменяет его
+      // на start_failed (стоит) или снимает — здесь он почти не бывает.
+      return one
+        ? 'we could not confirm whether it started — it may be sending; its status shows up within a few minutes.'
+        : `we could not confirm whether one or more of them started${rest} — they may be sending; their status ` +
+            'shows up within a few minutes.';
+  }
+}
+
+/** Стоящие кампании без причины (сводка): их кнопка старта стартует. */
+function othersWithoutProblem(summary: HeEngSendingSummary): number {
+  return summary.problem ? Math.max(0, summary.startable - summary.problem_campaigns) : 0;
+}
+
+/**
+ * Голова фразы про стоящие кампании (0 / 2) рядом с отправляющими:
+ * «2 of 3 campaigns are not sending». Не отправляют и завершённые, и
+ * остановленные рассыльщиком — если такие тоже есть, «not sending» про одни
+ * стоящие было бы неверным счётом, и голова называет их статус: «paused or not
+ * started yet» (2 — пауза, 0 — ни разу не стартовала).
+ */
+function restHead(summary: HeEngSendingSummary): string {
+  const count = summary.startable;
+  const verb = count === 1 ? 'is' : 'are';
+  const of = `${count.toLocaleString('en-US')} of ${summary.campaigns.toLocaleString('en-US')} campaigns`;
+  return count === summary.campaigns - summary.sending ? `${of} ${verb} not sending` : `${of} ${verb} paused or not started yet`;
+}
+
+/** Голова той же фразы, когда не отправляет ни одна кампания запуска. */
+function noneSendingHead(campaigns: number): string {
+  return campaigns === 1 ? 'This campaign is not sending' : 'These campaigns are not sending';
+}
+
+/**
+ * Запуск до self-serve отправки проекта ('pre_self_serve'): кабинет его кампании
+ * не стартует (проверка ящиков пула откажет), кнопки старта нет. Тот же смысл,
+ * что у отказа старта ENG_START_PRE_SELF_SERVE_TEXT (engCampaignSending.ts, в
+ * клиентский бандл не едет) — менять вместе.
+ */
+const PRE_SELF_SERVE_EN =
+  'This launch was created before sending was set up for your project, so its campaigns cannot be started from here. Message Support.';
+
+/**
+ * Тот же запуск до self-serve, пока часть его кампаний отправляет (сводка
+ * 'sending', `pre_self_serve`): Pause есть, кнопки старта нет.
+ */
+const PRE_SELF_SERVE_SENDING_EN =
+  'This launch was created before sending was set up for your project: «Pause» stops it, but only Support can start it again.';
+
+/**
+ * Отправка аккаунта выключена сотрудником. Пояснение блока отправки печатает её
+ * в ЛЮБОМ состоянии сводки (engSendingNote), и ровно её цитирует алерт команде
+ * 'revoke_pause_failed' (engSendingAlert.ts) — менять вместе.
+ */
+const TURNED_OFF_EN = 'Sending is turned off for your account, so campaigns cannot be started. Message Support.';
+
+/** Тег статуса отправки (status-tag карточки). */
+export function engSendingTag(summary: HeEngSendingSummary): { label: string; tone: 'green' | 'amber' | 'red' | 'neutral' } {
+  switch (summary.state) {
+    case 'sending':
+      return { label: 'sending', tone: 'green' };
+    case 'paused':
+      return { label: 'paused', tone: 'neutral' };
+    case 'not_sending':
+    case 'pre_self_serve':
+      // Не «not started»: кампании запуска до self-serve мог стартовать
+      // сотрудник, а потом их остановили.
+      return { label: 'not sending', tone: 'amber' };
+    case 'not_started':
+      return { label: 'not started', tone: 'amber' };
+    case 'completed':
+      return { label: 'completed', tone: 'neutral' };
+    case 'attention':
+      return { label: 'needs attention', tone: 'red' };
+    case 'empty':
+      return { label: 'no contacts', tone: 'neutral' };
+    case 'unknown':
+      return { label: summary.readable ? 'status loading' : 'status unavailable', tone: 'neutral' };
+  }
+}
+
+/**
+ * Строка статуса: «Sending · N sent · M replies», «Paused …», «Completed …» и
+ * т. п. Числа — только прочитанные у рассыльщика у ВСЕХ кампаний (иначе их
+ * нет вовсе); «replies» — уникальные ответы людей, без автоответов. Статус
+ * давно не обновлялся (чтения не удаются) — «as of» с временем последнего.
+ */
+export function engSendingLine(summary: HeEngSendingSummary): string {
+  const counts =
+    summary.sent !== null && summary.replies !== null
+      ? ` · ${plural(summary.sent, 'email sent', 'emails sent')} · ${plural(summary.replies, 'reply', 'replies')}`
+      : '';
+  const asOf = summary.status_stale && shortTime(summary.status_as_of) ? ` · as of ${shortTime(summary.status_as_of)}` : '';
+  switch (summary.state) {
+    case 'sending':
+      return (
+        (summary.sending < summary.campaigns
+          ? `Sending — ${summary.sending} of ${summary.campaigns} campaigns`
+          : 'Sending') + counts + asOf
+      );
+    case 'paused': {
+      const at = shortTime(summary.paused_at);
+      return `Paused by you${at ? ` on ${at}` : ''}` + counts + asOf;
+    }
+    case 'not_sending':
+      return 'Not sending' + counts + asOf;
+    case 'pre_self_serve':
+      return 'Not sending — created before self-serve sending' + counts + asOf;
+    case 'not_started':
+      return 'Not started yet' + counts + asOf;
+    case 'completed':
+      return 'Completed' + counts + asOf;
+    case 'attention':
+      return 'Needs attention' + counts + asOf;
+    case 'empty':
+      return 'These campaigns have no contacts, so there is nothing to send.';
+    case 'unknown':
+      if (!summary.readable) return 'The sending status of this launch is not available.';
+      // Не прочитана часть: прочитанные не отправляют — но непрочитанная может.
+      if (summary.unknown > 0 && summary.unknown < summary.campaigns) {
+        return (
+          `${summary.unknown.toLocaleString('en-US')} of ${summary.campaigns.toLocaleString('en-US')} campaigns: ` +
+          'status not read yet' + counts + asOf
+        );
+      }
+      return 'Reading the sending status — it shows up within a few minutes.';
+  }
+}
+
+/**
+ * Стоящие кампании рядом с отправляющими (сводка 'sending', `startable` > 0):
+ * сколько не отправляет и почему, и кнопка, если она есть. Без кнопки
+ * «Start the rest» (клиент поставил паузу, а часть кампаний ещё отправляет;
+ * аккаунт выключен; запуск до self-serve) — только факт: почему не стартовать
+ * при выключенном аккаунте и у запуска до self-serve, говорят свои фразы
+ * engSendingNote.
+ */
+function restNotSendingText(summary: HeEngSendingSummary): string {
+  const head = restHead(summary);
+  const button = summary.secondary_action === 'start_rest' ? 'Start the rest' : null;
+  const them = summary.startable === 1 ? 'it' : 'them';
+  if (summary.problem) {
+    return `${head}: ${engSendingProblemText(summary.problem, button, summary.startable, othersWithoutProblem(summary))}`;
+  }
+  if (button) return `${head} — press «${button}» to start ${them}.`;
+  return `${head}.`;
+}
+
+/**
+ * Пояснение под строкой — только когда клиенту есть что сделать или понять.
+ * null — пояснять нечего. У 'sending' — и про остановленные рассыльщиком, и про
+ * стоящие рядом с отправляющими (restNotSendingText): одно другого не
+ * отменяет.
+ */
+export function engSendingNote(summary: HeEngSendingSummary): string | null {
+  // Выключенный аккаунт — его фраза в ЛЮБОМ состоянии (её цитирует алерт
+  // команде 'revoke_pause_failed'): кампании могут ещё отправлять, если пауза
+  // выключения не встала, и старт им закрыт.
+  const turnedOff = summary.access === 'turned_off' ? TURNED_OFF_EN : null;
+  if (summary.state === 'unknown' && !summary.readable) {
+    return turnedOff ?? 'Message Support if this stays this way.';
+  }
+  const stoppedHead = 'Our sending service stopped or removed one or more campaigns of this launch.';
+  if (summary.state === 'sending') {
+    const parts = [
+      summary.attention > 0 ? (turnedOff ? stoppedHead : `${stoppedHead} Message Support.`) : null,
+      summary.startable > 0 ? restNotSendingText(summary) : null,
+      summary.pre_self_serve && !turnedOff ? PRE_SELF_SERVE_SENDING_EN : null,
+      turnedOff,
+    ].filter((p): p is string => p !== null);
+    return parts.length > 0 ? parts.join(' ') : null;
+  }
+  if (summary.attention > 0) return turnedOff ? `${stoppedHead} ${turnedOff}` : `${stoppedHead} Message Support.`;
+  if (turnedOff) return turnedOff;
+  if (summary.state === 'pre_self_serve') return PRE_SELF_SERVE_EN;
+  const button = engStartButtonOf(summary);
+  // Стоят не все кампании (часть завершена или её статус не известен) —
+  // голова называет число стоящих, а не «These campaigns are not sending».
+  const allStand = summary.startable === summary.campaigns;
+  const standHead = allStand ? noneSendingHead(summary.campaigns) : restHead(summary);
+  if ((summary.state === 'not_sending' || summary.state === 'not_started') && summary.problem) {
+    return `${standHead}: ${engSendingProblemText(
+      summary.problem,
+      button,
+      allStand ? summary.campaigns : summary.startable,
+      othersWithoutProblem(summary),
+    )}`;
+  }
+  if (summary.state === 'not_sending') {
+    // Верно и для кампаний, старт которых не пробовали (не успел), и для
+    // неудавшегося: только факт и кнопка.
+    const head = standHead;
+    const them = summary.startable === 1 ? 'it' : 'them';
+    return button
+      ? `${head}. Press «${button}» to start ${them}.`
+      : `${head}. Message Support if ${summary.startable === 1 ? 'it stays' : 'they stay'} this way.`;
+  }
+  // Статус части не прочитан, а часть стоит — про стоящие (кнопка «Start the
+  // rest» рядом с Pause, если она есть).
+  if (summary.state === 'unknown' && summary.startable > 0) return restNotSendingText(summary);
+  return null;
+}
+
+/** Подпись кнопки карточки (`action` и вторая — `secondary_action`). */
+export function engSendingActionLabel(action: 'pause' | 'start' | 'resume' | 'start_rest'): string {
+  switch (action) {
+    case 'pause':
+      return 'Pause';
+    case 'resume':
+      return 'Resume';
+    case 'start_rest':
+      return 'Start the rest';
+    case 'start':
+      return 'Start sending';
+  }
+}
+
+/**
+ * Итог старта: начали / уже отправляли / не стартовали (с причиной) / не
+ * успели. `button` — кнопка старта, которая будет на карточке после этого
+ * старта (по свежей сводке или startButtonAfter); null — её нет.
+ */
+function startOutcomeText(
+  r: {
+    campaigns: number;
+    started: number;
+    already_sending: number;
+    completed: number;
+    failed: HeEngStartErrorCode[];
+    not_attempted: number;
+    unconfirmed?: number;
+    compensated: number;
+    compensation_failed?: number;
+  },
+  button: EngStartButton | null,
+): string {
+  if (r.campaigns === 0) return 'These campaigns have no contacts, so there is nothing to start.';
+  const on = r.started - r.compensated + r.already_sending;
+  const pauseFailed = r.compensation_failed ?? 0;
+  const unconfirmed = r.unconfirmed ?? 0;
+  const parts: string[] = [];
+  if (pauseFailed > 0) {
+    // Pause клиента посреди старта не встала у части кампаний — команде ушёл
+    // алерт 'pause_failed' (engSendingAlert), она ставит их на паузу руками.
+    parts.push(
+      `You paused this vertical while it was starting, but ${plural(pauseFailed, 'campaign', 'campaigns')} could ` +
+        `not be paused yet and may still be sending — our team is stopping ${pauseFailed === 1 ? 'it' : 'them'}.`,
+    );
+  } else if (r.compensated > 0) {
+    parts.push('You paused this vertical while it was starting, so its campaigns stay paused.');
+  } else if (on > 0) {
+    parts.push(
+      on === r.campaigns
+        ? `Sending is on for ${r.campaigns === 1 ? 'the campaign' : `all ${r.campaigns} campaigns`}.`
+        : `Sending is on for ${on} of ${r.campaigns} campaigns.`,
+    );
+  } else if (r.completed < r.campaigns && unconfirmed === 0) {
+    parts.push('Sending did not start.');
+  }
+  // Неясный старт — не «не стартована»: могла начать отправку (Pause есть).
+  if (unconfirmed > 0) {
+    parts.push(
+      r.campaigns === 1
+        ? 'We could not confirm whether it started — it may be sending; its status shows up within a few minutes.'
+        : `We could not confirm whether ${plural(unconfirmed, 'campaign', 'campaigns')} started — ` +
+            `${unconfirmed === 1 ? 'it' : 'they'} may be sending; ${unconfirmed === 1 ? 'its' : 'their'} status shows ` +
+            'up within a few minutes.',
+    );
+  }
+  if (r.completed > 0) {
+    parts.push(`${plural(r.completed, 'campaign is', 'campaigns are')} already completed.`);
+  }
+  if (r.failed.length > 0) {
+    parts.push(
+      `${plural(r.failed.length, 'campaign was', 'campaigns were')} not started: ${engSendingProblemText(r.failed[0], button, r.failed.length)}`,
+    );
+  }
+  if (r.not_attempted > 0) {
+    parts.push(
+      `${plural(r.not_attempted, 'campaign was', 'campaigns were')} not started yet because this took long — ` +
+        (button
+          ? `press «${button}» for this vertical.`
+          : `message Support if ${r.not_attempted === 1 ? 'it stays' : 'they stay'} this way.`),
+    );
+  }
+  return parts.join(' ');
+}
+
+/** Итог старта кампаний (роут запуска и POST .../sending) — общая форма. */
+interface EngStartOutcome {
+  campaigns: number;
+  started: number;
+  already_sending: number;
+  completed: number;
+  failed: HeEngStartErrorCode[];
+  not_attempted: number;
+  unconfirmed?: number;
+  compensated: number;
+  compensation_failed?: number;
+}
+
+/**
+ * Отказы старта, которые бывают и ПОСЛЕ стартов этого же вызова (выключение
+ * аккаунта посреди цикла, желание клиента не прочиталось после цикла):
+ * «Sending was not started:» перед ними было бы неправдой — часть кампаний
+ * успела стартовать (и поставлена на паузу). Их фраза печатается одна — она
+ * верна и до старта, и после.
+ */
+const START_REFUSALS_AFTER_ACTIVATION: ReadonlySet<string> = new Set([
+  'sending_turned_off',
+  'sending_not_enabled',
+  'sending_state_unavailable',
+]);
+
+/**
+ * Что сделал запуск с отправкой (`sending` ответа роута запуска,
+ * EngLaunchSendingResult в api-client). null — сказать нечего. `after` —
+ * свежая сводка из ответа запуска (`sending_summary`): фраза называет кнопку,
+ * которая теперь на карточке (engStartButtonOf); сводки нет — кнопку после
+ * старта называет startButtonAfter.
+ */
+export function engLaunchSendingText(
+  r: EngStartOutcome & {
+    outcome: 'done' | 'skipped' | 'refused' | 'client_paused';
+    skip_reason?: 'launch_problem' | 'window_not_applied' | 'not_requested';
+    refusal?: { code: string; message: string };
+    paused_found?: number;
+  },
+  after: HeEngSendingSummary | null = null,
+): string | null {
+  switch (r.outcome) {
+    case 'done':
+      return startOutcomeText(r, after ? engStartButtonOf(after) : startButtonAfter(r));
+    case 'skipped':
+      // 'not_requested' этот экран не получает (launchEngTemplate шлёт
+      // start_sending всегда), но фраза верна и для него: кампании созданы и не
+      // стартованы, а какая кнопка их стартует (или почему никакая), говорит
+      // блок отправки вертикали.
+      return r.skip_reason === 'window_not_applied'
+        ? 'Sending was not started — see the note about the sending window.'
+        : r.skip_reason === 'not_requested'
+          ? 'The campaigns were created but not started — the sending status of this vertical shows how to start them.'
+          : 'Sending was not started — see the note about the problem with this launch.';
+    case 'refused':
+      if (!r.refusal) return 'Sending was not started.';
+      return START_REFUSALS_AFTER_ACTIVATION.has(r.refusal.code)
+        ? r.refusal.message
+        : `Sending was not started: ${r.refusal.message}`;
+    case 'client_paused': {
+      const paused = r.paused_found ?? 0;
+      if (paused > 0) {
+        // Кампания записи стоит на паузе у рассыльщика — запуск не стартовал
+        // ничего (её мог остановить клиент, сотрудник или наша страховка).
+        const button = after ? engStartButtonOf(after) : 'Start sending';
+        return (
+          `${paused === 1 ? 'A campaign' : `${paused.toLocaleString('en-US')} campaigns`} of this vertical ` +
+          `${paused === 1 ? 'is' : 'are'} paused, so this launch did not start any of its campaigns — ` +
+          (button ? `press «${button}» to start them.` : 'message Support if they stay this way.')
+        );
+      }
+      const button = after ? engStartButtonOf(after) : 'Resume';
+      return `This vertical is paused, so its campaigns were not started.${button ? ` Press «${button}» to start sending.` : ''}`;
+    }
+  }
+}
+
+/**
+ * Итог кнопки Start sending / Start the rest / Resume / Pause (POST
+ * .../sending). `after` — свежая сводка из ответа (null — ответа без сводки):
+ * по ней фраза итога называет кнопку старта, которая теперь на карточке.
+ * Pause, чьё желание не записалось (`state_recorded: false`), — пауза может не
+ * удержаться: повторить Pause (если кнопка Pause на карточке есть) или Support.
+ */
+export function engSendingActionText(
+  action: 'start' | 'pause',
+  result:
+    | EngStartOutcome
+    | { campaigns: number; paused: number; failed: number; not_attempted: number; state_recorded?: boolean },
+  after: HeEngSendingSummary | null,
+): string {
+  if (action === 'start' && 'started' in result) {
+    return startOutcomeText(result, after ? engStartButtonOf(after) : startButtonAfter(result));
+  }
+  if ('paused' in result) {
+    const notPaused = result.failed + result.not_attempted;
+    // «Pause» ещё раз — только если она на карточке (свежая сводка).
+    const pauseShown = after !== null && (after.action === 'pause' || after.secondary_action === 'pause');
+    if (result.state_recorded === false) {
+      const retry = pauseShown
+        ? 'Press «Pause» again in a minute; if this keeps happening, message Support.'
+        : 'Message Support so we can make sure it stays paused.';
+      return notPaused === 0
+        ? `Sending is paused, but we could not save that you paused this vertical, so the pause may not hold. ${retry}`
+        : `We could not pause ${plural(notPaused, 'campaign', 'campaigns')} of this launch, so ` +
+            `${notPaused === 1 ? 'it' : 'they'} may still be sending, and we could not save that you paused this ` +
+            `vertical. ${retry}`;
+    }
+    if (notPaused === 0) return 'Sending is paused.';
+    // Не вставшие — команде ушёл алерт 'pause_failed' (её паузу держит и
+    // доводка при чтении статуса: желание записано).
+    return (
+      `We could not pause ${plural(notPaused, 'campaign', 'campaigns')} of this launch, so ${notPaused === 1 ? 'it' : 'they'} may still be sending. ` +
+      (pauseShown
+        ? 'Press «Pause» again in a minute; if it keeps failing, message Support.'
+        : `Our team is stopping ${notPaused === 1 ? 'it' : 'them'}; message Support if this keeps happening.`)
+    );
+  }
+  return '';
 }
 
 /**

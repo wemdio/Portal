@@ -220,26 +220,30 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
 
   /**
    * Подтверждение обязательно: отмена не только останавливает идущее, но и
-   * выключает автопилот и ночной добор, а добор клиент обратно не включит —
-   * снимает его паузу только сотрудник (staff-кнопка refill-pause). Каждая
-   * фраза подтверждения проверена по роуту отмены:
+   * выключает автопилот и ночной добор. Каждая фраза подтверждения проверена
+   * по роуту отмены:
    *  - «stops the work running on it now» — джобы pending/running →
    *    cancelled, базы collecting/analyzing → failed, researching → draft;
    *  - «turns its autopilot off» — первая запись роута (не легла — 500,
    *    отмены нет);
-   *  - «stops its daily refill if it has one» — пауза добора
-   *    (pauseHeRefillForClientCancel); конфига нет — добора и не было.
+   *  - «turns its daily top-up off if it has one» — пауза добора
+   *    (pauseHeRefillForClientCancel); конфига нет — добора и не было. Дашборд
+   *    после этого рисует добор проекта выключенным (`stopped`, тег «off»).
    *    Без миграции 20260930_0005 паузу записать нечем — это условие выката,
    *    а не форма, которую экран обязан пережить;
    *  - «Finished bases, letters and templates are kept» — роут трогает только
    *    базы в работе, цепочек и шаблонов не трогает;
-   *  - «campaigns already launched are left as they are» — роут рассыльщика не
-   *    зовёт, а кампании ENG создаются на паузе и сами не активируются
-   *    (launchHandoff.ts), так что их состояние отмена не меняет;
+   *  - «Campaigns already launched are not stopped by this … use «Pause»» —
+   *    роут рассыльщика не зовёт, а с S2 запуск сам стартует кампании (роут
+   *    запуска, startHeEngLaunchSending), так что отправляющие кампании после
+   *    отмены отправляют дальше. «The ones that are sending» — потому что
+   *    кампании запуска бывают и на паузе клиента, и не стартованы: про них
+   *    «keep sending» было бы неправдой. Остановить их — кнопка «Pause» блока
+   *    отправки (EngSendingBlock) на шаге 5 и в Command Center;
    *  - ««Start outreach» turns the autopilot back on» — POST .../autopilot;
-   *    паузу добора он не снимает — её снимает только staff-кнопка команды,
-   *    отсюда «only by our team, through Support» (window.confirm — простой
-   *    текст, ссылки в нём нет; Support — пункт меню кабинета);
+   *    паузу добора он не снимает — её снимает «Turn on» блока «Daily top-up»
+   *    Command Center (S2, POST .../refill → switchHeUsRefill снимает именно
+   *    паузу отмены) или staff-кнопка команды;
    *  - проект 'researching' — ещё одна фраза: отмена переводит его в 'draft'
    *    (cancel-роут), а research кабинет запускает заново только после
    *    технического сбоя (решение владельца 10.10.2026; отмена — не сбой).
@@ -269,9 +273,11 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
     if (
       !window.confirm(
         'Cancel all jobs on this project? This stops the work running on it now, turns its autopilot off ' +
-          'and stops its daily refill if it has one. Finished bases, letters and templates are kept, and ' +
-          'campaigns already launched are left as they are. «Start outreach» turns the autopilot back on; ' +
-          'the daily refill can be restarted only by our team, through Support.' +
+          'and turns its daily top-up off if it has one. Finished bases, letters and templates are kept. ' +
+          'Campaigns already launched are not stopped by this: the ones that are sending keep sending — use ' +
+          '«Pause» on step 5 «Review & Launch» or in the Command Center to stop them. «Start outreach» turns ' +
+          'the autopilot back on, and «Turn on» under «Daily top-up» in the Command Center turns the daily ' +
+          'top-up back on.' +
           researchNote,
       )
     ) {
@@ -352,7 +358,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
                 disabled={cancelling}
                 className="ds-btn-secondary ml-auto inline-flex items-center gap-1.5 text-[11px]"
                 style={{ color: 'var(--cp-red)' }}
-                title="Stop the work running on this project, turn its autopilot off and stop its daily refill if it has one. Campaigns already launched are left as they are."
+                title="Stop the work running on this project, turn its autopilot off and turn its daily top-up off if it has one. Campaigns already launched are not stopped — use «Pause» to stop them."
               >
                 <Ban className="h-3 w-3" />
                 {cancelling ? 'Cancelling…' : 'Cancel all jobs'}

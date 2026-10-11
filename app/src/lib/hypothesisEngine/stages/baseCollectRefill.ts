@@ -22,10 +22,14 @@
  *     запуска, сплитнутого по сегментам, пачка ночи, уже срезанная дневным
  *     капом, раскладывается по сегментным кампаниям того же запуска тем же
  *     классификатором, что у запуска (routeHeRefillSegments, блок «РАСКЛАДКА»):
- *     строка сегмента — в кампанию сегмента, без сегмента, без ответа или без
- *     кампании своего сегмента — в основную; сегментная кампания, явно
- *     отказавшая без единого приёма (удалена или в архиве у рассыльщика),
- *     отдаёт свои строки основной в том же прогоне (п. 7 «РАСКЛАДКИ»);
+ *     строка сегмента — в кампанию сегмента, без сегмента, без ответа, без
+ *     кампании своего сегмента или с завершённой — в основную; строка
+ *     сегмента, чья кампания не отправляет (остановлена рассыльщиком, удалена,
+ *     стоит, статус не подтверждён), не уходит никуда — её компания ждёт в
+ *     очереди переноса (п. 4 «РАСКЛАДКИ»); сегментная кампания, явно
+ *     отказавшая без единого приёма уже при загрузке (удалена или в архиве у
+ *     рассыльщика после шага 4c), отдаёт свои строки основной в том же
+ *     прогоне (п. 7 «РАСКЛАДКИ»);
  *   - лиды: только строки с email И ДОПУЩЕННЫМ вердиктом валидации. Список
  *     допущенных вердиктов и их ранжирование здесь НЕ дублируются — вердикт
  *     считает heLaunchEmailVerdict (launchHandoff.ts), тот же, что у ручного
@@ -131,6 +135,19 @@
  *     терминальная запись базы (persistRefillBase) плюс стартовый гейт стадии
  *     по статусу 'collecting'. Флаг поверх них — только защита от второго
  *     письма уже написанному лиду;
+ *   - до брони и до провайдера (шаг 4c) долив спрашивает, берут ли кампании
+ *     запуска контакты (S2, checkHeRefillSendTarget в autoPipeline.ts: пауза
+ *     клиента, выключенный «Daily top-up», выключенная отправка аккаунта,
+ *     основная кампания завершена, остановлена, шлёт не из ящиков пула
+ *     проекта или её статус не подтверждён — по свежему статусу). Нет — долив
+ *     пропущен отказом без единого запроса на загрузку: компании ночи у
+ *     market='us' ждут в очереди переноса, как у ночи без бюджета
+ *     (stats.sending_skip, в серию отказов не идёт). Строки неотправляющей
+ *     СЕГМЕНТНОЙ кампании раскладка держит, завершённой — отдаёт основной
+ *     (п. 4 «РАСКЛАДКИ»). Pause клиента, выключенный «Daily top-up» и
+ *     выключенная отправка аккаунта, случившиеся уже во время загрузки,
+ *     останавливают следующие чанки (проверка владения: 'client_paused',
+ *     'top_up_off', 'access_turned_off', 'access_not_enabled');
  *   - blocklist владельца пресета и чанкование — внутри
  *     appendLeadsToClientCampaign (тот же путь, что у RU auto-pipeline), но с
  *     entitlementMode='managed_contract': объём режет серверный daily_leads_cap,
@@ -233,17 +250,29 @@ import {
 // Пауза по ёмкости живёт рядом с тем, кто её ЧИТАЕТ (тик крона): второго
 // определения «проект остановлен» в дереве быть не должно — там же и признак
 // паузы, записанной отменой клиентом (проверка владения перед провайдером).
-// Бандл воркера от этого не растёт — autoPipeline тянет только
-// baseCollectEnqueue, launchHandoff, templateOperatorGate и instantly-клиент, а
-// они уже здесь (через appendLeads и импорты ниже). Оттуда же — колонки базы
-// долива и причина «писем нет», общие с предпроверкой писем тика.
+// Оттуда же — колонки базы долива и причина «писем нет», общие с
+// предпроверкой писем тика, и проверка «кампании запуска отправляют?» (шаг 4c,
+// одна на тик и долив). autoPipeline тянет в бандл воркера baseCollectEnqueue,
+// launchHandoff, templateOperatorGate, instantly-клиент и логгер (они уже здесь
+// через appendLeads и импорты ниже), а с S2 — ещё модули отправки ENG
+// (engCampaignStatus, engSendingAccess, engSendingAlert, sendingPool): чтение
+// кэша статусов, выключателя аккаунта, ящиков пула и живое чтение кампании, —
+// и алерт команде о том, что добор держит (notifyHeRefillHold).
 import {
   buildHeCapacityPauseReason,
+  checkHeRefillSendTarget,
   HE_REFILL_BASE_COLUMNS,
   HE_REFILL_NO_LETTERS_DETAIL,
   isHeClientCancelPauseReason,
+  notifyHeRefillHold,
   pauseHeAutoPipelineRefill,
+  type HeRefillCampaignVerdictDetail,
+  type HeRefillSendSkipReason,
 } from '../autoPipeline';
+// Желание клиента по шаблону запуска (Pause / Resume кабинета) — его
+// перечитывает хук владения перед каждым чанком (readHeRefillOwnershipLoss).
+import { readHeEngClientStates } from '../engCampaignStatus';
+import { readHeEngSendingAccess } from '../engSendingAccess';
 // Алерт команде в health-бот: кабинет ENG пишет клиенту «команда уже
 // работает», и это правда только потому, что пауза по ёмкости сообщает о себе
 // здесь (см. alertRefillCapacityStop). Тем же каналом — ночь, все строки
@@ -538,6 +567,14 @@ const REFILL_CANCELLED_ERROR = 'Cancelled by user';
 const REFILL_CANCEL_MARKERS = new Set(['cancelled by user', 'отменено пользователем']);
 
 /**
+ * Начало текста отказа долива, пропущенного шагом 4c (кампании запуска не
+ * берут контакты); за ним — машинная причина и подробность. Читается только
+ * людьми (refill_result.error, строка прогона, лог); машинный признак —
+ * stats.sending_skip.
+ */
+const REFILL_SENDING_SKIP_NOTE = 'долив пропущен до отправки: кампании запуска не берут контакты';
+
+/**
  * Прогон оборван ОТМЕНОЙ клиентом, а не сторожем простоя.
  *
  * Сигнал стадии обрывают ровно двое (worker/hypothesisEngine.ts, handleJob):
@@ -569,7 +606,28 @@ function refillUserCancelled(ctx: HeStageContext): boolean {
  *  - 'refill_cancelled' — ночной добор проекта на паузе ОТМЕНЫ клиентом
  *    (isHeClientCancelPauseReason). Роут кабинета пишет паузу раньше, чем
  *    отменяет джобы, поэтому эта ветка ловит отмену и в миллисекунды между
- *    его записями, и когда запись отмены джоб у него не легла вовсе.
+ *    его записями, и когда запись отмены джоб у него не легла вовсе;
+ *  - 'client_paused' — клиент нажал Pause запуска, в который доливает ночь
+ *    (he_eng_launch_sending = 'paused'; роут паузы пишет его ДО паузы кампаний
+ *    у рассыльщика). Читается, только когда вызывающий передал шаблон (шаг 4c
+ *    его пропустил — market='us'). Это НЕ отмена: прогон перестаёт
+ *    отправлять, а итог ночи — пропуск шага 4c, если ничего не дошло, или
+ *    обычная доставка того, что ушло до паузы (runHeRefillAppend, «ПАУЗА
+ *    КЛИЕНТА ВО ВРЕМЯ ЗАГРУЗКИ»): неотправленные компании ждут в очереди
+ *    переноса. Отмена из списка выше выигрывает у паузы;
+ *  - 'top_up_off' — клиент выключил «Daily top-up» проекта
+ *    (he_auto_pipeline_configs.enabled ≠ true или строки нет);
+ *  - 'access_turned_off' / 'access_not_enabled' — отправку аккаунта владельца
+ *    проекта выключил сотрудник / она не включена (engSendingAccess);
+ *  - 'unavailable' — не прочиталось что-то из проверок us: владелец проекта,
+ *    выключатель аккаунта, желание клиента, отдельное чтение «Daily top-up».
+ *    Fail-closed, но не сбой ночи: тот же пропуск 'unavailable', что у шага
+ *    4c, — иначе блип чтения шёл бы в серию отказов и со второй ночи подряд
+ *    выжигал бы оплаченные компании.
+ *    Эти — как 'client_paused' (тот же шаблон-условие: только us, после
+ *    шага 4c): не отмена, а остановка отправки — следующие чанки не уходят,
+ *    неотправленные компании ждут в очереди переноса, бронь их не списывает,
+ *    пропуск — та же причина шага 4c (stats.sending_skip).
  * НЕ потеря владения:
  *  - джоба 'running' — наша;
  *  - джоба 'pending' / 'done' / 'failed' — строку переписал двойник при
@@ -592,13 +650,46 @@ type HeRefillOwnershipLoss =
   | 'job_missing'
   | 'base_cancelled'
   | 'base_missing'
-  | 'refill_cancelled';
+  | 'refill_cancelled'
+  | 'client_paused'
+  | 'top_up_off'
+  | 'access_turned_off'
+  | 'access_not_enabled'
+  | 'unavailable';
+
+/**
+ * Остановки отправки по решению клиента или аккаунта — не отмена: прогон
+ * перестаёт слать, итог — пропуск шага 4c этой причиной (или доставка того,
+ * что ушло раньше); неотправленные компании — в очередь переноса.
+ */
+type HeRefillSendStop = Extract<
+  HeRefillOwnershipLoss,
+  'client_paused' | 'top_up_off' | 'access_turned_off' | 'access_not_enabled' | 'unavailable'
+>;
+
+const REFILL_SEND_STOP_TEXT: Record<HeRefillSendStop, string> = {
+  client_paused: 'клиент нажал Pause',
+  top_up_off: 'клиент выключил ежедневный добор',
+  access_turned_off: 'сотрудник выключил отправку аккаунта',
+  access_not_enabled: 'отправка аккаунта не включена',
+  unavailable: 'проверка «вправе ли отправлять» не прочиталась (владелец, выключатель или желание клиента)',
+};
+
+function isHeRefillSendStop(loss: HeRefillOwnershipLoss): loss is HeRefillSendStop {
+  return (
+    loss === 'client_paused' ||
+    loss === 'top_up_off' ||
+    loss === 'access_turned_off' ||
+    loss === 'access_not_enabled' ||
+    loss === 'unavailable'
+  );
+}
 
 /**
  * Прочитать, вправе ли прогон отправлять (HeRefillOwnershipLoss); null —
- * вправе. Три чтения по ключу разом, клиентом СТАДИЙ: после обрыва сигнала они
- * отвергаются, и долив уходит в отказ, который refillUserCancelled узнаёт как
- * отмену.
+ * вправе. Три чтения по ключу разом (четыре — с шаблоном: желание клиента),
+ * клиентом СТАДИЙ: после обрыва сигнала они отвергаются, и долив уходит в
+ * отказ, который refillUserCancelled узнаёт как отмену.
  *
  * FAIL-CLOSED: несостоявшееся чтение БРОСАЕТ, и долив уходит в общий отказ, не
  * отправив ни строки, — та же сторона, что у брони дневного бюджета, которая
@@ -606,20 +697,30 @@ type HeRefillOwnershipLoss =
  * решает серия отказов). Отправка, которую отмена должна была остановить, не
  * отзывается; потерянная ночь — отзывается следующей. Единственное
  * исключение — колонок паузы нет (миграция 20260930_0005, PostgREST 42703): без
- * них паузы отмены не бывает по определению.
+ * них паузы отмены не бывает по определению (желание клиента читается и тогда).
+ * Проверки us (владелец, выключатель аккаунта, желание клиента, отдельное
+ * чтение «Daily top-up») не бросают, а отвечают 'unavailable': отправка так же
+ * остановлена, но ночь — пропуск с переносом компаний, а не сбой в серию.
  */
 async function readHeRefillOwnershipLoss(
   ctx: HeStageContext,
-  ids: { jobId: string; baseId: string; projectId: string },
+  ids: { jobId: string; baseId: string; projectId: string; templateId: string | null },
 ): Promise<HeRefillOwnershipLoss | null> {
-  const [jobRes, baseRes, configRes] = await Promise.all([
+  const [jobRes, baseRes, configRes, clientStates, ownerRes] = await Promise.all([
     ctx.supabase.from('he_jobs').select('status').eq('id', ids.jobId).maybeSingle(),
     ctx.supabase.from('he_bases').select('status, error').eq('id', ids.baseId).maybeSingle(),
     ctx.supabase
       .from('he_auto_pipeline_configs')
-      .select('refill_paused_at, refill_pause_reason')
+      // us (шаблон передан) — и переключатель «Daily top-up» тем же чтением.
+      .select(ids.templateId ? 'refill_paused_at, refill_pause_reason, enabled' : 'refill_paused_at, refill_pause_reason')
       .eq('project_id', ids.projectId)
       .maybeSingle(),
+    // Не бросает: таблица не читается — null (ниже — тот же fail-closed).
+    ids.templateId ? readHeEngClientStates(ctx.supabase, [ids.templateId]) : Promise.resolve(null),
+    // us: владелец проекта — для выключателя отправки аккаунта.
+    ids.templateId
+      ? ctx.supabase.from('he_projects').select('created_by').eq('id', ids.projectId).maybeSingle()
+      : Promise.resolve(null),
   ]);
   if (jobRes.error) throw new Error(`he_jobs ownership read: ${jobRes.error.message}`);
   const jobRow = jobRes.data as { status?: unknown } | null;
@@ -630,14 +731,42 @@ async function readHeRefillOwnershipLoss(
   if (!baseRow) return 'base_missing';
   const baseError = typeof baseRow.error === 'string' ? baseRow.error.trim().toLowerCase() : '';
   if (baseRow.status === 'failed' && REFILL_CANCEL_MARKERS.has(baseError)) return 'base_cancelled';
-  if (configRes.error) {
-    if ((configRes.error as { code?: string }).code === '42703') return null;
+  if (configRes.error && (configRes.error as { code?: string }).code !== '42703') {
     throw new Error(`he_auto_pipeline_configs ownership read: ${configRes.error.message}`);
   }
-  const config = configRes.data as { refill_paused_at?: unknown; refill_pause_reason?: unknown } | null;
+  const config = (configRes.error ? null : configRes.data) as
+    | { refill_paused_at?: unknown; refill_pause_reason?: unknown }
+    | null;
   const paused = typeof config?.refill_paused_at === 'string' && config.refill_paused_at !== '';
   const reason = typeof config?.refill_pause_reason === 'string' ? config.refill_pause_reason : null;
-  return paused && isHeClientCancelPauseReason(reason) ? 'refill_cancelled' : null;
+  if (paused && isHeClientCancelPauseReason(reason)) return 'refill_cancelled';
+  if (!ids.templateId) return null;
+  // us — тот же порядок, что у гейта ночи (createHeRefillSendGate): «Daily
+  // top-up», выключатель аккаунта, пауза клиента. Всё fail-closed; не
+  // прочиталось — 'unavailable' (пропуск с переносом, а не сбой ночи).
+  let enabled: unknown;
+  if (configRes.error) {
+    // 42703 (колонок паузы нет) пропущен выше — переключатель читается отдельно.
+    const { data, error } = await ctx.supabase
+      .from('he_auto_pipeline_configs')
+      .select('enabled')
+      .eq('project_id', ids.projectId)
+      .maybeSingle();
+    if (error) return 'unavailable';
+    enabled = (data as { enabled?: unknown } | null)?.enabled;
+  } else {
+    enabled = (configRes.data as { enabled?: unknown } | null)?.enabled;
+  }
+  if (enabled !== true) return 'top_up_off';
+  if (!ownerRes || ownerRes.error) return 'unavailable';
+  const owner = (ownerRes.data as { created_by?: unknown } | null)?.created_by;
+  if (typeof owner !== 'string' || !owner) return 'unavailable';
+  const access = await readHeEngSendingAccess(ctx.supabase, owner);
+  if (access.state === 'revoked') return 'access_turned_off';
+  if (access.state === 'not_enabled') return 'access_not_enabled';
+  if (access.state === 'unavailable' || access.state === 'error') return 'unavailable';
+  if (clientStates === null) return 'unavailable';
+  return clientStates.get(ids.templateId)?.state === 'paused' ? 'client_paused' : null;
 }
 
 /** Статистика воронки долива (he_auto_pipeline_runs.stats + refill_result). */
@@ -899,6 +1028,20 @@ export interface HeRefillStats {
    * (engDashboard: «refill cancelled»).
    */
   cancelled?: true;
+  /**
+   * Долив пропущен до того, как провайдер получил хоть строку: кампании
+   * запуска не берут контакты (шаг 4c, checkHeRefillSendTarget — пауза
+   * клиента, выключенный «Daily top-up», выключенная отправка аккаунта,
+   * кампания завершена, остановлена, шлёт не из ящиков пула проекта или её
+   * статус не подтверждён; до брони) либо клиент нажал Pause уже во время
+   * загрузки, до первого чанка ('client_paused', проверка владения). Пишется
+   * только у отказа, и только когда отказ — это пропуск, а не отмена (у
+   * отмены — `cancelled`).
+   * Читатели: refillFailStreak (пропуск — не свойство среза, в серию не идёт),
+   * readCarryoverByVertical тика (такая ночь не решает судьбу очереди) и лента
+   * кабинета (engDashboard: «daily top-up skipped — …»).
+   */
+  sending_skip?: HeRefillSendSkipReason;
   /**
    * Исход брони дневного бюджета (he_reserve_refill_daily_budget). Пишется,
    * когда бронь запрашивалась; нет ключа — отправлять было нечего и бронь не
@@ -1838,8 +1981,10 @@ function alertRefillLettersHeld(
  * причине: причину opsAlert вымарывает (redactSecrets), и UUID кампании стал
  * бы «[redacted]». Повтор той же вертикали в течение 6 ч гасит дедупликация
  * opsAlert (вид 'segment_refused', окно по вертикали): несколько мёртвых
- * сегментов одной ночи — одна новость, следующая ночь пишет снова, пока
- * кампанию не вернули. `void` и рынок — как у alertRefillLettersHeld.
+ * сегментов одной ночи — одна новость. Следующие ночи удалённую кампанию
+ * видит уже шаг 4c (404 → строки сегмента удерживаются) и пишет свой алерт
+ * ('segments_held', notifyHeRefillHold). `void` и рынок — как у
+ * alertRefillLettersHeld.
  */
 function alertRefillSegmentRefused(
   job: HeJob,
@@ -1934,6 +2079,8 @@ function refillSegmentRefusalsNote(stats: HeRefillStats): string {
  *  - 'appended' / 'no_new' → 'success';
  *  - 'failed':
  *      · stats.cancelled — отмена клиентом → 'skip' (решение человека);
+ *      · stats.sending_skip — кампании запуска не брали контакты, долив
+ *        пропущен до провайдера (шаг 4c) → 'skip': про срез это не говорит;
  *      · stats.budget_outcome 'cap_exhausted' — бюджет проекта не дал базе ни
  *        строки, её компании вне серии ушли в очередь переноса (market='us')
  *        или вернулись в пул → 'skip';
@@ -1966,8 +2113,10 @@ function refillStreakVerdict(
     const stats = (run.stats && typeof run.stats === 'object' ? run.stats : {}) as {
       cancelled?: unknown;
       budget_outcome?: unknown;
+      sending_skip?: unknown;
     };
     if (stats.cancelled === true) return 'skip';
+    if (typeof stats.sending_skip === 'string') return 'skip';
     if (stats.budget_outcome === 'cap_exhausted' || stats.budget_outcome === 'already_reserved') {
       return 'skip';
     }
@@ -2077,6 +2226,8 @@ interface RefillTemplatePick {
   /** Основная кампания запуска (segment=null) — цель долива по умолчанию. */
   campaignId: string;
   presetId: string;
+  /** Шаблон этого запуска — по нему читается пауза клиента (шаг 4c). */
+  templateId: string;
   operatorMapping: HeOperatorMapping[] | undefined;
   /**
    * he_templates.letters как есть — письма, из которых запуск собрал кампанию
@@ -2218,7 +2369,13 @@ export function pickRefillTemplate(
         Date.parse(launch.created_at) ||
         Date.parse(typeof t.created_at === 'string' ? t.created_at : '') ||
         0;
-      return { launch, operatorMapping: plan?.operator_mapping, letters: t.letters, ts };
+      return {
+        launch,
+        templateId: typeof t.id === 'string' ? t.id : '',
+        operatorMapping: plan?.operator_mapping,
+        letters: t.letters,
+        ts,
+      };
     })
     .filter((t): t is NonNullable<typeof t> => t !== null);
   if (launched.length === 0) return null;
@@ -2246,6 +2403,7 @@ export function pickRefillTemplate(
       return {
         campaignId: main.campaign_id,
         presetId: t.launch.preset_id,
+        templateId: t.templateId,
         operatorMapping: t.operatorMapping,
         letters: t.letters,
         segmentCampaigns,
@@ -2254,6 +2412,7 @@ export function pickRefillTemplate(
     return {
       campaignId: t.launch.campaign_id,
       presetId: t.launch.preset_id,
+      templateId: t.templateId,
       operatorMapping: t.operatorMapping,
       letters: t.letters,
       segmentCampaigns: new Map(),
@@ -2391,13 +2550,23 @@ function selectRefillLeadsByCompany<L extends object>(input: {
  *     джобы воркера журналирует сам llm.ts (журнал расхода ENG, costTelemetry).
  *     Вызов классификатора — один на прогон, своих повторов поверх его
  *     собственных у раскладки нет.
- *  4. КУДА. Условие сегмента, у которого есть кампания этого запуска, — в неё.
+ *  4. КУДА — по вердикту кампании сегмента из шага 4c (segmentVerdicts).
+ *     Условие сегмента, чья кампания этого запуска ОТПРАВЛЯЕТ, — в неё.
  *     «Ни одно не подходит» (null), строка без ответа (батч упал, строка не
- *     размечена, условие не из списка) и сегмент без своей кампании (его
- *     кампания не создалась — она в pending запуска) — в ОСНОВНУЮ: основной
- *     текст этой строке читается верно (его проверил шаг 3a), и ровно его долив
- *     слал до правки. Классификатор отказал целиком — вся ночь в основную,
- *     строкой лога, без повторной платной попытки.
+ *     размечена, условие не из списка), сегмент без своей кампании (его
+ *     кампания не создалась — она в pending запуска) и сегмент, чья кампания
+ *     ЗАВЕРШЕНА (3), — в ОСНОВНУЮ: основной текст этой строке читается верно
+ *     (его проверил шаг 3a), и ровно его долив слал до правки. Классификатор
+ *     отказал целиком — вся ночь в основную, строкой лога, без повторной
+ *     платной попытки. Сегмент, чья кампания НЕ ОТПРАВЛЯЕТ иначе —
+ *     остановлена рассыльщиком (-99/-1/-2), удалена (404), стоит (0/2) или
+ *     статус не подтверждён, — свою строку УДЕРЖИВАЕТ (HeRefillRouting.held):
+ *     она не уходит никуда, её компания (если другой её адрес не ушёл) ждёт в
+ *     очереди переноса, а бронь дня её не списывает. В основную её не
+ *     отдаём: та шлёт из тех же ящиков, и это был бы обход остановки
+ *     рассыльщика. Алерт команде — у шага 4c. Сбой раскладки или
+ *     непрочитанный журнал доставки при такой кампании удерживают ВСЮ пачку:
+ *     какие строки её, не знаем.
  *  5. ПИСЬМА СЕГМЕНТА. Шаг 3a проверил основной текст; строка, уходящая в
  *     сегмент, проверяется тем же гейтом по текстам кампании сегмента
  *     (heRefillUnfilledRows с segmentWhen). Не прошла — в основную.
@@ -2408,8 +2577,12 @@ function selectRefillLeadsByCompany<L extends object>(input: {
  *     (б) Между прогонами: адрес, который общий журнал доставки
  *         (client_campaign_contact_ledger; строку appendLeadsToClientCampaign
  *         пишет ДО запроса к рассыльщику и без неё запрос не делает) уже видел
- *         в кампании ЭТОГО запуска, идёт в ту же кампанию, а не туда, куда его
- *         разложит модель сегодня. Повторно отправляют строки два пути:
+ *         в кампании ЭТОГО запуска (журнал читается по ВСЕМ его кампаниям,
+ *         отправляющим и нет), идёт в ту же кампанию, а не туда, куда его
+ *         разложит модель сегодня. Закреплённый за НЕОТПРАВЛЯЮЩЕЙ кампанией
+ *         (п. 4, включая завершённую) удерживается и считается возможно
+ *         доставленным: ни в основную, ни в перенос — та кампания могла ему
+ *         писать. Повторно отправляют строки два пути:
  *         наследник перехваченной брони ('reclaimed') и компании, вернувшиеся в
  *         пул после частичной доставки (ремонт воркера, отмена посреди долива,
  *         см. refillLeadsReachedProvider). В ту же кампанию дубль отсеет
@@ -2423,9 +2596,10 @@ function selectRefillLeadsByCompany<L extends object>(input: {
  *         что у долива до правки. Строка журнала из партии, которую рассыльщик
  *         отклонил ЯВНО (4xx), адрес не закрепляет: лида в той кампании нет
  *         (readHeRefillLedgerPins, п. 7г).
- *  7. ОТКАЗ СЕГМЕНТНОЙ КАМПАНИИ (шаг 6b runHeRefillAppend). Статус кампаний у
- *     рассыльщика долив не читает, и кампанию сегмента могли удалить или
- *     заархивировать: её группа получает явный отказ (404/400 —
+ *  7. ОТКАЗ СЕГМЕНТНОЙ КАМПАНИИ (шаг 6b runHeRefillAppend). Статус кампаний
+ *     долив читает до раскладки (шаг 4c), и неотправляющие сегменты свои
+ *     строки держат (п. 4), но кампанию сегмента могли удалить или
+ *     заархивировать и после этого чтения: её группа получает явный отказ (404/400 —
  *     refillSegmentCampaignRefusal: 4xx, не 429 и не ёмкость, ни строки не
  *     принято). До раскладки эти строки уходили в основную кампанию и
  *     отправлялись; без этого пункта они читались бы «возможно, доставлены»:
@@ -2474,10 +2648,10 @@ function selectRefillLeadsByCompany<L extends object>(input: {
  *     (е) Видно: stats.segment_refusals (кампания, код ответа, лидов,
  *         закреплённых, итог), строка лога и алерт команде (opsAlert, вид
  *         'segment_refused', окно 6 ч по вертикали) — оба ПОСЛЕ того, как итог
- *         переотправки известен. Мёртвая кампания сегмента отказывает каждую ночь,
- *         пока команда её не вернёт или не перезапустит шаблон: один лишний
- *         запрос и классификация строк этого сегмента за ночь, а текст
- *         сегмента не получает никто.
+ *         переотправки известен. Следующей ночью шаг 4c читает удалённую
+ *         кампанию как 404 ('stopped'), и её строки уже удерживаются (п. 4), а
+ *         не переотправляются; текст сегмента не получает никто, пока команда
+ *         не вернёт кампанию или не перезапустит шаблон.
  */
 
 /**
@@ -2661,13 +2835,36 @@ async function readHeRefillCampaignAccepted(
   }
 }
 
+/** Итог раскладки (routeHeRefillSegments): группы на отправку и удержанное (п. 4). */
+interface HeRefillRouting<L> {
+  groups: Array<HeRefillCampaignGroup<L>>;
+  /** Раскладка читала журнал или звала модель — владение перепроверить до отправки. */
+  worked: boolean;
+  /**
+   * Строки, которые этой ночью не уходят НИКУДА: их сегментная кампания не
+   * отправляет (п. 4) или закрепила их за собой (п. 6б). Вместе с группами —
+   * разбиение пачки.
+   */
+  held: L[];
+  /**
+   * Из `held` — закреплённые журналом доставки за неотправляющей кампанией
+   * (п. 6б): она могла им писать, поэтому они «возможно доставлены» — не в
+   * основную и не в перенос.
+   */
+  heldPinned: ReadonlySet<L>;
+}
+
 /**
  * Разложить пачку ночи по кампаниям запуска — см. блок «РАСКЛАДКА» выше.
- * Вызывающий скоупит market='us'. Всегда возвращает РАЗБИЕНИЕ `leads`
- * (каждый лид ровно в одной группе, группы непустые; основная — первой, затем
- * сегменты в порядке условий писем). `worked` — раскладка читала журнал или
+ * Вызывающий скоупит market='us'. Всегда возвращает РАЗБИЕНИЕ `leads`:
+ * каждый лид ровно в одной группе или в `held`, группы непустые; основная —
+ * первой, затем сегменты в порядке условий писем. `segmentCampaigns` — ВСЕ
+ * сегментные кампании запуска, `segmentVerdicts` — их вердикты шага 4c (нет
+ * вердикта — как «не подтверждена»). `worked` — раскладка читала журнал или
  * звала модель, то есть прошло время и владение надо перепроверить до первой
- * отправки. Не бросает: любой сбой внутри — основная кампания.
+ * отправки. Не бросает: любой сбой внутри — вся пачка в основную кампанию,
+ * а если у запуска есть неотправляющая сегментная кампания — вся пачка
+ * удержана (какие строки её, не знаем, а обходить её через основную нельзя).
  */
 async function routeHeRefillSegments<L extends { email: string }>(
   ctx: HeStageContext,
@@ -2676,30 +2873,55 @@ async function routeHeRefillSegments<L extends { email: string }>(
     sourceOf: ReadonlyMap<object, HeRefillLeadSource>;
     mainCampaignId: string;
     segmentCampaigns: ReadonlyMap<string, string>;
+    segmentVerdicts: ReadonlyMap<string, HeRefillCampaignVerdictDetail>;
     letters: unknown;
     ownerUserId: string;
     usage: HeUsage;
   },
-): Promise<{ groups: Array<HeRefillCampaignGroup<L>>; worked: boolean }> {
-  const allMain: HeRefillCampaignGroup<L> = {
-    campaignId: input.mainCampaignId,
-    segment: null,
-    leads: [...input.leads],
-    pinned: new Set(),
+): Promise<HeRefillRouting<L>> {
+  const allMain: HeRefillRouting<L> = {
+    groups: [{ campaignId: input.mainCampaignId, segment: null, leads: [...input.leads], pinned: new Set() }],
+    worked: false,
+    held: [],
+    heldPinned: new Set(),
   };
+  // Класс сегментной кампании (п. 4): отправляет / завершена / остальное.
+  const classOf = (campaignId: string): 'send' | 'done' | 'hold' => {
+    const verdict = input.segmentVerdicts.get(campaignId)?.verdict;
+    return verdict === 'sending' ? 'send' : verdict === 'completed' ? 'done' : 'hold';
+  };
+  // ВСЕ сегментные кампании запуска (не основная): закрепления журнала
+  // читаются по каждой, и по каждой неотправляющей адрес удерживается (п. 6б).
+  const segmentIds = [...new Set(input.segmentCampaigns.values())].filter(
+    (id) => id && id !== input.mainCampaignId,
+  );
+  const notSending = new Set(segmentIds.filter((id) => classOf(id) !== 'send'));
+  if (input.leads.length === 0 || segmentIds.length === 0) return allMain;
+  /** Сбой раскладки: неотправляющий сегмент есть — удержать всё, нет — основная. */
+  const fallback = (): HeRefillRouting<L> =>
+    notSending.size > 0
+      ? { groups: [], worked: true, held: [...input.leads], heldPinned: new Set() }
+      : { ...allMain, worked: true };
   const whens = heRefillSegmentWhens(input.letters);
-  // Условия, у которых есть кампания этого запуска (и это не основная).
-  const routable = whens.filter((when) => {
+  // Условия, у которых есть кампания этого запуска (и это не основная): куда
+  // строка уходит (отправляет) и где она держится (не отправляет и не
+  // завершена). Условие завершённой кампании — как условие без кампании.
+  const withCampaign = whens.filter((when) => {
     const id = input.segmentCampaigns.get(when);
     return id !== undefined && id !== input.mainCampaignId;
   });
-  if (input.leads.length === 0 || routable.length === 0) return { groups: [allMain], worked: false };
+  const routable = withCampaign.filter((when) => classOf(input.segmentCampaigns.get(when)!) === 'send');
+  const holding = withCampaign.filter((when) => classOf(input.segmentCampaigns.get(when)!) === 'hold');
   const routableSet = new Set(routable);
+  const holdingSet = new Set(holding);
+  const completedWhens = new Set(withCampaign.filter((when) => classOf(input.segmentCampaigns.get(when)!) === 'done'));
   const whenOfCampaign = new Map<string, string>();
   for (const when of routable) {
     const id = input.segmentCampaigns.get(when)!;
     if (!whenOfCampaign.has(id)) whenOfCampaign.set(id, when);
   }
+  // Модель нужна, только если строке есть куда уйти или где держаться.
+  const classifyNeeded = routable.length > 0 || holding.length > 0;
   const emailOf = (lead: L) => lead.email.trim().toLowerCase();
 
   try {
@@ -2711,22 +2933,42 @@ async function routeHeRefillSegments<L extends { email: string }>(
     }
     /** Адрес → условие сегмента или null (основная кампания). */
     const decided = new Map<string, string | null>();
-    const segmentCandidates: Array<{ lead: L; when: string; pinned: boolean }> = [];
+    const segmentCandidates: Array<{ lead: L; when: string; pinned: boolean; hold: boolean }> = [];
     const toClassify: L[] = [];
     /** Адреса, ушедшие в сегмент ПО ЗАКРЕПЛЕНИЮ журнала (п. 6б, п. 7г). */
     const pinnedToSegment = new Set<string>();
+    /** Адреса, удержанные этой ночью (п. 4), и из них закреплённые (п. 6б). */
+    const heldEmails = new Set<string>();
+    const heldPinnedEmails = new Set<string>();
 
-    // п. 6б: закрепление за кампанией, куда адрес уже уходил.
+    // п. 6б: закрепление за кампанией, куда адрес уже уходил, — по ВСЕМ
+    // кампаниям запуска, включая неотправляющие.
     const pins = await readHeRefillLedgerPins(ctx, {
       ownerUserId: input.ownerUserId,
-      campaignIds: [input.mainCampaignId, ...whenOfCampaign.keys()],
+      campaignIds: [input.mainCampaignId, ...segmentIds],
       emails: [...firstOf.keys()],
     });
+    if (pins === null && notSending.size > 0) {
+      // Журнал не прочитан, а неотправляющая кампания есть: адрес, который она
+      // уже получила, отсюда не отличить, и в основную он ушёл бы второй
+      // цепочкой. Ночь держит всё — компании ждут в очереди переноса.
+      stageLog(
+        ctx,
+        `[base_collect] refill: журнал доставки не прочитан, а сегментных кампаний не отправляет ${notSending.size} — ` +
+          `все ${input.leads.length} лид. этой ночью удержаны (их компании — в очередь переноса)`,
+      );
+      return fallback();
+    }
     let pinnedMain = 0;
     for (const [email, lead] of firstOf) {
       const pinned = pins?.get(email);
       if (pinned === undefined) {
-        toClassify.push(lead);
+        if (classifyNeeded) toClassify.push(lead);
+        else decided.set(email, null);
+        continue;
+      }
+      if (notSending.has(pinned)) {
+        heldPinnedEmails.add(email);
         continue;
       }
       const when = whenOfCampaign.get(pinned);
@@ -2734,7 +2976,7 @@ async function routeHeRefillSegments<L extends { email: string }>(
         decided.set(email, null);
         pinnedMain += 1;
       } else {
-        segmentCandidates.push({ lead, when, pinned: true });
+        segmentCandidates.push({ lead, when, pinned: true, hold: false });
       }
     }
 
@@ -2761,6 +3003,7 @@ async function routeHeRefillSegments<L extends { email: string }>(
     let answeredNone = 0;
     let unanswered = 0;
     let noCampaign = 0;
+    let completedToMain = 0;
     toClassify.forEach((lead, index) => {
       const email = emailOf(lead);
       const answer = classified?.assignments.get(index);
@@ -2770,16 +3013,22 @@ async function routeHeRefillSegments<L extends { email: string }>(
       } else if (answer === null) {
         decided.set(email, null);
         answeredNone += 1;
-      } else if (!routableSet.has(answer)) {
-        decided.set(email, null);
-        noCampaign += 1;
+      } else if (routableSet.has(answer) || holdingSet.has(answer)) {
+        segmentCandidates.push({ lead, when: answer, pinned: false, hold: holdingSet.has(answer) });
       } else {
-        segmentCandidates.push({ lead, when: answer, pinned: false });
+        decided.set(email, null);
+        if (completedWhens.has(answer)) completedToMain += 1;
+        else noCampaign += 1;
       }
     });
 
     // п. 5: письма сегмента — по паре «сегмент + набор колонок источника».
-    const gateSets = new Map<string, Array<{ lead: L; when: string; pinned: boolean; source: HeRefillLeadSource }>>();
+    // Строка, которой текст сегмента прочитался бы неверно, уходит в основную
+    // и у неотправляющего сегмента: туда её отправил бы и отправляющий.
+    const gateSets = new Map<
+      string,
+      Array<{ lead: L; when: string; pinned: boolean; hold: boolean; source: HeRefillLeadSource }>
+    >();
     let heldBySegmentText = 0;
     let noSource = 0;
     for (const candidate of segmentCandidates) {
@@ -2816,6 +3065,10 @@ async function routeHeRefillSegments<L extends { email: string }>(
           heldBySegmentText += 1;
           continue;
         }
+        if (candidate.hold) {
+          heldEmails.add(email);
+          continue;
+        }
         decided.set(email, when);
         if (candidate.pinned) {
           pinnedSegment += 1;
@@ -2826,11 +3079,23 @@ async function routeHeRefillSegments<L extends { email: string }>(
       }
     }
 
-    // Разбиение пачки: каждый лид — туда, куда решён его адрес.
+    // Разбиение пачки: каждый лид — туда, куда решён его адрес, или в удержанные.
     const mainLeads: L[] = [];
     const byWhen = new Map<string, L[]>();
+    const held: L[] = [];
+    const heldPinned = new Set<L>();
     for (const lead of input.leads) {
-      const when = decided.get(emailOf(lead)) ?? null;
+      const email = emailOf(lead);
+      if (heldPinnedEmails.has(email)) {
+        held.push(lead);
+        heldPinned.add(lead);
+        continue;
+      }
+      if (heldEmails.has(email)) {
+        held.push(lead);
+        continue;
+      }
+      const when = decided.get(email) ?? null;
       if (when === null) {
         mainLeads.push(lead);
         continue;
@@ -2854,22 +3119,26 @@ async function routeHeRefillSegments<L extends { email: string }>(
         });
       }
     }
-    // Страховка разбиения: группы обязаны покрыть пачку ровно (иначе кап и
-    // позиции попыток разошлись бы с тем, что ушло). Не сошлось — основная.
-    const covered = groups.reduce((sum, group) => sum + group.leads.length, 0);
+    // Страховка разбиения: группы и удержанные обязаны покрыть пачку ровно
+    // (иначе кап и позиции попыток разошлись бы с тем, что ушло).
+    const covered = groups.reduce((sum, group) => sum + group.leads.length, 0) + held.length;
     if (covered !== input.leads.length) {
       stageLog(
         ctx,
         `[base_collect] refill: раскладка по сегментам не сошлась (${covered} из ${input.leads.length}) — ` +
-          'вся пачка уходит в основную кампанию',
+          (notSending.size > 0
+            ? 'вся пачка удержана: у запуска есть неотправляющая сегментная кампания'
+            : 'вся пачка уходит в основную кампанию'),
       );
-      return { groups: [allMain], worked: true };
+      return fallback();
     }
     const cost = classified?.usage.costUsd ?? 0;
     stageLog(
       ctx,
       `[base_collect] refill: сегменты запуска — адресов ${firstOf.size}: ` +
-        `закреплено журналом доставки ${pinnedMain + pinnedSegment} (основная ${pinnedMain}, сегменты ${pinnedSegment})` +
+        `закреплено журналом доставки ${pinnedMain + pinnedSegment + heldPinnedEmails.size} ` +
+        `(основная ${pinnedMain}, сегменты ${pinnedSegment}, неотправляющие сегменты ${heldPinnedEmails.size} — ` +
+        'не отправляются, возможно доставлены)' +
         (pins === null ? ' [журнал не прочитан]' : '') +
         `, классифицировано ${toClassify.length}` +
         (classified
@@ -2884,22 +3153,27 @@ async function routeHeRefillSegments<L extends { email: string }>(
           : toClassify.length > 0
             ? ' (классификатор отказал)'
             : '') +
-        `, в сегменты ${toSegment}; в основную: «ни один сегмент» ${answeredNone}, без ответа ${unanswered}, ` +
-        `сегмент без кампании ${noCampaign}, текст сегмента прочитался бы неверно ${heldBySegmentText}` +
+        `, в сегменты ${toSegment}, удержано неотправляющими сегментами ${heldEmails.size} (в очередь переноса); ` +
+        `в основную: «ни один сегмент» ${answeredNone}, без ответа ${unanswered}, ` +
+        `сегмент без кампании ${noCampaign}, сегмент завершён ${completedToMain}, ` +
+        `текст сегмента прочитался бы неверно ${heldBySegmentText}` +
         (noSource > 0 ? `, строка лида не найдена ${noSource}` : '') +
         '. ' +
         `Лидов по кампаниям: ${groups
           .map((group) => `${group.segment === null ? 'основная' : `«${group.segment.slice(0, 60)}»`} ${group.leads.length}`)
-          .join(', ')}`,
+          .join(', ') || 'нет'}` +
+        (held.length > 0 ? `; удержано ${held.length}` : ''),
     );
-    return { groups, worked: true };
+    return { groups, worked: true, held, heldPinned };
   } catch (e) {
     stageLog(
       ctx,
       `[base_collect] refill: раскладка по сегментам не удалась (${e instanceof Error ? e.message : String(e)}) — ` +
-        'вся пачка уходит в основную кампанию',
+        (notSending.size > 0
+          ? 'вся пачка удержана: у запуска есть неотправляющая сегментная кампания'
+          : 'вся пачка уходит в основную кампанию'),
     );
-    return { groups: [allMain], worked: true };
+    return fallback();
   }
 }
 
@@ -4433,7 +4707,21 @@ export async function runHeRefillAppend(args: {
    * assertRefillOwnership перед броском, читает catch: это отмена, а не сбой
    * среза. Живёт ВНЕ try по той же причине, что и бронь.
    */
-  let ownershipLoss: HeRefillOwnershipLoss | null = null;
+  let ownershipLoss: Exclude<HeRefillOwnershipLoss, HeRefillSendStop> | null = null;
+  /**
+   * Шаблон запуска, чью паузу клиентом перечитывает проверка владения: ставит
+   * шаг 4c, когда кампании запуска приняты (только market='us'); до него —
+   * null, и пауза не читается (её решает сам шаг 4c).
+   */
+  let clientPauseTemplateId: string | null = null;
+  /**
+   * Проверка владения увидела остановку отправки (HeRefillSendStop: Pause
+   * клиента, выключенный «Daily top-up», выключенная или не включённая
+   * отправка аккаунта) и бросила — это не отмена, а остановка загрузки: разбор
+   * — «ПАУЗА КЛИЕНТА ВО ВРЕМЯ ЗАГРУЗКИ» в шаге 6 и пропуск этой причиной в
+   * catch'е. Живёт ВНЕ try, как ownershipLoss.
+   */
+  let sendStop: HeRefillSendStop | null = null;
   /**
    * Проверка владения перед провайдером: прямо перед вызовом долива и в хуке
    * перед КАЖДЫМ HTTP-запросом чанка (см. «ОТМЕНА ВЫИГРЫВАЕТ У ОТПРАВКИ» в
@@ -4445,7 +4733,12 @@ export async function runHeRefillAppend(args: {
       jobId: job.id,
       baseId: base.id,
       projectId: job.project_id,
+      templateId: clientPauseTemplateId,
     });
+    if (loss && isHeRefillSendStop(loss)) {
+      sendStop = loss;
+      throw new Error(`${REFILL_SENDING_SKIP_NOTE} (${loss}): ${REFILL_SEND_STOP_TEXT[loss]} во время загрузки`);
+    }
     if (loss) {
       ownershipLoss = loss;
       throw new Error(`долив остановлен перед отправкой: прогон больше не вправе отправлять (${loss})`);
@@ -4479,6 +4772,14 @@ export async function runHeRefillAppend(args: {
   const carriedHeld = new Set<string>();
   /** Пачка, отданная провайдеру (позиции = индексы attempted/deferred). */
   let sentBatch: readonly object[] = [];
+  /**
+   * Хвост sentBatch — строки, которые раскладка УДЕРЖАЛА (неотправляющий
+   * сегмент, п. 4 «РАСКЛАДКИ»): сколько их и позиции закреплённых за
+   * неотправляющей кампанией (п. 6б) — их читают «возможно доставленными» обе
+   * ветки, успешная и catch, чтобы компания не ушла ни в основную, ни в перенос.
+   */
+  let heldCount = 0;
+  let heldReached: readonly number[] = [];
   /**
    * Собственные строки-кандидаты ночи (leadRows), какой свой лид из какой
    * строки и что пережило чёрный список — очередь собственных компаний нужна
@@ -4888,6 +5189,80 @@ export async function runHeRefillAppend(args: {
       );
     }
 
+    // 4c. КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ? (S2; до брони и до провайдера). Между
+    //     постановкой ночи (03:20) и этим местом проходят часы сборки: клиент
+    //     мог нажать Pause, выключить «Daily top-up», кампания могла
+    //     завершиться или встать у рассыльщика. Та же проверка, что у тика
+    //     (autoPipeline.ts, блок «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?»): основная
+    //     кампания отправляет по свежему статусу (живое чтение перед решением),
+    //     у ENG-клиента — из ящиков пула проекта, иначе долив пропущен — отказом
+    //     ниже (catch): провайдер не получил
+    //     ничего, у market='us' компании ночи ждут в очереди переноса, как у
+    //     ночи без бюджета, перенесённые возвращаются в очередь, бронь не
+    //     бралась, серия отказов вертикали ночь не считает (stats.sending_skip).
+    //     Пропуск, который чинит только команда, — ещё и алерт
+    //     (notifyHeRefillHold).
+    //     Сегментные кампании ночь не отменяют: гейт отдаёт вердикт каждой, и
+    //     раскладка 6a решает их строки (блок «РАСКЛАДКА», п. 4): отправляющая
+    //     получает свои, завершённая отдаёт их основной, остальные держат —
+    //     строки не уходят никуда, компании ждут в очереди переноса. О
+    //     сегментах, остановленных рассыльщиком, удалённых или стоящих, — алерт
+    //     команде. С этого места Pause клиента перечитывается и перед каждым
+    //     чанком загрузки (clientPauseTemplateId → readHeRefillOwnershipLoss).
+    let segmentVerdicts: ReadonlyMap<string, HeRefillCampaignVerdictDetail> = new Map();
+    if (kept.length > 0) {
+      const sendTarget = await checkHeRefillSendTarget(ctx.supabase, job.project_id, {
+        templateId: pick.templateId,
+        presetId: pick.presetId,
+        mainCampaignId: pick.campaignId,
+        segmentCampaignIds: [...new Set(pick.segmentCampaigns.values())],
+      });
+      if (!sendTarget.allowed) {
+        runStats.sending_skip = sendTarget.reason;
+        if (sendTarget.alert) {
+          void notifyHeRefillHold({
+            projectId: job.project_id,
+            verticalId: base.vertical_id,
+            templateId: pick.templateId,
+            where: 'refill',
+            baseId: base.id,
+            alert: sendTarget.alert,
+          });
+        }
+        throw new Error(`${REFILL_SENDING_SKIP_NOTE} (${sendTarget.reason}): ${sendTarget.detail}`);
+      }
+      segmentVerdicts = sendTarget.segmentVerdicts;
+      if (args.market === 'us') clientPauseTemplateId = pick.templateId || null;
+      const notSending = [...segmentVerdicts].filter(([, v]) => v.verdict !== 'sending');
+      if (notSending.length > 0) {
+        stageLog(
+          ctx,
+          `[base_collect] refill: сегментных кампаний не отправляет ${notSending.length} из ${segmentVerdicts.size} ` +
+            `(${notSending.map(([id, v]) => `${id}: ${v.detail}`).join('; ')}) — строки завершённых уходят в основную ` +
+            `кампанию ${pick.campaignId}, строки остальных этой ночью держатся (очередь переноса)`,
+        );
+      }
+      // Команде — о том, что без неё не пройдёт: остановлена рассыльщиком,
+      // удалена или стоит. «Статус не подтверждён» — сбой чтения этой ночи,
+      // строка лога выше; завершённая отдаёт строки основной.
+      const teamFixes = notSending.filter(([, v]) => v.verdict === 'stopped' || v.verdict === 'not_sending');
+      if (teamFixes.length > 0 && args.market === 'us') {
+        void notifyHeRefillHold({
+          projectId: job.project_id,
+          verticalId: base.vertical_id,
+          templateId: pick.templateId,
+          where: 'refill',
+          baseId: base.id,
+          alert: {
+            kind: 'segments_held',
+            mainCampaignId: pick.campaignId,
+            campaigns: teamFixes.map(([id, v]) => ({ id, detail: v.detail })),
+            carryMaxDays: HE_REFILL_CARRYOVER_MAX_AGE_DAYS,
+          },
+        });
+      }
+    }
+
     // 5. Дневной кап проекта — БРОНЬ, взятая до первого запроса к рассыльщику.
     //    Кап заморожен за проектом на UTC-день, занятое считается под
     //    advisory-локом, поэтому два прогона одного проекта (в том числе два
@@ -4998,16 +5373,19 @@ export async function runHeRefillAppend(args: {
       // проверка в хуке ниже и перед каждой следующей кампанией.
       await assertRefillOwnership();
       // 6a. Раскладка по сегментным кампаниям запуска (только market='us' и
-      //     только у запуска с сегментными кампаниями; блок «РАСКЛАДКА»):
-      //     делится уже срезанная капом пачка, группы — её разбиение. Иначе —
-      //     одна группа, основная кампания: ровно прежний долив.
-      const routing =
+      //     только у запуска с сегментными кампаниями — любыми, не только
+      //     отправляющими: закрепления журнала читаются по всем; блок
+      //     «РАСКЛАДКА»): делится уже срезанная капом пачка, группы и
+      //     удержанные — её разбиение. Иначе — одна группа, основная кампания:
+      //     ровно прежний долив.
+      const routing: HeRefillRouting<(typeof toSend)[number]> =
         args.market === 'us' && pick.segmentCampaigns.size > 0
           ? await routeHeRefillSegments(ctx, {
               leads: toSend,
               sourceOf: leadSources,
               mainCampaignId: pick.campaignId,
               segmentCampaigns: pick.segmentCampaigns,
+              segmentVerdicts,
               letters: pick.letters,
               ownerUserId,
               usage,
@@ -5015,12 +5393,21 @@ export async function runHeRefillAppend(args: {
           : {
               groups: [{ campaignId: pick.campaignId, segment: null, leads: [...toSend], pinned: new Set<(typeof toSend)[number]>() }],
               worked: false,
+              held: [],
+              heldPinned: new Set<(typeof toSend)[number]>(),
             };
       // Пачка запоминается ДО вызова: позиции в attempted/deferred (и в снимке
       // частичного отказа) — индексы именно этого массива, а итог переноса
       // обязан знать, чей лид на какой позиции, и в catch'е тоже. Порядок —
-      // группы подряд: основная, затем сегменты (у одной группы это toSend).
-      sentBatch = routing.groups.flatMap((group) => group.leads);
+      // группы подряд: основная, затем сегменты (у одной группы это toSend), а
+      // В КОНЦЕ — удержанные строки неотправляющих сегментов (п. 4 раскладки):
+      // в провайдер они не идут, их позиции не бывают попыткой, поэтому их
+      // компании читаются недошедшими (перенос) — кроме закреплённых за
+      // неотправляющей кампанией: те «возможно доставлены» (heldReached).
+      sentBatch = [...routing.groups.flatMap((group) => group.leads), ...routing.held];
+      const sendCount = sentBatch.length - routing.held.length;
+      heldCount = routing.held.length;
+      heldReached = routing.held.flatMap((lead, i) => (routing.heldPinned.has(lead) ? [sendCount + i] : []));
       segmentGroups = routing.groups.filter((group) => group.segment !== null).length;
       const appendGroup = (campaignId: string, groupLeads: typeof toSend) => appendLeadsToClientCampaign({
         userId: ownerUserId,
@@ -5161,6 +5548,14 @@ export async function runHeRefillAppend(args: {
           part = await appendGroup(group.campaignId, group.leads);
           if (group.segment === null && part.attemptedIndexes.length > 0) mainAnswered = true;
         } catch (e) {
+          // ПАУЗА КЛИЕНТА ВО ВРЕМЯ ЗАГРУЗКИ: проверка владения увидела Pause
+          // (перед этой кампанией или перед её чанком) и бросила ДО запроса —
+          // дальше не шлём ничего. Принятое раньше — итог ночи (разбор после
+          // цикла); сводный снимок — тот же, что у отказа кампании.
+          if (sendStop) {
+            appended = refillGroupFailure(e, appended, offset).partialResult;
+            break;
+          }
           const refusedStatus = group.segment !== null ? refillSegmentCampaignRefusal(e) : null;
           if (refusedStatus === null) throw offset === 0 ? e : refillGroupFailure(e, appended, offset);
           // Сегментная кампания отказала явно, лидов в ней этой ночью не
@@ -5260,6 +5655,11 @@ export async function runHeRefillAppend(args: {
                       ? 'часть принята до отказа'
                       : 'ответа нет: строки считаются возможно доставленными'),
               );
+              // Pause клиента во время переотправки — та же остановка, что выше.
+              if (sendStop) {
+                appended = refillAddReachedPositions(failure.partialResult, pinnedReached);
+                break;
+              }
               throw new AppendLeadsPartialError(
                 failure.message,
                 refillAddReachedPositions(failure.partialResult, pinnedReached),
@@ -5278,7 +5678,31 @@ export async function runHeRefillAppend(args: {
         offset += group.leads.length;
         if (appended.capacityBlocked === true) break;
       }
-      appendOutcome = appended;
+      // ПАУЗА КЛИЕНТА ВО ВРЕМЯ ЗАГРУЗКИ — итог. Провайдер не получил ничего
+      // (ни принятого, ни попытки без ответа) — это пропуск шага 4c
+      // этой причиной (catch: очередь переноса, лента «daily top-up skipped —
+      // you had paused this vertical» и т. п.). Получил — обычная ночь с тем, что ушло
+      // до паузы: 'appended' с принятым, компании без единого письма — в
+      // очередь переноса (успешная ветка ниже). Строки, ушедшие до паузы,
+      // лежат в кампании, которую клиент поставил на паузу, и уйдут после
+      // Resume — не раньше.
+      if (sendStop) {
+        if (appended.accepted === 0 && refillAttemptsNotProvenRefused(appended) === 0) {
+          runStats.sending_skip = sendStop;
+          throw new Error(
+            `${REFILL_SENDING_SKIP_NOTE} (${sendStop}): ${REFILL_SEND_STOP_TEXT[sendStop]} до того, как провайдер ` +
+              'получил хоть одну строку',
+          );
+        }
+        stageLog(
+          ctx,
+          `[base_collect] refill: ${REFILL_SEND_STOP_TEXT[sendStop]} во время загрузки — следующие чанки не ` +
+            `отправлены; принято до остановки ${appended.accepted}, компании без единого письма уходят в очередь переноса`,
+        );
+      }
+      // Удержанные раскладкой строки (хвост sentBatch) провайдеру не шли;
+      // закреплённые за неотправляющей кампанией — «возможно доставлены».
+      appendOutcome = refillAddReachedPositions(appended, heldReached);
       runStats.appended = appended.accepted;
       runStats.skipped_instantly = appended.skipped;
       // Провайдер уже видел строки. Если дальше упадёт запись базы, компании
@@ -5299,7 +5723,7 @@ export async function runHeRefillAppend(args: {
         // Остаток пачки: принято + окончательно отсеяно ≤ отдано, разница —
         // строки, которым не хватило места (явный отказ на чанке + хвост,
         // который пауза не начала отправлять).
-        const deferred = Math.max(0, toSend.length - appended.accepted - appended.skipped);
+        const deferred = Math.max(0, toSend.length - heldCount - appended.accepted - appended.skipped);
         if (deferred > 0) {
           runStats.deferred = deferred;
           runStats.deferred_reason = 'instantly_capacity';
@@ -5401,6 +5825,8 @@ export async function runHeRefillAppend(args: {
         // Ночь разложена по сегментам — пачка делилась и на сегментные
         // кампании запуска (разбивка по кампаниям — строкой раскладки выше).
         (segmentGroups > 0 ? ` (+ сегментных в раскладке: ${segmentGroups})` : '') +
+        // Строки неотправляющих сегментов — не ушли никуда (п. 4 раскладки).
+        (heldCount > 0 ? ` [удержано неотправляющими сегментами: ${heldCount} лид.]` : '') +
         // Сегментная кампания отказала, и её строки ушли в основную (п. 7).
         refillSegmentRefusalsNote(runStats) +
         `, лидов ${runStats.appended} ` +
@@ -5522,6 +5948,9 @@ export async function runHeRefillAppend(args: {
     // компании в пул без серии отказов, без очереди собственных компаний.
     const cancelled = refillUserCancelled(ctx) || ownershipLoss !== null;
     if (cancelled) runStats.cancelled = true;
+    // Отмена выигрывает у пропуска шага 4c: чтения проверки после обрыва
+    // сигнала отказывают, и её «не читается» — следствие отмены, а не причина.
+    if (cancelled) delete runStats.sending_skip;
     const rawMessage = e instanceof Error ? e.message : String(e);
     const message = (
       capacityRefusal && !rawMessage.includes(REFILL_CAPACITY_NOTE)
@@ -5533,6 +5962,12 @@ export async function runHeRefillAppend(args: {
     // знаем наверняка) → прежнее 'analyzed': компании считаются отработанными,
     // второе письмо тому же лиду дороже потерянного лида.
     const delivered = providerTouched || refillLeadsReachedProvider(e);
+    // Pause клиента, увиденная проверкой владения до того, как провайдер
+    // получил хоть строку (перед раскладкой, перед первой кампанией), — тот же
+    // пропуск 'client_paused', что у шага 4c (п. 3б ниже). Отмена выигрывает.
+    if (sendStop && !delivered && !cancelled && runStats.sending_skip === undefined) {
+      runStats.sending_skip = sendStop;
+    }
     // РЕШЕНИЕ О КОМПАНИЯХ — по ВСЕМУ набору исходов отказа:
     //  1. доставлено (или не знаем) → 'analyzed'. У market='us' компании, до
     //     которых отправка не дошла (их срезал кап, отказ провайдера случился
@@ -5552,6 +5987,11 @@ export async function runHeRefillAppend(args: {
     //     не спрашивается и сама ночь в неё не попадёт (refillStreakVerdict) —
     //     иначе вторая такая ночь подряд выжигала бы оплаченный срез без
     //     единого письма;
+    //  3б. кампании запуска не брали контакты (stats.sending_skip: шаг 4c до
+    //     брони или Pause клиента до первого чанка загрузки) — провайдер не
+    //     получил ничего, и решил не срез: тот же исход, что у п. 3
+    //     (market='us' — очередь переноса, иначе возврат в пул), и в серию
+    //     отказов ночь не идёт;
     //  4. отмена клиентом без доставки → 'failed' всегда: решение человека, а
     //     не свойство среза, в серию тоже не идёт;
     //  5. остальное (не дошло до провайдера по нашей или его причине) → серия
@@ -5559,6 +5999,7 @@ export async function runHeRefillAppend(args: {
     //     иначе ночной крон собирал бы тот же срез снова и снова.
     const predecessorHoldsBudget = !delivered && runStats.budget_outcome === 'already_reserved';
     const budgetSpentElsewhere = !delivered && runStats.budget_outcome === 'cap_exhausted';
+    const sendingSkipped = !delivered && runStats.sending_skip !== undefined;
     // Что дошло (или могло дойти) до провайдера — одно правило для своих и
     // перенесённых компаний (refillLeadsReachedProvider): явный 429 при
     // нулевом приёме доказывает, что не создано ничего.
@@ -5567,22 +6008,26 @@ export async function runHeRefillAppend(args: {
       : partial && partial.accepted === 0 && refillRateLimitRefusal(e)
         ? new Set<number>()
         : refillReachedPositions(partial);
+    // Удержанные раскладкой строки, закреплённые за неотправляющей кампанией,
+    // — «возможно доставлены» и здесь (у appendOutcome они уже внутри).
+    for (const position of heldReached) reached.add(position);
     // Очередь собственных компаний — только у п. 1 и п. 3 (market='us') и
     // только без отмены клиентом: отменённый прогон — решение человека, его
     // компании решает прежнее правило (п. 1 — исключены, п. 4 — в пул), и
     // следующие ночи не досылают за него то, что он не успел.
-    const ownQueue = (delivered || budgetSpentElsewhere) && !cancelled ? planOwnQueue(reached) : null;
+    const ownQueue =
+      (delivered || budgetSpentElsewhere || sendingSkipped) && !cancelled ? planOwnQueue(reached) : null;
     /** null — серия решению не понадобилась и не читалась. */
     let failStreak: number | null = null;
     let released: boolean;
-    /** П. 3 у market='us': очередь записана, база 'analyzed'. */
+    /** П. 3 и 3б у market='us': очередь записана, база 'analyzed'. */
     let budgetStopCarried = false;
     if (delivered || predecessorHoldsBudget) {
       released = false;
-    } else if (budgetSpentElsewhere && ownQueue && (await writeHeRefillCarryQueue(ctx, ownQueue))) {
+    } else if ((budgetSpentElsewhere || sendingSkipped) && ownQueue && (await writeHeRefillCarryQueue(ctx, ownQueue))) {
       released = false;
       budgetStopCarried = true;
-    } else if (budgetSpentElsewhere || cancelled) {
+    } else if (budgetSpentElsewhere || sendingSkipped || cancelled) {
       released = true;
     } else {
       failStreak = await refillFailStreak(ctx, base.vertical_id, base.id);
@@ -5613,7 +6058,12 @@ export async function runHeRefillAppend(args: {
     // сверяет его полным совпадением и показывает отмену, а не «шаг не успел»
     // (текст AbortError прочитанного после отмены запроса классифицировался
     // как 'timeout'). Строка прогона и журнал сохраняют настоящий текст.
-    const baseError = cancelled ? REFILL_CANCELLED_ERROR : message;
+    // Пропуск шага 4c, чьи компании не легли в очередь (база 'failed'), — тем
+    // же текстом: карточка прогона в кабинете говорит «этот прогон остановлен,
+    // не закончив; пойдёт ли добор дальше — на Command Center» (engStageErrorText,
+    // 'refill'), и это правда, а свой русский текст свёлся бы в «техническую
+    // проблему». Причину клиент видит в ленте и строке «next» дашборда.
+    const baseError = cancelled || sendingSkipped ? REFILL_CANCELLED_ERROR : message;
     const refillResult: HeRefillResult = {
       status: 'failed',
       stats: runStats,
@@ -5696,13 +6146,17 @@ export async function runHeRefillAppend(args: {
             ? ' — бронь держит прошлый прогон этой базы, который мог уже отправить строки: ' +
               'база остаётся analyzed, компании не возвращаем'
             : budgetStopCarried
-              ? ' — провайдер строк не получил, бюджет дня занят другими базами: компании ночи ' +
+              ? (sendingSkipped
+                ? ' — провайдер строк не получил, кампании запуска не брали контакты: компании ночи '
+                : ' — провайдер строк не получил, бюджет дня занят другими базами: компании ночи ') +
                 'в очереди переноса (база analyzed), ночь в серию отказов не идёт'
             : released
               ? ' — провайдер строк не получил, база failed (компании не выжигаем)'
                 + (budgetSpentElsewhere
                   ? ': бюджет дня занят другими базами, ночь в серию отказов не идёт'
-                  : '')
+                  : sendingSkipped
+                    ? ': кампании запуска не брали контакты, ночь в серию отказов не идёт'
+                    : '')
                 + (refillRateLimitRefusal(e) ? ': отказ по частоте запросов, приёма не было' : '')
               : ` — отказ ${(failStreak ?? 0) + 1}-й подряд, компании остаются исключёнными ` +
                 '(база analyzed): иначе ночной прогон собрал бы тот же срез заново'),

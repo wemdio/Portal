@@ -303,8 +303,8 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
  * всегда false: историю RU-инструмента признак не переписывает.
  *
  * Тот же предикат — у ЭКРАНА, а не его копия: шаг «Review & Launch» кабинета
- * (components/client-eng/EngStepReview.tsx) решает им, предлагать ли «Launch all
- * (paused)» шаблону с записью, и подписывает бейдж. Поэтому `launch_info.pending`
+ * (components/client-eng/EngStepReview.tsx) решает им, предлагать ли «Launch
+ * all» шаблону с записью, и подписывает бейдж. Поэтому `launch_info.pending`
  * проходит проекцию кабинета (clientEngProjection.ts, LAUNCH_PENDING_FIELDS):
  * без ключа экран видел бы законченным ЛЮБОЙ запуск и достройка осталась бы
  * недостижимой. Второго определения «запуск не закончен» быть не должно —

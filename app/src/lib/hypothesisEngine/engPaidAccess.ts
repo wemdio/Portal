@@ -161,7 +161,8 @@ const ACTION_PHRASE: Record<EngPaidAction, string> = {
   collect: 'collect contacts',
   letters: 'write letters',
   launch: 'launch campaigns',
-  resume_refill: 'resume the auto-refill',
+  // «Turn on» под «Daily top-up» и «Resume daily top-up» шага 2.
+  resume_refill: 'turn on the daily top-up',
 };
 
 export const ENG_PAID_UNAVAILABLE_TEXT = 'Service temporarily unavailable — refresh the page';

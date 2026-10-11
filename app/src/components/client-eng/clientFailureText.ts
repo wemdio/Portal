@@ -264,8 +264,12 @@ const FINISHED_WORK_KEPT =
  * не только статус базы, но и закладка каталога (catalogCursor), а у
  * каталожных источников она сдвигается за прочитанное ещё во время сборки и
  * при отказе долива назад не откатывается.
+ * Что эти контакты «отправляются», тоже не обещаем: с S2 клиент сам ставит
+ * кампании вертикали на паузу, а ночь, пропущенная проверкой «кампании запуска
+ * отправляют?» (autoPipeline.ts), пропущена именно потому, что они не
+ * отправляют.
  */
-export const HE_REFILL_RUN_KEPT_EN = 'Contacts already in your campaigns stay there and keep sending.';
+export const HE_REFILL_RUN_KEPT_EN = 'Contacts already in your campaigns stay there.';
 
 /**
  * ОДНА нейтральная фраза на все отказы, которые чинит только команда:
@@ -354,7 +358,7 @@ const TEAM_FIX_WHAT_TO_DO =
  * карточка базы не видит; их показывает Command Center.
  */
 export const HE_REFILL_RUN_WHAT_TO_DO_EN =
-  'This was one run of the daily refill, and a refill run is not restarted by hand; the Command Center shows whether the daily refill goes on. Message Support if it keeps stopping.';
+  'This was one run of the daily top-up, and a top-up run is not restarted by hand; «Daily top-up» in the Command Center shows whether it goes on. Message Support if it keeps stopping.';
 
 const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
   // 'billing' и 'configuration' читаются клиентом ОДИНАКОВО (HE_TEAM_ON_IT_EN):
@@ -426,8 +430,11 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
    *    те же компании могла обогащать прежняя сборка. «No contacts were bought
    *    for this vertical», как у audience_mismatch, тоже не пишем: у вертикали
    *    могут быть другие, раньше собранные базы;
-   *  - «your other bases and campaigns are not affected» — без «running»:
-   *    кампании создаются на паузе, а их статус у рассыльщика кабинет не читает;
+   *  - «your other bases and campaigns are not affected» — без «running»: с S2
+   *    кампании запуска бывают отправляющими, на паузе клиента, не стартованными
+   *    и завершёнными, и «running» было бы правдой не для всех. Сама фраза
+   *    верна при любом их статусе: остановка сборки рассыльщика не зовёт и
+   *    кампаний не трогает;
    *  - про повтор — «may»: «Start outreach» эту вертикаль заново не собирает
    *    (HE_COLLECT_STOP_REPEATS_CODES, autopilotReconcile), повтор — явная
    *    «Collect again» шага 4, и новая сборка может остановиться так же. «Будет
@@ -577,7 +584,7 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
   sending_capacity: {
     title: HE_TEAM_ON_IT_EN,
     whatIsSaved: HE_REFILL_RUN_KEPT_EN,
-    whatToDo: `The daily refill of this project may be on hold until it is fixed — the Command Center shows whether it is. ${HE_REFILL_HOLD_LIFT_EN}`,
+    whatToDo: `The daily top-up of this project may be on hold until it is fixed — «Daily top-up» in the Command Center shows whether it is. ${HE_REFILL_HOLD_LIFT_EN}`,
   },
   /**
    * Дневной кап добора проекта на сегодня занят другими бронями. Отдельный
@@ -591,13 +598,13 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     title: "Nothing from this run was added to your campaign — this project's daily contact limit was already taken for today.",
     whatIsSaved: HE_REFILL_RUN_KEPT_EN,
     whatToDo:
-      'Nothing to do here: the limit starts over each UTC day, and the Command Center shows the state of the daily refill.',
+      'Nothing to do here: the limit starts over each UTC day, and «Daily top-up» in the Command Center shows the state of the daily top-up.',
   },
   refill_repeat_run: {
     title:
-      "Nothing from this run was added to your campaign — an earlier attempt of the same refill run already holds its share of today's contact limit.",
+      "Nothing from this run was added to your campaign — an earlier attempt of the same top-up run already holds its share of today's contact limit.",
     whatIsSaved: HE_REFILL_RUN_KEPT_EN,
-    whatToDo: 'Nothing to do here: this was a repeat of a refill run that had already started today.',
+    whatToDo: 'Nothing to do here: this was a repeat of a top-up run that had already started today.',
   },
   internal: {
     title: 'The step stopped because of a technical problem on our side.',

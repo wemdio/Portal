@@ -38,7 +38,7 @@
  * недостижима из кабинета: шаг «Review & Launch» считал запускаемым шаблон без
  * ЛЮБОЙ записи о запуске, а частичный запуск запись оставляет — кнопка
  * пропадала ровно тогда, когда нужна. Вход теперь тот же, что и у первого
- * запуска: «Launch all (paused)» берёт и шаблоны с НЕЗАКОНЧЕННОЙ записью
+ * запуска: «Launch all» берёт и шаблоны с НЕЗАКОНЧЕННОЙ записью
  * (components/client-eng/EngStepReview.tsx), новой кнопки для этого не
  * появилось. Признак кабинет получает из той же записи — `launch_info.pending`
  * теперь проходит проекцию (clientEngProjection.ts, LAUNCH_PENDING_FIELDS), и
@@ -115,7 +115,7 @@
  *  - us (с 09.10.2026): «нет ответа» ≠ дефолтный сегмент. Такие строки
  *    ОТКЛАДЫВАЮТСЯ — не уходят в этом запуске и лежат в launch_info.pending
  *    стадией 'classify' поимённо; запуск записан незаконченным, и повтор
- *    («Launch all (paused)») классифицирует ровно их — это вторая и последняя
+ *    («Launch all») классифицирует ровно их — это вторая и последняя
  *    попытка: что и она не разметила, уходит с основным текстом. Если без
  *    ответа больше HE_SEGMENT_HOLD_REFUSE_SHARE строк, запуск без такого
  *    долга (первый или force) отказывает до рассыльщика.
@@ -768,16 +768,16 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     // «did not go out», а не «were not created»: на достройке у такого сегмента
     // кампания может уже быть — не уехали только его адреса. Факт про повтор
     // оставлен — он правда (незаконченный запуск достраивается, шапка файла),
-    // а «Launch all (paused)», единственная кнопка запуска кабинета, берёт и
+    // а «Launch all», единственная кнопка запуска кабинета, берёт и
     // незаконченные запуски (EngStepReview.tsx).
     capacityStopNote: (segments, teamAlerted) =>
       `${segments.toLocaleString('en-US')} more segment${segments === 1 ? '' : 's'} of your audience ` +
       'did not go out in this launch. ' +
       (teamAlerted
         ? `${HE_TEAM_ON_IT_EN} Message Support to find out when it is fixed — then launch again with ` +
-          '«Launch all (paused)»'
+          '«Launch all»'
         : 'This stopped because of a temporary problem on our side. Message Support to find out when to ' +
-          'launch again with «Launch all (paused)»') +
+          'launch again with «Launch all»') +
       '; repeating this launch does not duplicate the campaigns that were already created.',
     // Правда для всех трёх форм гейта (templateOperatorGate): подстановка без
     // колонки в теме (пусто), без колонки и fallback в теле (пусто), имя
@@ -802,7 +802,7 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     // долга (первый запуск, force), и он до рассыльщика — кампаний этой
     // попытки нет, прежняя запись (у force) возвращена как была.
     segmentClassifyIncomplete: () => SEGMENT_CLASSIFY_INCOMPLETE_EN,
-    // «Launch all (paused)» снова предлагает такой шаблон: запуск записан
+    // «Launch all» снова предлагает такой шаблон: запуск записан
     // незаконченным (heLaunchIsIncomplete), а панель запуска не исчезает после
     // прогона (EngStepReview.tsx). Повтор шлёт с skip_if_in_campaign и —
     // вторая и последняя попытка — отдаёт неразмеченным основной текст (шаг 5c).
@@ -812,8 +812,8 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
         `${held.toLocaleString('en-US')} ${held === 1 ? 'address' : 'addresses'} of this audience did not go ` +
         `out in this launch: we could not yet work out which segment of these letters fits ${it}, so ` +
         `${held === 1 ? 'it waits' : 'they wait'} for one more try instead of getting the main letter text ` +
-        `straight away. Nobody was contacted for ${it} and your audience keeps ${it}. Press «Launch all ` +
-        `(paused)» again to send ${it}: we try once more, and ` +
+        `straight away. Nobody was contacted for ${it} and your audience keeps ${it}. Press «Launch all» ` +
+        `again to send ${it}: we try once more, and ` +
         (held === 1
           ? 'if we still cannot place it, it gets the main letter text. '
           : 'any we still cannot place get the main letter text. ') +
@@ -1045,7 +1045,7 @@ export const HE_SEGMENT_HOLD_REFUSE_SHARE = 0.5;
  *    research-роут кабинета: он не ставит повтор при записанном запуске.
  *  - sibling_template_launched: у ДРУГОГО шаблона той же базы есть запуск.
  *    Два готовых шаблона одной базы бывают (пересборка специалиста, шаблоны до
- *    переиспользования в стадии). «Launch all (paused)» кабинета берёт один
+ *    переиспользования в стадии). «Launch all» кабинета берёт один
  *    шаблон на базу (launchableTemplates в EngStepReview.tsx), так что эту
  *    защиту встречают второй таб, запуск специалистом и живая аренда соседа —
  *    вторая кампания написала бы тем же людям вторую цепочку. Свой

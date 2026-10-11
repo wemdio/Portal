@@ -2,7 +2,7 @@
  * Счётчики частоты ENG-контура: регистрация с английского хоста (по IP и по
  * адресу почты), повторная отправка письма подтверждения (по пользователю),
  * запуски шаблона из кабинета, которые не прошли после платной части (по
- * шаблону).
+ * шаблону), старт кампаний из кабинета (по пользователю; пауза не считается).
  *
  * СЧИТАЕТСЯ ТОЛЬКО СОСТОЯВШЕЕСЯ. Попадание записывается до действия (иначе
  * два параллельных запроса оба прошли бы последнее место), а если действие,
@@ -39,7 +39,8 @@ export type HeEngRateBucket =
   | 'signup_email'
   | 'verify_resend_min'
   | 'verify_resend_hour'
-  | 'launch_failed';
+  | 'launch_failed'
+  | 'sending_action';
 
 export interface HeEngRateRule {
   /** Сколько попаданий разрешено в окне. */
@@ -68,6 +69,11 @@ export const HE_ENG_RATE_RULES: Record<HeEngRateBucket, HeEngRateRule> = {
   verify_resend_min: { limit: 1, windowSeconds: 60 },
   verify_resend_hour: { limit: 5, windowSeconds: 3600 },
   launch_failed: { limit: 3, windowSeconds: 3600 },
+  // «Start sending» / «Resume» кампаний запуска из кабинета — по пользователю
+  // (api/client/eng/templates/[id]/sending): каждое нажатие — несколько вызовов
+  // рассыльщика на кампанию, а не платная работа. «Pause» сюда не входит:
+  // остановку отправки лимит не отказывает никогда.
+  sending_action: { limit: 30, windowSeconds: 3600 },
 };
 
 export interface HeEngRateDecision {

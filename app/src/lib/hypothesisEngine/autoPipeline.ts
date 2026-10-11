@@ -4,7 +4,12 @@
  * HE-машинерии).
  *
  * Вызывается one-shot кроном app/worker/heAutoPipelineCron.ts. Один тик:
- *   1. enabled-конфиги he_auto_pipeline_configs, проект market='us';
+ *   1. enabled-конфиги he_auto_pipeline_configs, проект market='us'. Конфиг
+ *      заводит первый успешный запуск шаблона из кабинета
+ *      (ensureHeUsRefillConfig, api/client/eng/templates/[id]/launch) или
+ *      переключатель «Daily top-up» дашборда (switchHeUsRefill,
+ *      api/client/eng/projects/[id]/refill); выключенный клиентом конфиг —
+ *      enabled=false — тик не читает вовсе (блок «ПЕРЕКЛЮЧАТЕЛЬ КЛИЕНТА»);
  *   1--. ОДИН ОБХОД В СУТКИ: конфиг, чей last_run_at уже в сегодняшних
  *      UTC-сутках, тик пропускает целиком ('already_ran_today',
  *      shouldRunConfigToday) — второй за сутки запуск крона не покупает
@@ -18,8 +23,10 @@
  *      20260930_0005). Стоит — проект пропускается ЦЕЛИКОМ, до любых чтений и
  *      любых запросов к рассыльщику. Пишут её ёмкость рассыльщика, отмена
  *      клиентом (кнопка Cancel кабинета) и потолок расхода (шаг 3a-; по
- *      умолчанию выключен), снимает только человек кнопкой в
- *      staff-инструменте; подробности — в блоке «ПАУЗА ПО ЁМКОСТИ» ниже;
+ *      умолчанию выключен). Снимает человек кнопкой в staff-инструменте, а
+ *      паузу ОТМЕНЫ — ещё и сам клиент переключателем «Daily top-up»
+ *      (switchHeUsRefill: паузы ёмкости и потолка он не трогает);
+ *      подробности — в блоке «ПАУЗА ПО ЁМКОСТИ» ниже;
  *   2. вертикали проекта в порядке compareHeRefillVerticalOrder: раньше та,
  *      что дольше не получала ночного слота (по журналу he_auto_pipeline_runs),
  *      created_at — только последний разрыв ничьей (блок «ПОРЯДОК ВЕРТИКАЛЕЙ
@@ -66,6 +73,19 @@
  *      поставлена: застрявшая в сборке ('existing') или не поставленная
  *      вертикаль уступает ночь следующей очереди, а затем и вертикалям без
  *      очереди. Подробности — у readCarryoverByVertical и в цикле вертикалей;
+ *   3a-. КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ? (S2; после писем и переноса, до
+ *      потолка расхода, предполёта и денег): основная кампания запуска
+ *      вертикали отправляет (1/4) по свежему статусу, клиент её не поставил на
+ *      паузу, отправка аккаунта не выключена, переключатель «Daily top-up»
+ *      включён, у ENG-клиента она шлёт только из ящиков пула проекта. Иначе
+ *      ночь не покупается, слот не расходуется, а пропуск
+ *      пишется строкой журнала 'failed' без base_id (stats.sending_skip —
+ *      причина; лента кабинета печатает её «daily top-up skipped — …»,
+ *      engDashboard.ts); то, что чинит только команда (кампания завершена,
+ *      остановлена рассыльщиком, ящики не из пула), — ещё и алерт
+ *      (notifyHeRefillHold). Полный набор
+ *      причин — блок «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?» ниже; та же проверка стоит
+ *      и перед самим доливом (stages/baseCollectRefill.ts, шаг 4c);
  *   3a-. ПОТОЛОК РАСХОДА ПРОЕКТА (spendCeiling.ts; ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН):
  *      один раз за обход проекта, перед первой вертикалью, которой ночь
  *      действительно покупалась бы (после сухой, писем и переноса, до
@@ -159,17 +179,52 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { getWorkspaceContactCapacity } from '@/lib/instantly/client';
+import { getCampaign, getWorkspaceContactCapacity } from '@/lib/instantly/client';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
-import type { InstantlyRequestOptions } from '@/lib/instantly/accounts';
+import { InstantlyApiError } from '@/lib/instantly/errors';
+import { resolveInstantlyAccountId, type InstantlyRequestOptions } from '@/lib/instantly/accounts';
+import { CampaignStatus } from '@/lib/instantly/types';
+import { logAudit, logWarn } from '@/lib/loggerServer';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
-import { buildLaunchSequence, parseLaunchInfo } from './launchHandoff';
+import { buildLaunchSequence, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
+// S2 «отправка без сотрудника»: отправляют ли кампании запуска — кэш статусов
+// у рассыльщика и желание клиента (лейн активации, engCampaignStatus.ts),
+// выключатель отправки аккаунта (engSendingAccess.ts) и ящики пула проекта
+// (sendingPool.ts). Блок «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?» ниже.
+import {
+  HE_ENG_STATUS_CONSUMER,
+  heEngStatusIsSending,
+  heEngWorkspaceConfigured,
+  heEngStatusIsStartable,
+  heEngStatusIsStopped,
+  readHeEngCampaignStatusRows,
+  readHeEngClientStates,
+  refreshHeEngCampaignStatuses,
+  writeHeEngCampaignStatus,
+  type HeEngCampaignStatusRow,
+} from './engCampaignStatus';
+import { readHeEngSendingAccess } from './engSendingAccess';
+import {
+  checkHeCampaignAgainstAssignment,
+  describeHeSendingPoolMailboxUses,
+  findHeSendingPoolMailboxUses,
+  readHeSendingPoolAssignment,
+  type HeSendingPoolAssignment,
+  type HeSendingPoolMailboxUses,
+} from './sendingPool';
 // Алерт команде в health-бот (решение владельца 04.10.2026): кабинет ENG пишет
 // клиенту «временная проблема, команда уже работает», и при паузе по ёмкости
 // это правда только потому, что пауза сообщает о себе здесь и в доливе
 // (stages/baseCollectRefill.ts). Модуль лёгкий: тянет только workerAlert.
-import { flushHeOpsAlerts, notifyHeClientStop } from './opsAlert';
+import {
+  flushHeOpsAlerts,
+  HE_OPS_CAPACITY_REPEAT_MS,
+  HE_OPS_SEND_TIMEOUT_MS,
+  heOpsReasonText,
+  notifyHeClientStop,
+} from './opsAlert';
 // Потолок расхода us-проекта (P-A-project-spend-ceiling). ПО УМОЛЧАНИЮ
 // ВЫКЛЮЧЕН: без HE_US_PROJECT_SPEND_CAP_USD / HE_US_PROJECT_DAY_SPEND_CAP_USD
 // проверка перед покупкой ночи не делает ни одного запроса.
@@ -427,7 +482,10 @@ export function heVerticalDryStopEnabled(env: NodeJS.ProcessEnv = process.env): 
  * refill_paused_at с причиной buildHeClientCancelPauseReason
  * (pauseHeRefillForClientCancel ниже). Второго механизма остановки нет
  * намеренно: тик пропускает проект тем же шагом, снимает паузу та же кнопка
- * сотрудника. Ночной добор ведёт he_auto_pipeline_configs.enabled, а не
+ * сотрудника — и, в отличие от паузы по ёмкости, сам клиент: её поставило его
+ * собственное нажатие, и платную работу она не охраняет (решение владельца
+ * 10–11.10.2026, переключатель «Daily top-up», switchHeUsRefill в блоке
+ * «ПЕРЕКЛЮЧАТЕЛЬ КЛИЕНТА»). Ночной добор ведёт he_auto_pipeline_configs.enabled, а не
  * he_projects.autopilot, поэтому без этой записи «отменить всё» не
  * останавливало добор: следующая ночь снова покупала сборку и доливала в живую
  * кампанию. Отличают два повода только по началу текста причины
@@ -617,13 +675,46 @@ export const HE_CLIENT_CANCEL_PAUSE_NOTE = 'Клиент отменил прое
 export function buildHeClientCancelPauseReason(): string {
   return (
     `${HE_CLIENT_CANCEL_PAUSE_NOTE}: автопилот выключен, ночной добор остановлен до явного ` +
-    'возобновления сотрудником. Возобновлять — только если клиент сам попросил продолжить.'
+    'возобновления — клиент включает его сам переключателем «Daily top-up» на дашборде; ' +
+    'сотрудник возобновляет, только если клиент сам попросил продолжить.'
   );
 }
 
 /** Пауза записана отменой клиентом (а не ёмкостью рассыльщика). */
 export function isHeClientCancelPauseReason(reason: string | null | undefined): boolean {
   return typeof reason === 'string' && reason.startsWith(HE_CLIENT_CANCEL_PAUSE_NOTE);
+}
+
+/**
+ * Разделитель, которым отмена дописывает к себе причину паузы, стоявшей до
+ * неё (pauseHeRefillForClientCancel, исход 'reason_amended'), и заглушка на
+ * месте причины, которой не было. Читает их splitHeClientCancelPauseReason —
+ * поэтому одна пара констант на обе стороны.
+ */
+const HE_CLIENT_CANCEL_PREVIOUS_MARK = ' Прежняя причина паузы: ';
+const HE_CLIENT_CANCEL_PREVIOUS_NONE = 'не записана';
+
+/**
+ * Что под паузой отмены — ВЕСЬ набор:
+ *  - { cancel: false } — пауза не отменой (ёмкость, потолок расхода) или её нет;
+ *  - { cancel: true, previous: undefined } — только отмена: под ней паузы не
+ *    было, и снять её значит вернуть проект в ночной добор;
+ *  - { cancel: true, previous: string | null } — отмена дописана поверх
+ *    паузы, стоявшей раньше (её причина; null — та была без текста). Снять
+ *    можно только отмену: прежняя пауза командная и остаётся.
+ * Признак — начало текста (isHeClientCancelPauseReason) и разделитель, а не
+ * полное совпадение: строки, записанные прежней формулировкой отмены, читаются
+ * так же.
+ */
+export function splitHeClientCancelPauseReason(
+  reason: string | null | undefined,
+): { cancel: false } | { cancel: true; previous: string | null | undefined } {
+  if (!isHeClientCancelPauseReason(reason)) return { cancel: false };
+  const text = reason as string;
+  const at = text.indexOf(HE_CLIENT_CANCEL_PREVIOUS_MARK);
+  if (at < 0) return { cancel: true, previous: undefined };
+  const previous = text.slice(at + HE_CLIENT_CANCEL_PREVIOUS_MARK.length).trim();
+  return { cancel: true, previous: previous && previous !== HE_CLIENT_CANCEL_PREVIOUS_NONE ? previous : null };
 }
 
 /**
@@ -677,7 +768,7 @@ export async function pauseHeRefillForClientCancel(
     const { data, error } = await supabase
       .from('he_auto_pipeline_configs')
       .update({
-        refill_pause_reason: `${reason} Прежняя причина паузы: ${state.reason ?? 'не записана'}`,
+        refill_pause_reason: `${reason}${HE_CLIENT_CANCEL_PREVIOUS_MARK}${state.reason ?? HE_CLIENT_CANCEL_PREVIOUS_NONE}`,
         updated_at: now,
       })
       .eq('project_id', projectId)
@@ -755,6 +846,1066 @@ async function withdrawRefillAfterClientCancel(
   }
 }
 
+/* ─── ПЕРЕКЛЮЧАТЕЛЬ КЛИЕНТА «Daily top-up» (S2) ──────────────────────────
+ *
+ * РЕШЕНИЕ ВЛАДЕЛЬЦА 10–11.10.2026: ночной добор настраивается сам после
+ * первого запуска (HE_US_DEFAULT_DAILY_REFILL новых контактов в сутки на
+ * проект, дефолт 50), а включает и выключает его сам клиент.
+ *
+ * ГДЕ ЗАВОДИТСЯ КОНФИГ — ensureHeUsRefillConfig: после запуска шаблона из
+ * кабинета (api/client/eng/templates/[id]/launch, ответ ядра 200 с записью о
+ * запуске) и при включении переключателем проекта, у которого строки нет
+ * (запуск до S2 или не легла запись после запуска). Строка одна на проект
+ * (unique project_id), вставка ON CONFLICT DO NOTHING: существующую строку —
+ * включённую, выключенную клиентом, на паузе — этот путь не меняет НИКОГДА.
+ *
+ * ЧТО ДЕЛАЕТ ПЕРЕКЛЮЧАТЕЛЬ (switchHeUsRefill, роут
+ * api/client/eng/projects/[id]/refill):
+ *  - «off» — enabled=false. Не пауза: выключенный конфиг тик не читает вовсе
+ *    (loadConfigs), снятие паузы сотрудником его не включает, а долив уже
+ *    купленной ночи перед отправкой видит выключатель ('top_up_off' в
+ *    createHeRefillSendGate) и контакты не добавляет (stages/baseCollectRefill.ts,
+ *    шаг 4c). Колонки паузы «off» не трогает;
+ *  - «on» — enabled=true (строки нет и у проекта есть запуск — заводит её) и
+ *    снимает ТОЛЬКО паузу, поставленную самим клиентом кнопкой «Cancel all
+ *    jobs» (splitHeClientCancelPauseReason). Пауза ёмкости рассыльщика и пауза
+ *    потолка расхода остаются командными, со своими фразами в кабинете; если
+ *    отмена была дописана поверх такой паузы, возвращается её прежняя причина,
+ *    а штамп паузы не меняется.
+ *
+ * ЦЕНА «on»: следующая ночь снова может купить сборку. Поэтому роут ставит
+ * гейт платных шагов (requireEngPaidAccess, 'resume_refill'), а тик — те же
+ * потолки расхода, ёмкость и проверку кампаний, что у любой ночи.
+ */
+
+export const HE_US_DEFAULT_DAILY_REFILL_ENV = 'HE_US_DEFAULT_DAILY_REFILL';
+/** Дефолт капа нового конфига — зеркало DEFAULT daily_leads_cap миграции 20260804_0005. */
+export const HE_US_DEFAULT_DAILY_REFILL_DEFAULT = 50;
+const HE_US_DEFAULT_DAILY_REFILL_MAX = 1000;
+
+/**
+ * Дневной кап, с которым заводится конфиг: целое 1..1000; пусто — дефолт;
+ * ноль, минус, дробь, больше 1000, мусор — дефолт и `rejected` (строка warn у
+ * вызывающего). Опечатка в лишний ноль не должна молча купить вдесятеро.
+ */
+export function readHeUsDefaultDailyRefill(env: NodeJS.ProcessEnv = process.env): { cap: number; rejected: boolean } {
+  const raw = (env[HE_US_DEFAULT_DAILY_REFILL_ENV] ?? '').trim();
+  if (!raw) return { cap: HE_US_DEFAULT_DAILY_REFILL_DEFAULT, rejected: false };
+  const value = Number(raw);
+  if (Number.isSafeInteger(value) && value >= 1 && value <= HE_US_DEFAULT_DAILY_REFILL_MAX) {
+    return { cap: value, rejected: false };
+  }
+  return { cap: HE_US_DEFAULT_DAILY_REFILL_DEFAULT, rejected: true };
+}
+
+/** Таблицы нет (Postgres 42P01 / PostgREST PGRST205). */
+function isMissingTableError(error: { code?: string } | null): boolean {
+  const code = error?.code ?? '';
+  return code === '42P01' || code === 'PGRST205';
+}
+
+function errorText(prefix: string, error: { code?: string; message?: string } | null): string {
+  return `${prefix}: ${error?.code ?? 'error'} ${String(error?.message ?? '').slice(0, 200)}`.trim();
+}
+
+/** Есть ли у проекта запись о запуске (parseLaunchInfo). null — не прочитали. */
+async function readHeProjectHasLaunch(db: SupabaseClient, projectId: string): Promise<boolean | null> {
+  const { data: verticals, error: vErr } = await db
+    .from('he_verticals')
+    .select('id')
+    .eq('project_id', projectId)
+    .limit(500);
+  if (vErr) return null;
+  const ids = ((verticals ?? []) as Array<{ id?: unknown }>).map((v) => asString(v.id)).filter(Boolean);
+  if (ids.length === 0) return false;
+  const { data: templates, error: tErr } = await db
+    .from('he_templates')
+    .select('launch_info')
+    .in('vertical_id', ids)
+    .not('launch_info', 'is', null)
+    .limit(500);
+  if (tErr) return null;
+  return ((templates ?? []) as Array<{ launch_info?: unknown }>).some((t) => parseLaunchInfo(t.launch_info) !== null);
+}
+
+/**
+ * Исход ensureHeUsRefillConfig — ВЕСЬ набор:
+ *  - 'created' — строки не было, этот вызов её завёл (enabled, кап из env);
+ *  - 'exists' — строка уже есть (любая): не тронута;
+ *  - 'not_us' — проекта нет или он не us: ночной добор он не получает;
+ *  - 'no_launch' — только с requireLaunch: запуска у проекта нет, доливать некуда;
+ *  - 'unavailable' — таблицы нет (миграция 20260804_0005 не прокатана);
+ *  - 'failed' — сбой БД.
+ */
+export type HeUsRefillConfigEnsure =
+  | { kind: 'created'; dailyLeadsCap: number }
+  | { kind: 'exists' }
+  | { kind: 'not_us' }
+  | { kind: 'no_launch' }
+  | { kind: 'unavailable'; detail: string }
+  | { kind: 'failed'; detail: string };
+
+/**
+ * Завести конфиг ночного добора us-проекта (см. блок выше). НЕ БРОСАЕТ:
+ * запуск, после которого он зовётся, уже состоялся, и отказ записи стоит
+ * только ночного добора, который клиент включит переключателем. 'created'
+ * пишется в аудит, 'unavailable' и 'failed' — строкой warn.
+ */
+export async function ensureHeUsRefillConfig(
+  db: SupabaseClient,
+  projectId: string,
+  opts: { requireLaunch?: boolean; env?: NodeJS.ProcessEnv } = {},
+): Promise<HeUsRefillConfigEnsure> {
+  const fail = (kind: 'unavailable' | 'failed', detail: string): HeUsRefillConfigEnsure => {
+    void logWarn('he.refill_config.not_created', `nightly refill config not created: ${detail}`, { projectId, kind });
+    return { kind, detail };
+  };
+  try {
+    const { data: project, error: projectErr } = await db
+      .from('he_projects')
+      .select('market')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (projectErr) return fail('failed', errorText('he_projects read', projectErr));
+    if ((project as { market?: unknown } | null)?.market !== 'us') return { kind: 'not_us' };
+    if (opts.requireLaunch) {
+      const launched = await readHeProjectHasLaunch(db, projectId);
+      if (launched === null) return fail('failed', 'launch records unreadable');
+      if (!launched) return { kind: 'no_launch' };
+    }
+    const { cap, rejected } = readHeUsDefaultDailyRefill(opts.env);
+    if (rejected) {
+      void logWarn(
+        'he.refill_config.cap_rejected',
+        `${HE_US_DEFAULT_DAILY_REFILL_ENV} is not an integer 1..${HE_US_DEFAULT_DAILY_REFILL_MAX} — default ${cap} used`,
+        { projectId },
+      );
+    }
+    const { data, error } = await db
+      .from('he_auto_pipeline_configs')
+      .upsert(
+        {
+          project_id: projectId,
+          enabled: true,
+          daily_leads_cap: cap,
+          verticals_per_run: HE_AUTO_DEFAULT_VERTICALS_PER_RUN,
+        },
+        { onConflict: 'project_id', ignoreDuplicates: true },
+      )
+      .select('id');
+    if (error) {
+      return fail(isMissingTableError(error) ? 'unavailable' : 'failed', errorText('he_auto_pipeline_configs insert', error));
+    }
+    if ((data ?? []).length === 0) return { kind: 'exists' };
+    void logAudit('he.refill_config.created', 'ENG nightly refill configured for the project', {
+      projectId,
+      dailyLeadsCap: cap,
+      source: opts.requireLaunch ? 'client_switch' : 'launch',
+    });
+    return { kind: 'created', dailyLeadsCap: cap };
+  } catch (e) {
+    return fail('failed', `threw: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}`);
+  }
+}
+
+/** Строка конфига, как её видит переключатель (колонки паузы — опционально). */
+export interface HeRefillConfigSwitchRow {
+  enabled: boolean;
+  refill_paused_at: string | null;
+  refill_pause_reason: string | null;
+}
+
+type HeRefillConfigRead =
+  | { kind: 'row'; row: HeRefillConfigSwitchRow }
+  | { kind: 'none' }
+  | { kind: 'missing' }
+  | { kind: 'error'; detail: string };
+
+/**
+ * Строка конфига проекта. Колонок паузы может не быть (миграция 20260930_0005)
+ * — тогда паузы нет и у тика (loadConfigs), повтор без них.
+ */
+async function readHeRefillConfigRow(db: SupabaseClient, projectId: string): Promise<HeRefillConfigRead> {
+  let res = await db
+    .from('he_auto_pipeline_configs')
+    .select('enabled, refill_paused_at, refill_pause_reason')
+    .eq('project_id', projectId)
+    .maybeSingle();
+  if (res.error && isMissingColumnError(res.error)) {
+    res = await db.from('he_auto_pipeline_configs').select('enabled').eq('project_id', projectId).maybeSingle();
+  }
+  if (res.error) {
+    return isMissingTableError(res.error)
+      ? { kind: 'missing' }
+      : { kind: 'error', detail: errorText('he_auto_pipeline_configs read', res.error) };
+  }
+  const raw = res.data as Record<string, unknown> | null;
+  if (!raw) return { kind: 'none' };
+  return {
+    kind: 'row',
+    row: {
+      enabled: raw.enabled === true,
+      refill_paused_at: asStringOrNull(raw.refill_paused_at),
+      refill_pause_reason: asStringOrNull(raw.refill_pause_reason),
+    },
+  };
+}
+
+/**
+ * Исход переключателя — ВЕСЬ набор:
+ *  - 'created' — «on», строки не было: заведена включённой;
+ *  - 'turned_on' — «on», был выключен клиентом: включён;
+ *  - 'resumed' — «on», стояла пауза отмены клиентом: снята (enabled тоже
+ *    включён, если был выключен);
+ *  - 'already_on' — «on», уже был включён и паузы отмены не было;
+ *  - 'turned_off' / 'already_off' — «off»; строки нет — тоже 'already_off';
+ *  - 'no_launch' — «on» без строки, а запуска у проекта нет;
+ *  - 'not_us' — «on» без строки у не-us проекта;
+ *  - 'unsupported' — таблицы нет (миграция 20260804_0005);
+ *  - 'failed' — сбой БД.
+ * Пауза ёмкости или потолка расхода переключателем не снимается ни в одном
+ * исходе: «on» поверх неё — 'turned_on' / 'already_on', и `config` в ответе
+ * показывает, что пауза стоит.
+ */
+export type HeUsRefillSwitchOutcome =
+  | 'created'
+  | 'turned_on'
+  | 'resumed'
+  | 'already_on'
+  | 'turned_off'
+  | 'already_off'
+  | 'no_launch'
+  | 'not_us'
+  | 'unsupported'
+  | 'failed';
+
+export interface HeUsRefillSwitchResult {
+  outcome: HeUsRefillSwitchOutcome;
+  /** Строка конфига после переключения; null — строки нет или не прочитана. */
+  config: HeRefillConfigSwitchRow | null;
+  detail?: string;
+}
+
+/**
+ * Переключатель «Daily top-up» проекта (см. блок выше). Права, рынок и
+ * владельца проверяет вызывающий роут. НЕ БРОСАЕТ.
+ */
+export async function switchHeUsRefill(
+  db: SupabaseClient,
+  projectId: string,
+  enabled: boolean,
+  opts: { now?: Date; env?: NodeJS.ProcessEnv } = {},
+): Promise<HeUsRefillSwitchResult> {
+  const now = (opts.now ?? new Date()).toISOString();
+  const finish = async (outcome: HeUsRefillSwitchOutcome, detail?: string): Promise<HeUsRefillSwitchResult> => {
+    const after = await readHeRefillConfigRow(db, projectId).catch(() => null);
+    return { outcome, config: after?.kind === 'row' ? after.row : null, ...(detail ? { detail } : {}) };
+  };
+  try {
+    if (!enabled) {
+      const { data, error } = await db
+        .from('he_auto_pipeline_configs')
+        .update({ enabled: false, updated_at: now })
+        .eq('project_id', projectId)
+        .eq('enabled', true)
+        .select('id');
+      if (error) {
+        return finish(isMissingTableError(error) ? 'unsupported' : 'failed', errorText('he_auto_pipeline_configs off', error));
+      }
+      return finish((data ?? []).length > 0 ? 'turned_off' : 'already_off');
+    }
+
+    let read = await readHeRefillConfigRow(db, projectId);
+    if (read.kind === 'missing') return finish('unsupported');
+    if (read.kind === 'error') return finish('failed', read.detail);
+    if (read.kind === 'none') {
+      const created = await ensureHeUsRefillConfig(db, projectId, { requireLaunch: true, env: opts.env });
+      switch (created.kind) {
+        case 'created':
+          return finish('created');
+        case 'not_us':
+        case 'no_launch':
+          return finish(created.kind);
+        case 'unavailable':
+          return finish('unsupported', created.detail);
+        case 'failed':
+          return finish('failed', created.detail);
+        case 'exists':
+          // Строку завёл параллельный вызов (запуск, второе нажатие) — дальше
+          // как с существующей.
+          read = await readHeRefillConfigRow(db, projectId);
+          if (read.kind !== 'row') return finish('failed', 'config row vanished after a concurrent insert');
+          break;
+      }
+    }
+    if (read.kind !== 'row') return finish('failed', 'config row unreadable');
+    const row = read.row;
+
+    let turnedOn = false;
+    if (!row.enabled) {
+      const { data, error } = await db
+        .from('he_auto_pipeline_configs')
+        .update({ enabled: true, updated_at: now })
+        .eq('project_id', projectId)
+        .eq('enabled', false)
+        .select('id');
+      if (error) return finish('failed', errorText('he_auto_pipeline_configs on', error));
+      turnedOn = (data ?? []).length > 0;
+    }
+
+    // Пауза отмены клиентом — его собственная, снимает её он сам. CAS по штампу
+    // и тексту: пауза, переписанная между чтением и записью (ёмкость, потолок,
+    // сотрудник), не снимается — следующее нажатие прочитает её заново.
+    let resumed = false;
+    const split = splitHeClientCancelPauseReason(row.refill_pause_reason);
+    if (row.refill_paused_at && split.cancel && row.refill_pause_reason) {
+      const patch =
+        split.previous === undefined
+          ? { refill_paused_at: null, refill_pause_reason: null, refill_resumed_at: now, updated_at: now }
+          : { refill_pause_reason: split.previous, updated_at: now };
+      const { data, error } = await db
+        .from('he_auto_pipeline_configs')
+        .update(patch)
+        .eq('project_id', projectId)
+        .eq('refill_paused_at', row.refill_paused_at)
+        .eq('refill_pause_reason', row.refill_pause_reason)
+        .select('id');
+      if (error) return finish('failed', errorText('he_auto_pipeline_configs cancel pause', error));
+      resumed = split.previous === undefined && (data ?? []).length > 0;
+    }
+    return finish(resumed ? 'resumed' : turnedOn ? 'turned_on' : 'already_on');
+  } catch (e) {
+    return finish('failed', `threw: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}`);
+  }
+}
+
+/* ─── КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ? (S2) ──────────────────────────────────
+ *
+ * ПРАВИЛО. Ночной добор не добавляет контакты в кампанию, которая их не
+ * отправит, и не покупает под неё сборку: кампанию клиент поставил на паузу,
+ * она завершена, остановлена рассыльщиком или удалена, отправка аккаунта
+ * выключена, переключатель «Daily top-up» выключен, кампания ENG-клиента шлёт
+ * не из ящиков пула его проекта — или мы не можем это подтвердить.
+ * Неизвестное = «не доливаем» (fail-closed): пропущенная ночь обратима, а
+ * контакты в стоящей кампании — это оплаченные компании, которым письмо не
+ * уйдёт.
+ *
+ * ГДЕ СТОИТ: тик (passConfig, шаг 3a- в шапке) — до потолка расхода,
+ * предполёта ёмкости и постановки сборки; долив (stages/baseCollectRefill.ts,
+ * шаг 4c) — до брони дневного бюджета и до провайдера: клиент мог нажать
+ * Pause за часы между постановкой и доливом. Pause, нажатую уже во время
+ * загрузки, ловит хук владения долива перед каждым чанком (там же,
+ * readHeRefillOwnershipLoss).
+ *
+ * ПОРЯДОК ПРОВЕРОК и причины (HeRefillSendSkipReason) — первая сработавшая:
+ *  1. 'top_up_off' — у проекта нет конфига или enabled=false (переключатель
+ *     клиента); читается каждый раз, а не из снимка тика;
+ *  2. владелец проекта (he_projects.created_by, рынок us) и выключатель
+ *     отправки аккаунта (readHeEngSendingAccess): 'not_enabled' →
+ *     'access_not_enabled', 'revoked' → 'access_turned_off', 'unavailable' /
+ *     'error' → 'unavailable'; 'enabled' / 'not_required' — ENG-клиент;
+ *     'not_client' — проект сотрудника (staff-инструмент): желания клиента и
+ *     ящиков пула у него нет, и шаги 3, 5 и 7 пропускаются;
+ *  3. желание клиента по шаблону запуска (he_eng_launch_sending): 'paused' →
+ *     'client_paused'; таблица не читается → 'unavailable'. Желания нет
+ *     (запуск до S2) — решает статус кампании;
+ *  4. воркспейс пресета записи о запуске; у ENG-клиента пресет обязан быть
+ *     его собственным (тот же, в чьём воркспейсе ядро создало кампании, —
+ *     engCampaignSending.launchWorkspace) → иначе 'unavailable';
+ *  5. ЯЩИКИ ПУЛА (ENG-клиент): ящики проекта
+ *     (sendingPool.readHeSendingPoolAssignment, одно чтение БД на гейт) не
+ *     'assigned' → 'unavailable': ящиков нет (запуск до S2) или они в разных
+ *     воркспейсах — с алертом команде; пул не читается (миграция
+ *     20261011_0001, сбой БД) — без алерта: это видно строкой пропуска
+ *     'unavailable' в ночном логе и в журнале прогонов. Ящик пула стоит в
+ *     пресете ДРУГОГО клиента или в живом запуске RU-кабинета
+ *     (findHeSendingPoolMailboxUses, та же проверка, что у запуска; чтение БД
+ *     пресетов, одно на гейт) → 'unavailable' с алертом; не прочитано →
+ *     'unavailable'. Затем ОДНО
+ *     живое чтение основной кампании — статус и email_list (GET
+ *     /campaigns/{id}: общий ограничитель воркспейса, без повторов на 429,
+ *     срок HE_REFILL_LIVE_READ_TIMEOUT_MS; на гейт — одно на кампанию, и
+ *     никогда LIST /emails). Воркспейс пресета не настроен в окружении →
+ *     'unavailable'; не прочитана → 'status_unknown' (ящики не проверены).
+ *     Прочитанное пишется в кэш статусов (writeHeEngCampaignStatus, с
+ *     воркспейсом), поэтому шаг 6 её второй раз не читает;
+ *  6. статус: живое чтение refreshHeEngCampaignStatuses кампаний, которых
+ *     шаг 5 не читал (сегментных, а у проекта сотрудника — и основной; аренда
+ *     общая с кабинетом; читает только кампанию, прочитанную раньше
+ *     HE_REFILL_STATUS_REFRESH_MS; GET /campaigns/{id} и при нужде
+ *     /campaigns/analytics), затем кэш he_eng_campaign_status. ОСНОВНАЯ
+ *     кампания (heRefillCampaignVerdict; у ENG-клиента — по чтению шага 5):
+ *     1/4 и прочитана не раньше HE_REFILL_STATUS_MAX_AGE_MS → дальше;
+ *     3 → 'campaign_completed'; -99/-1/-2 или 404 → 'campaign_stopped' (оба
+ *     с алертом команде); 0/2 → 'campaign_not_sending'; строки нет, статус не
+ *     читался, старше срока или незнакомое число → 'status_unknown'. Таблицы
+ *     или функции аренды нет (миграция 20261011_0002) → 'unavailable';
+ *  7. АДРЕСА ОСНОВНОЙ (ENG-клиент): email_list шага 5 — непустое
+ *     подмножество ящиков пула проекта, кампания в их воркспейсе
+ *     (checkHeCampaignAgainstAssignment, та же проверка, что у старта) →
+ *     иначе 'unavailable' с алертом команде.
+ * СЕГМЕНТНЫЕ кампании ночь не отменяют: гейт отдаёт вердикт каждой
+ * (`segmentVerdicts`), а судьбу их строк решает раскладка долива
+ * (routeHeRefillSegments, блок «РАСКЛАДКА», п. 4): отправляющая получает свои
+ * строки; завершённая (3) — её строки уходят в основную кампанию, как у
+ * сегмента без кампании; остальные (остановлена рассыльщиком, удалена, стоит,
+ * статус не подтверждён) — её строки ДЕРЖАТСЯ: не уходят никуда, а их
+ * компании ждут в очереди переноса. Обходить остановку рассыльщика через
+ * основную кампанию (те же ящики) нельзя. ПРАВИЛО ПУЛА: сегментная кампания с
+ * пометкой кэша start_error 'mailboxes_changed' (её адреса не из ящиков пула
+ * проекта — пометку ставят старт и каждое живое чтение отправляющей кампании,
+ * engCampaignStatus.refreshHeEngCampaignStatuses) получает вердикт 'stopped'
+ * при любом статусе: её строки держатся и в основную не уходят. Основная
+ * кампания проверяется по-прежнему — живым чтением шага 5 и шагом 7.
+ *
+ * ЗАВЕРШЁННАЯ основная (3) — тоже «не доливаем», и это решение, а не сбой:
+ * новые адреса в завершённой кампании сами не уходят, а её повторный старт
+ * после долива (startHeEngLaunchSending, via 'refill') в долив не вшит. Добор
+ * вертикали стоит, пока кампанию не вернут в отправку: каждую ночь — строка
+ * пропуска и алерт команде с действием (notifyHeRefillHold). Клиент видит
+ * пропуск с советом написать в Support.
+ *
+ * АЛЕРТ. Пропуск, который сам не пройдёт и который чинит только команда,
+ * несёт `alert` (HeRefillHoldAlert); отправляет его вызывающий
+ * (notifyHeRefillHold): тик ждёт, долив — нет.
+ *
+ * НЕ БРОСАЕТ: любой сбой — 'unavailable'.
+ */
+
+export const HE_REFILL_SEND_SKIP_REASONS = [
+  'top_up_off',
+  'access_not_enabled',
+  'access_turned_off',
+  'client_paused',
+  'campaign_completed',
+  'campaign_stopped',
+  'campaign_not_sending',
+  'status_unknown',
+  'unavailable',
+] as const;
+
+export type HeRefillSendSkipReason = (typeof HE_REFILL_SEND_SKIP_REASONS)[number];
+
+/** Прочитанный статус старше этого — «не знаем» ('status_unknown'). */
+export const HE_REFILL_STATUS_MAX_AGE_MS = 30 * 60_000;
+/** Живое чтение перед решением — если статус прочитан раньше этого. */
+const HE_REFILL_STATUS_REFRESH_MS = 10 * 60_000;
+/** Срок живого чтения основной кампании (шаг 5). */
+const HE_REFILL_LIVE_READ_TIMEOUT_MS = 10_000;
+
+export type HeRefillCampaignVerdict = 'sending' | 'completed' | 'stopped' | 'not_sending' | 'unknown';
+
+/** Вердикт кампании и его подробность (строка лога, алерт команде). */
+export interface HeRefillCampaignVerdictDetail {
+  verdict: HeRefillCampaignVerdict;
+  detail: string;
+}
+
+const VERDICT_SKIP_REASON: Record<Exclude<HeRefillCampaignVerdict, 'sending'>, HeRefillSendSkipReason> = {
+  completed: 'campaign_completed',
+  stopped: 'campaign_stopped',
+  not_sending: 'campaign_not_sending',
+  unknown: 'status_unknown',
+};
+
+/** Отрицательные статусы рассыльщика — словами для лога и команды. */
+const STOPPED_STATUS_LABEL: Record<string, string> = {
+  [String(CampaignStatus.AccountSuspended)]: 'аккаунт рассыльщика заблокирован',
+  [String(CampaignStatus.AccountsUnhealthy)]: 'ящики нездоровы',
+  [String(CampaignStatus.BounceProtect)]: 'защита от bounce',
+};
+
+/** Вердикт по строке кэша статуса — чистая функция, см. шаг 6 блока выше. */
+export function heRefillCampaignVerdict(
+  row: HeEngCampaignStatusRow | undefined,
+  nowMs: number,
+): HeRefillCampaignVerdictDetail {
+  if (!row) return { verdict: 'unknown', detail: 'статус не читался ни разу' };
+  if (row.read_error === 'not_found') return { verdict: 'stopped', detail: 'кампании нет у рассыльщика (404)' };
+  const readAtMs = row.status_read_at ? Date.parse(row.status_read_at) : Number.NaN;
+  if (row.status === null || !Number.isFinite(readAtMs)) return { verdict: 'unknown', detail: 'статус не прочитан' };
+  if (nowMs - readAtMs > HE_REFILL_STATUS_MAX_AGE_MS) {
+    return {
+      verdict: 'unknown',
+      detail: `статус прочитан ${Math.round((nowMs - readAtMs) / 60_000)} мин назад` +
+        (row.read_error === 'failed' ? ', последнее чтение не удалось' : ''),
+    };
+  }
+  if (heEngStatusIsStopped(row.status)) {
+    return { verdict: 'stopped', detail: `статус ${row.status} (${STOPPED_STATUS_LABEL[String(row.status)] ?? 'остановлена'})` };
+  }
+  if (heEngStatusIsSending(row.status)) return { verdict: 'sending', detail: `статус ${row.status}` };
+  if (row.status === CampaignStatus.Completed) return { verdict: 'completed', detail: 'статус 3 (завершена)' };
+  if (heEngStatusIsStartable(row.status)) return { verdict: 'not_sending', detail: `статус ${row.status} (стоит)` };
+  return { verdict: 'unknown', detail: `незнакомый статус ${row.status}` };
+}
+
+/**
+ * Основная кампания записи о запуске — та, в которую доливает ночь: при
+ * сплите по сегментам — segment=null, иначе скалярная. '' — сплит без
+ * основной (доливать некуда).
+ */
+export function heRefillMainCampaignId(launch: HeTemplateLaunchInfo): string {
+  const id = launch.campaigns?.length
+    ? launch.campaigns.find((c) => c.segment === null)?.campaign_id
+    : launch.campaign_id;
+  return id ?? '';
+}
+
+/**
+ * Вердикт ОСНОВНОЙ кампании запусков — для кабинета (строка «next» вертикали
+ * и строка «Daily top-up» конвейера): ночь решает основная кампания, а не
+ * сводка отправки (HeEngSendingSummary.state 'sending' значит «отправляет ХОТЬ
+ * ОДНА кампания» — при завершённой основной и живом сегменте сводка говорит
+ * 'sending', а ночь пропускается). Только кэш he_eng_campaign_status — ни
+ * одного запроса к рассыльщику (кэш освежают кабинет и сама ночь); то же
+ * правило, что у гейта (heRefillCampaignVerdict, срок
+ * HE_REFILL_STATUS_MAX_AGE_MS: старше — 'unknown'). Ящики пула здесь не
+ * проверяются: email_list в кэше нет, пропуск по ящикам кабинет видит строкой
+ * журнала ночи. Ключ — id шаблона; запуска без основной кампании в ответе нет.
+ * null — кэш не читается. НЕ БРОСАЕТ.
+ */
+export async function readHeRefillMainVerdicts(
+  db: SupabaseClient,
+  launches: ReadonlyArray<{ templateId: string; launch: HeTemplateLaunchInfo }>,
+  nowMs: number = Date.now(),
+): Promise<Map<string, HeRefillCampaignVerdictDetail> | null> {
+  const mainOf = new Map<string, string>();
+  for (const { templateId, launch } of launches) {
+    const id = heRefillMainCampaignId(launch);
+    if (templateId && id) mainOf.set(templateId, id);
+  }
+  const out = new Map<string, HeRefillCampaignVerdictDetail>();
+  if (mainOf.size === 0) return out;
+  const rows = await readHeEngCampaignStatusRows(db, [...mainOf.values()]);
+  if (rows === null) return null;
+  for (const [templateId, campaignId] of mainOf) {
+    out.set(templateId, heRefillCampaignVerdict(rows.get(campaignId), nowMs));
+  }
+  return out;
+}
+
+/** Кампании одного запуска, в которые ночь может долить. */
+export interface HeRefillSendCampaigns {
+  /** Шаблон запуска — у него желание клиента (he_eng_launch_sending). */
+  templateId: string;
+  /** Пресет записи о запуске — его воркспейс читается. */
+  presetId: string;
+  /** Основная кампания (segment=null) — решает ночь. */
+  mainCampaignId: string;
+  /** Сегментные кампании того же запуска (у тика — пусто: решает основная). */
+  segmentCampaignIds: readonly string[];
+}
+
+/**
+ * Что добор вертикали держит и что чинит только команда (notifyHeRefillHold):
+ *  - 'main_completed' — основная кампания запуска завершена (3);
+ *  - 'main_stopped' — основная остановлена рассыльщиком (-99/-1/-2) или
+ *    удалена (404);
+ *  - 'mailboxes' — у проекта ENG-клиента нет ящиков пула, они в разных
+ *    воркспейсах, ящик пула стоит у другого клиента, или основная кампания
+ *    шлёт не из них (`campaignId` — она);
+ *  - 'segments_held' — сегментные кампании запуска остановлены рассыльщиком,
+ *    удалены или стоят (0/2): их строки долив держит (только долив).
+ */
+export type HeRefillHoldAlert =
+  | { kind: 'main_completed'; campaignId: string }
+  | { kind: 'main_stopped'; campaignId: string; detail: string }
+  | { kind: 'mailboxes'; campaignId: string; detail: string }
+  | {
+      kind: 'segments_held';
+      mainCampaignId: string;
+      campaigns: Array<{ id: string; detail: string }>;
+      /** Срок очереди переноса, суток (HE_REFILL_CARRYOVER_MAX_AGE_DAYS долива). */
+      carryMaxDays: number;
+    };
+
+export type HeRefillSendTarget =
+  | { allowed: true; segmentVerdicts: ReadonlyMap<string, HeRefillCampaignVerdictDetail> }
+  | { allowed: false; reason: HeRefillSendSkipReason; detail: string; alert: HeRefillHoldAlert | null };
+
+type HeRefillSendOwner =
+  | { ok: true; createdBy: string; engClient: boolean }
+  | { ok: false; reason: HeRefillSendSkipReason; detail: string };
+
+type HeRefillSendWorkspace = { ok: true; clientUserId: string; accountId: string } | { ok: false; detail: string };
+
+/** Живое чтение основной кампании (шаг 5). */
+type HeRefillMainLive =
+  | { kind: 'read'; row: HeEngCampaignStatusRow; emailList: unknown }
+  | { kind: 'unconfigured'; detail: string }
+  | { kind: 'failed'; detail: string };
+
+/** Почему ящиков пула проекта нет в пригодном виде (шаг 5). */
+function poolProblemText(assignment: Exclude<HeSendingPoolAssignment, { kind: 'assigned' }>): string {
+  switch (assignment.kind) {
+    case 'none':
+      return 'у проекта нет ящиков пула (запуск до S2 или ящики возвращены)';
+    case 'mixed':
+      return `ящики пула проекта в разных воркспейсах: ${assignment.workspaces.join(', ')}`;
+    case 'unavailable':
+      return 'пул ящиков не читается (he_sending_pool, миграция 20261011_0001)';
+    case 'error':
+      return `пул ящиков не прочитан: ${assignment.message}`;
+  }
+}
+
+/**
+ * Проверка «кампании запуска отправляют?» одного проекта (см. блок выше).
+ * Владелец, выключатель аккаунта, воркспейс пресета, ящики пула и живое
+ * чтение основной кампании читаются один раз на гейт (обход проекта тиком —
+ * секунды); переключатель проекта, желание клиента и кэш статусов — на каждый
+ * вызов. `instantlyDb` — БД пресетов (по умолчанию supabaseInstantly; нет —
+ * 'unavailable').
+ */
+export function createHeRefillSendGate(
+  db: SupabaseClient,
+  projectId: string,
+  deps: { instantlyDb?: SupabaseClient | null; now?: () => Date; env?: NodeJS.ProcessEnv } = {},
+): (campaigns: HeRefillSendCampaigns) => Promise<HeRefillSendTarget> {
+  const instantlyDb = deps.instantlyDb === undefined ? supabaseInstantly : deps.instantlyDb;
+  const clock = deps.now ?? (() => new Date());
+  let ownerRead: Promise<HeRefillSendOwner> | null = null;
+  let poolRead: Promise<HeSendingPoolAssignment> | null = null;
+  let usesRead: Promise<HeSendingPoolMailboxUses> | null = null;
+  const workspaceReads = new Map<string, Promise<HeRefillSendWorkspace>>();
+  const liveReads = new Map<string, Promise<HeRefillMainLive>>();
+
+  const readOwner = async (): Promise<HeRefillSendOwner> => {
+    const { data, error } = await db.from('he_projects').select('created_by, market').eq('id', projectId).maybeSingle();
+    if (error) return { ok: false, reason: 'unavailable', detail: errorText('he_projects read', error) };
+    const row = data as { created_by?: unknown; market?: unknown } | null;
+    const createdBy = asString(row?.created_by);
+    if (!row || !createdBy) return { ok: false, reason: 'unavailable', detail: 'проект или его владелец не найден' };
+    if (row.market !== 'us') return { ok: false, reason: 'unavailable', detail: `рынок проекта ${String(row.market)}` };
+    const access = await readHeEngSendingAccess(db, createdBy, { env: deps.env });
+    switch (access.state) {
+      case 'enabled':
+      case 'not_required':
+        return { ok: true, createdBy, engClient: true };
+      case 'not_client':
+        return { ok: true, createdBy, engClient: false };
+      case 'not_enabled':
+        return { ok: false, reason: 'access_not_enabled', detail: 'отправка аккаунта ещё не включена сотрудником' };
+      case 'revoked':
+        return { ok: false, reason: 'access_turned_off', detail: 'отправка аккаунта выключена сотрудником' };
+      case 'unavailable':
+      case 'error':
+        return { ok: false, reason: 'unavailable', detail: `выключатель отправки аккаунта: ${access.detail ?? access.state}` };
+    }
+    return { ok: false, reason: 'unavailable', detail: 'выключатель отправки аккаунта: неизвестное состояние' };
+  };
+
+  const readWorkspace = async (presetId: string): Promise<HeRefillSendWorkspace> => {
+    if (!presetId) return { ok: false, detail: 'в записи о запуске нет preset_id' };
+    if (!instantlyDb) return { ok: false, detail: 'БД пресетов не сконфигурирована' };
+    const { data, error } = await instantlyDb
+      .from('client_campaign_presets')
+      .select('client_user_id, instantly_account_id')
+      .eq('id', presetId)
+      .maybeSingle();
+    if (error) return { ok: false, detail: errorText('client_campaign_presets read', error) };
+    const row = data as { client_user_id?: unknown; instantly_account_id?: unknown } | null;
+    if (!row) return { ok: false, detail: `пресет ${presetId} не найден` };
+    return {
+      ok: true,
+      clientUserId: asString(row.client_user_id),
+      accountId: resolveInstantlyAccountId(asStringOrNull(row.instantly_account_id)),
+    };
+  };
+
+  // Шаг 5: одно живое чтение основной кампании — статус и email_list. Статус
+  // (и воркспейс, где кампания нашлась) пишется в кэш — кабинету и шагу 6:
+  // свежая строка повторно не читается.
+  const readMainLive = async (campaignId: string, accountId: string): Promise<HeRefillMainLive> => {
+    const base = { campaign_id: campaignId, sent: null, replies: null, counts_read_at: null, refresh_until: null, start_error: null };
+    if (!heEngWorkspaceConfigured(accountId)) {
+      return { kind: 'unconfigured', detail: `воркспейс пресета ${accountId} не настроен в окружении` };
+    }
+    try {
+      const live = await getCampaign(campaignId, {
+        accountId,
+        retryRateLimits: false,
+        timeoutMs: HE_REFILL_LIVE_READ_TIMEOUT_MS,
+        consumer: HE_ENG_STATUS_CONSUMER,
+      });
+      if (!live || live.id !== campaignId) return { kind: 'failed', detail: 'ответ рассыльщика без этой кампании' };
+      const status = typeof live.status === 'number' && Number.isFinite(live.status) ? live.status : null;
+      await writeHeEngCampaignStatus(db, projectId, campaignId, { status, readError: null, workspace: accountId });
+      return {
+        kind: 'read',
+        row: { ...base, status, status_read_at: clock().toISOString(), read_error: null },
+        emailList: live.email_list,
+      };
+    } catch (e) {
+      if (e instanceof InstantlyApiError && e.status === 404) {
+        await writeHeEngCampaignStatus(db, projectId, campaignId, { readError: 'not_found' });
+        return {
+          kind: 'read',
+          row: { ...base, status: null, status_read_at: clock().toISOString(), read_error: 'not_found' },
+          emailList: null,
+        };
+      }
+      return { kind: 'failed', detail: e instanceof Error ? e.message.slice(0, 200) : 'unknown' };
+    }
+  };
+
+  return async (campaigns) => {
+    const skip = (
+      reason: HeRefillSendSkipReason,
+      detail: string,
+      alert: HeRefillHoldAlert | null = null,
+    ): HeRefillSendTarget => ({ allowed: false, reason, detail, alert });
+    try {
+      // 1. Переключатель «Daily top-up» — каждый раз: клиент мог выключить его
+      //    за секунды до постановки или за часы до долива.
+      const { data: cfg, error: cfgErr } = await db
+        .from('he_auto_pipeline_configs')
+        .select('enabled')
+        .eq('project_id', projectId)
+        .maybeSingle();
+      if (cfgErr) return skip('unavailable', errorText('he_auto_pipeline_configs read', cfgErr));
+      if (!cfg) return skip('top_up_off', 'у проекта нет конфига ночного добора');
+      if ((cfg as { enabled?: unknown }).enabled !== true) {
+        return skip('top_up_off', 'клиент выключил ежедневный добор (enabled=false)');
+      }
+
+      // 2. Владелец и выключатель отправки аккаунта.
+      ownerRead ??= readOwner();
+      const owner = await ownerRead;
+      if (!owner.ok) return skip(owner.reason, owner.detail);
+
+      // 3. Пауза клиента — только у ENG-клиента (у проекта сотрудника её нет).
+      if (owner.engClient) {
+        const states = await readHeEngClientStates(db, [campaigns.templateId]);
+        if (states === null) return skip('unavailable', 'желание клиента (he_eng_launch_sending) не читается');
+        if (states.get(campaigns.templateId)?.state === 'paused') {
+          return skip('client_paused', `клиент поставил запуск шаблона ${campaigns.templateId} на паузу`);
+        }
+      }
+
+      // 4. Воркспейс пресета записи о запуске.
+      const mainId = campaigns.mainCampaignId;
+      if (!mainId) return skip('unavailable', 'у запуска нет основной кампании');
+      let pending = workspaceReads.get(campaigns.presetId);
+      if (!pending) {
+        pending = readWorkspace(campaigns.presetId);
+        workspaceReads.set(campaigns.presetId, pending);
+      }
+      const workspace = await pending;
+      if (!workspace.ok) return skip('unavailable', workspace.detail);
+      if (owner.engClient && workspace.clientUserId !== owner.createdBy) {
+        return skip('unavailable', 'пресет записи о запуске — не пресет владельца проекта');
+      }
+
+      // 5. Ящики пула и живое чтение основной кампании — только ENG-клиент.
+      let pool: Extract<HeSendingPoolAssignment, { kind: 'assigned' }> | null = null;
+      let mainLive: Extract<HeRefillMainLive, { kind: 'read' }> | null = null;
+      if (owner.engClient) {
+        poolRead ??= readHeSendingPoolAssignment(db, projectId);
+        const assignment = await poolRead;
+        if (assignment.kind !== 'assigned') {
+          const detail = poolProblemText(assignment);
+          const teamFixes = assignment.kind === 'none' || assignment.kind === 'mixed';
+          return skip('unavailable', detail, teamFixes ? { kind: 'mailboxes', campaignId: mainId, detail } : null);
+        }
+        pool = assignment;
+        // Ящик пула не стоит ни в пресете ДРУГОГО клиента, ни в живом запуске
+        // RU-кабинета — та же проверка, что у запуска (engSendingPreset, шаг 6).
+        if (!instantlyDb) return skip('unavailable', 'БД пресетов не сконфигурирована');
+        usesRead ??= findHeSendingPoolMailboxUses(instantlyDb, assignment.emails, {
+          exceptPresetOfClient: owner.createdBy,
+        });
+        const uses = await usesRead;
+        if (uses.kind === 'error') return skip('unavailable', `занятость ящиков пула не прочитана: ${uses.message}`);
+        if (uses.kind === 'in_use') {
+          const detail = `ящик пула проекта уже используется: ${describeHeSendingPoolMailboxUses(uses.uses)}`;
+          return skip('unavailable', detail, { kind: 'mailboxes', campaignId: mainId, detail });
+        }
+        let live = liveReads.get(mainId);
+        if (!live) {
+          live = readMainLive(mainId, workspace.accountId);
+          liveReads.set(mainId, live);
+        }
+        const read = await live;
+        if (read.kind === 'unconfigured') return skip('unavailable', read.detail);
+        if (read.kind === 'failed') {
+          return skip('status_unknown', `основная кампания ${mainId} не прочитана (${read.detail}) — её ящики не проверены`);
+        }
+        mainLive = read;
+      }
+
+      // 6. Статус: живое чтение того, что шаг 5 не читал (если старше окна),
+      //    затем кэш.
+      const ids = [...new Set([mainId, ...campaigns.segmentCampaignIds].filter(Boolean))];
+      const refreshIds = mainLive ? ids.filter((id) => id !== mainId) : ids;
+      if (refreshIds.length > 0) {
+        await refreshHeEngCampaignStatuses(db, {
+          projectId,
+          instantlyAccountId: workspace.accountId,
+          campaignIds: refreshIds,
+          templateOf: new Map(refreshIds.map((id) => [id, campaigns.templateId])),
+          freshMs: HE_REFILL_STATUS_REFRESH_MS,
+          maxCampaigns: refreshIds.length,
+        });
+      }
+      const rows = await readHeEngCampaignStatusRows(db, ids);
+      if (rows === null) return skip('unavailable', 'кэш статусов кампаний (he_eng_campaign_status) не читается');
+      const nowMs = clock().getTime();
+      const main = heRefillCampaignVerdict(mainLive?.row ?? rows.get(mainId), nowMs);
+      if (main.verdict !== 'sending') {
+        const alert: HeRefillHoldAlert | null =
+          main.verdict === 'completed'
+            ? { kind: 'main_completed', campaignId: mainId }
+            : main.verdict === 'stopped'
+              ? { kind: 'main_stopped', campaignId: mainId, detail: main.detail }
+              : null;
+        return skip(VERDICT_SKIP_REASON[main.verdict], `основная кампания ${mainId}: ${main.detail}`, alert);
+      }
+
+      // 7. Адреса основной — ящики пула проекта (ENG-клиент).
+      if (pool && mainLive) {
+        const check = checkHeCampaignAgainstAssignment(pool, {
+          instantlyAccountId: workspace.accountId,
+          emailList: mainLive.emailList,
+        });
+        if (!check.ok) {
+          const detail =
+            check.reason === 'workspace_mismatch'
+              ? 'кампания в другом воркспейсе, чем ящики пула проекта'
+              : check.reason === 'no_mailboxes'
+                ? 'в кампании нет ни одного ящика отправки'
+                : `в кампании ящики не из пула проекта: ${check.foreign.slice(0, 5).join(', ')}` +
+                  (check.foreign.length > 5 ? ` и ещё ${check.foreign.length - 5}` : '');
+          return skip('unavailable', `основная кампания ${mainId}: ${detail}`, { kind: 'mailboxes', campaignId: mainId, detail });
+        }
+      }
+      // Сегменты: вердикт по кэшу; кампания с пометкой 'mailboxes_changed'
+      // (адреса не из ящиков пула проекта — её ставят старт и каждое живое
+      // чтение отправляющей кампании, engCampaignStatus) — как остановленная
+      // при ЛЮБОМ статусе: её строки держатся, в основную не уходят (та шлёт из
+      // ящиков пула, и это был бы обход проверки).
+      return {
+        allowed: true,
+        segmentVerdicts: new Map(
+          campaigns.segmentCampaignIds
+            .filter((id) => id && id !== mainId)
+            .map((id) => {
+              const row = rows.get(id);
+              const verdict: HeRefillCampaignVerdictDetail =
+                row?.start_error === 'mailboxes_changed'
+                  ? { verdict: 'stopped', detail: 'ящики кампании не из пула проекта (пометка mailboxes_changed)' }
+                  : heRefillCampaignVerdict(row, nowMs);
+              return [id, verdict] as const;
+            }),
+        ),
+      };
+    } catch (e) {
+      return skip('unavailable', `проверка упала: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}`);
+    }
+  };
+}
+
+/** Одна проверка без мемоизации — для долива (stages/baseCollectRefill.ts, шаг 4c). */
+export function checkHeRefillSendTarget(
+  db: SupabaseClient,
+  projectId: string,
+  campaigns: HeRefillSendCampaigns,
+  deps: { instantlyDb?: SupabaseClient | null; now?: () => Date; env?: NodeJS.ProcessEnv } = {},
+): Promise<HeRefillSendTarget> {
+  return createHeRefillSendGate(db, projectId, deps)(campaigns);
+}
+
+/* ─── АЛЕРТ КОМАНДЕ: ДОБОР ВЕРТИКАЛИ ДЕРЖИТ ТО, ЧТО ЧИНИТ ТОЛЬКО КОМАНДА ───
+ *
+ * Виды — HeRefillHoldAlert. Зовут тик (после строки пропуска; ЖДЁТ: крон
+ * одноразовый, ожидание ограничено HE_OPS_SEND_TIMEOUT_MS) и долив (`void`:
+ * воркер долгоживущий).
+ *
+ * ДЕДУПЛИКАЦИЯ — в памяти процесса, окно HE_OPS_CAPACITY_REPEAT_MS (6 ч), по
+ * виду и кампании (у 'segments_held' — по основной кампании запуска). Тик и
+ * долив — разные процессы и пишут каждый свой раз; следующая ночь (сутки
+ * спустя) пишет снова, пока не починено — так же, как 'letters_held' у
+ * opsAlert. Окно держится, только если сообщение принял хоть один чат; не
+ * принял никто — снимается, и следующий такой же случай пишет снова.
+ *
+ * Транспорт — lib/telegram/workerAlert (health-бот), как у opsAlert. Id
+ * кампаний — строками контекста: причину heOpsReasonText вымарывает, и UUID
+ * кампании стал бы «[redacted]». Рынок не проверяется: тик и долив работают
+ * только с market='us'. НЕ БРОСАЕТ.
+ */
+
+const HOLD_ALERT_WORKER_ID = 'hypothesis-engine · ENG';
+const holdSilentUntil = new Map<string, { until: number }>();
+
+/**
+ * Почему совет команде никогда не «перезапустить шаблон вертикали с force»:
+ * повтор запуска заново грузит всю базу шаблона в новые кампании, и людям,
+ * которым старая кампания уже писала, может уйти вторая цепочка.
+ */
+const NO_FORCE_RELAUNCH =
+  'НЕ перезапускать шаблон вертикали с force: повтор заново грузит всю базу в новые кампании и может отправить ' +
+  'вторую цепочку тем, кому уже писали';
+
+export interface HeRefillHoldNotice {
+  projectId: string;
+  verticalId: string | null;
+  templateId: string | null;
+  /** 'tick' — ночь не куплена; 'refill' — сборка куплена, решал долив. */
+  where: 'tick' | 'refill';
+  baseId?: string | null;
+  alert: HeRefillHoldAlert;
+}
+
+function holdAlertKey(notice: HeRefillHoldNotice): string {
+  const a = notice.alert;
+  return a.kind === 'segments_held' ? `${a.kind}|${a.mainCampaignId}` : `${a.kind}|${a.campaignId}`;
+}
+
+function holdAlertBody(notice: HeRefillHoldNotice): {
+  subject: string;
+  error: string;
+  context: Record<string, string | number | null>;
+} {
+  const a = notice.alert;
+  const ids: Record<string, string | null> = {
+    'проект': notice.projectId,
+    'вертикаль': notice.verticalId,
+    'шаблон': notice.templateId,
+    ...(notice.baseId ? { 'база': notice.baseId } : {}),
+  };
+  const night =
+    notice.where === 'tick'
+      ? 'сборка этой ночи не куплена, контакты не добавлены'
+      : 'сборка этой ночи уже была куплена: контакты не добавлены, её компании ждут в очереди переноса ' +
+        '(не легла очередь — вернулись в пул)';
+  switch (a.kind) {
+    case 'main_completed':
+      return {
+        subject: 'ENG: основная кампания запуска завершена — ночной добор вертикали стоит',
+        error:
+          `основная кампания завершена (статус 3): все её адреса прошли цепочку, а в завершённую кампанию ` +
+          `добор контакты не грузит; ${night}. Так каждую ночь, пока кампания не отправляет снова`,
+        context: {
+          ...ids,
+          'кампания': a.campaignId,
+          'клиент видит':
+            'daily top-up skipped — the main campaign of this vertical has completed; message Support to continue it',
+          'сделать':
+            'продолжить вертикаль: добавить новые контакты в эту же кампанию у рассыльщика и активировать её там ' +
+            '(статус 1) — следующая ночь увидит отправку и продолжит добор сама; либо написать клиенту в чат ' +
+            `поддержки и решить с ним, продолжать ли вертикаль. ${NO_FORCE_RELAUNCH}. Не продолжать — выключить ` +
+            'ночной добор проекта (he_auto_pipeline_configs.enabled или переключатель клиента «Daily top-up»)',
+        },
+      };
+    case 'main_stopped':
+      return {
+        subject: 'ENG: основная кампания запуска остановлена рассыльщиком — ночной добор вертикали стоит',
+        error: `основная кампания: ${heOpsReasonText(a.detail)}; ${night}. Так каждую ночь, пока кампания не отправляет снова`,
+        context: {
+          ...ids,
+          'кампания': a.campaignId,
+          'клиент видит':
+            'daily top-up skipped — our sending service stopped or removed the main campaign of this vertical; message Support',
+          'сделать':
+            'проверить у рассыльщика ящики проекта и саму кампанию; остановленную (-99/-1/-2) после починки ' +
+            'активировать там (статус 1) — кнопка старта в кабинете клиента остановленную рассыльщиком кампанию не ' +
+            'стартует; следующая ночь проверит статус и продолжит добор сама. Удалённую (404) — ' +
+            `${NO_FORCE_RELAUNCH}; клиенту сказано написать в Support — выяснить, кто и почему удалил кампанию, и ` +
+            'решить с владельцем, как продолжать вертикаль; до того ночи её пропускают',
+        },
+      };
+    case 'mailboxes':
+      return {
+        subject: 'ENG: ночной добор вертикали стоит — ящики отправки не сходятся с пулом проекта',
+        error: `${heOpsReasonText(a.detail)}; ${night}. Так каждую ночь, пока не поправлено`,
+        context: {
+          ...ids,
+          'кампания': a.campaignId,
+          // Полностью: причина выше обрезана и вымарана (id клиентов).
+          'подробно': a.detail.slice(0, 600),
+          'клиент видит':
+            'daily top-up skipped — we could not confirm these campaigns can take new contacts; message Support if this repeats',
+          'сделать':
+            'кампания шлёт не из ящиков пула — сверить её email_list у рассыльщика с ящиками проекта («Пул ящиков ' +
+            'ENG» в Движке вертикалей v1) и поправить кампанию: только ящики пула проекта, в том же воркспейсе; ящик ' +
+            'пула стоит у другого клиента — убрать его из того пресета (/admin/clients/<клиент>/preset) или ' +
+            'остановить тот RU-запуск; у проекта нет ящиков пула (запуск до S2) или они в разных воркспейсах — ' +
+            'решить с владельцем, как перевести вертикаль на ящики пула, или выключить ночной добор проекта. ' +
+            'Следующая ночь проверит снова',
+        },
+      };
+    case 'segments_held':
+      return {
+        subject: 'ENG: сегментные кампании запуска не отправляют — их строки ночной добор держит',
+        error:
+          `не отправляют ${a.campaigns.length} сегм. кампан.: ${a.campaigns.map((c) => heOpsReasonText(c.detail)).join('; ')}. ` +
+          'Строки этих сегментов не уходят никуда — ни в свою кампанию, ни в основную; остальные строки ночи ' +
+          'отправляются как обычно',
+        context: {
+          ...ids,
+          'кампании сегментов': a.campaigns.map((c) => c.id).join(', '),
+          'основная кампания': a.mainCampaignId,
+          'клиент видит': 'строку ночи в ленте без отдельной пометки: строки этих сегментов в число добавленных не входят',
+          'сделать':
+            'проверить кампании сегментов у рассыльщика: остановленную (-99/-1/-2) — починить ящики или адреса и ' +
+            'активировать там; стоящую (0/2) — активировать там; шлющую не из ящиков пула проекта (пометка ' +
+            '«ящики кампании не из пула проекта») — поправить её email_list у рассыльщика на ящики пула проекта («Пул ' +
+            'ящиков ENG»), в том же воркспейсе: следующее чтение статуса снимет пометку; удалённую (404) — ' +
+            `${NO_FORCE_RELAUNCH}; выяснить, кто и почему удалил кампанию, и написать клиенту в чат поддержки, что ` +
+            'текст этого сегмента не уходит. ' +
+            `Пока не сделано, компании этих строк каждую ночь ждут в очереди переноса (до ${a.carryMaxDays} сут., ` +
+            'потом отпускаются в пул), адресам, которым кампания сегмента уже писала, не пишем вовсе',
+        },
+      };
+  }
+}
+
+/** Сообщить команде (см. блок выше). Решение «слать / молчать» — синхронно. НЕ БРОСАЕТ. */
+export function notifyHeRefillHold(notice: HeRefillHoldNotice, opts: { now?: number } = {}): Promise<void> {
+  try {
+    const now = opts.now ?? Date.now();
+    for (const [key, hold] of holdSilentUntil) {
+      if (now >= hold.until) holdSilentUntil.delete(key);
+    }
+    const key = holdAlertKey(notice);
+    const current = holdSilentUntil.get(key);
+    if (current && now < current.until) return Promise.resolve();
+    const hold = { until: now + HE_OPS_CAPACITY_REPEAT_MS };
+    holdSilentUntil.set(key, hold);
+
+    const body = holdAlertBody(notice);
+    const delivered = sendWorkerAlert({
+      workerId: HOLD_ALERT_WORKER_ID,
+      subject: body.subject,
+      error: body.error,
+      context: body.context,
+    }).catch(() => false);
+    void delivered
+      .then((accepted) => {
+        if (!accepted && holdSilentUntil.get(key) === hold) holdSilentUntil.delete(key);
+      })
+      .catch(() => undefined);
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, HE_OPS_SEND_TIMEOUT_MS);
+      (timer as { unref?: () => void }).unref?.();
+    });
+    return Promise.race([delivered.then(() => undefined), deadline]).then(
+      () => {
+        if (timer) clearTimeout(timer);
+      },
+      () => {
+        if (timer) clearTimeout(timer);
+      },
+    );
+  } catch (e) {
+    console.warn('[he-refill-hold] алерт не собран:', e);
+    return Promise.resolve();
+  }
+}
+
 /**
  * Обходить ли конфиг в этот запуск крона: ОДИН ОБХОД НА UTC-СУТКИ.
  *
@@ -789,6 +1940,7 @@ export type HeAutoPipelineDetailStatus =
   | 'dry'
   | 'carry_covers'
   | 'letters_held'
+  | 'sending_skipped'
   | 'failed';
 
 /**
@@ -798,6 +1950,15 @@ export type HeAutoPipelineDetailStatus =
  */
 const LETTERS_HELD_ERROR =
   'письма запущенного шаблона сняли бы все строки ночи — сборка не ставилась, деньги не потрачены';
+
+/**
+ * Текст ошибки строки журнала, когда тик не купил ночь, потому что кампании
+ * запуска не берут контакты (шаг 3a- «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?»); за ним
+ * — машинная причина и подробность. Машинная причина для читателей —
+ * stats.sending_skip, по тексту её никто не разбирает.
+ */
+const SENDING_SKIP_ERROR =
+  'кампании запуска не берут контакты — сборка не ставилась, деньги не потрачены, контакты не добавлены';
 
 /**
  * Текст отказа предполёта — БЛИЗНЕЦ REFILL_CAPACITY_NOTE в
@@ -826,6 +1987,8 @@ export interface HeAutoPipelineTickDetail {
    * нулевой серии, см. readDryNightStreak).
    */
   dryNights?: number;
+  /** Только у 'sending_skipped': почему кампании запуска не берут контакты. */
+  sendingSkip?: HeRefillSendSkipReason;
   message?: string;
 }
 
@@ -896,6 +2059,13 @@ export interface HeAutoPipelineTickSummary {
    * добавил бы к алерту команде и строке журнала.
    */
   lettersHeld: number;
+  /**
+   * Вертикалей, чья ночь не куплена, потому что её кампании не берут контакты
+   * (шаг 3a- «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?» в шапке: переключатель клиента,
+   * пауза клиента, отправка аккаунта, кампания завершена, остановлена или её
+   * статус не подтверждён). НЕ failed: это решение, а не сбой тика.
+   */
+  sendingSkipped: number;
   failed: number;
   details: HeAutoPipelineTickDetail[];
   /**
@@ -995,6 +2165,12 @@ interface VerticalLaunchTarget {
    * ИМЕННО его, иначе он мерил бы чужой (дефолтный) воркспейс.
    */
   presetId: string;
+  /**
+   * Шаблон этого запуска: его желание клиента (he_eng_launch_sending — пауза
+   * клиента ставится на шаблон) читает проверка «кампании запуска
+   * отправляют?» (createHeRefillSendGate).
+   */
+  templateId: string;
 }
 
 /**
@@ -1022,17 +2198,18 @@ function latestCampaignByVertical(
     // долив (stages/baseCollectRefill.ts, routeHeRefillSegments, только 'us');
     // сплит без основной кампании вертикаль пропускает — строкам без сегмента
     // лечь некуда (pickRefillTemplate тоже вернёт null).
-    const campaignId = launch.campaigns?.length
-      ? launch.campaigns.find((c) => c.segment === null)?.campaign_id
-      : launch.campaign_id;
+    const campaignId = heRefillMainCampaignId(launch);
     if (!campaignId) continue;
     const current = best.get(verticalId);
     if (!current || ts >= current.ts) {
-      best.set(verticalId, { campaignId, presetId: launch.preset_id, ts });
+      best.set(verticalId, { campaignId, presetId: launch.preset_id, templateId: asString(row.id), ts });
     }
   }
   return new Map(
-    [...best.entries()].map(([k, v]) => [k, { campaignId: v.campaignId, presetId: v.presetId }]),
+    [...best.entries()].map(([k, v]) => [
+      k,
+      { campaignId: v.campaignId, presetId: v.presetId, templateId: v.templateId },
+    ]),
   );
 }
 
@@ -1370,7 +2547,8 @@ async function readRefillDayRemaining(
  *
  * Не решают (пропускаются, как и в серии отказов refillStreakVerdict): ночь без
  * бюджета ('failed' с budget_outcome 'cap_exhausted'), повтор прогона той же
- * базы ('already_reserved') и отмена клиентом (stats.cancelled). Ночь без
+ * базы ('already_reserved'), отмена клиентом (stats.cancelled) и пропуск долива,
+ * потому что кампании запуска не отправляли (stats.sending_skip). Ночь без
  * бюджета ПЕРЕНОСИТ свои компании (решение владельца 04.10.2026), и именно у
  * её вертикали очередь самая большая; считать её «сломанной» значило бы
  * оставить эту очередь без ночи, пока она не истечёт. Решающей ночи в окне
@@ -1429,10 +2607,16 @@ async function readCarryoverByVertical(
       const stats = (run.stats && typeof run.stats === 'object' ? run.stats : {}) as {
         budget_outcome?: unknown;
         cancelled?: unknown;
+        sending_skip?: unknown;
       };
+      // Пропуск долива, потому что кампании запуска не отправляли
+      // (stats.sending_skip, stages/baseCollectRefill.ts, шаг 4c), тоже не
+      // решает: о вертикали он не говорит ничего, а её компании ушли в ту же
+      // очередь переноса.
       const undecided =
         status === 'failed'
         && (stats.cancelled === true
+          || typeof stats.sending_skip === 'string'
           || stats.budget_outcome === 'cap_exhausted'
           || stats.budget_outcome === 'already_reserved');
       if (!undecided) decisive.set(verticalId, status);
@@ -1780,7 +2964,8 @@ async function passConfig(
   // Решение принято раньше и записано в конфиге; перепроверять его
   // сегодняшним запросом к рассыльщику нельзя — ровно этот «автоматический
   // пересмотр» и превратил бы паузу обратно в пропуск одной ночи. Снимает её
-  // только сотрудник (resumeHeRefillPause, staff-роут refill-pause).
+  // сотрудник (resumeHeRefillPause, staff-роут refill-pause), а паузу отмены —
+  // ещё и клиент переключателем «Daily top-up» (switchHeUsRefill).
   // Своей строки he_auto_pipeline_runs пропуск НЕ пишет — та же причина, что у
   // budget_exhausted и dry: в status нет значения «решили не собирать», а
   // 'failed' выдал бы намеренную остановку за сбой. И ровно поэтому ночь под
@@ -1836,7 +3021,7 @@ async function passConfig(
   if (verticals.length > 0) {
     const { data: templateRows, error: tErr } = await supabase
       .from('he_templates')
-      .select('vertical_id, launch_info, created_at, letters, personalization_plan')
+      .select('id, vertical_id, launch_info, created_at, letters, personalization_plan')
       .in('vertical_id', verticals.map((v) => v.id))
       .not('launch_info', 'is', null);
     if (tErr) throw new Error(`he_templates read: ${tErr.message}`);
@@ -1969,6 +3154,8 @@ async function passConfig(
     : verticalsInOrder;
   /** Компании очередей вертикалей, чья ночь этим тиком действительно поставлена. */
   let carryRunning = 0;
+  /** Отправляют ли кампании запуска (шаг 3a- в шапке) — один гейт на обход проекта. */
+  const sendGate = createHeRefillSendGate(supabase, config.project_id);
 
   for (const vertical of budgetExhausted ? [] : tickOrder) {
     if (enqueued >= perRun) break;
@@ -2089,6 +3276,60 @@ async function passConfig(
         message:
           `carried-over companies of the verticals running tonight (${carryRunning}) cover ` +
           `today's lead budget (${dayLeft}) — older queues go first, no run for this vertical tonight`,
+      });
+      continue;
+    }
+
+    // ─── КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ? (шаг 3a- в шапке; до потолка расхода,
+    //     предполёта ёмкости и постановки — ни запроса ёмкости, ни денег на
+    //     вертикаль, чьи контакты никто не отправит) ───
+    // Решает основная кампания запуска (сегментные — только у долива, их
+    // строки он держит или раскладывает). Пропуск
+    // пишется строкой журнала без base_id, как отказ предполёта: лента кабинета
+    // печатает причину («daily top-up skipped — …», engDashboard.ts), а серии
+    // сухих ночей, отказов вертикали и порядок вертикалей её не видят (все
+    // читают только строки с base_id). Строка не легла — ночь всё равно не
+    // покупается, причина остаётся в ночном логе. Пропуск, который чинит только
+    // команда (основная завершена, остановлена рассыльщиком, ящики не из пула),
+    // ещё и алерт — после строки журнала; ждём: крон одноразовый.
+    const send = await sendGate({
+      templateId: target.templateId,
+      presetId: target.presetId,
+      mainCampaignId: campaignId,
+      segmentCampaignIds: [],
+    });
+    if (!send.allowed) {
+      summary.sendingSkipped += 1;
+      let recorded = true;
+      try {
+        await insertRun(supabase, {
+          config_id: config.id,
+          project_id: config.project_id,
+          vertical_id: vertical.id,
+          base_id: null,
+          status: 'failed',
+          stats: { sending_skip: send.reason },
+          error: `${SENDING_SKIP_ERROR} (${send.reason}): ${send.detail}`.slice(0, 500),
+          completed_at: now.toISOString(),
+        });
+      } catch {
+        recorded = false;
+      }
+      if (send.alert) {
+        await notifyHeRefillHold({
+          projectId: config.project_id,
+          verticalId: vertical.id,
+          templateId: target.templateId,
+          where: 'tick',
+          alert: send.alert,
+        });
+      }
+      detail({
+        verticalId: vertical.id,
+        status: 'sending_skipped',
+        sendingSkip: send.reason,
+        ...dryNightsDetail,
+        message: `${send.reason}: ${send.detail}${recorded ? '' : ' (run row NOT written)'}`,
       });
       continue;
     }
@@ -2365,6 +3606,7 @@ export async function runHeAutoPipelineTick(
     dry: 0,
     carryCovers: 0,
     lettersHeld: 0,
+    sendingSkipped: 0,
     failed: 0,
     details: [],
     orders: [],

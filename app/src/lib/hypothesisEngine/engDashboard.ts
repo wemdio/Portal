@@ -14,11 +14,130 @@
 
 import { heLaunchIsIncomplete, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
 import type { HeClientStageErrorCode } from './clientEngProjection';
+// Только типы: набор причин пропуска одна на тик, долив и ленту, вердикт
+// основной кампании — тот же, что у гейта ночи, а модуль тика (instantly-клиент,
+// кэш статусов) в агрегат дашборда не едет.
+import type { HeRefillCampaignVerdict, HeRefillSendSkipReason } from './autoPipeline';
+import type { HeEngClientState, HeEngSendingAccessView } from './engCampaignStatus';
 // Справочник клиентских текстов без зависимостей (тот же, что реэкспортирует
 // clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда.
 import { HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
 
 /* ─────────────────────────── Время (UTC) ─────────────────────────── */
+
+/**
+ * Пропуск ночного добора, потому что кампании запуска не берут контакты
+ * (stats.sending_skip строки he_auto_pipeline_runs — её пишут тик до покупки
+ * сборки и долив до провайдера, autoPipeline.ts / stages/baseCollectRefill.ts).
+ * Фраза правдива для ОБОИХ мест записи: ни тот, ни другой контактов в кампанию
+ * не добавил («skipped»), а куплена ли сборка, лента не говорит. Строка ленты
+ * историческая, поэтому кнопку карточки она не называет: есть ли сейчас
+ * «Start sending» или «Resume», зависит от нынешнего состояния (запуск до S2
+ * кнопки старта не имеет вовсе), и это говорит строка «next» карточки
+ * вертикали. Support назван там, где его нужно звать при любом состоянии.
+ * Командой «уведомлена» здесь не пишется нигде: алерта у пропуска нет.
+ */
+const TOP_UP_SKIP_EN: Record<HeRefillSendSkipReason, string> = {
+  top_up_off: 'daily top-up skipped — it is turned off',
+  access_not_enabled: 'daily top-up skipped — sending is not on for your account yet',
+  access_turned_off: 'daily top-up skipped — sending is turned off for your account; message Support',
+  // Прошедшее время и по желанию клиента: строка историческая (паузы может уже
+  // не быть), а пропуск 'client_paused' пишется только по Pause клиента.
+  client_paused: 'daily top-up skipped — you had paused this vertical',
+  // Гейт ночи судит ОСНОВНУЮ кампанию запуска (сегментные ночь не отменяют) —
+  // фраза называет именно её. Те же фразы цитируют алерты команде
+  // (autoPipeline.holdAlertBody: 'main_completed', 'main_stopped') — менять вместе.
+  campaign_completed: 'daily top-up skipped — the main campaign of this vertical has completed; message Support to continue it',
+  campaign_stopped:
+    'daily top-up skipped — our sending service stopped or removed the main campaign of this vertical; message Support',
+  campaign_not_sending: 'daily top-up skipped — the main campaign of this vertical was not sending',
+  status_unknown: 'daily top-up skipped — we could not confirm the main campaign of this vertical is sending',
+  // 'unavailable' гейт пишет и когда проверить не удалось (выключатель, желание
+  // клиента, кэш, пул не читаются), и когда проверка нашла, что кампания шлёт
+  // не из ящиков пула проекта (запуск до self-serve, чужие адреса): фраза
+  // верна для обоих — подтвердить, что кампании можно доливать, не вышло.
+  unavailable: 'daily top-up skipped — we could not confirm these campaigns can take new contacts; message Support if this repeats',
+};
+
+/**
+ * Возьмёт ли ближайшая ночь ЭТУ вертикаль — для строки «next» карточки, строки
+ * «Daily top-up» её конвейера и счёта идущих проектов в карточке «Daily top-up»
+ * блока Today. Повторяет порядок гейта ночи (autoPipeline.ts, блок «КАМПАНИИ
+ * ЗАПУСКА ОТПРАВЛЯЮТ?») по тем данным, что есть у агрегата без провайдера:
+ *  1. переключатель проекта — не здесь: его состояние (`projects[].refill`)
+ *     кабинет печатает своей строкой;
+ *  2. выключатель отправки аккаунта: 'not_enabled' → 'access_not_enabled',
+ *     'turned_off' → 'access_turned_off', 'unavailable' → 'unavailable';
+ *  3. желание клиента по шаблону запуска: 'paused' → 'client_paused' (и тогда,
+ *     когда часть кампаний ещё отправляет: пауза не дошла до рассыльщика, а
+ *     ночь всё равно пропускает); не читается → 'unavailable';
+ *  4. воркспейс записи о запуске не клиента (`readable` сводки false) →
+ *     'unavailable';
+ *  5. запуск до self-serve отправки проекта → 'pre_self_serve': у гейта это
+ *     'unavailable' шага ящиков пула (его кампании — из ящиков другого
+ *     пресета), и не проходит он его при ЛЮБОМ статусе кампаний; пул не
+ *     читается → 'unavailable', как у гейта;
+ *  6. основной кампании нет (сплит по сегментам без неё) → 'no_main': тик такую
+ *     вертикаль не берёт вовсе;
+ *  7. вердикт ОСНОВНОЙ кампании по кэшу (readHeRefillMainVerdicts, то же
+ *     правило, что у гейта): 'sending' → ночь её берёт; 'completed' / 'stopped' /
+ *     'not_sending' → пропуск; 'unknown' (не читался, старше 30 минут) — тик
+ *     перед решением читает её сам, поэтому исход не известен, и строки
+ *     кабинета говорят это условно. Кэш не читается → 'unavailable'.
+ * Не повторяет живую проверку адресов основной кампании (шаг 7 гейта): адресов
+ * в кэше нет; такой пропуск кабинет видит строкой ленты ночи.
+ */
+export type EngDashTopUpVerdict =
+  | 'sending'
+  | 'unknown'
+  | 'access_not_enabled'
+  | 'access_turned_off'
+  | 'unavailable'
+  | 'client_paused'
+  | 'pre_self_serve'
+  | 'no_main'
+  | 'campaign_completed'
+  | 'campaign_stopped'
+  | 'campaign_not_sending';
+
+export interface EngDashTopUp {
+  verdict: EngDashTopUpVerdict;
+  /** Запуск разбит по сегментам: основная кампания — «Default texts» (как у шага 4). */
+  split: boolean;
+}
+
+const TOP_UP_MAIN_VERDICT: Record<HeRefillCampaignVerdict, EngDashTopUpVerdict> = {
+  sending: 'sending',
+  unknown: 'unknown',
+  completed: 'campaign_completed',
+  stopped: 'campaign_stopped',
+  not_sending: 'campaign_not_sending',
+};
+
+/** Чистая функция — см. EngDashTopUpVerdict. */
+export function deriveEngTopUpVerdict(input: {
+  access: HeEngSendingAccessView;
+  /** Сводка отправки читается (воркспейс записи — клиента, кэш доступен). */
+  readable: boolean;
+  /** Желание клиента по шаблону; null — его нет (запуск не стартовал кабинет); 'unreadable' — таблица не читается. */
+  clientState: HeEngClientState | null | 'unreadable';
+  /** Запуск до self-serve отправки проекта (heEngLaunchPredatesSelfServe); 'unreadable' — пул не читается. */
+  preSelfServe: boolean | 'unreadable';
+  /** Вердикт основной кампании; 'no_main' — её нет; null — кэш не читается. */
+  main: HeRefillCampaignVerdict | 'no_main' | null;
+}): EngDashTopUpVerdict {
+  if (input.access === 'not_enabled') return 'access_not_enabled';
+  if (input.access === 'turned_off') return 'access_turned_off';
+  if (input.access === 'unavailable') return 'unavailable';
+  if (input.clientState === 'unreadable') return 'unavailable';
+  if (input.clientState === 'paused') return 'client_paused';
+  if (!input.readable) return 'unavailable';
+  if (input.preSelfServe === 'unreadable') return 'unavailable';
+  if (input.preSelfServe) return 'pre_self_serve';
+  if (input.main === 'no_main') return 'no_main';
+  if (input.main === null) return 'unavailable';
+  return TOP_UP_MAIN_VERDICT[input.main];
+}
 
 /** Слот ежедневного авто-добора: 03:20 UTC (crontab heAutoPipelineCron). */
 export const HE_AUTO_RUN_HOUR_UTC = 3;
@@ -66,14 +185,11 @@ export function nextDailyRunIso(now: Date): string {
  * и посреди запуска, и после обрыва. Нажатие на шаге 5, пока аренда жива,
  * получает честный 409 «запуск ещё идёт или оборвался меньше 15 минут назад».
  *
- * `launched` — запись о запуске законченная. Это НЕ «кампания идёт»: ядро
- * создаёт кампании на паузе и не активирует их никогда (launchHandoff.ts,
- * шапка; во всём hypothesisEngine нет ни одного вызова activateCampaign),
- * стартует их сотрудник у рассыльщика. Статус кампании у рассыльщика кабинет не
- * читает (это отдельное решение владельца, P-D-remote-campaign-status), поэтому
- * из локальных данных «live» не выводится никогда: подпись этапа говорит то,
- * что верно при ЛЮБОМ удалённом статусе, — кампании созданы на паузе, а
- * запускает их команда (вопросы — в Support).
+ * `launched` — запись о запуске законченная. Это ещё НЕ «кампания идёт»:
+ * идёт ли отправка, говорит не этап, а сводка отправки запуска (`sending`
+ * вертикали дашборда — настоящий статус кампаний у рассыльщика из кэша
+ * engCampaignStatus; её добавляет роут). Подпись этапа поэтому про то, что
+ * верно при любом статусе: кампании созданы.
  *
  * `attention` — вертикаль встала на ТЕРМИНАЛЬНОМ состоянии и сама не поедет:
  * последняя своя база упала или отменена, проанализирована с нулём строк, её
@@ -87,7 +203,7 @@ export function nextDailyRunIso(now: Date): string {
  * autopilotReconcile.ts), и работы по ней сейчас нет. «Start outreach» и ночной
  * проход её не трогают, поэтому ни «needs attention», ни «next: …» про неё
  * неправда: клиент её не выбрал или снял сам. Запуск, готовый
- * шаблон и идущая работа этот этап перекрывают: «Launch all (paused)» и ночной
+ * шаблон и идущая работа этот этап перекрывают: «Launch all» и ночной
  * долив выбор не читают, а начатая джоба доработает.
  */
 export type EngDashStage =
@@ -194,8 +310,9 @@ export type EngDashAttentionInfo = EngDashAttention | EngDashAnalysisStopped;
 
 /**
  * Пять точек прогресса карточки: research → letters → base → template →
- * sending. Пятая — «кампания отправляет», а этого кабинет из своих данных не
- * знает (см. `launched` выше), поэтому сейчас она не ставится ни одним этапом.
+ * sending. Пятая — «кампания отправляет»: этап её не ставит (из сущностей
+ * движка это не выводится), её ставит роут дашборда по сводке отправки
+ * (`sending.state === 'sending'`).
  */
 export type EngDashDots = [boolean, boolean, boolean, boolean, boolean];
 
@@ -319,6 +436,19 @@ function latestLaunchedTemplate(
     if (!best || ts >= best.ts) best = { row, launch, ts };
   }
   return best ? { row: best.row, launch: best.launch } : null;
+}
+
+/**
+ * Шаблон вертикали, о запуске которого говорит этап (тот же выбор, что у
+ * deriveEngVerticalStage: самый свежий по дате запуска) — роут дашборда читает
+ * по нему сводку отправки. null — запущенного шаблона нет.
+ */
+export function engDashLaunchedTemplate(
+  templates: Array<Record<string, unknown>>,
+): { templateId: string; launch: HeTemplateLaunchInfo } | null {
+  const launched = latestLaunchedTemplate(templates);
+  const templateId = launched ? asStr(launched.row.id) : '';
+  return launched && templateId ? { templateId, launch: launched.launch } : null;
 }
 
 function collectInfo(base: Record<string, unknown> | null): Record<string, unknown> {
@@ -537,14 +667,11 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     };
   }
   if (launched) {
-    // Не «live»: кампании созданы на паузе, стартует их команда (клиентской
-    // кнопки старта нет — поэтому и Support), а их статус у рассыльщика
-    // кабинет не читает (см. EngDashStage). Подпись верна при любом удалённом
-    // статусе — и до старта, и после, — поэтому без имени кампании и без
-    // утверждения, что она отправляет; пятая точка не ставится.
+    // Отправляет ли запуск — говорит сводка отправки (роут, `sending`), а не
+    // этап: подпись верна при любом статусе кампаний у рассыльщика.
     return {
       stage: 'launched',
-      stageDetail: 'created paused — our team reviews it and starts sending; message Support to ask about it',
+      stageDetail: 'campaigns created',
       dots: [true, true, true, true, false],
       mainBase,
       launch: launched.launch,
@@ -750,8 +877,9 @@ export interface EngDashEvent {
      * Ночь БЕЗ отправки и БЕЗ сбоя кода. Причины разные, строка ленты одна:
      * отправлять нечего ('no_new'), у рассыльщика нет места
      * (stats.error_kind='instantly_capacity'), дневной бюджет не дал строк
-     * (stats.budget_outcome) и отмена клиентом без подтверждённого приёма
-     * (stats.cancelled). Тип переиспользован осознанно:
+     * (stats.budget_outcome), отмена клиентом без подтверждённого приёма
+     * (stats.cancelled) и пропуск, потому что кампании запуска не берут
+     * контакты (stats.sending_skip). Тип переиспользован осознанно:
      * в кабинете он рисуется серым, а 'failed' — красным сбоем (EVENT_ICON,
      * components/client-eng/EngDashboard.tsx), и отложенная ночь — именно
      * серая. Разница причин — в тексте, а не в типе: заводить ключ, которого
@@ -873,7 +1001,7 @@ export function buildEngDashboardEvents(input: {
             text: `campaign launch unfinished — part of the audience has not gone out yet${name}`,
             at,
           }
-        : { type: 'launched', text: `campaign launched (paused)${name}`, at },
+        : { type: 'launched', text: `campaign launched${name}`, at },
     );
   }
 
@@ -924,7 +1052,7 @@ export function buildEngDashboardEvents(input: {
           : '';
       events.push({
         type: 'refill_appended',
-        text: withVertical(`refill: +${asNum(stats.appended)} leads${heldBack}${skipped}`, vname),
+        text: withVertical(`daily top-up: +${asNum(stats.appended)} leads${heldBack}${skipped}`, vname),
         at,
       });
     } else if (status === 'no_new') {
@@ -934,7 +1062,7 @@ export function buildEngDashboardEvents(input: {
       // market='us' — только если и очередь переноса не дала ни одного
       // допущенного адреса. Про компании мы знаем только в первом случае,
       // поэтому подпись говорит ровно то, что верно для обоих: отправлять нечего.
-      events.push({ type: 'refill_empty', text: withVertical('refill: nothing new to send', vname), at });
+      events.push({ type: 'refill_empty', text: withVertical('daily top-up: nothing new to send', vname), at });
     } else if (status === 'failed') {
       // Нет места у рассыльщика — не сбой кода, а ночь, которую некуда было
       // отправить. Подпись — про ЭТОТ прогон («stopped»), а не про состояние
@@ -965,11 +1093,18 @@ export function buildEngDashboardEvents(input: {
           appendedBeforeCancel > 0
             ? {
                 type: 'refill_appended',
-                text: withVertical(`refill cancelled: +${appendedBeforeCancel} leads before the cancel`, vname),
+                text: withVertical(`daily top-up cancelled: +${appendedBeforeCancel} leads before the cancel`, vname),
                 at,
               }
-            : { type: 'refill_empty', text: withVertical('refill cancelled', vname), at },
+            : { type: 'refill_empty', text: withVertical('daily top-up cancelled', vname), at },
         );
+        continue;
+      }
+      // Пропуск: кампании запуска не берут контакты (stats.sending_skip, см.
+      // TOP_UP_SKIP_EN). Ниже отмены: у отменённого прогона пропуска нет.
+      const sendingSkip = asStr(stats.sending_skip) as HeRefillSendSkipReason;
+      if (Object.prototype.hasOwnProperty.call(TOP_UP_SKIP_EN, sendingSkip)) {
+        events.push({ type: 'refill_empty', text: withVertical(TOP_UP_SKIP_EN[sendingSkip], vname), at });
         continue;
       }
       // stats.error_kind='letters_held' пишет крон до покупки сборки
@@ -979,28 +1114,28 @@ export function buildEngDashboardEvents(input: {
         asStr(stats.error_kind) === 'instantly_capacity'
           ? {
               type: 'refill_empty',
-              text: withVertical(`refill stopped: ${HE_TEAM_ON_IT_SHORT_EN}`, vname),
+              text: withVertical(`daily top-up stopped: ${HE_TEAM_ON_IT_SHORT_EN}`, vname),
               at,
             }
           : asStr(stats.error_kind) === 'letters_held'
             ? {
                 type: 'refill_empty',
-                text: withVertical('refill paused: the letters need rewriting — message Support to have them rewritten', vname),
+                text: withVertical('daily top-up paused: the letters need rewriting — message Support to have them rewritten', vname),
                 at,
               }
           : budgetOutcome === 'cap_exhausted'
             ? {
                 type: 'refill_empty',
-                text: withVertical("refill: nothing added — today's contact limit was already taken", vname),
+                text: withVertical("daily top-up: nothing added — today's contact limit was already taken", vname),
                 at,
               }
             : budgetOutcome === 'already_reserved'
               ? {
                   type: 'refill_empty',
-                  text: withVertical('refill: nothing added — repeat of a run that already started today', vname),
+                  text: withVertical('daily top-up: nothing added — repeat of a run that already started today', vname),
                   at,
                 }
-              : { type: 'failed', text: withVertical('refill failed', vname), at },
+              : { type: 'failed', text: withVertical('daily top-up failed', vname), at },
       );
     }
   }

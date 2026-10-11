@@ -4,7 +4,7 @@
  * Command Center (/client/eng/dashboard): общий экран по всем ENG-проектам
  * клиента. IA карточки вертикали — «карта пайплайна»: вертикальный список
  * стадий человеческими именами (Research → Letters → Lead base → Email
- * enrichment → Analysis → Template → Launch, у запущенной вертикали + Daily refill)
+ * enrichment → Analysis → Template → Launch, у запущенной вертикали + Daily top-up)
  * с маркерами done/current/future и короткими доказательствами цифрами из
  * агрегата; строка «next: …» внизу — следующий шаг конвейера.
  *
@@ -29,19 +29,25 @@ import {
   Wand2,
 } from 'lucide-react';
 import {
+  EngPaidAccessError,
   fetchEngDashboard,
+  setEngProjectTopUp,
   type EngDashboardActiveJob,
   type EngDashboardEvent,
   type EngDashboardVertical,
   type EngDashboardResponse,
+  type EngTopUpSwitchOutcome,
 } from './api-client';
 import {
   ENG_REFILL_SPEND_PAUSED_SHORT_EN,
   engAutopilotHoldText,
   engDashAttentionText,
   engRefillHoldText,
+  engSendingTag,
+  engStartButtonOf,
 } from './engText';
-import { EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
+import { EngPaidAccessNotice, EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
+import { EngSendingBlock } from './EngSending';
 import { HE_TEAM_ON_IT_SHORT_EN } from './clientFailureText';
 // Только тип — см. пояснение в engText.ts: набор состояний один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
@@ -49,15 +55,16 @@ import type { HeClientRefillState } from '@/lib/hypothesisEngine/clientEngProjec
 // Тоже только тип, и по той же причине: набор этапов и причин 'attention' —
 // один на роут и экран, его знает engDashboard.ts (deriveEngVerticalStage).
 import type { EngDashAttentionInfo, EngDashStage } from '@/lib/hypothesisEngine/engDashboard';
-import { EngCard, EngSpinner } from './ui';
+import { EngBadge, EngCard, EngSpinner } from './ui';
 
 const POLL_INTERVAL_MS = 15000;
 
 /* ── Статус вертикали: dot + uppercase mono-tag (status-tag из DESIGN.md).
    Цвет — только как данные: amber — работа идёт или нужен шаг клиента,
    grey — этап пройден, конвейер ждёт следующего, или вертикаль не выбрана
-   ('not_selected'), red — вертикаль встала на сбое ('attention'). Зелёного
-   тега нет: «идёт рассылка» кабинет из своих данных не знает (см. 'launched'). ── */
+   ('not_selected'), red — вертикаль встала на сбое ('attention'). У запущенной
+   вертикали тег — статус отправки (сводка `sending`: зелёный «sending» только
+   по прочитанному статусу кампаний у рассыльщика, sendingStatusOf ниже). ── */
 
 type StageStatus = { tag: string; dot: string; text: string };
 
@@ -71,15 +78,28 @@ const STAGE_STATUS: Record<EngDashStage, StageStatus> = {
   template: { tag: 'ready to launch', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   // Запуск записан, но не закончен — нужен шаг клиента (шаг 5), поэтому amber.
   launch_unfinished: { tag: 'launch unfinished', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
-  // Не «live»: кампании созданы на паузе, стартует их команда, а статус у
-  // рассыльщика кабинет не читает. «created paused» верно и до старта, и
-  // после; серый — этап пройден, следующий шаг за командой.
-  launched: { tag: 'created paused', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
+  // Сводки отправки нет (ответ старше S2) — «launched»: верно при любом
+  // статусе кампаний. Со сводкой тег — её статус (sendingStatusOf).
+  launched: { tag: 'launched', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
   // Умолчание этапа; подпись по причине — attentionStatus ниже.
   attention: { tag: 'needs attention', dot: 'var(--cp-red)', text: 'var(--cp-red)' },
   // Решение клиента, а не сбой и не работа: серый, без пульса и без «next».
   not_selected: { tag: 'not selected', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
 };
+
+const TONE_STATUS: Record<'green' | 'amber' | 'red' | 'neutral', { dot: string; text: string }> = {
+  green: { dot: 'var(--cp-green)', text: 'var(--cp-green)' },
+  amber: { dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  red: { dot: 'var(--cp-red)', text: 'var(--cp-red)' },
+  neutral: { dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
+};
+
+/** Тег запущенной вертикали по сводке отправки (engSendingTag). */
+function sendingStatusOf(vertical: EngDashboardVertical): StageStatus | null {
+  if (vertical.stage !== 'launched' || !vertical.sending) return null;
+  const tag = engSendingTag(vertical.sending);
+  return { tag: tag.label, ...TONE_STATUS[tag.tone] };
+}
 
 /**
  * Тег этапа 'attention' по причине. Красный — сбой (упавшая база, упавший
@@ -179,7 +199,7 @@ const JOB_STAGE_LABELS: Record<string, string> = {
 
 /**
  * Шаг мастера проекта, куда ведёт кнопка вертикали. Сухая вертикаль ведёт на
- * шаг 2: кнопка «Resume auto-refill» живёт там.
+ * шаг 2: кнопка «Resume daily top-up» живёт там.
  */
 function wizardStepFor(vertical: EngDashboardVertical, refillHeldHere: boolean): number {
   switch (vertical.stage) {
@@ -291,7 +311,8 @@ interface PipeRow {
    * Маркер текущей строки: amber — работа идёт (точка пульсирует), held —
    * остановлено и само не возобновится (точка янтарная, неподвижная),
    * green — идущий ночной добор (точка зелёная, неподвижная), red — вертикаль
-   * встала на сбое, quiet — остановлена отменой (обе неподвижные).
+   * встала на сбое, quiet — остановлена отменой или выключена клиентом (обе
+   * неподвижные).
    */
   marker?: 'amber' | 'green' | 'held' | 'red' | 'quiet';
   /** Короткое доказательство цифрами; только то, что есть в агрегате. */
@@ -336,8 +357,9 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
 }
 
 /**
- * Что кабинет говорит про ночной добор одной строкой — по ВСЕМ пяти
- * состояниям проекта, без шестого «наверное».
+ * Что кабинет говорит про ночной добор («daily top-up» — тем же словом, что
+ * переключатель проекта ниже) одной строкой — по ВСЕМ пяти состояниям
+ * проекта, без шестого «наверное».
  *
  * `paused` НЕ схлопывается в `not configured`: добор настроен и нужен, просто
  * сегодня его некуда грузить, и обещать «next run 03:20 UTC» проекту, который
@@ -352,24 +374,29 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
  * короткая фраза в духе HE_SPEND_PAUSED_EN (ENG_REFILL_SPEND_PAUSED_SHORT_EN).
  *
  * `stopped` — та же колонка паузы, но записанная отменой проекта («Cancel all
- * jobs»): алерта у неё нет, проблемы на нашей стороне нет, поэтому фраза своя —
- * что произошло и кто вернёт (engRefillHoldText).
+ * jobs»): алерта у неё нет, проблемы на нашей стороне нет, и снимает её сам
+ * клиент переключателем «Daily top-up» (S2, switchHeUsRefill в autoPipeline.ts).
+ *
+ * `off` — конфига нет (запуска не было или он старше S2) ИЛИ клиент выключил
+ * добор переключателем: фраза верна для обоих — переключатель «on» заводит
+ * конфиг, если его нет, и включает выключенный. У запущенной вертикали
+ * переключатель её проекта всегда виден (DailyTopUpRow, блок «Daily top-up»).
  */
 const REFILL_NEXT_LINE: Record<HeClientRefillState, string> = {
-  running: 'next: daily refill 03:20 UTC',
-  paused: `next: daily refill on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
-  spend_paused: `next: daily refill on hold — ${ENG_REFILL_SPEND_PAUSED_SHORT_EN}`,
-  stopped: 'next: daily refill stopped — project cancelled; message Support to restart it',
-  off: 'next: daily refill — not configured',
+  running: 'next: daily top-up 03:20 UTC',
+  paused: `next: daily top-up on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
+  spend_paused: `next: daily top-up on hold — ${ENG_REFILL_SPEND_PAUSED_SHORT_EN}`,
+  stopped: 'next: daily top-up is off since the project was cancelled — press «Turn on» under «Daily top-up»',
+  off: 'next: daily top-up is off — press «Turn on» under «Daily top-up»',
 };
 
-/** То же коротко — в строку «Daily refill» карты пайплайна. */
+/** То же коротко — в строку «Daily top-up» карты пайплайна. */
 const REFILL_PIPE_EVIDENCE: Record<HeClientRefillState, string> = {
   running: 'next 03:20 UTC',
   paused: `on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
   spend_paused: 'on hold — paused on our side',
-  stopped: 'stopped — project cancelled',
-  off: 'not configured',
+  stopped: 'off — project cancelled',
+  off: 'off',
 };
 
 /**
@@ -377,8 +404,122 @@ const REFILL_PIPE_EVIDENCE: Record<HeClientRefillState, string> = {
  * сняло (`refill_dry`). Только для `running`: у `paused`, `spend_paused`,
  * `stopped` и `off` своя, более общая правда — добора нет у всего проекта.
  */
-const REFILL_DRY_NEXT_LINE = 'next: daily refill paused for this vertical — resume it on step 2';
+const REFILL_DRY_NEXT_LINE = 'next: daily top-up paused for this vertical — press «Resume daily top-up» on step 2 «Verticals»';
 const REFILL_DRY_PIPE_EVIDENCE = 'paused for this vertical';
+
+/**
+ * Ночной добор ПРОЕКТА идёт (`running`), а ЭТУ вертикаль ночь пропустит. Решает
+ * не сводка отправки (`sending.state === 'sending'` — «отправляет хоть одна
+ * кампания»), а ОСНОВНАЯ кампания запуска, как у гейта ночи: при живой
+ * сегментной и стоящей основной ночь вертикаль пропускает. Вердикт считает роут
+ * (`top_up`, deriveEngTopUpVerdict в engDashboard.ts — порядок гейта
+ * autoPipeline.ts, блок «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?»); что ночь
+ * действительно пропустила, пишет лента («daily top-up skipped — …»).
+ *
+ * Действие — только то, что на карточке ЕСТЬ: кнопка старта блока отправки
+ * (engStartButtonOf — «Start sending», «Start the rest» или «Resume»), а без
+ * неё — Support. Основная кампания у запуска, разбитого по сегментам, —
+ * «Default texts» (так её подписывает шаг 4), у неразбитого — единственная.
+ *
+ * null — ночь вертикаль берёт (основная отправляет) или вердикта нет (запуска
+ * нет, ответ старше этой правки). 'unknown' — статус основной не читался
+ * полчаса: тик перед решением читает его сам, поэтому фраза условная и точка не
+ * «held».
+ */
+function topUpSkipFor(vertical: EngDashboardVertical): { line: string; evidence: string; held: boolean } | null {
+  const topUp = vertical.top_up;
+  if (!topUp) return null;
+  const s = vertical.sending ?? null;
+  const campaign = topUp.split ? 'its «Default texts» campaign' : 'its campaign';
+  const skip = (line: string, evidence: string) => ({ line: `next: daily top-up ${line}`, evidence, held: true });
+  // Кампании без адресов кабинет не стартует вовсе (старт берёт только кампании
+  // с адресами) — кнопки нет, и кабинет статус такой кампании не читает, так
+  // что 'unknown' у неё не «прочитаем перед ночью», а тот же пропуск.
+  const empty = s?.state === 'empty';
+  switch (topUp.verdict) {
+    case 'sending':
+      return null;
+    case 'access_not_enabled':
+      return skip('waits until sending is on for your account', 'waits for sending to be on');
+    case 'access_turned_off':
+      return skip('skips this vertical — sending is turned off for your account; message Support', 'skipped — sending is off');
+    case 'unavailable':
+      return skip(
+        'skips this vertical while we cannot check its campaigns — message Support if this stays',
+        'skipped — campaigns not checked',
+      );
+    case 'client_paused':
+      // Пауза клиента, а часть кампаний ещё отправляет (пауза не дошла до
+      // рассыльщика) — кнопка на карточке «Pause», не «Resume». Запуск до
+      // self-serve отправки кабинет не стартует вовсе: «Resume» у него нет, и
+      // фраза не обещает, что клиент вернёт его сам. Сводки нет — не знаем,
+      // какой это запуск: без обещания.
+      return skip(
+        s?.action === 'resume'
+          ? 'skips this vertical while you keep it paused — press «Resume» to include it'
+          : s?.pre_self_serve
+            ? 'skips this vertical while it is paused — it was created before sending was set up for your project, ' +
+              'so only Support can start it again'
+            : s
+              ? 'skips this vertical while you keep it paused'
+              : 'skips this vertical while it is paused',
+        'skipped — paused by you',
+      );
+    case 'pre_self_serve':
+      return skip(
+        'skips this vertical — its campaigns were created before sending was set up for your project; message Support',
+        'skipped — created before self-serve sending',
+      );
+    case 'no_main':
+      return skip(
+        'skips this vertical — its launch has no «Default texts» campaign; message Support',
+        'skipped — no «Default texts» campaign',
+      );
+    case 'campaign_completed':
+      return skip(`skips this vertical — ${campaign} has completed; message Support to continue it`, 'skipped — campaign completed');
+    case 'campaign_stopped':
+      return skip(`skips this vertical until ${campaign} is sending again — message Support`, 'skipped — campaign stopped');
+    case 'campaign_not_sending': {
+      if (empty) {
+        return skip(
+          'skips this vertical — its campaigns have no contacts and were not started; message Support',
+          'skipped — campaigns not started',
+        );
+      }
+      const button = s ? engStartButtonOf(s) : null;
+      return skip(
+        `skips this vertical until ${campaign} is sending — ${button ? `press «${button}»` : 'message Support'}`,
+        'skipped — campaign not sending',
+      );
+    }
+    case 'unknown':
+      if (empty) {
+        return skip(
+          'skips this vertical — its campaigns have no contacts and were not started; message Support',
+          'skipped — campaigns not started',
+        );
+      }
+      return {
+        line: `next: daily top-up 03:20 UTC — it first checks that ${campaign} is sending`,
+        evidence: 'next 03:20 UTC, if sending',
+        held: false,
+      };
+  }
+}
+
+/**
+ * Возьмёт ли ближайшая ночь вертикаль — для счёта идущих проектов в карточке
+ * «Daily top-up» блока Today: у неё запись о запуске (этап 'launched' или
+ * 'launch_unfinished' — тик берёт любую запись с основной кампанией), проект
+ * идёт, правило сухой вертикали её не сняло, и пропуска нет либо он условный
+ * ('unknown': статус прочитают перед решением).
+ */
+function topUpTakesVertical(vertical: EngDashboardVertical, refill: HeClientRefillState): boolean {
+  if (vertical.stage !== 'launched' && vertical.stage !== 'launch_unfinished') return false;
+  if (refill !== 'running' || vertical.refill_dry === true) return false;
+  const skip = topUpSkipFor(vertical);
+  return skip === null || !skip.held;
+}
 
 /** Строка «next: …» — следующий шаг конвейера из текущей стадии. */
 function nextLineFor(vertical: EngDashboardVertical, refill: HeClientRefillState, dry: boolean, rewrite: boolean): string {
@@ -404,7 +545,9 @@ function nextLineFor(vertical: EngDashboardVertical, refill: HeClientRefillState
     case 'launch_unfinished':
       return 'next: finish the launch on step 5 «Review & Launch»';
     case 'launched':
-      return refill === 'running' && dry ? REFILL_DRY_NEXT_LINE : REFILL_NEXT_LINE[refill];
+      if (refill === 'running' && dry) return REFILL_DRY_NEXT_LINE;
+      if (refill === 'running') return topUpSkipFor(vertical)?.line ?? REFILL_NEXT_LINE.running;
+      return REFILL_NEXT_LINE[refill];
     case 'attention':
       return attentionNextLine(vertical.attention);
     case 'not_selected':
@@ -578,25 +721,32 @@ function buildPipelineRows(
 
   if (launched) {
     const refillRunning = job?.stage === 'base_collect';
+    // Проект идёт, а кампании этой вертикали контакты не берут (topUpSkipFor):
+    // ночь её пропустит — точка неподвижная, как у паузы.
+    const skip = refill === 'running' && !dryHere ? topUpSkipFor(vertical) : null;
     rows.push({
       key: 'refill',
-      label: 'Daily refill',
+      label: 'Daily top-up',
       state: 'current',
       // Маркер — тоже утверждение, и под паузой оба прежних врали: зелёная
       // точка значит «живой цикл», пульсирующая янтарная — «прямо сейчас
       // работает». Остановленный добор не то и не другое, поэтому у него своя
-      // точка: янтарная, но неподвижная — и у пауз (ёмкость, потолок расхода), и
-      // у отмены проекта. Сухая вертикаль — тот же «held»: проект идёт, а её
-      // ночь не берёт.
+      // точка: янтарная, но неподвижная — у пауз (ёмкость, потолок расхода).
+      // Сухая вертикаль и вертикаль, чьи кампании контакты не берут, — тот же
+      // «held»: проект идёт, а её ночь не берёт. Выключенный добор (`off` —
+      // переключатель или конфига нет, `stopped` — отмена проекта) — решение
+      // клиента, а не тревога: серая точка.
       marker: refillRunning
         ? 'amber'
-        : refill === 'paused' || refill === 'spend_paused' || refill === 'stopped' || dryHere
-          ? 'held'
-          : 'green',
+        : refill === 'off' || refill === 'stopped'
+          ? 'quiet'
+          : refill === 'paused' || refill === 'spend_paused' || dryHere || skip?.held === true
+            ? 'held'
+            : 'green',
       evidence: refillRunning
-        ? withEta('collecting refill…')
+        ? withEta('collecting new contacts…')
         : `${s.appended_today > 0 ? `+${fmt(s.appended_today)} today · ` : ''}${
-            dryHere ? REFILL_DRY_PIPE_EVIDENCE : REFILL_PIPE_EVIDENCE[refill]
+            dryHere ? REFILL_DRY_PIPE_EVIDENCE : (skip?.evidence ?? REFILL_PIPE_EVIDENCE[refill])
           }`,
     });
   }
@@ -789,6 +939,7 @@ function VerticalCard({
   projectName,
   activeJob,
   refill,
+  onSendingChanged,
 }: {
   vertical: EngDashboardVertical;
   index: number;
@@ -797,6 +948,8 @@ function VerticalCard({
   activeJob: EngDashboardActiveJob | undefined;
   /** Состояние ночного добора ПРОЕКТА этой вертикали, а не аккаунта. */
   refill: HeClientRefillState;
+  /** После Pause / Start sending / Resume — перечитать агрегат. */
+  onSendingChanged: () => void;
 }) {
   const dryHere = refill === 'running' && vertical.refill_dry === true;
   const step = wizardStepFor(vertical, dryHere);
@@ -810,11 +963,11 @@ function VerticalCard({
       ? attentionStatus(vertical.attention)
       : rewrite && vertical.stage === 'template'
         ? LETTERS_REWRITE_STATUS
-        : STAGE_STATUS[vertical.stage];
+        : (sendingStatusOf(vertical) ?? STAGE_STATUS[vertical.stage]);
   const rows = buildPipelineRows(vertical, activeJob, refill);
   // Одна фраза под картой пайплайна — только там, где строке карты её не
-  // вместить: почему вертикаль встала (engDashAttentionText) и что запуск
-  // создан на паузе (stageDetail этапа 'launched', engDashboard.ts).
+  // вместить: почему вертикаль встала (engDashAttentionText). У запущенной
+  // вертикали вместо фразы — блок отправки (статус, счётчики, кнопка).
   const note =
     vertical.stage === 'attention' && vertical.attention
       ? {
@@ -824,9 +977,17 @@ function VerticalCard({
               : engDashAttentionText(vertical.attention),
           color: status.text,
         }
-      : launched
-        ? { text: vertical.stageDetail, color: 'var(--cp-paper-mute)' }
-        : null;
+      : null;
+  // Блок отправки — у любого записанного запуска, и у незаконченного тоже: его
+  // уже созданные кампании стартуют и ставятся на паузу так же.
+  const sendingTemplateId =
+    (launched || vertical.stage === 'launch_unfinished') && vertical.sending
+      ? (vertical.sending_template_id ?? null)
+      : null;
+  // Ночная сверка с датасетом (actualsReconcile) отстаёт от живых счётчиков
+  // блока отправки на сутки: два разных «sent» на одной карточке читались бы
+  // как противоречие. Есть живые счётчики — печатаем только их.
+  const actual = vertical.sending && vertical.sending.sent !== null ? null : vertical.actual;
 
   return (
     <div
@@ -853,7 +1014,15 @@ function VerticalCard({
         </p>
       )}
 
-      {(vertical.forecast || vertical.actual) && (
+      {sendingTemplateId && vertical.sending && (
+        <EngSendingBlock
+          templateId={sendingTemplateId}
+          summary={vertical.sending}
+          onChanged={onSendingChanged}
+        />
+      )}
+
+      {(vertical.forecast || actual) && (
         <div
           className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] ds-mono"
           style={{ color: 'var(--cp-paper-faint)' }}
@@ -870,17 +1039,17 @@ function VerticalCard({
               score, not a predicted reply rate
             </span>
           )}
-          {vertical.actual && (
+          {actual && (
             <span>
               actual{' '}
               <b
                 style={{
-                  color: vertical.actual.reply_pct > 0 ? 'var(--cp-green)' : 'var(--cp-paper-mute)',
+                  color: actual.reply_pct > 0 ? 'var(--cp-green)' : 'var(--cp-paper-mute)',
                 }}
               >
-                {vertical.actual.reply_pct}%
+                {actual.reply_pct}%
               </b>{' '}
-              replies · {vertical.actual.sent.toLocaleString('en-US')} sent
+              replies · {actual.sent.toLocaleString('en-US')} sent
             </span>
           )}
         </div>
@@ -906,6 +1075,129 @@ function VerticalCard({
   );
 }
 
+/* ── Переключатель «Daily top-up» проекта ── */
+
+/**
+ * Состояние переключателя по состоянию ночного добора проекта
+ * (`projects[].refill`, HeClientRefillState) — ВЕСЬ набор:
+ *  - `running` — включён и идёт;
+ *  - `paused` / `spend_paused` — включён, но стоит на паузе команды (ёмкость
+ *    рассыльщика / потолок расхода): переключатель её не снимает, текст —
+ *    тот же, что у блока паузы (engRefillHoldText);
+ *  - `stopped` — выключен отменой проекта («Cancel all jobs»): «on» её снимает;
+ *  - `off` — выключен клиентом или конфига нет (запуск до S2): «on» включает
+ *    или заводит его.
+ */
+const TOP_UP_TAG: Record<HeClientRefillState, { label: string; tone: 'green' | 'amber' | 'neutral' }> = {
+  running: { label: 'on', tone: 'green' },
+  paused: { label: 'on hold', tone: 'amber' },
+  spend_paused: { label: 'on hold', tone: 'amber' },
+  stopped: { label: 'off', tone: 'neutral' },
+  off: { label: 'off', tone: 'neutral' },
+};
+
+/**
+ * Фраза состояния. `running` и `off` — свои; паузы и отмена — справочник
+ * кабинета (engRefillHoldText), тот же, что был у блока объяснений: правда
+ * про паузы у них одна. Каждая фраза верна при любом статусе кампаний: что
+ * ночь пропускает вертикаль, чья основная кампания не отправляет, говорит
+ * строка «next» её карточки (topUpSkipFor), и `running` на неё ссылается.
+ */
+function topUpStateText(state: HeClientRefillState): string {
+  switch (state) {
+    case 'running':
+      return 'On — each night from 03:20 UTC we look for new contacts and add them to the campaigns of this project; a vertical whose campaigns are not sending is skipped, and its «next» line says why.';
+    case 'off':
+      return 'Off — no new contacts are added to the campaigns of this project. Turn it on to look for new contacts each night (from 03:20 UTC) and add them to the campaigns that are sending.';
+    default:
+      return engRefillHoldText(state);
+  }
+}
+
+/** Итог нажатия: исход роута и состояние добора после него. */
+function topUpResultText(outcome: EngTopUpSwitchOutcome, refill: HeClientRefillState): string {
+  if (outcome === 'turned_off') return 'The daily top-up is off.';
+  if (outcome === 'already_off') return 'The daily top-up is already off.';
+  if (refill === 'paused' || refill === 'spend_paused') {
+    return 'The daily top-up is on, but it is on hold on our side — see the note above.';
+  }
+  if (refill !== 'running') return 'The daily top-up did not turn on. Try again in a moment.';
+  return outcome === 'already_on'
+    ? 'The daily top-up is already on.'
+    : 'The daily top-up is on — the next one starts at 03:20 UTC.';
+}
+
+function DailyTopUpRow({
+  projectId,
+  projectName,
+  showName,
+  state,
+  onChanged,
+}: {
+  projectId: string;
+  projectName: string;
+  showName: boolean;
+  state: HeClientRefillState;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+  const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
+  // Включён — всё, что ночь читает как enabled (в том числе на паузе команды);
+  // выключенный и отменённый включаются одной кнопкой.
+  const on = state === 'running' || state === 'paused' || state === 'spend_paused';
+  const tag = TOP_UP_TAG[state];
+
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    setResult(null);
+    setRefusal(null);
+    try {
+      const res = await setEngProjectTopUp(projectId, !on);
+      const text = topUpResultText(res.outcome, res.refill);
+      setResult({ tone: res.refill === 'running' || res.outcome === 'turned_off' || res.outcome === 'already_off' ? 'ok' : 'error', text });
+      onChanged();
+    } catch (e) {
+      if (e instanceof EngPaidAccessError) setRefusal(e);
+      else setResult({ tone: 'error', text: e instanceof Error ? e.message : 'The request did not go through.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        {showName && (
+          <span className="truncate text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>
+            {projectName}
+          </span>
+        )}
+        <EngBadge label={tag.label} tone={tag.tone} />
+        <button
+          type="button"
+          onClick={() => void toggle()}
+          disabled={busy}
+          className={`${on ? 'ds-btn-secondary' : 'ds-btn-primary'} ml-auto inline-flex items-center gap-1.5 text-xs`}
+        >
+          {busy ? <EngSpinner className="h-3 w-3" /> : <RefreshCw className="h-3 w-3" />}
+          {on ? 'Turn off' : 'Turn on'}
+        </button>
+      </div>
+      <p className="text-[11px] m-0" style={{ color: state === 'paused' || state === 'spend_paused' ? 'var(--cp-amber)' : 'var(--cp-paper-mute)' }}>
+        <EngSupportText text={topUpStateText(state)} />
+      </p>
+      {result && (
+        <p className="text-[11px] m-0" style={{ color: result.tone === 'ok' ? 'var(--cp-paper-mute)' : 'var(--cp-amber)' }}>
+          <EngSupportText text={result.text} />
+        </p>
+      )}
+      {refusal && <EngPaidAccessNotice refusal={refusal} />}
+    </div>
+  );
+}
+
 /* ── Дашборд ── */
 
 export function EngDashboard() {
@@ -922,7 +1214,7 @@ export function EngDashboard() {
       setError('');
     } catch (e) {
       if (!opts.silent) {
-        setError(e instanceof Error ? e.message : 'Failed to load the dashboard');
+        setError(e instanceof Error ? e.message : 'Failed to load the Command Center');
       }
     } finally {
       loadingRef.current = false;
@@ -965,7 +1257,7 @@ export function EngDashboard() {
   /**
    * Состояние ночного добора — ПО ПРОЕКТАМ, и весь набор целиком.
    *
-   * Карточка «Auto-refill» одна на аккаунт, а пауза ставится проекту, поэтому
+   * Карточка «Daily top-up» одна на аккаунт, а пауза ставится проекту, поэтому
    * карточка печатает не одно состояние, а СОСТАВ: сколько проектов идёт,
    * сколько на паузе (по ёмкости — `paused`, по потолку расхода —
    * `spend_paused`; «on hold» правда про обе) и сколько остановлено отменой
@@ -989,16 +1281,37 @@ export function EngDashboard() {
   const refillSpendHeldCount = projects.filter((p) => p.refill === 'spend_paused').length;
   const refillHeldCount = refillCapacityHeldCount + refillSpendHeldCount;
   const refillStoppedProjects = projects.filter((p) => p.refill === 'stopped');
-  const refillRunningCount = projects.filter((p) => p.refill === 'running').length;
-  // Блок объяснений под карточками: паузы и отмена — каждая своей фразой.
-  const refillExplainedProjects = projects.flatMap((p) =>
-    p.refill === 'paused' || p.refill === 'spend_paused' || p.refill === 'stopped'
-      ? [{ id: p.id, name: p.name, state: p.refill }]
-      : [],
+  /*
+   * «Идёт» — проект, который ближайшая ночь действительно обойдёт: добор
+   * включён И хоть одну его запущенную вертикаль ночь возьмёт
+   * (topUpTakesVertical — основная кампания отправляет или её статус прочитают
+   * перед решением, вертикаль не сухая). Включённый проект, у которого ночь
+   * пропустит каждую вертикаль, — `skipped`: обратный отсчёт для него обещал бы
+   * добор, которого не будет; почему пропуск, говорит строка «next» вертикали.
+   */
+  const refillRunningProjects = projects.filter((p) => p.refill === 'running');
+  const refillRunningCount = refillRunningProjects.filter((p) =>
+    verticals.some((v) => v.project_id === p.id && topUpTakesVertical(v, 'running')),
+  ).length;
+  const refillSkippedCount = refillRunningProjects.length - refillRunningCount;
+  /**
+   * Переключатели «Daily top-up» (DailyTopUpRow) — у проекта, которому есть
+   * что доливать: у него есть запуск (вертикаль 'launched' или
+   * 'launch_unfinished' — запись о запуске с кампаниями) или у его добора уже
+   * есть состояние кроме `off`. Проекту без запуска «on» ответил бы отказом
+   * (роут: 'no_launch'), а `off` у него — правда без кнопки.
+   */
+  const launchedProjectIds = new Set(
+    verticals.filter((v) => v.stage === 'launched' || v.stage === 'launch_unfinished').map((v) => v.project_id),
   );
+  const topUpProjects = projects.flatMap((p) => {
+    const state = p.refill ?? 'off';
+    return state !== 'off' || launchedProjectIds.has(p.id) ? [{ id: p.id, name: p.name, state }] : [];
+  });
   const projectsWord = (n: number) => `${n} project${n === 1 ? '' : 's'}`;
   // Хвост подписи про стоящие проекты — только ненулевые части.
   const stoppedSuffix = refillStoppedProjects.length > 0 ? ` · ${projectsWord(refillStoppedProjects.length)} stopped` : '';
+  const skippedSuffix = refillSkippedCount > 0 ? ` · ${projectsWord(refillSkippedCount)} skipped` : '';
   // Паузы по потолку рядом с фразой паузы по ёмкости: у них своя правда.
   const spendHeldSuffix =
     refillSpendHeldCount > 0 ? ` · ${projectsWord(refillSpendHeldCount)} paused on our side` : '';
@@ -1092,7 +1405,7 @@ export function EngDashboard() {
                 className="ds-card p-4 flex flex-col gap-1"
                 style={{ animation: 'eng-dash-in 0.5s ease-out 210ms both' }}
               >
-                <span className="ds-eyebrow">Auto-refill</span>
+                <span className="ds-eyebrow">Daily top-up</span>
                 {/* Обратный отсчёт показываем ровно тогда, когда в ближайшую
                     ночь реально пойдёт хотя бы один проект; если при этом
                     другие стоят, подпись их называет. Ни одного идущего —
@@ -1104,6 +1417,7 @@ export function EngDashboard() {
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
                       next run 03:20 UTC · daily cap {autoRefill.daily_cap.toLocaleString('en-US')}
                       {refillHeldCount > 0 ? ` · ${projectsWord(refillHeldCount)} on hold` : ''}
+                      {skippedSuffix}
                       {stoppedSuffix}
                     </span>
                   </>
@@ -1116,6 +1430,19 @@ export function EngDashboard() {
                       {refillCapacityHeldCount > 0
                         ? `${HE_TEAM_ON_IT_SHORT_EN}${spendHeldSuffix}`
                         : ENG_REFILL_SPEND_PAUSED_SHORT_EN}
+                      {skippedSuffix}
+                      {stoppedSuffix}
+                    </span>
+                  </>
+                ) : refillSkippedCount > 0 ? (
+                  <>
+                    <span className="ds-mono text-base font-medium" style={{ color: 'var(--cp-amber)' }}>
+                      skipped
+                    </span>
+                    <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                      as things stand, the next run skips{' '}
+                      {projects.length === 1 ? 'your project' : projectsWord(refillSkippedCount)} — see the verticals
+                      below
                       {stoppedSuffix}
                     </span>
                   </>
@@ -1125,8 +1452,8 @@ export function EngDashboard() {
                       stopped
                     </span>
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
-                      {refillStoppedProjects.length === 1 ? 'project' : 'projects'} cancelled —{' '}
-                      <EngSupportText text="message Support to restart the daily refill" />
+                      {refillStoppedProjects.length === 1 ? 'project' : 'projects'} cancelled — press «Turn on» under
+                      «Daily top-up» below
                     </span>
                   </>
                 ) : (
@@ -1135,7 +1462,9 @@ export function EngDashboard() {
                       off
                     </span>
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
-                      daily refill is not configured
+                      {topUpProjects.length > 0
+                        ? 'daily top-up is off — press «Turn on» under «Daily top-up» below'
+                        : 'starts after your first launch'}
                     </span>
                   </>
                 )}
@@ -1168,31 +1497,30 @@ export function EngDashboard() {
             </EngCard>
           )}
 
-          {/* Проект, которому остановили ночной добор: из-за нехватки места под
-              новые контакты (`paused`) или потолком расхода (`spend_paused`) —
-              клиенту причина не называется — или отменой проекта (`stopped`):
-              у каждого своя фраза (engRefillHoldText). Отдельный блок, а не
-              строка в карточке: карточка отвечает «когда следующая ночь», а
-              здесь нужно сказать, что произошло и кто это разберёт, — в 10
-              пикселей подписи это не влезает, а недосказанность здесь и была
-              ложью.
-              Ссылки нет намеренно, в отличие от блока автопилота: в мастере
-              проекта клиенту с этим делать нечего — паузу снимает сотрудник,
-              и кнопки для клиента у неё нет и не должно быть (мутирующая
-              клиентская ручка означала бы право клиента запускать платную
-              работу провайдера). Отмена — не тревога, поэтому её строка не
-              янтарная. */}
-          {refillExplainedProjects.length > 0 && (
-            <EngCard className="flex flex-col gap-2">
-              <span className="ds-eyebrow">Auto-refill</span>
-              {refillExplainedProjects.map((p) => (
-                <p
+          {/* Переключатель «Daily top-up» каждого проекта с запуском (S2,
+              решение владельца 10–11.10.2026: добор настраивается сам после
+              первого запуска, включает и выключает его клиент). Состояние —
+              весь набор HeClientRefillState (TOP_UP_TAG): у пауз команды
+              (ёмкость — `paused`, потолок расхода — `spend_paused`) кнопка
+              только выключает, а снимает их по-прежнему сотрудник — фраза
+              паузы говорит это сама (engRefillHoldText); отмену проекта
+              (`stopped`) и выключенный добор (`off`) кнопка включает
+              (POST /eng/projects/[id]/refill, switchHeUsRefill). Отдельный
+              блок, а не строка карточки «Daily top-up» выше: та отвечает
+              «когда следующая ночь», здесь — что с добором и что с ним
+              сделать. */}
+          {topUpProjects.length > 0 && (
+            <EngCard className="flex flex-col gap-3">
+              <span className="ds-eyebrow">Daily top-up</span>
+              {topUpProjects.map((p) => (
+                <DailyTopUpRow
                   key={p.id}
-                  className="text-xs m-0"
-                  style={{ color: p.state === 'stopped' ? 'var(--cp-paper-mute)' : 'var(--cp-amber)' }}
-                >
-                  <span className="font-semibold">{p.name}</span> — <EngSupportText text={engRefillHoldText(p.state)} />
-                </p>
+                  projectId={p.id}
+                  projectName={p.name}
+                  showName={projects.length > 1}
+                  state={p.state}
+                  onChanged={() => void load({ silent: true })}
+                />
               ))}
             </EngCard>
           )}
@@ -1207,14 +1535,14 @@ export function EngDashboard() {
               <p className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
                 {projects.length === 0 ? 'No project yet' : 'No verticals yet'}
               </p>
-              {/* Кампании создаёт только «Launch all (paused)» шага 5 (на паузе);
-                  письма, базу и шаблон автопилот строит после «Start outreach»
-                  и только по вертикалям с принятой гипотезой. */}
+              {/* Кампании создаёт и стартует «Launch all» шага 5; письма,
+                  базу и шаблон автопилот строит после «Start outreach» и
+                  только по вертикалям с принятой гипотезой. */}
               <p className="text-xs m-0 max-w-md" style={{ color: 'var(--cp-paper-mute)' }}>
                 The engine researches your market. Accept the hypotheses you want on step 2 and press «Start
                 outreach» — it drafts letters, collects a base and builds a template for each vertical you
-                picked. «Launch all (paused)» on step 5 then creates the campaigns, paused. Every vertical shows
-                up here.
+                picked. «Launch all» on step 5 then creates the campaigns and starts sending. Every vertical
+                shows up here.
               </p>
               <Link
                 href={
@@ -1254,6 +1582,7 @@ export function EngDashboard() {
                           projectName={projectNames.get(v.project_id) ?? ''}
                           activeJob={v.id ? jobByVertical.get(v.id) : undefined}
                           refill={refillByProject.get(v.project_id) ?? 'off'}
+                          onSendingChanged={() => void load({ silent: true })}
                         />
                       ))}
                     </div>

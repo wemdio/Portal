@@ -19,11 +19,15 @@ import { engErrorText, localizeEngError } from './engText';
 import type { HeChainLetterDto, HeProjectDetailResponse } from '@/components/hypothesis-engine/api';
 import type { HeChain, HeHypothesis, HeJob, HeProject } from '@/lib/hypothesisEngine/types';
 import type { HeIcpFrame } from '@/lib/hypothesisEngine/icpFrame';
+import type { HeTemplateLaunchCampaign, HeTemplateLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
+// Только типы: сводка отправки запуска и коды неудачного старта — один словарь
+// на роуты (lib/hypothesisEngine/engCampaignStatus) и на экран.
 import type {
-  HeLaunchPresetOption,
-  HeTemplateLaunchCampaign,
-  HeTemplateLaunchInfo,
-} from '@/lib/hypothesisEngine/launchHandoff';
+  HeEngSendingAction,
+  HeEngSendingSecondaryAction,
+  HeEngSendingSummary,
+  HeEngStartErrorCode,
+} from '@/lib/hypothesisEngine/engCampaignStatus';
 // Только тип — см. пояснение в engText.ts: словарь кодов один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
 import type {
@@ -45,6 +49,8 @@ import type {
   EngDashAttentionInfo,
   EngDashSelection,
   EngDashStage,
+  EngDashTopUp,
+  EngDashTopUpVerdict,
 } from '@/lib/hypothesisEngine/engDashboard';
 
 // `HeBaseSummary`/`HeProjectDetailResponse` отсюда БОЛЬШЕ НЕ реэкспортируются:
@@ -52,7 +58,7 @@ import type {
 // нет. Их суженные пары — `EngBaseSummary` и `EngProjectDetailResponse` ниже.
 // Письмо цепочки у обоих контуров одно и то же, его реэкспорт остаётся.
 export type { HeChainLetterDto } from '@/components/hypothesis-engine/api';
-export type { HeLaunchPresetOption };
+export type { HeEngSendingAction, HeEngSendingSecondaryAction, HeEngSendingSummary, HeEngStartErrorCode };
 
 import type { HeBaseSummary as HeBaseSummaryDto } from '@/components/hypothesis-engine/api';
 
@@ -351,11 +357,6 @@ interface EngCancelResponse {
   error?: string;
 }
 
-interface EngPresetsResponse {
-  presets?: HeLaunchPresetOption[];
-  error?: string;
-}
-
 /* ── Окно отправки (sending window) ── */
 
 /**
@@ -433,13 +434,59 @@ export interface EngLaunchResponse {
   warnings?: string[];
   error?: string;
   /**
-   * Отказ ядра запуска с машинным кодом (409 или 503 с `code`,
-   * launchTemplate.ts): запуск не состоялся, кампания не создана, `error` —
-   * английский текст ядра. Только у этих кодов launchEngTemplate отвечает
-   * значением, а не бросает: «Launch all» обходится с ними по-разному
-   * (EngStepReview, LaunchAllPanel).
+   * Отказ запуска с машинным кодом (ядро: 409 / 503 с `code`, launchTemplate.ts;
+   * роут: выключатель отправки аккаунта и ящики пула — 403 / 404 / 409 / 503):
+   * запуск не состоялся, кампания не создана, `error` — английский текст. Только
+   * у этих кодов launchEngTemplate отвечает значением, а не бросает: «Launch
+   * all» обходится с ними по-разному (EngStepReview, LaunchAllPanel).
    */
   refusal?: EngLaunchRefusalCode;
+  /** Старт созданных кампаний этим запуском (только у ответа 200). */
+  sending?: EngLaunchSendingResult;
+  /**
+   * Свежая сводка отправки этого запуска (как `sending` ответа POST
+   * .../sending): по ней фраза итога называет кнопку, которая на карточке.
+   * Нет / null — сводки нет (кэш не читается).
+   */
+  sending_summary?: HeEngSendingSummary | null;
+}
+
+/**
+ * Старт кампаний после ядра запуска (роут запуска, блок «Отправка»):
+ *  - 'done'          — старт сделан по кампаниям записи: сколько начали,
+ *                      сколько уже отправляли, какие не стартовали (коды) и
+ *                      сколько не успели начать (`not_attempted`);
+ *  - 'skipped'       — старт не делался: предупреждение запуска говорит, что
+ *                      кампании не стартованы (`launch_problem`), окно
+ *                      отправки не доехало до всех (`window_not_applied`) или
+ *                      запрос пришёл без `start_sending: true`
+ *                      (`not_requested` — страница старше S2; этот экран его
+ *                      шлёт всегда);
+ *  - 'refused'       — проверка старта отказала (`refusal.message` — фраза);
+ *  - 'client_paused' — клиент поставил этот запуск на паузу, запуск её не снял;
+ *                      или (`paused_found` > 0) кампании записи стоят на паузе
+ *                      у рассыльщика, и запуск не стартовал ничего.
+ * `unconfirmed` — старт неясен (кампания могла начать отправку): не входит ни
+ * в `started`, ни в `failed`.
+ */
+export interface EngLaunchSendingResult {
+  outcome: 'done' | 'skipped' | 'refused' | 'client_paused';
+  skip_reason?: 'launch_problem' | 'window_not_applied' | 'not_requested';
+  refusal?: { code: string; message: string };
+  campaigns: number;
+  started: number;
+  already_sending: number;
+  completed: number;
+  failed: HeEngStartErrorCode[];
+  not_attempted: number;
+  unconfirmed: number;
+  paused_found: number;
+  compensated: number;
+  /**
+   * Клиент нажал Pause во время старта, а пауза части кампаний, которые этот
+   * старт начинал, не подтвердилась — они могут отправлять (команде — алерт).
+   */
+  compensation_failed: number;
 }
 
 /**
@@ -463,14 +510,44 @@ export type EngLaunchRefusalCode =
   | 'sibling_template_launched'
   | 'research_running'
   | 'preset_no_mailboxes'
-  | 'segment_classification_incomplete';
+  | 'segment_classification_incomplete'
+  | EngLaunchSendingRefusalCode;
+
+/**
+ * Отказы роута запуска ДО ядра, одинаковые для каждого шаблона пачки «Launch
+ * all» (про аккаунт и его ящики, а не про шаблон): выключатель отправки
+ * аккаунта (engSendingAccess) и ящики пула проекта (engSendingPreset).
+ */
+export type EngLaunchSendingRefusalCode =
+  | 'sending_not_enabled'
+  | 'sending_turned_off'
+  | 'sending_access_unavailable'
+  | 'sending_mailboxes_shortage'
+  | 'sending_setup_unavailable'
+  | 'sending_setup_failed'
+  | 'sending_not_available';
+
+const ENG_LAUNCH_SENDING_REFUSAL_CODES: readonly string[] = [
+  'sending_not_enabled',
+  'sending_turned_off',
+  'sending_access_unavailable',
+  'sending_mailboxes_shortage',
+  'sending_setup_unavailable',
+  'sending_setup_failed',
+  'sending_not_available',
+] satisfies readonly EngLaunchSendingRefusalCode[];
+
+export function isEngLaunchSendingRefusalCode(raw: unknown): raw is EngLaunchSendingRefusalCode {
+  return typeof raw === 'string' && ENG_LAUNCH_SENDING_REFUSAL_CODES.includes(raw);
+}
 
 function isEngLaunchRefusalCode(raw: unknown): raw is EngLaunchRefusalCode {
   return (
     raw === 'sibling_template_launched' ||
     raw === 'research_running' ||
     raw === 'preset_no_mailboxes' ||
-    raw === 'segment_classification_incomplete'
+    raw === 'segment_classification_incomplete' ||
+    isEngLaunchSendingRefusalCode(raw)
   );
 }
 
@@ -509,7 +586,7 @@ interface EngChainPatchResponse {
  * который этот фетч выбрасывает: startEngResearch и launchEngTemplate (свои
  * 409) и все вызовы, которые может остановить гейт платных шагов
  * (engPaidApiFetch: создание проекта, «Start outreach», «Collect again»,
- * «Resume auto-refill»). Они ходят через engApiFetchRaw и доводят тексты теми
+ * «Resume daily top-up»). Они ходят через engApiFetchRaw и доводят тексты теми
  * же функциями engText.
  *
  * Здесь именно `engErrorText`, а не `engStageErrorText`: это ЖИВОЙ ответ, где
@@ -923,6 +1000,40 @@ export async function resumeEngVerticalRefill(verticalId: string): Promise<{ ok?
   });
 }
 
+/* ── Переключатель «Daily top-up» проекта (POST /eng/projects/[id]/refill) ── */
+
+/**
+ * Исход переключателя — копия словаря switchHeUsRefill (autoPipeline.ts)
+ * значениями, которые роут отдаёт с 200: отказы ('no_launch', 'not_us',
+ * 'unsupported', 'failed') приходят не-2xx и бросаются ошибкой с текстом роута.
+ */
+export type EngTopUpSwitchOutcome =
+  | 'created'
+  | 'turned_on'
+  | 'resumed'
+  | 'already_on'
+  | 'turned_off'
+  | 'already_off';
+
+export interface EngTopUpSwitchResponse {
+  ok: true;
+  outcome: EngTopUpSwitchOutcome;
+  /** Состояние ночного добора проекта после переключения (та же проекция, что `projects[].refill`). */
+  refill: HeClientRefillState;
+}
+
+/**
+ * Включить («on») или выключить («off») ежедневный добор проекта. «on» может
+ * остановить гейт платных шагов — EngPaidAccessError; прочие отказы — Error с
+ * английским текстом роута.
+ */
+export async function setEngProjectTopUp(projectId: string, enabled: boolean): Promise<EngTopUpSwitchResponse> {
+  return engPaidApiFetch<EngTopUpSwitchResponse>(`/eng/projects/${projectId}/refill`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
+}
+
 export async function patchEngChain(
   chainId: string,
   letters: HeChainLetterDto[],
@@ -935,11 +1046,6 @@ export async function patchEngChain(
 
 export async function buildEngTemplate(baseId: string): Promise<EngJobResponse> {
   return engApiFetch<EngJobResponse>(`/eng/bases/${baseId}/template`, { method: 'POST' });
-}
-
-export async function fetchEngLaunchPresets(templateId: string): Promise<HeLaunchPresetOption[]> {
-  const data = await engApiFetch<EngPresetsResponse>(`/eng/templates/${templateId}/launch`);
-  return data.presets ?? [];
 }
 
 /**
@@ -966,27 +1072,82 @@ export class EngLaunchServerError extends Error {
  * Остальное — как у engApiFetch: успех отдаёт тело с английским `error`;
  * отказ гейта платных шагов бросается EngPaidAccessError, прочий 5xx —
  * EngLaunchServerError, любой другой отказ — Error с английским текстом.
+ *
+ * `start_sending: true` — подтверждение, что этот экран знает: запуск стартует
+ * кампании (кнопка «Launch all», а не прежняя «Launch all (paused)»). Без него
+ * роут запуска НЕ отказывает: он создаёт кампании на паузе, как до S2, и не
+ * стартует их (ответ 200, `sending.outcome 'skipped'`, `skip_reason
+ * 'not_requested'`): страница, загруженная до S2, обещала клиенту кампании на
+ * паузе, и её нажатие отправку не начинает.
  */
 export async function launchEngTemplate(
   templateId: string,
-  body: { preset_id: string; schedule?: EngSendingWindow },
+  body: { schedule?: EngSendingWindow },
 ): Promise<EngLaunchResponse> {
   const { res, body: data } = await engApiFetchRaw(`/eng/templates/${templateId}/launch`, {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, start_sending: true }),
   });
   if (res.ok) {
     const out = (data ?? {}) as EngLaunchResponse;
     if (typeof out.error === 'string') out.error = engErrorText(out.error);
     return out;
   }
-  if ((res.status === 409 || res.status === 503) && isEngLaunchRefusalCode(data?.code)) {
+  if (
+    (res.status === 409 || res.status === 503 || (isEngLaunchSendingRefusalCode(data?.code) && res.status < 500)) &&
+    isEngLaunchRefusalCode(data?.code)
+  ) {
     return { ok: false, error: engRawErrorText(res, data), refusal: data.code };
   }
   const paidAccess = engPaidAccessErrorFrom(res, data);
   if (paidAccess) throw paidAccess;
   if (res.status >= 500) throw new EngLaunchServerError(engRawErrorText(res, data), res.status);
   throw new Error(engRawErrorText(res, data));
+}
+
+/* ── Отправка кампаний запуска (GET/POST /eng/templates/[id]/sending) ── */
+
+/**
+ * Сводка отправки запуска шаблона; null — шаблон не запущен или ответ без
+ * сводки (демо). Бросает на сбое (engApiFetch).
+ */
+export async function fetchEngTemplateSending(templateId: string): Promise<HeEngSendingSummary | null> {
+  const data = await engApiFetch<{ sending?: HeEngSendingSummary | null }>(`/eng/templates/${templateId}/sending`);
+  return data.sending ?? null;
+}
+
+/** Ответ POST .../sending: что сделано и свежая сводка. */
+export interface EngSendingActionResponse {
+  action: 'start' | 'pause';
+  result:
+    | {
+        campaigns: number;
+        started: number;
+        already_sending: number;
+        completed: number;
+        failed: HeEngStartErrorCode[];
+        not_attempted: number;
+        unconfirmed: number;
+        compensated: number;
+        compensation_failed: number;
+      }
+    | { campaigns: number; paused: number; failed: number; not_attempted: number; state_recorded: boolean };
+  sending: HeEngSendingSummary | null;
+}
+
+/**
+ * «Start sending» / «Start the rest» / «Resume» (action 'start') или «Pause».
+ * Отказ гейта платных шагов бросается EngPaidAccessError, прочие отказы —
+ * Error с английским текстом роута.
+ */
+export async function postEngTemplateSending(
+  templateId: string,
+  action: 'start' | 'pause',
+): Promise<EngSendingActionResponse> {
+  return engPaidApiFetch<EngSendingActionResponse>(`/eng/templates/${templateId}/sending`, {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  });
 }
 
 /** Что предложить клиенту в окне отправки (работает и до запуска шаблона). */
@@ -1016,7 +1177,15 @@ export async function updateEngSendingWindow(
  * `launch_unfinished` — запись о запуске есть, но часть аудитории не уехала
  * (`heLaunchIsIncomplete`): его достраивают на шаге 5.
  */
-export type { EngDashAnalysisStopped, EngDashAttention, EngDashAttentionInfo, EngDashSelection, EngDashStage };
+export type {
+  EngDashAnalysisStopped,
+  EngDashAttention,
+  EngDashAttentionInfo,
+  EngDashSelection,
+  EngDashStage,
+  EngDashTopUp,
+  EngDashTopUpVerdict,
+};
 
 export interface EngDashboardVertical {
   id: string;
@@ -1027,8 +1196,8 @@ export interface EngDashboardVertical {
   stageDetail: string;
   /**
    * Пять точек прогресса: research → letters → base → template → sending.
-   * Пятую не ставит ни один этап: статус кампании у рассыльщика кабинет не
-   * читает (engDashboard.ts, EngDashDots).
+   * Пятую ставит роут по прочитанному статусу кампаний (`sending.state ===
+   * 'sending'`, engDashboard.ts, EngDashDots).
    */
   dots: boolean[];
   /**
@@ -1086,6 +1255,20 @@ export interface EngDashboardVertical {
   attention?: EngDashAttentionInfo | null;
   /** Выбор вертикали клиентом (EngDashSelection); `null` или нет поля — не прочитан. */
   selection?: EngDashSelection | null;
+  /**
+   * Отправка запущенного шаблона вертикали: настоящий статус кампаний,
+   * счётчики и кнопка (HeEngSendingSummary). `null` или нет поля — запуска
+   * нет (или ответ старше S2).
+   */
+  sending?: HeEngSendingSummary | null;
+  /** Шаблон, к которому относится `sending` (для кнопки); null — сводки нет. */
+  sending_template_id?: string | null;
+  /**
+   * Возьмёт ли вертикаль ближайшая ночь добора — по основной кампании запуска,
+   * как решает гейт ночи (deriveEngTopUpVerdict). `null` или нет поля —
+   * запуска нет (или ответ старше этой правки: тогда кабинет судит по `sending`).
+   */
+  top_up?: EngDashTopUp | null;
 }
 
 export interface EngDashboardEvent {

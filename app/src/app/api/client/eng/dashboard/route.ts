@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import {
   heTemplateNeedsRewrite,
@@ -23,14 +24,24 @@ import {
   latestEndedJobByBase,
   liveBaseIdsFromJobs,
 } from '@/lib/hypothesisEngine/autopilotNext';
+import { readHeEngSendingSummaries, type HeEngLaunchRef } from '@/lib/hypothesisEngine/engCampaignSending';
+import {
+  heEngLaunchPredatesSelfServe,
+  readHeEngClientStates,
+  readHeEngPoolAssignedSince,
+} from '@/lib/hypothesisEngine/engCampaignStatus';
+import { heRefillMainCampaignId, readHeRefillMainVerdicts } from '@/lib/hypothesisEngine/autoPipeline';
 import {
   buildEngDashboardEvents,
+  deriveEngTopUpVerdict,
   deriveEngVerticalStage,
+  engDashLaunchedTemplate,
   engDashRewriteCandidateIds,
   engDashSelectionByVertical,
   nextDailyRunIso,
   utcDayStartIso,
   type EngDashSelection,
+  type EngDashTopUp,
 } from '@/lib/hypothesisEngine/engDashboard';
 import { engServerError } from '../_shared';
 
@@ -80,7 +91,7 @@ function ts(v: unknown): number {
  * Имя кампании чистится на ВХОДЕ в склейку, а не в каждом месте на выходе:
  * из `launch_info.campaign_name` оно расходится по дашборду двумя путями —
  * карточка Launch (`launch.campaign_name` ниже) и лента активности («campaign
- * launched (paused): <имя>», buildEngDashboardEvents); `stageDetail` этапа
+ * launched: <имя>», buildEngDashboardEvents); `stageDetail` этапа
  * 'launched' имени больше не несёт. У запусков до этой волны в имени
  * лежит внутренний префикс `HE · ` и русский фолбэк «база»: гейт на записи
  * (launchTemplate.ts) задал новые имена, но старые строки остались как были.
@@ -630,6 +641,69 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  /**
+   * ОТПРАВКА ЗАПУСКА вертикали (S2): настоящий статус кампаний у рассыльщика и
+   * счётчики — из общего кэша (engCampaignStatus; живое чтение фоном, не чаще
+   * раза в 5 минут на кампанию, только API кампаний, никогда LIST /emails), с
+   * кнопкой Pause / Start sending / Resume карточки. Только us-проекты и только
+   * запущенный шаблон этапа (engDashLaunchedTemplate — тот же выбор, что у
+   * этапа). Сбой чтения — сводка без статуса ('unknown'), а не отказ агрегата.
+   */
+  const launchRefs: HeEngLaunchRef[] = [];
+  const launchedTemplateByVertical = new Map<string, string>();
+  for (const v of verticalRows) {
+    const vid = v.id as string;
+    if (!usProjectIds.has(str(v.project_id))) continue;
+    const launched = engDashLaunchedTemplate(templateRows.filter((t) => t.vertical_id === vid));
+    if (!launched) continue;
+    launchedTemplateByVertical.set(vid, launched.templateId);
+    launchRefs.push({ projectId: str(v.project_id), templateId: launched.templateId, launch: launched.launch });
+  }
+  const sendingByTemplate = await readHeEngSendingSummaries(supabaseAdmin, supabaseInstantly, {
+    userId,
+    launches: launchRefs,
+    refresh: true,
+    now: now.getTime(),
+  });
+
+  /**
+   * ДОБОР ВЕРТИКАЛИ (S2): возьмёт ли её ближайшая ночь (deriveEngTopUpVerdict) —
+   * по тем же данным, что у гейта ночи, без провайдера: желание клиента
+   * (he_eng_launch_sending), запуск до self-serve (когда проекту отданы ящики
+   * пула) и вердикт ОСНОВНОЙ кампании по кэшу статусов (readHeRefillMainVerdicts):
+   * ночь решает она, а сводка `sending` говорит «отправляет хоть одна». Три
+   * чтения БД на опрос и только при запусках; ни одно не бросает — несчитанное
+   * становится 'unavailable', агрегат не падает. Наружу — только вердикт,
+   * подробности гейта (русские строки для staff) не идут.
+   */
+  const topUpByTemplate = new Map<string, EngDashTopUp>();
+  if (launchRefs.length > 0) {
+    const [clientStates, mainVerdicts, assignedSince] = await Promise.all([
+      readHeEngClientStates(supabaseAdmin, launchRefs.map((l) => l.templateId)),
+      readHeRefillMainVerdicts(supabaseAdmin, launchRefs, now.getTime()),
+      readHeEngPoolAssignedSince(supabaseAdmin, launchRefs.map((l) => l.projectId)),
+    ]);
+    for (const ref of launchRefs) {
+      const summary = sendingByTemplate.get(ref.templateId);
+      if (!summary) continue;
+      topUpByTemplate.set(ref.templateId, {
+        verdict: deriveEngTopUpVerdict({
+          access: summary.access,
+          readable: summary.readable,
+          clientState: clientStates === null ? 'unreadable' : (clientStates.get(ref.templateId)?.state ?? null),
+          preSelfServe:
+            assignedSince === null ? 'unreadable' : heEngLaunchPredatesSelfServe(ref.launch, ref.projectId, assignedSince),
+          main: !heRefillMainCampaignId(ref.launch)
+            ? 'no_main'
+            : mainVerdicts === null
+              ? null
+              : (mainVerdicts.get(ref.templateId)?.verdict ?? null),
+        }),
+        split: (ref.launch.campaigns?.length ?? 0) > 1,
+      });
+    }
+  }
+
   const verticals = verticalRows
     .slice()
     .sort((a, b) => ts(a.created_at) - ts(b.created_at))
@@ -674,6 +748,12 @@ export async function GET(req: NextRequest) {
           : {}),
       });
 
+      const launchedTemplateId = launchedTemplateByVertical.get(vid);
+      const sending = launchedTemplateId ? (sendingByTemplate.get(launchedTemplateId) ?? null) : null;
+      // Пятая точка — «кампания отправляет»: только по прочитанному статусу.
+      const dots = [...derived.dots] as typeof derived.dots;
+      dots[4] = derived.stage === 'launched' && sending?.state === 'sending';
+
       const mainInfo =
         derived.mainBase?.collect_info && typeof derived.mainBase.collect_info === 'object'
           ? (derived.mainBase.collect_info as Record<string, unknown>)
@@ -689,7 +769,7 @@ export async function GET(req: NextRequest) {
         name: v.name,
         stage: derived.stage,
         stageDetail: derived.stageDetail,
-        dots: derived.dots,
+        dots,
         stats: {
           // КОМПАНИИ и СТРОКИ — разные числа, и раньше в обоих полях лежало
           // одно: `row_count`. Теперь `companies` — только счётчик стадии
@@ -737,6 +817,13 @@ export async function GET(req: NextRequest) {
         attention: derived.attention,
         // Выбор вертикали клиентом (EngDashSelection); null — не прочитан.
         selection: selection ?? null,
+        // Отправка запущенного шаблона (HeEngSendingSummary: состояние,
+        // счётчики, кнопка); null — запуска нет. Шаблон — только id для
+        // кнопки (POST /eng/templates/[id]/sending); id кампаний наружу не идут.
+        sending,
+        sending_template_id: sending ? (launchedTemplateId ?? null) : null,
+        // Возьмёт ли вертикаль ближайшая ночь добора (EngDashTopUp); null — запуска нет.
+        top_up: launchedTemplateId ? (topUpByTemplate.get(launchedTemplateId) ?? null) : null,
       };
     });
 

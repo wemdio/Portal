@@ -16,6 +16,7 @@ import {
 } from './api';
 import { HE } from './design';
 import { ProjectDetail } from './ProjectDetail';
+import { SendingPoolPanel } from './SendingPoolPanel';
 import { ProjectStatusBadge, formatDate, prettyHost, prettyProjectName } from './ui';
 
 export function HypothesisEngineView() {
@@ -23,6 +24,7 @@ export function HypothesisEngineView() {
   const [listLoading, setListLoading] = useState(true);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [poolOpen, setPoolOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +82,17 @@ export function HypothesisEngineView() {
         >
           Открыть Движок вертикалей v2
         </a>
+      </div>
+
+      {/* Пул наших ящиков отправки для английского кабинета */}
+      <div className={`${HE.card} ${HE.cardPad} space-y-4`}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className={HE.secTitle}>Пул ящиков ENG</p>
+          <button type="button" className={HE.btnSmall} onClick={() => setPoolOpen((v) => !v)}>
+            {poolOpen ? 'Свернуть' : 'Открыть'}
+          </button>
+        </div>
+        {poolOpen && <SendingPoolPanel />}
       </div>
 
       {/* Список проектов */}

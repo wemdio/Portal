@@ -34,6 +34,11 @@ import type { HeJob } from '@/lib/hypothesisEngine/types';
 import { getHeClientFailure } from '@/lib/hypothesisEngine/clientErrors';
 import { heLaunchIsIncomplete, parseLaunchInfo, type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
 import { notifyHeClientLaunch } from '@/lib/hypothesisEngine/opsAlert';
+import { ensureHeEngPresetForProject } from '@/lib/hypothesisEngine/engSendingPreset';
+import { requireHeEngSendingAccess } from '@/lib/hypothesisEngine/engSendingAccess';
+import { readHeEngSendingSummaries, startHeEngLaunchSending } from '@/lib/hypothesisEngine/engCampaignSending';
+import { heEngLaunchCampaigns, type HeEngStartErrorCode } from '@/lib/hypothesisEngine/engCampaignStatus';
+import { ensureHeUsRefillConfig } from '@/lib/hypothesisEngine/autoPipeline';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError, logWarn } from '@/lib/loggerServer';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
@@ -49,8 +54,17 @@ import {
 export const dynamic = 'force-dynamic';
 // До HE_LAUNCH_MAX_LEADS лидов = 2 вызова /leads/add + создание кампании
 // (окно отправки клиента ядро ставит при создании; короткий PATCH окна — только
-// кампаниям прошлой попытки на достройке, см. ниже).
-export const maxDuration = 60;
+// кампаниям прошлой попытки на достройке, см. ниже) и старт созданных кампаний
+// (по кампании: чтение, старт, при неясном ответе — проверочное чтение).
+export const maxDuration = 120;
+
+/**
+ * Старт кампаний после ядра (блок «Отправка» ниже) укладывается в срок от
+ * начала запроса: новая кампания начинается, только если до срока остаётся
+ * бюджет одной кампании (engCampaignSending); не начатые клиент стартует
+ * кнопкой «Start sending».
+ */
+const SENDING_DEADLINE_MS = 100_000;
 
 const LAUNCH_FAILED = 'Failed to launch the campaign';
 
@@ -155,7 +169,7 @@ function readSegmentFailures(raw: unknown): Array<string | null> {
  * созданы, но повторный запуск этим текстом не защищён.
  */
 const WARNING_NEEDS_ATTENTION =
-  'Part of the launch reported a problem on our side. The campaigns that were created stay paused — contact Support to have them checked before launching this template again.';
+  'Part of the launch reported a problem on our side, so the campaigns that were created were not started. Contact Support to have them checked before you start them or launch this template again.';
 
 /** Префикс отказа сегментной группы в английском контуре (launchTemplate.ts:429). */
 const SEGMENT_FAILED_PREFIX = 'Segment campaign failed: ';
@@ -174,12 +188,16 @@ const SEGMENT_FAILED_PREFIX = 'Segment campaign failed: ';
  * GET .../schedule, не найдя сохранённого выбора новее этого запуска, читает
  * окна кампаний запуска у рассыльщика (разные — говорит и это). «Save the
  * hours you want», а не «save your window again»: форма покажет прочитанные
- * часы кампаний, а не выбор, который до них не доехал.
+ * часы кампаний, а не выбор, который до них не доехал. Кнопку старта фраза не
+ * называет: на достройке кампании прошлой попытки могут уже отправлять («Start
+ * the rest»), клиент мог поставить паузу («Resume») — какая кнопка стоит,
+ * показывает блок отправки шаблона (engText.engStartButtonOf).
  */
 const WARNING_SCHEDULE_NOT_APPLIED =
   'The campaigns were created, but the sending window you picked did not reach them, so they kept ' +
-  'their earlier sending hours. They stay paused — open the sending window of this template to see ' +
-  'those hours, and save the hours you want before anyone starts them.';
+  'their earlier sending hours, and this launch did not start sending. Open the sending window of this ' +
+  'template to see those hours, save the hours you want, and then start the campaigns — the sending status ' +
+  'of this template shows how.';
 
 /**
  * Окно доехало до ЧАСТИ кампаний запуска (сплит по сегментам базы создаёт их
@@ -204,8 +222,8 @@ function scheduleAppliedPartlyWarning(keptEarlierWindow: string[]): string {
     (named
       ? `These campaigns kept their earlier sending hours: ${named}. `
       : 'Some campaigns kept their earlier sending hours. ') +
-    'They stay paused — open the sending window on this step and save the hours you want before anyone ' +
-    'starts them.'
+    'This launch did not start sending — open the sending window on this step, save the hours you want, ' +
+    'and then start the campaigns — the sending status of this template shows how.'
   );
 }
 
@@ -266,9 +284,10 @@ function toClientLaunchWarnings(raw: unknown, segmentFailures: Array<string | nu
   return out;
 }
 
-// GET — пресеты для селектора «Launch»: ТОЛЬКО свои (у staff — все, пресет
-// выбирает сотрудник). Имени у пресета нет — подписываем адресом отправителя
-// (ящик клиента, он же виден ему на /client/eng/mailboxes).
+// GET — пресеты для селектора «Launch»: ТОЛЬКО свои. С S2 кабинет селектор не
+// рисует и этот GET не зовёт (пресет собирается из ящиков пула проекта при
+// запуске, а POST поле preset_id игнорирует); ответ остался для вкладок со
+// старым бандлом. Имени у пресета нет — подписываем адресом отправителя.
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
@@ -309,9 +328,13 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ presets });
 }
 
-// POST — «Launch (paused)»: ДЕЛЕГИРУЕМ в общее ядро runHeTemplateLaunch (та
-// же механика, что у staff: PAUSED-кампания, лиды базы, launch_info в
-// шаблоне, незаконченный запуск достраивается). Отличия клиентского контура:
+// POST — «Launch»: выключатель отправки аккаунта, ящики пула проекта и пресет
+// из них (ensureHeEngPresetForProject), затем ДЕЛЕГИРУЕМ в общее ядро
+// runHeTemplateLaunch (та же механика, что у staff: PAUSED-кампания, лиды
+// базы, launch_info в шаблоне, незаконченный запуск достраивается), и после
+// успешного ядра роут СТАРТУЕТ созданные кампании, если тело просит это
+// (`start_sending: true`; блок «Отправка» ниже; ядро само не стартует ничего).
+// Отличия клиентского контура:
 // повтора законченного запуска (force) нет — 400 FORCE_NOT_AVAILABLE; пресет читается
 // со скоупом владельца, тексты EN, бренд рассыльщика скрабим из ошибок, а
 // ответ ядра не отдаём как есть — сужаем белым списком (см. выше): в нём
@@ -338,6 +361,7 @@ export async function GET(req: NextRequest) {
 // не прочитались) — они ничего не оплатили и зовут повторить через минуту.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.launch.post' }, async () => {
+    const requestStartedAt = Date.now();
     const result = await requireClientAuth(req);
     if ('error' in result) return result.error;
     if (!supabaseAdmin || !supabaseInstantly) return jsonError('Server misconfigured', 500);
@@ -349,15 +373,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const { id } = await params;
     if (!isValidUuid(id)) return jsonError('Invalid id', 400);
 
-    let body: { preset_id?: unknown; force?: unknown; schedule?: unknown };
+    let body: { preset_id?: unknown; force?: unknown; schedule?: unknown; start_sending?: unknown };
     try {
       body = (await req.json()) as typeof body;
     } catch {
       return jsonError('Invalid body', 400);
     }
-    const presetId = typeof body?.preset_id === 'string' ? body.preset_id.trim() : '';
-    if (!presetId) return jsonError('Provide preset_id', 400);
+    // `preset_id` тела больше не читается: пресет отправки клиента собирается
+    // из ящиков пула его проекта (ensureHeEngPresetForProject ниже), выбирать
+    // нечего. Старый бандл кабинета поле присылает — оно игнорируется.
     if (body?.force !== undefined && body.force !== false) return jsonError(FORCE_NOT_AVAILABLE, 400);
+    // Старт кампаний после ядра — только по явному `start_sending: true`: его
+    // шлёт кабинет, который говорит клиенту, что «Launch all» начинает отправку
+    // (api-client.launchEngTemplate). Вкладка со старым бандлом обещала
+    // «Launch all (paused)» — её запуск создаёт кампании на паузе
+    // (sending.outcome 'skipped', skip_reason 'not_requested'), и клиент
+    // стартует их кнопкой «Start sending», уже зная, что это отправка.
+    const startRequested = body?.start_sending === true;
 
     // Окно отправки выбирает КЛИЕНТ (пояс, часы, дни). Поля нет в теле —
     // ставим английский дефолт, а НЕ окно пресета: пресет заполнял
@@ -377,6 +409,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const access = await requireEngPaidAccess(supabaseAdmin, userId, { action: 'launch' });
     if (!access.ok) return engPaidAccessResponse(access.refusal);
+
+    // Выключатель отправки аккаунта (engSendingAccess; по умолчанию требуется,
+    // HE_US_SENDING_REQUIRES_ACTIVATION=0 снимает) — до ящиков пула, ядра и
+    // любого вызова рассыльщика: запуск теперь начинает отправку. Отказ «не
+    // включена» записывает, что клиент ждёт, и зовёт команду (алерт).
+    const sendingAccess = await requireHeEngSendingAccess(supabaseAdmin, userId, {
+      projectId: String(owned.project.id),
+      via: 'launch',
+    });
+    if (!sendingAccess.ok) {
+      return NextResponse.json({ error: sendingAccess.message, code: sendingAccess.code }, { status: sendingAccess.status });
+    }
+
+    // Ящики пула проекта и пресет клиента из них (engSendingPreset — контракт
+    // лейна пула): нехватка ящиков и сбой настройки — отказ до ядра, ничего не
+    // создано. Дальше ядро получает ЭТОТ пресет, а не выбранный клиентом.
+    const sendingPreset = await ensureHeEngPresetForProject(String(owned.project.id), userId);
+    if (sendingPreset.kind !== 'ready') {
+      return NextResponse.json({ error: sendingPreset.message, code: sendingPreset.code }, { status: sendingPreset.status });
+    }
+    const presetId = sendingPreset.presetId;
 
     // Неудачные запуски этого шаблона за час. Попадание пишется ДО ядра (два
     // параллельных нажатия не проходят оба последнее место) и остаётся, если
@@ -543,9 +596,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // то, что ядро не трогает: кампании, которые на ДОСТРОЙКЕ уже держат адреса
     // (ядро их не меняет — их получатели могут быть в рассылке), и кампании
     // прошлой попытки, которым в этом заходе не нашлось группы. Окно одно на
-    // шаблон, PATCH идемпотентен (в нём только campaign_schedule), кампании на
-    // паузе, поэтому переставить им окно безопасно — и пропустить их значило
-    // бы оставить часть запуска на часах, которые клиент уже переставил.
+    // шаблон, PATCH идемпотентен (в нём только campaign_schedule — у
+    // отправляющей кампании тоже, как у PATCH .../schedule), поэтому
+    // переставить им окно безопасно — и пропустить их значило бы оставить
+    // часть запуска на часах, которые клиент уже переставил.
     //
     // Только на успешном запуске (200). 409 «уже запущено» не создаёт кампаний, и
     // переставлять окно у чужого прошлого запуска этот ответ не должен — для
@@ -717,11 +771,139 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       responseBody.warnings = [...existing, ...scheduleWarnings];
     }
 
-    // Команде — что клиент создал кампании и их надо проверить и стартовать:
-    // ядро создаёт их на паузе и не активирует никогда (launchHandoff.ts), а
-    // кабинет обещает клиенту, что их стартует менеджер. Только успешный
-    // запуск (200, запись о запуске в ответе ядра) — и законченный, и
-    // незаконченный: созданные кампании ждут сотрудника в обоих случаях. Не
+    // ── Отправка: старт кампаний запуска (S2, решение владельца 10–11.10.2026) ──
+    //
+    // Ядро создаёт кампании на паузе и само их не стартует (его зовёт и RU
+    // staff-инструмент) — стартует ЭТОТ роут, только на успешном запуске (200) и
+    // только кампании записи о запуске (законченной или достроенной этим
+    // нажатием — достройка стартует то, что достроила). Не стартует, если ответ
+    // несёт предупреждение, которое обещает клиенту «не стартовано»:
+    //  - WARNING_NEEDS_ATTENTION (внутренний след в предупреждении ядра, в том
+    //    числе несохранённая запись о запуске) — 'launch_problem';
+    //  - окно отправки не доехало до всех кампаний (WARNING_SCHEDULE_NOT_APPLIED,
+    //    scheduleAppliedPartlyWarning) — 'window_not_applied': кампании ушли бы
+    //    на чужих часах;
+    // и если тело не просило старт (`start_sending: true`, см. разбор тела) —
+    // 'not_requested': старый бандл обещал кампании на паузе.
+    // Остальные проверки — внутри startHeEngLaunchSending (запись в БД содержит
+    // все кампании ответа — иначе итоговая запись не сохранилась; гейт писем;
+    // выключатель; пауза клиента; ящики пула и адреса живой кампании; статус).
+    // Шаблоны, отказанные гейтом подстановок или классификатором сегментов, сюда
+    // не доходят: это не 200. 409 «уже запущено» ничего не стартует — для не
+    // стартованных кампаний запуска кабинета есть «Start sending»
+    // (api/client/eng/templates/[id]/sending); запуск, созданный до выдачи
+    // проекту ящиков пула, кабинет не стартует вовсе (сводка 'pre_self_serve').
+    let sendingStarted = 0;
+    let sendingNotStarted = 0;
+    let sendingSkipReason: 'launch_problem' | 'window_not_applied' | 'not_requested' | null = null;
+    if (outcome.status === 200) {
+      const record = parseLaunchInfo(outcome.body.launch);
+      const recordCampaigns = record ? heEngLaunchCampaigns(record) : [];
+      const withLeads = recordCampaigns.filter((c) => c.leads > 0).length;
+      const warningsNow = Array.isArray(responseBody.warnings) ? (responseBody.warnings as string[]) : [];
+      const skipReason: 'launch_problem' | 'window_not_applied' | 'not_requested' | null =
+        !record || warningsNow.includes(WARNING_NEEDS_ATTENTION)
+          ? 'launch_problem'
+          : scheduleWarnings.some((w) => w !== WARNING_SCHEDULE_NOT_SAVED)
+            ? 'window_not_applied'
+            : !startRequested
+              ? 'not_requested'
+              : null;
+      const nothingStarted = {
+        campaigns: withLeads,
+        started: 0,
+        already_sending: 0,
+        completed: 0,
+        failed: [] as HeEngStartErrorCode[],
+        not_attempted: 0,
+        unconfirmed: 0,
+        paused_found: 0,
+        compensated: 0,
+        compensation_failed: 0,
+      };
+      if (skipReason) {
+        responseBody.sending = { outcome: 'skipped', skip_reason: skipReason, ...nothingStarted };
+        sendingNotStarted = withLeads;
+        sendingSkipReason = skipReason;
+      } else {
+        const started = await startHeEngLaunchSending({
+          portalDb,
+          instantlyDb,
+          clientUserId: userId,
+          projectId: String(owned.project.id),
+          templateId: id,
+          via: 'launch',
+          expectedCampaignIds: recordCampaigns.map((c) => c.campaignId),
+          deadlineMs: requestStartedAt + SENDING_DEADLINE_MS,
+        });
+        if (started.kind === 'refused') {
+          // Записи в БД нет, она не совпала с ответом ядра или осталась в
+          // аренде — итоговая запись не сохранилась (её предупреждение уже в
+          // ответе).
+          const launchProblem =
+            started.code === 'record_mismatch' || started.code === 'launch_running' || started.code === 'not_launched';
+          responseBody.sending = launchProblem
+            ? { outcome: 'skipped', skip_reason: 'launch_problem', ...nothingStarted }
+            : { outcome: 'refused', refusal: { code: started.code, message: started.message }, ...nothingStarted };
+          sendingNotStarted = withLeads;
+          if (launchProblem) sendingSkipReason = 'launch_problem';
+        } else if (started.clientPaused) {
+          // Пауза клиента — или кампания записи на паузе у рассыльщика
+          // (`paused_found`, шаг 6b startHeEngLaunchSending): не стартовано ничего.
+          responseBody.sending = { outcome: 'client_paused', ...nothingStarted, paused_found: started.pausedFound };
+          sendingNotStarted = withLeads;
+        } else {
+          responseBody.sending = {
+            outcome: 'done',
+            campaigns: started.campaigns,
+            started: started.started,
+            already_sending: started.alreadySending,
+            completed: started.completed,
+            failed: started.failed.map((f) => f.code),
+            not_attempted: started.notAttempted,
+            unconfirmed: started.unconfirmed,
+            paused_found: 0,
+            compensated: started.compensated,
+            compensation_failed: started.compensationFailed,
+          };
+          sendingStarted = started.started - started.compensated;
+          sendingNotStarted = started.failed.length + started.notAttempted;
+        }
+      }
+    }
+
+    // Свежая сводка отправки этого запуска (как в ответе POST .../sending): по
+    // ней фраза итога запуска называет кнопку, которая теперь на карточке
+    // (engText.engLaunchSendingText → engStartButtonOf). Из кэша, без живого
+    // чтения; не бросает (пусто — фраза выбирает кнопку по итогу).
+    if (outcome.status === 200 && 'sending' in responseBody) {
+      const record = parseLaunchInfo(outcome.body.launch);
+      if (record) {
+        const summaries = await readHeEngSendingSummaries(portalDb, instantlyDb, {
+          userId,
+          launches: [{ projectId: String(owned.project.id), templateId: id, launch: record }],
+          refresh: false,
+        });
+        responseBody.sending_summary = summaries.get(id) ?? null;
+      }
+    }
+
+    // ── Ежедневный добор: конфиг после первого успешного запуска (S2) ──
+    // Любой 200 с записью о запуске, стартовала отправка или нет: ночь всё
+    // равно проверяет, берут ли кампании контакты, и без этого ничего не
+    // покупает (autoPipeline.ts, «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?»). Строка одна на
+    // проект; уже заведённую — в том числе выключенную клиентом — вызов не
+    // трогает. Не бросает; сбой пишется строкой warn, а включить добор клиент
+    // может переключателем «Daily top-up» дашборда.
+    if (outcome.status === 200 && parseLaunchInfo(outcome.body.launch)) {
+      await ensureHeUsRefillConfig(portalDb, String(owned.project.id));
+    }
+
+    // Команде — ИНФОРМАЦИЯ, что клиент запустил шаблон из кабинета и сколько
+    // кампаний начали отправку (делать ничего не нужно, кроме 'launch_problem':
+    // тогда — проверить кампании запуска у рассыльщика; не стартованные клиент
+    // видит с причиной и кнопкой старта блока отправки вертикали). Только успешный запуск (200,
+    // запись о запуске в ответе ядра) — и законченный, и незаконченный. Не
     // ждём (`void`): ответ клиенту от Telegram не зависит, notifyHeClientLaunch
     // не бросает; дедупликация и свёртка «Launch all» — в opsAlert.ts.
     if (outcome.status === 200) {
@@ -738,6 +920,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           leads: record.leads_count,
           unfinished: heLaunchIsIncomplete(record),
           forced: false,
+          sending: { started: sendingStarted, notStarted: sendingNotStarted, skipReason: sendingSkipReason },
         });
       }
     }

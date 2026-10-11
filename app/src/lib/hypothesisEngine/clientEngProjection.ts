@@ -371,7 +371,8 @@ export function toClientEngAutopilotHold(
  * Состояние ночного добора ПРОЕКТА в том виде, в каком его получает кабинет.
  * Набор полный и закрытый — третьего булева флага у него нет намеренно:
  *  - `off`     — ночного добора у проекта нет: строки `he_auto_pipeline_configs`
- *                не существует либо `enabled = false`;
+ *                не существует либо `enabled = false` (клиент выключил его
+ *                переключателем «Daily top-up», switchHeUsRefill);
  *  - `running` — добор включён и ночь его поставит;
  *  - `paused`  — добор включён, но остановлен переполнением ёмкости
  *                (`refill_paused_at`, миграция 20260930_0005), и ночь его НЕ
@@ -386,8 +387,10 @@ export function toClientEngAutopilotHold(
  *  - `stopped` — добор включён, но остановлен ОТМЕНОЙ проекта: кнопка «Cancel
  *                all jobs» кабинета пишет ту же колонку `refill_paused_at` с
  *                причиной отмены (pauseHeRefillForClientCancel, autoPipeline.ts).
- *                Ночь его не поставит, пока сотрудник не вернёт проект той же
- *                кнопкой staff-инструмента.
+ *                Ночь его не поставит, пока клиент не включит добор
+ *                переключателем «Daily top-up» (switchHeUsRefill снимает именно
+ *                эту паузу) или сотрудник не вернёт проект кнопкой
+ *                staff-инструмента.
  *
  * ПОЧЕМУ `paused` НЕ СХЛОПЫВАЕТСЯ НИ С ЧЕМ. До паузы кабинет знал ровно
  * `enabled` и печатал по нему «next: daily refill 03:20 UTC». У проекта на
@@ -659,7 +662,7 @@ const LAUNCH_CAMPAIGN_FIELDS = ['campaign_id', 'campaign_name', 'segment', 'lead
  *
  * Зачем кабинету: по этому ключу шаг «Review & Launch» узнаёт, что запуск можно
  * ДОСТРОИТЬ (heLaunchIsIncomplete — один предикат на сервер и на экран), и
- * снова показывает «Launch all (paused)». Без проекции признак оставался на
+ * снова показывает «Launch all». Без проекции признак оставался на
  * сервере, и кабинет видел частичный запуск как законченный: кнопка пропадала,
  * хотя API повтор уже разрешал, — вся механика достройки была недостижима.
  *
@@ -683,7 +686,7 @@ const LAUNCH_PENDING_FIELDS = ['segment', 'stage'] as const;
  * `HE · ` — внутренняя метка студии (staff узнаёт свои кампании в списке
  * рассыльщика), `база` — русский фолбэк для базы без filename. Оба попадают на
  * экран клиента: имя печатают EngStepBases.tsx:149 и дашборд (`stageDetail`
- * «live: …», карточка Launch, лента «campaign launched (paused): …»).
+ * «live: …», карточка Launch, лента «campaign launched: …»).
  */
 const LEGACY_CAMPAIGN_PREFIX = 'HE · ';
 const LEGACY_CAMPAIGN_FALLBACK_BASE = 'база';

@@ -358,16 +358,19 @@ export const CLIENT_NAV_ENG: ClientNavItem = {
 };
 
 /**
- * Подключение своих ящиков в ENG-кабинете. Живёт под /client/eng/*,
- * иначе middleware уводит eng-клиента обратно в /client/eng.
+ * Ящики, которые ENG-клиент подключил сам. Живёт под /client/eng/*,
+ * иначе middleware уводит eng-клиента обратно в /client/eng. С S2 кампании
+ * кабинета шлют из ящиков пула проекта, а не из подключённых, и новые ящики
+ * экран не подключает (app/client/eng/mailboxes/page.tsx) — поэтому ни
+ * «Sending», ни «Connect» в подписи нет.
  */
 export const CLIENT_NAV_ENG_MAILBOXES: ClientNavItem = {
   id: 'eng-mailboxes',
-  label: 'Sending mailboxes',
-  labelEn: 'Sending mailboxes',
+  label: 'Connected mailboxes',
+  labelEn: 'Connected mailboxes',
   href: '/client/eng/mailboxes',
-  description: 'Connect your outreach mailboxes',
-  descriptionEn: 'Connect your outreach mailboxes',
+  description: 'Mailboxes you connected earlier — campaigns you launch send from mailboxes we provide',
+  descriptionEn: 'Mailboxes you connected earlier — campaigns you launch send from mailboxes we provide',
 };
 
 /**

@@ -7,13 +7,16 @@
  * через ChainEditor шага Letters, PATCH /eng/chains/[id]; подписан как
  * черновик — на готовый шаблон правка не влияет), ленивое превью базы
  * (GET /eng/bases/[id]/rows, первые 100 строк, компактные колонки) и статус
- * шаблона. Вверху — общий селектор пресета, ОКНО ОТПРАВКИ (пояс/часы/дни,
- * уезжает вместе с запуском) и «Launch all (paused)»: последовательный запуск
- * ready-шаблонов, которым есть что запускать, по одному на базу
- * (launchableTemplates), со счётчиком запущенных N/M; ошибка одного шаблона
- * показывается и не останавливает остальные — кроме отказов «идёт повторное
- * исследование», «в пресете нет ящиков» и «классификатор сегментов не
- * ответил», которые получил бы следующий шаблон.
+ * шаблона. Вверху — ОКНО ОТПРАВКИ (пояс/часы/дни, уезжает вместе с запуском)
+ * и «Launch all»: последовательный запуск ready-шаблонов, которым есть что
+ * запускать, по одному на базу (launchableTemplates), со счётчиком запущенных
+ * N/M; запуск создаёт кампании из ящиков пула проекта и стартует их (роут
+ * запуска, блок «Отправка»). Ошибка одного шаблона показывается и не
+ * останавливает остальные — кроме отказов «идёт повторное исследование», «в
+ * пресете нет ящиков», «классификатор сегментов не ответил» и отказов
+ * отправки аккаунта (выключатель, ящики пула), которые получил бы следующий
+ * шаблон. У запущенного шаблона — статус отправки и Pause / Start sending /
+ * Resume (EngSendingBlock).
  * Итог прогона (ошибки и предупреждения запуска) остаётся на экране и тогда,
  * когда запускать больше нечего: панель не снимается после первого прогона.
  * Шаблон, чьи письма запуск откажет (`needs_rewrite` проекции), в прогон не
@@ -44,8 +47,8 @@ import {
   engTemplateNeedsRewrite,
   engTemplatePlaceholders,
   fetchEngBaseRows,
-  fetchEngLaunchPresets,
   fetchEngSendingWindow,
+  isEngLaunchSendingRefusalCode,
   launchEngTemplate,
   updateEngSendingWindow,
   type EngBaseSummary,
@@ -53,7 +56,6 @@ import {
   type EngSendingWindowTimezoneOption,
   type EngSendingWindowWeekdayOption,
   type HeChainDto,
-  type HeLaunchPresetOption,
   type HeJobSummary,
 } from './api-client';
 import { EngBadge, EngBaseStatusBadge, EngCard, EngSpinner } from './ui';
@@ -61,9 +63,11 @@ import { EngPaidAccessNotice, EngSupportText } from './EngPaidAccess';
 import {
   engChainDraftText,
   engLaunchRunStoppedText,
+  engLaunchSendingText,
   engPlaceholderText,
   engTemplateNeedsRewriteText,
 } from './engText';
+import { EngSendingBlock } from './EngSending';
 import { ChainEditor } from './EngStepLetters';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -531,8 +535,8 @@ type FinalLettersState =
 const FINAL_LETTERS_STATE_TEXT: Record<FinalLettersState, string> = {
   launched: 'The campaigns of this launch were created with these letters.',
   unfinished:
-    'This launch has already created campaigns with these letters, and part of this audience has not gone in yet; «Launch all (paused)» finishes it with the same letters.',
-  next_launch: '«Launch all (paused)» creates the campaigns for this audience with these letters.',
+    'This launch has already created campaigns with these letters, and part of this audience has not gone in yet; «Launch all» finishes it with the same letters.',
+  next_launch: '«Launch all» creates the campaigns for this audience with these letters and starts sending them.',
   rewrite_none: 'These letters cannot be launched as they are — see the note above.',
   rewrite_unfinished:
     'The campaigns already created use these letters, but they cannot finish the launch as they are — see the note above.',
@@ -677,7 +681,7 @@ function VerticalReviewCard({
   base: EngBaseSummary | undefined;
   template: HeTemplate | undefined;
   templateBusy: boolean;
-  /** Шаблон карточки — в списке «Launch all (paused)» (launchableTemplates). */
+  /** Шаблон карточки — в списке «Launch all» (launchableTemplates). */
   inLaunchAll: boolean;
   onChanged: () => void;
 }) {
@@ -713,16 +717,9 @@ function VerticalReviewCard({
             tone={template.status === 'ready' && !rewriteBlocksLaunch ? 'green' : 'amber'}
           />
         )}
-        {/* «created paused», а не «launched (paused)» зелёным: запуск создаёт
-            кампании на паузе, стартует их команда, а статус кампании у
-            рассыльщика кабинет не читает — подпись верна и до старта, и после
-            (та же, что у Command Center). */}
-        {launch && (
-          <EngBadge
-            label={launchUnfinished ? 'launch unfinished' : 'created paused'}
-            tone={launchUnfinished ? 'amber' : 'neutral'}
-          />
-        )}
+        {/* Незаконченный запуск — свой тег; статус отправки (настоящий, у
+            рассыльщика) — в блоке отправки ниже, у любого запуска. */}
+        {launch && launchUnfinished && <EngBadge label="launch unfinished" tone="amber" />}
         {!template && templateBusy && (
           <span className="inline-flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
             <EngSpinner className="h-3 w-3" /> building template…
@@ -760,6 +757,14 @@ function VerticalReviewCard({
         <p className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
           <EngSupportText text={engTemplateNeedsRewriteText(launch === null ? 'none' : 'unfinished')} />
         </p>
+      )}
+
+      {/* Запущенный шаблон: статус отправки и Pause / Start sending / Resume
+          (EngSendingBlock читает сводку сам). */}
+      {launch && template && (
+        <div className="mt-2">
+          <EngSendingBlock templateId={template.id} poll />
+        </div>
       )}
 
       {/* Запущенный шаблон: окно отправки клиент может поменять и после
@@ -809,10 +814,17 @@ function VerticalReviewCard({
 
 function LaunchAllPanel({
   launchable,
+  nameOf,
   onChanged,
   onRunStart,
 }: {
   launchable: HeTemplate[];
+  /**
+   * Имя вертикали шаблона (а без неё — файл базы) для строк итога прогона:
+   * предупреждения и отказы приходят по шаблону, и без имени «The campaigns
+   * were created, but…» из пачки в четыре шаблона не указывает ни на один.
+   */
+  nameOf: (template: HeTemplate) => string;
   onChanged: () => void;
   /**
    * Прогон начался — родитель держит панель на экране и после того, как
@@ -822,9 +834,6 @@ function LaunchAllPanel({
    */
   onRunStart: () => void;
 }) {
-  const [presets, setPresets] = useState<HeLaunchPresetOption[] | null>(null);
-  const [presetId, setPresetId] = useState('');
-  const [presetsError, setPresetsError] = useState('');
   /**
    * Отказ гейта платных шагов (почта не подтверждена, гейт не прочитал свои
    * данные): его получил бы и каждый следующий шаблон, поэтому прогон на нём
@@ -854,8 +863,8 @@ function LaunchAllPanel({
     notes: [],
   });
 
-  // Пресеты — per-client (GET launch их не привязывает к шаблону), грузим по
-  // первому ready-шаблону. Зависим от стабильного id, а не от массива.
+  // Окно отправки грузим по первому ready-шаблону. Зависим от стабильного id,
+  // а не от массива.
   const firstTemplateId = launchable[0]?.id;
   // Сколько из них — ДОСТРОЙКА незакончённого запуска: «Launch» для них значит
   // «закончить», а не «начать заново», и сказать это надо до нажатия.
@@ -863,28 +872,11 @@ function LaunchAllPanel({
     const launch = parseLaunchInfo((t as { launch_info?: unknown }).launch_info);
     return launch !== null && heLaunchIsIncomplete(launch);
   }).length;
-  // Окно отправки — тоже одно на пачку: «Launch all» запускает все готовые
-  // шаблоны одним пресетом, и часы отправки у них общие. Поменять окно
+  // Окно отправки — одно на пачку: «Launch all» запускает все готовые шаблоны
+  // из одних ящиков проекта, и часы отправки у них общие. Поменять окно
   // отдельной кампании можно после запуска, в её карточке.
   const { config: windowConfig, setValue: setWindowValue, error: windowError } =
     useSendingWindow(firstTemplateId);
-  useEffect(() => {
-    if (!firstTemplateId) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const list = await fetchEngLaunchPresets(firstTemplateId);
-        if (cancelled) return;
-        setPresets(list);
-        setPresetId((prev) => prev || (list[0]?.id ?? ''));
-      } catch (e) {
-        if (!cancelled) setPresetsError(e instanceof Error ? e.message : 'Failed to load presets');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [firstTemplateId]);
 
   /**
    * Отказы защиты аудитории (`res.refusal`, launchTemplate.ts, шаг 4b′) читаются
@@ -898,8 +890,11 @@ function LaunchAllPanel({
    *  - research_running — у проекта идёт повторное исследование. Тот же отказ
    *    получит КАЖДЫЙ следующий шаблон, поэтому цикл останавливается: одна
    *    строка вместо N одинаковых и ни одного лишнего запроса;
-   *  - preset_no_mailboxes — в выбранном пресете нет ящиков отправки. Пресет
+   *  - preset_no_mailboxes — в пресете проекта нет ящиков отправки. Пресет
    *    один на всю пачку, поэтому и здесь цикл останавливается;
+   *  - отказы отправки аккаунта (isEngLaunchSendingRefusalCode: выключатель
+   *    отправки не включён / выключен / не читается, ящиков пула не хватило,
+   *    настройка отправки не собралась) — про аккаунт, а не про шаблон: стоп;
    *  - segment_classification_incomplete (503) — классификатор сегментов не
    *    ответил по слишком большой доле адресов. Он общий у всех шаблонов, и
    *    следующий шаблон с сегментами оплатил бы классификацию всей своей
@@ -913,7 +908,7 @@ function LaunchAllPanel({
    * следующий шаблон оплатил бы заново, не узнав ничего нового.
    */
   const onLaunchAll = async () => {
-    if (state.running || !presetId || launchable.length === 0) return;
+    if (state.running || launchable.length === 0) return;
     if (!isSendingWindowUsable(windowConfig)) return;
     const errors: string[] = [];
     const notes: string[] = [];
@@ -925,39 +920,52 @@ function LaunchAllPanel({
     // перемешал бы launch_info опросов.
     for (let i = 0; i < launchable.length; i++) {
       const tpl = launchable[i];
+      // Каждая строка итога — с именем вертикали шаблона, к которому она относится.
+      const label = nameOf(tpl) || `Template ${i + 1}`;
+      const about = (text: string) => `${label}: ${text}`;
       let stop = false;
       try {
         const res = await launchEngTemplate(tpl.id, {
-          preset_id: presetId,
           // Окна нет (списки не загрузились) — не шлём поле вовсе: сервер
           // подставит английский дефолт, а не часы пресета администратора.
           ...(windowConfig ? { schedule: windowConfig.value } : {}),
         });
         if (res.refusal === 'sibling_template_launched') {
-          notes.push(res.error ?? `Template ${i + 1}: not launched`);
-        } else if (res.refusal === 'research_running' || res.refusal === 'preset_no_mailboxes') {
-          errors.push(res.error ?? `Template ${i + 1}: launch failed`);
+          notes.push(about(res.error ?? 'not launched'));
+        } else if (
+          res.refusal === 'research_running' ||
+          res.refusal === 'preset_no_mailboxes' ||
+          isEngLaunchSendingRefusalCode(res.refusal)
+        ) {
+          const notTried = launchable.length - i - 1;
+          const refused = about(res.error ?? 'launch failed');
+          errors.push(notTried > 0 ? `${refused} ${engLaunchRunStoppedText(notTried)}` : refused);
           stop = true;
         } else if (res.refusal === 'segment_classification_incomplete') {
           const notTried = launchable.length - i - 1;
-          const refused = res.error ?? `Template ${i + 1}: launch failed`;
+          const refused = about(res.error ?? 'launch failed');
           errors.push(notTried > 0 ? `${refused} ${engLaunchRunStoppedText(notTried)}` : refused);
           stop = true;
         } else if (!res.ok) {
-          errors.push(res.error ?? `Template ${i + 1}: launch failed`);
+          errors.push(about(res.error ?? 'launch failed'));
         } else {
           launched += 1;
         }
         // Предупреждения запуска (в т.ч. «окно отправки не доехало») — не
         // ошибки: кампании созданы. Поэтому отдельным списком и другим цветом.
-        for (const warning of res.warnings ?? []) notes.push(warning);
+        for (const warning of res.warnings ?? []) notes.push(about(warning));
+        // Что запуск сделал с отправкой — началась ли она (роут запуска,
+        // блок «Отправка»).
+        const sendingText =
+          res.ok !== false && res.sending ? engLaunchSendingText(res.sending, res.sending_summary ?? null) : null;
+        if (sendingText) notes.push(about(sendingText));
       } catch (e) {
         if (e instanceof EngPaidAccessError) {
           // Гейт отвечает одинаково на любой шаблон этого клиента: дальше не
           // пробуем, текст и действие — в EngPaidAccessNotice ниже.
           setRefusal(e);
           const notTried = launchable.length - i - 1;
-          if (notTried > 0) errors.push(engLaunchRunStoppedText(notTried));
+          if (notTried > 0) errors.push(about(engLaunchRunStoppedText(notTried)));
           stop = true;
         } else if (e instanceof EngLaunchServerError) {
           // 5xx без кода: сбой на нашей стороне (после классификатора сегментов
@@ -965,10 +973,10 @@ function LaunchAllPanel({
           // шаблона. Следующий шаблон оплатил бы классификацию ради того же
           // сбоя — прогон останавливается, как на отказе классификатора.
           const notTried = launchable.length - i - 1;
-          errors.push(notTried > 0 ? `${e.message} ${engLaunchRunStoppedText(notTried)}` : e.message);
+          errors.push(about(notTried > 0 ? `${e.message} ${engLaunchRunStoppedText(notTried)}` : e.message));
           stop = true;
         } else {
-          errors.push(e instanceof Error ? e.message : `Template ${i + 1}: launch failed`);
+          errors.push(about(e instanceof Error ? e.message : 'launch failed'));
         }
       }
       setState({
@@ -1019,48 +1027,26 @@ function LaunchAllPanel({
   return (
     <EngCard>
       <div className="flex flex-wrap items-center gap-2">
-        {presets === null && !presetsError ? (
-          <span className="text-[11px] inline-flex items-center gap-1.5" style={{ color: 'var(--cp-text-m)' }}>
-            <EngSpinner className="h-3 w-3" /> Loading presets…
-          </span>
-        ) : presets && presets.length === 0 ? (
-          <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-            {/* Пресеты заводит команда: клиентского создания пресета нет
-                (api/client/preset — только чтение). */}
-            <EngSupportText text="No sending preset is set up for your account yet. Presets are set up by our team — message Support to have one set up." />
-          </span>
-        ) : (
-          <>
-            <select
-              value={presetId}
-              onChange={(e) => setPresetId(e.target.value)}
-              className="ds-input text-xs"
-              aria-label="Sending preset"
-            >
-              {(presets ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() => void onLaunchAll()}
-              disabled={state.running || !presetId || !isSendingWindowUsable(windowConfig)}
-              className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
-            >
-              {state.running ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
-              Launch all (paused)
-            </button>
-            <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-              {launchable.length} template{launchable.length === 1 ? '' : 's'} ready — campaigns stay paused for review
-            </span>
-          </>
-        )}
+        <button
+          type="button"
+          onClick={() => void onLaunchAll()}
+          disabled={state.running || !isSendingWindowUsable(windowConfig)}
+          className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+        >
+          {state.running ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
+          Launch all
+        </button>
+        {/* Ящики отправки выдаются проекту из нашего пула при запуске
+            (ensureHeEngPresetForProject), выбирать клиенту нечего. */}
+        <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          {launchable.length} template{launchable.length === 1 ? '' : 's'} ready — launching creates the campaigns
+          and starts sending them from the mailboxes we set up for your project; «Pause» on this step or in the
+          Command Center stops them
+        </span>
       </div>
       {/* Достройка: клиент обязан знать, что повтор ЗАКАНЧИВАЕТ прошлый запуск,
           а не начинает второй по той же аудитории. Отдельной кнопки для этого
-          нет — это тот же «Launch all (paused)». */}
+          нет — это тот же «Launch all». */}
       {unfinished > 0 && (
         <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
           {unfinished === 1
@@ -1111,17 +1097,12 @@ function LaunchAllPanel({
           <EngSupportText text={note} />
         </div>
       ))}
-      {presetsError && (
-        <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-          {presetsError}
-        </div>
-      )}
     </EngCard>
   );
 }
 
 /**
- * Что запускает «Launch all (paused)» — ПО ОДНОМУ шаблону на базу.
+ * Что запускает «Launch all» — ПО ОДНОМУ шаблону на базу.
  *
  * К запуску готовы ready-шаблоны без записи о запуске И те, чей запуск НЕ
  * ЗАКОНЧЕН: в записи остались части аудитории без кампании или без адресов
@@ -1214,6 +1195,9 @@ export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChan
     .filter((c) => c.chain || c.base || c.template);
 
   const launchable = launchableTemplates(templates);
+  // Имя для строк итога «Launch all»: вертикаль шаблона, без неё — файл базы.
+  const launchName = (t: HeTemplate): string =>
+    verticals.find((v) => v.id === t.vertical_id)?.name ?? bases.find((b) => b.id === t.base_id)?.filename ?? '';
   // Панель запуска остаётся на экране после первого прогона, даже если
   // запускать стало нечего: в ней итог прогона (см. LaunchAllPanel.onRunStart).
   const [launchRunStarted, setLaunchRunStarted] = useState(false);
@@ -1246,6 +1230,7 @@ export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChan
       {(launchable.length > 0 || launchRunStarted) && (
         <LaunchAllPanel
           launchable={launchable}
+          nameOf={launchName}
           onChanged={onChanged}
           onRunStart={() => setLaunchRunStarted(true)}
         />

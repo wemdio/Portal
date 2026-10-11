@@ -18,12 +18,12 @@ export const dynamic = 'force-dynamic';
 
 // Текст уезжает клиенту как есть (engServerError → тело ответа → engErrorText,
 // английская строка проходит скраб насквозь). Поэтому он называет действие ТЕМ
-// ЖЕ словом, что и кнопка кабинета, — «auto-refill» (EngStepVerticals.tsx):
-// отказ, говорящий про «nightly top-ups», отсылал бы к действию, которого в
-// кабинете нет.
-const RESUME_FAILED = 'Failed to resume the auto-refill';
+// ЖЕ словом, что и кнопка кабинета, — «daily top-up» («Resume daily top-up»,
+// EngStepVerticals.tsx, и его запасной текст): отказ другим словом отсылал бы к
+// действию, которого в кабинете нет.
+const RESUME_FAILED = 'Failed to resume the daily top-up for this vertical';
 
-// POST — «Resume auto-refill»: отменить решение правила сухой вертикали.
+// POST — «Resume daily top-up»: отменить решение правила сухой вертикали.
 //
 // Ночной проход снимает вертикаль с добора, когда N подряд ночей не добавили ни
 // одного контакта (lib/hypothesisEngine/autoPipeline.ts, блок «СУХАЯ

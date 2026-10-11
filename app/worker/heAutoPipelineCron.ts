@@ -15,8 +15,12 @@
  *      бандл dist/workers/heAutoPipelineCron.js → в образе /app/workers/.
  *   2. Прокатить миграцию supabase/migrations/20260804_0005_he_auto_pipeline.sql
  *      (he_auto_pipeline_configs/runs).
- *   3. Завести конфиги: insert в he_auto_pipeline_configs (project_id us-проекта,
- *      enabled, daily_leads_cap, verticals_per_run).
+ *   3. Конфиги he_auto_pipeline_configs у ENG-клиентов заводит кабинет сам:
+ *      первый успешный запуск шаблона и переключатель «Daily top-up»
+ *      (ensureHeUsRefillConfig / switchHeUsRefill, autoPipeline.ts; кап —
+ *      HE_US_DEFAULT_DAILY_REFILL, дефолт 50). Руками (insert: project_id
+ *      us-проекта, enabled, daily_leads_cap, verticals_per_run) — только
+ *      проекту сотрудника.
  *   4. Пересобрать и перезапустить образ воркеров (обычный деплой worker'ов).
  *   5. На хосте добавить в crontab (03:20 UTC = 06:20 МСК — после ночного
  *      jobhive-инжеста, до утренней рассылки):
@@ -62,8 +66,13 @@
  *      нет и проверка молчит; второй за сутки запуск останавливает уже правило
  *      суток, а эта проверка остаётся для `--force`;
  *   3. по каждой вертикали: нет запущенной кампании (`no_campaign`), правило
- *      сухой вертикали (`dry`), предполёт ёмкости воркспейса
- *      (`capacity_blocked`), и только потом постановка сборки.
+ *      сухой вертикали (`dry`), кампании запуска не берут контакты
+ *      (`sending_skipped`: переключатель «Daily top-up» клиента, его пауза,
+ *      отправка аккаунта, кампания завершена или остановлена, статус не
+ *      подтверждён — причина в строке; уровень info, а у «не подтверждён /
+ *      не читается / остановлена» — warn; exit code не меняет), предполёт
+ *      ёмкости воркспейса (`capacity_blocked`), и только потом постановка
+ *      сборки.
  *
  * ПОРЯДОК ВЕРТИКАЛЕЙ (кому достаются verticals_per_run слотов ночи) — не
  * created_at, а compareHeRefillVerticalOrder (autoPipeline.ts, блок «ПОРЯДОК
@@ -285,10 +294,16 @@ async function main(): Promise<number> {
     // десятков других info-строк, и проект может месяцами не получать
     // контактов, пока сотрудник не откроет именно его. Exit code по-прежнему
     // не меняется: пауза — решение, а не сбой тика.
+    // 'sending_skipped' — решение (клиент поставил паузу или выключил добор,
+    // кампания завершена), поэтому info; но «статус не подтверждён», «не
+    // читается» и «остановлена рассыльщиком» — warn: без человека они сами не
+    // пройдут, а ночи вертикали стоят.
+    const sendingWarn =
+      d.sendingSkip === 'status_unknown' || d.sendingSkip === 'unavailable' || d.sendingSkip === 'campaign_stopped';
     const level =
       d.status === 'failed'
         ? 'error'
-        : d.status === 'capacity_blocked' || d.status === 'paused'
+        : d.status === 'capacity_blocked' || d.status === 'paused' || sendingWarn
           ? 'warn'
           : 'info';
     if (d.status === 'paused') pausedConfigIds.push(d.configId);
@@ -359,6 +374,7 @@ async function main(): Promise<number> {
       `${summary.budgetExhausted} budget_exhausted, ${summary.paused} paused` +
       (pausedConfigIds.length > 0 ? ` (${pausedConfigIds.join(', ')})` : '') +
       `, ${summary.dry} dry, ${summary.carryCovers} carry_covers, ${summary.lettersHeld} letters_held, ` +
+      `${summary.sendingSkipped} sending_skipped, ` +
       `${summary.failed} failed in ${elapsedSec}s`,
   );
   return summary.failed > 0 || resumeFailed || reconcileFailed ? 1 : 0;
