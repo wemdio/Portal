@@ -1057,7 +1057,9 @@ async function buildPlan(
     hypotheses.map((h) => `${h.title} ${h.description ?? ''}`).join('\n'));
   if (stripped) stageLog(ctx, `[base_collect] план: сняты пороги выручки/штата без основания в гипотезе (${stripped} задач)`);
   const { plan: scoped, changed: broadened } = broad ? veBroadHypothesisPlan(sized) : { plan: sized, changed: 0 };
-  const niche = market !== 'us' && !broad ? detectVeNicheSourceProfile(hypotheses) : null;
+  // Broad removes incidental size/hiring restrictions, not the business model
+  // named in the audience (payment providers still are not transfer branches).
+  const niche = market !== 'us' ? detectVeNicheSourceProfile(hypotheses) : null;
   const plan = niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped;
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {
@@ -2628,7 +2630,7 @@ function taggedHarvest(task: VeCollectTaskState): VeUnifiedRow[] {
 }
 const candidateSourceKey = (row: VeUnifiedRow) => (row as VeUnifiedRow & { _ve_source_strategy?: string })._ve_source_strategy;
 
-/** Only confirmed narrow RU audiences opt in; old title-only checkpoints
+/** Only explicitly named RU audiences opt in; old title-only checkpoints
  * are checked against the exact hypothesis before constraining acquisition. */
 async function pinNicheSourceProfile(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<VeNicheSourceProfile | null> {
   if (info.niche_source_profile) return info.niche_source_profile;
@@ -2640,8 +2642,7 @@ async function pinNicheSourceProfile(ctx: VeStageContext, job: VeJob, base: VeAu
     if (!hypothesis || hypothesis.status === 'rejected') throw new Error('Source audience is no longer available');
     info.hypotheses = [hypothesis as NonNullable<VeCollectInfo['hypotheses']>[number]];
   }
-  const profile = !info.hypotheses?.some((hypothesis) => hypothesis.broad)
-    ? detectVeNicheSourceProfile(info.hypotheses ?? []) : null;
+  const profile = detectVeNicheSourceProfile(info.hypotheses ?? []);
   if (profile) {
     info.niche_source_profile = profile;
     await persistCollectInfo(ctx, base.id, info);
