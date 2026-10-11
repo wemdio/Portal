@@ -51,8 +51,9 @@ export function veNicheRubricAllowed(profile: VeNicheSourceProfile, label: strin
     return adult.test(value) && platform.test(value) && !/(?:студи|studio|магазин|салон|клуб|эскорт)/.test(value);
   }
   if (profile === 'crossborder_buyers') {
-    if (/авто|машин|оборудован|ломбард|металл|скупк/.test(value)) return false;
-    return /байер|buyer/.test(value) || (foreign.test(value) && /выкуп|покуп(?:к|ок)|доставк.*товар/.test(value));
+    // Auto parts are ordinary cross-border purchases; buying whole cars is a different audience.
+    if (/авто(?!\s*запчаст)|машин|оборудован|ломбард|металл|скупк/.test(value)) return false;
+    return /байер|buyer/.test(value) || (foreign.test(value) && /выкуп|покуп(?:к|ок)|доставк.*(?:товар|авто\s*запчаст)/.test(value));
   }
   return !supportingBusiness.test(value) && !/логистик|перевозк/.test(value)
     && /интернет\s*магазин|онлайн\s*магазин|электронн[а-я]* коммерц|e\s*commerce|ecommerce/.test(value);
