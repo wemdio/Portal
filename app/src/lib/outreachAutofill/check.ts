@@ -6,7 +6,7 @@ import { startJobCampaign, uploadJobToSender } from '@/lib/outreachSender/upload
 import { SenderOpError } from '@/lib/sender/campaignOps';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { notifyAutofill } from './notify';
-import { baseUntil, latestCheckSlot, mskDay, planAutofill, shortDate } from './plan';
+import { baseUntil, latestCheckSlot, mskDay, nextCheckIsToday, planAutofill, shortDate } from './plan';
 import {
   AUTOFILL_FOLDER_KEY,
   AUTOFILL_LANGS,
@@ -26,7 +26,9 @@ import {
  *   • разбор законченного автосбора — на каждом тике: залить готовые компании
  *     в новую рассылку папки, запустить её и сообщить итог в чат техники;
  *   • проверка базы — в 09:00 и 21:00 МСК: базы меньше чем на 3 рабочих дня →
- *     автосбор на неделю (не больше одного в день на язык).
+ *     автосбор на неделю. Каждая проверка смотрит на базу заново: утренний
+ *     сбор, не закрывший потребность, вечерний не отменяет (11.10.2026).
+ *     Больше двух сборов в сутки не выйдет — проверок всего две.
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -139,7 +141,10 @@ async function handleFinishedJob(lang: AutofillLang, now: Date, log: Log): Promi
     await notifyAutofill(lang, `добрано ${companies} компаний, база до ${until}`, { tag: false });
   } else {
     const why = stopReason ? ` (${stopReason})` : '';
-    await notifyAutofill(lang, `нужно ${target}, собрано ${companies}${why}, база до ${until}, завтра доберу`, { tag: true });
+    // Когда следующая проверка — вечером того же дня, «завтра доберу» было
+    // неправдой: добор будет через несколько часов.
+    const when = nextCheckIsToday(now) ? 'вечером доберу' : 'завтра доберу';
+    await notifyAutofill(lang, `нужно ${target}, собрано ${companies}${why}, база до ${until}, ${when}`, { tag: true });
   }
   if (streak >= 2) {
     await notifyAutofill(
@@ -187,9 +192,32 @@ async function checkBase(lang: AutofillLang, now: Date, log: Log): Promise<void>
     return;
   }
   if (!plan.needed) return;
-  if (row.last_job_day === mskDay(now)) {
-    log('info', `Автодобор ${lang}: базы мало, но автосбор сегодня уже был — ждём завтра`);
-    return;
+  /**
+   * Утренний сбор второй проверке не помеха.
+   *
+   * Раньше здесь стояло «сегодня сбор уже был — ждём завтра», и вечерняя
+   * проверка пропускала добор, даже когда базы по-прежнему не хватало:
+   * 11.10.2026 утренний сбор дал 60 компаний из 800, а в 21:00 автодобор
+   * просто промолчал. Условие запуска — состояние базы (`plan.needed`), а не
+   * факт утреннего сбора.
+   *
+   * Ограничение теперь по ОКНУ проверки, а не по дню: в одном окне (09:00 или
+   * 21:00) сбор запускается один раз. Так два сбора в сутки — потолок, и
+   * внеплановая проверка (её просит смена ящиков в папке, см.
+   * requestAutofillRecheck) не начинает второй сбор в том же окне.
+   */
+  if (row.last_job_id) {
+    const { data: lastJob, error: lastJobErr } = await db()
+      .from('parser_jobs')
+      .select('created_at')
+      .eq('id', row.last_job_id)
+      .maybeSingle();
+    if (lastJobErr) throw new Error(`прошлый автосбор не прочитан: ${lastJobErr.message}`);
+    const startedAt = lastJob?.created_at ? Date.parse(String(lastJob.created_at)) : 0;
+    if (startedAt >= latestCheckSlot(now).getTime()) {
+      log('info', `Автодобор ${lang}: базы мало, но сбор в этом окне проверки уже был — ждём следующего`);
+      return;
+    }
   }
   if (!row.owner_id) {
     await notifyAutofill(lang, 'не знаю, от чьего имени запускать сбор — выключите и включите автодобор заново', { tag: true });
