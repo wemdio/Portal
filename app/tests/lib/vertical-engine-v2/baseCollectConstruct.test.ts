@@ -3781,15 +3781,16 @@ describe('base_collect: сухие источники завершают баз�
   /** Пробуждение, в котором дочерний конструктор уже проверил партию: ни одной новой компании по гипотезе. */
   const finishBatch = async (args: { hypothesis: { title: string; description: string }; tasks: TaskState[];
     completed: ReturnType<typeof history>; batch: VeUnifiedRow[]; batchTask: Task; ready: VeUnifiedRow[];
-    seen: VeUnifiedRow[]; replanAttempts?: number; widenings?: number }) => {
+    seen: VeUnifiedRow[]; replanAttempts?: number; widenings?: number; phase?: 'existing' | 'paid'; reserve?: Array<Record<string, unknown>> }) => {
     const readyRows = readyOf(args.ready);
     const batchKey = veSourceStrategyKey(args.batchTask);
     const processed = args.completed.reduce((sum, batch) => sum + batch.candidates, 0);
     const info: VeCollectInfo = {
       plan: { tasks: args.tasks.map((task) => task.task) }, tasks: args.tasks,
       collection_mode: 'preview', ready_target: 500,
+      ...(args.reserve ? { relevance_reserve: { version: 1 as const, rows: args.reserve } } : {}),
       construct: { bc_job_id: 'bc-dry', status: 'dispatched', dispatched_at: '2026-09-23T09:00:00Z' },
-      search_policy: { version: 1, phase: 'paid', deferred_rows: [], construct_rows: args.batch },
+      search_policy: { version: 1, phase: args.phase ?? 'paid', deferred_rows: [], construct_rows: args.batch },
       adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: args.replanAttempts ?? 2,
         ...(args.widenings ? { widenings: args.widenings } : {}), active_source: batchKey, completed: args.completed,
         pending: { id: 'dry-pending', source_key: batchKey, source: args.batchTask.source, candidates: args.batch.length,
@@ -3882,6 +3883,74 @@ describe('base_collect: сухие источники завершают баз�
     expect(after.target_progress?.reason).toContain('Источники перестали давать контакты: последние 1530 компаний из Яндекс Карт дали 4 контакта.');
     // Непросмотренные компании не потеряны: выдача карт цела.
     expect(after.tasks![2].harvest).toHaveLength(30);
+
+    // Confirmed Web3-shaped repetition: held raw buffers, renewable/pending
+    // task and untagged old deferred rows cannot buy a new parser/lookup or
+    // turn existing stock into permission for paid relevance search.
+    const weakTask = PLAN.funds.r;
+    const weakKey = veSourceStrategyKey(weakTask);
+    const weakHistory = Array.from({ length: 5 }, (_, index) => ({
+      id: `weak-${index}`, source: weakTask.source, source_key: weakKey, candidates: 100,
+      new_ready: index === 4 ? 2 : 0, new_target: index === 4 ? 2 : 0, poor: true, spend,
+      started_at: '2026-10-10T00:00:00Z', finished_at: '2026-10-10T00:10:00Z',
+    }));
+    for (const phase of ['existing', 'paid'] as const) for (const status of ['pending', 'done'] as const) {
+      const stock = orgs('Непроверенная компания', 'weakstock', 5, 500);
+      const noSite = unifiedRow({ company: 'Сохранённая компания без сайта' });
+      const heldInfo: VeCollectInfo = {
+        plan: { tasks: [weakTask] }, tasks: [state(weakTask, { status, harvest: [...stock, noSite], existing_contacts_only: true })],
+        collection_mode: 'preview', ready_target: 500,
+        search_policy: { version: 1, phase, deferred_rows: [noSite] },
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, active_source: weakKey, completed: weakHistory },
+        target_progress: { ...createCollectionTarget('preview'), round: 6, candidates_processed: 500, ready_rows: 6 },
+        target_checkpoint: { completed_round: 5, seen_rows: ready, processed_rows: ready.length },
+      };
+      const heldDb = seed(heldInfo, {
+        ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', ...HYPOTHESES.funds }],
+        ve_bases: [{ ...makeBase(heldInfo), data: readyRows, row_count: 6, columns: [...VE_AUTO_COLLECT_COLUMNS] }],
+      });
+      const modelCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
+      const relevanceCalls = mockFindIrrelevantRows.mock.calls.length;
+      await wakeQueued(heldDb);
+      const held = infoOf(heldDb);
+      expect(held.target_progress).toMatchObject({ status: 'limited', stop_cause: 'low_yield', ready_rows: 6 });
+      expect(held.search_policy?.phase).toBe(phase);
+      expect(held.tasks![0]).toMatchObject({ status, existing_contacts_only: true });
+      expect(held.tasks![0].harvest).toHaveLength(6);
+      expect(held.search_policy!.deferred_rows.length).toBeGreaterThanOrEqual(1);
+      expect(heldDb.getRows('base_constructor_jobs')).toHaveLength(0);
+      expect(jest.mocked(callLLMWithSchema).mock.calls).toHaveLength(modelCalls);
+      expect(mockFindIrrelevantRows.mock.calls).toHaveLength(relevanceCalls);
+      expect(searchRows).not.toHaveBeenCalled();
+      expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+    }
+
+    // The fifth closed batch establishes the hold at completion, not before:
+    // import its already-paid constructor, keep reserve, and close a valid
+    // checkpoint without opening another round or a paid phase.
+    const ownedBatch = orgs('Сохранённая проверяемая компания', 'owned', 100);
+    const ownedDb = await finishBatch({ completed: weakHistory.slice(0, 4), batch: ownedBatch,
+      batchTask: weakTask, ready, seen: ready, hypothesis: HYPOTHESES.funds, phase: 'existing',
+      tasks: [state(weakTask, { harvest: ownedBatch, exhausted: true, existing_contacts_only: true })],
+      reserve: [{ ...unifiedRow({ company: 'Нужны доказательства', website: 'deferred.test', email: 'saved@deferred.test' }),
+        _email_status: 'ok', _relevance_unchecked: true,
+        _ve_relevance: { version: 2, status: 'needs_review', reason: 'search deferred', context_hash: 'a'.repeat(64),
+          evidence: [], review_attempts: 0, search_deferred: true } }],
+    });
+    const owned = infoOf(ownedDb);
+    expect(owned.adaptive_collection?.completed).toHaveLength(5);
+    expect(owned.adaptive_collection?.pending).toBeUndefined();
+    expect(owned.target_progress).toMatchObject({ status: 'limited', stop_cause: 'low_yield', ready_rows: 6, round: 5 });
+    expect(owned.target_checkpoint?.completed_round).toBe(5);
+    expect(owned.search_policy?.phase).toBe('existing');
+    expect(readVeRelevanceReserveRows(owned).length).toBeGreaterThanOrEqual(101);
+    expect(readVeRelevanceReserveRows(owned).find((row) => row.email === 'saved@deferred.test')).toMatchObject({
+      _ve_relevance: { status: 'needs_review', search_deferred: true } });
+    expect(ownedDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect(ownedDb.getRows('ve_jobs').filter((row) => row.stage === 'base_collect' && row.status === 'pending')).toHaveLength(0);
+    expect(searchRows).not.toHaveBeenCalled();
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+
   });
 
   // РАС: реестр 4 275 → 2 (сухой, ещё читается), карты 1 049 → 2 (мало, но не доказано).
