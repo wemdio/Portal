@@ -42,6 +42,7 @@ const SOURCE_LABEL: Record<string, string> = {
   hero: 'Обсудить задачу',
   register: 'Регистрация',
   demo: 'Демо',
+  eng_pilot: 'ENG-лендинг outreachos.xyz: проверка ниши',
 };
 
 function sourceLabel(source?: string | null): string {
