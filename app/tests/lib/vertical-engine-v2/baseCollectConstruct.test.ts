@@ -2994,6 +2994,78 @@ describe('base_collect: план кончился раньше цели', () => 
     expect(prior.adaptive_collection!.active_source).toBe(veSourceStrategyKey(prior.tasks![0].task));
     expect(prior.source_selection?.previous_tasks[0]).toMatchObject({ task, exhausted: true });
     expect(applyVeNicheSourceSelection(prior, 'payments')).toBe(false);
+
+    // PG esoteric/fintech, 12.10: v1 changed the query but kept a done page
+    // attributed to the old, dry strategy. That page must not pin renewal.
+    for (const replanAttempts of [0, 2]) {
+      const oldKey = veSourceStrategyKey(task);
+      const oldRow = { ...unifiedRow({ company: 'Старый ИТ-подрядчик', inn: '7700000991',
+        website: 'old-provider.test', email: 'sales@old-provider.test' }), _ve_source_strategy: oldKey };
+      const migrated = exhaustedInfo(task, {
+        hypotheses: [{ id: 'h1', status: 'accepted', ...payment }],
+        target_progress: { ...createCollectionTarget('preview'), round: 42, candidates_processed: 1993,
+          ready_rows: 2, max_rounds: 141 },
+        target_checkpoint: { completed_round: 41, seen_rows: processed, processed_rows: 1993 },
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: replanAttempts, widenings: 2,
+          active_source: oldKey, completed: Array.from({ length: replanAttempts ? 5 : 15 }, (_, index) => ({
+            id: `old-${index}`, source_key: oldKey, source: 'companies_directory', candidates: 100,
+            new_ready: 0, new_target: 0, poor: true, started_at: '2026-09-30T14:56:46.399Z',
+            finished_at: '2026-09-30T15:08:38.981Z',
+            spend: { ai_usd: 0.01, serper_credits: 0, estimated_total_usd: 0.01, unknown_attempts: 0, complete: true },
+          })) },
+      });
+      migrated.tasks![0].harvest = [oldRow];
+      migrated.tasks![0].directory_cursors = { old_scope: 1729 };
+      applyVeNicheSourceSelection(migrated, 'payments');
+      const oldHistory = JSON.stringify(migrated.adaptive_collection!.completed);
+      const oldCheckpoint = JSON.stringify(migrated.target_checkpoint);
+      const savedMigration = JSON.parse(JSON.stringify(migrated)) as VeCollectInfo;
+      const migratedDb = seedBase(migrated, payment);
+      jest.mocked(callLLMWithSchema).mockClear();
+      jest.mocked(searchRows).mockClear();
+      jest.mocked(searchVeNicheDirectoryRows).mockClear().mockResolvedValue({ rows: [
+        { name: 'Финтех Платежи', inn: '7700000992', website: 'fintech-pay.test', email: 'info@fintech-pay.test' },
+      ] });
+      const resumed = (await wake(migratedDb)).collect_info as VeCollectInfo;
+      expect(searchVeNicheDirectoryRows).toHaveBeenCalled();
+      expect(jest.mocked(searchVeNicheDirectoryRows).mock.calls[0].slice(1, 3)).toEqual([
+        expect.objectContaining({ hasEmail: true, okvedCodes: ['64', '62'] }), expect.arrayContaining(['финтех']),
+      ]);
+      expect(resumed.tasks![0].directory_cursors?.old_scope).toBe(1729);
+      expect(resumed.search_policy!.deferred_rows).toContainEqual(oldRow);
+      expect(JSON.stringify(resumed.target_checkpoint)).toBe(oldCheckpoint);
+      expect(JSON.stringify(resumed.adaptive_collection!.completed)).toBe(oldHistory);
+      expect(resumed.adaptive_collection!.replan_attempts).toBe(replanAttempts);
+      expect(resumed.target_progress).toMatchObject({ round: 42, candidates_processed: 1993, max_rounds: 141 });
+      const children = migratedDb.getRows('base_constructor_jobs');
+      expect(children).toHaveLength(1);
+      expect(JSON.stringify(children[0].data)).toContain('fintech-pay.test');
+      expect(JSON.stringify(children[0].data)).not.toContain('old-provider.test');
+      expect(searchRows).not.toHaveBeenCalled();
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+
+      // The exception is only for retired pages: unchanged held sources stay
+      // held, and ordinary non-niche renewal keeps its existing behaviour.
+      for (const sameScope of [true, false]) {
+        const control = JSON.parse(JSON.stringify(savedMigration)) as VeCollectInfo;
+        if (sameScope) {
+          control.tasks![0].task = task;
+          control.plan!.tasks = [task];
+          control.adaptive_collection!.active_source = oldKey;
+        } else {
+          delete control.niche_source_profile;
+          delete control.source_selection;
+          control.hypotheses = [{ id: 'h1', status: 'accepted', ...MEAT }];
+        }
+        const controlDb = seedBase(control, sameScope ? payment : MEAT);
+        jest.mocked(searchVeNicheDirectoryRows).mockClear();
+        await wake(controlDb);
+        expect(searchVeNicheDirectoryRows).not.toHaveBeenCalled();
+        expect(controlDb.getRows('base_constructor_jobs')).toHaveLength(0);
+        expect((controlDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0].harvest).toContainEqual(oldRow);
+      }
+    }
+    jest.mocked(searchVeNicheDirectoryRows).mockReset().mockResolvedValue({ rows: [] });
     for (const outstanding of [
       { construct: { bc_job_id: 'paid-child', status: 'dispatched' as const } },
       { tasks: [{ ...prior.tasks![0], status: 'dispatched' as const, child_job_id: 'paid-hh' }] },

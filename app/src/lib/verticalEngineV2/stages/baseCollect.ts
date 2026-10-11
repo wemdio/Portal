@@ -2701,6 +2701,17 @@ function veRowAcquisitionAllowed(info: VeCollectInfo, row: VeUnifiedRow): boolea
   // immutable constructor inputs do not use this new-acquisition guard.
   return !(info.tasks ?? []).some((task) => veTaskAcquisitionDeferred(info, task));
 }
+
+/** A v1 source correction kept the previous page's attribution. Rows which
+ * adaptive selection will not consume must not pin the new query to that page.
+ * Keep them in deferred storage; their old yield and paid receipts still apply. */
+function isRetiredNicheHarvestRow(info: VeCollectInfo, task: VeCollectTaskState, row: VeUnifiedRow): boolean {
+  const policy = info.adaptive_collection;
+  const key = candidateSourceKey(row);
+  return Boolean(info.source_selection && policy && key && key !== veSourceStrategyKey(task.task)
+    && (veAdaptiveSourceDeferred(policy, key) || veAdaptiveSourceDry(policy.completed, key)));
+}
+
 async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, available: VeUnifiedRow[]): Promise<VeUnifiedRow[]> {
   if (!available.length || info.adaptive_collection?.pending) return info.adaptive_collection?.pending ? [] : available;
   let candidates = available;
@@ -4762,19 +4773,21 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     // A completed lookup with no site is not an unconsumed candidate: otherwise
     // its raw row pins the same catalogue page for every subsequent round.
     for (const state of tasks) {
-      const harvest = state.harvest ?? [];
+      const harvest = taggedHarvest(state);
       const recovered = applyVeSourceContacts(harvest, info.source_contact_recovery);
       const pendingDiscovery = new Set(!existingFirst && !state.task.widened && !info.source_contact_budget?.paused
         ? pendingVeSourceContacts(harvest, info.source_contact_recovery) : []);
       if (canAcquire && (info.preview_pipeline?.batches.length ?? 0) < PREVIEW_IN_FLIGHT
         && !veTaskAcquisitionDeferred(info, state) && isVeRenewableSourceTask(state)
         && !recovered.some((row, index) => normalizeCompanyForDedup(row.company) !== ''
+          && !isRetiredNicheHarvestRow(info, state, row)
           && (hasExistingSourceContact(row) || pendingDiscovery.has(harvest[index]))
           && !baseRowMatchesExclusion(consumedKeys, row) && !baseRowMatchesExclusion(reservedKeys, row))) {
         // Retain unsuccessful/paused source inputs as well as their lookup
         // receipts; advancing the page must not erase the saved reserve.
         if (info.search_policy) info.search_policy.deferred_rows = dedupUnifiedRows([
-          ...info.search_policy.deferred_rows, ...taggedHarvest(state).filter((row) => !hasExistingSourceContact(row)),
+          ...info.search_policy.deferred_rows, ...harvest.filter((row) => !hasExistingSourceContact(row)
+            || isRetiredNicheHarvestRow(info, state, row)),
         ]);
         if (isVeLegacyMapsTask(state)) {
           // Старая задача карт: её строки уже разобраны, дальше читаем каталог.

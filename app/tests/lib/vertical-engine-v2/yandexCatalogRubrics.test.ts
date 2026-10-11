@@ -215,7 +215,13 @@ describe('готовый каталог Яндекс Карт: выбор руб
     expect(veNicheRubricAllowed('adult_platform', 'Вебкам студии')).toBe(false);
     expect(veNicheRubricAllowed('esoteric_platform', 'Эзотерические центры')).toBe(false);
     expect(veNicheRubricAllowed('crossborder_buyers', 'Доставка покупок из-за рубежа')).toBe(true);
-    expect(veNicheRubricAllowed('crossborder_buyers', 'Выкуп автомобилей из Европы')).toBe(false);
+    for (const label of ['Выкуп автозапчастей из США', 'Выкуп авто запчастей из Европы',
+      'Доставка автозапчастей из Европы', 'Доставка авто запчастей из США'])
+      expect(veNicheRubricAllowed('crossborder_buyers', label)).toBe(true);
+    for (const label of ['Выкуп автомобилей из Европы', 'Выкуп авто из США',
+      'Выкуп автомашин из Китая', 'Выкуп автомобилей и автозапчастей из США',
+      'Доставка автомобилей из Европы', 'Доставка оборудования из США', 'Доставка автозапчастей по России'])
+      expect(veNicheRubricAllowed('crossborder_buyers', label)).toBe(false);
     expect(veNicheRubricAllowed('crossborder_buyers', 'Международная доставка грузов')).toBe(false);
     expect(veNicheRubricAllowed('crossborder_ecommerce', 'Интернет-магазины')).toBe(true);
     expect(veNicheRubricAllowed('crossborder_ecommerce', 'Разработка интернет-магазинов')).toBe(false);
