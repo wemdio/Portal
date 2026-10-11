@@ -7,7 +7,7 @@
  * контактов, у Фондов карты — рабочий источник (2,6 %).
  */
 import {
-  chooseVeAdaptiveSource, finishVeAdaptiveBatch, newVeAdaptiveCollection, validVeAdaptiveCollection, veAdaptiveSourceDry,
+  chooseVeAdaptiveSource, finishVeAdaptiveBatch, newVeAdaptiveCollection, validVeAdaptiveCollection, veAdaptiveSourceDry, veAdaptiveSourceDeferred,
   veDryLiveSources, veDrySourcesSummary, veReadyContactKeys, VE_DRY_SOURCE_MIN_COMPANIES, VE_DRY_SOURCE_MIN_CONTACTS,
   type VeAdaptiveCollection, type VeAdaptiveResult, type VeBatchSpend,
 } from '@/lib/verticalEngineV2/adaptiveCollection';
@@ -76,6 +76,25 @@ describe('сухой источник по фактическому выходу
     // Граница: четыре контакта на 1 500 — сухой, пять — нет.
     expect(veAdaptiveSourceDry([...early.slice(1), batch(101, 4, 99)], 'k')).toMatchObject({ contacts: 4 });
     expect(veAdaptiveSourceDry([...early.slice(1), batch(101, 5, 99)], 'k')).toBeNull();
+    // Near-empty repetition is held only after both replans, not at the 5%
+    // source-switch threshold. Boundaries use goal contacts, not extra boxes.
+    const five = Array.from({ length: 5 }, (_, index) => ({ ...batch(100, index === 4 ? 2 : 0, index),
+      new_target: index === 4 ? 2 : 0 }));
+    const repeated = { ...newVeAdaptiveCollection(), replan_attempts: 2, active_source: 'k', completed: five };
+    expect(veAdaptiveSourceDeferred(repeated, 'k')).toMatchObject({ companies: 500, contacts: 2 });
+    expect(chooseVeAdaptiveSource(repeated, ['k'])).toBeUndefined();
+    expect(chooseVeAdaptiveSource(repeated, ['k', 'changed-query'])).toBe('changed-query');
+    expect(veAdaptiveSourceDeferred({ ...repeated, replan_attempts: 1 }, 'k')).toBeNull();
+    expect(veAdaptiveSourceDeferred({ ...repeated, completed: five.map((row, index) => index === 0
+      ? { ...row, candidates: 99 } : row) }, 'k')).toBeNull();
+    expect(veAdaptiveSourceDeferred({ ...repeated, completed: five.map((row, index) => index === 4
+      ? { ...row, new_target: 3 } : row) }, 'k')).toBeNull();
+    expect(veAdaptiveSourceDeferred({ ...repeated, completed: five.map((row, index) => index === 0
+      ? { ...row, poor: false } : row) }, 'k')).toBeNull();
+    const productive = five.map((row, index) => ({ ...row, new_ready: index < 3 ? 3 : 2, new_target: index < 3 ? 3 : 2 }));
+    expect(veAdaptiveSourceDeferred({ ...repeated, completed: productive }, 'k')).toBeNull();
+    expect(chooseVeAdaptiveSource({ ...repeated, completed: productive }, ['k'])).toBe('k');
+
   });
 
   it('сухой источник не выбирается для следующей партии (Фонды, партия 66)', () => {
