@@ -32,7 +32,9 @@ function rateLimited(ip: string): boolean {
 
 // Lead surfaces allowed to label themselves; anything else is stored as 'unknown'
 // so a client can't inject arbitrary text into the Telegram alert title.
-const ALLOWED_SOURCES = new Set(['hero', 'demo']);
+// eng_pilot — форма «Check my niche» английского лендинга outreachos.xyz
+// (deploy/static/outreachos.xyz); name там — сайт компании.
+const ALLOWED_SOURCES = new Set(['hero', 'demo', 'eng_pilot']);
 
 interface LeadFields {
   name: string;
