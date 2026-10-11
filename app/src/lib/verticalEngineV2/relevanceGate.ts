@@ -253,6 +253,18 @@ function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondP
     'Reasons in ' + (language === 'ru' ? 'Russian' : 'English') + '. JSON only: {"decisions":[{"i":0,"status":"needs_review","reason":"...","' + (evidenceIds ? 'evidence_ids' : 'evidence') + '":[]}]}',
   ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
 }
+/** A careers/contact shell proves neither the company's business nor a conflict.
+ * Keep this deliberately narrow: any remaining words leave the normal review
+ * intact, including an HR provider's actual services on its careers page. */
+function navigationOnlyQuote(quote: string, company: string): boolean {
+  let text = normalized(quote)
+    .replace(/(?:https?:\/\/|www\.)[^\s<>]+|(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,}(?:\/[^\s<>]*)?/gu, ' ')
+    .replace(/\burl\b\s*:?/gu, ' ');
+  const name = normalized(company);
+  if (name.length >= 3) text = text.split(name).join(' ');
+  const facts = text.replace(/приглашаем\s+в\s+команду|все\s+вакансии\s+здесь|отправить\s+резюме|свяжитесь\s+с\s+нами|crm[\s-]*форма\s+появится\s+здесь/gu, ' ');
+  return facts !== text && !/\p{L}/u.test(facts);
+}
 function supportedDecision(raw: z.infer<typeof outputDecision>, fields: Fields, contextHash: string, attempts: number, secondPass: boolean): VeRelevanceDecision {
   const evidence = checkedEvidence(raw, fields);
   const activityEvidence = evidence.some((item) => ACTIVITY_FIELDS.includes(item.field) && activityQuote(item.quote));
@@ -264,7 +276,8 @@ function supportedDecision(raw: z.infer<typeof outputDecision>, fields: Fields, 
   if (status === 'irrelevant' && !secondPass) {
     status = 'needs_review'; reason = sliceWholeChars('Требуется проверить предварительное несовпадение: ' + reason, 0, 400);
   }
-  if (status === 'irrelevant' && !evidence.some((item) => item.field === 'website_text' && activityQuote(item.quote))) {
+  if (status === 'irrelevant' && !evidence.some((item) => item.field === 'website_text'
+    && activityQuote(item.quote) && !navigationOnlyQuote(item.quote, fields.company))) {
     status = 'needs_review'; reason = 'Сайт не подтвердил несовпадение с гипотезой; недостаточно подтверждённых данных.';
   }
   return { version: 2, status, reason, evidence, context_hash: contextHash, review_attempts: attempts };

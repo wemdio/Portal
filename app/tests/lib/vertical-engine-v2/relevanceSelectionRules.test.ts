@@ -99,7 +99,7 @@ interface Captured { kind: 'rubric' | 'classify' | 'review' | 'repair'; model: s
  * with `status`); `review` answers the semantic check, `reviewStatus` refuses it
  * with that HTTP status, `malformed` answers it with a broken body. */
 function provider(review: (model: string) => Result = () => 'direct_match',
-  secondPass: { status: 'relevant' | 'needs_review'; ids: number[] } = { status: 'relevant', ids: [0] },
+  secondPass: { status: 'relevant' | 'irrelevant' | 'needs_review'; ids: number[] } = { status: 'relevant', ids: [0] },
   options: { reviewStatus?: number; malformed?: (user: string) => boolean } = {}) {
   const calls = { rubric: 0, classify: 0, deepseek: 0, confirm: 0, jev: 0, reviewed: 0, requests: [] as Captured[], jevStates: [] as unknown[] };
   global.fetch = jest.fn(async (_url: string, init: { body: string }) => {
@@ -708,6 +708,43 @@ describe('VE2 relevance selection rules', () => {
     expect(out.decisions.get(0)).toMatchObject({ status: 'needs_review', rules_version: VE_RELEVANCE_RULES_VERSION,
       reason: legacy.verdicts[key].reason });
     expect(Object.values(out.checkpoint.semantic_reviews)).toEqual([before]);
+
+    // A real saved failure: the classifier rejected an auto-parts buyer using
+    // nothing but its employer's careers shell. Withhold that rejection for
+    // free; actual HR services and an affirmative different business still use
+    // the usual gate, even alongside exactly the same navigation text.
+    const navigation = 'URL: https://hr.autotrade.test/\nhr.autotrade.test Приглашаем в команду Автотрейд! '
+      + 'СВЯЖИТЕСЬ С НАМИ ВСЕ ВАКАНСИИ ЗДЕСЬ отправить резюме CRM-форма появится здесь';
+    for (const sample of [
+      { text: navigation, proposal: 'irrelevant' as const, status: 'needs_review', review: 'direct_conflict' as Result },
+      { text: navigation + ' Подбираем сотрудников для других компаний и сопровождаем найм.',
+        proposal: 'relevant' as const, status: 'relevant', review: 'direct_match' as Result },
+      { text: navigation + ' Производим и продаём стальные трубы для заводов.',
+        proposal: 'irrelevant' as const, status: 'irrelevant', review: 'direct_conflict' as Result },
+    ]) {
+      resetVeTriageState();
+      const run = { verticalName: 'HR', hypothesisTitle: 'Кадровые агентства', language: 'ru' as const,
+        triage: true, allowPaidSearch: false, rows: [{ company: 'Автотрейд', website: 'https://hr.autotrade.test/' }] };
+      const calls = provider(() => sample.review, { status: sample.proposal, ids: [0] });
+      const fetchEvidence = jest.fn().mockResolvedValue({ status: 'ok', text: sample.text,
+        url: run.rows[0].website, reason: 'ok', pages: 1 });
+      const checked = await findIrrelevantRows({ ...run, fetchEvidence });
+      expect(checked.decisions.get(0)?.status).toBe(sample.status);
+      expect(calls.requests.filter((request) => request.kind === 'repair')).toHaveLength(0);
+      if (sample.status === 'needs_review') {
+        expect([calls.classify, calls.deepseek, calls.confirm]).toEqual([1, 0, 0]);
+        const reserve = [{ ...run.rows[0], email: 'review@example.test', _email_status: 'ok',
+          _ve_relevance: checked.decisions.get(0) }];
+        expect(buildVeRelevanceReviewBatch({ reserve, ready: [], source: [], automatic: true,
+          allowPaidSearch: false, triage: true }).companies).toBe(0);
+      }
+      const count = (global.fetch as jest.Mock).mock.calls.length;
+      const repeated = await findIrrelevantRows({ ...run, fetchEvidence, checkpoint: checked.checkpoint });
+      expect(repeated.decisions.get(0)?.status).toBe(sample.status);
+      expect(global.fetch).toHaveBeenCalledTimes(count);
+      expect(fetchEvidence).toHaveBeenCalledTimes(1);
+      expect(fetchEvidence.mock.calls[0][1]).toMatchObject({ allowPaidSearch: false });
+    }
   });
 
   it('does not reuse an older rejection saved under the new review key', async () => {
