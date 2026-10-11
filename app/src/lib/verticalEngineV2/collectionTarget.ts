@@ -195,6 +195,8 @@ export interface VeCollectionTargetProgress {
   counted_per_company?: number;
   status: 'collecting' | 'target_reached' | 'exhausted' | 'limited' | 'error';
   reason?: string;
+  /** Economic hold is not market exhaustion and must not restart broad supply automatically. */
+  stop_cause?: 'low_yield';
 }
 
 /**

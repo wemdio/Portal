@@ -93,7 +93,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError, isVeTransientCatalogError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
-  readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veDryLiveSources,
+  readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veAdaptiveSourceDeferred, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
 import { stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
   VE_PLAN_MAX_TASKS, VE_PLAN_WIDENING_LIMIT, VE_SIZE_FILTER_KEYS } from '../planWidening';
@@ -850,7 +850,7 @@ function retainDeferredSourceRows(info: VeCollectInfo): void {
   if (info.search_policy?.phase !== 'existing') return;
   info.search_policy.deferred_rows = dedupUnifiedRows([
     ...info.search_policy.deferred_rows,
-    ...(info.tasks ?? []).flatMap((task) => (task.harvest ?? []).filter((row) => !hasExistingSourceContact(row))),
+    ...(info.tasks ?? []).flatMap((task) => taggedHarvest(task).filter((row) => !hasExistingSourceContact(row))),
   ]);
 }
 
@@ -2599,6 +2599,20 @@ function taggedHarvest(task: VeCollectTaskState): VeUnifiedRow[] {
 }
 const candidateSourceKey = (row: VeUnifiedRow) => (row as VeUnifiedRow & { _ve_source_strategy?: string })._ve_source_strategy;
 
+/** New acquisitions only: never use this guard to discard saved/in-flight rows. */
+function veTaskAcquisitionDeferred(info: VeCollectInfo, task: VeCollectTaskState): boolean {
+  return !!info.adaptive_collection && !!veAdaptiveSourceDeferred(info.adaptive_collection, veSourceStrategyKey(task.task));
+}
+function veRowAcquisitionAllowed(info: VeCollectInfo, row: VeUnifiedRow): boolean {
+  const policy = info.adaptive_collection;
+  if (!policy) return true;
+  const key = candidateSourceKey(row);
+  if (key) return !veAdaptiveSourceDeferred(policy, key);
+  // Old deferred source rows lack attribution. Keep them, but do not buy a
+  // new lookup that could silently reopen a held strategy. Saved reviews and
+  // immutable constructor inputs do not use this new-acquisition guard.
+  return !(info.tasks ?? []).some((task) => veTaskAcquisitionDeferred(info, task));
+}
 async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, available: VeUnifiedRow[]): Promise<VeUnifiedRow[]> {
   if (!available.length || info.adaptive_collection?.pending) return info.adaptive_collection?.pending ? [] : available;
   let candidates = available;
@@ -2698,7 +2712,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   if (!policy || policy.pending || info.preview_pipeline?.batches.length || !target || target.ready_rows >= target.ready_target) return;
   const tasks = info.tasks ?? [];
   const consumed = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
-  const available = tasks.filter((task) => task.status !== 'failed' && (task.status !== 'done'
+  const available = tasks.filter((task) => !veTaskAcquisitionDeferred(info, task) && task.status !== 'failed' && (task.status !== 'done'
     || isVeRenewableSourceTask(task)
     || (task.harvest ?? []).some((row) => (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
       && !baseRowMatchesExclusion(consumed, row))));
@@ -2762,7 +2776,8 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     await persistCollectInfo(ctx, base.id, info);
     if (!policy.replan_error) return;
   }
-  const activeDry = !!policy.active_source && !!veAdaptiveSourceDry(policy.completed, policy.active_source);
+  const activeDry = !!policy.active_source && (!!veAdaptiveSourceDry(policy.completed, policy.active_source)
+    || !!veAdaptiveSourceDeferred(policy, policy.active_source));
   if (!policy.active_source || activeDry || !available.some((task) => veSourceStrategyKey(task.task) === policy.active_source)) {
     const chosen = chooseVeAdaptiveSource(policy, available.map((task) => veSourceStrategyKey(task.task)));
     // Сухие все: прежний источник остаётся активным, чтобы не открыть разом
@@ -3429,7 +3444,7 @@ async function resumeSavedPreviewValidation(
   const gate = await checkCollectedRelevance({ ctx, job, base, info, finalRows, finalEmailStatuses, market, usage,
     previousRelevanceCheckpoint: previous?.result?.relevance_checkpoint });
   const seenKeys = addAcquisitionReceipts(buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []), info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
-  const hasBufferedCandidates = (info.tasks ?? []).some((task) => task.status === 'done'
+  const hasBufferedCandidates = (info.tasks ?? []).some((task) => !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
     && (task.harvest ?? []).some((row) => {
       const fresh = pruneBaseRowAgainstExclusion(keys, row);
       return fresh !== null && pruneBaseRowAgainstExclusion(seenKeys, fresh) !== null;
@@ -3528,7 +3543,7 @@ async function reviewSavedRelevance(
     relevance_recovery: true,
   };
   const seenKeys = addAcquisitionReceipts(buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []), info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
-  const hasBufferedCandidates = automatic && (info.tasks ?? []).some((task) => task.status === 'done'
+  const hasBufferedCandidates = automatic && (info.tasks ?? []).some((task) => !veTaskAcquisitionDeferred(info, task) && task.status === 'done'
     && (task.harvest ?? []).some((row) => pruneBaseRowAgainstExclusion(seenKeys, row) !== null));
   return completeTargetRound({ ctx, job, base, info, progress: target, candidates: [], rows: mergeVeRelevanceRows(savedReserve, gate?.storedRows ?? []),
     columns: base.columns ?? [...VE_AUTO_COLLECT_COLUMNS], stats, hasBufferedCandidates,
@@ -3709,8 +3724,9 @@ async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoB
 }
 
 /** Источник ещё может дать кандидатов без нового плана. */
-function veTaskCanSupply(task: VeCollectTaskState): boolean {
-  return task.status === 'pending' || task.status === 'dispatched' || isVeRenewableSourceTask(task);
+function veTaskCanSupply(task: VeCollectTaskState, info: VeCollectInfo): boolean {
+  return task.status === 'dispatched' || (!veTaskAcquisitionDeferred(info, task)
+    && (task.status === 'pending' || isVeRenewableSourceTask(task)));
 }
 
 /**
@@ -3849,7 +3865,7 @@ async function completeTargetRound(args: {
   }
   // Старая задача карт тоже продолжаема: следующий раунд читает её запросы
   // из готового каталога (sourceRenewal).
-  const renewableDirectory = tasks.some(isVeRenewableSourceTask);
+  const renewableDirectory = tasks.some((task) => !veTaskAcquisitionDeferred(info, task) && isVeRenewableSourceTask(task));
   const exhausted = !args.hasBufferedCandidates && tasks.length > 0 && tasks.every((task) =>
     (task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && task.exhausted && !task.hit_ceiling,
   );
@@ -3858,14 +3874,15 @@ async function completeTargetRound(args: {
   const taskError = reviewOnly ? undefined : tasks.find((task) => task.status === 'failed');
   const pipeline = info.preview_pipeline;
   const pendingBatches = pipeline?.batches.filter((batch) => batch.id !== pipeline.active_batch_id) ?? [];
-  const pendingSources = tasks.some((task) => task.status === 'pending' || task.status === 'dispatched');
+  const pendingSources = tasks.some((task) => task.status === 'dispatched'
+    || (task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)));
   const existingFirst = info.search_policy?.phase === 'existing';
   const discoveryPaused = info.source_contact_budget?.paused === true;
-  const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done'
+  const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done' && !veTaskAcquisitionDeferred(info, task)
     && !task.task.widened && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery))
     || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) =>
-      pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
+      veRowAcquisitionAllowed(info, row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
   // Цифры для честной причины остановки: сколько поисков куплено, сколько они
   // дали сайтов и сколько из этих сайтов дошло до готового контакта.
   const discoveryChecked = Object.values(info.source_contact_recovery?.checked ?? {});
@@ -4030,25 +4047,41 @@ async function completeTargetRound(args: {
         reason: 'Уточнение сохранённых контактов завершено. Неопределённые контакты остались в резерве; новый сбор в этой операции не запускается.' };
     }
   }
+  // Admission must see the just-finished batch as well: otherwise the fifth
+  // hundred can open paid search before its near-empty verdict is recorded.
+  // Keep this prospective until all permitted saved reviews have completed;
+  // normal source yield still includes those reviews, exactly as before.
+  let completedAdaptive: VeAdaptiveCollection | undefined;
+  if (info.adaptive_collection?.pending && !continueSavedReview && !args.validationError && !taskError
+    && cleaned.summary.status === 'complete' && !pipeline?.error && pendingBatches.length === 0) {
+    const finishedAt = new Date().toISOString();
+    const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, info.adaptive_collection.pending.started_at, finishedAt);
+    completedAdaptive = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...overCapRows], spend, finishedAt,
+      targetCount.perCompany);
+  }
+  const admissionPolicy = completedAdaptive ?? info.adaptive_collection;
+  const hasDeferredAcquisition = !!admissionPolicy && tasks.some((task) =>
+    veAdaptiveSourceDeferred(admissionPolicy, veSourceStrategyKey(task.task)) !== null);
   // Only after existing stock and in-flight work are drained may a deficit buy
   // search. This transition is durable together with ready rows and counters.
   // An outage is not stock exhaustion; never switch phases to hide an error.
   const consumedExisting = buildBaseExclusionKeysFromRows([...seen.values()]);
-  const existingBuffered = tasks.some((task) => task.status === 'done' && (task.harvest ?? []).some((row) =>
+  const existingBuffered = tasks.some((task) => !veTaskAcquisitionDeferred(info, task) && task.status === 'done' && (task.harvest ?? []).some((row) =>
     hasExistingSourceContact(row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null
       && !baseRowMatchesExclusion(consumedExisting, row)));
   // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
   const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= next.max_rounds;
-  if (existingFirst && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
+  if (existingFirst && !hasDeferredAcquisition
+    && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
     info.search_policy!.phase = 'paid';
     const canAcquirePaid = stats.rows_total < progress.max_candidates && progress.round < next.max_rounds
-      && (tasks.some((task) => task.existing_contacts_only)
-        || hasPendingVeSourceContacts(info.search_policy!.deferred_rows, info.source_contact_recovery));
+      && (tasks.some((task) => task.existing_contacts_only && !veTaskAcquisitionDeferred(info, task))
+        || hasPendingVeSourceContacts(info.search_policy!.deferred_rows.filter((row) => veRowAcquisitionAllowed(info, row)), info.source_contact_recovery));
     // The directory's previous exhaustion referred to its site/email lanes,
     // not to the full original audience. Other sources keep their cursor.
-    for (const task of tasks) if (canAcquirePaid && task.existing_contacts_only) {
+    for (const task of tasks) if (canAcquirePaid && task.existing_contacts_only && !veTaskAcquisitionDeferred(info, task)) {
       task.status = 'pending'; task.exhausted = false; task.hit_ceiling = false; delete task.note;
       delete task.existing_contacts_only;
       // Счётчик отбраковки остаётся от лейнов бесплатной фазы. В платной
@@ -4071,22 +4104,19 @@ async function completeTargetRound(args: {
   let widenedSliceDry = false;
   if (info.adaptive_collection?.pending && !continueSavedReview && !args.validationError && !taskError
     && cleaned.summary.status === 'complete' && !pipeline?.error && pendingBatches.length === 0) {
-    const finishedAt = new Date().toISOString();
     const batchSource = info.adaptive_collection.pending.source_key;
-    const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, info.adaptive_collection.pending.started_at, finishedAt);
     // Measure the source BEFORE the per-company limit: its thresholds (5 % yield,
     // $0.05 per contact) were calibrated on uncapped counts, so judging a capped
     // batch by them would call every normal source weak and buy a replan.
     // Сухость источника меряется в единицах цели: targetCount.perCompany — тот же K, что у счётчика цели.
-    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...overCapRows], spend, finishedAt,
-      targetCount.perCompany);
+    info.adaptive_collection = completedAdaptive!;
     const policy = info.adaptive_collection;
     // Расширенный срез — последняя автоматическая попытка. Если и он дал две
     // плохие партии, а живого источника кроме него нет, база завершается сама,
     // а не перебирает срезы за счёт проверок.
     widenedSliceDry = policy.replan_needed === true && !reviewOnly && targetRows < progress.ready_target
       && tasks.some((task) => task.task.widened && veSourceStrategyKey(task.task) === batchSource)
-      && !tasks.some((task) => veSourceStrategyKey(task.task) !== batchSource && veTaskCanSupply(task)
+      && !tasks.some((task) => veSourceStrategyKey(task.task) !== batchSource && veTaskCanSupply(task, info)
         && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task))
         && !veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task.task)));
     if (widenedSliceDry) {
@@ -4120,8 +4150,35 @@ async function completeTargetRound(args: {
     // at a worker checkpoint, never as a side effect of an interface read.
     await refreshPlanPopulation(ctx, base, info, freshKeys);
   }
+  // An economic hold is not source/market exhaustion. Drain saved work first,
+  // then stop without opening a new slice or resetting a daily supply budget.
+  const deferredSources = info.adaptive_collection ? [...new Set(tasks.map((task) => veSourceStrategyKey(task.task)))].flatMap((key) => {
+    const verdict = veAdaptiveSourceDeferred(info.adaptive_collection!, key);
+    return verdict ? [verdict] : [];
+  }) : [];
+  const acquirableStock = tasks.some((task) => veTaskCanSupply(task, info)
+    || (!veTaskAcquisitionDeferred(info, task) && task.status === 'done' && (task.harvest ?? []).some((row) =>
+      (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
+      && pruneBaseRowAgainstExclusion(freshKeys, row) !== null && !baseRowMatchesExclusion(consumedExisting, row))));
+  const economicHold = deferredSources.length > 0 && !acquirableStock && !pendingDiscovery
+    && !info.adaptive_collection?.pending && !reviewOnly && !continueSavedReview
+    && !args.validationError && !taskError && !pipeline?.error && cleaned.summary.status === 'complete'
+    && pendingBatches.length === 0 && targetRows < progress.ready_target;
+  if (economicHold) {
+    // Holding a weak source must not itself enable paid source/relevance
+    // search. Keep the current phase and drain only its permitted saved work.
+    next = { ...next, status: 'limited', round: progress.round, stop_cause: 'low_yield',
+      reason: `Повторные партии из тех же источников почти не дают контактов: ${veDrySourcesSummary(deferredSources)}. `
+        + `Две попытки сменить план уже использованы. Собрано ${targetRows} из ${progress.ready_target}; `
+        + 'проверенные контакты сохранены. Это не означает, что подходящие компании на рынке закончились.' };
+    info.adaptive_collection!.replan_needed = false;
+    delete info.adaptive_collection!.replan_reason;
+    info.adaptive_collection!.note = 'Новые партии из источников с подтверждённо низким выходом отложены.';
+    info.target_progress = next;
+  }
+  if (next.status !== 'limited' || !economicHold) delete next.stop_cause;
   // Правило узкого рынка уже расширило срез или завершило базу в этом раунде.
-  let marketDecided = false;
+  let marketDecided = economicHold;
   if (info.estimate) {
     const sourceRows = readVeRelevanceSourceRows(info.relevance_reserve);
     const candidateCompanies = new Set(sourceRows.map(veRelevanceCompanyKey));
@@ -4155,12 +4212,12 @@ async function completeTargetRound(args: {
     // Размер известен только у реестра. Пока жив источник без размера
     // (каталог карт), прогноз по реестру не говорит, что рынок кончился.
     // Сухой источник (veAdaptiveSourceDry) живым не считается.
-    const unsizedLive = tasks.some((task) => task.source !== 'companies_directory' && veTaskCanSupply(task)
+    const unsizedLive = tasks.some((task) => task.source !== 'companies_directory' && veTaskCanSupply(task, info)
       && !(info.adaptive_collection && veAdaptiveSourceDry(info.adaptive_collection.completed, veSourceStrategyKey(task.task))));
     // Останавливаем только раунд, за которым не осталось уже оплаченной работы:
     // недокачанный дочерний конструктор или неразобранный запас дороже одного
     // лишнего раунда, а на следующем пробуждении оценка повторится.
-    if (projected !== null && next.status === 'collecting' && !reviewOnly && !continueSavedReview
+    if (!economicHold && projected !== null && next.status === 'collecting' && !reviewOnly && !continueSavedReview
       && progress.round >= 2 && pendingBatches.length === 0 && !pendingSources && !pendingDiscovery
       && !args.hasBufferedCandidates && !info.adaptive_collection?.pending && !unsizedLive
       && targetRows + projected < VE_NARROW_MARKET_MIN_PROJECTED) {
@@ -4204,7 +4261,7 @@ async function completeTargetRound(args: {
     && (next.status === 'collecting' || emptyRound)) {
     // Живой источник — задача, которая ещё может читать, или непросмотренные
     // строки в её выдаче. Исчерпанные источники в решение не входят.
-    const liveKeys = tasks.filter((task) => task.status !== 'failed' && (veTaskCanSupply(task)
+    const liveKeys = tasks.filter((task) => task.status !== 'failed' && (veTaskCanSupply(task, info)
       || (task.harvest ?? []).some((row) => pruneBaseRowAgainstExclusion(freshKeys, row) !== null
         && !baseRowMatchesExclusion(consumedExisting, row))))
       .map((task) => veSourceStrategyKey(task.task));
@@ -4240,8 +4297,8 @@ async function completeTargetRound(args: {
   // исчерпании база завершается с честной причиной.
   // Состояние задач читаем заново: переход к платной фазе выше мог их открыть.
   const sourcesRanOut = !reviewOnly && !args.hasBufferedCandidates && !pendingDiscovery
-    && pendingBatches.length === 0 && !tasks.some(veTaskCanSupply);
-  if (!widenedSliceDry && !drySourcesStop && sourcesRanOut && (next.status === 'exhausted' || next.status === 'limited')
+    && pendingBatches.length === 0 && !tasks.some((task) => veTaskCanSupply(task, info));
+  if (!economicHold && !widenedSliceDry && !drySourcesStop && sourcesRanOut && (next.status === 'exhausted' || next.status === 'limited')
     && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && !acquisitionLimited
     && targetRows < progress.ready_target && tasks.length > 0) {
@@ -4611,7 +4668,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       const pendingDiscovery = new Set(!existingFirst && !state.task.widened && !info.source_contact_budget?.paused
         ? pendingVeSourceContacts(harvest, info.source_contact_recovery) : []);
       if (canAcquire && (info.preview_pipeline?.batches.length ?? 0) < PREVIEW_IN_FLIGHT
-        && isVeRenewableSourceTask(state)
+        && !veTaskAcquisitionDeferred(info, state) && isVeRenewableSourceTask(state)
         && !recovered.some((row, index) => normalizeCompanyForDedup(row.company) !== ''
           && (hasExistingSourceContact(row) || pendingDiscovery.has(harvest[index]))
           && !baseRowMatchesExclusion(consumedKeys, row) && !baseRowMatchesExclusion(reservedKeys, row))) {
@@ -4634,7 +4691,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   // ─── DISPATCH ───
   for (const state of tasks) {
-    if (state.status !== 'pending' || info.adaptive_collection?.pending) continue;
+    if (state.status !== 'pending' || info.adaptive_collection?.pending || veTaskAcquisitionDeferred(info, state)) continue;
     if (info.adaptive_collection?.active_source && veSourceStrategyKey(state.task) !== info.adaptive_collection.active_source) continue;
     if (info.preview_pipeline && target && (info.preview_pipeline.error || target.ready_rows >= target.ready_target)) continue;
     try {
@@ -4682,7 +4739,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   retainDeferredSourceRows(info);
 
   // Other pending sources are alternatives, not children we must await.
-  const waiting = tasks.filter((t) => t.status === 'dispatched' || (t.status === 'pending'
+  const waiting = tasks.filter((t) => t.status === 'dispatched' || (t.status === 'pending' && !veTaskAcquisitionDeferred(info, t)
     && (!info.adaptive_collection?.active_source || veSourceStrategyKey(t.task) === info.adaptive_collection.active_source)));
   if (waiting.length > 0 && !info.preview_pipeline) {
     await requeueSelf(ctx, job);
@@ -4723,7 +4780,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Расширенному срезу поиск сайта не покупаем: строка с одной почтой из него
   // идёт как есть, как в бесплатной фазе.
   const widenedSources = new Set(tasks.filter((task) => task.task.widened).map((task) => veSourceStrategyKey(task.task)));
-  const discoveryCandidates = interleaved.filter((row) => !widenedSources.has(candidateSourceKey(row) ?? '')
+  const discoveryCandidates = interleaved.filter((row) => veRowAcquisitionAllowed(info, row) && !widenedSources.has(candidateSourceKey(row) ?? '')
     && pruneBaseRowAgainstExclusion(existingKeys, row) !== null);
   if (target) {
     addAcquisitionReceipts(existingKeys, info.target_checkpoint?.seen_rows ?? [], interleaved);
@@ -4758,7 +4815,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   let pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
   if (!existingFirst && !info.construct && !info.preview_pipeline?.batches.length && waiting.length === 0
     && (!target || target.ready_rows < target.ready_target)) {
-    const immediatelyUsable = prepared.filter((row) => (row.website || row.email)
+    const immediatelyUsable = prepared.filter((row) => veRowAcquisitionAllowed(info, row) && (row.website || row.email)
       && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length;
     if (immediatelyUsable === 0) {
       // A company/site is not a ready contact. Evaluate yield only here, after
@@ -4776,7 +4833,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         });
         prepared = applyVeSourceContacts(interleaved, info.source_contact_recovery);
         pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
-        if (prepared.filter((row) => (row.website || row.email) && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length === 0) {
+        if (prepared.filter((row) => veRowAcquisitionAllowed(info, row) && (row.website || row.email) && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length === 0) {
           if (target) info.source_contact_budget = evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
             checkpoint: info.source_contact_recovery, discoveryContacts: countVeSourceDiscoveryContacts(base.data) }).budget;
           if (!info.source_contact_budget?.paused && hasPendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery)) {
@@ -4790,7 +4847,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   delete info.source_contact_discovery;
   if (target && info.source_contact_recovery) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
   const considered = prepared.filter((row, index) => ownsLegacyInput
-    || ((existingFirst ? hasExistingSourceContact(row) : hasExistingSourceContact(row) || !pendingSourceRows.has(interleaved[index]))
+    || (veRowAcquisitionAllowed(info, row) && (existingFirst ? hasExistingSourceContact(row) : hasExistingSourceContact(row) || !pendingSourceRows.has(interleaved[index]))
       // An unsuccessful lookup must not move empty source rows into another
       // paid enrichment lane. Keep them in harvest/deferred storage instead.
       && (!info.source_contact_budget || hasExistingSourceContact(row))));
@@ -4820,7 +4877,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   if (merged.length === 0 && target && info.adaptive_collection && !info.adaptive_collection.pending
     && !info.preview_pipeline?.error && !failed.length && target.ready_rows < target.ready_target) {
-    const nextSource = tasks.find((task) => task.status === 'pending'
+    const nextSource = tasks.find((task) => task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)
       && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source
       && !veAdaptiveSourceDry(info.adaptive_collection!.completed, veSourceStrategyKey(task.task)));
     if (nextSource) {
