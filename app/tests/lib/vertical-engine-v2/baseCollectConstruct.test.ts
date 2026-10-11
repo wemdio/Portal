@@ -17,6 +17,8 @@ jest.mock('@/lib/companiesSearch/rpcSearch', () => ({
   searchCount: jest.fn(async () => ({ count: 9_120 })),
 }));
 
+jest.mock('@/lib/verticalEngineV2/nicheDirectory', () => ({ searchVeNicheDirectoryRows: jest.fn(async () => ({ rows: [] })) }));
+
 jest.mock('@/lib/verticalEngineV2/llm', () => ({
   callLLMWithSchema: jest.fn(),
   LLMValidationError: jest.requireActual('@/lib/verticalEngineV2/llm').LLMValidationError,
@@ -56,6 +58,7 @@ import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecove
 import { veRelevanceRowKey } from '@/lib/verticalEngineV2/relevanceReserve';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
+  applyVeNicheSourceSelection,
   baseRowMatchesExclusion,
   buildBaseExclusionKeysFromRows,
   dedupUnifiedRows,
@@ -67,6 +70,7 @@ import {
   type VeCollectInfo,
   type VeUnifiedRow,
 } from '@/lib/verticalEngineV2/stages/baseCollect';
+import { searchVeNicheDirectoryRows } from '@/lib/verticalEngineV2/nicheDirectory';
 import { selectRefillLeadRows } from '@/lib/verticalEngineV2/stages/baseCollectRefill';
 import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
@@ -2955,6 +2959,82 @@ describe('base_collect: план кончился раньше цели', () => 
         sizeOrUnknown: { revenueFrom: 150_000_000, employeesFrom: 25 } });
       expect(info.target_progress?.status).toBe('collecting');
     }
+
+    const payment = { title: 'Финтех и платежное посредничество', description: 'Платёжные провайдеры и агрегаторы', broad: false };
+    const task = { source: 'companies_directory' as const, rationale: 'Финансы и ИТ', directory_filters: { okvedCodes: ['64', '62'], includeIp: false } };
+    // A fresh narrow plan cannot borrow the whole-sector population or open
+    // paid discovery when the indexed stock is empty.
+    const freshDb = seed({ collection_mode: 'preview' }, hypothesis(payment));
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([task]));
+    await wake(freshDb);
+    const fresh = freshDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(fresh.niche_source_profile).toBe('payments');
+    expect(fresh.search_policy?.phase).toBe('existing');
+    expect(fresh.estimate).toMatchObject({ population_matches_source: false, unique_companies: null });
+    expect(fresh.tasks![0].task.directory_filters?.nameTerms).toContain('финтех');
+
+    const seen = unifiedRow({ company: 'Ранее проверенная компания', inn: '7700000901' });
+    const prior = exhaustedInfo(task, { hypotheses: [{ id: 'h1', status: 'accepted', ...payment }],
+      target_progress: { ...createCollectionTarget('preview'), round: 7, candidates_processed: 10_000, ready_rows: 2 },
+      target_checkpoint: { completed_round: 6, seen_rows: [seen], processed_rows: 10_000 },
+      adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2, active_source: veSourceStrategyKey(task) },
+    });
+    prior.tasks![0].directory_cursors = { old_scope: 2000 };
+    const immutable = JSON.stringify([prior.target_progress, prior.target_checkpoint, prior.search_policy,
+      prior.adaptive_collection!.completed, prior.adaptive_collection!.replan_attempts]);
+    expect(applyVeNicheSourceSelection(prior, 'payments')).toBe(true);
+    expect(JSON.stringify([prior.target_progress, prior.target_checkpoint, prior.search_policy,
+      prior.adaptive_collection!.completed, prior.adaptive_collection!.replan_attempts])).toBe(immutable);
+    expect(prior.tasks).toHaveLength(1);
+    expect(prior.tasks![0].directory_cursors).toEqual({ old_scope: 2000 });
+    expect(prior.tasks![0].harvest?.[0]).toMatchObject({ _ve_source_strategy: veSourceStrategyKey(task) });
+    expect(prior.adaptive_collection!.active_source).toBe(veSourceStrategyKey(prior.tasks![0].task));
+    expect(prior.source_selection?.previous_tasks[0]).toMatchObject({ task, exhausted: true });
+    expect(applyVeNicheSourceSelection(prior, 'payments')).toBe(false);
+    for (const outstanding of [
+      { construct: { bc_job_id: 'paid-child', status: 'dispatched' as const } },
+      { tasks: [{ ...prior.tasks![0], status: 'dispatched' as const, child_job_id: 'paid-hh' }] },
+      { preview_pipeline: { version: 1 as const, revision: 1, batches: [{ id: 'paid-batch', rows: [seen], dispatched_at: '2026-10-11' }] } },
+    ]) {
+      const inFlight = { ...prior, source_selection: undefined, ...outstanding };
+      const snapshot = JSON.stringify(inFlight);
+      expect(applyVeNicheSourceSelection(inFlight, 'payments')).toBe(false);
+      expect(JSON.stringify(inFlight)).toBe(snapshot);
+    }
+    prior.adaptive_collection!.replan_attempts = 0;
+    prior.adaptive_collection!.replan_needed = true;
+    const cappedDb = seedBase(prior, payment);
+    jest.mocked(callLLMWithSchema).mockClear();
+    jest.mocked(searchVeNicheDirectoryRows).mockClear();
+    jest.mocked(searchRows).mockClear();
+    await wake(cappedDb);
+    const capped = cappedDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(capped.target_progress).toMatchObject({ candidates_processed: 10_000, ready_rows: 2 });
+    expect(capped.search_policy?.phase).toBe('paid'); // Saved phase is historical; the niche guard still blocks new spend.
+    expect(searchVeNicheDirectoryRows).not.toHaveBeenCalled();
+    expect(searchRows).not.toHaveBeenCalled();
+    expect(cappedDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(callLLMWithSchema).not.toHaveBeenCalled();
+
+    // An old paid preview first resumes relevance, before tasks can migrate.
+    // The policy and safe source correction must be applied before that return.
+    const retryInfo = exhaustedInfo(task, { hypotheses: [{ id: 'h1', status: 'accepted', title: payment.title }],
+      relevance_review_requested: true, validation_retry: true,
+      construct: { status: 'done', bc_job_id: 'already-imported' },
+      target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: 2, ready_rows: 2 },
+      target_checkpoint: { completed_round: 3, seen_rows: processed, processed_rows: 2 },
+      relevance_reserve: { version: 1, rows: [{ ...ready[0], _ve_relevance: { version: 1, status: 'error' } }] },
+    });
+    const retryDb = seedBase(retryInfo, payment);
+    mockFindIrrelevantRows.mockClear();
+    await wake(retryDb);
+    const retried = retryDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(retried.niche_source_profile).toBe('payments');
+    expect(retried.source_selection?.profile).toBe('payments');
+    expect(mockFindIrrelevantRows).toHaveBeenCalled();
+    for (const [input] of mockFindIrrelevantRows.mock.calls) expect(input.allowPaidSearch).toBe(false);
+    expect(retried.tasks![0].task.directory_filters?.nameTerms).toContain('финтех');
+    expect(searchVeNicheDirectoryRows).not.toHaveBeenCalled();
   });
 
   it('план широкой гипотезы — классы ОКВЭД и каталог без порогов и без сигнала найма', async () => {
