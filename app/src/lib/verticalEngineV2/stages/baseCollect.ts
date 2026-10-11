@@ -155,6 +155,9 @@ import {
   type SourcePlanPromptInput,
 } from '../prompts/sourcePlan';
 import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
+import { searchVeNicheDirectoryRows } from '../nicheDirectory';
+import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed,
+  type VeNicheSourceProfile } from '../nicheSourcePolicy';
 import { VeCatalogRepairSchema, VeSourcePlanSchema } from '../schemas';
 import type { VeBase, VeJob, VeProject, VeVertical } from '../types';
 import {
@@ -482,12 +485,14 @@ export function interleaveTaskHarvests(lists: VeUnifiedRow[][]): VeUnifiedRow[] 
 /* ─────────────────────── Билдеры запросов к коллекторам ─────────────────────── */
 
 /** directory_filters плана → фильтры реестра (только заданные поля). */
+type VeDirectorySearchFilters = CompaniesSearchFilters & { nameTerms?: string[] };
 export function mapDirectoryFilters(
   filters: VeCollectTask['directory_filters'],
-): CompaniesSearchFilters {
+): VeDirectorySearchFilters {
   // B2B-дефолт: ИП не включаем (RPC при отсутствии фильтра вернёт includeIp=true).
-  const out: CompaniesSearchFilters = { includeIp: filters?.includeIp ?? false };
+  const out: VeDirectorySearchFilters = { includeIp: filters?.includeIp ?? false };
   if (!filters) return out;
+  if (filters.nameTerms) out.nameTerms = filters.nameTerms;
   if (filters.okvedCodes?.length) out.okvedCodes = filters.okvedCodes;
   if (filters.regionCodes?.length) out.regionCodes = filters.regionCodes;
   if (typeof filters.revenueFrom === 'number') out.revenueFrom = filters.revenueFrom;
@@ -686,6 +691,14 @@ export interface VeSliceProbe {
 }
 
 export interface VeCollectInfo {
+  /** Confirmed RU niche: constrain new spend even while draining saved work. */
+  niche_source_profile?: VeNicheSourceProfile;
+  /** One-way, bounded correction of source scopes. Old cursors remain here for
+   * audit; saved rows, candidate limits and paid-work receipts are not reset. */
+  source_selection?: { version: 1; profile: VeNicheSourceProfile; previous_tasks: Array<{
+    task: VeCollectTask; catalog?: VeYandexCatalogCheckpoint; directory_cursors?: Record<string, number>;
+    status: VeCollectTaskStatus; child_job_id: string | null; exhausted?: boolean; unavailable?: boolean;
+  }> };
   adaptive_collection?: VeAdaptiveCollection;
   /** Display/audit snapshot of the last applied "addresses per company" limit; the source of truth is ve_bases.max_emails_per_company. */
   company_contact_cap?: { limit: number; over_cap_rows: number; companies: number; applied_at: string };
@@ -783,7 +796,7 @@ export interface VeCollectInfo {
    */
   slice_probe?: VeSliceProbe;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
-  hypotheses?: Array<{ id: string; title: string; status: string | null }>;
+  hypotheses?: Array<{ id: string; title: string; description?: string | null; status: string | null; broad?: boolean }>;
   /**
    * Оценка единственного реестрового среза плана. Несколько срезов нельзя
    * складывать: их компании могут пересекаться, поэтому в таком случае числа
@@ -846,8 +859,14 @@ function keepWidenedSourceRow(task: VeCollectTask, row: VeUnifiedRow): boolean {
   return !task.widened || hasExistingSourceContact(row);
 }
 
+// Corrected niches use existing source contacts only. A source correction is
+// not permission to buy website discovery from an old, off-target backlog.
+function usesExistingSourceContacts(info: VeCollectInfo): boolean {
+  return Boolean(info.niche_source_profile || info.source_selection) || info.search_policy?.phase === 'existing';
+}
+
 function retainDeferredSourceRows(info: VeCollectInfo): void {
-  if (info.search_policy?.phase !== 'existing') return;
+  if (!info.search_policy || !usesExistingSourceContacts(info)) return;
   info.search_policy.deferred_rows = dedupUnifiedRows([
     ...info.search_policy.deferred_rows,
     ...(info.tasks ?? []).flatMap((task) => taggedHarvest(task).filter((row) => !hasExistingSourceContact(row))),
@@ -924,7 +943,7 @@ async function buildPlan(
   plan: VeSourcePlan;
   planRepair?: VePlanRepair;
   sliceProbe?: VeSliceProbe;
-  usedHypotheses: Array<{ id: string; title: string; status: string | null }>;
+  usedHypotheses: NonNullable<VeCollectInfo['hypotheses']>;
 }> {
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
   // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
@@ -1037,7 +1056,9 @@ async function buildPlan(
   const { plan: sized, stripped } = stripUnfoundedSizeFilters(probed,
     hypotheses.map((h) => `${h.title} ${h.description ?? ''}`).join('\n'));
   if (stripped) stageLog(ctx, `[base_collect] план: сняты пороги выручки/штата без основания в гипотезе (${stripped} задач)`);
-  const { plan, changed: broadened } = broad ? veBroadHypothesisPlan(sized) : { plan: sized, changed: 0 };
+  const { plan: scoped, changed: broadened } = broad ? veBroadHypothesisPlan(sized) : { plan: sized, changed: 0 };
+  const niche = market !== 'us' && !broad ? detectVeNicheSourceProfile(hypotheses) : null;
+  const plan = niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped;
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {
     plan,
@@ -1045,7 +1066,7 @@ async function buildPlan(
     sliceProbe,
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
-    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, status: h.status })),
+    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status, broad })),
   };
 }
 
@@ -1327,7 +1348,7 @@ async function insertChildJob(
  */
 export async function fetchDirectoryRows(
   ctx: VeStageContext,
-  filters: CompaniesSearchFilters,
+  filters: VeDirectorySearchFilters,
   limit: number,
   excludedKeys: VeBaseExclusionKeys,
   startOffset = 0,
@@ -1352,7 +1373,10 @@ export async function fetchDirectoryRows(
     // A deep scan logs nothing until it ends: each page is progress for the
     // inactivity watchdog, and a cancel must not wait for the last page.
     ctx.signal?.throwIfAborted();
-    const res = await searchRows(filters, DIRECTORY_PAGE_SIZE, offset);
+    const { nameTerms, ...sharedFilters } = filters;
+    const res = nameTerms
+      ? await searchVeNicheDirectoryRows(ctx.supabase, sharedFilters, nameTerms, DIRECTORY_PAGE_SIZE, offset, ctx.signal)
+      : await searchRows(sharedFilters, DIRECTORY_PAGE_SIZE, offset);
     ctx.onActivity?.();
     if (res.error) {
       // Страницы до сбоя разобраны полностью, и offset двигался только по ним.
@@ -1407,15 +1431,15 @@ export async function fetchDirectoryRows(
  * поэтому смещение остаётся верным между заходами.
  */
 const DIRECTORY_CURSOR_LIMIT = 8;
-function directoryCursorKey(filters: CompaniesSearchFilters): string {
+function directoryCursorKey(filters: VeDirectorySearchFilters): string {
   const stable = Object.entries(filters).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b));
   return createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 16);
 }
-function readDirectoryCursor(state: VeCollectTaskState, filters: CompaniesSearchFilters): number {
+function readDirectoryCursor(state: VeCollectTaskState, filters: VeDirectorySearchFilters): number {
   const saved = state.directory_cursors?.[directoryCursorKey(filters)];
   return typeof saved === 'number' && Number.isSafeInteger(saved) && saved > 0 ? saved : 0;
 }
-function writeDirectoryCursor(state: VeCollectTaskState, filters: CompaniesSearchFilters, offset: number): void {
+function writeDirectoryCursor(state: VeCollectTaskState, filters: VeDirectorySearchFilters, offset: number): void {
   if (!Number.isSafeInteger(offset) || offset <= 0) return;
   const key = directoryCursorKey(filters);
   const cursors = { ...(state.directory_cursors ?? {}) };
@@ -1758,6 +1782,8 @@ async function dispatchTask(
   usage: VeUsage,
   save: () => Promise<void>,
   existingContactsOnly = false,
+  sourceProfile?: VeNicheSourceProfile,
+  audienceContext?: string,
 ): Promise<void> {
   const { task } = state;
 
@@ -1767,7 +1793,9 @@ async function dispatchTask(
     if (!state.catalog) {
       try {
         const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
-          context: task.rationale, signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
+          context: audienceContext ?? task.rationale,
+          rubricAllowed: sourceProfile ? (label) => veNicheRubricAllowed(sourceProfile, label) : undefined,
+          signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
         state.catalog = { version: 1, filters };
       } catch (error) {
         ctx.signal?.throwIfAborted();
@@ -2595,9 +2623,68 @@ async function dispatchConstructJob(input: {
 }
 
 function taggedHarvest(task: VeCollectTaskState): VeUnifiedRow[] {
-  return (task.harvest ?? []).map((row) => ({ ...row, _ve_source_strategy: veSourceStrategyKey(task.task) }));
+  return (task.harvest ?? []).map((row) => ({ ...row,
+    _ve_source_strategy: candidateSourceKey(row) ?? veSourceStrategyKey(task.task) }));
 }
 const candidateSourceKey = (row: VeUnifiedRow) => (row as VeUnifiedRow & { _ve_source_strategy?: string })._ve_source_strategy;
+
+/** Only confirmed narrow RU audiences opt in; old title-only checkpoints
+ * are checked against the exact hypothesis before constraining acquisition. */
+async function pinNicheSourceProfile(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<VeNicheSourceProfile | null> {
+  if (info.niche_source_profile) return info.niche_source_profile;
+  if (!base.hypothesis_id || !detectVeNicheSourceProfile(info.hypotheses ?? [])) return null;
+  if (info.hypotheses?.some((hypothesis) => hypothesis.broad === undefined)) {
+    const { data: hypothesis, error } = await ctx.supabase.from('ve_hypotheses')
+      .select('id,title,description,status,broad').eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
+    if (error) throw new Error(`Source audience read: ${error.message}`);
+    if (!hypothesis || hypothesis.status === 'rejected') throw new Error('Source audience is no longer available');
+    info.hypotheses = [hypothesis as NonNullable<VeCollectInfo['hypotheses']>[number]];
+  }
+  const profile = !info.hypotheses?.some((hypothesis) => hypothesis.broad)
+    ? detectVeNicheSourceProfile(info.hypotheses ?? []) : null;
+  if (profile) {
+    info.niche_source_profile = profile;
+    await persistCollectInfo(ctx, base.id, info);
+  }
+  return profile;
+}
+
+/** Change only future source selection, at a quiescent acquisition boundary.
+ * A changed scope receives a new cursor key, while old rows retain their exact
+ * attribution and all spend/seen/limit checkpoints remain intact. */
+export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNicheSourceProfile): boolean {
+  if (!info.plan || !info.tasks?.length || info.source_selection || (info.construct && info.construct.status !== 'done') || info.adaptive_collection?.pending
+    || info.preview_pipeline?.batches.length || info.tasks.some((task) => task.status === 'dispatched')) return false;
+  const previous: NonNullable<VeCollectInfo['source_selection']>['previous_tasks'] = [];
+  for (const state of info.tasks) {
+    // Already paid HH jobs are immutable. A newly built plan receives the
+    // narrower query, but a code update must not launch another HH job.
+    if (state.source === 'hh_live' && state.status !== 'pending') continue;
+    const task = normalizeVeNicheSourceTask(state.task, profile);
+    const wrongCatalog = state.catalog?.filters.categories?.some((label) => !veNicheRubricAllowed(profile, label));
+    if (veSourceStrategyKey(task) === veSourceStrategyKey(state.task) && !wrongCatalog) continue;
+    previous.push({ task: state.task, catalog: state.catalog, directory_cursors: state.directory_cursors,
+      status: state.status, child_job_id: state.child_job_id, exhausted: state.exhausted, unavailable: state.unavailable });
+    state.harvest = taggedHarvest(state);
+    if (info.adaptive_collection?.active_source === veSourceStrategyKey(state.task)) {
+      info.adaptive_collection.active_source = veSourceStrategyKey(task);
+    }
+    state.task = task;
+    if (state.source === 'yandex_maps') delete state.catalog;
+    // No changed filter may inherit an exhausted verdict of another scope.
+    // No acquisition takes place here, and failed children are not retried.
+    delete state.exhausted;
+    delete state.hit_ceiling;
+    delete state.unavailable;
+    state.note = 'Уточнён отбор источника под аудиторию; сохранённые результаты и лимиты сохранены.';
+  }
+  info.plan = { ...info.plan, tasks: info.tasks.map((state) => state.task) };
+  info.niche_source_profile = profile;
+  info.source_selection = { version: 1, profile, previous_tasks: previous };
+  // The old whole-sector population is no longer a prediction of this niche.
+  delete info.estimate;
+  return true;
+}
 
 /** New acquisitions only: never use this guard to discard saved/in-flight rows. */
 function veTaskAcquisitionDeferred(info: VeCollectInfo, task: VeCollectTaskState): boolean {
@@ -2673,7 +2760,7 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
       // includeIp:false — один и тот же срез реестра (см. нормализацию в
       // mapDirectoryFilters и veSourceStrategyKey). Он ничего не сужает, зато
       // стоял у 326 задач из 331 и в одиночку запрещал уход на карты.
-      .some(([key, value]) => !['okvedCodes', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
+      .some(([key, value]) => !['okvedCodes', 'nameTerms', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
       || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
       || original.funded_filters || original.eng_hiring_query
       // Запрос вакансий — сигнал найма, а не граница рынка: по всей России
@@ -2709,12 +2796,13 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   vertical: VeVertical, market: VeMarket, usage: VeUsage): Promise<void> {
   const policy = info.adaptive_collection;
   const target = info.target_progress;
-  if (!policy || policy.pending || info.preview_pipeline?.batches.length || !target || target.ready_rows >= target.ready_target) return;
+  if (!policy || policy.pending || info.preview_pipeline?.batches.length || !target || target.ready_rows >= target.ready_target
+    || target.candidates_processed >= target.max_candidates) return;
   const tasks = info.tasks ?? [];
   const consumed = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
   const available = tasks.filter((task) => !veTaskAcquisitionDeferred(info, task) && task.status !== 'failed' && (task.status !== 'done'
     || isVeRenewableSourceTask(task)
-    || (task.harvest ?? []).some((row) => (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
+    || (task.harvest ?? []).some((row) => (!usesExistingSourceContacts(info) || hasExistingSourceContact(row))
       && !baseRowMatchesExclusion(consumed, row))));
   const alternatives = available.filter((task) => veSourceStrategyKey(task.task) !== policy.active_source
     && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task))
@@ -3258,7 +3346,7 @@ async function checkCollectedRelevance(args: {
       // сбора, не теряя компаний: они получают штатный «поиск отложен» и
       // вернутся к проверке, когда рубильник включат обратно.
       allowPaidSearch: isVePaidWebsiteSearchEnabled()
-        && info.search_policy?.phase !== 'existing'
+        && !usesExistingSourceContacts(info)
         && (!info.target_progress || info.target_progress.ready_rows < info.target_progress.ready_target),
       websiteLimit: info.target_progress ? Math.max(0, info.target_progress.ready_target - info.target_progress.ready_rows) : undefined,
       triage: isVeRelevanceTriageEnabled(job.project_id),
@@ -3496,7 +3584,7 @@ async function reviewSavedRelevance(
     reserve: savedReserve,
     ready: Array.isArray(base.data) ? base.data : [],
     source: readVeRelevanceSourceRows(info.relevance_reserve), automatic,
-    allowPaidSearch: info.search_policy?.phase !== 'existing',
+    allowPaidSearch: !usesExistingSourceContacts(info),
     triage: isVeRelevanceTriageEnabled(job.project_id),
   });
   // A queued SMTP child must not hold already validated recipients behind
@@ -3876,7 +3964,7 @@ async function completeTargetRound(args: {
   const pendingBatches = pipeline?.batches.filter((batch) => batch.id !== pipeline.active_batch_id) ?? [];
   const pendingSources = tasks.some((task) => task.status === 'dispatched'
     || (task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)));
-  const existingFirst = info.search_policy?.phase === 'existing';
+  const existingFirst = usesExistingSourceContacts(info);
   const discoveryPaused = info.source_contact_budget?.paused === true;
   const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done' && !veTaskAcquisitionDeferred(info, task)
     && !task.task.widened && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
@@ -4071,7 +4159,7 @@ async function completeTargetRound(args: {
       && !baseRowMatchesExclusion(consumedExisting, row)));
   // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
   const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= next.max_rounds;
-  if (existingFirst && !hasDeferredAcquisition
+  if (existingFirst && !info.niche_source_profile && !info.source_selection && !hasDeferredAcquisition
     && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
@@ -4158,7 +4246,7 @@ async function completeTargetRound(args: {
   }) : [];
   const acquirableStock = tasks.some((task) => veTaskCanSupply(task, info)
     || (!veTaskAcquisitionDeferred(info, task) && task.status === 'done' && (task.harvest ?? []).some((row) =>
-      (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
+      (!usesExistingSourceContacts(info) || hasExistingSourceContact(row))
       && pruneBaseRowAgainstExclusion(freshKeys, row) !== null && !baseRowMatchesExclusion(consumedExisting, row))));
   const economicHold = deferredSources.length > 0 && !acquirableStock && !pendingDiscovery
     && !info.adaptive_collection?.pending && !reviewOnly && !continueSavedReview
@@ -4549,6 +4637,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // ctx.market прокидывает воркер, фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
   ctx = { ...ctx, market };
+  // Pin the cost policy before recovery early returns. Paid children keep
+  // their immutable inputs; a resume does not buy search for their old backlog.
+  if (target && market !== 'us' && !isRefill) {
+    const profile = await pinNicheSourceProfile(ctx, job, base, info);
+    if (profile && applyVeNicheSourceSelection(info, profile)) await persistCollectInfo(ctx, baseId, info);
+  }
   if (info.company_name_recovery) {
     if (!target) throw new Error('Company name recovery requires a collection target');
     return resumeSavedCompanyNames(ctx, job, base, info, target, usage);
@@ -4624,6 +4718,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     await persistCollectInfo(ctx, baseId, info);
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
   }
+  if (target && market !== 'us' && !isRefill) {
+    const profile = await pinNicheSourceProfile(ctx, job, base, info);
+    if (profile && applyVeNicheSourceSelection(info, profile)) await persistCollectInfo(ctx, baseId, info);
+  }
   if (target) await adaptCollectionSources(ctx, job, base, info, vertical, market, usage);
 
   // Базы, чей план был сохранён до появления estimate, получают его при
@@ -4653,7 +4751,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   };
 
   retainDeferredSourceRows(info);
-  const existingFirst = info.search_policy?.phase === 'existing';
+  const existingFirst = usesExistingSourceContacts(info);
   if ((info.preview_pipeline || info.adaptive_collection) && target) {
     const reservedKeys = buildBaseExclusionKeysFromRows(info.preview_pipeline?.batches.flatMap((batch) => batch.rows) ?? []);
     const consumedKeys = await getExcludedKeys();
@@ -4704,7 +4802,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // Расширенный срез берёт только компании с готовой почтой или сайтом:
       // остальные потребовали бы платного поиска сайта ради второй очереди.
       await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
-        () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened));
+        () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened),
+        info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'));
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
