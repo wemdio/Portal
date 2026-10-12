@@ -1,6 +1,7 @@
 import 'server-only';
 import { datasetQuery } from '@/lib/instantlyDataset';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 /**
  * Исходы рассылки Instantly по дням: отправлено → отбои → ответы → лиды.
@@ -17,10 +18,12 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
  * Откуда что берётся (намеренно из разных мест, см. wiki/concepts/key-metrics.md):
  *  - отправлено:  `raw_emails` ue_type=1 — то же, что считает сама страница,
  *                 поэтому плитка «Отправлено» сходится с цифрой наверху.
- *  - ответы/лиды: `raw_emails` ue_type=2, ОДИН лид = один ответ за день.
+ *  - ответы:       `raw_emails` ue_type=2, один ответ на человека за день.
  *                 Повторы автоответчиков (до 12 строк на лида, 20% ue2) иначе
  *                 раздули бы ответы вдвое — тот же дедуп, что в `v_reply_facts`.
- *                 Лид = Instantly или его AI поставили «interested».
+ *  - лиды:         наша ИИ-квалификация ответов для проектов. Один лид = один
+ *                 выбранный тред проекта, который идёт в TG и таблицу лидов;
+ *                 метки interested от Instantly здесь не участвуют.
  *  - отбои:       timestamped `email_bounced` webhooks, received by Portal.
  *                 Instantly's daily analytics omits bounces. Before webhook
  *                 coverage begins, the daily value is unknown (never zero).
@@ -63,7 +66,8 @@ function isCalendarDay(s: string): boolean {
 const num = (v: string | number | null | undefined): number => (v == null ? 0 : Number(v));
 
 type SentRow = { day: string; sent: string };
-type ReplyRow = { day: string; replies: string; leads: string; invalid: string };
+type ReplyRow = { day: string; replies: string; invalid: string };
+type LeadRow = { day: string; leads: number };
 type BounceRow = { day: string; bounced: number };
 
 /** Список дней окна: ['YYYY-MM-DD', …] по возрастанию, последний — `day`. */
@@ -86,7 +90,8 @@ export async function buildMailboxOutcomes(day: string): Promise<MailboxOutcomes
   // отправок за 30 дней сотни тысяч, и у них свой покрывающий индекс
   // (ue_type, timestamp_email, eaccount), тогда как ответам нужна куча ради
   // lead_id/i_status. Один общий запрос лишил бы отправки index-only-плана.
-  const [sentRows, replyRows] = await Promise.all([
+  if (!supabaseInstantly) throw new Error('Instantly qualification DB unavailable');
+  const [sentRows, replyRows, leadResponse] = await Promise.all([
     datasetQuery<SentRow>(
       `SELECT to_char(timestamp_email::date, 'YYYY-MM-DD') AS day, count(*)::text AS sent
          FROM raw_emails
@@ -102,8 +107,6 @@ export async function buildMailboxOutcomes(day: string): Promise<MailboxOutcomes
       `SELECT to_char(timestamp_email::date, 'YYYY-MM-DD') AS day,
               count(DISTINCT coalesce(lead_id, id))::text AS replies,
               (count(DISTINCT coalesce(lead_id, id))
-                FILTER (WHERE i_status = 1 OR ai_interest_value = 1))::text AS leads,
-              (count(DISTINCT coalesce(lead_id, id))
                 FILTER (WHERE i_status = -3))::text AS invalid
          FROM raw_emails
         WHERE ue_type = 2
@@ -112,7 +115,12 @@ export async function buildMailboxOutcomes(day: string): Promise<MailboxOutcomes
         GROUP BY 1`,
       [from, day],
     ),
+    // Квалификатор живёт в операционной БД Instantly. Его решение по проекту
+    // закрепляется за одним тредом, поэтому повторные ответы не дают лидов.
+    supabaseInstantly.rpc('instantly_project_leads_daily', { p_from: from, p_to: day }),
   ]);
+  if (leadResponse.error) throw leadResponse.error;
+  const leadRows = (leadResponse.data ?? []) as LeadRow[];
 
   // Отбои живут в Portal DB: Instantly's daily API has no bounce metric.
   // Only full UTC days after registration are allowed to show a true zero.
@@ -153,6 +161,7 @@ export async function buildMailboxOutcomes(day: string): Promise<MailboxOutcomes
   const sentBy = new Map(sentRows.map((r) => [r.day, num(r.sent)]));
   const bounceBy = new Map(bounceRows.map((r) => [r.day, num(r.bounced)]));
   const replyBy = new Map(replyRows.map((r) => [r.day, r]));
+  const leadBy = new Map(leadRows.map((r) => [r.day, num(r.leads)]));
 
   const series: OutcomeDay[] = days.map((d) => {
     const reply = replyBy.get(d);
@@ -162,12 +171,12 @@ export async function buildMailboxOutcomes(day: string): Promise<MailboxOutcomes
       bounced: bounceAvailableFrom && d >= bounceAvailableFrom ? bounceBy.get(d) ?? 0 : null,
       invalid: num(reply?.invalid),
       replies: num(reply?.replies),
-      leads: num(reply?.leads),
+      leads: leadBy.get(d) ?? 0,
     };
   });
 
   const last = series[series.length - 1];
-  notes.push('Отбои — по событиям Instantly с момента подключения; отправки, ответы и лиды — по письмам датасета.');
+  notes.push('Отбои — по событиям Instantly с момента подключения; лиды — по нашей квалификации для проектов, один на переписку.');
 
   return {
     day,
