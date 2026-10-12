@@ -81,7 +81,7 @@ function jsonValueToPlain(value: unknown): unknown {
 }
 
 export interface FreezeVerdict {
-  /** Когда заморозка снимается сама, unix-секунды. 0/отсутствует — бессрочно. */
+  /** Когда Telegram удалит аккаунт без успешной апелляции, unix-секунды. */
   until: number | null;
   /** Ссылка на обжалование — та же, что показывает баннер в официальном приложении. */
   appealUrl: string | null;
@@ -105,21 +105,21 @@ export interface FreezeVerdict {
  * Вызов read-only: проверка по-прежнему ничего в аккаунте не меняет.
  */
 export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict | null> {
-  let config: Record<string, unknown>;
-  try {
-    const res = await withTimeout(
-      client.invoke(new Api.help.GetAppConfig({ hash: 0 })),
-      callTimeoutMs(),
-      'конфиг приложения',
-    );
-    const plain = jsonValueToPlain((res as { config?: unknown }).config ?? res);
-    if (!plain || typeof plain !== 'object') return null;
-    config = plain as Record<string, unknown>;
-  } catch {
-    // Конфиг не пришёл — молчим. Объявлять аккаунт замороженным из-за сетевой
-    // ошибки нельзя: это ровно та ошибка, за которую списывают живой номер.
-    return null;
+  const res = await withTimeout(
+    client.invoke(new Api.help.GetAppConfig({ hash: 0 })),
+    callTimeoutMs(),
+    'конфиг приложения',
+  );
+  // Неответ и неожиданный формат не равны отсутствию заморозки: вызывающий
+  // покажет «проверка не удалась», а не ложно объявит аккаунт живым.
+  if (!('config' in res) || res.config.className !== 'JsonObject') {
+    throw new Error('Telegram не вернул конфиг приложения для проверки заморозки');
   }
+  const plain = jsonValueToPlain(res.config);
+  if (!plain || typeof plain !== 'object' || Array.isArray(plain)) {
+    throw new Error('Не удалось прочитать конфиг приложения для проверки заморозки');
+  }
+  const config = plain as Record<string, unknown>;
 
   const freezeKeys = Object.keys(config).filter((k) => /freeze/i.test(k));
   if (!freezeKeys.length) return null;
@@ -149,13 +149,14 @@ export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict
 /** Человеческий текст вердикта о заморозке — он и попадёт в карточку аккаунта. */
 export function describeFreeze(v: FreezeVerdict): string {
   const parts = [
-    'ЗАМОРОЗКА Telegram — аккаунт цел, но ему запрещено искать людей по нику и писать незнакомым.',
-    'Само не пройдёт: снимается обжалованием.',
+    'ЗАМОРОЗКА Telegram — аккаунт доступен только для чтения, отправка сообщений и другие действия запрещены.',
+    'Оспорить заморозку можно через @SpamBot.',
   ];
   if (v.until) {
-    parts.push(`Указан срок до ${new Date(v.until * 1000).toLocaleString('ru-RU', {
-      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-    })}.`);
+    parts.push(`Без успешной апелляции Telegram удалит аккаунт ${new Date(v.until * 1000).toLocaleString('ru-RU', {
+      timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    })} МСК.`);
   }
   if (v.appealUrl) parts.push(`Обжалование: ${v.appealUrl}`);
   return parts.join(' ');
@@ -184,21 +185,8 @@ export function classifyCheckError(rawMessage: string): { status: AccountCheckSt
   const restriction = classifyRestriction(msg, Date.now());
   if (restriction) {
     return {
-      status: restriction.kind === 'permanent' ? 'banned' : 'restricted',
+      status: restriction.kind === 'permanent' ? 'banned' : restriction.kind === 'frozen' ? 'frozen' : 'restricted',
       detail: describeRestriction(restriction),
-    };
-  }
-
-  /**
-   * Прямой отказ «метод заморожен». Ставим до общих веток: в сообщении может
-   * оказаться что угодно ещё, а этот код однозначен.
-   */
-  if (/FROZEN_METHOD_INVALID|FrozenMethodInvalid/i.test(msg)) {
-    return {
-      status: 'frozen',
-      detail: 'ЗАМОРОЗКА Telegram — метод запрещён для этого аккаунта. '
-        + 'Аккаунт цел, но писать незнакомым и искать людей по нику не может. '
-        + 'Снимается обжалованием в официальном приложении.',
     };
   }
 
@@ -316,6 +304,7 @@ export async function checkAccount(
    * проверка бодро отвечала бы «жив» аккаунту, который уже неделю не может
    * написать ни одному незнакомому человеку.
    */
+  let spamBotFree: SpamBotVerdict | null = null;
   if (options.askSpamBotWhenRestricted) {
     const verdict = await askSpamBot(client);
     if (verdict?.kind === 'limited') {
@@ -326,21 +315,25 @@ export async function checkAccount(
       };
     }
     if (verdict?.kind === 'free') {
-      return {
-        status: 'ok',
-        detail: `жив, ограничение снято — ${describeSpamBotVerdict(verdict)}`
-          + (otherSessions.length ? ` В аккаунте ещё ${otherSessions.length} чужих сеансов.` : ''),
-        ...identity,
-      };
+      spamBotFree = verdict;
     }
   }
 
   /**
-   * Последней спрашиваем про заморозку — она единственная, что доживает до
-   * этой строки: профиль чист, сеанс наш, @SpamBot молчит. Раньше здесь
-   * безоговорочно писалось «жив».
+   * Перед любым ответом «жив» проверяем заморозку. Чистый профиль и ответ
+   * @SpamBot «ограничений нет» не исключают баннер read-only в Telegram.
    */
-  const freeze = await probeFreeze(client);
+  let freeze: FreezeVerdict | null;
+  try {
+    freeze = await probeFreeze(client);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return {
+      status: 'error',
+      detail: `Не удалось проверить заморозку Telegram — статус аккаунта неизвестен. ${reason.slice(0, 180)}`,
+      ...identity,
+    };
+  }
   if (freeze) {
     return {
       status: 'frozen',
@@ -352,9 +345,12 @@ export async function checkAccount(
 
   return {
     status: 'ok',
-    detail: otherSessions.length
-      ? `жив, но в аккаунте ещё ${otherSessions.length} чужих сеансов`
-      : 'жив, чужих сеансов нет',
+    detail: spamBotFree
+      ? `жив, ограничение снято — ${describeSpamBotVerdict(spamBotFree)}`
+        + (otherSessions.length ? ` В аккаунте ещё ${otherSessions.length} чужих сеансов.` : '')
+      : otherSessions.length
+        ? `жив, но в аккаунте ещё ${otherSessions.length} чужих сеансов`
+        : 'жив, чужих сеансов нет',
     ...identity,
   };
 }
