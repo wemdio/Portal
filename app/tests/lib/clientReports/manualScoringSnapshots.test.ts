@@ -1,5 +1,6 @@
 /** @jest-environment node */
 
+import { createHash } from 'node:crypto';
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
 
 let mockDb: MockSupabaseClient;
@@ -26,6 +27,9 @@ import {
 } from '@/lib/jobs/manualScoringRunner';
 import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import { getOrFetchScore } from '@/lib/jobs/mailganerScoreCache';
+import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import { validateEmailForAutoPipeline } from '@/lib/jobs/autoPipelineEmailValidation';
 
 const cleanCompanyNamesMock = cleanCompanyNames as jest.MockedFunction<typeof cleanCompanyNames>;
 const appendLeadsMock = appendLeadsToClientCampaign as jest.MockedFunction<typeof appendLeadsToClientCampaign>;
@@ -89,6 +93,9 @@ function routeSeed(errorSelects?: Record<string, { columnsInclude: string; messa
 describe('manual scoring durable snapshot reconciliation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.mocked(getOrFetchScore).mockReset();
+    jest.mocked(scrapeEmails).mockReset();
+    jest.mocked(validateEmailForAutoPipeline).mockReset();
   });
 
   it('repairs a missing immutable snapshot before finalizing an already-processed run', async () => {
@@ -134,6 +141,91 @@ describe('manual scoring durable snapshot reconciliation', () => {
       metadata: expect.objectContaining({ source_filename: 'manual.csv', is_no_email_retry: true }),
     });
     expect(appendLeadsMock).not.toHaveBeenCalled();
+  });
+
+  it('resumes only 12 missing rows while preserving 88 saved results and routing ready contacts', async () => {
+    const runId = 'synthetic-retry-24';
+    const originalTime = '2026-10-10T10:00:00.000Z';
+    const saved = Array.from({ length: 88 }, (_, index) => ({
+      id: index + 1, run_id: runId, domain: `saved-${index}.test`,
+      company_name: `Saved ${index}`, score: index === 87 ? 1_001 : 20_000,
+      rating: 'B', spf: 'v=spf1 -all', bucket: index === 87 ? 'medium' : 'high',
+      email: [0, 1, 87].includes(index) ? `lead@saved-${index}.test` : null,
+      email_validation_status: index === 1 ? 'smtp_reject' : 'valid',
+      email2: null, email2_validation_status: null, error_message: null,
+      scraped_name: `Saved ${index}`, processed_at: originalTime,
+    }));
+    const missing = Array.from({ length: 12 }, (_, index) => ({
+      id: index + 89, run_id: runId, domain: `new-${index}.test`, bucket: null,
+      score: null, email: null, email2: null, processed_at: originalTime,
+    }));
+    const otherRun = { id: 'other-run', client_user_id: 'other-client', status: 'pending', started_at: originalTime };
+    const otherRow = { id: 999, run_id: otherRun.id, domain: 'untouched.test', bucket: null, processed_at: originalTime };
+    mockDb = createMockSupabase({ tables: {
+      client_manual_score_runs: [{
+        id: runId, client_user_id: 'client-1', source_filename: 'synthetic-retry-24.txt',
+        status: 'processing', route_to_instantly: true, is_no_email_retry: true,
+        started_at: originalTime, processed_count: 88,
+      }, otherRun],
+      client_manual_score_rows: [...saved, ...missing, otherRow],
+      mailganer_domain_scores: [],
+      client_auto_pipeline_configs: [{ client_user_id: 'client-1', score_buckets: [
+        { score_min: 1_001, score_max: 15_000, instantly_campaign_id: 'existing-c', label: 'C', sequence: { steps: [{}] } },
+        { score_min: 15_001, score_max: 1_000_000, instantly_campaign_id: 'existing-b', label: 'B', sequence: { steps: [{}] } },
+      ] }],
+      client_pipeline_domain_snapshots: [],
+    } });
+    const checksum = (rows: Array<Record<string, unknown>>) => createHash('md5').update(JSON.stringify(
+      rows.map((row) => [row.id, row.domain, row.score, row.rating, row.spf, row.email,
+        row.email_validation_status, row.email2, row.email2_validation_status,
+        row.bucket, row.error_message, row.processed_at]),
+    )).digest('hex');
+    const originalChecksum = checksum(saved);
+    jest.mocked(getOrFetchScore).mockImplementation(async (domain) => ({
+      ok: true, score: domain === 'new-0.test' ? 1_001 : 20_000,
+      spf: 'v=spf1 -all', raw: { rating: 'B' },
+    }));
+    jest.mocked(scrapeEmails).mockImplementation(async (url) => ({
+      emails: [`lead@${url.replace('https://', '')}`], allEmailsRaw: [],
+      checkedUrls: [url], pagesScanned: 1, siteName: 'Synthetic company', failureReason: null,
+    }));
+    jest.mocked(validateEmailForAutoPipeline).mockImplementation(async (email) => ({
+      status: email === 'lead@new-11.test' ? 'smtp_reject' : 'valid',
+      isValid: email !== 'lead@new-11.test', details: {},
+    }));
+    cleanCompanyNamesMock.mockImplementation(async (rows) => rows.map((row) => row.name ?? 'Synthetic company'));
+    appendLeadsMock.mockImplementation(async ({ leads }) => ({
+      accepted: leads.length, skipped: 0, identityComplete: true,
+      acceptedIndexes: leads.map((_, index) => index), attemptedIndexes: leads.map((_, index) => index),
+    }));
+
+    await expect(processManualRun({ runId, endpoint })).resolves.toMatchObject({ status: 'completed', total: 100 });
+
+    expect(jest.mocked(getOrFetchScore).mock.calls.map(([domain]) => domain).sort())
+      .toEqual(missing.map((row) => row.domain).sort());
+    expect(scrapeEmails).toHaveBeenCalledTimes(12);
+    expect(validateEmailForAutoPipeline).toHaveBeenCalledTimes(12);
+    const finalRows = mockDb.getRows('client_manual_score_rows').filter((row) => row.run_id === runId);
+    expect(checksum(finalRows.filter((row) => Number(row.id) <= 88))).toBe(originalChecksum);
+    expect(finalRows.filter((row) => row.bucket === null)).toHaveLength(0);
+    expect(finalRows.filter((row) => Number(row.id) > 88)
+      .every((row) => row.processed_at !== originalTime)).toBe(true);
+    expect(mockDb.getRows('client_manual_score_runs').find((row) => row.id === otherRun.id)).toEqual(otherRun);
+    expect(mockDb.getRows('client_manual_score_rows').find((row) => row.id === otherRow.id)).toEqual(otherRow);
+    expect(mockDb.getRows('client_manual_score_runs').find((row) => row.id === runId))
+      .toMatchObject({ started_at: originalTime, processed_count: 100 });
+    expect(appendLeadsMock.mock.calls.map(([input]) => [input.campaignId, input.leads.length]).sort())
+      .toEqual([['existing-b', 11], ['existing-c', 2]]);
+    const routed = appendLeadsMock.mock.calls.flatMap(([input]) => input.leads.map((lead) => lead.email));
+    expect(routed).toEqual(expect.arrayContaining(['lead@saved-0.test', 'lead@saved-87.test', 'lead@new-0.test']));
+    expect(routed).not.toEqual(expect.arrayContaining(['lead@saved-1.test']));
+    expect(routed).not.toEqual(expect.arrayContaining(['lead@new-11.test']));
+    const snapshots = mockDb.getRows('client_pipeline_domain_snapshots');
+    expect(snapshots).toHaveLength(100);
+    expect(snapshots.every((snapshot) => snapshot.source_run_id === runId
+      && (snapshot.metadata as Record<string, unknown>).is_no_email_retry === true
+      && snapshot.scored_at === finalRows.find((row) => String(row.id) === snapshot.source_row_id)?.processed_at)).toBe(true);
+    expect(snapshots.filter((snapshot) => snapshot.routed_campaign_id !== null)).toHaveLength(13);
   });
 
   it('fails closed when processed rows cannot be loaded for routing', async () => {

@@ -6,15 +6,22 @@
  * где остановился (processManualRun идемпотентен — берёт только rows где
  * bucket IS NULL).
  *
- * При старте также вызывает cleanup_expired_manual_score_runs() — удаляет
- * прогоны старше 30 дней (см. миграцию 0013).
+ * При обычном старте вызывает cleanup_expired_manual_score_runs() — удаляет
+ * прогоны старше 30 дней (см. миграцию 0013). В opt-in приоритете №24 cleanup
+ * пропускается, чтобы не менять посторонние прогоны.
  */
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { processManualRun } from '@/lib/jobs/manualScoringRunner';
 import { resolveMailganerScoringConcurrency } from '@/lib/jobs/mailganerScoringThrottle';
+import {
+  claimRun24Priority, createRun24PriorityPool, isRun24PriorityEnabled,
+  Run24PrioritySelector, type ManualPendingRun,
+} from '@/lib/jobs/manualScoringRun24Priority';
 
 const WORKER_ID = 'manual-scoring';
+
+class PendingRunQueryError extends Error {}
 
 function getEndpointConfig() {
   return {
@@ -29,6 +36,10 @@ async function main(): Promise<void> {
   const log = createWorkerLogger(WORKER_ID);
   const supabase = requireSupabaseAdmin(log);
   const endpoint = getEndpointConfig();
+  const priorityEnabled = isRun24PriorityEnabled(process.env.MANUAL_SCORING_RUN24_PRIORITY_ONCE);
+  const prioritySelector = new Run24PrioritySelector(priorityEnabled);
+  const priorityPool = priorityEnabled ? createRun24PriorityPool(process.env) : null;
+  priorityPool?.on('error', () => log('error', 'Run24 priority database connection error'));
 
   if (!endpoint.apiKey) {
     log('error', 'MAILGANER_API_KEY env not set');
@@ -42,39 +53,45 @@ async function main(): Promise<void> {
   });
   log('info', `Scoring concurrency=${scoringConcurrency}`);
 
-  // Cleanup истёкших прогонов при старте
-  try {
-    const { data } = await supabase.rpc('cleanup_expired_manual_score_runs');
-    const deleted = typeof data === 'number' ? data : 0;
-    if (deleted > 0) log('info', `Cleanup: removed ${deleted} expired runs`);
-  } catch (err) {
-    log('warn', 'Cleanup function failed (ok on first run before migration)', err);
+  // The opt-in one-shot must not delete any unrelated expired run at startup.
+  if (priorityEnabled) {
+    log('info', 'Run24 one-shot priority enabled; startup cleanup skipped');
+  } else {
+    try {
+      const { data } = await supabase.rpc('cleanup_expired_manual_score_runs');
+      const deleted = typeof data === 'number' ? data : 0;
+      if (deleted > 0) log('info', `Cleanup: removed ${deleted} expired runs`);
+    } catch (err) {
+      log('warn', 'Cleanup function failed (ok on first run before migration)', err);
+    }
   }
 
   const isShuttingDown = setupGracefulShutdown(log);
 
   while (!isShuttingDown()) {
     try {
-      const { data: pending, error } = await supabase
-        .from('client_manual_score_runs')
-        .select('id, client_user_id, source_filename, unique_count')
-        .eq('status', 'pending')
-        .order('started_at', { ascending: true })
-        .limit(1)
-        .maybeSingle();
-
-      if (error) {
-        log('error', 'Failed to query pending runs', error);
-        await sleep(15_000);
-        continue;
-      }
+      const pending = await prioritySelector.selectNext(async () => {
+        // Keep the ordinary queue ordering unchanged, including its tie behaviour.
+        const { data, error } = await supabase
+          .from('client_manual_score_runs')
+          .select('id, client_user_id, source_filename, unique_count')
+          .eq('status', 'pending')
+          .order('started_at', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (error) throw new PendingRunQueryError(error.message);
+        return data as ManualPendingRun | null;
+      }, () => {
+        if (!priorityPool) throw new Error('Run24 priority pool is not initialized');
+        return claimRun24Priority(priorityPool);
+      });
 
       if (!pending) {
         await sleep(10_000);
         continue;
       }
 
-      const run = pending as { id: string; client_user_id: string; source_filename: string | null; unique_count: number };
+      const run = pending;
       log('info', `→ Processing run ${run.id} (${run.unique_count} domains, file: ${run.source_filename ?? '?'})`);
       const startedAt = Date.now();
 
@@ -96,12 +113,13 @@ async function main(): Promise<void> {
         `← Run ${run.id} ${result.status} in ${elapsed}s: storage=${result.buckets.storage}, medium=${result.buckets.medium}, high=${result.buckets.high}, top=${result.buckets.top}, invalid=${result.buckets.invalid}`,
       );
     } catch (err) {
-      log('error', 'Worker loop error', err);
-      await sleep(30_000);
+      log('error', err instanceof PendingRunQueryError ? 'Failed to query pending runs' : 'Worker loop error', err);
+      await sleep(err instanceof PendingRunQueryError ? 15_000 : 30_000);
     }
   }
 
   log('info', 'Graceful shutdown');
+  await priorityPool?.end();
   process.exit(0);
 }
 
