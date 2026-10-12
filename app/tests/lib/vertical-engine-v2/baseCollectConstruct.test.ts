@@ -88,7 +88,7 @@ import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceChe
 import { recoverVeSavedEmails, resumeVeSavedEmailRecovery, hasPendingVeSavedEmailRecovery,
   type VeSavedEmailRecoveryState } from '@/lib/verticalEngineV2/savedEmailRecovery';
 import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
-import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
+import { normalizeVeSourceContacts, VE_CONFIRMED_WEBSITE_MARK } from '@/lib/verticalEngineV2/sourceContacts';
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { planVeJobFailure } from '@/lib/verticalEngineV2/jobRetry';
@@ -294,11 +294,10 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(result).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
       // A second click must join the same queued recovery.
       await expect(enqueueVeBaseCollect(supabase, enqueueInput)).resolves.toMatchObject({ ok: true, created: false, base: { id: 'b1' } });
+      // This failed on relevance coverage, not SMTP. Continuing that saved
+      // phase must not clear settled unknowns and buy another email check.
       expect((db.getRows('ve_bases').find((base) => base.id === 'b1')!.collect_info as VeCollectInfo).saved_email_recovery)
-        .toMatchObject({ generation: complete ? 2 : 1, checked: { b: 'ok', c: 'catch_all', d: 'invalid' },
-          automatic_checked: { b: 'ok', c: 'catch_all', d: 'invalid' } });
-      expect((db.getRows('ve_bases').find((base) => base.id === 'b1')!.collect_info as VeCollectInfo).saved_email_recovery?.checked)
-        .not.toHaveProperty('a');
+        .toEqual(info.saved_email_recovery);
       const queued = db.getRows('ve_jobs').filter((j) => j.stage === 'base_collect').at(-1)!;
       const job = { ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] };
       await supabase.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
@@ -588,7 +587,7 @@ describe('base_collect CONSTRUCT step order', () => {
     const hints = [{ key: veCompanyFactKey(company)!, website: 'https://orion.test/', facts: 'Производим промышленное оборудование',
       observedAt: new Date().toISOString(), inns: [company.inn], ownerInns: [company.inn] }];
     expect(prioritizeVeCandidates([spare, company, present], hints, 'Промышленное оборудование'))
-      .toEqual([{ ...company, website: hints[0].website }, present, spare]);
+      .toEqual([{ ...company, website: hints[0].website, source_detail: `${VE_CONFIRMED_WEBSITE_MARK} ${hints[0].website}` }, present, spare]);
     expect(prioritizeVeCandidates([company], [{ ...hints[0], inns: ['7700000002'], ownerInns: ['7700000002'] }])[0].website).toBe('');
     expect(prioritizeVeCandidates([company], hints, '', Date.now() + VE_COMPANY_FACT_TTL_MS)[0].website).toBe('');
     expect(company.website).toBe('');
@@ -2727,6 +2726,131 @@ describe('VE2 cross-base contact exclusion', () => {
       excluded_existing_bases_after_construct: 1,
       launchable_rows: 1,
     });
+
+    // Project exclusions use only already present identifiers. Block known
+    // matches before paid admission; an anonymous Gmail contact stays eligible.
+    const policy = { project_id: 'p1', revision: 1, inns: ['7700000101', '7700000102'],
+      domains: ['blocked.test'], updated_at: '2026-10-12T10:00:00Z' };
+    const candidates = [
+      unifiedRow({ company: 'Excluded by INN', inn: '7700000101', website: 'known.test', email: 'mail@known.test' }),
+      unifiedRow({ company: 'Excluded by domain', website: 'sales.blocked.test', email: 'mail@sales.blocked.test' }),
+      unifiedRow({ company: 'Allowed clinic', inn: '7700000103', website: 'allowed.test', email: 'mail@allowed.test' }),
+      unifiedRow({ company: 'Identity appears later', email: 'later@gmail.com' }),
+      unifiedRow({ company: 'Unidentified clinic', email: 'unknown@gmail.com' }),
+    ];
+    const excludedInfo: VeCollectInfo = { ...collectInfo(candidates), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 } };
+    excludedInfo.tasks![0].exhausted = true;
+    const policyDb = seed(excludedInfo, { ve_project_exclusions: [policy,
+      { project_id: 'another-project', revision: 9, inns: ['7700000103'], domains: ['allowed.test'] }] });
+    const policyClient = policyDb as unknown as SupabaseClient;
+    const gateCalls = mockFindIrrelevantRows.mock.calls.length;
+    const sourceCalls = jest.mocked(fetchVeRelevanceEvidence).mock.calls.length;
+    await runBaseCollectStage(makeJob(), { supabase: policyClient });
+    const child = policyDb.getRows('base_constructor_jobs')[0];
+    expect(policyDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    const inputGrid = child.data as string[][];
+    expect(inputGrid).toHaveLength(4);
+    expect(inputGrid.slice(1).map((row) => row[0])).toEqual(expect.arrayContaining([
+      'Allowed clinic', 'Identity appears later', 'Unidentified clinic',
+    ]));
+    expect(inputGrid.flat()).not.toContain('Excluded by INN');
+    expect(inputGrid.flat()).not.toContain('Excluded by domain');
+    const innColumn = inputGrid[0].indexOf('ИНН');
+    expect(innColumn).toBeGreaterThanOrEqual(0);
+    const outputGrid = inputGrid.slice(1).map((row) => {
+      const values = [...row];
+      if (values[0] === 'Identity appears later') values[innColumn] = '7700000102';
+      return [...values, 'ok'];
+    });
+    await policyDb.from('base_constructor_jobs').update({ status: 'completed',
+      data: [[...inputGrid[0], 'Email Статус'], ...outputGrid] }).eq('id', child.id);
+    await policyDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+    await runBaseCollectStage(makeJob(), { supabase: policyClient });
+    const finished = policyDb.getRows('ve_bases')[0];
+    expect((finished.data as Array<Record<string, unknown>>).map((row) => row.email).sort())
+      .toEqual(['mail@allowed.test', 'unknown@gmail.com']);
+    expect(finished.collect_info).toMatchObject({ project_exclusions: {
+      revision: 1, mode: 'existing_identity', blocked_rows: 1, unidentified_rows: 1,
+    }, target_progress: { candidates_processed: 3, max_candidates: 10_000 },
+    project_exclusion_reserve: { rows: [expect.objectContaining({ email: 'later@gmail.com', inn: '7700000102', _email_status: 'ok' })] } });
+    expect(stripTaskHarvest(finished).collect_info).not.toHaveProperty('project_exclusion_reserve');
+    expect(mockFindIrrelevantRows.mock.calls.slice(gateCalls).flatMap(([request]) => request.rows)
+      .some((row: Record<string, unknown>) => row.inn === '7700000102')).toBe(false);
+    expect(jest.mocked(fetchVeRelevanceEvidence).mock.calls.length).toBe(sourceCalls);
+    await runBaseCollectStage(makeJob(), { supabase: policyClient });
+    expect(policyDb.getRows('base_constructor_jobs')).toHaveLength(1);
+
+    // Removing a rule does not start a job or repeat paid acquisition. At the
+    // next explicit saved-only review, its existing email verdict is retained
+    // and only the never-reviewed observation joins the normal relevance gate.
+    await policyDb.from('ve_project_exclusions').update({ revision: 2, inns: ['7700000101'] }).eq('project_id', 'p1');
+    const resumeInfo = policyDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    await policyDb.from('ve_bases').update({ status: 'collecting', collect_info: {
+      ...resumeInfo, relevance_review_requested: true,
+    } }).eq('id', 'b1');
+    await policyDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+    const restoredGateCalls = mockFindIrrelevantRows.mock.calls.length;
+    await runBaseCollectStage(makeJob(), { supabase: policyClient });
+    expect((policyDb.getRows('ve_bases')[0].data as Array<Record<string, unknown>>).map((row) => row.email).sort())
+      .toEqual(['later@gmail.com', 'mail@allowed.test', 'unknown@gmail.com']);
+    expect(mockFindIrrelevantRows.mock.calls.slice(restoredGateCalls).flatMap(([request]) => request.rows)
+      .some((row: Record<string, unknown>) => row.inn === '7700000102')).toBe(true);
+    expect(policyDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect(policyDb.getRows('ve_bases')[0].collect_info).toMatchObject({
+      project_exclusion_reserve: { rows: [] }, target_progress: { candidates_processed: 3 },
+    });
+
+    // A reserved batch may be disallowed between its durable checkpoint and
+    // child insertion. Complete that same reservation locally with no paid
+    // worker claim, instead of hanging forever or creating another child.
+    const reservedInfo: VeCollectInfo = { ...collectInfo([candidates[0]]), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
+      preview_pipeline: { version: 1, revision: 0, batches: [{ id: 'policy-reserved-child',
+        rows: [candidates[0]], dispatched_at: '2026-10-12T10:00:00Z' }] } };
+    reservedInfo.tasks![0].exhausted = true;
+    const reservedDb = seed(reservedInfo, { ve_project_exclusions: [policy] });
+    const reservedGateCalls = mockFindIrrelevantRows.mock.calls.length;
+    await runBaseCollectStage(makeJob(), { supabase: reservedDb as unknown as SupabaseClient });
+    expect(reservedDb.getRows('base_constructor_jobs')).toEqual([expect.objectContaining({
+      id: 'policy-reserved-child', status: 'completed', initial_row_count: 0,
+    })]);
+    expect(reservedDb.getRows('ve_bases')[0]).toMatchObject({ row_count: 0, data: [] });
+    expect(mockFindIrrelevantRows.mock.calls.length).toBe(reservedGateCalls);
+
+    // An unavailable policy is different from an unidentified company. It
+    // stops before any paid work instead of silently treating rules as empty.
+    const unreadableDb = createMockSupabase({ tables: {
+      ve_bases: [makeBase(collectInfo([candidates[2]]))], ve_jobs: [makeJob() as unknown as Record<string, unknown>],
+    }, errorTables: { ve_project_exclusions: 'database unavailable' } });
+    await expect(runBaseCollectStage(makeJob(), { supabase: unreadableDb as unknown as SupabaseClient }))
+      .rejects.toThrow('Не удалось проверить исключения проекта');
+    expect(unreadableDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(mockFindIrrelevantRows.mock.calls.length).toBe(reservedGateCalls);
+
+    // A rule changed during the last paid phase must still win publication.
+    // No second cleanup call or another constructor is needed to enforce it.
+    const changing = seed({ ...collectInfo([candidates[2]], dispatched), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 } },
+    { ve_project_exclusions: [{ ...policy, inns: [], domains: [] }], base_constructor_jobs: [{
+      id: dispatched.bc_job_id, status: 'completed', selected_steps: ['split_emails', 'validate_emails'],
+      data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'],
+        ['Allowed clinic', 'allowed.test', 'mail@allowed.test', '7700000103', 'ok']],
+    }] });
+    (changing.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0].exhausted = true;
+    const nameCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
+    const cleanNames = jest.mocked(callLLMWithSchema).getMockImplementation()!;
+    jest.mocked(callLLMWithSchema).mockImplementationOnce(async (...args) => {
+      await changing.from('ve_project_exclusions').update({ revision: 2, domains: ['allowed.test'] }).eq('project_id', 'p1');
+      return cleanNames(...args);
+    });
+    await runBaseCollectStage(makeJob(), { supabase: changing as unknown as SupabaseClient });
+    expect(changing.getRows('ve_bases')[0]).toMatchObject({ row_count: 0, data: [], collect_info: {
+      project_exclusions: { revision: 2, blocked_rows: 1 }, target_progress: { ready_rows: 0 },
+      project_exclusion_reserve: { rows: [expect.objectContaining({ email: 'mail@allowed.test' })] },
+    } });
+    expect(jest.mocked(callLLMWithSchema).mock.calls.length).toBe(nameCalls + 1);
+    expect(changing.getRows('base_constructor_jobs')).toHaveLength(1);
   });
 });
 
@@ -2994,6 +3118,106 @@ describe('base_collect: план кончился раньше цели', () => 
     expect(prior.adaptive_collection!.active_source).toBe(veSourceStrategyKey(prior.tasks![0].task));
     expect(prior.source_selection?.previous_tasks[0]).toMatchObject({ task, exhausted: true });
     expect(applyVeNicheSourceSelection(prior, 'payments')).toBe(false);
+
+    // Existing payment bases have already applied v1. Refresh only their
+    // future source scope once; never erase what was tried or paid for.
+    const legacyPayments = JSON.parse(JSON.stringify(prior)) as VeCollectInfo;
+    legacyPayments.source_selection!.version = 1;
+    delete legacyPayments.tasks![0].task.directory_filters!.identityCatalog;
+    legacyPayments.tasks![0].task.directory_filters!.nameTerms = ['платеж', 'финтех', 'pay'];
+    legacyPayments.tasks![0].exhausted = true;
+    legacyPayments.plan!.tasks = legacyPayments.tasks!.map((state) => state.task);
+    legacyPayments.adaptive_collection!.active_source = veSourceStrategyKey(legacyPayments.tasks![0].task);
+    const oldPaymentKey = legacyPayments.adaptive_collection!.active_source;
+    const paymentHistory = JSON.stringify(legacyPayments.source_selection!.previous_tasks);
+    const paymentBudgets = JSON.stringify([legacyPayments.target_progress, legacyPayments.target_checkpoint,
+      legacyPayments.search_policy, legacyPayments.adaptive_collection!.completed, legacyPayments.adaptive_collection!.replan_attempts]);
+    expect(applyVeNicheSourceSelection(legacyPayments, 'payments')).toBe(true);
+    expect(legacyPayments.source_selection?.version).toBe(2);
+    expect(JSON.stringify(legacyPayments.source_selection!.previous_tasks.slice(0, -1))).toBe(paymentHistory);
+    expect(legacyPayments.tasks![0].task.directory_filters).toMatchObject({ identityCatalog: 'payments-2026-10-12' });
+    expect(legacyPayments.tasks![0].task.directory_filters!.nameTerms).toEqual(expect.arrayContaining(['пэй', 'пеймент']));
+    expect(legacyPayments.adaptive_collection!.active_source).not.toBe(oldPaymentKey);
+    expect(legacyPayments.tasks![0].exhausted).toBeUndefined();
+    expect(legacyPayments.tasks![0].directory_cursors).toEqual({ old_scope: 2000 });
+    expect(JSON.stringify([legacyPayments.target_progress, legacyPayments.target_checkpoint,
+      legacyPayments.search_policy, legacyPayments.adaptive_collection!.completed, legacyPayments.adaptive_collection!.replan_attempts])).toBe(paymentBudgets);
+    expect(applyVeNicheSourceSelection(legacyPayments, 'payments')).toBe(false);
+
+    // A corrected official site may retry a saved, unusable company once.
+    // Already acquired corrected sites, ready contacts and other bases win.
+    const provider = unifiedRow({ company: 'ООО ПЭЙКИПЕР-ПРОЦЕССИНГ', inn: '5047186409',
+      website: 'unrelated.test', email: 'wrong@unrelated.test' });
+    const correctedProvider = normalizeVeSourceContacts(provider);
+    const providerTask = legacyPayments.tasks![0].task;
+    for (const blockedBy of ['none', 'corrected_seen', 'ready', 'other_base'] as const) {
+      const repairedInfo = exhaustedInfo(providerTask, {
+        niche_source_profile: 'payments', source_selection: { version: 2, profile: 'payments', previous_tasks: [] },
+        hypotheses: [{ id: 'h1', status: 'accepted', ...payment }],
+        target_checkpoint: { completed_round: 2, seen_rows: [blockedBy === 'corrected_seen' ? correctedProvider : provider], processed_rows: 1 },
+        target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: 1, ready_rows: 0 },
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, active_source: veSourceStrategyKey(providerTask) },
+      });
+      repairedInfo.tasks![0] = { source: 'companies_directory', status: 'pending', child_job_id: null,
+        rows: 0, task: providerTask, harvest: [] };
+      const providerDb = seedBase(repairedInfo, payment, { data: blockedBy === 'ready' ? [provider] : [] },
+        blockedBy === 'other_base' ? [{ id: 'other-provider-base', project_id: PROJECT.id, hypothesis_id: 'other-hypothesis',
+          status: 'analyzed', data: [provider] }] : []);
+      jest.mocked(searchVeNicheDirectoryRows).mockClear().mockResolvedValue({ rows: [
+        { name: provider.company, inn: provider.inn, website: provider.website, email: provider.email },
+      ] });
+      jest.mocked(callLLMWithSchema).mockClear();
+      await wake(providerDb);
+      const created = providerDb.getRows('base_constructor_jobs');
+      expect(created).toHaveLength(blockedBy === 'none' ? 1 : 0);
+      if (created.length) {
+        const grid = created[0].data as string[][];
+        expect(grid[1][grid[0].indexOf('Сайт')]).toBe(correctedProvider.website);
+        expect(grid[1][grid[0].indexOf('Email')]).toBe('');
+      }
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+    }
+
+    // A fresh exact-owner fact repairs a nonempty raw URL before acquisition.
+    // The saved harvest must receive the URL, cleared email and provenance
+    // together, even though normalization changed its receipt in memory.
+    const rawOwner = unifiedRow({ company: 'Платёжный провайдер пример', inn: '7700000995',
+      website: 'stale-owner.test', email: 'wrong@stale-owner.test', source_detail: 'реестр' });
+    const verifiedWebsite = 'https://verified-owner.test/contacts';
+    const factInfo = exhaustedInfo(providerTask, {
+      niche_source_profile: 'payments', source_selection: { version: 2, profile: 'payments', previous_tasks: [] },
+      hypotheses: [{ id: 'h1', status: 'accepted', ...payment }],
+      target_checkpoint: { completed_round: 2, seen_rows: [], processed_rows: 0 },
+      target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: 0, ready_rows: 0 },
+      adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, active_source: veSourceStrategyKey(providerTask) },
+    });
+    factInfo.tasks![0] = { source: 'companies_directory', status: 'pending', child_job_id: null,
+      rows: 0, task: providerTask, harvest: [] };
+    const factDb = seedBase(factInfo, payment, { data: [] });
+    await factDb.from('ve_company_fact_pages').insert({ company_key: veCompanyFactKey(rawOwner), reader_version: 1,
+      observed_at: new Date().toISOString(), expires_at: new Date(Date.now() + VE_COMPANY_FACT_TTL_MS).toISOString(),
+      website: verifiedWebsite, facts: 'Платежный агрегатор для бизнеса', inns: [rawOwner.inn], owner_inns: [rawOwner.inn] });
+    jest.mocked(searchVeNicheDirectoryRows).mockClear().mockResolvedValue({ rows: [
+      { name: rawOwner.company, inn: rawOwner.inn, website: rawOwner.website, email: rawOwner.email },
+    ] });
+    jest.mocked(callLLMWithSchema).mockClear();
+    jest.mocked(fetchVeRelevanceEvidence).mockClear();
+    const factResult = (await wake(factDb)).collect_info as VeCollectInfo;
+    const savedOwner = factResult.tasks![0].harvest![0];
+    expect(savedOwner).toMatchObject({ inn: rawOwner.inn, website: verifiedWebsite, email: '' });
+    expect(savedOwner.source_detail).toContain(`${VE_CONFIRMED_WEBSITE_MARK} ${verifiedWebsite}`);
+    expect(savedOwner.source_detail).toContain(rawOwner.email);
+    const factChildren = factDb.getRows('base_constructor_jobs');
+    expect(factChildren).toHaveLength(1);
+    const factGrid = factChildren[0].data as string[][];
+    expect(factGrid[1][factGrid[0].indexOf('Сайт')]).toBe(verifiedWebsite);
+    expect(factGrid[1][factGrid[0].indexOf('Email')]).toBe('');
+    const childBeforeRetry = JSON.stringify(factChildren[0]);
+    await wake(factDb);
+    expect(factDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect(JSON.stringify(factDb.getRows('base_constructor_jobs')[0])).toBe(childBeforeRetry);
+    expect(callLLMWithSchema).not.toHaveBeenCalled();
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
 
     // PG esoteric/fintech, 12.10: v1 changed the query but kept a done page
     // attributed to the old, dry strategy. That page must not pin renewal.
@@ -4005,8 +4229,8 @@ describe('base_collect: сухие источники завершают баз�
     // Ни нового дочернего конструктора, ни подбора среза.
     expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
     expect(callLLMWithSchema).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), { model: 'test-collection-model' });
-    // Терминальный статус с завершённым раундом: после анализа «Продолжить подготовку» доступна.
-    expect(canResumePartialPreview({ ...base, status: 'analyzed' })).toBe(true);
+    // Тот же сухой источник не становится полезным после очередного нажатия.
+    expect(canResumePartialPreview({ ...base, status: 'analyzed' })).toBe(false);
   });
 
   it('школы: пока подбор нового среза не израсходован, сухие источники сначала расширяют срез', async () => {

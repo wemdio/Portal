@@ -346,7 +346,14 @@ describe('VE2 contact delivery scheduler', () => {
           await db.from('ve_contact_supply_batches').update({ status: 'auditing', audit_id: 'audit' }).eq('id', 'batch');
           return { data: { audit_id: 'audit', status: 'ready' } };
         },
-        ve_append_contact_supply_batch: async (_params, db) => {
+        ve_append_contact_supply_batch: async (params, db) => {
+          // Production SQL requires exact equality with audited supply_leads.
+          // Do not add private metadata only at materialization time.
+          const source = db.getRows('ve_bases').find(row => row.id === 'supply-base');
+          const snapshot = prepareAuditSnapshot(template as never, source as never);
+          for (const row of params.p_rows as Array<{ source_row_index: number; lead_payload: unknown }>) {
+            expect(row.lead_payload).toEqual(snapshot.audience.leads[row.source_row_index]);
+          }
           await db.from('ve_contact_supply_batches').update({ status: 'appended', appended_count: 1 }).eq('id', 'batch');
           return { data: { appended_count: 1, replayed: false } };
         },

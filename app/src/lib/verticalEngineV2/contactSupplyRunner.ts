@@ -7,6 +7,8 @@ import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
 import { buildContactSupplyRequests } from './contactSupplyPlanner';
 import { parseExactNonNegativeContactCount } from './contactDeliveryPreview';
 import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDeliveryInventory';
+import { loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
+import { createVeDeliveryIdentityResolver } from './projectExclusionDelivery';
 import { buildSegmentationLaunchGroups } from './segmentationAudit';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
@@ -147,9 +149,10 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
     portalProjectId: project.portal_project_id, portalPeriodId: project.portal_period_id ?? null,
     targetContacts: project.target_contacts, presetId: project.launch_preset_id,
   }, preset);
+  const exclusions = await loadVeProjectExclusions(portalDb, projectId);
   const [inventory, rows, blocked, items] = await Promise.all([
     loadVeContactDeliveryCampaignInventory(portalDb, instantlyDb, projectId),
-    loadVeContactDeliveryRows(portalDb, projectId),
+    loadVeContactDeliveryRows(portalDb, projectId, exclusions.inns.length + exclusions.domains.length > 0),
     getBlockedEmailSet(instantlyDb, preset.client_user_id),
     readContactDeliveryPages<SupplyItem>('active supply items', (from, to) => portalDb.from('ve_launch_queue_items')
       .select('id, status, potential_pct', { count: 'exact' }).eq('project_id', projectId).eq('status', 'active')
@@ -176,11 +179,17 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
     ? Math.min(BUFFER_WORKDAYS * settings.dailyCapacity, Math.max(0, plan.remainingContacts - outstanding))
     : plan.days.slice(0, BUFFER_WORKDAYS).reduce((sum, day) => sum + day.quota, 0);
   const campaignItems = new Map(campaigns.map((campaign) => [campaign.id, campaign.item_id]));
+  const readyCandidates = rows.filter(row => row.status === 'ready' || row.status === 'reserved');
+  const policyRows = exclusions.inns.length + exclusions.domains.length > 0
+    ? await createVeDeliveryIdentityResolver(portalDb, projectId)(readyCandidates) : [];
+  const excludedRows = new Set(readyCandidates.filter((_, index) => policyRows[index]
+    && matchVeProjectExclusion(policyRows[index], exclusions)).map(row => row.id));
   const requests = buildContactSupplyRequests(bufferTarget, items.map((item) => ({
     id: item.id, weight: item.potential_pct,
     ready: rows.filter((row) => activeCampaignRows.has(row.campaign_row_id)
       && campaignItems.get(row.campaign_row_id) === item.id
-      && (row.status === 'ready' || row.status === 'reserved') && !blocked.has(row.email_normalized)).length,
+      && (row.status === 'ready' || row.status === 'reserved') && !blocked.has(row.email_normalized)
+      && !excludedRows.has(row.id)).length,
   })));
   return { requests, campaigns, blocked, existingEmails: new Set(rows.map((row) => row.email_normalized)),
     // Stock is prepared ahead of the next sending days, including weekends.
@@ -310,12 +319,14 @@ export async function runProjectContactSupply(input: {
       classification: { assignments: validation.assignments, unclassifiedRows: [], failedBatches: 0, totalBatches: 0, usage: { tokensUsed: 0, costUsd: 0 } },
     });
     const campaigns = context.campaigns.filter((campaign) => campaign.item_id === plan.item_id);
+    const exclusions = await loadVeProjectExclusions(portalDb, veProjectId);
     const rows: Array<{ campaign_id: string; source_row_index: number; lead_payload: Record<string, unknown>; email_normalized: string }> = [];
     let missingCampaign = false;
     for (const group of groups) {
       const allowed = group.leadIndices.filter((index) => {
         const email = validation.snapshot.audience.leads[index].email.trim().toLowerCase();
-        return !context.blocked.has(email) && !context.existingEmails.has(email);
+        return !context.blocked.has(email) && !context.existingEmails.has(email)
+          && !matchVeProjectExclusion(validation.snapshot.audience.rows[index], exclusions);
       });
       if (!allowed.length) continue;
       const matches = campaigns.filter((campaign) => (campaign.segment ?? null) === group.segment);
@@ -324,7 +335,11 @@ export async function runProjectContactSupply(input: {
         const lead = validation.snapshot.audience.leads[index];
         const email = lead.email.trim().toLowerCase();
         rows.push({
-          campaign_id: matches[0].campaign_id, source_row_index: index, lead_payload: { ...lead }, email_normalized: email,
+          campaign_id: matches[0].campaign_id, source_row_index: index,
+          // The append RPC verifies exact equality against audit.supply_leads.
+          // Source identity is recoverable by supply_batch_id without changing
+          // the immutable audited provider payload.
+          lead_payload: { ...lead }, email_normalized: email,
         });
       }
     }

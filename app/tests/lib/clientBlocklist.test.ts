@@ -20,6 +20,11 @@ import {
   getClientExcludedDomainSuffixes,
   isClientDomainExcluded,
 } from '@/lib/clientBlocklist/domainPolicy';
+import {
+  filterVeProjectExcludedRows, getVeProjectExclusionIdentity, loadVeProjectExclusions,
+  matchVeProjectExclusion, normalizeVeExclusionDomain, validateVeProjectExclusionInput,
+  type VeProjectExclusions,
+} from '@/lib/verticalEngineV2/projectExclusions';
 
 describe('client company-domain policy', () => {
   const clientId = '0a6d90e1-91d0-404e-b508-6b031bda7cfd';
@@ -46,6 +51,41 @@ describe('client company-domain policy', () => {
     expect(result.kept).toEqual([leads[1], leads[3], leads[4]]);
     expect(result.kept[0]).toBe(leads[1]);
     expect(filterClientDomainLeads(leads, 'another-client').kept).toEqual(leads);
+
+    // VE2 project rules use known company identifiers only, without site requests.
+    const rules: VeProjectExclusions = { projectId: 've-project', revision: 1,
+      inns: ['7701234567'], domains: ['company.ru', 'xn--e1afmkfd.xn--p1ai', 'tenant.github.io'], updated_at: null };
+    const audience = [
+      { email: 'one@gmail.com', ИНН: '7701234567' },
+      { email: 'two@branch.company.ru' },
+      { email: 'three@gmail.com', Сайт: 'HTTPS://WWW.COMPANY.RU./contacts' },
+      { email: 'four@notcompany.ru' },
+      { email: 'five@company.ru.evil.test' },
+      { email: 'six@mail.ru' },
+      { email: 'seven@other.test', custom_variables: { Сайт: 'https://пример.рф' } },
+      { email: 'eight@other.test', _ve_company_identity: { inns: ['7701234567'], domains: [] } },
+      { email: 'nine@other.test', website: 'tenant.github.io' },
+      { email: 'ten@other.test', website: 'other.github.io' },
+    ];
+    const filtered = filterVeProjectExcludedRows(audience, rules);
+    expect(filtered.kept).toEqual([audience[3], audience[4], audience[5], audience[9]]);
+    expect(filtered.blockedCount).toBe(6);
+    expect(filtered.unidentifiedCount).toBe(4); // INN missing; unmatched rows deliberately stay.
+    expect(filtered.kept[0]).toBe(audience[3]);
+    expect(filterVeProjectExcludedRows(audience, { ...rules, projectId: 'other', inns: [], domains: [] }).kept).toBe(audience);
+    expect(getVeProjectExclusionIdentity(audience[6])).toEqual({ inns: [], domains: ['other.test', 'xn--e1afmkfd.xn--p1ai'] });
+    expect(matchVeProjectExclusion({ email: 'x@gmail.com', website: 'company.ru/not/a/company-name' }, rules)).toBe('domain');
+    expect(matchVeProjectExclusion({ email: 'x@gmail.com', company: 'company.ru', note: 'ИНН 7701234567' }, rules)).toBeNull();
+    expect(matchVeProjectExclusion({ website: 'company.ru' }, { ...rules, domains: ['branch.company.ru'], inns: [] })).toBeNull();
+    for (const invalid of ['com', 'co.uk', 'github.io', 'mail.ru', 'gmail.com', 'vk.com/client', '127.0.0.1',
+      'https://company.ru@evil.test', 'javascript:company.ru', '*.company.ru', 'company..ru', 'x@company.ru']) {
+      expect(normalizeVeExclusionDomain(invalid)).toBeNull();
+    }
+    expect(validateVeProjectExclusionInput({ revision: 0, inns: ['7701234567', '7701234567'],
+      domains: ['https://www.Company.ru/path', 'company.ru'] })).toEqual({ ok: true, revision: 0, inns: ['7701234567'], domains: ['company.ru'] });
+    expect(validateVeProjectExclusionInput({ revision: 0, inns: ['770123456'], domains: ['mail.ru'] })).toMatchObject({ ok: false });
+    expect(validateVeProjectExclusionInput({ revision: -1, inns: [], domains: [] })).toMatchObject({ ok: false });
+    expect(validateVeProjectExclusionInput({ revision: 0, inns: Array(10001).fill('7701234567'), domains: [] })).toMatchObject({ ok: false });
   });
 });
 
@@ -71,6 +111,17 @@ describe('getBlockedEmailSet', () => {
       fn: 'client_blocklist_snapshot',
       params: { p_client_user_id: 'client-1' },
     }]);
+
+    const projects = createMockSupabase({ tables: { ve_project_exclusions: [
+      { project_id: 'one', revision: 1, inns: ['7701234567'], domains: ['company.ru'], updated_at: '2026-10-12T00:00:00Z' },
+      { project_id: 'two', revision: 2, inns: [], domains: ['other.ru'], updated_at: null },
+    ] } });
+    expect(await loadVeProjectExclusions(projects as unknown as SupabaseClient, 'one')).toMatchObject({ projectId: 'one', revision: 1, domains: ['company.ru'] });
+    expect(await loadVeProjectExclusions(projects as unknown as SupabaseClient, 'missing')).toMatchObject({ revision: 0, domains: [], inns: [] });
+    const unavailable = createMockSupabase({ errorTables: { ve_project_exclusions: 'unavailable' } });
+    await expect(loadVeProjectExclusions(unavailable as unknown as SupabaseClient, 'one')).rejects.toThrow('Не удалось проверить');
+    const corrupt = createMockSupabase({ tables: { ve_project_exclusions: [{ project_id: 'one', revision: 1, inns: ['bad'], domains: [] }] } });
+    await expect(loadVeProjectExclusions(corrupt as unknown as SupabaseClient, 'one')).rejects.toThrow('повреждён');
   });
 
   it('fails closed instead of returning a truncated oversized blocklist', async () => {

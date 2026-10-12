@@ -5,6 +5,7 @@ import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSet
 import { ContactUploadNotice } from '@/components/vertical-engine-v2/engine/ContactUploadNotice';
 import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/OutreachLaunchPanel';
 import { DeliveryTargetPanel } from '@/components/vertical-engine-v2/engine/DeliveryTargetPanel';
+import { ProjectExclusions } from '@/components/vertical-engine-v2/engine/ProjectExclusions';
 
 const mockVeEnginePost = jest.fn();
 const mockVeEngineCall = jest.fn();
@@ -124,6 +125,79 @@ describe('VE2 auto-outreach launch panel', () => {
     });
     expect(onSaved).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    view.unmount();
+
+    // Project settings keep unsaved pasted identifiers through polling and
+    // require an explicit reload after concurrent or ambiguous saves.
+    const exclusionsUrl = '/api/tools/vertical-engine-v2/projects/project-1/exclusions';
+    const exclusions = { revision: 4, inns: ['7707083893'], domains: ['client.ru'], updated_at: null };
+    const onExclusionsSaved = jest.fn();
+    mockVeEngineCall.mockReset();
+    mockVeEngineCall.mockResolvedValueOnce({ ok: true, status: 200, data: exclusions });
+    const exclusionsView = render(<ProjectExclusions projectId="project-1" onSaved={onExclusionsSaved} />);
+    await user.click(await screen.findByRole('button', { name: 'Изменить исключения' }));
+    const innInput = screen.getByRole('textbox', { name: 'ИНН клиентов' });
+    const domainInput = screen.getByRole('textbox', { name: 'Домены клиентов' });
+    expect(innInput).toHaveFocus();
+    expect(screen.getByText(/Если ИНН нет и домен не совпал, контакт остаётся/)).toBeInTheDocument();
+    await user.clear(innInput); await user.paste('007707083\n7707083893; 7707083893');
+    await user.clear(domainInput); await user.paste('HTTPS://CLIENT.RU/path, other.ru');
+    exclusionsView.rerender(<ProjectExclusions projectId="project-1" onSaved={onExclusionsSaved} />);
+    expect(innInput).toHaveValue('007707083\n7707083893; 7707083893');
+    expect(mockVeEngineCall).toHaveBeenCalledTimes(1);
+    mockVeEngineCall.mockResolvedValueOnce({ ok: false, status: 400,
+      data: { error: 'Проверьте список исключений', errors: ['ИНН №1: нужно 10 или 12 цифр.'] } });
+    await user.click(screen.getByRole('button', { name: 'Сохранить исключения' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('ИНН №1: нужно 10 или 12 цифр.');
+    expect(JSON.parse(mockVeEngineCall.mock.calls[1][1].body)).toEqual({
+      revision: 4, inns: ['007707083', '7707083893'], domains: ['HTTPS://CLIENT.RU/path', 'other.ru'],
+    });
+    expect(onExclusionsSaved).not.toHaveBeenCalled();
+    expect(innInput).toHaveValue('007707083\n7707083893; 7707083893');
+
+    await user.clear(innInput); await user.paste('7707083893');
+    mockVeEngineCall.mockResolvedValueOnce({ ok: false, status: 409, data: { error: 'Список уже изменили. Загрузите актуальную версию.' } });
+    await user.click(screen.getByRole('button', { name: 'Сохранить исключения' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Список уже изменили');
+    await user.type(domainInput, '; extra.ru');
+    expect(screen.getByRole('button', { name: 'Сохранить исключения' })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Список уже изменили');
+    expect(onExclusionsSaved).not.toHaveBeenCalled();
+    const confirm = jest.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
+    try {
+      await user.click(screen.getByRole('button', { name: 'Обновить список' }));
+      expect(mockVeEngineCall).toHaveBeenCalledTimes(3);
+      expect(domainInput).toHaveValue('HTTPS://CLIENT.RU/path, other.ru; extra.ru');
+      mockVeEngineCall.mockResolvedValueOnce({ ok: true, status: 200, data: { ...exclusions, revision: 5, domains: ['new.ru'] } });
+      await user.click(screen.getByRole('button', { name: 'Обновить список' }));
+      await waitFor(() => expect(domainInput).toHaveValue('new.ru'));
+      await user.clear(domainInput); await user.paste('WWW.CLIENT.RU\nother.ru');
+      let resolveSave!: (value: unknown) => void;
+      mockVeEngineCall.mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
+      await user.click(screen.getByRole('button', { name: 'Сохранить исключения' }));
+      const saving = screen.getByRole('button', { name: 'Сохраняем…' });
+      expect(saving).toBeDisabled();
+      await user.click(saving);
+      expect(mockVeEngineCall).toHaveBeenCalledTimes(5);
+      expect(mockVeEngineCall).toHaveBeenLastCalledWith(exclusionsUrl, {
+        method: 'PUT', body: JSON.stringify({ revision: 5, inns: ['7707083893'], domains: ['WWW.CLIENT.RU', 'other.ru'] }),
+      });
+      await act(async () => { resolveSave({ ok: true, status: 200,
+        data: { ...exclusions, revision: 6, domains: ['client.ru', 'other.ru'], updated_at: '2026-10-12T12:00:00Z' } }); });
+      expect(await screen.findByText('Исключения сохранены для этого проекта.')).toBeInTheDocument();
+      expect(screen.getByText('ИНН: 1 · домены: 2')).toBeInTheDocument();
+      expect(onExclusionsSaved).toHaveBeenCalledTimes(1);
+      await user.click(screen.getByRole('button', { name: 'Изменить исключения' }));
+      const savedDomains = screen.getByRole('textbox', { name: 'Домены клиентов' });
+      expect(savedDomains).toHaveValue('client.ru\nother.ru');
+      await user.clear(savedDomains); await user.paste('third.ru');
+      mockVeEngineCall.mockRejectedValueOnce(new Error('Connection reset after response was lost'));
+      await user.click(screen.getByRole('button', { name: 'Сохранить исключения' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Не удалось подтвердить сохранение. Обновите список перед повтором.');
+      expect(screen.getByRole('button', { name: 'Сохранить исключения' })).toBeDisabled();
+      expect(savedDomains).toHaveValue('third.ru');
+      expect(onExclusionsSaved).toHaveBeenCalledTimes(1);
+    } finally { confirm.mockRestore(); }
   });
   beforeAll(() => {
     // jsdom не даёт crypto.randomUUID; панель берёт из него ключ идемпотентности.

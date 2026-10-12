@@ -69,6 +69,7 @@ describe('VE2 goal counts companies, not address density', () => {
     const state = getPreparationPresentation({ preparation, base: summary, jobs: [] });
     expect(state.title).toBe('База и письма готовы к согласованию');
     expect(state.description).toContain('Компаний: 39.');
-    expect(state.canContinue).toBe(true);
+    expect(state.canContinue).toBe(false);
+    expect(state.guidance.action).toBe('review');
   });
 });

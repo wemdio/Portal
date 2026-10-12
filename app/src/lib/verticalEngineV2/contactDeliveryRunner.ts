@@ -13,6 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createVeDeliveryExclusionGuard } from './projectExclusionDelivery';
 import {
   AppendLeadsPartialError,
   appendLeadsToClientCampaign,
@@ -469,6 +470,7 @@ export async function runContactDeliveryDay(input: {
         entitlementMode: 'managed_contract',
         expectedInstantlyAccountId: preflight.instantlyAccountId,
         pauseOnWorkspaceCapacity: true,
+        prepareProviderChunk: createVeDeliveryExclusionGuard(input.portalDb, input.veProjectId),
         beforeProviderRequest: async () => {
           const { data, error } = await input.portalDb.rpc('ve_renew_contact_delivery_request', {
             p_run_id: reservation.run_id, p_attempt_id: attemptId,

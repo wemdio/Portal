@@ -208,16 +208,20 @@ export type ContactDeliveryInventoryRow = {
   campaign_row_id: string;
   email_normalized: string;
   status: 'ready' | 'reserved' | 'attempting' | 'accepted' | 'skipped' | 'uncertain';
+  lead_payload?: Record<string, unknown>;
+  item_id?: string;
+  supply_batch_id?: string | null;
 };
 
-export async function loadVeContactDeliveryRows(db: SupabaseClient, veProjectId: string) {
+export async function loadVeContactDeliveryRows(db: SupabaseClient, veProjectId: string, includePolicyIdentity = false) {
   const rows = await readContactDeliveryPages<ContactDeliveryInventoryRow>(
     'delivery contact reserve',
-    (from, to) => db.from('ve_contact_delivery_rows')
-      .select('id, campaign_row_id, email_normalized, status', { count: 'exact' })
-      .eq('ve_project_id', veProjectId)
-      .order('id', { ascending: true })
-      .range(from, to),
+    (from, to) => {
+      const query = includePolicyIdentity
+        ? db.from('ve_contact_delivery_rows').select('id, campaign_row_id, email_normalized, status, lead_payload, item_id, supply_batch_id', { count: 'exact' })
+        : db.from('ve_contact_delivery_rows').select('id, campaign_row_id, email_normalized, status', { count: 'exact' });
+      return query.eq('ve_project_id', veProjectId).order('id', { ascending: true }).range(from, to);
+    },
   );
   if (new Set(rows.map((row) => row.id)).size !== rows.length
     || new Set(rows.map((row) => row.email_normalized)).size !== rows.length) {

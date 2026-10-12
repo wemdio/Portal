@@ -7,10 +7,11 @@
  * стоит денег, а каждое ужесточение — контактов; обе стороны под тестом.
  */
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
-import { recoverVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
+import { normalizeVeSourceContacts, recoverVeSourceContacts, VE_CONFIRMED_WEBSITE_MARK } from '@/lib/verticalEngineV2/sourceContacts';
 import { veCompanyFactKey, veFactPageKey } from '@/lib/verticalEngineV2/companyFacts';
+import { vePaymentCompanyHint } from '@/lib/verticalEngineV2/paymentCompanyDirectory';
 import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
-import type { VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
+import { parseVeEvidencePage, type VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 
 const OUR_INN = '7700000001';
 const FOREIGN_INN = '7800000002';
@@ -129,7 +130,7 @@ describe('подтверждение владения сайтом', () => {
     expect(result.status).not.toBe('ok');
   });
 
-  it('подтверждённая страница из памяти фактов проверяется вместо покупки поиска', async () => {
+  it('бесплатные источники сайта проверяются по владельцу вместо покупки поиска', async () => {
     // Раньше память подключалась только при пустом поле «сайт»: компания с
     // сайтом из реестра, который не печатает ИНН, платила за поиск заново.
     const search = jest.fn(async () => []);
@@ -156,6 +157,39 @@ describe('подтверждение владения сайтом', () => {
     // Память лишь даёт шанс подтвердиться бесплатно; покупать поиск не пришлось.
     expect(search).not.toHaveBeenCalled();
     expect(result.status).toBe('ok');
+
+    // A reviewed URL repairs a wrong registry URL without buying search. Two
+    // own legal entities are allowed only on their reviewed official host.
+    const ownInn = '5047186409';
+    const hint = vePaymentCompanyHint(ownInn)!;
+    const hintHost = new URL(hint.website).hostname;
+    const legalHtml = '<html><head><title>Реквизиты компании ООО ПЭЙКИПЕР ПРОЦЕССИНГ</title></head>'
+      + '<body><h1>Реквизиты компании</h1><p>ООО ПЭЙКИПЕР ПРОЦЕССИНГ. ИНН 5047186409</p>'
+      + '<p>ООО ПЭЙКИПЕР. ИНН 5008053934</p></body></html>';
+    expect(parseVeEvidencePage(Buffer.from(legalHtml), hint.website, 'text/html').ownerInns).toEqual([...hint.inns]);
+    const merchantCredits = legalHtml.replaceAll('Реквизиты компании', 'Оплата покупок');
+    expect(parseVeEvidencePage(Buffer.from(merchantCredits), 'https://merchant.test/credits', 'text/html').ownerInns).toEqual([]);
+    const partnerCredits = legalHtml.replaceAll('Реквизиты компании', 'Реквизиты платёжного партнёра');
+    expect(parseVeEvidencePage(Buffer.from(partnerCredits), 'https://merchant.test/credits', 'text/html').ownerInns).toEqual([]);
+    for (const [owners, expected] of [
+      [[...hint.inns], 'ok'], [[ownInn, FOREIGN_INN], 'unavailable'],
+      [[hint.inns[1]], 'unavailable'], [[], 'unavailable'],
+    ] as const) {
+      const paidSearch = jest.fn(async () => []);
+      const read = jest.fn(async (url: string) => page({ url,
+        // Brand/location cannot replace the required catalogue owner INN.
+        title: 'ПЭЙКИПЕР-ПРОЦЕССИНГ', text: 'ПЭЙКИПЕР-ПРОЦЕССИНГ. Москва. Приём онлайн-платежей.',
+        ownerInns: new URL(url).hostname === hintHost ? [...owners] : [FOREIGN_INN],
+      }));
+      const checked = await fetchVeRelevanceEvidence('https://wrong-owner.test/', {
+        companyInn: ownInn, companyName: 'ПЭЙКИПЕР-ПРОЦЕССИНГ', companyAddress: 'Москва',
+        fetchPage: read, search: paidSearch as never, allowPaidSearch: false, searchCache: async () => [],
+      });
+      expect(checked.status).toBe(expected);
+      expect(paidSearch).not.toHaveBeenCalled();
+      expect(checked.pages).toBeLessThanOrEqual(10);
+      if (expected === 'ok') expect(new URL(checked.url).hostname).toBe(hintHost);
+    }
   });
 });
 
@@ -173,5 +207,21 @@ describe('проход добора сайтов', () => {
     await recoverVeSourceContacts({ rows, fetchEvidence, save: async () => undefined });
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual(expect.objectContaining({ companyEmail: 'info@romashka-mebel.ru' }));
+
+    const stale = { ...rows[0], inn: '5047186409', website: 'https://wrong-owner.test/',
+      email: 'contact@wrong-owner.test' };
+    const repaired = normalizeVeSourceContacts(stale);
+    expect(new URL(repaired.website).hostname).toBe('paykeeper.ru');
+    expect(repaired.email).toBe('');
+    expect(repaired.source_detail).toContain(stale.website);
+    expect(repaired.source_detail).toContain(stale.email);
+    expect(normalizeVeSourceContacts(repaired)).toEqual(repaired);
+    // A payment-service email on a merchant row never identifies the service.
+    const merchant = { ...rows[0], inn: '7705401519', email: 'support@mixplat.ru', website: 'https://merchant.test/' };
+    expect(normalizeVeSourceContacts(merchant)).toEqual(merchant);
+    const fresherFact = { ...repaired, website: 'https://new-official.test/',
+      source_detail: `${repaired.source_detail}\n${VE_CONFIRMED_WEBSITE_MARK} https://new-official.test/` };
+    expect(normalizeVeSourceContacts(fresherFact)).toEqual(fresherFact);
+    expect(stale.email).toBe('contact@wrong-owner.test');
   });
 });
