@@ -221,6 +221,17 @@ export function describeSending(ctx: SendingContext): HealthMark {
     };
   }
 
+  // Заморозка не является временным cooldown, даже если старый срок паузы
+  // остался в карточке от предыдущего ограничения.
+  if (account.check_status === 'frozen') {
+    return {
+      tone: 'bad',
+      label: 'заморожен',
+      detail: `${account.check_detail ?? 'Telegram заморозил аккаунт.'} ${lastSentNote}`,
+      days: silentDays,
+    };
+  }
+
   const cooldownUntil = ts(account.cooldown_until);
   if (cooldownUntil !== null && cooldownUntil > now) {
     /**
@@ -242,20 +253,6 @@ export function describeSending(ctx: SendingContext): HealthMark {
 
   // Ограничение есть, а паузы уже нет: она истекла раньше, чем Telegram снял
   // спам-блок. Аккаунт формально свободен, но писать незнакомым не может.
-  /**
-   * Заморозка — не спам-блок: её не пережидают, по ней подают обжалование.
-   * Отдельная ветка, чтобы оператор не ставил такой аккаунт «на отлёжку» и не
-   * ждал впустую неделями.
-   */
-  if (account.check_status === 'frozen') {
-    return {
-      tone: 'bad',
-      label: 'заморожен',
-      detail: `${account.check_detail ?? 'Telegram заморозил аккаунт.'} ${lastSentNote}`,
-      days: silentDays,
-    };
-  }
-
   if (account.check_status === 'restricted') {
     return {
       tone: 'warn',
