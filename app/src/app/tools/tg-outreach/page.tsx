@@ -2268,6 +2268,13 @@ interface CheckRow {
   queued?: boolean;
 }
 
+function formatFreezeDeadline(iso: string): string {
+  return new Date(iso).toLocaleString('ru-RU', {
+    timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
 /**
  * Итоги проверки аккаунта человеческим языком.
  *
@@ -2285,16 +2292,15 @@ interface CheckRow {
  * живые номера, поймавшие спам-блок на пару дней, читались как сгоревшие.
  */
 /**
- * Обжалование заморозки: кнопка и окно с текстом.
+ * Первое сообщение по заморозке: кнопка и окно с текстом.
  *
  * Обращение отправляет не браузер, а воркер — тем соединением, которое уже
  * держит аккаунт. Подключиться отсюда нельзя: второе подключение к той же
  * сессии Telegram встречает AUTH_KEY_DUPLICATED и выключает аккаунт. Поэтому
  * кнопка ставит заказ в очередь, а не «отправляет».
  *
- * Текст даём править. Обращение читает живой человек в поддержке, и заготовка
- * на все случаи, разосланная десятком одинаковых аккаунтов, скорее навредит,
- * чем поможет.
+ * В @SpamBot дальше идёт отдельная анкета и проверка человека. Отправка одного
+ * сообщения не означает, что анкета завершена или заявка принята на разбор.
  */
 function AppealButton({
   account,
@@ -2319,7 +2325,7 @@ function AppealButton({
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        setError(body.error ?? 'Не получилось поставить обжалование');
+        setError(body.error ?? 'Не получилось поставить сообщение в очередь');
         return;
       }
       setOpen(false);
@@ -2334,25 +2340,33 @@ function AppealButton({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        title="Отправить обращение в поддержку Telegram от имени этого аккаунта"
+        title="Отправить первое сообщение; вопросы бота и проверку человека нужно пройти вручную"
         className="cursor-pointer rounded-md border border-rose-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-rose-700 transition hover:bg-rose-50"
       >
-        Обжаловать
+        Написать
       </button>
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-lg rounded-xl bg-white p-4 shadow-xl">
             <h3 className="text-sm font-semibold text-gray-900">
-              Обжалование заморозки · {account.first_name || account.session_name}
+              Первое сообщение по заморозке · {account.first_name || account.session_name}
             </h3>
             <p className="mt-1 text-[11px] leading-tight text-gray-500">
-              Обращение уйдёт от имени этого аккаунта, когда рассылка в ближайшем круге до него
-              дойдёт. Отправит его портал — заходить в аккаунт не нужно.
+              Портал отправит только это сообщение от имени аккаунта в ближайшем круге.
+              Вопросы @SpamBot и проверку Cloudflare нужно пройти вручную в Telegram.
             </p>
             {account.freeze_appeal_url && (
               <p className="mt-1 break-all text-[11px] text-gray-400">
                 Адрес от Telegram: {account.freeze_appeal_url}
+              </p>
+            )}
+            {account.check_status === 'frozen' && (
+              <p className="mt-1 text-[11px] font-medium text-rose-700">
+                Удаление без успешной апелляции:{' '}
+                {account.freeze_until_at
+                  ? `${formatFreezeDeadline(account.freeze_until_at)} МСК`
+                  : 'Telegram не сообщил дату'}
               </p>
             )}
 
@@ -3051,6 +3065,8 @@ function CampaignAccountsTab({
                 check_detail: detail,
                 checked_at: new Date().toISOString(),
                 other_sessions: otherSessions,
+                freeze_appeal_url: data?.freeze_appeal_url ?? null,
+                freeze_until_at: data?.freeze_until_at ?? null,
                 // Личность и телефон проверка узнаёт заодно — их ручка тоже
                 // записала, и в строке они должны появиться без перезагрузки.
                 ...(data?.tg_user_id != null ? { tg_user_id: data.tg_user_id } : {}),
@@ -3100,6 +3116,8 @@ function CampaignAccountsTab({
             ...a,
             check_status: data?.status ?? a.check_status,
             check_detail: data?.detail ?? a.check_detail,
+            freeze_appeal_url: data?.freeze_appeal_url ?? null,
+            freeze_until_at: data?.freeze_until_at ?? null,
             checked_at: new Date().toISOString(),
             other_sessions: data?.other_sessions ?? [],
           }
@@ -4126,7 +4144,7 @@ function CampaignAccountsTab({
                       )}
                       {a.appeal_requested_at && !a.appeal_status && (
                         <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">
-                          обжалование в очереди
+                          сообщение в очереди
                         </span>
                       )}
                       {a.appeal_status && !a.appeal_requested_at && (
@@ -4138,7 +4156,7 @@ function CampaignAccountsTab({
                               : 'bg-amber-50 text-amber-700'
                           }`}
                         >
-                          {a.appeal_status === 'sent' ? 'обжаловано' : 'обжалование не ушло'}
+                          {a.appeal_status === 'sent' ? 'сообщение отправлено' : 'сообщение не ушло'}
                         </span>
                       )}
                       {(a.other_sessions?.length ?? 0) > 0 && (
@@ -4201,6 +4219,13 @@ function CampaignAccountsTab({
                     </div>
                   ) : (
                     <span className="text-xs text-gray-300">—</span>
+                  )}
+                  {a.check_status === 'frozen' && (
+                    <div className="text-[10px] font-medium text-rose-700" title="Telegram удалит аккаунт к этому сроку, если апелляцию не примут">
+                      Удаление: {a.freeze_until_at
+                        ? `${formatFreezeDeadline(a.freeze_until_at)} МСК`
+                        : 'Telegram не сообщил дату'}
+                    </div>
                   )}
                   {a.checked_at && (
                     <div className="text-[10px] text-gray-400">

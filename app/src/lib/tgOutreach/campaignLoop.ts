@@ -2396,6 +2396,7 @@ export async function runCampaignLoop(
                   // Ссылку пишем всегда, в том числе пустую: аккаунт мог
                   // оттаять, и старый адрес обжалования вводил бы в заблуждение.
                   freeze_appeal_url: checkResult.freeze_appeal_url ?? null,
+                  freeze_until_at: checkResult.freeze_until_at ?? null,
                   ...(checkResult.tg_user_id != null ? { tg_user_id: checkResult.tg_user_id } : {}),
                   ...(checkResult.tg_username != null ? { tg_username: checkResult.tg_username } : {}),
                   ...(checkResult.phone ? { phone: checkResult.phone } : {}),

@@ -53,6 +53,8 @@ export interface AccountCheckResult {
    * было бы ошибкой при первой же правке формулировки.
    */
   freeze_appeal_url?: string | null;
+  /** Дата удаления без успешной апелляции из freeze_until_date, ISO UTC. */
+  freeze_until_at?: string | null;
 }
 
 function callTimeoutMs(): number {
@@ -136,7 +138,9 @@ export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict
   };
 
   const since = num(freezeKeys.find((k) => /since/i.test(k)));
-  const until = num(freezeKeys.find((k) => /until/i.test(k)));
+  // Для показываемого оператору срока берём только официальное поле: похожий
+  // ключ из конфига не должен стать ложной датой удаления.
+  const until = num('freeze_until_date');
   const appealUrl = str(freezeKeys.find((k) => /appeal|url/i.test(k)));
 
   // Поля заморозки появляются в конфиге только у замороженного аккаунта, но
@@ -250,7 +254,21 @@ export async function checkAccount(
       'проверка аккаунта',
     )) as Api.User | undefined;
   } catch (e) {
-    return classifyCheckError(e instanceof Error ? e.message : String(e));
+    const classified = classifyCheckError(e instanceof Error ? e.message : String(e));
+    if (classified.status === 'frozen') {
+      // Telegram может отклонить даже getMe. По документации после этого
+      // отказа конфиг остаётся доступен и содержит точный срок удаления.
+      try {
+        const freeze = await probeFreeze(client);
+        if (freeze) return {
+          status: 'frozen',
+          detail: describeFreeze(freeze),
+          freeze_appeal_url: freeze.appealUrl,
+          freeze_until_at: freeze.until ? new Date(freeze.until * 1000).toISOString() : null,
+        };
+      } catch { /* Код FROZEN уже подтвердил статус, но срок Telegram не отдал. */ }
+    }
+    return classified;
   }
 
   if (!me) {
@@ -339,6 +357,7 @@ export async function checkAccount(
       status: 'frozen',
       detail: describeFreeze(freeze),
       freeze_appeal_url: freeze.appealUrl,
+      freeze_until_at: freeze.until ? new Date(freeze.until * 1000).toISOString() : null,
       ...identity,
     };
   }
