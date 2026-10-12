@@ -10,7 +10,7 @@ import type { Log } from './process';
 /** Same first-sales destination as other agency email leads. */
 const PIPELINE_ID = 7670334;
 const NEW_LEAD_STATUS_ID = 63385358;
-const RESPONSIBLE_USER_ID = 10539886;
+const RESPONSIBLE_USER_ID = 12036498;
 const SUB_SOURCE_FIELD_ID = 1314381;
 const BATCH = 1;
 const MAX_ATTEMPTS = 5;
