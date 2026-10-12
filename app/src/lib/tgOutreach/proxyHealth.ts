@@ -504,7 +504,7 @@ export async function recordAccountSuccess(
     .eq('id', accountId);
 
   /**
-   * «Жив» пишем всем, КРОМЕ ограниченных и забаненных.
+   * «Жив» пишем всем, КРОМЕ ограниченных, замороженных и забаненных.
    *
    * Подключиться и получить диалоги умеет и аккаунт под спам-блоком: блок
    * закрывает переписку с незнакомыми, а не вход. Пока эта отметка ставилась
@@ -514,7 +514,8 @@ export async function recordAccountSuccess(
    * вовсе — она идёт только к тем, кто числится ограниченным.
    *
    * Обратно в «жив» ограниченный аккаунт возвращает не круг, а факт ушедшего
-   * первого касания — см. `clearRestrictionAfterSend`.
+   * первого касания — см. `clearRestrictionAfterSend`. Заморозка тоже
+   * позволяет читать диалоги, поэтому успешный круг её не снимает.
    */
   await db
     .from('tg_outreach_accounts')
@@ -524,7 +525,7 @@ export async function recordAccountSuccess(
       checked_at: new Date().toISOString(),
     })
     .eq('id', accountId)
-    .or('check_status.is.null,check_status.not.in.(restricted,banned)');
+    .or('check_status.is.null,check_status.not.in.(restricted,frozen,banned)');
 }
 
 /**
