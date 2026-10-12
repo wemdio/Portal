@@ -4,7 +4,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import OutcomesDashboard from '@/components/mailbox-load/OutcomesDashboard';
-import type { MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, TagStatus } from '@/lib/instantly/mailboxLoad';
+import type {
+  MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, TagStatus, InactiveTag, InactiveReason,
+} from '@/lib/instantly/mailboxLoad';
 import {
   sortTags, sortSpecialists, nextSort,
   type SortState, type TagSortKey, type SpecialistSortKey,
@@ -67,6 +69,40 @@ function SortTh<K extends string>({
 const fmt = (n: number) => n.toLocaleString('ru-RU');
 const pct = (u: number | null) => (u == null ? '—' : `${Math.round(u * 100)}%`);
 
+// 'YYYY-MM-DD' → «пт, 9 октября». День недели обязателен: без него «данные
+// за 11.10» не говорили, что это воскресенье и простой в нём ожидаем.
+const dayLabel = (d: string) =>
+  new Date(`${d}T00:00:00Z`).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long', timeZone: 'UTC' });
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+const REASON_LABEL: Record<InactiveReason, string> = {
+  project_done: 'Проект завершён',
+  no_recent_activity: 'Свои кампании не шлют неделю',
+  // не «кампаний не было»: ящики тега могли слать через другой тег
+  no_campaigns: 'Нет своих кампаний',
+  not_launched: 'Клиент ещё не запущен',
+};
+
+function reasonLabel(tag: InactiveTag): string {
+  if (tag.reason === 'project_done' && tag.projectStatus?.toLowerCase().startsWith('отмен')) return 'Проект отменён';
+  if (tag.reason === 'not_launched' && /колди|тригга/i.test(tag.workFormat ?? '')) return 'Ведётся вне Instantly';
+  return REASON_LABEL[tag.reason];
+}
+
+// уточнение причины: проект, найденный по имени тега (ещё не запускали или
+// ведут в Coldy), — его статус и формат работы
+function reasonDetail(tag: InactiveTag): string | null {
+  if (!tag.matchedByName) return null;
+  return [tag.projectStatus, tag.workFormat].filter(Boolean).join(' · ') || null;
+}
+
 // нормализация для сравнения «клиент ≈ название тега» (убираем пунктуацию/регистр)
 const norm = (s: string | null | undefined) => (s ?? '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
 
@@ -124,6 +160,9 @@ export default function MailboxLoadPage() {
   const [tagSort, setTagSort] = useState<SortState<TagSortKey> | null>(null);
   const [specSort, setSpecSort] = useState<SortState<SpecialistSortKey> | null>(null);
   const [expandedSpec, setExpandedSpec] = useState<string | null>(null);
+  // Блок «Не в работе» свёрнут: это справка о свободных ящиках, а не то, ради
+  // чего открывают страницу.
+  const [showInactive, setShowInactive] = useState(false);
 
   // Фетч в эффекте, ключ = выбранный день + reloadKey. Инлайн-async + setState ПОСЛЕ
   // await + флаг active — идиома дома (без cascading-render варнинга). Спиннер на старте
@@ -257,20 +296,38 @@ export default function MailboxLoadPage() {
             : 'border-amber-300 bg-amber-50 text-amber-900'
         }`}>
           <span>
-            Данные за <b className={data.stale ? 'text-red-900' : 'text-amber-950'}>{data.asOfDay || '—'}</b> (UTC-день)
+            Данные за <b className={data.stale ? 'text-red-900' : 'text-amber-950'}>{data.asOfDay ? dayLabel(data.asOfDay) : '—'}</b> (UTC-день)
           </span>
           {data.lastSync && <span>Последний синк: {new Date(data.lastSync).toLocaleString('ru-RU')}</span>}
           {data.stale && <span className="font-semibold">⚠️ Синк устарел — цифры могут быть неактуальны</span>}
+          {/* Выходные пропущены автоматически — называем их, а не прячем:
+              иначе в понедельник непонятно, почему таблица за пятницу. */}
+          {data.skippedDays.length > 0 && (
+            <span className="basis-full">
+              {data.skippedDays.map(dayLabel).join(' и ')} — {data.skippedDays.length === 1 ? 'выходной' : 'выходные'} по
+              расписанию кампаний, показан последний рабочий день. Выходной можно выбрать в поле «День».
+            </span>
+          )}
+          {!data.isSendingDay && (
+            <span className="basis-full font-semibold">
+              Выходной по расписанию кампаний: большинство из них в этот день не шлёт, простой ожидаем.
+            </span>
+          )}
         </div>
       )}
 
       {/* summary */}
-      {t && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {t && data && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <SummaryTile label="Потолок / день" value={fmt(t.capacity)} sub="Σ лимитов активных ящиков" />
           <SummaryTile label="Отправлено" value={fmt(t.sent)} sub="писем за день, все ящики" />
           <SummaryTile label="Утилизация" value={pct(t.utilization)} sub="факт / потолок" />
-          <SummaryTile label="Активных ящиков" value={fmt(t.activeMailboxes)} sub="под тегами" />
+          <SummaryTile label="Активных ящиков" value={fmt(t.activeMailboxes)} sub="под тегами в работе" />
+          <SummaryTile
+            label="Не в работе"
+            value={fmt(data.inactiveTotals.activeMailboxes)}
+            sub={`свободных активных ящиков, потолок ${fmt(data.inactiveTotals.capacity)}`}
+          />
         </div>
       )}
 
@@ -362,6 +419,55 @@ export default function MailboxLoadPage() {
         </div>
       )}
 
+      {/* ── НЕ В РАБОТЕ ── теги, ящики которых никто не использует: проект
+          завершён, кампании давно встали или их не было. Вне основной таблицы
+          и итогов — их простой означает свободные ящики, а не недогруз клиента. */}
+      {!loading && !error && data && data.inactiveTags.length > 0 && (
+        <div className="rounded-xl border border-zinc-200 bg-white">
+          <button
+            type="button"
+            onClick={() => setShowInactive((v) => !v)}
+            aria-expanded={showInactive}
+            className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded-xl px-3 py-2.5 text-left text-xs hover:bg-zinc-50"
+          >
+            <span className={`text-zinc-300 transition-transform ${showInactive ? 'rotate-90' : ''}`}>›</span>
+            <span className="font-medium text-zinc-800">Не в работе</span>
+            <span className="text-zinc-400">
+              {data.inactiveTotals.tagCount} {plural(data.inactiveTotals.tagCount, 'тег', 'тега', 'тегов')}
+              {' · '}{fmt(data.inactiveTotals.activeMailboxes)} {plural(data.inactiveTotals.activeMailboxes, 'свободный активный ящик', 'свободных активных ящика', 'свободных активных ящиков')}
+              {' · '}потолок {fmt(data.inactiveTotals.capacity)} в день
+            </span>
+          </button>
+          {showInactive && (
+            <div className="overflow-x-auto border-t border-zinc-100">
+              <table className="w-full min-w-[720px] text-xs">
+                <thead>
+                  <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
+                    <th className="px-3 py-2 font-medium">Тег / последний клиент</th>
+                    <th className="px-3 py-2 font-medium">Специалист</th>
+                    <th className="px-3 py-2 font-medium text-right">Свободно ящиков</th>
+                    <th className="px-3 py-2 font-medium text-right">Потолок</th>
+                    <th className="px-3 py-2 font-medium text-right">Посл. кампания</th>
+                    <th className="px-3 py-2 font-medium">Почему</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.inactiveTags.map((tag) => (
+                    <InactiveRows
+                      key={tag.tagId}
+                      tag={tag}
+                      expanded={expanded === tag.tagId}
+                      drill={drill[tag.tagId]}
+                      onToggle={() => void toggleTag(tag.tagId)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* notes */}
       {data && !error && data.notes.length > 0 && (
         <ul className="space-y-1 text-[11px] text-zinc-400">
@@ -411,6 +517,21 @@ function TagRows({ tag, expanded, drill, onToggle }: {
             {tag.client && norm(tag.client) !== norm(tag.tag) && (
               <span className="text-zinc-400">· {tag.client}</span>
             )}
+            {tag.matchedByName && tag.unlinkedCampaign && (
+              <span className="text-zinc-300" title={`Кампания не привязана к проекту в портале: ${tag.unlinkedCampaign}. Проект найден по имени тега.`}>
+                · кампания без проекта
+              </span>
+            )}
+            {tag.otherClients.length > 0 && (
+              <span className="text-zinc-300" title={`Ящики тега делят: ${tag.otherClients.join(', ')}`}>
+                +{tag.otherClients.length}
+              </span>
+            )}
+            {!tag.client && tag.unlinkedCampaign && (
+              <span className="text-zinc-300" title={`Кампания не привязана к проекту в портале: ${tag.unlinkedCampaign}`}>
+                · без проекта
+              </span>
+            )}
           </div>
         </td>
         <td className="px-3 py-2 text-zinc-600">
@@ -430,53 +551,113 @@ function TagRows({ tag, expanded, drill, onToggle }: {
       </tr>
       {expanded && (
         <tr className="bg-zinc-50/60">
-          <td colSpan={7} className="px-3 py-2">
-            {!drill || drill.loading ? (
-              <div className="py-3 text-center text-[11px] text-zinc-400">Загрузка ящиков…</div>
-            ) : drill.error ? (
-              <div className="py-3 text-center text-[11px] text-red-600">
-                Не удалось загрузить ящики. Кликните по строке ещё раз, чтобы повторить.
-              </div>
-            ) : drill.mailboxes.length === 0 ? (
-              <div className="py-3 text-center text-[11px] text-zinc-400">Ящики не найдены.</div>
-            ) : (
-              <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white">
-                <table className="w-full min-w-[560px] text-[11px]">
-                  <thead>
-                    <tr className="border-b border-zinc-100 text-left text-[9px] uppercase tracking-wider text-zinc-400">
-                      <th className="px-2.5 py-1.5 font-medium">Ящик</th>
-                      <th className="px-2.5 py-1.5 font-medium">Статус</th>
-                      <th className="px-2.5 py-1.5 font-medium text-right">Лимит</th>
-                      <th className="px-2.5 py-1.5 font-medium text-right">Отпр.</th>
-                      <th className="px-2.5 py-1.5 font-medium">Утил.</th>
-                      <th className="px-2.5 py-1.5 font-medium text-right">Посл. актив.</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {drill.mailboxes.map((mb) => {
-                      const idle = mb.statusValue === 1 && mb.sent === 0;
-                      const u = mb.dailyLimit > 0 ? mb.sent / mb.dailyLimit : null;
-                      return (
-                        <tr key={mb.email} className={`border-b border-zinc-50 ${idle ? 'bg-red-50/40' : ''}`}>
-                          <td className="px-2.5 py-1.5 font-mono text-[10px] text-zinc-700">{mb.email}</td>
-                          <td className="px-2.5 py-1.5">
-                            <span className={mb.statusValue === 1 ? 'text-emerald-600' : 'text-zinc-400'}>{mb.status ?? '—'}</span>
-                          </td>
-                          <td className="px-2.5 py-1.5 text-right tabular-nums text-zinc-600">
-                            {mb.dailyLimit}
-                            {mb.isDefaultLimit && <span className="text-zinc-300" title="Лимит явно не выставлен — действует дефолт воркспейса"> (дефолт)</span>}
-                          </td>
-                          <td className="px-2.5 py-1.5 text-right tabular-nums text-zinc-700">{mb.sent}</td>
-                          <td className="px-2.5 py-1.5 tabular-nums text-zinc-500">{u == null ? '—' : `${Math.round(u * 100)}%`}</td>
-                          <td className="px-2.5 py-1.5 text-right text-zinc-400">{mb.lastUsed ?? '—'}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+          <td colSpan={7} className="px-3 py-2"><MailboxDrill drill={drill} /></td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+// ── ящики тега за день (раскрытие строки) ────────────────────────────────────
+function MailboxDrill({ drill }: { drill: DrillState }) {
+  if (!drill || drill.loading) {
+    return <div className="py-3 text-center text-[11px] text-zinc-400">Загрузка ящиков…</div>;
+  }
+  if (drill.error) {
+    return (
+      <div className="py-3 text-center text-[11px] text-red-600">
+        Не удалось загрузить ящики. Кликните по строке ещё раз, чтобы повторить.
+      </div>
+    );
+  }
+  if (drill.mailboxes.length === 0) {
+    return <div className="py-3 text-center text-[11px] text-zinc-400">Ящики не найдены.</div>;
+  }
+  return (
+    <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white">
+      <table className="w-full min-w-[560px] text-[11px]">
+        <thead>
+          <tr className="border-b border-zinc-100 text-left text-[9px] uppercase tracking-wider text-zinc-400">
+            <th className="px-2.5 py-1.5 font-medium">Ящик</th>
+            <th className="px-2.5 py-1.5 font-medium">Статус</th>
+            <th className="px-2.5 py-1.5 font-medium text-right">Лимит</th>
+            <th className="px-2.5 py-1.5 font-medium text-right">Отпр.</th>
+            <th className="px-2.5 py-1.5 font-medium">Утил.</th>
+            <th className="px-2.5 py-1.5 font-medium text-right">Посл. актив.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {drill.mailboxes.map((mb) => {
+            const idle = mb.statusValue === 1 && mb.sent === 0;
+            const u = mb.dailyLimit > 0 ? mb.sent / mb.dailyLimit : null;
+            return (
+              <tr key={mb.email} className={`border-b border-zinc-50 ${idle ? 'bg-red-50/40' : ''}`}>
+                <td className="px-2.5 py-1.5 font-mono text-[10px] text-zinc-700">{mb.email}</td>
+                <td className="px-2.5 py-1.5">
+                  <span className={mb.statusValue === 1 ? 'text-emerald-600' : 'text-zinc-400'}>{mb.status ?? '—'}</span>
+                </td>
+                <td className="px-2.5 py-1.5 text-right tabular-nums text-zinc-600">
+                  {mb.dailyLimit}
+                  {mb.isDefaultLimit && <span className="text-zinc-300" title="Лимит явно не выставлен — действует дефолт воркспейса"> (дефолт)</span>}
+                </td>
+                <td className="px-2.5 py-1.5 text-right tabular-nums text-zinc-700">{mb.sent}</td>
+                <td className="px-2.5 py-1.5 tabular-nums text-zinc-500">{u == null ? '—' : `${Math.round(u * 100)}%`}</td>
+                <td className="px-2.5 py-1.5 text-right text-zinc-400">{mb.lastUsed ?? '—'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── строка тега «не в работе» + те же ящики ──────────────────────────────────
+function InactiveRows({ tag, expanded, drill, onToggle }: {
+  tag: InactiveTag; expanded: boolean; drill: DrillState; onToggle: () => void;
+}) {
+  return (
+    <>
+      <tr
+        className="cursor-pointer border-b border-zinc-50 text-zinc-500 hover:bg-zinc-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
+        onClick={onToggle}
+        onKeyDown={rowKeyHandler(onToggle)}
+        tabIndex={0}
+        aria-expanded={expanded}
+      >
+        <td className="px-3 py-2">
+          <div className="flex items-center gap-1.5">
+            <span className={`text-zinc-300 transition-transform ${expanded ? 'rotate-90' : ''}`}>›</span>
+            <span className="font-medium text-zinc-700">{tag.tag}</span>
+            {tag.client && norm(tag.client) !== norm(tag.tag) && (
+              <span className="text-zinc-400">· {tag.client}</span>
             )}
-          </td>
+          </div>
+        </td>
+        <td className="px-3 py-2">{tag.specialist ?? <span className="text-zinc-300">—</span>}</td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          {tag.activeMailboxes}
+          {tag.totalMailboxes !== tag.activeMailboxes && <span className="text-zinc-300">/{tag.totalMailboxes}</span>}
+          {/* занятые ящики не свободны: тег не потерялся, его ящики работают
+              под другим тегом (посчитаны в таблице выше) или закреплены за
+              клиентом, которого ещё не запустили */}
+          {tag.busyElsewhere > 0 && (
+            <div className="text-[10px] text-zinc-400">ещё {tag.busyElsewhere} заняты другими тегами</div>
+          )}
+          {tag.reason === 'not_launched' && tag.activeMailboxes > 0 && (
+            <div className="text-[10px] text-zinc-400">закреплены за клиентом, в свободные не входят</div>
+          )}
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">{fmt(tag.capacity)}</td>
+        <td className="px-3 py-2 text-right tabular-nums text-zinc-400">{tag.lastCampaignDay ?? '—'}</td>
+        <td className="px-3 py-2 text-[11px]">
+          {reasonLabel(tag)}
+          {reasonDetail(tag) && <div className="text-[10px] text-zinc-400">проект: {reasonDetail(tag)}</div>}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="bg-zinc-50/60">
+          <td colSpan={6} className="px-3 py-2"><MailboxDrill drill={drill} /></td>
         </tr>
       )}
     </>
@@ -528,7 +709,7 @@ function SpecialistRows({ spec, tags, expanded, onToggle }: {
                   <StatusBadge status={tg.status} />
                 </div>
               ))}
-              <span className="text-[10px] text-zinc-400">Итог специалиста = сумма его тегов (статус: {STATUS_UI[spec.status].label.toLowerCase()}).</span>
+              <span className="text-[10px] text-zinc-400">Итог специалиста — по уникальным ящикам его тегов: ящик под двумя тегами считается один раз (статус: {STATUS_UI[spec.status].label.toLowerCase()}).</span>
             </div>
           </td>
         </tr>
