@@ -27,7 +27,7 @@ const OUTREACH_START_FAILED = 'Failed to start the outreach';
 /** Отказ по состоянию проекта — 409 с английским текстом кабинета. */
 const REFUSAL_TEXT: Record<HeAutopilotRefusal, string> = {
   not_researched: 'The research is not finished yet — the autopilot starts once the project is researched',
-  no_verticals: 'No verticals yet — wait for the research to produce them',
+  no_verticals: 'No markets yet — wait for the research to produce them',
 };
 
 /**

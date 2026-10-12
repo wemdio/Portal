@@ -177,11 +177,11 @@ export const ENG_START_PRE_SELF_SERVE_TEXT =
  * после «Sending was not started: » (роут запуска).
  */
 export const ENG_START_STATE_UNCONFIRMED_TEXT =
-  'Because of a problem on our side we could not confirm that this vertical should keep sending, so the campaigns '
+  'Because of a problem on our side we could not confirm that this market should keep sending, so the campaigns '
   + 'we were starting are paused. Try again in a minute; if it keeps failing, message Support.';
 /** То же, но пауза части кампаний не подтвердилась — команде ушёл алерт 'pause_failed'. */
 export const ENG_START_STATE_UNCONFIRMED_PAUSE_FAILED_TEXT =
-  'Because of a problem on our side we could not confirm that this vertical should keep sending, so we paused the '
+  'Because of a problem on our side we could not confirm that this market should keep sending, so we paused the '
   + 'campaigns we were starting, but some of them could not be paused yet and may still be sending — our team is '
   + 'stopping them. Message Support.';
 /**
@@ -190,7 +190,7 @@ export const ENG_START_STATE_UNCONFIRMED_PAUSE_FAILED_TEXT =
  * какая теперь на карточке, решает свежая сводка.
  */
 export const ENG_START_PAUSED_MEANWHILE_TEXT =
-  'You paused this vertical while sending was starting, so nothing more was started.';
+  'You paused this market while sending was starting, so nothing more was started.';
 const TEMPLATE_NOT_FOUND_TEXT = 'Template not found';
 
 /* ─────────────── Результаты ─────────────── */

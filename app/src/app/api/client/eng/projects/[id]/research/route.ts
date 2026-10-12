@@ -116,11 +116,11 @@ const RERUN_CONFIRM_CODE = 'research_rerun_confirm_required';
  *    потом может и не появиться.
  */
 const RERUN_CONFIRM_TEXT =
-  'Starting the research again permanently deletes what was built on the current verticals of this project, so ' +
+  'Starting the research again permanently deletes what was built on the current markets of this project, so ' +
   'it needs your confirmation. Reload this page and press «Try again» to see what would be deleted and confirm.';
 const RERUN_LAUNCHED_TEXT =
   'The research cannot be started again on this project because a campaign has already been launched from it, ' +
-  'or is being launched right now. Starting it again would delete the launched templates together with the ' +
+  'or is being launched right now. Starting it again would delete the launched letters together with the ' +
   'record of which contacts went into those campaigns. Message Support if you need this market researched again.';
 const RERUN_BUSY_TEXT =
   'Work for this project is still running, and starting the research again now would throw that work away. ' +

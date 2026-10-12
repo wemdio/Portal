@@ -25,12 +25,11 @@ import { engServerError } from '../../../_shared';
 export const dynamic = 'force-dynamic';
 
 const LETTERS_START_FAILED = 'Failed to start the letters';
-const LETTERS_EXIST =
-  'Letters for this vertical already exist, so new ones were not generated. Step 3 shows them.';
+const LETTERS_EXIST = 'Letters for this market already exist, so new ones were not written.';
 // 23505 без стоящей джобы: запуск победителя гонки успел закончиться (готово,
 // упал или отменён) — «уже закончился» верно для всех трёх.
 const LETTERS_RACE_FINISHED =
-  'Letters for this vertical were just started by another request, and that run has already ended. ' +
+  'Letters for this market were just started by another request, and that run has already ended. ' +
   'Refresh the page to see its result.';
 
 /**
@@ -59,15 +58,15 @@ async function findActiveChainJob(
 // POST — поставить генерацию цепочки писем для СВОЕЙ вертикали.
 //
 // Кабинет этот роут НЕ зовёт (generateEngChain без вызывающего: письма ставит
-// «Start outreach» — autopilotReconcile.ts), сюда приходят только прямые
-// запросы и старые бандлы. Поэтому каждая платная возможность сверх того, что
-// делает «Start outreach», закрыта:
+// «Launch» шага 3 — реконсилер autopilotReconcile.ts), сюда приходят только
+// прямые запросы и старые бандлы. Поэтому каждая платная возможность сверх
+// того, что делает реконсилер «Launch», закрыта:
 //  - язык — только язык рынка проекта (us → 'en', defaultChainLanguageForMarket);
 //    прежний выбор ru/pl английскому кабинету не нужен;
 //  - у вертикали уже есть готовая ('ready') цепочка → 409 LETTERS_EXIST:
 //    перегенерация — второй платный прогон ради того, что уже есть, а кнопки
 //    «переписать письма» в кабинете нет. Упавшую или незаконченную цепочку
-//    повтор поднимает — так же, как «Start outreach».
+//    повтор поднимает — так же, как реконсилер «Launch».
 // Дедуп как у staff: активная chain-задача на эту вертикаль уже есть →
 // возвращаем её со статусом 200. Тем же ответом — проигравший гонки двух
 // постановок: 23505 от he_jobs_one_active_chain_per_vertical (20261010_0003).
@@ -158,7 +157,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       .single();
     // 23505 — he_jobs_one_active_chain_per_vertical (20261010_0003): между
     // дедупом выше и этой вставкой цепочку вертикали поставил другой запрос
-    // (второй клик, «Start outreach», специалист). Вставки не было — отвечаем
+    // (второй клик, «Launch», специалист). Вставки не было — отвечаем
     // как дедуп: его джобой. Других уникальных ограничений, способных ответить
     // 23505 на вставку chain, у he_jobs нет (PK — gen_random_uuid, прочие
     // partial-индексы — по другим стадиям). Без миграции 23505 не бывает.

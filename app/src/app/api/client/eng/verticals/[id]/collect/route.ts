@@ -24,22 +24,25 @@ const COLLECT_START_FAILED = 'Failed to start the collection';
 const COLLECT_NOT_RESEARCHED =
   'A collection starts only on a researched project. Step 1 shows the state of the research.';
 const COLLECT_NOT_SELECTED =
-  'This vertical is not selected, so it was not collected. Accept at least one of its hypotheses on step 2 first.';
-const COLLECT_HAS_BASE =
-  'This vertical already has a collected base, so a new collection was not started. Step 4 shows that base.';
+  'This market is not selected, so it was not collected. Select it on step 2 «Choose markets» first.';
+const COLLECT_HAS_BASE = 'This market already has collected contacts, so a new collection was not started.';
 
-// POST — «Collect again» шага 4: новая авто-сборка базы СВОЕЙ вертикали.
-// Единственный клиентский вызов — кнопка у последней базы вертикали,
-// остановившейся решением, которое повторится (HE_COLLECT_STOP_REPEATS_CODES):
-// «Start outreach» такую вертикаль больше не собирает (autopilotReconcile.ts),
-// и повтор — только это явное нажатие. Сам роут повтор после любой остановки
-// разрешает: нажатие и есть решение клиента заплатить ещё раз.
+// POST — «Collect again» на карточке рынка шага 3 «Launch»: новая авто-сборка
+// базы СВОЕЙ вертикали. Клиентский вызов — кнопка у рынка, чья последняя своя
+// сборка остановилась. Остановки решением, которое повторится
+// (HE_COLLECT_STOP_REPEATS_CODES), «Launch» шага 3 (тот же реконсилер,
+// autopilotReconcile.ts) больше не собирает, и повтор для них — только это
+// явное нажатие. Сам роут повтор после любой остановки разрешает: нажатие и
+// есть решение клиента заплатить ещё раз. Дальше сборку ведёт автопилот
+// (анализ, итоговые письма, затем автозапуск) — только пока он включён: после
+// «Cancel all jobs» (autopilot=false) база остаётся собранной, а дальше её
+// двигает следующее нажатие «Launch».
 //
 // Возможности, которыми кабинет не пользуется, закрыты (каждая — платная):
 //  - лимит — только AUTOPILOT_BASE_LIMIT (2 000 строк сборки), тот же, что у
-//    «Start outreach»; прежний выбор 10 000 кабинет не предлагал никогда;
-//  - hypothesis_ids из тела не принимаются: сборка идёт по гипотезам,
-//    принятым на шаге 2, ровно как у «Start outreach»;
+//    реконсилера «Launch»; прежний выбор 10 000 кабинет не предлагал никогда;
+//  - hypothesis_ids из тела не принимаются: сборка идёт по гипотезам рынка,
+//    выбранного на шаге 2, ровно как у реконсилера «Launch»;
 //  - проект не 'researched', вертикаль не выбрана (нет accepted-гипотезы) или
 //    у неё уже есть своя (не доливная) база в 'analyzing'/'analyzed' — 409:
 //    вторая платная база поверх готовой — не то, что предлагает кнопка.
@@ -76,7 +79,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
     }
     if (body && typeof body === 'object' && 'hypothesis_ids' in body) {
-      return jsonError('hypothesis_ids is not accepted — a collection uses the hypotheses accepted on step 2', 400);
+      return jsonError('hypothesis_ids is not accepted — a collection uses the market as selected on step 2', 400);
     }
 
     const owned = await loadClientHeVertical(supabaseAdmin, id, result.auth.userId);
@@ -84,7 +87,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     if (owned.project.status !== 'researched') return jsonError(COLLECT_NOT_RESEARCHED, 409);
 
-    // Состояние вертикали — тем же предикатом, что у «Start outreach»
+    // Состояние вертикали — тем же предикатом, что у реконсилера «Launch»
     // (autopilotReconcile.ts): выбранность — accepted-гипотеза с непустым id;
     // своя база — source 'auto' без доливного «auto-refill: …».
     const [hypothesesRes, basesRes] = await Promise.all([

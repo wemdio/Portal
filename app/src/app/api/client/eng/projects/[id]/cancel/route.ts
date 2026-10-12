@@ -7,6 +7,7 @@ import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { pauseHeRefillForClientCancel } from '@/lib/hypothesisEngine/autoPipeline';
+import { cancelHeEngLaunchIntent } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { isHeMissingColumnError } from '@/lib/hypothesisEngine/projectCancelMarker';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import { engServerError } from '../../../_shared';
@@ -80,9 +81,9 @@ const CANCEL_BASE_WORK_SELECT = [
  *     успеет закончиться, ставил бы следующую платную. Координатор и
  *     реконсилер перечитывают флаг ещё раз прямо перед каждой платной
  *     постановкой (isHeAutopilotStillOn), поэтому запись идёт ПЕРВОЙ.
- *     Включить обратно — «Start outreach» (POST .../autopilot); другого
- *     выключателя автопилота у кабинета нет. Не записалось — отвечаем
- *     отказом, ничего не тронув.
+ *     Включить обратно — «Launch» шага 3 (POST .../launch; старые вкладки —
+ *     «Start outreach», POST .../autopilot); другого выключателя автопилота у
+ *     кабинета нет. Не записалось — отвечаем отказом, ничего не тронув.
  *     ТОЙ ЖЕ записью — he_projects.cancelled_at = момент отмены, долговечная
  *     отметка (lib/hypothesisEngine/projectCancelMarker.ts): отмена при нуле
  *     активных джоб не оставляет ни одной отменённой джобы, и без отметки по
@@ -93,6 +94,14 @@ const CANCEL_BASE_WORK_SELECT = [
  *     запись с флагом — чтобы «автопилот выключен, а отметки нет» не бывало.
  *     Колонки нет (миграция не применена) — та же запись без отметки, исход
  *     уходит в аудит (cancelMarker: 'unsupported').
+ *  1b. Автозапуск проекта (he_eng_launch_intent, engAutoLaunch) — выключен:
+ *     wanted=false, cancelled_at. Тик воркера и сам требует autopilot=true и
+ *     отметку отмены не новее нажатия «Launch» (защита вдвое); запуск, который
+ *     тик уже взял к моменту отмены, ядро доводит (кампании создаются), но
+ *     перед стартом тик перечитывает автозапуск (engAutoLaunch.heEngStartGate)
+ *     и кампании не стартует — строка 'done cancelled'; уже отправляющие
+ *     кампании слушаются Pause. Включить снова — «Launch». Нет таблицы (миграция 20261012_0001)
+ *     или сбой — отмену не валит, исход уходит в аудит.
  *  2. Пауза ночного добора — ТА ЖЕ, что ставит ёмкость рассыльщика
  *     (he_auto_pipeline_configs.refill_paused_at, причина «клиент отменил»,
  *     pauseHeRefillForClientCancel). Добор ведёт he_auto_pipeline_configs.enabled,
@@ -166,6 +175,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
 
+    // 1b. Автозапуск проекта. Не бросает; сбой — только в аудит.
+    const autoLaunch = await cancelHeEngLaunchIntent(supabaseAdmin, id, nowDate);
+    if (autoLaunch === 'error') {
+      await logError('client.eng.cancel.auto_launch_failed', new Error('launch intent not cancelled'), {
+        userId: result.auth.userId,
+        projectId: id,
+      });
+    }
+
     // 2. Ночной добор — та же пауза, что у ёмкости. Не бросает.
     const refillPause = await pauseHeRefillForClientCancel(supabaseAdmin, id, { now: nowDate });
     if (refillPause === 'failed') {
@@ -230,6 +248,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       autopilotOff: true,
       cancelMarker,
       refillPause,
+      autoLaunch,
     });
 
     return NextResponse.json({ ok: true, cancelled });

@@ -19,6 +19,8 @@ import type { HeClientStageErrorCode } from './clientEngProjection';
 // кэш статусов) в агрегат дашборда не едет.
 import type { HeRefillMainRestartOutcome, HeRefillMainVerdict, HeRefillSendSkipReason } from './autoPipeline';
 import type { HeEngClientState, HeEngSendingAccessView } from './engCampaignStatus';
+// Только типы: модуль читают и экраны кабинета, а engAutoLaunch — серверный.
+import type { HeEngAutoLaunchCode, HeEngAutoLaunchState } from './engAutoLaunch';
 // Справочник клиентских текстов без зависимостей (тот же, что реэкспортирует
 // clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда.
 import { HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
@@ -43,7 +45,7 @@ const TOP_UP_SKIP_EN: Record<HeRefillSendSkipReason, string> = {
   access_turned_off: 'daily top-up skipped — sending is turned off for your account; message Support',
   // Прошедшее время и по желанию клиента: строка историческая (паузы может уже
   // не быть), а пропуск 'client_paused' пишется только по Pause клиента.
-  client_paused: 'daily top-up skipped — you had paused this vertical',
+  client_paused: 'daily top-up skipped — you had paused this market',
   // Гейт ночи судит ОСНОВНУЮ кампанию запуска (сегментные ночь не отменяют) —
   // фраза называет именно её. Те же фразы цитируют алерты команде
   // (autoPipeline.holdAlertBody: 'main_completed', 'main_stopped') — менять вместе.
@@ -52,12 +54,12 @@ const TOP_UP_SKIP_EN: Record<HeRefillSendSkipReason, string> = {
   // продолжаем: запуск кабинет не стартовал или её прошлый повторный старт не
   // удался (блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» в autoPipeline.ts).
   campaign_completed:
-    'daily top-up skipped — the main campaign of this vertical has completed and is not restarted automatically; ' +
+    'daily top-up skipped — the main campaign of this market has completed and is not restarted automatically; ' +
     'message Support to continue it',
   campaign_stopped:
-    'daily top-up skipped — our sending service stopped or removed the main campaign of this vertical; message Support',
-  campaign_not_sending: 'daily top-up skipped — the main campaign of this vertical was not sending',
-  status_unknown: 'daily top-up skipped — we could not confirm the main campaign of this vertical is sending',
+    'daily top-up skipped — our sending service stopped or removed the main campaign of this market; message Support',
+  campaign_not_sending: 'daily top-up skipped — the main campaign of this market was not sending',
+  status_unknown: 'daily top-up skipped — we could not confirm the main campaign of this market is sending',
   // 'unavailable' гейт пишет и когда проверить не удалось (выключатель, желание
   // клиента, кэш, пул не читаются), и когда проверка нашла, что кампания шлёт
   // не из ящиков пула проекта (запуск до self-serve, чужие адреса): фраза
@@ -80,12 +82,12 @@ const MAIN_RESTART_FEED_EN: Record<HeRefillMainRestartOutcome, string | null> = 
   restarted: 'its completed campaign started sending again',
   not_needed: null,
   nothing_accepted: null,
-  client_paused: 'you had paused this vertical, so its completed campaign was not started again',
+  client_paused: 'you had paused this market, so its completed campaign was not started again',
   // Старт уже отправил кампании POST /activate, Pause пришёл во время него, а
   // пауза не подтвердилась: «не стартовали» было бы неправдой. «Stopping it» —
   // правда: команде ушёл алерт 'pause_failed' (engCampaignSending.ts, шаг 9).
   pause_failed:
-    'you paused this vertical while its completed campaign was being started again; it was started and could not be paused yet, so it may still be sending (our team is stopping it)',
+    'you paused this market while its completed campaign was being started again; it was started and could not be paused yet, so it may still be sending (our team is stopping it)',
   access_off: 'sending was off for your account, so its completed campaign was not started again',
   cancelled: null,
   failed: `its completed campaign did not start sending again (${HE_TEAM_ON_IT_SHORT_EN})`,
@@ -409,6 +411,89 @@ export interface EngDashVerticalSlice {
    * прежние).
    */
   rewriteTemplateIds?: ReadonlySet<string>;
+  /**
+   * Автозапуск готового шаблона вертикали (S3, engAutoLaunch): строка
+   * he_eng_auto_launch шаблона этапа 'template' или синтетическое
+   * 'waiting' (клиент нажал «Launch», строки ещё нет). null / нет поля —
+   * автозапуск этому шаблону не назначен (клиент «Launch» не нажимал,
+   * миграции нет или не прочиталось): подпись зовёт запустить на шаге 3.
+   */
+  autoLaunch?: EngDashAutoLaunch | null;
+  /**
+   * Автопилот проекта (he_projects.autopilot): true — после писем и проверки
+   * контактов следующую стадию ставит он сам; false — ничего не ставит, пока
+   * клиент не нажмёт «Launch» шага 3 (реконсилер включает автопилот). Нет поля —
+   * не прочитан: подпись не обещает ни того, ни другого.
+   */
+  autopilot?: boolean;
+}
+
+/** Состояние автозапуска шаблона этапа — то, что нужно подписи. */
+export interface EngDashAutoLaunch {
+  state: HeEngAutoLaunchState;
+  code: HeEngAutoLaunchCode | null;
+  /**
+   * Только у 'waiting' без кода (тик рынок ещё не пробовал): выключатель
+   * отправки аккаунта, прочитанный роутом, когда он держит старт —
+   * 'not_enabled' (ждёт разовой проверки командой) или 'revoked' (выключен).
+   * Нет поля — включён, не требуется или не прочитан. То же правило, что у
+   * строки рынка на шаге 3 (обещать «скоро» при выключателе нельзя).
+   */
+  access?: 'not_enabled' | 'revoked';
+  /**
+   * У 'waiting' без кода: рынок ждёт тика дольше HE_ENG_AUTO_LAUNCH_STALE_MS
+   * (от даты строки, у синтетической — от даты шаблона). У 'running': аренду
+   * никто не держит — попытка брошена (engAutoLaunch.heEngAutoLaunchLeaseExpired).
+   * В обоих случаях на шаге 3 стоит «Launch now».
+   */
+  stale?: boolean;
+}
+
+/**
+ * Короткая подпись этапа 'template' по автозапуску (полные фразы и кнопки —
+ * у шага 3 мастера). Каждая правда для любой формы своего состояния: «we try
+ * again» — строка ждёт следующей попытки тика, «see step 3» — там причина и
+ * действие (кнопка или Support). null — подпись без автозапуска.
+ */
+export function engDashAutoLaunchDetail(auto: EngDashAutoLaunch | null | undefined): string | null {
+  if (!auto) return null;
+  if (auto.state === 'running') {
+    return auto.stale === true ? 'starting has not finished — see step 3' : 'starting sending…';
+  }
+  if (auto.state === 'failed') return 'could not start after several tries — nothing was sent; see step 3';
+  // 'done' у шаблона БЕЗ записи о запуске (этап 'template') — только
+  // 'needs_support': запись о запуске не легла, старт не делался.
+  if (auto.state === 'done') {
+    return auto.code === 'needs_support' ? 'sending could not start — nothing was started; see step 3' : null;
+  }
+  if (auto.state === 'waiting') {
+    if (auto.code !== null) return 'starting did not work on this try — we try again shortly';
+    if (auto.access === 'not_enabled') return 'ready — sending starts after a one-time check of your account';
+    if (auto.access === 'revoked') return 'sending is turned off for your account — message Support';
+    if (auto.stale === true) return 'ready — starting is taking longer than usual; see step 3';
+    return 'ready — sending starts automatically shortly';
+  }
+  switch (auto.code) {
+    case 'sending_not_enabled':
+      return 'ready — sending starts after a one-time check of your account';
+    case 'sending_turned_off':
+      return 'sending is turned off for your account — message Support';
+    case 'email_not_verified':
+      return 'ready — confirm your email to start sending';
+    case 'spend_limit':
+    case 'spend_day_limit':
+      return 'ready — your spending limit stops it; see step 3';
+    case 'unavailable':
+    case 'setup_unavailable':
+    case 'mailboxes_short':
+      return 'ready — we are preparing sending for your account';
+    case 'research_running':
+      return 'waiting for the research to finish';
+    case 'letters_need_rewrite':
+      return 'letters need rewriting — nothing was sent; see step 3';
+    default:
+      return 'sending could not start — nothing was sent; see step 3';
+  }
 }
 
 export interface EngDashStageInfo {
@@ -439,6 +524,14 @@ export interface EngDashStageInfo {
    * У остальных этапов — false.
    */
   lettersNeedRewrite: boolean;
+  /**
+   * Итоговые письма рынка сняты «Rewrite letters» ('failed' у he_templates
+   * пишет только роут переписки), а новых нет и генерация не идёт: ни
+   * запущенного, ни готового шаблона, самый новый — снятый. «Launch» такой
+   * рынок не двигает (реконсилер считает шаблон существующим) — путь только
+   * «Rewrite letters» или Support на шаге 3. Нет поля — не этот случай.
+   */
+  lettersRetired?: boolean;
   /** Причина этапа 'attention'; у остальных этапов — null. */
   attention: EngDashAttentionInfo | null;
 }
@@ -529,6 +622,15 @@ export function engDashRewriteCandidateIds(templates: Array<Record<string, unkno
 /** Свежий готовый шаблон без записи о запуске — тот, что этап 'template' зовёт запускать. */
 function latestReadyUnlaunched(templates: Array<Record<string, unknown>>): Record<string, unknown> | null {
   return latest(templates.filter((t) => asStr(t.status) === 'ready' && !parseLaunchInfo(t.launch_info)));
+}
+
+/**
+ * id шаблона этапа 'template' (свежий готовый без записи о запуске) — роут
+ * дашборда читает по нему строку автозапуска (тот же выбор, что у этапа).
+ */
+export function engDashReadyTemplateId(templates: Array<Record<string, unknown>>): string | null {
+  const id = asStr(latestReadyUnlaunched(templates)?.id);
+  return id || null;
 }
 
 /**
@@ -725,8 +827,8 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     return {
       stage: 'template',
       stageDetail: rewrite
-        ? 'letters need rewriting — message Support to have them rewritten'
-        : 'template ready — launch when set',
+        ? 'letters need rewriting — nothing was sent; see step 3'
+        : (engDashAutoLaunchDetail(input.autoLaunch) ?? 'template ready — launch it on step 3'),
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
@@ -809,9 +911,9 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       stage: 'not_selected',
       stageDetail:
         input.selection === 'no_hypotheses'
-          ? 'not selected — this vertical has no hypotheses to accept'
+          ? 'not selected — this market has no buyer ideas, so it cannot be picked'
           : projectStatus === 'researched'
-            ? 'not selected — accept one of its hypotheses on step 2 to include it'
+            ? 'not selected — tick it on step 2 to include it'
             : projectStatus === 'draft'
               ? 'not selected — research is not running on this project; step 1 says what to do'
               : 'not selected',
@@ -819,6 +921,27 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
+      attention: null,
+    };
+  }
+  // Письма сняты «Rewrite letters», новых нет, генерация не идёт (её джоба —
+  // в активных джобах вертикали по base_id). Список активных джоб неполон —
+  // «не написаны» не доказано, подпись прежняя.
+  const newestTemplate = latest(templates);
+  if (
+    newestTemplate !== null &&
+    asStr(newestTemplate.status) === 'failed' &&
+    input.liveWorkUnknown !== true &&
+    !activeJobs.some((j) => asStr(j.stage) === 'template')
+  ) {
+    return {
+      stage: 'analyzed',
+      stageDetail: 'new letters were not written — nothing was sent; see step 3',
+      dots: [true, true, true, false, false],
+      mainBase,
+      launch: null,
+      lettersNeedRewrite: false,
+      lettersRetired: true,
       attention: null,
     };
   }
@@ -867,9 +990,19 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     };
   }
   if (hasReadyChain) {
+    // Сбор контактов после писем ставит только автопилот (autopilotNext.ts);
+    // выключен — сбор начнёт «Launch» шага 3 (реконсилер включает автопилот).
+    // Пауза по потолку расхода: сбор не поставят ни автопилот, ни «Launch».
     return {
       stage: 'letters',
-      stageDetail: 'letters ready — collect a base',
+      stageDetail:
+        input.spendPaused === true
+          ? 'letters ready — on hold, paused on our side'
+          : input.autopilot === true
+            ? 'letters ready — next: collecting contacts'
+            : input.autopilot === false
+              ? 'letters ready — press «Launch» on step 3 to collect contacts'
+              : 'letters ready — step 3 «Launch» shows what comes next',
       dots: [true, true, false, false, false],
       mainBase,
       launch: null,
@@ -892,8 +1025,8 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   return {
     stage: 'letters',
     // Без «generate a chain»: такой кнопки у клиента нет — письма пишет
-    // автопилот после «Start outreach» (те же слова, что у шага 3, EngStepLetters).
-    stageDetail: chainJobActive ? 'writing letters…' : 'no letters yet — written after «Start outreach» on step 2',
+    // автопилот после «Launch» шага 3.
+    stageDetail: chainJobActive ? 'writing letters…' : 'no letters yet — written after «Launch» on step 3',
     dots: [true, false, false, false, false],
     mainBase,
     launch: null,

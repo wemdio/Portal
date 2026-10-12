@@ -24,8 +24,8 @@
  * реконсилер и авто-резюм выключены по умолчанию и упавшую работу не
  * переоплачивают), ни кнопок, которых в кабинете нет. Действия называются теми
  * же словами, что и кнопки: «Try again» (шаг 1, только у research, вставшего
- * техническим сбоем — heResearchRetryAllowed ниже), «Start outreach»
- * (шаг 2) и «Collect again» (шаг 4, только у остановок
+ * техническим сбоем — heResearchRetryAllowed ниже), «Launch»
+ * (шаг 3) и «Collect again» (карточка рынка шага 3, только у остановок
  * HE_COLLECT_STOP_REPEATS_CODES). Повтор собирает НОВУЮ базу, а не продолжает
  * упавшую (упавшая база не переиспользуется), поэтому «всё собранное
  * сохранено» здесь не пишется — сохранено то, что уже было закончено.
@@ -116,11 +116,11 @@ export interface HeClientFailure {
  *
  * Читатели — три места одного правила, поэтому список здесь, в модуле без
  * зависимостей, который тянут и сервер, и браузер:
- *  - «Start outreach» (autopilotReconcile.ts, нажатие клиента): вертикаль,
+ *  - «Launch» шага 3 (autopilotReconcile.ts, нажатие клиента): вертикаль,
  *    чья ПОСЛЕДНЯЯ своя база кончилась таким кодом, новую сборку не получает
  *    (пропуск 'collect_stop_repeats'); раньше каждое нажатие покупало её
  *    заново — до AUTOPILOT_BASE_LIMIT (2 000) строк сборки на такую вертикаль;
- *  - кнопка «Collect again» шага 4 (EngStepBases.tsx) — явный повтор этой
+ *  - кнопка «Collect again» шага 3 (EngStepLaunch.tsx) — явный повтор этой
  *    вертикали, рисуется у такой базы;
  *  - роут этой кнопки (POST /api/client/eng/verticals/[id]/collect) повтор
  *    разрешает — это и есть явное решение клиента.
@@ -226,12 +226,12 @@ export const HE_RESEARCH_STALL_GRACE_MS = 10 * 60 * 1000;
  * котором она есть, а не обещана.
  */
 const COLLECT_AGAIN_EN =
-  '«Start outreach» does not collect a vertical again while its latest collection ended this way. To try once more anyway, use «Collect again» on step 4 — it appears on the latest stopped collection of a vertical you have selected; a new collection is checked the same way and may stop here again.';
+  '«Launch» does not collect a market again while its latest collection ended this way. To try once more anyway, use «Collect again» on the market card in step 3 — it appears on the latest stopped collection of a market you have selected; a new collection is checked the same way and may stop here again.';
 
 /**
  * Где клиент перезапускает остановившийся шаг. Кнопок две, у каждой своя
  * область: research перезапускает «Try again» шага 1, упавшую сборку
- * базы — «Start outreach» шага 2 (клиентское нажатие ставит новую сборку
+ * базы — «Launch» шага 3 (клиентское нажатие ставит новую сборку
  * вертикали, у которой нет живой или готовой базы; упавшая база этому не
  * мешает — кроме остановок HE_COLLECT_STOP_REPEATS_CODES, у которых свой текст
  * и своя кнопка). Один код причины бывает и у проекта, и у базы, поэтому
@@ -248,7 +248,7 @@ const COLLECT_AGAIN_EN =
  * website_no_html своё действие называет сам.
  */
 const WHERE_TO_RESTART =
-  '«Try again» on step 1 if the research stopped, «Start outreach» on step 2 if a base collection stopped';
+  '«Try again» on step 1 if the research stopped, «Launch» on step 3 if a base collection stopped';
 
 /**
  * Что уцелело при остановке шага движка. Ровно то, что правда для любой формы:
@@ -394,14 +394,14 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
   /**
    * Действия — только те, что в ENG-кабинете есть. Загрузки своего списка в
    * кабинете нет, а us-запуск базы без построчного вердикта всё равно откажет.
-   * «Start outreach» такую вертикаль второй раз не собирает
+   * «Launch» такую вертикаль второй раз не собирает
    * (HE_COLLECT_STOP_REPEATS_CODES), повтор — явная «Collect again».
    */
   audience_mismatch: {
-    title: 'The catalog slice we could build for this vertical did not match it, so no base was built.',
-    whatIsSaved: 'No contacts were bought for this vertical.',
+    title: 'The catalog slice we could build for this market did not match it, so no base was built.',
+    whatIsSaved: 'No contacts were bought for this market.',
     whatToDo:
-      `This was a deliberate stop — mailing such a list would hurt the verticals that do work. ${COLLECT_AGAIN_EN} To collect another vertical instead, accept its hypotheses on step 2 and press «Start outreach».`,
+      `This was a deliberate stop — mailing such a list would hurt the markets that do work. ${COLLECT_AGAIN_EN} To collect another market instead, tick it on step 2 «Choose markets» and press «Launch» on step 3.`,
   },
   /**
    * Сборка, в которой релевант-гейт снял все компании, судя целью по
@@ -411,8 +411,8 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
    * все с пометкой _low_relevance), меняется только статус — 'failed' с этой
    * причиной. Поэтому «no base was built» здесь неправда. Каждое предложение —
    * правда при любой такой базе:
-   *  - «fit the hypotheses it had accepted or suggested when they were
-   *    checked» — цель гейта ровно такая: неотклонённые гипотезы вертикали на
+   *  - «fit the ideas it had accepted or suggested when they were
+   *    checked» («ideas» — гипотезы словом шага 2) — цель гейта ровно такая: неотклонённые гипотезы вертикали на
    *    момент суда (записываются вместе с ним, relevance_gate.hypothesis_scope),
    *    «suggested» — слово, которым кабинет показывает статус proposed (ui.tsx).
    *    Отклонённые не проверялись, а вердикты с тех пор могли поменяться —
@@ -420,7 +420,7 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
    *    остальные заменял вопрос о самой вертикали, и ей не принадлежит ни
    *    одна из компаний — им не подходят и эти гипотезы;
    *  - «this base will not be launched» — запуск берёт только 'analyzed'-базу,
-   *    а «Start outreach» упавшую базу не поднимает (ставит новую сборку);
+   *    а «Launch» упавшую базу не поднимает (ставит новую сборку);
    *  - «saved with this base» — строки записаны той же финальной записью, что
    *    и статус: без неё базы с этой причиной не бывает;
    *  - «this collection did not look up any emails» — конструктор (поиск и
@@ -428,38 +428,39 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
    *    требует, чтобы его джобы ещё не было). Не «no emails were looked up for
    *    these companies»: упавшая база выпадает из кросс-базового исключения, и
    *    те же компании могла обогащать прежняя сборка. «No contacts were bought
-   *    for this vertical», как у audience_mismatch, тоже не пишем: у вертикали
+   *    for this market», как у audience_mismatch, тоже не пишем: у вертикали
    *    могут быть другие, раньше собранные базы;
    *  - «your other bases and campaigns are not affected» — без «running»: с S2
    *    кампании запуска бывают отправляющими, на паузе клиента, не стартованными
    *    и завершёнными, и «running» было бы правдой не для всех. Сама фраза
    *    верна при любом их статусе: остановка сборки рассыльщика не зовёт и
    *    кампаний не трогает;
-   *  - про повтор — «may»: «Start outreach» эту вертикаль заново не собирает
+   *  - про повтор — «may»: «Launch» эту вертикаль заново не собирает
    *    (HE_COLLECT_STOP_REPEATS_CODES, autopilotReconcile), повтор — явная
-   *    «Collect again» шага 4, и новая сборка может остановиться так же. «Будет
+   *    «Collect again» шага 3, и новая сборка может остановиться так же. «Будет
    *    судиться тем же правилом» не пишем: флаг и вердикты гипотез к
-   *    следующему суду могут поменяться — поэтому и сказано, что гипотезы
-   *    можно поменять на шаге 2 до повтора.
+   *    следующему суду могут поменяться. Совета «поменяйте принятые гипотезы»
+   *    больше нет: шаг 2 «Choose markets» выбирает рынок целиком, отдельных
+   *    гипотез клиент не размечает.
    */
   hypothesis_mismatch: {
     title:
-      'None of the companies found for this vertical fit the hypotheses it had accepted or suggested when they were checked, so this base will not be launched.',
+      'None of the companies found for this market fit the ideas it had accepted or suggested when they were checked, so this base will not be launched.',
     whatIsSaved:
       'The companies found are saved with this base, but this collection did not look up any emails for them. Your other bases and campaigns are not affected.',
     whatToDo:
-      `This was a deliberate stop, not a technical problem. ${COLLECT_AGAIN_EN} Before that, you can change which of its hypotheses are accepted on step 2.`,
+      `This was a deliberate stop, not a technical problem. ${COLLECT_AGAIN_EN}`,
   },
   segment_exhausted: {
-    title: 'The sources have no new companies left for this vertical.',
+    title: 'The sources have no new companies left for this market.',
     whatIsSaved: 'Companies collected earlier stay in the bases you already have.',
     whatToDo:
-      `This does not mean the market is exhausted — only these sources are. ${COLLECT_AGAIN_EN} To collect another vertical instead, accept its hypotheses on step 2 and press «Start outreach».`,
+      `This does not mean the market is exhausted — only these sources are. ${COLLECT_AGAIN_EN} To collect another market instead, tick it on step 2 «Choose markets» and press «Launch» on step 3.`,
   },
   // Не «источники не дали строк» (это был бы `source`): строки были, но все
   // они — компании и адреса, которые уже держит другая база проекта. Сбор
   // заново не повторяет их — исключение по другим базам проекта стоит на
-  // каждой сборке, — поэтому «Start outreach» правдив как действие. Строка
+  // каждой сборке, — поэтому «Launch» правдив как действие. Строка
   // снимается и по одному АДРЕСУ (общий ящик у компании с другим именем и
   // доменом), поэтому текст говорит «компания или её адрес», а не только
   // «компания».
@@ -469,13 +470,13 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved:
       'Those companies and addresses stay in the audiences that already hold them; this collection does not add them a second time.',
     whatToDo:
-      'Press «Start outreach» on step 2 to collect this vertical again — a new collection skips the companies you already have; if it keeps coming back empty, message Support.',
+      'Press «Launch» on step 3 to collect this market again — a new collection skips the companies you already have; if it keeps coming back empty, message Support.',
   },
   source: {
-    title: 'The company sources did not return any rows for this vertical.',
+    title: 'The company sources did not return any rows for this market.',
     whatIsSaved: FINISHED_WORK_KEPT,
     whatToDo:
-      'Press «Start outreach» on step 2 to collect this vertical again; if it keeps coming back empty, message Support.',
+      'Press «Launch» on step 3 to collect this market again; if it keeps coming back empty, message Support.',
   },
   /**
    * Адрес сайта, который клиент указал сам, не привёл к публичному серверу —
@@ -501,7 +502,7 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     title: 'We could not open the website you gave us, so the research had nothing to read.',
     whatIsSaved: 'The project and everything you entered are saved.',
     whatToDo:
-      'Open the address in a browser to check it. This cabinet does not start the research again after this kind of stop, so message Support. If the site opens for you but stays closed to us, describe your business in a few sentences in the Brief step first — the research can work from that description instead of the site.',
+      'Open the address in a browser to check it. This cabinet does not start the research again after this kind of stop, so message Support. If the site opens for you but stays closed to us, describe your business in a few sentences in «Business description» on step 1 first — the research can work from that description instead of the site.',
   },
   /**
    * Сайт клиента принял соединение, но ни один его адрес не отдал HTML — род
@@ -525,7 +526,7 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     title: 'We could not read any page of the website you gave us, so the research had nothing to read.',
     whatIsSaved: 'The project and everything you entered are saved.',
     whatToDo:
-      'This can be a problem on our side as well as on the site. Check that the address opens in a browser, then press «Try again» on step 1. If it stops this way again, describe your business in a few sentences in the Brief step and press «Try again» once more — the research can then work from that description instead of the site. If it still stops, message Support.',
+      'This can be a problem on our side as well as on the site. Check that the address opens in a browser, then press «Try again» on step 1. If it stops this way again, describe your business in a few sentences in «Business description» on step 1 and press «Try again» once more — the research can then work from that description instead of the site. If it still stops, message Support.',
   },
   /**
    * На упавшей базе этот код значит одно: ни одна строка не получила вердикта,
@@ -538,7 +539,7 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved:
       'No address in this base has a verified email, so it cannot be mailed; your other bases and running campaigns are not affected.',
     whatToDo:
-      'Press «Start outreach» on step 2 to collect this vertical again — a new collection checks every address from the start. If it fails again, message Support.',
+      'Press «Launch» on step 3 to collect this market again — a new collection checks every address from the start. If it fails again, message Support.',
   },
   timeout: {
     title: 'The step did not finish in time and was stopped.',

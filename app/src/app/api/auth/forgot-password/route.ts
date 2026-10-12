@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sendTransactionalEmail } from '@/lib/email/smtpClient';
 import { renderPasswordResetEmail } from '@/lib/email/templates/passwordReset';
+import { formatEngEmailUtc, renderEngPasswordResetEmail } from '@/lib/email/templates/engPasswordReset';
+import { heEngAppOrigin, HE_ENG_VERIFY_FROM_NAME } from '@/lib/hypothesisEngine/engEmailVerificationMail';
 import { generateStrongPassword } from '@/lib/passwordGenerator';
 import { logAudit, logError } from '@/lib/loggerServer';
 
@@ -100,10 +102,11 @@ export async function POST(req: NextRequest) {
 
   // Resolve userId via profiles. supabase-js admin client doesn't have a
   // "get user by email" yet (would need listUsers + filter); profiles already
-  // mirrors email through the auth trigger.
+  // mirrors email through the auth trigger. `market` picks the email language:
+  // an ENG-cabinet account (profiles.market = 'eng') gets the English letter.
   const { data: profile, error: profileErr } = await supabaseAdmin
     .from('profiles')
-    .select('id, email')
+    .select('id, email, market')
     .eq('email', emailRaw)
     .maybeSingle();
 
@@ -126,11 +129,24 @@ export async function POST(req: NextRequest) {
     return jsonOk();
   }
 
-  const resetAtMsk = formatMoscowTime(new Date());
-  const { subject, html, text } = renderPasswordResetEmail({
-    password: newPassword,
-    resetAtMsk,
-  });
+  // ENG: English letter, the reset time in UTC (the reader's zone is unknown),
+  // a link to the cabinet's account page and the same sender name as the
+  // other ENG letters. RU: the letter and the call exactly as before.
+  // The link goes through sign-in (`/login?next=`, app/login/page.tsx accepts
+  // exactly this next on the ENG host), so after signing in the reader lands
+  // on the password form, not on the dashboard. A reader who is still signed
+  // in is sent from this /login straight to the account page by middleware.
+  const eng = profile.market === 'eng';
+  const { subject, html, text } = eng
+    ? renderEngPasswordResetEmail({
+        password: newPassword,
+        resetAtUtc: formatEngEmailUtc(new Date()),
+        accountUrl: `${heEngAppOrigin()}/login?next=/client/eng/account`,
+      })
+    : renderPasswordResetEmail({
+        password: newPassword,
+        resetAtMsk: formatMoscowTime(new Date()),
+      });
 
   try {
     await sendTransactionalEmail({
@@ -138,6 +154,7 @@ export async function POST(req: NextRequest) {
       subject,
       html,
       text,
+      ...(eng ? { fromName: HE_ENG_VERIFY_FROM_NAME } : {}),
     });
     await logAudit('auth.forgot.success', `Password reset email sent`, { to: profile.email }, logMeta);
   } catch (err) {

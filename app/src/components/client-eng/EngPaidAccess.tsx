@@ -97,7 +97,12 @@ function useResendLink(onDone?: () => void) {
   return { sending, note, send };
 }
 
-function ResendControls({ onDone }: { onDone?: () => void }) {
+/**
+ * «Send confirmation link» и ссылка на страницу подтверждения. Экспорт — для
+ * шага 3 «Launch»: рынок, чей автозапуск ждёт подтверждения почты, показывает
+ * ту же кнопку у себя.
+ */
+export function EngResendLinkControls({ onDone }: { onDone?: () => void }) {
   const { sending, note, send } = useResendLink(onDone);
   return (
     <div className="flex flex-col gap-1.5">
@@ -135,7 +140,7 @@ export function EngPaidAccessNotice({ refusal }: { refusal: EngPaidAccessError }
       <span>
         <EngSupportText text={refusal.message} />
       </span>
-      {refusal.code === 'email_not_verified' && !refusal.emailMissing && <ResendControls />}
+      {refusal.code === 'email_not_verified' && !refusal.emailMissing && <EngResendLinkControls />}
     </div>
   );
 }
@@ -170,7 +175,7 @@ export function EngVerifyEmailBanner() {
       <span>
         {BANNER_HEAD} <EngSupportText text={detail} />
       </span>
-      {status.email !== null && <ResendControls onDone={() => void load()} />}
+      {status.email !== null && <EngResendLinkControls onDone={() => void load()} />}
     </div>
   );
 }

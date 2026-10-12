@@ -26,6 +26,7 @@ import {
   Mail,
   RefreshCw,
   Rocket,
+  UserRound,
   Wand2,
 } from 'lucide-react';
 import {
@@ -76,7 +77,8 @@ const STAGE_STATUS: Record<EngDashStage, StageStatus> = {
   analyzing: { tag: 'analysis', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   analyzed: { tag: 'analyzed', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
   template: { tag: 'ready to launch', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
-  // Запуск записан, но не закончен — нужен шаг клиента (шаг 5), поэтому amber.
+  // Запуск записан, но не закончен — его достраивает шаг 3 (автозапуск или
+  // «Launch now»), поэтому amber.
   launch_unfinished: { tag: 'launch unfinished', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   // Сводки отправки нет (ответ старше S2) — «launched»: верно при любом
   // статусе кампаний. Со сводкой тег — её статус (sendingStatusOf).
@@ -120,34 +122,36 @@ function attentionStatus(attention: EngDashAttentionInfo | null | undefined): St
 /**
  * Следующий шаг вертикали в 'attention' — туда, где полный текст причины и
  * действия, а не пересказ его здесь:
- *  - база (сбой или отмена) — шаг 4 печатает у упавшей базы объяснение по коду
- *    причины вместе с «что делать» (engStageErrorText), а без причины — свою
- *    фразу с действием;
+ *  - база (сбой или отмена) — карточка рынка шага 3 печатает у упавшей базы
+ *    объяснение по коду причины вместе с «что делать» (engStageErrorText) и
+ *    «Collect again», а без причины — свою фразу с действием;
  *  - пустая база — у клиента хода нет: автопилот считает 'analyzed'-базу
  *    готовой и новую сборку не ставит, а шаблон по пустой базе не строится —
  *    поэтому Support (чат кабинета, отвечает команда);
  *  - research — шаг 1: «Try again» там есть только после технического сбоя
  *    (решение владельца 10.10.2026), иначе шаг говорит, почему повтора нет
  *    (там же «Last error» шапки проекта, если причина записана);
- *  - остановленный анализ — «Start outreach» шага 2: при `requeues` кнопка
+ *  - остановленный анализ — «Launch» шага 3: при `requeues` кнопка
  *    ставит базе base_analyze заново, строки не покупаются второй раз
  *    (autopilotReconcile.ts, ремонт осиротевшей базы); иначе результат нажатия
  *    зависит от формы (цепочка, новая сборка, пауза по потолку расхода — под
  *    ней `requeues` ложно), и строка называет только саму кнопку — что ещё
- *    нужно (принять гипотезу, перезапустить research), пишет шаг 2.
+ *    нужно (выбрать рынок, перезапустить research), пишет шаг 3.
  */
 function attentionNextLine(attention: EngDashAttentionInfo | null | undefined): string {
   switch (attention?.reason) {
     case 'base_empty':
-      return 'next: message Support about this vertical';
+      return 'next: message Support about this market';
     case 'project_failed':
-      return 'next: open step 1 «Brief» — it shows whether the research can be tried again';
+      return 'next: open step 1 «Your business» — it shows whether the research can be tried again';
     case 'analysis_stopped':
+      // Без `requeues` «Launch» этот анализ заново не ставит — тот же Support,
+      // что у карточки рынка на шаге 3 и в письме об этой остановке.
       return attention.requeues
-        ? 'next: «Start outreach» on step 2 queues the analysis again'
-        : 'next: «Start outreach» on step 2';
+        ? 'next: «Launch» on step 3 checks the contacts again'
+        : 'next: message Support about this market';
     default:
-      return 'next: step 4 «Bases & Launch» says what to do';
+      return 'next: step 3 «Launch» says what to do';
   }
 }
 
@@ -159,8 +163,8 @@ function attentionNextLine(attention: EngDashAttentionInfo | null | undefined): 
  */
 function analysisStoppedText(code: 'cancelled' | null): string {
   return code === 'cancelled'
-    ? 'Analyzing the latest base of this vertical was cancelled before it finished.'
-    : 'Analyzing the latest base of this vertical stopped before it finished.';
+    ? 'Analyzing the latest base of this market was cancelled before it finished.'
+    : 'Analyzing the latest base of this market stopped before it finished.';
 }
 
 /**
@@ -179,8 +183,28 @@ const LETTERS_REWRITE_STATUS: StageStatus = {
   dot: 'var(--cp-amber)',
   text: 'var(--cp-amber)',
 };
-/** Следующий шаг такой вертикали — за командой (через Support), а не за кнопкой запуска. */
-const LETTERS_REWRITE_NEXT_LINE = 'next: message Support to have the letters rewritten';
+/**
+ * Следующий шаг такой вертикали — «Rewrite letters» на карточке рынка шага 3
+ * (новые итоговые письма в пределах бюджета генераций; исчерпан — отказ
+ * кнопки ведёт в Support). Незаконченный запуск кнопка не переписывает —
+ * у него Support (LETTERS_REWRITE_UNFINISHED_NEXT_LINE).
+ */
+const LETTERS_REWRITE_NEXT_LINE = 'next: press «Rewrite letters» on step 3 «Launch»';
+const LETTERS_REWRITE_UNFINISHED_NEXT_LINE = 'next: message Support to have the letters rewritten';
+
+/**
+ * Письма сняты «Rewrite letters», а новые не написаны (`letters_retired`
+ * агрегата): «Launch» рынок не двигает. На шаге 3 у карточки рынка — «Rewrite
+ * letters», пока у аудитории есть попытки, иначе Support; сколько попыток
+ * осталось, знает только шаг 3 (GET …/rewrite), поэтому кнопку здесь не
+ * называем.
+ */
+const LETTERS_RETIRED_STATUS: StageStatus = {
+  tag: 'letters not written',
+  dot: 'var(--cp-amber)',
+  text: 'var(--cp-amber)',
+};
+const LETTERS_RETIRED_NEXT_LINE = 'next: step 3 «Launch» shows how to get new letters';
 
 const JOB_STAGE_LABELS: Record<string, string> = {
   site_profile: 'profiling the site',
@@ -188,7 +212,7 @@ const JOB_STAGE_LABELS: Record<string, string> = {
   brand_cloud: 'building brand cloud',
   hypotheses: 'drafting hypotheses',
   evidence: 'collecting evidence',
-  clustering: 'clustering verticals',
+  clustering: 'grouping ideas into markets',
   chain: 'writing letters',
   vocab: 'building vocabulary',
   base_collect: 'collecting the base',
@@ -198,31 +222,76 @@ const JOB_STAGE_LABELS: Record<string, string> = {
 };
 
 /**
- * Шаг мастера проекта, куда ведёт кнопка вертикали. Сухая вертикаль ведёт на
- * шаг 2: кнопка «Resume daily top-up» живёт там.
+ * Шаг мастера проекта, куда ведёт кнопка вертикали (мастер из трёх шагов):
+ *  - шаг 1 «Your business» — пока идёт research и когда он встал («Try
+ *    again» или почему его нет);
+ *  - шаг 2 «Choose markets» — рынок не выбран: там его отмечают;
+ *  - шаг 3 «Launch» — всё от писем и дальше: прогресс рынка, его кнопки
+ *    («Launch now», «Collect again», «Rewrite letters», «Resume daily
+ *    top-up») и блок отправки.
  */
-function wizardStepFor(vertical: EngDashboardVertical, refillHeldHere: boolean): number {
+function wizardStepFor(vertical: EngDashboardVertical): number {
   switch (vertical.stage) {
     case 'research':
-      return 2; // Verticals: там живёт прогресс research
-    case 'letters':
-      return 3; // Letters
-    case 'launch_unfinished':
-      return 5; // Review & Launch: там достраивается запуск
-    case 'launched':
-      return refillHeldHere ? 2 : 4;
+      return 1;
     case 'not_selected':
-      return 2; // Verticals: там принимают гипотезы
+      return 2;
     case 'attention':
-      // Research — шаг 1 («Try again» или почему его нет); остановленный анализ — шаг 2
-      // («Start outreach»); база — шаг 4, где её причина.
-      return vertical.attention?.reason === 'project_failed'
-        ? 1
-        : vertical.attention?.reason === 'analysis_stopped'
-          ? 2
-          : 4;
+      return vertical.attention?.reason === 'project_failed' ? 1 : 3;
     default:
-      return 4; // Bases & Launch
+      return 3;
+  }
+}
+
+/**
+ * Готовый рынок и его автозапуск (`auto_launch` агрегата): тег карточки и
+ * строка «next». Нет автозапуска — ждёт «Launch now» на шаге 3.
+ */
+function autoLaunchStatus(vertical: EngDashboardVertical): StageStatus | null {
+  const auto = vertical.auto_launch;
+  if (vertical.stage !== 'template' || !auto) return null;
+  switch (auto.state) {
+    case 'waiting':
+      // Не пробованный тиком рынок при выключателе аккаунта держится им —
+      // тот же тег, что у строки 'held' с этой причиной.
+      if (auto.code === null && auto.access) return { tag: 'on hold', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
+      return { tag: 'starting', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
+    case 'running':
+      return { tag: 'starting', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
+    case 'held':
+      return { tag: 'on hold', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
+    case 'failed':
+      return { tag: 'not started', dot: 'var(--cp-red)', text: 'var(--cp-red)' };
+    case 'done':
+      // У шаблона без записи о запуске 'done' — только 'needs_support' (запись
+      // не легла): не «ready to launch», шаг 3 зовёт в Support.
+      return auto.code === 'needs_support' ? { tag: 'not started', dot: 'var(--cp-red)', text: 'var(--cp-red)' } : null;
+  }
+}
+
+function templateNextLine(vertical: EngDashboardVertical): string {
+  const auto = vertical.auto_launch;
+  if (!auto) return 'next: press «Launch now» on step 3 «Launch» to start sending';
+  switch (auto.state) {
+    case 'waiting':
+      // 'waiting' без кода — то же правило, что у строки рынка на шаге 3:
+      // выключатель аккаунта держит старт, а ожидание дольше обычного даёт там
+      // «Launch now».
+      if (auto.code !== null) return 'next: we try to start sending again — step 3 «Launch» shows when';
+      if (auto.access === 'not_enabled') return 'next: sending starts after a one-time check of your account by our team';
+      if (auto.access === 'revoked') return 'next: message Support — sending is turned off for your account';
+      if (auto.stale === true) return 'next: press «Launch now» on step 3 «Launch» to start it yourself';
+      return 'next: sending starts automatically';
+    case 'running':
+      // Брошенная попытка (`stale`): на шаге 3 у рынка «Launch now».
+      return auto.stale === true ? 'next: press «Launch now» on step 3 «Launch» to try again' : 'next: starting sending…';
+    case 'held':
+    case 'failed':
+      return 'next: step 3 «Launch» says what is needed';
+    case 'done':
+      // 'done' у шаблона без записи о запуске — только 'needs_support'
+      // (запись не легла): отправки нет, шаг 3 зовёт в Support.
+      return auto.code === 'needs_support' ? 'next: step 3 «Launch» says what is needed' : 'next: step 3 «Launch» shows its sending';
   }
 }
 
@@ -404,8 +473,8 @@ const REFILL_PIPE_EVIDENCE: Record<HeClientRefillState, string> = {
  * сняло (`refill_dry`). Только для `running`: у `paused`, `spend_paused`,
  * `stopped` и `off` своя, более общая правда — добора нет у всего проекта.
  */
-const REFILL_DRY_NEXT_LINE = 'next: daily top-up paused for this vertical — press «Resume daily top-up» on step 2 «Verticals»';
-const REFILL_DRY_PIPE_EVIDENCE = 'paused for this vertical';
+const REFILL_DRY_NEXT_LINE = 'next: daily top-up paused for this market — press «Resume daily top-up» on step 3 «Launch»';
+const REFILL_DRY_PIPE_EVIDENCE = 'paused for this market';
 
 /**
  * Ночной добор ПРОЕКТА идёт (`running`), а ЭТУ вертикаль ночь пропустит. Решает
@@ -419,7 +488,7 @@ const REFILL_DRY_PIPE_EVIDENCE = 'paused for this vertical';
  * Действие — только то, что на карточке ЕСТЬ: кнопка старта блока отправки
  * (engStartButtonOf — «Start sending», «Start the rest» или «Resume»), а без
  * неё — Support. Основная кампания у запуска, разбитого по сегментам, —
- * «Default texts» (так её подписывает шаг 4), у неразбитого — единственная.
+ * «Default texts» (так её подписывает кабинет), у неразбитого — единственная.
  *
  * null — ночь вертикаль берёт (основная отправляет) или вердикта нет (запуска
  * нет, ответ старше этой правки). 'unknown' — статус основной не читался
@@ -442,10 +511,10 @@ function topUpSkipFor(vertical: EngDashboardVertical): { line: string; evidence:
     case 'access_not_enabled':
       return skip('waits until sending is on for your account', 'waits for sending to be on');
     case 'access_turned_off':
-      return skip('skips this vertical — sending is turned off for your account; message Support', 'skipped — sending is off');
+      return skip('skips this market — sending is turned off for your account; message Support', 'skipped — sending is off');
     case 'unavailable':
       return skip(
-        'skips this vertical while we cannot check its campaigns — message Support if this stays',
+        'skips this market while we cannot check its campaigns — message Support if this stays',
         'skipped — campaigns not checked',
       );
     case 'client_paused':
@@ -456,46 +525,46 @@ function topUpSkipFor(vertical: EngDashboardVertical): { line: string; evidence:
       // какой это запуск: без обещания.
       return skip(
         s?.action === 'resume'
-          ? 'skips this vertical while you keep it paused — press «Resume» to include it'
+          ? 'skips this market while you keep it paused — press «Resume» to include it'
           : s?.pre_self_serve
-            ? 'skips this vertical while it is paused — it was created before sending was set up for your project, ' +
+            ? 'skips this market while it is paused — it was created before sending was set up for your project, ' +
               'so only Support can start it again'
             : s
-              ? 'skips this vertical while you keep it paused'
-              : 'skips this vertical while it is paused',
+              ? 'skips this market while you keep it paused'
+              : 'skips this market while it is paused',
         'skipped — paused by you',
       );
     case 'pre_self_serve':
       return skip(
-        'skips this vertical — its campaigns were created before sending was set up for your project; message Support',
+        'skips this market — its campaigns were created before sending was set up for your project; message Support',
         'skipped — created before self-serve sending',
       );
     case 'no_main':
       return skip(
-        'skips this vertical — its launch has no «Default texts» campaign; message Support',
+        'skips this market — its launch has no «Default texts» campaign; message Support',
         'skipped — no «Default texts» campaign',
       );
     case 'campaign_completed':
-      return skip(`skips this vertical — ${campaign} has completed; message Support to continue it`, 'skipped — campaign completed');
+      return skip(`skips this market — ${campaign} has completed; message Support to continue it`, 'skipped — campaign completed');
     case 'campaign_stopped':
-      return skip(`skips this vertical until ${campaign} is sending again — message Support`, 'skipped — campaign stopped');
+      return skip(`skips this market until ${campaign} is sending again — message Support`, 'skipped — campaign stopped');
     case 'campaign_not_sending': {
       if (empty) {
         return skip(
-          'skips this vertical — its campaigns have no contacts and were not started; message Support',
+          'skips this market — its campaigns have no contacts and were not started; message Support',
           'skipped — campaigns not started',
         );
       }
       const button = s ? engStartButtonOf(s) : null;
       return skip(
-        `skips this vertical until ${campaign} is sending — ${button ? `press «${button}»` : 'message Support'}`,
+        `skips this market until ${campaign} is sending — ${button ? `press «${button}»` : 'message Support'}`,
         'skipped — campaign not sending',
       );
     }
     case 'unknown':
       if (empty) {
         return skip(
-          'skips this vertical — its campaigns have no contacts and were not started; message Support',
+          'skips this market — its campaigns have no contacts and were not started; message Support',
           'skipped — campaigns not started',
         );
       }
@@ -525,25 +594,52 @@ function topUpTakesVertical(vertical: EngDashboardVertical, refill: HeClientRefi
 function nextLineFor(vertical: EngDashboardVertical, refill: HeClientRefillState, dry: boolean, rewrite: boolean): string {
   const stage = vertical.stage;
   // Шаблон этапа запуск откажет: ни «launch», ни «finish the launch» не сработают.
-  if (rewrite && (stage === 'template' || stage === 'launch_unfinished')) return LETTERS_REWRITE_NEXT_LINE;
+  if (rewrite && stage === 'template') return LETTERS_REWRITE_NEXT_LINE;
+  if (rewrite && stage === 'launch_unfinished') return LETTERS_REWRITE_UNFINISHED_NEXT_LINE;
+  if (vertical.letters_retired === true) return LETTERS_RETIRED_NEXT_LINE;
+  // Сбор после писем и итоговые письма после проверки ставит только автопилот
+  // (autopilotNext.ts). Выключен — никто не поставит, пока клиент не нажмёт
+  // «Launch» шага 3 (реконсилер включает автопилот и ставит недостающее); не
+  // прочитан — ни того, ни другого не обещаем.
+  const autopilot = vertical.autopilot;
+  // Пауза по потолку расхода: ни автопилот, ни «Launch» следующую платную
+  // стадию не поставят (реконсилер встаёт на потолке) — к кнопке не зовём.
+  const spendHeld = `next: on hold — ${ENG_REFILL_SPEND_PAUSED_SHORT_EN}`;
   switch (stage) {
     case 'research':
-      return 'next: verticals review';
+      return 'next: choose your markets';
     case 'letters':
-      return 'next: base collection';
+      if (vertical.spend_paused === true) return spendHeld;
+      return autopilot === true
+        ? 'next: base collection'
+        : autopilot === false
+          ? 'next: press «Launch» on step 3 «Launch» to collect contacts'
+          : 'next: step 3 «Launch» shows what comes next';
     case 'collecting':
       return 'next: email enrichment (after collection)';
     case 'construct':
       return 'next: analysis (after enrichment)';
     case 'analyzing':
-      return 'next: template';
     case 'analyzed':
       // Без внутреннего «85/15» — это доля текста шаблона, а не шаг клиента.
-      return 'next: template';
+      if (vertical.spend_paused === true) return spendHeld;
+      return autopilot === true
+        ? 'next: template'
+        : autopilot === false
+          ? 'next: press «Launch» on step 3 «Launch» to have the final letters written'
+          : 'next: step 3 «Launch» shows what comes next';
     case 'template':
-      return 'next: launch from Review & Launch';
+      return templateNextLine(vertical);
     case 'launch_unfinished':
-      return 'next: finish the launch on step 5 «Review & Launch»';
+      // «Само» — только пока строка ждёт следующей попытки или идёт: 'done'
+      // (сдался после трёх достроек) и 'held' тик сам не достроит — тогда
+      // кнопка, как у карточки рынка на шаге 3.
+      // Брошенная попытка ('running' со `stale`) сама не достроится, если
+      // автозапуск проекта выключен, — тогда кнопка, как на шаге 3.
+      return vertical.auto_launch?.state === 'waiting' ||
+        (vertical.auto_launch?.state === 'running' && vertical.auto_launch.stale !== true)
+        ? 'next: we finish the launch automatically — step 3 «Launch» shows it'
+        : 'next: press «Launch now» on step 3 «Launch» to finish the launch';
     case 'launched':
       if (refill === 'running' && dry) return REFILL_DRY_NEXT_LINE;
       if (refill === 'running') return topUpSkipFor(vertical)?.line ?? REFILL_NEXT_LINE.running;
@@ -578,6 +674,9 @@ function buildPipelineRows(
         : 'red';
   // Признак ставится только шаблону этапа 'template' / 'launch_unfinished'.
   const rewrite = lettersNeedRewrite(vertical) && (vertical.stage === 'template' || launchUnfinished);
+  // Письма сняты, новых нет (этап 'analyzed'): строка Template — текущая и
+  // неподвижная, сама не сдвинется.
+  const retired = vertical.letters_retired === true;
   const dryHere = refill === 'running' && vertical.refill_dry === true;
   const cur = currentIndexFor(vertical);
   // Невыбранная вертикаль: пройдено то, что уже есть (точки агрегата: research,
@@ -684,8 +783,10 @@ function buildPipelineRows(
       key: 'template',
       label: 'Template',
       state: stateOf(5),
-      evidence:
-        stateOf(5) === 'done'
+      ...(retired ? { marker: 'held' as const } : {}),
+      evidence: retired
+        ? 'new letters not written'
+        : stateOf(5) === 'done'
           ? rewrite
             ? 'letters need rewriting'
             : 'template ready'
@@ -704,7 +805,7 @@ function buildPipelineRows(
       // White-label: имя кампании — подпись, а не ссылка. Наружу вести некуда:
       // у клиента нет своего входа в рассыльщик, а сама ссылка светила бы бренд.
       evidence: launchUnfinished ? (
-        rewrite ? 'unfinished — these letters cannot finish it' : 'unfinished — finish it on step 5'
+        rewrite ? 'unfinished — these letters cannot finish it' : 'unfinished — step 3 finishes it'
       ) : launched ? (
         <>
           {s.leads_launched > 0 ? `${fmt(s.leads_launched)} leads` : ''}
@@ -951,8 +1052,7 @@ function VerticalCard({
   /** После Pause / Start sending / Resume — перечитать агрегат. */
   onSendingChanged: () => void;
 }) {
-  const dryHere = refill === 'running' && vertical.refill_dry === true;
-  const step = wizardStepFor(vertical, dryHere);
+  const step = wizardStepFor(vertical);
   const launched = vertical.stage === 'launched';
   const rewrite = lettersNeedRewrite(vertical);
   // Незаконченный запуск остаётся «launch unfinished» (это правда и с
@@ -963,7 +1063,9 @@ function VerticalCard({
       ? attentionStatus(vertical.attention)
       : rewrite && vertical.stage === 'template'
         ? LETTERS_REWRITE_STATUS
-        : (sendingStatusOf(vertical) ?? STAGE_STATUS[vertical.stage]);
+        : vertical.letters_retired === true
+          ? LETTERS_RETIRED_STATUS
+          : (sendingStatusOf(vertical) ?? autoLaunchStatus(vertical) ?? STAGE_STATUS[vertical.stage]);
   const rows = buildPipelineRows(vertical, activeJob, refill);
   // Одна фраза под картой пайплайна — только там, где строке карты её не
   // вместить: почему вертикаль встала (engDashAttentionText). У запущенной
@@ -1108,7 +1210,7 @@ const TOP_UP_TAG: Record<HeClientRefillState, { label: string; tone: 'green' | '
 function topUpStateText(state: HeClientRefillState): string {
   switch (state) {
     case 'running':
-      return 'On — each night from 03:20 UTC we look for new contacts and add them to the campaigns of this project; a vertical whose campaigns cannot take new contacts is skipped, and its «next» line says why.';
+      return 'On — each night from 03:20 UTC we look for new contacts and add them to the campaigns of this project; a market whose campaigns cannot take new contacts is skipped, and its «next» line says why.';
     case 'off':
       return 'Off — no new contacts are added to the campaigns of this project. Turn it on to look for new contacts each night (from 03:20 UTC) and add them to the campaigns that can take them.';
     default:
@@ -1349,7 +1451,7 @@ export function EngDashboard() {
             Command Center
           </h1>
           <p className="mt-1 text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
-            Live view across all your verticals — refreshed every 15s.
+            Live view across all your markets — refreshed every 15s.
           </p>
         </div>
         <Link
@@ -1367,6 +1469,16 @@ export function EngDashboard() {
         >
           <LayoutGrid className="h-3.5 w-3.5" />
           All projects
+        </Link>
+        {/* Аккаунт (адрес входа, смена пароля) — ссылкой здесь, а не пунктом
+            меню: набор пунктов меню закреплён (tests/lib/clientNav.test.ts). */}
+        <Link
+          href={'/client/eng/account' as Route}
+          prefetch={false}
+          className="ds-btn-ghost inline-flex items-center gap-1.5"
+        >
+          <UserRound className="h-3.5 w-3.5" />
+          Account
         </Link>
       </header>
 
@@ -1451,7 +1563,7 @@ export function EngDashboard() {
                     </span>
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
                       as things stand, the next run skips{' '}
-                      {projects.length === 1 ? 'your project' : projectsWord(refillSkippedCount)} — see the verticals
+                      {projects.length === 1 ? 'your project' : projectsWord(refillSkippedCount)} — see the markets
                       below
                       {stoppedSuffix}
                     </span>
@@ -1487,8 +1599,8 @@ export function EngDashboard() {
           {/* Проект, который автопилот не продвинул. Место выбрано по вопросу,
               с которым клиент сюда и приходит: «почему ничего не происходит?» —
               поэтому блок стоит сразу под «Right now», где идущих стадий как
-              раз нет. Ссылка ведёт в мастер проекта: там та же фраза и шаг 2 с
-              «Start outreach»; собственной кнопки здесь нет намеренно —
+              раз нет. Ссылка ведёт в мастер проекта: там та же фраза и шаг 3 с
+              «Launch»; собственной кнопки здесь нет намеренно —
               дашборд ничего не запускает. */}
           {heldProjects.length > 0 && (
             <EngCard className="flex flex-col gap-2">
@@ -1543,16 +1655,14 @@ export function EngDashboard() {
                   проектов нет; есть — путь в него (несколько — у аккаунта,
                   создавшего их до этого правила, — в список). */}
               <p className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
-                {projects.length === 0 ? 'No project yet' : 'No verticals yet'}
+                {projects.length === 0 ? 'No project yet' : 'No markets yet'}
               </p>
-              {/* Кампании создаёт и стартует «Launch all» шага 5; письма,
-                  базу и шаблон автопилот строит после «Start outreach» и
-                  только по вертикалям с принятой гипотезой. */}
+              {/* Письма, базу, итоговые письма и запуск после «Launch» шага 3
+                  ведут автопилот и автозапуск — и только по выбранным рынкам. */}
               <p className="text-xs m-0 max-w-md" style={{ color: 'var(--cp-paper-mute)' }}>
-                The engine researches your market. Accept the hypotheses you want on step 2 and press «Start
-                outreach» — it drafts letters, collects a base and builds a template for each vertical you
-                picked. «Launch all» on step 5 then creates the campaigns and starts sending. Every vertical
-                shows up here.
+                We research your business and find the markets that could buy from you. Choose the ones you want on
+                step 2 and press «Launch» on step 3 — we write the letters, collect and check contacts, write the
+                final letters and start sending for each market you chose. Every market shows up here.
               </p>
               <Link
                 href={
@@ -1574,8 +1684,8 @@ export function EngDashboard() {
               </Link>
             </EngCard>
           ) : (
-            <section aria-label="Verticals" className="flex flex-col gap-4">
-              <h2 className="ds-eyebrow">02 → Verticals</h2>
+            <section aria-label="Markets" className="flex flex-col gap-4">
+              <h2 className="ds-eyebrow">02 → Markets</h2>
               {(projects.length > 1 ? projects : [{ id: '', name: '' }]).map((p) => {
                 const list = projects.length > 1 ? verticals.filter((v) => v.project_id === p.id) : verticals;
                 if (list.length === 0) return null;

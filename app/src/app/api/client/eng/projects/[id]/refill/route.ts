@@ -23,7 +23,8 @@ export const dynamic = 'force-dynamic';
 // переключатель дашборда, — «daily top-up».
 const TOP_UP_NOT_AVAILABLE = 'The daily top-up is not available for this project.';
 const TOP_UP_NO_LAUNCH =
-  'The daily top-up starts after the first launch: launch a template on step 5 «Review & Launch» first.';
+  'The daily top-up becomes available once your first campaign is created. Campaigns are created after you press ' +
+  '«Launch» on step 3.';
 const TOP_UP_SETUP_PROBLEM =
   'The daily top-up cannot be switched right now because of a problem on our side. Message Support.';
 const TOP_UP_FAILED = 'Failed to switch the daily top-up';

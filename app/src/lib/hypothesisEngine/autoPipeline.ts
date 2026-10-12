@@ -2006,7 +2006,7 @@ function holdAlertBody(notice: HeRefillHoldNotice): {
           'подробно': a.detail.slice(0, 600),
           // Фраза ленты — TOP_UP_SKIP_EN.campaign_completed (engDashboard.ts), менять вместе.
           'клиент видит':
-            'daily top-up skipped — the main campaign of this vertical has completed and is not restarted ' +
+            'daily top-up skipped — the main campaign of this market has completed and is not restarted ' +
             'automatically; message Support to continue it (лента); строка «next» вертикали — пропуск с советом ' +
             'написать в Support',
           'сделать':
@@ -2053,7 +2053,7 @@ function holdAlertBody(notice: HeRefillHoldNotice): {
           ...ids,
           'кампания': a.campaignId,
           'клиент видит':
-            'daily top-up skipped — our sending service stopped or removed the main campaign of this vertical; message Support',
+            'daily top-up skipped — our sending service stopped or removed the main campaign of this market; message Support',
           'сделать':
             'проверить у рассыльщика ящики проекта и саму кампанию; остановленную (-99/-1/-2) после починки ' +
             'активировать там (статус 1) — кнопка старта в кабинете клиента остановленную рассыльщиком кампанию не ' +

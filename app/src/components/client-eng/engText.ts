@@ -102,7 +102,7 @@ const PROVIDER_TRACE_RE =
  *                   шага 1, и только после технического сбоя
  *                   (heResearchRetryAllowed, clientFailureText.ts);
  *  - `collection` — карточка основной базы вертикали; новую сборку ставит
- *                   «Start outreach» шага 2;
+ *                   «Launch» шага 3;
  *  - `refill`     — карточка прогона ежедневного долива («auto-refill: …»).
  *                   Перезапустить ночь клиент не может (её ставит крон), а
  *                   пойдёт ли следующая, решают конфиг, пауза и бюджет —
@@ -120,7 +120,7 @@ export type EngFailureScope = 'research' | 'collection' | 'refill';
  * отменённой базы харвест (`dropCancelledBaseHarvest`), а строки базы пишет
  * только финальная запись стадии — у базы, отменённой посреди сборки, других
  * копий собранного нет. Отменённая на анализе база строки хранит, но и её
- * «Start outreach» не переиспользует: упавшая база новую сборку не
+ * «Launch» не переиспользует: упавшая база новую сборку не
  * останавливает, и та собирает заново.
  */
 const CANCELLED_BASE_HEAD_EN =
@@ -135,7 +135,7 @@ const STAGE_CANCELLED_EN: Record<EngFailureScope, string> = {
   research:
     'The research was cancelled before it finished. This cabinet starts research again only when it stops because of a technical problem, so message Support if you need it researched.',
   collection:
-    `${CANCELLED_BASE_HEAD_EN} If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse this base.`,
+    `${CANCELLED_BASE_HEAD_EN} If you still need this market, «Launch» on step 3 starts a new collection for it — it does not reuse this base.`,
   // «stopped», а не «cancelled»: тот же маркер базе прогона пишет и пропуск
   // ночи, чьи кампании не брали контакты (stages/baseCollectRefill.ts, отказ
   // с stats.sending_skip без очереди переноса), — его никто не отменял.
@@ -228,14 +228,14 @@ export function engStageErrorText(code: HeClientStageErrorCode, scope: EngFailur
   });
 }
 
-/** Первое предложение основной базы, упавшей без записанной причины (шаг 4). */
+/** Первое предложение основной базы, упавшей без записанной причины (шаг 3). */
 export const ENG_NO_REASON_BASE_HEAD_EN =
   'This collection stopped without a recorded reason, so this base will not be launched.';
 
 /**
  * Остановленная основная база, которая НЕ решает, что дальше с вертикалью: у
  * вертикали есть своя авто-база новее, либо собирающаяся, анализирующаяся или
- * проанализированная (EngStepBases, `stopTextOffersRestart`). «Start outreach» решает
+ * проанализированная (EngStepBases, `stopTextOffersRestart`). «Launch» решает
  * по ПОСЛЕДНЕЙ своей базе — новой сборки при живой или готовой базе не ставит,
  * а после остановки HE_COLLECT_STOP_REPEATS_CODES не ставит вовсе
  * (autopilotReconcile.ts), — а «Collect again» рисуется только у последней
@@ -244,7 +244,7 @@ export const ENG_NO_REASON_BASE_HEAD_EN =
  * Заголовок и «что уцелело» — те же, что у полного текста (`engStageErrorText`).
  */
 const EARLIER_BASE_NOTE_EN =
-  'Another base of this vertical is newer, still being collected or already collected, so this stopped one needs nothing from you.';
+  'Another base of this market is newer, still being collected or already collected, so this stopped one needs nothing from you.';
 
 export function engEarlierBaseStopText(code: HeClientStageErrorCode | null): string {
   if (code === null) return `${ENG_NO_REASON_BASE_HEAD_EN} ${EARLIER_BASE_NOTE_EN}`;
@@ -257,11 +257,11 @@ export function engEarlierBaseStopText(code: HeClientStageErrorCode | null): str
  * Почему карточка вертикали Command Center в этапе 'attention' — только «что
  * произошло» (у кодов, которые чинит команда, это два предложения
  * HE_TEAM_ON_IT_EN); «что делать» карточка говорит строкой «next: …» и ведёт
- * туда, где полный текст (шаг 4 для базы, шапка проекта и шаг 1 для research).
+ * туда, где полный текст (шаг 3 для базы, шапка проекта и шаг 1 для research).
  *
  * Собирается только из констант: заголовок справочника по коду
  * (`heClientFailureFor(code).title` — та же фраза, с которой начинается
- * объяснение базы на шаге 4 и «Last error» шапки проекта, поэтому экраны не
+ * объяснение базы на шаге 3 и «Last error» шапки проекта, поэтому экраны не
  * расходятся) либо своя фраза для отмены, отсутствующей причины и пустой
  * базы. Каждая правдива для любой строки своей причины:
  *  - отмена ('cancelled') — базу пишут 'failed' оба cancel-роута, и это
@@ -272,11 +272,11 @@ export function engEarlierBaseStopText(code: HeClientStageErrorCode | null): str
  *    неё нечего, и это всё, что про неё известно (причины у такой базы нет).
  */
 const ATTENTION_CANCELLED_BASE_EN =
-  'Work on the latest base of this vertical was cancelled before it finished, so that base will not be launched.';
+  'Work on the latest base of this market was cancelled before it finished, so that base will not be launched.';
 const ATTENTION_NO_REASON_BASE_EN =
-  'Collecting the latest base of this vertical stopped without a recorded reason, so that base will not be launched.';
+  'Collecting the latest base of this market stopped without a recorded reason, so that base will not be launched.';
 const ATTENTION_EMPTY_BASE_EN =
-  'The latest base of this vertical came back with no rows, so there is nothing to launch from it.';
+  'The latest base of this market came back with no rows, so there is nothing to launch from it.';
 const ATTENTION_CANCELLED_RESEARCH_EN = 'The research of this project was cancelled before it finished.';
 const ATTENTION_NO_REASON_RESEARCH_EN = 'The research of this project stopped without a recorded reason.';
 
@@ -311,9 +311,14 @@ export function engRefillStoppedText(): string {
  *
  * Правила формулировок:
  *  - у КАЖДОГО кода назван следующий шаг: у `retrying` — уже существующая
- *    кнопка «Start outreach» шага 2, у остальных трёх — Support (чат кабинета,
- *    отвечает команда; менеджера у self-serve кабинета нет). НОВОЙ кнопки,
- *    запускающей платную работу, кабинет для них не предлагает и не должен;
+ *    кнопка «Launch» шага 3; у `stage_stopped` — карточки рынков шага 3, а
+ *    не «Launch»: код один на проект и не говорит, ЧТО встало, а «Launch»
+ *    двигает не всё (сборку с повторяющейся остановкой, анализ, который он не
+ *    ставит заново, и письма с исчерпанным бюджетом — нет), поэтому что
+ *    нажать, говорит карточка самого рынка, и без такой карточки — Support;
+ *    у остальных — Support (чат кабинета, отвечает команда; менеджера у
+ *    self-serve кабинета нет). НОВОЙ кнопки, запускающей платную работу,
+ *    кабинет для них не предлагает и не должен;
  *  - про автоматический повтор здесь НЕ обещано ничего, хотя у `read_failed` и
  *    `enqueue_failed` он предусмотрен: ночной проход
  *    (`runHeAutopilotReconcilePass`) выключен флагом `HE_AUTOPILOT_RECONCILE` и
@@ -324,16 +329,19 @@ export function engRefillStoppedText(): string {
  *    ручной выход, безопасный сам по себе: кнопка идёт тем же идемпотентным
  *    путём (`reconcileHeAutopilotProject`) и уже сделанную работу не повторяет;
  *  - но «ВСЕГДА» про эту кнопку писать НЕЛЬЗЯ, и поэтому текст отправляет НА
- *    ШАГ 2, а не обещает кнопку на нём. Кнопка рисуется только при
- *    `canStartOutreach` (`EngStepVerticals`: `status === 'researched'` И хотя бы
- *    одна accepted-гипотеза), а пауза с автопилотом=true доживает и до других
- *    состояний: клиент вправе отклонить все гипотезы, а research проекта может
- *    оказаться не законченным (повтор после технического сбоя или сотрудником,
- *    отмена — cancel-роут возвращает проект в 'draft'). В обоих случаях кнопки
- *    на шаге 2 нет, зато есть его собственная подсказка `startOutreachHint` —
- *    ровно то, чего экран ждёт; на неё текст и ссылается;
+ *    ШАГ 3, а не обещает кнопку на нём. Кнопка рисуется только у
+ *    исследованного проекта с выбранным рынком и не выключенной отправкой
+ *    (EngStepLaunch), а пауза с автопилотом=true доживает и до других
+ *    состояний: research проекта может оказаться не законченным (повтор после
+ *    технического сбоя или сотрудником, отмена — cancel-роут возвращает проект
+ *    в 'draft'), а легаси-доска могла снять все гипотезы. Тогда кнопки на шаге 3
+ *    нет, зато он сам говорит, чего ждёт (шаг 1 или шаг 2) — на это текст и
+ *    ссылается;
  *  - ни имён таблиц, стадий и провайдеров, ни внутренних id: наружу приехал
  *    КОД, разбирать в браузере уже нечего;
+ *  - «команда уже знает» — только там, где пауза шлёт алерт (`spend_paused`);
+ *    у `letters_exhausted` и `target_missing` алерта нет, и фраза у них — только
+ *    Support (как и в письме об этих паузах, engClientNotice.ts);
  *  - `spend_paused` (потолок расхода, по умолчанию выключен) — общая фраза
  *    HE_SPEND_PAUSED_EN, та же, что в отказе 409 кнопок кабинета: следующий
  *    шаг — за командой, клиенту кнопку не предлагаем (кнопка, начинающая
@@ -342,13 +350,13 @@ export function engRefillStoppedText(): string {
  */
 const AUTOPILOT_HOLD_EN: Record<HeClientAutopilotHoldCode, string> = {
   retrying:
-    'We could not read or save the state of this project on the last check, so the next stage was not started. Nothing is lost and nothing was cancelled. Open step 2 and press «Start outreach» to move it on — it picks up where the project stopped and does not repeat work that is already done. If that button is not on step 2, step 2 says what it is waiting for first. If it keeps coming back, message Support.',
+    'We could not read or save the state of this project on the last check, so the next stage was not started. Nothing is lost and nothing was cancelled. Press «Launch» on step 3 to move it on — it picks up where the project stopped and does not repeat work that is already done. If that button is not on step 3, step 3 says what it is waiting for first. If it keeps coming back, message Support.',
   stage_stopped:
-    'A paid step of this project stopped with an error earlier, and the autopilot does not pay for the same step twice on its own. Everything collected so far is saved. Our team can see it — message Support if you want this project picked up again.',
+    'A paid step of this project stopped with an error earlier, and the autopilot does not pay for the same step twice on its own. Everything collected so far is saved. Each market’s card on step 3 «Launch» says what stopped there and what you can do next; if no card says what to do, message Support.',
   letters_exhausted:
-    'Writing the letters for this base was retried as many times as we allow for one analysis, so the autopilot stopped retrying. The base and everything collected are saved. Our team can see it — message Support to have the letters looked at.',
+    'Writing the final letters for one of your markets was retried as many times as we allow, so the autopilot stopped retrying and that market is not moving on. Everything collected so far is saved. Message Support to have the letters looked at.',
   target_missing:
-    'The autopilot could not tell what to work on next for this project, so it stopped moving it forward. Nothing collected is lost. Our team can see it — message Support to get this project going again.',
+    'The autopilot could not tell what to work on next for this project, so it stopped moving it forward. Nothing collected is lost. Message Support to get this project going again.',
   spend_paused: HE_SPEND_PAUSED_EN,
 };
 
@@ -406,7 +414,7 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * проблемы», ни «команда уже знает» здесь нет: алерта отмена не шлёт. Вернуть
  * добор может сам клиент — переключатель «Daily top-up» дашборда снимает
  * именно эту паузу (S2, switchHeUsRefill в autoPipeline.ts; паузы ёмкости и
- * потолка он не трогает), «Start outreach» её не трогает. Лиды из кампаний
+ * потолка он не трогает), «Launch» её не трогает. Лиды из кампаний
  * отмена не убирает (роут отмены рассыльщика не зовёт вовсе). Менять вместе с
  * подтверждением отмены в EngProjectWizard.
  *
@@ -463,7 +471,7 @@ export function engRefillHoldText(state: EngRefillHoldState): string {
  * ПОЧЕМУ ЗДЕСЬ НЕТ «ОТ ВАС НИЧЕГО НЕ НУЖНО». Это была самая частая ложь
  * кабинета. Паузу пишут ТРИ пути, и ни один из них не срабатывает на упавшей
  * платной стадии: координатор ПОСЛЕ done-джобы `chain`/`base_analyze`
- * (`enqueueAutopilotFollowups`), нажатие «Start outreach» самим клиентом
+ * (`enqueueAutopilotFollowups`), нажатие «Launch» самим клиентом
  * (`reconcileHeAutopilotProject` с trigger='client' — он и пишет, и СНИМАЕТ
  * причину) и ночной проход (выключен флагом, см. `retrying` выше). ФИНАЛЬНЫЙ
  * ФЕЙЛ платной стадии (chain, base_collect, template) не пишет ни паузы, ни
@@ -474,19 +482,21 @@ export function engRefillHoldText(state: EngRefillHoldState): string {
  * добавлять к этому «ничего не ждёт вас» значило бы сказать «всё хорошо» ровно
  * там, где встало. Вместо необеспеченного обещания названа та же кнопка, что у
  * `retrying`: путь идемпотентный (`reconcileHeAutopilotProject`), уже сделанную
- * работу он не повторяет. И так же, как там, текст отправляет НА ШАГ 2, а не
+ * работу он не повторяет. И так же, как там, текст отправляет НА ШАГ 3, а не
  * обещает кнопку на нём: автопилот=true доживает и до состояний, где кнопки нет
- * (все гипотезы отклонены, research перезапущен или отменён), и на шаге 2 тогда
- * стоит его собственная подсказка `startOutreachHint`.
+ * (рынок не выбран, research перезапущен или отменён), и шаг 3 тогда говорит,
+ * чего ждёт. Мастер показывает эту фразу только пока у выбранного рынка нет
+ * готовых итоговых писем (дальше рынок ведёт автозапуск, и его карточка на
+ * шаге 3 говорит, что с ним).
  */
 export function engAutopilotIdleText(): string {
-  return 'Nothing is running on this project right now, and the autopilot has not flagged anything. If you were expecting it to move on by itself, open step 2 and press «Start outreach» — it picks up where the project stopped and does not repeat work that is already done. If that button is not on step 2, step 2 says what it is waiting for first.';
+  return 'Nothing is running on this project right now, and the autopilot has not flagged anything. If you were expecting it to move on by itself, press «Launch» on step 3 — it picks up where the project stopped and does not repeat work that is already done. If that button is not on step 3, step 3 says what it is waiting for first.';
 }
 
 /**
  * Письма ready-шаблона запуск откажет (признак проекции `needs_rewrite`,
  * clientEngProjection.heTemplateNeedsRewrite: тот же гейт писем, что у ядра
- * запуска, шаг 4b″). Один текст на шаги 4 и 5, причина — словами 409 ядра
+ * запуска, шаг 4b″). Один текст на карточку рынка шага 3, причина — словами 409 ядра
  * (`templateOperatorsUnresolved`): признак ловит ровно те три формы, что тот
  * текст называет (пустое место, слово-заглушка, сырая подстановка).
  *
@@ -495,9 +505,14 @@ export function engAutopilotIdleText(): string {
  *    ядро откажет тем же гейтом. «Ничего не отправлено» здесь неправда (часть
  *    уже в кампаниях), поэтому про отправленное фраза молчит.
  *
- * Действие — Support, как у 409: письма шаблона клиент не правит (правка
- * цепочки на шаге 3 в готовый шаблон не попадает), а пересборку писем кабинет
- * не запускает. Обещания «команда уже видит» нет: алерта на это нет.
+ * Действие:
+ *  - `none` — кнопка «Rewrite letters» карточки рынка (POST
+ *    /eng/templates/[id]/rewrite: новые итоговые письма в пределах бюджета
+ *    генераций на анализ; исчерпан — отказ кнопки сам ведёт в Support).
+ *    Карточка рисует кнопку всегда, когда рисует эту фразу;
+ *  - `unfinished` — Support: письма уже в кампании, и роут переписки такой
+ *    шаблон не берёт (409 launched).
+ * Обещания «команда уже видит» нет: алерта на это нет.
  */
 const TEMPLATE_REWRITE_WHY_EN =
   'they contain a placeholder (such as a first name) that cannot be filled in from this audience, so ' +
@@ -506,7 +521,7 @@ const TEMPLATE_REWRITE_WHY_EN =
 export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished'): string {
   return launch === 'unfinished'
     ? `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Message Support to have the letters rewritten.`
-    : `These letters cannot be launched as written: ${TEMPLATE_REWRITE_WHY_EN} Nothing has been sent from this template. Message Support to have the letters rewritten.`;
+    : `The final letters did not pass our automatic check, so nothing was sent: ${TEMPLATE_REWRITE_WHY_EN} Press «Rewrite letters» to have them written again.`;
 }
 
 /**
@@ -528,19 +543,19 @@ export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished'): stri
  *  - шаблон есть — «already been written … does not change them»: шаблоны не
  *    перечитывают цепочку. Что правка дойдёт до шаблона, который соберут
  *    позже (новая база вертикали), фраза не отрицает и не обещает.
- * `review` — на шаге 5, где итоговые письма показаны прямо над редактором.
+ * `review` — там, где итоговые письма показаны прямо над редактором.
  */
 export function engChainDraftText(hasTemplate: boolean, place: 'letters' | 'review'): string {
   if (!hasTemplate) {
-    return 'This is a draft. The final letters for this vertical are written from it later, together with what we learn about its base, and each final letter keeps the wait set here for the letter with the same number.';
+    return 'This is a draft. The final letters for this market are written from it later, together with what we learn about its base, and each final letter keeps the wait set here for the letter with the same number.';
   }
   return place === 'review'
     ? 'This is a draft. The final letters above have already been written, and changing this draft does not change them.'
-    : 'This is a draft. The final letters for this vertical have already been written (see step 5 «Review & Launch»), and changing this draft does not change them.';
+    : 'This is a draft. The final letters for this market have already been written (see «Preview letters» on step 3), and changing this draft does not change them.';
 }
 
 /**
- * Подпись подстановки `{{name}}` в итоговых письмах шага 5 — по виду
+ * Подпись подстановки `{{name}}` в итоговых письмах («Preview letters») — по виду
  * наполнения из проекции (toClientEngTemplatePlaceholders: то же правило, что у
  * гейта писем запуска). Правдиво для любой строки своего вида:
  *  - per_recipient — значение берётся из строки базы получателя (у колонки
@@ -563,23 +578,6 @@ export function engPlaceholderText(placeholder: ClientEngTemplatePlaceholder): s
     case 'unfilled':
       return `${token} — nothing in your base fills this in.`;
   }
-}
-
-/**
- * «Launch all» остановлен отказом, который получил бы и следующий шаблон
- * (классификатор сегментов не ответил: он общий у всех шаблонов прогона;
- * гейт платных шагов — он про клиента, а не про шаблон).
- * Дописывается к тексту отказа: без неё «Launched 1/4» не говорит, пробовали
- * ли остальные. Обещания «следующее нажатие их попробует» нет: прогон снова
- * начнёт с отказавшего шаблона и, пока причина та же (почта не подтверждена,
- * окно повторов классификатора полно), снова встанет на нём. Правда при любом
- * исходе — только то, что не тронутые прогоном шаблоны остаются в списке
- * запуска (записи о запуске у них нет).
- */
-export function engLaunchRunStoppedText(notTried: number): string {
-  return notTried === 1
-    ? 'This run stopped here: 1 more template was not tried. It stays in the list for the next «Launch all».'
-    : `This run stopped here: ${notTried} more templates were not tried. They stay in the list for the next «Launch all».`;
 }
 
 /* ── Отправка кампаний запуска (S2) ── */
@@ -931,11 +929,11 @@ function startOutcomeText(
     // Pause клиента посреди старта не встала у части кампаний — команде ушёл
     // алерт 'pause_failed' (engSendingAlert), она ставит их на паузу руками.
     parts.push(
-      `You paused this vertical while it was starting, but ${plural(pauseFailed, 'campaign', 'campaigns')} could ` +
+      `You paused this market while it was starting, but ${plural(pauseFailed, 'campaign', 'campaigns')} could ` +
         `not be paused yet and may still be sending — our team is stopping ${pauseFailed === 1 ? 'it' : 'them'}.`,
     );
   } else if (r.compensated > 0) {
-    parts.push('You paused this vertical while it was starting, so its campaigns stay paused.');
+    parts.push('You paused this market while it was starting, so its campaigns stay paused.');
   } else if (on > 0) {
     parts.push(
       on === r.campaigns
@@ -967,7 +965,7 @@ function startOutcomeText(
     parts.push(
       `${plural(r.not_attempted, 'campaign was', 'campaigns were')} not started yet because this took long — ` +
         (button
-          ? `press «${button}» for this vertical.`
+          ? `press «${button}» for this market.`
           : `message Support if ${r.not_attempted === 1 ? 'it stays' : 'they stay'} this way.`),
     );
   }
@@ -1027,7 +1025,7 @@ export function engLaunchSendingText(
       return r.skip_reason === 'window_not_applied'
         ? 'Sending was not started — see the note about the sending window.'
         : r.skip_reason === 'not_requested'
-          ? 'The campaigns were created but not started — the sending status of this vertical shows how to start them.'
+          ? 'The campaigns were created but not started — the sending status of this market shows how to start them.'
           : 'Sending was not started — see the note about the problem with this launch.';
     case 'refused':
       if (!r.refusal) return 'Sending was not started.';
@@ -1041,13 +1039,13 @@ export function engLaunchSendingText(
         // ничего (её мог остановить клиент, сотрудник или наша страховка).
         const button = after ? engStartButtonOf(after) : 'Start sending';
         return (
-          `${paused === 1 ? 'A campaign' : `${paused.toLocaleString('en-US')} campaigns`} of this vertical ` +
+          `${paused === 1 ? 'A campaign' : `${paused.toLocaleString('en-US')} campaigns`} of this market ` +
           `${paused === 1 ? 'is' : 'are'} paused, so this launch did not start any of its campaigns — ` +
           (button ? `press «${button}» to start them.` : 'message Support if they stay this way.')
         );
       }
       const button = after ? engStartButtonOf(after) : 'Resume';
-      return `This vertical is paused, so its campaigns were not started.${button ? ` Press «${button}» to start sending.` : ''}`;
+      return `This market is paused, so its campaigns were not started.${button ? ` Press «${button}» to start sending.` : ''}`;
     }
   }
 }
@@ -1078,10 +1076,10 @@ export function engSendingActionText(
         ? 'Press «Pause» again in a minute; if this keeps happening, message Support.'
         : 'Message Support so we can make sure it stays paused.';
       return notPaused === 0
-        ? `Sending is paused, but we could not save that you paused this vertical, so the pause may not hold. ${retry}`
+        ? `Sending is paused, but we could not save that you paused this market, so the pause may not hold. ${retry}`
         : `We could not pause ${plural(notPaused, 'campaign', 'campaigns')} of this launch, so ` +
             `${notPaused === 1 ? 'it' : 'they'} may still be sending, and we could not save that you paused this ` +
-            `vertical. ${retry}`;
+            `market. ${retry}`;
     }
     if (notPaused === 0) return 'Sending is paused.';
     // Не вставшие — команде ушёл алерт 'pause_failed' (её паузу держит и

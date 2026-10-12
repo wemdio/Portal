@@ -6,7 +6,7 @@
  * Resume, а рядом с Pause — вторая «Start the rest», когда часть кампаний
  * отправляет, а часть стоит, или рядом со «Start sending» — вторая «Pause»,
  * когда клиент просил отправку, а всё стоит (`secondary_action`). Один компонент на Command Center (сводка приходит в агрегате
- * дашборда, `summary`) и на шаг 5 «Review & Launch» (`poll`: компонент читает
+ * дашборда, `summary`) и на карточку рынка шага 3 «Launch» (`poll`: компонент читает
  * GET /eng/templates/[id]/sending сам, раз в 30 с в видимой вкладке).
  *
  * Сводку и тексты делает сервер и engText (engSendingLine / engSendingNote /

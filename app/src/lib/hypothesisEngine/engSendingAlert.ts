@@ -33,7 +33,19 @@
  *    не из-за кампании: таблицы пула нет, ящики проекта в разных воркспейсах,
  *    ящик проекта стоит у другого клиента, пресет записи о запуске не клиента /
  *    его нет / его воркспейс не настроен.
- *    Клиент видит «problem on our side — message Support»; совет — по причине.
+ *    Клиент видит «problem on our side — message Support»; совет — по причине;
+ *  - 'auto_launch_stuck' — автозапуск вертикали после «Launch» проекта
+ *    (engAutoLaunch) вошёл в состояние, которое без команды или клиента не
+ *    сдвинется; алерт — один раз при входе (перепроверка строки его не
+ *    повторяет). Сам НЕ продолжит (автозапуск вертикали остановлен и больше
+ *    не платит; клиенту письмо «нужно действие», если почта настроена):
+ *    6 сбоев подряд на нашей стороне (`server_error`), 3 платных сбоя
+ *    (`launch_failed`), брошенные посреди попытки (`abandoned`),
+ *    незаконченный запуск не достроился за 3 попытки (`unfinished`).
+ *    Продолжит сам, когда причину снимут (перепроверка раз в час): отказ
+ *    ядра не по гейту (`needs_support`; письмо клиенту), отказ проверки рынка
+ *    аккаунта или шаблона (`scope_refused`; у повтора только старта — не
+ *    продолжит), блокировка аккаунта (`account_blocked`; письма клиенту нет).
  *
  * ДЕДУПЛИКАЦИЯ — в памяти процесса, окно HE_OPS_TEAM_FIX_REPEAT_MS (1 ч) по
  * ключу (вид + аккаунт / шаблон / причина). Окно держится, только если
@@ -111,6 +123,13 @@ export type HeEngSendingAlert =
       cause: HeEngSendingSetupCause;
       /** Подробность (воркспейсы, причина) — команде. */
       detail: string;
+    }
+  | {
+      kind: 'auto_launch_stuck';
+      projectId: string;
+      templateId: string;
+      /** Код строки автозапуска (engAutoLaunch.HE_ENG_AUTO_LAUNCH_CODES). */
+      code: string;
     };
 
 /**
@@ -205,8 +224,115 @@ function alertKey(alert: HeEngSendingAlert): string {
       return `revoke_pause_failed|${alert.projectId}|${alert.templateId ?? ''}|${alert.where}`;
     case 'setup_unavailable':
       return `setup_unavailable|${alert.templateId}|${alert.cause}`;
+    case 'auto_launch_stuck':
+      return `auto_launch_stuck|${alert.templateId}|${alert.code}`;
   }
 }
+
+/**
+ * Что с автозапуском вертикали и что делать команде — по коду алерта (код
+ * строки или `alertCode` решения, engAutoLaunch.heEngAutoLaunchVerdict).
+ * Алерт уходит один раз, когда строка ВХОДИТ в это состояние: перепроверка
+ * строки его не повторяет. `subject` говорит, продолжит ли автозапуск сам.
+ */
+const AUTO_LAUNCH_STUCK: Record<string, { subject: string; what: string; client: string; todo: string }> = {
+  needs_support: {
+    subject: 'ENG: ядро запуска отказало вертикали не по гейту — автозапуск перепроверяет раз в час',
+    what:
+      'ядро запуска отказало шаблону не по гейту (нет писем, нет колонки адреса, все контакты в чёрном списке, ' +
+      'у соседнего шаблона той же базы уже есть запуск, в пресете нет ящиков, пресет незаконченного запуска ' +
+      'пропал) — строка «held», автозапуск зовёт ядро снова раз в час; пока причина не снята, ничего не создаётся',
+    client:
+      'Sending could not start for this market. Nothing was sent. Press «Launch now» to see the reason, or ' +
+      'message Support. (у незаконченного запуска — «Part of this market’s audience has not gone out yet. Press ' +
+      '«Launch now» to finish it…»)',
+    todo:
+      'причина — в application_logs (client.eng.template.launch*, поле trigger=auto) или в ответе «Launch now» ' +
+      'клиента; починить данные/пресет — дальше автозапуск возьмёт шаблон сам в течение часа',
+  },
+  scope_refused: {
+    subject: 'ENG: автозапуск вертикали отказан проверкой рынка аккаунта или шаблона',
+    what:
+      'перед запуском проверка рынка аккаунта (requireEngMarket) или шаблона у владельца проекта ' +
+      '(loadClientHeTemplate) ответила 4xx: профиль не ENG или шаблона нет у этого владельца (удалён, проект ' +
+      'передан). У не запущенной вертикали строка «held», автозапуск перепроверяет раз в час и продолжит сам; ' +
+      'у законченного запуска (повтор только старта) — «done», сам не продолжит',
+    client:
+      'если аккаунт видит проект — у рынка на шаге 3 общий отказ («Sending could not start for this market…» ' +
+      'или у законченного запуска «Starting this market ran into a problem… message Support»)',
+    todo:
+      'проверить профиль клиента (market, role) и владельца проекта; если шаблон законно не его — ничего не делать',
+  },
+  server_error: {
+    subject: 'ENG: автозапуск вертикали остановлен — сам не продолжит',
+    what:
+      'шесть попыток подряд упали на нашей стороне ДО платной части (чтения БД: аккаунт, рынок, шаблон, пресет, ' +
+      'чёрный список, защиты; запись начала запуска) — строка «failed», автозапуск вертикали остановлен',
+    client:
+      'We could not start this market after several tries. Nothing was sent. Press «Launch now» to try once ' +
+      'more; if it does not start, message Support. (у незаконченного запуска — «Part of this market’s ' +
+      'audience has not gone out yet. Press «Launch now» to finish it…»)',
+    todo:
+      'проверить application_logs client.eng.template.launch_failed (trigger=auto) и БД; после починки клиент ' +
+      'нажимает «Launch» на шаге 3 (счётчики сбросятся) или «Launch now» у вертикали',
+  },
+  launch_failed: {
+    subject: 'ENG: автозапуск вертикали остановлен — сам не продолжит и больше не платит',
+    what:
+      'третий запуск упал ПОСЛЕ платной части (классификатор сегментов не ответил по большинству адресов, ' +
+      'первая кампания не создалась или ядро упало посреди; брошенные посреди попытки идут в тот же счёт) — ' +
+      'строка «failed», автозапуск вертикали остановлен и больше не платит',
+    client:
+      'We could not start this market after several tries. Nothing was sent. Press «Launch now» to try once ' +
+      'more; if it does not start, message Support. (у незаконченного запуска — «Part of this market’s ' +
+      'audience has not gone out yet. Press «Launch now» to finish it…»)',
+    todo:
+      'проверить ключ/баланс модели классификатора и рассыльщика (application_logs client.eng.template.launch_failed, ' +
+      'trigger=auto); после починки клиент нажимает «Launch» на шаге 3 (это его решение платить снова) или ' +
+      '«Launch now» у вертикали',
+  },
+  abandoned: {
+    subject: 'ENG: автозапуск вертикали остановлен — попытки обрываются, сам не продолжит',
+    what:
+      'попытки запуска брошены посреди — процесс умер (воркер hypothesis-engine: OOM, рестарт, деплой; или ' +
+      'сервер кабинета посреди «Launch now»): вторая подряд или третий платный сбой вместе с ними — строка ' +
+      '«failed», автозапуск вертикали остановлен и больше не платит',
+    client:
+      'We could not start this market after several tries. Nothing was sent. Press «Launch now» to try once ' +
+      'more; if it does not start, message Support. (у незаконченного запуска — «Part of this market’s ' +
+      'audience has not gone out yet. Press «Launch now» to finish it…»)',
+    todo:
+      'проверить логи и рестарты воркера hypothesis-engine и портала вокруг запуска (OOM, деплой) и application_logs ' +
+      'client.eng.template.launch* (trigger=auto); после починки клиент нажимает «Launch» на шаге 3 (счётчики ' +
+      'сбросятся) или «Launch now» у вертикали',
+  },
+  unfinished: {
+    subject: 'ENG: незаконченный запуск вертикали не достроился — автозапуск сам не продолжит',
+    what:
+      'незаконченный запуск не достроился за три попытки подряд (раз в 30 мин) — часть аудитории вертикали не ' +
+      'ушла; строка «done», автозапуск больше не достраивает (уже стартованные кампании отправляют)',
+    client:
+      'Part of this market’s audience has not gone out yet. Press «Launch now» to finish it — the campaigns ' +
+      'already created are reused, only the addresses that have not gone out are added, and nobody is contacted twice.',
+    todo:
+      'причина — в предупреждениях ядра и application_logs client.eng.template.launch* (trigger=auto); после ' +
+      'починки клиент нажимает «Launch now» у вертикали (достраивается только долг)',
+  },
+  account_blocked: {
+    subject: 'ENG: автозапуск вертикали стоит — аккаунт клиента заблокирован (после разблокировки продолжит сам)',
+    what:
+      'аккаунт клиента заблокирован (бан в /admin/users), демо-аккаунт или роль не client/admin. Автозапуск не ' +
+      'начинает запуск, а если блокировка пришла посреди запуска — кампании созданы и не стартованы; уже ' +
+      'отправляющие кампании не тронуты. Строка «held», перепроверка раз в час',
+    client:
+      'письма нет; кабинет этого проекта аккаунт не видит (бан — вход закрыт, демо — демо-данные, не ' +
+      'client/admin — отказ 403)',
+    todo:
+      'если блокировка ошибочна — снять её в /admin/users (или исправить роль, снять демо): пока автозапуск ' +
+      'проекта включён, строка перепроверяется раз в час и продолжит сама (не запущенная или недостроенная ' +
+      'вертикаль — запуском, у законченного запуска — только стартом); иначе ничего делать не нужно',
+  },
+};
 
 const STATUS_LABEL: Record<string, string> = {
   '-99': 'аккаунт заблокирован (-99)',
@@ -236,7 +362,8 @@ function alertBody(alert: HeEngSendingAlert): {
           'клиент видит':
             'Sending for your account is being enabled by our team — this happens once. We will email you when it is on',
           'сделать':
-            '/admin/users → клиент → «Включить отправку ENG» (клиенту уйдёт письмо); после этого клиент запускает сам',
+            '/admin/users → клиент → «Включить отправку ENG» (клиенту уйдёт письмо); после этого готовые вертикали ' +
+            'проекта, где клиент нажал «Launch», запускает автозапуск (в течение минуты), остальные клиент запускает сам',
         },
       };
     case 'access_unavailable':
@@ -294,7 +421,7 @@ function alertBody(alert: HeEngSendingAlert): {
             'проект': alert.projectId,
             'шаблон': alert.templateId,
             'клиент видит':
-              'Because of a problem on our side we could not confirm that this vertical should keep sending, so we ' +
+              'Because of a problem on our side we could not confirm that this market should keep sending, so we ' +
               'paused the campaigns we were starting, but some of them could not be paused yet and may still be ' +
               'sending — our team is stopping them. Message Support.',
             'сделать': `поставить эти кампании на паузу у рассыльщика руками (${held}); проверить he_eng_launch_sending`,
@@ -302,13 +429,13 @@ function alertBody(alert: HeEngSendingAlert): {
         };
       }
       const notSaved =
-        '«… we could not save that you paused this vertical, so the pause may not hold. Press «Pause» again in a ' +
+        '«… we could not save that you paused this market, so the pause may not hold. Press «Pause» again in a ' +
         'minute; if this keeps happening, message Support.» (без кнопки Pause на карточке — «… Message Support so ' +
         'we can make sure it stays paused.»)';
       const fixState =
         'проверить he_eng_launch_sending (миграция 20261011_0002, БД) и записать шаблону client_state=paused; ' +
-        'пока не записано, кнопка старта клиента и доводка паузы его паузу не держат («Launch all» кампании на ' +
-        'паузе у рассыльщика не стартует)';
+        'пока не записано, кнопка старта клиента и доводка паузы его паузу не держат («Launch now» и автозапуск ' +
+        'кампании на паузе у рассыльщика не стартуют)';
       if (alert.campaignIds.length === 0) {
         // Рассыльщик остановил всё, но Pause клиента не записался.
         return {
@@ -317,7 +444,7 @@ function alertBody(alert: HeEngSendingAlert): {
           context: {
             'проект': alert.projectId,
             'шаблон': alert.templateId,
-            'клиент видит': `«Sending is paused, but we could not save that you paused this vertical…» — ${notSaved}`,
+            'клиент видит': `«Sending is paused, but we could not save that you paused this market…» — ${notSaved}`,
             'сделать': fixState,
           },
         };
@@ -332,7 +459,7 @@ function alertBody(alert: HeEngSendingAlert): {
             ? 'после «Pause»: «We could not pause N campaigns of this launch, so they may still be sending. Press ' +
               '«Pause» again in a minute; if it keeps failing, message Support.» (без кнопки Pause на карточке — «… ' +
               'Our team is stopping them; message Support if this keeps happening.»); Pause посреди старта: «You paused this ' +
-              'vertical while it was starting, but N campaigns could not be paused yet and may still be sending — ' +
+              'market while it was starting, but N campaigns could not be paused yet and may still be sending — ' +
               'our team is stopping them.»'
             : `«We could not pause N campaigns of this launch, so they may still be sending, and…» — ${notSaved}`,
           'сделать': alert.stateRecorded
@@ -361,6 +488,22 @@ function alertBody(alert: HeEngSendingAlert): {
               'делает только чтение статуса, пока клиент смотрит дашборд или шаг 5',
         },
       };
+    case 'auto_launch_stuck': {
+      const known = AUTO_LAUNCH_STUCK[alert.code];
+      return {
+        // Тема — своя у каждого кода: одни продолжат сами (перепроверка), другие нет.
+        subject: known?.subject ?? 'ENG: автозапуск вертикали встал',
+        error: known?.what ?? `код ${alert.code}`,
+        context: {
+          'проект': alert.projectId,
+          'шаблон': alert.templateId,
+          'клиент видит': known?.client ?? 'Support',
+          'сделать':
+            known?.todo ??
+            'посмотреть строку he_eng_auto_launch шаблона и application_logs client.eng.template.launch* (trigger=auto)',
+        },
+      };
+    }
     case 'setup_unavailable':
       return {
         subject: `ENG: кампании клиента не стартованы — ${SETUP_SUBJECT[alert.cause]}`,

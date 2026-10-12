@@ -128,6 +128,32 @@ function scheduleEngVerificationEmail(userId: string, email: string): void {
   }
 }
 
+/**
+ * Тексты ответов для ENG-хоста. Русские остаются в коде ниже как были — RU-ветка
+ * отвечает теми же строками. Сырой текст GoTrue на ENG не уходит: роут
+ * переводит известные случаи (занятый адрес, слабый пароль, неверный адрес), а
+ * остальное — общей фразой.
+ *
+ * profileFailed: к этому моменту пользователь auth УЖЕ создан (триггер завёл
+ * профиль с ролью client и market='eng' из user_metadata), повторная
+ * регистрация ответит «уже существует». Поэтому фраза ведёт ко входу, а не к
+ * повтору: вход работает, ссылку подтверждения почты кабинет отправит заново
+ * («Send a new link»).
+ */
+const ENG_SIGNUP_TEXT = {
+  invalidRequest: 'Invalid request',
+  invalidEmail: 'Enter a valid email',
+  shortPassword: 'Password must be at least 8 characters',
+  noName: 'Enter your name',
+  noCompany: 'Enter your company',
+  longPhone: 'Phone number is too long',
+  longTelegram: 'Telegram username is too long',
+  emailTaken: 'An account with this email already exists',
+  weakPassword: 'This password is not accepted. Choose a stronger one.',
+  createFailed: 'Could not create the account. Try again.',
+  profileFailed: 'Your account was created, but its setup did not finish. Sign in to continue; if something does not work, message Support.',
+} as const;
+
 export async function POST(req: NextRequest) {
   if (!supabaseAdmin) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
@@ -140,7 +166,8 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: 'Невалидный JSON' }, { status: 400 });
+    const invalidJson = marketFromRequestHeaders(req.headers) === 'eng' ? ENG_SIGNUP_TEXT.invalidRequest : 'Невалидный JSON';
+    return NextResponse.json({ error: invalidJson }, { status: 400 });
   }
 
   const email = (body.email ?? '').trim().toLowerCase();
@@ -150,28 +177,30 @@ export async function POST(req: NextRequest) {
   const phone = (body.phone ?? '').trim();
   const telegram = (body.telegram ?? '').trim();
   const utm = readSignupUtm(req);
-  const locale = normalizeClientLocale(req.cookies.get(CLIENT_LOCALE_COOKIE)?.value);
   // Рынок по хосту запроса (ENG-кабинет на app.outreachos.xyz): Origin → Host →
   // Referer, см. lib/engMarket. На RU-хостах market не передаём — колонка
   // profiles.market уйдёт в default 'ru'.
   const market = marketFromRequestHeaders(req.headers);
+  const eng = market === 'eng';
+  // ENG-кабинет английский: язык профиля — 'en', а не кука RU-переключателя.
+  const locale = eng ? 'en' : normalizeClientLocale(req.cookies.get(CLIENT_LOCALE_COOKIE)?.value);
 
   if (!email || !isEmailLike(email)) {
-    return NextResponse.json({ error: 'Введите корректный email' }, { status: 400 });
+    return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.invalidEmail : 'Введите корректный email' }, { status: 400 });
   }
   if (password.length < 8) {
-    return NextResponse.json({ error: 'Пароль должен быть от 8 символов' }, { status: 400 });
+    return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.shortPassword : 'Пароль должен быть от 8 символов' }, { status: 400 });
   }
   if (!fullName || fullName.length > 200) {
-    return NextResponse.json({ error: 'Укажите имя' }, { status: 400 });
+    return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.noName : 'Укажите имя' }, { status: 400 });
   }
   if (!company || company.length > 200) {
-    return NextResponse.json({ error: 'Укажите компанию' }, { status: 400 });
+    return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.noCompany : 'Укажите компанию' }, { status: 400 });
   }
-  if (phone.length > 50) return NextResponse.json({ error: 'Слишком длинный телефон' }, { status: 400 });
-  if (telegram.length > 100) return NextResponse.json({ error: 'Слишком длинный telegram' }, { status: 400 });
+  if (phone.length > 50) return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.longPhone : 'Слишком длинный телефон' }, { status: 400 });
+  if (telegram.length > 100) return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.longTelegram : 'Слишком длинный telegram' }, { status: 400 });
 
-  if (market === 'eng') {
+  if (eng) {
     const limited = await engSignupRateLimited(req, email);
     if (limited) return limited;
   }
@@ -195,9 +224,20 @@ export async function POST(req: NextRequest) {
   if (createErr || !created?.user) {
     const msg = createErr?.message ?? 'Ошибка создания аккаунта';
     if (/already (registered|exists)|duplicate/i.test(msg)) {
-      return NextResponse.json({ error: 'Аккаунт с таким email уже существует' }, { status: 409 });
+      return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.emailTaken : 'Аккаунт с таким email уже существует' }, { status: 409 });
     }
     await logError('signup.create_user_failed', createErr, { email });
+    if (eng) {
+      // GoTrue: weak_password («Password should be …», «… known to be weak …»)
+      // и неверный адрес («Unable to validate email address …»); остальное —
+      // общая фраза, текст GoTrue остаётся в логе выше.
+      const engError = createErr?.code === 'weak_password' || /password/i.test(msg)
+        ? ENG_SIGNUP_TEXT.weakPassword
+        : /email/i.test(msg) && /invalid|validate/i.test(msg)
+          ? ENG_SIGNUP_TEXT.invalidEmail
+          : ENG_SIGNUP_TEXT.createFailed;
+      return NextResponse.json({ error: engError }, { status: 400 });
+    }
     return NextResponse.json({ error: msg }, { status: 400 });
   }
 
@@ -222,7 +262,7 @@ export async function POST(req: NextRequest) {
     .eq('id', userId);
   if (profileErr) {
     await logError('signup.profile_update_failed', profileErr, { userId });
-    return NextResponse.json({ error: 'Ошибка обновления профиля' }, { status: 500 });
+    return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.profileFailed : 'Ошибка обновления профиля' }, { status: 500 });
   }
 
   const { error: tariffErr } = await supabaseAdmin
@@ -235,7 +275,7 @@ export async function POST(req: NextRequest) {
     });
   if (tariffErr) {
     await logError('signup.tariff_insert_failed', tariffErr, { userId });
-    return NextResponse.json({ error: 'Ошибка инициализации тарифа' }, { status: 500 });
+    return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.profileFailed : 'Ошибка инициализации тарифа' }, { status: 500 });
   }
 
   if (market === 'eng') scheduleEngVerificationEmail(userId, email);

@@ -21,7 +21,7 @@ export const dynamic = 'force-dynamic';
 // ЖЕ словом, что и кнопка кабинета, — «daily top-up» («Resume daily top-up»,
 // EngStepVerticals.tsx, и его запасной текст): отказ другим словом отсылал бы к
 // действию, которого в кабинете нет.
-const RESUME_FAILED = 'Failed to resume the daily top-up for this vertical';
+const RESUME_FAILED = 'Failed to resume the daily top-up for this market';
 
 // POST — «Resume daily top-up»: отменить решение правила сухой вертикали.
 //

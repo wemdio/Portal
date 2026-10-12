@@ -287,7 +287,7 @@ export function EngProjectsList() {
                   Create &amp; start research
                 </button>
                 {hint(
-                  'Research starts right away: we profile the site, map competitors and draft market verticals for '
+                  'Research starts right away: we profile the site, map competitors and find the markets that could buy '
                     + 'your offer.',
                 )}
               </div>
@@ -348,7 +348,7 @@ export function EngProjectsList() {
                   className="mt-1 flex items-center gap-3 text-[11px] ds-mono"
                   style={{ color: 'var(--cp-text-m)' }}
                 >
-                  <span>{p.vertical_count} verticals</span>
+                  <span>{p.vertical_count} markets</span>
                   <span>{p.base_count} bases</span>
                   <span className="ml-auto inline-flex items-center gap-1">
                     {fmtDate(p.created_at)}

@@ -19,16 +19,23 @@ function esc(s: string): string {
  * (lib/hypothesisEngine/engSendingAccess.ts, sendHeEngSendingEnabledEmail).
  *
  * What the copy promises, and why it is true:
- *   - "«Launch all» on step 5 creates the campaigns of a template and starts
- *     sending them" — the cabinet launch route starts the campaigns it creates
- *     once the account switch is on (the cabinet sends start_sending: true);
- *   - "you can pause and resume them on the dashboard" — them = campaigns
- *     launched from now on: the Pause / Resume buttons of the dashboard;
- *   - "turning sending on does not change campaigns you launched before" —
- *     enabling touches no campaign. No promise of a Start sending button for
- *     them: a launch created before sending was set up for the project cannot
- *     be started from the cabinet (engCampaignStatus 'pre_self_serve'), and
- *     its card says so; the dashboard shows the status of each launch.
+ *   - "markets you launched start sending by themselves as soon as their
+ *     letters and contacts are ready" — «Launch» records the launch intent, and
+ *     the worker's auto-launch tick (engAutoLaunch.ts) launches every ready
+ *     market of a wanted intent through the same shared launch function as the
+ *     button; a market held on the account switch is re-checked every 10
+ *     minutes, so it starts on the next check after this switch;
+ *   - "if a market shows «Launch now», press it" — the honest fallback for the
+ *     shapes where nothing starts by itself: the auto-launch tables are not
+ *     there yet, or starting takes longer than usual (step 3 then shows
+ *     «Launch now», the per-template launch route);
+ *   - "you can pause sending on your dashboard" — the Pause button of the
+ *     dashboard's sending block;
+ *   - "turning sending on does not change campaigns created before" — enabling
+ *     touches no campaign. No promise of a Start sending button for them: a
+ *     launch created before sending was set up for the project cannot be
+ *     started from the cabinet (engCampaignStatus 'pre_self_serve'), and its
+ *     card says so; the dashboard shows the status of each launch.
  */
 export function renderEngSendingEnabledEmail(args: EngSendingEnabledEmailArgs): RenderedEmail {
   const subject = 'Sending is on for your outreachOS account';
@@ -42,10 +49,10 @@ export function renderEngSendingEnabledEmail(args: EngSendingEnabledEmailArgs): 
         <tr><td>
           <h1 style="font-size:20px;margin:0 0 16px;color:#1a1a1a;">Sending is on</h1>
           <p style="font-size:15px;line-height:1.5;margin:0 0 12px;">
-            Our team has turned on sending for your outreachOS account. From now on, «Launch all» on step 5 «Review &amp; Launch» creates the campaigns of a template and starts sending them. You can pause and resume them on the dashboard.
+            Our team has turned on sending for your outreachOS account. Markets you launched start sending by themselves as soon as their letters and contacts are ready; if a market shows «Launch now», press it. You can pause sending on your dashboard at any time.
           </p>
           <p style="font-size:15px;line-height:1.5;margin:0 0 12px;">
-            Turning sending on does not change campaigns you launched before; the dashboard shows the status of each.
+            Turning sending on does not change campaigns created before; the dashboard shows the status of each.
           </p>
           <p style="margin:24px 0;">
             <a href="${esc(args.dashboardUrl)}" style="display:inline-block;background:#1a1a1a;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 20px;border-radius:6px;">Open the dashboard</a>
@@ -64,9 +71,9 @@ export function renderEngSendingEnabledEmail(args: EngSendingEnabledEmailArgs): 
   const text = [
     'Sending is on',
     '',
-    'Our team has turned on sending for your outreachOS account. From now on, «Launch all» on step 5 «Review & Launch» creates the campaigns of a template and starts sending them. You can pause and resume them on the dashboard.',
+    'Our team has turned on sending for your outreachOS account. Markets you launched start sending by themselves as soon as their letters and contacts are ready; if a market shows «Launch now», press it. You can pause sending on your dashboard at any time.',
     '',
-    'Turning sending on does not change campaigns you launched before; the dashboard shows the status of each.',
+    'Turning sending on does not change campaigns created before; the dashboard shows the status of each.',
     '',
     `Open the dashboard: ${args.dashboardUrl}`,
     '',

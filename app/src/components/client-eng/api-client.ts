@@ -41,11 +41,19 @@ import type {
 // — один словарь на роуты и на экран; сам модуль в клиентский бандл не едет.
 import type { EngPaidAccessCode } from '@/lib/hypothesisEngine/engPaidAccess';
 import type { EngResearchRetryVerdict } from '@/lib/hypothesisEngine/researchJob';
+// Только типы автозапуска (S3) — см. «Запуск проекта одной кнопкой» ниже.
+import type {
+  EngAutoLaunchDetail,
+  EngAutoLaunchMarket,
+  HeEngAutoLaunchCode,
+  HeEngAutoLaunchState,
+} from '@/lib/hypothesisEngine/engAutoLaunch';
 // Тоже только типы: этап и причина карточки дашборда — один словарь на роут
 // (lib/hypothesisEngine/engDashboard) и на экран.
 import type {
   EngDashAnalysisStopped,
   EngDashAttention,
+  EngDashAutoLaunch,
   EngDashAttentionInfo,
   EngDashSelection,
   EngDashStage,
@@ -79,8 +87,8 @@ import type { HeBaseSummary as HeBaseSummaryDto } from '@/components/hypothesis-
  * `progress` (подпись прогресса) и всё, чего нет в JOB_FIELDS, — включая
  * `tokens_used`/`cost_usd`, из-за которых волна и переписывала эти роуты.
  *
- * Имя прежнее: под ним тип импортируют EngStepBrief/EngStepLetters/
- * EngStepReview — файлы чужой полосы, переименование это их правка.
+ * Имя прежнее: под ним тип импортируют шаги мастера (EngStepBrief,
+ * EngStepLaunch).
  */
 export type HeJobSummary = Pick<HeJob, 'id' | 'stage' | 'status' | 'attempts' | 'started_at'> & {
   /** Колонки в HeJob нет (как и в staff-DTO), а в выдаче она есть. */
@@ -308,7 +316,137 @@ export type EngProjectDetailResponse = Omit<
    * прочитал джобу, и в демо-выдаче — тогда шаг 1 считает осторожно.
    */
   research_retry?: { verdict: EngResearchRetryVerdict; latest_job_status: string | null };
+  /**
+   * Автозапуск рынков проекта (S3, readHeEngAutoLaunchDetail): желание
+   * клиента «запускай сам» и строка автозапуска по каждому готовому рынку.
+   * null — сервер его не прочитал; ключа нет — ответ старше S3. Оба экран
+   * читает как «автозапуска нет»: у готового рынка тогда «Launch now».
+   */
+  auto_launch?: EngAutoLaunchDetail | null;
+  /** Типичные сроки по недавним проектам (engEstimates); null — данных мало. */
+  estimates?: EngEstimates;
 };
+
+/* ── Запуск проекта одной кнопкой (S3) ── */
+
+/**
+ * Автозапуск рынков: состояние и код строки, строка рынка и сводка проекта —
+ * РЕЭКСПОРТ типов модуля автозапуска (lib/hypothesisEngine/engAutoLaunch), а
+ * не копия: словарь кодов один на роут и на экран, расхождение ловит
+ * компилятор. `import type` стирается целиком — серверный модуль в бандл
+ * кабинета не едет. Кандидат без строки сервер отдаёт синтезированным
+ * `waiting` с `created_at` шаблона.
+ */
+export type EngAutoLaunchState = HeEngAutoLaunchState;
+export type EngAutoLaunchCode = HeEngAutoLaunchCode;
+export type { EngAutoLaunchDetail, EngAutoLaunchMarket };
+
+export interface EngEstimates {
+  /** Медиана минут исследования по недавним проектам; null — мало данных. */
+  research_minutes: number | null;
+  /** Медиана часов от писем до готовых итоговых писем; null — мало данных. */
+  prepare_hours: number | null;
+}
+
+/** Выключатель отправки аккаунта, как его видит запуск проекта. */
+export type EngSendingAccessState = 'enabled' | 'not_required' | 'not_enabled' | 'revoked' | 'unknown';
+
+/** GET /eng/projects/[id]/launch — что показать до и после «Launch». */
+export interface EngProjectLaunchInfo {
+  available: boolean;
+  requested: boolean;
+  requested_at: string | null;
+  /** Когда «Cancel all jobs» выключил автозапуск; null — не выключали. */
+  cancelled_at: string | null;
+  /** Часы отправки, сохранённые с «Launch»; null — «Launch» ещё не нажимали. */
+  schedule: EngSendingWindow | null;
+  default: EngSendingWindow;
+  timezones: EngSendingWindowTimezoneOption[];
+  weekdays: EngSendingWindowWeekdayOption[];
+  sending_access: EngSendingAccessState;
+}
+
+/** POST /eng/projects/[id]/launch — 200. */
+export interface EngProjectLaunchResponse {
+  ok: true;
+  /** 'unavailable' — желание не записалось (таблиц нет): готовые рынки ждут «Launch now». */
+  auto_launch: 'on' | 'unavailable';
+  sending_access: EngSendingAccessState;
+  schedule: EngSendingWindow;
+  chains_enqueued: number;
+  collects_enqueued: number;
+  templates_enqueued: number;
+  analyses_requeued: number;
+  verticals_skipped: number;
+  collect_again_verticals: number;
+  autopilot_hold_code: HeClientAutopilotHoldCode | null;
+}
+
+export async function fetchEngProjectLaunch(projectId: string): Promise<EngProjectLaunchInfo> {
+  return engApiFetch<EngProjectLaunchInfo>(`/eng/projects/${projectId}/launch`);
+}
+
+/**
+ * «Launch» шага 3: записывает желание «запускай сам» с часами отправки и
+ * ставит работу тем же реконсилером, что прежняя кнопка автопилота (POST
+ * .../autopilot). Отказ
+ * гейта платных шагов — EngPaidAccessError; прочие отказы (не исследован, нет
+ * рынков, отправка выключена) — Error с английским текстом роута.
+ */
+export async function launchEngProject(
+  projectId: string,
+  body: { schedule?: EngSendingWindow },
+): Promise<EngProjectLaunchResponse> {
+  return engPaidApiFetch<EngProjectLaunchResponse>(`/eng/projects/${projectId}/launch`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/** Часы отправки для рынков, которые запустятся дальше (после «Launch»). */
+export async function updateEngProjectLaunchSchedule(
+  projectId: string,
+  schedule: EngSendingWindow,
+): Promise<{ ok?: boolean; schedule?: EngSendingWindow; error?: string }> {
+  return engApiFetch<{ ok?: boolean; schedule?: EngSendingWindow; error?: string }>(
+    `/eng/projects/${projectId}/launch`,
+    { method: 'PATCH', body: JSON.stringify({ schedule }) },
+  );
+}
+
+/**
+ * «Continue» шага 2: выбранные рынки проекта (вертикали). Отказ — Error с
+ * английским текстом роута (в том числе «нельзя снять рынок в работе»).
+ */
+export async function saveEngMarkets(
+  projectId: string,
+  verticalIds: string[],
+): Promise<{ ok?: boolean; selected?: string[]; error?: string }> {
+  return engApiFetch<{ ok?: boolean; selected?: string[]; error?: string }>(`/eng/projects/${projectId}/markets`, {
+    method: 'PUT',
+    body: JSON.stringify({ vertical_ids: verticalIds }),
+  });
+}
+
+/**
+ * «Rewrite letters»: новые итоговые письма вместо тех, что не прошли
+ * автоматическую проверку. Платный шаг: отказ гейта — EngPaidAccessError,
+ * прочие отказы — Error с английским текстом роута.
+ */
+export async function rewriteEngTemplateLetters(templateId: string): Promise<EngJobResponse> {
+  return engPaidApiFetch<EngJobResponse>(`/eng/templates/${templateId}/rewrite`, { method: 'POST', body: '{}' });
+}
+
+/** GET того же роута — попытки писем аудитории шаблона (тот же бюджет, что решает «Rewrite letters»). */
+export interface EngRewriteTries {
+  tries_used: number;
+  tries_max: number;
+  tries_left: number;
+}
+
+export async function fetchEngTemplateRewriteTries(templateId: string): Promise<EngRewriteTries> {
+  return engApiFetch<EngRewriteTries>(`/eng/templates/${templateId}/rewrite`);
+}
 
 interface EngProjectsResponse {
   projects?: EngProjectListItem[];
@@ -496,14 +634,14 @@ export interface EngLaunchSendingResult {
  *  - sibling_template_launched — у другого шаблона той же базы уже есть запуск;
  *  - research_running — у проекта идёт повторное исследование;
  *  - preset_no_mailboxes — в пресете нет ни одного ящика отправки (пресет
- *    один на всю пачку «Launch all», следующий шаблон получил бы то же);
+ *    один на проект, следующий шаблон получил бы то же);
  *  - segment_classification_incomplete — 503: классификатор сегментов не
  *    ответил по слишком большой доле адресов. Он общий у всех шаблонов, и
  *    следующий шаблон с сегментами снова оплатил бы классификацию всей своей
  *    аудитории ради того же отказа. Отказ лимита неудачных запусков шаблона
  *    (тоже 503) приходит БЕЗ кода — это EngLaunchServerError.
  * template_unresolved_operators экрану различать незачем: это ошибка одного
- * шаблона (бросается), а шаблоны, которые она ждёт, «Launch all» и не берёт
+ * шаблона (бросается), а шаблоны, которые она ждёт, шаг 3 и не запускает
  * (`needs_rewrite`, engTemplateNeedsRewrite).
  */
 export type EngLaunchRefusalCode =
@@ -566,7 +704,7 @@ export type EngTemplatePlaceholder = ClientEngTemplatePlaceholder;
  * Подстановки отправляемых писем шаблона и чем каждая наполнится у получателя
  * (clientEngProjection, toClientEngTemplatePlaceholders). null — сервер их не
  * посчитал (базы шаблона нет в деталке) или поля нет вовсе (ответ старше):
- * тогда шаг 5 о подстановках ничего не утверждает.
+ * тогда «Preview letters» о подстановках ничего не утверждает.
  */
 export function engTemplatePlaceholders(template: unknown): EngTemplatePlaceholder[] | null {
   const raw = (template as { placeholders?: unknown } | null)?.placeholders;
@@ -585,7 +723,7 @@ interface EngChainPatchResponse {
  * Исключения — вызовы, которым нужен машинный код отказа из тела не-2xx,
  * который этот фетч выбрасывает: startEngResearch и launchEngTemplate (свои
  * 409) и все вызовы, которые может остановить гейт платных шагов
- * (engPaidApiFetch: создание проекта, «Start outreach», «Collect again»,
+ * (engPaidApiFetch: создание проекта, «Launch», «Collect again»,
  * «Resume daily top-up»). Они ходят через engApiFetchRaw и доводят тексты теми
  * же функциями engText.
  *
@@ -904,38 +1042,6 @@ export async function cancelEngProject(projectId: string): Promise<EngCancelResp
   return engApiFetch<EngCancelResponse>(`/eng/projects/${projectId}/cancel`, { method: 'POST' });
 }
 
-/* ── Автопилот (POST /eng/projects/[id]/autopilot) ── */
-
-export interface EngAutopilotResponse {
-  ok?: boolean;
-  chains_enqueued?: number;
-  collects_enqueued?: number;
-  templates_enqueued?: number;
-  /** Осиротевшим базам доставлен пропавший анализ — тоже поставленная стадия. */
-  analyses_requeued?: number;
-  verticals_skipped?: number;
-  /**
-   * Сколько выбранных вертикалей нажатие НЕ собрало заново, потому что их
-   * последняя база остановилась решением, которое повторится
-   * (HE_COLLECT_STOP_REPEATS_CODES). Повтор — «Collect again» на шаге 4. Нет
-   * ключа — ответ старше этого поля.
-   */
-  collect_again_verticals?: number;
-  /**
-   * Пауза, записанная этим же нажатием: `null`/нет ключа — проект не на
-   * паузе. КОД, а не причина движка и не текст — тот же закрытый словарь, что
-   * у `EngProject.autopilot_hold`. Метки времени здесь нет намеренно: нажатие
-   * только что произошло, и второй источник её значения экрану не нужен —
-   * карточку паузы со временем рисует мастер по деталке проекта.
-   */
-  autopilot_hold_code?: HeClientAutopilotHoldCode | null;
-  error?: string;
-}
-
-export async function startEngAutopilot(projectId: string): Promise<EngAutopilotResponse> {
-  return engPaidApiFetch<EngAutopilotResponse>(`/eng/projects/${projectId}/autopilot`, { method: 'POST' });
-}
-
 /* ── Превью строк базы (GET /eng/bases/[id]/rows) ── */
 
 export interface EngBaseRowsResponse {
@@ -976,8 +1082,8 @@ export async function generateEngChain(verticalId: string, language?: string): P
 }
 
 /**
- * «Collect again» шага 4 — новая сборка вертикали (до 2 000 компаний, по
- * гипотезам, принятым на шаге 2: лимит и гипотезы решает сервер, тело пустое).
+ * «Collect again» шага 3 — новая сборка вертикали (до 2 000 компаний, по
+ * гипотезам рынка, выбранного на шаге 2: лимит и гипотезы решает сервер, тело пустое).
  */
 export async function collectEngBase(verticalId: string): Promise<EngBaseCollectResponse> {
   return engPaidApiFetch<EngBaseCollectResponse>(`/eng/verticals/${verticalId}/collect`, {
@@ -1051,7 +1157,7 @@ export async function buildEngTemplate(baseId: string): Promise<EngJobResponse> 
 /**
  * Запуск шаблона не прошёл на нашей стороне: 5xx роута запуска без кода
  * отказа (сбой ядра или рассыльщика, лимит неудачных запусков шаблона за
- * час). «Launch all» на нём останавливает прогон (EngStepReview): сбой после
+ * час). «Launch now» показывает его текстом (EngStepLaunch): сбой после
  * классификатора сегментов следующий шаблон оплатил бы заново, не узнав
  * ничего нового. `message` — английский текст роута.
  */
@@ -1074,7 +1180,7 @@ export class EngLaunchServerError extends Error {
  * EngLaunchServerError, любой другой отказ — Error с английским текстом.
  *
  * `start_sending: true` — подтверждение, что этот экран знает: запуск стартует
- * кампании (кнопка «Launch all», а не прежняя «Launch all (paused)»). Без него
+ * кампании (кнопка «Launch now», а не прежний запуск «на паузе»). Без него
  * роут запуска НЕ отказывает: он создаёт кампании на паузе, как до S2, и не
  * стартует их (ответ 200, `sending.outcome 'skipped'`, `skip_reason
  * 'not_requested'`): страница, загруженная до S2, обещала клиенту кампании на
@@ -1175,11 +1281,12 @@ export async function updateEngSendingWindow(
  * (lib/hypothesisEngine/engDashboard), а не копия: копия отстала от роута на
  * этап `attention`, и компилятор этого не видел.
  * `launch_unfinished` — запись о запуске есть, но часть аудитории не уехала
- * (`heLaunchIsIncomplete`): его достраивают на шаге 5.
+ * (`heLaunchIsIncomplete`): его достраивает шаг 3.
  */
 export type {
   EngDashAnalysisStopped,
   EngDashAttention,
+  EngDashAutoLaunch,
   EngDashAttentionInfo,
   EngDashSelection,
   EngDashStage,
@@ -1249,6 +1356,24 @@ export interface EngDashboardVertical {
    */
   letters_need_rewrite?: boolean;
   /**
+   * Итоговые письма сняты «Rewrite letters», а новых нет и генерация не идёт
+   * (EngDashStageInfo.lettersRetired): «Launch» рынок не двигает, путь —
+   * «Rewrite letters» или Support на шаге 3. Поля нет — не этот случай.
+   */
+  letters_retired?: boolean;
+  /**
+   * Автопилот проекта вертикали: false — следующую стадию после писем и
+   * проверки контактов никто не поставит до «Launch» шага 3. `null` или нет
+   * поля — не прочитан.
+   */
+  autopilot?: boolean | null;
+  /**
+   * У проекта вертикали записана пауза по потолку расхода ('spend_paused'):
+   * «Launch» шага 3 ничего платного не поставит. `null` или нет поля — паузы
+   * не прочитаны.
+   */
+  spend_paused?: boolean | null;
+  /**
    * Почему вертикаль стоит (этап `attention`); у других этапов `null`. Поля
    * нет у ответа старше этого этапа — карточка тогда печатает этап как есть.
    */
@@ -1269,6 +1394,15 @@ export interface EngDashboardVertical {
    * запуска нет (или ответ старше этой правки: тогда кабинет судит по `sending`).
    */
   top_up?: EngDashTopUp | null;
+  /**
+   * Автозапуск шаблона этапа (S3, EngDashAutoLaunch): состояние и код его
+   * строки. `null` или нет поля — автозапуска у рынка нет (не нажат «Launch»,
+   * таблиц нет, не прочитан, ответ старше S3): готовый рынок тогда ждёт
+   * «Launch now» на шаге 3.
+   */
+  auto_launch?: EngDashAutoLaunch | null;
+  /** Шаблон, к которому относится `auto_launch`; null — автозапуска нет. */
+  auto_launch_template_id?: string | null;
 }
 
 export interface EngDashboardEvent {

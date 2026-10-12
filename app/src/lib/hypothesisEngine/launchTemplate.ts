@@ -620,7 +620,7 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     // research-стадия у такого проекта — повторное исследование. «When the
     // research completes»: упади оно раньше кластеризации, шаблон уцелеет.
     researchRunning:
-      'Research is running again for this project. When it completes, it rebuilds the verticals and ' +
+      'Research is running again for this project. When it completes, it rebuilds the markets and ' +
       'deletes their audiences and templates, this one included, so the launch was stopped before any ' +
       'campaign was created.',
     launchGuardReadFailed:
@@ -675,10 +675,13 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
         '. Nothing was marked as contacted and your audience keeps every held-back address.'
       );
     },
+    // Без «All campaigns are paused»: кабинет стартует кампании сразу после
+    // ядра (engClientLaunch), и рядом с итогом «Sending has started» фраза
+    // была бы неправдой; состояние отправки говорит итог старта.
     segmentSplitInfo: (campaignsCount) =>
-      `Segment variants materialized: the launch was split into ${campaignsCount} campaigns by base segment (each segment campaign carries its own letter texts). All campaigns are paused.`,
+      `This launch was split into ${campaignsCount} campaigns by audience segment; each segment campaign has its own letter texts.`,
     rowsSkippedNote: (invalid, irrelevant) =>
-      `Base rows skipped: ${invalid.toLocaleString('en-US')} with an invalid email (verification) and ${irrelevant.toLocaleString('en-US')} irrelevant to the vertical.`,
+      `Base rows skipped: ${invalid.toLocaleString('en-US')} with an invalid email (verification) and ${irrelevant.toLocaleString('en-US')} irrelevant to the market.`,
     unverifiedSkippedNote: (unverified) =>
       `Rows left out because their address has no validation verdict: ${unverified.toLocaleString('en-US')}. ` +
       'An unverified address is never contacted.',
@@ -768,28 +771,30 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     // «did not go out», а не «were not created»: на достройке у такого сегмента
     // кампания может уже быть — не уехали только его адреса. Факт про повтор
     // оставлен — он правда (незаконченный запуск достраивается, шапка файла),
-    // а «Launch all», единственная кнопка запуска кабинета, берёт и
-    // незаконченные запуски (EngStepReview.tsx).
+    // а «Launch now» у рынка на шаге 3 запускает и незаконченный запуск (S3;
+    // при «Launch» проекта его достраивает и автозапуск).
     capacityStopNote: (segments, teamAlerted) =>
       `${segments.toLocaleString('en-US')} more segment${segments === 1 ? '' : 's'} of your audience ` +
       'did not go out in this launch. ' +
       (teamAlerted
         ? `${HE_TEAM_ON_IT_EN} Message Support to find out when it is fixed — then launch again with ` +
-          '«Launch all»'
+          '«Launch now»'
         : 'This stopped because of a temporary problem on our side. Message Support to find out when to ' +
-          'launch again with «Launch all»') +
+          'launch again with «Launch now»') +
       '; repeating this launch does not duplicate the campaigns that were already created.',
     // Правда для всех трёх форм гейта (templateOperatorGate): подстановка без
     // колонки в теме (пусто), без колонки и fallback в теле (пусто), имя
     // человека с fallback («there» — слово-заглушка), битый фрагмент вида
     // «{company}» (сырой шаблон). Сводку для staff клиенту не печатаем: в ней
-    // имена операторов и колонок. Действие — Support: письма шаблона клиент
-    // не правит (правка цепочки на шаге 3 в готовый шаблон не попадает).
+    // имена операторов и колонок. Действие — «Rewrite letters» у рынка на
+    // шаге 3 (S3: новые письма той же базы, бюджет поколения — 3 прогона);
+    // исчерпан бюджет — кнопки нет, и тогда Support. Обе ветки в одной фразе:
+    // она правда при любом остатке бюджета.
     templateOperatorsUnresolved: () =>
       'These letters contain a placeholder (such as a first name) that cannot be filled in from this ' +
       'audience, so recipients would see a blank, a stand-in word or the raw placeholder in its place. ' +
-      'This launch was stopped before anything was sent or changed. Message Support to have the letters ' +
-      'rewritten.',
+      'This launch was stopped before anything was sent or changed. Press «Rewrite letters» on this market ' +
+      'in step 3 to get new letters; if the button is not there, message Support.',
     // Пресет клиент не правит (его заводит администратор; подключение ящика на
     // странице почты кабинета в пресет его не добавляет), поэтому — Support.
     // «Before anything was sent or changed» — правда и для первого запуска, и
@@ -802,17 +807,17 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     // долга (первый запуск, force), и он до рассыльщика — кампаний этой
     // попытки нет, прежняя запись (у force) возвращена как была.
     segmentClassifyIncomplete: () => SEGMENT_CLASSIFY_INCOMPLETE_EN,
-    // «Launch all» снова предлагает такой шаблон: запуск записан
-    // незаконченным (heLaunchIsIncomplete), а панель запуска не исчезает после
-    // прогона (EngStepReview.tsx). Повтор шлёт с skip_if_in_campaign и —
-    // вторая и последняя попытка — отдаёт неразмеченным основной текст (шаг 5c).
+    // «Launch now» у рынка на шаге 3 снова запускает такой шаблон: запуск
+    // записан незаконченным (heLaunchIsIncomplete); при «Launch» проекта его
+    // повторяет и автозапуск. Повтор шлёт с skip_if_in_campaign и — вторая и
+    // последняя попытка — отдаёт неразмеченным основной текст (шаг 5c).
     segmentRowsHeldNote: (held) => {
       const it = held === 1 ? 'it' : 'them';
       return (
         `${held.toLocaleString('en-US')} ${held === 1 ? 'address' : 'addresses'} of this audience did not go ` +
         `out in this launch: we could not yet work out which segment of these letters fits ${it}, so ` +
         `${held === 1 ? 'it waits' : 'they wait'} for one more try instead of getting the main letter text ` +
-        `straight away. Nobody was contacted for ${it} and your audience keeps ${it}. Press «Launch all» ` +
+        `straight away. Nobody was contacted for ${it} and your audience keeps ${it}. Press «Launch now» ` +
         `again to send ${it}: we try once more, and ` +
         (held === 1
           ? 'if we still cannot place it, it gets the main letter text. '
@@ -1008,6 +1013,28 @@ const HE_LAUNCH_OUTCOME_CODES: ReadonlySet<string> = new Set<string>([
 export function heLaunchOutcomeCode(outcome: HeTemplateLaunchOutcome): HeLaunchOutcomeCode | null {
   const code = outcome.body.code;
   return typeof code === 'string' && HE_LAUNCH_OUTCOME_CODES.has(code) ? (code as HeLaunchOutcomeCode) : null;
+}
+
+/**
+ * Конфликт по САМОМУ шаблону из 409 ядра без машинного кода (шаг 1):
+ *  - 'in_progress' — аренда записи жива (запуск идёт или оборвался меньше
+ *    HE_LAUNCH_LEASE_MS назад);
+ *  - 'already_launched' — законченный запуск (в теле есть `launch`);
+ *  - 'not_ready' — шаблон не в статусе 'ready'.
+ * Сверка — с текстами словаря ядра обоих языков, а не по разбору текста:
+ * автозапуск кабинета (engAutoLaunch.heEngAutoLaunchVerdict) решает по ней,
+ * ждать ли аренду или сдаться. Поведение runHeTemplateLaunch не меняется.
+ * Иначе — null.
+ */
+export function heLaunchConflictOf(
+  outcome: HeTemplateLaunchOutcome,
+): 'in_progress' | 'already_launched' | 'not_ready' | null {
+  if (outcome.status !== 409) return null;
+  const error = outcome.body.error;
+  if (error === MESSAGES.en.launchInProgress || error === MESSAGES.ru.launchInProgress) return 'in_progress';
+  if ('launch' in outcome.body) return 'already_launched';
+  if (error === MESSAGES.en.templateNotReady || error === MESSAGES.ru.templateNotReady) return 'not_ready';
+  return null;
 }
 
 /**

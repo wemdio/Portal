@@ -118,6 +118,13 @@ import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
 import { flushHeOpsAlerts, notifyHeClientStop } from '@/lib/hypothesisEngine/opsAlert';
 import type { HeOpsStopKind, HeOpsStopProvider } from '@/lib/hypothesisEngine/opsAlert';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
+// Автозапуск ENG (S3): после «Launch» проекта готовый шаблон вертикали
+// запускается тем же вызовом, что кнопка «Launch now» кабинета, — тиком между
+// джобами (maybeRunHeEngAutoLaunch ниже).
+import { heEngAutoLaunchTickMs, runHeEngAutoLaunchTick } from '@/lib/hypothesisEngine/engAutoLaunch';
+// Письма ENG-клиенту (S3): события автозапуска и проход по данным в том же тике.
+import { runHeEngClientMailScan, sendHeEngClientNotice } from '@/lib/hypothesisEngine/engClientMail';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
@@ -3366,6 +3373,54 @@ async function writeJobFailure(
   return !failErr;
 }
 
+/**
+ * АВТОЗАПУСК ENG — тик между джобами (S3, engAutoLaunch.runHeEngAutoLaunchTick):
+ * не чаще раза в HE_ENG_AUTO_LAUNCH_TICK_MS (дефолт минута), полностью
+ * дожидается, не бросает и делает не больше ОДНОГО запуска. Здесь, а не новой
+ * стадией he_jobs и не в done-ветке шаблона:
+ *  - активной джобы во время тика нет, поэтому общий канал отмены запросов к
+ *    модели (setHeActiveJob, llm.ts) не оборвёт классификатор сегментов
+ *    запуска, а сторож простоя стадии не оборвёт вызовы рассыльщика посреди
+ *    запуска (их ограничивают свои сроки: 90 с на вызов рассыльщика, срок
+ *    попытки модели, 100 с на старт кампаний);
+ *  - новая стадия потребовала бы миграции check-ограничения he_jobs и правки
+ *    каждой исчерпывающей карты стадий, а done-ветка шаблона живёт в сроке
+ *    участка после стадии (POST_STAGE_DEADLINE_MS) и не должна падать.
+ * Цена: запуск (обычно секунды, в худшем случае 2–3 минуты) задерживает
+ * очередь джоб обоих рынков на это время. drain-worker.sh тик не видит:
+ * SIGKILL посреди запуска оставляет строку автозапуска 'running' — по
+ * истечении аренды записи у ядра (15 мин) и строки (10 мин) следующий тик
+ * считает брошенную попытку платным сбоем и достраивает запуск без дублей
+ * (вторая брошенная подряд — строка 'failed' и алерт, без нового запуска);
+ * брошенную после ядра стартует, только если решение «стартуем» было
+ * записано, иначе ничего не стартует ('done needs_support').
+ * Выключатель запуска — HE_ENG_AUTO_LAUNCH=0 в окружении воркера; без
+ * instantly-БД (supabaseInstantly null) — выключен с одной строкой warn.
+ * Письма клиенту (engClientMail) идут тем же тиком: проход по данным —
+ * независимо от выключателя, письма событий автозапуска — из его решений.
+ * Без SMTP_* в .env воркера письма не уходят (заявка остаётся, повтор ≤ 3).
+ */
+let heEngAutoLaunchNextAtMs = 0;
+
+async function maybeRunHeEngAutoLaunch(): Promise<boolean> {
+  const nowMs = Date.now();
+  if (nowMs < heEngAutoLaunchNextAtMs) return false;
+  heEngAutoLaunchNextAtMs = nowMs + heEngAutoLaunchTickMs();
+  try {
+    return await runHeEngAutoLaunchTick({
+      portalDb: db,
+      instantlyDb: supabaseInstantly,
+      log: (level, msg) => log(level, msg),
+      shouldStop,
+      mail: { send: sendHeEngClientNotice, scan: runHeEngClientMailScan },
+    });
+  } catch (err) {
+    // runHeEngAutoLaunchTick не бросает; это страховка очереди.
+    log('error', `[auto-launch] tick threw: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 async function pollOnce(): Promise<boolean> {
   // Брошенные строки закрываем ДО клейма: пока такая строка висит в 'running',
   // её проект стоит, а воркер один на всех.
@@ -3379,6 +3434,10 @@ async function pollOnce(): Promise<boolean> {
   // тика (при дефолтном WORKER_POLL_INTERVAL_MS — не дольше 30 с) и выйдет по
   // флагу. Клейм, уже начатый к сигналу (чтение и апдейт в claimJob), доходит
   // до конца, и эта джоба исполняется как текущая.
+  if (shouldStop()) return false;
+  // Автозапуск ENG — между джобами, до клейма (см. maybeRunHeEngAutoLaunch).
+  // Запуск был — true: pollLoop сразу зайдёт снова и возьмёт джобу.
+  if (await maybeRunHeEngAutoLaunch()) return true;
   if (shouldStop()) return false;
   const job = await claimJob();
   if (!job) return false;

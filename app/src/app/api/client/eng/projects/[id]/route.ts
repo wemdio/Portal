@@ -33,6 +33,8 @@ import {
   HE_MAX_EMAILS_PER_COMPANY_MIN,
   normalizeHeMaxEmailsPerCompany,
 } from '@/lib/hypothesisEngine/baseCollectEnqueue';
+import { readHeEngAutoLaunchDetail } from '@/lib/hypothesisEngine/engAutoLaunch';
+import { readHeEngTypicalDurations } from '@/lib/hypothesisEngine/engEstimates';
 import { engServerError } from '../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -210,6 +212,23 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     }
   }
 
+  // АВТОЗАПУСК (S3, engAutoLaunch): включён ли после «Launch» проекта и что с
+  // каждым готовым рынком — строки he_eng_auto_launch шаблонов проекта плюс
+  // кандидаты без строки ('waiting', дата шаблона). Без счётчиков и аренды.
+  // Миграции нет — available:false (шаг 3 показывает «Launch now» у каждого
+  // готового рынка); сбой чтения — ключ null, шаг 3 считает осторожно.
+  //
+  // ОЦЕНКИ ВРЕМЕНИ (engEstimates): медианы недавних проектов, кэш 15 минут,
+  // меньше трёх замеров или сбой — null (экран числа не печатает).
+  const [autoLaunch, durations] = await Promise.all([
+    readHeEngAutoLaunchDetail(supabaseAdmin, id, {
+      verticals: detail.detail.verticals as Array<Record<string, unknown>>,
+      hypotheses: detail.detail.hypotheses as Array<Record<string, unknown>>,
+      templates: detail.detail.templates as Array<Record<string, unknown>>,
+    }),
+    readHeEngTypicalDurations(supabaseAdmin),
+  ]);
+
   // Белый список полей: себестоимость, модели, план сорсинга и id внутренних
   // джоб в кабинет не едут (lib/hypothesisEngine/clientEngProjection).
   // Рамку ЦА (brief.icp) проектор ставит сам (toClientEngProjectRow,
@@ -228,6 +247,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           }),
     ...(busyRes.error ? {} : { has_active_jobs: (busyRes.data ?? []).length > 0 }),
     ...(researchRetry ? { research_retry: researchRetry } : {}),
+    auto_launch: autoLaunch,
+    estimates: { research_minutes: durations.researchMinutes, prepare_hours: durations.prepareHours },
   });
 }
 

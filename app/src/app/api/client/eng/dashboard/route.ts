@@ -36,13 +36,21 @@ import {
   deriveEngTopUpVerdict,
   deriveEngVerticalStage,
   engDashLaunchedTemplate,
+  engDashReadyTemplateId,
   engDashRewriteCandidateIds,
   engDashSelectionByVertical,
   nextDailyRunIso,
   utcDayStartIso,
+  type EngDashAutoLaunch,
   type EngDashSelection,
   type EngDashTopUp,
 } from '@/lib/hypothesisEngine/engDashboard';
+import {
+  HE_ENG_AUTO_LAUNCH_STALE_MS,
+  heEngAutoLaunchLeaseExpired,
+  readHeEngAutoLaunchForProjects,
+} from '@/lib/hypothesisEngine/engAutoLaunch';
+import { readHeEngSendingAccess } from '@/lib/hypothesisEngine/engSendingAccess';
 import { engServerError } from '../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -399,16 +407,25 @@ export async function GET(req: NextRequest) {
    * null — паузы не прочитаны: «не доказано» тоже, `requeues` ложно.
    */
   let spendPausedProjectIds: Set<string> | null = null;
+  /**
+   * Автопилот проекта (he_projects.autopilot) из того же чтения: этап 'letters'
+   * с готовыми письмами говорит «next: collecting contacts», только когда сбор
+   * поставит автопилот, иначе зовёт к «Launch» (deriveEngVerticalStage).
+   * null — не прочитан: подпись не обещает ни того, ни другого.
+   */
+  let autopilotByProjectId: Map<string, boolean> | null = null;
   const holdsRes = await supabaseAdmin
     .from('he_projects')
     .select('id, autopilot, autopilot_error, autopilot_error_at')
     .in('id', projectIds);
   if (!holdsRes.error) {
     spendPausedProjectIds = new Set<string>();
+    autopilotByProjectId = new Map<string, boolean>();
     for (const raw of holdsRes.data ?? []) {
       const row = raw as Record<string, unknown>;
       const pid = str(row.id);
       if (!pid) continue;
+      autopilotByProjectId.set(pid, row.autopilot === true);
       // Пауза — факт автопилота: у ручного прогона координатор ничего не ставит.
       // Исключение — 'spend_paused' (потолок расхода, по умолчанию выключен):
       // её пишет и без автопилота отказ кнопки ручного режима (в том числе
@@ -704,6 +721,28 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  /**
+   * АВТОЗАПУСК (S3, engAutoLaunch): строка he_eng_auto_launch шаблона этапа
+   * (запущенного или готового) и включён ли автозапуск проекта («Launch»
+   * нажат). Только us-проекты, одно чтение пачкой; сбой или нет миграции —
+   * ключ автозапуска null на всех карточках, подпись — без него.
+   */
+  const autoLaunchRead =
+    usProjectIds.size > 0 ? await readHeEngAutoLaunchForProjects(supabaseAdmin, [...usProjectIds]) : null;
+  /**
+   * Выключатель отправки аккаунта — для строки 'waiting' без кода (тик рынок
+   * ещё не пробовал): при 'not_enabled' или 'revoked' «sending starts
+   * automatically shortly» неправда, и подпись говорит то же, что строка рынка
+   * на шаге 3 (там тот же выключатель читает GET …/launch). Одно чтение без
+   * записи и алерта, только когда автозапуск хоть одного проекта включён;
+   * сбой чтения — поля нет, как у шага 3 при 'unknown'.
+   */
+  let accountAccess: 'not_enabled' | 'revoked' | undefined;
+  if (autoLaunchRead && autoLaunchRead.wanted.size > 0) {
+    const access = await readHeEngSendingAccess(supabaseAdmin, userId);
+    if (access.state === 'not_enabled' || access.state === 'revoked') accountAccess = access.state;
+  }
+
   const verticals = verticalRows
     .slice()
     .sort((a, b) => ts(a.created_at) - ts(b.created_at))
@@ -724,6 +763,56 @@ export async function GET(req: NextRequest) {
         return b ? b.vertical_id === vid : false;
       });
       const selection = selectionOf(vid);
+      // Строка автозапуска шаблона этапа; у готового шаблона выбранной
+      // вертикали проекта с нажатым «Launch» без строки — 'waiting' (тик её
+      // ещё не взял), как в деталке проекта.
+      // Строку пишет и кнопка «Launch now» (замок шаблона), поэтому строка сама
+      // по себе ещё не значит «запустится само»: берём её, только когда
+      // автозапуск проекта включён (тик ведёт лишь такие проекты) или запуск
+      // идёт прямо сейчас — то же правило, что у карточки рынка на шаге 3.
+      // Ещё 'done needs_support' — при любом автозапуске: у шаблона без записи
+      // о запуске это «запись не легла», и шаг 3 тогда зовёт в Support, а не к
+      // «Launch now» (кампании могли быть созданы).
+      const autoTemplateId = launchedTemplateByVertical.get(vid) ?? engDashReadyTemplateId(vTemplates);
+      const autoRowRaw = autoTemplateId && autoLaunchRead ? autoLaunchRead.rows.get(autoTemplateId) : undefined;
+      const autoRow =
+        autoRowRaw &&
+        (autoRowRaw.state === 'running' ||
+          (autoRowRaw.state === 'done' && autoRowRaw.code === 'needs_support') ||
+          autoLaunchRead?.wanted.has(str(v.project_id)))
+          ? autoRowRaw
+          : undefined;
+      const autoLaunchRaw: EngDashAutoLaunch | null = autoRow
+        ? { state: autoRow.state, code: autoRow.code }
+        : autoLaunchRead &&
+            autoTemplateId &&
+            !launchedTemplateByVertical.has(vid) &&
+            selection === 'selected' &&
+            autoLaunchRead.wanted.has(str(v.project_id))
+          ? { state: 'waiting', code: null }
+          : null;
+      // 'waiting' без кода: выключатель аккаунта и «дольше обычного» — как у
+      // строки рынка на шаге 3 (её отсчёт — от даты строки, у синтетической —
+      // от даты шаблона, как в деталке проекта).
+      const autoSince = autoRow
+        ? autoRow.created_at
+        : str(vTemplates.find((t) => str(t.id) === autoTemplateId)?.created_at);
+      const autoSinceMs = Date.parse(autoSince);
+      // 'running', аренду которой никто не держит (попытка брошена): то же
+      // `stale`, что у строки рынка на шаге 3 (деталка проекта), — там тогда
+      // стоит «Launch now», а не вечное «starting sending…».
+      const autoLaunch: EngDashAutoLaunch | null =
+        autoLaunchRaw && autoLaunchRaw.state === 'waiting' && autoLaunchRaw.code === null
+          ? {
+              ...autoLaunchRaw,
+              ...(accountAccess ? { access: accountAccess } : {}),
+              ...(Number.isFinite(autoSinceMs) && now.getTime() - autoSinceMs > HE_ENG_AUTO_LAUNCH_STALE_MS
+                ? { stale: true }
+                : {}),
+            }
+          : autoLaunchRaw && autoRow && heEngAutoLaunchLeaseExpired(autoRow, now.getTime())
+            ? { ...autoLaunchRaw, stale: true }
+            : autoLaunchRaw;
 
       const derived = deriveEngVerticalStage({
         projectStatus: str(project?.status),
@@ -742,6 +831,9 @@ export async function GET(req: NextRequest) {
         ...(liveJobRows !== null ? { stalledAnalysis } : {}),
         selection,
         rewriteTemplateIds,
+        autoLaunch,
+        // Не прочитан — поля нет: подпись этапа 'letters' ничего не обещает.
+        ...(autopilotByProjectId !== null ? { autopilot: autopilotByProjectId.get(v.project_id as string) === true } : {}),
         // Не прочитано — поля нет, и `requeues` ложно (не доказано).
         ...(spendPausedProjectIds !== null
           ? { spendPaused: spendPausedProjectIds.has(v.project_id as string) }
@@ -812,6 +904,16 @@ export async function GET(req: NextRequest) {
         // откажет — карточка пишет «letters need rewriting» вместо «ready to
         // launch» / «finish the launch» (EngDashboard.tsx).
         letters_need_rewrite: derived.lettersNeedRewrite,
+        // Письма сняты «Rewrite letters», новых нет (EngDashStageInfo.lettersRetired):
+        // карточка зовёт на шаг 3 («Rewrite letters» или Support), а не ждёт шаблона.
+        letters_retired: derived.lettersRetired === true,
+        // Автопилот проекта; null — не прочитан. Строка «next» карточки зовёт к
+        // «Launch», когда он выключен (следующую стадию никто не поставит).
+        autopilot: autopilotByProjectId ? (autopilotByProjectId.get(v.project_id as string) ?? null) : null,
+        // Записанная пауза по потолку расхода у проекта ('spend_paused'); null —
+        // паузы не прочитаны. Строка «next» карточки тогда не зовёт к «Launch»:
+        // реконсилер встаёт на потолке и ничего платного не ставит.
+        spend_paused: spendPausedProjectIds ? spendPausedProjectIds.has(v.project_id as string) : null,
         // Этап 'attention': причина и код (машинный код словаря кабинета, без
         // сырого текста стадии). У остальных этапов — null.
         attention: derived.attention,
@@ -822,6 +924,10 @@ export async function GET(req: NextRequest) {
         // кнопки (POST /eng/templates/[id]/sending); id кампаний наружу не идут.
         sending,
         sending_template_id: sending ? (launchedTemplateId ?? null) : null,
+        // Автозапуск шаблона этапа (EngDashAutoLaunch: состояние и код); null —
+        // не назначен или не прочитан. Счётчики и аренда наружу не идут.
+        auto_launch: autoLaunch,
+        auto_launch_template_id: autoLaunch ? (autoTemplateId ?? null) : null,
         // Возьмёт ли вертикаль ближайшая ночь добора (EngDashTopUp); null — запуска нет.
         top_up: launchedTemplateId ? (topUpByTemplate.get(launchedTemplateId) ?? null) : null,
       };

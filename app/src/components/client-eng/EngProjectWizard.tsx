@@ -1,10 +1,12 @@
 'use client';
 
 /**
- * Мастер проекта клиентского ENG-кабинета: 5 шагов (Brief → Verticals →
- * Letters → Bases & Launch → Review & Launch) поверх деталки
- * GET /api/client/eng/projects/[id]. Шаг 5 — единое окно приёмки автопилота
- * («Start outreach» на шаге 2). Поллинг всегда, пока деталка загружена: каждые
+ * Мастер проекта клиентского ENG-кабинета: 3 шага (Your business → Choose
+ * markets → Launch) поверх деталки GET /api/client/eng/projects/[id]. У каждого
+ * шага своя кнопка «Continue» к следующему; шаг 3 — одна кнопка «Launch»
+ * (POST .../launch: желание «запускай сам» + тот же реконсилер, что у прежней
+ * кнопки автопилота), а дальше рынки готовит автопилот и запускает автозапуск.
+ * Старые ссылки ?step=4 и ?step=5 ведут на шаг 3. Поллинг всегда, пока деталка загружена: каждые
  * 4с, пока по проекту идёт работа (engWizardLiveWork, плюс короткий запас на
  * зазор между стадиями автопилота — engAutopilotUnfinished), иначе раз в 30с;
  * в скрытой вкладке опроса нет, а при возврате в неё — сразу свежие данные.
@@ -17,19 +19,20 @@ import { ArrowLeft, Ban, LayoutDashboard } from 'lucide-react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { useSearchParams } from 'next/navigation';
+import { engAnalysisRequeues } from '@/lib/hypothesisEngine/engDashboard';
 import {
   cancelEngProject,
   fetchEngProjectDetail,
+  type EngBaseSummary,
   type EngProject,
   type EngProjectDetailResponse,
 } from './api-client';
 import { engAutopilotHoldText, engAutopilotIdleText, engStageErrorText } from './engText';
-import { EngBadge, EngSpinner, fmtDate, projectStatusTone } from './ui';
+import { EngBadge, EngSpinner, engBaseAnalysisStopped, fmtDate, projectStatusTone } from './ui';
+import { collectAgainBaseId, ownAutoBaseState } from './EngStepBases';
 import { EngStepBrief } from './EngStepBrief';
-import { EngStepVerticals } from './EngStepVerticals';
-import { EngStepLetters } from './EngStepLetters';
-import { EngStepBases } from './EngStepBases';
-import { EngStepReview } from './EngStepReview';
+import { EngStepMarkets } from './EngStepMarkets';
+import { EngStepLaunch, engRetiredTemplateOf } from './EngStepLaunch';
 import { EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
 
 /** Опрос деталки, пока по проекту идёт работа. */
@@ -54,12 +57,21 @@ const POLL_IDLE_MS = 30_000;
 const AUTOPILOT_HANDOFF_POLLS = 5;
 
 const STEPS = [
-  { id: 1, label: 'Brief' },
-  { id: 2, label: 'Verticals' },
-  { id: 3, label: 'Letters' },
-  { id: 4, label: 'Bases & Launch' },
-  { id: 5, label: 'Review & Launch' },
+  { id: 1, label: 'Your business' },
+  { id: 2, label: 'Choose markets' },
+  { id: 3, label: 'Launch' },
 ] as const;
+
+/**
+ * Шаг из глубокой ссылки (?step=N). Дашборд ведёт на шаг по этапу рынка;
+ * ссылки прежнего мастера на 5 шагов (?step=4 «Bases», ?step=5 «Review») —
+ * на шаг 3, где теперь живут базы, письма и запуск. Вне диапазона — шаг 1.
+ */
+function stepFromQuery(raw: string | null | undefined): number {
+  const n = Number(raw);
+  if (n === 4 || n === 5) return 3;
+  return Number.isInteger(n) && n >= 1 && n <= STEPS.length ? n : 1;
+}
 
 export type EngDetail = EngProjectDetailResponse & { project: EngProject };
 
@@ -104,14 +116,48 @@ function engWizardLiveWork(detail: EngDetail): boolean {
  * сам автопилот, autopilotReconcile.ts), а готового шаблона ещё нет — шаблон
  * последняя стадия, которую автопилот ставит сам; запуск — уже кнопка клиента.
  * Только 'researched': до этого автопилот вертикали не ведёт.
+ *
+ * Рынок, который «Launch» не сдвинет, сюда не входит (launchCannotMove): по
+ * нему шапка звала бы к «Launch», а карточка шага 3 — к своей кнопке или в
+ * Support. Предикаты — те же, что у карточки рынка шага 3 (EngStepLaunch).
  */
 function engAutopilotUnfinished(detail: EngDetail): boolean {
   const project = detail.project;
   if (project.autopilot !== true || project.autopilot_hold || project.status !== 'researched') return false;
   const verticals = new Set((detail.verticals ?? []).map((v) => v.id));
-  const ready = new Set((detail.templates ?? []).filter((t) => t.status === 'ready').map((t) => t.vertical_id));
+  const templates = detail.templates ?? [];
+  const bases = (detail.bases ?? []) as EngBaseSummary[];
+  const chains = (detail.chains ?? []) as unknown as Array<Record<string, unknown>>;
+  const ready = new Set(templates.filter((t) => t.status === 'ready').map((t) => t.vertical_id));
+  const launchCannotMove = (verticalId: string): boolean => {
+    // Письма «Rewrite letters» снял, а новые не написаны (engRetiredTemplateOf):
+    // путь — «Rewrite letters» или Support.
+    if (engRetiredTemplateOf(templates.filter((t) => t.vertical_id === verticalId)) !== undefined) return true;
+    const ownBases = bases.filter((b) => b.vertical_id === verticalId);
+    // Последняя своя сборка остановилась так, что новая повторит остановку:
+    // «Launch» её пропускает ('collect_stop_repeats'), путь — «Collect again».
+    if (collectAgainBaseId(ownBases, true, true) !== null) return true;
+    const latest = ownAutoBaseState(ownBases).latest;
+    if (!latest) return false;
+    // Сборка вернулась без контактов — карточка зовёт в Support.
+    if (latest.status === 'analyzed' && latest.row_count <= 0) return true;
+    // Проверка контактов встала, и «Launch» её заново не поставит — Support.
+    return (
+      engBaseAnalysisStopped(latest) &&
+      !engAnalysisRequeues(
+        latest as unknown as Record<string, unknown>,
+        ownBases as unknown as Array<Record<string, unknown>>,
+        chains.filter((c) => c.vertical_id === verticalId),
+      )
+    );
+  };
   return (detail.hypotheses ?? []).some(
-    (h) => h.status === 'accepted' && h.vertical_id !== null && verticals.has(h.vertical_id) && !ready.has(h.vertical_id),
+    (h) =>
+      h.status === 'accepted' &&
+      h.vertical_id !== null &&
+      verticals.has(h.vertical_id) &&
+      !ready.has(h.vertical_id) &&
+      !launchCannotMove(h.vertical_id),
   );
 }
 
@@ -120,11 +166,26 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
   const [detail, setDetail] = useState<EngDetail | null>(null);
   const [error, setError] = useState('');
   // Глубокая ссылка вида ?step=3 (дашборд ведёт на нужный шаг по этапу
-  // вертикали); вне диапазона — стартовый шаг 1.
-  const [step, setStep] = useState<number>(() => {
-    const raw = Number(searchParams?.get('step'));
-    return Number.isInteger(raw) && raw >= 1 && raw <= STEPS.length ? raw : 1;
-  });
+  // рынка); вне диапазона — стартовый шаг 1.
+  const [step, setStep] = useState<number>(() => stepFromQuery(searchParams?.get('step')));
+
+  /**
+   * Переход на шаг (вкладка, «Continue», «Change»): адрес держит ?step, чтобы
+   * перезагрузка страницы открыла тот же шаг, а «Continue» поднимает экран к
+   * началу шага — иначе следующий шаг открывался бы на месте прокрутки.
+   */
+  const goToStep = useCallback((next: number) => {
+    setStep(next);
+    if (typeof window === 'undefined') return;
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('step', String(next));
+      window.history.replaceState(window.history.state, '', url.toString());
+    } catch {
+      // Адрес не обновился — шаг всё равно открыт.
+    }
+    window.scrollTo({ top: 0 });
+  }, []);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState('');
   const loadingRef = useRef(false);
@@ -193,7 +254,15 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
   // «working…» в шапке и границы карточек автопилота — по живым задачам
   // (engHasActiveJobs); частота опроса — по более широкому «идёт работа».
   const hasActiveJobs = detail ? engHasActiveJobs(detail) : false;
-  const working = detail ? engWizardLiveWork(detail) || handoffPolls > 0 : false;
+  // Автозапуск рынка идёт (строка 'running') — тоже частый опрос: старт
+  // кампаний занимает минуты, и итог клиент должен увидеть сразу. В «есть что
+  // отменять» это не входит: начатый запуск отмена не обрывает.
+  // Брошенная попытка (`stale`, аренду никто не держит) не идёт — частый
+  // опрос по ней шёл бы вечно.
+  const autoLaunchRunning = (detail?.auto_launch?.markets ?? []).some(
+    (m) => m.state === 'running' && m.stale !== true,
+  );
+  const working = detail ? engWizardLiveWork(detail) || handoffPolls > 0 || autoLaunchRunning : false;
   const loaded = detail !== null;
 
   // Опрос — всегда, пока деталка загружена: 4 с при работе, 30 с без неё.
@@ -239,8 +308,9 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
    *    отмены отправляют дальше. «The ones that are sending» — потому что
    *    кампании запуска бывают и на паузе клиента, и не стартованы: про них
    *    «keep sending» было бы неправдой. Остановить их — кнопка «Pause» блока
-   *    отправки (EngSendingBlock) на шаге 5 и в Command Center;
-   *  - ««Start outreach» turns the autopilot back on» — POST .../autopilot;
+   *    отправки (EngSendingBlock) на шаге 3 и в Command Center;
+   *  - ««Launch» on step 3 turns the autopilot and automatic launch back
+   *    on» — POST .../launch (желание «запускай сам» снова wanted и реконсилер);
    *    паузу добора он не снимает — её снимает «Turn on» блока «Daily top-up»
    *    Command Center (S2, POST .../refill → switchHeUsRefill снимает именно
    *    паузу отмены) или staff-кнопка команды;
@@ -272,12 +342,12 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
         : '';
     if (
       !window.confirm(
-        'Cancel all jobs on this project? This stops the work running on it now, turns its autopilot off ' +
-          'and turns its daily top-up off if it has one. Finished bases, letters and templates are kept. ' +
-          'Campaigns already launched are not stopped by this: the ones that are sending keep sending — use ' +
-          '«Pause» on step 5 «Review & Launch» or in the Command Center to stop them. «Start outreach» turns ' +
-          'the autopilot back on, and «Turn on» under «Daily top-up» in the Command Center turns the daily ' +
-          'top-up back on.' +
+        'Cancel all jobs on this project? This stops the work running on it now, turns its autopilot and ' +
+          'automatic launch off and turns its daily top-up off if it has one. Finished bases, letters and ' +
+          'templates are kept. Campaigns already launched are not stopped by this: the ones that are sending ' +
+          'keep sending — use «Pause» on step 3 «Launch» or in the Command Center to stop them. «Launch» on ' +
+          'step 3 turns the autopilot and automatic launch back on, and «Turn on» under «Daily top-up» in the ' +
+          'Command Center turns the daily top-up back on.' +
           researchNote,
       )
     ) {
@@ -358,7 +428,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
                 disabled={cancelling}
                 className="ds-btn-secondary ml-auto inline-flex items-center gap-1.5 text-[11px]"
                 style={{ color: 'var(--cp-red)' }}
-                title="Stop the work running on this project, turn its autopilot off and turn its daily top-up off if it has one. Campaigns already launched are not stopped — use «Pause» to stop them."
+                title="Stop the work running on this project, turn its autopilot and automatic launch off and turn its daily top-up off if it has one. Campaigns already launched are not stopped — use «Pause» to stop them."
               >
                 <Ban className="h-3 w-3" />
                 {cancelling ? 'Cancelling…' : 'Cancel all jobs'}
@@ -396,10 +466,18 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
                  пишутся РАЗНЫМИ путями: код стадии кладёт failJob воркера, и
                  только для research-стадий (RESEARCH_STAGES,
                  worker/hypothesisEngine.ts), а паузу — координатор после
-                 done-джобы, само нажатие «Start outreach» (реконсилер в режиме
+                 done-джобы, само нажатие «Launch» (реконсилер в режиме
                  client пишет причину и снимает её) и ночной проход. Пересечься
                  они могут, и без этого гейта нейтральная карточка вставала
                  ПРЯМО ПОД красной «Last error», отменяя её словами.
+
+              4) нейтральная ветка — только пока у выбранного рынка нет готовых
+                 итоговых писем и «Launch» его сдвинет (engAutopilotUnfinished):
+                 дальше рынок ведёт автозапуск, и его состояние говорит
+                 карточка рынка на шаге 3; «ничего не идёт — нажмите Launch»
+                 над отправляющими рынками или над рынком, чья карточка зовёт
+                 к «Collect again», «Rewrite letters» или в Support, звало бы к
+                 кнопке без повода.
 
               Пауза и её отсутствие — РАЗНЫЕ ветки, а не два оттенка одной:
               «что-то у нас не сработало» приезжает записанной причиной
@@ -415,7 +493,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
                   <span style={{ color: 'var(--cp-text-l)' }}> · {fmtDate(project.autopilot_hold.at)}</span>
                 )}
               </div>
-            ) : !project.error_code ? (
+            ) : !project.error_code && engAutopilotUnfinished(detail) ? (
               <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-text-m)' }}>
                 {engAutopilotIdleText()}
               </div>
@@ -444,7 +522,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
               <button
                 key={s.id}
                 type="button"
-                onClick={() => setStep(s.id)}
+                onClick={() => goToStep(s.id)}
                 className={`ds-nav-item ${step === s.id ? 'active' : ''}`}
                 aria-current={step === s.id ? 'step' : undefined}
               >
@@ -453,11 +531,24 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
             ))}
           </nav>
 
-          {step === 1 && <EngStepBrief detail={detail} onChanged={() => void load({ silent: true })} />}
-          {step === 2 && <EngStepVerticals detail={detail} onChanged={() => void load({ silent: true })} />}
-          {step === 3 && <EngStepLetters detail={detail} onChanged={() => void load({ silent: true })} />}
-          {step === 4 && <EngStepBases detail={detail} onChanged={() => void load({ silent: true })} />}
-          {step === 5 && <EngStepReview detail={detail} onChanged={() => void load({ silent: true })} />}
+          {step === 1 && (
+            <EngStepBrief
+              detail={detail}
+              onChanged={() => void load({ silent: true })}
+              onContinue={() => goToStep(2)}
+              onOpenLaunch={() => goToStep(3)}
+            />
+          )}
+          {step === 2 && (
+            <EngStepMarkets
+              detail={detail}
+              onChanged={() => load({ silent: true })}
+              goToStep={goToStep}
+            />
+          )}
+          {step === 3 && (
+            <EngStepLaunch detail={detail} onChanged={() => void load({ silent: true })} goToStep={goToStep} />
+          )}
 
           <div className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
             Updated {fmtDate(project?.updated_at)}

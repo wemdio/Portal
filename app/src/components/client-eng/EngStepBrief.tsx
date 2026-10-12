@@ -1,11 +1,17 @@
 'use client';
 
 /**
- * Шаг 1 «Brief» клиентского ENG-кабинета: карточки site_profile (что движок
- * понял с сайта), состояние research и «Try again», редактируемые
- * offer/style/signature/business overrides, рамка ЦА клиента (brief.icp —
- * указание EN-промпту гипотез, lib/hypothesisEngine/icpFrame) и настройка
- * проекта «до N адресов одной компании».
+ * Шаг 1 «Your business» клиентского ENG-кабинета. Сверху — ход исследования
+ * простыми словами: шесть стадий research списком «готово / идёт / ждёт»
+ * (по research-джобам деталки), примерное время по недавним проектам
+ * (`estimates.research_minutes` деталки) и обещание письма, когда рынки
+ * готовы; у законченного — «Your markets are ready» и «Continue» на шаг 2,
+ * пока рынки не выбирали и «Launch» не нажимали (дальше — ссылка на шаг 3). Под
+ * свёрнутым «What we know about your business» — карточки site_profile (что
+ * движок понял с сайта), редактируемые offer/style/signature/business
+ * overrides, рамка ЦА клиента (brief.icp — указание EN-промпту гипотез,
+ * lib/hypothesisEngine/icpFrame) и настройка проекта «до N адресов одной
+ * компании».
  *
  * RESEARCH ИДЁТ ОДИН РАЗ (решение владельца 10.10.2026). Кнопки «Re-run
  * research» больше нет: «Try again» рисуется только когда research встал из-за
@@ -49,7 +55,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Save } from 'lucide-react';
+import { ArrowRight, Check, CircleDashed, RefreshCw, Save, X } from 'lucide-react';
 import {
   HE_ICP_ENTRY_MAX_CHARS,
   HE_ICP_LINE_MAX_CHARS,
@@ -73,11 +79,88 @@ import {
   heResearchRetryAllowed,
   heResearchStopCode,
 } from './clientFailureText';
+import { heEngMarketStarted, heEngMarketsFresh } from '@/lib/hypothesisEngine/engMarkets';
 import { EngPaidAccessNotice, EngSupportText } from './EngPaidAccess';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
 const RESEARCH_STAGES = ['site_profile', 'competitors', 'brand_cloud', 'hypotheses', 'evidence', 'clustering'];
+
+/**
+ * Стадии research словами клиента, в порядке цепочки (воркер ставит их одну
+ * за другой: site_profile → … → clustering, worker/hypothesisEngine.ts).
+ */
+const RESEARCH_STEP_LABELS: Record<string, string> = {
+  site_profile: 'Reading your website',
+  competitors: 'Finding companies like yours',
+  brand_cloud: 'Learning how your market talks',
+  hypotheses: 'Listing who could buy from you',
+  evidence: 'Checking each idea against real data',
+  clustering: 'Grouping ideas into markets',
+};
+
+type ResearchStepState = 'done' | 'running' | 'waiting' | 'stopped';
+
+/**
+ * Список стадий research для шага 1 — по ТЕКУЩЕМУ прогону: джобы деталки
+ * свежими первыми, прогон — research-джобы от самой свежей до первой
+ * встреченной site_profile включительно (повтор после сбоя начинает с неё, и
+ * «готово» прошлого прогона не должно выдавать себя за готовое сейчас).
+ * Состояние стадии — по её самой свежей джобе прогона: done — «готово»,
+ * pending/running — «идёт», failed/cancelled — «остановилась», джобы нет —
+ * «ждёт». У законченного проекта готово всё.
+ */
+function researchSteps(jobs: HeJobSummary[], status: unknown): Array<{ stage: string; label: string; state: ResearchStepState }> {
+  const run: HeJobSummary[] = [];
+  if (status !== 'researched') {
+    for (const job of jobs) {
+      if (!RESEARCH_STAGES.includes(job.stage)) continue;
+      run.push(job);
+      if (job.stage === 'site_profile') break;
+    }
+  }
+  return RESEARCH_STAGES.map((stage) => {
+    const label = RESEARCH_STEP_LABELS[stage] ?? stage;
+    if (status === 'researched') return { stage, label, state: 'done' as const };
+    const job = run.find((j) => j.stage === stage);
+    const state: ResearchStepState = !job
+      ? 'waiting'
+      : job.status === 'done'
+        ? 'done'
+        : job.status === 'pending' || job.status === 'running'
+          ? 'running'
+          : 'stopped';
+    return { stage, label, state };
+  });
+}
+
+/** Строка списка стадий: значок состояния и подпись. */
+function ResearchStepRow({ label, state }: { label: string; state: ResearchStepState }) {
+  return (
+    <li className="flex items-center gap-2 text-xs">
+      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center" aria-hidden>
+        {state === 'done' ? (
+          <Check className="h-3.5 w-3.5" style={{ color: 'var(--cp-green)' }} />
+        ) : state === 'running' ? (
+          <EngSpinner className="h-3.5 w-3.5" />
+        ) : state === 'stopped' ? (
+          <X className="h-3.5 w-3.5" style={{ color: 'var(--cp-amber)' }} />
+        ) : (
+          <CircleDashed className="h-3.5 w-3.5" style={{ color: 'var(--cp-text-l)' }} />
+        )}
+      </span>
+      <span
+        style={{
+          color:
+            state === 'waiting' ? 'var(--cp-text-l)' : state === 'stopped' ? 'var(--cp-amber)' : 'var(--cp-paper)',
+        }}
+      >
+        {label}
+        {state === 'running' ? '…' : state === 'stopped' ? ' — stopped' : ''}
+      </span>
+    </li>
+  );
+}
 
 /** Стадии research до hypotheses — рамку ЦА они не читают. */
 const STAGES_BEFORE_HYPOTHESES = ['site_profile', 'competitors', 'brand_cloud'];
@@ -149,13 +232,13 @@ function rerunConsequenceLines(c: EngResearchRerunConsequences): string[] {
   }
   if (c.templates > 0) lines.push(plural(c.templates, 'letter template', 'letter templates'));
   if (c.letter_sequences > 0) {
-    lines.push(`${plural(c.letter_sequences, 'letter sequence', 'letter sequences')} written for your verticals`);
+    lines.push(`${plural(c.letter_sequences, 'letter sequence', 'letter sequences')} written for your markets`);
   }
   if (c.vocabularies > 0) {
-    lines.push(`${plural(c.vocabularies, 'targeting vocabulary', 'targeting vocabularies')} built for your verticals`);
+    lines.push(`${plural(c.vocabularies, 'targeting vocabulary', 'targeting vocabularies')} built for your markets`);
   }
   if (c.dossiers > 0) {
-    lines.push(`${plural(c.dossiers, 'market dossier', 'market dossiers')} built for your verticals`);
+    lines.push(`${plural(c.dossiers, 'market dossier', 'market dossiers')} built for your markets`);
   }
   return lines;
 }
@@ -361,7 +444,7 @@ function researchStateText(state: ResearchState, status: unknown, errorCode: unk
 function emptyProfileText(state: ResearchState): string {
   switch (state) {
     case 'running':
-      return 'Profiling the site — the brief will appear here as soon as the research finishes.';
+      return 'Reading your website — what we learn about your business appears here as soon as the research finishes.';
     case 'retry_failed':
     case 'stalled':
     case 'settling':
@@ -613,7 +696,19 @@ function profileValue(value: unknown): string {
   return '';
 }
 
-export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChanged: () => void }) {
+export function EngStepBrief({
+  detail,
+  onChanged,
+  onContinue,
+  onOpenLaunch,
+}: {
+  detail: EngDetail;
+  onChanged: () => void;
+  /** «Continue» законченного исследования — на шаг 2 «Choose markets». */
+  onContinue: () => void;
+  /** Ссылка на шаг 3 «Launch», когда рынки уже выбраны или запущены. */
+  onOpenLaunch: () => void;
+}) {
   const { project, jobs = [] } = detail;
   const brief = (project.brief ?? {}) as Record<string, unknown>;
   const siteProfile = (brief.site_profile ?? null) as Record<string, unknown> | null;
@@ -653,6 +748,34 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
   // (researchStateOf), а не по своему пересчёту.
   const canRetry = researchState === 'retry_failed' || researchState === 'stalled';
   const icpOpen = icpEditable(researchState, listLatestResearch?.stage ?? null);
+  const steps = useMemo(() => researchSteps(jobs, project.status), [jobs, project.status]);
+  // Список стадий — когда есть что показать: research идёт или его прогон уже
+  // оставил джобы (остановившийся — видно, на какой стадии).
+  const showSteps = project.status === 'researching' || steps.some((step) => step.state !== 'waiting');
+  // Сроки и «напишем письмом» — только пока research идёт или ждёт следующей
+  // стадии: у остановленного обещать их нечему.
+  const researchGoing =
+    researchState === 'running' ||
+    researchState === 'settling' ||
+    (researchState === 'unknown' && project.status === 'researching');
+  const researchMinutes = detail.estimates?.research_minutes;
+  const marketCount = (detail.verticals ?? []).length;
+  /**
+   * Что после «Your markets are ready»: 'choose' — рынки ещё не выбирали и
+   * «Launch» не нажимали (тогда «Continue» на шаг 2); 'launched' — «Launch»
+   * нажат или работа по рынку уже начата (шаг 3 показывает её ход); 'chosen' —
+   * рынки выбраны, но «Launch» ещё не нажат.
+   */
+  const marketsStage = useMemo<'choose' | 'chosen' | 'launched'>(() => {
+    const activeJobs = jobs.filter((j) => j.status === 'pending' || j.status === 'running');
+    const state = { chains: detail.chains ?? [], bases: detail.bases ?? [], templates: detail.templates ?? [], activeJobs };
+    const started = (detail.verticals ?? []).some((v) => heEngMarketStarted(v.id, state));
+    if (detail.auto_launch?.requested === true || started) return 'launched';
+    return heEngMarketsFresh(detail.hypotheses ?? []) ? 'choose' : 'chosen';
+  }, [detail, jobs]);
+  // «What we know about your business» свёрнут, кроме повтора после сбоя:
+  // текст повтора может звать к «Business description» внутри.
+  const [aboutOpen, setAboutOpen] = useState(canRetry);
 
   // Значение, выставленное вне этого селекта (поддержка попросила 7), обязано
   // остаться видимым: иначе экран показывал бы не то, что действует.
@@ -786,7 +909,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
     <div className="flex flex-col gap-4">
       <EngCard>
         <div className="flex items-center gap-2">
-          <EngEyebrow>Site profile</EngEyebrow>
+          <EngEyebrow>Your business</EngEyebrow>
           <span className="mb-2">
             {researchRunning ? (
               <span className="inline-flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
@@ -798,13 +921,73 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
           </span>
         </div>
 
+        {researchState === 'researched' ? (
+          marketCount > 0 ? (
+            <div className="flex flex-col gap-2">
+              <p className="m-0 text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                Your markets are ready
+              </p>
+              <p className="m-0 text-xs" style={{ color: 'var(--cp-text-m)' }}>
+                We researched {project.website_url} and found {marketCount === 1 ? '1 market' : `${marketCount} markets`}{' '}
+                that could buy from you.
+                {marketsStage === 'choose'
+                  ? ' Next, choose the ones to start with.'
+                  : marketsStage === 'launched'
+                    ? ' Your markets are chosen — step 3 «Launch» shows their progress.'
+                    : ' Your markets are chosen — press «Launch» on step 3 to start them.'}
+              </p>
+              {marketsStage === 'choose' ? (
+                <button
+                  type="button"
+                  onClick={onContinue}
+                  className="ds-btn-primary mt-1 inline-flex items-center gap-1.5 self-start text-xs"
+                >
+                  Continue <ArrowRight className="h-3 w-3" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onOpenLaunch}
+                  className="ds-btn-secondary mt-1 inline-flex items-center gap-1.5 self-start text-xs"
+                >
+                  Open step 3 «Launch» <ArrowRight className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <p className="m-0 text-sm" style={{ color: 'var(--cp-text-m)' }}>
+              <EngSupportText text="The research finished, but it did not find any markets for this website. Message Support." />
+            </p>
+          )
+        ) : (
+          <>
+            {showSteps && (
+              <ol className="m-0 flex list-none flex-col gap-1.5 p-0">
+                {steps.map((step) => (
+                  <ResearchStepRow key={step.stage} label={step.label} state={step.state} />
+                ))}
+              </ol>
+            )}
+            {researchGoing && (
+              <div className="mt-3 flex flex-col gap-1 text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+                {typeof researchMinutes === 'number' && researchMinutes > 0 && (
+                  <span>Research usually takes about {Math.round(researchMinutes)} minutes (based on recent projects).</span>
+                )}
+                <span>
+                  We&apos;ll email you when your markets are ready, or if the research stops. You can close this page —
+                  the research goes on without it.
+                </span>
+              </div>
+            )}
+          </>
+        )}
+
         {/* Состояние research и «Try again» — кнопка только у повтора после
             сбоя или вставшей цепочки (researchStateOf, вердикт сервера); у
-            идущего, законченного и неизвестного research текста нет, его
-            статус — в бейдже выше. */}
+            идущего, законченного и неизвестного research текста нет. */}
         {researchText && (
           <div
-            className="mb-3 flex flex-wrap items-start gap-3 rounded-md p-3 text-xs"
+            className="mt-3 flex flex-wrap items-start gap-3 rounded-md p-3 text-xs"
             style={{
               border: '1px solid var(--cp-divider)',
               color: canRetry ? 'var(--cp-amber)' : 'var(--cp-text-m)',
@@ -826,234 +1009,255 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
             )}
           </div>
         )}
-
-        {siteProfile ? (
-          <dl className="grid gap-3 sm:grid-cols-2">
-            {PROFILE_FIELDS.map(({ key, label }) => {
-              const value = profileValue(siteProfile[key]);
-              if (!value) return null;
-              return (
-                <div
-                  key={key}
-                  className="rounded-md p-3"
-                  style={{ border: '1px solid var(--cp-divider)' }}
-                >
-                  <dt className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--cp-text-l)' }}>
-                    {label}
-                  </dt>
-                  <dd className="mt-1 text-sm whitespace-pre-wrap" style={{ color: 'var(--cp-paper)' }}>
-                    {value}
-                  </dd>
-                </div>
-              );
-            })}
-          </dl>
-        ) : (
-          <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-            {emptyProfileText(researchState)}
-          </p>
+        {refusal && (
+          <div className="mt-3">
+            <EngPaidAccessNotice refusal={refusal} />
+          </div>
         )}
       </EngCard>
 
-      <EngCard>
-        <EngEyebrow>Offer &amp; style overrides</EngEyebrow>
-        <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-          These notes steer letter generation. Leave empty to use what the research inferred.
-        </p>
-        <div className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold" style={{ color: businessHint ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}>
-              Business description (manual, max 3000 chars)
-              {businessHint}
-            </span>
-            <textarea
-              value={overrides.value('business_override')}
-              onChange={(e) => overrides.edit('business_override', e.target.value)}
-              rows={4}
-              maxLength={3000}
-              placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin, JS-heavy, or could not be opened at all."
-              className="ds-input w-full resize-y"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-              Offer override
-            </span>
-            <textarea
-              value={overrides.value('offer_override')}
-              onChange={(e) => overrides.edit('offer_override', e.target.value)}
-              rows={2}
-              placeholder="e.g. 4–6 qualified meetings per month with US clinic owners, pay-per-meeting"
-              className="ds-input w-full resize-y"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-              Style reference (1–2 “perfect” emails to imitate)
-            </span>
-            <textarea
-              value={overrides.value('style_override')}
-              onChange={(e) => overrides.edit('style_override', e.target.value)}
-              rows={4}
-              placeholder="Paste an email whose tone the generator should copy"
-              className="ds-input w-full resize-y"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-              Sender signature (used verbatim at the end of every letter)
-            </span>
-            <textarea
-              value={overrides.value('signature_override')}
-              onChange={(e) => overrides.edit('signature_override', e.target.value)}
-              rows={2}
-              placeholder="Jane Doe, Acme, acme.com"
-              className="ds-input w-full resize-y"
-            />
-          </label>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void onSave()}
-              disabled={briefSaving || overrides.changed.length === 0}
-              className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
-            >
-              {saving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
-              Save overrides
-            </button>
-            <SaveStatus saving={saving} savedAt={savedAt} unsaved={overrides.changed.length > 0} />
-          </div>
-        </div>
-      </EngCard>
+      <details
+        open={aboutOpen}
+        onToggle={(e) => setAboutOpen(e.currentTarget.open)}
+        className="flex flex-col gap-4"
+      >
+        <summary className="cursor-pointer text-xs font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+          What we know about your business
+        </summary>
+        <div className="mt-3 flex flex-col gap-4">
+          <EngCard>
+            <EngEyebrow>Site profile</EngEyebrow>
 
-      {/* Рамка ЦА читается только EN-промптом гипотез (рынок us); роут на
-          другом рынке её не принимает, поэтому и формы там нет. */}
-      {project.market === 'us' && (
-        <EngCard>
-          <EngEyebrow>Target audience</EngEyebrow>
-          {/* Каждая фраза — про механизм как он есть. Рамку по имени читает
-              только стадия гипотез, в начале своего прогона (stages/hypotheses.ts,
-              EN-промпт prompts/hypotheses.en.ts): по ней модель выбирает и
-              запрещает сегменты (шаг 2); в письма она попадает лишь в составе
-              брифа (шапка файла). Размер и география — указание модели
-              вписать их условием отбора в описание каждой гипотезы внутри
-              рамки; описания читает планировщик источников
-              (prompts/sourcePlan.en.ts: фильтры стран и штата), а порог штата
-              из плана, когда размер в них не назван, сборка снимает (кроме
-              среза, у которого без него не осталось бы других фильтров —
-              heSizeBasisEn и heTaskWithoutUnfoundedSize, stages/baseCollect.ts). Вписывает их модель, кодом гипотеза с
-              рамкой не сверяется, отсюда «usually». География — уже, чем
-              размер: pdl, funded и eng_hiring фильтруют только по СТРАНЕ, место
-              мельче страны (штат, регион, город) несёт лишь гео запроса
-              google_maps, а релевант-гейт географию не проверяет вовсе. Поэтому
-              про страну — «usually … a filter», про штат/город — только карты и
-              честное «companies from elsewhere can still appear».
+            {siteProfile ? (
+              <dl className="grid gap-3 sm:grid-cols-2">
+                {PROFILE_FIELDS.map(({ key, label }) => {
+                  const value = profileValue(siteProfile[key]);
+                  if (!value) return null;
+                  return (
+                    <div
+                      key={key}
+                      className="rounded-md p-3"
+                      style={{ border: '1px solid var(--cp-divider)' }}
+                    >
+                      <dt className="text-[10px] font-semibold uppercase tracking-wide" style={{ color: 'var(--cp-text-l)' }}>
+                        {label}
+                      </dt>
+                      <dd className="mt-1 text-sm whitespace-pre-wrap" style={{ color: 'var(--cp-paper)' }}>
+                        {value}
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
+            ) : (
+              <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
+                {emptyProfileText(researchState)}
+              </p>
+            )}
+          </EngCard>
 
-              Research идёт один раз (решение владельца 10.10.2026), поэтому
-              «следующего прогона», который подхватил бы позже сохранённое, нет.
-              Форма открыта, только пока чтение рамки впереди (icpEditable), и
-              последняя фраза говорит ровно это; дальше — ответы без правки и
-              причина (icpLockedText). */}
-          <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-            Who the research should aim at. These answers steer which market hypotheses the research
-            proposes. The company size you name here usually becomes a condition for which companies are
-            collected for those hypotheses. A country usually becomes a filter for the companies collected,
-            while a state, region or city can be used only when searching local businesses on maps, so
-            companies from elsewhere can still appear.{' '}
-            {icpOpen
-              ? 'The research reads these answers when it starts drafting the hypotheses; answers saved after that step has started are not used by it.'
-              : icpLockedText(researchState)}
-          </p>
-          {icpOpen ? (
+          <EngCard>
+            <EngEyebrow>Offer &amp; style overrides</EngEyebrow>
+            <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+              These notes steer letter generation. Leave empty to use what the research inferred.
+            </p>
             <div className="flex flex-col gap-3">
-              {(['include', 'exclude'] as const).map((field) => (
-                <label key={field} className="flex flex-col gap-1">
-                  <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-                    {ICP_LABELS[field]} (one per line, up to {HE_ICP_LIST_MAX_ENTRIES} lines of{' '}
-                    {HE_ICP_ENTRY_MAX_CHARS} characters)
-                  </span>
-                  <textarea
-                    value={icp.value(field)}
-                    onChange={(e) => icp.edit(field, e.target.value)}
-                    rows={3}
-                    placeholder={
-                      field === 'include'
-                        ? 'e.g. Multi-location dental groups\nIndependent orthodontic practices'
-                        : 'e.g. Hospitals\nDental schools'
-                    }
-                    className="ds-input w-full resize-y"
-                  />
-                </label>
-              ))}
-              <div className="grid gap-3 sm:grid-cols-2">
-                {(['size', 'geo'] as const).map((field) => (
-                  <label key={field} className="flex flex-col gap-1">
-                    <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-                      {ICP_LABELS[field]}
-                    </span>
-                    <input
-                      type="text"
-                      value={icp.value(field)}
-                      onChange={(e) => icp.edit(field, e.target.value)}
-                      maxLength={HE_ICP_LINE_MAX_CHARS}
-                      placeholder={field === 'size' ? 'e.g. 20–500 employees' : 'e.g. Texas and Florida'}
-                      className="ds-input w-full"
-                    />
-                  </label>
-                ))}
-              </div>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-semibold" style={{ color: businessHint ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}>
+                  Business description (manual, max 3000 chars)
+                  {businessHint}
+                </span>
+                <textarea
+                  value={overrides.value('business_override')}
+                  onChange={(e) => overrides.edit('business_override', e.target.value)}
+                  rows={4}
+                  maxLength={3000}
+                  placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin, JS-heavy, or could not be opened at all."
+                  className="ds-input w-full resize-y"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+                  Offer override
+                </span>
+                <textarea
+                  value={overrides.value('offer_override')}
+                  onChange={(e) => overrides.edit('offer_override', e.target.value)}
+                  rows={2}
+                  placeholder="e.g. 4–6 qualified meetings per month with US clinic owners, pay-per-meeting"
+                  className="ds-input w-full resize-y"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+                  Style reference (1–2 “perfect” emails to imitate)
+                </span>
+                <textarea
+                  value={overrides.value('style_override')}
+                  onChange={(e) => overrides.edit('style_override', e.target.value)}
+                  rows={4}
+                  placeholder="Paste an email whose tone the generator should copy"
+                  className="ds-input w-full resize-y"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+                  Sender signature (used verbatim at the end of every letter)
+                </span>
+                <textarea
+                  value={overrides.value('signature_override')}
+                  onChange={(e) => overrides.edit('signature_override', e.target.value)}
+                  rows={2}
+                  placeholder="Jane Doe, Acme, acme.com"
+                  className="ds-input w-full resize-y"
+                />
+              </label>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => void onSaveIcp()}
-                  disabled={briefSaving || icp.changed.length === 0}
+                  onClick={() => void onSave()}
+                  disabled={briefSaving || overrides.changed.length === 0}
                   className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
                 >
-                  {icpSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
-                  Save target audience
+                  {saving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                  Save overrides
                 </button>
-                <SaveStatus saving={icpSaving} savedAt={icpSavedAt} unsaved={icp.changed.length > 0} />
+                <SaveStatus saving={saving} savedAt={savedAt} unsaved={overrides.changed.length > 0} />
               </div>
             </div>
-          ) : (
-            <IcpReadOnly frame={icpTextOf(brief)} />
-          )}
-        </EngCard>
-      )}
+          </EngCard>
 
-      <EngCard>
-        <EngEyebrow>Contacts per company</EngEyebrow>
-        <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-          The most people we may write to at one company. Applies to lists collected from now on —
-          a list you have already collected keeps the number it was collected with.
-        </p>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
-            Email addresses per company
-            <select
-              value={cap}
-              onChange={(e) => capForm.edit('cap', e.target.value)}
-              className="ds-input mt-1 w-full text-xs"
-            >
-              {capOptions.map((n) => (
-                <option key={n} value={n}>
-                  {n === 1 ? 'Up to 1 address' : `Up to ${n} addresses`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            onClick={() => void onSaveCap()}
-            disabled={capSaving}
-            className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
-          >
-            {capSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
-            Save
-          </button>
-          <SaveStatus saving={capSaving} savedAt={capSavedAt} unsaved={capForm.changed.length > 0} />
+          {/* Рамка ЦА читается только EN-промптом гипотез (рынок us); роут на
+              другом рынке её не принимает, поэтому и формы там нет. */}
+          {project.market === 'us' && (
+            <EngCard>
+              <EngEyebrow>Target audience</EngEyebrow>
+              {/* Каждая фраза — про механизм как он есть. Рамку по имени читает
+                  только стадия гипотез, в начале своего прогона (stages/hypotheses.ts,
+                  EN-промпт prompts/hypotheses.en.ts): по ней модель выбирает и
+                  запрещает сегменты (шаг 2); в письма она попадает лишь в составе
+                  брифа (шапка файла). Размер и география — указание модели
+                  вписать их условием отбора в описание каждой гипотезы внутри
+                  рамки; описания читает планировщик источников
+                  (prompts/sourcePlan.en.ts: фильтры стран и штата), а порог штата
+                  из плана, когда размер в них не назван, сборка снимает (кроме
+                  среза, у которого без него не осталось бы других фильтров —
+                  heSizeBasisEn и heTaskWithoutUnfoundedSize, stages/baseCollect.ts). Вписывает их модель, кодом гипотеза с
+                  рамкой не сверяется, отсюда «usually». География — уже, чем
+                  размер: pdl, funded и eng_hiring фильтруют только по СТРАНЕ, место
+                  мельче страны (штат, регион, город) несёт лишь гео запроса
+                  google_maps, а релевант-гейт географию не проверяет вовсе. Поэтому
+                  про страну — «usually … a filter», про штат/город — только карты и
+                  честное «companies from elsewhere can still appear».
+
+                  Research идёт один раз (решение владельца 10.10.2026), поэтому
+                  «следующего прогона», который подхватил бы позже сохранённое, нет.
+                  Форма открыта, только пока чтение рамки впереди (icpEditable), и
+                  последняя фраза говорит ровно это; дальше — ответы без правки и
+                  причина (icpLockedText). */}
+              <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                Who the research should aim at. These answers steer which market hypotheses the research
+                proposes. The company size you name here usually becomes a condition for which companies are
+                collected for those hypotheses. A country usually becomes a filter for the companies collected,
+                while a state, region or city can be used only when searching local businesses on maps, so
+                companies from elsewhere can still appear.{' '}
+                {icpOpen
+                  ? 'The research reads these answers when it starts drafting the hypotheses; answers saved after that step has started are not used by it.'
+                  : icpLockedText(researchState)}
+              </p>
+              {icpOpen ? (
+                <div className="flex flex-col gap-3">
+                  {(['include', 'exclude'] as const).map((field) => (
+                    <label key={field} className="flex flex-col gap-1">
+                      <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+                        {ICP_LABELS[field]} (one per line, up to {HE_ICP_LIST_MAX_ENTRIES} lines of{' '}
+                        {HE_ICP_ENTRY_MAX_CHARS} characters)
+                      </span>
+                      <textarea
+                        value={icp.value(field)}
+                        onChange={(e) => icp.edit(field, e.target.value)}
+                        rows={3}
+                        placeholder={
+                          field === 'include'
+                            ? 'e.g. Multi-location dental groups\nIndependent orthodontic practices'
+                            : 'e.g. Hospitals\nDental schools'
+                        }
+                        className="ds-input w-full resize-y"
+                      />
+                    </label>
+                  ))}
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {(['size', 'geo'] as const).map((field) => (
+                      <label key={field} className="flex flex-col gap-1">
+                        <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
+                          {ICP_LABELS[field]}
+                        </span>
+                        <input
+                          type="text"
+                          value={icp.value(field)}
+                          onChange={(e) => icp.edit(field, e.target.value)}
+                          maxLength={HE_ICP_LINE_MAX_CHARS}
+                          placeholder={field === 'size' ? 'e.g. 20–500 employees' : 'e.g. Texas and Florida'}
+                          className="ds-input w-full"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void onSaveIcp()}
+                      disabled={briefSaving || icp.changed.length === 0}
+                      className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+                    >
+                      {icpSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                      Save target audience
+                    </button>
+                    <SaveStatus saving={icpSaving} savedAt={icpSavedAt} unsaved={icp.changed.length > 0} />
+                  </div>
+                </div>
+              ) : (
+                <IcpReadOnly frame={icpTextOf(brief)} />
+              )}
+            </EngCard>
+          )}
+
+          <EngCard>
+            <EngEyebrow>Contacts per company</EngEyebrow>
+            <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+              The most people we may write to at one company. Applies to lists collected from now on —
+              a list you have already collected keeps the number it was collected with.
+            </p>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+                Email addresses per company
+                <select
+                  value={cap}
+                  onChange={(e) => capForm.edit('cap', e.target.value)}
+                  className="ds-input mt-1 w-full text-xs"
+                >
+                  {capOptions.map((n) => (
+                    <option key={n} value={n}>
+                      {n === 1 ? 'Up to 1 address' : `Up to ${n} addresses`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => void onSaveCap()}
+                disabled={capSaving}
+                className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+              >
+                {capSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                Save
+              </button>
+              <SaveStatus saving={capSaving} savedAt={capSavedAt} unsaved={capForm.changed.length > 0} />
+            </div>
+          </EngCard>
+
         </div>
-      </EngCard>
+      </details>
 
       {/* Отказы роута исследования ведут в Support — словом, которое
           EngSupportText делает ссылкой на чат. */}
@@ -1062,7 +1266,6 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
           <EngSupportText text={error} />
         </div>
       )}
-      {refusal && <EngPaidAccessNotice refusal={refusal} />}
 
       {/* Диалог — только пока повтор ещё положен: начался research (сотрудник,
           вторая вкладка) — его кнопка ничего бы не поставила. */}
@@ -1087,13 +1290,13 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
                 (кластеризация); исследование, упавшее раньше неё, ничего не
                 удалит, поэтому безусловное «is deleted» было бы неправдой. */}
             <p className="text-sm mb-2" style={{ color: 'var(--cp-text-m)' }}>
-              When the new research finishes, it rebuilds the verticals of this project from scratch and
+              When the new research finishes, it rebuilds the markets of this project from scratch and
               deletes everything built on the current ones. This cannot be undone.
             </p>
             {rerunConsequenceLines(rerunConfirm).length > 0 && (
               <>
                 <p className="text-sm mb-1" style={{ color: 'var(--cp-text-m)' }}>
-                  Built on the current verticals now:
+                  Built on the current markets now:
                 </p>
                 <ul className="mb-3 list-disc pl-5 text-sm" style={{ color: 'var(--cp-paper)' }}>
                   {rerunConsequenceLines(rerunConfirm).map((line) => (
@@ -1103,7 +1306,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               </>
             )}
             <p className="text-[11px] mb-4" style={{ color: 'var(--cp-text-l)' }}>
-              The verticals themselves come from the new research, so they may differ from the ones you see
+              The markets themselves come from the new research, so they may differ from the ones you see
               now.
             </p>
             <div className="flex flex-wrap items-center gap-3">

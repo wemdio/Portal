@@ -158,10 +158,10 @@ export function baseStatusTone(status: string | undefined): EngTone {
  * бейдж «analyzing» про такую базу был неправдой. Ответ — СЕРВЕРА: признак
  * `analysis_live` деталки (GET /eng/projects/[id]) считается общим предикатом
  * isAnalyzingBaseLive — активная джоба на её base_id или окно постановки
- * ANALYZING_ORPHAN_GRACE_MS, — тем же, что у Command Center и «Start outreach».
+ * ANALYZING_ORPHAN_GRACE_MS, — тем же, что у Command Center и «Launch».
  * Нет ключа (живость не прочитана) — не «остановлен»: анализ читается идущим.
  *
- * Одно правило на бейдж шагов 4 и 5 (EngBaseStatusBadge) и на фразу шага 4 про
+ * Одно правило на бейдж (EngBaseStatusBadge) и на фразу шага 3 про
  * остановленный анализ, чтобы они не расходились.
  */
 export function engBaseAnalysisStopped(base: { status?: string; analysis_live?: boolean }): boolean {

@@ -52,7 +52,25 @@
  *    (`autoPipeline.ts`, шаг 3a-, и напоминание о стоящей паузе). Провайдера
  *    нет — `provider: 'budget'`; окно молчания — 6 ч, как у ёмкости: потолок
  *    проекта сам не опускается, и каждая следующая попытка постановки — та же
- *    новость.
+ *    новость;
+ *  - 'stage_stopped' — рынок проекта с включённым автозапуском («Launch»
+ *    нажат) встал так, что сам не пойдёт: платная стадия (цепочка писем,
+ *    проверка контактов, итоговые письма, переписывание писем) упала
+ *    окончательно, или пауза автопилота «retrying» (read_failed /
+ *    enqueue_failed) держится дольше часа. Зовёт почтовый проход кабинета
+ *    (engClientMail.runHeEngClientMailScan) — ровно тогда, когда заявляет
+ *    письмо клиенту об этой остановке, то есть один раз на событие (дедуп
+ *    письма — таблица he_eng_client_emails; без неё нет ни письма, ни этого
+ *    алерта). Решение владельца по умолчанию (S3): о такой остановке узнают и
+ *    клиент, и команда. Провайдера нет — `provider: 'pipeline'`; стадия —
+ *    HeOpsStageStopStage; окно молчания — 6 ч по ключу события (eventKey):
+ *    оно только гасит дубль одного события, а разные события одного проекта
+ *    пишутся каждое. В свёртку (ключ 2 ниже) НЕ идёт: каждое событие —
+ *    отдельным сообщением со своими джобой, базой, причиной, строкой «клиент
+ *    видит» и советом по стадии — сотруднику нужны именно они, а строка
+ *    списка их не несёт. Объём держит вызывающий: алерт только у заявки
+ *    письма (одна на событие), а заявок за проход почты не больше его
+ *    бюджета отправок (SCAN_SEND_CAP, 5 в минуту).
  *
  * ТОЛЬКО market='us'. RU-инструмент живёт со своими привычками и в это решение
  * не входит: строка с market='ru' (и любым другим известным рынком) молча
@@ -98,7 +116,8 @@
  *         удалённую (404) или стоящую долив с S2 видит заранее и держит её
  *         строки (stages/baseCollectRefill.ts, шаг 4c; алерт 'segments_held',
  *         autoPipeline.notifyHeRefillHold);
- *  2. провайдер + вид отказа: первое сообщение уходит сразу, а остальные
+ *  2. провайдер + вид отказа (кроме 'stage_stopped' — см. выше): первое
+ *     сообщение уходит сразу, а остальные
  *     проекты с тем же отказом в течение HE_OPS_BURST_WINDOW_MS (10 мин)
  *     копятся и уходят ОДНИМ сообщением-списком в конце окна — кончившийся
  *     баланс у провайдера валит все проекты очереди подряд, и это одна новость,
@@ -156,14 +175,24 @@ export type HeOpsStopKind =
   | 'capacity_pause'
   | 'letters_held'
   | 'spend_ceiling'
-  | 'segment_refused';
+  | 'segment_refused'
+  | 'stage_stopped';
 
 /**
  * Чей отказ: модель (LLM-провайдер), поиск (Serper), рассыльщик (Instantly);
  * 'letters' — не провайдер, а письма запущенного шаблона (вид 'letters_held');
- * 'budget' — не провайдер, а потолок расхода проекта (вид 'spend_ceiling').
+ * 'budget' — не провайдер, а потолок расхода проекта (вид 'spend_ceiling');
+ * 'pipeline' — не провайдер, а конвейер рынка (вид 'stage_stopped').
  */
-export type HeOpsStopProvider = 'model' | 'search' | 'sending' | 'letters' | 'budget';
+export type HeOpsStopProvider = 'model' | 'search' | 'sending' | 'letters' | 'budget' | 'pipeline';
+
+/**
+ * Что встало у вида 'stage_stopped' (поле `stage`): упавшая окончательно
+ * стадия рынка — цепочка писем, проверка контактов (base_analyze), первые
+ * итоговые письма базы, итоговые письма «Rewrite letters», — или пауза
+ * автопилота «retrying», которую никто не снял за час.
+ */
+export type HeOpsStageStopStage = 'chain' | 'base_analyze' | 'template' | 'template_rewrite' | 'autopilot_retrying';
 
 export interface HeOpsStop {
   projectId: string;
@@ -188,8 +217,16 @@ export interface HeOpsStop {
    * молчания (см. шапку); у остальных видов — только строка сообщения.
    */
   verticalId?: string | null;
+  /** Имя вертикали (рынка) — строкой контекста рядом с её id, если известно. */
+  verticalName?: string | null;
   /** Шаблон, если отказ случился на его запуске. */
   templateId?: string | null;
+  /**
+   * Только 'stage_stopped': ключ события (dedupe_key письма клиенту) — входит
+   * в ключ окна молчания, чтобы разные остановки одного проекта не гасили
+   * друг друга.
+   */
+  eventKey?: string | null;
   /**
    * Кампания рассыльщика, о которой алерт ('segment_refused' — отказавшая
    * кампания сегмента), и основная кампания запуска. Строками контекста, а не
@@ -222,7 +259,7 @@ export const HE_OPS_STAGE_TEMPLATE_LAUNCH = 'template_launch';
 
 /** Окно молчания по проекту, виду и провайдеру для 'billing' / 'configuration' (см. шапку). */
 export const HE_OPS_TEAM_FIX_REPEAT_MS = 60 * 60 * 1000;
-/** То же окно для 'capacity_pause', 'letters_held', 'spend_ceiling' и 'segment_refused' (см. шапку). */
+/** То же окно для 'capacity_pause', 'letters_held', 'spend_ceiling', 'segment_refused' и 'stage_stopped' (см. шапку). */
 export const HE_OPS_CAPACITY_REPEAT_MS = 6 * 60 * 60 * 1000;
 
 /** Окно молчания по проекту, виду отказа и провайдеру — по виду отказа. */
@@ -230,7 +267,8 @@ export function heOpsRepeatWindowMs(kind: HeOpsStopKind): number {
   return kind === 'capacity_pause' ||
     kind === 'letters_held' ||
     kind === 'spend_ceiling' ||
-    kind === 'segment_refused'
+    kind === 'segment_refused' ||
+    kind === 'stage_stopped'
     ? HE_OPS_CAPACITY_REPEAT_MS
     : HE_OPS_TEAM_FIX_REPEAT_MS;
 }
@@ -257,6 +295,7 @@ const KIND_LABEL: Record<HeOpsStopKind, string> = {
   letters_held: 'письмо запущенной кампании прочиталось бы неверно у всех строк ночи',
   spend_ceiling: 'известный расход проекта достиг потолка — следующая платная стадия не поставлена',
   segment_refused: 'сегментная кампания запуска отказала — текст сегмента не уходит',
+  stage_stopped: 'рынок с включённым автозапуском встал и сам не пойдёт',
 };
 
 const PROVIDER_LABEL: Record<HeOpsStopProvider, string> = {
@@ -265,7 +304,21 @@ const PROVIDER_LABEL: Record<HeOpsStopProvider, string> = {
   sending: 'Instantly (рассыльщик)',
   letters: 'письма шаблона (не провайдер)',
   budget: 'потолок расхода ENG (не провайдер)',
+  pipeline: 'конвейер рынка (не провайдер)',
 };
+
+/** Что именно встало у 'stage_stopped' — в тему сообщения (в свёртку этот вид не идёт). */
+const STAGE_STOP_LABEL: Record<HeOpsStageStopStage, string> = {
+  chain: 'цепочка писем рынка упала окончательно',
+  base_analyze: 'проверка контактов (base_analyze) упала окончательно',
+  template: 'итоговые письма базы упали окончательно, шаблона нет',
+  template_rewrite: 'переписывание писем («Rewrite letters») упало, остался только снятый шаблон',
+  autopilot_retrying: 'пауза автопилота «retrying» держится больше часа — следующая стадия не поставлена',
+};
+
+function stageStopLabel(stage: string): string {
+  return (STAGE_STOP_LABEL as Record<string, string | undefined>)[stage] ?? stage;
+}
 
 /**
  * Начало темы сообщения. 'letters_held' проект не останавливает: ночной добор
@@ -274,11 +327,13 @@ const PROVIDER_LABEL: Record<HeOpsStopProvider, string> = {
 function subjectHead(kind: HeOpsStopKind): string {
   if (kind === 'letters_held') return 'ночной добор вертикали не отправил ничего';
   if (kind === 'segment_refused') return 'ночной добор вертикали идёт мимо сегментной кампании';
+  if (kind === 'stage_stopped') return 'рынок клиентского проекта встал';
   return kind === 'spend_ceiling' ? 'клиентский проект на паузе' : 'клиентский проект остановлен';
 }
 
 /** Что сделать команде — по виду отказа, провайдеру и (для ёмкости) месту отказа. */
 function actionFor(kind: HeOpsStopKind, provider: HeOpsStopProvider, stage?: string): string {
+  if (kind === 'stage_stopped') return stageStopAction(stage);
   if (kind === 'letters_held') {
     const meanwhile =
       stage === 'refill_preflight'
@@ -301,7 +356,7 @@ function actionFor(kind: HeOpsStopKind, provider: HeOpsStopProvider, stage?: str
     const resume =
       stage === 'refill_preflight' || stage === 'refill_paused'
         ? 'снять паузу ночного добора: Движок вертикалей → карточка проекта → возобновить ночной добор'
-        : 'проект продолжает «Start outreach» клиента (или ночной проход при HE_AUTOPILOT_RECONCILE), '
+        : 'проект продолжает «Launch» клиента на шаге 3 (или ночной проход при HE_AUTOPILOT_RECONCILE), '
           + 'не запущенное исследование — «Try again» клиента на шаге 1 (он остаётся у research, вставшего '
           + 'техническим сбоем), по шагу — staff-инструмент';
     return 'проверить расход (GET /api/tools/hypothesis-engine/projects/<id>/cost); продолжить — поднять '
@@ -312,12 +367,54 @@ function actionFor(kind: HeOpsStopKind, provider: HeOpsStopProvider, stage?: str
   }
   if (kind === 'capacity_pause') {
     if (stage === HE_OPS_STAGE_TEMPLATE_LAUNCH) {
-      return 'освободить место в воркспейсе рассыльщика, затем повторить запуск шаблона (клиент — «Launch all» на шаге 5): повтор создаёт только несозданные сегменты и не дублирует уже созданные кампании';
+      return 'освободить место в воркспейсе рассыльщика, затем повторить запуск шаблона (клиент — «Launch now» на шаге 3; при «Launch» проекта автозапуск достраивает незаконченный запуск сам): повтор создаёт только несозданные сегменты и не дублирует уже созданные кампании';
     }
     return 'освободить место в воркспейсе рассыльщика, затем снять паузу: Движок вертикалей → карточка проекта → возобновить ночной добор';
   }
   const what = kind === 'billing' ? 'пополнить баланс' : 'проверить ключ в env воркера';
   return `${what} — ${PROVIDER_LABEL[provider]}; затем перезапустить остановленный шаг — сам он не продолжится`;
+}
+
+/**
+ * Совет команде у 'stage_stopped' — по тому, что встало. Что написано
+ * клиенту, приходит строкой «клиент видит» (clientSees): там же видно, какой
+ * кнопкой он может сдвинуть рынок сам, а здесь — что может сотрудник.
+ */
+function stageStopAction(stage?: string): string {
+  const supportReply = 'клиенту, которому написано обратиться в Support, ответить в чате поддержки кабинета';
+  switch (stage) {
+    case 'chain':
+      return 'причина — he_jobs.error джобы (строка выше); отказ на нашей стороне (провайдер, ключ, баланс) — сначала '
+        + 'починить. Двигает рынок одно из двух: «Launch» клиента на шаге 3 (новая цепочка — новый платный прогон '
+        + 'модели) или сотрудник — POST /api/tools/hypothesis-engine/verticals/<вертикаль>/chain; готовую цепочку '
+        + `автопилот проекта ведёт дальше сам (сборка, проверка, итоговые письма, автозапуск); ${supportReply}`;
+    case 'base_analyze':
+      return 'причина — he_jobs.error джобы; база (строка «база») осталась в analyzing со строками — они оплачены и '
+        + 'заново не покупаются. Повторный анализ ставит «Launch» клиента на шаге 3 (реконсилер доставляет пропавший '
+        + 'base_analyze), только если это единственная своя analyzing-база рынка со строками, своей collecting- или '
+        + 'analyzed-базы у рынка нет и цепочка готова — тогда клиенту и написано «Launch». Staff-кнопки повторного '
+        + 'анализа нет: в остальных случаях — тот же ремонт руками (repairOrphanAnalyzingBase): одна строка he_jobs '
+        + 'stage=base_analyze, status=pending, payload {base_id}, если активного base_analyze по базе нет (платный '
+        + `прогон модели); ${supportReply}`;
+    case 'template':
+      return 'причина — he_jobs.error джобы; у базы (строка «база») нет шаблона. Пока бюджет генераций поколения анализа '
+        + 'не исчерпан (heTemplateGenerationBudget, 3 засчитанных прогона), генерацию ставит «Launch» клиента на шаге 3; '
+        + 'исчерпан — только сотрудник: POST /api/tools/hypothesis-engine/bases/<база>/template (force, мимо бюджета). '
+        + `Готовый шаблон автозапуск проекта запустит сам; ${supportReply}`;
+    case 'template_rewrite':
+      return 'причина — he_jobs.error джобы; у рынка остался только шаблон, снятый «Rewrite letters» '
+        + '(he_templates.status=failed), и «Launch» его не двигает (реконсилер считает шаблон базы по любому статусу). '
+        + 'Пока бюджет генераций не исчерпан — «Rewrite letters» клиента на карточке рынка; исчерпан — сотрудник: '
+        + 'POST /api/tools/hypothesis-engine/bases/<база>/template (force, мимо бюджета). Готовый шаблон автозапуск '
+        + `проекта запустит сам; ${supportReply}`;
+    case 'autopilot_retrying':
+      return 'следующую стадию проекта не прочитали или не поставили, и повторить это некому: ночной проход '
+        + '(HE_AUTOPILOT_RECONCILE) по умолчанию выключен. Проверить, отвечает ли БД (лог воркера «autopilot followups '
+        + 'failed», application_logs client.eng.project_launch.*_failed). Двигает проект «Launch» клиента на шаге 3 — '
+        + `путь идемпотентный, сделанное не повторяет; ${supportReply}`;
+    default:
+      return `разобрать остановку по строкам выше; ${supportReply}`;
+  }
 }
 
 /** Похожее на секрет — вымарываем до обрезки, чтобы хвост токена не пережил срез. */
@@ -355,6 +452,13 @@ function projectLabel(stop: HeOpsStop): string {
   return name ? `«${clip(name, HE_OPS_NAME_MAX)}» (${stop.projectId})` : stop.projectId;
 }
 
+/** Вертикаль строкой контекста: «имя» (id), только id или null. */
+function verticalLabel(stop: HeOpsStop): string | null {
+  if (!stop.verticalId) return null;
+  const name = stop.verticalName?.trim();
+  return name ? `«${clip(name, HE_OPS_NAME_MAX)}» (${stop.verticalId})` : stop.verticalId;
+}
+
 /**
  * Отправка с собственным сроком: sendWorkerAlert не бросает, но и срока не знает.
  * `holds` — окна молчания проектов этого сообщения: не принял ни один чат —
@@ -389,7 +493,10 @@ async function sendBounded(alert: Parameters<typeof sendWorkerAlert>[0], holds: 
 function sendSingle(stop: HeOpsStop, held: HeOpsHeld): Promise<void> {
   return sendBounded({
     workerId: WORKER_ID,
-    subject: `${subjectHead(stop.kind)} — ${KIND_LABEL[stop.kind]}, ${PROVIDER_LABEL[stop.provider]}`,
+    subject:
+      stop.kind === 'stage_stopped'
+        ? `${subjectHead(stop.kind)} — ${stageStopLabel(stop.stage)}`
+        : `${subjectHead(stop.kind)} — ${KIND_LABEL[stop.kind]}, ${PROVIDER_LABEL[stop.provider]}`,
     error: heOpsReasonText(stop.reason),
     context: {
       'проект': projectLabel(stop),
@@ -398,7 +505,7 @@ function sendSingle(stop: HeOpsStop, held: HeOpsHeld): Promise<void> {
       'HTTP-статус': stop.httpStatus ?? null,
       'джоба': stop.jobId ?? null,
       'база': stop.baseId ?? null,
-      'вертикаль': stop.verticalId ?? null,
+      'вертикаль': verticalLabel(stop),
       'шаблон': stop.templateId ?? null,
       'кампания': stop.campaignId ?? null,
       'основная кампания': stop.mainCampaignId ?? null,
@@ -419,7 +526,8 @@ function sendBurst(provider: HeOpsStopProvider, kind: HeOpsStopKind, pending: He
   const shown = stops.slice(0, HE_OPS_BURST_LIST_MAX);
   const lines = shown.map(
     (s) =>
-      `${projectLabel(s)} — ${s.stage}${s.verticalId ? `, вертикаль ${s.verticalId}` : ''}` +
+      `${projectLabel(s)} — ${s.stage}` +
+      `${s.verticalId ? `, вертикаль ${verticalLabel(s)}` : ''}` +
       `${s.campaignId ? `, кампания ${s.campaignId}` : ''}${s.market ? '' : ' (рынок не прочитан)'}`,
   );
   if (stops.length > shown.length) lines.push(`и ещё ${stops.length - shown.length}`);
@@ -517,15 +625,22 @@ export function notifyHeClientStop(stop: HeOpsStop, opts: { now?: number } = {})
     }
     // 'letters_held' и 'segment_refused' — окно по вертикали (см. шапку),
     // остальные виды — по проекту.
+    // 'stage_stopped' — по ключу события: разные остановки проекта пишутся каждая.
     const projectKey =
       `${stop.projectId}|${stop.kind}|${stop.provider}` +
-      (stop.kind === 'letters_held' || stop.kind === 'segment_refused' ? `|${stop.verticalId ?? ''}` : '');
+      (stop.kind === 'letters_held' || stop.kind === 'segment_refused' ? `|${stop.verticalId ?? ''}` : '') +
+      (stop.kind === 'stage_stopped' ? `|${stop.eventKey ?? stop.jobId ?? ''}` : '');
     const current = silentUntilByProjectKind.get(projectKey);
     if (current !== undefined && now < current.until) return Promise.resolve();
     // Занимаем окно сразу (решение синхронное), но держится оно, только если
     // сообщение примут: иначе sendBounded его снимет (см. шапку).
     const held: HeOpsHeld = { key: projectKey, hold: { until: now + heOpsRepeatWindowMs(stop.kind) } };
     silentUntilByProjectKind.set(projectKey, held.hold);
+
+    // Остановка стадии — всегда отдельным сообщением: строка свёртки теряет
+    // джобу, базу, причину и «клиент видит», по которым сотрудник действует
+    // (см. шапку).
+    if (stop.kind === 'stage_stopped') return sendSingle(stop, held).then(() => undefined, () => undefined);
 
     const burstKey = `${stop.provider}|${stop.kind}`;
     const open = bursts.get(burstKey);
@@ -600,8 +715,8 @@ export function flushHeOpsAlerts(): Promise<void> {
  *     держится, только если сообщение принял чат (sendBounded снимает его иначе);
  *  2. свёртка ПО ПРОЕКТУ: первое сообщение проекта уходит сразу, остальные
  *     запуски того же проекта в течение HE_OPS_BURST_WINDOW_MS (10 мин) —
- *     одним списком в конце окна. «Launch all» запускает шаблоны
- *     подряд, и это одна новость про проект, а не восемь.
+ *     одним списком в конце окна. Автозапуск после «Launch» проекта
+ *     запускает вертикали подряд, и это одна новость про проект, а не восемь.
  * Цена памяти та же, что у остановок: после рестарта веб-процесса тот же
  * запуск может прийти ещё раз, а накопленный и не отправленный список
  * теряется, если процесс умер без flushHeOpsAlerts() (веб-процесс шлёт его по
@@ -620,7 +735,10 @@ export interface HeOpsClientLaunch {
   campaignIds: string[];
   /** Адресов в кампаниях запуска по записи (`launch_info.leads_count`). */
   leads: number;
-  /** Часть аудитории не уехала (heLaunchIsIncomplete): клиент достраивает с шага 5. */
+  /**
+   * Часть аудитории не уехала (heLaunchIsIncomplete): достраивает автозапуск
+   * (при «Launch» проекта) или клиент кнопкой «Launch now» шага 3.
+   */
   unfinished: boolean;
   /** Повторный запуск с force: прежние кампании шаблона остались у рассыльщика. */
   forced: boolean;
@@ -636,6 +754,11 @@ export interface HeOpsClientLaunch {
     notStarted: number;
     skipReason?: 'launch_problem' | 'window_not_applied' | 'not_requested' | null;
   } | null;
+  /**
+   * Кто запустил: клиент кнопкой («Launch now» шага 3) или автозапуск после
+   * «Launch» проекта (engAutoLaunch, воркер движка). Нет поля — кнопка.
+   */
+  trigger?: 'button' | 'auto';
 }
 
 const LAUNCH_WORKER_ID = 'hypothesis-engine · ENG';
@@ -675,6 +798,7 @@ const LAUNCH_SKIP_LABEL: Record<'launch_problem' | 'window_not_applied' | 'not_r
 
 function launchLine(launch: HeOpsClientLaunch): string {
   return (
+    (launch.trigger === 'auto' ? 'автозапуск, ' : '') +
     `шаблон ${launch.templateId}${launch.verticalId ? `, вертикаль ${launch.verticalId}` : ''}: ` +
     `кампаний ${launch.campaignIds.length}, адресов ${launch.leads}` +
     (launch.sending
@@ -682,7 +806,9 @@ function launchLine(launch: HeOpsClientLaunch): string {
         (launch.sending.notStarted > 0 ? `, не стартовали ${launch.sending.notStarted}` : '') +
         (launch.sending.skipReason ? ` (старт не делался: ${LAUNCH_SKIP_LABEL[launch.sending.skipReason]})` : '')
       : '') +
-    (launch.unfinished ? ', запуск НЕ закончен (часть аудитории не уехала, клиент достраивает с шага 5)' : '') +
+    (launch.unfinished
+      ? ', запуск НЕ закончен (часть аудитории не уехала; достраивает автозапуск или клиент кнопкой «Launch now» на шаге 3)'
+      : '') +
     (launch.forced ? ', повторный запуск с force — прежние кампании шаблона остались у рассыльщика' : '') +
     (launch.market ? '' : ' (рынок не прочитан — проверь, что это ENG)')
   );
@@ -696,11 +822,12 @@ function sendLaunchSingle(launch: HeOpsClientLaunch, held: HeOpsHeld): Promise<v
       // кампанию (старый бандл, предупреждение запуска и отказ старта создают
       // кампании на паузе).
       subject:
-        launch.sending && launch.sending.started > 0
-          ? 'клиент запустил шаблон из кабинета — отправка начата кабинетом'
+        `${launch.trigger === 'auto' ? 'автозапуск шаблона после «Launch» клиента' : 'клиент запустил шаблон из кабинета'} — ` +
+        (launch.sending && launch.sending.started > 0
+          ? 'отправка начата кабинетом'
           : launch.sending?.skipReason === 'launch_problem'
-            ? 'клиент запустил шаблон из кабинета — запуск записал проблему, кампании не стартованы'
-            : 'клиент запустил шаблон из кабинета — кампании созданы, отправка этим запуском не начата',
+            ? 'запуск записал проблему, кампании не стартованы'
+            : 'кампании созданы, отправка этим запуском не начата'),
       error: launchLine(launch),
       context: {
         'проект': launch.projectId,

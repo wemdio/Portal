@@ -9,8 +9,28 @@
 
 export type ClientMarket = 'ru' | 'eng';
 
-/** Хост ENG-кабинета (без порта, lowercase). */
-export const ENG_APP_HOST = (process.env.ENG_APP_HOST ?? 'app.outreachos.xyz').toLowerCase();
+/** Значение переменной окружения с хостом: пустое или из пробелов = не задано. */
+function configuredHost(raw: string | undefined): string {
+  return (raw ?? '').trim().toLowerCase();
+}
+
+/**
+ * Хост ENG-кабинета (без порта, lowercase).
+ *  - Сервер: ENG_APP_HOST, если пусто — NEXT_PUBLIC_ENG_APP_HOST.
+ *  - Браузер: только NEXT_PUBLIC_ENG_APP_HOST. Next вшивает в клиентский
+ *    бандл лишь NEXT_PUBLIC_*-имена и только при `next build`; ENG_APP_HOST
+ *    там всегда undefined (поэтому браузерные проверки — заголовок вкладки,
+ *    меню кабинета — раньше видели только значение по умолчанию).
+ *  - Ни одна не задана — app.outreachos.xyz, прод-хост ENG, как и раньше: на
+ *    RU-хостах проверка по-прежнему ложна, на ENG-хосте — истинна.
+ * Чтобы сменить хост, обе переменные задают одинаковыми; разойдутся — браузер
+ * и сервер разойдутся во мнении, какой хост ENG (вход на это не опирается:
+ * LoginForm берёт признак ENG-хоста у сервера, page.tsx).
+ */
+export const ENG_APP_HOST =
+  configuredHost(process.env.ENG_APP_HOST)
+  || configuredHost(process.env.NEXT_PUBLIC_ENG_APP_HOST)
+  || 'app.outreachos.xyz';
 
 /** Канонический хост RU-портала — куда уводим «чужую» аудиторию с ENG-хоста. */
 export const MAIN_APP_HOST = (process.env.MAIN_APP_HOST ?? 'polza-portal.ru').toLowerCase();
