@@ -81,6 +81,13 @@ export interface AppendLeadsToClientCampaignInput {
   pauseOnWorkspaceCapacity?: boolean;
   /** Trusted VE2 lease fence; runs just before each HTTP attempt, after rate admission. */
   beforeProviderRequest?: () => Promise<void>;
+  /** Optional trusted caller policy. Indexes are relative to this chunk, not input.leads.
+   * Payload metadata may be removed, but retained recipient identities cannot change. */
+  prepareProviderChunk?: (leads: readonly LeadCreatePayload[]) => Promise<{
+    leads: LeadCreatePayload[];
+    inputIndexes: number[];
+    beforeRequest?: () => Promise<void>;
+  }>;
   /** Durable reporting provenance for this append operation. */
   ledgerSource?: {
     kind: string;
@@ -306,16 +313,18 @@ export async function appendLeadsToClientCampaign(
   const source = input.ledgerSource ?? { kind: 'campaign_append' };
   let accepted = 0;
   let externalSkipped = 0;
+  let callerPolicySkipped = 0;
   let identityComplete = true;
   const acceptedIndexes: number[] = [];
   const attemptedIndexes = new Set<number>();
   const batchIds: string[] = [];
+  let unjournaledPolicySkips = 0;
   const deferredIndexes = new Set<number>();
   let capacityBlocked = false;
 
   const currentResult = (): AppendLeadsResult => ({
     accepted,
-    skipped: externalSkipped + blockedCount,
+    skipped: externalSkipped + blockedCount + callerPolicySkipped,
     attemptedIndexes: [...attemptedIndexes].sort((a, b) => a - b),
     acceptedIndexes: identityComplete ? [...acceptedIndexes].sort((a, b) => a - b) : null,
     skippedIndexes: [...skippedIndexes].sort((a, b) => a - b),
@@ -338,7 +347,36 @@ export async function appendLeadsToClientCampaign(
 
   for (let offset = 0; offset < leadsToSend.length;) {
     if (workspaceRemaining === 0) { capacityBlocked = true; break; }
-    const chunk = leadsToSend.slice(offset, offset + Math.min(PROVIDER_APPEND_BATCH_SIZE, workspaceRemaining ?? PROVIDER_APPEND_BATCH_SIZE));
+    const originalChunk = leadsToSend.slice(offset, offset + Math.min(PROVIDER_APPEND_BATCH_SIZE, workspaceRemaining ?? PROVIDER_APPEND_BATCH_SIZE));
+    let chunk = originalChunk;
+    let chunkInputIndexes = sentInputIndexes.slice(offset, offset + originalChunk.length);
+    let beforeChunkRequest: (() => Promise<void>) | undefined;
+    let chunkPolicySkipped = 0;
+    if (input.prepareProviderChunk) {
+      try {
+        const prepared = await input.prepareProviderChunk(originalChunk);
+        if (prepared.leads.length !== prepared.inputIndexes.length
+          || new Set(prepared.inputIndexes).size !== prepared.inputIndexes.length
+          || prepared.inputIndexes.some((index, position) => !Number.isSafeInteger(index) || index < 0
+            || index >= originalChunk.length
+            || prepared.leads[position].email.trim().toLowerCase() !== originalChunk[index].email.trim().toLowerCase())) {
+          throw new Error('Caller policy changed recipient identity');
+        }
+        const retained = new Set(prepared.inputIndexes);
+        originalChunk.forEach((_, index) => {
+          if (!retained.has(index)) skippedIndexes.add(chunkInputIndexes[index]);
+        });
+        chunkPolicySkipped = originalChunk.length - prepared.leads.length;
+        callerPolicySkipped += chunkPolicySkipped;
+        unjournaledPolicySkips += chunkPolicySkipped;
+        chunk = prepared.leads;
+        chunkInputIndexes = prepared.inputIndexes.map(index => sentInputIndexes[offset + index]);
+        beforeChunkRequest = prepared.beforeRequest;
+      } catch (error) {
+        throw new AppendLeadsPartialError(error instanceof Error ? error.message : 'Caller policy unavailable', currentResult());
+      }
+      if (chunk.length === 0) { offset += originalChunk.length; continue; }
+    }
     const ledgerContext = {
       clientUserId: userId,
       campaignId,
@@ -353,11 +391,12 @@ export async function appendLeadsToClientCampaign(
     try {
       ({ batchId } = await startAppendLedgerBatch(supabaseAdmin, {
         ...ledgerContext,
-        blockedCount: offset === 0 ? blockedCount : 0,
-        tariffSkippedCount: offset === 0 ? tariffSkippedCount : 0,
+        blockedCount: (batchIds.length === 0 ? blockedCount : 0) + unjournaledPolicySkips,
+        tariffSkippedCount: batchIds.length === 0 ? tariffSkippedCount : 0,
         startedAt: new Date().toISOString(),
       }));
       batchIds.push(batchId);
+      unjournaledPolicySkips = 0;
     } catch (ledgerError) {
       await logError('client.appendLeads.ledger_start_failed', ledgerError, { campaignId, offset }, logMeta);
       throw new AppendLeadsPartialError(
@@ -381,10 +420,11 @@ export async function appendLeadsToClientCampaign(
         },
         {
           ...instantlyRequestOptions,
-          ...(input.beforeProviderRequest ? { timeoutMs: 90_000, timeoutIncludesBody: true, retryRateLimits: false } : {}),
+          ...(input.beforeProviderRequest || input.prepareProviderChunk ? { timeoutMs: 90_000, timeoutIncludesBody: true, retryRateLimits: false } : {}),
           onRequestAttempt: async () => {
             await input.beforeProviderRequest?.();
-            for (const index of sentInputIndexes.slice(offset, offset + chunk.length)) {
+            await beforeChunkRequest?.();
+            for (const index of chunkInputIndexes) {
               attemptedIndexes.add(index);
             }
           },
@@ -411,7 +451,7 @@ export async function appendLeadsToClientCampaign(
     } catch (err) {
       if (input.pauseOnWorkspaceCapacity && isInstantlyContactCapacityError(err)) {
         capacityBlocked = true;
-        for (const index of sentInputIndexes.slice(offset, offset + chunk.length)) deferredIndexes.add(index);
+        for (const index of chunkInputIndexes) deferredIndexes.add(index);
       }
       try {
         await failAppendLedgerBatch(supabaseAdmin, {
@@ -448,12 +488,12 @@ export async function appendLeadsToClientCampaign(
     if (identity.identityComplete) {
       const acceptedChunkIndexes = new Set(identity.acceptedIdentities.map((entry) => entry.index));
       for (const acceptedIdentity of identity.acceptedIdentities) {
-        const inputIndex = sentInputIndexes[offset + acceptedIdentity.index];
+        const inputIndex = chunkInputIndexes[acceptedIdentity.index];
         if (inputIndex !== undefined) acceptedIndexes.push(inputIndex);
       }
       for (let index = 0; index < chunk.length; index += 1) {
         if (!acceptedChunkIndexes.has(index)) {
-          (deferOmissions ? deferredIndexes : skippedIndexes).add(sentInputIndexes[offset + index]);
+          (deferOmissions ? deferredIndexes : skippedIndexes).add(chunkInputIndexes[index]);
         }
       }
     } else {
@@ -477,7 +517,7 @@ export async function appendLeadsToClientCampaign(
         currentResult(),
       );
     }
-    offset += chunk.length;
+    offset += originalChunk.length;
     if (chunkCapacityBlocked) break;
   }
 

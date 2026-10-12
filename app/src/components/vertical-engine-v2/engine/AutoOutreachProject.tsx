@@ -31,6 +31,7 @@ import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { ManualHypothesisForm } from './ManualHypothesisForm';
 import { PriorityNichesEditor, PriorityNicheResults, type PriorityNichesEditorHandle } from './PriorityNichesEditor';
+import { ProjectExclusions } from './ProjectExclusions';
 import { PreparationProgress, getPreparationPresentation, getPreparationActionNotice,
   refreshPreparationRequestNotice, type PreparationPresentation, type PreparationRequestNotice } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
@@ -664,6 +665,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           </button>
         ) : null}
       </div>
+      <ProjectExclusions key={projectId} projectId={projectId} onSaved={() => void refresh()} />
       <details className="ve2-panel-line mb-6" open={detail.project.status !== 'researched'}>
         <summary className="ve2-link cursor-pointer p-4">Данные клиента и исследование</summary>
         <div className="p-4">
