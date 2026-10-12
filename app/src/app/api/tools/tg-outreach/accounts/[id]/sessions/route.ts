@@ -98,6 +98,8 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
             check_detail: fresh.detail.slice(0, 500),
             checked_at: new Date().toISOString(),
             other_sessions: fresh.other_sessions ?? [],
+            freeze_appeal_url: fresh.freeze_appeal_url ?? null,
+            freeze_until_at: fresh.freeze_until_at ?? null,
           })
           .eq('id', id);
         return NextResponse.json(fresh);
