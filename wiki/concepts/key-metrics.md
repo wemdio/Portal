@@ -6,6 +6,12 @@
 
 ## Email volume
 
+**Дневные отбои:** дневной API Instantly не содержит bounced, хотя обзор
+кампании отдаёт накопленный `bounced_count`, а webhook `email_bounced` — время
+конкретного отбоя. Дашборд «Нагрузка почт» с 2026-10-12 считает дни по этому
+webhook; до дня регистрации подписки значение неизвестно, а не равно нулю.
+Дневной ряд `raw_campaign_analytics_daily_snap.bounced` для этой цели не использовать.
+
 | Метрика | Что значит | Откуда |
 |---|---|---|
 | `emails_sent_count` | Всего исходящих отправок | `raw_campaign_analytics_overview_snap` (aggregate) или `count(*) WHERE ue_type=1` (per-message) |

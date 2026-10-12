@@ -6,8 +6,8 @@
  * partner read API (`/api/partner/activity`). Keep this module dependency-free.
  */
 
-/** Normalized activity kind exposed to the partner. */
-export type ActivityKind = 'opened' | 'replied';
+/** Normalized event kind stored from Instantly webhooks. */
+export type ActivityKind = 'opened' | 'replied' | 'bounced';
 
 export interface NormalizedActivityEvent {
   eventType: ActivityKind;
@@ -27,15 +27,17 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * Maps an Instantly webhook event_type to our normalized kind, or null for
- * events we intentionally ignore (sent / clicked / bounced / unsubscribed …).
+ * events we intentionally ignore (sent / clicked / unsubscribed …).
  *
- * We only persist the two signals the partner asked for: replied + opened.
+ * The partner API exposes only replied + opened; bounced is used by the
+ * internal mailbox outcomes dashboard.
  */
 export function mapActivityKind(rawType: unknown): ActivityKind | null {
   const t = String(rawType ?? '').toLowerCase();
   if (!t) return null;
+  if (t === 'email_bounced') return 'bounced';
   // Order matters: check "repl" before "open" so a hypothetical
-  // "reply_with_open" can't be misclassified. clicked/bounced/etc → null.
+  // "reply_with_open" can't be misclassified. clicked/etc → null.
   if (t.includes('repl')) return 'replied'; // reply_received, email_replied, replied
   if (t.includes('open')) return 'opened'; // email_opened, opened
   return null;
@@ -104,7 +106,7 @@ function extractCampaignId(payload: Record<string, unknown>): string | null {
 
 /**
  * Normalizes a single raw Instantly webhook payload into our event shape.
- * Returns null when the event is irrelevant (not open/reply) or unusable
+ * Returns null when the event is irrelevant (not open/reply/bounce) or unusable
  * (no lead email) — the receiver acks those with 200 and stores nothing.
  *
  * Field extraction is deliberately defensive: Instantly's pushed payload shape

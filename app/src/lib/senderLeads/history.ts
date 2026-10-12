@@ -34,6 +34,7 @@ export interface LeadHistoryRowDto {
   qualifiedAt: string | null;
   tgSentAt: string | null;
   tgError: string | null;
+  crm: { status: 'pending' | 'sent' | 'failed' | 'skipped'; action: 'created' | 'note_added' | null; leadUrl: string | null; error: string | null } | null;
   replyAt: string | null;
   replyFrom: string | null;
   replyFromName: string | null;
@@ -176,6 +177,7 @@ const LIST_SELECT = [
   'sender_replies(from_email, from_name, subject, body, received_at, created_at)',
   'sender_recipients(email, name, lead_verdict, lead_verdict_source, lead_verdict_at)',
   'sender_campaigns!inner(name, folder_id)',
+  'sender_auto_lead_crm_pushes(status, action, lead_url, error_message)',
 ].join(', ');
 
 type One<T> = T | T[] | null;
@@ -212,12 +214,19 @@ interface ListRow {
     lead_verdict_at: string | null;
   }>;
   sender_campaigns: One<{ name: string; folder_id: string }>;
+  sender_auto_lead_crm_pushes: One<{
+    status: 'pending' | 'sent' | 'failed' | 'skipped';
+    action: 'created' | 'note_added' | null;
+    lead_url: string | null;
+    error_message: string | null;
+  }>;
 }
 
 function toRowDto(row: ListRow): LeadHistoryRowDto {
   const reply = one(row.sender_replies);
   const recipient = one(row.sender_recipients);
   const campaign = one(row.sender_campaigns);
+  const crm = one(row.sender_auto_lead_crm_pushes);
   return {
     replyId: row.reply_id,
     recipientId: row.recipient_id,
@@ -230,6 +239,7 @@ function toRowDto(row: ListRow): LeadHistoryRowDto {
     qualifiedAt: row.qualified_at,
     tgSentAt: row.tg_sent_at,
     tgError: row.tg_error,
+    crm: crm ? { status: crm.status, action: crm.action, leadUrl: crm.lead_url, error: crm.error_message } : null,
     replyAt: reply?.received_at ?? reply?.created_at ?? row.created_at,
     replyFrom: reply?.from_email ?? null,
     replyFromName: reply?.from_name ?? null,

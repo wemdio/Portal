@@ -3,6 +3,7 @@ import { qualifyReply } from '@/lib/instantly/leadQualifier';
 import { loadSenderThread } from './context';
 import { loadCampaignSettings, type LeadSettings } from './settings';
 import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type LeadTelegramConfig } from './telegram';
+import { processSenderAutoLeadCrm } from './crm';
 
 /**
  * Один круг квалификатора ответов «Рассылки»
@@ -14,6 +15,7 @@ import { buildLeadMessage, leadTelegramConfig, sendLeadMessage, threadUrl, type 
  * 2. Оцениваем правилами квалификатора Instantly с готовой перепиской из нашей
  *    базы и правилом папки.
  * 3. Лида шлём в ТГ-чат — не больше одного сообщения на переписку.
+ * 4. Доставленных лидов RU/EN автоаутрича ставим в очередь AMO.
  *
  * Сбой ИИ не теряет ответ: строка остаётся pending с растущей паузой, после
  * пяти попыток — error. Сбой ТГ не трогает оценку: доставка повторяется
@@ -227,7 +229,10 @@ async function deliverLeads(db: SupabaseClient, tg: LeadTelegramConfig, log: Log
         threadUrl: threadUrl(row.recipient_id),
       });
       const messageId = await sendLeadMessage(tg, text);
-      await markRow(db, row.reply_id, { tg_sent_at: new Date().toISOString(), tg_message_id: messageId, tg_error: null });
+      await markRow(db, row.reply_id, {
+        tg_sent_at: new Date().toISOString(), tg_message_id: messageId,
+        tg_message_text: text, tg_error: null,
+      });
       sent += 1;
     } catch (err) {
       const message = errorText(err);
@@ -242,11 +247,12 @@ export interface PassResult {
   qualified: number;
   leads: number;
   delivered: number;
+  crm: number;
 }
 
 export async function runSenderLeadsPass(db: SupabaseClient, log: Log): Promise<PassResult> {
   const ai = senderLeadsAi();
-  const result: PassResult = { qualified: 0, leads: 0, delivered: 0 };
+  const result: PassResult = { qualified: 0, leads: 0, delivered: 0, crm: 0 };
 
   if (ai) {
     const fresh = await claimNew(db);
@@ -269,5 +275,6 @@ export async function runSenderLeadsPass(db: SupabaseClient, log: Log): Promise<
 
   const tg = leadTelegramConfig();
   if (tg) result.delivered = await deliverLeads(db, tg, log);
+  result.crm = await processSenderAutoLeadCrm(db, log);
   return result;
 }

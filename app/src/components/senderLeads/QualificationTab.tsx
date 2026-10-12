@@ -416,7 +416,20 @@ export function QualificationTab({ folderKey }: { folderKey: string }) {
                   {explanation ? <p className="text-sm text-zinc-600">{explanation}</p> : null}
 
                   <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span className={`text-xs ${chat.className}`}>Чат: {chat.text}</span>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span className={`text-xs ${chat.className}`}>Чат: {chat.text}</span>
+                      {row.crm ? (
+                        <span className={`text-xs ${row.crm.status === 'failed' ? 'text-red-600' : row.crm.status === 'sent' ? 'text-blue-700' : row.crm.status === 'skipped' ? 'text-zinc-500' : 'text-amber-700'}`}>
+                          AMO: {row.crm.status === 'failed'
+                            ? `ошибка — ${row.crm.error ?? 'проверьте интеграцию'}`
+                            : row.crm.status === 'skipped' ? 'пропущено: не лид'
+                            : row.crm.status === 'pending'
+                              ? 'в очереди'
+                              : row.crm.action === 'created' ? 'сделка создана' : 'примечание добавлено'}
+                          {row.crm.leadUrl ? <a href={row.crm.leadUrl} target="_blank" rel="noopener noreferrer" className="ml-1 underline">Открыть</a> : null}
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
