@@ -93,6 +93,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         tg_user_id?: number | null;
         tg_username?: string | null;
         phone?: string | null;
+        freeze_appeal_url?: string | null;
+        freeze_until_at?: string | null;
       }) => {
         await auth.supabase
           .from('tg_outreach_accounts')
@@ -101,6 +103,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             check_detail: result.detail.slice(0, 500),
             checked_at: new Date().toISOString(),
             other_sessions: result.other_sessions ?? [],
+            freeze_appeal_url: result.freeze_appeal_url ?? null,
+            freeze_until_at: result.freeze_until_at ?? null,
             // Заказ на проверку снимаем: он выполнен, пусть и не воркером.
             check_requested_at: null,
             check_requested_by_name: null,
