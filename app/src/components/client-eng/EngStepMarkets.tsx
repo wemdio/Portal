@@ -21,7 +21,7 @@
  * обновляет); после первой правки — свой черновик до сохранения.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, Lock } from 'lucide-react';
 import type { HeHypothesis, HeProjectStatus, HeVertical } from '@/lib/hypothesisEngine/types';
 import {
@@ -31,7 +31,7 @@ import {
   heEngRecommendedVerticalIds,
   heEngSelectedVerticalIds,
 } from '@/lib/hypothesisEngine/engMarkets';
-import { saveEngMarkets } from './api-client';
+import { engSendingAccessOf, fetchEngProjectLaunch, saveEngMarkets, type EngSendingAccessState } from './api-client';
 import { EngSupportText } from './EngPaidAccess';
 import { EngBadge, EngCard, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
@@ -203,6 +203,33 @@ export function EngStepMarkets({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  /**
+   * Выключатель отправки аккаунта (GET …/launch, то же чтение, что у шага 3):
+   * 'revoked' — «Launch» шага 3 выключена, «Launch N more markets» скрыта, и
+   * звать к ним нельзя. null — не прочитан (или не прочитался): фраза прежняя,
+   * как и кнопка шага 3 до своего чтения. Ключ деталки `account_access`
+   * (свежее, с опросом мастера) решает раньше (engSendingAccessOf), как на
+   * шаге 3.
+   */
+  const projectId = detail.project.id;
+  const researched = status === 'researched';
+  const [sendingAccess, setSendingAccess] = useState<EngSendingAccessState | null>(null);
+  useEffect(() => {
+    if (!researched) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const info = await fetchEngProjectLaunch(projectId);
+        if (!cancelled) setSendingAccess(info.sending_access);
+      } catch {
+        // Не прочитался — фраза прежняя (null); отказ кнопки шага 3 скажет сам.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, researched]);
+
   if (status !== 'researched') {
     return (
       <EngCard>
@@ -285,12 +312,29 @@ export function EngStepMarkets({
                 владельца по умолчанию) — сказать до того, как клиент его
                 отметит. */}
             {/* Под паузой потолка расхода «Launch» его не начнёт (реконсилер
-                встаёт на потолке) — к кнопке не зовём (как шаг 3). */}
+                встаёт на потолке) — к кнопке не зовём (как шаг 3). Отправка
+                аккаунта выключена ('revoked', в том числе после разблокировки,
+                пока сотрудник её не включил) — «Launch» шага 3 выключена, а
+                «Launch N more markets» скрыта: тоже не зовём (как красная
+                строка доступа шага 3). При включённом автозапуске такие рынки
+                начинает кнопка «Launch N more markets» шага 3 (EngStepLaunch,
+                то же условие показа); без него — обычный «Launch», он берёт
+                все выбранные. */}
             {(locked.size > 0 || detail.auto_launch?.requested === true) && (
               <p className="m-0 text-xs" style={{ color: 'var(--cp-paper)' }}>
-                {detail.project.autopilot_hold?.code === 'spend_paused'
-                  ? 'A market you tick now does not start by itself. Work on this project is paused on our side; our team has been notified.'
-                  : 'A market you tick now starts when you press «Launch» on step 3 again — markets ticked after a launch do not start by themselves.'}
+                <EngSupportText
+                  text={
+                    detail.project.autopilot_hold?.code === 'spend_paused'
+                      ? 'A market you tick now does not start by itself. Work on this project is paused on our side; our team has been notified.'
+                      : engSendingAccessOf(detail.account_access, sendingAccess) === 'revoked'
+                        ? 'A market you tick now does not start by itself: sending is turned off for your account. Message Support.'
+                        : detail.auto_launch?.requested === true &&
+                            detail.auto_launch.available !== false &&
+                            detail.project.autopilot === true
+                          ? 'Ticking a market here starts nothing by itself: markets you tick now start when you press «Launch … more markets» on step 3.'
+                          : 'A market you tick now starts when you press «Launch» on step 3 again — markets ticked after a launch do not start by themselves.'
+                  }
+                />
               </p>
             )}
           </div>

@@ -254,6 +254,30 @@ export function engEarlierBaseStopText(code: HeClientStageErrorCode | null): str
 }
 
 /**
+ * Отправка аккаунта выключена сотрудником (выключатель 'revoked'; так и после
+ * разблокировки, пока сотрудник не включит отправку). Строка вместо «нажмите
+ * X» у кнопок, которые тогда откажут 403 sending_turned_off: «Launch» и
+ * «Launch now» (роуты запуска), «Rewrite letters» и «Collect again» (общая
+ * проверка engSendingSwitchRefusal), «Start sending» / «Resume» (старт
+ * отправки проверяет выключатель сам). Кабинет эти кнопки тогда не рисует или
+ * выключает.
+ */
+export const ENG_SENDING_OFF_EN = 'Sending is turned off for your account. Message Support.';
+
+/**
+ * Последняя остановленная основная сборка рынка при выключенной отправке
+ * аккаунта: заголовок и «что уцелело» — те же, что у полного текста
+ * (`engStageErrorText`), а вместо «что делать» — ENG_SENDING_OFF_EN: новую
+ * сборку ставят только «Launch» и «Collect again», и обе тогда откажут.
+ */
+export function engBaseStopSendingOffText(code: HeClientStageErrorCode | null): string {
+  if (code === null) return `${ENG_NO_REASON_BASE_HEAD_EN} ${ENG_SENDING_OFF_EN}`;
+  if (code === 'cancelled') return `${CANCELLED_BASE_HEAD_EN} ${ENG_SENDING_OFF_EN}`;
+  const failure = heClientFailureFor(code);
+  return `${failure.title} ${failure.whatIsSaved} ${ENG_SENDING_OFF_EN}`;
+}
+
+/**
  * Почему карточка вертикали Command Center в этапе 'attention' — только «что
  * произошло» (у кодов, которые чинит команда, это два предложения
  * HE_TEAM_ON_IT_EN); «что делать» карточка говорит строкой «next: …» и ведёт
@@ -360,8 +384,16 @@ const AUTOPILOT_HOLD_EN: Record<HeClientAutopilotHoldCode, string> = {
   spend_paused: HE_SPEND_PAUSED_EN,
 };
 
-/** Фраза про паузу автопилота по коду причины. */
-export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
+/**
+ * `retrying` при выключенной отправке аккаунта: «Launch» тогда откажет 403 —
+ * вместо неё ENG_SENDING_OFF_EN. Остальные коды «Launch» не называют.
+ */
+const AUTOPILOT_RETRYING_SENDING_OFF_EN =
+  `We could not read or save the state of this project on the last check, so the next stage was not started. Nothing is lost and nothing was cancelled. ${ENG_SENDING_OFF_EN}`;
+
+/** Фраза про паузу автопилота по коду причины; `sendingOff` — выключатель отправки аккаунта 'revoked'. */
+export function engAutopilotHoldText(code: HeClientAutopilotHoldCode, sendingOff = false): string {
+  if (code === 'retrying' && sendingOff) return AUTOPILOT_RETRYING_SENDING_OFF_EN;
   return AUTOPILOT_HOLD_EN[code];
 }
 
@@ -489,7 +521,11 @@ export function engRefillHoldText(state: EngRefillHoldState): string {
  * готовых итоговых писем (дальше рынок ведёт автозапуск, и его карточка на
  * шаге 3 говорит, что с ним).
  */
-export function engAutopilotIdleText(): string {
+export function engAutopilotIdleText(sendingOff = false): string {
+  // Выключатель отправки аккаунта 'revoked': «Launch» откажет 403 — к ней не зовём.
+  if (sendingOff) {
+    return `Nothing is running on this project right now, and the autopilot has not flagged anything. ${ENG_SENDING_OFF_EN}`;
+  }
   return 'Nothing is running on this project right now, and the autopilot has not flagged anything. If you were expecting it to move on by itself, press «Launch» on step 3 — it picks up where the project stopped and does not repeat work that is already done. If that button is not on step 3, step 3 says what it is waiting for first.';
 }
 
@@ -509,7 +545,9 @@ export function engAutopilotIdleText(): string {
  *  - `none` — кнопка «Rewrite letters» карточки рынка (POST
  *    /eng/templates/[id]/rewrite: новые итоговые письма в пределах бюджета
  *    генераций на анализ; исчерпан — отказ кнопки сам ведёт в Support).
- *    Карточка рисует кнопку всегда, когда рисует эту фразу;
+ *    Карточка рисует кнопку всегда, когда рисует эту фразу; при выключенной
+ *    отправке аккаунта (`sendingOff`) — ни кнопки, ни «Press», а
+ *    ENG_SENDING_OFF_EN;
  *  - `unfinished` — Support: письма уже в кампании, и роут переписки такой
  *    шаблон не берёт (409 launched).
  * Обещания «команда уже видит» нет: алерта на это нет.
@@ -518,9 +556,14 @@ const TEMPLATE_REWRITE_WHY_EN =
   'they contain a placeholder (such as a first name) that cannot be filled in from this audience, so ' +
   'recipients would see a blank, a stand-in word or the raw placeholder in its place.';
 
-export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished'): string {
-  return launch === 'unfinished'
-    ? `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Message Support to have the letters rewritten.`
+export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished', sendingOff = false): string {
+  if (launch === 'unfinished') {
+    return `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Message Support to have the letters rewritten.`;
+  }
+  // Выключатель отправки аккаунта 'revoked': «Rewrite letters» откажет 403 —
+  // карточка кнопку не рисует, а фраза к ней не зовёт.
+  return sendingOff
+    ? `The final letters did not pass our automatic check, so nothing was sent: ${TEMPLATE_REWRITE_WHY_EN} ${ENG_SENDING_OFF_EN}`
     : `The final letters did not pass our automatic check, so nothing was sent: ${TEMPLATE_REWRITE_WHY_EN} Press «Rewrite letters» to have them written again.`;
 }
 

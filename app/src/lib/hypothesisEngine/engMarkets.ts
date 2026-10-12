@@ -231,3 +231,32 @@ export function heEngMarketStarted(
     return baseId !== '' && baseIds.has(baseId);
   });
 }
+
+/**
+ * Рынок ещё НЕ НАЧИНАЛСЯ вовсе — его возьмёт «Launch N more markets» шага 3
+ * (POST /api/client/eng/projects/[id]/launch {markets}). Строже, чем
+ * «не начат» (heEngMarketStarted): у рынка нет НИЧЕГО — ни цепочки писем, ни
+ * базы, ни шаблона в любом статусе, ни джобы в любом статусе с его
+ * vertical_id. Рынок, у которого что-то упало или было отменено, сюда не
+ * входит: его двигает обычный «Launch» или кнопка его карточки, и «Launch N
+ * more» за него не платит.
+ *
+ * Выбранность (accepted-гипотеза) проверяет вызывающий. Экран передаёт
+ * капнутый список джоб деталки и только подсказывает; решает роут по своему
+ * свежему чтению (джобы цепочки — без капа), тем же правилом.
+ */
+export function heEngMarketPending(
+  verticalId: string,
+  state: {
+    chains: readonly HeEngMarketChain[];
+    bases: readonly HeEngMarketBase[];
+    templates: readonly HeEngMarketTemplate[];
+    jobs: readonly HeEngMarketJob[];
+  },
+): boolean {
+  if (!verticalId) return false;
+  if (state.chains.some((c) => str(c.vertical_id) === verticalId)) return false;
+  if (state.bases.some((b) => str(b.vertical_id) === verticalId)) return false;
+  if (state.templates.some((t) => str(t.vertical_id) === verticalId)) return false;
+  return !state.jobs.some((j) => payloadId(j.payload, 'vertical_id') === verticalId);
+}

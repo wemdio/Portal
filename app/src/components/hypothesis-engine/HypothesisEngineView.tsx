@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from 'react';
 import type { HeProject } from '@/lib/hypothesisEngine/types';
+import { isValidUuid } from '@/lib/apiValidation';
 import {
   HE_API,
   heCall,
@@ -29,6 +30,11 @@ export function HypothesisEngineView() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Глубокая ссылка ?project=<id> (карточка клиента раздела «Английские
+      // клиенты»): сразу открыть проект — и тот, что не попал в список 100
+      // свежих. «Назад» ведёт в список, как обычно.
+      const linked = new URLSearchParams(window.location.search).get('project');
+      if (linked && isValidUuid(linked)) setSelectedId(linked);
       try {
         const { data } = await heCall<HeProjectsResponse>(`${HE_API}/projects`);
         if (!cancelled) setProjects(Array.isArray(data.projects) ? data.projects : []);

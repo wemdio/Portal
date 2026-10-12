@@ -78,7 +78,8 @@
  *      вертикали отправляет (1/4) по свежему статусу — или завершена (3) у
  *      запуска, где ENG-клиент сам включил отправку (её долив стартует снова,
  *      приняв в неё новые контакты, блок «ЗАВЕРШЁННАЯ ОСНОВНАЯ» ниже), — клиент
- *      её не поставил на паузу, отправка аккаунта не выключена, переключатель
+ *      её не поставил на паузу, аккаунт владельца не заблокирован (S3b),
+ *      отправка аккаунта не выключена, переключатель
  *      «Daily top-up» включён, у ENG-клиента она шлёт только из ящиков пула
  *      проекта. Иначе ночь не покупается, слот не расходуется, а пропуск
  *      пишется строкой журнала 'failed' без base_id (stats.sending_skip —
@@ -208,6 +209,8 @@ import {
   type HeEngCampaignStatusRow,
 } from './engCampaignStatus';
 import { readHeEngSendingAccess } from './engSendingAccess';
+// S3b: владелец заблокирован — ночь не покупается (шаг 2 гейта ниже).
+import { readHeEngOwnerHold } from './autopilotNext';
 import {
   checkHeCampaignAgainstAssignment,
   describeHeSendingPoolMailboxUses,
@@ -1203,10 +1206,16 @@ export async function switchHeUsRefill(
  * ПОРЯДОК ПРОВЕРОК и причины (HeRefillSendSkipReason) — первая сработавшая:
  *  1. 'top_up_off' — у проекта нет конфига или enabled=false (переключатель
  *     клиента); читается каждый раз, а не из снимка тика;
- *  2. владелец проекта (he_projects.created_by, рынок us) и выключатель
- *     отправки аккаунта (readHeEngSendingAccess): 'not_enabled' →
- *     'access_not_enabled', 'revoked' → 'access_turned_off', 'unavailable' /
- *     'error' → 'unavailable'; 'enabled' / 'not_required' — ENG-клиент;
+ *  2. владелец проекта (he_projects.created_by, рынок us), его блокировка и
+ *     выключатель отправки аккаунта. Отметка блокировки
+ *     (autopilotNext.readHeEngOwnerHold без чтения аккаунта: отметку пишет
+ *     «Заблокировать» карточки ENG-клиента) → 'account_blocked', не
+ *     прочиталась → 'unavailable'. Затем выключатель (readHeEngSendingAccess):
+ *     'not_enabled' → 'access_not_enabled', 'revoked' → 'access_turned_off',
+ *     'unavailable' / 'error' → 'unavailable'; 'enabled' / 'not_required' —
+ *     ENG-клиент, и тогда ещё аккаунт тем же чтением, что у автозапуска (бан
+ *     Supabase мимо карточки, роль, демо: readHeEngOwnerHold со `standing`) →
+ *     'account_blocked', не прочитался → 'unavailable';
  *     'not_client' — проект сотрудника (staff-инструмент): желания клиента и
  *     ящиков пула у него нет, и шаги 3, 5 и 7 пропускаются;
  *  3. желание клиента по шаблону запуска (he_eng_launch_sending): 'paused' →
@@ -1295,6 +1304,7 @@ export async function switchHeUsRefill(
 
 export const HE_REFILL_SEND_SKIP_REASONS = [
   'top_up_off',
+  'account_blocked',
   'access_not_enabled',
   'access_turned_off',
   'client_paused',
@@ -1389,7 +1399,8 @@ export function heRefillMainCampaignId(launch: HeTemplateLaunchInfo): string {
  *    может отправлять; команде ушёл алерт 'pause_failed' из самого старта
  *    (engCampaignSending.ts, шаг 9). Гейт ночи не держит: следующие ночи и так
  *    пропускает пауза клиента;
- *  - 'access_off' — отправка аккаунта к старту выключена или не включена;
+ *  - 'access_off' — отправка аккаунта к старту выключена или не включена,
+ *    или владелец проекта заблокирован (S3b; старт тогда не зовётся);
  *  - 'cancelled' — прогон отменён клиентом («Cancel all jobs»): вызова нет;
  *  - 'failed' — старт не удался (`code`): алерт команде, и следующие ночи
  *    вертикали держит гейт (readHeRefillRestartHold).
@@ -1656,11 +1667,24 @@ export function createHeRefillSendGate(
     const createdBy = asString(row?.created_by);
     if (!row || !createdBy) return { ok: false, reason: 'unavailable', detail: 'проект или его владелец не найден' };
     if (row.market !== 'us') return { ok: false, reason: 'unavailable', detail: `рынок проекта ${String(row.market)}` };
+    const marker = await readHeEngOwnerHold(db, createdBy, { standing: false });
+    if (marker.kind === 'blocked') return { ok: false, reason: 'account_blocked', detail: 'аккаунт владельца заблокирован сотрудником' };
+    if (marker.kind === 'unavailable') return { ok: false, reason: 'unavailable', detail: `блокировка аккаунта: ${marker.detail}` };
     const access = await readHeEngSendingAccess(db, createdBy, { env: deps.env });
     switch (access.state) {
       case 'enabled':
-      case 'not_required':
+      case 'not_required': {
+        // ENG-клиент с включённой отправкой — ночь была бы куплена: аккаунт
+        // тем же чтением, что у автозапуска (бан мимо карточки, роль, демо).
+        const standing = await readHeEngOwnerHold(db, createdBy, { standing: true, marker: false });
+        if (standing.kind === 'blocked') {
+          return { ok: false, reason: 'account_blocked', detail: `аккаунт владельца не активен (${standing.source})` };
+        }
+        if (standing.kind === 'unavailable') {
+          return { ok: false, reason: 'unavailable', detail: `аккаунт владельца не прочитан: ${standing.detail}` };
+        }
         return { ok: true, createdBy, engClient: true };
+      }
       case 'not_client':
         return { ok: true, createdBy, engClient: false };
       case 'not_enabled':
@@ -2040,7 +2064,9 @@ function holdAlertBody(notice: HeRefillHoldNotice): {
           'сделать':
             'посмотреть у рассыльщика, почему кампания не стартовала (код: mailboxes_changed — ящики не из пула ' +
             'проекта; needs_attention / not_found — остановлена или удалена; read_failed / start_failed / ' +
-            'start_unconfirmed / not_attempted — сбой или срок; ответ отказа — проверки старта), устранить причину и ' +
+            'start_unconfirmed / not_attempted — сбой или срок; account_unread — не прочитался аккаунт владельца: ' +
+            'сначала откройте его карточку в разделе «Английские клиенты» — заблокированному кампанию не активировать; ' +
+            'ответ отказа — проверки старта), устранить причину и ' +
             'активировать кампанию там (статус 1) — эти контакты уйдут, а следующая ночь увидит отправку и ' +
             `продолжит добор сама. ${NO_FORCE_RELAUNCH}`,
         },

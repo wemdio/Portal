@@ -41,6 +41,7 @@ import {
 } from './api-client';
 import {
   ENG_REFILL_SPEND_PAUSED_SHORT_EN,
+  ENG_SENDING_OFF_EN,
   engAutopilotHoldText,
   engDashAttentionText,
   engRefillHoldText,
@@ -146,9 +147,13 @@ function attentionNextLine(attention: EngDashAttentionInfo | null | undefined): 
       return 'next: open step 1 «Your business» — it shows whether the research can be tried again';
     case 'analysis_stopped':
       // Без `requeues` «Launch» этот анализ заново не ставит — тот же Support,
-      // что у карточки рынка на шаге 3 и в письме об этой остановке.
+      // что у карточки рынка на шаге 3 и в письме об этой остановке. Анализ
+      // остановил отказ, который чинит команда (`teamFix`), — «Launch» до
+      // починки упрётся в него же: сначала Support, как в письме.
       return attention.requeues
-        ? 'next: «Launch» on step 3 checks the contacts again'
+        ? attention.teamFix === true
+          ? TEAM_FIX_LAUNCH_NEXT_LINE
+          : 'next: «Launch» on step 3 checks the contacts again'
         : 'next: message Support about this market';
     default:
       return 'next: step 3 «Launch» says what to do';
@@ -205,6 +210,29 @@ const LETTERS_RETIRED_STATUS: StageStatus = {
   text: 'var(--cp-amber)',
 };
 const LETTERS_RETIRED_NEXT_LINE = 'next: step 3 «Launch» shows how to get new letters';
+
+/**
+ * Остановку этапа чинит только команда (`team_fix` агрегата, EngDashTeamFix;
+ * у остановленного анализа — `attention.teamFix`): кнопка до починки упрётся в
+ * тот же отказ, поэтому сначала Support, потом кнопка — как письмо об этой
+ * остановке (engClientMail, совет 'team_fix') и карточка рынка шага 3.
+ */
+const TEAM_FIX_LAUNCH_NEXT_LINE = 'next: message Support to find out when it is fixed, then press «Launch» on step 3';
+const TEAM_FIX_REWRITE_NEXT_LINE =
+  'next: message Support to find out when it is fixed, then press «Rewrite letters» on step 3';
+
+/**
+ * «Launch now» откажет выключатель отправки аккаунта (`account_access`
+ * агрегата): выключен — Support; ждёт разовой проверки командой — после неё
+ * (письмо «Sending is on» зовёт нажать «Launch now» там, где кнопка есть).
+ */
+function launchNowBlockedLine(access: 'not_enabled' | 'revoked' | null | undefined): string | null {
+  if (access === 'revoked') return 'next: message Support — sending is turned off for your account';
+  if (access === 'not_enabled') {
+    return 'next: after a one-time check of your account by our team, press «Launch now» on step 3 «Launch»';
+  }
+  return null;
+}
 
 const JOB_STAGE_LABELS: Record<string, string> = {
   site_profile: 'profiling the site',
@@ -269,9 +297,9 @@ function autoLaunchStatus(vertical: EngDashboardVertical): StageStatus | null {
   }
 }
 
-function templateNextLine(vertical: EngDashboardVertical): string {
+function templateNextLine(vertical: EngDashboardVertical, access: 'not_enabled' | 'revoked' | null | undefined): string {
   const auto = vertical.auto_launch;
-  if (!auto) return 'next: press «Launch now» on step 3 «Launch» to start sending';
+  if (!auto) return launchNowBlockedLine(access) ?? 'next: press «Launch now» on step 3 «Launch» to start sending';
   switch (auto.state) {
     case 'waiting':
       // 'waiting' без кода — то же правило, что у строки рынка на шаге 3:
@@ -280,11 +308,15 @@ function templateNextLine(vertical: EngDashboardVertical): string {
       if (auto.code !== null) return 'next: we try to start sending again — step 3 «Launch» shows when';
       if (auto.access === 'not_enabled') return 'next: sending starts after a one-time check of your account by our team';
       if (auto.access === 'revoked') return 'next: message Support — sending is turned off for your account';
-      if (auto.stale === true) return 'next: press «Launch now» on step 3 «Launch» to start it yourself';
+      if (auto.stale === true) {
+        return launchNowBlockedLine(access) ?? 'next: press «Launch now» on step 3 «Launch» to start it yourself';
+      }
       return 'next: sending starts automatically';
     case 'running':
       // Брошенная попытка (`stale`): на шаге 3 у рынка «Launch now».
-      return auto.stale === true ? 'next: press «Launch now» on step 3 «Launch» to try again' : 'next: starting sending…';
+      return auto.stale === true
+        ? (launchNowBlockedLine(access) ?? 'next: press «Launch now» on step 3 «Launch» to try again')
+        : 'next: starting sending…';
     case 'held':
     case 'failed':
       return 'next: step 3 «Launch» says what is needed';
@@ -591,20 +623,40 @@ function topUpTakesVertical(vertical: EngDashboardVertical, refill: HeClientRefi
 }
 
 /** Строка «next: …» — следующий шаг конвейера из текущей стадии. */
-function nextLineFor(vertical: EngDashboardVertical, refill: HeClientRefillState, dry: boolean, rewrite: boolean): string {
+function nextLineFor(
+  vertical: EngDashboardVertical,
+  refill: HeClientRefillState,
+  dry: boolean,
+  rewrite: boolean,
+  access: 'not_enabled' | 'revoked' | null | undefined,
+): string {
   const stage = vertical.stage;
+  // Отправка аккаунта выключена ('revoked'; так и после разблокировки, пока
+  // сотрудник не включит отправку): «Launch» шага 3 выключена, а «Launch now»,
+  // «Rewrite letters» и «Collect again» откажут 403 sending_turned_off, и шаг 3
+  // их не рисует — к ним не зовём, а ведём в Support.
+  const launchOff = access === 'revoked' ? launchNowBlockedLine(access) : null;
   // Шаблон этапа запуск откажет: ни «launch», ни «finish the launch» не сработают.
-  if (rewrite && stage === 'template') return LETTERS_REWRITE_NEXT_LINE;
+  if (rewrite && stage === 'template') return launchOff ?? LETTERS_REWRITE_NEXT_LINE;
   if (rewrite && stage === 'launch_unfinished') return LETTERS_REWRITE_UNFINISHED_NEXT_LINE;
-  if (vertical.letters_retired === true) return LETTERS_RETIRED_NEXT_LINE;
+  // Пауза по потолку расхода: ни автопилот, ни «Launch» следующую платную
+  // стадию не поставят (реконсилер встаёт на потолке) — к кнопке не зовём.
+  const spendHeld = `next: on hold — ${ENG_REFILL_SPEND_PAUSED_SHORT_EN}`;
+  // Остановку чинит команда: сначала Support, потом кнопка (не под паузой
+  // потолка расхода — там кнопку не зовут вовсе: у снятых писем карточка
+  // шага 3 тогда без «Rewrite letters», а роут переписки откажет потолком).
+  if (vertical.team_fix === 'rewrite' && vertical.spend_paused !== true) return launchOff ?? TEAM_FIX_REWRITE_NEXT_LINE;
+  if (vertical.letters_retired === true) {
+    return vertical.spend_paused === true ? spendHeld : (launchOff ?? LETTERS_RETIRED_NEXT_LINE);
+  }
+  if ((vertical.team_fix === 'letters' || vertical.team_fix === 'final_letters') && vertical.spend_paused !== true) {
+    return launchOff ?? TEAM_FIX_LAUNCH_NEXT_LINE;
+  }
   // Сбор после писем и итоговые письма после проверки ставит только автопилот
   // (autopilotNext.ts). Выключен — никто не поставит, пока клиент не нажмёт
   // «Launch» шага 3 (реконсилер включает автопилот и ставит недостающее); не
   // прочитан — ни того, ни другого не обещаем.
   const autopilot = vertical.autopilot;
-  // Пауза по потолку расхода: ни автопилот, ни «Launch» следующую платную
-  // стадию не поставят (реконсилер встаёт на потолке) — к кнопке не зовём.
-  const spendHeld = `next: on hold — ${ENG_REFILL_SPEND_PAUSED_SHORT_EN}`;
   switch (stage) {
     case 'research':
       return 'next: choose your markets';
@@ -613,7 +665,7 @@ function nextLineFor(vertical: EngDashboardVertical, refill: HeClientRefillState
       return autopilot === true
         ? 'next: base collection'
         : autopilot === false
-          ? 'next: press «Launch» on step 3 «Launch» to collect contacts'
+          ? (launchOff ?? 'next: press «Launch» on step 3 «Launch» to collect contacts')
           : 'next: step 3 «Launch» shows what comes next';
     case 'collecting':
       return 'next: email enrichment (after collection)';
@@ -626,26 +678,38 @@ function nextLineFor(vertical: EngDashboardVertical, refill: HeClientRefillState
       return autopilot === true
         ? 'next: template'
         : autopilot === false
-          ? 'next: press «Launch» on step 3 «Launch» to have the final letters written'
+          ? (launchOff ?? 'next: press «Launch» on step 3 «Launch» to have the final letters written')
           : 'next: step 3 «Launch» shows what comes next';
     case 'template':
-      return templateNextLine(vertical);
+      return templateNextLine(vertical, access);
     case 'launch_unfinished':
       // «Само» — только пока строка ждёт следующей попытки или идёт: 'done'
       // (сдался после трёх достроек) и 'held' тик сам не достроит — тогда
       // кнопка, как у карточки рынка на шаге 3.
       // Брошенная попытка ('running' со `stale`) сама не достроится, если
       // автозапуск проекта выключен, — тогда кнопка, как на шаге 3.
+      // Строку держит выключатель аккаунта при включённом автозапуске — тик
+      // достроит сам после проверки (строка 'held' перепроверяется).
+      if (vertical.auto_launch?.state === 'held' && vertical.auto_launch.code === 'sending_not_enabled') {
+        return 'next: we finish the launch after a one-time check of your account by our team';
+      }
       return vertical.auto_launch?.state === 'waiting' ||
         (vertical.auto_launch?.state === 'running' && vertical.auto_launch.stale !== true)
         ? 'next: we finish the launch automatically — step 3 «Launch» shows it'
-        : 'next: press «Launch now» on step 3 «Launch» to finish the launch';
+        : (launchNowBlockedLine(access) ?? 'next: press «Launch now» on step 3 «Launch» to finish the launch');
     case 'launched':
       if (refill === 'running' && dry) return REFILL_DRY_NEXT_LINE;
       if (refill === 'running') return topUpSkipFor(vertical)?.line ?? REFILL_NEXT_LINE.running;
       return REFILL_NEXT_LINE[refill];
     case 'attention':
-      return attentionNextLine(vertical.attention);
+      // Повтор анализа ставит только «Launch» (`requeues`), новую сборку
+      // остановленной базы — «Launch» или «Collect again» шага 3: при
+      // выключенной отправке аккаунта обе откажут — Support.
+      return launchOff &&
+        ((vertical.attention?.reason === 'analysis_stopped' && vertical.attention.requeues) ||
+          vertical.attention?.reason === 'base_stopped')
+        ? launchOff
+        : attentionNextLine(vertical.attention);
     case 'not_selected':
       // Не «next: …»: шага конвейера нет, есть только выбор клиента — фраза
       // роута (engDashboard.ts), верная и для «гипотез нет вовсе».
@@ -1040,6 +1104,7 @@ function VerticalCard({
   projectName,
   activeJob,
   refill,
+  accountAccess,
   onSendingChanged,
 }: {
   vertical: EngDashboardVertical;
@@ -1049,6 +1114,8 @@ function VerticalCard({
   activeJob: EngDashboardActiveJob | undefined;
   /** Состояние ночного добора ПРОЕКТА этой вертикали, а не аккаунта. */
   refill: HeClientRefillState;
+  /** Выключатель отправки аккаунта, когда он держит «Launch now» (`account_access`). */
+  accountAccess: 'not_enabled' | 'revoked' | null | undefined;
   /** После Pause / Start sending / Resume — перечитать агрегат. */
   onSendingChanged: () => void;
 }) {
@@ -1159,7 +1226,7 @@ function VerticalCard({
 
       <div className="pt-2.5" style={{ borderTop: '1px solid var(--cp-divider)' }}>
         <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-          <EngSupportText text={nextLineFor(vertical, refill, vertical.refill_dry === true, rewrite)} />
+          <EngSupportText text={nextLineFor(vertical, refill, vertical.refill_dry === true, rewrite, accountAccess)} />
         </span>
       </div>
 
@@ -1613,7 +1680,8 @@ export function EngDashboard() {
                   className="text-xs hover:underline"
                   style={{ color: 'var(--cp-amber)' }}
                 >
-                  <span className="font-semibold">{p.name}</span> — {engAutopilotHoldText(p.hold.code)}
+                  <span className="font-semibold">{p.name}</span> —{' '}
+                  {engAutopilotHoldText(p.hold.code, data?.account_access === 'revoked')}
                 </Link>
               ))}
             </EngCard>
@@ -1658,11 +1726,24 @@ export function EngDashboard() {
                 {projects.length === 0 ? 'No project yet' : 'No markets yet'}
               </p>
               {/* Письма, базу, итоговые письма и запуск после «Launch» шага 3
-                  ведут автопилот и автозапуск — и только по выбранным рынкам. */}
+                  ведут автопилот и автозапуск — и только по выбранным рынкам.
+                  Отправка аккаунта выключена ('revoked'; так и после
+                  разблокировки, пока сотрудник не включит её): «Launch»
+                  откажет 403 sending_turned_off — вместо неё строка доступа,
+                  как у карточек рынков. Исследование выключатель не
+                  спрашивает, кнопка ниже работает. */}
               <p className="text-xs m-0 max-w-md" style={{ color: 'var(--cp-paper-mute)' }}>
-                We research your business and find the markets that could buy from you. Choose the ones you want on
-                step 2 and press «Launch» on step 3 — we write the letters, collect and check contacts, write the
-                final letters and start sending for each market you chose. Every market shows up here.
+                {data?.account_access === 'revoked' ? (
+                  <EngSupportText
+                    text={`We research your business and find the markets that could buy from you. ${ENG_SENDING_OFF_EN}`}
+                  />
+                ) : (
+                  <>
+                    We research your business and find the markets that could buy from you. Choose the ones you want
+                    on step 2 and press «Launch» on step 3 — we write the letters, collect and check contacts, write
+                    the final letters and start sending for each market you chose. Every market shows up here.
+                  </>
+                )}
               </p>
               <Link
                 href={
@@ -1702,6 +1783,7 @@ export function EngDashboard() {
                           projectName={projectNames.get(v.project_id) ?? ''}
                           activeJob={v.id ? jobByVertical.get(v.id) : undefined}
                           refill={refillByProject.get(v.project_id) ?? 'off'}
+                          accountAccess={data?.account_access}
                           onSendingChanged={() => void load({ silent: true })}
                         />
                       ))}

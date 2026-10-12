@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -23,11 +24,13 @@ import {
 } from '@/lib/hypothesisEngine/engSendingAccess';
 import { ENG_PAID_UNAVAILABLE_TEXT } from '@/lib/hypothesisEngine/engPaidAccess';
 import {
+  HE_ENG_LAUNCH_INTENT_TABLE,
   heEngIntentSendingWindow,
   readHeEngLaunchIntent,
   updateHeEngLaunchSchedule,
   writeHeEngLaunchIntent,
 } from '@/lib/hypothesisEngine/engAutoLaunch';
+import { HE_ENG_MARKETS_MAX_PER_SAVE, heEngMarketPending } from '@/lib/hypothesisEngine/engMarkets';
 import { engServerError } from '../../../_shared';
 import {
   ENG_SENDING_WINDOW_TIMEZONES,
@@ -46,6 +49,29 @@ const NOT_RESEARCHED_TEXT =
   'The research is not finished yet — your markets appear on step 2 when it is.';
 const NO_MARKETS_TEXT = 'Pick at least one market on step 2 first.';
 const NOT_LAUNCHED_TEXT = 'Press Launch first — the sending hours are saved with it.';
+/** «Launch N more markets»: рынки тела не те, что выбраны у проекта сейчас. */
+const MARKETS_CHANGED_TEXT = 'The markets you chose have changed — refresh the page and try again.';
+/** «Launch N more markets» без включённого автозапуска проекта. */
+const MORE_NOT_LAUNCHED_TEXT = 'Press «Launch» first — it turns on automatic launch for your project.';
+const INVALID_MARKETS_TEXT = `markets must be a list of 1 to ${HE_ENG_MARKETS_MAX_PER_SAVE} different market ids`;
+
+/**
+ * Стадии, чья джоба несёт vertical_id без базы: по ним «рынок уже
+ * трогали» (heEngMarketPending). Джобы баз и шаблонов ссылаются на базу, а
+ * база рынка сама делает его не «нетронутым».
+ */
+const VERTICAL_JOB_STAGES = ['chain', 'dossier', 'vocab'];
+
+/** id рынков из тела «Launch N more markets»; null — тело не то. */
+function parseMarketIds(raw: unknown): string[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > HE_ENG_MARKETS_MAX_PER_SAVE) return null;
+  const ids: string[] = [];
+  for (const value of raw) {
+    if (typeof value !== 'string' || !isValidUuid(value) || ids.includes(value)) return null;
+    ids.push(value);
+  }
+  return ids;
+}
 
 /**
  * Состояние выключателя отправки аккаунта — словом для кабинета (строка
@@ -155,6 +181,23 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 //     так же, не покупается (collect_again_verticals).
 // Запись намерения и постановка не атомарны: намерение — первым; упал
 // реконсилер — 500, повторное нажатие доставит только недостающее.
+//
+// «LAUNCH N MORE MARKETS» — тело {markets: [vertical_id…]} без schedule
+// (решение владельца 12.10.2026: рынок, отмеченный после «Launch», стартует
+// только явным нажатием). Те же проверки 1–3 в том же порядке, дальше:
+//  a. 1–50 разных uuid, каждый — вертикаль ЭТОГО проекта и выбран сейчас;
+//     иначе 409 markets_changed;
+//  b. автозапуск проекта включён (намерение wanted и autopilot=true); иначе
+//     409 not_launched. Намерение НЕ переписывается (часы и время нажатия те
+//     же), строки автозапуска других рынков ('failed', 'held') не трогаются —
+//     это нажатие за другой рынок не платит. Снимается только отметка
+//     «исполнено» (settled_at): исполненное намерение тик не читает, и
+//     итоговые письма новых рынков сами бы не запустились;
+//  c. по свежему чтению берутся только рынки, которые ещё ни разу не
+//     трогали (heEngMarketPending); остальные — markets_already_started;
+//  d. реконсилер с onlyVerticalIds: те же правила оплаты и потолок, только по
+//     этим рынкам. Двойной клик ничего не дублирует: дедуп активных джоб и
+//     уникальный индекс активной цепочки вертикали.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.project_launch.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -171,12 +214,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const owned = await loadClientHeProject(supabaseAdmin, id, userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
-    let body: { schedule?: unknown } = {};
+    let body: { schedule?: unknown; markets?: unknown } = {};
     try {
       const text = await req.text();
       body = text.trim() ? ((JSON.parse(text) ?? {}) as typeof body) : {};
     } catch {
       return jsonError('Invalid body', 400);
+    }
+    // «Launch N more markets»: часов в теле нет — у намерения они уже свои.
+    let moreMarkets: string[] | null = null;
+    if (body?.markets !== undefined) {
+      if (body.schedule !== undefined && body.schedule !== null) {
+        return jsonError('Send markets or schedule, not both', 400);
+      }
+      moreMarkets = parseMarketIds(body.markets);
+      if (!moreMarkets) return jsonError(INVALID_MARKETS_TEXT, 400);
     }
     const parsedWindow =
       body?.schedule === undefined || body?.schedule === null
@@ -188,17 +240,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (owned.project.status !== 'researched') {
       return NextResponse.json({ error: NOT_RESEARCHED_TEXT, code: 'not_researched' }, { status: 409 });
     }
-    const { data: selected, error: selectedErr } = await supabaseAdmin
-      .from('he_hypotheses')
-      .select('id')
-      .eq('project_id', id)
-      .eq('status', 'accepted')
-      .limit(1);
-    if (selectedErr) {
-      return engServerError('client.eng.project_launch.selection_failed', selectedErr, LAUNCH_FAILED, { userId, projectId: id });
-    }
-    if ((selected ?? []).length === 0) {
-      return NextResponse.json({ error: NO_MARKETS_TEXT, code: 'no_markets' }, { status: 409 });
+    if (!moreMarkets) {
+      const { data: selected, error: selectedErr } = await supabaseAdmin
+        .from('he_hypotheses')
+        .select('id')
+        .eq('project_id', id)
+        .eq('status', 'accepted')
+        .limit(1);
+      if (selectedErr) {
+        return engServerError('client.eng.project_launch.selection_failed', selectedErr, LAUNCH_FAILED, { userId, projectId: id });
+      }
+      if ((selected ?? []).length === 0) {
+        return NextResponse.json({ error: NO_MARKETS_TEXT, code: 'no_markets' }, { status: 409 });
+      }
     }
 
     const access = await requireEngPaidAccess(supabaseAdmin, userId, { action: 'start_outreach' });
@@ -231,6 +285,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // Отметка «клиент ждёт» и алерт команде (дедуп в процессе, 1 ч). Отказ
       // не возвращаем: подготовка идёт, запуск подождёт включения.
       await requireHeEngSendingAccess(supabaseAdmin, userId, { projectId: id, via: 'launch' });
+    }
+
+    if (moreMarkets) {
+      return launchMoreMarkets(supabaseAdmin, {
+        userId,
+        projectId: id,
+        project: owned.project,
+        markets: moreMarkets,
+        sendingAccess: sending.state,
+      });
     }
 
     const intent = await writeHeEngLaunchIntent(supabaseAdmin, { projectId: id, userId, schedule: sendingWindow });
@@ -305,6 +369,170 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       collect_again_verticals: collectStopRepeats.length,
       autopilot_hold_code: hold?.code ?? null,
     });
+  });
+}
+
+/** «Launch N more markets» после общих проверок POST (шапка POST, пункты a–d). */
+async function launchMoreMarkets(
+  db: SupabaseClient,
+  args: {
+    userId: string;
+    projectId: string;
+    project: Record<string, unknown>;
+    markets: string[];
+    sendingAccess: HeEngSendingAccessState;
+  },
+): Promise<NextResponse> {
+  const { userId, projectId, markets } = args;
+  const logContext = { userId, projectId };
+
+  // a. Рынки — этого проекта и выбраны сейчас (тот же предикат выбора, что у
+  // реконсилера: accepted-гипотеза с непустым id).
+  const [verticalsRes, selectedRes] = await Promise.all([
+    db.from('he_verticals').select('id').eq('project_id', projectId).in('id', markets),
+    db.from('he_hypotheses').select('id, vertical_id').eq('project_id', projectId).eq('status', 'accepted').in('vertical_id', markets),
+  ]);
+  if (verticalsRes.error || selectedRes.error) {
+    return engServerError(
+      'client.eng.project_launch.more_markets_read_failed',
+      verticalsRes.error ?? selectedRes.error,
+      LAUNCH_FAILED,
+      logContext,
+    );
+  }
+  const own = new Set(((verticalsRes.data ?? []) as Array<{ id?: unknown }>).map((v) => String(v.id ?? '')));
+  const selected = new Set(
+    ((selectedRes.data ?? []) as Array<{ id?: unknown; vertical_id?: unknown }>)
+      .filter((h) => typeof h.id === 'string' && h.id !== '')
+      .map((h) => String(h.vertical_id ?? '')),
+  );
+  if (markets.some((m) => !own.has(m) || !selected.has(m))) {
+    return NextResponse.json({ error: MARKETS_CHANGED_TEXT, code: 'markets_changed' }, { status: 409 });
+  }
+
+  // b. Автозапуск проекта включён: намерение wanted и автопилот (тик ведёт
+  // только такие проекты). Нет таблицы намерения — автозапуска нет, и
+  // начинать рынки этой кнопкой незачем: «Launch» берёт их все.
+  const intentRead = await readHeEngLaunchIntent(db, projectId);
+  if (intentRead.kind === 'error') {
+    return engServerError('client.eng.project_launch.intent_read_failed', new Error(intentRead.message), LAUNCH_FAILED, logContext);
+  }
+  const intent = intentRead.kind === 'ok' ? intentRead.intent : null;
+  if (!intent || !intent.wanted || args.project.autopilot !== true) {
+    return NextResponse.json({ error: MORE_NOT_LAUNCHED_TEXT, code: 'not_launched' }, { status: 409 });
+  }
+
+  // c. Свежее чтение: рынок, который уже трогали (цепочка, база, шаблон или
+  // джоба в любом статусе), этой кнопкой не начинается.
+  const [chainsRes, basesRes, templatesRes, jobsRes] = await Promise.all([
+    db.from('he_chains').select('id, vertical_id, status').in('vertical_id', markets),
+    db.from('he_bases').select('id, vertical_id, status').eq('project_id', projectId).in('vertical_id', markets),
+    db.from('he_templates').select('id, vertical_id').in('vertical_id', markets),
+    db.from('he_jobs').select('id, status, payload').eq('project_id', projectId).in('stage', VERTICAL_JOB_STAGES),
+  ]);
+  const readErr = chainsRes.error ?? basesRes.error ?? templatesRes.error ?? jobsRes.error;
+  if (readErr) {
+    return engServerError('client.eng.project_launch.more_markets_read_failed', readErr, LAUNCH_FAILED, logContext);
+  }
+  const state = {
+    chains: chainsRes.data ?? [],
+    bases: basesRes.data ?? [],
+    templates: templatesRes.data ?? [],
+    jobs: jobsRes.data ?? [],
+  };
+  const pending = markets.filter((m) => heEngMarketPending(m, state));
+  const alreadyStarted = markets.filter((m) => !pending.includes(m));
+  const schedule = toClientEngSendingWindow(heEngIntentSendingWindow(intent));
+  const answer = (extra: {
+    started: string[];
+    already: string[];
+    counts?: { chainsEnqueued: number; collectsEnqueued: number; templatesEnqueued: number; analysesRequeued: number; verticalsSkipped: number };
+    holdCode?: string | null;
+  }) =>
+    NextResponse.json({
+      ok: true,
+      auto_launch: 'on',
+      sending_access: sendingAccessWord(args.sendingAccess),
+      schedule,
+      chains_enqueued: extra.counts?.chainsEnqueued ?? 0,
+      collects_enqueued: extra.counts?.collectsEnqueued ?? 0,
+      templates_enqueued: extra.counts?.templatesEnqueued ?? 0,
+      analyses_requeued: extra.counts?.analysesRequeued ?? 0,
+      verticals_skipped: extra.counts?.verticalsSkipped ?? 0,
+      collect_again_verticals: 0,
+      autopilot_hold_code: extra.holdCode ?? null,
+      markets_started: extra.started,
+      markets_already_started: extra.already,
+    });
+  if (pending.length === 0) {
+    void logAudit('client.eng.project_launch.more_markets', 'ENG client pressed Launch more markets; all had started', {
+      ...logContext,
+      markets,
+      alreadyStarted,
+    });
+    return answer({ started: [], already: alreadyStarted });
+  }
+
+  // Исполненное намерение тик не читает (settled_at): снять отметку, иначе
+  // итоговые письма новых рынков сами не запустились бы. Только у ещё
+  // включённого намерения; отмена между чтением и записью — 0 строк.
+  const nowIso = new Date().toISOString();
+  const { data: reopened, error: reopenErr } = await db
+    .from(HE_ENG_LAUNCH_INTENT_TABLE)
+    .update({ settled_at: null, updated_at: nowIso })
+    .eq('project_id', projectId)
+    .eq('wanted', true)
+    .select('project_id');
+  if (reopenErr) {
+    return engServerError('client.eng.project_launch.reopen_failed', reopenErr, LAUNCH_FAILED, logContext);
+  }
+  if ((reopened ?? []).length === 0) {
+    return NextResponse.json({ error: MORE_NOT_LAUNCHED_TEXT, code: 'not_launched' }, { status: 409 });
+  }
+
+  // d. Только эти рынки.
+  const reconciled = await reconcileHeAutopilotProject(db, {
+    projectId,
+    project: args.project,
+    trigger: 'client',
+    onlyVerticalIds: pending,
+  });
+  if (!reconciled.ok && reconciled.kind === 'refused') {
+    return reconciled.refusal === 'not_researched'
+      ? NextResponse.json({ error: NOT_RESEARCHED_TEXT, code: 'not_researched' }, { status: 409 })
+      : NextResponse.json({ error: MARKETS_CHANGED_TEXT, code: 'markets_changed' }, { status: 409 });
+  }
+  if (!reconciled.ok) {
+    return engServerError(FAILURE_EVENT[reconciled.step] ?? 'client.eng.project_launch.failed', reconciled.error, LAUNCH_FAILED, {
+      ...logContext,
+      ...(reconciled.verticalId ? { verticalId: reconciled.verticalId } : {}),
+      ...(reconciled.baseId ? { baseId: reconciled.baseId } : {}),
+    });
+  }
+  // Начат — этим нажатием поставлена его цепочка писем. Цепочку между
+  // чтением и вставкой поставил кто-то другой (уникальный индекс, 23505 →
+  // 'chain_running') — рынок уже начат. Прочие пропуски (автопилот выключили,
+  // потолок расхода, рынок сняли) — ни то ни другое: о них говорит пауза.
+  const started = reconciled.details.filter((d) => d.outcome === 'chain_enqueued').map((d) => d.verticalId);
+  const raced = reconciled.details.filter((d) => d.reason === 'chain_running').map((d) => d.verticalId);
+  const hold = reconciled.pause ? toClientEngAutopilotHold({ autopilot_error: reconciled.pause }) : null;
+
+  void logAudit('client.eng.project_launch.more_markets', 'ENG client pressed Launch more markets', {
+    ...logContext,
+    markets,
+    started,
+    alreadyStarted: [...alreadyStarted, ...raced],
+    sendingAccess: args.sendingAccess,
+    chainsEnqueued: reconciled.counts.chainsEnqueued,
+    verticalsSkipped: reconciled.counts.verticalsSkipped,
+    ...(reconciled.pause ? { autopilotPause: reconciled.pause } : {}),
+  });
+
+  return answer({
+    started,
+    already: [...alreadyStarted, ...raced],
+    counts: reconciled.counts,
+    holdCode: hold?.code ?? null,
   });
 }
 

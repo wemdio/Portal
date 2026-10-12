@@ -35,9 +35,65 @@ import {
 } from '@/lib/hypothesisEngine/baseCollectEnqueue';
 import { readHeEngAutoLaunchDetail } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { readHeEngTypicalDurations } from '@/lib/hypothesisEngine/engEstimates';
+import { readHeEngSendingAccess } from '@/lib/hypothesisEngine/engSendingAccess';
+import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
+import {
+  ENG_TEAM_FIX_STAGES,
+  engLatestFailedStageJobs,
+  type EngTeamFixStop,
+} from '@/lib/hypothesisEngine/engDashboard';
 import { engServerError } from '../../_shared';
 
 export const dynamic = 'force-dynamic';
+
+/** Сколько закончившихся прогонов стадий рынков читает признак «чинит команда». */
+const TEAM_FIX_JOBS_LIMIT = 500;
+
+/**
+ * Остановки стадий рынков проекта отказом, который чинит команда
+ * (EngTeamFixStop): по каждой цели (рынок у писем, база у проверки и итоговых
+ * писем) последний закончившийся прогон, и только если он упал отказом
+ * heTeamFixableFailureOf ('billing' / 'configuration') — тот же предикат, по
+ * которому письмо об остановке советует 'team_fix', а воркер шлёт алерт
+ * команде. Наружу — только вид; текст ошибки не уходит. Два лёгких чтения:
+ * закончившиеся прогоны без ошибки, затем ошибки только упавших последних
+ * (обычно их нет — второго чтения нет). null — не прочиталось (ключа в ответе
+ * нет, экран зовёт к кнопке, как раньше). Прогоны старше
+ * TEAM_FIX_JOBS_LIMIT свежих не видны — у такой цели признака нет.
+ */
+async function readTeamFixStops(projectId: string): Promise<EngTeamFixStop[] | null> {
+  if (!supabaseAdmin) return null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('he_jobs')
+      .select('id, stage, status, created_at, payload')
+      .eq('project_id', projectId)
+      .in('stage', [...ENG_TEAM_FIX_STAGES])
+      .in('status', ['done', 'failed', 'cancelled'])
+      .order('created_at', { ascending: false })
+      .limit(TEAM_FIX_JOBS_LIMIT);
+    if (error) return null;
+    const failed = engLatestFailedStageJobs((data ?? []) as Array<Record<string, unknown>>);
+    if (failed.length === 0) return [];
+    const { data: errors, error: errorsErr } = await supabaseAdmin
+      .from('he_jobs')
+      .select('id, error')
+      .in('id', failed.map((f) => f.id));
+    if (errorsErr) return null;
+    const errorById = new Map<string, unknown>();
+    for (const row of (errors ?? []) as Array<{ id?: unknown; error?: unknown }>) {
+      if (typeof row.id === 'string') errorById.set(row.id, row.error);
+    }
+    const stops: EngTeamFixStop[] = [];
+    for (const f of failed) {
+      const kind = heTeamFixableFailureOf(errorById.get(f.id));
+      if (kind) stops.push({ stage: f.stage, vertical_id: f.vertical_id, base_id: f.base_id, kind });
+    }
+    return stops;
+  } catch {
+    return null;
+  }
+}
 
 const PROJECT_LOAD_FAILED = 'Failed to load the project';
 const BRIEF_SAVE_FAILED = 'Failed to save the brief';
@@ -220,14 +276,33 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   //
   // ОЦЕНКИ ВРЕМЕНИ (engEstimates): медианы недавних проектов, кэш 15 минут,
   // меньше трёх замеров или сбой — null (экран числа не печатает).
-  const [autoLaunch, durations] = await Promise.all([
+  //
+  // ОСТАНОВКИ, КОТОРЫЕ ЧИНИТ КОМАНДА (readTeamFixStops): только у исследованного
+  // проекта — карточки рынков шага 3 и шапка мастера рисуются у него.
+  //
+  // ВЫКЛЮЧАТЕЛЬ ОТПРАВКИ АККАУНТА (readHeEngSendingAccess — то же чтение, что у
+  // GET …/launch, без записи и алерта): тоже только у исследованного проекта.
+  // При 'revoked' «Launch», «Launch now», «Rewrite letters» и «Collect again»
+  // откажут 403 — шапка мастера и шаги 2–3 к ним не зовут, а шаг 3 их не
+  // рисует или выключает; с опросом деталки экран видит включение и выключение
+  // без перезагрузки. Сбой чтения и нет таблицы — ключа нет (экран берёт
+  // чтение GET …/launch).
+  const [autoLaunch, durations, teamFixStops, sendingAccess] = await Promise.all([
     readHeEngAutoLaunchDetail(supabaseAdmin, id, {
       verticals: detail.detail.verticals as Array<Record<string, unknown>>,
       hypotheses: detail.detail.hypotheses as Array<Record<string, unknown>>,
       templates: detail.detail.templates as Array<Record<string, unknown>>,
     }),
     readHeEngTypicalDurations(supabaseAdmin),
+    rawProject.status === 'researched' ? readTeamFixStops(id) : Promise.resolve(null),
+    rawProject.status === 'researched' ? readHeEngSendingAccess(supabaseAdmin, result.auth.userId) : Promise.resolve(null),
   ]);
+  const accountAccess: 'not_enabled' | 'revoked' | null | undefined =
+    sendingAccess === null || sendingAccess.state === 'error' || sendingAccess.state === 'unavailable'
+      ? undefined
+      : sendingAccess.state === 'not_enabled' || sendingAccess.state === 'revoked'
+        ? sendingAccess.state
+        : null;
 
   // Белый список полей: себестоимость, модели, план сорсинга и id внутренних
   // джоб в кабинет не едут (lib/hypothesisEngine/clientEngProjection).
@@ -249,6 +324,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     ...(researchRetry ? { research_retry: researchRetry } : {}),
     auto_launch: autoLaunch,
     estimates: { research_minutes: durations.researchMinutes, prepare_hours: durations.prepareHours },
+    ...(teamFixStops ? { team_fix_stops: teamFixStops } : {}),
+    ...(accountAccess !== undefined ? { account_access: accountAccess } : {}),
   });
 }
 

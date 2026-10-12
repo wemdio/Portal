@@ -24,7 +24,9 @@
  *   проекция записи о запуске и предупреждений → проверка вызывающего перед
  *   стартом (onStartDecided, с 12.10.2026 — см. ниже) → старт кампаний
  *   (startHeEngLaunchSending via 'launch', только по startSending) → сводка
- *   отправки → конфиг ночного добора → справка команде (notifyHeClientLaunch).
+ *   отправки → конфиг ночного добора (с 13.10.2026 — не после отказа
+ *   проверки старта 'cancelled' / 'account_blocked' и только с разрешения
+ *   beforeTopUpConfig вызывающего) → справка команде (notifyHeClientLaunch).
  * Все тексты, константы и помощники — те же байты, что были в роуте; ответ
  * (`body`) — ровно прежний JSON (контракт api-client.launchEngTemplate); новое
  * — отказ проверки перед стартом (`sending.outcome 'refused'` с её кодом и
@@ -52,9 +54,15 @@
  * `onStartDecided` (оба вызова) — последняя проверка вызывающего прямо перед
  * startHeEngLaunchSending, когда старт уже решён (пропуска нет): кнопка и тик
  * передают engAutoLaunch.heEngStartGate — аккаунт ещё не заблокирован (бан
- * мог прийти посреди запуска) и решение «стартуем» записано в строку
- * автозапуска (код 'start_pending'). Отказ — старт не начат, итог 'refused' с
- * кодом проверки; бросок — тот же отказ 'start_not_recorded' (fail-closed).
+ * или отметка блокировки могли прийти посреди запуска) и решение «стартуем»
+ * записано в строку автозапуска (код 'start_pending'). Отказ — старт не
+ * начат, итог 'refused' с кодом проверки; бросок — тот же отказ
+ * 'start_not_recorded' (fail-closed).
+ *
+ * СРОК СТАРТА (`sendingDeadlineFrom`): у кнопки — от начала запроса (запрос
+ * держит свой maxDuration), у тика — от самого старта: ядро перед ним идёт
+ * минутами (классификатор сегментов), и срок от взятия строки кончался бы до
+ * старта — ни одна кампания не начиналась бы.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -120,14 +128,24 @@ export interface HeEngTemplateLaunchInput {
   /** Стартовать кампании после ядра (`start_sending: true` кнопки; автозапуск — всегда). */
   startSending: boolean;
   trigger: HeEngLaunchTrigger;
-  /** Отсюда считается срок старта кампаний (SENDING_DEADLINE_MS). */
-  requestStartedAt: number;
+  /**
+   * Откуда считается срок старта кампаний (SENDING_DEADLINE_MS, шапка «СРОК
+   * СТАРТА»): число — от этого момента (кнопка: начало запроса); 'start' —
+   * от самого старта (тик воркера: срока запроса у него нет).
+   */
+  sendingDeadlineFrom: number | 'start';
   /**
    * Проверка прямо перед стартом кампаний (см. шапку); нет — старт без неё.
    * Зовётся только когда старт решён: у запуска нет пропуска (launch_problem /
    * window_not_applied / not_requested).
    */
   onStartDecided?: () => Promise<HeEngStartGateResult>;
+  /**
+   * Проверка перед заведением конфига ночного добора (ensureHeUsRefillConfig)
+   * после успешного запуска: false — конфиг не заводится (блок «Ежедневный
+   * добор» ниже). Нет — заводится, как до 13.10.2026. Бросок — не заводится.
+   */
+  beforeTopUpConfig?: () => Promise<boolean>;
 }
 
 /**
@@ -138,6 +156,15 @@ export interface HeEngTemplateLaunchInput {
 export type HeEngStartGateResult =
   | { ok: true }
   | { ok: false; code: string; message: string; retryable: boolean };
+
+/**
+ * Коды отказа проверки перед стартом, которые решают судьбу запуска
+ * окончательно (engAutoLaunch.heEngStartGate пишет их, heEngAutoLaunchVerdict
+ * и блок «Ежедневный добор» ниже читают): автозапуск проекта отменён посреди
+ * попытки тика («Cancel all jobs» или блокировка) и аккаунт заблокирован.
+ */
+export const HE_ENG_START_REFUSAL_CANCELLED = 'cancelled';
+export const HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED = 'account_blocked';
 
 /** Проверка перед стартом бросила или не записалась — старт не начат. */
 export const ENG_START_GATE_FAILED_TEXT =
@@ -204,12 +231,18 @@ export interface HeEngTemplateLaunchResult {
 /* ─────────────── Тексты и проекция ответа (байты бывшего роута) ─────────────── */
 
 /**
- * Старт кампаний после ядра (блок «Отправка» ниже) укладывается в срок от
- * начала запроса: новая кампания начинается, только если до срока остаётся
- * бюджет одной кампании (engCampaignSending); не начатые клиент стартует
- * кнопкой «Start sending».
+ * Старт кампаний после ядра (блок «Отправка» ниже) укладывается в этот срок,
+ * отсчитанный от `sendingDeadlineFrom` (кнопка — начало запроса, тик — сам
+ * старт): новая кампания начинается, только если до срока остаётся бюджет
+ * одной кампании (engCampaignSending); не начатые клиент стартует кнопкой
+ * «Start sending», а тик — повтором старта ('start_retry').
  */
 const SENDING_DEADLINE_MS = 100_000;
+
+/** Абсолютный срок старта, считается прямо перед стартом. */
+function sendingDeadlineMs(from: number | 'start'): number {
+  return (from === 'start' ? Date.now() : from) + SENDING_DEADLINE_MS;
+}
 
 const LAUNCH_FAILED = 'Failed to launch the campaign';
 
@@ -328,24 +361,23 @@ const SEGMENT_FAILED_PREFIX = 'Segment campaign failed: ';
  * запуска нет ни одной кампании, или на ПЕРВОМ запуске рынка, где ядро не
  * назвало кампании с окном (`window_campaign_ids`), а PATCH окна не прошёл ни
  * у одной. Отказом ответ не делаем — слепой повтор наплодил бы дубли кампаний
- * и лидов, — но клиент обязан узнать, что до старта окно надо переставить.
+ * и лидов, — но клиент обязан узнать, что старт без проверки уйдёт не в его
+ * часы.
  *
  * Слово «default» здесь было ложью: в кабинете «default» — это 09:00–17:00
  * Eastern (engDefaultSendingWindow), а у кампаний остались часы пресета.
- * Посмотреть настоящие часы клиент может там же, куда его отправляет фраза:
- * GET .../schedule, не найдя сохранённого выбора новее этого запуска, читает
- * окна кампаний запуска у рассыльщика (разные — говорит и это). «Save the
- * hours you want», а не «save your window again»: форма покажет прочитанные
- * часы кампаний, а не выбор, который до них не доехал. Кнопку старта фраза не
- * называет: часть кампаний может уже отправлять («Start the rest»), клиент мог
- * поставить паузу («Resume») — какая кнопка стоит, показывает блок отправки
- * шаблона (engText.engStartButtonOf).
+ *
+ * Следующий шаг — ОДИН на всех путях этого исхода (skip_reason
+ * 'window_not_applied', строка автозапуска 'done needs_support', письмо
+ * needs_support 'not_started' — engClientNotice.ts, и строка шага 3 той же
+ * строки): ENG_SUPPORT_BEFORE_START_TEXT — сначала Support, потом «Start
+ * sending». Кнопкой старта кампании ушли бы на прежних часах.
  */
+const ENG_SUPPORT_BEFORE_START_TEXT = 'Message Support before pressing «Start sending».';
+
 const WARNING_SCHEDULE_NOT_APPLIED =
   'The campaigns were created, but the sending window you picked did not reach them, so they kept ' +
-  'their earlier sending hours, and this launch did not start sending. Open the sending window of this ' +
-  'template to see those hours, save the hours you want, and then start the campaigns — the sending status ' +
-  'of this template shows how.';
+  `their earlier sending hours, and this launch did not start sending. ${ENG_SUPPORT_BEFORE_START_TEXT}`;
 
 /**
  * Окно доехало до ЧАСТИ кампаний первого запуска рынка (сплит по сегментам
@@ -353,15 +385,13 @@ const WARNING_SCHEDULE_NOT_APPLIED =
  * это только кампании, которым окно ставил ЭТОТ роут и рассыльщик его не
  * принял: созданные ядром несут окно с момента создания, а кампании прошлой
  * попытки достройки роут не трогает (свои часы рынка). Клиент различает
- * кампании запуска только по имени, и «часть» без имён не даёт ему проверить
- * результат повторного сохранения. Имя идёт через тот же проектор, что и
- * launch_info ответа (внутренний префикс и русский фолбэк срезаны), id кампаний
- * наружу не уходят.
+ * кампании запуска только по имени, и «часть» без имён не даёт ему назвать
+ * их Support. Имя идёт через тот же проектор, что и launch_info ответа
+ * (внутренний префикс и русский фолбэк срезаны), id кампаний наружу не уходят.
  *
  * Выбор при частичной перестановке НЕ сохраняется (см. блок «Окно отправки»
- * ниже), и форма окна на этом шаге показывает часы, прочитанные у кампаний, с
- * пометкой, что они у кампаний разные, — поэтому «save the hours you want», а
- * не «save it again»: выбранного окна в форме может не быть.
+ * ниже). Следующий шаг — тот же, что у WARNING_SCHEDULE_NOT_APPLIED (тот же
+ * skip_reason 'window_not_applied'): ENG_SUPPORT_BEFORE_START_TEXT.
  */
 function scheduleAppliedPartlyWarning(keptEarlierWindow: string[]): string {
   const named = keptEarlierWindow.filter((name) => name.length > 0).join(', ').slice(0, 300);
@@ -370,8 +400,7 @@ function scheduleAppliedPartlyWarning(keptEarlierWindow: string[]): string {
     (named
       ? `These campaigns kept their earlier sending hours: ${named}. `
       : 'Some campaigns kept their earlier sending hours. ') +
-    'This launch did not start sending — open the sending window on this step, save the hours you want, ' +
-    'and then start the campaigns — the sending status of this template shows how.'
+    `This launch did not start sending. ${ENG_SUPPORT_BEFORE_START_TEXT}`
   );
 }
 
@@ -1056,6 +1085,9 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
       code: null,
       retryable: false,
     };
+    // Код отказа проверки перед стартом (null — не отказала или не звалась):
+    // по нему блок «Ежедневный добор» ниже не заводит конфиг.
+    let startGateRefusal: string | null = null;
     if (outcome.status === 200) {
       const record = parseLaunchInfo(outcome.body.launch);
       const recordCampaigns = record ? heEngLaunchCampaigns(record) : [];
@@ -1099,6 +1131,7 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
         };
         sendingNotStarted = withLeads;
         sendingVerdict = { kind: 'not_started', reason: 'refused', code: gate.code, retryable: gate.retryable };
+        startGateRefusal = gate.code;
       } else {
         const started = await startHeEngLaunchSending({
           portalDb,
@@ -1108,7 +1141,7 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
           templateId: id,
           via: 'launch',
           expectedCampaignIds: recordCampaigns.map((c) => c.campaignId),
-          deadlineMs: input.requestStartedAt + SENDING_DEADLINE_MS,
+          deadlineMs: sendingDeadlineMs(input.sendingDeadlineFrom),
         });
         sendingVerdict = sendingVerdictOf(started);
         if (started.kind === 'refused') {
@@ -1170,8 +1203,43 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
     // проект; уже заведённую — в том числе выключенную клиентом — вызов не
     // трогает. Не бросает; сбой пишется строкой warn, а включить добор клиент
     // может переключателем «Daily top-up» дашборда.
+    //
+    // Конфиг НЕ заводится (13.10.2026), если проект за время запуска отменили
+    // или аккаунт заблокировали: «Cancel all jobs» ставит паузу добора, а
+    // блокировка выключает «Daily top-up» только у ЗАВЕДЁННОГО конфига
+    // (pauseHeRefillForClientCancel — 'no_config', switchHeUsRefill(false) —
+    // 'already_off'), и конфиг, заведённый после них, включил бы ночной добор
+    // проекту, который его уже не должен получать. Признаки:
+    //  - проверка перед стартом отказала HE_ENG_START_REFUSAL_CANCELLED или
+    //    HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED — без новых чтений;
+    //  - проверка вызывающего (beforeTopUpConfig) ответила «нет» или бросила:
+    //    отмена или блокировка, пришедшие уже после проверки старта (старт
+    //    идёт до SENDING_DEADLINE_MS), и сбой её чтения (fail-closed).
     if (outcome.status === 200 && parseLaunchInfo(outcome.body.launch)) {
-      await ensureHeUsRefillConfig(portalDb, projectId);
+      const refusedForGood =
+        startGateRefusal === HE_ENG_START_REFUSAL_CANCELLED || startGateRefusal === HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED;
+      let topUpAllowed = !refusedForGood;
+      if (topUpAllowed && input.beforeTopUpConfig) {
+        try {
+          topUpAllowed = await input.beforeTopUpConfig();
+        } catch (e) {
+          topUpAllowed = false;
+          void logWarn('client.eng.template.launch.top_up_check_failed', e instanceof Error ? e.message : 'unknown', {
+            userId,
+            templateId: id,
+            trigger,
+          });
+        }
+      }
+      if (topUpAllowed) {
+        await ensureHeUsRefillConfig(portalDb, projectId);
+      } else {
+        void logWarn(
+          'client.eng.template.launch.top_up_config_skipped',
+          'nightly refill config not created: the project was cancelled or the account blocked during the launch, or that could not be checked',
+          { userId, projectId, templateId: id, startGateRefusal, trigger },
+        );
+      }
     }
 
     // Команде — ИНФОРМАЦИЯ, что шаблон запущен из кабинета (кнопкой клиента
@@ -1253,13 +1321,14 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
  * другим») → startHeEngLaunchSending via 'launch' по кампаниям записи о
  * запуске. via 'launch' СТРОЖЕ кнопки «Start sending»: паузу клиента не
  * снимает и кампанию на паузе у рассыльщика (2) не стартует. Прямо перед
- * стартом — `onStartDecided` (как у runHeEngTemplateLaunch).
+ * стартом — `onStartDecided` (как у runHeEngTemplateLaunch). Конфиг ночного
+ * добора повтор не заводит (его заводит только успешный запуск).
  *
  * Отказ гейта до старта — 'not_started' с кодом гейта (`reason: 'refused'`).
  * НЕ БРОСАЕТ.
  */
 export async function retryHeEngLaunchStart(
-  input: Omit<HeEngTemplateLaunchInput, 'sendingWindow' | 'startSending'>,
+  input: Omit<HeEngTemplateLaunchInput, 'sendingWindow' | 'startSending' | 'beforeTopUpConfig'>,
 ): Promise<HeEngLaunchSendingVerdict> {
   const { portalDb, instantlyDb, userId, templateId, owned, trigger } = input;
   const projectId = String(owned.project.id);
@@ -1316,7 +1385,7 @@ export async function retryHeEngLaunchStart(
       templateId,
       via: 'launch',
       expectedCampaignIds: heEngLaunchCampaigns(record).map((c) => c.campaignId),
-      deadlineMs: input.requestStartedAt + SENDING_DEADLINE_MS,
+      deadlineMs: sendingDeadlineMs(input.sendingDeadlineFrom),
     });
     const verdict = sendingVerdictOf(started);
     void logAudit('client.eng.template.launch.start_retried', 'ENG launch campaigns start retried', {

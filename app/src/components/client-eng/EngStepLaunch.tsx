@@ -33,22 +33,30 @@ import type { HeHypothesis, HeTemplate, HeVertical } from '@/lib/hypothesisEngin
 import { heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 // Тот же предикат «кнопка поставит анализ заново», что у Command Center
 // (чистая функция без серверных зависимостей).
-import { engAnalysisRequeues } from '@/lib/hypothesisEngine/engDashboard';
-import { heEngMarketStarted, heEngSelectedVerticalIds } from '@/lib/hypothesisEngine/engMarkets';
+import {
+  ENG_TEAM_FIX_STOP_EN,
+  engAnalysisRequeues,
+  engTeamFixStopOf,
+  engTeamFixThenText,
+} from '@/lib/hypothesisEngine/engDashboard';
+import { heEngMarketPending, heEngMarketStarted, heEngSelectedVerticalIds } from '@/lib/hypothesisEngine/engMarkets';
 import {
   EngLaunchServerError,
   EngPaidAccessError,
   collectEngBase,
+  engSendingAccessOf,
   engTemplateNeedsRewrite,
   fetchEngProjectLaunch,
   fetchEngTemplateRewriteTries,
   launchEngProject,
+  launchEngProjectMarkets,
   launchEngTemplate,
   rewriteEngTemplateLetters,
   updateEngProjectLaunchSchedule,
   type EngAutoLaunchMarket,
   type EngBaseSummary,
   type EngProjectLaunchInfo,
+  type EngProjectLaunchMoreResponse,
   type EngProjectLaunchResponse,
   type EngSendingAccessState,
   type EngSendingWindow,
@@ -58,7 +66,9 @@ import {
 } from './api-client';
 import {
   ENG_NO_REASON_BASE_HEAD_EN,
+  ENG_SENDING_OFF_EN,
   engAutopilotHoldText,
+  engBaseStopSendingOffText,
   engChainDraftText,
   engEarlierBaseStopText,
   engLaunchSendingText,
@@ -190,6 +200,41 @@ function accessLine(access: EngSendingAccessState | undefined): { text: string; 
   }
 }
 
+/**
+ * Шапка шага 3 у начатого проекта. `blocked` — выключатель отправки держит
+ * «Launch» (accessLine 'revoked': кнопка выключена, «Launch N more markets» и
+ * «Launch now» скрыты, роут ответил бы 403; так и после разблокировки, пока
+ * сотрудник не включит отправку). Тогда в шапке нет ни «Press «Launch»», ни
+ * «press «Launch now»», ни обещания «starts sending by itself» — что делать,
+ * говорит красная строка доступа ниже.
+ */
+function launchHeaderText(s: {
+  requested: boolean;
+  available: boolean | null;
+  requestedAt: string | null;
+  cancelledAt: string | null;
+  blocked: boolean;
+}): string {
+  const notAvailable = s.blocked
+    ? 'Automatic sending is not available right now.'
+    : 'Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.';
+  if (s.requested && s.available !== false) {
+    const on = `Automatic launch is on${s.requestedAt ? ` since ${fmtDate(s.requestedAt)}` : ''}`;
+    return s.blocked ? `${on}.` : `${on}: each market starts sending by itself once its final letters are ready.`;
+  }
+  if (s.requested) return notAvailable;
+  if (s.cancelledAt) {
+    // Выключает его и «Cancel all jobs» клиента, и остановка работы командой
+    // (и блокировка аккаунта) — фраза верна для всех.
+    const off = `Automatic launch has been off since ${fmtDate(s.cancelledAt)}.`;
+    return s.blocked ? off : `${off} Press «Launch» to turn it back on.`;
+  }
+  if (s.available === false) return notAvailable;
+  return s.blocked
+    ? 'Automatic launch is not on for this project.'
+    : 'Automatic launch is not on for this project. Press «Launch» to turn it on — each market then starts sending by itself once its final letters are ready.';
+}
+
 /** Итог «Launch» проекта одной-двумя фразами. */
 function launchResultText(res: EngProjectLaunchResponse): { text: string; held: boolean } {
   const parts: string[] = [];
@@ -237,6 +282,41 @@ function launchResultText(res: EngProjectLaunchResponse): { text: string; held: 
         : ' Each market starts sending by itself once its final letters are ready. We’ll email you when sending starts, or if something stops and needs you.'
       : ' Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.';
   return { text: `${head}${againNote}${tail}`, held: held || Boolean(holdCode) || (parts.length === 0 && again > 0) };
+}
+
+/**
+ * Итог «Launch N more markets». Обещание письма и старта — то же, что у
+ * «Launch» (намерение проекта уже включено, новые рынки ведёт тот же автозапуск);
+ * при выключателе аккаунта 'not_enabled' старт ждёт разовой проверки командой.
+ * Пауза, записанная этим нажатием (потолок расхода, сбой постановки), — её
+ * фразой; рынки, которые к нажатию уже начались, — отдельной фразой.
+ */
+function launchMoreResultText(
+  res: EngProjectLaunchMoreResponse,
+  nameOf: (verticalId: string) => string,
+): { text: string; held: boolean } {
+  const started = (res.markets_started ?? []).map(nameOf);
+  const already = (res.markets_already_started ?? []).map(nameOf);
+  const holdCode = res.autopilot_hold_code;
+  if (started.length === 0) {
+    if (holdCode) return { text: `Nothing new was started. ${engAutopilotHoldText(holdCode)}`, held: true };
+    return {
+      text:
+        already.length > 0
+          ? 'These markets have already started — their cards below show how far they have got.'
+          : 'Nothing new was started — each market’s card below says what it is waiting for.',
+      held: true,
+    };
+  }
+  const head = `Started ${plural(started.length, 'more market', 'more markets')}: ${namesList(started)}.`;
+  const how = ' We write their letters, find and check contacts and start sending by ourselves, the same way as your other markets.';
+  const tail =
+    res.sending_access === 'not_enabled'
+      ? ' They start sending after our team has finished the one-time check of your account.'
+      : ' We’ll email you when sending starts, or if something stops and needs you.';
+  const alreadyNote = already.length > 0 ? ` ${namesList(already)} had already started.` : '';
+  const holdNote = holdCode ? ` Not everything could be started. ${engAutopilotHoldText(holdCode)}` : '';
+  return { text: `${head}${how}${tail}${alreadyNote}${holdNote}`, held: Boolean(holdCode) };
 }
 
 /* ── Рынок: что с ним сейчас ── */
@@ -478,7 +558,7 @@ function autoLaunchLine(
         };
       }
       if (code === null && access === 'revoked') {
-        return { text: 'Sending is turned off for your account. Message Support.', tone: 'red', actions: [] };
+        return { text: ENG_SENDING_OFF_EN, tone: 'red', actions: [] };
       }
       if (code === 'unfinished') {
         // «Launch now» остаётся: замок шаблона (he_eng_auto_launch_claim) не
@@ -539,27 +619,40 @@ function autoLaunchLine(
         actions: [],
       };
     }
-    case 'held':
+    case 'held': {
+      // `launched` — запуск не закончен (часть аудитории уже в кампаниях):
+      // «Ready» и «starts» про такой рынок неправда — говорим «the rest».
+      const rest = 'Part of this market’s audience has not gone out yet';
       switch (code) {
         case 'sending_not_enabled':
           return {
-            text: 'Ready. Sending starts after a one-time check of your account by our team — we’ll email you when it’s on.',
+            text: launched
+              ? `${rest}; the rest is added after a one-time check of your account by our team — we’ll email you when it’s on.`
+              : 'Ready. Sending starts after a one-time check of your account by our team — we’ll email you when it’s on.',
             tone: 'muted',
             actions: [],
           };
         case 'sending_turned_off':
-          return { text: 'Sending is turned off for your account. Message Support.', tone: 'red', actions: [] };
+          return { text: ENG_SENDING_OFF_EN, tone: 'red', actions: [] };
         case 'email_not_verified':
-          return { text: 'Ready. Sending starts once you confirm your email.', tone: 'amber', actions: ['resend'] };
+          return {
+            text: launched ? `${rest}; the rest is added once you confirm your email.` : 'Ready. Sending starts once you confirm your email.',
+            tone: 'amber',
+            actions: ['resend'],
+          };
         case 'spend_limit':
           return {
-            text: 'Sending for this market is on hold: your account has reached its usage limit. Contact Support to raise the limit.',
+            text: launched
+              ? `${rest}: adding the rest is on hold because your account has reached its usage limit. Contact Support to raise the limit.`
+              : 'Sending for this market is on hold: your account has reached its usage limit. Contact Support to raise the limit.',
             tone: 'amber',
             actions: [],
           };
         case 'spend_day_limit':
           return {
-            text: 'Sending for this market is on hold: your account has reached its usage limit for the last 24 hours. We try again by ourselves, or contact Support to raise the limit.',
+            text: launched
+              ? `${rest}: adding the rest is on hold because your account has reached its usage limit for the last 24 hours. We try again by ourselves, or contact Support to raise the limit.`
+              : 'Sending for this market is on hold: your account has reached its usage limit for the last 24 hours. We try again by ourselves, or contact Support to raise the limit.',
             tone: 'amber',
             actions: [],
           };
@@ -569,14 +662,18 @@ function autoLaunchLine(
           // (heEngLaunchWindowPlan: не прочитались запись о запуске или часы
           // рынка) — поэтому без «your account».
           return {
-            text: `Ready. We could not finish our checks just now — we’ll try again ${nextTryText(row.next_at)}.`,
+            text: launched
+              ? `${rest}. We could not finish our checks just now — we’ll try again ${nextTryText(row.next_at)}.`
+              : `Ready. We could not finish our checks just now — we’ll try again ${nextTryText(row.next_at)}.`,
             tone: 'muted',
             actions: [],
           };
         case 'setup_unavailable':
         case 'mailboxes_short':
           return {
-            text: 'We’re preparing sending for your account; it starts by itself when ready. Our team has been notified.',
+            text: launched
+              ? `${rest}; we’re preparing sending for your account and add the rest by ourselves when it’s ready. Our team has been notified.`
+              : 'We’re preparing sending for your account; it starts by itself when ready. Our team has been notified.',
             tone: 'muted',
             actions: [],
           };
@@ -585,13 +682,40 @@ function autoLaunchLine(
         case 'letters_need_rewrite':
           // Пишет карточка своей веткой (признак `needs_rewrite`) — с кнопкой.
           return null;
-        default:
+        case 'account_blocked':
+          // Строку автозапуск сам не перепроверяет (срок — через годы, его не
+          // печатаем): поднимает её только новое «Launch» проекта. Отправка
+          // аккаунта выключена ('revoked') — «Launch» выключена, к ней не зовём.
+          if (access === 'revoked') return { text: ENG_SENDING_OFF_EN, tone: 'red', actions: [] };
+          return {
+            text: launched
+              ? `${rest}. Press «Launch» above to finish it.`
+              : 'Sending for this market has not started yet. Press «Launch» above to start it.',
+            tone: 'amber',
+            actions: [],
+          };
+        case 'needs_support':
+          // Отказ запуска, который не снимается сам (алерт команде и письмо
+          // ушли при входе в код). Незаконченному запуску «Launch now»
+          // упрётся в тот же отказ — Support.
+          if (launched) {
+            return { text: `${rest}: finishing it ran into a problem. Message Support.`, tone: 'amber', actions: [] };
+          }
           return {
             text: 'Sending could not start for this market. Nothing was sent. Press «Launch now» to see the reason, or message Support.',
             tone: 'amber',
             actions: ['launch_now'],
           };
+        default:
+          return {
+            text: launched
+              ? `${rest}. Press «Launch now» to see the reason, or message Support.`
+              : 'Sending could not start for this market. Nothing was sent. Press «Launch now» to see the reason, or message Support.',
+            tone: 'amber',
+            actions: ['launch_now'],
+          };
       }
+    }
     case 'failed':
       return {
         text: 'We could not start this market after several tries. Nothing was sent. Press «Launch now» to try once more; if it does not start, message Support.',
@@ -610,9 +734,17 @@ function autoLaunchLine(
  * шаблоне, пока у аудитории есть попытки, и Support, когда их 0. «Nothing was
  * sent» — правда: роут переписки не снимает письма с записью о запуске и не
  * трогает рынок, у которого запущены другие письма.
+ *
+ * `sendingOff` — выключатель отправки аккаунта 'revoked' (так и после
+ * разблокировки, пока сотрудник не включит отправку): «Rewrite letters» тогда
+ * откажет 403 sending_turned_off — кнопки нет, вместо «Press» строка доступа.
+ * Попытки, которые кончились, — прежняя фраза: она зовёт в Support и кнопку не
+ * называет.
  */
 function retiredLine(
   tries: { left: number; max: number } | { error: true } | null,
+  teamFix: boolean,
+  sendingOff: boolean,
 ): MarketLine {
   const head = 'New final letters for this market were not written, so nothing was sent from it.';
   if (tries && 'left' in tries && tries.left <= 0) {
@@ -620,6 +752,23 @@ function retiredLine(
       text: `${head} All ${tries.max} letter-writing tries for this audience are used — message Support to get new letters.`,
       tone: 'amber',
       actions: [],
+    };
+  }
+  if (sendingOff) {
+    return {
+      text: teamFix ? `${head} ${ENG_TEAM_FIX_STOP_EN} ${ENG_SENDING_OFF_EN}` : `${head} ${ENG_SENDING_OFF_EN}`,
+      tone: 'red',
+      actions: [],
+    };
+  }
+  // Новые письма не написал отказ, который чинит команда: нажатие до починки
+  // упрётся в тот же отказ и съест попытку — сначала Support (кнопка остаётся
+  // вторым шагом, вторичной).
+  if (teamFix) {
+    return {
+      text: `${head} ${ENG_TEAM_FIX_STOP_EN} ${engTeamFixThenText('Rewrite letters')}`,
+      tone: 'amber',
+      actions: ['rewrite'],
     };
   }
   if (tries && 'left' in tries) {
@@ -643,11 +792,115 @@ function retiredLine(
  */
 const SPEND_PAUSED_NEXT = 'Work on this project is paused on our side; our team has been notified.';
 
+/**
+ * Остановку стадии рынка чинит только команда (EngTeamFixStop деталки,
+ * engDashboard.ts): письма ('letters'), проверка контактов ('check' — только
+ * когда «Launch» её заново ставит, иначе карточка и так зовёт в Support),
+ * итоговые письма ('final_letters') или новые письма «Rewrite letters»
+ * ('rewrite'). Кнопка до починки упрётся в тот же отказ, поэтому карточка
+ * зовёт сначала в Support, как письмо об этой остановке. Решает ТЕКУЩАЯ
+ * остановка карточки: идущая работа, готовые письма или другая база — не она.
+ */
+export type EngMarketTeamFix = 'letters' | 'check' | 'final_letters' | 'rewrite';
+
+function marketTeamFixOf(view: MarketView, detail: EngDetail): EngMarketTeamFix | null {
+  const stops = detail.team_fix_stops;
+  if (!stops || stops.length === 0 || view.template || view.templateJob) return null;
+  if (view.retired) return engTeamFixStopOf(stops, 'template', view.retired.base_id) ? 'rewrite' : null;
+  const { base } = view;
+  if (base) {
+    if (base.status === 'analyzed' && base.row_count > 0) {
+      return engTeamFixStopOf(stops, 'template', base.id) ? 'final_letters' : null;
+    }
+    if (base.status === 'analyzing' && engBaseAnalysisStopped(base) && engTeamFixStopOf(stops, 'base_analyze', base.id)) {
+      const chains = (detail.chains ?? []) as unknown as Array<Record<string, unknown>>;
+      const requeues =
+        detail.project.status === 'researched' &&
+        view.selected &&
+        detail.project.autopilot_hold?.code !== 'spend_paused' &&
+        engAnalysisRequeues(
+          base as unknown as Record<string, unknown>,
+          view.ownBases as unknown as Array<Record<string, unknown>>,
+          chains.filter((c) => c.vertical_id === view.vertical.id),
+        );
+      return requeues ? 'check' : null;
+    }
+    return null;
+  }
+  if (view.chainStopped && !view.chainJob) {
+    return engTeamFixStopOf(stops, 'chain', view.vertical.id) ? 'letters' : null;
+  }
+  return null;
+}
+
+/**
+ * Выбранные рынки, чью текущую остановку чинит только команда
+ * (marketTeamFixOf) — для шапки мастера (EngProjectWizard): «Launch» их до
+ * починки не сдвинет, и общая фраза «press «Launch»» про них неправда.
+ */
+export function engTeamFixMarkets(detail: EngDetail): Array<{ id: string; name: string; fix: EngMarketTeamFix }> {
+  if (!detail.team_fix_stops || detail.team_fix_stops.length === 0) return [];
+  const selected = new Set(heEngSelectedVerticalIds((detail.hypotheses ?? []) as HeHypothesis[]));
+  const out: Array<{ id: string; name: string; fix: EngMarketTeamFix }> = [];
+  for (const vertical of (detail.verticals ?? []) as HeVertical[]) {
+    if (!selected.has(vertical.id)) continue;
+    const fix = marketTeamFixOf(buildMarketView(detail, vertical, true), detail);
+    if (fix) out.push({ id: vertical.id, name: vertical.name, fix });
+  }
+  return out;
+}
+
+/** «A problem on our side stopped it; … then press «Launch».» — как письмо (совет 'team_fix'). */
+const TEAM_FIX_LAUNCH_NEXT = `${ENG_TEAM_FIX_STOP_EN} ${engTeamFixThenText('Launch')}`;
+
+/**
+ * Готовый к «Launch now» рынок, которому кнопку откажет выключатель отправки
+ * аккаунта (GET …/launch): 'revoked' — выключен сотрудником, 'not_enabled' —
+ * ждёт разовой проверки командой (тогда письмо «Sending is on» зовёт нажать
+ * «Launch now» там, где кнопка есть). Строка без кнопки; иначе — как была.
+ */
+function launchNowAccessLine(
+  line: MarketLine | null,
+  access: EngSendingAccessState | undefined,
+  launched: boolean,
+): MarketLine | null {
+  if (!line || !line.actions.includes('launch_now')) return line;
+  const actions = line.actions.filter((a) => a !== 'launch_now');
+  if (access === 'revoked') {
+    return { text: ENG_SENDING_OFF_EN, tone: 'red', actions };
+  }
+  if (access === 'not_enabled') {
+    return {
+      text: launched
+        ? 'Part of this market’s audience has not gone out yet. The rest can be added after a one-time check of your account by our team — we’ll email you when it’s on; then press «Launch now» here.'
+        : 'Ready. Sending can start after a one-time check of your account by our team — we’ll email you when it’s on; then press «Launch now» here.',
+      tone: 'muted',
+      actions,
+    };
+  }
+  return line;
+}
+
 function preparingLine(
   view: MarketView,
-  ctx: { autopilotOn: boolean; researched: boolean; spendPaused: boolean },
+  ctx: {
+    autopilotOn: boolean;
+    researched: boolean;
+    spendPaused: boolean;
+    teamFix: EngMarketTeamFix | null;
+    /** Подпись «Launch N more markets», если рынок начинает она; иначе null. */
+    moreLabel: string | null;
+    /**
+     * Выключатель отправки аккаунта 'revoked' (так и после разблокировки, пока
+     * сотрудник не включит отправку): «Launch» вверху выключена, роут ответил
+     * бы 403 — к ней не зовём; что делать, говорит красная строка доступа
+     * вверху шага.
+     */
+    launchBlocked: boolean;
+  },
 ): MarketLine | null {
   const { base } = view;
+  const teamFixNext = ctx.launchBlocked ? ENG_TEAM_FIX_STOP_EN : TEAM_FIX_LAUNCH_NEXT;
   if (view.templateJob) return { text: 'Writing the final letters…', tone: 'muted', spinner: true, actions: [] };
   if (base) {
     // Идущую сборку описывает её собственный прогресс (CollectProgress).
@@ -666,8 +919,12 @@ function preparingLine(
       return {
         text: ctx.spendPaused
           ? `The contacts are ready, and the final letters have not been written yet. ${SPEND_PAUSED_NEXT}`
-          : 'The contacts are ready, and the final letters have not been written yet. If nothing is running on this project, press «Launch» above to move it on; if that does not help, message Support.',
-        tone: 'muted',
+          : ctx.teamFix === 'final_letters'
+            ? `The contacts are ready, and writing the final letters stopped. ${teamFixNext}`
+            : ctx.launchBlocked
+              ? 'The contacts are ready, and the final letters have not been written yet.'
+              : 'The contacts are ready, and the final letters have not been written yet. If nothing is running on this project, press «Launch» above to move it on; if that does not help, message Support.',
+        tone: ctx.teamFix === 'final_letters' && !ctx.spendPaused ? 'amber' : 'muted',
         actions: [],
       };
     }
@@ -679,7 +936,11 @@ function preparingLine(
     return {
       text: ctx.spendPaused
         ? `Writing the letters stopped before it finished. ${SPEND_PAUSED_NEXT}`
-        : 'Writing the letters stopped before it finished. Press «Launch» above to try again; if it stops again, message Support.',
+        : ctx.teamFix === 'letters'
+          ? `Writing the letters stopped before it finished. ${teamFixNext}`
+          : ctx.launchBlocked
+            ? 'Writing the letters stopped before it finished.'
+            : 'Writing the letters stopped before it finished. Press «Launch» above to try again; if it stops again, message Support.',
       tone: 'amber',
       actions: [],
     };
@@ -688,12 +949,18 @@ function preparingLine(
     if (ctx.spendPaused) return { text: `The letters are written. ${SPEND_PAUSED_NEXT}`, tone: 'muted', actions: [] };
     return ctx.autopilotOn
       ? { text: 'The letters are written; collecting contacts comes next.', tone: 'muted', actions: [] }
-      : { text: 'The letters are written. Press «Launch» above to collect contacts for this market.', tone: 'muted', actions: [] };
+      : ctx.launchBlocked
+        ? { text: 'The letters are written.', tone: 'muted', actions: [] }
+        : { text: 'The letters are written. Press «Launch» above to collect contacts for this market.', tone: 'muted', actions: [] };
   }
   if (view.selected && ctx.researched) {
     return ctx.spendPaused
       ? { text: `Not started yet. ${SPEND_PAUSED_NEXT}`, tone: 'muted', actions: [] }
-      : { text: 'Not started yet — press «Launch» above to start it.', tone: 'muted', actions: [] };
+      : ctx.launchBlocked
+        ? { text: 'Not started yet.', tone: 'muted', actions: [] }
+        : ctx.moreLabel
+        ? { text: `Not started yet — press «${ctx.moreLabel}» above to start it.`, tone: 'muted', actions: [] }
+        : { text: 'Not started yet — press «Launch» above to start it.', tone: 'muted', actions: [] };
   }
   return null;
 }
@@ -706,6 +973,7 @@ function MarketCard({
   autoOn,
   sendingAccess,
   launchSchedule,
+  moreLabel,
   onChanged,
 }: {
   view: MarketView;
@@ -720,9 +988,12 @@ function MarketCard({
    * рынка часы свои — «Sending hours» на его карточке.
    */
   launchSchedule: EngSendingWindow | undefined;
+  /** Подпись «Launch N more markets», если этот рынок начинает она; иначе null. */
+  moreLabel: string | null;
   onChanged: () => void;
 }) {
   const { vertical, template, launch, row, base, ownBases, retired } = view;
+  const teamFix = marketTeamFixOf(view, detail);
   const [busy, setBusy] = useState<'launch_now' | 'rewrite' | 'collect' | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [notes, setNotes] = useState<string[]>([]);
@@ -770,6 +1041,15 @@ function MarketCard({
     template.status === 'ready' &&
     (engTemplateNeedsRewrite(template) || row?.code === 'letters_need_rewrite');
   const dots = marketDots(view);
+  /**
+   * Отправка аккаунта выключена сотрудником ('revoked'; так и после
+   * разблокировки, пока сотрудник не включит отправку). Тогда откажут 403
+   * sending_turned_off «Launch» вверху (она выключена), «Launch now»,
+   * «Rewrite letters» и «Collect again» карточки, а старт блока отправки не
+   * рисует сводка: ни одна строка карточки к ним не зовёт, а кнопки карточки
+   * не рисуются — вместо «нажмите» строка доступа (ENG_SENDING_OFF_EN).
+   */
+  const launchBlocked = sendingAccess === 'revoked';
 
   // Строка состояния и кнопки — по старшинству: запуск → автозапуск → подготовка.
   let line: MarketLine | null = null;
@@ -782,7 +1062,12 @@ function MarketCard({
         line = autoLaunchLine(row, true, sendingAccess);
       } else if (row?.state === 'running') {
         line = autoLaunchLine(row, true, sendingAccess);
-      } else {
+      } else if (autoOn && row?.state === 'held') {
+        // Строку держит гейт (лимиты, ящики, настройка, проверки, отказ
+        // запуска, блокировка) — его фраза, а не «Press «Launch now»».
+        line = autoLaunchLine(row, true, sendingAccess);
+      }
+      if (!line && !needsRewrite) {
         line = {
           text: 'Part of this market’s audience has not gone out yet. Press «Launch now» to finish it — the campaigns already created are reused, only the addresses that have not gone out are added, and nobody is contacted twice.',
           tone: 'amber',
@@ -806,8 +1091,14 @@ function MarketCard({
         // Строку 'done needs_support' пишет и кнопка «Launch now», не только
         // автозапуск, — поэтому без слова «automatic». «Start sending» блока
         // отправки здесь небезопасна (window_not_applied: кампании на прежних
-        // часах) — сначала Support, как и письмо об этой строке.
-        text: 'Starting this market ran into a problem. If the sending status above does not show it sending, message Support before pressing «Start sending».',
+        // часах) — сначала Support: тот же шаг и те же слова, что у заметки
+        // запуска и письма об этой строке (engClientLaunch,
+        // ENG_SUPPORT_BEFORE_START_TEXT).
+        // Под выключенной отправкой аккаунта кнопки старта у блока нет (его
+        // пояснение говорит, что отправка выключена) — без ««Start sending»».
+        text: launchBlocked
+          ? 'Starting this market ran into a problem. Message Support.'
+          : 'Starting this market ran into a problem. Message Support before pressing «Start sending».',
         tone: 'amber',
         actions: [],
       };
@@ -817,14 +1108,21 @@ function MarketCard({
       // выключен или отмена новее нажатия) — кампании не стартованы. Старт —
       // кнопка блока отправки выше (её текст и наличие решает сводка).
       line = {
-        text: 'Sending was not started because automatic launch was turned off while this market was being launched. The sending status above shows how to start it.',
+        // Под выключенной отправкой аккаунта старта у блока нет — без «shows
+        // how to start it» (пояснение блока говорит, что отправка выключена).
+        text: launchBlocked
+          ? 'Sending was not started because automatic launch was turned off while this market was being launched.'
+          : 'Sending was not started because automatic launch was turned off while this market was being launched. The sending status above shows how to start it.',
         tone: 'amber',
         actions: [],
       };
     }
   } else if (template) {
     if (needsRewrite) {
-      line = { text: engTemplateNeedsRewriteText('none'), tone: 'amber', actions: ['rewrite'] };
+      // «Rewrite letters» под выключенной отправкой аккаунта откажет — без кнопки.
+      line = launchBlocked
+        ? { text: engTemplateNeedsRewriteText('none', true), tone: 'red', actions: [] }
+        : { text: engTemplateNeedsRewriteText('none'), tone: 'amber', actions: ['rewrite'] };
     } else if (row?.state === 'done' && row.code === 'needs_support') {
       // Запуск дошёл до ядра, но записи о запуске у шаблона нет (её запись не
       // легла — 'launch_problem'): кампании могли быть созданы и стоят на
@@ -857,28 +1155,36 @@ function MarketCard({
             tone: 'amber',
             actions: [],
           }
-        : retiredLine(retiredTries);
+        : retiredLine(retiredTries, teamFix === 'rewrite', launchBlocked);
   } else {
     line = preparingLine(view, {
       autopilotOn: detail.project.autopilot === true,
       researched,
       spendPaused: detail.project.autopilot_hold?.code === 'spend_paused',
+      teamFix,
+      moreLabel,
+      launchBlocked,
     });
   }
+  // «Launch now» откажет выключатель отправки аккаунта — строка без кнопки.
+  line = launchNowAccessLine(line, sendingAccess, incomplete);
 
   // Остановленная сборка и остановленный анализ — своим текстом с действием.
+  // Отправка аккаунта выключена ('revoked'): новую сборку ставят только
+  // «Launch» вверху (выключена) и «Collect again» (откажет 403, кнопки нет) —
+  // вместо «что делать» строка доступа (engBaseStopSendingOffText).
   const latest = ownAutoBaseState(ownBases).latest;
   const againBaseId = collectAgainBaseId(ownBases, researched, view.selected);
   let stopText = '';
   if (!template && !view.templateJob && latest && latest.status === 'failed' && base?.id === latest.id) {
     const offersRestart = stopTextOffersRestart(latest, ownBases);
-    stopText = latest.error_code
-      ? offersRestart
-        ? engStageErrorText(latest.error_code, 'collection')
-        : engEarlierBaseStopText(latest.error_code)
-      : offersRestart
-        ? `${ENG_NO_REASON_BASE_HEAD_EN} If you still need this market, press «Launch» above to start a new collection for it; message Support if it keeps stopping.`
-        : engEarlierBaseStopText(null);
+    stopText = !offersRestart
+      ? engEarlierBaseStopText(latest.error_code ?? null)
+      : launchBlocked
+        ? engBaseStopSendingOffText(latest.error_code ?? null)
+        : latest.error_code
+          ? engStageErrorText(latest.error_code, 'collection')
+          : `${ENG_NO_REASON_BASE_HEAD_EN} If you still need this market, press «Launch» above to start a new collection for it; message Support if it keeps stopping.`;
   }
   if (!template && !view.templateJob && base && engBaseAnalysisStopped(base)) {
     const chains = (detail.chains ?? []) as unknown as Array<Record<string, unknown>>;
@@ -897,10 +1203,17 @@ function MarketCard({
           ? 'Checking the contacts of this market was cancelled before it finished.'
           : 'Checking the contacts of this market stopped before it finished.') +
         // Не ставит «Launch» — ничто из кабинета этот анализ заново не
-        // поставит (письмо об этой остановке тоже зовёт в Support).
-        (requeues
-          ? ' Press «Launch» above to check them again; the contacts already collected are not bought again.'
-          : ' Message Support about it.'),
+        // поставит (письмо об этой остановке тоже зовёт в Support). Анализ
+        // остановил отказ, который чинит команда, — сначала Support, как в
+        // письме (совет 'team_fix'). «Launch» выключена (launchBlocked) — к
+        // ней не зовём.
+        (requeues && !launchBlocked
+          ? teamFix === 'check'
+            ? ` ${TEAM_FIX_LAUNCH_NEXT} The contacts already collected are not bought again.`
+            : ' Press «Launch» above to check them again; the contacts already collected are not bought again.'
+          : teamFix === 'check'
+            ? ` ${ENG_TEAM_FIX_STOP_EN}`
+            : ' Message Support about it.'),
       tone: 'amber',
       actions: [],
     });
@@ -1066,17 +1379,18 @@ function MarketCard({
           </button>
         )}
         {actions.has('rewrite') && rewriteTarget && (
+          // Остановку чинит команда — кнопка второй шаг после Support, не первый.
           <button
             type="button"
             onClick={() => void runRewrite()}
             disabled={busy !== null}
-            className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+            className={`${teamFix === 'rewrite' ? 'ds-btn-secondary' : 'ds-btn-primary'} inline-flex items-center gap-1.5 text-xs`}
           >
             {busy === 'rewrite' ? <EngSpinner className="h-3 w-3" /> : <Wand2 className="h-3 w-3" />}
             Rewrite letters
           </button>
         )}
-        {againBaseId !== null && latest?.id === againBaseId && !template && (
+        {againBaseId !== null && latest?.id === againBaseId && !template && !launchBlocked && (
           <button
             type="button"
             onClick={() => void runCollectAgain()}
@@ -1229,7 +1543,9 @@ export function EngStepLaunch({
   const requestedAt = auto?.requested_at ?? info?.requested_at ?? null;
   const autoOn = requested && available !== false;
   const cancelledAt = !requested ? (auto?.cancelled_at ?? info?.cancelled_at ?? null) : null;
-  const access = accessLine(info?.sending_access);
+  // Выключатель отправки аккаунта: свежий из деталки (опрос мастера), иначе GET …/launch.
+  const sendingAccess = engSendingAccessOf(detail.account_access, info?.sending_access);
+  const access = accessLine(sendingAccess);
 
   const selectedIds = useMemo(() => {
     const known = new Set(verticals.map((v) => v.id));
@@ -1247,19 +1563,43 @@ export function EngStepLaunch({
   const selectedSet = new Set(selectedIds);
   /**
    * Выбранные рынки, по которым не было НИЧЕГО (ни писем, ни базы, ни шаблона,
-   * ни джобы — даже упавших): их возьмёт «Launch». Рынок с остановленной
-   * сборкой сюда не входит — «Launch» его заново не соберёт, у него своя
-   * карточка с причиной и «Collect again».
+   * ни джобы — даже упавших): их возьмёт «Launch» или «Launch N more markets».
+   * Рынок с остановленной сборкой сюда не входит — «Launch» его заново не
+   * соберёт, у него своя карточка с причиной и «Collect again». Правило одно
+   * с роутом (heEngMarketPending); список джоб деталки капнут, и решает роут
+   * по своему свежему чтению.
    */
-  const pending = verticals.filter((v) => {
-    if (!selectedSet.has(v.id) || startedIds.has(v.id)) return false;
-    if ((detail.chains ?? []).some((c) => c.vertical_id === v.id)) return false;
-    if ((detail.bases ?? []).some((b) => b.vertical_id === v.id)) return false;
-    return !(detail.jobs ?? []).some((j) => (j.payload as { vertical_id?: unknown } | null | undefined)?.vertical_id === v.id);
-  });
+  const pendingState = {
+    chains: detail.chains ?? [],
+    bases: detail.bases ?? [],
+    templates: detail.templates ?? [],
+    jobs: detail.jobs ?? [],
+  };
+  const pending = verticals.filter((v) => selectedSet.has(v.id) && heEngMarketPending(v.id, pendingState));
   const selectedNames = verticals.filter((v) => selectedSet.has(v.id)).map((v) => v.name);
   const cardVerticals = verticals.filter((v) => selectedSet.has(v.id) || startedIds.has(v.id));
   const fresh = !requested && startedIds.size === 0;
+  const spendPaused = detail.project.autopilot_hold?.code === 'spend_paused';
+  /**
+   * «Launch N more markets» (решение владельца 12.10.2026: отмеченный после
+   * «Launch» рынок стартует только явным нажатием): автозапуск проекта включён
+   * (намерение и автопилот — то же условие, что у роута), есть нетронутые
+   * выбранные рынки, нет паузы потолка расхода (реконсилер встал бы на
+   * потолке) и отправка аккаунта не выключена (роут ответил бы 403).
+   */
+  const showMore =
+    status === 'researched' &&
+    autoOn &&
+    detail.project.autopilot === true &&
+    pending.length > 0 &&
+    !spendPaused &&
+    !access?.blocks;
+  const moreLabel = showMore
+    ? pending.length === 1
+      ? 'Launch 1 more market'
+      : `Launch ${pending.length} more markets`
+    : null;
+  const pendingIds = new Set(pending.map((v) => v.id));
 
   const onLaunch = async () => {
     if (launching || access?.blocks || !windowUsable) return;
@@ -1273,6 +1613,29 @@ export function EngStepLaunch({
       setWindowDraft(null);
       setEditingWindow(false);
       await loadInfo();
+    } catch (e) {
+      if (e instanceof EngPaidAccessError) setRefusal(e);
+      else setError(e instanceof Error ? e.message : 'Failed to launch');
+    } finally {
+      setLaunching(false);
+      onChanged();
+    }
+  };
+
+  /** «Launch N more markets»: только нетронутые выбранные рынки, намерение не переписывается. */
+  const onLaunchMore = async () => {
+    if (launching || !showMore) return;
+    setLaunching(true);
+    setError('');
+    setRefusal(null);
+    setResult(null);
+    const names = new Map(verticals.map((v) => [v.id, v.name]));
+    try {
+      const res = await launchEngProjectMarkets(
+        projectId,
+        pending.map((v) => v.id),
+      );
+      setResult(launchMoreResultText(res, (id) => names.get(id) ?? 'a market'));
     } catch (e) {
       if (e instanceof EngPaidAccessError) setRefusal(e);
       else setError(e instanceof Error ? e.message : 'Failed to launch');
@@ -1343,8 +1706,10 @@ export function EngStepLaunch({
   // Кнопка «Launch» стоит всегда, когда её примет роут: она же «двигает
   // дальше» остановившееся и берёт рынки, выбранные после первого нажатия.
   // Подпись — всегда «Launch»: её по имени зовут тексты пауз, остановок и
-  // карточек рынков, и «Launch N more» сделал бы их неправдой.
-  const launchPrimary = fresh || !requested || pending.length > 0;
+  // карточек рынков. Нетронутые рынки при включённом автозапуске начинает
+  // отдельная главная кнопка «Launch N more markets» (showMore), и тогда
+  // «Launch» — вторичная.
+  const launchPrimary = fresh || !requested || (pending.length > 0 && !showMore);
 
   const windowBlock = (mode: 'before' | 'intent') => (
     <div className="mt-3 flex flex-col gap-1">
@@ -1449,9 +1814,11 @@ export function EngStepLaunch({
             <div className="mt-3 flex flex-col gap-1 text-xs" style={{ color: 'var(--cp-text-m)' }}>
               {available === false ? (
                 <span>
-                  We write the letters, find and check contacts and write the final letters by ourselves. Automatic
-                  sending is not available right now, so when a market is ready, press «Launch now» on it to start
-                  sending.
+                  {/* При выключенной отправке аккаунта «Launch now» на
+                      карточках нет (launchNowAccessLine) — не зовём. */}
+                  {access?.blocks
+                    ? 'We write the letters, find and check contacts and write the final letters by ourselves. Automatic sending is not available right now.'
+                    : 'We write the letters, find and check contacts and write the final letters by ourselves. Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.'}
                 </span>
               ) : (
                 <>
@@ -1473,15 +1840,7 @@ export function EngStepLaunch({
         ) : (
           <>
             <p className="m-0 text-xs" style={{ color: 'var(--cp-text-m)' }}>
-              {requested && available !== false
-                ? `Automatic launch is on${requestedAt ? ` since ${fmtDate(requestedAt)}` : ''}: each market starts sending by itself once its final letters are ready.`
-                : requested
-                  ? 'Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.'
-                  : cancelledAt
-                    ? `Automatic launch is off since you cancelled on ${fmtDate(cancelledAt)}. Press «Launch» to turn it back on.`
-                    : available === false
-                      ? 'Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.'
-                      : 'Automatic launch is not on for this project. Press «Launch» to turn it on — each market then starts sending by itself once its final letters are ready.'}
+              {launchHeaderText({ requested, available, requestedAt, cancelledAt, blocked: Boolean(access?.blocks) })}
             </p>
             {pending.length > 0 && (
               <p className="m-0 mt-2 text-xs" style={{ color: 'var(--cp-paper)' }}>
@@ -1489,18 +1848,26 @@ export function EngStepLaunch({
                     владельца по умолчанию: ждут нового нажатия) — фраза говорит
                     это прямо. */}
                 {/* Под паузой потолка расхода «Launch» их не начнёт
-                    (реконсилер встаёт на потолке) — звать к нему нельзя. */}
-                {pending.length === 1
-                  ? `1 market you chose has not started yet: ${pending[0].name}. ${
-                      detail.project.autopilot_hold?.code === 'spend_paused'
-                        ? SPEND_PAUSED_NEXT
-                        : 'It starts when you press «Launch» again — a market ticked after a launch does not start by itself.'
-                    }`
-                  : `${pending.length} markets you chose have not started yet: ${namesList(pending.map((v) => v.name))}. ${
-                      detail.project.autopilot_hold?.code === 'spend_paused'
-                        ? SPEND_PAUSED_NEXT
-                        : 'They start when you press «Launch» again — markets ticked after a launch do not start by themselves.'
-                    }`}{' '}
+                    (реконсилер встаёт на потолке) — звать к нему нельзя. При
+                    выключенной отправке аккаунта (access.blocks) «Launch»
+                    выключена, а «Launch N more markets» скрыта — тоже не
+                    зовём: что делать, говорит красная строка доступа ниже. */}
+                {[
+                  pending.length === 1
+                    ? `1 market you chose has not started yet: ${pending[0].name}.`
+                    : `${pending.length} markets you chose have not started yet: ${namesList(pending.map((v) => v.name))}.`,
+                  spendPaused
+                    ? SPEND_PAUSED_NEXT
+                    : access?.blocks
+                      ? ''
+                      : moreLabel
+                        ? `Ticking a market starts nothing by itself — press «${moreLabel}» to start ${pending.length === 1 ? 'it' : 'them'}.`
+                        : pending.length === 1
+                          ? 'It starts when you press «Launch» again — a market ticked after a launch does not start by itself.'
+                          : 'They start when you press «Launch» again — markets ticked after a launch do not start by themselves.',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}{' '}
                 <button
                   type="button"
                   onClick={() => goToStep(2)}
@@ -1522,12 +1889,24 @@ export function EngStepLaunch({
         )}
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
+          {showMore && moreLabel && (
+            <button
+              type="button"
+              onClick={() => void onLaunchMore()}
+              disabled={launching}
+              className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+            >
+              {launching ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
+              {moreLabel}
+            </button>
+          )}
           {launchButton}
           {/* Не «любой остановившийся»: снятые письма, сборку с повторяющейся
               остановкой, анализ без повторной постановки и всё под паузой
               потолка «Launch» не двигает — у них на карточке своя кнопка или
-              Support. */}
-          {launchButton && !fresh && !launchPrimary && (
+              Support. При выключенной отправке аккаунта кнопка выключена —
+              подсказки про неё нет. */}
+          {launchButton && !fresh && !launchPrimary && !access?.blocks && (
             <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
               Moves on a market whose card says to press «Launch» — work already done is not repeated.
             </span>
@@ -1563,8 +1942,9 @@ export function EngStepLaunch({
             view={buildMarketView(detail, v, selectedSet.has(v.id))}
             detail={detail}
             autoOn={autoOn}
-            sendingAccess={info?.sending_access}
+            sendingAccess={sendingAccess}
             launchSchedule={windowConfig && windowUsable ? windowConfig.value : undefined}
+            moreLabel={pendingIds.has(v.id) ? moreLabel : null}
             onChanged={onChanged}
           />
         ))}

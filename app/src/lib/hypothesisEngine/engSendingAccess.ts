@@ -65,7 +65,8 @@ export function heEngSendingActivationRequired(env: NodeJS.ProcessEnv = process.
 /**
  * Отправка аккаунта ещё не включена. Правда при отказе: команде ушёл алерт
  * 'access_requested' (engSendingAlert; без кредов Telegram его нет — тогда
- * клиента видно в /admin/users по requested_at), а письмо «включено» уходит при
+ * клиента видно в разделе «Английские клиенты» (/admin/eng-clients) под чипом
+ * «Ждут включения отправки»), а письмо «включено» уходит при
  * включении (engSendingAccessMail.sendHeEngSendingEnabledEmail; не ушло — экран
  * сотрудника так и пишет). «Support» кабинет рисует ссылкой.
  */

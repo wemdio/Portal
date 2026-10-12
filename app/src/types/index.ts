@@ -25,6 +25,8 @@ export interface UserProfile {
   full_name?: string;
   avatar_url?: string;
   created_at?: string;
+  /** profiles.market: 'eng' — аккаунт английского кабинета (app.outreachos.xyz). */
+  market?: 'ru' | 'eng';
 }
 
 export interface Project {

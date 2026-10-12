@@ -137,7 +137,8 @@
  *     письма уже написанному лиду;
  *   - до брони и до провайдера (шаг 4c) долив спрашивает, берут ли кампании
  *     запуска контакты (S2, checkHeRefillSendTarget в autoPipeline.ts: пауза
- *     клиента, выключенный «Daily top-up», выключенная отправка аккаунта,
+ *     клиента, выключенный «Daily top-up», заблокированный владелец (S3b),
+ *     выключенная отправка аккаунта,
  *     основная кампания завершена, а продолжить её нельзя, остановлена, шлёт
  *     не из ящиков пула проекта или её статус не подтверждён — по свежему
  *     статусу). Завершённую основную, которую продолжить можно (желание
@@ -148,10 +149,11 @@
  *     market='us' ждут в очереди переноса, как у ночи без бюджета
  *     (stats.sending_skip, в серию отказов не идёт). Строки неотправляющей
  *     СЕГМЕНТНОЙ кампании раскладка держит, завершённой — отдаёт основной
- *     (п. 4 «РАСКЛАДКИ»). Pause клиента, выключенный «Daily top-up» и
- *     выключенная отправка аккаунта, случившиеся уже во время загрузки,
- *     останавливают следующие чанки (проверка владения: 'client_paused',
- *     'top_up_off', 'access_turned_off', 'access_not_enabled');
+ *     (п. 4 «РАСКЛАДКИ»). Pause клиента, выключенный «Daily top-up»,
+ *     блокировка владельца и выключенная отправка аккаунта, случившиеся уже во
+ *     время загрузки, останавливают следующие чанки (проверка владения:
+ *     'client_paused', 'top_up_off', 'account_blocked', 'access_turned_off',
+ *     'access_not_enabled');
  *   - blocklist владельца пресета и чанкование — внутри
  *     appendLeadsToClientCampaign (тот же путь, что у RU auto-pipeline), но с
  *     entitlementMode='managed_contract': объём режет серверный daily_leads_cap,
@@ -283,6 +285,9 @@ import { startHeEngLaunchSending, type HeEngStartResult } from '../engCampaignSe
 // перечитывает хук владения перед каждым чанком (readHeRefillOwnershipLoss).
 import { readHeEngClientStates } from '../engCampaignStatus';
 import { readHeEngSendingAccess } from '../engSendingAccess';
+// Блокировка владельца (S3b): перед каждым чанком — отметка, перед повторным
+// стартом — отметка и аккаунт (readHeEngOwnerHold).
+import { readHeEngOwnerHold } from '../autopilotNext';
 // Алерт команде в health-бот: кабинет ENG пишет клиенту «команда уже
 // работает», и это правда только потому, что пауза по ёмкости сообщает о себе
 // здесь (см. alertRefillCapacityStop). Тем же каналом — ночь, все строки
@@ -631,10 +636,14 @@ function refillUserCancelled(ctx: HeStageContext): boolean {
  *    переноса. Отмена из списка выше выигрывает у паузы;
  *  - 'top_up_off' — клиент выключил «Daily top-up» проекта
  *    (he_auto_pipeline_configs.enabled ≠ true или строки нет);
+ *  - 'account_blocked' — владелец проекта заблокирован сотрудником (S3b,
+ *    отметка блокировки; чтение аккаунта в Supabase Auth здесь не идёт — оно
+ *    у шага 4c и у повторного старта, а не на каждом чанке);
  *  - 'access_turned_off' / 'access_not_enabled' — отправку аккаунта владельца
  *    проекта выключил сотрудник / она не включена (engSendingAccess);
  *  - 'unavailable' — не прочиталось что-то из проверок us: владелец проекта,
- *    выключатель аккаунта, желание клиента, отдельное чтение «Daily top-up».
+ *    отметка блокировки, выключатель аккаунта, желание клиента, отдельное
+ *    чтение «Daily top-up».
  *    Fail-closed, но не сбой ночи: тот же пропуск 'unavailable', что у шага
  *    4c, — иначе блип чтения шёл бы в серию отказов и со второй ночи подряд
  *    выжигал бы оплаченные компании.
@@ -667,6 +676,7 @@ type HeRefillOwnershipLoss =
   | 'refill_cancelled'
   | 'client_paused'
   | 'top_up_off'
+  | 'account_blocked'
   | 'access_turned_off'
   | 'access_not_enabled'
   | 'unavailable';
@@ -678,21 +688,23 @@ type HeRefillOwnershipLoss =
  */
 type HeRefillSendStop = Extract<
   HeRefillOwnershipLoss,
-  'client_paused' | 'top_up_off' | 'access_turned_off' | 'access_not_enabled' | 'unavailable'
+  'client_paused' | 'top_up_off' | 'account_blocked' | 'access_turned_off' | 'access_not_enabled' | 'unavailable'
 >;
 
 const REFILL_SEND_STOP_TEXT: Record<HeRefillSendStop, string> = {
   client_paused: 'клиент нажал Pause',
   top_up_off: 'клиент выключил ежедневный добор',
+  account_blocked: 'сотрудник заблокировал аккаунт владельца',
   access_turned_off: 'сотрудник выключил отправку аккаунта',
   access_not_enabled: 'отправка аккаунта не включена',
-  unavailable: 'проверка «вправе ли отправлять» не прочиталась (владелец, выключатель или желание клиента)',
+  unavailable: 'проверка «вправе ли отправлять» не прочиталась (владелец, отметка блокировки, выключатель или желание клиента)',
 };
 
 function isHeRefillSendStop(loss: HeRefillOwnershipLoss): loss is HeRefillSendStop {
   return (
     loss === 'client_paused' ||
     loss === 'top_up_off' ||
+    loss === 'account_blocked' ||
     loss === 'access_turned_off' ||
     loss === 'access_not_enabled' ||
     loss === 'unavailable'
@@ -712,9 +724,10 @@ function isHeRefillSendStop(loss: HeRefillOwnershipLoss): loss is HeRefillSendSt
  * отзывается; потерянная ночь — отзывается следующей. Единственное
  * исключение — колонок паузы нет (миграция 20260930_0005, PostgREST 42703): без
  * них паузы отмены не бывает по определению (желание клиента читается и тогда).
- * Проверки us (владелец, выключатель аккаунта, желание клиента, отдельное
- * чтение «Daily top-up») не бросают, а отвечают 'unavailable': отправка так же
- * остановлена, но ночь — пропуск с переносом компаний, а не сбой в серию.
+ * Проверки us (владелец, отметка блокировки, выключатель аккаунта, желание
+ * клиента, отдельное чтение «Daily top-up») не бросают, а отвечают
+ * 'unavailable': отправка так же остановлена, но ночь — пропуск с переносом
+ * компаний, а не сбой в серию.
  */
 async function readHeRefillOwnershipLoss(
   ctx: HeStageContext,
@@ -756,8 +769,9 @@ async function readHeRefillOwnershipLoss(
   if (paused && isHeClientCancelPauseReason(reason)) return 'refill_cancelled';
   if (!ids.templateId) return null;
   // us — тот же порядок, что у гейта ночи (createHeRefillSendGate): «Daily
-  // top-up», выключатель аккаунта, пауза клиента. Всё fail-closed; не
-  // прочиталось — 'unavailable' (пропуск с переносом, а не сбой ночи).
+  // top-up», блокировка владельца, выключатель аккаунта, пауза клиента. Всё
+  // fail-closed; не прочиталось — 'unavailable' (пропуск с переносом, а не
+  // сбой ночи).
   let enabled: unknown;
   if (configRes.error) {
     // 42703 (колонок паузы нет) пропущен выше — переключатель читается отдельно.
@@ -775,6 +789,9 @@ async function readHeRefillOwnershipLoss(
   if (!ownerRes || ownerRes.error) return 'unavailable';
   const owner = (ownerRes.data as { created_by?: unknown } | null)?.created_by;
   if (typeof owner !== 'string' || !owner) return 'unavailable';
+  const hold = await readHeEngOwnerHold(ctx.supabase, owner, { standing: false });
+  if (hold.kind === 'blocked') return 'account_blocked';
+  if (hold.kind === 'unavailable') return 'unavailable';
   const access = await readHeEngSendingAccess(ctx.supabase, owner);
   if (access.state === 'revoked') return 'access_turned_off';
   if (access.state === 'not_enabled') return 'access_not_enabled';
@@ -4672,8 +4689,9 @@ const HE_REFILL_RESTART_DEADLINE_MS = 45_000;
  * стартована и может отправлять, и фраза «не стартовали» была бы неправдой.
  * Алерт команде по нему уже ушёл из самого старта ('pause_failed',
  * engCampaignSending.ts, шаг 9) — второй отсюда не шлётся. Провал ('failed',
- * `code` — код отказа или кампании):
- * выключатель не читается, ящики пула, воркспейс, письма, запуск до self-serve
+ * `code` — код отказа или кампании): аккаунт владельца не прочитан
+ * ('account_unread' — его ставит сам долив до старта, S3b), выключатель не
+ * читается, ящики пула, воркспейс, письма, запуск до self-serve
  * или идущий, кампания не прочитана, не стартовала, стоит (0/2: её
  * остановили мимо долива — 'not_completed'), остановлена рассыльщиком или
  * удалена, неясный старт, не хватило срока.
@@ -4959,8 +4977,10 @@ export async function runHeRefillAppend(args: {
    * (идемпотентно). Контакты — тем, что уже принято, ни одного запроса на
    * загрузку старт не делает.
    * Без вызова: ночь не приняла в основную ни одного контакта
-   * ('nothing_accepted' — отправлять нечего) или прогон отменён клиентом
-   * ('cancelled'). Зовут обе ветки — успешная и отказ после частичной доставки
+   * ('nothing_accepted' — отправлять нечего), прогон отменён клиентом
+   * ('cancelled') или владелец проекта заблокирован ('access_off', S3b:
+   * readHeEngOwnerHold — отметка блокировки и аккаунт). Зовут обе ветки —
+   * успешная и отказ после частичной доставки
    * — ПОСЛЕ терминальной записи базы и закрытия брони (они не ждут
    * рассыльщика), ДО строки прогона: строка несёт исход (stats.main_restart).
    * Не удалось ('failed') — алерт команде ('main_restart_failed'), и гейт
@@ -5012,49 +5032,66 @@ export async function runHeRefillAppend(args: {
       }
     };
     let cancelledDuring = false;
+    /** Владелец заблокирован (источник блокировки) — старт не звали. */
+    let ownerBlocked: string | null = null;
     if (mainAccepted === 0) {
       record('nothing_accepted');
     } else if (cancelledRun || (await runCancelled())) {
       record('cancelled');
     } else {
       ctx.onActivity?.();
-      let result: HeEngStartResult;
-      if (!supabaseInstantly) {
-        result = { kind: 'refused', status: 503, code: 'instantly_db_unconfigured', message: '' };
+      // Владелец заблокирован (S3b: отметка блокировки — или бан мимо
+      // карточки клиента, роль, демо) — старт не зовём: сам старт читает
+      // только выключатель отправки, а он остаётся включённым, если
+      // выключение при блокировке не легло или бан поставлен мимо карточки.
+      // Исход 'access_off': отправка аккаунта к старту закрыта; следующие ночи
+      // держит гейт ('account_blocked'). Не прочиталось — как отказ чтения у
+      // самого старта: 'failed' с алертом.
+      const hold = await readHeEngOwnerHold(restartDb, target.ownerUserId, { standing: true });
+      if (hold.kind === 'blocked') {
+        ownerBlocked = hold.source;
+        record('access_off');
       } else {
-        try {
-          result = await startHeEngLaunchSending({
-            portalDb: restartDb,
-            instantlyDb: supabaseInstantly,
-            clientUserId: target.ownerUserId,
-            projectId: job.project_id,
-            templateId: target.templateId,
-            via: 'refill',
-            onlyCampaignIds: [target.campaignId],
-            deadlineMs: Date.now() + HE_REFILL_RESTART_DEADLINE_MS,
-          });
-        } catch (e) {
-          // startHeEngLaunchSending не бросает; страховка — тот же провал.
-          result = { kind: 'refused', status: 500, code: 'start_threw', message: e instanceof Error ? e.message : '' };
+        let result: HeEngStartResult;
+        if (hold.kind === 'unavailable') {
+          result = { kind: 'refused', status: 503, code: 'account_unread', message: hold.detail.slice(0, 200) };
+        } else if (!supabaseInstantly) {
+          result = { kind: 'refused', status: 503, code: 'instantly_db_unconfigured', message: '' };
+        } else {
+          try {
+            result = await startHeEngLaunchSending({
+              portalDb: restartDb,
+              instantlyDb: supabaseInstantly,
+              clientUserId: target.ownerUserId,
+              projectId: job.project_id,
+              templateId: target.templateId,
+              via: 'refill',
+              onlyCampaignIds: [target.campaignId],
+              deadlineMs: Date.now() + HE_REFILL_RESTART_DEADLINE_MS,
+            });
+          } catch (e) {
+            // startHeEngLaunchSending не бросает; страховка — тот же провал.
+            result = { kind: 'refused', status: 500, code: 'start_threw', message: e instanceof Error ? e.message : '' };
+          }
         }
-      }
-      cancelledDuring = await runCancelled();
-      const verdict = heRefillMainRestartVerdict(result);
-      record(verdict.outcome, verdict.code, cancelledDuring);
-      if (verdict.outcome === 'failed') {
-        void notifyHeRefillHold({
-          projectId: job.project_id,
-          verticalId: base.vertical_id,
-          templateId: target.templateId,
-          where: 'refill',
-          baseId: base.id,
-          alert: {
-            kind: 'main_restart_failed',
-            campaignId: target.campaignId,
-            accepted: mainAccepted,
-            code: verdict.code ?? 'unknown',
-          },
-        });
+        cancelledDuring = await runCancelled();
+        const verdict = heRefillMainRestartVerdict(result);
+        record(verdict.outcome, verdict.code, cancelledDuring);
+        if (verdict.outcome === 'failed') {
+          void notifyHeRefillHold({
+            projectId: job.project_id,
+            verticalId: base.vertical_id,
+            templateId: target.templateId,
+            where: 'refill',
+            baseId: base.id,
+            alert: {
+              kind: 'main_restart_failed',
+              campaignId: target.campaignId,
+              accepted: mainAccepted,
+              code: verdict.code ?? 'unknown',
+            },
+          });
+        }
       }
     }
     const restart = runStats.main_restart;
@@ -5066,7 +5103,8 @@ export async function runHeRefillAppend(args: {
         (restart?.outcome === 'pause_failed'
           ? ' — клиент нажал Pause во время старта, пауза кампании не подтвердилась (алерт pause_failed ушёл из старта)'
           : '') +
-        (cancelledDuring ? ' — отмена прогона пришла во время старта, старт доведён до конца, исход как есть' : ''),
+        (cancelledDuring ? ' — отмена прогона пришла во время старта, старт доведён до конца, исход как есть' : '') +
+        (ownerBlocked ? ` — владелец проекта заблокирован (${ownerBlocked}), старт не звали` : ''),
     );
   };
 

@@ -29,6 +29,7 @@ import {
 } from '@/lib/hypothesisEngine/launchTemplate';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -215,7 +216,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 // генерация по базе не идёт (иначе 200 с ней для снятого шаблона, 409 для
 // готового); автозапуск не держит шаблон прямо сейчас; бюджет писем поколения
 // анализа (heTemplateGenerationBudget, HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS
-// засчитанных прогонов); гейт платных шагов ('letters'); потолок расхода.
+// засчитанных прогонов); выключатель отправки аккаунта (engSendingSwitchRefusal,
+// как у «Launch» проекта); гейт платных шагов ('letters'); потолок расхода.
 // Отказы — 409 { error, code } с кодами not_ready | launched | letters_ok |
 // starting | letters_exhausted | changed.
 //
@@ -333,6 +335,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return engServerError('client.eng.template_rewrite.budget_read_failed', budgetErr, REWRITE_START_FAILED, logContext);
     }
     if (tries.left === 0) return refusal(409, REWRITE_EXHAUSTED, 'letters_exhausted');
+
+    const switchRefusal = await engSendingSwitchRefusal(db, userId, projectId, 'client.eng.template_rewrite.sending_access_unread');
+    if (switchRefusal) return switchRefusal;
 
     const access = await requireEngPaidAccess(db, userId, { action: 'letters' });
     if (!access.ok) return engPaidAccessResponse(access.refusal);

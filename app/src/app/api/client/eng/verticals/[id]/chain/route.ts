@@ -20,6 +20,7 @@ import {
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
 import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -72,7 +73,8 @@ async function findActiveChainJob(
 // постановок: 23505 от he_jobs_one_active_chain_per_vertical (20261010_0003).
 //
 // ГЕЙТ ПЛАТНЫХ ШАГОВ (requireEngPaidAccess, 'letters'): почта и потолок
-// расхода клиента — до потолка проекта и постановки.
+// расхода клиента — до потолка проекта и постановки. Перед ним — выключатель
+// отправки аккаунта (engSendingSwitchRefusal), как у «Launch» проекта.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.chain.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -123,6 +125,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     if ((ready ?? []).length > 0) return jsonError(LETTERS_EXIST, 409);
+
+    const switchRefusal = await engSendingSwitchRefusal(
+      supabaseAdmin,
+      result.auth.userId,
+      (owned.vertical.project_id as string) ?? null,
+      'client.eng.chain.sending_access_unread',
+    );
+    if (switchRefusal) return switchRefusal;
 
     const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'letters' });
     if (!access.ok) return engPaidAccessResponse(access.refusal);

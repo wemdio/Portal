@@ -34,7 +34,9 @@
  * доводятся пауза, которую рассыльщик не принял с первого раза, старт,
  * доехавший до рассыльщика после ответа «не удалось», и старт мимо кабинета.
  * Так же — отправляющую кампанию аккаунта, отправку которого выключил
- * сотрудник ('revoked', engSendingAccess; перечитано на это чтение).
+ * сотрудник ('revoked', engSendingAccess), или заблокированного аккаунта
+ * (активная отметка he_eng_account_blocks, engAccountBlockMarker); оба
+ * перечитаны на это чтение.
  *
  * ВОРКСПЕЙС КАМПАНИИ. Удачное живое чтение (здесь, при старте и паузе)
  * записывает в строку воркспейс, в котором кампания нашлась
@@ -52,6 +54,7 @@ import { CampaignStatus } from '@/lib/instantly/types';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import type { HeTemplateLaunchInfo } from './launchHandoff';
 import { readHeEngSendingAccess, type HeEngSendingAccessState } from './engSendingAccess';
+import { readHeEngAccountBlock } from './engAccountBlockMarker';
 import { notifyHeEngSending } from './engSendingAlert';
 import { checkHeCampaignAgainstAssignment, HE_SENDING_POOL_TABLE, readHeSendingPoolAssignment } from './sendingPool';
 
@@ -842,16 +845,19 @@ async function templateStillPaused(db: SupabaseClient, templateId: string): Prom
 
 /**
  * Отправку владельца проекта выключил сотрудник ('revoked', engSendingAccess)
- * — прямо сейчас. Не прочли проект или выключатель — false: доводка паузы по
- * выключению идёт только по прочитанному выключению (его же держат гейты
- * старта и долива).
+ * или владелец заблокирован (активная отметка блокировки, engAccountBlockMarker)
+ * — прямо сейчас. Оба читаются разом; хватает одного прочитанного «да». Не
+ * прочли проект, выключатель или отметку — этот источник false: доводка паузы
+ * идёт только по прочитанному выключению или блокировке (их же держат гейты
+ * старта и долива), а следующее чтение статуса проверит снова.
  */
 async function projectOwnerRevoked(db: SupabaseClient, projectId: string): Promise<boolean> {
   try {
     const { data, error } = await db.from('he_projects').select('created_by').eq('id', projectId).maybeSingle();
     const owner = error ? null : text((data as { created_by?: unknown } | null)?.created_by);
     if (!owner) return false;
-    return (await readHeEngSendingAccess(db, owner)).state === 'revoked';
+    const [access, block] = await Promise.all([readHeEngSendingAccess(db, owner), readHeEngAccountBlock(db, owner)]);
+    return access.state === 'revoked' || block.state === 'blocked';
   } catch {
     return false;
   }

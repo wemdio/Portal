@@ -24,6 +24,12 @@ import {
   calcBillingAmount,
 } from '@/lib/tariffPricing';
 import type { TariffType, PaidTariffType, BillingPeriod } from '@/lib/tariffPricing';
+import {
+  countAdminUserRoles,
+  engCabinetClientStats,
+  filterAdminUsers,
+  isEngCabinetClient,
+} from '@/components/admin-eng/usersFilter';
 
 type TariffData = {
   tariff_type: TariffType;
@@ -906,58 +912,6 @@ function UserAvatar({ user, signedUrl }: { user: UserProfile; signedUrl?: string
   );
 }
 
-/** Ответ GET/POST /api/admin/users/[id]/eng-sending (выключатель отправки ENG-аккаунта). */
-interface AdminEngSendingState {
-  applicable: boolean;
-  required: boolean;
-  state: 'enabled' | 'not_enabled' | 'revoked' | 'unavailable' | 'error';
-  requested_at: string | null;
-  enabled_at: string | null;
-  revoked_at: string | null;
-  email_sent_at: string | null;
-}
-
-/**
- * Отправка аккаунта сейчас разрешена: включена сотрудником или — при снятом
- * требовании (HE_US_SENDING_REQUIRES_ACTIVATION=0) — не выключена (гейты
- * читают такой аккаунт как 'not_required'). Тогда кнопка — «Выключить».
- */
-function engSendingAllowed(s: AdminEngSendingState): boolean {
-  return s.state === 'enabled' || (!s.required && s.state === 'not_enabled');
-}
-
-/** «запуск / запуска / запусков» — по числу. */
-function ruLaunches(n: number): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return 'запуск';
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'запуска';
-  return 'запусков';
-}
-
-function engSendingTitle(s: AdminEngSendingState): string {
-  const at = (iso: string | null) => (iso ? new Date(iso).toLocaleString('ru-RU') : null);
-  const parts: string[] = [];
-  if (!s.required) {
-    parts.push(
-      'Требование снято (HE_US_SENDING_REQUIRES_ACTIVATION=0) — включать не нужно; «Выключить» всё равно останавливает отправку аккаунта',
-    );
-  }
-  if (s.state === 'enabled') parts.push(`Включена ${at(s.enabled_at) ?? ''}`.trim());
-  if (s.state === 'revoked') parts.push(`Выключена ${at(s.revoked_at) ?? ''}`.trim());
-  // Клиент ждёт — только пока отправку не включали, и его запрос новее
-  // выключения (запрос до выключения — история, а не ожидание).
-  if (
-    s.state === 'not_enabled' &&
-    s.requested_at &&
-    (!s.revoked_at || Date.parse(s.requested_at) > Date.parse(s.revoked_at))
-  ) {
-    parts.push(`Клиент ждёт с ${at(s.requested_at)}`);
-  }
-  if (s.email_sent_at) parts.push(`Письмо «Sending is on» ушло ${at(s.email_sent_at)}`);
-  return parts.join('\n');
-}
-
 export default function UsersPage() {
   const isTma = useIsTma();
   const { userId: currentUserId, userRole: currentUserRole } = useUser();
@@ -1015,10 +969,9 @@ export default function UsersPage() {
   const [accountProtected, setAccountProtected] = useState(false);
   const [blockStatusLoaded, setBlockStatusLoaded] = useState(false);
   const [blocking, setBlocking] = useState(false);
-  // Выключатель отправки ENG-аккаунта (GET/POST /api/admin/users/[id]/eng-sending):
-  // null — не прочитан или не ENG-клиент (кнопки нет).
-  const [engSending, setEngSending] = useState<AdminEngSendingState | null>(null);
-  const [engSendingSaving, setEngSendingSaving] = useState(false);
+  // Клиенты английского кабинета ведутся в разделе «Английские клиенты»
+  // (/admin/eng-clients); здесь они спрятаны, пока не включена эта галочка.
+  const [showEngClients, setShowEngClients] = useState(false);
 
   const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
   const [clientCampaignBaseline, setClientCampaignBaseline] = useState<string[]>([]);
@@ -1272,14 +1225,28 @@ export default function UsersPage() {
     setAccountBlocked(false);
     setAccountProtected(false);
     setBlockStatusLoaded(false);
-    setEngSending(null);
+    // Клиент английского кабинета: управление — в его карточке раздела
+    // «Английские клиенты»; здесь узкая модалка без запросов и без кнопок
+    // действий (роль, инструменты, тариф, доступ к кампаниям, блокировка,
+    // удаление, пароль — всё это делает карточка или не делается для ENG).
+    if (isEngCabinetClient(user)) {
+      setModalRole(user.role ?? null);
+      setModalFullName(user.full_name ?? '');
+      setModalEmail(user.email ?? '');
+      setActionModalOrigin(origin);
+      setActionModalUserId(user.id);
+      setModalFlyIn(false);
+      setActionModalLoadingUserId(null);
+      setTimeout(() => setModalFlyIn(true), 20);
+      return;
+    }
     try {
       const isClient = user.role === 'client';
       // Per-call catch so one failing endpoint does not blow away state derived
       // from the others. Without this, a 500 on /client-access would reset the
       // already-loaded tariff/subscription back to "Не оплачена" defaults via
       // the outer catch, even though the tariff fetch itself succeeded.
-      const [toolsRes, accessRes, tariffRes, blockRes, engSendingRes] = await Promise.all([
+      const [toolsRes, accessRes, tariffRes, blockRes] = await Promise.all([
         apiFetch<{ visibility: Record<string, boolean> }>(
           `/api/admin/users/${user.id}/tools`
         ).catch((err) => {
@@ -1310,14 +1277,7 @@ export default function UsersPage() {
           void logError('admin.users.modal.block-status.fetch.failed', err, { targetUserId: user.id });
           return null;
         }),
-        isClient
-          ? apiFetch<AdminEngSendingState>(`/api/admin/users/${user.id}/eng-sending`).catch((err) => {
-              void logError('admin.users.modal.eng-sending.fetch.failed', err, { targetUserId: user.id });
-              return null;
-            })
-          : Promise.resolve(null),
       ]);
-      setEngSending(engSendingRes?.applicable ? engSendingRes : null);
       setToolVisibility(toolsRes.visibility ?? {});
       setAccountBlocked(blockRes?.blocked === true);
       setAccountProtected(blockRes?.protected === true);
@@ -1668,111 +1628,31 @@ export default function UsersPage() {
     }
   }
 
-  /**
-   * Включить / выключить отправку ENG. `redeliver` — у уже выключенного
-   * аккаунта: «Выключить ещё раз» снова ставит на паузу кампании всех его
-   * запусков (роут делает паузу при любом выключенном состоянии, не только при
-   * смене) — для кампаний, которые с первого раза не встали.
-   */
-  async function handleToggleEngSending(redeliver = false) {
-    if (!actionModalUserId || !engSending || engSendingSaving) return;
-    const nextEnabled = redeliver ? false : !engSendingAllowed(engSending);
-    if (!nextEnabled && !window.confirm(
-      redeliver
-        ? 'Отправка ENG-аккаунта уже выключена. Поставить кампании всех его запусков на паузу ещё раз (что не ' +
-            'встанет — покажем)?'
-        : 'Выключить отправку ENG-аккаунта? Кампании всех его запусков будут поставлены на паузу (что не встанет — ' +
-            'покажем), а запуск, «Start sending» / «Resume» и ночной добор аккаунта будут отказаны — и при снятом ' +
-            'требовании HE_US_SENDING_REQUIRES_ACTIVATION=0.',
-    )) {
-      return;
-    }
-    setEngSendingSaving(true);
-    setError('');
-    setSaveSuccessMessage(null);
-    try {
-      const result = await apiFetch<AdminEngSendingState & {
-        changed: boolean;
-        email: 'sent' | 'no_email' | 'failed' | null;
-        paused: {
-          launches: number;
-          paused: number;
-          failed: number;
-          notAttempted: number;
-          unreadLaunches?: number;
-          readFailed: boolean;
-        } | null;
-      }>(`/api/admin/users/${actionModalUserId}/eng-sending`, {
-        method: 'POST',
-        body: JSON.stringify({ enabled: nextEnabled }),
-      });
-      setEngSending(result.applicable ? result : null);
-      if (nextEnabled) {
-        setSaveSuccessMessage(
-          result.email === 'sent'
-            ? 'Отправка ENG включена, клиенту ушло письмо'
-            : result.email === 'no_email'
-              ? 'Отправка ENG включена; адреса в профиле нет — напишите клиенту в чат поддержки'
-              : result.email === 'failed'
-                ? 'Отправка ENG включена, но письмо клиенту не ушло — напишите ему в чат поддержки'
-                : 'Отправка ENG уже была включена',
-        );
-      } else {
-        const p = result.paused;
-        const unread = p?.unreadLaunches ?? 0;
-        const notStopped = p ? p.failed + p.notAttempted : 0;
-        // Запуски, чья запись не прочиталась, — отдельно от кампаний: сколько
-        // в них кампаний, неизвестно (по каждому ушёл алерт с id шаблона).
-        const problems = [
-          notStopped > 0 ? `не остановлены ${notStopped}` : null,
-          unread > 0 ? `${ruLaunches(unread) === 'запуск' ? 'не прочитан' : 'не прочитаны'} ${unread} ${ruLaunches(unread)}` : null,
-        ].filter((x): x is string => x !== null);
-        const head = result.changed ? 'Отправка ENG выключена' : 'Отправка ENG уже была выключена, пауза доставлена ещё раз';
-        setSaveSuccessMessage(
-          !p
-            ? 'Отправка ENG уже была выключена'
-            : p.readFailed
-              ? `${head}, но запуски аккаунта не прочитались — поставьте его кампании на паузу у рассыльщика`
-              : problems.length > 0
-                ? `${head}; на паузе ${p.paused}, ${problems.join(', ')} — поставьте ` +
-                  `${unread > 0 ? 'их кампании' : 'их'} на паузу у рассыльщика`
-                : `${head}; кампаний на паузе: ${p.paused}`,
-        );
-      }
-    } catch (err: unknown) {
-      void logError('admin.users.eng-sending-toggle.failed', err, { targetUserId: actionModalUserId, enabled: nextEnabled });
-      setError(getErrorMessage(err) || 'Ошибка изменения отправки ENG');
-    } finally {
-      setEngSendingSaving(false);
-    }
-  }
-
   // Memoised so that sortedUsers below sees a stable filteredUsers reference
   // when nothing about (users, searchQuery) actually changed. Without this
   // wrap, every parent re-render — including those triggered by typing in
   // the action modal — produced a new array, defeating sortedUsers' useMemo
   // and re-rendering the entire users table.
-  const filteredUsers = useMemo(() => {
-    const q = searchQuery.toLowerCase();
-    return users.filter((user) => {
-      const roleKey: UserRole | 'none' = user.role ?? 'none';
-      if (!selectedRoleFilters.has(roleKey)) return false;
-      return (
-        user.email?.toLowerCase().includes(q) ||
-        user.full_name?.toLowerCase().includes(q) ||
-        (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(q))
-      );
-    });
-  }, [users, searchQuery, selectedRoleFilters]);
+  // Клиенты английского кабинета спрятаны, пока не включена галочка
+  // (components/admin-eng/usersFilter.ts — то же правило, что у раздела).
+  const filteredUsers = useMemo(
+    () => filterAdminUsers(users, { query: searchQuery, roles: selectedRoleFilters, showEng: showEngClients }),
+    [users, searchQuery, selectedRoleFilters, showEngClients],
+  );
 
   // Счётчики по каждой роли — по всей базе, независимо от поиска и выбранных
-  // фильтров. Показываются в дропдауне рядом с каждым чекбоксом.
-  const roleCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const k of ROLE_FILTER_KEYS) counts[k] = 0;
-    for (const u of users) counts[u.role ?? 'none'] = (counts[u.role ?? 'none'] ?? 0) + 1;
-    return counts as Record<UserRole | 'none', number>;
-  }, [users, ROLE_FILTER_KEYS]);
+  // фильтров (без спрятанных клиентов английского кабинета). Показываются в
+  // дропдауне рядом с каждым чекбоксом.
+  const roleCounts = useMemo(
+    () => countAdminUserRoles(users, ROLE_FILTER_KEYS, showEngClients),
+    [users, ROLE_FILTER_KEYS, showEngClients],
+  );
+  const visibleUsersCount = useMemo(
+    () => (showEngClients ? users.length : users.filter((u) => !isEngCabinetClient(u)).length),
+    [users, showEngClients],
+  );
+  // Сколько клиентов английского кабинета в базе и сколько подходит под поиск.
+  const engStats = useMemo(() => engCabinetClientStats(users, searchQuery), [users, searchQuery]);
 
   const sortedUsers = useMemo(() => {
     const list = [...filteredUsers];
@@ -1845,7 +1725,7 @@ export default function UsersPage() {
               {selectedRoleFilters.size === 0
                 ? 'Роли не выбраны'
                 : selectedRoleFilters.size === ROLE_FILTER_KEYS.length
-                  ? `Все роли · ${users.length}`
+                  ? `Все роли · ${visibleUsersCount}${!showEngClients && engStats.total > 0 ? ' (без английских клиентов)' : ''}`
                   : selectedRoleFilters.size === 1
                     ? (() => {
                         const only = [...selectedRoleFilters][0];
@@ -1945,6 +1825,33 @@ export default function UsersPage() {
           Добавить пользователя
         </button>
       </div>
+
+      {engStats.total > 0 && (
+        <div className="mb-4 flex flex-col gap-2 rounded-xl border border-blue-200 bg-blue-50/60 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <Link href="/admin/eng-clients" className="font-medium text-blue-700 hover:text-blue-800">
+            Клиенты английского кабинета ({engStats.total}) — в разделе «Английские клиенты» →
+          </Link>
+          <label className="inline-flex cursor-pointer items-center gap-2 text-gray-700">
+            <input
+              type="checkbox"
+              checked={showEngClients}
+              onChange={(e) => setShowEngClients(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            Показать клиентов английского кабинета
+          </label>
+        </div>
+      )}
+      {!showEngClients && engStats.matching > 0 && (
+        <p className="mb-4 text-sm">
+          <Link
+            href={`/admin/eng-clients?q=${encodeURIComponent(searchQuery.trim())}` as Route}
+            className="font-medium text-blue-600 hover:text-blue-700"
+          >
+            Найдено среди английских клиентов: {engStats.matching} — открыть
+          </Link>
+        </p>
+      )}
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
@@ -2098,6 +2005,7 @@ export default function UsersPage() {
         const userForModal = users.find((u) => u.id === actionModalUserId);
         if (!userForModal) return null;
         const origin = actionModalOrigin;
+        const engClient = isEngCabinetClient(userForModal);
         return (
           <div
             className="fixed inset-0 z-50 p-4 flex items-center justify-center"
@@ -2119,6 +2027,60 @@ export default function UsersPage() {
                 transition: 'left 1s cubic-bezier(0.34, 1.56, 0.64, 1), top 1s cubic-bezier(0.34, 1.56, 0.64, 1), transform 1s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 1s ease-out',
               }}
             >
+              {engClient ? (
+                <>
+                  <div className="px-7 py-5 border-b border-gray-200 shrink-0 flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      {userForModal.full_name || userForModal.email || 'Пользователь'}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionModalUserId(null);
+                        setModalFlyIn(false);
+                      }}
+                      className="size-8 inline-flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
+                      aria-label="Закрыть"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="p-7 space-y-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <p className="text-sm font-medium text-gray-700 mb-1">ФИО</p>
+                        <p className="text-sm text-gray-900 break-words">{userForModal.full_name || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-gray-700 mb-1">Почта</p>
+                        <p className="text-sm text-gray-900 break-words">{userForModal.email || '—'}</p>
+                      </div>
+                    </div>
+                    <p className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                      Это клиент английского кабинета. Управление — в карточке клиента.
+                    </p>
+                  </div>
+                  <div className="pl-4 pr-5 py-5 border-t border-gray-200 bg-gray-50 flex flex-wrap items-center gap-2">
+                    <Link
+                      href={`/admin/eng-clients/${userForModal.id}` as Route}
+                      className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium text-sm"
+                    >
+                      Открыть карточку
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionModalUserId(null);
+                        setModalFlyIn(false);
+                      }}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Закрыть
+                    </button>
+                  </div>
+                </>
+              ) : (
+              <>
               <div className="px-7 py-5 border-b border-gray-200 shrink-0 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -2536,40 +2498,6 @@ export default function UsersPage() {
                     >
                       Бриф клиента
                     </Link>
-                    {engSending && (
-                      <button
-                        type="button"
-                        onClick={() => void handleToggleEngSending()}
-                        disabled={engSendingSaving || engSending.state === 'unavailable' || engSending.state === 'error'}
-                        title={engSendingTitle(engSending)}
-                        className={`px-3 py-2 border rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed ${
-                          engSendingAllowed(engSending)
-                            ? 'border-amber-200 text-amber-700 hover:bg-amber-50'
-                            : 'border-green-200 text-green-700 hover:bg-green-50'
-                        }`}
-                      >
-                        {engSendingSaving
-                          ? 'Сохранение...'
-                          : engSending.state === 'unavailable'
-                            ? 'Отправка ENG: миграция не применена'
-                            : engSending.state === 'error'
-                              ? 'Отправка ENG: не прочиталась'
-                              : engSendingAllowed(engSending)
-                                ? 'Выключить отправку ENG'
-                                : 'Включить отправку ENG'}
-                      </button>
-                    )}
-                    {engSending?.state === 'revoked' && (
-                      <button
-                        type="button"
-                        onClick={() => void handleToggleEngSending(true)}
-                        disabled={engSendingSaving}
-                        title="Отправка уже выключена: поставить кампании всех запусков аккаунта на паузу ещё раз — для тех, что не встали с первого раза"
-                        className="px-3 py-2 border rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed border-amber-200 text-amber-700 hover:bg-amber-50"
-                      >
-                        {engSendingSaving ? 'Сохранение...' : 'Выключить ещё раз / доставить паузу'}
-                      </button>
-                    )}
                   </>
                 )}
                 {actionModalUserId !== currentUserId && (
@@ -2628,6 +2556,8 @@ export default function UsersPage() {
                   {saving ? 'Сохранение...' : 'Сохранить изменения'}
                 </button>
               </div>
+              </>
+              )}
             </div>
           </div>
         );

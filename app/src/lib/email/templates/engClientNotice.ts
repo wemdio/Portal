@@ -65,6 +65,16 @@ export interface EngClientNoticeEmailArgs {
   website: string | null;
   /** Where the button leads (a cabinet page on the ENG host). */
   ctaUrl: string;
+  /**
+   * The account's sending switch is turned off ('revoked' — staff turned it
+   * off, and so it stays after an unblock until staff turn it on again), as
+   * the sender read it right before this attempt. «Launch», «Launch now»,
+   * «Rewrite letters», «Collect again» and «Start sending» then refuse
+   * (sending_turned_off), so the copy names none of them and sends the client
+   * to Support (SENDING_OFF). «Try again» of the research, «Pause» and the
+   * market choice on step 2 do not ask the switch and stay named.
+   */
+  sendingOff: boolean;
 }
 
 function esc(s: string): string {
@@ -98,7 +108,8 @@ interface NoticeCopy {
  *  - research_ready — the research finished (project 'researched' after a
  *    clustering run that finished in the last hours) and at least one market
  *    exists. "We picked the markets" — step 2 marks the recommended ones;
- *    "press Launch" — step 3 has one Launch button.
+ *    "press Launch" — step 3 has one Launch button (with the sending switch
+ *    off it is disabled, and the letter names Support instead).
  *  - research_stopped — the project is 'failed' (only a research stage or its
  *    hand-off writes that; a cancel by hand is not emailed) or still
  *    'researching' with no research step run for longer than the stall window.
@@ -109,10 +120,15 @@ interface NoticeCopy {
  *  - sending_waiting — the automatic launch is held on the account switch
  *    (sending not turned on yet), so the market's final letters and contacts
  *    are ready (the candidate is a ready template). The switch letter
- *    (engSendingEnabled.ts) goes out when staff turn sending on.
+ *    (engSendingEnabled.ts) goes out when staff turn sending on. If the
+ *    switch is off ('revoked') by the time the letter goes out, «one-time
+ *    check» is not what it waits for: the letter says sending is turned off.
  *  - sending_started — the automatic launch started at least one campaign
  *    (or found it already sending). Letters go out in the sending hours
- *    chosen at Launch; the dashboard shows counts and has Pause.
+ *    chosen at Launch; the dashboard shows counts and has Pause. If the
+ *    switch was turned off between the start and this attempt (a retry after
+ *    an SMTP failure), «is on» is not known any more — staff turning sending
+ *    off pause the campaigns — so the letter says only that it was started.
  *  - action_needed — per code; none of them promises that nothing was sent
  *    unless the sender path guarantees it (a launch that stopped half way can
  *    have started some campaigns).
@@ -129,6 +145,13 @@ const TEAM_ON_IT = 'because of a temporary problem on our side. Our team has bee
 /** «Message Support to find out when it is fixed, then …» — step 1 and the cabinet say the same. */
 const AFTER_THE_FIX = 'Message Support to find out when it is fixed, then open your project and';
 
+/**
+ * In place of the button of the next step while the account's sending switch
+ * is off (`sendingOff`): the cabinet's line for the same state
+ * (engText.ts, ENG_SENDING_OFF_EN), with where Support is.
+ */
+const SENDING_OFF = 'Sending is turned off for your account. Message Support from your cabinet.';
+
 function noticeCopy(args: EngClientNoticeEmailArgs): NoticeCopy {
   const market = oneLine(args.marketName, 80);
   const website = oneLine(args.website, 120);
@@ -140,7 +163,9 @@ function noticeCopy(args: EngClientNoticeEmailArgs): NoticeCopy {
         subject: 'Your markets are ready to review',
         heading: 'Your markets are ready',
         paragraphs: [
-          `We finished researching ${website ?? 'your website'}. We picked the markets most likely to buy from you — open your project, check them and press Launch.`,
+          args.sendingOff
+            ? `We finished researching ${website ?? 'your website'}. We picked the markets most likely to buy from you — open your project and check them. ${SENDING_OFF}`
+            : `We finished researching ${website ?? 'your website'}. We picked the markets most likely to buy from you — open your project, check them and press Launch.`,
         ],
         cta: 'Choose markets',
       };
@@ -167,11 +192,24 @@ function noticeCopy(args: EngClientNoticeEmailArgs): NoticeCopy {
         subject: `Your letters are ready${ofMarket}`,
         heading: 'Your letters are ready',
         paragraphs: [
-          `The final letters and contacts${forMarket} are ready. Sending starts after a one-time check of your account by our team. We'll email you when sending is on.`,
+          args.sendingOff
+            ? `The final letters and contacts${forMarket} are ready. ${SENDING_OFF}`
+            : `The final letters and contacts${forMarket} are ready. Sending starts after a one-time check of your account by our team. We'll email you when sending is on.`,
         ],
         cta: 'Open the dashboard',
       };
     case 'sending_started':
+      if (args.sendingOff) {
+        return {
+          subject: `Your campaign was started${ofMarket}`,
+          heading: 'Your campaign was started',
+          paragraphs: [
+            `Your campaign${forMarket} was started. ${SENDING_OFF}`,
+            'Your dashboard shows how many letters went out and how many replies came in.',
+          ],
+          cta: 'Open the dashboard',
+        };
+      }
       return {
         subject: `Sending has started${ofMarket}`,
         heading: 'Sending has started',
@@ -182,7 +220,15 @@ function noticeCopy(args: EngClientNoticeEmailArgs): NoticeCopy {
         cta: 'Open the dashboard',
       };
     case 'action_needed':
-      return actionCopy(args.code ?? null, args.next ?? null, args.reason ?? null, market, forMarket, ofMarket);
+      return actionCopy(
+        args.code ?? null,
+        args.next ?? null,
+        args.reason ?? null,
+        args.sendingOff,
+        market,
+        forMarket,
+        ofMarket,
+      );
   }
 }
 
@@ -256,14 +302,30 @@ function stageStopText(code: StageStopCode, forMarket: string): StageStopText {
   }
 }
 
-function stageStopCopy(subject: string, text: StageStopText, next: EngClientNoticeNext | null): NoticeCopy {
+/**
+ * `sendingOff`: «Launch» and «Rewrite letters» refuse while the account's
+ * sending switch is off, so the stops they would move ('launch', 'rewrite',
+ * 'team_fix') name Support instead (SENDING_OFF); 'support' and null name no
+ * button and stay as they are.
+ */
+function stageStopCopy(
+  subject: string,
+  text: StageStopText,
+  next: EngClientNoticeNext | null,
+  sendingOff: boolean,
+): NoticeCopy {
+  const kept = text.kept ? ' The contacts already collected are kept.' : '';
   const paragraph =
     next === 'launch' || next === 'rewrite'
-      ? `${text.what} stopped before it finished. ${text.button}`
+      ? sendingOff
+        ? `${text.what} stopped before it finished, and it does not start again by itself.${kept} ${SENDING_OFF}`
+        : `${text.what} stopped before it finished. ${text.button}`
       : next === 'team_fix'
-        ? `${text.what} stopped ${TEAM_ON_IT} ${AFTER_THE_FIX} ${text.afterFix}`
+        ? sendingOff
+          ? `${text.what} stopped ${TEAM_ON_IT} ${SENDING_OFF}`
+          : `${text.what} stopped ${TEAM_ON_IT} ${AFTER_THE_FIX} ${text.afterFix}`
         : next === 'support'
-          ? `${text.what} stopped before it finished, and it does not start again by itself.${text.kept ? ' The contacts already collected are kept.' : ''} Message Support from your cabinet — our team has been told as well.`
+          ? `${text.what} stopped before it finished, and it does not start again by itself.${kept} Message Support from your cabinet — our team has been told as well.`
           : `${text.what} stopped before it finished. Open your project to see what you can do.`;
   return { subject, heading: text.heading, paragraphs: [paragraph], cta: 'Open your project' };
 }
@@ -287,10 +349,15 @@ function stageStopCopy(subject: string, text: StageStopText, next: EngClientNoti
  *    writes this hold alerts the team in the same call.
  * 'stage_stopped' is not mailed (each of its causes has its own stage-stop
  * letter with the right next step); it and anything unknown get the general
- * sentence.
+ * sentence. `sendingOff`: «Launch» refuses, so 'retrying' names Support
+ * (SENDING_OFF) — the cabinet says the same (engText.ts,
+ * AUTOPILOT_RETRYING_SENDING_OFF_EN).
  */
-function holdSentence(hold: string | null, next: EngClientNoticeNext | null): string {
+function holdSentence(hold: string | null, next: EngClientNoticeNext | null, sendingOff: boolean): string {
   if (hold === 'retrying' || (hold === null && next === 'launch')) {
+    if (sendingOff) {
+      return `We could not start the next step of your project, so it is not moving on. Nothing is lost and nothing was cancelled. ${SENDING_OFF}`;
+    }
     return 'We could not start the next step of your project, so it is not moving on. Nothing is lost and nothing was cancelled. Open your project and press «Launch» on step 3 to move it on — work that is already done is not repeated. If that button is not on step 3, step 3 says what it is waiting for first. If it keeps happening, message Support.';
   }
   switch (hold) {
@@ -305,10 +372,16 @@ function holdSentence(hold: string | null, next: EngClientNoticeNext | null): st
   }
 }
 
+/**
+ * `sendingOff` — the account's sending switch is off: the copies that would
+ * name «Rewrite letters», «Start sending» («to start it») or «Launch» name
+ * Support instead (SENDING_OFF); the rest name no button and do not change.
+ */
 function actionCopy(
   code: EngClientNoticeCode | null,
   next: EngClientNoticeNext | null,
   reason: string | null,
+  sendingOff: boolean,
   market: string | null,
   forMarket: string,
   ofMarket: string,
@@ -319,13 +392,15 @@ function actionCopy(
     case 'final_letters_stopped':
     case 'check_stopped':
     case 'rewrite_stopped':
-      return stageStopCopy(subject, stageStopText(code, forMarket), next);
+      return stageStopCopy(subject, stageStopText(code, forMarket), next, sendingOff);
     case 'letters_need_rewrite':
       return {
         subject,
         heading: 'Your letters need a rewrite',
         paragraphs: [
-          `The final letters${forMarket} did not pass our automatic check, so they were not sent. Open your project and press «Rewrite letters»; if the button is not there, message Support.`,
+          sendingOff
+            ? `The final letters${forMarket} did not pass our automatic check, so they were not sent. ${SENDING_OFF}`
+            : `The final letters${forMarket} did not pass our automatic check, so they were not sent. Open your project and press «Rewrite letters»; if the button is not there, message Support.`,
         ],
         cta: 'Open your project',
       };
@@ -334,7 +409,9 @@ function actionCopy(
         subject,
         heading: 'Sending did not start',
         paragraphs: [
-          `Your campaign${forMarket} is ready, but sending did not start after several tries. Open your dashboard to see why and to start it; if it does not start, message Support.`,
+          sendingOff
+            ? `Your campaign${forMarket} is ready, but sending did not start after several tries. ${SENDING_OFF}`
+            : `Your campaign${forMarket} is ready, but sending did not start after several tries. Open your dashboard to see why and to start it; if it does not start, message Support.`,
         ],
         cta: 'Open the dashboard',
       };
@@ -351,7 +428,7 @@ function actionCopy(
       return {
         subject: 'Work on your project is on hold',
         heading: 'Work on your project is on hold',
-        paragraphs: [holdSentence(reason, next)],
+        paragraphs: [holdSentence(reason, next, sendingOff)],
         cta: 'Open your project',
       };
     case 'needs_support':
@@ -363,12 +440,18 @@ function actionCopy(
       // the decision to start). Step 3 then shows no reason, and «Start
       // sending» would send without the check (for a window that was not set —
       // outside the client's hours), so the letter names Support before it.
+      // Its last sentence is word for word the step the launch note
+      // (engClientLaunch.ts, ENG_SUPPORT_BEFORE_START_TEXT) and step 3 name;
+      // with the sending switch off «Start sending» refuses, and step 3 then
+      // says only «Message Support» — so does the letter (SENDING_OFF).
       if (code === 'needs_support' && reason === 'not_started') {
         return {
           subject,
           heading: 'Starting did not finish',
           paragraphs: [
-            `We could not finish starting your campaigns${forMarket}. Our team needs to check them first — message Support before you press «Start sending».`,
+            sendingOff
+              ? `We could not finish starting your campaigns${forMarket}. Our team needs to check them first. ${SENDING_OFF}`
+              : `We could not finish starting your campaigns${forMarket}. Our team needs to check them first. Message Support before pressing «Start sending».`,
           ],
           cta: 'Open your project',
         };

@@ -727,9 +727,10 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'that is already in a campaign would get two letters.',
     // Число в фразах ниже бывает и 1: достройка отложенных классификатором
     // адресов (шаг 5c) обычно дозаполняет одну кампанию и оставляет остальные.
-    // Не «kept exactly as it was»: роут кабинета после ядра ставит окно
-    // отправки и таким кампаниям (PATCH campaign_schedule) — неизменны только
-    // их существование и контакты.
+    // Фраза говорит только то, что ядро гарантирует на любом пути: кампании не
+    // создавались заново и контакты в них не добавлялись. Их окно отправки ядро
+    // не трогает, и роут кабинета на достройке тоже (с 12.10.2026 у рынка свои
+    // часы — engClientLaunch.heEngLaunchWindowPlan).
     relaunchKeptCampaignsNote: (kept) =>
       `This launch was repeated: ${kept.toLocaleString('en-US')} campaign${kept === 1 ? '' : 's'} of this ` +
       `template already existed from an earlier attempt. ${kept === 1 ? 'It was' : 'They were'} not created ` +

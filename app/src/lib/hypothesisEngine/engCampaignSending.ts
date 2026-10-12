@@ -73,10 +73,20 @@
  * (= не отправляет). Кампания, которую ни разу не читали удачно, ставится на
  * паузу в воркспейсе пресета записи о запуске (иначе — ящиков пула), и «404»
  * там — НЕ пауза: неудача и алерт.
+ * Пауза блокировки и разблокировки ('staff_block', engAccountBlock): кампания
+ * без воркспейса и с «404» в запасном — не неудача, а `unreachable` (кабинет
+ * до неё не дотягивается — её ставит на паузу человек), если все чтения по
+ * дороге удались и записанного воркспейса без ключа у неё нет (иначе
+ * неудача: это сбой чтения или настройки); «404» в запасном процесс помнит
+ * (blockAbsentAt), и следующие нажатия называют такую кампанию без вызова. У
+ * разблокировки (`confirmedSinceMs`) кампания, чей не отправляющий статус уже
+ * прочитан после начала блокировки, второй раз не ставится — засчитывается
+ * (`confirmedEarlier`).
  *
  * ВРЕМЯ. Вызывающий передаёт срок (`deadlineMs`): кампания начинается, только
- * если до срока остаётся PER_CAMPAIGN_BUDGET_MS; остальные — `notAttempted`
- * (кабинет говорит, что их надо стартовать кнопкой).
+ * если до срока остаётся PER_CAMPAIGN_BUDGET_MS (у разблокировки — свой
+ * `campaignReserveMs`); остальные — `notAttempted` (кабинет говорит, что их
+ * надо стартовать кнопкой).
  *
  * client_instantly_access и client_campaign_launches этот модуль НЕ пишет:
  * RU-роуты api/client/campaigns/[id]/activate|pause рынка не проверяют и
@@ -126,10 +136,12 @@ import {
   summarizeHeEngSending,
   warnHeEngSendingDegraded,
   writeHeEngCampaignStatus,
+  type HeEngCampaignStatusRow,
   type HeEngClientState,
   type HeEngSendingSummary,
   type HeEngStartErrorCode,
 } from './engCampaignStatus';
+import type { HeEngUnreachableCampaign } from './engAccountBlockMarker';
 
 /** Метка счётчика использования рассыльщика (instantly_api_usage_hourly). */
 export const HE_ENG_SENDING_CONSUMER = 'he_eng_sending';
@@ -139,7 +151,10 @@ const READBACK_TIMEOUT_MS = 5_000;
 /**
  * ЭВРИСТИЧЕСКИЙ запас на одну кампанию, а НЕ её худший случай: кампания
  * (старт или пауза) начинается, только если до срока вызывающего столько
- * осталось. Обычно ответы рассыльщика приходят за доли секунды, и 20 с хватает
+ * осталось (пауза разблокировки задаёт свой запас — `campaignReserveMs`:
+ * кампанию, чья пауза подтвердится уже после её срока, засчитает следующее
+ * нажатие по записанному статусу). Обычно
+ * ответы рассыльщика приходят за доли секунды, и 20 с хватает
  * с запасом. Худший случай больше: старт — чтение (READ_TIMEOUT_MS), POST
  * /activate (ACTION_TIMEOUT_MS) и проверочное чтение (READBACK_TIMEOUT_MS) =
  * 30 с, пауза — POST /pause и проверочное чтение = 20 с; если общий
@@ -260,6 +275,10 @@ export interface HeEngPauseDone {
   notAttempted: number;
   /** Желание клиента записано (he_eng_launch_sending). */
   stateRecorded: boolean;
+  /** Только 'staff_block': из `paused` — засчитаны по чтению после начала блокировки (`confirmedSinceMs`). */
+  confirmedEarlier: number;
+  /** Только 'staff_block': кабинету недоступны (не в `failed`); у остальных пауз — в `failed`. */
+  unreachable: HeEngUnreachableCampaign[];
 }
 
 export type HeEngPauseResult = HeEngSendingRefusal | HeEngPauseDone;
@@ -472,10 +491,12 @@ async function readBack(
 }
 
 /**
- * Поставить одну кампанию на паузу. true — после вызова она не отправляет.
- * `trust404` — воркспейс проверен (кампания в нём уже находилась при удачном
- * чтении): «404» значит «кампании нет», это не отправка. Без проверенного
- * воркспейса «404» значит лишь «не в этом воркспейсе» — неудача.
+ * Поставить одну кампанию на паузу. 'paused' — после вызова она не
+ * отправляет; 'failed' — пауза не подтверждена (отказ, в том числе 429,
+ * неясный ответ без подтверждения). `trust404` — воркспейс проверен (кампания
+ * в нём уже находилась при удачном чтении): «404» значит «кампании нет», это
+ * не отправка ('paused'). Без проверенного воркспейса «404» значит лишь «не в
+ * этом воркспейсе» — 'absent': где она, кабинет не знает.
  */
 async function pauseOne(
   portalDb: SupabaseClient,
@@ -483,7 +504,7 @@ async function pauseOne(
   campaignId: string,
   accountId: string,
   trust404: boolean,
-): Promise<boolean> {
+): Promise<'paused' | 'failed' | 'absent'> {
   let after: number | null = null;
   let ambiguous: boolean;
   try {
@@ -502,19 +523,52 @@ async function pauseOne(
   if (after === null || heEngStatusIsSending(after)) {
     const back = await readBack(campaignId, accountId, { ambiguous });
     if (back.notFound) {
-      if (!trust404) return false;
+      if (!trust404) return 'absent';
       await writeHeEngCampaignStatus(portalDb, projectId, campaignId, { readError: 'not_found' });
-      return true;
+      return 'paused';
     }
     after = back.status;
   }
-  if (after === null) return false;
+  if (after === null) return 'failed';
   await writeHeEngCampaignStatus(portalDb, projectId, campaignId, {
     status: after,
     readError: null,
     workspace: accountId,
   });
-  return !heEngStatusIsSending(after);
+  return heEngStatusIsSending(after) ? 'failed' : 'paused';
+}
+
+/**
+ * Пауза кампании уже подтверждена чтением (пауза разблокировки, `sinceMs`):
+ * в строке кэша не отправляющий статус, прочитанный у рассыльщика не раньше
+ * `sinceMs` (статус и время чтения пишут вместе живое чтение, пауза, старт и
+ * гейт ночи). Тот же признак, что у pauseOne: не 1/4 — стоит, завершена,
+ * черновик или остановлена рассыльщиком.
+ */
+function pausedSince(row: HeEngCampaignStatusRow | undefined, sinceMs: number): boolean {
+  if (!row || row.status === null || heEngStatusIsSending(row.status)) return false;
+  const readAt = row.status_read_at ? Date.parse(row.status_read_at) : Number.NaN;
+  return Number.isFinite(readAt) && readAt >= sinceMs;
+}
+
+/**
+ * Пауза блокировки и разблокировки: где этот процесс уже получил «404»
+ * запасного воркспейса (ключ «кампания|воркспейс» → когда). Id кампании у
+ * рассыльщика в другой воркспейс не переезжает, поэтому следующие нажатия, пока
+ * не прошло HE_ENG_BLOCK_ABSENT_MEMORY_MS, называют такую кампанию недоступной
+ * без вызова: иначе её POST /pause и проверочное чтение на каждом нажатии
+ * съедают у общего ограничителя срок нажатия, и до остальных кампаний очередь
+ * не доходит. Только память процесса: после рестарта — один вызов снова.
+ */
+const HE_ENG_BLOCK_ABSENT_MEMORY_MS = 30 * 60_000;
+const blockAbsentAt = new Map<string, number>();
+
+/** Имена кампаний записи о запуске — для строки «поставьте на паузу руками». */
+function launchCampaignNames(launch: HeTemplateLaunchInfo): Map<string, string> {
+  const out = new Map<string, string>();
+  if (launch.campaign_name) out.set(launch.campaign_id, launch.campaign_name);
+  for (const c of launch.campaigns ?? []) if (c.campaign_name) out.set(c.campaign_id, c.campaign_name);
+  return out;
 }
 
 /* ─────────────── Старт ─────────────── */
@@ -1002,7 +1056,7 @@ export async function startHeEngLaunchSending(input: {
         const started = new Set(startedIds);
         const notPaused: string[] = [];
         for (const id of attemptedIds) {
-          if (await pauseOne(portalDb, projectId, id, accountId, true)) {
+          if ((await pauseOne(portalDb, projectId, id, accountId, true)) === 'paused') {
             if (started.has(id)) done.compensated += 1;
           } else {
             notPaused.push(id);
@@ -1102,10 +1156,25 @@ export async function pauseHeEngLaunchSending(input: {
   templateId: string;
   /** 'client' — кнопка Pause (записывает желание клиента); 'staff' — выключение аккаунта. */
   by: 'client' | 'staff';
+  /** Только 'staff': где для алерта 'revoke_pause_failed' (по умолчанию — выключение отправки). */
+  staffWhere?: 'staff_turn_off' | 'staff_block';
   deadlineMs: number;
+  /**
+   * Только 'staff_block' (разблокировка, engAccountBlock): кампания, чей не
+   * отправляющий статус прочитан у рассыльщика не раньше этого момента
+   * (pausedSince), на паузу заново не ставится и засчитывается
+   * (`confirmedEarlier`). Не задан — ставится каждая.
+   */
+  confirmedSinceMs?: number;
+  /** Запас на кампанию до срока (по умолчанию PER_CAMPAIGN_BUDGET_MS). */
+  campaignReserveMs?: number;
 }): Promise<HeEngPauseResult> {
   const { portalDb, instantlyDb, ownerUserId, projectId, templateId, by } = input;
   const ctx = { userId: ownerUserId, projectId, templateId, by };
+  // Пауза блокировки и разблокировки: кампанию, до которой кабинет не
+  // дотягивается, она не считает неудачей, а называет (`unreachable`).
+  const blockPause = by === 'staff' && input.staffWhere === 'staff_block';
+  const reserveMs = input.campaignReserveMs ?? PER_CAMPAIGN_BUDGET_MS;
   try {
     const loaded = await loadLaunch(portalDb, {
       ownerUserId,
@@ -1131,26 +1200,32 @@ export async function pauseHeEngLaunchSending(input: {
     // чтении (строка кэша) — там «404» значит «кампании нет». Не читалась
     // удачно — запасной: пресета записи о запуске, иначе ящиков пула проекта;
     // «404» в запасном — не пауза (кампания может жить в другом воркспейсе).
+    // `definite` — ни одно чтение по дороге не упало и записанный воркспейс
+    // (если он есть) настроен: только тогда «воркспейса нет» и «404» в
+    // запасном значат «кабинету недоступна», а не «не прочли» / «нет ключа».
     const rows = await readHeEngCampaignStatusRows(
       portalDb,
       campaigns.map((c) => c.campaignId),
     );
-    let fallback: string | null | undefined;
-    const fallbackWorkspace = async (): Promise<string | null> => {
+    let fallback: { accountId: string | null; definite: boolean } | undefined;
+    const fallbackWorkspace = async (): Promise<{ accountId: string | null; definite: boolean }> => {
       if (fallback !== undefined) return fallback;
-      fallback = null;
       const workspace = await launchWorkspace(instantlyDb, ownerUserId, loaded.launch.preset_id);
       if (workspace.kind === 'ok') {
-        fallback = workspace.accountId;
+        fallback = { accountId: workspace.accountId, definite: true };
       } else {
         const assignment = await readHeSendingPoolAssignment(portalDb, projectId);
-        if (assignment.kind === 'assigned') {
-          const poolWorkspace = resolveInstantlyAccountId(assignment.instantlyAccountId);
-          fallback = heEngWorkspaceConfigured(poolWorkspace) ? poolWorkspace : null;
-        }
+        const definite = workspace.kind !== 'error' && assignment.kind !== 'error';
+        const poolWorkspace =
+          assignment.kind === 'assigned' ? resolveInstantlyAccountId(assignment.instantlyAccountId) : null;
+        fallback = {
+          accountId: poolWorkspace && heEngWorkspaceConfigured(poolWorkspace) ? poolWorkspace : null,
+          definite,
+        };
       }
       return fallback;
     };
+    const names = blockPause ? launchCampaignNames(loaded.launch) : null;
 
     const done: HeEngPauseDone = {
       kind: 'done',
@@ -1159,42 +1234,80 @@ export async function pauseHeEngLaunchSending(input: {
       failed: [],
       notAttempted: 0,
       stateRecorded,
+      confirmedEarlier: 0,
+      unreachable: [],
     };
     const unattempted: string[] = [];
     let unverifiedWorkspace = 0;
     for (const c of campaigns) {
+      const row = rows?.get(c.campaignId);
+      if (blockPause && input.confirmedSinceMs !== undefined && pausedSince(row, input.confirmedSinceMs)) {
+        done.paused += 1;
+        done.confirmedEarlier += 1;
+        continue;
+      }
       let accountId: string | null = null;
       let trust404 = false;
-      const recorded = rows?.get(c.campaignId)?.instantly_account_id ?? null;
+      let definite = rows !== null;
+      const recorded = row?.instantly_account_id ?? null;
       if (recorded && heEngWorkspaceConfigured(recorded)) {
         accountId = resolveInstantlyAccountId(recorded);
         trust404 = true;
+      } else if (recorded) {
+        // Воркспейс известен, а ключа к нему у процесса нет — это сбой
+        // настройки, а не «кабинету недоступна»: такая кампания держит
+        // разблокировку (неудача), даже если запасной ответит «404».
+        definite = false;
       }
       if (!accountId) {
-        accountId = await fallbackWorkspace();
+        const fb = await fallbackWorkspace();
+        accountId = fb.accountId;
+        definite = definite && fb.definite;
         if (accountId) unverifiedWorkspace += 1;
       }
+      const unreachable = (notFoundIn: string | null): HeEngUnreachableCampaign => ({
+        campaign_id: c.campaignId,
+        name: names?.get(c.campaignId) ?? null,
+        workspace: recorded,
+        not_found_in: notFoundIn,
+      });
       if (!accountId) {
-        done.failed.push(c.campaignId);
+        if (blockPause && definite) done.unreachable.push(unreachable(null));
+        else done.failed.push(c.campaignId);
         continue;
       }
-      if (Date.now() + PER_CAMPAIGN_BUDGET_MS > input.deadlineMs) {
+      const absentKey = `${c.campaignId}|${accountId}`;
+      const absentAt = blockPause && definite && !trust404 ? blockAbsentAt.get(absentKey) : undefined;
+      if (absentAt !== undefined && Date.now() - absentAt < HE_ENG_BLOCK_ABSENT_MEMORY_MS) {
+        done.unreachable.push(unreachable(accountId));
+        continue;
+      }
+      if (Date.now() + reserveMs > input.deadlineMs) {
         done.notAttempted += 1;
         unattempted.push(c.campaignId);
         continue;
       }
-      if (await pauseOne(portalDb, projectId, c.campaignId, accountId, trust404)) done.paused += 1;
-      else done.failed.push(c.campaignId);
+      const paused = await pauseOne(portalDb, projectId, c.campaignId, accountId, trust404);
+      if (paused === 'paused') {
+        done.paused += 1;
+      } else if (paused === 'absent' && blockPause && definite) {
+        if (blockAbsentAt.size >= 1000) blockAbsentAt.clear();
+        blockAbsentAt.set(absentKey, Date.now());
+        done.unreachable.push(unreachable(accountId));
+      } else {
+        done.failed.push(c.campaignId);
+      }
     }
     // Алерт: часть кампаний не встала — или Pause клиента не записался (даже
     // если рассыльщик остановил всё): без записи эту паузу не держат ни доводка
     // при чтении статуса, ни ночной гейт, а кнопка старта и запуск
-    // (кроме шага 6b) читают прежнее желание.
+    // (кроме шага 6b) читают прежнее желание. Недоступные кабинету — в своём
+    // алерте блокировки ('campaigns_unreachable', engAccountBlock).
     if (done.failed.length > 0 || unattempted.length > 0 || (by === 'client' && !stateRecorded)) {
       const campaignIds = [...done.failed, ...unattempted];
       void notifyHeEngSending(
         by === 'staff'
-          ? { kind: 'revoke_pause_failed', projectId, templateId, campaignIds, where: 'staff_turn_off' }
+          ? { kind: 'revoke_pause_failed', projectId, templateId, campaignIds, where: input.staffWhere ?? 'staff_turn_off' }
           : { kind: 'pause_failed', projectId, templateId, campaignIds, stateRecorded },
       );
     }
@@ -1206,6 +1319,7 @@ export async function pauseHeEngLaunchSending(input: {
       notAttempted: done.notAttempted,
       stateRecorded,
       unverifiedWorkspace,
+      ...(blockPause ? { confirmedEarlier: done.confirmedEarlier, unreachable: done.unreachable.length } : {}),
     });
     return done;
   } catch (e) {
@@ -1214,76 +1328,131 @@ export async function pauseHeEngLaunchSending(input: {
   }
 }
 
+/** Счётчики паузы кампаний аккаунта (ответ pauseHeEngAccountSending). */
+export interface HeEngAccountPauseCounts {
+  launches: number;
+  /** Не отправляют после вызова (поставлены на паузу, уже стояли или завершены — см. pauseOne). */
+  paused: number;
+  failed: number;
+  notAttempted: number;
+  unreadLaunches: number;
+  readFailed: boolean;
+  /** Только 'staff_block' (поля нет у выключения отправки) — см. HeEngPauseDone. */
+  confirmedEarlier?: number;
+  unreachable?: HeEngUnreachableCampaign[];
+}
+
 /**
- * Выключение отправки аккаунта сотрудником: пауза кампаний ВСЕХ запусков
- * us-проектов аккаунта (желание клиента не трогается — это решение не его).
- * До срока; что не успели — `notAttempted`. Запуск, чья запись не прочиталась
- * (pauseHeEngLaunchSending отказал до рассыльщика), — `unreadLaunches`, а не
- * кампании: сколько в нём кампаний, неизвестно; по каждому такому шаблону —
- * алерт 'revoke_pause_failed'. НЕ БРОСАЕТ.
+ * Ход паузы аккаунта — для вызывающего со своим жёстким сроком
+ * (engAccountBlock): функция пишет сюда по мере работы. `listed` — запуски
+ * аккаунта прочитаны (`counts.launches` — все); `settledLaunches` — сколько
+ * запусков уже дали исход в `counts`. Остальные к сроку вызывающего —
+ * запуски без подтверждённой паузы.
+ */
+export interface HeEngAccountPauseProgress {
+  counts: HeEngAccountPauseCounts;
+  listed: boolean;
+  settledLaunches: number;
+}
+
+/**
+ * Пауза кампаний ВСЕХ запусков us-проектов аккаунта сотрудником — при
+ * выключении отправки (`where` 'staff_turn_off', по умолчанию) и при
+ * блокировке клиента ('staff_block', engAccountBlock). Желание клиента не
+ * трогается — это решение не его. До срока; что не успели — `notAttempted`.
+ * Запуск, чья запись не прочиталась (pauseHeEngLaunchSending отказал до
+ * рассыльщика), — `unreadLaunches`, а не кампании: сколько в нём кампаний,
+ * неизвестно; по каждому такому шаблону — алерт 'revoke_pause_failed' с тем же
+ * `where`. У 'staff_block' — ещё `confirmedEarlier` и `unreachable`
+ * (`confirmedSinceMs`, `campaignReserveMs` — см. pauseHeEngLaunchSending).
+ * НЕ БРОСАЕТ.
  */
 export async function pauseHeEngAccountSending(input: {
   portalDb: SupabaseClient;
   instantlyDb: SupabaseClient;
   userId: string;
   deadlineMs: number;
-}): Promise<{
-  launches: number;
-  paused: number;
-  failed: number;
-  notAttempted: number;
-  unreadLaunches: number;
-  readFailed: boolean;
-}> {
-  const out = { launches: 0, paused: 0, failed: 0, notAttempted: 0, unreadLaunches: 0, readFailed: false };
+  where?: 'staff_turn_off' | 'staff_block';
+  progress?: HeEngAccountPauseProgress;
+  confirmedSinceMs?: number;
+  campaignReserveMs?: number;
+}): Promise<HeEngAccountPauseCounts> {
+  const where = input.where ?? 'staff_turn_off';
+  const progress: HeEngAccountPauseProgress = input.progress ?? {
+    counts: { launches: 0, paused: 0, failed: 0, notAttempted: 0, unreadLaunches: 0, readFailed: false },
+    listed: false,
+    settledLaunches: 0,
+  };
+  const out = progress.counts;
+  if (where === 'staff_block') {
+    out.confirmedEarlier ??= 0;
+    out.unreachable ??= [];
+  }
+  const readFailed = (): HeEngAccountPauseCounts => {
+    out.readFailed = true;
+    return { ...out };
+  };
+  const nothingToPause = (): HeEngAccountPauseCounts => {
+    progress.listed = true;
+    return { ...out };
+  };
   try {
     const { data: projects, error: projErr } = await input.portalDb
       .from('he_projects')
       .select('id')
       .eq('created_by', input.userId)
       .eq('market', 'us');
-    if (projErr) return { ...out, readFailed: true };
+    if (projErr) return readFailed();
     const projectIds = (projects ?? []).map((p) => String((p as { id?: unknown }).id ?? '')).filter(Boolean);
-    if (projectIds.length === 0) return out;
+    if (projectIds.length === 0) return nothingToPause();
     const { data: verticals, error: vertErr } = await input.portalDb
       .from('he_verticals')
       .select('id, project_id')
       .in('project_id', projectIds);
-    if (vertErr) return { ...out, readFailed: true };
+    if (vertErr) return readFailed();
     const projectOf = new Map(
       (verticals ?? []).map((v) => [String((v as { id?: unknown }).id), String((v as { project_id?: unknown }).project_id)]),
     );
-    if (projectOf.size === 0) return out;
+    if (projectOf.size === 0) return nothingToPause();
     const { data: templates, error: tplErr } = await input.portalDb
       .from('he_templates')
       .select('id, vertical_id, launch_info')
       .in('vertical_id', [...projectOf.keys()])
       .not('launch_info', 'is', null);
-    if (tplErr) return { ...out, readFailed: true };
+    if (tplErr) return readFailed();
+    const launches: Array<{ templateId: string; projectId: string }> = [];
     for (const raw of (templates ?? []) as Array<Record<string, unknown>>) {
       if (!parseLaunchInfo(raw.launch_info)) continue;
       const projectId = projectOf.get(String(raw.vertical_id));
       if (!projectId) continue;
-      out.launches += 1;
+      launches.push({ templateId: String(raw.id), projectId });
+    }
+    out.launches = launches.length;
+    progress.listed = true;
+    for (const { templateId, projectId } of launches) {
       const res = await pauseHeEngLaunchSending({
         portalDb: input.portalDb,
         instantlyDb: input.instantlyDb,
         ownerUserId: input.userId,
         projectId,
-        templateId: String(raw.id),
+        templateId,
         by: 'staff',
+        staffWhere: where,
         deadlineMs: input.deadlineMs,
+        confirmedSinceMs: input.confirmedSinceMs,
+        campaignReserveMs: input.campaignReserveMs,
       });
       if (res.kind === 'refused') {
         // Запись запуска не прочиталась — ни одна его кампания не ставилась
         // на паузу; команде — по шаблону, чтобы поставить их руками.
         out.unreadLaunches += 1;
+        progress.settledLaunches += 1;
         void notifyHeEngSending({
           kind: 'revoke_pause_failed',
           projectId,
-          templateId: String(raw.id),
+          templateId,
           campaignIds: [],
-          where: 'staff_turn_off',
+          where,
           launchUnread: true,
         });
         continue;
@@ -1291,10 +1460,15 @@ export async function pauseHeEngAccountSending(input: {
       out.paused += res.paused;
       out.failed += res.failed.length;
       out.notAttempted += res.notAttempted;
+      if (where === 'staff_block') {
+        out.confirmedEarlier = (out.confirmedEarlier ?? 0) + res.confirmedEarlier;
+        out.unreachable = [...(out.unreachable ?? []), ...res.unreachable];
+      }
+      progress.settledLaunches += 1;
     }
-    return out;
+    return { ...out };
   } catch {
-    return { ...out, readFailed: true };
+    return readFailed();
   }
 }
 

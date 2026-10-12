@@ -68,6 +68,30 @@ import 'server-only';
  * role='client', market='eng', не is_demo и с адресом. Проект — market='us'.
  * Всё остальное — 'not_eng' / 'no_email', и заявка не создаётся.
  *
+ * ЗАБЛОКИРОВАННЫЙ ПОЛУЧАТЕЛЬ (решение владельца 12.10.2026: блокировка
+ * останавливает всё, письма клиенту тоже) — 'blocked': ни заявки, ни SMTP.
+ * Признаков два, хватает любого: активная отметка блокировки
+ * (he_eng_account_blocks — пакетом вместе с профилями, readRecipients) и живой
+ * бан Supabase (auth.users.banned_until в будущем — читается перед самой
+ * заявкой, loadNoticeContext: бан, поставленный мимо раздела «Английские
+ * клиенты», отметки не пишет). Повтор неотправленных закрывает строку такого
+ * получателя без отправки (attempts = 3, лог retry_dropped). Сбой любого из
+ * этих чтений — письма в этом проходе нет и попытка не тратится; таблицы
+ * отметок нет (миграция 20261013_0001) — решает только бан.
+ *
+ * ВЫКЛЮЧЕННАЯ ОТПРАВКА. Выключатель отправки аккаунта 'revoked' (сотрудник
+ * выключил; так и после разблокировки, пока сотрудник не включит снова) —
+ * письма идут, но «Launch», «Launch now», «Rewrite letters», «Collect again»
+ * и «Start sending» откажут 403 sending_turned_off. Поэтому каждая попытка
+ * (и первая, и повтор) перед отправкой читает выключатель
+ * (readHeEngSendingAccess, loadNoticeContext), и при 'revoked' текст вместо
+ * такой кнопки говорит «Sending is turned off for your account. Message
+ * Support» (engClientNotice, sendingOff) — как кабинет в том же состоянии.
+ * next_step (решение заявки) не меняется: включат отправку до повтора —
+ * повтор назовёт кнопку. «Try again» исследования, «Pause» и выбор рынков
+ * выключатель не спрашивают и называются как прежде. Сбой чтения — 'failed',
+ * как у остальных чтений контекста письма: заявки нет, попытка не тратится.
+ *
  * ОКНО СОБЫТИЯ — 6 часов. Проход смотрит только на свежие факты (кластеризация
  * закончилась, research упал или встал, база или стадия встали, пауза записана
  * в последние 6 часов), поэтому первый запуск кода не разошлёт письма о давних
@@ -84,12 +108,19 @@ import 'server-only';
  * бюджет отправок, читается снова следующим проходом. Круг дольше одного
  * прохода — строка лога (не чаще BUDGET_LOG_EVERY_MS), круг дольше окна
  * события за вычетом отстоя — своё событие лога: события могли выпасть из окна.
- * Чтение, которое упёрлось в свой limit, — не «всё прочитано»: письма по
- * этому куску ждут (лог), а не уходят по неполному срезу (иначе «ничего не
- * идёт» при обрезанном списке живых джоб). Исследование — по 500 проектов на
- * запрос, упор — тоже в лог. Чтения стадий — только когда в окне есть
- * упавшая джоба стадии; бюджет писем (heTemplateGenerationBudget) — только
- * для ещё не заявленных событий; не больше SCAN_SEND_CAP отправок за проход.
+ * Чтения со многими строками на id (джобы, базы, вертикали, гипотезы, цепочки,
+ * шаблоны, эпизоды) идут кусками по MANY_CHUNK id с limit READ_LIMIT (не
+ * больше 1000: столько PostgREST отдаёт за раз и сам режет молча). Кусок,
+ * упёршийся в limit, — не «всё прочитано»: события ЕГО проектов (или рынков)
+ * в этом проходе не пишутся (лог), а не уходят по неполному срезу (иначе
+ * «ничего не идёт» при обрезанном списке живых джоб); остальные куски — как
+ * обычно. Доливные базы отсекаются в самом запросе (NOT_REFILL_BASE_OR): их
+ * по одной на рынок за ночь, и без этого чтения баз упирались бы в limit.
+ * Исследование — по 500 проектов на запрос, упор — тоже в лог. Чтения стадий
+ * — только когда в окне есть упавшая джоба стадии и только по рынкам и базам
+ * ещё не заявленных упавших джоб; бюджет писем (heTemplateGenerationBudget) —
+ * только для ещё не заявленных событий; не больше SCAN_SEND_CAP отправок за
+ * проход.
  *
  * ССЫЛКИ — всегда на ENG-хост из окружения (heEngAppOrigin), не на Host
  * запроса; шаги мастера — ?step=1|2|3.
@@ -100,6 +131,7 @@ import { sendTransactionalEmail } from '@/lib/email/smtpClient';
 import { renderEngClientNoticeEmail } from '@/lib/email/templates/engClientNotice';
 import { logWarn } from '@/lib/loggerServer';
 import { heTemplateGenerationBudget } from './autopilotNext';
+import { heEngAccountBlockOf, readHeEngAccountBlocks } from './engAccountBlockMarker';
 import {
   toClientEngAutopilotHold,
   toClientEngBase,
@@ -109,6 +141,7 @@ import {
 import { heTeamFixableFailureOf } from './clientErrors';
 import { engAnalysisRequeues } from './engDashboard';
 import { heEngAppOrigin, HE_ENG_VERIFY_FROM_NAME } from './engEmailVerificationMail';
+import { readHeEngSendingAccess } from './engSendingAccess';
 import { notifyHeClientStop, type HeOpsStageStopStage, type HeOpsStop } from './opsAlert';
 import { engResearchRetryVerdict, HE_RESEARCH_STAGES, HE_RESEARCH_STALL_GRACE_MS } from './researchJob';
 import { normalizeWebsiteInput } from './websiteUrl';
@@ -171,11 +204,25 @@ export interface HeEngClientNotice {
   refId?: string | null;
   /** Только autopilot_hold: номер эпизода паузы этого кода у проекта (шапка, «ПАУЗА АВТОПИЛОТА»). */
   episode?: number | null;
+  /**
+   * Только needs_support: requested_at намерения (нажатие «Launch»), при
+   * котором автозапуск сдался. У классов, которые поднимает новое нажатие
+   * ('failed', 'refused'), входит в ключ (heEngClientNoticeKey).
+   */
+  launchRequestedAt?: string | null;
   /** Какой следующий шаг называет письмо; в ключ события не входит. */
   next?: HeEngClientNextStep | null;
 }
 
-export type HeEngClientNoticeResult = 'sent' | 'duplicate' | 'not_eng' | 'no_email' | 'unavailable' | 'failed';
+/** 'blocked' — получатель заблокирован (шапка, «ЗАБЛОКИРОВАННЫЙ ПОЛУЧАТЕЛЬ»): ни заявки, ни SMTP. */
+export type HeEngClientNoticeResult =
+  | 'sent'
+  | 'duplicate'
+  | 'not_eng'
+  | 'no_email'
+  | 'blocked'
+  | 'unavailable'
+  | 'failed';
 
 type Row = Record<string, unknown>;
 
@@ -241,6 +288,27 @@ function num(v: unknown): number {
 const ID_CHUNK = 100;
 /** Ключи дедупа длиннее uuid — их кусок короче. */
 const KEY_CHUNK = 30;
+/**
+ * Чтения, где на один id приходится много строк (джобы и базы проекта,
+ * вертикали, гипотезы, цепочки и шаблоны рынка, эпизоды пауз): куски по
+ * MANY_CHUNK id, limit READ_LIMIT (шапка, «ОБЪЁМ И ПОЛНОТА»).
+ */
+const MANY_CHUNK = 20;
+const READ_LIMIT = 1000;
+
+/**
+ * «Не доливная база» в запросе — то же правило, что isRefillBase (и проекция
+ * кабинета): доливная — collect_info.refill = true ИЛИ имя «auto-refill…».
+ * Пустые значения (ключа refill нет, filename null) — не доливная. Одним
+ * or(): (refill нет ∨ refill ≠ true) ∧ (имени нет ∨ не «auto-refill…»),
+ * раскрыто в четыре and(). После чтения isRefillBase проверяет ещё раз.
+ */
+const NOT_REFILL_BASE_OR = [
+  'and(collect_info->>refill.is.null,filename.is.null)',
+  'and(collect_info->>refill.is.null,filename.not.like.auto-refill%)',
+  'and(collect_info->>refill.neq.true,filename.is.null)',
+  'and(collect_info->>refill.neq.true,filename.not.like.auto-refill%)',
+].join(',');
 
 type ReadResult = PromiseLike<{ data: unknown[] | null; error: { code?: string; message?: string } | null }>;
 
@@ -262,36 +330,48 @@ function logBudgetHit(event: string, message: string, context?: Record<string, u
 }
 
 /**
- * Чтение по списку кусками; null — хоть один кусок не прочитался (ошибка — в
- * лог под event) или упёрся в `limit` (строк столько же, сколько limit, — срез
- * мог быть обрезан). Обрезанный срез — не «всё прочитано»: «ничего не идёт» по
- * обрезанному списку живых джоб дало бы письмо об остановке того, что идёт,
- * поэтому письма этого куска ждут, а упор — в лог (logBudgetHit).
+ * Чтение по списку кусками. null — хоть один кусок не прочитался (ошибка — в
+ * лог под event): по этому чтению писем в проходе нет. С `limit` (каждый
+ * запрос обязан вызываться с `.limit(limit)`) кусок, вернувший столько строк,
+ * сколько limit, мог быть обрезан: его строк в `rows` нет, а его id — в `cut`,
+ * и вызывающий не пишет событий по ним в этом проходе («ничего не идёт» по
+ * обрезанному списку живых джоб дало бы письмо об остановке того, что идёт);
+ * упор — в лог (logBudgetHit). Остальные куски прочитаны целиком.
  */
+interface InRead {
+  rows: Row[];
+  cut: Set<string>;
+}
+
 async function readIn(
   ids: string[],
   chunk: number,
   event: string,
   read: (part: string[]) => ReadResult,
   limit?: number,
-): Promise<Row[] | null> {
+): Promise<InRead | null> {
   const rows: Row[] = [];
+  const cut = new Set<string>();
   for (let i = 0; i < ids.length; i += chunk) {
-    const { data, error } = await read(ids.slice(i, i + chunk));
+    const part = ids.slice(i, i + chunk);
+    const { data, error } = await read(part);
     if (error) {
       void logWarn(event, errText(error));
       return null;
     }
-    const part = (data ?? []) as Row[];
-    if (limit !== undefined && part.length >= limit) {
-      logBudgetHit(`${event}.limit`, `read returned ${part.length} rows, its limit: the slice may be cut — no email from it this pass`, {
-        ids: Math.min(chunk, ids.length - i),
-      });
-      return null;
+    const got = (data ?? []) as Row[];
+    if (limit !== undefined && got.length >= limit) {
+      for (const id of part) cut.add(id);
+      logBudgetHit(
+        `${event}.limit`,
+        `read returned ${got.length} rows, its limit: the slice may be cut — no email about these ${part.length} ids this pass`,
+        { ids: part.length },
+      );
+      continue;
     }
-    rows.push(...part);
+    rows.push(...got);
   }
-  return rows;
+  return { rows, cut };
 }
 
 function ms(v: unknown): number {
@@ -360,12 +440,18 @@ export function heEngClientNoticeKey(notice: HeEngClientNotice): string | null {
         case 'letters_need_rewrite':
         case 'start_failed':
           return template ? `action:${notice.code}:${template}` : null;
-        case 'needs_support':
+        case 'needs_support': {
           // refId — причина, которую тик автозапуска различает сам ('spend_limit',
           // 'sending_turned_off'); без неё — общий «не получилось». Разные
           // причины одного рынка — разные события: письмо о потолке расхода не
           // должно глушить позднее «запуск сдался».
-          return `action:needs_support:${template ?? project}${ref ? `:${ref}` : ''}`;
+          // У 'failed' и 'refused' в ключе ещё и нажатие «Launch»: строку
+          // 'failed' новое нажатие возвращает в 'waiting', у 'held' ставит срок
+          // «сейчас» — и второе «сдался» после нового нажатия должно дать
+          // письмо, а не «дубликат» первого.
+          const press = ref === 'failed' || ref === 'refused' ? pressStampOf(notice.launchRequestedAt) : null;
+          return `action:needs_support:${template ?? project}${ref ? `:${ref}` : ''}${press ? `:${press}` : ''}`;
+        }
         case 'collect_stopped':
           return ref ? `action:collect_stopped:${ref}` : null;
         case 'autopilot_hold': {
@@ -390,9 +476,19 @@ export function heEngClientNoticeKey(notice: HeEngClientNotice): string | null {
   }
 }
 
+/** Нажатие «Launch» для ключа письма: миллисекунды requested_at (одна запись — одна строка, как бы её ни отформатировала БД). */
+function pressStampOf(requestedAt: string | null | undefined): string | null {
+  const t = Date.parse(str(requestedAt));
+  return Number.isFinite(t) && t > 0 ? String(t) : null;
+}
+
 /* ── Получатель ── */
 
-type RecipientVerdict = { kind: 'ok'; userId: string; email: string } | { kind: 'not_eng' } | { kind: 'no_email' };
+type RecipientVerdict =
+  | { kind: 'ok'; userId: string; email: string }
+  | { kind: 'not_eng' }
+  | { kind: 'no_email' }
+  | { kind: 'blocked' };
 
 function recipientOf(profile: Row | null | undefined): RecipientVerdict {
   if (!profile) return { kind: 'not_eng' };
@@ -404,18 +500,70 @@ function recipientOf(profile: Row | null | undefined): RecipientVerdict {
 
 const PROFILE_COLUMNS = 'id, email, role, market, is_demo';
 
-/** Профили владельцев одним чтением; null — не прочиталось. */
+/**
+ * Профили владельцев одним чтением и отметки блокировки тех из них, кому
+ * письмо вообще ушло бы (активная отметка — 'blocked'). null — не прочиталось
+ * одно из двух (письма по этому списку в проходе нет).
+ */
 async function readRecipients(db: SupabaseClient, userIds: string[]): Promise<Map<string, RecipientVerdict> | null> {
   const out = new Map<string, RecipientVerdict>();
   const ids = [...new Set(userIds.filter(Boolean))];
   if (ids.length === 0) return out;
-  const rows = await readIn(ids, ID_CHUNK, 'he.eng_client_mail.profiles_read_failed', (part) =>
+  const read = await readIn(ids, ID_CHUNK, 'he.eng_client_mail.profiles_read_failed', (part) =>
     db.from('profiles').select(PROFILE_COLUMNS).in('id', part).limit(part.length),
   );
-  if (!rows) return null;
-  const byId = new Map(rows.map((p) => [str(p.id), p]));
+  if (!read) return null;
+  const byId = new Map(read.rows.map((p) => [str(p.id), p]));
   for (const id of ids) out.set(id, recipientOf(byId.get(id)));
+  const okIds = ids.filter((id) => out.get(id)?.kind === 'ok');
+  if (okIds.length > 0) {
+    const blocks = await readHeEngAccountBlocks(db, okIds);
+    if (blocks.state === 'error') {
+      void logWarn('he.eng_client_mail.block_read_failed', blocks.detail, { code: blocks.code });
+      return null;
+    }
+    for (const id of okIds) {
+      if (heEngAccountBlockOf(blocks, id).state === 'blocked') out.set(id, { kind: 'blocked' });
+    }
+  }
   return out;
+}
+
+/** Бан Supabase сейчас: 'gone' — пользователя в auth нет (писать некому). */
+type LiveBan = { kind: 'banned' | 'clear' | 'gone' } | { kind: 'error'; message: string };
+
+/**
+ * Живой бан получателя (auth.users.banned_until в будущем; непарсящийся срок —
+ * бан, fail-closed) — то же правило, что engAutoLaunch.readHeEngAccountStanding.
+ * НЕ БРОСАЕТ.
+ */
+async function readLiveBan(db: SupabaseClient, userId: string): Promise<LiveBan> {
+  try {
+    const { data, error } = await db.auth.admin.getUserById(userId);
+    if (error) {
+      const authErr = error as { status?: number; code?: string; message?: string };
+      if (authErr.status === 404 || authErr.code === 'user_not_found') return { kind: 'gone' };
+      return { kind: 'error', message: `auth user read: ${String(authErr.message ?? '').slice(0, 200)}` };
+    }
+    const user = data?.user ?? null;
+    if (!user) return { kind: 'gone' };
+    const bannedUntil = typeof user.banned_until === 'string' ? user.banned_until.trim() : '';
+    if (!bannedUntil) return { kind: 'clear' };
+    const until = Date.parse(bannedUntil);
+    return { kind: !Number.isFinite(until) || until > Date.now() ? 'banned' : 'clear' };
+  } catch (e) {
+    return { kind: 'error', message: `auth user read threw: ${errText(e)}` };
+  }
+}
+
+/**
+ * Память прохода: бан по получателю (одно чтение auth на получателя за
+ * проход) и проекты, чей получатель оказался заблокирован (их события в этом
+ * проходе больше не готовятся и не читают контекст).
+ */
+interface RecipientMemo {
+  bans: Map<string, 'banned' | 'clear' | 'gone'>;
+  blockedProjects: Set<string>;
 }
 
 /* ── Контекст письма ── */
@@ -424,12 +572,15 @@ interface NoticeContext {
   recipient: { userId: string; email: string };
   website: string | null;
   marketName: string | null;
+  /** Выключатель отправки аккаунта — 'revoked' на момент этой попытки (шапка, «ВЫКЛЮЧЕННАЯ ОТПРАВКА»). */
+  sendingOff: boolean;
 }
 
 type ContextOutcome =
   | { kind: 'ok'; ctx: NoticeContext }
   | { kind: 'not_eng' }
   | { kind: 'no_email' }
+  | { kind: 'blocked' }
   | { kind: 'failed'; message: string };
 
 /** Сайт для текста письма: «acme.com», а не «https://acme.com/». */
@@ -487,7 +638,19 @@ async function readJobVertical(
   return readBaseVertical(db, projectId, str(job.base_id));
 }
 
-async function loadNoticeContext(db: SupabaseClient, notice: HeEngClientNotice): Promise<ContextOutcome> {
+/**
+ * Контекст письма прямо перед заявкой: проект, получатель (профиль и отметка
+ * блокировки — readRecipients), живой бан получателя (readLiveBan; `memo` —
+ * одно чтение на получателя за проход), рынок, выключатель отправки аккаунта
+ * (readHeEngSendingAccess; повтор читает его заново). 'blocked' — получатель
+ * заблокирован: заявки нет. Любой сбой чтения — 'failed' (письма нет, заявки
+ * нет, попытка повтора не тратится).
+ */
+async function loadNoticeContext(
+  db: SupabaseClient,
+  notice: HeEngClientNotice,
+  memo?: RecipientMemo,
+): Promise<ContextOutcome> {
   const { data: project, error: projectErr } = await db
     .from('he_projects')
     .select('id, created_by, market, website_url')
@@ -501,9 +664,19 @@ async function loadNoticeContext(db: SupabaseClient, notice: HeEngClientNotice):
   if (!ownerId) return { kind: 'not_eng' };
 
   const recipients = await readRecipients(db, [ownerId]);
-  if (!recipients) return { kind: 'failed', message: 'profile read failed' };
+  if (!recipients) return { kind: 'failed', message: 'profile or block marker read failed' };
   const recipient = recipients.get(ownerId) ?? { kind: 'not_eng' as const };
   if (recipient.kind !== 'ok') return recipient;
+
+  let ban = memo?.bans.get(ownerId);
+  if (!ban) {
+    const live = await readLiveBan(db, ownerId);
+    if (live.kind === 'error') return { kind: 'failed', message: live.message };
+    ban = live.kind;
+    memo?.bans.set(ownerId, ban);
+  }
+  if (ban === 'banned') return { kind: 'blocked' };
+  if (ban === 'gone') return { kind: 'not_eng' };
 
   let verticalId = '';
   const templateId = notice.templateId?.trim();
@@ -523,12 +696,19 @@ async function loadNoticeContext(db: SupabaseClient, notice: HeEngClientNotice):
   const market = await readMarketName(db, notice.projectId, verticalId);
   if (market.kind === 'failed') return market;
 
+  // Выключатель отправки (шапка, «ВЫКЛЮЧЕННАЯ ОТПРАВКА»): то же чтение без
+  // записи и алерта, что у кабинета (GET /dashboard, GET проекта). Нет таблицы
+  // ('unavailable', 'not_required') — выключить аккаунт было негде.
+  const access = await readHeEngSendingAccess(db, ownerId);
+  if (access.state === 'error') return { kind: 'failed', message: `sending access read: ${access.detail ?? 'error'}` };
+
   return {
     kind: 'ok',
     ctx: {
       recipient: { userId: recipient.userId, email: recipient.email },
       website: websiteLabel(p.website_url),
       marketName: market.name,
+      sendingOff: access.state === 'revoked',
     },
   };
 }
@@ -566,6 +746,7 @@ async function deliver(notice: HeEngClientNotice, ctx: NoticeContext, key: strin
       marketName: ctx.marketName,
       website: ctx.website,
       ctaUrl: ctaUrlOf(notice),
+      sendingOff: ctx.sendingOff,
     });
     await sendTransactionalEmail({ to: ctx.recipient.email, subject, html, text, fromName: HE_ENG_VERIFY_FROM_NAME });
     return true;
@@ -592,11 +773,14 @@ async function markSent(db: SupabaseClient, key: string): Promise<void> {
 /**
  * Заявка и отправка. `claimed` — заявку вставил ЭТОТ вызов (письмо ушло или
  * ждёт повтора): по нему проход зовёт алерт команде ровно один раз на событие.
+ * `sendingOff` (только при `claimed`) — с каким выключателем отправки ушла
+ * первая попытка: алерт говорит команде то же, что письмо клиенту.
  */
 async function claimAndDeliver(
   db: SupabaseClient,
   notice: HeEngClientNotice,
-): Promise<{ result: HeEngClientNoticeResult; claimed: boolean }> {
+  memo?: RecipientMemo,
+): Promise<{ result: HeEngClientNoticeResult; claimed: boolean; sendingOff?: boolean }> {
   try {
     if (!isNoticeKind(notice.kind) || (notice.kind === 'action_needed' && !isActionCode(notice.code))) {
       return { result: 'failed', claimed: false };
@@ -604,7 +788,7 @@ async function claimAndDeliver(
     const key = heEngClientNoticeKey(notice);
     if (!key) return { result: 'failed', claimed: false };
 
-    const loaded = await loadNoticeContext(db, notice);
+    const loaded = await loadNoticeContext(db, notice, memo);
     if (loaded.kind === 'failed') {
       void logWarn('he.eng_client_mail.context_failed', loaded.message, { key, projectId: notice.projectId });
       return { result: 'failed', claimed: false };
@@ -640,9 +824,10 @@ async function claimAndDeliver(
     }
     if (!Array.isArray(claimedRows) || claimedRows.length === 0) return { result: 'duplicate', claimed: false };
 
-    if (!(await deliver(notice, loaded.ctx, key))) return { result: 'failed', claimed: true };
+    const sendingOff = loaded.ctx.sendingOff;
+    if (!(await deliver(notice, loaded.ctx, key))) return { result: 'failed', claimed: true, sendingOff };
     await markSent(db, key);
-    return { result: 'sent', claimed: true };
+    return { result: 'sent', claimed: true, sendingOff };
   } catch (e) {
     void logWarn('he.eng_client_mail.notice_failed', errText(e), { projectId: notice?.projectId ?? null });
     return { result: 'failed', claimed: false };
@@ -652,9 +837,10 @@ async function claimAndDeliver(
 /**
  * Письмо о событии — один раз на ключ события (heEngClientNoticeKey).
  * НЕ БРОСАЕТ. 'duplicate' — заявка с этим ключом уже есть (письмо ушло,
- * уходит или ждёт повтора); 'unavailable' — нет таблицы дедупа; 'failed' —
- * не та форма уведомления, сбой чтения или SMTP (заявка тогда остаётся, и
- * проход повторит её).
+ * уходит или ждёт повтора); 'blocked' — получатель заблокирован (заявки нет);
+ * 'unavailable' — нет таблицы дедупа; 'failed' — не та форма уведомления,
+ * сбой чтения (заявки нет) или SMTP (заявка тогда остаётся, и проход
+ * повторит её).
  */
 export async function sendHeEngClientNotice(
   db: SupabaseClient,
@@ -671,17 +857,21 @@ interface ScanState {
   failed: number;
   /** Сколько ещё отправок можно сделать в этом проходе. */
   left: number;
+  /** Бан получателей и заблокированные проекты этого прохода (RecipientMemo). */
+  memo: RecipientMemo;
 }
 
 /**
  * Событие прохода. `prepare` — то, что стоит чтений (бюджет писем, имя
  * рынка для алерта), и зовётся только для событий, у которых заявки ещё нет;
  * null из него — не досчиталось (сбой чтения): событие ждёт следующего
- * прохода, письма с непроверенным советом нет.
+ * прохода, письма с непроверенным советом нет. `alert` строится по
+ * выключателю отправки, с которым ушло письмо (строка «клиент видит» —
+ * clientSeesText).
  */
 interface ScanCandidate {
   notice: HeEngClientNotice;
-  prepare?: () => Promise<{ notice: HeEngClientNotice; alert: HeOpsStop | null } | null>;
+  prepare?: () => Promise<{ notice: HeEngClientNotice; alert: ((sendingOff: boolean) => HeOpsStop) | null } | null>;
 }
 
 /** Повтор неотправленных. 'missing' — таблицы нет, проходу дальше делать нечего. */
@@ -719,11 +909,12 @@ async function retryUnsent(db: SupabaseClient, state: ScanState): Promise<'ok' |
     };
     if (!key || !notice.projectId || !isNoticeKind(notice.kind)) continue;
 
-    const loaded = await loadNoticeContext(db, notice);
+    const loaded = await loadNoticeContext(db, notice, state.memo);
     if (loaded.kind === 'failed') continue; // сбой чтения — попытку не тратим
     if (loaded.kind !== 'ok') {
-      // Получатель больше не подходит (сменился профиль, пропал адрес) —
-      // письмо закрывается без отправки.
+      // Получатель больше не подходит (сменился профиль, пропал адрес,
+      // аккаунт заблокирован — отметкой или баном) — письмо закрывается без
+      // отправки. После разблокировки оно не уходит.
       await db
         .from(HE_ENG_CLIENT_EMAILS_TABLE)
         .update({ attempts: MAX_ATTEMPTS, last_attempt_at: new Date(state.now).toISOString() })
@@ -758,17 +949,20 @@ async function retryUnsent(db: SupabaseClient, state: ScanState): Promise<'ok' |
 async function readExistingKeys(db: SupabaseClient, keys: string[]): Promise<Set<string> | null> {
   const out = new Set<string>();
   if (keys.length === 0) return out;
-  const rows = await readIn(keys, KEY_CHUNK, 'he.eng_client_mail.keys_read_failed', (part) =>
+  const read = await readIn(keys, KEY_CHUNK, 'he.eng_client_mail.keys_read_failed', (part) =>
     db.from(HE_ENG_CLIENT_EMAILS_TABLE).select('dedupe_key').in('dedupe_key', part).limit(part.length),
   );
-  if (!rows) return null;
-  for (const row of rows) out.add(str(row.dedupe_key));
+  if (!read) return null;
+  for (const row of read.rows) out.add(str(row.dedupe_key));
   return out;
 }
 
 /**
  * Отправить кандидатов, у которых ещё нет заявки, в пределах бюджета прохода.
  * Алерт команде кандидата уходит, только если заявку вставил этот вызов.
+ * Получатель оказался заблокирован (живой бан — 'blocked') — ни заявки, ни
+ * алерта, бюджет отправок не тратится, и остальные события его проектов в
+ * этом проходе пропускаются без чтений (state.memo.blockedProjects).
  * false — до конца списка не дошли (кончился бюджет отправок или не
  * прочитались заявки): вызывающий читает эти события снова следующим проходом.
  */
@@ -782,10 +976,11 @@ async function sendCandidates(db: SupabaseClient, state: ScanState, candidates: 
   if (!existing) return false;
   for (const { candidate, key } of keyed) {
     if (existing.has(key)) continue;
+    if (state.memo.blockedProjects.has(candidate.notice.projectId)) continue;
     if (state.left <= 0) return false;
     existing.add(key);
     let notice = candidate.notice;
-    let alert: HeOpsStop | null = null;
+    let alert: ((sendingOff: boolean) => HeOpsStop) | null = null;
     if (candidate.prepare) {
       let prepared: Awaited<ReturnType<NonNullable<ScanCandidate['prepare']>>>;
       try {
@@ -798,9 +993,11 @@ async function sendCandidates(db: SupabaseClient, state: ScanState, candidates: 
       notice = prepared.notice;
       alert = prepared.alert;
     }
-    const { result, claimed } = await claimAndDeliver(db, notice);
-    if (claimed && alert) void notifyHeClientStop(alert);
-    if (result === 'sent') {
+    const { result, claimed, sendingOff } = await claimAndDeliver(db, notice, state.memo);
+    if (claimed && alert) void notifyHeClientStop(alert(sendingOff === true));
+    if (result === 'blocked') {
+      state.memo.blockedProjects.add(notice.projectId);
+    } else if (result === 'sent') {
       state.left -= 1;
       state.sent += 1;
     } else if (result === 'failed') {
@@ -827,25 +1024,36 @@ function researchJobStamp(job: Row): number {
 
 const RESEARCH_JOB_COLUMNS = 'id, project_id, status, created_at, started_at, finished_at, updated_at';
 
-/** Последняя research-джоба каждого проекта; null — не прочиталось. */
-async function readLatestResearchJobs(db: SupabaseClient, projectIds: string[]): Promise<Map<string, Row> | null> {
-  const jobs = await readIn(projectIds, ID_CHUNK, 'he.eng_client_mail.research_jobs_read_failed', (part) =>
-    db
-      .from('he_jobs')
-      .select(RESEARCH_JOB_COLUMNS)
-      .in('project_id', part)
-      .in('stage', HE_RESEARCH_STAGES)
-      .order('created_at', { ascending: false })
-      .limit(1000),
-    1000,
+/**
+ * Последняя research-джоба каждого проекта; null — не прочиталось. `cut` —
+ * проекты, чей кусок упёрся в limit: их последняя джоба не известна, и
+ * событий по ним в этом проходе нет.
+ */
+async function readLatestResearchJobs(
+  db: SupabaseClient,
+  projectIds: string[],
+): Promise<{ latest: Map<string, Row>; cut: Set<string> } | null> {
+  const jobs = await readIn(
+    projectIds,
+    MANY_CHUNK,
+    'he.eng_client_mail.research_jobs_read_failed',
+    (part) =>
+      db
+        .from('he_jobs')
+        .select(RESEARCH_JOB_COLUMNS)
+        .in('project_id', part)
+        .in('stage', HE_RESEARCH_STAGES)
+        .order('created_at', { ascending: false })
+        .limit(READ_LIMIT),
+    READ_LIMIT,
   );
   if (!jobs) return null;
-  const out = new Map<string, Row>();
+  const latest = new Map<string, Row>();
   for (const pid of projectIds) {
-    const last = latestBy(jobs.filter((j) => str(j.project_id) === pid), 'created_at');
-    if (last) out.set(pid, last);
+    const last = latestBy(jobs.rows.filter((j) => str(j.project_id) === pid), 'created_at');
+    if (last) latest.set(pid, last);
   }
-  return out;
+  return { latest, cut: jobs.cut };
 }
 
 /**
@@ -918,20 +1126,26 @@ async function scanResearchEvents(db: SupabaseClient, state: ScanState): Promise
   const candidates: ScanCandidate[] = [];
 
   if (researched.length > 0) {
-    const jobs = await readIn(researched, ID_CHUNK, 'he.eng_client_mail.clustering_read_failed', (part) =>
-      db
-        .from('he_jobs')
-        .select('project_id, finished_at, updated_at')
-        .in('project_id', part)
-        .eq('stage', 'clustering')
-        .eq('status', 'done')
-        .limit(1000),
-      1000,
+    const jobs = await readIn(
+      researched,
+      MANY_CHUNK,
+      'he.eng_client_mail.clustering_read_failed',
+      (part) =>
+        db
+          .from('he_jobs')
+          .select('project_id, finished_at, updated_at')
+          .in('project_id', part)
+          .eq('stage', 'clustering')
+          .eq('status', 'done')
+          .limit(READ_LIMIT),
+      READ_LIMIT,
     );
-    const fresh = (jobs ?? []).length === 0
+    // Кусок, упёршийся в limit (jobs.cut), — его проекты ждут следующего прохода.
+    const fresh = !jobs
       ? []
       : researched.filter((pid) => {
-          const own = (jobs ?? []).filter((j) => str(j.project_id) === pid);
+          if (jobs.cut.has(pid)) return false;
+          const own = jobs.rows.filter((j) => str(j.project_id) === pid);
           const last = own.reduce((acc, j) => Math.max(acc, ms(j.finished_at) || ms(j.updated_at)), 0);
           return last >= since;
         });
@@ -940,10 +1154,10 @@ async function scanResearchEvents(db: SupabaseClient, state: ScanState): Promise
     if (pending.length > 0) {
       const verticals = await readIn(
         pending,
-        ID_CHUNK,
+        MANY_CHUNK,
         'he.eng_client_mail.verticals_read_failed',
-        (part) => db.from('he_verticals').select('project_id').in('project_id', part).limit(2000),
-        2000,
+        (part) => db.from('he_verticals').select('project_id').in('project_id', part).limit(READ_LIMIT),
+        READ_LIMIT,
       );
       // Клиент уже нажал Launch (есть строка намерения) — рынки он видел, и
       // «выберите и нажмите Launch» ему уже не нужно. Нет таблицы намерения —
@@ -963,9 +1177,9 @@ async function scanResearchEvents(db: SupabaseClient, state: ScanState): Promise
         for (const r of (intents ?? []) as Row[]) launched.add(str(r.project_id));
       }
       if (verticals) {
-        const withMarkets = new Set(verticals.map((v) => str(v.project_id)));
+        const withMarkets = new Set(verticals.rows.map((v) => str(v.project_id)));
         for (const pid of pending) {
-          if (withMarkets.has(pid) && !launched.has(pid)) {
+          if (withMarkets.has(pid) && !launched.has(pid) && !verticals.cut.has(pid)) {
             candidates.push({ notice: { kind: 'research_ready', projectId: pid } });
           }
         }
@@ -977,7 +1191,9 @@ async function scanResearchEvents(db: SupabaseClient, state: ScanState): Promise
     const lastJobs = await readLatestResearchJobs(db, stopped.map((p) => str(p.id)));
     for (const p of lastJobs ? stopped : []) {
       const pid = str(p.id);
-      const last = lastJobs?.get(pid) ?? null;
+      // Срез джоб проекта обрезан — последняя джоба не известна: ждём.
+      if (lastJobs?.cut.has(pid)) continue;
+      const last = lastJobs?.latest.get(pid) ?? null;
       if (last?.status === 'cancelled') continue;
       const verdict = engResearchRetryVerdict({
         status: p.status,
@@ -1052,11 +1268,19 @@ interface StageSnapshot {
   ended: Row[];
   /** Идущие джобы проектов (pending / running), любые стадии. */
   live: Row[];
-  /** Проект → выбранные клиентом вертикали (есть accepted-гипотеза). */
+  /**
+   * Проект → выбранные клиентом вертикали (есть accepted-гипотеза) — только
+   * среди рынков ещё не заявленных упавших джоб.
+   */
   selected: Map<string, Set<string>>;
+  /** Базы упавших джоб и не доливные базы их рынков. */
   bases: Row[];
   chains: Row[];
   templates: Row[];
+  /** Проекты, чей кусок чтения упёрся в limit: событий по ним в этом проходе нет. */
+  cutProjects: Set<string>;
+  /** Рынки (вертикали), чей кусок чтения упёрся в limit. */
+  cutVerticals: Set<string>;
 }
 
 /** Ключ цели джобы: цепочка — вертикаль, остальные стадии — база. */
@@ -1124,7 +1348,7 @@ function stageStopEvents(input: {
     if (job.status !== 'failed') continue;
     const pid = str(job.project_id);
     const project = projects.get(pid);
-    if (!project) continue;
+    if (!project || snapshot.cutProjects.has(pid)) continue;
     const endedAt = ms(job.finished_at) || ms(job.updated_at);
     if (endedAt < since || endedAt > settled || endedAt < project.requestedAt) continue;
     const selected = snapshot.selected.get(pid) ?? new Set<string>();
@@ -1140,7 +1364,7 @@ function stageStopEvents(input: {
       if (!base || isRefillBase(base)) continue;
       verticalId = str(base.vertical_id);
     }
-    if (!verticalId || !selected.has(verticalId)) continue;
+    if (!verticalId || !selected.has(verticalId) || snapshot.cutVerticals.has(verticalId)) continue;
     const vTemplates = snapshot.templates.filter((t) => str(t.vertical_id) === verticalId);
     if (vTemplates.some((t) => t.status !== 'failed' || templateLaunchMarked(t, nowMs))) continue;
     const vChains = snapshot.chains.filter((c) => str(c.vertical_id) === verticalId);
@@ -1244,12 +1468,19 @@ function stageStopKeysOf(job: Row): string[] {
     .filter((k): k is string => k !== null);
 }
 
+/** Колонки базы, которые читает правило остановок (stageStopEvents) и признак долива. */
+const STAGE_BASE_COLUMNS =
+  'id, project_id, vertical_id, status, source, row_count, filename, created_at, refill_flag:collect_info->>refill';
+
 /**
  * Срез конвейера для проектов с упавшими стадиями; null — не прочитался
  * (письма ждут следующего прохода). `fresh` — упавшая джоба годится в
  * событие по времени (окно, отстой, после нажатия Launch). Джобы, письмо о
  * которых уже заявлено, срез не читают: иначе каждое событие стоило бы пачки
- * чтений каждую минуту все 6 часов окна.
+ * чтений каждую минуту все 6 часов окна. Остальное читается только по ещё не
+ * заявленным упавшим джобам: их базы (по id), их рынки (вертикаль цепочки или
+ * базы) — выбор, не доливные базы, цепочки и шаблоны этих рынков — и идущие
+ * джобы их проектов. Кусок, упёршийся в limit, даёт cutProjects / cutVerticals.
  */
 async function readStageSnapshot(
   db: SupabaseClient,
@@ -1257,84 +1488,145 @@ async function readStageSnapshot(
   since: number,
   fresh: (job: Row) => boolean,
 ): Promise<StageSnapshot | null> {
-  const ended = await readIn(projectIds, ID_CHUNK, 'he.eng_client_mail.stage_jobs_read_failed', (part) =>
-    db
-      .from('he_jobs')
-      .select('id, project_id, stage, status, error, created_at, updated_at, finished_at, vertical_id:payload->>vertical_id, base_id:payload->>base_id')
-      .in('project_id', part)
-      .in('stage', STAGE_STOP_STAGES)
-      .in('status', ['failed', 'cancelled'])
-      .gte('updated_at', new Date(since).toISOString())
-      .limit(500),
-    500,
+  const endedRead = await readIn(
+    projectIds,
+    MANY_CHUNK,
+    'he.eng_client_mail.stage_jobs_read_failed',
+    (part) =>
+      db
+        .from('he_jobs')
+        .select('id, project_id, stage, status, error, created_at, updated_at, finished_at, vertical_id:payload->>vertical_id, base_id:payload->>base_id')
+        .in('project_id', part)
+        .in('stage', STAGE_STOP_STAGES)
+        .in('status', ['failed', 'cancelled'])
+        .gte('updated_at', new Date(since).toISOString())
+        .limit(READ_LIMIT),
+    READ_LIMIT,
   );
-  if (!ended) return null;
-  const failed = ended.filter((j) => j.status === 'failed' && fresh(j));
+  if (!endedRead) return null;
+  const cutProjects = new Set(endedRead.cut);
+  const cutVerticals = new Set<string>();
+  const empty = (): StageSnapshot => ({
+    ended: [],
+    live: [],
+    selected: new Map(),
+    bases: [],
+    chains: [],
+    templates: [],
+    cutProjects,
+    cutVerticals,
+  });
+  const failed = endedRead.rows.filter((j) => j.status === 'failed' && fresh(j));
   const claimed = await readExistingKeys(db, failed.flatMap(stageStopKeysOf));
   if (!claimed) return null;
   const open = failed.filter((j) => !stageStopKeysOf(j).some((k) => claimed.has(k)));
   const withFailed = [...new Set(open.map((j) => str(j.project_id)))];
-  if (withFailed.length === 0) {
-    return { ended: [], live: [], selected: new Map(), bases: [], chains: [], templates: [] };
-  }
-  const [live, hypotheses, bases] = await Promise.all([
-    readIn(withFailed, ID_CHUNK, 'he.eng_client_mail.stage_context_failed', (part) =>
+  if (withFailed.length === 0) return empty();
+
+  // Базы упавших джоб (базовых стадий) — по id; рынки — их вертикали и
+  // вертикали упавших цепочек.
+  const baseIds = [...new Set(open.filter((j) => j.stage !== 'chain').map((j) => str(j.base_id)).filter(Boolean))];
+  const ownBases = await readIn(baseIds, ID_CHUNK, 'he.eng_client_mail.stage_context_failed', (part) =>
+    db.from('he_bases').select(STAGE_BASE_COLUMNS).in('id', part).limit(part.length),
+  );
+  if (!ownBases) return null;
+  const verticalIds = [
+    ...new Set([
+      ...open.filter((j) => j.stage === 'chain').map((j) => str(j.vertical_id)),
+      ...ownBases.rows.map((b) => str(b.vertical_id)),
+    ]),
+  ].filter(Boolean);
+
+  const live = await readIn(
+    withFailed,
+    MANY_CHUNK,
+    'he.eng_client_mail.stage_context_failed',
+    (part) =>
       db
         .from('he_jobs')
         .select('project_id, stage, vertical_id:payload->>vertical_id, base_id:payload->>base_id')
         .in('project_id', part)
         .in('status', ['pending', 'running'])
-        .limit(500),
-      500,
+        .limit(READ_LIMIT),
+    READ_LIMIT,
+  );
+  if (!live) return null;
+  for (const pid of live.cut) cutProjects.add(pid);
+  const ended = endedRead.rows.filter((j) => withFailed.includes(str(j.project_id)));
+  if (verticalIds.length === 0) {
+    return { ...empty(), ended, live: live.rows, bases: ownBases.rows };
+  }
+  const [hypotheses, marketBases, chains, templates] = await Promise.all([
+    readIn(
+      verticalIds,
+      MANY_CHUNK,
+      'he.eng_client_mail.stage_context_failed',
+      (part) =>
+        db
+          .from('he_hypotheses')
+          .select('project_id, vertical_id')
+          .in('vertical_id', part)
+          .eq('status', 'accepted')
+          .limit(READ_LIMIT),
+      READ_LIMIT,
     ),
     readIn(
-      withFailed,
-      ID_CHUNK,
+      verticalIds,
+      MANY_CHUNK,
       'he.eng_client_mail.stage_context_failed',
-      (part) => db.from('he_hypotheses').select('project_id, vertical_id').in('project_id', part).eq('status', 'accepted').limit(2000),
-      2000,
+      (part) =>
+        db
+          .from('he_bases')
+          .select(STAGE_BASE_COLUMNS)
+          .in('vertical_id', part)
+          .or(NOT_REFILL_BASE_OR)
+          .limit(READ_LIMIT),
+      READ_LIMIT,
     ),
-    readIn(withFailed, ID_CHUNK, 'he.eng_client_mail.stage_context_failed', (part) =>
-      db
-        .from('he_bases')
-        .select('id, project_id, vertical_id, status, source, row_count, filename, created_at, refill_flag:collect_info->>refill')
-        .in('project_id', part)
-        .limit(2000),
-      2000,
+    readIn(
+      verticalIds,
+      MANY_CHUNK,
+      'he.eng_client_mail.stage_context_failed',
+      (part) => db.from('he_chains').select('vertical_id, status').in('vertical_id', part).limit(READ_LIMIT),
+      READ_LIMIT,
+    ),
+    readIn(
+      verticalIds,
+      MANY_CHUNK,
+      'he.eng_client_mail.stage_context_failed',
+      (part) =>
+        db
+          .from('he_templates')
+          .select('id, vertical_id, base_id, status, launch_campaign_id:launch_info->>campaign_id, launch_running_until:launch_info->>running_until')
+          .in('vertical_id', part)
+          .limit(READ_LIMIT),
+      READ_LIMIT,
     ),
   ]);
-  if (!live || !hypotheses || !bases) return null;
+  if (!hypotheses || !marketBases || !chains || !templates) return null;
+  for (const read of [hypotheses, marketBases, chains, templates]) {
+    for (const vid of read.cut) cutVerticals.add(vid);
+  }
   const selected = new Map<string, Set<string>>();
-  for (const h of hypotheses) {
+  for (const h of hypotheses.rows) {
     const pid = str(h.project_id);
     const vid = str(h.vertical_id);
     if (!pid || !vid) continue;
     if (!selected.has(pid)) selected.set(pid, new Set());
     selected.get(pid)?.add(vid);
   }
-  const verticalIds = [...new Set([...selected.values()].flatMap((s) => [...s]))];
-  if (verticalIds.length === 0) {
-    return { ended: ended.filter((j) => withFailed.includes(str(j.project_id))), live, selected, bases, chains: [], templates: [] };
-  }
-  const [chains, templates] = await Promise.all([
-    readIn(
-      verticalIds,
-      ID_CHUNK,
-      'he.eng_client_mail.stage_context_failed',
-      (part) => db.from('he_chains').select('vertical_id, status').in('vertical_id', part).limit(2000),
-      2000,
-    ),
-    readIn(verticalIds, ID_CHUNK, 'he.eng_client_mail.stage_context_failed', (part) =>
-      db
-        .from('he_templates')
-        .select('id, vertical_id, base_id, status, launch_campaign_id:launch_info->>campaign_id, launch_running_until:launch_info->>running_until')
-        .in('vertical_id', part)
-        .limit(2000),
-      2000,
-    ),
-  ]);
-  if (!chains || !templates) return null;
-  return { ended: ended.filter((j) => withFailed.includes(str(j.project_id))), live, selected, bases, chains, templates };
+  const basesById = new Map<string, Row>();
+  for (const b of [...ownBases.rows, ...marketBases.rows]) basesById.set(str(b.id), b);
+  return {
+    ended,
+    live: live.rows,
+    selected,
+    bases: [...basesById.values()],
+    chains: chains.rows,
+    templates: templates.rows,
+    cutProjects,
+    cutVerticals,
+  };
 }
 
 /** Имя рынка для алерта команде; null — не прочиталось (алерт уйдёт с id). */
@@ -1348,8 +1640,25 @@ async function readVerticalName(db: SupabaseClient, verticalId: string): Promise
   }
 }
 
-/** Что команда читает в строке «клиент видит»: какое письмо уходит и какой шаг в нём назван. */
-function clientSeesText(heading: string, next: HeEngClientNextStep, code?: HeEngStageStopCode): string {
+/**
+ * Что команда читает в строке «клиент видит»: какое письмо уходит и какой шаг
+ * в нём назван. `sendingOff` — письмо ушло при выключенной отправке аккаунта:
+ * кнопки 'launch' / 'rewrite' / 'team_fix' оно не называет (шапка,
+ * «ВЫКЛЮЧЕННАЯ ОТПРАВКА») — и строка команде тоже.
+ */
+function clientSeesText(
+  heading: string,
+  next: HeEngClientNextStep,
+  code: HeEngStageStopCode | undefined,
+  sendingOff: boolean,
+): string {
+  if (sendingOff && (next === 'launch' || next === 'rewrite' || next === 'team_fix')) {
+    return (
+      `клиенту отправляется письмо «${heading}» — отправка аккаунта выключена, поэтому кнопку письмо не называет ` +
+      'и зовёт в Support' +
+      (next === 'team_fix' ? ' (сказано: временная проблема на нашей стороне, команда уже работает)' : '')
+    );
+  }
   const step =
     next === 'launch'
       ? 'нажать «Launch» на шаге 3'
@@ -1395,9 +1704,10 @@ function stageStopCandidate(db: SupabaseClient, event: StageStopEvent, projectNa
       // та же кнопка; кнопку письмо называет по коду остановки.
       if (next !== 'support' && event.teamFix) next = 'team_fix';
       const notice: HeEngClientNotice = { ...base, next };
+      const verticalName = await readVerticalName(db, event.verticalId);
       return {
         notice,
-        alert: {
+        alert: (sendingOff) => ({
           projectId: event.projectId,
           projectName,
           market: 'us',
@@ -1408,10 +1718,10 @@ function stageStopCandidate(db: SupabaseClient, event: StageStopEvent, projectNa
           jobId: event.jobId,
           baseId: event.baseId,
           verticalId: event.verticalId,
-          verticalName: await readVerticalName(db, event.verticalId),
+          verticalName,
           eventKey: heEngClientNoticeKey(notice),
-          clientSees: clientSeesText(STAGE_STOP_HEADING[event.code], next, event.code),
-        },
+          clientSees: clientSeesText(STAGE_STOP_HEADING[event.code], next, event.code, sendingOff),
+        }),
       };
     },
   };
@@ -1516,7 +1826,7 @@ async function closeClearedHolds(db: SupabaseClient, state: ScanState): Promise<
     (part) => db.from('he_projects').select('id, autopilot_error, autopilot_error_at').in('id', part).limit(part.length),
   );
   if (!projects) return;
-  const current = new Map(projects.map((p) => [str(p.id), toClientEngAutopilotHold(p)?.code ?? null]));
+  const current = new Map(projects.rows.map((p) => [str(p.id), toClientEngAutopilotHold(p)?.code ?? null]));
   const cleared = rows
     .filter((r) => (current.get(str(r.project_id)) ?? null) !== str(r.ref_id))
     .map((r) => str(r.dedupe_key))
@@ -1584,7 +1894,7 @@ async function scanIntentPage(
       .limit(part.length),
   );
   if (!projectRows) return true;
-  const projects = projectRows.filter(
+  const projects = projectRows.rows.filter(
     (p) => p.market === 'us' && str(p.created_by) !== '' && str(p.created_by) === intents.get(str(p.id))?.userId,
   );
   if (projects.length === 0) return true;
@@ -1616,9 +1926,10 @@ async function scanIntentPage(
     // Заявки писем о паузах этих проектов: открытый эпизод того же кода —
     // письмо уже есть; иначе номер нового эпизода — закрытые + 1. Сбой
     // чтения — писем о паузах в этом проходе нет (номер эпизода не угадываем).
+    // Кусок, упёршийся в limit, — паузы его проектов ждут следующего прохода.
     const episodes = await readIn(
       [...new Set(holds.map(({ p }) => str(p.id)))],
-      ID_CHUNK,
+      MANY_CHUNK,
       'he.eng_client_mail.hold_episodes_read_failed',
       (part) =>
         db
@@ -1626,12 +1937,13 @@ async function scanIntentPage(
           .select('project_id, ref_id, closed_at')
           .eq('code', 'autopilot_hold')
           .in('project_id', part)
-          .limit(1000),
-      1000,
+          .limit(READ_LIMIT),
+      READ_LIMIT,
     );
     for (const { p, hold } of episodes ? holds : []) {
       const pid = str(p.id);
-      const own = (episodes ?? []).filter((r) => str(r.project_id) === pid && str(r.ref_id) === hold.code);
+      if (episodes?.cut.has(pid)) continue;
+      const own = (episodes?.rows ?? []).filter((r) => str(r.project_id) === pid && str(r.ref_id) === hold.code);
       if (own.some((r) => !str(r.closed_at))) continue;
       const episode = own.length + 1;
       if (hold.code === 'retrying') {
@@ -1647,7 +1959,7 @@ async function scanIntentPage(
           notice,
           prepare: async () => ({
             notice,
-            alert: {
+            alert: (sendingOff) => ({
               projectId: pid,
               projectName: str(p.name) || null,
               market: 'us',
@@ -1656,8 +1968,8 @@ async function scanIntentPage(
               provider: 'pipeline',
               reason: `autopilot_error=${str(p.autopilot_error)} с ${hold.at}`,
               eventKey: heEngClientNoticeKey(notice),
-              clientSees: clientSeesText('Work on your project is on hold', 'launch'),
-            },
+              clientSees: clientSeesText('Work on your project is on hold', 'launch', undefined, sendingOff),
+            }),
           }),
         });
         continue;
@@ -1676,19 +1988,27 @@ async function scanIntentPage(
     }
   }
 
+  // Упавшие базы — без доливных (они в запросе не читаются, NOT_REFILL_BASE_OR).
+  // Кусок, упёршийся в limit (проекты или рынки), — события его ждут
+  // следующего прохода.
   const projectIds = eligible.map((p) => str(p.id));
-  const failedRows = await readIn(projectIds, ID_CHUNK, 'he.eng_client_mail.failed_bases_read_failed', (part) =>
-    db
-      .from('he_bases')
-      .select('id, project_id, vertical_id, error, filename, updated_at, refill_flag:collect_info->>refill')
-      .in('project_id', part)
-      .eq('status', 'failed')
-      .gte('updated_at', new Date(since).toISOString())
-      .limit(200),
-    200,
+  const failedRows = await readIn(
+    projectIds,
+    MANY_CHUNK,
+    'he.eng_client_mail.failed_bases_read_failed',
+    (part) =>
+      db
+        .from('he_bases')
+        .select('id, project_id, vertical_id, error, filename, updated_at, refill_flag:collect_info->>refill')
+        .in('project_id', part)
+        .eq('status', 'failed')
+        .gte('updated_at', new Date(since).toISOString())
+        .or(NOT_REFILL_BASE_OR)
+        .limit(READ_LIMIT),
+    READ_LIMIT,
   );
   if (failedRows) {
-    const stopped = failedRows.filter((b) => {
+    const stopped = failedRows.rows.filter((b) => {
       const updated = ms(b.updated_at);
       return (
         !isRefillBase(b) &&
@@ -1699,24 +2019,38 @@ async function scanIntentPage(
     });
     const verticalIds = [...new Set(stopped.map((b) => str(b.vertical_id)).filter(Boolean))];
     if (verticalIds.length > 0) {
-      const allBases = await readIn(verticalIds, ID_CHUNK, 'he.eng_client_mail.collect_context_failed', (part) =>
-        db
-          .from('he_bases')
-          .select('id, vertical_id, created_at, filename, refill_flag:collect_info->>refill')
-          .in('vertical_id', part)
-          .limit(2000),
-        2000,
+      const allBases = await readIn(
+        verticalIds,
+        MANY_CHUNK,
+        'he.eng_client_mail.collect_context_failed',
+        (part) =>
+          db
+            .from('he_bases')
+            .select('id, vertical_id, created_at, filename, refill_flag:collect_info->>refill')
+            .in('vertical_id', part)
+            .or(NOT_REFILL_BASE_OR)
+            .limit(READ_LIMIT),
+        READ_LIMIT,
       );
       const accepted = allBases
-        ? await readIn(verticalIds, ID_CHUNK, 'he.eng_client_mail.collect_context_failed', (part) =>
-            db.from('he_hypotheses').select('vertical_id').in('vertical_id', part).eq('status', 'accepted').limit(2000),
-            2000,
+        ? await readIn(
+            verticalIds,
+            MANY_CHUNK,
+            'he.eng_client_mail.collect_context_failed',
+            (part) =>
+              db
+                .from('he_hypotheses')
+                .select('vertical_id')
+                .in('vertical_id', part)
+                .eq('status', 'accepted')
+                .limit(READ_LIMIT),
+            READ_LIMIT,
           )
         : null;
       const activeJobs = accepted
         ? await readIn(
             [...new Set(stopped.map((b) => str(b.project_id)))],
-            ID_CHUNK,
+            MANY_CHUNK,
             'he.eng_client_mail.collect_context_failed',
             (part) =>
               db
@@ -1724,21 +2058,23 @@ async function scanIntentPage(
                 .select('project_id, vertical_id:payload->>vertical_id, base_id:payload->>base_id')
                 .in('project_id', part)
                 .in('status', ['pending', 'running'])
-                .limit(500),
-            500,
+                .limit(READ_LIMIT),
+            READ_LIMIT,
           )
         : null;
       if (allBases && accepted && activeJobs) {
-        const selected = new Set(accepted.map((h) => str(h.vertical_id)));
+        const selected = new Set(accepted.rows.map((h) => str(h.vertical_id)));
         for (const base of stopped) {
           const vid = str(base.vertical_id);
           const bid = str(base.id);
+          const pid = str(base.project_id);
+          if (allBases.cut.has(vid) || accepted.cut.has(vid) || activeJobs.cut.has(pid)) continue;
           if (!selected.has(vid)) continue;
-          const lastOwn = latestBy(allBases.filter((b) => str(b.vertical_id) === vid && !isRefillBase(b)), 'created_at');
+          const lastOwn = latestBy(allBases.rows.filter((b) => str(b.vertical_id) === vid && !isRefillBase(b)), 'created_at');
           if (!lastOwn || str(lastOwn.id) !== bid) continue;
-          if (activeJobs.some((j) => str(j.vertical_id) === vid || str(j.base_id) === bid)) continue;
+          if (activeJobs.rows.some((j) => str(j.vertical_id) === vid || str(j.base_id) === bid)) continue;
           candidates.push({
-            notice: { kind: 'action_needed', code: 'collect_stopped', projectId: str(base.project_id), refId: bid },
+            notice: { kind: 'action_needed', code: 'collect_stopped', projectId: pid, refId: bid },
           });
         }
       }
@@ -1794,7 +2130,13 @@ export async function runHeEngClientMailScan(
   db: SupabaseClient,
   opts: { now?: Date } = {},
 ): Promise<{ sent: number; failed: number }> {
-  const state: ScanState = { now: (opts.now ?? new Date()).getTime(), sent: 0, failed: 0, left: SCAN_SEND_CAP };
+  const state: ScanState = {
+    now: (opts.now ?? new Date()).getTime(),
+    sent: 0,
+    failed: 0,
+    left: SCAN_SEND_CAP,
+    memo: { bans: new Map(), blockedProjects: new Set() },
+  };
   try {
     if ((await retryUnsent(db, state)) === 'missing') return { sent: 0, failed: 0 };
     await scanResearchEvents(db, state);

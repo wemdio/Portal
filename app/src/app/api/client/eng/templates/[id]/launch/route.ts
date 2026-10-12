@@ -13,21 +13,31 @@ import {
   ENG_LAUNCH_BUSY_TEXT,
   claimHeEngAutoLaunch,
   heEngAutoLaunchVerdict,
+  heEngIntentSendingWindow,
   heEngStartGate,
+  heEngTopUpGate,
+  readHeEngLaunchIntent,
   recordHeEngAutoLaunchDecision,
   startHeEngAutoLaunchLeaseHeartbeat,
 } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { ENG_PAID_UNAVAILABLE_TEXT } from '@/lib/hypothesisEngine/engPaidAccess';
 import { logWarn } from '@/lib/loggerServer';
-import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
+import type { ClientCampaignPreset, ClientLaunchScheduleOverride } from '@/lib/clientLaunch/types';
 import { engServerError } from '../../../_shared';
 import { engDefaultSendingWindow, parseEngSendingWindow } from '../../../_launchWindow';
 
 export const dynamic = 'force-dynamic';
-// До HE_LAUNCH_MAX_LEADS лидов = 2 вызова /leads/add + создание кампании
-// (окно отправки клиента ядро ставит при создании; короткий PATCH окна — только
-// кампаниям прошлой попытки на достройке) и старт созданных кампаний
-// (по кампании: чтение, старт, при неясном ответе — проверочное чтение).
+// Бюджет запроса: классификатор сегментов ядра (у шаблона с сегментными
+// вариантами), создание кампаний — окно отправки ядро ставит при создании, а
+// пустой кампании прошлой попытки — тем же PATCH'ем, что и цепочку, — до
+// HE_LAUNCH_MAX_LEADS лидов = 2 вызова /leads/add, и старт кампаний в пределах
+// SENDING_DEADLINE_MS (100 с) от начала запроса (engClientLaunch: новая
+// кампания начинается, только пока до срока остаётся бюджет одной кампании;
+// по кампании — чтение, старт, при неясном ответе — проверочное чтение).
+// Отдельный PATCH окна роут делает только на ПЕРВОМ запуске рынка и только
+// кампаниям, которых ядро не назвало; на достройке кампании прошлой попытки с
+// адресами держат свои часы и не переставляются. Standalone-сервер Next этот
+// срок не обрывает — поэтому замок продлевается, пока запуск идёт (POST ниже).
 export const maxDuration = 120;
 
 // GET — пресеты для селектора «Launch»: ТОЛЬКО свои. С S2 кабинет селектор не
@@ -97,7 +107,9 @@ export async function GET(req: NextRequest) {
 // классификатор пережил бы аренду — тогда тик начал бы второй платный запуск.
 // Перед стартом кампаний — та же проверка, что у тика (heEngStartGate):
 // аккаунт не заблокирован посреди запуска, решение «стартуем» записано в
-// строку (без него брошенная строка ничего не стартует).
+// строку (без него брошенная строка ничего не стартует). Перед конфигом
+// ночного добора — heEngTopUpGate (аккаунт не заблокирован за время запуска).
+// Срок старта кампаний у кнопки — от начала запроса (requestStartedAt).
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.launch.post' }, async () => {
     const requestStartedAt = Date.now();
@@ -130,24 +142,40 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // стартует их кнопкой «Start sending», уже зная, что это отправка.
     const startRequested = body?.start_sending === true;
 
-    // Окно отправки выбирает КЛИЕНТ (пояс, часы, дни). Поля нет в теле —
-    // ставим английский дефолт, а НЕ окно пресета: пресет заполнял
-    // администратор, и для клиента рынка США его часы и пояс случайны. Так
-    // запуск мимо кабинета (старый бандл, прямой вызов API) тоже получает
-    // осмысленное окно, а не московские часы. Это окно ПЕРВОГО запуска рынка:
-    // у шаблона, у которого уже есть запись о запуске (достройка), общий вызов
-    // его не берёт — там своё окно рынка, и кампании прошлой попытки не
-    // переставляются (engClientLaunch.heEngLaunchWindowPlan).
-    const parsedWindow =
-      body?.schedule === undefined || body?.schedule === null
-        ? ({ ok: true, window: engDefaultSendingWindow() } as const)
-        : parseEngSendingWindow(body.schedule);
-    if (!parsedWindow.ok) return jsonError(parsedWindow.error, 400);
-    const sendingWindow = parsedWindow.window;
+    // Окно отправки выбирает КЛИЕНТ (пояс, часы, дни). Поля нет в теле — окно,
+    // сохранённое «Launch» проекта (he_eng_launch_intent.schedule, ниже, после
+    // скоупа шаблона), а без намерения — английский дефолт; НЕ окно пресета:
+    // пресет заполнял администратор, и для клиента рынка США его часы и пояс
+    // случайны. Так запуск мимо кабинета (старый бандл, прямой вызов API,
+    // кабинет без выбранного окна) получает часы клиента, а не московские. Это
+    // окно ПЕРВОГО запуска рынка: у шаблона, у которого уже есть запись о
+    // запуске (достройка), общий вызов его не берёт — там своё окно рынка, и
+    // кампании прошлой попытки не переставляются
+    // (engClientLaunch.heEngLaunchWindowPlan).
+    const bodyWindow =
+      body?.schedule === undefined || body?.schedule === null ? null : parseEngSendingWindow(body.schedule);
+    if (bodyWindow && !bodyWindow.ok) return jsonError(bodyWindow.error, 400);
 
     // Скоуп шаблона ДО запуска: чужой — 404, существование не раскрываем.
     const owned = await loadClientHeTemplate(supabaseAdmin, id, userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+
+    // Окна нет в теле — часы намерения проекта (heEngIntentSendingWindow:
+    // записанные и проверенные, иначе дефолт). Нет таблицы намерения или
+    // строки — дефолт; сбой чтения — 503, ничего не начато (часы клиента не
+    // угадываем).
+    let sendingWindow: ClientLaunchScheduleOverride;
+    if (bodyWindow) {
+      sendingWindow = bodyWindow.window;
+    } else {
+      const intentRead = await readHeEngLaunchIntent(supabaseAdmin, String(owned.project.id));
+      if (intentRead.kind === 'error') {
+        void logWarn('client.eng.template.launch.intent_unread', intentRead.message, { userId, templateId: id });
+        return jsonError(ENG_PAID_UNAVAILABLE_TEXT, 503);
+      }
+      sendingWindow =
+        intentRead.kind === 'ok' ? heEngIntentSendingWindow(intentRead.intent) : engDefaultSendingWindow();
+    }
 
     const lock = await claimHeEngAutoLaunch(supabaseAdmin, {
       templateId: id,
@@ -175,8 +203,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         sendingWindow,
         startSending: startRequested,
         trigger: 'button',
-        requestStartedAt,
+        sendingDeadlineFrom: requestStartedAt,
         onStartDecided: heEngStartGate(supabaseAdmin, { userId, templateId: id, claimed }),
+        beforeTopUpConfig: heEngTopUpGate(supabaseAdmin, { userId, templateId: id }),
       });
     } finally {
       stopHeartbeat?.();

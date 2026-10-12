@@ -10,6 +10,14 @@
  *
  * ЧТО ПРОВЕРЯЕТ — по действию (порядок проверок = порядок строк):
  *
+ *   0. Каждое действие, первым: аккаунт не заблокирован (S3b,
+ *      autopilotNext.readHeEngOwnerHold — отметка блокировки карточки
+ *      ENG-клиента и аккаунт тем же чтением, что у автозапуска: бан Supabase,
+ *      роль, демо). Заблокирован — 403 'account_blocked' «Your account is not
+ *      active.»; не прочиталось — 503 'unavailable'. Нужен сессии, пережившей
+ *      блокировку (отзыв сессий не удался, бан мимо карточки), и тику
+ *      автозапуска, который зовёт этот гейт сам (engClientLaunch).
+ *
  *   действие          почта  один сайт  исследований/сутки  расход клиента
  *   create_project      ✓        ✓                                 ✓
  *   research            ✓                       ✓                  ✓
@@ -37,7 +45,7 @@
  * отдельно (api/client/eng/templates/[id]/launch).
  *
  * КОМУ. Только роли 'client'. Сотрудник (admin), которого requireEngMarket
- * пускает в ENG-кабинет для отладки, проходит без проверок.
+ * пускает в ENG-кабинет для отладки, проходит без проверок, кроме шага 0.
  *
  * ПРОВЕРКИ И ИХ ДЕГРАДАЦИЯ:
  *  - почта (he_eng_email_verifications, миграция 20261010_0001): нет таблицы
@@ -84,6 +92,7 @@ import { logAudit, logWarn } from '@/lib/loggerServer';
 import { readHeEngEmailStatus } from './engEmailVerification';
 import { checkHeClientSpendCeiling, readHeClientSpendCaps } from './engClientSpend';
 import { HE_RESEARCH_STAGES } from './researchJob';
+import { readHeEngOwnerHold } from './autopilotNext';
 
 export type EngPaidAction =
   | 'create_project'
@@ -95,6 +104,7 @@ export type EngPaidAction =
   | 'resume_refill';
 
 export type EngPaidAccessCode =
+  | 'account_blocked'
   | 'email_not_verified'
   | 'project_limit'
   | 'research_limit'
@@ -166,6 +176,13 @@ const ACTION_PHRASE: Record<EngPaidAction, string> = {
 };
 
 export const ENG_PAID_UNAVAILABLE_TEXT = 'Service temporarily unavailable — refresh the page';
+
+/**
+ * Аккаунт заблокирован (шаг 0). Та же фраза, что engAutoLaunch.
+ * ENG_ACCOUNT_NOT_ACTIVE_TEXT: импорт оттуда замкнул бы круг модулей
+ * (engAutoLaunch → engClientLaunch → этот файл).
+ */
+export const ENG_PAID_ACCOUNT_BLOCKED_TEXT = 'Your account is not active.';
 
 /**
  * Создание проекта клиентом без функции под замком (he_eng_create_project,
@@ -307,6 +324,18 @@ export async function requireEngPaidAccess(
   const { action } = opts;
   const now = opts.now ?? new Date();
   const env = opts.env ?? process.env;
+
+  // 0. Блокировка аккаунта — до всего остального (шаг 0 в шапке).
+  const hold = await readHeEngOwnerHold(supabase, userId, { standing: true });
+  if (hold.kind === 'unavailable') return unavailable(userId, action, hold.detail);
+  if (hold.kind === 'blocked') {
+    return refuse(
+      userId,
+      action,
+      { code: 'account_blocked', status: 403, message: ENG_PAID_ACCOUNT_BLOCKED_TEXT },
+      { source: hold.source },
+    );
+  }
 
   // 1. Почта.
   const email = await readHeEngEmailStatus(supabase, userId, now.getTime());

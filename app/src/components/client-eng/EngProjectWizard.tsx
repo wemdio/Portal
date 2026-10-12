@@ -27,12 +27,13 @@ import {
   type EngProject,
   type EngProjectDetailResponse,
 } from './api-client';
-import { engAutopilotHoldText, engAutopilotIdleText, engStageErrorText } from './engText';
+import { ENG_SENDING_OFF_EN, engAutopilotHoldText, engAutopilotIdleText, engStageErrorText } from './engText';
 import { EngBadge, EngSpinner, engBaseAnalysisStopped, fmtDate, projectStatusTone } from './ui';
 import { collectAgainBaseId, ownAutoBaseState } from './EngStepBases';
 import { EngStepBrief } from './EngStepBrief';
 import { EngStepMarkets } from './EngStepMarkets';
-import { EngStepLaunch, engRetiredTemplateOf } from './EngStepLaunch';
+import { EngStepLaunch, engRetiredTemplateOf, engTeamFixMarkets } from './EngStepLaunch';
+import { ENG_TEAM_FIX_STOP_EN } from '@/lib/hypothesisEngine/engDashboard';
 import { EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
 
 /** Опрос деталки, пока по проекту идёт работа. */
@@ -129,7 +130,11 @@ function engAutopilotUnfinished(detail: EngDetail): boolean {
   const bases = (detail.bases ?? []) as EngBaseSummary[];
   const chains = (detail.chains ?? []) as unknown as Array<Record<string, unknown>>;
   const ready = new Set(templates.filter((t) => t.status === 'ready').map((t) => t.vertical_id));
+  // Остановку чинит только команда — «Launch» до починки не сдвинет; про такие
+  // рынки своя фраза шапки (engTeamFixHeaderText).
+  const teamFix = new Set(engTeamFixMarkets(detail).map((m) => m.id));
   const launchCannotMove = (verticalId: string): boolean => {
+    if (teamFix.has(verticalId)) return true;
     // Письма «Rewrite letters» снял, а новые не написаны (engRetiredTemplateOf):
     // путь — «Rewrite letters» или Support.
     if (engRetiredTemplateOf(templates.filter((t) => t.vertical_id === verticalId)) !== undefined) return true;
@@ -159,6 +164,25 @@ function engAutopilotUnfinished(detail: EngDetail): boolean {
       !ready.has(h.vertical_id) &&
       !launchCannotMove(h.vertical_id),
   );
+}
+
+/**
+ * Шапка проекта, когда остановку выбранного рынка (письма, проверка контактов
+ * или итоговые письма) чинит только команда: сначала Support, потом «Launch» —
+ * та же фраза, что у карточки рынка шага 3 и у письма об остановке (совет
+ * 'team_fix'). Новые письма «Rewrite letters» здесь не названы: их кнопка — на
+ * карточке рынка, и шапка к «Launch» про них не зовёт. null — таких рынков нет.
+ * При выключенной отправке аккаунта (`account_access` 'revoked' деталки)
+ * «Launch» откажет 403 — вместо «then press «Launch»» строка доступа.
+ */
+function engTeamFixHeaderText(detail: EngDetail): string | null {
+  const names = engTeamFixMarkets(detail)
+    .filter((m) => m.fix !== 'rewrite')
+    .map((m) => m.name);
+  if (names.length === 0) return null;
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  if (detail.account_access === 'revoked') return `Work on ${list} stopped. ${ENG_TEAM_FIX_STOP_EN} ${ENG_SENDING_OFF_EN}`;
+  return `Work on ${list} stopped. ${ENG_TEAM_FIX_STOP_EN} Message Support to find out when it is fixed, then press «Launch» on step 3.`;
 }
 
 export function EngProjectWizard({ projectId }: { projectId: string }) {
@@ -488,14 +512,20 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
             !hasActiveJobs &&
             (project.autopilot_hold ? (
               <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-amber)' }}>
-                <EngSupportText text={engAutopilotHoldText(project.autopilot_hold.code)} />
+                <EngSupportText
+                  text={engAutopilotHoldText(project.autopilot_hold.code, detail.account_access === 'revoked')}
+                />
                 {project.autopilot_hold.at && (
                   <span style={{ color: 'var(--cp-text-l)' }}> · {fmtDate(project.autopilot_hold.at)}</span>
                 )}
               </div>
+            ) : !project.error_code && engTeamFixHeaderText(detail) ? (
+              <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-amber)' }}>
+                <EngSupportText text={engTeamFixHeaderText(detail) ?? ''} />
+              </div>
             ) : !project.error_code && engAutopilotUnfinished(detail) ? (
               <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-text-m)' }}>
-                {engAutopilotIdleText()}
+                <EngSupportText text={engAutopilotIdleText(detail.account_access === 'revoked')} />
               </div>
             ) : null)}
           {/* Пауза по потолку расхода ('spend_paused'; потолок по умолчанию

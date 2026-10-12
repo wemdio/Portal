@@ -21,6 +21,12 @@
  * аборти́т LLM-запрос через канал активной джобы (setHeActiveJob), а если стадия успела
  * завершиться — done/дочейн не выполняются, attempts не растут (failJob).
  *
+ * Заблокированный ENG-аккаунт (S3b): перед стадией джобы us-проекта воркер
+ * читает отметку блокировки владельца (engBlockedSweep.guardHeEngJobOwner):
+ * заблокирован — джоба гасится и стадия не идёт; отметка не прочиталась —
+ * джоба возвращается в очередь с паузой, попытка не тратится. Между джобами —
+ * фоновая проверка заблокированных аккаунтов (heEngBlockSweep ниже).
+ *
  * Живость стадии (волна 3): у каждой стадии есть сторож простоя
  * (createHeJobWatchdog). Он считает окно от ПОСЛЕДНЕЙ активности — строки лога
  * стадии, запроса к БД (withStageActivity), завершённой операции
@@ -124,6 +130,9 @@ import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 import { heEngAutoLaunchTickMs, runHeEngAutoLaunchTick } from '@/lib/hypothesisEngine/engAutoLaunch';
 // Письма ENG-клиенту (S3): события автозапуска и проход по данным в том же тике.
 import { runHeEngClientMailScan, sendHeEngClientNotice } from '@/lib/hypothesisEngine/engClientMail';
+// Заблокированный ENG-аккаунт (S3b): страж джобы в handleJob и фоновая
+// проверка между джобами (heEngBlockSweep ниже).
+import { createHeEngBlockSweepTicker, guardHeEngJobOwner } from '@/lib/hypothesisEngine/engBlockedSweep';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
@@ -2008,10 +2017,11 @@ async function handleJob(job: HeJob) {
     | { ok: false; error: unknown };
   let journal: HeProviderJournal | null = null;
   try {
-    // Рынок проекта (geo поиска, язык промптов/писем) — один read на джобу.
+    // Рынок проекта (geo поиска, язык промптов/писем) — один read на джобу;
+    // тем же чтением — владелец (страж блокировки ниже, только us).
     const { data: proj, error: projErr, status: projStatus } = await db
       .from('he_projects')
-      .select('market')
+      .select('market, created_by')
       .eq('id', job.project_id)
       .maybeSingle();
     // Обрыв ЧТЕНИЯ — прерывание, а не сбой стадии: стадия ещё не начиналась.
@@ -2032,7 +2042,23 @@ async function handleJob(job: HeJob) {
       const text = `he_projects market read: ${projErr.message}`;
       throw isTransientDbError(projErr, projStatus) ? new HeJobInterruptionError(text, 'db') : new Error(text);
     }
-    const market = normalizeHeMarket((proj as { market?: string } | null)?.market);
+    const projRow = proj as { market?: string; created_by?: unknown } | null;
+    const market = normalizeHeMarket(projRow?.market);
+
+    // Владелец us-проекта заблокирован (S3b, engBlockedSweep.guardHeEngJobOwner)
+    // — стадия НЕ запускается: джоба погашена ('cancelled') или, если отметку
+    // блокировки не прочитали, возвращена в очередь с паузой без траты
+    // попытки ('released'); затем воркер берёт следующую джобу. RU-джобы
+    // отметку не читают. Возврат не лёг — та же политика, что у обрыва чтения
+    // проекта выше: бесплатное прерывание.
+    if (market === 'us') {
+      const owner = typeof projRow?.created_by === 'string' ? projRow.created_by : '';
+      const guard = await guardHeEngJobOwner(db, job, owner, { log: (level, msg) => log(level, msg) });
+      if (guard === 'not_released') {
+        throw new HeJobInterruptionError('he_eng_account_blocks read: owner block not read and the job not released', 'db');
+      }
+      if (guard !== 'run') return;
+    }
 
     // Журнал расхода ENG (lib/hypothesisEngine/costTelemetry.ts): только у
     // проекта market='us' — каждое обращение стадии к Requesty и Serper даёт
@@ -3386,8 +3412,10 @@ async function writeJobFailure(
  *  - новая стадия потребовала бы миграции check-ограничения he_jobs и правки
  *    каждой исчерпывающей карты стадий, а done-ветка шаблона живёт в сроке
  *    участка после стадии (POST_STAGE_DEADLINE_MS) и не должна падать.
- * Цена: запуск (обычно секунды, в худшем случае 2–3 минуты) задерживает
- * очередь джоб обоих рынков на это время. drain-worker.sh тик не видит:
+ * Цена: запуск (обычно секунды; в худшем случае — ядро, которое с
+ * классификатором сегментов идёт минутами, и сразу за ним до 100 с старта
+ * кампаний, отсчитанных от самого старта) задерживает очередь джоб обоих
+ * рынков на это время. drain-worker.sh тик не видит:
  * SIGKILL посреди запуска оставляет строку автозапуска 'running' — по
  * истечении аренды записи у ядра (15 мин) и строки (10 мин) следующий тик
  * считает брошенную попытку платным сбоем и достраивает запуск без дублей
@@ -3421,6 +3449,23 @@ async function maybeRunHeEngAutoLaunch(): Promise<boolean> {
   }
 }
 
+/**
+ * ЗАБЛОКИРОВАННЫЕ ENG-АККАУНТЫ — фоновая проверка между джобами (S3b,
+ * engBlockedSweep.ts, часть 2): выключатель отправки заблокированного аккаунта
+ * снова выключен, кампании его запусков перечитаны и, если отправляют, стоят
+ * на паузе. Не чаще раза в HE_ENG_BLOCK_SWEEP_MS (дефолт 5 мин), независимо от
+ * HE_ENG_AUTO_LAUNCH; выключатель HE_ENG_BLOCK_SWEEP=0. Очередь обоих рынков
+ * прогон держит не дольше HE_ENG_BLOCK_SWEEP_BUDGET_MS (20 с): дальше он
+ * доходит фоном, а следующий не начнётся, пока этот не кончится. Нет активных
+ * отметок — один запрос.
+ */
+const heEngBlockSweep = createHeEngBlockSweepTicker({
+  portalDb: db,
+  instantlyDb: supabaseInstantly,
+  log: (level, msg) => log(level, msg),
+  shouldStop,
+});
+
 async function pollOnce(): Promise<boolean> {
   // Брошенные строки закрываем ДО клейма: пока такая строка висит в 'running',
   // её проект стоит, а воркер один на всех.
@@ -3435,6 +3480,8 @@ async function pollOnce(): Promise<boolean> {
   // флагу. Клейм, уже начатый к сигналу (чтение и апдейт в claimJob), доходит
   // до конца, и эта джоба исполняется как текущая.
   if (shouldStop()) return false;
+  // Заблокированные ENG-аккаунты — между джобами (см. heEngBlockSweep).
+  await heEngBlockSweep.maybeRun();
   // Автозапуск ENG — между джобами, до клейма (см. maybeRunHeEngAutoLaunch).
   // Запуск был — true: pollLoop сразу зайдёт снова и возьмёт джобу.
   if (await maybeRunHeEngAutoLaunch()) return true;

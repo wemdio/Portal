@@ -66,6 +66,20 @@
  * бюджет считается по поколению анализа, и повторная кнопка тоже не должна
  * ставить новую генерацию по анализу, на котором порог уже достигнут.
  *
+ * НОЧЬ НЕ НАЧИНАЕТ РЫНОК С НУЛЯ (us). Рынок, отмеченный после «Launch», ждёт
+ * явного нажатия клиента (решение владельца 12.10.2026: галочка ничего не
+ * тратит). Поэтому ночной проход у проекта market='us' пропускает выбранную
+ * вертикаль, у которой нет НИ ОДНОЙ строки he_chains (причина 'not_started',
+ * без паузы): цепочку с нуля ставят только «Launch» и «Launch N more markets».
+ *
+ * СУЖЕННЫЙ ВЫЗОВ (`onlyVerticalIds`, «Launch N more markets» шага 3): те же
+ * правила оплаты и тот же потолок, но только по перечисленным вертикалям —
+ * остальных проход не касается вовсе (ни постановок, ни ремонта сирот, ни
+ * строк в details). Флаг автопилота он не пишет (вызывающий требует, что он
+ * уже включён; перед каждой платной постановкой его всё равно перечитывает
+ * stopUnlessAutopilotOn), а итоговую причину паузы не снимает и не понижает:
+ * она — одна на проект и про ВСЕ вертикали, а суженный проход видит часть.
+ *
  * ЧЕГО ЗДЕСЬ НЕТ. Ни одной новой постановки сборки мимо enqueueHeBaseCollect
  * (его дедуп — единственное, что стоит между ночным проходом и второй платной
  * базой) и ни одной записи терминального статуса: «не прочитали» в этом
@@ -86,6 +100,7 @@ import { createHeSpendGate } from './spendCeiling';
 import {
   AUTOPILOT_BASE_LIMIT,
   HE_ANALYZING_BASE_FIELDS,
+  HE_AUTOPILOT_PAUSE_REASONS,
   ORPHAN_ANALYZING_REASON,
   HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS,
   heTemplateGenerationBudget,
@@ -95,6 +110,7 @@ import {
   latestEndedJobByBase,
   liveBaseIdsFromJobs,
   pauseForHeAutopilotSkip,
+  readHeEngOwnerHold,
   recordHeAutopilotPause,
   repairOrphanAnalyzingBase,
 } from './autopilotNext';
@@ -133,15 +149,18 @@ export type HeAutopilotRefusal = 'not_researched' | 'no_verticals';
  * которое новая сборка повторит (HE_COLLECT_STOP_REPEATS_CODES), и кнопка
  * сборку не покупает (докблок файла). Своя, а не общая: её решает только
  * клиентское нажатие этого пути; воркер её не встречает. Паузы проекта не
- * даёт (pauseForReconcileSkip).
+ * даёт (pauseForReconcileSkip). И 'not_started' — ночной проход us-проекта не
+ * начинает рынок, у которого нет ни одной строки he_chains (докблок файла).
  */
-export type HeAutopilotReconcileSkipReason = HeAutopilotSkipReason | 'collect_stop_repeats';
+export type HeAutopilotReconcileSkipReason = HeAutopilotSkipReason | 'collect_stop_repeats' | 'not_started';
 
 function pauseForReconcileSkip(reason: HeAutopilotReconcileSkipReason): HeAutopilotPauseReason | null {
   // Решение, а не сбой: причину клиент читает у самой базы (код причины на
   // шаге 4) вместе с кнопкой «Collect again», а карточка паузы проекта
   // говорила бы про остановленный платный шаг.
   if (reason === 'collect_stop_repeats') return null;
+  // Рынок ждёт нажатия клиента — это не остановка.
+  if (reason === 'not_started') return null;
   return pauseForHeAutopilotSkip(reason);
 }
 
@@ -293,16 +312,22 @@ export async function reconcileHeAutopilotProject(
     /** Строка he_projects (роут отдаёт уже загруженную со скоупом владельца). */
     project: Row;
     trigger: HeAutopilotTrigger;
+    /**
+     * Только эти вертикали проекта («Launch N more markets»; докблок файла).
+     * Нет поля — все вертикали, как раньше.
+     */
+    onlyVerticalIds?: readonly string[];
   },
 ): Promise<HeAutopilotReconcileResult> {
   const { projectId, project, trigger } = args;
   const nightly = trigger === 'nightly';
+  const scope = args.onlyVerticalIds ? new Set(args.onlyVerticalIds) : null;
 
   if (project.status !== 'researched') {
     return { ok: false, kind: 'refused', refusal: 'not_researched' };
   }
 
-  const { data: verticals, error: vertErr } = await supabase
+  const { data: allVerticals, error: vertErr } = await supabase
     .from('he_verticals')
     .select('id, name')
     .eq('project_id', projectId)
@@ -311,6 +336,10 @@ export async function reconcileHeAutopilotProject(
     await recordHeAutopilotPause(supabase, projectId, 'read_failed');
     return { ok: false, kind: 'failed', step: 'verticals', error: vertErr, pause: 'read_failed' };
   }
+  // Суженный вызов: остальные вертикали проекта не читаются дальше и не
+  // разбираются. Ни одной из перечисленных у проекта нет — тот же отказ, что
+  // у проекта без вертикалей (вызывающий отвечает «рынки изменились»).
+  const verticals = scope ? (allVerticals ?? []).filter((v) => scope.has(asString(v.id))) : allVerticals;
   if (!verticals || verticals.length === 0) {
     return { ok: false, kind: 'refused', refusal: 'no_verticals' };
   }
@@ -434,8 +463,10 @@ export async function reconcileHeAutopilotProject(
   // Флаг — ДО постановки джоб: воркер подхватывает followups только при
   // autopilot=true, а клеймить свежие джобы он начнёт позже этой транзакции.
   // Ночной проход флага не трогает: он и отбирает проекты по нему, а лишняя
-  // запись двигала бы updated_at проекта без всякой работы по нему.
-  if (!nightly) {
+  // запись двигала бы updated_at проекта без всякой работы по нему. Суженный
+  // вызов — тоже (докблок файла): флаг уже стоит, а включённый им заново
+  // автопилот повёл бы и остальные рынки.
+  if (!nightly && !scope) {
     const { error: flagErr } = await supabase
       .from('he_projects')
       .update({ autopilot: true, updated_at: new Date().toISOString() })
@@ -579,6 +610,14 @@ export async function reconcileHeAutopilotProject(
         // Цепочка уже падала. Ночью за неё не платим: повтор — решение
         // человека (кнопка кабинета или специалист).
         skipReason = 'chain_failed_before';
+      } else if (
+        nightly &&
+        normalizeHeMarket(project.market) === 'us' &&
+        !chains.some((c) => c.vertical_id === verticalId)
+      ) {
+        // Рынок ещё не начинали (ни одной строки цепочки): с нуля его
+        // начинает только нажатие клиента (докблок файла).
+        skipReason = 'not_started';
       } else {
         const stop = (await stopUnlessAutopilotOn(verticalId)) ?? (await stopOnSpendCeiling(verticalId, 'chain'));
         if (stop) return stop;
@@ -918,7 +957,18 @@ export async function reconcileHeAutopilotProject(
   // Причина — одна на проект: самая важная из набравшихся. Прогресс по всем
   // вертикалям её СНИМАЕТ (null), и это не «починили», а «сейчас стоять не на
   // чем»: следующий проход перепишет заново.
-  await recordHeAutopilotPause(supabase, projectId, pause);
+  //
+  // Суженный вызов видит не все вертикали: снять или понизить причину, которую
+  // записала другая вертикаль, он не вправе. Пишет он только причину важнее
+  // уже записанной (строка проекта — та, что отдал вызывающий).
+  if (!scope) {
+    await recordHeAutopilotPause(supabase, projectId, pause);
+  } else if (pause) {
+    const recorded = (HE_AUTOPILOT_PAUSE_REASONS as readonly string[]).includes(asString(project.autopilot_error))
+      ? (asString(project.autopilot_error) as HeAutopilotPauseReason)
+      : null;
+    if (worstPause(recorded, pause) !== recorded) await recordHeAutopilotPause(supabase, projectId, pause);
+  }
 
   return { ok: true, counts, details, pause };
 }
@@ -1058,6 +1108,10 @@ export interface HeAutopilotReconcilePassSummary {
  *    /tools/hypothesis-engine работает на тех же таблицах, и проход не имеет
  *    права ставить ему ничего;
  *  - только status='researched' (третья проверка — внутри реконсилера);
+ *  - владелец не заблокирован (readHeEngOwnerHold: отметка блокировки у
+ *    любого владельца, аккаунт — только у клиента английского кабинета;
+ *    проект сотрудника идёт как раньше); заблокирован или не прочитался —
+ *    строка 'refused', ничего не поставлено;
  *  - осматривается окно из HE_AUTOPILOT_RECONCILE_WINDOW кандидатов со
  *    сдвигом по ночам, а платную работу начинают не больше
  *    HE_AUTOPILOT_RECONCILE_PER_RUN из них (проекты, которым ставить нечего,
@@ -1113,7 +1167,7 @@ export async function runHeAutopilotReconcilePass(
   const readCandidates = async (from: number, to: number): Promise<Row[]> => {
     const { data, error } = await supabase
       .from('he_projects')
-      .select('id, status, market, autopilot')
+      .select('id, status, market, autopilot, created_by')
       .eq('autopilot', true)
       .eq('market', 'us')
       .eq('status', 'researched')
@@ -1151,6 +1205,27 @@ export async function runHeAutopilotReconcilePass(
     if (startedWork >= actingCap) break;
     const projectId = asString(project.id);
     try {
+      // Владелец заблокирован (отметка «Заблокировать» карточки ENG-клиента
+      // или бан/роль/демо аккаунта) — платную работу ночь не начинает
+      // (решение владельца 12.10.2026: «если бан, то всё останавливать»).
+      // Блокировка и так выключает автопилот его проектов, но остановка могла
+      // не дойти до проекта, а бан мог прийти мимо карточки. Аккаунт читается
+      // только у клиента английского кабинета ('eng_client'): роль сотрудника,
+      // ведущего us-проект в staff-инструменте, — не блокировка. Не
+      // прочиталось — тоже не начинает (fail-closed): следующая ночь прочитает
+      // снова.
+      const hold = await readHeEngOwnerHold(supabase, asString(project.created_by), { standing: 'eng_client' });
+      if (hold.kind !== 'clear') {
+        summary.refused += 1;
+        summary.rows.push({
+          projectId,
+          outcome: 'refused',
+          pause: null,
+          details: [],
+          message: hold.kind === 'blocked' ? `account_blocked (${hold.source})` : `account_unread: ${hold.detail}`,
+        });
+        continue;
+      }
       const result = await reconcileHeAutopilotProject(supabase, {
         projectId,
         project,

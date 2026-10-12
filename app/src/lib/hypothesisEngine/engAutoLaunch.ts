@@ -14,7 +14,8 @@
  *     HE_ENG_AUTO_LAUNCH_TICK_MS, между джобами) берёт готовый шаблон и
  *     запускает его ТЕМ ЖЕ вызовом, что кнопка «Launch now»: аккаунт
  *     (readHeEngAccountStanding — та часть requireClientAuth кнопки, что не
- *     про сессию: бан, роль, демо) → requireEngMarket → loadClientHeTemplate →
+ *     про сессию: бан, роль, демо, плюс отметка блокировки ENG-клиента) →
+ *     requireEngMarket → loadClientHeTemplate →
  *     engClientLaunch.runHeEngTemplateLaunch (trigger 'auto', startSending:
  *     true, окно намерения — для ПЕРВОГО запуска рынка; достройка берёт своё
  *     окно рынка) — со всеми гейтами кнопки: гейт платных шагов,
@@ -60,11 +61,21 @@
  * ОТМЕНА ПОСРЕДИ ПОПЫТКИ. «Cancel all jobs», пришедший, пока тик запускает
  * рынок, останавливает старт: проверка перед стартом перечитывает намерение и
  * проект ('done cancelled', без письма); созданное ядром остаётся на паузе.
+ * Конфиг ночного добора после такой попытки не заводится (heEngTopUpGate
+ * перечитывает то же перед ним). Прямо перед ядром тик перечитывает то же
+ * ещё раз: отмена после снимка прохода ядро не зовёт ('done cancelled'). Отмена
+ * посреди ядра его не останавливает: оно один раз создаёт кампании (и платит
+ * классификатор, если он есть у шаблона), старт не делается.
  *
- * ЗАБЛОКИРОВАННЫЙ АККАУНТ (бан Supabase, роль не client/admin, демо) — новый
- * запуск и старт не начинаются ('held account_blocked', перепроверка раз в
- * час, один алерт команде на рынок, письма клиенту нет); уже отправляющие
- * кампании не трогаются.
+ * ЗАБЛОКИРОВАННЫЙ АККАУНТ (отметка блокировки he_eng_account_blocks, бан
+ * Supabase, роль не client/admin, демо; отказ гейта платных шагов с кодом
+ * 'account_blocked') — новый запуск и старт не начинаются: строка
+ * 'held account_blocked' со сроком через ~10 лет (ACCOUNT_BLOCKED_PARK_MIN),
+ * один алерт команде на рынок, письма клиенту нет. Сама строка не
+ * перепроверяется: поднимает её только новое «Launch» клиента
+ * (writeHeEngLaunchIntent ставит 'held' срок «сейчас») — после разблокировки
+ * ничего не запускается и не стартует само. Уже отправляющие кампании этот
+ * модуль не трогает. Отметку не прочитали — попытки нет ('unavailable').
  *
  * ДЕГРАДАЦИЯ. Нет таблиц / функции миграции — намерение 'missing': «Launch»
  * проекта стадии ставит, отвечает auto_launch 'unavailable'; тик не делает
@@ -85,12 +96,15 @@ import {
 import { loadClientHeTemplate, requireEngMarket } from './apiGuards';
 import {
   ENG_START_GATE_FAILED_TEXT,
+  HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED,
+  HE_ENG_START_REFUSAL_CANCELLED,
   retryHeEngLaunchStart,
   runHeEngTemplateLaunch,
   type HeEngLaunchSendingVerdict,
   type HeEngLaunchSummary,
   type HeEngStartGateResult,
 } from './engClientLaunch';
+import { readHeEngAccountBlock } from './engAccountBlockMarker';
 import { heEngSendingAccessAllows, readHeEngSendingAccess } from './engSendingAccess';
 import { notifyHeEngSending } from './engSendingAlert';
 import { heLaunchIsIncomplete, parseLaunchInfo, readHeLaunchLease } from './launchHandoff';
@@ -126,6 +140,18 @@ const INTENTS_PER_PASS = 200;
 const INTENT_PAGE = 50;
 /** Пачка id в `in(...)`: длина URL PostgREST. */
 const ID_CHUNK = 50;
+/**
+ * Чтения тика, где на один id приходится много строк (вертикали, выбор и
+ * строки автозапуска — на проект, шаблоны — на вертикаль): куски меньше, и
+ * каждый запрос с limit TICK_READ_LIMIT; кусок, упёршийся в limit, пропускает
+ * свои проекты в этом проходе (readChunked).
+ */
+const TICK_PROJECT_CHUNK = 10;
+const TICK_VERTICAL_CHUNK = 25;
+const TICK_READ_LIMIT = 1000;
+/** Не чаще раза в столько — строка лога о проектах, пропущенных из-за упора чтения. */
+const CUT_LOG_EVERY_MS = 60 * 60_000;
+let cutLoggedAt = 0;
 /** Сколько раз за тик пробуем взять строку, если её перехватили. */
 const CLAIMS_PER_TICK = 3;
 
@@ -178,12 +204,16 @@ export const HE_ENG_AUTO_LAUNCH_CODES = [
   'start_pending',
   /** Попытка брошена посреди (процесс умер) — платный сбой; 'failed' — сдались. */
   'abandoned',
-  /** Аккаунт заблокирован (бан, роль, демо) — 'held', перепроверка раз в час. */
+  /**
+   * Аккаунт заблокирован (отметка блокировки, бан, роль, демо) — 'held' со
+   * сроком через ~10 лет: поднимает только новое «Launch» клиента.
+   */
   'account_blocked',
   /**
-   * «Cancel all jobs» пришёл посреди попытки тика (heEngStartGate): кампании
-   * созданы, старт не делался — 'done'; новое «Launch» возвращает строку в
-   * 'waiting'.
+   * «Cancel all jobs» (или блокировка) пришёл посреди попытки тика
+   * (heEngStartGate): кампании созданы, старт не делался — 'done'; новое
+   * «Launch» возвращает строку в 'waiting', только если запуск шаблона не
+   * закончен (writeHeEngLaunchIntent).
    */
   'cancelled',
 ] as const;
@@ -338,12 +368,21 @@ export async function readHeEngLaunchIntent(db: SupabaseClient, projectId: strin
 /**
  * «Launch» проекта: намерение включено, окно и время нажатия записаны, отмена
  * и отметка «исполнено» (settled_at, см. heEngLaunchSettled) сняты — тик снова
- * читает проект. Повторное нажатие — решение клиента начать заново: строки
- * 'failed' и 'done cancelled' (старт отменён «Cancel all jobs» посреди
- * попытки) возвращаются в 'waiting' с обнулёнными счётчиками (в том числе
- * платных сбоев — клиент решил заплатить снова), у строк 'held' срок проверки —
- * сейчас. Остальные строки 'done' не трогаются: дальше отправкой правят кнопки
- * блока отправки. Сброс строк — best-effort (warn): намерение важнее.
+ * читает проект. Повторное нажатие — решение клиента начать заново:
+ *  - строки 'failed' возвращаются в 'waiting' с обнулёнными счётчиками (в том
+ *    числе платных сбоев — клиент решил заплатить снова);
+ *  - строки 'done cancelled' (старт отменён посреди попытки тика) — так же,
+ *    но только у шаблона с НЕЗАКОНЧЕННЫМ запуском (или без записи о запуске):
+ *    его тик достроит. У законченного запуска строка остаётся: кампании
+ *    созданы и не стартованы, их стартует «Start sending» блока отправки, а
+ *    'waiting' над законченным запуском тик не берёт (кандидатом он не бывает)
+ *    — кабинет показывал бы вечное «скоро»;
+ *  - у строк 'held' срок проверки — сейчас (в том числе у 'held
+ *    account_blocked': только это нажатие её и поднимает).
+ * Остальные строки 'done' не трогаются: дальше отправкой правят кнопки блока
+ * отправки. Сброс строк — best-effort (warn): намерение важнее; не прочитались
+ * шаблоны строк 'done cancelled' — они не поднимаются (кабинет у
+ * незаконченного запуска предлагает «Launch now»).
  */
 export async function writeHeEngLaunchIntent(
   db: SupabaseClient,
@@ -390,12 +429,7 @@ export async function writeHeEngLaunchIntent(
     };
     const [failedRes, cancelledRes, heldRes] = await Promise.all([
       db.from(HE_ENG_AUTO_LAUNCH_TABLE).update(revived).eq('project_id', args.projectId).eq('state', 'failed'),
-      db
-        .from(HE_ENG_AUTO_LAUNCH_TABLE)
-        .update(revived)
-        .eq('project_id', args.projectId)
-        .eq('state', 'done')
-        .eq('code', 'cancelled'),
+      reviveCancelledUnfinished(db, args.projectId, revived),
       db
         .from(HE_ENG_AUTO_LAUNCH_TABLE)
         .update({ next_at: nowIso, updated_at: nowIso })
@@ -415,6 +449,54 @@ export async function writeHeEngLaunchIntent(
     });
   }
   return 'ok';
+}
+
+/**
+ * Поднять строки 'done cancelled' проекта, у шаблона которых запуск не
+ * закончен или записи о запуске нет (writeHeEngLaunchIntent). Условие записи —
+ * строка всё ещё 'done cancelled'. Ответ — в форме ответа запроса (`error`) для
+ * общей строки warn вызывающего; бросок ловит вызывающий.
+ */
+async function reviveCancelledUnfinished(
+  db: SupabaseClient,
+  projectId: string,
+  revived: Record<string, unknown>,
+): Promise<{ error: PgError | null }> {
+  const { data: rows, error: rowsErr } = await db
+    .from(HE_ENG_AUTO_LAUNCH_TABLE)
+    .select('template_id')
+    .eq('project_id', projectId)
+    .eq('state', 'done')
+    .eq('code', 'cancelled')
+    .limit(500);
+  if (rowsErr) return { error: rowsErr };
+  const ids = [
+    ...new Set(((rows ?? []) as Array<Record<string, unknown>>).map((r) => str(r.template_id)).filter(Boolean)),
+  ];
+  if (ids.length === 0) return { error: null };
+  const nowMs = Date.now();
+  const unfinished: string[] = [];
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const chunk = ids.slice(i, i + ID_CHUNK);
+    const { data: templates, error: templatesErr } = await db
+      .from('he_templates')
+      .select(TEMPLATE_MARK_COLUMNS)
+      .in('id', chunk);
+    if (templatesErr) return { error: templatesErr };
+    for (const raw of (templates ?? []) as unknown as Array<Record<string, unknown>>) {
+      const view = templateViewOf(raw, nowMs);
+      if (view && (!view.launched || view.incomplete)) unfinished.push(view.id);
+    }
+  }
+  if (unfinished.length === 0) return { error: null };
+  const { error } = await db
+    .from(HE_ENG_AUTO_LAUNCH_TABLE)
+    .update(revived)
+    .eq('project_id', projectId)
+    .in('template_id', unfinished)
+    .eq('state', 'done')
+    .eq('code', 'cancelled');
+  return { error };
 }
 
 /**
@@ -577,6 +659,11 @@ export type HeEngAutoLaunchOutcome =
   | { kind: 'scope'; status: number; start?: boolean }
   /** Аккаунт до запуска (readHeEngAccountStanding): заблокирован или не прочитался. */
   | { kind: 'account'; standing: 'blocked' | 'unavailable'; start?: boolean }
+  /**
+   * Автозапуск проекта, перечитанный прямо перед ядром (только запуск):
+   * снят после снимка прохода — ядро не звали; не прочитался — попытки нет.
+   */
+  | { kind: 'intent'; state: 'cancelled' | 'unavailable' }
   /** Брошенные попытки исчерпаны (heEngAbandonedMark.giveUp) — без новой попытки. */
   | { kind: 'abandoned'; start: boolean }
   /**
@@ -595,6 +682,12 @@ export interface HeEngAutoLaunchNotice {
   templateId?: string | null;
   code?: HeEngAutoLaunchNoticeCode | null;
   refId?: string | null;
+  /**
+   * requested_at намерения (нажатие «Launch»), при котором решён итог: у
+   * needs_support классов, которые поднимает новое нажатие ('failed',
+   * 'refused'), входит в ключ письма (engClientMail.heEngClientNoticeKey).
+   */
+  launchRequestedAt?: string | null;
 }
 
 export interface HeEngAutoLaunchDecision {
@@ -606,10 +699,12 @@ export interface HeEngAutoLaunchDecision {
   paidFailures: number;
   startRetries: number;
   /**
-   * Письма клиенту (без projectId/templateId — их добавляет тик). У
+   * Письма клиенту (без projectId/templateId и нажатия — их добавляет тик). У
    * needs_support `refId` — класс итога ('unfinished', 'failed', 'refused',
    * 'not_started', 'spend_limit', 'sending_turned_off'): ключ письма с ним, и
-   * письмо одного класса не глушит позднее письмо другого.
+   * письмо одного класса не глушит позднее письмо другого; у 'failed' и
+   * 'refused' в ключе ещё и нажатие «Launch» (launchRequestedAt): строку с
+   * ними поднимает новое нажатие, и второе «сдался» после него — новое письмо.
    */
   notices: Array<{ kind: HeEngAutoLaunchNoticeKind; code?: HeEngAutoLaunchNoticeCode; refId?: string }>;
   /** Встало насовсем — алерт команде auto_launch_stuck. */
@@ -637,8 +732,13 @@ const UNFINISHED_RETRY_MIN = 30;
 const UNFINISHED_TRIES_MAX = 3;
 /** Брошенная попытка запуска: вторая подряд — 'failed' без новой попытки. */
 export const HE_ENG_AUTO_LAUNCH_ABANDONED_MAX = 2;
-/** Заблокированный аккаунт: перепроверка раз в час. */
-const ACCOUNT_BLOCKED_RECHECK_MIN = 60;
+/**
+ * Заблокированный аккаунт: срок строки — через ~10 лет, то есть строка сама не
+ * перепроверяется никогда. Поднимает её только новое «Launch» клиента
+ * (writeHeEngLaunchIntent: у 'held' срок — «сейчас»), так что разблокировка
+ * сама ничего не запускает и не стартует. Кабинет этот срок не печатает.
+ */
+const ACCOUNT_BLOCKED_PARK_MIN = 3650 * 24 * 60;
 
 /**
  * Что делать со строкой по итогу попытки (чистая функция, `now` — часы
@@ -649,18 +749,21 @@ const ACCOUNT_BLOCKED_RECHECK_MIN = 60;
  *    start_failed + письмо «нажмите Start sending»;
  *  - запуск не закончен → waiting unfinished (каждые 30 мин, 3 раза), дальше
  *    done needs_support + письмо + алерт;
- *  - аккаунт заблокирован (до запуска или перед стартом) → held
- *    account_blocked, перепроверка раз в час, без письма; алерт — при входе в
- *    этот код;
+ *  - аккаунт заблокирован (до запуска, отказ гейта платных шагов
+ *    'account_blocked' или перед стартом) → held account_blocked со сроком
+ *    через ~10 лет (ACCOUNT_BLOCKED_PARK_MIN: поднимает только новое
+ *    «Launch»), без письма; алерт — при входе в этот код;
  *  - гейты (почта, лимиты, выключатель, ящики) → held со своим кодом,
  *    перепроверка через 10–60 мин;
- *  - «Cancel all jobs» посреди попытки тика (heEngStartGate) → done
- *    cancelled, старт не делался, без письма и алерта;
+ *  - «Cancel all jobs» посреди попытки тика (перед ядром — тик перечитывает
+ *    автозапуск; перед стартом — heEngStartGate) → done cancelled, ядро или
+ *    старт не делались, без письма и алерта; перечитать перед ядром не
+ *    вышло — как сбой до платной части;
  *  - письма не проходят гейт подстановок → held letters_need_rewrite
  *    (перепроверка раз в сутки; «Rewrite letters» даёт новый шаблон);
  *  - 4xx ядра без гейта и 4xx проверок скоупа → held needs_support (раз в
  *    час; у старта — done) + алерт только при ВХОДЕ в код (перепроверка его
- *    не повторяет, как у account_blocked);
+ *    не повторяет);
  *  - сбой до платной части → waiting server_error с откатом, после шести —
  *    failed; после платной части — paid_failures, после трёх — failed;
  *  - брошенные попытки исчерпаны → failed abandoned (+ алерт) или, у старта,
@@ -714,19 +817,19 @@ export function heEngAutoLaunchVerdict(
   };
 
   // Заблокированный аккаунт войти не может — письма нет. Алерт — только при
-  // входе в код: перепроверка раз в час его не повторяет.
+  // входе в код: новое «Launch», упёршееся в ту же блокировку, его не повторяет.
   const accountBlocked = (label: string): HeEngAutoLaunchDecision =>
-    decide('held', 'account_blocked', ACCOUNT_BLOCKED_RECHECK_MIN, label, { alert: row.code !== 'account_blocked' });
+    decide('held', 'account_blocked', ACCOUNT_BLOCKED_PARK_MIN, label, { alert: row.code !== 'account_blocked' });
 
   switch (outcome.kind) {
     case 'launched': {
       const sending = outcome.sending;
-      if (sending.kind === 'not_started' && sending.code === 'account_blocked') {
+      if (sending.kind === 'not_started' && sending.code === HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED) {
         return accountBlocked('launched_account_blocked');
       }
       // «Cancel all jobs» посреди попытки: старт не делался (и у незаконченного
       // запуска достройка не повторяется) — до нового «Launch».
-      if (sending.kind === 'not_started' && sending.code === HE_ENG_START_CANCELLED_CODE) {
+      if (sending.kind === 'not_started' && sending.code === HE_ENG_START_REFUSAL_CANCELLED) {
         return decide('done', 'cancelled', 0, 'launched_cancelled');
       }
       const startedNotice = sending.kind === 'started' ? [{ kind: 'sending_started' as const }] : [];
@@ -768,8 +871,8 @@ export function heEngAutoLaunchVerdict(
       if (v.kind === 'started') {
         return decide('done', null, 0, 'start_retry_sending', { notices: [{ kind: 'sending_started' }] });
       }
-      if (v.code === 'account_blocked') return accountBlocked('start_retry_account_blocked');
-      if (v.code === HE_ENG_START_CANCELLED_CODE) return decide('done', 'cancelled', 0, 'start_retry_cancelled');
+      if (v.code === HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED) return accountBlocked('start_retry_account_blocked');
+      if (v.code === HE_ENG_START_REFUSAL_CANCELLED) return decide('done', 'cancelled', 0, 'start_retry_cancelled');
       if (v.reason === 'client_paused') return decide('done', 'client_paused', 0, 'start_retry_client_paused');
       if (!v.retryable) {
         return decide('done', 'start_failed', 0, `start_retry_${v.reason}:start_failed`, {
@@ -795,6 +898,12 @@ export function heEngAutoLaunchVerdict(
     case 'account':
       if (outcome.standing === 'blocked') return accountBlocked('account_blocked');
       return outcome.start ? startRetryOrGiveUp('account_unavailable') : serverError('account_unavailable');
+    case 'intent':
+      // Ядро не звали: ничего не создано и не оплачено. 'done cancelled' —
+      // как у отмены перед стартом; новое «Launch» поднимает строку (записи о
+      // запуске у шаблона нет — writeHeEngLaunchIntent).
+      if (outcome.state === 'cancelled') return decide('done', 'cancelled', 0, 'intent_cancelled_before_core');
+      return serverError('intent_unavailable');
     case 'abandoned':
       if (outcome.start) {
         return decide('done', 'start_failed', 0, 'abandoned_start:start_failed', {
@@ -827,6 +936,9 @@ export function heEngAutoLaunchVerdict(
     case 'refused': {
       const code = outcome.code;
       switch (code) {
+        case HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED:
+          // Отказ гейта платных шагов: отметка блокировки ENG-клиента.
+          return accountBlocked('refused_account_blocked');
         case 'email_not_verified':
         case 'spend_day_limit':
         case 'unavailable':
@@ -1031,30 +1143,37 @@ export function heEngAbandonedMark(
 
 /**
  * Может ли аккаунт сейчас запускать и стартовать — та часть requireClientAuth
- * (clientApiHelper.ts), что не про сессию, для вызова без запроса (тик
- * воркера) и для перепроверки посреди запуска:
- *  - бан Supabase (auth.users.banned_until в будущем; блокировка в
- *    /admin/users ставит его и отзывает сессии) — 'blocked' ('banned');
+ * (clientApiHelper.ts), что не про сессию, плюс отметка блокировки
+ * ENG-клиента, для вызова без запроса (тик воркера) и для перепроверки посреди
+ * запуска:
+ *  - отметка блокировки (he_eng_account_blocks, readHeEngAccountBlock: её
+ *    пишет блокировка ENG-клиента в админке) — 'blocked' ('staff_block');
+ *    таблицы нет (миграция 20261013_0001) — отметка ничего не решает;
+ *  - бан Supabase (auth.users.banned_until в будущем; блокировка ставит его и
+ *    отзывает сессии) — 'blocked' ('banned');
  *  - профиль: role 'client' или 'admin' (иначе requireClientAuth отвечает
  *    403), не is_demo (демо-аккаунт read-only) — 'blocked' ('role' / 'demo');
  *  - пользователя или профиля нет — 'blocked' ('missing' / 'role').
- * Любой сбой чтения — 'unavailable' (fail-closed: не разрешает ничего), если
- * второе чтение не дало блокировку само. НЕ БРОСАЕТ.
+ * Любой сбой чтения (и отметки) — 'unavailable' (fail-closed: не разрешает
+ * ничего), если другое чтение не дало блокировку само. НЕ БРОСАЕТ.
  */
 export type HeEngAccountStanding =
   | { kind: 'ok' }
-  | { kind: 'blocked'; reason: 'banned' | 'role' | 'demo' | 'missing' }
+  | { kind: 'blocked'; reason: 'staff_block' | 'banned' | 'role' | 'demo' | 'missing' }
   | { kind: 'unavailable'; message: string };
 
 export async function readHeEngAccountStanding(db: SupabaseClient, userId: string): Promise<HeEngAccountStanding> {
   try {
-    const [userRes, profileRes] = await Promise.all([
+    const [userRes, profileRes, block] = await Promise.all([
       db.auth.admin.getUserById(userId),
       db.from('profiles').select('role, is_demo').eq('id', userId).maybeSingle(),
+      readHeEngAccountBlock(db, userId),
     ]);
-    let unavailable: string | null = null;
+    if (block.state === 'blocked') return { kind: 'blocked', reason: 'staff_block' };
+    const unread: string[] = [];
+    if (block.state === 'error') unread.push(block.detail);
     if (profileRes.error) {
-      unavailable = errText('profiles read', profileRes.error);
+      unread.push(errText('profiles read', profileRes.error));
     } else {
       const profile = (profileRes.data ?? null) as { role?: unknown; is_demo?: unknown } | null;
       if (profile?.role !== 'client' && profile?.role !== 'admin') return { kind: 'blocked', reason: 'role' };
@@ -1063,17 +1182,18 @@ export async function readHeEngAccountStanding(db: SupabaseClient, userId: strin
     if (userRes.error) {
       const authErr = userRes.error as { status?: number; code?: string; message?: string };
       if (authErr.status === 404 || authErr.code === 'user_not_found') return { kind: 'blocked', reason: 'missing' };
-      return { kind: 'unavailable', message: unavailable ?? `auth user read: ${String(authErr.message ?? '').slice(0, 200)}` };
+      unread.push(`auth user read: ${String(authErr.message ?? '').slice(0, 200)}`);
+    } else {
+      const user = userRes.data?.user ?? null;
+      if (!user) return { kind: 'blocked', reason: 'missing' };
+      const bannedUntil = typeof user.banned_until === 'string' ? user.banned_until.trim() : '';
+      if (bannedUntil) {
+        // Непарсящийся срок бана — считаем баном (fail-closed).
+        const until = Date.parse(bannedUntil);
+        if (!Number.isFinite(until) || until > Date.now()) return { kind: 'blocked', reason: 'banned' };
+      }
     }
-    const user = userRes.data?.user ?? null;
-    if (!user) return { kind: 'blocked', reason: 'missing' };
-    const bannedUntil = typeof user.banned_until === 'string' ? user.banned_until.trim() : '';
-    if (bannedUntil) {
-      // Непарсящийся срок бана — считаем баном (fail-closed).
-      const until = Date.parse(bannedUntil);
-      if (!Number.isFinite(until) || until > Date.now()) return { kind: 'blocked', reason: 'banned' };
-    }
-    return unavailable ? { kind: 'unavailable', message: unavailable } : { kind: 'ok' };
+    return unread.length > 0 ? { kind: 'unavailable', message: unread.join('; ').slice(0, 400) } : { kind: 'ok' };
   } catch (e) {
     return { kind: 'unavailable', message: e instanceof Error ? e.message.slice(0, 200) : 'unknown' };
   }
@@ -1085,22 +1205,23 @@ export const ENG_ACCOUNT_NOT_ACTIVE_TEXT = 'Your account is not active.';
 export const ENG_ACCOUNT_UNREAD_TEXT =
   'We could not check your account just now. The sending status of this market shows how to start the campaigns.';
 
-/** Код отказа проверки перед стартом: автозапуск проекта отменён посреди попытки тика. */
-const HE_ENG_START_CANCELLED_CODE = 'cancelled';
 /** Автозапуск отменён посреди попытки тика (кнопка эту проверку не проходит — текст только в журнал). */
 const ENG_LAUNCH_CANCELLED_TEXT = 'Automatic launch was turned off for this project, so sending was not started.';
 
 /**
- * Автозапуск проекта всё ещё действует (перечитывается перед стартом попытки
- * тика): намерение wanted, автопилот проекта включён, отметка отмены
+ * Автозапуск проекта всё ещё действует (у попытки тика перечитывается перед
+ * ядром, перед стартом и перед конфигом ночного добора; 'wanted' несёт
+ * свежее намерение): намерение wanted, автопилот проекта включён, отметка отмены
  * (he_projects.cancelled_at) не новее последнего «Launch». «Cancel all jobs»
- * пишет и то и другое (api/client/eng/projects/[id]/cancel). Сбой чтения
+ * и блокировка ENG-клиента пишут и то и другое (engProjectStop). Сбой чтения
  * (и нет таблицы намерения) — 'unavailable'. НЕ БРОСАЕТ.
  */
 async function readHeEngLaunchStillWanted(
   db: SupabaseClient,
   projectId: string,
-): Promise<{ kind: 'wanted' } | { kind: 'cancelled'; reason: string } | { kind: 'unavailable'; message: string }> {
+): Promise<
+  { kind: 'wanted'; intent: HeEngLaunchIntent } | { kind: 'cancelled'; reason: string } | { kind: 'unavailable'; message: string }
+> {
   try {
     const intentRead = await readHeEngLaunchIntent(db, projectId);
     if (intentRead.kind === 'error') return { kind: 'unavailable', message: intentRead.message };
@@ -1122,7 +1243,7 @@ async function readHeEngLaunchStillWanted(
     if (project.autopilot !== true) return { kind: 'cancelled', reason: 'autopilot_off' };
     const cancelledAt = tsOf(project.cancelled_at);
     if (cancelledAt > 0 && cancelledAt > tsOf(intent.requestedAt)) return { kind: 'cancelled', reason: 'cancelled_after_launch' };
-    return { kind: 'wanted' };
+    return { kind: 'wanted', intent };
   } catch (e) {
     return { kind: 'unavailable', message: e instanceof Error ? e.message.slice(0, 200) : 'unknown' };
   }
@@ -1131,10 +1252,12 @@ async function readHeEngLaunchStillWanted(
 /**
  * Проверка прямо перед стартом кампаний (`onStartDecided` engClientLaunch) —
  * общая у кнопки «Launch now» и тика:
- *  1. аккаунт (readHeEngAccountStanding) — бан мог прийти посреди запуска;
+ *  1. аккаунт (readHeEngAccountStanding) — бан или отметка блокировки могли
+ *     прийти посреди запуска (HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED);
  *  2. только у тика (`projectId` задан; запуск и повтор старта): автозапуск
  *     проекта всё ещё действует (readHeEngLaunchStillWanted) — «Cancel all
- *     jobs» мог прийти посреди попытки. Отменён — HE_ENG_START_CANCELLED_CODE
+ *     jobs» или блокировка могли прийти посреди попытки. Отменён —
+ *     HE_ENG_START_REFUSAL_CANCELLED
  *     (строка 'done cancelled', без письма); не прочиталось — повторяемый
  *     отказ. Кнопка — само нажатие клиента, её эта проверка не держит;
  *  3. решение «стартуем» записано во взятую строку автозапуска (code
@@ -1155,7 +1278,12 @@ export function heEngStartGate(
         userId: args.userId,
         templateId: args.templateId,
       });
-      return { ok: false, code: 'account_blocked', message: ENG_ACCOUNT_NOT_ACTIVE_TEXT, retryable: false };
+      return {
+        ok: false,
+        code: HE_ENG_START_REFUSAL_ACCOUNT_BLOCKED,
+        message: ENG_ACCOUNT_NOT_ACTIVE_TEXT,
+        retryable: false,
+      };
     }
     if (standing.kind === 'unavailable') {
       void logWarn('he.eng_auto_launch.start_account_unread', standing.message, {
@@ -1172,7 +1300,7 @@ export function heEngStartGate(
           projectId: args.projectId,
           templateId: args.templateId,
         });
-        return { ok: false, code: HE_ENG_START_CANCELLED_CODE, message: ENG_LAUNCH_CANCELLED_TEXT, retryable: false };
+        return { ok: false, code: HE_ENG_START_REFUSAL_CANCELLED, message: ENG_LAUNCH_CANCELLED_TEXT, retryable: false };
       }
       if (still.kind === 'unavailable') {
         void logWarn('he.eng_auto_launch.start_intent_unread', still.message, {
@@ -1194,6 +1322,45 @@ export function heEngStartGate(
       }
     }
     return { ok: true };
+  };
+}
+
+/**
+ * Проверка перед заведением конфига ночного добора после успешного запуска
+ * (`beforeTopUpConfig` engClientLaunch) — у кнопки и тика: аккаунт не
+ * заблокирован (отметка блокировки; таблицы нет — не мешает) и, только у тика
+ * (`projectId` задан), автозапуск проекта всё ещё действует
+ * (readHeEngLaunchStillWanted). Блокировка или «Cancel all jobs», пришедшие во
+ * время запуска, выключают «Daily top-up» только у заведённого конфига, и
+ * заведённый после них включил бы добор. Сбой любого чтения — false
+ * (fail-closed: конфиг не заводится, добор клиент включит сам). Кнопку отмена
+ * не держит (её нажатие — решение клиента), как и в heEngStartGate. НЕ БРОСАЕТ.
+ */
+export function heEngTopUpGate(
+  db: SupabaseClient,
+  args: { userId: string; templateId: string; projectId?: string },
+): () => Promise<boolean> {
+  return async () => {
+    const block = await readHeEngAccountBlock(db, args.userId);
+    if (block.state === 'blocked' || block.state === 'error') {
+      void logWarn('he.eng_auto_launch.top_up_refused', `nightly refill config not created: account ${block.state}`, {
+        userId: args.userId,
+        templateId: args.templateId,
+        ...(block.state === 'error' ? { detail: block.detail } : {}),
+      });
+      return false;
+    }
+    if (!args.projectId) return true;
+    const still = await readHeEngLaunchStillWanted(db, args.projectId);
+    if (still.kind !== 'wanted') {
+      void logWarn(
+        'he.eng_auto_launch.top_up_refused',
+        `nightly refill config not created: ${still.kind === 'cancelled' ? still.reason : still.message}`,
+        { userId: args.userId, projectId: args.projectId, templateId: args.templateId },
+      );
+      return false;
+    }
+    return true;
   };
 }
 
@@ -1454,17 +1621,34 @@ function projectQualifies(project: Record<string, unknown>, intent: HeEngLaunchI
   return !(cancelledAt > 0 && cancelledAt > tsOf(intent.requestedAt));
 }
 
+/**
+ * Чтение по списку id кусками по `chunk`. `limit` — с ним каждый запрос
+ * обязан вызываться с `.limit(limit)`: кусок, вернувший столько строк,
+ * сколько limit, мог быть обрезан (PostgREST сам режет ответ по своему
+ * max-rows, поэтому limit не больше 1000) — его строк в `rows` нет, а id
+ * куска — в `cut`: вызывающий пропускает их проекты в этом проходе
+ * (fail-closed: ни отметки «исполнено», ни запуска по неполному срезу).
+ */
 async function readChunked<T>(
   ids: string[],
   read: (chunk: string[]) => PromiseLike<{ data: unknown[] | null; error: PgError | null }>,
-): Promise<{ rows: T[] } | { error: PgError }> {
+  opts: { chunk?: number; limit?: number } = {},
+): Promise<{ rows: T[]; cut: Set<string> } | { error: PgError }> {
+  const size = opts.chunk ?? ID_CHUNK;
   const rows: T[] = [];
-  for (let i = 0; i < ids.length; i += ID_CHUNK) {
-    const res = await read(ids.slice(i, i + ID_CHUNK));
+  const cut = new Set<string>();
+  for (let i = 0; i < ids.length; i += size) {
+    const part = ids.slice(i, i + size);
+    const res = await read(part);
     if (res.error) return { error: res.error };
-    rows.push(...((res.data ?? []) as T[]));
+    const got = (res.data ?? []) as T[];
+    if (opts.limit !== undefined && got.length >= opts.limit) {
+      for (const id of part) cut.add(id);
+      continue;
+    }
+    rows.push(...got);
   }
-  return { rows };
+  return { rows, cut };
 }
 
 /** Решение «стартуем» на строке над законченным запуском (см. DueCandidate.mode 'start'). */
@@ -1481,7 +1665,11 @@ function startDecided(row: HeEngAutoLaunchRow): boolean {
  * законченный запуск (такая вертикаль кандидатом не бывает — один запуск на
  * вертикаль, — а «Rewrite letters» рынку с письмами в кампании отказывает), и
  * ни у одного законченного запуска нет строки, которую тик ещё берёт:
- * 'running' или с решённым, но не сделанным стартом (startDecided).
+ * 'running' или с решённым, но не сделанным стартом (startDecided). Строка
+ * 'held account_blocked', срок которой не наступил, намерение открытым не
+ * держит: тик её сам не берёт никогда (ACCOUNT_BLOCKED_PARK_MIN), а новое
+ * «Launch», которое ставит ей срок «сейчас», снимает и отметку «исполнено» —
+ * и тогда она снова держит намерение открытым, пока тик её не возьмёт.
  * Вертикаль без законченного запуска — в том числе остановленная ('failed',
  * 'done needs_support') — намерение открытым оставляет: «Launch now» клиента
  * или новый шаблон рынка снова дают тику работу, а их тик видит, только пока
@@ -1509,7 +1697,8 @@ export function heEngLaunchSettled(input: {
     if (finished.length === 0) return false;
     for (const view of finished) {
       const row = input.rows.get(view.id);
-      if (row && (row.state === 'running' || startDecided(row))) return false;
+      const parked = row?.state === 'held' && row.code === 'account_blocked' && !isDue(row, nowMs);
+      if (row && !parked && (row.state === 'running' || startDecided(row))) return false;
     }
   }
   return true;
@@ -1616,7 +1805,6 @@ async function runClaimed(
   claimed: HeEngAutoLaunchRow,
 ): Promise<void> {
   const db = opts.portalDb;
-  const requestStartedAt = Date.now();
   // Решение «стартуем» могло записаться между снимком и взятием (взятие код
   // не меняет) — тогда это режим старта, а не 'undecided'.
   const due: DueCandidate =
@@ -1660,7 +1848,7 @@ async function runClaimed(
   let outcome: HeEngAutoLaunchOutcome;
   const stopHeartbeat = startHeEngAutoLaunchLeaseHeartbeat(db, claimed);
   try {
-    outcome = await runClaimedOutcome(opts, due, row, requestStartedAt);
+    outcome = await runClaimedOutcome(opts, due, row);
   } finally {
     stopHeartbeat();
   }
@@ -1669,16 +1857,16 @@ async function runClaimed(
 
 /**
  * Попытка по взятой строке — те же проверки, что у кнопки, в том же порядке:
- * аккаунт (бан, роль, демо — у кнопки это requireClientAuth) →
- * requireEngMarket → loadClientHeTemplate → запуск или повтор старта; перед
- * самим стартом — heEngStartGate (аккаунт ещё раз, автозапуск проекта не
- * отменён, запись 'start_pending').
+ * аккаунт (бан, роль, демо — у кнопки это requireClientAuth; плюс отметка
+ * блокировки) → requireEngMarket → loadClientHeTemplate → запуск или повтор
+ * старта; перед самим стартом — heEngStartGate (аккаунт ещё раз, автозапуск
+ * проекта не отменён, запись 'start_pending'); перед конфигом ночного добора
+ * — heEngTopUpGate.
  */
 async function runClaimedOutcome(
   opts: HeEngAutoLaunchTickOptions & { instantlyDb: SupabaseClient },
   due: DueCandidate,
   claimed: HeEngAutoLaunchRow,
-  requestStartedAt: number,
 ): Promise<HeEngAutoLaunchOutcome> {
   const db = opts.portalDb;
   const userId = due.intent.userId;
@@ -1707,10 +1895,24 @@ async function runClaimedOutcome(
         templateId: due.templateId,
         owned: { project: owned.project, template: owned.template },
         trigger: 'auto',
-        requestStartedAt,
+        // Срок старта — от самого старта: у тика нет срока запроса.
+        sendingDeadlineFrom: 'start',
         onStartDecided,
       }),
     };
+  }
+  // Перед ядром — автозапуск проекта ещё раз: снимок прохода мог устареть, а
+  // ядро создаёт кампании и платит классификатор. «Cancel all jobs» или
+  // блокировка после снимка — ядро не зовём; не прочиталось — попытки нет.
+  // Окно первого запуска — из свежего намерения.
+  const still = await readHeEngLaunchStillWanted(db, due.projectId);
+  if (still.kind !== 'wanted') {
+    opts.log(
+      'warn',
+      `[auto-launch] project=${due.projectId} template=${due.templateId} not launched: ` +
+        (still.kind === 'cancelled' ? `automatic launch turned off (${still.reason})` : `intent not read: ${still.message}`),
+    );
+    return { kind: 'intent', state: still.kind };
   }
   const result = await runHeEngTemplateLaunch({
     portalDb: db,
@@ -1718,11 +1920,14 @@ async function runClaimedOutcome(
     userId,
     templateId: due.templateId,
     owned: { project: owned.project, template: owned.template },
-    sendingWindow: heEngIntentSendingWindow(due.intent),
+    sendingWindow: heEngIntentSendingWindow(still.intent),
     startSending: true,
     trigger: 'auto',
-    requestStartedAt,
+    // Срок старта — от самого старта: ядро перед ним идёт минутами
+    // (классификатор), а срок от взятия строки кончался бы до старта.
+    sendingDeadlineFrom: 'start',
     onStartDecided,
+    beforeTopUpConfig: heEngTopUpGate(db, { userId, templateId: due.templateId, projectId: due.projectId }),
   });
   return result.summary;
 }
@@ -1775,6 +1980,7 @@ async function decideClaimed(
           templateId: due.templateId,
           code: notice.code ?? null,
           refId: notice.refId ?? null,
+          launchRequestedAt: due.intent.requestedAt || null,
         });
       } catch (e) {
         opts.log('warn', `[auto-launch] notice ${notice.kind} not sent: ${e instanceof Error ? e.message : 'unknown'}`);
@@ -1792,6 +1998,19 @@ async function decideClaimed(
   }
 }
 
+/** Строка лога о проектах, пропущенных из-за упора чтения в limit (не чаще CUT_LOG_EVERY_MS). */
+function logCutProjects(opts: HeEngAutoLaunchTickOptions, cutProjects: ReadonlySet<string>): void {
+  if (cutProjects.size === 0) return;
+  const nowMs = Date.now();
+  if (nowMs - cutLoggedAt < CUT_LOG_EVERY_MS) return;
+  cutLoggedAt = nowMs;
+  opts.log(
+    'warn',
+    `[auto-launch] ${cutProjects.size} project(s) skipped this pass: a read of their markets, choices, rows or ` +
+      `templates returned its limit of ${TICK_READ_LIMIT} rows and may be cut — e.g. ${[...cutProjects][0]}`,
+  );
+}
+
 /**
  * Тик автозапуска (воркер движка, между джобами, не чаще раза в
  * HE_ENG_AUTO_LAUNCH_TICK_MS):
@@ -1801,7 +2020,10 @@ async function decideClaimed(
  *     курсором, ≤ INTENTS_PER_PASS (readOpenIntentsPass; упёрся в бюджет —
  *     строка warn, следующий проход продолжает дальше), их проекты (autopilot,
  *     researched, us, владелец = нажавший, не отменён после нажатия),
- *     выбранные вертикали, их шаблоны и строки;
+ *     выбранные вертикали, их шаблоны и строки — кусками по
+ *     TICK_PROJECT_CHUNK / TICK_VERTICAL_CHUNK с limit TICK_READ_LIMIT; проект,
+ *     чей кусок упёрся в limit, в этом проходе пропускается целиком (без
+ *     отметки «исполнено» и без запуска; строка warn не чаще раза в час);
  *  3. исполненные намерения (heEngLaunchSettled: у каждой выбранной вертикали
  *     законченный запуск без отложенного старта) получают settled_at и
  *     дальше не читаются до нового «Launch»;
@@ -1812,8 +2034,8 @@ async function decideClaimed(
  *     (до CLAIMS_PER_TICK);
  *  6. запуск тем же вызовом, что «Launch now» (runClaimed: брошенная прошлая
  *     попытка сначала считается, аккаунт проверяется до попытки, перед
- *     стартом — аккаунт и отмена автозапуска проекта), решение в строку,
- *     письмо, алерт, строка лога `[auto-launch] …`.
+ *     стартом — аккаунт и отмена автозапуска проекта; срок старта — от самого
+ *     старта), решение в строку, письмо, алерт, строка лога `[auto-launch] …`.
  * Не больше ОДНОГО запуска за тик. true — запуск был (воркер сразу идёт
  * дальше по очереди). НЕ БРОСАЕТ.
  */
@@ -1886,16 +2108,31 @@ export async function runHeEngAutoLaunchTick(opts: HeEngAutoLaunchTickOptions): 
       .map((p) => str(p.id));
     if (liveProjectIds.length === 0) return false;
 
-    // 3. Вертикали, выбор, шаблоны выбранных вертикалей, строки.
+    // 3. Вертикали, выбор, шаблоны выбранных вертикалей, строки — куски
+    // поменьше и с limit: кусок, упёршийся в limit, пропускает свои проекты
+    // в этом проходе (readChunked, `cut`).
+    const detail = { chunk: TICK_PROJECT_CHUNK, limit: TICK_READ_LIMIT };
     const [verticalsRead, hypothesesRead, rowsRead] = await Promise.all([
-      readChunked<Record<string, unknown>>(liveProjectIds, (chunk) =>
-        db.from('he_verticals').select('id, project_id').in('project_id', chunk),
+      readChunked<Record<string, unknown>>(
+        liveProjectIds,
+        (chunk) => db.from('he_verticals').select('id, project_id').in('project_id', chunk).limit(TICK_READ_LIMIT),
+        detail,
       ),
-      readChunked<Record<string, unknown>>(liveProjectIds, (chunk) =>
-        db.from('he_hypotheses').select('vertical_id, status').in('project_id', chunk).eq('status', 'accepted'),
+      readChunked<Record<string, unknown>>(
+        liveProjectIds,
+        (chunk) =>
+          db
+            .from('he_hypotheses')
+            .select('vertical_id, status')
+            .in('project_id', chunk)
+            .eq('status', 'accepted')
+            .limit(TICK_READ_LIMIT),
+        detail,
       ),
-      readChunked<Record<string, unknown>>(liveProjectIds, (chunk) =>
-        db.from(HE_ENG_AUTO_LAUNCH_TABLE).select(ROW_COLUMNS).in('project_id', chunk),
+      readChunked<Record<string, unknown>>(
+        liveProjectIds,
+        (chunk) => db.from(HE_ENG_AUTO_LAUNCH_TABLE).select(ROW_COLUMNS).in('project_id', chunk).limit(TICK_READ_LIMIT),
+        detail,
       ),
     ]);
     for (const [what, read] of [
@@ -1913,16 +2150,32 @@ export async function runHeEngAutoLaunchTick(opts: HeEngAutoLaunchTickOptions): 
       }
     }
     if ('error' in verticalsRead || 'error' in hypothesesRead || 'error' in rowsRead) return false;
+    // Проекты, срез которых обрезан упором в limit: ни отметки «исполнено», ни
+    // кандидатов в этом проходе (по неполному срезу легко «увидеть», что всё
+    // запущено, или пропустить строку).
+    const cutProjects = new Set<string>([...verticalsRead.cut, ...hypothesesRead.cut, ...rowsRead.cut]);
     const selectedVerticals = new Set(hypothesesRead.rows.map((h) => str(h.vertical_id)).filter(Boolean));
-    const verticalIds = verticalsRead.rows.map((v) => str(v.id)).filter((id) => selectedVerticals.has(id));
-    if (verticalIds.length === 0) return false;
-    const templatesRead = await readChunked<Record<string, unknown>>(verticalIds, (chunk) =>
-      db.from('he_templates').select(TEMPLATE_MARK_COLUMNS).in('vertical_id', chunk),
+    const verticalIds = verticalsRead.rows
+      .filter((v) => !cutProjects.has(str(v.project_id)))
+      .map((v) => str(v.id))
+      .filter((id) => selectedVerticals.has(id));
+    if (verticalIds.length === 0) {
+      logCutProjects(opts, cutProjects);
+      return false;
+    }
+    const templatesRead = await readChunked<Record<string, unknown>>(
+      verticalIds,
+      (chunk) => db.from('he_templates').select(TEMPLATE_MARK_COLUMNS).in('vertical_id', chunk).limit(TICK_READ_LIMIT),
+      { chunk: TICK_VERTICAL_CHUNK, limit: TICK_READ_LIMIT },
     );
     if ('error' in templatesRead) {
       opts.log('warn', `[auto-launch] ${errText('templates read', templatesRead.error)}`);
       return false;
     }
+    for (const v of verticalsRead.rows) {
+      if (templatesRead.cut.has(str(v.id))) cutProjects.add(str(v.project_id));
+    }
+    logCutProjects(opts, cutProjects);
     const rowByTemplate = new Map<string, HeEngAutoLaunchRow>();
     for (const raw of rowsRead.rows) {
       const row = toRow(raw);
@@ -1934,7 +2187,7 @@ export async function runHeEngAutoLaunchTick(opts: HeEngAutoLaunchTickOptions): 
     const settled: HeEngLaunchIntent[] = [];
     for (const projectId of liveProjectIds) {
       const intent = intentByProject.get(projectId);
-      if (!intent) continue;
+      if (!intent || cutProjects.has(projectId)) continue;
       const verticals = verticalsRead.rows.filter((v) => str(v.project_id) === projectId);
       const ids = new Set(verticals.map((v) => str(v.id)));
       const projectHypotheses = hypothesesRead.rows.filter((h) => ids.has(str(h.vertical_id)));

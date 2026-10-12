@@ -41,10 +41,14 @@ import {
   engDashSelectionByVertical,
   nextDailyRunIso,
   utcDayStartIso,
+  ENG_TEAM_FIX_STAGES,
+  engLatestFailedStageJobs,
   type EngDashAutoLaunch,
   type EngDashSelection,
   type EngDashTopUp,
+  type EngTeamFixStop,
 } from '@/lib/hypothesisEngine/engDashboard';
+import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
 import {
   HE_ENG_AUTO_LAUNCH_STALE_MS,
   heEngAutoLaunchLeaseExpired,
@@ -81,6 +85,8 @@ const RUNS_LIMIT = 100;
 // Гипотезы — только ради выбора вертикалей (EngDashSelection). Выборка, упёршаяся
 // в кап, неполна: выбор тогда не выводится вовсе (см. selectionOf ниже).
 const HYPOTHESES_LIMIT = 1000;
+/** Сколько закончившихся прогонов стадий рынков читает признак «чинит команда». */
+const TEAM_FIX_JOBS_LIMIT = 1000;
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -182,7 +188,17 @@ export async function GET(req: NextRequest) {
     events: [] as unknown[],
     activeJobs: [] as unknown[],
   };
-  if (projectRows.length === 0) return NextResponse.json(emptyAggregate);
+  if (projectRows.length === 0) {
+    // Пустой кабинет: абзац «как это работает» (EngDashboard) зовёт к «Launch»
+    // шага 3, а при выключенной отправке аккаунта ('revoked') она откажет —
+    // поэтому выключатель читается и здесь, тем же чтением, что ниже (без
+    // записи и алерта). Сбой чтения — null, абзац прежний.
+    const access = await readHeEngSendingAccess(supabaseAdmin, userId);
+    return NextResponse.json({
+      ...emptyAggregate,
+      account_access: access.state === 'not_enabled' || access.state === 'revoked' ? access.state : null,
+    });
+  }
 
   const projectIds = projectRows.map((p) => p.id as string);
 
@@ -737,10 +753,60 @@ export async function GET(req: NextRequest) {
    * записи и алерта, только когда автозапуск хоть одного проекта включён;
    * сбой чтения — поля нет, как у шага 3 при 'unknown'.
    */
+  // Его же читают подпись готового шаблона без автозапуска и строки «next»
+  // карточек (account_access ответа): «Launch now» при выключателе откажет.
+  // Поэтому чтение — при любом us-проекте, а не только при включённом
+  // автозапуске.
   let accountAccess: 'not_enabled' | 'revoked' | undefined;
-  if (autoLaunchRead && autoLaunchRead.wanted.size > 0) {
+  if (usProjectIds.size > 0) {
     const access = await readHeEngSendingAccess(supabaseAdmin, userId);
     if (access.state === 'not_enabled' || access.state === 'revoked') accountAccess = access.state;
+  }
+
+  /**
+   * ОСТАНОВКИ, КОТОРЫЕ ЧИНИТ КОМАНДА (EngTeamFixStop): по каждой цели (рынок у
+   * писем, база у проверки и итоговых писем) последний закончившийся прогон
+   * исследованных us-проектов, и только если он упал отказом
+   * heTeamFixableFailureOf — тот же предикат, что у письма об остановке
+   * (совет 'team_fix') и алерта команде. Два лёгких чтения: прогоны без
+   * ошибки, затем ошибки только упавших последних. Сбой — поля нет: подписи
+   * прежние. Прогоны старше TEAM_FIX_JOBS_LIMIT свежих не видны.
+   */
+  let teamFixStops: EngTeamFixStop[] | undefined;
+  const researchedUsIds = projectRows
+    .filter((p) => usProjectIds.has(p.id as string) && p.status === 'researched')
+    .map((p) => p.id as string);
+  if (researchedUsIds.length > 0) {
+    const endedRes = await supabaseAdmin
+      .from('he_jobs')
+      .select('id, stage, status, created_at, payload')
+      .in('project_id', researchedUsIds)
+      .in('stage', [...ENG_TEAM_FIX_STAGES])
+      .in('status', ['done', 'failed', 'cancelled'])
+      .order('created_at', { ascending: false })
+      .limit(TEAM_FIX_JOBS_LIMIT);
+    if (!endedRes.error) {
+      const failed = engLatestFailedStageJobs((endedRes.data ?? []) as Array<Record<string, unknown>>);
+      if (failed.length === 0) {
+        teamFixStops = [];
+      } else {
+        const errorsRes = await supabaseAdmin
+          .from('he_jobs')
+          .select('id, error')
+          .in('id', failed.map((f) => f.id));
+        if (!errorsRes.error) {
+          const errorById = new Map<string, unknown>();
+          for (const row of (errorsRes.data ?? []) as Array<{ id?: unknown; error?: unknown }>) {
+            if (typeof row.id === 'string') errorById.set(row.id, row.error);
+          }
+          teamFixStops = [];
+          for (const f of failed) {
+            const kind = heTeamFixableFailureOf(errorById.get(f.id));
+            if (kind) teamFixStops.push({ stage: f.stage, vertical_id: f.vertical_id, base_id: f.base_id, kind });
+          }
+        }
+      }
+    }
   }
 
   const verticals = verticalRows
@@ -838,6 +904,9 @@ export async function GET(req: NextRequest) {
         ...(spendPausedProjectIds !== null
           ? { spendPaused: spendPausedProjectIds.has(v.project_id as string) }
           : {}),
+        verticalId: vid,
+        ...(teamFixStops ? { teamFixStops } : {}),
+        ...(accountAccess && usProjectIds.has(str(v.project_id)) ? { accountAccess } : {}),
       });
 
       const launchedTemplateId = launchedTemplateByVertical.get(vid);
@@ -930,6 +999,8 @@ export async function GET(req: NextRequest) {
         auto_launch_template_id: autoLaunch ? (autoTemplateId ?? null) : null,
         // Возьмёт ли вертикаль ближайшая ночь добора (EngDashTopUp); null — запуска нет.
         top_up: launchedTemplateId ? (topUpByTemplate.get(launchedTemplateId) ?? null) : null,
+        // Остановку этапа чинит только команда (EngDashTeamFix); null — не этот случай.
+        team_fix: derived.teamFix ?? null,
       };
     });
 
@@ -1081,5 +1152,8 @@ export async function GET(req: NextRequest) {
     autoRefill,
     events,
     activeJobs,
+    // Выключатель отправки аккаунта, когда он держит «Launch now» (строки
+    // «next» карточек); null — включён, не требуется или не прочитан.
+    account_access: accountAccess ?? null,
   });
 }

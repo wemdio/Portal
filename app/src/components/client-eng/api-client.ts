@@ -57,8 +57,10 @@ import type {
   EngDashAttentionInfo,
   EngDashSelection,
   EngDashStage,
+  EngDashTeamFix,
   EngDashTopUp,
   EngDashTopUpVerdict,
+  EngTeamFixStop,
 } from '@/lib/hypothesisEngine/engDashboard';
 
 // `HeBaseSummary`/`HeProjectDetailResponse` отсюда БОЛЬШЕ НЕ реэкспортируются:
@@ -325,7 +327,27 @@ export type EngProjectDetailResponse = Omit<
   auto_launch?: EngAutoLaunchDetail | null;
   /** Типичные сроки по недавним проектам (engEstimates); null — данных мало. */
   estimates?: EngEstimates;
+  /**
+   * Остановки стадий рынков, которые чинит только команда (EngTeamFixStop,
+   * engDashboard.ts): последний прогон писем рынка, проверки контактов или
+   * итоговых писем базы упал отказом 'billing' / 'configuration' — только вид,
+   * без текста ошибки. Карточка тогда зовёт сначала в Support, потом к кнопке
+   * (как письмо об этой остановке). Ключа нет — не прочитано или проект не
+   * исследован: карточки как раньше.
+   */
+  team_fix_stops?: EngTeamFixStop[];
+  /**
+   * Выключатель отправки аккаунта — тем же чтением, что у GET …/launch, но с
+   * каждым опросом деталки (мастер перечитывает её сам): 'revoked' —
+   * выключен сотрудником (так и после разблокировки, пока сотрудник не
+   * включит отправку), 'not_enabled' — ждёт разовой проверки командой, null —
+   * включён или не требуется. Ключа нет — не прочитан (сбой чтения, нет
+   * таблицы), проект не 'researched' или ответ старше: экран берёт чтение
+   * GET …/launch (engSendingAccessOf).
+   */
+  account_access?: 'not_enabled' | 'revoked' | null;
 };
+export type { EngTeamFixStop };
 
 /* ── Запуск проекта одной кнопкой (S3) ── */
 
@@ -350,6 +372,22 @@ export interface EngEstimates {
 
 /** Выключатель отправки аккаунта, как его видит запуск проекта. */
 export type EngSendingAccessState = 'enabled' | 'not_required' | 'not_enabled' | 'revoked' | 'unknown';
+
+/**
+ * Выключатель отправки аккаунта для шагов мастера: свежее чтение деталки
+ * (`account_access`, перечитывается опросом мастера), а без её ключа — чтение
+ * GET …/launch (`fromLaunch`, один раз при открытии шага и после нажатий).
+ * null деталки — включён или не требуется: 'enabled' (экраны различают только
+ * 'revoked' и 'not_enabled'). undefined — не прочитан нигде.
+ */
+export function engSendingAccessOf(
+  fromDetail: 'not_enabled' | 'revoked' | null | undefined,
+  fromLaunch: EngSendingAccessState | null | undefined,
+): EngSendingAccessState | undefined {
+  if (fromDetail === 'revoked' || fromDetail === 'not_enabled') return fromDetail;
+  if (fromDetail === null) return 'enabled';
+  return fromLaunch ?? undefined;
+}
 
 /** GET /eng/projects/[id]/launch — что показать до и после «Launch». */
 export interface EngProjectLaunchInfo {
@@ -400,6 +438,33 @@ export async function launchEngProject(
   return engPaidApiFetch<EngProjectLaunchResponse>(`/eng/projects/${projectId}/launch`, {
     method: 'POST',
     body: JSON.stringify(body),
+  });
+}
+
+/**
+ * POST /eng/projects/[id]/launch {markets} — 200 «Launch N more markets»: та же
+ * форма, что у «Launch», плюс id рынков, начатых этим нажатием, и рынков,
+ * которые к нажатию уже были начаты (их роут пропустил).
+ */
+export interface EngProjectLaunchMoreResponse extends EngProjectLaunchResponse {
+  markets_started: string[];
+  markets_already_started: string[];
+}
+
+/**
+ * «Launch N more markets» шага 3: начинает только перечисленные рынки,
+ * отмеченные после «Launch» и ещё не тронутые; намерение «запускай сам» и
+ * строки других рынков не трогает. Отказ гейта платных шагов —
+ * EngPaidAccessError; 409 markets_changed / not_launched и прочие — Error с
+ * английским текстом роута.
+ */
+export async function launchEngProjectMarkets(
+  projectId: string,
+  markets: string[],
+): Promise<EngProjectLaunchMoreResponse> {
+  return engPaidApiFetch<EngProjectLaunchMoreResponse>(`/eng/projects/${projectId}/launch`, {
+    method: 'POST',
+    body: JSON.stringify({ markets }),
   });
 }
 
@@ -871,9 +936,12 @@ export type { EngPaidAccessCode };
 /**
  * Коды отказа гейта (engPaidAccess.ts). Копия словаря значениями: модуль гейта
  * серверный, в бандл кабинета едет только его тип, а сверку значений с типом
- * делает `satisfies`.
+ * делает `satisfies`. 'account_blocked' — аккаунт заблокирован или не активен
+ * (сессия пережила блокировку): экран показывает текст роута «Your account is
+ * not active.» без кнопки действия.
  */
 const ENG_PAID_ACCESS_CODES = [
+  'account_blocked',
   'email_not_verified',
   'project_limit',
   'research_limit',
@@ -1403,6 +1471,12 @@ export interface EngDashboardVertical {
   auto_launch?: EngDashAutoLaunch | null;
   /** Шаблон, к которому относится `auto_launch`; null — автозапуска нет. */
   auto_launch_template_id?: string | null;
+  /**
+   * Остановку этапа чинит только команда (EngDashTeamFix): строка «next»
+   * зовёт сначала в Support, потом к кнопке. `null` или нет поля — не этот
+   * случай или не прочитано.
+   */
+  team_fix?: EngDashTeamFix | null;
 }
 
 export interface EngDashboardEvent {
@@ -1472,6 +1546,14 @@ export interface EngDashboardResponse {
   autoRefill?: { next_run_at: string; daily_cap: number };
   events?: EngDashboardEvent[];
   activeJobs?: EngDashboardActiveJob[];
+  /**
+   * Выключатель отправки аккаунта, когда он держит «Launch now»: 'not_enabled'
+   * (ждёт разовой проверки командой) или 'revoked' (выключен). `null` или нет
+   * поля — включён, не требуется или не прочитан: строки «next» как раньше.
+   * Приходит и у кабинета без проектов: 'revoked' меняет абзац пустого
+   * состояния (в нём «Launch» шага 3).
+   */
+  account_access?: 'not_enabled' | 'revoked' | null;
   error?: string;
 }
 

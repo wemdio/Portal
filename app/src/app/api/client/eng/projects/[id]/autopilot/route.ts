@@ -17,6 +17,7 @@ import type {
   HeAutopilotRefusal,
 } from '@/lib/hypothesisEngine/autopilotReconcile';
 import { toClientEngAutopilotHold } from '@/lib/hypothesisEngine/clientEngProjection';
+import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -67,6 +68,9 @@ const FAILURE_EVENT: Record<HeAutopilotReconcileStep, string> = {
 // такие вертикали считает collect_again_verticals ответа. Тормоз бесконечной
 // генерации писем (бюджет поколения анализа) действует в обоих режимах.
 //
+// ВЫКЛЮЧАТЕЛЬ ОТПРАВКИ АККАУНТА (engSendingSwitchRefusal) — до гейта, как у
+// «Launch» проекта.
+//
 // ГЕЙТ ПЛАТНЫХ ШАГОВ (requireEngPaidAccess, действие 'start_outreach'):
 // подтверждённая почта и потолок расхода клиента — ДО реконсилера, потому что
 // каждое его действие (цепочка, сборка, ремонт анализа, письма) платное.
@@ -98,6 +102,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+
+    const switchRefusal = await engSendingSwitchRefusal(
+      supabaseAdmin,
+      result.auth.userId,
+      id,
+      'client.eng.autopilot.sending_access_unread',
+    );
+    if (switchRefusal) return switchRefusal;
 
     const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'start_outreach' });
     if (!access.ok) return engPaidAccessResponse(access.refusal);

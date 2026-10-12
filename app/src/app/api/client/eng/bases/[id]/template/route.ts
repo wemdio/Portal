@@ -18,6 +18,7 @@ import {
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
 import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -76,8 +77,10 @@ async function findActiveTemplateJob(projectId: string, baseId: string) {
 //     итог 'skipped:template_ready');
 //   - бюджет писем поколения анализа (heTemplateGenerationBudget): без него
 //     скрипт ставил бы новую платную генерацию после каждой закончившейся.
-// И гейт платных шагов (requireEngPaidAccess, 'letters'): почта и потолок
-// расхода клиента — после этих отказов, до потолка проекта и постановки.
+// Затем выключатель отправки аккаунта (engSendingSwitchRefusal), как у
+// «Launch» проекта, и гейт платных шагов (requireEngPaidAccess, 'letters'):
+// почта и потолок расхода клиента — после этих отказов, до потолка проекта и
+// постановки.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.template.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -151,6 +154,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     if (!budgetAllowed) return jsonError(LETTERS_EXHAUSTED, 409);
+
+    const switchRefusal = await engSendingSwitchRefusal(
+      supabaseAdmin,
+      result.auth.userId,
+      (owned.base.project_id as string) ?? null,
+      'client.eng.template.sending_access_unread',
+    );
+    if (switchRefusal) return switchRefusal;
 
     const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'letters' });
     if (!access.ok) return engPaidAccessResponse(access.refusal);

@@ -16,6 +16,7 @@ import { enqueueHeBaseCollect } from '@/lib/hypothesisEngine/baseCollectEnqueue'
 import { toClientEngBase } from '@/lib/hypothesisEngine/clientEngProjection';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
 import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -51,7 +52,8 @@ const COLLECT_HAS_BASE = 'This market already has collected contacts, so a new c
 //
 // ГЕЙТ ПЛАТНЫХ ШАГОВ (requireEngPaidAccess, 'collect'): почта и потолок
 // расхода клиента — после отказов по состоянию, до потолка проекта и
-// постановки.
+// постановки. Перед ним — выключатель отправки аккаунта (engSendingSwitchRefusal),
+// как у «Launch» проекта.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.collect.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -121,6 +123,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return row.source === 'auto' && !String(row.filename ?? '').startsWith('auto-refill');
     });
     if (hasOwnBase) return jsonError(COLLECT_HAS_BASE, 409);
+
+    const switchRefusal = await engSendingSwitchRefusal(
+      supabaseAdmin,
+      result.auth.userId,
+      (owned.vertical.project_id as string) ?? null,
+      'client.eng.collect.sending_access_unread',
+    );
+    if (switchRefusal) return switchRefusal;
 
     const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'collect' });
     if (!access.ok) return engPaidAccessResponse(access.refusal);

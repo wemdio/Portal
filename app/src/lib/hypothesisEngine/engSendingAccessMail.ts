@@ -10,7 +10,7 @@ import 'server-only';
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { sendTransactionalEmail } from '@/lib/email/smtpClient';
-import { renderEngSendingEnabledEmail } from '@/lib/email/templates/engSendingEnabled';
+import { renderEngSendingEnabledEmail, type EngSendingEnabledCopy } from '@/lib/email/templates/engSendingEnabled';
 import { logWarn } from '@/lib/loggerServer';
 import { heEngAppOrigin, HE_ENG_VERIFY_FROM_NAME } from './engEmailVerificationMail';
 import { HE_ENG_SENDING_ACCESS_TABLE } from './engSendingAccess';
@@ -19,17 +19,21 @@ export type HeEngSendingEmailResult = { kind: 'sent' } | { kind: 'no_email' } | 
 
 /**
  * Отправить письмо. Отметка email_sent_at — только после того, как SMTP-сервер
- * его принял (её показывает экран сотрудника). НЕ БРОСАЕТ.
+ * его принял (её показывает экран сотрудника). `copy` — какой текст (выбирает
+ * роут включения по состоянию аккаунта прямо перед отправкой; нет — 'auto').
+ * НЕ БРОСАЕТ.
  */
 export async function sendHeEngSendingEnabledEmail(
   db: SupabaseClient,
   userId: string,
   email: string | null,
+  copy?: EngSendingEnabledCopy,
 ): Promise<HeEngSendingEmailResult> {
   if (!email) return { kind: 'no_email' };
   try {
     const { subject, html, text } = renderEngSendingEnabledEmail({
       dashboardUrl: `${heEngAppOrigin()}/client/eng/dashboard`,
+      copy,
     });
     await sendTransactionalEmail({ to: email, subject, html, text, fromName: HE_ENG_VERIFY_FROM_NAME });
   } catch (e) {

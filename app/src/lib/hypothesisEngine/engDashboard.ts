@@ -65,6 +65,11 @@ const TOP_UP_SKIP_EN: Record<HeRefillSendSkipReason, string> = {
   // не из ящиков пула проекта (запуск до self-serve, чужие адреса): фраза
   // верна для обоих — подтвердить, что кампании можно доливать, не вышло.
   unavailable: 'daily top-up skipped — we could not confirm these campaigns can take new contacts; message Support if this repeats',
+  // Аккаунт владельца заблокирован сотрудником или не активен (гейт ночи,
+  // autoPipeline.ts) — строку клиент видит только после разблокировки, и
+  // причину блокировки она не называет. Прошедшее время: к тому моменту
+  // аккаунт снова активен (как у 'client_paused' — строка историческая).
+  account_blocked: 'daily top-up skipped — your account was not active',
 };
 
 /**
@@ -213,6 +218,99 @@ export function nextDailyRunIso(now: Date): string {
   return next.toISOString();
 }
 
+/* ─────────────── Остановка, которую чинит только команда ─────────────── */
+
+/** Отказ, который чинит только команда (clientErrors.heTeamFixableFailureOf). */
+export type EngTeamFixKind = 'billing' | 'configuration';
+
+/** Платные стадии рынка, чью остановку кабинет зовёт нажать заново. */
+export type EngTeamFixStage = 'chain' | 'base_analyze' | 'template';
+
+export const ENG_TEAM_FIX_STAGES: readonly EngTeamFixStage[] = ['chain', 'base_analyze', 'template'];
+
+/**
+ * Последний закончившийся прогон стадии рынка упал отказом, который чинит
+ * команда (деньги или настройка у провайдера). Наружу — только вид отказа:
+ * сырой текст ошибки в кабинет не едет. Цель — рынок у писем ('chain') и
+ * база у проверки контактов и итоговых писем ('template' — и генерация
+ * «Rewrite letters»: та же стадия по базе снятых писем).
+ *
+ * Зачем: кнопка («Launch», «Rewrite letters») двигает такую остановку только
+ * после починки — нажатие раньше упрётся в тот же отказ, а у писем ещё и
+ * съест попытку. Письмо об остановке (engClientMail, совет 'team_fix') зовёт
+ * сначала в Support; кабинет говорит то же (ENG_TEAM_FIX_STOP_EN).
+ */
+export interface EngTeamFixStop {
+  stage: EngTeamFixStage;
+  vertical_id: string | null;
+  base_id: string | null;
+  kind: EngTeamFixKind;
+}
+
+/** Предложение кабинета про такую остановку: то же, что у письма (совет 'team_fix'). */
+export const ENG_TEAM_FIX_STOP_EN = 'A problem on our side stopped it; our team has been told.';
+
+/** «…then press «Launch»» / «Rewrite letters» — после ENG_TEAM_FIX_STOP_EN. */
+export function engTeamFixThenText(button: 'Launch' | 'Rewrite letters'): string {
+  return `Message Support to find out when it is fixed, then press «${button}».`;
+}
+
+function payloadStr(payload: unknown, key: 'vertical_id' | 'base_id'): string {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+  return asStr((payload as Record<string, unknown>)[key]);
+}
+
+/**
+ * Упавшие джобы, которые ПОСЛЕДНИЕ по своей цели среди закончившихся
+ * (done / failed / cancelled) джоб стадий ENG_TEAM_FIX_STAGES: ключ — стадия
+ * и рынок у 'chain', стадия и база у остальных; порядок — created_at, при
+ * равенстве id (то же правило, что у письма об остановке,
+ * engClientMail.stageStopEvents). Ошибку роут читает отдельно, по их id, и
+ * классифицирует сам (классификатор в бандл кабинета не едет).
+ */
+export function engLatestFailedStageJobs(
+  rows: ReadonlyArray<Record<string, unknown>>,
+): Array<{ id: string; stage: EngTeamFixStage; vertical_id: string | null; base_id: string | null }> {
+  const latestByKey = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const stage = asStr(row.stage);
+    if (!(ENG_TEAM_FIX_STAGES as readonly string[]).includes(stage)) continue;
+    const target = stage === 'chain' ? payloadStr(row.payload, 'vertical_id') : payloadStr(row.payload, 'base_id');
+    if (!target || !asStr(row.id)) continue;
+    const key = `${stage}|${target}`;
+    const prev = latestByKey.get(key);
+    const at = tsOf(row.created_at);
+    if (!prev || at > tsOf(prev.created_at) || (at === tsOf(prev.created_at) && asStr(row.id) > asStr(prev.id))) {
+      latestByKey.set(key, row);
+    }
+  }
+  const out: Array<{ id: string; stage: EngTeamFixStage; vertical_id: string | null; base_id: string | null }> = [];
+  for (const row of latestByKey.values()) {
+    if (row.status !== 'failed') continue;
+    const stage = asStr(row.stage) as EngTeamFixStage;
+    out.push({
+      id: asStr(row.id),
+      stage,
+      vertical_id: stage === 'chain' ? payloadStr(row.payload, 'vertical_id') : null,
+      base_id: stage === 'chain' ? null : payloadStr(row.payload, 'base_id'),
+    });
+  }
+  return out;
+}
+
+/** Остановка стадии по цели (рынок у 'chain', база у остальных); null — её нет. */
+export function engTeamFixStopOf(
+  stops: ReadonlyArray<EngTeamFixStop> | null | undefined,
+  stage: EngTeamFixStage,
+  target: string | null | undefined,
+): EngTeamFixStop | null {
+  if (!stops || !target) return null;
+  return (
+    stops.find((s) => s.stage === stage && (stage === 'chain' ? s.vertical_id === target : s.base_id === target)) ??
+    null
+  );
+}
+
 /* ─────────────────────────── Этап вертикали ─────────────────────────── */
 
 /**
@@ -346,6 +444,12 @@ export interface EngDashAnalysisStopped {
    * саму кнопку.
    */
   requeues: boolean;
+  /**
+   * true — последний анализ этой базы остановил отказ, который чинит команда
+   * (EngTeamFixStop): при `requeues` карточка зовёт сначала в Support, потом к
+   * «Launch». Нет поля — не этот случай или не прочитано.
+   */
+  teamFix?: boolean;
 }
 
 /** Причина этапа 'attention' — одна из трёх выше или остановленный анализ. */
@@ -397,10 +501,14 @@ export interface EngDashVerticalSlice {
   selection?: EngDashSelection;
   /**
    * У проекта записана пауза по потолку расхода (toClientEngAutopilotHold, код
-   * 'spend_paused'; потолок по умолчанию выключен). Читает только `requeues`
-   * остановленного анализа: проход «Start outreach» над потолком кончается на
-   * первой платной постановке и до ремонта этой вертикали может не дойти.
-   * Нет поля — паузы не прочитаны, и `requeues` ложно (не доказано).
+   * 'spend_paused'; потолок по умолчанию выключен). Читают `requeues`
+   * остановленного анализа (проход «Start outreach» над потолком кончается на
+   * первой платной постановке и до ремонта этой вертикали может не дойти) и
+   * подписи этапов, которые иначе звали бы к «Launch» или «Rewrite letters»
+   * (письма готовы, писем нет, письма сняты): под паузой следующую платную
+   * стадию не поставят ни кнопки, ни автопилот, а роут переписки откажет
+   * потолком. Нет поля — паузы не прочитаны: `requeues` ложно (не доказано),
+   * подписи прежние.
    */
   spendPaused?: boolean;
   /**
@@ -426,7 +534,36 @@ export interface EngDashVerticalSlice {
    * не прочитан: подпись не обещает ни того, ни другого.
    */
   autopilot?: boolean;
+  /**
+   * Остановки стадий проекта отказом, который чинит команда (EngTeamFixStop;
+   * роут — по последнему закончившемуся прогону каждой цели). Нет поля — не
+   * прочитаны: подписи прежние.
+   */
+  teamFixStops?: ReadonlyArray<EngTeamFixStop>;
+  /** id вертикали — для остановки её писем в `teamFixStops`; нет — не сверяется. */
+  verticalId?: string;
+  /**
+   * Выключатель отправки аккаунта, когда он держит «Launch now» ('not_enabled'
+   * — ждёт разовой проверки командой, 'revoked' — выключен). Читают подпись
+   * готового шаблона без автозапуска («launch it on step 3» при нём неправда)
+   * и, при 'revoked', подписи этапа писем, которые иначе звали бы к «Launch»
+   * шага 3: та при нём выключена (так и после разблокировки, пока сотрудник
+   * не включит отправку), а также подписи снятых писем (команда чинит) и
+   * автозапуска 'account_blocked', которые звали бы к «Rewrite letters» и
+   * «Launch» — обе тогда откажут 403. Нет поля — включён, не требуется или не
+   * прочитан.
+   */
+  accountAccess?: 'not_enabled' | 'revoked';
 }
+
+/**
+ * Какую остановку этапа чинит команда — для подписи и строки «next»:
+ * 'letters' — письма (этап 'letters'), 'final_letters' — итоговые письма
+ * (этап 'analyzed'), 'rewrite' — новые письма «Rewrite letters» (этап
+ * 'analyzed' со снятыми письмами). Проверка контактов — у причины
+ * 'analysis_stopped' (`teamFix`).
+ */
+export type EngDashTeamFix = 'letters' | 'final_letters' | 'rewrite';
 
 /** Состояние автозапуска шаблона этапа — то, что нужно подписи. */
 export interface EngDashAutoLaunch {
@@ -454,8 +591,13 @@ export interface EngDashAutoLaunch {
  * у шага 3 мастера). Каждая правда для любой формы своего состояния: «we try
  * again» — строка ждёт следующей попытки тика, «see step 3» — там причина и
  * действие (кнопка или Support). null — подпись без автозапуска.
+ * `accountAccess` — выключатель отправки аккаунта (EngDashVerticalSlice):
+ * при 'revoked' «Launch» шага 3 выключена, и подпись к ней не зовёт.
  */
-export function engDashAutoLaunchDetail(auto: EngDashAutoLaunch | null | undefined): string | null {
+export function engDashAutoLaunchDetail(
+  auto: EngDashAutoLaunch | null | undefined,
+  accountAccess?: 'not_enabled' | 'revoked',
+): string | null {
   if (!auto) return null;
   if (auto.state === 'running') {
     return auto.stale === true ? 'starting has not finished — see step 3' : 'starting sending…';
@@ -491,6 +633,11 @@ export function engDashAutoLaunchDetail(auto: EngDashAutoLaunch | null | undefin
       return 'waiting for the research to finish';
     case 'letters_need_rewrite':
       return 'letters need rewriting — nothing was sent; see step 3';
+    case 'account_blocked':
+      // Строку снова берёт только новое «Launch» (автозапуск её не перепроверяет).
+      return accountAccess === 'revoked'
+        ? 'sending is turned off for your account — message Support'
+        : 'sending has not started — press «Launch» on step 3';
     default:
       return 'sending could not start — nothing was sent; see step 3';
   }
@@ -532,6 +679,8 @@ export interface EngDashStageInfo {
    * «Rewrite letters» или Support на шаге 3. Нет поля — не этот случай.
    */
   lettersRetired?: boolean;
+  /** Остановку этапа чинит команда (EngDashTeamFix); нет поля — не этот случай. */
+  teamFix?: EngDashTeamFix;
   /** Причина этапа 'attention'; у остальных этапов — null. */
   attention: EngDashAttentionInfo | null;
 }
@@ -713,9 +862,11 @@ function engDashAttentionOf(input: EngDashVerticalSlice): EngDashAttentionInfo |
   if (status === 'analyzed' && asNum(lastOwn.row_count) === 0) return { reason: 'base_empty', code: null };
   const lastOwnId = asStr(lastOwn.id);
   if (status === 'analyzing' && input.stalledAnalysis?.has(lastOwnId) === true) {
+    const teamFix = engTeamFixStopOf(input.teamFixStops, 'base_analyze', lastOwnId) !== null;
     return {
       reason: 'analysis_stopped',
       code: input.stalledAnalysis.get(lastOwnId) ?? null,
+      ...(teamFix ? { teamFix: true } : {}),
       // Кнопка есть только у 'researched'-проекта, а невыбранную вертикаль
       // (или вертикаль с непрочитанным выбором) она не трогает вовсе. Под
       // записанной паузой по потолку расхода (или с непрочитанными паузами)
@@ -828,7 +979,12 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
       stage: 'template',
       stageDetail: rewrite
         ? 'letters need rewriting — nothing was sent; see step 3'
-        : (engDashAutoLaunchDetail(input.autoLaunch) ?? 'template ready — launch it on step 3'),
+        : (engDashAutoLaunchDetail(input.autoLaunch, input.accountAccess) ??
+          (input.accountAccess === 'revoked'
+            ? 'ready — sending is turned off for your account; message Support'
+            : input.accountAccess === 'not_enabled'
+              ? 'ready — sending can start after a one-time check of your account'
+              : 'template ready — launch it on step 3')),
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
@@ -934,28 +1090,55 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     input.liveWorkUnknown !== true &&
     !activeJobs.some((j) => asStr(j.stage) === 'template')
   ) {
+    // Новые письма не написал отказ, который чинит команда: «Rewrite letters»
+    // до починки съест попытку впустую — сначала Support. Под паузой потолка
+    // расхода кнопку не зовём вовсе (карточка шага 3 тогда без неё, роут
+    // переписки откажет потолком) — поле `teamFix` остаётся данными. При
+    // выключенной отправке аккаунта ('revoked') «Rewrite letters» откажет 403
+    // sending_turned_off (карточка шага 3 тогда без неё) — тоже не зовём.
+    const teamFix = engTeamFixStopOf(input.teamFixStops, 'template', asStr(newestTemplate.base_id)) !== null;
     return {
       stage: 'analyzed',
-      stageDetail: 'new letters were not written — nothing was sent; see step 3',
+      stageDetail:
+        input.spendPaused === true
+          ? 'new letters were not written — nothing was sent; on hold, paused on our side'
+          : teamFix
+            ? input.accountAccess === 'revoked'
+              ? 'new letters were not written — a problem on our side; message Support'
+              : 'new letters were not written — a problem on our side; message Support, then «Rewrite letters» on step 3'
+            : 'new letters were not written — nothing was sent; see step 3',
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
       lettersRetired: true,
+      ...(teamFix ? { teamFix: 'rewrite' as const } : {}),
       attention: null,
     };
   }
   if (usableAnalyzedBase) {
+    // Итоговые письма этой базы остановил отказ, который чинит команда: у базы
+    // нет ни одного шаблона и генерация по ней сейчас не идёт (идущая —
+    // новее упавшей). Список активных джоб неполон — не доказано.
+    const analyzedId = asStr(usableAnalyzedBase.id);
+    const teamFix =
+      input.liveWorkUnknown !== true &&
+      engTeamFixStopOf(input.teamFixStops, 'template', analyzedId) !== null &&
+      !templates.some((t) => asStr(t.base_id) === analyzedId) &&
+      !activeJobs.some((j) => asStr(j.stage) === 'template' && payloadStr(j.payload, 'base_id') === analyzedId);
     return {
       stage: 'analyzed',
       // «rows», а не «companies»: см. mainBase в EngDashStageInfo. Слово взято
       // у шага 4 мастера (EngStepBases: «{row_count} rows»), чтобы у одного и
       // того же числа в кабинете было одно имя.
-      stageDetail: `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows`,
+      stageDetail: teamFix
+        ? `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows — final letters stopped by a problem on our side`
+        : `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows`,
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
       lettersNeedRewrite: false,
+      ...(teamFix ? { teamFix: 'final_letters' as const } : {}),
       attention: null,
     };
   }
@@ -1001,7 +1184,9 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
           : input.autopilot === true
             ? 'letters ready — next: collecting contacts'
             : input.autopilot === false
-              ? 'letters ready — press «Launch» on step 3 to collect contacts'
+              ? input.accountAccess === 'revoked'
+                ? 'letters ready — sending is turned off for your account; message Support'
+                : 'letters ready — press «Launch» on step 3 to collect contacts'
               : 'letters ready — step 3 «Launch» shows what comes next',
       dots: [true, true, false, false, false],
       mainBase,
@@ -1022,15 +1207,36 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     };
   }
   const chainJobActive = activeJobs.some((j) => asStr(j.stage) === 'chain');
+  // Письма рынка остановил отказ, который чинит команда (последняя
+  // закончившаяся цепочка рынка упала так, а новая не идёт).
+  const chainTeamFix =
+    !chainJobActive &&
+    input.liveWorkUnknown !== true &&
+    engTeamFixStopOf(input.teamFixStops, 'chain', input.verticalId) !== null;
   return {
     stage: 'letters',
     // Без «generate a chain»: такой кнопки у клиента нет — письма пишет
-    // автопилот после «Launch» шага 3.
-    stageDetail: chainJobActive ? 'writing letters…' : 'no letters yet — written after «Launch» on step 3',
+    // автопилот после «Launch» шага 3. Под паузой потолка расхода «Launch»
+    // письма не поставит (реконсилер встаёт на потолке) — к нему не зовём,
+    // как у готовых писем выше; поле `teamFix` остаётся данными. При
+    // выключенной отправке аккаунта ('revoked') «Launch» выключена — тоже не
+    // зовём.
+    stageDetail: chainJobActive
+      ? 'writing letters…'
+      : input.spendPaused === true
+        ? 'no letters yet — on hold, paused on our side'
+        : chainTeamFix
+          ? input.accountAccess === 'revoked'
+            ? 'writing the letters stopped — a problem on our side; message Support'
+            : 'writing the letters stopped — a problem on our side; message Support, then «Launch» on step 3'
+          : input.accountAccess === 'revoked'
+            ? 'no letters yet — sending is turned off for your account; message Support'
+            : 'no letters yet — written after «Launch» on step 3',
     dots: [true, false, false, false, false],
     mainBase,
     launch: null,
     lettersNeedRewrite: false,
+    ...(chainTeamFix ? { teamFix: 'letters' as const } : {}),
     attention: null,
   };
 }

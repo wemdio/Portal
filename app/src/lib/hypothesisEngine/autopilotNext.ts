@@ -53,12 +53,121 @@
  *    привязанный к ПОКОЛЕНИЮ анализа базы;
  *  - latestEndedJobByBase / endedBaseAnalyzeOutcomes: «эту стадию по базе уже
  *    пробовали» — последний упавший или отменённый исход, общий для дочейна и
- *    ночного реконсилера.
+ *    ночного реконсилера;
+ *  - readHeEngOwnerHold (S3b): заблокирован ли владелец us-проекта — для
+ *    дочейна, ночного добора и гейта платных шагов.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { HeJob } from './types';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
+import { readHeEngAccountBlock } from './engAccountBlockMarker';
+import type { HeEngAccountStanding } from './engAutoLaunch';
+
+/* ───────────── Владелец заблокирован? (S3b) ───────────── */
+
+/**
+ * Можно ли тратить деньги на работу аккаунта — для путей без запроса клиента
+ * (дочейн автопилота ниже, ночной добор autoPipeline.ts и его долив
+ * stages/baseCollectRefill.ts) и для гейта платных шагов (engPaidAccess.ts).
+ * Решение владельца 12.10.2026: «если бан, то всё нужно останавливать».
+ *
+ * Читает два источника:
+ *  - отметку блокировки (he_eng_account_blocks, engAccountBlockMarker): её
+ *    пишет кнопка «Заблокировать» карточки ENG-клиента ПЕРВЫМ шагом. Одно
+ *    чтение по ключу;
+ *  - при `standing: true` — ещё и аккаунт тем же чтением, что автозапуск
+ *    (engAutoLaunch.readHeEngAccountStanding: бан Supabase, роль не
+ *    client/admin, демо, пользователя нет). Так держится и бан, поставленный
+ *    мимо карточки (без отметки). Это чтение пользователя в Supabase Auth и
+ *    профиля — его зовут там, где оно редкое (раз на дочейн, на ночь проекта,
+ *    на повторный старт, на нажатие платной кнопки), а не на каждом клейме
+ *    джобы;
+ *  - при `standing: 'eng_client'` — аккаунт читается только у владельца,
+ *    который может быть клиентом английского кабинета
+ *    (heEngOwnerNeedsStanding): у сотрудника (кроме админа) чтение аккаунта
+ *    ответило бы 'role' (его роль не client/admin), а проект сотрудника
+ *    (staff-инструмент) блокировкой клиента не останавливается — так же, как
+ *    ночной добор пропускает его по 'not_client' (autoPipeline.ts,
+ *    createHeRefillSendGate). Отметку при этом читают у любого владельца.
+ *    Это режим путей без запроса клиента, где владелец — любой: дочейн
+ *    автопилота ниже и ночной проход (autopilotReconcile.ts).
+ * engAutoLaunch подгружается динамически: он сам (через engClientLaunch)
+ * импортирует этот модуль, и статический импорт замкнул бы круг.
+ * `marker: false` — отметку не читать (вызывающий уже прочитал её сам).
+ *
+ * Вердикт: 'blocked' — работу не начинать; 'unavailable' — не прочиталось:
+ * работу тоже не начинать («не сейчас»); 'clear' — как до S3b. Таблицы
+ * отметок нет (миграция 20261013_0001 не применена) — отметка не мешает, а
+ * одну строку warn на процесс пишет сам читатель отметки. НЕ БРОСАЕТ.
+ */
+export type HeEngOwnerHold =
+  | { kind: 'clear' }
+  /** 'marker' — отметка блокировки; остальное — HeEngAccountStanding.reason. */
+  | { kind: 'blocked'; source: 'marker' | Extract<HeEngAccountStanding, { kind: 'blocked' }>['reason'] }
+  | { kind: 'unavailable'; detail: string };
+
+export async function readHeEngOwnerHold(
+  db: SupabaseClient,
+  userId: string,
+  opts: { standing: boolean | 'eng_client'; marker?: boolean },
+): Promise<HeEngOwnerHold> {
+  if (opts.marker !== false) {
+    const marker = await readHeEngAccountBlock(db, userId);
+    if (marker.state === 'blocked') return { kind: 'blocked', source: 'marker' };
+    if (marker.state === 'error') return { kind: 'unavailable', detail: marker.detail };
+  }
+  if (!opts.standing) return { kind: 'clear' };
+  if (opts.standing === 'eng_client') {
+    const owner = await heEngOwnerNeedsStanding(db, userId);
+    if (owner.kind === 'unavailable') return owner;
+    if (owner.kind === 'skip') return { kind: 'clear' };
+  }
+  try {
+    const { readHeEngAccountStanding } = await import('./engAutoLaunch');
+    const standing = await readHeEngAccountStanding(db, userId);
+    if (standing.kind === 'blocked') return { kind: 'blocked', source: standing.reason };
+    if (standing.kind === 'unavailable') return { kind: 'unavailable', detail: `account standing: ${standing.message}` };
+    return { kind: 'clear' };
+  } catch (e) {
+    return { kind: 'unavailable', detail: `account standing threw: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}` };
+  }
+}
+
+/**
+ * Читать ли аккаунт владельца в режиме `standing: 'eng_client'`.
+ * 'read' — профиль клиента английского кабинета (profiles.role='client' AND
+ * market='eng': то же правило, что у readHeEngSendingAccess) или профиля нет
+ * (аккаунт удалён или не дописан — чтение аккаунта ответит 'role', работа
+ * не начнётся). 'skip' — любой другой профиль (сотрудник,
+ * RU-клиент), владельца нет (пустой id: отметки и аккаунта у такого проекта
+ * нет) или колонки market нет (42703 — английских клиентов быть не может, как
+ * у readHeEngSendingAccess). Сбой чтения — 'unavailable': работу не начинать.
+ * НЕ БРОСАЕТ.
+ */
+async function heEngOwnerNeedsStanding(
+  db: SupabaseClient,
+  userId: string,
+): Promise<{ kind: 'read' } | { kind: 'skip' } | { kind: 'unavailable'; detail: string }> {
+  if (typeof userId !== 'string' || userId.length === 0) return { kind: 'skip' };
+  try {
+    const { data, error } = await db
+      .from('profiles')
+      .select('role, market')
+      .eq('id', userId)
+      .maybeSingle();
+    if (error) {
+      const code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : '';
+      if (code === '42703') return { kind: 'skip' };
+      return { kind: 'unavailable', detail: `owner profile read: ${code ? `${code} ` : ''}${error.message}`.slice(0, 300) };
+    }
+    const row = (data ?? null) as { role?: unknown; market?: unknown } | null;
+    if (!row) return { kind: 'read' };
+    return row.role === 'client' && row.market === 'eng' ? { kind: 'read' } : { kind: 'skip' };
+  } catch (e) {
+    return { kind: 'unavailable', detail: `owner profile read threw: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}` };
+  }
+}
 
 /* ───────────── Сбой чтения ≠ решение ───────────── */
 
@@ -731,6 +840,13 @@ export const HE_AUTOPILOT_SKIP_REASONS = [
   'collect_cancelled',   // сборку (или анализ) последней базы вертикали отменил клиент
   'analysis_cancelled',  // анализ базы отменил клиент
   'template_cancelled',  // генерацию писем по базе отменил клиент
+  /**
+   * Решение СОТРУДНИКА: владелец us-проекта заблокирован (readHeEngOwnerHold —
+   * отметка блокировки или бан, роль, демо). Паузы проекта не даёт: войти и
+   * увидеть её клиент не может, а после разблокировки этап запускает его
+   * «Launch».
+   */
+  'account_blocked',
   'orphan_repair_failed',      // ремонт осиротевшей базы не удался (запись)
   'orphan_repair_read_failed', // ремонт осиротевшей базы не удался (чтение)
 ] as const;
@@ -773,6 +889,9 @@ export function pauseForHeAutopilotSkip(
     case 'collect_cancelled':
     case 'analysis_cancelled':
     case 'template_cancelled':
+      return null;
+    // Блокировка — решение сотрудника, а не сбой платного шага.
+    case 'account_blocked':
       return null;
     case 'letters_exhausted':
       return 'letters_exhausted';
@@ -1237,6 +1356,11 @@ async function followupMayClearPause(
  * движок делает выводы: ночной реконсилер (autopilotReconcile.ts) решает по
  * самим данным конвейера, поэтому неудавшаяся запись причины ничего не ломает.
  *
+ * Владелец us-проекта заблокирован (readHeEngOwnerHold) — ничего не ставится:
+ * 'skipped:account_blocked', паузы нет. Отметку блокировки читают у любого
+ * владельца, аккаунт (бан, роль, демо) — только у клиента английского
+ * кабинета: проект сотрудника идёт как раньше.
+ *
  * `opts.spendGate` — ворота потолка расхода (spendCeiling.createHeSpendGate),
  * спрашиваются прямо перед платной постановкой сборки и писем. НЕОБЯЗАТЕЛЬНЫ, и
  * без них поведение прежнее; вызывающий этой функции один — воркер
@@ -1255,7 +1379,7 @@ export async function enqueueAutopilotFollowups(
 
   const { data: project, error: projErr } = await supabase
     .from('he_projects')
-    .select('id, autopilot')
+    .select('id, autopilot, market, created_by')
     .eq('id', job.project_id)
     .maybeSingle();
   // Причину тут НЕ пишем: автопилот проекта ещё не подтверждён (это и есть
@@ -1263,10 +1387,25 @@ export async function enqueueAutopilotFollowups(
   // в лог воркера, а ночной проход разберётся по данным.
   if (projErr) throw new HeAutopilotReadError(`autopilot project read: ${projErr.message}`);
   if (!project || (project as { autopilot?: boolean }).autopilot !== true) return {};
+  const { market, created_by: owner } = project as { market?: unknown; created_by?: unknown };
 
   let result: AutopilotFollowupsResult;
   let verticalId: string | null;
   try {
+    // Владелец us-проекта заблокирован (S3b) — следующую платную стадию не
+    // ставим. Блокировка сама выключает автопилот проекта (engProjectStop),
+    // так что сюда доходит только то, что та запись не накрыла: её сбой или
+    // бан мимо карточки клиента. Аккаунт читается только у клиента
+    // английского кабинета ('eng_client'): у us-проекта сотрудника его роль —
+    // не блокировка. Не прочиталось — как любой сбой чтения дочейна: причина
+    // 'read_failed' и бросок (см. catch).
+    if (market === 'us' && typeof owner === 'string' && owner.length > 0) {
+      const hold = await readHeEngOwnerHold(supabase, owner, { standing: 'eng_client' });
+      if (hold.kind === 'unavailable') throw new HeAutopilotReadError(`autopilot owner block read: ${hold.detail}`);
+      if (hold.kind === 'blocked') {
+        return job.stage === 'chain' ? { collect: skipped('account_blocked') } : { template: skipped('account_blocked') };
+      }
+    }
     if (job.stage === 'chain') {
       result = { collect: await afterChainDone(supabase, job, opts.spendGate) };
       verticalId = typeof job.payload?.vertical_id === 'string' && job.payload.vertical_id.length > 0
