@@ -85,6 +85,7 @@ export async function GET(req: NextRequest) {
     .from('instantly_activity_events')
     .select('lead_email,event_type,occurred_at')
     .eq('instantly_account_id', accountId)
+    .in('event_type', ['opened', 'replied'])
     .gte('occurred_at', startUtc)
     .lt('occurred_at', endUtc)
     .order('occurred_at', { ascending: true })

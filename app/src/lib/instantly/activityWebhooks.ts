@@ -4,7 +4,7 @@ import { listInstantlyAccounts, getInstantlyAccountApiKey } from './accounts';
 import { instantlyUsageEndpoint, instantlyUsageStatusFromHttp, recordInstantlyApiUsage } from './usageCounters';
 
 /**
- * Idempotent registration of the activity webhooks (email_opened + reply_received)
+ * Idempotent registration of the activity webhooks (opens, replies, bounces)
  * in EVERY configured Instantly account, pointing at our receiver
  * `/api/instantly/webhook/<accountId>?token=<secret>`.
  *
@@ -14,14 +14,14 @@ import { instantlyUsageEndpoint, instantlyUsageStatusFromHttp, recordInstantlyAp
  * a single `event_type`. We keep this isolated so we don't disturb the existing
  * (separate) webhook admin surface.
  *
- * Only Instantly API calls in the whole feature: 2 events × N accounts, run once
+ * Only Instantly API calls in the whole feature: 3 events × N accounts, run once
  * at setup (and safe to re-run). After that everything is push (zero polling).
  */
 
 const BASE_URL = 'https://api.instantly.ai/api/v2';
 
 // Verified against the V2 webhook event-type enum.
-const ACTIVITY_EVENTS = ['email_opened', 'reply_received'] as const;
+const ACTIVITY_EVENTS = ['email_opened', 'reply_received', 'email_bounced'] as const;
 type ActivityEvent = (typeof ACTIVITY_EVENTS)[number];
 
 interface RawWebhook {

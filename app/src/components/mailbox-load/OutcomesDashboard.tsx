@@ -34,20 +34,20 @@ import type { MailboxOutcomes, OutcomeDay } from '@/lib/instantly/mailboxOutcome
  * страница выше продолжает работать.
  */
 
-type MetricKey = 'sent' | 'negative' | 'replies' | 'leads';
+type MetricKey = 'sent' | 'bounced' | 'replies' | 'leads';
 
 const LABELS: Record<MetricKey, string> = {
   sent: 'Отправлено',
-  negative: 'Не доставлено',
+  bounced: 'Не доставлено',
   replies: 'Ответы',
   leads: 'Лиды',
 };
 
-const METRICS: MetricKey[] = ['sent', 'negative', 'replies', 'leads'];
+const METRICS: MetricKey[] = ['sent', 'bounced', 'replies', 'leads'];
 
 /** Слот палитры у каждого показателя: цвет закреплён и не зависит от того,
  *  какие ряды сейчас включены. */
-const SLOT: Record<MetricKey, number> = { sent: 0, negative: 1, replies: 2, leads: 3 };
+const SLOT: Record<MetricKey, number> = { sent: 0, bounced: 1, replies: 2, leads: 3 };
 
 const CHART_HEIGHT = 300;
 
@@ -61,11 +61,6 @@ function share(part: number, whole: number): string {
 function formatDay(iso: string): string {
   const [, month, day] = iso.split('-');
   return `${day}.${month}`;
-}
-
-/** Негатив = отбой при доставке + разобранный ответ «не тот человек/адрес». */
-function negativeOf(d: OutcomeDay): number {
-  return d.bounced + d.invalid;
 }
 
 function Tile({ label, value, sub, tone }: {
@@ -90,9 +85,9 @@ function buildOption(
   visible: ReadonlySet<MetricKey>,
 ): EChartsCoreOption {
   const labels = days.map((d) => formatDay(d.day));
-  const values: Record<MetricKey, number[]> = {
+  const values: Record<MetricKey, (number | null)[]> = {
     sent: days.map((d) => d.sent),
-    negative: days.map(negativeOf),
+    bounced: days.map((d) => d.bounced),
     replies: days.map((d) => d.replies),
     leads: days.map((d) => d.leads),
   };
@@ -211,7 +206,7 @@ export default function OutcomesDashboard({ day }: { day: string }) {
   );
 
   const t = data?.totals;
-  const negative = t ? t.bounced + t.invalid : 0;
+  const bounced = t?.bounced ?? null;
 
   return (
     <div ref={rootRef} className="space-y-3">
@@ -233,9 +228,9 @@ export default function OutcomesDashboard({ day }: { day: string }) {
             <Tile label="Отправлено" value={nf(t.sent)} sub="писем за день" />
             <Tile
               label="Не доставлено"
-              value={data.bounceUnavailable && t.invalid === 0 ? '—' : nf(negative)}
-              sub={`отбои ${data.bounceUnavailable ? '—' : nf(t.bounced)} · невалидных ${nf(t.invalid)} · ${share(negative, t.sent)} от писем`}
-              tone={t.sent > 0 && negative / t.sent > 0.05 ? 'bad' : null}
+              value={bounced === null ? '—' : nf(bounced)}
+              sub={`${bounced === null ? '—' : share(bounced, t.sent)} от писем · не тот контакт: ${nf(t.invalid)}`}
+              tone={bounced !== null && t.sent > 0 && bounced / t.sent > 0.05 ? 'bad' : null}
             />
             <Tile label="Ответы" value={nf(t.replies)} sub={`${share(t.replies, t.sent)} от писем, по людям`} />
             <Tile label="Лиды" value={nf(t.leads)} sub={`${share(t.leads, t.replies)} от ответов`} />
