@@ -294,11 +294,10 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(result).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
       // A second click must join the same queued recovery.
       await expect(enqueueVeBaseCollect(supabase, enqueueInput)).resolves.toMatchObject({ ok: true, created: false, base: { id: 'b1' } });
+      // This failed on relevance coverage, not SMTP. Continuing that saved
+      // phase must not clear settled unknowns and buy another email check.
       expect((db.getRows('ve_bases').find((base) => base.id === 'b1')!.collect_info as VeCollectInfo).saved_email_recovery)
-        .toMatchObject({ generation: complete ? 2 : 1, checked: { b: 'ok', c: 'catch_all', d: 'invalid' },
-          automatic_checked: { b: 'ok', c: 'catch_all', d: 'invalid' } });
-      expect((db.getRows('ve_bases').find((base) => base.id === 'b1')!.collect_info as VeCollectInfo).saved_email_recovery?.checked)
-        .not.toHaveProperty('a');
+        .toEqual(info.saved_email_recovery);
       const queued = db.getRows('ve_jobs').filter((j) => j.stage === 'base_collect').at(-1)!;
       const job = { ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] };
       await supabase.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
@@ -4105,8 +4104,8 @@ describe('base_collect: сухие источники завершают баз�
     // Ни нового дочернего конструктора, ни подбора среза.
     expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
     expect(callLLMWithSchema).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), { model: 'test-collection-model' });
-    // Терминальный статус с завершённым раундом: после анализа «Продолжить подготовку» доступна.
-    expect(canResumePartialPreview({ ...base, status: 'analyzed' })).toBe(true);
+    // Тот же сухой источник не становится полезным после очередного нажатия.
+    expect(canResumePartialPreview({ ...base, status: 'analyzed' })).toBe(false);
   });
 
   it('школы: пока подбор нового среза не израсходован, сухие источники сначала расширяют срез', async () => {

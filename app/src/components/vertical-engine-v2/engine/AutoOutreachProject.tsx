@@ -15,6 +15,7 @@ import {
   type VeProjectResponse,
   type VeJobResponse,
   type VeBaseSummary,
+  type VePreparationAction,
 } from './api';
 import { HE } from './design';
 import { StatusBox, formatDate, prettyProjectName } from './ui';
@@ -30,7 +31,8 @@ import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { ManualHypothesisForm } from './ManualHypothesisForm';
 import { PriorityNichesEditor, PriorityNicheResults, type PriorityNichesEditorHandle } from './PriorityNichesEditor';
-import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
+import { PreparationProgress, getPreparationPresentation, getPreparationActionNotice,
+  refreshPreparationRequestNotice, type PreparationPresentation, type PreparationRequestNotice } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
 import { collectCount, isPartialPreview } from './collectionProgress';
 import { ContactLimitField, parseContactLimitDraft } from './ContactLimitField';
@@ -208,6 +210,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [run, setRun] = useState<VeOutreachRun | null>(null);
   const [step, setStep] = useState(1);
   const [error, setError] = useState('');
+  const [preparationNotice, setPreparationNotice] = useState<PreparationRequestNotice | null>(null);
   const [refreshError, setRefreshError] = useState('');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -266,6 +269,11 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         setSnapshot((current) =>
           !current || setup.data.setup.revision >= current.setup.revision ? setup.data : current,
         );
+      if (project.ok && setup.ok && readRevision === detailMutationRevision.current) {
+        setPreparationNotice((current) => refreshPreparationRequestNotice(current, {
+          preparations: setup.data.preparations, bases: project.data.bases ?? [], jobs: project.data.jobs ?? [],
+        }));
+      }
       if (launch.ok)
         setRun((current) =>
           !current || (launch.data.run && launch.data.run.updated_at >= current.updated_at) ? launch.data.run : current,
@@ -355,20 +363,36 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
     setBusy(true);
     setError('');
+    const preparing = payload.action === 'prepare';
+    const noticeHypothesisId = typeof payload.hypothesis_id === 'string' ? payload.hypothesis_id : null;
+    setPreparationNotice(preparing
+      ? { hypothesisId: noticeHypothesisId, checking: true, tone: 'info', message: 'Проверяем возможность продолжения…' } : null);
     try {
-      const result = await veEnginePost<VeOutreachSetupResponse>(`${VE_API}/projects/${projectId}/outreach`, {
+      const result = await veEnginePost<VeOutreachSetupResponse & { preparation_action?: VePreparationAction }>(`${VE_API}/projects/${projectId}/outreach`, {
         revision: snapshot.setup.revision,
         ...payload,
       });
       if (!result.ok) {
-        setError(result.data.error ?? 'Не удалось сохранить выбор');
+        if (preparing) {
+          setPreparationNotice({ hypothesisId: noticeHypothesisId,
+            keepUntilStateChanges: result.data.preparation_action?.status === 'unavailable',
+            ...(result.data.preparation_action ? getPreparationActionNotice(result.data.preparation_action)
+              : { tone: 'error', message: result.data.error ?? 'Не удалось продолжить подготовку.' }) });
+          await refresh();
+        } else setError(result.data.error ?? 'Не удалось сохранить выбор');
         return;
       }
       setSnapshot(result.data);
       if (payload.action === 'select') setLaunchHypothesisIds([]);
       if (payload.action === 'select' && payload.next_run === true) setStep(1);
-      if (payload.action === 'prepare') {
-        setStep((current) => current === 3 ? 3 : 2);
+      if (preparing) {
+        const outcome = result.data.preparation_action;
+        setPreparationNotice({ hypothesisId: noticeHypothesisId, keepUntilStateChanges: outcome?.status === 'unavailable',
+          ...getPreparationActionNotice(outcome) });
+        // No-op/rejected continuations stay beside the base that was clicked.
+        // A queued response means waiting for a worker, not active collection.
+        if (outcome?.status !== 'unavailable' && outcome?.status !== 'ready')
+          setStep((current) => current === 3 ? 3 : 2);
         await refresh();
       }
       // Finished bases are re-partitioned by the worker right after the save.
@@ -377,7 +401,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         await refresh();
       }
     } catch {
-      setError('Не удалось сохранить решение. Проверьте соединение');
+      if (preparing) setPreparationNotice({ hypothesisId: noticeHypothesisId, tone: 'error',
+        message: 'Ответ не получен. Обновите статус, прежде чем повторять подготовку.' });
+      else setError('Не удалось сохранить решение. Проверьте соединение');
     } finally {
       setBusy(false);
     }
@@ -674,6 +700,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         </div>
       ) : null}
       {refreshError ? <div className="mb-5"><StatusBox tone="error">{refreshError}</StatusBox></div> : null}
+      {preparationNotice && preparationNotice.hypothesisId === null ? <div className="mb-5">
+        <StatusBox tone={preparationNotice.tone}>{preparationNotice.message}</StatusBox>
+      </div> : null}
       <div className="ve2-wiz">
         <aside className="ve2-rail min-w-0">
           <StepNav
@@ -867,6 +896,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     jobs={detail.jobs}
                     onContinue={() => void change({ action: 'prepare', hypothesis_id: activeId })}
                     continueDisabled={busy || locked}
+                    actionNotice={preparationNotice?.hypothesisId === activeId ? preparationNotice : null}
                   />
                   {!preparation ? <button type="button" className={HE.btnGhost} onClick={() => jump(1)}>К гипотезам</button> : null}
                 </>
@@ -939,7 +969,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     <h3 className="ve2-h3">{h.title}</h3>
                     {!launchStates[h.id]?.launched ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} approved={approved}
                       onContinue={launchStates[h.id]?.launched ? undefined : () => void change({ action: 'prepare', hypothesis_id: h.id })}
-                      continueDisabled={busy || locked} /> : null}
+                      continueDisabled={busy || locked}
+                      actionNotice={preparationNotice?.hypothesisId === h.id ? preparationNotice : null} /> : null}
                     {!p ? <button type="button" className={HE.btnPrimary} onClick={() => jump(1)}>К гипотезам</button> : null}
                     {base ? (
                       <>

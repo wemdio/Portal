@@ -181,7 +181,7 @@ describe('VE2 base collection enqueue recovery', () => {
           if (partialClaimed) return { data: [] };
           partialClaimed = true;
           return { data: [{ project_id: input.projectId, hypothesis_id: 'h1', base_id: 'saved-partial',
-            template_id: null, status: 'pending', language: 'ru', claim_token: 'partial-lease' }] };
+            template_id: null, status: 'pending', resume_collection_requested: true, language: 'ru', claim_token: 'partial-lease' }] };
         },
         ve_save_outreach_preparation: partialSave,
       } });
@@ -208,7 +208,10 @@ describe('VE2 base collection enqueue recovery', () => {
     // A Continue action inside one card may not dispatch the project-wide RPC.
     const projectId = '00000000-0000-4000-8000-000000000301';
     const hypothesisId = '00000000-0000-4000-8000-000000000302';
-    mockRouteDb = createMockSupabase({ rpcHandlers: {
+    mockRouteDb = createMockSupabase({ tables: {
+      ve_outreach_setups: [{ project_id: projectId, revision: 7, selected_hypothesis_ids: [hypothesisId] }],
+      ve_hypotheses: [{ id: hypothesisId, project_id: projectId, vertical_id: input.verticalId, status: 'approved' }],
+    }, rpcHandlers: {
       ve_request_outreach_preparation: () => ({ data: null }),
       ve_request_outreach_hypothesis_preparation: () => ({ data: null }),
     } });
@@ -217,11 +220,99 @@ describe('VE2 base collection enqueue recovery', () => {
     }), { params: Promise.resolve({ id: projectId }) });
     expect((await request({ hypothesis_id: hypothesisId })).status).toBe(200);
     expect(mockRouteDb.rpcCalls).toEqual([expect.objectContaining({ fn: 've_request_outreach_hypothesis_preparation',
-      params: { p_project_id: projectId, p_revision: 7, p_hypothesis_id: hypothesisId } })]);
+      params: { p_project_id: projectId, p_revision: 7, p_hypothesis_id: hypothesisId, p_resume_collection: false } })]);
     for (const invalid of [null, '', 'wrong-id']) expect((await request({ hypothesis_id: invalid })).status).toBe(400);
     expect(mockRouteDb.rpcCalls).toHaveLength(1);
     expect((await request({})).status).toBe(200);
     expect(mockRouteDb.rpcCalls[1].fn).toBe('ve_request_outreach_preparation');
+
+    // A stale browser must not turn an unavailable continuation into a new
+    // paid collection or reset the ready preparation. The exact decision is
+    // persisted without altering the base's worker checkpoint or timestamp.
+    const stoppedTarget = { mode: 'preview', status: 'limited', ready_rows: 10, ready_target: 500,
+      round: 100, max_rounds: 100, candidates_processed: 10000, max_candidates: 10000 };
+    const stoppedInfo = { collection_mode: 'preview', target_progress: stoppedTarget,
+      target_checkpoint: { completed_round: 100 }, tasks: [] };
+    const setupRows = { ve_outreach_setups: [{ project_id: projectId, revision: 7, selected_hypothesis_ids: [hypothesisId] }],
+      ve_hypotheses: [{ id: hypothesisId, project_id: projectId, vertical_id: input.verticalId, status: 'approved' }] };
+    mockRouteDb = createMockSupabase({ tables: { ...setupRows,
+      ve_outreach_preparations: [{ project_id: projectId, hypothesis_id: hypothesisId, base_id: 'stopped', template_id: 'letters', status: 'ready' }],
+      ve_bases: [{ id: 'stopped', project_id: projectId, hypothesis_id: hypothesisId, source: 'auto', status: 'analyzed',
+        row_count: 10, updated_at: '2026-10-12T10:00:00Z', collection_continuation_revision: 0,
+        max_emails_per_company: null, contact_cap_applied: null, collect_info: stoppedInfo }],
+      ve_templates: [{ id: 'letters', base_id: 'stopped', status: 'ready', supply_batch_id: null, launch_info: null }],
+    }, rpcHandlers: { ve_request_outreach_hypothesis_preparation: () => ({ data: null }) } });
+    for (let click = 0; click < 2; click++) {
+      const blocked = await request({ hypothesis_id: hypothesisId });
+      expect(blocked.status).toBe(409);
+      expect(await blocked.json()).toMatchObject({ preparation_action: { status: 'unavailable', hypothesis_id: hypothesisId } });
+    }
+    expect(mockRouteDb.rpcCalls).toHaveLength(0);
+    expect(mockRouteDb.getRows('ve_jobs')).toHaveLength(0);
+    expect(mockRouteDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzed', collect_info: stoppedInfo,
+      updated_at: '2026-10-12T10:00:00Z' });
+    expect(mockRouteDb.getRows('ve_outreach_preparations')[0].status).toBe('ready');
+
+    // Exhausted collection must not block finishing failed letters, and a
+    // live job must not receive a second request from an old browser tab.
+    await mockRouteDb.from('ve_templates').update({ status: 'failed' }).eq('id', 'letters');
+    const retryLetters = await request({ hypothesis_id: hypothesisId });
+    expect(retryLetters.status).toBe(200);
+    expect(await retryLetters.json()).toMatchObject({ preparation_action: { status: 'queued' } });
+    expect(mockRouteDb.rpcCalls).toHaveLength(1);
+    await mockRouteDb.from('ve_jobs').insert({ id: 'active-letters', project_id: projectId, stage: 'template',
+      status: 'pending', payload: { base_id: 'stopped' } });
+    const alreadyRunning = await request({ hypothesis_id: hypothesisId });
+    expect(alreadyRunning.status).toBe(200);
+    expect(await alreadyRunning.json()).toMatchObject({ preparation_action: { status: 'already_running' } });
+    expect(mockRouteDb.rpcCalls).toHaveLength(1);
+    await mockRouteDb.from('ve_jobs').update({ status: 'done' });
+    await mockRouteDb.from('ve_templates').update({ status: 'ready' });
+    await mockRouteDb.from('ve_outreach_preparations').update({ status: 'error', template_id: null });
+    const repairLink = await request({ hypothesis_id: hypothesisId });
+    expect(await repairLink.json()).toMatchObject({ preparation_action: { status: 'queued', code: 'preparation_incomplete' } });
+    expect(mockRouteDb.rpcCalls.at(-1)).toMatchObject({ params: { p_resume_collection: false } });
+
+    // The coordinator must honor that request by finishing letters only,
+    // even when the partial preview could otherwise open another source round.
+    let lettersClaimed = false;
+    const lettersSave = jest.fn(() => ({ data: true }));
+    const unfinishedLettersDb = createMockSupabase({ tables: {
+      ve_hypotheses: [{ id: hypothesisId, project_id: projectId, vertical_id: input.verticalId, status: 'approved' }],
+      ve_bases: [{ id: 'letters-only-base', project_id: projectId, hypothesis_id: hypothesisId, source: 'auto',
+        status: 'analyzed', row_count: 10, collection_mode: 'preview',
+        target_progress: { ...stoppedTarget, round: 1, candidates_processed: 10 },
+        collect_info: { collection_mode: 'preview', target_checkpoint: { completed_round: 1 },
+          target_progress: { ...stoppedTarget, round: 1, candidates_processed: 10 },
+          tasks: [{ status: 'pending', task: { source: 'directory', query: 'saved source' } }] } }],
+      ve_templates: [{ id: 'failed-letters', base_id: 'letters-only-base', status: 'failed', supply_batch_id: null }],
+      ve_jobs: [{ id: 'old-letter-job', project_id: projectId, stage: 'template', status: 'failed',
+        payload: { base_id: 'letters-only-base' } }],
+    }, rpcHandlers: {
+      ve_claim_outreach_preparation: () => {
+        if (lettersClaimed) return { data: [] };
+        lettersClaimed = true;
+        return { data: [{ project_id: projectId, hypothesis_id: hypothesisId, base_id: 'letters-only-base',
+          template_id: 'failed-letters', status: 'pending', language: 'ru', claim_token: 'letters-lease' }] };
+      },
+      ve_save_outreach_preparation: lettersSave,
+      ve_enqueue_outreach_preparation_job: () => ({ data: { ok: true } }),
+    } });
+    await runVeOutreachPreparations(unfinishedLettersDb as unknown as SupabaseClient);
+    expect(unfinishedLettersDb.rpcCalls.filter((call) => call.fn === 've_enqueue_outreach_preparation_job'))
+      .toEqual([expect.objectContaining({ params: expect.objectContaining({ p_stage: 'template', p_base_id: 'letters-only-base' }) })]);
+    expect(unfinishedLettersDb.getRows('ve_bases')).toHaveLength(1);
+    expect(unfinishedLettersDb.getRows('ve_bases')[0].status).toBe('analyzed');
+    expect(unfinishedLettersDb.getRows('ve_jobs').some((job) => job.stage === 'base_collect')).toBe(false);
+    expect(lettersSave).toHaveBeenLastCalledWith(expect.objectContaining({ p_status: 'generating' }), expect.anything());
+    // Linking an already prepared partial result is also preparation only.
+    // It may not be mistaken for consent to purchase another source round.
+    lettersClaimed = false;
+    await unfinishedLettersDb.from('ve_templates').update({ status: 'ready' });
+    await runVeOutreachPreparations(unfinishedLettersDb as unknown as SupabaseClient);
+    expect(lettersSave).toHaveBeenLastCalledWith(expect.objectContaining({ p_status: 'ready', p_template_id: 'failed-letters' }), expect.anything());
+    expect(unfinishedLettersDb.getRows('ve_jobs').some((job) => job.stage === 'base_collect')).toBe(false);
+    expect(unfinishedLettersDb.rpcCalls.filter((call) => call.fn === 've_enqueue_outreach_preparation_job')).toHaveLength(1);
 
     // The specialist's "addresses per company" limit: saved through its own RPC.
     // The nudge only asks the queue for bases whose applied value is out of date
@@ -338,6 +429,53 @@ describe('VE2 base collection enqueue recovery', () => {
       expect(interruptedDb.getRows('ve_bases')).toHaveLength(1);
       expect(interruptedDb.getRows('ve_bases')[0].collect_info).toEqual(savedInfo);
       expect(interruptedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
+    }
+
+    // Resuming a source must retain completed email results. Only an actual
+    // failed email-recovery stage admits a fresh bounded pass for unknowns.
+    const emailState = { version: 1, attempt_id: 'automatic:saved', generation: 3,
+      checked: { unknown: 'unknown', valid: 'ok', invalid: 'invalid' }, automatic_checked: { unknown: 'unknown', valid: 'ok' } };
+    const partialInfo = { collection_mode: 'preview', limit: 100, ready_target: 500,
+      target_progress: { status: 'limited', round: 1, max_rounds: 100, ready_rows: 10, ready_target: 500,
+        candidates_processed: 100, max_candidates: 10_000 }, target_checkpoint: { completed_round: 1 },
+      tasks: [{ source: 'companies_directory', status: 'done', exhausted: false,
+        task: { source: 'companies_directory', directory_filters: { okvedCodes: ['86'] } } }],
+      saved_email_recovery: emailState };
+    const resumeInput = { ...input, hypothesisIds: ['h1'], collectionMode: 'preview' as const, resumeBaseId: 'saved' };
+    for (const mode of ['source', 'interrupted', 'email-failure'] as const) {
+      const child = { id: '00000000-0000-4000-8000-000000000401', started_at: '2026-10-12T10:00:00Z', emails: ['pending@example.test'] };
+      const state = mode === 'email-failure' ? { ...emailState, error: 'Email worker unavailable', batch: child } : emailState;
+      const info = mode === 'source' ? partialInfo : { ...partialInfo,
+        target_progress: { ...partialInfo.target_progress, status: mode === 'interrupted' ? 'collecting' : 'error' },
+        ...(mode === 'interrupted' ? { relevance_review_requested: true } : { construct: { status: 'done', bc_job_id: 'paid-constructor' } }),
+        saved_email_recovery: state };
+      const saved = { id: 'saved', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: 'h1', source: 'auto',
+        status: mode === 'source' ? 'analyzed' : 'failed', updated_at: '2026-10-12T10:00:00Z', collection_continuation_revision: 4,
+        error: mode === 'source' ? null : mode === 'interrupted' ? 'Provider usage journal could not be saved.' : 'Проверка email завершилась не полностью',
+        collect_info: info };
+      const resumeDb = createMockSupabase({ tables: { ve_hypotheses: [{ id: 'h1', title: 'Medicine' }], ve_bases: [saved], ve_jobs: [] } });
+      const client = resumeDb as unknown as SupabaseClient;
+      await expect(enqueueVeBaseCollect(client, resumeInput)).resolves.toMatchObject({ ok: true, created: true });
+      const stored = resumeDb.getRows('ve_bases')[0].collect_info as typeof info;
+      expect(stored.target_progress).toMatchObject({ max_candidates: 10_000, candidates_processed: 100 });
+      if (mode === 'email-failure') expect(stored.saved_email_recovery).toEqual({ ...emailState, generation: 4,
+        checked: { valid: 'ok', invalid: 'invalid' }, automatic_checked: { valid: 'ok' }, batch: child });
+      else expect(stored.saved_email_recovery).toEqual(emailState);
+      await expect(enqueueVeBaseCollect(client, resumeInput)).resolves.toMatchObject({ ok: true, created: false });
+      expect(resumeDb.getRows('ve_jobs')).toHaveLength(1);
+      expect(resumeDb.getRows('ve_bases')).toHaveLength(1);
+    }
+    // Either CAS token changing invalidates an old collect_info snapshot,
+    // including a legacy writer which forgot to advance updated_at.
+    for (const changed of [{ updated_at: '2026-10-12T10:01:00Z' }, { collection_continuation_revision: 5 }]) {
+      const currentInfo = { ...partialInfo, specialist_change: true };
+      const racedDb = createMockSupabase({ tables: { ve_hypotheses: [{ id: 'h1', title: 'Medicine' }],
+        ve_bases: [{ id: 'saved', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: 'h1', source: 'auto', status: 'analyzed',
+          updated_at: '2026-10-12T10:00:00Z', collection_continuation_revision: 4, collect_info: partialInfo }], ve_jobs: [] },
+        beforeFirstUpdates: { ve_bases: (rows) => rows.map((row) => ({ ...row, ...changed, collect_info: currentInfo })) } });
+      await expect(enqueueVeBaseCollect(racedDb as unknown as SupabaseClient, resumeInput)).resolves.toMatchObject({ ok: false });
+      expect(racedDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzed', collect_info: currentInfo });
+      expect(racedDb.getRows('ve_jobs')).toHaveLength(0);
     }
 
     // Death after base resume but before queue INSERT: recover only an older
