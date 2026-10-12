@@ -14,7 +14,7 @@ export const runtime = 'nodejs';
  * POST /api/instantly/webhook/<accountId>?token=<INSTANTLY_WEBHOOK_SECRET>
  *
  * Registered once via /api/instantly/activity/register for events
- * email_opened + reply_received. Each delivered event is normalized and upserted
+ * email_opened + reply_received + email_bounced. Each delivered event is normalized and upserted
  * into instantly_activity_events; the partner API reads from there. No auth
  * signing exists on Instantly's side, so the shared secret lives in the URL.
  *
