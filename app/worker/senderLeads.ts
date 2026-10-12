@@ -3,7 +3,8 @@ import { leadTelegramConfig } from '@/lib/senderLeads/telegram';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
 /**
- * Квалификатор ответов «Рассылки»: живые ответы → оценка ИИ → лиды в ТГ-чат
+ * Квалификатор ответов «Рассылки»: живые ответы → оценка ИИ → лиды в ТГ-чат;
+ * лиды RU/EN автоаутрича после доставки в General передаются в AMO
  * (docs/superpowers/specs/2026-09-29-sender-reply-leads-design.md).
  *
  * Отдельный воркер на 139, а не цикл в воркере Instantly: свой ключ ИИ
@@ -39,8 +40,8 @@ async function main(): Promise<void> {
   while (!shouldStop()) {
     try {
       const pass = await runSenderLeadsPass(db, log);
-      if (pass.qualified || pass.delivered) {
-        log('info', `Оценено ${pass.qualified}, лидов ${pass.leads}, в чат ушло ${pass.delivered}`);
+      if (pass.qualified || pass.delivered || pass.crm) {
+        log('info', `Оценено ${pass.qualified}, лидов ${pass.leads}, в чат ушло ${pass.delivered}, AMO обработано ${pass.crm}`);
       }
     } catch (err) {
       log('error', 'Круг квалификатора упал', err);
