@@ -88,7 +88,7 @@ import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceChe
 import { recoverVeSavedEmails, resumeVeSavedEmailRecovery, hasPendingVeSavedEmailRecovery,
   type VeSavedEmailRecoveryState } from '@/lib/verticalEngineV2/savedEmailRecovery';
 import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
-import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
+import { normalizeVeSourceContacts, VE_CONFIRMED_WEBSITE_MARK } from '@/lib/verticalEngineV2/sourceContacts';
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { planVeJobFailure } from '@/lib/verticalEngineV2/jobRetry';
@@ -588,7 +588,7 @@ describe('base_collect CONSTRUCT step order', () => {
     const hints = [{ key: veCompanyFactKey(company)!, website: 'https://orion.test/', facts: 'Производим промышленное оборудование',
       observedAt: new Date().toISOString(), inns: [company.inn], ownerInns: [company.inn] }];
     expect(prioritizeVeCandidates([spare, company, present], hints, 'Промышленное оборудование'))
-      .toEqual([{ ...company, website: hints[0].website }, present, spare]);
+      .toEqual([{ ...company, website: hints[0].website, source_detail: `${VE_CONFIRMED_WEBSITE_MARK} ${hints[0].website}` }, present, spare]);
     expect(prioritizeVeCandidates([company], [{ ...hints[0], inns: ['7700000002'], ownerInns: ['7700000002'] }])[0].website).toBe('');
     expect(prioritizeVeCandidates([company], hints, '', Date.now() + VE_COMPANY_FACT_TTL_MS)[0].website).toBe('');
     expect(company.website).toBe('');
@@ -2994,6 +2994,106 @@ describe('base_collect: план кончился раньше цели', () => 
     expect(prior.adaptive_collection!.active_source).toBe(veSourceStrategyKey(prior.tasks![0].task));
     expect(prior.source_selection?.previous_tasks[0]).toMatchObject({ task, exhausted: true });
     expect(applyVeNicheSourceSelection(prior, 'payments')).toBe(false);
+
+    // Existing payment bases have already applied v1. Refresh only their
+    // future source scope once; never erase what was tried or paid for.
+    const legacyPayments = JSON.parse(JSON.stringify(prior)) as VeCollectInfo;
+    legacyPayments.source_selection!.version = 1;
+    delete legacyPayments.tasks![0].task.directory_filters!.identityCatalog;
+    legacyPayments.tasks![0].task.directory_filters!.nameTerms = ['платеж', 'финтех', 'pay'];
+    legacyPayments.tasks![0].exhausted = true;
+    legacyPayments.plan!.tasks = legacyPayments.tasks!.map((state) => state.task);
+    legacyPayments.adaptive_collection!.active_source = veSourceStrategyKey(legacyPayments.tasks![0].task);
+    const oldPaymentKey = legacyPayments.adaptive_collection!.active_source;
+    const paymentHistory = JSON.stringify(legacyPayments.source_selection!.previous_tasks);
+    const paymentBudgets = JSON.stringify([legacyPayments.target_progress, legacyPayments.target_checkpoint,
+      legacyPayments.search_policy, legacyPayments.adaptive_collection!.completed, legacyPayments.adaptive_collection!.replan_attempts]);
+    expect(applyVeNicheSourceSelection(legacyPayments, 'payments')).toBe(true);
+    expect(legacyPayments.source_selection?.version).toBe(2);
+    expect(JSON.stringify(legacyPayments.source_selection!.previous_tasks.slice(0, -1))).toBe(paymentHistory);
+    expect(legacyPayments.tasks![0].task.directory_filters).toMatchObject({ identityCatalog: 'payments-2026-10-12' });
+    expect(legacyPayments.tasks![0].task.directory_filters!.nameTerms).toEqual(expect.arrayContaining(['пэй', 'пеймент']));
+    expect(legacyPayments.adaptive_collection!.active_source).not.toBe(oldPaymentKey);
+    expect(legacyPayments.tasks![0].exhausted).toBeUndefined();
+    expect(legacyPayments.tasks![0].directory_cursors).toEqual({ old_scope: 2000 });
+    expect(JSON.stringify([legacyPayments.target_progress, legacyPayments.target_checkpoint,
+      legacyPayments.search_policy, legacyPayments.adaptive_collection!.completed, legacyPayments.adaptive_collection!.replan_attempts])).toBe(paymentBudgets);
+    expect(applyVeNicheSourceSelection(legacyPayments, 'payments')).toBe(false);
+
+    // A corrected official site may retry a saved, unusable company once.
+    // Already acquired corrected sites, ready contacts and other bases win.
+    const provider = unifiedRow({ company: 'ООО ПЭЙКИПЕР-ПРОЦЕССИНГ', inn: '5047186409',
+      website: 'unrelated.test', email: 'wrong@unrelated.test' });
+    const correctedProvider = normalizeVeSourceContacts(provider);
+    const providerTask = legacyPayments.tasks![0].task;
+    for (const blockedBy of ['none', 'corrected_seen', 'ready', 'other_base'] as const) {
+      const repairedInfo = exhaustedInfo(providerTask, {
+        niche_source_profile: 'payments', source_selection: { version: 2, profile: 'payments', previous_tasks: [] },
+        hypotheses: [{ id: 'h1', status: 'accepted', ...payment }],
+        target_checkpoint: { completed_round: 2, seen_rows: [blockedBy === 'corrected_seen' ? correctedProvider : provider], processed_rows: 1 },
+        target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: 1, ready_rows: 0 },
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, active_source: veSourceStrategyKey(providerTask) },
+      });
+      repairedInfo.tasks![0] = { source: 'companies_directory', status: 'pending', child_job_id: null,
+        rows: 0, task: providerTask, harvest: [] };
+      const providerDb = seedBase(repairedInfo, payment, { data: blockedBy === 'ready' ? [provider] : [] },
+        blockedBy === 'other_base' ? [{ id: 'other-provider-base', project_id: PROJECT.id, hypothesis_id: 'other-hypothesis',
+          status: 'analyzed', data: [provider] }] : []);
+      jest.mocked(searchVeNicheDirectoryRows).mockClear().mockResolvedValue({ rows: [
+        { name: provider.company, inn: provider.inn, website: provider.website, email: provider.email },
+      ] });
+      jest.mocked(callLLMWithSchema).mockClear();
+      await wake(providerDb);
+      const created = providerDb.getRows('base_constructor_jobs');
+      expect(created).toHaveLength(blockedBy === 'none' ? 1 : 0);
+      if (created.length) {
+        const grid = created[0].data as string[][];
+        expect(grid[1][grid[0].indexOf('Сайт')]).toBe(correctedProvider.website);
+        expect(grid[1][grid[0].indexOf('Email')]).toBe('');
+      }
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+    }
+
+    // A fresh exact-owner fact repairs a nonempty raw URL before acquisition.
+    // The saved harvest must receive the URL, cleared email and provenance
+    // together, even though normalization changed its receipt in memory.
+    const rawOwner = unifiedRow({ company: 'Платёжный провайдер пример', inn: '7700000995',
+      website: 'stale-owner.test', email: 'wrong@stale-owner.test', source_detail: 'реестр' });
+    const verifiedWebsite = 'https://verified-owner.test/contacts';
+    const factInfo = exhaustedInfo(providerTask, {
+      niche_source_profile: 'payments', source_selection: { version: 2, profile: 'payments', previous_tasks: [] },
+      hypotheses: [{ id: 'h1', status: 'accepted', ...payment }],
+      target_checkpoint: { completed_round: 2, seen_rows: [], processed_rows: 0 },
+      target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: 0, ready_rows: 0 },
+      adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, active_source: veSourceStrategyKey(providerTask) },
+    });
+    factInfo.tasks![0] = { source: 'companies_directory', status: 'pending', child_job_id: null,
+      rows: 0, task: providerTask, harvest: [] };
+    const factDb = seedBase(factInfo, payment, { data: [] });
+    await factDb.from('ve_company_fact_pages').insert({ company_key: veCompanyFactKey(rawOwner), reader_version: 1,
+      observed_at: new Date().toISOString(), expires_at: new Date(Date.now() + VE_COMPANY_FACT_TTL_MS).toISOString(),
+      website: verifiedWebsite, facts: 'Платежный агрегатор для бизнеса', inns: [rawOwner.inn], owner_inns: [rawOwner.inn] });
+    jest.mocked(searchVeNicheDirectoryRows).mockClear().mockResolvedValue({ rows: [
+      { name: rawOwner.company, inn: rawOwner.inn, website: rawOwner.website, email: rawOwner.email },
+    ] });
+    jest.mocked(callLLMWithSchema).mockClear();
+    jest.mocked(fetchVeRelevanceEvidence).mockClear();
+    const factResult = (await wake(factDb)).collect_info as VeCollectInfo;
+    const savedOwner = factResult.tasks![0].harvest![0];
+    expect(savedOwner).toMatchObject({ inn: rawOwner.inn, website: verifiedWebsite, email: '' });
+    expect(savedOwner.source_detail).toContain(`${VE_CONFIRMED_WEBSITE_MARK} ${verifiedWebsite}`);
+    expect(savedOwner.source_detail).toContain(rawOwner.email);
+    const factChildren = factDb.getRows('base_constructor_jobs');
+    expect(factChildren).toHaveLength(1);
+    const factGrid = factChildren[0].data as string[][];
+    expect(factGrid[1][factGrid[0].indexOf('Сайт')]).toBe(verifiedWebsite);
+    expect(factGrid[1][factGrid[0].indexOf('Email')]).toBe('');
+    const childBeforeRetry = JSON.stringify(factChildren[0]);
+    await wake(factDb);
+    expect(factDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect(JSON.stringify(factDb.getRows('base_constructor_jobs')[0])).toBe(childBeforeRetry);
+    expect(callLLMWithSchema).not.toHaveBeenCalled();
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
 
     // PG esoteric/fintech, 12.10: v1 changed the query but kept a done page
     // attributed to the old, dry strategy. That page must not pin renewal.

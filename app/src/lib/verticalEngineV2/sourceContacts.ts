@@ -1,11 +1,27 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { extractEmails } from '@/lib/tools/dfybUtils';
-import { normalizeVeCompanyInn } from './collectionIdentity';
+import { normalizeVeCompanyInn, normalizeVeWebsiteHost } from './collectionIdentity';
 import { fetchVeRelevanceEvidence, veOfficialWebsiteCandidates } from './relevanceEvidence';
 import { VeRelevanceCheckpointError } from './relevanceCheckpoint';
+import { vePaymentCompanyHint } from './paymentCompanyDirectory';
 
 type SourceRow = { company: string; website: string; email: string; inn: string; address: string; source_detail: string };
+/** These notes preserve provenance only; they never grant relevance or website ownership. */
+export const VE_CONFIRMED_WEBSITE_MARK = 'Сайт из подтверждённых реквизитов компании:';
+const PAYMENT_WEBSITE_MARK = 'Кандидат официального сайта по ИНН:';
+
+/** A replaced site's emails may belong to its previous owner. Keep them in
+ * provenance, not in the constructor's fallback email column. */
+export function replaceVeSourceWebsite<T extends { website: string; email: string; source_detail?: string }>(row: T, website: string, note: string): T {
+  const previousHost = normalizeVeWebsiteHost(row.website), nextHost = normalizeVeWebsiteHost(website);
+  if (!nextHost || previousHost === nextHost) return row;
+  const cleared = Boolean(previousHost && row.email.trim());
+  const audit = [row.website ? `Сайт в источнике: ${row.website}` : '',
+    cleared ? `Email прежнего сайта (не использовать): ${row.email}` : '', note].filter(Boolean).join('\n');
+  return { ...row, website, email: cleared ? '' : row.email,
+    source_detail: [row.source_detail, audit].filter(Boolean).join('\n') };
+}
 const MAX_SITE_LOOKUPS = 10_000;
 const resultSchema = z.object({ website: z.string().max(1000), reason: z.string().max(400) });
 const checkpointSchema = z.object({ version: z.literal(1), checked: z.record(z.string(), resultSchema) });
@@ -97,8 +113,14 @@ export function normalizeVeSourceContacts<T extends SourceRow>(row: T): T {
   });
   const email = [...new Set([...extractEmails(row.email), ...misplaced].map((v) => v.toLowerCase()))].join(', ');
   const website = veOfficialWebsiteCandidates(row.website).map((url) => url.href).join(', ');
-  return { ...row, email, website, source_detail: row.website && website !== row.website
+  const normalized = { ...row, email, website, source_detail: row.website && website !== row.website
     ? `${row.source_detail}\nСайт в источнике: ${row.website}` : row.source_detail };
+  const hint = vePaymentCompanyHint(row.inn);
+  // A fresher exact-owner fact can legitimately point to another official
+  // domain. Do not bounce that candidate back to a reviewed discovery hint.
+  // The note does not establish ownership: the normal website gate still runs.
+  if (!hint || (website && row.source_detail.includes(VE_CONFIRMED_WEBSITE_MARK))) return normalized;
+  return replaceVeSourceWebsite(normalized, hint.website, `${PAYMENT_WEBSITE_MARK} ${hint.website} (${hint.source})`);
 }
 
 function readState(value?: unknown): VeSourceContactCheckpoint {

@@ -156,6 +156,7 @@ import {
 } from '../prompts/sourcePlan';
 import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
 import { searchVeNicheDirectoryRows } from '../nicheDirectory';
+import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyHint } from '../paymentCompanyDirectory';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed,
   type VeNicheSourceProfile } from '../nicheSourcePolicy';
 import { VeCatalogRepairSchema, VeSourcePlanSchema } from '../schemas';
@@ -283,7 +284,7 @@ function unifiedRow(partial: Partial<VeUnifiedRow>): VeUnifiedRow {
 
 /** Строка реестра companies_directory → унифицированная строка. */
 export function mapDirectoryRow(row: Record<string, unknown>): VeUnifiedRow {
-  return unifiedRow({
+  const mapped = unifiedRow({
     company: cell(row.name),
     website: cell(row.website),
     email: cell(row.email),
@@ -302,8 +303,9 @@ export function mapDirectoryRow(row: Record<string, unknown>): VeUnifiedRow {
     employees: cell(row.employees_count),
     revenue: cell(row.revenue),
     inn: cell(row.inn),
-    source_detail: 'реестр',
+    source_detail: cell(row._ve_source_detail) || 'реестр',
   });
+  return vePaymentCompanyHint(mapped.inn) ? normalizeVeSourceContacts(mapped) : mapped;
 }
 
 /** Вакансия hh → работодатель + название вакансии как крючок персонализации. */
@@ -485,7 +487,7 @@ export function interleaveTaskHarvests(lists: VeUnifiedRow[][]): VeUnifiedRow[] 
 /* ─────────────────────── Билдеры запросов к коллекторам ─────────────────────── */
 
 /** directory_filters плана → фильтры реестра (только заданные поля). */
-type VeDirectorySearchFilters = CompaniesSearchFilters & { nameTerms?: string[] };
+type VeDirectorySearchFilters = CompaniesSearchFilters & Pick<NonNullable<VeCollectTask['directory_filters']>, 'nameTerms' | 'identityCatalog'>;
 export function mapDirectoryFilters(
   filters: VeCollectTask['directory_filters'],
 ): VeDirectorySearchFilters {
@@ -493,6 +495,7 @@ export function mapDirectoryFilters(
   const out: VeDirectorySearchFilters = { includeIp: filters?.includeIp ?? false };
   if (!filters) return out;
   if (filters.nameTerms) out.nameTerms = filters.nameTerms;
+  if (filters.identityCatalog) out.identityCatalog = filters.identityCatalog;
   if (filters.okvedCodes?.length) out.okvedCodes = filters.okvedCodes;
   if (filters.regionCodes?.length) out.regionCodes = filters.regionCodes;
   if (typeof filters.revenueFrom === 'number') out.revenueFrom = filters.revenueFrom;
@@ -695,7 +698,7 @@ export interface VeCollectInfo {
   niche_source_profile?: VeNicheSourceProfile;
   /** One-way, bounded correction of source scopes. Old cursors remain here for
    * audit; saved rows, candidate limits and paid-work receipts are not reset. */
-  source_selection?: { version: 1; profile: VeNicheSourceProfile; previous_tasks: Array<{
+  source_selection?: { version: 1 | 2; profile: VeNicheSourceProfile; previous_tasks: Array<{
     task: VeCollectTask; catalog?: VeYandexCatalogCheckpoint; directory_cursors?: Record<string, number>;
     status: VeCollectTaskStatus; child_job_id: string | null; exhausted?: boolean; unavailable?: boolean;
   }> };
@@ -1376,6 +1379,8 @@ export async function fetchDirectoryRows(
     // inactivity watchdog, and a cancel must not wait for the last page.
     ctx.signal?.throwIfAborted();
     const { nameTerms, ...sharedFilters } = filters;
+    if (filters.identityCatalog && !nameTerms) return { rows, excludedDuringFetch, alreadySeenDuringFetch,
+      exhausted: false, hitCeiling: false, nextOffset: offset, error: 'Identity discovery requires a niche directory scope' };
     const res = nameTerms
       ? await searchVeNicheDirectoryRows(ctx.supabase, sharedFilters, nameTerms, DIRECTORY_PAGE_SIZE, offset, ctx.signal)
       : await searchRows(sharedFilters, DIRECTORY_PAGE_SIZE, offset);
@@ -1404,7 +1409,12 @@ export async function fetchDirectoryRows(
         else alreadySeenDuringFetch += 1;
         continue;
       }
-      rows.push(pruned.email === cell(r.email) ? r : { ...r, email: pruned.email });
+      // Preserve the original-site/email audit produced by the identity hint
+      // through the later directory mapping; never quietly retain an email
+      // from a replaced, unrelated registry website.
+      const prepared = vePaymentCompanyHint(mapped.inn)
+        ? { ...r, website: mapped.website, email: mapped.email, _ve_source_detail: mapped.source_detail } : r;
+      rows.push(pruned.email === cell(prepared.email) ? prepared : { ...prepared, email: pruned.email });
     }
     offset += scanned;
     if (res.rows.length < DIRECTORY_PAGE_SIZE) break;
@@ -2286,7 +2296,10 @@ function addAcquisitionReceipts(keys: VeBaseExclusionKeys, rows: Array<Partial<V
     if (matching?.length === 1) {
       keys.receipts.add(veAcquisitionReceipt(matching[0]));
       const normalized = applyVeSourceContacts(matching)[0];
-      if (normalized.email === matching[0].email) keys.receipts.add(veAcquisitionReceipt(normalized));
+      if (normalized.email === matching[0].email
+        && normalizeVeWebsiteHost(normalized.website) === normalizeVeWebsiteHost(matching[0].website)) {
+        keys.receipts.add(veAcquisitionReceipt(normalized));
+      }
     }
   }
   return keys;
@@ -2654,9 +2667,10 @@ async function pinNicheSourceProfile(ctx: VeStageContext, job: VeJob, base: VeAu
  * A changed scope receives a new cursor key, while old rows retain their exact
  * attribution and all spend/seen/limit checkpoints remain intact. */
 export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNicheSourceProfile): boolean {
-  if (!info.plan || !info.tasks?.length || info.source_selection || (info.construct && info.construct.status !== 'done') || info.adaptive_collection?.pending
+  const upgradingPayments = profile === 'payments' && info.source_selection?.profile === 'payments' && info.source_selection.version === 1;
+  if (!info.plan || !info.tasks?.length || (info.source_selection && !upgradingPayments) || (info.construct && info.construct.status !== 'done') || info.adaptive_collection?.pending
     || info.preview_pipeline?.batches.length || info.tasks.some((task) => task.status === 'dispatched')) return false;
-  const previous: NonNullable<VeCollectInfo['source_selection']>['previous_tasks'] = [];
+  const previous: NonNullable<VeCollectInfo['source_selection']>['previous_tasks'] = [...(info.source_selection?.previous_tasks ?? [])];
   for (const state of info.tasks) {
     // Already paid HH jobs are immutable. A newly built plan receives the
     // narrower query, but a code update must not launch another HH job.
@@ -2681,7 +2695,7 @@ export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNich
   }
   info.plan = { ...info.plan, tasks: info.tasks.map((state) => state.task) };
   info.niche_source_profile = profile;
-  info.source_selection = { version: 1, profile, previous_tasks: previous };
+  info.source_selection = { version: profile === 'payments' ? 2 : 1, profile, previous_tasks: previous };
   // The old whole-sector population is no longer a prediction of this niche.
   delete info.estimate;
   return true;
@@ -4754,7 +4768,17 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       const otherBases = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
       excludedKeysCache = target ? { ...copyExclusionKeys(otherBases), otherBases } : otherBases;
       if (target) {
-        addRowsToExclusionKeys(excludedKeysCache, info.target_checkpoint?.seen_rows ?? []);
+        const seenRows = info.target_checkpoint?.seen_rows ?? [];
+        const canRepairPaymentIdentity = info.niche_source_profile === 'payments'
+          && info.tasks?.some((task) => task.task.directory_filters?.identityCatalog === VE_PAYMENT_DIRECTORY_REVISION);
+        // Only a new exact-owner website may revisit a consumed company. Its
+        // old receipts remain intact, and the seen-company host index stops
+        // this exception after one acquisition of the corrected website.
+        const consumedCompanies = canRepairPaymentIdentity ? seenRows.filter((row) => {
+          const hint = vePaymentCompanyHint(row.inn);
+          return !hint || normalizeVeWebsiteHost(row.website) === normalizeVeWebsiteHost(hint.website);
+        }) : seenRows;
+        addRowsToExclusionKeys(excludedKeysCache, consumedCompanies);
         addAcquisitionReceipts(excludedKeysCache, info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
         addRowsToExclusionKeys(excludedKeysCache, Array.isArray(base.data) ? base.data : []);
       }
@@ -4908,17 +4932,23 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (target && !ownsLegacyInput && !info.adaptive_collection?.pending) {
     const hints = await readVeCandidateHints(prepared, ctx.supabase, ctx.signal);
     // Enrich without reordering here: discovery indexes still refer to interleaved.
-    const replacements = new Map<string, string>();
+    const replacements = new Map<string, VeUnifiedRow>();
     const enrichedRows = prioritizeVeCandidates(prepared, hints, '', Date.now(), true);
     prepared = prepared.map((row, index) => {
       const enriched = enrichedRows[index];
-      if (!row.website && enriched.website) replacements.set(veAcquisitionReceipt(row), enriched.website);
+      if (row.website !== enriched.website || row.email !== enriched.email || row.source_detail !== enriched.source_detail) {
+        replacements.set(veAcquisitionReceipt(row), enriched);
+        // Harvest still holds the raw source representation; normalization
+        // may already have changed the URL, email or provenance above.
+        replacements.set(veAcquisitionReceipt(interleaved[index]), enriched);
+      }
       return enriched;
     });
     if (replacements.size) {
       const enrich = (row: VeUnifiedRow) => {
-        const website = replacements.get(veAcquisitionReceipt(row));
-        return website ? { ...row, website } : row;
+        const replacement = replacements.get(veAcquisitionReceipt(row));
+        return replacement ? { ...row, website: replacement.website, email: replacement.email,
+          source_detail: replacement.source_detail } : row;
       };
       for (const task of tasks) if (task.harvest) task.harvest = task.harvest.map(enrich);
       if (info.search_policy) info.search_policy.deferred_rows = info.search_policy.deferred_rows.map(enrich);
