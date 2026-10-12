@@ -8,7 +8,7 @@ import { buildContactSupplyRequests } from './contactSupplyPlanner';
 import { parseExactNonNegativeContactCount } from './contactDeliveryPreview';
 import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDeliveryInventory';
 import { loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
-import { createVeDeliveryIdentityResolver } from './projectExclusionDelivery';
+import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
 import { buildSegmentationLaunchGroups } from './segmentationAudit';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
@@ -181,7 +181,7 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
   const campaignItems = new Map(campaigns.map((campaign) => [campaign.id, campaign.item_id]));
   const readyCandidates = rows.filter(row => row.status === 'ready' || row.status === 'reserved');
   const policyRows = exclusions.inns.length + exclusions.domains.length > 0
-    ? await createVeDeliveryIdentityResolver(portalDb, projectId)(readyCandidates) : [];
+    ? await createVeDeliveryIdentityResolver(portalDb, projectId)(readyCandidates) : readyCandidates.map(veDeliveryPolicyRow);
   const excludedRows = new Set(readyCandidates.filter((_, index) => policyRows[index]
     && matchVeProjectExclusion(policyRows[index], exclusions)).map(row => row.id));
   const requests = buildContactSupplyRequests(bufferTarget, items.map((item) => ({
@@ -326,7 +326,7 @@ export async function runProjectContactSupply(input: {
       const allowed = group.leadIndices.filter((index) => {
         const email = validation.snapshot.audience.leads[index].email.trim().toLowerCase();
         return !context.blocked.has(email) && !context.existingEmails.has(email)
-          && !matchVeProjectExclusion(validation.snapshot.audience.rows[index], exclusions);
+          && !matchVeProjectExclusion({ ...validation.snapshot.audience.rows[index], email }, exclusions);
       });
       if (!allowed.length) continue;
       const matches = campaigns.filter((campaign) => (campaign.segment ?? null) === group.segment);

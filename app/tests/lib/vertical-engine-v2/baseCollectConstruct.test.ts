@@ -2730,7 +2730,7 @@ describe('VE2 cross-base contact exclusion', () => {
     // Project exclusions use only already present identifiers. Block known
     // matches before paid admission; an anonymous Gmail contact stays eligible.
     const policy = { project_id: 'p1', revision: 1, inns: ['7700000101', '7700000102'],
-      domains: ['blocked.test'], updated_at: '2026-10-12T10:00:00Z' };
+      domains: ['blocked.test'], emails: [], updated_at: '2026-10-12T10:00:00Z' };
     const candidates = [
       unifiedRow({ company: 'Excluded by INN', inn: '7700000101', website: 'known.test', email: 'mail@known.test' }),
       unifiedRow({ company: 'Excluded by domain', website: 'sales.blocked.test', email: 'mail@sales.blocked.test' }),
@@ -2742,7 +2742,7 @@ describe('VE2 cross-base contact exclusion', () => {
       target_progress: createCollectionTarget('preview'), adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 } };
     excludedInfo.tasks![0].exhausted = true;
     const policyDb = seed(excludedInfo, { ve_project_exclusions: [policy,
-      { project_id: 'another-project', revision: 9, inns: ['7700000103'], domains: ['allowed.test'] }] });
+      { project_id: 'another-project', revision: 9, inns: ['7700000103'], domains: ['allowed.test'], emails: [] }] });
     const policyClient = policyDb as unknown as SupabaseClient;
     const gateCalls = mockFindIrrelevantRows.mock.calls.length;
     const sourceCalls = jest.mocked(fetchVeRelevanceEvidence).mock.calls.length;
@@ -2818,6 +2818,16 @@ describe('VE2 cross-base contact exclusion', () => {
     expect(reservedDb.getRows('ve_bases')[0]).toMatchObject({ row_count: 0, data: [] });
     expect(mockFindIrrelevantRows.mock.calls.length).toBe(reservedGateCalls);
 
+    const emailReservedDb = seed(reservedInfo, { ve_project_exclusions: [{ ...policy,
+      inns: [], domains: [], emails: ['mail@known.test'],
+    }] });
+    await runBaseCollectStage(makeJob(), { supabase: emailReservedDb as unknown as SupabaseClient });
+    expect(emailReservedDb.getRows('base_constructor_jobs')).toEqual([expect.objectContaining({
+      id: 'policy-reserved-child', status: 'completed', initial_row_count: 0,
+    })]);
+    expect(emailReservedDb.getRows('ve_bases')[0]).toMatchObject({ row_count: 0, data: [] });
+    expect(mockFindIrrelevantRows.mock.calls.length).toBe(reservedGateCalls);
+
     // An unavailable policy is different from an unidentified company. It
     // stops before any paid work instead of silently treating rules as empty.
     const unreadableDb = createMockSupabase({ tables: {
@@ -2851,6 +2861,44 @@ describe('VE2 cross-base contact exclusion', () => {
     } });
     expect(jest.mocked(callLLMWithSchema).mock.calls.length).toBe(nameCalls + 1);
     expect(changing.getRows('base_constructor_jobs')).toHaveLength(1);
+
+    // A saved split result may contain multiple recipients from one company.
+    // Exact email rules remove only that recipient, without another constructor.
+    for (const [sourceEmail, legacyChild] of [
+      ['mail@allowed.test, other@allowed.test', false], ['mail@allowed.test', false], ['mail@allowed.test', true],
+    ] as const) {
+      const emailSplitDb = seed({ ...collectInfo([{ ...candidates[2], email: sourceEmail }],
+        { ...dispatched, dispatched_at: new Date().toISOString() }), collection_mode: 'preview',
+        target_progress: createCollectionTarget('preview'), adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 } },
+      { ve_project_exclusions: [{ ...policy, inns: [], domains: [], emails: ['mail@allowed.test'] }],
+        base_constructor_jobs: [{ id: dispatched.bc_job_id, status: 'running',
+          selected_steps: legacyChild ? ['validate_emails'] : ['split_emails', 'validate_emails'],
+          data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'],
+            ['Allowed clinic', 'allowed.test', 'mail@allowed.test', '7700000103', 'ok'],
+            ['Allowed clinic', 'allowed.test', 'other@allowed.test', '7700000103', 'ok']],
+        }] });
+      (emailSplitDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0].exhausted = true;
+      const callsBeforePoll = jest.mocked(callLLMWithSchema).mock.calls.length;
+      const pendingChild = await runBaseCollectStage(makeJob(), { supabase: emailSplitDb as unknown as SupabaseClient });
+      expect(pendingChild.result).toMatchObject({ waiting: true });
+      expect(jest.mocked(callLLMWithSchema).mock.calls.length).toBe(callsBeforePoll);
+      expect(emailSplitDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      await emailSplitDb.from('base_constructor_jobs').update({ status: 'completed' }).eq('id', dispatched.bc_job_id);
+      await emailSplitDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+      await runBaseCollectStage(makeJob(), { supabase: emailSplitDb as unknown as SupabaseClient });
+      if (legacyChild) {
+        // Unsafe legacy verdicts cannot be reused; no allowed source rows
+        // remain, so there must be no paid replacement constructor either.
+        expect(emailSplitDb.getRows('ve_bases')[0]).toMatchObject({ row_count: 0, data: [] });
+        expect(jest.mocked(callLLMWithSchema).mock.calls.length).toBe(callsBeforePoll);
+      } else {
+        expect(emailSplitDb.getRows('ve_bases')[0]).toMatchObject({ row_count: 1,
+          data: [expect.objectContaining({ email: 'other@allowed.test' })],
+          collect_info: { project_exclusion_reserve: { rows: [expect.objectContaining({ email: 'mail@allowed.test' })] } },
+        });
+      }
+      expect(emailSplitDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
   });
 });
 

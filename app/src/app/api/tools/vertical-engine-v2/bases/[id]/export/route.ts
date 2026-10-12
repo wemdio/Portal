@@ -158,7 +158,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         if (info?.collection_mode !== 'preview' || !['collecting', 'analyzing', 'analyzed', 'failed'].includes(base.status)) {
           return jsonError('Превью ещё не прошло проверки', 409);
         }
-        exportRows = prepareSegmentationAudience({ rows, columns, source: 'auto' }).rows;
+        const audience = prepareSegmentationAudience({ rows, columns, source: 'auto' });
+        exportRows = audience.rows.map((row, index) => ({ ...row, email: audience.leads[index].email }));
         exportColumns = columns.filter((column) => !column.startsWith('_'));
       }
       if (mode === 'launch-ready' && context) {
@@ -223,6 +224,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           if (!row) return;
           exportRows.push({
             ...row,
+            email: lead.email,
             _ve_segment: validation.assignments.get(leadIndex) ?? '',
           });
         });

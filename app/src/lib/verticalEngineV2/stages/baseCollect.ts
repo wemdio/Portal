@@ -5144,8 +5144,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     : (info.construct || info.adaptive_collection?.pending) && info.search_policy?.construct_rows ? info.search_policy.construct_rows
       : orderedKept.slice(0, info.adaptive_collection ? veAdaptiveCandidateLimit(target!)
         : info.source_contact_recovery ? Math.min(limit, PREVIEW_BATCH_SIZE) : limit);
+  // Current exclusions may remove every source row while its already-owned
+  // child is still validating other addresses. Finish that child before
+  // completing this round or moving to another source; do not buy a new one.
+  const hasDispatchedConstruct = info.construct?.status === 'dispatched' && Boolean(info.construct.bc_job_id);
 
-  if (merged.length === 0 && target && info.adaptive_collection && !info.adaptive_collection.pending
+  if (merged.length === 0 && !hasDispatchedConstruct && target && info.adaptive_collection && !info.adaptive_collection.pending
     && !info.preview_pipeline?.error && !failed.length && target.ready_rows < target.ready_target) {
     const nextSource = tasks.find((task) => task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)
       && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source
@@ -5160,7 +5164,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
 
-  if (info.preview_pipeline && merged.length === 0 && waiting.length > 0
+  if (info.preview_pipeline && merged.length === 0 && !hasDispatchedConstruct && waiting.length > 0
     && !info.preview_pipeline.error && (target?.ready_rows ?? 0) < (target?.ready_target ?? 500)) {
     await requeueSelf(ctx, job, 15_000);
     return { result: { waiting: true, base_id: baseId, pending_sources: waiting.map((task) => task.source) },
@@ -5181,7 +5185,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     finished_at: new Date().toISOString(),
   };
 
-  if (merged.length === 0) {
+  if (merged.length === 0 && !hasDispatchedConstruct) {
     if (target) return await completeTargetRound({
       ctx, job, base, info, progress: target, candidates: [], rows: [],
       columns: [...VE_AUTO_COLLECT_COLUMNS], stats, hasBufferedCandidates: false,
@@ -5269,7 +5273,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const candidateStatsChanged = !sameCollectSnapshot(info.stats, candidateStats);
   info.stats = candidateStats;
   let construct = info.construct;
-  if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
+  if ((!construct || construct.status === 'dispatched') && (hasDispatchedConstruct || needsConstruct(merged))) {
     if (!construct?.bc_job_id) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
@@ -5320,9 +5324,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // Джоба могла быть поставлена до обязательного split_emails. Её
       // row-level validation status нельзя безопасно прикрепить к первому
       // адресу merged-ячейки: лучший статус мог относиться ко второму.
-      // Терминальную legacy-джобу не импортируем, а один раз пересобираем по
-      // текущему контракту; новая selected_steps уже содержит split_emails.
-      if (bc?.selected_steps && !bc.selected_steps.includes('split_emails')) {
+      // Терминальную legacy-джобу не импортируем. Если остались доступные
+      // кандидаты, один раз пересобираем с обязательным split_emails.
+      const legacyWithoutSplit = Boolean(bc?.selected_steps && !bc.selected_steps.includes('split_emails'));
+      if (legacyWithoutSplit && merged.length > 0) {
         const replacement = await dispatchConstructJob({
           ctx,
           ownerId: project.created_by,
@@ -5350,7 +5355,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       }
       // IMPORT: failed/cancelled базу НЕ валит — импортируем частичный data,
       // если он есть, иначе идём в analyzing без обогащения.
-      const imported = await importConstructRows(ctx, bcJobId);
+      // There is nothing safe to rebuild when all current inputs were
+      // excluded. Old row-level verdicts still cannot identify which sibling
+      // email was validated, so discard that legacy result without a new job.
+      const imported = legacyWithoutSplit ? null : await importConstructRows(ctx, bcJobId);
       const failNote =
         bcStatus === 'completed'
           ? null
@@ -5369,8 +5377,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       } else {
         info.construct = {
           ...construct,
-          status: bcStatus === 'completed' ? 'done' : bcStatus,
-          note: failNote
+          status: legacyWithoutSplit || bcStatus === 'completed' ? 'done' : bcStatus,
+          note: legacyWithoutSplit
+            ? 'Старый результат конструктора без разбиения email не импортирован: доступных исходных кандидатов не осталось; повторная проверка не запускалась'
+            : failNote
             ? `${failNote} — база без обогащения`
             : 'конструктор вернул пустые данные — база без обогащения',
         };
@@ -5380,7 +5390,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         `[base_collect] construct ${bcStatus}: ${
           imported
             ? `импортировано ${imported.rows.length} строк, почт ${imported.emailsFound}, валидных ${imported.validCount}`
-            : 'данных нет — база без обогащения'
+            : legacyWithoutSplit ? info.construct.note : 'данных нет — база без обогащения'
         }`,
       );
     } else {

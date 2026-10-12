@@ -107,7 +107,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     createLeadsMock.mockReset().mockResolvedValue({ leads_uploaded: 1, remaining_in_plan: 1 });
     capacityMock.mockResolvedValue({ limit: 10, used: 9, remaining: 1 });
     const policyDb = createMockSupabase({ tables: { ve_project_exclusions: [{
-      project_id: 've-project', revision: 1, inns: ['1234567890'], domains: [], updated_at: null,
+      project_id: 've-project', revision: 1, inns: ['1234567890'], domains: [], emails: [], updated_at: null,
     }] } });
     const policyLeads = [
       withVeDeliveryCompanyIdentity({ email: 'blocked@gmail.com' }, { 'ИНН': '1234567890' }),
@@ -144,7 +144,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     // Recover exact source identities, including a supply batch, but never
     // assign another company's INN from an ambiguous shared address.
     const legacyDb = createMockSupabase({ tables: {
-      ve_project_exclusions: [{ project_id: 'legacy-project', revision: 1, inns: ['1234567890'], domains: ['excluded-company.ru'] }],
+      ve_project_exclusions: [{ project_id: 'legacy-project', revision: 1, inns: ['1234567890'], domains: ['excluded-company.ru'], emails: [] }],
       ve_contact_delivery_rows: [
         { id: 'd1', ve_project_id: 'legacy-project', email_normalized: 'legacy@gmail.com', item_id: 'legacy-item' },
         { id: 'd2', ve_project_id: 'legacy-project', email_normalized: 'shared@gmail.com', item_id: 'legacy-item' },
@@ -179,6 +179,18 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
       leads: [{ email: 'unknown-first@gmail.com' }],
       prepareProviderChunk: createVeDeliveryExclusionGuard(legacyDb as never, 'legacy-project'),
     })).toMatchObject({ accepted: 1, skipped: 0, acceptedIndexes: [0], skippedIndexes: [] });
+    const emailOnlyDb = createMockSupabase({ tables: { ve_project_exclusions: [{
+      project_id: 'email-project', revision: 1, inns: [], domains: [], emails: ['stop@gmail.com'],
+    }] } });
+    createLeadsMock.mockClear();
+    expect(await appendLeadsToClientCampaign({ ...capacityInput,
+      leads: [{ email: 'stop@gmail.com' }, { email: 'keep@gmail.com' }],
+      prepareProviderChunk: createVeDeliveryExclusionGuard(emailOnlyDb as never, 'email-project'),
+    })).toMatchObject({ accepted: 1, skipped: 1, acceptedIndexes: [1], skippedIndexes: [0], attemptedIndexes: [1] });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
+    expect(createLeadsMock.mock.calls[0][0]).toEqual([{ email: 'keep@gmail.com' }]);
+    // Exact email checks need no source-base or identity-recovery queries.
+    expect(emailOnlyDb.selects.every(call => call.table === 've_project_exclusions')).toBe(true);
   });
 
   it('continues with the untouched tail when workspace blocklist rejections leave free slots', async () => {

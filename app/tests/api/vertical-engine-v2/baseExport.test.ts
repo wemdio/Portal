@@ -96,7 +96,7 @@ function seedAllContacts(options: Partial<MockSupabaseSeed> = {}) {
     tables: {
       ve_projects: [{ id: EXPORT_PROJECT, name: 'Аудит Профи' }],
       ve_hypotheses: [{ id: EXPORT_HYPOTHESIS, project_id: EXPORT_PROJECT, title: 'Производство' }],
-      ve_project_exclusions: [{ project_id: EXPORT_PROJECT, revision: 1, inns: ['7701234567'], domains: ['blocked.ru'] }],
+      ve_project_exclusions: [{ project_id: EXPORT_PROJECT, revision: 1, inns: ['7701234567'], domains: ['blocked.ru'], emails: [] }],
       ve_bases: [
         base('base-first', [...ready, ...ROWS.slice(1, 4), { company: 'No verdict', email: 'unverified@example.com' }]),
         base('base-daily', [ready[1], { company: 'Fresh', email: 'fresh@new-company.ru', _email_status: 'ok' },
@@ -294,6 +294,14 @@ describe('Vertical Engine v2 base CSV export', () => {
     await mockPortalDb.from('ve_project_exclusions').update({ revision: 2, domains: ['archive.ru', 'blocked.ru'] }).eq('project_id', EXPORT_PROJECT);
     const filtered = await GET_ALL_CONTACTS(allContactsRequest(), allContactsContext());
     expect(await filtered.text()).not.toContain('uploaded@archive.ru');
+    await mockPortalDb.from('ve_project_exclusions').update({ revision: 3, inns: [], domains: [],
+      emails: ['fresh@new-company.ru', 'uploaded@archive.ru', 'lead-1@example.com'],
+    }).eq('project_id', EXPORT_PROJECT);
+    const emailFiltered = await GET_ALL_CONTACTS(allContactsRequest(), allContactsContext());
+    expect(emailFiltered.status).toBe(200);
+    const emailCsv = await emailFiltered.text();
+    for (const removed of ['fresh@new-company.ru', 'uploaded@archive.ru', 'lead-1@example.com']) expect(emailCsv).not.toContain(removed);
+    for (const kept of ['uncertain@archive.ru', 'lead-2@example.com', 'next-day@example.com']) expect(emailCsv).toContain(kept);
 
     // Aliased source columns and immutable daily history preserve their cells,
     // while old vertical-wide bases contribute only the owned delivery rows.
@@ -382,7 +390,7 @@ describe('Vertical Engine v2 base CSV export', () => {
     expect(csv).not.toContain('beta@example.com');
     expect(csv).not.toContain('not-an-email');
     await mockPortalDb.from('ve_project_exclusions').insert({ project_id: 'project-export-1',
-      revision: 1, inns: [], domains: ['example.com'] });
+      revision: 1, inns: [], domains: ['example.com'], emails: [] });
     const excluded = await GET(request('launch-ready', true), { params: Promise.resolve({ id: BASE_ID }) });
     expect(excluded.status).toBe(409);
     const raw = await GET(request('raw'), { params: Promise.resolve({ id: BASE_ID }) });
@@ -392,6 +400,8 @@ describe('Vertical Engine v2 base CSV export', () => {
     expect(unknown.status).toBe(200);
     expect(unknown.headers.get('X-VE-Project-Unidentified')).toBe('1');
     expect(await unknown.text()).toContain('alpha@example.com');
+    await mockPortalDb.from('ve_project_exclusions').update({ inns: [], emails: ['alpha@example.com'] }).eq('project_id', 'project-export-1');
+    expect((await GET(request('launch-ready', true), { params: Promise.resolve({ id: BASE_ID }) })).status).toBe(409);
   });
 
   it('requires the exact template, audit and preset context for launch-ready export', async () => {

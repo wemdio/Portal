@@ -138,7 +138,7 @@ it('recovers the exact filtered reserve and period ownership without uploading c
   await mockPortalDb.from('ve_contact_delivery_rows').insert({ id: 'own-contact', ve_project_id: 've-project-1',
     campaign_row_id: 'own-row', email_normalized: 'allowed@example.test', status: 'ready', lead_payload: oldPayload });
   await mockPortalDb.from('ve_project_exclusions').insert({ project_id: 've-project-1',
-    revision: 1, inns: [], domains: ['example.test'] });
+    revision: 1, inns: [], domains: ['example.test'], emails: [] });
   expect((await recover()).status).toBe(200);
   expect(mockPortalDb.rpcCalls.at(-1)?.params.p_drip_rows).toEqual([
     expect.objectContaining({ email_normalized: 'allowed@example.test', lead_payload: oldPayload }),

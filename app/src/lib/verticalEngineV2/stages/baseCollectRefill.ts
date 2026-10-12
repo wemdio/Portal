@@ -519,7 +519,7 @@ export async function runVeRefillAppend(args: {
     const { kept: clientAllowed, blockedCount } = filterBlockedLeads(leads, blockedSet);
     runStats.skipped_blocklist = blockedCount;
     const exclusions = await loadVeProjectExclusions(ctx.supabase, job.project_id);
-    const kept = clientAllowed.filter(lead => !matchVeProjectExclusion(sourceRowByLead.get(lead) ?? {}, exclusions));
+    const kept = clientAllowed.filter(lead => !matchVeProjectExclusion({ ...sourceRowByLead.get(lead), email: lead.email }, exclusions));
     runStats.skipped_project_exclusions = clientAllowed.length - kept.length;
 
     // 5. Дневной cap проекта резервируется атомарно в БД. Обычный read spent

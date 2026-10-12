@@ -620,7 +620,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   try {
     const rules = await loadVeProjectExclusions(portalDb, base.project_id);
     groups = groups.map(group => ({ ...group, leadIdx: group.leadIdx.filter(index => {
-      if (!matchVeProjectExclusion(audience.rows[index], rules)) return true;
+      if (!matchVeProjectExclusion({ ...audience.rows[index], email: audience.leads[index].email }, rules)) return true;
       projectExcludedCount += 1;
       return false;
     }) })).filter(group => group.leadIdx.length > 0);

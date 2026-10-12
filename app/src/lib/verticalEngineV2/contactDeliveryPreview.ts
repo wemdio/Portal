@@ -7,7 +7,7 @@ import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
 import { filterVeProjectExcludedRows, loadVeProjectExclusions, matchVeProjectExclusion, type VeProjectExclusions } from './projectExclusions';
-import { createVeDeliveryIdentityResolver } from './projectExclusionDelivery';
+import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
 import { ContactDeliveryAnalyticsUnavailableError, loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
@@ -311,10 +311,13 @@ export async function buildVeContactDeliveryPreview(
   let exclusions: VeProjectExclusions;
   try { exclusions = await loadVeProjectExclusions(portalDb, base.project_id); }
   catch { return outcome(503, 'VE_PROJECT_EXCLUSIONS_UNAVAILABLE', 'Не удалось проверить исключения проекта. Попробуйте ещё раз.'); }
-  const policyAudience = filterVeProjectExcludedRows(currentValidation.snapshot.audience.rows, exclusions);
+  const policyCandidates = currentValidation.snapshot.audience.rows.map((row, index) => ({
+    ...row, email: currentValidation.snapshot.audience.leads[index].email,
+  }));
+  const policyAudience = filterVeProjectExcludedRows(policyCandidates, exclusions);
   const allowedRows = new Set(policyAudience.kept);
   const candidateLeads = filterBlockedLeads(
-    currentValidation.snapshot.audience.leads.filter((_, index) => allowedRows.has(currentValidation.snapshot.audience.rows[index])),
+    currentValidation.snapshot.audience.leads.filter((_, index) => allowedRows.has(policyCandidates[index])),
     blockedEmails,
   ).kept;
   let readyRemaining: number;
@@ -333,7 +336,7 @@ export async function buildVeContactDeliveryPreview(
     const activeRows = new Set(inventory.activeCampaignRowIds);
     const readyCandidates = rows.filter((row) => row.status === 'ready' && !blockedEmails.has(row.email_normalized));
     const identities = exclusions.inns.length + exclusions.domains.length > 0
-      ? await createVeDeliveryIdentityResolver(portalDb, base.project_id)(readyCandidates) : [];
+      ? await createVeDeliveryIdentityResolver(portalDb, base.project_id)(readyCandidates) : readyCandidates.map(veDeliveryPolicyRow);
     const readyRows = readyCandidates.filter((_, index) => !identities[index] || !matchVeProjectExclusion(identities[index], exclusions));
     readyRemaining = readyRows.filter((row) => activeRows.has(row.campaign_row_id)).length + prospective;
     reserveRemaining = readyRows.length + prospective;
