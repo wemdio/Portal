@@ -6,11 +6,17 @@ import { ContactUploadNotice } from '@/components/vertical-engine-v2/engine/Cont
 import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/OutreachLaunchPanel';
 import { DeliveryTargetPanel } from '@/components/vertical-engine-v2/engine/DeliveryTargetPanel';
 import { ProjectExclusions } from '@/components/vertical-engine-v2/engine/ProjectExclusions';
+import { DownloadVerifiedContacts } from '@/components/vertical-engine-v2/engine/DownloadVerifiedContacts';
 
 const mockVeEnginePost = jest.fn();
 const mockVeEngineCall = jest.fn();
 const mockAuthFetch = jest.fn();
+const mockDownloadBaseCsvResponse = jest.fn();
 jest.mock('@/lib/authFetch', () => ({authFetch: (...args: unknown[]) => mockAuthFetch(...args)}));
+jest.mock('@/lib/verticalEngineV2/baseCsv', () => ({
+  ...jest.requireActual('@/lib/verticalEngineV2/baseCsv'),
+  downloadBaseCsvResponse: (...args: unknown[]) => mockDownloadBaseCsvResponse(...args),
+}));
 // Поля useTemplateLaunch, которые читает панель автоаутрича.
 const mockLaunch: Record<string, unknown> = {};
 
@@ -198,6 +204,45 @@ describe('VE2 auto-outreach launch panel', () => {
       expect(savedDomains).toHaveValue('third.ru');
       expect(onExclusionsSaved).toHaveBeenCalledTimes(1);
     } finally { confirm.mockRestore(); }
+    exclusionsView.unmount();
+
+    // Full audience downloads are explicit, include supply through the scoped
+    // endpoint, survive parent polling, and never save an error as a CSV file.
+    mockAuthFetch.mockReset();
+    mockDownloadBaseCsvResponse.mockReset();
+    const downloads = render(<DownloadVerifiedContacts projectId="project-1" hypothesisId="hypothesis-1" />);
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+    let finishDownload!: (response: unknown) => void;
+    mockAuthFetch.mockImplementationOnce(() => new Promise(resolve => { finishDownload = resolve; }));
+    await user.click(screen.getByRole('button', { name: 'Скачать все проверенные контакты' }));
+    const pendingDownload = screen.getByRole('button', { name: 'Готовим CSV…' });
+    expect(pendingDownload).toBeDisabled();
+    await user.click(pendingDownload);
+    downloads.rerender(<DownloadVerifiedContacts projectId="project-1" hypothesisId="hypothesis-1" />);
+    expect(mockAuthFetch).toHaveBeenCalledTimes(1);
+    expect(mockAuthFetch).toHaveBeenLastCalledWith('/api/tools/vertical-engine-v2/projects/project-1/contacts/export?hypothesis_id=hypothesis-1');
+    await act(async () => { finishDownload({ ok: false, status: 409,
+      json: async () => ({ error: 'Проверенных контактов для скачивания пока нет.' }) }); });
+    expect(await screen.findByRole('status')).toHaveTextContent('Проверенных контактов для скачивания пока нет.');
+    expect(mockDownloadBaseCsvResponse).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Скачать все проверенные контакты' })).toBeEnabled();
+    mockAuthFetch.mockResolvedValueOnce({ ok: false, status: 503,
+      json: async () => ({ error: 'Не удалось проверить исключения проекта.' }) });
+    await user.click(screen.getByRole('button', { name: 'Скачать все проверенные контакты' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не удалось проверить исключения проекта.');
+    expect(mockDownloadBaseCsvResponse).not.toHaveBeenCalled();
+    const csvResponse = { ok: true, status: 200 };
+    mockAuthFetch.mockResolvedValueOnce(csvResponse);
+    mockDownloadBaseCsvResponse.mockResolvedValueOnce(undefined);
+    await user.click(screen.getByRole('button', { name: 'Скачать все проверенные контакты' }));
+    await waitFor(() => expect(mockDownloadBaseCsvResponse).toHaveBeenCalledWith(csvResponse, 'hypothesis-hypothesis-1-verified.csv'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    mockAuthFetch.mockRejectedValueOnce(new Error('Network error'));
+    await user.click(screen.getByRole('button', { name: 'Скачать все проверенные контакты' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Не удалось скачать контакты. Попробуйте ещё раз.');
+    expect(screen.getByRole('button', { name: 'Скачать все проверенные контакты' })).toBeEnabled();
+    expect(mockDownloadBaseCsvResponse).toHaveBeenCalledTimes(1);
+    downloads.unmount();
   });
   beforeAll(() => {
     // jsdom не даёт crypto.randomUUID; панель берёт из него ключ идемпотентности.

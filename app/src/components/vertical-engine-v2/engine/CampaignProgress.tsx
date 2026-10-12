@@ -1,5 +1,6 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import type { VeContactSupplyStatus } from '@/lib/verticalEngineV2/contactSupplyStatus';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
@@ -13,6 +14,7 @@ interface CampaignProgressProps {
   title: string;
   /** False for imported bases and other campaigns without automatic supply. */
   required: boolean;
+  headerAction?: ReactNode;
 }
 
 const SUPPLY_LABELS: Record<NonNullable<VeContactSupplyStatus['plan']>['status'], string> = {
@@ -26,7 +28,7 @@ const SUPPLY_LABELS: Record<NonNullable<VeContactSupplyStatus['plan']>['status']
 
 const count = (value: number) => value.toLocaleString('ru-RU');
 
-export function CampaignProgress({ template, title, required }: CampaignProgressProps) {
+export function CampaignProgress({ template, title, required, headerAction }: CampaignProgressProps) {
   const supply = useContactSupply(template.id, required, null);
   const info = parseLaunchInfo((template as VeTemplate & { launch_info?: unknown }).launch_info);
   const plan = required ? supply.data?.plan : null;
@@ -42,7 +44,10 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
 
   return (
     <article className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
-      <h3 className="ve2-h3">{title}</h3>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h3 className="ve2-h3">{title}</h3>
+        {headerAction}
+      </div>
       <ContactUploadNotice key={template.id} templateId={template.id} />
 
       {plan ? (
