@@ -198,6 +198,7 @@ describe('VE2 contact delivery runner', () => {
       skipIfInCampaign: false,
       entitlementMode: 'managed_contract',
       expectedInstantlyAccountId: 'workspace-1',
+      prepareProviderChunk: expect.any(Function),
     }));
   });
 

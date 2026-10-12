@@ -15,8 +15,9 @@
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { VE_RELEVANCE_RULES_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
-import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
+import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veSavedReviewSignature } from '@/lib/verticalEngineV2/relevanceReserve';
 import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
+import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { resetVeTriageState, veTriageRubricMessages } from '@/lib/verticalEngineV2/relevanceTriage';
 import { VE_RELEVANCE_TARGET_RULES } from '@/lib/verticalEngineV2/relevanceReview';
 import { readRelevanceCheckpoint, relevanceHash } from '@/lib/verticalEngineV2/relevanceCheckpoint';
@@ -833,5 +834,18 @@ describe('VE2 relevance selection rules', () => {
         relevance_reserve: { version: 1, rows: reserve } } });
     expect(canResumePartialPreview(base([row]))).toBe(true);
     expect(canResumePartialPreview(base([stamped]))).toBe(false);
+    const completed = base([row]);
+    expect(canResumePartialPreview({ ...completed, collect_info: { ...completed.collect_info,
+      relevance_review_progress: { signature: relevanceHash(veSavedReviewSignature([row], { triage: isVeRelevanceTriageEnabled('p1') })), passes: 1 } } })).toBe(false);
+    const existingOnly = base([deferred]);
+    expect(canResumePartialPreview({ ...existingOnly, collect_info: { ...existingOnly.collect_info,
+      search_policy: { phase: 'existing' } } })).toBe(false);
+    // A repeated click must not turn a completed unknown SMTP verdict into a
+    // fresh validation request. An unprocessed address remains resumable.
+    const unknown = base([{ ...stamped, _email_status: 'unknown' }]);
+    expect(canResumePartialPreview(unknown)).toBe(true);
+    expect(canResumePartialPreview({ ...unknown, collect_info: { ...unknown.collect_info,
+      saved_email_recovery: { version: 1, attempt_id: 'automatic:base',
+        checked: { [relevanceHash(row.email)]: 'unknown' } } } })).toBe(false);
   });
 });

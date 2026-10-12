@@ -13,6 +13,7 @@ import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { createClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 import { searchVeNicheDirectoryRows } from '@/lib/verticalEngineV2/nicheDirectory';
+import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyInns, vePaymentCompanyHint } from '@/lib/verticalEngineV2/paymentCompanyDirectory';
 
 const ctx = {} as VeStageContext;
 const empty = { inns: new Set<string>(), emails: new Set<string>(), receipts: new Set<string>(), websiteInns: new Map<string, Set<string>>() };
@@ -167,12 +168,46 @@ describe('строка реестра', () => {
     expect(request.searchParams.getAll('employees_count')).toEqual(['gte.2', 'lte.20']);
     expect([request.searchParams.get('offset'), request.searchParams.get('limit'), request.searchParams.get('order')])
       .toEqual(['200', '100', 'id.asc']);
+
+    // Provider identities reach the same bounded reader even when the legal
+    // name is neutral or its exact OKVED lies outside finance/IT. The catalog
+    // is a source hint, not permission to bypass the specialist's filters.
+    const providerRequests: URL[] = [];
+    const providerDb = createClient('https://niche.test', 'local-test-key', { auth: { persistSession: false }, global: {
+      fetch: async (input) => {
+        const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+        providerRequests.push(url);
+        const data = url.pathname.endsWith('/companies_directory') ? [
+          { id: 4, inn: '7723887394', name: 'ООО ПЭЙМАСТЕР', website: 'unrelated.test', email: 'wrong@unrelated.test', okved_code: '82.99', okved_code_exact: '82.99' },
+          { id: 5, inn: '2536154341', name: 'ООО АРСЕНАЛ МЕДИА', website: null, okved_code: '62.02', okved_code_exact: '62.02' },
+          { id: 6, inn: '7700000111', name: 'Неизвестная компания', website: 'untouched.test', okved_code: '64', okved_code_exact: '64' },
+        ] : url.searchParams.get('select') === 'code,parent_code' ? [{ code: '64', parent_code: 'K' }] : [];
+        return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    } });
+    const providerResult = await searchVeNicheDirectoryRows(providerDb,
+      { ...filters, identityCatalog: VE_PAYMENT_DIRECTORY_REVISION }, ['пэй', 'пей'], 100, 200);
+    expect(providerResult.error).toBeUndefined();
+    expect(providerResult.rows[0]).toMatchObject({ inn: '7723887394', website: 'unrelated.test', okved_code: '82.99' });
+    expect(mapDirectoryRow(providerResult.rows[0])).toMatchObject({ inn: '7723887394', website: vePaymentCompanyHint('7723887394')!.website, email: '' });
+    expect(mapDirectoryRow(providerResult.rows[0]).source_detail).toContain('wrong@unrelated.test');
+    expect(mapDirectoryRow(providerResult.rows[1])).toMatchObject({ inn: '2536154341', website: vePaymentCompanyHint('2536154341')!.website });
+    expect(providerResult.rows[2].website).toBe('untouched.test');
+    const providerRequest = providerRequests.find((url) => url.pathname.endsWith('/companies_directory'))!;
+    const identities = `inn.in.(${vePaymentCompanyInns().join(',')})`;
+    expect(providerRequest.searchParams.getAll('or')).toEqual([
+      `(and(or(${identities},and(or(name.ilike.*пэй*,name.ilike.*пей*),or(okved_code_exact.like.64*,and(okved_code_exact.is.null,okved_code.in.(64))))),or(website.not.is.null,${identities})))`,
+    ]);
+    expect(providerRequest.searchParams.get('website')).toBeNull();
+    for (const key of ['region_code', 'name', 'email', 'revenue', 'employees_count', 'order', 'limit', 'offset']) {
+      expect(providerRequest.searchParams.getAll(key)).toEqual(request.searchParams.getAll(key));
+    }
     const beforeInvalid = requests.length;
     for (const terms of [[], ['*'], ['fin,or(name.not.is.null)'], ['a b'], ['xx'], ['x'.repeat(41)], Array(13).fill('pay')]) {
       await expect(searchVeNicheDirectoryRows(db, filters, terms, 100)).resolves.toMatchObject({ rows: [], error: expect.any(String) });
     }
     for (const bad of [{ ...filters, hasPhone: true }, { ...filters, okvedCodes: ['64,62'] },
-      { ...filters, employeesFrom: 1.5 }]) {
+      { ...filters, employeesFrom: 1.5 }, { ...filters, identityCatalog: 'arbitrary-provider-list' as typeof VE_PAYMENT_DIRECTORY_REVISION }]) {
       await expect(searchVeNicheDirectoryRows(db, bad, ['pay'], 100)).resolves.toMatchObject({ rows: [], error: expect.any(String) });
     }
     await expect(searchVeNicheDirectoryRows(db, filters, ['pay'], 1001)).resolves.toMatchObject({ rows: [], error: expect.any(String) });

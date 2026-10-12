@@ -164,6 +164,19 @@ export interface VeCollectInfo {
 }
 
 /** GET /projects/[id] отдаёт усечённые строки баз (без тяжёлого data). */
+export interface VeCollectionContinuation {
+  available: boolean;
+  action: 'resume_collection' | 'resume_preparation' | null;
+  code: string;
+  reason: string;
+}
+
+export interface VePreparationAction {
+  status: 'queued' | 'already_running' | 'unavailable' | 'ready';
+  reason: string;
+  hypothesis_id: string | null;
+}
+
 export type VeBaseSummary = Pick<
   VeBase,
   'id' | 'vertical_id' | 'hypothesis_id' | 'filename' | 'row_count' | 'analysis' | 'created_at' | 'columns' | 'sample_rows'
@@ -182,6 +195,8 @@ export type VeBaseSummary = Pick<
   source?: VeBaseSource;
   /** План/прогресс автосборки (null у загруженных вручную). */
   collect_info?: VeCollectInfo | null;
+  /** Evaluated by the server from complete saved collection state. */
+  collection_continuation?: VeCollectionContinuation | null;
 };
 
 /** Усечённая строка джобы (без result/tokens). */

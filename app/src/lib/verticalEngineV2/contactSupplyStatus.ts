@@ -5,6 +5,8 @@ import { getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { allocateContactSupplyTargets } from './contactSupplyPlanner';
 import { buildVeBaseAudienceSummary, type VeAudienceBase, type VeBaseAudienceSummary } from './baseAudienceSummary';
 import { localIsoDate } from './portalDeliveryTerm';
+import { loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
+import { createVeDeliveryIdentityResolver } from './projectExclusionDelivery';
 
 type SupplyStock = {
   ready: number; uploaded: number; uploaded_today: number; uncertain: number;
@@ -86,17 +88,25 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
     typeof estimate.as_of === 'string' && typeof estimate.scope === 'string'
     ? { contacts: estimate.contacts, as_of: estimate.as_of, scope: estimate.scope, confidence: 'low' }
     : null;
-  const rows = plan.item_id ? await readContactDeliveryPages<{status: string; finalized_at: string | null; email_normalized: string}>(
-    'supply display inventory', (from, to) => db.from('ve_contact_delivery_rows')
-      .select('status, finalized_at, email_normalized', { count: 'exact' }).eq('item_id', plan.item_id)
-      .order('id').range(from, to),
+  const exclusions = await loadVeProjectExclusions(db, base.project_id);
+  const rows = plan.item_id ? await readContactDeliveryPages<{status: string; finalized_at: string | null; email_normalized: string; lead_payload?: Record<string, unknown>}>(
+    'supply display inventory', (from, to) => {
+      const query = exclusions.inns.length + exclusions.domains.length > 0
+        ? db.from('ve_contact_delivery_rows').select('status, finalized_at, email_normalized, lead_payload, item_id, supply_batch_id', { count: 'exact' })
+        : db.from('ve_contact_delivery_rows').select('status, finalized_at, email_normalized', { count: 'exact' });
+      return query.eq('item_id', plan.item_id).order('id').range(from, to);
+    },
   ) : [];
   const { data: preset, error: presetError } = await instantlyDb.from('client_campaign_presets')
     .select('client_user_id, schedule_timezone').eq('id', binding.preset_id).maybeSingle();
   if (presetError || !preset?.client_user_id) throw new Error('Не удалось проверить запас клиента');
   const blocked = await getBlockedEmailSet(instantlyDb, preset.client_user_id);
+  const readyCandidates = rows.filter(row => row.status === 'ready' && !blocked.has(row.email_normalized));
+  const policyRows = exclusions.inns.length + exclusions.domains.length > 0
+    ? await createVeDeliveryIdentityResolver(db, base.project_id)(readyCandidates) : [];
+  const ready = readyCandidates.filter((_, index) => !policyRows[index] || !matchVeProjectExclusion(policyRows[index], exclusions)).length;
   const stockAt = (timezone: string, businessDate: string): SupplyStock => ({
-    ready: rows.filter(row => row.status === 'ready' && !blocked.has(row.email_normalized)).length,
+    ready,
     uploaded: rows.filter(row => row.status === 'accepted').length,
     uploaded_today: rows.filter(row => row.status === 'accepted' && row.finalized_at &&
       Number.isFinite(Date.parse(row.finalized_at)) && localIsoDate(new Date(row.finalized_at), timezone) === businessDate).length,
@@ -148,20 +158,20 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
   const requiredDaily = Math.min(Number(p.required_daily), Number(p.sender_capacity));
   const dailyTarget = allocateContactSupplyTargets(requiredDaily, items.map((item) => ({ id: item.id, weight: item.potential_pct })))
     .find((item) => item.itemId === plan.item_id)?.contacts ?? 0;
-  const ready = plan.item_id ? rows.filter((row) => row.status === 'ready' && !blocked.has(row.email_normalized)).length : Number(p.prospective_ready);
+  const readyStock = plan.item_id ? stock.ready : Number(p.prospective_ready);
   result.metrics = {
     ...stock,
-    ready,
+    ready: readyStock,
     project_first_contacted: Number(p.contacts_done_count), project_daily_plan: dayRun?.effective_count ?? Number(p.effective_daily),
     project_required_daily: requiredDaily, project_ready: Number(p.ready_remaining),
     project_stock_workdays: requiredDaily > 0 ? Math.floor(Number(p.ready_remaining) / requiredDaily) : null,
     hypothesis_daily_target: dailyTarget,
-    hypothesis_stock_workdays: dailyTarget > 0 ? Math.floor(ready / dailyTarget) : null,
+    hypothesis_stock_workdays: dailyTarget > 0 ? Math.floor(readyStock / dailyTarget) : null,
     hypothesis_estimated_workdays: null,
     business_date: String(p.business_date), timezone,
   };
   if (result.estimate) {
-    result.metrics.hypothesis_estimated_workdays = dailyTarget > 0 ? Math.floor((ready + result.estimate.contacts) / dailyTarget) : null;
+    result.metrics.hypothesis_estimated_workdays = dailyTarget > 0 ? Math.floor((readyStock + result.estimate.contacts) / dailyTarget) : null;
   }
   return result;
 }

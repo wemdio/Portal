@@ -266,6 +266,14 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
     const blockedPreview = await POST(request(), {params: Promise.resolve({id: TEMPLATE_ID})});
     expect(blockedPreview.status).toBe(503);
     expect(await blockedPreview.json()).toMatchObject({code: 'DELIVERY_ANALYTICS_PENDING'});
+
+    await mockPortalDb.from('ve_project_exclusions').insert({ project_id: VE_PROJECT_ID,
+      revision: 1, inns: ['1234567890'], domains: [] });
+    await mockPortalDb.from('ve_contact_delivery_rows').update({ lead_payload: {
+      _ve_company_identity: { inns: ['1234567890'], domains: [] },
+    } }).in('email_normalized', ['ready-a@example.test', 'accepted-today@example.test']);
+    const excludedStock = await read();
+    expect(excludedStock).toMatchObject({ stock: { ready: 1, uploaded: 2, uploaded_today: 1, uncertain: 2 } });
   });
 
   it('uses only the exact active Portal period and the fresh unblocked audited audience', async () => {

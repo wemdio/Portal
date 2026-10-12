@@ -1,6 +1,16 @@
 import 'server-only';
 import { datasetQuery } from '@/lib/instantlyDataset';
 import { isReservedMailboxPoolTag } from '@/lib/instantly/mailboxTags';
+import {
+  DEFAULT_DAILY_LIMIT, RECENT_WINDOW_DAYS,
+  assembleMailboxLoad, isCalendarDay, num, pickDefaultDay, sendingWeekdays, weekdayOf,
+  type BoxRow, type CampaignRefRow, type CampaignVolumeRow, type DaySendRow, type MailboxLoad,
+  type MailboxRow, type ProjectLinkRow, type ProjectRow, type ScheduleVotes,
+} from '@/lib/instantly/mailboxLoadModel';
+
+export type {
+  InactiveReason, InactiveTag, MailboxLoad, MailboxRow, OwnerSource, SpecialistLoad, TagLoad, TagStatus,
+} from '@/lib/instantly/mailboxLoadModel';
 
 /**
  * Нагрузка на почтовые ящики (mailbox load) по тегам и специалистам.
@@ -12,8 +22,8 @@ import { isReservedMailboxPoolTag } from '@/lib/instantly/mailboxTags';
  * ящики на паузе); 100% = выжали всё.
  *
  * Источник — аналитический датасет instantly_dataset (ночной синк), НЕ live API.
- * Поэтому «день» — это последний ПОЛНЫЙ день в датасете (датасет всегда отстаёт
- * на ночной синк, так что max(день отправок) = последний завершённый день).
+ * Поэтому «день» по умолчанию — последний ПОЛНЫЙ день в датасете, в который
+ * кампании шлют по расписанию (выходные пропускаются, см. mailboxLoadModel.ts).
  *
  * Данные:
  *  - потолок:  coalesce(raw_accounts.daily_limit, 30) по активным (status=1).
@@ -25,327 +35,234 @@ import { isReservedMailboxPoolTag } from '@/lib/instantly/mailboxTags';
  *  - факт:     raw_emails (ue_type=1) за день, bucket по UTC. Считается по ВСЕМ
  *              ящикам тега независимо от текущего status — факт есть факт
  *              (ящик мог слать утром и встать на паузу вечером).
- *  - специалист: raw_campaigns.email_tag_list → portal_project_campaigns →
- *              portal_projects.specialist (доминирующий по числу кампаний тега)
+ *  - клиент:   по СВОИМ кампаниям тега (ссылаются на тег или на его ящики в
+ *              email_list): кто слал с его ящиков в этот день (raw_emails), иначе
+ *              за неделю (v_campaign_daily_canonical), иначе активные, иначе
+ *              последняя прежняя. Проект — portal_project_campaigns ∪
+ *              portal_period_campaigns → portal_projects.
+ *  - в работе: свои кампании слали за RECENT_WINDOW_DAYS дней или проект тега
+ *              не завершён; остальные теги — блок «Не в работе».
  *  - пул:      теги «неименные …» — резерв ящиков; при взятии клиента в
  *              работу ящику ставят ВТОРОЙ (клиентский) тег. Поэтому пул-тег
- *              не показываем строкой клиента (дублировал бы клиентские цифры),
- *              а считаем по нему свободный резерв (ящики без второго тега).
+ *              не показываем строкой клиента (дублировал бы клиентские цифры).
  *
  * Даты возвращаются строками 'YYYY-MM-DD' — чтобы pg/JS не сдвинул день по tz.
  */
 
-// пороги утилизации (доля факт/потолок)
-const LOW = 0.4; // ниже — недогруз
-const FULL = 0.9; // выше — фактически потолок
-const OVER = 1.05; // выше — перебор (подняли лимиты / всплеск)
 // синк считается устаревшим, если последний успешный старше стольких часов
 const STALE_SYNC_HOURS = 30;
-// дефолт воркспейса Instantly для ящиков без явного daily_limit (API тогда
-// вообще не отдаёт блок настроек отправки). Значение подтверждено замером.
-const DEFAULT_DAILY_LIMIT = 30;
-const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// формат + календарная валидность ('2026-02-31' проходит регексп, но ::date
-// в Postgres кидает out of range → ложный 500 build_failed в мониторинге)
-function isCalendarDay(s: string): boolean {
-  if (!DAY_RE.test(s)) return false;
-  const d = new Date(`${s}T00:00:00Z`);
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
-}
-
-export type TagStatus = 'no_capacity' | 'stopped' | 'idle' | 'low' | 'ok' | 'full' | 'over';
-
-export type TagLoad = {
-  tagId: string;
-  tag: string;
-  activeMailboxes: number;
-  totalMailboxes: number;
-  capacity: number; // Σ effective daily_limit по активным ящикам
-  sent: number; // отправлено за день (все ящики тега)
-  utilization: number | null; // sent/capacity; null если потолок 0
-  status: TagStatus;
-  specialist: string | null; // доминирующий специалист
-  client: string | null; // доминирующий клиент
-  otherSpecialists: string[]; // прочие специалисты тега (для подсказки)
-  projectCount: number;
+type FreshRow = {
+  last_send_day: string | null; last_synced_day: string | null;
+  last_sync: string | null; sync_age_hours: string | null;
 };
 
-export type SpecialistLoad = {
-  specialist: string; // '__unassigned__' → «Не привязано»
-  tagCount: number;
-  activeMailboxes: number;
-  capacity: number;
-  sent: number;
-  utilization: number | null;
-  status: TagStatus;
-  clients: string[];
-  tags: string[];
-};
-
-export type MailboxRow = {
-  email: string;
-  statusValue: number | null;
-  status: string | null; // label_ru
-  dailyLimit: number; // effective (NULL → дефолт 30)
-  isDefaultLimit: boolean; // лимит не выставлен явно, действует дефолт
-  sent: number;
-  lastUsed: string | null; // 'YYYY-MM-DD' последней отправки (в пределах 30 дн)
-};
-
-export type MailboxLoad = {
-  asOfDay: string; // 'YYYY-MM-DD' — за какой день данные
-  latestDay: string | null; // последний полный день в датасете (для date-picker max)
-  lastSync: string | null; // ISO последнего успешного синка
+export type ResolvedDay = {
+  asOfDay: string;
+  latestDay: string | null;
+  isSendingDay: boolean;
+  skippedDays: string[];
+  lastSync: string | null;
   syncAgeHours: number | null;
-  stale: boolean; // синк устарел (> STALE_SYNC_HOURS)
-  generatedAt: string;
-  tags: TagLoad[];
-  specialists: SpecialistLoad[];
-  totals: { activeMailboxes: number; capacity: number; sent: number; utilization: number | null };
-  notes: string[];
+  stale: boolean;
 };
-
-const UNASSIGNED = '__unassigned__';
-
-function classify(capacity: number, sent: number): TagStatus {
-  // потолка нет: различаем «ничего не происходит» и «слал, но сейчас все
-  // ящики выключены» (status — снимок текущего момента, отправки — история дня)
-  if (capacity <= 0) return sent > 0 ? 'stopped' : 'no_capacity';
-  const u = sent / capacity;
-  if (u <= 0) return 'idle';
-  if (u < LOW) return 'low';
-  if (u < FULL) return 'ok';
-  if (u <= OVER) return 'full';
-  return 'over';
-}
-
-const num = (v: string | number | null | undefined): number => (v == null ? 0 : Number(v));
-
-type FreshRow = { as_of: string | null; last_sync: string | null; sync_age_hours: string | null };
-type TagRow = {
-  tag_id: string; tag: string;
-  active_mailboxes: string; total_mailboxes: string; capacity: string; sent: string;
-};
-type SpecRow = { tag_id: string; specialist: string | null; client: string | null; campaigns: string };
-type TotalsRow = { active_mailboxes: string; capacity: string; sent: string };
 
 /**
- * Определяет последний полный день в датасете (по отправкам, UTC) и свежесть синка.
- * Если day передан явно — использует его, но всё равно тянет свежесть и latestDay.
+ * Определяет день страницы и свежесть синка.
+ *
+ * Без явного дня — последний полный день, в который шлёт большинство активных
+ * кампаний (по их расписаниям). Явный день принимается, если он не позже
+ * последнего полного: будущий или ещё не долитый день дал бы нули по всем
+ * тегам = ложный «все в простое».
  */
-export async function resolveAsOf(day?: string): Promise<{ asOfDay: string; latestDay: string | null; lastSync: string | null; syncAgeHours: number | null; stale: boolean }> {
-  // as_of = последний ПОЛНЫЙ день по отправкам. `< current_date` (UTC) исключает
-  // сегодняшний день: он либо ещё не наступил в данных, либо частично залит идущим
-  // прямо сейчас ночным синком (иначе дефолт мог бы показать неполный день = ложный недогруз).
-  const rows = await datasetQuery<FreshRow>(
-    `SELECT
-       (SELECT to_char(max(timestamp_email)::date, 'YYYY-MM-DD')
-          FROM raw_emails
-          WHERE ue_type = 1 AND timestamp_email >= now() - interval '14 days'
-            AND timestamp_email < current_date) AS as_of,
-       (SELECT to_char(max(finished_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-          FROM dataset_snapshots WHERE ok) AS last_sync,
-       (SELECT round((extract(epoch FROM (now() - max(finished_at))) / 3600)::numeric, 1)::text
-          FROM dataset_snapshots WHERE ok) AS sync_age_hours`,
-  );
-  const r = rows[0] ?? { as_of: null, last_sync: null, sync_age_hours: null };
-  // Явный день принимаем только если он не позже последнего ПОЛНОГО дня:
-  // будущий/ещё-не-долитый день дал бы sent=0 по всем тегам = ложный «все в
-  // простое» (max на дата-пикере — advisory, руками ввести можно; API — тем более).
+export async function resolveAsOf(day?: string): Promise<ResolvedDay> {
+  const [freshRows, voteRows] = await Promise.all([
+    datasetQuery<FreshRow>(
+      // last_send_day — есть ли вообще данные за 14 дней (иначе страница пуста).
+      // last_synced_day — последний ПОЛНЫЙ день по календарю синка: день D
+      // полон, если успешный синк, забиравший письма (counts.new_emails;
+      // прогоны --leads-only и analytics-only письма не тянут), стартовал не
+      // раньше 20:00 UTC этого дня (ночной стартует в 21:00; дневные ручные
+      // прогоны день не закрывают), и не позже вчера. По календарю, а не по последнему дню с письмами:
+      // будний день, в который рассылка встала целиком, обязан стать днём по
+      // умолчанию и показаться пустым, а не исчезнуть.
+      `SELECT
+         (SELECT to_char(max(timestamp_email)::date, 'YYYY-MM-DD')
+            FROM raw_emails
+            WHERE ue_type = 1 AND timestamp_email >= now() - interval '14 days'
+              AND timestamp_email < current_date) AS last_send_day,
+         (SELECT CASE WHEN max(started_at) IS NOT NULL THEN to_char(least(current_date - 1,
+                   (max(started_at AT TIME ZONE 'UTC') - interval '20 hours')::date), 'YYYY-MM-DD') END
+            FROM dataset_snapshots WHERE ok AND counts ? 'new_emails') AS last_synced_day,
+         (SELECT to_char(max(finished_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            FROM dataset_snapshots WHERE ok) AS last_sync,
+         (SELECT round((extract(epoch FROM (now() - max(finished_at))) / 3600)::numeric, 1)::text
+            FROM dataset_snapshots WHERE ok) AS sync_age_hours`,
+    ),
+    // Голоса расписаний: сколько активных кампаний шлёт в каждый день недели.
+    // Ключи days — '0'…'6', 0 = воскресенье (как getUTCDay). jsonpath, а не
+    // jsonb_array_elements/jsonb_each: у тех оценка в миллионы строк, и
+    // Postgres полсекунды JIT-компилировал запрос, работающий 5 мс, — на каждой
+    // загрузке и каждом раскрытии тега (замер 12.10). Кривой JSON lax-режим
+    // пропускает молча.
+    datasetQuery<ScheduleVotes>(
+      `SELECT count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days.*') AS scheduled,
+              count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days."0" ? (@ == true)') AS d0,
+              count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days."1" ? (@ == true)') AS d1,
+              count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days."2" ? (@ == true)') AS d2,
+              count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days."3" ? (@ == true)') AS d3,
+              count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days."4" ? (@ == true)') AS d4,
+              count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days."5" ? (@ == true)') AS d5,
+              count(*) FILTER (WHERE campaign_schedule @? '$.schedules[*].days."6" ? (@ == true)') AS d6
+       FROM raw_campaigns
+       WHERE status = 1`,
+    ),
+  ]);
+  const r = freshRows[0] ?? { last_send_day: null, last_synced_day: null, last_sync: null, sync_age_hours: null };
+  const weekdays = sendingWeekdays(voteRows[0]);
+  const latestDay = r.last_send_day ? (r.last_synced_day ?? r.last_send_day) : null;
+
   // ISO-строки сравниваются лексикографически корректно.
-  const requested = day && isCalendarDay(day) ? day : null;
-  const asOfDay = (requested && r.as_of && requested <= r.as_of) ? requested : (r.as_of ?? '');
+  const requested = day && isCalendarDay(day) && latestDay && day <= latestDay ? day : null;
+  let asOfDay = '';
+  let skippedDays: string[] = [];
+  if (requested) {
+    asOfDay = requested;
+  } else if (latestDay) {
+    ({ day: asOfDay, skipped: skippedDays } = pickDefaultDay(latestDay, weekdays));
+  }
+  const isSendingDay = !asOfDay || weekdays.length === 0 || weekdays.includes(weekdayOf(asOfDay));
   const syncAgeHours = r.sync_age_hours == null ? null : Number(r.sync_age_hours);
   const stale = syncAgeHours == null ? true : syncAgeHours > STALE_SYNC_HOURS;
-  return { asOfDay, latestDay: r.as_of, lastSync: r.last_sync, syncAgeHours, stale };
+  return { asOfDay, latestDay, isSendingDay, skippedDays, lastSync: r.last_sync, syncAgeHours, stale };
 }
 
 /**
- * Собирает всю картину нагрузки за день (по умолчанию — последний полный день).
+ * Собирает всю картину нагрузки за день (по умолчанию — последний рабочий
+ * полный день).
  */
 export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
-  const { asOfDay, latestDay, lastSync, syncAgeHours, stale } = await resolveAsOf(day);
+  const { asOfDay, latestDay, isSendingDay, skippedDays, lastSync, syncAgeHours, stale } = await resolveAsOf(day);
   const generatedAt = new Date().toISOString();
 
   if (!asOfDay) {
     return {
-      asOfDay: '', latestDay, lastSync, syncAgeHours, stale, generatedAt,
-      tags: [], specialists: [],
+      asOfDay: '', latestDay, isSendingDay, skippedDays, lastSync, syncAgeHours, stale, generatedAt,
+      tags: [], specialists: [], inactiveTags: [],
       totals: { activeMailboxes: 0, capacity: 0, sent: 0, utilization: null },
+      inactiveTotals: { tagCount: 0, activeMailboxes: 0, capacity: 0 },
       notes: ['Нет данных об отправках за последние 14 дней в датасете.'],
     };
   }
 
-  // 1) нагрузка по тегам за день. Потолок — по активным ящикам (status=1):
-  //    ящик на паузе имеет daily_limit, но не шлёт → в знаменатель не берём.
-  //    Отправки — по всем ящикам тега (факт есть факт). Маппинги дедупим.
-  const [tagRows, specRows, totalsRows, hiddenRows] = await Promise.all([
-    datasetQuery<TagRow>(
-      // hidden теги (клиент ведётся в Coldy/Trigga, в Instantly только прогрев)
-      // исключаем — иначе вечный ложный «Простой». Список — mailbox_load_hidden_tags.
-      `WITH mappings AS (
-         SELECT DISTINCT tag_id, resource_id
-         FROM raw_custom_tag_mappings
-         WHERE resource_type = '1'
-           AND tag_id NOT IN (SELECT tag_id FROM mailbox_load_hidden_tags)
-       ),
-       vol AS (
-         SELECT eaccount, count(*) AS sent
-         FROM raw_emails
-         WHERE ue_type = 1 AND timestamp_email >= $1::date AND timestamp_email < ($1::date + 1)
-         GROUP BY eaccount
-       )
-       SELECT ct.id AS tag_id, ct.name AS tag,
-              count(*) FILTER (WHERE a.status = 1) AS active_mailboxes,
-              count(*) AS total_mailboxes,
-              coalesce(sum(coalesce(a.daily_limit, $2::int)) FILTER (WHERE a.status = 1), 0) AS capacity,
-              coalesce(sum(v.sent), 0) AS sent
-       FROM mappings m
+  const [boxes, daySends, recentCampaigns, campaignRefs, projectLinks, projects, hiddenRows] = await Promise.all([
+    // 1) ящики под тегами. Hidden теги (клиент ведётся в Coldy/Trigga, в
+    //    Instantly только прогрев) исключаем — иначе вечный ложный «Простой».
+    //    Список — mailbox_load_hidden_tags.
+    datasetQuery<BoxRow>(
+      `SELECT DISTINCT m.tag_id, ct.name AS tag, a.email, a.status, a.daily_limit
+       FROM raw_custom_tag_mappings m
        JOIN raw_custom_tags ct ON ct.id = m.tag_id
        JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
-       LEFT JOIN vol v ON v.eaccount = a.email
-       GROUP BY ct.id, ct.name`,
-      [asOfDay, DEFAULT_DAILY_LIMIT],
+       WHERE m.resource_type = '1'
+         AND m.tag_id NOT IN (SELECT tag_id FROM mailbox_load_hidden_tags)`,
     ),
-    // 2) тег → специалист/клиент (best-effort, через кампании тега).
-    datasetQuery<SpecRow>(
-      `SELECT ct.id AS tag_id, p.specialist, p.client, count(DISTINCT c.id) AS campaigns
-       FROM raw_custom_tags ct
-       JOIN raw_campaigns c ON c.email_tag_list @> ARRAY[ct.id]
-       JOIN portal_project_campaigns ppc ON ppc.campaign_id = c.id
-       JOIN portal_projects p ON p.id = ppc.project_id
-       WHERE ct.id IN (SELECT DISTINCT tag_id FROM raw_custom_tag_mappings WHERE resource_type = '1')
-         AND p.specialist IS NOT NULL AND btrim(p.specialist) <> ''
-       GROUP BY ct.id, p.specialist, p.client`,
-    ),
-    // 3) итог по ВСЕМ тегированным ящикам (distinct — без двойного счёта тех,
-    //    кто под 2+ тегами). sent без фильтра по статусу — как и в строках.
-    datasetQuery<TotalsRow>(
-      `WITH vol AS (
-         SELECT eaccount, count(*) AS sent
+    // 2) письма дня по ящикам и кампаниям: из них и «Отправлено» по ящикам,
+    //    и чьи кампании на самом деле шлют с ящиков тега (~60 мс на день).
+    datasetQuery<DaySendRow>(
+      `SELECT s.eaccount, s.campaign_id, c.name AS campaign_name, s.sent
+       FROM (
+         SELECT eaccount, campaign_id, count(*) AS sent
          FROM raw_emails
          WHERE ue_type = 1 AND timestamp_email >= $1::date AND timestamp_email < ($1::date + 1)
-         GROUP BY eaccount
-       ),
-       tagged AS (
-         SELECT DISTINCT a.email, a.status, a.daily_limit
+         GROUP BY eaccount, campaign_id
+       ) s
+       LEFT JOIN raw_campaigns c ON c.id = s.campaign_id`,
+      [asOfDay],
+    ),
+    // 3) отправки кампаний за окно «тег в работе» — из дневной аналитики
+    //    Instantly, а не из писем: неделя писем по кампаниям — чтение кучи на
+    //    секунды (до ~10 с на холодной неделе), аналитика — ~0,2 с. Сверка за
+    //    03–09.10: 260 кампаний, 227 864 письма против 227 865.
+    datasetQuery<CampaignVolumeRow>(
+      `SELECT campaign_id, sum(sent) AS sent
+       FROM v_campaign_daily_canonical
+       WHERE date >= ($1::date - $2::int) AND date <= $1::date
+       GROUP BY campaign_id
+       HAVING sum(sent) > 0`,
+      [asOfDay, RECENT_WINDOW_DAYS - 1],
+    ),
+    // 4) свои кампании тега: ссылаются на него списком тегов или его ящиками
+    //    в email_list (часть кампаний назначает ящики поимённо).
+    datasetQuery<CampaignRefRow>(
+      //    Ящики — только живые: удалённый ящик, оставшийся в маппинге,
+      //    связывал тег с кампаниями, где ни одного нынешнего ящика тега нет.
+      //    list_overlap — сколько ящиков тега в email_list (сборка оставляет
+      //    поимённую ссылку только тегу с наибольшим пересечением).
+      `WITH tag_boxes AS (
+         SELECT m.tag_id, array_agg(DISTINCT m.resource_id) AS boxes
          FROM raw_custom_tag_mappings m
          JOIN raw_accounts a ON a.email = m.resource_id AND a.deleted_at IS NULL
          WHERE m.resource_type = '1'
-           AND m.tag_id NOT IN (SELECT tag_id FROM mailbox_load_hidden_tags)
+         GROUP BY m.tag_id
        )
-       SELECT count(*) FILTER (WHERE t.status = 1) AS active_mailboxes,
-              coalesce(sum(coalesce(t.daily_limit, $2::int)) FILTER (WHERE t.status = 1), 0) AS capacity,
-              coalesce(sum(v.sent), 0) AS sent
-       FROM tagged t
-       LEFT JOIN vol v ON v.eaccount = t.email`,
-      [asOfDay, DEFAULT_DAILY_LIMIT],
+       SELECT tb.tag_id, c.id AS campaign_id, c.name AS campaign_name, c.status,
+              to_char(c.timestamp_created AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS created_day,
+              to_char(c.timestamp_created AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') AS created_at,
+              coalesce(c.email_tag_list @> ARRAY[tb.tag_id], false) AS via_tag,
+              CASE WHEN coalesce(c.email_tag_list @> ARRAY[tb.tag_id], false) THEN NULL
+                   ELSE cardinality(ARRAY(SELECT unnest(c.email_list) INTERSECT SELECT unnest(tb.boxes))) END AS list_overlap
+       FROM tag_boxes tb
+       JOIN raw_campaigns c ON c.email_tag_list @> ARRAY[tb.tag_id] OR c.email_list && tb.boxes`,
     ),
-    // 4) счётчик скрытых тегов — для пояснения в notes.
+    // 5) кампания → проект. Две привязки вместе: автоматическая
+    //    (portal_project_campaigns) и кампании периодов проекта. Свежие запуски
+    //    часто есть только во второй — одна первая покрывала 74% отправок дня,
+    //    обе — 98% (замер 09.10.2026); проектам они друг другу не противоречат.
+    datasetQuery<ProjectLinkRow>(
+      `SELECT campaign_id, project_id::text AS project_id FROM portal_project_campaigns
+       UNION
+       SELECT campaign_id, project_id::text FROM portal_period_campaigns
+       WHERE campaign_id IS NOT NULL AND project_id IS NOT NULL`,
+    ),
+    // 6) проекты: клиент, специалист, статус, формат работы.
+    datasetQuery<ProjectRow>(
+      `SELECT id::text AS id, client, specialist, status, work_format FROM portal_projects`,
+    ),
+    // 7) счётчик скрытых тегов — для пояснения в notes.
     datasetQuery<{ n: string }>(`SELECT count(*) AS n FROM mailbox_load_hidden_tags`),
   ]);
   const hiddenCount = num(hiddenRows[0]?.n);
 
-  // тег → ранжированный список (специалист, клиент, #кампаний)
-  const specByTag = new Map<string, { specialist: string; client: string | null; campaigns: number }[]>();
-  for (const s of specRows) {
-    if (!s.specialist) continue;
-    const arr = specByTag.get(s.tag_id) ?? [];
-    arr.push({ specialist: s.specialist, client: s.client, campaigns: num(s.campaigns) });
-    specByTag.set(s.tag_id, arr);
-  }
-  for (const arr of specByTag.values()) arr.sort((a, b) => b.campaigns - a.campaigns);
-
-  const tags: TagLoad[] = tagRows
-    // пул-теги «неименные …» — не клиенты (это резерв ящиков): их ящики уже
-    // посчитаны под клиентскими тегами, отдельной строкой не дублируем.
-    .filter((r) => !isReservedMailboxPoolTag(r.tag ?? ''))
-    .map((r) => {
-      const capacity = num(r.capacity);
-      const sent = num(r.sent);
-      const ranked = specByTag.get(r.tag_id) ?? [];
-      const primary = ranked[0] ?? null;
-      const others = [...new Set(ranked.slice(1).map((x) => x.specialist))];
-      return {
-        tagId: r.tag_id,
-        tag: r.tag ?? '',
-        activeMailboxes: num(r.active_mailboxes),
-        totalMailboxes: num(r.total_mailboxes),
-        capacity,
-        sent,
-        utilization: capacity > 0 ? sent / capacity : null,
-        status: classify(capacity, sent),
-        specialist: primary?.specialist ?? null,
-        client: primary?.client ?? null,
-        otherSpecialists: others,
-        projectCount: new Set(ranked.map((x) => x.client)).size,
-      };
-    })
-    // порядок: сначала теги с потолком по убыванию потолка (это рабочие клиенты),
-    // затем «stopped» (слали, но выключены), затем пустые.
-    .sort((a, b) => {
-      if ((a.capacity > 0) !== (b.capacity > 0)) return a.capacity > 0 ? -1 : 1;
-      if (a.capacity > 0) return b.capacity - a.capacity;
-      return b.sent - a.sent;
-    });
-
-  // свод по специалистам (специалист = Σ его тегов; теги могут пересекаться по ящикам — редко)
-  const bySpec = new Map<string, Omit<SpecialistLoad, 'status'>>();
-  for (const t of tags) {
-    const key = t.specialist ?? UNASSIGNED;
-    const agg = bySpec.get(key) ?? {
-      specialist: key, tagCount: 0, activeMailboxes: 0, capacity: 0, sent: 0, utilization: null, clients: [], tags: [],
-    };
-    agg.tagCount += 1;
-    agg.activeMailboxes += t.activeMailboxes;
-    agg.capacity += t.capacity;
-    agg.sent += t.sent;
-    agg.tags.push(t.tag);
-    if (t.client) agg.clients.push(t.client);
-    bySpec.set(key, agg);
-  }
-  const specialists: SpecialistLoad[] = [...bySpec.values()]
-    .map((s) => ({
-      ...s,
-      clients: [...new Set(s.clients)],
-      utilization: s.capacity > 0 ? s.sent / s.capacity : null,
-      status: classify(s.capacity, s.sent),
-    }))
-    .sort((a, b) => {
-      // «Не привязано» всегда в конец
-      if ((a.specialist === UNASSIGNED) !== (b.specialist === UNASSIGNED)) return a.specialist === UNASSIGNED ? 1 : -1;
-      return b.capacity - a.capacity;
-    });
-
-  const tt = totalsRows[0] ?? { active_mailboxes: '0', capacity: '0', sent: '0' };
-  const totalCapacity = num(tt.capacity);
-  const totalSent = num(tt.sent);
+  const assembled = assembleMailboxLoad({
+    asOfDay, boxes, daySends, recentCampaigns, campaignRefs, projectLinks, projects,
+    isPoolTag: isReservedMailboxPoolTag,
+  });
 
   const notes: string[] = [];
   notes.push('Потолок — по активным ящикам (status=Активен); ящикам без явного лимита подставлен дефолт воркспейса 30/день.');
   notes.push('«Отправлено» — по всем ящикам тега, включая выключенные сейчас (статус — снимок момента, отправки — история дня).');
-  notes.push('Итог считает каждый ящик один раз; суммы строк могут быть выше (ящик под 2+ тегами попадает в каждый тег).');
-  notes.push('«День» — по UTC (последний полный день в датасете). Датасет обновляется ночным синком, данные не реалтайм.');
+  notes.push('Клиент тега — по его собственным кампаниям (ссылаются на тег или на его ящики поимённо): кто слал в этот день, иначе за неделю, иначе по активным. Письма с общих ящиков через другой тег — работа того тега, они видны в подсказке «+N».');
+  notes.push(`В таблице только теги в работе: свои кампании слали за ${RECENT_WINDOW_DAYS} дней или у тега есть свои кампании незавершённого проекта. Остальные — в блоке «Не в работе»; свободными там считаются только ящики, не занятые тегами в работе и не закреплённые за клиентом, которого ещё не запустили (проект найден по имени тега).`);
+  notes.push('Итог и строки специалистов считают каждый ящик один раз; суммы строк тегов могут быть выше (ящик под 2+ тегами попадает в каждый тег).');
+  notes.push('Ящики только с тегом «неименные …» (резерв без клиента) в цифры страницы не входят.');
+  notes.push('«День» — по UTC. По умолчанию — последний полный день, когда кампании шлют по расписанию. Датасет обновляется ночным синком, данные не реалтайм.');
   if (hiddenCount > 0) {
     notes.push(`Скрыто тегов: ${hiddenCount} — клиенты ведутся в Coldy/Trigga, в Instantly их ящики только на прогреве (отправок нет).`);
   }
-  if (tags.some((t) => t.capacity > 0 && !t.specialist)) {
-    notes.push('Часть тегов без привязки к специалисту (операционные пулы или новые теги) — они в группе «Не привязано».');
+  if (assembled.tags.some((t) => t.capacity > 0 && !t.specialist)) {
+    notes.push('Часть тегов без привязки к специалисту (кампании не привязаны к проекту в портале) — они в группе «Не привязано».');
+  }
+  if (asOfDay < (latestDay ?? asOfDay)) {
+    notes.push('Для прошлого дня клиенты и проекты берутся по нынешним статусам кампаний и проектов — картина того дня приблизительная.');
   }
   if (stale) {
     notes.push(`⚠️ Последний синк датасета старше ${STALE_SYNC_HOURS}ч — данные могут быть неактуальны (проверить ночной синк).`);
   }
 
   return {
-    asOfDay, latestDay, lastSync, syncAgeHours, stale, generatedAt,
-    tags, specialists,
-    totals: {
-      activeMailboxes: num(tt.active_mailboxes),
-      capacity: totalCapacity,
-      sent: totalSent,
-      utilization: totalCapacity > 0 ? totalSent / totalCapacity : null,
-    },
+    asOfDay, latestDay, isSendingDay, skippedDays, lastSync, syncAgeHours, stale, generatedAt,
+    ...assembled,
     notes,
   };
 }
@@ -359,9 +276,9 @@ type DrillRow = {
  * Drill-down: ящики одного тега за день (потолок, отправлено, статус, последняя активность).
  */
 export async function getTagMailboxes(tagId: string, day?: string): Promise<{ asOfDay: string; tag: string | null; mailboxes: MailboxRow[] }> {
-  // resolveAsOf валидирует и клампит день (будущий/невалидный → последний полный).
-  // Запрос свежести ~1мс — дешевле, чем дыра «drill за будущий день = все нули»
-  // при прямом вызове API мимо дашборда.
+  // resolveAsOf валидирует и клампит день (будущий/невалидный → день по умолчанию).
+  // Его запросы — единицы мс; дешевле, чем дыра «drill за будущий день = все
+  // нули» при прямом вызове API мимо дашборда.
   const { asOfDay } = await resolveAsOf(day);
   if (!asOfDay || !tagId) return { asOfDay: asOfDay ?? '', tag: null, mailboxes: [] };
 

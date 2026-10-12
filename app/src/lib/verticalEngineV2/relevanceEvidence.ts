@@ -14,6 +14,7 @@ import { veSearchProviderFailure, VeSearchProviderError, VE_RELEVANCE_SEARCH_OPE
 import { readVeSearchCache, searchVeRelevanceWebsitesCached } from './relevanceSearchCache';
 import { createVeSharedPageReader, focusVeCompanyFact, freshVeCompanyFact, readVeCompanyFacts,
   veCompanyFactKey, veFactPageKey, writeVeCompanyFacts } from './companyFacts';
+import { vePaymentCompanyHint } from './paymentCompanyDirectory';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
@@ -389,7 +390,12 @@ export async function fetchVeRelevanceEvidence(
 ): Promise<VeRelevanceEvidence> {
   opts.signal?.throwIfAborted();
   const inn = normalizeVeCompanyInn(opts.companyInn);
-  const supplied = veOfficialWebsiteCandidates(website);
+  const paymentHint = vePaymentCompanyHint(inn);
+  const hintSite = paymentHint ? veOfficialWebsiteCandidates(paymentHint.website)[0] : undefined;
+  // Reviewed public coordinates are discovery candidates, not ownership
+  // evidence. Prefer them to a stale registry URL within the same page/domain
+  // budget; their pages must still publish the expected legal owner below.
+  const supplied = veOfficialWebsiteCandidates([hintSite?.href ?? '', website].filter(Boolean).join(', '));
   // У 17.8% строк резерва сайта нет вовсе — им платный поиск покупается без
   // единой бесплатной попытки. Но у трети из них корпоративная почта на своём
   // домене, а домен корпоративной почты и есть сайт компании. Кандидат
@@ -429,7 +435,15 @@ export async function fetchVeRelevanceEvidence(
     // бесплатно, а проверка владения остаётся прежней.
     for (const page of cachedPages.values()) {
       const url = allowedUrl(page.url)!;
-      if (!supplied.some((other) => siteHost(other) === siteHost(url))) supplied.push(url);
+      // Keep the supplied home on the same host. Starting from a cached legal
+      // page would hide an offline home and trigger extra service requests.
+      if (inn && !supplied.some((other) => siteHost(other) === siteHost(url))
+        && page.ownerInns?.includes(inn) && page.ownerInns.every((owner) => owner === inn)) {
+        const others = supplied.filter((other) => siteHost(other) !== siteHost(url));
+        supplied.splice(0, supplied.length, url, ...others.slice(0, MAX_DOMAINS - 1));
+        break;
+      }
+      if (supplied.length < MAX_DOMAINS && !supplied.some((other) => siteHost(other) === siteHost(url))) supplied.push(url);
       if (supplied.length >= MAX_DOMAINS) break;
     }
   }
@@ -663,6 +677,15 @@ export async function fetchVeRelevanceEvidence(
       // ослаблен — он по-прежнему требует ровно одного владельца и нашего ИНН.
       const owners = new Set(sitePages.flatMap((page) => page.ownerInns ?? []));
       const seen = owners;
+      // Some verified brands have several own legal entities. The exception
+      // is confined to the reviewed official domain and its exact INN group;
+      // an extra owner, a merchant's payment widget or a matching brand name
+      // cannot satisfy it. In particular, the requested INN must be present.
+      if (inn && paymentHint && hintSite && sitePages.length
+        && sitePages.every((page) => siteHost(new URL(page.url)) === siteHost(hintSite))) {
+        return owners.has(inn) && [...owners].every((owner) => paymentHint.inns.includes(owner)) ? 'verified'
+          : owners.size ? 'conflict' : 'unknown';
+      }
       // Сайт, который НЕ печатает ни одного владельческого ИНН, проверяем
       // брендом и географией — тем же порогом, что и компанию без ИНН. Раньше
       // наличие ИНН в реестре делало требование к тому же сайту строже: нет

@@ -191,12 +191,16 @@ describe('готовый каталог Яндекс Карт: выбор руб
       expect(adjusted[0].directory_filters).toEqual({ ...tasks[0].directory_filters,
         okvedCodes: profile.startsWith('crossborder_') ? ['47.91', '46'] : ['47', '47.1', '47.9', '46'],
         nameTerms: veNicheDirectoryNameTerms(profile),
+        ...(profile === 'payments' ? { identityCatalog: 'payments-2026-10-12' } : {}),
       });
       expect(adjusted[1].maps_query?.geo).toBe('Казань');
       expect(adjusted[1].maps_query?.queries.length).toBeLessThanOrEqual(1);
       expect(adjusted[2].hh_query).toMatchObject({ area: '1', date_from: '2026-01-01', date_to: '2026-10-01' });
       expect(adjusted[2].hh_query?.text.length).toBeLessThanOrEqual(300);
       expect(adjusted.map((task) => normalizeVeNicheSourceTask(task, profile))).toEqual(adjusted);
+      if (profile === 'payments') {
+        expect(normalizeVeNicheSourceTask(adjusted[0], 'adult_platform').directory_filters?.identityCatalog).toBeUndefined();
+      }
     }
     expect(detectVeNicheSourceProfile([])).toBeNull();
     expect(detectVeNicheSourceProfile(profiles.map(([title]) => ({ title })))).toBeNull();

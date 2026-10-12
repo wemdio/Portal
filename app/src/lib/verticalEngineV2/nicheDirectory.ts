@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 import { OKVED2_TREE, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
+import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyInns } from './paymentCompanyDirectory';
 
 const TIMEOUT_MS = 10_000;
 const MAX_ROWS = 1_000;
@@ -8,6 +9,7 @@ const MAX_OFFSET = 200_000;
 const ALLOWED_FILTERS = new Set([
   'okvedCodes', 'regionCodes', 'includeIp', 'hasEmail', 'hasWebsite',
   'revenueFrom', 'revenueTo', 'employeesFrom', 'employeesTo',
+  'identityCatalog',
 ]);
 const OKVED_CODE = /^\d{2}(?:\.\d{1,2}){0,2}$/;
 const NAME_TERM = /^[A-Za-zА-Яа-яЁё0-9 -]+$/;
@@ -16,6 +18,7 @@ const COLUMNS = 'id,name,inn,kpp,address,phones,email,employees_count,revenue,co
 
 type SearchResult = { rows: Record<string, unknown>[]; error?: string };
 type DirectoryRow = Record<string, unknown> & { okved_code: string | null; okved_code_exact: string | null };
+type NicheFilters = CompaniesSearchFilters & { identityCatalog?: typeof VE_PAYMENT_DIRECTORY_REVISION };
 
 /** Only code-owned literal fragments enter PostgREST's expression grammar. */
 function normalizedTerms(value: readonly string[]): string[] | null {
@@ -36,7 +39,7 @@ function normalizedTerms(value: readonly string[]): string[] | null {
 /** A narrow VE-only reader. It never falls back to the unfiltered registry. */
 export async function searchVeNicheDirectoryRows(
   db: SupabaseClient,
-  filters: CompaniesSearchFilters,
+  filters: NicheFilters,
   nameTerms: readonly string[],
   limit: number,
   offset = 0,
@@ -48,6 +51,8 @@ export async function searchVeNicheDirectoryRows(
     || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_ROWS
     || !Number.isSafeInteger(offset) || offset < 0 || offset > MAX_OFFSET
     || Object.entries(filters).some(([key, value]) => value !== undefined && !ALLOWED_FILTERS.has(key))) return invalid();
+  if (filters.identityCatalog !== undefined && filters.identityCatalog !== VE_PAYMENT_DIRECTORY_REVISION) return invalid();
+  const identityInns = filters.identityCatalog === VE_PAYMENT_DIRECTORY_REVISION ? vePaymentCompanyInns() : [];
   for (const key of ['includeIp', 'hasEmail', 'hasWebsite'] as const) {
     if (filters[key] !== undefined && typeof filters[key] !== 'boolean') return invalid();
   }
@@ -94,12 +99,21 @@ export async function searchVeNicheDirectoryRows(
       + (mappedCodes.length ? `,and(okved_code_exact.is.null,okved_code.in.(${mappedCodes.join(',')}))` : '') + ')' : null;
     // One top-level .or avoids accidental replacement of the name predicate
     // by a second PostgREST `or` parameter. All remaining filters are ANDed.
+    const identity = identityInns.length ? `inn.in.(${identityInns.join(',')})` : null;
+    const normalScope = okved ? `and(${names},${okved})` : names;
+    const audienceScope = identity ? `or(${identity},${normalScope})` : normalScope;
+    // Known public identities cover neutral legal names and inaccurate OKVED,
+    // without opening another industry slice. Geography and size still apply.
+    // A known official URL is an existing website candidate even when the
+    // registry lacks one. It still passes the normal ownership/relevance gate.
+    const scope = identity && filters.hasWebsite
+      ? `and(${audienceScope},or(website.not.is.null,${identity}))` : audienceScope;
     let query = db.from('companies_directory').select(COLUMNS)
-      .or(okved ? `and(${names},${okved})` : terms.map((term) => `name.ilike.*${term}*`).join(','));
+      .or(!identity && !okved ? terms.map((term) => `name.ilike.*${term}*`).join(',') : scope);
     if (filters.regionCodes?.length) query = query.in('region_code', filters.regionCodes);
     if (filters.includeIp === false) query = query.not('name', 'ilike', 'ИП %');
     if (filters.hasEmail) query = query.not('email', 'is', null);
-    if (filters.hasWebsite) query = query.not('website', 'is', null);
+    if (filters.hasWebsite && !identity) query = query.not('website', 'is', null);
     for (const [from, to, column] of [
       ['revenueFrom', 'revenueTo', 'revenue'], ['employeesFrom', 'employeesTo', 'employees_count'],
     ] as const) {

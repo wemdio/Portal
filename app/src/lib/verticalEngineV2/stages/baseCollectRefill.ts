@@ -36,6 +36,8 @@ import {
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
+import { loadVeProjectExclusions, matchVeProjectExclusion } from '../projectExclusions';
+import { createVeDeliveryExclusionGuard, withVeDeliveryCompanyIdentity } from '../projectExclusionDelivery';
 import { isCompanyNameReady } from '../companyNames';
 import { isVeRelevanceReady } from '../relevanceDecision';
 import type { VeJob, VeOperatorMapping } from '../types';
@@ -60,6 +62,7 @@ export interface VeRefillStats {
   appended: number;
   /** Отрезано blocklist'ом владельца пресета. */
   skipped_blocklist: number;
+  skipped_project_exclusions?: number;
   /** Отсеяно Instantly при загрузке (дубли кампании и пр.). */
   skipped_instantly: number;
   /** Не влезло в дневной кап daily_leads_cap (уйдёт в отчёт, не в кампанию). */
@@ -513,8 +516,11 @@ export async function runVeRefillAppend(args: {
     // 4. Blocklist владельца (сами считаем — число нужно в журнале;
     //    appendLeadsToClientCampaign продублирует фильтр внутри, это дёшево).
     const blockedSet = await getBlockedEmailSet(supabaseInstantly, ownerUserId);
-    const { kept, blockedCount } = filterBlockedLeads(leads, blockedSet);
+    const { kept: clientAllowed, blockedCount } = filterBlockedLeads(leads, blockedSet);
     runStats.skipped_blocklist = blockedCount;
+    const exclusions = await loadVeProjectExclusions(ctx.supabase, job.project_id);
+    const kept = clientAllowed.filter(lead => !matchVeProjectExclusion(sourceRowByLead.get(lead) ?? {}, exclusions));
+    runStats.skipped_project_exclusions = clientAllowed.length - kept.length;
 
     // 5. Дневной cap проекта резервируется атомарно в БД. Обычный read spent
     //    -> POST имеет race между workers и поэтому здесь запрещён.
@@ -540,7 +546,8 @@ export async function runVeRefillAppend(args: {
         const appended = await appendLeadsToClientCampaign({
           userId: ownerUserId,
           campaignId: pick.campaignId,
-          leads: toSend,
+          leads: toSend.map((lead, index) => withVeDeliveryCompanyIdentity(lead, candidateRows[index])),
+          prepareProviderChunk: createVeDeliveryExclusionGuard(ctx.supabase, job.project_id),
           contextLabel: `VE2 auto-refill · ${base.id}`,
           skipIfInCampaign: false,
         });

@@ -10,7 +10,7 @@ import { finishVeAdaptiveBatch, newVeAdaptiveCollection, veReadyContactKeys, veS
   type VeAdaptiveCollection, type VeBatchSpend } from '@/lib/verticalEngineV2/adaptiveCollection';
 import { stripUnfoundedSizeFilters, veCanWidenPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTask,
   veSecondQueueTasks } from '@/lib/verticalEngineV2/planWidening';
-import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
+import { canResumePartialPreview, getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
 import type { VeCollectTask } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 
 const HYPOTHESES = {
@@ -102,6 +102,47 @@ describe('вторая очередь исчерпанного реестра', 
     expect(veCanWidenPlan([SWEETS_TASK], { widenings: 2, replan_attempts: 0 })).toBe(false);
     expect(veCanWidenPlan([directory({ okvedCodes: ['10.1'] })], { widenings: 0, replan_attempts: 0 })).toBe(true);
     expect(veCanWidenPlan([directory({ okvedCodes: ['10.1'] })], { widenings: 1, replan_attempts: 2 })).toBe(false);
+
+    const live = { ...base, collect_info: { ...base.collect_info,
+      tasks: [{ ...base.collect_info.tasks[0], exhausted: false }],
+      adaptive_collection: { ...base.collect_info.adaptive_collection, widenings: 2 } } };
+    expect(getVeCollectionContinuation(live)).toMatchObject({ available: true, code: 'sources_available', action: 'resume_collection' });
+    const ceiling = { ...live, collect_info: { ...live.collect_info, target_checkpoint: { completed_round: 10_000 },
+      target_progress: { ...live.collect_info.target_progress, round: 10_000 } } };
+    expect(getVeCollectionContinuation(ceiling)).toMatchObject({ available: false, code: 'round_limit', action: null });
+    const capped = { ...live, collect_info: { ...live.collect_info,
+      target_progress: { ...live.collect_info.target_progress, candidates_processed: 10_000 } } };
+    expect(getVeCollectionContinuation(capped)).toMatchObject({ available: false, code: 'candidate_limit' });
+    // Already admitted work is drained even at the acquisition ceiling.
+    for (const saved of [{ company_name_recovery: { validation_error: null } },
+      { preview_pipeline: { batches: [{ id: 'paid-child' }] } },
+      { tasks: [{ ...live.collect_info.tasks[0], status: 'dispatched', child_job_id: 'child' }] }]) {
+      expect(getVeCollectionContinuation({ ...ceiling, collect_info: { ...ceiling.collect_info, ...saved } }))
+        .toMatchObject({ available: true, code: 'saved_work', action: 'resume_preparation' });
+    }
+    const key = veSourceStrategyKey(SWEETS_TASK);
+    const held = { ...live, collect_info: { ...live.collect_info, adaptive_collection: { ...live.collect_info.adaptive_collection,
+      completed: Array.from({ length: 5 }, (_, i) => ({ id: `dry-${i}`, source_key: key, source: 'companies_directory',
+        candidates: 100, new_ready: 0, new_target: 0, poor: true, started_at: '', finished_at: '',
+        spend: { ai_usd: 0, serper_credits: 0, estimated_total_usd: 0, unknown_attempts: 0, complete: true } })) } } };
+    const before = JSON.stringify(held);
+    expect(getVeCollectionContinuation(held)).toMatchObject({ available: false, code: 'low_yield' });
+    expect(getVeCollectionContinuation(held)).toMatchObject({ available: false, code: 'low_yield' });
+    expect(JSON.stringify(held)).toBe(before);
+    expect(getVeCollectionContinuation({ ...held, collect_info: { ...held.collect_info,
+      adaptive_collection: { replan_attempts: 2, widenings: 2 } } })).toMatchObject({ available: false, code: 'invalid_checkpoint' });
+    expect(getVeCollectionContinuation({ ...base, status: 'failed', error: 'Отменено пользователем' }))
+      .toMatchObject({ available: true, action: 'resume_preparation' });
+
+    // A deployed correction is new work once, even if the previous scope was exhausted.
+    const payments = { ...widened, collect_info: { ...widened.collect_info, niche_source_profile: 'payments',
+      source_selection: { version: 1, profile: 'payments' },
+      tasks: [{ source: 'companies_directory', status: 'done', exhausted: true,
+        task: directory({ okvedCodes: ['62'], nameTerms: ['pay'] }) }],
+      adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2 } } };
+    expect(getVeCollectionContinuation(payments)).toMatchObject({ available: true, code: 'source_update' });
+    payments.collect_info.source_selection.version = 2;
+    expect(getVeCollectionContinuation(payments)).toMatchObject({ available: false, code: 'sources_exhausted' });
   });
 });
 

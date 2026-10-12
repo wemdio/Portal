@@ -223,6 +223,17 @@ describe('Vertical Engine v2 base CSV export', () => {
     expect(csv).not.toContain('ALPHA@example.com');
     expect(csv).not.toContain('beta@example.com');
     expect(csv).not.toContain('not-an-email');
+    await mockPortalDb.from('ve_project_exclusions').insert({ project_id: 'project-export-1',
+      revision: 1, inns: [], domains: ['example.com'] });
+    const excluded = await GET(request('launch-ready', true), { params: Promise.resolve({ id: BASE_ID }) });
+    expect(excluded.status).toBe(409);
+    const raw = await GET(request('raw'), { params: Promise.resolve({ id: BASE_ID }) });
+    expect(await raw.text()).toContain('alpha@example.com');
+    await mockPortalDb.from('ve_project_exclusions').update({ inns: ['1234567890'], domains: [] }).eq('project_id', 'project-export-1');
+    const unknown = await GET(request('launch-ready', true), { params: Promise.resolve({ id: BASE_ID }) });
+    expect(unknown.status).toBe(200);
+    expect(unknown.headers.get('X-VE-Project-Unidentified')).toBe('1');
+    expect(await unknown.text()).toContain('alpha@example.com');
   });
 
   it('requires the exact template, audit and preset context for launch-ready export', async () => {

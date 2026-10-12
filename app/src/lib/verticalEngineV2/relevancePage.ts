@@ -138,6 +138,10 @@ function isLegalPage(url: string, headings = ''): boolean {
     // or a company card that happens to mention somebody else's INN.
     const slug = path.replace(/\/$/, '').split('/').pop()?.replace(/\.(?:html?|php)$/iu, '') ?? '';
     const title = cleanText(headings);
+    // Some companies publish their legal details at /credits. That path
+    // alone can also mean loans or site credits, so require a legal heading.
+    if (slug.toLowerCase() === 'credits'
+      && /^реквизиты\s+компании\s+(?:ооо|ао|пао|зао|оао|нко|ип)(?=\s|[«"])/iu.test(title)) return true;
     if (/^(?:privacy|policy|politika|политика)(?:[-_][\p{L}\p{N}]+)+$/iu.test(slug)) {
       return /политика.{0,80}(?:конфиденциальност|персональн)|privacy\s+policy|data\s+protection\s+policy/iu.test(title);
     }

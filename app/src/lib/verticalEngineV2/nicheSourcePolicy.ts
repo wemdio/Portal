@@ -1,4 +1,5 @@
 import type { VeCollectTask } from './prompts/sourcePlan';
+import { VE_PAYMENT_DIRECTORY_REVISION } from './paymentCompanyDirectory';
 
 /** Narrow business models whose parent industry is not a useful source slice. */
 export type VeNicheSourceProfile = 'payments' | 'esoteric_platform' | 'adult_platform'
@@ -60,7 +61,7 @@ export function veNicheRubricAllowed(profile: VeNicheSourceProfile, label: strin
 }
 
 const NAME_TERMS: Record<VeNicheSourceProfile, readonly string[]> = {
-  payments: ['платеж', 'платёж', 'финтех', 'fintech', 'pay', 'эквайр', 'процессинг', 'processing', 'gateway', 'psp'],
+  payments: ['платеж', 'платёж', 'финтех', 'fintech', 'pay', 'пэй', 'пеймент', 'эквайр', 'процессинг', 'processing', 'gateway', 'psp'],
   esoteric_platform: ['астро', 'astro', 'эзотер', 'esoter', 'таро', 'taro', 'нумерол', 'numerol', 'гороскоп', 'horosc'],
   adult_platform: ['вебкам', 'webcam', 'adult', 'стрим', 'stream', 'fans', 'camgirl', 'порно', 'porn'],
   crossborder_ecommerce: ['экспорт', 'export', 'импорт', 'import', 'cross', 'кросс', 'global', 'глобал', 'international', 'международ', 'world', 'миров'],
@@ -101,9 +102,13 @@ export function normalizeVeNicheSourceTask(task: VeCollectTask, profile: VeNiche
     const narrowed = task.directory_filters.okvedCodes?.map((code) =>
       (profile === 'crossborder_ecommerce' || profile === 'crossborder_buyers') && ['47', '47.1', '47.9'].includes(code)
         ? '47.91' : code);
-    return { ...task, directory_filters: { ...task.directory_filters,
-      ...(narrowed ? { okvedCodes: [...new Set(narrowed)] } : {}), nameTerms: veNicheDirectoryNameTerms(profile) },
-    rationale: `Ищем компании ${audience} по профильным названиям в реестре; сохраняем ограничения географии и размера.` };
+    const filters = { ...task.directory_filters,
+      ...(narrowed ? { okvedCodes: [...new Set(narrowed)] } : {}), nameTerms: veNicheDirectoryNameTerms(profile),
+    };
+    if (profile === 'payments') filters.identityCatalog = VE_PAYMENT_DIRECTORY_REVISION;
+    else delete filters.identityCatalog;
+    return { ...task, directory_filters: filters,
+    rationale: `Ищем компании ${audience} по профильным названиям${profile === 'payments' ? ' и опубликованным реквизитам' : ''} в реестре; сохраняем ограничения географии и размера.` };
   }
   if ((task.source === 'yandex_maps' || task.source === 'google_maps') && task.maps_query?.queries.length) {
     const queries = [...new Set([...task.maps_query.queries.filter((query) => veNicheRubricAllowed(profile, query)), ...MAP_QUERIES[profile]])]

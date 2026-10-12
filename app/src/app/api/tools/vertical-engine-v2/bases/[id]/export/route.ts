@@ -13,6 +13,7 @@ import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentation
 import { VE_PREVIEW_READY_TARGET } from '@/lib/verticalEngineV2/collectionTarget';
 import { projectCompanyNames, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
 import { readVeRelevanceReserve, VE_COMPANY_CAP_FIELD } from '@/lib/verticalEngineV2/relevanceReserve';
+import { filterVeProjectExcludedRows, loadVeProjectExclusions } from '@/lib/verticalEngineV2/projectExclusions';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -134,6 +135,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
       let exportRows = rows;
       let exportColumns = columns;
+      let projectExcludedCount = 0;
+      let projectUnidentifiedCount = 0;
       if (mode === 'review') {
         const info = isRecord(base.collect_info) ? base.collect_info : null;
         const reserve = readVeRelevanceReserve(info?.relevance_reserve);
@@ -155,7 +158,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         if (info?.collection_mode !== 'preview' || !['collecting', 'analyzing', 'analyzed', 'failed'].includes(base.status)) {
           return jsonError('Превью ещё не прошло проверки', 409);
         }
-        exportRows = prepareSegmentationAudience({ rows, columns, source: 'auto' }).rows.slice(0, VE_PREVIEW_READY_TARGET);
+        exportRows = prepareSegmentationAudience({ rows, columns, source: 'auto' }).rows;
         exportColumns = columns.filter((column) => !column.startsWith('_'));
       }
       if (mode === 'launch-ready' && context) {
@@ -226,6 +229,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         exportColumns = [...columns.filter((column) => column !== '_ve_segment'), '_ve_segment'];
       }
       if (mode !== 'raw' && mode !== 'review') {
+        try {
+          const rules = await loadVeProjectExclusions(supabaseAdmin, base.project_id);
+          const filtered = filterVeProjectExcludedRows(exportRows, rules);
+          exportRows = filtered.kept;
+          projectExcludedCount = filtered.blockedCount;
+          projectUnidentifiedCount = filtered.unidentifiedCount;
+          if (mode === 'preview') exportRows = exportRows.slice(0, VE_PREVIEW_READY_TARGET);
+        } catch {
+          return jsonError('Не удалось проверить исключения проекта. Попробуйте ещё раз.', 503);
+        }
         exportRows = projectCompanyNames(exportRows);
         exportColumns = exportColumns.filter((column) => column !== VE_COMPANY_NAME_FIELD);
       }
@@ -247,6 +260,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           'Content-Type': 'text/csv; charset=utf-8',
           'Content-Disposition': `attachment; filename="${filename}"`,
           'Cache-Control': 'no-store',
+          'X-VE-Project-Excluded': String(projectExcludedCount),
+          'X-VE-Project-Unidentified': String(projectUnidentifiedCount),
         },
       });
     },
