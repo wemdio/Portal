@@ -17,10 +17,34 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { TelegramClient } from 'telegram';
-import { askSpamBot, describeSpamBotVerdict, type SpamBotVerdict } from './accountCheck';
+import { askSpamBot, describeFreeze, describeSpamBotVerdict, readFreezeConfig, type SpamBotVerdict } from './accountCheck';
 import { classifyRestriction, describeRestriction, type Restriction } from './restriction';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
+
+/** Сохранить явную ошибку FROZEN от Telegram как заморозку, а не как временную паузу. */
+export async function recordAccountFreeze(args: {
+  db: SupabaseClient;
+  client: TelegramClient;
+  account: { id: string; check_status?: string | null; check_detail?: string | null };
+}): Promise<{ detail: string; error: string | null }> {
+  // Код FROZEN уже получен вызывающим. Конфиг нужен только ради даты удаления.
+  const freeze = await readFreezeConfig(args.client).catch(() => null);
+  const detail = freeze
+    ? describeFreeze(freeze)
+    : 'ЗАМОРОЗКА Telegram подтверждена отказом API. Аккаунт только для чтения; дату удаления Telegram не сообщил.';
+  const { error } = await args.db.from('tg_outreach_accounts').update({
+    check_status: 'frozen',
+    check_detail: detail.slice(0, 500),
+    checked_at: new Date().toISOString(),
+    ...(freeze?.until ? { freeze_until_at: new Date(freeze.until * 1000).toISOString() } : {}),
+    ...(freeze?.appealUrl ? { freeze_appeal_url: freeze.appealUrl } : {}),
+  }).eq('id', args.account.id);
+  // Даже при ошибке БД не даём этому же кругу продолжить отправку.
+  args.account.check_status = 'frozen';
+  args.account.check_detail = detail.slice(0, 500);
+  return { detail, error: error?.message ?? null };
+}
 
 export function isFloodLimitReason(reason: string): boolean {
   const u = reason.toUpperCase();

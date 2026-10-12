@@ -6,8 +6,8 @@
  * «нас разлогинили» или «номер забанили», можно только сходив в Telegram. Здесь
  * этот поход автоматизирован для всей партии сразу.
  *
- * Проверка намеренно ничего не меняет в аккаунте: только подключение, getMe и
- * список активных сеансов. Ни отправок, ни правок профиля — иначе проверка сама
+ * Проверка намеренно ничего не меняет в аккаунте: только читающие запросы.
+ * Ни отправок, ни правок профиля — иначе проверка сама
  * становилась бы нагрузкой на аккаунт, который мы и так подозреваем в проблемах.
  */
 import { Api } from 'telegram';
@@ -99,14 +99,14 @@ export interface FreezeVerdict {
  * методов. 07.09.2026 портал показывал «жив» восемнадцати аккаунтам ATOL,
  * которым Telegram отказывал трое суток подряд.
  *
- * Признак берём оттуда же, откуда его берёт официальное приложение, когда
- * рисует баннер с кнопкой обжалования: в конфиге появляются поля со сроком и
- * ссылкой. Ключи ищем по вхождению «freeze», а не по точным именам — состав
- * конфига Telegram меняет свободно, и жёсткий список тихо перестал бы работать.
+ * Пустой конфиг НЕ доказывает, что заморозки нет: Telegram документирует
+ * появление freeze-полей после отказа FROZEN_METHOD_INVALID. Поэтому при
+ * пустом конфиге вызываем читающий channels.searchPosts, для которого Telegram
+ * отдельно документирует эту ошибку, и затем повторно читаем конфиг со сроком.
  *
  * Вызов read-only: проверка по-прежнему ничего в аккаунте не меняет.
  */
-export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict | null> {
+export async function readFreezeConfig(client: TelegramClient): Promise<FreezeVerdict | null> {
   const res = await withTimeout(
     client.invoke(new Api.help.GetAppConfig({ hash: 0 })),
     callTimeoutMs(),
@@ -148,6 +148,38 @@ export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict
   // Telegram чем-то заполнил.
   if (since === null && until === null && !appealUrl) return null;
   return { until, appealUrl };
+}
+
+export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict | null> {
+  const configVerdict = await readFreezeConfig(client);
+  if (configVerdict) return configVerdict;
+
+  try {
+    // Поиск по хештегу ничего не отправляет и не меняет в аккаунте. В отличие
+    // от getMe/getDialogs этот метод отвергается у замороженного аккаунта.
+    await withTimeout(
+      client.invoke(new Api.channels.SearchPosts({
+        hashtag: 'telegram',
+        offsetRate: 0,
+        offsetPeer: new Api.InputPeerEmpty(),
+        offsetId: 0,
+        limit: 1,
+      })),
+      callTimeoutMs(),
+      'проверка доступа к поиску публичных постов',
+    );
+    return null;
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    if (classifyCheckError(raw).status !== 'frozen') throw error;
+    // После явного отказа Telegram может добавить в конфиг дату удаления.
+    // Даже если не добавил, код отказа сам по себе подтверждает заморозку.
+    try {
+      return await readFreezeConfig(client) ?? { until: null, appealUrl: null };
+    } catch {
+      return { until: null, appealUrl: null };
+    }
+  }
 }
 
 /** Человеческий текст вердикта о заморозке — он и попадёт в карточку аккаунта. */
@@ -296,6 +328,29 @@ export async function checkAccount(
     other_sessions: otherSessions,
   };
 
+  // Проверяем заморозку до флага restricted и @SpamBot: они описывают другие
+  // ограничения и не должны скрывать режим «только чтение».
+  let freeze: FreezeVerdict | null;
+  try {
+    freeze = await probeFreeze(client);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return {
+      status: 'error',
+      detail: `Не удалось проверить заморозку Telegram — статус аккаунта неизвестен. ${reason.slice(0, 180)}`,
+      ...identity,
+    };
+  }
+  if (freeze) {
+    return {
+      status: 'frozen',
+      detail: describeFreeze(freeze),
+      freeze_appeal_url: freeze.appealUrl,
+      freeze_until_at: freeze.until ? new Date(freeze.until * 1000).toISOString() : null,
+      ...identity,
+    };
+  }
+
   if (me.restricted) {
     const restriction = restrictionFromProfile((me.restrictionReason ?? []).map((r) => r.text ?? ''));
     // Срок снятия у Telegram есть только в личке с антиспам-ботом. Раз аккаунт
@@ -335,31 +390,6 @@ export async function checkAccount(
     if (verdict?.kind === 'free') {
       spamBotFree = verdict;
     }
-  }
-
-  /**
-   * Перед любым ответом «жив» проверяем заморозку. Чистый профиль и ответ
-   * @SpamBot «ограничений нет» не исключают баннер read-only в Telegram.
-   */
-  let freeze: FreezeVerdict | null;
-  try {
-    freeze = await probeFreeze(client);
-  } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    return {
-      status: 'error',
-      detail: `Не удалось проверить заморозку Telegram — статус аккаунта неизвестен. ${reason.slice(0, 180)}`,
-      ...identity,
-    };
-  }
-  if (freeze) {
-    return {
-      status: 'frozen',
-      detail: describeFreeze(freeze),
-      freeze_appeal_url: freeze.appealUrl,
-      freeze_until_at: freeze.until ? new Date(freeze.until * 1000).toISOString() : null,
-      ...identity,
-    };
   }
 
   return {

@@ -13,6 +13,7 @@ import * as fdb from './db';
 import {
   isFloodLimitReason,
   parkAccountAfterLimit,
+  recordAccountFreeze,
   clearRestrictionAfterSend,
 } from '../accountCooldown';
 import { classifyRestriction, describeRestriction } from '../restriction';
@@ -158,6 +159,21 @@ function cooldownLabel(untilIso: string): string {
     day: '2-digit',
     month: '2-digit',
   });
+}
+
+async function stopIfFrozen(args: {
+  db: SupabaseClient;
+  client: TelegramClient;
+  account: { id: string; check_status?: string | null; check_detail?: string | null };
+  error: string;
+  log: LogFn;
+}): Promise<boolean> {
+  if (classifyRestriction(args.error, Date.now())?.kind !== 'frozen') return false;
+  const frozen = await recordAccountFreeze(args);
+  args.log(frozen.error ? 'error' : 'warning',
+    `Первое касание остановлено: ${frozen.detail} Контакты остаются в очереди без потери попыток.` +
+    (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
+  return true;
 }
 
 /**
@@ -555,6 +571,11 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         // getEntity, списывали попытку живому контакту и порция продолжала
         // ломиться в API. Разбираем ошибку тем же классификатором.
         const msg = err instanceof Error ? err.message : String(err);
+        if (await stopIfFrozen({ db, client, account, error: msg, log })) {
+          result.postponed++;
+          stopAll = true;
+          break;
+        }
         const failure = classifySendFailure(msg);
 
         if (failure.kind === 'contact_permanent') {
@@ -686,6 +707,11 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
           continue;
         }
 
+        if (await stopIfFrozen({ db, client, account, error: msg, log })) {
+          result.postponed++;
+          stopAll = true;
+          break;
+        }
         const failure = classifySendFailure(msg);
 
         if (failure.kind === 'contact_permanent') {
