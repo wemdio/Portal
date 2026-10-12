@@ -158,6 +158,8 @@ export interface AmoClient {
   findTelegramContactField(): Promise<AmoTelegramField | null>;
   /** Контакт с этим именем, ником в поле Telegram или почтой в поле Email. */
   findContact(input: { name: string; telegram?: string | null; email?: string | null }): Promise<number | null>;
+  /** Exact email match, without accepting a coincidentally equal contact name. */
+  findContactByEmail(email: string): Promise<number | null>;
   /**
    * Новый контакт. Почта уходит в стандартное поле Email: по нему встроенная
    * почта amoCRM показывает переписку в ленте сделки и даёт отвечать из AMO.
@@ -169,15 +171,23 @@ export interface AmoClient {
     email?: string | null;
     phone?: string | null;
   }): Promise<number>;
+  findCompanyByName(name: string): Promise<number | null>;
+  createCompany(name: string): Promise<number>;
+  linkContactCompany(contactId: number, companyId: number): Promise<void>;
+  /** Open deal of this exact contact; closed wins/losses are ignored. */
+  findOpenLeadOfContact(contactId: number): Promise<number | null>;
   createLead(input: {
     name: string;
     pipelineId: number | null;
     statusId: number | null;
     contactId: number;
+    companyId?: number | null;
+    responsibleUserId?: number | null;
     tags: string[];
-    customFields?: Array<{ field_id: number; values: Array<{ enum_id: number }> }>;
+    customFields?: Array<{ field_id: number; values: Array<{ enum_id: number } | { value: string }> }>;
   }): Promise<number>;
   addLeadNote(leadId: number, text: string): Promise<void>;
+  findLeadNoteContaining(leadId: number, marker: string): Promise<boolean>;
   /** id варианта в списочном поле сделки по его тексту, без учёта регистра. */
   findLeadFieldEnumId(fieldId: number, value: string): Promise<number | null>;
 }
@@ -218,6 +228,20 @@ export function createAmoClient(opts: { baseUrl: string; token: string; fetchImp
     } catch {
       throw new AmoHttpError(`AMO вернула не JSON (HTTP ${res.status})`, res.status);
     }
+  }
+
+  async function contactLinks(contactId: number): Promise<Array<{ to_entity_id: number; to_entity_type: string }>> {
+    type Raw = {
+      _embedded?: { links?: Array<{ to_entity_id: number; to_entity_type: string }> };
+      _links?: { next?: { href?: string } };
+    };
+    const links: Array<{ to_entity_id: number; to_entity_type: string }> = [];
+    for (let page = 1; page <= 10; page++) {
+      const data = await call<Raw>('GET', `/api/v4/contacts/${contactId}/links?limit=250&page=${page}`);
+      links.push(...(data?._embedded?.links ?? []));
+      if (!data?._links?.next?.href) return links;
+    }
+    throw new AmoHttpError('У контакта слишком много связей AMO для надёжной проверки дублей', 400);
   }
 
   return {
@@ -296,6 +320,22 @@ export function createAmoClient(opts: { baseUrl: string; token: string; fetchImp
       return hit ? hit.id : null;
     },
 
+    async findContactByEmail(email) {
+      type Raw = {
+        _embedded?: { contacts?: Array<{ id: number; custom_fields_values?: AmoContactField[] | null }> };
+        _links?: { next?: { href?: string } };
+      };
+      const want = email.trim().toLowerCase();
+      if (!want) return null;
+      for (let page = 1; page <= 10; page++) {
+        const data = await call<Raw>('GET', `/api/v4/contacts?limit=50&page=${page}&query=${encodeURIComponent(want)}`);
+        const hit = (data?._embedded?.contacts ?? []).find((c) => contactEmailValues(c.custom_fields_values).includes(want));
+        if (hit) return hit.id;
+        if (!data?._links?.next?.href) return null;
+      }
+      throw new AmoHttpError('Слишком много контактов AMO по запросу; поиск дубля не завершён', 400);
+    },
+
     async createContact({ name, telegram, telegramField, email, phone }) {
       type Raw = { _embedded?: { contacts?: Array<{ id: number }> } };
       const fields: Array<Record<string, unknown>> = [];
@@ -318,17 +358,62 @@ export function createAmoClient(opts: { baseUrl: string; token: string; fetchImp
       return id;
     },
 
+    async findCompanyByName(name) {
+      type Raw = {
+        _embedded?: { companies?: Array<{ id: number; name?: string }> };
+        _links?: { next?: { href?: string } };
+      };
+      const want = name.trim().toLowerCase();
+      if (!want) return null;
+      for (let page = 1; page <= 10; page++) {
+        const data = await call<Raw>('GET', `/api/v4/companies?limit=50&page=${page}&query=${encodeURIComponent(name.trim())}`);
+        const hit = (data?._embedded?.companies ?? []).find((c) => (c.name ?? '').trim().toLowerCase() === want);
+        if (hit) return hit.id;
+        if (!data?._links?.next?.href) return null;
+      }
+      throw new AmoHttpError('Слишком много компаний AMO по запросу; поиск дубля не завершён', 400);
+    },
+
+    async createCompany(name) {
+      type Raw = { _embedded?: { companies?: Array<{ id: number }> } };
+      const data = await call<Raw>('POST', '/api/v4/companies', [{ name }]);
+      const id = data?._embedded?.companies?.[0]?.id;
+      if (!id) throw new AmoHttpError('AMO не вернула id компании', 500);
+      return id;
+    },
+
+    async linkContactCompany(contactId, companyId) {
+      const links = await contactLinks(contactId);
+      if (links.some((link) => link.to_entity_type === 'companies' && link.to_entity_id === companyId)) return;
+      await call('POST', `/api/v4/contacts/${contactId}/link`, [
+        { to_entity_id: companyId, to_entity_type: 'companies' },
+      ]);
+    },
+
+    async findOpenLeadOfContact(contactId) {
+      type RawLead = { id: number; status_id: number };
+      const links = await contactLinks(contactId);
+      const ids = links.filter((link) => link.to_entity_type === 'leads').map((link) => link.to_entity_id);
+      for (const id of ids.sort((a, b) => b - a)) {
+        const lead = await call<RawLead>('GET', `/api/v4/leads/${id}`);
+        if (lead && !SYSTEM_STATUS_IDS.has(lead.status_id)) return lead.id;
+      }
+      return null;
+    },
+
     async createLead(input) {
       type Raw = { _embedded?: { leads?: Array<{ id: number }> } };
       const lead: Record<string, unknown> = {
         name: input.name,
         _embedded: {
           contacts: [{ id: input.contactId }],
+          ...(input.companyId ? { companies: [{ id: input.companyId }] } : {}),
           ...(input.tags.length ? { tags: input.tags.map((t) => ({ name: t })) } : {}),
         },
       };
       if (input.pipelineId) lead.pipeline_id = input.pipelineId;
       if (input.statusId) lead.status_id = input.statusId;
+      if (input.responsibleUserId) lead.responsible_user_id = input.responsibleUserId;
       if (input.customFields?.length) lead.custom_fields_values = input.customFields;
       const data = await call<Raw>('POST', '/api/v4/leads', [lead]);
       const id = data?._embedded?.leads?.[0]?.id;
@@ -338,6 +423,19 @@ export function createAmoClient(opts: { baseUrl: string; token: string; fetchImp
 
     async addLeadNote(leadId, text) {
       await call('POST', `/api/v4/leads/${leadId}/notes`, [{ note_type: 'common', params: { text } }]);
+    },
+
+    async findLeadNoteContaining(leadId, marker) {
+      type Raw = {
+        _embedded?: { notes?: Array<{ params?: { text?: string } }> };
+        _links?: { next?: { href?: string } };
+      };
+      for (let page = 1; page <= 10; page++) {
+        const data = await call<Raw>('GET', `/api/v4/leads/${leadId}/notes?limit=250&page=${page}`);
+        if ((data?._embedded?.notes ?? []).some((note) => note.params?.text?.includes(marker))) return true;
+        if (!data?._links?.next?.href) return false;
+      }
+      throw new AmoHttpError('У сделки слишком много примечаний AMO для надёжной проверки дублей', 400);
     },
 
     async findLeadFieldEnumId(fieldId, value) {
