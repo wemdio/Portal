@@ -145,10 +145,10 @@ function instantlyDb(options: { blocklistError?: string; blockedEmails?: string[
   });
 }
 
-async function launch(options: { blocklistError?: string; blockedEmails?: string[]; reservedEmails?: string[]; preview?: boolean; supplyBatch?: boolean; approvedPlan?: Record<string, unknown>; force?: boolean; projectExclusions?: { inns: string[]; domains: string[] } } = {}) {
+async function launch(options: { blocklistError?: string; blockedEmails?: string[]; reservedEmails?: string[]; preview?: boolean; supplyBatch?: boolean; approvedPlan?: Record<string, unknown>; force?: boolean; projectExclusions?: { inns: string[]; domains: string[]; emails?: string[] } } = {}) {
   const portal = portalDb();
   if (options.projectExclusions) await portal.from('ve_project_exclusions').insert({
-    project_id: PROJECT_ID, revision: 1, ...options.projectExclusions,
+    project_id: PROJECT_ID, revision: 1, emails: [], ...options.projectExclusions,
   });
   if (options.preview) {
     await portal.from('ve_bases').update({ collect_info: { collection_mode: 'preview' } }).eq('id', BASE_ID);
@@ -312,6 +312,27 @@ describe('Vertical Engine v2 initial launch client blocklist', () => {
       expect.objectContaining({ email_normalized: 'allowed@example.test', lead_payload: expect.objectContaining({
         _ve_company_identity: expect.objectContaining({ inns: ['2222222222'] }),
       }) }),
+    ]);
+    expect(mockCreateLeads).not.toHaveBeenCalled();
+    const emailExcluded = await launch({ blockedEmails: [], projectExclusions: { inns: [], domains: [], emails: [leads[0].email] } });
+    expect(emailExcluded.outcome.status).toBe(200);
+    expect(emailExcluded.outcome.body.project_excluded_contacts).toBe(1);
+    expect(emailExcluded.portal.rpcCalls.at(-1)?.params?.p_drip_rows).toEqual([
+      expect.objectContaining({ email_normalized: 'allowed@example.test' }),
+    ]);
+    expect(mockCreateLeads).not.toHaveBeenCalled();
+
+    mockValidateStoredAuditSnapshot.mockReturnValue({ ...validation, snapshot: { ...validation.snapshot,
+      audience: { ...validation.snapshot.audience, rows: [
+        { 'Почта': leads[0].email, email: 'info@blocked.test' },
+        { email: leads[1].email },
+      ] },
+    } });
+    const domainExcluded = await launch({ blockedEmails: [], projectExclusions: { inns: [], domains: ['blocked.test'] } });
+    expect(domainExcluded.outcome.status).toBe(200);
+    expect(domainExcluded.outcome.body.project_excluded_contacts).toBe(1);
+    expect(domainExcluded.portal.rpcCalls.at(-1)?.params?.p_drip_rows).toEqual([
+      expect.objectContaining({ email_normalized: 'allowed@example.test' }),
     ]);
     expect(mockCreateLeads).not.toHaveBeenCalled();
   });

@@ -13,7 +13,7 @@ import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentation
 import { VE_PREVIEW_READY_TARGET } from '@/lib/verticalEngineV2/collectionTarget';
 import { projectCompanyNames, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
 import { readVeRelevanceReserve, VE_COMPANY_CAP_FIELD } from '@/lib/verticalEngineV2/relevanceReserve';
-import { filterVeProjectExcludedRows, loadVeProjectExclusions } from '@/lib/verticalEngineV2/projectExclusions';
+import { filterVeProjectExcludedRows, loadVeProjectExclusions, veProjectExclusionRow } from '@/lib/verticalEngineV2/projectExclusions';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -158,7 +158,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         if (info?.collection_mode !== 'preview' || !['collecting', 'analyzing', 'analyzed', 'failed'].includes(base.status)) {
           return jsonError('Превью ещё не прошло проверки', 409);
         }
-        exportRows = prepareSegmentationAudience({ rows, columns, source: 'auto' }).rows;
+        const audience = prepareSegmentationAudience({ rows, columns, source: 'auto' });
+        exportRows = audience.rows.map((row, index) => veProjectExclusionRow(row, audience.leads[index].email));
         exportColumns = columns.filter((column) => !column.startsWith('_'));
       }
       if (mode === 'launch-ready' && context) {
@@ -222,7 +223,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           const row = validation.snapshot.audience.rows[leadIndex];
           if (!row) return;
           exportRows.push({
-            ...row,
+            ...veProjectExclusionRow(row, lead.email),
             _ve_segment: validation.assignments.get(leadIndex) ?? '',
           });
         });
@@ -240,7 +241,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
           return jsonError('Не удалось проверить исключения проекта. Попробуйте ещё раз.', 503);
         }
         exportRows = projectCompanyNames(exportRows);
-        exportColumns = exportColumns.filter((column) => column !== VE_COMPANY_NAME_FIELD);
+        exportColumns = exportColumns.filter((column) => column !== VE_COMPANY_NAME_FIELD && column !== '_ve_company_identity');
       }
       if (exportRows.length === 0) {
         return jsonError('В базе нет строк, готовых к запуску', 409);

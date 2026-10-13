@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getVeModel, veNativeJsonSchema, type LLMMessage, type LLMUsage } from './llm';
+import { veMedicalScopeNote, type VeMedicalTarget } from './relevanceMedical';
 
 export const veRelevanceReviewResultSchema = z.object({
   result: z.enum(['direct_match', 'direct_conflict', 'insufficient']),
@@ -36,7 +37,8 @@ export const VE_RELEVANCE_SCOPE_NOTE = 'Check only three things here: the activi
   + '\n' + PROVIDER_TYPE_RULE;
 
 /** Deliberately omits the classifier's verdict, explanation and company name. */
-export function relevanceReviewMessages(scope: string, companies: VeRelevanceReviewCompany[], language: 'ru' | 'en'): LLMMessage[] {
+export function relevanceReviewMessages(scope: string, companies: VeRelevanceReviewCompany[], language: 'ru' | 'en', origin?: VeMedicalTarget['hypothesisOrigin']): LLMMessage[] {
+  const medicalNote = veMedicalScopeNote(scope, origin);
   return [{ role: 'system', content: [
     'Independently check what the supplied exact activity excerpts establish about ONE target hypothesis.',
     VE_RELEVANCE_TARGET_RULES,
@@ -49,12 +51,13 @@ export function relevanceReviewMessages(scope: string, companies: VeRelevanceRev
     'Return one review for every local i. Explain the specific activity established and its relationship to the target; do not claim exclusivity or absence from an incomplete excerpt.',
     'Keep each reason concise, at most 240 characters. Reasons in ' + (language === 'ru' ? 'Russian' : 'English')
       + '. JSON only: {"reviews":[{"i":0,"result":"insufficient","reason":"..."}]}.',
-  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + '\nExact activity excerpts by local company index:\n'
+  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (medicalNote ? '\n' + medicalNote : '') + '\nExact activity excerpts by local company index:\n'
     + JSON.stringify(companies.map((company, i) => ({ i, evidence: company.evidence }))) }];
 }
 
 export async function reviewVeRelevanceEvidence(input: {
   scope: string; language: 'ru' | 'en'; companies: VeRelevanceReviewCompany[];
+  hypothesisOrigin?: VeMedicalTarget['hypothesisOrigin'];
   model?: string; signal?: AbortSignal; onUsage?: (usage: LLMUsage) => void;
 }) {
   if (input.companies.length < 1 || input.companies.length > 8) throw new Error('Semantic relevance review requires 1..8 companies');
@@ -72,7 +75,7 @@ export async function reviewVeRelevanceEvidence(input: {
       || data.reviews.some((review) => review.i >= companies.length)) ctx.addIssue({ code: 'custom', message: 'Every local i must occur exactly once' });
   });
   const model = input.model ?? getVeModel('relevanceReview');
-  return callLLMWithSchema(relevanceReviewMessages(input.scope, companies, input.language), schema, {
+  return callLLMWithSchema(relevanceReviewMessages(input.scope, companies, input.language, input.hypothesisOrigin), schema, {
     model, maxTokens: 8192, jsonSchema: veNativeJsonSchema(model, 've_relevance_review', schema),
     maxHttpAttempts: 1, maxSchemaAttempts: 1, timeoutMs: 90_000, requireCompleteJson: true,
     signal: input.signal, onUsage: input.onUsage,

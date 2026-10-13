@@ -22,7 +22,7 @@ import {
 } from '@/lib/clientBlocklist/domainPolicy';
 import {
   filterVeProjectExcludedRows, getVeProjectExclusionIdentity, loadVeProjectExclusions,
-  matchVeProjectExclusion, normalizeVeExclusionDomain, validateVeProjectExclusionInput,
+  matchVeProjectExclusion, normalizeVeExclusionDomain, validateVeProjectExclusionInput, veProjectExclusionRow,
   type VeProjectExclusions,
 } from '@/lib/verticalEngineV2/projectExclusions';
 
@@ -54,7 +54,7 @@ describe('client company-domain policy', () => {
 
     // VE2 project rules use known company identifiers only, without site requests.
     const rules: VeProjectExclusions = { projectId: 've-project', revision: 1,
-      inns: ['7701234567'], domains: ['company.ru', 'xn--e1afmkfd.xn--p1ai', 'tenant.github.io'], updated_at: null };
+      inns: ['7701234567'], domains: ['company.ru', 'xn--e1afmkfd.xn--p1ai', 'tenant.github.io'], emails: [], updated_at: null };
     const audience = [
       { email: 'one@gmail.com', ИНН: '7701234567' },
       { email: 'two@branch.company.ru' },
@@ -86,6 +86,62 @@ describe('client company-domain policy', () => {
     expect(validateVeProjectExclusionInput({ revision: 0, inns: ['770123456'], domains: ['mail.ru'] })).toMatchObject({ ok: false });
     expect(validateVeProjectExclusionInput({ revision: -1, inns: [], domains: [] })).toMatchObject({ ok: false });
     expect(validateVeProjectExclusionInput({ revision: 0, inns: Array(10001).fill('7701234567'), domains: [] })).toMatchObject({ ok: false });
+
+    // An exact address does not turn a free mail provider or a whole company
+    // into an exclusion. Plus tags and local-part dots retain their identity.
+    const emailRules: VeProjectExclusions = { projectId: 've-project', revision: 2,
+      inns: [], domains: [], emails: ['person@gmail.com', 'ops+paid@company.ru'], updated_at: null };
+    // Selecting a personal recipient from another column must preserve the
+    // company's original domain without blocking every address of that company.
+    const multiEmailRow = { 'Почта': 'person@gmail.com', email: 'info@company.ru',
+      _ve_company_identity: { inns: ['1234567890'], domains: ['previous.test'] } };
+    const projected = veProjectExclusionRow(multiEmailRow, 'person@gmail.com');
+    expect(matchVeProjectExclusion(projected, rules)).toBe('domain');
+    expect(matchVeProjectExclusion(projected, emailRules)).toBe('email');
+    expect(matchVeProjectExclusion(projected, { ...emailRules, emails: ['info@company.ru'] })).toBeNull();
+    expect(getVeProjectExclusionIdentity(projected)).toEqual({ inns: ['1234567890'], domains: ['company.ru', 'previous.test'] });
+    expect(projected._ve_company_identity).not.toHaveProperty('emails');
+    expect(multiEmailRow.email).toBe('info@company.ru');
+    // Recovery can have a saved recipient without its former source row.
+    expect(veProjectExclusionRow(undefined, 'person@gmail.com')).toEqual({
+      email: 'person@gmail.com', _ve_company_identity: { inns: [], domains: [] },
+    });
+    for (const email of ['person@gmail.com', '  PERSON@GMAIL.COM ', 'OPS+PAID@COMPANY.RU']) {
+      expect(matchVeProjectExclusion({ email }, emailRules)).toBe('email');
+    }
+    for (const email of ['someone@gmail.com', 'person+tag@gmail.com', 'per.son@gmail.com',
+      'person@sub.gmail.com', 'ops@company.ru', 'ops+other@company.ru']) {
+      expect(matchVeProjectExclusion({ email }, emailRules)).toBeNull();
+    }
+    const exactAudience = [
+      { email: 'PERSON@gmail.com' },
+      { email: 'allowed@company.ru', emails: ['ops+paid@company.ru', 'allowed@company.ru'],
+        custom_variables: { email: 'person@gmail.com' }, _ve_company_identity: { emails: ['person@gmail.com'] } },
+      { email: 'someone@gmail.com' },
+      { company: 'No saved address' },
+    ];
+    const emailFiltered = filterVeProjectExcludedRows(exactAudience, emailRules);
+    expect(emailFiltered.kept).toEqual(exactAudience.slice(1));
+    expect(emailFiltered.kept[0]).toBe(exactAudience[1]);
+    expect(emailFiltered.blockedCount).toBe(1);
+    expect(emailFiltered.unidentifiedCount).toBe(1);
+    expect(matchVeProjectExclusion({ 'E-mail': 'PERSON@gmail.com' }, emailRules)).toBe('email');
+    expect(matchVeProjectExclusion({ custom_variables: { 'Почта': 'PERSON@gmail.com' } }, emailRules)).toBe('email');
+    expect(matchVeProjectExclusion({ email: null, 'E-mail': 'person@gmail.com', custom_variables: { email: 'person@gmail.com' } }, emailRules)).toBeNull();
+    expect(matchVeProjectExclusion({ emails: ['person@gmail.com'], _ve_company_identity: { email: 'person@gmail.com' } }, emailRules)).toBeNull();
+    expect(matchVeProjectExclusion({ company: 'person@gmail.com', note: 'person@gmail.com' }, emailRules)).toBeNull();
+    expect(validateVeProjectExclusionInput({ revision: 2, inns: [], domains: [],
+      emails: [' PERSON@gmail.com ', 'person@gmail.com', 'OPS+PAID@COMPANY.RU'] })).toMatchObject({
+      ok: true, emails: ['ops+paid@company.ru', 'person@gmail.com'],
+    });
+    for (const email of ['', 'someone', 'a b@company.ru', 'a\u0000b@company.ru', 'a\r\nb@company.ru',
+      'Name <person@gmail.com>', 'mailto:person@gmail.com', 'a@@company.ru', 'person@*.company.ru',
+      `${'a'.repeat(65)}@company.ru`]) {
+      expect(validateVeProjectExclusionInput({ revision: 2, inns: [], domains: [], emails: [email] })).toMatchObject({ ok: false });
+    }
+    expect(validateVeProjectExclusionInput({ revision: 2, inns: [], domains: [], emails: null })).toMatchObject({ ok: false });
+    expect(validateVeProjectExclusionInput({ revision: 2, inns: ['7701234567'], domains: [],
+      emails: Array(10_000).fill('person@gmail.com') })).toMatchObject({ ok: false });
   });
 });
 
@@ -113,15 +169,21 @@ describe('getBlockedEmailSet', () => {
     }]);
 
     const projects = createMockSupabase({ tables: { ve_project_exclusions: [
-      { project_id: 'one', revision: 1, inns: ['7701234567'], domains: ['company.ru'], updated_at: '2026-10-12T00:00:00Z' },
+      { project_id: 'one', revision: 1, inns: ['7701234567'], domains: ['company.ru'], emails: ['person@gmail.com'], updated_at: '2026-10-12T00:00:00Z' },
       { project_id: 'two', revision: 2, inns: [], domains: ['other.ru'], updated_at: null },
     ] } });
-    expect(await loadVeProjectExclusions(projects as unknown as SupabaseClient, 'one')).toMatchObject({ projectId: 'one', revision: 1, domains: ['company.ru'] });
-    expect(await loadVeProjectExclusions(projects as unknown as SupabaseClient, 'missing')).toMatchObject({ revision: 0, domains: [], inns: [] });
+    expect(await loadVeProjectExclusions(projects as unknown as SupabaseClient, 'one')).toMatchObject({ projectId: 'one', revision: 1, domains: ['company.ru'], emails: ['person@gmail.com'] });
+    expect(await loadVeProjectExclusions(projects as unknown as SupabaseClient, 'missing')).toMatchObject({ revision: 0, domains: [], inns: [], emails: [] });
     const unavailable = createMockSupabase({ errorTables: { ve_project_exclusions: 'unavailable' } });
     await expect(loadVeProjectExclusions(unavailable as unknown as SupabaseClient, 'one')).rejects.toThrow('Не удалось проверить');
     const corrupt = createMockSupabase({ tables: { ve_project_exclusions: [{ project_id: 'one', revision: 1, inns: ['bad'], domains: [] }] } });
     await expect(loadVeProjectExclusions(corrupt as unknown as SupabaseClient, 'one')).rejects.toThrow('повреждён');
+    for (const emails of [['bad'], ['person@gmail.com', 'person@gmail.com'], null, undefined]) {
+      const corruptEmails = createMockSupabase({ tables: { ve_project_exclusions: [
+        { project_id: 'one', revision: 1, inns: [], domains: [], emails },
+      ] } });
+      await expect(loadVeProjectExclusions(corruptEmails as unknown as SupabaseClient, 'one')).rejects.toThrow('повреждён');
+    }
   });
 
   it('fails closed instead of returning a truncated oversized blocklist', async () => {

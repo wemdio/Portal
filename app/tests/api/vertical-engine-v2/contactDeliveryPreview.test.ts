@@ -268,12 +268,14 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
     expect(await blockedPreview.json()).toMatchObject({code: 'DELIVERY_ANALYTICS_PENDING'});
 
     await mockPortalDb.from('ve_project_exclusions').insert({ project_id: VE_PROJECT_ID,
-      revision: 1, inns: ['1234567890'], domains: [] });
+      revision: 1, inns: ['1234567890'], domains: [], emails: [] });
     await mockPortalDb.from('ve_contact_delivery_rows').update({ lead_payload: {
       _ve_company_identity: { inns: ['1234567890'], domains: [] },
     } }).in('email_normalized', ['ready-a@example.test', 'accepted-today@example.test']);
     const excludedStock = await read();
     expect(excludedStock).toMatchObject({ stock: { ready: 1, uploaded: 2, uploaded_today: 1, uncertain: 2 } });
+    await mockPortalDb.from('ve_project_exclusions').update({ inns: [], emails: ['reserve-a@example.test', 'accepted-today@example.test'] }).eq('project_id', VE_PROJECT_ID);
+    expect(await read()).toMatchObject({ stock: { ready: 1, uploaded: 2, uploaded_today: 1, uncertain: 2 } });
   });
 
   it('uses only the exact active Portal period and the fresh unblocked audited audience', async () => {
@@ -388,6 +390,11 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
       outstanding_count: 2,
       supply_deficit: 8,
     });
+    await mockPortalDb.from('ve_project_exclusions').insert({ project_id: VE_PROJECT_ID,
+      revision: 1, inns: [], domains: [], emails: ['ready-b@example.test', 'reserve@example.test'] });
+    const excluded = await POST(request(), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(excluded.status).toBe(200);
+    expect((await excluded.json()).preview).toMatchObject({ ready_remaining: 1, reserve_remaining: 2, outstanding_count: 2 });
   });
 
   it('uses the immutable bound plan when the live preset limit has changed', async () => {

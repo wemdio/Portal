@@ -53,7 +53,7 @@ import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
 import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
-import { loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
+import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 import { withVeDeliveryCompanyIdentity } from './projectExclusionDelivery';
 import {
   claimProjectCampaignLinks,
@@ -620,7 +620,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   try {
     const rules = await loadVeProjectExclusions(portalDb, base.project_id);
     groups = groups.map(group => ({ ...group, leadIdx: group.leadIdx.filter(index => {
-      if (!matchVeProjectExclusion(audience.rows[index], rules)) return true;
+      if (!matchVeProjectExclusion(veProjectExclusionRow(audience.rows[index], audience.leads[index].email), rules)) return true;
       projectExcludedCount += 1;
       return false;
     }) })).filter(group => group.leadIdx.length > 0);

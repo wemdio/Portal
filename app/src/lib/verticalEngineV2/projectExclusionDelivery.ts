@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 import type { AppendLeadsToClientCampaignInput } from '@/lib/clientLaunch/appendLeads';
-import { getVeProjectExclusionIdentity, loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
+import { getVeProjectExclusionIdentity, loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { findEmailColumn } from './launchHandoff';
 
@@ -10,7 +10,7 @@ export function withVeDeliveryCompanyIdentity(
   lead: LeadCreatePayload,
   row: Record<string, unknown>,
 ): LeadCreatePayload & Record<string, unknown> {
-  return { ...lead, _ve_company_identity: getVeProjectExclusionIdentity({ ...row, email: lead.email }) };
+  return { ...lead, _ve_company_identity: getVeProjectExclusionIdentity(veProjectExclusionRow(row, lead.email)) };
 }
 
 export function veDeliveryPolicyRow(row: { email_normalized: string; lead_payload?: unknown }): Record<string, unknown> {

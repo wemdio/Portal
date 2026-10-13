@@ -11,6 +11,7 @@ import { finishVeAdaptiveBatch, newVeAdaptiveCollection, veReadyContactKeys, veS
 import { stripUnfoundedSizeFilters, veCanWidenPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTask,
   veSecondQueueTasks } from '@/lib/verticalEngineV2/planWidening';
 import { canResumePartialPreview, getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
+import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed } from '@/lib/verticalEngineV2/clinicSourcePolicy';
 import type { VeCollectTask } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 
 const HYPOTHESES = {
@@ -54,6 +55,69 @@ describe('основание размера в тексте гипотезы', (
     // Без ОКВЭД и региона снятие порога открыло бы весь реестр: такой срез не трогаем.
     const unscoped = directory({ revenueFrom: 1_000_000_000 });
     expect(stripUnfoundedSizeFilters({ tasks: [unscoped] }, HYPOTHESES.meat).plan.tasks[0]).toBe(unscoped);
+
+    // Event&Marketing saved plan shapes, replayed as fresh plans: prefer the
+    // specialty catalog without touching explicit size, geo or paid HH scope.
+    for (const [title, profile] of [['Пластическая хирургия', 'plastic_surgery'],
+      ['Остеопатические клиники', 'osteopathy'], ['Стоматологии 3+ кресла', 'dental']] as const) {
+      expect(detectVeClinicSourceProfile([{ title }])).toBe(profile);
+      expect(detectVeClinicSourceProfile([{ title, broad: true }])).toBeNull();
+    }
+    for (const title of ['Маркетинг для стоматологий', 'Поставщики стоматологического оборудования',
+      'Клиники пластической хирургии и косметологии', 'Остеопатические и стоматологические клиники', 'Стоматологи России',
+      'Частные остеопаты', 'Рекламные агентства для стоматологий', 'Сервисы для стоматологий',
+      'Стоматологии и медицинские центры', 'Клиники пластической хирургии и кардиологии',
+      'Медицинские центры кроме стоматологий', 'Клиники без пластической хирургии']) {
+      expect(detectVeClinicSourceProfile([{ title }])).toBeNull();
+    }
+    expect(detectVeClinicSourceProfile([{ title: 'Медицинские центры', description: 'Помогаем продвигать пластическую хирургию' }])).toBeNull();
+    expect(detectVeClinicSourceProfile([{ title: 'Пластическая хирургия' }, { title: 'Остеопатические клиники' }])).toBeNull();
+    expect(detectVeClinicSourceProfile([{ title: 'Центры остеопатии и мануальной терапии' }])).toBe('osteopathy');
+    expect(detectVeClinicSourceProfile([{ title: 'Стоматологии с несколькими врачами и креслами' }])).toBe('dental');
+    const registry = directory({ okvedCodes: ['86'], regionCodes: ['78'], employeesFrom: 5, revenueFrom: 10_000_000 });
+    const mixedCatalog: VeCollectTask = { source: 'yandex_maps', rationale: 'Специальности', maps_query: {
+      queries: ['пластическая хирургия', 'косметология', 'дерматология', 'трихология'], geo: 'Санкт-Петербург' } };
+    const genericCatalog: VeCollectTask = { source: 'yandex_maps', rationale: 'Медцентры',
+      maps_query: { queries: ['медицинский центр'], geo: 'Санкт-Петербург' } };
+    const hiring: VeCollectTask = { source: 'hh_live', rationale: 'Найм по условию гипотезы',
+      hh_query: { text: 'остеопат', area: '2', date_from: '2026-09-01' } };
+    const original = { tasks: [registry, mixedCatalog, genericCatalog, hiring] };
+    const snapshot = JSON.stringify(original);
+    expect(isVeClinicCatalogTask(mixedCatalog, 'plastic_surgery')).toBe(false);
+    const clinic = normalizeVeClinicSourcePlan(original, 'plastic_surgery');
+    expect(clinic.changed).toBe(true);
+    expect(clinic.plan.tasks).toHaveLength(original.tasks.length);
+    expect(clinic.plan.tasks[0].maps_query).toEqual({ queries: ['пластическая хирургия'], geo: 'Санкт-Петербург' });
+    expect(clinic.plan.tasks.slice(1)).toEqual([registry, genericCatalog, hiring]);
+    expect(clinic.plan.tasks[1]).toBe(registry);
+    expect(clinic.plan.tasks[3]).toBe(hiring);
+    expect(JSON.stringify(original)).toBe(snapshot);
+    expect(normalizeVeClinicSourcePlan(clinic.plan, 'plastic_surgery')).toEqual({ plan: clinic.plan, changed: false });
+    for (const query of ['косметология', 'дерматология', 'медицинский центр', 'пластическая хирургия и косметология',
+      'пластическая хирургия и кардиология', 'медицинские центры без пластической хирургии']) {
+      expect(veClinicRubricAllowed('plastic_surgery', query)).toBe(false);
+    }
+    const osteo = normalizeVeClinicSourcePlan({ tasks: [registry, genericCatalog, hiring] }, 'osteopathy');
+    expect(osteo.plan.tasks[0].maps_query).toEqual({ queries: ['остеопатия'], geo: 'Санкт-Петербург' });
+    expect(osteo.plan.tasks.slice(1)).toEqual([registry, hiring]);
+    const dentalCatalog: VeCollectTask = { ...genericCatalog, maps_query: {
+      queries: ['стоматология', 'имплантация зубов', 'стоматологическая клиника'], geo: 'Россия' } };
+    expect(isVeClinicCatalogTask(dentalCatalog, 'dental')).toBe(true);
+    expect(normalizeVeClinicSourcePlan({ tasks: [registry, dentalCatalog] }, 'dental').plan.tasks).toEqual([dentalCatalog, registry]);
+    const scoped = { tasks: [{ ...genericCatalog, maps_query: { queries: ['медицинский центр в Москве'] } }] };
+    expect(normalizeVeClinicSourcePlan(scoped, 'osteopathy')).toEqual({ plan: scoped, changed: false });
+    expect(normalizeVeClinicSourcePlan({ tasks: [registry, hiring] }, 'dental').changed).toBe(false);
+    const exactCatalog = { ...mixedCatalog, maps_query: { ...mixedCatalog.maps_query!, queries: ['пластическая хирургия'] } };
+    const secondMixed = { ...mixedCatalog, maps_query: { ...mixedCatalog.maps_query!, queries: ['дерматология', 'пластическая хирургия'] } };
+    for (const tasks of [[mixedCatalog, exactCatalog], [mixedCatalog, secondMixed]]) {
+      const normalized = normalizeVeClinicSourcePlan({ tasks }, 'plastic_surgery').plan;
+      expect(new Set(normalized.tasks.map(veSourceStrategyKey)).size).toBe(tasks.length);
+      expect(normalized.tasks.filter((task) => isVeClinicCatalogTask(task, 'plastic_surgery'))).toHaveLength(1);
+      expect(normalizeVeClinicSourcePlan(normalized, 'plastic_surgery').changed).toBe(false);
+    }
+    const otherCity = { ...mixedCatalog, maps_query: { ...mixedCatalog.maps_query!, geo: 'Москва' } };
+    expect(normalizeVeClinicSourcePlan({ tasks: [exactCatalog, otherCity] }, 'plastic_surgery').plan.tasks
+      .filter((task) => isVeClinicCatalogTask(task, 'plastic_surgery'))).toHaveLength(2);
   });
 });
 

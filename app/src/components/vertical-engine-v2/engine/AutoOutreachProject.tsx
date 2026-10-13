@@ -32,6 +32,7 @@ import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { ManualHypothesisForm } from './ManualHypothesisForm';
 import { PriorityNichesEditor, PriorityNicheResults, type PriorityNichesEditorHandle } from './PriorityNichesEditor';
 import { ProjectExclusions } from './ProjectExclusions';
+import { DownloadVerifiedContacts } from './DownloadVerifiedContacts';
 import { PreparationProgress, getPreparationPresentation, getPreparationActionNotice,
   refreshPreparationRequestNotice, type PreparationPresentation, type PreparationRequestNotice } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
@@ -968,7 +969,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 const preparationState = getPreparationPresentation({ preparation: p, base, jobs: detail.jobs });
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
-                    <h3 className="ve2-h3">{h.title}</h3>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <h3 className="ve2-h3">{h.title}</h3>
+                      <DownloadVerifiedContacts projectId={projectId} hypothesisId={h.id} />
+                    </div>
                     {!launchStates[h.id]?.launched ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} approved={approved}
                       onContinue={launchStates[h.id]?.launched ? undefined : () => void change({ action: 'prepare', hypothesis_id: h.id })}
                       continueDisabled={busy || locked}
@@ -1128,6 +1132,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     template={t}
                     required={base?.source === 'auto' && base.collect_info?.collection_mode === 'preview'}
                     title={hypothesisId ? (titles[hypothesisId] ?? 'Гипотеза') : (base?.filename ?? 'Кампания')}
+                    headerAction={hypothesisId ? <DownloadVerifiedContacts projectId={projectId} hypothesisId={hypothesisId} /> : undefined}
                   />
                 );
               })}
