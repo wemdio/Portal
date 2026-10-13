@@ -18,8 +18,9 @@
  *
  * Поля под сайтом — ответы, которые читает само исследование, а повторить
  * его кликом клиент не может: описание бизнеса (brief.business_override —
- * промпт гипотез; профиль, когда сайт не открылся) и рамка ЦА (brief.icp —
- * промпт гипотез). Те же ключи brief, что правит шаг «Brief», те же лимиты
+ * бриф клиента EN-промпта профиля, всегда, и промпт гипотез) и рамка ЦА
+ * (brief.icp — тот же бриф профиля как пожелание, кого достать, и промпт
+ * гипотез). Те же ключи brief, что правит шаг «Brief», те же лимиты
  * (BUSINESS_OVERRIDE_MAX_LENGTH, icpFrame.ts), та же проверка рамки до
  * отправки (parseHeIcpFramePatch). Шлётся только заполненное.
  */
@@ -230,8 +231,9 @@ export function EngProjectsList() {
                   className="ds-input w-full resize-y"
                 />
                 {hint(
-                  'The research reads this when it drafts your market hypotheses, and builds your company profile '
-                    + 'from it if your site cannot be opened.',
+                  'The research takes this as facts about your business: it builds your company profile from your site '
+                    + 'and this text, and reads it again when it drafts your market hypotheses. Where the two differ, this '
+                    + 'text wins; if your site has little text or does not open, the profile is built mostly from it.',
                 )}
               </label>
 

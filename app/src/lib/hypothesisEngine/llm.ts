@@ -9,7 +9,11 @@
  *    (providerKeys.ts, getApiKey ниже);
  *  - четыре роли моделей (см. getHeModel): research / chain / bulk / gate;
  *  - дополнительный callLLMText — свободный текст без json_object
- *    (цепочки писем парсятся маркерами ---LETTER N---, а не схемой).
+ *    (цепочки писем парсятся маркерами ---LETTER N---, а не схемой);
+ *  - у английского промпта проекта market='us' служебные сообщения JSON-режима
+ *    английские, и повтор схемы переигрывает предыдущий ответ целиком (до
+ *    32 000 символов); остальные вызовы — по-русски, как раньше
+ *    (jsonHintLanguage).
  *
  * Расход вызова берётся из usage.cost роутера — это цена, которую Requesty
  * выставил (с его наценкой, кешем и фактической моделью ответа). Таблица
@@ -47,6 +51,7 @@ import { z } from 'zod';
 import { isHeProviderBillingError, isHeProviderConfigurationError } from './clientErrors';
 import {
   heProviderJournalActive,
+  heProviderJournalMarket,
   noteHeProviderCall,
   type HeProviderCallOutcome,
   type HeRequestyCall,
@@ -456,19 +461,103 @@ function llmLog(msg: string): void {
 }
 
 /**
+ * Язык служебных сообщений JSON-режима: подсказки «верни JSON»
+ * (withJsonModeHint) и фидбэка повтора схемы (callLLMWithSchemaAttempts).
+ *
+ * 'en' — только у работы проекта market='us' (под журналом расхода ENG — тот
+ * же признак, по которому выбирается свой ключ, providerKeys.ts) и только
+ * когда инструкции вызова написаны латиницей: латинских букв в них больше,
+ * чем кириллических. Инструкции — system-сообщения, а если их нет — все
+ * сообщения; в user-сообщениях приезжают данные (имена компаний), и они язык
+ * не решают. Решает перевес, а не наличие кириллицы: английские промпты
+ * цепочки и шаблона называют блоки материалов русскими именами
+ * («ПОДПИСЬ ОТПРАВИТЕЛЯ»). Так английский промпт получает английские
+ * подсказки, и русская строка внутри английского разговора больше не тянет
+ * модель писать поля по-русски.
+ *
+ * 'ru' — всё остальное, байт-в-байт как до правки: RU-проекты, работа без
+ * журнала (staff-роуты, CLI), русский промпт us-проекта (досье, цепочка на
+ * русском или польском — у польской system-промпт русский). Ошибка
+ * распознавания в сторону 'ru' даёт ровно прежнее поведение.
+ */
+type HeJsonHintLanguage = 'ru' | 'en';
+
+const CYRILLIC_LETTERS_RE = /[\u0400-\u04FF]/g;
+const LATIN_LETTERS_RE = /[A-Za-z]/g;
+
+function jsonHintLanguage(messages: LLMMessage[]): HeJsonHintLanguage {
+  if (heProviderJournalMarket() !== 'us') return 'ru';
+  const system = messages.filter((m) => m.role === 'system');
+  const instructions = (system.length ? system : messages).map((m) => m.content).join('\n');
+  const cyrillic = instructions.match(CYRILLIC_LETTERS_RE)?.length ?? 0;
+  const latin = instructions.match(LATIN_LETTERS_RE)?.length ?? 0;
+  return latin > cyrillic ? 'en' : 'ru';
+}
+
+/**
  * json_object-режим отвечает 400, если слово «json» не встречается ни в одном
  * сообщении. Промпты в prompts/ формат упоминают, а инлайновые (system досье
  * собирается в stages/dossier.ts) — нет, и такая стадия падала на каждом
- * прогоне. Подсказку добавляем здесь, а не в каждом промпте.
+ * прогоне. Подсказку добавляем здесь, а не в каждом промпте. Язык — см.
+ * jsonHintLanguage.
  */
-function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
+function withJsonModeHint(messages: LLMMessage[], language: HeJsonHintLanguage): LLMMessage[] {
   if (messages.some((m) => /json/i.test(m.content))) return messages;
   return [
     ...messages,
     {
       role: 'user',
       content:
-        'Верни ответ строго как валидный JSON по схеме: без markdown-фенсов и без текста до/после.',
+        language === 'en'
+          ? 'Return the answer strictly as valid JSON matching the schema: no markdown fences and no text before or after.'
+          : 'Верни ответ строго как валидный JSON по схеме: без markdown-фенсов и без текста до/после.',
+    },
+  ];
+}
+
+/**
+ * Самый длинный предыдущий ответ, который английский повтор схемы переигрывает
+ * целиком (то же число, что у соседнего движка). Длиннее — ответ не
+ * переигрывается вовсе, а фидбэк говорит, что он опущен: обрубок длинного
+ * ответа учил бы модель вернуть обрубок.
+ */
+const SCHEMA_RETRY_REPLAY_MAX_CHARS = 32_000;
+
+/**
+ * Хвост английского повтора схемы (jsonHintLanguage === 'en'): что дописать к
+ * исходным сообщениям после отброшенной попытки. Усечённый ответ не
+ * переигрывается (как и в русской ветке); непрошедший схему или синтаксис —
+ * целиком, если он не длиннее SCHEMA_RETRY_REPLAY_MAX_CHARS, иначе опускается
+ * с пометкой. Русская ветка — прежняя, со срезом до 2000 символов.
+ */
+function englishSchemaRetryMessages(previous: {
+  text: string;
+  error?: string;
+  kind: 'truncated' | 'json_syntax' | 'schema';
+}): LLMMessage[] {
+  if (previous.kind === 'truncated') {
+    return [
+      {
+        role: 'user',
+        content:
+          'Your previous answer did not fit into the output limit and was cut off. Return the COMPLETE result for ' +
+          'the original request: every item of the list, strictly valid JSON matching the schema, with no markdown ' +
+          'fences and no text before or after. Shorten field values, not the list.',
+      },
+    ];
+  }
+  const replay = previous.text.length <= SCHEMA_RETRY_REPLAY_MAX_CHARS;
+  return [
+    ...(replay ? [{ role: 'assistant' as const, content: previous.text }] : []),
+    {
+      role: 'user',
+      content:
+        `Your previous answer failed JSON schema validation. Error:\n` +
+        `${previous.error}\n\n` +
+        (replay ? '' : 'Your previous answer was too long to repeat here, so it is left out.\n') +
+        'Generate the COMPLETE result for the original request again, not only the corrected parts and not a ' +
+        'fragment of your previous answer. Return valid JSON strictly matching the schema. No markdown fences, ' +
+        'no text before or after.',
     },
   ];
 }
@@ -484,10 +573,23 @@ function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
  * (clientErrors.ts → код 'timeout'), менять формулировку вместе с ней.
  */
 export class HeLlmTimeoutError extends Error {
+  /**
+   * Дискриминант класса: instanceof ложен у копии модуля и у отказа,
+   * восстановленного воркером из файла брошенных строк простым Error
+   * (worker/hypothesisEngine.ts, FAILURE_FIELDS). Читатель — isHeLlmTimeout.
+   */
+  readonly heLlmTimeout = true as const;
+
   constructor(public readonly label: string, public readonly timeoutMs: number) {
     super(`${label} timed out after ${timeoutMs}ms`);
     this.name = 'HeLlmTimeoutError';
   }
+}
+
+/** Истёк ли свой срок попытки запроса к модели — по дискриминанту, не по тексту. */
+export function isHeLlmTimeout(error: unknown): boolean {
+  if (error instanceof HeLlmTimeoutError) return true;
+  return (error as { heLlmTimeout?: unknown } | null)?.heLlmTimeout === true;
 }
 
 /**
@@ -853,13 +955,15 @@ async function rawCall(
   maxTokens: number,
   jsonMode: boolean,
   signal: AbortSignal,
+  /** Язык подсказки json_object-режима (jsonHintLanguage); без JSON-режима не читается. */
+  hintLanguage: HeJsonHintLanguage = 'ru',
 ): Promise<{ text: string; response: RequestyResponse }> {
   // Ключ читаем ДО цикла: пробел в конфигурации повтором не лечится, а сообщение
   // с именем env-переменной клиентский маппинг узнаёт как 'configuration'.
   const apiKey = getApiKey();
   const body = JSON.stringify({
     model,
-    messages: jsonMode ? withJsonModeHint(messages) : messages,
+    messages: jsonMode ? withJsonModeHint(messages, hintLanguage) : messages,
     max_tokens: maxTokens,
     ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
   });
@@ -1075,12 +1179,17 @@ async function callLLMWithSchemaAttempts<T>(
    * где считается стоимость прогона.
    */
   const discarded = { tokensUsed: 0, promptTokens: 0, completionTokens: 0, costUsd: 0 };
+  // Язык служебных сообщений — по ИСХОДНЫМ сообщениям, один раз на вызов:
+  // переигранный ответ и фидбэк повтора на него влиять не должны.
+  const hintLanguage = jsonHintLanguage(messages);
 
   for (let attempt = 0; attempt < SCHEMA_ATTEMPTS; attempt++) {
     parent?.throwIfAborted();
     const currentMessages: LLMMessage[] = [...messages];
     const previous = attempt > 0 ? attempts[0] : undefined;
-    if (previous) {
+    if (previous && hintLanguage === 'en') {
+      currentMessages.push(...englishSchemaRetryMessages(previous));
+    } else if (previous) {
       // Обрубок в истории учит модель вернуть ровно тот же обрубок (а срез до
       // 2000 символов делает обрубком даже целый ответ), поэтому при усечении
       // предыдущий ответ не переигрываем вовсе и просим полный результат.
@@ -1106,7 +1215,7 @@ async function callLLMWithSchemaAttempts<T>(
       `LLM request ${attempt + 1}/${SCHEMA_ATTEMPTS}`,
       attemptTimeoutMs,
       parent,
-      (signal) => rawCall(currentMessages, opts.model, maxTokens, true, signal),
+      (signal) => rawCall(currentMessages, opts.model, maxTokens, true, signal, hintLanguage),
     );
     const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
     const costUsd = costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd);

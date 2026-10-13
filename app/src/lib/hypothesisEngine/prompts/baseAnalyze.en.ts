@@ -5,10 +5,17 @@
  * держать синхронными с RU-оригиналом. Результат — основа 15% сегментной
  * дописки финального шаблона, поэтому для us-проектов анализ пишется
  * по-английски (иначе EN-шаблон получал RU-вставки).
+ *
+ * Одно расхождение с RU намеренно: сегодняшняя дата и правило «без выдуманной
+ * сезонности» для recommended_angles — углы уходят в письма, и сезонный
+ * зачин («перед праздничным сезоном…»), выдуманный моделью без даты, читался
+ * бы получателем как ложь. Дату стадия не передаёт: её берёт сборка промпта
+ * (heTodayUtc), то есть это дата вызова модели.
  */
 
 import type { LLMMessage } from '../llm';
 import type { BaseAnalyzePromptInput } from './baseAnalyze';
+import { heTodayUtc } from './evidence.en';
 
 const SYSTEM = `You are a senior data analyst. You are given a lead-list export (column names + sample rows) for a specific sales vertical. Your task is to build a precise profile of the list: who it actually consists of.
 
@@ -18,6 +25,7 @@ Rules:
 - notable_segments — 2–6 meaningful observations: what genuinely stands out in the data (e.g. "40% are micro-businesses with no website", "e-commerce from New York dominates", "half of the decision-makers are founders").
 - data_quality_notes — be honest: which columns are missing, which fields are dirty, what will hinder personalization.
 - recommended_angles — 3–6 messaging angles for THIS specific list: examples, phrasings, and emphases that will land with its segments (geo specifics, industry case studies, decision-maker roles). This is the basis for the template's segment-level tailoring — make the angles concrete, not "write about the benefits".
+- No invented seasonality: do not build an angle on a season, holiday, quarter-end or budget cycle unless the data below shows that this list's businesses are seasonal; any time reference must be true for today's date (given below).
 - Respond strictly in English, JSON ONLY.`;
 
 export function buildBaseAnalysisMessagesEn(input: BaseAnalyzePromptInput): LLMMessage[] {
@@ -25,7 +33,8 @@ export function buildBaseAnalysisMessagesEn(input: BaseAnalyzePromptInput): LLMM
     .map((r, i) => `${i + 1}. ${JSON.stringify(r)}`)
     .join('\n');
 
-  const user = `LIST: ${input.filename} — ${input.rowCount} rows (sample below)
+  const user = `TODAY: ${heTodayUtc()}
+LIST: ${input.filename} — ${input.rowCount} rows (sample below)
 SALES VERTICAL: ${input.verticalName}
 
 COLUMNS (${input.columns.length}):

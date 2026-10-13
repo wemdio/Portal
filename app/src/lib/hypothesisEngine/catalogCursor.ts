@@ -199,8 +199,16 @@ export function heCatalogSliceKey(task: HeCollectTask, widen = 0): string | null
  * гипотезы и словарь не менялись, переиспользовала бы план, построенный по
  * СТАРОМУ промпту, — правка выкатилась бы и не подействовала, и ничто бы об
  * этом не сказало. Поднимайте число руками, меняя промпт плана, правило
- * снятия порогов, а при включённом ремонте среза — ещё и вопрос пробы или
- * ремонтный промпт (sliceProbe.ts, buildCatalogRepairMessagesEn).
+ * снятия порогов, разбор меток каталога (pdlCatalog.ts), а при включённом
+ * ремонте среза — ещё и вопрос пробы или ремонтный промпт (sliceProbe.ts,
+ * buildCatalogRepairMessagesEn).
+ *
+ * История: 2 — метки pdl-срезов сверяются со справочником каталога, а срез без
+ * единой метки снимается до починки (stages/baseCollect.ts, heResolvePdlLabels).
+ * Цена подъёма — один новый план (и починка, если каталога в нём не осталось)
+ * на каждую вертикаль market='us' с сохранённым планом, один раз, на её
+ * следующей сборке; закладки срезов с прежними фильтрами совпадут по ключу и
+ * сохранятся.
  *
  * ПЛЮС ПОРОГИ ПРОБЫ СРЕЗА — сами, без ручного bump'а. Проба и ремонт среза
  * (ensureSliceMatchesVertical в stages/baseCollect.ts) бегут ТОЛЬКО при
@@ -217,7 +225,7 @@ export function heCatalogSliceKey(task: HeCollectTask, widen = 0): string | null
  * означает «включить ремонт»); закладки срезов, чьи фильтры не изменились,
  * совпадут по ключу фильтров и сохранятся.
  */
-export const HE_SOURCE_PLAN_REVISION = 1;
+export const HE_SOURCE_PLAN_REVISION = 2;
 
 export function heCatalogPlanKey(market: string, input: unknown): string {
   const repairBelow = sliceProbeRepairBelow();

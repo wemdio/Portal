@@ -43,7 +43,7 @@ import { projectMarket, type HeMarket } from '../market';
 import { buildBrandCloudMessages } from '../prompts/brandCloud';
 import { buildBrandCloudMessagesEn } from '../prompts/brandCloud.en';
 import type { HeJob } from '../types';
-import { heStageSignal, resolveFetchText, resolveSearch } from './io';
+import { heStageSignal, resolveFetchPage, resolveFetchText, resolveSearch } from './io';
 import {
   heSearchFailureStatus,
   heSearchOutageFailure,
@@ -107,6 +107,12 @@ import type { HeCompetitorEntry } from './competitors';
  * запрос — слишком длинный контекст одного бренда, отказ фильтра содержимого).
  * Схемные сбои (LLMValidationError) и усечения тоже остаются поэлементными:
  * они про ответ модели, а не про доступ к ней.
+ *
+ * Одно исключение — evidence на market='us' (heEvidenceResumableLlmFailure в
+ * stages/evidence.ts): там 'transient' и истёкший срок вызова модели прогон
+ * тоже останавливают. Пропущенный brand_cloud'ом бренд — один из шести входов
+ * гипотез, а пропущенный кандидат evidence — потерянная гипотеза, которую
+ * повтор джобы с чекпойнта переспрашивает, не покупая вердикты префикса.
  */
 const HE_RUN_STOPPING_LLM_KINDS = new Set<HeLlmFailureKind>(['billing', 'configuration']);
 
@@ -306,6 +312,11 @@ async function collectBrandPages(
 ): Promise<{ pages: Array<{ url: string; text: string }>; searchResults: Array<{ title: string; link: string; snippet?: string }> }> {
   const search = resolveSearch(ctx);
   const fetchText = resolveFetchText(ctx);
+  // Кейс-страница рынка 'us' — строгим чтением (io.ts resolveFetchPage): её
+  // адрес взят из выдачи, и 404 или PDF по нему — «страницы нет», а не главная
+  // или «о компании» того же сайта под чужим адресом. Главная бренда — прежним
+  // fetchText: для неё цепочка запасных адресов верна.
+  const fetchPage = market === 'us' ? resolveFetchPage(ctx) : null;
   const jobSignal = heStageSignal(ctx);
 
   let searchResults: Array<{ title: string; link: string; snippet?: string }> = [];
@@ -336,7 +347,13 @@ async function collectBrandPages(
   const caseLink = searchResults.find((r) => caseLinkPattern.test(r.link))?.link;
   if (caseLink) {
     try {
-      pages.push({ url: caseLink, text: truncate(await fetchText(caseLink), CASE_PAGE_EXCERPT) });
+      if (fetchPage) {
+        const page = await fetchPage(caseLink);
+        if (page?.text.trim()) pages.push({ url: page.url, text: truncate(page.text, CASE_PAGE_EXCERPT) });
+        else stageLog(ctx, `[brand_cloud] кейс-страница ${caseLink} пропущена: страницы по адресу нет`);
+      } else {
+        pages.push({ url: caseLink, text: truncate(await fetchText(caseLink), CASE_PAGE_EXCERPT) });
+      }
     } catch (e) {
       if (jobSignal?.aborted) throw e;
       stageLog(ctx, `[brand_cloud] фетч кейс-страницы ${caseLink} пропущен: ${heIoFailureReason(e)}`);

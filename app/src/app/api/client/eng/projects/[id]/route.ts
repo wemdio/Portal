@@ -21,6 +21,7 @@ import { isAnalyzingBaseLive, liveBaseIdsFromJobs } from '@/lib/hypothesisEngine
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import {
   patchHeProjectBrief,
+  type HeBriefField,
   type HeBriefPatchBody,
 } from '@/lib/hypothesisEngine/projectBriefPatch';
 import {
@@ -96,6 +97,151 @@ async function readTeamFixStops(projectId: string): Promise<EngTeamFixStop[] | n
   }
 }
 
+type DetailRow = Record<string, unknown>;
+
+/** Итог ночного добора рынка в деталке: успешных прогонов и принятых адресов. */
+interface EngRefillTotal {
+  vertical_id: string;
+  runs: number;
+  added: number;
+}
+
+/**
+ * ЗАКОНЧЕННЫЕ ПРОГОНЫ НОЧНОГО ДОБОРА — в кабинет не базами, а итогом на рынок.
+ *
+ * Каждая ночь добора — своя строка he_bases («auto-refill: …»), и общий со
+ * staff загрузчик деталки (loadHeProjectDetail) отдаёт их все: ответ, который
+ * мастер опрашивает раз в 4–30 с, рос на строку за ночь. Базами на экране их
+ * нет давно (карточка рынка шага 3 берёт базу шаблона или последнюю свою
+ * авто-базу, isOwnAutoBase), поэтому в ответе их тоже нет — вместо них по
+ * рынку `refill_totals`:
+ *  - `runs` — прогоны, которые ДОРАБОТАЛИ: `collect_info.refill_result.status`
+ *    'appended' или 'no_new' (stages/baseCollectRefill.ts). Прогон 'failed'
+ *    (наш сбой или сбой провайдера, нет места у рассыльщика, дневной бюджет
+ *    занят, отмена клиентом) или без итога долива — не «добор, который
+ *    ничего не нашёл», и в `runs` не идёт: иначе кабинет писал бы
+ *    «N top-ups so far, no new contacts added yet» после ночей нашего сбоя
+ *    (решение владельца 04.10.2026 — свой сбой клиенту не выдаётся за рынок).
+ *    По той же причине не идёт и 'no_new', у которого упала хоть одна задача
+ *    сборки (`collect_info.stats.tasks_failed` > 0): сборка пишет 'no_new' и
+ *    тогда, когда строк нет потому, что источник не прочитался (ошибка чтения
+ *    каталога, упавшая дочерняя сборка карт, «timeout:» ожидания), — это
+ *    ночь нашего сбоя, а не рынок без новых компаний. Обе записи 'no_new'
+ *    (completeHeRefillNoNew и долив без допущенных адресов) кладут рядом
+ *    `stats` той же сборки; нет `stats` или поля — упавших задач не было;
+ *  - `added` — адреса, принятые рассыльщиком, у ЛЮБОГО прогона (сумма
+ *    `refill_result.stats.appended`; нет числа — 0): упавший прогон мог
+ *    успеть отдать часть строк, и они уже в кампаниях рынка.
+ * Рынок, у которого нет ни доработавшего прогона, ни принятого адреса, итога
+ * не получает (ключа нет — строки на карточке нет).
+ * Загрузчик staff не тронут: выдача /api/tools/hypothesis-engine прежняя.
+ *
+ * Остаются базами:
+ *  - идущий прогон ('collecting' / 'analyzing') — по нему мастер держит
+ *    частый опрос и кнопку «Cancel all jobs» (EngProjectWizard);
+ *  - прогон, на котором построен шаблон (шаблоны до 0c802b2a4): карточка рынка
+ *    и признак переписки писем ищут базу шаблона по id;
+ *  - прогон рынка без единого шаблона в ответе: без него «рынок начат»
+ *    (heEngMarketStarted) прочитался бы иначе. Добор бывает только у
+ *    запущенного рынка, так что это оборона, а не путь.
+ * Признак прогона — `refill` проекции (isHeRefillBaseRow: флаг постановки или
+ * имя «auto-refill»), статус — тот же, что у базы.
+ */
+function foldFinishedRefillBases(
+  bases: DetailRow[],
+  rawBases: unknown[],
+  templates: DetailRow[],
+): { bases: DetailRow[]; totals: EngRefillTotal[] } {
+  const templateBaseIds = new Set<string>();
+  const verticalsWithTemplate = new Set<string>();
+  for (const t of templates) {
+    if (typeof t.base_id === 'string') templateBaseIds.add(t.base_id);
+    if (typeof t.vertical_id === 'string') verticalsWithTemplate.add(t.vertical_id);
+  }
+  const appendedById = new Map<string, number>();
+  const finishedIds = new Set<string>();
+  for (const raw of rawBases) {
+    const row = raw && typeof raw === 'object' ? (raw as DetailRow) : null;
+    if (!row || typeof row.id !== 'string') continue;
+    const info = row.collect_info && typeof row.collect_info === 'object' ? (row.collect_info as DetailRow) : null;
+    const result = info?.refill_result && typeof info.refill_result === 'object' ? (info.refill_result as DetailRow) : null;
+    const collectStats = info?.stats && typeof info.stats === 'object' ? (info.stats as DetailRow) : null;
+    const tasksFailed = collectStats?.tasks_failed;
+    const sourceFailed = typeof tasksFailed === 'number' && tasksFailed > 0;
+    if (result?.status === 'appended' || (result?.status === 'no_new' && !sourceFailed)) finishedIds.add(row.id);
+    const stats = result?.stats && typeof result.stats === 'object' ? (result.stats as DetailRow) : null;
+    const appended = stats?.appended;
+    if (typeof appended === 'number' && Number.isFinite(appended) && appended > 0) {
+      appendedById.set(row.id, Math.floor(appended));
+    }
+  }
+  const kept: DetailRow[] = [];
+  const totals = new Map<string, EngRefillTotal>();
+  for (const base of bases) {
+    const id = typeof base.id === 'string' ? base.id : '';
+    const verticalId = typeof base.vertical_id === 'string' ? base.vertical_id : '';
+    const fold =
+      base.refill === true &&
+      base.status !== 'collecting' &&
+      base.status !== 'analyzing' &&
+      id !== '' &&
+      !templateBaseIds.has(id) &&
+      verticalId !== '' &&
+      verticalsWithTemplate.has(verticalId);
+    if (!fold) {
+      kept.push(base);
+      continue;
+    }
+    const total = totals.get(verticalId) ?? { vertical_id: verticalId, runs: 0, added: 0 };
+    if (finishedIds.has(id)) total.runs += 1;
+    total.added += appendedById.get(id) ?? 0;
+    totals.set(verticalId, total);
+  }
+  return { bases: kept, totals: [...totals.values()].filter((t) => t.runs > 0 || t.added > 0) };
+}
+
+/**
+ * Примерный срок отправки запущенного рынка (`launch_info.run_days`,
+ * engClientLaunch.recordHeEngRunDays) — в запись о запуске шаблона ответа.
+ * Проекция записи (toClientEngLaunchInfo) его не пропускает, поэтому поле
+ * добавляется здесь, из сырой записи, и только пока срок посчитан для того же
+ * числа адресов, что в записи (`run_days_leads` = `leads_count`): срок другой
+ * попытки над другим числом адресов не всплывает. Целое ≥ 1, иначе поля нет.
+ */
+function withRunDays(templates: DetailRow[], rawTemplates: unknown[]): DetailRow[] {
+  const runDaysById = new Map<string, number>();
+  for (const raw of rawTemplates) {
+    const row = raw && typeof raw === 'object' ? (raw as DetailRow) : null;
+    const info = row?.launch_info && typeof row.launch_info === 'object' ? (row.launch_info as DetailRow) : null;
+    if (!row || !info || typeof row.id !== 'string') continue;
+    const days = info.run_days;
+    if (
+      typeof days === 'number' &&
+      Number.isInteger(days) &&
+      days >= 1 &&
+      typeof info.leads_count === 'number' &&
+      info.run_days_leads === info.leads_count
+    ) {
+      runDaysById.set(row.id, days);
+    }
+  }
+  if (runDaysById.size === 0) return templates;
+  return templates.map((t) => {
+    const days = typeof t.id === 'string' ? runDaysById.get(t.id) : undefined;
+    const info = t.launch_info;
+    if (days === undefined || !info || typeof info !== 'object') return t;
+    return { ...t, launch_info: { ...(info as DetailRow), run_days: days } };
+  });
+}
+
+/** Поля брифа в тексте отказа 413 — как их подписывает шаг 1 кабинета (EngStepBrief). */
+const BRIEF_FIELD_LABELS: Record<HeBriefField, string> = {
+  business_override: 'Business description',
+  offer_override: 'Offer',
+  style_override: 'Style reference',
+  signature_override: 'Sender signature',
+};
+
 const PROJECT_LOAD_FAILED = 'Failed to load the project';
 const BRIEF_SAVE_FAILED = 'Failed to save the brief';
 const SETTING_SAVE_FAILED = 'Failed to save the project setting';
@@ -121,8 +267,9 @@ const NO_FIELDS =
   'Provide offer_override, style_override, signature_override, business_override, icp or max_emails_per_company';
 
 /**
- * Рамку ЦА читает только EN-промпт гипотез (рынок us, stages/hypotheses.ts).
- * На проекте другого рынка она легла бы в brief и не была бы прочитана
+ * Рамку ЦА читают только EN-промпты (рынок us): профиля сайта
+ * (stages/siteProfile.ts, clientBriefForProfile) и гипотез
+ * (stages/hypotheses.ts). На проекте другого рынка она легла бы в brief и не была бы прочитана
  * никогда, поэтому роут её там не принимает. Кабинет создаёт проекты только
  * с market='us' и форму рамки на другом рынке не показывает: сюда доходит
  * лишь запрос в обход формы.
@@ -220,7 +367,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     : null;
 
   // ИДЁТ ЛИ АНАЛИЗ 'analyzing'-БАЗ — тем же правилом, что у Command Center и
-  // реконсилера «Start outreach»: общий предикат isAnalyzingBaseLive
+  // реконсилера «Launch» (шаг 3): общий предикат isAnalyzingBaseLive
   // (autopilotNext.ts) — активная джоба любой стадии на её base_id ИЛИ запись
   // строки в пределах окна постановки ANALYZING_ORPHAN_GRACE_MS (щель
   // harvest-финала между статусом 'analyzing' и вставкой base_analyze).
@@ -318,15 +465,24 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     ? await readHeBrandEngClient(supabaseAdmin, result.auth.userId)
     : false;
   const projected = toClientEngProjectDetail(detail.detail, { heEngClient });
+  // Законченные прогоны ночного добора — итогом на рынок (foldFinishedRefillBases),
+  // срок отправки — в запись о запуске (withRunDays).
+  const refill = foldFinishedRefillBases(
+    projected.bases,
+    Array.isArray(detail.detail.bases) ? detail.detail.bases : [],
+    projected.templates,
+  );
   return NextResponse.json({
     ...projected,
     bases:
       analysisLive.size === 0
-        ? projected.bases
-        : projected.bases.map((b) => {
+        ? refill.bases
+        : refill.bases.map((b) => {
             const live = typeof b.id === 'string' ? analysisLive.get(b.id) : undefined;
             return live === undefined ? b : { ...b, analysis_live: live };
           }),
+    templates: withRunDays(projected.templates, Array.isArray(detail.detail.templates) ? detail.detail.templates : []),
+    ...(refill.totals.length > 0 ? { refill_totals: refill.totals } : {}),
     ...(busyRes.error ? {} : { has_active_jobs: (busyRes.data ?? []).length > 0 }),
     ...(researchRetry ? { research_retry: researchRetry } : {}),
     auto_launch: autoLaunch,
@@ -467,7 +623,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         case 'bad_type':
           return jsonError(`${err.field} must be a string`, 400);
         case 'too_long':
-          return jsonError(`${err.field}: maximum ${err.max} characters`, 413);
+          // Клиенту — имя поля, как его подписывает шаг 1, а не ключ брифа.
+          return jsonError(`${BRIEF_FIELD_LABELS[err.field]}: up to ${err.max} characters.`, 413);
         case 'not_found':
           return jsonError('Project not found', 404);
         default:

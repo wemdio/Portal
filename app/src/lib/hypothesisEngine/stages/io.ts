@@ -20,16 +20,40 @@
  * Accept-Language — см. ENG_WEBSITE_ROUTE. Рынок 'ru' читает сайт ровно теми
  * же запросом и маршрутом, что и до этой правки; общий парсер
  * (lib/enrich/websiteParser.ts) держит русские значения дефолтами.
+ *
+ * Защита чтения и потолок тела (раунды 9–11): каждое чтение страницы через
+ * ЭТОТ модуль — главная со всей цепочкой fetchAndExtract и строгая страница
+ * resolveFetchPage — идёт с опцией guard парсера (heFetchGuard ниже: проверка
+ * публичного адреса перед каждым запросом и шагом редиректа, не больше
+ * HE_MAX_REDIRECTS шагов) и с потолком тела HE_PAGE_MAX_BYTES. Оба рынка: ни
+ * один настоящий сайт не ведёт редиректом на приватный адрес и не нуждается в
+ * мегабайтах HTML ради 3000 символов текста. Только у 'us' редирект https →
+ * http не проходится, порт — только 80/443, а адреса наших серверов
+ * отклоняются: политика английского рынка целиком — createUsWebsiteFetchGuard
+ * (enrich/publicAddress.ts, там же OWN_SERVER_ADDRESSES и STANDARD_WEB_PORTS). Чтения сайтов
+ * мимо этого модуля — шаги конструктора баз, которые base_collect ставит
+ * дочерней джобой (поиск почт, описания компаний, lib/tools/processingSteps.ts):
+ * EN-джоба конструктора (locale 'en' — её ставит только рынок 'us') читает
+ * под той же createUsWebsiteFetchGuard и с потолком 3 МиБ (enSiteGuard там),
+ * RU-джоба — без этой защиты, как раньше.
+ *
+ * Строгая страница (resolveFetchPage): ровно запрошенный адрес — без обхода
+ * «о компании», без подмены главной, www- и http-вариантами; нет страницы —
+ * null. Для подстраниц сайта и источников доказательств, где подменённая
+ * страница — неправда в корпусе.
  */
 
 import { lookup } from 'node:dns/promises';
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { WebsiteFetchError } from '@/lib/clientBrief/autofill/fetchWebsiteHtml';
 import { DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
+import { createPublicWebsiteGuard, createUsWebsiteFetchGuard } from '@/lib/enrich/publicAddress';
 import {
   fetchAndExtract,
+  fetchSinglePage,
   isWebsiteNoHtmlError,
   normalizeUrl,
+  type WebsiteFetchGuard,
   type WebsiteFetchRouteOrder,
 } from '@/lib/enrich/websiteParser';
 import { getHeActiveJobSignal } from '../llm';
@@ -41,8 +65,32 @@ import type { HeStageContext } from './shared';
 export type HeFetchTextFn = (url: string) => Promise<string>;
 export type HeSearchFn = (q: string) => Promise<Array<{ title: string; link: string; snippet?: string }>>;
 
+/** Строго прочитанная страница (resolveFetchPage). */
+export interface HeFetchedPage {
+  /** Адрес, где закончились редиректы: с него и пришёл текст. */
+  url: string;
+  /** Текст страницы, ≤3000 символов; пустой — HTML есть, текста нет. */
+  text: string;
+}
+export type HeFetchPageFn = (url: string) => Promise<HeFetchedPage | null>;
+
 /** DNS-резолв SSRF-гейта: у node:dns своего срока нет — молчащий резолвер вешал стадию. */
 const DNS_TIMEOUT_MS = 8_000;
+
+/**
+ * Потолок тела ОДНОГО ответа. Воркер живёт в 512 МБ, а тело раньше
+ * ограничивал только срок попытки — быстрый хост за 8 с успевал залить сотни
+ * мегабайт, и декодирование с cheerio умножали их. Текст страницы режется до
+ * 3000 символов, так что первых 3 МБ HTML хватает с запасом.
+ */
+const HE_PAGE_MAX_BYTES = 3 * 1024 * 1024;
+
+/**
+ * Шагов редиректа на один запрос. Каждый шаг проверяется на публичный адрес,
+ * поэтому потолок — не защита сам по себе, а предел работы; 10 — как у Go
+ * net/http, с запасом для цепочек http → https → www → /en/.
+ */
+const HE_MAX_REDIRECTS = 10;
 
 /**
  * Чтение сайта: константы цепочки fetchAndExtract (lib/enrich/websiteParser.ts).
@@ -53,6 +101,9 @@ const DNS_TIMEOUT_MS = 8_000;
  * совпадает с его дефолтом по договорённости: арифметика бюджета опирается
  * именно на это число, и молчаливое совпадение с чужой константой держалось бы
  * ровно до первой её правки.
+ *
+ * Защита чтения (heFetchGuard) арифметику не меняет: проверки адреса, все шаги
+ * редиректа и чтение тела идут внутри того же срока одной попытки.
  */
 const WEBSITE_FETCH_TIMEOUT_MS = 8_000;
 const WEBSITE_FETCH_ATTEMPTS = 2;
@@ -87,10 +138,10 @@ function aboutCandidatesInEffect(): number {
  * сайт падал бы на site_profile как таймаут. Срок обязан ловить зависание, а не
  * рубить здоровый сайт.
  */
-function websiteTimeoutMs(): number {
+function websiteTimeoutMs(gateLookups: 1 | 2): number {
   const perAddress = WEBSITE_FETCH_ATTEMPTS * WEBSITE_FETCH_TIMEOUT_MS + WEBSITE_FETCH_RETRY_DELAY_MS;
   const addresses = WEBSITE_ORIGIN_VARIANTS + aboutCandidatesInEffect();
-  const chain = DNS_TIMEOUT_MS + addresses * perAddress;
+  const chain = gateLookups * DNS_TIMEOUT_MS + addresses * perAddress;
   // Округляем до целых секунд: срок печатается в лог и в he_jobs.error.
   //
   // Верхнего клампа нет намеренно: тихо урезанный бюджет рубил бы здоровый сайт
@@ -108,7 +159,9 @@ function websiteTimeoutMs(): number {
   //   ceil(1,15 × (8 000 + (3 + n) × 16 300)) < окно,
   // где n — WEBSITE_ENRICHMENT_MAX_ABOUT_CANDIDATES. Это n ≤ 92 на шиппинг-окне
   // и n ≤ 60 при окне на нижней границе; дефолт n = 4 (141 000 мс) от обоих
-  // порогов далеко.
+  // порогов далеко. У рынка 'us' в гейте второй lookup (gateLookups = 2, см.
+  // WEBSITE_TIMEOUT_US_MS) — 16 000 вместо 8 000; пороги от этого не
+  // сдвигаются (те же n ≤ 92 и n ≤ 60), дефолт — 150 000 мс.
   //
   // Что ломается выше порога: чтение сайта не подаёт признаков жизни, пока не
   // закончится (ctx.onActivity стоит в .finally у resolveFetchText), поэтому
@@ -121,7 +174,30 @@ function websiteTimeoutMs(): number {
 }
 
 /** ≈141 с на дефолтных 4 страницах «о компании», ≈216 с на 8. */
-const WEBSITE_TIMEOUT_MS = websiteTimeoutMs();
+const WEBSITE_TIMEOUT_MS = websiteTimeoutMs(1);
+/**
+ * Рынок 'us': после общего гейта — проверка политики его защиты чтения (порт и
+ * адреса наших серверов, gateWebsiteAddress) со своим lookup под тем же
+ * DNS_TIMEOUT_MS, поэтому в цепочке два срока DNS: ≈150 с на дефолте. У 'ru'
+ * бюджет прежний.
+ */
+const WEBSITE_TIMEOUT_US_MS = websiteTimeoutMs(2);
+
+/**
+ * Строгая страница (resolveFetchPage): один адрес, без цепочки. Гейт DNS и у
+ * рынка 'us' второй lookup — повторный при отказе (usDnsFailure) либо проверка
+ * политики 'us' при успехе (gateWebsiteAddress), не оба, — по DNS_TIMEOUT_MS, затем
+ * WEBSITE_FETCH_ATTEMPTS попыток по сроку с паузой, тот же запас на разбор:
+ * ceil(1,15 × (2 × 8 000 + 2 × 8 000 + 300)) = 38 000 мс. Минимума в 120 с нет:
+ * он про цепочку главной, а одна страница, не ответившая за две попытки, не
+ * ответит и за третью минуту.
+ */
+const WEBSITE_PAGE_TIMEOUT_MS =
+  Math.ceil(
+    ((2 * DNS_TIMEOUT_MS + WEBSITE_FETCH_ATTEMPTS * WEBSITE_FETCH_TIMEOUT_MS + WEBSITE_FETCH_RETRY_DELAY_MS) *
+      WEBSITE_PARSE_SLACK) /
+      1000,
+  ) * 1000;
 /**
  * Поиск: срок HTTP-запроса живёт внутри клиента Serper, а этот бюджет
  * страхует зависший клиент И покрывает журнал расхода вокруг запроса
@@ -132,7 +208,8 @@ const SEARCH_TIMEOUT_MS = HE_SEARCH_TIMEOUT_MS;
 /**
  * Сайт клиента недоступен — исход чтения сайта, а не поломка стадии. Два рода:
  *  - `dns` — гейт не пустил к первому запросу: домен не резолвится, адрес
- *    невалидный либо приватный (`assertPublicWebsite`) — факт об адресе. У
+ *    невалидный либо приватный (`assertPublicWebsite`), у рынка 'us' ещё —
+ *    порт не 80/443 или адрес нашего сервера (heFetchGuard) — факт об адресе. У
  *    рынка 'us' «не резолвится» — только ENOTFOUND/ENODATA, а сбой самого
  *    резолвера (EAI_AGAIN и др.) сюда не попадает (usDnsFailure ниже);
  *  - `no_html` — хост принял соединение, но ни один адрес origin'а не отдал
@@ -163,6 +240,7 @@ const SEARCH_TIMEOUT_MS = HE_SEARCH_TIMEOUT_MS;
  * бренда (stages/brandCloud.ts), источник поисковой выдачи
  * (stages/evidence.ts), главная конкурента (stages/competitors.ts). То есть в
  * журнале стадии может стоять «Сайт клиента недоступен» про домен конкурента.
+ * Строгая страница (defaultFetchPage) бросает тот же класс с тем же текстом.
  *
  * Почему текст всё равно НЕ меняется. Первые слова вместе с родом в скобках —
  * якорь классификатора кабинета (clientErrors.ts), и разойтись эти два места не
@@ -252,6 +330,33 @@ const ENG_WEBSITE_ROUTE: { routeOrder: WebsiteFetchRouteOrder; acceptLanguage: s
 const DNS_NAME_NOT_FOUND_CODES = new Set(['ENOTFOUND', 'ENODATA']);
 
 /**
+ * Не ответил НАШ резолвер (usDnsFailure ниже) — сбой у нас, а не факт о сайте.
+ * Текст «DNS-резолвер не ответил …» — якорь кабинета (clientErrors.ts → код
+ * 'internal'), его не менять. Дискриминант heResolverFailure читает воркер
+ * (writeJobFailure): такой отказ тратит попытку, но повтор идёт после паузы, а
+ * не через ~5 с — минутный сбой резолвера иначе сжигал все попытки стадии.
+ * Поле переживает файл брошенных строк (FAILURE_FIELDS воркера).
+ */
+class HeResolverFailureError extends Error {
+  /** Дискриминант: instanceof ложен, если в процессе окажется две копии модуля. */
+  readonly heResolverFailure = true as const;
+
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = 'HeResolverFailureError';
+  }
+}
+
+/** Сбой нашего резолвера (HeResolverFailureError) где-то в цепочке причин — по дискриминанту. */
+export function isHeResolverFailure(error: unknown): boolean {
+  for (let e: unknown = error, depth = 0; e && typeof e === 'object' && depth < 4; depth += 1) {
+    if ((e as { heResolverFailure?: unknown }).heResolverFailure === true) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
  * Провал DNS-резолва у гейта assertPublicWebsite — у рынка 'us' уточнённый.
  *
  * Общий гейт (lib/clientDemo/personalize.ts: его делят демо-персонализация RU и
@@ -265,9 +370,10 @@ const DNS_NAME_NOT_FOUND_CODES = new Set(['ENOTFOUND', 'ENODATA']);
  *  - ENOTFOUND / ENODATA — имени нет: прежний род `dns`;
  *  - имя на этот раз нашлось — первый провал был сбоем резолвера;
  *  - любой другой код — резолвер не ответил.
- * Последние два — обычная Error с кодом резолвера, НЕ HeSiteUnreachableError:
- * site_profile её не переживает, а бросает, воркер повторяет стадию по своей
- * политике, а кабинет читает исход техническим сбоем («Try again» есть).
+ * Последние два — HeResolverFailureError с кодом резолвера в тексте, НЕ
+ * HeSiteUnreachableError: site_profile её не переживает, а бросает, воркер
+ * повторяет стадию по своей политике (с паузой, см. класс выше), а кабинет
+ * читает исход техническим сбоем («Try again» есть).
  * Невалидный, приватный или служебный адрес (400 гейта) остаётся родом `dns`.
  * Рынок 'ru' сюда не заходит — у него всё как до этой правки.
  */
@@ -284,18 +390,83 @@ async function usDnsFailure(gateError: unknown, normalized: string): Promise<unk
   } catch (e) {
     const code = (e as { code?: unknown } | null)?.code;
     if (typeof code === 'string' && DNS_NAME_NOT_FOUND_CODES.has(code)) return gateError;
-    return new Error(`DNS-резолвер не ответил для ${host} (${typeof code === 'string' ? code : 'без кода'})`, {
-      cause: e,
-    });
+    return new HeResolverFailureError(
+      `DNS-резолвер не ответил для ${host} (${typeof code === 'string' ? code : 'без кода'})`,
+      e,
+    );
   }
-  return new Error(`DNS-резолвер не ответил для ${host} с первой попытки (повторный запрос прошёл)`, {
-    cause: gateError,
-  });
+  return new HeResolverFailureError(
+    `DNS-резолвер не ответил для ${host} с первой попытки (повторный запрос прошёл)`,
+    gateError,
+  );
+}
+
+/**
+ * Защита чтения для каждого запроса этого модуля (см. шапку): публичный адрес перед
+ * каждым запросом и шагом редиректа, прямой маршрут — с проверкой при
+ * соединении (enrich/publicAddress.ts). Явный http-вариант главной в цепочке
+ * fetchAndExtract — не редирект, отказ https → http его не касается.
+ *
+ * 'us' — политика английского рынка целиком (createUsWebsiteFetchGuard в
+ * enrich/publicAddress.ts, с этим же HE_MAX_REDIRECTS): редирект https → http
+ * не проходится, порт только 80/443 (STANDARD_WEB_PORTS), адреса наших
+ * серверов (OWN_SERVER_ADDRESSES) отклоняются по литералу, по ответу нашего
+ * резолвера и при соединении прямого маршрута. 'ru' — только публичный адрес:
+ * https → http проходится, как проходил в redirect: 'follow' до этой правки,
+ * порт и адрес наших серверов не проверяются.
+ */
+function heFetchGuard(market: HeMarket): WebsiteFetchGuard {
+  if (market === 'us') return createUsWebsiteFetchGuard({ maxRedirects: HE_MAX_REDIRECTS });
+  return createPublicWebsiteGuard({ allowHttpDowngrade: true, maxRedirects: HE_MAX_REDIRECTS });
+}
+
+/**
+ * SSRF-гейт до первого запроса: адрес публичный и резолвится. Отказ — род
+ * `dns` (у рынка 'us' сбой самого резолвера отделён, см. usDnsFailure).
+ * Общий шаг defaultFetchText и defaultFetchPage.
+ *
+ * У рынка 'us' следом — политика его защиты чтения (порт и адреса наших
+ * серверов, heFetchGuard): адрес, который она отклоняет, — тоже факт об
+ * адресе, род `dns`, а не `no_html` с «Try again», который ничего не изменит.
+ * Её lookup ответил ошибкой — проверка пропускает (решает соединение, см.
+ * enrich/publicAddress.ts), как и на каждом следующем запросе; молчит дольше
+ * DNS_TIMEOUT_MS — истёкший срок операции, как и у первого lookup.
+ */
+async function gateWebsiteAddress(normalized: string, signal: AbortSignal, market: HeMarket): Promise<void> {
+  try {
+    await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
+      assertPublicWebsite(normalized),
+    );
+  } catch (e) {
+    if (market !== 'us' || signal.aborted || isHeOperationTimeout(e)) {
+      throw asSiteUnreachable(e, 'dns', normalized, signal);
+    }
+    // Повторный lookup — под тем же бюджетом DNS, что и первый.
+    const failure = await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
+      usDnsFailure(e, normalized),
+    );
+    if (failure !== e) throw failure;
+    throw asSiteUnreachable(e, 'dns', normalized, signal);
+  }
+  if (market === 'us') {
+    try {
+      await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
+        heFetchGuard(market).checkUrl(new URL(normalized)),
+      );
+    } catch (e) {
+      // Отказ политики — по дискриминанту WebsiteAddressRefusedError, не по тексту.
+      const refused = (e as { websiteAddressRefused?: unknown } | null)?.websiteAddressRefused === true;
+      throw refused ? asSiteUnreachable(e, 'dns', normalized, signal) : e;
+    }
+  }
+  // DNS-резолв не прерывается: его поздний результат не должен начать HTTP.
+  signal.throwIfAborted();
 }
 
 /**
  * Дефолтный фетч: нормализация URL → SSRF-гейт (DNS/приватные адреса режем
- * до первого запроса) → fetchAndExtract (главная + «о компании», ≤3000 символов).
+ * до первого запроса) → fetchAndExtract (главная + «о компании», ≤3000 символов)
+ * с защитой чтения и потолком тела на каждом запросе цепочки.
  * Оба шага дают собственный род недоступности — см. HeSiteUnreachableError.
  *
  * Порядок шагов важен: проверка публичности адреса идёт ПЕРВОЙ, до любого
@@ -307,29 +478,16 @@ export async function defaultFetchText(
   market: HeMarket = 'ru',
 ): Promise<string> {
   const normalized = normalizeUrl(url);
-  return withHeDeadline('website extraction', WEBSITE_TIMEOUT_MS, parent, async (signal) => {
-    try {
-      await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
-        assertPublicWebsite(normalized),
-      );
-    } catch (e) {
-      if (market !== 'us' || signal.aborted || isHeOperationTimeout(e)) {
-        throw asSiteUnreachable(e, 'dns', normalized, signal);
-      }
-      // Повторный lookup — под тем же бюджетом DNS, что и первый.
-      const failure = await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
-        usDnsFailure(e, normalized),
-      );
-      if (failure !== e) throw failure;
-      throw asSiteUnreachable(e, 'dns', normalized, signal);
-    }
-    // DNS-резолв не прерывается: его поздний результат не должен начать HTTP.
-    signal.throwIfAborted();
+  const budget = market === 'us' ? WEBSITE_TIMEOUT_US_MS : WEBSITE_TIMEOUT_MS;
+  return withHeDeadline('website extraction', budget, parent, async (signal) => {
+    await gateWebsiteAddress(normalized, signal, market);
     let text: string;
     try {
       text = await fetchAndExtract(normalized, {
         timeout: WEBSITE_FETCH_TIMEOUT_MS,
         signal,
+        guard: heFetchGuard(market),
+        maxBytes: HE_PAGE_MAX_BYTES,
         ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
       });
     } catch (e) {
@@ -339,6 +497,42 @@ export async function defaultFetchText(
     }
     signal.throwIfAborted();
     return text;
+  });
+}
+
+/**
+ * Дефолтная строгая страница: тот же SSRF-гейт → fetchSinglePage (ровно этот
+ * адрес, без «о компании» и запасных адресов) с защитой чтения и потолком тела.
+ *
+ * Исходы — те же классы, что у defaultFetchText, плюс null:
+ *  - { url, text } — url — адрес после редиректов, text может быть пустым;
+ *  - null — страницы нет (ответ не 2xx, не-HTML) или адрес редиректа отклонён;
+ *  - HeSiteUnreachableError('dns') — гейт не пустил;
+ *  - HeSiteUnreachableError('no_html') — адрес не ответил ни на одной попытке;
+ *  - HeOperationTimeoutError — истёк WEBSITE_PAGE_TIMEOUT_MS; отмена — отменой.
+ */
+export async function defaultFetchPage(
+  url: string,
+  parent?: AbortSignal,
+  market: HeMarket = 'ru',
+): Promise<HeFetchedPage | null> {
+  const normalized = normalizeUrl(url);
+  return withHeDeadline('website page', WEBSITE_PAGE_TIMEOUT_MS, parent, async (signal) => {
+    await gateWebsiteAddress(normalized, signal, market);
+    let page: HeFetchedPage | null;
+    try {
+      page = await fetchSinglePage(normalized, {
+        timeout: WEBSITE_FETCH_TIMEOUT_MS,
+        signal,
+        guard: heFetchGuard(market),
+        maxBytes: HE_PAGE_MAX_BYTES,
+        ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
+      });
+    } catch (e) {
+      throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal) : e;
+    }
+    signal.throwIfAborted();
+    return page;
   });
 }
 
@@ -364,6 +558,23 @@ export function resolveFetchText(ctx: HeStageContext): HeFetchTextFn {
     (custom
       ? withHeDeadline('website extraction', WEBSITE_TIMEOUT_MS, parent, () => custom(url))
       : defaultFetchText(url, parent, market)
+    ).finally(() => ctx.onActivity?.());
+}
+
+/**
+ * Строгая страница для стадии (подстраницы сайта, источники доказательств):
+ * исходы — у defaultFetchPage. Подменённый ctx.fetchText (тесты, особые
+ * стадии) отвечает и здесь — его текст считается текстом запрошенного адреса,
+ * статуса у него нет, поэтому null он не даёт.
+ */
+export function resolveFetchPage(ctx: HeStageContext): HeFetchPageFn {
+  const parent = heStageSignal(ctx);
+  const market = ctx.market;
+  const custom = ctx.fetchText;
+  return (url) =>
+    (custom
+      ? withHeDeadline('website page', WEBSITE_PAGE_TIMEOUT_MS, parent, async () => ({ url, text: await custom(url) }))
+      : defaultFetchPage(url, parent, market)
     ).finally(() => ctx.onActivity?.());
 }
 

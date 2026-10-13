@@ -80,7 +80,7 @@ import fs from 'node:fs';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, sleep, startWorkerHeartbeat } from './_shared';
 import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
-import { getHeActiveJobSignal, heLlmFailureOf, heLlmMaxAttemptMs, setHeActiveJob } from '@/lib/hypothesisEngine/llm';
+import { getHeActiveJobSignal, heLlmFailureOf, heLlmMaxAttemptMs, isHeLlmTimeout, setHeActiveJob } from '@/lib/hypothesisEngine/llm';
 import type { HeLlmSpend } from '@/lib/hypothesisEngine/llm';
 // Клиент БД СТАДИЙ: срок на заголовки И на паузу между кусками тела, обрыв по
 // сигналу джобы. Отдельный от `db` сознательно — см. комментарий у stageDb ниже.
@@ -117,6 +117,7 @@ import { createHeSpendGate } from '@/lib/hypothesisEngine/spendCeiling';
 import { closeHeRefillBaseAfterFinalFail } from '@/lib/hypothesisEngine/stages/baseCollect';
 import { isHeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
 import type { HeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
+import { isHeResolverFailure, isHeSiteUnreachable } from '@/lib/hypothesisEngine/stages/io';
 // Алерт команде в health-бот, когда ENG-проект остановлен отказом, который
 // чинит только команда (решение владельца 04.10.2026). Предикат — тот же, по
 // которому кабинет сворачивает причину в 'billing'/'configuration'.
@@ -286,6 +287,20 @@ const STAGE_WATCHDOG = parseHeStageWatchdogMode(process.env.HE_STAGE_WATCHDOG_MO
  * (research → проект failed, base_collect → ремонт базы). Серия обнуляется
  * любым нормально завершившимся прогоном, включая тик self-requeue
  * base_collect: прогрессирующая сборка предела не достигает.
+ *
+ * Тот же предел и та же серия — у остановки evidence рынка 'us' с
+ * продвинутым чекпойнтом (HeEvidenceProgressResumeError в
+ * stages/evidence.ts, род 'evidence_progress'): стадия сама бросает отказ с
+ * дискриминантом heJobInterruption, когда модель временно не ответила, а это
+ * исполнение уже проверило хотя бы одного кандидата и чекпойнт с ним
+ * подтверждён. Сделанная работа лежит в чекпойнте, и повтор её не покупает —
+ * поэтому попытку она не тратит. Своей ветки у неё здесь нет: она идёт этой
+ * политикой целиком (серия, пауза, после предела — обычная попытка), а сверх
+ * того evidence ограничивает такие остановки на джобу сам
+ * (EVIDENCE_FREE_RESUMES_PER_JOB, счётчик в чекпойнте, серией не
+ * обнуляется). Бесплатных повторов evidence поэтому не больше
+ * EVIDENCE_FREE_RESUMES_PER_JOB на джобу и не больше HE_JOB_FREE_INTERRUPTIONS
+ * подряд, засчитанных — те же MAX_ATTEMPTS.
  */
 const HE_JOB_FREE_INTERRUPTIONS = 5;
 /** Пауза перед повтором прерванного прогона: 30с → 60с → 120с (дальше 120с). */
@@ -329,6 +344,31 @@ const INTERRUPTION_RETRY_MAX_MS = 120_000;
 const RATE_LIMIT_PAUSE_DEFAULT_MS = 60_000;
 /** Потолок одной паузы: дольше — уже не «подожди», а «зайди позже». */
 const RATE_LIMIT_PAUSE_MAX_MS = 10 * 60_000;
+/**
+ * Лестница пауз перед повтором после ОТКАЗА ПРОВАЙДЕРА, который проходит сам:
+ * 429 модели (выше) и временный сбой модели или поиска
+ * (heTransientProviderFailureOf) — RATE_LIMIT_PAUSE_DEFAULT_MS (60 с) после
+ * первой засчитанной попытки, этот потолок (120 с) после второй; провайдер
+ * назвал срок дольше (Retry-After) — ждём его, но не дольше
+ * RATE_LIMIT_PAUSE_MAX_MS. Попытка тратится, как и раньше: полных прогонов
+ * стадии те же MAX_ATTEMPTS, пауза только отодвигает повтор. Та же лестница —
+ * у временного сбоя на нашей стороне внутри стадии (heOwnTransientFailureOf).
+ *
+ * Зачем. Обычный временный отказ (5xx, свой срок ответа модели, обрыв
+ * соединения, полный отказ поиска) повторялся сразу — claimJob поднимал строку
+ * через ~5 с, — и сбой провайдера на минуту-две сжигал все три попытки:
+ * research-проект падал, а каждый повтор заново оплачивал вызовы, которые
+ * стадия успела сделать до отказа. С паузами 60 + 120 с три попытки
+ * переживают около трёх минут недоступности (плюс время самих прогонов).
+ *
+ * Почему с 60 с, а не с 30, как у прерываний: пауз всего MAX_ATTEMPTS − 1 = 2
+ * (на последней попытке повтора нет), и 30 + 60 с не покрывали бы
+ * двухминутный сбой. У 429 без Retry-After первая пауза прежняя (60 с), вторая
+ * вдвое длиннее; Retry-After короче ступени лестницы паузу больше не
+ * сокращает: срок, названный провайдером, — нижняя граница паузы, а не её
+ * длина.
+ */
+const PROVIDER_RETRY_PAUSE_LADDER_MAX_MS = 120_000;
 
 /**
  * Срок на участок ПОСЛЕ стадии: финализация (чтение статуса → done-запись →
@@ -475,7 +515,10 @@ function isHeJobInterruption(error: unknown): boolean {
   return (error as { heJobInterruption?: unknown } | null)?.heJobInterruption === true;
 }
 
-/** Род прерывания для лога: сторож простоя, рестарт воркера или обрыв чтения БД. */
+/**
+ * Род прерывания для лога: сторож простоя, рестарт воркера, обрыв чтения БД или
+ * остановка evidence с продвинутым чекпойнтом ('evidence_progress').
+ */
 function heJobInterruptionKind(error: unknown): string {
   const kind = (error as { kind?: unknown } | null)?.kind;
   return typeof kind === 'string' ? kind : 'unknown';
@@ -540,6 +583,75 @@ function heSearchRefusalOf(error: unknown): HeSearchProviderError | null {
     if (isHeSearchProviderError(e) && e.kind !== 'transient') return e;
     e = (e as { cause?: unknown }).cause;
   }
+  return null;
+}
+
+/** Временный отказ провайдера, после которого повтор стадии отодвигается. */
+type HeTransientProviderFailure = 'model' | 'model_timeout' | 'search';
+
+/**
+ * ВРЕМЕННЫЙ отказ провайдера — по ТИПУ (дискриминанты классов), никогда по
+ * тексту; null — не такой. Читатель — writeJobFailure: такой отказ тратит
+ * попытку, как и раньше, но повтор отодвигается лестницей пауз
+ * (PROVIDER_RETRY_PAUSE_LADDER_MAX_MS, rateLimitPauseMs).
+ *
+ *  - 'model' — класс 'transient' транспорта модели (llm.ts: 5xx, 408/425/529,
+ *    обрыв соединения, недочитанное тело 200) после быстрых повторов внутри
+ *    вызова или после окна, в котором их делают;
+ *  - 'model_timeout' — истёк свой срок попытки запроса к модели
+ *    (HeLlmTimeoutError); отмена задачи и сторож простоя сюда не попадают —
+ *    у них свой класс (отмена, HeJobInterruptionError);
+ *  - 'search' — отказ поиска класса 'transient' (429, 5xx, свой срок запроса
+ *    клиента Serper, обрыв сети, отказ одному запросу; SerperFailureKind);
+ *    стадия бросает его, только если поиск не обслужил ни одного запроса
+ *    (stages/searchIo.ts).
+ * Истёкший срок операции стадии (HeOperationTimeoutError — чтение сайта
+ * клиента, страховочный срок поиска) сюда НЕ входит: это не отказ провайдера,
+ * и он остаётся обычным фейлом с повтором без паузы (stages/siteProfile.ts).
+ * 429 модели (rate_limit) здесь не считается: у него своя ветка в
+ * writeJobFailure с той же лестницей. Цепочку причин проходим на ту же
+ * глубину, что heLlmFailureOf и heSearchRefusalOf.
+ */
+function heTransientProviderFailureOf(error: unknown): HeTransientProviderFailure | null {
+  if (heLlmFailureOf(error)?.kind === 'transient') return 'model';
+  for (let e: unknown = error, depth = 0; e && depth < 4; depth += 1) {
+    if (isHeLlmTimeout(e)) return 'model_timeout';
+    if (isHeSearchProviderError(e) && e.kind === 'transient') return 'search';
+    e = (e as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** Временный сбой у НАС (не у провайдера), после которого повтор стадии отодвигается. */
+type HeOwnTransientFailure = 'db' | 'resolver';
+
+/**
+ * ВРЕМЕННЫЙ сбой нашей стороны внутри стадии; null — не такой. Читатель —
+ * writeJobFailure: попытка тратится, как и раньше, но повтор идёт после паузы
+ * той же лестницы (rateLimitPauseMs: 60 с, потом 120 с), а не через ~5 с —
+ * иначе сбой на минуту сжигал все MAX_ATTEMPTS попыток, а каждая заново
+ * оплачивала вызовы модели, которые стадия успела сделать до отказа.
+ *
+ *  - 'resolver' — не ответил наш DNS-резолвер (HeResolverFailureError из
+ *    stages/io.ts, по дискриминанту heResolverFailure);
+ *  - 'db' — isTransientDbError: блип БД или шлюза PostgREST (обрыв, 502/503/504
+ *    Kong/nginx, коды 08xxx/57P0x/PGRST00x). Предикат узнаёт его и по тексту
+ *    (ECONNRESET, «fetch failed»), поэтому так же попадает и сетевой обрыв
+ *    другого запроса стадии без класса провайдера — пауза ему тоже на пользу,
+ *    в логе он назван «БД/шлюз или сеть», а не «БД».
+ * Отказы с классом провайдера (heLlmFailureOf любого рода, свой срок модели,
+ * отказ поиска) сюда НЕ попадают: у них свои ветки выше по коду, а 502 в теле
+ * ответа модели — не блип нашей БД. Недоступный сайт (HeSiteUnreachableError)
+ * — тоже нет: это исход чтения чужого адреса, а не сбой у нас.
+ */
+function heOwnTransientFailureOf(error: unknown): HeOwnTransientFailure | null {
+  if (heLlmFailureOf(error)) return null;
+  for (let e: unknown = error, depth = 0; e && depth < 4; depth += 1) {
+    if (isHeLlmTimeout(e) || isHeSearchProviderError(e) || isHeSiteUnreachable(e)) return null;
+    e = (e as { cause?: unknown }).cause;
+  }
+  if (isHeResolverFailure(error)) return 'resolver';
+  if (isTransientDbError(error)) return 'db';
   return null;
 }
 
@@ -1130,15 +1242,21 @@ const STRANDED_PATH = process.env.HE_WORKER_STRANDED_PATH ?? '/tmp/hypothesis-en
 /**
  * Поля отказа, по которым failJob решает судьбу джобы. Все они читаются по
  * ДИСКРИМИНАНТУ, а не по классу (isHeJobInterruption, isHeJobTerminal,
- * heBrandInputRefusalOf, heLlmFailureOf, heSearchRefusalOf), поэтому отказ, восстановленный из файла
- * простым Error с этими полями, классифицируется так же, как исходный.
+ * heBrandInputRefusalOf, heLlmFailureOf, heSearchRefusalOf,
+ * heTransientProviderFailureOf, heOwnTransientFailureOf), поэтому отказ,
+ * восстановленный из файла простым Error с этими полями, классифицируется так
+ * же, как исходный. Блип БД heOwnTransientFailureOf узнаёт по тексту
+ * сообщения — оно в файле есть всегда.
  */
 const FAILURE_FIELDS = [
   'heJobInterruption',
   'heJobTerminal',
   'heUnpaidRefusal',
   'heLlmFailure',
+  'heLlmTimeout',
   'heSearchProvider',
+  'heResolverFailure',
+  'heSiteUnreachable',
   'kind',
   'status',
   'retryAfterMs',
@@ -3089,15 +3207,22 @@ async function closeAnalyzingBaseAfterCancel(client: HeWorkerDb, job: HeJob): Pr
 }
 
 /**
- * Сколько ждать до повтора, если провайдер попросил подождать (429).
- * Попытку это НЕ экономит (см. RATE_LIMIT_PAUSE_DEFAULT_MS) — только отодвигает
- * повтор на время, которое назвал сам провайдер.
+ * Сколько ждать до повтора после отказа, который проходит сам: 429 (провайдер
+ * попросил подождать), временный сбой провайдера (heTransientProviderFailureOf)
+ * или временный сбой у нас (heOwnTransientFailureOf: блип БД/шлюза, наш
+ * резолвер — у них Retry-After нет). Ступень лестницы по номеру засчитанной
+ * попытки — 60 с, потом 120 с (PROVIDER_RETRY_PAUSE_LADDER_MAX_MS); названный
+ * провайдером срок (Retry-After) длиннее ступени — он, но не дольше
+ * RATE_LIMIT_PAUSE_MAX_MS. Попытку это НЕ экономит (см.
+ * RATE_LIMIT_PAUSE_DEFAULT_MS) — только отодвигает повтор.
  */
-function rateLimitPauseMs(retryAfterMs: number | undefined): number {
-  return Math.min(
-    RATE_LIMIT_PAUSE_MAX_MS,
-    Math.max(1_000, retryAfterMs && Number.isFinite(retryAfterMs) ? retryAfterMs : RATE_LIMIT_PAUSE_DEFAULT_MS),
+function rateLimitPauseMs(retryAfterMs: number | undefined, nextAttempts: number): number {
+  const step = Math.min(
+    RATE_LIMIT_PAUSE_DEFAULT_MS * 2 ** Math.max(0, nextAttempts - 1),
+    PROVIDER_RETRY_PAUSE_LADDER_MAX_MS,
   );
+  const asked = retryAfterMs && Number.isFinite(retryAfterMs) ? retryAfterMs : 0;
+  return Math.min(RATE_LIMIT_PAUSE_MAX_MS, Math.max(step, asked));
 }
 
 /**
@@ -3187,7 +3312,10 @@ async function writeJobFailure(
   const unpaidRefusal = heBrandInputRefusalOf(err);
 
   // Прерывание (сторож простоя, рестарт воркера, обрыв чтения проекта до
-  // стадии): работа не выполнялась, платить попыткой не за что. Признак —
+  // стадии): работа не выполнялась, платить попыткой не за что. Остановка
+  // evidence с продвинутым чекпойнтом ('evidence_progress', см.
+  // HE_JOB_FREE_INTERRUPTIONS) идёт этой же веткой: её работа сохранена и
+  // повтором не покупается. Признак —
   // ТИП ошибки, не её текст. Бесплатность ограничена: после
   // HE_JOB_FREE_INTERRUPTIONS подряд прерывание считается обычной попыткой,
   // иначе застрявшая стадия крутилась бы бесплатно вечно.
@@ -3199,7 +3327,28 @@ async function writeJobFailure(
   const nextAttempts = job.attempts + (free || unpaidRefusal ? 0 : 1);
   const finalFail =
     !free && (terminalProviderRefusal || terminalStageFailure || nextAttempts >= MAX_ATTEMPTS);
-  const pauseMs = rateLimited && !finalFail ? rateLimitPauseMs(llmFailure?.retryAfterMs) : 0;
+  // Временный сбой провайдера (не 429 — у него ветка rateLimited): попытка
+  // тратится как раньше, но повтор отодвигается той же лестницей пауз, а не
+  // идёт через ~5 с. Прерывание сюда не попадает: у него своя пауза ниже.
+  const transientProvider = rateLimited || interrupted ? null : heTransientProviderFailureOf(err);
+  // Временный сбой у НАС (блип БД/шлюза, наш DNS-резолвер) — та же лестница
+  // пауз, попытка тратится так же: повтор только отодвигается, а предел — те
+  // же MAX_ATTEMPTS. Терминальные отказы и классы провайдера сюда не доходят.
+  const ownTransient =
+    rateLimited || interrupted || transientProvider || terminalProviderRefusal || terminalStageFailure || unpaidRefusal
+      ? null
+      : heOwnTransientFailureOf(err);
+  const pauseMs =
+    (rateLimited || transientProvider || ownTransient) && !finalFail && !unpaidRefusal
+      ? rateLimitPauseMs(llmFailure?.retryAfterMs, nextAttempts)
+      : 0;
+  const pauseReason = transientProvider
+    ? `временный сбой провайдера (${transientProvider})`
+    : ownTransient === 'resolver'
+      ? 'временный сбой у нас (DNS-резолвер)'
+      : ownTransient === 'db'
+        ? 'временный сбой у нас (БД/шлюз или сеть)'
+        : '';
   if (unpaidRefusal) {
     log(
       'error',
@@ -3247,7 +3396,12 @@ async function writeJobFailure(
         + `${pauseMs ? `, повтор не раньше чем через ${pauseMs}ms` : ' — попытки исчерпаны'}: ${msg}`,
     );
   } else {
-    log('error', `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${MAX_ATTEMPTS}): ${msg}`);
+    log(
+      'error',
+      `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${MAX_ATTEMPTS})`
+        + `${pauseMs ? `, ${pauseReason} — повтор не раньше чем через ${pauseMs}ms` : ''}`
+        + `: ${msg}`,
+    );
   }
 
   // Серия прерываний закрывается ОБЫЧНЫМ фейлом тоже: между двумя прерываниями
@@ -3260,8 +3414,11 @@ async function writeJobFailure(
    *    пауза в run_after — без неё повтор упирался бы в ту же недоступную БД
    *    сразу, started_at сброшен, как это делал bulk-апдейт resetStuckJobs до
    *    волны 3);
-   *  - rate limit: та же пауза, но попытка потрачена (см. выше);
-   *  - обычный фейл: повтор сразу, как раньше, но серия прерываний закрыта.
+   *  - rate limit, временный сбой провайдера и временный сбой у нас (блип
+   *    БД/шлюза, наш резолвер): пауза по лестнице (rateLimitPauseMs), попытка
+   *    потрачена (см. выше);
+   *  - прочий обычный фейл: повтор сразу, как раньше, но серия прерываний
+   *    закрыта.
    */
   const retryState: Record<string, unknown> = {};
   if (interrupted) {
@@ -3563,7 +3720,8 @@ async function main() {
       + `${stageIdleTimeoutMs()}ms idle `
       + `(≥ ${LLM_SILENCE_SAFETY_FACTOR}× LLM attempt ${heLlmMaxAttemptMs()}ms, floor ${STAGE_IDLE_FLOOR_MS}ms), `
       + `abort grace ${STAGE_ABORT_GRACE_MS}ms, free interruptions ${HE_JOB_FREE_INTERRUPTIONS}, `
-      + `rate-limit pause ≤ ${RATE_LIMIT_PAUSE_MAX_MS}ms (попытка тратится), `
+      + `retry pause (429, временный сбой провайдера, блип БД/резолвера) ${RATE_LIMIT_PAUSE_DEFAULT_MS}→${PROVIDER_RETRY_PAUSE_LADDER_MAX_MS}ms, `
+      + `Retry-After ≤ ${RATE_LIMIT_PAUSE_MAX_MS}ms (попытка тратится), `
       + `post-stage deadline ${POST_STAGE_DEADLINE_MS}ms, `
       // Срок клиента стадий печатаем рядом с окном сторожа: порядок «срок
       // запроса к БД < окно простоя» — то условие, при котором вставшее тело

@@ -148,7 +148,7 @@ export type EngDashTopUpVerdict =
 
 export interface EngDashTopUp {
   verdict: EngDashTopUpVerdict;
-  /** Запуск разбит по сегментам: основная кампания — «Default texts» (как у шага 4). */
+  /** Запуск разбит по сегментам: основная кампания — «Default texts» (как у карточки рынка шага 3). */
   split: boolean;
 }
 
@@ -317,9 +317,10 @@ export function engTeamFixStopOf(
 
 /**
  * `launch_unfinished` — запись о запуске есть, но `heLaunchIsIncomplete` (часть
- * аудитории без кампании или без адресов). Тот же предикат, что у шага 5 и у
- * самого запуска: «live» для такой записи значило бы, что клиенту делать
- * нечего, хотя достроить запуск может только его нажатие на шаге 5.
+ * аудитории без кампании или без адресов). Тот же предикат, что у карточки
+ * рынка шага 3 и у самого запуска: «live» для такой записи значило бы, что
+ * клиенту делать нечего, хотя достраивает запуск «Launch now» на шаге 3 или
+ * автозапуск.
  *
  * `pending` есть и у ИДУЩЕГО запуска: ядро пишет запись по ходу (группа в
  * полёте и ещё не начатые группы — launchTemplate.ts, persistProgress), а
@@ -343,7 +344,7 @@ export function engTeamFixStopOf(
  *
  * `not_selected` — у вертикали нет ни одной accepted-гипотезы (тот же
  * предикат, по которому автопилот пропускает её как 'not_selected',
- * autopilotReconcile.ts), и работы по ней сейчас нет. «Start outreach» и ночной
+ * autopilotReconcile.ts), и работы по ней сейчас нет. «Launch» шага 3 и ночной
  * проход её не трогают, поэтому ни «needs attention», ни «next: …» про неё
  * неправда: клиент её не выбрал или снял сам. Запуск, готовый
  * шаблон и идущая работа этот этап перекрывают: «Launch all» и ночной
@@ -420,7 +421,7 @@ export interface EngDashAttention {
  * `analysis_stopped` — последняя своя база вертикали висит в 'analyzing', а
  * анализ её не идёт: ни одна активная джоба не держит её base_id и окно
  * постановки (ANALYZING_ORPHAN_GRACE_MS) прошло — общий предикат
- * isAnalyzingBaseLive автопилота, по нему же «Start outreach» решает, что база
+ * isAnalyzingBaseLive автопилота, по нему же «Launch» шага 3 решает, что база
  * осиротела. Финальный фейл base_analyze базу не трогает (она так и остаётся
  * 'analyzing'), поэтому без этой причины карточка печатала «analyzing the
  * base…» вечно.
@@ -438,7 +439,7 @@ export interface EngDashAnalysisStopped {
    */
   code: 'cancelled' | null;
   /**
-   * true — нажатие «Start outreach» поставит ей base_analyze заново: вертикаль
+   * true — нажатие «Launch» шага 3 поставит ей base_analyze заново: вертикаль
    * выбрана, проект 'researched', паузы по потолку расхода у проекта нет
    * (`spendPaused` прочитан и ложен) и выполнены условия ремонта осиротевшей
    * базы (engAnalysisRequeues). false — кнопка поведёт вертикаль другим путём
@@ -475,7 +476,7 @@ export interface EngDashVerticalSlice {
   chains: Array<Record<string, unknown>>;
   /**
    * Строки баз вертикали. Кроме колонок he_bases роут кладёт в каждую два
-   * поля проекции мастера (toClientEngBase — те же, что видит шаг 4):
+   * поля проекции мастера (toClientEngBase — те же, что видит шаг 3):
    * `refill` (прогон ночного долива, а не база вертикали) и `error_code` (код
    * причины he_bases.error). Без них (`undefined`) база считается своей и без
    * записанной причины.
@@ -504,7 +505,7 @@ export interface EngDashVerticalSlice {
   /**
    * У проекта записана пауза по потолку расхода (toClientEngAutopilotHold, код
    * 'spend_paused'; потолок по умолчанию выключен). Читают `requeues`
-   * остановленного анализа (проход «Start outreach» над потолком кончается на
+   * остановленного анализа (проход «Launch» над потолком кончается на
    * первой платной постановке и до ремонта этой вертикали может не дойти) и
    * подписи этапов, которые иначе звали бы к «Launch» или «Rewrite letters»
    * (письма готовы, писем нет, письма сняты): под паузой следующую платную
@@ -785,7 +786,7 @@ export function engDashReadyTemplateId(templates: Array<Record<string, unknown>>
 }
 
 /**
- * Поставит ли клиентское «Start outreach» этой 'analyzing'-базе, чей анализ не
+ * Поставит ли клиентское «Launch» (шаг 3) этой 'analyzing'-базе, чей анализ не
  * идёт, base_analyze заново (бесплатная вставка джобы; строки второй раз не
  * покупаются). Ровно условия ремонта осиротевшей базы в autopilotReconcile.ts
  * по базам вертикали (`verticalBases`) и её цепочкам:
@@ -842,8 +843,8 @@ function baseErrorCode(base: Record<string, unknown>): HeClientStageErrorCode | 
  *  - список активных джоб неполон (`liveWorkUnknown`): идёт ли работа,
  *    неизвестно, а «встала» без этого знания — неправда.
  *
- * Порядок причин: упавший проект — первым. Пока он 'failed', «Start outreach»
- * шага 2 недоступен (кнопке нужен 'researched'), и совет про базу был бы
+ * Порядок причин: упавший проект — первым. Пока он 'failed', «Launch»
+ * шага 3 недоступен (кнопке нужен 'researched'), и совет про базу был бы
  * неправдой; дальше — ПОСЛЕДНЯЯ своя база (доливные прогоны не считаются: их
  * исход — лента событий и блок добора, а не этап вертикали). Старая упавшая
  * база под более новой 'uploaded' — не причина: решает последняя. Последняя
@@ -1042,11 +1043,11 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   }
   // Невыбранная вертикаль: дальше её двигает только выбор клиента. Не во время
   // research (вертикали пересоздаются, все гипотезы ещё 'proposed') и не у
-  // упавшего проекта (его причина — 'attention' ниже, и «Start outreach» там
+  // упавшего проекта (его причина — 'attention' ниже, и «Launch» там
   // недоступен); при живой или неизвестной работе — прежний этап.
   //
   // Совет «accept one of its hypotheses» — только у 'researched': кнопка
-  // «Start outreach» есть лишь там (EngStepVerticals, canStartOutreach). У
+  // «Launch» есть лишь там (EngStepLaunch, canLaunch). У
   // 'draft' (отменённый research, cancel-роут) принятие гипотезы ничего не
   // двигает — research не идёт и сам не начнётся, а кабинет запускает его
   // заново только после технического сбоя (решение владельца 10.10.2026;
@@ -1131,7 +1132,8 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     return {
       stage: 'analyzed',
       // «rows», а не «companies»: см. mainBase в EngDashStageInfo. Слово взято
-      // у шага 4 мастера (EngStepBases: «{row_count} rows»), чтобы у одного и
+      // у шага 3 мастера (EngStepBases.SendVolume: «… rows with a verified
+      // email», превью: «… rows»), чтобы у одного и
       // того же числа в кабинете было одно имя.
       stageDetail: teamFix
         ? `base analyzed: ${asNum(usableAnalyzedBase.row_count)} rows — final letters stopped by a problem on our side`

@@ -3,10 +3,40 @@
  * гипотез-кандидатов (25–40, tier 1/2/3) из «генетической памяти» модели.
  * Кандидаты сохраняются в job.result.candidates — их верифицирует стадия
  * evidence. На этом шаге поиск и доказательства НЕ используются.
+ *
+ * Мягкие проверки ответа (оба рынка, только строка лога): квоты промпта
+ * (25–40 кандидатов, tier 2 ≥ 8, tier 3 ≥ 8) и повторы title.
+ *
+ * Только market='us':
+ *  - пол схемы (HeHypothesesBatchSchemaUs): не меньше HE_HYPOTHESES_FLOOR_US
+ *    кандидатов с непустым title. Нарушение — повтор вызова с разбором ошибки
+ *    (llm.ts, у EN-промпта повтор видит весь прошлый ответ); повтор тоже ниже
+ *    пола — берём его ответ как есть (callHypothesesUs), стадия не падает.
+ *    Кандидат с пустым title сам по себе повтора не вызывает: код его
+ *    выбрасывает бесплатно (вместе с отклонёнными и повторами ниже);
+ *  - гипотезы проекта, отклонённые человеком (status='rejected'), уходят в
+ *    промпт запретом и отсекаются кодом по нормализованному title; повторы
+ *    title внутри ответа схлопываются до первого — evidence не платит за
+ *    одного кандидата дважды.
  */
 
-import { callLLMWithSchema, getHeModel } from '../llm';
-import { HeHypothesesBatchSchema, type HeBrandCloudOutput, type HeSiteProfileOutput } from '../schemas';
+import { z } from 'zod';
+
+import {
+  callLLMWithSchema,
+  getHeModel,
+  LLMValidationError,
+  tryRepairTruncatedJson,
+  type HeLlmSchemaCallOptions,
+  type LLMMessage,
+} from '../llm';
+import {
+  HeHypothesesBatchSchema,
+  HeHypothesisCandidateSchema,
+  type HeBrandCloudOutput,
+  type HeHypothesisCandidate,
+  type HeSiteProfileOutput,
+} from '../schemas';
 import { projectMarket, type HeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
 import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
@@ -22,8 +52,150 @@ import {
   stageLog,
   type HeStageContext,
   type HeStageResult,
+  type HeUsage,
 } from './shared';
 import type { HeCompetitorEntry } from './competitors';
+
+/* ─────────────── пол ответа и разметка (только market='us') ─────────────── */
+
+/**
+ * Пол списка кандидатов рынка 'us'. Промпт просит 25–40; ответ короче 8 —
+ * отказ или обрубок, а не «рынков мало», и одна осмысленная попытка (повтор
+ * схемы видит весь прошлый ответ и ошибку) дешевле исследования, построенного
+ * на трёх гипотезах.
+ */
+const HE_HYPOTHESES_FLOOR_US = 8;
+
+/**
+ * Схема ответа рынка 'us': общий кандидат (пробелы по краям title срезаются) и
+ * пол списка, посчитанный по кандидатам с непустым title. Пустой title схему
+ * не роняет: повтор схемы оплачивает генерацию ВСЕГО ответа (25–40 кандидатов,
+ * до 32 768 токенов на ресёрч-модели) заново, а такую строку код выбрасывает
+ * даром (runHypothesesStage). Повтор — только когда непустых меньше пола.
+ * Локальная: RU отвечает по общей HeHypothesesBatchSchema, и её поведение не
+ * меняется.
+ */
+const HeHypothesesBatchSchemaUs = z.object({
+  hypotheses: z
+    .array(HeHypothesisCandidateSchema.extend({ title: z.string().trim() }))
+    .refine(
+      (list) => list.filter((h) => h.title).length >= HE_HYPOTHESES_FLOOR_US,
+      `return 25-40 hypotheses: fewer than ${HE_HYPOTHESES_FLOOR_US} with a non-empty title is not a complete answer`,
+    ),
+});
+
+/** Сколько отклонённых title проекта уходит в промпт запретом (код отсекает все). */
+const REJECTED_TITLES_PROMPT_LIMIT = 60;
+
+function normTitle(title: string): string {
+  return title.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Title гипотез проекта, отклонённых человеком (status='rejected'), без
+ * повторов. Только market='us'. Сбой чтения роняет стадию до платного вызова:
+ * без списка повтор research мог бы снова предложить отклонённое.
+ */
+async function readRejectedTitles(ctx: HeStageContext, projectId: string): Promise<string[]> {
+  const { data, error } = await ctx.supabase
+    .from('he_hypotheses')
+    .select('title')
+    .eq('project_id', projectId)
+    .eq('status', 'rejected');
+  if (error) throw new Error(`he_hypotheses read rejected: ${error.message}`);
+  const seen = new Set<string>();
+  const titles: string[] = [];
+  for (const row of (data ?? []) as Array<{ title?: unknown }>) {
+    if (typeof row.title !== 'string') continue;
+    const key = normTitle(row.title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    titles.push(row.title.trim());
+  }
+  return titles;
+}
+
+/**
+ * Ответ последней попытки без пола: общая схема, пустые title выброшены,
+ * остальные обрезаны по краям. null — разобрать нечего, и стадия бросает
+ * исходный отказ. Разбор тот же, что у llm.ts: срезать markdown-фенсы, затем
+ * JSON.parse, а при сбое — ремонт обрезанного JSON.
+ */
+function lenientHypothesesFrom(rawText: string): HeHypothesisCandidate[] | null {
+  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    parsed = tryRepairTruncatedJson(cleaned);
+  }
+  if (parsed === null) return null;
+  const validated = HeHypothesesBatchSchema.safeParse(parsed);
+  if (!validated.success) return null;
+  const kept = validated.data.hypotheses
+    .filter((h) => h.title.trim())
+    .map((h) => ({ ...h, title: h.title.trim() }));
+  return kept.length ? kept : null;
+}
+
+/**
+ * Вызов модели рынка 'us' со схемой с полом. Обе попытки ниже пола (меньше
+ * HE_HYPOTHESES_FLOOR_US кандидатов с непустым title) — берём ответ последней
+ * без пола (lenientHypothesesFrom) и пишем это в лог: исследование идёт
+ * дальше на том, что модель дала, а не падает, чтобы клиент перезапускал его
+ * целиком. Прочие отказы — как были.
+ *
+ * Деньги: в худшем случае 2 оплаченных вызова (было 1). Их расход стадия в
+ * этой ветке не знает (он едет только с результатом), но воркер пишет в учёт
+ * больший из расхода стадии и суммы оплаченных ответов модели (канал активной
+ * джобы), так что он не теряется.
+ */
+async function callHypothesesUs(
+  ctx: HeStageContext,
+  messages: LLMMessage[],
+  options: HeLlmSchemaCallOptions,
+  usage: HeUsage,
+): Promise<HeHypothesisCandidate[]> {
+  try {
+    const llm = await callLLMWithSchema(messages, HeHypothesesBatchSchemaUs, options);
+    addUsage(usage, llm);
+    return llm.data.hypotheses;
+  } catch (e) {
+    if (!(e instanceof LLMValidationError)) throw e;
+    const recovered = lenientHypothesesFrom(e.rawText);
+    if (!recovered) throw e;
+    stageLog(
+      ctx,
+      `[hypotheses] ответ дважды не прошёл пол схемы (≥ ${HE_HYPOTHESES_FLOOR_US} кандидатов с непустым title) — `
+        + `берём последний как есть: ${recovered.length} кандидатов`,
+    );
+    return recovered;
+  }
+}
+
+/**
+ * Мягкие проверки ответа модели — только строка лога, без отказа (оба рынка):
+ * квоты промпта (25–40 кандидатов, tier 2 ≥ 8, tier 3 ≥ 8) и повторы title.
+ */
+function logSoftChecks(ctx: HeStageContext, candidates: HeHypothesisCandidate[]): void {
+  const tiers = candidates.reduce<Record<number, number>>((acc, h) => {
+    acc[h.tier] = (acc[h.tier] ?? 0) + 1;
+    return acc;
+  }, {});
+  const seen = new Set<string>();
+  let duplicates = 0;
+  for (const h of candidates) {
+    const key = normTitle(h.title);
+    if (seen.has(key)) duplicates += 1;
+    else seen.add(key);
+  }
+  const issues: string[] = [];
+  if (candidates.length < 25 || candidates.length > 40) issues.push(`кандидатов ${candidates.length} (просили 25–40)`);
+  if ((tiers[2] ?? 0) < 8) issues.push(`tier 2: ${tiers[2] ?? 0} (просили ≥ 8)`);
+  if ((tiers[3] ?? 0) < 8) issues.push(`tier 3: ${tiers[3] ?? 0} (просили ≥ 8)`);
+  if (duplicates) issues.push(`повторов title: ${duplicates}`);
+  if (issues.length) stageLog(ctx, `[hypotheses] мягкая проверка ответа: ${issues.join('; ')}`);
+}
 
 /* ─────────────── калибровочные данные (best-effort) ─────────────── */
 
@@ -219,6 +391,15 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     );
   }
 
+  // Отклонённые человеком гипотезы проекта (us): запрет в промпте и фильтр ниже.
+  const rejectedTitles = market === 'us' ? await readRejectedTitles(ctx, job.project_id) : [];
+  if (rejectedTitles.length) {
+    stageLog(
+      ctx,
+      `[hypotheses] отклонённых гипотез проекта: ${rejectedTitles.length} — в промпт запретом, совпавшие отсекаем кодом`,
+    );
+  }
+
   stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
   // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
@@ -236,18 +417,58 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
       ? { businessOverride: project.brief.business_override.trim() }
       : {}),
     ...(icpFrame ? { icpFrame } : {}),
+    ...(rejectedTitles.length ? { rejectedTitles: rejectedTitles.slice(0, REJECTED_TITLES_PROMPT_LIMIT) } : {}),
   };
-  const llm = await callLLMWithSchema(
-    (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),
-    HeHypothesesBatchSchema,
-    // 25–40 гипотез с description/fit_rationale/rationale/search_queries на
-    // русском — кириллические BPE-токены дорогие, 8–16k обрезало бы JSON
-    // посередине (поймали на проде: Unterminated string).
-    { model: getHeModel('research'), maxTokens: 32768 },
-  );
-  addUsage(usage, llm);
+  const messages = (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput);
+  // 25–40 гипотез с description/fit_rationale/rationale/search_queries на
+  // русском — кириллические BPE-токены дорогие, 8–16k обрезало бы JSON
+  // посередине (поймали на проде: Unterminated string).
+  const options = { model: getHeModel('research'), maxTokens: 32768 };
+  let candidates: HeHypothesisCandidate[];
+  if (market === 'us') {
+    candidates = await callHypothesesUs(ctx, messages, options, usage);
+  } else {
+    const llm = await callLLMWithSchema(messages, HeHypothesesBatchSchema, options);
+    addUsage(usage, llm);
+    candidates = llm.data.hypotheses;
+  }
+  logSoftChecks(ctx, candidates);
 
-  const candidates = llm.data.hypotheses;
+  if (market === 'us') {
+    // Пустой title, отклонённое человеком и повторы title внутри ответа — до
+    // evidence, где за каждого кандидата платят поиском и вердиктом. Пустой
+    // title схема пропускает (пол считается по непустым), выбрасывается он здесь.
+    const rejected = new Set(rejectedTitles.map(normTitle));
+    const seen = new Set<string>();
+    let blankDropped = 0;
+    let rejectedDropped = 0;
+    let duplicatesDropped = 0;
+    candidates = candidates.filter((h) => {
+      const key = normTitle(h.title);
+      if (!key) {
+        blankDropped += 1;
+        return false;
+      }
+      if (rejected.has(key)) {
+        rejectedDropped += 1;
+        return false;
+      }
+      if (seen.has(key)) {
+        duplicatesDropped += 1;
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+    if (blankDropped || rejectedDropped || duplicatesDropped) {
+      stageLog(
+        ctx,
+        `[hypotheses] отсечено: пустых title ${blankDropped}, отклонённых ранее ${rejectedDropped}, `
+          + `повторов title ${duplicatesDropped}`,
+      );
+    }
+  }
+
   const tierCounts = candidates.reduce<Record<number, number>>((acc, h) => {
     acc[h.tier] = (acc[h.tier] ?? 0) + 1;
     return acc;

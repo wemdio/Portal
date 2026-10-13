@@ -4,7 +4,6 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import {
   heTemplateNeedsRewrite,
   toClientEngAutopilotHold,
@@ -126,6 +125,30 @@ function withSafeCampaignName(template: Record<string, unknown>): Record<string,
 }
 
 /**
+ * `collect_info` базы на этом маршруте — ТРИ ключа, выбранные JSON-путями, а не
+ * колонка целиком. Дашборд читает из неё ровно их: `refill` (долив, а не база
+ * вертикали — isHeRefillBaseRow через toClientEngBase), `stats` (счётчики задач
+ * и `companies_total`) и `construct` (этап 'construct' и счётчики адресов,
+ * deriveEngVerticalStage). Всё остальное — план, `tasks[]` с предмерж-харвестом
+ * (до 10 МБ у идущей сборки), мемо гейта — БД больше не пересылает на каждом
+ * 15-секундном полле, а не режет уже после пересылки.
+ *
+ * Отсутствующий ключ PostgREST отдаёт как null; ключа нет ни одного (ручная
+ * загрузка, сборка до плана) — `collect_info` null, как у базы без колонки.
+ */
+const BASE_COLLECT_INFO_SELECT =
+  'ci_refill:collect_info->refill, ci_stats:collect_info->stats, ci_construct:collect_info->construct';
+
+function withBaseCollectInfo(row: Record<string, unknown>): Record<string, unknown> {
+  const { ci_refill: refill, ci_stats: stats, ci_construct: construct, ...rest } = row;
+  const info: Record<string, unknown> = {};
+  if (refill != null) info.refill = refill;
+  if (stats != null) info.stats = stats;
+  if (construct != null) info.construct = construct;
+  return { ...rest, collect_info: Object.keys(info).length > 0 ? info : null };
+}
+
+/**
  * Компаний в базе — ЕДИНСТВЕННОЕ честное число компаний, доступное дашборду:
  * `collect_info.stats.companies_total` (уникальные ключи «компания|домен»,
  * пишет стадия при финализации базы — stages/baseCollect.ts, capImportedRows).
@@ -219,7 +242,7 @@ export async function GET(req: NextRequest) {
         .in('project_id', projectIds),
       supabaseAdmin
         .from('he_bases')
-        .select('id, project_id, vertical_id, status, source, row_count, error, filename, collect_info, created_at, updated_at')
+        .select(`id, project_id, vertical_id, status, source, row_count, error, filename, ${BASE_COLLECT_INFO_SELECT}, created_at, updated_at`)
         .in('project_id', projectIds),
       supabaseAdmin
         .from('he_jobs')
@@ -275,13 +298,11 @@ export async function GET(req: NextRequest) {
 
   const verticalRows = verticalsRes.data ?? [];
   const verticalIds = verticalRows.map((v) => v.id as string);
-  // collect_info: harvest (до limit строк на задачу, задач в плане 1–4) режет
-  // stripTaskHarvest. Снять его с ЭТОГО маршрута нельзя, хотя терминальная
-  // запись стадии харвест больше не сохраняет (dropCollectWorkState в
-  // stages/baseCollect): дашборд рисует прогресс ИДУЩЕЙ сборки, а у неё харвест
-  // в collect_info лежит по построению — это чекпойнт мёрджа между тиками.
-  // Всё остальное — клиентская проекция (план сорсинга с pdl_filters, id джоб
-  // конструктора и состояние долива дашборду не нужны и клиенту не полагаются).
+  // collect_info выбран тремя JSON-путями (BASE_COLLECT_INFO_SELECT): харвеста
+  // задач в ответе БД нет вовсе, в том числе у ИДУЩЕЙ сборки, где он лежит в
+  // колонке по построению (чекпойнт мёрджа между тиками). Оставшиеся ключи
+  // проходят клиентскую проекцию (id джобы конструктора и сырые пометки
+  // клиенту не полагаются).
   // Строкой toClientEngBase дашборд не заменяет: ему нужны project_id/updated_at,
   // которых нет в белом списке мастера. Но три поля берёт ИМЕННО из неё, чтобы
   // шаг 4 и карточка Command Center говорили про одну базу одно и то же:
@@ -289,8 +310,8 @@ export async function GET(req: NextRequest) {
   // вертикали — по collect_info.refill или имени «auto-refill») и `error_code`
   // (код причины he_bases.error, в том числе 'cancelled'). Сырые `error` и
   // `filename` в склейку не идут: они выбраны только ради этих двух признаков.
-  const baseRows = (basesRes.data ?? []).map((b) => {
-    const row = stripTaskHarvest(b as Record<string, unknown>);
+  const rawBaseRows = (basesRes.data ?? []).map((b) => withBaseCollectInfo(b as Record<string, unknown>));
+  const baseRows = rawBaseRows.map((row) => {
     const client = toClientEngBase(row);
     const out: Record<string, unknown> = {
       ...row,
@@ -304,12 +325,7 @@ export async function GET(req: NextRequest) {
   });
   // Счётчик компаний строится по СЫРЫМ строкам баз (см. companiesTotalOf):
   // спроецированный `collect_info` ключа `companies_total` уже не несёт.
-  const companiesByBaseId = new Map(
-    (basesRes.data ?? []).map((b) => [
-      str((b as Record<string, unknown>).id),
-      companiesTotalOf(b as Record<string, unknown>),
-    ]),
-  );
+  const companiesByBaseId = new Map(rawBaseRows.map((b) => [str(b.id), companiesTotalOf(b)]));
   const activeJobRows = activeJobsRes.data ?? [];
   const finishedJobRows = finishedJobsRes.data ?? [];
   /**

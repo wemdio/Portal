@@ -11,15 +11,34 @@
  * Дополнительно — наполнение кейс-банка (he_cases, source='site'): по тексту
  * сайта + до 3 очевидных кейс-страниц (/cases, /case-studies, /otzyvy, …)
  * LLM извлекает до 8 доказательных кейсов клиента (дедуп по нормализованному
- * тексту). Refresh атомарный: новые кейсы вставляются первыми, затем
- * удаляются устаревшие site-строки проекта (не совпавшие по нормализованному
- * тексту); при пустой выборке или сбое вставки старые кейсы сохраняются.
- * Загруженные вручную (source='upload') не трогаются. Весь кейс-шаг
- * best-effort: ошибка (LLM/БД/нет таблицы на параллельном роллауте)
- * логируется и НЕ роняет основную стадию.
+ * тексту). Refresh по снимку: site-строки проекта читаются ДО вставки, на
+ * каждый ключ (нормализованный текст) остаётся одна строка, вставляются только
+ * кейсы, которых в снимке нет, и удаляются строки снимка, не совпавшие со
+ * свежим набором, и лишние копии одного ключа; при пустой выборке или сбое
+ * вставки старые кейсы сохраняются. Загруженные вручную (source='upload') не
+ * трогаются. Весь кейс-шаг best-effort: ошибка (LLM/БД/нет таблицы на
+ * параллельном роллауте) логируется и НЕ роняет основную стадию.
  *
  * Локализация: при he_projects.market='us' оба LLM-вызова идут EN-промптами
  * (prompts/siteProfile.en), иначе — RU (обратная совместимость).
+ *
+ * Только market='us' (рынок 'ru' читает и строит всё, как раньше):
+ *  - доп. страницы — свои англоязычные списки путей (CONTENT_PAGE_PATHS_EN,
+ *    CASE_PAGE_PATHS_EN) строгим чтением одной страницы (io.ts
+ *    resolveFetchPage): отсутствующий путь — «страницы нет» за один запрос, а
+ *    не главная или «о компании» вместо неё. Страница, чей итоговый адрес или
+ *    текст уже взят (главная, редирект двух путей на один адрес), в корпус
+ *    второй раз не идёт;
+ *  - бриф клиента — второй источник профиля, двумя блоками EN-промпта
+ *    (clientBriefForProfile): факты о клиенте (business_override,
+ *    offer_override) — на конфликте с текстом сайта правы они, у тонкого или
+ *    JS-сайта профиль строится в основном по ним; пожелания по таргетингу
+ *    (рамка ЦА icp) — не факты, только для target_audience;
+ *  - current_clients и cases профиля — только дословно из текста сайта: что
+ *    модель вернула сверх этого (пожелание «hospitals» из рамки ЦА в том
+ *    числе), код выбрасывает до записи (keepSiteLiteralProof);
+ *  - профиль несёт product_category — категорию продукта словами покупателя;
+ *    по ней стадия competitors ищет конкурентов, а не только по имени бренда.
  *
  * Сроки чтения сайта (волна 3): каждое чтение ограничено сроком (io.ts), и
  * истёкший срок — НЕ «страницы нет». Три исхода стадии различимы:
@@ -51,12 +70,14 @@
 
 import { z } from 'zod';
 
-import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
 import { HeSiteProfileSchema } from '../schemas';
 import { heCaseDraftSchema, normalizeCaseText } from '../caseBank';
+import { readHeIcpFrame } from '../icpFrame';
+import { BUSINESS_OVERRIDE_MAX_LENGTH, OFFER_OVERRIDE_MAX_LENGTH } from '../projectBriefPatch';
 import { buildSiteCaseExtractionMessages, buildSiteProfileMessages } from '../prompts/siteProfile';
 import {
   buildSiteCaseExtractionMessagesEn,
@@ -67,7 +88,10 @@ import {
   heStageSignal,
   HeSiteUnreachableError,
   isHeSiteUnreachable,
+  resolveFetchPage,
   resolveFetchText,
+  type HeFetchedPage,
+  type HeFetchPageFn,
   type HeFetchTextFn,
 } from './io';
 import { heIoFailureReason, isHeOperationTimeout } from '../operationDeadline';
@@ -86,10 +110,11 @@ const HeSiteCasesSchema = z.object({
 });
 
 /**
- * Очевидные пути кейс-страниц — слепой перебор на том же origin. Список
- * общий для обоих рынков: EN-пути (/case-studies, /testimonials, /customers)
- * перемешаны с RU — для RU-сайтов они безвредны (404 — ожидаемая норма),
- * а порядок задаёт приоритет в пределах MAX_PAGE_ATTEMPTS.
+ * Очевидные пути кейс-страниц рынка 'ru' — слепой перебор на том же origin.
+ * EN-пути (/case-studies, /testimonials, /customers) перемешаны с RU — для
+ * RU-сайтов они безвредны (404 — ожидаемая норма), а порядок задаёт
+ * приоритет в пределах MAX_PAGE_ATTEMPTS. Рынок 'us' перебирает свой список
+ * (CASE_PAGE_PATHS_EN ниже).
  */
 export const CASE_PAGE_PATHS = [
   '/cases',
@@ -113,9 +138,10 @@ const MAX_PAGE_ATTEMPTS = 6;
 const MIN_PAGE_CHARS = 100;
 
 /**
- * Контентные страницы для профиля бизнеса: «о компании», услуги, цены,
- * продукты. Профиль, построенный на одной главной (≤3000 символов), даёт
+ * Контентные страницы для профиля бизнеса (рынок 'ru'): «о компании», услуги,
+ * цены, продукты. Профиль, построенный на одной главной (≤3000 символов), даёт
  * усреднённые гипотезы из приоров модели — докачиваем до 4 страниц в корпус.
+ * Рынок 'us' перебирает свой список (CONTENT_PAGE_PATHS_EN ниже).
  */
 export const CONTENT_PAGE_PATHS = [
   '/about',
@@ -131,6 +157,42 @@ export const CONTENT_PAGE_PATHS = [
   '/solutions',
   '/resheniya',
 ];
+
+/**
+ * Пути рынка 'us': англоязычный сайт описывает продукт на /products,
+ * /solutions, /pricing, /platform, а клиентов — на /customers и
+ * /case-studies. Русских путей здесь нет; порядок — приоритет, а длина
+ * списков равна капам попыток (MAX_CONTENT_ATTEMPTS, MAX_PAGE_ATTEMPTS): путь
+ * сверх капа не пробовался бы никогда. Читаются строгим чтением страницы (см.
+ * fetchExtraPages), поэтому отсутствующий (404) путь стоит один запрос.
+ */
+const CONTENT_PAGE_PATHS_EN = [
+  '/about',
+  '/about-us',
+  '/company',
+  '/products',
+  '/solutions',
+  '/services',
+  '/pricing',
+  '/platform',
+];
+const CASE_PAGE_PATHS_EN = [
+  '/customers',
+  '/case-studies',
+  '/customer-stories',
+  '/success-stories',
+  '/testimonials',
+  '/clients',
+];
+
+/**
+ * Строгое чтение (рынок 'us'): сколько подряд путей должно не ответить ни на
+ * одной из двух попыток (HeSiteUnreachableError рода no_html), чтобы origin
+ * считался молчащим. У строгого чтения запасных адресов нет, и один такой
+ * путь — это две попытки одного адреса (≈16 с), а не полный круг цепочки, как у
+ * fetchText; одного медленного пути мало, чтобы бросить остальные.
+ */
+const STRICT_SILENT_AFTER_NO_HTML = 2;
 
 /** Капы контентной докачки: ≤4 успешных страниц, ≤8 попыток (оба списка). */
 const MAX_CONTENT_PAGES = 4;
@@ -173,6 +235,13 @@ const JS_STUB_MARK = 'требует JavaScript';
  * ошибки — недобранные доп. страницы одного прогона против гарантии, что мёртвый
  * хост не съест полчаса односоточного воркера. Следующий прогон пробует заново —
  * память живёт только внутри прогона.
+ *
+ * Всё сказанное выше о пробе пути — про рынок 'ru' (fetchText). Рынок 'us'
+ * читает доп. страницы строго (resolveFetchPage): 404, 5xx, 403 и не-HTML там
+ * — «страницы нет» (null), а no_html значит, что сам адрес не ответил ни на
+ * одной из двух попыток. Поэтому путь 'us' пишет origin в память не с первого
+ * no_html, а со STRICT_SILENT_AFTER_NO_HTML подряд (любой ответ сбрасывает
+ * счёт); род dns — гейт не пустил хост — пишет сразу, как и у 'ru'.
  */
 type HeSilentOrigins = Set<string>;
 
@@ -186,9 +255,10 @@ function siteOrigin(url: string): string | null {
 }
 
 /**
- * Дотянуть контентные + кейс-страницы тем же fetchText, что и главная.
- * Бюджеты РАЗДЕЛЬНЫЕ: контентные пути (12 шт) не съедают попытки кейс-путей —
- * иначе кейс-страницы недостижимы вообще (8 попыток < 12 контентных путей).
+ * Дотянуть контентные + кейс-страницы (рынок 'ru' — тем же fetchText, что и
+ * главная; 'us' — строгим чтением, см. последний абзац). Бюджеты РАЗДЕЛЬНЫЕ:
+ * контентные пути (12 шт) не съедают попытки кейс-путей — иначе кейс-страницы
+ * недостижимы вообще (8 попыток < 12 контентных путей).
  * Каждая страница best-effort: 404/ошибка парсера — норма.
  *
  * Истёкший срок — не «нет страницы»: origin не отвечает, и остальные пути
@@ -203,31 +273,70 @@ function siteOrigin(url: string): string | null {
  * память прогона (silentOrigins), и она же останавливает второй цикл этой
  * функции — кейс-пути. ЕДИНСТВЕННАЯ точка этой проверки здесь: кейс-шаг стадии
  * (refreshSiteCases) своего перебора путей не имеет и получает готовые страницы.
+ *
+ * Рынок 'us' (передан strict): свои списки путей и строгое чтение страницы.
+ * Взятая страница отдаёт в корпус свой итоговый адрес (после редиректов), а
+ * страница, чей адрес или текст уже взят — главная, предыдущая доп. страница,
+ * контентная, вернувшаяся кейсовой, — пропускается и считается в duplicates:
+ * «/about» и «/about-us», уводящие на один «/company», дают одну страницу.
+ * Текст сравнивается вхождением в уже взятый (главная fetchText несёт и
+ * «о компании»), адрес — без схемы, «www.», запроса и хвостового «/».
  */
 async function fetchExtraPages(
   fetchText: HeFetchTextFn,
   websiteUrl: string,
   silentOrigins: HeSilentOrigins,
   jobSignal?: AbortSignal,
+  strict?: { fetchPage: HeFetchPageFn; homeText: string },
 ): Promise<{
   content: Array<{ url: string; text: string }>;
   cases: Array<{ url: string; text: string }>;
   timedOut: boolean;
+  duplicates: number;
 }> {
   const origin = siteOrigin(websiteUrl);
   if (!origin) {
-    return { content: [], cases: [], timedOut: false };
+    return { content: [], cases: [], timedOut: false, duplicates: 0 };
   }
   let timedOut = false;
   const stop = () => timedOut || silentOrigins.has(origin);
+  const takenUrls = new Set<string>();
+  const takenTexts: string[] = [];
+  let duplicates = 0;
+  let noHtmlStreak = 0;
+  if (strict) {
+    const homeUrl = pageUrlKey(websiteUrl);
+    if (homeUrl) takenUrls.add(homeUrl);
+    const homeText = pageTextKey(strict.homeText);
+    if (homeText) takenTexts.push(homeText);
+  }
+  const takeStrictPage = (page: HeFetchedPage | null): { url: string; text: string } | null => {
+    noHtmlStreak = 0;
+    if (!page || page.text.trim().length < MIN_PAGE_CHARS) return null;
+    const urlKey = pageUrlKey(page.url);
+    const textKey = pageTextKey(page.text);
+    if ((urlKey && takenUrls.has(urlKey)) || takenTexts.some((taken) => taken.includes(textKey))) {
+      duplicates += 1;
+      return null;
+    }
+    if (urlKey) takenUrls.add(urlKey);
+    takenTexts.push(textKey);
+    return { url: page.url, text: page.text };
+  };
   const fetchPath = async (path: string): Promise<{ url: string; text: string } | null> => {
     try {
+      if (strict) return takeStrictPage(await strict.fetchPage(origin + path));
       const text = await fetchText(origin + path);
       if (text && text.trim().length >= MIN_PAGE_CHARS) return { url: origin + path, text };
     } catch (e) {
       if (jobSignal?.aborted) throw e;
       if (isHeOperationTimeout(e)) timedOut = true;
-      else if (isHeSiteUnreachable(e)) silentOrigins.add(origin);
+      else if (
+        isHeSiteUnreachable(e)
+        && (!strict || e.kind === 'dns' || ++noHtmlStreak >= STRICT_SILENT_AFTER_NO_HTML)
+      ) {
+        silentOrigins.add(origin);
+      }
       /* страницы может не существовать — это ожидаемо */
     }
     return null;
@@ -235,7 +344,7 @@ async function fetchExtraPages(
 
   const content: Array<{ url: string; text: string }> = [];
   let contentAttempts = 0;
-  for (const path of CONTENT_PAGE_PATHS) {
+  for (const path of strict ? CONTENT_PAGE_PATHS_EN : CONTENT_PAGE_PATHS) {
     if (content.length >= MAX_CONTENT_PAGES || contentAttempts >= MAX_CONTENT_ATTEMPTS || stop()) break;
     contentAttempts++;
     const page = await fetchPath(path);
@@ -244,13 +353,28 @@ async function fetchExtraPages(
 
   const cases: Array<{ url: string; text: string }> = [];
   let caseAttempts = 0;
-  for (const path of CASE_PAGE_PATHS) {
+  for (const path of strict ? CASE_PAGE_PATHS_EN : CASE_PAGE_PATHS) {
     if (cases.length >= MAX_EXTRA_PAGES || caseAttempts >= MAX_PAGE_ATTEMPTS || stop()) break;
     caseAttempts++;
     const page = await fetchPath(path);
     if (page) cases.push(page);
   }
-  return { content, cases, timedOut };
+  return { content, cases, timedOut, duplicates };
+}
+
+/** Ключ адреса страницы для дедупа: хост без «www.» + путь без хвостового «/». */
+function pageUrlKey(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname.toLowerCase().replace(/^www\./, '')}${parsed.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Ключ текста страницы для дедупа: без многоточия обрезки, пробелы схлопнуты, регистр снят. */
+function pageTextKey(text: string): string {
+  return text.replace(/…$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 /** Корпус профиля: главная + контентные страницы с маркерами URL, с капом. */
@@ -264,9 +388,10 @@ function buildProfileCorpus(siteText: string, extraPages: Array<{ url: string; t
 }
 
 /**
- * Кейс-шаг стадии (best-effort): LLM-извлечение до 8 кейсов → атомарный
- * refresh в he_cases (только source='site' этого проекта): insert новых
- * первым, затем delete устаревших site-строк вне свежего набора.
+ * Кейс-шаг стадии (best-effort): LLM-извлечение до 8 кейсов → refresh в
+ * he_cases (только source='site' этого проекта): снимок site-строк до
+ * вставки, insert кейсов, которых в снимке нет, затем delete строк снимка вне
+ * свежего набора и лишних копий одного кейса.
  *
  * Кейс-страницы приходят ГОТОВЫМИ и параметр обязателен. Свой перебор путей у
  * этого шага был (fetchCasePages) и удалён: единственный вызов всегда передавал
@@ -300,9 +425,10 @@ async function refreshSiteCases(
   //
   // Текст модели чистим ДО дедупа и вставки: один NUL или одиночный UTF-16
   // суррогат — и PostgREST отвергает всю вставку he_cases. Порядок важен:
-  // ключ дедупа и уборки устаревших (freshKeys ниже) считается по ТОМУ ЖЕ
-  // тексту, что ляжет в строку, — иначе только что вставленный кейс читался бы
-  // «устаревшим» и удалялся. Текст без этих двух символов не меняется.
+  // ключ дедупа и сверки со снимком (freshKeys ниже) считается по ТОМУ ЖЕ
+  // тексту, что ляжет в строку, — иначе на следующем прогоне этот же кейс не
+  // узнавался бы в снимке: прежняя строка уходила бы «устаревшей», а он
+  // вставлялся заново. Текст без этих двух символов не меняется.
   const seen = new Set<string>();
   const cases = stripUnstorableJsonChars(llm.data.cases)
     .slice(0, 8)
@@ -319,38 +445,57 @@ async function refreshSiteCases(
     return { extracted: 0, tokensUsed: llm.tokensUsed, costUsd: llm.costUsd };
   }
 
-  // Insert-first: сначала новые строки — при сбое вставки старые site-кейсы
-  // проекта остаются на месте (delete-then-insert терял бы их все).
-  const { error: insError } = await ctx.supabase.from('he_cases').insert(
-    cases.map((c) => ({
-      project_id: projectId,
-      source: 'site',
-      filename: null,
-      industry: c.industry,
-      client_type: c.client_type,
-      task: c.task,
-      metrics: c.metrics,
-      result: c.result,
-      text: c.text,
-    })),
-  );
-  if (insError) throw new Error(`he_cases insert site: ${insError.message}`);
-
-  // Затем чистим устаревшие: site-кейсы проекта, чей нормализованный текст не
-  // вошёл в только что вставленный набор (совпавшие — те же кейсы, остаются
-  // в одном экземпляре). Upload-кейсы не трогаем.
-  const freshKeys = new Set(cases.map((c) => normalizeCaseText(c.text)));
+  // Снимок site-строк проекта ДО вставки: уборка ниже трогает только его, то
+  // есть ни строку этого прогона, ни чужую запись после снимка удалить не может.
+  // На каждый ключ (нормализованный текст — тот же, что у дедупа выше) остаётся
+  // одна строка, самая ранняя; другие копии ключа и строки, которых нет в
+  // свежем наборе, — устаревшие. Вставляются только кейсы, которых в снимке
+  // нет: совпавший кейс остаётся прежней строкой, а не копией рядом с ней.
+  // Upload-кейсы не трогаем.
   const { data: siteRows, error: readError } = await ctx.supabase
     .from('he_cases')
     .select('id, text')
     .eq('project_id', projectId)
-    .eq('source', 'site');
+    .eq('source', 'site')
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true });
   if (readError) throw new Error(`he_cases read site: ${readError.message}`);
-  const staleIds = ((siteRows ?? []) as Array<{ id: string; text: string | null }>)
-    .filter((r) => !freshKeys.has(normalizeCaseText(r.text ?? '')))
-    .map((r) => r.id);
+  const freshKeys = new Set(cases.map((c) => normalizeCaseText(c.text)));
+  const retainedKeys = new Set<string>();
+  const staleIds: string[] = [];
+  for (const row of (siteRows ?? []) as Array<{ id: string; text: string | null }>) {
+    const key = normalizeCaseText(row.text ?? '');
+    if (!freshKeys.has(key) || retainedKeys.has(key)) staleIds.push(row.id);
+    else retainedKeys.add(key);
+  }
+  const missingCases = cases.filter((c) => !retainedKeys.has(normalizeCaseText(c.text)));
+
+  // Insert-first: сначала недостающие строки — при сбое вставки весь прежний
+  // набор проекта остаётся на месте (delete-then-insert терял бы его целиком).
+  if (missingCases.length) {
+    const { error: insError } = await ctx.supabase.from('he_cases').insert(
+      missingCases.map((c) => ({
+        project_id: projectId,
+        source: 'site',
+        filename: null,
+        industry: c.industry,
+        client_type: c.client_type,
+        task: c.task,
+        metrics: c.metrics,
+        result: c.result,
+        text: c.text,
+      })),
+    );
+    if (insError) throw new Error(`he_cases insert site: ${insError.message}`);
+  }
+
   if (staleIds.length) {
-    const { error: delError } = await ctx.supabase.from('he_cases').delete().in('id', staleIds);
+    const { error: delError } = await ctx.supabase
+      .from('he_cases')
+      .delete()
+      .eq('project_id', projectId)
+      .eq('source', 'site')
+      .in('id', staleIds);
     if (delError) throw new Error(`he_cases delete stale site: ${delError.message}`);
   }
 
@@ -369,16 +514,106 @@ function readBusinessOverride(brief: HeProject['brief']): string | null {
 }
 
 /**
- * Пометка корпуса, когда профиль строится по ручному описанию, а не по сайту:
- * промпт требует «опирайся ТОЛЬКО на текст сайта», и молча подсунуть туда чужой
- * текст — значит получить профиль, который врёт про источник. Язык — по рынку,
- * как и сам промпт.
+ * Пометка корпуса рынка 'ru', когда профиль строится по ручному описанию, а не
+ * по сайту: RU-промпт требует «опирайся ТОЛЬКО на текст сайта», и молча
+ * подсунуть туда чужой текст — значит получить профиль, который врёт про
+ * источник. Рынок 'us' описание корпусом не передаёт: EN-промпт получает бриф
+ * отдельным блоком (clientBriefForProfile) и прямо знает, что сайт не прочитан.
  */
-function manualBusinessMark(market: HeMarket): string {
-  return market === 'us'
-    ? '=== The website could not be read. Business description provided by the client ==='
-    : '=== Сайт прочитать не удалось. Описание бизнеса от клиента ===';
+const MANUAL_BUSINESS_MARK_RU = '=== Сайт прочитать не удалось. Описание бизнеса от клиента ===';
+
+/**
+ * Бриф клиента для EN-промпта профиля (только market='us'), двумя блоками — у
+ * них разный статус для профиля (в кабинете их набирает сам клиент, у
+ * staff-проекта — специалист):
+ *  - facts — факты о клиенте: описание бизнеса (business_override) и оффер
+ *    (offer_override). Они про то, что клиент делает и продаёт;
+ *  - wishes — пожелания по таргетингу из рамки ЦА (icp, readHeIcpFrame): кого
+ *    клиент хочет или не хочет видеть покупателем. Это НЕ факты: «Customers the
+ *    client wants to reach: hospitals» не значит, что больницы у клиента уже
+ *    есть. Промпт пускает их только в target_audience, а current_clients и
+ *    cases после ответа сверяет с текстом сайта код (keepSiteLiteralProof).
+ * Блок — строки «подпись: значение» либо null, когда строк нет. Описание и
+ * оффер в платный вызов идут не длиннее капа записи поля (projectBriefPatch):
+ * значение, сохранённое до капа или в обход роута, длиннее не уйдёт. Рамку ЦА
+ * режет при чтении сам readHeIcpFrame.
+ */
+function clientBriefForProfile(brief: HeProject['brief']): { facts: string | null; wishes: string | null } {
+  const fields = (brief ?? {}) as Record<string, unknown>;
+  const facts: string[] = [];
+  const business = readBusinessOverride(brief);
+  if (business) facts.push(`About the business: ${sliceWholeChars(business, 0, BUSINESS_OVERRIDE_MAX_LENGTH)}`);
+  const offer = typeof fields.offer_override === 'string' ? fields.offer_override.trim() : '';
+  if (offer) facts.push(`Offer: ${sliceWholeChars(offer, 0, OFFER_OVERRIDE_MAX_LENGTH)}`);
+  const wishes: string[] = [];
+  const icp = readHeIcpFrame(fields.icp);
+  if (icp?.include.length) wishes.push(`Customers the client wants to reach: ${icp.include.join('; ')}`);
+  if (icp?.exclude.length) wishes.push(`Customers the client does not want to reach: ${icp.exclude.join('; ')}`);
+  if (icp?.size) wishes.push(`Wanted customer company size: ${icp.size}`);
+  if (icp?.geo) wishes.push(`Wanted customer geography: ${icp.geo}`);
+  return {
+    facts: facts.length ? facts.join('\n') : null,
+    wishes: wishes.length ? wishes.join('\n') : null,
+  };
 }
+
+/** Слова текста для дословной сверки: NFKC, нижний регистр, всё, кроме букв и цифр, — один пробел. */
+function literalWords(text: string): string {
+  return text.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+/** Сколько выброшенных записей показать в строке лога (остальные — числом). */
+const LITERAL_DROP_LOG_SAMPLE = 3;
+
+/**
+ * Доказательства профиля рынка 'us' — только дословно из текста сайта.
+ *
+ * current_clients и cases кабинет показывает клиенту («Current clients»), а
+ * письма берут их в материалы как доказательство (chain: proof «из
+ * материалов»), и письма пула уходят без проверки человеком. Промпт требует
+ * брать их только из текста сайта и его словами; здесь это проверяет код:
+ * запись остаётся, только если её слова целиком, подряд и по границам слов
+ * есть в корпусе, который видела модель (регистр, пунктуация и пробелы не
+ * различаются). Остальное выбрасывается — пожелание из рамки ЦА («hospitals»),
+ * которого на сайте нет, и пересказ кейса чужими словами тоже. Сайт недоступен
+ * — корпус пуст, и оба списка пустые. Остальные поля профиля не трогаются.
+ */
+function keepSiteLiteralProof<T extends { current_clients: string[]; cases: string[] }>(
+  ctx: HeStageContext,
+  profile: T,
+  corpus: string,
+): T {
+  const haystack = ` ${literalWords(corpus)} `;
+  const dropped: string[] = [];
+  const keep = (items: string[]): string[] =>
+    items.filter((item) => {
+      const words = literalWords(item);
+      if (words && haystack.includes(` ${words} `)) return true;
+      dropped.push(item);
+      return false;
+    });
+  const checked = { ...profile, current_clients: keep(profile.current_clients), cases: keep(profile.cases) };
+  if (dropped.length) {
+    stageLog(
+      ctx,
+      `[site_profile] из current_clients/cases убрано ${dropped.length}: этих слов нет в тексте сайта `
+        + `(${dropped.slice(0, LITERAL_DROP_LOG_SAMPLE).map((item) => `«${sliceWholeChars(item, 0, 80)}»`).join(', ')}`
+        + `${dropped.length > LITERAL_DROP_LOG_SAMPLE ? ', …' : ''})`,
+    );
+  }
+  return checked;
+}
+
+/**
+ * Профиль рынка 'us': общая схема плюс product_category — категория продукта
+ * словами покупателя («payroll software for restaurants»). Её читает стадия
+ * competitors (stages/competitors.ts), чтобы искать конкурентов по категории,
+ * а не только по имени бренда. Схема локальная: RU-профиль этого поля не
+ * получает, и общий HeSiteProfileSchema не меняется.
+ */
+const HeSiteProfileSchemaUs = HeSiteProfileSchema.extend({
+  product_category: z.string().default(''),
+});
 
 /** Что делать специалисту, когда сайт мёртв и ручного описания тоже нет. */
 const SITE_UNREACHABLE_NEEDS_BUSINESS =
@@ -440,6 +675,9 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   const market = projectMarket(project);
 
   const fetchText = resolveFetchText(ctx);
+  // Доп. страницы рынка 'us' — строгим чтением (см. fetchExtraPages); главная
+  // у обоих рынков читается fetchText: для неё цепочка запасных адресов верна.
+  const fetchPage = market === 'us' ? resolveFetchPage(ctx) : null;
   const jobSignal = heStageSignal(ctx);
   // Память прогона о молчащих origin'ах (см. HeSilentOrigins): её наполняет и
   // главная, и каждая проба пути, а читают оба цикла докачки.
@@ -496,7 +734,9 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
     );
   }
   if (unreachable) {
-    siteText = `${manualBusinessMark(market)}\n${manualBusiness}`;
+    // Рынок 'us' корпус оставляет пустым: описание и остальной бриф уходят в
+    // EN-промпт отдельным блоком (clientBriefForProfile ниже).
+    if (market !== 'us') siteText = `${MANUAL_BUSINESS_MARK_RU}\n${manualBusiness}`;
     stageLog(ctx, '[site_profile] профиль строим по ручному описанию бизнеса (business_override)');
   }
   // Докачка контентных/кейс-страниц: профиль по одной главной (≤3000 символов)
@@ -504,7 +744,19 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   // из этой же пачки уходят в refreshSiteCases (без повторных фетчей).
   // Недоступный origin уже в памяти прогона, поэтому вызов вернётся пустым, не
   // тронув ни одного из 14 путей.
-  const extraPages = await fetchExtraPages(fetchText, project.website_url, silentOrigins, jobSignal);
+  const extraPages = await fetchExtraPages(
+    fetchText,
+    project.website_url,
+    silentOrigins,
+    jobSignal,
+    fetchPage ? { fetchPage, homeText: siteText } : undefined,
+  );
+  if (extraPages.duplicates > 0) {
+    stageLog(
+      ctx,
+      `[site_profile] доп. страниц-повторов пропущено: ${extraPages.duplicates} (их адрес или текст уже в корпусе)`,
+    );
+  }
   if (extraPages.timedOut) {
     stageLog(
       ctx,
@@ -521,7 +773,7 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   // ручное описание, и в логе это должно читаться так же.
   stageLog(
     ctx,
-    `[site_profile] ${unreachable ? 'ручное описание' : 'главная'} ${siteText.length} символов`
+    `[site_profile] ${unreachable && market !== 'us' ? 'ручное описание' : 'главная'} ${siteText.length} символов`
       + ` + ${corpusPages.length} доп. страниц (кейс: ${extraPages.cases.length}), профиль…`,
   );
   const corpus = buildProfileCorpus(siteText, corpusPages);
@@ -535,20 +787,41 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
     stageLog(ctx, `[site_profile] сайт тонкий (${corpus.length} символов) — помечен site_thin`);
   }
 
+  // Бриф клиента — второй источник профиля, только рынок 'us' (см. шапку).
+  const clientBrief = market === 'us' ? clientBriefForProfile(project.brief) : null;
+  if (clientBrief?.facts || clientBrief?.wishes) {
+    stageLog(
+      ctx,
+      `[site_profile] бриф клиента в промпте профиля: факты о клиенте ${clientBrief.facts?.length ?? 0} символов `
+        + `(на конфликте с сайтом правы они), пожелания по таргетингу ${clientBrief.wishes?.length ?? 0} символов `
+        + '(не факты: только target_audience)',
+    );
+  }
+
   const profileInput = { websiteUrl: project.website_url, siteText: corpus };
-  const llm = await callLLMWithSchema(
-    market === 'us' ? buildSiteProfileMessagesEn(profileInput) : buildSiteProfileMessages(profileInput),
-    HeSiteProfileSchema,
-    { model: getHeModel('research'), maxTokens: 4096 },
-  );
+  const profileOptions = { model: getHeModel('research'), maxTokens: 4096 };
+  const llm = market === 'us'
+    ? await callLLMWithSchema(
+        buildSiteProfileMessagesEn({
+          ...profileInput,
+          clientFacts: clientBrief?.facts ?? null,
+          targetingWishes: clientBrief?.wishes ?? null,
+          siteState: unreachable ? 'unreachable' : siteThin ? 'thin' : 'read',
+        }),
+        HeSiteProfileSchemaUs,
+        profileOptions,
+      )
+    : await callLLMWithSchema(buildSiteProfileMessages(profileInput), HeSiteProfileSchema, profileOptions);
   addUsage(usage, llm);
+  // Рынок 'us': клиенты и кейсы профиля — только дословно из текста сайта.
+  const profile = market === 'us' ? keepSiteLiteralProof(ctx, llm.data, corpus) : llm.data;
 
   await patchBrief(
     ctx,
     project,
     {
       website_url: project.website_url,
-      site_profile: llm.data,
+      site_profile: profile,
       site_thin: siteThin,
       site_text_chars: corpus.length,
       // Пишем всегда: ожившему сайту метка прошлого прогона осталась бы навсегда.
@@ -585,5 +858,5 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
     }
   }
 
-  return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+  return { result: profile, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
 }

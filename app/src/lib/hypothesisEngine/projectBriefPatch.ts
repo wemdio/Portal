@@ -31,6 +31,13 @@ export const SIGNATURE_OVERRIDE_MAX_LENGTH = 500;
 // Максимум символов ручного описания бизнеса (brief.business_override) — после trim.
 export const BUSINESS_OVERRIDE_MAX_LENGTH = 3000;
 
+// Максимум символов оффера (brief.offer_override) — после trim. Оффер целиком
+// уходит в платные промпты: письма (chain, template) обоих рынков, а на рынке
+// 'us' ещё и профиль сайта (stages/siteProfile.ts). Без капа их вход не
+// ограничен ничем, кроме тела запроса. Уже сохранённое длиннее значение запись
+// не трогает; профиль 'us' режет его тем же капом при чтении.
+export const OFFER_OVERRIDE_MAX_LENGTH = 3000;
+
 export type HeBriefField = 'offer_override' | 'style_override' | 'signature_override' | 'business_override';
 
 export type HeBriefPatchError =
@@ -38,8 +45,8 @@ export type HeBriefPatchError =
   | { code: 'no_fields' }
   /** Поле передано не строкой. */
   | { code: 'bad_type'; field: HeBriefField }
-  /** style/signature/business длиннее лимита после trim. */
-  | { code: 'too_long'; field: 'style_override' | 'signature_override' | 'business_override'; max: number }
+  /** offer/style/signature/business длиннее лимита после trim. */
+  | { code: 'too_long'; field: HeBriefField; max: number }
   | { code: 'not_found' }
   | { code: 'db'; message: string };
 
@@ -103,6 +110,9 @@ export async function patchHeProjectBrief(
   }
   if (businessRaw !== undefined && typeof businessRaw !== 'string') {
     return { ok: false, error: { code: 'bad_type', field: 'business_override' } };
+  }
+  if (typeof offerRaw === 'string' && offerRaw.trim().length > OFFER_OVERRIDE_MAX_LENGTH) {
+    return { ok: false, error: { code: 'too_long', field: 'offer_override', max: OFFER_OVERRIDE_MAX_LENGTH } };
   }
   if (typeof styleRaw === 'string' && styleRaw.trim().length > STYLE_OVERRIDE_MAX_LENGTH) {
     return { ok: false, error: { code: 'too_long', field: 'style_override', max: STYLE_OVERRIDE_MAX_LENGTH } };

@@ -3,6 +3,19 @@
  * pure-функция applyClusteringDecisions детерминированно применяет их
  * (матчинг по точному title, агрегация %, ранжирование), результат пишется
  * в he_verticals + he_hypotheses.vertical_id. Проект → status 'researched'.
+ *
+ * Рынок 'us': в кластеризацию идут только неотклонённые гипотезы проекта
+ * (proposed — предложенные evidence, accepted — уже выбранные человеком), и
+ * привязка к вертикали отклонённые не трогает. Отклонённая гипотеза прошлого
+ * прогона иначе снова собиралась бы в вертикаль со своим процентом — то есть
+ * отклонённый рынок предлагался бы заново. Прошлые 'proposed' здесь могут
+ * быть: evidence рынка 'us' сносит их (все, и привязанные к вертикалям тоже)
+ * только когда его прогон принял хотя бы одну гипотезу, и тогда сразу вставляет
+ * свежие. Принял ноль — прошлые 'proposed' остаются как есть (в результате
+ * evidence prior_proposed_kept), и кластеризация собирает их снова; дублей при
+ * этом нет, потому что evidence ничего не вставлял, а прошлые вертикали этот
+ * прогон сносит и привязку пересобирает целиком (ниже). Рынок 'ru' кластеризует
+ * все гипотезы проекта, как раньше.
  */
 
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
@@ -194,11 +207,18 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
   // проект только в фолбэке: остальное стадии нужно из he_hypotheses).
   const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
 
-  const { data: hyps, error } = await ctx.supabase
-    .from('he_hypotheses')
-    .select('*')
-    .eq('project_id', job.project_id)
-    .order('potential_pct', { ascending: false });
+  const { data: hyps, error } = market === 'us'
+    ? await ctx.supabase
+      .from('he_hypotheses')
+      .select('*')
+      .eq('project_id', job.project_id)
+      .in('status', ['proposed', 'accepted'])
+      .order('potential_pct', { ascending: false })
+    : await ctx.supabase
+      .from('he_hypotheses')
+      .select('*')
+      .eq('project_id', job.project_id)
+      .order('potential_pct', { ascending: false });
   if (error) throw new Error(`he_hypotheses read: ${error.message}`);
   const hypotheses = (hyps ?? []) as HeHypothesis[];
   if (!hypotheses.length) {
@@ -258,11 +278,18 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
     if (insError || !inserted) throw new Error(`he_verticals insert: ${insError?.message ?? 'unknown'}`);
     written.push({ ...v, id: (inserted as { id: string }).id });
 
-    const { error: linkError } = await ctx.supabase
-      .from('he_hypotheses')
-      .update({ vertical_id: (inserted as { id: string }).id })
-      .eq('project_id', job.project_id)
-      .in('title', v.memberTitles);
+    const { error: linkError } = market === 'us'
+      ? await ctx.supabase
+        .from('he_hypotheses')
+        .update({ vertical_id: (inserted as { id: string }).id })
+        .eq('project_id', job.project_id)
+        .in('title', v.memberTitles)
+        .neq('status', 'rejected')
+      : await ctx.supabase
+        .from('he_hypotheses')
+        .update({ vertical_id: (inserted as { id: string }).id })
+        .eq('project_id', job.project_id)
+        .in('title', v.memberTitles);
     if (linkError) throw new Error(`he_hypotheses link: ${linkError.message}`);
   }
 

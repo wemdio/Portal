@@ -26,7 +26,9 @@
  *   (startHeEngLaunchSending via 'launch', только по startSending) → сводка
  *   отправки → конфиг ночного добора (с 13.10.2026 — не после отказа
  *   проверки старта 'cancelled' / 'account_blocked' и только с разрешения
- *   beforeTopUpConfig вызывающего) → справка команде (notifyHeClientLaunch).
+ *   beforeTopUpConfig вызывающего) → примерный срок отправки в записи о
+ *   законченном запуске (recordHeEngRunDays, с 13.10.2026) → справка команде
+ *   (notifyHeClientLaunch).
  * Все тексты, константы и помощники — те же байты, что были в роуте; ответ
  * (`body`) — ровно прежний JSON (контракт api-client.launchEngTemplate); новое
  * — отказ проверки перед стартом (`sending.outcome 'refused'` с её кодом и
@@ -92,7 +94,7 @@ import { HE_COST_LAUNCH_STAGE } from './costReport';
 import { projectMarket } from './market';
 import type { HeJob } from './types';
 import { getHeClientFailure } from './clientErrors';
-import { heLaunchIsIncomplete, parseLaunchInfo } from './launchHandoff';
+import { heLaunchIsIncomplete, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
 import { notifyHeClientLaunch } from './opsAlert';
 import { ensureHeEngPresetForProject, HE_ENG_POOL_CAMPAIGN_SETTINGS } from './engSendingPreset';
 import { requireHeEngSendingAccess } from './engSendingAccess';
@@ -599,6 +601,189 @@ async function heEngLaunchWindowPlan(
     return { kind: 'finishing', window: plan.window ?? args.requested };
   } catch (e) {
     return { kind: 'unavailable', reason: e instanceof Error ? e.message : 'unknown' };
+  }
+}
+
+/* ─────────────── Примерный срок отправки ─────────────── */
+
+/** Положительное конечное число, иначе null. */
+function positiveLimit(raw: unknown): number | null {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
+/**
+ * Примерный срок отправки ОДНОЙ кампании в календарных днях. Чистая формула
+ * по мотивам V2 (verticalEngineV2/launchTemplate.ts, estimatedBundleRunDays;
+ * код V2 не импортируется): адреса кампании делятся на дневной лимит, рабочие
+ * дни переводятся в календарные по числу дней недели в окне отправки (нет
+ * дней — 5, как у V2), сверху — сумма пауз писем 2..N (`wait_days`: последние
+ * адреса ещё ждут свои follow-up'ы). Срок рынка из сроков его кампаний —
+ * heEngLaunchRunDays ниже.
+ *
+ * Отличие от V2 — второй предел. Ядро запуска ставит каждой кампании ОБА
+ * лимита пресета (buildCampaignPayloadFromPreset): daily_max_leads — новых
+ * адресов в день и daily_limit — писем в день, follow-up'ы входят в него же.
+ * При цепочке из трёх писем и равных лимитах (дефолт колонок пресета — 50 и
+ * 50) письма упираются в daily_limit втрое раньше, чем адреса в
+ * daily_max_leads, и формула V2 занизила бы срок втрое. Поэтому срок — больший
+ * из двух:
+ *  - новые адреса: ceil(leads / daily_max_leads) рабочих дней → календарные +
+ *    паузы писем;
+ *  - все письма: ceil(leads × писем / daily_limit) рабочих дней → календарные.
+ * Нет daily_max_leads — первый предел считается по daily_limit (как у V2);
+ * нет daily_limit — второго предела нет.
+ * null — оценивать нечем: нет адресов или ни одного лимита.
+ */
+export function heEngRunDays(input: {
+  leads: number;
+  dailyNewContacts: unknown;
+  dailyLetters: unknown;
+  sendingDays: readonly unknown[];
+  letters: unknown;
+}): number | null {
+  const leads = Number.isFinite(input.leads) ? Math.floor(input.leads) : 0;
+  if (leads <= 0) return null;
+  const perDayLetters = positiveLimit(input.dailyLetters);
+  const perDayNew = positiveLimit(input.dailyNewContacts) ?? perDayLetters;
+  if (perDayNew === null) return null;
+  const activeDays =
+    new Set(input.sendingDays.filter((d): d is number => typeof d === 'number' && Number.isInteger(d) && d >= 0 && d <= 6))
+      .size || 5;
+  const letters = Array.isArray(input.letters) ? (input.letters as unknown[]) : [];
+  const letterCount = Math.max(1, letters.length);
+  const followUpDays = letters.slice(1).reduce<number>((total, letter) => {
+    const wait = (letter as { wait_days?: unknown } | null)?.wait_days;
+    return total + (typeof wait === 'number' && Number.isFinite(wait) ? Math.max(0, wait) : 0);
+  }, 0);
+  const calendar = (sendingDayCount: number) => Math.ceil((sendingDayCount * 7) / activeDays);
+  const byNewContacts = calendar(Math.ceil(leads / perDayNew)) + followUpDays;
+  const byLetters = perDayLetters === null ? 0 : calendar(Math.ceil((leads * letterCount) / perDayLetters));
+  return Math.max(1, Math.ceil(Math.max(byNewContacts, byLetters)));
+}
+
+/**
+ * Примерный срок отправки рынка — «~N days, approximate» на карточке
+ * запущенного рынка шага 3 (EngStepLaunch): САМЫЙ ДОЛГИЙ из сроков его
+ * кампаний (heEngRunDays по адресам каждой).
+ *
+ * Почему максимум, а не все адреса против одного набора лимитов. Ядро запуска
+ * создаёт каждой группе сегмента свою кампанию (launchTemplate.ts, цикл по
+ * группам), и у каждой — свои полные лимиты пресета
+ * (buildCampaignPayloadFromPreset: daily_limit и daily_max_leads — на
+ * кампанию). Старт отправки (engCampaignSending.startHeEngLaunchSending)
+ * включает все кампании записи одним вызовом, и дальше они шлют параллельно,
+ * каждая под своими лимитами. Письма у всех кампаний одни и те же по числу и
+ * паузам (buildLaunchSequence меняет только текст сегмента), поэтому входы,
+ * кроме адресов, общие.
+ *
+ * Чего формула не знает — отсюда «approximate»: кампании берут письма из
+ * одних и тех же ящиков пресета, а дневной потолок самих ящиков у рассыльщика
+ * сюда не входит (несколько кампаний на малом числе ящиков идут дольше);
+ * часов окна и интервала между письмами (email_gap), ответов (stop on reply),
+ * пауз и ночного добора она тоже не знает.
+ *
+ * Записи без `campaigns` (запуски до сплита) — одна кампания на все
+ * `leads_count`. Кампания без адресов срока не даёт; null — ни одна не дала.
+ */
+export function heEngLaunchRunDays(input: {
+  record: Pick<HeTemplateLaunchInfo, 'leads_count' | 'campaigns'>;
+  dailyNewContacts: unknown;
+  dailyLetters: unknown;
+  sendingDays: readonly unknown[];
+  letters: unknown;
+}): number | null {
+  const { record, ...limits } = input;
+  const campaignLeads = record.campaigns?.length
+    ? record.campaigns.map((c) => c.leads_count)
+    : [record.leads_count];
+  let longest: number | null = null;
+  for (const leads of campaignLeads) {
+    const days = heEngRunDays({ leads, ...limits });
+    if (days !== null && (longest === null || days > longest)) longest = days;
+  }
+  return longest;
+}
+
+/**
+ * Записать примерный срок отправки (heEngLaunchRunDays — самая долгая из
+ * кампаний запуска) в запись о запуске после успешного ядра: `run_days` и
+ * `run_days_leads` — число адресов записи (сумма по её кампаниям), для
+ * которого срок посчитан. Деталка кабинета (api/client/eng/projects/[id])
+ * отдаёт срок карточке рынка, только пока `run_days_leads` равен
+ * `leads_count` записи: срок, посчитанный по другому числу адресов, не
+ * всплывёт.
+ *
+ * Только у ЗАКОНЧЕННОГО запуска (heLaunchIsIncomplete): у незаконченного часть
+ * аудитории ещё не в кампаниях. Достройка, закончившая запуск, проходит здесь
+ * же: итоговая запись ядра собирается заново, и прежних полей в ней нет.
+ *
+ * Входы — те, с которыми кампании этого захода созданы: дни окна этого запуска
+ * (`sendingDays`, heEngLaunchWindowPlan), лимиты пресета записи (иначе пресета
+ * этого запуска) и письма шаблона. Часы рынка, изменённые после запуска,
+ * срок не пересчитывают — карточка так и подписывает его: «estimated at
+ * launch».
+ *
+ * Запись УСЛОВНАЯ, по токену попытки (`attempt`): итоговая запись ядра его
+ * держит, а любая новая попытка ставит свой первой же записью (шаг 5b′
+ * launchTemplate.ts). Токен совпал — колонка с чтения не менялась, и в неё
+ * уходит ровно прочитанное плюс два поля; не совпал или токена нет (запись не
+ * нашего формата) — записи нет. Ничего платного; сбой — строка warn, запуск
+ * и его ответ от этого не зависят. Не бросает.
+ */
+async function recordHeEngRunDays(input: {
+  portalDb: SupabaseClient;
+  instantlyDb: SupabaseClient;
+  templateId: string;
+  userId: string;
+  fallbackPresetId: string;
+  sendingDays: readonly number[];
+  trigger: HeEngLaunchTrigger;
+}): Promise<void> {
+  const { portalDb, instantlyDb, templateId, userId, trigger } = input;
+  const skipped = (reason: string): void => {
+    void logWarn('client.eng.template.launch.run_days_not_saved', reason, { userId, templateId, trigger });
+  };
+  try {
+    const { data: row, error } = await portalDb
+      .from('he_templates')
+      .select('launch_info, letters')
+      .eq('id', templateId)
+      .maybeSingle();
+    if (error) return skipped(`launch record not read: ${error.message}`);
+    const raw = (row as { launch_info?: unknown } | null)?.launch_info;
+    const record = parseLaunchInfo(raw);
+    if (!record || heLaunchIsIncomplete(record)) return;
+    const fields = raw as Record<string, unknown>;
+    const attempt = fields.attempt;
+    if (typeof attempt !== 'string' || attempt.length === 0) return;
+    const { data: preset, error: presetErr } = await instantlyDb
+      .from('client_campaign_presets')
+      .select('daily_limit, daily_max_leads')
+      .eq('id', record.preset_id || input.fallbackPresetId)
+      .eq('client_user_id', userId)
+      .maybeSingle();
+    if (presetErr) return skipped(`preset limits not read: ${presetErr.message}`);
+    if (!preset) return skipped('preset not found');
+    const limits = preset as { daily_limit?: unknown; daily_max_leads?: unknown };
+    const runDays = heEngLaunchRunDays({
+      record,
+      dailyNewContacts: limits.daily_max_leads,
+      dailyLetters: limits.daily_limit,
+      sendingDays: input.sendingDays,
+      letters: (row as { letters?: unknown } | null)?.letters,
+    });
+    if (runDays === null) return;
+    if (fields.run_days === runDays && fields.run_days_leads === record.leads_count) return;
+    const { data: saved, error: saveErr } = await portalDb
+      .from('he_templates')
+      .update({ launch_info: { ...fields, run_days: runDays, run_days_leads: record.leads_count } })
+      .eq('id', templateId)
+      .eq('launch_info->>attempt', attempt)
+      .select('id');
+    if (saveErr) return skipped(`not saved: ${saveErr.message}`);
+    if (!Array.isArray(saved) || saved.length === 0) skipped('launch record changed after it was read');
+  } catch (e) {
+    skipped(e instanceof Error ? e.message : 'unknown');
   }
 }
 
@@ -1247,6 +1432,22 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
           { userId, projectId, templateId: id, startGateRefusal, trigger },
         );
       }
+    }
+
+    // ── Примерный срок отправки рынка (recordHeEngRunDays) ──
+    // После блока «Отправка»: старт (startHeEngLaunchSending) сверяет запись о
+    // запуске с ответом ядра, и эта запись его не опережает. Только
+    // законченный запуск; не бросает и ответ не меняет.
+    if (outcome.status === 200 && parseLaunchInfo(outcome.body.launch)) {
+      await recordHeEngRunDays({
+        portalDb,
+        instantlyDb,
+        templateId: id,
+        userId,
+        fallbackPresetId: presetId,
+        sendingDays: launchWindow.days,
+        trigger,
+      });
     }
 
     // Команде — ИНФОРМАЦИЯ, что шаблон запущен из кабинета (кнопкой клиента

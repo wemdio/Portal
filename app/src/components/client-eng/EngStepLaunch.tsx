@@ -44,6 +44,7 @@ import {
   EngLaunchServerError,
   EngPaidAccessError,
   collectEngBase,
+  engLaunchRunDays,
   engSendingAccessOf,
   engTemplateNeedsRewrite,
   fetchEngProjectLaunch,
@@ -58,6 +59,7 @@ import {
   type EngProjectLaunchInfo,
   type EngProjectLaunchMoreResponse,
   type EngProjectLaunchResponse,
+  type EngRefillTotal,
   type EngSendingAccessState,
   type EngSendingWindow,
   type EngSendingWindowTimezoneOption,
@@ -236,6 +238,33 @@ function launchHeaderText(s: {
   return s.blocked
     ? 'Automatic launch is not on for this project.'
     : 'Automatic launch is not on for this project. Press «Launch» to turn it on — each market then starts sending by itself once its final letters are ready.';
+}
+
+/**
+ * «~N days, approximate» запущенного рынка: срок посчитан при запуске
+ * (engClientLaunch.heEngLaunchRunDays) — самая долгая из кампаний запуска,
+ * которые шлют параллельно, каждая по своим адресам и своим дневным лимитам,
+ * с днями окна отправки и паузами между письмами — фраза называет ровно это.
+ */
+function runDaysText(days: number): string {
+  return (
+    `Sending all letters to these contacts takes ~${plural(days, 'day', 'days')}, approximate: estimated at launch ` +
+    "from each campaign's contacts and daily sending limits, your sending days and the waits between letters."
+  );
+}
+
+/**
+ * Итог ночного добора рынка (`refill_totals` деталки): адреса, которые
+ * прогоны добавили в его кампании, а пока их нет — сколько прогонов
+ * доработало. Число прогонов при добавленных адресах не печатается: в
+ * `added` входят и упавшие прогоны, успевшие отдать часть строк, а в `runs`
+ * — только доработавшие. Упавшие ночи (наш сбой) за «ничего не нашли» не
+ * выдаются: в `runs` их нет, а рынок только с ними итога не получает.
+ */
+function refillTotalText(total: EngRefillTotal): string {
+  return total.added > 0
+    ? `Daily top-up: ${plural(total.added, 'new contact', 'new contacts')} added so far.`
+    : `Daily top-up: ${plural(total.runs, 'top-up', 'top-ups')} so far, no new contacts added yet.`;
 }
 
 /** Итог «Launch» проекта одной-двумя фразами. */
@@ -1097,6 +1126,8 @@ function MarketCard({
   const rewriteReasons = template ? engTemplateRewriteReasons(template) : null;
   const brandInputs = engLettersBrandInputs(detail.project);
   const dots = marketDots(view);
+  const runDays = template ? engLaunchRunDays(template as { launch_info?: unknown }) : null;
+  const refillTotal = (detail.refill_totals ?? []).find((r) => r.vertical_id === vertical.id) ?? null;
   /**
    * Отправка аккаунта выключена сотрудником ('revoked'; так и после
    * разблокировки, пока сотрудник не включит отправку). Тогда откажут 403
@@ -1396,6 +1427,21 @@ function MarketCard({
               ? ` · campaigns: ${launch.campaigns.map((c) => c.segment ?? 'Default texts').join(', ')}`
               : ''}
           </span>
+          {/* Примерный срок отправки (engClientLaunch.heEngLaunchRunDays, записан при
+              запуске) — только у законченного запуска: у незаконченного часть
+              аудитории ещё не в кампаниях. */}
+          {!incomplete && runDays !== null && (
+            <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+              {runDaysText(runDays)}
+            </span>
+          )}
+          {/* Ночной добор рынка одним итогом: его прогоны базами не приходят
+              (роут деталки, foldFinishedRefillBases). */}
+          {refillTotal && (
+            <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+              {refillTotalText(refillTotal)}
+            </span>
+          )}
           <LaunchedSendingWindow templateId={template.id} />
         </div>
       )}
@@ -1420,7 +1466,10 @@ function MarketCard({
       )}
 
       {base && base.status === 'collecting' && <CollectProgress base={base} />}
-      {base && !template && <SendVolume base={base} />}
+      {/* Объём «к отправке» — до запуска рынка, в том числе у готовых
+          итоговых писем, которые ждут автозапуска или «Launch now»; после
+          запуска строка выше печатает факт (`leads_count`). */}
+      {base && !launch && <SendVolume base={base} />}
       {base && !template && <AutopilotDecisions base={base} />}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">

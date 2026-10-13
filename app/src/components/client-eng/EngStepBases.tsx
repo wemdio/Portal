@@ -11,7 +11,8 @@
  * заново не собирает, и повтор — только это явное нажатие.
  */
 
-import type { EngBaseSummary } from './api-client';
+import { useEffect, useState } from 'react';
+import { fetchEngBaseRows, type EngBaseSummary, type EngReadyToSend } from './api-client';
 import { heCollectStopRepeats } from './clientFailureText';
 import { EngSupportText } from './EngPaidAccess';
 import { EngSpinner } from './ui';
@@ -76,6 +77,52 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
 
 /* ── Сколько из готовой базы реально уедет в рассылку ── */
 
+const fmtCount = (n: number) => n.toLocaleString('en-US');
+
+/**
+ * Счёт «к отправке» готовой базы — GET /eng/bases/[id]/rows?ready=1
+ * (countReadyToSend роута: правило us-запуска по всем строкам и чёрному
+ * списку клиента). Один запрос на базу при показе карточки и заново, когда
+ * меняется число строк; опрос деталки его не повторяет. null — ещё не пришёл,
+ * не прочитался или сервер честно посчитать не может: панель тогда говорит
+ * прежнее «X of Y rows with a verified email».
+ */
+function useReadyToSend(baseId: string | null, rowCount: number): EngReadyToSend | null {
+  const key = baseId ? `${baseId}:${rowCount}` : null;
+  const [state, setState] = useState<{ key: string; ready: EngReadyToSend | null } | null>(null);
+  useEffect(() => {
+    if (!baseId) return;
+    const stateKey = `${baseId}:${rowCount}`;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchEngBaseRows(baseId, { limit: 1, ready: true });
+        if (!cancelled) setState({ key: stateKey, ready: res.ready ?? null });
+      } catch {
+        if (!cancelled) setState({ key: stateKey, ready: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [baseId, rowCount]);
+  return state && state.key === key ? state.ready : null;
+}
+
+/** Почему проверенные адреса не уйдут — только причины с ненулевым числом. */
+function readyToSendReasons(ready: EngReadyToSend): string[] {
+  return [
+    ready.failed > 0 ? `${fmtCount(ready.failed)} did not pass the email check` : '',
+    ready.flagged > 0 ? `${fmtCount(ready.flagged)} flagged as not a fit for this market` : '',
+    ready.unusable > 0 ? `${fmtCount(ready.unusable)} without one usable address` : '',
+    ready.repeated > 0 ? `${fmtCount(ready.repeated)} repeat an address already counted` : '',
+    ready.blocked > 0 ? `${fmtCount(ready.blocked)} on your «Do not contact» list` : '',
+    ready.over_limit > 0
+      ? `${fmtCount(ready.over_limit)} over the ${fmtCount(ready.limit)}-contact limit of one launch`
+      : '',
+  ].filter((s) => s !== '');
+}
+
 /**
  * Честный объём ДО запуска. Строк в базе и контактов в кампании — разные
  * числа: запуск (`runHeTemplateLaunch`) отправляет только строки с вердиктом
@@ -83,20 +130,16 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
  * один раз (`mapBaseRowsToLeads`, дедуп по email). База на 2000 строк уезжает
  * сотнями, и до этой правки клиент узнавал об этом только после запуска.
  *
- * ПОЧЕМУ НЕТ ОДНОГО ЧИСЛА «ready to send». Точный ответ считается только по
- * самим строкам: нужно пересечение «вердикт ok» × «не помечена вне вертикали»
- * минус дубли адресов. Строки живут в `he_bases.data` (до 50k строк, десятки
- * МБ), а деталку проекта кабинет поллит каждые 4 секунды — по ней этот jsonb
- * намеренно не тянут (projectDetail.ts: HE_BASE_LIST_COLUMNS без `data`).
- * Из двух счётчиков в `collect_info` точное число не выводится: пересечение
- * «ok» и «вне вертикали» неизвестно, и любая арифметика над ними дала бы
- * ВЫДУМАННУЮ цифру — она хуже отсутствия цифры. Поэтому показываем ровно то,
- * что записано, каждое число своим именем, а «сколько уедет» называем только
- * фактом после запуска (`launch_info.leads_count`, TemplateLaunchStatus).
- * Точный предварительный счётчик возможен, но его должна ПИСАТЬ стадия при
- * финализации базы: считать «адреса с вердиктом 'ok', не помеченные вне
- * вертикали, после капа на компанию» надо там, где известна сетка, и класть
- * готовое число в collect_info.stats — кабинет не должен это выводить сам.
+ * ЧИСЛО «READY TO SEND» у готовой ('analyzed') базы считает СЕРВЕР по самим
+ * строкам (useReadyToSend → countReadyToSend роута строк): те же функции и
+ * тот же порядок, что у us-запуска, плюс чёрный список клиента и потолок
+ * одного запуска. Деталка проекта `data` не возит (projectDetail.ts:
+ * HE_BASE_LIST_COLUMNS без `data`, опрос раз в 4 с), поэтому счёт — отдельный
+ * запрос раз на базу. Из двух счётчиков `collect_info` точное число не
+ * выводится (пересечение «ok» и «вне вертикали» неизвестно), и экран сам его
+ * не выводит: пока счёта нет — прежние числа, каждое своим именем, и «точное
+ * число — при запуске». У 'analyzing'-базы счёта нет: её анализ ещё идёт.
+ * После запуска карточка рынка печатает факт (`launch_info.leads_count`).
  *
  * ТРИ ветки из четырёх говорят не «сколько уедет», а «не уедет ничего»: база
  * без вердиктов, база, собранная прежним контрактом (вердикт не построчный), и
@@ -115,9 +158,11 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
 export function SendVolume({ base }: { base: EngBaseSummary }) {
   // Только авто-база: у загруженного файла движок строки не размечает, и
   // запуск их не фильтрует (`isAutoBase` в runHeTemplateLaunch).
-  if (base.source !== 'auto' || base.row_count <= 0) return null;
-  if (base.refill === true) return null;
-  if (base.status !== 'analyzed' && base.status !== 'analyzing') return null;
+  const shown =
+    base.source === 'auto' &&
+    base.row_count > 0 &&
+    base.refill !== true &&
+    (base.status === 'analyzed' || base.status === 'analyzing');
 
   const construct = base.collect_info?.construct;
   // valid_count пишется только вместе с импортом результата конструктора;
@@ -128,6 +173,15 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
       : null;
   // `stats.low_relevance` отдаёт проекция (COLLECT_STATS_FIELDS).
   const flagged = base.collect_info?.stats?.low_relevance ?? 0;
+  // Счёт «к отправке» — только там, где ниже рисуется последняя ветка (есть
+  // проверенные адреса, вердикты построчные) и база готова.
+  const ready = useReadyToSend(
+    shown && base.status === 'analyzed' && verified !== null && verified > 0 && construct?.per_address_verdicts !== false
+      ? base.id
+      : null,
+    base.row_count,
+  );
+  if (!shown) return null;
 
   // Вердиктов нет ВООБЩЕ — и это не «узнаем на запуске», а отказ запуска.
   // `valid_count` пишется ровно тем же импортом результата конструктора, что и
@@ -173,6 +227,33 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
             'collected again; a new collection keeps one address per row with its own check result.'
           }
         />
+      </div>
+    );
+  }
+
+  // Счёт сервера пришёл: одно число «к отправке» из проверенных и причины
+  // остальных. Ноль к отправке — запуск такой базы откажет (ядро: noValidEmails
+  // / allContactsBlocked — лидов не осталось). Проверенных нет вовсе (счёт
+  // разошёлся с valid_count) — прежняя ветка ниже.
+  if (ready && ready.checked > 0) {
+    const reasons = readyToSendReasons(ready);
+    return (
+      <div
+        className="mt-2 flex flex-col gap-1 text-[11px]"
+        style={{ color: ready.to_send === 0 ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}
+      >
+        <div className="ds-mono">
+          Ready to send: {fmtCount(ready.to_send)} of {fmtCount(ready.checked)} checked addresses
+        </div>
+        <div style={{ color: ready.to_send === 0 ? 'var(--cp-amber)' : 'var(--cp-text-l)' }}>
+          <EngSupportText
+            text={
+              ready.to_send === 0
+                ? `Not one checked address can be mailed now: ${reasons.join(', ')}. A launch of this base would be refused. Message Support.`
+                : `${reasons.length > 0 ? `The rest will not be mailed: ${reasons.join(', ')}. ` : ''}The launch counts again when it starts, so the number can still change.`
+            }
+          />
+        </div>
       </div>
     );
   }

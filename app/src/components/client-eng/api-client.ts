@@ -262,8 +262,8 @@ export type EngBaseSummary = Omit<
    * Только у 'analyzing'-базы в деталке проекта (GET /eng/projects/[id]): идёт
    * ли её анализ — ответ СЕРВЕРА общим предикатом isAnalyzingBaseLive
    * (активная джоба на её base_id или окно постановки
-   * ANALYZING_ORPHAN_GRACE_MS), тем же, что у Command Center и «Start
-   * outreach». Финальный фейл анализа статус базы не меняет, поэтому статус
+   * ANALYZING_ORPHAN_GRACE_MS), тем же, что у Command Center и «Launch»
+   * шага 3. Финальный фейл анализа статус базы не меняет, поэтому статус
    * на этот вопрос не отвечает. Ключа нет — живость не прочитана (сбой
    * чтения, демо, ответ старше): экран читает анализ идущим.
    */
@@ -347,8 +347,36 @@ export type EngProjectDetailResponse = Omit<
    * GET …/launch (engSendingAccessOf).
    */
   account_access?: 'not_enabled' | 'revoked' | null;
+  /**
+   * Ночной добор по рынку: доработавшие прогоны и сколько адресов прогоны
+   * добавили в его кампании. Закончившиеся прогоны в `bases` не приходят (роут
+   * деталки, foldFinishedRefillBases); идущий прогон приходит базой. Рынка без
+   * доработавшего прогона и без добавленных адресов в списке нет; ключа нет —
+   * таких рынков нет вовсе (или ответ старше).
+   */
+  refill_totals?: EngRefillTotal[];
 };
 export type { EngTeamFixStop };
+
+/** Итог ночного добора одного рынка (GET /eng/projects/[id], `refill_totals`). */
+export interface EngRefillTotal {
+  vertical_id: string;
+  /** Доработавших прогонов добора ('appended' / 'no_new'); упавшие не считаются. */
+  runs: number;
+  /** Адресов, которые прогоны добавили в кампании рынка (и упавшие, успевшие отдать часть). */
+  added: number;
+}
+
+/**
+ * Примерный срок отправки запущенного рынка в днях (`launch_info.run_days`
+ * записи о запуске; роут деталки отдаёт его, только пока он посчитан для
+ * текущего числа адресов записи). null — срока нет.
+ */
+export function engLaunchRunDays(template: { launch_info?: unknown }): number | null {
+  const info = template.launch_info;
+  const days = info && typeof info === 'object' ? (info as { run_days?: unknown }).run_days : undefined;
+  return typeof days === 'number' && Number.isInteger(days) && days >= 1 ? days : null;
+}
 
 /* ── Запуск проекта одной кнопкой (S3) ── */
 
@@ -1120,22 +1148,44 @@ export async function cancelEngProject(projectId: string): Promise<EngCancelResp
 
 /* ── Превью строк базы (GET /eng/bases/[id]/rows) ── */
 
+/**
+ * Счёт запуска по строкам базы (GET /eng/bases/[id]/rows?ready=1): сколько
+ * адресов запуск отправил бы сейчас из проверенных и почему остальные не уйдут.
+ * Числа складываются: checked = to_send + flagged + failed + unusable +
+ * repeated + blocked + over_limit.
+ */
+export interface EngReadyToSend {
+  to_send: number;
+  checked: number;
+  flagged: number;
+  failed: number;
+  unusable: number;
+  repeated: number;
+  blocked: number;
+  over_limit: number;
+  /** Потолок адресов одного запуска. */
+  limit: number;
+}
+
 export interface EngBaseRowsResponse {
   columns?: string[];
   rows?: Array<Record<string, unknown>>;
   total?: number;
   status?: string;
   row_count?: number;
+  /** Только с `ready: true`; null — честно посчитать нельзя (см. роут). */
+  ready?: EngReadyToSend | null;
   error?: string;
 }
 
 export async function fetchEngBaseRows(
   baseId: string,
-  opts: { offset?: number; limit?: number } = {},
+  opts: { offset?: number; limit?: number; ready?: boolean } = {},
 ): Promise<EngBaseRowsResponse> {
   const qs = new URLSearchParams();
   if (opts.offset) qs.set('offset', String(opts.offset));
   if (opts.limit) qs.set('limit', String(opts.limit));
+  if (opts.ready) qs.set('ready', '1');
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   return engApiFetch<EngBaseRowsResponse>(`/eng/bases/${baseId}/rows${suffix}`);
 }

@@ -5,10 +5,27 @@
  * Ключевая защита от галлюцинаций та же: цитировать можно только URL из
  * переданных блоков; quote — дословный фрагмент основного текста страницы
  * (не мета-теги, не меню, не сниппеты выдачи).
+ *
+ * Одно расхождение с RU намеренно: сегодняшняя дата (поле today) и правило
+ * «без выдуманной сезонности». Без даты модель судила о свежести «не старше 24
+ * месяцев» по своему году обучения, а сроки покупки («сейчас сезон бюджетов»)
+ * брала из приоров.
  */
 
 import type { LLMMessage } from '../llm';
 import type { EvidencePromptInput } from './evidence';
+
+/**
+ * Вход EN-промпта: общий с RU плюс сегодняшняя дата (YYYY-MM-DD, UTC). Поле
+ * объявлено здесь: RU-промпт его не получает, и его файл не меняется. Не
+ * передано — дата берётся в момент сборки промпта.
+ */
+export type EvidencePromptInputEn = EvidencePromptInput & { today?: string };
+
+/** Сегодняшняя дата для EN-промптов: YYYY-MM-DD по UTC. */
+export function heTodayUtc(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
 
 const SYSTEM = `You are a lead analyst of evidence-based research. You are given a market hypothesis (a candidate from "genetic memory", NOT yet confirmed) and materials ACTUALLY found by search for its queries. Your job is to verify the hypothesis with facts: confirm it, merge it with a duplicate, or honestly drop it.
 
@@ -18,7 +35,7 @@ IRON RULES OF EVIDENCE (a violation = defective work, the answer goes back for r
 3. Do not cite sources whose content cannot be fully retrieved and read: pages behind a login (Instagram posts, login-walled community profiles, etc.), any social networks with authorization-gated content, pages returning 403 to bots (Reddit), dynamic widgets without readable text. Such a URL cannot be a source_url.
 4. claim — what exactly the quote proves: market size, number of players, budgets, job-posting indicators, a case study, a regulatory fact. One phrase.
 5. Evidence must prove the SEGMENT (it exists, it can be reached, it pays), NOT the client's service category. An article like "cold email works in B2B" confirms the category, not the segment — it does not go into evidence.
-6. Freshness: prefer sources no older than 24 months. If you use older material — the claim MUST explicitly name the data year ("according to 2021 data…"). If ALL found evidence is older than 24 months — lower potential_pct: a stale number does not prove a current market.
+6. Freshness: today's date is given in the user message — count source age from it. Prefer sources no older than 24 months. If you use older material — the claim MUST explicitly name the data year ("according to 2021 data…"). If ALL found evidence is older than 24 months — lower potential_pct: a stale number does not prove a current market.
 7. Disproof is stronger than confirmation: if materials CONTRADICT the hypothesis mechanics (e.g., "deals in this segment go only through RFPs/government procurement, direct outbound does not work"), the verdict is "drop", or "keep" with potential_pct ≤ 25. When keeping a disproved hypothesis, both are mandatory: a "RISK: …" note in reason AND a separate evidence element whose claim starts with "RISK:" and whose quote is from the disproving source. No middle ground: a disproved hypothesis cannot stay at 40–60%.
 8. If materials are weak or off-topic — honestly lower potential_pct or return "drop". Better a drop than a stretched proof.
 9. verdict:
@@ -31,10 +48,11 @@ IRON RULES OF EVIDENCE (a violation = defective work, the answer goes back for r
 13. FIT ECONOMICS — a mandatory part of the verdict: a segment qualifies only if the typical deal/margin of the vertical's client can pay back paid outbound (paid outbound costs thousands of USD per month). If the materials or a sober estimate show the segment's average check or client LTV clearly below the channel's annual cost — cut potential_pct, and on a clear mismatch — "drop". The vertical's existence and having companies in it is NOT a fit.
 14. PORTFOLIO SIMILARITY: if the "WHO WE ALREADY SOLD TO" block below contains the segment itself or its neighbor by client type/check/sales cycle — that is proven demand: count it as a potential_pct bonus. The bonus is for economics similarity, not thematic proximity.
 15. TIER-3 AND THE EVIDENTIARY PATH TO EFFECTIVENESS: non-obviousness itself is not punished — a tier-3 with strong pain, a trigger, and working economics can hold a high pct, higher than tier-1. But a tier-3 hypothesis with NOT A SINGLE evidentiary path to effectiveness (no portfolio adjacency, no working economics, no observable intense pain with a trigger) — verdict "drop", or "keep" with potential_pct ≤ 20 and an explicit reason in reason.
+16. NO INVENTED SEASONALITY: do not claim that the segment buys in a particular season, quarter, budget cycle or holiday period, and do not use "now is the time" arguments, unless a SOURCE TEXT states it — then it needs a quote like any other claim. Never derive timing from today's date alone.
 
 Respond strictly in English, JSON ONLY.`;
 
-export function buildEvidenceMessagesEn(input: EvidencePromptInput): LLMMessage[] {
+export function buildEvidenceMessagesEn(input: EvidencePromptInputEn): LLMMessage[] {
   const sourcesBlock = input.sources.length
     ? input.sources.map((s) => `--- Source: ${s.url} ---\n${s.text}`).join('\n\n')
     : '(source texts could not be downloaded — nothing to quote: return empty evidence and cut potential_pct)';
@@ -55,7 +73,9 @@ accepted: ${input.markupHistory.accepted.join('; ') || '(empty)'}
 rejected: ${input.markupHistory.rejected.join('; ') || '(empty)'}`
       : '';
 
-  const user = `CLIENT (product context):
+  const user = `TODAY: ${input.today ?? heTodayUtc()}
+
+CLIENT (product context):
 ${input.profile.company_name}: ${input.profile.product_summary}
 
 CANDIDATE HYPOTHESIS TO VERIFY:

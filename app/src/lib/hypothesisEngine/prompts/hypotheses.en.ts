@@ -6,8 +6,11 @@
  * географический перенос «works in the US → expand to EU/LatAm», чек-лист
  * макросекторов US-рынка.
  *
- * ДВА расхождения с RU-оригиналом сделаны намеренно, синхронизировать их НЕ
- * надо. Второе — блок рамки ЦА клиента (icpFrameParts ниже): рамку задаёт
+ * ТРИ расхождения с RU-оригиналом сделаны намеренно, синхронизировать их НЕ
+ * надо. Третье — блок отклонённых рынков (rejectedTitles, rejectedBlock ниже):
+ * стадия hypotheses на рынке us читает отклонённые человеком гипотезы проекта и
+ * запрещает их предлагать снова; RU-промпт этого блока не получает. Второе —
+ * блок рамки ЦА клиента (icpFrameParts ниже): рамку задаёт
  * только клиент ENG-кабинета, и RU-промпт её не получает. Первое — формат
  * description. Сначала КТО ЭТО (вид деятельности, тип компании,
  * продукты, явные условия среза), боль — отдельным предложением после.
@@ -62,10 +65,29 @@ import type { HypothesesPromptInput } from './hypotheses';
 
 /**
  * Вход EN-промпта: общий с RU плюс рамка ЦА клиента (brief.icp, шаг «Brief»
- * кабинета). Поле объявлено здесь, а не в RU-модуле: RU-промпт рамку не
+ * кабинета) и title гипотез проекта, отклонённых человеком (stages/hypotheses.ts
+ * readRejectedTitles). Поля объявлены здесь, а не в RU-модуле: RU-промпт их не
  * получает, и его файл не меняется.
  */
-export type HypothesesPromptInputEn = HypothesesPromptInput & { icpFrame?: HeIcpFrame | null };
+export type HypothesesPromptInputEn = HypothesesPromptInput & {
+  icpFrame?: HeIcpFrame | null;
+  rejectedTitles?: string[];
+};
+
+/**
+ * Блок отклонённых рынков и его пункт самопроверки; обе строки пустые, если
+ * отклонённых нет, — тогда промпт байт-в-байт прежний. Запрет держит и модель
+ * (переименованная копия), и код: стадия отсекает совпавший title сама.
+ */
+function rejectedParts(titles: string[] | undefined): { block: string; selfCheck: string } {
+  const list = (titles ?? []).map((t) => t.trim()).filter(Boolean);
+  if (!list.length) return { block: '', selfCheck: '' };
+  return {
+    block: `MARKETS ALREADY REJECTED FOR THIS CLIENT (a person reviewed and rejected them; never propose them again — not under another name and not as a narrower or wider version of the same segment):
+${list.map((t) => `- ${t}`).join('\n')}`,
+    selfCheck: ' Is every candidate different from the rejected markets, including renamed versions of them?',
+  };
+}
 
 /** «"Company size"», «"Company size" and "Geography"». */
 function quotedList(names: string[]): string {
@@ -216,6 +238,7 @@ How to read: potential_pct is the vertical's potential, NOT a reply% forecast. B
 
   const frame = icpFrameParts(input.icpFrame);
   const frameBlock = frame.block;
+  const rejected = rejectedParts(input.rejectedTitles);
 
   const user = `CLIENT PROFILE (website ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
@@ -231,7 +254,7 @@ ${potential.length ? potential.map((e) => `- ${e.name} (${e.potential_pct}%): ${
 
 BRAND CLOUD — "noise" (typical clients, background):
 ${noise.length ? noise.map((e) => `- ${e.name}`).join('\n') : '(empty)'}
-${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}${frameBlock ? `\n${frameBlock}\n` : ''}
+${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}${frameBlock ? `\n${frameBlock}\n` : ''}${rejected.block ? `\n${rejected.block}\n` : ''}
 TASK: produce 25–40 market hypotheses following the system prompt rules${frameBlock ? " and the client's targeting frame above" : ''}.
 
 FORMAT — JSON ONLY:
@@ -251,7 +274,7 @@ FORMAT — JSON ONLY:
 
 LENGTH DISCIPLINE (critical): the per-field limits above are hard — write tightly and to the point, no filler or retelling. If you see you won't fit the limit — shorten the wording instead of cutting it off mid-word. The answer must be one fully closed valid JSON: 25 whole candidates are better than 40 with a truncated JSON.
 
-Check yourself before answering: 25–40 candidates? tier 2 ≥ 8? tier 3 ≥ 8? Macro-sector checklist walked — every relevant sector covered by at least one hypothesis? No macro-sector holds more than ~25% of candidates? Does each candidate's tier reflect obviousness of the connection, not potential_pct? Do candidates with an incompatible sales motion carry "RISK: …" in the rationale? Does every candidate's fit_rationale contain all four chain links (decision-maker → goal → pain → offer) plus the fifth link — why the economics work — and not repeat the description? Do segments with unrecoverable economics have their pct cut and a "RISK: economics …" note? Does every tier-3 without a portfolio match have another evidentiary path to effectiveness? Does every description open with WHO THEY ARE and keep the pain in a separate sentence after it? Are all titles unique? Not a single URL in the answer?${frame.selfCheck}`;
+Check yourself before answering: 25–40 candidates? tier 2 ≥ 8? tier 3 ≥ 8? Macro-sector checklist walked — every relevant sector covered by at least one hypothesis? No macro-sector holds more than ~25% of candidates? Does each candidate's tier reflect obviousness of the connection, not potential_pct? Do candidates with an incompatible sales motion carry "RISK: …" in the rationale? Does every candidate's fit_rationale contain all four chain links (decision-maker → goal → pain → offer) plus the fifth link — why the economics work — and not repeat the description? Do segments with unrecoverable economics have their pct cut and a "RISK: economics …" note? Does every tier-3 without a portfolio match have another evidentiary path to effectiveness? Does every description open with WHO THEY ARE and keep the pain in a separate sentence after it? Are all titles unique? Not a single URL in the answer?${frame.selfCheck}${rejected.selfCheck}`;
 
   return [
     { role: 'system', content: SYSTEM },

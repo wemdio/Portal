@@ -22,14 +22,21 @@
  *
  * Кто какие поля брифа читает (поэтому что редактируется после research):
  *  - offer_override, style_override, signature_override — письма: стадии chain
- *    и template (stages/chain.ts, stages/template.ts). Research их не читает;
- *  - business_override — research (site_profile строит по нему профиль, когда
- *    сайт не открылся; hypotheses кладёт его в промпт) и письма (chain и
- *    template — «CLIENT'S OWN WORDS» у EN). Письма читают его и после research;
- *  - icp (рамка ЦА) — стадия hypotheses, в начале своего прогона
- *    (stages/hypotheses.ts). Ещё она уходит в письма вместе со всем брифом:
- *    chain кладёт JSON брифа без overrides в материалы промпта, template — в
- *    корпус сверки чисел. После того как hypotheses её прочитала, на гипотезы
+ *    и template (stages/chain.ts, stages/template.ts). Из них research читает
+ *    только offer_override: site_profile рынка 'us' кладёт его в бриф промпта
+ *    профиля блоком фактов о клиенте (stages/siteProfile.ts,
+ *    clientBriefForProfile; кап — OFFER_OVERRIDE_MAX_LENGTH);
+ *  - business_override — research (site_profile рынка 'us' — всегда, в тот же
+ *    блок фактов; hypotheses кладёт его в промпт) и письма (chain и template —
+ *    «CLIENT'S OWN WORDS» у EN). Письма читают его и после research;
+ *  - icp (рамка ЦА) — research: site_profile рынка 'us' (бриф промпта профиля,
+ *    блок пожеланий по таргетингу — только для target_audience) и стадия
+ *    hypotheses, каждая в начале своего прогона
+ *    (stages/hypotheses.ts). В материалы английских писем она не попадает:
+ *    chain проекта 'us' вырезает из JSON брифа и её, и target_audience профиля
+ *    (briefWithoutTargetingWishes в stages/chain.ts); русская и польская
+ *    цепочки получают её в JSON брифа, как раньше, template — в корпусе сверки
+ *    чисел. После того как hypotheses её прочитала, на гипотезы
  *    она уже не влияет, поэтому форма рамки открыта только пока следующее её
  *    чтение впереди (icpEditable ниже), а дальше показывает ответы без правки;
  *  - max_emails_per_company (колонка проекта, не бриф) — будущие сборки баз.
@@ -80,6 +87,7 @@ import {
   heResearchStopCode,
 } from './clientFailureText';
 import { heEngMarketStarted, heEngMarketsFresh } from '@/lib/hypothesisEngine/engMarkets';
+import { OFFER_OVERRIDE_MAX_LENGTH } from '@/lib/hypothesisEngine/projectBriefPatch';
 import { EngPaidAccessNotice, EngSupportText } from './EngPaidAccess';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
@@ -162,7 +170,13 @@ function ResearchStepRow({ label, state }: { label: string; state: ResearchStepS
   );
 }
 
-/** Стадии research до hypotheses — рамку ЦА они не читают. */
+/**
+ * Стадии research до hypotheses. Из них рамку ЦА читает только site_profile
+ * рынка 'us' — в начале своего прогона, в бриф клиента промпта профиля
+ * (stages/siteProfile.ts, clientBriefForProfile); competitors и brand_cloud её
+ * не читают. Правка рамки, пока идёт одна из этих стадий, доходит до
+ * hypotheses — её главного читателя; уже построенный профиль она не меняет.
+ */
 const STAGES_BEFORE_HYPOTHESES = ['site_profile', 'competitors', 'brand_cloud'];
 
 /** Подписи полей site_profile (EN) в порядке показа. */
@@ -1058,8 +1072,27 @@ export function EngStepBrief({
 
           <EngCard>
             <EngEyebrow>Offer &amp; style overrides</EngEyebrow>
+            {/* Кто что читает — шапка файла. Описание и оффер в бриф профиля
+                кладёт только site_profile рынка 'us' (кабинет создаёт только
+                такие проекты; на другом рынке — прежняя фраза). Правило «бриф
+                прав на конфликте, у тонкого сайта профиль строится в основном
+                по нему» — EN-промпт профиля (prompts/siteProfile.en.ts). Сайт
+                не открылся — дальше research пускает ТОЛЬКО описание бизнеса:
+                без него site_profile отказывает до вызова модели, оффер этого
+                не меняет (stages/siteProfile.ts, `unreachable && !manualBusiness`);
+                с ним профиль строится по описанию и офферу. Research идёт один раз, поэтому
+                сохранённое после его конца читают только письма, которые пишутся
+                после сохранения (chain и template читают бриф в начале прогона). */}
             <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-              These notes steer letter generation. Leave empty to use what the research inferred.
+              {project.market === 'us'
+                ? 'These notes steer letter generation. The research also uses your business description and offer as '
+                  + 'facts about your business when it builds the site profile above. Where they differ from your '
+                  + 'website, they win. If your website has little text, the profile is built mostly from them. If your '
+                  + 'website does not open, the research can continue only when the business description is filled in; '
+                  + 'the profile is then built from it and from your offer, if you gave one. Notes saved after the '
+                  + 'research has finished are used only for letters written after you save them. Leave empty to use '
+                  + 'what the research inferred.'
+                : 'These notes steer letter generation. Leave empty to use what the research inferred.'}
             </p>
             <div className="flex flex-col gap-3">
               <label className="flex flex-col gap-1">
@@ -1072,18 +1105,23 @@ export function EngStepBrief({
                   onChange={(e) => overrides.edit('business_override', e.target.value)}
                   rows={4}
                   maxLength={3000}
-                  placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin, JS-heavy, or could not be opened at all."
+                  placeholder={
+                    project.market === 'us'
+                      ? 'What you sell, to whom, and why clients pick you. The research reads it together with your website and relies on it most when the site has little text or does not open.'
+                      : 'What you sell, to whom, and why clients pick you.'
+                  }
                   className="ds-input w-full resize-y"
                 />
               </label>
               <label className="flex flex-col gap-1">
                 <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-                  Offer override
+                  Offer override (max {OFFER_OVERRIDE_MAX_LENGTH} chars)
                 </span>
                 <textarea
                   value={overrides.value('offer_override')}
                   onChange={(e) => overrides.edit('offer_override', e.target.value)}
                   rows={2}
+                  maxLength={OFFER_OVERRIDE_MAX_LENGTH}
                   placeholder="e.g. 4–6 qualified meetings per month with US clinic owners, pay-per-meeting"
                   className="ds-input w-full resize-y"
                 />
@@ -1127,16 +1165,21 @@ export function EngStepBrief({
             </div>
           </EngCard>
 
-          {/* Рамка ЦА читается только EN-промптом гипотез (рынок us); роут на
-              другом рынке её не принимает, поэтому и формы там нет. */}
+          {/* Рамку ЦА читают только EN-промпты (рынок us): гипотез и профиля
+              сайта; роут на другом рынке её не принимает, поэтому и формы там нет. */}
           {project.market === 'us' && (
             <EngCard>
               <EngEyebrow>Target audience</EngEyebrow>
-              {/* Каждая фраза — про механизм как он есть. Рамку по имени читает
-                  только стадия гипотез, в начале своего прогона (stages/hypotheses.ts,
-                  EN-промпт prompts/hypotheses.en.ts): по ней модель выбирает и
-                  запрещает сегменты (шаг 2); в письма она попадает лишь в составе
-                  брифа (шапка файла). Размер и география — указание модели
+              {/* Каждая фраза — про механизм как он есть. Рамку по имени читают
+                  две стадии research, каждая в начале своего прогона: site_profile
+                  рынка us кладёт её в бриф промпта профиля блоком пожеланий по
+                  таргетингу (TARGETING WISHES, stages/siteProfile.ts
+                  clientBriefForProfile): промпт пускает их только в
+                  target_audience, а current_clients и cases код берёт только
+                  дословно из текста сайта (keepSiteLiteralProof), — и стадия гипотез
+                  (stages/hypotheses.ts, EN-промпт prompts/hypotheses.en.ts): по ней модель выбирает и
+                  запрещает сегменты (шаг 2); в английские письма она не попадает
+                  (шапка файла). Размер и география — указание модели
                   вписать их условием отбора в описание каждой гипотезы внутри
                   рамки; описания читает планировщик источников
                   (prompts/sourcePlan.en.ts: фильтры стран и штата), а порог штата
@@ -1157,7 +1200,9 @@ export function EngStepBrief({
                   причина (icpLockedText). */}
               <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
                 Who the research should aim at. These answers steer which market hypotheses the research
-                proposes. The company size you name here usually becomes a condition for which companies are
+                proposes. When it builds the site profile, it reads them only as who you want to reach or avoid,
+                never as your current clients. The company
+                size you name here usually becomes a condition for which companies are
                 collected for those hypotheses. A country usually becomes a filter for the companies collected,
                 while a state, region or city can be used only when searching local businesses on maps, so
                 companies from elsewhere can still appear.{' '}

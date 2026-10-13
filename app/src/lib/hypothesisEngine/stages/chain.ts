@@ -19,7 +19,9 @@
  * EN: ответ фикс-прохода, в котором чисел не из материалов больше, чем в
  * письмах до него, не принимается; критик и рерайт видят «CLIENT'S OWN
  * WORDS», а рерайт, после которого чисел не из материалов стало больше,
- * откатывается (см. критик-луп ниже).
+ * откатывается (см. критик-луп ниже). Английская цепочка проекта 'us' получает
+ * бриф без пожеланий клиента по таргетингу — рамки ЦА и target_audience
+ * профиля (briefWithoutTargetingWishes): ни в материалах, ни в корпусе чисел.
  * Цепочка 'us', когда клиент подтверждённо не мы (letterBrandGuard: английская
  * и польская — всегда, русская — у проекта клиента ENG-кабинета): чужая
  * компания в письмах (наш бренд «Polza» /
@@ -252,6 +254,40 @@ export const HE_CHAIN_TARGET_LETTERS_EN = 4;
 /** Подсказка повтора EN-цепочки: английская, иначе русский текст уходит посреди английской генерации. */
 const RETRY_HINT_EN = `You returned too few emails or broke the format. The sequence needs exactly ${HE_CHAIN_TARGET_LETTERS_EN} emails, each as a "---LETTER N---" block with a "Subject:" line, plus each email's B variant as a "---LETTER N B---" block right after it. Return the whole sequence again, with no explanations.`;
 
+/**
+ * Бриф английской цепочки проекта 'us' без ПОЖЕЛАНИЙ клиента по таргетингу:
+ *  - `icp` (рамка ЦА: include / exclude / size / geo) — кого клиент ХОЧЕТ
+ *    найти или обойти. Своё дело она сделала в research: гипотезы и вертикали
+ *    выбраны по ней, а письма идут в выбранную вертикаль (её имя, описание и
+ *    гипотезы — в материалах отдельно);
+ *  - `site_profile.target_audience` — единственное поле профиля, которое
+ *    EN-промпт профиля разрешает строить по этим пожеланиям
+ *    (prompts/siteProfile.en.ts). Пометить, какая часть поля с сайта, а какая
+ *    из пожеланий, нечем — поэтому поле уходит целиком.
+ * В материалах цепочки, где «бриф — это оффер и USP», пожелание читалось бы
+ * фактом: «мы помогаем стоматологиям» у клиента, среди клиентов которого
+ * стоматологий нет, — выдуманное доказательство в письме, которое из пула
+ * уходит без проверки человеком. Подпись «это пожелание, не факт» — только
+ * просьба к модели; отсутствие поля в материалах — гарантия кода. Остальной
+ * бриф (профиль сайта с current_clients и cases — дословно с сайта, см.
+ * keepSiteLiteralProof в stages/siteProfile.ts) и порядок ключей — прежние.
+ * Русская и польская цепочки и английская цепочка проекта 'ru' (его профиль
+ * строится без брифа) получают бриф как раньше.
+ */
+function briefWithoutTargetingWishes(brief: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(brief)) {
+    if (key === 'icp') continue;
+    if (key === 'site_profile' && value && typeof value === 'object' && !Array.isArray(value)) {
+      const { target_audience: _wishShaped, ...profile } = value as Record<string, unknown>;
+      out[key] = profile;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
 export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const verticalId = payloadString(job, 'vertical_id');
@@ -291,7 +327,6 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // вместе с оффером) — из JSON брифа EN-промпта его вырезаем. RU/PL видят
   // бриф как раньше (business_override внутри JSON).
   const { business_override: _biz, ...briefRestEn } = briefRest;
-  const briefForPrompt = language === 'en' ? briefRestEn : briefRest;
   const businessOverride = typeof brief.business_override === 'string' ? brief.business_override : undefined;
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
@@ -324,6 +359,10 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // RU-сегменты, и в английскую генерацию уезжают русские темы кампаний
   // вместе с русским текстом самого блока (renderWinnerPatternsBlock).
   const market = ctx.market ?? projectMarket(project);
+  // Снапшот брифа для материалов и корпуса чисел. Английская цепочка проекта
+  // 'us' — без пожеланий клиента по таргетингу (briefWithoutTargetingWishes).
+  const briefForPrompt =
+    language === 'en' ? (market === 'us' ? briefWithoutTargetingWishes(briefRestEn) : briefRestEn) : briefRest;
   // Цепочка 'us': чужая компания в письмах (letterBrandGuard). Список не пуст,
   // только когда клиент подтверждённо не мы (хост сайта проекта не наш) и
   // цепочка английская или польская — или владелец проекта клиент

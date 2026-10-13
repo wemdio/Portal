@@ -191,6 +191,8 @@ import { withHeCleanCompanyNames } from '../companyNameCleanup';
 import type { HeCompanyCleanRow } from '../companyNames';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
+// Метки pdl-среза → значения каталога (только market='us', fail-open).
+import { loadHePdlFacets, resolveHePdlFilters } from '../pdlCatalog';
 // Набор источников по рынку (us — только ENG-источники; RU — без набора).
 import {
   assertHeSourceAllowedForMarket,
@@ -764,6 +766,12 @@ export interface HeCollectTaskState {
   harvest?: HeUnifiedRow[];
   /** Когда задача ушла в дочерний парсер (ISO) — таймаут ожидания в WAIT. */
   dispatched_at?: string;
+  /**
+   * WAIT: с какого момента (ISO) чтение статуса или строк дочерней джобы
+   * подряд падает временным сбоем БД. Снимается первым удачным опросом; по нему
+   * задача не ждёт такое чтение дольше CHILD_READ_FAILURE_WINDOW_MS.
+   */
+  wait_read_failing_since?: string;
   error?: string;
   /**
    * Реестр и ENG-каталоги: строк пропущено на выборке как уже собранные в других
@@ -1160,11 +1168,19 @@ const CHILD_JOB_TABLE: Record<'hh_live' | 'yandex_maps' | 'google_maps', string>
   google_maps: 'google_maps_jobs',
 };
 
+/**
+ * Терминальные неуспешные статусы google_maps_jobs (CHECK-набор миграции
+ * 20260707_0001). captcha/blocked/timeout/login_required воркер карт пишет как
+ * ФИНАЛ джобы вместе с completed_at (lib/parsers/googleParsersWorker.ts, событие
+ * `done` сервиса парсера), а возобновить можно только 'paused'
+ * (api/parsers/googlemaps/[jobId]/resume) — то есть из этих статусов джоба уже
+ * не выйдет. Пока их не было в наборе, задача ждала такую джобу до таймаута.
+ */
+const GOOGLE_MAPS_FAILED_STATUSES = new Set(['failed', 'stopped', 'captcha', 'blocked', 'timeout', 'login_required']);
+
 /** Дочерняя джоба завершилась неудачно? google_maps имеет свой набор статусов. */
 function isChildFailed(source: HeCollectSource, status: string): boolean {
-  return source === 'google_maps'
-    ? status === 'failed' || status === 'stopped'
-    : status === 'failed';
+  return source === 'google_maps' ? GOOGLE_MAPS_FAILED_STATUSES.has(status) : status === 'failed';
 }
 
 /**
@@ -1378,10 +1394,12 @@ async function persistCollectInfo(
  * строка): 264 байта на строку pdl, 430 на строку реестра. То есть
  * `collect_info` завершённой базы весит до 10,3 МБ у кабинета (лимит 10 000,
  * 4 задачи) и до 82 МБ у RU-инструмента (лимит 50 000) — при 3,3 КБ полезного
- * остатка. Эту колонку читают деталка проекта (поллинг 4 с) и ENG-дашборд по
- * ВСЕМ базам проекта, а наружу из неё не уходит ни байта: `stripTaskHarvest`
+ * остатка. Колонку целиком читает деталка проекта (поллинг 4 с) по ВСЕМ базам
+ * проекта, а наружу из неё не уходит ни байта: `stripTaskHarvest`
  * (projectDetail) и клиентская проекция режут харвест на выходе — но уже ПОСЛЕ
- * того, как БД его переслала.
+ * того, как БД его переслала. ENG-дашборд берёт из колонки только три ключа
+ * JSON-путями (api/client/eng/dashboard, BASE_COLLECT_INFO_SELECT) — харвеста
+ * БД ему не пересылает вовсе.
  *
  * `relevance_gate.flagged_keys` — второй по весу ключ (кап гейта
  * HE_RELEVANCE_MAX_ROWS = 3000 ключей ≈ 154 КБ, то есть 98% остатка у
@@ -1728,6 +1746,57 @@ function heWithoutUnfoundedSizeFilters(
   });
 }
 
+/**
+ * МЕТКИ PDL-СРЕЗА — К ЗНАЧЕНИЯМ КАТАЛОГА (pdlCatalog.ts; только market='us').
+ *
+ * Зовётся на тех же четырёх местах, где pdl-срез рождается из ответа модели,
+ * и после heWithoutUnfoundedSizeFilters: свежий план (buildPlan), починка «нет
+ * каталога» (ensureCatalogSource), повторная проба среза
+ * (ensureSliceMatchesVertical) и платное расширение плана
+ * (widenPlanWithPaidSlice). Переиспользованный план сюда не заходит: в стор он
+ * ложится уже разобранным, а планы, сохранённые до разбора, отрезает ревизия
+ * ключа плана (HE_SOURCE_PLAN_REVISION в catalogCursor.ts).
+ *
+ * Возвращает задачи с метками каталога и индексы МЁРТВЫХ pdl-задач — у которых
+ * в каталоге нет ни одной метки хотя бы одной оси: такой срез не находит ни
+ * строки. Что с ними делать, решает вызывающий. Справочник не прочитан —
+ * задачи как есть и мёртвых нет, то есть поведение до этой правки. Задачи без
+ * pdl справочник не читают.
+ */
+async function heResolvePdlLabels(
+  ctx: HeStageContext,
+  tasks: HeCollectTask[],
+  where: string,
+): Promise<{ tasks: HeCollectTask[]; dead: number[] }> {
+  if (!tasks.some((t) => t.source === 'pdl' && t.pdl_filters)) return { tasks, dead: [] };
+  const facets = await loadHePdlFacets(ctx.supabase, {
+    signal: heStageSignal(ctx),
+    log: (message) => stageLog(ctx, message),
+  });
+  if (!facets) return { tasks, dead: [] };
+  const dead: number[] = [];
+  const resolved = tasks.map((task, i) => {
+    if (task.source !== 'pdl' || !task.pdl_filters) return task;
+    const res = resolveHePdlFilters(task.pdl_filters, facets);
+    if (res.mapped.length > 0) {
+      stageLog(ctx, `[base_collect] ${where}: метки pdl приведены к каталогу (${res.mapped.join(', ')})`);
+    }
+    if (res.dropped.length > 0) {
+      stageLog(ctx, `[base_collect] ${where}: метки pdl вне каталога сняты (${res.dropped.join(', ')})`);
+    }
+    if (res.dead.length > 0) {
+      dead.push(i);
+      stageLog(
+        ctx,
+        `[base_collect] ${where}: в каталоге нет ни одной метки (${res.dead.join(', ')}) — ` +
+          `срез ${JSON.stringify(task.pdl_filters)} не находит ни строки`,
+      );
+    }
+    return { ...task, pdl_filters: res.filters };
+  });
+  return { tasks: resolved, dead };
+}
+
 /* ───────────── Расширение среза, когда план кончился раньше цели ───────────── */
 
 /**
@@ -1903,6 +1972,8 @@ async function buildPlan(
   sliceProbe?: HeSliceProbe;
   /** Источники задач, снятых набором рынка (пусто у RU и у чистого us-плана). */
   marketDropped: string[];
+  /** Сколько pdl-срезов ответа модели снято как мёртвые по меткам каталога (только us). */
+  labelDead: number;
 }> {
   const { promptInput } = input;
   const marketDropped: string[] = [];
@@ -1923,13 +1994,30 @@ async function buildPlan(
       ? { ...answered, tasks: heWithoutUnfoundedSizeFilters(ctx, answered.tasks, promptInput) }
       : answered;
 
-  const withCatalog = await ensureCatalogSource(ctx, planned, promptInput, usage, market);
+  // Метки pdl — к значениям каталога, тоже ДО починки: мёртвый срез (ни одной
+  // метки оси в каталоге) не находит ни строки, поэтому снимается здесь, и если
+  // каталожных задач после этого не осталось, его место занимает починка «нет
+  // каталога» — тот же один платный вызов, что у плана без pdl вовсе. Без
+  // снятия такой план ушёл бы в сбор, дал ноль строк по срезу и лёг бы в стор
+  // вертикали, повторяя ноль каждую ночь.
+  let labelled = planned;
+  let labelDead = 0;
+  if (market === 'us') {
+    const res = await heResolvePdlLabels(ctx, planned.tasks, 'план модели');
+    labelDead = res.dead.length;
+    labelled = { ...planned, tasks: res.tasks.filter((_, i) => !res.dead.includes(i)) };
+    if (labelDead > 0) {
+      stageLog(ctx, `[base_collect] план модели: снято pdl-срезов без меток каталога — ${labelDead}`);
+    }
+  }
+
+  const withCatalog = await ensureCatalogSource(ctx, labelled, promptInput, usage, market);
   const repaired = heGatePlanForMarket(ctx, withCatalog.plan, market, 'план после починки каталога', marketDropped);
   // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
   // не существует, а добавленный срез проверяется на общих основаниях.
   const probed = await ensureSliceMatchesVertical(ctx, repaired, vertical, promptInput, usage, market);
   const plan = heGatePlanForMarket(ctx, probed.plan, market, 'план после пробы среза', marketDropped);
-  return { plan, planRepair: withCatalog.planRepair, sliceProbe: probed.sliceProbe, marketDropped };
+  return { plan, planRepair: withCatalog.planRepair, sliceProbe: probed.sliceProbe, marketDropped, labelDead };
 }
 
 /**
@@ -1978,10 +2066,19 @@ async function ensureCatalogSource(
   // Починка отвечает ТОЛЬКО за фильтры, то есть придумывает их с нуля, — и тот
   // же порог без основания она ставит так же охотно. Провенанс и лог ниже
   // печатают фильтры ПОСЛЕ снятия: иначе staff читал бы срез, которого не было.
-  const [task] = heWithoutUnfoundedSizeFilters(
+  // Метки — к каталогу. Мёртвый ответ починки (ни одной метки оси в каталоге)
+  // остаётся в плане как есть: второй платный вызов здесь не покупаем, а
+  // строка лога называет срез, который не найдёт ни строки.
+  const {
+    tasks: [task],
+  } = await heResolvePdlLabels(
     ctx,
-    [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
-    promptInput,
+    heWithoutUnfoundedSizeFilters(
+      ctx,
+      [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
+      promptInput,
+    ),
+    'починка плана',
   );
   // Потолок плана — 4 задачи (HeSourcePlanSchema). Если модель уже выбрала
   // четыре, каталожный срез вытесняет последнюю: без каталога база всё равно
@@ -2143,11 +2240,18 @@ async function ensureSliceMatchesVertical(
   addUsage(usage, repair);
 
   // Тот же ремонтный вызов — тот же придуманный порог; снимаем ДО второй пробы,
-  // иначе проба мерила бы один срез, а сбор шёл по другому.
-  const [retried] = heWithoutUnfoundedSizeFilters(
+  // иначе проба мерила бы один срез, а сбор шёл по другому. По той же причине
+  // ДО пробы — и метки каталога (мёртвый срез проба увидит пустым).
+  const {
+    tasks: [retried],
+  } = await heResolvePdlLabels(
     ctx,
-    [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
-    promptInput,
+    heWithoutUnfoundedSizeFilters(
+      ctx,
+      [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
+      promptInput,
+    ),
+    'перепланирование среза',
   );
   const second = await probe([retried]);
   if (second.sampled > 0 && sliceProbeRejectBelow() > 0 && second.hitRate < sliceProbeRejectBelow()) {
@@ -2306,12 +2410,28 @@ async function widenPlanWithPaidSlice(
 
   // Срез придумывает модель — значит и порог без основания она ставит так же
   // охотно, как в починке «нет каталога». Снимаем ДО проверки на повтор:
-  // сравнивать надо ровно тот срез, который пойдёт в сбор.
-  const [task] = heWithoutUnfoundedSizeFilters(
+  // сравнивать надо ровно тот срез, который пойдёт в сбор. По той же причине до
+  // неё и метки каталога: «hospital and health care» и «hospital & health care»
+  // — один и тот же срез.
+  const labelled = await heResolvePdlLabels(
     ctx,
-    [{ source: 'pdl', rationale: widened.data.rationale, pdl_filters: widened.data.pdl_filters }],
-    input.promptInput,
+    heWithoutUnfoundedSizeFilters(
+      ctx,
+      [{ source: 'pdl', rationale: widened.data.rationale, pdl_filters: widened.data.pdl_filters }],
+      input.promptInput,
+    ),
+    'расширение плана',
   );
+  const [task] = labelled.tasks;
+  // Ни одной метки оси в каталоге — срез не найдёт ни строки. За ответ уже
+  // заплачено, и он ничего не дал: это 'failed' с остыванием, как у повтора
+  // прочитанного среза, а не задача, которую стор вертикали повторял бы каждую
+  // ночь.
+  if (labelled.dead.length > 0) {
+    info.plan_widening = { outcome: 'failed', error: 'модель вернула срез без меток каталога', at };
+    stageLog(ctx, '[base_collect] расширение плана: в срезе нет ни одной метки каталога — план не тронут');
+    return null;
+  }
   const key = heCatalogSliceKey(task);
   const known = new Set(
     plan.tasks.map((t) => heCatalogSliceKey(t)).filter((k): k is string => k !== null),
@@ -2347,8 +2467,38 @@ async function widenPlanWithPaidSlice(
 
 /* ─────────────────────────── Фаза DISPATCH ─────────────────────────── */
 
-/** Сколько ждём дочернюю джобу парсера, прежде чем считать её зависшей. */
+/**
+ * Сроки ожидания дочерней джобы парсера (WAIT, pollTask). Их три, и каждый
+ * отвечает на свой вопрос:
+ *  - CHILD_TIMEOUT_MS — сколько джоба может РАБОТАТЬ: от её собственного
+ *    started_at (воркер парсера ставит его на каждом клейме), а не от нашей
+ *    постановки — очередь к парсеру работой не является;
+ *  - CHILD_QUEUE_WAIT_MS — сколько джоба может ЖДАТЬ в очереди, ни разу не
+ *    начавшись или вернувшись в очередь после рестарта воркера парсера (тот
+ *    переводит 'running' обратно в 'queued'/'pending'): от dispatched_at. У
+ *    google_maps воркер по умолчанию берёт одну джобу за раз
+ *    (GOOGLEPARSERS_CONCURRENCY=1), и ночная очередь из соседних сборок —
+ *    обычное дело;
+ *  - их сумма — потолок всего ожидания от dispatched_at при любом статусе:
+ *    джоба, которую рестарты воркера раз за разом возвращают в очередь и
+ *    берут снова, свежий started_at получает на каждом клейме и иначе не
+ *    кончилась бы никогда. Потолок держится и тогда, когда статус не
+ *    прочитался (временный сбой БД, WAIT); там же — своё окно сбоев чтения
+ *    подряд, CHILD_READ_FAILURE_WINDOW_MS.
+ */
 const CHILD_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+const CHILD_QUEUE_WAIT_MS = 10 * 60 * 60 * 1000;
+
+/**
+ * Сколько WAIT терпит временный сбой БД на ЧТЕНИИ дочерней джобы (статус или
+ * строки), подряд и без единого удачного опроса, считая от первого такого сбоя
+ * (wait_read_failing_since задачи). Перезапуск PostgREST или переключение БД
+ * укладываются в минуты; чтение, которое падает четверть часа на каждом тике
+ * (≈30 попыток через 30 с), — уже не блип: например, 504 на тяжёлом чтении
+ * строк завершённой джобы, которое так и будет падать под нагрузкой. Дольше
+ * задача не ждёт — уходит в 'failed' с текстом «timeout: …».
+ */
+const CHILD_READ_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 
 async function insertChildJob(
   ctx: HeStageContext,
@@ -3789,7 +3939,27 @@ async function readChildRows(
   return (data ?? []).map((r) => mapGoogleRow(r as Record<string, unknown>));
 }
 
-/** Опросить дочернюю джобу задачи: completed → harvest, failed/stopped → failed. */
+/** Сколько прошло от ISO-штампа; null — штампа нет или он не читается. */
+function msSince(iso: unknown): number | null {
+  if (typeof iso !== 'string' || !iso) return null;
+  const at = Date.parse(iso);
+  return Number.isFinite(at) ? Date.now() - at : null;
+}
+
+/**
+ * Опросить дочернюю джобу задачи: completed → harvest, неуспешный финал →
+ * failed, ещё не финал → сроки ожидания (см. CHILD_TIMEOUT_MS).
+ *
+ * Статус читается ПЕРВЫМ, сроки — только у джобы, которая ещё не кончилась.
+ * Раньше срок проверялся до чтения: джоба, завершившаяся сразу за порогом,
+ * уходила в 'failed' непрочитанной, хотя её строки уже лежали в таблице.
+ *
+ * «Начата» — статус 'running' (или 'paused' у карт — её ставит человек, и
+ * снять паузу может только он); остальные не-финальные статусы — ожидание в
+ * очереди. У задачи без dispatched_at (collect_info до появления штампа) срок
+ * работы считается от started_at джобы, а срока очереди и общего потолка нет —
+ * как и раньше.
+ */
 async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: number): Promise<void> {
   // До poll доходят только источники с дочерними джобами (остальные done на dispatch).
   const table = CHILD_JOB_TABLE[state.source as keyof typeof CHILD_JOB_TABLE];
@@ -3797,7 +3967,7 @@ async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: n
 
   const { data, error } = await ctx.supabase
     .from(table)
-    .select('status, error_message')
+    .select('status, error_message, started_at')
     .eq('id', state.child_job_id)
     .maybeSingle();
   if (error) throw new Error(`${table} read: ${error.message}`);
@@ -3807,18 +3977,40 @@ async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: n
     return;
   }
 
-  const row = data as { status?: unknown; error_message?: unknown };
+  const row = data as { status?: unknown; error_message?: unknown; started_at?: unknown };
   const status = String(row.status ?? '');
   if (status === 'completed') {
     state.harvest = await readChildRows(ctx, state, limit);
     state.status = 'done';
     state.rows = state.harvest.length;
-  } else if (isChildFailed(state.source, status)) {
+    return;
+  }
+  if (isChildFailed(state.source, status)) {
     state.status = 'failed';
     state.error =
       (typeof row.error_message === 'string' && row.error_message) || `дочерняя джоба: ${status}`;
+    return;
   }
-  // queued/running/pending — задача остаётся dispatched, ждём следующий тик.
+
+  // Не финал. Тексты начинаются с «timeout:», как и прежний: по нему кабинет
+  // относит причину к коду 'timeout' (clientErrors.ts).
+  const sinceDispatch = msSince(state.dispatched_at);
+  const started = status === 'running' || (state.source === 'google_maps' && status === 'paused');
+  let timeout: string | null = null;
+  if (sinceDispatch !== null && sinceDispatch > CHILD_QUEUE_WAIT_MS + CHILD_TIMEOUT_MS) {
+    timeout = `timeout: дочерняя джоба не завершилась за ${(CHILD_QUEUE_WAIT_MS + CHILD_TIMEOUT_MS) / 3_600_000} ч (статус ${status})`;
+  } else if (started) {
+    const running = msSince(row.started_at) ?? sinceDispatch;
+    if (running !== null && running > CHILD_TIMEOUT_MS) timeout = 'timeout: дочерняя джоба зависла';
+  } else if (sinceDispatch !== null && sinceDispatch > CHILD_QUEUE_WAIT_MS) {
+    timeout = `timeout: дочерняя джоба не стартовала за ${CHILD_QUEUE_WAIT_MS / 3_600_000} ч (статус ${status})`;
+  }
+  if (timeout) {
+    state.status = 'failed';
+    state.error = timeout;
+    stageLog(ctx, `[base_collect] ${state.source}: ${state.error} (${state.child_job_id})`);
+  }
+  // Иначе задача остаётся dispatched — ждём следующий тик.
 }
 
 /* ─────────────────────────── Self-requeue ─────────────────────────── */
@@ -5959,6 +6151,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     info.hypotheses = planned.usedHypotheses;
     let planRepair: HePlanRepair | undefined;
     let sliceProbe: HeSliceProbe | undefined;
+    // pdl-срезы ответа модели, снятые как мёртвые по меткам каталога (buildPlan).
+    let labelDead = 0;
     if (reusedPlan) {
       // Тот же вход планировщика, что и у сохранённого плана: срезы те же, и
       // закладки в сторе указывают ровно в них. Экономия — вызов планировщика
@@ -5975,6 +6169,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       planRepair = built.planRepair;
       sliceProbe = built.sliceProbe;
       marketDropped.push(...built.marketDropped);
+      labelDead = built.labelDead;
     }
     if (planRepair) info.plan_repair = planRepair;
     if (sliceProbe) info.slice_probe = sliceProbe;
@@ -6027,14 +6222,25 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
      * классификатор отдаёт `billing` / `configuration` / `provider` раньше
      * `source`; на `billing` / `configuration` воркер тогда же шлёт алерт
      * команде (тот же предикат, heTeamFixableFailureOf), на `provider` — нет.
+     *
+     * Второй путь сюда — pdl-срезы ответа модели без единой метки каталога
+     * (buildPlan, `labelDead`): они сняты, а починка не удалась. Причина тогда
+     * называет их; без них текст байт-в-байт прежний.
      */
     if (market === 'us' && info.plan.tasks.length === 0) {
       info.tasks = [];
       const dropped = [...new Set(marketDropped)];
       const repairError = info.plan_repair?.outcome === 'failed' ? info.plan_repair.error : undefined;
+      const why =
+        labelDead > 0
+          ? `у pdl-срезов плана нет ни одной метки каталога (снято: ${labelDead})` +
+            (dropped.length > 0
+              ? `, остальные задачи вне набора источников рынка ${market} (сняты: ${dropped.join(', ')})`
+              : '')
+          : `ни одна задача плана не входит в набор источников рынка ${market}` +
+            (dropped.length > 0 ? ` (сняты: ${dropped.join(', ')})` : '');
       const note =
-        `Авто-сборка не дала строк: план пуст — ни одна задача плана не входит в набор источников рынка ${market}` +
-        (dropped.length > 0 ? ` (сняты: ${dropped.join(', ')})` : '') +
+        `Авто-сборка не дала строк: план пуст — ${why}` +
         (repairError ? `, добавить каталожный срез не удалось: ${repairError}` : '') +
         '. Коллекторы не вызывались.';
       await paidCheckpointDb(ctx)
@@ -6104,7 +6310,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
    *    у зрелого проекта это десятки МБ на тик, а результат тика выбрасывался;
    *  - заново мёржил и дедуплицировал до 4 × limit строк харвеста;
    *  - ПЕРЕПИСЫВАЛ `he_bases.collect_info` целиком тем же значением
-   *    (persistCollectInfo ниже безусловен) — до 82 МБ jsonb каждые 60 с.
+   *    (запись в WAIT тогда была безусловной) — до 82 МБ jsonb каждые 60 с.
    *
    * Что осталось прежним: сам опрос BC-джобы, пауза 60 с и self-requeue. Окно
    * таймаута и терминальный статус спрашиваем ТЕМИ ЖЕ предикатами, что и фаза
@@ -6321,34 +6527,99 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
 
   // ─── WAIT ───
+  /**
+   * Задача вышла из 'dispatched' на этом тике (строки прочитаны, финал с
+   * ошибкой, срок ожидания). Только тогда collect_info и пишется: всё, что тик
+   * менял до WAIT, записали свои места (план, диспатч, свип задач вне набора,
+   * расширение плана), а тик чистого ожидания ничего не меняет — и раньше
+   * переписывал всю колонку (с харвестом каждой завершённой задачи) тем же
+   * значением раз в 30 с, пока идёт дочерний парсер.
+   */
+  let waitChanged = false;
+  /** Изменилась только метка wait_read_failing_since — см. запись после цикла. */
+  let waitMarkChanged = false;
   for (const state of tasks) {
     if (state.status !== 'dispatched') continue;
-    // Дочерняя джоба висит дольше 3ч (парсер умер/потерял строку) — вечно
-    // не ждём: задача failed, сборка продолжается по остальным задачам.
-    // У задач без dispatched_at (collect_info до появления штампа) таймаута
-    // нет — поведение как раньше.
-    if (
-      state.dispatched_at &&
-      Date.now() - new Date(state.dispatched_at).getTime() > CHILD_TIMEOUT_MS
-    ) {
-      state.status = 'failed';
-      state.error = 'timeout: дочерняя джоба зависла';
-      stageLog(ctx, `[base_collect] ${state.source}: ${state.error} (${state.child_job_id})`);
-      continue;
-    }
+    // Сроки ожидания (работа от started_at джобы, очередь и общий потолок от
+    // dispatched_at) проверяет pollTask ПОСЛЕ чтения статуса — см. CHILD_TIMEOUT_MS.
     try {
       await pollTask(ctx, state, limit);
+      if (state.wait_read_failing_since !== undefined) {
+        delete state.wait_read_failing_since;
+        waitMarkChanged = true;
+      }
     } catch (e) {
       // То же, что у диспатча: вставшее тело ответа (чтение строк дочерней
       // джобы бывает тяжёлым) — прерывание, а не провал. Иначе задача навсегда
       // 'failed', и результат уже оплаченной дочерней джобы не читает никто.
       if (heStageInterrupted(ctx, e)) throw e;
+      // Блип нашей БД (обрыв, 502/503/504 шлюза) — тоже не провал задачи:
+      // задача остаётся 'dispatched', следующий тик через 30 с прочитает её
+      // снова. Но не бесконечно, и ни одно из двух ограничений ниже не требует
+      // удачного чтения:
+      //  - общий потолок ожидания от dispatched_at (CHILD_QUEUE_WAIT_MS +
+      //    CHILD_TIMEOUT_MS) — тот же, что pollTask ставит при любом
+      //    прочитанном статусе: за ним задача 'failed' и с непрочитанным;
+      //  - окно сбоев чтения подряд (CHILD_READ_FAILURE_WINDOW_MS) от метки
+      //    wait_read_failing_since — оно же держит задачу без dispatched_at и
+      //    чтение строк завершённой джобы, к которому сроки ожидания не
+      //    применяются. Метку пишем один раз за серию (и снимаем первым удачным
+      //    опросом); не записалась — серия начнётся заново на следующем тике, и
+      //    задачу держит только общий потолок.
+      // Срок работы от started_at джобы (CHILD_TIMEOUT_MS) и срок очереди здесь
+      // не проверить: оба зависят от статуса, а он не прочитан.
+      if (isTransientDbError(e)) {
+        const reason = e instanceof Error ? e.message : String(e);
+        const sinceDispatch = msSince(state.dispatched_at);
+        let failingFor = msSince(state.wait_read_failing_since);
+        if (failingFor === null) {
+          state.wait_read_failing_since = new Date().toISOString();
+          failingFor = 0;
+          waitMarkChanged = true;
+        }
+        if (sinceDispatch !== null && sinceDispatch > CHILD_QUEUE_WAIT_MS + CHILD_TIMEOUT_MS) {
+          state.status = 'failed';
+          state.error =
+            `timeout: дочерняя джоба не завершилась за ${(CHILD_QUEUE_WAIT_MS + CHILD_TIMEOUT_MS) / 3_600_000} ч ` +
+            `(статус не прочитан: временный сбой БД — ${reason})`;
+        } else if (failingFor > CHILD_READ_FAILURE_WINDOW_MS) {
+          state.status = 'failed';
+          state.error =
+            `timeout: статус или строки дочерней джобы не читаются ${Math.round(failingFor / 60_000)} мин подряд ` +
+            `(временный сбой БД — ${reason})`;
+        }
+        if (state.status === 'failed') {
+          delete state.wait_read_failing_since;
+          waitChanged = true;
+          stageLog(ctx, `[base_collect] ${state.source}: ${state.error} (${state.child_job_id})`);
+          continue;
+        }
+        stageLog(
+          ctx,
+          `[base_collect] poll ${state.source}: временный сбой БД (${Math.round(failingFor / 1000)} с подряд, ` +
+            `предел ${CHILD_READ_FAILURE_WINDOW_MS / 60_000} мин), повтор на следующем тике — ${reason}`,
+        );
+        continue;
+      }
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
       stageLog(ctx, `[base_collect] poll ${state.source} упал: ${state.error}`);
     }
+    if (state.status !== 'dispatched') waitChanged = true;
   }
-  await persistCollectInfo(ctx, baseId, info);
+  if (waitChanged) {
+    await persistCollectInfo(ctx, baseId, info);
+  } else if (waitMarkChanged) {
+    // Изменилась только метка серии сбоев: запись — не ради данных, и блип БД,
+    // из-за которого метка и появилась, не должен ронять тик (попытка джобы
+    // ушла бы на запись метки). Не легла — см. комментарий в catch выше.
+    try {
+      await persistCollectInfo(ctx, baseId, info);
+    } catch (e) {
+      if (heStageInterrupted(ctx, e) || !isTransientDbError(e)) throw e;
+      stageLog(ctx, `[base_collect] метка сбоев чтения не записана (временный сбой БД) — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   const waiting = tasks.filter((t) => t.status === 'pending' || t.status === 'dispatched');
   if (waiting.length > 0) {
