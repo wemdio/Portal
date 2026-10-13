@@ -16,6 +16,7 @@ import {
   type VeJobResponse,
   type VeBaseSummary,
   type VePreparationAction,
+  type VeContinuationCheck,
 } from './api';
 import { HE } from './design';
 import { StatusBox, formatDate, prettyProjectName } from './ui';
@@ -359,23 +360,28 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   const change = async (payload: Record<string, unknown>) => {
     if (!snapshot || busy || locked) return;
-    if (payload.action === 'prepare' && contactLimitUnsaved) {
+    if (['prepare', 'check_continuation'].includes(String(payload.action)) && contactLimitUnsaved) {
       setError('Сначала примените лимит адресов на шаге «Гипотезы».');
       return;
     }
     setBusy(true);
     setError('');
     const preparing = payload.action === 'prepare';
+    const checkingContinuation = payload.action === 'check_continuation';
     const noticeHypothesisId = typeof payload.hypothesis_id === 'string' ? payload.hypothesis_id : null;
-    setPreparationNotice(preparing
-      ? { hypothesisId: noticeHypothesisId, checking: true, tone: 'info', message: 'Проверяем возможность продолжения…' } : null);
+    setPreparationNotice(preparing || checkingContinuation
+      ? { hypothesisId: noticeHypothesisId, checking: true, tone: 'info',
+        message: checkingContinuation ? 'Проверяем возможность добора. Сбор не запускается…' : 'Проверяем возможность продолжения…' } : null);
     try {
-      const result = await veEnginePost<VeOutreachSetupResponse & { preparation_action?: VePreparationAction }>(`${VE_API}/projects/${projectId}/outreach`, {
+      const result = await veEnginePost<VeOutreachSetupResponse & { preparation_action?: VePreparationAction; continuation_check?: VeContinuationCheck }>(`${VE_API}/projects/${projectId}/outreach`, {
         revision: snapshot.setup.revision,
         ...payload,
       });
       if (!result.ok) {
-        if (preparing) {
+        if (checkingContinuation) {
+          setPreparationNotice({ hypothesisId: noticeHypothesisId, keepUntilStateChanges: true,
+            tone: 'error', message: result.data.error ?? 'Не удалось проверить возможность добора. Сбор не запускался.' });
+        } else if (preparing) {
           setPreparationNotice({ hypothesisId: noticeHypothesisId,
             keepUntilStateChanges: result.data.preparation_action?.status === 'unavailable',
             ...(result.data.preparation_action ? getPreparationActionNotice(result.data.preparation_action)
@@ -384,10 +390,26 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         } else setError(result.data.error ?? 'Не удалось сохранить выбор');
         return;
       }
-      setSnapshot(result.data);
+      setSnapshot((current) => !current || result.data.setup.revision >= current.setup.revision ? result.data : current);
       if (payload.action === 'select') setLaunchHypothesisIds([]);
       if (payload.action === 'select' && payload.next_run === true) setStep(1);
-      if (preparing) {
+      if (checkingContinuation) {
+        const checked = result.data.continuation_check;
+        // A check never queues work or changes the step. Keep the bounded
+        // decision visible even if a polling GET is already in flight.
+        if (checked?.base_id && checked.code) {
+          detailMutationRevision.current += 1;
+          const checkedBase = detail?.bases.find((base) => base.id === checked.base_id);
+          setDetail((current) => current ? { ...current, bases: current.bases.map((base) =>
+            base.id === checked.base_id && base.hypothesis_id === checked.hypothesis_id
+              && base.updated_at === checkedBase?.updated_at && base.status === checkedBase?.status
+              ? { ...base, collection_continuation: { available: checked.status === 'available', action: checked.action,
+                code: checked.code!, reason: checked.reason } } : base) } : current);
+        }
+        setPreparationNotice({ hypothesisId: noticeHypothesisId, keepUntilStateChanges: true,
+          tone: checked ? 'info' : 'error', message: checked?.reason ?? 'Не удалось получить результат проверки. Сбор не запускался.' });
+        await refresh();
+      } else if (preparing) {
         const outcome = result.data.preparation_action;
         setPreparationNotice({ hypothesisId: noticeHypothesisId, keepUntilStateChanges: outcome?.status === 'unavailable',
           ...getPreparationActionNotice(outcome) });
@@ -403,7 +425,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         await refresh();
       }
     } catch {
-      if (preparing) setPreparationNotice({ hypothesisId: noticeHypothesisId, tone: 'error',
+      if (checkingContinuation) setPreparationNotice({ hypothesisId: noticeHypothesisId, keepUntilStateChanges: true,
+        tone: 'error', message: 'Не удалось получить результат проверки. Сбор не запускался. Повторите проверку.' });
+      else if (preparing) setPreparationNotice({ hypothesisId: noticeHypothesisId, tone: 'error',
         message: 'Ответ не получен. Обновите статус, прежде чем повторять подготовку.' });
       else setError('Не удалось сохранить решение. Проверьте соединение');
     } finally {
@@ -898,6 +922,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     base={preparationBase}
                     jobs={detail.jobs}
                     onContinue={() => void change({ action: 'prepare', hypothesis_id: activeId })}
+                    onCheckContinuation={() => void change({ action: 'check_continuation', hypothesis_id: activeId })}
                     continueDisabled={busy || locked}
                     actionNotice={preparationNotice?.hypothesisId === activeId ? preparationNotice : null}
                   />
@@ -975,6 +1000,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     </div>
                     {!launchStates[h.id]?.launched ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} approved={approved}
                       onContinue={launchStates[h.id]?.launched ? undefined : () => void change({ action: 'prepare', hypothesis_id: h.id })}
+                      onCheckContinuation={() => void change({ action: 'check_continuation', hypothesis_id: h.id })}
                       continueDisabled={busy || locked}
                       actionNotice={preparationNotice?.hypothesisId === h.id ? preparationNotice : null} /> : null}
                     {!p ? <button type="button" className={HE.btnPrimary} onClick={() => jump(1)}>К гипотезам</button> : null}

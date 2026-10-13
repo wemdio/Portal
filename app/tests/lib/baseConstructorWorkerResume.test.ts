@@ -23,10 +23,12 @@ import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { resumeFailedConstructorJob } from '@/lib/tools/baseConstructorResume';
 import { MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
+import { describeConstructorProgress } from '@/lib/tools/baseConstructorProgress';
 import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
   stepValidateEmails,
+  type ProgressFn,
 } from '@/lib/tools/processingSteps';
 
 // Мокаем supabase клиент чтобы наблюдать какие шаги/обновления случились.
@@ -68,12 +70,13 @@ jest.mock('@/lib/tools/processingSteps', () => {
   const stepNoop = async (data: string[][]) => data;
   const stepValidateEmails = jest.fn(async (
     data: string[][],
-    onProgress: (progress: number) => Promise<void>,
+    onProgress: ProgressFn,
   ) => {
     // A resumed step may internally report progress relative to its remaining
     // tail. The worker owns the persisted UI percentage and must clamp these
     // callbacks to the pre-restart floor.
-    await onProgress(10);
+    await onProgress(10, { phase: 'retrying', completed: 1, total: 10 });
+    await onProgress(100);
     return data;
   });
   const original = jest.requireActual('@/lib/tools/processingSteps');
@@ -292,6 +295,7 @@ describe('runBaseConstructorJob resume logic', () => {
       current_step_key: 'validate_emails',
       current_step_progress: 45,
       total_steps: 1,
+      result_stats: { step_progress: { step_index: 1, step_key: 'validate_emails', phase: 'checking', completed: 99, total: 100 } },
       data: [
         ['Email', 'Email Статус', 'Email Провайдер'],
         ['pending@example.com', '', ''],
@@ -309,6 +313,21 @@ describe('runBaseConstructorJob resume logic', () => {
     expect(validationProgress.length).toBeGreaterThan(0);
     expect(Math.min(...validationProgress)).toBeGreaterThanOrEqual(45);
     expect(Math.max(...validationProgress)).toBeLessThanOrEqual(99);
+    const progressPatches = updates.filter((update) => update.current_step_key === 'validate_emails');
+    const displayed = progressPatches.map((patch) => describeConstructorProgress(patch as Parameters<typeof describeConstructorProgress>[0]));
+    // Resuming clears the previous attempt's counters; the new pass replaces
+    // the old 99%, then saving is distinct from real completed status.
+    expect(displayed[0]).toBeNull();
+    expect(displayed).toContain('Повторная проверка временных ошибок: 1 из 10');
+    expect(displayed).toContain('Сохраняем результат этапа');
+    const stalePhase = {
+      status: 'processing', current_step: 2, current_step_key: 'clean_names', current_step_progress: 5,
+      result_stats: { step_progress: { step_index: 1, step_key: 'validate_emails', phase: 'retrying' } },
+    };
+    expect(describeConstructorProgress(stalePhase)).toBeNull();
+    expect(describeConstructorProgress({ ...stalePhase, current_step_key: 'validate_emails', current_step_progress: 99 }))
+      .toContain('Проверка почт ещё не завершена');
+    expect(describeConstructorProgress({ ...stalePhase, status: 'completed' })).toBeNull();
     expect(updates).toEqual(expect.arrayContaining([
       expect.objectContaining({
         status: 'completed',
