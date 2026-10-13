@@ -822,8 +822,11 @@ function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
  * Защита чтения от SSRF — ОПЦИЯ `guard` (fetchHtmlWithRetry, fetchAndExtract,
  * fetchSinglePage). Дефолта нет: без неё запрос идёт прежним путём —
  * redirect: 'follow', адрес проверяет разве что сам вызывающий до первого
- * запроса. Передаёт её только движок гипотез (hypothesisEngine/stages/io.ts,
- * реализация — createPublicWebsiteGuard в enrich/publicAddress.ts).
+ * запроса. Передают её движок гипотез (hypothesisEngine/stages/io.ts) и
+ * EN-джобы конструктора баз (tools/processingSteps.ts: сюда — шаг описаний,
+ * почтовый обход — через scrapeEmails, который берёт fetchFollowingGuarded и
+ * readBodyCapped отсюда); реализация — createPublicWebsiteGuard и
+ * createUsWebsiteFetchGuard в enrich/publicAddress.ts.
  *
  * С guard редиректы ведутся вручную: перед КАЖДЫМ запросом — первым и каждым
  * шагом редиректа — адрес проверяет checkUrl; шагов не больше maxRedirects;
@@ -944,8 +947,12 @@ function guardedResponseUrl(url: URL): string {
   return copy.href;
 }
 
-/** Ручные редиректы под защитой чтения; возвращает ответ и адрес последнего шага. */
-async function fetchFollowingGuarded(
+/**
+ * Ручные редиректы под защитой чтения; возвращает ответ и адрес последнего шага.
+ * fetchOpts — с redirect: 'manual'; тот же объект (маршрут, signal) идёт в
+ * каждый шаг. Экспорт — для почтового обхода (enrich/emailScraper.ts).
+ */
+export async function fetchFollowingGuarded(
   url: string,
   fetchOpts: RequestInit,
   guard: WebsiteFetchGuard,
@@ -981,9 +988,10 @@ async function fetchFollowingGuarded(
  * Тело не больше maxBytes: читаем потоком и обрываем на потолке. Для текста
  * страницы (≤ MAX_TEXT_LENGTH символов) первых мегабайт хватает с запасом, а
  * быстрый хост больше не может залить в воркер сотни мегабайт — до этой опции
- * тело ограничивал только срок попытки.
+ * тело ограничивал только срок попытки. Экспорт — для почтового обхода
+ * (enrich/emailScraper.ts).
  */
-async function readBodyCapped(res: Response, maxBytes: number, url: string): Promise<ArrayBuffer> {
+export async function readBodyCapped(res: Response, maxBytes: number, url: string): Promise<ArrayBuffer> {
   const reader = res.body?.getReader();
   if (!reader) return new ArrayBuffer(0);
   const chunks: Uint8Array[] = [];

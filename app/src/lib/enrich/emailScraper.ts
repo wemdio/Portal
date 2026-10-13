@@ -9,6 +9,7 @@
  */
 
 import iconv from 'iconv-lite';
+import type { LookupAddress, LookupOptions } from 'node:dns';
 import type { Agent } from 'undici';
 import {
   getNonPriorityProxyDispatcher,
@@ -16,6 +17,7 @@ import {
   tryAcquireProxySlot,
 } from '@/lib/enrich/proxyPool';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
+import type { WebsiteFetchGuard } from '@/lib/enrich/websiteParser';
 
 // ── Configuration ──────────────────────────────────────────────
 const FETCH_TIMEOUT_MS = 10_000;
@@ -49,6 +51,109 @@ async function getInsecureTlsDispatcher(): Promise<Agent | undefined> {
     return undefined;
   }
 }
+
+/**
+ * Прямой маршрут под защитой чтения (опция guard): такой же undici.Agent без
+ * проверки сертификата, как выше, но с проверкой адреса в момент
+ * соединения. Каждый адрес ответа DNS, по которому undici соединяется,
+ * проверяет checkUrl самой защиты — как адрес-литерал (непубличный, адрес
+ * нашего сервера), так что своей копии политики здесь нет. Хоть один адрес
+ * отклонён или ответ пуст — соединение не открывается. Это закрывает подмену
+ * ответа DNS между проверкой адреса и запросом. Адрес-литерал undici не
+ * резолвит, его закрывает checkUrl перед запросом.
+ *
+ * Диспетчер защиты (guard.directDispatcher) сюда не подходит: он проверяет
+ * сертификат, а обход почты намеренно идёт без этой проверки (см. выше) —
+ * с ним сайты с невалидной цепочкой перестали бы читаться. Он остаётся
+ * запасным, если undici не загрузился. Агент один на объект защиты, и пул
+ * соединений у него общий для всех вызовов с ней (EN-джобы конструктора берут
+ * одну защиту на процесс — enSiteGuard в tools/processingSteps.ts).
+ */
+const guardedDirectDispatchers = new WeakMap<WebsiteFetchGuard, Promise<unknown>>();
+
+type LookupCallback = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+
+function addressRefusal(error: unknown): error is Error {
+  return (
+    typeof error === 'object' && error !== null
+    && (error as { websiteAddressRefused?: unknown }).websiteAddressRefused === true
+  );
+}
+
+/** Ошибка отказа (WebsiteAddressRefusedError) или null — все адреса ответа прошли checkUrl защиты. */
+async function refusedResolvedAddress(
+  guard: WebsiteFetchGuard,
+  hostname: string,
+  addresses: LookupAddress[],
+  refuse: (reason: string) => Error,
+): Promise<Error | null> {
+  if (addresses.length === 0) return refuse(`${hostname}: пустой ответ DNS`);
+  for (const entry of addresses) {
+    try {
+      await guard.checkUrl(new URL(`http://${entry.family === 6 ? `[${entry.address}]` : entry.address}/`));
+    } catch (error) {
+      // Что угодно, кроме отказа защиты (невалидный адрес в ответе DNS) —
+      // тоже отказ: соединение с непроверенным адресом не открываем.
+      return addressRefusal(error) ? error : refuse(`${hostname} ведёт на непроверяемый адрес ${entry.address}`);
+    }
+  }
+  return null;
+}
+
+function guardCheckedLookup(
+  guard: WebsiteFetchGuard,
+  dnsLookup: typeof import('node:dns').lookup,
+  refuse: (reason: string) => Error,
+) {
+  return (hostname: string, options: LookupOptions, callback: LookupCallback): void => {
+    dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
+      if (err) {
+        callback(err, '');
+        return;
+      }
+      void refusedResolvedAddress(guard, hostname, addresses, refuse).then((refused) => {
+        if (refused) callback(refused, '');
+        else if (options.all) callback(null, addresses);
+        else callback(null, addresses[0].address, addresses[0].family);
+      });
+    });
+  };
+}
+
+function getGuardedDirectDispatcher(
+  guard: WebsiteFetchGuard,
+  refuse: (reason: string) => Error,
+): Promise<unknown> {
+  let dispatcher = guardedDirectDispatchers.get(guard);
+  if (!dispatcher) {
+    dispatcher = (async () => {
+      try {
+        const [{ Agent: UndiciAgent }, dns] = await Promise.all([import('undici'), import('node:dns')]);
+        return new UndiciAgent({
+          connect: { rejectUnauthorized: false, lookup: guardCheckedLookup(guard, dns.lookup, refuse) },
+        });
+      } catch {
+        return guard.directDispatcher;
+      }
+    })();
+    guardedDirectDispatchers.set(guard, dispatcher);
+  }
+  return dispatcher;
+}
+
+/**
+ * Защита чтения и потолок тела для обхода почты — опции scrapeEmails guard и
+ * maxBytes (см. там). Объект один на вызов scrapeEmails: в нём же счётчики,
+ * которые вызов возвращает в readLimits.
+ */
+type PageReadLimits = {
+  guard?: WebsiteFetchGuard;
+  maxBytes?: number;
+  counts: { refused: number; capped: number };
+};
+
+/** Причина для failureReason, когда адрес отклонён защитой чтения. */
+const ADDRESS_REFUSED_FAILURE: PageFetchFailure = 'Адрес отклонён защитой чтения';
 
 /** Человекочитаемая причина, по которой страница не открылась. */
 export type PageFetchFailure = string;
@@ -568,11 +673,22 @@ type PageFetchResult = {
   failure: PageFetchFailure | null;
   /** HTTP-статус, когда ответ был получен. Нужен чтобы отличить 403 от обрыва. */
   status?: number;
+  /**
+   * Только с опцией guard: адрес страницы или шага её редиректа отклонён
+   * защитой чтения — на него запрос не уходил. Повтор не нужен: адрес тот же.
+   */
+  refused?: true;
 };
 
 async function fetchPage(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string; dispatcher?: unknown },
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    acceptLanguage?: string;
+    dispatcher?: unknown;
+    limits?: PageReadLimits;
+  },
 ): Promise<PageFetchResult> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   if (options?.signal?.aborted) return { html: null, failure: null };
@@ -599,6 +715,7 @@ async function fetchPage(
         signal: options?.signal,
         acceptLanguage: options?.acceptLanguage,
         dispatcher: options?.dispatcher,
+        limits: options?.limits,
       }),
       bounded,
     ]);
@@ -610,7 +727,13 @@ async function fetchPage(
 
 async function fetchPageInner(
   url: string,
-  options: { timeout: number; signal?: AbortSignal; acceptLanguage?: string; dispatcher?: unknown },
+  options: {
+    timeout: number;
+    signal?: AbortSignal;
+    acceptLanguage?: string;
+    dispatcher?: unknown;
+    limits?: PageReadLimits;
+  },
 ): Promise<PageFetchResult> {
   const { timeout } = options;
   const controller = new AbortController();
@@ -628,7 +751,7 @@ async function fetchPageInner(
     // использовался с 21.07 по 30.07.2026 и был снят: медленные ноды
     // съедали per-page таймаут и джоба на 1000 строк шла час. Прокси
     // остался только как разовый ретрай на 403 — см. fetchWithProxyRetry.
-    const res = await fetch(url, {
+    const init = {
       method: 'GET',
       headers: {
         'User-Agent': BROWSER_USER_AGENT,
@@ -638,7 +761,9 @@ async function fetchPageInner(
       signal: controller.signal,
       redirect: 'follow',
       ...(options.dispatcher ? { dispatcher: options.dispatcher } : dispatcher ? { dispatcher } : {}),
-    } as RequestInit);
+    } as RequestInit;
+    if (options.limits) return await fetchPageLimited(url, init, options.limits, options.dispatcher, controller.signal);
+    const res = await fetch(url, init);
     if (res.status >= 400) {
       return { html: null, failure: describeFetchStatus(res.status), status: res.status };
     }
@@ -656,15 +781,76 @@ async function fetchPageInner(
   }
 }
 
+/**
+ * Запрос страницы с опциями scrapeEmails guard и/или maxBytes. Без них сюда не
+ * заходим: fetchPageInner идёт прежним путём. Заголовки, срок попытки (signal)
+ * и выбор маршрута (прямой или прокси) — те же, что у прежнего пути.
+ *  - guard: редиректы ведёт вручную fetchFollowingGuarded парсера (та же
+ *    функция, что у движка гипотез): checkUrl перед первым запросом и перед
+ *    каждым шагом, не больше guard.maxRedirects шагов, схема только
+ *    http/https, https → http только при allowHttpDowngrade, Location
+ *    перечитывается как UTF-8 так же, как в follow-режиме. Прямой маршрут
+ *    идёт через getGuardedDirectDispatcher: адрес проверяется ещё раз при
+ *    соединении. Прокси-маршрут (ретрай главной на 403/429) соединяется
+ *    нодой прокси, и имя она резолвит сама: проверки при соединении у него
+ *    нет, остаётся checkUrl каждого шага нашим резолвером. Наш резолвер не
+ *    ответил — checkUrl пропускает, и адрес выбирает прокси; непубличный
+ *    адрес на его стороне — сеть провайдера прокси, не наша.
+ *  - maxBytes: тело читается потоком и обрывается на потолке (readBodyCapped
+ *    парсера); разбираются первые maxBytes байт, как у движка гипотез.
+ * Отказ адреса — исход refused (страница не читается), а не исключение.
+ * Остальные ошибки уходят в catch fetchPageInner, как у прежнего пути.
+ */
+async function fetchPageLimited(
+  url: string,
+  init: RequestInit,
+  limits: PageReadLimits,
+  proxyDispatcher: unknown,
+  signal: AbortSignal,
+): Promise<PageFetchResult> {
+  const parser = await import('@/lib/enrich/websiteParser');
+  let res: Response;
+  try {
+    if (limits.guard) {
+      const route = proxyDispatcher
+        ?? await getGuardedDirectDispatcher(limits.guard, (reason) => new parser.WebsiteAddressRefusedError(reason));
+      const guardedInit = { ...init, redirect: 'manual' } as RequestInit & { dispatcher?: unknown };
+      if (route) guardedInit.dispatcher = route;
+      else delete guardedInit.dispatcher;
+      ({ res } = await parser.fetchFollowingGuarded(url, guardedInit, limits.guard, signal));
+    } else {
+      res = await fetch(url, init);
+    }
+  } catch (err) {
+    // Отказ при соединении fetch отдаёт как cause своей ошибки.
+    if (!addressRefusal(err) && !addressRefusal((err as { cause?: unknown } | null)?.cause)) throw err;
+    limits.counts.refused += 1;
+    return { html: null, failure: ADDRESS_REFUSED_FAILURE, refused: true };
+  }
+  if (res.status >= 400) {
+    return { html: null, failure: describeFetchStatus(res.status), status: res.status };
+  }
+  const contentType = res.headers.get('content-type');
+  if (!isHtmlLikeContentType(contentType)) {
+    return { html: null, failure: 'Страница не отдала HTML', status: res.status };
+  }
+  const body = limits.maxBytes ? await parser.readBodyCapped(res, limits.maxBytes, url) : await res.arrayBuffer();
+  // Ровно maxBytes байт тоже считается: тело дошло до потолка.
+  if (limits.maxBytes && body.byteLength >= limits.maxBytes) limits.counts.capped += 1;
+  return { html: decodeHtml(body, contentType), failure: null, status: res.status };
+}
+
 async function fetchPageWithRetry(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
+  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string; limits?: PageReadLimits },
 ): Promise<PageFetchResult> {
   let last: PageFetchResult = { html: null, failure: null };
   for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
     if (options?.signal?.aborted) return last;
     last = await fetchPage(url, options);
     if (last.html) return last;
+    // Отклонённый адрес (только с опцией guard) второй попыткой не станет другим.
+    if (last.refused) return last;
     if (options?.signal?.aborted) return last;
     if (attempt < FETCH_RETRIES) await sleep(FETCH_RETRY_DELAY_MS * (attempt + 1));
   }
@@ -696,7 +882,7 @@ export async function fetchSitePageHtml(
 async function fetchPageWithProxyRetry(
   url: string,
   direct: PageFetchResult,
-  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
+  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string; limits?: PageReadLimits },
 ): Promise<PageFetchResult> {
   if (!PROXY_RETRY_ENABLED) return direct;
   if (direct.html || direct.status === undefined) return direct;
@@ -713,6 +899,7 @@ async function fetchPageWithProxyRetry(
       signal: options?.signal,
       acceptLanguage: options?.acceptLanguage,
       dispatcher,
+      limits: options?.limits,
     });
     return res.html ? res : null;
   };
@@ -788,6 +975,13 @@ export type ScrapeEmailsResult = {
    * оба случая приходили одинаковой пустой строкой.
    */
   failureReason: PageFetchFailure | null;
+  /**
+   * Только с опцией guard или maxBytes (без них поля нет): refused — сколько
+   * раз защита чтения отклонила адрес страницы или шага её редиректа, на
+   * отклонённый адрес запрос не уходил; capped — сколько ответов дочитано до
+   * потолка maxBytes (разобраны первые maxBytes байт).
+   */
+  readLimits?: { refused: number; capped: number };
 };
 
 /**
@@ -829,6 +1023,17 @@ export async function scrapeEmails(
      */
     locale?: 'ru' | 'en';
     includeDescription?: boolean;
+    /**
+     * Защита чтения (WebsiteFetchGuard, например createUsWebsiteFetchGuard из
+     * enrich/publicAddress.ts) для КАЖДОГО запроса обхода: главная, www,
+     * найденные ссылки, статичные пути, прокси-ретрай. Редиректы — вручную, с
+     * проверкой каждого шага (см. fetchPageLimited). Отклонённый адрес — как
+     * страница, которая не открылась: обход идёт дальше, повтора нет. Не
+     * передана — redirect: 'follow', как до неё.
+     */
+    guard?: WebsiteFetchGuard;
+    /** Потолок тела каждого ответа в байтах; не передан — тело читается целиком. */
+    maxBytes?: number;
   },
 ): Promise<ScrapeEmailsResult> {
   const url = normalizeUrl(rawUrl);
@@ -845,6 +1050,12 @@ export async function scrapeEmails(
   const allEmails = new Set<string>();
   const checkedUrls: string[] = [];
   const checkedNormalized = new Set<string>();
+  // Только с опциями guard/maxBytes; без них fetchPage* получают прежние объекты опций.
+  const limits: PageReadLimits | null = options?.guard || options?.maxBytes
+    ? { guard: options.guard, maxBytes: options.maxBytes, counts: { refused: 0, capped: 0 } }
+    : null;
+  const limitsOption = limits ? { limits } : {};
+  const readLimitsField = () => (limits ? { readLimits: { ...limits.counts } } : {});
 
   // Helper: have we collected at least one email that survives the
   // junk filter? Cheap enough to call between pages — filterJunkEmails
@@ -874,12 +1085,12 @@ export async function scrapeEmails(
 
     checkedNormalized.add(normalized);
     checkedUrls.push(pageUrl);
-    let result = await fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage });
+    let result = await fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage, ...limitsOption });
     // Прокси тратим только на главную: если она за бот-защитой, остальные
     // страницы того же сайта за ней же, а ретраить каждую — это и есть
     // тот июльский сценарий, когда джоба на 1000 строк шла час.
     if (isMain && !result.html) {
-      result = await fetchPageWithProxyRetry(pageUrl, result, { timeout, signal, acceptLanguage });
+      result = await fetchPageWithProxyRetry(pageUrl, result, { timeout, signal, acceptLanguage, ...limitsOption });
     }
     if (isMain && !result.html && result.failure) mainFailure = result.failure;
     return result.html;
@@ -919,6 +1130,7 @@ export async function scrapeEmails(
         siteName,
         ...(description ? { description } : {}),
         failureReason: mainFailure,
+        ...readLimitsField(),
       };
     }
     discoveredLinks = await discoverEmailPageLinks(mainHtml, url);
@@ -976,5 +1188,6 @@ export async function scrapeEmails(
     siteName,
     ...(description ? { description } : {}),
     failureReason: mainFailure,
+    ...readLimitsField(),
   };
 }

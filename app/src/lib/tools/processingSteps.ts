@@ -23,6 +23,7 @@ import {
   fetchAndExtract,
   WEBSITE_ACCEPT_LANGUAGE_EN,
   WEBSITE_NO_TEXT_STUB_EN,
+  type WebsiteFetchGuard,
 } from '@/lib/enrich/websiteParser';
 import { isBlockedCompanyWebsiteDomain } from '@/lib/companiesDirectory/contactPolicy';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
@@ -131,6 +132,71 @@ const ENRICH_PER_SITE_TIMEOUT_MS = boundedInteger(
   60_000,
 );
 const SITE_CHECK_BATCH = 50;
+
+/**
+ * Чтение сайтов EN-джобы (locale='en') — под защитой чтения английского рынка
+ * и с потолком тела. Адреса сайтов приходят из карточек Google Maps и таблиц
+ * клиента, а читает их воркер на нашем сервере: без защиты сайт или его
+ * редирект мог привести запрос на 127.0.0.1, 10.x, адрес метаданных облака или
+ * наш собственный сервер, а быстрый хост — залить в воркер сотни мегабайт.
+ *
+ * Защита — createUsWebsiteFetchGuard (enrich/publicAddress.ts): только
+ * публичный адрес перед каждым запросом и шагом редиректа и ещё раз при
+ * соединении прямого маршрута, не адреса наших серверов, порт только 80/443,
+ * без редиректа https → http, не больше 10 шагов редиректа. Потолок — 3 МиБ,
+ * как у движка гипотез. Получают их оба шага, которые читают сайт:
+ * find_emails (scrapeEmails) и enrich_descriptions (fetchAndExtract).
+ * Отклонённый адрес — страница, которая не открылась: строка идёт дальше без
+ * неё, джоба не падает; итог — одна строка лога на шаг. RU-джобы получают
+ * прежние объекты опций.
+ *
+ * Модуль защиты грузится лениво и только EN-джобой: RU-путь шагов не меняется
+ * даже составом загруженных модулей. Не загрузился — шаг EN-джобы падает (сайты
+ * без защиты не читаем), а промис сбрасывается: следующая попытка шага пробует
+ * загрузить модуль заново.
+ */
+const EN_SITE_READ_MAX_BYTES = 3 * 1024 * 1024;
+let enSiteReadGuard: Promise<WebsiteFetchGuard> | null = null;
+
+function enSiteGuard(): Promise<WebsiteFetchGuard> {
+  if (!enSiteReadGuard) {
+    const loading = import('@/lib/enrich/publicAddress').then((m) => m.createUsWebsiteFetchGuard());
+    loading.catch(() => {
+      if (enSiteReadGuard === loading) enSiteReadGuard = null;
+    });
+    enSiteReadGuard = loading;
+  }
+  return enSiteReadGuard;
+}
+
+/**
+ * Та же защита; отказ её checkUrl ещё и отмечается — для итоговой строки лога
+ * шага. Отказы правил редиректа и отказ при соединении идут мимо checkUrl, их
+ * эта обёртка не видит.
+ */
+function guardNotingRefusals(guard: WebsiteFetchGuard, onRefused: () => void): WebsiteFetchGuard {
+  return {
+    ...guard,
+    checkUrl: async (url) => {
+      try {
+        await guard.checkUrl(url);
+      } catch (error) {
+        if ((error as { websiteAddressRefused?: unknown } | null)?.websiteAddressRefused === true) onRefused();
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * Что отклоняет защита EN-джобы — для строк лога шагов. Проверка адреса
+ * (checkUrl) — первые три; правила редиректа проверяет функция ручных
+ * редиректов парсера (fetchFollowingGuarded), а не checkUrl.
+ */
+const EN_SITE_ADDRESS_CHECK_KINDS = 'непубличный адрес или служебное имя, адрес нашего сервера, порт не 80/443';
+const EN_SITE_REFUSAL_KINDS = `${EN_SITE_ADDRESS_CHECK_KINDS}, `
+  + 'редирект https → http, не на http/https или на невалидный адрес, больше 10 редиректов';
+
 const TA_BATCH = 10;
 const TA_SCORING_CONCURRENCY = boundedInteger(
   process.env.BASE_TA_SCORING_CONCURRENCY,
@@ -750,6 +816,16 @@ export async function stepFindEmails(
 
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
+  // EN: защита чтения и потолок тела в каждый обход (см. EN_SITE_READ_MAX_BYTES).
+  // Переход https → http почтовому обходу разрешён: сертификат он и так не
+  // проверяет (http-ответ его не ослабляет), а запрет терял бы адреса сайтов,
+  // которые так переадресуют. Проверка адреса и порта — на каждом шаге, как было.
+  const enRead = locale === 'en'
+    ? { guard: { ...(await enSiteGuard()), allowHttpDowngrade: true }, maxBytes: EN_SITE_READ_MAX_BYTES }
+    : null;
+  let refusedRows = 0;
+  let cappedBodies = 0;
+
   let done = 0;
   // Чекпоинт по строкам И по времени, что раньше. Один счётчик строк давал
   // вечный цикл: база в 6602 строки, падение на 3% — это 198-я строка, до
@@ -780,6 +856,7 @@ export async function stepFindEmails(
         locale,
         ...(options?.reuseWebsiteDescription ? { includeDescription: true } : {}),
         ...(controller ? { signal: controller.signal } : {}),
+        ...(enRead ?? {}),
       });
       // Give an aborted crawler one second to return addresses from pages
       // already read. A broken fetch must not occupy the pool slot forever.
@@ -790,6 +867,11 @@ export async function stepFindEmails(
         }),
       ]) : await scraping;
       const emails = result?.emails ?? [];
+      // Есть только у EN (опции guard/maxBytes): итог — одной строкой после шага.
+      if (result?.readLimits) {
+        if (result.readLimits.refused > 0) refusedRows += 1;
+        cappedBodies += result.readLimits.capped;
+      }
       if (options?.reuseWebsiteDescription && descriptionIdx >= 0 && result?.description
         && !(body[item.i][descriptionIdx] || '').trim()) {
         body[item.i][descriptionIdx] = result.description.slice(0, 2000);
@@ -826,6 +908,15 @@ export async function stepFindEmails(
   });
 
   await reportChain;
+  if (refusedRows > 0 || cappedBodies > 0) {
+    console.warn(
+      `[find_emails] защита чтения EN-джобы: строк, где отклонён хотя бы один адрес, — ${refusedRows} `
+      + `из ${toProcess.length} (${EN_SITE_REFUSAL_KINDS}); на отклонённый адрес запрос не уходил, `
+      + `страница считалась неоткрывшейся. Ответов, дочитанных до потолка `
+      + `${EN_SITE_READ_MAX_BYTES / 1024 / 1024} МиБ, — ${cappedBodies}: разобраны их первые `
+      + `${EN_SITE_READ_MAX_BYTES / 1024 / 1024} МиБ.`,
+    );
+  }
   if (cancelled || (isCancelled && await isCancelled())) throw new Error('Отменено');
   if (done !== toProcess.length) throw new Error('Не удалось завершить поиск почт');
   await onProgress(100);
@@ -1094,14 +1185,19 @@ export async function stepEnrich(
    * с Accept-Language 'en-US,en'; без этой опции шаг описаний просил ту же
    * страницу с русским дефолтом парсера, и сайт с переключателем языка отдавал
    * двум шагам разные версии. Служебные подписи результата — тоже английские:
-   * колонка описания доезжает до превью базы английского кабинета.
+   * колонка описания доезжает до превью базы английского кабинета. Потолок
+   * тела и защита чтения — см. EN_SITE_READ_MAX_BYTES; защиту каждая строка
+   * получает своей обёрткой (guardNotingRefusals), чтобы посчитать отказы.
    * RU-джоба получает ровно прежний объект опций { timeout, signal }.
    */
   const enFetch = locale === 'en'
-    ? { acceptLanguage: WEBSITE_ACCEPT_LANGUAGE_EN, textLanguage: 'en' as const }
+    ? { acceptLanguage: WEBSITE_ACCEPT_LANGUAGE_EN, textLanguage: 'en' as const, maxBytes: EN_SITE_READ_MAX_BYTES }
     : {};
 
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
+
+  const enGuard = locale === 'en' ? await enSiteGuard() : null;
+  const refusedRows = new Set<number>();
 
   let done = 0;
   let timedOut = 0;
@@ -1152,7 +1248,12 @@ export async function stepEnrich(
     try {
       // signal comes from the pool's per-task watchdog. Pass it down so a
       // tarpit website's fetch is aborted at ENRICH_PER_SITE_TIMEOUT_MS.
-      const text = await fetchAndExtract(item.url, { timeout: 15_000, signal, ...enFetch });
+      const text = await fetchAndExtract(item.url, {
+        timeout: 15_000,
+        signal,
+        ...enFetch,
+        ...(enGuard ? { guard: guardNotingRefusals(enGuard, () => refusedRows.add(item.i)) } : {}),
+      });
       // EN: «страница ответила, текста нет» — не описание компании, и клиенту
       // в колонке Description она не нужна; ячейка остаётся пустой.
       const usable = locale === 'en' ? text !== WEBSITE_NO_TEXT_STUB_EN : true;
@@ -1179,6 +1280,16 @@ export async function stepEnrich(
   if (timedOut > 0) {
     console.warn(
       `[stepEnrich] ${timedOut}/${toProcess.length} sites hit the ${ENRICH_PER_SITE_TIMEOUT_MS}ms hard timeout (probably proxy tarpits or unresponsive servers).`,
+    );
+  }
+  if (refusedRows.size > 0) {
+    console.warn(
+      `[stepEnrich] защита чтения EN-джобы: строк, где проверка адреса отклонила хотя бы один адрес, — `
+      + `${refusedRows.size} из ${toProcess.length} (${EN_SITE_ADDRESS_CHECK_KINDS}); на отклонённый адрес `
+      + `запрос не уходил, сайт без другого открывшегося адреса остался без описания. В этот счёт не входят `
+      + `отказы правил редиректа (https → http, не на http/https, больше 10 шагов), отказ при соединении `
+      + `(ответ DNS сменился после проверки) и ответы больше потолка ${EN_SITE_READ_MAX_BYTES / 1024 / 1024} МиБ: `
+      + `их парсер пишет своими строками [fetchHtml] по адресу.`,
     );
   }
 
