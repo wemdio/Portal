@@ -18,6 +18,7 @@ import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, getVeActiveJobSignal, type LLMMessage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { VE_RELEVANCE_TARGET_RULES } from './relevanceReview';
+import { veMedicalScopeNote, type VeMedicalTarget } from './relevanceMedical';
 
 // Thresholds below were calibrated on this exact release; an alias could move them silently.
 const DEFAULT_MODEL = 'typesafe/jev-1.13.0';
@@ -76,8 +77,9 @@ export const veTriageRubricSchema = z.object({
 });
 export type VeTriageRubric = z.infer<typeof veTriageRubricSchema>;
 
-export function veTriageRubricMessages(scope: string, language: 'ru' | 'en'): LLMMessage[] {
+export function veTriageRubricMessages(scope: string, language: 'ru' | 'en', origin?: VeMedicalTarget['hypothesisOrigin']): LLMMessage[] {
   const facts = language === 'ru' ? 'Russian' : 'English';
+  const medicalNote = veMedicalScopeNote(scope, origin);
   return [{ role: 'system', content: [
     `You convert ONE B2B targeting hypothesis into an English checklist for a fast yes/no classifier that will read ${facts} company facts (registry category, description, website text).`,
     VE_RELEVANCE_TARGET_RULES,
@@ -89,7 +91,7 @@ export function veTriageRubricMessages(scope: string, language: 'ru' | 'en'): LL
     'adjacent: 0-3 look-alike activities that are NOT sufficient evidence of the target activity (for example "aesthetic dentistry" for a skin/body cosmetology target). Short noun phrases.',
     'Every sentence above must be concrete, at most 28 words, in plain English, without marketing language. Do not mention the seller or its product.',
     `activity_label: the target activity as a short noun phrase in ${facts}, at most 12 words, for an interface note. conflict_labels: one short noun phrase in ${facts} per conflict, same order and count as conflicts.`,
-  ].join('\n') }, { role: 'user', content: scope }];
+  ].join('\n') }, { role: 'user', content: scope + (medicalNote ? '\n' + medicalNote : '') }];
 }
 
 export interface VeTriageTarget { vertical: string; verticalSummary: string; hypothesisTitle: string; hypothesisDescription: string }

@@ -3539,6 +3539,62 @@ describe('base_collect: план кончился раньше цели', () => 
     expect((child.data as string[][]).slice(1).map((row) => row[0]).sort())
       .toEqual(['Мясная лавка Почтовая', 'Мясокомбинат Ромашка']);
     expect(fetchVeRelevanceEvidence).not.toHaveBeenCalledWith('', expect.anything());
+
+    // A specialist clinic catalogue wins over a whole-sector medical registry
+    // while it remains useful. Its old cursors and the fallback's saved rows
+    // survive; a deployment must not create another paid child on retry.
+    const clinic = { title: 'Клиники пластической хирургии', description: 'Клиники, оказывающие услуги пластической хирургии.', broad: false };
+    const registry = { ...DIRECTORY_TASK, directory_filters: { okvedCodes: ['86.2'], includeIp: false } };
+    const exact = { source: 'yandex_maps' as const, rationale: 'Профильные клиники',
+      maps_query: { queries: ['Пластическая хирургия'], geo: 'Россия' } };
+    const broadRow = unifiedRow({ company: 'Медцентр Общий', website: 'general.test', email: 'info@general.test' });
+    const exactRow = unifiedRow({ company: 'Клиника Пластики', website: 'plastic.test', email: 'info@plastic.test' });
+    for (const condition of ['exact', 'exhausted', 'low_yield', 'mixed', 'mixed_category', 'broad', 'legacy', 'legacy_no_id', 'us'] as const) {
+      const clinicTask = condition === 'mixed' ? { ...exact, maps_query: { ...exact.maps_query, queries: ['Пластическая хирургия', 'Косметология'] } } : exact;
+      const sourceKey = veSourceStrategyKey(clinicTask);
+      const policy = { ...newVeAdaptiveCollection(), active_source: veSourceStrategyKey(registry), replan_attempts: 2, widenings: 2 };
+      if (condition === 'low_yield') policy.completed = [0, 1].map((index) => ({ id: `clinic-poor-${index}`,
+        source: 'yandex_maps', source_key: sourceKey, candidates: 100, new_ready: 0, new_target: 0, poor: true,
+        started_at: '2026-10-12T00:00:00Z', finished_at: '2026-10-12T00:01:00Z',
+        spend: { ai_usd: 0.1, serper_credits: 0, estimated_total_usd: 0.1, unknown_attempts: 0, complete: true } }));
+      const clinicInfo = exhaustedInfo(registry, { hypotheses: [{ id: 'h1', status: 'accepted', ...clinic,
+        broad: condition === 'legacy' ? undefined : condition === 'broad' }],
+        adaptive_collection: policy, search_policy: { version: 1, phase: 'existing', deferred_rows: [] } });
+      clinicInfo.tasks![0] = { source: 'companies_directory', status: 'done', child_job_id: null, rows: 1,
+        task: registry, harvest: [broadRow], exhausted: true, directory_cursors: { saved: 700 } };
+      clinicInfo.tasks!.push({ source: 'yandex_maps', status: 'done', child_job_id: null,
+        rows: condition === 'exhausted' ? 0 : 1, task: clinicTask, harvest: condition === 'exhausted' ? [] : [exactRow], exhausted: true,
+        catalog: { version: 1, filters: { categories: condition === 'mixed_category'
+          ? ['Пластическая хирургия', 'Медицинские центры'] : ['Пластическая хирургия'], countries: ['Россия'] }, after: 'saved-cursor' } });
+      clinicInfo.plan = { tasks: clinicInfo.tasks!.map((task) => task.task) };
+      const clinicDb = seedBase(clinicInfo, clinic, condition === 'legacy_no_id' ? { hypothesis_id: null } : {});
+      if (condition === 'us') await clinicDb.from('ve_projects').update({ market: 'us' }).eq('id', 'p1');
+      const taskSnapshot = JSON.stringify(clinicInfo.tasks);
+      const counters = JSON.stringify([clinicInfo.target_checkpoint, policy.completed, policy.replan_attempts, policy.widenings]);
+      jest.mocked(callLLMWithSchema).mockClear();
+      if (condition === 'legacy_no_id') {
+        await expect(wake(clinicDb)).rejects.toThrow('Target collection requires a scoped hypothesis base');
+        expect(clinicDb.getRows('base_constructor_jobs')).toHaveLength(0);
+        expect(callLLMWithSchema).not.toHaveBeenCalled();
+        continue;
+      }
+      await wake(clinicDb);
+      const saved = clinicDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      const paid = clinicDb.getRows('base_constructor_jobs');
+      expect(paid).toHaveLength(1);
+      expect((paid[0].data as string[][]).slice(1).map((row) => row[0]))
+        .toEqual([condition === 'exact' ? exactRow.company : broadRow.company]);
+      expect(JSON.stringify(saved.tasks)).toBe(taskSnapshot);
+      expect(JSON.stringify([saved.target_checkpoint, saved.adaptive_collection!.completed,
+        saved.adaptive_collection!.replan_attempts, saved.adaptive_collection!.widenings])).toBe(counters);
+      expect(saved.target_progress).toMatchObject({ candidates_processed: 2, max_candidates: 10_000 });
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+      expect(clinicDb.getRows('yandex_maps_jobs')).toHaveLength(0);
+      const paidSnapshot = JSON.stringify(paid);
+      await wake(clinicDb);
+      expect(JSON.stringify(clinicDb.getRows('base_constructor_jobs'))).toBe(paidSnapshot);
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+    }
   });
 
   it('новый срез из каталога PDL тоже берёт только компании с сайтом', async () => {

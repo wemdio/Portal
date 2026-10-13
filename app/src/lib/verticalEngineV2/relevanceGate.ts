@@ -14,6 +14,7 @@ import { proxyPoolHealth } from '@/lib/enrich/proxyPool';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { reviewVeRelevanceEvidence, VE_RELEVANCE_SCOPE_NOTE, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
+import { veMedicalScopeNote, type VeMedicalTarget } from './relevanceMedical';
 import { triageVeCompanies, veTriageAvailable, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
   VE_TRIAGE_MAX_EXCERPTS, VE_TRIAGE_RUBRIC_VERSION, type VeTriageRubric } from './relevanceTriage';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
@@ -232,7 +233,8 @@ const outputDecision = z.object({
   // the website pass can repair citations under its existing bounded policy.
   evidence: z.array(z.object({ field: z.enum(FIELDS), quote: z.string().max(400) })).max(3),
 });
-function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondPass: boolean, evidenceIds = false): LLMMessage[] {
+function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondPass: boolean, evidenceIds = false, origin?: VeMedicalTarget['hypothesisOrigin']): LLMMessage[] {
+  const medicalNote = veMedicalScopeNote(scope, origin);
   return [{ role: 'system', content: [
     'Assess the actual business of each company against ONE target hypothesis, not merely its broad vertical.',
     VE_RELEVANCE_TARGET_RULES,
@@ -251,7 +253,7 @@ function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondP
     'The reason must follow from the cited service facts. Keep each reason concise, at most 240 characters. Do not claim that a company works exclusively in one area, or lacks the target service, when the excerpts merely omit other activities.',
     secondPass ? 'Independent second look using website evidence: reconsider provisional rejections AND uncertainty.' : 'Initial review: keep uncertainty explicit instead of guessing.',
     'Reasons in ' + (language === 'ru' ? 'Russian' : 'English') + '. JSON only: {"decisions":[{"i":0,"status":"needs_review","reason":"...","' + (evidenceIds ? 'evidence_ids' : 'evidence') + '":[]}]}',
-  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
+  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (medicalNote ? '\n' + medicalNote : '') + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
 }
 /** A careers/contact shell proves neither the company's business nor a conflict.
  * Keep this deliberately narrow: any remaining words leave the normal review
@@ -340,6 +342,7 @@ export async function findIrrelevantRows(input: {
   /** Supplementary company facts only; their emails/statuses never become recipients. */
   evidenceRows?: Array<Record<string, unknown>>;
   hypothesisTitle?: string; hypothesisDescription?: string; language: 'ru' | 'en';
+  hypothesisOrigin?: VeMedicalTarget['hypothesisOrigin'];
   log?: (message: string) => void; signal?: AbortSignal; checkpointScope?: string;
   checkpoint?: unknown;
   onCheckpoint?: (checkpoint: VeRelevanceCheckpoint, options?: { canYield: boolean }) => Promise<void>;
@@ -685,7 +688,7 @@ export async function findIrrelevantRows(input: {
       await save(false); // A failed reservation must still prevent the paid request.
       let notified = false;
       try {
-        const response = await reviewVeRelevanceEvidence({ scope, language: input.language,
+        const response = await reviewVeRelevanceEvidence({ scope, language: input.language, hypothesisOrigin: input.hypothesisOrigin,
           companies: reviews.map((review) => reviewCompany(review.proposal)), model: attemptModel,
           signal: signal ?? undefined, onUsage: (usage) => { notified = true; accountUsage(usage); } });
         if (!notified) accountUsage(response);
@@ -833,7 +836,7 @@ export async function findIrrelevantRows(input: {
     try {
       const fields = batch.map((entry, i) => secondPass
         ? { ...entry.fields, description: '', website_text: '', category: '', excerpts: excerpts[i] } : entry.fields);
-      const llm = await invoke(messages(scope, fields, input.language, secondPass, secondPass), schema,
+      const llm = await invoke(messages(scope, fields, input.language, secondPass, secondPass, input.hypothesisOrigin), schema,
         { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema,
           ...(model === VE_COLLECTION_MODEL ? { maxHttpAttempts: 2 as const, timeoutMs: 90_000 } : {}),
           ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
@@ -923,7 +926,7 @@ export async function findIrrelevantRows(input: {
       return null;
     }
     try {
-      const response = await invoke(veTriageRubricMessages(scope, input.language), veTriageRubricSchema,
+      const response = await invoke(veTriageRubricMessages(scope, input.language, input.hypothesisOrigin), veTriageRubricSchema,
         { model: veTriageRubricModel(), maxTokens: 4000, timeoutMs: 120_000, maxHttpAttempts: 2, maxSchemaAttempts: 1, signal: signal ?? undefined });
       signal?.throwIfAborted();
       checkpoint.triage = { version: VE_TRIAGE_RUBRIC_VERSION, rubric: response.data };
