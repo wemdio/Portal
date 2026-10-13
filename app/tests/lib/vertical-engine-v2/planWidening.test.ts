@@ -22,6 +22,7 @@ const HYPOTHESES = {
   agencies: 'Малые агентства недвижимости\nАгентства 3–30 агентов, продающие вторичку и новостройки в регионах, которым нужен единый источник объектов и комиссий.',
   dentists: 'Стоматологии 3+ кресла\nЧастные стоматологии с лицензией, несколькими врачами и чеком на терапию, ортопедию, имплантацию.',
   transport: 'Транспортные холдинги\nКрупные автотранспортные, ЖД- и мультимодальные группы с филиалами, ремонтом, складами, договорами и учетными системами.',
+  refinery: 'Нефтеперерабатывающие заводы\nНПЗ с лабораториями контроля сырья, полуфабрикатов и готовых нефтепродуктов. ЛИМС закрывает путь пробы, протоколы, паспорта качества и интеграции с производственным контуром.',
 };
 const directory = (filters: NonNullable<VeCollectTask['directory_filters']>): VeCollectTask =>
   ({ source: 'companies_directory', rationale: 'Реестр по ОКВЭД гипотезы.', directory_filters: filters });
@@ -43,6 +44,11 @@ describe('основание размера в тексте гипотезы', (
     expect(veHypothesisSizeBasis(HYPOTHESES.agencies)).toBe(true);
     expect(veHypothesisSizeBasis(HYPOTHESES.dentists)).toBe(true);
     expect(veHypothesisSizeBasis(HYPOTHESES.transport)).toBe(true);
+    expect(veHypothesisSizeBasis(HYPOTHESES.refinery)).toBe(false);
+    expect(veHypothesisSizeBasis('НПЗ')).toBe(false);
+    expect(veHypothesisSizeBasis('Крупные нефтеперерабатывающие заводы')).toBe(true);
+    expect(veHypothesisSizeBasis('НПЗ от 100 сотрудников')).toBe(true);
+    expect(veHypothesisSizeBasis('Горно-обогатительные комбинаты')).toBe(true);
   });
 
   it('планировщик не сохраняет порог без основания, а обоснованный оставляет', () => {
@@ -55,6 +61,19 @@ describe('основание размера в тексте гипотезы', (
     // Без ОКВЭД и региона снятие порога открыло бы весь реестр: такой срез не трогаем.
     const unscoped = directory({ revenueFrom: 1_000_000_000 });
     expect(stripUnfoundedSizeFilters({ tasks: [unscoped] }, HYPOTHESES.meat).plan.tasks[0]).toBe(unscoped);
+
+    // Аврора / НПЗ: тип деятельности сам по себе не задаёт размер компании.
+    // Fresh planning removes the invented size filter; saved tasks retain
+    // their identity and only their existing bounded second queue is widened.
+    const refinery = directory({ okvedCodes: ['19.2'], employeesFrom: 100, hasEmail: false, includeIp: false });
+    const refineryBefore = JSON.stringify(refinery);
+    const refineryScope = { okvedCodes: ['19.2'], hasEmail: false, includeIp: false };
+    const normalizedRefinery = stripUnfoundedSizeFilters({ tasks: [refinery] }, HYPOTHESES.refinery);
+    expect(normalizedRefinery.stripped).toBe(1);
+    expect(normalizedRefinery.plan.tasks[0].directory_filters).toEqual(refineryScope);
+    expect(stripUnfoundedSizeFilters({ tasks: [refinery] }, 'Крупные НПЗ').plan.tasks[0]).toBe(refinery);
+    expect(veSecondQueueTask(refinery, veHypothesisSizeBasis(HYPOTHESES.refinery))?.directory_filters).toEqual(refineryScope);
+    expect(JSON.stringify(refinery)).toBe(refineryBefore);
 
     // Event&Marketing saved plan shapes, replayed as fresh plans: prefer the
     // specialty catalog without touching explicit size, geo or paid HH scope.
