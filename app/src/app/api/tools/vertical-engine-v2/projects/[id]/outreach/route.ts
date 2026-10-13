@@ -4,7 +4,7 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { enqueueVeContactReprojections, loadVeOutreachSetup } from '@/lib/verticalEngineV2/outreachSetup';
 import { VE_MAX_EMAILS_PER_COMPANY_MAX, VE_MAX_EMAILS_PER_COMPANY_MIN } from '@/lib/verticalEngineV2/companyContactCap';
-import { checkVePreparationRequest, type VePreparationAction } from '@/lib/verticalEngineV2/preparationRequest';
+import { checkVeContinuationRequest, checkVePreparationRequest, type VePreparationAction } from '@/lib/verticalEngineV2/preparationRequest';
 import { logAudit } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
@@ -41,7 +41,17 @@ export async function POST(req: NextRequest, { params }: Context) {
           outcome: action.status, reason_code: action.code ?? null, revision: b.revision },
         { userId: auth.auth.userId, route: '/api/tools/vertical-engine-v2/projects/[id]/outreach' },
       );
-      if (b.action === 'select') {
+      if (b.action === 'check_continuation') {
+        if (!uuid(b.hypothesis_id)) return NextResponse.json({ error: 'Укажите гипотезу для проверки' }, { status: 400 });
+        const check = await checkVeContinuationRequest(supabaseAdmin, projectId, b.revision, b.hypothesis_id);
+        await logAudit('tools.vertical-engine-v2.continuation.checked', 'Проверка возможности продолжения',
+          { project_id: projectId, hypothesis_id: check.hypothesis_id, base_id: check.base_id ?? null,
+            outcome: check.status, reason_code: check.code ?? null, revision: b.revision },
+          { userId: auth.auth.userId, route: '/api/tools/vertical-engine-v2/projects/[id]/outreach' });
+        // A negative verdict is also a successful check. Never fall through to
+        // the prepare RPC, even when the preflight finds available work.
+        return NextResponse.json({ ...await loadVeOutreachSetup(supabaseAdmin, projectId), continuation_check: check });
+      } else if (b.action === 'select') {
         if (!Array.isArray(b.hypothesis_ids) || b.hypothesis_ids.length > 50 || b.hypothesis_ids.some((id: unknown) => !uuid(id))
           || !['ru','en','pl'].includes(b.language)) {
           return NextResponse.json({ error: 'Выберите не более 50 гипотез и поддерживаемый язык' }, { status: 400 });

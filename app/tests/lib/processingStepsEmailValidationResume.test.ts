@@ -24,6 +24,7 @@ jest.mock('@/lib/emailValidation/validator', () => ({
 }));
 
 import { validateEmail, type ValidationResult } from '@/lib/emailValidation/validator';
+import type { ConstructorProgressDetail } from '@/lib/tools/baseConstructorProgress';
 import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   stepValidateEmails,
@@ -270,13 +271,14 @@ describe('stepValidateEmails durable checkpoint/resume', () => {
     });
     const total = 20;
     const attemptTwoCounts: number[] = [];
+    const phases: ConstructorProgressDetail[] = [];
 
     await stepValidateEmails(
       [
         ['Email'],
         ...Array.from({ length: total }, (_, index) => [`grey-${index}@example.com`]),
       ],
-      async () => {},
+      async (_percent, detail) => { if (detail) phases.push(detail); },
       async () => false,
       {
         onCheckpoint: async (rows) => {
@@ -292,5 +294,14 @@ describe('stepValidateEmails durable checkpoint/resume', () => {
 
     expect(attemptTwoCounts.some((count) => count > 0 && count < total)).toBe(true);
     expect(attemptTwoCounts.at(-1)).toBe(total);
+    expect(phases).toEqual(expect.arrayContaining([
+      { phase: 'checking', completed: 0, total },
+      { phase: 'checking', completed: total, total },
+      { phase: 'retrying', completed: 0, total },
+      { phase: 'retrying', completed: 10, total },
+      { phase: 'retrying', completed: total, total },
+    ]));
+    // Display telemetry must not add probes or replenish the retry budget.
+    expect(validateEmailMock).toHaveBeenCalledTimes(total * 2);
   });
 });

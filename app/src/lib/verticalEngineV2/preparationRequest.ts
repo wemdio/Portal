@@ -12,6 +12,31 @@ export interface VePreparationAction {
   resume_collection?: boolean;
 }
 
+/** A check reports eligibility; it never acknowledges a queued request. */
+export type VeContinuationCheck = Omit<VePreparationAction, 'status' | 'resume_collection'> & {
+  status: 'available' | Exclude<VePreparationAction['status'], 'queued'>;
+  action: 'resume_collection' | 'resume_preparation' | null;
+};
+
+/** Same scoped preflight and CAS as Prepare, without granting durable retry
+ * intent. The HTTP check route must return this result before any request RPC. */
+export async function checkVeContinuationRequest(
+  db: SupabaseClient, projectId: string, revision: number, hypothesisId: string,
+): Promise<VeContinuationCheck> {
+  const result = await checkVePreparationRequest(db, projectId, revision, hypothesisId);
+  return {
+    status: result.status === 'queued' ? 'available' : result.status,
+    action: result.status === 'queued' ? result.resume_collection ? 'resume_collection' : 'resume_preparation' : null,
+    reason: result.status === 'queued'
+      ? result.resume_collection ? 'Продолжение сбора доступно. Оно ещё не запущено.'
+        : 'Продолжение подготовки доступно. Оно ещё не запущено.'
+      : result.reason,
+    hypothesis_id: result.hypothesis_id,
+    ...(result.base_id ? { base_id: result.base_id } : {}),
+    ...(result.code ? { code: result.code } : {}),
+  };
+}
+
 /** Preflight for a single explicit request; only the compact verdict is saved.
  * Enqueue rechecks the state under its claim. No jobs or paid checks start here. */
 export async function checkVePreparationRequest(
@@ -32,7 +57,7 @@ export async function checkVePreparationRequest(
   if (!setup.data?.selected_hypothesis_ids?.includes(hypothesisId) || !hypothesis.data?.vertical_id
     || hypothesis.data.status === 'rejected') return outcome('unavailable', 'Выберите доступную гипотезу этого проекта', 'not_selected');
 
-  const queued = () => outcome('queued', 'Запрос принят. Подготовка продолжится автоматически.');
+  const queued = (baseId?: string, code?: string) => outcome('queued', 'Запрос принят. Подготовка продолжится автоматически.', code, baseId);
   const busy = (baseId?: string) => outcome('already_running', 'Подготовка уже выполняется. Повторно нажимать не нужно.', 'already_running', baseId);
   if (preparation.data?.status === 'pending'
     || Date.parse(preparation.data?.locked_until ?? '') > Date.now()) return busy(preparation.data?.base_id ?? undefined);
@@ -72,7 +97,7 @@ export async function checkVePreparationRequest(
   // exhausted source plan hide a failed analysis/letter job or an orphan.
   if (saved.status === 'collecting' || saved.status === 'analyzing'
     || (saved.status === 'failed' && saved.error === 'Отменено пользователем')
-    || (saved.status === 'analyzed' && saved.row_count > 0 && template.data?.status !== 'ready')) return queued();
+    || (saved.status === 'analyzed' && saved.row_count > 0 && template.data?.status !== 'ready')) return queued(saved.id, 'preparation_incomplete');
   if (saved.status === 'analyzed' && saved.row_count > 0 && template.data?.status === 'ready'
     && (preparation.data?.status !== 'ready' || preparation.data.base_id !== saved.id
       || preparation.data.template_id !== template.data.id)) return {

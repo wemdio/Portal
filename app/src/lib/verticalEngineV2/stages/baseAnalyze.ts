@@ -9,6 +9,8 @@ import { VeBaseAnalysisSchema } from '../schemas';
 import { buildBaseAnalysisMessages } from '../prompts/baseAnalyze';
 import { buildBaseAnalysisMessagesEn } from '../prompts/baseAnalyze.en';
 import { projectMarket } from '../market';
+import { getVeCollectionContinuation } from '../collectionRecovery';
+import { saveVeCollectionContinuationCache } from '../collectionContinuationCache';
 import { moscowDateKey, readStoredRuSeasonality } from '../ruSeasonality';
 import type { VeBase, VeJob, VeRuSeasonality } from '../types';
 import {
@@ -45,16 +47,23 @@ export async function runBaseAnalyzeStage(job: VeJob, ctx: VeStageContext): Prom
     .single();
   if (bError || !baseRow) throw new Error(`ve_bases ${baseId}: ${bError?.message ?? 'not found'}`);
   const base = baseRow as VeBase;
+  const revision = baseRow.collection_continuation_revision;
+  const cacheable = base.source === 'auto' && !!base.hypothesis_id
+    && typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+    && revision <= Number.MAX_SAFE_INTEGER - 2;
 
   const columns = Array.isArray(base.columns) ? base.columns : [];
   const sampleRows = (Array.isArray(base.sample_rows) ? base.sample_rows : [])
     .slice(0, MAX_SAMPLE_ROWS)
     .map((r) => sanitizeRow(r, columns));
 
-  await ctx.supabase
+  const startUpdate = ctx.supabase
     .from('ve_bases')
     .update({ status: 'analyzing', updated_at: new Date().toISOString() })
     .eq('id', baseId);
+  const started = cacheable
+    ? await startUpdate.select('collection_continuation_revision').maybeSingle()
+    : await startUpdate;
 
   let verticalName = '';
   if (base.vertical_id) {
@@ -105,11 +114,28 @@ export async function runBaseAnalyzeStage(job: VeJob, ctx: VeStageContext): Prom
   );
   addUsage(usage, llm);
 
-  const { error: updError } = await ctx.supabase
+  const finishUpdate = ctx.supabase
     .from('ve_bases')
     .update({ analysis: llm.data, status: 'analyzed', updated_at: new Date().toISOString() })
     .eq('id', baseId);
+  const { data: finished, error: updError } = cacheable
+    ? await finishUpdate.select('id,project_id,source,hypothesis_id,status,error,updated_at,collection_continuation_revision,max_emails_per_company,contact_cap_applied').maybeSingle()
+    : await finishUpdate;
   if (updError) throw new Error(`ve_bases update analysis: ${updError.message}`);
+
+  // Each status UPDATE invalidates the cache and advances its DB revision,
+  // even if the status was already identical. Exactly these two increments
+  // prove the loaded collect_info stayed unchanged throughout analysis.
+  // The final cache-only CAS also rejects changes after this completion.
+  if (cacheable && !started.error && started.data?.collection_continuation_revision === revision + 1
+    && finished?.collection_continuation_revision === revision + 2) {
+    try {
+      const snapshot = { ...baseRow, ...finished };
+      await saveVeCollectionContinuationCache(ctx.supabase, snapshot, getVeCollectionContinuation(snapshot));
+    } catch {
+      // An optional cache must never fail or replay an already paid analysis.
+    }
+  }
 
   return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
 }

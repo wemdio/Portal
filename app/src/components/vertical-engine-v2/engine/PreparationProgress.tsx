@@ -14,6 +14,7 @@ interface PreparationProgressProps {
   /** Project detail supplies jobs newest first; its history is intentionally bounded. */
   jobs: readonly VeJobSummary[];
   onContinue?: () => void;
+  onCheckContinuation?: () => void;
   continueDisabled?: boolean;
   approved?: boolean;
   actionNotice?: PreparationActionNotice | null;
@@ -67,6 +68,9 @@ export interface PreparationPresentation {
   currentStep: number | null;
   tone: 'info' | 'muted' | 'err' | 'ok';
   canContinue?: boolean;
+  canCheckContinuation?: boolean;
+  /** Optional collection must never compete with reviewing a finished base. */
+  additionalCollection?: { action: 'check' | 'collect' | null; reason: string };
   continueLabel?: string;
   continueHint?: string;
   awaitingStatus?: boolean;
@@ -298,7 +302,7 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
     && (continuation?.action === 'resume_preparation' || target?.status === 'target_reached');
   if (canResumePreparedBase) {
     state.canContinue = true;
-    state.continueLabel = continuation?.code === 'state_unchecked' ? 'Проверить и продолжить' : 'Продолжить подготовку';
+    state.continueLabel = 'Продолжить подготовку';
     if (state.tone !== 'err' && continuation?.code !== 'preparation_incomplete') {
       state.title = 'База собрана, письма ещё не готовы';
       state.description = 'Проверенные контакты сохранены.';
@@ -318,18 +322,32 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
   }
   if (state.canContinue && !downstreamRetry && !canResumePreparedBase) {
     if (continuation) {
-      state.canContinue = continuation.available && continuation.action !== null;
-      state.continuationBlocked = !state.canContinue;
-      state.continueLabel = continuation.code === 'state_unchecked' ? 'Проверить и продолжить'
-        : continuation.action === 'resume_collection' ? 'Продолжить добор' : 'Продолжить подготовку';
+      state.canCheckContinuation = continuation.code === 'state_unchecked';
+      state.canContinue = !state.canCheckContinuation && continuation.available && continuation.action !== null;
+      state.continuationBlocked = !state.canContinue && !state.canCheckContinuation;
+      state.continueLabel = continuation.action === 'resume_collection' ? 'Собрать ещё контакты' : 'Продолжить подготовку';
       state.continueHint = continuation.reason;
     } else if (terminalCollection) {
       // Older API snapshots omit the full saved state. Do not guess that an
       // exhausted plan has another paid or productive pass left.
       state.canContinue = false;
-      state.continuationBlocked = true;
-      state.continueHint = 'Возможность добора пока не подтверждена. Обновите статус.';
+      state.canCheckContinuation = true;
+      state.continueHint = 'Можно проверить, осталась ли работа для добора. Сама проверка сбор не запускает.';
     }
+  }
+  if (state.tone === 'ok') {
+    if (terminalCollection || state.canContinue || state.canCheckContinuation) {
+      state.additionalCollection = {
+        action: state.canCheckContinuation ? 'check' : state.canContinue ? 'collect' : null,
+        reason: state.canCheckContinuation
+          ? 'Проверим, осталась ли работа для добора. Сбор начнётся только по отдельной кнопке.'
+          : state.continueHint ?? '',
+      };
+    }
+    state.canContinue = false;
+    state.canCheckContinuation = false;
+    state.continuationBlocked = false;
+    state.continueHint = undefined;
   }
   let guidance: NonNullable<PreparationPresentation['guidance']>;
   if (!props.preparation) {
@@ -337,13 +355,14 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
   } else if (state.tone === 'ok' && props.approved) {
     guidance = { action: 'launch', title: 'База и письма одобрены', next: 'Перейдите к запуску этой базы. Система подготовит кампанию в Instantly; отправку вы включите там сами.' };
   } else if (state.tone === 'ok') {
-    guidance = { action: 'review', title: 'Теперь проверьте базу и письма', next: 'После проверки одобрите базу. Затем можно подготовить кампанию в Instantly; отправку вы включите там сами.' };
+    guidance = { action: 'review', title: 'База и письма готовы', next: 'Скачайте контакты или проверьте базу и письма для запуска. После проверки одобрите базу.' };
   } else if (props.context === 'letters' && props.base?.status === 'failed' && state.tone === 'muted') {
     guidance = { action: 'check', title: 'Нужно проверить состояние базы', next: 'Откройте «Базы и объём»: там указаны причина остановки и доступные действия.' };
+  } else if (state.canCheckContinuation) {
+    guidance = { action: 'check', title: 'Можно проверить возможность добора', next: 'Проверка покажет, остались ли незавершённые этапы или доступные источники. Сбор она не запускает.' };
   } else if (state.canContinue) {
-    guidance = { action: 'continue', title: continuation?.code === 'state_unchecked' ? 'Проверьте возможность продолжения' : 'Можно продолжить подготовку',
-      next: continuation?.code === 'state_unchecked' ? 'Проверка покажет, какие этапы можно продолжить.'
-        : `Нажмите «${state.continueLabel ?? 'Продолжить подготовку'}» ниже. Работа продолжится с сохранённого этапа.` };
+    guidance = { action: 'continue', title: 'Можно продолжить подготовку',
+      next: `Нажмите «${state.continueLabel ?? 'Продолжить подготовку'}» ниже. Работа продолжится с сохранённого этапа.` };
   } else if (state.continuationBlocked) {
     guidance = { action: 'check', title: 'Добор сейчас недоступен', next: 'Новый сбор сейчас не выполняется.' };
   } else if (state.tone === 'err') {
@@ -365,6 +384,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
     return () => { clearTimeout(first); clearInterval(timer); };
   }, []);
   const state = getPreparationPresentation(props);
+  const completed = state.tone === 'ok';
   const job = props.jobs.find(candidate => candidate.stage === 'base_collect' && candidate.payload?.base_id === props.base?.id);
   const progress = getCollectionProgress(props.base?.collect_info, job);
   const target = props.base?.collect_info?.target_progress;
@@ -383,10 +403,11 @@ export function PreparationProgress(props: PreparationProgressProps) {
         <StatusDot tone={state.tone} />
         <h3 className={HE.cardTitle}>{state.guidance.title}</h3>
       </div>
-      <p className="font-medium">{state.title}</p>
-      {state.readiness ? <p>{state.readiness}</p> : null}
+      {!completed ? <p className="font-medium">{state.title}</p> : null}
       <p>{state.guidance.next}</p>
-      {state.guidance?.action === 'wait' ? <details>
+      {completed && state.additionalCollection ? <p className={HE.muted}>Подготовка завершена ниже цели. Эти контакты можно использовать — добор не обязателен.</p> : null}
+      {!completed && state.readiness ? <p>{state.readiness}</p> : null}
+      {completed ? null : state.guidance?.action === 'wait' ? <details>
         <summary className="ve2-link cursor-pointer">Что происходит на этом этапе</summary>
         <p className={`${HE.muted} mt-2 max-w-[70ch]`}>{state.description}</p>
       </details> : <p className={HE.muted}>{state.description}</p>}
@@ -421,8 +442,23 @@ export function PreparationProgress(props: PreparationProgressProps) {
           {savedReady !== null ? `; проверенных контактов: ${savedReady.toLocaleString('ru-RU')}` : ''}.
         </p>
       ) : null}
-      {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
+      {!completed && props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
         className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
+      {state.additionalCollection && props.onContinue ? <details>
+        <summary className="ve2-link cursor-pointer">Дополнительный добор</summary>
+        <div className="mt-3 space-y-3">
+          <p className={HE.muted}>{state.description}</p>
+          {state.additionalCollection.reason ? <p className={HE.muted}>{state.additionalCollection.reason}</p> : null}
+          {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
+            className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
+          {state.additionalCollection.action === 'check' && props.onCheckContinuation ? <button type="button"
+            className={HE.btnGhost} disabled={props.continueDisabled} onClick={props.onCheckContinuation}>Проверить возможность добора</button> : null}
+          {state.additionalCollection.action === 'collect' ? <button type="button"
+            className={HE.btnGhost} disabled={props.continueDisabled} onClick={props.onContinue}>Собрать ещё контакты</button> : null}
+        </div>
+      </details> : null}
+      {state.canCheckContinuation && props.onCheckContinuation ? <button type="button"
+        className={HE.btnGhost} disabled={props.continueDisabled} onClick={props.onCheckContinuation}>Проверить возможность добора</button> : null}
       {state.canContinue && props.onContinue ? <div className="space-y-2">
         <button type="button" className={state.continueLabel ? HE.btnGhost : HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
           {state.continueLabel ?? 'Продолжить подготовку'}

@@ -290,7 +290,7 @@ export async function loadVeProjectDetail(
     }
     else decision = readVeCollectionContinuationCache(base) ?? {
       available: true, action: 'resume_preparation', code: 'state_unchecked',
-      reason: 'Проверим, осталось ли доступное продолжение. Повторный сбор начнётся только при наличии работы.',
+      reason: 'Можно проверить возможность добора. Проверка не запускает сбор.',
     };
     // Only the bounded decision is public. Full checkpoints are read once on
     // an explicit request and its result is cached until the base changes.

@@ -261,7 +261,7 @@ describe('VE2 collection progress presentation', () => {
     expect(getPreparationPresentation({ preparation: interrupted, base: collecting, jobs: [{ ...parent, status: 'running' }] }))
       .toMatchObject({ tone: 'info', currentStep: 0 });
     for (const readyRows of [0, 22]) {
-      const stopped = { ...preview, id: collecting.id, status: 'analyzed' as const,
+      const stopped = { ...preview, id: collecting.id, status: 'analyzed' as const, row_count: readyRows,
         collect_info: { ...preview.collect_info, target_progress: { ...preview.collect_info!.target_progress!, ready_rows: readyRows } } };
       const presentation = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [] });
       expect(presentation).toMatchObject({ tone: readyRows > 0 ? 'ok' : 'muted', currentStep: readyRows > 0 ? 3 : null, canContinue: false });
@@ -272,15 +272,29 @@ describe('VE2 collection progress presentation', () => {
       const unavailable = { available: false, action: null, code: 'sources_exhausted', reason: 'Доступные источники обработаны.' } as const;
       const blocked = { ...stopped, collection_continuation: unavailable };
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: blocked, jobs: [] }))
-        .toMatchObject({ canContinue: false, continueHint: unavailable.reason });
+        .toMatchObject(readyRows > 0
+          ? { canContinue: false, additionalCollection: { action: null, reason: unavailable.reason } }
+          : { canContinue: false, continueHint: unavailable.reason });
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'pending' }, base: blocked, jobs: [] }))
         .toMatchObject({ canContinue: false, guidance: { action: 'check' } });
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
         collection_continuation: { available: true, action: 'resume_collection', code: 'fresh_sources', reason: 'Есть новые источники.' } }, jobs: [] }))
-        .toMatchObject({ canContinue: true, continueLabel: 'Продолжить добор' });
+        .toMatchObject(readyRows > 0
+          ? { canContinue: false, additionalCollection: { action: 'collect', reason: 'Есть новые источники.' } }
+          : { canContinue: true, continueLabel: 'Собрать ещё контакты' });
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
         collection_continuation: { available: true, action: 'resume_preparation', code: 'state_unchecked', reason: 'Нужно проверить состояние.' } }, jobs: [] }))
-        .toMatchObject({ canContinue: true, continueLabel: 'Проверить и продолжить' });
+        .toMatchObject(readyRows > 0
+          ? { canContinue: false, canCheckContinuation: false, additionalCollection: { action: 'check' }, guidance: { action: 'review' } }
+          : { canContinue: false, canCheckContinuation: true, guidance: { action: 'check' } });
+      // Legacy ready bases without a saved decision stay downloadable and
+      // launchable; optional inspection cannot call the collection action.
+      if (readyRows > 0) {
+        expect(presentation).toMatchObject({ canContinue: false, additionalCollection: { action: 'check' },
+          guidance: { title: 'База и письма готовы', action: 'review' } });
+        expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped,
+          jobs: [], approved: true })).toMatchObject({ canContinue: false, guidance: { action: 'launch' } });
+      }
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
         collection_continuation: { ...unavailable, code: 'already_running', reason: 'Подготовка уже выполняется.' } }, jobs: [] }))
         .toMatchObject({ tone: 'info', guidance: { action: 'wait' } });
