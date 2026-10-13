@@ -370,6 +370,68 @@ describe('VE2 relevance selection rules', () => {
     const settled = provider();
     await findIrrelevantRows({ ...input, fetchEvidence, checkpoint: still.checkpoint });
     expect(settled).toMatchObject({ classify: 0, deepseek: 0, confirm: 0, jev: 0 });
+
+    // 13.10.2026, saved MetroFitness rejection: five club addresses were already
+    // quoted, but the old reviewer demanded reception and a sales department.
+    // The excerpt is contact-free; the provider below is a double, not a live
+    // adjudication. This pins checkpoint recovery and its cost boundaries only.
+    const fitness = {
+      verticalName: 'Фитнес и спорт', hypothesisTitle: 'Фитнес-сети',
+      hypothesisDescription: 'Фитнес-клубы от 5 филиалов: ресепшен и отдел продаж абонементов, продление, заморозки, персональные тренировки, работа с возражениями.',
+      quote: 'Современные тренажерына все группы мышц\n\nКлубы МетроFitness в Екатеринбурге\n\nАмундсена, 63\nМашиностроителей, 22\nУральская, 61а\nКрауля 63\nХалтурина, 55',
+      reason: 'MetroFitness: перечислены 5+ клубов в Екатеринбурге, явная сеть. Но нет упоминаний ресепшен и отдела продаж абонементов; только описание клубов и услуг.',
+      result: 'direct_match' as const,
+    };
+    // An own laboratory really is stated in this target. Removing contextual
+    // reception/sales conditions must not turn missing laboratory evidence into
+    // an admission, or a saved direct conflict into a new paid review.
+    const refinery = { verticalName: 'Промышленность', hypothesisTitle: 'Нефтеперерабатывающие заводы',
+      hypothesisDescription: 'НПЗ с лабораториями контроля сырья, полуфабрикатов и готовых нефтепродуктов.',
+      quote: 'Наш нефтеперерабатывающий завод перерабатывает нефть и выпускает бензин и дизельное топливо.',
+      reason: 'Нефтепереработка подтверждена, но сведений о собственной лаборатории нет.',
+      result: 'insufficient' as const };
+    for (const scenario of [fitness, refinery]) {
+      const { quote, reason, result: assessment, ...scope } = scenario;
+      const row = { company: scenario === fitness ? 'MetroFitness' : 'НПЗ', description: quote,
+        email: 'info@fixture.test', _email_status: 'ok' };
+      const fixtureInput = { ...scope, rows: [row], language: 'ru' as const, triage: true };
+      provider(() => 'insufficient');
+      const site = offline();
+      const saved = beforeRelease((await findIrrelevantRows({ ...fixtureInput, fetchEvidence: site })).checkpoint);
+      const key = keyOf(saved, quote), ref = saved.semantic_review_refs[key];
+      saved.semantic_reviews[ref].attempts = 1;
+      saved.semantic_reviews[ref].result = { result: 'insufficient', reason };
+      saved.verdicts[key] = { ...saved.verdicts[key], reason: 'Смысловое соответствие не подтверждено: ' + reason,
+        website_review_version: 4, triage_version: 1 };
+      const selected = buildVeRelevanceReviewBatch({ reserve: [{ ...row, _ve_relevance: saved.verdicts[key] }],
+        ready: [], source: [], automatic: true, allowPaidSearch: false, triage: true });
+      expect([scope.hypothesisTitle, selected.companies]).toEqual([scope.hypothesisTitle, 1]);
+      site.mockClear();
+      const recoveredCalls = provider(() => assessment);
+      const recovered = await findIrrelevantRows({ ...fixtureInput, fetchEvidence: site, allowPaidSearch: false, checkpoint: saved });
+      expect(recovered.decisions.get(0)?.status).toBe(assessment === 'direct_match' ? 'relevant' : 'needs_review');
+      expect(recoveredCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 1, confirm: 1 });
+      expect(site).not.toHaveBeenCalled();
+      for (const request of recoveredCalls.requests) {
+        expect(request.kind).toBe('review');
+        expect(request.user).toContain(scope.hypothesisDescription);
+        expect(request.user).toContain(JSON.stringify(quote).slice(1, -1));
+        expect(request.system).toContain('Sector evidence alone cannot prove a required own laboratory or a network.');
+      }
+      const replayCalls = provider();
+      const repeated = await findIrrelevantRows({ ...fixtureInput, fetchEvidence: site, allowPaidSearch: false, checkpoint: recovered.checkpoint });
+      expect(repeated.decisions.get(0)?.status).toBe(recovered.decisions.get(0)?.status);
+      expect(replayCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+      expect(buildVeRelevanceReviewBatch({ reserve: [{ ...row, _ve_relevance: repeated.decisions.get(0) }],
+        ready: [], source: [], automatic: true, allowPaidSearch: false, triage: true }).companies).toBe(0);
+      expect(site).not.toHaveBeenCalled();
+      const conflict = structuredClone(saved);
+      conflict.semantic_reviews[ref].result = { result: 'direct_conflict', reason: 'Доказано несовместимое направление деятельности.' };
+      const conflictCalls = provider();
+      const held = await findIrrelevantRows({ ...fixtureInput, fetchEvidence: site, allowPaidSearch: false, checkpoint: conflict });
+      expect(held.decisions.get(0)?.status).toBe('needs_review');
+      expect(conflictCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+    }
   });
 
   it('rechecks a rejection of a proposal made on the read website text, and its quarantine', async () => {

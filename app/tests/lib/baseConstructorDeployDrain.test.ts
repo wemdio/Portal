@@ -16,11 +16,11 @@ describe('BaseConstructor deploy drain', () => {
   it('does not pause or stop unrelated workers during a Base Constructor-only drain', () => {
     const drainWorker = readRepoFile('drain-worker.sh');
     const guardedGenericStops = drainWorker.match(
-      /if should_drain_non_baseconstructor_workers; then[\s\S]*?for c in "\$\{containers\[@\]\}"[\s\S]*?\nfi/,
+      /if should_drain_shared_worker_pool; then[\s\S]*?for c in "\$\{containers\[@\]\}"[\s\S]*?\nfi/,
     )?.[0];
 
     expect(drainWorker).toContain(
-      'if should_drain_non_baseconstructor_workers && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then',
+      'if should_drain_shared_worker_pool && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then',
     );
     expect(guardedGenericStops).toBeDefined();
   });

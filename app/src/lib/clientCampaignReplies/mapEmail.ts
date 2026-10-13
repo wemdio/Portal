@@ -27,13 +27,42 @@ function decodeCodePoint(code: number, fallback: string): string {
     : fallback;
 }
 
+/**
+ * `s.replace(tag, replacement)` for a tag rule whose every match ends with '>'.
+ * Nothing after the last '>' can be part of such a match, and that tail is the
+ * only place where these regexes go quadratic: from every '<' with no '>' after
+ * it, `[^>]*` rescans to the end of the string (200k such '<' in one inbound email
+ * held the request for close to a minute). So the rule runs up to the last '>'
+ * and the tail is kept as is — the same result in linear time.
+ */
+function replaceTag(s: string, tag: RegExp, replacement: string): string {
+  const end = s.lastIndexOf('>') + 1;
+  return s.slice(0, end).replace(tag, replacement) + s.slice(end);
+}
+
+/**
+ * `s.replace(/[ \t]+\n/g, '\n')` without the regex: on a long run of spaces that
+ * is not followed by a newline the regex retries from every space of the run.
+ */
+function trimSpacesBeforeNewlines(s: string): string {
+  if (!s.includes('\n')) return s;
+  const lines = s.split('\n');
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    const line = lines[i];
+    let end = line.length;
+    while (end > 0 && (line[end - 1] === ' ' || line[end - 1] === '\t')) end -= 1;
+    if (end !== line.length) lines[i] = line.slice(0, end);
+  }
+  return lines.join('\n');
+}
+
 /** Lightweight HTML → plain-text. Intentionally minimal: replies are usually short. */
 function htmlToText(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>\s*<p[^>]*>/gi, '\n')
-    .replace(/<\/?(div|p|li)[^>]*>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+  let s = replaceTag(html, /<br\s*\/?>/gi, '\n');
+  s = replaceTag(s, /<\/p>\s*<p[^>]*>/gi, '\n');
+  s = replaceTag(s, /<\/?(div|p|li)[^>]*>/gi, '\n');
+  s = replaceTag(s, /<[^>]+>/g, '');
+  s = s
     // Числовые сущности (&#1055; / &#x442;): mail.ru и часть клиентов шлют
     // html-only письма со ВСЕЙ кириллицей в таком виде — без декода тред-вью и
     // процитированная история (quoteHistory) превращаются в «кашу» из кодов.
@@ -42,10 +71,31 @@ function htmlToText(html: string): string {
     .replace(/&#x([0-9a-f]+);/gi, (m, hex: string) => decodeCodePoint(parseInt(hex, 16), m))
     .replace(/&([a-z]+);/gi, (m, name: string) => NAMED_HTML_ENTITIES[name.toLowerCase()] ?? m)
     // &amp; последним — чтобы двойное кодирование (&amp;lt;) не превращалось в "<"
-    .replace(/&amp;/gi, '&')
-    .replace(/[ \t]+\n/g, '\n')
+    .replace(/&amp;/gi, '&');
+  return trimSpacesBeforeNewlines(s)
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/**
+ * The matches of `/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi` in `s` as [attributes, body],
+ * in linear time. The regex rescans to the end of the string from every `<a` that
+ * has no '>' or no closing tag after it. Here the first such `<a` ends the search:
+ * a later `<a` would need a '>' and a closing tag after that same point, so none
+ * of them can match either.
+ */
+function* anchorMatches(s: string): Generator<[string, string]> {
+  const opening = /<a\b/gi;
+  const closing = /<\/a\s*>/gi;
+  for (let open = opening.exec(s); open; open = opening.exec(s)) {
+    const gt = s.indexOf('>', open.index + 2);
+    if (gt === -1) return;
+    closing.lastIndex = gt + 1;
+    const close = closing.exec(s);
+    if (!close) return;
+    yield [s.slice(open.index + 2, gt), s.slice(gt + 1, close.index)];
+    opening.lastIndex = closing.lastIndex;
+  }
 }
 
 export function extractBodyText(body: Email['body']): string | null {
@@ -74,9 +124,9 @@ export function extractImageLinks(body: Email['body']): ThreadImageLink[] {
   const seen = new Set<string>();
   // Only read quoted hrefs from anchors. Never render the original HTML or
   // infer an attachment from <img> tags (often mail-client icons/trackers).
-  for (const match of html.slice(0, 200_000).matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)) {
+  for (const [attributes, anchorBody] of anchorMatches(html.slice(0, 200_000))) {
     if (links.length >= MAX_IMAGE_LINKS) break;
-    const hrefMatch = match[1].match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    const hrefMatch = attributes.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
     const href = (hrefMatch?.[1] ?? hrefMatch?.[2] ?? '')
       .replace(/&#(\d+);/g, (m, dec: string) => decodeCodePoint(Number(dec), m))
       .replace(/&#x([0-9a-f]+);/gi, (m, hex: string) => decodeCodePoint(parseInt(hex, 16), m))
@@ -89,7 +139,7 @@ export function extractImageLinks(body: Email['body']): ThreadImageLink[] {
       const fileName = decodeURIComponent(url.pathname.split('/').pop() ?? '');
       if (!/\.(?:png|jpe?g|gif|webp)$/i.test(fileName) || seen.has(url.href)) continue;
       seen.add(url.href);
-      const label = htmlToText(match[2]);
+      const label = htmlToText(anchorBody);
       links.push({ url: url.href, name: label && label.length <= 120 ? label : fileName });
     } catch {
       // Ignore malformed links rather than exposing them to the client.
