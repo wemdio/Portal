@@ -8,7 +8,7 @@
 import { beginAdaptiveBatch, type VeCollectInfo } from '@/lib/verticalEngineV2/stages/baseCollect';
 import { finishVeAdaptiveBatch, newVeAdaptiveCollection, veReadyContactKeys, veSourceStrategyKey,
   type VeAdaptiveCollection, type VeBatchSpend } from '@/lib/verticalEngineV2/adaptiveCollection';
-import { stripUnfoundedSizeFilters, veCanWidenPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTask,
+import { normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veCanWidenPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTask,
   veSecondQueueTasks } from '@/lib/verticalEngineV2/planWidening';
 import { canResumePartialPreview, getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
 import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed } from '@/lib/verticalEngineV2/clinicSourcePolicy';
@@ -74,6 +74,70 @@ describe('основание размера в тексте гипотезы', (
     expect(stripUnfoundedSizeFilters({ tasks: [refinery] }, 'Крупные НПЗ').plan.tasks[0]).toBe(refinery);
     expect(veSecondQueueTask(refinery, veHypothesisSizeBasis(HYPOTHESES.refinery))?.directory_filters).toEqual(refineryScope);
     expect(JSON.stringify(refinery)).toBe(refineryBefore);
+
+    // A new plan for Aurora's generating companies must not buy an unrelated
+    // water-utility slice or treat a generic chemist vacancy as sector proof.
+    const powerScope = { market: 'ru', hypotheses: [{ title: 'Энергетические компании', broad: false,
+      description: 'ТЭЦ, ГРЭС, АЭС-смежные и генерирующие компании с химлабораториями воды, топлива, масел и выбросов. ЛИМС упорядочивает пробы, графики, приборы и отчётность.' }] };
+    const power = directory({ okvedCodes: ['35.1', '35.3'], regionCodes: ['78'], revenueFrom: 500_000_000 });
+    const water = directory({ okvedCodes: ['36', '37'], regionCodes: ['78'], revenueFrom: 200_000_000 });
+    const chemicalHh: VeCollectTask = { source: 'hh_live', rationale: 'Химлаборатории', hh_query: { area: '2',
+      date_from: '2026-08-15', date_to: '2026-09-15',
+      text: 'инженер-химик OR лаборант химического анализа OR химик лаборатории ТЭЦ OR ГРЭС OR электростанция OR водоканал' } };
+    const mixedPowerMaps: VeCollectTask = { source: 'yandex_maps', rationale: 'Площадки',
+      maps_query: { queries: ['ТЭЦ', 'ГРЭС', 'водоканал', 'очистные сооружения'], geo: 'Санкт-Петербург' } };
+    const oldPowerPlan = { tasks: [chemicalHh, power, water, mixedPowerMaps] };
+    const powerBefore = JSON.stringify(oldPowerPlan);
+    const fixedPower = normalizeVeGenerationSourcePlan(oldPowerPlan, powerScope);
+    expect(fixedPower.changed).toBe(true);
+    expect(fixedPower.plan.tasks).toHaveLength(3);
+    expect(fixedPower.plan.tasks[0]).toBe(power);
+    expect(fixedPower.plan.tasks[1].maps_query).toEqual({ queries: ['ТЭЦ', 'ГРЭС'], geo: 'Санкт-Петербург' });
+    expect(fixedPower.plan.tasks[2].hh_query).toEqual({ ...chemicalHh.hh_query,
+      text: '(инженер-химик OR лаборант химического анализа OR химик лаборатории) AND (ТЭЦ OR ГРЭС OR АЭС OR электростанция)' });
+    expect(JSON.stringify(oldPowerPlan)).toBe(powerBefore);
+    expect(normalizeVeGenerationSourcePlan(fixedPower.plan, powerScope)).toEqual({ plan: fixedPower.plan, changed: false });
+    for (const scope of [{ ...powerScope, market: 'us' }, { ...powerScope, hypotheses: [] },
+      { ...powerScope, hypotheses: [...powerScope.hypotheses, ...powerScope.hypotheses] },
+      ...[true, undefined, null].map((broad) => ({ ...powerScope,
+        hypotheses: [{ ...powerScope.hypotheses[0], broad }] })),
+      ...['ТЭЦ, ГРЭС и водоканалы с химлабораториями воды и топлива.',
+        'ТЭЦ и агрохолдинги с химлабораториями воды и топлива.',
+        'ТЭЦ с химлабораториями воды. А также энергетические подрядчики.',
+        'АЭС-смежные с химлабораториями воды.'].map((description) => ({ ...powerScope,
+        hypotheses: [{ ...powerScope.hypotheses[0], description }] }))]) {
+      expect(normalizeVeGenerationSourcePlan(oldPowerPlan, scope)).toEqual({ plan: oldPowerPlan, changed: false });
+    }
+    for (const text of ['инженер-химик OR лаборант Москва', '"инженер-химик" OR лаборант',
+      'инженер-химик AND (ТЭЦ OR АЭС)', 'инженер-химик NOT фармацевтика', 'NAME:химик OR лаборант',
+      'инженер-химик ТЭЦ OR лаборант химического анализа ГРЭС']) {
+      const unknown = { ...chemicalHh, hh_query: { ...chemicalHh.hh_query!, text } };
+      expect(normalizeVeGenerationSourcePlan({ tasks: [power, unknown] }, powerScope).plan.tasks[1]).toBe(unknown);
+    }
+    const geoQuery = { ...mixedPowerMaps, maps_query: { queries: ['ТЭЦ в Санкт-Петербурге', 'водоканал в Москве'], geo: 'Россия' } };
+    expect(normalizeVeGenerationSourcePlan({ tasks: [power, geoQuery] }, powerScope)).toEqual({ plan: { tasks: [power, geoQuery] }, changed: false });
+    const onlyWater = { tasks: [water] };
+    expect(normalizeVeGenerationSourcePlan(onlyWater, powerScope)).toEqual({ plan: onlyWater, changed: false });
+    const mixedCodes = directory({ ...power.directory_filters, okvedCodes: ['35.1', '35.3', '36.00', '37.00'] });
+    expect(normalizeVeGenerationSourcePlan({ tasks: [power, mixedCodes] }, powerScope).plan.tasks).toEqual([power]);
+    // A saved plan is read-only context when opening its already budgeted
+    // second queue: a new water slice must not reopen the wrong audience.
+    const wideningScope = { ...powerScope, existingTasks: oldPowerPlan.tasks };
+    const newWater = veSecondQueueTask(water, false)!;
+    const newPower = veSecondQueueTask(power, false)!;
+    expect(normalizeVeGenerationSourcePlan({ tasks: [newWater] }, wideningScope))
+      .toEqual({ plan: { tasks: [] }, changed: true });
+    expect(normalizeVeGenerationSourcePlan({ tasks: [newWater, newPower] }, wideningScope))
+      .toEqual({ plan: { tasks: [newPower] }, changed: true });
+    expect(normalizeVeGenerationSourcePlan({ tasks: [power] }, wideningScope))
+      .toEqual({ plan: { tasks: [] }, changed: true });
+    expect(JSON.stringify(oldPowerPlan)).toBe(powerBefore);
+    const newPowerPlan = { tasks: [newPower] };
+    expect(normalizeVeGenerationSourcePlan(newPowerPlan, wideningScope)).toEqual({ plan: newPowerPlan, changed: false });
+    const unknownHh = { ...chemicalHh, hh_query: { ...chemicalHh.hh_query!, text: 'инженер AND (ТЭЦ OR АЭС)' } };
+    const reorderOnly = normalizeVeGenerationSourcePlan({ tasks: [unknownHh, power] }, powerScope);
+    expect(reorderOnly).toEqual({ plan: { tasks: [power, unknownHh] }, changed: true });
+    expect(normalizeVeGenerationSourcePlan(reorderOnly.plan, powerScope)).toEqual({ plan: reorderOnly.plan, changed: false });
 
     // Event&Marketing saved plan shapes, replayed as fresh plans: prefer the
     // specialty catalog without touching explicit size, geo or paid HH scope.

@@ -96,7 +96,7 @@ import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransient
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veAdaptiveSourceDeferred, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
-import { stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
+import { normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
   VE_PLAN_MAX_TASKS, VE_PLAN_WIDENING_LIMIT, VE_SIZE_FILTER_KEYS } from '../planWidening';
 import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
@@ -1088,7 +1088,8 @@ async function buildPlan(
   }
 
   // Широкая гипотеза (сектор для ежедневного добора) — только в плане своей базы.
-  const broad = hypothesisId ? await readVeHypothesisBroad(ctx, hypothesisId) : false;
+  const broadFlag = hypothesisId ? await readVeHypothesisBroad(ctx, hypothesisId) : null;
+  const broad = broadFlag === true;
   const promptInput = {
     verticalName: vertical.name,
     verticalSummary: vertical.summary,
@@ -1130,8 +1131,13 @@ async function buildPlan(
   // named in the audience (payment providers still are not transfer branches).
   const niche = market !== 'us' ? detectVeNicheSourceProfile(hypotheses) : null;
   const nichePlan = niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped;
-  const clinic = market !== 'us' && hypothesisId && !broad ? detectVeClinicSourceProfile(hypotheses) : null;
-  const plan = clinic ? normalizeVeClinicSourcePlan(nichePlan, clinic).plan : nichePlan;
+  const clinic = market !== 'us' && hypothesisId && broadFlag === false ? detectVeClinicSourceProfile(hypotheses) : null;
+  const clinicPlan = clinic ? normalizeVeClinicSourcePlan(nichePlan, clinic).plan : nichePlan;
+  const generation = normalizeVeGenerationSourcePlan(clinicPlan, {
+    market, hypotheses: hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad })) : [],
+  });
+  const plan = generation.plan;
+  if (generation.changed) stageLog(ctx, '[base_collect] план генерации: профильные каталоги впереди, водоканалы исключены, вакансии ограничены отраслью');
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {
     plan,
@@ -1140,7 +1146,7 @@ async function buildPlan(
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
     usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status,
-      ...(hypothesisId ? { broad } : {}) })),
+      ...(hypothesisId && broadFlag !== null ? { broad } : {}) })),
   };
 }
 
@@ -3959,28 +3965,37 @@ function veTaskCanSupply(task: VeCollectTaskState, info: VeCollectInfo): boolean
 }
 
 /**
- * Широкая ли гипотеза базы. Сбой чтения или колонки ещё нет (воркер обновился
- * раньше миграции 20260923_0001) — обычная гипотеза, как до этой правки.
+ * Широкая ли гипотеза базы. Unknown сохраняет прежний план без расширения
+ * и не разрешает новые сужающие правила источников.
  */
-async function readVeHypothesisBroad(ctx: VeStageContext, hypothesisId: string): Promise<boolean> {
+async function readVeHypothesisBroad(ctx: VeStageContext, hypothesisId: string): Promise<boolean | null> {
   try {
     const { data, error } = await ctx.supabase.from('ve_hypotheses').select('broad').eq('id', hypothesisId).maybeSingle();
-    return !error && (data as { broad?: unknown } | null)?.broad === true;
+    const broad = (data as { broad?: unknown } | null)?.broad;
+    return !error && typeof broad === 'boolean' ? broad : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-/** Сбой чтения не снимает порог: тогда он ослабляется, как обоснованный. */
-async function readVeHypothesisSizeBasis(ctx: VeStageContext, hypothesisId: string | null | undefined): Promise<boolean> {
-  if (!hypothesisId) return true;
+/** Read once for both size and source scope. Unknown scope never narrows a
+ * plan; a failed read preserves the previous conservative size fallback. */
+async function readVeHypothesisSourceBasis(ctx: VeStageContext, hypothesisId: string | null | undefined): Promise<{
+  sizeBasis: boolean;
+  hypotheses: Array<{ title: string; description: string; broad: boolean }>;
+}> {
+  const unknown = { sizeBasis: true, hypotheses: [] };
+  if (!hypothesisId) return unknown;
   try {
-    const { data, error } = await ctx.supabase.from('ve_hypotheses').select('title, description').eq('id', hypothesisId).maybeSingle();
-    if (error || !data) return true;
-    const row = data as { title?: unknown; description?: unknown };
-    return veHypothesisSizeBasis(`${typeof row.title === 'string' ? row.title : ''}\n${typeof row.description === 'string' ? row.description : ''}`);
+    const { data, error } = await ctx.supabase.from('ve_hypotheses').select('title, description, broad').eq('id', hypothesisId).maybeSingle();
+    if (error || !data) return unknown;
+    const row = data as { title?: unknown; description?: unknown; broad?: unknown };
+    const title = typeof row.title === 'string' ? row.title : '';
+    const description = typeof row.description === 'string' ? row.description : '';
+    return { sizeBasis: veHypothesisSizeBasis(`${title}\n${description}`),
+      hypotheses: row.broad === false ? [{ title, description, broad: false }] : [] };
   } catch {
-    return true;
+    return unknown;
   }
 }
 
@@ -4000,8 +4015,13 @@ async function widenExhaustedPlan(
   if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
   const lead = cause === 'narrow_market' ? 'Текущий срез мал для базы по прогнозу'
     : cause === 'dry_sources' ? 'Источники перестали давать контакты' : 'План исчерпан раньше цели';
-  const sizeBasis = await readVeHypothesisSizeBasis(ctx, base.hypothesis_id);
-  const added = veSecondQueueTasks(tasks.map((task) => task.task), sizeBasis);
+  const { sizeBasis, hypotheses } = await readVeHypothesisSourceBasis(ctx, base.hypothesis_id);
+  const existingTasks = tasks.map((task) => task.task);
+  // Only proposed NEW tasks are normalized. The original paid tasks, cursors,
+  // harvest and strategy keys remain untouched, including on a retry.
+  const added = normalizeVeGenerationSourcePlan({ tasks: veSecondQueueTasks(existingTasks, sizeBasis) }, {
+    market: ctx.market ?? '', hypotheses, existingTasks,
+  }).plan.tasks;
   if (added.length) {
     for (const task of added) tasks.push({ source: task.source, task, status: 'pending', child_job_id: null, rows: 0 });
     policy.active_source = veSourceStrategyKey(added[0]);

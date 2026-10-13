@@ -3110,6 +3110,59 @@ describe('base_collect: план кончился раньше цели', () => 
     expect(info.adaptive_collection).toMatchObject({ widenings: 2, replan_attempts: 1 });
     expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
     expect(db.getRows('ve_jobs').filter((row) => row.stage === 'base_analyze')).toHaveLength(1);
+
+    // A saved generation plan may still own exhausted water-utility tasks.
+    // Scope the newly widened tasks only: old acquisition work stays recorded
+    // and must not be searched, classified or validated a second time.
+    const power = { ...MEAT_TASK, directory_filters: {
+      includeIp: false, okvedCodes: ['35.1', '35.3'], regionCodes: ['78'], revenueFrom: 500_000_000,
+    } };
+    const water = { ...MEAT_TASK, directory_filters: {
+      includeIp: false, okvedCodes: ['36', '37'], regionCodes: ['78'], revenueFrom: 200_000_000,
+    } };
+    const oldEnergy = exhaustedInfo(power, {
+      plan: { tasks: [power, water] },
+      tasks: [power, water].map((task, index) => ({
+        source: task.source, task, status: 'done', child_job_id: null, rows: 1,
+        harvest: [processed[index]], exhausted: true,
+        directory_cursors: { old_scope: index === 0 ? 90 : 78 },
+      })),
+      target_checkpoint: { completed_round: 2, processed_rows: processed.length,
+        seen_rows: processed.map(({ company, inn, email, website, address, source_detail }) => ({
+          company, inn, email, website, address, source_detail,
+        })) },
+    });
+    const oldTasks = JSON.parse(JSON.stringify(oldEnergy.tasks));
+    const oldCheckpoint = JSON.parse(JSON.stringify(oldEnergy.target_checkpoint));
+    const energyDb = seedBase(oldEnergy, {
+      title: 'Энергетические компании', broad: false,
+      description: 'ТЭЦ, ГРЭС, АЭС-смежные и генерирующие компании с химлабораториями воды, топлива, масел и выбросов. ЛИМС упорядочивает пробы, графики, приборы и отчётность.',
+    });
+    jest.mocked(searchRows).mockClear();
+    jest.mocked(callLLMWithSchema).mockClear();
+    jest.mocked(fetchVeRelevanceEvidence).mockClear();
+    mockFindIrrelevantRows.mockClear();
+    const energyBase = await wake(energyDb);
+    const energy = energyBase.collect_info as VeCollectInfo;
+    expect(energyBase).toMatchObject({ status: 'collecting', row_count: ready.length, data: ready });
+    expect(energy.tasks).toHaveLength(3);
+    expect(energy.tasks!.slice(0, 2)).toEqual(oldTasks);
+    expect(energy.plan?.tasks.slice(0, 2)).toEqual([power, water]);
+    expect(energy.tasks![2]).toMatchObject({ status: 'pending', rows: 0, child_job_id: null,
+      task: { widened: 'second_queue', directory_filters: {
+        includeIp: false, okvedCodes: ['35.1', '35.3'], regionCodes: ['78'],
+      } } });
+    expect(energy.tasks![2].task.directory_filters).not.toHaveProperty('revenueFrom');
+    expect(energy.target_checkpoint).toMatchObject({ ...oldCheckpoint, completed_round: 3 });
+    expect(energy.target_progress).toMatchObject({ ...oldEnergy.target_progress, status: 'collecting', round: 4 });
+    expect(energy.adaptive_collection).toMatchObject({ widenings: 1,
+      active_source: veSourceStrategyKey(energy.tasks![2].task) });
+    expect(searchRows).not.toHaveBeenCalled();
+    expect(callLLMWithSchema).not.toHaveBeenCalled();
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+    expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
+    expect(energyDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(energyDb.getRows('parser_jobs')).toHaveLength(0);
   });
 
   it('новый план не сохраняет порог без основания, а обоснованный — сохраняет и расширяет по правилу', async () => {
