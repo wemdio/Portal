@@ -23,6 +23,7 @@ import { VE_RELEVANCE_TARGET_RULES } from '@/lib/verticalEngineV2/relevanceRevie
 import { readRelevanceCheckpoint, relevanceHash } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import type { VeRelevanceDecision } from '@/lib/verticalEngineV2/relevanceDecision';
 import savedBeforeRelease from './fixtures/relevanceCheckpointBeforeRulesV2.json';
+import { veMedicalScopeNote } from '@/lib/verticalEngineV2/relevanceMedical';
 
 const FOOD = { verticalName: 'Пищевые заводы',
   verticalSummary: 'Производители пищевой и кормовой продукции с рецептурами, партиями, сроками годности, ветсертификацией и поставками в сети; решение обычно у операционного директора, директора по производству или ИТ-директора. Покупают продукт клиента, чтобы управлять рецептурами, прослеживаемостью, сменами, складами сырья и выпуском.' };
@@ -256,6 +257,26 @@ describe('VE2 relevance selection rules', () => {
     await findIrrelevantRows({ verticalName: FOOD.verticalName, verticalSummary: FOOD.verticalSummary, language: 'ru',
       fetchEvidence: offline(), rows: [{ company: 'Компания', description: QUOTES.meat }] });
     expect(calls.requests.find((request) => request.kind === 'classify')?.user).toContain(SUMMARY_ONLY.meat);
+    const medical = provider();
+    await findIrrelevantRows({ verticalName: 'Медицина', hypothesisTitle: 'Остеопатические клиники',
+      hypothesisDescription: 'Лицензированные центры остеопатии и мануальной терапии с несколькими врачами.',
+      hypothesisOrigin: 'generated', language: 'ru', triage: true, fetchEvidence: offline(),
+      rows: [{ company: 'Пример', description: 'В клинике проводят остеопатическое лечение.' }] });
+    for (const kind of ['rubric', 'classify', 'review']) {
+      const prompt = medical.requests.find((request) => request.kind === kind)?.user ?? '';
+      expect(prompt).toContain('MEDICAL PROVIDERS:');
+      expect(prompt).toContain('Do not infer an operating block merely from surgery');
+    }
+    for (const origin of ['manual', undefined] as const) {
+      expect(veMedicalScopeNote('Target hypothesis: Остеопатические клиники', origin)).toBe('');
+    }
+    for (const title of ['Пищевые заводы', 'Оборудование для стоматологий', 'Платёжные сервисы для стоматологий',
+      'Остеопатические клиники и детские сады', 'Обучение врачей-остеопатов']) {
+      expect(veMedicalScopeNote('Target hypothesis: ' + title, 'generated')).toBe('');
+    }
+    for (const description of ['Обязательно с лицензией.', 'Строго от 5 врачей.', 'Только с действующей лицензией.']) {
+      expect(veMedicalScopeNote('Target hypothesis: Остеопатические клиники\n' + description, 'generated')).toBe('');
+    }
   });
 
   it('keeps the closed lists of structural conditions exact and free of size, in the rules and in the Jev checklist', () => {

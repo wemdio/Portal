@@ -160,6 +160,8 @@ import { searchVeNicheDirectoryRows } from '../nicheDirectory';
 import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyHint } from '../paymentCompanyDirectory';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed,
   type VeNicheSourceProfile } from '../nicheSourcePolicy';
+import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed,
+  type VeClinicSourceProfile } from '../clinicSourcePolicy';
 import { VeCatalogRepairSchema, VeSourcePlanSchema } from '../schemas';
 import type { VeBase, VeJob, VeProject, VeVertical } from '../types';
 import {
@@ -1127,7 +1129,9 @@ async function buildPlan(
   // Broad removes incidental size/hiring restrictions, not the business model
   // named in the audience (payment providers still are not transfer branches).
   const niche = market !== 'us' ? detectVeNicheSourceProfile(hypotheses) : null;
-  const plan = niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped;
+  const nichePlan = niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped;
+  const clinic = market !== 'us' && hypothesisId && !broad ? detectVeClinicSourceProfile(hypotheses) : null;
+  const plan = clinic ? normalizeVeClinicSourcePlan(nichePlan, clinic).plan : nichePlan;
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {
     plan,
@@ -1135,7 +1139,8 @@ async function buildPlan(
     sliceProbe,
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
-    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status, broad })),
+    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status,
+      ...(hypothesisId ? { broad } : {}) })),
   };
 }
 
@@ -1861,6 +1866,7 @@ async function dispatchTask(
   existingContactsOnly = false,
   sourceProfile?: VeNicheSourceProfile,
   audienceContext?: string,
+  clinicProfile?: VeClinicSourceProfile | null,
 ): Promise<void> {
   const { task } = state;
 
@@ -1871,7 +1877,8 @@ async function dispatchTask(
       try {
         const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
           context: audienceContext ?? task.rationale,
-          rubricAllowed: sourceProfile ? (label) => veNicheRubricAllowed(sourceProfile, label) : undefined,
+          rubricAllowed: sourceProfile ? (label) => veNicheRubricAllowed(sourceProfile, label)
+            : clinicProfile && isVeClinicCatalogTask(task, clinicProfile) ? (label) => veClinicRubricAllowed(clinicProfile, label) : undefined,
           signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
         state.catalog = { version: 1, filters };
       } catch (error) {
@@ -2795,6 +2802,30 @@ function isRetiredNicheHarvestRow(info: VeCollectInfo, task: VeCollectTaskState,
     && (veAdaptiveSourceDeferred(policy, key) || veAdaptiveSourceDry(policy.completed, key)));
 }
 
+function clinicProfileForInfo(info: VeCollectInfo, market: VeMarket | undefined, hypothesisId: string | null | undefined): VeClinicSourceProfile | null {
+  // Legacy title-only snapshots do not establish whether this was a broad
+  // audience. Keep their old scope rather than guessing or adding a DB read.
+  return hypothesisId && market !== 'us' && info.hypotheses?.every((hypothesis) => hypothesis.broad === false)
+    ? detectVeClinicSourceProfile(info.hypotheses) : null;
+}
+/** Prefer an available specialist catalogue over the whole medical sector.
+ * This changes only scheduling: saved queries, cursors, receipts and economic
+ * holds stay intact. A weak/exhausted catalogue never blocks the fallback. */
+function clinicSourceKeys(info: VeCollectInfo, available: string[], market: VeMarket | undefined,
+  hypothesisId: string | null | undefined): string[] {
+  const profile = clinicProfileForInfo(info, market, hypothesisId);
+  const policy = info.adaptive_collection;
+  if (!profile || !policy || info.construct?.status === 'dispatched' || info.preview_pipeline?.batches.length
+    || info.tasks?.some((state) => state.status === 'dispatched')) return available;
+  const exact = new Set((info.tasks ?? []).filter((state) => state.status !== 'failed' && !state.unavailable
+    && isVeClinicCatalogTask(state.task, profile)
+    && (!state.catalog?.filters.categories?.length || state.catalog.filters.categories.every((label) => veClinicRubricAllowed(profile, label))))
+    .map((state) => veSourceStrategyKey(state.task)));
+  const preferred = available.filter((key) => exact.has(key) && !veAdaptiveLowYield(policy.completed, key)
+    && !veAdaptiveSourceDry(policy.completed, key) && !veAdaptiveSourceDeferred(policy, key));
+  return preferred.length ? preferred : available;
+}
+
 async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, available: VeUnifiedRow[]): Promise<VeUnifiedRow[]> {
   available = projectAllowedRows(ctx, available);
   if (!available.length || info.adaptive_collection?.pending) return info.adaptive_collection?.pending ? [] : available;
@@ -2802,7 +2833,7 @@ async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, 
   const policy = info.adaptive_collection;
   if (policy) {
     const keys = [...new Set(available.map(candidateSourceKey).filter((key): key is string => !!key))];
-    const selected = chooseVeAdaptiveSource(policy, keys);
+    const selected = chooseVeAdaptiveSource(policy, clinicSourceKeys(info, keys, ctx.market, base.hypothesis_id));
     if (selected) {
       if (policy.active_source && policy.active_source !== selected) {
         policy.switches += 1;
@@ -2905,7 +2936,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     && !veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task.task)));
   const planExhausted = policy.replan_reason === 'plan_exhausted';
   if (policy.replan_needed && !planExhausted && alternatives.length) {
-    policy.active_source = chooseVeAdaptiveSource(policy, alternatives.map((task) => veSourceStrategyKey(task.task)));
+    policy.active_source = chooseVeAdaptiveSource(policy, clinicSourceKeys(info, alternatives.map((task) => veSourceStrategyKey(task.task)), market, base.hypothesis_id));
     policy.replan_needed = false; delete policy.replan_reason; policy.switches += 1;
     policy.note = 'Низкий выход: автоматически переключились на другой источник из плана.';
     await persistCollectInfo(ctx, base.id, info);
@@ -2962,14 +2993,19 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   }
   const activeDry = !!policy.active_source && (!!veAdaptiveSourceDry(policy.completed, policy.active_source)
     || !!veAdaptiveSourceDeferred(policy, policy.active_source));
-  if (!policy.active_source || activeDry || !available.some((task) => veSourceStrategyKey(task.task) === policy.active_source)) {
-    const chosen = chooseVeAdaptiveSource(policy, available.map((task) => veSourceStrategyKey(task.task)));
+  const availableKeys = available.map((task) => veSourceStrategyKey(task.task));
+  const preferredKeys = clinicSourceKeys(info, availableKeys, market, base.hypothesis_id);
+  if (!policy.active_source || activeDry || !preferredKeys.includes(policy.active_source)) {
+    const chosen = chooseVeAdaptiveSource(policy, preferredKeys);
     // Сухие все: прежний источник остаётся активным, чтобы не открыть разом
     // все задачи плана. Партии из него не будет (prepareAdaptiveCandidates).
     if (activeDry && !chosen) return;
     if (activeDry) {
       policy.switches += 1;
       policy.note = 'Источник перестал давать контакты: следующая партия — из другого источника плана.';
+    } else if (policy.active_source && chosen && policy.active_source !== chosen && preferredKeys.length < availableKeys.length) {
+      policy.switches += 1;
+      policy.note = 'Сначала проверяем профильный каталог клиник. Остальные источники и их позиции сохранены.';
     }
     policy.active_source = chosen;
     await persistCollectInfo(ctx, base.id, info);
@@ -3405,10 +3441,11 @@ async function checkCollectedRelevance(args: {
     const verticalName = (vrow as { name?: string } | null)?.name ?? '';
     let hypothesisTitle = '';
     let hypothesisDescription = '';
+    let hypothesisOrigin: 'generated' | 'manual' | undefined;
     if (base.hypothesis_id) {
       const { data: hypothesisRow, error: hypothesisError } = await ctx.supabase
         .from('ve_hypotheses')
-        .select('title, description')
+        .select('title, description, origin')
         .eq('id', base.hypothesis_id)
         .eq('project_id', job.project_id)
         .eq('vertical_id', base.vertical_id)
@@ -3419,6 +3456,8 @@ async function checkCollectedRelevance(args: {
         hypothesisTitle = (hypothesisRow as { title?: string } | null)?.title ?? '';
         hypothesisDescription =
           (hypothesisRow as { description?: string | null } | null)?.description ?? '';
+        const origin = (hypothesisRow as { origin?: unknown } | null)?.origin;
+        if (origin === 'generated' || origin === 'manual') hypothesisOrigin = origin;
         if (!hypothesisTitle.trim()) {
           throw new Error(
             `гипотеза relevance-gate ${base.hypothesis_id} не найдена или не имеет title`,
@@ -3433,6 +3472,7 @@ async function checkCollectedRelevance(args: {
       verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
       hypothesisTitle,
       hypothesisDescription,
+      hypothesisOrigin,
       language: market === 'us' ? 'en' : 'ru',
       log: (m) => stageLog(ctx, m),
       signal: ctx.signal,
@@ -4963,7 +5003,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // остальные потребовали бы платного поиска сайта ради второй очереди.
       await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
         () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened),
-        info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'));
+        info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'),
+        clinicProfileForInfo(info, market, base.hypothesis_id));
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -5144,12 +5185,18 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     : (info.construct || info.adaptive_collection?.pending) && info.search_policy?.construct_rows ? info.search_policy.construct_rows
       : orderedKept.slice(0, info.adaptive_collection ? veAdaptiveCandidateLimit(target!)
         : info.source_contact_recovery ? Math.min(limit, PREVIEW_BATCH_SIZE) : limit);
+  // Current exclusions may remove every source row while its already-owned
+  // child is still validating other addresses. Finish that child before
+  // completing this round or moving to another source; do not buy a new one.
+  const hasDispatchedConstruct = info.construct?.status === 'dispatched' && Boolean(info.construct.bc_job_id);
 
-  if (merged.length === 0 && target && info.adaptive_collection && !info.adaptive_collection.pending
+  if (merged.length === 0 && !hasDispatchedConstruct && target && info.adaptive_collection && !info.adaptive_collection.pending
     && !info.preview_pipeline?.error && !failed.length && target.ready_rows < target.ready_target) {
-    const nextSource = tasks.find((task) => task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)
+    const nextSources = tasks.filter((task) => task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)
       && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source
       && !veAdaptiveSourceDry(info.adaptive_collection!.completed, veSourceStrategyKey(task.task)));
+    const nextKey = clinicSourceKeys(info, nextSources.map((task) => veSourceStrategyKey(task.task)), market, base.hypothesis_id)[0];
+    const nextSource = nextSources.find((task) => veSourceStrategyKey(task.task) === nextKey);
     if (nextSource) {
       info.adaptive_collection.active_source = veSourceStrategyKey(nextSource.task);
       info.adaptive_collection.switches += 1;
@@ -5160,7 +5207,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
 
-  if (info.preview_pipeline && merged.length === 0 && waiting.length > 0
+  if (info.preview_pipeline && merged.length === 0 && !hasDispatchedConstruct && waiting.length > 0
     && !info.preview_pipeline.error && (target?.ready_rows ?? 0) < (target?.ready_target ?? 500)) {
     await requeueSelf(ctx, job, 15_000);
     return { result: { waiting: true, base_id: baseId, pending_sources: waiting.map((task) => task.source) },
@@ -5181,7 +5228,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     finished_at: new Date().toISOString(),
   };
 
-  if (merged.length === 0) {
+  if (merged.length === 0 && !hasDispatchedConstruct) {
     if (target) return await completeTargetRound({
       ctx, job, base, info, progress: target, candidates: [], rows: [],
       columns: [...VE_AUTO_COLLECT_COLUMNS], stats, hasBufferedCandidates: false,
@@ -5269,7 +5316,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const candidateStatsChanged = !sameCollectSnapshot(info.stats, candidateStats);
   info.stats = candidateStats;
   let construct = info.construct;
-  if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
+  if ((!construct || construct.status === 'dispatched') && (hasDispatchedConstruct || needsConstruct(merged))) {
     if (!construct?.bc_job_id) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
@@ -5320,9 +5367,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // Джоба могла быть поставлена до обязательного split_emails. Её
       // row-level validation status нельзя безопасно прикрепить к первому
       // адресу merged-ячейки: лучший статус мог относиться ко второму.
-      // Терминальную legacy-джобу не импортируем, а один раз пересобираем по
-      // текущему контракту; новая selected_steps уже содержит split_emails.
-      if (bc?.selected_steps && !bc.selected_steps.includes('split_emails')) {
+      // Терминальную legacy-джобу не импортируем. Если остались доступные
+      // кандидаты, один раз пересобираем с обязательным split_emails.
+      const legacyWithoutSplit = Boolean(bc?.selected_steps && !bc.selected_steps.includes('split_emails'));
+      if (legacyWithoutSplit && merged.length > 0) {
         const replacement = await dispatchConstructJob({
           ctx,
           ownerId: project.created_by,
@@ -5350,7 +5398,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       }
       // IMPORT: failed/cancelled базу НЕ валит — импортируем частичный data,
       // если он есть, иначе идём в analyzing без обогащения.
-      const imported = await importConstructRows(ctx, bcJobId);
+      // There is nothing safe to rebuild when all current inputs were
+      // excluded. Old row-level verdicts still cannot identify which sibling
+      // email was validated, so discard that legacy result without a new job.
+      const imported = legacyWithoutSplit ? null : await importConstructRows(ctx, bcJobId);
       const failNote =
         bcStatus === 'completed'
           ? null
@@ -5369,8 +5420,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       } else {
         info.construct = {
           ...construct,
-          status: bcStatus === 'completed' ? 'done' : bcStatus,
-          note: failNote
+          status: legacyWithoutSplit || bcStatus === 'completed' ? 'done' : bcStatus,
+          note: legacyWithoutSplit
+            ? 'Старый результат конструктора без разбиения email не импортирован: доступных исходных кандидатов не осталось; повторная проверка не запускалась'
+            : failNote
             ? `${failNote} — база без обогащения`
             : 'конструктор вернул пустые данные — база без обогащения',
         };
@@ -5380,7 +5433,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         `[base_collect] construct ${bcStatus}: ${
           imported
             ? `импортировано ${imported.rows.length} строк, почт ${imported.emailsFound}, валидных ${imported.validCount}`
-            : 'данных нет — база без обогащения'
+            : legacyWithoutSplit ? info.construct.note : 'данных нет — база без обогащения'
         }`,
       );
     } else {

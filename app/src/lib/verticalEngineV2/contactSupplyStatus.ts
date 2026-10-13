@@ -6,7 +6,7 @@ import { allocateContactSupplyTargets } from './contactSupplyPlanner';
 import { buildVeBaseAudienceSummary, type VeAudienceBase, type VeBaseAudienceSummary } from './baseAudienceSummary';
 import { localIsoDate } from './portalDeliveryTerm';
 import { loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
-import { createVeDeliveryIdentityResolver } from './projectExclusionDelivery';
+import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
 
 type SupplyStock = {
   ready: number; uploaded: number; uploaded_today: number; uncertain: number;
@@ -103,7 +103,7 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
   const blocked = await getBlockedEmailSet(instantlyDb, preset.client_user_id);
   const readyCandidates = rows.filter(row => row.status === 'ready' && !blocked.has(row.email_normalized));
   const policyRows = exclusions.inns.length + exclusions.domains.length > 0
-    ? await createVeDeliveryIdentityResolver(db, base.project_id)(readyCandidates) : [];
+    ? await createVeDeliveryIdentityResolver(db, base.project_id)(readyCandidates) : readyCandidates.map(veDeliveryPolicyRow);
   const ready = readyCandidates.filter((_, index) => !policyRows[index] || !matchVeProjectExclusion(policyRows[index], exclusions)).length;
   const stockAt = (timezone: string, businessDate: string): SupplyStock => ({
     ready,
