@@ -90,13 +90,14 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { loadVeProjectExclusions, matchVeProjectExclusion, filterVeProjectExcludedRows, type VeProjectExclusions } from '../projectExclusions';
 import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError, isVeTransientCatalogError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veAdaptiveSourceDeferred, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
-import { stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
+import { normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
   VE_PLAN_MAX_TASKS, VE_PLAN_WIDENING_LIMIT, VE_SIZE_FILTER_KEYS } from '../planWidening';
 import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
@@ -162,6 +163,8 @@ import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAl
   type VeNicheSourceProfile } from '../nicheSourcePolicy';
 import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed,
   type VeClinicSourceProfile } from '../clinicSourcePolicy';
+import { detectVeMediaSourceProfile, normalizeVeMediaSourcePlan, veMediaRubricAllowed,
+  type VeMediaSourceProfile } from '../mediaSourcePolicy';
 import { VeCatalogRepairSchema, VeSourcePlanSchema } from '../schemas';
 import type { VeBase, VeJob, VeProject, VeVertical } from '../types';
 import {
@@ -311,15 +314,42 @@ export function mapDirectoryRow(row: Record<string, unknown>): VeUnifiedRow {
   return vePaymentCompanyHint(mapped.inn) ? normalizeVeSourceContacts(mapped) : mapped;
 }
 
-/** Вакансия hh → работодатель + название вакансии как крючок персонализации. */
-export function mapHhRow(row: Record<string, unknown>, queryText: string): VeUnifiedRow {
-  return unifiedRow({
+/** Saved employer evidence only: no vacancy text, fetched pages or validation verdicts. */
+function hhEmployerText(value: unknown, limit: number): string {
+  if (typeof value !== 'string') return '';
+  const entities: Record<string, string> = { nbsp: ' ', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' };
+  const plain = sliceWholeChars(value, 0, 32_000)
+    .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&(?:#(x[\da-f]+|\d+)|([a-z]+));/gi, (entity, numeric: string | undefined, named: string | undefined) => {
+      if (!numeric) return entities[named?.toLowerCase() ?? ''] ?? entity;
+      const code = numeric[0].toLowerCase() === 'x' ? parseInt(numeric.slice(1), 16) : Number(numeric);
+      return Number.isSafeInteger(code) && code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+        ? String.fromCodePoint(code) : '';
+    });
+  return sliceWholeChars(stripUnstorableJsonChars(plain).replace(/\s+/g, ' ').trim(), 0, limit);
+}
+
+/** Вакансия hh → работодатель с уже сохранёнными описанием и отраслями. */
+export function mapHhRow(row: Record<string, unknown>, queryText: string): VeUnifiedRow & { description?: string } {
+  // The relevance gate reads category/description up to the same bounds.
+  // Industry labels remain separate lines, like the registry's activity labels.
+  const industries = Array.isArray(row.industries) ? row.industries : [row.industries];
+  const category = sliceWholeChars([...new Set(industries.map((industry) => hhEmployerText(
+    industry && typeof industry === 'object' ? (industry as Record<string, unknown>).name : industry, 600,
+  )).filter(Boolean))].join('\n'), 0, 600);
+  const description = hhEmployerText(row.company_description, 2000);
+  const mapped = unifiedRow({
     company: cell(row.company_name),
     website: cell(row.company_site_url),
     vacancy_title: cell(row.name),
     address: cell(row.area),
+    category,
     source_detail: `hh: ${queryText}`,
   });
+  // Optional source evidence already has a constructor/relevance column path;
+  // keep the stable public base header contract unchanged when it is absent.
+  return description ? { ...mapped, description } : mapped;
 }
 
 /** Организация Яндекс.Карт → унифицированная строка. */
@@ -1088,7 +1118,8 @@ async function buildPlan(
   }
 
   // Широкая гипотеза (сектор для ежедневного добора) — только в плане своей базы.
-  const broad = hypothesisId ? await readVeHypothesisBroad(ctx, hypothesisId) : false;
+  const broadFlag = hypothesisId ? await readVeHypothesisBroad(ctx, hypothesisId) : null;
+  const broad = broadFlag === true;
   const promptInput = {
     verticalName: vertical.name,
     verticalSummary: vertical.summary,
@@ -1130,8 +1161,15 @@ async function buildPlan(
   // named in the audience (payment providers still are not transfer branches).
   const niche = market !== 'us' ? detectVeNicheSourceProfile(hypotheses) : null;
   const nichePlan = niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped;
-  const clinic = market !== 'us' && hypothesisId && !broad ? detectVeClinicSourceProfile(hypotheses) : null;
-  const plan = clinic ? normalizeVeClinicSourcePlan(nichePlan, clinic).plan : nichePlan;
+  const clinic = market !== 'us' && hypothesisId && broadFlag === false ? detectVeClinicSourceProfile(hypotheses) : null;
+  const clinicPlan = clinic ? normalizeVeClinicSourcePlan(nichePlan, clinic).plan : nichePlan;
+  const generation = normalizeVeGenerationSourcePlan(clinicPlan, {
+    market, hypotheses: hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad })) : [],
+  });
+  const media = detectVeMediaSourceProfile({ market,
+    hypotheses: hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad: false })) : [] });
+  const plan = media ? normalizeVeMediaSourcePlan(generation.plan, media).plan : generation.plan;
+  if (generation.changed) stageLog(ctx, '[base_collect] план генерации: профильные каталоги впереди, водоканалы исключены, вакансии ограничены отраслью');
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {
     plan,
@@ -1140,7 +1178,7 @@ async function buildPlan(
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
     usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status,
-      ...(hypothesisId ? { broad } : {}) })),
+      ...(hypothesisId && broadFlag !== null ? { broad } : {}) })),
   };
 }
 
@@ -1867,6 +1905,7 @@ async function dispatchTask(
   sourceProfile?: VeNicheSourceProfile,
   audienceContext?: string,
   clinicProfile?: VeClinicSourceProfile | null,
+  mediaProfile?: VeMediaSourceProfile | null,
 ): Promise<void> {
   const { task } = state;
 
@@ -1878,7 +1917,8 @@ async function dispatchTask(
         const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
           context: audienceContext ?? task.rationale,
           rubricAllowed: sourceProfile ? (label) => veNicheRubricAllowed(sourceProfile, label)
-            : clinicProfile && isVeClinicCatalogTask(task, clinicProfile) ? (label) => veClinicRubricAllowed(clinicProfile, label) : undefined,
+            : clinicProfile && isVeClinicCatalogTask(task, clinicProfile) ? (label) => veClinicRubricAllowed(clinicProfile, label)
+            : mediaProfile ? (label) => veMediaRubricAllowed(mediaProfile, label) : undefined,
           signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
         state.catalog = { version: 1, filters };
       } catch (error) {
@@ -1895,6 +1935,23 @@ async function dispatchTask(
         return;
       }
       await save(); // Reuse the resolved filter after a read failure/redeploy.
+    }
+    if (mediaProfile) {
+      // A saved mapping may predate audience-aware selection. Only subtract
+      // wrong rubrics; never rewind its cursor or add a new paid search scope.
+      const categories = state.catalog.filters.categories?.filter((label) => veMediaRubricAllowed(mediaProfile, label)) ?? [];
+      if (!categories.length) {
+        state.status = 'done';
+        state.unavailable = true;
+        state.note = 'Сохранённые рубрики каталога не соответствуют выбранной гипотезе';
+        delete state.error;
+        await save();
+        return;
+      }
+      if (categories.length !== state.catalog.filters.categories?.length) {
+        state.catalog = { ...state.catalog, filters: { ...state.catalog.filters, categories } };
+        await save();
+      }
     }
     const excluded = await getExcludedKeys();
     state.harvest ??= [];
@@ -2086,7 +2143,7 @@ async function readChildRows(
   if (state.source === 'hh_live') {
     const { data, error } = await ctx.supabase
       .from('hh_vacancies')
-      .select('name, company_name, company_site_url, area')
+      .select('name, company_name, company_site_url, area, company_description, industries')
       .eq('job_id', jobId)
       .limit(limit);
     if (error) throw new Error(`hh_vacancies read: ${error.message}`);
@@ -2807,6 +2864,20 @@ function clinicProfileForInfo(info: VeCollectInfo, market: VeMarket | undefined,
   // audience. Keep their old scope rather than guessing or adding a DB read.
   return hypothesisId && market !== 'us' && info.hypotheses?.every((hypothesis) => hypothesis.broad === false)
     ? detectVeClinicSourceProfile(info.hypotheses) : null;
+}
+
+/** Read the selected hypothesis once for old title-only media checkpoints.
+ * This restores audience metadata, never source cursors, verdicts or budgets. */
+async function pinMediaAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  market: VeMarket): Promise<void> {
+  if (!base.hypothesis_id || info.hypotheses?.length !== 1 || info.hypotheses[0].broad !== undefined
+    || !detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses.map((hypothesis) => ({ ...hypothesis, broad: false })) })) return;
+  const { data, error } = await ctx.supabase.from('ve_hypotheses').select('id,title,description,status,broad')
+    .eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
+  if (error) throw new Error(`Source audience read: ${error.message}`);
+  if (!data || data.status === 'rejected') throw new Error('Source audience is no longer available');
+  info.hypotheses = [data as NonNullable<VeCollectInfo['hypotheses']>[number]];
+  await persistCollectInfo(ctx, base.id, info);
 }
 /** Prefer an available specialist catalogue over the whole medical sector.
  * This changes only scheduling: saved queries, cursors, receipts and economic
@@ -3959,28 +4030,37 @@ function veTaskCanSupply(task: VeCollectTaskState, info: VeCollectInfo): boolean
 }
 
 /**
- * Широкая ли гипотеза базы. Сбой чтения или колонки ещё нет (воркер обновился
- * раньше миграции 20260923_0001) — обычная гипотеза, как до этой правки.
+ * Широкая ли гипотеза базы. Unknown сохраняет прежний план без расширения
+ * и не разрешает новые сужающие правила источников.
  */
-async function readVeHypothesisBroad(ctx: VeStageContext, hypothesisId: string): Promise<boolean> {
+async function readVeHypothesisBroad(ctx: VeStageContext, hypothesisId: string): Promise<boolean | null> {
   try {
     const { data, error } = await ctx.supabase.from('ve_hypotheses').select('broad').eq('id', hypothesisId).maybeSingle();
-    return !error && (data as { broad?: unknown } | null)?.broad === true;
+    const broad = (data as { broad?: unknown } | null)?.broad;
+    return !error && typeof broad === 'boolean' ? broad : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-/** Сбой чтения не снимает порог: тогда он ослабляется, как обоснованный. */
-async function readVeHypothesisSizeBasis(ctx: VeStageContext, hypothesisId: string | null | undefined): Promise<boolean> {
-  if (!hypothesisId) return true;
+/** Read once for both size and source scope. Unknown scope never narrows a
+ * plan; a failed read preserves the previous conservative size fallback. */
+async function readVeHypothesisSourceBasis(ctx: VeStageContext, hypothesisId: string | null | undefined): Promise<{
+  sizeBasis: boolean;
+  hypotheses: Array<{ title: string; description: string; broad: boolean }>;
+}> {
+  const unknown = { sizeBasis: true, hypotheses: [] };
+  if (!hypothesisId) return unknown;
   try {
-    const { data, error } = await ctx.supabase.from('ve_hypotheses').select('title, description').eq('id', hypothesisId).maybeSingle();
-    if (error || !data) return true;
-    const row = data as { title?: unknown; description?: unknown };
-    return veHypothesisSizeBasis(`${typeof row.title === 'string' ? row.title : ''}\n${typeof row.description === 'string' ? row.description : ''}`);
+    const { data, error } = await ctx.supabase.from('ve_hypotheses').select('title, description, broad').eq('id', hypothesisId).maybeSingle();
+    if (error || !data) return unknown;
+    const row = data as { title?: unknown; description?: unknown; broad?: unknown };
+    const title = typeof row.title === 'string' ? row.title : '';
+    const description = typeof row.description === 'string' ? row.description : '';
+    return { sizeBasis: veHypothesisSizeBasis(`${title}\n${description}`),
+      hypotheses: row.broad === false ? [{ title, description, broad: false }] : [] };
   } catch {
-    return true;
+    return unknown;
   }
 }
 
@@ -4000,8 +4080,13 @@ async function widenExhaustedPlan(
   if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
   const lead = cause === 'narrow_market' ? 'Текущий срез мал для базы по прогнозу'
     : cause === 'dry_sources' ? 'Источники перестали давать контакты' : 'План исчерпан раньше цели';
-  const sizeBasis = await readVeHypothesisSizeBasis(ctx, base.hypothesis_id);
-  const added = veSecondQueueTasks(tasks.map((task) => task.task), sizeBasis);
+  const { sizeBasis, hypotheses } = await readVeHypothesisSourceBasis(ctx, base.hypothesis_id);
+  const existingTasks = tasks.map((task) => task.task);
+  // Only proposed NEW tasks are normalized. The original paid tasks, cursors,
+  // harvest and strategy keys remain untouched, including on a retry.
+  const added = normalizeVeGenerationSourcePlan({ tasks: veSecondQueueTasks(existingTasks, sizeBasis) }, {
+    market: ctx.market ?? '', hypotheses, existingTasks,
+  }).plan.tasks;
   if (added.length) {
     for (const task of added) tasks.push({ source: task.source, task, status: 'pending', child_job_id: null, rows: 0 });
     policy.active_source = veSourceStrategyKey(added[0]);
@@ -4825,6 +4910,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // The public wrapper already cloned the per-invocation context. Preserve
   // that identity so the loaded project rules accompany every helper call.
   ctx.market = market;
+  await pinMediaAudience(ctx, job, base, info, market);
   // Pin the cost policy before recovery early returns. Paid children keep
   // their immutable inputs; a resume does not buy search for their old backlog.
   if (target && market !== 'us' && !isRefill) {
@@ -5004,7 +5090,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
         () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened),
         info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'),
-        clinicProfileForInfo(info, market, base.hypothesis_id));
+        clinicProfileForInfo(info, market, base.hypothesis_id),
+        base.hypothesis_id ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +

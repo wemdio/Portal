@@ -39,7 +39,7 @@ const SIZE_BASIS: RegExp[] = [
   /\d\s*\+/,
   new RegExp(`(?<![${LETTER}])(от|более|свыше|больше|не менее)\\s+\\d`, 'i'),
   /\d[\d\s]*([–—-]\s*\d+\s*)?(сотрудник|работник|человек|агент|врач|кресел|кресла|филиал|точ[еки]|магазин|отделени|автомобил|машин)/i,
-  new RegExp(`(?<![${LETTER}])(гок|нпз)(и|ов|ам|а)?(?![${LETTER}])|горно-?обогатит|нефтеперерабатыва`, 'i'),
+  new RegExp(`(?<![${LETTER}])гок(и|ов|ам|а)?(?![${LETTER}])|горно-?обогатит`, 'i'),
 ];
 
 /** Размер компании назван в тексте гипотезы (заголовок + описание). */
@@ -192,4 +192,102 @@ export function veBroadHypothesisPlan(plan: VeSourcePlan): { plan: VeSourcePlan;
     tasks.push(next);
   }
   return { plan: changed ? { ...plan, tasks } : plan, changed };
+}
+
+const generationText = (value: string) => value.toLowerCase().replace(/ё/g, 'е')
+  .replace(/[-‐–—]/g, ' ').replace(/\s+/g, ' ').trim();
+const generationBuyer = /^(?:тэц|грэс|аэс(?: смежные)?|генерирующие компании|электростанции)$/;
+const generationRubric = /^(?:тэц|грэс|аэс|электростанци[яи]|теплоэлектроцентраль)$/;
+const waterRubric = /^(?:водоканал[ы]?|очистные сооружения)$/;
+const energyCode = (code: string) => /^35\.(?:1|3)(?:\.|$|\d)/.test(code.trim());
+const waterCode = (code: string) => /^(?:36|37)(?:\.|$)/.test(code.trim());
+
+/** Deliberately recognizes one unambiguous industrial audience. Unknown or
+ * mixed buyers keep their plan; water being tested is not a water utility. */
+function isGenerationLaboratoryScope(input: {
+  market: string;
+  hypotheses: Array<{ title: string; description?: string | null; broad?: boolean | null }>;
+}): boolean {
+  if (input.market !== 'ru' || input.hypotheses.length !== 1 || input.hypotheses[0].broad !== false) return false;
+  const hypothesis = input.hypotheses[0];
+  if (!/^(?:энергетические компании|генерирующие компании|электростанции)$/.test(generationText(hypothesis.title))) return false;
+  const description = generationText(hypothesis.description ?? '');
+  // Only the known audience sentence followed by an optional LIMS offer is
+  // understood here. Never discard a second, unfamiliar audience sentence.
+  const match = /^(.+?) с химлабораториями (.+?)(?:\.\s*(лимс\s+.*))?\.?$/.exec(description);
+  if (!match || /водоканал|водоснабжен|водоотведен|очистные сооружения|(?:^|\s)(?:кроме|без|не|также)(?:\s|$)/.test(description)) return false;
+  const buyers = match[1].split(/\s+(?:и|или)\s+|\s*[,;/]\s*/);
+  const specimens = match[2].replace(/\.$/, '').split(/\s+и\s+|\s*,\s*/);
+  return buyers.length > 0 && buyers.every((buyer) => generationBuyer.test(buyer.trim()))
+    && buyers.some((buyer) => buyer !== 'аэс смежные')
+    && specimens.length > 0 && specimens.every((item) => /^(?:воды|топлива|масел|выбросов)$/.test(item.trim()));
+}
+
+/** A proven old flat OR accidentally selected every chemist in every sector.
+ * Free-form constraints, geography and Boolean queries are never rewritten. */
+function scopedGenerationHh(text: string): string | null {
+  if (!/\sOR\s/.test(text) || /\b(?:AND|NOT)\b|["'()!:*]/i.test(text)) return null;
+  const roles = new Set<string>();
+  let hasUnscopedRole = false;
+  for (const term of text.split(/\s+OR\s+/)) {
+    const value = generationText(term);
+    if (generationRubric.test(value) || waterRubric.test(value)) continue;
+    const role = /^(инженер химик|лаборант химического анализа|химик лаборатории)(?: (?:тэц|грэс|аэс|электростанции))?$/.exec(value);
+    if (!role) return null;
+    if (value === role[1]) hasUnscopedRole = true;
+    roles.add(role[1] === 'инженер химик' ? 'инженер-химик' : role[1]);
+  }
+  if (!roles.size || !hasUnscopedRole) return null;
+  const query = `(${[...roles].join(' OR ')}) AND (ТЭЦ OR ГРЭС OR АЭС OR электростанция)`;
+  return query.length <= 300 ? query : null;
+}
+
+/** Fresh plans/replans only. No new source, paid action or budget; saved tasks
+ * with cursors, harvested companies and children must never pass through here. */
+export function normalizeVeGenerationSourcePlan(plan: VeSourcePlan, input: {
+  market: string;
+  hypotheses: Array<{ title: string; description?: string | null; broad?: boolean | null }>;
+  /** Widening only: immutable source definitions already owning saved cursors.
+   * They are an anchor/deduplication context, never part of the returned plan. */
+  existingTasks?: readonly VeCollectTask[];
+}): { plan: VeSourcePlan; changed: boolean } {
+  if (!isGenerationLaboratoryScope(input)) return { plan, changed: false };
+  let changed = false;
+  const generationCatalog = (task: VeCollectTask) => task.source === 'companies_directory'
+    ? !!task.directory_filters?.okvedCodes?.length && task.directory_filters.okvedCodes.every(energyCode)
+    : task.source === 'yandex_maps' && !!task.maps_query?.queries.length
+      && task.maps_query.queries.every((query) => generationRubric.test(generationText(query)));
+  const narrowed = plan.tasks.flatMap((task): VeCollectTask[] => {
+    if (task.source === 'companies_directory' && task.directory_filters?.okvedCodes?.length) {
+      const codes = task.directory_filters.okvedCodes.filter((code) => !waterCode(code));
+      if (codes.length === task.directory_filters.okvedCodes.length) return [task];
+      changed = true;
+      return codes.length ? [{ ...task, directory_filters: { ...task.directory_filters, okvedCodes: codes } }] : [];
+    }
+    if (task.source === 'yandex_maps' && task.maps_query?.queries.length) {
+      const queries = task.maps_query.queries.filter((query) => !waterRubric.test(generationText(query)));
+      if (queries.length === task.maps_query.queries.length) return [task];
+      changed = true;
+      return queries.length ? [{ ...task, maps_query: { ...task.maps_query, queries } }] : [];
+    }
+    const text = task.source === 'hh_live' && task.hh_query ? scopedGenerationHh(task.hh_query.text) : null;
+    if (!text || text === task.hh_query?.text) return [task];
+    changed = true;
+    return [{ ...task, hh_query: { ...task.hh_query!, text } }];
+  });
+  // Without a retained catalog for the intended audience, decline the repair
+  // rather than erase the whole plan or invent a replacement source.
+  if (!narrowed.some(generationCatalog) && !input.existingTasks?.some(generationCatalog)) return { plan, changed: false };
+  const ordered = [...narrowed.filter(generationCatalog), ...narrowed.filter((task) => !generationCatalog(task))];
+  if (ordered.some((task, index) => task !== narrowed[index])) changed = true;
+  if (!changed && !input.existingTasks?.length) return { plan, changed: false };
+  const keys = new Set(input.existingTasks?.map(veSourceStrategyKey));
+  const tasks = ordered.filter((task) => {
+    const key = veSourceStrategyKey(task);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  if (tasks.length !== ordered.length) changed = true;
+  return changed ? { plan: { ...plan, tasks }, changed: true } : { plan, changed: false };
 }
