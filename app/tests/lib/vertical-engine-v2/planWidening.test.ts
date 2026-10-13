@@ -12,6 +12,7 @@ import { normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veCanWidenP
   veSecondQueueTasks } from '@/lib/verticalEngineV2/planWidening';
 import { canResumePartialPreview, getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
 import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed } from '@/lib/verticalEngineV2/clinicSourcePolicy';
+import { detectVeMediaSourceProfile, isVeMediaCatalogTask, normalizeVeMediaSourcePlan, veMediaRubricAllowed } from '@/lib/verticalEngineV2/mediaSourcePolicy';
 import type { VeCollectTask } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 
 const HYPOTHESES = {
@@ -138,6 +139,74 @@ describe('основание размера в тексте гипотезы', (
     const reorderOnly = normalizeVeGenerationSourcePlan({ tasks: [unknownHh, power] }, powerScope);
     expect(reorderOnly).toEqual({ plan: { tasks: [power, unknownHh] }, changed: true });
     expect(normalizeVeGenerationSourcePlan(reorderOnly.plan, powerScope)).toEqual({ plan: reorderOnly.plan, changed: false });
+
+    // TypeType's narrow audiences previously inherited cinema/concert rubrics
+    // and all-sector designers from their parent media vertical.
+    for (const [title, description, profile, query, wrongQueries] of [
+      ['Игры и анимация', 'Игровые издатели, анимационные студии и владельцы IP с титрами, UI, мерчем и промо. Шрифт помогает создать узнаваемый мир и локализовать кириллицу.',
+        'games_animation', 'анимация', ['игровая студия', 'анимационная студия', 'кинотеатр', 'медиа-компания']],
+      ['Стриминги и ТВ', 'Онлайн-кинотеатры, телеканалы и видеоплатформы с большим объемом промо, титров, постеров и интерфейсов. Нужна узнаваемая экранная типографика.',
+        'streaming_tv', 'телекомпания', ['телестудия', 'кинотеатр', 'продюсерский центр', 'концертный зал', 'продакшн-студия']],
+    ] as const) {
+      const hypothesis = { title, description, broad: false };
+      expect(detectVeMediaSourceProfile({ market: 'ru', hypotheses: [hypothesis] })).toBe(profile);
+      for (const scope of [{ market: 'us', hypotheses: [hypothesis] }, { market: 'ru', hypotheses: [] },
+        { market: 'ru', hypotheses: [hypothesis, hypothesis] },
+        ...[true, null, undefined].map((broad) => ({ market: 'ru', hypotheses: [{ ...hypothesis, broad }] })),
+        { market: 'ru', hypotheses: [{ ...hypothesis, title: `${title} и музеи` }] },
+        { market: 'ru', hypotheses: [{ ...hypothesis, description: 'Телеканалы и офлайн-кинотеатры с собственным брендом.' }] },
+        { market: 'ru', hypotheses: [{ ...hypothesis, description: `${description} Также музеи.` }] },
+        ...['Онлайн-кинотеатры с собственным контентом и офлайн-кинотеатры.',
+          'Игровые издатели с собственными IP и музеи.',
+          'Онлайн-кинотеатры с большим объемом промо, титров, постеров и интерфейсов (а также офлайн-кинотеатры).',
+          'Игровые издатели с титрами, UI, мерчем и промо; а также музеи.',
+          'Телеканалы. Нужна узнаваемая экранная типографика; также офлайн-кинотеатры.',
+        ].map((description) => ({ market: 'ru', hypotheses: [{ ...hypothesis, description }] }))]) {
+        expect(detectVeMediaSourceProfile(scope)).toBeNull();
+      }
+      const mediaRegistry = directory({ okvedCodes: ['58', '59', '62', '63'], regionCodes: ['78'], revenueFrom: 25_000_000, employeesTo: 300 });
+      const mediaHh: VeCollectTask = { source: 'hh_live', rationale: 'Дизайнеры', hh_query: {
+        text: 'дизайнер OR бренд-дизайнер OR креативный директор', area: '2', date_from: '2026-09-01', date_to: '2026-09-30',
+      } };
+      const mediaMaps: VeCollectTask = { source: 'yandex_maps', rationale: 'Каталог',
+        maps_query: { queries: [...wrongQueries], geo: 'Санкт-Петербург' } };
+      const mediaPlan = { tasks: [mediaHh, mediaRegistry, mediaMaps, { ...mediaMaps, rationale: 'Повтор того же среза' }] };
+      const before = JSON.stringify(mediaPlan);
+      const media = normalizeVeMediaSourcePlan(mediaPlan, profile);
+      expect(media.changed).toBe(true);
+      expect(media.plan.tasks).toHaveLength(3);
+      expect(media.plan.tasks[0].maps_query).toEqual({ queries: [profile === 'games_animation' ? 'анимационная студия' : query], geo: 'Санкт-Петербург' });
+      expect(isVeMediaCatalogTask(media.plan.tasks[0], profile)).toBe(true);
+      expect(media.plan.tasks[1]).toBe(mediaRegistry);
+      expect(media.plan.tasks[2].hh_query).toEqual({ ...mediaHh.hh_query,
+        text: profile === 'games_animation'
+          ? 'геймдев OR "разработка игр" OR "издатель игр" OR "анимационная студия" OR мультипликация'
+          : '"онлайн-кинотеатр" OR телеканал OR видеоплатформа OR телевещание' });
+      expect(JSON.stringify(mediaPlan)).toBe(before);
+      expect(normalizeVeMediaSourcePlan(media.plan, profile)).toEqual({ plan: media.plan, changed: false });
+      for (const text of ['дизайнер Москва', 'дизайнер AND телеканал', '"игровая студия" OR анимация', 'дизайнер NOT казино']) {
+        const constrained = { ...mediaHh, hh_query: { ...mediaHh.hh_query!, text } };
+        expect(normalizeVeMediaSourcePlan({ tasks: [constrained] }, profile)).toEqual({ plan: { tasks: [constrained] }, changed: false });
+      }
+      const geographic = { ...mediaMaps, maps_query: { queries: [`${query} в Москве`], geo: 'Россия' } };
+      expect(normalizeVeMediaSourcePlan({ tasks: [geographic] }, profile)).toEqual({ plan: { tasks: [geographic] }, changed: false });
+      const precise = { ...mediaMaps, maps_query: { queries: profile === 'games_animation'
+        ? ['студия разработки игр', 'анимация', 'мультипликация'] : ['видеоплатформа', 'онлайн-кинотеатр'], geo: 'Санкт-Петербург' } };
+      expect(normalizeVeMediaSourcePlan({ tasks: [precise] }, profile)).toEqual({ plan: { tasks: [precise] }, changed: false });
+      const generic = { ...mediaMaps, maps_query: { queries: ['кинотеатр'], geo: 'Санкт-Петербург' } };
+      expect(normalizeVeMediaSourcePlan({ tasks: [generic] }, profile).plan.tasks[0].maps_query)
+        .toEqual({ queries: [query], geo: 'Санкт-Петербург' });
+      for (const label of ['Кинотеатры', 'Концертные залы', 'Студии звукозаписи', 'Казино', 'Компьютерные клубы', 'Аниматоры', 'Рекламные агентства']) {
+        expect(veMediaRubricAllowed(profile, label)).toBe(false);
+      }
+    }
+    for (const title of ['Медиа и развлечения', 'Дизайн для телеканалов', 'Маркетинг для игровых студий']) {
+      expect(detectVeMediaSourceProfile({ market: 'ru', hypotheses: [{ title, broad: false }] })).toBeNull();
+    }
+    expect(veMediaRubricAllowed('games_animation', 'Анимация')).toBe(true);
+    expect(veMediaRubricAllowed('games_animation', 'Разработка компьютерных игр')).toBe(true);
+    expect(veMediaRubricAllowed('streaming_tv', 'Телекомпании')).toBe(true);
+    expect(veMediaRubricAllowed('streaming_tv', 'Онлайн-кинотеатры')).toBe(true);
 
     // Event&Marketing saved plan shapes, replayed as fresh plans: prefer the
     // specialty catalog without touching explicit size, geo or paid HH scope.

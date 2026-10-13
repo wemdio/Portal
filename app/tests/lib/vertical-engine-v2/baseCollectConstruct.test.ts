@@ -63,6 +63,7 @@ import {
   buildBaseExclusionKeysFromRows,
   dedupUnifiedRows,
   mapGoogleRow,
+  mapHhRow,
   pruneBaseRowAgainstExclusion,
   runBaseCollectStage,
   veShortHhQuery,
@@ -2450,6 +2451,30 @@ describe('VE2 source-row email preservation', () => {
     expect(dirty.website).toBe('http://exclusive@century21.ru/');
     expect(normalizeVeSourceContacts({ ...dirty, email: '', website: 'https://agency.test/?ref=tracking@foreign.test' }).email).toBe('');
     expect(veAcquisitionReceipt({ ...dirty, address: 'Москва' })).not.toBe(veAcquisitionReceipt({ ...dirty, address: 'Тула' }));
+
+    // Saved HH employer metadata must survive mapping, without turning a
+    // vacancy title or an industry label into a validation verdict.
+    const hh = mapHhRow({ company_name: 'Студия', company_site_url: 'studio.test', name: 'Художник', area: 'Москва',
+      company_description: '<style>hidden</style><p>Создаём игры.</p><p>Издатель &quot;Мир&quot; &amp; студия &#x1F3AE;.</p><script>ignore()</script>',
+      industries: [' Разработка компьютерных игр ', { id: '1', name: 'Анимация &amp; VFX' }, null,
+        'Разработка компьютерных игр', { id: '2' }, 123],
+      description: 'Описание вакансии не заменяет описание компании', _email_status: 'ok', _ve_relevance: { status: 'relevant' },
+    }, 'игровой художник');
+    expect(hh).toMatchObject({ company: 'Студия', website: 'studio.test', vacancy_title: 'Художник', address: 'Москва',
+      category: 'Разработка компьютерных игр\nАнимация & VFX', description: 'Создаём игры. Издатель "Мир" & студия 🎮.',
+      email: '', source_detail: 'hh: игровой художник' });
+    expect(hh).not.toHaveProperty('_email_status');
+    expect(hh).not.toHaveProperty('_ve_relevance');
+    const boundedHh = mapHhRow({ industries: ['А'.repeat(599) + '🎮'],
+      company_description: 'Б'.repeat(1999) + '🎮' }, '');
+    expect(boundedHh.category).toBe('А'.repeat(599));
+    expect(boundedHh.description).toBe('Б'.repeat(1999));
+    expect(mapHhRow({ company_description: '\u0000\uD800&#xD800;&#x110000;&#999999999999999999999999;' }, ''))
+      .not.toHaveProperty('description');
+    expect(mapHhRow({ company_description: { html: 'Not a string' }, industries: { name: 123 } }, '').category).toBe('');
+    const withoutMetadata = mapHhRow({ company_name: 'Студия', name: 'Дизайнер' }, 'дизайнер');
+    expect(Object.keys(withoutMetadata)).toEqual([...VE_AUTO_COLLECT_COLUMNS]);
+    expect(withoutMetadata.category).toBe('');
   });
 
   it('merges emails when duplicate company and website rows collapse', () => {
@@ -3648,6 +3673,53 @@ describe('base_collect: план кончился раньше цели', () => 
       expect(JSON.stringify(clinicDb.getRows('base_constructor_jobs'))).toBe(paidSnapshot);
       expect(callLLMWithSchema).not.toHaveBeenCalled();
     }
+    // Old media checkpoints have only a title. Read their own hypothesis before
+    // narrowing a cached mapping; keep cursors, caps and paid work immutable.
+    for (const condition of ['games', 'tv', 'broad', 'us', 'capped', 'renamed'] as const) {
+      const media = { title: condition === 'tv' ? 'Стриминги и ТВ' : 'Игры и анимация',
+        description: '', broad: condition === 'broad' };
+      const mediaTask = { source: 'yandex_maps' as const, rationale: 'Сохранённый медиа-план',
+        maps_query: { queries: ['кинотеатр', 'анимация'], geo: 'Россия' } };
+      const categories = condition === 'tv' ? ['Кинотеатры', 'Концертные залы', 'Студии звукозаписи']
+        : ['Анимация', 'Кинотеатры', 'Азартные игры'];
+      const counters = { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2,
+        active_source: veSourceStrategyKey(mediaTask) };
+      const legacy = exhaustedInfo(mediaTask, {
+        hypotheses: [{ id: 'h1', title: media.title, status: 'accepted' }],
+        tasks: [{ source: 'yandex_maps', status: 'pending', child_job_id: null, rows: 0,
+          task: mediaTask, harvest: [], catalog: { version: 1, after: '600',
+            filters: { categories, countries: ['Россия'] } } }],
+        search_policy: { version: 1, phase: 'existing', deferred_rows: [] }, adaptive_collection: counters,
+        ...(condition === 'capped' ? { target_progress: { ...createCollectionTarget('preview'), round: 3,
+          ready_rows: 2, candidates_processed: 10_000 } } : {}),
+      });
+      const mediaDb = seedBase(legacy, condition === 'renamed' ? { ...media, title: 'Медиа и развлечения' } : media);
+      if (condition === 'us') await mediaDb.from('ve_projects').update({ market: 'us' }).eq('id', 'p1');
+      const catalogReads: Record<string, unknown>[] = [];
+      const mediaRpc = mediaDb.rpc;
+      mediaDb.rpc = ((name: string, params: Record<string, unknown>) => {
+        if (name === 'yandex_maps_catalog_search') catalogReads.push(params);
+        const operation = name === 'yandex_maps_catalog_search' ? Promise.resolve({ data: [], error: null }) : mediaRpc(name, params);
+        return Object.assign(operation, { abortSignal: () => operation });
+      }) as typeof mediaDb.rpc;
+      jest.mocked(callLLMWithSchema).mockClear();
+      await wake(mediaDb);
+      const saved = mediaDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      if (condition === 'tv' || condition === 'capped') expect(catalogReads).toEqual([]);
+      else expect(catalogReads).toEqual([expect.objectContaining({ p_after: '600',
+        p_countries: ['Россия'], p_categories: condition === 'games' ? ['Анимация'] : categories })]);
+      if (condition === 'tv') expect(saved.tasks![0]).toMatchObject({ status: 'done', unavailable: true,
+        note: 'Сохранённые рубрики каталога не соответствуют выбранной гипотезе' });
+      expect(saved.tasks![0].catalog?.after).toBe('600');
+      expect(saved.tasks![0].task).toEqual(mediaTask);
+      expect(saved.adaptive_collection).toMatchObject({ replan_attempts: 2, widenings: 2 });
+      expect(saved.target_progress?.max_candidates).toBe(10_000);
+      if (condition === 'capped') expect(saved.target_progress?.candidates_processed).toBe(10_000);
+      expect(mediaDb.getRows('base_constructor_jobs')).toHaveLength(0);
+      expect(mediaDb.getRows('hh_jobs')).toHaveLength(0);
+      expect(mediaDb.getRows('yandex_maps_jobs')).toHaveLength(0);
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+    }
   });
 
   it('новый срез из каталога PDL тоже берёт только компании с сайтом', async () => {
@@ -4246,6 +4318,32 @@ describe('base_collect: мелкие дефекты аудита 22.09', () => {
       await pendingWake(db).catch(() => undefined);
       expect(db.getRows('parser_jobs')).toHaveLength(2);
       expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0]).toMatchObject({ status: 'done', rows: 0 });
+
+      // A completed HH child already owns the employer evidence. Read it
+      // with the vacancy and pass it into the existing constructor grid.
+      const evidenceInfo: VeCollectInfo = { plan: { tasks: [HH_TASK] }, tasks: [{ source: 'hh_live', status: 'dispatched',
+        child_job_id: 'hh-evidence', rows: 0, task: HH_TASK, dispatched_at: new Date().toISOString() }] };
+      const evidenceDb = seed(evidenceInfo, { parser_jobs: [{ id: 'hh-evidence', status: 'completed', started_at: null }],
+        hh_vacancies: [{ job_id: 'hh-evidence', name: 'Художник', company_name: 'Студия игр',
+          company_site_url: 'https://games.test', area: 'Москва', industries: ['Разработка компьютерных игр'],
+          company_description: '<p>Разрабатываем и издаём компьютерные игры.</p>' }] });
+      const evidenceBase = await pendingWake(evidenceDb);
+      expect(evidenceDb.selects.filter((query) => query.table === 'hh_vacancies')).toEqual([
+        { table: 'hh_vacancies', columns: 'name, company_name, company_site_url, area, company_description, industries' },
+      ]);
+      expect((evidenceBase.collect_info as VeCollectInfo).tasks![0].harvest![0]).toMatchObject({
+        category: 'Разработка компьютерных игр', description: 'Разрабатываем и издаём компьютерные игры.',
+      });
+      const evidenceConstructor = evidenceDb.getRows('base_constructor_jobs')[0];
+      const grid = evidenceConstructor.data as string[][];
+      expect(grid[1][grid[0].indexOf('Категория')]).toBe('Разработка компьютерных игр');
+      expect(grid[1][grid[0].indexOf('Описание')]).toBe('Разрабатываем и издаём компьютерные игры.');
+      expect(evidenceConstructor.selected_steps).toEqual(expect.arrayContaining(['find_emails', 'validate_emails']));
+      expect(evidenceBase.data).toEqual([]);
+      await pendingWake(evidenceDb);
+      expect(evidenceDb.getRows('parser_jobs')).toHaveLength(1);
+      expect(evidenceDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(evidenceDb.selects.filter((query) => query.table === 'hh_vacancies')).toHaveLength(1);
     });
 
     it('не трогает короткие запросы и запросы на языке поиска hh', () => {
