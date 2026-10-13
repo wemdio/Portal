@@ -177,6 +177,15 @@ export interface VePreparationAction {
   hypothesis_id: string | null;
 }
 
+export interface VeContinuationCheck {
+  status: 'available' | 'already_running' | 'unavailable' | 'ready';
+  reason: string;
+  hypothesis_id: string;
+  base_id?: string;
+  code?: string;
+  action: VeCollectionContinuation['action'];
+}
+
 export type VeBaseSummary = Pick<
   VeBase,
   'id' | 'vertical_id' | 'hypothesis_id' | 'filename' | 'row_count' | 'analysis' | 'created_at' | 'columns' | 'sample_rows'

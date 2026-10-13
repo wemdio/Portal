@@ -253,9 +253,85 @@ describe('VE2 base collection enqueue recovery', () => {
       updated_at: '2026-10-12T10:00:00Z' });
     expect(mockRouteDb.getRows('ve_outreach_preparations')[0].status).toBe('ready');
 
+    // Checking continuation is distinct from requesting it. Both an exhausted
+    // and an available saved source plan may update only the decision cache.
+    const stoppedDb = mockRouteDb;
+    const checkedStopped = await request({ action: 'check_continuation', hypothesis_id: hypothesisId });
+    expect(checkedStopped.status).toBe(200);
+    expect(await checkedStopped.json()).toMatchObject({ continuation_check: {
+      status: 'unavailable', action: null, hypothesis_id: hypothesisId, base_id: 'stopped', code: 'candidate_limit',
+    } });
+    expect(stoppedDb.getRows('ve_bases')[0].collection_continuation).toBeTruthy();
+    expect(stoppedDb.rpcCalls).toHaveLength(0);
+    const availableInfo = { collection_mode: 'preview',
+      target_progress: { ...stoppedTarget, round: 1, candidates_processed: 10 },
+      target_checkpoint: { completed_round: 1 },
+      tasks: [{ source: 'companies_directory', status: 'pending', rows: 0, child_job_id: null,
+        task: { source: 'companies_directory', rationale: 'saved source', directory_filters: { okvedCodes: ['62'] } } }],
+    };
+    for (const mode of ['available', 'busy', 'launched', 'stale', 'unselected', 'foreign-base', 'race', 'read-failure'] as const) {
+      const checkBase = { ...stoppedDb.getRows('ve_bases')[0], collect_info: availableInfo, collection_continuation: null,
+        project_id: mode === 'foreign-base' ? '00000000-0000-4000-8000-000000000399' : projectId };
+      mockRouteDb = createMockSupabase({ tables: {
+        ...setupRows,
+        ve_outreach_setups: [{ project_id: projectId, revision: 7,
+          selected_hypothesis_ids: mode === 'unselected' ? [] : [hypothesisId] }],
+        ve_outreach_preparations: [{ project_id: projectId, hypothesis_id: hypothesisId,
+          base_id: 'stopped', template_id: 'letters', status: 'ready' }],
+        ve_bases: [checkBase],
+        ve_templates: [{ id: 'letters', base_id: 'stopped', status: 'ready', supply_batch_id: null,
+          launch_info: mode === 'launched' ? { campaign_ids: ['campaign'] } : null }],
+        ve_jobs: mode === 'busy' ? [{ id: 'collect-running', project_id: projectId, stage: 'base_collect',
+          status: 'running', payload: { base_id: 'stopped' } }] : [],
+      },
+      ...(mode === 'race' ? { beforeFirstUpdates: { ve_bases: (rows) => rows.map((row) => ({
+        ...row, collection_continuation_revision: 1, collection_continuation: null,
+      })) } } : {}),
+      ...(mode === 'read-failure' ? { errorSelects: { ve_bases: { columnsInclude: 'collect_info', message: 'db unavailable' } } } : {}),
+      rpcHandlers: { ve_request_outreach_preparation: () => ({ data: null }),
+        ve_request_outreach_hypothesis_preparation: () => ({ data: null }) } });
+      const checked = await request({ action: 'check_continuation', hypothesis_id: hypothesisId,
+        ...(mode === 'stale' ? { revision: 6 } : {}) });
+      expect(checked.status).toBe(mode === 'read-failure' ? 503 : 200);
+      const body = await checked.json();
+      if (mode === 'available') {
+        expect(body.continuation_check).toMatchObject({ status: 'available', action: 'resume_collection', base_id: 'stopped', code: 'sources_available' });
+        expect(body.continuation_check.reason).toContain('ещё не запущено');
+        expect(body.continuation_check).not.toHaveProperty('resume_collection');
+        expect(body).not.toHaveProperty('preparation_action');
+        expect(mockRouteDb.getRows('ve_bases')[0].collection_continuation).toBeTruthy();
+      } else if (mode === 'busy') expect(body.continuation_check).toMatchObject({ status: 'already_running', action: null, code: 'already_running' });
+      else if (mode === 'launched') expect(body.continuation_check).toMatchObject({ status: 'ready', action: null, code: 'launched' });
+      else if (mode !== 'read-failure') expect(body.continuation_check).toMatchObject({ status: 'unavailable',
+        code: mode === 'stale' ? 'selection_changed' : mode === 'unselected' ? 'not_selected'
+          : mode === 'foreign-base' ? 'base_missing' : 'state_changed' });
+      expect(mockRouteDb.rpcCalls).toHaveLength(0);
+      expect(mockRouteDb.inserts).toHaveLength(0);
+      expect(mockRouteDb.getRows('ve_jobs')).toHaveLength(mode === 'busy' ? 1 : 0);
+      expect(mockRouteDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzed', collect_info: availableInfo,
+        updated_at: '2026-10-12T10:00:00Z' });
+      expect(mockRouteDb.getRows('ve_outreach_preparations')[0].status).toBe('ready');
+      for (const update of mockRouteDb.updates) {
+        expect(update.table).toBe('ve_bases');
+        expect(Object.keys(update.patch)).toEqual(['collection_continuation']);
+      }
+    }
+    mockRouteDb = stoppedDb;
+    for (const invalid of [undefined, null, '', 'wrong-id']) {
+      expect((await request({ action: 'check_continuation', hypothesis_id: invalid })).status).toBe(400);
+    }
+    expect(mockRouteDb.rpcCalls).toHaveLength(0);
+
     // Exhausted collection must not block finishing failed letters, and a
     // live job must not receive a second request from an old browser tab.
     await mockRouteDb.from('ve_templates').update({ status: 'failed' }).eq('id', 'letters');
+    const checkedLetters = await request({ action: 'check_continuation', hypothesis_id: hypothesisId });
+    expect(checkedLetters.status).toBe(200);
+    expect(await checkedLetters.json()).toMatchObject({ continuation_check: { status: 'available',
+      action: 'resume_preparation', base_id: 'stopped', code: 'preparation_incomplete' } });
+    expect(mockRouteDb.rpcCalls).toHaveLength(0);
+    expect(mockRouteDb.getRows('ve_jobs')).toHaveLength(0);
+    expect(mockRouteDb.getRows('ve_outreach_preparations')[0].status).toBe('ready');
     const retryLetters = await request({ hypothesis_id: hypothesisId });
     expect(retryLetters.status).toBe(200);
     expect(await retryLetters.json()).toMatchObject({ preparation_action: { status: 'queued' } });
