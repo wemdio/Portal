@@ -9,6 +9,7 @@ import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
 import { stripBaseConstructorCheckpointMetadata } from '@/lib/tools/baseConstructorCheckpoint';
 import { mergeBaseConstructorStats } from '@/lib/tools/baseConstructorMetrics';
 import { presentConstructorJob } from '@/lib/tools/baseConstructorPresentation';
+import { resumeFailedConstructorJob } from '@/lib/tools/baseConstructorResume';
 
 const admin = supabaseAdmin!;
 
@@ -173,7 +174,7 @@ export async function GET(
       );
       const { data: job, error } = await admin
         .from('base_constructor_jobs')
-        .select('id, user_id, status, file_name, selected_steps, step_config, current_step, current_step_key, current_step_progress, total_steps, initial_row_count, result_stats, error_message, created_at, started_at, completed_at')
+        .select('id, user_id, status, workload_origin, file_name, selected_steps, step_config, current_step, current_step_key, current_step_progress, total_steps, initial_row_count, result_stats, error_message, created_at, started_at, completed_at')
         .eq('id', id)
         .single();
 
@@ -202,6 +203,19 @@ export async function PATCH(
 
       const { id } = await params;
       const body = await req.json();
+
+      if (body.action === 'retry') {
+        // The failure version prevents an old/delayed click from retrying a
+        // different failure that happened after this card was loaded.
+        if (body.failed_at !== null && (typeof body.failed_at !== 'string'
+          || body.failed_at.length > 40 || !Number.isFinite(Date.parse(body.failed_at)))) {
+          return NextResponse.json({ error: 'Откройте задачу заново в истории.' }, { status: 400 });
+        }
+        const result = await resumeFailedConstructorJob(admin, user.id, id, body.failed_at);
+        return result.ok
+          ? NextResponse.json(result)
+          : NextResponse.json({ error: result.error }, { status: result.httpStatus });
+      }
 
       if (body.action === 'cancel') {
         const { error } = await admin

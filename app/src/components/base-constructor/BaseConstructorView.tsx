@@ -394,6 +394,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [error, setError] = useState('');
 
   const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
+  const retryPendingRef = useRef(false);
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<{ id: string; failedAt: string | null; message: string } | null>(null);
   // Full result blob, cached lazily for the admin "Открыть в базах" flow. Keyed by
   // job id so a job switch during an in-flight fetch can't hand back another job's rows.
   const fullDataCacheRef = useRef<{ id: string; rows: string[][] } | null>(null);
@@ -888,6 +891,57 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     }
   }
 
+  /* ─── Resume a failed manual job, without uploading/creating another ─── */
+
+  async function handleRetry() {
+    if (!activeJob || activeJob.status !== 'failed' || clientMode
+      || activeJob.workload_origin === 'automation' || retryPendingRef.current) return;
+    const jobId = activeJob.id;
+    const failedAt = activeJob.completed_at ?? null;
+    retryPendingRef.current = true;
+    setRetryingJobId(jobId);
+    setRetryError(null);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const res = await authFetch(`/api/tools/base-constructor/${jobId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ action: 'retry', failed_at: failedAt }),
+        signal: controller.signal,
+      });
+      const result = await res.json().catch(() => null);
+      if (res.status === 401) throw new Error('Сессия истекла. Войдите в портал и попробуйте снова. Прогресс сохранён.');
+      if (!res.ok) {
+        if (res.status === 409) {
+          invalidateHistoryRequests();
+          void loadHistory();
+        }
+        throw new Error(result?.error || 'Не удалось возобновить задачу. Попробуйте снова.');
+      }
+      if (result?.ok !== true || !isActiveJobStatus(result.status)) {
+        throw new Error('Не удалось подтвердить запуск. Попробуйте снова: дубликат не создастся.');
+      }
+      // A response for another selected job must not steal the user's screen.
+      const resume = (job: ConstructorJob): ConstructorJob => job.id === jobId
+        && job.status === 'failed' && (job.completed_at ?? null) === failedAt
+        ? { ...job, status: result.status, error_message: undefined, completed_at: undefined }
+        : job;
+      setActiveJob((current) => current ? resume(current) : current);
+      setHistory((current) => current.map(resume));
+      if (fullDataCacheRef.current?.id === jobId) fullDataCacheRef.current = null;
+      invalidateHistoryRequests();
+      void loadHistory();
+    } catch (err) {
+      setRetryError({ id: jobId, failedAt, message: controller.signal.aborted
+        ? 'Ответ сервера задерживается. Попробуйте снова: дубликат не создастся.'
+        : err instanceof Error ? err.message : 'Ошибка сети. Попробуйте снова.' });
+    } finally {
+      clearTimeout(timeout);
+      retryPendingRef.current = false;
+      setRetryingJobId(null);
+    }
+  }
+
   /* ─── Cancel ─── */
 
   async function handleCancel() {
@@ -970,6 +1024,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     setBrief('');
     setPrompt('');
     setError('');
+    setRetryError(null);
   }
 
   /* ═══════════════════════════════════════════
@@ -2043,6 +2098,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               </div>
             </div>
             <div className="px-6 py-5 space-y-5">
+              {!clientMode && activeJob.status === 'pending' && activeJob.current_step > 0 && (
+                <p role="status" className="text-sm text-gray-600">
+                  Задача в очереди на продолжение. Сохранённый прогресс показан ниже.
+                </p>
+              )}
               {/* Overall progress bar */}
               <div>
                 <div className="flex items-center justify-between text-sm mb-2">
@@ -2145,14 +2205,41 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 {clientMode ? CLIENT_CONSTRUCTOR_ERROR : activeJob.error_message || 'Неизвестная ошибка'}
               </p>
               {clientMode && <a href="/client/support" className="ds-btn-secondary inline-flex">Написать в поддержку</a>}
+              {!clientMode && activeJob.workload_origin !== 'automation' && (
+                <>
+                  <p className="text-sm text-gray-600">
+                    Продолжим с последней сохранённой точки. Завершённые шаги не запускаются заново.
+                    Несохранённая часть текущего шага может повториться.
+                  </p>
+                  {retryError?.id === activeJob.id && retryError.failedAt === (activeJob.completed_at ?? null) && (
+                    <p role="alert" className="text-sm text-red-600">{retryError.message}</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    disabled={retryingJobId !== null}
+                    aria-busy={retryingJobId === activeJob.id}
+                    className="mr-2 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white hover:bg-gray-800 transition inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-900"
+                  >
+                    {retryingJobId === activeJob.id
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                      : <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />}
+                    {retryingJobId === activeJob.id ? 'Возобновляем…' : 'Попробовать снова'}
+                  </button>
+                </>
+              )}
+              {!clientMode && activeJob.workload_origin === 'automation' && (
+                <p className="text-sm text-gray-600">Этой задачей управляет автоматизация. Возобновите её в исходном инструменте.</p>
+              )}
               <button
+                type="button"
                 onClick={resetForm}
                 className={clientMode
                   ? 'ds-btn-secondary inline-flex items-center gap-2'
                   : 'px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition inline-flex items-center gap-2'}
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                Попробовать снова
+                {clientMode ? 'Попробовать снова' : 'Загрузить другую базу'}
               </button>
             </div>
           </div>

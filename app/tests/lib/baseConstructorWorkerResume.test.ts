@@ -20,6 +20,9 @@
  */
 
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { resumeFailedConstructorJob } from '@/lib/tools/baseConstructorResume';
+import { MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
 import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
@@ -98,6 +101,57 @@ interface MockedAdmin {
 
 const validateEmailsMock = jest.mocked(stepValidateEmails);
 
+// A small stateful DB, unlike the runner mock above: filters actually gate
+// updates so concurrent retries and stale failure generations exercise CAS.
+function retryFixture(overrides: Record<string, unknown> = {}) {
+  const state = {
+    job: {
+      id: 'job-3', user_id: 'u', status: 'failed', workload_origin: 'manual',
+      selected_steps: ['remove_empty', 'dedup_full', 'find_emails'],
+      step_config: { brief: 'Keep me' }, current_step: 2, current_step_progress: 50,
+      total_steps: 3, run_token: 'old-generation', completed_at: '2026-10-13T10:00:00Z',
+      error_message: 'upstream failed', result_stats: { elapsed: 123 },
+      data: [['col'], ['a'], ['b']], ...overrides,
+    } as Record<string, unknown>,
+    role: 'technician', activeCount: 0, countError: false, updateError: false,
+    beforeUpdate: null as (() => void) | null,
+    writes: [] as Record<string, unknown>[],
+    selects: [] as string[],
+  };
+  const db = { from(table: string) {
+    const filters: Array<(row: Record<string, unknown>) => boolean> = [];
+    let patch: Record<string, unknown> | undefined;
+    let head = false;
+    const execute = async () => {
+      if (table === 'profiles') return { data: { role: state.role }, error: null };
+      if (head) return { count: state.activeCount, error: state.countError ? {} : null };
+      if (patch) {
+        state.beforeUpdate?.();
+        state.beforeUpdate = null;
+        if (state.updateError) return { data: null, error: { message: 'temporary' } };
+      }
+      if (!filters.every((filter) => filter(state.job))) return { data: null, error: null };
+      if (patch) {
+        state.writes.push(patch);
+        state.job = { ...state.job, ...patch };
+      }
+      return { data: { ...state.job, checkpoint_header: (state.job.data as string[][])?.[0] }, error: null };
+    };
+    const b = {
+      select: (columns: string, options?: { head?: boolean }) => { state.selects.push(columns); head = options?.head === true; return b; },
+      update: (value: Record<string, unknown>) => { patch = value; return b; },
+      eq: (key: string, value: unknown) => { filters.push(row => row[key] === value); return b; },
+      is: (key: string, value: unknown) => { filters.push(row => (row[key] ?? null) === value); return b; },
+      in: (key: string, values: unknown[]) => { filters.push(row => values.includes(row[key])); return b; },
+      or: () => { filters.push(row => row.workload_origin == null || row.workload_origin === 'manual'); return b; },
+      maybeSingle: execute, single: execute,
+      then: (resolve: (value: unknown) => unknown) => execute().then(resolve),
+    };
+    return b;
+  } } as unknown as SupabaseClient;
+  return { db, state };
+}
+
 describe('runBaseConstructorJob resume logic', () => {
   let admin: MockedAdmin;
 
@@ -162,19 +216,23 @@ describe('runBaseConstructorJob resume logic', () => {
   });
 
   it('resume with mid-step (progress<100): re-runs current step', async () => {
-    // Шаг 2 завис на 50% — на resume перезапускаем именно его.
-    admin.__setCurrentJob({
-      id: 'job-3',
-      user_id: 'u',
-      file_name: 'test.csv',
-      status: 'processing',
-      selected_steps: ['remove_empty', 'dedup_full', 'find_emails'],
-      step_config: {},
-      current_step: 2,
-      current_step_progress: 50,
-      total_steps: 3,
-      data: [['col'], ['a'], ['b']],
-    });
+    // Failed -> retry twice -> one pending row -> ordinary worker claim.
+    const { db, state } = retryFixture();
+    const saved = structuredClone(state.job);
+    const failedAt = state.job.completed_at as string;
+    const retry = () => resumeFailedConstructorJob(db, 'u', 'job-3', failedAt);
+    expect(await Promise.all([retry(), retry()])).toEqual([
+      { ok: true, status: 'pending' }, { ok: true, status: 'pending' },
+    ]);
+    expect(state.writes).toHaveLength(1);
+    expect(Object.keys(state.writes[0]).sort()).toEqual(['completed_at', 'error_message', 'run_token', 'status']);
+    expect(state.job).toEqual({ ...saved, status: 'pending', completed_at: null, error_message: null, run_token: expect.any(String) });
+    expect(state.job.run_token).not.toBe(saved.run_token);
+    expect(state.selects.every(columns => !columns.split(', ').includes('data'))).toBe(true);
+    expect(await retry()).toEqual({ ok: true, status: 'pending' });
+    expect(state.writes).toHaveLength(1);
+    // pollAndClaim sets processing before runBaseConstructorJob reads the row.
+    admin.__setCurrentJob({ ...state.job, status: 'processing' });
 
     await runBaseConstructorJob('job-3');
 
@@ -186,6 +244,40 @@ describe('runBaseConstructorJob resume logic', () => {
     expect(stepKeys).not.toContain('remove_empty');
     expect(stepKeys).toContain('dedup_full');
     expect(stepKeys).toContain('find_emails');
+
+    // Access, queue failures, obsolete cards, terminal jobs and automation must
+    // remain unchanged. Extend this lifecycle test rather than adding a suite.
+    for (const overrides of [
+      { user_id: 'someone-else' }, { workload_origin: 'automation' },
+      { status: 'completed' }, { status: 'cancelled' },
+      { completed_at: '2026-10-13T10:01:00Z' }, { data: [] }, { current_step: 99 },
+    ]) {
+      const fixture = retryFixture(overrides);
+      const before = structuredClone(fixture.state.job);
+      expect((await resumeFailedConstructorJob(fixture.db, 'u', 'job-3', failedAt)).ok).toBe(false);
+      expect(fixture.state.writes).toEqual([]);
+      expect(fixture.state.job).toEqual(before);
+    }
+    for (const options of [
+      { role: 'client' }, { role: '' }, { activeCount: MAX_MANUAL_CONSTRUCTOR_JOBS },
+      { countError: true }, { updateError: true },
+    ]) {
+      const fixture = retryFixture();
+      Object.assign(fixture.state, options);
+      expect((await resumeFailedConstructorJob(fixture.db, 'u', 'job-3', failedAt)).ok).toBe(false);
+      expect(fixture.state.writes).toEqual([]);
+    }
+    const legacy = retryFixture({ workload_origin: null, run_token: null, completed_at: null, current_step: 0 });
+    expect(await resumeFailedConstructorJob(legacy.db, 'u', 'job-3', null)).toEqual({ ok: true, status: 'pending' });
+    for (const status of ['processing', 'cancelled', 'failed']) {
+      const racing = retryFixture();
+      racing.state.beforeUpdate = () => Object.assign(racing.state.job, {
+        status, run_token: 'different-generation', completed_at: '2026-10-13T10:02:00Z',
+      });
+      const result = await resumeFailedConstructorJob(racing.db, 'u', 'job-3', failedAt);
+      expect(result.ok).toBe(status === 'processing');
+      expect(racing.state.writes).toEqual([]);
+    }
   });
 
   it('resume validate_emails never reports less than the saved 45%', async () => {
