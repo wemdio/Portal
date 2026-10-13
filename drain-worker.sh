@@ -45,14 +45,20 @@ should_drain_baseconstructor_workers() {
   return 1
 }
 
-should_drain_non_baseconstructor_workers() {
+should_drain_shared_worker_pool() {
   if [ -z "$requested_worker_targets" ]; then
     return 0
   fi
   for requested_target in $requested_worker_targets; do
-    if ! is_baseconstructor_worker "$requested_target"; then
-      return 0
+    if is_baseconstructor_worker "$requested_target"; then
+      continue
     fi
+    # Manual scoring has its own fail-closed graceful drain below. A targeted
+    # deploy must not pause queues or stop containers owned by other workers.
+    if [ "$requested_target" = "worker-manual-scoring" ]; then
+      continue
+    fi
+    return 0
   done
   return 1
 }
@@ -61,6 +67,33 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "[drain] python3 is required"
   exit 1
 fi
+
+# Bound Docker metadata reads without ever signalling the container. Python's
+# timeout kills/waits only the local Docker CLI child if the daemon is stuck.
+run_docker_readonly() {
+  python3 - "$@" <<'PY'
+import subprocess, sys
+
+try:
+    result = subprocess.run(
+        sys.argv[1:],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+except subprocess.TimeoutExpired:
+    print('[drain] Docker metadata read timed out after 10s', file=sys.stderr)
+    raise SystemExit(124)
+
+if result.returncode != 0:
+    sys.stderr.write(result.stderr)
+    raise SystemExit(result.returncode)
+sys.stdout.write(result.stdout)
+PY
+}
 
 # .env is Docker configuration, not a shell script. In particular, unquoted
 # PEM headers contain spaces; sourcing them aborts deployment before draining.
@@ -167,7 +200,105 @@ if should_drain_worker "worker-vertical-engine-v2"; then
   echo "[drain] Vertical Engine v2 stopped"
 fi
 
-if should_drain_non_baseconstructor_workers && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
+if should_drain_worker "worker-manual-scoring"; then
+  manual_stop_timeout_seconds="${MANUAL_SCORING_DRAIN_TIMEOUT_SECONDS:-600}"
+  if [[ ! "$manual_stop_timeout_seconds" =~ ^[0-9]+$ ]] \
+      || [ "$manual_stop_timeout_seconds" -lt 1 ] \
+      || [ "$manual_stop_timeout_seconds" -gt 600 ]; then
+    echo "[drain] FATAL: MANUAL_SCORING_DRAIN_TIMEOUT_SECONDS must be 1..600" >&2
+    exit 1
+  fi
+  echo "[drain] Gracefully stopping manual scoring (up to ${manual_stop_timeout_seconds}s)..."
+
+  # Capture the exact running container before stopping it. Compose can return
+  # success after its timeout has escalated SIGTERM to SIGKILL, so its status
+  # alone is not proof that the worker persisted/released its owned lease.
+  if ! manual_container_ids="$(
+    run_docker_readonly docker compose --env-file .env -p portal -f docker-compose.prod.yml \
+      ps -q worker-manual-scoring
+  )"; then
+    echo "[drain] FATAL: cannot inspect the running manual-scoring worker" >&2
+    exit 1
+  fi
+
+  if [ -z "$manual_container_ids" ]; then
+    echo "[drain] Manual scoring is not running; nothing to drain"
+  elif [[ "$manual_container_ids" == *$'\n'* ]]; then
+    echo "[drain] FATAL: expected one manual-scoring container, found multiple" >&2
+    exit 1
+  else
+    # Docker's finite stop timeout escalates to SIGKILL itself. Use an
+    # infinite daemon-side timeout and bound only this local waiting client;
+    # timing out must leave the worker alive to finish/persist, then abort the
+    # deploy before force_rm_svc.
+    docker stop --timeout -1 "$manual_container_ids" &
+    manual_stop_client_pid=$!
+    manual_stopped_state=""
+    manual_stop_verified=0
+    manual_stop_deadline=$((SECONDS + manual_stop_timeout_seconds))
+
+    while ((SECONDS < manual_stop_deadline)); do
+      if ! manual_stopped_state="$(
+        run_docker_readonly docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' \
+          "$manual_container_ids"
+      )"; then
+        kill "$manual_stop_client_pid" 2>/dev/null || true
+        wait "$manual_stop_client_pid" 2>/dev/null || true
+        echo "[drain] FATAL: cannot verify the manual-scoring worker; it was not force-killed" >&2
+        exit 1
+      fi
+
+      if [[ "$manual_stopped_state" == false\ * ]]; then
+        # A stopped container is not enough to make an unbounded `wait` safe:
+        # the local Docker HTTP client can still hang while reading its reply.
+        # Reap it only after it has exited; otherwise keep the same bounded poll.
+        if kill -0 "$manual_stop_client_pid" 2>/dev/null; then
+          sleep 1
+          continue
+        fi
+        if wait "$manual_stop_client_pid"; then manual_stop_client_rc=0; else manual_stop_client_rc=$?; fi
+        if [ "$manual_stop_client_rc" -ne 0 ]; then
+          echo "[drain] FATAL: manual-scoring stop client failed (${manual_stop_client_rc}); aborting before forced removal" >&2
+          exit 1
+        fi
+        manual_stop_verified=1
+        break
+      fi
+
+      if ! kill -0 "$manual_stop_client_pid" 2>/dev/null; then
+        if wait "$manual_stop_client_pid"; then
+          manual_stop_client_rc=0
+        else
+          manual_stop_client_rc=$?
+        fi
+        echo "[drain] FATAL: manual-scoring stop client exited (${manual_stop_client_rc}) while the container is ${manual_stopped_state}; aborting before forced removal" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+
+    if [ "$manual_stop_verified" -ne 1 ]; then
+      # This signal targets only the local `docker stop` CLI. The daemon was
+      # told timeout=-1, so it never escalates the container to SIGKILL.
+      kill "$manual_stop_client_pid" 2>/dev/null || true
+      wait "$manual_stop_client_pid" 2>/dev/null || true
+      if [[ "$manual_stopped_state" == false\ * ]]; then
+        echo "[drain] FATAL: manual-scoring container exited but the stop client did not finish within ${manual_stop_timeout_seconds}s; deploy aborted before forced removal" >&2
+      else
+        echo "[drain] FATAL: manual-scoring did not stop within ${manual_stop_timeout_seconds}s; worker left running, deploy aborted before forced removal" >&2
+      fi
+      exit 1
+    fi
+
+    if [ "$manual_stopped_state" != "false 0" ]; then
+      echo "[drain] FATAL: manual-scoring did not stop cleanly (${manual_stopped_state}); aborting before forced removal" >&2
+      exit 1
+    fi
+    echo "[drain] Manual scoring stopped after its owned lease was persisted"
+  fi
+fi
+
+if should_drain_shared_worker_pool && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
   echo "[drain] Checking active running tasks before deploy..."
 
   total_running=0
@@ -319,10 +450,10 @@ PY
   else
     echo "[drain] ai_campaigns: running=0"
   fi
-elif should_drain_non_baseconstructor_workers; then
+elif should_drain_shared_worker_pool; then
   echo "[drain] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — skipping Supabase pause flow"
 else
-  echo "[drain] Base Constructor-only deploy — unrelated queues stay running"
+  echo "[drain] Dedicated-worker-only deploy — unrelated queues stay running"
 fi
 
 if should_drain_worker "worker-autopipeline"; then
@@ -335,7 +466,7 @@ if should_drain_worker "worker-autopipeline"; then
   echo "[drain] Auto-pipeline stopped cleanly"
 fi
 
-if should_drain_non_baseconstructor_workers; then
+if should_drain_shared_worker_pool; then
   containers=(
     "portal-worker"
     "portal-worker-hh"

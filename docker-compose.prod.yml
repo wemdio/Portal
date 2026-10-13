@@ -1832,7 +1832,9 @@ services:
       - MAILGANER_API_KEY=${MAILGANER_API_KEY}
       - MAILGANER_AUTH_SCHEME=${MAILGANER_AUTH_SCHEME}
       - MAILGANER_SCORING_CONCURRENCY=${MAILGANER_SCORING_CONCURRENCY:-}
-    stop_grace_period: 30s
+    # Fallback only. Approved deploys must use drain-worker.sh's no-SIGKILL
+    # checkpoint contract; a plain compose down is not a safe drain proof.
+    stop_grace_period: 10m
     deploy:
       resources:
         limits:
