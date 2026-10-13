@@ -53,7 +53,11 @@
  *      письма, в которые ночь доливает, отбор долива (шаг 3a в
  *      stages/baseCollectRefill.ts) снял бы у ВСЕХ строк при любых строках —
  *      оператор темы без колонки, оператор без колонки и fallback или с
- *      fallback не к месту, битые скобки, писем нет (heRefillLettersHoldEveryRow).
+ *      fallback не к месту, битые скобки, писем нет (heRefillLettersHoldEveryRow);
+ *      письма называют наш бренд или вымышленную компанию из примера
+ *      промпта, а клиент проекта по сайту не мы (heRefillBrandHoldEveryRow; правило
+ *      языка и владельца — letterBrandGuard,
+ *      сайт и бриф проекта читаются, только если в письмах есть такое слово).
  *      Раньше это узнавалось только после купленной сборки: все строки
  *      снимались, а компании оставались исключёнными в 'analyzed'-базе, куда
  *      никто не возвращается, — каждую ночь, пока письма не починят. Теперь
@@ -89,6 +93,20 @@
  *      и алерт (notifyHeRefillHold). Полный набор
  *      причин — блок «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?» ниже; та же проверка стоит
  *      и перед самим доливом (stages/baseCollectRefill.ts, шаг 4c);
+ *   3a-. СПИСОК DO NOT CONTACT ВЛАДЕЛЬЦА ЧИТАЕТСЯ? (после «кампании
+ *      отправляют?», до потолка расхода, предполёта и денег): долив читает
+ *      список владельца пресета (getBlockedEmailSet) на своём шаге 4 — уже
+ *      после купленной сборки, — и список, который так не читается (больше
+ *      BLOCKLIST_MAX_ENTRIES адресов; неполный или кривой снапшот; БД
+ *      пресетов не отвечает), ронял ночь с потраченными деньгами, и так
+ *      каждую ночь, пока клиент не укоротит список. Тот же вызов здесь
+ *      (readHeRefillBlocklistHold): бросил — ночь не покупается, слот не
+ *      расходуется, пишется строка журнала 'failed' без base_id
+ *      (stats.error_kind 'blocklist_over_cap' или 'blocklist_unreadable';
+ *      лента кабинета печатает «daily top-up skipped — …», engDashboard.ts) и
+ *      уходит алерт команде тем же путём, что у пропусков ночи
+ *      (notifyHeRefillHold, вид 'blocklist', раз в окно на проект). Ответ
+ *      кэшируется на обход проекта по пресету: владелец у его вертикалей один;
  *   3a-. ПОТОЛОК РАСХОДА ПРОЕКТА (spendCeiling.ts; ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН):
  *      один раз за обход проекта, перед первой вертикалью, которой ночь
  *      действительно покупалась бы (после сухой, писем и переноса, до
@@ -189,6 +207,7 @@ import { resolveInstantlyAccountId, type InstantlyRequestOptions } from '@/lib/i
 import { CampaignStatus } from '@/lib/instantly/types';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { BLOCKLIST_MAX_ENTRIES, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
 import { buildLaunchSequence, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
@@ -248,6 +267,14 @@ import {
   heTemplateGateHoldsEveryRow,
   withHeEmptyCellFallbacks,
 } from './templateOperatorGate';
+// Чужая компания в письмах (S4) — тоже чистый модуль без импортов.
+import {
+  describeHeBrandLeaks,
+  findHeBrandLeaks,
+  heTemplateBrandLeaks,
+  readHeBrandEngClient,
+  type HeBrandProject,
+} from './letterBrandGuard';
 import type { HeChainLetter, HeOperatorMapping } from './types';
 
 /**
@@ -321,6 +348,24 @@ export function heRefillLettersHoldEveryRow(template: {
     operatorMapping: withHeEmptyCellFallbacks(plan?.operator_mapping, HE_REFILL_BASE_COLUMNS).mapping,
   });
   return heTemplateGateHoldsEveryRow(gate) ? describeHeTemplateOperatorGate(gate, 4) : null;
+}
+
+/**
+ * Снял бы отбор долива ВСЕ строки ночи за чужую компанию в письмах (шаг 3a в
+ * stages/baseCollectRefill.ts, `brandHold`)? Причина для лога и алерта — или
+ * null. Та же проверка, что у долива и шага 4b″ запуска
+ * (letterBrandGuard.heTemplateBrandLeaks: us-проект, клиент по сайту не мы;
+ * английские и польские письма — всегда, русские — когда владелец клиент
+ * ENG-кабинета, признак `heEngClient` строки проекта); от строк не зависит.
+ * Чистая функция.
+ */
+export function heRefillBrandHoldEveryRow(letters: unknown, project: HeBrandProject): string | null {
+  const leaks = heTemplateBrandLeaks('us', project, letters);
+  return leaks.length
+    ? 'письма кампании называют наш бренд или вымышленную компанию из примера промпта, а клиент проекта — ' +
+        `другая компания (${describeHeBrandLeaks(leaks, 3)}); адресам, уже загруженным в кампанию, она, если ` +
+        'отправляет, шлёт эти же письма — разберите её вручную'
+    : null;
 }
 
 /* ─── СУХАЯ ВЕРТИКАЛЬ ─────────────────────────────────────────────────────
@@ -1588,6 +1633,16 @@ export interface HeRefillSendCampaigns {
  */
 export type HeRefillHoldAlert =
   | { kind: 'main_completed'; campaignId: string; why: 'no_client_intent' | 'restart_failed'; detail: string }
+  | {
+      /** Список Do not contact владельца не читается (шаг 3a- «СПИСОК DO NOT CONTACT»). */
+      kind: 'blocklist';
+      campaignId: string;
+      /** true — в списке больше BLOCKLIST_MAX_ENTRIES адресов (счёт прочитан). */
+      overCap: boolean;
+      /** Точный счёт списка; null — не прочитался. */
+      count: number | null;
+      detail: string;
+    }
   | { kind: 'main_restart_failed'; campaignId: string; accepted: number; code: string }
   | { kind: 'main_stopped'; campaignId: string; detail: string }
   | { kind: 'mailboxes'; campaignId: string; detail: string }
@@ -1993,6 +2048,9 @@ export interface HeRefillHoldNotice {
 
 function holdAlertKey(notice: HeRefillHoldNotice): string {
   const a = notice.alert;
+  // Список один на владельца — то есть на проект: одно сообщение на проект за
+  // окно, а не на каждую его вертикаль.
+  if (a.kind === 'blocklist') return `${a.kind}|${notice.projectId}`;
   return a.kind === 'segments_held' ? `${a.kind}|${a.mainCampaignId}` : `${a.kind}|${a.campaignId}`;
 }
 
@@ -2014,6 +2072,31 @@ function holdAlertBody(notice: HeRefillHoldNotice): {
       : 'сборка этой ночи уже была куплена: контакты не добавлены, её компании ждут в очереди переноса ' +
         '(не легла очередь — вернулись в пул)';
   switch (a.kind) {
+    case 'blocklist':
+      return {
+        subject: a.overCap
+          ? `ENG: список Do not contact клиента больше ${BLOCKLIST_MAX_ENTRIES} адресов — ночной добор проекта не покупается`
+          : 'ENG: список Do not contact клиента не читается — ночной добор проекта не покупается',
+        error:
+          `${heOpsReasonText(a.detail)}; ${night}. Долив сверяет каждый адрес с этим списком и без него не ` +
+          'загружает никого — поэтому сборку не покупаем. Так каждую ночь, пока список не читается',
+        context: {
+          ...ids,
+          'кампания': a.campaignId,
+          'адресов в списке': a.count,
+          'клиент видит': a.overCap
+            ? 'строку ленты «daily top-up skipped — your Do not contact list held more than ' +
+              `${BLOCKLIST_MAX_ENTRIES.toLocaleString('en-US')} addresses…» (engDashboard.ts) и плашку на странице Do not ` +
+              'contact с точным числом'
+            : 'строку ленты «daily top-up skipped — we could not read your Do not contact list…» (engDashboard.ts)',
+          'сделать': a.overCap
+            ? `список укорачивает клиент кнопкой «Remove» на странице Do not contact (лишнее сверх ${BLOCKLIST_MAX_ENTRIES}); ` +
+              'попало туда сбоем записи — убрать лишние строки client_blocked_contacts этого клиента вручную, сверив с ним; ' +
+              'следующая ночь проверит список сама'
+            : 'проверить БД пресетов (client_blocked_contacts, функция client_blocklist_snapshot) и пресет кампании; ' +
+              'следующая ночь проверит список сама',
+        },
+      };
     case 'main_completed':
       return {
         subject:
@@ -2213,6 +2296,7 @@ export type HeAutoPipelineDetailStatus =
   | 'dry'
   | 'carry_covers'
   | 'letters_held'
+  | 'blocklist_held'
   | 'sending_skipped'
   | 'failed';
 
@@ -2223,6 +2307,63 @@ export type HeAutoPipelineDetailStatus =
  */
 const LETTERS_HELD_ERROR =
   'письма запущенного шаблона сняли бы все строки ночи — сборка не ставилась, деньги не потрачены';
+
+/**
+ * Текст ошибки строки журнала, когда тик не купил ночь, потому что список Do
+ * not contact владельца не читается (шаг 3a- «СПИСОК DO NOT CONTACT»); за ним
+ * — подробность. Машинная причина — stats.error_kind 'blocklist_over_cap' /
+ * 'blocklist_unreadable': по тексту её никто не разбирает.
+ */
+const BLOCKLIST_HELD_ERROR =
+  'список Do not contact владельца не читается — сборка не ставилась, деньги не потрачены, контакты не добавлены';
+
+/**
+ * Список Do not contact владельца пресета до покупки ночи (шаг 3a- «СПИСОК DO
+ * NOT CONTACT» в шапке): тот же вызов getBlockedEmailSet, что у долива на его
+ * шаге 4, — бросил там, бросит и здесь. null — список читается, ночь можно
+ * покупать; иначе — почему нет. `overCap` — точный счёт списка (head-счёт
+ * client_blocked_contacts) больше BLOCKLIST_MAX_ENTRIES; счёт не прочитался —
+ * false, а `count` null. НЕ БРОСАЕТ.
+ */
+export async function readHeRefillBlocklistHold(
+  instantlyDb: SupabaseClient | null,
+  presetId: string,
+): Promise<{ overCap: boolean; count: number | null; detail: string } | null> {
+  if (!instantlyDb) return { overCap: false, count: null, detail: 'БД пресетов не сконфигурирована (INSTANTLY_SUPABASE_URL)' };
+  let ownerUserId: string;
+  try {
+    const { data, error } = await instantlyDb
+      .from('client_campaign_presets')
+      .select('client_user_id')
+      .eq('id', presetId)
+      .maybeSingle();
+    if (error) return { overCap: false, count: null, detail: `client_campaign_presets read: ${error.message}` };
+    const owner = (data as { client_user_id?: unknown } | null)?.client_user_id;
+    if (typeof owner !== 'string' || !owner) {
+      return { overCap: false, count: null, detail: `пресет ${presetId} не найден — владелец списка неизвестен` };
+    }
+    ownerUserId = owner;
+  } catch (e) {
+    return { overCap: false, count: null, detail: `client_campaign_presets read: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  try {
+    await getBlockedEmailSet(instantlyDb, ownerUserId);
+    return null;
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    let count: number | null = null;
+    try {
+      const res = await instantlyDb
+        .from('client_blocked_contacts')
+        .select('id', { count: 'exact', head: true })
+        .eq('client_user_id', ownerUserId);
+      count = res.error || typeof res.count !== 'number' ? null : res.count;
+    } catch {
+      count = null;
+    }
+    return { overCap: count !== null && count > BLOCKLIST_MAX_ENTRIES, count, detail };
+  }
+}
 
 /**
  * Текст ошибки строки журнала, когда тик не купил ночь, потому что кампании
@@ -2332,6 +2473,12 @@ export interface HeAutoPipelineTickSummary {
    * добавил бы к алерту команде и строке журнала.
    */
   lettersHeld: number;
+  /**
+   * Вертикалей, чья ночь не куплена, потому что список Do not contact
+   * владельца не читается (шаг 3a- «СПИСОК DO NOT CONTACT» в шапке). НЕ
+   * failed — по той же причине, что у lettersHeld.
+   */
+  blocklistHeld: number;
   /**
    * Вертикалей, чья ночь не куплена, потому что её кампании не берут контакты
    * (шаг 3a- «КАМПАНИИ ЗАПУСКА ОТПРАВЛЯЮТ?» в шапке: переключатель клиента,
@@ -2493,10 +2640,15 @@ function latestCampaignByVertical(
  * поэтому сверяются ВСЕ запущенные шаблоны вертикали с этой кампанией, и
  * вертикаль попадает сюда, только если снят был бы каждый: какой из них
  * возьмёт долив, тик не знает. Обычно такой шаблон один.
+ *
+ * `project` — сайт, бриф и признак владельца проекта для проверки чужой
+ * компании в письмах (heRefillBrandHoldEveryRow); null — тик их не читал (в
+ * письмах нет ни одного проверяемого слова), и этой причины нет.
  */
 function lettersHeldByVertical(
   templateRows: Array<Record<string, unknown>>,
   campaignByVertical: ReadonlyMap<string, VerticalLaunchTarget>,
+  project: HeBrandProject | null,
 ): Map<string, string> {
   const held = new Map<string, string>();
   const sendable = new Set<string>();
@@ -2509,10 +2661,11 @@ function lettersHeldByVertical(
       launch.campaign_id === target.campaignId ||
       (launch.campaigns ?? []).some((c) => c.campaign_id === target.campaignId);
     if (!carriesCampaign) continue;
-    const reason = heRefillLettersHoldEveryRow({
-      letters: row.letters,
-      personalization_plan: row.personalization_plan,
-    });
+    const reason =
+      heRefillLettersHoldEveryRow({
+        letters: row.letters,
+        personalization_plan: row.personalization_plan,
+      }) ?? (project ? heRefillBrandHoldEveryRow(row.letters, project) : null);
     if (reason === null) {
       sendable.add(verticalId);
       held.delete(verticalId);
@@ -3300,7 +3453,25 @@ async function passConfig(
     if (tErr) throw new Error(`he_templates read: ${tErr.message}`);
     const launchedTemplates = (templateRows ?? []) as Array<Record<string, unknown>>;
     campaignByVertical = latestCampaignByVertical(launchedTemplates);
-    heldLetters = lettersHeldByVertical(launchedTemplates, campaignByVertical);
+    // Сайт и бриф проекта — проверке чужой компании в письмах (шаг 3a--),
+    // и только когда в письмах запущенных шаблонов есть хоть одно проверяемое
+    // слово (findHeBrandLeaks без исключений; иначе проверка пуста при любом
+    // проекте). Не прочитались — как сбой чтения шаблонов выше: ночь проекта не
+    // покупается.
+    // Владелец — клиент ENG-кабинета (letterBrandGuard.heEngClient: тогда
+    // проверяются и русские письма) — тем же чтением, только здесь же.
+    let brandProject: HeBrandProject | null = null;
+    if (launchedTemplates.some((row) => findHeBrandLeaks(row.letters).length > 0)) {
+      const { data: projectRow, error: pErr } = await supabase
+        .from('he_projects')
+        .select('website_url, brief, created_by')
+        .eq('id', config.project_id)
+        .maybeSingle();
+      if (pErr) throw new Error(`he_projects read: ${pErr.message}`);
+      const row = (projectRow ?? null) as { website_url?: unknown; brief?: unknown; created_by?: unknown } | null;
+      brandProject = row ? { ...row, heEngClient: await readHeBrandEngClient(supabase, row.created_by) } : null;
+    }
+    heldLetters = lettersHeldByVertical(launchedTemplates, campaignByVertical, brandProject);
   }
 
   const perRun = Math.max(1, config.verticals_per_run ?? HE_AUTO_DEFAULT_VERTICALS_PER_RUN);
@@ -3429,6 +3600,8 @@ async function passConfig(
   let carryRunning = 0;
   /** Отправляют ли кампании запуска (шаг 3a- в шапке) — один гейт на обход проекта. */
   const sendGate = createHeRefillSendGate(supabase, config.project_id);
+  /** Список Do not contact владельца по пресету (шаг 3a- «СПИСОК DO NOT CONTACT») — одно чтение на пресет за обход. */
+  const blocklistHolds = new Map<string, Promise<Awaited<ReturnType<typeof readHeRefillBlocklistHold>>>>();
 
   for (const vertical of budgetExhausted ? [] : tickOrder) {
     if (enqueued >= perRun) break;
@@ -3606,6 +3779,61 @@ async function passConfig(
         sendingSkip: send.reason,
         ...dryNightsDetail,
         message: `${send.reason}: ${send.detail}${recorded ? '' : ' (run row NOT written)'}`,
+      });
+      continue;
+    }
+
+    // ─── СПИСОК DO NOT CONTACT ВЛАДЕЛЬЦА ЧИТАЕТСЯ? (шаг 3a- в шапке; до
+    //     потолка расхода, предполёта и постановки — до денег) ───
+    // Долив сверяет адреса с этим списком на своём шаге 4, ПОСЛЕ купленной
+    // сборки, и без списка не грузит никого. Не читается — ночь не покупаем:
+    // строка журнала без base_id (как у 'letters_held': дневную бронь не
+    // трогает, в серии сухих ночей и отказов вертикали не входит) и алерт
+    // команде (один на проект за окно).
+    let blocklistHold = blocklistHolds.get(target.presetId);
+    if (!blocklistHold) {
+      blocklistHold = readHeRefillBlocklistHold(supabaseInstantly, target.presetId);
+      blocklistHolds.set(target.presetId, blocklistHold);
+    }
+    const blockHold = await blocklistHold;
+    if (blockHold) {
+      summary.blocklistHeld += 1;
+      // Ждём, а не `void`: крон одноразовый (ожидание ограничено внутри notifyHeRefillHold).
+      await notifyHeRefillHold({
+        projectId: config.project_id,
+        verticalId: vertical.id,
+        templateId: target.templateId,
+        where: 'tick',
+        alert: {
+          kind: 'blocklist',
+          campaignId,
+          overCap: blockHold.overCap,
+          count: blockHold.count,
+          detail: blockHold.detail,
+        },
+      });
+      let recorded = true;
+      try {
+        await insertRun(supabase, {
+          config_id: config.id,
+          project_id: config.project_id,
+          vertical_id: vertical.id,
+          base_id: null,
+          status: 'failed',
+          stats: { error_kind: blockHold.overCap ? 'blocklist_over_cap' : 'blocklist_unreadable' },
+          error: `${BLOCKLIST_HELD_ERROR}: ${blockHold.detail}`.slice(0, 500),
+          completed_at: now.toISOString(),
+        });
+      } catch {
+        recorded = false;
+      }
+      detail({
+        verticalId: vertical.id,
+        status: 'blocklist_held',
+        ...dryNightsDetail,
+        message:
+          `owner Do not contact list unreadable${blockHold.overCap ? ` (${blockHold.count} > ${BLOCKLIST_MAX_ENTRIES})` : ''}: ` +
+          `${blockHold.detail} — no collection bought${recorded ? '' : ' (run row NOT written)'}`,
       });
       continue;
     }
@@ -3885,6 +4113,7 @@ export async function runHeAutoPipelineTick(
     dry: 0,
     carryCovers: 0,
     lettersHeld: 0,
+    blocklistHeld: 0,
     sendingSkipped: 0,
     failed: 0,
     details: [],

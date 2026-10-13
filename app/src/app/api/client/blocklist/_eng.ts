@@ -1,0 +1,543 @@
+/**
+ * ENG-ветка роутов чёрного списка клиента (`GET/POST /api/client/blocklist`,
+ * `DELETE /api/client/blocklist/[id]`) — экран «Do not contact» английского
+ * кабинета (`app/client/eng/do-not-contact`).
+ *
+ * Хранилище то же, что у RU-страницы «Чёрный список»: `client_blocked_contacts`
+ * в БД рассыльщика, скоуп `client_user_id`, точный нормализованный адрес
+ * (`normalizeBlockedEmail`). Читают его те же фильтры: запуск шаблона
+ * (`hypothesisEngine/launchTemplate.ts`, шаг 5a — Launch, «Launch N more
+ * markets», достройка долга) и ночной долив
+ * (`hypothesisEngine/stages/baseCollectRefill.ts`, шаг 4, плюс повтор внутри
+ * `appendLeadsToClientCampaign` прямо перед загрузкой). Оба читают список
+ * клиента из пресета (`client_campaign_presets.client_user_id`), а пресет
+ * ENG-клиента записан на него самого (`engSendingPreset.ts`) — значит, адрес,
+ * добавленный здесь, выпадает из каждой загрузки, которая прочитала список
+ * после добавления. Запуск читает его ОДИН раз, в начале (шаг 5a), и грузит
+ * лидов через минуты (после классификатора сегментов): адрес, добавленный,
+ * пока запуск уже идёт, в этот запуск ещё может попасть. Экран говорит это
+ * клиенту так же.
+ *
+ * ЧЕГО ВЕТКА НЕ ДЕЛАЕТ. Людей, которые УЖЕ лежат в кампании, она из кампании не
+ * убирает: ни одного вызова рассыльщика здесь нет. Почему — отчёт лейна
+ * (`.s4-reports/do-not-contact.md`): в кодовой базе нет проверенного вызова
+ * «снять одного лида с кампании», а воркспейс пула общий с другими клиентами.
+ * Экран говорит это клиенту прямым текстом.
+ *
+ * Отличия от RU-ветки (она не меняется ни на байт, развилка — `auth.market`):
+ *  - тексты английские: RU-фраза дошла бы до кабинета общим «problem on our
+ *    side» (engErrorText режет кириллицу), и клиент не узнал бы причину;
+ *  - добавление пачкой — разбор вставленного текста здесь, на сервере, одним
+ *    правилом; домены и мусор не добавляются и возвращаются примерами;
+ *  - потолок списка (BLOCKLIST_MAX_ENTRIES) держится строго: вставка, пересчёт
+ *    и откат своих строк, если список перерос потолок. Список длиннее потолка
+ *    getBlockedEmailSet не читает вовсе — запуск и долив этого клиента тогда
+ *    отказывают (fail-closed), поэтому перерасти его пачкой нельзя. Гарантии
+ *    «никогда» нет: при сбое отката или потерянном ответе вставки (и у
+ *    RU-ветки — гонкой двух вкладок) список может оказаться длиннее; тогда
+ *    экран держит постоянную строку об этом (EngDoNotContact), добавление
+ *    отвечает list_over_limit, а страницы читаются и дальше 10 000;
+ *  - список постранично с точным счётом и поиском: у PostgREST есть потолок
+ *    строк ответа (ради него и написан RPC client_blocklist_snapshot, см. его
+ *    миграцию 20260901_0001), и `.limit(10000)` RU-ветки за ним показал бы
+ *    часть списка как весь.
+ */
+
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import {
+  BLOCKLIST_MAX_ENTRIES,
+  normalizeBlockedEmail,
+} from '@/lib/clientBlocklist/blockedContacts';
+import { logAudit, logError } from '@/lib/loggerServer';
+
+/** Строк на странице списка. */
+export const ENG_BLOCKLIST_PAGE_SIZE = 100;
+/** Разных адресов в одной вставке. */
+export const ENG_BLOCKLIST_MAX_PER_ADD = 1_000;
+/** Символов во вставленном тексте: 1 000 адресов с именами и запятыми влезают с запасом. */
+export const ENG_BLOCKLIST_MAX_TEXT = 200_000;
+/** Примеров недобавленного в ответе (остальное — числом). */
+const EXAMPLES_MAX = 10;
+const EXAMPLE_CHARS = 80;
+/** id в одном `in(...)` отката: 100 uuid — около 4 КБ строки запроса. */
+const ROLLBACK_ID_CHUNK = 100;
+/** Строк в одной вставке (см. engBlocklistPost). */
+const INSERT_CHUNK = 100;
+const SEARCH_MAX_CHARS = 320;
+
+const MAX_TEXT = BLOCKLIST_MAX_ENTRIES.toLocaleString('en-US');
+const PER_ADD_TEXT = ENG_BLOCKLIST_MAX_PER_ADD.toLocaleString('en-US');
+
+export const ENG_BLOCKLIST_TEXT = {
+  loadFailed: 'Could not load your list. Try again in a minute.',
+  badRequest: 'The request could not be read. Refresh the page and try again.',
+  empty: 'Paste at least one email address.',
+  // Срабатывает по числу символов, а не адресов: 700 строк выгрузки CRM с
+  // колонками уже длиннее потолка, поэтому совет — про текст, а не «≤ 1 000».
+  tooLong: 'This is too much text to add at once. Paste only the email addresses, or fewer rows at a time.',
+  tooMany: (n: number) =>
+    `You pasted ${n.toLocaleString('en-US')} different addresses. Add at most ${PER_ADD_TEXT} at a time.`,
+  listFull:
+    `Your list already holds ${MAX_TEXT} addresses, the most it can hold. ` +
+    'Remove addresses you no longer need to add new ones.',
+  // Список уже длиннее потолка (сбой отката или потерянный ответ вставки):
+  // число — настоящее, а не «10 000», и сказано, что это значит для кампаний.
+  listOverLimit: (count: number) =>
+    `Your list holds ${count.toLocaleString('en-US')} addresses, more than the ${MAX_TEXT} it can hold, ` +
+    'so nothing was added. ' +
+    `Until you remove at least ${(count - BLOCKLIST_MAX_ENTRIES).toLocaleString('en-US')}, ` +
+    'no new contacts are added to your campaigns.',
+  overLimit: (room: number) =>
+    `These addresses would take your list over ${MAX_TEXT}, the most it can hold, so none of them were added. ` +
+    `You can add up to ${room.toLocaleString('en-US')} more, or remove addresses you no longer need.`,
+  addFailed: 'Could not add these addresses, and none of them were added. Try again in a minute.',
+  // Экран после этого кода сам перечитывает список (reload) — отсюда «below».
+  addUnconfirmed:
+    'Could not finish adding these addresses, and some of them may be on your list now. ' +
+    'Check your list below. ' +
+    `While it holds more than ${MAX_TEXT} addresses, no new contacts are added to your campaigns.`,
+  overLimitStuck:
+    `Your list went over ${MAX_TEXT} addresses, the most it can hold, and we could not undo it. ` +
+    `No new contacts are added to your campaigns until you remove addresses to bring it back to ${MAX_TEXT} or fewer.`,
+  removeFailed: 'Could not remove this address. Try again in a minute.',
+} as const;
+
+/**
+ * Машинный код отказа добавления. Экран читает три из них: после
+ * `add_unconfirmed`, `over_limit_stuck` и `list_over_limit` он перечитывает
+ * список — состав после ответа неизвестен или список длиннее потолка, и экран
+ * должен показать его настоящий размер.
+ */
+export type EngBlocklistAddCode =
+  | 'bad_request'
+  | 'empty'
+  | 'too_long'
+  | 'too_many'
+  | 'list_full'
+  | 'list_over_limit'
+  | 'over_limit'
+  | 'add_failed'
+  | 'add_unconfirmed'
+  | 'over_limit_stuck';
+
+interface EngBlockedRow {
+  id: string;
+  email: string;
+  created_at: string;
+}
+
+interface Rejected {
+  count: number;
+  examples: string[];
+}
+
+export interface EngBlocklistPaste {
+  /** Разные нормализованные адреса, в порядке вставки. */
+  emails: string[];
+  /**
+   * Сайт, домен или шаблон с явным признаком: `@acme.com`, `*@acme.com`,
+   * `info*@acme.com`, `https://acme.com`, `www.acme.com`, `acme.com/about`.
+   * Слово с точкой без такого признака (`acme.com`, `Jane.Doe`, `report.pdf`)
+   * сюда НЕ попадает — оно «не адрес», утверждать, что клиент вставил домен,
+   * нечем.
+   */
+  domains: Rejected;
+  /** Всё прочее непустое: имена, обрывки, адреса без домена, слова с точкой. */
+  invalid: Rejected;
+}
+
+/** Обёртки вокруг адреса из почтовых клиентов и таблиц: `<a@b.com>`, `"a@b.com",`, `(a@b.com).` */
+const WRAP_HEAD_RE = /^[<>()[\]{}"'`]+/;
+const WRAP_TAIL_RE = /[<>()[\]{}"'`.,:;]+$/;
+const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+/** Разделители токенов. `<` и `>` — тоже: `Jane<jane@acme.com>` без пробела даёт два токена. */
+const SPLIT_RE = /[\s,;<>]+/;
+
+/**
+ * Невидимые символы формата (категория Cf: U+200B из Slack, U+FEFF, мягкий
+ * перенос, метки направления). Строка с таким символом на экране выглядит как
+ * адрес лида, но не совпадёт с ним никогда (filterBlockedLeads сравнивает
+ * точные строки), — поэтому они вырезаются до разбора.
+ */
+const FORMAT_CHARS_RE = /\p{Cf}/gu;
+
+/**
+ * Ссылка mailto: адрес — до `?` (дальше subject/body/cc ссылки), в
+ * процент-кодировке (RFC 6068). Ссылка заменяется самим адресом до разбивки на
+ * токены, так что `mailto:a@x.com,b@y.com?subject=Hi` даёт два адреса.
+ */
+const MAILTO_RE = /mailto:([^\s<>"'`()[\]{}]*)/gi;
+
+function mailtoAddresses(_link: string, rest: string): string {
+  const addresses = rest.split('?')[0];
+  try {
+    return ` ${decodeURIComponent(addresses)} `;
+  } catch {
+    // Битая %-последовательность: как есть — дальше её разберёт общее правило.
+    return ` ${addresses} `;
+  }
+}
+
+/**
+ * Форма адреса, которую список принимает, поверх `normalizeBlockedEmail` (его
+ * EMAIL_RE пропускает `<`, `?`, кавычки и прочее в домене — такая строка не
+ * совпала бы ни с одним лидом, а клиенту было бы сказано «добавлено»).
+ * Локальная часть — буквы, цифры и atext-символы RFC 5322 без `*` (шаблон
+ * разбирается раньше); домен — метки из букв, цифр и дефиса и буквенная зона
+ * (или punycode `xn--`). Всё, что сюда не прошло, — «не адрес». Принятая
+ * строка проходит и `normalizeBlockedEmail`, поэтому читатели списка
+ * (getBlockedEmailSet) её примут.
+ */
+const ADDRESS_RE =
+  /^[\p{L}\p{M}\p{N}!#$%&'+\/=?^_`{|}~.-]+@(?:[\p{L}\p{N}](?:[\p{L}\p{M}\p{N}-]*[\p{L}\p{M}\p{N}])?\.)+(?:\p{L}[\p{L}\p{M}]{1,62}|xn--[a-z0-9-]+)$/u;
+
+function pushExample(target: Rejected, seen: Set<string>, raw: string) {
+  const key = raw.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  target.count += 1;
+  if (target.examples.length < EXAMPLES_MAX) {
+    target.examples.push(raw.length > EXAMPLE_CHARS ? `${raw.slice(0, EXAMPLE_CHARS)}…` : raw);
+  }
+}
+
+/**
+ * Шаблон со звёздочкой в локальной части (`*@acme.com`, `info*@acme.com`).
+ * `normalizeBlockedEmail` такой токен ПРИНЯЛ бы как адрес, и в список легла бы
+ * строка, которая не совпадёт ни с одним лидом, — клиент считал бы домен
+ * закрытым. Поэтому шаблон разбирается раньше адреса.
+ */
+const WILDCARD_LOCAL_RE = /^[^@]*\*[^@]*@/;
+
+/**
+ * Сайт, домен или шаблон вместо адреса — только с явным признаком: `@` без
+ * локальной части, звёздочка в локальной части, схема (`https://`), `www.` или
+ * путь после домена. Голое слово с точкой (`acme.com`, `Jane.Doe`,
+ * `report.pdf`) признака не несёт и уходит в «не адрес».
+ */
+function looksLikeDomain(token: string): boolean {
+  const lower = token.toLowerCase();
+  const at = lower.indexOf('@');
+  if (at >= 0) {
+    if (at > 0 && !WILDCARD_LOCAL_RE.test(lower)) return false;
+    return DOMAIN_RE.test(lower.slice(at + 1).split(/[/?#]/)[0]);
+  }
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//.exec(lower);
+  const rest = scheme ? lower.slice(scheme[0].length) : lower;
+  const pathAt = rest.search(/[/?#]/);
+  const host = pathAt >= 0 ? rest.slice(0, pathAt) : rest;
+  const marked = scheme !== null || pathAt >= 0 || host.startsWith('www.');
+  return marked && DOMAIN_RE.test(host);
+}
+
+/**
+ * Разбор вставленного текста: сначала вырезаются невидимые символы формата и
+ * ссылки mailto заменяются адресами; разделители — пробелы, переводы строк,
+ * запятые, точки с запятой, `<` и `>`. Адрес проходит тем же
+ * `normalizeBlockedEmail`, что и фильтры запуска и долива, и вдобавок
+ * консервативной формой ADDRESS_RE. Повторы считаются один раз.
+ */
+export function parseEngBlocklistPaste(text: string): EngBlocklistPaste {
+  const emails: string[] = [];
+  const seenEmails = new Set<string>();
+  const domains: Rejected = { count: 0, examples: [] };
+  const invalid: Rejected = { count: 0, examples: [] };
+  const seenDomains = new Set<string>();
+  const seenInvalid = new Set<string>();
+  const prepared = text.replace(FORMAT_CHARS_RE, '').replace(MAILTO_RE, mailtoAddresses);
+  for (const piece of prepared.split(SPLIT_RE)) {
+    const token = piece.replace(WRAP_HEAD_RE, '').replace(WRAP_TAIL_RE, '');
+    if (!token) continue;
+    const normalized = WILDCARD_LOCAL_RE.test(token) ? null : normalizeBlockedEmail(token);
+    const email = normalized && ADDRESS_RE.test(normalized) ? normalized : null;
+    if (email) {
+      if (!seenEmails.has(email)) {
+        seenEmails.add(email);
+        emails.push(email);
+      }
+    } else if (looksLikeDomain(token)) {
+      pushExample(domains, seenDomains, token);
+    } else {
+      pushExample(invalid, seenInvalid, token);
+    }
+  }
+  return { emails, domains, invalid };
+}
+
+function refusal(code: EngBlocklistAddCode, error: string, status: number) {
+  return NextResponse.json({ error, code }, { status });
+}
+
+/** `%`, `_` и `\` из строки поиска — буквально, а не шаблоном ilike. */
+function likeLiteral(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/** Точный счёт списка клиента (с `q` — только адресов с этой подстрокой); null — не прочитался. */
+async function countList(db: SupabaseClient, userId: string, q = ''): Promise<number | null> {
+  let query = db
+    .from('client_blocked_contacts')
+    .select('id', { count: 'exact', head: true })
+    .eq('client_user_id', userId);
+  if (q) query = query.ilike('email', `%${likeLiteral(q)}%`);
+  const { count, error } = await query;
+  return error || typeof count !== 'number' ? null : count;
+}
+
+/** Откат строк, вставленных этим запросом. true — удалены все. */
+async function rollbackInserted(db: SupabaseClient, userId: string, ids: string[]): Promise<boolean> {
+  let ok = true;
+  for (let i = 0; i < ids.length; i += ROLLBACK_ID_CHUNK) {
+    const { error } = await db
+      .from('client_blocked_contacts')
+      .delete()
+      .eq('client_user_id', userId)
+      .in('id', ids.slice(i, i + ROLLBACK_ID_CHUNK));
+    if (error) ok = false;
+  }
+  return ok;
+}
+
+/**
+ * GET (ENG): страница списка, свежие сверху. `?offset=` — с какой строки,
+ * `?q=` — часть адреса. `total` — весь список, `matching` — под поиском.
+ */
+export async function engBlocklistGet(
+  req: NextRequest,
+  db: SupabaseClient,
+  userId: string,
+): Promise<NextResponse> {
+  const params = req.nextUrl.searchParams;
+  const rawOffset = Number(params.get('offset') ?? 0);
+  // Без потолка 10 000: список, переросший потолок (см. шапку), обязан
+  // листаться до конца — иначе «Show more» за 10 000 отдавал бы ту же страницу.
+  // Смещение за концом — PGRST103 ниже, пустая страница.
+  const offset = Number.isSafeInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+  const q = (params.get('q') ?? '').trim().toLowerCase().slice(0, SEARCH_MAX_CHARS);
+
+  let page = db
+    .from('client_blocked_contacts')
+    .select('id, email, created_at', { count: 'exact' })
+    .eq('client_user_id', userId);
+  if (q) page = page.ilike('email', `%${likeLiteral(q)}%`);
+  const [pageRes, total] = await Promise.all([
+    page
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + ENG_BLOCKLIST_PAGE_SIZE - 1),
+    q ? countList(db, userId) : Promise.resolve(null),
+  ]);
+
+  // Строка, с которой просили страницу, исчезла (удаления между страницами):
+  // PostgREST отвечает PGRST103 — это пустая страница, а не сбой, и счёт тогда
+  // читается отдельно.
+  const pastEnd = pageRes.error?.code === 'PGRST103';
+  const matching =
+    pageRes.error && !pastEnd
+      ? null
+      : !pastEnd && typeof pageRes.count === 'number'
+        ? pageRes.count
+        : await countList(db, userId, q);
+  const listTotal = q ? total : matching;
+  if (matching === null || listTotal === null) {
+    await logError(
+      'client.blocklist.eng_list_failed',
+      pageRes.error ?? new Error('не прочитался счёт списка'),
+      { searching: q.length > 0 },
+      { userId },
+    );
+    return NextResponse.json({ error: ENG_BLOCKLIST_TEXT.loadFailed }, { status: 500 });
+  }
+
+  const items = pastEnd ? [] : ((pageRes.data ?? []) as EngBlockedRow[]);
+  const nextOffset = offset + items.length;
+  return NextResponse.json({
+    items,
+    total: listTotal,
+    matching,
+    offset,
+    next_offset: items.length > 0 && nextOffset < matching ? nextOffset : null,
+  });
+}
+
+/**
+ * POST (ENG): добавить вставленный текст. Body: `{ text: string }`.
+ *
+ * Порядок: разбор → потолок по текущему счёту → вставка частями без
+ * перезаписи (`ignoreDuplicates`: вернутся только новые строки) → пересчёт →
+ * если список перерос BLOCKLIST_MAX_ENTRIES или пересчёт не прочитался, откат
+ * своих новых строк. Уже стоявшие адреса не трогаются ни вставкой, ни откатом.
+ * Сбой части вставки — откат известных строк и пересчёт: «ничего не
+ * добавлено» (add_failed) отвечается, только когда откат прошёл и пересчёт
+ * показал прежний размер списка.
+ */
+export async function engBlocklistPost(
+  req: NextRequest,
+  db: SupabaseClient,
+  userId: string,
+): Promise<NextResponse> {
+  let body: { text?: unknown };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
+  }
+  if (!body || typeof body !== 'object' || typeof body.text !== 'string') {
+    return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
+  }
+  if (body.text.length > ENG_BLOCKLIST_MAX_TEXT) {
+    return refusal('too_long', ENG_BLOCKLIST_TEXT.tooLong, 400);
+  }
+
+  const paste = parseEngBlocklistPaste(body.text);
+  if (paste.emails.length === 0 && paste.domains.count === 0 && paste.invalid.count === 0) {
+    return refusal('empty', ENG_BLOCKLIST_TEXT.empty, 400);
+  }
+  if (paste.emails.length > ENG_BLOCKLIST_MAX_PER_ADD) {
+    return refusal('too_many', ENG_BLOCKLIST_TEXT.tooMany(paste.emails.length), 400);
+  }
+  if (paste.emails.length === 0) {
+    return NextResponse.json({
+      added: 0,
+      already_listed: 0,
+      domains: paste.domains,
+      invalid: paste.invalid,
+      total: null,
+    });
+  }
+
+  const before = await countList(db, userId);
+  if (before === null) {
+    await logError('client.blocklist.eng_add_failed', new Error('не прочитался счёт списка до вставки'), {}, { userId });
+    return refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500);
+  }
+  if (before > BLOCKLIST_MAX_ENTRIES) {
+    return refusal('list_over_limit', ENG_BLOCKLIST_TEXT.listOverLimit(before), 400);
+  }
+  if (before === BLOCKLIST_MAX_ENTRIES) {
+    return refusal('list_full', ENG_BLOCKLIST_TEXT.listFull, 400);
+  }
+
+  // Вставка частями по INSERT_CHUNK строк: RETURNING каждой части заведомо
+  // меньше потолка строк ответа PostgREST, значит, id вернутся ВСЕ — откат ниже
+  // держится на этом. Сбой части — откат уже вставленных частей.
+  const insertedIds: string[] = [];
+  for (let i = 0; i < paste.emails.length; i += INSERT_CHUNK) {
+    const { data, error } = await db
+      .from('client_blocked_contacts')
+      .upsert(
+        paste.emails
+          .slice(i, i + INSERT_CHUNK)
+          .map((email) => ({ client_user_id: userId, email, reason: null, source: 'manual' })),
+        { onConflict: 'client_user_id,email', ignoreDuplicates: true },
+      )
+      .select('id');
+    if (error || !Array.isArray(data)) {
+      // Строки прошлых частей известны по id — откатываются. Сама сбойная
+      // часть могла и записаться (ответ потерян после commit) — её id
+      // неизвестны, удалять по адресу нельзя (снесли бы адреса, стоявшие в
+      // списке раньше). Поэтому — пересчёт: прежний размер после отката значит
+      // «ничего не добавлено»; список длиннее потолка — over_limit_stuck (запуски
+      // и долив клиента теперь отказывают); иначе состав неизвестен —
+      // add_unconfirmed, экран перечитает список.
+      const rolledBack = insertedIds.length === 0 || (await rollbackInserted(db, userId, insertedIds));
+      const now = await countList(db, userId);
+      await logError(
+        'client.blocklist.eng_add_failed',
+        error ?? new Error('вставка не вернула строк'),
+        { inserted: insertedIds.length, rolledBack, before, now },
+        { userId },
+      );
+      if (now !== null && now > BLOCKLIST_MAX_ENTRIES) {
+        return refusal('over_limit_stuck', ENG_BLOCKLIST_TEXT.overLimitStuck, 500);
+      }
+      return rolledBack && now === before
+        ? refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500)
+        : refusal('add_unconfirmed', ENG_BLOCKLIST_TEXT.addUnconfirmed, 500);
+    }
+    for (const row of data as { id: string }[]) insertedIds.push(row.id);
+  }
+
+  const after = await countList(db, userId);
+  if (after === null || after > BLOCKLIST_MAX_ENTRIES) {
+    const rolledBack = insertedIds.length === 0 || (await rollbackInserted(db, userId, insertedIds));
+    await logError(
+      'client.blocklist.eng_add_rolled_back',
+      new Error(
+        after === null
+          ? 'не прочитался счёт списка после вставки'
+          : `список перерос ${BLOCKLIST_MAX_ENTRIES}: ${after}`,
+      ),
+      { inserted: insertedIds.length, rolledBack },
+      { userId },
+    );
+    if (after === null) {
+      return rolledBack
+        ? refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500)
+        : refusal('add_unconfirmed', ENG_BLOCKLIST_TEXT.addUnconfirmed, 500);
+    }
+    if (!rolledBack) return refusal('over_limit_stuck', ENG_BLOCKLIST_TEXT.overLimitStuck, 500);
+    // Размер без своих строк: другая вкладка могла за это время дописать
+    // столько, что список и без нас длиннее потолка, — тогда число настоящее.
+    const without = after - insertedIds.length;
+    if (without > BLOCKLIST_MAX_ENTRIES) {
+      return refusal('list_over_limit', ENG_BLOCKLIST_TEXT.listOverLimit(without), 400);
+    }
+    const room = BLOCKLIST_MAX_ENTRIES - without;
+    return room > 0
+      ? refusal('over_limit', ENG_BLOCKLIST_TEXT.overLimit(room), 400)
+      : refusal('list_full', ENG_BLOCKLIST_TEXT.listFull, 400);
+  }
+
+  if (insertedIds.length > 0) {
+    await logAudit(
+      'client.blocklist.eng_added',
+      'ENG-клиент добавил адреса в «Do not contact»',
+      { added: insertedIds.length, alreadyListed: paste.emails.length - insertedIds.length, total: after },
+      { userId },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      added: insertedIds.length,
+      already_listed: paste.emails.length - insertedIds.length,
+      domains: paste.domains,
+      invalid: paste.invalid,
+      total: after,
+    },
+    { status: insertedIds.length > 0 ? 201 : 200 },
+  );
+}
+
+/** DELETE (ENG): тот же скоуп, что у RU-ветки; чужой id даёт removed: 0. */
+export async function engBlocklistDelete(
+  db: SupabaseClient,
+  userId: string,
+  id: string,
+): Promise<NextResponse> {
+  const { data, error } = await db
+    .from('client_blocked_contacts')
+    .delete()
+    .eq('id', id)
+    .eq('client_user_id', userId)
+    .select('email');
+
+  if (error) {
+    await logError('client.blocklist.remove_failed', error, { id }, { userId });
+    return NextResponse.json({ error: ENG_BLOCKLIST_TEXT.removeFailed }, { status: 500 });
+  }
+
+  const removed = (data ?? []).length;
+  if (removed > 0) {
+    await logAudit(
+      'client.blocklist.removed',
+      'Client unblocked a contact',
+      { email: (data as { email: string }[])[0]?.email },
+      { userId },
+    );
+  }
+  return NextResponse.json({ removed });
+}

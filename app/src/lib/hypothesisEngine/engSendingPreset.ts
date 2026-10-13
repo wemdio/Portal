@@ -47,7 +47,13 @@
  *    которому уже были запуски, нельзя (долив appendLeadsToClientCampaign ищет
  *    кампании в воркспейсе пресета) — это держит функция выдачи (шапка
  *    миграции, «закрепление воркспейса»);
- *  - stop_on_reply = true (цепочка останавливается на ответе; не выключается);
+ *  - настройки кампаний пула HE_ENG_POOL_CAMPAIGN_SETTINGS (ниже):
+ *    stop_on_reply = true, open_tracking = false, link_tracking = false — и у
+ *    нового, и у существующего пресета. Кампании ENG-кабинета получают их и
+ *    без пресета (ядро, вход campaignSettings); в пресете они для путей,
+ *    которые строят кампанию только из пресета (staff-роут запуска шаблона с
+ *    этим пресетом). Администратор не может поставить им другое значение
+ *    (checkHeEngPresetAdminEdit);
  *  - agency_managed = false: с true RU-запуск кабинета (lib/clientLaunch/
  *    runLaunch.ts) пропустил бы свой тарифный гейт, и ENG-аккаунт отправил бы
  *    из ящиков пула мимо гейтов ENG. Ночной долив ENG тарифный гейт и так
@@ -57,10 +63,10 @@
  *    Кампаниям us-проекта ядро окно пресета не передаёт никогда (всегда окно
  *    кабинета, launchSchedule.ts), поэтому у существующего пресета часы не
  *    трогаются — их видит только экран администратора.
- *  - Дневные лимиты, интервал и трекинг — дефолты колонок (кампания: 50 писем
- *    в день, 50 новых контактов в день, 10 минут между письмами; потолок
- *    одного ящика — его daily_limit у рассыльщика) и не трогаются у
- *    существующего пресета.
+ *  - Дневные лимиты и интервал — дефолты колонок (кампания: 50 писем в день,
+ *    50 новых контактов в день, 10 минут между письмами; потолок одного
+ *    ящика — его daily_limit у рассыльщика) и не трогаются у существующего
+ *    пресета.
  *
  * ПРОВЕРКА ИСКЛЮЧИТЕЛЬНОСТИ ВНЕ ПУЛА (после выдачи, на каждом запуске). Ящик
  * пула, который стоит в пресете ДРУГОГО клиента (администратор вписал руками)
@@ -82,6 +88,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { engDefaultSendingWindow } from '@/app/api/client/eng/_launchWindow';
 import { ENG_PAID_UNAVAILABLE_TEXT } from './engPaidAccess';
+import type { HeLaunchCampaignSettings } from './launchTemplate';
 import {
   assignHeSendingPool,
   describeHeSendingPoolMailboxUses,
@@ -92,6 +99,29 @@ import {
   readHeSendingPoolWorkspace,
   HE_US_POOL_MAILBOXES_PER_PROJECT_ENV,
 } from './sendingPool';
+
+/* ─────────────── Настройки кампаний пула ─────────────── */
+
+/**
+ * С этими настройками создаётся каждая кампания ENG-кабинета из ящиков пула
+ * (engClientLaunch передаёт их ядру входом campaignSettings: основная,
+ * сегментная и замена удалённой у рассыльщика кампании, PATCH пустой кампании
+ * прошлой попытки), и их же держит пресет клиента (вставка и выравнивание в
+ * ensureHeEngPresetForProject, отказ правки в checkHeEngPresetAdminEdit).
+ *  - stop_on_reply: цепочка останавливается на ответе.
+ *  - open_tracking / link_tracking выключены: ящики пула наши и стоят в
+ *    общем воркспейсе с кампаниями RU-клиентов outreachOS (sendingPool.ts,
+ *    «Воркспейс пула»), пиксель открытий и переписанные ссылки трекинга
+ *    вредят доставляемости, а кабинет показывает только отправленные и
+ *    ответы. Решение владельца — подтвердить (отчёт S4, лейн send-settings).
+ * Заголовок отписки (insert_unsubscribe_header) здесь не задаётся — открытый
+ * вопрос владельца.
+ */
+export const HE_ENG_POOL_CAMPAIGN_SETTINGS = {
+  stop_on_reply: true,
+  open_tracking: false,
+  link_tracking: false,
+} as const satisfies Required<HeLaunchCampaignSettings>;
 
 /* ─────────────── Тексты клиенту ─────────────── */
 
@@ -181,10 +211,20 @@ interface PresetRow {
   instantly_account_id: string | null;
   email_account_ids: unknown;
   stop_on_reply: boolean | null;
+  open_tracking: boolean | null;
+  link_tracking: boolean | null;
   agency_managed: boolean | null;
 }
 
-const PRESET_COLUMNS = 'id, instantly_account_id, email_account_ids, stop_on_reply, agency_managed';
+const PRESET_COLUMNS =
+  'id, instantly_account_id, email_account_ids, stop_on_reply, open_tracking, link_tracking, agency_managed';
+
+/**
+ * Настройки HE_ENG_POOL_CAMPAIGN_SETTINGS, у которых в пресете есть колонка с
+ * тем же именем, — только их пишет пресет. Настройка без колонки (если её
+ * добавят в HE_ENG_POOL_CAMPAIGN_SETTINGS) доходит только до кампаний кабинета.
+ */
+const PRESET_POOL_SETTING_KEYS = ['stop_on_reply', 'open_tracking', 'link_tracking'] as const;
 
 function fail(
   reason: HeEngSendingPresetErrorReason,
@@ -432,7 +472,9 @@ export async function ensureHeEngPresetForProject(
           client_user_id: clientUserId,
           instantly_account_id: ws,
           email_account_ids: emails,
-          stop_on_reply: true,
+          stop_on_reply: HE_ENG_POOL_CAMPAIGN_SETTINGS.stop_on_reply,
+          open_tracking: HE_ENG_POOL_CAMPAIGN_SETTINGS.open_tracking,
+          link_tracking: HE_ENG_POOL_CAMPAIGN_SETTINGS.link_tracking,
           agency_managed: false,
           schedule_from: window.from,
           schedule_to: window.to,
@@ -460,7 +502,9 @@ export async function ensureHeEngPresetForProject(
       const patch: Record<string, unknown> = {};
       if (resolveInstantlyAccountId(preset.instantly_account_id) !== ws) patch.instantly_account_id = ws;
       if (!sameList(presetEmails(preset.email_account_ids), emails)) patch.email_account_ids = emails;
-      if (preset.stop_on_reply !== true) patch.stop_on_reply = true;
+      for (const key of PRESET_POOL_SETTING_KEYS) {
+        if (preset[key] !== HE_ENG_POOL_CAMPAIGN_SETTINGS[key]) patch[key] = HE_ENG_POOL_CAMPAIGN_SETTINGS[key];
+      }
       if (preset.agency_managed !== false) patch.agency_managed = false;
       if (Object.keys(patch).length > 0) {
         const { data: updated, error: updateErr } = await instantlyDb
@@ -511,6 +555,8 @@ export const ENG_PRESET_ADMIN_WORKSPACE_REFUSED_TEXT =
   'Это клиент ENG-кабинета: воркспейс его пресета — воркспейс его ящиков из «Пул ящиков ENG» (там его кампании, и ночной долив ищет их там). Сменить воркспейс здесь нельзя.';
 export const ENG_PRESET_ADMIN_STOP_ON_REPLY_REFUSED_TEXT =
   'Это клиент ENG-кабинета: «Останавливать цепочку при ответе» в его пресете всегда включено (его ставит запуск из пула). Выключить здесь нельзя.';
+export const ENG_PRESET_ADMIN_TRACKING_REFUSED_TEXT =
+  'Это клиент ENG-кабинета: «Отслеживать открытия писем» и «Отслеживать клики по ссылкам» в его пресете ставит запуск из пула — с этими значениями создаются все его кампании. Изменить здесь нельзя.';
 export const ENG_PRESET_ADMIN_READ_FAILED_TEXT =
   'Не удалось прочитать пресет клиента ENG-кабинета — ничего не сохранено, попробуйте ещё раз.';
 
@@ -536,7 +582,11 @@ function engPresetAddRefusedText(added: string[]): string {
  *    пробелов) — письма уходят только из ящиков пула проекта;
  *  - сменить воркспейс — запущенный клиент закреплён за воркспейсом пресета
  *    (долив appendLeadsToClientCampaign ищет кампании там);
- *  - выключить stop_on_reply.
+ *  - выключить stop_on_reply;
+ *  - поставить open_tracking / link_tracking не то значение, что в
+ *    HE_ENG_POOL_CAMPAIGN_SETTINGS, если в пресете сейчас другое (пресет,
+ *    записанный до этих настроек, сохраняется как есть — его выровняет
+ *    следующий запуск).
  * Может: убрать адреса (runbook смены сайта, шаг 5.0, когда кнопка «Вернуть
  * ящики в пул» не очистила пресет; адрес, который ещё отдан проекту,
  * следующий запуск вернёт сам) и менять остальные поля. Синхронизация
@@ -590,7 +640,7 @@ export async function checkHeEngPresetAdminEdit(
     if (!instantlyDb) return { ok: false, status: 503, message: ENG_PRESET_ADMIN_READ_FAILED_TEXT };
     const { data: currentRow, error: currentErr } = await instantlyDb
       .from('client_campaign_presets')
-      .select('instantly_account_id, email_account_ids')
+      .select('instantly_account_id, email_account_ids, open_tracking, link_tracking')
       .eq('client_user_id', clientUserId)
       .maybeSingle();
     if (currentErr) {
@@ -600,9 +650,17 @@ export async function checkHeEngPresetAdminEdit(
       });
       return { ok: false, status: 503, message: ENG_PRESET_ADMIN_READ_FAILED_TEXT };
     }
-    const current = currentRow as { instantly_account_id: string | null; email_account_ids: unknown } | null;
+    const current = currentRow as {
+      instantly_account_id: string | null;
+      email_account_ids: unknown;
+      open_tracking: boolean | null;
+      link_tracking: boolean | null;
+    } | null;
 
-    let refused: { reason: 'create' | 'workspace' | 'add_mailbox' | 'stop_on_reply'; message: string } | null = null;
+    let refused: {
+      reason: 'create' | 'workspace' | 'add_mailbox' | 'stop_on_reply' | 'tracking';
+      message: string;
+    } | null = null;
     if (!current) {
       refused = { reason: 'create', message: ENG_PRESET_ADMIN_CREATE_REFUSED_TEXT };
     } else if (
@@ -617,6 +675,12 @@ export async function checkHeEngPresetAdminEdit(
     }
     if (!refused && change.stop_on_reply !== undefined && change.stop_on_reply !== true) {
       refused = { reason: 'stop_on_reply', message: ENG_PRESET_ADMIN_STOP_ON_REPLY_REFUSED_TEXT };
+    }
+    if (!refused && current) {
+      const awayFromPool = (['open_tracking', 'link_tracking'] as const).some(
+        (key) => change[key] !== undefined && change[key] !== HE_ENG_POOL_CAMPAIGN_SETTINGS[key] && change[key] !== current[key],
+      );
+      if (awayFromPool) refused = { reason: 'tracking', message: ENG_PRESET_ADMIN_TRACKING_REFUSED_TEXT };
     }
     if (refused) {
       void logAudit('he.eng_preset_admin_edit.refused', 'admin edit of an ENG client preset refused', {

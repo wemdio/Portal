@@ -24,6 +24,8 @@ import type { HeEngAutoLaunchCode, HeEngAutoLaunchState } from './engAutoLaunch'
 // Справочник клиентских текстов без зависимостей (тот же, что реэкспортирует
 // clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда.
 import { HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
+// Порог списка Do not contact — фразе ленты о пропущенной ночи (шаг 3a- autoPipeline.ts).
+import { BLOCKLIST_MAX_ENTRIES } from '@/lib/clientBlocklist/blockedContacts';
 
 /* ─────────────────────────── Время (UTC) ─────────────────────────── */
 
@@ -1510,6 +1512,30 @@ export function buildEngDashboardEvents(input: {
             ? {
                 type: 'refill_empty',
                 text: withVertical('daily top-up paused: the letters need rewriting — message Support to have them rewritten', vname),
+                at,
+              }
+          // stats.error_kind 'blocklist_over_cap' / 'blocklist_unreadable' пишет
+          // крон до покупки сборки (autoPipeline.ts, шаг 3a- «СПИСОК DO NOT
+          // CONTACT»): список владельца не читается, ночь не куплена, команде
+          // ушёл алерт. Строка историческая: число — порог списка, а не его
+          // нынешний размер (его пишет страница Do not contact).
+          : asStr(stats.error_kind) === 'blocklist_over_cap'
+            ? {
+                type: 'refill_empty',
+                text: withVertical(
+                  `daily top-up skipped — your Do not contact list held more than ${BLOCKLIST_MAX_ENTRIES.toLocaleString('en-US')} ` +
+                    'addresses, so no one could be checked against it; remove addresses on the Do not contact page',
+                  vname,
+                ),
+                at,
+              }
+          : asStr(stats.error_kind) === 'blocklist_unreadable'
+            ? {
+                type: 'refill_empty',
+                text: withVertical(
+                  'daily top-up skipped — we could not read your Do not contact list, so no one was added; message Support if this repeats',
+                  vname,
+                ),
                 at,
               }
           : budgetOutcome === 'cap_exhausted'

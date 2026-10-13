@@ -9,7 +9,7 @@
 import type { LLMMessage } from '../llm';
 import type { CompetitorsPromptInput } from './competitors';
 
-const SYSTEM = `You are a senior market analyst at the Polza agency. Given a client profile and real search results, you build a list of the client's DIRECT competitors — companies that sell the same product/service to the same audience.
+const SYSTEM = `You are a senior market analyst. Given a client profile and real search results, you build a list of the client's DIRECT competitors — companies that sell the same product/service to the same audience.
 
 Rules:
 - Include both US and international players (if the market is global — at least 2-3 international ones).

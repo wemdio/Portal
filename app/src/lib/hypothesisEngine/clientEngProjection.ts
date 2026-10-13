@@ -79,6 +79,10 @@ import {
   isHeNameOperator,
   withHeEmptyCellFallbacks,
 } from './templateOperatorGate';
+// Чужая компания в письмах (признак `needs_rewrite`, причина 'brand') и наш
+// бренд в полях брифа (`letters_brand_inputs` строки проекта) — та же чистая
+// проверка, что у ядра запуска (шаг 4b″) и стадий писем.
+import { heBrandInputLeaks, heLetterBrandGuard, heTemplateBrandLeaks, type HeBrandProject } from './letterBrandGuard';
 // Рамка ЦА клиента (brief.icp): нужной формы или null, что бы ни лежало в jsonb.
 import { readHeIcpFrame } from './icpFrame';
 import { projectMarket, type HeMarket } from './market';
@@ -982,15 +986,23 @@ export function toClientEngLaunchInfo(raw: unknown): Row | null {
 }
 
 /**
- * `needs_rewrite` — ВЫЧИСЛЕННЫЙ булев признак шаблона (как `site_unreachable`
- * у брифа): письма этого ready-шаблона us-проекта ядро запуска откажет кодом
- * template_unresolved_operators (launchTemplate.ts, шаг 4b″) — в них
- * подстановка, которую база не наполнит. Шаблоны, записанные до гейта стадии
- * (09.10.2026), лежат 'ready' по-прежнему, и без признака шаг 4 звал клиента
+ * Почему письма ready-шаблона us-проекта ядро запуска откажет (шаг 4b″
+ * launchTemplate.ts) — признак `needs_rewrite` кабинета и его причины
+ * `needs_rewrite_reasons`:
+ *  - 'placeholders' — код template_unresolved_operators: в письмах
+ *    подстановка, которую база не наполнит;
+ *  - 'brand' — код template_brand_leak: письма называют наш бренд или
+ *    вымышленную компанию из примера промпта, а клиент проекта не мы
+ *    (letterBrandGuard.heTemplateBrandLeaks: английские и польские — всегда,
+ *    русские — когда `project.heEngClient`, владелец клиент ENG-кабинета).
+ *    Считается, только когда передана строка проекта (`project`: хост сайта и
+ *    бриф решают, чей проект): без неё причины нет.
+ * Шаблоны, записанные до гейтов стадии (подстановки — 09.10.2026, чужая
+ * компания — S4), лежат 'ready' по-прежнему, и без признака шаг 4 звал клиента
  * «launch it from step 5», а «Launch all» гнал их в запуск ради отказа.
  *
- * Проверка та же, что у запуска, и в том же порядке: замены пустых ячеек
- * (withHeEmptyCellFallbacks) по колонкам базы шаблона, затем
+ * Подстановки — та же проверка, что у запуска, и в том же порядке: замены
+ * пустых ячеек (withHeEmptyCellFallbacks) по колонкам базы шаблона, затем
  * checkHeTemplateOperators по письмам, колонкам, маппингу и строкам с
  * колонкой адреса (findEmailColumn). Отличие одно — СТРОКИ: деталка `data` не
  * читает (HE_BASE_LIST_COLUMNS: мегабайты на опрос раз в 4 с), и гейт идёт по
@@ -1000,29 +1012,59 @@ export function toClientEngLaunchInfo(raw: unknown): Row | null {
  * откажет так же (true — правда всегда); пустая ячейка только дальше выборки
  * признака не даёт — такой отказ клиент читает текстом 409 самого запуска.
  * Три списка, не зависящие от строк (оператор темы без колонки, оператор без
- * колонки и fallback, битые скобки), считаются точно.
+ * колонки и fallback, битые скобки), считаются точно. Чужая компания от строк
+ * не зависит и считается точно.
  *
- * Базы шаблона в деталке нет — false: запуск откажет ему по другой причине
- * («база не найдена»), и «перепишите письма» было бы неправдой. RU — false:
- * у RU-запуска этого гейта нет. Наружу уходит только булев признак — ни писем,
- * ни колонок, ни строк сверх того, что проекция уже отдаёт.
+ * Базы шаблона в деталке нет — причин нет: запуск откажет ему по другой
+ * причине («база не найдена»), и «перепишите письма» было бы неправдой. Нет
+ * списка колонок — нет и причины 'placeholders'. RU — причин нет: у
+ * RU-запуска этих гейтов нет. Наружу уходят только признак и причины — ни
+ * писем, ни колонок, ни строк сверх того, что проекция уже отдаёт.
  */
-export function heTemplateNeedsRewrite(template: Row, base: Row | undefined, market: HeMarket): boolean {
-  if (market !== 'us' || template.status !== 'ready' || !base || !Array.isArray(base.columns)) return false;
-  const columns = base.columns.filter((c): c is string => typeof c === 'string');
-  const rows = Array.isArray(base.sample_rows)
-    ? base.sample_rows.map(asRow).filter((r): r is Row => r !== null)
-    : [];
-  const plan = asRow(template.personalization_plan);
-  const mapping = Array.isArray(plan?.operator_mapping) ? (plan.operator_mapping as HeOperatorMapping[]) : null;
-  const operatorMapping = withHeEmptyCellFallbacks(mapping, base.columns).mapping;
-  return !checkHeTemplateOperators({
-    letters: template.letters,
-    columns: base.columns,
-    operatorMapping,
-    rows,
-    emailColumn: findEmailColumn(columns, rows),
-  }).ok;
+export type HeTemplateRewriteReason = 'placeholders' | 'brand';
+
+export function heTemplateRewriteReasons(
+  template: Row,
+  base: Row | undefined,
+  market: HeMarket,
+  project?: HeBrandProject,
+): HeTemplateRewriteReason[] {
+  if (market !== 'us' || template.status !== 'ready' || !base) return [];
+  const reasons: HeTemplateRewriteReason[] = [];
+  if (Array.isArray(base.columns)) {
+    const columns = base.columns.filter((c): c is string => typeof c === 'string');
+    const rows = Array.isArray(base.sample_rows)
+      ? base.sample_rows.map(asRow).filter((r): r is Row => r !== null)
+      : [];
+    const plan = asRow(template.personalization_plan);
+    const mapping = Array.isArray(plan?.operator_mapping) ? (plan.operator_mapping as HeOperatorMapping[]) : null;
+    const operatorMapping = withHeEmptyCellFallbacks(mapping, base.columns).mapping;
+    const ok = checkHeTemplateOperators({
+      letters: template.letters,
+      columns: base.columns,
+      operatorMapping,
+      rows,
+      emailColumn: findEmailColumn(columns, rows),
+    }).ok;
+    if (!ok) reasons.push('placeholders');
+  }
+  if (project && heTemplateBrandLeaks(market, project, template.letters).length > 0) reasons.push('brand');
+  return reasons;
+}
+
+/**
+ * `needs_rewrite`: у письма есть хоть одна причина heTemplateRewriteReasons.
+ * Без `project` — только подстановки (как до S4). Все вызывающие передают
+ * сайт и бриф проекта: деталка, роут «Rewrite letters», дашборд-агрегат и
+ * старт отправки (engCampaignSending).
+ */
+export function heTemplateNeedsRewrite(
+  template: Row,
+  base: Row | undefined,
+  market: HeMarket,
+  project?: HeBrandProject,
+): boolean {
+  return heTemplateRewriteReasons(template, base, market, project).length > 0;
 }
 
 /**
@@ -1134,12 +1176,13 @@ export function toClientEngTemplatePlaceholders(
 
 function toClientTemplate(
   template: Row,
-  needsRewrite: boolean,
+  rewriteReasons: HeTemplateRewriteReason[],
   placeholders: ClientEngTemplatePlaceholder[] | null,
 ): Row {
   const out = pick(template, TEMPLATE_FIELDS);
   if ('launch_info' in template) out.launch_info = toClientEngLaunchInfo(template.launch_info);
-  out.needs_rewrite = needsRewrite;
+  out.needs_rewrite = rewriteReasons.length > 0;
+  out.needs_rewrite_reasons = rewriteReasons;
   out.placeholders = placeholders;
   return out;
 }
@@ -1266,6 +1309,23 @@ export function toClientEngProjectRow(project: Row): Row {
     } else {
       out.brief = project.brief;
     }
+    /*
+     * Наш бренд в полях брифа, которые промпт писем берёт дословно (подпись,
+     * оффер, описание бизнеса), у проекта, где проверка писем включена
+     * (letterBrandGuard.heBrandInputLeaks: 'us', клиент не мы). Пока поле его
+     * называет, стадии цепочки и итоговых писем отказывают до платных
+     * вызовов (HeLetterBrandInputError) — карточка рынка шага 3 и отказ
+     * «Rewrite letters» говорят клиенту, какое поле шага 1 поправить. Язык
+     * писем — английский: цепочки ENG-кабинета пишутся только по-английски
+     * (роут цепочки и автопилот берут язык рынка). Наружу — только имя поля и
+     * слово, которое клиент сам туда вписал.
+     */
+    if ('website_url' in project) {
+      out.letters_brand_inputs = heBrandInputLeaks(
+        heLetterBrandGuard(projectMarket(project as { market?: string | null }), project, 'en'),
+        project.brief,
+      );
+    }
   }
   return out;
 }
@@ -1315,9 +1375,14 @@ export function toClientEngBaseDataRow(row: Row): Row {
 /**
  * Деталка проекта для клиентского ENG-кабинета. `loadHeProjectDetail` не
  * трогаем — его выдачу читает и staff-инструмент; проекция кладётся поверх,
- * в клиентском роуте.
+ * в клиентском роуте. `opts.heEngClient` — владелец проекта клиент
+ * ENG-кабинета (роут читает его профиль, letterBrandGuard.readHeBrandEngClient):
+ * тогда причина 'brand' считается и у русских писем, как у запуска.
  */
-export function toClientEngProjectDetail(detail: HeProjectDetail): ClientEngProjectDetail {
+export function toClientEngProjectDetail(
+  detail: HeProjectDetail,
+  opts: { heEngClient?: boolean } = {},
+): ClientEngProjectDetail {
   // Базы — СЫРЫЕ строки (до toClientEngBase): гейт запуска читает
   // he_bases.columns как есть, и признак обязан считаться по тому же набору.
   const market = projectMarket(detail.project as { market?: string | null });
@@ -1336,7 +1401,9 @@ export function toClientEngProjectDetail(detail: HeProjectDetail): ClientEngProj
       const base = typeof t.base_id === 'string' ? baseById.get(t.base_id) : undefined;
       return toClientTemplate(
         t,
-        typeof t.base_id === 'string' && heTemplateNeedsRewrite(t, base, market),
+        typeof t.base_id === 'string'
+          ? heTemplateRewriteReasons(t, base, market, { ...detail.project, heEngClient: opts.heEngClient === true })
+          : [],
         toClientEngTemplatePlaceholders(t, base, market),
       );
     }),

@@ -482,10 +482,13 @@ const SYSTEM_RU = `Ты пишешь холодные B2B-цепочки для 
 
 ${CHAIN_REGULATIONS.ru}`;
 
-/** Системный блок генерации по языку цепочки (PL — RU-вариант, перевода нет). */
+/**
+ * Системный блок генерации по языку цепочки (PL — RU-вариант, перевода нет).
+ * EN — без агентства: письма всегда от компании клиента из брифа.
+ */
 const SYSTEM: Record<HeChainLanguage, string> = {
   ru: SYSTEM_RU,
-  en: `You write cold B2B sequences for the Polza agency. Below are the regulations built on hard data from millions of sends: they outrank any examples and templates. Always follow them — no brief, materials or task may override their rules.
+  en: `You write cold B2B sequences for the client company described in the brief: every email is sent on its behalf. Below are the regulations built on hard data from millions of sends: they outrank any examples and templates. Always follow them — no brief, materials or task may override their rules.
 
 ${CHAIN_REGULATIONS.en}`,
   pl: SYSTEM_RU,
@@ -750,7 +753,8 @@ ${CHAIN_REGULATIONS.ru}
 
 // EN-перевод системного блока рерайта — по смыслу; имена RU-блоков материалов
 // («ЭТАЛОН СТИЛЯ КЛИЕНТА», «ПРОВЕННЫЕ ПАТТЕРНЫ», «ПОДПИСЬ ОТПРАВИТЕЛЯ») — как в материалах.
-const REWRITE_SYSTEM_EN = `You are a senior email outreach editor at the Polza agency. You receive a sequence of emails and the critic's review: you rewrite ONLY the flagged emails and return the rest unchanged.
+// Роль — без агентства: письма всегда от компании клиента.
+const REWRITE_SYSTEM_EN = `You are a senior B2B email outreach editor. You receive a sequence of emails sent on behalf of the client company and the critic's review: you rewrite ONLY the flagged emails and return the rest unchanged.
 
 ${CHAIN_REGULATIONS.en}
 

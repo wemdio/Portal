@@ -14,6 +14,8 @@ import {
   requireEngPaidAccess,
 } from '@/lib/hypothesisEngine/apiGuards';
 import { reconcileHeAutopilotProject } from '@/lib/hypothesisEngine/autopilotReconcile';
+import type { HeAutopilotVerticalDetail } from '@/lib/hypothesisEngine/autopilotReconcile';
+import type { HeBrandInputLeak } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { toClientEngAutopilotHold } from '@/lib/hypothesisEngine/clientEngProjection';
 import {
   ENG_SENDING_ACCESS_PROBLEM_TEXT,
@@ -98,6 +100,17 @@ function sendingAccessWord(state: HeEngSendingAccessState): EngSendingAccessWord
   }
 }
 
+/**
+ * Рынки, которым это нажатие НЕ поставило письма, потому что поле брифа
+ * называет наш бренд (причина реконсилера 'brand_input'), и сами поля —
+ * кабинет называет их клиенту (EngStepLaunch, launchResultText). Поля — то,
+ * что клиент сам вписал на шаге 1 (имя поля и слово), ничего сверх.
+ */
+function brandInputStops(details: HeAutopilotVerticalDetail[]): { markets: number; inputs: HeBrandInputLeak[] } {
+  const stopped = details.filter((d) => d.reason === 'brand_input');
+  return { markets: stopped.length, inputs: stopped.find((d) => (d.brandInputs ?? []).length > 0)?.brandInputs ?? [] };
+}
+
 /** Шаг события лога по шагу сбоя общего пути (как у «Start outreach»). */
 const FAILURE_EVENT: Record<string, string> = {
   verticals: 'client.eng.project_launch.verticals_failed',
@@ -178,7 +191,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 //  5. reconcileHeAutopilotProject(trigger 'client') — тот же путь и те же
 //     правила оплаты, что у «Start outreach»: письма, сборка, анализ, финальные
 //     письма; повтор упавшего — решение клиента, сборка, которая остановится
-//     так же, не покупается (collect_again_verticals).
+//     так же, не покупается (collect_again_verticals). Письма рынку, у которого
+//     поле брифа называет наш бренд, не ставятся (причина 'brand_input'
+//     реконсилера): ответ несёт их число и поля (brand_input_markets,
+//     brand_inputs), кабинет называет поле шага 1.
 // Запись намерения и постановка не атомарны: намерение — первым; упал
 // реконсилер — 500, повторное нажатие доставит только недостающее.
 //
@@ -338,6 +354,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
     const collectStopRepeats = reconciled.details.filter((d) => d.reason === 'collect_stop_repeats');
     const hold = reconciled.pause ? toClientEngAutopilotHold({ autopilot_error: reconciled.pause }) : null;
+    const brand = brandInputStops(reconciled.details);
 
     void logAudit('client.eng.project_launch.requested', 'ENG client pressed Launch for the project', {
       userId,
@@ -354,6 +371,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       analysesRequeued: reconciled.counts.analysesRequeued,
       verticalsSkipped: reconciled.counts.verticalsSkipped,
       ...(reconciled.pause ? { autopilotPause: reconciled.pause } : {}),
+      ...(brand.markets > 0 ? { brandInputMarkets: brand.markets } : {}),
     });
 
     return NextResponse.json({
@@ -368,6 +386,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       verticals_skipped: reconciled.counts.verticalsSkipped,
       collect_again_verticals: collectStopRepeats.length,
       autopilot_hold_code: hold?.code ?? null,
+      brand_input_markets: brand.markets,
+      brand_inputs: brand.inputs,
     });
   });
 }
@@ -448,6 +468,7 @@ async function launchMoreMarkets(
     already: string[];
     counts?: { chainsEnqueued: number; collectsEnqueued: number; templatesEnqueued: number; analysesRequeued: number; verticalsSkipped: number };
     holdCode?: string | null;
+    brand?: { markets: number; inputs: HeBrandInputLeak[] };
   }) =>
     NextResponse.json({
       ok: true,
@@ -463,6 +484,8 @@ async function launchMoreMarkets(
       autopilot_hold_code: extra.holdCode ?? null,
       markets_started: extra.started,
       markets_already_started: extra.already,
+      brand_input_markets: extra.brand?.markets ?? 0,
+      brand_inputs: extra.brand?.inputs ?? [],
     });
   if (pending.length === 0) {
     void logAudit('client.eng.project_launch.more_markets', 'ENG client pressed Launch more markets; all had started', {
@@ -516,6 +539,9 @@ async function launchMoreMarkets(
   const started = reconciled.details.filter((d) => d.outcome === 'chain_enqueued').map((d) => d.verticalId);
   const raced = reconciled.details.filter((d) => d.reason === 'chain_running').map((d) => d.verticalId);
   const hold = reconciled.pause ? toClientEngAutopilotHold({ autopilot_error: reconciled.pause }) : null;
+  // Рынки, которым письма не поставлены из-за поля брифа, остаются
+  // нетронутыми: та же кнопка начнёт их после правки поля.
+  const brand = brandInputStops(reconciled.details);
 
   void logAudit('client.eng.project_launch.more_markets', 'ENG client pressed Launch more markets', {
     ...logContext,
@@ -526,6 +552,7 @@ async function launchMoreMarkets(
     chainsEnqueued: reconciled.counts.chainsEnqueued,
     verticalsSkipped: reconciled.counts.verticalsSkipped,
     ...(reconciled.pause ? { autopilotPause: reconciled.pause } : {}),
+    ...(brand.markets > 0 ? { brandInputMarkets: brand.markets } : {}),
   });
 
   return answer({
@@ -533,6 +560,7 @@ async function launchMoreMarkets(
     already: [...alreadyStarted, ...raced],
     counts: reconciled.counts,
     holdCode: hold?.code ?? null,
+    brand,
   });
 }
 

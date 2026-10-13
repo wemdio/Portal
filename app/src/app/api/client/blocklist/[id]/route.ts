@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { engBlocklistDelete } from '../_eng';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,6 +26,9 @@ export async function DELETE(
 
   const { userId } = result.auth;
   const { id } = await ctx.params;
+
+  // ENG-кабинет: то же удаление, текст отказа английский (../_eng.ts).
+  if (result.auth.market === 'eng') return engBlocklistDelete(db, userId, id);
 
   const { data, error } = await db
     .from('client_blocked_contacts')

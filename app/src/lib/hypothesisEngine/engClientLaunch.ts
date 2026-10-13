@@ -38,9 +38,12 @@
  * гейт оператора и писем ядра, чёрный список, окно США, ёмкость, удержание
  * сегментов, выключатель аккаунта, пул ящиков, паузу клиента.
  *
- * Ядро (launchTemplate.runHeTemplateLaunch) не изменено и по-прежнему ничего не
- * стартует; стартует только этот модуль (через engCampaignSending), как раньше
- * роут. RU staff-запуск, lib/clientLaunch/** и appendLeads не тронуты.
+ * Ядро (launchTemplate.runHeTemplateLaunch) по-прежнему ничего не стартует;
+ * стартует только этот модуль (через engCampaignSending), как раньше роут.
+ * Ядру этот модуль передаёт настройки кампаний ящиков пула (вход
+ * campaignSettings, engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS) — staff-роут
+ * их не передаёт. RU staff-запуск, lib/clientLaunch/** и appendLeads не
+ * тронуты.
  *
  * НЕ БРОСАЕТ: брошенное ядро — 500 «Failed to launch the campaign» (раньше —
  * необработанное исключение роута и пустой 500 Next), попадание лимита
@@ -91,7 +94,7 @@ import type { HeJob } from './types';
 import { getHeClientFailure } from './clientErrors';
 import { heLaunchIsIncomplete, parseLaunchInfo } from './launchHandoff';
 import { notifyHeClientLaunch } from './opsAlert';
-import { ensureHeEngPresetForProject } from './engSendingPreset';
+import { ensureHeEngPresetForProject, HE_ENG_POOL_CAMPAIGN_SETTINGS } from './engSendingPreset';
 import { requireHeEngSendingAccess } from './engSendingAccess';
 import { readHeEngSendingSummaries, startHeEngLaunchSending, type HeEngStartResult } from './engCampaignSending';
 import { heEngLaunchCampaigns, type HeEngStartErrorCode } from './engCampaignStatus';
@@ -766,6 +769,10 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
           // (шаг 4b⁗ ядра), а не с часами пресета до второго вызова. На
           // достройке это своё окно рынка (heEngLaunchWindowPlan).
           sendingWindow: launchWindow,
+          // Настройки кампаний ящиков пула (stop on reply, трекинг выключен) —
+          // каждой кампании этого запуска при создании, что бы ни стояло в
+          // пресете (engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS).
+          campaignSettings: HE_ENG_POOL_CAMPAIGN_SETTINGS,
         }),
       );
       releaseFailedHit = outcome.status < 500 || isHeLaunchUnpaidServerError(outcome.body.error);

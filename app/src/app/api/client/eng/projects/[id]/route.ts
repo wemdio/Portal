@@ -36,6 +36,7 @@ import {
 import { readHeEngAutoLaunchDetail } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { readHeEngTypicalDurations } from '@/lib/hypothesisEngine/engEstimates';
 import { readHeEngSendingAccess } from '@/lib/hypothesisEngine/engSendingAccess';
+import { heBrandNeedsOwner, readHeBrandEngClient } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
 import {
   ENG_TEAM_FIX_STAGES,
@@ -310,7 +311,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // readHeIcpFrame) — на всех трёх ответах роута с brief одинаково.
   // `analysis_live` — вычисленный булев признак, а не колонка: ключ только у
   // 'analyzing'-баз, чья живость прочитана.
-  const projected = toClientEngProjectDetail(detail.detail);
+  // Владелец (он же этот клиент) — клиент ENG-кабинета: причина 'brand' у
+  // русских писем считается, как у запуска (letterBrandGuard). Профиль
+  // читается, только когда хоть у одного шаблона он меняет ответ.
+  const heEngClient = (detail.detail.templates as Array<Record<string, unknown>>).some((t) => heBrandNeedsOwner(t.letters))
+    ? await readHeBrandEngClient(supabaseAdmin, result.auth.userId)
+    : false;
+  const projected = toClientEngProjectDetail(detail.detail, { heEngClient });
   return NextResponse.json({
     ...projected,
     bases:

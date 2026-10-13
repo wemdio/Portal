@@ -17,7 +17,10 @@
  *     считаются в stats.held_unfilled, а компании, у которых других адресов
  *     нет, у market='us' ждут в очереди переноса с пометкой «ждёт писем» —
  *     блок «ПЕРЕНОС», HE_REFILL_CARRY_HELD_REASON; снята ВСЯ ночь — алерт
- *     команде, alertRefillLettersHeld);
+ *     команде, alertRefillLettersHeld). Английские письма кампании называют
+ *     наш бренд или вымышленную компанию из примера промпта, а клиент проекта
+ *     не мы (letterBrandGuard, как шаг 4b″ запуска), — снимаются ВСЕ строки
+ *     ночи и переноса: в кампанию не уходит никто;
  *   - кампания — ОСНОВНАЯ кампания запуска (segment=null). У market='us' и
  *     запуска, сплитнутого по сегментам, пачка ночи, уже срезанная дневным
  *     капом, раскладывается по сегментным кампаниям того же запуска тем же
@@ -307,6 +310,9 @@ import {
   heTemplateGateHoldsEveryRow,
   withHeEmptyCellFallbacks,
 } from '../templateOperatorGate';
+// Чужая компания в письмах кампании (только us; правило языка — letterBrandGuard) — та же
+// проверка, что у запуска (launchTemplate.ts, шаг 4b″).
+import { describeHeBrandLeaks, heBrandNeedsOwner, heTemplateBrandLeaks, readHeBrandEngClient } from '../letterBrandGuard';
 import type { HeMarket } from '../market';
 import type { HeChainLetter, HeJob, HeOperatorMapping } from '../types';
 import { addUsage, stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
@@ -2351,6 +2357,14 @@ const _refillBaseColumnsMatch: readonly [...typeof HE_AUTO_COLLECT_COLUMNS, 'des
  * alertRefillLettersHeld). У вызова с `segmentWhen` «снято всё» значит лишь
  * «в кампанию этого сегмента никого»: строки уходят в основную кампанию.
  *
+ * `brandHold` — письма кампании называют чужую компанию (наш бренд или
+ * вымышленную компанию из примера промпта у клиента, который не мы, —
+ * heTemplateBrandLeaks, шаг 3a): снимаются все строки, причина — этот текст.
+ * Запуск такие письма отказал бы целиком (шаг 4b″), а у кампании, запущенной
+ * до этой проверки, долив не должен добавить ни одного адресата. Тик крона
+ * проверяет то же ДО покупки сборки (heRefillBrandHoldEveryRow в
+ * autoPipeline.ts) и такую ночь не ставит; здесь — страховка.
+ *
  * Снятая ОСНОВНЫМ текстом строка (шаг 3a) не теряется: она остаётся в
  * he_bases.data своей базы (долив пишет базу целиком), а её компания, если
  * других лидов у неё нет, у market='us' ложится в очередь переноса с пометкой
@@ -2370,7 +2384,10 @@ function heRefillUnfilledRows(input: {
   emailColumn: string | null;
   /** Условие сегмента — проверять тексты его кампании; нет — основной. */
   segmentWhen?: string | null;
+  /** Чужая компания в письмах кампании — причина снять все строки (см. выше); null — нет. */
+  brandHold?: string | null;
 }): { held: (row: Record<string, unknown>) => boolean; detail: string } {
+  if (input.brandHold) return { held: () => true, detail: input.brandHold };
   const sequence = buildLaunchSequence(
     Array.isArray(input.letters) ? (input.letters as HeChainLetter[]) : null,
     input.segmentWhen ? { segmentWhen: input.segmentWhen } : undefined,
@@ -5139,6 +5156,40 @@ export async function runHeRefillAppend(args: {
       throw new Error(`пресет ${pick.presetId} не найден — владелец кампании неизвестен`);
     }
 
+    // 2b. Чужая компания в письмах кампании (только us, шаг 3a ниже снимает
+    //     ВСЕ строки): письма называют наш бренд или вымышленную компанию из
+    //     примера промпта, а клиент проекта не мы — проверка запуска (шаг 4b″
+    //     launchTemplate.ts) по письмам шаблона этой ночи, с тем же правилом
+    //     языка (русские — только у проекта клиента ENG-кабинета; профиль
+    //     владельца читается, только когда он меняет ответ — heBrandNeedsOwner).
+    //     Сайт и бриф проекта не прочитались — отказ долива до провайдера
+    //     (общий catch): не знаем, чьи это письма, — не отправляем.
+    let brandHold: string | null = null;
+    if (usLetterGate) {
+      const { data: projectRow, error: projectErr } = await ctx.supabase
+        .from('he_projects')
+        .select('website_url, brief, created_by')
+        .eq('id', job.project_id)
+        .maybeSingle();
+      if (projectErr) throw new Error(`he_projects read: ${projectErr.message}`);
+      if (!projectRow) throw new Error(`he_projects ${job.project_id}: not found`);
+      const brandRow = projectRow as { website_url?: unknown; brief?: unknown; created_by?: unknown };
+      const brandLeaks = heTemplateBrandLeaks(
+        'us',
+        {
+          ...brandRow,
+          heEngClient: heBrandNeedsOwner(pick.letters) ? await readHeBrandEngClient(ctx.supabase, brandRow.created_by) : false,
+        },
+        pick.letters,
+      );
+      if (brandLeaks.length) {
+        brandHold =
+          'письма кампании называют наш бренд или вымышленную компанию из примера промпта, а клиент проекта — ' +
+          `другая компания (${describeHeBrandLeaks(brandLeaks, 3)}): долив в эту кампанию никого не добавляет, но ` +
+          'адресам, уже загруженным в неё, кампания, если отправляет, шлёт эти же письма — разберите её вручную';
+      }
+    }
+
     // 3. Лиды: email + допущенный вердикт валидации, маппинг колонок →
     //    переменные шаблона.
     const { leadRows, leadRowIndexes, withEmail, valid, unverified } =
@@ -5233,6 +5284,7 @@ export async function runHeRefillAppend(args: {
           operatorMapping: ownMapping,
           rows: leadRows,
           emailColumn: ownMapped.emailColumn,
+          brandHold,
         })
       : null;
     const leads: typeof ownMapped.leads = [];
@@ -5329,6 +5381,7 @@ export async function runHeRefillAppend(args: {
                 operatorMapping: carriedMapping,
                 rows: picked.leadRows,
                 emailColumn: mapped.emailColumn,
+                brandHold,
               })
             : null;
           mapped.leads.forEach((lead, i) => {

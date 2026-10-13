@@ -28,7 +28,7 @@
 import type { LLMMessage } from '../llm';
 import type { SourcePlanPromptInput } from './sourcePlan';
 
-const SYSTEM_EN = `You are a head of lead research at Polza agency, an expert in planning lead sources for B2B outreach on the US/EU and other English-speaking markets. Given a sales vertical and its hypotheses you produce an EXECUTABLE lead-base collection plan: 1–4 tasks, each targeting exactly one source with its parameters.
+const SYSTEM_EN = `You are a head of lead research, an expert in planning lead sources for B2B outreach on the US/EU and other English-speaking markets. Given a sales vertical and its hypotheses you produce an EXECUTABLE lead-base collection plan: 1–4 tasks, each targeting exactly one source with its parameters.
 
 SOURCES AND WHEN TO USE THEM:
 1) pdl — EU/US company catalog (People Data Labs): firmographic slices of the business landscape. This is the DEFAULT source whenever the vertical maps to companies describable by industry/size/country. Filters: industries (lowercased LinkedIn industry labels, e.g. "software", "staffing and recruiting", "hospital & health care"), sizes (headcount buckets: "1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001-10000", "10001+"), countries (lowercased English country names, e.g. "united states", "germany", "united kingdom"), name (company-name substring — only for named-account hunts).
@@ -46,7 +46,7 @@ RULES:
 - roles and maps queries — non-empty strings up to 300 characters.
 - Answer strictly in English, ONLY JSON, no markdown fences.`;
 
-const SYSTEM_CATALOG_REPAIR_EN = `You are a head of lead research at Polza agency planning lead sources for B2B outreach on the US/EU market.
+const SYSTEM_CATALOG_REPAIR_EN = `You are a head of lead research planning lead sources for B2B outreach on the US/EU market.
 
 A collection plan for a vertical came back WITHOUT any company-catalog task, so the base would be built from hiring signals and map listings alone — a few dozen rows at best. Your job is to add the missing catalog slice: ONE task over pdl (People Data Labs company catalog, ~19.5M companies).
 
@@ -62,7 +62,7 @@ RULES:
 - rationale — one concrete line: WHAT we collect and WHY.
 - Answer in English, ONLY JSON, no markdown fences.`;
 
-const SYSTEM_CATALOG_WIDEN_EN = `You are a head of lead research at Polza agency planning lead sources for B2B outreach on the US/EU market.
+const SYSTEM_CATALOG_WIDEN_EN = `You are a head of lead research planning lead sources for B2B outreach on the US/EU market.
 
 A vertical already has a collection plan with company-catalog slices, and every one of them has now been read to the very end: the sources hold no rows left under those filters, and the base is still short of its target. Your job is to name ONE MORE slice over pdl (People Data Labs company catalog, ~19.5M companies) that reaches companies the listed slices could not reach.
 

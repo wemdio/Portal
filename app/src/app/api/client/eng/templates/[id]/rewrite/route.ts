@@ -23,6 +23,13 @@ import {
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
 import {
+  heBrandInputLeaks,
+  heBrandInputRewriteRefusalEn,
+  heBrandNeedsOwner,
+  heLetterBrandGuard,
+  readHeBrandEngClient,
+} from '@/lib/hypothesisEngine/letterBrandGuard';
+import {
   HE_TEMPLATE_LAUNCH_MARK_COLUMNS,
   heTemplateLaunchMarked,
   type HeTemplateLaunchMark,
@@ -182,8 +189,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 }
 
 // POST — «Rewrite letters»: новые итоговые письма рынка вместо писем, которые
-// автоматическая проверка запуска не пропустит (подстановка, которую база не
-// наполнит — шаг 4b″ ядра запуска, код template_unresolved_operators).
+// автоматическая проверка запуска не пропустит (шаг 4b″ ядра запуска):
+// подстановка, которую база не наполнит (код template_unresolved_operators),
+// или чужая компания в письмах (letterBrandGuard: у клиента ENG-кабинета — на
+// любом языке) — наш бренд либо вымышленная
+// компания из примера промпта у клиента, который не мы (template_brand_leak).
+// Обе причины — heTemplateNeedsRewrite со строкой проекта (сайт и бриф).
 //
 // ПРОВЕРКА ТА ЖЕ, ЧТО У ЗАПУСКА, И ПО ТЕМ ЖЕ СТРОКАМ: heTemplateNeedsRewrite
 // по ВСЕЙ базе шаблона (колонки + data), а не по sample_rows деталки. Иначе
@@ -214,12 +225,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 // одни письма рынка не в кампании (одна кампания на рынок — ядро откажет
 // новым письмам sibling_template_launched); база проверена ('analyzed');
 // генерация по базе не идёт (иначе 200 с ней для снятого шаблона, 409 для
-// готового); автозапуск не держит шаблон прямо сейчас; бюджет писем поколения
+// готового); поле брифа, которое промпт писем берёт дословно (подпись, оффер,
+// описание бизнеса), не называет наш бренд (letterBrandGuard.heBrandInputLeaks:
+// иначе новая генерация откажет до платных вызовов, а снятые письма остались бы
+// снятыми — отказ называет поле шага 1); автозапуск не держит шаблон прямо сейчас; бюджет писем поколения
 // анализа (heTemplateGenerationBudget, HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS
 // засчитанных прогонов); выключатель отправки аккаунта (engSendingSwitchRefusal,
 // как у «Launch» проекта); гейт платных шагов ('letters'); потолок расхода.
 // Отказы — 409 { error, code } с кодами not_ready | launched | letters_ok |
-// starting | letters_exhausted | changed.
+// brand_input | starting | letters_exhausted | changed.
 //
 // Ответ 201 { ok, job, tries: { used, max } } — used: засчитанные прогоны ДО
 // этой генерации. Генерация по базе уже стоит — 200 { ok, existing: true, job }.
@@ -312,14 +326,38 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return refusal(409, REWRITE_BUSY, 'changed');
     }
 
+    // Сайт и бриф проекта: чей проект (чужая компания в письмах) и что клиент
+    // вписал в поля брифа. В owned.project их нет (loadClientHeTemplate).
+    const { data: identityData, error: identityErr } = await db
+      .from('he_projects')
+      .select('website_url, brief')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (identityErr) {
+      return engServerError('client.eng.template_rewrite.project_read_failed', identityErr, REWRITE_START_FAILED, logContext);
+    }
+    const identity = (identityData ?? {}) as { website_url?: unknown; brief?: unknown };
+    const market = projectMarket(owned.project as { market?: string | null });
+
     if (!retired) {
+      // Владелец (он же этот клиент) — клиент ENG-кабинета: русские письма
+      // проверяются, как у запуска (letterBrandGuard); профиль — только когда
+      // он меняет ответ.
+      const heEngClient = heBrandNeedsOwner(template.letters) ? await readHeBrandEngClient(db, userId) : false;
       const needsRewrite = heTemplateNeedsRewrite(
         template,
         { columns: base.columns, sample_rows: base.data },
-        projectMarket(owned.project as { market?: string | null }),
+        market,
+        { ...identity, heEngClient },
       );
       if (!needsRewrite) return refusal(409, REWRITE_LETTERS_OK, 'letters_ok');
     }
+
+    // Наш бренд в поле брифа: новая генерация откажет до платных вызовов
+    // (HeLetterBrandInputError), а письма уже были бы сняты — отказ здесь, до
+    // снятия, и с тем, что поправить на шаге 1. Язык писем кабинета — английский.
+    const brandInputs = heBrandInputLeaks(heLetterBrandGuard(market, identity, 'en'), identity.brief);
+    if (brandInputs.length) return refusal(409, heBrandInputRewriteRefusalEn(brandInputs), 'brand_input');
 
     const auto = await autoLaunchStarting(db, id);
     if (auto.error) {

@@ -42,6 +42,12 @@ import 'server-only';
  * 'configuration' у research), — 'team_fix': сначала Support («узнать, когда
  * починят»), потом та же кнопка. Так же говорит кабинет (clientFailureText,
  * TEAM_FIX_WHAT_TO_DO и шаг 1): нажатие до починки упрётся в тот же отказ.
+ * Если кнопка есть, но стадию писем остановил бесплатный отказ за наш бренд в
+ * поле брифа (пометка воркера в payload джобы,
+ * letterBrandGuard.heJobUnpaidBrandInput), — 'edit_brief': письмо называет
+ * поле шага 1 и слово (из той же пометки) и только потом кнопку остановки:
+ * нажатие без правки поля упрётся в тот же отказ (путь «Launch» и роут
+ * «Rewrite letters» проверяют поле до постановки).
  *
  * ДЕДУП (he_eng_client_emails, миграция 20261012_0002). Сначала заявка —
  * insert … on conflict (dedupe_key) do nothing; письмо шлёт только тот, чья
@@ -139,6 +145,7 @@ import {
   type ClientEngAutopilotHold,
 } from './clientEngProjection';
 import { heTeamFixableFailureOf } from './clientErrors';
+import { heBrandInputFieldLabelEn, heJobUnpaidBrandInput, type HeBrandInputLeak } from './letterBrandGuard';
 import { engAnalysisRequeues } from './engDashboard';
 import { heEngAppOrigin, HE_ENG_VERIFY_FROM_NAME } from './engEmailVerificationMail';
 import { readHeEngSendingAccess } from './engSendingAccess';
@@ -176,9 +183,11 @@ export type HeEngClientActionCode = (typeof HE_ENG_CLIENT_ACTION_CODES)[number];
  * Следующий шаг, который называет письмо (колонка next_step; шапка модуля).
  * 'team_fix' — отказ, который чинит команда: Support, потом кнопка остановки
  * (у research — «Try again», у rewrite_stopped — «Rewrite letters», у
- * остальных стадий — «Launch»).
+ * остальных стадий — «Launch»). 'edit_brief' — стадию писем остановил
+ * бесплатный отказ за наш бренд в поле брифа: поправить поле шага 1, потом
+ * кнопка остановки (шапка модуля).
  */
-export const HE_ENG_CLIENT_NEXT_STEPS = ['launch', 'rewrite', 'try_again', 'support', 'team_fix'] as const;
+export const HE_ENG_CLIENT_NEXT_STEPS = ['launch', 'rewrite', 'try_again', 'support', 'team_fix', 'edit_brief'] as const;
 
 export type HeEngClientNextStep = (typeof HE_ENG_CLIENT_NEXT_STEPS)[number];
 
@@ -574,6 +583,12 @@ interface NoticeContext {
   marketName: string | null;
   /** Выключатель отправки аккаунта — 'revoked' на момент этой попытки (шапка, «ВЫКЛЮЧЕННАЯ ОТПРАВКА»). */
   sendingOff: boolean;
+  /**
+   * Поля брифа с нашим брендом из пометки бесплатного отказа упавшей джобы
+   * стадии (только у остановок стадий; пусто — пометки нет или поля
+   * потерялись) — письмо 'edit_brief' их называет.
+   */
+  brandInputs: HeBrandInputLeak[];
 }
 
 type ContextOutcome =
@@ -619,23 +634,30 @@ async function readBaseVertical(
   return { kind: 'ok', verticalId: str(base?.vertical_id) };
 }
 
-/** Вертикаль упавшей джобы стадии: из payload (цепочка) или через её базу. */
+/**
+ * Вертикаль упавшей джобы стадии: из payload (цепочка) или через её базу; и
+ * поля брифа из пометки бесплатного отказа (heJobUnpaidBrandInput) — их
+ * называет письмо 'edit_brief'.
+ */
 async function readJobVertical(
   db: SupabaseClient,
   projectId: string,
   jobId: string,
-): Promise<{ kind: 'ok'; verticalId: string } | { kind: 'failed'; message: string }> {
+): Promise<{ kind: 'ok'; verticalId: string; brandInputs: HeBrandInputLeak[] } | { kind: 'failed'; message: string }> {
   const { data, error } = await db
     .from('he_jobs')
-    .select('project_id, vertical_id:payload->>vertical_id, base_id:payload->>base_id')
+    .select('project_id, payload')
     .eq('id', jobId)
     .maybeSingle();
   if (error) return { kind: 'failed', message: `job read: ${errText(error)}` };
   const job = data as Row | null;
-  if (!job) return { kind: 'ok', verticalId: '' };
+  if (!job) return { kind: 'ok', verticalId: '', brandInputs: [] };
   if (str(job.project_id) !== projectId) return { kind: 'failed', message: 'job of another project' };
-  if (str(job.vertical_id)) return { kind: 'ok', verticalId: str(job.vertical_id) };
-  return readBaseVertical(db, projectId, str(job.base_id));
+  const payload = (job.payload ?? null) as Row | null;
+  const brandInputs = heJobUnpaidBrandInput(payload) ?? [];
+  if (str(payload?.vertical_id)) return { kind: 'ok', verticalId: str(payload?.vertical_id), brandInputs };
+  const base = await readBaseVertical(db, projectId, str(payload?.base_id));
+  return base.kind === 'ok' ? { ...base, brandInputs } : base;
 }
 
 /**
@@ -679,6 +701,7 @@ async function loadNoticeContext(
   if (ban === 'gone') return { kind: 'not_eng' };
 
   let verticalId = '';
+  let brandInputs: HeBrandInputLeak[] = [];
   const templateId = notice.templateId?.trim();
   if (templateId) {
     const { data, error } = await db.from('he_templates').select('vertical_id').eq('id', templateId).maybeSingle();
@@ -692,6 +715,7 @@ async function loadNoticeContext(
     const job = await readJobVertical(db, notice.projectId, notice.refId);
     if (job.kind === 'failed') return job;
     verticalId = job.verticalId;
+    brandInputs = job.brandInputs;
   }
   const market = await readMarketName(db, notice.projectId, verticalId);
   if (market.kind === 'failed') return market;
@@ -709,6 +733,7 @@ async function loadNoticeContext(
       website: websiteLabel(p.website_url),
       marketName: market.name,
       sendingOff: access.state === 'revoked',
+      brandInputs,
     },
   };
 }
@@ -747,6 +772,11 @@ async function deliver(notice: HeEngClientNotice, ctx: NoticeContext, key: strin
       website: ctx.website,
       ctaUrl: ctaUrlOf(notice),
       sendingOff: ctx.sendingOff,
+      // Только у 'edit_brief': поле шага 1 подписью кабинета и слово клиента.
+      brandInputs:
+        notice.next === 'edit_brief'
+          ? ctx.brandInputs.map((i) => ({ label: heBrandInputFieldLabelEn(i.field) ?? i.field, word: i.brand }))
+          : null,
     });
     await sendTransactionalEmail({ to: ctx.recipient.email, subject, html, text, fromName: HE_ENG_VERIFY_FROM_NAME });
     return true;
@@ -1260,6 +1290,12 @@ interface StageStopEvent {
    * починки — совет 'team_fix' (Support прежде кнопки).
    */
   teamFix: boolean;
+  /**
+   * Джобу закрыл бесплатный отказ за наш бренд в поле брифа (пометка воркера,
+   * heJobUnpaidBrandInput): кнопка двигает остановку только после правки
+   * поля — совет 'edit_brief' (поле шага 1 прежде кнопки).
+   */
+  brandInput: boolean;
 }
 
 /** Срез конвейера проектов с упавшими стадиями — одной пачкой чтений. */
@@ -1375,6 +1411,7 @@ function stageStopEvents(input: {
       jobId: str(job.id),
       reason: str(job.error),
       teamFix: heTeamFixableFailureOf(job.error) !== null,
+      brandInput: str(job.unpaid_refusal) === 'brand_input',
     };
 
     if (stage === 'chain') {
@@ -1495,7 +1532,10 @@ async function readStageSnapshot(
     (part) =>
       db
         .from('he_jobs')
-        .select('id, project_id, stage, status, error, created_at, updated_at, finished_at, vertical_id:payload->>vertical_id, base_id:payload->>base_id')
+        .select(
+          'id, project_id, stage, status, error, created_at, updated_at, finished_at, vertical_id:payload->>vertical_id, ' +
+            'base_id:payload->>base_id, unpaid_refusal:payload->>unpaid_refusal',
+        )
         .in('project_id', part)
         .in('stage', STAGE_STOP_STAGES)
         .in('status', ['failed', 'cancelled'])
@@ -1652,7 +1692,7 @@ function clientSeesText(
   code: HeEngStageStopCode | undefined,
   sendingOff: boolean,
 ): string {
-  if (sendingOff && (next === 'launch' || next === 'rewrite' || next === 'team_fix')) {
+  if (sendingOff && (next === 'launch' || next === 'rewrite' || next === 'team_fix' || next === 'edit_brief')) {
     return (
       `клиенту отправляется письмо «${heading}» — отправка аккаунта выключена, поэтому кнопку письмо не называет ` +
       'и зовёт в Support' +
@@ -1662,6 +1702,9 @@ function clientSeesText(
   const step =
     next === 'launch'
       ? 'нажать «Launch» на шаге 3'
+      : next === 'edit_brief'
+        ? 'убрать наш бренд из поля брифа на шаге 1 «Your business» (письмо называет поле и слово), потом нажать ' +
+          (code === 'rewrite_stopped' ? '«Rewrite letters» на карточке рынка' : '«Launch» на шаге 3')
       : next === 'rewrite'
         ? 'нажать «Rewrite letters» на карточке рынка (шаг 3)'
         : next === 'try_again'
@@ -1703,6 +1746,11 @@ function stageStopCandidate(db: SupabaseClient, event: StageStopEvent, projectNa
       // нажатие до починки упрётся в тот же отказ — сначала Support, потом
       // та же кнопка; кнопку письмо называет по коду остановки.
       if (next !== 'support' && event.teamFix) next = 'team_fix';
+      // Кнопка двигает остановку, но стадию писем остановило поле брифа с
+      // нашим брендом: нажатие без правки поля упрётся в тот же отказ (путь
+      // «Launch» и роут «Rewrite letters» проверяют его до постановки) —
+      // сначала поле шага 1, потом та же кнопка.
+      if ((next === 'launch' || next === 'rewrite') && event.brandInput) next = 'edit_brief';
       const notice: HeEngClientNotice = { ...base, next };
       const verticalName = await readVerticalName(db, event.verticalId);
       return {

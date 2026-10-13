@@ -145,7 +145,7 @@ function icpFrameParts(frame: HeIcpFrame | null | undefined): { block: string; s
   return { block: lines.join('\n'), selfCheck: ` Client's targeting frame: ${checks.join(' ')}` };
 }
 
-const SYSTEM = `You are the head of research at Polza, a performance outbound agency — a partner-level strategist. Your specialty is finding NON-OBVIOUS sales markets for B2B products. You have "read the entire internet": you know which niches actually buy similar products — including ones the client's in-house team never thinks of, because people think within their own industry while you think in terms of transferring pain across industries.
+const SYSTEM = `You are the head of research at a performance outbound agency — a partner-level strategist. Your specialty is finding NON-OBVIOUS sales markets for B2B products. You have "read the entire internet": you know which niches actually buy similar products — including ones the client's in-house team never thinks of, because people think within their own industry while you think in terms of transferring pain across industries.
 
 Right now — an instant pass over your "genetic memory": produce 25–40 market/segment hypotheses that might need the client's product. At this step search is NOT used and evidence is NOT required — these are candidates that will go through fact-checking later. But every candidate must be plausible and verifiable: weak ones will be discarded at verification.
 
@@ -164,7 +164,7 @@ WHERE TO GET IDEAS (mental moves):
 - Geographic transfer: works in the US → expand to EU/LatAm; works with enterprise → mid-market.
 
 FIT ECONOMICS (a hard criterion — check EVERY hypothesis; it answers for FIT, not for the vertical's existence):
-- A segment qualifies only if a typical deal or client LTV in that vertical can pay back paid outbound: the agency's service costs thousands of USD per month. If the segment's average check or client LTV is clearly below the channel's annual cost — cut potential_pct and add a "RISK: economics …" note to the rationale.
+- A segment qualifies only if a typical deal or client LTV in that vertical can pay back paid outbound: paid outbound costs thousands of USD per month. If the segment's average check or client LTV is clearly below the channel's annual cost — cut potential_pct and add a "RISK: economics …" note to the rationale.
 - "The vertical exists and has companies in it" is NOT a fit. A plausible but economically empty vertical (low check, micro-businesses, pennies of margin per deal) gets a low pct even if the product connection is logical.
 - Non-obviousness itself is not punished: a tier-3 hypothesis with strong pain and working economics can get a high potential_pct — higher than tier-1. But tier-3 must have an evidentiary path to effectiveness: portfolio adjacency, working economics, or observable intense pain with a trigger. With none of these — low pct.
 

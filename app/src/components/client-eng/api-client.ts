@@ -40,6 +40,7 @@ import type {
 // Только тип: код отказа гейта платных шагов (lib/hypothesisEngine/engPaidAccess)
 // — один словарь на роуты и на экран; сам модуль в клиентский бандл не едет.
 import type { EngPaidAccessCode } from '@/lib/hypothesisEngine/engPaidAccess';
+import type { HeBrandInputLeak } from '@/lib/hypothesisEngine/letterBrandGuard';
 import type { EngResearchRetryVerdict } from '@/lib/hypothesisEngine/researchJob';
 // Только типы автозапуска (S3) — см. «Запуск проекта одной кнопкой» ниже.
 import type {
@@ -418,6 +419,13 @@ export interface EngProjectLaunchResponse {
   verticals_skipped: number;
   collect_again_verticals: number;
   autopilot_hold_code: HeClientAutopilotHoldCode | null;
+  /**
+   * Рынки, которым это нажатие не поставило письма: поле брифа шага 1
+   * называет наш бренд (реконсилер, причина 'brand_input'), и сами поля. Нет
+   * поля — сервер старше этого признака.
+   */
+  brand_input_markets?: number;
+  brand_inputs?: HeBrandInputLeak[];
 }
 
 export async function fetchEngProjectLaunch(projectId: string): Promise<EngProjectLaunchInfo> {
@@ -1559,4 +1567,127 @@ export interface EngDashboardResponse {
 
 export async function fetchEngDashboard(): Promise<EngDashboardResponse> {
   return engApiFetch<EngDashboardResponse>('/eng/dashboard');
+}
+
+/* ── «Do not contact» (GET/POST /blocklist, DELETE /blocklist/[id]) ── */
+
+/**
+ * Строка списка «Do not contact». Хранилище и роуты — общий чёрный список
+ * клиента (`client_blocked_contacts`, `api/client/blocklist`); на запрос
+ * ENG-кабинета роуты отвечают своей веткой (`api/client/blocklist/_eng.ts`):
+ * постранично, с точным счётом и английскими текстами.
+ */
+export interface EngBlockedAddress {
+  id: string;
+  email: string;
+  created_at: string;
+}
+
+export interface EngBlockedListPage {
+  items: EngBlockedAddress[];
+  /** Весь список клиента. */
+  total: number;
+  /** Под поиском `q`; без поиска равен `total`. */
+  matching: number;
+  offset: number;
+  /** Следующая страница; null — дальше строк нет. */
+  next_offset: number | null;
+}
+
+export async function fetchEngBlockedList(opts: { offset?: number; q?: string } = {}): Promise<EngBlockedListPage> {
+  const qs = new URLSearchParams();
+  if (opts.offset) qs.set('offset', String(opts.offset));
+  if (opts.q) qs.set('q', opts.q);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return engApiFetch<EngBlockedListPage>(`/blocklist${suffix}`);
+}
+
+/** Недобавленное из вставки: сколько и до 10 примеров как есть. */
+export interface EngBlockedRejected {
+  count: number;
+  examples: string[];
+}
+
+export interface EngBlockedAddResult {
+  added: number;
+  already_listed: number;
+  /** Сайты, домены и шаблоны с явным признаком — список берёт только точные адреса. */
+  domains: EngBlockedRejected;
+  /** Не адреса (имена, обрывки, слова с точкой). */
+  invalid: EngBlockedRejected;
+  /** Размер списка после добавления; null — адресов во вставке не было. */
+  total: number | null;
+}
+
+/**
+ * Итог добавления. Отказ несёт английский текст роута; `reload` — состав
+ * списка после ответа неизвестен или он длиннее потолка (коды
+ * `add_unconfirmed`, `over_limit_stuck`, `list_over_limit`), экран
+ * перечитывает список.
+ *
+ * `error: null` — читаемого ответа нет: не-JSON (502/504 nginx во время
+ * деплоя или по таймауту), 5xx без кода, 2xx без итога. Роут мог успеть
+ * записать строки, поэтому исход неизвестен: экран говорит это своей фразой и
+ * перечитывает список (`reload` тогда всегда true).
+ */
+export type EngBlockedAddOutcome =
+  | { ok: true; result: EngBlockedAddResult }
+  | { ok: false; error: string; reload: boolean }
+  | { ok: false; error: null; reload: true };
+
+const BLOCKED_ADD_RELOAD_CODES: readonly string[] = ['add_unconfirmed', 'over_limit_stuck', 'list_over_limit'];
+
+function rejectedOf(raw: unknown): EngBlockedRejected {
+  const r = raw as Partial<EngBlockedRejected> | null;
+  return {
+    count: typeof r?.count === 'number' ? r.count : 0,
+    examples: Array.isArray(r?.examples) ? r.examples.filter((e): e is string => typeof e === 'string') : [],
+  };
+}
+
+export async function addEngBlockedAddresses(text: string): Promise<EngBlockedAddOutcome> {
+  const { res, body } = await engApiFetchRaw('/blocklist', {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  });
+  if (res.ok && body && typeof body.added === 'number') {
+    return {
+      ok: true,
+      result: {
+        added: body.added,
+        already_listed: typeof body.already_listed === 'number' ? body.already_listed : 0,
+        domains: rejectedOf(body.domains),
+        invalid: rejectedOf(body.invalid),
+        total: typeof body.total === 'number' ? body.total : null,
+      },
+    };
+  }
+  // Ответ-отказ — с машинным кодом (коды роута, DEMO_READONLY) или 4xx с
+  // текстом. Всё прочее — исход неизвестен (см. EngBlockedAddOutcome).
+  const refused =
+    !res.ok &&
+    body !== null &&
+    (typeof body.code === 'string' || (res.status < 500 && typeof body.error === 'string'));
+  if (!refused) return { ok: false, error: null, reload: true };
+  return {
+    ok: false,
+    error: engRawErrorText(res, body),
+    reload: typeof body.code === 'string' && BLOCKED_ADD_RELOAD_CODES.includes(body.code),
+  };
+}
+
+/**
+ * Итог удаления. `removed: 0` — строки уже нет (удалена в другой вкладке).
+ * `error: null` — читаемого ответа нет (не-JSON 502/504): удалилась ли строка,
+ * неизвестно, экран говорит это своей фразой. Отказ роута — его английский
+ * текст (повтор удаления безопасен: уже удалённая строка даст removed: 0).
+ */
+export type EngBlockedRemoveOutcome =
+  | { ok: true; removed: number }
+  | { ok: false; error: string | null };
+
+export async function removeEngBlockedAddress(id: string): Promise<EngBlockedRemoveOutcome> {
+  const { res, body } = await engApiFetchRaw(`/blocklist/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (res.ok && body && typeof body.removed === 'number') return { ok: true, removed: body.removed };
+  return { ok: false, error: body && typeof body.error === 'string' ? engRawErrorText(res, body) : null };
 }

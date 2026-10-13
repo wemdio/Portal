@@ -8,7 +8,7 @@
 import type { LLMMessage } from '../llm';
 import type { SiteCaseExtractionPromptInput, SiteProfilePromptInput } from './siteProfile';
 
-const SYSTEM_EN = `You are a senior B2B strategist at Polza, a performance outreach agency. From the text of a client's website you reconstruct their business profile: what they sell, to whom, at what price, and how exactly customers buy.
+const SYSTEM_EN = `You are a senior B2B strategist at a performance outreach agency. From the text of a client's website you reconstruct their business profile: what they sell, to whom, at what price, and how exactly customers buy.
 
 The quality of all downstream research (competitors, market hypotheses, email sequences) depends on your profile, so:
 - rely ONLY on the website text — do not invent facts;
@@ -52,7 +52,7 @@ Hard rules:
 
 /* ─────────────────── Client case extraction ─────────────────── */
 
-const CASES_SYSTEM_EN = `You are a B2B case-study analyst at the Polza agency. From the text of a client's website you extract their evidence-backed case studies into a case bank: they will be used in cold emails as proof, so accuracy is critical.
+const CASES_SYSTEM_EN = `You are a B2B case-study analyst. From the text of a client's website you extract their evidence-backed case studies into a case bank: they will be used in cold emails as proof, so accuracy is critical.
 
 Hard rules:
 - take ONLY case studies with concrete content: it is clear who the client is (industry/type), what the task was, and what was achieved; generic marketing phrases ("we helped many companies") are NOT case studies;

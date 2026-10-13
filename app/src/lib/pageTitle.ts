@@ -51,6 +51,7 @@ const CLIENT_SECTION_TITLES: ReadonlyArray<{
   { prefix: '/client/parsers', ru: 'Парсеры', en: 'Parsers', es: 'Extractores' },
   { prefix: '/client/offer', ru: 'Договор оферты', en: 'Terms of service', es: 'Términos del servicio' },
   { prefix: '/client/eng/replies', ru: 'Replies', en: 'Replies', es: 'Replies' },
+  { prefix: '/client/eng/do-not-contact', ru: 'Do not contact', en: 'Do not contact', es: 'Do not contact' },
   { prefix: '/client/eng/account', ru: 'Account', en: 'Account', es: 'Account' },
   { prefix: '/client/eng', ru: 'Outreach', en: 'Outreach', es: 'Outreach' },
 ];

@@ -5,6 +5,8 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { describeHeBrandInputLeaks, heBrandInputsBeforeEnqueue } from '@/lib/hypothesisEngine/letterBrandGuard';
+import { normalizeHeMarket } from '@/lib/hypothesisEngine/market';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -45,6 +47,11 @@ async function findActiveTemplateJob(db: SupabaseClient, projectId: string, base
 // специалиста поэтому прежнее: каждый его клик — новая генерация, как до
 // правки. Форс не берёт только чужие старые шаблоны: свой, вставленный
 // прошлой попыткой этой же джобы, повтор вернёт без второй оплаты.
+//
+// Поле брифа, которое промпт писем берёт дословно, называет наш бренд, а
+// клиент проекта не мы (letterBrandGuard.heBrandInputsBeforeEnqueue; язык —
+// самой новой цепочки вертикали, как у стадии), — 409 до постановки: стадия
+// откажет до первого вызова модели, и джоба была бы пустой.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.template.post' },
@@ -59,7 +66,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       const { data: base, error: baseErr } = await supabaseAdmin
         .from('he_bases')
-        .select('id, project_id, status')
+        .select('id, project_id, status, vertical_id')
         .eq('id', id)
         .single();
       if (baseErr) {
@@ -76,6 +83,33 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const active = await findActiveTemplateJob(supabaseAdmin, base.project_id, id);
       if (active.error) return jsonError(active.error.message, 500);
       if (active.job) return NextResponse.json({ ok: true, job: active.job });
+
+      const { data: briefRow, error: briefErr } = await supabaseAdmin
+        .from('he_projects')
+        .select('market, website_url, brief, created_by')
+        .eq('id', base.project_id)
+        .maybeSingle();
+      if (briefErr) return jsonError(briefErr.message, 500);
+      let brandInputs: Awaited<ReturnType<typeof heBrandInputsBeforeEnqueue>>;
+      try {
+        const project = (briefRow ?? {}) as { market?: unknown; website_url?: unknown; brief?: unknown; created_by?: unknown };
+        brandInputs = await heBrandInputsBeforeEnqueue(supabaseAdmin, {
+          market: normalizeHeMarket(project.market),
+          project,
+          ...(typeof base.vertical_id === 'string' && base.vertical_id ? { verticalId: base.vertical_id } : {}),
+        });
+      } catch (e) {
+        return jsonError(e instanceof Error ? e.message : 'Не удалось прочитать язык цепочки вертикали', 500);
+      }
+      if (brandInputs.length > 0) {
+        return jsonError(
+          'Сборку шаблона не ставим: поле брифа называет наш бренд, а клиент проекта — другая компания, и стадия ' +
+            'отказала бы до вызова модели. Поправьте поле — у клиента ENG-кабинета он сам на шаге 1 «Your business», ' +
+            'у проекта инструмента — на шаге 1 «Исследование», — и соберите шаблон заново: ' +
+            describeHeBrandInputLeaks(brandInputs),
+          409,
+        );
+      }
 
       const { data: job, error: jobErr } = await supabaseAdmin
         .from('he_jobs')

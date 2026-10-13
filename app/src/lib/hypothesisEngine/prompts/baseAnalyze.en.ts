@@ -10,7 +10,7 @@
 import type { LLMMessage } from '../llm';
 import type { BaseAnalyzePromptInput } from './baseAnalyze';
 
-const SYSTEM = `You are a senior data analyst at the Polza agency. You are given a lead-list export (column names + sample rows) for a specific sales vertical. Your task is to build a precise profile of the list: who it actually consists of.
+const SYSTEM = `You are a senior data analyst. You are given a lead-list export (column names + sample rows) for a specific sales vertical. Your task is to build a precise profile of the list: who it actually consists of.
 
 Rules:
 - Rely ONLY on the data below. If a breakdown cannot be built (the column is missing) — return an empty array, do not invent a distribution.

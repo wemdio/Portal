@@ -103,6 +103,7 @@ import { CampaignStatus } from '@/lib/instantly/types';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { parseLaunchInfo, readHeLaunchLease, type HeTemplateLaunchInfo } from './launchHandoff';
 import { heTemplateNeedsRewrite } from './clientEngProjection';
+import { heBrandNeedsOwner, readHeBrandEngClient } from './letterBrandGuard';
 import {
   checkHeCampaignAgainstAssignment,
   describeHeSendingPoolMailboxUses,
@@ -302,6 +303,12 @@ interface LoadedLaunch {
   template: Record<string, unknown>;
   launch: HeTemplateLaunchInfo;
   runningUntilMs: number | null;
+  /**
+   * Сайт, бриф и владелец проекта — гейту писем старта (чужая компания в
+   * письмах, heTemplateNeedsRewrite; владелец решает, проверяются ли русские
+   * письма — letterBrandGuard.heEngClient).
+   */
+  project: { website_url?: unknown; brief?: unknown; created_by?: unknown };
 }
 
 /**
@@ -334,17 +341,23 @@ async function loadLaunch(
   }
   const { data: projRow, error: projErr } = await portalDb
     .from('he_projects')
-    .select('created_by, market')
+    .select('created_by, market, website_url, brief')
     .eq('id', args.projectId)
     .maybeSingle();
   if (projErr) return refused(503, 'sending_read_failed', ENG_SENDING_ACCESS_BLIP_TEXT);
-  const project = projRow as { created_by?: unknown; market?: unknown } | null;
+  const project = projRow as { created_by?: unknown; market?: unknown; website_url?: unknown; brief?: unknown } | null;
   if (!project || project.created_by !== args.ownerUserId || project.market !== 'us') {
     return refused(404, 'not_found', TEMPLATE_NOT_FOUND_TEXT);
   }
   const launch = parseLaunchInfo(template.launch_info);
   if (!launch) return refused(404, 'not_launched', ENG_START_NOT_LAUNCHED_TEXT);
-  return { kind: 'loaded', template, launch, runningUntilMs: readHeLaunchLease(template.launch_info).runningUntilMs };
+  return {
+    kind: 'loaded',
+    template,
+    launch,
+    runningUntilMs: readHeLaunchLease(template.launch_info).runningUntilMs,
+    project: { website_url: project.website_url, brief: project.brief, created_by: project.created_by },
+  };
 }
 
 /**
@@ -639,7 +652,9 @@ export async function startHeEngLaunchSending(input: {
       }
     }
 
-    // 3. Гейт писем — тот же признак, что у кабинета (needs_rewrite).
+    // 3. Гейт писем — тот же признак, что у кабинета (needs_rewrite): обе
+    //    причины ядра запуска (шаг 4b″) — подстановки и чужая компания в
+    //    письмах (с сайтом и брифом проекта, letterBrandGuard).
     if (template.status !== 'ready') return refused(409, 'letters_need_rewrite', ENG_START_LETTERS_TEXT);
     let base: Record<string, unknown> | undefined;
     if (typeof template.base_id === 'string' && template.base_id) {
@@ -651,7 +666,12 @@ export async function startHeEngLaunchSending(input: {
       if (baseErr) return refused(503, 'sending_read_failed', ENG_SENDING_ACCESS_BLIP_TEXT);
       base = (baseRow ?? undefined) as Record<string, unknown> | undefined;
     }
-    if (heTemplateNeedsRewrite(template, base, 'us')) {
+    // Владелец — клиент ENG-кабинета: его письма проверяются на любом языке;
+    // профиль читается, только когда он меняет ответ (heBrandNeedsOwner).
+    const heEngClient = heBrandNeedsOwner(template.letters)
+      ? await readHeBrandEngClient(portalDb, loaded.project.created_by)
+      : false;
+    if (heTemplateNeedsRewrite(template, base, 'us', { ...loaded.project, heEngClient })) {
       return refused(409, 'letters_need_rewrite', ENG_START_LETTERS_TEXT);
     }
 

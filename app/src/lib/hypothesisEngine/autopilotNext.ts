@@ -63,6 +63,16 @@ import type { HeJob } from './types';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
 import { readHeEngAccountBlock } from './engAccountBlockMarker';
 import type { HeEngAccountStanding } from './engAutoLaunch';
+import {
+  HE_JOB_BRAND_INPUTS_KEY,
+  HE_JOB_UNPAID_BRAND_INPUT,
+  HE_JOB_UNPAID_REFUSAL_KEY,
+  HeLetterBrandInputError,
+  heBrandInputsBeforeEnqueue,
+  heJobUnpaidBrandInput,
+  type HeBrandInputLeak,
+} from './letterBrandGuard';
+import { normalizeHeMarket } from './market';
 
 /* ───────────── Владелец заблокирован? (S3b) ───────────── */
 
@@ -830,6 +840,17 @@ export const HE_AUTOPILOT_SKIP_REASONS = [
   'letters_exhausted',   // засчитанные прогоны писем на это поколение анализа дошли до порога
   'spend_ceiling',       // потолок расхода us-проекта достигнут (spendCeiling.ts; по умолчанию выключен)
   /**
+   * Решение по брифу КЛИЕНТА: поле, которое промпт писем берёт дословно
+   * (подпись, оффер, описание бизнеса), называет наш бренд, а клиент не мы
+   * (letterBrandGuard.heBrandInputsBeforeEnqueue). Генерация писем откажет до
+   * первого вызова модели, поэтому её не ставим вовсе. Паузы проекта не даёт:
+   * что поправить, говорит карточка рынка шага 3 (проекция
+   * letters_brand_inputs), ответ «Launch» и — у дочейна после анализа, где
+   * клиента рядом нет, — письмо об остановке рынка (recordHeBrandInputRefusal);
+   * снимает это сам клиент правкой поля и «Launch».
+   */
+  'brand_input',
+  /**
    * Решения КЛИЕНТА, а не отказы. Кнопка «Cancel all jobs» переводит джобы в
    * 'cancelled', и ночью за такую работу не платим заново: клиент её только
    * что остановил. Паузы кабинету эти причины НЕ дают — клиент знает, что
@@ -897,6 +918,10 @@ export function pauseForHeAutopilotSkip(
       return 'letters_exhausted';
     case 'spend_ceiling':
       return 'spend_ceiling';
+    // Поле брифа клиента: поправить его может только он, и карточка рынка
+    // называет поле — паузы «платный шаг остановился» здесь нет.
+    case 'brand_input':
+      return null;
     case 'orphan_repair_failed':
       return 'enqueue_failed';
     case 'orphan_repair_read_failed':
@@ -944,8 +969,10 @@ export interface HeTemplateGenerationBudget {
   /**
    * Сколько прогонов засчитано этому поколению: попытки строк (он же счётчик
    * he_jobs.attempts), закончившейся строке — минимум одна (кроме done-строки,
-   * вернувшей уже готовый шаблон без модели, — ей только её attempts). Бесплатно
-   * прерванные прогоны сюда не попадают (см. HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS).
+   * вернувшей уже готовый шаблон без модели, и failed-строки, закрытой
+   * бесплатным отказом за наш бренд в поле брифа, — им только их attempts).
+   * Бесплатно прерванные прогоны сюда не попадают (см.
+   * HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS).
    */
   paidRuns: number;
   /** created_at последней done-джобы base_analyze этой базы (null — её нет). */
@@ -992,7 +1019,12 @@ function jobBaseId(payload: unknown): string | null {
  * вернула уже готовый шаблон (result.reused, stages/template.ts): модель она не
  * звала, и засчитываются ей только её attempts — упавшие попытки до этого
  * возврата (форс-джоба, чья первая попытка оплатила и вставила шаблон, а
- * done-запись не легла).
+ * done-запись не легла). Второе исключение — failed-строка с пометкой
+ * бесплатного отказа (letterBrandGuard.heJobUnpaidBrandInput: поле брифа
+ * называет наш бренд, стадия отказала до первого вызова модели, воркер
+ * попытку не засчитал): ей тоже только её attempts — платные попытки той же
+ * строки до этого отказа. Так клиент, поправивший поле, пишет письма с полным
+ * бюджетом, сколько бы таких отказов ни было.
  *
  * Сбой чтения БРОСАЕТСЯ HeAutopilotReadError: «не знаю, сколько потрачено» —
  * это не «не потрачено ничего». Вызывающий на этом останавливается и пробует
@@ -1044,7 +1076,12 @@ export async function heTemplateGenerationBudget(
     const ended = row.status === 'done' || row.status === 'failed';
     // `->>` отдаёт текст: 'true' у строки, вернувшей готовый шаблон без модели.
     const reused = row.status === 'done' && row.reused === 'true';
-    paidRuns += ended && !reused ? Math.max(attempts, 1) : attempts;
+    // Строку закрыл бесплатный отказ (наш бренд в поле брифа — пометка воркера,
+    // letterBrandGuard.heJobUnpaidBrandInput): последний прогон модель не звал,
+    // и «минимум один» ему не положен — засчитываются только платные попытки
+    // до него (attempts этот отказ не трогает).
+    const unpaid = row.status === 'failed' && heJobUnpaidBrandInput(row.payload) !== null;
+    paidRuns += ended && !reused && !unpaid ? Math.max(attempts, 1) : attempts;
   }
 
   return { allowed: paidRuns < HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS, paidRuns, generationAt };
@@ -1276,6 +1313,34 @@ async function afterBaseAnalyzeDone(
   });
   if (!budget.allowed) return { outcome: skipped('letters_exhausted'), verticalId };
 
+  // Наш бренд в поле брифа, которое промпт писем берёт дословно: стадия
+  // откажет до первого вызова модели (HeLetterBrandInputError), и постановка
+  // была бы пустой строкой очереди — не ставим вовсе. Тот же отказ на каждом
+  // пути постановки писем (letterBrandGuard.heBrandInputsBeforeEnqueue);
+  // клиенту поле называет карточка рынка шага 3. Сбой чтения — «не знаю», а
+  // не «можно» (HeAutopilotReadError, как у чтений выше).
+  const { data: projectRow, error: projectErr } = await supabase
+    .from('he_projects')
+    .select('market, website_url, brief, created_by')
+    .eq('id', job.project_id)
+    .maybeSingle();
+  if (projectErr) throw new HeAutopilotReadError(`autopilot project brief read: ${projectErr.message}`);
+  const briefProject = (projectRow ?? {}) as { market?: unknown; website_url?: unknown; brief?: unknown; created_by?: unknown };
+  let brandInputs;
+  try {
+    brandInputs = await heBrandInputsBeforeEnqueue(supabase, {
+      market: normalizeHeMarket(briefProject.market),
+      project: briefProject,
+      ...(verticalId ? { verticalId } : {}),
+    });
+  } catch (e) {
+    throw new HeAutopilotReadError(`autopilot letters language read: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (brandInputs.length > 0) {
+    await recordHeBrandInputRefusal(supabase, { projectId: job.project_id, baseId, inputs: brandInputs });
+    return { outcome: skipped('brand_input'), verticalId };
+  }
+
   // Письма — платная генерация: флаг перечитываем прямо перед постановкой.
   if (!(await isHeAutopilotStillOn(supabase, job.project_id))) {
     return { outcome: skipped('autopilot_off'), verticalId };
@@ -1294,6 +1359,45 @@ async function afterBaseAnalyzeDone(
   if (jobErr?.code === '23505') return { outcome: 'existing', verticalId };
   if (jobErr) throw new Error(`autopilot template enqueue: ${jobErr.message}`);
   return { outcome: 'enqueued', verticalId };
+}
+
+/**
+ * Отказ дочейна за поле брифа — СТРОКОЙ, а не только словом в логе: клиента
+ * рядом нет (дочейн идёт после done-джобы base_analyze), и сказать ему, какое
+ * поле шага 1 поправить, может только письмо об остановке рынка
+ * (engClientMail, остановки стадий по упавшим джобам), а оно читает he_jobs.
+ * Поэтому пишется сразу закрытая строка template: status 'failed', attempts 0,
+ * he_jobs.error — тот же текст сотруднику, что у стадии
+ * (HeLetterBrandInputError), payload — base_id и пометка бесплатного отказа с
+ * полями (как у воркера, writeJobFailure). Воркер её не берёт (не 'pending'),
+ * бюджет писем её не считает (heJobUnpaidBrandInput), письмо называет поле
+ * ('edit_brief'). Одна строка на done-джобу анализа — писем не больше, чем
+ * анализов. Запись не легла — пропуск тот же (поле называет карточка рынка
+ * шага 3), только письма не будет; не бросает.
+ */
+async function recordHeBrandInputRefusal(
+  supabase: SupabaseClient,
+  args: { projectId: string; baseId: string; inputs: HeBrandInputLeak[] },
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+  try {
+    await supabase.from('he_jobs').insert({
+      project_id: args.projectId,
+      stage: 'template',
+      status: 'failed',
+      attempts: 0,
+      payload: {
+        base_id: args.baseId,
+        [HE_JOB_UNPAID_REFUSAL_KEY]: HE_JOB_UNPAID_BRAND_INPUT,
+        [HE_JOB_BRAND_INPUTS_KEY]: args.inputs,
+      },
+      error: new HeLetterBrandInputError('template', args.inputs).message.slice(0, 500),
+      finished_at: nowIso,
+      updated_at: nowIso,
+    });
+  } catch {
+    // Не бросает: см. докблок.
+  }
 }
 
 /** Итог дочейна, при котором конвейер ЭТОЙ вертикали пошёл дальше. */

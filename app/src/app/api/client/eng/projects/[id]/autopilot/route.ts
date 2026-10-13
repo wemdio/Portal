@@ -191,6 +191,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const hold = reconciled.pause
       ? toClientEngAutopilotHold({ autopilot_error: reconciled.pause })
       : null;
+    const brandStops = reconciled.details.filter((detail) => detail.reason === 'brand_input');
 
     return NextResponse.json({
       ok: true,
@@ -204,6 +205,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       // (EngStepVerticals), иначе пропуск читался бы как «всё уже готово».
       collect_again_verticals: collectStopRepeats.length,
       autopilot_hold_code: hold?.code ?? null,
+      // Рынки, которым письма не поставлены: поле брифа называет наш бренд
+      // (причина реконсилера 'brand_input'), — и поля (как у «Launch»).
+      brand_input_markets: brandStops.length,
+      brand_inputs: brandStops.find((d) => (d.brandInputs ?? []).length > 0)?.brandInputs ?? [],
     });
   });
 }

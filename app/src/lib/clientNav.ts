@@ -371,6 +371,21 @@ export const CLIENT_NAV_ENG_REPLIES: ClientNavItem = {
   descriptionEn: 'Replies to your campaigns',
 };
 
+/**
+ * «Do not contact» ENG-клиента (app/client/eng/do-not-contact) — его чёрный
+ * список (client_blocked_contacts) через те же /api/client/blocklist. Под
+ * /client/eng/* по той же причине, что и Replies; подписи английские в обоих
+ * полях. RU-страница «Чёрный список» (/client/blocklist) не меняется.
+ */
+export const CLIENT_NAV_ENG_DO_NOT_CONTACT: ClientNavItem = {
+  id: 'eng-do-not-contact',
+  label: 'Do not contact',
+  labelEn: 'Do not contact',
+  href: '/client/eng/do-not-contact',
+  description: 'Addresses your campaigns leave out',
+  descriptionEn: 'Addresses your campaigns leave out',
+};
+
 /*
  * Пункта «ящики клиента» в ENG-меню нет (решение владельца 11.10.2026): кампании
  * кабинета шлют только из ящиков нашего пула, подключать свои клиенту незачем.
@@ -475,6 +490,12 @@ export function resolveActiveNavId(pathname: string): string | null {
   }
   if (pathname === CLIENT_NAV_ENG_REPLIES.href || pathname.startsWith(`${CLIENT_NAV_ENG_REPLIES.href}/`)) {
     return CLIENT_NAV_ENG_REPLIES.id;
+  }
+  if (
+    pathname === CLIENT_NAV_ENG_DO_NOT_CONTACT.href ||
+    pathname.startsWith(`${CLIENT_NAV_ENG_DO_NOT_CONTACT.href}/`)
+  ) {
+    return CLIENT_NAV_ENG_DO_NOT_CONTACT.id;
   }
   if (pathname === '/client/eng' || pathname.startsWith('/client/eng/')) {
     return 'eng';

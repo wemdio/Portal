@@ -19,6 +19,8 @@ import {
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
 import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
 import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
+import { heBrandInputRefusalEn, heBrandInputsBeforeEnqueue } from '@/lib/hypothesisEngine/letterBrandGuard';
+import { projectMarket } from '@/lib/hypothesisEngine/market';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -76,7 +78,11 @@ async function findActiveTemplateJob(projectId: string, baseId: string) {
 //     templates/[id]/rewrite со своими проверками (тот же отказ у автопилота —
 //     итог 'skipped:template_ready');
 //   - бюджет писем поколения анализа (heTemplateGenerationBudget): без него
-//     скрипт ставил бы новую платную генерацию после каждой закончившейся.
+//     скрипт ставил бы новую платную генерацию после каждой закончившейся;
+//   - поле брифа, которое промпт писем берёт дословно, называет наш бренд
+//     (letterBrandGuard.heBrandInputsBeforeEnqueue; язык — самой новой
+//     цепочки рынка, как у стадии): 409 brand_input с полем шага 1 — стадия
+//     откажет до первого вызова модели, ставить нечего.
 // Затем выключатель отправки аккаунта (engSendingSwitchRefusal), как у
 // «Launch» проекта, и гейт платных шагов (requireEngPaidAccess, 'letters'):
 // почта и потолок расхода клиента — после этих отказов, до потолка проекта и
@@ -102,7 +108,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const { data: baseMeta, error: baseMetaErr } = await supabaseAdmin
       .from('he_bases')
-      .select('filename')
+      .select('filename, vertical_id')
       .eq('id', id)
       .maybeSingle();
     if (baseMetaErr) {
@@ -154,6 +160,34 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     if (!budgetAllowed) return jsonError(LETTERS_EXHAUSTED, 409);
+
+    // Наш бренд в поле брифа — до гейтов и постановки (шапка роута).
+    const { data: briefRow, error: briefErr } = await supabaseAdmin
+      .from('he_projects')
+      .select('website_url, brief, created_by')
+      .eq('id', owned.base.project_id as string)
+      .maybeSingle();
+    let brandInputs: Awaited<ReturnType<typeof heBrandInputsBeforeEnqueue>>;
+    try {
+      if (briefErr) throw briefErr;
+      const verticalId = String((baseMeta as { vertical_id?: unknown } | null)?.vertical_id ?? '');
+      brandInputs = await heBrandInputsBeforeEnqueue(supabaseAdmin, {
+        market: projectMarket(owned.project),
+        project: (briefRow ?? {}) as { website_url?: unknown; brief?: unknown; created_by?: unknown },
+        ...(verticalId ? { verticalId } : {}),
+      });
+    } catch (briefReadErr) {
+      return engServerError('client.eng.template.brief_read_failed', briefReadErr, TEMPLATE_START_FAILED, {
+        userId: result.auth.userId,
+        baseId: id,
+      });
+    }
+    if (brandInputs.length > 0) {
+      return NextResponse.json(
+        { error: heBrandInputRefusalEn(brandInputs, 'press «Launch» on step 3'), code: 'brand_input' },
+        { status: 409 },
+      );
+    }
 
     const switchRefusal = await engSendingSwitchRefusal(
       supabaseAdmin,

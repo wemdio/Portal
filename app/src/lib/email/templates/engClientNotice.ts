@@ -39,10 +39,25 @@ export type EngClientNoticeCode =
  *                  then presses the button of that stop — «Try again» for the
  *                  research, «Rewrite letters» for a failed rewrite, «Launch»
  *                  for the other stage stops. The cabinet says the same for
- *                  these codes (clientFailureText.ts, HE_TEAM_ON_IT_EN).
+ *                  these codes (clientFailureText.ts, HE_TEAM_ON_IT_EN);
+ *  - 'edit_brief' — a field on step 1 «Your business» names our brand while the
+ *                  client is another company, so the letters step refused
+ *                  before writing anything (no model call, no try used): the
+ *                  client edits that field (`brandInputs` names it) and then
+ *                  presses the button of that stop — «Rewrite letters» for a
+ *                  failed rewrite, «Launch» for the other letter stops. The
+ *                  market card on step 3 names the same field.
  * null — the letter names no button and sends the client to the project.
  */
-export type EngClientNoticeNext = 'launch' | 'rewrite' | 'try_again' | 'support' | 'team_fix';
+export type EngClientNoticeNext = 'launch' | 'rewrite' | 'try_again' | 'support' | 'team_fix' | 'edit_brief';
+
+/** A step-1 field that names our brand (`edit_brief`): its label on step 1 and the word in it. */
+export interface EngClientNoticeBrandInput {
+  /** The field label on step 1 («Sender signature», «Offer override», «Business description»). */
+  label: string;
+  /** The word as the client wrote it («OutreachOS»). */
+  word: string;
+}
 
 export interface EngClientNoticeEmailArgs {
   kind: EngClientNoticeKind;
@@ -50,6 +65,12 @@ export interface EngClientNoticeEmailArgs {
   code?: EngClientNoticeCode | null;
   /** Only for research_stopped, autopilot_hold and the four stage stops. */
   next?: EngClientNoticeNext | null;
+  /**
+   * Only with next 'edit_brief': the step-1 fields that name our brand, as the
+   * job recorded them; empty — not known (the letter then sends the client to
+   * step 3, whose market card names the field).
+   */
+  brandInputs?: EngClientNoticeBrandInput[] | null;
   /**
    * Only for action_needed: the event's own reason, the `ref_id` of the
    * letter. autopilot_hold — the cabinet's hold code (clientEngProjection.ts,
@@ -228,6 +249,7 @@ function noticeCopy(args: EngClientNoticeEmailArgs): NoticeCopy {
         market,
         forMarket,
         ofMarket,
+        args.brandInputs ?? [],
       );
   }
 }
@@ -252,6 +274,8 @@ interface StageStopText {
   button: string;
   /** For 'team_fix': what to press after the fix — continues «…, then open your project and». */
   afterFix: string;
+  /** For 'edit_brief': the button after the field is edited — continues «…, then». */
+  afterBrief: string;
   /** The collected contacts are kept whatever happens next. */
   kept: boolean;
 }
@@ -270,6 +294,7 @@ function stageStopText(code: StageStopCode, forMarket: string): StageStopText {
         button:
           'This market is not moving on. Open your project and press «Launch» on step 3 to try again — work that is already done is not repeated. If it stops again, message Support.',
         afterFix: 'press «Launch» on step 3 to try again — work that is already done is not repeated.',
+        afterBrief: 'press «Launch» on step 3 to have the letters written.',
         kept: false,
       };
     case 'final_letters_stopped':
@@ -279,6 +304,8 @@ function stageStopText(code: StageStopCode, forMarket: string): StageStopText {
         button:
           'Sending has not started for this market. Open your project and press «Launch» on step 3 to try again — the contacts already collected are kept and are not bought again. If it stops again, message Support.',
         afterFix: 'press «Launch» on step 3 to try again — the contacts already collected are kept and are not bought again.',
+        afterBrief:
+          'press «Launch» on step 3 to have the final letters written — the contacts already collected are kept and are not bought again.',
         kept: true,
       };
     case 'check_stopped':
@@ -288,6 +315,8 @@ function stageStopText(code: StageStopCode, forMarket: string): StageStopText {
         button:
           'Open your project and press «Launch» on step 3 to check them again — the contacts already collected are not bought again. If it stops again, message Support.',
         afterFix: 'press «Launch» on step 3 to check them again — the contacts already collected are kept and are not bought again.',
+        // Проверка контактов полей брифа не читает — 'edit_brief' ей не ставится.
+        afterBrief: 'press «Launch» on step 3 to check them again.',
         kept: true,
       };
     case 'rewrite_stopped':
@@ -297,26 +326,64 @@ function stageStopText(code: StageStopCode, forMarket: string): StageStopText {
         button:
           'Sending has not started for this market. Open your project and press «Rewrite letters» on this market to try again; if the button is not there, message Support.',
         afterFix: 'press «Rewrite letters» on this market to try again.',
+        afterBrief: 'press «Rewrite letters» on this market to have them written.',
         kept: false,
       };
   }
 }
 
+function listEn(items: string[]): string {
+  if (items.length <= 1) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/**
+ * 'edit_brief': which step-1 field names our brand and how to edit it — the
+ * same labels and buttons as step 1 «Your business» (the «What we know about
+ * your business» section with the fields and «Save overrides»). No fields
+ * known — the market card on step 3 names it (it shows the field while the
+ * field still names our brand).
+ */
+function briefEditSentence(inputs: EngClientNoticeBrandInput[], afterBrief: string): string {
+  if (inputs.length === 0) {
+    return (
+      'A field on step 1 «Your business» names a brand that is not your company, and letters go out on behalf of ' +
+      'your company only, so none were written and no try was used. Step 3 names the field: remove that name from ' +
+      `it under «What we know about your business» on step 1 and press «Save overrides», then ${afterBrief}`
+    );
+  }
+  const fields = listEn([...new Set(inputs.map((i) => `«${i.label}»`))]);
+  const words = listEn([...new Set(inputs.map((i) => `"${i.word}"`))]);
+  const many = new Set(inputs.map((i) => i.label)).size > 1;
+  return (
+    `Your ${fields} on step 1 ${many ? 'name' : 'names'} ${words}, ${
+      new Set(inputs.map((i) => i.word)).size > 1 ? 'brands that are' : 'a brand that is'
+    } not your company, and letters go out on behalf of your company only, so none were written and no try was ` +
+    `used. Edit ${fields} on step 1 «Your business»: open «What we know about your business», remove ${words} and ` +
+    `press «Save overrides», then ${afterBrief}`
+  );
+}
+
 /**
  * `sendingOff`: «Launch» and «Rewrite letters» refuse while the account's
  * sending switch is off, so the stops they would move ('launch', 'rewrite',
- * 'team_fix') name Support instead (SENDING_OFF); 'support' and null name no
- * button and stay as they are.
+ * 'team_fix', 'edit_brief') name Support instead (SENDING_OFF); 'support' and
+ * null name no button and stay as they are.
  */
 function stageStopCopy(
   subject: string,
   text: StageStopText,
   next: EngClientNoticeNext | null,
   sendingOff: boolean,
+  brandInputs: EngClientNoticeBrandInput[],
 ): NoticeCopy {
   const kept = text.kept ? ' The contacts already collected are kept.' : '';
   const paragraph =
-    next === 'launch' || next === 'rewrite'
+    next === 'edit_brief'
+      ? sendingOff
+        ? `${text.what} stopped before it finished, and it does not start again by itself.${kept} ${SENDING_OFF}`
+        : `${text.what} stopped before any letter was written. ${briefEditSentence(brandInputs, text.afterBrief)}`
+      : next === 'launch' || next === 'rewrite'
       ? sendingOff
         ? `${text.what} stopped before it finished, and it does not start again by itself.${kept} ${SENDING_OFF}`
         : `${text.what} stopped before it finished. ${text.button}`
@@ -385,6 +452,7 @@ function actionCopy(
   market: string | null,
   forMarket: string,
   ofMarket: string,
+  brandInputs: EngClientNoticeBrandInput[],
 ): NoticeCopy {
   const subject = `Your outreach needs you${ofMarket}`;
   switch (code) {
@@ -392,7 +460,7 @@ function actionCopy(
     case 'final_letters_stopped':
     case 'check_stopped':
     case 'rewrite_stopped':
-      return stageStopCopy(subject, stageStopText(code, forMarket), next, sendingOff);
+      return stageStopCopy(subject, stageStopText(code, forMarket), next, sendingOff, brandInputs);
     case 'letters_need_rewrite':
       return {
         subject,

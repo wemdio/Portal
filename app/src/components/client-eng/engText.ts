@@ -54,7 +54,10 @@ import type {
   HeClientAutopilotHoldCode,
   HeClientRefillState,
   HeClientStageErrorCode,
+  HeTemplateRewriteReason,
 } from '@/lib/hypothesisEngine/clientEngProjection';
+// Тоже только тип: поля брифа, в которых проверка писем нашла наш бренд.
+import type { HeBrandInputField, HeBrandInputLeak } from '@/lib/hypothesisEngine/letterBrandGuard';
 // Тоже только тип: набор причин этапа 'attention' один на оба конца провода.
 import type { EngDashAttention } from '@/lib/hypothesisEngine/engDashboard';
 // Тоже только типы: сводка отправки запуска и коды неудачного старта.
@@ -531,10 +534,17 @@ export function engAutopilotIdleText(sendingOff = false): string {
 
 /**
  * Письма ready-шаблона запуск откажет (признак проекции `needs_rewrite`,
- * clientEngProjection.heTemplateNeedsRewrite: тот же гейт писем, что у ядра
- * запуска, шаг 4b″). Один текст на карточку рынка шага 3, причина — словами 409 ядра
- * (`templateOperatorsUnresolved`): признак ловит ровно те три формы, что тот
- * текст называет (пустое место, слово-заглушка, сырая подстановка).
+ * clientEngProjection.heTemplateRewriteReasons: те же гейты писем, что у ядра
+ * запуска, шаг 4b″). Один текст на карточку рынка шага 3, причина — словами
+ * 409 ядра по причинам проекции (`needs_rewrite_reasons`):
+ *  - 'placeholders' (`templateOperatorsUnresolved`): признак ловит ровно те три
+ *    формы, что тот текст называет (пустое место, слово-заглушка, сырая
+ *    подстановка);
+ *  - 'brand' (template_brand_leak): письма называют наш бренд или вымышленную
+ *    компанию из примера промпта, а клиент не мы. Самого слова фраза не
+ *    печатает: «бренд или название компании, которое не ваше» правда для обоих
+ *    видов.
+ * Причин нет в ответе (старый ответ, демо) — 'placeholders', как до S4.
  *
  *  - `none` — запуска не было: кампании не созданы, из шаблона не ушло ничего;
  *  - `unfinished` — запуск до гейта, часть аудитории не уехала, а достройку
@@ -547,24 +557,143 @@ export function engAutopilotIdleText(sendingOff = false): string {
  *    генераций на анализ; исчерпан — отказ кнопки сам ведёт в Support).
  *    Карточка рисует кнопку всегда, когда рисует эту фразу; при выключенной
  *    отправке аккаунта (`sendingOff`) — ни кнопки, ни «Press», а
- *    ENG_SENDING_OFF_EN;
+ *    ENG_SENDING_OFF_EN. Наш бренд в поле брифа (`brandInputs`, строка
+ *    проекта `letters_brand_inputs`): роут переписки откажет, пока поле его
+ *    называет, — фраза сначала зовёт поправить поле на шаге 1
+ *    (engLettersBrandInputText);
  *  - `unfinished` — Support: письма уже в кампании, и роут переписки такой
- *    шаблон не берёт (409 launched).
+ *    шаблон не берёт (409 launched). С причиной 'brand' фраза ещё и прямо
+ *    говорит, что кампании рынка, пока отправляют, шлют эти письма уже
+ *    загруженным людям (гейты отказывают только новым загрузкам, старту и
+ *    «Resume»), — условием «while … is sending»: отправляют ли они сейчас,
+ *    карточка не знает (сводку читает EngSendingBlock), а после «Pause» фраза
+ *    должна оставаться правдой, — и зовёт нажать «Pause» на этом рынке: кнопку «Pause» блок
+ *    отправки карточки (EngSendingBlock) рисует всегда, когда хоть одна
+ *    кампания может отправлять (engCampaignStatus, сводка отправки), и пауза
+ *    не отказывается ни выключателем, ни гейтом.
  * Обещания «команда уже видит» нет: алерта на это нет.
  */
 const TEMPLATE_REWRITE_WHY_EN =
   'they contain a placeholder (such as a first name) that cannot be filled in from this audience, so ' +
   'recipients would see a blank, a stand-in word or the raw placeholder in its place.';
+const TEMPLATE_REWRITE_BRAND_WHY_EN =
+  'they mention a brand or company name that is not yours, and letters go out on behalf of your company only.';
+const TEMPLATE_REWRITE_PLACEHOLDER_ALSO_EN =
+  ' They also contain a placeholder (such as a first name) that cannot be filled in from this audience.';
 
-export function engTemplateNeedsRewriteText(launch: 'none' | 'unfinished', sendingOff = false): string {
+function templateRewriteWhy(reasons: readonly HeTemplateRewriteReason[] | null): string {
+  const brand = reasons?.includes('brand') === true;
+  const placeholders = !reasons || reasons.length === 0 || reasons.includes('placeholders');
+  if (brand && placeholders) {
+    return `${TEMPLATE_REWRITE_WHY_EN} They also mention a brand or company name that is not yours.`;
+  }
+  return brand ? TEMPLATE_REWRITE_BRAND_WHY_EN : TEMPLATE_REWRITE_WHY_EN;
+}
+
+export function engTemplateNeedsRewriteText(
+  launch: 'none' | 'unfinished',
+  sendingOff = false,
+  reasons: readonly HeTemplateRewriteReason[] | null = null,
+  brandInputs: readonly HeBrandInputLeak[] = [],
+): string {
+  const why = templateRewriteWhy(reasons);
   if (launch === 'unfinished') {
-    return `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${TEMPLATE_REWRITE_WHY_EN} Message Support to have the letters rewritten.`;
+    if (reasons?.includes('brand') === true) {
+      const also = reasons.includes('placeholders') ? TEMPLATE_REWRITE_PLACEHOLDER_ALSO_EN : '';
+      return (
+        'These letters mention a brand or company name that is not yours, so the rest of this audience is not ' +
+        `added to this market's campaigns.${also} While a campaign of this market is sending, the people already ` +
+        'uploaded to it keep getting these letters; press «Pause» on this market to stop that. Message Support to ' +
+        'have the letters rewritten.'
+      );
+    }
+    return `Part of this audience has not gone out yet, and these letters cannot finish the launch: ${why} Message Support to have the letters rewritten.`;
   }
   // Выключатель отправки аккаунта 'revoked': «Rewrite letters» откажет 403 —
   // карточка кнопку не рисует, а фраза к ней не зовёт.
-  return sendingOff
-    ? `The final letters did not pass our automatic check, so nothing was sent: ${TEMPLATE_REWRITE_WHY_EN} ${ENG_SENDING_OFF_EN}`
-    : `The final letters did not pass our automatic check, so nothing was sent: ${TEMPLATE_REWRITE_WHY_EN} Press «Rewrite letters» to have them written again.`;
+  if (sendingOff) {
+    return `The final letters did not pass our automatic check, so nothing was sent: ${why} ${ENG_SENDING_OFF_EN}`;
+  }
+  return brandInputs.length > 0
+    ? `The final letters did not pass our automatic check, so nothing was sent: ${why} ${engLettersBrandInputText(brandInputs, 'rewrite')}`
+    : `The final letters did not pass our automatic check, so nothing was sent: ${why} Press «Rewrite letters» to have them written again.`;
+}
+
+/** Причины `needs_rewrite_reasons` шаблона из проекции; поля нет — null. */
+export function engTemplateRewriteReasons(template: unknown): HeTemplateRewriteReason[] | null {
+  const raw = (template as { needs_rewrite_reasons?: unknown } | null)?.needs_rewrite_reasons;
+  if (!Array.isArray(raw)) return null;
+  return raw.filter((r): r is HeTemplateRewriteReason => r === 'placeholders' || r === 'brand');
+}
+
+/** Подписи полей шага 1 «Your business» (EngStepBrief.tsx, карточка «Offer & style overrides»). */
+const BRAND_INPUT_FIELD_LABEL_EN: Record<HeBrandInputField, string> = {
+  signature_override: 'Sender signature',
+  offer_override: 'Offer override',
+  business_override: 'Business description',
+};
+
+/**
+ * Наш бренд в полях брифа (`letters_brand_inputs` строки проекта —
+ * clientEngProjection, letterBrandGuard.heBrandInputLeaks); нет поля или не
+ * тот вид — пусто.
+ */
+export function engLettersBrandInputs(project: unknown): HeBrandInputLeak[] {
+  const raw = (project as { letters_brand_inputs?: unknown } | null)?.letters_brand_inputs;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (i): i is HeBrandInputLeak =>
+      !!i &&
+      typeof (i as HeBrandInputLeak).brand === 'string' &&
+      Object.prototype.hasOwnProperty.call(BRAND_INPUT_FIELD_LABEL_EN, (i as HeBrandInputLeak).field),
+  );
+}
+
+function listEn(items: string[]): string {
+  if (items.length <= 1) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/**
+ * Поле шага 1 называет наш бренд, а клиент не мы: пока это так, стадии писем
+ * отказывают до платных вызовов (HeLetterBrandInputError), и ни новые письма
+ * рынка, ни «Rewrite letters» не пройдут. Фраза называет поле и слово, которые
+ * клиент вписал сам, и путь к ним — раскрывающийся блок «What we know about
+ * your business» шага 1, кнопка «Save overrides». `then` — кнопка после правки:
+ * 'launch' — «Launch» вверху шага 3 (ставит письма заново), 'launch_again' —
+ * та же кнопка из ответа на её нажатие (EngStepLaunch, launchResultText),
+ * 'launch_or_support' — «Launch» у итоговых писем: их генерацию «Launch»
+ * ставит, только пока бюджет писем поколения анализа не исчерпан
+ * (heTemplateGenerationBudget; бесплатные отказы за поле брифа его не
+ * тратят), поэтому с запасным Support, как у той же строки без поля брифа,
+ * 'rewrite' — «Rewrite letters» карточки, 'none' — без кнопки (выключена или
+ * откажет: отправка аккаунта выключена, пауза потолка расхода).
+ */
+export function engLettersBrandInputText(
+  inputs: readonly HeBrandInputLeak[],
+  then: 'launch' | 'launch_again' | 'launch_or_support' | 'rewrite' | 'none',
+): string {
+  const fields = [...new Set(inputs.map((i) => i.field))];
+  const words = [...new Set(inputs.map((i) => i.brand))];
+  const fieldText = listEn(fields.map((f) => `«${BRAND_INPUT_FIELD_LABEL_EN[f]}»`));
+  const wordText = listEn(words.map((w) => `"${w}"`));
+  const next =
+    then === 'launch'
+      ? ', then press «Launch» above'
+      : then === 'launch_again'
+        ? ', then press «Launch» again'
+        : then === 'launch_or_support'
+          ? ', then press «Launch» above; if the final letters still do not start, message Support'
+        : then === 'rewrite'
+          ? ', then press «Rewrite letters»'
+          : '';
+  return (
+    `Your ${fieldText} on step 1 ${fields.length > 1 ? 'name' : 'names'} ${wordText}, ` +
+    `${words.length > 1 ? 'brands that are' : 'a brand that is'} not your company. ` +
+    'Letters go out on behalf of your company, so they are not written while that text is there. ' +
+    `On step 1 «Your business», open «What we know about your business», remove ${wordText} from ${fieldText} ` +
+    `and press «Save overrides»${next}.`
+  );
 }
 
 /**

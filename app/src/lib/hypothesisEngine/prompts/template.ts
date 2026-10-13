@@ -27,6 +27,7 @@ import type { LLMMessage } from '../llm';
 import type { HeBaseAnalysisOutput, HeTemplatePlanOutput } from '../schemas';
 import type { HeChainLanguage, HeChainLetter } from '../types';
 import { renderClientCaseBlock, type HeCaseDraft } from '../caseBank';
+import { HE_EN_EXAMPLE_CASES, HE_EN_EXAMPLE_SENDER } from '../letterBrandGuard';
 import {
   CHAIN_REGULATIONS,
   buildChainCriticMessages,
@@ -70,7 +71,9 @@ ${CHAIN_REGULATIONS.ru}
 
 // EN-перевод системного блока плана — по смыслу; имена RU-блоков материалов
 // («ПОДПИСЬ ОТПРАВИТЕЛЯ», «КЕЙС КЛИЕНТА», «✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ») — как в материалах.
-const PLAN_SYSTEM_EN = `You are the creative director of the Polza agency. You assemble the plan of the final sequence template using the 85/15 architecture:
+// Роль — без агентства: письма всегда от компании клиента (ENG-кабинет и
+// US-проекты инструмента), наш бренд модели не называется.
+const PLAN_SYSTEM_EN = `You are a senior B2B email outreach creative director. You assemble the plan of the final sequence template for the client company, the sender of every email, using the 85/15 architecture:
 
 - ~85% — FIXED BLOCK: the fixed semantic backbone of the sequence for the hypothesis/vertical. Identical for all leads: segment pains, the client's offer, evidence, the emails' structure. Write it as a ready brief for a copywriter: for each email — the goal, the key idea, the arguments, which proof to use.
 - ~15% — SEGMENT VARIANTS: conditional email variants for the segments of the SPECIFIC uploaded base (letters[].segment_variants). Angles, examples, wordings from the base analysis: dominant geo/industries/roles, spotted segments. This is NOT per-lead personalization — it is adaptation to what is actually visible in the base rows.
@@ -226,7 +229,11 @@ ${CHAIN_REGULATIONS.ru}
 
 // EN-перевод системного блока финальных писем — по смыслу; имена RU-блоков
 // материалов («ПОДПИСЬ ОТПРАВИТЕЛЯ», «КЕЙС КЛИЕНТА») — как в материалах.
-const LETTERS_SYSTEM_EN = `You are a senior email outreach specialist at the Polza agency. You write the final sequence template following the approved 85/15 plan. The regulations below are hard data from millions of sends — they outrank any other considerations.
+// Роль и пример — без нашего бренда: письма всегда от компании клиента.
+// Отправитель примера и его кейсы — вымышленные компании; их имена берутся из
+// проверки писем (letterBrandGuard), и письмо, списавшее пример, она не
+// пропустит у клиента с другим именем.
+const LETTERS_SYSTEM_EN = `You are a senior B2B email outreach specialist. You write the final sequence template for the client company, the sender of every email, following the approved 85/15 plan. The regulations below are hard data from millions of sends — they outrank any other considerations.
 
 ${CHAIN_REGULATIONS.en}
 
@@ -248,18 +255,18 @@ Additional template rules:
 - Before delivering, read each email aloud: grammar and agreement must be flawless. Check: every email has a greeting at the start and the sender's signature at the end; the first line is a greeting, not an in-your-face assertion about the recipient's business or market; no subject and no body contains a dash ("—", "–"); every email has exactly one CTA question (zero CTAs — a violation); the greeting, the message, the question and the signature are separated by blank lines, and the question is its own paragraph right before the signature; no email offers, promises or implies a report, example, sample, case study, audit or any other asset that the materials do not provide.
 
 EXAMPLE — how not to and how to (a structure example, not text to copy):
-BAD: "Software vendors' sales are hitting a traffic ceiling. We are Polza: we write cold emails for a company that sells a complex product to other businesses, and we drive it to a conversation with decision-makers. That's how we worked with BPMSoft. Send a sample sequence for {{company}}?"
-Why bad: no greeting, no signature, and the first line is an in-your-face assertion about someone else's market: a pitch, not a note from a person; the reason is a generic segment truism (the "traffic ceiling" platitude is true for everyone and no one in particular); the service is not named in plain words, the client is described through nested clauses; the "That's how we worked with BPMSoft" case is a context-free sticker: unclear what was done and what it has to do with the recipient; the CTA "Send a sample sequence for {{company}}?" offers an asset that no material provides (offering or promising a sample, report, case study or audit that is not in the materials is banned), and it has no referral branch.
+BAD: "Software vendors' sales are hitting a traffic ceiling. We are ${HE_EN_EXAMPLE_SENDER}: we write cold emails for a company that sells a complex product to other businesses, and we drive it to a conversation with decision-makers. That's how we worked with ${HE_EN_EXAMPLE_CASES[0]}. Send a sample sequence for {{company}}?"
+Why bad: no greeting, no signature, and the first line is an in-your-face assertion about someone else's market: a pitch, not a note from a person; the reason is a generic segment truism (the "traffic ceiling" platitude is true for everyone and no one in particular); the service is not named in plain words, the client is described through nested clauses; the "That's how we worked with ${HE_EN_EXAMPLE_CASES[0]}" case is a context-free sticker: unclear what was done and what it has to do with the recipient; the CTA "Send a sample sequence for {{company}}?" offers an asset that no material provides (offering or promising a sample, report, case study or audit that is not in the materials is banned), and it has no referral branch.
 GOOD: "Good afternoon.
 
 I saw a figure for your industry: the share of deals stuck at the pilot stage grew 1.7x over the year, and I thought of you.
 
-At Polza we do done-for-you email outreach: we find companies that need your product and bring them to a conversation with decision-makers. We'll start with a test on a narrow segment. We're in your space: for Diasoft we booked meetings with CFOs.
+At ${HE_EN_EXAMPLE_SENDER} we do done-for-you email outreach: we find companies that need your product and bring them to a conversation with decision-makers. We'll start with a test on a narrow segment. We're in your space: for ${HE_EN_EXAMPLE_CASES[1]} we booked meetings with CFOs.
 
 Is this relevant to you, or could you point me to who owns new business at {{company}}?
 
 Best regards,
-The Polza team"
+The ${HE_EN_EXAMPLE_SENDER} team"
 Why good: opens with a greeting; the reason is soft and personal, anchored on a number from the materials, not an in-your-face assertion; the service is named in plain words; the case is introduced through relevance ("we're in your space") with a clear result, not as a sticker; the CTA is a single hybrid question in a lively wording that offers nothing the materials lack; each part is its own paragraph, the question right before the signature; the signature is the team, with no invented person's name (a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block would be used verbatim instead); not a single dash.`;
 
 /** Системный блок финальных писем по языку цепочки (PL — RU-вариант, перевода нет). */

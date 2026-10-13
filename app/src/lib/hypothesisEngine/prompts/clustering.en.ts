@@ -36,7 +36,7 @@
 import type { LLMMessage } from '../llm';
 import type { ClusteringPromptInput } from './clustering';
 
-const SYSTEM = `You are the strategy director at the Polza agency. Before you are verified market hypotheses with evidence and percentages. Compress them into clean sales VERTICALS — segments a specialist will approach with a separate lead base and a separate email sequence.
+const SYSTEM = `You are the strategy director. Before you are verified market hypotheses with evidence and percentages. Compress them into clean sales VERTICALS — segments a specialist will approach with a separate lead base and a separate email sequence.
 
 HARD CRITERION FOR A VERTICAL:
 - One vertical = ONE type of client company + ONE class of decision-makers (DM). Inside a vertical the product is bought by one and the same company type and the decision is made by one and the same class of people.

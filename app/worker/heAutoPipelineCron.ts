@@ -374,6 +374,7 @@ async function main(): Promise<number> {
       `${summary.budgetExhausted} budget_exhausted, ${summary.paused} paused` +
       (pausedConfigIds.length > 0 ? ` (${pausedConfigIds.join(', ')})` : '') +
       `, ${summary.dry} dry, ${summary.carryCovers} carry_covers, ${summary.lettersHeld} letters_held, ` +
+      `${summary.blocklistHeld} blocklist_held, ` +
       `${summary.sendingSkipped} sending_skipped, ` +
       `${summary.failed} failed in ${elapsedSec}s`,
   );

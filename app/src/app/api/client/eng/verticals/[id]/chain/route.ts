@@ -21,6 +21,7 @@ import {
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
 import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
 import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
+import { heBrandInputRefusalEn, heBrandInputsBeforeEnqueue } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -71,6 +72,10 @@ async function findActiveChainJob(
 // Дедуп как у staff: активная chain-задача на эту вертикаль уже есть →
 // возвращаем её со статусом 200. Тем же ответом — проигравший гонки двух
 // постановок: 23505 от he_jobs_one_active_chain_per_vertical (20261010_0003).
+//
+// Поле брифа, которое промпт писем берёт дословно, называет наш бренд
+// (letterBrandGuard.heBrandInputsBeforeEnqueue) — 409 brand_input с полем
+// шага 1, до гейтов и постановки: стадия откажет до первого вызова модели.
 //
 // ГЕЙТ ПЛАТНЫХ ШАГОВ (requireEngPaidAccess, 'letters'): почта и потолок
 // расхода клиента — до потолка проекта и постановки. Перед ним — выключатель
@@ -125,6 +130,30 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     if ((ready ?? []).length > 0) return jsonError(LETTERS_EXIST, 409);
+
+    // Сайт, бриф и владелец проекта — проверке полей брифа (в owned.project их нет).
+    const { data: briefRow, error: briefErr } = await supabaseAdmin
+      .from('he_projects')
+      .select('website_url, brief, created_by')
+      .eq('id', owned.vertical.project_id as string)
+      .maybeSingle();
+    if (briefErr) {
+      return engServerError('client.eng.chain.project_read_failed', briefErr, LETTERS_START_FAILED, {
+        userId: result.auth.userId,
+        verticalId: id,
+      });
+    }
+    const brandInputs = await heBrandInputsBeforeEnqueue(supabaseAdmin, {
+      market: projectMarket(owned.project),
+      project: (briefRow ?? {}) as { website_url?: unknown; brief?: unknown; created_by?: unknown },
+      language,
+    });
+    if (brandInputs.length > 0) {
+      return NextResponse.json(
+        { error: heBrandInputRefusalEn(brandInputs, 'press «Launch» on step 3'), code: 'brand_input' },
+        { status: 409 },
+      );
+    }
 
     const switchRefusal = await engSendingSwitchRefusal(
       supabaseAdmin,

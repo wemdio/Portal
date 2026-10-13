@@ -121,6 +121,12 @@ import type { HeSearchProviderError } from '@/lib/hypothesisEngine/stages/search
 // чинит только команда (решение владельца 04.10.2026). Предикат — тот же, по
 // которому кабинет сворачивает причину в 'billing'/'configuration'.
 import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
+import {
+  HE_JOB_BRAND_INPUTS_KEY,
+  HE_JOB_UNPAID_BRAND_INPUT,
+  HE_JOB_UNPAID_REFUSAL_KEY,
+  heBrandInputRefusalOf,
+} from '@/lib/hypothesisEngine/letterBrandGuard';
 import { flushHeOpsAlerts, notifyHeClientStop } from '@/lib/hypothesisEngine/opsAlert';
 import type { HeOpsStopKind, HeOpsStopProvider } from '@/lib/hypothesisEngine/opsAlert';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
@@ -1124,12 +1130,13 @@ const STRANDED_PATH = process.env.HE_WORKER_STRANDED_PATH ?? '/tmp/hypothesis-en
 /**
  * Поля отказа, по которым failJob решает судьбу джобы. Все они читаются по
  * ДИСКРИМИНАНТУ, а не по классу (isHeJobInterruption, isHeJobTerminal,
- * heLlmFailureOf, heSearchRefusalOf), поэтому отказ, восстановленный из файла
+ * heBrandInputRefusalOf, heLlmFailureOf, heSearchRefusalOf), поэтому отказ, восстановленный из файла
  * простым Error с этими полями, классифицируется так же, как исходный.
  */
 const FAILURE_FIELDS = [
   'heJobInterruption',
   'heJobTerminal',
+  'heUnpaidRefusal',
   'heLlmFailure',
   'heSearchProvider',
   'kind',
@@ -3161,13 +3168,23 @@ async function writeJobFailure(
   const terminalProviderRefusal =
     llmFailure?.kind === 'billing' || llmFailure?.kind === 'configuration' || searchRefusal !== null;
   // Терминальный отказ стадии: повтор оплатит её заново и получит тот же ответ.
-  // Дискриминант heJobTerminal носят ДВА класса, и они разные новости:
+  // Дискриминант heJobTerminal носят ТРИ класса, и они разные новости:
   // HeJobResultWriteError («результат оплачен, но не сохранился» — здешний и
-  // тот, которым сборщик закрывает брошенную строку) и HeVocabEmptyError
+  // тот, которым сборщик закрывает брошенную строку), HeVocabEmptyError
   // (stages/vocab.ts: обязательный список словаря пуст или отсутствует и после
-  // повтора, платить за это трижды не за что).
+  // повтора, платить за это трижды не за что) и HeLetterBrandInputError
+  // (letterBrandGuard.ts: поле брифа клиента называет наш бренд — стадия писем
+  // отказала до первого платного вызова, повтор с тем же брифом откажет так же).
   // Поэтому ниже в лог уходит ИМЯ класса, а не выдумка про запись результата.
   const terminalStageFailure = isHeJobTerminal(err);
+  // Отказ за наш бренд в поле брифа ещё и БЕСПЛАТНЫЙ (heBrandInputRefusalOf —
+  // по дискриминанту): вызовов модели в этом прогоне не было, и попытка ему
+  // не засчитывается, а строка помечается в payload (HE_JOB_UNPAID_REFUSAL_KEY
+  // и поля брифа). По пометке тормоз писем (heTemplateGenerationBudget) и
+  // ночной гейт «цепочка уже падала» (autopilotReconcile) этот прогон не
+  // считают, а письмо об остановке рынка называет поле шага 1. Попытки,
+  // засчитанные ДО него (платные прогоны той же строки), остаются в attempts.
+  const unpaidRefusal = heBrandInputRefusalOf(err);
 
   // Прерывание (сторож простоя, рестарт воркера, обрыв чтения проекта до
   // стадии): работа не выполнялась, платить попыткой не за что. Признак —
@@ -3177,12 +3194,20 @@ async function writeJobFailure(
   const interrupted = isHeJobInterruption(err);
   const interruptions = interrupted ? heJobInterruptions(job.payload) + 1 : 0;
   const free = interrupted && interruptions <= HE_JOB_FREE_INTERRUPTIONS;
-  // attempts — число фейлов, а не клеймов: инкремент только здесь.
-  const nextAttempts = job.attempts + (free ? 0 : 1);
+  // attempts — число фейлов, а не клеймов: инкремент только здесь. Бесплатный
+  // отказ (unpaidRefusal) его не трогает — платить попыткой не за что.
+  const nextAttempts = job.attempts + (free || unpaidRefusal ? 0 : 1);
   const finalFail =
     !free && (terminalProviderRefusal || terminalStageFailure || nextAttempts >= MAX_ATTEMPTS);
   const pauseMs = rateLimited && !finalFail ? rateLimitPauseMs(llmFailure?.retryAfterMs) : 0;
-  if (terminalStageFailure) {
+  if (unpaidRefusal) {
+    log(
+      'error',
+      `Job ${job.id} (${job.stage}) terminal unpaid refusal (${err instanceof Error ? err.name : 'unknown'}) `
+        + `— попытка не засчитана (${job.attempts}/${MAX_ATTEMPTS}), повтор не назначается, строка помечена `
+        + `${HE_JOB_UNPAID_REFUSAL_KEY}=${HE_JOB_UNPAID_BRAND_INPUT}: ${msg}`,
+    );
+  } else if (terminalStageFailure) {
     log(
       'error',
       `Job ${job.id} (${job.stage}) terminal stage failure (${err instanceof Error ? err.name : 'unknown'}) `
@@ -3246,7 +3271,15 @@ async function writeJobFailure(
     ).toISOString();
     retryState.started_at = null;
   } else {
-    if (clearedPayload) retryState.payload = stripUnstorableJsonChars(clearedPayload);
+    if (unpaidRefusal) {
+      // Пометка бесплатного отказа (см. unpaidRefusal выше) — поверх payload
+      // джобы, серия прерываний закрыта как у обычного фейла.
+      retryState.payload = stripUnstorableJsonChars({
+        ...(clearedPayload ?? job.payload ?? {}),
+        [HE_JOB_UNPAID_REFUSAL_KEY]: HE_JOB_UNPAID_BRAND_INPUT,
+        [HE_JOB_BRAND_INPUTS_KEY]: unpaidRefusal.inputs,
+      });
+    } else if (clearedPayload) retryState.payload = stripUnstorableJsonChars(clearedPayload);
     if (pauseMs) {
       retryState.run_after = new Date(Date.now() + pauseMs).toISOString();
       retryState.started_at = null;

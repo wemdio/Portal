@@ -55,6 +55,7 @@ import {
   readHeEngAutoLaunchForProjects,
 } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { readHeEngSendingAccess } from '@/lib/hypothesisEngine/engSendingAccess';
+import { heBrandNeedsOwner, readHeBrandEngClient } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { engServerError } from '../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -529,13 +530,22 @@ export async function GET(req: NextRequest) {
   if (rewriteCandidates.length > 0) {
     const candidateRows = templateRows.filter((t) => rewriteCandidates.includes(str(t.id)));
     const candidateBaseIds = [...new Set(candidateRows.map((t) => str(t.base_id)).filter(Boolean))];
-    const [lettersRes, baseColumnsRes] = await Promise.all([
+    // Сайт и бриф проектов кандидатов — причине 'brand' признака (чужая
+    // компания в письмах, letterBrandGuard): без них признак видел бы только
+    // подстановки, а шаг 3 и ядро запуска — обе причины.
+    const candidateProjectIds = [
+      ...new Set(candidateRows.map((t) => projectOfVertical.get(str(t.vertical_id)) ?? '').filter(Boolean)),
+    ];
+    const [lettersRes, baseColumnsRes, identityRes] = await Promise.all([
       supabaseAdmin
         .from('he_templates')
         .select('id, letters, personalization_plan')
         .in('id', rewriteCandidates),
       candidateBaseIds.length > 0
         ? supabaseAdmin.from('he_bases').select('id, columns, sample_rows').in('id', candidateBaseIds)
+        : Promise.resolve({ data: [] as Array<Record<string, unknown>>, error: null }),
+      candidateProjectIds.length > 0
+        ? supabaseAdmin.from('he_projects').select('id, website_url, brief').in('id', candidateProjectIds)
         : Promise.resolve({ data: [] as Array<Record<string, unknown>>, error: null }),
     ]);
     if (lettersRes.error) {
@@ -548,18 +558,40 @@ export async function GET(req: NextRequest) {
         userId,
       });
     }
+    if (identityRes.error) {
+      return engServerError('client.eng.dashboard.project_identity_failed', identityRes.error, DASHBOARD_LOAD_FAILED, {
+        userId,
+      });
+    }
     const lettersById = new Map(
       (lettersRes.data ?? []).map((t) => [str((t as Record<string, unknown>).id), t as Record<string, unknown>]),
     );
     const gateBaseById = new Map(
       (baseColumnsRes.data ?? []).map((b) => [str((b as Record<string, unknown>).id), b as Record<string, unknown>]),
     );
+    const identityById = new Map(
+      (identityRes.data ?? []).map((p) => [str((p as Record<string, unknown>).id), p as Record<string, unknown>]),
+    );
+    // Владелец всех этих проектов — этот клиент: клиент ENG-кабинета — русские
+    // письма проверяются, как у запуска (letterBrandGuard). Профиль — только
+    // когда хоть у одного кандидата он меняет ответ.
+    const heEngClient = (lettersRes.data ?? []).some((t) => heBrandNeedsOwner((t as Record<string, unknown>).letters))
+      ? await readHeBrandEngClient(supabaseAdmin, userId)
+      : false;
     for (const t of candidateRows) {
       const extra = lettersById.get(str(t.id));
       // Строки шаблона нет во второй выборке (удалён между запросами) —
       // признак не ставим: шаблона, которому он адресован, уже нет.
       if (!extra) continue;
-      if (heTemplateNeedsRewrite({ ...t, ...extra }, gateBaseById.get(str(t.base_id)), 'us')) {
+      const identity = identityById.get(projectOfVertical.get(str(t.vertical_id)) ?? '');
+      if (
+        heTemplateNeedsRewrite(
+          { ...t, ...extra },
+          gateBaseById.get(str(t.base_id)),
+          'us',
+          identity ? { ...identity, heEngClient } : undefined,
+        )
+      ) {
         rewriteTemplateIds.add(str(t.id));
       }
     }

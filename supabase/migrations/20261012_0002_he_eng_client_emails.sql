@@ -36,8 +36,11 @@
 --                     на шаге 3), 'rewrite' («Rewrite letters»), 'try_again'
 --                     («Try again» на шаге 1), 'support', 'team_fix' (отказ,
 --                     который чинит команда, — деньги или ключ провайдера:
---                     сначала Support, потом кнопка этой остановки); null —
---                     письмо кнопку не называет. Решается по данным в момент
+--                     сначала Support, потом кнопка этой остановки),
+--                     'edit_brief' (поле брифа на шаге 1 называет наш бренд —
+--                     стадия писем отказала до вызова модели: сначала поправить
+--                     поле, потом кнопка этой остановки); null — письмо кнопку
+--                     не называет. Решается по данным в момент
 --                     заявки и читается повтором отправки — повтор называет
 --                     ту же кнопку; выключатель отправки аккаунта читается на
 --                     каждой попытке, и при выключенной отправке письмо
@@ -94,7 +97,7 @@ create table if not exists public.he_eng_client_emails (
                     'letters_need_rewrite', 'start_failed', 'needs_support', 'collect_stopped', 'autopilot_hold',
                     'letters_stopped', 'final_letters_stopped', 'check_stopped', 'rewrite_stopped'
                   )),
-  next_step       text check (next_step is null or next_step in ('launch', 'rewrite', 'try_again', 'support', 'team_fix')),
+  next_step       text check (next_step is null or next_step in ('launch', 'rewrite', 'try_again', 'support', 'team_fix', 'edit_brief')),
   created_at      timestamptz not null default now(),
   last_attempt_at timestamptz,
   sent_at         timestamptz,

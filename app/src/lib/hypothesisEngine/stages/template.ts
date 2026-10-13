@@ -25,7 +25,8 @@
  *     стадия не пишет.
  * До шага 1, без единого платного вызова: база читается только своего проекта,
  * пустая база (row_count 0) — отказ, а готовый шаблон базы возвращается как
- * есть (result.reused, расход 0) — см. findReusableTemplate про форс.
+ * есть (result.reused, расход 0) — см. findReusableTemplate про форс и про
+ * письма с чужой компанией (их не возвращает).
  * В промпты подмешиваются style_override из брифа (styleExample),
  * signature_override (дословная подпись отправителя) и winner-паттерны
  * датасета (best-effort); у EN — ещё слова клиента из брифа (offer_override,
@@ -57,6 +58,22 @@
  * откатывается, а снявший его отказ принимается, если не добавил
  * непроверенных чисел (lettersRegression); рерайт критика откатывается, если
  * гейт пропускал письма до него и не пропускает после.
+ * Письма 'us', когда клиент подтверждённо не мы (letterBrandGuard: хост сайта
+ * не наш; английские и польские — всегда, русские — у проекта клиента
+ * ENG-кабинета): чужая компания в письмах (наш бренд
+ * «Polza» / «OutreachOS» или вымышленная компания из примера EN-промпта) —
+ * провал того же рода, что гейт отправки. Её упоминания идут пунктами в
+ * фикс-проход (шаг 2c, ответ с бОльшим их числом не принимается), запускают
+ * тот же единственный повтор шага 2d (повтор, добавивший их, — откат),
+ * откатывают рерайт критика, который их добавил, а шаг 3b такой шаблон не
+ * пишет: стадия падает HeLetterBrandLeakError, не терминально, как
+ * HeTemplateOperatorGateError. Наш бренд в поле брифа, которое промпт берёт
+ * дословно (подпись, оффер, описание бизнеса), — отказ ДО первого платного
+ * вызова, HeLetterBrandInputError (терминально и бесплатно: попытку воркер не
+ * засчитывает). Готовый шаблон базы с чужой компанией в письмах стадия не
+ * переиспользует (findReusableTemplate) — пишет новые письма. Русские письма
+ * us-проекта агентского клиента staff-инструмента не проверяются (роль
+ * RU-промпта — «Polza»).
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
@@ -99,6 +116,20 @@ import {
   withHeEmptyCellFallbacks,
   type HeTemplateOperatorGateResult,
 } from '../templateOperatorGate';
+import {
+  HeLetterBrandInputError,
+  HeLetterBrandLeakError,
+  describeHeBrandInputLeaks,
+  describeHeBrandLeaks,
+  findHeBrandLeaks,
+  heBrandInputLeaks,
+  heBrandLeakFixItems,
+  heLetterBrandGuard,
+  heLetterBrandLeaks,
+  heTemplateBrandLeaks,
+  readHeBrandEngClient,
+  type HeBrandLeak,
+} from '../letterBrandGuard';
 import type {
   HeBase,
   HeChain,
@@ -515,6 +546,21 @@ function operatorIssuesHintEn(issues: string[]): string {
   );
 }
 
+/**
+ * Подсказка повтора шага 2d про чужую компанию в письмах ('us', проверка включена — letterBrandGuard):
+ * пункты heBrandLeakFixItems — что убрать и о ком писать вместо этого. Язык —
+ * язык генерации ('en' — английский, иначе русский). Идёт отдельным абзацем
+ * после подсказки по операторам (если она есть) — её текст не меняется.
+ */
+function brandLeakRetryHint(leaks: HeBrandLeak[], language: HeChainLanguage, clientCompany: string): string {
+  const items = heBrandLeakFixItems(leaks, language, clientCompany).map((i) => `- ${i.detail}`).join('\n');
+  return language === 'en'
+    ? `The template names a company that is not the sender:\n${items}\n\nFix each item as it says. ` +
+        `Return the whole template again, in the same format (---LETTER N--- / ---LETTER 1 B--- / ---SEGMENT: <when>---).`
+    : `В шаблоне назван не тот отправитель:\n${items}\n\nИсправь каждый пункт, как в нём сказано. ` +
+        `Верни шаблон заново, целиком, в том же формате (---LETTER N--- / ---LETTER 1 B--- / ---SEGMENT: <when>---).`;
+}
+
 /** Сколько проблем нашёл гейт отправки — мера «лучше/хуже» для повторов и рерайта. */
 function gateIssueCount(gate: HeTemplateOperatorGateResult): number {
   return gate.subjectUnresolved.length + gate.unbacked.length + gate.malformed.length + gate.emptyCells.length;
@@ -550,11 +596,21 @@ interface HeReusableTemplate {
  *
  * Сбой чтения бросаем: «не знаю, есть ли шаблон» — не «шаблона нет», и платная
  * генерация на догадке здесь ровно тот дефект, который чинится.
+ *
+ * Готовый шаблон, чьи письма называют чужую компанию (`leaksOf` не пуст —
+ * letterBrandGuard.heTemplateBrandLeaks: us-проект, клиент не мы, правило
+ * языка — шапка letterBrandGuard), не возвращается: такие письма ядро запуска откажет, и вернуть их
+ * значило бы не написать новых никогда. Берётся самый свежий без утечки среди
+ * последних REUSE_SCAN готовых; нет такого — генерация. Сам шаблон остаётся
+ * как есть ('failed' у he_templates пишет только роут «Rewrite letters»).
  */
+const REUSE_SCAN = 20;
+
 async function findReusableTemplate(
   ctx: HeStageContext,
   job: HeJob,
   baseId: string,
+  leaksOf: (letters: unknown) => HeBrandLeak[],
 ): Promise<HeReusableTemplate | null> {
   let query = ctx.supabase
     .from('he_templates')
@@ -568,9 +624,17 @@ async function findReusableTemplate(
     if (typeof job.created_at !== 'string' || job.created_at.length === 0) return null;
     query = query.gte('created_at', job.created_at);
   }
-  const { data, error } = await query.order('created_at', { ascending: false }).limit(1).maybeSingle();
+  const { data, error } = await query.order('created_at', { ascending: false }).limit(REUSE_SCAN);
   if (error) throw new Error(`he_templates reuse read: ${error.message}`);
-  return (data as HeReusableTemplate | null) ?? null;
+  for (const row of (data ?? []) as HeReusableTemplate[]) {
+    const leaks = leaksOf(row.letters);
+    if (leaks.length === 0) return row;
+    stageLog(
+      ctx,
+      `[template] готовый шаблон ${row.id} не переиспользуем: в письмах наш бренд или компания из примера, а клиент проекта — другая компания (${describeHeBrandLeaks(leaks, 3)})`,
+    );
+  }
+  return null;
 }
 
 export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -598,7 +662,21 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     throw new Error(`he_bases ${baseId}: в базе нет строк (row_count=${rowCount}) — шаблон по пустой базе не собираем`);
   }
 
-  const reusable = await findReusableTemplate(ctx, job, baseId);
+  // Проект — до переиспользования: готовый шаблон, чьи письма называют чужую
+  // компанию, стадия не возвращает (findReusableTemplate), а решает это хост
+  // сайта и бриф проекта. Строки проекта нет — база ушла вместе с ним
+  // (he_bases.project_id on delete cascade), и чтение базы выше уже упало.
+  const project = await readProject(ctx.supabase, job.project_id);
+  const market = ctx.market ?? projectMarket(project);
+  // Владелец проекта — клиент ENG-кабинета (letterBrandGuard.heEngClient): его
+  // письма проверяются на любом языке. Одно чтение профиля на джобу 'us'.
+  const brandProject = {
+    ...project,
+    heEngClient: market === 'us' ? await readHeBrandEngClient(ctx.supabase, project.created_by) : false,
+  };
+  const reusable = await findReusableTemplate(ctx, job, baseId, (letters) =>
+    heTemplateBrandLeaks(market, brandProject, letters),
+  );
   if (reusable) {
     stageLog(
       ctx,
@@ -682,7 +760,6 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // Стиль клиента из брифа проекта (style_override, рядом с offer_override) →
   // styleExample в промпты плана и финальных писем. Подпись отправителя
   // (signature_override) → signatureOverride в план, письма и рерайт.
-  const project = await readProject(ctx.supabase, job.project_id);
   const brief = (project.brief ?? {}) as Record<string, unknown>;
   const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
   const signatureOverride =
@@ -695,11 +772,11 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
   // генерим без паттернов, стадию это не валит.
-  // Рынок обязателен: словарь SEGMENT_LABEL_KEYWORDS содержит и английские
-  // токены (saas, logistics, retail), поэтому ENG-вертикаль матчится на
-  // RU-сегменты, и в английскую генерацию уезжают русские темы кампаний
-  // вместе с русским текстом самого блока (renderWinnerPatternsBlock).
-  const market = ctx.market ?? projectMarket(project);
+  // Рынок обязателен (market — выше, у переиспользования): словарь
+  // SEGMENT_LABEL_KEYWORDS содержит и английские токены (saas, logistics,
+  // retail), поэтому ENG-вертикаль матчится на RU-сегменты, и в английскую
+  // генерацию уезжают русские темы кампаний вместе с русским текстом самого
+  // блока (renderWinnerPatternsBlock).
   let winnerPatterns: HeWinnerPattern[] = [];
   try {
     const terms = [vertical.name, ...(Array.isArray(vertical.synonyms) ? vertical.synonyms : [])];
@@ -731,6 +808,23 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
 
   // Язык всех промптов стадии наследуется от цепочки вертикали (he_chains.language).
   const language = (chain.language === 'en' || chain.language === 'pl' ? chain.language : 'ru') as HeChainLanguage;
+
+  // Письма 'us': чужая компания в письмах (letterBrandGuard). Список не пуст,
+  // только когда клиент подтверждённо не мы (хост сайта проекта не наш) и
+  // письма английские или польские — или владелец клиент ENG-кабинета (тогда и
+  // русские). RU и наш собственный проект — пустой список всегда.
+  const brandGuard = heLetterBrandGuard(market, brandProject, language);
+  const brandLeaksOf = (ls: HeChainLetterAB[]): HeBrandLeak[] => heLetterBrandLeaks(brandGuard, ls);
+  // Наш бренд в поле брифа, которое промпт берёт дословно: письма с ним не
+  // пройдут проверку ни в одном прогоне — отказ до первого платного вызова (план).
+  const brandInputs = heBrandInputLeaks(brandGuard, brief);
+  if (brandInputs.length) {
+    stageLog(
+      ctx,
+      `[template] поле брифа называет наш бренд, а клиент проекта — другая компания: генерацию не начинаем — ${describeHeBrandInputLeaks(brandInputs)}`,
+    );
+    throw new HeLetterBrandInputError('template', brandInputs);
+  }
 
   // Шаг 1: план 85/15.
   const plan = await callLLMWithSchema(
@@ -919,15 +1013,24 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const unverifiedCount = (violations: HeLetterRuleViolation[]) =>
     violations.filter((v) => v.rule === 'unverified_number').length;
   const ruleViolations = collectRuleViolations(letters);
-  if (ruleViolations.length > 0) {
-    stageLog(ctx, `[template] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
+  // 'us', проверка включена (letterBrandGuard): чужая компания в письмах клиента (brandLeaksOf; иначе пусто) запускает
+  // этот же фикс-проход своими пунктами — без него шаг 3b шаблон не запишет.
+  const brandLeaksBeforeFix = brandLeaksOf(letters);
+  if (ruleViolations.length > 0 || brandLeaksBeforeFix.length > 0) {
+    stageLog(
+      ctx,
+      `[template] детерминированный контроль: ${ruleViolations.length} нарушений${
+        brandLeaksBeforeFix.length ? `, чужая компания в письмах: ${describeHeBrandLeaks(brandLeaksBeforeFix)}` : ''
+      } — фикс-проход`,
+    );
     // Принятие фикса: то же число писем и не меньше B/сегментных вариантов
     // (модель могла молча выкинуть блоки ---LETTER N B--- / ---SEGMENT---).
     // EN — и не больше непроверенных чисел, чем в письмах до него: фикс
     // переписывает шаблон целиком и мог вписать цифру, которой нет в
     // материалах, а повтор и рерайт ниже сравнивают числа уже с письмами
     // после фикса — такая цифра ушла бы получателю (rule_violations — только
-    // предупреждение). Вызов фикса уже оплачен; новых вызовов нет.
+    // предупреждение). 'us', проверка включена — и не больше упоминаний чужой компании, чем до
+    // него. Вызов фикса уже оплачен; новых вызовов нет.
     const countVariants = (ls: HeChainLetterAB[]) => ({
       b: ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0),
       seg: ls.reduce((acc, l) => acc + (l.segment_variants?.length ?? 0), 0),
@@ -938,7 +1041,14 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         [
           ...messages,
           { role: 'assistant', content: llm.text },
-          { role: 'user', content: buildChainRuleFixHint(ruleViolations, language, { hasSegmentBlocks: true }) },
+          {
+            role: 'user',
+            content: buildChainRuleFixHint(
+              [...ruleViolations, ...heBrandLeakFixItems(brandLeaksBeforeFix, language, brandGuard.clientCompany)],
+              language,
+              { hasSegmentBlocks: true },
+            ),
+          },
         ],
         { model, maxTokens: 16384 },
       );
@@ -954,6 +1064,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         const remaining = collectRuleViolations(rebuilt.letters);
         const numbersBefore = language === 'en' ? unverifiedCount(ruleViolations) : 0;
         const numbersAfter = language === 'en' ? unverifiedCount(remaining) : 0;
+        const brandAfterFix = brandLeaksOf(rebuilt.letters);
         if (numbersAfter > numbersBefore) {
           stageLog(
             ctx,
@@ -962,6 +1073,11 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
               .slice(0, 3)
               .map((v) => v.detail)
               .join('; ')}`,
+          );
+        } else if (brandAfterFix.length > brandLeaksBeforeFix.length) {
+          stageLog(
+            ctx,
+            `[template] фикс-проход: чужая компания в письмах ${brandAfterFix.length} раз (было ${brandLeaksBeforeFix.length}) — оставляем исходные письма; ${describeHeBrandLeaks(brandAfterFix, 3)}`,
           );
         } else {
           llm = fix;
@@ -975,6 +1091,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
                 .map((v) => v.detail)
                 .join('; ')}`,
             );
+          }
+          if (brandAfterFix.length > 0) {
+            stageLog(ctx, `[template] после фикс-прохода чужая компания в письмах осталась: ${describeHeBrandLeaks(brandAfterFix)}`);
           }
         }
       } else {
@@ -1067,6 +1186,10 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // по детерминированным проверкам; null — принять новые письма. Рерайт
   // критика (шаг 2e) судится своим, более узким правилом
   // (rewriteRollbackReason). Порядок:
+  //  0) 'us', проверка включена — чужая компания в письмах (brandLeaksOf; иначе 0). Такой же провал
+  //     шага 3b, как гейт: повтор, после которого упоминаний больше, — откат;
+  //     меньше — принимаем, если только повтор не сломал гейт (п. 1) и не
+  //     добавил непроверенных чисел — то же правило, что у гейта.
   //  1) 'us' — гейт отправки. Провал на шаге 3b стоит всей оплаченной
   //     генерации, поэтому письма, которые он пропускает, лучше: проходил до и
   //     не проходит после — откат; не проходил и проходит — принимаем, если
@@ -1078,11 +1201,18 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   //     сначала непроверенные числа (их больше — откат, даже если всего
   //     нарушений столько же или меньше; меньше — принимаем), затем общее
   //     число; RU/PL — общее число, как раньше.
-  type LetterStanding = { gate: HeTemplateOperatorGateResult | null; rules: number; numbers: number };
+  type LetterStanding = {
+    gate: HeTemplateOperatorGateResult | null;
+    /** Упоминаний чужой компании (только когда проверка включена — letterBrandGuard; иначе 0). */
+    brand: number;
+    rules: number;
+    numbers: number;
+  };
   const standingOf = (ls: HeChainLetterAB[], gate: HeTemplateOperatorGateResult | null): LetterStanding => {
     const violations = collectRuleViolations(ls);
     return {
       gate,
+      brand: brandLeaksOf(ls).length,
       rules: violations.length,
       numbers: unverifiedCount(violations),
     };
@@ -1090,10 +1220,12 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const lettersStanding = (ls: HeChainLetterAB[]) => standingOf(ls, market === 'us' ? sendGate(ls).gate : null);
   type LettersRegression =
     | { kind: 'gate'; was: number; now: number }
+    | { kind: 'brand'; was: number; now: number }
     | { kind: 'numbers'; was: number; now: number }
     | { kind: 'rules'; was: number; now: number };
   const lettersRegression = (before: LetterStanding, after: LetterStanding): LettersRegression | null => {
     const numbersUp = after.numbers > before.numbers;
+    if (after.brand > before.brand) return { kind: 'brand', was: before.brand, now: after.brand };
     if (before.gate && after.gate && before.gate.ok !== after.gate.ok) {
       if (before.gate.ok) return { kind: 'gate', was: 0, now: gateIssueCount(after.gate) };
       return numbersUp ? { kind: 'numbers', was: before.numbers, now: after.numbers } : null;
@@ -1102,6 +1234,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       const was = gateIssueCount(before.gate);
       const now = gateIssueCount(after.gate);
       if (now > was) return { kind: 'gate', was, now };
+    }
+    if (after.brand < before.brand) {
+      return numbersUp ? { kind: 'numbers', was: before.numbers, now: after.numbers } : null;
     }
     if (language === 'en' && after.numbers !== before.numbers) {
       return numbersUp ? { kind: 'numbers', was: before.numbers, now: after.numbers } : null;
@@ -1122,8 +1257,12 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // следующей платной генерации, и шаблон не лёг бы ни разу. RU — как раньше.
   const gateBeforeRetry = market === 'us' ? sendGate(letters).gate : null;
   const refusingGate = gateBeforeRetry && !gateBeforeRetry.ok ? gateBeforeRetry : null;
+  // 'us', проверка включена (letterBrandGuard): чужая компания, которую фикс-проход (шаг 2c) не снял, запускает тот же
+  // единственный повтор, со своим абзацем подсказки: иначе шаг 3b шаблон не
+  // запишет, и воркер купит всю генерацию заново. RU — пустой список.
+  const brandBeforeRetry = brandLeaksOf(letters);
 
-  if (mappingIssues.length || refusingGate) {
+  if (mappingIssues.length || refusingGate || brandBeforeRetry.length) {
     if (mappingIssues.length) {
       stageLog(ctx, `[template] operator_mapping: ${mappingIssues.length} проблем — retry с фидбэком`);
     }
@@ -1133,24 +1272,33 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         `[template] гейт отправки отказал бы этим письмам — retry с фидбэком: ${describeHeTemplateOperatorGate(refusingGate, 6)}`,
       );
     }
+    if (brandBeforeRetry.length) {
+      stageLog(ctx, `[template] чужая компания в письмах — retry с фидбэком: ${describeHeBrandLeaks(brandBeforeRetry)}`);
+    }
     // Принимаем регенерацию только с тем же числом писем и не хуже прежней
     // (lettersRegression, с регламентом): retry переписывает шаблон целиком и
     // мог вернуть тире/лишние CTA уже после фикс-прохода, а у 'us' — сломать
-    // гейт отправки.
+    // гейт отправки или вписать чужую компанию.
     const preRetryStanding = standingOf(letters, gateBeforeRetry);
     const preRetry = { letters, ops, operatorMapping, mappingIssues };
-    const hint =
-      language === 'en'
-        ? operatorIssuesHintEn([
-            ...validateOperatorMapping(operatorMapping, columns, plan.data, {
-              subjectOperators: ops.subjectOperators,
-              language,
-            }),
-            ...(refusingGate ? heTemplateOperatorGateProblemsEn(refusingGate) : []),
-          ])
-        : operatorIssuesHint(
-            refusingGate ? [...mappingIssues, describeHeTemplateOperatorGate(refusingGate, 12)] : mappingIssues,
-          );
+    const operatorHint =
+      mappingIssues.length || refusingGate
+        ? language === 'en'
+          ? operatorIssuesHintEn([
+              ...validateOperatorMapping(operatorMapping, columns, plan.data, {
+                subjectOperators: ops.subjectOperators,
+                language,
+              }),
+              ...(refusingGate ? heTemplateOperatorGateProblemsEn(refusingGate) : []),
+            ])
+          : operatorIssuesHint(
+              refusingGate ? [...mappingIssues, describeHeTemplateOperatorGate(refusingGate, 12)] : mappingIssues,
+            )
+        : '';
+    const brandHint = brandBeforeRetry.length
+      ? brandLeakRetryHint(brandBeforeRetry, language, brandGuard.clientCompany)
+      : '';
+    const hint = [operatorHint, brandHint].filter(Boolean).join('\n\n');
     const retryLlm = await callLLMText(
       [
         ...messages,
@@ -1170,7 +1318,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
             ? `[template] retry по операторам вернул ${worse.now} нарушений регламента (было ${worse.was}) — оставляем прежние письма`
             : worse.kind === 'numbers'
               ? `[template] retry по операторам вернул ${worse.now} непроверенных чисел (было ${worse.was}) — оставляем прежние письма`
-              : `[template] retry по операторам: гейт отправки нашёл ${worse.now} проблем (было ${worse.was}) — оставляем прежние письма`,
+              : worse.kind === 'brand'
+                ? `[template] retry по операторам: чужая компания в письмах ${worse.now} раз (было ${worse.was}) — оставляем прежние письма`
+                : `[template] retry по операторам: гейт отправки нашёл ${worse.now} проблем (было ${worse.was}) — оставляем прежние письма`,
         );
         ({ letters, ops, operatorMapping, mappingIssues } = preRetry);
       } else {
@@ -1202,9 +1352,11 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   //
   // Фикс-проход был до рерайта, а сам рерайт регламент не проходит. Поэтому
   // рерайт сверяется с письмами до него — бесплатно, детерминированными
-  // проверками — и откатывается (сам он уже оплачен) только в двух случаях:
+  // проверками — и откатывается (сам он уже оплачен) только в трёх случаях:
   //  а) 'us': гейт отправки письма до него пропускал, а после него — нет
   //     (провал на шаге 3b стоил бы всей оплаченной генерации);
+  //  а′) 'us', проверка включена (letterBrandGuard): упоминаний чужой компании (brandLeaksOf) после него больше, чем
+  //     до него — тот же провал шага 3b;
   //  б) EN: чисел не из материалов (unverified_number, с сегментными
   //     вариантами) стало больше — письмо не должно утверждать того, чего нет
   //     в материалах.
@@ -1223,6 +1375,11 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       if (!gateAfter.ok) {
         return `гейт отправки письма до него пропускал, после него — ${gateIssueCount(gateAfter)} проблем`;
       }
+    }
+    if (market === 'us') {
+      const was = brandLeaksOf(before).length;
+      const now = brandLeaksOf(after);
+      if (now.length > was) return `чужая компания в письмах ${now.length} раз (было ${was}): ${describeHeBrandLeaks(now, 3)}`;
     }
     if (language === 'en') {
       const was = unverifiedCount(collectRuleViolations(before));
@@ -1380,10 +1537,32 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
           .join('; ')}`,
       );
     }
+    // Наш бренд или компания из примера в английских письмах, а клиент
+    // подтверждённо не мы (letterBrandGuard) — такой же провал, как гейт:
+    // шаблон не пишется, ошибка не терминальная.
+    // Проверяются письма, которые ляжут в he_templates (после починки
+    // приветствия). Клиента не с чем сравнить (ни сайта, ни имени компании) —
+    // проверки нет, но то, что письма называют такое слово, видно в логе.
+    const finalBrandLeaks = brandLeaksOf(letters);
+    if (finalBrandLeaks.length) {
+      stageLog(
+        ctx,
+        `[template] в письмах назван наш бренд или компания из примера, а клиент проекта — другая компания: шаблон не сохраняем — ${describeHeBrandLeaks(finalBrandLeaks, 20)}`,
+      );
+    } else if (language === 'en' && brandGuard.ownership === 'unknown') {
+      const named = findHeBrandLeaks(letters);
+      if (named.length) {
+        stageLog(
+          ctx,
+          `[template] письма называют наш бренд или компанию из примера (${describeHeBrandLeaks(named, 6)}), но ни сайта, ни имени компании клиента нет — сравнить не с чем, шаблон не держим`,
+        );
+      }
+    }
     if (!gate.ok) {
       stageLog(ctx, `[template] гейт отправки: шаблон не сохраняем — ${describeHeTemplateOperatorGate(gate, 20)}`);
       throw new HeTemplateOperatorGateError(gate);
     }
+    if (finalBrandLeaks.length) throw new HeLetterBrandLeakError('template', finalBrandLeaks);
   }
 
   const segmentWarnings = validateSegmentVariants(letters, analysis);

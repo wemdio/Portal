@@ -96,6 +96,7 @@ import { classifyHeClientError, type HeClientErrorCode } from './clientErrors';
 import { heCollectStopRepeats } from '@/components/client-eng/clientFailureText';
 import { defaultChainLanguageForMarket, normalizeHeMarket } from './market';
 import { flushHeOpsAlerts } from './opsAlert';
+import { heBrandInputsBeforeEnqueue, heJobUnpaidBrandInput, type HeBrandInputLeak } from './letterBrandGuard';
 import { createHeSpendGate } from './spendCeiling';
 import {
   AUTOPILOT_BASE_LIMIT,
@@ -205,6 +206,12 @@ export interface HeAutopilotVerticalDetail {
   baseId?: string;
   /** Входные числа тормоза писем (только у reason='letters_exhausted'). */
   letters?: HeAutopilotLettersBudget;
+  /**
+   * Только у reason='brand_input': поля брифа, которые называют наш бренд
+   * (letterBrandGuard.heBrandInputsBeforeEnqueue), — их называет клиенту
+   * ответ «Launch».
+   */
+  brandInputs?: HeBrandInputLeak[];
   /** Текст сбоя для лога вызывающего; наружу, клиенту, не уходит. */
   message?: string;
 }
@@ -300,7 +307,11 @@ function payloadField(payload: unknown, key: 'base_id' | 'vertical_id'): string 
  *     клиентом (см. п. 2 докблока файла: иначе повтор платного анализа шёл бы
  *     каждую ночь); сорвавшаяся постановка ремонта сборку НЕ ставит;
  *   база analyzed, шаблона и активной template-джобы нет, бюджет поколения не
- *     исчерпан → template.
+ *     исчерпан → template;
+ *   поле брифа, которое промпт писем берёт дословно, называет наш бренд
+ *     (letterBrandGuard.heBrandInputsBeforeEnqueue) → ни chain, ни template:
+ *     причина 'brand_input' с полями в details, паузы нет (стадия откажет до
+ *     первого вызова модели — постановка была бы пустой).
  *
  * Идемпотентно: повторный вызов ничего не дублирует, а подхватывает
  * рассинхрон (ручные отмены, упавшие постановки, пропавший дочейн воркера).
@@ -349,7 +360,9 @@ export async function reconcileHeAutopilotProject(
   // из этого снапшота + дедупов внутри enqueueHeBaseCollect (гонки с воркером
   // и ручными кнопками закрываются там и unique-индексом collecting-базы).
   const [chainsRes, hypothesesRes, basesRes, templatesRes, jobsRes] = await Promise.all([
-    supabase.from('he_chains').select('id, vertical_id, status').in('vertical_id', verticalIds),
+    // language и created_at — языку итоговых писем (самая новая цепочка
+    // вертикали, как берёт её стадия template) для проверки полей брифа.
+    supabase.from('he_chains').select('id, vertical_id, status, language, created_at').in('vertical_id', verticalIds),
     supabase.from('he_hypotheses').select('id, vertical_id, status').eq('project_id', projectId),
     supabase
       .from('he_bases')
@@ -441,6 +454,11 @@ export async function reconcileHeAutopilotProject(
       const cancelled = row.status === 'cancelled';
       if (row.stage === 'chain') {
         const verticalId = payloadField(row.payload, 'vertical_id');
+        // Бесплатный отказ за наш бренд в поле брифа (пометка воркера,
+        // heJobUnpaidBrandInput) — не «цепочка уже падала»: за неё не платили.
+        // Повтор держит проверка полей брифа ниже (тот же отказ до постановки),
+        // а у рынка, которого ещё не начинали, — 'not_started'.
+        if (!cancelled && heJobUnpaidBrandInput(row.payload) !== null) continue;
         if (verticalId) (cancelled ? cancelledChainVerticals : failedChainVerticals).add(verticalId);
       } else if (row.stage === 'template') {
         const baseId = payloadField(row.payload, 'base_id');
@@ -478,6 +496,24 @@ export async function reconcileHeAutopilotProject(
   }
 
   const language = defaultChainLanguageForMarket(normalizeHeMarket(project.market));
+
+  /**
+   * Поля брифа, которые промпт писем берёт дословно и которые называют наш
+   * бренд (letterBrandGuard.heBrandInputsBeforeEnqueue): стадия писем
+   * откажет до первого вызова модели, поэтому ни цепочку, ни итоговые письма
+   * этот проход тогда не ставит — вертикаль уходит в details с причиной
+   * 'brand_input' и полями (паузы проекта нет). `lettersLanguage` — язык
+   * генерации: цепочка — язык её постановки, итоговые письма — язык самой
+   * новой цепочки вертикали (как берёт её стадия template). Сбой чтения
+   * профиля владельца — проверка как у клиента ENG-кабинета (fail-closed).
+   */
+  const brandProject = { website_url: project.website_url, brief: project.brief, created_by: project.created_by };
+  const brandInputsFor = (lettersLanguage: string): Promise<HeBrandInputLeak[]> =>
+    heBrandInputsBeforeEnqueue(supabase, {
+      market: normalizeHeMarket(project.market),
+      project: brandProject,
+      language: lettersLanguage,
+    });
 
   const counts: HeAutopilotReconcileCounts = {
     chainsEnqueued: 0,
@@ -582,6 +618,7 @@ export async function reconcileHeAutopilotProject(
     let skipStopCode: HeClientErrorCode | undefined;
     let skipMessage: string | undefined;
     let skipLetters: HeAutopilotLettersBudget | undefined;
+    let skipBrandInputs: HeBrandInputLeak[] | undefined;
 
     // Автопилот гонит только клиент-выбранные вертикали: без единой accepted
     // гипотезы вертикаль пропускаем (клиент её не выбирал — сборки/письма/
@@ -618,7 +655,11 @@ export async function reconcileHeAutopilotProject(
         // Рынок ещё не начинали (ни одной строки цепочки): с нуля его
         // начинает только нажатие клиента (докблок файла).
         skipReason = 'not_started';
+      } else if ((skipBrandInputs = await brandInputsFor(language)).length > 0) {
+        // Наш бренд в поле брифа — цепочку не ставим (brandInputsFor выше).
+        skipReason = 'brand_input';
       } else {
+        skipBrandInputs = undefined;
         const stop = (await stopUnlessAutopilotOn(verticalId)) ?? (await stopOnSpendCeiling(verticalId, 'chain'));
         if (stop) return stop;
         const { error: chainErr } = await supabase.from('he_jobs').insert({
@@ -882,6 +923,14 @@ export async function reconcileHeAutopilotProject(
               counts,
             };
           }
+          // Язык итоговых писем — самая новая цепочка вертикали (как у стадии
+          // template); у вертикали с готовой цепочкой она в снапшоте есть.
+          const newestChain = chains
+            .filter((c) => c.vertical_id === verticalId)
+            .sort((a, b) => Date.parse(asString((b as Row).created_at)) - Date.parse(asString((a as Row).created_at)))[0] as
+            | Row
+            | undefined;
+          const chainLanguage = asString(newestChain?.language);
           if (!budget.allowed) {
             skipReason = 'letters_exhausted';
             // Числа решения — вместе с причиной: иначе тормоз считает их и
@@ -891,7 +940,14 @@ export async function reconcileHeAutopilotProject(
               paidRuns: budget.paidRuns,
               generationAt: budget.generationAt,
             };
+          } else if (
+            (skipBrandInputs = await brandInputsFor(chainLanguage === 'en' || chainLanguage === 'pl' ? chainLanguage : 'ru'))
+              .length > 0
+          ) {
+            // Наш бренд в поле брифа — итоговые письма не ставим (brandInputsFor выше).
+            skipReason = 'brand_input';
           } else {
+            skipBrandInputs = undefined;
             const stop =
               (await stopUnlessAutopilotOn(verticalId, analyzedBaseId))
               ?? (await stopOnSpendCeiling(verticalId, 'template'));
@@ -948,6 +1004,7 @@ export async function reconcileHeAutopilotProject(
         reason,
         ...(skipStopCode ? { stopCode: skipStopCode } : {}),
         ...(skipLetters ? { letters: skipLetters } : {}),
+        ...(reason === 'brand_input' && skipBrandInputs ? { brandInputs: skipBrandInputs } : {}),
         ...(skipMessage ? { message: skipMessage } : {}),
       });
       pause = worstPause(pause, pauseForReconcileSkip(reason));
@@ -1167,7 +1224,9 @@ export async function runHeAutopilotReconcilePass(
   const readCandidates = async (from: number, to: number): Promise<Row[]> => {
     const { data, error } = await supabase
       .from('he_projects')
-      .select('id, status, market, autopilot, created_by')
+      // website_url и brief — проверке полей брифа до постановки писем
+      // (letterBrandGuard.heBrandInputsBeforeEnqueue, reconcileHeAutopilotProject).
+      .select('id, status, market, autopilot, created_by, website_url, brief')
       .eq('autopilot', true)
       .eq('market', 'us')
       .eq('status', 'researched')

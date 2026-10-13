@@ -126,6 +126,10 @@
  * запуска и force-перезапуск:
  *  - письма с подстановкой, которую база не наполнит (templateOperatorGate),
  *    — отказ 409 'template_unresolved_operators';
+ *  - письма, которые называют наш бренд или вымышленную компанию из примера
+ *    промпта, а клиент проекта не мы (letterBrandGuard: английские и
+ *    польские — всегда, русские — у проекта клиента ENG-кабинета), — отказ
+ *    409 'template_brand_leak';
  *  - пресет без ящиков отправки — отказ 409 'preset_no_mailboxes';
  *  - окно отправки новых кампаний — выбор клиента, иначе дефолт кабинета, а не
  *    часы пресета (launchSchedule.ts).
@@ -147,6 +151,7 @@ import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
+import type { CampaignCreatePayload } from '@/lib/instantly/types';
 import { InstantlyApiError, isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
@@ -170,6 +175,7 @@ import {
 import { describeHeLaunchWindow, resolveHeLaunchSendingWindow, type HeLaunchWindowSource } from './launchSchedule';
 import { projectMarket, type HeMarket } from './market';
 import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
+import { describeHeBrandLeaks, heBrandNeedsOwner, heTemplateBrandLeaks, readHeBrandEngClient } from './letterBrandGuard';
 import { HE_RESEARCH_STAGES } from './researchJob';
 import {
   HE_ENG_CAMPAIGN_NAMING,
@@ -341,6 +347,31 @@ const SEGMENT_CLASSIFY_INCOMPLETE_EN =
   'We could not work out which segment of these letters fits too many of the addresses in this launch, so ' +
   'it was stopped before anything was sent or changed. You can try again later; if it keeps happening, ' +
   'contact Support.';
+
+/**
+ * Отказ шага 4b″ за чужую компанию в письмах (template_brand_leak). Тексты —
+ * вне словаря MESSAGES: его RU-блок сверяется байт в байт. EN — клиенту, без
+ * самого слова (письма — его, а не повод печатать наш бренд), с той же
+ * кнопкой, что у отказа за подстановки: «Rewrite letters» рынка на шаге 3
+ * (новые письма проходят эту проверку до сохранения); кнопки нет (бюджет
+ * писем исчерпан, отправка аккаунта выключена, запуск незакончен) — Support.
+ * RU — сотруднику, запускающему us-шаблон из RU-инструмента, со сводкой.
+ */
+const TEMPLATE_BRAND_LEAK_TEXT: { en: string; ru: (detail: string) => string } = {
+  en:
+    'These letters mention a brand or company name that is not yours, so this launch was stopped before ' +
+    'anything was sent or changed. Press «Rewrite letters» on this market in step 3 to get new letters; if ' +
+    'the button is not there, message Support.',
+  // Новая сборка проходит ту же проверку до сохранения (стадии template и
+  // chain — то же правило языка, letterBrandGuard), но у клиента
+  // ENG-кабинета русская или польская цепочка пишется ролью «Polza» и
+  // проверку проходить не будет — поэтому сначала английская цепочка.
+  ru: (detail) =>
+    'Запуск остановлен: письма шаблона us-проекта называют наш бренд или вымышленную компанию из примера ' +
+    `промпта, а клиент проекта — другая компания (${detail}). Ничего не отправлено и не изменено. ` +
+    'Пересоберите шаблон — новая сборка проходит эту проверку до сохранения; если цепочка вертикали не на ' +
+    'английском, сначала перегенерируйте её на английском.',
+};
 
 /** Аренда запуска в минутах — для текстов: число в них обязано следовать константе. */
 const LEASE_MINUTES = Math.round(HE_LAUNCH_LEASE_MS / 60_000);
@@ -597,8 +628,9 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'Message Support to have this audience collected again — a new collection keeps one address per row ' +
       'with its own check result.',
     blocklistLoadFailed:
-      'Your blocked-contacts list could not be read, so the launch was stopped before any campaign was created. ' +
-      'Please try again in a minute.',
+      'Your «Do not contact» list could not be read, so the launch was stopped before any campaign was created. ' +
+      'Try again in a minute. If it stops again, open «Do not contact»: a list over 10,000 addresses stops every ' +
+      'launch until it is shortened. Otherwise, message Support.',
     allContactsBlocked: 'Every address in this base is on your blocked-contacts list, so there is nobody to write to.',
     tooManyLeads: (count) =>
       `Too many leads for a wizard launch: ${count.toLocaleString('en-US')}. Maximum is ${HE_LAUNCH_MAX_LEADS.toLocaleString('en-US')}.`,
@@ -970,6 +1002,10 @@ export type HeLaunchRefusalCode = (typeof HE_LAUNCH_REFUSAL_CODES)[number];
  * `code` рядом с текстом. Все три — ДО первого вызова рассыльщика:
  *  - template_unresolved_operators (409) — в письмах подстановка, которую база
  *    не наполнит (templateOperatorGate.checkHeTemplateOperators);
+ *  - template_brand_leak (409) — письма называют наш бренд или вымышленную
+ *    компанию из примера промпта, а клиент проекта не мы
+ *    (letterBrandGuard.heTemplateBrandLeaks: английские и польские — всегда,
+ *    русские — у проекта клиента ENG-кабинета);
  *  - preset_no_mailboxes (409) — в пресете нет ни одного ящика отправки;
  *  - segment_classification_incomplete (503) — классификатор сегментов не
  *    ответил по доле строк выше HE_SEGMENT_HOLD_REFUSE_SHARE. Только у
@@ -980,12 +1016,16 @@ export type HeLaunchRefusalCode = (typeof HE_LAUNCH_REFUSAL_CODES)[number];
  * segment_classification_incomplete (api-client.ts, EngStepReview.tsx: пресет
  * и классификатор общие у всей пачки «Launch all», и следующий шаблон получил
  * бы тот же отказ); 503 роут кабинета отдаёт с кодом, читая его
- * heLaunchOutcomeCode (ниже). template_unresolved_operators кабинет по коду не
- * различает: такие шаблоны он в «Launch all» не берёт (признак проекции
- * `needs_rewrite`).
+ * heLaunchOutcomeCode (ниже). template_unresolved_operators и
+ * template_brand_leak кабинет по коду не различает: такие шаблоны он в «Launch
+ * all» не берёт (признак проекции `needs_rewrite` — heTemplateRewriteReasons с
+ * причинами 'placeholders' и 'brand'). Автозапуск (engAutoLaunch) держит
+ * template_brand_leak общей веткой неизвестного отказа: 'needs_support',
+ * письмо клиенту и алерт команде.
  */
 export const HE_LAUNCH_PREFLIGHT_REFUSAL_CODES = [
   'template_unresolved_operators',
+  'template_brand_leak',
   'preset_no_mailboxes',
   'segment_classification_incomplete',
 ] as const;
@@ -1157,7 +1197,19 @@ export interface HeTemplateLaunchInput {
    * — ровно как до 09.10.2026. Новые кампании создаются сразу с этим окном.
    */
   sendingWindow?: ClientLaunchScheduleOverride | null;
+  /**
+   * Настройки кампании поверх пресета (шаг 6): с ними создаётся каждая новая
+   * кампания этой попытки — основная, сегментная и замена удалённой у
+   * рассыльщика, — и их же получает PATCH пустой кампании прошлой попытки.
+   * Передаёт только ENG-кабинет (engClientLaunch: настройки ящиков пула,
+   * engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS). Не передано (staff-роут,
+   * RU) — payload и PATCH прежние, настройки — из пресета.
+   */
+  campaignSettings?: HeLaunchCampaignSettings;
 }
+
+/** Настройки кампании, которые вызывающий ядра может задать поверх пресета. */
+export type HeLaunchCampaignSettings = Pick<CampaignCreatePayload, 'stop_on_reply' | 'open_tracking' | 'link_tracking'>;
 
 export interface HeTemplateLaunchOutcome {
   status: number;
@@ -1166,6 +1218,7 @@ export interface HeTemplateLaunchOutcome {
 
 export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise<HeTemplateLaunchOutcome> {
   const { portalDb, instantlyDb, templateId, presetId, force, userId, scopeClientUserId, locale, eventPrefix } = input;
+  const campaignSettings = input.campaignSettings;
   const t = MESSAGES[locale];
 
   // 1. Шаблон.
@@ -1294,9 +1347,11 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //     тоже новый отказ — но только на сбое БД, до первого вызова рассыльщика,
   //     и повтор безопасен. Строки проекта нет — база ушла вместе с ним
   //     (he_bases.project_id on delete cascade): «база не найдена».
+  //     Сайт и бриф — проверке писем на чужую компанию (шаг 4b″): чей это
+  //     проект, решают хост сайта и бриф (letterBrandGuard).
   const { data: projectRow, error: projectErr } = await portalDb
     .from('he_projects')
-    .select('market')
+    .select('market, website_url, brief, created_by')
     .eq('id', base.project_id)
     .maybeSingle();
   if (projectErr) {
@@ -1421,6 +1476,39 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       return {
         status: 409,
         body: { error: t.templateOperatorsUnresolved(detail), code: 'template_unresolved_operators' satisfies HeLaunchPreflightRefusalCode },
+      };
+    }
+
+    // ЧУЖАЯ КОМПАНИЯ В ПИСЬМАХ (тот же шаг 4b″): письма называют наш бренд или
+    // вымышленную компанию из примера промпта, а клиент проекта не мы
+    // (letterBrandGuard: хост сайта и бриф; язык — по самим письмам; русские —
+    // только у проекта клиента ENG-кабинета, и его профиль читается, только
+    // когда он меняет ответ — heBrandNeedsOwner). Гейт стадии template такие
+    // письма в 'ready' не пускает, но шаблоны, записанные до него, лежат
+    // 'ready' — поэтому и здесь, на всех путях этого ядра. Бесплатно, до
+    // классификатора и рассыльщика; force не снимает.
+    const brandRow = projectRow as { website_url?: unknown; brief?: unknown; created_by?: unknown };
+    const brandLeaks = heTemplateBrandLeaks(
+      market,
+      {
+        ...brandRow,
+        heEngClient: heBrandNeedsOwner(template.letters) ? await readHeBrandEngClient(portalDb, brandRow.created_by) : false,
+      },
+      template.letters,
+    );
+    if (brandLeaks.length) {
+      const detail = describeHeBrandLeaks(brandLeaks);
+      await logAudit(
+        `${eventPrefix}.refused_template_brand_leak`,
+        'Launch refused: template letters name another company (our brand or a prompt example)',
+        { userId, templateId, baseId: base.id, projectId: base.project_id, leaks: brandLeaks.length, detail },
+      );
+      return {
+        status: 409,
+        body: {
+          error: locale === 'en' ? TEMPLATE_BRAND_LEAK_TEXT.en : TEMPLATE_BRAND_LEAK_TEXT.ru(detail),
+          code: 'template_brand_leak' satisfies HeLaunchPreflightRefusalCode,
+        },
       };
     }
   }
@@ -2491,11 +2579,15 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     try {
       // Окно (шаг 4b⁗) — в момент создания: кампания не существует ни
       // секунды с часами пресета. Нет окна (RU без явного) — вызов прежний.
-      const payload = buildCampaignPayloadFromPreset({
+      const presetPayload = buildCampaignPayloadFromPreset({
         preset,
         sequence: { name: campaignName, steps: sequence.steps },
         ...(sendingWindow ? { scheduleOverride: sendingWindow } : {}),
       });
+      // Настройки вызывающего (вход campaignSettings, только ENG-кабинет) —
+      // тоже в момент создания, поверх значений пресета. Без них payload — тот
+      // же объект, что раньше.
+      const payload = campaignSettings ? { ...presetPayload, ...campaignSettings } : presetPayload;
 
       // Новая кампания: в запись — СРАЗУ, как узнан id, и только потом PATCH
       // цепочки. Иначе отказ PATCH'а оставлял созданную кампанию вне записи, и
@@ -2560,12 +2652,17 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
           // Окно — тем же PATCH'ем: пустую кампанию прошлой попытки (у
           // us-проекта до 09.10.2026 — с часами пресета) нечем было бы иначе
           // привести к окну этого запуска на пути без кабинета.
+          // Настройки вызывающего (campaignSettings) — тоже здесь: пустую
+          // кампанию мог создать путь без них (staff-роут с тем же пресетом).
+          // Кампания с подтверждёнными адресами их не получает — остаётся с
+          // настройками своего создания.
           try {
             await updateCampaign(
               reuse.campaign_id,
               {
                 sequences: payload.sequences,
                 ...(sendingWindow ? { campaign_schedule: payload.campaign_schedule } : {}),
+                ...(campaignSettings ?? {}),
               },
               instantlyRequestOptions,
             );

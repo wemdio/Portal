@@ -72,8 +72,11 @@ import {
   engChainDraftText,
   engEarlierBaseStopText,
   engLaunchSendingText,
+  engLettersBrandInputText,
+  engLettersBrandInputs,
   engStageErrorText,
   engTemplateNeedsRewriteText,
+  engTemplateRewriteReasons,
 } from './engText';
 import { EngPaidAccessNotice, EngResendLinkControls, EngSupportText } from './EngPaidAccess';
 import { EngSendingBlock } from './EngSending';
@@ -263,13 +266,23 @@ function launchResultText(res: EngProjectLaunchResponse): { text: string; held: 
         ? ' Work on this project is now paused on our side, so nothing else was started; our team has been notified.'
         : ` ${engAutopilotHoldText(holdCode)}`
       : ` ${parts.length > 0 ? 'Not everything could be started. ' : ''}${engAutopilotHoldText(holdCode)}`;
+  // Рынки, которым письма не поставлены: поле брифа шага 1 называет наш бренд
+  // (реконсилер, причина 'brand_input') — поле и что сделать.
+  const brandMarkets = res.brand_input_markets ?? 0;
+  const brandNote =
+    brandMarkets > 0
+      ? ` The letters for ${plural(brandMarkets, 'market', 'markets')} were not started. ${engLettersBrandInputText(
+          res.brand_inputs ?? [],
+          'launch_again',
+        )}`
+      : '';
   const head =
     parts.length > 0
-      ? `Started: ${parts.join(' · ')}.${holdNote}`
-      : held
+      ? `Started: ${parts.join(' · ')}.${holdNote}${brandNote}`
+      : held || brandMarkets > 0
         ? holdCode === 'spend_paused'
-          ? holdNote.trim()
-          : `Nothing new was started.${holdNote}`
+          ? `${holdNote.trim()}${brandNote}`
+          : `Nothing new was started.${holdNote}${brandNote}`
         : 'Nothing new was started — everything «Launch» can start is already in progress or done; each market’s card below says what it is waiting for.';
   // Обещание письма — ровно то, что шлёт engClientMail при включённом
   // автозапуске: старт отправки (и ожидание проверки аккаунта) и остановки,
@@ -281,7 +294,10 @@ function launchResultText(res: EngProjectLaunchResponse): { text: string; held: 
         ? ' Each market starts sending by itself once its final letters are ready and our team has finished the one-time check of your account. We’ll email you when sending starts, or if something stops and needs you.'
         : ' Each market starts sending by itself once its final letters are ready. We’ll email you when sending starts, or if something stops and needs you.'
       : ' Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.';
-  return { text: `${head}${againNote}${tail}`, held: held || Boolean(holdCode) || (parts.length === 0 && again > 0) };
+  return {
+    text: `${head}${againNote}${tail}`,
+    held: held || Boolean(holdCode) || (parts.length === 0 && again > 0) || brandMarkets > 0,
+  };
 }
 
 /**
@@ -298,7 +314,13 @@ function launchMoreResultText(
   const started = (res.markets_started ?? []).map(nameOf);
   const already = (res.markets_already_started ?? []).map(nameOf);
   const holdCode = res.autopilot_hold_code;
+  // Рынки, которым письма не поставлены: поле брифа шага 1 называет наш бренд.
+  const brandNote =
+    (res.brand_input_markets ?? 0) > 0 ? ` ${engLettersBrandInputText(res.brand_inputs ?? [], 'launch_again')}` : '';
   if (started.length === 0) {
+    if (brandNote) {
+      return { text: `Nothing new was started.${brandNote}${holdCode ? ` ${engAutopilotHoldText(holdCode)}` : ''}`, held: true };
+    }
     if (holdCode) return { text: `Nothing new was started. ${engAutopilotHoldText(holdCode)}`, held: true };
     return {
       text:
@@ -316,7 +338,7 @@ function launchMoreResultText(
       : ' We’ll email you when sending starts, or if something stops and needs you.';
   const alreadyNote = already.length > 0 ? ` ${namesList(already)} had already started.` : '';
   const holdNote = holdCode ? ` Not everything could be started. ${engAutopilotHoldText(holdCode)}` : '';
-  return { text: `${head}${how}${tail}${alreadyNote}${holdNote}`, held: Boolean(holdCode) };
+  return { text: `${head}${how}${tail}${alreadyNote}${holdNote}${brandNote}`, held: Boolean(holdCode) || brandNote !== '' };
 }
 
 /* ── Рынок: что с ним сейчас ── */
@@ -745,6 +767,12 @@ function retiredLine(
   tries: { left: number; max: number } | { error: true } | null,
   teamFix: boolean,
   sendingOff: boolean,
+  /**
+   * Наш бренд в полях брифа шага 1 (`letters_brand_inputs`): роут переписки
+   * откажет 409 brand_input, пока поле его называет, — фраза сначала зовёт
+   * поправить поле, потом «Rewrite letters».
+   */
+  brandInputs: ReturnType<typeof engLettersBrandInputs> = [],
 ): MarketLine {
   const head = 'New final letters for this market were not written, so nothing was sent from it.';
   if (tries && 'left' in tries && tries.left <= 0) {
@@ -770,6 +798,9 @@ function retiredLine(
       tone: 'amber',
       actions: ['rewrite'],
     };
+  }
+  if (brandInputs.length > 0) {
+    return { text: `${head} ${engLettersBrandInputText(brandInputs, 'rewrite')}`, tone: 'amber', actions: ['rewrite'] };
   }
   if (tries && 'left' in tries) {
     return {
@@ -897,10 +928,21 @@ function preparingLine(
      * вверху шага.
      */
     launchBlocked: boolean;
+    /**
+     * Наш бренд в полях брифа шага 1 (`letters_brand_inputs` проекта): пока
+     * это так, письма рынка не пишутся (стадии отказывают до платных вызовов),
+     * и «Launch» без правки поля их не напишет — остановка писем говорит, что
+     * поправить.
+     */
+    brandInputs: ReturnType<typeof engLettersBrandInputs>;
   },
 ): MarketLine | null {
   const { base } = view;
   const teamFixNext = ctx.launchBlocked ? ENG_TEAM_FIX_STOP_EN : TEAM_FIX_LAUNCH_NEXT;
+  const brandInputLine: MarketLine | null =
+    ctx.brandInputs.length > 0 && !ctx.spendPaused
+      ? { text: engLettersBrandInputText(ctx.brandInputs, ctx.launchBlocked ? 'none' : 'launch'), tone: 'amber', actions: [] }
+      : null;
   if (view.templateJob) return { text: 'Writing the final letters…', tone: 'muted', spinner: true, actions: [] };
   if (base) {
     // Идущую сборку описывает её собственный прогресс (CollectProgress).
@@ -915,6 +957,13 @@ function preparingLine(
           tone: 'amber',
           actions: [],
         };
+      }
+      // Итоговые письма «Launch» ставит, только пока бюджет писем не исчерпан —
+      // фраза с запасным Support, как у строки ниже.
+      if (brandInputLine && ctx.teamFix !== 'final_letters') {
+        return ctx.launchBlocked
+          ? brandInputLine
+          : { ...brandInputLine, text: engLettersBrandInputText(ctx.brandInputs, 'launch_or_support') };
       }
       return {
         text: ctx.spendPaused
@@ -933,6 +982,7 @@ function preparingLine(
   }
   if (view.chainJob) return { text: 'Writing the letters…', tone: 'muted', spinner: true, actions: [] };
   if (view.chainStopped) {
+    if (brandInputLine && ctx.teamFix !== 'letters') return brandInputLine;
     return {
       text: ctx.spendPaused
         ? `Writing the letters stopped before it finished. ${SPEND_PAUSED_NEXT}`
@@ -954,6 +1004,9 @@ function preparingLine(
         : { text: 'The letters are written. Press «Launch» above to collect contacts for this market.', tone: 'muted', actions: [] };
   }
   if (view.selected && ctx.researched) {
+    // Наш бренд в поле брифа: «Launch» письма этого рынка не поставит, пока
+    // поле не поправлено (реконсилер, причина 'brand_input') — фраза называет поле.
+    if (brandInputLine) return brandInputLine;
     return ctx.spendPaused
       ? { text: `Not started yet. ${SPEND_PAUSED_NEXT}`, tone: 'muted', actions: [] }
       : ctx.launchBlocked
@@ -1040,6 +1093,9 @@ function MarketCard({
     template !== undefined &&
     template.status === 'ready' &&
     (engTemplateNeedsRewrite(template) || row?.code === 'letters_need_rewrite');
+  /** Причины `needs_rewrite` (подстановки / чужая компания) и наш бренд в полях брифа шага 1. */
+  const rewriteReasons = template ? engTemplateRewriteReasons(template) : null;
+  const brandInputs = engLettersBrandInputs(detail.project);
   const dots = marketDots(view);
   /**
    * Отправка аккаунта выключена сотрудником ('revoked'; так и после
@@ -1057,7 +1113,7 @@ function MarketCard({
   if (launch) {
     if (incomplete) {
       if (needsRewrite) {
-        line = { text: engTemplateNeedsRewriteText('unfinished'), tone: 'amber', actions: [] };
+        line = { text: engTemplateNeedsRewriteText('unfinished', false, rewriteReasons), tone: 'amber', actions: [] };
       } else if (autoOn && row && (row.state === 'waiting' || row.state === 'running')) {
         line = autoLaunchLine(row, true, sendingAccess);
       } else if (row?.state === 'running') {
@@ -1121,8 +1177,8 @@ function MarketCard({
     if (needsRewrite) {
       // «Rewrite letters» под выключенной отправкой аккаунта откажет — без кнопки.
       line = launchBlocked
-        ? { text: engTemplateNeedsRewriteText('none', true), tone: 'red', actions: [] }
-        : { text: engTemplateNeedsRewriteText('none'), tone: 'amber', actions: ['rewrite'] };
+        ? { text: engTemplateNeedsRewriteText('none', true, rewriteReasons), tone: 'red', actions: [] }
+        : { text: engTemplateNeedsRewriteText('none', false, rewriteReasons, brandInputs), tone: 'amber', actions: ['rewrite'] };
     } else if (row?.state === 'done' && row.code === 'needs_support') {
       // Запуск дошёл до ядра, но записи о запуске у шаблона нет (её запись не
       // легла — 'launch_problem'): кампании могли быть созданы и стоят на
@@ -1155,7 +1211,7 @@ function MarketCard({
             tone: 'amber',
             actions: [],
           }
-        : retiredLine(retiredTries, teamFix === 'rewrite', launchBlocked);
+        : retiredLine(retiredTries, teamFix === 'rewrite', launchBlocked, brandInputs);
   } else {
     line = preparingLine(view, {
       autopilotOn: detail.project.autopilot === true,
@@ -1164,6 +1220,7 @@ function MarketCard({
       teamFix,
       moreLabel,
       launchBlocked,
+      brandInputs,
     });
   }
   // «Launch now» откажет выключатель отправки аккаунта — строка без кнопки.
