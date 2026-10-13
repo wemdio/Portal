@@ -53,6 +53,7 @@ import { InstantlyApiError } from '@/lib/instantly/errors';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { runClientLaunch } from '@/lib/clientLaunch/runLaunch';
 import { createVeDeliveryExclusionGuard, withVeDeliveryCompanyIdentity } from '@/lib/verticalEngineV2/projectExclusionDelivery';
+import { mapBaseRowsToLeads } from '@/lib/verticalEngineV2/launchHandoff';
 
 const leads = [
   { email: 'one@example.com', company_name: 'One', custom_variables: { domain: 'example.com', score: '1001' } },
@@ -191,6 +192,23 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     expect(createLeadsMock.mock.calls[0][0]).toEqual([{ email: 'keep@gmail.com' }]);
     // Exact email checks need no source-base or identity-recovery queries.
     expect(emailOnlyDb.selects.every(call => call.table === 've_project_exclusions')).toBe(true);
+
+    // An operator may rename the original corporate email. Its domain must
+    // survive mapping when a different column provides the actual recipient.
+    const raw = { 'Почта': 'person@gmail.com', email: 'info@excluded-company.ru' };
+    const mapped = mapBaseRowsToLeads({ rows: [raw], columns: ['Почта', 'email'],
+      operatorMapping: [{ operator: 'backupEmail', column: 'email', matched: true }] });
+    expect(mapped.leads[0].email).toBe('person@gmail.com');
+    expect(mapped.leads[0].custom_variables).toMatchObject({ backupEmail: 'info@excluded-company.ru' });
+    createLeadsMock.mockClear();
+    const preservedIdentity = await appendLeadsToClientCampaign({ ...capacityInput,
+      leads: [withVeDeliveryCompanyIdentity(mapped.leads[0], raw),
+        withVeDeliveryCompanyIdentity({ email: 'other@gmail.com' }, {})],
+      prepareProviderChunk: createVeDeliveryExclusionGuard(legacyDb as never, 'legacy-project'),
+    });
+    expect(preservedIdentity).toMatchObject({ accepted: 1, skipped: 1, acceptedIndexes: [1], skippedIndexes: [0], attemptedIndexes: [1] });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
+    expect(createLeadsMock.mock.calls[0][0]).toEqual([{ email: 'other@gmail.com' }]);
   });
 
   it('continues with the untouched tail when workspace blocklist rejections leave free slots', async () => {

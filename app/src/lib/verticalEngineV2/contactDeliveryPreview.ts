@@ -6,7 +6,7 @@ import {
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
-import { filterVeProjectExcludedRows, loadVeProjectExclusions, matchVeProjectExclusion, type VeProjectExclusions } from './projectExclusions';
+import { filterVeProjectExcludedRows, loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow, type VeProjectExclusions } from './projectExclusions';
 import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
 import { ContactDeliveryAnalyticsUnavailableError, loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
@@ -311,9 +311,8 @@ export async function buildVeContactDeliveryPreview(
   let exclusions: VeProjectExclusions;
   try { exclusions = await loadVeProjectExclusions(portalDb, base.project_id); }
   catch { return outcome(503, 'VE_PROJECT_EXCLUSIONS_UNAVAILABLE', 'Не удалось проверить исключения проекта. Попробуйте ещё раз.'); }
-  const policyCandidates = currentValidation.snapshot.audience.rows.map((row, index) => ({
-    ...row, email: currentValidation.snapshot.audience.leads[index].email,
-  }));
+  const policyCandidates = currentValidation.snapshot.audience.rows.map((row, index) =>
+    veProjectExclusionRow(row, currentValidation.snapshot.audience.leads[index].email));
   const policyAudience = filterVeProjectExcludedRows(policyCandidates, exclusions);
   const allowedRows = new Set(policyAudience.kept);
   const candidateLeads = filterBlockedLeads(

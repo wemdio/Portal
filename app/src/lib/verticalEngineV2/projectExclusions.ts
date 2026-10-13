@@ -155,6 +155,13 @@ export function getVeProjectExclusionIdentity(row: Record<string, unknown>): { i
   return { inns: [...identity.inns], domains: [...identity.domains] };
 }
 
+/** The selected recipient may come from an alias column. Preserve every known
+ * company identifier before replacing email, while exact-email rules continue
+ * to inspect only the selected recipient. This metadata is private. */
+export function veProjectExclusionRow(row: Record<string, unknown> | null | undefined, email: string): Record<string, unknown> {
+  return { ...row, email, _ve_company_identity: getVeProjectExclusionIdentity(row ?? {}) };
+}
+
 const compiledRules = new WeakMap<VeProjectExclusions, { inns: Set<string>; domains: Set<string>; emails: Set<string> }>();
 function compiled(rules: VeProjectExclusions) {
   let result = compiledRules.get(rules);

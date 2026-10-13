@@ -3,7 +3,7 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { findEmailColumn, mapBaseRowsToLeads } from './launchHandoff';
 import { prepareSegmentationAudience } from './segmentationAudit';
 import { projectCompanyNames } from './companyNames';
-import { getVeProjectExclusionIdentity, loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
+import { getVeProjectExclusionIdentity, loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 
 type Row = Record<string, unknown>;
 type Identity = ReturnType<typeof getVeProjectExclusionIdentity>;
@@ -130,13 +130,14 @@ export async function loadVeVerifiedContactsExport(
       const email = emailColumn ? emailCell(row[emailColumn]) : '';
       if (!email) continue;
       facts.observed.add(email);
-      const identity = getVeProjectExclusionIdentity({ ...row, email });
+      const policyRow = veProjectExclusionRow(row, email);
+      const identity = getVeProjectExclusionIdentity(policyRow);
       const previous = facts.identities.get(email);
       if (previous && !sameIdentity(previous, identity)) ambiguousEmails.add(email);
       facts.identities.set(email, identity);
       // Remember this even if quality now rejects the source: an old aliased
       // delivery payload must not resurrect its known excluded company.
-      if (matchVeProjectExclusion({ ...row, email }, policy)) {
+      if (matchVeProjectExclusion(policyRow, policy)) {
         facts.blocked.add(email);
         if (includeContacts) blockedEmails.add(email);
       }
@@ -146,8 +147,9 @@ export async function loadVeVerifiedContactsExport(
     const visible = projectCompanyNames(audience.rows);
     audience.rows.forEach((row, index) => {
       const email = audience.leads[index].email.trim().toLowerCase();
+      const policyRow = veProjectExclusionRow(row, email);
       facts.ready.add(email);
-      if (matchVeProjectExclusion({ ...row, email }, policy)) {
+      if (matchVeProjectExclusion(policyRow, policy)) {
         facts.blocked.add(email);
         if (includeContacts) blockedEmails.add(email);
       }
@@ -156,7 +158,7 @@ export async function loadVeVerifiedContactsExport(
       // Newer source bases win duplicate email presentation; never merge
       // arbitrary fields from different companies sharing a mailbox.
       if (!contacts.has(email)) contacts.set(email, { row: { ...publicCells(visible[index], columns), email },
-        identity: getVeProjectExclusionIdentity({ ...row, email }) });
+        identity: getVeProjectExclusionIdentity(policyRow) });
     });
     baseFacts.set(baseId, facts);
     return facts;
@@ -216,7 +218,7 @@ export async function loadVeVerifiedContactsExport(
         if (!facts) continue;
         const identity = combinedIdentity(getVeProjectExclusionIdentity(entry.lead_payload), facts.identities.get(email));
         if (facts.blocked.has(email)
-          || matchVeProjectExclusion({ ...entry.lead_payload, email, _ve_company_identity: identity }, policy)) blockedEmails.add(email);
+          || matchVeProjectExclusion(veProjectExclusionRow({ ...entry.lead_payload, _ve_company_identity: identity }, email), policy)) blockedEmails.add(email);
         // A current explicit rejection wins over its old launch snapshot. A lone
         // skipped snapshot can also be a permanent provider/invalid-email refusal.
         if (entry.status === 'skipped' || (facts.observed.has(email) && !facts.ready.has(email))) continue;

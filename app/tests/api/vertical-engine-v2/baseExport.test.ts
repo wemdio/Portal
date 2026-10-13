@@ -303,6 +303,20 @@ describe('Vertical Engine v2 base CSV export', () => {
     for (const removed of ['fresh@new-company.ru', 'uploaded@archive.ru', 'lead-1@example.com']) expect(emailCsv).not.toContain(removed);
     for (const kept of ['uncertain@archive.ru', 'lead-2@example.com', 'next-day@example.com']) expect(emailCsv).toContain(kept);
 
+    seedAllContacts();
+    await mockPortalDb.from('ve_bases').insert({ id: 'two-email-columns', project_id: EXPORT_PROJECT,
+      hypothesis_id: EXPORT_HYPOTHESIS, source: 'auto', created_at: SAVED_AT, columns: ['Почта', 'email'],
+      data: [{ 'Почта': 'person@gmail.com', email: 'info@blocked.ru', _email_status: 'ok' }] });
+    const domainCsv = await (await GET_ALL_CONTACTS(allContactsRequest(), allContactsContext())).text();
+    expect(domainCsv).not.toContain('person@gmail.com');
+    await mockPortalDb.from('ve_project_exclusions').update({ revision: 2, inns: [], domains: [], emails: ['info@blocked.ru'] }).eq('project_id', EXPORT_PROJECT);
+    const recipientOnly = await GET_ALL_CONTACTS(allContactsRequest(), allContactsContext());
+    expect(recipientOnly.status).toBe(200);
+    const recipientCsv = await recipientOnly.text();
+    expect(recipientCsv).toContain('person@gmail.com');
+    expect(recipientCsv).not.toContain('_ve_company_identity');
+    expect(recipientCsv).not.toContain('[object Object]');
+
     // Aliased source columns and immutable daily history preserve their cells,
     // while old vertical-wide bases contribute only the owned delivery rows.
     seedAllContacts();

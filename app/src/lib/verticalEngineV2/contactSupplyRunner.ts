@@ -7,7 +7,7 @@ import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
 import { buildContactSupplyRequests } from './contactSupplyPlanner';
 import { parseExactNonNegativeContactCount } from './contactDeliveryPreview';
 import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDeliveryInventory';
-import { loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
+import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
 import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
 import { buildSegmentationLaunchGroups } from './segmentationAudit';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
@@ -326,7 +326,7 @@ export async function runProjectContactSupply(input: {
       const allowed = group.leadIndices.filter((index) => {
         const email = validation.snapshot.audience.leads[index].email.trim().toLowerCase();
         return !context.blocked.has(email) && !context.existingEmails.has(email)
-          && !matchVeProjectExclusion({ ...validation.snapshot.audience.rows[index], email }, exclusions);
+          && !matchVeProjectExclusion(veProjectExclusionRow(validation.snapshot.audience.rows[index], email), exclusions);
       });
       if (!allowed.length) continue;
       const matches = campaigns.filter((campaign) => (campaign.segment ?? null) === group.segment);

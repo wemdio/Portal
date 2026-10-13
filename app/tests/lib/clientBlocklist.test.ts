@@ -22,7 +22,7 @@ import {
 } from '@/lib/clientBlocklist/domainPolicy';
 import {
   filterVeProjectExcludedRows, getVeProjectExclusionIdentity, loadVeProjectExclusions,
-  matchVeProjectExclusion, normalizeVeExclusionDomain, validateVeProjectExclusionInput,
+  matchVeProjectExclusion, normalizeVeExclusionDomain, validateVeProjectExclusionInput, veProjectExclusionRow,
   type VeProjectExclusions,
 } from '@/lib/verticalEngineV2/projectExclusions';
 
@@ -91,6 +91,21 @@ describe('client company-domain policy', () => {
     // into an exclusion. Plus tags and local-part dots retain their identity.
     const emailRules: VeProjectExclusions = { projectId: 've-project', revision: 2,
       inns: [], domains: [], emails: ['person@gmail.com', 'ops+paid@company.ru'], updated_at: null };
+    // Selecting a personal recipient from another column must preserve the
+    // company's original domain without blocking every address of that company.
+    const multiEmailRow = { 'Почта': 'person@gmail.com', email: 'info@company.ru',
+      _ve_company_identity: { inns: ['1234567890'], domains: ['previous.test'] } };
+    const projected = veProjectExclusionRow(multiEmailRow, 'person@gmail.com');
+    expect(matchVeProjectExclusion(projected, rules)).toBe('domain');
+    expect(matchVeProjectExclusion(projected, emailRules)).toBe('email');
+    expect(matchVeProjectExclusion(projected, { ...emailRules, emails: ['info@company.ru'] })).toBeNull();
+    expect(getVeProjectExclusionIdentity(projected)).toEqual({ inns: ['1234567890'], domains: ['company.ru', 'previous.test'] });
+    expect(projected._ve_company_identity).not.toHaveProperty('emails');
+    expect(multiEmailRow.email).toBe('info@company.ru');
+    // Recovery can have a saved recipient without its former source row.
+    expect(veProjectExclusionRow(undefined, 'person@gmail.com')).toEqual({
+      email: 'person@gmail.com', _ve_company_identity: { inns: [], domains: [] },
+    });
     for (const email of ['person@gmail.com', '  PERSON@GMAIL.COM ', 'OPS+PAID@COMPANY.RU']) {
       expect(matchVeProjectExclusion({ email }, emailRules)).toBe('email');
     }

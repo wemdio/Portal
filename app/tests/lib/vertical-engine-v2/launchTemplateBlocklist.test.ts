@@ -321,6 +321,20 @@ describe('Vertical Engine v2 initial launch client blocklist', () => {
       expect.objectContaining({ email_normalized: 'allowed@example.test' }),
     ]);
     expect(mockCreateLeads).not.toHaveBeenCalled();
+
+    mockValidateStoredAuditSnapshot.mockReturnValue({ ...validation, snapshot: { ...validation.snapshot,
+      audience: { ...validation.snapshot.audience, rows: [
+        { 'Почта': leads[0].email, email: 'info@blocked.test' },
+        { email: leads[1].email },
+      ] },
+    } });
+    const domainExcluded = await launch({ blockedEmails: [], projectExclusions: { inns: [], domains: ['blocked.test'] } });
+    expect(domainExcluded.outcome.status).toBe(200);
+    expect(domainExcluded.outcome.body.project_excluded_contacts).toBe(1);
+    expect(domainExcluded.portal.rpcCalls.at(-1)?.params?.p_drip_rows).toEqual([
+      expect.objectContaining({ email_normalized: 'allowed@example.test' }),
+    ]);
+    expect(mockCreateLeads).not.toHaveBeenCalled();
   });
 
   it('fails closed before any Instantly mutation when the client blocklist cannot be read', async () => {

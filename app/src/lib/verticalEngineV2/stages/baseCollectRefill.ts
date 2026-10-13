@@ -36,7 +36,7 @@ import {
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
-import { loadVeProjectExclusions, matchVeProjectExclusion } from '../projectExclusions';
+import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from '../projectExclusions';
 import { createVeDeliveryExclusionGuard, withVeDeliveryCompanyIdentity } from '../projectExclusionDelivery';
 import { isCompanyNameReady } from '../companyNames';
 import { isVeRelevanceReady } from '../relevanceDecision';
@@ -519,7 +519,7 @@ export async function runVeRefillAppend(args: {
     const { kept: clientAllowed, blockedCount } = filterBlockedLeads(leads, blockedSet);
     runStats.skipped_blocklist = blockedCount;
     const exclusions = await loadVeProjectExclusions(ctx.supabase, job.project_id);
-    const kept = clientAllowed.filter(lead => !matchVeProjectExclusion({ ...sourceRowByLead.get(lead), email: lead.email }, exclusions));
+    const kept = clientAllowed.filter(lead => !matchVeProjectExclusion(veProjectExclusionRow(sourceRowByLead.get(lead) ?? {}, lead.email), exclusions));
     runStats.skipped_project_exclusions = clientAllowed.length - kept.length;
 
     // 5. Дневной cap проекта резервируется атомарно в БД. Обычный read spent
