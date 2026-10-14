@@ -661,6 +661,7 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
             template={selectedTemplate}
             base={selectedBase}
             jobs={jobs}
+            market={project?.market}
             onBuildTemplate={handleBuildTemplate}
           />
         );

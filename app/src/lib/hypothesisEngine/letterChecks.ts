@@ -14,13 +14,30 @@
  * Мелкие числа (<10 без %): пропускаем — «2 недели», «3–5 встреч» это
  * санкционированные регламентом конструкции, не рыночные факты.
  *
- * Язык 'en' (кабинет ENG, market 'us') меняет только своё: тексты detail —
- * по-английски (они уходят модели фикс-подсказкой посреди английских писем),
- * приветствие «Good evening» засчитывается, числа читаются по-английски
- * (запятая — разделитель тысяч), номер письма в detail берётся из
- * letterIndex. RU и PL проверяются байт-в-байт как раньше. Отдельно —
- * checkLetterParagraphs: абзацы EN-письма, только предупреждение.
+ * Английские правила ENG-кабинета действуют ТОЛЬКО у английских писем проекта
+ * рынка 'us' (heUsEnglishLetters: язык 'en' И рынок 'us', рынок передаёт
+ * стадия): тексты detail — по-английски (они уходят модели фикс-подсказкой
+ * посреди английских писем), приветствие «Good evening» засчитывается, числа
+ * читаются по-английски (запятая — разделитель тысяч), номер письма в detail
+ * берётся из letterIndex, и только у них есть checkLetterParagraphs (абзацы,
+ * только предупреждение). Язык 'en' — ещё не 'us': английскую цепочку
+ * выбирает и сотрудник staff-инструмента у проекта рынка 'ru' (шаг 3), и её
+ * письма, как и RU/PL, проверяются байт-в-байт как до переноса ENG
+ * (решение владельца 14.10.2026 «Как было»). Рынок не передан — тоже как до
+ * переноса.
  */
+
+import type { HeMarket } from './market';
+
+/**
+ * Английские письма проекта рынка 'us' (ENG-кабинет) — единственный случай, где
+ * письма проверяются и пишутся по правилам переноса ENG. Английская цепочка
+ * проекта 'ru' (staff-инструмент) — нет: у неё всё как до переноса. Тот же
+ * предикат читают стадии chain и template.
+ */
+export function heUsEnglishLetters(language: string | null | undefined, market: HeMarket | null | undefined): boolean {
+  return language === 'en' && market === 'us';
+}
 
 export interface HeLetterRuleViolation {
   /** Номер письма (1-based), вариант в detail ('A'/'B'). */
@@ -49,8 +66,9 @@ const GREETING_RE = /^(здравствуйте|здравствуй|добры�
 /**
  * «Good evening» — обычное английское приветствие, но GREETING_RE его не знает,
  * и EN-письмо с ним получало нарушение и платный фикс-проход. Засчитываем
- * только при language === 'en': GREETING_RE проверяет и RU/PL-письма, их
- * результат не меняем.
+ * только у английских писем проекта 'us' (heUsEnglishLetters): GREETING_RE
+ * проверяет и RU/PL-письма, и английские письма проекта 'ru', их результат не
+ * меняем.
  */
 const GREETING_EN_EXTRA_RE = /^good\s+evening\b/i;
 
@@ -84,7 +102,7 @@ function normalizeNumberToken(raw: string): string {
 }
 
 /**
- * Английское чтение чисел ('en'): запятая — разделитель тысяч, точка —
+ * Английское чтение чисел (английские письма проекта 'us'): запятая — разделитель тысяч, точка —
  * десятичная. «10,000» → 10000, «$35,000» → 35000, «1,234,567» — одно число,
  * «3.5%» → 3.5. Русское чтение (NUMBER_RE) делает из «10,000» десятичное
  * «10.000» → «10», а «1,234,567» рвёт на «1,234» и «567», поэтому любое
@@ -121,11 +139,12 @@ function normalizeRuFormatToken(raw: string): string {
 const EN_NUMBER_FACTS = new WeakSet<Set<string>>();
 
 /**
- * Множество нормализованных чисел из корпуса материалов. language === 'en' —
- * английское чтение (плюс однозначная русская запись, см. выше); любой другой
- * язык или его отсутствие — прежнее чтение байт-в-байт.
+ * Множество нормализованных чисел из корпуса материалов. Английские письма
+ * проекта 'us' (heUsEnglishLetters(language, market)) — английское чтение
+ * (плюс однозначная русская запись, см. выше); любой другой язык, английский
+ * у проекта 'ru' или рынок не передан — прежнее чтение байт-в-байт.
  */
-export function extractNumberFacts(corpus: string, language?: string): Set<string> {
+export function extractNumberFacts(corpus: string, language?: string, market?: HeMarket): Set<string> {
   // Шум, который иначе покрывает фактчек ложно-положительно: uuid кейсов/
   // проектов (цифровые группы) и ISO-даты/таймстампы (дни/минуты/секунды
   // дают почти все двузначные числа).
@@ -133,7 +152,7 @@ export function extractNumberFacts(corpus: string, language?: string): Set<strin
     .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, ' ')
     .replace(/\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?(?:[+-]\d{2}:?\d{2})?)?/g, ' ');
   const out = new Set<string>();
-  if (language === 'en') {
+  if (heUsEnglishLetters(language, market)) {
     // Целую часть дробного числа EN отдельно НЕ добавляет (русское чтение ниже
     // добавляет): «94.5%» не покрывает «94%», а EN-промпт велит цитировать
     // числа клиента дословно и не округлять их. Целое покрывают только дроби с
@@ -164,14 +183,20 @@ export function extractNumberFacts(corpus: string, language?: string): Set<strin
 }
 
 /**
- * Числа из текста письма, которых нет в корпусном множестве. language — как
- * читать числа письма; не передан → так же, как прочитан корпус (facts из
- * extractNumberFacts(corpus, 'en') — по-английски, иначе по-русски). Передавать
- * его нужно только для множества, собранного вручную: расхождение с чтением
- * корпуса ломает сверку в обе стороны.
+ * Числа из текста письма, которых нет в корпусном множестве. language (с
+ * market) — как читать числа письма: по-английски только английские письма
+ * проекта 'us'. Не передан → так же, как прочитан корпус (facts из
+ * extractNumberFacts(corpus, 'en', 'us') — по-английски, иначе по-русски).
+ * Передавать его нужно только для множества, собранного вручную: расхождение
+ * с чтением корпуса ломает сверку в обе стороны.
  */
-export function findUnverifiedNumbers(text: string, facts: Set<string>, language?: string): string[] {
-  const en = (language ?? (EN_NUMBER_FACTS.has(facts) ? 'en' : undefined)) === 'en';
+export function findUnverifiedNumbers(
+  text: string,
+  facts: Set<string>,
+  language?: string,
+  market?: HeMarket,
+): string[] {
+  const en = language !== undefined ? heUsEnglishLetters(language, market) : EN_NUMBER_FACTS.has(facts);
   const re = en ? NUMBER_RE_EN : NUMBER_RE;
   const normalize = en ? normalizeNumberTokenEn : normalizeNumberToken;
   const bad = new Set<string>();
@@ -189,16 +214,17 @@ export interface HeLetterForCheck {
   /** Вариант ('A' основной, 'B') — попадает в detail нарушения. */
   variant?: string;
   /**
-   * Номер письма в цепочке (1-based). Учитывается только при language === 'en':
-   * стадии сдают варианты A и B одним плоским списком, и позиция в списке — не
-   * номер письма (B письма 1 получал тег «2B», A письма 2 — «3A»), так что
-   * фикс-подсказка отправляла модель не к тому письму. RU/PL по-прежнему
-   * берут позицию в списке.
+   * Номер письма в цепочке (1-based). Учитывается только у английских писем
+   * проекта 'us' (heUsEnglishLetters): стадии сдают варианты A и B одним
+   * плоским списком, и позиция в списке — не номер письма (B письма 1 получал
+   * тег «2B», A письма 2 — «3A»), так что фикс-подсказка отправляла модель не
+   * к тому письму. RU/PL и английские письма проекта 'ru' по-прежнему берут
+   * позицию в списке.
    */
   letterIndex?: number;
 }
 
-/** Номер письма для нарушения: letterIndex — только для EN, иначе позиция в списке. */
+/** Номер письма для нарушения: letterIndex — только у английских писем 'us', иначе позиция в списке. */
 function letterNumber(letter: HeLetterForCheck, position: number, en: boolean): number {
   const n = letter.letterIndex;
   return en && typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : position + 1;
@@ -210,14 +236,19 @@ function letterNumber(letter: HeLetterForCheck, position: number, en: boolean): 
  * (нет материалов — не к чему привязываться). Числа письма читаются так же,
  * как прочитан корпус (см. findUnverifiedNumbers), а не по `language`: стадия,
  * собравшая facts без языка, сверяет по-старому.
+ * `market` — рынок проекта: английские тексты detail, «Good evening» и
+ * letterIndex — только при heUsEnglishLetters(language, market). Проверка
+ * LLM-tells (TELLS_EN) была у любых английских писем и до переноса ENG —
+ * она по-прежнему идёт по языку.
  */
 export function checkLetterRules(
   letters: HeLetterForCheck[],
   language: string,
   facts: Set<string>,
+  market?: HeMarket,
 ): HeLetterRuleViolation[] {
   const violations: HeLetterRuleViolation[] = [];
-  const en = language === 'en';
+  const en = heUsEnglishLetters(language, market);
   letters.forEach((letter, i) => {
     const n = letterNumber(letter, i, en);
     const tag = letter.variant ? `${n}${letter.variant}` : `${n}`;
@@ -265,7 +296,7 @@ export function checkLetterRules(
         }
       }
     }
-    if (en) {
+    if (language === 'en') {
       for (const tell of TELLS_EN) {
         const m = letter.body.match(tell.re);
         if (m) {
@@ -341,15 +372,20 @@ function paragraphProblem(body: string): string | null {
 }
 
 /**
- * Абзацы писем: только для language === 'en', только варианты A/B (сегментные
- * варианты — фрагменты тела, их не проверяем). Это ПРЕДУПРЕЖДЕНИЕ: в
- * checkLetterRules не входит, фикс-проход не запускает и ничего не блокирует.
- * Стадия chain пишет его в лог; стадия template (EN) кладёт его в
- * rule_violations финальных писем (personalization_plan), но рерайт критика
- * по нему не откатывает. Для других языков — пустой список.
+ * Абзацы писем: только у английских писем проекта 'us' (heUsEnglishLetters),
+ * только варианты A/B (сегментные варианты — фрагменты тела, их не
+ * проверяем). Это ПРЕДУПРЕЖДЕНИЕ: в checkLetterRules не входит, фикс-проход
+ * не запускает и ничего не блокирует. Стадия chain пишет его в лог; стадия
+ * template (английские письма 'us') кладёт его в rule_violations финальных
+ * писем (personalization_plan), но рерайт критика по нему не откатывает. Для
+ * других языков и для английских писем проекта 'ru' — пустой список.
  */
-export function checkLetterParagraphs(letters: HeLetterForCheck[], language: string): HeLetterRuleViolation[] {
-  if (language !== 'en') return [];
+export function checkLetterParagraphs(
+  letters: HeLetterForCheck[],
+  language: string,
+  market?: HeMarket,
+): HeLetterRuleViolation[] {
+  if (!heUsEnglishLetters(language, market)) return [];
   const out: HeLetterRuleViolation[] = [];
   letters.forEach((letter, i) => {
     const problem = paragraphProblem(letter.body);

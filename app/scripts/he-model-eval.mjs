@@ -61,7 +61,11 @@ function scoreHypotheses(text) {
 
 function scoreLetter(text) {
   const words = text.trim().split(/\s+/).length;
-  const violations = checkLetterRules([{ subject: '', body: text }], 'en', extractNumberFacts(BRIEF));
+  // Бриф — US (WebFX), письмо английское: правила ENG-кабинета (рынок 'us'),
+  // как их применяют стадии us-проекта. Без рынка letterChecks берёт правила
+  // английской цепочки RU-проекта (как до переноса ENG). Корпус читаем без
+  // языка, как и раньше, — чтение чисел не меняем.
+  const violations = checkLetterRules([{ subject: '', body: text }], 'en', extractNumberFacts(BRIEF), 'us');
   return { words, violations: violations.length, details: violations.map((v) => v.rule) };
 }
 
