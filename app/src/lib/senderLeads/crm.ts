@@ -4,7 +4,7 @@ import {
   POLZA_CONNECTION, POLZA_CONTOUR_FIELD_ID, POLZA_SOURCE_FIELD_ID,
   resolveCrmConnection,
 } from '@/lib/crm/connections';
-import { leadMessageNote } from './telegram';
+import { addDealLinkToMessage, leadMessageNote, leadTelegramConfig } from './telegram';
 import type { Log } from './process';
 
 /** Same first-sales destination as other agency email leads. */
@@ -123,6 +123,17 @@ async function pushOne(db: SupabaseClient, row: PushRow, log: Log): Promise<void
       status: 'sent', action: action ?? 'note_added', sent_at: new Date().toISOString(), error_message: null,
     });
     log('info', `AMO: ${action === 'created' ? 'создана сделка' : 'добавлено примечание в сделку'} ${leadId} для ${row.sub_source}`);
+    // Ссылка на сделку — в сообщение в чате (не вышло — лид и сделка от этого не страдают).
+    try {
+      const tg = leadTelegramConfig();
+      const { data: sent } = await db.from('sender_reply_qualifications')
+        .select('tg_message_id, tg_message_text').eq('reply_id', row.reply_id).maybeSingle();
+      if (tg && sent?.tg_message_id && sent.tg_message_text) {
+        await addDealLinkToMessage(tg, Number(sent.tg_message_id), String(sent.tg_message_text), `${client.baseUrl}/leads/detail/${leadId}`);
+      }
+    } catch (linkErr) {
+      log('warn', `ТГ: ссылка на сделку ${leadId} не добавлена: ${linkErr instanceof Error ? linkErr.message : String(linkErr)}`);
+    }
   } catch (err) {
     const message = (err instanceof Error ? err.message : String(err)).slice(0, 500);
     const attempts = row.attempts + 1;

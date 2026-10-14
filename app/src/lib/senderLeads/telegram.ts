@@ -1,4 +1,4 @@
-import { sendMessage } from '@/lib/tgBot/telegramClient';
+import { editMessageText, sendMessage } from '@/lib/tgBot/telegramClient';
 
 /**
  * Лид «Рассылки» → общий ТГ-чат продаж.
@@ -69,7 +69,7 @@ export interface LeadMessageInput {
 }
 
 export function buildLeadMessage(input: LeadMessageInput): string {
-  const lines: string[] = ['📨 <b>Новый лид из Рассылки</b>', ''];
+  const lines: string[] = ['📨 <b>Новый лид из Автоаутрича</b>', ''];
   const where = [input.folderName, input.campaignName].filter(Boolean).map((s) => escapeHtml(clip(s!, 200)));
   lines.push(`<b>Рассылка:</b> ${where.join(' · ')}`);
   const contact = input.replyFrom && input.replyFrom.toLowerCase() !== input.recipientEmail.toLowerCase()
@@ -106,6 +106,22 @@ export async function sendLeadMessage(config: LeadTelegramConfig, text: string):
     ...(config.threadId ? { messageThreadId: config.threadId } : {}),
   });
   return result.message_id;
+}
+
+/**
+ * Дописать в сообщение о лиде ссылку на сделку в amoCRM (с 14.10.2026): сообщение
+ * уходит раньше сделки, поэтому ссылка добавляется правкой, когда сделка создана.
+ */
+export async function addDealLinkToMessage(config: LeadTelegramConfig, messageId: number, html: string, dealUrl: string): Promise<void> {
+  if (html.includes(dealUrl)) return;
+  await editMessageText(config.token, {
+    chatId: config.chatId,
+    messageId,
+    text: `${html}
+🔗 <a href="${escapeHtml(dealUrl)}">Открыть сделку в amoCRM</a>`,
+    parseMode: 'HTML',
+    disableWebPagePreview: true,
+  });
 }
 
 /** Адрес переписки на портале: вкладка «Письма» сразу открывает её. */
