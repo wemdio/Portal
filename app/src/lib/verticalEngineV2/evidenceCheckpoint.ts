@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { canonicalJson, sha256Hex } from '@/lib/companiesDirectory/guardedImportCore';
 import { VeEvidenceItemSchema, VeRuSeasonalitySchema } from './schemas';
+import { VeAudienceScopeSchema } from './audienceScope';
 
 const count = z.number().int().nonnegative();
 const AcceptedHypothesisSchema = z.object({
@@ -10,6 +11,7 @@ const AcceptedHypothesisSchema = z.object({
   potential_pct: z.number().int().min(0).max(100),
   // Absent in checkpoints written before broad hypotheses: those are narrow.
   broad: z.boolean().optional(),
+  audience_scope: VeAudienceScopeSchema.nullable().optional(),
 });
 
 // Bump the checkpoint version when verdict/prompt semantics change; a resumed

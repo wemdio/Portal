@@ -9,7 +9,8 @@
  */
 import { buildHypothesesInstantMessages, type HypothesesPromptInput } from '@/lib/verticalEngineV2/prompts/hypotheses';
 import { buildHypothesesInstantMessagesEn } from '@/lib/verticalEngineV2/prompts/hypotheses.en';
-import { VeHypothesesBatchSchema } from '@/lib/verticalEngineV2/schemas';
+import { VeHypothesesBatchSchema, VeScopedHypothesesBatchSchema, createVePriorityHypothesesSchema } from '@/lib/verticalEngineV2/schemas';
+import { readVeAudienceScope, veAudienceScopeKey, veAudienceScopeText, isVeAudienceScopeEnabled, isVeAudienceGenerationEnabled } from '@/lib/verticalEngineV2/audienceScope';
 import { combineHypothesisCandidates } from '@/lib/verticalEngineV2/stages/hypotheses';
 import { veEffectiveEvidenceVerdict, veEvidenceMergeTitles } from '@/lib/verticalEngineV2/stages/evidence';
 import { evidenceInputHash, readEvidenceCheckpoint } from '@/lib/verticalEngineV2/evidenceCheckpoint';
@@ -75,6 +76,60 @@ describe('VE2 broad hypotheses', () => {
       narrow('Санатории и реабилитация', 'Санатории и реабилитационные центры. Боль — загрузка номерного фонда вне сезона.'),
     ],
   };
+
+  it('preserves OR scope through normalization, evidence and checkpoint; rejects unknown contracts and isolates opt-in generation', () => {
+    const ruScoped = buildHypothesesInstantMessages({ ...input, audienceScope: true }).map((message) => message.content).join('\n');
+    const enScoped = buildHypothesesInstantMessagesEn({ ...input, audienceScope: true }).map((message) => message.content).join('\n');
+    expect(ruScoped).toContain('Минимального количества и квот по тирам нет');
+    expect(ruScoped).toContain('Прямые ограничения клиента не ослабляй');
+    expect(enScoped).toContain('no minimum count or tier quota');
+    expect(ruScoped).not.toContain('Если выходит меньше 25');
+    expect(enScoped).not.toContain('25–40');
+    const scope = { version: 1 as const, kind: 'sector' as const, any_of: ['Финтех', 'Платёжные провайдеры'], required: ['Россия'], excluded: ['Страховые агенты'] };
+    const same = { ...scope, any_of: [' платЕжные  провайдеры ', 'ФИНТЕХ', 'Финтех'] };
+    expect(veAudienceScopeKey(scope)).toBe(veAudienceScopeKey(same));
+    expect(veAudienceScopeKey({ ...scope, required: [] })).not.toBe(veAudienceScopeKey(scope));
+    expect(veAudienceScopeText(scope)).toContain('ANY ONE is sufficient (OR)');
+    expect(readVeAudienceScope(undefined)).toBeNull();
+    for (const invalid of [{ ...scope, version: 2 }, { ...scope, any_of: [] }, { ...scope, excluded: 'none' }, { ...scope, unexpected: true }]) {
+      expect(() => readVeAudienceScope(invalid)).toThrow();
+    }
+    const wide = { ...MEDICINE, title: 'Финтех', audience_scope: scope };
+    const duplicate = { ...wide, title: 'Финансовые платформы', audience_scope: same };
+    const result = VeScopedHypothesesBatchSchema.parse({ hypotheses: [], broad_hypotheses: [wide, duplicate] });
+    const candidates = combineHypothesisCandidates(result);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].audience_scope).toEqual(scope);
+    expect(combineHypothesisCandidates(result, false)).toHaveLength(2);
+    expect(VeScopedHypothesesBatchSchema.safeParse({ hypotheses: [], broad_hypotheses: [wide, { ...wide, audience_scope: { ...scope, required: ['Казахстан'] } }] }).success).toBe(false);
+    expect(VeScopedHypothesesBatchSchema.safeParse({ hypotheses: [], broad_hypotheses: [{ ...wide, audience_scope: null }] }).success).toBe(false);
+    expect(createVePriorityHypothesesSchema(['Финтех'], true).safeParse({ hypotheses: [], broad_hypotheses: [{ ...wide, audience_scope: { ...scope, version: 2 } }],
+      priority_niche_results: [{ niche: 'Финтех', status: 'suggested', hypothesis_titles: ['Финтех'], reason: 'Подходит' }] }).success).toBe(false);
+    expect(veEffectiveEvidenceVerdict(candidates[0], 'merge', { broad: true, audience_scope: { ...scope, any_of: ['Платёжные провайдеры'] } })).toBe('keep');
+    expect(veEffectiveEvidenceVerdict(candidates[0], 'merge', { broad: true, audience_scope: same })).toBe('merge');
+    expect(veEffectiveEvidenceVerdict(candidates[0], 'merge', { broad: true })).toBe('keep');
+    const hash = evidenceInputHash({ candidates });
+    expect(readEvidenceCheckpoint({ version: 1, input_hash: hash, next_index: 1, merged: 0, dropped: 0, evidence_dropped: 0,
+      accepted: [{ ...candidates[0], evidence: [], seasonality: null }], usage: { tokensUsed: 10, costUsd: 0.01 },
+      today_moscow: '2026-10-15', portfolio_profile: null, markup_history: null }, hash, 1)?.accepted[0].audience_scope).toEqual(scope);
+    const beforeScope = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS, beforeGeneration = process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS;
+    try {
+      delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS; delete process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS;
+      expect(isVeAudienceScopeEnabled('pilot')).toBe(false);
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = 'pilot';
+      expect(isVeAudienceScopeEnabled('pilot')).toBe(true);
+      expect(isVeAudienceScopeEnabled('other')).toBe(false);
+      expect(isVeAudienceGenerationEnabled('pilot')).toBe(false);
+      process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS = 'pilot';
+      expect(isVeAudienceGenerationEnabled('pilot')).toBe(true);
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = '*'; process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS = '*';
+      expect(isVeAudienceGenerationEnabled('other')).toBe(true);
+      expect(isVeAudienceGenerationEnabled(null)).toBe(false);
+    } finally {
+      if (beforeScope === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS; else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = beforeScope;
+      if (beforeGeneration === undefined) delete process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS; else process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS = beforeGeneration;
+    }
+  });
 
   it('asks for 3–5 sector-level hypotheses in a separate block in addition to the narrow list (RU/EN)', () => {
     const [system, user] = buildHypothesesInstantMessages(input).map((message) => message.content);

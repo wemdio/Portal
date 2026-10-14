@@ -16,7 +16,8 @@ import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { VE_RELEVANCE_RULES_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
 import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veSavedReviewSignature } from '@/lib/verticalEngineV2/relevanceReserve';
-import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
+import { canResumePartialPreview, veSavedRelevanceScope } from '@/lib/verticalEngineV2/collectionRecovery';
+import { createVeCollectionAudienceSnapshot } from '@/lib/verticalEngineV2/sourceAudience';
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { resetVeTriageState, veTriageRubricMessages } from '@/lib/verticalEngineV2/relevanceTriage';
 import { VE_RELEVANCE_TARGET_RULES, veStaffingScopeNote, relevanceReviewMessages } from '@/lib/verticalEngineV2/relevanceReview';
@@ -164,6 +165,52 @@ describe('VE2 relevance selection rules', () => {
     delete process.env.VE_RELEVANCE_TRIAGE; delete process.env.VE_RELEVANCE_TRIAGE_PROJECTS;
   });
   afterEach(() => { process.env = { ...env }; });
+
+  it('uses the frozen structured policy in every check, keeps explicit requirements and separates saved verdicts', async () => {
+    const audienceScope = { version: 1 as const, kind: 'sector' as const, any_of: ['Fintech platforms', 'Payment providers'],
+      required: ['At least 200 employees', 'Uses ERP', 'Hires engineers'], excluded: ['Insurance agencies'] };
+    const base = { rows: [{ company: 'Company', description: QUOTES.meat }], verticalName: 'Seller context must not narrow',
+      hypothesisTitle: 'Misleading narrow title', hypothesisDescription: 'Old description', language: 'ru' as const,
+      fetchEvidence: offline(), websiteLimit: 0, audienceScope };
+    const calls = provider(() => 'insufficient');
+    const checked = await findIrrelevantRows({ ...base, triage: true });
+    expect(checked.decisions.get(0)?.status).not.toBe('relevant');
+    expect(calls.rubric).toBe(0);
+    expect(calls.requests.map(request => request.kind)).toEqual(expect.arrayContaining(['classify', 'review']));
+    for (const request of calls.requests) {
+      expect(request.system).toContain('STRUCTURED AUDIENCE v1');
+      expect(request.system).toContain('any_of is OR');
+      expect(request.system).toContain('required is AND');
+      expect(request.system).not.toContain('CONTEXT and never a requirement');
+      expect(request.system).not.toContain('minimum number of locations ("from 5") is not checked');
+      for (const requirement of [...audienceScope.required, ...audienceScope.excluded]) expect(request.user).toContain(requirement);
+      expect(request.user).not.toContain('Old description');
+    }
+    const savedCount = calls.classify + calls.deepseek + calls.confirm;
+    await findIrrelevantRows({ ...base, triage: true, checkpoint: checked.checkpoint });
+    expect(calls.classify + calls.deepseek + calls.confirm).toBe(savedCount);
+    const different = await findIrrelevantRows({ ...base, audienceScope: { ...audienceScope, required: ['Uses ERP'] }, checkpoint: checked.checkpoint });
+    expect(different.checkpoint.context_hash).not.toBe(checked.checkpoint.context_hash);
+    const beforeInvalid = calls.classify + calls.deepseek + calls.confirm;
+    await expect(findIrrelevantRows({ ...base, audienceScope: { ...audienceScope, version: 2 } as never })).rejects.toThrow();
+    expect(calls.classify + calls.deepseek + calls.confirm).toBe(beforeInvalid);
+
+    const hypothesis = { id: 'h1', title: 'B2B SaaS с remote-командами',
+      description: 'SaaS-вендоры, нанимающие разработчиков в 2+ странах.', origin: 'generated' as const, status: 'accepted' };
+    const legacyScope = veSavedRelevanceScope({ hypotheses: [hypothesis] }, 'h1');
+    const scoped = veSavedRelevanceScope({ audience_snapshot: createVeCollectionAudienceSnapshot([
+      { ...hypothesis, audience_scope: { ...audienceScope, any_of: ['B2B SaaS'], required: ['Найм в 2+ странах'] } },
+    ], 'new_preview', '2026-10-15T00:00:00Z') }, 'h1');
+    const saved = { company: 'SaaS', website: 'https://saas.test', email: 'info@saas.test', _email_status: 'ok',
+      _ve_relevance: { status: 'needs_review', reason: 'Не подтверждён найм в 2+ странах.',
+        website_review_version: 4, rules_version: VE_RELEVANCE_RULES_VERSION, review_attempts: 2 } };
+    const batch = { reserve: [saved], ready: [], source: [], automatic: true, allowPaidSearch: false, triage: false };
+    expect(buildVeRelevanceReviewBatch({ ...batch, ...legacyScope }).rows).toHaveLength(1);
+    expect(buildVeRelevanceReviewBatch({ ...batch, ...scoped }).rows).toHaveLength(0);
+    expect(JSON.stringify(veSavedReviewSignature([saved], { ...scoped, triage: false }))).not.toContain('staffing_pending');
+    const pending = { ...saved, _ve_relevance: { ...saved._ve_relevance, website_review_version: undefined, review_attempts: 0 } };
+    expect(buildVeRelevanceReviewBatch({ ...batch, ...scoped, reserve: [pending] }).rows).toHaveLength(1);
+  });
 
   it('asks every model to prove only activity, type and structural conditions, never the vertical summary', async () => {
     for (const [name, hypothesis] of Object.entries(HYPOTHESES) as Array<[keyof typeof HYPOTHESES, typeof HYPOTHESES.meat]>) {

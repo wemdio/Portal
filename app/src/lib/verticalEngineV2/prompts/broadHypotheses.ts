@@ -13,9 +13,13 @@ import {
   HYPOTHESIS_FIELD_RULES,
   buildHypothesesClientContext,
   type HypothesesClientContextInput,
+  AUDIENCE_SCOPE_GENERATION_RULES,
+  AUDIENCE_SCOPE_JSON_ITEM,
 } from './hypotheses';
 
 export interface BroadHypothesesPromptInput extends HypothesesClientContextInput {
+  audienceScope?: boolean;
+  existingScopes?: string[];
   /** Сколько новых широких нужно (свободные места до предела проекта). */
   count: number;
   /** Вертикали проекта с названиями их узких гипотез. */
@@ -42,6 +46,14 @@ function listOrEmpty(lines: string[]): string {
 }
 
 export function buildBroadHypothesesMessages(input: BroadHypothesesPromptInput): LLMMessage[] {
+  if (input.audienceScope) return [
+    { role: 'system', content: `Ты исследуешь B2B-аудитории продукта клиента. Сейчас добавляем только новые широкие аудитории существующего проекта.\n${FIT_ECONOMICS_CORE}\n${HYPOTHESIS_FIELD_RULES}\n${AUDIENCE_SCOPE_GENERATION_RULES}\nУже сохранённые аудитории и ручные условия не меняй. Не повторяй их под другим названием. Только русский JSON, без поиска и выдуманных доказательств.` },
+    { role: 'user', content: `${buildHypothesesClientContext(input)}
+Существующие узкие: ${JSON.stringify(input.verticals)}
+Существующие широкие: ${JSON.stringify(input.existingBroad)}
+Сохранённые границы аудиторий: ${JSON.stringify(input.existingScopes ?? [])}
+Верни {"broad_hypotheses":[]} — до ${input.count} новых секторов, формат кандидата ${AUDIENCE_SCOPE_JSON_ITEM}, но kind="sector" и tier необязателен. Если новых подходящих аудиторий нет, верни пустой массив. Не создавай соседнее имя того же охвата, не расширяй клиентские ограничения.` },
+  ];
   const user = `${buildHypothesesClientContext(input)}
 
 ОСНОВНОЙ СПИСОК — УЖЕ ЕСТЬ В ПРОЕКТЕ (вертикаль: её гипотезы):

@@ -15,6 +15,8 @@ import type { VeCollectTask } from './prompts/sourcePlan';
 import type { VeStaffingCorrectionScope } from './staffingCorrection';
 import { relevanceHash } from './relevanceCheckpoint';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
+import { isVeAudienceScopeEnabled } from './audienceScope';
+import { needsLegacyFintechAudienceRefresh, readVeCollectionAudienceSnapshot, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
 
 export interface VeCollectionContinuation {
   available: boolean;
@@ -32,6 +34,18 @@ const records = (value: unknown): Array<Record<string, unknown>> => Array.isArra
 const available = (code: VeCollectionContinuation['code'], reason: string,
   action: Exclude<VeCollectionContinuation['action'], null> = 'resume_preparation'): VeCollectionContinuation => ({ available: true, action, code, reason });
 const unavailable = (code: VeCollectionContinuation['code'], reason: string): VeCollectionContinuation => ({ available: false, action: null, code, reason });
+
+/** A feature flag is eligibility, never permission to restart an old base.
+ * The enqueue caller additionally requires an exact explicit resume and CAS. */
+export function needsVeControlledAudienceRefresh(base: Record<string, unknown>, currentHypothesis?: Record<string, unknown> | null): boolean {
+  const info = record(base.collect_info);
+  if (!info || base.status !== 'analyzed' || base.source !== 'auto'
+    || !isVeAudienceScopeEnabled(typeof base.project_id === 'string' ? base.project_id : null)
+    || !currentHypothesis || currentHypothesis.id !== base.hypothesis_id || currentHypothesis.status === 'rejected') return false;
+  const saved = records(info.hypotheses);
+  if (saved.length !== 1 || saved[0].id !== base.hypothesis_id) return false;
+  return needsLegacyFintechAudienceRefresh({ ...info, hypotheses: [currentHypothesis as unknown as VeSourceAudienceHypothesis] });
+}
 
 /** Detect the same quiescent, one-way correction as the collector, without
  * changing cursors, receipts or the amount of work already admitted. */
@@ -55,11 +69,16 @@ function hasSourceCorrection(info: Record<string, unknown>, tasks: Array<Record<
 }
 
 /** Only a single, explicitly identified audience can correct saved verdicts. */
-export function veSavedRelevanceScope(info: { hypotheses?: unknown }, hypothesisId: unknown): VeStaffingCorrectionScope {
-  const hypotheses = records(info.hypotheses);
+export function veSavedRelevanceScope(info: { hypotheses?: unknown; audience_snapshot?: unknown }, hypothesisId: unknown): VeStaffingCorrectionScope {
+  const snapshot = readVeCollectionAudienceSnapshot(info.audience_snapshot);
+  const hypotheses = records(snapshot?.hypotheses ?? info.hypotheses);
   const hypothesis = hypotheses.length === 1 && typeof hypothesisId === 'string'
     && hypotheses[0].id === hypothesisId ? hypotheses[0] : null;
   if (!hypothesis || hypothesis.status === 'rejected') return {};
+  // This helper only selects the legacy staffing relaxation. A frozen typed
+  // scope can require hiring explicitly, so reopening that refusal would pay
+  // for a review that cannot apply. Other pending-review selectors are intact.
+  if (snapshot && hypothesis.audience_scope != null) return {};
   return {
     hypothesisTitle: typeof hypothesis.title === 'string' ? hypothesis.title : undefined,
     hypothesisDescription: typeof hypothesis.description === 'string' ? hypothesis.description : undefined,
@@ -72,6 +91,13 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   const info = record(base.collect_info);
   if (base.source !== 'auto' || !base.hypothesis_id || info?.collection_mode !== 'preview' || info.refill || info.supply_batch_id) {
     return unavailable('not_preview', 'Для этой базы продолжение сбора недоступно.');
+  }
+  let existingOnly: boolean;
+  try {
+    readVeCollectionAudienceSnapshot(info.audience_snapshot);
+    existingOnly = veSourceDiscoveryIsExistingOnly(info);
+  } catch {
+    return unavailable('invalid_checkpoint', 'Сохранённые условия аудитории или расходов требуют проверки.');
   }
   if (base.status === 'collecting') return available('in_progress', 'Продолжится незавершённый этап подготовки.');
   // Explicit preparation can undo the specialist's cancellation through its
@@ -115,10 +141,11 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
     return unavailable('invalid_checkpoint', 'Сохранённые результаты проверки адресов требуют проверки.');
   }
   const triage = isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null);
-  const scope = veSavedRelevanceScope(currentHypothesis !== undefined ? { hypotheses: currentHypothesis ? [currentHypothesis] : [] } : info, base.hypothesis_id);
+  const scope = veSavedRelevanceScope(info.audience_snapshot || currentHypothesis === undefined
+    ? info : { hypotheses: currentHypothesis ? [currentHypothesis] : [] }, base.hypothesis_id);
   const batch = buildVeRelevanceReviewBatch({ ...scope,
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
-    allowPaidSearch: !info.niche_source_profile && !info.source_selection && record(info.search_policy)?.phase !== 'existing', triage });
+    allowPaidSearch: !existingOnly, triage });
   if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { ...scope, triage }))) {
     return available('saved_work', 'Можно уточнить соответствие уже найденных компаний.');
   }
@@ -132,6 +159,12 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   const adaptive = record(info.adaptive_collection) as VeAdaptiveCollection | null;
   if (info.adaptive_collection && (!adaptive || !validVeAdaptiveCollection(adaptive))) {
     return unavailable('invalid_checkpoint', 'Сохранённый план сбора требует проверки. Готовые контакты сохранены.');
+  }
+  if (needsVeControlledAudienceRefresh(base, currentHypothesis)) {
+    if (Number(target.round) >= veCollectionMaxRounds(target.max_rounds)) {
+      return unavailable('round_limit', 'Сохранённый бюджет сбора исчерпан. Обновление источников само не увеличивает его; готовые контакты сохранены.');
+    }
+    return available('source_update', 'Доступен обновлённый подбор источников в пределах сохранённого бюджета.', 'resume_collection');
   }
   if (hasSourceCorrection(info, tasks)) return available('source_update', 'Доступен обновлённый подбор источников для этой аудитории.', 'resume_collection');
   const policy = adaptive ?? undefined;

@@ -23,6 +23,7 @@ import { VeOperationTimeoutError, withVeDeadline } from '../operationDeadline';
 import { evidenceInputHash, readEvidenceCheckpoint, type EvidenceCheckpoint } from '../evidenceCheckpoint';
 import { reconcileVePriorityNicheResults, VePriorityNicheReportSchema, type VePriorityNicheResult } from '../priorityNiches';
 import { isRetryableStageError } from '../jobRetry';
+import { readVeAudienceScope, veAudienceScopeKey } from '../audienceScope';
 import {
   VeEvidenceVerdictSchema,
   type VeHypothesisCandidate,
@@ -113,10 +114,16 @@ async function optionalRead<T>(ctx: VeStageContext, label: string, read: () => P
 
 /** Цели merge: широкая гипотеза сливается только с широкой, узкая — только с узкой. */
 export function veEvidenceMergeTitles(
-  candidates: Array<Pick<VeHypothesisCandidate, 'title' | 'broad'>>,
-  candidate: Pick<VeHypothesisCandidate, 'broad'>,
+  candidates: Array<Pick<VeHypothesisCandidate, 'title' | 'broad' | 'audience_scope'>>,
+  candidate: Pick<VeHypothesisCandidate, 'broad' | 'audience_scope'>,
 ): string[] {
-  return candidates.filter((other) => (other.broad === true) === (candidate.broad === true)).map((other) => other.title);
+  return candidates.filter((other) => (other.broad === true) === (candidate.broad === true)
+    && sameAudienceScope(candidate, other)).map((other) => other.title);
+}
+
+function sameAudienceScope(a: Pick<VeHypothesisCandidate, 'audience_scope'>, b: Pick<VeHypothesisCandidate, 'audience_scope'>): boolean {
+  const first = readVeAudienceScope(a.audience_scope), second = readVeAudienceScope(b.audience_scope);
+  return !first && !second || !!first && !!second && veAudienceScopeKey(first) === veAudienceScopeKey(second);
 }
 
 /**
@@ -126,12 +133,13 @@ export function veEvidenceMergeTitles(
  * пропал бы из списка. Merge без найденной цели того же вида — keep, как раньше.
  */
 export function veEffectiveEvidenceVerdict(
-  candidate: Pick<VeHypothesisCandidate, 'broad'>,
+  candidate: Pick<VeHypothesisCandidate, 'broad' | 'audience_scope'>,
   verdict: 'keep' | 'merge' | 'drop',
-  mergeTarget: { broad?: boolean } | undefined,
+  mergeTarget: Pick<VeHypothesisCandidate, 'broad' | 'audience_scope'> | undefined,
 ): 'keep' | 'merge' | 'drop' {
   if (verdict === 'drop') return candidate.broad === true ? 'keep' : 'drop';
-  if (verdict === 'merge' && mergeTarget && (mergeTarget.broad === true) === (candidate.broad === true)) return 'merge';
+  if (verdict === 'merge' && mergeTarget && (mergeTarget.broad === true) === (candidate.broad === true)
+    && sameAudienceScope(candidate, mergeTarget)) return 'merge';
   return 'keep';
 }
 
@@ -319,6 +327,8 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
     'hypotheses',
   ));
   const candidates = hypothesesResult?.candidates ?? [];
+  // Validate saved scope before any search/model call, including after flag removal.
+  candidates.forEach((candidate) => readVeAudienceScope(candidate.audience_scope));
   if (!candidates.length) {
     throw new Error('Нет кандидатов: сначала выполните стадию hypotheses');
   }
@@ -524,6 +534,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
           tier: candidate.tier,
           title: candidate.title,
           description: candidate.description,
+          ...(candidate.audience_scope ? { audience_scope: candidate.audience_scope } : {}),
           // Вердикт обязан пронести fit_rationale (возможно, уточнив по фактам);
           // пустое поле — откат к исходной цепочке кандидата.
           fit_rationale: v.fit_rationale || candidate.fit_rationale,
@@ -543,6 +554,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
             tier: candidate.tier, title: candidate.title, description: candidate.description,
             fit_rationale: candidate.fit_rationale, evidence: [], seasonality: null,
             potential_pct: Math.min(candidate.potential_pct, 20), broad: true,
+            ...(candidate.audience_scope ? { audience_scope: candidate.audience_scope } : {}),
           });
           return;
         }
@@ -600,6 +612,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
       status: 'proposed',
       // У всех строк: при вставке массива отсутствующий ключ стал бы NULL.
       broad: a.broad === true,
+      ...(a.audience_scope ? { audience_scope: a.audience_scope } : {}),
     }));
     throwIfCancelled(ctx);
     let { error: insError } = await ctx.supabase.from('ve_hypotheses').insert(rows);

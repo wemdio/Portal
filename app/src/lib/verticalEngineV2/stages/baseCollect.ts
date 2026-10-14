@@ -159,6 +159,11 @@ import {
 } from '../prompts/sourcePlan';
 import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
 import { searchVeNicheDirectoryRows } from '../nicheDirectory';
+import { isVeAudienceScopeEnabled, veAudienceScopeText } from '../audienceScope';
+import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, readVeSourceCostPolicy,
+  veSourceDiscoveryIsExistingOnly, veAudienceNicheProfile, normalizeVeAudienceSourcePlan, loadVeApprovedSupplyAudience,
+  canRefreshVeAudienceSources, needsLegacyFintechAudienceRefresh, isVeBroadFintechAudience,
+  type VeCollectionAudienceSnapshot, type VeSourceCostPolicy, type VeSourceAudienceHypothesis } from '../sourceAudience';
 import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyHint } from '../paymentCompanyDirectory';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed,
   type VeNicheSourceProfile } from '../nicheSourcePolicy';
@@ -728,6 +733,13 @@ export interface VeSliceProbe {
 }
 
 export interface VeCollectInfo {
+  /** Frozen source/relevance audience; a rollout flag change never reinterprets it. */
+  audience_snapshot?: VeCollectionAudienceSnapshot;
+  /** Set only by explicit continuation of an unlaunched, quiescent preview. */
+  audience_scope_refresh_requested?: boolean;
+  audience_source_refresh?: { version: 1; previous_tasks: NonNullable<VeCollectInfo['source_selection']>['previous_tasks']; previous_construct?: VeConstructInfo };
+  /** Independent durable spend guard, preserved when source profiles change. */
+  cost_policy?: VeSourceCostPolicy;
   /** Confirmed RU niche: constrain new spend even while draining saved work. */
   niche_source_profile?: VeNicheSourceProfile;
   /** One-way, bounded correction of source scopes. Old cursors remain here for
@@ -838,7 +850,7 @@ export interface VeCollectInfo {
    */
   slice_probe?: VeSliceProbe;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
-  hypotheses?: Array<{ id: string; title: string; description?: string | null; status: string | null; broad?: boolean; origin?: 'generated' | 'manual' }>;
+  hypotheses?: VeSourceAudienceHypothesis[];
   /**
    * Оценка единственного реестрового среза плана. Несколько срезов нельзя
    * складывать: их компании могут пересекаться, поэтому в таком случае числа
@@ -904,7 +916,7 @@ function keepWidenedSourceRow(task: VeCollectTask, row: VeUnifiedRow): boolean {
 // Corrected niches use existing source contacts only. A source correction is
 // not permission to buy website discovery from an old, off-target backlog.
 function usesExistingSourceContacts(info: VeCollectInfo): boolean {
-  return Boolean(info.niche_source_profile || info.source_selection) || info.search_policy?.phase === 'existing';
+  return veSourceDiscoveryIsExistingOnly(info);
 }
 
 function retainDeferredSourceRows(info: VeCollectInfo): void {
@@ -1039,6 +1051,7 @@ async function buildPlan(
   market: VeMarket,
   hypothesisId: string | null,
   strategyFeedback?: string,
+  audienceSnapshot?: VeCollectionAudienceSnapshot,
 ): Promise<{
   plan: VeSourcePlan;
   planRepair?: VePlanRepair;
@@ -1048,7 +1061,7 @@ async function buildPlan(
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
   // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
   // идут в работу, только когда принятых нет (как в пересчёте % вертикали).
-  const { data: hypRows, error: hError } = await ctx.supabase
+  const { data: hypRows, error: hError } = audienceSnapshot ? { data: audienceSnapshot.hypotheses, error: null } : await ctx.supabase
     .from('ve_hypotheses')
     .select('id, title, description, tier, status, origin')
     .eq('project_id', job.project_id)
@@ -1058,7 +1071,7 @@ async function buildPlan(
   if (hError) throw new Error(`ve_hypotheses read: ${hError.message}`);
   let hypotheses = (hypRows ?? [])
     .map((r) => {
-      const row = r as { id?: unknown; title?: unknown; description?: unknown; tier?: unknown; status?: unknown; origin?: unknown };
+      const row = r as { id?: unknown; title?: unknown; description?: unknown; tier?: unknown; status?: unknown; origin?: unknown; broad?: unknown; audience_scope?: unknown };
       return {
         id: typeof row.id === 'string' ? row.id : '',
         title: typeof row.title === 'string' ? row.title : '',
@@ -1066,6 +1079,7 @@ async function buildPlan(
         tier: typeof row.tier === 'number' ? row.tier : null,
         status: typeof row.status === 'string' ? row.status : null,
         origin: row.origin === 'generated' ? 'generated' as const : row.origin === 'manual' ? 'manual' as const : undefined,
+        ...(audienceSnapshot ? { broad: row.broad as boolean | undefined, audience_scope: row.audience_scope as VeSourceAudienceHypothesis['audience_scope'] } : {}),
       };
     })
     .filter((h) => h.title);
@@ -1120,13 +1134,15 @@ async function buildPlan(
   }
 
   // Широкая гипотеза (сектор для ежедневного добора) — только в плане своей базы.
-  const broadFlag = hypothesisId ? await readVeHypothesisBroad(ctx, hypothesisId) : null;
+  const broadFlag = audienceSnapshot ? audienceSnapshot.hypotheses.every((h) => h.broad === true)
+    : hypothesisId ? await readVeHypothesisBroad(ctx, hypothesisId) : null;
   const broad = broadFlag === true;
   const promptInput = {
     verticalName: vertical.name,
     verticalSummary: vertical.summary,
     synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
     hypotheses: broad ? hypotheses.map((h) => ({ ...h, broad: true })) : hypotheses,
+    audienceScope: audienceSnapshot?.hypotheses[0].audience_scope,
     companyTypes,
   };
 
@@ -1158,18 +1174,23 @@ async function buildPlan(
   const { plan: sized, stripped } = stripUnfoundedSizeFilters(probed,
     hypotheses.map((h) => `${h.title} ${h.description ?? ''}`).join('\n'));
   if (stripped) stageLog(ctx, `[base_collect] план: сняты пороги выручки/штата без основания в гипотезе (${stripped} задач)`);
-  const { plan: scoped, changed: broadened } = broad ? veBroadHypothesisPlan(sized) : { plan: sized, changed: 0 };
+  // Structured mandatory conditions must never pass through legacy broadening,
+  // which deliberately removes size filters from old sector hypotheses.
+  const { plan: scoped, changed: broadened } = broad && !audienceSnapshot?.hypotheses.some((h) => h.audience_scope)
+    ? veBroadHypothesisPlan(sized) : { plan: sized, changed: 0 };
   // Broad removes incidental size/hiring restrictions, not the business model
   // named in the audience (payment providers still are not transfer branches).
-  const niche = market !== 'us' ? detectVeNicheSourceProfile(hypotheses) : null;
-  const nichePlan = niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped;
-  const clinic = market !== 'us' && hypothesisId && broadFlag === false ? detectVeClinicSourceProfile(hypotheses) : null;
+  const controlled = audienceSnapshot && market !== 'us' ? normalizeVeAudienceSourcePlan(scoped, audienceSnapshot.hypotheses) : null;
+  const niche = market !== 'us' && !controlled ? detectVeNicheSourceProfile(hypotheses) : null;
+  const nichePlan = controlled?.plan ?? (niche ? { ...scoped, tasks: scoped.tasks.map((task) => normalizeVeNicheSourceTask(task, niche)) } : scoped);
+  const structuredAudience = audienceSnapshot?.hypotheses.some((h) => !!h.audience_scope);
+  const clinic = !structuredAudience && market !== 'us' && hypothesisId && broadFlag === false ? detectVeClinicSourceProfile(hypotheses) : null;
   const clinicPlan = clinic ? normalizeVeClinicSourcePlan(nichePlan, clinic).plan : nichePlan;
   const generation = normalizeVeGenerationSourcePlan(clinicPlan, {
-    market, hypotheses: hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad })) : [],
+    market, hypotheses: !structuredAudience && hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad })) : [],
   });
   const media = detectVeMediaSourceProfile({ market,
-    hypotheses: hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad: false })) : [] });
+    hypotheses: !structuredAudience && hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad: false })) : [] });
   const plan = media ? normalizeVeMediaSourcePlan(generation.plan, media).plan : generation.plan;
   if (generation.changed) stageLog(ctx, '[base_collect] план генерации: профильные каталоги впереди, водоканалы исключены, вакансии ограничены отраслью');
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
@@ -1180,6 +1201,7 @@ async function buildPlan(
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
     usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status, origin: h.origin,
+      ...(audienceSnapshot && h.audience_scope ? { audience_scope: h.audience_scope } : {}),
       ...(hypothesisId && broadFlag !== null ? { broad } : {}) })),
   };
 }
@@ -1326,8 +1348,8 @@ async function ensureSliceMatchesVertical(
     const sample = await sampleCatalogTasks(ctx, tasks);
     const res = await probeSliceRelevance({
       rows: sample,
-      verticalName: vertical.name,
-      verticalSummary: vertical.summary ?? '',
+      verticalName: promptInput.audienceScope ? 'Frozen hypothesis audience' : vertical.name,
+      verticalSummary: promptInput.audienceScope ? veAudienceScopeText(promptInput.audienceScope) : vertical.summary ?? '',
       log: (m) => stageLog(ctx, m),
     });
     usage.tokensUsed += res.tokensUsed;
@@ -2778,9 +2800,102 @@ function taggedHarvest(task: VeCollectTaskState): VeUnifiedRow[] {
 }
 const candidateSourceKey = (row: VeUnifiedRow) => (row as VeUnifiedRow & { _ve_source_strategy?: string })._ve_source_strategy;
 
+/** Explicit preview continuation only: rewrite future free-source reads while
+ * preserving paid observations, target caps, old cursors and source attribution. */
+export function applyVeAudienceSourceRefresh(info: VeCollectInfo, snapshot: VeCollectionAudienceSnapshot): boolean {
+  if (!info.plan || !info.tasks?.length || !needsLegacyFintechAudienceRefresh({ ...info, hypotheses: snapshot.hypotheses })) return false;
+  const decision = normalizeVeAudienceSourcePlan({ ...info.plan, tasks: info.tasks.map((state) => state.task) }, snapshot.hypotheses);
+  if (decision.decision !== 'sector_fintech') return false;
+  const previous = info.tasks.map((state) => ({ task: state.task, catalog: state.catalog,
+    directory_cursors: state.directory_cursors, status: state.status, child_job_id: state.child_job_id,
+    exhausted: state.exhausted, unavailable: state.unavailable }));
+  info.cost_policy = { version: 1, website_discovery: 'existing_only' };
+  for (let index = 0; index < info.tasks.length; index++) {
+    const state = info.tasks[index], task = decision.plan.tasks[index];
+    // Historical paid children and unchanged cursors never run a second time.
+    if (!task || !['companies_directory', 'yandex_maps'].includes(state.source)
+      || veSourceStrategyKey(task) === veSourceStrategyKey(state.task)) continue;
+    state.harvest = taggedHarvest(state);
+    state.task = task;
+    state.status = 'pending';
+    if (state.source === 'yandex_maps') delete state.catalog;
+    delete state.exhausted; delete state.hit_ceiling; delete state.unavailable;
+    state.note = 'Источник уточнён под полный финтех-сектор; результаты, расходы и общий предел сохранены.';
+  }
+  info.audience_source_refresh = { version: 1, previous_tasks: previous, ...(info.construct ? { previous_construct: info.construct } : {}) };
+  delete info.construct;
+  info.plan = { ...info.plan, tasks: info.tasks.map((state) => state.task) };
+  info.hypotheses = snapshot.hypotheses;
+  info.audience_snapshot = snapshot;
+  delete info.niche_source_profile;
+  if (info.adaptive_collection?.replan_needed) {
+    // A free corrected source is already available; do not buy a replacement
+    // plan first. Historical replan attempts/spend remain untouched.
+    info.adaptive_collection.replan_needed = false;
+    delete info.adaptive_collection.replan_reason;
+  }
+  delete info.audience_scope_refresh_requested;
+  delete info.estimate;
+  return true;
+}
+
+async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo, market: VeMarket): Promise<void> {
+  if (info.audience_snapshot) return; // Persisted snapshots survive rollout rollback.
+  const refreshing = info.audience_scope_refresh_requested === true;
+  const isNew = !info.plan && !info.construct && !info.tasks?.length && !info.preview_pipeline?.batches.length
+    && !info.target_progress?.candidates_processed && !info.target_checkpoint;
+  if (!refreshing && !isNew) return;
+  if (!base.hypothesis_id || !['preview', 'supply'].includes(info.collection_mode ?? '') || info.refill) {
+    if (refreshing) throw new Error('Collection audience refresh requires a preview');
+    return;
+  }
+  if (refreshing && !canRefreshVeAudienceSources(info)) throw new Error('Collection audience refresh has unfinished work');
+  if (info.collection_mode === 'supply') {
+    if (!info.supply_batch_id) return; // Legacy non-batch fixtures/flows retain their old path.
+    const approved = await loadVeApprovedSupplyAudience(ctx.supabase, { projectId: job.project_id,
+      hypothesisId: base.hypothesis_id, batchId: info.supply_batch_id, baseId: base.id });
+    if (approved) {
+      info.audience_snapshot = approved;
+      info.cost_policy = { version: 1, website_discovery: 'existing_only' };
+      info.hypotheses = approved.hypotheses;
+      await persistCollectInfo(ctx, base.id, info);
+    }
+    return;
+  }
+  // '*' keeps pre-migration legacy rows readable. A scope already generated is
+  // authoritative even if rollout flags were subsequently removed, in RU/EN.
+  const { data: hypothesis, error } = await ctx.supabase.from('ve_hypotheses')
+    .select('*').eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
+  if (error || !hypothesis || hypothesis.status === 'rejected') throw new Error(`Collection audience read: ${error?.message ?? 'hypothesis unavailable'}`);
+  // The specialist authorized the enqueue-time audience. A title/description
+  // edited while this job waited cannot silently change that authorization.
+  if (refreshing && (!readVeSourceCostPolicy(info.cost_policy) || info.hypotheses?.length !== 1
+    || info.hypotheses[0].id !== base.hypothesis_id)) throw new Error('Collection audience refresh authorization is unavailable');
+  const h = refreshing ? info.hypotheses![0] : hypothesis as VeSourceAudienceHypothesis;
+  const typed = h.audience_scope !== undefined && h.audience_scope !== null;
+  if (!typed && !refreshing && (!isVeAudienceScopeEnabled(job.project_id) || market !== 'ru' || info.collection_mode !== 'preview')) return;
+  if (!typed && h.origin === 'manual') {
+    if (refreshing) throw new Error('Manual legacy audience cannot be refreshed automatically');
+    return;
+  }
+  // An explicit marker was durably authorized by the enqueue CAS. Do not
+  // strand it because the allowlist changed while the worker was waiting.
+  const reason = refreshing ? 'explicit_continuation' : 'new_preview';
+  const snapshot = createVeCollectionAudienceSnapshot([h], reason, new Date().toISOString());
+  if (refreshing) {
+    if (market !== 'ru' || !isVeBroadFintechAudience(h) || !applyVeAudienceSourceRefresh(info, snapshot)) throw new Error('No safe source-only audience correction is available');
+  } else {
+    info.cost_policy = { version: 1, website_discovery: 'existing_only' };
+    info.audience_snapshot = snapshot;
+    info.hypotheses = snapshot.hypotheses;
+  }
+  await persistCollectInfo(ctx, base.id, info);
+}
+
 /** Only explicitly named RU audiences opt in; old title-only checkpoints
  * are checked against the exact hypothesis before constraining acquisition. */
 async function pinNicheSourceProfile(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<VeNicheSourceProfile | null> {
+  if (info.audience_snapshot) return veAudienceNicheProfile(info.audience_snapshot.hypotheses);
   if (info.niche_source_profile) return info.niche_source_profile;
   if (!base.hypothesis_id || !detectVeNicheSourceProfile(info.hypotheses ?? [])) return null;
   if (info.hypotheses?.some((hypothesis) => hypothesis.broad === undefined)) {
@@ -2864,6 +2979,7 @@ function isRetiredNicheHarvestRow(info: VeCollectInfo, task: VeCollectTaskState,
 function clinicProfileForInfo(info: VeCollectInfo, market: VeMarket | undefined, hypothesisId: string | null | undefined): VeClinicSourceProfile | null {
   // Legacy title-only snapshots do not establish whether this was a broad
   // audience. Keep their old scope rather than guessing or adding a DB read.
+  if (info.audience_snapshot?.hypotheses.some((h) => h.audience_scope)) return null;
   return hypothesisId && market !== 'us' && info.hypotheses?.every((hypothesis) => hypothesis.broad === false)
     ? detectVeClinicSourceProfile(info.hypotheses) : null;
 }
@@ -2872,7 +2988,7 @@ function clinicProfileForInfo(info: VeCollectInfo, market: VeMarket | undefined,
  * This restores audience metadata, never source cursors, verdicts or budgets. */
 async function pinMediaAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
   market: VeMarket): Promise<void> {
-  if (!base.hypothesis_id || info.hypotheses?.length !== 1 || info.hypotheses[0].broad !== undefined
+  if (info.audience_snapshot || !base.hypothesis_id || info.hypotheses?.length !== 1 || info.hypotheses[0].broad !== undefined
     || !detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses.map((hypothesis) => ({ ...hypothesis, broad: false })) })) return;
   const { data, error } = await ctx.supabase.from('ve_hypotheses').select('id,title,description,status,broad')
     .eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
@@ -2884,7 +3000,7 @@ async function pinMediaAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBas
 /** Old saved SaaS verdicts may be corrected only against the current selected
  * hypothesis, not a stale title-only plan. No candidate fields are rewritten. */
 async function pinStaffingReviewAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<void> {
-  if (!base.hypothesis_id || info.hypotheses?.length !== 1
+  if (info.audience_snapshot || !base.hypothesis_id || info.hypotheses?.length !== 1
     || !/^B2B\s+SaaS\b/i.test(info.hypotheses[0].title)) return;
   const { data, error } = await ctx.supabase.from('ve_hypotheses').select('id,title,description,status,broad,origin')
     .eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
@@ -2963,7 +3079,7 @@ const SIZE_FILTER_KEYS = [...VE_SIZE_FILTER_KEYS, 'sizeOrUnknown'] as const;
 /** Keep user/plan restrictions when trying a different query. Cross-source
  * fallback is allowed only when the original source has no numeric/geo scope
  * which the new source cannot enforce. Final hypothesis checks stay unchanged. */
-export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollectTask): VeCollectTask | null {
+export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollectTask, preserveSize = false): VeCollectTask | null {
   if (!['companies_directory', 'yandex_maps', 'pdl', 'funded', 'eng_hiring'].includes(candidate.source)) return null;
   if (candidate.source !== original.source) {
     const restricted = original.directory_filters && Object.entries(original.directory_filters)
@@ -2978,7 +3094,7 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
       // (area 113 или пусто) он ничего не сужает. 9f82e79d стояла на 5
       // контактах, потому что любая замена hh_live считалась нарушением.
       || (original.hh_query?.area && !['113', ''].includes(original.hh_query.area.trim()));
-    if (restricted) return null;
+    if (restricted || (preserveSize && SIZE_FILTER_KEYS.some((key) => original.directory_filters?.[key] !== undefined))) return null;
   }
   if (candidate.source === 'companies_directory' && original.source === candidate.source) return {
     ...candidate, directory_filters: { ...candidate.directory_filters, ...original.directory_filters,
@@ -2986,7 +3102,7 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
       // Пороги размера берём у КАНДИДАТА, а не у исходной задачи: иначе
       // самовыдуманный планировщиком порог невозможно ослабить ни одной
       // альтернативой — перетирался бы обратно на каждой попытке.
-      ...Object.fromEntries(SIZE_FILTER_KEYS.map((key) => [key, candidate.directory_filters?.[key]])),
+      ...Object.fromEntries(SIZE_FILTER_KEYS.map((key) => [key, preserveSize ? original.directory_filters?.[key] ?? candidate.directory_filters?.[key] : candidate.directory_filters?.[key]])),
     },
   };
   if (candidate.source === 'yandex_maps' && original.maps_query && candidate.maps_query) return {
@@ -3040,10 +3156,10 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
       const feedback = planExhausted
         ? `Источники плана исчерпаны, а цель базы не набрана. Предложи ДРУГОЙ срез того же рынка: соседние или более общие коды ОКВЭД, готовый каталог Яндекс Карт или другой запрос. ${rules} Предыдущий план (без порогов размера): ${previous}`
         : `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. ${rules} Предыдущий план (без порогов размера): ${previous}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.slice(-6))}`;
-      const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback);
+      const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback, info.audience_snapshot);
       if (replacement.sliceProbe?.outcome === 'rejected') throw new Error('alternative_slice_rejected');
       const known = new Set(tasks.map((task) => veSourceStrategyKey(task.task)));
-      const next = replacement.plan.tasks.map((task) => safeAlternativeTask(task, original.task))
+      const next = replacement.plan.tasks.map((task) => safeAlternativeTask(task, original.task, !!info.audience_snapshot?.hypotheses.some((h) => h.audience_scope?.required.length)))
         .find((task): task is VeCollectTask => !!task && !known.has(veSourceStrategyKey(task)));
       if (next) {
         const task: VeCollectTask = planExhausted ? { ...next, widened: 'replan' } : next;
@@ -3526,7 +3642,13 @@ async function checkCollectedRelevance(args: {
     let hypothesisTitle = '';
     let hypothesisDescription = '';
     let hypothesisOrigin: 'generated' | 'manual' | undefined;
-    if (base.hypothesis_id) {
+    const frozenHypothesis = info.audience_snapshot?.hypotheses.find((h) => h.id === base.hypothesis_id);
+    if (frozenHypothesis) {
+      hypothesisTitle = frozenHypothesis.title;
+      hypothesisDescription = frozenHypothesis.description ?? '';
+      hypothesisOrigin = frozenHypothesis.origin;
+    } else if (base.hypothesis_id) {
+      if (info.audience_snapshot) throw new Error('Frozen collection hypothesis is missing');
       const { data: hypothesisRow, error: hypothesisError } = await ctx.supabase
         .from('ve_hypotheses')
         .select('title, description, origin')
@@ -3557,12 +3679,14 @@ async function checkCollectedRelevance(args: {
       hypothesisTitle,
       hypothesisDescription,
       hypothesisOrigin,
+      audienceScope: frozenHypothesis?.audience_scope,
       language: market === 'us' ? 'en' : 'ru',
       log: (m) => stageLog(ctx, m),
       signal: ctx.signal,
       onActivity: ctx.onActivity,
       checkpointScope: JSON.stringify([
         job.project_id, base.id, base.vertical_id, base.hypothesis_id ?? null,
+        ...(info.audience_snapshot ? [info.audience_snapshot.hash] : []),
       ]),
       reviewAttempt: job.payload?.review_relevance === true ? job.id : undefined,
       // Рубильник VE_PAID_WEBSITE_SEARCH=off отключает самую дорогую статью
@@ -4094,11 +4218,16 @@ async function widenExhaustedPlan(
   if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
   const lead = cause === 'narrow_market' ? 'Текущий срез мал для базы по прогнозу'
     : cause === 'dry_sources' ? 'Источники перестали давать контакты' : 'План исчерпан раньше цели';
-  const { sizeBasis, hypotheses } = await readVeHypothesisSourceBasis(ctx, base.hypothesis_id);
+  const frozen = info.audience_snapshot?.hypotheses;
+  const { sizeBasis, hypotheses } = frozen ? {
+    sizeBasis: frozen.some((h) => veHypothesisSizeBasis(`${h.title} ${h.description ?? ''}`)),
+    hypotheses: frozen.filter((h) => h.broad === false && !h.audience_scope).map((h) => ({ title: h.title, description: h.description ?? '', broad: false })),
+  } : await readVeHypothesisSourceBasis(ctx, base.hypothesis_id);
   const existingTasks = tasks.map((task) => task.task);
   // Only proposed NEW tasks are normalized. The original paid tasks, cursors,
   // harvest and strategy keys remain untouched, including on a retry.
-  const added = normalizeVeGenerationSourcePlan({ tasks: veSecondQueueTasks(existingTasks, sizeBasis) }, {
+  const mandatorySize = !!frozen?.some((h) => h.audience_scope?.required.some(veHypothesisSizeBasis));
+  const added = normalizeVeGenerationSourcePlan({ tasks: mandatorySize ? [] : veSecondQueueTasks(existingTasks, sizeBasis) }, {
     market: ctx.market ?? '', hypotheses, existingTasks,
   }).plan.tasks;
   if (added.length) {
@@ -4441,7 +4570,7 @@ async function completeTargetRound(args: {
       && !baseRowMatchesExclusion(consumedExisting, row)));
   // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
   const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= next.max_rounds;
-  if (existingFirst && !info.niche_source_profile && !info.source_selection && !hasDeferredAcquisition
+  if (existingFirst && !readVeSourceCostPolicy(info.cost_policy) && !info.niche_source_profile && !info.source_selection && !hasDeferredAcquisition
     && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
@@ -4803,6 +4932,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
   if (base.project_id !== job.project_id) throw new Error('Collection base does not belong to the job project');
+  const frozenAudience = readVeCollectionAudienceSnapshot(info.audience_snapshot);
+  if (frozenAudience && (frozenAudience.hypotheses.length !== 1 || frozenAudience.hypotheses[0].id !== base.hypothesis_id)) {
+    throw new Error('Collection audience does not belong to the base hypothesis');
+  }
+  readVeSourceCostPolicy(info.cost_policy);
+  if (info.audience_snapshot && !info.cost_policy) throw new Error('Collection audience is missing its cost policy');
   collectionProjectRules.set(ctx, { rules: await loadVeProjectExclusions(ctx.supabase, job.project_id), info });
   restoreAllowedProjectReserve(ctx);
   if (Array.isArray(base.data)) base.data = retainProjectExclusions(ctx, base.data);
@@ -4925,6 +5060,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // The public wrapper already cloned the per-invocation context. Preserve
   // that identity so the loaded project rules accompany every helper call.
   ctx.market = market;
+  await pinCollectionAudience(ctx, job, base, info, market);
   await pinMediaAudience(ctx, job, base, info, market);
   await pinStaffingReviewAudience(ctx, job, base, info);
   // Pin the cost policy before recovery early returns. Paid children keep
@@ -4973,6 +5109,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       usage,
       market,
       hypothesisId,
+      undefined,
+      info.audience_snapshot,
     );
     info.plan = plan;
     if (planRepair) info.plan_repair = planRepair;
@@ -5105,9 +5243,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // остальные потребовали бы платного поиска сайта ради второй очереди.
       await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
         () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened),
-        info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'),
+        info.audience_snapshot ? veAudienceNicheProfile(info.audience_snapshot.hypotheses) ?? undefined : info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'),
         clinicProfileForInfo(info, market, base.hypothesis_id),
-        base.hypothesis_id ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null);
+        base.hypothesis_id && !info.audience_snapshot?.hypotheses.some((h) => h.audience_scope)
+          ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
