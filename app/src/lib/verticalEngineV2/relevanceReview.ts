@@ -15,6 +15,17 @@ export interface VeRelevanceReviewCompany {
 /** A service mentioned in a buyer description does not erase the provider type. */
 const PROVIDER_TYPE_RULE = 'PROVIDER TYPE: listed services or problems expand the service range, not the kind of organization. When the target names a specialized provider or center, evidence must establish that provider activity as an actual service offering of the organization or a substantive specialist unit it operates. A supporting function inside another activity is not enough: an in-house accountant does not make a factory an accounting firm, and speech therapy, adapted curricula or correctional groups inside preschool education do not make a kindergarten a child neuropsychological or developmental correction center. A bare category such as "speech therapist" establishes neither the specialist center nor its service offering. For that target, look for an actual neuropsychology/developmental correction practice, specialist consultations, assessment or therapy programs offered as such, rather than educational support for enrolled children. A genuine multidisciplinary center or an organization operating such a specialist unit may qualify; neither the word kindergarten nor a mixed directory category is a blanket exclusion. Do not require a separate legal entity, private ownership, exclusivity or the exact title as a name unless the hypothesis requires it. If only a supporting function is shown, return needs_review/insufficient; direct conflict requires affirmative incompatible facts. This type requirement still applies when the description lists a broader service or problem.';
 
+// Hiring across countries was being mistaken for the company's geographic
+// scope by the independent review, even with a correct triage checklist.
+// Reinforce the existing context rule; do not change saved verdict versions.
+export function veStaffingScopeNote(scope: string, origin?: 'generated' | 'manual'): string {
+  const target = scope.split('\nVertical:')[0];
+  if (origin !== 'generated' || /обязательн|строго|только\s+с(?:\s|$)|\b(?:must|required|only with)\b/i.test(target)) return '';
+  if (!/^Target hypothesis:\s*B2B\s+SaaS\b/i.test(target.split('\n')[0])
+    || !/remote|распредел[её]н|удал[её]н|нанима|(?:^|\s)найм|\bhiring\b/i.test(target)) return '';
+  return 'For this SaaS target, the company\'s OWN remote team or hiring in 2+ countries is staffing context, even in the title; missing proof is not insufficient. Still require its own SaaS product, B2B customers and stated company region. Staffing as the company\'s PRODUCT or SERVICE remains activity, not context. Custom developers, outsourcers and resellers alone are not SaaS vendors.';
+}
+
 /** Shared by the classifier, both independent checks and the triage checklist:
  * only the buyer's activity, type and structural conditions are requirements;
  * everything else in the hypothesis is context, never a reason to withhold admission. */
@@ -51,7 +62,7 @@ export function relevanceReviewMessages(scope: string, companies: VeRelevanceRev
     'Return one review for every local i. Explain the specific activity established and its relationship to the target; do not claim exclusivity or absence from an incomplete excerpt.',
     'Keep each reason concise, at most 240 characters. Reasons in ' + (language === 'ru' ? 'Russian' : 'English')
       + '. JSON only: {"reviews":[{"i":0,"result":"insufficient","reason":"..."}]}.',
-  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (medicalNote ? '\n' + medicalNote : '') + '\nExact activity excerpts by local company index:\n'
+  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (veStaffingScopeNote(scope, origin) ? '\n' + veStaffingScopeNote(scope, origin) : '') + (medicalNote ? '\n' + medicalNote : '') + '\nExact activity excerpts by local company index:\n'
     + JSON.stringify(companies.map((company, i) => ({ i, evidence: company.evidence }))) }];
 }
 

@@ -128,6 +128,7 @@ import {
   buildVeRelevanceReviewBatch, compactVeRelevanceReserve, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
   veRelevanceCompanyKey, veRelevanceRowKey, veSavedReviewSignature, type VeRelevanceReserve, type VeRelevanceReserveSummary,
 } from '../relevanceReserve';
+import { veSavedRelevanceScope } from '../collectionRecovery';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
 import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
 import { singleVeSavedEmail } from '../savedEmailReviewEligibility';
@@ -837,7 +838,7 @@ export interface VeCollectInfo {
    */
   slice_probe?: VeSliceProbe;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
-  hypotheses?: Array<{ id: string; title: string; description?: string | null; status: string | null; broad?: boolean }>;
+  hypotheses?: Array<{ id: string; title: string; description?: string | null; status: string | null; broad?: boolean; origin?: 'generated' | 'manual' }>;
   /**
    * Оценка единственного реестрового среза плана. Несколько срезов нельзя
    * складывать: их компании могут пересекаться, поэтому в таком случае числа
@@ -1049,7 +1050,7 @@ async function buildPlan(
   // идут в работу, только когда принятых нет (как в пересчёте % вертикали).
   const { data: hypRows, error: hError } = await ctx.supabase
     .from('ve_hypotheses')
-    .select('id, title, description, tier, status')
+    .select('id, title, description, tier, status, origin')
     .eq('project_id', job.project_id)
     .eq('vertical_id', vertical.id)
     .neq('status', 'rejected')
@@ -1057,13 +1058,14 @@ async function buildPlan(
   if (hError) throw new Error(`ve_hypotheses read: ${hError.message}`);
   let hypotheses = (hypRows ?? [])
     .map((r) => {
-      const row = r as { id?: unknown; title?: unknown; description?: unknown; tier?: unknown; status?: unknown };
+      const row = r as { id?: unknown; title?: unknown; description?: unknown; tier?: unknown; status?: unknown; origin?: unknown };
       return {
         id: typeof row.id === 'string' ? row.id : '',
         title: typeof row.title === 'string' ? row.title : '',
         description: typeof row.description === 'string' ? row.description : null,
         tier: typeof row.tier === 'number' ? row.tier : null,
         status: typeof row.status === 'string' ? row.status : null,
+        origin: row.origin === 'generated' ? 'generated' as const : row.origin === 'manual' ? 'manual' as const : undefined,
       };
     })
     .filter((h) => h.title);
@@ -1177,7 +1179,7 @@ async function buildPlan(
     sliceProbe,
     // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
     // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
-    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status,
+    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, description: h.description, status: h.status, origin: h.origin,
       ...(hypothesisId && broadFlag !== null ? { broad } : {}) })),
   };
 }
@@ -2879,6 +2881,17 @@ async function pinMediaAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBas
   info.hypotheses = [data as NonNullable<VeCollectInfo['hypotheses']>[number]];
   await persistCollectInfo(ctx, base.id, info);
 }
+/** Old saved SaaS verdicts may be corrected only against the current selected
+ * hypothesis, not a stale title-only plan. No candidate fields are rewritten. */
+async function pinStaffingReviewAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<void> {
+  if (!base.hypothesis_id || info.hypotheses?.length !== 1
+    || !/^B2B\s+SaaS\b/i.test(info.hypotheses[0].title)) return;
+  const { data, error } = await ctx.supabase.from('ve_hypotheses').select('id,title,description,status,broad,origin')
+    .eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
+  if (error) throw new Error(`Relevance audience read: ${error.message}`);
+  if (!data || data.status === 'rejected') throw new Error('Relevance audience is no longer available');
+  info.hypotheses = [data as NonNullable<VeCollectInfo['hypotheses']>[number]];
+}
 /** Prefer an available specialist catalogue over the whole medical sector.
  * This changes only scheduling: saved queries, cursors, receipts and economic
  * holds stay intact. A weak/exhausted catalogue never blocks the fallback. */
@@ -3793,6 +3806,7 @@ async function reviewSavedRelevance(
     emailRecoveryError = recovered.error ?? null;
   }
   const { rows, evidenceRows, companies } = buildVeRelevanceReviewBatch({
+    ...veSavedRelevanceScope(info, base.hypothesis_id),
     reserve: savedReserve,
     ready: projectAllowedRows(ctx, Array.isArray(base.data) ? base.data : []),
     source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic,
@@ -4361,7 +4375,8 @@ async function completeTargetRound(args: {
   const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
     && targetRows < progress.ready_target;
   const triageEnabled = isVeRelevanceTriageEnabled(job.project_id);
-  const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({
+  const reviewScope = veSavedRelevanceScope(info, base.hypothesis_id);
+  const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({ ...reviewScope,
     reserve: reserveRows, ready: cleaned.rows, source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic: true,
     allowPaidSearch: !existingFirst, triage: triageEnabled,
   }) : null;
@@ -4376,7 +4391,7 @@ async function completeTargetRound(args: {
   // Форма отпечатка изменилась, поэтому после раскатки каждая база делает ровно
   // один лишний проход и только потом снова защёлкивается.
   const reviewSignature = automaticBatch?.rows.length
-    ? relevanceHash(veSavedReviewSignature(automaticBatch.rows, { triage: triageEnabled }))
+    ? relevanceHash(veSavedReviewSignature(automaticBatch.rows, { ...reviewScope, triage: triageEnabled }))
     : null;
   const stalledReview = reviewSignature !== null && info.relevance_review_progress?.signature === reviewSignature;
   if (reviewSignature === null) delete info.relevance_review_progress;
@@ -4446,7 +4461,7 @@ async function completeTargetRound(args: {
       delete task.excluded_during_fetch;
       delete task.already_seen_during_fetch;
     }
-    const saved = buildVeRelevanceReviewBatch({ reserve: reserveRows, ready: cleaned.rows,
+    const saved = buildVeRelevanceReviewBatch({ ...reviewScope, reserve: reserveRows, ready: cleaned.rows,
       source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic: true, triage: triageEnabled });
     continueSavedReview = saved.rows.length > 0;
     if (continueSavedReview) info.relevance_review_requested = true;
@@ -4911,6 +4926,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // that identity so the loaded project rules accompany every helper call.
   ctx.market = market;
   await pinMediaAudience(ctx, job, base, info, market);
+  await pinStaffingReviewAudience(ctx, job, base, info);
   // Pin the cost policy before recovery early returns. Paid children keep
   // their immutable inputs; a resume does not buy search for their old backlog.
   if (target && market !== 'us' && !isRefill) {

@@ -273,25 +273,28 @@ describe('VE2 collection progress presentation', () => {
       const blocked = { ...stopped, collection_continuation: unavailable };
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: blocked, jobs: [] }))
         .toMatchObject(readyRows > 0
-          ? { canContinue: false, additionalCollection: { action: null, reason: unavailable.reason } }
+          ? { canContinue: false, collectionSummary: expect.stringContaining(unavailable.reason) }
           : { canContinue: false, continueHint: unavailable.reason });
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'pending' }, base: blocked, jobs: [] }))
         .toMatchObject({ canContinue: false, guidance: { action: 'check' } });
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
         collection_continuation: { available: true, action: 'resume_collection', code: 'fresh_sources', reason: 'Есть новые источники.' } }, jobs: [] }))
+        .toMatchObject({ canContinue: true, continueLabel: 'Собрать ещё контакты' });
+      const unknown = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
+        collection_continuation: { available: true, action: 'resume_preparation', code: 'state_unchecked', reason: 'Нужно проверить состояние.' } }, jobs: [] });
+      expect(unknown)
         .toMatchObject(readyRows > 0
-          ? { canContinue: false, additionalCollection: { action: 'collect', reason: 'Есть новые источники.' } }
-          : { canContinue: true, continueLabel: 'Собрать ещё контакты' });
-      expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
-        collection_continuation: { available: true, action: 'resume_preparation', code: 'state_unchecked', reason: 'Нужно проверить состояние.' } }, jobs: [] }))
-        .toMatchObject(readyRows > 0
-          ? { canContinue: false, canCheckContinuation: false, additionalCollection: { action: 'check' }, guidance: { action: 'review' } }
-          : { canContinue: false, canCheckContinuation: true, guidance: { action: 'check' } });
+          ? { canContinue: false, continuationUnconfirmed: true, guidance: { action: 'review' } }
+          : { canContinue: false, continuationUnconfirmed: true, guidance: { action: 'check', next: expect.stringContaining('пока не подтверждена') } });
+      expect(unknown).not.toHaveProperty('canCheckContinuation');
+      expect(unknown.continuationBlocked).not.toBe(true);
+      expect(unknown.continueHint).toBeUndefined();
       // Legacy ready bases without a saved decision stay downloadable and
-      // launchable; optional inspection cannot call the collection action.
+      // launchable. Unknown availability exposes no manual check or retry.
       if (readyRows > 0) {
-        expect(presentation).toMatchObject({ canContinue: false, additionalCollection: { action: 'check' },
+        expect(presentation).toMatchObject({ canContinue: false, collectionSummary: expect.any(String),
           guidance: { title: 'База и письма готовы', action: 'review' } });
+        expect(presentation).not.toHaveProperty('additionalCollection');
         expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped,
           jobs: [], approved: true })).toMatchObject({ canContinue: false, guidance: { action: 'launch' } });
       }

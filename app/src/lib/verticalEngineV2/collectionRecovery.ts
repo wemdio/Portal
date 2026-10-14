@@ -12,6 +12,7 @@ import { veCanWidenPlan } from './planWidening';
 import { isVeRenewableSourceTask, reopenVeSourceTask } from './sourceRenewal';
 import { validVeAdaptiveCollection, veAdaptiveSourceDeferred, veAdaptiveSourceDry, veSourceStrategyKey, type VeAdaptiveCollection } from './adaptiveCollection';
 import type { VeCollectTask } from './prompts/sourcePlan';
+import type { VeStaffingCorrectionScope } from './staffingCorrection';
 import { relevanceHash } from './relevanceCheckpoint';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
 
@@ -53,9 +54,21 @@ function hasSourceCorrection(info: Record<string, unknown>, tasks: Array<Record<
   });
 }
 
-/** Pure server decision for resume, coordinator and UI projection. The caller
- * additionally applies live-job and launched-base guards. No paid calls here. */
-export function getVeCollectionContinuation(base: Record<string, unknown>): VeCollectionContinuation {
+/** Only a single, explicitly identified audience can correct saved verdicts. */
+export function veSavedRelevanceScope(info: { hypotheses?: unknown }, hypothesisId: unknown): VeStaffingCorrectionScope {
+  const hypotheses = records(info.hypotheses);
+  const hypothesis = hypotheses.length === 1 && typeof hypothesisId === 'string'
+    && hypotheses[0].id === hypothesisId ? hypotheses[0] : null;
+  if (!hypothesis || hypothesis.status === 'rejected') return {};
+  return {
+    hypothesisTitle: typeof hypothesis.title === 'string' ? hypothesis.title : undefined,
+    hypothesisDescription: typeof hypothesis.description === 'string' ? hypothesis.description : undefined,
+    hypothesisOrigin: hypothesis.origin === 'generated' || hypothesis.origin === 'manual' ? hypothesis.origin : undefined,
+  };
+}
+
+/** Pure server decision; callers additionally apply live-job and launched-base guards. */
+export function getVeCollectionContinuation(base: Record<string, unknown>, currentHypothesis?: Record<string, unknown> | null): VeCollectionContinuation {
   const info = record(base.collect_info);
   if (base.source !== 'auto' || !base.hypothesis_id || info?.collection_mode !== 'preview' || info.refill || info.supply_batch_id) {
     return unavailable('not_preview', 'Для этой базы продолжение сбора недоступно.');
@@ -102,9 +115,11 @@ export function getVeCollectionContinuation(base: Record<string, unknown>): VeCo
     return unavailable('invalid_checkpoint', 'Сохранённые результаты проверки адресов требуют проверки.');
   }
   const triage = isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null);
-  const batch = buildVeRelevanceReviewBatch({ reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+  const scope = veSavedRelevanceScope(currentHypothesis !== undefined ? { hypotheses: currentHypothesis ? [currentHypothesis] : [] } : info, base.hypothesis_id);
+  const batch = buildVeRelevanceReviewBatch({ ...scope,
+    reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
     allowPaidSearch: !info.niche_source_profile && !info.source_selection && record(info.search_policy)?.phase !== 'existing', triage });
-  if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { triage }))) {
+  if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { ...scope, triage }))) {
     return available('saved_work', 'Можно уточнить соответствие уже найденных компаний.');
   }
   // Предел раундов не препятствие: продолжение само даёт новый бюджет
@@ -147,8 +162,8 @@ export function getVeCollectionContinuation(base: Record<string, unknown>): VeCo
 }
 
 /** Compatibility for callers considering terminal partial previews only. */
-export function canResumePartialPreview(base: Record<string, unknown>): boolean {
-  return base.status === 'analyzed' && getVeCollectionContinuation(base).available;
+export function canResumePartialPreview(base: Record<string, unknown>, currentHypothesis?: Record<string, unknown> | null): boolean {
+  return base.status === 'analyzed' && getVeCollectionContinuation(base, currentHypothesis).available;
 }
 
 /**

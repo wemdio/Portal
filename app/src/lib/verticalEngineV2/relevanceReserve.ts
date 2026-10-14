@@ -3,6 +3,7 @@ import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentit
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION } from './relevanceDecision';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
+import { needsVeStaffingCorrection, VE_STAFFING_CORRECTION_VERSION, type VeStaffingCorrectionScope } from './staffingCorrection';
 
 /** Validated address of a relevant company kept out of the ready base only by the
  * specialist's "addresses per company" limit (companyContactCap.ts). Recomputed
@@ -225,7 +226,7 @@ function awaitsVeRulesReview(row: Record<string, unknown>): boolean {
  */
 export function veSavedReviewSignature(
   rows: Array<Record<string, unknown>>,
-  options: { triage: boolean },
+  options: { triage: boolean } & VeStaffingCorrectionScope,
 ): unknown[] {
   return rows.map((row) => {
     const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
@@ -240,7 +241,11 @@ export function veSavedReviewSignature(
       // Отметка правил отбора — тоже продвижение. Элемент есть только у
       // отмеченных строк: отпечатки строк без отметки прежние, лишнего
       // прохода после раскатки нет.
-      ...(decision?.rules_version !== undefined ? [decision.rules_version] : [])];
+      ...(decision?.rules_version !== undefined ? [decision.rules_version] : []),
+      // An old no-progress signature must not hide this newly available work.
+      // Unrelated hypotheses/rows retain exactly their former fingerprint.
+      ...(needsVeStaffingCorrection(decision, options) ? ['staffing_pending', VE_STAFFING_CORRECTION_VERSION] : []),
+      ...(decision?.staffing_correction_version !== undefined ? ['staffing', decision.staffing_correction_version] : [])];
   }).sort();
 }
 
@@ -258,7 +263,7 @@ export interface VeRelevanceReviewBatch {
 }
 
 /** A company is reviewed once using facts from all of its saved observations. */
-export function buildVeRelevanceReviewBatch(input: {
+export function buildVeRelevanceReviewBatch(input: VeStaffingCorrectionScope & {
   reserve: Array<Record<string, unknown>>;
   ready: Array<Record<string, unknown>>;
   source: Array<Record<string, unknown>>;
@@ -273,6 +278,9 @@ export function buildVeRelevanceReviewBatch(input: {
     .map(veRelevanceCompanyKey));
   const selected = new Set(input.reserve.filter((row) => {
     if (!needsVeRelevanceReview(row)) return false;
+    // A correction only reuses a saved semantic proposal. The gate checks its
+    // full receipt and website guards; no search capability is required here.
+    if (isVeAcceptedEmailStatus(row._email_status) && needsVeStaffingCorrection(row._ve_relevance, input)) return true;
     const untriaged = input.triage === true && awaitsVeTriage(row);
     // A deferred search stays excluded without paid search, also for the rules
     // pass: a rejected admission waits for that website work, so selecting it
