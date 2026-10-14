@@ -3,8 +3,10 @@
  * базы (гео/индустрии/типы/должности + сегменты + углы) → he_bases.analysis,
  * status 'analyzed'. Результат — основа 15% дописки стадии template.
  *
- * Обе записи статуса — на входе ('analyzing') и в конце ('analyzed') — CAS по
- * ANALYZABLE_BASE_STATUSES: отменённую ('failed') базу стадия не оживляет.
+ * Обе записи статуса — на входе ('analyzing') и в конце ('analyzed') — у
+ * market='us' CAS по ANALYZABLE_BASE_STATUSES: отменённую ('failed') базу стадия
+ * не оживляет. RU-проект пишет обе безусловно и анализ — как вернула модель, как
+ * до порта ENG (решение владельца 14.10.2026 «Как было»).
  */
 
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
@@ -88,25 +90,39 @@ export async function runBaseAnalyzeStage(job: HeJob, ctx: HeStageContext): Prom
     .slice(0, MAX_SAMPLE_ROWS)
     .map((r) => sanitizeRow(r, columns));
 
-  // Вход — CAS по ANALYZABLE_BASE_STATUSES. Ноль строк — база уже не наша
-  // (отменена, закрыта или ещё собирается): отказ ДО вызова модели, без оплаты.
-  // Отменённую джобу воркер разбирает как отмену (попытку не тратит), иначе
-  // повтор снова пройдёт через этот же CAS до вызова модели. Сбой самой
-  // записи, как и раньше, анализ не останавливает: статус решит CAS конечной
-  // записи.
-  const { data: entered, error: enterError } = await ctx.supabase
-    .from('he_bases')
-    .update({ status: 'analyzing', updated_at: new Date().toISOString() })
-    .eq('id', baseId)
-    .in('status', ANALYZABLE_BASE_STATUSES)
-    .select('id');
-  if (enterError) {
-    stageLog(ctx, `[base_analyze] запись 'analyzing' не легла (${enterError.message}) — анализ продолжаем`);
-  } else if ((entered ?? []).length === 0) {
-    throw new Error(
-      `he_bases ${baseId}: статус базы не из ${ANALYZABLE_BASE_STATUSES.join('/')} ` +
-        `(прочитан '${base.status}') — анализ не запускаем, модель не вызывалась`,
-    );
+  // Рынок: ctx.market (воркер передаёт его всегда), фолбэк — колонка
+  // he_projects.market. Определяет язык промпта анализа и CAS записей статуса.
+  // Нужен до записи входа, поэтому фолбэк читается здесь, а не перед вызовом
+  // модели.
+  const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
+
+  if (market === 'us') {
+    // Вход — CAS по ANALYZABLE_BASE_STATUSES. Ноль строк — база уже не наша
+    // (отменена, закрыта или ещё собирается): отказ ДО вызова модели, без
+    // оплаты. Отменённую джобу воркер разбирает как отмену (попытку не
+    // тратит), иначе повтор снова пройдёт через этот же CAS до вызова модели.
+    // Сбой самой записи, как и раньше, анализ не останавливает: статус решит
+    // CAS конечной записи.
+    const { data: entered, error: enterError } = await ctx.supabase
+      .from('he_bases')
+      .update({ status: 'analyzing', updated_at: new Date().toISOString() })
+      .eq('id', baseId)
+      .in('status', ANALYZABLE_BASE_STATUSES)
+      .select('id');
+    if (enterError) {
+      stageLog(ctx, `[base_analyze] запись 'analyzing' не легла (${enterError.message}) — анализ продолжаем`);
+    } else if ((entered ?? []).length === 0) {
+      throw new Error(
+        `he_bases ${baseId}: статус базы не из ${ANALYZABLE_BASE_STATUSES.join('/')} ` +
+          `(прочитан '${base.status}') — анализ не запускаем, модель не вызывалась`,
+      );
+    }
+  } else {
+    // RU — как до порта ENG: запись безусловная, её сбой не читается.
+    await ctx.supabase
+      .from('he_bases')
+      .update({ status: 'analyzing', updated_at: new Date().toISOString() })
+      .eq('id', baseId);
   }
 
   let verticalName = '';
@@ -118,10 +134,6 @@ export async function runBaseAnalyzeStage(job: HeJob, ctx: HeStageContext): Prom
       .maybeSingle();
     verticalName = (vRow as { name?: string } | null)?.name ?? '';
   }
-
-  // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market (лениво,
-  // только когда воркер рынок не прокинул). Определяет язык промпта анализа.
-  const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
 
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildBaseAnalysisMessagesEn : buildBaseAnalysisMessages)({
@@ -136,7 +148,7 @@ export async function runBaseAnalyzeStage(job: HeJob, ctx: HeStageContext): Prom
   );
   addUsage(usage, llm);
 
-  // Конец — тот же CAS. Ноль строк значит, что за время вызова модели базу
+  // Конец у market='us' — тот же CAS. Ноль строк значит, что за время вызова модели базу
   // закрыли (отмена → 'failed'): анализ не пишем и базу не оживляем. Шаблон по
   // ней тогда не ставится никем: дочейн автопилота (afterBaseAnalyzeDone)
   // ставит письма только по базе, которая читается 'analyzed', а у отменённой
@@ -147,20 +159,29 @@ export async function runBaseAnalyzeStage(job: HeJob, ctx: HeStageContext): Prom
   // analysis — текст модели: один NUL или одиночный UTF-16 суррогат, и PostgREST
   // отвергает запись уже после оплаченного вызова — стадия падает и на повторе
   // платит снова. Чистка трогает только эти два символа: текст без них (вся
-  // кириллица и латиница) ложится байт-в-байт тем же.
-  const { data: analyzed, error: updError } = await ctx.supabase
-    .from('he_bases')
-    .update({ analysis: stripUnstorableJsonChars(llm.data), status: 'analyzed', updated_at: new Date().toISOString() })
-    .eq('id', baseId)
-    .in('status', ANALYZABLE_BASE_STATUSES)
-    .select('id');
-  if (updError) throw new Error(`he_bases update analysis: ${updError.message}`);
-  if ((analyzed ?? []).length === 0) {
-    stageLog(
-      ctx,
-      `[base_analyze] база ${baseId} за время анализа ушла из ${ANALYZABLE_BASE_STATUSES.join('/')} ` +
-        '(отмена или закрытие) — анализ не записан, база не оживает',
-    );
+  // кириллица и латиница) ложится байт-в-байт тем же. CAS и чистка — только
+  // market='us'; RU — безусловная запись как до порта ENG (шапка файла).
+  if (market === 'us') {
+    const { data: analyzed, error: updError } = await ctx.supabase
+      .from('he_bases')
+      .update({ analysis: stripUnstorableJsonChars(llm.data), status: 'analyzed', updated_at: new Date().toISOString() })
+      .eq('id', baseId)
+      .in('status', ANALYZABLE_BASE_STATUSES)
+      .select('id');
+    if (updError) throw new Error(`he_bases update analysis: ${updError.message}`);
+    if ((analyzed ?? []).length === 0) {
+      stageLog(
+        ctx,
+        `[base_analyze] база ${baseId} за время анализа ушла из ${ANALYZABLE_BASE_STATUSES.join('/')} ` +
+          '(отмена или закрытие) — анализ не записан, база не оживает',
+      );
+    }
+  } else {
+    const { error: updError } = await ctx.supabase
+      .from('he_bases')
+      .update({ analysis: llm.data, status: 'analyzed', updated_at: new Date().toISOString() })
+      .eq('id', baseId);
+    if (updError) throw new Error(`he_bases update analysis: ${updError.message}`);
   }
 
   return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };

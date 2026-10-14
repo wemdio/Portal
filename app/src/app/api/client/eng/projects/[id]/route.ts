@@ -21,6 +21,7 @@ import { isAnalyzingBaseLive, liveBaseIdsFromJobs } from '@/lib/hypothesisEngine
 import { readHeChainExhaustedVerticals } from '@/lib/hypothesisEngine/autopilotReconcile';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import {
+  OFFER_OVERRIDE_MAX_LENGTH,
   patchHeProjectBrief,
   type HeBriefField,
   type HeBriefPatchBody,
@@ -628,8 +629,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     // Рамка ЦА уходит отдельным аргументом: overrides и рамка ложатся одной
     // записью brief (один read-merge-write), а staff-роут, который зовёт
-    // ту же функцию без него, `icp` не пишет вовсе.
-    const patch = await patchHeProjectBrief(supabaseAdmin, id, body, icpRequested ? { icp: icpPatch } : undefined);
+    // ту же функцию без него, `icp` не пишет вовсе. Кап оффера этот роут
+    // передаёт правилом (staff-PATCH правила не передаёт, и кап там решает
+    // рынок проекта: 'us' — тот же отказ, RU — оффер любой длины, как до порта
+    // ENG); проверка стоит в функции на прежнем месте, поэтому порядок отказов
+    // кабинета прежний.
+    const patch = await patchHeProjectBrief(
+      supabaseAdmin,
+      id,
+      body,
+      icpRequested ? { icp: icpPatch } : undefined,
+      { offerMaxLength: OFFER_OVERRIDE_MAX_LENGTH },
+    );
     if (!patch.ok) {
       const err = patch.error;
       switch (err.code) {

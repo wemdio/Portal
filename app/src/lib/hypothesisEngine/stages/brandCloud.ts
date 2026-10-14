@@ -19,6 +19,12 @@
  * (мёртвый сайт, пустая выдача, 4xx на его же контексте) по-прежнему
  * пропускается — см. heRunStoppingLlmFailure ниже.
  *
+ * Все три остановки — отказ доступа к провайдеру, полный отказ поиска и «модель
+ * не разобрала ни один бренд» — ТОЛЬКО market='us' (решение владельца
+ * 14.10.2026 «Как было»). RU-проект перебирает бренды, как до порта ENG: сбой
+ * по бренду пропускается, стадия завершается со списком сущностей, какой
+ * получился (в том числе пустым).
+ *
  * Чекпойнт перебора (только market='us'): после каждого бренда, как только
  * хоть один бренд разобран, разобранный префикс пишется в he_jobs.result этой
  * же джобы, и повтор джобы продолжает с него — оплаченные ответы модели второй
@@ -79,9 +85,9 @@ import type { HeCompetitorEntry } from './competitors';
  * потому что две копии этого списка рано или поздно разойдутся, а расходятся
  * они деньгами.
  *
- *  - billing / configuration (оба рынка): нужен человек. Воркер отказывает по
- *    ним терминально (failJob, terminalProviderRefusal) — то есть НЕ
- *    переплачивает стадию двумя лишними прогонами;
+ *  - billing / configuration (только market='us'): нужен человек. Воркер
+ *    отказывает по ним терминально (failJob, terminalProviderRefusal) — то
+ *    есть НЕ переплачивает стадию двумя лишними прогонами;
  *  - rate_limit — ТОЛЬКО market='us' (см. heRunStoppingLlmFailure). Транспорт
  *    уже пересидел 429 внутри вызова (до 3 повторов, каждое ожидание ≤30 с) и
  *    всё равно получил отказ. Воркер отодвигает повтор до времени, которое
@@ -95,8 +101,10 @@ import type { HeCompetitorEntry } from './competitors';
  *    встал (сам 429 не оплачивается).
  *
  * На русском рынке (легаси /tools/hypothesis-engine, ежедневный инструмент
- * специалистов) 429 поглощается поэлементно, как было до волны 3: элемент
- * пропускается, перебор идёт дальше, стадия кончается за одно исполнение.
+ * специалистов) ЛЮБОЙ отказ модели — 429, деньги, ключ — поглощается
+ * поэлементно, как было до порта ENG (решение владельца 14.10.2026 «Как
+ * было»): элемент пропускается, перебор идёт дальше, стадия кончается за одно
+ * исполнение.
  * Волна 3 сделала 429 останавливающим и для RU, не сказав об этом, и воркер
  * перезапускал стадию с первого элемента, заново покупая уже готовые вердикты
  * (до трёх исполнений там, где база платила один раз). Чекпойнта у RU нет —
@@ -120,14 +128,15 @@ const HE_RUN_STOPPING_LLM_KINDS = new Set<HeLlmFailureKind>(['billing', 'configu
  * Факты отказа модели, если он останавливает весь прогон, — иначе null.
  * Читается ТИПОМ (heLlmFailureOf → дискриминант класса транспорта), никогда
  * регэкспом по тексту: в этом движке «aborted» означает отмену пользователем.
- * rate_limit останавливает только market='us' — там повтор продолжает с
- * чекпойнта (см. docblock HE_RUN_STOPPING_LLM_KINDS).
+ * Только market='us' — там повтор продолжает с чекпойнта (см. docblock
+ * HE_RUN_STOPPING_LLM_KINDS); у RU-проекта всегда null, как до порта ENG.
  */
 export function heRunStoppingLlmFailure(error: unknown, market: HeMarket): HeLlmFailureFacts | null {
+  if (market !== 'us') return null;
   const failure = heLlmFailureOf(error);
   if (!failure) return null;
   if (HE_RUN_STOPPING_LLM_KINDS.has(failure.kind)) return failure;
-  return failure.kind === 'rate_limit' && market === 'us' ? failure : null;
+  return failure.kind === 'rate_limit' ? failure : null;
 }
 
 /**
@@ -405,7 +414,11 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
   // (heSearchOutageFailure) судит о том, что поиск делает сейчас, а не о
   // префиксе из чекпойнта. Обслуженные запросы префикса учитываются только в
   // итоговой проверке «ни один бренд не получил выдачи» ниже.
+  // У RU-проекта отказ поиска сюда не доходит: resolveSearch отдаёт ему пустую
+  // выдачу, как до порта ENG (io.ts), а остановки по отказу ниже стоят только у
+  // 'us' (searchStops).
   const tally = newHeSearchTally();
+  const searchStops = market === 'us';
   const restoredSearchAnswered = restored?.search_answered ?? 0;
   let searchedThisRun = 0;
   /**
@@ -429,7 +442,7 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
     // обслуживший НИ ОДНОГО бренда за два подряд, лёг целиком
     // (heSearchOutageFailure). Пустая выдача по бренду — факт о бренде, и сюда
     // не попадает; одиночный блип не переживает следующего бренда.
-    const outage = heSearchOutageFailure(tally, searchedThisRun);
+    const outage = searchStops ? heSearchOutageFailure(tally, searchedThisRun) : undefined;
     if (outage) {
       stageLog(
         ctx,
@@ -466,8 +479,9 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
       // с пустым списком сущностей, а стадия hypotheses читает это как «следов
       // бренда нет» — то есть отказ провайдера превращался в вывод о рынке.
       // Бросаем исходную ошибку: её тип нужен воркеру целым (пауза по 429,
-      // терминальный отказ по 402/401). 429 на RU сюда не попадает и
-      // поглощается ниже как сбой одного бренда (см. heRunStoppingLlmFailure).
+      // терминальный отказ по 402/401). У RU-проекта ни один отказ модели сюда
+      // не попадает и поглощается ниже как сбой одного бренда, как до порта ENG
+      // (см. heRunStoppingLlmFailure).
       const refusal = heRunStoppingLlmFailure(e, market);
       if (refusal) {
         stageLog(
@@ -507,7 +521,9 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
   // Ни один бренд не получил выдачи из-за провайдера: «следов бренда нет» было
   // бы ложью про все бренды сразу, а её читает стадия hypotheses. Обслуженные
   // запросы префикса из чекпойнта (только us) — в том же счёте.
-  const searchFailure = heSearchStageFailure({ ...tally, answered: tally.answered + restoredSearchAnswered });
+  const searchFailure = searchStops
+    ? heSearchStageFailure({ ...tally, answered: tally.answered + restoredSearchAnswered })
+    : undefined;
   if (searchFailure) {
     stageLog(
       ctx,
@@ -527,8 +543,9 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
   // контексте бренда), уходил в 'done' с пустым списком, he_jobs.error оставался
   // NULL, и hypotheses получала «рынок пуст» вместо честного отказа.
   // Бросаем ПЕРВЫЙ проглоченный сбой: его тип нужен воркеру целым, а первый —
-  // тот, на котором прогон реально начал сыпаться.
-  if (brandsAnswered === 0 && firstModelFailure !== undefined) {
+  // тот, на котором прогон реально начал сыпаться. Только market='us': RU-проект
+  // завершает стадию с пустым списком, как до порта ENG (шапка файла).
+  if (market === 'us' && brandsAnswered === 0 && firstModelFailure !== undefined) {
     stageLog(
       ctx,
       `[brand_cloud] модель не разобрала ни один из ${targets.length} брендов — стадия остановлена `

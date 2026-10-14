@@ -49,8 +49,9 @@
  *    миграции, «закрепление воркспейса»);
  *  - настройки кампаний пула HE_ENG_POOL_CAMPAIGN_SETTINGS (ниже):
  *    stop_on_reply = true, open_tracking = false, link_tracking = false — и у
- *    нового, и у существующего пресета (insert_unsubscribe_header = false
- *    колонки в пресете не имеет и доходит до кампаний через ядро). Кампании
+ *    нового, и у существующего пресета (insert_unsubscribe_header = false и
+ *    stop_for_company = true колонок в пресете не имеют и доходят до кампаний
+ *    через ядро). Кампании
  *    ENG-кабинета получают их и без пресета (ядро, вход campaignSettings; у
  *    staff-роута запуска шаблона us-проекта клиента кабинета ядро берёт их
  *    само — launchTemplate, шаг 4b‴′); в пресете они для путей, которые
@@ -130,12 +131,18 @@ import {
  *    (PRESET_POOL_SETTING_KEYS). Кампании, созданные до этой правки и уже
  *    принявшие адреса, заголовок не меняют: такая кампания настройки не
  *    получает.
- *  - stop_for_company НЕ задаётся — решение владельца ещё не принято
- *    (отчёт аудита 14.10.2026): ответ одного адреса компании не останавливает
- *    шаги её остальных адресов.
+ *  - stop_for_company включён (решение владельца 14.10.2026): после ответа
+ *    любого адреса компании её остальные адреса в этой кампании писем больше
+ *    не получают. Доходит до рассыльщика тем же путём, что и
+ *    insert_unsubscribe_header: payload создания и PATCH пустой кампании
+ *    прошлой попытки в ядре (вход campaignSettings — кабинет, шаг 4b‴′ —
+ *    staff-запуск us-проекта клиента кабинета). В пресет не пишется: колонки
+ *    у client_campaign_presets нет (PRESET_POOL_SETTING_KEYS). Кампании,
+ *    созданные до этой правки и уже принявшие адреса, его не получают.
  */
 export const HE_ENG_POOL_CAMPAIGN_SETTINGS = {
   stop_on_reply: true,
+  stop_for_company: true,
   open_tracking: false,
   link_tracking: false,
   insert_unsubscribe_header: false,

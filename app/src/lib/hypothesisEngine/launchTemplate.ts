@@ -38,6 +38,19 @@
  * записи без ключа pending — все, что есть в RU-инструменте, — считаются
  * законченными.
  *
+ * RU-ПРОЕКТ — КАК ДО ПОРТА ENG (решение владельца 14.10.2026 «Как было», с
+ * 15.10.2026). Всё, что описано в этой шапке про запись по ходу, аренду,
+ * достройку, предохранители и предполёт, — путь market='us'. Шаблон проекта с
+ * любым другим рынком (то есть каждый проект staff-инструмента) после чтения
+ * рынка (шаг 4b) уходит в runHeTemplateLaunchAsBeforePort (в конце файла):
+ * прежний запуск байт в байт — одна запись в конце без pending и аренды,
+ * отказ поздней группы сегментов — предупреждение законченного запуска, без
+ * гейта вердиктов, чёрного списка клиента, стандартных полей лида и новых
+ * предупреждений. Аренду и долг в записи шаблона RU-проекта (их мог оставить
+ * код порта, работавший на проде с 14.10.2026) запуск не читает: рынок для
+ * этого читается заранее (шаг 1, readHeLaunchStateMarket). Отличие от
+ * прежнего — отказ на непрочитанном рынке (докблок той функции).
+ *
  * ЧЕМ ЭТО НАЖИМАЕТСЯ (28.09.2026, там же). Механика достройки сама по себе была
  * недостижима из кабинета: шаг «Review & Launch» считал запускаемым шаблон без
  * ЛЮБОЙ записи о запуске, а частичный запуск запись оставляет — кнопка
@@ -81,16 +94,13 @@
  *     адресу той же компании (шаг 4c);
  *   - вердикт валидации почты обязателен у market='us': строка без вердикта
  *     лидом не становится;
- *   - чёрный список контактов клиента применяется в ОБОИХ контурах; не
- *     прочитался — запуск не состоялся.
- * ЧТО ИЗ ЭТОГО ВИДИТ RU-ИНСТРУМЕНТ (он же ежедневный staff-инструмент): только
- * чёрный список — он про получателя и не зависит от рынка. Требование вердикта
- * и отказ по легаси-сборке скоупнуты на 'us': RU-базы собираются без разноса
- * адресов и законно бывают без вердиктов, а запрещать сотруднику привычный
- * запуск никто не просил. Взамен RU получает счёт таких строк вслух.
- * Сколько строк сняли эти предохранители (и сколько RU отправил без вердикта),
- * уходит в warnings ответа (их показывает и staff-UI, и — после сужения
- * роутом — ENG-кабинет) и в аудит.
+ *   - чёрный список контактов клиента: не прочитался — запуск не состоялся.
+ * RU-ИНСТРУМЕНТ (он же ежедневный staff-инструмент) этих предохранителей не
+ * видит: RU-проект идёт прежним запуском (runHeTemplateLaunchAsBeforePort) — без
+ * гейта вердиктов и без чёрного списка клиента, как до порта ENG (решение
+ * владельца 14.10.2026 «Как было»: список не вошёл в то, что остаётся у RU).
+ * Сколько строк сняли эти предохранители, уходит в warnings ответа (после
+ * сужения роутом — в ENG-кабинет) и в аудит.
  *
  * ПОТОЛОК ЗАПУСКА (HE_LAUNCH_MAX_LEADS) считает АДРЕСА, а число клиента —
  * КОМПАНИИ, и после разноса адресов по строкам это уже не одно и то же: 2000
@@ -1228,6 +1238,59 @@ async function heUsLaunchAudienceGuard(
  */
 const HE_LAUNCH_UPLOAD_CHUNK = 1000;
 
+/**
+ * Рынок проекта шаблона для решения по аренде и долгу записи (шаг 1) — до шага
+ * 2, тем же путём база → проект, что у шага 4b. null — не прочитался (сбой
+ * БД, нет базы или проекта): тогда шаг 1 решает, как раньше. Никогда не
+ * бросает. Зовётся только для записи с живой арендой или долгом.
+ */
+async function readHeLaunchStateMarket(portalDb: SupabaseClient, baseId: string): Promise<HeMarket | null> {
+  try {
+    const { data: baseRow, error: baseErr } = await portalDb
+      .from('he_bases')
+      .select('project_id')
+      .eq('id', baseId)
+      .maybeSingle();
+    const projectId = (baseRow as { project_id?: unknown } | null)?.project_id;
+    if (baseErr || typeof projectId !== 'string' || !projectId) return null;
+    const { data: projectRow, error: projectErr } = await portalDb
+      .from('he_projects')
+      .select('market')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (projectErr || !projectRow) return null;
+    return projectMarket(projectRow as { market?: string | null });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Запись о запуске в форме до порта ENG — для ответа «уже запущено» шаблона
+ * RU-проекта: поля, которые пишет только код порта (pending, счётчики
+ * leads_requested/leads_attempted/leads_already_present), в ответ не идут.
+ * Нужна для записей, которые код порта успел оставить у RU-шаблонов на проде
+ * (с 14.10.2026); запись запуска RU-проекта таких полей не несёт.
+ */
+function heLaunchInfoAsBeforePort(info: HeTemplateLaunchInfo): HeTemplateLaunchInfo {
+  const campaigns = (info.campaigns ?? []).map((c) => ({
+    campaign_id: c.campaign_id,
+    campaign_name: c.campaign_name,
+    campaign_url: c.campaign_url,
+    segment: c.segment,
+    leads_count: c.leads_count,
+  }));
+  return {
+    campaign_id: info.campaign_id,
+    campaign_name: info.campaign_name,
+    campaign_url: info.campaign_url,
+    leads_count: info.leads_count,
+    preset_id: info.preset_id,
+    created_at: info.created_at,
+    ...(campaigns.length > 0 ? { campaigns } : {}),
+  };
+}
+
 /** Кампании у рассыльщика больше нет (удалена) — 404 на её id. */
 function isInstantlyNotFound(err: unknown): boolean {
   return err instanceof InstantlyApiError && err.status === 404;
@@ -1276,10 +1339,15 @@ export interface HeTemplateLaunchInput {
   campaignSettings?: HeLaunchCampaignSettings;
 }
 
-/** Настройки кампании, которые вызывающий ядра может задать поверх пресета. */
+/**
+ * Настройки кампании, которые вызывающий ядра может задать поверх пресета.
+ * stop_for_company — с 15.10.2026 (решение владельца 14.10.2026, его ставит
+ * engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS): после ответа любого адреса
+ * компании её остальные адреса писем больше не получают.
+ */
 export type HeLaunchCampaignSettings = Pick<
   CampaignCreatePayload,
-  'stop_on_reply' | 'open_tracking' | 'link_tracking' | 'insert_unsubscribe_header'
+  'stop_on_reply' | 'stop_for_company' | 'open_tracking' | 'link_tracking' | 'insert_unsubscribe_header'
 >;
 
 export interface HeTemplateLaunchOutcome {
@@ -1316,20 +1384,50 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   // раньше «уже запущено»: пока аренда жива, запись может быть промежуточной.
   // Повтор достраивать параллельно с живой попыткой нельзя: обе грузили бы
   // одни и те же адреса.
+  //
+  // Аренда и долг (pending) — механика ТОЛЬКО market='us'. RU-проект идёт
+  // запуском как до порта ENG (развилка шага 4b), а он ни аренды, ни долга не
+  // знает: «уже запущено» без force, force — новые кампании в ВЫБРАННОМ пресете.
+  // Но код порта работал на проде с 14.10.2026 (~19:13 UTC) и для RU-шаблонов
+  // тоже, так что такая запись у RU-шаблона бывает. Поэтому, когда запись несёт
+  // живую аренду или долг, рынок проекта читается здесь же, до любого решения
+  // по ним (readHeLaunchStateMarket); у RU-проекта оба признака игнорируются.
+  // Рынок не прочитался — решают они, как раньше (у 'us' это прежний путь, а
+  // RU-шаблон с такой записью во время сбоя БД получит прежний отказ этого
+  // кода; см. развилку шага 4b про выбранный пресет). Записи без аренды и без
+  // долга — всё, что пишет запуск RU-проекта, — лишнего чтения здесь не
+  // получают (только ответ «уже запущено» ниже читает рынок для формы записи).
   const startLease = readHeLaunchLease(template.launch_info);
-  if (startLease.runningUntilMs !== null && startLease.runningUntilMs > Date.now()) {
+  const leaseLive = startLease.runningUntilMs !== null && startLease.runningUntilMs > Date.now();
+  const existingLaunch = parseLaunchInfo(template.launch_info);
+  const launchIncomplete = heLaunchIsIncomplete(existingLaunch);
+  // undefined — рынок здесь не читался; null — читался, но не прочитался.
+  let stateMarket: HeMarket | null | undefined;
+  if (leaseLive || launchIncomplete) stateMarket = await readHeLaunchStateMarket(portalDb, template.base_id);
+  const launchStateApplies = stateMarket !== 'ru';
+  if (leaseLive && launchStateApplies) {
     return { status: 409, body: { error: t.launchInProgress } };
   }
 
-  const existingLaunch = parseLaunchInfo(template.launch_info);
   // Незакончённый запуск (в записи остались сегменты без кампании или без
   // лидов) повтор НЕ блокирует и force для него не нужен: достраивать нечего
   // прятать, а дублей повтор не создаёт по построению — кампанию, которая уже
   // есть, он переиспользует (шаг 6). Требовать force здесь значило бы
   // заставлять оператора угадывать слово, чтобы дозапустить свой же запуск.
-  const resumeLaunch = heLaunchIsIncomplete(existingLaunch);
+  // У RU-проекта достройки нет (см. выше): его запись — законченный запуск.
+  const resumeLaunch = launchIncomplete && launchStateApplies;
   if (existingLaunch && !force && !resumeLaunch) {
-    return { status: 409, body: { error: t.alreadyLaunched, launch: existingLaunch } };
+    // Ответ RU-проекта — запись в форме до порта ENG (heLaunchInfoAsBeforePort):
+    // у записи, оставленной кодом порта, в нём нет его полей. Рынок не
+    // прочитался — ответ прежний этого кода.
+    if (stateMarket === undefined) stateMarket = await readHeLaunchStateMarket(portalDb, template.base_id);
+    return {
+      status: 409,
+      body: {
+        error: t.alreadyLaunched,
+        launch: stateMarket === 'ru' ? heLaunchInfoAsBeforePort(existingLaunch) : existingLaunch,
+      },
+    };
   }
   // Долг незакончённого запуска (шаги 5a′ и 5c). Поимённым он бывает только
   // целиком: если хоть у одного сегмента нет списка адресов (запись до
@@ -1432,6 +1530,41 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   }
   if (!projectRow) return { status: 404, body: { error: t.baseNotFound } };
   const market: HeMarket = projectMarket(projectRow as { market?: string | null });
+
+  //     RU-ПРОЕКТ (любой рынок, кроме 'us') — ЗАПУСК КАК ДО ПОРТА ENG (решение
+  //     владельца 14.10.2026 «Как было», см. runHeTemplateLaunchAsBeforePort
+  //     ниже): дальше по этой функции идёт ТОЛЬКО market='us'. Ветки «RU — как
+  //     раньше» ниже с этой развилки не достижимы; они оставлены, чтобы путь
+  //     'us' оставался тем же кодом, что прошёл аудит 14.10.2026.
+  //
+  //     Пресет запуска RU — ВЫБРАННЫЙ (как до порта). Пресет записи (шаг 3)
+  //     сюда приходит, только если на шаге 1 рынок не прочитался, а запись несёт
+  //     долг (код порта, работавший на проде с 14.10.2026): тогда выбранный
+  //     читается заново тем же запросом, что у шага 3 до порта.
+  if (market !== 'us') {
+    let ruPreset = preset;
+    if (presetPinned) {
+      let ruPresetQuery = instantlyDb.from('client_campaign_presets').select('*').eq('id', presetId);
+      if (scopeClientUserId) ruPresetQuery = ruPresetQuery.eq('client_user_id', scopeClientUserId);
+      const { data: ruPresetRow, error: ruPresetErr } = await ruPresetQuery.maybeSingle();
+      if (ruPresetErr) {
+        await logError(`${eventPrefix}.preset_failed`, ruPresetErr, { userId });
+        return { status: 500, body: { error: t.presetLoadFailed } };
+      }
+      if (!ruPresetRow) return { status: 404, body: { error: t.presetNotFound } };
+      ruPreset = ruPresetRow as ClientCampaignPreset;
+    }
+    return runHeTemplateLaunchAsBeforePort({
+      input,
+      t,
+      template,
+      existingLaunch,
+      base,
+      preset: ruPreset,
+      templateLetters,
+      segmentWhens,
+    });
+  }
   // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
   const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
 
@@ -1901,11 +2034,12 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //     бросает и на сбое БД, и на неполной выдаче) — любая означает «не знаем
   //     список», а значит «не отправляем».
   //
-  //     Оба контура, включая RU-инструмент: блок ставит клиент по негативному
-  //     ответу, и получателю всё равно, кто нажал запуск. Для RU это новое
-  //     поведение и новый режим отказа (500 вместо отправки), поэтому оба
-  //     названы вслух — счёт снятых контактов в warnings, причина отказа в
-  //     тексте ошибки, подробности в logError. Ветка пустого client_user_id
+  //     Оба контура запуска us-проекта (кабинет и staff-роут): блок ставит
+  //     клиент по негативному ответу, и получателю всё равно, кто нажал запуск.
+  //     RU-проект сюда не доходит (развилка шага 4b): у него список best-effort
+  //     и без отказов (runHeTemplateLaunchAsBeforePort). Счёт снятых контактов
+  //     — в warnings, причина отказа — в тексте ошибки, подробности — в
+  //     logError. Ветка пустого client_user_id
   //     оборонительная: в схеме колонка not null
   //     (instantly-migrations/20260429_0001), то есть в норме недостижима.
   const clientUserId =
@@ -3255,4 +3389,346 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         : {}),
     },
   };
+}
+
+/* ───────────── RU-проект: запуск как до порта ENG ───────────── */
+
+/**
+ * ЗАПУСК ШАБЛОНА RU-ПРОЕКТА (he_projects.market не 'us' — то есть каждый
+ * проект staff-инструмента) — РОВНО КАК ДО ПОРТА ENG (решение владельца
+ * 14.10.2026 «Как было»). Эталон — runHeTemplateLaunch на 46bd0e82e (ветка
+ * Sergey до слияния порта), шаги 4–7: та же фильтрация строк автосборки, тот
+ * же маппинг лидов, тот же 413 сверх HE_LAUNCH_MAX_LEADS, тот же классификатор
+ * сегментов (прежний контракт: строка без ответа — дефолтный текст, упали все
+ * батчи — одна кампания без вариантов), кампании создаются подряд, лиды группы
+ * уходят одним вызовом, запись о запуске пишется ОДИН раз в конце — без
+ * аренды, без launch_info.pending и без достройки. Поэтому сегментный запуск,
+ * упавший на поздней группе, записан законченным, а отказ группы назван в
+ * warnings («Кампания сегмента не создана: …») — как было; повтор — force.
+ *
+ * Отличия от эталона — только эти:
+ *  - чёрный список клиента — best-effort (15.10.2026: «как было» у RU не
+ *    снимает защиту клиента — фильтр оставлен, новых отказов нет). Прочитался — заблокированные адреса
+ *    не уезжают, их число — в warnings (blockedContactsNote). Не прочитался
+ *    (или у пресета нет владельца) — запуск идёт без фильтра, как до порта,
+ *    причина — в logError. Если фильтр снял ВСЕХ, ответ — прежний отказ
+ *    «В базе нет валидных email-адресов» (400 эталона на пустую аудиторию), а
+ *    не письма людям из чёрного списка; число снятых — в аудите. Стоит после
+ *    413: решение о потолке принимается по той же аудитории, что в эталоне;
+ *  - рынок проекта читается до этой функции (шаг 4b): сбой чтения — 500
+ *    marketReadFailed и у RU (без рынка нельзя отличить RU от us), строки
+ *    проекта нет — 404 «База не найдена»;
+ *  - аренду и долг (pending) записи шаблона, которые мог оставить код порта
+ *    (он работал на проде с 14.10.2026, ~19:13 UTC, и для RU-шаблонов), шаг 1
+ *    у RU-проекта не читает: такой запуск — законченный, «уже запущено» без
+ *    force и новые кампании в выбранном пресете с force. Исключение — сбой
+ *    БД на чтении рынка шага 1 при такой записи: тогда действует прежний код
+ *    шага 1 (409 «запуск ещё идёт» при живой аренде, пресет записи для шагов
+ *    2–4 при долге), а выбранный пресет перечитывается на развилке шага 4b;
+ *  - campaignSettings и явное окно отправки (sendingWindow) применяются, если
+ *    переданы. Staff-роут не передаёт ни то, ни другое — его payload тот же
+ *    объект, что в эталоне; передаёт их только ENG-кабинет, у которого проекты
+ *    'us', — здесь это страховка, чтобы кампания из ящиков пула не ушла без
+ *    его настроек ни при каком рынке.
+ * Функции общих модулей — нынешние, с проверенно прежним результатом на
+ * RU-строках: mapBaseRowsToLeads без новых опций (очищенное имя компании
+ * пишется только у ENG-баз), heLegacySegmentAssignments поверх детального
+ * классификатора (прежний контракт), buildLaunchCampaignName без naming
+ * (прежнее имя «HE · …»).
+ */
+async function runHeTemplateLaunchAsBeforePort(args: {
+  input: HeTemplateLaunchInput;
+  t: HeLaunchMessages;
+  template: HeTemplate & { launch_info?: unknown };
+  existingLaunch: HeTemplateLaunchInfo | null;
+  base: Pick<HeBase, 'id' | 'filename' | 'columns' | 'data'> & { source?: string };
+  preset: ClientCampaignPreset;
+  templateLetters: HeTemplate['letters'];
+  segmentWhens: string[];
+}): Promise<HeTemplateLaunchOutcome> {
+  const { input, t, template, existingLaunch, base, preset, templateLetters, segmentWhens } = args;
+  const { portalDb, instantlyDb, templateId, presetId, force, userId, locale, eventPrefix } = input;
+
+  // 1. Уже запущено — 409 без force, как в эталоне. Запись с долгом (pending)
+  //    тоже: эталон её не достраивал (см. докблок).
+  if (existingLaunch && !force) {
+    return { status: 409, body: { error: t.alreadyLaunched, launch: heLaunchInfoAsBeforePort(existingLaunch) } };
+  }
+
+  // 5. Лиды из базы. Все проверки — ДО любого вызова Instantly.
+  //    Качественные пометки АВТОсборки (base_collect, source='auto'):
+  //    _email_status !== 'ok' (баунс-риск на домен клиента) и _low_relevance
+  //    (шум источников вне вертикали) в запуск не идут. Ручные базы (upload)
+  //    не фильтруем — там эти ключи, если есть, принадлежат пользователю.
+  const allRows = Array.isArray(base.data) ? (base.data as Array<Record<string, unknown>>) : [];
+  const isAutoBase = base.source === 'auto';
+  let skippedInvalid = 0;
+  let skippedIrrelevant = 0;
+  const rows = isAutoBase
+    ? allRows.filter((r) => {
+        if (r._low_relevance === true) {
+          skippedIrrelevant += 1;
+          return false;
+        }
+        const status = typeof r._email_status === 'string' ? r._email_status : null;
+        if (status && status !== 'ok') {
+          skippedInvalid += 1;
+          return false;
+        }
+        return true;
+      })
+    : allRows;
+  const columns = Array.isArray(base.columns)
+    ? base.columns.filter((c): c is string => typeof c === 'string')
+    : [];
+  const mapped = mapBaseRowsToLeads({
+    rows,
+    columns,
+    operatorMapping: template.personalization_plan?.operator_mapping,
+  });
+  const { emailColumn } = mapped;
+  if (!emailColumn) return { status: 400, body: { error: t.noEmailColumn } };
+  if (mapped.leads.length === 0) return { status: 400, body: { error: t.noValidEmails } };
+  if (mapped.leads.length > HE_LAUNCH_MAX_LEADS) {
+    return { status: 413, body: { error: t.tooManyLeads(mapped.leads.length) } };
+  }
+
+  // 5a. Чёрный список клиента — best-effort (см. докблок функции). Массивы
+  //     лидов и индексов строк режутся вместе: их параллельность держит сплит
+  //     по сегментам ниже.
+  let leads = mapped.leads;
+  let leadRowIndices = mapped.leadRowIndices;
+  let blockedContacts = 0;
+  const clientUserId = typeof preset.client_user_id === 'string' ? preset.client_user_id.trim() : '';
+  try {
+    if (!clientUserId) {
+      throw new Error(`пресет ${presetId}: пустой client_user_id — чей чёрный список применять, неизвестно`);
+    }
+    const filtered = filterBlockedLeads(leads, await getBlockedEmailSet(instantlyDb, clientUserId));
+    blockedContacts = filtered.blockedCount;
+    if (blockedContacts > 0) {
+      const allowed = new Set(filtered.kept.map((l) => l.email));
+      const keptLeads: typeof leads = [];
+      const keptRowIndices: number[] = [];
+      leads.forEach((lead, i) => {
+        if (!allowed.has(lead.email)) return;
+        keptLeads.push(lead);
+        keptRowIndices.push(leadRowIndices[i]);
+      });
+      leads = keptLeads;
+      leadRowIndices = keptRowIndices;
+    }
+  } catch (err) {
+    // Как до порта: списка в этом запуске не было — запуск идёт без него.
+    await logError(`${eventPrefix}.blocklist_failed`, err, {
+      userId,
+      templateId,
+      presetId,
+      clientUserId: clientUserId || null,
+      launchContinuedWithoutBlocklist: true,
+    });
+  }
+  if (leads.length === 0) {
+    await logAudit(
+      `${eventPrefix}.refused_all_contacts_blocked`,
+      'Launch refused: every address is on the client blocklist',
+      { userId, templateId, baseId: base.id, presetId, blockedContacts },
+    );
+    return { status: 400, body: { error: t.noValidEmails } };
+  }
+
+  // 5b. Материализация 15%: сплит лидов по сегментам базы. Классификатор —
+  //     LLM (bulk-модель, батчами); системный сбой → null → легаси-путь:
+  //     одна кампания, сегментные варианты выкинуты с предупреждением.
+  interface LeadGroup {
+    segment: string | null;
+    leadIdx: number[];
+  }
+  let groups: LeadGroup[] = [{ segment: null, leadIdx: leads.map((_, i) => i) }];
+  let segmentsMaterialized = false;
+  if (segmentWhens.length > 0) {
+    let assignments: Map<number, string> | null = null;
+    try {
+      assignments = heLegacySegmentAssignments(
+        await classifyBaseRowsIntoSegmentsDetailed({
+          rows: leadRowIndices.map((ri) => rows[ri] ?? {}),
+          segments: segmentWhens,
+          language: detectSegmentLanguage(segmentWhens),
+          unansweredFate: 'default',
+        }),
+      );
+    } catch {
+      assignments = null;
+    }
+    if (assignments) {
+      const defaultIdx: number[] = [];
+      const bySegment = new Map<string, number[]>();
+      leadRowIndices.forEach((_rowIndex, leadPos) => {
+        const seg = assignments.get(leadPos);
+        if (!seg) {
+          defaultIdx.push(leadPos);
+          return;
+        }
+        const list = bySegment.get(seg) ?? [];
+        list.push(leadPos);
+        bySegment.set(seg, list);
+      });
+      const next: LeadGroup[] = [];
+      if (defaultIdx.length > 0) next.push({ segment: null, leadIdx: defaultIdx });
+      for (const when of segmentWhens) {
+        const idxs = bySegment.get(when);
+        if (idxs && idxs.length > 0) next.push({ segment: when, leadIdx: idxs });
+      }
+      if (next.length > 0) groups = next;
+      segmentsMaterialized = segmentWhens.some((w) => (bySegment.get(w) ?? []).length > 0);
+    }
+  }
+
+  const instantlyRequestOptions = { accountId: resolveInstantlyAccountId(preset.instantly_account_id) };
+
+  // 6. Instantly: по кампании на группу (НЕ активируем!) + лиды группы. Текст
+  //    ошибки идёт без scrubBrand — staff-UI нужна точная формулировка API.
+  //    Основная кампания (segment=null) создаётся первой — её id уходит в
+  //    скалярные поля launch_info (их читает refill-долив и старый UI).
+  const campaigns: HeTemplateLaunchCampaign[] = [];
+  const groupErrors: string[] = [];
+  let accepted = 0;
+  for (const group of groups) {
+    const sequence = buildLaunchSequence(templateLetters, { segmentWhen: group.segment });
+    if (!sequence) return { status: 400, body: { error: t.noLetters } };
+    const campaignName = buildLaunchCampaignName(base.filename, new Date(), group.segment);
+    try {
+      const presetPayload = buildCampaignPayloadFromPreset({
+        preset,
+        sequence: { name: campaignName, steps: sequence.steps },
+        ...(input.sendingWindow ? { scheduleOverride: input.sendingWindow } : {}),
+      });
+      const payload = input.campaignSettings ? { ...presetPayload, ...input.campaignSettings } : presetPayload;
+      const created = await createCampaign(payload, instantlyRequestOptions);
+      const campaignId = (created as { id?: string }).id ?? null;
+      if (!campaignId) {
+        throw new Error('Instantly вернул кампанию без идентификатора');
+      }
+
+      // Как в клиентском запуске: если Instantly не сохранил sequences при
+      // создании — досылаем PATCH'ем.
+      if (!hasUsableCampaignSequences(created.sequences)) {
+        await updateCampaign(campaignId, { sequences: payload.sequences }, instantlyRequestOptions);
+      }
+
+      const leadResult = await createLeads(
+        group.leadIdx.map((i) => leads[i]),
+        {
+          campaign_id: campaignId,
+          skip_if_in_workspace: false,
+          skip_if_in_campaign: false,
+          skip_if_in_list: false,
+        },
+        instantlyRequestOptions,
+      );
+      accepted += leadResult.leads_uploaded;
+      campaigns.push({
+        campaign_id: campaignId,
+        campaign_name: campaignName,
+        campaign_url: instantlyCampaignUrl(campaignId),
+        segment: group.segment,
+        leads_count: leadResult.leads_uploaded,
+      });
+    } catch (err) {
+      // Первая кампания: весь запуск считается failed (ни одной кампании ещё
+      // нет, ретрай безопасен). Поздние группы — частичный успех: фиксируем в
+      // warnings, созданные кампании не трогаем.
+      if (campaigns.length === 0) {
+        const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
+        await logError(`${eventPrefix}.failed`, err, { userId, templateId });
+        return { status: 500, body: { error: message.slice(0, 300) } };
+      }
+      const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
+      groupErrors.push(`${group.segment ?? 'default'}: ${message.slice(0, 200)}`);
+      await logError(`${eventPrefix}.group_failed`, err, {
+        userId,
+        templateId,
+        segment: group.segment,
+      });
+    }
+  }
+
+  if (accepted === 0) {
+    return { status: 500, body: { error: t.zeroAccepted, campaign_id: campaigns[0]?.campaign_id ?? null } };
+  }
+
+  // 7. Запись о запуске в шаблон. Скалярные поля — первая (основная) кампания;
+  //    полный список — campaigns[].
+  const primary = campaigns[0];
+  const launchInfo: HeTemplateLaunchInfo = {
+    campaign_id: primary.campaign_id,
+    campaign_name: primary.campaign_name,
+    campaign_url: primary.campaign_url,
+    leads_count: accepted,
+    preset_id: presetId,
+    created_at: new Date().toISOString(),
+    campaigns,
+  };
+  const warnings: string[] = [];
+  if (skippedInvalid > 0 || skippedIrrelevant > 0) {
+    warnings.push(t.rowsSkippedNote(skippedInvalid, skippedIrrelevant));
+  }
+  if (blockedContacts > 0) {
+    warnings.push(t.blockedContactsNote(blockedContacts));
+  }
+  if (segmentWhens.length > 0 && !segmentsMaterialized) {
+    const legacy = buildLaunchSequence(templateLetters);
+    const segWarning =
+      locale === 'en'
+        ? legacy && legacy.droppedSegmentVariants > 0
+          ? t.segmentVariantsWarning(legacy.droppedSegmentVariants, legacy.lettersWithSegmentVariants)
+          : null
+        : legacy
+          ? segmentVariantsWarning(legacy)
+          : null;
+    if (segWarning) warnings.push(segWarning);
+  }
+  if (segmentsMaterialized && campaigns.length > 1) {
+    warnings.push(t.segmentSplitInfo(campaigns.length));
+  }
+  for (const ge of groupErrors) {
+    warnings.push(
+      locale === 'en' ? `Segment campaign failed: ${ge}` : `Кампания сегмента не создана: ${ge}`,
+    );
+  }
+
+  const { error: updErr } = await portalDb
+    .from('he_templates')
+    .update({ launch_info: launchInfo })
+    .eq('id', templateId);
+  if (updErr) {
+    // Кампания уже создана — не превращаем ответ в ошибку (иначе слепой
+    // ретрай плодит дубли), но честно предупреждаем, что дедуп-записи нет.
+    await logError(`${eventPrefix}.info_save_failed`, updErr, {
+      userId,
+      templateId,
+      instantlyCampaignId: primary.campaign_id,
+    });
+    warnings.push(t.launchInfoSaveWarning(false));
+  }
+
+  await logAudit(
+    `${eventPrefix}.success`,
+    'Hypothesis engine template sent to Instantly (paused)',
+    {
+      userId,
+      templateId,
+      baseId: base.id,
+      presetId,
+      instantlyCampaignId: primary.campaign_id,
+      campaigns: campaigns.length,
+      segmentsMaterialized,
+      accepted,
+      totalLeads: leads.length,
+      force,
+      ...(blockedContacts > 0 ? { blockedContacts } : {}),
+    },
+  );
+
+  return { status: 200, body: { ok: true, launch: launchInfo, warnings } };
 }

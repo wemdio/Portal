@@ -419,17 +419,20 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
     // после сноса прошлых вертикалей выше. Чистка трогает только эти два
     // символа: текст без них (вся кириллица и латиница) ложится байт-в-байт тем
     // же. Привязка гипотез ниже идёт по memberTitles — заголовкам из he_hypotheses,
-    // а не по тексту модели, и чистка её не задевает.
+    // а не по тексту модели, и чистка её не задевает. Только market='us':
+    // RU-проект пишет строку как до порта ENG (решение владельца 14.10.2026
+    // «Как было»; так же chain, template, vocab, evidence и base_analyze).
+    const verticalRow = {
+      project_id: job.project_id,
+      name: v.name,
+      summary: v.summary,
+      synonyms: v.synonyms,
+      potential_pct: v.potential_pct,
+      rank: v.rank,
+    };
     const { data: inserted, error: insError } = await ctx.supabase
       .from('he_verticals')
-      .insert(stripUnstorableJsonChars({
-        project_id: job.project_id,
-        name: v.name,
-        summary: v.summary,
-        synonyms: v.synonyms,
-        potential_pct: v.potential_pct,
-        rank: v.rank,
-      }))
+      .insert(market === 'us' ? stripUnstorableJsonChars(verticalRow) : verticalRow)
       .select('id')
       .single();
     if (insError || !inserted) throw new Error(`he_verticals insert: ${insError?.message ?? 'unknown'}`);
