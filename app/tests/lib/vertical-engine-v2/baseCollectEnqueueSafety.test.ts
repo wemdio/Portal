@@ -12,6 +12,9 @@ import { autoResumeVeTransientPreparations, enqueueVeContactReprojections, loadV
 import { VeAutomaticContinuationChecks, veAutomaticContinuationCandidates, veAutomaticContinuationResultCurrent } from '@/components/vertical-engine-v2/engine/automaticContinuationCheck';
 import type { VeBaseSummary, VeContinuationCheck } from '@/components/vertical-engine-v2/engine/api';
 import { VE_RELEVANCE_RULES_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
+import { VE_RELEVANCE_TRIAGE_VERSION } from '@/lib/verticalEngineV2/relevanceTriageConfig';
+import { newVeAdaptiveCollection } from '@/lib/verticalEngineV2/adaptiveCollection';
+import { checkVeContinuationRequest } from '@/lib/verticalEngineV2/preparationRequest';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -44,7 +47,8 @@ describe('VE2 base collection enqueue recovery', () => {
     };
     mockRouteDb = createMockSupabase({ tables: {
       ve_verticals: [{ id: input.verticalId, project_id: input.projectId, name: input.verticalName }],
-      ve_hypotheses: ['hypothesis-1', 'hypothesis-2'].map((id) => ({ id, title: id })),
+      ve_hypotheses: ['hypothesis-1', 'hypothesis-2'].map((id) => ({ id, title: id,
+        project_id: input.projectId, vertical_id: input.verticalId })),
       ve_bases: [{ id: 'existing', vertical_id: input.verticalId, project_id: input.projectId,
         hypothesis_id: 'hypothesis-1', source: 'auto', status: 'collecting', collect_info: privateInfo }],
       ve_jobs: [{ id: 'existing-job', project_id: input.projectId, stage: 'base_collect',
@@ -70,8 +74,8 @@ describe('VE2 base collection enqueue recovery', () => {
     const db = createMockSupabase({
       tables: {
         ve_hypotheses: [
-          { id: 'hypothesis-1', title: 'Первая' },
-          { id: 'hypothesis-2', title: 'Вторая' },
+          { id: 'hypothesis-1', title: 'Первая', project_id: input.projectId, vertical_id: input.verticalId },
+          { id: 'hypothesis-2', title: 'Вторая', project_id: input.projectId, vertical_id: input.verticalId },
         ],
         ve_bases: [
           {
@@ -162,22 +166,49 @@ describe('VE2 base collection enqueue recovery', () => {
     // that saved base. Routine enqueue still reuses it without daily spending.
     // 'rules': a completed website check from before the current selection
     // rules is resumable once, for the gate's one-time recheck of saved quotes.
-    for (const mode of ['continue', 'routine', 'launched', 'checked', 'rules'] as const) {
+    for (const mode of ['continue', 'routine', 'launched', 'checked', 'rules', 'staffing', 'manual'] as const) {
       let partialClaimed = false;
       const partialSave = jest.fn(() => ({ data: true }));
-      const target = { mode: 'preview', status: 'limited', ready_rows: 0, ready_target: 500,
+      const staffing = mode === 'staffing' || mode === 'manual';
+      const currentHypothesis = { id: 'h1', title: staffing ? 'B2B SaaS с remote-командами' : 'Industrial plants',
+        description: staffing ? 'SaaS-вендоры из СНГ, Европы, MENA и APAC, нанимающие специалистов в 2+ странах.' : '',
+        origin: mode === 'manual' ? 'manual' : 'generated', broad: false,
+        project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' };
+      const readyRows = staffing ? [{ company: 'Ready SaaS', website: 'ready.test', email: 'team@ready.test', _email_status: 'ok' }] : [];
+      const sourceReceipts = { version: 1, checked: { paid: { website: 'https://plant.test', reason: 'verified' } } };
+      const savedTasks = [{ source: 'hh_live', status: 'done', exhausted: true, child_job_id: 'paid-hh-child', rows: 17,
+        task: { source: 'hh_live', hh_query: 'разработчик', rationale: 'saved source' },
+        harvest: [{ company: 'Plant', website: 'plant.test', email: 'info@plant.test' }] }];
+      const target = { mode: 'preview', status: 'limited', ready_rows: readyRows.length, ready_target: 500,
         candidates_processed: 17, round: 1, max_rounds: 100, max_candidates: 10000, first_round_candidates: 100 };
+      const partialInfo = { collection_mode: 'preview', target_progress: target,
+        target_checkpoint: { completed_round: 1, seen_rows: readyRows, processed_rows: 17 },
+        relevance_reserve: { version: 1, rows: [{ company: 'Plant', website: 'plant.test', email: 'info@plant.test',
+          _email_status: 'ok', _ve_relevance: { status: 'needs_review', review_attempts: 1,
+            website_review_version: mode === 'checked' || mode === 'rules' || staffing ? 4 : 3,
+            ...(mode === 'rules' ? {} : { rules_version: VE_RELEVANCE_RULES_VERSION }),
+            ...(staffing ? { reason: 'Смысловое соответствие не подтверждено: Не подтверждена удалённая команда.',
+              triage_version: VE_RELEVANCE_TRIAGE_VERSION } : {}) } }] },
+        ...(staffing ? {
+          // A stale generated snapshot must not override the specialist's
+          // current manual hypothesis, nor lose newly loaded description.
+          hypotheses: [{ id: 'h1', title: currentHypothesis.title, origin: 'generated' }],
+          tasks: savedTasks, source_contact_recovery: sourceReceipts,
+          adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2 },
+        } : {}) };
       const partialDb = createMockSupabase({ tables: {
-        ve_hypotheses: [{ id: 'h1', title: 'Industrial plants', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+        ve_hypotheses: [currentHypothesis],
         ve_verticals: [{ id: input.verticalId, project_id: input.projectId, name: input.verticalName }],
         ve_bases: [{ id: 'saved-partial', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: 'h1',
-          source: 'auto', status: 'analyzed', row_count: 0, collection_mode: 'preview', target_progress: target,
-          collect_info: { collection_mode: 'preview', target_progress: target, target_checkpoint: { completed_round: 1 },
-            relevance_reserve: { version: 1, rows: [{ company: 'Plant', website: 'plant.test', email: 'info@plant.test',
-              _email_status: 'ok', _ve_relevance: { status: 'needs_review', review_attempts: 1,
-                website_review_version: mode === 'checked' || mode === 'rules' ? 4 : 3,
-                ...(mode === 'rules' ? {} : { rules_version: VE_RELEVANCE_RULES_VERSION }) } }] } } }],
-        ve_templates: mode === 'launched' ? [{ id: 'live-template', base_id: 'saved-partial', launch_info: { campaign_id: 'live' } }] : [],
+          source: 'auto', status: 'analyzed', row_count: readyRows.length, data: readyRows,
+          collection_mode: 'preview', target_progress: target, collect_info: partialInfo,
+          updated_at: '2026-10-14T00:00:00Z', collection_continuation_revision: 0,
+          max_emails_per_company: null, contact_cap_applied: null }],
+        ve_templates: mode === 'launched' ? [{ id: 'live-template', base_id: 'saved-partial', launch_info: { campaign_id: 'live' } }]
+          : staffing ? [{ id: 'ready-letters', base_id: 'saved-partial', status: 'ready', supply_batch_id: null, launch_info: null }] : [],
+        ve_outreach_setups: [{ project_id: input.projectId, revision: 7, selected_hypothesis_ids: ['h1'] }],
+        ve_outreach_preparations: [{ project_id: input.projectId, hypothesis_id: 'h1', base_id: 'saved-partial',
+          template_id: staffing ? 'ready-letters' : null, status: 'ready' }],
       }, rpcHandlers: {
         ve_claim_outreach_preparation: () => {
           if (partialClaimed) return { data: [] };
@@ -188,23 +219,44 @@ describe('VE2 base collection enqueue recovery', () => {
         ve_save_outreach_preparation: partialSave,
       } });
       const partialClient = partialDb as unknown as SupabaseClient;
+      if (staffing) {
+        // The lightweight preflight uses current metadata without purchasing
+        // work, altering a worker checkpoint or reviving a manual audience.
+        await expect(checkVeContinuationRequest(partialClient, input.projectId, 7, 'h1')).resolves.toMatchObject({
+          status: mode === 'staffing' ? 'available' : 'unavailable',
+          code: mode === 'staffing' ? 'saved_work' : 'sources_exhausted', base_id: 'saved-partial' });
+        expect(partialDb.getRows('ve_jobs')).toHaveLength(0);
+        expect(partialDb.rpcCalls).toHaveLength(0);
+        expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzed', data: readyRows,
+          updated_at: '2026-10-14T00:00:00Z', collect_info: partialInfo });
+        expect(partialDb.updates.every((update) => update.table === 've_bases'
+          && Object.keys(update.patch).join(',') === 'collection_continuation')).toBe(true);
+      }
       if (mode === 'routine') {
         await expect(enqueueVeBaseCollect(partialClient, { ...input, hypothesisIds: ['h1'], collectionMode: 'preview' }))
           .resolves.toMatchObject({ ok: true, created: false });
       } else await runVeOutreachPreparations(partialClient);
       expect(partialDb.getRows('ve_bases')).toHaveLength(1);
       const jobs = partialDb.getRows('ve_jobs');
-      expect(jobs).toHaveLength(mode === 'continue' || mode === 'rules' ? 1 : 0);
-      if (mode === 'continue' || mode === 'rules') {
+      expect(jobs).toHaveLength(mode === 'continue' || mode === 'rules' || mode === 'staffing' ? 1 : 0);
+      if (mode === 'continue' || mode === 'rules' || mode === 'staffing') {
         expect(jobs[0]).toMatchObject({ stage: 'base_collect', status: 'pending',
           payload: { base_id: 'saved-partial', hypothesis_id: 'h1', collection_mode: 'preview' } });
         expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting',
           collect_info: { relevance_review_requested: true, validation_retry: true,
-            target_progress: { ready_rows: 0, candidates_processed: 17, round: 1 } } });
+            target_progress: { ready_rows: readyRows.length, candidates_processed: 17, round: 1 } } });
+        if (staffing) expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ row_count: readyRows.length, data: readyRows,
+          collect_info: { hypotheses: [currentHypothesis], source_contact_recovery: sourceReceipts, tasks: savedTasks,
+            target_checkpoint: partialInfo.target_checkpoint, relevance_reserve: partialInfo.relevance_reserve,
+            adaptive_collection: partialInfo.adaptive_collection } });
         expect(partialSave).toHaveBeenLastCalledWith(expect.objectContaining({ p_status: 'collecting' }), expect.anything());
         await enqueueVeBaseCollect(partialClient, { ...input, hypothesisIds: ['h1'], collectionMode: 'preview', resumeBaseId: 'saved-partial' });
         expect(partialDb.getRows('ve_jobs')).toHaveLength(1);
-      } else expect(partialDb.getRows('ve_bases')[0].status).toBe('analyzed');
+      } else {
+        expect(partialDb.getRows('ve_bases')[0].status).toBe('analyzed');
+        if (mode === 'manual') expect(partialDb.getRows('ve_bases')[0]).toMatchObject({
+          data: readyRows, collect_info: partialInfo, updated_at: '2026-10-14T00:00:00Z' });
+      }
     }
 
     // A Continue action inside one card may not dispatch the project-wide RPC.

@@ -18,9 +18,11 @@ const PROVIDER_TYPE_RULE = 'PROVIDER TYPE: listed services or problems expand th
 // Hiring across countries was being mistaken for the company's geographic
 // scope by the independent review, even with a correct triage checklist.
 // Reinforce the existing context rule; do not change saved verdict versions.
-export function veStaffingScopeNote(scope: string): string {
-  if (!/^Target hypothesis:\s*B2B\s+SaaS\b/i.test(scope.split('\n')[0])
-    || !/remote|распредел[её]н|удал[её]н|нанима|\bнайм|\bhiring\b/i.test(scope)) return '';
+export function veStaffingScopeNote(scope: string, origin?: 'generated' | 'manual'): string {
+  const target = scope.split('\nVertical:')[0];
+  if (origin !== 'generated' || /обязательн|строго|только\s+с(?:\s|$)|\b(?:must|required|only with)\b/i.test(target)) return '';
+  if (!/^Target hypothesis:\s*B2B\s+SaaS\b/i.test(target.split('\n')[0])
+    || !/remote|распредел[её]н|удал[её]н|нанима|(?:^|\s)найм|\bhiring\b/i.test(target)) return '';
   return 'For this SaaS target, the company\'s OWN remote team or hiring in 2+ countries is staffing context, even in the title; missing proof is not insufficient. Still require its own SaaS product, B2B customers and stated company region. Staffing as the company\'s PRODUCT or SERVICE remains activity, not context. Custom developers, outsourcers and resellers alone are not SaaS vendors.';
 }
 
@@ -60,7 +62,7 @@ export function relevanceReviewMessages(scope: string, companies: VeRelevanceRev
     'Return one review for every local i. Explain the specific activity established and its relationship to the target; do not claim exclusivity or absence from an incomplete excerpt.',
     'Keep each reason concise, at most 240 characters. Reasons in ' + (language === 'ru' ? 'Russian' : 'English')
       + '. JSON only: {"reviews":[{"i":0,"result":"insufficient","reason":"..."}]}.',
-  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (veStaffingScopeNote(scope) ? '\n' + veStaffingScopeNote(scope) : '') + (medicalNote ? '\n' + medicalNote : '') + '\nExact activity excerpts by local company index:\n'
+  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (veStaffingScopeNote(scope, origin) ? '\n' + veStaffingScopeNote(scope, origin) : '') + (medicalNote ? '\n' + medicalNote : '') + '\nExact activity excerpts by local company index:\n'
     + JSON.stringify(companies.map((company, i) => ({ i, evidence: company.evidence }))) }];
 }
 

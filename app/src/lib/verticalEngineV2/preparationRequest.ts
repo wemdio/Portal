@@ -50,7 +50,7 @@ export async function checkVePreparationRequest(
       .eq('project_id', projectId).maybeSingle(),
     db.from('ve_outreach_preparations').select('base_id,template_id,status,locked_until')
       .eq('project_id', projectId).eq('hypothesis_id', hypothesisId).maybeSingle(),
-    db.from('ve_hypotheses').select('id,vertical_id,status')
+    db.from('ve_hypotheses').select('id,vertical_id,status,title,description,origin')
       .eq('project_id', projectId).eq('id', hypothesisId).maybeSingle(),
   ]);
   for (const result of [setup, preparation, hypothesis]) if (result.error) throw new Error(result.error.message);
@@ -111,7 +111,7 @@ export async function checkVePreparationRequest(
     ...queued(), base_id: saved.id, code: 'preparation_incomplete',
     reason: 'Завершим подготовку по сохранённой базе и готовым письмам.',
   };
-  const decision = getVeCollectionContinuation(saved);
+  const decision = getVeCollectionContinuation(saved, hypothesis.data);
   if (!await saveVeCollectionContinuationCache(db, saved, decision)) return outcome('unavailable',
     'Не удалось подтвердить актуальное состояние базы. Обновите страницу.', 'state_changed', saved.id);
   if (decision.available) return { ...queued(), base_id: saved.id, code: decision.code, resume_collection: true };

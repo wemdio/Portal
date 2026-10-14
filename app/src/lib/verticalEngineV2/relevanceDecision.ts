@@ -25,6 +25,8 @@ export const veRelevanceDecisionSchema = z.object({
   triage_version: z.number().int().positive().optional().catch(undefined),
   /** needs_review, уже проверенный по этой версии правил отбора (VE_RELEVANCE_RULES_VERSION). */
   rules_version: z.number().int().positive().optional().catch(undefined),
+  /** Saved SaaS staffing-only refusal examined by the targeted correction. */
+  staffing_correction_version: z.number().int().positive().optional().catch(undefined),
   /** Present only when the triage itself decided. `final`: a reject that is not re-reviewed. */
   triage: z.object({ outcome: z.enum(['admit', 'reject']), activity: z.number().min(0).max(1),
     final: z.literal(true).optional() }).optional().catch(undefined),
