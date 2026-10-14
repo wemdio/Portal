@@ -604,6 +604,56 @@ export async function deleteLeadsByCampaign(campaignId: string, requestOptions?:
   return { count: totalDeleted };
 }
 
+const LEAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * DELETE /leads/{id} — удалить ОДНУ запись лида по её id. Расчёт: в API v2
+ * запись лида принадлежит одной кампании (или списку), тот же адрес в другой
+ * кампании — другая запись с другим id, и её этот вызов не касается. Без тела,
+ * поэтому без Content-Type (request() ставит его только вместе с телом), как
+ * deleteCampaign.
+ *
+ * НЕ ПРОВЕРЕН на живом рассыльщике: ни один путь кодовой базы этот вызов раньше
+ * не делал. Что он удаляет только эту запись (а не тот же адрес в других
+ * кампаниях воркспейса), что он отвечает на успех и на уже удалённый id и как
+ * удаление влияет на счётчики кампании, подтверждает разовая живая проверка
+ * (план — в отчёте .r12-reports/build-dnc.md). Вызывает его только
+ * hypothesisEngine/engDncRemoval.ts, и только с HE_ENG_DNC_REMOVE=1.
+ *
+ * Закрыт по умолчанию (fail-closed), до запроса:
+ *  - id не в форме UUID — отказ;
+ *  - воркспейс не назван явно (accountId) — отказ: удаление «в воркспейс по
+ *    умолчанию» не делается никогда;
+ *  - skipRateLimiter — отказ: вызов идёт только через общий ограничитель.
+ * После ответа: `id` — какой id записи рассыльщик вернул в теле (null — тела
+ * или id в нём нет). Вернул ДРУГОЙ id — бросаем: что удалено, неизвестно.
+ * Ответ 2xx сам по себе «удалено» не доказывает — вызывающий подтверждает
+ * удаление повторным поиском лида в кампании (engDncRemoval.removeOne).
+ */
+export async function deleteLead(
+  id: string,
+  requestOptions: InstantlyRequestOptions,
+): Promise<{ id: string | null }> {
+  if (typeof id !== 'string' || !LEAD_ID_RE.test(id)) {
+    throw new Error('deleteLead: lead id is not a UUID');
+  }
+  if (!requestOptions || typeof requestOptions.accountId !== 'string' || !requestOptions.accountId.trim()) {
+    throw new Error('deleteLead: the workspace must be named explicitly');
+  }
+  if (requestOptions.skipRateLimiter) {
+    throw new Error('deleteLead: the shared rate limiter cannot be skipped');
+  }
+  const body = await request<unknown>(`/leads/${id}`, { method: 'DELETE' }, requestOptions);
+  const echoed =
+    body && typeof body === 'object' && typeof (body as { id?: unknown }).id === 'string'
+      ? (body as { id: string }).id
+      : null;
+  if (echoed !== null && echoed.trim().toLowerCase() !== id.toLowerCase()) {
+    throw new Error('deleteLead: the provider answered for another lead id');
+  }
+  return { id: echoed };
+}
+
 // ─── Lead Lists ───────────────────────────────────────────────────────────────
 
 export async function listLeadLists(params?: PaginationParams) {

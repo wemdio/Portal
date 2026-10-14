@@ -33,7 +33,18 @@ export async function GET(req: NextRequest) {
   // (./_eng.ts). Ниже — RU-ветка, без изменений.
   if (result.auth.market === 'eng') {
     if (result.auth.isDemo) {
-      return NextResponse.json({ items: [], total: 0, matching: 0, offset: 0, next_offset: null });
+      return NextResponse.json({
+        items: [],
+        total: 0,
+        matching: 0,
+        offset: 0,
+        next_offset: null,
+        in_campaign_removal: 'off',
+        pending: null,
+        failed: null,
+        failed_examples: [],
+        failed_at_least: false,
+      });
     }
     if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
     return engBlocklistGet(req, supabaseInstantly, result.auth.userId);
