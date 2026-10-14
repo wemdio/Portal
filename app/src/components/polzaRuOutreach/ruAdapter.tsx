@@ -77,6 +77,7 @@ const SOURCE_SHORT: Record<SourceCode, string> = {
   directory: 'Общая база',
   gis: '2ГИС',
   ymaps: 'Я.Карты',
+  ymaps_catalog: 'Каталог Я.Карт',
   revenue_growth: 'Выручка ФНС',
   news: 'Новости',
 };
