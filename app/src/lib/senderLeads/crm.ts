@@ -65,7 +65,7 @@ async function pushOne(db: SupabaseClient, row: PushRow, log: Log): Promise<void
     }
 
     if (!leadId) {
-      leadId = await client.findOpenLeadOfContact(contactId);
+      leadId = (await client.findOpenLeadOfContact(contactId))?.id ?? null;
       if (leadId) {
         action = 'note_added';
         await patch(db, row.id, {

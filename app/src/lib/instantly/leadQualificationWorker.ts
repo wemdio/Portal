@@ -813,14 +813,15 @@ async function getPortalLinkedCampaignIds(): Promise<string[]> {
     }
   }
 
-  // Наши «N. Polza_…» квалификатор не трогает (с 06.10.2026, просьба
-  // пользователя): ни пометки «лид», ни уведомлений, ни доски — сделки по ним
-  // продажи заводят руками, а диалоги «Персонализированные ответы» читают
-  // напрямую из Instantly. См. lib/instantly/ownAgencyCampaign.ts.
+  // Наши «N. Polza_…» и «ENagency …» квалификатор не трогает: ни пометки
+  // «лид», ни уведомлений, ни доски. Их ответы квалифицирует отдельный проход
+  // (lib/ownReplyLeads), а диалоги «Персонализированные ответы» читают напрямую
+  // из Instantly. Префильтр широкий (ilike), точное правило — в
+  // isOwnAgencyCampaign (lib/instantly/ownAgencyCampaign.ts).
   const { data: ownRows, error: ownError } = await supabaseAdmin
     .from('instantly_campaign_catalog')
     .select('id, name')
-    .ilike('name', '%polza%');
+    .or('name.ilike.%polza%,name.ilike.%enagency%');
   if (ownError) {
     throw new Error(`own agency campaigns unavailable: ${ownError.message}`);
   }

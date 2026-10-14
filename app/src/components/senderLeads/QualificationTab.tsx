@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import { LEAD_CRITERIA_MAX } from '@/lib/senderLeads/settings';
+import type { OwnReplySettingsDto } from '@/lib/ownReplyLeads/settings';
 import type {
   LeadHistoryCounts,
   LeadHistoryFilter,
@@ -10,7 +11,8 @@ import type {
   LeadSettingsDto,
   LeadVerdict,
 } from '@/lib/senderLeads/history';
-import { fetchLeadHistory, fetchLeadSettings, saveLeadSettings, setLeadVerdict } from './api';
+import { fetchLeadHistory, fetchLeadSettings, fetchOwnSettings, saveLeadSettings, saveOwnSettings, setLeadVerdict } from './api';
+import { OwnRepliesHistory } from './OwnRepliesHistory';
 
 const FILTERS: { id: LeadHistoryFilter; label: string; tone: string }[] = [
   { id: 'all', label: 'Всего', tone: 'text-zinc-900' },
@@ -117,11 +119,21 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [ownLoaded, setOwnLoaded] = useState<OwnReplySettingsDto | null>(null);
+  const [ownEnabled, setOwnEnabled] = useState(false);
+  const [ownCriteria, setOwnCriteria] = useState('');
+
   const apply = (settings: LeadSettingsDto) => {
     setLoaded(settings);
     setEnabled(settings.enabled);
     setTelegram(settings.telegram);
     setCriteria(settings.criteria);
+  };
+
+  const applyOwn = (settings: OwnReplySettingsDto) => {
+    setOwnLoaded(settings);
+    setOwnEnabled(settings.enabled);
+    setOwnCriteria(settings.criteria);
   };
 
   useEffect(() => {
@@ -133,21 +145,37 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить настройки');
       });
+    fetchOwnSettings()
+      .then((settings) => {
+        if (!cancelled) applyOwn(settings);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить настройки наших кампаний');
+      });
     return () => {
       cancelled = true;
     };
   }, [folderKey]);
 
-  const dirty = loaded !== null
+  const folderDirty = loaded !== null
     && (enabled !== loaded.enabled || telegram !== loaded.telegram || criteria.trim() !== loaded.criteria.trim());
-  const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX;
+  const ownDirty = ownLoaded !== null
+    && (ownEnabled !== ownLoaded.enabled || ownCriteria.trim() !== ownLoaded.criteria.trim());
+  const dirty = folderDirty || ownDirty;
+  const tooLong = criteria.trim().length > LEAD_CRITERIA_MAX || ownCriteria.trim().length > LEAD_CRITERIA_MAX;
 
   const save = async () => {
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
-      apply(await saveLeadSettings(folderKey, { enabled, telegram, criteria: criteria.trim() }));
+      // Одна кнопка на вкладку: сохраняет и папку, и блок «наши кампании» — что изменено.
+      const [folderRes, ownRes] = await Promise.all([
+        folderDirty ? saveLeadSettings(folderKey, { enabled, telegram, criteria: criteria.trim() }) : null,
+        ownDirty ? saveOwnSettings({ enabled: ownEnabled, criteria: ownCriteria.trim() }) : null,
+      ]);
+      if (folderRes) apply(folderRes);
+      if (ownRes) applyOwn(ownRes);
       setSaved(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить');
@@ -237,11 +265,56 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
             </p>
           </div>
 
+          <div className="space-y-3 border-t border-zinc-200 pt-4">
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-900">Instantly · наши кампании</h3>
+              <p className="text-xs text-zinc-500">Ответы X. Polza и ENagency: лид → сделка в AMO и сообщение в чат.</p>
+            </div>
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={ownEnabled}
+                onChange={(e) => {
+                  setOwnEnabled(e.target.checked);
+                  touch();
+                }}
+                className="mt-0.5 h-4 w-4 cursor-pointer rounded border-zinc-300"
+              />
+              <span>
+                <span className="block text-sm font-medium text-zinc-900">Квалифицировать и заводить сделки в AMO</span>
+                <span className="block text-xs text-zinc-500">
+                  {ownLoaded?.enabled && ownLoaded.enabledAt
+                    ? `Включено с ${new Date(ownLoaded.enabledAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} — оцениваются ответы после этого.`
+                    : 'Оцениваются только ответы, пришедшие после включения.'}
+                </span>
+              </span>
+            </label>
+            <div>
+              <div className="flex items-baseline justify-between gap-3">
+                <label htmlFor="own-lead-criteria" className="text-sm font-medium text-zinc-900">Что считать лидом</label>
+                <span className={`text-xs ${ownCriteria.trim().length > LEAD_CRITERIA_MAX ? 'text-red-600' : 'text-zinc-400'}`}>
+                  {ownCriteria.trim().length} / {LEAD_CRITERIA_MAX}
+                </span>
+              </div>
+              <textarea
+                id="own-lead-criteria"
+                value={ownCriteria}
+                onChange={(e) => {
+                  setOwnCriteria(e.target.value);
+                  touch();
+                }}
+                rows={4}
+                placeholder="Пусто — общие правила квалификатора"
+                className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
+              />
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
               onClick={() => void save()}
-              disabled={saving || !dirty || tooLong || !loaded?.folderExists}
+              disabled={saving || !dirty || tooLong || (folderDirty && !loaded?.folderExists)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
             >
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
@@ -265,6 +338,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
  * Вкладка «Квалификация» автоаутрича: настройки квалификатора папки
  * «Рассылки» и история оценок её ответов — кто лид, кто нет, что ушло в
  * ТГ-чат. Ручная метка «Лид» / «Не лид» приоритетнее ИИ и в чат не шлёт.
+ * Внизу — история блока «Instantly · наши кампании» (ответы X. Polza и ENagency → AMO).
  */
 export function QualificationTab({ folderKey }: { folderKey: string }) {
   const [filter, setFilter] = useState<LeadHistoryFilter>('all');
@@ -496,6 +570,8 @@ export function QualificationTab({ folderKey }: { folderKey: string }) {
           </div>
         ) : null}
       </div>
+
+      <OwnRepliesHistory />
     </div>
   );
 }

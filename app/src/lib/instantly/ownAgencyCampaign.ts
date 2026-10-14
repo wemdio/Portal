@@ -1,24 +1,44 @@
 /**
- * Наши собственные email-кампании Polza: «1. Polza_HH_…», «11. Polza_B2B_SaaS_…».
+ * Наши собственные email-кампании. Две формы названия:
+ *  - «1. Polza_HH_…», «11. Polza_B2B_SaaS_…» — номер, точка, «Polza» в начале;
+ *  - «ENagency SDR», «ENagency v2 dir ect_hyp_001_apollo_300 UK&IR» — «ENagency»
+ *    в начале (английский аутрич), регистр не важен.
  *
- * Номер, точка, «Polza» в начале названия. Такие кампании:
- *  - сами привязываются к проекту студии «Polza» мимо границы периода
- *    (`autoMatchCampaignsToProjects`), чтобы их диалоги были видны в
- *    «Персонализированных ответах»;
- *  - НЕ проходят квалификатор: пометки «лид», уведомлений специалисту и сделок
- *    в AMO по ним нет — с 06.10.2026 сделки по ним продажи заводят руками.
- *    Ответы инструмент читает напрямую из Instantly.
+ * Такие кампании:
+ *  - сами привязываются к своему проекту студии мимо границы периода
+ *    (`autoMatchCampaignsToProjects`): «N. Polza_…» — к клиенту «Polza»,
+ *    «ENagency …» — к клиенту «ENagency», и никогда крест-накрест; так их
+ *    диалоги видны в «Персонализированных ответах»;
+ *  - НЕ проходят клиентский квалификатор (`leadQualificationWorker`): пометки
+ *    «лид», уведомлений специалисту и сделок в AMO по ним из него нет. Их ответы
+ *    квалифицирует и передаёт в AMO отдельный проход (`lib/ownReplyLeads`, с
+ *    14.10.2026; включается на вкладке «Квалификация»). Ответы инструмент читает
+ *    напрямую из Instantly.
  *
  * Модуль без зависимостей: его тянут и каталог кампаний, и квалификатор, и
  * экран ответов.
  */
-const OWN_AGENCY_CAMPAIGN_RE = /^\s*\d+\s*\.\s*polza/i;
+// «N. Polza_…»: номер, точка, «Polza» в начале названия.
+const POLZA_CAMPAIGN_RE = /^\s*\d+\s*\.\s*polza/i;
+// «ENagency …»: слово «ENagency» в начале названия.
+const ENAGENCY_CAMPAIGN_RE = /^\s*enagency\b/i;
 
 export function isOwnAgencyCampaign(campaignName: string | null | undefined): boolean {
-  return OWN_AGENCY_CAMPAIGN_RE.test(campaignName ?? '');
+  const name = campaignName ?? '';
+  return POLZA_CAMPAIGN_RE.test(name) || ENAGENCY_CAMPAIGN_RE.test(name);
 }
 
-/** Проект студии, к которому относятся наши кампании, — клиент «Polza». */
-export function isOwnAgencyProjectClient(client: string | null | undefined): boolean {
-  return (client ?? '').trim().toLowerCase() === 'polza';
+/**
+ * Наша кампания принадлежит именно этому проекту студии: «N. Polza_…» — клиенту
+ * «Polza», «ENagency …» — клиенту «ENagency». Крест-накрест — false.
+ */
+export function ownAgencyProjectMatches(
+  projectClient: string | null | undefined,
+  campaignName: string | null | undefined,
+): boolean {
+  const client = (projectClient ?? '').trim().toLowerCase();
+  const name = campaignName ?? '';
+  if (client === 'polza') return POLZA_CAMPAIGN_RE.test(name);
+  if (client === 'enagency') return ENAGENCY_CAMPAIGN_RE.test(name);
+  return false;
 }

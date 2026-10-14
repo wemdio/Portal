@@ -22,6 +22,19 @@ export const POLZA_SOURCE_TG_OUTREACH = 'Telegram Outreach';
 export const POLZA_CONTOUR_FIELD_ID = 1317011;
 export const POLZA_CONTOUR_TG_OUTREACH = 'TG-outreach';
 
+/**
+ * Email-аутрич наших кампаний «N. Polza_…» (с 11.10.2026): значения и
+ * текстовые поля — как в ручных сделках менеджеров (сверено по amo_leads).
+ */
+export const POLZA_SOURCE_EMAIL_OUTREACH = 'Email Outreach';
+export const POLZA_CONTOUR_EMAIL_OUTREACH = 'Email-outreach';
+/** «Подысточник» (текст): «аутрич» / «англ аутрич». */
+export const POLZA_SUBSOURCE_FIELD_ID = 1314381;
+/** «Ком-й» (текст): менеджеры писали туда название кампании. */
+export const POLZA_CAMPAIGN_FIELD_ID = 402805;
+/** «Сайт» (текст). */
+export const POLZA_SITE_FIELD_ID = 402799;
+
 export interface CrmConnectionPublic {
   id: string;
   name: string;
