@@ -8,6 +8,9 @@ import type {
   ThreadVerdictDto,
 } from '@/lib/senderLeads/history';
 
+import type { OwnHistoryDto, OwnHistoryFilter } from '@/lib/ownReplyLeads/history';
+import type { OwnReplySettingsDto } from '@/lib/ownReplyLeads/settings';
+
 const BASE = '/api/tools/sender-leads';
 
 export function fetchLeadHistory(params: { folder: string; filter: LeadHistoryFilter; page: number }) {
@@ -37,4 +40,23 @@ export function setLeadVerdict(recipientId: string, verdict: LeadVerdict) {
 
 export function fetchThreadVerdict(recipientId: string) {
   return authFetchJson<ThreadVerdictDto>(`${BASE}/verdict?recipientId=${encodeURIComponent(recipientId)}`);
+}
+
+const OWN_BASE = '/api/tools/own-reply-leads';
+
+export function fetchOwnHistory(filter: OwnHistoryFilter, page: number) {
+  const query = new URLSearchParams({ filter, page: String(page) });
+  return authFetchJson<OwnHistoryDto>(`${OWN_BASE}?${query.toString()}`);
+}
+
+export function fetchOwnSettings() {
+  return authFetchJson<OwnReplySettingsDto>(`${OWN_BASE}/settings`);
+}
+
+export function saveOwnSettings(body: { enabled: boolean; criteria: string }) {
+  return authFetchJson<OwnReplySettingsDto>(`${OWN_BASE}/settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
