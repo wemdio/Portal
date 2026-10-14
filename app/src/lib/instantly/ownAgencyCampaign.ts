@@ -18,7 +18,10 @@
  * Модуль без зависимостей: его тянут и каталог кампаний, и квалификатор, и
  * экран ответов.
  */
-const OWN_AGENCY_CAMPAIGN_RE = /^\s*(?:\d+\s*\.\s*polza|enagency\b)/i;
+// «N. Polza_…»: номер, точка, «Polza» в начале названия.
+const POLZA_CAMPAIGN_RE = /^\s*\d+\s*\.\s*polza/i;
+// «ENagency …»: слово «ENagency» в начале названия.
+const ENAGENCY_CAMPAIGN_RE = /^\s*enagency\b/i;
 
 export function isOwnAgencyCampaign(campaignName: string | null | undefined): boolean {
   const name = campaignName ?? '';
