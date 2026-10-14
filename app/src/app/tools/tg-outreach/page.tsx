@@ -1795,8 +1795,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           одна — ещё нет. Пусто, если последнее не наше. */}
                       {d.messages.at(-1)?.role === 'assistant' && d.out_read != null && (
                         d.out_read
-                          ? <CheckCheck title="Собеседник прочитал" className="h-3.5 w-3.5 text-blue-500" />
-                          : <Check title="Не прочитано" className="h-3.5 w-3.5 text-gray-400" />
+                          ? <span title="Собеседник прочитал"><CheckCheck className="h-3.5 w-3.5 text-blue-500" /></span>
+                          : <span title="Не прочитано"><Check className="h-3.5 w-3.5 text-gray-400" /></span>
                       )}
                     </div>
                     <div className="flex items-center gap-2">
