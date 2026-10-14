@@ -48,6 +48,8 @@ import {
   Pencil,
   Archive,
   UserPen,
+  Check,
+  CheckCheck,
 } from 'lucide-react';
 import { AccountArchiveSection, ArchiveAccountsDialog } from '@/components/tg-outreach/AccountArchive';
 import type { ArchiveReason } from '@/lib/tgOutreach/accountArchive';
@@ -1789,6 +1791,13 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         <ForwardBadge forward={d.forward} compact />
                       )}
                       <span className="text-[10px] text-gray-400">{d.messages.length} сообщ.</span>
+                      {/* Галочки по нашему последнему сообщению: две — прочитано,
+                          одна — ещё нет. Пусто, если последнее не наше. */}
+                      {d.messages.at(-1)?.role === 'assistant' && d.out_read != null && (
+                        d.out_read
+                          ? <CheckCheck title="Собеседник прочитал" className="h-3.5 w-3.5 text-blue-500" />
+                          : <Check title="Не прочитано" className="h-3.5 w-3.5 text-gray-400" />
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
@@ -2041,6 +2050,11 @@ function DialogsTab({ campaignId, crmEnabled }: {
                               </div>
                               {m.content}
                             </div>
+                            {i === d.messages.length - 1 && m.role === 'assistant' && d.out_read != null && (
+                              <div className={`mt-0.5 text-right text-[10px] ${d.out_read ? 'text-blue-500' : 'text-gray-400'}`}>
+                                {d.out_read ? 'Прочитано' : 'Не прочитано'}
+                              </div>
+                            )}
                           </div>
                         );
                       })}

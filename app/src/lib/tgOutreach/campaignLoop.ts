@@ -16,6 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP, TG_SERVICE_NOTIFICATIONS_USER_ID } from './types';
+import { outboxReadFlag, syncOutboxReadFlags } from './outboxRead';
 import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
@@ -2527,6 +2528,27 @@ export async function runCampaignLoop(
             'info',
             `Аккаунт ${account.session_name}: загрузил ${dialogs.length} диалогов, из них ${cycleStats.unread} с непрочитанными`,
           );
+          // Галочки «прочитано» у наших сообщений: список диалогов уже в руках,
+          // отдельного запроса не нужно. Диалоги без непрочитанных ниже
+          // пропускаются, поэтому синхронизируем все, а не только их.
+          try {
+            const changedReads = await syncOutboxReadFlags(
+              db,
+              campaign.id,
+              account.id,
+              dialogs.flatMap((d) => {
+                if (!(d.entity instanceof Api.User)) return [];
+                const flag = outboxReadFlag(
+                  d.message,
+                  (d.dialog as { readOutboxMaxId?: number } | undefined)?.readOutboxMaxId,
+                );
+                return [{ tgUserId: Number(d.entity.id), flag }];
+              }),
+            );
+            if (changedReads > 0) log('info', `Аккаунт ${account.session_name}: отметки «прочитано» обновлены у ${changedReads} диалогов`);
+          } catch (readErr) {
+            log('warning', `Аккаунт ${account.session_name}: не удалось обновить отметки «прочитано» — ${readErr instanceof Error ? readErr.message : String(readErr)}`);
+          }
 
           for (const dialog of dialogs) {
             if (shouldStop()) break;

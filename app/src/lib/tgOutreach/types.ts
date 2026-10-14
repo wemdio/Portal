@@ -515,6 +515,8 @@ export interface OutreachDialog {
    */
   can_send_changed_reason?: string | null;
   messages: DialogMessage[];
+  /** Прочитал ли собеседник наше последнее сообщение; null — неизвестно или последнее не наше. */
+  out_read?: boolean | null;
   status: DialogStatus;
   last_message_at: string | null;
   created_at: string;
