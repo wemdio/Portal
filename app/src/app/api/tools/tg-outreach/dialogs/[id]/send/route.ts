@@ -51,7 +51,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       
         const { data, error } = await supabase
           .from('tg_outreach_dialogs')
-          .update({ messages, last_message_at: new Date().toISOString() })
+          .update({ messages, last_message_at: new Date().toISOString(), out_read: false })
           .eq('id', id)
           .select()
           .single();
