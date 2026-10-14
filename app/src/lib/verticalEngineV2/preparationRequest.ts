@@ -50,7 +50,7 @@ export async function checkVePreparationRequest(
       .eq('project_id', projectId).maybeSingle(),
     db.from('ve_outreach_preparations').select('base_id,template_id,status,locked_until')
       .eq('project_id', projectId).eq('hypothesis_id', hypothesisId).maybeSingle(),
-    db.from('ve_hypotheses').select('id,vertical_id,status,title,description,origin')
+    db.from('ve_hypotheses').select('id,vertical_id,status,title,description,origin,broad')
       .eq('project_id', projectId).eq('id', hypothesisId).maybeSingle(),
   ]);
   for (const result of [setup, preparation, hypothesis]) if (result.error) throw new Error(result.error.message);

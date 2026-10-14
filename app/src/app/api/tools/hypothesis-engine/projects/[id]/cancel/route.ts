@@ -4,6 +4,8 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { normalizeHeMarket } from '@/lib/hypothesisEngine/market';
+import { isHeMissingColumnError } from '@/lib/hypothesisEngine/projectCancelMarker';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -26,6 +28,16 @@ function jsonError(message: string, status: number) {
  *     иначе они навсегда зависают без своей джобы (и collecting держит
  *     unique-индекс he_bases_one_collecting_per_vertical).
  * Уже завершённые (done/failed) джобы и готовые артефакты не трогаем.
+ *
+ * Только у проекта market='us' — та же долговечная отметка отмены, что пишет
+ * клиентский роут: he_projects.cancelled_at = момент отмены
+ * (lib/hypothesisEngine/projectCancelMarker.ts). По ней ремонт осиротевшей
+ * сборки (baseCollectEnqueue) не чинит базы, созданные до отмены, а автоподъём
+ * (he_auto_resume_transient_bases) не поднимает базы, упавшие до неё. Пишется
+ * после отмены джоб и только когда отменена хоть одна (иначе — 409, как и
+ * раньше); колонки нет — пропуск, сбой — в лог, отмену он не валит: джобы уже
+ * отменены, а их отменённые строки автоподъём читает и без отметки. RU-проекту
+ * роут не пишет ничего нового.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
@@ -41,7 +53,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       const { data: project, error: projErr } = await supabaseAdmin
         .from('he_projects')
-        .select('id, status')
+        .select('id, status, market')
         .eq('id', id)
         .single();
       if (projErr || !project) {
@@ -65,6 +77,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const cancelled = (cancelledJobs ?? []).length;
       if (cancelled === 0) {
         return jsonError('Нет активных задач — отменять нечего', 409);
+      }
+
+      // Отметка отмены — только 'us' (см. докблок POST).
+      let cancelMarker: 'recorded' | 'unsupported' | 'failed' | 'not_us' = 'not_us';
+      if (normalizeHeMarket((project as { market?: unknown }).market) === 'us') {
+        const { error: markerErr } = await supabaseAdmin
+          .from('he_projects')
+          .update({ cancelled_at: now })
+          .eq('id', id);
+        if (!markerErr) {
+          cancelMarker = 'recorded';
+        } else if (isHeMissingColumnError(markerErr)) {
+          cancelMarker = 'unsupported';
+        } else {
+          cancelMarker = 'failed';
+          await logError('tools.hypothesis-engine.cancel.marker_failed', markerErr, { userId, projectId: id });
+        }
       }
 
       // Базы, которые ждали отменённые джобы (автосборка / анализ), — в failed,
@@ -93,6 +122,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         userId,
         projectId: id,
         cancelled,
+        ...(cancelMarker === 'not_us' ? {} : { cancelMarker }),
       });
 
       return NextResponse.json({ ok: true, cancelled });

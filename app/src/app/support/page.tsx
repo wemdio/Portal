@@ -19,6 +19,7 @@ import { Send, Loader2, AlertCircle, MessageSquare } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson } from '@/lib/authFetch';
 import { useUser } from '@/lib/UserProvider';
+import { isValidUuid } from '@/lib/apiValidation';
 import {
   SUPPORT_MESSAGE_MAX_LEN,
   validateMessageBody,
@@ -128,11 +129,15 @@ export default function AdminSupportPage() {
     void fetchThreads();
   }, [fetchThreads]);
 
-  // Auto-select the first (most recent) thread once the list loads.
+  // Auto-select the first (most recent) thread once the list loads — or the
+  // thread of a deep link /support?thread=<id> (карточка клиента раздела
+  // «Английские клиенты»), даже если его нет на загруженной странице списка:
+  // подменять его самым свежим тредом значило бы открыть чужой чат.
   useEffect(() => {
     if (selectedId !== null) return;
     if (threads.length === 0) return;
-    setSelectedId(threads[0].id);
+    const linked = new URLSearchParams(window.location.search).get('thread');
+    setSelectedId(linked && isValidUuid(linked) ? linked : threads[0].id);
   }, [threads, selectedId]);
 
   useEffect(() => {

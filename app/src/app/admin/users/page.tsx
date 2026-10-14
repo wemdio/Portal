@@ -24,6 +24,12 @@ import {
   calcBillingAmount,
 } from '@/lib/tariffPricing';
 import type { TariffType, PaidTariffType, BillingPeriod } from '@/lib/tariffPricing';
+import {
+  countAdminUserRoles,
+  engCabinetClientStats,
+  filterAdminUsers,
+  isEngCabinetClient,
+} from '@/components/admin-eng/usersFilter';
 
 type TariffData = {
   tariff_type: TariffType;
@@ -964,6 +970,9 @@ export default function UsersPage() {
   const [accountProtected, setAccountProtected] = useState(false);
   const [blockStatusLoaded, setBlockStatusLoaded] = useState(false);
   const [blocking, setBlocking] = useState(false);
+  // Клиенты английского кабинета ведутся в разделе «Английские клиенты»
+  // (/admin/eng-clients); здесь они спрятаны, пока не включена эта галочка.
+  const [showEngClients, setShowEngClients] = useState(false);
 
   const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
   const [clientCampaignBaseline, setClientCampaignBaseline] = useState<string[]>([]);
@@ -1217,6 +1226,21 @@ export default function UsersPage() {
     setAccountBlocked(false);
     setAccountProtected(false);
     setBlockStatusLoaded(false);
+    // Клиент английского кабинета: управление — в его карточке раздела
+    // «Английские клиенты»; здесь узкая модалка без запросов и без кнопок
+    // действий (роль, инструменты, тариф, доступ к кампаниям, блокировка,
+    // удаление, пароль — всё это делает карточка или не делается для ENG).
+    if (isEngCabinetClient(user)) {
+      setModalRole(user.role ?? null);
+      setModalFullName(user.full_name ?? '');
+      setModalEmail(user.email ?? '');
+      setActionModalOrigin(origin);
+      setActionModalUserId(user.id);
+      setModalFlyIn(false);
+      setActionModalLoadingUserId(null);
+      setTimeout(() => setModalFlyIn(true), 20);
+      return;
+    }
     try {
       const isClient = user.role === 'client';
       // Per-call catch so one failing endpoint does not blow away state derived
@@ -1610,27 +1634,26 @@ export default function UsersPage() {
   // wrap, every parent re-render — including those triggered by typing in
   // the action modal — produced a new array, defeating sortedUsers' useMemo
   // and re-rendering the entire users table.
-  const filteredUsers = useMemo(() => {
-    const q = searchQuery.toLowerCase();
-    return users.filter((user) => {
-      const roleKey: UserRole | 'none' = user.role ?? 'none';
-      if (!selectedRoleFilters.has(roleKey)) return false;
-      return (
-        user.email?.toLowerCase().includes(q) ||
-        user.full_name?.toLowerCase().includes(q) ||
-        (user.role && ROLE_LABELS[user.role]?.toLowerCase().includes(q))
-      );
-    });
-  }, [users, searchQuery, selectedRoleFilters]);
+  // Клиенты английского кабинета спрятаны, пока не включена галочка
+  // (components/admin-eng/usersFilter.ts — то же правило, что у раздела).
+  const filteredUsers = useMemo(
+    () => filterAdminUsers(users, { query: searchQuery, roles: selectedRoleFilters, showEng: showEngClients }),
+    [users, searchQuery, selectedRoleFilters, showEngClients],
+  );
 
   // Счётчики по каждой роли — по всей базе, независимо от поиска и выбранных
-  // фильтров. Показываются в дропдауне рядом с каждым чекбоксом.
-  const roleCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const k of ROLE_FILTER_KEYS) counts[k] = 0;
-    for (const u of users) counts[u.role ?? 'none'] = (counts[u.role ?? 'none'] ?? 0) + 1;
-    return counts as Record<UserRole | 'none', number>;
-  }, [users, ROLE_FILTER_KEYS]);
+  // фильтров (без спрятанных клиентов английского кабинета). Показываются в
+  // дропдауне рядом с каждым чекбоксом.
+  const roleCounts = useMemo(
+    () => countAdminUserRoles(users, ROLE_FILTER_KEYS, showEngClients),
+    [users, ROLE_FILTER_KEYS, showEngClients],
+  );
+  const visibleUsersCount = useMemo(
+    () => (showEngClients ? users.length : users.filter((u) => !isEngCabinetClient(u)).length),
+    [users, showEngClients],
+  );
+  // Сколько клиентов английского кабинета в базе и сколько подходит под поиск.
+  const engStats = useMemo(() => engCabinetClientStats(users, searchQuery), [users, searchQuery]);
 
   const sortedUsers = useMemo(() => {
     const list = [...filteredUsers];
@@ -1703,7 +1726,7 @@ export default function UsersPage() {
               {selectedRoleFilters.size === 0
                 ? 'Роли не выбраны'
                 : selectedRoleFilters.size === ROLE_FILTER_KEYS.length
-                  ? `Все роли · ${users.length}`
+                  ? `Все роли · ${visibleUsersCount}${!showEngClients && engStats.total > 0 ? ' (без английских клиентов)' : ''}`
                   : selectedRoleFilters.size === 1
                     ? (() => {
                         const only = [...selectedRoleFilters][0];
@@ -1804,6 +1827,33 @@ export default function UsersPage() {
           Добавить пользователя
         </button>
       </div>
+
+      {engStats.total > 0 && (
+        <div className="mb-4 flex flex-col gap-2 rounded-xl border border-blue-200 bg-blue-50/60 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <Link href="/admin/eng-clients" className="font-medium text-blue-700 hover:text-blue-800">
+            Клиенты английского кабинета ({engStats.total}) — в разделе «Английские клиенты» →
+          </Link>
+          <label className="inline-flex cursor-pointer items-center gap-2 text-gray-700">
+            <input
+              type="checkbox"
+              checked={showEngClients}
+              onChange={(e) => setShowEngClients(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            Показать клиентов английского кабинета
+          </label>
+        </div>
+      )}
+      {!showEngClients && engStats.matching > 0 && (
+        <p className="mb-4 text-sm">
+          <Link
+            href={`/admin/eng-clients?q=${encodeURIComponent(searchQuery.trim())}` as Route}
+            className="font-medium text-blue-600 hover:text-blue-700"
+          >
+            Найдено среди английских клиентов: {engStats.matching} — открыть
+          </Link>
+        </p>
+      )}
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
@@ -1969,6 +2019,7 @@ export default function UsersPage() {
         const userForModal = users.find((u) => u.id === actionModalUserId);
         if (!userForModal) return null;
         const origin = actionModalOrigin;
+        const engClient = isEngCabinetClient(userForModal);
         return (
           <div
             className="fixed inset-0 z-50 p-4 flex items-center justify-center"
@@ -1990,6 +2041,60 @@ export default function UsersPage() {
                 transition: 'left 1s cubic-bezier(0.34, 1.56, 0.64, 1), top 1s cubic-bezier(0.34, 1.56, 0.64, 1), transform 1s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 1s ease-out',
               }}
             >
+              {engClient ? (
+                <>
+                  <div className="px-7 py-5 border-b border-gray-200 shrink-0 flex items-center justify-between">
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      {userForModal.full_name || userForModal.email || 'Пользователь'}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionModalUserId(null);
+                        setModalFlyIn(false);
+                      }}
+                      className="size-8 inline-flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors text-gray-600"
+                      aria-label="Закрыть"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="p-7 space-y-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <p className="text-sm font-medium text-gray-700 mb-1">ФИО</p>
+                        <p className="text-sm text-gray-900 break-words">{userForModal.full_name || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-gray-700 mb-1">Почта</p>
+                        <p className="text-sm text-gray-900 break-words">{userForModal.email || '—'}</p>
+                      </div>
+                    </div>
+                    <p className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                      Это клиент английского кабинета. Управление — в карточке клиента.
+                    </p>
+                  </div>
+                  <div className="pl-4 pr-5 py-5 border-t border-gray-200 bg-gray-50 flex flex-wrap items-center gap-2">
+                    <Link
+                      href={`/admin/eng-clients/${userForModal.id}` as Route}
+                      className="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium text-sm"
+                    >
+                      Открыть карточку
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActionModalUserId(null);
+                        setModalFlyIn(false);
+                      }}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Закрыть
+                    </button>
+                  </div>
+                </>
+              ) : (
+              <>
               <div className="px-7 py-5 border-b border-gray-200 shrink-0 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -2465,6 +2570,8 @@ export default function UsersPage() {
                   {saving ? 'Сохранение...' : 'Сохранить изменения'}
                 </button>
               </div>
+              </>
+              )}
             </div>
           </div>
         );

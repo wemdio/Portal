@@ -1,5 +1,6 @@
 import { navItems, NAV_PATH_ALIASES } from '@/lib/navigation';
 import { commonDictionary, dict, type Locale } from '@/lib/i18n';
+import { isEngAppHost } from '@/lib/engMarket';
 
 const SITE_LABEL = 'outreachOS';
 
@@ -49,7 +50,9 @@ const CLIENT_SECTION_TITLES: ReadonlyArray<{
   { prefix: '/client/build', ru: 'Сбор базы', en: 'Build a list', es: 'Crear una lista' },
   { prefix: '/client/parsers', ru: 'Парсеры', en: 'Parsers', es: 'Extractores' },
   { prefix: '/client/offer', ru: 'Договор оферты', en: 'Terms of service', es: 'Términos del servicio' },
-  { prefix: '/client/eng/mailboxes', ru: 'Sending mailboxes', en: 'Sending mailboxes', es: 'Buzones' },
+  { prefix: '/client/eng/replies', ru: 'Replies', en: 'Replies', es: 'Replies' },
+  { prefix: '/client/eng/do-not-contact', ru: 'Do not contact', en: 'Do not contact', es: 'Do not contact' },
+  { prefix: '/client/eng/account', ru: 'Account', en: 'Account', es: 'Account' },
   { prefix: '/client/eng', ru: 'Outreach', en: 'Outreach', es: 'Outreach' },
 ];
 
@@ -73,7 +76,15 @@ export function getPortalPageSectionTitle(pathname: string | null, locale: Local
   if (pathname.startsWith('/client')) {
     return getClientPortalSectionTitle(pathname, locale);
   }
-  if (pathname === '/login') return dict(commonDictionary.login, locale);
+  if (pathname === '/login') {
+    // ENG-хост: вход английский (app/login/page.tsx), а локаль гостя — из
+    // куки, которой у него нет, то есть 'ru'. Хост знает только браузер:
+    // заголовок ставят эффекты PortalDocumentTitle. Какой хост ENG, браузер
+    // узнаёт из NEXT_PUBLIC_ENG_APP_HOST, без неё — app.outreachos.xyz
+    // (lib/engMarket). Вне ENG — как было.
+    if (typeof window !== 'undefined' && isEngAppHost(window.location.hostname)) return 'Sign in';
+    return dict(commonDictionary.login, locale);
+  }
   if (pathname === '/maintenance') return dict(commonDictionary.maintenance, locale);
   if (pathname.startsWith('/review/')) return dict(commonDictionary.reviewBase, locale);
 

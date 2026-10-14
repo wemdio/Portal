@@ -1,5 +1,4 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { findEmailColumn, mapBaseRowsToLeads } from './launchHandoff';
 import { prepareSegmentationAudience } from './segmentationAudit';
 import { projectCompanyNames } from './companyNames';
@@ -11,8 +10,10 @@ type BaseReference = { id: string; project_id: string; hypothesis_id: string; so
 type ItemReference = { id: string; project_id: string; hypothesis_id: string; base_id: string };
 type DeliveryRow = { id: string; ve_project_id: string; item_id: string; supply_batch_id: string | null;
   email_normalized: string; lead_payload: unknown; status: string };
-type BaseFacts = { observed: Set<string>; ready: Set<string>; blocked: Set<string>; identities: Map<string, Identity> };
-type ExportContact = { row: Row; identity: Identity };
+type BaseFacts = { hypothesisId: string | null; observed: Set<string>; ready: Set<string>; blocked: Set<string>; identities: Map<string, Identity> };
+type ExportContact = { row: Row; identity: Identity; hypothesisIds: Set<string>; baseIds: Set<string> };
+
+export const VE_VERIFIED_EXPORT_MAX_HYPOTHESES = 50;
 
 const ID_BATCH = 100;
 const DELIVERY_STATES = new Set(['ready', 'reserved', 'attempting', 'accepted', 'skipped', 'uncertain']);
@@ -61,54 +62,90 @@ function deliveryCells(payload: Row, email: string): Row {
   return { ...result, email };
 }
 
-async function* deliveryPages(db: SupabaseClient, projectId: string, itemIds: string[], capturedAt: string) {
-  let offset = 0, total: number | null = null;
-  while (total === null || offset < total) {
-    const page = await db.from('ve_contact_delivery_rows')
-      .select('id,ve_project_id,item_id,supply_batch_id,email_normalized,lead_payload,status', { count: 'exact' })
-      .eq('ve_project_id', projectId).in('item_id', itemIds).lte('created_at', capturedAt)
-      .order('id').range(offset, offset + 499);
+type ExportPage<T> = { data: T[] | null; count?: number | null; error: { message: string } | null };
+
+/** Keyset pagination cannot skip rows when a concurrent deletion moves an
+ * offset. Exact remaining counts also reject an incomplete/changing export. */
+async function* exportPages<T extends { id: string }>(
+  read: (after: string | null) => PromiseLike<ExportPage<T>>,
+) {
+  let after: string | null = null, expectedRemaining: number | null = null;
+  for (;;) {
+    const page = await read(after);
     if (page.error || !Number.isSafeInteger(page.count) || (page.count ?? -1) < 0
-      || (total !== null && page.count !== total) || !Array.isArray(page.data)
-      || (!page.data.length && offset < (page.count ?? 0)) || offset + page.data.length > (page.count ?? 0)) {
-      throw new Error('Не удалось полностью прочитать историю контактов. Повторите скачивание.');
+      || (expectedRemaining !== null && page.count !== expectedRemaining) || !Array.isArray(page.data)
+      || (!page.data.length && page.count !== 0) || page.data.length > (page.count ?? 0)
+      || page.data.length > 500) {
+      throw new Error('Не удалось полностью прочитать сохранённые контакты. Повторите скачивание.');
     }
-    total = page.count as number;
-    offset += page.data.length;
-    yield page.data as DeliveryRow[];
+    for (const row of page.data) {
+      if (!row.id || (after !== null && row.id <= after)) {
+        throw new Error('Состав сохранённых контактов изменился. Повторите скачивание.');
+      }
+      after = row.id;
+    }
+    expectedRemaining = (page.count as number) - page.data.length;
+    if (page.data.length) yield page.data;
+    if (expectedRemaining === 0) return;
   }
 }
 
-/** Read-only cumulative export of saved verified contacts for one hypothesis.
+async function readExportPages<T extends { id: string }>(read: (after: string | null) => PromiseLike<ExportPage<T>>): Promise<T[]> {
+  const result: T[] = [];
+  for await (const page of exportPages(read)) result.push(...page);
+  return result;
+}
+
+function deliveryPages(db: SupabaseClient, projectId: string, itemIds: string[], capturedAt: string) {
+  return exportPages<DeliveryRow>(after => {
+    let query = db.from('ve_contact_delivery_rows')
+      .select('id,ve_project_id,item_id,supply_batch_id,email_normalized,lead_payload,status', { count: 'exact' })
+      .eq('ve_project_id', projectId).in('item_id', itemIds).lte('created_at', capturedAt)
+      .order('id');
+    if (after) query = query.gt('id', after);
+    return query.range(0, 499);
+  });
+}
+
+/** Read-only cumulative export of saved verified contacts for selected hypotheses.
  * No launch, collection, reconciliation, provider call or quality re-check is
  * performed. The ready parts of active/failed bases remain downloadable.
  */
 export async function loadVeVerifiedContactsExport(
   db: SupabaseClient,
   projectId: string,
-  hypothesisId: string,
+  hypothesisId: string | string[],
   capturedAt = new Date().toISOString(),
+  hypothesisTitles: Record<string, string> = {},
 ): Promise<{ columns: string[]; rows: Row[]; excludedCount: number; unidentifiedCount: number }> {
-  if (!projectId || !hypothesisId || !Number.isFinite(Date.parse(capturedAt))) {
+  const hypothesisIds = typeof hypothesisId === 'string' ? [hypothesisId] : hypothesisId;
+  const selectedIds = new Set(hypothesisIds);
+  if (!projectId || !hypothesisIds.length || hypothesisIds.length > VE_VERIFIED_EXPORT_MAX_HYPOTHESES
+    || selectedIds.size !== hypothesisIds.length || hypothesisIds.some(id => !id) || !Number.isFinite(Date.parse(capturedAt))) {
     throw new Error('Не удалось определить состав выгрузки. Обновите страницу.');
   }
   const policy = await loadVeProjectExclusions(db, projectId);
-  const references = await readContactDeliveryPages<BaseReference>('verified export bases', (from, to) => db
-    .from('ve_bases').select('id,project_id,hypothesis_id,source,created_at', { count: 'exact' })
-    .eq('project_id', projectId).eq('hypothesis_id', hypothesisId).eq('source', 'auto')
-    .lte('created_at', capturedAt).order('created_at', { ascending: false }).order('id').range(from, to));
+  const references = await readExportPages<BaseReference>(after => {
+    let query = db.from('ve_bases').select('id,project_id,hypothesis_id,source,created_at', { count: 'exact' })
+      .eq('project_id', projectId).in('hypothesis_id', hypothesisIds).eq('source', 'auto')
+      .lte('created_at', capturedAt).order('id');
+    if (after) query = query.gt('id', after);
+    return query.range(0, 499);
+  });
+  references.sort((a, b) => b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id));
   const baseFacts = new Map<string, BaseFacts>();
   const contacts = new Map<string, ExportContact>();
   const eligibleEmails = new Set<string>();
   const blockedEmails = new Set<string>();
   const ignoredBases = new Set<string>();
-  async function readBaseFacts(baseId: string, includeContacts: boolean): Promise<BaseFacts | null> {
+  async function readBaseFacts(baseId: string, includeContacts: boolean, expectedHypothesisId?: string): Promise<BaseFacts | null> {
     // Only one base payload at a time, never collect_info/harvest/reserve.
     const { data, error } = await db.from('ve_bases')
       .select('id,project_id,hypothesis_id,source,columns,data')
       .eq('id', baseId).eq('project_id', projectId).maybeSingle();
     if (error || !data || data.id !== baseId || data.project_id !== projectId
-      || (data.hypothesis_id !== hypothesisId && (includeContacts || data.hypothesis_id !== null))) {
+      || (!selectedIds.has(data.hypothesis_id) && (includeContacts || data.hypothesis_id !== null))
+      || (expectedHypothesisId && data.hypothesis_id !== expectedHypothesisId && (includeContacts || data.hypothesis_id !== null))) {
       throw new Error('Не удалось проверить исходную базу запуска. Повторите скачивание.');
     }
     // A legacy shared vertical base is owned here only through its exact launch
@@ -123,7 +160,7 @@ export async function loadVeVerifiedContactsExport(
       throw new Error('Не удалось полностью прочитать проверенные контакты. Повторите скачивание.');
     }
     const rows = data.data as Row[], columns = data.columns as string[];
-    const facts: BaseFacts = { observed: new Set(), ready: new Set(), blocked: new Set(), identities: new Map() };
+    const facts: BaseFacts = { hypothesisId: data.hypothesis_id, observed: new Set(), ready: new Set(), blocked: new Set(), identities: new Map() };
     const ambiguousEmails = new Set<string>();
     const emailColumn = findEmailColumn(columns, rows);
     for (const row of rows) {
@@ -158,29 +195,36 @@ export async function loadVeVerifiedContactsExport(
       // Newer source bases win duplicate email presentation; never merge
       // arbitrary fields from different companies sharing a mailbox.
       if (!contacts.has(email)) contacts.set(email, { row: { ...publicCells(visible[index], columns), email },
-        identity: getVeProjectExclusionIdentity(policyRow) });
+        identity: getVeProjectExclusionIdentity(policyRow), hypothesisIds: new Set(), baseIds: new Set() });
+      contacts.get(email)!.hypothesisIds.add(data.hypothesis_id);
+      contacts.get(email)!.baseIds.add(baseId);
     });
     baseFacts.set(baseId, facts);
     return facts;
   }
   for (const reference of references) {
     if (!reference.id || baseFacts.has(reference.id) || reference.project_id !== projectId
-      || reference.hypothesis_id !== hypothesisId || reference.source !== 'auto') {
+      || !selectedIds.has(reference.hypothesis_id) || reference.source !== 'auto') {
       throw new Error('Состав баз изменился во время выгрузки. Повторите скачивание.');
     }
-    await readBaseFacts(reference.id, true);
+    await readBaseFacts(reference.id, true, reference.hypothesis_id);
   }
 
-  const items = await readContactDeliveryPages<ItemReference>('verified export launches', (from, to) => db
-    .from('ve_launch_queue_items').select('id,project_id,hypothesis_id,base_id', { count: 'exact' })
-    .eq('project_id', projectId).eq('hypothesis_id', hypothesisId).lte('created_at', capturedAt)
-    .order('id').range(from, to));
+  const items = await readExportPages<ItemReference>(after => {
+    let query = db.from('ve_launch_queue_items').select('id,project_id,hypothesis_id,base_id', { count: 'exact' })
+      .eq('project_id', projectId).in('hypothesis_id', hypothesisIds).lte('created_at', capturedAt)
+      .order('id');
+    if (after) query = query.gt('id', after);
+    return query.range(0, 499);
+  });
   const itemBases = new Map<string, string>();
+  const itemHypotheses = new Map<string, string>();
   for (const item of items) {
-    if (!item.id || !item.base_id || itemBases.has(item.id) || item.project_id !== projectId || item.hypothesis_id !== hypothesisId) {
+    if (!item.id || !item.base_id || itemBases.has(item.id) || item.project_id !== projectId || !selectedIds.has(item.hypothesis_id)) {
       throw new Error('Не удалось проверить принадлежность сохранённых запусков. Повторите скачивание.');
     }
     itemBases.set(item.id, item.base_id);
+    itemHypotheses.set(item.id, item.hypothesis_id);
   }
   const itemIds = [...itemBases.keys()];
   const seenDeliveryRows = new Set<string>();
@@ -191,9 +235,12 @@ export async function loadVeVerifiedContactsExport(
       const batchBases = new Map<string, string>();
       for (let batchOffset = 0; batchOffset < batchIds.length; batchOffset += ID_BATCH) {
         const requested = batchIds.slice(batchOffset, batchOffset + ID_BATCH);
-        const batches = await readContactDeliveryPages<{ id: string; base_id: string }>('verified export supply binding', (from, to) => db
-          .from('ve_contact_supply_batches').select('id,base_id', { count: 'exact' })
-          .in('id', requested).order('id').range(from, to));
+        const batches = await readExportPages<{ id: string; base_id: string }>(after => {
+          let query = db.from('ve_contact_supply_batches').select('id,base_id', { count: 'exact' })
+            .in('id', requested).order('id');
+          if (after) query = query.gt('id', after);
+          return query.range(0, 499);
+        });
         if (batches.length !== requested.length || batches.some(batch => !requested.includes(batch.id) || !baseFacts.has(batch.base_id))) {
           throw new Error('Не удалось полностью связать ежедневные доборы с гипотезой. Повторите скачивание.');
         }
@@ -214,8 +261,12 @@ export async function loadVeVerifiedContactsExport(
         const sourceBaseId = entry.supply_batch_id ? batchBases.get(entry.supply_batch_id) : itemBases.get(entry.item_id);
         if (!sourceBaseId) throw new Error('Не удалось проверить исходную базу запуска. Повторите скачивание.');
         if (ignoredBases.has(sourceBaseId)) continue;
-        const facts = baseFacts.get(sourceBaseId) ?? await readBaseFacts(sourceBaseId, false);
+        const ownedHypothesisId = itemHypotheses.get(entry.item_id)!;
+        const facts = baseFacts.get(sourceBaseId) ?? await readBaseFacts(sourceBaseId, false, ownedHypothesisId);
         if (!facts) continue;
+        if (facts.hypothesisId !== null && facts.hypothesisId !== ownedHypothesisId) {
+          throw new Error('Контакты добора не соответствуют исходной гипотезе. Повторите скачивание.');
+        }
         const identity = combinedIdentity(getVeProjectExclusionIdentity(entry.lead_payload), facts.identities.get(email));
         if (facts.blocked.has(email)
           || matchVeProjectExclusion(veProjectExclusionRow({ ...entry.lead_payload, _ve_company_identity: identity }, email), policy)) blockedEmails.add(email);
@@ -223,7 +274,10 @@ export async function loadVeVerifiedContactsExport(
         // skipped snapshot can also be a permanent provider/invalid-email refusal.
         if (entry.status === 'skipped' || (facts.observed.has(email) && !facts.ready.has(email))) continue;
         eligibleEmails.add(email);
-        if (!contacts.has(email)) contacts.set(email, { row: deliveryCells(entry.lead_payload, email), identity });
+        if (!contacts.has(email)) contacts.set(email, { row: deliveryCells(entry.lead_payload, email), identity,
+          hypothesisIds: new Set(), baseIds: new Set() });
+        contacts.get(email)!.hypothesisIds.add(ownedHypothesisId);
+        contacts.get(email)!.baseIds.add(sourceBaseId);
       }
     }
   }
@@ -237,8 +291,12 @@ export async function loadVeVerifiedContactsExport(
   for (const [email, contact] of contacts) {
     if (blockedEmails.has(email)) continue;
     if ((policy.inns.length && !contact.identity.inns.length) || (policy.domains.length && !contact.identity.domains.length)) unidentifiedCount++;
-    Object.keys(contact.row).forEach(column => columns.add(column));
-    rows.push(contact.row);
+    const row = hypothesisIds.length > 1 ? { ...contact.row,
+      'Гипотезы': [...contact.hypothesisIds].sort().map(id => hypothesisTitles[id] || id).join(' | '),
+      'Исходные базы': [...contact.baseIds].sort().join(' | '),
+    } : contact.row;
+    Object.keys(row).forEach(column => columns.add(column));
+    rows.push(row);
   }
   return { columns: [...columns], rows,
     excludedCount: [...blockedEmails].filter(email => eligibleEmails.has(email)).length, unidentifiedCount };

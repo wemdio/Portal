@@ -9,7 +9,7 @@
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { buildVeRelevanceReviewBatch } from '@/lib/verticalEngineV2/relevanceReserve';
-import { decideVeTriage, resetVeTriageState, selectVeTriageEvidence, triageVeCompanies, type VeTriageRubric } from '@/lib/verticalEngineV2/relevanceTriage';
+import { decideVeTriage, resetVeTriageState, selectVeTriageEvidence, triageVeCompanies, veScopedTriageRubric, veTriageCompanyRequest, veTriageEvidenceRequest, type VeTriageRubric } from '@/lib/verticalEngineV2/relevanceTriage';
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { withProviderUsage, type ProviderUsageEvent } from '@/lib/providerUsage';
 
@@ -92,6 +92,32 @@ describe('VE2 calibrated relevance triage', () => {
     delete process.env.VE_RELEVANCE_TRIAGE_PROJECTS; delete process.env.VE_MODEL_GATE; delete process.env.VE_MODEL_RELEVANCE_REVIEW;
   });
   afterEach(() => { process.env = { ...env }; });
+
+  it('preserves twelve explicit conditions without extra questions or legacy rubric narrowing', () => {
+    const scope = { version: 1 as const, kind: 'sector' as const, any_of: ['Fintech', 'Payment providers'],
+      required: Array.from({ length: 12 }, (_, i) => `Explicit requirement ${i}`),
+      excluded: Array.from({ length: 12 }, (_, i) => `Explicit exclusion ${i}`) };
+    const exact = veScopedTriageRubric(scope);
+    expect(exact.requirements).toHaveLength(1);
+    expect(exact.conflicts).toHaveLength(1);
+    for (const value of scope.required) expect(exact.requirements[0]).toContain(value);
+    for (const value of scope.excluded) expect(exact.conflicts[0]).toContain(value);
+    const request = veTriageCompanyRequest(rubric, { vertical: 'Wrong', verticalSummary: 'Narrow context', hypothesisTitle: 'Only PSP',
+      hypothesisDescription: 'No hiring conditions', audienceScope: scope }, { company: 'Company', website: '', category: '', description: maker, vacancy_title: '', website_text: '' }, 'en');
+    expect(JSON.stringify(request.state)).toContain(JSON.stringify(scope));
+    expect(JSON.stringify(request)).not.toContain('Narrow context');
+    expect(request.questions.activity.instructions).toContain('OR, not AND');
+    expect(Object.keys(request.questions).filter(key => key.startsWith('req_'))).toEqual(['req_0']);
+    expect(request.questions.req_0.instructions).toContain('Explicit requirement 11');
+    const answers = { activity: { noul: 0.99 }, req_0: { noul: 0.99 }, conflict_0: { noul: 0.01 }, serves_target_not_member: { noul: 0.01 } };
+    expect(decideVeTriage(answers, exact)?.outcome).toBe('admit');
+    expect(decideVeTriage({ ...answers, req_0: { noul: 0.1 } }, exact)?.outcome).toBe('uncertain');
+    expect(decideVeTriage({ ...answers, conflict_0: {} }, exact)).toBeNull();
+    const excerpts = [{ id: 0, field: 'description', quote: maker }];
+    expect(selectVeTriageEvidence(excerpts, { e0: { noul: 0.99 }, r0_0: { noul: 0.1 } }, exact)).toEqual([]);
+    expect(selectVeTriageEvidence(excerpts, { e0: { noul: 0.99 }, r0_0: { noul: 0.99 } }, exact)).toEqual([0]);
+    expect(veTriageEvidenceRequest(exact, 'Company', excerpts).questions.r0_0.instructions).toContain('Explicit requirement 11');
+  });
 
   it('is off unless the mode and (when listed) the project are configured', () => {
     expect(isVeRelevanceTriageEnabled('p1')).toBe(true);

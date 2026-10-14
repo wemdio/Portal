@@ -6,6 +6,7 @@
  */
 
 import type { VeHypothesisCandidate } from './schemas';
+import { readVeAudienceScope, veAudienceScopeKey, type VeAudienceScope } from './audienceScope';
 
 /** Стадия ve_jobs: добавить широкие гипотезы в исследованный проект. */
 export const VE_BROAD_HYPOTHESES_STAGE = 'broad_hypotheses';
@@ -42,6 +43,7 @@ export function selectNewBroadCandidates(
   candidates: readonly VeHypothesisCandidate[],
   existingTitles: Iterable<string>,
   slots: number,
+  existingScopes: Iterable<VeAudienceScope | null | undefined> = [],
 ): VeBroadSelection {
   const seen = new Set<string>();
   for (const title of existingTitles) {
@@ -50,16 +52,20 @@ export function selectNewBroadCandidates(
   }
   const added: VeHypothesisCandidate[] = [];
   const duplicates: string[] = [];
+  const scopeKeys = new Set([...existingScopes].flatMap((scope) => scope ? [veAudienceScopeKey(scope)] : []));
   for (const candidate of candidates) {
     const title = candidate.title.trim();
     const key = veBroadTitleKey(title);
+    const scope = readVeAudienceScope(candidate.audience_scope);
+    const scopeKey = scope ? veAudienceScopeKey(scope) : null;
     if (!key) continue;
-    if (seen.has(key)) {
+    if (seen.has(key) || scopeKey && scopeKeys.has(scopeKey)) {
       duplicates.push(title);
       continue;
     }
     if (added.length >= slots) break;
     seen.add(key);
+    if (scopeKey) scopeKeys.add(scopeKey);
     added.push({ ...candidate, title, tier: 1, broad: true });
   }
   return { added, duplicates };

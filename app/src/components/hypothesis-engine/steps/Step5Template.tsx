@@ -517,6 +517,9 @@ export function Step5Template(props: {
 
   /* ── Готовый шаблон ── */
   const mapping = template.personalization_plan?.operator_mapping ?? [];
+  // Только у EN-шаблонов с нарушениями (стадия template пишет поле лишь тогда):
+  // у RU-шаблонов его нет, и блок ниже не рисуется.
+  const ruleViolations = template.personalization_plan?.rule_violations ?? [];
   // Пречек лимита запуска: роут ответит 413 сверх HE_LAUNCH_MAX_LEADS —
   // не даём дойти до клика по «Отправить в запуск» с заведомо большой базой.
   const baseOverLaunchLimit = (base?.row_count ?? 0) > HE_LAUNCH_MAX_LEADS;
@@ -574,6 +577,24 @@ export function Step5Template(props: {
 
       {/* Превью по лидам — финальные письма с подставленными значениями базы */}
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
+
+      {/* Регламент финальных писем (EN): предупреждения, шаблон всё равно готов */}
+      {ruleViolations.length > 0 ? (
+        <div className="max-w-3xl rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-sm font-medium text-amber-800">
+            Предупреждения регламента писем ({ruleViolations.length})
+            <span className="font-normal text-amber-700">
+              {' '}
+              — шаблон готов, и письма уйдут как есть; исправить: шаг 3 (Контент) → пересобрать шаблон
+            </span>
+          </p>
+          <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-xs text-amber-800">
+            {ruleViolations.map((v, i) => (
+              <li key={`${v.letter}-${v.rule}-${i}`}>{v.detail}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {/* Финальные письма */}
       <ol className="max-w-3xl space-y-3">

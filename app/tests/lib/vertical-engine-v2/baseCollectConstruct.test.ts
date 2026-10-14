@@ -59,6 +59,7 @@ import { veRelevanceRowKey } from '@/lib/verticalEngineV2/relevanceReserve';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   applyVeNicheSourceSelection,
+  applyVeAudienceSourceRefresh,
   baseRowMatchesExclusion,
   buildBaseExclusionKeysFromRows,
   dedupUnifiedRows,
@@ -72,6 +73,9 @@ import {
   type VeUnifiedRow,
 } from '@/lib/verticalEngineV2/stages/baseCollect';
 import { searchVeNicheDirectoryRows } from '@/lib/verticalEngineV2/nicheDirectory';
+import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, loadVeApprovedSupplyAudience, veSourceDiscoveryIsExistingOnly, normalizeVeAudienceSourcePlan, veAudienceNicheProfile, needsLegacyFintechAudienceRefresh } from '@/lib/verticalEngineV2/sourceAudience';
+import { buildSourcePlanMessages } from '@/lib/verticalEngineV2/prompts/sourcePlan';
+import { buildSourcePlanMessagesEn, buildCatalogRepairMessagesEn } from '@/lib/verticalEngineV2/prompts/sourcePlan.en';
 import { selectRefillLeadRows } from '@/lib/verticalEngineV2/stages/baseCollectRefill';
 import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
@@ -3044,7 +3048,7 @@ describe('base_collect: план кончился раньше цели', () => 
   const SWEETS_TASK = { source: 'companies_directory' as const,
     rationale: 'Собираем крупные кондитерские фабрики для гипотезы про рецептуры, партии и поставки в сети.',
     directory_filters: { includeIp: false, okvedCodes: ['10.7', '10.8'], revenueFrom: 300_000_000, employeesFrom: 50 } };
-  const hypothesis = (text: { title: string; description: string; broad?: boolean }) =>
+  const hypothesis = (text: { title: string; description: string; broad?: boolean; audience_scope?: unknown }) =>
     ({ ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', ...text }] });
   const processed = [
     unifiedRow({ company: 'Мясокомбинат Восток', inn: '7700000011', website: 'vostok.test', email: 'info@vostok.test' }),
@@ -3226,6 +3230,30 @@ describe('base_collect: план кончился раньше цели', () => 
       expect(fresh.tasks![0].task.directory_filters?.nameTerms).toContain('финтех');
     }
 
+    const oldScopeFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+    try {
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = 'p1';
+      const pilotDb = seed({ collection_mode: 'preview' }, hypothesis(payment));
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([task]));
+      const pilot = (await wake(pilotDb)).collect_info as VeCollectInfo;
+      expect(pilot.audience_snapshot).toMatchObject({ version: 1, reason: 'new_preview' });
+      expect(pilot.cost_policy).toEqual({ version: 1, website_discovery: 'existing_only' });
+      expect(pilot.tasks![0].task.directory_filters?.nameTerms).toBeUndefined();
+      expect(pilot.niche_source_profile).toBeUndefined();
+      delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+      const typedDb = seed({ collection_mode: 'preview' }, hypothesis({ ...payment, audience_scope: {
+        version: 1, kind: 'sector', any_of: ['Финтех', 'Платёжные провайдеры'], required: ['Выручка до 80 млн рублей'], excluded: ['Банки'],
+      } }));
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([{ ...task, directory_filters: { ...task.directory_filters, revenueTo: 80_000_000 } }]));
+      const typed = (await wake(typedDb)).collect_info as VeCollectInfo;
+      expect(typed.audience_snapshot?.hypotheses[0].description).toContain('Выручка до 80 млн рублей');
+      expect(typed.tasks![0].task.directory_filters?.revenueTo).toBe(80_000_000);
+      expect(typed.cost_policy).toEqual({ version: 1, website_discovery: 'existing_only' });
+    } finally {
+      if (oldScopeFlag === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+      else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = oldScopeFlag;
+    }
+
     const seen = unifiedRow({ company: 'Ранее проверенная компания', inn: '7700000901' });
     const prior = exhaustedInfo(task, { hypotheses: [{ id: 'h1', status: 'accepted', ...payment }],
       target_progress: { ...createCollectionTarget('preview'), round: 7, candidates_processed: 10_000, ready_rows: 2 },
@@ -3255,6 +3283,93 @@ describe('base_collect: план кончился раньше цели', () => 
     legacyPayments.plan!.tasks = legacyPayments.tasks!.map((state) => state.task);
     legacyPayments.adaptive_collection!.active_source = veSourceStrategyKey(legacyPayments.tasks![0].task);
     const oldPaymentKey = legacyPayments.adaptive_collection!.active_source;
+    // Controlled sector correction changes source coverage, not caps/receipts.
+    const sector = { ...payment, id: 'h1', status: 'accepted', broad: true, origin: 'generated' as const };
+    const scoped = structuredClone(prior);
+    scoped.hypotheses = [sector];
+    scoped.collection_mode = 'preview';
+    scoped.audience_scope_refresh_requested = true;
+    scoped.construct = { status: 'done', bc_job_id: 'paid-finished' };
+    scoped.tasks!.push({ ...structuredClone(scoped.tasks![0]), task: { ...structuredClone(scoped.tasks![0].task),
+      directory_filters: { ...scoped.tasks![0].task.directory_filters, okvedCodes: ['66'] } } });
+    // Adaptive tasks can outgrow the initial plan. The live tasks are authoritative.
+    scoped.plan = { tasks: [scoped.tasks![0].task] };
+    const pendingScope = structuredClone(scoped);
+    pendingScope.cost_policy = { version: 1, website_discovery: 'existing_only' };
+    const snapshot = createVeCollectionAudienceSnapshot([sector], 'explicit_continuation', '2026-10-14T12:00:00Z');
+    const safety = JSON.stringify([scoped.target_progress, scoped.target_checkpoint, scoped.adaptive_collection]);
+    expect(needsLegacyFintechAudienceRefresh(scoped)).toBe(true);
+    expect(applyVeAudienceSourceRefresh(scoped, snapshot)).toBe(true);
+    expect(scoped.tasks).toHaveLength(prior.tasks!.length + 1);
+    expect(scoped.construct).toBeUndefined();
+    expect(scoped.audience_source_refresh?.previous_construct).toEqual({ status: 'done', bc_job_id: 'paid-finished' });
+    expect(scoped.tasks![1].task.directory_filters?.nameTerms).toContain('скоринг');
+    expect(scoped.tasks![0].task).toEqual(prior.tasks![0].task);
+    expect(scoped.tasks![0].directory_cursors).toEqual({ old_scope: 2000 });
+    expect(JSON.stringify([scoped.target_progress, scoped.target_checkpoint, scoped.adaptive_collection])).toBe(safety);
+    expect(veSourceDiscoveryIsExistingOnly(scoped)).toBe(true);
+    delete scoped.source_selection;
+    expect(veSourceDiscoveryIsExistingOnly(scoped)).toBe(true);
+    expect(applyVeAudienceSourceRefresh(scoped, snapshot)).toBe(false);
+    const changedAfterClick = seedBase(pendingScope, { title: 'Стоматологии', description: 'Изменённая после клика аудитория', broad: false });
+    await wake(changedAfterClick);
+    expect((changedAfterClick.getRows('ve_bases')[0].collect_info as VeCollectInfo).audience_snapshot?.hypotheses[0].title).toBe(payment.title);
+    expect(readVeCollectionAudienceSnapshot(snapshot)?.hash).toBe(snapshot.hash);
+    expect(() => readVeCollectionAudienceSnapshot({ ...snapshot, version: 2 })).toThrow();
+    expect(() => readVeCollectionAudienceSnapshot({ ...snapshot, hash: 'changed' })).toThrow();
+    expect(() => veSourceDiscoveryIsExistingOnly({ cost_policy: { version: 2 } })).toThrow();
+    const boundCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
+    const wrongBinding = seed({ collection_mode: 'preview', cost_policy: { version: 1, website_discovery: 'existing_only' },
+      audience_snapshot: createVeCollectionAudienceSnapshot([{ ...sector, id: 'another-hypothesis' }], 'new_preview', snapshot.applied_at) }, hypothesis(payment));
+    await expect(wake(wrongBinding)).rejects.toThrow('does not belong to the base hypothesis');
+    expect(jest.mocked(callLLMWithSchema).mock.calls).toHaveLength(boundCalls);
+    for (const guard of [{ collection_mode: 'supply' }, { construct: { status: 'dispatched', bc_job_id: 'paid' } },
+      { saved_email_recovery: { batch: { id: 'paid' } } }, { adaptive_collection: { pending: { id: 'paid' } } }]) {
+      const held = { ...prior, collection_mode: 'preview', hypotheses: [sector], ...guard } as VeCollectInfo;
+      const before = JSON.stringify(held);
+      expect(applyVeAudienceSourceRefresh(held, snapshot)).toBe(false);
+      expect(JSON.stringify(held)).toBe(before);
+    }
+    const structured = { ...sector, audience_scope: { version: 1 as const, kind: 'sector' as const,
+      any_of: ['Финтех', 'Платёжные провайдеры'], required: ['Выручка до 80 млн рублей'], excluded: ['Банки'] } };
+    const structuredSnapshot = createVeCollectionAudienceSnapshot([structured], 'new_preview', '2026-10-14T12:00:00Z');
+    expect(structuredSnapshot.hypotheses[0].description).toContain('ANY ONE');
+    expect(structuredSnapshot.hypotheses[0].description).toContain('Выручка до 80 млн рублей');
+    expect(structuredSnapshot.hypotheses[0].description).toContain('Банки');
+    expect(veAudienceNicheProfile([structured])).toBeNull();
+    for (const builder of [buildSourcePlanMessages, buildSourcePlanMessagesEn, buildCatalogRepairMessagesEn]) {
+      const messages = builder({ verticalName: 'Не относящийся к аудитории контекст', hypotheses: [structured], audienceScope: structured.audience_scope });
+      expect(messages[0].content).toContain('AUTHORITATIVE STRUCTURED AUDIENCE');
+      expect(messages[0].content).toContain('All required conditions (AND)');
+      expect(messages[0].content).toContain('Выручка до 80 млн рублей');
+      expect(messages[0].content).toContain('Банки');
+    }
+    const approvalDb = createMockSupabase({ tables: { ve_contact_supply_batches: [{ id: 'batch', base_id: 'supply', plan_id: 'supply-plan' }],
+      ve_contact_supply_plans: [{ id: 'supply-plan', project_id: 'p1', hypothesis_id: 'h1', item_id: 'launch' }],
+      ve_launch_queue_items: [{ id: 'launch', project_id: 'p1', hypothesis_id: 'h1', base_id: 'approved-preview' }],
+      ve_bases: [{ id: 'approved-preview', project_id: 'p1', hypothesis_id: 'h1', audience_snapshot: structuredSnapshot,
+        cost_policy: { version: 1, website_discovery: 'existing_only' } }],
+      ve_hypotheses: [{ id: 'h1', title: 'Стоматологии', description: 'Изменённая после запуска аудитория', audience_scope: null }],
+    } });
+    const approvedScope = await loadVeApprovedSupplyAudience(approvalDb as unknown as SupabaseClient,
+      { projectId: 'p1', hypothesisId: 'h1', batchId: 'batch', baseId: 'supply' });
+    expect(approvedScope?.hash).toBe(structuredSnapshot.hash);
+    expect(approvedScope?.hypotheses[0].description).toContain('Выручка до 80 млн рублей');
+    expect(approvalDb.getRows('ve_hypotheses')[0].title).toBe('Стоматологии');
+    await expect(loadVeApprovedSupplyAudience(approvalDb as unknown as SupabaseClient,
+      { projectId: 'other-project', hypothesisId: 'h1', batchId: 'batch', baseId: 'supply' })).rejects.toThrow();
+
+    expect(normalizeVeAudienceSourcePlan({ tasks: [task] }, [structured]).decision).toBe('unchanged');
+    const requiredHiring = { ...structured, audience_scope: { ...structured.audience_scope,
+      kind: 'segment' as const, any_of: ['Платёжные провайдеры'], required: ['Нанимают финансового директора'] } };
+    const hiringPlan = { tasks: [{ source: 'hh_live' as const, rationale: 'Сохранить обязательную роль',
+      hh_query: { text: '"платёжный провайдер" AND "финансовый директор"' } }] };
+    expect(normalizeVeAudienceSourcePlan(hiringPlan, [requiredHiring]).plan).toEqual(hiringPlan);
+    expect(veAudienceNicheProfile([requiredHiring])).toBeNull();
+    const mixed = { ...structured, audience_scope: { ...structured.audience_scope, any_of: ['Финтех', 'Стоматологии'] } };
+    expect(normalizeVeAudienceSourcePlan({ tasks: [task] }, [mixed]).plan).toEqual({ tasks: [task] });
+    expect(needsLegacyFintechAudienceRefresh({ ...prior, collection_mode: 'preview', hypotheses: [{ ...sector, origin: 'manual' }] })).toBe(false);
+
     const paymentHistory = JSON.stringify(legacyPayments.source_selection!.previous_tasks);
     const paymentBudgets = JSON.stringify([legacyPayments.target_progress, legacyPayments.target_checkpoint,
       legacyPayments.search_policy, legacyPayments.adaptive_collection!.completed, legacyPayments.adaptive_collection!.replan_attempts]);

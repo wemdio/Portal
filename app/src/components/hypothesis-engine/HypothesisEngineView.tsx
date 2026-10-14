@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { HeProject } from '@/lib/hypothesisEngine/types';
+import { isValidUuid } from '@/lib/apiValidation';
 import {
   HE_API,
   heCall,
@@ -18,6 +19,7 @@ import {
 } from './api';
 import { HE, Spinner } from './design';
 import { ProjectDetail } from './ProjectDetail';
+import { SendingPoolPanel } from './SendingPoolPanel';
 import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
 
 export function HypothesisEngineView() {
@@ -30,10 +32,16 @@ export function HypothesisEngineView() {
   const [creating, setCreating] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [poolOpen, setPoolOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Глубокая ссылка ?project=<id> (карточка клиента раздела «Английские
+      // клиенты»): сразу открыть проект — и тот, что не попал в список 100
+      // свежих. «Назад» ведёт в список, как обычно.
+      const linked = new URLSearchParams(window.location.search).get('project');
+      if (linked && isValidUuid(linked)) setSelectedId(linked);
       try {
         const { data } = await heCall<HeProjectsResponse>(`${HE_API}/projects`);
         if (!cancelled) setProjects(Array.isArray(data.projects) ? data.projects : []);
@@ -141,6 +149,17 @@ export function HypothesisEngineView() {
       </div>
 
       {errorMsg && <StatusBox tone="error">{errorMsg}</StatusBox>}
+
+      {/* Пул наших ящиков отправки для английского кабинета */}
+      <div className={`${HE.card} ${HE.cardPad} space-y-4`}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className={HE.secTitle}>Пул ящиков ENG</p>
+          <button type="button" className={HE.btnSmall} onClick={() => setPoolOpen((v) => !v)}>
+            {poolOpen ? 'Свернуть' : 'Открыть'}
+          </button>
+        </div>
+        {poolOpen && <SendingPoolPanel />}
+      </div>
 
       {/* Список проектов */}
       {listLoading ? (

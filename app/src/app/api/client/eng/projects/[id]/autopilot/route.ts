@@ -3,26 +3,79 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
-import { loadClientHeProject } from '@/lib/hypothesisEngine/apiGuards';
-import { enqueueHeBaseCollect } from '@/lib/hypothesisEngine/baseCollectEnqueue';
-import { AUTOPILOT_BASE_LIMIT } from '@/lib/hypothesisEngine/autopilotNext';
-import { defaultChainLanguageForMarket, projectMarket } from '@/lib/hypothesisEngine/market';
+import { isValidUuid } from '@/lib/apiValidation';
+import { withToolTrace } from '@/lib/toolTrace';
+import {
+  engPaidAccessResponse,
+  loadClientHeProject,
+  requireEngMarket,
+  requireEngPaidAccess,
+} from '@/lib/hypothesisEngine/apiGuards';
+import { reconcileHeAutopilotProject } from '@/lib/hypothesisEngine/autopilotReconcile';
+import type {
+  HeAutopilotReconcileStep,
+  HeAutopilotRefusal,
+} from '@/lib/hypothesisEngine/autopilotReconcile';
+import { toClientEngAutopilotHold } from '@/lib/hypothesisEngine/clientEngProjection';
+import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
+import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
 
+/** Один текст на все сбои роута: наружу — он, подробности — в application_logs. */
+const OUTREACH_START_FAILED = 'Failed to start the outreach';
+
+/** Отказ по состоянию проекта — 409 с английским текстом кабинета. */
+const REFUSAL_TEXT: Record<HeAutopilotRefusal, string> = {
+  not_researched: 'The research is not finished yet — the autopilot starts once the project is researched',
+  no_verticals: 'No markets yet — wait for the research to produce them',
+};
+
+/**
+ * Шаг общего пути → код события лога. Коды прежние: по ним ищут в
+ * application_logs, и переименование стоило бы истории поиска.
+ */
+const FAILURE_EVENT: Record<HeAutopilotReconcileStep, string> = {
+  verticals: 'client.eng.autopilot.verticals_failed',
+  snapshot: 'client.eng.autopilot.snapshot_failed',
+  flag: 'client.eng.autopilot.flag_failed',
+  chain_enqueue: 'client.eng.autopilot.chain_enqueue_failed',
+  collect_enqueue: 'client.eng.autopilot.collect_enqueue_failed',
+  template_budget: 'client.eng.autopilot.template_budget_failed',
+  template_enqueue: 'client.eng.autopilot.template_enqueue_failed',
+};
+
 // POST — «Start outreach»: включает автопилот проекта (he_projects.autopilot=true)
 // и идемпотентно доставляет недостающие стадии конвейера по каждой
-// КЛИЕНТ-ВЫБРАННОЙ вертикали (есть хотя бы одна accepted-гипотеза; остальные
-// вертикали пропускаются):
-//   нет ready-цепочки и нет активной chain-джобы → chain (язык по market);
-//   цепочка ready и нет основной auto-базы (collecting/analyzing/analyzed;
-//   refill-базы «auto-refill: …» не в счёт) → base_collect
-//     (лимит AUTOPILOT_BASE_LIMIT, accepted-гипотезы; дедупы внутри
-//     enqueueHeBaseCollect);
-//   база analyzed и нет шаблона/активной template-джобы → template.
-// Дальше конвейер ведёт воркер (enqueueAutopilotFollowups) — повторный вызов
-// этого роута ничего не дублирует, а подхватывает рассинхрон (ручные отмены,
-// упавшие джобы до retry).
+// КЛИЕНТ-ВЫБРАННОЙ вертикали. Сама логика доставки — в общем модуле
+// lib/hypothesisEngine/autopilotReconcile: ровно тот же код каждую ночь
+// выполняет автоматический проход крона (trigger='nightly'), и второй
+// реализации у кабинета нет.
+//
+// ВЫКЛЮЧАТЕЛЬ у автопилота один — отмена проекта (POST .../cancel, кнопка
+// «Cancel all jobs»): она пишет autopilot=false и ставит на паузу ночной добор.
+// Отдельного DELETE здесь нет намеренно: автопилот без отмены уже стоящих
+// стадий выключил бы только постановку СЛЕДУЮЩИХ, а идущие продолжили бы
+// платить — кнопки с таким смыслом в кабинете нет. Повторное нажатие
+// «Start outreach» после отмены включает автопилот снова, но паузу ночного
+// добора НЕ снимает: её возвращает сотрудник (staff-инструмент).
+//
+// Отличие ручного вызова от ночного (см. докблок модуля): человек вправе
+// оплатить повтор упавшей стадии, машина — нет. Исключение и для человека —
+// сборка вертикали, чья последняя база остановилась решением, которое новая
+// сборка повторит (HE_COLLECT_STOP_REPEATS_CODES): её «Start outreach» не
+// покупает, повтор — явная «Collect again» (POST .../verticals/[id]/collect);
+// такие вертикали считает collect_again_verticals ответа. Тормоз бесконечной
+// генерации писем (бюджет поколения анализа) действует в обоих режимах.
+//
+// ВЫКЛЮЧАТЕЛЬ ОТПРАВКИ АККАУНТА (engSendingSwitchRefusal) — до гейта, как у
+// «Launch» проекта.
+//
+// ГЕЙТ ПЛАТНЫХ ШАГОВ (requireEngPaidAccess, действие 'start_outreach'):
+// подтверждённая почта и потолок расхода клиента — ДО реконсилера, потому что
+// каждое его действие (цепочка, сборка, ремонт анализа, письма) платное.
+// Отказ — типизированный 4xx с английским текстом и кодом (engPaidAccess.ts).
+// Потолки проекта и клиента реконсилер проверяет и сам (createHeSpendGate).
 //
 // Границы: проект обязан быть status='researched' (verticals/гипотезы уже есть)
 // и иметь хотя бы одну вертикаль — иначе 409. Рынок НЕ ограничиваем: флаг и
@@ -30,194 +83,132 @@ export const dynamic = 'force-dynamic';
 // язык chain всё равно вычисляется из market.
 //
 // verticals_skipped в ответе — вертикали, по которым в этом вызове ничего не
-// потребовалось ставить (всё уже в работе или готово).
+// потребовалось ставить (всё уже в работе, готово или ждёт человека).
+// Вылеченная осиротевшая база пропуском НЕ считается: ей поставлен
+// base_analyze, и в ответе это отдельный счётчик analyses_requeued.
+// autopilot_hold_code — пауза, записанная этим же вызовом (null — паузы нет):
+// без неё «ничего не поставлено» неотличимо от «всё уже готово».
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const result = await requireClientAuth(req);
-  if ('error' in result) return result.error;
-  if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+  return withToolTrace({ request: req, operation: 'client.eng.autopilot.post' }, async () => {
+    const result = await requireClientAuth(req);
+    if ('error' in result) return result.error;
+    if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
-  const { id } = await params;
-  if (!id) return jsonError('Missing id', 400);
+    const { id } = await params;
+    if (!isValidUuid(id)) return jsonError('Invalid id', 400);
 
-  const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
-  if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
-  const project = owned.project;
+    const gate = await requireEngMarket(supabaseAdmin, result.auth.userId);
+    if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
 
-  if (project.status !== 'researched') {
-    return jsonError('The research is not finished yet — the autopilot starts once the project is researched', 409);
-  }
+    const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
+    if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
-  const { data: verticals, error: vertErr } = await supabaseAdmin
-    .from('he_verticals')
-    .select('id, name')
-    .eq('project_id', id)
-    .order('rank', { ascending: true });
-  if (vertErr) return jsonError(vertErr.message, 500);
-  if (!verticals || verticals.length === 0) {
-    return jsonError('No verticals yet — wait for the research to produce them', 409);
-  }
-  const verticalIds = verticals.map((v) => v.id as string);
-
-  // Снапшот состояния конвейера одной пачкой; решения по каждой вертикали —
-  // из этого снапшота + дедупов внутри enqueueHeBaseCollect (гонки с воркером
-  // и ручными кнопками закрываются там и unique-индексом collecting-базы).
-  const [chainsRes, hypothesesRes, basesRes, templatesRes, jobsRes] = await Promise.all([
-    supabaseAdmin.from('he_chains').select('id, vertical_id, status').in('vertical_id', verticalIds),
-    supabaseAdmin.from('he_hypotheses').select('id, vertical_id, status').eq('project_id', id),
-    supabaseAdmin
-      .from('he_bases')
-      .select('id, vertical_id, source, status, filename')
-      .eq('project_id', id)
-      .order('created_at', { ascending: false }),
-    supabaseAdmin.from('he_templates').select('id, vertical_id, base_id').in('vertical_id', verticalIds),
-    supabaseAdmin
-      .from('he_jobs')
-      .select('id, stage, status, payload')
-      .eq('project_id', id)
-      .in('status', ['pending', 'running']),
-  ]);
-  for (const res of [chainsRes, hypothesesRes, basesRes, templatesRes, jobsRes]) {
-    if (res.error) return jsonError(res.error.message, 500);
-  }
-
-  const chains = chainsRes.data ?? [];
-  const hypotheses = hypothesesRes.data ?? [];
-  const bases = basesRes.data ?? [];
-  const templates = templatesRes.data ?? [];
-  const activeJobs = jobsRes.data ?? [];
-
-  // Флаг — ДО постановки джоб: воркер подхватывает followups только при
-  // autopilot=true, а клеймить свежие джобы он начнёт позже этой транзакции.
-  const { error: flagErr } = await supabaseAdmin
-    .from('he_projects')
-    .update({ autopilot: true, updated_at: new Date().toISOString() })
-    .eq('id', id);
-  if (flagErr) return jsonError(flagErr.message, 500);
-
-  const language = defaultChainLanguageForMarket(projectMarket(project));
-
-  let chainsEnqueued = 0;
-  let collectsEnqueued = 0;
-  let templatesEnqueued = 0;
-  let verticalsSkipped = 0;
-
-  for (const vertical of verticals) {
-    const verticalId = vertical.id as string;
-
-    // Автопилот гонит только клиент-выбранные вертикали: без единой accepted
-    // гипотезы вертикаль пропускаем (клиент её не выбирал — сборки/письма/
-    // шаблоны по ней не нужны, а стоили бы часы конструктора).
-    const accepted = hypotheses
-      .filter((h) => h.vertical_id === verticalId && h.status === 'accepted')
-      .map((h) => h.id as string);
-    if (accepted.length === 0) {
-      verticalsSkipped += 1;
-      continue;
-    }
-
-    const readyChain = chains.some((c) => c.vertical_id === verticalId && c.status === 'ready');
-    const activeChain = activeJobs.some(
-      (j) => j.stage === 'chain' && (j.payload as { vertical_id?: string } | null)?.vertical_id === verticalId,
+    const switchRefusal = await engSendingSwitchRefusal(
+      supabaseAdmin,
+      result.auth.userId,
+      id,
+      'client.eng.autopilot.sending_access_unread',
     );
-    let enqueued = false;
+    if (switchRefusal) return switchRefusal;
 
-    if (!readyChain && !activeChain) {
-      const { error: chainErr } = await supabaseAdmin.from('he_jobs').insert({
-        project_id: id,
-        stage: 'chain',
-        status: 'pending',
-        payload: { vertical_id: verticalId, language },
+    const access = await requireEngPaidAccess(supabaseAdmin, result.auth.userId, { action: 'start_outreach' });
+    if (!access.ok) return engPaidAccessResponse(access.refusal);
+
+    const reconciled = await reconcileHeAutopilotProject(supabaseAdmin, {
+      projectId: id,
+      project: owned.project,
+      trigger: 'client',
+    });
+
+    if (!reconciled.ok && reconciled.kind === 'refused') {
+      return jsonError(REFUSAL_TEXT[reconciled.refusal], 409);
+    }
+    if (!reconciled.ok) {
+      return engServerError(FAILURE_EVENT[reconciled.step], reconciled.error, OUTREACH_START_FAILED, {
+        userId: result.auth.userId,
+        projectId: id,
+        ...(reconciled.verticalId ? { verticalId: reconciled.verticalId } : {}),
+        ...(reconciled.baseId ? { baseId: reconciled.baseId } : {}),
       });
-      if (chainErr) {
-        await logError('client.eng.autopilot.chain_enqueue_failed', chainErr, {
-          userId: result.auth.userId,
-          projectId: id,
-          verticalId,
-        });
-        return jsonError(chainErr.message, 500);
-      }
-      chainsEnqueued += 1;
-      enqueued = true;
-    } else if (readyChain) {
-      // Auto-базы вертикали БЕЗ refill-баз auto-pipeline («auto-refill: …»):
-      // refill — дочерний долив кампании, он ни основной базой не считается,
-      // ни шаблон по себе не требует. Живая (collecting/analyzing) или готовая
-      // (analyzed). Свежее — первой (выборка created_at desc).
-      const autoBases = bases.filter(
-        (b) =>
-          b.vertical_id === verticalId &&
-          b.source === 'auto' &&
-          !String((b as { filename?: string }).filename ?? '').startsWith('auto-refill'),
-      );
-      const liveBase = autoBases.some((b) => b.status === 'collecting' || b.status === 'analyzing');
-      const analyzedBase = autoBases.find((b) => b.status === 'analyzed');
-
-      if (!liveBase && !analyzedBase) {
-        const collect = await enqueueHeBaseCollect(supabaseAdmin, {
-          verticalId,
-          projectId: id,
-          verticalName: (vertical.name as string) ?? 'vertical',
-          limit: AUTOPILOT_BASE_LIMIT,
-          hypothesisIds: accepted,
-        });
-        if (!collect.ok) {
-          await logError('client.eng.autopilot.collect_enqueue_failed', new Error(collect.message), {
-            userId: result.auth.userId,
-            projectId: id,
-            verticalId,
-          });
-          return jsonError(collect.message, 500);
-        }
-        if (collect.created) {
-          collectsEnqueued += 1;
-          enqueued = true;
-        }
-      }
-
-      if (analyzedBase) {
-        const hasTemplate = templates.some((t) => t.base_id === analyzedBase.id);
-        const activeTemplate = activeJobs.some(
-          (j) =>
-            j.stage === 'template' && (j.payload as { base_id?: string } | null)?.base_id === analyzedBase.id,
-        );
-        if (!hasTemplate && !activeTemplate) {
-          const { error: tplErr } = await supabaseAdmin.from('he_jobs').insert({
-            project_id: id,
-            stage: 'template',
-            status: 'pending',
-            payload: { base_id: analyzedBase.id },
-          });
-          if (tplErr) {
-            await logError('client.eng.autopilot.template_enqueue_failed', tplErr, {
-              userId: result.auth.userId,
-              projectId: id,
-              baseId: analyzedBase.id,
-            });
-            return jsonError(tplErr.message, 500);
-          }
-          templatesEnqueued += 1;
-          enqueued = true;
-        }
-      }
     }
 
-    if (!enqueued) verticalsSkipped += 1;
-  }
+    // Ремонт осиротевшей базы мог не удаться: запуск от этого успешен (сборку
+    // по такой вертикали не запускаем — строки уже оплачены), но причина
+    // обязана быть в application_logs, а не только в счётчике пропусков.
+    for (const detail of reconciled.details) {
+      if (!detail.message) continue;
+      void logError(
+        'client.eng.autopilot.orphan_repair_failed',
+        new Error(detail.message),
+        { userId: result.auth.userId, projectId: id, verticalId: detail.verticalId },
+      );
+    }
 
-  void logAudit('client.eng.autopilot.enabled', 'ENG cabinet autopilot enabled', {
-    userId: result.auth.userId,
-    projectId: id,
-    chainsEnqueued,
-    collectsEnqueued,
-    templatesEnqueued,
-    verticalsSkipped,
-  });
+    // Числа, по которым тормоз писем принял решение (сколько платных прогонов
+    // уже записано на это поколение анализа и какое это поколение). Без них
+    // специалист, открывший исчерпанный проект, не отличит честное третье
+    // падение от бюджета, съеденного строкой, которую закрыл сторож простоя, —
+    // и вынужден повторять запрос руками. В ответ КЛИЕНТУ они не идут: ему
+    // едет код паузы, а не счётчик.
+    const lettersBudget = reconciled.details.flatMap((detail) =>
+      detail.letters ? [{ verticalId: detail.verticalId, ...detail.letters }] : [],
+    );
+    // Вертикали, которым это нажатие НЕ купило новую сборку, потому что их
+    // последняя база остановилась решением, которое повторится: след в аудите
+    // (вертикаль и код причины) и число для кабинета.
+    const collectStopRepeats = reconciled.details.flatMap((detail) =>
+      detail.reason === 'collect_stop_repeats'
+        ? [{ verticalId: detail.verticalId, code: detail.stopCode ?? null }]
+        : [],
+    );
 
-  return NextResponse.json({
-    ok: true,
-    chains_enqueued: chainsEnqueued,
-    collects_enqueued: collectsEnqueued,
-    templates_enqueued: templatesEnqueued,
-    verticals_skipped: verticalsSkipped,
+    void logAudit('client.eng.autopilot.enabled', 'ENG cabinet autopilot enabled', {
+      userId: result.auth.userId,
+      projectId: id,
+      chainsEnqueued: reconciled.counts.chainsEnqueued,
+      collectsEnqueued: reconciled.counts.collectsEnqueued,
+      templatesEnqueued: reconciled.counts.templatesEnqueued,
+      analysesRequeued: reconciled.counts.analysesRequeued,
+      verticalsSkipped: reconciled.counts.verticalsSkipped,
+      ...(reconciled.pause ? { autopilotPause: reconciled.pause } : {}),
+      ...(lettersBudget.length > 0 ? { lettersBudget } : {}),
+      ...(collectStopRepeats.length > 0 ? { collectStopRepeats } : {}),
+    });
+
+    // Пауза уезжает в ответ КОДОМ кабинета, а не причиной движка: словарь
+    // движка закрытый, но он про его собственные решения, и переводит его в
+    // язык клиента ровно одна карта (`toClientEngAutopilotHold`) — та же, по
+    // которой паузу читает деталка проекта. Второй таблицы соответствия у
+    // кабинета быть не должно, поэтому причина прогоняется через ту же функцию
+    // строкой проекта, а не пересобирается здесь заново. Метки времени в ответе
+    // нет: её показывает карточка мастера, читающая настоящую колонку.
+    //
+    // Зачем вообще: нажатие, не поставившее НИЧЕГО, до этого отчитывалось
+    // «всё уже стоит или готово» — в том числе там, где ничего не стало
+    // именно из-за паузы (письма исчерпаны, состояние не прочиталось, ремонт
+    // осиротевшей базы не удался). Зелёный успех на заблокированном проекте —
+    // ровно та ложь, из-за которой клиент ждёт вместо того, чтобы написать.
+    const hold = reconciled.pause
+      ? toClientEngAutopilotHold({ autopilot_error: reconciled.pause })
+      : null;
+    const brandStops = reconciled.details.filter((detail) => detail.reason === 'brand_input');
+
+    return NextResponse.json({
+      ok: true,
+      chains_enqueued: reconciled.counts.chainsEnqueued,
+      collects_enqueued: reconciled.counts.collectsEnqueued,
+      templates_enqueued: reconciled.counts.templatesEnqueued,
+      analyses_requeued: reconciled.counts.analysesRequeued,
+      verticals_skipped: reconciled.counts.verticalsSkipped,
+      // Сколько из пропущенных — «повтор остановится так же»: кабинет говорит
+      // о них отдельной фразой и ведёт к «Collect again» на шаге 4
+      // (EngStepVerticals), иначе пропуск читался бы как «всё уже готово».
+      collect_again_verticals: collectStopRepeats.length,
+      autopilot_hold_code: hold?.code ?? null,
+      // Рынки, которым письма не поставлены: поле брифа называет наш бренд
+      // (причина реконсилера 'brand_input'), — и поля (как у «Launch»).
+      brand_input_markets: brandStops.length,
+      brand_inputs: brandStops.find((d) => (d.brandInputs ?? []).length > 0)?.brandInputs ?? [],
+    });
   });
 }

@@ -8,17 +8,25 @@
  *
  * Правила подстановки (зеркалят рендер Instantly):
  *  - matched-маппинг: берём значение row[column] (строкифицированное, trimmed);
- *  - matched + пустая/отсутствующая ячейка → пустая строка: Instantly рендерит
- *    существующую пустую переменную как '', никогда — как литерал {{var}}.
- *    Такой оператор попадает в emptyVars (отдельно от unresolved). Ветки
- *    «matched + пусто → fallback» здесь сознательно нет: боевой пайплайн не
- *    проставляет fallback у matched-маппингов, и превью не должно показывать
- *    подстановку, которой в Instantly не будет;
+ *  - matched + пустая/отсутствующая ячейка → fallback маппинга, а без него —
+ *    пустая строка (как mapBaseRowsToLeads: `val || fallback || ''`):
+ *    Instantly рендерит существующую пустую переменную как '', никогда — как
+ *    литерал {{var}}. Пустой оператор попадает в emptyVars (отдельно от
+ *    unresolved). Fallback у matched кладёт только стадия template
+ *    us-проекта (замена пустой ячейки, templateOperatorGate); у RU-маппинга
+ *    его нет, и превью показывает пустоту, как и раньше. Шаблон us, записанный
+ *    до этой замены, получает её в памяти запуска — превью её не видит и
+ *    показывает пустоту;
  *  - unmatched-оператор с fallback → подставляется fallback (как обещает
  *    таблица маппинга «Подставим: …»), токен kind='fallback';
- *  - unmatched без fallback и операторы вне маппинга → как есть + unresolved.
+ *  - unmatched без fallback и операторы вне маппинга → как есть + unresolved;
+ *  - колонка `company` строки ENG-базы, которой сборка дописала очищенное
+ *    название (`_company_clean`, companyNames.ts), подставляет его — то же,
+ *    что уходит в письмо. Подпись лида (previewRowLabel) остаётся исходной
+ *    ячейкой: это имя строки базы, а не текст письма.
  */
 
+import { heLetterCompanyName } from './companyNames';
 import type { HeOperatorMapping } from './types';
 
 /**
@@ -101,12 +109,15 @@ function resolveOperator(
 ): ResolvedOperator {
   const m = mapping.get(name.toLowerCase());
   if (m && m.matched && m.column) {
-    const value = stringifyCell(row[m.column]);
+    // Колонка компании ENG-базы — очищенное название, ровно как у запуска
+    // (mapBaseRowsToLeads читает его той же heLetterCompanyName).
+    const value = heLetterCompanyName(row, m.column) ?? stringifyCell(row[m.column]);
     if (value) return { kind: 'value', text: value };
-    // Колонка есть, ячейка пуста → Instantly подставит пустую строку, а не
-    // литерал {{var}}. Fallback matched-маппинга здесь НЕ применяется: боевой
-    // пайплайн (stages/template) не проставляет fallback у matched-маппингов,
-    // и превью не должно показывать подстановку, которой в рассылке не будет.
+    // Колонка есть, ячейка пуста → значение переменной лида: fallback маппинга
+    // (у us — замена пустой ячейки, «your website»), иначе пустая строка, а не
+    // литерал {{var}} — ровно то, что кладёт mapBaseRowsToLeads.
+    const standIn = (m.fallback ?? '').trim();
+    if (standIn) return { kind: 'value', text: standIn };
     return { kind: 'value', text: '', empty: true };
   }
   if (m && !m.matched) {

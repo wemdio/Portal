@@ -16,6 +16,7 @@
  */
 
 import type { LLMMessage } from '../llm';
+import { readVeAudienceScope, veAudienceScopeText, type VeAudienceScope } from '../audienceScope';
 
 export interface VeCollectTask {
   source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring';
@@ -91,8 +92,16 @@ export interface SourcePlanPromptInput {
   synonyms?: string[];
   /** Неотклонённые гипотезы вертикали (rejected сюда не попадают). */
   hypotheses: Array<{ title: string; description?: string | null; tier?: number | null; broad?: boolean }>;
+  /** Frozen explicit contract; parent/title context may never override it. */
+  audienceScope?: VeAudienceScope | null;
   /** Вокабуляр типов компаний из стадии vocab (опционально). */
   companyTypes?: string[];
+}
+
+export function sourceAudiencePolicy(input: SourcePlanPromptInput): string {
+  const scope = readVeAudienceScope(input.audienceScope);
+  if (!scope) return '';
+  return `\n\nAUTHORITATIVE STRUCTURED AUDIENCE: This contract overrides incidental scope rules above. Cover ANY ONE of its alternatives (OR), not their intersection and not only the first alternative. All required conditions (AND) and every excluded category remain mandatory, including explicitly required hiring signals, software, revenue, company size and geography. Do not treat these requirements as optional context or broaden them for volume. Do not add restrictions from the hypothesis title, parent vertical or vocabulary. Sources may provide candidates pending verification, never establish unsupported eligibility. Keep the existing 1–4 task cap; use independent alternative queries within that cap.\n${veAudienceScopeText(scope)}`;
 }
 
 export function buildSourcePlanMessages(input: SourcePlanPromptInput): LLMMessage[] {
@@ -120,7 +129,7 @@ ${input.hypotheses.map((h) => `- ${h.broad ? '[широкая] ' : h.tier != nul
 Для source="companies_directory" обязателен "directory_filters"; для "hh_live" — "hh_query"; для "yandex_maps"/"google_maps" — "maps_query".`;
 
   return [
-    { role: 'system', content: SYSTEM },
+    { role: 'system', content: SYSTEM + sourceAudiencePolicy(input) },
     { role: 'user', content: user },
   ];
 }

@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
+import { ADMIN_ENG_CLIENT_ACCESS_TEXT, refuseAdminActionForEngClient } from '@/lib/adminEngClientGuard';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -139,6 +140,17 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   const idsToRemove = existingRows
     .map((row) => row.resource_id)
     .filter((campaignId) => !desiredIds.has(campaignId));
+
+  // Клиенту английского кабинета доступ к RU-кампаниям не выдаём
+  // (adminEngClientGuard.ts); убрать уже выданный можно.
+  if (idsToAdd.length > 0) {
+    const engRefusal = await refuseAdminActionForEngClient(supabaseAdmin, targetUserId, {
+      refusal: ADMIN_ENG_CLIENT_ACCESS_TEXT,
+      event: 'admin.client-access.put',
+      logMeta,
+    });
+    if (engRefusal) return engRefusal;
+  }
 
   let rowsToAdd: Array<{
     client_user_id: string;

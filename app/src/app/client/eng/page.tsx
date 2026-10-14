@@ -15,7 +15,7 @@ export default function ClientEngPage() {
           Outreach
         </h1>
         <p className="mt-1 text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          Verticals engine: research your market, review verticals, edit letters, collect a base and launch — all in English.
+          Tell us about your business, choose the markets to start with and press Launch — we write the letters, find the contacts and start sending.
         </p>
       </header>
       <EngProjectsList />

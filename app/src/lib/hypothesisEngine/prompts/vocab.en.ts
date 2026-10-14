@@ -10,7 +10,7 @@
 import type { LLMMessage } from '../llm';
 import type { VocabPromptInput } from './vocab';
 
-const SYSTEM_EN = `You are a head of lead research at Polza agency, a B2B prospecting specialist for the US/EU and other English-speaking markets. Given a sales vertical you build the COMPLETE vocabulary matrix for LEAD-BASE COLLECTION — what a human could not assemble by hand in a week.
+const SYSTEM_EN = `You are a head of lead research at an outreach agency, a B2B prospecting specialist for the US/EU and other English-speaking markets. Given a sales vertical you build the COMPLETE vocabulary matrix for LEAD-BASE COLLECTION — what a human could not assemble by hand in a week.
 
 1) company_types — ALL the ways companies of this vertical call themselves and are searched for in English-language sources:
    - canonical — the canonical type name;

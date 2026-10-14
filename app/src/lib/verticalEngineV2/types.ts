@@ -177,6 +177,8 @@ export interface VeHypothesis {
   tier: VeHypothesisTier;
   title: string;
   description: string;
+  /** Optional immutable audience contract; absent rows retain legacy behavior. */
+  audience_scope?: import('./audienceScope').VeAudienceScope | null;
   /** «Почему это рынок для клиента» (ЛПР → цель → боль → оффер). NULL/отсутствует у легаси-строк. */
   fit_rationale?: string | null;
   evidence: VeEvidenceItem[];

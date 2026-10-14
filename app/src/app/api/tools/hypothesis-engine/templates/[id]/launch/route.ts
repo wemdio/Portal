@@ -7,6 +7,11 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { runHeTemplateLaunch } from '@/lib/hypothesisEngine/launchTemplate';
 import { type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
+import { openHeProviderJournal, withHeProviderJournal } from '@/lib/hypothesisEngine/costTelemetry';
+import { HE_COST_LAUNCH_STAGE } from '@/lib/hypothesisEngine/costReport';
+import { projectMarket, type HeMarket } from '@/lib/hypothesisEngine/market';
+import type { HeJob } from '@/lib/hypothesisEngine/types';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -15,6 +20,39 @@ export const maxDuration = 60;
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
+}
+
+/**
+ * Проект шаблона и его рынок — для журнала расхода вокруг запуска. Путь тот
+ * же, что у ядра запуска (шаблон → база → проект, шаги 2 и 4b ядра): рынок
+ * журнала и рынок, по которому ядро решает запуск, читаются из одной строки.
+ *  - 'missing' — шаблона, базы или проекта нет: ядро само ответит 404, и
+ *    классификатор не позовётся;
+ *  - 'unread'  — сбой чтения: запуск идёт без журнала, как до него. Прочитает
+ *    ядро рынок 'us' и позовёт классификатор — его расход журнал не увидит
+ *    (отчёт себестоимости называет этот случай в excludes).
+ * Никогда не бросает.
+ */
+async function readLaunchProject(
+  db: SupabaseClient,
+  templateId: string,
+): Promise<{ projectId: string; market: HeMarket } | 'missing' | 'unread'> {
+  try {
+    const template = await db.from('he_templates').select('base_id').eq('id', templateId).maybeSingle();
+    if (template.error) return 'unread';
+    const baseId = (template.data as { base_id?: unknown } | null)?.base_id;
+    if (typeof baseId !== 'string') return 'missing';
+    const base = await db.from('he_bases').select('project_id').eq('id', baseId).maybeSingle();
+    if (base.error) return 'unread';
+    const projectId = (base.data as { project_id?: unknown } | null)?.project_id;
+    if (typeof projectId !== 'string') return 'missing';
+    const project = await db.from('he_projects').select('market').eq('id', projectId).maybeSingle();
+    if (project.error) return 'unread';
+    if (!project.data) return 'missing';
+    return { projectId, market: projectMarket(project.data as { market?: string | null }) };
+  } catch {
+    return 'unread';
+  }
 }
 
 // GET — список пресетов для селектора «Отправить в запуск» (id + имя клиента).
@@ -96,16 +134,49 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       if (!presetId) return jsonError('Укажите preset_id', 400);
       const force = body?.force === true;
 
-      const outcome = await runHeTemplateLaunch({
-        portalDb: supabaseAdmin,
-        instantlyDb: supabaseInstantly,
-        templateId: id,
-        presetId,
-        force,
-        userId,
-        locale: 'ru',
-        eventPrefix: 'tools.hypothesis-engine.template.launch',
-      });
+      // Журнал расхода ENG (costTelemetry.ts) вокруг ядра запуска: классификатор
+      // сегментов (шаг 5c ядра) — платный вызов модели из роута. Только у
+      // проекта market='us': у RU-проекта openHeProviderJournal отвечает null,
+      // и ядро зовётся как раньше (лишнее здесь — три чтения по ключу до
+      // запуска). Рынок не прочитался — запуск идёт без журнала (отчёт
+      // себестоимости перечисляет этот случай в excludes) и строка в лог
+      // процесса: телеметрия не имеет права отказать запуску. Строка говорит
+      // только «рынок не прочитан»: был ли проект 'us' и позовёт ли ядро
+      // классификатор, роут здесь не знает. Запись строк фоновая, settle не
+      // зовётся — та же причина, что у клиентского роута.
+      const launchProject = await readLaunchProject(supabaseAdmin, id);
+      if (launchProject === 'unread') {
+        console.warn(`[he-cost] запуск шаблона ${id}: рынок проекта не прочитан`);
+      }
+      const journal = typeof launchProject === 'object'
+        ? openHeProviderJournal(
+            supabaseAdmin,
+            launchProject.market,
+            {
+              id,
+              project_id: launchProject.projectId,
+              stage: HE_COST_LAUNCH_STAGE as HeJob['stage'],
+              payload: {},
+            },
+            (msg) => console.warn(msg),
+          )
+        : null;
+      // Сужение `!supabaseAdmin || !supabaseInstantly` выше в замыкание не
+      // переходит — клиенты фиксируются здесь.
+      const portalDb = supabaseAdmin;
+      const instantlyDb = supabaseInstantly;
+      const outcome = await withHeProviderJournal(journal, () =>
+        runHeTemplateLaunch({
+          portalDb,
+          instantlyDb,
+          templateId: id,
+          presetId,
+          force,
+          userId,
+          locale: 'ru',
+          eventPrefix: 'tools.hypothesis-engine.template.launch',
+        }),
+      );
 
       return NextResponse.json(outcome.body, { status: outcome.status });
     },

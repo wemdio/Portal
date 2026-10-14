@@ -21,12 +21,79 @@ const TONE_COLORS: Record<EngTone, { dot: string; text: string }> = {
   red: { dot: 'var(--cp-red)', text: 'var(--cp-red)' },
 };
 
+/**
+ * Клиентские подписи СЫРЫХ статусов he_* — словарь кабинета вместо значений
+ * колонок. Бейджи мастера печатают статус как есть (`label={project.status}`,
+ * `label={b.status}`, `template: ${template.status}`, `label={hypothesis.status}`
+ * — шаги 1, 2, 4, 5, шапка мастера и список проектов), поэтому перевод стоит в
+ * ЕДИНСТВЕННОМ компоненте бейджа (EngBadge ниже): любое место, где сырой статус
+ * доезжает до бейджа, — нынешнее или будущее, — получает подпись, а не enum.
+ *
+ * Ключи — ровно значения enum'ов (types.ts), строчными, целиком: ни подписи
+ * мастера с заглавной буквы («Ready to send», «Failed» у ящиков), ни фразы
+ * («launched (paused)», «template: letters need rewriting») с ними не
+ * совпадают и проходят как есть. Одно слово у разных сущностей значит одно и
+ * то же, кроме `draft`, — у шаблона он приходит только с префиксом
+ * «template: » (свой словарь ниже), голым — только у проекта.
+ *
+ * Каждая подпись правдива для любой строки с этим статусом:
+ *  - `failed` → «stopped»: базу 'failed' пишут и сбой стадии, и ОБА
+ *    cancel-роута (отмена отличается только строкой причины), поэтому
+ *    «failed» про отменённую базу было неправдой; у проекта 'failed' пишут
+ *    research-стадии — «stopped» верно и там, причину печатает «Last error»;
+ *  - `draft` (проект) → «idle»: так стоит и новый проект до старта research, и
+ *    проект после отмены research (cancel-роут возвращает его в 'draft');
+ *    «not started» про второй случай было бы неправдой;
+ *  - `researched` → «research done»; `proposed` (гипотеза) → «suggested»: ни
+ *    принятия, ни отказа по ней ещё нет;
+ *  - шаблон (CHECK колонки: 'draft' | 'ready' | 'failed'): стадия template
+ *    пишет строку сразу 'ready' (stages/template.ts), 'draft' — лишь дефолт
+ *    колонки, и ни он, ни 'failed' не значат «ещё строится». Поэтому `draft` →
+ *    «not ready», а не «being built»; `failed` → «stopped», как у базы.
+ */
+const STATUS_LABELS: ReadonlyMap<string, string> = new Map([
+  // he_projects.status
+  ['draft', 'idle'],
+  ['researching', 'researching'],
+  ['researched', 'research done'],
+  ['failed', 'stopped'],
+  // he_bases.status ('failed' — выше)
+  ['uploaded', 'uploaded'],
+  ['collecting', 'collecting'],
+  // Только пока анализ идёт: 'analyzing'-база без идущего анализа приходит в
+  // бейдж как «analysis stopped» (EngBaseStatusBadge ниже).
+  ['analyzing', 'analyzing'],
+  ['analyzed', 'analyzed'],
+  // he_hypotheses.status
+  ['proposed', 'suggested'],
+  ['accepted', 'accepted'],
+  ['rejected', 'rejected'],
+]);
+
+/** he_templates.status — приходит в бейдж как «template: <status>». */
+const TEMPLATE_STATUS_LABELS: ReadonlyMap<string, string> = new Map([
+  ['draft', 'not ready'],
+  ['ready', 'ready'],
+  ['failed', 'stopped'],
+]);
+
+const TEMPLATE_STATUS_RE = /^template: ([a-z_]+)$/;
+
+/** Подпись бейджа: сырой статус → слово кабинета; всё остальное — как есть. */
+function engStatusLabel(label: string): string {
+  const own = STATUS_LABELS.get(label);
+  if (own !== undefined) return own;
+  const template = TEMPLATE_STATUS_RE.exec(label);
+  const templateLabel = template ? TEMPLATE_STATUS_LABELS.get(template[1]) : undefined;
+  return templateLabel !== undefined ? `template: ${templateLabel}` : label;
+}
+
 export function EngBadge({ label, tone = 'neutral' }: { label: string; tone?: EngTone }) {
   const color = TONE_COLORS[tone];
   return (
     <span className="ds-status-tag" style={{ color: color.text }}>
       <span className="ds-status-dot" style={{ background: color.dot }} />
-      {label}
+      {engStatusLabel(label)}
     </span>
   );
 }
@@ -83,6 +150,35 @@ export function baseStatusTone(status: string | undefined): EngTone {
     default:
       return 'neutral';
   }
+}
+
+/**
+ * Анализ 'analyzing'-базы НЕ идёт. Финальный фейл base_analyze базу не трогает
+ * (она так и остаётся 'analyzing'), поэтому статус на этот вопрос не отвечает, и
+ * бейдж «analyzing» про такую базу был неправдой. Ответ — СЕРВЕРА: признак
+ * `analysis_live` деталки (GET /eng/projects/[id]) считается общим предикатом
+ * isAnalyzingBaseLive — активная джоба на её base_id или окно постановки
+ * ANALYZING_ORPHAN_GRACE_MS, — тем же, что у Command Center и «Launch».
+ * Нет ключа (живость не прочитана) — не «остановлен»: анализ читается идущим.
+ *
+ * Одно правило на бейдж (EngBaseStatusBadge) и на фразу шага 3 про
+ * остановленный анализ, чтобы они не расходились.
+ */
+export function engBaseAnalysisStopped(base: { status?: string; analysis_live?: boolean }): boolean {
+  return base.status === 'analyzing' && base.analysis_live === false;
+}
+
+/**
+ * Бейдж статуса базы: у 'analyzing'-базы, чей анализ не идёт
+ * (engBaseAnalysisStopped), — «analysis stopped» янтарём (верно и про сбой, и
+ * про отмену); иначе — статус через словарь EngBadge.
+ */
+export function EngBaseStatusBadge({ base }: { base: { status: string; analysis_live?: boolean } }) {
+  return engBaseAnalysisStopped(base) ? (
+    <EngBadge label="analysis stopped" tone="amber" />
+  ) : (
+    <EngBadge label={base.status} tone={baseStatusTone(base.status)} />
+  );
 }
 
 /** Тон бейджа для статуса гипотезы HE. */

@@ -4,6 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin, ALL_ROLES } from '@/lib/roles';
+import { ADMIN_ENG_CLIENT_ROLE_TEXT, refuseAdminActionForEngClient } from '@/lib/adminEngClientGuard';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -66,6 +67,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const role = typeof body?.role === 'string' ? (body.role as UserRole) : null;
   if (!role) return jsonError('Missing role', 400);
   if (!ALL_ROLES.includes(role)) return jsonError('Invalid role', 400);
+
+  // Клиент английского кабинета может быть только клиентом (adminEngClientGuard.ts).
+  if (role !== 'client') {
+    const engRefusal = await refuseAdminActionForEngClient(supabaseAdmin, targetUserId, {
+      refusal: ADMIN_ENG_CLIENT_ROLE_TEXT,
+      event: 'admin.users.role',
+      logMeta,
+    });
+    if (engRefusal) return engRefusal;
+  }
 
   const { error: updateErr } = await supabaseAdmin
     .from('profiles')
