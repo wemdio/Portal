@@ -5,9 +5,10 @@
  *    в начале (английский аутрич), регистр не важен.
  *
  * Такие кампании:
- *  - сами привязываются к проекту студии «Polza» мимо границы периода
- *    (`autoMatchCampaignsToProjects`), чтобы их диалоги были видны в
- *    «Персонализированных ответах»;
+ *  - сами привязываются к своему проекту студии мимо границы периода
+ *    (`autoMatchCampaignsToProjects`): «N. Polza_…» — к клиенту «Polza»,
+ *    «ENagency …» — к клиенту «ENagency», и никогда крест-накрест; так их
+ *    диалоги видны в «Персонализированных ответах»;
  *  - НЕ проходят клиентский квалификатор (`leadQualificationWorker`): пометки
  *    «лид», уведомлений специалисту и сделок в AMO по ним из него нет. Их ответы
  *    квалифицирует и передаёт в AMO отдельный проход (`lib/ownReplyLeads`, с
@@ -20,10 +21,21 @@
 const OWN_AGENCY_CAMPAIGN_RE = /^\s*(?:\d+\s*\.\s*polza|enagency\b)/i;
 
 export function isOwnAgencyCampaign(campaignName: string | null | undefined): boolean {
-  return OWN_AGENCY_CAMPAIGN_RE.test(campaignName ?? '');
+  const name = campaignName ?? '';
+  return POLZA_CAMPAIGN_RE.test(name) || ENAGENCY_CAMPAIGN_RE.test(name);
 }
 
-/** Проект студии, к которому относятся наши кампании, — клиент «Polza». */
-export function isOwnAgencyProjectClient(client: string | null | undefined): boolean {
-  return (client ?? '').trim().toLowerCase() === 'polza';
+/**
+ * Наша кампания принадлежит именно этому проекту студии: «N. Polza_…» — клиенту
+ * «Polza», «ENagency …» — клиенту «ENagency». Крест-накрест — false.
+ */
+export function ownAgencyProjectMatches(
+  projectClient: string | null | undefined,
+  campaignName: string | null | undefined,
+): boolean {
+  const client = (projectClient ?? '').trim().toLowerCase();
+  const name = campaignName ?? '';
+  if (client === 'polza') return POLZA_CAMPAIGN_RE.test(name);
+  if (client === 'enagency') return ENAGENCY_CAMPAIGN_RE.test(name);
+  return false;
 }

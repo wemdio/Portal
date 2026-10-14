@@ -14,7 +14,7 @@ import {
   POLZA_SOURCE_FIELD_ID,
   POLZA_SUBSOURCE_FIELD_ID,
 } from '@/lib/crm/connections';
-import type { AmoClient } from '@/lib/crm/amoClient';
+import { AmoHttpError, type AmoClient } from '@/lib/crm/amoClient';
 import { processCrmQueue, type CrmDealSpec, type CrmQueueRow } from '@/lib/crm/dealQueue';
 import { senderLeadsAi, type Log, type SenderLeadsAi } from '@/lib/senderLeads/process';
 import { leadTelegramConfig, sendLeadMessage, type LeadTelegramConfig } from '@/lib/senderLeads/telegram';
@@ -256,7 +256,9 @@ async function enqueuePush(db: SupabaseClient, row: QualRow, ctx: ThreadContext,
   if (error?.code === '23505') {
     // Либо этот же ответ уже ставили (повтор после сбоя), либо человека
     // передали раньше — второй задачи и второго сообщения в чат не будет.
-    const { data: own } = await db.from('own_reply_crm_pushes').select('id').eq('qualification_id', row.email_id).limit(1);
+    const { data: own, error: ownError } = await db.from('own_reply_crm_pushes').select('id').eq('qualification_id', row.email_id).limit(1);
+    // Не прочиталось — повтор позже, а не примечание «уже передавали» наугад.
+    if (ownError) throw new Error(`own_reply_crm_pushes lookup: ${ownError.message}`);
     if (!own?.length) await markQual(db, row.email_id, { handoff_note: 'Этого человека уже передавали в AMO' });
     return;
   }
@@ -269,6 +271,18 @@ type QualOutcome = 'lead' | 'not_lead' | 'wait';
 async function qualifyOne(db: SupabaseClient, row: QualRow, settings: OwnReplySettings, ai: SenderLeadsAi, log: Log): Promise<QualOutcome> {
   const attempts = row.attempts + 1;
   try {
+    // Задача в AMO уже стоит (вставка прошла, отметка «лид» — нет): ИИ заново не
+    // спрашиваем, иначе «не лид» разошёлся бы с уже идущей сделкой.
+    const { data: pushed, error: pushedError } = await db
+      .from('own_reply_crm_pushes')
+      .select('id')
+      .eq('qualification_id', row.email_id)
+      .limit(1);
+    if (pushedError) throw new Error(`own_reply_crm_pushes lookup: ${pushedError.message}`);
+    if (pushed?.length) {
+      await markQual(db, row.email_id, { status: 'lead', attempts, last_error: null, qualified_at: new Date().toISOString() });
+      return 'lead';
+    }
     let ctx: ThreadContext | null;
     try {
       ctx = await fetchThreadContext(row.campaign_id, row.lead_email, row.thread_id, 'main', {
@@ -363,7 +377,8 @@ async function findOpenLead(db: SupabaseClient, client: AmoClient, email: string
     .or(`contact_email.ilike.${quoted(`*@${domain}`)},company_website.ilike.${quoted(`*${domain}*`)}`)
     .order('updated_at', { ascending: false })
     .limit(20);
-  if (error) throw new Error(`amo_leads: ${error.message}`);
+  // Сбой базы — временный: очередь AMO повторит задачу, а не закроет её навсегда.
+  if (error) throw new AmoHttpError(`amo_leads: ${error.message}`, 503);
   const hit = ((data ?? []) as { amo_id: number; name: string | null; contact_email: string | null; company_website: string | null }[])
     .find((l) => emailDomain(l.contact_email) === domain || siteHost(l.company_website) === domain);
   return hit ? { id: Number(hit.amo_id), name: (hit.name ?? '').trim() || `Сделка #${hit.amo_id}` } : null;
@@ -474,12 +489,24 @@ export async function runOwnReplyLeadsPass(db: SupabaseClient, instantlyDb: Supa
   const settings = await loadOwnReplySettings(db);
   const ai = senderLeadsAi();
   if (settings.enabled && ai && instantlyDb) {
-    result.claimed = await claimFromInbox(db, instantlyDb, settings);
-    for (const row of await dueQualifications(db)) {
-      const outcome = await qualifyOne(db, row, settings, ai, log);
-      if (outcome === 'wait') continue;
-      result.qualified += 1;
-      if (outcome === 'lead') result.leads += 1;
+    // Сбой оценки не должен останавливать AMO и чат ниже.
+    try {
+      result.claimed = await claimFromInbox(db, instantlyDb, settings);
+      for (const row of await dueQualifications(db)) {
+        let outcome: QualOutcome;
+        try {
+          outcome = await qualifyOne(db, row, settings, ai, log);
+        } catch (err) {
+          // Не записался статус строки — она повторится в следующем круге.
+          log('error', `Наши кампании: ответ ${row.email_id} — сбой записи статуса: ${errorText(err)}`);
+          continue;
+        }
+        if (outcome === 'wait') continue;
+        result.qualified += 1;
+        if (outcome === 'lead') result.leads += 1;
+      }
+    } catch (err) {
+      log('error', `Наши кампании: сбор и оценка ответов — ${errorText(err)}`);
     }
   }
   result.pushed = await processPushes(db, log);

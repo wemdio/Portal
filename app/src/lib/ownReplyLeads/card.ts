@@ -18,18 +18,18 @@ const MAX_MESSAGE_CHARS = 3000;
 const REPLY_PREVIEW_MAX = 1200;
 const REASON_MAX = 600;
 
-/** Письма ветки по порядку: ue_type 2 — ответ лида, остальное — наши. */
+/** Письма ветки по порядку: ue_type 2 — ответ лида, остальное (и без типа, как в leadQualifier) — наши. */
 export function messagesFromContext(ctx: ThreadContext): CardMessage[] {
   const emails = [...ctx.threadEmails];
   if (!emails.some((e) => e.id === ctx.replyEmail.id)) emails.push(ctx.replyEmail);
   return emails
     .map((e) => ({
-      role: (e.ue_type ?? 2) === 2 ? ('lead' as const) : ('us' as const),
+      role: (e.ue_type ?? 1) === 2 ? ('lead' as const) : ('us' as const),
       text: extractAuthoredReplyText(getBodyText(e.body)).trim(),
       timestamp: e.timestamp_email ?? e.timestamp_created ?? null,
     }))
     .filter((m) => m.text)
-    .sort((a, b) => Date.parse(a.timestamp ?? '') - Date.parse(b.timestamp ?? ''));
+    .sort((a, b) => (Date.parse(a.timestamp ?? '') || 0) - (Date.parse(b.timestamp ?? '') || 0));
 }
 
 function fmtStamp(value: string | null): string {
