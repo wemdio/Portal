@@ -149,7 +149,7 @@ export const INDUSTRY_GROUP_LABELS: Record<IndustryGroup, string> = {
 
 export const SOURCE_CODES = [
   'hh', 'direct', 'crm', 'exhibitors', 'contracts', 'tenders', 'growth', 'base', 'site_news', 'directory',
-  'gis', 'ymaps', 'revenue_growth', 'news',
+  'gis', 'ymaps', 'ymaps_catalog', 'revenue_growth', 'news',
 ] as const;
 export type SourceCode = (typeof SOURCE_CODES)[number];
 
@@ -166,6 +166,7 @@ export const SOURCE_LABELS: Record<SourceCode, string> = {
   directory: 'Общая база компаний (по профилю)',
   gis: '2ГИС: несколько филиалов, отдел продаж',
   ymaps: 'Яндекс Карты: новые точки сетей',
+  ymaps_catalog: 'Каталог Яндекс Карт: компании сфер ЦА (с сайтом)',
   revenue_growth: 'Рост выручки по отчётности ФНС',
   news: 'Новости о компании (Google News)',
 };
