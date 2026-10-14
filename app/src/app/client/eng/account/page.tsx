@@ -3,9 +3,10 @@
 /**
  * /client/eng/account — аккаунт ENG-клиента: адрес входа и смена пароля.
  *
- * Сюда ведёт письмо «Your new outreachOS password» (api/auth/forgot-password,
- * ветка ENG): «войдите с этим паролем и задайте свой». В меню пункта нет
- * намеренно — набор пунктов закреплён tests/lib/clientNav.test.ts.
+ * Сюда ведут прямая ссылка и вход с ?next=/client/eng/account (login/page.tsx).
+ * Забытый пароль меняется не здесь, а по одноразовой ссылке из письма сброса
+ * (api/auth/forgot-password/_engReset.ts). В меню пункта нет намеренно —
+ * набор пунктов закреплён tests/lib/clientNav.test.ts.
  *
  * Смена — существующий POST /api/client/password: он перепроверяет текущий
  * пароль входом, на ENG-хосте отвечает по-английски (неверный текущий — 400,

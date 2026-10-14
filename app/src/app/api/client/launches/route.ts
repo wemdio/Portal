@@ -107,6 +107,18 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  // RU-запуск не для аккаунтов английского кабинета (аудит 14.10.2026): с
+  // активным RU-тарифом ENG-аккаунт создавал бы и стартовал кампании с ящиков
+  // пула своего пресета мимо выключателя отправки ENG, проверок писем и
+  // Do-not-contact ENG. ENG запускает только кабинет (/api/client/eng/**).
+  // `market` — рынок запроса общего гейта (ENG-хост или profiles.market='eng').
+  // Чтение истории (GET) не закрыто. RU — как было.
+  if (result.auth.market === 'eng') {
+    return NextResponse.json(
+      { error: 'Launching campaigns here is not available for your account.', code: 'NOT_AVAILABLE_FOR_ACCOUNT' },
+      { status: 403 },
+    );
+  }
 
   const { userId } = result.auth;
 

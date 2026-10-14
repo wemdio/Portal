@@ -14,6 +14,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { logError, logWarn } from '@/lib/loggerServer';
 import type { ClientMarket } from '@/lib/engMarket';
+import { readHeEngAccountBlock } from './engAccountBlockMarker';
 
 // Гейт платных шагов (почта, лимиты, расход клиента) — рядом с рыночным:
 // роуты контура берут оба отсюда. Реализация и таблица «действие → проверки»
@@ -190,8 +191,40 @@ export async function requireEngMarket(
     noteMarketDenial(userId, role, row !== null);
     return { ok: false, failure: { status: 403, message: 'This section is not available for your account' } };
   }
+  // Заблокированный ENG-клиент (аудит 14.10.2026): отметку блокировки читал
+  // только гейт платных шагов, а неплатные мутации (письма, рынки, расписание
+  // кампаний у рассыльщика) шли до 6 часов — пока жив JWT, если отзыв сессий
+  // при блокировке не лёг. Этот гейт закрывает только роуты, которые его
+  // зовут (/api/client/eng/**, подтверждение почты). Do-not-contact
+  // (/api/client/blocklist/**, ветка ENG в _eng.ts) его НЕ зовёт: добавлять и
+  // удалять записи заблокированный по одной отметке клиент пока может —
+  // открытый пункт аудита, тот файл правится в другой ветке. Одно чтение по ключу на
+  // запрос клиента. Бан GoTrue здесь не читаем — это был бы вызов GoTrue на
+  // каждый запрос; блокировка из карточки пишет отметку ПЕРВОЙ
+  // (engAccountBlock), а бан мимо карточки держат вход и платный гейт
+  // (readHeEngOwnerHold, standing). Таблицы нет (миграция 20261013_0001) — как
+  // у остальных читателей отметки, не мешает; сбой чтения — 503, как у
+  // профиля выше: «не прочитали» не превращается ни в «можно», ни в «нельзя».
+  const block = await readHeEngAccountBlock(supabase, userId);
+  if (block.state === 'blocked') {
+    return { ok: false, failure: { status: 403, message: ENG_ACCOUNT_BLOCKED_TEXT } };
+  }
+  if (block.state === 'error') {
+    void logError('client.eng.market_gate.block_read_failed', null, { userId, detail: block.detail.slice(0, 300) });
+    return {
+      ok: false,
+      failure: { status: 503, message: 'Service temporarily unavailable — refresh the page' },
+    };
+  }
   return { ok: true, market };
 }
+
+/**
+ * Отказ рыночного гейта заблокированному клиенту — то же слово, что у входа
+ * (LoginForm, ENG-хост). Не обещает ни сроков, ни контакта: куда писать,
+ * решает владелец (аудит 14.10.2026).
+ */
+export const ENG_ACCOUNT_BLOCKED_TEXT = 'This account is blocked.';
 
 /** Проект, принадлежащий клиенту (created_by = userId). */
 export async function loadClientHeProject(

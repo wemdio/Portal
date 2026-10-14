@@ -1,12 +1,17 @@
-import { NextResponse, type NextRequest } from 'next/server';
+import { after, NextResponse, type NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sendTransactionalEmail } from '@/lib/email/smtpClient';
 import { renderPasswordResetEmail } from '@/lib/email/templates/passwordReset';
-import { formatEngEmailUtc, renderEngPasswordResetEmail } from '@/lib/email/templates/engPasswordReset';
-import { heEngAppOrigin, HE_ENG_VERIFY_FROM_NAME } from '@/lib/hypothesisEngine/engEmailVerificationMail';
-import { readHeEngAccountBlock } from '@/lib/hypothesisEngine/engAccountBlockMarker';
 import { generateStrongPassword } from '@/lib/passwordGenerator';
 import { logAudit, logError } from '@/lib/loggerServer';
+import {
+  engResetClientIp,
+  engResetPageResponse,
+  engResetSubmitResponse,
+  isEngResetFormRequest,
+  resolveEngResetAccount,
+  sendEngResetLink,
+} from './_engReset';
 
 export const dynamic = 'force-dynamic';
 
@@ -54,34 +59,11 @@ function jsonOk() {
 }
 
 /**
- * A blocked ENG account (S3b, owner decision 2026-10-12: a block stops
- * everything): the ENG client card's block marker (he_eng_account_blocks) or a
- * Supabase ban that has not expired yet — including a ban set outside the card.
- * Without this check a reset would rotate the blocked account's password and
- * email it. The caller still answers {ok:true}: like whether an email is
- * registered, a block is never revealed. 'unread' — something could not be
- * read: no password change and no email (the user can try again after
- * RESET_COOLDOWN_MS). Marker table missing (migration 20261013_0001 not
- * applied) — the ban alone decides.
+ * GET /api/auth/forgot-password?token=… — ENG only: the page of the reset link
+ * (a form for the new password). Does not use the link up. See _engReset.ts.
  */
-async function engResetRefusal(
-  userId: string,
-): Promise<{ kind: 'blocked'; source: 'marker' | 'ban' } | { kind: 'unread'; detail: string } | null> {
-  if (!supabaseAdmin) return { kind: 'unread', detail: 'no supabaseAdmin' };
-  const marker = await readHeEngAccountBlock(supabaseAdmin, userId);
-  if (marker.state === 'blocked') return { kind: 'blocked', source: 'marker' };
-  if (marker.state === 'error') return { kind: 'unread', detail: marker.detail };
-  try {
-    const { data, error } = await supabaseAdmin.auth.admin.getUserById(userId);
-    if (error || !data?.user) return { kind: 'unread', detail: `auth user read: ${error?.message ?? 'no user'}` };
-    const bannedUntil = typeof data.user.banned_until === 'string' ? data.user.banned_until.trim() : '';
-    if (!bannedUntil) return null;
-    // An unparseable ban end counts as banned, as in the auto-launch (fail-closed).
-    const until = Date.parse(bannedUntil);
-    return !Number.isFinite(until) || until > Date.now() ? { kind: 'blocked', source: 'ban' } : null;
-  } catch (e) {
-    return { kind: 'unread', detail: `auth user read threw: ${e instanceof Error ? e.message : 'unknown'}` };
-  }
+export function GET(req: NextRequest) {
+  return engResetPageResponse(req);
 }
 
 /**
@@ -92,15 +74,27 @@ async function engResetRefusal(
  * Flow:
  *   1. Validate input shape (don't bother the DB / SMTP with garbage).
  *   2. Throttle by email — see RECENT_RESETS above.
- *   3. Look up profiles.email → auth user id. Silent success on miss to
- *      avoid leaking which emails are registered.
- *   4. Generate a strong password, write it to auth.users via admin update.
- *   5. Email the new password to profiles.email (never to the input email
+ *   3. ENG account whose SIGN-IN address is this email (_engReset.ts,
+ *      resolveEngResetAccount): a signed one-time reset link to that address;
+ *      the password is NOT changed here. Never a password in an email. The
+ *      link work (rate limits, block check, GoTrue, SMTP) runs AFTER the
+ *      {ok:true} response, so the response time does not tell an ENG
+ *      customer's address from an unknown one.
+ *   4. RU (unchanged): look up profiles.email → auth user id. Silent success
+ *      on miss to avoid leaking which emails are registered.
+ *   5. Generate a strong password, write it to auth.users via admin update.
+ *   6. Email the new password to profiles.email (never to the input email
  *      directly — they're equal here, but the indirection makes the security
  *      property explicit and refactor-resistant).
- *   6. Return the same {ok:true} response either way.
+ *   7. Return the same {ok:true} response either way.
+ *
+ * A form post (urlencoded) is the ENG reset page saving the new password
+ * (_engReset.ts, engResetSubmitResponse); the RU form and «Forgot password?»
+ * send JSON and never reach it.
  */
 export async function POST(req: NextRequest) {
+  if (isEngResetFormRequest(req)) return engResetSubmitResponse(req);
+
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -132,10 +126,30 @@ export async function POST(req: NextRequest) {
     return jsonOk();
   }
 
+  // ENG account (its sign-in address is this email): a reset link, not a new
+  // password (_engReset.ts). A failed lookup does not stop the RU path below;
+  // an ENG profile it finds gets no password either (see below).
+  const engAccount = await resolveEngResetAccount(supabaseAdmin, emailRaw);
+  if (engAccount.kind === 'eng') {
+    // After the response (see 3. above). after() is the Next way to run work
+    // past the response; outside a request scope it throws — then the promise
+    // just runs on (sendEngResetLink never throws).
+    const ip = engResetClientIp(req);
+    const run = () => sendEngResetLink(ip, engAccount, logMeta);
+    try {
+      after(run);
+    } catch {
+      void run();
+    }
+    return jsonOk();
+  }
+  if (engAccount.kind === 'unread') {
+    await logError('auth.forgot.eng_lookup.failed', null, { detail: engAccount.detail.slice(0, 300) }, logMeta);
+  }
+
   // Resolve userId via profiles. supabase-js admin client doesn't have a
   // "get user by email" yet (would need listUsers + filter); profiles already
-  // mirrors email through the auth trigger. `market` picks the email language:
-  // an ENG-cabinet account (profiles.market = 'eng') gets the English letter.
+  // mirrors email through the auth trigger.
   const { data: profile, error: profileErr } = await supabaseAdmin
     .from('profiles')
     .select('id, email, market')
@@ -151,23 +165,17 @@ export async function POST(req: NextRequest) {
     return jsonOk();
   }
 
-  // ENG: a blocked account gets no new password and no email (see
-  // engResetRefusal). RU: unchanged, no such check.
+  // ENG profile matched here only by profiles.email (its sign-in address is
+  // different, or the lookup above failed): an ENG account never gets a new
+  // password by email — no change, no letter. RU: unchanged.
   if (profile.market === 'eng') {
-    const refusal = await engResetRefusal(profile.id as string);
-    if (refusal?.kind === 'blocked') {
-      await logAudit(
-        'auth.forgot.eng_blocked',
-        'Forgot-password refused: ENG account is blocked',
-        { source: refusal.source },
-        logMeta,
-      );
-      return jsonOk();
-    }
-    if (refusal?.kind === 'unread') {
-      await logError('auth.forgot.eng_block_read.failed', null, { detail: refusal.detail.slice(0, 300) }, logMeta);
-      return jsonOk();
-    }
+    await logAudit(
+      'auth.forgot.eng_unresolved',
+      'Forgot-password: ENG profile matched by profile email only — no password change, no email',
+      { lookup: engAccount.kind },
+      logMeta,
+    );
+    return jsonOk();
   }
 
   const newPassword = generateStrongPassword(14);
@@ -180,24 +188,10 @@ export async function POST(req: NextRequest) {
     return jsonOk();
   }
 
-  // ENG: English letter, the reset time in UTC (the reader's zone is unknown),
-  // a link to the cabinet's account page and the same sender name as the
-  // other ENG letters. RU: the letter and the call exactly as before.
-  // The link goes through sign-in (`/login?next=`, app/login/page.tsx accepts
-  // exactly this next on the ENG host), so after signing in the reader lands
-  // on the password form, not on the dashboard. A reader who is still signed
-  // in is sent from this /login straight to the account page by middleware.
-  const eng = profile.market === 'eng';
-  const { subject, html, text } = eng
-    ? renderEngPasswordResetEmail({
-        password: newPassword,
-        resetAtUtc: formatEngEmailUtc(new Date()),
-        accountUrl: `${heEngAppOrigin()}/login?next=/client/eng/account`,
-      })
-    : renderPasswordResetEmail({
-        password: newPassword,
-        resetAtMsk: formatMoscowTime(new Date()),
-      });
+  const { subject, html, text } = renderPasswordResetEmail({
+    password: newPassword,
+    resetAtMsk: formatMoscowTime(new Date()),
+  });
 
   try {
     await sendTransactionalEmail({
@@ -205,7 +199,6 @@ export async function POST(req: NextRequest) {
       subject,
       html,
       text,
-      ...(eng ? { fromName: HE_ENG_VERIFY_FROM_NAME } : {}),
     });
     await logAudit('auth.forgot.success', `Password reset email sent`, { to: profile.email }, logMeta);
   } catch (err) {
