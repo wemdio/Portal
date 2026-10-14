@@ -184,6 +184,7 @@ export interface VeContinuationCheck {
   base_id?: string;
   code?: string;
   action: VeCollectionContinuation['action'];
+  cache_revision?: number;
 }
 
 export type VeBaseSummary = Pick<
@@ -206,6 +207,7 @@ export type VeBaseSummary = Pick<
   collect_info?: VeCollectInfo | null;
   /** Evaluated by the server from complete saved collection state. */
   collection_continuation?: VeCollectionContinuation | null;
+  collection_continuation_revision?: number;
 };
 
 /** Усечённая строка джобы (без result/tokens). */

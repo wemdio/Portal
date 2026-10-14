@@ -19,7 +19,7 @@ import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veSavedReviewSig
 import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { resetVeTriageState, veTriageRubricMessages } from '@/lib/verticalEngineV2/relevanceTriage';
-import { VE_RELEVANCE_TARGET_RULES } from '@/lib/verticalEngineV2/relevanceReview';
+import { VE_RELEVANCE_TARGET_RULES, veStaffingScopeNote, relevanceReviewMessages } from '@/lib/verticalEngineV2/relevanceReview';
 import { readRelevanceCheckpoint, relevanceHash } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import type { VeRelevanceDecision } from '@/lib/verticalEngineV2/relevanceDecision';
 import savedBeforeRelease from './fixtures/relevanceCheckpointBeforeRulesV2.json';
@@ -280,6 +280,15 @@ describe('VE2 relevance selection rules', () => {
   });
 
   it('keeps the closed lists of structural conditions exact and free of size, in the rules and in the Jev checklist', () => {
+    const saas = 'Target hypothesis: B2B SaaS с remote-командами\nSaaS-вендоры из СНГ, нанимающие разработчиков в 2+ странах.';
+    const staffing = veStaffingScopeNote(saas);
+    expect(staffing).toContain("company's OWN remote team");
+    expect(relevanceReviewMessages(saas, [], 'ru')[1].content).toContain(staffing);
+    // The seller's SaaS vertical or a B2C/hiring-provider target must not gain
+    // an invented B2B customer requirement from the SaaS-specific reminder.
+    for (const scope of ['Target hypothesis: B2C SaaS с remote-командами',
+      'Target hypothesis: Агентства международного найма\nVertical: B2B SaaS remote',
+      'Target hypothesis: B2B SaaS\nПродукты для бизнеса']) expect(veStaffingScopeNote(scope)).toBe('');
     // Size is ranking, not selection: the gate never receives the registry headcount, so a size
     // condition would hold every company back, whatever words it is written in.
     const rules = /STRUCTURAL CONDITIONS are the only other requirements, and only when the hypothesis states them: (.+?)\. Warehouses/

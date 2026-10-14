@@ -13,7 +13,7 @@ import { fetchVeRelevanceEvidence, VE_RELEVANCE_EVIDENCE_MAX_MS, type VeRelevanc
 import { proxyPoolHealth } from '@/lib/enrich/proxyPool';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
-import { reviewVeRelevanceEvidence, VE_RELEVANCE_SCOPE_NOTE, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
+import { reviewVeRelevanceEvidence, VE_RELEVANCE_SCOPE_NOTE, VE_RELEVANCE_TARGET_RULES, veStaffingScopeNote, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
 import { veMedicalScopeNote, type VeMedicalTarget } from './relevanceMedical';
 import { triageVeCompanies, veTriageAvailable, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
   VE_TRIAGE_MAX_EXCERPTS, VE_TRIAGE_RUBRIC_VERSION, type VeTriageRubric } from './relevanceTriage';
@@ -253,7 +253,7 @@ function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondP
     'The reason must follow from the cited service facts. Keep each reason concise, at most 240 characters. Do not claim that a company works exclusively in one area, or lacks the target service, when the excerpts merely omit other activities.',
     secondPass ? 'Independent second look using website evidence: reconsider provisional rejections AND uncertainty.' : 'Initial review: keep uncertainty explicit instead of guessing.',
     'Reasons in ' + (language === 'ru' ? 'Russian' : 'English') + '. JSON only: {"decisions":[{"i":0,"status":"needs_review","reason":"...","' + (evidenceIds ? 'evidence_ids' : 'evidence') + '":[]}]}',
-  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (medicalNote ? '\n' + medicalNote : '') + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
+  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (veStaffingScopeNote(scope) ? '\n' + veStaffingScopeNote(scope) : '') + (medicalNote ? '\n' + medicalNote : '') + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
 }
 /** A careers/contact shell proves neither the company's business nor a conflict.
  * Keep this deliberately narrow: any remaining words leave the normal review

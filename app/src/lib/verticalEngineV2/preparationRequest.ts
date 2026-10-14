@@ -8,6 +8,8 @@ export interface VePreparationAction {
   hypothesis_id: string | null;
   base_id?: string;
   code?: string;
+  /** Version of the saved base used for the verdict; UI must reject stale checks. */
+  cache_revision?: number;
   /** Durable intent for analyzed partial previews; omitted for preparation repair. */
   resume_collection?: boolean;
 }
@@ -34,6 +36,7 @@ export async function checkVeContinuationRequest(
     hypothesis_id: result.hypothesis_id,
     ...(result.base_id ? { base_id: result.base_id } : {}),
     ...(result.code ? { code: result.code } : {}),
+    ...(result.cache_revision !== undefined ? { cache_revision: result.cache_revision } : {}),
   };
 }
 
@@ -51,8 +54,10 @@ export async function checkVePreparationRequest(
       .eq('project_id', projectId).eq('id', hypothesisId).maybeSingle(),
   ]);
   for (const result of [setup, preparation, hypothesis]) if (result.error) throw new Error(result.error.message);
+  let cacheRevision: number | undefined;
   const outcome = (status: VePreparationAction['status'], reason: string, code?: string, baseId?: string): VePreparationAction =>
-    ({ status, reason, hypothesis_id: hypothesisId, ...(code ? { code } : {}), ...(baseId ? { base_id: baseId } : {}) });
+    ({ status, reason, hypothesis_id: hypothesisId, ...(code ? { code } : {}), ...(baseId ? { base_id: baseId } : {}),
+      ...(cacheRevision !== undefined ? { cache_revision: cacheRevision } : {}) });
   if (setup.data?.revision !== revision) return outcome('unavailable', 'Выбор изменился. Обновите страницу', 'selection_changed');
   if (!setup.data?.selected_hypothesis_ids?.includes(hypothesisId) || !hypothesis.data?.vertical_id
     || hypothesis.data.status === 'rejected') return outcome('unavailable', 'Выберите доступную гипотезу этого проекта', 'not_selected');
@@ -82,6 +87,8 @@ export async function checkVePreparationRequest(
     if (prepared.data) base = prepared;
   }
   const saved = base.data!;
+  if (typeof saved.collection_continuation_revision === 'number' && Number.isSafeInteger(saved.collection_continuation_revision)
+    && saved.collection_continuation_revision >= 0) cacheRevision = saved.collection_continuation_revision;
   const [active, template, launched] = await Promise.all([
     db.from('ve_jobs').select('id').eq('project_id', projectId).eq('payload->>base_id', saved.id)
       .in('stage', ['base_collect', 'base_analyze', 'template', 'base_reproject_contacts'])

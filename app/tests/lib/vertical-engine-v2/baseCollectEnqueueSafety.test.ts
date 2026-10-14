@@ -8,7 +8,9 @@ import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue'
 import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, canRunVeJob, veJobConcurrency, veBaseCollectConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
-import { autoResumeVeTransientPreparations, enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
+import { autoResumeVeTransientPreparations, enqueueVeContactReprojections, loadVeOutreachSetup } from '@/lib/verticalEngineV2/outreachSetup';
+import { VeAutomaticContinuationChecks, veAutomaticContinuationCandidates, veAutomaticContinuationResultCurrent } from '@/components/vertical-engine-v2/engine/automaticContinuationCheck';
+import type { VeBaseSummary, VeContinuationCheck } from '@/components/vertical-engine-v2/engine/api';
 import { VE_RELEVANCE_RULES_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
 
 let mockRouteDb = createMockSupabase();
@@ -295,11 +297,18 @@ describe('VE2 base collection enqueue recovery', () => {
       expect(checked.status).toBe(mode === 'read-failure' ? 503 : 200);
       const body = await checked.json();
       if (mode === 'available') {
-        expect(body.continuation_check).toMatchObject({ status: 'available', action: 'resume_collection', base_id: 'stopped', code: 'sources_available' });
+        expect(body.continuation_check).toMatchObject({ status: 'available', action: 'resume_collection', base_id: 'stopped', code: 'sources_available', cache_revision: 0 });
         expect(body.continuation_check.reason).toContain('ещё не запущено');
         expect(body.continuation_check).not.toHaveProperty('resume_collection');
         expect(body).not.toHaveProperty('preparation_action');
         expect(mockRouteDb.getRows('ve_bases')[0].collection_continuation).toBeTruthy();
+        // The automatic path skips all project-wide preview/review reads;
+        // the earlier full response remains supported for rolling clients.
+        jest.mocked(loadVeOutreachSetup).mockClear();
+        const slim = await request({ action: 'check_continuation', check_only: true, hypothesis_id: hypothesisId });
+        expect(slim.status).toBe(200);
+        expect(Object.keys(await slim.json())).toEqual(['continuation_check']);
+        expect(loadVeOutreachSetup).not.toHaveBeenCalled();
       } else if (mode === 'busy') expect(body.continuation_check).toMatchObject({ status: 'already_running', action: null, code: 'already_running' });
       else if (mode === 'launched') expect(body.continuation_check).toMatchObject({ status: 'ready', action: null, code: 'launched' });
       else if (mode !== 'read-failure') expect(body.continuation_check).toMatchObject({ status: 'unavailable',
@@ -321,6 +330,57 @@ describe('VE2 base collection enqueue recovery', () => {
       expect((await request({ action: 'check_continuation', hypothesis_id: invalid })).status).toBe(400);
     }
     expect(mockRouteDb.rpcCalls).toHaveLength(0);
+    expect((await request({ action: 'check_continuation', check_only: 'true', hypothesis_id: hypothesisId })).status).toBe(400);
+
+    // Automatic inspection is scoped to visible selected preview cards. Its
+    // queue cannot turn polling, a rerender or parallel cards into a retry loop.
+    const autoBase = { ...stoppedDb.getRows('ve_bases')[0], collect_info: availableInfo,
+      collection_continuation: { available: true, action: 'resume_preparation', code: 'state_unchecked', reason: 'Unknown' } } as unknown as VeBaseSummary;
+    const autoInput = { projectId, step: 3, activeHypothesisId: hypothesisId, setupRevision: 7,
+      selectedHypothesisIds: [hypothesisId, 'other'],
+      preparations: [
+        { project_id: projectId, hypothesis_id: hypothesisId, base_id: 'stopped', template_id: 'letters', status: 'ready' as const, language: 'ru' as const, last_error: null },
+        { project_id: projectId, hypothesis_id: 'other', base_id: 'other', template_id: 'other-letters', status: 'error' as const, language: 'ru' as const, last_error: 'Failed' },
+      ], bases: [autoBase, { ...autoBase, id: 'other', hypothesis_id: 'other', status: 'failed' as const }],
+      jobs: [], launchedBaseIds: new Set<string>() };
+    const candidates = veAutomaticContinuationCandidates(autoInput);
+    expect(candidates.map((candidate) => candidate.baseId)).toEqual(['stopped', 'other']);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, step: 2 }).map((candidate) => candidate.baseId)).toEqual(['stopped']);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, step: 4 })).toHaveLength(0);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, selectedHypothesisIds: [] })).toHaveLength(0);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, launchedBaseIds: new Set(['stopped', 'other']) })).toHaveLength(0);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, preparations: autoInput.preparations.map((row) => ({ ...row, status: 'pending' })) })).toHaveLength(0);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, bases: autoInput.bases.map((row) => ({ ...row, source: 'upload' })) })).toHaveLength(0);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, bases: autoInput.bases.map((row) => ({ ...row,
+      collect_info: { ...row.collect_info, collection_mode: 'supply' } })) })).toHaveLength(0);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, bases: autoInput.bases.map((row) => ({ ...row,
+      collection_continuation: { available: false, action: null, code: 'already_running', reason: 'Running' } })) })).toHaveLength(0);
+    const queue = new VeAutomaticContinuationChecks();
+    expect(queue.next(candidates, 0).candidate).toEqual(candidates[0]);
+    expect(queue.start(candidates[0], 0)).toBe(true);
+    expect(queue.start(candidates[1], 0)).toBe(false);
+    expect(queue.next(candidates, 1)).toEqual({});
+    queue.finish(candidates[0], true, 0);
+    expect(queue.next(candidates, 1).candidate).toEqual(candidates[1]);
+    expect(queue.start(candidates[1], 1)).toBe(true);
+    queue.finish(candidates[1], false, 1);
+    expect(queue.next(candidates, 29_999)).toEqual({ retryAt: 30_000 });
+    expect(queue.start(candidates[0], 29_999)).toBe(false);
+    expect(queue.start(candidates[0], 30_000)).toBe(true);
+    queue.finish(candidates[0], true, 30_000);
+    expect(queue.next(candidates, 100_000)).toEqual({ retryAt: undefined });
+    const changedCandidates = veAutomaticContinuationCandidates({ ...autoInput,
+      bases: autoInput.bases.map((row) => ({ ...row, collection_continuation_revision: 1 })) });
+    expect(queue.next(changedCandidates, 100_000).candidate).toEqual(changedCandidates[0]);
+    const autoResult: VeContinuationCheck = { status: 'available', action: 'resume_collection', hypothesis_id: hypothesisId,
+      base_id: 'stopped', cache_revision: 0, code: 'sources_available', reason: 'Available' };
+    expect(veAutomaticContinuationResultCurrent(candidates[0], autoResult, candidates[0])).toBe(true);
+    expect(veAutomaticContinuationResultCurrent(candidates[0], autoResult, changedCandidates[0])).toBe(false);
+    expect(veAutomaticContinuationResultCurrent(candidates[0], { ...autoResult, cache_revision: 1 }, candidates[0])).toBe(false);
+    expect(veAutomaticContinuationResultCurrent(candidates[0], { ...autoResult, base_id: 'other' }, candidates[0])).toBe(false);
+    expect(veAutomaticContinuationResultCurrent(candidates[0], { ...autoResult, code: 'state_changed' }, candidates[0])).toBe(false);
+    expect(veAutomaticContinuationResultCurrent(candidates[0], autoResult,
+      veAutomaticContinuationCandidates({ ...autoInput, setupRevision: 8 })[0])).toBe(false);
 
     // Exhausted collection must not block finishing failed letters, and a
     // live job must not receive a second request from an old browser tab.
