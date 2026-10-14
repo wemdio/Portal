@@ -450,8 +450,8 @@ function buildMarketView(detail: EngDetail, vertical: HeVertical, selected: bool
   });
   const retired = !template && !templateJob ? engRetiredTemplateOf(templates) : undefined;
   const shown = template ?? retired;
-  const base =
-    (shown ? (bases.find((b) => b.id === shown.base_id) ?? null) : null) ?? ownAutoBaseState(ownBases).latest;
+  const shownBase = shown ? bases.find((b) => b.id === shown.base_id) : undefined;
+  const base = shownBase ?? ownAutoBaseState(ownBases).latest;
   const row = template
     ? ((detail.auto_launch?.markets ?? []).find((m) => m.template_id === template.id) ?? null)
     : null;
