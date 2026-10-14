@@ -352,9 +352,11 @@ export const CLIENT_NAV_ENG: ClientNavItem = {
   href: '/client/eng',
   // Пункт рисуется только ENG-клиенту (ветка market='eng' в ClientNavList),
   // а подсказка выбирается по locale профиля, который у него бывает и 'ru' —
-  // поэтому английская в обоих полях, как у пунктов ниже.
-  description: 'Verticals engine for the US market (English UI)',
-  descriptionEn: 'Verticals engine for the US market (English UI)',
+  // поэтому английская в обоих полях, как у пунктов ниже. Подсказку видит
+  // клиент при наведении — только его словами, без внутренних названий
+  // продукта («движок вертикалей», «English UI»; аудит 14.10.2026).
+  description: 'Your project, markets and campaigns',
+  descriptionEn: 'Your project, markets and campaigns',
 };
 
 /**

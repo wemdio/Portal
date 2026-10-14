@@ -23,8 +23,8 @@
  * Состояние рынка (по старшинству): запись о запуске → блок отправки; иначе
  * строка автозапуска (`auto_launch.markets` деталки); иначе стадия подготовки.
  * Автозапуск выключен (не нажат «Launch», отменён «Cancel all jobs», таблиц
- * нет) — у готового рынка «Launch now», и экран не обещает, что рынок
- * запустится сам.
+ * нет, выключатель HE_ENG_AUTO_LAUNCH выключен — тогда available:false) — у
+ * готового рынка «Launch now», и экран не обещает, что рынок запустится сам.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -190,12 +190,22 @@ function prepareTimeText(hours: number): string {
   return `about ${rounded} hour${rounded === 1 ? '' : 's'}`;
 }
 
-/** Строка про выключатель отправки аккаунта; null — сказать нечего. */
-function accessLine(access: EngSendingAccessState | undefined): { text: string; blocks: boolean } | null {
+/**
+ * Строка про выключатель отправки аккаунта; null — сказать нечего.
+ * `autoAvailable` — автозапуск вообще работает (available деталки / GET
+ * …/launch не false; при выключенном HE_ENG_AUTO_LAUNCH — false): без него
+ * после проверки рынок сам не стартует — «can start», а не «starts».
+ */
+function accessLine(
+  access: EngSendingAccessState | undefined,
+  autoAvailable: boolean,
+): { text: string; blocks: boolean } | null {
   switch (access) {
     case 'not_enabled':
       return {
-        text: 'Sending starts after a one-time check of your account by our team. We’ll email you when it’s on.',
+        text: autoAvailable
+          ? 'Sending starts after a one-time check of your account by our team. We’ll email you when it’s on.'
+          : 'Sending can start after a one-time check of your account by our team. We’ll email you when it’s on.',
         blocks: false,
       };
     case 'revoked':
@@ -267,6 +277,20 @@ function refillTotalText(total: EngRefillTotal): string {
     : `Daily top-up: ${plural(total.runs, 'top-up', 'top-ups')} so far, no new contacts added yet.`;
 }
 
+/**
+ * Хвост итога «Launch» / «Launch N more markets», когда автозапуска нет
+ * (auto_launch 'unavailable': нет таблиц или выключатель HE_ENG_AUTO_LAUNCH
+ * выключен — тик ничего не берёт и писем о старте не шлёт): ни «starts by
+ * itself», ни «we’ll email you when sending starts» — только «Launch now».
+ * Письмо «it’s on» — это письмо «Sending is on», которое уходит при включении
+ * отправки сотрудником (api/admin/users/[id]/eng-sending), а не от тика.
+ */
+function launchUnavailableTail(sendingAccess: EngSendingAccessState | undefined): string {
+  return sendingAccess === 'not_enabled'
+    ? ' Automatic sending is not available right now: when a market is ready and our team has finished the one-time check of your account (we’ll email you when it’s on), press «Launch now» on it to start sending.'
+    : ' Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.';
+}
+
 /** Итог «Launch» проекта одной-двумя фразами. */
 function launchResultText(res: EngProjectLaunchResponse): { text: string; held: boolean } {
   const parts: string[] = [];
@@ -317,12 +341,14 @@ function launchResultText(res: EngProjectLaunchResponse): { text: string; held: 
   // автозапуске: старт отправки (и ожидание проверки аккаунта) и остановки,
   // которым нужен клиент (стадии, сборка, пауза, письма на переписку, старт
   // не удался); паузы, которые снимаются сами или командой, писем не шлют.
+  // 'on' роут отвечает, только когда намерение записано И выключатель
+  // HE_ENG_AUTO_LAUNCH включён; иначе — launchUnavailableTail.
   const tail =
     res.auto_launch === 'on'
       ? res.sending_access === 'not_enabled'
         ? ' Each market starts sending by itself once its final letters are ready and our team has finished the one-time check of your account. We’ll email you when sending starts, or if something stops and needs you.'
         : ' Each market starts sending by itself once its final letters are ready. We’ll email you when sending starts, or if something stops and needs you.'
-      : ' Automatic sending is not available right now, so when a market is ready, press «Launch now» on it to start sending.';
+      : launchUnavailableTail(res.sending_access);
   return {
     text: `${head}${againNote}${tail}`,
     held: held || Boolean(holdCode) || (parts.length === 0 && again > 0) || brandMarkets > 0,
@@ -333,6 +359,9 @@ function launchResultText(res: EngProjectLaunchResponse): { text: string; held: 
  * Итог «Launch N more markets». Обещание письма и старта — то же, что у
  * «Launch» (намерение проекта уже включено, новые рынки ведёт тот же автозапуск);
  * при выключателе аккаунта 'not_enabled' старт ждёт разовой проверки командой.
+ * Роут ответил auto_launch 'unavailable' (выключатель HE_ENG_AUTO_LAUNCH
+ * выключен) — без «start sending by ourselves» и обещания письма: хвост
+ * launchUnavailableTail, как у «Launch».
  * Пауза, записанная этим нажатием (потолок расхода, сбой постановки), — её
  * фразой; рынки, которые к нажатию уже начались, — отдельной фразой.
  */
@@ -360,9 +389,13 @@ function launchMoreResultText(
     };
   }
   const head = `Started ${plural(started.length, 'more market', 'more markets')}: ${namesList(started)}.`;
-  const how = ' We write their letters, find and check contacts and start sending by ourselves, the same way as your other markets.';
-  const tail =
-    res.sending_access === 'not_enabled'
+  const auto = res.auto_launch === 'on';
+  const how = auto
+    ? ' We write their letters, find and check contacts and start sending by ourselves, the same way as your other markets.'
+    : ' We write their letters, find and check contacts and write their final letters by ourselves.';
+  const tail = !auto
+    ? launchUnavailableTail(res.sending_access)
+    : res.sending_access === 'not_enabled'
       ? ' They start sending after our team has finished the one-time check of your account.'
       : ' We’ll email you when sending starts, or if something stops and needs you.';
   const alreadyNote = already.length > 0 ? ` ${namesList(already)} had already started.` : '';
@@ -381,6 +414,11 @@ interface MarketView {
   chainJob: boolean;
   /** Последняя джоба писем рынка упала или отменена, а готовых писем нет. */
   chainStopped: boolean;
+  /**
+   * Тормоз цепочек рынка исчерпан (`chain_exhausted` деталки): «Launch» новую
+   * цепочку не поставит — карточка зовёт в Support. Только при `chainStopped`.
+   */
+  chainExhausted: boolean;
   ownBases: EngBaseSummary[];
   /** База, по которой идёт или идёт запуск: база шаблона, иначе последняя своя авто-база. */
   base: EngBaseSummary | null;
@@ -432,6 +470,19 @@ export function engRetiredTemplateOf<T extends { status?: unknown; created_at?: 
   return newest !== undefined && newest.status === 'failed' ? newest : undefined;
 }
 
+/**
+ * Рынки с исчерпанным тормозом цепочек — серверный ключ деталки
+ * `chain_exhausted` (api/client/eng/projects/[id] → autopilotReconcile
+ * .readHeChainExhaustedVerticals: засчитанные прогоны цепочки рынка дошли до
+ * порога, «Launch» его пропустит). Капнутого списка `jobs` для этого мало —
+ * считает сервер. Ключа нет (сбой чтения, старый сервер) — пусто, и карточка
+ * говорит по-прежнему. Поля нет в типе api-client — читаем осторожно.
+ */
+function chainExhaustedIdsOf(detail: EngDetail): ReadonlySet<string> {
+  const raw = (detail as { chain_exhausted?: unknown }).chain_exhausted;
+  return new Set(Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : []);
+}
+
 function buildMarketView(detail: EngDetail, vertical: HeVertical, selected: boolean): MarketView {
   const jobs = (detail.jobs ?? []) as HeJobSummary[];
   const chains = (detail.chains ?? []) as HeChainDto[];
@@ -455,12 +506,16 @@ function buildMarketView(detail: EngDetail, vertical: HeVertical, selected: bool
   const row = template
     ? ((detail.auto_launch?.markets ?? []).find((m) => m.template_id === template.id) ?? null)
     : null;
+  const chainJob = latestChainJob !== undefined && isLive(latestChainJob);
+  const chainStopped =
+    !chain && latestChainJob !== undefined && (latestChainJob.status === 'failed' || latestChainJob.status === 'cancelled');
   return {
     vertical,
     selected,
     chain,
-    chainJob: latestChainJob !== undefined && isLive(latestChainJob),
-    chainStopped: !chain && latestChainJob !== undefined && (latestChainJob.status === 'failed' || latestChainJob.status === 'cancelled'),
+    chainJob,
+    chainStopped,
+    chainExhausted: chainStopped && !chainJob && chainExhaustedIdsOf(detail).has(vertical.id),
     ownBases,
     base,
     template,
@@ -691,19 +746,22 @@ function autoLaunchLine(
             tone: 'amber',
             actions: ['resend'],
           };
+        // Потолки — нейтрально («a usage limit»), как у manualHeldLine:
+        // spend_limit пишут потолок клиента и потолок проекта, spend_day_limit —
+        // ещё и общий потолок ENG, которого аккаунт клиента не достигал.
         case 'spend_limit':
           return {
             text: launched
-              ? `${rest}: adding the rest is on hold because your account has reached its usage limit. Contact Support to raise the limit.`
-              : 'Sending for this market is on hold: your account has reached its usage limit. Contact Support to raise the limit.',
+              ? `${rest}: adding the rest is on hold because a usage limit was reached. Contact Support to raise the limit.`
+              : 'Sending for this market is on hold because a usage limit was reached. Contact Support to raise the limit.',
             tone: 'amber',
             actions: [],
           };
         case 'spend_day_limit':
           return {
             text: launched
-              ? `${rest}: adding the rest is on hold because your account has reached its usage limit for the last 24 hours. We try again by ourselves, or contact Support to raise the limit.`
-              : 'Sending for this market is on hold: your account has reached its usage limit for the last 24 hours. We try again by ourselves, or contact Support to raise the limit.',
+              ? `${rest}: adding the rest is on hold because a usage limit for the last 24 hours was reached. We try again by ourselves, or message Support.`
+              : 'Sending for this market is on hold because a usage limit for the last 24 hours was reached. We try again by ourselves, or message Support.',
             tone: 'amber',
             actions: [],
           };
@@ -775,6 +833,90 @@ function autoLaunchLine(
       };
     case 'done':
       return null;
+  }
+}
+
+/**
+ * Строка 'held' рынка, когда автозапуска у проекта нет (`autoOn` false:
+ * «Launch» не нажат или отменён, таблиц нет, выключатель HE_ENG_AUTO_LAUNCH
+ * выключен). Такую строку пишет сама кнопка «Launch now» (тем же решением
+ * heEngAutoLaunchVerdict, что у тика), а тика, который её перепроверит, нет:
+ * фразы autoLaunchLine «starts by itself», «we try again by ourselves», «we’ll
+ * try again at …» здесь неправда, а прежний откат на зелёное «Ready to send»
+ * прятал причину — и каждое нажатие повторяло тот же отказ (аудит 14.10.2026).
+ * Здесь — причина последней попытки без обещания автоматического старта.
+ * «Launch now» остаётся: только её нажатие перепроверит строку (тупик без
+ * кнопки, когда команда уже всё поправила, хуже повторного отказа).
+ * Потолки — нейтрально («a usage limit»): spend_day_limit пишут и потолок
+ * клиента, и потолок проекта, и общий потолок ENG.
+ * null — строке сказать нечего: решает нынешний выключатель отправки
+ * аккаунта (launchNowAccessLine у общей строки «Ready»), а у писем —
+ * ветка переписки карточки (`needsRewrite`).
+ */
+function manualHeldLine(
+  row: EngAutoLaunchMarket,
+  launched: boolean,
+  access: EngSendingAccessState | undefined,
+): MarketLine | null {
+  const rest = 'Part of this market’s audience has not gone out yet';
+  switch (row.code) {
+    case 'sending_not_enabled':
+    case 'sending_turned_off':
+    case 'letters_need_rewrite':
+      return null;
+    case 'setup_unavailable':
+    case 'mailboxes_short':
+      return {
+        text: launched
+          ? `${rest}: the mailboxes your campaigns send from are not set up for your account yet. Message Support, and press «Launch now» once they are ready.`
+          : 'Sending can’t start yet: the mailboxes your campaigns send from are not set up for your account. Message Support, and press «Launch now» once they are ready.',
+        tone: 'amber',
+        actions: ['launch_now'],
+      };
+    case 'spend_limit':
+      return {
+        text: launched
+          ? `${rest}: adding the rest is on hold because a usage limit was reached. Message Support to raise the limit, then press «Launch now».`
+          : 'Sending for this market is on hold because a usage limit was reached. Message Support to raise the limit, then press «Launch now».',
+        tone: 'amber',
+        actions: ['launch_now'],
+      };
+    case 'spend_day_limit':
+      return {
+        text: launched
+          ? `${rest}: adding the rest is on hold because a usage limit for the last 24 hours was reached. Press «Launch now» again later, or message Support.`
+          : 'Sending for this market is on hold because a usage limit for the last 24 hours was reached. Press «Launch now» again later, or message Support.',
+        tone: 'amber',
+        actions: ['launch_now'],
+      };
+    case 'email_not_verified':
+      return {
+        text: launched
+          ? `${rest}: the rest can be added once you confirm your email. Confirm it, then press «Launch now».`
+          : 'Sending can’t start until you confirm your email. Confirm it, then press «Launch now».',
+        tone: 'amber',
+        actions: ['resend', 'launch_now'],
+      };
+    case 'unavailable':
+      return {
+        text: launched
+          ? `${rest}. We could not finish our checks on the last try. Press «Launch now» to try again.`
+          : 'Sending has not started: we could not finish our checks on the last try. Press «Launch now» to try again.',
+        tone: 'muted',
+        actions: ['launch_now'],
+      };
+    case 'research_running':
+      return {
+        text: launched
+          ? `${rest}. Waiting for the research to finish; then press «Launch now» to add the rest.`
+          : 'Waiting for the research to finish; then press «Launch now» to start sending.',
+        tone: 'muted',
+        actions: ['launch_now'],
+      };
+    default:
+      // account_blocked, needs_support и прочие: фразы autoLaunchLine
+      // автоматического старта не обещают.
+      return autoLaunchLine(row, launched, access);
   }
 }
 
@@ -1011,6 +1153,17 @@ function preparingLine(
   }
   if (view.chainJob) return { text: 'Writing the letters…', tone: 'muted', spinner: true, actions: [] };
   if (view.chainStopped) {
+    // Тормоз цепочек рынка исчерпан (серверный `chain_exhausted`): «Launch»
+    // новую цепочку не поставит — ни сразу, ни после правки брифа или починки
+    // командой (реконсилер: 'chain_exhausted'). Звать к нему — обещать повтор,
+    // которого не будет; путь один — Support.
+    if (view.chainExhausted) {
+      return {
+        text: 'Writing the letters stopped before it finished. Message Support to have the letters looked at.',
+        tone: 'amber',
+        actions: [],
+      };
+    }
     if (brandInputLine && ctx.teamFix !== 'letters') return brandInputLine;
     return {
       text: ctx.spendPaused
@@ -1026,8 +1179,18 @@ function preparingLine(
   }
   if (view.chain) {
     if (ctx.spendPaused) return { text: `The letters are written. ${SPEND_PAUSED_NEXT}`, tone: 'muted', actions: [] };
+    // Автопилот ставит сборку сам сразу после писем, но общий потолок расхода
+    // ENG пропускает этот шаг без паузы (spendCeiling.ts) — тогда двигает его
+    // только «Launch»; фраза зовёт к нему, если ничего не идёт (как у готовых
+    // контактов ниже).
     return ctx.autopilotOn
-      ? { text: 'The letters are written; collecting contacts comes next.', tone: 'muted', actions: [] }
+      ? {
+          text: ctx.launchBlocked
+            ? 'The letters are written; collecting contacts comes next.'
+            : 'The letters are written; collecting contacts comes next. If nothing is running on this project, press «Launch» above to move it on.',
+          tone: 'muted',
+          actions: [],
+        }
       : ctx.launchBlocked
         ? { text: 'The letters are written.', tone: 'muted', actions: [] }
         : { text: 'The letters are written. Press «Launch» above to collect contacts for this market.', tone: 'muted', actions: [] };
@@ -1149,10 +1312,12 @@ function MarketCard({
         line = autoLaunchLine(row, true, sendingAccess);
       } else if (row?.state === 'running') {
         line = autoLaunchLine(row, true, sendingAccess);
-      } else if (autoOn && row?.state === 'held') {
+      } else if (row?.state === 'held') {
         // Строку держит гейт (лимиты, ящики, настройка, проверки, отказ
-        // запуска, блокировка) — его фраза, а не «Press «Launch now»».
-        line = autoLaunchLine(row, true, sendingAccess);
+        // запуска, блокировка) — его фраза, а не «Press «Launch now»». Без
+        // автозапуска её написала сама «Launch now» — причина без обещания
+        // старта «by itself» (manualHeldLine).
+        line = autoOn ? autoLaunchLine(row, true, sendingAccess) : manualHeldLine(row, true, sendingAccess);
       }
       if (!line && !needsRewrite) {
         line = {
@@ -1222,6 +1387,11 @@ function MarketCard({
       };
     } else if (row && (autoOn || row.state === 'running')) {
       line = autoLaunchLine(row, false, sendingAccess);
+    } else if (row?.state === 'held') {
+      // Автозапуска нет, а строку 'held' написала «Launch now» (ящики,
+      // настройка, потолки, почта, проверки): её причина, а не зелёное
+      // «Ready to send» — иначе каждое нажатие молча повторяет отказ.
+      line = manualHeldLine(row, false, sendingAccess);
     }
     if (!line && !needsRewrite && !(row && autoOn && row.state === 'done')) {
       line = {
@@ -1651,7 +1821,7 @@ export function EngStepLaunch({
   const cancelledAt = !requested ? (auto?.cancelled_at ?? info?.cancelled_at ?? null) : null;
   // Выключатель отправки аккаунта: свежий из деталки (опрос мастера), иначе GET …/launch.
   const sendingAccess = engSendingAccessOf(detail.account_access, info?.sending_access);
-  const access = accessLine(sendingAccess);
+  const access = accessLine(sendingAccess, available !== false);
 
   const selectedIds = useMemo(() => {
     const known = new Set(verticals.map((v) => v.id));
