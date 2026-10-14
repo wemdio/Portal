@@ -16,7 +16,7 @@ import type { VeStaffingCorrectionScope } from './staffingCorrection';
 import { relevanceHash } from './relevanceCheckpoint';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
 import { isVeAudienceScopeEnabled } from './audienceScope';
-import { needsLegacyFintechAudienceRefresh, readVeCollectionAudienceSnapshot, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
+import { needsLegacyFintechAudienceRefresh, readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
 
 export interface VeCollectionContinuation {
   available: boolean;
@@ -51,9 +51,13 @@ export function needsVeControlledAudienceRefresh(base: Record<string, unknown>, 
  * changing cursors, receipts or the amount of work already admitted. */
 function hasSourceCorrection(info: Record<string, unknown>, tasks: Array<Record<string, unknown>>): boolean {
   const selection = record(info.source_selection);
+  const snapshot = readVeCollectionAudienceSnapshot(info.audience_snapshot);
   const hypotheses = records(info.hypotheses).filter((h) => typeof h.title === 'string') as Array<{ title: string }>;
-  const profile = (typeof info.niche_source_profile === 'string' ? info.niche_source_profile
-    : detectVeNicheSourceProfile(hypotheses)) as VeNicheSourceProfile | null;
+  // Match the collector: a title or old profile cannot restore a specialty
+  // rewrite which the frozen audience (including required conditions) forbids.
+  const profile = snapshot ? veAudienceNicheProfile(snapshot.hypotheses)
+    : (typeof info.niche_source_profile === 'string' ? info.niche_source_profile
+      : detectVeNicheSourceProfile(hypotheses)) as VeNicheSourceProfile | null;
   if (!profile || !['payments', 'esoteric_platform', 'adult_platform', 'crossborder_ecommerce', 'crossborder_buyers'].includes(profile)
     || !info.plan || !tasks.length || (selection && !(profile === 'payments' && selection.profile === 'payments' && selection.version === 1))
     || (info.construct && record(info.construct)?.status !== 'done') || record(info.adaptive_collection)?.pending
