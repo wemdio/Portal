@@ -67,6 +67,21 @@
  *  5. Клиент убрал адрес из списка (DELETE /api/client/blocklist/[id] →
  *     releaseHeEngDncAddress): его строки 'queued' и 'failed' становятся
  *     'cancelled' (last_error 'unlisted'). Уже снятых обратно не добавляем.
+ *  6. ЗАБЛОКИРОВАННЫЙ АККАУНТ (отметка he_eng_account_blocks, engAccountBlock;
+ *     решение владельца «блокировка останавливает всё»). Роут списка
+ *     отказывает ему в POST и DELETE (_eng.ts), а проход воркера читает
+ *     отметки владельцев своих заявок и строк одним пакетом
+ *     (readHeEngAccountBlocks) и по владельцу с активной отметкой не делает
+ *     ничего: ни разворота, ни чтения записей о запуске, ни одного вызова
+ *     рассыльщика. Его заявки и строки, которым пора, откладываются на
+ *     HE_ENG_DNC_BLOCKED_RECHECK_MS без траты попытки (last_error
+ *     'account_blocked'), взятые строки возвращаются так же — после
+ *     разблокировки всё продолжается само. Отметка не прочиталась —
+ *     fail-closed: заявки прохода не трогаются, взятые строки возвращаются
+ *     без траты попытки, и проход кончается; следующий проход читает снова.
+ *     Таблицы отметок нет (миграция 20261013_0001) — как до блокировки. Бан
+ *     GoTrue без отметки проход не видит: блокировка из карточки пишет
+ *     отметку первой.
  *
  * ЧТО ВИДИТ КЛИЕНТ (readHeEngDncSummary). `pending` — разных адресов ждут
  * проверки (строки 'queued' и заявки 'pending' и 'after_launch'). `failed` — только то, с чем
@@ -143,6 +158,7 @@ import { InstantlyApiError } from '@/lib/instantly/errors';
 import { resolveInstantlyAccountId, type InstantlyRequestOptions } from '@/lib/instantly/accounts';
 import { CampaignStatus } from '@/lib/instantly/types';
 import { logWarn } from '@/lib/loggerServer';
+import { readHeEngAccountBlocks } from './engAccountBlockMarker';
 import { parseLaunchInfo, readHeLaunchLease } from './launchHandoff';
 import { heEngLaunchCampaigns, heEngWorkspaceConfigured, readHeEngCampaignStatusRows } from './engCampaignStatus';
 import { notifyHeEngSending } from './engSendingAlert';
@@ -194,6 +210,11 @@ const ACTIVITY_TABLE = 'instantly_activity_events';
 const REPLY_ID_RE = /^\d{1,15}$/;
 /** Попыток строки или заявки до 'failed'. */
 export const HE_ENG_DNC_MAX_ATTEMPTS = 10;
+/**
+ * Заявки и строки заблокированного аккаунта (шапка, п. 6) откладываются на
+ * столько без траты попытки: после разблокировки они продолжатся не позже.
+ */
+export const HE_ENG_DNC_BLOCKED_RECHECK_MS = 15 * 60_000;
 /** Аренда взятой строки или заявки: дольше худшего прохода, доходящего фоном. */
 export const HE_ENG_DNC_LEASE_MS = 10 * 60_000;
 const BACKOFF_BASE_MS = 60_000;
@@ -1227,6 +1248,13 @@ export interface HeEngDncPassReport {
   released: number;
   /** Удаление ушло, проверочного поиска в проходе не хватило: возвращены без траты попытки, с id записи. */
   awaitingConfirmation: number;
+  /**
+   * Заявки и взятые строки заблокированных аккаунтов (шапка, п. 6): отложены
+   * на HE_ENG_DNC_BLOCKED_RECHECK_MS без траты попытки.
+   */
+  heldBlocked: number;
+  /** Заявки и взятые строки, не тронутые потому, что отметки блокировки не прочитались. */
+  heldUnreadable: number;
   /** Вызовов рассыльщика за проход. */
   calls: number;
   stoppedBy: 'rate_limited' | 'provider' | 'budget' | 'cutoff' | 'stop' | null;
@@ -1247,6 +1275,8 @@ function emptyReport(enabled: boolean): HeEngDncPassReport {
     failed: 0,
     released: 0,
     awaitingConfirmation: 0,
+    heldBlocked: 0,
+    heldUnreadable: 0,
     calls: 0,
     stoppedBy: null,
   };
@@ -1254,6 +1284,19 @@ function emptyReport(enabled: boolean): HeEngDncPassReport {
 
 let missingWarned = false;
 let noInstantlyDbWarned = false;
+
+type BlockedOwners = { ok: true; blocked: ReadonlySet<string> } | { ok: false; detail: string };
+
+/**
+ * Отметки блокировки владельцев (шапка, п. 6) — одним пакетным чтением.
+ * Таблицы нет — никто не заблокирован (как до блокировки); сбой — ok:false.
+ */
+async function readBlockedOwners(db: SupabaseClient, userIds: readonly string[]): Promise<BlockedOwners> {
+  const read = await readHeEngAccountBlocks(db, userIds);
+  if (read.state === 'ok') return { ok: true, blocked: new Set(read.blocked.keys()) };
+  if (read.state === 'missing') return { ok: true, blocked: new Set() };
+  return { ok: false, detail: read.detail };
+}
 
 /**
  * Один проход (шапка, п. 4). Выключено — ни одного запроса. НЕ БРОСАЕТ.
@@ -1285,6 +1328,39 @@ export async function runHeEngDncRemovalPass(opts: {
     failedByUser.set(userId, f);
   };
   const iso = (ms: number) => new Date(ms).toISOString();
+  // Заблокированный владелец (шапка, п. 6): все его заявки и строки, которым
+  // пора, — на HE_ENG_DNC_BLOCKED_RECHECK_MS вперёд одной записью на таблицу,
+  // попытки не тронуты. Иначе они каждый проход снова занимали бы места
+  // соседей в выборке заявок и в круге клиентов he_eng_dnc_claim. Взятые
+  // (с арендой) этой записью не задеваются — их возвращает проход строк.
+  const postponedOwners = new Set<string>();
+  const postponeBlockedOwner = async (userId: string): Promise<void> => {
+    if (postponedOwners.has(userId)) return;
+    postponedOwners.add(userId);
+    const nowIso = iso(clock());
+    const patch = { next_at: iso(clock() + HE_ENG_DNC_BLOCKED_RECHECK_MS), last_error: 'account_blocked', updated_at: nowIso };
+    const [intentsRes, rowsRes] = await Promise.all([
+      db
+        .from(HE_ENG_DNC_INTENTS_TABLE)
+        .update(patch)
+        .eq('user_id', userId)
+        .in('status', ['pending', 'after_launch'])
+        .lte('next_at', nowIso),
+      db
+        .from(HE_ENG_DNC_REMOVALS_TABLE)
+        .update(patch)
+        .eq('user_id', userId)
+        .eq('status', 'queued')
+        .lte('next_at', nowIso),
+    ]);
+    if (intentsRes.error || rowsRes.error) {
+      opts.log(
+        'warn',
+        `[eng-dnc] клиент ${userId} заблокирован, а его очередь не отложилась (${pgText('запись', intentsRes.error ?? rowsRes.error)}) — `
+          + 'рассыльщика по нему не зовём, следующий проход отложит снова',
+      );
+    }
+  };
 
   try {
     if (!opts.instantlyDb) {
@@ -1313,7 +1389,17 @@ export async function runHeEngDncRemovalPass(opts: {
       }
       opts.log('warn', `[eng-dnc] ${pgText('заявки не прочитались', intentErr)}`);
     }
-    for (const raw of (intentErr ? [] : (intentRows ?? [])) as Array<Record<string, unknown>>) {
+    const intents = (intentErr ? [] : (intentRows ?? [])) as Array<Record<string, unknown>>;
+    // Владельцы с отметкой блокировки (шапка, п. 6). Не прочиталось — заявки
+    // прохода не трогаются (fail-closed), следующий проход прочитает снова.
+    const intentOwners: BlockedOwners =
+      intents.length > 0 ? await readBlockedOwners(db, intents.map((r) => str(r.user_id))) : { ok: true, blocked: new Set() };
+    if (!intentOwners.ok) {
+      report.heldUnreadable += intents.length;
+      opts.log('warn', `[eng-dnc] отметки блокировки не прочитались (${intentOwners.detail}) — заявки прохода не тронуты`);
+    }
+    const blockedIntentOwners: ReadonlySet<string> = intentOwners.ok ? intentOwners.blocked : new Set();
+    for (const raw of intentOwners.ok ? intents : []) {
       if (opts.shouldStop?.()) break;
       const id = str(raw.id);
       const userId = str(raw.user_id);
@@ -1322,6 +1408,11 @@ export async function runHeEngDncRemovalPass(opts: {
       const status = raw.status === 'after_launch' ? 'after_launch' : raw.status === 'pending' ? 'pending' : null;
       const watching = status === 'after_launch';
       if (!id || !userId || attempts === null || !status) continue;
+      if (blockedIntentOwners.has(userId)) {
+        await postponeBlockedOwner(userId);
+        report.heldBlocked += 1;
+        continue;
+      }
       const taken = await db
         .from(HE_ENG_DNC_INTENTS_TABLE)
         .update({ attempts: attempts + 1, next_at: iso(clock() + HE_ENG_DNC_LEASE_MS), updated_at: iso(clock()) })
@@ -1418,9 +1509,9 @@ export async function runHeEngDncRemovalPass(opts: {
       opts.log('warn', `[eng-dnc] ${pgText('строки не взяты', claim.error)}`);
       return report;
     }
-    const rows = parseClaimed(claim.data);
-    report.claimed = rows.length;
-    if (rows.length === 0) return report;
+    const claimedRows = parseClaimed(claim.data);
+    report.claimed = claimedRows.length;
+    if (claimedRows.length === 0) return report;
 
     // Исход строки — условной записью по взятию (status 'queued' и attempts
     // этого взятия). Не легла — строку возьмут снова после аренды, и повтор
@@ -1466,6 +1557,37 @@ export async function runHeEngDncRemovalPass(opts: {
     const release = async (row: ClaimedRow) => {
       if (await finish(row, { attempts: row.attempts - 1, next_at: iso(clock()) })) report.released += 1;
     };
+
+    // Владельцы с отметкой блокировки (шапка, п. 6): их строки — обратно без
+    // траты попытки и на HE_ENG_DNC_BLOCKED_RECHECK_MS вперёд; ни записей о
+    // запуске, ни списка, ни рассыльщика. Отметки не прочитались — так же
+    // возвращаются ВСЕ взятые строки, но к следующему проходу, и он кончается.
+    const rowOwners = await readBlockedOwners(db, claimedRows.map((r) => r.user_id));
+    if (!rowOwners.ok) {
+      opts.log('warn', `[eng-dnc] отметки блокировки не прочитались (${rowOwners.detail}) — взятые строки возвращены`);
+      for (const row of claimedRows) {
+        if (await finish(row, { attempts: row.attempts - 1, next_at: iso(clock()) })) report.heldUnreadable += 1;
+      }
+      return report;
+    }
+    const rows: ClaimedRow[] = [];
+    for (const row of claimedRows) {
+      if (!rowOwners.blocked.has(row.user_id)) {
+        rows.push(row);
+        continue;
+      }
+      await postponeBlockedOwner(row.user_id);
+      if (
+        await finish(row, {
+          attempts: row.attempts - 1,
+          next_at: iso(clock() + HE_ENG_DNC_BLOCKED_RECHECK_MS),
+          last_error: 'account_blocked',
+        })
+      ) {
+        report.heldBlocked += 1;
+      }
+    }
+    if (rows.length === 0) return report;
 
     // Записи о запуске и список — на клиента, заново на каждом проходе.
     const context = new Map<string, { campaigns: Map<string, HeEngDncCampaign>; listed: Set<string> } | null>();
@@ -1610,14 +1732,19 @@ export function createHeEngDncRemovalTicker(opts: {
         env: opts.env,
       })
         .then((r) => {
-          if (r.intentsExpanded || r.intentsWatching || r.intentsRetried || r.intentsFailed || r.claimed) {
+          if (
+            r.intentsExpanded || r.intentsWatching || r.intentsRetried || r.intentsFailed || r.claimed
+            || r.heldBlocked || r.heldUnreadable
+          ) {
             opts.log(
               'info',
               `[eng-dnc] заявки: разложено ${r.intentsExpanded}, ждут конца запуска ${r.intentsWatching}, `
                 + `повтор ${r.intentsRetried}, сдались ${r.intentsFailed}; `
                 + `строк взято ${r.claimed}: снято ${r.done}, нет в кампании ${r.notFound}, убраны из списка ${r.cancelled}, `
                 + `повтор ${r.retried}, сдались ${r.failed}, возвращено ${r.released}, `
-                + `ждут проверки удаления ${r.awaitingConfirmation}; вызовов ${r.calls}`
+                + `ждут проверки удаления ${r.awaitingConfirmation}; `
+                + `отложены (блокировка) ${r.heldBlocked}, не тронуты (отметки не прочитались) ${r.heldUnreadable}; `
+                + `вызовов ${r.calls}`
                 + `${r.stoppedBy ? `, стоп: ${r.stoppedBy}` : ''}; ${Date.now() - nowMs} мс`,
             );
           }

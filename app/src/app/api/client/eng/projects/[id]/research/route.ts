@@ -13,12 +13,10 @@ import {
   requireEngPaidAccess,
 } from '@/lib/hypothesisEngine/apiGuards';
 import {
-  ENG_PAID_ACCOUNT_BLOCKED_TEXT,
-  ENG_PAID_UNAVAILABLE_TEXT,
+  engSpendLimitRefusal,
   startEngResearchLocked,
   type EngPaidAction,
 } from '@/lib/hypothesisEngine/engPaidAccess';
-import { readHeEngOwnerHold } from '@/lib/hypothesisEngine/autopilotNext';
 import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE } from '@/components/client-eng/clientFailureText';
 import {
   HE_RESEARCH_STAGES,
@@ -36,7 +34,7 @@ import {
   type HeTemplateLaunchMark,
 } from '@/lib/hypothesisEngine/launchTemplate';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
-import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { enforceHeSpendCeiling, heSpendStopIsGlobal, type HeSpendCheck } from '@/lib/hypothesisEngine/spendCeiling';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -296,6 +294,19 @@ async function rerunGate(
 }
 
 /**
+ * Отказ потолка расхода проекта (enforceHeSpendCeiling) клиенту — общий у
+ * «Try again» и «Save and continue». Остановил ОБЩИЙ потолок ENG ('eng_day') —
+ * паузы на проекте нет (spendCeiling.ts, heSpendStopIsGlobal), и фраза
+ * карточки паузы была бы неправдой: тот же отказ, что у гейта платных шагов
+ * (engSpendLimitRefusal('eng_day')). Иначе — фраза карточки паузы, как раньше.
+ */
+function spendRefusal(check: HeSpendCheck): NextResponse {
+  return heSpendStopIsGlobal(check)
+    ? engPaidAccessResponse(engSpendLimitRefusal('eng_day'))
+    : jsonError(HE_SPEND_PAUSED_EN, 409);
+}
+
+/**
  * ПРОДОЛЖЕНИЕ RESEARCH ПОСЛЕ ОПИСАНИЯ БИЗНЕСА («Save and continue» шага 1).
  *
  * Зачем. site_profile проекта клиента ENG-кабинета на тонком сайте без описания
@@ -313,23 +324,32 @@ async function rerunGate(
  *  - дневной лимит стартов (HE_US_MAX_RESEARCH_PER_DAY) её не считает — он
  *    считает строки site_profile, созданные за сутки (engPaidAccess.ts), а эта
  *    создана стартом, который в лимит уже вошёл; и не спрашивается: это не
- *    новый старт, а продолжение уже начатого;
+ *    новый старт, а продолжение уже начатого (гейт платных шагов зовётся с
+ *    `continuation: true` — пропускает только этот шаг);
  *  - вердикт «повтор только после технического сбоя» (engResearchRetryVerdict)
  *    не спрашивается и ничем не «расходуется» — у него и нет счёта;
  *  - бюджет писем (heTemplateGenerationBudget) research не касается вовсе.
- * Потолки расхода (engClientSpend и spendCeiling) тоже не спрашиваются — по
- * той же причине, по которой их нет у дочейна воркера: начатое исследование
- * доводится до конца, а этот прогон прошёл их на своём старте и с тех пор не
- * потратил ничего (отказ стоит до первого платного вызова).
+ * Потолки расхода СПРАШИВАЮТСЯ, как у «Try again»: продолжение запускает
+ * платную цепочку research заново (профиль, кейсы, гипотезы, кластеризация), а
+ * дочейн воркера её уже не остановит. Со старта этого прогона могли
+ * измениться общий расход ENG за 24 ч (HE_US_ENG_DAY_SPEND_CAP_USD, 'eng_day'),
+ * расход клиента по другим проектам, пороги в окружении и статус почты
+ * (сверка с адресом входа auth.users) — поэтому «прошёл на старте» не
+ * довод.
  *
  * Что проверяется:
  *  - описание в проекте есть (то же чтение, что у стадии: строка после trim) —
  *    иначе стадия отказала бы снова;
- *  - аккаунт не заблокирован — шаг 0 гейта платных шагов (readHeEngOwnerHold,
- *    standing: true): блокировка останавливает всё;
  *  - последняя research-джоба — 'failed' site_profile (её и продолжаем);
  *  - «что удалит повтор» (rerunGate): продолжение доходит до кластеризации так
  *    же, как повтор, и с тем же диалогом подтверждения;
+ *  - гейт платных шагов (requireEngPaidAccess, 'research', continuation):
+ *    блокировка и бан (шаг 0), подтверждённая почта, потолки расхода клиента и
+ *    общий потолок ENG — те же отказы и тексты, что у остальных платных кнопок
+ *    (engPaidAccessResponse);
+ *  - потолок расхода проекта (enforceHeSpendCeiling, как у «Try again»):
+ *    пауза проекта и алерт — там же; отказ общего потолка ENG — нейтральной
+ *    фразой engSpendLimitRefusal('eng_day') (spendRefusal ниже);
  *  - записи — CAS: проект только из 'failed', джоба только из 'failed'.
  *    Сначала проект, потом джоба: джоба в очереди у проекта 'failed' — это
  *    остановленный research с живой стадией для деталки и вердикта, а её
@@ -362,18 +382,6 @@ async function resumeAfterBusinessDescription(
     return refuse('no_business_description', jsonError(RESUME_NEEDS_TEXT, 409));
   }
 
-  const hold = await readHeEngOwnerHold(db, userId, { standing: true });
-  if (hold.kind === 'unavailable') {
-    void logWarn('client.eng.research.resume_hold_unavailable', hold.detail, ids);
-    return engPaidAccessResponse({ code: 'unavailable', status: 503, message: ENG_PAID_UNAVAILABLE_TEXT });
-  }
-  if (hold.kind === 'blocked') {
-    return refuse(
-      `account_blocked:${hold.source}`,
-      engPaidAccessResponse({ code: 'account_blocked', status: 403, message: ENG_PAID_ACCOUNT_BLOCKED_TEXT }),
-    );
-  }
-
   const { data: jobs, error: jobsErr } = await db
     .from('he_jobs')
     .select('id, stage, status, attempts')
@@ -392,6 +400,22 @@ async function resumeAfterBusinessDescription(
 
   const gate = await rerunGate(db, ids, confirm);
   if (!gate.ok) return gate.response;
+
+  // Гейт платных шагов и потолок проекта — тем же порядком, что у «Try again»
+  // (после отказов «что удалит повтор»: нажатие, которое ничего бы не
+  // поставило, паузы не пишет). Отказы гейт пишет в журнал сам.
+  const access = await requireEngPaidAccess(db, userId, { action: 'research', continuation: true });
+  if (!access.ok) return engPaidAccessResponse(access.refusal);
+  const spend = await enforceHeSpendCeiling(db, {
+    projectId,
+    market: project.market ?? null,
+    projectName: typeof project.name === 'string' ? project.name : null,
+    stage: 'site_profile',
+    path: 'client_button',
+    jobId: job.id,
+    warn: (msg) => void logWarn('client.eng.research.spend_unknown', msg, ids),
+  });
+  if (!spend.allowed) return refuse('spend_ceiling', spendRefusal(spend.check));
 
   const now = new Date().toISOString();
   const { data: movedProject, error: projectErr } = await db
@@ -456,7 +480,8 @@ async function resumeAfterBusinessDescription(
 // оплачиваются ещё раз (продолжения с места сбоя у research нет — кроме
 // одного случая: research, остановленный на тонком сайте без описания бизнеса
 // (код website_thin), продолжается той же джобой своим путём,
-// resumeAfterBusinessDescription выше, до всех проверок ниже).
+// resumeAfterBusinessDescription выше: без вердикта повтора и лимита стартов
+// за сутки, но с тем же гейтом платных шагов и потолком расхода).
 // Дедуп тот же, что у staff: активная research-стадия → 409.
 // С этой же 409 приходит и проигравший гонки двойной клик: у клиента его
 // второй запрос ждёт замок he_eng_start_research и видит джобу первого, а на
@@ -514,8 +539,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
     // Research ждёт описания бизнеса (website_thin) — не повтор после сбоя, а
-    // продолжение той же джобы: своим путём, до вердикта повтора и гейта
-    // платных шагов (resumeAfterBusinessDescription выше).
+    // продолжение той же джобы: своим путём, до вердикта повтора
+    // (resumeAfterBusinessDescription выше; гейт платных шагов без лимита
+    // стартов и потолок расхода она спрашивает сама).
     const errorCode = toClientEngStageErrorCode(owned.project.error);
     if (owned.project.status === 'failed' && errorCode === HE_RESEARCH_NEEDS_DESCRIPTION_CODE) {
       return resumeAfterBusinessDescription(supabaseAdmin, {
@@ -590,8 +616,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Потолок расхода us-проекта (lib/hypothesisEngine/spendCeiling.ts; ПО
     // УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда ни одного запроса). Достигнут — исследование не
     // ставим: пауза 'spend_ceiling' на проекте и алерт команде уже сделаны в
-    // enforceHeSpendCeiling, клиент читает ту же фразу, что и карточка паузы.
-    // Неизвестный расход — ставим как без потолка (fail-open).
+    // enforceHeSpendCeiling, клиент читает ту же фразу, что и карточка паузы
+    // (остановил общий потолок ENG — паузы нет, и фраза нейтральная:
+    // spendRefusal выше). Неизвестный расход — ставим как без потолка
+    // (fail-open).
     // Стоит ПОСЛЕ отказов «что удалит повтор» (launched/busy/confirm): нажатие,
     // которое не поставило бы ничего и без потолка, не пишет паузу и не шлёт
     // алерт. Подтверждённый повтор на паузе не удаляет ничего — research не
@@ -604,7 +632,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       path: 'client_button',
       warn: (msg) => void logWarn('client.eng.research.spend_unknown', msg, { userId: result.auth.userId, projectId: id }),
     });
-    if (!spend.allowed) return jsonError(HE_SPEND_PAUSED_EN, 409);
+    if (!spend.allowed) return spendRefusal(spend.check);
 
     // Постановка. Клиент (access.limits) — he_eng_start_research (миграция
     // 20261010_0002): под замком на пользователя лимит исследований, дедуп

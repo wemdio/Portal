@@ -34,6 +34,13 @@
  * create_project не проверяется: создать проект может только клиент без
  * проектов, а у него нет ни одной джобы site_profile.
  *
+ * 'research' с `continuation: true` — продолжение уже начатого исследования
+ * («Save and continue» после остановки на тонком сайте, роут исследования,
+ * resumeAfterBusinessDescription): та же строка site_profile возвращается в
+ * очередь, новой нет, поэтому НЕ спрашивается только лимит стартов за сутки
+ * (строка в нём уже посчитана своим стартом). Шаг 0, почта и расход клиента
+ * (в том числе общий потолок ENG 'eng_day') — как у 'research'.
+ *
  * Запуск — тоже платный шаг: у шаблона с сегментными вариантами писем ядро
  * запуска зовёт классификатор сегментов (модель по всей аудитории запуска,
  * launchTemplate.ts, шаг 5c), поэтому потолок расхода клиента проверяется и
@@ -358,7 +365,16 @@ const CHECKS_SPEND: ReadonlySet<EngPaidAction> = new Set([
 export async function requireEngPaidAccess(
   supabase: SupabaseClient,
   userId: string,
-  opts: { action: EngPaidAction; now?: Date; env?: NodeJS.ProcessEnv },
+  opts: {
+    action: EngPaidAction;
+    /**
+     * Только с 'research': продолжение той же строки site_profile (шапка) —
+     * шаг 3 (стартов за сутки) пропускается, остальные шаги те же.
+     */
+    continuation?: boolean;
+    now?: Date;
+    env?: NodeJS.ProcessEnv;
+  },
 ): Promise<EngPaidAccessResult> {
   const { action } = opts;
   const now = opts.now ?? new Date();
@@ -411,7 +427,8 @@ export async function requireEngPaidAccess(
   }
 
   // 3. Исследования: стартов site_profile по us-проектам клиента за UTC-сутки.
-  if (CHECKS_RESEARCH.has(action)) {
+  // Продолжение (continuation) новой строки не ставит — не спрашивается.
+  if (CHECKS_RESEARCH.has(action) && opts.continuation !== true) {
     const { data: projects, error: projectsErr } = await supabase
       .from('he_projects')
       .select('id')

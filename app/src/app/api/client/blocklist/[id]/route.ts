@@ -27,7 +27,8 @@ export async function DELETE(
   const { userId } = result.auth;
   const { id } = await ctx.params;
 
-  // ENG-кабинет: то же удаление, текст отказа английский (../_eng.ts).
+  // ENG-кабинет: то же удаление, текст отказа английский (../_eng.ts);
+  // заблокированному аккаунту (отметка блокировки ENG) — 403 до удаления.
   if (result.auth.market === 'eng') return engBlocklistDelete(db, userId, id);
 
   const { data, error } = await db

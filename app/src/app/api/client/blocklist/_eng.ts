@@ -32,6 +32,16 @@
  * не удалось (только то, с чем клиент ещё может что-то сделать); DELETE
  * отменяет ждущие и неудавшиеся строки убранного адреса.
  *
+ * ЗАБЛОКИРОВАННЫЙ АККАУНТ (отметка he_eng_account_blocks, engAccountBlock):
+ * POST и DELETE отказывают 403 тем же текстом, что рыночный гейт кабинета
+ * (apiGuards.requireEngMarket, ENG_ACCOUNT_BLOCKED_TEXT) — для сессии,
+ * пережившей блокировку (отзыв сессий не лёг). Список не меняется, заявок
+ * снятия с кампаний нет. Отметка не прочиталась — 503, ничего не записано;
+ * таблицы нет (миграция 20261013_0001) — как до блокировки. GET открыт: он
+ * ничего не меняет и не тратит. Строки, которые лежали в очереди снятия до
+ * блокировки, воркер не трогает, пока отметка стоит (engDncRemoval,
+ * runHeEngDncRemovalPass).
+ *
  * Отличия от RU-ветки (она не меняется ни на байт, развилка — `auth.market`):
  *  - тексты английские: RU-фраза дошла бы до кабинета общим «problem on our
  *    side» (engErrorText режет кириллицу), и клиент не узнал бы причину;
@@ -60,6 +70,8 @@ import {
 } from '@/lib/clientBlocklist/blockedContacts';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { ENG_ACCOUNT_BLOCKED_TEXT } from '@/lib/hypothesisEngine/apiGuards';
+import { readHeEngAccountBlock } from '@/lib/hypothesisEngine/engAccountBlockMarker';
 import {
   heEngDncRemovalView,
   openHeEngDncIntent,
@@ -119,6 +131,8 @@ export const ENG_BLOCKLIST_TEXT = {
     `Your list went over ${MAX_TEXT} addresses, the most it can hold, and we could not undo it. ` +
     `No new contacts are added to your campaigns until you remove addresses to bring it back to ${MAX_TEXT} or fewer.`,
   removeFailed: 'Could not remove this address. Try again in a minute.',
+  // Тот же текст, что у рыночного гейта кабинета (apiGuards.requireEngMarket).
+  unavailable: 'Service temporarily unavailable — refresh the page',
 } as const;
 
 /**
@@ -128,6 +142,8 @@ export const ENG_BLOCKLIST_TEXT = {
  * должен показать его настоящий размер.
  */
 export type EngBlocklistAddCode =
+  | 'account_blocked'
+  | 'unavailable'
   | 'bad_request'
   | 'empty'
   | 'too_long'
@@ -287,6 +303,33 @@ function refusal(code: EngBlocklistAddCode, error: string, status: number) {
   return NextResponse.json({ error, code }, { status });
 }
 
+/**
+ * Отказ мутации заблокированному аккаунту (шапка, «Заблокированный аккаунт»):
+ * 403 'account_blocked' — отметка активна; 503 'unavailable' — отметка не
+ * прочиталась или основной БД нет («не прочитали» не превращается в «можно»);
+ * null — можно (отметки нет, снята, или таблицы нет). Одно чтение по ключу.
+ */
+async function engBlocklistBlockRefusal(
+  portalDb: SupabaseClient | null,
+  userId: string,
+  op: 'add' | 'remove',
+): Promise<NextResponse | null> {
+  const block = portalDb
+    ? await readHeEngAccountBlock(portalDb, userId)
+    : ({ state: 'error', detail: 'portal db is not configured', code: null } as const);
+  if (block.state === 'blocked') return refusal('account_blocked', ENG_ACCOUNT_BLOCKED_TEXT, 403);
+  if (block.state === 'error') {
+    await logError(
+      'client.blocklist.eng_block_read_failed',
+      new Error(block.detail.slice(0, 300)),
+      { op },
+      { userId },
+    );
+    return refusal('unavailable', ENG_BLOCKLIST_TEXT.unavailable, 503);
+  }
+  return null;
+}
+
 /** `%`, `_` и `\` из строки поиска — буквально, а не шаблоном ilike. */
 function likeLiteral(value: string): string {
   return value.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -420,7 +463,8 @@ const REPLY_ID_RE = /^\d{1,15}$/;
  * адреса не добавят ещё раз. К ним `removal_after_launch` — у клиента идёт
  * запуск, и его кампании проверятся ещё раз, когда он кончится, и
  * `removal_skipped_reply_campaign` — кампания ответа (Block) не проверяется.
- * Отказы (4xx/5xx) — тела S4 без этих полей.
+ * Отказы (4xx/5xx) — тела S4 без этих полей. Заблокированный аккаунт —
+ * первым делом, до разбора тела (engBlocklistBlockRefusal).
  */
 export async function engBlocklistPost(
   req: NextRequest,
@@ -428,6 +472,9 @@ export async function engBlocklistPost(
   userId: string,
   portalDb: SupabaseClient | null = supabaseAdmin,
 ): Promise<NextResponse> {
+  const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'add');
+  if (blocked) return blocked;
+
   let body: { text?: unknown; reply_id?: unknown };
   try {
     body = (await req.json()) as typeof body;
@@ -620,6 +667,7 @@ async function engBlocklistAddParsed(
  * DELETE (ENG): тот же скоуп, что у RU-ветки; чужой id даёт removed: 0.
  * Снятие с кампаний включено — ждущие и неудавшиеся строки убранного адреса
  * отменяются (engDncRemoval.releaseHeEngDncAddress; выключено — без запроса).
+ * Заблокированный аккаунт — отказ до удаления (engBlocklistBlockRefusal).
  */
 export async function engBlocklistDelete(
   db: SupabaseClient,
@@ -627,6 +675,9 @@ export async function engBlocklistDelete(
   id: string,
   portalDb: SupabaseClient | null = supabaseAdmin,
 ): Promise<NextResponse> {
+  const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'remove');
+  if (blocked) return blocked;
+
   const { data, error } = await db
     .from('client_blocked_contacts')
     .delete()
