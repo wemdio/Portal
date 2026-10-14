@@ -73,7 +73,7 @@ import {
   type VeUnifiedRow,
 } from '@/lib/verticalEngineV2/stages/baseCollect';
 import { searchVeNicheDirectoryRows } from '@/lib/verticalEngineV2/nicheDirectory';
-import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, loadVeApprovedSupplyAudience, veSourceDiscoveryIsExistingOnly, normalizeVeAudienceSourcePlan, veAudienceNicheProfile, needsLegacyFintechAudienceRefresh } from '@/lib/verticalEngineV2/sourceAudience';
+import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, loadVeApprovedSupplyAudience, veNewAudienceSourceCostPolicy, veSourceDiscoveryIsExistingOnly, normalizeVeAudienceSourcePlan, veAudienceNicheProfile, needsLegacyFintechAudienceRefresh } from '@/lib/verticalEngineV2/sourceAudience';
 import { buildSourcePlanMessages } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 import { buildSourcePlanMessagesEn, buildCatalogRepairMessagesEn } from '@/lib/verticalEngineV2/prompts/sourcePlan.en';
 import { selectRefillLeadRows } from '@/lib/verticalEngineV2/stages/baseCollectRefill';
@@ -3249,6 +3249,60 @@ describe('base_collect: план кончился раньше цели', () => 
       expect(typed.audience_snapshot?.hypotheses[0].description).toContain('Выручка до 80 млн рублей');
       expect(typed.tasks![0].task.directory_filters?.revenueTo).toBe(80_000_000);
       expect(typed.cost_policy).toEqual({ version: 1, website_discovery: 'existing_only' });
+
+      // The new project contract freezes audience without silently removing
+      // ordinary free-first discovery. Legacy pilots keep their stricter cap.
+      const ordinary = { id: 'h1', status: 'accepted', ...MEAT, audience_scope: {
+        version: 1 as const, kind: 'sector' as const, any_of: ['Мясопереработка'], required: [], excluded: [],
+      } };
+      for (const generationVersion of [undefined, null, 1]) {
+        const ordinaryDb = seed({ collection_mode: 'preview' }, { ...hypothesis(ordinary),
+          ve_projects: [{ ...PROJECT, audience_generation_version: generationVersion }] });
+        jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([MEAT_TASK]));
+        const ordinaryInfo = (await wake(ordinaryDb)).collect_info as VeCollectInfo;
+        expect(ordinaryInfo.cost_policy?.website_discovery).toBe(generationVersion === 1 ? 'existing_then_configured' : 'existing_only');
+        expect(ordinaryInfo.search_policy?.phase).toBe(generationVersion === 1 ? 'paid' : 'existing');
+        expect(ordinaryInfo.audience_snapshot?.hypotheses[0].audience_scope).toEqual(ordinary.audience_scope);
+      }
+      const configured = veNewAudienceSourceCostPolicy(ordinary, 1, 'ru');
+      expect(veNewAudienceSourceCostPolicy(ordinary, 1, 'us')).toEqual(configured);
+      expect(veNewAudienceSourceCostPolicy({ ...ordinary, title: 'Fintech and payment providers',
+        audience_scope: { ...ordinary.audience_scope, any_of: ['Fintech', 'Payment providers'] } }, 1, 'us')).toEqual(configured);
+      expect(veSourceDiscoveryIsExistingOnly({ cost_policy: configured, search_policy: { phase: 'existing' } })).toBe(true);
+      expect(veSourceDiscoveryIsExistingOnly({ cost_policy: configured, search_policy: { phase: 'paid' } })).toBe(false);
+      expect(() => veNewAudienceSourceCostPolicy(ordinary, 2, 'ru')).toThrow('Unsupported');
+      for (const restricted of [
+        { ...ordinary, title: payment.title }, // Original specialty title still caps cost.
+        { ...ordinary, audience_scope: { ...ordinary.audience_scope, any_of: ['Финтех'] } },
+        { ...ordinary, audience_scope: { ...ordinary.audience_scope, any_of: ['Платёжные провайдеры'], required: ['Нанимают финансового директора'] } },
+        { ...ordinary, audience_scope: { ...ordinary.audience_scope, any_of: ['Мясопереработка', 'Платёжные провайдеры'] } },
+      ]) expect(veNewAudienceSourceCostPolicy(restricted, 1, 'ru').website_discovery).toBe('existing_only');
+
+      // A persisted ordinary preview retains its policy on retry, even if the
+      // project marker changes. The global switch still controls paid lookups.
+      const oldPaidFlag = process.env.VE_PAID_WEBSITE_SEARCH;
+      try {
+        for (const flag of ['off', 'on']) {
+          process.env.VE_PAID_WEBSITE_SEARCH = flag;
+          const reviewInfo = exhaustedInfo(MEAT_TASK, {
+            audience_snapshot: createVeCollectionAudienceSnapshot([ordinary], 'new_preview', '2026-10-15T00:00:00Z'),
+            cost_policy: configured, hypotheses: [ordinary], relevance_review_requested: true, validation_retry: true,
+            construct: { status: 'done', bc_job_id: 'already-imported' },
+            target_checkpoint: { completed_round: 3, seen_rows: processed, processed_rows: processed.length },
+            relevance_reserve: { version: 1, rows: [{ ...ready[0], _ve_relevance: { version: 1, status: 'error' } }] },
+          });
+          const reviewDb = seedBase(reviewInfo, payment);
+          mockFindIrrelevantRows.mockClear();
+          const reviewed = (await wake(reviewDb)).collect_info as VeCollectInfo;
+          expect(reviewed.cost_policy).toEqual(configured);
+          expect(reviewed.audience_snapshot?.hash).toBe(reviewInfo.audience_snapshot?.hash);
+          expect(mockFindIrrelevantRows).toHaveBeenCalled();
+          for (const [input] of mockFindIrrelevantRows.mock.calls) expect(input.allowPaidSearch).toBe(flag !== 'off');
+        }
+      } finally {
+        if (oldPaidFlag === undefined) delete process.env.VE_PAID_WEBSITE_SEARCH;
+        else process.env.VE_PAID_WEBSITE_SEARCH = oldPaidFlag;
+      }
     } finally {
       if (oldScopeFlag === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
       else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = oldScopeFlag;
@@ -3353,8 +3407,35 @@ describe('base_collect: план кончился раньше цели', () => 
     } });
     const approvedScope = await loadVeApprovedSupplyAudience(approvalDb as unknown as SupabaseClient,
       { projectId: 'p1', hypothesisId: 'h1', batchId: 'batch', baseId: 'supply' });
-    expect(approvedScope?.hash).toBe(structuredSnapshot.hash);
-    expect(approvedScope?.hypotheses[0].description).toContain('Выручка до 80 млн рублей');
+    expect(approvedScope?.snapshot.hash).toBe(structuredSnapshot.hash);
+    expect(approvedScope?.snapshot.hypotheses[0].description).toContain('Выручка до 80 млн рублей');
+    expect(approvedScope?.costPolicy).toEqual({ version: 1, website_discovery: 'existing_only' });
+    await approvalDb.from('ve_bases').update({ cost_policy: { version: 1, website_discovery: 'existing_then_configured' } }).eq('id', 'approved-preview');
+    const configuredApproval = await loadVeApprovedSupplyAudience(approvalDb as unknown as SupabaseClient,
+      { projectId: 'p1', hypothesisId: 'h1', batchId: 'batch', baseId: 'supply' });
+    expect(configuredApproval?.snapshot.hash).toBe(structuredSnapshot.hash);
+    expect(configuredApproval?.costPolicy).toEqual({ version: 1, website_discovery: 'existing_then_configured' });
+    for (const websiteDiscovery of ['existing_only', 'existing_then_configured'] as const) {
+      const inherited = { version: 1 as const, website_discovery: websiteDiscovery };
+      const supplyInfo: VeCollectInfo = { collection_mode: 'supply', supply_batch_id: 'batch', ready_target: 500 };
+      const supplyDb = seed(supplyInfo, {
+        ...hypothesis({ title: 'Стоматологии', description: 'Текущая гипотеза не определяет одобренный добор.' }),
+        ve_contact_supply_batches: [{ id: 'batch', base_id: 'b1', plan_id: 'supply-plan' }],
+        ve_contact_supply_plans: approvalDb.getRows('ve_contact_supply_plans'),
+        ve_launch_queue_items: approvalDb.getRows('ve_launch_queue_items'),
+        ve_bases: [makeBase(supplyInfo), {
+          id: 'approved-preview', project_id: 'p1', hypothesis_id: 'h1', source: 'auto', status: 'analyzed',
+          audience_snapshot: structuredSnapshot, cost_policy: inherited,
+        }],
+      });
+      const originalRpc = supplyDb.rpc;
+      supplyDb.rpc = (name, params) => name === 've_require_contact_supply_active'
+        ? Promise.resolve({ data: { id: 'supply-plan' }, error: null }) : originalRpc(name, params);
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([task]));
+      const supply = (await wake(supplyDb)).collect_info as VeCollectInfo;
+      expect(supply.audience_snapshot?.hash).toBe(structuredSnapshot.hash);
+      expect(supply.cost_policy).toEqual(inherited);
+    }
     expect(approvalDb.getRows('ve_hypotheses')[0].title).toBe('Стоматологии');
     await expect(loadVeApprovedSupplyAudience(approvalDb as unknown as SupabaseClient,
       { projectId: 'other-project', hypothesisId: 'h1', batchId: 'batch', baseId: 'supply' })).rejects.toThrow();

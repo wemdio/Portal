@@ -7,6 +7,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { VePriorityNichesSchema } from '@/lib/verticalEngineV2/priorityNiches';
 import { normalizeWebsiteInput } from '@/lib/verticalEngineV2/websiteUrl';
 import { findInternalLegacyDuplicates } from '@/lib/verticalEngineV2/legacyDuplicateCheck';
+import { VE_AUDIENCE_GENERATION_VERSION } from '@/lib/verticalEngineV2/audienceScope';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -114,6 +115,7 @@ export async function POST(req: NextRequest) {
           name,
           website_url: normalized.url,
           status: 'draft',
+          audience_generation_version: VE_AUDIENCE_GENERATION_VERSION,
           ...(niches.data.length ? { brief: { priority_niches: niches.data } } : {}),
         })
         .select()

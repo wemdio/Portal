@@ -161,7 +161,7 @@ import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prom
 import { searchVeNicheDirectoryRows } from '../nicheDirectory';
 import { isVeAudienceScopeEnabled, veAudienceScopeText } from '../audienceScope';
 import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, readVeSourceCostPolicy,
-  veSourceDiscoveryIsExistingOnly, veAudienceNicheProfile, normalizeVeAudienceSourcePlan, loadVeApprovedSupplyAudience,
+  veSourceDiscoveryIsExistingOnly, veNewAudienceSourceCostPolicy, veAudienceNicheProfile, normalizeVeAudienceSourcePlan, loadVeApprovedSupplyAudience,
   canRefreshVeAudienceSources, needsLegacyFintechAudienceRefresh, isVeBroadFintechAudience,
   type VeCollectionAudienceSnapshot, type VeSourceCostPolicy, type VeSourceAudienceHypothesis } from '../sourceAudience';
 import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyHint } from '../paymentCompanyDirectory';
@@ -2839,7 +2839,7 @@ export function applyVeAudienceSourceRefresh(info: VeCollectInfo, snapshot: VeCo
   return true;
 }
 
-async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo, market: VeMarket): Promise<void> {
+async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo, market: VeMarket, generationVersion: unknown): Promise<void> {
   if (info.audience_snapshot) return; // Persisted snapshots survive rollout rollback.
   const refreshing = info.audience_scope_refresh_requested === true;
   const isNew = !info.plan && !info.construct && !info.tasks?.length && !info.preview_pipeline?.batches.length
@@ -2855,9 +2855,9 @@ async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAu
     const approved = await loadVeApprovedSupplyAudience(ctx.supabase, { projectId: job.project_id,
       hypothesisId: base.hypothesis_id, batchId: info.supply_batch_id, baseId: base.id });
     if (approved) {
-      info.audience_snapshot = approved;
-      info.cost_policy = { version: 1, website_discovery: 'existing_only' };
-      info.hypotheses = approved.hypotheses;
+      info.audience_snapshot = approved.snapshot;
+      info.cost_policy = approved.costPolicy;
+      info.hypotheses = approved.snapshot.hypotheses;
       await persistCollectInfo(ctx, base.id, info);
     }
     return;
@@ -2869,7 +2869,7 @@ async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAu
   if (error || !hypothesis || hypothesis.status === 'rejected') throw new Error(`Collection audience read: ${error?.message ?? 'hypothesis unavailable'}`);
   // The specialist authorized the enqueue-time audience. A title/description
   // edited while this job waited cannot silently change that authorization.
-  if (refreshing && (!readVeSourceCostPolicy(info.cost_policy) || info.hypotheses?.length !== 1
+  if (refreshing && (readVeSourceCostPolicy(info.cost_policy)?.website_discovery !== 'existing_only' || info.hypotheses?.length !== 1
     || info.hypotheses[0].id !== base.hypothesis_id)) throw new Error('Collection audience refresh authorization is unavailable');
   const h = refreshing ? info.hypotheses![0] : hypothesis as VeSourceAudienceHypothesis;
   const typed = h.audience_scope !== undefined && h.audience_scope !== null;
@@ -2885,7 +2885,7 @@ async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAu
   if (refreshing) {
     if (market !== 'ru' || !isVeBroadFintechAudience(h) || !applyVeAudienceSourceRefresh(info, snapshot)) throw new Error('No safe source-only audience correction is available');
   } else {
-    info.cost_policy = { version: 1, website_discovery: 'existing_only' };
+    info.cost_policy = veNewAudienceSourceCostPolicy(h, generationVersion, market);
     info.audience_snapshot = snapshot;
     info.hypotheses = snapshot.hypotheses;
   }
@@ -4570,7 +4570,7 @@ async function completeTargetRound(args: {
       && !baseRowMatchesExclusion(consumedExisting, row)));
   // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
   const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= next.max_rounds;
-  if (existingFirst && !readVeSourceCostPolicy(info.cost_policy) && !info.niche_source_profile && !info.source_selection && !hasDeferredAcquisition
+  if (existingFirst && readVeSourceCostPolicy(info.cost_policy)?.website_discovery !== 'existing_only' && !info.niche_source_profile && !info.source_selection && !hasDeferredAcquisition
     && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
@@ -5060,7 +5060,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // The public wrapper already cloned the per-invocation context. Preserve
   // that identity so the loaded project rules accompany every helper call.
   ctx.market = market;
-  await pinCollectionAudience(ctx, job, base, info, market);
+  await pinCollectionAudience(ctx, job, base, info, market, project.audience_generation_version);
   await pinMediaAudience(ctx, job, base, info, market);
   await pinStaffingReviewAudience(ctx, job, base, info);
   // Pin the cost policy before recovery early returns. Paid children keep

@@ -230,10 +230,10 @@ export async function loadHypothesesClientContext(
 export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
+  const audienceScope = isVeAudienceGenerationEnabled(job.project_id, project.audience_generation_version);
   // Рынок: ctx.market (воркер), фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
   const clientContext = await loadHypothesesClientContext(ctx, project);
-  const audienceScope = isVeAudienceGenerationEnabled(job.project_id);
 
   // Калибровочные данные — best-effort: сбой любого источника → undefined,
   // мгновенный проход продолжается без калибровки.
