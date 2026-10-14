@@ -206,8 +206,10 @@ function poolServes(room: AccountPoolRoom, needing: readonly string[]): boolean 
  * Факты письма (`facts`) — только прочитанное здесь: проекты и кто снова
  * запустит исследование каждого не исследованного (вердикт шага 1 —
  * engAccountBlock.readHeEngAccountResearch: «Try again» там, где шаг 1 его
- * показывает, команда — где нет), было ли у проекта «Launch» хоть раз (строка
- * автозапуска), есть ли запуски (he_templates.launch_info) и «Daily top-up»
+ * показывает, описание бизнеса и «Save and continue» — где research ждёт
+ * описания, команда — где нет ни того, ни другого), было ли у проекта
+ * «Launch» хоть раз (строка автозапуска), есть ли запуски
+ * (he_templates.launch_info) и «Daily top-up»
  * каждого проекта — так, как его показывает дашборд (toClientEngRefillState).
  * Не прочиталось что-то — 'check' без фактов (текст, верный при любом
  * состоянии). Нет таблицы отметок — разблокировок не было; нет таблицы
@@ -315,11 +317,18 @@ async function sendingEnabledCopy(
     // 'auto' — только при включённом автозапуске и пуле, который обслужит.
     const autoTrue = autoSwitchOn && serves === true;
     if (intentMissing) return plain(afterUnblock || !autoTrue ? 'check' : 'auto');
-    const restarts: EngSendingEnabledFacts['research'] = { tryAgain: 0, teamFix: 0, team: 0, running: 0 };
+    const restarts: EngSendingEnabledFacts['research'] = {
+      tryAgain: 0,
+      teamFix: 0,
+      team: 0,
+      describeBusiness: 0,
+      running: 0,
+    };
     for (const p of list) {
       if (p.restart === 'try_again') restarts.tryAgain += 1;
       else if (p.restart === 'team_fix') restarts.teamFix += 1;
       else if (p.restart === 'team') restarts.team += 1;
+      else if (p.restart === 'describe_business') restarts.describeBusiness += 1;
       else if (p.restart === 'running') restarts.running += 1;
     }
     const facts: EngSendingEnabledFacts = {

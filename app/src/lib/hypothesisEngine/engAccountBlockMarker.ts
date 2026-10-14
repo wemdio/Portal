@@ -284,9 +284,11 @@ export function heEngStopDoubtText(d: HeEngStopDoubt): string {
  * деталки проекта): 'try_again' — «Try again» на шаге 1 есть; 'team_fix' —
  * есть, но сначала команда чинит отказ провайдера (деньги или настройка, коды
  * 'billing' / 'configuration'); 'team' — из кабинета не запустить, только
- * команда (остановлено не техническим сбоем); 'running' — идёт.
+ * команда (остановлено не техническим сбоем); 'describe_business' — research
+ * ждёт описания бизнеса (тонкий сайт, код website_thin): клиент продолжает его
+ * сам — описание и «Save and continue» на шаге 1; 'running' — идёт.
  */
-export type HeEngResearchRestart = 'try_again' | 'team_fix' | 'team' | 'running';
+export type HeEngResearchRestart = 'try_again' | 'team_fix' | 'team' | 'describe_business' | 'running';
 
 /** Отчёт разблокировки (только в ответе роута и аудите; в таблицу не пишется). */
 export interface HeEngUnblockReport {

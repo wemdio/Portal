@@ -184,6 +184,7 @@ import {
   type HeEngUnblockReport,
   type HeEngUnreachableCampaign,
 } from './engAccountBlockMarker';
+import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE } from '@/components/client-eng/clientFailureText';
 import { toClientEngStageErrorCode } from './clientEngProjection';
 import { HE_ENG_BLOCK_SWEEP_RECHECK_MS } from './engBlockedSweep';
 import {
@@ -1150,6 +1151,9 @@ const RESEARCH_RESTART_TEXT: Record<HeEngResearchRestart, string> = {
   team:
     'исследование не закончено, и из кабинета его не запустить (кабинет повторяет его только после технического ' +
     'сбоя) — перезапустите в инструменте, если нужно',
+  describe_business:
+    'исследование ждёт описания бизнеса (на сайте почти нет текста) — клиент продолжит его сам: описание и ' +
+    '«Save and continue» на шаге 1; перезапуск в инструменте без описания остановится так же',
   running: 'исследование идёт',
 };
 
@@ -1237,11 +1241,19 @@ export type HeEngAccountResearchRead =
     }
   | { ok: false };
 
-/** Вердикт шага 1 (researchJob.engResearchRetryVerdict) → кто снова запустит исследование. */
+/**
+ * Вердикт шага 1 (researchJob.engResearchRetryVerdict) → кто снова запустит
+ * исследование. Research, ждущий описания бизнеса (проект 'failed' кодом
+ * website_thin, последняя research-джоба не отменена — то же условие, что у
+ * состояния 'needs_description' шага 1, EngStepBrief.researchStateOf), вердикт
+ * получает 'not_technical' (код в HE_RESEARCH_FINAL_STOP_CODES), но это не
+ * «только команда»: его продолжает сам клиент — 'describe_business'.
+ */
 function researchRestartOf(
   verdict: ReturnType<typeof engResearchRetryVerdict>,
   status: unknown,
   errorCode: unknown,
+  lastJobStatus: unknown,
 ): HeEngResearchRestart | null {
   switch (verdict) {
     case 'finished':
@@ -1255,7 +1267,9 @@ function researchRestartOf(
       // Шаг 1 у 'billing' / 'configuration' сначала зовёт в Support, потом «Try again».
       return status === 'failed' && (errorCode === 'billing' || errorCode === 'configuration') ? 'team_fix' : 'try_again';
     case 'not_technical':
-      return 'team';
+      return status === 'failed' && errorCode === HE_RESEARCH_NEEDS_DESCRIPTION_CODE && lastJobStatus !== 'cancelled'
+        ? 'describe_business'
+        : 'team';
   }
 }
 
@@ -1303,7 +1317,7 @@ export async function readHeEngAccountResearch(
           now: now.getTime(),
           graceMs: HE_RESEARCH_STALL_GRACE_MS,
         });
-        return { id, website, status, restart: researchRestartOf(verdict, p.status, errorCode) };
+        return { id, website, status, restart: researchRestartOf(verdict, p.status, errorCode, last.job?.status) };
       }),
     );
     if (projects.some((p) => p === null)) {

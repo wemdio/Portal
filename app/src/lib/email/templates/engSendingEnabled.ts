@@ -45,9 +45,12 @@ export interface EngSendingEnabledFacts {
    * Projects not researched yet, by who starts their research again — the
    * verdict step 1 shows (researchJob.engResearchRetryVerdict): «Try again»
    * on step 1; Support first, then «Try again» (a temporary problem on our
-   * side); only our team (step 1 has no «Try again»); still running.
+   * side); only our team (step 1 has no «Try again»); waiting for a short
+   * description of the business (the website had too little text: step 1 asks
+   * for it and has «Save and continue», which goes on with the same research —
+   * engAccountBlock.researchRestartOf, 'describe_business'); still running.
    */
-  research: { tryAgain: number; teamFix: number; team: number; running: number };
+  research: { tryAgain: number; teamFix: number; team: number; describeBusiness: number; running: number };
   /**
    * «Daily top-up» of the account's projects that have one, as the dashboard
    * shows it (toClientEngRefillState): on, on hold on our side, off.
@@ -107,7 +110,8 @@ function stepOneOf(n: number, total: number): string {
 /**
  * One sentence per kind of research that is not finished, in the words of step
  * 1 (EngStepBrief): «Try again» only where step 1 shows it, Support first
- * where step 1 says so, our team where step 1 has no «Try again».
+ * where step 1 says so, our team where step 1 has no «Try again», and the
+ * description form with «Save and continue» where step 1 asks for it.
  */
 function researchSentences(f: EngSendingEnabledFacts | null): string[] {
   if (!f) return [];
@@ -129,6 +133,11 @@ function researchSentences(f: EngSendingEnabledFacts | null): string[] {
   if (r.team > 0) {
     out.push(
       `The research of ${projectsOf(r.team, f.projects)} stopped before it finished, and it cannot be started again from your cabinet: only our team can restart it. Message Support if you need it researched.`,
+    );
+  }
+  if (r.describeBusiness > 0) {
+    out.push(
+      `The research of ${projectsOf(r.describeBusiness, f.projects)} is waiting for a short description of your business, because we could read only a little text on your website: describe in 2–3 sentences what you sell and to whom ${stepOneOf(r.describeBusiness, f.projects)} and press «Save and continue».`,
     );
   }
   return out;

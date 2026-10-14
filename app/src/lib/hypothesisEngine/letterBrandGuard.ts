@@ -933,15 +933,28 @@ export async function readHeProjectOwnerKind(
   db: SupabaseClient,
   ownerId: unknown,
 ): Promise<'eng_client' | 'other' | 'unknown'> {
-  if (typeof ownerId !== 'string' || ownerId.length === 0) return 'other';
+  return (await readHeProjectOwner(db, ownerId)).kind;
+}
+
+/**
+ * То же чтение, что readHeProjectOwnerKind, но 'unknown' несёт и сам отказ
+ * (ошибку PostgREST или брошенное исключение) — для того, кто бросает дальше
+ * и хочет, чтобы воркер узнал блип БД по причине (cause → isTransientDbError)
+ * и взял паузу, а не сжёг попытки подряд. НЕ БРОСАЕТ.
+ */
+export async function readHeProjectOwner(
+  db: SupabaseClient,
+  ownerId: unknown,
+): Promise<{ kind: 'eng_client' | 'other' } | { kind: 'unknown'; error: unknown }> {
+  if (typeof ownerId !== 'string' || ownerId.length === 0) return { kind: 'other' };
   try {
     const { data, error } = await db.from('profiles').select('role, market').eq('id', ownerId).maybeSingle();
-    if (error) return (error as { code?: unknown }).code === '42703' ? 'other' : 'unknown';
+    if (error) return (error as { code?: unknown }).code === '42703' ? { kind: 'other' } : { kind: 'unknown', error };
     const row = (data ?? null) as { role?: unknown; market?: unknown } | null;
-    if (!row) return 'other';
-    return row.role === 'client' && row.market === 'eng' ? 'eng_client' : 'other';
-  } catch {
-    return 'unknown';
+    if (!row) return { kind: 'other' };
+    return { kind: row.role === 'client' && row.market === 'eng' ? 'eng_client' : 'other' };
+  } catch (e) {
+    return { kind: 'unknown', error: e };
   }
 }
 
