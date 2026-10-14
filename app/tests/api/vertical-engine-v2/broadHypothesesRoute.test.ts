@@ -23,6 +23,7 @@ jest.mock('@/lib/toolTrace', () => ({
 jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
 
 import { POST } from '@/app/api/tools/vertical-engine-v2/projects/[id]/broad-hypotheses/route';
+import { POST as CREATE_PROJECT } from '@/app/api/tools/vertical-engine-v2/projects/route';
 import { GET as GET_EXCLUSIONS, PUT as PUT_EXCLUSIONS } from '@/app/api/tools/vertical-engine-v2/projects/[id]/exclusions/route';
 
 const PROJECT = '8fe92ae8-d271-484e-af6c-288d20d6edaa';
@@ -157,6 +158,22 @@ describe('POST broad-hypotheses', () => {
     expect((await PUT_EXCLUSIONS(settingsRequest({ revision: 1, inns: [], domains: [] }), context)).status).toBe(503);
     seed(tables({ ve_projects: [] }));
     expect((await GET_EXCLUSIONS({} as NextRequest, context)).status).toBe(404);
+
+    // The server fixes the generation contract only on a new internal project.
+    // Neither an older browser nor a submitted override can opt it back out.
+    seed(tables({ ve_jobs: [] }));
+    const oldProjects = structuredClone(mockDb.getRows('ve_projects'));
+    for (const override of [{}, { audience_generation_version: null }, { audience_generation_version: 2 }]) {
+      const created = await CREATE_PROJECT(new Request('http://portal.test/projects', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ website_url: 'new-client.test', name: 'Новый клиент', confirm: true, ...override }),
+      }) as NextRequest);
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({ project: { audience_generation_version: 1, status: 'draft' } });
+    }
+    expect(mockDb.getRows('ve_projects').slice(0, oldProjects.length)).toEqual(oldProjects);
+    expect(mockDb.getRows('ve_jobs')).toEqual([]);
+    expect(mockDb.mutations.every((mutation) => mutation.table === 've_projects' && mutation.kind === 'insert')).toBe(true);
   });
 
   it('returns the concurrent task when the unique index wins the race', async () => {

@@ -154,7 +154,7 @@ async function resumeFailedPreview(
   const pendingAudienceRefresh = saved.collect_info?.audience_scope_refresh_requested === true;
   if (pendingAudienceRefresh) {
     try {
-      if (!readVeSourceCostPolicy(saved.collect_info.cost_policy)) throw new Error('Missing cost policy');
+      if (readVeSourceCostPolicy(saved.collect_info.cost_policy)?.website_discovery !== 'existing_only') throw new Error('Missing source refresh cost policy');
     } catch { return { ok: false, message: 'Сохранённое обновление источников требует проверки условий расходов.' }; }
   }
   const sourceRefresh = refreshAudience || pendingAudienceRefresh;

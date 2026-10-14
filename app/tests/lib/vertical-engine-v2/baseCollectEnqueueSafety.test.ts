@@ -42,8 +42,9 @@ describe('VE2 base collection enqueue recovery', () => {
   it('applies a controlled source refresh only to an explicit unlaunched preview without growing its budget', async () => {
     const oldFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
     try {
-      for (const mode of ['explicit', 'routine', 'disabled', 'manual', 'launched', 'round-limit', 'candidate-limit', 'lost-insert', 'raced', 'retry-marker', 'saved-at-cap'] as const) {
+      for (const mode of ['explicit', 'routine', 'disabled', 'manual', 'launched', 'round-limit', 'candidate-limit', 'lost-insert', 'raced', 'retry-marker', 'invalid-cost-marker', 'saved-at-cap'] as const) {
         process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = mode === 'disabled' ? '' : input.projectId;
+        const retryMarker = mode === 'retry-marker' || mode === 'invalid-cost-marker';
         const hypothesis = { id: 'fintech', project_id: input.projectId, vertical_id: input.verticalId,
           title: 'Финтех и платежное посредничество', description: 'Платёжные провайдеры и финтех-компании.',
           broad: true, origin: mode === 'manual' ? 'manual' : 'generated', status: 'approved' };
@@ -61,10 +62,11 @@ describe('VE2 base collection enqueue recovery', () => {
             rows: [{ company: 'Saved fintech', email: 'saved@example.test', _email_status: 'unknown' }] } } : {}),
           saved_email_recovery: { version: 1, attempt_id: 'automatic:saved', generation: 1, checked: { known: 'ok' }, automatic_checked: { known: 'ok' } } };
         const base = { id: 'saved-fintech', project_id: input.projectId, vertical_id: input.verticalId,
-          hypothesis_id: hypothesis.id, source: 'auto', status: mode === 'retry-marker' ? 'failed' : 'analyzed', row_count: 99,
-          error: mode === 'retry-marker' ? 'Provider usage journal could not be saved.' : null,
-          updated_at: '2026-10-14T00:00:00Z', collection_continuation_revision: 4, collect_info: mode === 'retry-marker'
-            ? { ...info, audience_scope_refresh_requested: true, cost_policy: { version: 1, website_discovery: 'existing_only' },
+          hypothesis_id: hypothesis.id, source: 'auto', status: retryMarker ? 'failed' : 'analyzed', row_count: 99,
+          error: retryMarker ? 'Provider usage journal could not be saved.' : null,
+          updated_at: '2026-10-14T00:00:00Z', collection_continuation_revision: 4, collect_info: retryMarker
+            ? { ...info, audience_scope_refresh_requested: true, cost_policy: { version: 1,
+              website_discovery: mode === 'invalid-cost-marker' ? 'existing_then_configured' : 'existing_only' },
               target_progress: { ...progress, status: 'collecting', round: 4 } } : info };
         const db = createMockSupabase({ tables: { ve_hypotheses: [hypothesis], ve_bases: [base], ve_jobs: [],
           ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [] },
@@ -79,7 +81,7 @@ describe('VE2 base collection enqueue recovery', () => {
         if (mode === 'saved-at-cap') expect(getVeCollectionContinuation(base, hypothesis)).toMatchObject({ code: 'saved_work', available: true });
         const result = await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
         const changed = mode === 'explicit' || mode === 'lost-insert' || mode === 'retry-marker';
-        expect(result.ok).toBe(mode !== 'raced');
+        expect(result.ok).toBe(mode !== 'raced' && mode !== 'invalid-cost-marker');
         if (changed) {
           expect(db.getRows('ve_bases')[0]).toMatchObject({ row_count: 99, status: 'collecting', collect_info: {
             audience_scope_refresh_requested: true, cost_policy: { version: 1, website_discovery: 'existing_only' },
