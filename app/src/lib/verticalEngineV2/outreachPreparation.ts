@@ -5,7 +5,7 @@ import type { VeOutreachPreparation } from './outreachSetup';
 
 class PreparationLeaseLost extends Error {}
 class PreparationReadError extends Error {}
-type ClaimedPreparation = VeOutreachPreparation & { claim_token: string };
+type ClaimedPreparation = VeOutreachPreparation & { claim_token: string; resume_collection_requested?: boolean };
 
 // This timer runs beside research. Do not deserialize megabytes of saved
 // candidates/evidence just to inspect a base's status every ten seconds.
@@ -119,10 +119,19 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
       }
       const rawTarget = base?.data?.target_progress;
       const target = rawTarget && typeof rawTarget === 'object' && !Array.isArray(rawTarget) ? rawTarget : null;
-      const continuePartial = retryRequested && base?.data?.status === 'analyzed'
+      const partialPreview = retryRequested && p.resume_collection_requested === true && base?.data?.status === 'analyzed'
         && target && ['limited', 'exhausted', 'error'].includes(String(target.status))
         && typeof target.ready_rows === 'number' && typeof target.ready_target === 'number'
         && target.ready_rows < target.ready_target;
+      let continuePartial = partialPreview;
+      if (partialPreview && baseId && base!.data.row_count > 0) {
+        const letters = await db.from('ve_templates').select('id,status').eq('base_id', baseId).is('supply_batch_id', null)
+          .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle();
+        if (letters.error) throw new PreparationReadError(letters.error.message);
+        // An explicit retry of unfinished preparation finishes the letters.
+        // It must not first purchase another collection of a partial audience.
+        continuePartial = letters.data?.status === 'ready';
+      }
       if (!baseId || (base?.data?.status === 'failed' && retryRequested) || continuePartial) {
         // Persist any adopted identity before enqueue/recovery can fail. A retry
         // continues the paid checkpoint instead of losing it and buying a new base.
@@ -133,7 +142,7 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
         if (v.error) throw new PreparationReadError(v.error.message);
         const result = await enqueueVeBaseCollect(db, { projectId: p.project_id, verticalId: h.data.vertical_id,
           verticalName: v.data.name, hypothesisIds: [p.hypothesis_id], collectionMode: 'preview',
-          ...(continuePartial && baseId ? { resumeBaseId: baseId } : {}),
+          ...(retryRequested && baseId ? { resumeBaseId: baseId } : {}),
           readyTarget: VE_PREVIEW_READY_TARGET, limit: VE_COLLECTION_MAX_CANDIDATES });
         if (!result.ok) {
           // enqueue can insert the base before reporting its job-insert failure.
@@ -142,6 +151,19 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
           throw new Error(result.message);
         }
         baseId = String(result.base.id);
+        if (!result.created && result.continuation && !result.continuation.available) {
+          if (result.base.status !== 'analyzed' || !(base?.data?.row_count > 0)) throw new Error(result.continuation.reason);
+          // State may have changed since the HTTP preflight. Keep the existing
+          // result and its letters instead of announcing a new collection.
+          const letters = await db.from('ve_templates').select('id,status').eq('base_id', baseId).is('supply_batch_id', null)
+            .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle();
+          if (letters.error) throw new PreparationReadError(letters.error.message);
+          if (letters.data?.status === 'ready') {
+            templateId = letters.data.id;
+            await save('ready');
+            continue;
+          }
+        }
         templateId = null;
         await save('collecting', null, false);
         base = await readBase();

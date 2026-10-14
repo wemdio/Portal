@@ -133,7 +133,7 @@ export function ManualBaseLibrary({
     template?.letters.length &&
     template.letters.every(
       (letter) =>
-        letter.selected_variant === "A" || letter.selected_variant === "B",
+        letter.selected_variant === "A" || letter.selected_variant === "B" || letter.selected_variant === "C",
     ) &&
     normalizeVeFinalLetters(template.letters).letters,
   );

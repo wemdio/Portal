@@ -79,6 +79,7 @@ export function buildManualScoringDomainSnapshot(input: {
   email2?: string | null;
   email2ValidationStatus?: string | null;
   sourceFilename?: string | null;
+  isNoEmailRetry?: boolean;
   scoredAt: string;
   routedCampaignId?: string | null;
   routedCampaignName?: string | null;
@@ -99,6 +100,7 @@ export function buildManualScoringDomainSnapshot(input: {
       { address: input.email2 ?? null, validationStatus: input.email2ValidationStatus },
     ],
     sourceFilename: input.sourceFilename,
+    isNoEmailRetry: input.isNoEmailRetry,
     scoredAt: input.scoredAt,
     routedCampaignId: input.routedCampaignId,
     routedCampaignName: input.routedCampaignName,

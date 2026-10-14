@@ -16,9 +16,11 @@
 import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getOrFetchScore, normalizeDomain } from './mailganerScoreCache';
+import { buildExcludePatterns } from './autoPipelineExclusions';
 import { validateEmailForAutoPipeline } from './autoPipelineEmailValidation';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import type { DomainInfo } from '@/lib/emailValidation/shared';
+import { manualDbRequest } from './manualScoringDbRequest';
 import { cleanCompanyNames } from '@/lib/companyNameCleanupBatch';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { partialAppendOutcome, selectAcceptedItems } from '@/lib/clientReports/appendOutcome';
@@ -48,7 +50,7 @@ interface EndpointConfig {
   timeoutMs: number;
 }
 
-interface ProcessOptions {
+export interface ProcessOptions {
   runId: string;
   endpoint: EndpointConfig;
   /** Прогресс-callback после каждого batch — даёт воркеру писать в БД. */
@@ -57,10 +59,20 @@ interface ProcessOptions {
   concurrency?: number;
   /** Лимит на одну строку, чтобы не зависнуть. Default 60 сек. */
   perRowTimeoutMs?: number;
+  /** Stop assigning rows; in-flight rows are drained before returning paused. */
+  shouldStop?: () => boolean;
+  /** Ownership checks fail closed. The worker owns lease release/reclaim. */
+  assertOwnership?: () => Promise<void>;
+  skipMarkProcessing?: boolean;
+  updateRunState?: (patch: Record<string, unknown>) => Promise<void>;
+  /** A claimed worker supplies its token-fenced row write here. */
+  persistRow?: (rowId: number, payload: ManualProcessedRowPayload) => Promise<void>;
+  /** The worker records a non-reclaimable routing phase before side effects. */
+  beforeReconcile?: () => Promise<void>;
 }
 
-interface ProcessResult {
-  status: 'completed' | 'failed';
+export interface ProcessResult {
+  status: 'completed' | 'failed' | 'paused';
   total: number;
   buckets: Record<ManualBucket, number>;
   error?: string;
@@ -80,13 +92,41 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     };
   }
 
-  const concurrency = opts.concurrency ?? 5;
+  const configuredConcurrency = opts.concurrency ?? 5;
+  const concurrency = Number.isFinite(configuredConcurrency)
+    ? Math.max(1, Math.floor(configuredConcurrency)) : 5;
+  const paused = (): ProcessResult => ({
+    status: 'paused', total: 0,
+    buckets: { storage: 0, medium: 0, high: 0, top: 0, invalid: 0 },
+  });
+  const fail = (message: string) => markFailed(opts.runId, message, opts);
+  const ownsRun = async (): Promise<boolean> => {
+    try {
+      await opts.assertOwnership?.();
+      return true;
+    } catch {
+      // Never change run state after a lease has been lost.
+      return false;
+    }
+  };
+  const canContinue = async (): Promise<boolean> => {
+    if (opts.shouldStop?.()) return false;
+    return await ownsRun() && !opts.shouldStop?.();
+  };
+  if (!await canContinue()) return paused();
 
   // 1. Mark as processing
-  await supabaseAdmin
+  if (!opts.skipMarkProcessing) {
+    await updateManualRunState(opts.runId, { status: 'processing' }, opts);
+  }
+
+  const { data: runMode, error: runModeError } = await supabaseAdmin
     .from('client_manual_score_runs')
-    .update({ status: 'processing' })
-    .eq('id', opts.runId);
+    .select('is_no_email_retry')
+    .eq('id', opts.runId)
+    .single();
+  if (runModeError) return await fail(`Failed to load run mode: ${runModeError.message}`);
+  const isNoEmailRetry = (runMode as { is_no_email_retry?: boolean } | null)?.is_no_email_retry === true;
 
   // 2. Берём все ещё не обработанные строки этого прогона
   const { data: rowsData, error: rowsErr } = await supabaseAdmin
@@ -97,22 +137,27 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     .order('id', { ascending: true });
 
   if (rowsErr) {
-    return await markFailed(opts.runId, `Failed to load rows: ${rowsErr.message}`);
+    return await fail(`Failed to load rows: ${rowsErr.message}`);
   }
 
   const rows = (rowsData ?? []) as Array<{ id: number; domain: string | null }>;
+  if (isNoEmailRetry && rows.length > 100) {
+    return await fail('No-email retry runs are limited to 100 rows');
+  }
   if (rows.length === 0) {
+    if (!await canContinue()) return paused();
     // Scoring already finished, but routing/snapshot persistence may have been
     // interrupted. Reconcile both before the run is allowed to complete.
     try {
-      await reconcileManualRoutingAndSnapshots(opts.runId);
+      await opts.beforeReconcile?.();
+      if (!await ownsRun()) return paused();
+      await reconcileManualRoutingAndSnapshots(opts.runId, opts);
     } catch (err) {
-      return await markFailed(
-        opts.runId,
-        err instanceof Error ? err.message : 'routing reconciliation failed',
-      );
+      if (!await ownsRun()) return paused();
+      return await fail(err instanceof Error ? err.message : 'routing reconciliation failed');
     }
-    return await finalize(opts.runId);
+    if (!await ownsRun()) return paused();
+    return await finalize(opts.runId, opts);
   }
 
   // 3. Shared MX cache между всеми row'ами этого прогона — economy для повторяющихся
@@ -122,19 +167,36 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
   // 4. Worker pool
   let cursor = 0;
   let processedSinceLastProgress = 0;
+  let savedInThisInvocation = 0;
+  let poolError: unknown;
+  let stopped = false;
   const PROGRESS_FLUSH_EVERY = 25;
 
   async function worker(): Promise<void> {
     while (true) {
+      if (poolError || stopped || !await canContinue()) {
+        stopped = true;
+        return;
+      }
+      // Ownership checks await; another loop may have failed meanwhile.
+      if (poolError || stopped) return;
       const i = cursor++;
       if (i >= rows.length) return;
       const row = rows[i];
 
-      const result = await processOneRow(row, opts.endpoint, domainInfoCache);
-
-      // Сохраняем результат — независимо от ошибки. bucket всегда выставляем,
-      // чтобы при повторном вызове processManualRun row не выбралась снова.
-      await persistManualProcessedRow(row.id, result, new Date().toISOString());
+      try {
+        const result = await processOneRow(row, opts.endpoint, domainInfoCache);
+        // Compute once. A retry reuses this exact result and timestamp, never
+        // repeats Mailganer/scraping/validation or overwrites a saved row.
+        await persistManualProcessedRow(row.id, result, new Date().toISOString(), {
+          assertOwnership: opts.assertOwnership,
+          write: opts.persistRow ? (payload) => opts.persistRow!(row.id, payload) : undefined,
+        });
+        savedInThisInvocation++;
+      } catch (err) {
+        poolError ??= err;
+        return;
+      }
 
       processedSinceLastProgress++;
       if (processedSinceLastProgress >= PROGRESS_FLUSH_EVERY) {
@@ -147,30 +209,34 @@ export async function processManualRun(opts: ProcessOptions): Promise<ProcessRes
     }
   }
 
-  try {
-    await Promise.all(
-      Array.from({ length: Math.min(concurrency, rows.length) }, worker),
-    );
-  } catch (err) {
-    return await markFailed(
-      opts.runId,
-      err instanceof Error ? err.message : 'worker pool crashed',
-    );
+  // Do not return on the first rejection: old async loops must not continue
+  // writing after the outer worker has moved on to another run.
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(concurrency, rows.length) }, worker),
+  );
+  for (const result of settled) {
+    if (result.status === 'rejected') poolError ??= result.reason;
   }
+  if (!await ownsRun()) return { ...paused(), total: savedInThisInvocation };
+  if (poolError) {
+    return await fail(poolError instanceof Error ? poolError.message : 'worker pool crashed');
+  }
+  if (stopped || opts.shouldStop?.()) return { ...paused(), total: savedInThisInvocation };
 
   // 4.5. Резолв названий (кэш ФНС) + чистка (AI как кнопка «Очистить названия»)
   //      + маршрутизация активных контактов в СУЩЕСТВУЮЩИЕ кампании авто-
   //      пайплайна по скорингу. Ошибка оставляет прогон retryable.
   try {
-    await reconcileManualRoutingAndSnapshots(opts.runId);
+    await opts.beforeReconcile?.();
+    if (!await ownsRun()) return { ...paused(), total: savedInThisInvocation };
+    await reconcileManualRoutingAndSnapshots(opts.runId, opts);
   } catch (err) {
-    return await markFailed(
-      opts.runId,
-      err instanceof Error ? err.message : 'routing reconciliation failed',
-    );
+    if (!await ownsRun()) return { ...paused(), total: savedInThisInvocation };
+    return await fail(err instanceof Error ? err.message : 'routing reconciliation failed');
   }
 
-  return await finalize(opts.runId);
+  if (!await ownsRun()) return { ...paused(), total: savedInThisInvocation };
+  return await finalize(opts.runId, opts);
 }
 
 /** Имя-кандидат из домена (крайний фоллбек): "stripe.com" → "Stripe". */
@@ -207,14 +273,21 @@ class ManualPartialRouteError extends Error {
   }
 }
 
-async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRouteOutcome>> {
+async function assertManualRunMayReconcile(options: ProcessOptions): Promise<void> {
+  await options.assertOwnership?.();
+  // Once routing starts, finish its receipts/snapshots even if SIGTERM arrives.
+  // Stopping here could release a run with an ambiguous external append.
+}
+
+async function resolveNamesAndRoute(runId: string, options: ProcessOptions): Promise<Map<number, ManualRouteOutcome>> {
+  await assertManualRunMayReconcile(options);
   const routedRows = new Map<number, ManualRouteOutcome>();
   const newlyRoutedRows = new Map<number, ManualRouteOutcome>();
   if (!supabaseAdmin) return routedRows;
 
   const { data: run } = await supabaseAdmin
     .from('client_manual_score_runs')
-    .select('client_user_id, route_to_instantly')
+    .select('client_user_id, route_to_instantly, is_no_email_retry')
     .eq('id', runId)
     .single();
   const clientUserId = (run as { client_user_id?: string } | null)?.client_user_id;
@@ -224,6 +297,8 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
   // Instantly НЕ льётся. Включается явно (true) для боевых ручных доливов.
   const routeToInstantly =
     (run as { route_to_instantly?: boolean } | null)?.route_to_instantly === true;
+  const isNoEmailRetry =
+    (run as { is_no_email_retry?: boolean } | null)?.is_no_email_retry === true;
 
   const { data: rowsData, error: rowsError } = await supabaseAdmin
     .from('client_manual_score_rows')
@@ -306,6 +381,7 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
 
   // 3. Сохраняем company_name ('' = резолв выполнен, имени нет → идемпотентность).
   for (let i = 0; i < rows.length; i += 1) {
+    await assertManualRunMayReconcile(options);
     const { error } = await supabaseAdmin
       .from('client_manual_score_rows')
       .update({ company_name: cleaned[i] || '' })
@@ -322,10 +398,15 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
   // 4. Маршрутизация в существующие кампании по скорингу — если настроены.
   const { data: cfg, error: cfgError } = await supabaseAdmin
     .from('client_auto_pipeline_configs')
-    .select('score_buckets')
+    .select('score_buckets, hh_extra_exclude_patterns')
     .eq('client_user_id', clientUserId)
     .maybeSingle();
   if (cfgError) throw new Error(cfgError.message);
+  const exclusionPatterns = isNoEmailRetry
+    ? buildExcludePatterns(
+      ((cfg as { hh_extra_exclude_patterns?: string[] } | null)?.hh_extra_exclude_patterns ?? []),
+    )
+    : [];
   const buckets = ((cfg as { score_buckets?: unknown } | null)?.score_buckets ?? []) as Array<{
     score_min: number;
     score_max: number | null;
@@ -345,6 +426,9 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
     const r = rows[i];
     const name = cleaned[i];
     if (!name || !r.domain || r.score === null) continue;
+    if (isNoEmailRetry && [
+      name, r.domain, r.company_name, r.scraped_name, nameByDomain.get(r.domain),
+    ].some((value) => value && exclusionPatterns.some((pattern) => pattern.test(value)))) continue;
     // Готовые почты (valid/role/free/catch_all) — каждая = отдельный лид.
     // Невалидные не берём (правило «почта валидная или catch-all»).
     const validEmails: string[] = [];
@@ -381,6 +465,7 @@ async function resolveNamesAndRoute(runId: string): Promise<Map<number, ManualRo
   }
 
   for (const g of groups.values()) {
+    await assertManualRunMayReconcile(options);
     const recordAcceptedRows = (outcome: Parameters<typeof selectAcceptedItems>[1]) => {
       const acceptedRowIds = selectAcceptedItems(g.leadRowIds, outcome);
       if (acceptedRowIds === null) {
@@ -434,18 +519,20 @@ async function persistManualRunSnapshots(
   runId: string,
   routedRows: ReadonlyMap<number, ManualRouteOutcome>,
   onlyRowIds?: ReadonlySet<number>,
+  options?: ProcessOptions,
 ): Promise<void> {
   if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
 
   const { data: run, error: runError } = await supabaseAdmin
     .from('client_manual_score_runs')
-    .select('client_user_id, source_filename')
+    .select('client_user_id, source_filename, is_no_email_retry')
     .eq('id', runId)
     .single();
   if (runError) throw new Error(`Failed to load manual score run: ${runError.message}`);
   const runDetails = run as {
     client_user_id?: string;
     source_filename?: string | null;
+    is_no_email_retry?: boolean;
   } | null;
   const clientUserId = runDetails?.client_user_id;
   if (!clientUserId) throw new Error('Manual score run has no client owner');
@@ -476,6 +563,7 @@ async function persistManualRunSnapshots(
     ? rows.filter((row) => onlyRowIds.has(row.id))
     : rows;
 
+  if (options) await assertManualRunMayReconcile(options);
   await persistDomainSnapshots(
     supabaseAdmin,
     selectedRows.map((row) => {
@@ -494,6 +582,7 @@ async function persistManualRunSnapshots(
         email2: row.email2,
         email2ValidationStatus: row.email2_validation_status,
         sourceFilename: runDetails?.source_filename ?? null,
+        isNoEmailRetry: runDetails?.is_no_email_retry === true,
         scoredAt: row.processed_at,
         routedCampaignId: route?.campaignId ?? null,
         routedCampaignName: route?.campaignName ?? null,
@@ -503,16 +592,17 @@ async function persistManualRunSnapshots(
   );
 }
 
-async function reconcileManualRoutingAndSnapshots(runId: string): Promise<void> {
+async function reconcileManualRoutingAndSnapshots(runId: string, options: ProcessOptions): Promise<void> {
   try {
-    const routedRows = await resolveNamesAndRoute(runId);
-    await persistManualRunSnapshots(runId, routedRows);
+    const routedRows = await resolveNamesAndRoute(runId, options);
+    await persistManualRunSnapshots(runId, routedRows, undefined, options);
   } catch (error) {
     if (error instanceof ManualPartialRouteError && error.routedRows.size > 0) {
       await persistManualRunSnapshots(
         runId,
         error.routedRows,
         new Set(error.routedRows.keys()),
+        options,
       );
     }
     throw error;
@@ -535,30 +625,131 @@ export interface ProcessedRow {
   email2ValidationStatus?: string | null;
 }
 
+export interface ManualProcessedRowPayload {
+  domain: string | null;
+  score: number | null;
+  rating: string | null;
+  spf: string | null;
+  email: string | null;
+  email_validation_status: string | null;
+  email2: string | null;
+  email2_validation_status: string | null;
+  bucket: ManualBucket;
+  error_message: string | null;
+  scraped_name: string | null;
+  processed_at: string;
+}
+
+export interface ManualRowSaveOptions {
+  /** Writes, not scoring, are bounded. Delay 0 is supported by fast tests. */
+  maxAttempts?: number;
+  baseDelayMs?: number;
+  assertOwnership?: () => Promise<void>;
+  write?: (payload: ManualProcessedRowPayload) => Promise<void>;
+}
+
+export function isTransientManualDbError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const item = error as { code?: unknown; status?: unknown; message?: unknown; cause?: unknown };
+  const code = String(item.code ?? '').toUpperCase();
+  const status = Number(item.status);
+  // Auth, schema and invalid payload failures need a fix, not more writes.
+  if (/^(?:22|23|28|42|MANUAL_)/.test(code) || [400, 401, 403, 404, 409, 422].includes(status)) return false;
+  if ([408, 429, 500, 502, 503, 504, 520, 522, 524].includes(status)) return true;
+  if (new Set([
+    'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH',
+    'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+  ]).has(code)) return true;
+  return /invalid response was received from the upstream server|fetch failed|socket hang up|network|service unavailable|tim(?:ed|ing)?\s*out|timeout/i.test(String(item.message ?? ''))
+    || (item.cause !== undefined && isTransientManualDbError(item.cause));
+}
+
+export function manualRowPayloadMatches(row: Record<string, unknown>, payload: ManualProcessedRowPayload): boolean {
+  return Object.entries(payload).every(([key, expected]) => {
+    if (key === 'processed_at') {
+      return new Date(String(row[key])).getTime() === new Date(String(expected)).getTime();
+    }
+    return (row[key] ?? null) === expected;
+  });
+}
+
 export async function persistManualProcessedRow(
   rowId: number,
   result: ProcessedRow,
   processedAt: string,
+  options: ManualRowSaveOptions = {},
 ): Promise<void> {
   if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
-  const { error } = await supabaseAdmin
-    .from('client_manual_score_rows')
-    .update({
-      domain: result.domain,
-      score: result.score,
-      rating: result.rating,
-      spf: result.spf,
-      email: result.email,
-      email_validation_status: result.emailValidationStatus,
-      email2: result.email2 ?? null,
-      email2_validation_status: result.email2ValidationStatus ?? null,
-      bucket: result.bucket,
-      error_message: result.errorMessage,
-      scraped_name: result.scrapedName,
-      processed_at: processedAt,
-    })
-    .eq('id', rowId);
-  if (error) throw new Error(`Failed to persist manual score row ${rowId}: ${error.message}`);
+  const payload: ManualProcessedRowPayload = {
+    domain: result.domain, score: result.score, rating: result.rating, spf: result.spf,
+    email: result.email, email_validation_status: result.emailValidationStatus,
+    email2: result.email2 ?? null, email2_validation_status: result.email2ValidationStatus ?? null,
+    bucket: result.bucket, error_message: result.errorMessage,
+    scraped_name: result.scrapedName, processed_at: processedAt,
+  };
+  const columns = Object.keys(payload).join(', ');
+  const configuredAttempts = options.maxAttempts ?? 3;
+  const attempts = Number.isFinite(configuredAttempts)
+    ? Math.max(1, Math.min(5, Math.floor(configuredAttempts))) : 3;
+  const configuredDelay = options.baseDelayMs ?? 250;
+  const baseDelay = Number.isFinite(configuredDelay) ? Math.max(0, configuredDelay) : 250;
+  let lastError: unknown;
+  const assertOwnership = async (): Promise<void> => {
+    try {
+      await options.assertOwnership?.();
+    } catch (cause) {
+      throw Object.assign(new Error('Manual scoring ownership is unavailable'), {
+        code: 'MANUAL_OWNERSHIP_UNAVAILABLE', cause,
+      });
+    }
+  };
+  const readBack = async (): Promise<'saved' | 'pending'> => {
+    await assertOwnership();
+    const { data, error } = await manualDbRequest(supabaseAdmin!
+      .from('client_manual_score_rows').select(columns).eq('id', rowId).maybeSingle());
+    if (error) throw error;
+    if (!data) throw new Error(`Manual score row ${rowId} no longer exists`);
+    const saved = data as unknown as Record<string, unknown>;
+    if (manualRowPayloadMatches(saved, payload)) return 'saved';
+    if (saved.bucket != null) throw new Error(`Manual score row ${rowId} has a different saved result`);
+    return 'pending';
+  };
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    // Keep this outside the retry catch: lease loss must never be retried.
+    await assertOwnership();
+    try {
+      if (options.write) {
+        await options.write(payload);
+        return;
+      }
+      // A response may be lost after COMMIT. CAS prevents a retry from
+      // overwriting a durable result; readback proves whether it was ours.
+      const { data, error } = await manualDbRequest(supabaseAdmin
+        .from('client_manual_score_rows').update(payload)
+        .eq('id', rowId).is('bucket', null).select(columns).maybeSingle());
+      if (error) throw error;
+      if (data && manualRowPayloadMatches(data as unknown as Record<string, unknown>, payload)) return;
+      if (await readBack() === 'saved') return;
+      throw new Error(`Manual score row ${rowId} write returned no durable result`);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientManualDbError(error)) break;
+      try {
+        if (await readBack() === 'saved') return;
+      } catch (readError) {
+        lastError = readError;
+        if (!isTransientManualDbError(readError)) break;
+      }
+      if (attempt < attempts && baseDelay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelay * 2 ** (attempt - 1)));
+      }
+    }
+  }
+  const message = lastError instanceof Error
+    ? lastError.message
+    : String((lastError as { message?: unknown } | null)?.message ?? 'unknown database error');
+  throw Object.assign(new Error(`Failed to persist manual score row ${rowId}: ${message}`), { cause: lastError });
 }
 
 /** Статусы, при которых почта считается готовой к аутричу (как isValid в авто). */
@@ -663,16 +854,25 @@ async function processOneRow(
   };
 }
 
-async function markFailed(runId: string, message: string): Promise<ProcessResult> {
+async function updateManualRunState(
+  runId: string,
+  patch: Record<string, unknown>,
+  options: Pick<ProcessOptions, 'assertOwnership' | 'updateRunState'> = {},
+): Promise<void> {
+  await options.assertOwnership?.();
+  if (options.updateRunState) return options.updateRunState(patch);
+  if (!supabaseAdmin) throw new Error('supabaseAdmin not initialized');
+  const { error } = await supabaseAdmin.from('client_manual_score_runs').update(patch).eq('id', runId);
+  if (error) throw Object.assign(new Error(`Failed to update manual run state: ${error.message}`), { cause: error });
+}
+
+async function markFailed(runId: string, message: string, options: ProcessOptions): Promise<ProcessResult> {
   if (supabaseAdmin) {
-    await supabaseAdmin
-      .from('client_manual_score_runs')
-      .update({
-        status: 'failed',
-        error_message: message.slice(0, 500),
-        finished_at: new Date().toISOString(),
-      })
-      .eq('id', runId);
+    await updateManualRunState(runId, {
+      status: 'failed',
+      error_message: message.slice(0, 500),
+      finished_at: new Date().toISOString(),
+    }, options);
   }
   return {
     status: 'failed',
@@ -682,7 +882,7 @@ async function markFailed(runId: string, message: string): Promise<ProcessResult
   };
 }
 
-async function finalize(runId: string): Promise<ProcessResult> {
+async function finalize(runId: string, options: ProcessOptions): Promise<ProcessResult> {
   if (!supabaseAdmin) {
     return {
       status: 'failed',
@@ -695,10 +895,13 @@ async function finalize(runId: string): Promise<ProcessResult> {
   // считаем ТОЛЬКО готовых к аутричу — с почтой И названием. Высоко-
   // отскоренные «без почты» не контакты и в эти счётчики/файлы не идут.
   // storage/invalid считаем как есть. processed_count — все обработанные.
-  const { data: bucketCounts } = await supabaseAdmin
+  const { data: bucketCounts, error: bucketError } = await supabaseAdmin
     .from('client_manual_score_rows')
     .select('bucket, email, email_validation_status, email2, email2_validation_status, company_name')
     .eq('run_id', runId);
+  if (bucketError) {
+    return markFailed(runId, `Failed to verify manual run completion: ${bucketError.message}`, options);
+  }
 
   const buckets: Record<ManualBucket, number> = {
     storage: 0,
@@ -716,7 +919,9 @@ async function finalize(runId: string): Promise<ProcessResult> {
     email2_validation_status: string | null;
     company_name: string | null;
   }>) {
-    if (!r.bucket || !(r.bucket in buckets)) continue;
+    if (!r.bucket || !(r.bucket in buckets)) {
+      return markFailed(runId, 'Manual run still has unprocessed rows; completion refused', options);
+    }
     processed += 1;
     if (r.bucket === 'storage' || r.bucket === 'invalid') {
       buckets[r.bucket] += 1;
@@ -730,18 +935,15 @@ async function finalize(runId: string): Promise<ProcessResult> {
     if (r.email2 && isReadyEmailStatus(r.email2_validation_status)) buckets[r.bucket] += 1;
   }
 
-  await supabaseAdmin
-    .from('client_manual_score_runs')
-    .update({
-      status: 'completed',
-      finished_at: new Date().toISOString(),
-      processed_count: processed,
-      bucket_storage_count: buckets.storage,
-      bucket_medium_count: buckets.medium,
-      bucket_high_count: buckets.high,
-      bucket_top_count: buckets.top,
-    })
-    .eq('id', runId);
+  await updateManualRunState(runId, {
+    status: 'completed',
+    finished_at: new Date().toISOString(),
+    processed_count: processed,
+    bucket_storage_count: buckets.storage,
+    bucket_medium_count: buckets.medium,
+    bucket_high_count: buckets.high,
+    bucket_top_count: buckets.top,
+  }, options);
 
   return { status: 'completed', total: processed, buckets };
 }

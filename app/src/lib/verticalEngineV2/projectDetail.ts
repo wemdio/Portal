@@ -13,6 +13,8 @@ import type { VeAdaptiveCollection } from './adaptiveCollection';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { reconcileProjectVerticals } from './actualsReconcile';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
+import { readVeCollectionContinuationCache } from './collectionContinuationCache';
+import type { VeCollectionContinuation } from './collectionRecovery';
 
 // Без data — тяжёлое jsonb-поле, деталка проекта его не тянет. sample_rows
 // (≤30 строк, серверный кап при записи) и columns лёгкие: шаг «База» рисует
@@ -41,7 +43,7 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 // прямым чтением колонки — 4,4 и 3,3 мс. Функция ve_base_public_info_cached
 // остаётся в базе как инструмент починки и разового пересчёта.
 export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:public_info, columns, sample_rows, created_at, updated_at';
+  'id, project_id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:public_info, columns, sample_rows, created_at, updated_at, max_emails_per_company, contact_cap_applied, collection_continuation, collection_continuation_revision';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
@@ -87,13 +89,13 @@ async function readDetailPages(
 // Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { adaptive_collection?: VeAdaptiveCollection; tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
+  const info = base.collect_info as { adaptive_collection?: VeAdaptiveCollection; tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; project_exclusion_reserve?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
   const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
-  if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info)
+  if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info) && !('project_exclusion_reserve' in info)
     && !('adaptive_collection' in info) && !('search_policy' in info) && !('source_contact_recovery' in info) && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info) && !('preview_pipeline' in info)) return base;
   const publicInfo = { ...info };
   const adaptive = info.adaptive_collection;
@@ -105,6 +107,7 @@ export function stripTaskHarvest(base: Record<string, unknown>): Record<string, 
   delete publicInfo.target_checkpoint;
   delete publicInfo.relevance_checkpoint;
   delete publicInfo.relevance_reserve;
+  delete publicInfo.project_exclusion_reserve;
   delete publicInfo.saved_email_recovery;
   delete publicInfo.source_contact_recovery;
   delete publicInfo.company_name_checkpoint;
@@ -160,7 +163,7 @@ export async function loadVeProjectDetail(
     };
   }
 
-  const [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes] = await Promise.all([
+  const [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes, activeRes, preparationsRes] = await Promise.all([
     supabase
       .from('ve_hypotheses')
       .select('*')
@@ -198,9 +201,17 @@ export async function loadVeProjectDetail(
       .select(VE_CASE_LIST_COLUMNS)
       .eq('project_id', projectId)
       .order('created_at', { ascending: false }),
+    // A long-running job can fall outside the 30 recent jobs. Never offer a
+    // second continuation merely because the activity panel is bounded.
+    readDetailPages('active preparation jobs', (from, to) => supabase.from('ve_jobs').select('payload', { count: 'exact' }).eq('project_id', projectId)
+      .in('stage', ['base_collect', 'base_analyze', 'template', 'base_reproject_contacts'])
+      .in('status', ['pending', 'running']).order('created_at', { ascending: true }).order('id', { ascending: true }).range(from, to)),
+    readDetailPages('project preparations', (from, to) => supabase.from('ve_outreach_preparations')
+      .select('hypothesis_id,base_id,template_id,status,locked_until', { count: 'exact' }).eq('project_id', projectId)
+      .order('hypothesis_id', { ascending: true }).range(from, to)),
   ]);
 
-  for (const res of [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes]) {
+  for (const res of [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes, activeRes, preparationsRes]) {
     if (res.error) return { ok: false, reason: 'db', message: res.error.message };
   }
 
@@ -228,7 +239,7 @@ export async function loadVeProjectDetail(
         .in('vertical_id', verticalIds)
         .is('supply_batch_id', null)
         .order('created_at', { ascending: false })
-        .order('id', { ascending: true })
+        .order('id', { ascending: false })
         .range(from, to)),
     ]);
     for (const res of [chainsRes, vocabsRes, templatesRes]) {
@@ -243,6 +254,49 @@ export async function loadVeProjectDetail(
   // замеров и объёмы проверяются внутри, деталку не тормозит).
   void reconcileProjectVerticals(supabase, projectId).catch(() => {});
 
+  const activeBaseIds = new Set((activeRes.data ?? []).flatMap((job) => job.payload && typeof job.payload === 'object'
+    && 'base_id' in job.payload ? [job.payload.base_id] : []));
+  const launchedBaseIds = new Set((templates as Record<string, unknown>[])
+    .filter((template) => template.launch_info != null).map((template) => template.base_id));
+  const latestTemplates = new Map<unknown, Record<string, unknown>>();
+  for (const template of templates as Record<string, unknown>[]) {
+    if (!latestTemplates.has(template.base_id)) latestTemplates.set(template.base_id, template);
+  }
+  const bases = (basesRes.data ?? []).map((base) => {
+    let decision: VeCollectionContinuation;
+    const template = latestTemplates.get(base.id);
+    const preparation = (preparationsRes.data ?? []).find((item) => item.hypothesis_id === base.hypothesis_id
+      && (!item.base_id || item.base_id === base.id));
+    const publicInfo = base.collect_info && typeof base.collect_info === 'object' && !Array.isArray(base.collect_info)
+      ? base.collect_info as Record<string, unknown> : null;
+    const preparedPreview = base.source === 'auto' && base.hypothesis_id && base.status === 'analyzed'
+      && typeof base.row_count === 'number' && base.row_count > 0 && publicInfo?.collection_mode === 'preview';
+    if (launchedBaseIds.has(base.id)) decision = { available: false, action: null, code: 'launched',
+      reason: 'База уже передана в запуск. Пополнение управляется в результатах.' };
+    else if (activeBaseIds.has(base.id) || preparation?.status === 'pending'
+      || (typeof preparation?.locked_until === 'string' && Date.parse(preparation.locked_until) > Date.now())) {
+      decision = { available: false, action: null, code: 'already_running',
+        reason: preparation?.status === 'pending' && !activeBaseIds.has(base.id)
+          ? 'Подготовка в очереди. Повторно нажимать не нужно.'
+          : 'Подготовка уже выполняется. Повторно нажимать не нужно.' };
+    }
+    // Letter jobs and preparation links change independently of the base's
+    // collection cache, and their history may be outside the recent 30 jobs.
+    else if (preparedPreview && (template?.status !== 'ready'
+      || (preparation && (preparation.status !== 'ready' || preparation.base_id !== base.id || preparation.template_id !== template.id)))) {
+      decision = { available: true, action: 'resume_preparation', code: 'preparation_incomplete',
+        reason: template?.status !== 'ready' ? 'Контакты сохранены. Осталось завершить подготовку писем.'
+          : 'Контакты и письма сохранены. Продолжите подготовку, чтобы перейти к согласованию.' };
+    }
+    else decision = readVeCollectionContinuationCache(base) ?? {
+      available: true, action: 'resume_preparation', code: 'state_unchecked',
+      reason: 'Можно проверить возможность добора. Проверка не запускает сбор.',
+    };
+    // Only the bounded decision is public. Full checkpoints are read once on
+    // an explicit request and its result is cached until the base changes.
+    return { ...base, collection_continuation: decision };
+  });
+
   return {
     ok: true,
     detail: {
@@ -255,7 +309,7 @@ export async function loadVeProjectDetail(
       // через stripTaskHarvest НЕЛЬЗЯ: тот ждёт сырой документ и читает
       // adaptive_collection.completed.length, которого в сводке нет — деталка
       // падала с «Не удалось обновить проект». Один белый список, одно место.
-      bases: basesRes.data ?? [],
+      bases,
       templates,
       jobs: jobsRes.data ?? [],
       dossiers: dossiersRes.data ?? [],

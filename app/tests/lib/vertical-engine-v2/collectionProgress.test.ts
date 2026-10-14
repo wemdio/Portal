@@ -4,8 +4,9 @@ import { getCollectionProgress, getCollectionQueue, isPartialPreview } from '@/c
 import type { VeBaseSummary } from '@/components/vertical-engine-v2/engine/api';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { loadVeProjectDetail } from '@/lib/verticalEngineV2/projectDetail';
+import { createVeCollectionContinuationCache, readVeCollectionContinuationCache, saveVeCollectionContinuationCache } from '@/lib/verticalEngineV2/collectionContinuationCache';
 import { selectHypothesisLetters } from '@/components/vertical-engine-v2/engine/letterSelection';
-import { getPreparationPresentation } from '@/components/vertical-engine-v2/engine/PreparationProgress';
+import { getPreparationActionNotice, getPreparationPresentation, refreshPreparationRequestNotice } from '@/components/vertical-engine-v2/engine/PreparationProgress';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { groupVeHypotheses } from '@/components/vertical-engine-v2/engine/hypothesisGroups';
 
@@ -57,6 +58,86 @@ describe('VE2 collection progress presentation', () => {
     expect(baseSelect).toContain('collect_info:public_info');
     expect(baseSelect).not.toMatch(/(^|,)\s*collect_info\s*(,|$)/);
     expect(getCollectionQueue(bases, [{ stage: 'base_collect', status: 'running', payload: { base_id: 'supply-active' } }]).current?.id).toBe('supply-active');
+
+    // Polling consumes only the small verdict. A legacy base or changed policy
+    // remains unknown until a full-state preflight; it must not silently become
+    // "no remaining work" or reuse a verdict from before the latest write.
+    const priorTriage = process.env.VE_RELEVANCE_TRIAGE;
+    const priorProjects = process.env.VE_RELEVANCE_TRIAGE_PROJECTS;
+    try {
+      process.env.VE_RELEVANCE_TRIAGE = 'off';
+      process.env.VE_RELEVANCE_TRIAGE_PROJECTS = 'project-1';
+      const snapshot = { id: 'checked', project_id: 'project-1', status: 'analyzed',
+        updated_at: '2026-10-12T10:00:00Z', max_emails_per_company: null, contact_cap_applied: 3,
+        collection_continuation_revision: 4, collect_info: { private: 'unchanged' } };
+      const verdict = { available: false, action: null, code: 'sources_exhausted', reason: 'Источники обработаны.' } as const;
+      const cache = createVeCollectionContinuationCache(snapshot, { ...verdict, private: 'must not leak' } as typeof verdict);
+      expect(cache?.decision).toEqual(verdict);
+      const cached = { ...snapshot, collection_continuation: cache };
+      expect(readVeCollectionContinuationCache(cached)).toEqual(verdict);
+      expect(readVeCollectionContinuationCache(snapshot)).toBeNull();
+      for (const patch of [
+        { updated_at: '2026-10-12T10:00:01Z' }, { status: 'collecting' }, { collection_continuation_revision: 5 },
+        { max_emails_per_company: 5 }, { contact_cap_applied: null }, { max_emails_per_company: undefined },
+        { collection_continuation: { ...cache, version: 0 } },
+        { collection_continuation: { ...cache, decision: { ...verdict, available: true } } },
+      ]) expect(readVeCollectionContinuationCache({ ...cached, ...patch })).toBeNull();
+      process.env.VE_RELEVANCE_TRIAGE = 'jev';
+      expect(readVeCollectionContinuationCache(cached)).toBeNull();
+      process.env.VE_RELEVANCE_TRIAGE = 'off';
+      const cacheDb = createMockSupabase({ tables: { ve_bases: [snapshot] } });
+      expect(await saveVeCollectionContinuationCache(cacheDb as never, snapshot, verdict)).toBe(true);
+      expect(cacheDb.updates[0].patch).toEqual({ collection_continuation: cache });
+      expect(cacheDb.getRows('ve_bases')[0]).toMatchObject(snapshot);
+      expect(cacheDb.inserts).toEqual([]);
+      const raced = createMockSupabase({ tables: { ve_bases: [snapshot] }, beforeFirstUpdates: {
+        ve_bases: (rows) => rows.map((row) => ({ ...row, collection_continuation_revision: 5, collection_continuation: null })),
+      } });
+      expect(await saveVeCollectionContinuationCache(raced as never, snapshot, verdict)).toBe(false);
+      expect(raced.getRows('ve_bases')[0].collection_continuation).toBeNull();
+      const unavailableDb = createMockSupabase({ tables: { ve_bases: [snapshot] }, errorTables: { ve_bases: 'offline' } });
+      expect(await saveVeCollectionContinuationCache(unavailableDb as never, snapshot, verdict)).toBe(false);
+
+      // Template/coordination changes do not touch the collection cache. They
+      // must still expose preparation repair, including outside recent jobs.
+      const checkedBases = ['letters-failed', 'link-error', 'ready-partial', 'busy-1', 'busy-2', 'busy-3', 'request-pending', 'lease-live', 'launched'].map((id) => {
+        const row = { ...makeBase(id, 'preview', 'analyzed', '2026-10-12T10:00:00Z'), ...snapshot,
+          id, hypothesis_id: `h-${id}`, vertical_id: 'vertical-1', row_count: 22, collect_info: { collection_mode: 'preview' } };
+        return { ...row, collection_continuation: createVeCollectionContinuationCache(row, verdict) };
+      });
+      const projectionDb = createMockSupabase({ enforceQueryWindows: true, maxRowsPerQuery: 2, tables: {
+        ve_projects: [{ id: 'project-1' }], ve_verticals: [{ id: 'vertical-1', project_id: 'project-1' }],
+        ve_bases: checkedBases,
+        ve_outreach_preparations: checkedBases.map((row) => ({ project_id: 'project-1', hypothesis_id: row.hypothesis_id,
+          base_id: row.id, template_id: `t-${row.id}`,
+          status: row.id === 'request-pending' ? 'pending' : row.id === 'link-error' ? 'error' : 'ready',
+          locked_until: row.id === 'lease-live' ? new Date(Date.now() + 60000).toISOString() : null })),
+        ve_templates: checkedBases.map((row) => ({ id: `t-${row.id}`, base_id: row.id, vertical_id: 'vertical-1',
+          status: row.id === 'letters-failed' ? 'failed' : 'ready', supply_batch_id: null,
+          created_at: '2026-10-12T10:00:00Z', launch_info: row.id === 'launched' ? { campaign_id: 'existing' } : null })),
+        ve_jobs: [
+          ...Array.from({ length: 35 }, (_, index) => ({ id: `done-${index}`, project_id: 'project-1', stage: 'template',
+            status: 'done', created_at: '2026-10-12T12:00:00Z', payload: { base_id: 'other' } })),
+          ...['busy-1', 'busy-2', 'busy-3'].map((id) => ({ id: `old-${id}`, project_id: 'project-1', stage: 'template',
+            status: 'running', created_at: '2026-10-11T12:00:00Z', payload: { base_id: id } })),
+        ],
+      } });
+      const projected = await loadVeProjectDetail(projectionDb as never, 'project-1');
+      if (!projected.ok) throw new Error(projected.message);
+      const decisions = new Map((projected.detail.bases as VeBaseSummary[]).map((row) => [row.id, row.collection_continuation]));
+      for (const id of ['letters-failed', 'link-error']) expect(decisions.get(id))
+        .toMatchObject({ available: true, action: 'resume_preparation', code: 'preparation_incomplete' });
+      expect(decisions.get('ready-partial')).toEqual(verdict);
+      expect(decisions.get('launched')).toMatchObject({ available: false, code: 'launched' });
+      expect(projected.detail.jobs.every((job) => (job as { status: string }).status === 'done')).toBe(true);
+      for (const id of ['busy-1', 'busy-2', 'busy-3', 'request-pending', 'lease-live']) expect(decisions.get(id))
+        .toMatchObject({ available: false, code: 'already_running' });
+    } finally {
+      if (priorTriage === undefined) delete process.env.VE_RELEVANCE_TRIAGE;
+      else process.env.VE_RELEVANCE_TRIAGE = priorTriage;
+      if (priorProjects === undefined) delete process.env.VE_RELEVANCE_TRIAGE_PROJECTS;
+      else process.env.VE_RELEVANCE_TRIAGE_PROJECTS = priorProjects;
+    }
 
     const preparation: VeOutreachPreparation = { project_id: 'project-1', hypothesis_id: 'h1', base_id: 'new',
       template_id: null, status: 'error', language: 'ru', last_error: 'Serper billing: insufficient search credits.' };
@@ -180,15 +261,76 @@ describe('VE2 collection progress presentation', () => {
     expect(getPreparationPresentation({ preparation: interrupted, base: collecting, jobs: [{ ...parent, status: 'running' }] }))
       .toMatchObject({ tone: 'info', currentStep: 0 });
     for (const readyRows of [0, 22]) {
-      const stopped = { ...preview, id: collecting.id, status: 'analyzed' as const,
+      const stopped = { ...preview, id: collecting.id, status: 'analyzed' as const, row_count: readyRows,
         collect_info: { ...preview.collect_info, target_progress: { ...preview.collect_info!.target_progress!, ready_rows: readyRows } } };
       const presentation = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [] });
-      expect(presentation).toMatchObject({ tone: readyRows > 0 ? 'ok' : 'muted', currentStep: readyRows > 0 ? 3 : null, canContinue: true });
+      expect(presentation).toMatchObject({ tone: readyRows > 0 ? 'ok' : 'muted', currentStep: readyRows > 0 ? 3 : null, canContinue: false });
       expect(presentation.title).toBe(readyRows > 0 ? 'База и письма готовы к согласованию' : 'Готовых контактов пока нет');
-      expect(presentation.guidance?.action).toBe(readyRows > 0 ? 'review' : 'continue');
+      expect(presentation.guidance?.action).toBe(readyRows > 0 ? 'review' : 'check');
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [], approved: true }).guidance.action)
-        .toBe(readyRows > 0 ? 'launch' : 'continue');
+        .toBe(readyRows > 0 ? 'launch' : 'check');
+      const unavailable = { available: false, action: null, code: 'sources_exhausted', reason: 'Доступные источники обработаны.' } as const;
+      const blocked = { ...stopped, collection_continuation: unavailable };
+      expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: blocked, jobs: [] }))
+        .toMatchObject(readyRows > 0
+          ? { canContinue: false, collectionSummary: expect.stringContaining(unavailable.reason) }
+          : { canContinue: false, continueHint: unavailable.reason });
+      expect(getPreparationPresentation({ preparation: { ...preparation, status: 'pending' }, base: blocked, jobs: [] }))
+        .toMatchObject({ canContinue: false, guidance: { action: 'check' } });
+      expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
+        collection_continuation: { available: true, action: 'resume_collection', code: 'fresh_sources', reason: 'Есть новые источники.' } }, jobs: [] }))
+        .toMatchObject({ canContinue: true, continueLabel: 'Собрать ещё контакты' });
+      const unknown = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
+        collection_continuation: { available: true, action: 'resume_preparation', code: 'state_unchecked', reason: 'Нужно проверить состояние.' } }, jobs: [] });
+      expect(unknown)
+        .toMatchObject(readyRows > 0
+          ? { canContinue: false, continuationUnconfirmed: true, guidance: { action: 'review' } }
+          : { canContinue: false, continuationUnconfirmed: true, guidance: { action: 'check', next: expect.stringContaining('пока не подтверждена') } });
+      expect(unknown).not.toHaveProperty('canCheckContinuation');
+      expect(unknown.continuationBlocked).not.toBe(true);
+      expect(unknown.continueHint).toBeUndefined();
+      // Legacy ready bases without a saved decision stay downloadable and
+      // launchable. Unknown availability exposes no manual check or retry.
+      if (readyRows > 0) {
+        expect(presentation).toMatchObject({ canContinue: false, collectionSummary: expect.any(String),
+          guidance: { title: 'База и письма готовы', action: 'review' } });
+        expect(presentation).not.toHaveProperty('additionalCollection');
+        expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped,
+          jobs: [], approved: true })).toMatchObject({ canContinue: false, guidance: { action: 'launch' } });
+      }
+      expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: { ...blocked,
+        collection_continuation: { ...unavailable, code: 'already_running', reason: 'Подготовка уже выполняется.' } }, jobs: [] }))
+        .toMatchObject({ tone: 'info', guidance: { action: 'wait' } });
+      // A collection limit must not prevent repair of failed letters.
+      expect(getPreparationPresentation({ preparation: { ...preparation, status: 'error' }, base: { ...blocked, row_count: 22 },
+        jobs: [{ ...parent, stage: 'template', status: 'failed' }] })).toMatchObject({ canContinue: true });
     }
+    const goalReached = { ...preview, id: collecting.id, status: 'analyzed' as const, row_count: 523,
+      collect_info: { ...preview.collect_info, target_progress: { ...preview.collect_info!.target_progress!, status: 'target_reached' as const,
+        ready_rows: 523 } }, collection_continuation: { available: true, action: 'resume_preparation' as const,
+        code: 'preparation_incomplete', reason: 'Нужно подготовить письма.' } };
+    expect(getPreparationPresentation({ preparation, base: goalReached, jobs: [] }))
+      .toMatchObject({ canContinue: true, continueLabel: 'Продолжить подготовку', currentStep: 2, guidance: { action: 'continue' } });
+    // A stale ready preparation does not turn failed/missing letters into a
+    // completed audience just because the collection itself is finished.
+    expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: goalReached, jobs: [], approved: true }))
+      .toMatchObject({ tone: 'muted', canContinue: true, title: 'Нужно завершить подготовку', guidance: { action: 'continue' } });
+    for (const status of ['queued', 'already_running', 'unavailable', 'ready'] as const) {
+      expect(getPreparationActionNotice({ status, reason: 'Ответ сервера', hypothesis_id: 'h1' }))
+        .toEqual({ tone: status === 'unavailable' ? 'error' : 'info', message: 'Ответ сервера' });
+    }
+    expect(getPreparationActionNotice()).toEqual({ tone: 'info', message: 'Обновляем состояние подготовки.' });
+    const freshState = { preparations: [preparation], bases: [goalReached], jobs: [] };
+    const queuedNotice = { hypothesisId: preparation.hypothesis_id, tone: 'info' as const, message: 'Запрос принят.' };
+    expect(refreshPreparationRequestNotice(queuedNotice, freshState)).toBeNull();
+    const pendingNotice = { ...queuedNotice, checking: true };
+    expect(refreshPreparationRequestNotice(pendingNotice, freshState)).toBe(pendingNotice);
+    const blockedNotice = { ...queuedNotice, tone: 'error' as const, keepUntilStateChanges: true, message: 'Источники обработаны.' };
+    const savedNotice = refreshPreparationRequestNotice(blockedNotice, freshState);
+    expect(savedNotice?.message).toBe(blockedNotice.message);
+    expect(refreshPreparationRequestNotice(savedNotice, freshState)).toBe(savedNotice);
+    expect(refreshPreparationRequestNotice(savedNotice, { ...freshState,
+      preparations: [{ ...preparation, status: 'ready' }] })).toBeNull();
     collecting.collect_info.relevance_review_requested = false;
     collecting.collect_info.construct.progress = { status: 'processing', current_step_key: 'validate_emails', current_step_progress: 37 };
     for (const history of [[], [{ ...parent, status: 'done' as const }]]) {

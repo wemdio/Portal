@@ -300,6 +300,8 @@ describe('VE2 contact delivery scheduler', () => {
   });
 
   it('fences supply approval, reuses one batch, audits fully and appends only into original campaigns', async () => {
+    // Sunday is not a sending day: prepare Monday's stock through the same
+    // approval, campaign, audit and dedup gates without sending anything.
     let approved = false;
     const template = { id: 'supply-template', base_id: 'supply-base', status: 'ready', letters: [], personalization_plan: {} };
     const portal = createMockSupabase({
@@ -309,7 +311,7 @@ describe('VE2 contact delivery scheduler', () => {
         ve_projects: [{ id: 've', ...COMPLETE_BINDING, launch_instantly_account_id: 'main' }],
         project_periods: [{ id: COMPLETE_BINDING.portal_period_id, project_id: COMPLETE_BINDING.portal_project_id, status: 'active', contacts_done: '0', deadline: '2026-09-11' }],
         ve_launch_queue_items: [{ id: 'item', project_id: 've', status: 'active', potential_pct: 70 }],
-        ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null, remote_status: 1, status_observed_at: '2026-09-07T06:00:00Z' }],
+        ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null, remote_status: 1, status_observed_at: '2026-09-06T06:00:00Z' }],
         ve_templates: [template],
         ve_contact_delivery_rows: [0, 1, 2].map((n) => ({ id: `row-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row', email_normalized: `existing${n}@example.test`, status: 'ready' })),
       },
@@ -344,7 +346,14 @@ describe('VE2 contact delivery scheduler', () => {
           await db.from('ve_contact_supply_batches').update({ status: 'auditing', audit_id: 'audit' }).eq('id', 'batch');
           return { data: { audit_id: 'audit', status: 'ready' } };
         },
-        ve_append_contact_supply_batch: async (_params, db) => {
+        ve_append_contact_supply_batch: async (params, db) => {
+          // Production SQL requires exact equality with audited supply_leads.
+          // Do not add private metadata only at materialization time.
+          const source = db.getRows('ve_bases').find(row => row.id === 'supply-base');
+          const snapshot = prepareAuditSnapshot(template as never, source as never);
+          for (const row of params.p_rows as Array<{ source_row_index: number; lead_payload: unknown }>) {
+            expect(row.lead_payload).toEqual(snapshot.audience.leads[row.source_row_index]);
+          }
           await db.from('ve_contact_supply_batches').update({ status: 'appended', appended_count: 1 }).eq('id', 'batch');
           return { data: { appended_count: 1, replayed: false } };
         },
@@ -355,7 +364,7 @@ describe('VE2 contact delivery scheduler', () => {
           instantly_campaign_catalog: [{ id: 'original-campaign', new_leads_contacted_count: 0 }] },
       rpcHandlers: { client_blocklist_snapshot: () => ({ data: { count: 1, emails: ['blocked@example.test'] } }) },
     });
-    const input = { portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-07T06:00:00Z') };
+    const input = { portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-06T06:00:00Z') };
     await runProjectContactSupply(input);
     expect(portal.getRows('ve_contact_supply_plans')[0].status).toBe('paused');
     expect(portal.rpcCalls.some((call) => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
@@ -366,7 +375,7 @@ describe('VE2 contact delivery scheduler', () => {
       await runProjectContactSupply(input);
       expect(portal.rpcCalls.some(call => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
     }
-    await portal.from('ve_launch_queue_campaigns').update({remote_status:1,status_observed_at:'2026-09-07T05:54:00Z'}).eq('id','campaign-row');
+    await portal.from('ve_launch_queue_campaigns').update({remote_status:1,status_observed_at:'2026-09-06T05:54:00Z'}).eq('id','campaign-row');
     await runProjectContactSupply(input);
     expect(portal.rpcCalls.some(call => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
     await portal.from('ve_launch_queue_campaigns').update({status_observed_at:input.now.toISOString()}).eq('id','campaign-row');
@@ -436,13 +445,17 @@ describe('VE2 contact delivery scheduler', () => {
     // Every batch is a new base with its own 10 000-candidate / round budget,
     // so the cap is per batch. For a whole sector it is not the end of the market.
     const cap = { status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана', ready_rows: 40 };
-    for (const [broad, appended, expected] of [[true, 40, 'active'], [false, 40, 'limited'], [true, 0, 'limited']] as const) {
+    for (const [broad, appended, expected, stopCause] of [
+      [true, 40, 'active', undefined], [false, 40, 'limited', undefined], [true, 0, 'limited', undefined],
+      [true, 1, 'limited', 'low_yield'],
+    ] as const) {
+      const progress = { ...cap, ...(stopCause ? { stop_cause: stopCause } : {}) };
       const portal = createMockSupabase({
         tables: {
           ve_hypotheses: [{ id: 'hyp', project_id: 've', broad }],
           ve_contact_supply_plans: [{ id: 'plan', project_id: 've', hypothesis_id: 'hyp', template_id: 'original-template', item_id: 'item', status: 'active', source_state: {} }],
           ve_contact_supply_batches: [{ id: 'batch', plan_id: 'plan', base_id: 'supply-base', template_id: 'supply-template', status: 'appended', appended_count: appended }],
-          ve_bases: [{ id: 'supply-base', project_id: 've', status: 'analyzed', target_progress: cap, collect_info: { target_progress: cap } }],
+          ve_bases: [{ id: 'supply-base', project_id: 've', status: 'analyzed', target_progress: progress, collect_info: { target_progress: progress } }],
           ve_projects: [{ id: 've', ...COMPLETE_BINDING, launch_instantly_account_id: 'main' }],
           project_periods: [{ id: COMPLETE_BINDING.portal_period_id, project_id: COMPLETE_BINDING.portal_project_id, status: 'active', contacts_done: '0', deadline: '2026-09-11' }],
           ve_launch_queue_items: [{ id: 'item', project_id: 've', status: 'active', potential_pct: 70 }],
@@ -465,6 +478,12 @@ describe('VE2 contact delivery scheduler', () => {
       const input = { portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-07T06:00:00Z') };
       await runProjectContactSupply(input);
       expect([broad, appended, portal.getRows('ve_contact_supply_plans')[0].status]).toEqual([broad, appended, expected]);
+      if (stopCause) {
+        // A committed append replay must preserve the economic stop too.
+        await portal.from('ve_contact_supply_plans').update({ status: 'active', source_state: {} }).eq('id', 'plan');
+        await runProjectContactSupply(input);
+        expect(portal.getRows('ve_contact_supply_plans')[0].status).toBe('limited');
+      }
       await runProjectContactSupply(input);
       expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch')).toHaveLength(expected === 'active' ? 1 : 0);
     }
@@ -520,11 +539,57 @@ describe('VE2 contact delivery scheduler', () => {
     });
     const now = new Date('2026-09-07T06:00:00Z');
 
-    const portal = createMockSupabase({ enforceQueryWindows: true, tables: tables(), rpcHandlers: handlers });
-    await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now });
-    // 100 − 10 observed = 90 over 5 workdays → 18 a day; two-day buffer 36 minus 3 ready.
-    expect(portal.rpcCalls.find((call) => call.fn === 've_enqueue_contact_supply_batch')?.params.p_limit).toBe(33);
-    expect(portal.selects.filter((call) => call.table === 'project_periods').every((call) => !call.columns.includes('contacts_done'))).toBe(true);
+    for (const date of ['2026-09-05T06:00:00Z', '2026-09-06T06:00:00Z', now.toISOString()]) {
+      const preparationNow = new Date(date);
+      const portal = createMockSupabase({ enforceQueryWindows: true, tables: tables(), rpcHandlers: handlers });
+      await portal.from('ve_launch_queue_campaigns').update({ status_observed_at: date }).eq('id', 'campaign-row');
+      await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow });
+      // Weekend preparation and Monday use the same upcoming workdays:
+      // 100 − 10 observed = 90 over 5 days → buffer 36 minus 3 ready.
+      expect(portal.rpcCalls.find((call) => call.fn === 've_enqueue_contact_supply_batch')?.params.p_limit).toBe(33);
+      expect(portal.selects.filter((call) => call.table === 'project_periods').every((call) => !call.columns.includes('contacts_done'))).toBe(true);
+      // A fulfilled plan and sufficient ready stock still buy no new batch.
+      const requested = portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch').length;
+      await portal.from('ve_projects').update({ target_contacts: 10 }).eq('id', 've');
+      await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow });
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch')).toHaveLength(requested);
+      await portal.from('ve_projects').update({ target_contacts: 12 }).eq('id', 've');
+      await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow });
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch')).toHaveLength(requested);
+      // StaffLine's 360/day rate prepares at most two workdays, even on
+      // Saturday; a smaller remaining obligation caps that stock request.
+      await portal.from('ve_projects').update({ target_contacts: 4000, sender_daily_capacity: 360 }).eq('id', 've');
+      await portal.from('projects').update({ deadline: '2026-09-04' }).eq('id', COMPLETE_BINDING.portal_project_id);
+      await portal.from('ve_contact_delivery_rows').update({ status: 'skipped' }).eq('ve_project_id', 've');
+      await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow });
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch').at(-1)?.params.p_limit).toBe(720);
+      await portal.from('ve_projects').update({ target_contacts: 410 }).eq('id', 've');
+      await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow });
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch').at(-1)?.params.p_limit).toBe(400);
+      // The deadline itself falls on Sunday: Saturday must prepare Monday,
+      // while 100/700 already committed contacts reduce future demand.
+      await portal.from('ve_projects').update({ target_contacts: 1010 }).eq('id', 've');
+      await portal.from('projects').update({ deadline: '2026-09-06' }).eq('id', COMPLETE_BINDING.portal_project_id);
+      await portal.from('ve_contact_delivery_rows').insert(Array.from({ length: 110 }, (_, n) => ({
+        id: `accepted-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row', email_normalized: `accepted${n}@example.test`, status: 'accepted',
+      })));
+      await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow });
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch').at(-1)?.params.p_limit).toBe(720);
+      await portal.from('ve_contact_delivery_rows').insert(Array.from({ length: 600 }, (_, n) => ({
+        id: `more-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row', email_normalized: `more${n}@example.test`, status: 'accepted',
+      })));
+      await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow });
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch').at(-1)?.params.p_limit).toBe(300);
+      const totalRequested = portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch').length;
+      for (const invalid of [{ delivery_schedule_days: [] }, { delivery_schedule_days: [1, 2, 3, 4, 5], sender_daily_capacity: 0 }]) {
+        await portal.from('ve_projects').update(invalid).eq('id', 've');
+        await expect(runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: preparationNow }))
+          .rejects.toThrow('Для плана нужны будние дни');
+      }
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch')).toHaveLength(totalRequested);
+      // This sweep prepares stock only: it never reserves or uploads a day.
+      expect(portal.rpcCalls.every((call) => ['ve_contact_supply_approval_current', 've_enqueue_contact_supply_batch'].includes(call.fn))).toBe(true);
+    }
 
     const afterPeriod = createMockSupabase({ enforceQueryWindows: true, rpcHandlers: handlers,
       tables: tables({}, [{ id: 'new-period', project_id: COMPLETE_BINDING.portal_project_id, status: 'active', deadline: '2026-10-31', contacts_done: '0' }]) });

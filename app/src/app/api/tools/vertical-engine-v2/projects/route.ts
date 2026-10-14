@@ -4,6 +4,7 @@ import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { VePriorityNichesSchema } from '@/lib/verticalEngineV2/priorityNiches';
 import { normalizeWebsiteInput } from '@/lib/verticalEngineV2/websiteUrl';
 import { findInternalLegacyDuplicates } from '@/lib/verticalEngineV2/legacyDuplicateCheck';
 
@@ -67,12 +68,15 @@ export async function POST(req: NextRequest) {
       const { userId } = authed.auth;
       if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
-      let body: { website_url?: unknown; name?: unknown; confirm?: unknown };
+      let body: { website_url?: unknown; name?: unknown; confirm?: unknown; priority_niches?: unknown };
       try {
-        body = (await req.json()) as { website_url?: unknown; name?: unknown; confirm?: unknown };
+        body = (await req.json()) as { website_url?: unknown; name?: unknown; confirm?: unknown; priority_niches?: unknown };
       } catch {
         return jsonError('Invalid body', 400);
       }
+
+      const niches = VePriorityNichesSchema.safeParse(body?.priority_niches ?? []);
+      if (!niches.success) return jsonError('Укажите до 8 направлений, каждое — до 120 символов', 400);
 
       const rawUrl = typeof body?.website_url === 'string' ? body.website_url : '';
       const normalized = normalizeWebsiteInput(rawUrl);
@@ -110,6 +114,7 @@ export async function POST(req: NextRequest) {
           name,
           website_url: normalized.url,
           status: 'draft',
+          ...(niches.data.length ? { brief: { priority_niches: niches.data } } : {}),
         })
         .select()
         .single();

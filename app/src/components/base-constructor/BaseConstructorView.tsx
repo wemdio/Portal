@@ -1,9 +1,11 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo, type DragEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, type DragEvent } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import { CLIENT_CONSTRUCTOR_ERROR } from '@/lib/tools/baseConstructorPresentation';
+import { describeConstructorProgress } from '@/lib/tools/baseConstructorProgress';
+import { startConstructorPolling } from '@/lib/tools/baseConstructorPolling';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 import {
@@ -94,6 +96,7 @@ interface ConstructorJob {
   total_steps: number;
   initial_row_count: number;
   result_stats?: {
+    step_progress?: unknown;
     total_rows: number;
     emails_found: number;
     avg_ta_score: number;
@@ -394,6 +397,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [error, setError] = useState('');
 
   const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
+  const activeJobRef = useRef(activeJob);
+  useLayoutEffect(() => { activeJobRef.current = activeJob; }, [activeJob]);
+  const [statusSync, setStatusSync] = useState<{ jobId: string; receivedAt: number | null; error: string } | null>(null);
+  const retryPendingRef = useRef(false);
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<{ id: string; failedAt: string | null; message: string } | null>(null);
   // Full result blob, cached lazily for the admin "Открыть в базах" flow. Keyed by
   // job id so a job switch during an in-flight fetch can't hand back another job's rows.
   const fullDataCacheRef = useRef<{ id: string; rows: string[][] } | null>(null);
@@ -412,7 +421,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const historyFiltersRef = useRef(historyFilters);
   const historyInitialLoadRef = useRef(true);
   const [activeManualCount, setActiveManualCount] = useState<number | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof startConstructorPolling> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -554,45 +563,80 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   /* ─── Polling ─── */
 
+  const loadHistoryRef = useRef(loadHistory);
+  useLayoutEffect(() => { loadHistoryRef.current = loadHistory; }, [loadHistory]);
+  const activeJobId = activeJob?.id;
+  const shouldPollJob = Boolean(activeJob && isActiveJobStatus(activeJob.status));
+  const jobCompleted = activeJob?.status === 'completed';
+
+  // Fetch just the preview, not the full result. A job switch invalidates
+  // the response even when the transport does not obey cancellation.
   useEffect(() => {
-    if (!activeJob || ['completed', 'failed', 'cancelled'].includes(activeJob.status)) {
-      if (pollRef.current) clearInterval(pollRef.current);
-      return;
-    }
+    if (!activeJobId || !jobCompleted) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    fullDataCacheRef.current = null;
+    void (async () => {
+      try {
+        const res = await authFetch(`/api/tools/base-constructor/${activeJobId}/data?preview=21`, {
+          cache: 'no-store', signal: controller.signal,
+        });
+        if (!res.ok) return;
+        const { data } = await res.json();
+        if (!cancelled) setPreviewData(data || null);
+      } catch { /* Download remains available if the optional preview failed. */ }
+      finally { clearTimeout(timeout); }
+    })();
+    return () => { cancelled = true; controller.abort(); clearTimeout(timeout); };
+  }, [activeJobId, jobCompleted]);
 
-    async function poll() {
-      if (!activeJob) return;
-      // Запоминаем id на момент старта запроса. Пока ответ едет (≈0.5s),
-      // юзер мог нажать «Поставить ещё базу» (activeJob → null) или
-      // кликнуть другой job в истории (activeJob → другой id). Если так —
-      // ответ от устаревшего poll'a нельзя коммитить, иначе экран мигнёт
-      // в форму и тут же откатится обратно на прогресс старой базы
-      // (баг 2026-06-18: «на 5 раз получается загрузить исходный файл»).
-      const jobIdAtStart = activeJob.id;
-      const res = await authFetch(`/api/tools/base-constructor/${jobIdAtStart}`);
-      if (!res.ok) return;
-      const { job } = await res.json();
-      // Stale-guard: коммитим свежие данные ТОЛЬКО если юзер всё ещё на
-      // той же задаче. Функциональный setState видит current на момент
-      // выполнения, а не на момент старта poll'a.
-      let committed = false;
-      setActiveJob((current) => {
-        if (!current || current.id !== jobIdAtStart) return current;
-        committed = true;
+  useEffect(() => {
+    if (!activeJobId || !shouldPollJob) return;
+    const loop = startConstructorPolling<ConstructorJob>({
+      fetch: async (signal) => {
+        const res = await authFetch(`/api/tools/base-constructor/${activeJobId}`, { cache: 'no-store', signal });
+        if (!res.ok) throw new Error(res.status === 401
+          ? 'Сессия истекла. Войдите в портал в новой вкладке, затем обновите статус.'
+          : 'Не удалось обновить статус. Показаны последние полученные данные.');
+        const { job } = await res.json();
+        if (!job || job.id !== activeJobId
+          || !['pending', 'processing', 'completed', 'failed', 'cancelled'].includes(job.status)
+          || !Array.isArray(job.selected_steps) || !Number.isFinite(job.current_step)
+          || !Number.isFinite(job.current_step_progress) || !Number.isFinite(job.total_steps)) {
+          throw new Error('Сервер вернул неполный статус. Повторяем запрос.');
+        }
         return job;
-      });
-      if (!committed) return;
-
-      if (['completed', 'failed', 'cancelled'].includes(job.status)) {
-        if (pollRef.current) clearInterval(pollRef.current);
-        loadHistory();
-        if (job.status === 'completed') loadJobPreview(job.id);
-      }
-    }
-
-    pollRef.current = setInterval(poll, 3000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [activeJob, loadHistory]);
+      },
+      onValue: (job) => {
+        if (activeJobRef.current?.id !== activeJobId || !isActiveJobStatus(activeJobRef.current.status)) return false;
+        setStatusSync({ jobId: activeJobId, receivedAt: Date.now(), error: '' });
+        setActiveJob((current) => current?.id === activeJobId && isActiveJobStatus(current.status) ? job : current);
+        if (!isActiveJobStatus(job.status)) {
+          void loadHistoryRef.current();
+          return false;
+        }
+        return true;
+      },
+      onError: (error) => setStatusSync((current) => ({
+        jobId: activeJobId,
+        receivedAt: current?.jobId === activeJobId ? current.receivedAt : null,
+        error: error instanceof Error ? error.message : 'Не удалось обновить статус.',
+      })),
+    });
+    pollRef.current = loop;
+    const refresh = () => { if (document.visibilityState === 'visible') void loop.refresh(); };
+    window.addEventListener('focus', refresh);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      loop.stop();
+      if (pollRef.current === loop) pollRef.current = null;
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [activeJobId, shouldPollJob]);
 
   /* ─── Submitting elapsed timer ──────────────────────────────────────
    *
@@ -653,17 +697,6 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   }, [submitting, submittingElapsedSec]);
 
   /* ─── Load job result data ─── */
-
-  // Preview = first ~20 rows only. The result blob can be tens of MB, so we never
-  // pull the whole thing just to render the preview table or enable download.
-  async function loadJobPreview(jobId: string) {
-    fullDataCacheRef.current = null;
-    setPreviewData(null);
-    const res = await authFetch(`/api/tools/base-constructor/${jobId}/data?preview=21`);
-    if (!res.ok) return;
-    const { data } = await res.json();
-    setPreviewData(data || null);
-  }
 
   // Full result, fetched lazily — only the admin "Открыть в базах" flow needs all rows.
   async function ensureFullData(jobId: string): Promise<string[][] | null> {
@@ -888,6 +921,57 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     }
   }
 
+  /* ─── Resume a failed manual job, without uploading/creating another ─── */
+
+  async function handleRetry() {
+    if (!activeJob || activeJob.status !== 'failed' || clientMode
+      || activeJob.workload_origin === 'automation' || retryPendingRef.current) return;
+    const jobId = activeJob.id;
+    const failedAt = activeJob.completed_at ?? null;
+    retryPendingRef.current = true;
+    setRetryingJobId(jobId);
+    setRetryError(null);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const res = await authFetch(`/api/tools/base-constructor/${jobId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ action: 'retry', failed_at: failedAt }),
+        signal: controller.signal,
+      });
+      const result = await res.json().catch(() => null);
+      if (res.status === 401) throw new Error('Сессия истекла. Войдите в портал и попробуйте снова. Прогресс сохранён.');
+      if (!res.ok) {
+        if (res.status === 409) {
+          invalidateHistoryRequests();
+          void loadHistory();
+        }
+        throw new Error(result?.error || 'Не удалось возобновить задачу. Попробуйте снова.');
+      }
+      if (result?.ok !== true || !isActiveJobStatus(result.status)) {
+        throw new Error('Не удалось подтвердить запуск. Попробуйте снова: дубликат не создастся.');
+      }
+      // A response for another selected job must not steal the user's screen.
+      const resume = (job: ConstructorJob): ConstructorJob => job.id === jobId
+        && job.status === 'failed' && (job.completed_at ?? null) === failedAt
+        ? { ...job, status: result.status, error_message: undefined, completed_at: undefined }
+        : job;
+      setActiveJob((current) => current ? resume(current) : current);
+      setHistory((current) => current.map(resume));
+      if (fullDataCacheRef.current?.id === jobId) fullDataCacheRef.current = null;
+      invalidateHistoryRequests();
+      void loadHistory();
+    } catch (err) {
+      setRetryError({ id: jobId, failedAt, message: controller.signal.aborted
+        ? 'Ответ сервера задерживается. Попробуйте снова: дубликат не создастся.'
+        : err instanceof Error ? err.message : 'Ошибка сети. Попробуйте снова.' });
+    } finally {
+      clearTimeout(timeout);
+      retryPendingRef.current = false;
+      setRetryingJobId(null);
+    }
+  }
+
   /* ─── Cancel ─── */
 
   async function handleCancel() {
@@ -970,6 +1054,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     setBrief('');
     setPrompt('');
     setError('');
+    setRetryError(null);
   }
 
   /* ═══════════════════════════════════════════
@@ -991,6 +1076,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const overallProgress = activeJob && activeJob.total_steps > 0
     ? Math.round(((activeJob.current_step - 1 + activeJob.current_step_progress / 100) / activeJob.total_steps) * 100)
     : 0;
+  const progressDescription = activeJob ? describeConstructorProgress(activeJob) : null;
+  const currentStatusSync = statusSync?.jobId === activeJob?.id ? statusSync : null;
 
   const needsBrief = selectedSteps.includes('ta_scoring');
   const needsPrompt = selectedSteps.includes('personalization');
@@ -2043,13 +2130,23 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               </div>
             </div>
             <div className="px-6 py-5 space-y-5">
+              {!clientMode && activeJob.status === 'pending' && activeJob.current_step > 0 && (
+                <p role="status" className="text-sm text-gray-600">
+                  Задача в очереди на продолжение. Сохранённый прогресс показан ниже.
+                </p>
+              )}
               {/* Overall progress bar */}
               <div>
                 <div className="flex items-center justify-between text-sm mb-2">
                   <span className={`font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>
-                    {STEP_MAP.get(activeJob.current_step_key as StepKey)?.label || 'Обработка...'}
+                    {activeJob.status === 'pending' ? 'Ожидает свободного воркера'
+                      : STEP_MAP.get(activeJob.current_step_key as StepKey)?.label || 'Обработка...'}
                   </span>
-                  <span className={`tabular-nums ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>{Math.max(0, overallProgress)}%</span>
+                  <span className={`tabular-nums shrink-0 ml-3 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                    {activeJob.current_step > 0
+                      ? `Шаг ${activeJob.current_step} из ${activeJob.total_steps}`
+                      : `Этапов: ${activeJob.total_steps}`}
+                  </span>
                 </div>
                 <div className={`w-full rounded-full h-2.5 ${clientMode ? 'bg-[var(--cp-surface-elev)]' : 'bg-gray-100'}`}>
                   <div
@@ -2057,6 +2154,23 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     style={{ width: `${Math.max(0, overallProgress)}%` }}
                   />
                 </div>
+                <p className={`text-xs mt-2 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                  Этапы занимают разное время. Полоса показывает ход обработки, а не оставшееся время.
+                </p>
+                <div className={`mt-2 text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                  {currentStatusSync?.receivedAt
+                    ? `Статус получен в ${new Date(currentStatusSync.receivedAt).toLocaleTimeString('ru-RU')}`
+                    : 'Получаем актуальный статус…'}
+                  <button type="button" onClick={() => void pollRef.current?.refresh()}
+                    className="ml-3 underline underline-offset-2 focus-visible:outline focus-visible:outline-2">
+                    Обновить статус
+                  </button>
+                </div>
+                {currentStatusSync?.error && (
+                  <p role="alert" className={`text-sm mt-2 ${clientMode ? 'text-[var(--cp-amber)]' : 'text-amber-800'}`}>
+                    {currentStatusSync.error} Автоматически повторяем запрос. Это не означает остановку обработки базы.
+                  </p>
+                )}
               </div>
 
               {/* Step-by-step indicators */}
@@ -2114,8 +2228,13 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         }`}>
                           {step.label}
                         </p>
+                        {isCurrent && progressDescription && (
+                          <p className={`text-xs mt-1 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-blue-700'}`}>
+                            {progressDescription}
+                          </p>
+                        )}
                       </div>
-                      {isCurrent && activeJob.current_step_progress > 0 && (
+                      {isCurrent && !progressDescription && activeJob.current_step_progress > 0 && (
                         <span className={`text-xs font-medium tabular-nums ${clientMode ? 'text-[var(--cp-paper)]' : 'text-blue-600'}`}>
                           {activeJob.current_step_progress}%
                         </span>
@@ -2145,14 +2264,41 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 {clientMode ? CLIENT_CONSTRUCTOR_ERROR : activeJob.error_message || 'Неизвестная ошибка'}
               </p>
               {clientMode && <a href="/client/support" className="ds-btn-secondary inline-flex">Написать в поддержку</a>}
+              {!clientMode && activeJob.workload_origin !== 'automation' && (
+                <>
+                  <p className="text-sm text-gray-600">
+                    Продолжим с последней сохранённой точки. Завершённые шаги не запускаются заново.
+                    Несохранённая часть текущего шага может повториться.
+                  </p>
+                  {retryError?.id === activeJob.id && retryError.failedAt === (activeJob.completed_at ?? null) && (
+                    <p role="alert" className="text-sm text-red-600">{retryError.message}</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    disabled={retryingJobId !== null}
+                    aria-busy={retryingJobId === activeJob.id}
+                    className="mr-2 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white hover:bg-gray-800 transition inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-900"
+                  >
+                    {retryingJobId === activeJob.id
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                      : <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />}
+                    {retryingJobId === activeJob.id ? 'Возобновляем…' : 'Попробовать снова'}
+                  </button>
+                </>
+              )}
+              {!clientMode && activeJob.workload_origin === 'automation' && (
+                <p className="text-sm text-gray-600">Этой задачей управляет автоматизация. Возобновите её в исходном инструменте.</p>
+              )}
               <button
+                type="button"
                 onClick={resetForm}
                 className={clientMode
                   ? 'ds-btn-secondary inline-flex items-center gap-2'
                   : 'px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition inline-flex items-center gap-2'}
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                Попробовать снова
+                {clientMode ? 'Попробовать снова' : 'Загрузить другую базу'}
               </button>
             </div>
           </div>
@@ -2449,8 +2595,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   <button type="button" className="min-w-0 flex-1 basis-64 text-left"
                   onClick={() => {
                     setActiveJob(j);
-                    setPreviewData(null);
-                    if (j.status === 'completed') loadJobPreview(j.id);
+                    if (activeJob?.id !== j.id) setPreviewData(null);
                   }}
                   >
                       <span className={`block break-words text-sm font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>

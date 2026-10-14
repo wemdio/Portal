@@ -130,6 +130,20 @@ it('recovers the exact filtered reserve and period ownership without uploading c
     expect.objectContaining({ periodId: 'period-1', campaignId: 'campaign-1', baselineContacts: 0 }),
   ]);
   expect(mockCreateLeads).not.toHaveBeenCalled();
+
+  // Current exclusions must not destroy the immutable recovery structure of
+  // an already-created empty campaign or change a pre-upgrade stored payload.
+  const oldPayload = { email: 'allowed@example.test', custom_variables: { client_code: 'old-value' } };
+  await mockPortalDb.from('ve_launch_queue_campaigns').insert({ id: 'own-row', campaign_id: 'campaign-1' });
+  await mockPortalDb.from('ve_contact_delivery_rows').insert({ id: 'own-contact', ve_project_id: 've-project-1',
+    campaign_row_id: 'own-row', email_normalized: 'allowed@example.test', status: 'ready', lead_payload: oldPayload });
+  await mockPortalDb.from('ve_project_exclusions').insert({ project_id: 've-project-1',
+    revision: 1, inns: [], domains: ['example.test'], emails: [] });
+  expect((await recover()).status).toBe(200);
+  expect(mockPortalDb.rpcCalls.at(-1)?.params.p_drip_rows).toEqual([
+    expect.objectContaining({ email_normalized: 'allowed@example.test', lead_payload: oldPayload }),
+  ]);
+  expect(mockCreateLeads).not.toHaveBeenCalled();
 });
 
 it('recovers a known live campaign even when the failed attempt saved no launch_info', async () => {

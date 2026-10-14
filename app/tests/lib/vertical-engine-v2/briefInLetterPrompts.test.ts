@@ -29,6 +29,9 @@ import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadlin
 import { buildChainLetters, runChainStage } from '@/lib/verticalEngineV2/stages/chain';
 import { runTemplateStage } from '@/lib/verticalEngineV2/stages/template';
 import { normalizeVeChainLetters } from '@/lib/verticalEngineV2/chainLetters';
+import { normalizeVeFinalLetters, materializeVeFinalLetters } from '@/lib/verticalEngineV2/finalLetters';
+import { veEmailLinkUrl, veEmailBodyDocument, veEmailBodyText } from '@/lib/verticalEngineV2/emailBody';
+import { renderTemplatePreview } from '@/lib/verticalEngineV2/renderPreview';
 import { buildLaunchSequence } from '@/lib/verticalEngineV2/launchHandoff';
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
@@ -592,13 +595,66 @@ describe('VE2 follow-up timing through generation and launch', () => {
     const letters = db.inserts.find((entry) => entry.table === 've_templates')!.rows[0].letters as VeChainLetter[];
     expect(waitsOf(letters)).toEqual([0, 0, 4, 8]);
     expect(result.result).toMatchObject({ direct_final: true });
+    const preset: ClientCampaignPreset = { id: 'preset', client_user_id: 'client', instantly_account_id: 'workspace',
+      email_account_ids: ['sender@example.test'], daily_limit: 30, daily_max_leads: 20, email_gap_minutes: 5,
+      open_tracking: false, link_tracking: false, text_only: true, stop_on_reply: true, agency_managed: true,
+      created_by: null, created_at: '2026-01-01', updated_at: '2026-01-01',
+      schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Europe/Moscow', schedule_from: '09:00', schedule_to: '18:00' };
     const payload = buildCampaignPayloadFromPreset({
-      preset: { email_account_ids: ['sender@example.test'], daily_limit: 30, daily_max_leads: 20,
-        schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Europe/Moscow',
-        schedule_from: '09:00', schedule_to: '18:00' } as ClientCampaignPreset,
+      preset,
       sequence: { name: 'Timing', steps: buildLaunchSequence(letters)!.steps },
     });
     expect(payload.sequences?.[0].steps.map((step) => step.delay)).toEqual([0, 4, 8, 1]);
     expect(payload.sequences?.[0].steps.every((step) => step.delay_unit === 'days')).toBe(true);
+    // Editing the generated chain must survive the same preview -> handoff path.
+    const href = veEmailLinkUrl('https://client.test/offer(old)?keep=1#pricing', { utm_source: 'email', utm_campaign: 'Клиент' });
+    const linked = `Вариант C: [условия](${href})\n\n[сайт](https://client.test/)`;
+    expect(veEmailBodyText(veEmailBodyDocument(linked))).toBe(linked);
+    expect(href).toContain('offer%28old%29?keep=1&utm_source=email&');
+    expect(href).toContain('#pricing');
+    for (const invalid of ['javascript:alert(1)', 'data:text/html,x', 'https://name:pass@client.test', 'https://client.test/ bad']) expect(() => veEmailLinkUrl(invalid)).toThrow();
+    for (const invalid of ['https://localhost', 'https://name:pass@client.test', 'https://[broken']) {
+      const pasted = `Письмо [ссылка](${invalid})\nПродолжение`;
+      expect(veEmailBodyText(veEmailBodyDocument(pasted))).toBe(pasted);
+      expect(normalizeVeFinalLetters([{ ...letters[0], body: pasted }]).error).toBeDefined();
+    }
+    expect(veEmailBodyText({ type: 'doc', content: [{ type: 'paragraph', content: [{
+      type: 'text', text: 'Тариф [PRO]', marks: [{ type: 'link', attrs: { href: 'https://client.test/offer' } }],
+    }] }] })).toBe('Тариф [PRO] (https://client.test/offer)');
+    const edited = letters.map(letter => ({ ...letter, selected_variants: ['A', 'B', 'C'] as const,
+      variants: [...letter.variants!, { subject: null, body: linked }] }));
+    const normalized = normalizeVeFinalLetters(edited);
+    expect(normalized.error).toBeUndefined();
+    const sent = buildLaunchSequence(normalized.letters!)!;
+    expect(sent.steps).toHaveLength(4);
+    expect(sent.steps.every(step => step.variants?.length === 2)).toBe(true);
+    expect(sent.steps[0].variants?.map(v => v.subject)).toEqual([letters[0].subject, letters[0].subject]);
+    expect(sent.steps[1].variants?.map(v => v.subject)).toEqual(['', '']);
+    const reviewed = renderTemplatePreview({ letters: normalized.letters!, operatorMapping: [], rows: [{ email: 'sample@test.test' }], columns: ['email'], variantIndices: [2, 1, 2, 0] });
+    expect(reviewed.rows[0].letters[0].body).toBe(linked);
+    expect(reviewed.rows[0].letters[1].body).toBe(letters[1].variants![0].body);
+    const editedPayload = buildCampaignPayloadFromPreset({ preset, sequence: { name: 'Edited', steps: sent.steps } });
+    expect(editedPayload.text_only).toBe(false);
+    expect(editedPayload.open_tracking).toBe(false);
+    expect(editedPayload.link_tracking).toBe(false);
+    expect(editedPayload.sequences![0].steps[0].variants![2].body).toContain(`<a href="${href.replace(/&/g, '&amp;')}">условия</a>`);
+    expect(normalizeVeFinalLetters([{ ...edited[0], selected_subject_indices: [0, 1] }]).error).toContain('общую тему');
+    expect(normalizeVeFinalLetters([{ ...edited[0], selected_variants: ['C'], variants: [] }]).error).toBeDefined();
+    expect(normalizeVeFinalLetters([{ ...edited[0], body: '[плохая](javascript:alert(1))' }]).error).toBeDefined();
+    for (const count of [1, 6]) {
+      const chain = Array.from({ length: count }, (_, i) => ({ ...normalized.letters![0], wait_days: i === 0 ? 0 : 3 }));
+      const changedLength = normalizeVeFinalLetters(chain).letters!;
+      expect(buildLaunchSequence(changedLength)!.steps).toHaveLength(count);
+      expect(buildLaunchSequence(changedLength)!.steps.slice(1).every(step => step.subject === '')).toBe(true);
+    }
+    expect(normalizeVeFinalLetters(Array(7).fill(edited[0])).error).toBeDefined();
+    const segmented = normalized.letters!.map(letter => ({ ...letter, segment_variants: [{ when: 'Клиники', text: 'Текст сегмента' }] }));
+    expect(materializeVeFinalLetters(segmented, 'Клиники').every(letter => letter.body === 'Текст сегмента' && !letter.variants?.length)).toBe(true);
+    const singleC = normalizeVeFinalLetters([{ ...edited[0], selected_variant: 'C', selected_variants: ['C'] }]).letters!;
+    expect(buildLaunchSequence(singleC)!.steps[0].body).toBe(linked);
+    expect(buildLaunchSequence(singleC)!.steps[0].variants).toEqual([]);
+    const oldSubjectTest = normalizeVeFinalLetters([{ ...letters[0], selected_subject_indices: [0, 1, 2, 3, 4, 5] }]).letters!;
+    expect(buildLaunchSequence(oldSubjectTest)!.steps[0].variants).toHaveLength(5);
+
   });
 });

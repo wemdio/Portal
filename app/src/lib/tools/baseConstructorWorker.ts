@@ -937,6 +937,8 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           : Math.min(99, Math.max(0, Math.round(job.current_step_progress ?? 0)))
         : 0;
       metrics.beginStep(i + 1, stepKey, Math.max(0, data.length - 1), isResumingCurrentStep);
+      // A phase from the previous step/attempt is not current progress.
+      metrics.merge({ step_progress: null });
       const priorStats = metrics.snapshot();
       const savedTelemetry = mergeBaseConstructorStats(priorStats.ta_scoring_telemetry, {});
       const priorTelemetry = mergeBaseConstructorStats(priorStats.ta_scoring_telemetry, {
@@ -965,7 +967,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         });
       };
       let lastReportedProgress = savedProgressFloor;
-      const progressFn: ProgressFn = async (progress) => {
+      const progressFn: ProgressFn = async (progress, detail) => {
         // A step's local 100 means "the function is about to return", not
         // "its returned rows are durable". Keep persisted progress at <=99;
         // the worker publishes 100 only after saving non-final output or in
@@ -975,6 +977,12 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           ? savedProgressFloor + Math.round(((100 - savedProgressFloor) * normalized) / 100)
           : normalized);
         lastReportedProgress = Math.max(lastReportedProgress, mapped);
+        if (detail || progress >= 100) {
+          metrics!.merge({ step_progress: {
+            ...(progress >= 100 ? { phase: 'saving' } : detail),
+            step_index: i + 1, step_key: stepKey, updated_at: new Date().toISOString(),
+          } });
+        }
         await updateJobProgress(jobId, i, stepKey, lastReportedProgress, runToken, metrics!.snapshot());
       };
       await progressFn(0);

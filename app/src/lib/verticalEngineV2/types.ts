@@ -184,6 +184,8 @@ export interface VeHypothesis {
   seasonality?: VeRuSeasonality | null;
   potential_pct: number;
   status: VeHypothesisStatus;
+  /** Автор аудитории: ручной ввод не является оценкой или доказательством модели. */
+  origin?: 'generated' | 'manual';
   /** Широкая гипотеза уровня сектора для ежедневного добора; нет до миграции 20260923_0001. */
   broad?: boolean;
   created_at: string;
@@ -421,8 +423,9 @@ export interface VeChainLetter {
   wait_days: number;
   /** A/B-варианты (B, C…) для ручного выбора и A/B-теста в Instantly. */
   variants?: VeChainLetterVariant[];
-  /** Final-editor contract. Alternatives stay editable; only this body is sent. */
-  selected_variant?: 'A' | 'B';
+  /** Backward-compatible default body. Explicit test selection takes precedence. */
+  selected_variant?: 'A' | 'B' | 'C';
+  selected_variants?: Array<'A' | 'B' | 'C'>;
   angle?: string;
   cta_intent?: string;
   /** Six independent subject suggestions; present on the first email only. */

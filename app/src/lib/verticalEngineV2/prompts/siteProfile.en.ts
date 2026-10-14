@@ -40,6 +40,10 @@ SPECIALIST'S BUSINESS DESCRIPTION (clarifies the offer; takes priority over the 
 ${input.businessOverride.trim()}
 """
 ` : ''}
+${input.priorityNiches?.length ? `
+Requested directions for subsequent research: ${JSON.stringify(input.priorityNiches)}.
+These are specialist preferences, not website facts: do not add them to current_clients, cases or target_audience unless supported by supplied sources. Do not change product facts to fit a requested niche.
+` : ''}
 Build the company profile and return ONLY JSON of exactly this shape (no markdown fences, no explanations):
 {
   "company_name": string,      // company/brand name as stated on the site

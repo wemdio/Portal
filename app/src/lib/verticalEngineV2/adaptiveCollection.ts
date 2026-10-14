@@ -176,6 +176,26 @@ export function veAdaptiveSourceDry(completed: VeAdaptiveResult[], sourceKey: st
   }
   return null;
 }
+/** Once both alternative-plan attempts are spent, do not buy another batch
+ * from the unchanged strategy after five hundred companies yielded at most
+ * two goal contacts. The 5% switch signal alone never disables a source:
+ * productive narrow sources (including 2.6% maps) remain available. This only
+ * defers new acquisition; already dispatched work and saved verdicts survive. */
+export function veAdaptiveSourceDeferred(state: VeAdaptiveCollection, sourceKey: string): VeDrySource | null {
+  if (state.replan_attempts < 2) return null;
+  let companies = 0, contacts = 0, source = '';
+  for (let index = state.completed.length - 1; index >= 0; index--) {
+    const batch = state.completed[index];
+    if (batch.source_key !== sourceKey) continue;
+    if (!batch.poor) return null;
+    companies += batch.candidates;
+    contacts += Number.isSafeInteger(batch.new_target) ? batch.new_target! : batch.new_ready;
+    source ||= batch.source;
+    if (contacts > 2) return null;
+    if (companies >= 500) return { source_key: sourceKey, source, companies, contacts };
+  }
+  return null;
+}
 /** Все живые источники базы сухие: их итоги; иначе null. Без живых источников решает другое правило. */
 export function veDryLiveSources(completed: VeAdaptiveResult[], liveKeys: Iterable<string>): VeDrySource[] | null {
   const keys = [...new Set(liveKeys)];
@@ -211,9 +231,9 @@ export function veDrySourcesSummary(dry: VeDrySource[]): string {
 }
 /** Prefer an untried alternative after two poor complete batches, then the
  * best observed yield. Never discard the old source or its unprocessed rows.
- * A dry source is never chosen; when every source is dry there is no choice. */
+ * Dry or repeatedly near-empty strategies are not chosen for new acquisition. */
 export function chooseVeAdaptiveSource(state: VeAdaptiveCollection, available: string[]): string | undefined {
-  const live = available.filter((key) => !veAdaptiveSourceDry(state.completed, key));
+  const live = available.filter((key) => !veAdaptiveSourceDry(state.completed, key) && !veAdaptiveSourceDeferred(state, key));
   if (!live.length) return undefined;
   if (state.active_source && live.includes(state.active_source) && !state.replan_needed) return state.active_source;
   const stats = (key: string) => state.completed.filter((item) => item.source_key === key);

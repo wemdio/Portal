@@ -27,6 +27,7 @@ export interface SiteProfilePromptInput {
   clientBrief?: string;
   /** Сохранённое специалистом описание бизнеса, в том числе для JS-сайта. */
   businessOverride?: string;
+  priorityNiches?: string[];
 }
 
 /** Блок брифа для промпта профиля. Пустой бриф блок не создаёт. */
@@ -56,6 +57,10 @@ ${input.businessOverride.trim()}
 """
 ` : ''}
 
+${input.priorityNiches?.length ? `
+Желаемые направления будущего исследования: ${JSON.stringify(input.priorityNiches)}.
+Это предпочтения специалиста, а не сведения сайта: не добавляй их в current_clients, cases или target_audience без подтверждения в источниках. Не меняй факты продукта ради желаемой ниши.
+` : ''}
 Собери профиль компании и верни ТОЛЬКО JSON строго такого вида (без markdown-фенсов и пояснений):
 {
   "company_name": string,      // название компании/бренда как на сайте

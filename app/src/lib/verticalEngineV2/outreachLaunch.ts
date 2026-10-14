@@ -74,8 +74,8 @@ async function readItem(db: SupabaseClient, projectId: string, item: LaunchItem)
   if (!template || !base || template.base_id !== base.id || base.project_id !== projectId
     || base.hypothesis_id !== item.hypothesis_id || template.status !== 'ready' || template.supply_batch_id
     || base.status !== 'analyzed' || base.collect_info?.collection_mode !== 'preview') fail('Письма или одобренная база ещё не готовы к запуску.');
-  if (!Array.isArray(template.letters) || !template.letters.length || template.letters.some((letter: { selected_variant?: unknown }) => !['A', 'B'].includes(String(letter.selected_variant)))) {
-    fail('Откройте и сохраните итоговые письма: для каждого письма нужен выбранный вариант A или B.');
+  if (!Array.isArray(template.letters) || !template.letters.length || template.letters.some((letter: { selected_variant?: unknown }) => !['A', 'B', 'C'].includes(String(letter.selected_variant)))) {
+    fail('Откройте и сохраните итоговые письма: для каждого письма нужен выбранный текст.');
   }
   const { data: revision, error } = await db.rpc('ve_contact_supply_preview_revision', { p_template_id: item.template_id });
   if (error || revision !== item.preview_revision) fail('Одобренная версия базы или писем изменилась. Требуется повторный просмотр.');

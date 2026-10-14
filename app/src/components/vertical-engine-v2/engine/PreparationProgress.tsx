@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
-import type { VeBaseSummary, VeCollectInfo, VeJobSummary } from './api';
+import type { VeBaseSummary, VeCollectInfo, VeJobSummary, VePreparationAction } from './api';
 import { collectCount, describeCompletedCollection, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
 import { HE, StatusDot } from './design';
 
@@ -16,6 +16,48 @@ interface PreparationProgressProps {
   onContinue?: () => void;
   continueDisabled?: boolean;
   approved?: boolean;
+  actionNotice?: PreparationActionNotice | null;
+}
+
+export interface PreparationActionNotice { tone: 'info' | 'error'; message: string }
+export interface PreparationRequestNotice extends PreparationActionNotice {
+  hypothesisId: string | null;
+  checking?: boolean;
+  keepUntilStateChanges?: boolean;
+  stateKey?: string;
+}
+
+/** Fresh persisted progress supersedes a request receipt. A refusal stays
+ * visible until the affected preparation changes, even across polling. */
+export function refreshPreparationRequestNotice(
+  notice: PreparationRequestNotice | null,
+  snapshot: { preparations: readonly VeOutreachPreparation[]; bases: readonly VeBaseSummary[]; jobs: readonly VeJobSummary[] },
+): PreparationRequestNotice | null {
+  if (!notice || notice.checking) return notice;
+  if (!notice.keepUntilStateChanges) return null;
+  const preparations = snapshot.preparations.filter((item) => !notice.hypothesisId || item.hypothesis_id === notice.hypothesisId);
+  const bases = snapshot.bases.filter((item) => !notice.hypothesisId || item.hypothesis_id === notice.hypothesisId
+    || preparations.some((preparation) => preparation.base_id === item.id));
+  const baseIds = new Set(bases.map((item) => item.id));
+  const stateKey = JSON.stringify({
+    preparations: preparations.map((item) => [item.hypothesis_id, item.base_id, item.template_id, item.status, item.last_error]).sort(),
+    bases: bases.map((item) => [item.id, item.status, item.updated_at, item.collection_continuation]).sort(),
+    jobs: snapshot.jobs.filter((item) => baseIds.has(item.payload?.base_id ?? ''))
+      .map((item) => [item.id, item.status, item.error]).sort(),
+  });
+  return notice.stateKey === undefined ? { ...notice, stateKey } : notice.stateKey === stateKey ? notice : null;
+}
+
+/** A successful HTTP response alone does not confirm a newly queued task. */
+export function getPreparationActionNotice(outcome?: VePreparationAction): PreparationActionNotice {
+  const messages = {
+    queued: 'Подготовка поставлена в очередь.',
+    already_running: 'Подготовка уже выполняется.',
+    unavailable: 'Продолжение сейчас недоступно.',
+    ready: 'База и письма уже готовы.',
+  };
+  return { tone: outcome?.status === 'unavailable' ? 'error' : 'info',
+    message: outcome?.reason || (outcome ? messages[outcome.status] : 'Обновляем состояние подготовки.') };
 }
 
 export interface PreparationPresentation {
@@ -25,9 +67,13 @@ export interface PreparationPresentation {
   currentStep: number | null;
   tone: 'info' | 'muted' | 'err' | 'ok';
   canContinue?: boolean;
+  /** Historical context only; collection actions remain visible separately. */
+  collectionSummary?: string;
+  continuationUnconfirmed?: boolean;
   continueLabel?: string;
   continueHint?: string;
   awaitingStatus?: boolean;
+  continuationBlocked?: boolean;
   guidance?: {
     action: 'wait' | 'review' | 'launch' | 'continue' | 'start' | 'check';
     title: string;
@@ -46,7 +92,7 @@ const CONSTRUCT_STEPS: Record<string, string> = {
 
 function preparationError(message: string): string {
   if (message.startsWith('Задача сбора завершилась, но база не готова.')) {
-    return 'Продолжение подготовки прервалось. Сейчас база не обрабатывается. Нажмите «Продолжить подготовку», чтобы возобновить работу с сохранёнными результатами.';
+    return 'Продолжение подготовки прервалось. Сейчас база не обрабатывается. Сохранённые результаты не потеряны.';
   }
   const failure = getVeCollectionFailure(message);
   return failure.kind !== 'unknown' ? failure.message : message;
@@ -79,6 +125,14 @@ function getPreparationStage({ preparation, base, jobs, context = 'base' }: Prep
     const job = jobFor(stage as VeJobSummary['stage']);
     return job && ['pending', 'running'].includes(job.status);
   });
+  if (base?.collection_continuation?.code === 'already_running' && !hasLiveJob) return {
+    title: 'Подготовка продолжается', description: base.collection_continuation.reason,
+    currentStep: null, tone: 'info',
+  };
+  if (base?.collection_continuation?.code === 'preparation_incomplete' && !hasLiveJob) return {
+    title: 'Нужно завершить подготовку', description: base.collection_continuation.reason,
+    currentStep: 2, tone: 'muted', canContinue: true, continueLabel: 'Продолжить подготовку',
+  };
   const target = base?.collect_info?.target_progress;
   const composition = describeReadyComposition(target);
   const partialReady = preparation.status === 'ready' && (target?.ready_rows ?? 0) > 0
@@ -99,8 +153,7 @@ function getPreparationStage({ preparation, base, jobs, context = 'base' }: Prep
         : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. '),
     currentStep: partialReady ? STEPS.length : null,
     tone: partialReady ? 'ok' : target.status === 'error' ? 'err' : 'muted', canContinue: true,
-    continueLabel: preparation.status === 'ready' && target.status !== 'error' ? 'Повторить добор' : undefined,
-    continueHint: 'Повторная попытка продолжит работу с сохранёнными результатами. Если источники снова дадут только повторы, новых контактов не будет.',
+    continueLabel: preparation.status === 'ready' && target.status !== 'error' ? 'Продолжить добор' : undefined,
   };
   if (context === 'letters' && base?.status === 'failed' && !hasLiveJob) return {
     title: 'Письма ждут завершения подготовки базы',
@@ -109,7 +162,7 @@ function getPreparationStage({ preparation, base, jobs, context = 'base' }: Prep
   };
   if (preparation.status === 'error' && !hasLiveJob) return {
     title: 'Подготовка остановлена',
-    description: preparation.last_error ? preparationError(preparation.last_error) : 'Не удалось завершить подготовку. Нажмите «Продолжить подготовку», чтобы повторить остановленный этап.',
+    description: preparation.last_error ? preparationError(preparation.last_error) : 'Не удалось завершить подготовку. Сохранённые результаты не потеряны.',
     currentStep: null, tone: 'err', canContinue: true,
   };
   if (preparation.status === 'ready' && !hasLiveJob) return {
@@ -175,7 +228,7 @@ function getPreparationStage({ preparation, base, jobs, context = 'base' }: Prep
   };
   if (job?.status === 'done') return {
     title: 'Сбор сейчас не выполняется',
-    description: 'Задача завершилась, но подготовка базы осталась незаконченной. Результаты сохранены. Нажмите «Продолжить подготовку», чтобы возобновить незавершённые этапы.',
+    description: 'Задача завершилась, но подготовка базы осталась незаконченной. Результаты сохранены.',
     currentStep: null, tone: 'muted', canContinue: true,
   };
   const info = base?.collect_info as (VeCollectInfo & { validation_retry?: boolean }) | null | undefined;
@@ -230,17 +283,84 @@ function getPreparationStage({ preparation, base, jobs, context = 'base' }: Prep
 /** Explain who acts next without treating missing queue evidence as active work. */
 export function getPreparationPresentation(props: PreparationProgressProps): PreparationPresentation & Required<Pick<PreparationPresentation, 'guidance'>> {
   const state = getPreparationStage(props);
+  const continuation = props.base?.collection_continuation;
+  const target = props.base?.collect_info?.target_progress;
+  const terminalCollection = !!target && ['limited', 'exhausted', 'error'].includes(target.status);
+  const downstreamRetry = props.preparation?.status !== 'ready' && (props.base?.row_count ?? 0) > 0
+    && ['template', 'base_analyze'].some((stage) => {
+      const job = props.jobs.find((candidate) => candidate.payload?.base_id === props.base?.id && candidate.stage === stage);
+      return job && ['failed', 'cancelled'].includes(job.status);
+    });
+  const hasLiveJob = ['base_collect', 'base_analyze', 'template'].some((stage) => {
+    const job = props.jobs.find((candidate) => candidate.payload?.base_id === props.base?.id && candidate.stage === stage);
+    return job && ['pending', 'running'].includes(job.status);
+  });
+  const canResumePreparedBase = !!props.preparation && props.preparation.status !== 'ready'
+    && props.base?.status === 'analyzed' && props.base.row_count > 0 && !hasLiveJob
+    && continuation?.code !== 'already_running'
+    && (continuation?.action === 'resume_preparation' || target?.status === 'target_reached');
+  if (canResumePreparedBase) {
+    state.canContinue = true;
+    state.continueLabel = 'Продолжить подготовку';
+    if (state.tone !== 'err' && continuation?.code !== 'preparation_incomplete') {
+      state.title = 'База собрана, письма ещё не готовы';
+      state.description = 'Проверенные контакты сохранены.';
+      state.currentStep = 2;
+      state.tone = 'muted';
+    }
+  }
+  if (terminalCollection && !downstreamRetry && !canResumePreparedBase && !hasLiveJob && continuation?.code !== 'already_running'
+    && ['pending', 'collecting'].includes(props.preparation?.status ?? '')) {
+    // A stale preparation row is not evidence of queued work. The complete
+    // server decision, rather than a past request, controls the next action.
+    state.title = 'Подготовка сейчас не выполняется';
+    state.description = 'Результаты предыдущей попытки сохранены.';
+    state.currentStep = null;
+    state.tone = 'muted';
+    state.canContinue = true;
+  }
+  if (state.canContinue && !downstreamRetry && !canResumePreparedBase) {
+    if (continuation) {
+      state.continuationUnconfirmed = continuation.code === 'state_unchecked';
+      state.canContinue = !state.continuationUnconfirmed && continuation.available && continuation.action !== null;
+      state.continuationBlocked = !state.canContinue && !state.continuationUnconfirmed;
+      state.continueLabel = continuation.action === 'resume_collection' ? 'Собрать ещё контакты' : 'Продолжить подготовку';
+      state.continueHint = state.continuationUnconfirmed ? undefined : continuation.reason;
+    } else if (terminalCollection) {
+      // Older API snapshots omit the full saved state. Do not guess that an
+      // exhausted plan has another paid or productive pass left.
+      state.canContinue = false;
+      state.continuationUnconfirmed = true;
+    }
+  }
+  if (state.tone === 'ok') {
+    if (terminalCollection) {
+      state.collectionSummary = [state.description, state.continueHint].filter(Boolean).join(' ');
+    }
+    // A finished base needs no retry. The only optional action is confirmed
+    // collection; an unknown cache is resolved automatically by the parent.
+    state.canContinue = continuation?.available === true && continuation.action === 'resume_collection'
+      && continuation.code !== 'state_unchecked';
+    if (state.canContinue) state.continueLabel = 'Собрать ещё контакты';
+    state.continuationBlocked = false;
+    state.continueHint = undefined;
+  }
   let guidance: NonNullable<PreparationPresentation['guidance']>;
   if (!props.preparation) {
     guidance = { action: 'start', title: 'Нужно начать подготовку', next: 'Вернитесь к гипотезам и нажмите «Подготовить письма и базы».' };
   } else if (state.tone === 'ok' && props.approved) {
     guidance = { action: 'launch', title: 'База и письма одобрены', next: 'Перейдите к запуску этой базы. Система подготовит кампанию в Instantly; отправку вы включите там сами.' };
   } else if (state.tone === 'ok') {
-    guidance = { action: 'review', title: 'Теперь проверьте базу и письма', next: 'После проверки одобрите базу. Затем можно подготовить кампанию в Instantly; отправку вы включите там сами.' };
+    guidance = { action: 'review', title: 'База и письма готовы', next: 'Скачайте контакты или проверьте базу и письма для запуска. После проверки одобрите базу.' };
   } else if (props.context === 'letters' && props.base?.status === 'failed' && state.tone === 'muted') {
-    guidance = { action: 'check', title: 'Нужно восстановить подготовку базы', next: 'Откройте «Базы и объём»: там указана причина остановки и доступно продолжение.' };
+    guidance = { action: 'check', title: 'Нужно проверить состояние базы', next: 'Откройте «Базы и объём»: там указаны причина остановки и доступные действия.' };
+  } else if (state.continuationUnconfirmed) {
+    guidance = { action: 'check', title: 'Подготовка не завершена', next: 'Возможность продолжения пока не подтверждена. Новый сбор не запускается.' };
   } else if (state.canContinue) {
-    guidance = { action: 'continue', title: 'Нужно продолжить подготовку', next: 'Нажмите «Продолжить подготовку» ниже. Система продолжит незавершённые этапы с сохранёнными результатами.' };
+    guidance = { action: 'continue', title: 'Можно продолжить подготовку',
+      next: `Нажмите «${state.continueLabel ?? 'Продолжить подготовку'}» ниже. Работа продолжится с сохранённого этапа.` };
+  } else if (state.continuationBlocked) {
+    guidance = { action: 'check', title: 'Добор сейчас недоступен', next: 'Новый сбор сейчас не выполняется.' };
   } else if (state.tone === 'err') {
     guidance = { action: 'check', title: 'Подготовка не завершена', next: 'Проверьте причину ниже. Если кнопка продолжения не появится после обновления статуса, сообщите об этом администратору.' };
   } else if (state.awaitingStatus) {
@@ -260,6 +380,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
     return () => { clearTimeout(first); clearInterval(timer); };
   }, []);
   const state = getPreparationPresentation(props);
+  const completed = state.tone === 'ok';
   const job = props.jobs.find(candidate => candidate.stage === 'base_collect' && candidate.payload?.base_id === props.base?.id);
   const progress = getCollectionProgress(props.base?.collect_info, job);
   const target = props.base?.collect_info?.target_progress;
@@ -278,10 +399,11 @@ export function PreparationProgress(props: PreparationProgressProps) {
         <StatusDot tone={state.tone} />
         <h3 className={HE.cardTitle}>{state.guidance.title}</h3>
       </div>
-      <p className="font-medium">{state.title}</p>
-      {state.readiness ? <p>{state.readiness}</p> : null}
+      {!completed ? <p className="font-medium">{state.title}</p> : null}
       <p>{state.guidance.next}</p>
-      {state.guidance?.action === 'wait' ? <details>
+      {completed && state.collectionSummary ? <p className={HE.muted}>Подготовка завершена ниже цели. Эти контакты можно использовать, добор не обязателен.</p> : null}
+      {!completed && state.readiness ? <p>{state.readiness}</p> : null}
+      {completed ? null : state.guidance?.action === 'wait' ? <details>
         <summary className="ve2-link cursor-pointer">Что происходит на этом этапе</summary>
         <p className={`${HE.muted} mt-2 max-w-[70ch]`}>{state.description}</p>
       </details> : <p className={HE.muted}>{state.description}</p>}
@@ -316,12 +438,18 @@ export function PreparationProgress(props: PreparationProgressProps) {
           {savedReady !== null ? `; проверенных контактов: ${savedReady.toLocaleString('ru-RU')}` : ''}.
         </p>
       ) : null}
+      {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
+        className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
       {state.canContinue && props.onContinue ? <div className="space-y-2">
         <button type="button" className={state.continueLabel ? HE.btnGhost : HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
           {state.continueLabel ?? 'Продолжить подготовку'}
         </button>
-        {state.continueHint ? <p className={HE.faint}>{state.continueHint}</p> : null}
       </div> : null}
+      {state.continueHint ? <p className={HE.muted}>{state.continueHint}</p> : null}
+      {state.collectionSummary ? <details>
+        <summary className="ve2-link cursor-pointer">О сборе базы</summary>
+        <p className={`${HE.muted} mt-2 max-w-[70ch]`}>{state.collectionSummary}</p>
+      </details> : null}
     </div>
   );
 }

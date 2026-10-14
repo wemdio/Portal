@@ -53,6 +53,8 @@ import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
 import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
+import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
+import { withVeDeliveryCompanyIdentity } from './projectExclusionDelivery';
 import {
   claimProjectCampaignLinks,
   describeOwnershipConflicts,
@@ -614,6 +616,20 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   if (groups.length === 0) {
     return { status: 400, body: { error: t.allContactsBlocked } };
   }
+  let projectExcludedCount = 0;
+  try {
+    const rules = await loadVeProjectExclusions(portalDb, base.project_id);
+    groups = groups.map(group => ({ ...group, leadIdx: group.leadIdx.filter(index => {
+      if (!matchVeProjectExclusion(veProjectExclusionRow(audience.rows[index], audience.leads[index].email), rules)) return true;
+      projectExcludedCount += 1;
+      return false;
+    }) })).filter(group => group.leadIdx.length > 0);
+  } catch {
+    return { status: 503, body: { code: 'VE_PROJECT_EXCLUSIONS_UNAVAILABLE', error: 'Не удалось проверить исключения проекта. Попробуйте ещё раз.' } };
+  }
+  if (groups.length === 0) {
+    return { status: 400, body: { code: 'VE_PROJECT_CONTACTS_EXCLUDED', error: 'Все доступные контакты совпали с исключениями проекта.' } };
+  }
   // Filter before creating remote campaigns; the unique DB constraint remains
   // the authority if two hypotheses prepare concurrently after this read.
   try {
@@ -924,7 +940,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
           campaign_id: campaignId,
           source_row_index: sourceRowIndex,
           drip_order: dripRows.length,
-          lead_payload: { ...lead },
+          lead_payload: withVeDeliveryCompanyIdentity(lead, audience.rows[sourceRowIndex]),
           email_normalized: emailNormalized,
         });
       }
@@ -1156,6 +1172,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       targetContacts,
       totalLeads: leads.length,
       blockedContacts: blockedContactsCount,
+      projectExcludedContacts: projectExcludedCount,
       force,
     },
   );
@@ -1166,6 +1183,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       ok: !ambiguousGroupFailure,
       launch: launchInfo,
       warnings,
+      project_excluded_contacts: projectExcludedCount,
       ...(ambiguousGroupFailure
         ? { error: t.launchUncertain, code: 'TEMPLATE_LAUNCH_UNCERTAIN' }
         : {}),

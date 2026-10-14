@@ -69,6 +69,17 @@ describe('VE2 goal counts companies, not address density', () => {
     const state = getPreparationPresentation({ preparation, base: summary, jobs: [] });
     expect(state.title).toBe('База и письма готовы к согласованию');
     expect(state.description).toContain('Компаний: 39.');
-    expect(state.canContinue).toBe(true);
+    expect(state.canContinue).toBe(false);
+    expect(state.guidance.action).toBe('review');
+    expect(state.collectionSummary).toContain('Компаний: 39.');
+    expect(state).not.toHaveProperty('canCheckContinuation');
+    const available = getPreparationPresentation({ preparation, base: { ...summary,
+      collection_continuation: { available: true, action: 'resume_collection', code: 'fresh_sources', reason: 'Есть необработанные компании.' } }, jobs: [] });
+    expect(available).toMatchObject({ tone: 'ok', canContinue: true, continueLabel: 'Собрать ещё контакты',
+      guidance: { action: 'review' } });
+    // A malformed/legacy unknown verdict is never permission for collection.
+    const unknown = getPreparationPresentation({ preparation, base: { ...summary,
+      collection_continuation: { available: true, action: 'resume_collection', code: 'state_unchecked', reason: 'Нужно проверить состояние.' } }, jobs: [] });
+    expect(unknown).toMatchObject({ tone: 'ok', canContinue: false, guidance: { action: 'review' } });
   });
 });

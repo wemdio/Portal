@@ -67,7 +67,9 @@ export {
   stripEnrichCheckpointMetadata,
 } from './baseConstructorCheckpoint';
 
-export type ProgressFn = (progress: number) => Promise<void>;
+import type { ConstructorProgressDetail } from './baseConstructorProgress';
+
+export type ProgressFn = (progress: number, detail?: ConstructorProgressDetail) => Promise<void>;
 export type CancelCheckFn = () => Promise<boolean>;
 export type CheckpointFn = (data: string[][]) => Promise<void>;
 
@@ -2290,6 +2292,8 @@ export async function stepValidateEmails(
   };
   const mainPassStartedAt = Date.now();
 
+  await onProgress(0, { phase: 'checking', completed: 0, total: toValidate.length });
+
   await processInPool(toValidate, VALIDATION_CONCURRENCY, async (email) => {
     if (checkpointError) return;
     if (isCancelled && await isCancelled()) { cancelled = true; return; }
@@ -2304,7 +2308,9 @@ export async function stepValidateEmails(
       // (autoCompleteIfStuck: для последнего шага порог 2 мин) завершить джоб
       // с нефильтрованным checkpoint'ом, пока шаг спит/допроверяет unknown.
       // Финальный onProgress(100) — в конце шага после фильтра.
-      await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)));
+      await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)), {
+        phase: 'checking', completed: done, total: toValidate.length,
+      });
     }
     if (onCheckpoint && shouldCheckpoint(done, done === toValidate.length)) {
       await enqueueCheckpoint();
@@ -2350,6 +2356,7 @@ export async function stepValidateEmails(
     const elapsed = Date.now() - mainPassStartedAt;
     const waitMs = Math.min(SECOND_PASS_DELAY_MS, Math.max(0, SECOND_PASS_DELAY_MS - elapsed));
     let waited = 0;
+    if (waitMs > 0) await onProgress(99, { phase: 'retry_wait', completed: 0, total: retryable.length });
     while (waited < waitMs) {
       const chunk = Math.min(1000, waitMs - waited);
       await sleep(chunk);
@@ -2358,12 +2365,13 @@ export async function stepValidateEmails(
       // для stale-detector'а), а прогресс остаётся 99 (см. кэп выше) — иначе
       // пауза до 5 мин после progress=100 давала stuck-reaper'у завершить джоб
       // с нефильтрованными данными.
-      if (waited % 30_000 < 1000) await onProgress(99);
+      if (waited % 30_000 < 1000) await onProgress(99, { phase: 'retry_wait', completed: 0, total: retryable.length });
       // Проверяем отмену раз в секунду, чтобы задача не висела в паузе.
       if (isCancelled && await isCancelled()) throw new Error('Отменено');
     }
     let retryDone = 0;
     const shouldRetryCheckpoint = makeCheckpointGate();
+    await onProgress(99, { phase: 'retrying', completed: 0, total: retryable.length });
     await processInPool(retryable, VALIDATION_CONCURRENCY, async (email) => {
       if (checkpointError) return;
       if (isCancelled && await isCancelled()) { cancelled = true; return; }
@@ -2374,7 +2382,9 @@ export async function stepValidateEmails(
       // Heartbeat и в самом пуле: на больших retry-списках пул идёт минуты,
       // молчание здесь — то же окно для stuck-reaper'а, что и пауза выше.
       retryDone++;
-      if (retryDone % 10 === 0) await onProgress(99);
+      if (retryDone % 10 === 0 || retryDone === retryable.length) await onProgress(99, {
+        phase: 'retrying', completed: retryDone, total: retryable.length,
+      });
       if (onCheckpoint && shouldRetryCheckpoint(retryDone, retryDone === retryable.length)) {
         await enqueueCheckpoint();
       }

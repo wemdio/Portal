@@ -73,6 +73,8 @@ const checkpointSchema = z.object({
     // Разовая перепроверка по новым правилам: отказ DeepSeek здесь решает
     // вторая модель. Добавочное поле, старый воркер его отбросит.
     recheck: z.literal(true).optional().catch(undefined),
+    /** Additive salt marker; the original paid receipt remains unchanged. */
+    staffing_correction_version: z.number().int().positive().optional().catch(undefined),
     // Попытка, оборванная остановкой воркера (ни ответа, ни ошибки модели),
     // уже один раз возвращена. Добавочное поле, старый воркер его отбросит.
     interrupted: z.literal(true).optional().catch(undefined),
