@@ -15,6 +15,7 @@ import { loadHhEmployers, SALES_TITLE_PATTERN, type HhVacancyRef } from './sourc
 import { loadSignalRows } from './sources/uploads';
 import { loadGisCandidates } from './sources/gis';
 import { loadYmapsNewBranches } from './sources/ymaps';
+import { loadYmapsCatalogCandidates } from './sources/ymapsCatalog';
 import type { RuOutreachConfig, Signal, SourceCode } from './types';
 
 export interface Candidate {
@@ -346,6 +347,25 @@ export async function collectCandidates(
             companyName: y.companyName,
             website: `https://${y.domain}`,
             signals: [y.signal],
+          }),
+        );
+      }
+    });
+  }
+
+  if (src.has('ymaps_catalog')) {
+    await attempt('ymaps_catalog', async () => {
+      for (const y of await loadYmapsCatalogCandidates(db, Math.min(50_000, Math.max(500, poolTarget)))) {
+        const domain = normalizeDomain(y.website);
+        if (!domain) continue;
+        all.push(
+          base({
+            key: `domain:${domain}`,
+            source: 'ymaps_catalog',
+            sourceRecordId: y.yandexId ? `ymaps_catalog:${y.yandexId}` : null,
+            companyName: y.name,
+            website: y.website.startsWith('http') ? y.website : `https://${domain}`,
+            knownEmails: splitEmails(y.email),
           }),
         );
       }
