@@ -10,7 +10,7 @@
  */
 
 import { z } from 'zod';
-import { VE_BROAD_HYPOTHESES_MAX } from './broadHypotheses';
+import { VE_BROAD_HYPOTHESES_MAX, veBroadTitleKey } from './broadHypotheses';
 import { VePriorityNicheResultSchema, vePriorityNicheKey } from './priorityNiches';
 import { VeAudienceScopeSchema, veAudienceScopeKey } from './audienceScope';
 
@@ -125,10 +125,10 @@ const VeScopedHypothesesBatchObject = z.object({
     audience_scope: VeAudienceScopeSchema.extend({ kind: z.literal('segment') }),
   })).max(20),
 });
-function validateScopedTitles(candidates: VeHypothesisCandidate[], ctx: z.RefinementCtx): void {
+function validateScopedTitles(candidates: VeHypothesisCandidate[], ctx: z.RefinementCtx, titleKey = vePriorityNicheKey): void {
   const titles = new Map<string, string>();
   for (const candidate of candidates) {
-    const title = vePriorityNicheKey(candidate.title);
+    const title = titleKey(candidate.title);
     const parsedScope = VeAudienceScopeSchema.safeParse(candidate.audience_scope);
     if (!parsedScope.success) continue;
     const scope = veAudienceScopeKey(parsedScope.data);
@@ -206,12 +206,13 @@ export const VeBroadHypothesesOnlySchema = z.object({
     fit_rationale: z.string().trim().min(1),
   })),
 });
+// Standalone appends must validate the same title key as the selector and SQL RPC.
 export const VeScopedBroadHypothesesOnlySchema = VeBroadHypothesesOnlySchema.extend({
   broad_hypotheses: z.array(VeBroadHypothesisCandidateSchema.extend({
     ...ScopedCandidateFields,
     audience_scope: VeAudienceScopeSchema.extend({ kind: z.literal('sector') }),
   })).max(VE_BROAD_HYPOTHESES_MAX),
-}).superRefine((value, ctx) => validateScopedTitles(value.broad_hypotheses, ctx));
+}).superRefine((value, ctx) => validateScopedTitles(value.broad_hypotheses, ctx, veBroadTitleKey));
 export type VeBroadHypothesesOnlyOutput = z.infer<typeof VeBroadHypothesesOnlySchema>;
 
 /* ─────────────────────── evidence (проход b) ─────────────────────── */

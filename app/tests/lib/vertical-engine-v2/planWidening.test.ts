@@ -11,6 +11,7 @@ import { finishVeAdaptiveBatch, newVeAdaptiveCollection, veReadyContactKeys, veS
 import { normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veCanWidenPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTask,
   veSecondQueueTasks } from '@/lib/verticalEngineV2/planWidening';
 import { canResumePartialPreview, getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
+import { createVeCollectionAudienceSnapshot } from '@/lib/verticalEngineV2/sourceAudience';
 import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed } from '@/lib/verticalEngineV2/clinicSourcePolicy';
 import { detectVeMediaSourceProfile, isVeMediaCatalogTask, normalizeVeMediaSourcePlan, veMediaRubricAllowed } from '@/lib/verticalEngineV2/mediaSourcePolicy';
 import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
@@ -362,6 +363,30 @@ describe('вторая очередь исчерпанного реестра', 
     expect(getVeCollectionContinuation(payments)).toMatchObject({ available: true, code: 'source_update' });
     payments.collect_info.source_selection.version = 2;
     expect(getVeCollectionContinuation(payments)).toMatchObject({ available: false, code: 'sources_exhausted' });
+
+    // The same frozen audience must decide source correction in preflight and
+    // the worker. Legacy titles/profiles cannot advertise an impossible retry.
+    for (const audience of [
+      { any_of: ['Финтех', 'Платёжные провайдеры'], required: [] },
+      { any_of: ['Платёжные провайдеры'], required: ['Выручка до 80 млн рублей'] },
+      { any_of: ['Платёжные провайдеры'], required: [] },
+    ]) {
+      const correctable = audience.any_of.length === 1 && audience.required.length === 0;
+      const frozen = { ...payments, collect_info: { ...payments.collect_info,
+        source_selection: { version: 1, profile: 'payments' },
+        cost_policy: { version: 1, website_discovery: 'existing_only' },
+        audience_snapshot: createVeCollectionAudienceSnapshot([{ id: 'h1', status: 'accepted',
+          title: 'Финтех и платежное посредничество', origin: 'generated', broad: true,
+          audience_scope: { version: 1, kind: 'sector', ...audience, excluded: [] } }], 'new_preview', '2026-10-14T12:00:00Z'),
+      } };
+      expect(getVeCollectionContinuation(frozen)).toMatchObject(correctable
+        ? { available: true, code: 'source_update' } : { available: false, code: 'sources_exhausted' });
+      expect(getVeCollectionContinuation({ ...frozen, collect_info: { ...frozen.collect_info,
+        company_name_recovery: { validation_error: null } } }))
+        .toMatchObject({ available: true, code: 'saved_work', action: 'resume_preparation' });
+      expect(getVeCollectionContinuation({ ...frozen, status: 'failed', error: 'Отменено пользователем' }))
+        .toMatchObject({ available: true, code: 'recovery_available', action: 'resume_preparation' });
+    }
 
     // A staffing-only saved refusal is useful work even with no remaining
     // source. Current metadata must win over an obsolete generated snapshot.
