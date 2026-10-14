@@ -19,7 +19,9 @@ import {
   toClientEngJobRow,
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
-import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { heChainGenerationBudget } from '@/lib/hypothesisEngine/autopilotReconcile';
+import { enforceHeSpendCeiling, heSpendStopIsGlobal } from '@/lib/hypothesisEngine/spendCeiling';
+import { engSpendLimitRefusal } from '@/lib/hypothesisEngine/engPaidAccess';
 import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
 import { heBrandInputRefusalEn, heBrandInputsBeforeEnqueue } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { engServerError } from '../../../_shared';
@@ -28,6 +30,13 @@ export const dynamic = 'force-dynamic';
 
 const LETTERS_START_FAILED = 'Failed to start the letters';
 const LETTERS_EXIST = 'Letters for this market already exist, so new ones were not written.';
+const LETTERS_NOT_RESEARCHED =
+  'Letters are written only for a researched project. Step 1 shows the state of the research.';
+const LETTERS_NOT_SELECTED =
+  'This market is not selected, so no letters were written for it. Select it on step 2 «Choose markets» first.';
+const LETTERS_EXHAUSTED =
+  'Writing the letters for this market has already been tried as many times as we allow, so it was not started again. ' +
+  'Message Support to have the letters looked at.';
 // 23505 без стоящей джобы: запуск победителя гонки успел закончиться (готово,
 // упал или отменён) — «уже закончился» верно для всех трёх.
 const LETTERS_RACE_FINISHED =
@@ -68,7 +77,16 @@ async function findActiveChainJob(
 //  - у вертикали уже есть готовая ('ready') цепочка → 409 LETTERS_EXIST:
 //    перегенерация — второй платный прогон ради того, что уже есть, а кнопки
 //    «переписать письма» в кабинете нет. Упавшую или незаконченную цепочку
-//    повтор поднимает — так же, как реконсилер «Launch».
+//    повтор поднимает — так же, как реконсилер «Launch», и с тем же тормозом:
+//    засчитанные прогоны цепочки вертикали дошли до порога
+//    (heChainGenerationBudget, HE_CHAIN_PAID_RUNS_PER_VERTICAL) → 409
+//    LETTERS_EXHAUSTED с Support (без него каждый вызов покупал бы до трёх
+//    платных прогонов модели);
+//  - проект не 'researched' или вертикаль не выбрана (нет accepted-гипотезы
+//    с непустым id — тот же предикат, что у реконсилера «Launch» и роута
+//    сборки) → 409: без этого прямой вызов покупал цепочку невыбранному рынку
+//    (а при включённом автопилоте за ней и сборку), или цепочку во время
+//    повторного исследования, которую кластеризация потом удалит.
 // Дедуп как у staff: активная chain-задача на эту вертикаль уже есть →
 // возвращаем её со статусом 200. Тем же ответом — проигравший гонки двух
 // постановок: 23505 от he_jobs_one_active_chain_per_vertical (20261010_0003).
@@ -108,6 +126,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return jsonError(`language must be ${language}`, 400);
     }
 
+    // Исследование закончено и рынок выбран — те же условия, что у «Launch»
+    // (реконсилер) и «Collect again» (роут сборки), до дедупа и до денег.
+    if (owned.project.status !== 'researched') return jsonError(LETTERS_NOT_RESEARCHED, 409);
+    const { data: acceptedRows, error: acceptedErr } = await supabaseAdmin
+      .from('he_hypotheses')
+      .select('id')
+      .eq('vertical_id', id)
+      .eq('status', 'accepted')
+      .limit(1);
+    if (acceptedErr) {
+      return engServerError('client.eng.chain.selection_read_failed', acceptedErr, LETTERS_START_FAILED, {
+        userId: result.auth.userId,
+        verticalId: id,
+      });
+    }
+    const selected = (acceptedRows ?? []).some((h) => {
+      const hid = (h as { id?: unknown }).id;
+      return typeof hid === 'string' && hid.length > 0;
+    });
+    if (!selected) return jsonError(LETTERS_NOT_SELECTED, 409);
+
     const active = await findActiveChainJob(supabaseAdmin, owned.vertical.project_id as string, id);
     if (active.error) {
       return engServerError('client.eng.chain.active_lookup_failed', active.error, LETTERS_START_FAILED, {
@@ -130,6 +169,30 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
     if ((ready ?? []).length > 0) return jsonError(LETTERS_EXIST, 409);
+
+    // Тормоз цепочек — тот же, что у «Launch» (autopilotReconcile.ts). Не
+    // прочиталось — не «можно»: 500, ничего не поставлено.
+    let chainBudget: Awaited<ReturnType<typeof heChainGenerationBudget>>;
+    try {
+      chainBudget = await heChainGenerationBudget(supabaseAdmin, {
+        projectId: owned.vertical.project_id as string,
+        verticalId: id,
+      });
+    } catch (budgetErr) {
+      return engServerError('client.eng.chain.budget_read_failed', budgetErr, LETTERS_START_FAILED, {
+        userId: result.auth.userId,
+        verticalId: id,
+      });
+    }
+    if (!chainBudget.allowed) {
+      void logAudit('client.eng.chain.exhausted', 'ENG cabinet chain refused: paid chain runs of this market used up', {
+        userId: result.auth.userId,
+        verticalId: id,
+        paidRuns: chainBudget.paidRuns,
+        generationAt: chainBudget.generationAt,
+      });
+      return NextResponse.json({ error: LETTERS_EXHAUSTED, code: 'letters_exhausted' }, { status: 409 });
+    }
 
     // Сайт, бриф и владелец проекта — проверке полей брифа (в owned.project их нет).
     const { data: briefRow, error: briefErr } = await supabaseAdmin
@@ -179,7 +242,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       verticalId: id,
       warn: (msg) => void logWarn('client.eng.chain.spend_unknown', msg, { userId: result.auth.userId, verticalId: id }),
     });
-    if (!spend.allowed) return jsonError(HE_SPEND_PAUSED_EN, 409);
+    // Общий потолок ENG паузы на проекте не пишет (spendCeiling.ts) — фраза
+    // карточки паузы («…continues when they resume it») была бы неправдой.
+    if (!spend.allowed) {
+      return heSpendStopIsGlobal(spend.check)
+        ? engPaidAccessResponse(engSpendLimitRefusal('eng_day'))
+        : jsonError(HE_SPEND_PAUSED_EN, 409);
+    }
 
     // `.select()` без аргументов вернул бы строку he_jobs целиком, вместе с
     // tokens_used/cost_usd и сырым текстом error: обе ветки роута отдают

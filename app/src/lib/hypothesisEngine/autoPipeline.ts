@@ -124,7 +124,14 @@
  *      следующая ночь поставит паузу снова. Расход неизвестен (сбой чтения
  *      журнала, срок проверки, неполное чтение ниже порога — последнее только
  *      без миграции 20261009_0001) — ночь покупается как без потолка
- *      (fail-open), причина едет в строку ночного лога;
+ *      (fail-open), причина едет в строку ночного лога. ОБЩИЙ потолок ENG
+ *      (HE_US_ENG_DAY_SPEND_CAP_USD — все us-проекты всех клиентов за
+ *      скользящие 24 часа, тот же checkHeSpendCeiling, порог 'eng_day') —
+ *      ночь проекта тоже не покупается, но БЕЗ durable-паузы и без алерта
+ *      про проект ('spend_held', счётчик spendHeld): порог общий и отпускает
+ *      сам, а пауза на каждом проекте снималась бы только staff-кнопкой;
+ *      следующая ночь проверяет заново. Поэтому порог задают выше обычного
+ *      ночного расхода ENG — иначе ночи будут пропускаться через одну;
  *   3a. ПРЕДПОЛЁТ ЁМКОСТИ: сколько контактов ещё принимает воркспейс
  *      рассыльщика. Ноль — сборка НЕ ставится (и остальные вертикали проекта
  *      тоже: воркспейс у них общий), потому что платит сборка, а не долив:
@@ -2298,6 +2305,12 @@ export type HeAutoPipelineDetailStatus =
   | 'letters_held'
   | 'blocklist_held'
   | 'sending_skipped'
+  /**
+   * Ночь проекта не куплена: достигнут ОБЩИЙ потолок расхода ENG
+   * (HE_US_ENG_DAY_SPEND_CAP_USD; шаг 3a- в шапке). Без durable-паузы и без
+   * строки журнала — как budget_exhausted: следующая ночь проверит снова.
+   */
+  | 'spend_held'
   | 'failed';
 
 /**
@@ -2486,6 +2499,16 @@ export interface HeAutoPipelineTickSummary {
    * статус не подтверждён). НЕ failed: это решение, а не сбой тика.
    */
   sendingSkipped: number;
+  /**
+   * ПРОЕКТОВ, чья ночь не куплена, потому что достигнут ОБЩИЙ потолок расхода
+   * ENG (HE_US_ENG_DAY_SPEND_CAP_USD — все us-проекты всех клиентов за
+   * скользящие 24 часа). Считается ПРОЕКТАМИ: решение общее на проект. НЕ
+   * failed и НЕ paused: паузы нет — порог общий и отпускает сам, а
+   * durable-пауза добора на каждом проекте, которую снимает только
+   * staff-кнопка, остановила бы весь рынок до ручного разбора (и ночь,
+   * видящая в окне вчерашний добор, ставила бы её снова).
+   */
+  spendHeld: number;
   failed: number;
   details: HeAutoPipelineTickDetail[];
   /**
@@ -3859,6 +3882,27 @@ async function passConfig(
         caps: spendCaps,
         now,
       });
+      if (spend.verdict.kind === 'over' && spend.verdict.cap === 'eng_day') {
+        // ОБЩИЙ потолок ENG: ночь проекта не покупаем, но durable-паузу добора
+        // НЕ пишем (шаг 3a- в шапке): порог общий и скользящий, отпускает сам,
+        // а пауза на каждом us-проекте, обойдённом этой ночью, снималась бы
+        // только staff-кнопкой по проекту — и следующая ночь, видящая в окне
+        // 24 часов вчерашний добор, ставила бы её снова. Как budget_exhausted:
+        // без строки he_auto_pipeline_runs (в status нет «решили не
+        // собирать»), last_run_at двигается как у любого обойдённого конфига —
+        // завтрашняя ночь проверит заново. Алерт команде — один на окно, его
+        // уже отправила сама проверка (engClientSpend.checkHeEngDaySpendCeiling).
+        summary.spendHeld += 1;
+        detail({
+          verticalId: vertical.id,
+          status: 'spend_held',
+          ...dryNightsDetail,
+          message:
+            `ENG day spend cap reached ($${spend.verdict.spendUsd.toFixed(2)} ≥ $${spend.verdict.capUsd.toFixed(2)} ` +
+            'over the last 24 h, all us projects) — no collection bought tonight, no refill pause recorded',
+        });
+        break;
+      }
       if (spend.verdict.kind === 'over') {
         // Пауза — ДО алерта и без строки he_auto_pipeline_runs: та же причина,
         // что у паузы в начале обхода (в status нет «решили не собирать», а
@@ -4115,6 +4159,7 @@ export async function runHeAutoPipelineTick(
     lettersHeld: 0,
     blocklistHeld: 0,
     sendingSkipped: 0,
+    spendHeld: 0,
     failed: 0,
     details: [],
     orders: [],

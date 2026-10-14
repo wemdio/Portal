@@ -3,7 +3,8 @@
  *
  * ВЫКЛЮЧЕН — ЗНАЧИТ НИЧЕГО. Пока ни HE_US_PROJECT_SPEND_CAP_USD, ни
  * HE_US_PROJECT_DAY_SPEND_CAP_USD, ни два порога клиента
- * (HE_US_CLIENT_SPEND_CAP_USD, HE_US_CLIENT_DAY_SPEND_CAP_USD) не заданы (пусто
+ * (HE_US_CLIENT_SPEND_CAP_USD, HE_US_CLIENT_DAY_SPEND_CAP_USD), ни общий
+ * потолок ENG (HE_US_ENG_DAY_SPEND_CAP_USD) не заданы (пусто
  * или переменной нет — это дефолт), каждая проверка ниже возвращает 'off' ДО
  * первого запроса к БД: ни
  * чтения журнала, ни записи паузы, ни алерта. Поведение любого рынка в дефолтной
@@ -18,10 +19,12 @@
  *    бы. В окне тика — расход последних 24 часов, как правило вместе со
  *    сборкой, купленной прошлой ночью (её оплата идёт после вчерашнего тика;
  *    выпадают только минуты, на которые сегодняшний тик пришёл позже). Не
- *    рынка целиком: общий потолок поставил бы на паузу проекты, которые за
- *    эти сутки не потратили ничего, а снимать паузу добора пришлось бы по
- *    каждому руками. Общий счёт денег провайдера держат его собственные
- *    лимиты и балансы.
+ *    рынка целиком: такой потолок ставит на паузу и проекты, которые за эти
+ *    сутки не потратили ничего, а паузу добора снимают по каждому руками.
+ *    Поэтому рынок целиком — отдельный ОБЩИЙ потолок ENG (ниже, по умолчанию
+ *    выключен, задаётся с запасом выше обычного суточного расхода ENG): он
+ *    стоп-кран против опустошения общего с RU баланса провайдера, а не
+ *    ежедневный лимит.
  *  - потолок КЛИЕНТА — сумма по ВСЕМ us-проектам владельца проекта
  *    (he_projects.created_by), за всё время (HE_US_CLIENT_SPEND_CAP_USD) и за
  *    скользящие 24 часа (HE_US_CLIENT_DAY_SPEND_CAP_USD). Считает его
@@ -35,6 +38,29 @@
  *    же, что 'over' проекта (пауза ЭТОГО проекта + алерт), — другие проекты
  *    клиента встанут на своей следующей платной постановке. Выключен (дефолт)
  *    — ни одного лишнего запроса.
+ *  - ОБЩИЙ потолок ENG за скользящие 24 часа (HE_US_ENG_DAY_SPEND_CAP_USD) —
+ *    расход ВСЕХ us-проектов всех клиентов (engClientSpend.ts, «ОБЩИЙ ПОТОЛОК
+ *    ENG»). Едет той же проверкой клиента и действует везде, где она: 'over'
+ *    с порогом 'eng_day' НЕ СТАВИТ платную стадию, как любой порог, но
+ *    DURABLE-ПАУЗЫ НЕ ПИШЕТ — ни паузы автопилота (enforceHeSpendCeiling,
+ *    createHeSpendGate → дочейн и реконсилер пропускают шаг без паузы), ни
+ *    паузы ночного добора (autoPipeline.ts пропускает ночь проекта, как
+ *    budget_exhausted). Почему: порог общий и скользящий — его достигает
+ *    расход ВСЕХ клиентов, и он отпускает сам, когда окно 24 часов
+ *    сдвинется; пауза на каждом проекте, которую снимает только человек
+ *    (staff-кнопка добора, полный проход реконсилера), остановила бы весь
+ *    рынок до ручного разбора по проекту, а ночь в 03:20 видит в окне
+ *    вчерашний добор и ставила бы её снова. Пропущенный шаг двигает «Launch»
+ *    клиента на шаге 3 (кнопка кабинета ниже порога пройдёт), следующий
+ *    дочейн или ночной проход реконсилера (если включён); пропущенная ночь
+ *    добора — следующая ночь. Кнопки кабинета упираются раньше — в гейт
+ *    платных шагов (engPaidAccess: код spend_day_limit с нейтральной фразой
+ *    ENG_SPEND_PAUSED_GLOBAL_TEXT). Алерт у него один на окно на процесс —
+ *    его шлёт сама проверка, поэтому alertHeSpendCeiling по 'eng_day' своего
+ *    сообщения про проект не шлёт (иначе каждый остановленный проект писал
+ *    бы ту же новость отдельно); каждый непоставленный шаг — строкой warn
+ *    вызывающего (лог воркера / портала). RU/VE2 не трогает: проект не 'us'
+ *    получает 'not_us' / 'off', как у остальных.
  *
  * КАК СЧИТАЕТСЯ РАСХОД. Только журнал ENG (costTelemetry.readHeProviderSpend,
  * источник application_logs 'he_provider_usage'), а не he_jobs.cost_usd: тот не
@@ -139,6 +165,7 @@ import { readHeProviderSpend, type HeProviderSpend } from './costTelemetry';
 import {
   HE_US_CLIENT_DAY_SPEND_CAP_ENV,
   HE_US_CLIENT_SPEND_CAP_ENV,
+  HE_US_ENG_DAY_SPEND_CAP_ENV,
   checkHeClientSpendCeilingForProject,
   type HeClientSpend,
 } from './engClientSpend';
@@ -181,6 +208,8 @@ export interface HeSpendCaps {
   clientCapUsd: number | null;
   /** Потолок клиента за последние 24 часа (HE_US_CLIENT_DAY_SPEND_CAP_USD); null — выключен. */
   clientDayCapUsd: number | null;
+  /** Общий потолок ENG за последние 24 часа (HE_US_ENG_DAY_SPEND_CAP_USD); null — выключен. */
+  engDayCapUsd: number | null;
   /** null — Serper не оценивается. */
   serperUsdPer1000: number | null;
   /** Переменные, заданные нечитаемым значением (0, минус, не число) — считаются не заданными. */
@@ -214,19 +243,21 @@ export function readHeSpendCaps(env: NodeJS.ProcessEnv = process.env): HeSpendCa
     dayCapUsd: read(HE_US_PROJECT_DAY_SPEND_CAP_ENV),
     clientCapUsd: read(HE_US_CLIENT_SPEND_CAP_ENV),
     clientDayCapUsd: read(HE_US_CLIENT_DAY_SPEND_CAP_ENV),
+    engDayCapUsd: read(HE_US_ENG_DAY_SPEND_CAP_ENV),
     serperUsdPer1000: read(HE_US_SERPER_TARIFF_ENV),
     rejected,
   };
 }
 
 /**
- * Включён ли потолок хоть одним порогом — проекта или клиента (тариф Serper сам
- * по себе его не включает). Читатели «включён ли вообще»: ранний выход
- * checkHeSpendCeiling и выключение прохода автоподъёма баз (baseAutoResume.ts),
- * который ставит сборку внутри SQL, мимо этой проверки.
+ * Включён ли потолок хоть одним порогом — проекта, клиента или общим потолком
+ * ENG (тариф Serper сам по себе его не включает). Читатели «включён ли вообще»:
+ * ранний выход checkHeSpendCeiling и выключение прохода автоподъёма баз
+ * (baseAutoResume.ts), который ставит сборку внутри SQL, мимо этой проверки.
  */
 export function heSpendCeilingOn(
-  caps: Pick<HeSpendCaps, 'projectCapUsd' | 'dayCapUsd' | 'clientCapUsd' | 'clientDayCapUsd'>,
+  caps: Pick<HeSpendCaps, 'projectCapUsd' | 'dayCapUsd' | 'clientCapUsd' | 'clientDayCapUsd'>
+    & Partial<Pick<HeSpendCaps, 'engDayCapUsd'>>,
 ): boolean {
   return heProjectCapsOn(caps) || heClientCapsOn(caps);
 }
@@ -235,8 +266,11 @@ function heProjectCapsOn(caps: Pick<HeSpendCaps, 'projectCapUsd' | 'dayCapUsd'>)
   return caps.projectCapUsd !== null || caps.dayCapUsd !== null;
 }
 
-function heClientCapsOn(caps: Pick<HeSpendCaps, 'clientCapUsd' | 'clientDayCapUsd'>): boolean {
-  return caps.clientCapUsd !== null || caps.clientDayCapUsd !== null;
+/** Пороги, которые считает проверка клиента: его собственные и общий потолок ENG. */
+function heClientCapsOn(
+  caps: Pick<HeSpendCaps, 'clientCapUsd' | 'clientDayCapUsd'> & Partial<Pick<HeSpendCaps, 'engDayCapUsd'>>,
+): boolean {
+  return caps.clientCapUsd !== null || caps.clientDayCapUsd !== null || (caps.engDayCapUsd ?? null) !== null;
 }
 
 /* ─────────────── Чистое решение ─────────────── */
@@ -252,8 +286,11 @@ export interface HeSpendCeilingInput {
   dayCapUsd: number | null;
 }
 
-/** 'client' / 'client_day' — потолки клиента (сумма по всем его us-проектам). */
-export type HeSpendCap = 'project' | 'day' | 'client' | 'client_day';
+/**
+ * 'client' / 'client_day' — потолки клиента (сумма по всем его us-проектам);
+ * 'eng_day' — общий потолок ENG (все us-проекты всех клиентов, 24 часа).
+ */
+export type HeSpendCap = 'project' | 'day' | 'client' | 'client_day' | 'eng_day';
 
 /**
  *  - 'off'     — оба порога выключены (расход не смотрится вовсе);
@@ -315,6 +352,8 @@ export interface HeSpendCheck {
   clientSpend: HeClientSpend | null;
   /** Расход клиента за последние 24 часа (только при включённом потолке клиента за сутки). */
   clientDaySpend: HeClientSpend | null;
+  /** Расход всего рынка us за последние 24 часа (только при включённом общем потолке ENG). */
+  engDaySpend: HeClientSpend | null;
   /** Почему расход неизвестен (безопасный текст для лога); null — прочитан. */
   failure: string | null;
 }
@@ -384,6 +423,7 @@ export async function checkHeSpendCeiling(
     daySpend: null,
     clientSpend: null,
     clientDaySpend: null,
+    engDaySpend: null,
     failure: null,
   };
   if (!heSpendCeilingOn(caps)) return base;
@@ -402,6 +442,7 @@ export async function checkHeSpendCeiling(
     daySpend: project?.daySpend ?? null,
     clientSpend: client?.clientSpend ?? null,
     clientDaySpend: client?.clientDaySpend ?? null,
+    engDaySpend: client?.engDaySpend ?? null,
     failure: [project?.failure, client?.failure].filter(Boolean).join('; ') || null,
   };
   const pv = project?.verdict ?? null;
@@ -418,19 +459,21 @@ export async function checkHeSpendCeiling(
 }
 
 /**
- * Потолок клиента по id проекта — вызов engClientSpend.checkHeClientSpendCeilingForProject
- * и перевод его ответа в словарь этого модуля. Не бросает (вызываемая не бросает).
- * 'off' от неё при включённом пороге значит одно — проект не 'us'.
+ * Потолки клиента и общий потолок ENG по id проекта — вызов
+ * engClientSpend.checkHeClientSpendCeilingForProject и перевод его ответа в
+ * словарь этого модуля. Не бросает (вызываемая не бросает). 'off' от неё при
+ * включённом пороге значит одно — проект не 'us'.
  */
 async function checkHeClientCaps(
   db: SupabaseClient,
   args: HeSpendCheckArgs & { caps: HeSpendCaps },
-): Promise<Pick<HeSpendCheck, 'verdict' | 'clientSpend' | 'clientDaySpend' | 'failure'>> {
+): Promise<Pick<HeSpendCheck, 'verdict' | 'clientSpend' | 'clientDaySpend' | 'engDaySpend' | 'failure'>> {
   const check = await checkHeClientSpendCeilingForProject(db, {
     projectId: args.projectId,
     caps: {
       totalCapUsd: args.caps.clientCapUsd,
       dayCapUsd: args.caps.clientDayCapUsd,
+      engDayCapUsd: args.caps.engDayCapUsd,
       serperUsdPer1000: args.caps.serperUsdPer1000,
       rejected: [],
     },
@@ -438,7 +481,8 @@ async function checkHeClientCaps(
     timeoutMs: args.timeoutMs,
   });
   const v = check.verdict;
-  const cap = (c: 'total' | 'day'): HeSpendCap => (c === 'total' ? 'client' : 'client_day');
+  const cap = (c: 'total' | 'day' | 'eng_day'): HeSpendCap =>
+    c === 'total' ? 'client' : c === 'day' ? 'client_day' : 'eng_day';
   const verdict: HeSpendCheck['verdict'] =
     v.kind === 'over' ? { kind: 'over', cap: cap(v.cap), spendUsd: v.spendUsd, capUsd: v.capUsd }
       : v.kind === 'unknown' ? { kind: 'unknown', cap: cap(v.cap) }
@@ -448,6 +492,7 @@ async function checkHeClientCaps(
     verdict,
     clientSpend: check.total,
     clientDaySpend: check.day,
+    engDaySpend: check.engDay,
     failure: check.failure ? `client: ${check.failure}` : null,
   };
 }
@@ -466,6 +511,7 @@ async function checkHeProjectCaps(
     daySpend: null,
     clientSpend: null,
     clientDaySpend: null,
+    engDaySpend: null,
     failure: null,
   };
 
@@ -553,6 +599,8 @@ export type HeSpendPath =
   | 'autopilot_reconcile_client'
   | 'autopilot_reconcile_nightly'
   | 'client_button'
+  // Тик автозапуска (engAutoLaunch → engClientLaunch.runHeEngTemplateLaunch).
+  | 'auto_launch'
   | 'nightly_refill';
 
 function usd(value: number): string {
@@ -575,6 +623,8 @@ function capLabel(cap: HeSpendCap): string {
       return `потолок клиента (все его us-проекты) ${HE_US_CLIENT_SPEND_CAP_ENV}`;
     case 'client_day':
       return `потолок клиента за последние 24 ч ${HE_US_CLIENT_DAY_SPEND_CAP_ENV}`;
+    case 'eng_day':
+      return `общий потолок ENG (все us-проекты всех клиентов) за последние 24 ч ${HE_US_ENG_DAY_SPEND_CAP_ENV}`;
   }
 }
 
@@ -589,7 +639,9 @@ export function describeHeSpendStop(check: HeSpendCheck, stage: string, path: He
           ? check.clientSpend
           : verdict.cap === 'client_day'
             ? check.clientDaySpend
-            : check.projectSpend;
+            : verdict.cap === 'eng_day'
+              ? check.engDaySpend
+              : check.projectSpend;
   const head =
     verdict.kind === 'over'
       ? `${capLabel(verdict.cap)}: ` +
@@ -610,6 +662,12 @@ export function describeHeSpendStop(check: HeSpendCheck, stage: string, path: He
  * Алерт команде: проект встал на потолке. Не бросает; ждёт не дольше срока
  * отправки opsAlert (HE_OPS_SEND_TIMEOUT_MS). Одноразовый процесс (крон)
  * обязан позвать flushHeOpsAlerts перед выходом — как и для остальных видов.
+ *
+ * Общий потолок ENG ('eng_day') — без сообщения про проект: про него уже
+ * написала сама проверка (engClientSpend.checkHeEngDaySpendCeiling — одно
+ * сообщение на окно на процесс), а он останавливает все us-проекты разом, и
+ * сообщение на каждый был бы той же новостью много раз. Пауза проекта при этом
+ * записывается вызывающим как обычно.
  */
 export function alertHeSpendCeiling(args: {
   projectId: string;
@@ -623,6 +681,7 @@ export function alertHeSpendCeiling(args: {
   pauseRecorded?: boolean | null;
   clientSees: string;
 }): Promise<void> {
+  if (args.check.verdict.kind === 'over' && args.check.verdict.cap === 'eng_day') return Promise.resolve();
   return notifyHeClientStop({
     projectId: args.projectId,
     projectName: args.check.projectName,
@@ -664,9 +723,22 @@ export interface HeSpendEnforceOptions {
 }
 
 export interface HeSpendDecision {
-  /** false — потолок достигнут: НЕ ставить; пауза и алерт уже сделаны. */
+  /**
+   * false — потолок достигнут: НЕ ставить; пауза и алерт уже сделаны (у общего
+   * потолка ENG — без паузы, см. heSpendStopIsGlobal).
+   */
   allowed: boolean;
   check: HeSpendCheck;
+}
+
+/**
+ * Остановил ли постановку ОБЩИЙ потолок ENG ('eng_day'). Тогда паузы на
+ * проекте нет (шапка, «ОБЩИЙ потолок ENG»), и вызывающему нельзя отвечать
+ * фразой карточки паузы (HE_SPEND_PAUSED_EN: «…continues when they resume
+ * it») — роутам кабинета отвечать engSpendLimitRefusal('eng_day').
+ */
+export function heSpendStopIsGlobal(check: Pick<HeSpendCheck, 'verdict'>): boolean {
+  return check.verdict.kind === 'over' && check.verdict.cap === 'eng_day';
 }
 
 /** Что клиент видит при паузе автопилота по потолку (строка алерта). */
@@ -678,6 +750,10 @@ const CLIENT_SEES_AUTOPILOT_HOLD = 'карточку паузы «Work on this p
  * Для ночного добора — НЕ этот путь (у него своя пауза, autoPipeline.ts).
  *
  *  - 'over'           → пауза + алерт, allowed=false;
+ *  - 'over' общего потолка ENG ('eng_day') → allowed=false БЕЗ паузы и без
+ *                       алерта про проект (алерт рынка уже отправила проверка;
+ *                       почему без паузы — шапка, «ОБЩИЙ потолок ENG»), строка
+ *                       warn вызывающего: какой шаг какого проекта не поставлен;
  *  - 'under'          → allowed=true; устаревшую причину 'spend_ceiling'
  *                       снимает clearHeSpendCeilingPauseIfSafe, и только там,
  *                       где это не прячет пропущенный шаг ДРУГОЙ вертикали:
@@ -708,6 +784,17 @@ export async function enforceHeSpendCeiling(
     now: args.now,
   });
   const verdict = check.verdict;
+  if (verdict.kind === 'over' && verdict.cap === 'eng_day') {
+    // Общий потолок ENG: шаг не ставим, durable-паузы НЕ пишем — порог
+    // скользящий и общий, он отпускает сам (шапка, «ОБЩИЙ потолок ENG»).
+    // Строка warn — чтобы по логу было видно, какой проект недополучил шаг.
+    args.warn?.(
+      `[he-spend] общий потолок ENG достигнут ($${verdict.spendUsd.toFixed(2)} ≥ $${verdict.capUsd.toFixed(2)} ` +
+        `за 24 ч) — ${args.stage} проекта ${args.projectId} не поставлен (${args.path}), паузы нет: ` +
+        'шаг двигает «Launch» клиента на шаге 3, когда расход опустится ниже порога',
+    );
+    return { allowed: false, check };
+  }
   if (verdict.kind === 'over') {
     const paused = await recordHeAutopilotPause(db, args.projectId, HE_SPEND_CEILING_PAUSE);
     await alertHeSpendCeiling({
@@ -746,19 +833,30 @@ export async function enforceHeSpendCeiling(
  * По 'under' ворота причину паузы НЕ снимают: дочейн снимает её сам при
  * прогрессе по правилу followupMayClearPause, реконсилер — итогом полного
  * прохода (см. шапку, «Причину 'spend_ceiling' на проекте снимают…»).
+ *
+ * `stopIsGlobal()` — отказ дал ОБЩИЙ потолок ENG (паузы нет): дочейн и
+ * реконсилер тогда пропускают шаг без своей паузы (причина
+ * 'spend_ceiling_global'). До первого отказа — false.
  */
 export function createHeSpendGate(
   db: SupabaseClient,
   args: Omit<HeSpendEnforceArgs, 'stage'>,
 ): HeSpendGate {
   let decision: Promise<boolean> | null = null;
-  return (stage: string) => {
+  let global = false;
+  const gate = (stage: string) => {
     if (!decision) {
-      decision = enforceHeSpendCeiling(db, { ...args, stage }, { clearStalePause: false })
-        .then((d) => d.allowed, () => true);
+      decision = enforceHeSpendCeiling(db, { ...args, stage }, { clearStalePause: false }).then(
+        (d) => {
+          global = !d.allowed && heSpendStopIsGlobal(d.check);
+          return d.allowed;
+        },
+        () => true,
+      );
     }
     return decision;
   };
+  return Object.assign(gate, { stopIsGlobal: () => global });
 }
 
 /* ─────────────── Ночной добор ─────────────── */

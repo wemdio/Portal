@@ -16,8 +16,11 @@
  *   гейт платных шагов (requireEngPaidAccess 'launch') → выключатель отправки
  *   аккаунта (requireHeEngSendingAccess via 'launch') → окно этого запуска
  *   (heEngLaunchWindowPlan, с 12.10.2026: первый запуск рынка — окно
- *   вызывающего, достройка — своё окно рынка) → ящики пула и пресет
- *   (ensureHeEngPresetForProject) → лимит неудачных запусков ('launch_failed')
+ *   вызывающего, достройка — своё окно рынка) → потолки расхода проекта и
+ *   общий потолок ENG (enforceHeSpendCeiling, с 14.10.2026; по умолчанию
+ *   выключены; до ящиков пула — отказ потолка не держит ящики) → ящики пула и
+ *   пресет (ensureHeEngPresetForProject) → лимит неудачных запусков
+ *   ('launch_failed')
  *   → журнал расхода + ядро runHeTemplateLaunch (force: false, скоуп владельца,
  *   locale 'en', окно запуска) → возврат попадания лимита → проекция 5xx/4xx →
  *   окно отправки на кампании и его запись (только первый запуск рынка) →
@@ -72,7 +75,13 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { scrubBrand } from '@/lib/scrubBrand';
-import { ENG_PAID_UNAVAILABLE_TEXT, requireEngPaidAccess, type EngPaidAccessRefusal } from './engPaidAccess';
+import {
+  ENG_PAID_UNAVAILABLE_TEXT,
+  engSpendLimitRefusal,
+  requireEngPaidAccess,
+  type EngPaidAccessRefusal,
+} from './engPaidAccess';
+import { enforceHeSpendCeiling } from './spendCeiling';
 import { resolveHeLaunchSendingWindow } from './launchSchedule';
 import {
   heLaunchOutcomeCode,
@@ -808,6 +817,8 @@ async function recordHeEngRunDays(input: {
 // Гейт платных шагов (requireEngPaidAccess, действие 'launch') — до журнала и
 // ядра: подтверждённая почта (письма уходят живым людям) и потолок расхода
 // клиента (по умолчанию выключен; таблица действий в engPaidAccess.ts).
+// Потолки проекта — отдельной проверкой после окна запуска и до ящиков пула
+// (enforceHeSpendCeiling, блок ниже).
 // Платная часть самого запуска — классификатор сегментов (шаг 5c ядра). Его
 // повтор у законченного запуска закрыт отказом force; а запуск, который НЕ
 // ПРОШЁЛ после него, — отказ классификатора (503
@@ -866,6 +877,60 @@ export async function runHeEngTemplateLaunch(input: HeEngTemplateLaunchInput): P
     }
     const finishing = windowPlan.kind === 'finishing';
     const launchWindow = windowPlan.window;
+
+    // Потолки расхода ПРОЕКТА (HE_US_PROJECT_SPEND_CAP_USD /
+    // HE_US_PROJECT_DAY_SPEND_CAP_USD) и общий потолок ENG — до платной части
+    // (классификатор сегментов ядра), как у каждой другой платной постановки
+    // ENG: гейт платных шагов выше смотрит потолки клиента и общий, но не
+    // потолки проекта. ПО УМОЛЧАНИЮ ВСЕ ВЫКЛЮЧЕНЫ — тогда ни одного запроса.
+    // Стоит после отказов, которые денег не касаются (выключатель отправки,
+    // окно): иначе их отказ записывал бы паузу потолка и слал алерт. И ДО
+    // ящиков пула (ensureHeEngPresetForProject ниже): тот закрепляет за
+    // проектом свободные ящики пула, и проект, которому потолок всё равно не
+    // дал бы запуститься, держал бы самый дефицитный ресурс, пока их не
+    // освободит сотрудник. Достигнут потолок проекта или клиента — пауза
+    // 'spend_ceiling' и алерт делает enforceHeSpendCeiling (у общего потолка
+    // ENG — без паузы, см. там); ответ — те же коды, что у отказа потолка в
+    // гейте (spend_limit / spend_day_limit): автозапуск их уже знает
+    // (engAutoLaunch), а фраза называет тот порог, что остановил
+    // (engSpendLimitRefusal). Устаревшую паузу запуск не снимает — это не
+    // стадия автопилота, снимают её реконсилер и кнопки постановки.
+    const spend = await enforceHeSpendCeiling(
+      portalDb,
+      {
+        projectId,
+        market: owned.project.market ?? null,
+        projectName: typeof owned.project.name === 'string' ? owned.project.name : null,
+        stage: HE_COST_LAUNCH_STAGE,
+        path: trigger === 'auto' ? 'auto_launch' : 'client_button',
+        verticalId: typeof owned.template.vertical_id === 'string' ? owned.template.vertical_id : null,
+        warn: (msg) => void logWarn('client.eng.template.launch.spend_unknown', msg, { userId, templateId: id, trigger }),
+      },
+      { clearStalePause: false },
+    );
+    if (!spend.allowed) {
+      const verdict = spend.check.verdict;
+      const cap = verdict.kind === 'over' ? verdict.cap : null;
+      void logAudit('client.eng.template.launch.spend_ceiling', 'ENG launch not started: spend ceiling reached', {
+        userId,
+        templateId: id,
+        trigger,
+        cap,
+      });
+      return paidRefusalResult(
+        engSpendLimitRefusal(
+          cap === 'project'
+            ? 'project'
+            : cap === 'client'
+              ? 'account'
+              : cap === 'day'
+                ? 'project_day'
+                : cap === 'client_day'
+                  ? 'account_day'
+                  : 'eng_day',
+        ),
+      );
+    }
 
     // Ящики пула проекта и пресет клиента из них (engSendingPreset — контракт
     // лейна пула): нехватка ящиков и сбой настройки — отказ до ядра, ничего не

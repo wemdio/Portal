@@ -231,11 +231,50 @@ export function engResearchLimitText(started: number, max: number): string {
   );
 }
 
+/**
+ * Фразы отказа по потолкам расхода. КАЖДАЯ называет ровно тот порог, который
+ * остановил шаг (правило «текст клиента не утверждает того, чего не было»):
+ *  - потолки КЛИЕНТА (HE_US_CLIENT_*) — «your account»;
+ *  - потолки ПРОЕКТА (HE_US_PROJECT_*; их видит только engClientLaunch и
+ *    кнопки через spendCeiling) — «this project»;
+ *  - ОБЩИЙ потолок ENG (HE_US_ENG_DAY_SPEND_CAP_USD) — нейтрально: аккаунт
+ *    клиента ничего не достиг, и поднимать ему нечего; шаг встал из-за
+ *    расхода всех клиентов за последние 24 часа, и окно отпускает само.
+ * Коды остаются прежними (spend_limit / spend_day_limit): их понимают
+ * автозапуск (engAutoLaunch) и шаг 3. Выбор фразы — engSpendLimitRefusal.
+ */
 export const ENG_SPEND_LIMIT_TEXT =
   'Your account has reached its usage limit, so this step cannot start. Contact Support to raise the limit.';
 export const ENG_SPEND_DAY_LIMIT_TEXT =
   'Your account has reached its usage limit for the last 24 hours, so this step cannot start right now. '
   + 'Try again later, or contact Support to raise the limit.';
+export const ENG_PROJECT_SPEND_LIMIT_TEXT =
+  'This project has reached its usage limit, so this step cannot start. Contact Support to raise the limit.';
+export const ENG_PROJECT_SPEND_DAY_LIMIT_TEXT =
+  'This project has reached its usage limit for the last 24 hours, so this step cannot start right now. '
+  + 'Try again later, or contact Support to raise the limit.';
+export const ENG_SPEND_PAUSED_GLOBAL_TEXT =
+  'Paid steps are paused on our side for a while, so this step cannot start right now. '
+  + 'Try again in a few hours, or message Support.';
+
+/** Какой порог остановил шаг — для выбора фразы (engSpendLimitRefusal). */
+export type EngSpendLimitScope = 'account' | 'account_day' | 'project' | 'project_day' | 'eng_day';
+
+/** Отказ по потолку расхода: код как раньше, фраза — по порогу (см. выше). */
+export function engSpendLimitRefusal(scope: EngSpendLimitScope): EngPaidAccessRefusal {
+  switch (scope) {
+    case 'account':
+      return { code: 'spend_limit', status: 409, message: ENG_SPEND_LIMIT_TEXT };
+    case 'project':
+      return { code: 'spend_limit', status: 409, message: ENG_PROJECT_SPEND_LIMIT_TEXT };
+    case 'account_day':
+      return { code: 'spend_day_limit', status: 429, message: ENG_SPEND_DAY_LIMIT_TEXT };
+    case 'project_day':
+      return { code: 'spend_day_limit', status: 429, message: ENG_PROJECT_SPEND_DAY_LIMIT_TEXT };
+    case 'eng_day':
+      return { code: 'spend_day_limit', status: 429, message: ENG_SPEND_PAUSED_GLOBAL_TEXT };
+  }
+}
 
 /* ─────────────── Логи деградации ─────────────── */
 
@@ -417,10 +456,14 @@ export async function requireEngPaidAccess(
     const spend = await checkHeClientSpendCeiling(supabase, { userId, caps, now });
     const verdict = spend.verdict;
     if (verdict.kind === 'over') {
-      return refuse(userId, action, verdict.cap === 'total'
-        ? { code: 'spend_limit', status: 409, message: ENG_SPEND_LIMIT_TEXT }
-        : { code: 'spend_day_limit', status: 429, message: ENG_SPEND_DAY_LIMIT_TEXT },
-      { cap: verdict.cap, spendUsd: verdict.spendUsd, capUsd: verdict.capUsd });
+      // Общий потолок ENG ('eng_day') — тот же код spend_day_limit, но фраза
+      // нейтральная: аккаунт этого клиента ничего не достиг.
+      return refuse(
+        userId,
+        action,
+        engSpendLimitRefusal(verdict.cap === 'total' ? 'account' : verdict.cap === 'day' ? 'account_day' : 'eng_day'),
+        { cap: verdict.cap, spendUsd: verdict.spendUsd, capUsd: verdict.capUsd },
+      );
     }
     if (verdict.kind === 'unknown') {
       warnDegraded(`spend_unknown:${spend.failure ?? verdict.cap}`, `client spend unknown (${spend.failure ?? verdict.cap}) — paid step allowed (fail-open)`, { action, userId });
