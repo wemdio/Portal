@@ -17,16 +17,23 @@ export interface DirectoryRow {
   revenue: number | null;
   employees: number | null;
   okved: string | null;
+  email: string | null;
 }
 
 export async function loadDirectoryCandidates(
   db: SupabaseClient,
-  opts: { minRevenue: number; maxRevenue: number; minEmployees: number; limit: number },
+  opts: { minRevenue: number; maxRevenue: number; minEmployees: number; limit: number; okvedPrefixes?: string[] },
 ): Promise<DirectoryRow[]> {
-  const { data, error } = await db.rpc('polza_ru_directory_candidates', {
+  // Префиксы ОКВЭД → регэксп по началу кода: «62.01» ловит 62.01 и 62.01.1,
+  // «46.6» — 46.61…46.69, «28» — весь класс (у ОКВЭД после класса всегда точка).
+  const okvedRegex = (opts.okvedPrefixes ?? []).length
+    ? String.raw`^(` + (opts.okvedPrefixes ?? []).map((p) => p.replace(/\./g, String.raw`\.`)).join('|') + ')'
+    : null;
+  const { data, error } = await db.rpc('polza_ru_directory_candidates_v2', {
     p_min_revenue: opts.minRevenue,
     p_max_revenue: opts.maxRevenue,
     p_min_employees: opts.minEmployees,
+    p_okved_regex: okvedRegex,
     p_limit: opts.limit,
   });
   if (error) throw new Error(`directory candidates failed: ${error.message}`);
@@ -39,6 +46,7 @@ export async function loadDirectoryCandidates(
       revenue: r.revenue != null ? Number(r.revenue) : null,
       employees: r.employees_count != null ? Number(r.employees_count) : null,
       okved: r.okved_code ? String(r.okved_code) : null,
+      email: r.email ? String(r.email) : null,
     }));
 }
 
