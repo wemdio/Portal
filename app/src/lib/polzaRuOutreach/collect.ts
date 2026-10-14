@@ -139,6 +139,11 @@ async function recentlyRejectedDomains(db: SupabaseClient, now = new Date()): Pr
 
 const SOURCE_POOL_LIMIT = 5000;
 
+/** «a@x.ru, b@x.ru; c@x.ru» → адреса по одному (в базах их пишут списком в одной ячейке). */
+function splitEmails(value: string | null | undefined): string[] {
+  return Array.from(new Set(String(value ?? '').toLowerCase().split(/[\s,;]+/).filter((e) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(e))));
+}
+
 export async function collectCandidates(
   db: SupabaseClient,
   config: RuOutreachConfig,
@@ -261,7 +266,7 @@ export async function collectCandidates(
   if (src.has('base')) {
     await attempt('base', async () => {
       for (const r of await loadSignalRows(db, 'base')) {
-        const email = typeof r.details.email === 'string' && r.details.email.includes('@') ? r.details.email : null;
+        const emails = splitEmails(typeof r.details.email === 'string' ? r.details.email : null);
         all.push(
           base({
             key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.company_name)}`,
@@ -271,7 +276,7 @@ export async function collectCandidates(
             inn: r.inn,
             website: r.company_website,
             revenue: typeof r.details.revenue === 'number' ? r.details.revenue : null,
-            knownEmails: email ? [email] : [],
+            knownEmails: emails,
           }),
         );
       }
@@ -290,13 +295,15 @@ export async function collectCandidates(
         minRevenue: config.min_revenue,
         maxRevenue: config.max_revenue,
         minEmployees: config.min_employees,
-        limit: Math.min(5000, Math.max(500, poolTarget)),
+        okvedPrefixes: config.okved_prefixes,
+        limit: Math.min(50_000, Math.max(500, poolTarget)),
       });
       for (const r of rows) {
         all.push(
           base({
             key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.name)}`,
             source: 'directory',
+            knownEmails: splitEmails(r.email),
             sourceRecordId: r.inn ? `inn:${r.inn}` : null,
             companyName: r.name,
             inn: r.inn,
