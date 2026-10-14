@@ -9,6 +9,7 @@ import {
   resolveBriefScoringConcurrency,
 } from '@/lib/briefScoring/concurrency';
 import { fatalAiAccountError } from '@/lib/openrouter/client';
+import { TA_JEV_BATCH, TaJevBreaker, scoreTaWithJev, taJevCut, taJevEnabled } from '@/lib/taScoringJev';
 
 type QueueItem = {
   id: string;
@@ -215,13 +216,20 @@ export async function runBriefScoringJob(jobId: string) {
 
     if (['failed', 'cancelled'].includes(job.status)) return;
 
+    // Оценка через Jev (lib/taScoringJev) — по флагу TA_SCORING_ENGINE, пачками
+    // по 10 с одним брифом; предохранитель общий на задачу.
+    const jevBreaker = taJevEnabled('databases', job.user_id) ? new TaJevBreaker() : null;
+    const jevCut = taJevCut();
+    const jevStats = { requests: 0, companies: 0, fallback: 0, costUsd: 0 };
+
     trace = await startTrace({
       name: 'database.brief_scoring',
       input: {
         jobId,
         total: job.total,
-        modelBatchSize: MODEL_BATCH_SIZE,
+        modelBatchSize: jevBreaker ? TA_JEV_BATCH : MODEL_BATCH_SIZE,
         modelConcurrency: MODEL_CONCURRENCY,
+        ...(jevBreaker ? { engine: 'jev' } : {}),
       },
       message: `Скоринг по брифу (${job.total} компаний)`,
       userId: job.user_id,
@@ -291,9 +299,10 @@ export async function runBriefScoringJob(jobId: string) {
         continue;
       }
 
+      const chunkSize = jevBreaker ? TA_JEV_BATCH : MODEL_BATCH_SIZE;
       const chunks: QueueItem[][] = [];
-      for (let i = 0; i < batch.length; i += MODEL_BATCH_SIZE) {
-        chunks.push(batch.slice(i, i + MODEL_BATCH_SIZE));
+      for (let i = 0; i < batch.length; i += chunkSize) {
+        chunks.push(batch.slice(i, i + chunkSize));
       }
 
       await mapBriefScoringWithConcurrency(chunks, MODEL_CONCURRENCY, async (chunk) => {
@@ -310,31 +319,97 @@ export async function runBriefScoringJob(jobId: string) {
         const activeItems = chunk.filter((item) => !overAttemptItems.some((it) => it.id === item.id));
         if (activeItems.length === 0) return;
 
-        try {
-          const scores = await scoreBriefCompanies({
-            apiKey: OPENROUTER_BRIEF_API_KEY,
-            briefText: job.brief_text,
-            companies: activeItems.map((item) => ({
-              idx: item.row_index,
-              data: toCompanyData(item.company_data),
-            })),
-          });
+        // Прежний путь DeepSeek; при оценке через Jev — только для компаний без его ответа.
+        const scoreWithDeepSeek = async (items: QueueItem[]) => {
+          try {
+            const scores = await scoreBriefCompanies({
+              apiKey: OPENROUTER_BRIEF_API_KEY,
+              briefText: job.brief_text,
+              companies: items.map((item) => ({
+                idx: item.row_index,
+                data: toCompanyData(item.company_data),
+              })),
+            });
 
-          const scoresByRow = new Map<number, BriefScoringResult>();
-          for (const score of scores) scoresByRow.set(score.idx, score);
+            const scoresByRow = new Map<number, BriefScoringResult>();
+            for (const score of scores) scoresByRow.set(score.idx, score);
 
-          for (const item of activeItems) {
-            const score = scoresByRow.get(item.row_index);
-            if (!score) {
-              const failed = await updateQueueFailed(item, 'Нет оценки от AI');
+            for (const item of items) {
+              const score = scoresByRow.get(item.row_index);
+              if (!score) {
+                const failed = await updateQueueFailed(item, 'Нет оценки от AI');
+                if (failed) {
+                  errors += 1;
+                  processed += 1;
+                }
+                continue;
+              }
+
+              const completed = await updateQueueCompleted(item, score);
+              if (completed) {
+                success += 1;
+                processed += 1;
+              } else {
+                const failed = await updateQueueFailed(item, 'Ошибка записи результата');
+                if (failed) {
+                  errors += 1;
+                  processed += 1;
+                }
+              }
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : 'Ошибка оценки ЦА';
+            const fatal = fatalAiAccountError(message);
+            if (fatal && !fatalError) fatalError = fatal;
+            const rowError = fatal ?? message;
+            lastRowError = rowError;
+
+            for (const item of items) {
+              const retry = !fatal && shouldRetryBriefScoringError(message, item.attempt_count);
+              if (retry) {
+                await requeueItem(item, message);
+                continue;
+              }
+              const failed = await updateQueueFailed(item, rowError);
               if (failed) {
                 errors += 1;
                 processed += 1;
               }
-              continue;
             }
 
-            const completed = await updateQueueCompleted(item, score);
+            await logError('brief.scoring.worker.batch_failed', err, {
+              jobId,
+              batchSize: items.length,
+            });
+          }
+        };
+
+        let rest = activeItems;
+        if (jevBreaker?.available) {
+          const result = await scoreTaWithJev({
+            apiKey: OPENROUTER_BRIEF_API_KEY,
+            brief: job.brief_text.slice(0, 5000),
+            companies: activeItems.map((item) => ({ key: item.id, data: toCompanyData(item.company_data) })),
+            cut: jevCut,
+            title: 'Portal - Brief Scoring (Jev)',
+          });
+          if (jevBreaker.record(result)) {
+            await logInfo('brief.scoring.worker.jev_disabled', 'Jev выключен до конца задачи, дальше оценивает DeepSeek', {
+              jobId,
+              reason: jevBreaker.disabledReason,
+            });
+          }
+          jevStats.requests += 1;
+          jevStats.companies += result.verdicts.size;
+          jevStats.costUsd += result.costUsd;
+          rest = [];
+          for (const item of activeItems) {
+            const verdict = result.verdicts.get(item.id);
+            if (!verdict) {
+              rest.push(item);
+              continue;
+            }
+            const completed = await updateQueueCompleted(item, { idx: item.row_index, score: verdict.score, reason: verdict.reason });
             if (completed) {
               success += 1;
               processed += 1;
@@ -346,30 +421,13 @@ export async function runBriefScoringJob(jobId: string) {
               }
             }
           }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : 'Ошибка оценки ЦА';
-          const fatal = fatalAiAccountError(message);
-          if (fatal && !fatalError) fatalError = fatal;
-          const rowError = fatal ?? message;
-          lastRowError = rowError;
-
-          for (const item of activeItems) {
-            const retry = !fatal && shouldRetryBriefScoringError(message, item.attempt_count);
-            if (retry) {
-              await requeueItem(item, message);
-              continue;
-            }
-            const failed = await updateQueueFailed(item, rowError);
-            if (failed) {
-              errors += 1;
-              processed += 1;
-            }
-          }
-
-          await logError('brief.scoring.worker.batch_failed', err, {
-            jobId,
-            batchSize: activeItems.length,
-          });
+          jevStats.fallback += rest.length;
+        } else if (jevBreaker) {
+          // Предохранитель уже выключил Jev: вся пачка — DeepSeek.
+          jevStats.fallback += activeItems.length;
+        }
+        for (let i = 0; i < rest.length; i += MODEL_BATCH_SIZE) {
+          await scoreWithDeepSeek(rest.slice(i, i + MODEL_BATCH_SIZE));
         }
       });
 
@@ -443,6 +501,16 @@ export async function runBriefScoringJob(jobId: string) {
       errors: failedCount,
       modelBatchSize: MODEL_BATCH_SIZE,
       modelConcurrency: MODEL_CONCURRENCY,
+      ...(jevBreaker
+        ? {
+            engine: 'jev',
+            jevRequests: jevStats.requests,
+            jevCompanies: jevStats.companies,
+            jevFallbackCompanies: jevStats.fallback,
+            jevCostUsd: Math.round(jevStats.costUsd * 1e6) / 1e6,
+            jevDisabledReason: jevBreaker.disabledReason,
+          }
+        : {}),
     });
 
     if (
