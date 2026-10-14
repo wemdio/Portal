@@ -8,11 +8,10 @@
  * контакт (найти или создать), сделка, примечания с перепиской, повторы.
  *
  * Спека: docs/superpowers/specs/2026-10-06-tg-outreach-crm-handoff-design.md.
- * Email-аутрич (лид → AMO с почтой в поле Email) был сделан в f5781ca22 и
- * отключён по просьбе 06.10.2026 — сделки по нему пока заводят руками;
- * вернуть — взять из этого коммита emailLeadPush.ts, миграцию и хук квалификатора.
- * Условие пользователя на возврат: сделки только по нашим кампаниям
- * «N. Polza_…» (`isOwnAgencyCampaign`), по кампаниям клиентов — никогда.
+ * Email-аутрич наших кампаний «N. Polza_…» — с 11.10.2026 своя очередь
+ * own_reply_crm_pushes (lib/ownReplyLeads/process.ts): открытая сделка
+ * человека получает примечание, новая не заводится. По кампаниям клиентов —
+ * никогда (условие пользователя 06.10.2026).
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
@@ -21,6 +20,7 @@ import {
   isTransientAmoError,
   splitNoteText,
   type AmoClient,
+  type AmoLeadCustomField,
   type AmoTelegramField,
 } from './amoClient';
 import { POLZA_CONNECTION, resolveCrmConnection } from './connections';
@@ -76,6 +76,19 @@ export interface CrmDealSpec {
    * «Контур». Значение ищется по тексту варианта в поле.
    */
   polzaSelects: Array<{ fieldId: number; fieldName: string; value: string }>;
+  /** Текстовые поля сделки — только в нашей AMO; пустые значения пропускаются. */
+  polzaTexts?: Array<{ fieldId: number; value: string }>;
+  /** Ответственный в AMO; не задан — владелец токена (как у TG-аутрича). */
+  responsibleUserId?: number | null;
+  /**
+   * Открытая сделка, куда положить переписку вместо новой (email-аутрич
+   * «N. Polza»: дубли не заводим). Нет хука — сделка создаётся всегда.
+   */
+  findExistingLead?: (client: AmoClient) => Promise<{ id: number; name: string } | null>;
+  /** Доп. колонки строки канала, когда переписка ушла в найденную сделку. */
+  existingLeadPatch?: (lead: { id: number; name: string }) => Record<string, unknown>;
+  /** Доп. колонки строки канала, когда создана новая сделка. */
+  createdLeadPatch?: Record<string, unknown>;
   /** Кого создаём — в журнал. */
   label: string;
 }
@@ -119,6 +132,24 @@ async function pushOne(db: SupabaseClient, table: string, task: CrmQueueRow, spe
 
     let contactId = task.amo_contact_id;
     let leadId = task.amo_lead_id;
+    let existing: { id: number; name: string } | null = null;
+
+    // Сначала — открытая сделка этого человека: id пишем сразу, повтор после
+    // сбоя на примечании пойдёт в неё же, а не заведёт новую.
+    if (!leadId && spec.findExistingLead) {
+      existing = await spec.findExistingLead(client);
+      if (existing) {
+        leadId = existing.id;
+        await db
+          .from(table)
+          .update({
+            amo_lead_id: leadId,
+            lead_url: `${client.baseUrl}/leads/detail/${leadId}`,
+            ...(spec.existingLeadPatch?.(existing) ?? {}),
+          })
+          .eq('id', task.id);
+      }
+    }
 
     if (!leadId) {
       if (!contactId) {
@@ -134,13 +165,17 @@ async function pushOne(db: SupabaseClient, table: string, task: CrmQueueRow, spe
         await db.from(table).update({ amo_contact_id: contactId }).eq('id', task.id);
       }
 
-      const customFields: Array<{ field_id: number; values: Array<{ enum_id: number }> }> = [];
+      const customFields: AmoLeadCustomField[] = [];
       if (isPolza) {
         const missing: string[] = [];
         for (const select of spec.polzaSelects) {
           const enumId = await leadSelectEnumId(client, select.fieldId, select.value).catch(() => null);
           if (enumId) customFields.push({ field_id: select.fieldId, values: [{ enum_id: enumId }] });
           else missing.push(`«${select.fieldName}» = «${select.value}»`);
+        }
+        for (const text of spec.polzaTexts ?? []) {
+          const value = text.value.trim().slice(0, 255);
+          if (value) customFields.push({ field_id: text.fieldId, values: [{ value }] });
         }
         // Сделку всё равно заводим: лид важнее пометки, её доставят руками.
         if (missing.length) warning = `в AMO не найдено ${missing.join(', ')} — проставьте руками`;
@@ -153,10 +188,15 @@ async function pushOne(db: SupabaseClient, table: string, task: CrmQueueRow, spe
         contactId,
         tags: spec.tags.map((t) => t.slice(0, 100)).filter(Boolean),
         customFields,
+        responsibleUserId: spec.responsibleUserId ?? null,
       });
       await db
         .from(table)
-        .update({ amo_lead_id: leadId, lead_url: `${client.baseUrl}/leads/detail/${leadId}` })
+        .update({
+          amo_lead_id: leadId,
+          lead_url: `${client.baseUrl}/leads/detail/${leadId}`,
+          ...(spec.createdLeadPatch ?? {}),
+        })
         .eq('id', task.id);
     }
 
@@ -168,7 +208,7 @@ async function pushOne(db: SupabaseClient, table: string, task: CrmQueueRow, spe
       .from(table)
       .update({ status: 'sent', sent_at: new Date().toISOString(), error_message: warning })
       .eq('id', task.id);
-    log('info', `CRM: сделка ${leadId} создана — ${spec.label}${warning ? ` — ${warning}` : ''}`);
+    log('info', `CRM: ${existing ? `переписка добавлена в сделку ${leadId}` : `сделка ${leadId} создана`} — ${spec.label}${warning ? ` — ${warning}` : ''}`);
   } catch (err) {
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 500);
     const attempts = task.attempts + 1;

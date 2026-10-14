@@ -52,10 +52,7 @@ export type FirstSalesLeadRow = {
   first_contract_at: string | null;
   won_at: string | null;
   history_complete: boolean;
-  /**
-   * Текущий этап сделки в AMO. Нужен ради одного правила: закрытая в минус
-   * (143) сделка квалом не считается — см. isQualifiedInWindow.
-   */
+  /** Текущий этап сделки в AMO. */
   status_id: number | null;
   raw: unknown;
 };
@@ -231,18 +228,17 @@ export function isLeadInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): b
  * смотрят на период как на срез: сделки и их этапы на его конец. Этап после
  * конца периода к нему не относится.
  *
- * Закрытая в минус сделка квалом не считается вовсе, когда бы её ни закрыли:
- * так квалы считает отчёт продаж, и дашборд с ним сверяют. Цена решения —
- * квалы прошлого периода уменьшаются, когда его сделку закрывают позже.
+ * Закрытая в минус сделка, успевшая дойти до квала, остаётся квалом (с
+ * 13.10.2026, просьба продаж): раньше она выпадала, и квалы прошлого периода
+ * уменьшались, когда его сделку закрывали позже. Сделку, закрытую сразу
+ * после первого контакта, квалом не делает: first_qualified_at не ставится
+ * при переходе в «Закрыто и не реализовано» (порог `sort < 10000` во view).
  */
-const LOST_STATUS_ID = 143;
-
 export function isQualifiedInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): boolean {
   return (
     isLeadInWindow(lead, from, to)
     && inWindow(lead.first_qualified_at, from, to)
     && lead.history_complete
-    && lead.status_id !== LOST_STATUS_ID
   );
 }
 

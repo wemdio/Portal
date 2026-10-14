@@ -1070,8 +1070,9 @@ async function runJob(
         const sourceEmails = c.signals
           .map((s) => s.meta?.email)
           .filter((e): e is string => typeof e === 'string' && e.includes('@'));
-        const extra = sourceEmails.length
-          ? { emails: Array.from(new Set([...catalog.emails, ...sourceEmails])), sourceUrl: catalog.sourceUrl ?? c.signals.find((s) => s.meta?.email)?.url ?? null }
+        const allSourceEmails = [...sourceEmails, ...c.knownEmails];
+        const extra = allSourceEmails.length
+          ? { emails: Array.from(new Set([...catalog.emails, ...allSourceEmails])), sourceUrl: catalog.sourceUrl ?? c.signals.find((s) => s.meta?.email)?.url ?? null }
           : catalog;
         const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, extra, pages);
         smtpSilent = noteEmailVerdict(found.verdict);
@@ -1089,6 +1090,8 @@ async function runJob(
         }
         // До трёх рабочих адресов, главный — первым.
         foundEmails = found.emails.map((item) => ({ ...item, sourceUrl: found.sourceUrl }));
+        // Загруженная база — один адрес на компанию, самый подходящий (решение 14.10.2026).
+        if (c.sources.length === 1 && c.sources[0] === 'base') foundEmails = foundEmails.slice(0, 1);
       }
       // Стоп-лист — по каждому адресу: запрещённый выпадает, главным становится
       // следующий. Строка отсеивается, только если разрешённых не осталось.

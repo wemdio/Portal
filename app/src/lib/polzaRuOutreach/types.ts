@@ -127,6 +127,9 @@ export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[]
     p.bridge,
     ...(chainUsesCase(chain) ? [p.case] : []),
     ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
+    // Предмет и должность — из утверждённых текстов (образец писателя с 14.10.2026).
+    p.topic,
+    ...(chain === 'hiring' ? [p.position] : []),
     p.signature,
   ];
 }
@@ -145,7 +148,7 @@ export const INDUSTRY_GROUP_LABELS: Record<IndustryGroup, string> = {
 };
 
 export const SOURCE_CODES = [
-  'hh', 'direct', 'crm', 'exhibitors', 'contracts', 'tenders', 'growth', 'site_news', 'directory',
+  'hh', 'direct', 'crm', 'exhibitors', 'contracts', 'tenders', 'growth', 'base', 'site_news', 'directory',
   'gis', 'ymaps', 'revenue_growth', 'news',
 ] as const;
 export type SourceCode = (typeof SOURCE_CODES)[number];
@@ -158,6 +161,7 @@ export const SOURCE_LABELS: Record<SourceCode, string> = {
   contracts: 'Госконтракты (загруженные выгрузки ЕИС)',
   tenders: 'Коммерческие тендеры (загруженные выгрузки)',
   growth: 'Гранты / акселераторы (загруженные списки)',
+  base: 'Загруженная база компаний (с почтой, без повода)',
   site_news: 'Новости на сайтах компаний прошлых запусков',
   directory: 'Общая база компаний (по профилю)',
   gis: '2ГИС: несколько филиалов, отдел продаж',
