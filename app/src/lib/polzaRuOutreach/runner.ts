@@ -496,27 +496,15 @@ interface JournalRow {
   normalized_domain: string | null;
   inn: string | null;
   doubt_flags: string[] | null;
+  source_record_id: string | null;
 }
 
 /**
- * Перезапуск воркера, когда лимит на ИИ уже исчерпан или от него остался только
- * запас под шаблоны (по снимку progress_detail.llm): разбирать больше не на
- * что, а журнал прошлого прогона —
- * готовые, отсеянные, очень спорные — оплачен. Поэтому журнал не стираем:
- * убираем только необработанные строки (и повторы, чей оригинал среди них —
- * как при обычном стопе по лимиту), счётчики пересчитываем по журналу тем же
- * правилом, что экран (funnel.ts), и завершаем запуск остановленным лимитом.
- * Отчёт SDR, пул и ошибки источников по журналу не пересчитать — они
- * остаются из снимка.
+ * Журнал запуска после перезапуска воркера: необработанные строки убраны,
+ * повторы без оригинала тоже, законченные (готовые, отсеянные, спорные) — как
+ * есть. Общий для «лимит исчерпан» и продолжения запуска с места остановки.
  */
-async function completeSpentRun(
-  db: SupabaseClient,
-  jobId: string,
-  target: number,
-  budget: JobBudget,
-  previousDetail: Record<string, unknown> | null,
-  finishRun: (patch: Record<string, unknown>) => Promise<void>,
-): Promise<void> {
+async function loadKeptJournal(db: SupabaseClient, jobId: string): Promise<JournalRow[]> {
   const { error: dropErr } = await db.from('polza_ru_outreach_companies').delete().eq('job_id', jobId).eq('row_status', 'processing');
   if (dropErr) throw new Error(`Не удалось убрать необработанные строки журнала: ${dropErr.message}`);
   const rows: JournalRow[] = [];
@@ -526,7 +514,7 @@ async function completeSpentRun(
     // пропустить или повторить строки, и счётчики разошлись бы с журналом.
     const { data, error } = await db
       .from('polza_ru_outreach_companies')
-      .select('id,row_status,pipeline_stage,reason_code,chain_type,normalized_domain,inn,doubt_flags')
+      .select('id,row_status,pipeline_stage,reason_code,chain_type,normalized_domain,inn,doubt_flags,source_record_id')
       .eq('job_id', jobId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -553,7 +541,29 @@ async function completeSpentRun(
     if (error) log('warn', `job ${jobId}: orphan duplicates cleanup failed`, error);
     for (const r of data ?? []) gone.add(String(r.id));
   }
-  const kept = rows.filter((r) => !gone.has(String(r.id)));
+  return rows.filter((r) => !gone.has(String(r.id)));
+}
+
+/**
+ * Перезапуск воркера, когда лимит на ИИ уже исчерпан или от него остался только
+ * запас под шаблоны (по снимку progress_detail.llm): разбирать больше не на
+ * что, а журнал прошлого прогона —
+ * готовые, отсеянные, очень спорные — оплачен. Поэтому журнал не стираем:
+ * убираем только необработанные строки (и повторы, чей оригинал среди них —
+ * как при обычном стопе по лимиту), счётчики пересчитываем по журналу тем же
+ * правилом, что экран (funnel.ts), и завершаем запуск остановленным лимитом.
+ * Отчёт SDR, пул и ошибки источников по журналу не пересчитать — они
+ * остаются из снимка.
+ */
+async function completeSpentRun(
+  db: SupabaseClient,
+  jobId: string,
+  target: number,
+  budget: JobBudget,
+  previousDetail: Record<string, unknown> | null,
+  finishRun: (patch: Record<string, unknown>) => Promise<void>,
+): Promise<void> {
+  const kept = await loadKeptJournal(db, jobId);
   const { funnel, reasons, chains, ready, doubtful, awaiting } = journalCounts(kept);
   const stopReason = ready >= target ? 'target_reached' : 'budget';
   const spend = budget.snapshot();
@@ -688,7 +698,7 @@ async function runJob(
   });
 
   try {
-    const { data: job, error: jobErr } = await db.from('parser_jobs').select('config').eq('id', jobId).single();
+    const { data: job, error: jobErr } = await db.from('parser_jobs').select('config, started_at').eq('id', jobId).single();
     if (jobErr || !job) throw new Error(jobErr?.message ?? 'Job not found');
     const config: RuOutreachConfig = sanitizeRuOutreachConfig((job.config ?? {}) as Partial<RuOutreachConfig>);
     const target = config.limit;
@@ -717,8 +727,11 @@ async function runJob(
 
     // Только идущему: статус остановки не перетираем (запуск, остановленный
     // после захвата, заново не начинается — ensureNotCancelled ниже).
+    // Продолжение после перезапуска воркера (деплой) не сбрасывает начало
+    // запуска: от него считается предел в 3 часа.
+    const resuming = Boolean(previousDetail) && Boolean(job.started_at);
     await setRunningProgress({
-      started_at: new Date().toISOString(),
+      ...(resuming ? {} : { started_at: new Date().toISOString() }),
       error_message: null,
       progress_stage: 'loading_sources',
       progress_percent: 1,
@@ -737,10 +750,13 @@ async function runJob(
     cancelWatch.unref?.();
     // Остановленный между захватом и стартом запуск журнал прошлого прогона не стирает.
     await ensureNotCancelled();
-    // Повтор после падения воркера — с чистого журнала, иначе дубли в воронке.
-    // Лимит при этом ещё не исчерпан (иначе — completeSpentRun выше): разборы
-    // сайтов в кэше, и заново платим в основном за вакансии.
-    await db.from('polza_ru_outreach_companies').delete().eq('job_id', jobId);
+    // Повтор после падения или перезапуска воркера (деплой) — продолжение с
+    // места остановки (решение 14.10.2026): законченные строки остаются,
+    // необработанные убираем, и в работу идут только компании, которых в
+    // журнале ещё нет. Раньше журнал стирался, и деплой посреди 3-часового
+    // запуска выбрасывал готовые компании.
+    const resumedJournal = await loadKeptJournal(db, jobId);
+    if (resumedJournal.length) log('info', `job ${jobId}: resuming — ${resumedJournal.length} finished rows kept`);
     // Из шаблонов цепочек прошлого прогона — только не готовые: failed-шаблон
     // иначе сразу отправил бы компании оффера в спорные без новой попытки, а
     // pending умершего прогона заставил бы ждать. Готовые (ok) оплачены и
@@ -764,7 +780,19 @@ async function runJob(
     const exported: ExportedIndex = config.include_previously_exported
       ? { domains: new Set(), inns: new Set() }
       : await loadPreviouslyExported(db, jobId);
-    const { pool, sourceErrors, skippedRecent } = await collectCandidates(db, config, amo, maxScan);
+    const collected = await collectCandidates(db, config, amo, maxScan);
+    const { sourceErrors, skippedRecent } = collected;
+    const doneSources = new Set(resumedJournal.map((r) => r.source_record_id).filter((v): v is string => Boolean(v)));
+    const doneDomains = new Set(resumedJournal.map((r) => r.normalized_domain).filter((v): v is string => Boolean(v)));
+    const doneInns = new Set(resumedJournal.map((r) => r.inn).filter((v): v is string => Boolean(v)));
+    const pool = resumedJournal.length
+      ? collected.pool.filter((c) => {
+          if (c.sourceRecordId && doneSources.has(c.sourceRecordId)) return false;
+          const d = normalizeDomain(c.website);
+          if (d && doneDomains.has(d)) return false;
+          return !(c.inn && doneInns.has(c.inn));
+        })
+      : collected.pool;
     if (Object.keys(sourceErrors).length) log('warn', `job ${jobId}: source errors`, sourceErrors);
     log('info', `job ${jobId}: pool=${pool.length}, skipped_recent=${skippedRecent}, target=${target}, sources=${config.sources.join(',')}`);
 
@@ -803,11 +831,25 @@ async function runJob(
     // Вакансии разбираются после почты, поэтому считаются компании с рабочей почтой.
     const sdr = { any_sales_vacancy: 0, strict_sdr: 0, broad_to_general_queue: 0 };
     const totals = { scanned: 0, ready: 0 };
+    if (resumedJournal.length) {
+      const prior = journalCounts(resumedJournal);
+      Object.assign(funnel, prior.funnel);
+      Object.assign(reasons, prior.reasons);
+      Object.assign(chains, prior.chains);
+      doubtful.count = prior.doubtful;
+      totals.scanned = resumedJournal.length;
+      totals.ready = prior.ready;
+    }
     // Дедуп запуска: какая строка заняла домен и какая — ИНН. Строка,
     // возвращённая в необработанные, их освобождает; повтор помнит, чей домен
     // или ИНН он повторил (уборка после стопа по лимиту).
     const domainOwner = new Map<string, string>();
     const innOwner = new Map<string, string>();
+    for (const r of resumedJournal) {
+      if (r.reason_code === 'DUPLICATE_COMPANY') continue;
+      if (r.normalized_domain) domainOwner.set(r.normalized_domain, String(r.id));
+      if (r.inn) innOwner.set(r.inn, String(r.id));
+    }
     const duplicates: Duplicate[] = [];
     // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
     const emailDomainCache: EmailDomainCache = new Map();
@@ -821,7 +863,7 @@ async function runJob(
     // которые лимит остановил, уберём из журнала. Запас тратит только
     // писатель — у уже разобранных компаний будут письма.
     let budgetStop = false;
-    const runStartedAt = Date.now();
+    const runStartedAt = resuming && job.started_at ? new Date(String(job.started_at)).getTime() : Date.now();
     const stopForBudget = (): boolean => {
       if (!analysisBudgetLeft() || Date.now() - runStartedAt > MAX_RUN_MS) budgetStop = true;
       return budgetStop;
@@ -856,6 +898,7 @@ async function runJob(
     // запуск докупал бы разбор новых компаний сверх того, что потом можно
     // выложить.
     const awaiting = { count: 0 };
+    if (resumedJournal.length) awaiting.count = journalCounts(resumedJournal).awaiting;
     // Из них — те, чей шаблон не написан из-за молчания модели: на шаге писем
     // следующей волны (или в конце запуска) шаблон пишется ещё раз, и эти
     // строки собираются заново.
