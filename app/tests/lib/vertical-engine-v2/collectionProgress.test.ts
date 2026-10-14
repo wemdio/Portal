@@ -64,9 +64,11 @@ describe('VE2 collection progress presentation', () => {
     // "no remaining work" or reuse a verdict from before the latest write.
     const priorTriage = process.env.VE_RELEVANCE_TRIAGE;
     const priorProjects = process.env.VE_RELEVANCE_TRIAGE_PROJECTS;
+    const priorAudienceProjects = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
     try {
       process.env.VE_RELEVANCE_TRIAGE = 'off';
       process.env.VE_RELEVANCE_TRIAGE_PROJECTS = 'project-1';
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = '';
       const snapshot = { id: 'checked', project_id: 'project-1', status: 'analyzed',
         updated_at: '2026-10-12T10:00:00Z', max_emails_per_company: null, contact_cap_applied: 3,
         collection_continuation_revision: 4, collect_info: { private: 'unchanged' } };
@@ -76,6 +78,14 @@ describe('VE2 collection progress presentation', () => {
       const cached = { ...snapshot, collection_continuation: cache };
       expect(readVeCollectionContinuationCache(cached)).toEqual(verdict);
       expect(readVeCollectionContinuationCache(snapshot)).toBeNull();
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = 'another-project';
+      expect(readVeCollectionContinuationCache(cached)).toEqual(verdict);
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = 'project-1';
+      expect(readVeCollectionContinuationCache(cached)).toBeNull();
+      const enabledCache = createVeCollectionContinuationCache(snapshot, verdict);
+      expect(readVeCollectionContinuationCache({ ...snapshot, collection_continuation: enabledCache })).toEqual(verdict);
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = '';
+      expect(readVeCollectionContinuationCache({ ...snapshot, collection_continuation: enabledCache })).toBeNull();
       for (const patch of [
         { updated_at: '2026-10-12T10:00:01Z' }, { status: 'collecting' }, { collection_continuation_revision: 5 },
         { max_emails_per_company: 5 }, { contact_cap_applied: null }, { max_emails_per_company: undefined },
@@ -137,6 +147,8 @@ describe('VE2 collection progress presentation', () => {
       else process.env.VE_RELEVANCE_TRIAGE = priorTriage;
       if (priorProjects === undefined) delete process.env.VE_RELEVANCE_TRIAGE_PROJECTS;
       else process.env.VE_RELEVANCE_TRIAGE_PROJECTS = priorProjects;
+      if (priorAudienceProjects === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+      else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = priorAudienceProjects;
     }
 
     const preparation: VeOutreachPreparation = { project_id: 'project-1', hypothesis_id: 'h1', base_id: 'new',

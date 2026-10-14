@@ -169,6 +169,11 @@ describe('VE2 stage broad_hypotheses on an existing project', () => {
   it('uses one scoped generation only when both flags allow it and preserves its receipt after flag removal', async () => {
     const priorScope = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS, priorGeneration = process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS;
     const scope = { version: 1, kind: 'sector', any_of: ['Финтех', 'Платежные провайдеры'], required: ['Россия'], excluded: [] };
+    // Both titles collapse in append deduplication; different requirements must retry instead of disappearing.
+    expect(VeScopedBroadHypothesesOnlySchema.safeParse({ broad_hypotheses: [
+      { ...sector('Платёжные компании'), audience_scope: scope },
+      { ...sector('Платежные компании'), audience_scope: { ...scope, required: ['Казахстан'] } },
+    ] }).success).toBe(false);
     const db = broadDb(seedTables(), { loseReply: true });
     const before = snapshot(db);
     try {

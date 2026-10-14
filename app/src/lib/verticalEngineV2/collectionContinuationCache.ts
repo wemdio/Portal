@@ -1,10 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeCollectionContinuation } from './collectionRecovery';
 import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
+import { isVeAudienceScopeEnabled } from './audienceScope';
 
 /** Bump when the continuation predicate or its underlying selection rules
  * change: an old negative verdict must not hide newly available work. */
-export const VE_COLLECTION_CONTINUATION_CACHE_VERSION = 2;
+export const VE_COLLECTION_CONTINUATION_CACHE_VERSION = 3;
 
 interface VeContinuationCache {
   version: number;
@@ -14,6 +15,7 @@ interface VeContinuationCache {
   basis_max_emails_per_company: number | null;
   basis_contact_cap_applied: number | null;
   triage_enabled: boolean;
+  audience_scope_enabled: boolean;
   decision: VeCollectionContinuation;
 }
 
@@ -36,6 +38,7 @@ function basis(base: Record<string, unknown>): Omit<VeContinuationCache, 'decisi
     basis_max_emails_per_company: base.max_emails_per_company,
     basis_contact_cap_applied: base.contact_cap_applied,
     triage_enabled: isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null),
+    audience_scope_enabled: isVeAudienceScopeEnabled(typeof base.project_id === 'string' ? base.project_id : null),
   };
 }
 
