@@ -353,6 +353,307 @@ export function heBrandNeedsOwner(letters: unknown): boolean {
   return heLettersLanguageOf(letters) === 'ru' && findHeBrandLeaks(letters).length > 0;
 }
 
+/* ── Строки отказа от писем и «последнее письмо» (правило владельца) ── */
+
+/**
+ * ПРАВИЛО ВЛАДЕЛЬЦА: в письмах нет строк, которые предлагают получателю
+ * перестать получать письма («let me know and I won't reach out again»,
+ * «reply STOP», «unsubscribe», «if you'd rather not hear from me»), и
+ * прощальных строк «это последнее письмо» (breakup: «this is my last email»,
+ * «I'm closing the loop», «I'll stop reaching out»). Для спам-фильтров и
+ * получателя это маркер рассылки, а заголовка отписки у кампаний пула нет
+ * осознанно (engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS).
+ *
+ * Промпт цепочки это уже запрещает (prompts/chain.ts), но письма ENG-кабинета
+ * уходят из наших ящиков без человека, который прочёл бы их, а клиент правит
+ * письма сам. Поэтому здесь — детерминированная проверка готового текста:
+ * модель могла правило нарушить, клиент — дописать строку руками.
+ *
+ * ЧТО ЛОВИТСЯ (findHeOptOutLines): фразы ниже, без учёта регистра, с любыми
+ * апострофами (’ ‘ ʼ) и кавычками, в любой теме и любом теле писем (основной
+ * вариант, вариант B, сегментные варианты).
+ *
+ * КОНТЕКСТ, А НЕ СЛОВО (аудит 14.10.2026, ложные срабатывания). Клиенты
+ * кабинета продают в том числе email-маркетинг, SMS-рассылки и CRM, и слова
+ * «unsubscribe», «opt out», «reply STOP», «close the loop», «stop reaching
+ * out» — обычный предмет их писем: «people unsubscribe», «your patients can
+ * reply STOP to any reminder», «our CRM helps you close the loop on every
+ * lead», «we will stop reaching out to cold leads for you». Поэтому каждая
+ * фраза требует, чтобы она была обращена от отправителя к получателю этого
+ * письма:
+ *  - отписка — инструкция получателю: «To unsubscribe…» в начале фразы,
+ *    «click/reply … to unsubscribe», «unsubscribe here/below», «you can
+ *    unsubscribe», «unsubscribe from these/our emails», строка «Unsubscribe»
+ *    отдельной строкой;
+ *  - opt out — «you can opt out», «To opt out…», «… to opt out», «opt out
+ *    here/below», «opt out of these/our emails»;
+ *  - «reply STOP», «click here to unsubscribe» — только повелительно: начало
+ *    фразы или после запятой, «just / please / or / then …», «you can …»;
+ *    «patients can reply STOP», «customers click a link to unsubscribe» —
+ *    третье лицо;
+ *  - «я/мы перестанем писать» — только когда получатель и есть объект: после
+ *    «stop reaching out / emailing / following up» идёт конец фразы, «you»,
+ *    «again», «after this», а не «to cold leads» или «with leads»; «won't
+ *    bother/spam you» — с «again / anymore» или концом фразы;
+ *  - «leave you alone» — только «I'll / we'll leave you alone» и «want me to
+ *    leave you alone», не «we'll never leave you alone with…»;
+ *  - «prefer not to receive / rather we didn't» — только «you'd prefer /
+ *    rather» и объектом наши письма («these emails», «hear from me»), не
+ *    «teams that prefer not to receive paper invoices»;
+ *  - «close the loop» — только от отправителя («I'm closing the loop», «just
+ *    closing the loop», тема «Closing the loop») и без продолжения «on every
+ *    lead / between teams / with customers».
+ * «My last email» — «моё прошлое письмо», а не прощание; «unsubscribe rate»,
+ * «opt-out requests» — предмет письма. Ложное срабатывание стоит клиенту
+ * одной правки письма (или отказа запуска до всего платного), пропуск —
+ * письма, которое владелец запретил.
+ *
+ * ГДЕ ВКЛЮЧЕНА (heTemplateOptOutLines): рынок 'us' и письма по-английски
+ * (heLettersLanguageOf — латиница; польские фразы этого списка не содержат и
+ * не совпадут). RU-письма и проекты рынка 'ru' не проверяются: правило
+ * написано для ENG-кабинета, и RU-тексты staff-инструмента не меняются.
+ */
+// Начало фразы: начало текста или строки, либо после знака конца фразы
+// (с закрывающей кавычкой или скобкой). Вариант с запятой — для «If not,
+// reply STOP».
+const SENTENCE_START = String.raw`(?<=^|[.!?;:—–]["')\]]?\s{0,3})`;
+const CLAUSE_START = String.raw`(?<=^|[.!?;:,—–]["')\]]?\s{0,3})`;
+// «будущее» отправителя: I'll / we will / I'm going to …
+const WILL = String.raw`(?:'ll|\s+will|'m\s+going\s+to|\s+am\s+going\s+to|'re\s+going\s+to|\s+are\s+going\s+to)`;
+// «не буду»: I won't / we will never / I'm not going to …
+const WONT = String.raw`(?:\s+won't|\s+wont|\s+will\s+not|\s+will\s+never|'ll\s+never|\s+shan't|\s+shall\s+not|'m\s+not\s+going\s+to|\s+am\s+not\s+going\s+to|'re\s+not\s+going\s+to|\s+are\s+not\s+going\s+to)`;
+// Глаголы «писать получателю» в форме -ing (stop reaching out, stop emailing).
+const CONTACT_ING = String.raw`(?:reaching\s+out|e-?mailing|writing|contacting|following\s+up|messaging|bothering|pinging|bugging|pestering|checking\s+in)`;
+// Что может идти после «stop reaching out», чтобы объектом был получатель:
+// конец фразы, «(to) you», «again», «after this»… — но не «to cold leads».
+const TO_RECIPIENT = String.raw`(?=\s*(?:[.,!?;:)"—–]|$|(?:to\s+|with\s+)?you\b|here\b|now\b|for\s+now\b|again\b|anymore\b|after\s+(?:this|that|today)\b|altogether\b|from\s+(?:now|here)\b))`;
+// «stop» как просьба перестать писать: конец фразы или глагол «писать».
+const STOP_SELF = String.raw`stop(?:ped)?(?=\s*(?:[.,!?;:)"—–]|$|now\b|here\b|${CONTACT_ING}${TO_RECIPIENT}))`;
+// Наши письма как объект: «these emails», «my notes», «more follow-ups».
+const OUR_MAIL = String.raw`(?:(?:these|this|my|our)\s+(?:e-?mails?|messages?|notes?|follow-?ups?|outreach)\b|(?:these|this)(?=\s*(?:[.,!?;:)]|$))|(?:any\s+more|more|further|any\s+further)\s+(?:e-?mails?|messages?|notes?|follow-?ups?)\b)`;
+// Хвост «закрыть вопрос» от отправителя: конец фразы, «here», «on this /
+// on my end» — но не «on every lead», «between teams», «with customers».
+const LOOP_END = String.raw`(?=\s*(?:[.,!?;:)"—–]|$|here\b|for\s+now\b|on\s+(?:this|that|it|my|our|things|the\s+(?:thread|conversation|email|emails|note))\b))`;
+// Повелительное наклонение — инструкция получателю: начало фразы (или после
+// запятой: «If not, reply STOP»), «just / please / or / then …», «you can …».
+// «Your patients can reply STOP», «customers click a link to unsubscribe» —
+// третье лицо, не инструкция.
+const IMPERATIVE = String.raw`(?:${CLAUSE_START}|\b(?:just|simply|please|or|then|free\s+to|you\s+(?:can|may|could)(?:\s+(?:always|also|just|simply))?)\s+)`;
+const REPLY_WORD = String.raw`(?:reply|respond|write\s+back|text|type|answer)\s+(?:with\s+)?(?:the\s+word\s+)?"?(?:stop|remove|unsubscribe|opt[\s-]?out)\b`;
+const INSTRUCT = String.raw`${IMPERATIVE}(?:click|tap|reply|respond|write\s+back|follow|use|visit|hit|press|answer)\b[^.!?\n]{0,40}?\bto`;
+
+function optOutRe(source: string): RegExp {
+  return new RegExp(source, 'gim');
+}
+
+const OPT_OUT_PATTERNS: readonly RegExp[] = [
+  // Отписка — инструкция получателю. Не ловит «people unsubscribe», «make it
+  // easy for customers to unsubscribe», «unsubscribe rate», «an unsubscribe
+  // link in every campaign».
+  optOutRe(String.raw`${SENTENCE_START}to\s+unsubscribe\b`),
+  optOutRe(String.raw`${INSTRUCT}\s+unsubscribe\b`),
+  optOutRe(String.raw`\bunsubscribe\s+(?:here|below)\b`),
+  optOutRe(String.raw`\b(?:the\s+)?unsubscribe\s+link\s+(?:below|here|at\s+the\s+bottom)\b`),
+  optOutRe(String.raw`\byou\s+(?:can|may|could|are\s+free\s+to)\s+(?:always\s+|easily\s+|simply\s+|just\s+|also\s+)?unsubscribe\b`),
+  optOutRe(String.raw`\bunsubscribe\s+from\s+(?:${OUR_MAIL}|(?:all\s+)?(?:future|further)\s+(?:e-?mails?|messages?|notes?)\b|(?:my|our|this)\s+(?:mailing\s+|e-?mail\s+)?list\b)`),
+  // Строка «Unsubscribe» в подвале письма — отдельной строкой.
+  optOutRe(String.raw`^[ \t\-–—|•*\[(]*unsubscribe[ \t\])|.]*$`),
+  // Opt out — тоже только получателю. Не ловит «customers can opt out of
+  // marketing texts», «opt-out requests».
+  optOutRe(String.raw`\byou\s+(?:can|may|could|are\s+free\s+to)\s+(?:always\s+|easily\s+|simply\s+|just\s+|also\s+)?opt[\s-]?out\b`),
+  optOutRe(String.raw`${SENTENCE_START}to\s+opt[\s-]?out\b`),
+  optOutRe(String.raw`${INSTRUCT}\s+opt[\s-]?out\b`),
+  optOutRe(String.raw`\bopt[\s-]?out\s+(?:here|below)\b`),
+  optOutRe(String.raw`\bopt[\s-]?out\s+of\s+${OUR_MAIL}`),
+  // «Reply STOP», «respond with "remove"», «you can reply STOP» — только
+  // повелительно (IMPERATIVE). Не ловит «your patients can reply STOP to any
+  // reminder», «customers text STOP to opt out».
+  optOutRe(String.raw`${IMPERATIVE}${REPLY_WORD}`),
+  optOutRe(String.raw`\b(?:just|simply)\s+say\s+"?(?:stop|remove|unsubscribe)\b`),
+  // «I won't reach out again», «we won't bother you again», «I won't follow
+  // up.» Глагол — только с «again / anymore / further / after this» или
+  // концом фразы: «we won't reach out to your existing customers», «we won't
+  // spam you with reports» — предложение клиента.
+  optOutRe(
+    String.raw`\b(?:i|we)${WONT}\s+(?:bother\s+you|bug\s+you|pester\s+you|spam\s+you|reach\s+out(?:\s+to\s+you)?|follow\s+up(?:\s+with\s+you)?|contact\s+you|e-?mail(?:\s+you)?|write(?:\s+to)?\s+you|message\s+you|ping\s+you|reach\s+you|be\s+in\s+touch)(?:\s+(?:here|by\s+email))?(?:\s+(?:again|anymore|any\s+more|further|after\s+(?:this|that|today))\b|\s*(?=[.!?]|$))`,
+  ),
+  // «you won't hear from me again», «you'll never hear from us».
+  optOutRe(String.raw`\byou(?:\s+won't|\s+wont|\s+will\s+not|\s+will\s+never|'ll\s+never|'ll\s+not)\s+hear\s+from\s+(?:me|us)\b`),
+  // «I'll stop reaching out (to you / after this)», «we will stop emailing
+  // you», «I'm going to stop following up.» Не ловит «we will stop reaching
+  // out to cold leads for you».
+  optOutRe(
+    String.raw`\b(?:i|we)${WILL}\s+(?:stop|cease|quit|discontinue)\s+(?:${CONTACT_ING}${TO_RECIPIENT}|sending\s+you\s+(?:e-?mails?|messages?|notes?|these|this)\b|sending\s+${OUR_MAIL}|(?:my|our|these)\s+(?:e-?mails|outreach|messages|notes|follow-?ups)\b)`,
+  ),
+  // «Should I stop (reaching out)?»
+  optOutRe(String.raw`\b(?:should|shall)\s+(?:i|we)\s+${STOP_SELF}`),
+  // «I'll remove you from my list», «take you off our list».
+  optOutRe(String.raw`\b(?:remove|take|drop|delete|scratch)\s+you\s+(?:from|off(?:\s+of)?)\s+(?:my|our|the|this)\s+(?:list|mailing\s+list|email\s+list|sequence|outreach|campaign|cadence)\b`),
+  // «we will no longer contact you», «if you no longer wish to receive…».
+  optOutRe(String.raw`\bno\s+longer\s+(?:contact|e-?mail|write\s+to|reach\s+out\s+to|message|bother)\s+you\b`),
+  optOutRe(String.raw`\byou\s+no\s+longer\s+(?:wish|want|like)\s+to\s+(?:receive|hear|get)\b`),
+  // «if you'd rather not hear from me», «if you prefer not to receive these
+  // emails». Не ловит «teams that prefer not to receive paper invoices».
+  optOutRe(String.raw`\b(?:rather|prefer(?:\s+to)?)\s+not\s+(?:to\s+)?hear\s+from\s+(?:me|us)\b`),
+  optOutRe(String.raw`\byou(?:'d|\s+would)?\s+(?:rather|prefer(?:\s+to)?)\s+not\s+(?:to\s+)?(?:receive|get)\s+${OUR_MAIL}`),
+  optOutRe(String.raw`\byou(?:'d|\s+would)?\s+(?:rather|prefer(?:\s+to)?)\s+not\s+(?:to\s+)?be\s+(?:contacted|e-?mailed|on\s+(?:my|our|this)\s+list)\b`),
+  // «if you don't want to hear from me», «if you don't want to receive these
+  // emails». Не ловит «if you don't want to receive more cold calls».
+  optOutRe(String.raw`\b(?:don't|dont|do\s+not)\s+(?:want|wish|care)\s+to\s+hear\s+from\s+(?:me|us)\b`),
+  optOutRe(String.raw`\byou\s+(?:don't|dont|do\s+not)\s+(?:want|wish|care)\s+to\s+(?:receive|get)\s+${OUR_MAIL}`),
+  optOutRe(String.raw`\byou\s+(?:don't|dont|do\s+not)\s+(?:want|wish|care)\s+to\s+be\s+(?:contacted|e-?mailed)\b`),
+  // «if you'd like me to stop», «want us to back off». Не ловит «want us to
+  // stop chasing invoices for you?».
+  optOutRe(String.raw`\b(?:want|like|need|prefer)\s+(?:me|us)\s+to\s+(?:${STOP_SELF}|back\s+off\b|leave\s+you\s+alone\b|go\s+away\b)`),
+  // «if you'd prefer I stop», «if you'd rather we didn't reach out». Не ловит
+  // «if you'd rather we talk next quarter».
+  optOutRe(
+    String.raw`\byou(?:'d|\s+would)?\s+(?:prefer|rather)\s+(?:that\s+)?(?:i|we)\s+(?:${STOP_SELF}|(?:didn't|did\s+not|don't|do\s+not|not|no\s+longer|never)\s+(?:reach(?:ed)?\s+out|e-?mail(?:ed)?|write|wrote|contact(?:ed)?|follow(?:ed)?\s+up|message(?:d)?|bother(?:ed)?|ping(?:ed)?)\b)`,
+  ),
+  // «I'll leave you alone» — не «we'll never leave you alone with…».
+  optOutRe(String.raw`\b(?:i|we)(?:${WILL}|\s+can|\s+promise\s+to)\s+(?:just\s+)?leave\s+you\s+alone\b`),
+  // «this is my last email», «last note from me», «one last try», «the last
+  // time I'll reach out». «My last email» не ловится: это «моё прошлое
+  // письмо»; «this is the last time you'll…» — тоже нет.
+  optOutRe(String.raw`\bthis\s+(?:is|will\s+be)\s+(?:my|our|the)\s+(?:last|final)\s+(?:email|e-mail|note|message|attempt|follow-?\s?up|try|outreach|reach\s*-?\s*out|ping|check-?\s?in)\b`),
+  optOutRe(String.raw`\b(?:last|final)\s+(?:email|e-mail|note|message|follow-?\s?up|ping|check-?\s?in)\s+from\s+(?:me|us)\b`),
+  optOutRe(String.raw`\b(?:one|my)\s+(?:last|final)\s+(?:attempt|try)\b`),
+  optOutRe(String.raw`\b(?:last|final)\s+time\s+(?:i|we)(?:'ll|\s+will)\s+(?:reach\s+out|e-?mail|write|follow\s+up|contact|bother|ping|message)\b`),
+  // «I'm closing the loop (on this)», «just closing the loop», тема «Closing
+  // the loop». Не ловит «our CRM helps you close the loop on every lead».
+  optOutRe(
+    String.raw`\b(?:i(?:'m|\s+am|'ll|\s+will|'d\s+like\s+to|\s+want(?:ed)?\s+to|\s+thought\s+i'd)|we(?:'re|\s+are|'ll|\s+will|'d\s+like\s+to|\s+want(?:ed)?\s+to)|just|let\s+me|let\s+us|time\s+to)\s+(?:just\s+|quickly\s+|go\s+ahead\s+and\s+)?clos(?:e|ing)\s+(?:the|this|our)\s+loop${LOOP_END}`,
+  ),
+  optOutRe(String.raw`${SENTENCE_START}(?:just\s+)?closing\s+(?:the|this|our)\s+loop${LOOP_END}`),
+  // «I'll close your file», «should I close your file?».
+  optOutRe(
+    String.raw`\b(?:i(?:'ll|\s+will|'m|\s+am)|we(?:'ll|\s+will|'re|\s+are)|should\s+(?:i|we)|shall\s+(?:i|we)|can\s+(?:i|we)|let\s+me|let\s+us)\s+(?:go\s+ahead\s+and\s+|just\s+)?clos(?:e|ing)\s+(?:out\s+)?your\s+file\b`,
+  ),
+  // «this is my breakup email». Не ловит «our AI writes the breakup email».
+  optOutRe(String.raw`\b(?:this\s+is\s+(?:my|our|a|the)|my|our)\s+break[\s-]?up\s+(?:email|e-mail|note|message)\b`),
+  // «I'll assume it's not a priority», «we'll assume you're not interested».
+  optOutRe(
+    String.raw`\b(?:i|we)(?:'ll|\s+will)\s+assume\b[^.!?\n]{0,60}?\b(?:not\s+(?:a\s+|the\s+)?(?:priority|interested|relevant|fit|right\s+time)|no\s+(?:interest|longer)|bad\s+timing|timing\s+(?:isn't|is\s+not))`,
+  ),
+];
+
+/** Одна строка отказа от писем или прощания в тексте письма. */
+export interface HeOptOutLine {
+  /** 1-based номер письма. */
+  letter: number;
+  /** A — основной текст, B — вариант письма (variants[]), segment — сегментный вариант. */
+  variant: 'A' | 'B' | 'segment';
+  field: 'subject' | 'body';
+  /** Условие сегмента — у variant 'segment'. */
+  segment?: string;
+  /** Фраза, как она написана в письме. */
+  phrase: string;
+}
+
+/** Апострофы и кавычки к ASCII — символ в символ, позиции совпадений не сдвигаются. */
+function asciiQuotes(text: string): string {
+  return text.replace(/[‘’ʼ`´]/g, "'").replace(/[“”«»„]/g, '"');
+}
+
+/**
+ * Все строки отказа от писем и прощания в письмах — без решения «включена ли
+ * проверка» (его принимает heTemplateOptOutLines). Вход — письма как в
+ * he_chains/he_templates (subject, body, variants[], segment_variants[]);
+ * одна находка на фразу и текст.
+ */
+export function findHeOptOutLines(letters: unknown): HeOptOutLine[] {
+  const out: HeOptOutLine[] = [];
+  const scan = (text: string, at: Omit<HeOptOutLine, 'phrase'>) => {
+    if (!text) return;
+    const norm = asciiQuotes(text);
+    // Совпадения всех шаблонов; пересекающиеся («Reply STOP» и «Reply STOP
+    // to opt out») — одна находка, самая длинная из начавшихся раньше.
+    const spans: Array<{ start: number; end: number }> = [];
+    for (const re of OPT_OUT_PATTERNS) {
+      for (const m of norm.matchAll(re)) {
+        const start = m.index ?? 0;
+        if (m[0].trim()) spans.push({ start, end: start + m[0].length });
+      }
+    }
+    spans.sort((a, b) => a.start - b.start || b.end - a.end);
+    const seen = new Set<string>();
+    let coveredTo = -1;
+    for (const span of spans) {
+      if (span.start < coveredTo) continue;
+      coveredTo = span.end;
+      const phrase = text.slice(span.start, span.end).replace(/\s+/g, ' ').trim();
+      const key = phrase.toLowerCase();
+      if (!phrase || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...at, phrase });
+    }
+  };
+  asList(letters).forEach((raw, i) => {
+    const letter = asRow(raw);
+    if (!letter) return;
+    const n = i + 1;
+    scan(asText(letter.subject), { letter: n, variant: 'A', field: 'subject' });
+    scan(asText(letter.body), { letter: n, variant: 'A', field: 'body' });
+    for (const rawVariant of asList(letter.variants)) {
+      const v = asRow(rawVariant);
+      if (!v) continue;
+      scan(asText(v.subject), { letter: n, variant: 'B', field: 'subject' });
+      scan(asText(v.body), { letter: n, variant: 'B', field: 'body' });
+    }
+    for (const rawSegment of asList(letter.segment_variants)) {
+      const s = asRow(rawSegment);
+      if (!s) continue;
+      scan(asText(s.text), { letter: n, variant: 'segment', field: 'body', segment: asText(s.when) });
+    }
+  });
+  return out;
+}
+
+/**
+ * Решение по письмам ENG-проекта: рынок 'us' и письма по-английски
+ * (heLettersLanguageOf) — находки findHeOptOutLines, иначе пусто. Зовут:
+ *  - предполёт ядра запуска (launchTemplate.runHeTemplateLaunch, шаг 4b″,
+ *    отказ 409 'template_opt_out_lines') — до платного классификатора и до
+ *    рассыльщика, на всех путях ядра: кабинет, автозапуск, сотрудник;
+ *  - старт отправки кампаний запуска (engCampaignSending.startHeEngLaunchSending —
+ *    кнопка, Resume, старт после запуска и после ночного долива) — последняя
+ *    страховка для запусков, сделанных до предполёта;
+ *  - сохранение писем цепочки клиентом (api/client/eng/chains/[id]).
+ * Пусто — можно.
+ */
+export function heTemplateOptOutLines(market: string, letters: unknown): HeOptOutLine[] {
+  if (market !== 'us' || heLettersLanguageOf(letters) !== 'en') return [];
+  return findHeOptOutLines(letters);
+}
+
+/** Короткая сводка по-русски для сотрудника и лога: письмо, место и фраза. */
+export function describeHeOptOutLines(lines: HeOptOutLine[], limit = 6): string {
+  const parts = lines.map((l) => {
+    const variant = l.variant === 'segment' ? 'сегментный вариант' : `вариант ${l.variant}`;
+    return `письмо ${l.letter}, ${variant}, ${l.field === 'subject' ? 'тема' : 'тело'}: «${l.phrase.slice(0, 80)}»`;
+  });
+  const shown = parts.slice(0, limit).join('; ');
+  return parts.length > limit ? `${shown}; и ещё ${parts.length - limit}` : shown;
+}
+
+/**
+ * Отказ клиенту на сохранение писем (английский, без внутренних слов): какие
+ * письма и какие фразы. Фраза — его же текст (или текст письма, который он
+ * сохраняет), её показ помогает найти строку.
+ */
+export function heOptOutRefusalEn(lines: HeOptOutLine[]): string {
+  const letters = [...new Set(lines.map((l) => l.letter))].sort((a, b) => a - b);
+  const quoted = [...new Set(lines.map((l) => `"${l.phrase.slice(0, 80)}"`))];
+  const manyLetters = letters.length > 1;
+  const manyLines = quoted.length > 1;
+  return (
+    `${manyLetters ? 'Letters' : 'Letter'} ${listEn(letters.map(String))} ${manyLetters ? 'include' : 'includes'} ` +
+    `${manyLines ? 'lines that offer' : 'a line that offers'} to stop writing or ` +
+    `${manyLines ? 'say' : 'says'} this is the last email (${quoted.slice(0, 3).join(', ')}). ` +
+    `Letters can't include such lines. Remove ${manyLines ? 'them' : 'it'} and save again.`
+  );
+}
+
 /* ── Поля брифа клиента: отказ до платных вызовов ── */
 
 /** Поля брифа, которые промпты писем берут ДОСЛОВНО (prompts/chain.ts). */

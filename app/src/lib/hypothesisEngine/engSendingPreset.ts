@@ -49,11 +49,14 @@
  *    миграции, «закрепление воркспейса»);
  *  - настройки кампаний пула HE_ENG_POOL_CAMPAIGN_SETTINGS (ниже):
  *    stop_on_reply = true, open_tracking = false, link_tracking = false — и у
- *    нового, и у существующего пресета. Кампании ENG-кабинета получают их и
- *    без пресета (ядро, вход campaignSettings); в пресете они для путей,
- *    которые строят кампанию только из пресета (staff-роут запуска шаблона с
- *    этим пресетом). Администратор не может поставить им другое значение
- *    (checkHeEngPresetAdminEdit);
+ *    нового, и у существующего пресета (insert_unsubscribe_header = false
+ *    колонки в пресете не имеет и доходит до кампаний через ядро). Кампании
+ *    ENG-кабинета получают их и без пресета (ядро, вход campaignSettings; у
+ *    staff-роута запуска шаблона us-проекта клиента кабинета ядро берёт их
+ *    само — launchTemplate, шаг 4b‴′); в пресете они для путей, которые
+ *    строят кампанию только из пресета (запуск us-шаблона не из кабинета
+ *    по чужому проекту с этим пресетом). Администратор не может поставить им
+ *    другое значение (checkHeEngPresetAdminEdit);
  *  - agency_managed = false: с true RU-запуск кабинета (lib/clientLaunch/
  *    runLaunch.ts) пропустил бы свой тарифный гейт, и ENG-аккаунт отправил бы
  *    из ящиков пула мимо гейтов ENG. Ночной долив ENG тарифный гейт и так
@@ -97,6 +100,7 @@ import {
   notifyHeSendingPool,
   readHeSendingPoolSize,
   readHeSendingPoolWorkspace,
+  HE_SENDING_POOL_TABLE,
   HE_US_POOL_MAILBOXES_PER_PROJECT_ENV,
 } from './sendingPool';
 
@@ -114,13 +118,27 @@ import {
  *    «Воркспейс пула»), пиксель открытий и переписанные ссылки трекинга
  *    вредят доставляемости, а кабинет показывает только отправленные и
  *    ответы. Решение владельца — подтвердить (отчёт S4, лейн send-settings).
- * Заголовок отписки (insert_unsubscribe_header) здесь не задаётся — открытый
- * вопрос владельца.
+ *  - insert_unsubscribe_header выключен — правило владельца: ни строк
+ *    отписки в письмах (letterBrandGuard.heTemplateOptOutLines), ни
+ *    заголовка отписки у писем пула. Без явного false заголовок зависел бы от
+ *    дефолта воркспейса или ручной правки в рассыльщике. Ядро кладёт
+ *    настройки в payload создания и PATCH пустой кампании
+ *    (`{ ...presetPayload, ...campaignSettings }`), и ключ доезжает до
+ *    рассыльщика и у запуска из кабинета, и у staff-запуска шаблона
+ *    us-проекта клиента кабинета (ядро берёт эти настройки само, шаг 4b‴′).
+ *    В пресет он не пишется: колонки у client_campaign_presets нет
+ *    (PRESET_POOL_SETTING_KEYS). Кампании, созданные до этой правки и уже
+ *    принявшие адреса, заголовок не меняют: такая кампания настройки не
+ *    получает.
+ *  - stop_for_company НЕ задаётся — решение владельца ещё не принято
+ *    (отчёт аудита 14.10.2026): ответ одного адреса компании не останавливает
+ *    шаги её остальных адресов.
  */
 export const HE_ENG_POOL_CAMPAIGN_SETTINGS = {
   stop_on_reply: true,
   open_tracking: false,
   link_tracking: false,
+  insert_unsubscribe_header: false,
 } as const satisfies Required<HeLaunchCampaignSettings>;
 
 /* ─────────────── Тексты клиенту ─────────────── */
@@ -560,6 +578,84 @@ export const ENG_PRESET_ADMIN_TRACKING_REFUSED_TEXT =
 export const ENG_PRESET_ADMIN_READ_FAILED_TEXT =
   'Не удалось прочитать пресет клиента ENG-кабинета — ничего не сохранено, попробуйте ещё раз.';
 
+/**
+ * Пресет НЕ клиента ENG-кабинета (RU, VE2, сотрудник): в нём не может стоять
+ * ящик, отданный проекту ENG-кабинета (he_sending_pool, status 'assigned').
+ * Текст сотруднику — по-русски, адреса названы.
+ */
+export function engPoolMailboxInOtherPresetText(emails: string[]): string {
+  return (
+    'Ящики уже отданы проекту английского кабинета («Пул ящиков ENG») и отправляют его письма: ' +
+    `${emails.slice(0, 5).join(', ')}${emails.length > 5 ? ` и ещё ${emails.length - 5}` : ''}. ` +
+    'В пресет другого клиента их ставить нельзя — оба клиента слали бы из одного ящика. Ничего не сохранено. ' +
+    'Снимите галочки с этих ящиков и сохраните ещё раз.'
+  );
+}
+
+/**
+ * Проверка пресета НЕ клиента ENG-кабинета (аудит 14.10.2026): ящики пула
+ * лежат в общем воркспейсе рассыльщика, и экран пресета показывает их как
+ * обычные ящики воркспейса. Пул сам проверяет чужие пресеты, когда ящик
+ * отдаётся проекту, включается или стартует кампания
+ * (sendingPool.findHeSendingPoolMailboxUses), но ящик, УЖЕ отданный проекту,
+ * без этой проверки мог тихо попасть в пресет RU- или VE2-клиента — и два
+ * клиента слали бы из одного ящика.
+ *
+ * Правило: в списке ящиков, который сохраняет администратор, есть адрес со
+ * статусом 'assigned' в he_sending_pool — отказ 409 с адресами, ничего не
+ * записано. Сравнение — без регистра и пробелов (пул хранит нижний регистр).
+ * Свободные ('available') и выключенные ящики пула не проверяются: их
+ * проверит выдача проекту. Правка без списка ящиков — как раньше.
+ *
+ * Сбой чтения пула — { ok: true } и warn (как у сбоя чтения профиля выше):
+ * RU-путь из-за нашего чтения не отказывает, а двойное использование всё
+ * равно ловит ENG-сторона — старт, запуск и ночной долив отказывают с алертом,
+ * пока ящик стоит в чужом пресете. Нет таблицы пула (миграция 20261011_0001
+ * не применена) — ящиков пула нет, проверять нечего. Не бросает.
+ */
+async function refuseAssignedPoolMailboxes(
+  portalDb: SupabaseClient,
+  clientUserId: string,
+  change: Record<string, unknown>,
+): Promise<HeEngPresetAdminEditCheck> {
+  if (change.email_account_ids === undefined) return { ok: true };
+  const wanted = presetEmails(change.email_account_ids);
+  if (wanted.length === 0) return { ok: true };
+  try {
+    const { data, error } = await portalDb
+      .from(HE_SENDING_POOL_TABLE)
+      .select('email')
+      .eq('status', 'assigned')
+      .in('email', wanted)
+      .limit(wanted.length);
+    if (error) {
+      const code = String((error as { code?: unknown }).code ?? '');
+      if (code !== '42P01' && code !== 'PGRST205') {
+        void logWarn('he.eng_preset_admin_edit.pool_unchecked', 'he_sending_pool unreadable — pool mailbox guard of a non-ENG preset skipped', {
+          targetUserId: clientUserId,
+          detail: pgDetail('he_sending_pool read', error),
+        });
+      }
+      return { ok: true };
+    }
+    const taken = presetEmails((Array.isArray(data) ? data : []).map((r) => (r as { email?: unknown }).email));
+    if (taken.length === 0) return { ok: true };
+    void logAudit('he.eng_preset_admin_edit.refused', 'pool mailbox assigned to an ENG project put into another client preset — refused', {
+      targetUserId: clientUserId,
+      fields: Object.keys(change),
+      reason: 'pool_mailbox_assigned',
+      mailboxes: taken,
+    });
+    return { ok: false, status: 409, message: engPoolMailboxInOtherPresetText(taken) };
+  } catch (e) {
+    void logWarn('he.eng_preset_admin_edit.pool_unchecked', 'pool mailbox guard of a non-ENG preset threw — skipped', {
+      targetUserId: clientUserId,
+      detail: e instanceof Error ? e.message.slice(0, 200) : 'unknown',
+    });
+    return { ok: true };
+  }
+}
+
 function engPresetAddRefusedText(added: string[]): string {
   return (
     'Это клиент ENG-кабинета: ящики его пресета — только ящики «Пул ящиков ENG», выданные его проекту ' +
@@ -593,8 +689,10 @@ function engPresetAddRefusedText(added: string[]): string {
  * пресета администратора ENG-кампаний не касается (журнал запусков RU их не
  * содержит).
  *
- * RU и остальные профили — { ok: true } после одного чтения профиля, дальше
- * PUT идёт как раньше. Профиль не прочитался или чтение бросило (кроме 42703
+ * RU и остальные профили — после чтения профиля одна проверка: в списке ящиков
+ * нет ящика, отданного проекту ENG-кабинета (refuseAssignedPoolMailboxes —
+ * иначе 409 с адресами); правка без списка ящиков и сбой чтения пула —
+ * { ok: true }, дальше PUT идёт как раньше. Профиль не прочитался или чтение бросило (кроме 42703
  * — нет колонки market: такой профиль не ENG) — тоже { ok: true } и warn:
  * решение «ENG или нет» без профиля не принять, а отказ здесь менял бы и
  * RU-путь. В этом состоянии пресет ENG-клиента не защищён; адреса всё равно
@@ -633,7 +731,9 @@ export async function checkHeEngPresetAdminEdit(
       return { ok: true };
     }
     const profile = (profileErr ? null : profileRow) as { role?: unknown; market?: unknown } | null;
-    if (!profile || profile.role !== 'client' || profile.market !== 'eng') return { ok: true };
+    if (!profile || profile.role !== 'client' || profile.market !== 'eng') {
+      return await refuseAssignedPoolMailboxes(portalDb, clientUserId, change);
+    }
 
     // Клиент ENG-кабинета: всё ниже — только его путь, сбой здесь — отказ.
     engClient = true;

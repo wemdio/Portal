@@ -314,10 +314,18 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
     setActionError('');
     setResearchStarting(true);
     try {
-      const { ok, status, data } = await hePost<HeJobResponse>(`${HE_API}/projects/${projectId}/research`);
+      const { ok, status, data } = await hePost<HeJobResponse & { code?: string }>(
+        `${HE_API}/projects/${projectId}/research`,
+      );
       if (!ok) {
+        // 409 research_rerun_launched — отказ повтора у проекта английского
+        // кабинета с запуском (staff-роут research): у него своя причина в
+        // data.error, «уже запущено» было бы неправдой. Остальные 409 —
+        // идущее исследование, текст прежний.
         setActionError(
-          status === 409 ? 'Исследование уже запущено' : data.error || 'Не удалось запустить исследование',
+          status === 409 && data.code !== 'research_rerun_launched'
+            ? 'Исследование уже запущено'
+            : data.error || 'Не удалось запустить исследование',
         );
         return;
       }

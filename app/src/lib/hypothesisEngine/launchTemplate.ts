@@ -3,6 +3,10 @@
  * кампанию в Instantly НА ПАУЗЕ (никогда не активируем — сотрудник проверяет
  * её в Instantly сам) и загрузить лидов базы. Один запуск на шаблон: повтор
  * только с force (создаёт НОВУЮ paused-кампанию и перезаписывает launch_info).
+ * У шаблона us-проекта force законченного запуска — отказ 409
+ * 'force_relaunch_refused' (шаг 4b, с 14.10.2026): перезапись записи выводит
+ * прежние кампании из паузы клиента, «Выключить отправку», блокировки и
+ * engBlockedSweep, а получатели получили бы вторую цепочку.
  *
  * ИСКЛЮЧЕНИЕ — НЕЗАКОНЧЕННЫЙ ЗАПУСК (с 28.09.2026, шаг 6). При сплите по
  * сегментам кампаний создаётся несколько, и отказ поздней группы оставлял
@@ -130,6 +134,10 @@
  *    промпта, а клиент проекта не мы (letterBrandGuard: английские и
  *    польские — всегда, русские — у проекта клиента ENG-кабинета), — отказ
  *    409 'template_brand_leak';
+ *  - английские письма со строкой отказа от писем или прощания (правило
+ *    владельца, letterBrandGuard.heTemplateOptOutLines) — отказ 409
+ *    'template_opt_out_lines' (с 14.10.2026; раньше — только на старте
+ *    отправки, после оплаченного классификатора и созданных кампаний);
  *  - пресет без ящиков отправки — отказ 409 'preset_no_mailboxes';
  *  - окно отправки новых кампаний — выбор клиента, иначе дефолт кабинета, а не
  *    часы пресета (launchSchedule.ts).
@@ -175,7 +183,16 @@ import {
 import { describeHeLaunchWindow, resolveHeLaunchSendingWindow, type HeLaunchWindowSource } from './launchSchedule';
 import { projectMarket, type HeMarket } from './market';
 import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
-import { describeHeBrandLeaks, heBrandNeedsOwner, heTemplateBrandLeaks, readHeBrandEngClient } from './letterBrandGuard';
+import {
+  describeHeBrandLeaks,
+  describeHeOptOutLines,
+  heBrandNeedsOwner,
+  heTemplateBrandLeaks,
+  heTemplateOptOutLines,
+  readHeBrandEngClient,
+  readHeProjectOwnerKind,
+} from './letterBrandGuard';
+import { HE_ENG_POOL_CAMPAIGN_SETTINGS } from './engSendingPreset';
 import { HE_RESEARCH_STAGES } from './researchJob';
 import {
   HE_ENG_CAMPAIGN_NAMING,
@@ -372,6 +389,40 @@ const TEMPLATE_BRAND_LEAK_TEXT: { en: string; ru: (detail: string) => string } =
     'Пересоберите шаблон — новая сборка проходит эту проверку до сохранения; если цепочка вертикали не на ' +
     'английском, сначала перегенерируйте её на английском.',
 };
+
+/**
+ * Отказ шага 4b″ за строки отказа от писем и прощания (template_opt_out_lines).
+ * Тексты — вне словаря MESSAGES: его RU-блок сверяется байт в байт. EN —
+ * клиенту: что не так и что делать. «Rewrite letters» не называется: кнопку
+ * карточка рисует только по признаку `needs_rewrite`, а он этой причины пока
+ * не знает, — поэтому Support. Фразы — из его же писем, без внутренних слов.
+ * RU — сотруднику, со сводкой: письмо, вариант и фраза.
+ */
+const TEMPLATE_OPT_OUT_TEXT: { en: string; ru: (detail: string) => string } = {
+  en:
+    'These letters include a line that offers to stop writing to the recipient or says this is the last ' +
+    "email, and letters can't include such lines. This launch was stopped before anything was sent or " +
+    'changed. Message Support to have the letters rewritten.',
+  ru: (detail) =>
+    'Запуск остановлен: в письмах шаблона us-проекта есть строка, которая предлагает получателю отписаться ' +
+    `или называет письмо последним (${detail}), — правило владельца такие строки запрещает. Ничего не ` +
+    'отправлено и не изменено. Пересоберите шаблон без этих строк.',
+};
+
+/**
+ * Отказ force законченного запуска us-шаблона (шаг 4b, force_relaunch_refused).
+ * Тексты — вне словаря MESSAGES: его RU-блок сверяется байт в байт. RU —
+ * сотруднику (staff-роут запуска шаблона принимает force); EN — на случай
+ * вызова из контура кабинета (его роут force не пропускает до ядра).
+ */
+const FORCE_RELAUNCH_US_TEXT = {
+  en: 'This template has already been launched, so it cannot be launched again. Nothing was sent or changed.',
+  ru:
+    'Повторный запуск с force закрыт для шаблона проекта английского кабинета: он создал бы новые кампании ' +
+    'по тем же адресам и перезаписал бы запись о запуске, а прежние кампании (возможно, уже отправляющие из ' +
+    'ящиков пула) выпали бы из паузы клиента, «Выключить отправку» и блокировки — получатели получили бы вторую ' +
+    'цепочку. Ничего не создано и не изменено. Незаконченный запуск достраивается без force.',
+} as const;
 
 /** Аренда запуска в минутах — для текстов: число в них обязано следовать константе. */
 const LEASE_MINUTES = Math.round(HE_LAUNCH_LEASE_MS / 60_000);
@@ -965,7 +1016,9 @@ export function isHeLaunchUnpaidServerError(text: unknown): boolean {
  * или нет) ЛИБО живая аренда (попытка держит запись прямо сейчас). Это то же,
  * что parseLaunchInfo !== null, плюс идущая попытка над записью не нашего
  * формата. Читают его две защиты: «по базе уже запущен другой шаблон» (шаг 4b′
- * ниже) и «повтор research удалил бы запуск» (api/client/eng/projects/[id]/research).
+ * ниже) и «повтор research удалил бы запуск» (api/client/eng/projects/[id]/research,
+ * а у us-проекта — и staff-роут исследования, и сама кластеризация:
+ * stages/clustering.ts, readHeResearchRerunLaunchBlock).
  *
  * Сама запись в выборку не идёт: у незаконченного запуска в ней лежат поимённые
  * адреса долга (launch_info.pending[].emails) — тысячи строк на шаблон, а
@@ -992,20 +1045,25 @@ export function heTemplateLaunchMarked(row: HeTemplateLaunchMark, nowMs: number 
 
 /**
  * Машинные коды отказов шага 4b′ — тело ответа несёт их рядом с текстом
- * (`code`), чтобы экран и скрипт различали причину не по тексту.
+ * (`code`), чтобы экран и скрипт различали причину не по тексту. Плюс
+ * force_relaunch_refused (шаг 4b): force законченного запуска us-шаблона.
+ * Кабинет его не встречает — его роут force не принимает (400 до ядра).
  */
-export const HE_LAUNCH_REFUSAL_CODES = ['sibling_template_launched', 'research_running'] as const;
+export const HE_LAUNCH_REFUSAL_CODES = ['sibling_template_launched', 'research_running', 'force_relaunch_refused'] as const;
 export type HeLaunchRefusalCode = (typeof HE_LAUNCH_REFUSAL_CODES)[number];
 
 /**
  * Машинные коды отказов предполёта us-проекта (шаги 4b″, 4b‴ и 5c) — тоже в
- * `code` рядом с текстом. Все три — ДО первого вызова рассыльщика:
+ * `code` рядом с текстом. Все — ДО первого вызова рассыльщика:
  *  - template_unresolved_operators (409) — в письмах подстановка, которую база
  *    не наполнит (templateOperatorGate.checkHeTemplateOperators);
  *  - template_brand_leak (409) — письма называют наш бренд или вымышленную
  *    компанию из примера промпта, а клиент проекта не мы
  *    (letterBrandGuard.heTemplateBrandLeaks: английские и польские — всегда,
  *    русские — у проекта клиента ENG-кабинета);
+ *  - template_opt_out_lines (409, с 14.10.2026) — в английских письмах
+ *    строка отказа от писем или прощания («reply STOP», «I won't reach out
+ *    again», «this is my last email»; letterBrandGuard.heTemplateOptOutLines);
  *  - preset_no_mailboxes (409) — в пресете нет ни одного ящика отправки;
  *  - segment_classification_incomplete (503) — классификатор сегментов не
  *    ответил по доле строк выше HE_SEGMENT_HOLD_REFUSE_SHARE. Только у
@@ -1021,11 +1079,14 @@ export type HeLaunchRefusalCode = (typeof HE_LAUNCH_REFUSAL_CODES)[number];
  * all» не берёт (признак проекции `needs_rewrite` — heTemplateRewriteReasons с
  * причинами 'placeholders' и 'brand'). Автозапуск (engAutoLaunch) держит
  * template_brand_leak общей веткой неизвестного отказа: 'needs_support',
- * письмо клиенту и алерт команде.
+ * письмо клиенту и алерт команде. template_opt_out_lines — так же, но
+ * признака проекции у него пока нет (тексты карточки — engText.ts): «Launch
+ * all» шаблон берёт и получает этот отказ, клиент читает его текст.
  */
 export const HE_LAUNCH_PREFLIGHT_REFUSAL_CODES = [
   'template_unresolved_operators',
   'template_brand_leak',
+  'template_opt_out_lines',
   'preset_no_mailboxes',
   'segment_classification_incomplete',
 ] as const;
@@ -1109,8 +1170,11 @@ export const HE_SEGMENT_HOLD_REFUSE_SHARE = 0.5;
  *    кластеризация (stages/clustering.ts) удаляет he_verticals проекта — и
  *    каскадом базы, шаблоны и записи о запуске. Кампания, созданная сейчас,
  *    осталась бы у рассыльщика без записи: ни достройки, ни долива, ни защиты
- *    от второго запуска по тем же людям. Защиту с другой стороны держит
- *    research-роут кабинета: он не ставит повтор при записанном запуске.
+ *    от второго запуска по тем же людям. Защиту с другой стороны держат оба
+ *    research-роута — кабинета и staff-инструмента (у us-проекта, с
+ *    14.10.2026): они не ставят повтор при записанном запуске, — и сама
+ *    кластеризация (stages/clustering.ts, readHeResearchRerunLaunchBlock):
+ *    при запуске она не сносит вертикали.
  *  - sibling_template_launched: у ДРУГОГО шаблона той же базы есть запуск.
  *    Два готовых шаблона одной базы бывают (пересборка специалиста, шаблоны до
  *    переиспользования в стадии). «Launch all» кабинета берёт один
@@ -1201,15 +1265,22 @@ export interface HeTemplateLaunchInput {
    * Настройки кампании поверх пресета (шаг 6): с ними создаётся каждая новая
    * кампания этой попытки — основная, сегментная и замена удалённой у
    * рассыльщика, — и их же получает PATCH пустой кампании прошлой попытки.
-   * Передаёт только ENG-кабинет (engClientLaunch: настройки ящиков пула,
-   * engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS). Не передано (staff-роут,
-   * RU) — payload и PATCH прежние, настройки — из пресета.
+   * Передаёт ENG-кабинет (engClientLaunch: настройки ящиков пула,
+   * engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS). Не передано: у
+   * us-проекта клиента ENG-кабинета (staff-роут запуска шаблона) ядро берёт
+   * те же настройки кабинета само (шаг 4b‴′, с 14.10.2026: без них кампания
+   * получала заголовок отписки по дефолту воркспейса — колонки для него у
+   * пресета нет); у RU и us-проекта не из кабинета — payload и PATCH
+   * прежние, настройки — из пресета.
    */
   campaignSettings?: HeLaunchCampaignSettings;
 }
 
 /** Настройки кампании, которые вызывающий ядра может задать поверх пресета. */
-export type HeLaunchCampaignSettings = Pick<CampaignCreatePayload, 'stop_on_reply' | 'open_tracking' | 'link_tracking'>;
+export type HeLaunchCampaignSettings = Pick<
+  CampaignCreatePayload,
+  'stop_on_reply' | 'open_tracking' | 'link_tracking' | 'insert_unsubscribe_header'
+>;
 
 export interface HeTemplateLaunchOutcome {
   status: number;
@@ -1218,7 +1289,8 @@ export interface HeTemplateLaunchOutcome {
 
 export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise<HeTemplateLaunchOutcome> {
   const { portalDb, instantlyDb, templateId, presetId, force, userId, scopeClientUserId, locale, eventPrefix } = input;
-  const campaignSettings = input.campaignSettings;
+  // Шаг 4b‴′ может взять настройки кабинета, если вызывающий их не передал.
+  let campaignSettings: HeLaunchCampaignSettings | undefined = input.campaignSettings;
   const t = MESSAGES[locale];
 
   // 1. Шаблон.
@@ -1362,6 +1434,33 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   const market: HeMarket = projectMarket(projectRow as { market?: string | null });
   // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
   const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
+
+  //     FORCE ЗАКОНЧЕННОГО ЗАПУСКА us-шаблона — отказ (аудит 14.10.2026). Force
+  //     создаёт новые кампании по той же аудитории (skip_if_in_campaign false) и
+  //     перезаписывает launch_info, а она — единственный список кампаний для
+  //     паузы клиента, «Выключить отправку», блокировки, engBlockedSweep и
+  //     he_sending_pool_launched: прежние кампании (возможно, уже отправляющие
+  //     из ящиков пула) выпали бы из всех них, а кабинет предложил бы «Start
+  //     sending» дублям — вторая цепочка тем же людям. Кабинет force не
+  //     принимает (роут, 400), так что дойти сюда может только staff-роут.
+  //     Незаконченный запуск (resumeLaunch) идёт достройкой — force ему ничего
+  //     не меняет, отказа нет. RU-проекты — как раньше. До шага 4b′ и до
+  //     всего платного: ничего не создано и не записано.
+  if (market === 'us' && force && existingLaunch && !resumeLaunch) {
+    await logAudit(`${eventPrefix}.refused_force_relaunch`, 'Launch refused: force re-launch of a launched us template', {
+      userId,
+      templateId,
+      baseId: template.base_id,
+      projectId: base.project_id,
+    });
+    return {
+      status: 409,
+      body: {
+        error: locale === 'en' ? FORCE_RELAUNCH_US_TEXT.en : FORCE_RELAUNCH_US_TEXT.ru,
+        code: 'force_relaunch_refused' satisfies HeLaunchRefusalCode,
+      },
+    };
+  }
 
   // 4b′. Защиты аудитории (heUsLaunchAudienceGuard): идёт повторное
   //      исследование (оно удалит этот шаблон вместе с записью о запуске) или
@@ -1511,6 +1610,36 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         },
       };
     }
+
+    // СТРОКИ ОТКАЗА ОТ ПИСЕМ И ПРОЩАНИЯ (тот же шаг 4b″, аудит 14.10.2026):
+    // «let me know and I won't reach out again», «reply STOP», «this is my
+    // last email» — правило владельца (letterBrandGuard.heTemplateOptOutLines:
+    // английские письма us-проекта). Раньше проверка стояла только на старте
+    // отправки, то есть ПОСЛЕ этого ядра: ящики пула выданы, классификатор
+    // оплачен, кампании созданы и адреса загружены — и лишь потом отказ.
+    // Здесь — бесплатно, до классификатора (5c) и рассыльщика (6), на всех
+    // путях ядра (кабинет, автозапуск, сотрудник, достройка); force не
+    // снимает. Старт отправки проверяет ещё раз — для запусков, сделанных до
+    // этой правки. Признак `needs_rewrite` кабинета этой причины пока не
+    // знает (тексты карточки — engText.ts), поэтому клиент читает этот отказ
+    // при нажатии и зовётся в Support, а автозапуск держит код общей веткой
+    // неизвестного отказа ('needs_support', письмо клиенту, алерт команде).
+    const optOutLines = heTemplateOptOutLines(market, template.letters);
+    if (optOutLines.length) {
+      const detail = describeHeOptOutLines(optOutLines);
+      await logAudit(
+        `${eventPrefix}.refused_template_opt_out_lines`,
+        'Launch refused: template letters offer to stop writing or say this is the last email',
+        { userId, templateId, baseId: base.id, projectId: base.project_id, lines: optOutLines.length, detail },
+      );
+      return {
+        status: 409,
+        body: {
+          error: locale === 'en' ? TEMPLATE_OPT_OUT_TEXT.en : TEMPLATE_OPT_OUT_TEXT.ru(detail),
+          code: 'template_opt_out_lines' satisfies HeLaunchPreflightRefusalCode,
+        },
+      };
+    }
   }
 
   // 4b‴. ЯЩИКИ ОТПРАВКИ (us). Пресет без единого ящика создаёт кампанию,
@@ -1540,6 +1669,27 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         body: { error: t.presetNoMailboxes, code: 'preset_no_mailboxes' satisfies HeLaunchPreflightRefusalCode },
       };
     }
+  }
+
+  // 4b‴′. НАСТРОЙКИ КАМПАНИЙ ENG-КАБИНЕТА без кабинета (аудит 14.10.2026).
+  //       Кабинет передаёт их сам (engClientLaunch → campaignSettings). Staff-роут
+  //       запуска шаблона — нет, и кампании us-проекта клиента ENG-кабинета,
+  //       запущенные сотрудником (обычно с пресетом из ящиков пула этого
+  //       клиента), получали заголовок отписки по дефолту воркспейса —
+  //       против правила владельца «ни строк отписки, ни заголовка»: колонки
+  //       для заголовка у пресета нет, а клиент потом стартует эти кампании
+  //       из кабинета. Поэтому у us-проекта без переданных настроек ядро
+  //       читает владельца проекта (letterBrandGuard.readHeProjectOwnerKind):
+  //       клиент ENG-кабинета — настройки кабинета
+  //       (engSendingPreset.HE_ENG_POOL_CAMPAIGN_SETTINGS: stop on reply,
+  //       трекинг выключен, без заголовка отписки), как у запуска из кабинета.
+  //       Чтение не удалось — тоже они: из двух ошибок эта лишь выключает
+  //       трекинг и заголовок у кампании, а обратная пустила бы письма клиента
+  //       ENG-кабинета с заголовком. Владелец не клиент кабинета (us-проект
+  //       сотрудника) и RU — как раньше, настройки из пресета, без чтения.
+  if (market === 'us' && !campaignSettings) {
+    const ownerKind = await readHeProjectOwnerKind(portalDb, (projectRow as { created_by?: unknown }).created_by);
+    if (ownerKind !== 'other') campaignSettings = HE_ENG_POOL_CAMPAIGN_SETTINGS;
   }
 
   // 4b⁗. ОКНО ОТПРАВКИ новых кампаний (launchSchedule.ts). Явное окно (выбор
@@ -2584,7 +2734,8 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         sequence: { name: campaignName, steps: sequence.steps },
         ...(sendingWindow ? { scheduleOverride: sendingWindow } : {}),
       });
-      // Настройки вызывающего (вход campaignSettings, только ENG-кабинет) —
+      // Настройки вызывающего (вход campaignSettings — ENG-кабинет; у
+      // us-проекта клиента кабинета без них — настройки кабинета, шаг 4b‴′) —
       // тоже в момент создания, поверх значений пресета. Без них payload — тот
       // же объект, что раньше.
       const payload = campaignSettings ? { ...presetPayload, ...campaignSettings } : presetPayload;

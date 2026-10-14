@@ -22,13 +22,14 @@
  *     другого пресета);
  *  3. письма шаблона проходят гейт подстановок (тот же признак, что
  *     `needs_rewrite` кабинета) — шаблон, который ядро запуска отказало бы,
- *     не стартует;
+ *     не стартует; и в них нет строк отказа от писем и прощания
+ *     (letterBrandGuard.heTemplateOptOutLines, правило владельца);
  *  4. выключатель отправки аккаунта (engSendingAccess, fail-closed);
  *  5. желание клиента: запуск не снимает паузу, поставленную клиентом;
- *  6. ящики пула проекта (sendingPool.readHeSendingPoolAssignment), у кнопки —
- *     ни один не стоит в пресете другого клиента или живом запуске RU-кабинета
- *     (sendingPool.findHeSendingPoolMailboxUses; у запуска это сделала выдача
- *     ящиков того же запроса), и воркспейс пресета записи о запуске (пресет —
+ *  6. ящики пула проекта (sendingPool.readHeSendingPoolAssignment), ни один
+ *     не стоит в пресете другого клиента или живом запуске RU-кабинета
+ *     (sendingPool.findHeSendingPoolMailboxUses — у всех путей, у запуска тоже:
+ *     проверка выдачи того же запроса была до минут ядра), и воркспейс пресета записи о запуске (пресет —
  *     только самого клиента: кампании запуска сотрудника с чужим пресетом не
  *     стартуют);
  *  6b. у запуска ('launch') — ни одна кампания записи не стоит на паузе (2) у
@@ -103,11 +104,12 @@ import { CampaignStatus } from '@/lib/instantly/types';
 import { logAudit, logWarn } from '@/lib/loggerServer';
 import { parseLaunchInfo, readHeLaunchLease, type HeTemplateLaunchInfo } from './launchHandoff';
 import { heTemplateNeedsRewrite } from './clientEngProjection';
-import { heBrandNeedsOwner, readHeBrandEngClient } from './letterBrandGuard';
+import { describeHeOptOutLines, heBrandNeedsOwner, heTemplateOptOutLines, readHeBrandEngClient } from './letterBrandGuard';
 import {
   checkHeCampaignAgainstAssignment,
   describeHeSendingPoolMailboxUses,
   findHeSendingPoolMailboxUses,
+  HE_SENDING_POOL_TABLE,
   readHeSendingPoolAssignment,
 } from './sendingPool';
 import {
@@ -674,6 +676,24 @@ export async function startHeEngLaunchSending(input: {
     if (heTemplateNeedsRewrite(template, base, 'us', { ...loaded.project, heEngClient })) {
       return refused(409, 'letters_need_rewrite', ENG_START_LETTERS_TEXT);
     }
+    // 3′. Строки отказа от писем и прощания (правило владельца,
+    //     letterBrandGuard.heTemplateOptOutLines; английские письма us-проекта):
+    //     модель могла нарушить запрет промпта, клиент — дописать строку.
+    //     С 14.10.2026 то же правило отказывает раньше — в предполёте ядра
+    //     запуска (launchTemplate, шаг 4b″, 'template_opt_out_lines'), до
+    //     классификатора и рассыльщика; здесь — последняя страховка для
+    //     кампаний, созданных до этого. Признак `needs_rewrite` кабинета
+    //     (heTemplateRewriteReasons) этой причины пока не знает, поэтому
+    //     текст — общий «письма нужно переписать, напишите в Support»: он
+    //     верен и для неё.
+    const optOut = heTemplateOptOutLines('us', template.letters);
+    if (optOut.length > 0) {
+      void logWarn('he.eng_sending.opt_out_lines', 'template letters offer an opt-out or say it is the last email — not started', {
+        ...ctx,
+        detail: describeHeOptOutLines(optOut),
+      });
+      return refused(409, 'letters_need_rewrite', ENG_START_LETTERS_TEXT);
+    }
 
     // 4. Выключатель аккаунта. Долив клиента не ждёт и команду не зовёт —
     //    только читает выключатель; код отказа — тот же, что у кнопки
@@ -737,9 +757,13 @@ export async function startHeEngLaunchSending(input: {
     }
     // Ящик пула не стоит ни в пресете ДРУГОГО клиента, ни в живом запуске
     // RU-кабинета — та же проверка, что у запуска (engSendingPreset, шаг 6) и
-    // ночного долива (createHeRefillSendGate, шаг 5). У 'launch' её сделала
-    // выдача ящиков этого же запроса (ensureHeEngPresetForProject).
-    if (via !== 'launch') {
+    // ночного долива (createHeRefillSendGate, шаг 5). У 'launch' — ТОЖЕ (аудит
+    // 14.10.2026): выдача ящиков этого запроса (ensureHeEngPresetForProject)
+    // проверяла их ДО ядра запуска, а ядро идёт минутами (платный
+    // классификатор сегментов, загрузка адресов). Ящик, который за это время
+    // сотрудник поставил в пресет RU-клиента, иначе ушёл бы в отправку двух
+    // клиентов сразу. Одно чтение БД рассыльщика прямо перед стартом.
+    {
       const uses = await findHeSendingPoolMailboxUses(instantlyDb, assignment.emails, {
         exceptPresetOfClient: clientUserId,
       });
@@ -1613,5 +1637,242 @@ export async function readHeEngSendingSummaries(
   } catch (e) {
     warnHeEngSendingDegraded('summaries', `sending summaries threw: ${String(e).slice(0, 200)}`, {});
     return out;
+  }
+}
+
+/* ─────────────── Кампании ENG — чтобы чужие читатели их не видели ─────────────── */
+
+/**
+ * Id кампаний из СРЕЗА записи о запуске (HE_ENG_LAUNCH_CAMPAIGN_COLUMNS): основная
+ * (launch_campaign_id) и все из launch_campaigns — те же кампании, что
+ * heEngLaunchCampaigns берёт из разобранной записи. Пустые и не-строки
+ * пропускаются. Чистая функция.
+ */
+export function heEngCampaignIdsOfLaunchRow(row: { launch_campaign_id?: unknown; launch_campaigns?: unknown }): string[] {
+  const ids = new Set<string>();
+  if (typeof row.launch_campaign_id === 'string' && row.launch_campaign_id.trim()) ids.add(row.launch_campaign_id.trim());
+  if (Array.isArray(row.launch_campaigns)) {
+    for (const c of row.launch_campaigns) {
+      const id = c && typeof c === 'object' ? (c as { campaign_id?: unknown }).campaign_id : null;
+      if (typeof id === 'string' && id.trim()) ids.add(id.trim());
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Срез записи о запуске без поимённого долга (launch_info.pending — тысячи
+ * адресов на шаблон): id кампаний, пресет запуска и вертикаль шаблона.
+ */
+const HE_ENG_LAUNCH_CAMPAIGN_COLUMNS =
+  'id, vertical_id, launch_campaign_id:launch_info->>campaign_id, launch_campaigns:launch_info->campaigns, launch_preset_id:launch_info->>preset_id';
+
+const ENG_IDS_PAGE = 1000;
+const ENG_IDS_MAX_PAGES = 200;
+const ENG_IDS_CHUNK = 100;
+
+type PageAnswer = PromiseLike<{ data: unknown; error: { code?: string | null; message?: string | null } | null }>;
+
+/**
+ * Все строки выборки страницами по ключу `key` (после последнего ключа
+ * страницы, а не смещением) до ПУСТОЙ страницы: короткая страница может быть
+ * лимитом строк PostgREST, а не концом (то же правило, что у
+ * sendingPool.scanByKeyset). Больше ENG_IDS_PAGE × ENG_IDS_MAX_PAGES строк —
+ * ошибка, а не «прочитано частично»: список для исключения обязан быть полным.
+ */
+async function scanAll(
+  label: string,
+  key: string,
+  page: (after: string | null) => PageAnswer,
+  visit: (row: Record<string, unknown>) => void,
+): Promise<{ ok: true } | { ok: false; error: string; missing: boolean }> {
+  let after: string | null = null;
+  for (let n = 0; n < ENG_IDS_MAX_PAGES; n += 1) {
+    const { data, error } = await page(after);
+    if (error) {
+      const code = String(error.code ?? '');
+      return { ok: false, error: pgText(`${label} read`, error), missing: code === '42P01' || code === 'PGRST205' };
+    }
+    const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
+    if (rows.length === 0) return { ok: true };
+    for (const row of rows) visit(row);
+    const last = rows[rows.length - 1]?.[key];
+    if (typeof last !== 'string' || !last) return { ok: false, error: `${label}: row without ${key}`, missing: false };
+    after = last;
+  }
+  return { ok: false, error: `${label}: more than ${ENG_IDS_PAGE * ENG_IDS_MAX_PAGES} rows`, missing: false };
+}
+
+function chunks<T>(list: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+export type HeEngCampaignIdsRead = { ok: true; ids: Set<string> } | { ok: false; error: string };
+
+/**
+ * ВСЕ id кампаний ENG-кабинета — для читателей, которые обязаны их НЕ видеть
+ * (партнёрский pull-API api/partner/activity: ящики пула ENG лежат в общем
+ * воркспейсе рассыльщика, и события ответов на кампании ENG ложатся в ту же
+ * ленту instantly_activity_events, что читает партнёр).
+ *
+ * ЧЬИ КАМПАНИИ (аудит 14.10.2026: только кабинет, а не любой us-проект). Тот
+ * же список, по которому ставят на паузу Pause клиента, «Выключить отправку»,
+ * блокировка и engBlockedSweep (pauseHeEngAccountSending: проекты рынка 'us'
+ * ВЛАДЕЛЬЦА-клиента кабинета, записи о запуске he_templates.launch_info их
+ * вертикалей). us-проект, который сотрудник ведёт в staff-инструменте не для
+ * клиента кабинета, — не ENG: его кампании могут быть кампаниями партнёра в
+ * его же воркспейсе, и вырезать их из его ленты нельзя. Проект — ENG, если:
+ *  - владелец (he_projects.created_by) — профиль с market 'eng';
+ *  - или профиля владельца НЕТ (created_by без FK: аккаунт удалён, а кампании
+ *    его проектов могут жить) — из двух ошибок эта лишь прячет чужие строки,
+ *    обратная отдала бы партнёру ответы получателей ENG;
+ *  - или проекту отданы ящики пула (he_sending_pool.project_id): письма идут
+ *    из ящиков пула, кто бы ни был владельцем.
+ * Плюс кампании, запущенные НЕ из такого проекта, но с ПРЕСЕТОМ, по которому
+ * запускался ENG-проект (launch_info.preset_id): пресет клиента кабинета —
+ * это ящики его пула, и сотрудник, запустивший с ним чужой us-шаблон, шлёт из
+ * тех же ящиков. Плюс кэш статусов he_eng_campaign_status (его пишет только
+ * отправка кабинета; ключ — проект, и кампания остаётся в нём, даже если
+ * запись о запуске пропала вместе с вертикалью).
+ *
+ * Нет таблицы кэша (миграция 20261011_0002) или пула (20261011_0001) — их
+ * часть пуста, остальное читается. Нет колонки profiles.market (42703) —
+ * ENG-аккаунтов быть не может, решают пул и кэш. Любой другой сбой —
+ * { ok: false }: неполный список исключений — это утечка, вызывающий
+ * отказывает. НЕ БРОСАЕТ.
+ */
+export async function readHeEngCampaignIds(portalDb: SupabaseClient): Promise<HeEngCampaignIdsRead> {
+  const ids = new Set<string>();
+  try {
+    const cache = await scanAll(
+      'he_eng_campaign_status',
+      'campaign_id',
+      (after) => {
+        let q = portalDb.from('he_eng_campaign_status').select('campaign_id');
+        if (after) q = q.gt('campaign_id', after);
+        return q.order('campaign_id', { ascending: true }).limit(ENG_IDS_PAGE);
+      },
+      (row) => {
+        if (typeof row.campaign_id === 'string' && row.campaign_id.trim()) ids.add(row.campaign_id.trim());
+      },
+    );
+    if (!cache.ok && !cache.missing) return { ok: false, error: cache.error };
+
+    // us-проекты и их владельцы.
+    const ownerOf = new Map<string, string | null>();
+    const projects = await scanAll(
+      'he_projects',
+      'id',
+      (after) => {
+        let q = portalDb.from('he_projects').select('id, created_by').eq('market', 'us');
+        if (after) q = q.gt('id', after);
+        return q.order('id', { ascending: true }).limit(ENG_IDS_PAGE);
+      },
+      (row) => {
+        if (typeof row.id !== 'string' || !row.id) return;
+        ownerOf.set(row.id, typeof row.created_by === 'string' && row.created_by ? row.created_by : null);
+      },
+    );
+    if (!projects.ok) return { ok: false, error: projects.error };
+
+    // Профили владельцев: market 'eng' — клиент кабинета; профиля нет — тоже ENG.
+    const owners = [...new Set([...ownerOf.values()].filter((v): v is string => v !== null))];
+    const foundOwners = new Set<string>();
+    const engOwners = new Set<string>();
+    let marketColumn = true;
+    for (const part of chunks(owners, ENG_IDS_CHUNK)) {
+      const { data, error } = await portalDb.from('profiles').select('id, market').in('id', part).limit(part.length);
+      if (error) {
+        if (String(error.code ?? '') === '42703') {
+          marketColumn = false;
+          break;
+        }
+        return { ok: false, error: pgText('profiles read', error) };
+      }
+      for (const row of (Array.isArray(data) ? data : []) as Array<{ id?: unknown; market?: unknown }>) {
+        if (typeof row.id !== 'string') continue;
+        foundOwners.add(row.id);
+        if (row.market === 'eng') engOwners.add(row.id);
+      }
+    }
+    const engProjects = new Set<string>();
+    if (marketColumn) {
+      for (const [projectId, owner] of ownerOf) {
+        if (owner !== null && (engOwners.has(owner) || !foundOwners.has(owner))) engProjects.add(projectId);
+      }
+    }
+
+    // Проекты с ящиками пула.
+    const pool = await scanAll(
+      HE_SENDING_POOL_TABLE,
+      'id',
+      (after) => {
+        let q = portalDb.from(HE_SENDING_POOL_TABLE).select('id, project_id').not('project_id', 'is', null);
+        if (after) q = q.gt('id', after);
+        return q.order('id', { ascending: true }).limit(ENG_IDS_PAGE);
+      },
+      (row) => {
+        if (typeof row.project_id === 'string' && ownerOf.has(row.project_id)) engProjects.add(row.project_id);
+      },
+    );
+    if (!pool.ok && !pool.missing) return { ok: false, error: pool.error };
+
+    // Вертикали всех us-проектов: запуск не из ENG-проекта нужен ради пресета.
+    const projectOfVertical = new Map<string, string>();
+    for (const part of chunks([...ownerOf.keys()], ENG_IDS_CHUNK)) {
+      const verticals = await scanAll(
+        'he_verticals',
+        'id',
+        (after) => {
+          let q = portalDb.from('he_verticals').select('id, project_id').in('project_id', part);
+          if (after) q = q.gt('id', after);
+          return q.order('id', { ascending: true }).limit(ENG_IDS_PAGE);
+        },
+        (row) => {
+          if (typeof row.id === 'string' && row.id && typeof row.project_id === 'string') {
+            projectOfVertical.set(row.id, row.project_id);
+          }
+        },
+      );
+      if (!verticals.ok) return { ok: false, error: verticals.error };
+    }
+
+    const engPresets = new Set<string>();
+    const otherLaunches: Array<{ preset: string; campaigns: string[] }> = [];
+    for (const part of chunks([...projectOfVertical.keys()], ENG_IDS_CHUNK)) {
+      const templates = await scanAll(
+        'he_templates',
+        'id',
+        (after) => {
+          let q = portalDb
+            .from('he_templates')
+            .select(HE_ENG_LAUNCH_CAMPAIGN_COLUMNS)
+            .in('vertical_id', part)
+            .not('launch_info', 'is', null);
+          if (after) q = q.gt('id', after);
+          return q.order('id', { ascending: true }).limit(ENG_IDS_PAGE);
+        },
+        (row) => {
+          const campaigns = heEngCampaignIdsOfLaunchRow(row);
+          const preset = typeof row.launch_preset_id === 'string' ? row.launch_preset_id.trim() : '';
+          const projectId = typeof row.vertical_id === 'string' ? projectOfVertical.get(row.vertical_id) : undefined;
+          if (projectId && engProjects.has(projectId)) {
+            for (const id of campaigns) ids.add(id);
+            if (preset) engPresets.add(preset);
+          } else if (preset && campaigns.length) {
+            otherLaunches.push({ preset, campaigns });
+          }
+        },
+      );
+      if (!templates.ok) return { ok: false, error: templates.error };
+    }
+    for (const launch of otherLaunches) {
+      if (engPresets.has(launch.preset)) for (const id of launch.campaigns) ids.add(id);
+    }
+    return { ok: true, ids };
+  } catch (e) {
+    return { ok: false, error: `ENG campaign ids read threw: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}` };
   }
 }
