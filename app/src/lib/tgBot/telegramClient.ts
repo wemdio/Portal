@@ -96,6 +96,20 @@ export async function sendMessage(
   });
 }
 
+/** Правка текста уже отправленного сообщения (например, дописать ссылку). */
+export async function editMessageText(
+  token: string,
+  options: { chatId: number; messageId: number; text: string; parseMode?: 'HTML' | 'MarkdownV2'; disableWebPagePreview?: boolean },
+): Promise<void> {
+  await callApi<unknown>(token, 'editMessageText', {
+    chat_id: options.chatId,
+    message_id: options.messageId,
+    text: options.text,
+    ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
+    ...(options.disableWebPagePreview ? { disable_web_page_preview: true } : {}),
+  });
+}
+
 export async function getWebhookInfo(token: string): Promise<{ url: string }> {
   return callApi<{ url: string }>(token, 'getWebhookInfo', {});
 }
