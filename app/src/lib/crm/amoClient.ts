@@ -147,6 +147,9 @@ export function contactEmailValues(fields: AmoContactField[] | null | undefined)
   return out;
 }
 
+/** Значение поля сделки: списочное — по enum_id, текстовое — по value. */
+export type AmoLeadCustomField = { field_id: number; values: Array<{ enum_id: number } | { value: string }> };
+
 export interface AmoClient {
   baseUrl: string;
   listPipelines(): Promise<AmoPipeline[]>;
@@ -174,8 +177,8 @@ export interface AmoClient {
   findCompanyByName(name: string): Promise<number | null>;
   createCompany(name: string): Promise<number>;
   linkContactCompany(contactId: number, companyId: number): Promise<void>;
-  /** Open deal of this exact contact; closed wins/losses are ignored. */
-  findOpenLeadOfContact(contactId: number): Promise<number | null>;
+  /** Open deal of this exact contact (id and name); closed wins/losses are ignored. */
+  findOpenLeadOfContact(contactId: number): Promise<{ id: number; name: string } | null>;
   createLead(input: {
     name: string;
     pipelineId: number | null;
@@ -184,7 +187,7 @@ export interface AmoClient {
     companyId?: number | null;
     responsibleUserId?: number | null;
     tags: string[];
-    customFields?: Array<{ field_id: number; values: Array<{ enum_id: number } | { value: string }> }>;
+    customFields?: AmoLeadCustomField[];
   }): Promise<number>;
   addLeadNote(leadId: number, text: string): Promise<void>;
   findLeadNoteContaining(leadId: number, marker: string): Promise<boolean>;
@@ -391,12 +394,14 @@ export function createAmoClient(opts: { baseUrl: string; token: string; fetchImp
     },
 
     async findOpenLeadOfContact(contactId) {
-      type RawLead = { id: number; status_id: number };
+      type RawLead = { id: number; name?: string | null; status_id: number };
       const links = await contactLinks(contactId);
       const ids = links.filter((link) => link.to_entity_type === 'leads').map((link) => link.to_entity_id);
       for (const id of ids.sort((a, b) => b - a)) {
         const lead = await call<RawLead>('GET', `/api/v4/leads/${id}`);
-        if (lead && !SYSTEM_STATUS_IDS.has(lead.status_id)) return lead.id;
+        if (lead && !SYSTEM_STATUS_IDS.has(lead.status_id)) {
+          return { id: lead.id, name: (lead.name ?? '').trim() || `Сделка #${lead.id}` };
+        }
       }
       return null;
     },
