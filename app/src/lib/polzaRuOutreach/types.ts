@@ -127,6 +127,9 @@ export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[]
     p.bridge,
     ...(chainUsesCase(chain) ? [p.case] : []),
     ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
+    // Предмет и должность — из утверждённых текстов (образец писателя с 14.10.2026).
+    p.topic,
+    ...(chain === 'hiring' ? [p.position] : []),
     p.signature,
   ];
 }
