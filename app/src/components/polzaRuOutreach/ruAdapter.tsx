@@ -72,10 +72,12 @@ const SOURCE_SHORT: Record<SourceCode, string> = {
   contracts: 'Госконтракты',
   tenders: 'Тендеры',
   growth: 'Гранты',
+  base: 'Своя база',
   site_news: 'Новости сайтов',
   directory: 'Общая база',
   gis: '2ГИС',
   ymaps: 'Я.Карты',
+  ymaps_catalog: 'Каталог Я.Карт',
   revenue_growth: 'Выручка ФНС',
   news: 'Новости',
 };

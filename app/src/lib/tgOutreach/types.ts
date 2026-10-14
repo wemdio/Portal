@@ -395,6 +395,8 @@ export interface OutreachAccount {
    * воркер отправил своим соединением и записал итог.
    */
   freeze_appeal_url?: string | null;
+  /** Telegram freeze_until_date: дата удаления без успешной апелляции, UTC. */
+  freeze_until_at?: string | null;
   appeal_requested_at?: string | null;
   appeal_requested_by_name?: string | null;
   appeal_text?: string | null;
@@ -513,6 +515,8 @@ export interface OutreachDialog {
    */
   can_send_changed_reason?: string | null;
   messages: DialogMessage[];
+  /** Прочитал ли собеседник наше последнее сообщение; null — неизвестно или последнее не наше. */
+  out_read?: boolean | null;
   status: DialogStatus;
   last_message_at: string | null;
   created_at: string;

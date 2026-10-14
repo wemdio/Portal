@@ -232,6 +232,9 @@ function textChecks(tag: string, text: string, chain: ChainType, writerFree: str
  * runQa, с местом: L1 — письмо 1 лично, L1r — «перешлите ответственному»,
  * L2, L3c — письмо 3 с кейсом, L3 — без кейса, L4, subject — тема письма 1.
  */
+/** Потолок своего текста письма шаблона, символов (цель — 80–100, норма — до 150). */
+export const TEMPLATE_OWN_TEXT_MAX = 200;
+
 export function runTemplateQa(input: TemplateQaInput): QaResult {
   const { letters: t, chain } = input;
   const P = TEMPLATE_PLACEHOLDERS;
@@ -286,6 +289,11 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
     for (const ph of [P.opening, P.bridge, P.hypothesis]) {
       if (text.includes(ph) && !ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
     }
+
+    // Лимит длины (14.10.2026, бережём ящики): свой текст писателя без
+    // приветствия, подписи и плейсхолдеров — не больше TEMPLATE_OWN_TEXT_MAX.
+    const own = plain.replace(/^Добрый день!/, '').replace(/С уважением,\s*$/, '').replace(/\s+/g, ' ').trim().length;
+    if (own > TEMPLATE_OWN_TEXT_MAX) flags.push(`${tag}:too_long(${own} симв.)`);
 
     const questions = countOf(text, '?');
     if (questions === 0) flags.push(`${tag}:no_cta`);
@@ -366,6 +374,7 @@ const TEMPLATE_FLAG_TEXT: Record<string, string> = {
   unsupported_number: 'цифры не из утверждённых формулировок («2–3» — только перед словом «сегмент»)',
   fabrication: 'число словами или обещание срока или результата — подтвердить нечем («каждый месяц» и «ежемесячно» без числа можно)',
   example_leak: 'в текст попал пример из задания — в шаблоне не может быть конкретной компании',
+  too_long: `своего текста больше ${TEMPLATE_OWN_TEXT_MAX} символов (без приветствия, подписи и плейсхолдеров) — сократи до 80–150`,
   not_shortest: 'письмо 4 должно быть короче письма 2 и письма 3 без кейса',
   subject_missing: 'нет темы',
   subject_placeholder: 'из плейсхолдеров в теме можно только «{{бренд}}»',

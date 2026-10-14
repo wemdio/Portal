@@ -16,6 +16,7 @@ import type {
   OutreachProxy,
 } from './types';
 import { DEFAULT_FOLLOW_UP, TG_SERVICE_NOTIFICATIONS_USER_ID } from './types';
+import { outboxReadFlag, syncOutboxReadFlags } from './outboxRead';
 import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
@@ -31,7 +32,7 @@ import {
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
 import { checkUsernamesOnTme } from './usernameExists';
-import { parkAccountAfterLimit } from './accountCooldown';
+import { parkAccountAfterLimit, recordAccountFreeze } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { sendFreezeAppeal } from './freezeAppeal';
 import { applyQueuedProfile, PROFILE_REST_HOURS, type QueuedProfilePayload } from './profile/queuedProfile';
@@ -992,22 +993,13 @@ export async function handleChat(
   const preReadDelay = randomRange(PRE_READ_DELAY_RANGE_SEC) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
-  try {
-    await withTimeout(
-      client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 })),
-      TG_READ_TIMEOUT_MS,
-      'отметка «прочитано»',
-    );
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    // Some accounts get rate-limited / partially frozen for read operations (MTProto error 420).
-    // We still want to reply; just skip marking as read.
-    if (errMsg.includes('FROZEN_METHOD_INVALID') || errMsg.includes('FrozenMethodInvalid')) {
-      log('warning', `${displayName}: Telegram временно заблокировал отметку "прочитано" для этого аккаунта (FROZEN_METHOD_INVALID) — продолжаю работу без отметки`);
-    } else {
-      throw err;
-    }
-  }
+  // FROZEN_METHOD_INVALID здесь означает заморозку всего аккаунта. Ошибку
+  // должен получить внешний цикл, чтобы прекратить работу и сохранить диагноз.
+  await withTimeout(
+    client.invoke(new Api.messages.ReadHistory({ peer: entity, maxId: 0 })),
+    TG_READ_TIMEOUT_MS,
+    'отметка «прочитано»',
+  );
 
   let history;
   try {
@@ -2189,7 +2181,12 @@ export async function runCampaignLoop(
         try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
 
         const now = new Date();
-        if (account.cooldown_until && new Date(account.cooldown_until) > now) {
+        if (account.check_status === 'frozen' && !account.check_requested_at) {
+          log('info', `${account.session_name}: Telegram заморозил аккаунт — пропускаю до повторной проверки после обжалования`);
+          continue;
+        }
+        if (account.cooldown_until && new Date(account.cooldown_until) > now
+          && !(account.check_status === 'frozen' && account.check_requested_at)) {
           log('info', `${account.session_name}: cooldown до ${account.cooldown_until}`);
           continue;
         }
@@ -2396,11 +2393,14 @@ export async function runCampaignLoop(
                   // Ссылку пишем всегда, в том числе пустую: аккаунт мог
                   // оттаять, и старый адрес обжалования вводил бы в заблуждение.
                   freeze_appeal_url: checkResult.freeze_appeal_url ?? null,
+                  freeze_until_at: checkResult.freeze_until_at ?? null,
                   ...(checkResult.tg_user_id != null ? { tg_user_id: checkResult.tg_user_id } : {}),
                   ...(checkResult.tg_username != null ? { tg_username: checkResult.tg_username } : {}),
                   ...(checkResult.phone ? { phone: checkResult.phone } : {}),
                 })
                 .eq('id', account.id);
+              account.check_status = checkResult.status;
+              account.check_detail = checkResult.detail.slice(0, 500);
               if (saveErr) {
                 log('warning', `Аккаунт ${account.session_name}: проверка прошла, но результат не записался — ${saveErr.message}`);
               } else {
@@ -2528,6 +2528,27 @@ export async function runCampaignLoop(
             'info',
             `Аккаунт ${account.session_name}: загрузил ${dialogs.length} диалогов, из них ${cycleStats.unread} с непрочитанными`,
           );
+          // Галочки «прочитано» у наших сообщений: список диалогов уже в руках,
+          // отдельного запроса не нужно. Диалоги без непрочитанных ниже
+          // пропускаются, поэтому синхронизируем все, а не только их.
+          try {
+            const changedReads = await syncOutboxReadFlags(
+              db,
+              campaign.id,
+              account.id,
+              dialogs.flatMap((d) => {
+                if (!(d.entity instanceof Api.User)) return [];
+                const flag = outboxReadFlag(
+                  d.message,
+                  (d.dialog as { readOutboxMaxId?: number } | undefined)?.readOutboxMaxId,
+                );
+                return [{ tgUserId: Number(d.entity.id), flag }];
+              }),
+            );
+            if (changedReads > 0) log('info', `Аккаунт ${account.session_name}: отметки «прочитано» обновлены у ${changedReads} диалогов`);
+          } catch (readErr) {
+            log('warning', `Аккаунт ${account.session_name}: не удалось обновить отметки «прочитано» — ${readErr instanceof Error ? readErr.message : String(readErr)}`);
+          }
 
           for (const dialog of dialogs) {
             if (shouldStop()) break;
@@ -2565,11 +2586,18 @@ export async function runCampaignLoop(
                 ? `@${dialog.entity.username}`
                 : dialogId != null ? `ID:${dialogId}` : 'unknown';
 
+              if (classifyCheckError(errMsg).status === 'frozen') {
+                const frozen = await recordAccountFreeze({ db, client, account });
+                log(frozen.error ? 'error' : 'warning',
+                  `Аккаунт ${account.session_name}: ${frozen.detail}` +
+                  (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
+                break;
+              }
+
               if (
                 errMsg.includes('PeerFloodError') ||
                 errMsg.includes('FloodWaitError') ||
-                errMsg.includes('FrozenMethodInvalidError') ||
-                errMsg.includes('FROZEN_METHOD_INVALID')
+                errMsg.includes('PEER_FLOOD')
               ) {
                 // Срок паузы спрашиваем у @SpamBot этим же соединением: пауза
                 // из настроек ставилась вслепую и каждые сутки выпускала
@@ -2613,6 +2641,8 @@ export async function runCampaignLoop(
               log('error', `Аккаунт ${account.session_name}, диалог ${dialogLabel}: не смог обработать — ${errMsg}`);
             }
           }
+
+          if (account.check_status === 'frozen') continue;
 
           await handleFollowUp(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
           await handleMissedRepliesLastDays(client, account, campaign as unknown as OutreachCampaign, db, log, shouldStop);
@@ -2666,7 +2696,12 @@ export async function runCampaignLoop(
            * оператор должен видеть в карточке, что это временно и до какого
            * момента, а не гадать по пустому кулдауну.
            */
-          if (diagnosis.status === 'session_revoked'
+          if (diagnosis.status === 'frozen') {
+            const frozen = await recordAccountFreeze({ db, client, account });
+            log(frozen.error ? 'error' : 'warning',
+              `Аккаунт ${account.session_name}: ${frozen.detail}` +
+              (frozen.error ? ` Не удалось сохранить статус: ${frozen.error}` : ''));
+          } else if (diagnosis.status === 'session_revoked'
             || diagnosis.status === 'session_duplicate'
             || diagnosis.status === 'banned'
             || diagnosis.status === 'restricted') {
@@ -2820,7 +2855,7 @@ export async function runCampaignLoop(
         //
         // Отлёжку проверяем здесь ещё раз: её мог назначить этот же круг
         // выше, при смене профиля, — до следующего круга аккаунт в составе.
-        if (!isResting(account, Date.now())) {
+        if (account.check_status !== 'frozen' && !isResting(account, Date.now())) {
           try {
             const ft = await sendFirstTouchBatch({
               db,

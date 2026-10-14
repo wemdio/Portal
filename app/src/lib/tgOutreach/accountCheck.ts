@@ -6,8 +6,8 @@
  * «нас разлогинили» или «номер забанили», можно только сходив в Telegram. Здесь
  * этот поход автоматизирован для всей партии сразу.
  *
- * Проверка намеренно ничего не меняет в аккаунте: только подключение, getMe и
- * список активных сеансов. Ни отправок, ни правок профиля — иначе проверка сама
+ * Проверка намеренно ничего не меняет в аккаунте: только читающие запросы.
+ * Ни отправок, ни правок профиля — иначе проверка сама
  * становилась бы нагрузкой на аккаунт, который мы и так подозреваем в проблемах.
  */
 import { Api } from 'telegram';
@@ -53,6 +53,8 @@ export interface AccountCheckResult {
    * было бы ошибкой при первой же правке формулировки.
    */
   freeze_appeal_url?: string | null;
+  /** Дата удаления без успешной апелляции из freeze_until_date, ISO UTC. */
+  freeze_until_at?: string | null;
 }
 
 function callTimeoutMs(): number {
@@ -81,7 +83,7 @@ function jsonValueToPlain(value: unknown): unknown {
 }
 
 export interface FreezeVerdict {
-  /** Когда заморозка снимается сама, unix-секунды. 0/отсутствует — бессрочно. */
+  /** Когда Telegram удалит аккаунт без успешной апелляции, unix-секунды. */
   until: number | null;
   /** Ссылка на обжалование — та же, что показывает баннер в официальном приложении. */
   appealUrl: string | null;
@@ -97,29 +99,29 @@ export interface FreezeVerdict {
  * методов. 07.09.2026 портал показывал «жив» восемнадцати аккаунтам ATOL,
  * которым Telegram отказывал трое суток подряд.
  *
- * Признак берём оттуда же, откуда его берёт официальное приложение, когда
- * рисует баннер с кнопкой обжалования: в конфиге появляются поля со сроком и
- * ссылкой. Ключи ищем по вхождению «freeze», а не по точным именам — состав
- * конфига Telegram меняет свободно, и жёсткий список тихо перестал бы работать.
+ * Пустой конфиг НЕ доказывает, что заморозки нет: Telegram документирует
+ * появление freeze-полей после отказа FROZEN_METHOD_INVALID. Поэтому при
+ * пустом конфиге вызываем читающий channels.searchPosts, для которого Telegram
+ * отдельно документирует эту ошибку, и затем повторно читаем конфиг со сроком.
  *
  * Вызов read-only: проверка по-прежнему ничего в аккаунте не меняет.
  */
-export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict | null> {
-  let config: Record<string, unknown>;
-  try {
-    const res = await withTimeout(
-      client.invoke(new Api.help.GetAppConfig({ hash: 0 })),
-      callTimeoutMs(),
-      'конфиг приложения',
-    );
-    const plain = jsonValueToPlain((res as { config?: unknown }).config ?? res);
-    if (!plain || typeof plain !== 'object') return null;
-    config = plain as Record<string, unknown>;
-  } catch {
-    // Конфиг не пришёл — молчим. Объявлять аккаунт замороженным из-за сетевой
-    // ошибки нельзя: это ровно та ошибка, за которую списывают живой номер.
-    return null;
+export async function readFreezeConfig(client: TelegramClient): Promise<FreezeVerdict | null> {
+  const res = await withTimeout(
+    client.invoke(new Api.help.GetAppConfig({ hash: 0 })),
+    callTimeoutMs(),
+    'конфиг приложения',
+  );
+  // Неответ и неожиданный формат не равны отсутствию заморозки: вызывающий
+  // покажет «проверка не удалась», а не ложно объявит аккаунт живым.
+  if (!('config' in res) || res.config.className !== 'JsonObject') {
+    throw new Error('Telegram не вернул конфиг приложения для проверки заморозки');
   }
+  const plain = jsonValueToPlain(res.config);
+  if (!plain || typeof plain !== 'object' || Array.isArray(plain)) {
+    throw new Error('Не удалось прочитать конфиг приложения для проверки заморозки');
+  }
+  const config = plain as Record<string, unknown>;
 
   const freezeKeys = Object.keys(config).filter((k) => /freeze/i.test(k));
   if (!freezeKeys.length) return null;
@@ -136,7 +138,9 @@ export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict
   };
 
   const since = num(freezeKeys.find((k) => /since/i.test(k)));
-  const until = num(freezeKeys.find((k) => /until/i.test(k)));
+  // Для показываемого оператору срока берём только официальное поле: похожий
+  // ключ из конфига не должен стать ложной датой удаления.
+  const until = num('freeze_until_date');
   const appealUrl = str(freezeKeys.find((k) => /appeal|url/i.test(k)));
 
   // Поля заморозки появляются в конфиге только у замороженного аккаунта, но
@@ -146,16 +150,49 @@ export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict
   return { until, appealUrl };
 }
 
+export async function probeFreeze(client: TelegramClient): Promise<FreezeVerdict | null> {
+  const configVerdict = await readFreezeConfig(client);
+  if (configVerdict) return configVerdict;
+
+  try {
+    // Поиск по хештегу ничего не отправляет и не меняет в аккаунте. В отличие
+    // от getMe/getDialogs этот метод отвергается у замороженного аккаунта.
+    await withTimeout(
+      client.invoke(new Api.channels.SearchPosts({
+        hashtag: 'telegram',
+        offsetRate: 0,
+        offsetPeer: new Api.InputPeerEmpty(),
+        offsetId: 0,
+        limit: 1,
+      })),
+      callTimeoutMs(),
+      'проверка доступа к поиску публичных постов',
+    );
+    return null;
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    if (classifyCheckError(raw).status !== 'frozen') throw error;
+    // После явного отказа Telegram может добавить в конфиг дату удаления.
+    // Даже если не добавил, код отказа сам по себе подтверждает заморозку.
+    try {
+      return await readFreezeConfig(client) ?? { until: null, appealUrl: null };
+    } catch {
+      return { until: null, appealUrl: null };
+    }
+  }
+}
+
 /** Человеческий текст вердикта о заморозке — он и попадёт в карточку аккаунта. */
 export function describeFreeze(v: FreezeVerdict): string {
   const parts = [
-    'ЗАМОРОЗКА Telegram — аккаунт цел, но ему запрещено искать людей по нику и писать незнакомым.',
-    'Само не пройдёт: снимается обжалованием.',
+    'ЗАМОРОЗКА Telegram — аккаунт доступен только для чтения, отправка сообщений и другие действия запрещены.',
+    'Оспорить заморозку можно через @SpamBot.',
   ];
   if (v.until) {
-    parts.push(`Указан срок до ${new Date(v.until * 1000).toLocaleString('ru-RU', {
-      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-    })}.`);
+    parts.push(`Без успешной апелляции Telegram удалит аккаунт ${new Date(v.until * 1000).toLocaleString('ru-RU', {
+      timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    })} МСК.`);
   }
   if (v.appealUrl) parts.push(`Обжалование: ${v.appealUrl}`);
   return parts.join(' ');
@@ -184,21 +221,8 @@ export function classifyCheckError(rawMessage: string): { status: AccountCheckSt
   const restriction = classifyRestriction(msg, Date.now());
   if (restriction) {
     return {
-      status: restriction.kind === 'permanent' ? 'banned' : 'restricted',
+      status: restriction.kind === 'permanent' ? 'banned' : restriction.kind === 'frozen' ? 'frozen' : 'restricted',
       detail: describeRestriction(restriction),
-    };
-  }
-
-  /**
-   * Прямой отказ «метод заморожен». Ставим до общих веток: в сообщении может
-   * оказаться что угодно ещё, а этот код однозначен.
-   */
-  if (/FROZEN_METHOD_INVALID|FrozenMethodInvalid/i.test(msg)) {
-    return {
-      status: 'frozen',
-      detail: 'ЗАМОРОЗКА Telegram — метод запрещён для этого аккаунта. '
-        + 'Аккаунт цел, но писать незнакомым и искать людей по нику не может. '
-        + 'Снимается обжалованием в официальном приложении.',
     };
   }
 
@@ -262,7 +286,21 @@ export async function checkAccount(
       'проверка аккаунта',
     )) as Api.User | undefined;
   } catch (e) {
-    return classifyCheckError(e instanceof Error ? e.message : String(e));
+    const classified = classifyCheckError(e instanceof Error ? e.message : String(e));
+    if (classified.status === 'frozen') {
+      // Telegram может отклонить даже getMe. По документации после этого
+      // отказа конфиг остаётся доступен и содержит точный срок удаления.
+      try {
+        const freeze = await probeFreeze(client);
+        if (freeze) return {
+          status: 'frozen',
+          detail: describeFreeze(freeze),
+          freeze_appeal_url: freeze.appealUrl,
+          freeze_until_at: freeze.until ? new Date(freeze.until * 1000).toISOString() : null,
+        };
+      } catch { /* Код FROZEN уже подтвердил статус, но срок Telegram не отдал. */ }
+    }
+    return classified;
   }
 
   if (!me) {
@@ -290,6 +328,29 @@ export async function checkAccount(
     other_sessions: otherSessions,
   };
 
+  // Проверяем заморозку до флага restricted и @SpamBot: они описывают другие
+  // ограничения и не должны скрывать режим «только чтение».
+  let freeze: FreezeVerdict | null;
+  try {
+    freeze = await probeFreeze(client);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return {
+      status: 'error',
+      detail: `Не удалось проверить заморозку Telegram — статус аккаунта неизвестен. ${reason.slice(0, 180)}`,
+      ...identity,
+    };
+  }
+  if (freeze) {
+    return {
+      status: 'frozen',
+      detail: describeFreeze(freeze),
+      freeze_appeal_url: freeze.appealUrl,
+      freeze_until_at: freeze.until ? new Date(freeze.until * 1000).toISOString() : null,
+      ...identity,
+    };
+  }
+
   if (me.restricted) {
     const restriction = restrictionFromProfile((me.restrictionReason ?? []).map((r) => r.text ?? ''));
     // Срок снятия у Telegram есть только в личке с антиспам-ботом. Раз аккаунт
@@ -316,6 +377,7 @@ export async function checkAccount(
    * проверка бодро отвечала бы «жив» аккаунту, который уже неделю не может
    * написать ни одному незнакомому человеку.
    */
+  let spamBotFree: SpamBotVerdict | null = null;
   if (options.askSpamBotWhenRestricted) {
     const verdict = await askSpamBot(client);
     if (verdict?.kind === 'limited') {
@@ -326,35 +388,18 @@ export async function checkAccount(
       };
     }
     if (verdict?.kind === 'free') {
-      return {
-        status: 'ok',
-        detail: `жив, ограничение снято — ${describeSpamBotVerdict(verdict)}`
-          + (otherSessions.length ? ` В аккаунте ещё ${otherSessions.length} чужих сеансов.` : ''),
-        ...identity,
-      };
+      spamBotFree = verdict;
     }
-  }
-
-  /**
-   * Последней спрашиваем про заморозку — она единственная, что доживает до
-   * этой строки: профиль чист, сеанс наш, @SpamBot молчит. Раньше здесь
-   * безоговорочно писалось «жив».
-   */
-  const freeze = await probeFreeze(client);
-  if (freeze) {
-    return {
-      status: 'frozen',
-      detail: describeFreeze(freeze),
-      freeze_appeal_url: freeze.appealUrl,
-      ...identity,
-    };
   }
 
   return {
     status: 'ok',
-    detail: otherSessions.length
-      ? `жив, но в аккаунте ещё ${otherSessions.length} чужих сеансов`
-      : 'жив, чужих сеансов нет',
+    detail: spamBotFree
+      ? `жив, ограничение снято — ${describeSpamBotVerdict(spamBotFree)}`
+        + (otherSessions.length ? ` В аккаунте ещё ${otherSessions.length} чужих сеансов.` : '')
+      : otherSessions.length
+        ? `жив, но в аккаунте ещё ${otherSessions.length} чужих сеансов`
+        : 'жив, чужих сеансов нет',
     ...identity,
   };
 }

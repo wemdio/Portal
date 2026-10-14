@@ -15,6 +15,7 @@ import { loadHhEmployers, SALES_TITLE_PATTERN, type HhVacancyRef } from './sourc
 import { loadSignalRows } from './sources/uploads';
 import { loadGisCandidates } from './sources/gis';
 import { loadYmapsNewBranches } from './sources/ymaps';
+import { loadYmapsCatalogCandidates } from './sources/ymapsCatalog';
 import type { RuOutreachConfig, Signal, SourceCode } from './types';
 
 export interface Candidate {
@@ -33,6 +34,8 @@ export interface Candidate {
   vacancyCount: number;
   revenue: number | null;
   employees: number | null;
+  /** Почты из загруженной базы: поиск почты проверяет их наравне с сайтом. */
+  knownEmails: string[];
 }
 
 function base(partial: Partial<Candidate> & Pick<Candidate, 'key' | 'companyName'> & { source: SourceCode }): Candidate {
@@ -50,6 +53,7 @@ function base(partial: Partial<Candidate> & Pick<Candidate, 'key' | 'companyName
     vacancyCount: 0,
     revenue: null,
     employees: null,
+    knownEmails: [],
     ...rest,
   };
 }
@@ -135,6 +139,11 @@ async function recentlyRejectedDomains(db: SupabaseClient, now = new Date()): Pr
 }
 
 const SOURCE_POOL_LIMIT = 5000;
+
+/** «a@x.ru, b@x.ru; c@x.ru» → адреса по одному (в базах их пишут списком в одной ячейке). */
+function splitEmails(value: string | null | undefined): string[] {
+  return Array.from(new Set(String(value ?? '').toLowerCase().split(/[\s,;]+/).filter((e) => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(e))));
+}
 
 export async function collectCandidates(
   db: SupabaseClient,
@@ -254,6 +263,27 @@ export async function collectCandidates(
     });
   }
 
+  // Своя база (загруженная): компания с почтой, без повода — цепочка «только профиль».
+  if (src.has('base')) {
+    await attempt('base', async () => {
+      for (const r of await loadSignalRows(db, 'base')) {
+        const emails = splitEmails(typeof r.details.email === 'string' ? r.details.email : null);
+        all.push(
+          base({
+            key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.company_name)}`,
+            source: 'base',
+            sourceRecordId: `base:${r.id}`,
+            companyName: r.company_name,
+            inn: r.inn,
+            website: r.company_website,
+            revenue: typeof r.details.revenue === 'number' ? r.details.revenue : null,
+            knownEmails: emails,
+          }),
+        );
+      }
+    });
+  }
+
   if (src.has('site_news')) {
     await attempt('site_news', async () => {
       all.push(...(await loadSiteUniverse(db)));
@@ -266,13 +296,15 @@ export async function collectCandidates(
         minRevenue: config.min_revenue,
         maxRevenue: config.max_revenue,
         minEmployees: config.min_employees,
-        limit: Math.min(5000, Math.max(500, poolTarget)),
+        okvedPrefixes: config.okved_prefixes,
+        limit: Math.min(100_000, Math.max(500, poolTarget)),
       });
       for (const r of rows) {
         all.push(
           base({
             key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.name)}`,
             source: 'directory',
+            knownEmails: splitEmails(r.email),
             sourceRecordId: r.inn ? `inn:${r.inn}` : null,
             companyName: r.name,
             inn: r.inn,
@@ -315,6 +347,25 @@ export async function collectCandidates(
             companyName: y.companyName,
             website: `https://${y.domain}`,
             signals: [y.signal],
+          }),
+        );
+      }
+    });
+  }
+
+  if (src.has('ymaps_catalog')) {
+    await attempt('ymaps_catalog', async () => {
+      for (const y of await loadYmapsCatalogCandidates(db, Math.min(100_000, Math.max(500, poolTarget)))) {
+        const domain = normalizeDomain(y.website);
+        if (!domain) continue;
+        all.push(
+          base({
+            key: `domain:${domain}`,
+            source: 'ymaps_catalog',
+            sourceRecordId: y.yandexId ? `ymaps_catalog:${y.yandexId}` : null,
+            companyName: y.name,
+            website: y.website.startsWith('http') ? y.website : `https://${domain}`,
+            knownEmails: splitEmails(y.email),
           }),
         );
       }
@@ -444,6 +495,7 @@ function merge(list: Candidate[]): Candidate[] {
     existing.amo = existing.amo ?? c.amo;
     existing.revenue = existing.revenue ?? c.revenue;
     existing.employees = existing.employees ?? c.employees;
+    existing.knownEmails = Array.from(new Set([...existing.knownEmails, ...c.knownEmails]));
     if (!existing.vacancies.length && c.vacancies.length) {
       existing.vacancies = c.vacancies;
       existing.vacancyCount = c.vacancyCount;

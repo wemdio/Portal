@@ -17,14 +17,15 @@ import * as XLSX from 'xlsx';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { normalizeInn } from '../company';
 
-export type UploadKind = 'exhibitors' | 'contracts' | 'growth' | 'tenders';
+/** base — своя база компаний (с почтой, без повода): идёт цепочкой «только профиль». */
+export type UploadKind = 'exhibitors' | 'contracts' | 'growth' | 'tenders' | 'base';
 
 type Field = 'company_name' | 'company_website' | 'inn' | 'record_url' | 'record_date' | 'stand' | 'category'
-  | 'contract_number' | 'subject' | 'amount' | 'customer';
+  | 'contract_number' | 'subject' | 'amount' | 'customer' | 'email' | 'okved' | 'region' | 'revenue';
 
 const ALIASES: Record<Field, RegExp> = {
   company_name: /^(?!.*заказчик)(компания|название|наименование|участник|экспонент|поставщик|исполнитель|победитель|company|name|exhibitor|supplier)/i,
-  company_website: /^(сайт|веб|website|site|url сайта|www)/i,
+  company_website: /^(сайт|веб|домен|website|site|url сайта|www)/i,
   inn: /^(?!.*заказчик).*(^|\s)инн(\s|$)|^inn$/i,
   record_url: /^(ссылка|url|link|карточка)/i,
   record_date: /^(дата|date)/i,
@@ -34,12 +35,16 @@ const ALIASES: Record<Field, RegExp> = {
   subject: /^(предмет|объект закупки|наименование объекта|subject)/i,
   amount: /^(цена|сумма|стоимость|amount|price)/i,
   customer: /заказчик|customer/i,
+  email: /^(e-?mail|почта|электронная почта)/i,
+  okved: /^(код )?оквэд|okved/i,
+  region: /^(регион|область|город|region)/i,
+  revenue: /^(выручка|revenue)/i,
 };
 
 /** Сопоставление колонок: порядок важен — ИНН и сайт раньше общего «названия». */
 const FIELD_ORDER: Field[] = [
   'inn', 'company_website', 'record_url', 'record_date', 'contract_number', 'subject', 'amount', 'customer',
-  'stand', 'category', 'company_name',
+  'stand', 'category', 'email', 'okved', 'region', 'revenue', 'company_name',
 ];
 
 export interface ParsedSignalRow {
@@ -103,7 +108,15 @@ export function parseSignalFile(buffer: Buffer, kind: UploadKind): ParsedSignalR
     const name = String(picked.company_name ?? '').trim();
     if (!name) continue;
     const details: Record<string, unknown> =
-      kind === 'contracts' || kind === 'tenders'
+      kind === 'base'
+        ? {
+            email: picked.email ? String(picked.email).trim().toLowerCase() : null,
+            okved: picked.okved ? String(picked.okved).trim() : null,
+            region: picked.region ? String(picked.region).trim() : null,
+            revenue: parseAmount(picked.revenue),
+            extra,
+          }
+        : kind === 'contracts' || kind === 'tenders'
         ? {
             contract_number: picked.contract_number ? String(picked.contract_number).trim() : null,
             subject: picked.subject ? String(picked.subject).trim() : null,
@@ -158,7 +171,7 @@ export interface SignalUploadRow {
  * T−90…T+14 (SPEC §4.1); контракт и грант — по дате записи за последние N дней
  * (у гранта без даты — по дате загрузки списка).
  */
-export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, freshnessDays: number): Promise<SignalUploadRow[]> {
+export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, freshnessDays = 0): Promise<SignalUploadRow[]> {
   const { data: uploads, error: upErr } = await db
     .from('polza_ru_signal_uploads')
     .select('id,title,event_start,event_end,official_url,catalog_year,created_at')
@@ -169,7 +182,7 @@ export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, fresh
   const day = 86_400_000;
   const sinceDate = new Date(now - freshnessDays * day).toISOString().slice(0, 10);
   const activeUploads = (uploads ?? []).filter((u) => {
-    if (kind === 'growth') return true;
+    if (kind === 'growth' || kind === 'base') return true;
     // Контракт в окне опубликован не раньше sinceDate, а загрузка сделана после него.
     // Отсекаем старые загрузки, иначе ежедневные из ГосПлана раздувают список id в запросе.
     if (kind !== 'exhibitors') return String(u.created_at ?? '').slice(0, 10) >= sinceDate;

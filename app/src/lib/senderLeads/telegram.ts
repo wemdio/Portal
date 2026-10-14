@@ -86,6 +86,17 @@ export function buildLeadMessage(input: LeadMessageInput): string {
   return lines.join('\n');
 }
 
+/** The exact General message, rendered as readable plain text for an AMO note. */
+export function leadMessageNote(html: string): string {
+  return html
+    .replace(/<a href="([^"]+)">([^<]+)<\/a>/g, (_match, url: string, label: string) => `${label}: ${url}`)
+    .replace(/<\/?(?:b|pre)>/g, '')
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
+}
+
 export async function sendLeadMessage(config: LeadTelegramConfig, text: string): Promise<number> {
   const result = await sendMessage(config.token, {
     chatId: config.chatId,

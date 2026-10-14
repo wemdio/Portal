@@ -63,13 +63,14 @@ export async function listProjectReplies(
   const catalog = await getCampaignCatalog(projectCampaignIds);
   const accountOf = (id: string) => catalog.get(id)?.accountId ?? 'main';
   const mainIds = projectCampaignIds.filter((id) => accountOf(id) === 'main');
+  // У наших кампаний тоже бывают вердикты квалификатора (ENagency шёл через него
+  // до 14.10.2026) — их читаем вместе с ящиком, дубли снимает findQualificationIdsByEmailIds.
   const ownIds = mainIds.filter((id) => isOwnAgencyCampaign(catalog.get(id)?.name));
-  const syncedIds = mainIds.filter((id) => !ownIds.includes(id));
 
   // Счётчики — по всем кампаниям проекта, независимо от выбранной: кнопки
   // кампаний над списком показывают, куда переключаться.
   const [qualCounts, inboxCounts, recentlyLinked] = await Promise.all([
-    countSyncedQualificationsByCampaign(syncedIds, options.search, { onlyLeads }),
+    countSyncedQualificationsByCampaign(mainIds, options.search, { onlyLeads }),
     onlyLeads ? Promise.resolve(new Map<string, number>()) : countInboxByCampaign(mainIds, options.search),
     getRecentlyLinkedCampaignIds(projectId, new Date(Date.now() - LINK_HISTORY_DAYS * 24 * 60 * 60_000).toISOString()),
   ]);
@@ -101,7 +102,7 @@ export async function listProjectReplies(
     [...byAccount].map(async ([accountId, ids]) => {
       if (accountId === 'main') {
         const [synced, inbox] = await Promise.all([
-          listSyncedQualifications(ids.filter((id) => !ownIds.includes(id)), { limit, search: options.search, onlyLeads }),
+          listSyncedQualifications(ids, { limit, search: options.search, onlyLeads }),
           onlyLeads ? Promise.resolve({ rows: [] as QualificationRow[], total: 0 }) : listInboxReplies(ids, { limit, search: options.search }),
         ]);
         // Письмо истории, которое квалификатор потом всё-таки взял, — одна строка, с вердиктом.

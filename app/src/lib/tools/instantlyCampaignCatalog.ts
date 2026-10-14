@@ -3,7 +3,7 @@ import 'server-only';
 import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
-import { isOwnAgencyCampaign, isOwnAgencyProjectClient } from '@/lib/instantly/ownAgencyCampaign';
+import { ownAgencyProjectMatches } from '@/lib/instantly/ownAgencyCampaign';
 import {
   resolveInstantlyAccountId,
   listInstantlyAccounts,
@@ -1292,12 +1292,13 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
 
       const existingOwners = ownerProjectIdsByCampaign.get(campaign.id);
 
-      // Наши «N. Polza_…» идут в проект Polza мимо границы периода (см.
-      // lib/instantly/ownAgencyCampaign.ts): 06.10.2026 период открыли 05.10, и
-      // все «1.–11. Polza» остались без проекта — их ответы не видел никто.
+      // Наши «N. Polza_…» идут в проект Polza, «ENagency …» — в проект ENagency
+      // мимо границы периода (см. lib/instantly/ownAgencyCampaign.ts): 06.10.2026
+      // период открыли 05.10, и все «1.–11. Polza» остались без проекта — их
+      // ответы не видел никто. Крест-накрест обход не действует.
       // Уже привязанную к нему не трогаем вовсе: иначе захват перенёс бы её из
       // прошлого периода в текущий и переписал историю периодов.
-      const ownAgency = isOwnAgencyProjectClient(project.client) && isOwnAgencyCampaign(campaign.name);
+      const ownAgency = ownAgencyProjectMatches(project.client, campaign.name);
       if (ownAgency && existingOwners?.has(project.id)) continue;
 
       // Period eligibility decides whether a link should be created. It must
