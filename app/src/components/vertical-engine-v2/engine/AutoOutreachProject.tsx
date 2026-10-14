@@ -34,6 +34,8 @@ import { ManualHypothesisForm } from './ManualHypothesisForm';
 import { PriorityNichesEditor, PriorityNicheResults, type PriorityNichesEditorHandle } from './PriorityNichesEditor';
 import { ProjectExclusions } from './ProjectExclusions';
 import { DownloadVerifiedContacts } from './DownloadVerifiedContacts';
+import { CombinedContactsDownload } from './CombinedContactsDownload';
+import { AudienceScopeSummary } from './AudienceScopeSummary';
 import { PreparationProgress, getPreparationPresentation, getPreparationActionNotice,
   refreshPreparationRequestNotice, type PreparationPresentation, type PreparationRequestNotice } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
@@ -682,7 +684,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         />
         <span className="ve2-hypothesis-copy">
           <span className="ve2-h3">{h.title}</span>
-          <span id={`hypothesis-description-${h.id}`} className={HE.muted}>{h.description}</span>
+          <AudienceScopeSummary id={`hypothesis-description-${h.id}`} scope={h.audience_scope} description={h.description} />
         </span>
       </label>
       <div className="ve2-hypothesis-meta">
@@ -700,7 +702,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         {h.origin !== 'manual' || h.evidence?.length ? <details className="ve2-hypothesis-evidence">
           <summary className="ve2-link">Доказательства · {h.evidence?.length ?? 0}</summary>
           <div className="ve2-evidence-content">
-            {h.fit_rationale ? <p className={HE.muted}>{h.fit_rationale}</p> : null}
+            {h.fit_rationale ? <p className={HE.muted}><span className="font-medium">Почему подходит: </span>{h.fit_rationale}</p> : null}
             {(h.evidence ?? []).map((ev, i) => (
               <div key={i} className="ve2-evidence-item">
                 <p>{ev.claim}</p>
@@ -988,6 +990,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
             <section className="space-y-6">
               <h2 className="ve2-h2">Базы и доступный объём</h2>
               {statusRefresh}
+              <CombinedContactsDownload key={projectId} projectId={projectId} hypotheses={detail.hypotheses.filter(hypothesis =>
+                detail.bases.some(base => base.hypothesis_id === hypothesis.id && base.source === 'auto'))} />
               {contactLimitUnsaved ? <StatusBox tone="info">
                 Изменение лимита ещё не применено. Перед запуском сохраните его на шаге «Гипотезы».
                 <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>К настройке лимита</button>

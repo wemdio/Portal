@@ -25,11 +25,12 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
-import { canResumePartialPreview, getVeCollectionContinuation, grantVeResumeRoundBudget, openNextVeCollectionRound, previewRecoveryKind, type VeCollectionContinuation } from './collectionRecovery';
+import { canResumePartialPreview, getVeCollectionContinuation, grantVeResumeRoundBudget, needsVeControlledAudienceRefresh, openNextVeCollectionRound, previewRecoveryKind, type VeCollectionContinuation } from './collectionRecovery';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 import { isVeResumableDirectoryError } from './collectionErrors';
 import { compactVeRelevanceReserve } from './relevanceReserve';
+import { readVeSourceCostPolicy } from './sourceAudience';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -138,7 +139,7 @@ async function resumeFailedPreview(
     return requested ? { ok: true, created: false, base: requested, continuation: getVeCollectionContinuation(requested, currentHypothesis) } : null;
   }
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
-  if (saved.status === 'analyzed') {
+  {
     // A launched campaign owns this audience. Recovery must not mutate it.
     const launched = await supabase.from('ve_templates').select('id').eq('base_id', saved.id)
       .not('launch_info', 'is', null).limit(1).maybeSingle();
@@ -147,10 +148,22 @@ async function resumeFailedPreview(
       available: false, action: null, code: 'launched', reason: 'База уже передана в запуск. Пополнение управляется в результатах.',
     } };
   }
+  const continuation = getVeCollectionContinuation(saved, currentHypothesis);
+  const refreshAudience = input.resumeBaseId === saved.id && continuation.code === 'source_update'
+    && continuation.action === 'resume_collection' && needsVeControlledAudienceRefresh(saved, currentHypothesis);
+  const pendingAudienceRefresh = saved.collect_info?.audience_scope_refresh_requested === true;
+  if (pendingAudienceRefresh) {
+    try {
+      if (!readVeSourceCostPolicy(saved.collect_info.cost_policy)) throw new Error('Missing cost policy');
+    } catch { return { ok: false, message: 'Сохранённое обновление источников требует проверки условий расходов.' }; }
+  }
+  const sourceRefresh = refreshAudience || pendingAudienceRefresh;
   const info = { ...saved.collect_info,
-    ...(currentHypothesis && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')) ? { hypotheses: [currentHypothesis] } : {}),
-    ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}),
-    ...(saved.status === 'analyzed' ? { validation_retry: true, relevance_review_requested: true } : {}),
+    ...(currentHypothesis && (refreshAudience || (!pendingAudienceRefresh && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')))) ? { hypotheses: [currentHypothesis] } : {}),
+    ...(previewRecoveryKind(saved) === 'validation' && !sourceRefresh ? { validation_retry: true } : {}),
+    ...(saved.status === 'analyzed' && !sourceRefresh ? { validation_retry: true, relevance_review_requested: true } : {}),
+    ...(refreshAudience ? { audience_scope_refresh_requested: true,
+      cost_policy: { version: 1, website_discovery: 'existing_only' } } : {}),
   };
   // Continuing acquisition is not permission to repeat completed SMTP checks.
   // Clear inconclusive results only when this failed preparation actually
@@ -162,7 +175,7 @@ async function resumeFailedPreview(
   if (info.saved_email_recovery !== undefined && emailRecoveryFailed) {
     info.saved_email_recovery = resumeVeSavedEmailRecovery(info.saved_email_recovery);
   }
-  if (previewRecoveryKind(saved) === 'pipeline' && info.target_checkpoint?.completed_round === info.target_progress?.round) {
+  if (!sourceRefresh && previewRecoveryKind(saved) === 'pipeline' && info.target_checkpoint?.completed_round === info.target_progress?.round) {
     // Review saved observations from ALL completed batches; the last child
     // alone cannot represent a pipelined preview. No re-scraping old inputs.
     info.validation_retry = true;
@@ -175,17 +188,23 @@ async function resumeFailedPreview(
   }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
+  if (refreshAudience) {
+    // A closed source round advances once; its saved spending envelope and
+    // low-yield history do not grow just because the source plan was fixed.
+    info.target_progress.round += 1;
+    if (info.stats) { info.stats = { ...info.stats }; delete info.stats.finished_at; }
+  }
   // Каталожный сбой — единственный вид восстановления, который может застать
   // раунд ЗАКРЫТЫМ: его контрольная точка записана, а номер остался прежним,
   // потому что ошибка задачи не даёт finishCollectionRound его увеличить.
   // Остальные виды либо требуют `completed_round === round - 1`, либо ставят
   // флаги повтора — те редактируют уже собранное и номер двигать не должны.
-  if (previewRecoveryKind(saved) === 'catalog') openNextVeCollectionRound(info);
+  if (!sourceRefresh && previewRecoveryKind(saved) === 'catalog') openNextVeCollectionRound(info);
   // Reopen failed tasks after advancing a closed round: its normal renewal
   // must not discard the saved prefix of a newly recovered directory task.
   // Older workers timed out queued children from dispatch time. On an explicit
   // continuation, poll the SAME child again instead of buying another scrape.
-  if (Array.isArray(info.tasks)) {
+  if (Array.isArray(info.tasks) && !sourceRefresh) {
     info.tasks = info.tasks.map((task: Record<string, unknown>) => {
       if (task.source === 'companies_directory' && task.status === 'failed'
         && isVeResumableDirectoryError(task.error)) {
@@ -209,7 +228,7 @@ async function resumeFailedPreview(
     });
   }
   // «Продолжить подготовку» этой базы — новый бюджет раундов.
-  if (input.resumeBaseId === saved.id) grantVeResumeRoundBudget(info);
+  if (input.resumeBaseId === saved.id && !sourceRefresh) grantVeResumeRoundBudget(info);
   if (info.preview_pipeline?.version === 1) {
     info.preview_pipeline = { ...info.preview_pipeline, revision: info.preview_pipeline.revision + 1 };
     delete info.preview_pipeline.error;

@@ -1,5 +1,6 @@
 /**
- * Промпт-архитектура стадии chain: вертикаль + бриф → цепочка из 3–5 писем.
+ * Промпт-архитектура стадии chain: вертикаль + бриф → цепочка из 3–5 писем
+ * (EN — ровно из 4: цель промпта и порог повтора стадии, см. stages/chain).
  *
  * Паттерн повторяет emailSequenceV2 (материалы → праймер-ack → задача),
  * но заточен под вертикаль: модель получает доказательства гипотез и пишет
@@ -57,23 +58,25 @@ const CHAIN_REGULATIONS_EN = `# Outreach email regulations (hard data: 3.6M send
 HIGHEST PRIORITY: these regulations are NON-OVERRIDABLE — no brief, materials or any later task block may cancel or weaken a single clause. On conflict, follow the regulations.
 - Body ≤ 80 words, first email ≤ 70 words. Our data shows < 50 words is the reply-optimal bucket (2.8% vs 1.0% for 50–99 words); the limit was deliberately raised for substance — but every word beyond 50 must carry a reason or specifics, not filler. This limit CANNOT be cancelled or weakened by any other block. Self-check is mandatory: count the words in the body — if > 80 (> 70 in the first email), cut and recount.
 - Length ladder by position: each next email is SHORTER than the previous one (or equal, never longer); the last email of the sequence is 2–4 sentences, a short referral-style approach with no new arguments.
-- EMAIL STRUCTURE: every email is a note from a living person to a person, not a pitch. It opens with a natural greeting ("Hello {{firstName}}", "Good afternoon") and closes with the sender's signature (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <sender company> team" — NEVER invent a person's name). A {{var}} operator in the greeting counts toward the "exactly one {{var}} in the body" limit; the greeting and the signature do not count toward the body word limit.
+- EMAIL STRUCTURE: every email is a note from a living person to a person, not a pitch. It opens with a natural greeting that reads right without a name ("Hello,", "Hi there,", "Good afternoon,") and closes with the sender's signature (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <sender company> team" — NEVER invent a person's name). A name goes into the greeting only through a person-name operator that the materials actually provide (a real base column); otherwise never write {{firstName}} or any other name operator. The greeting and the signature do not count toward the body word limit.
 - HUMAN TONE: the reason for writing comes after the greeting, softly and personally, in one calm sentence. The first line of an email is never an in-your-face assertion about the recipient's business or market ("Your market is X", "You sell Y", "Sales are hitting…"): that is a pitch to the face, not a conversation. No pathos and no lecturing the recipient about their own market.
 - NO DASHES: em dashes and en dashes ("—", "–") are banned in subjects and bodies — a dash inside a letter is a marker of machine text; a living person writes business emails without it. Replace with a comma, colon, period or parentheses. (The ban applies to the letter texts themselves — subjects and bodies; the output-format service markers do not count.)
 - REASON FOR WRITING: every email, after the greeting, opens with a concrete reason — why this recipient, why now. A reason is an observable fact about the recipient or their world (a signal about their company/site, a fact of their industry, a sharp number from the materials), delivered naturally, humanly. A generic segment truism as the reason is banned: "everyone in the segment has problem X", "sales are hitting a traffic ceiling", "many in the industry…" — those are platitudes, not reasons.
 - 1–3 sentences per body reply best; 9–12 sentences cut reply threefold.
 - 3–4 word subjects are the reply optimum (1.8%); 12+ word subjects kill reply (−58%). A question in the subject gives +54% reply.
-- {{var}} personalization in the subject — +117% reply, in the body — +44%. Mandatory: {{var}} in EVERY subject; exactly one {{var}} in every body.
+- {{var}} personalization in the subject — +117% reply, in the body — +44%, but only when the variable is filled with real data: a {{var}} with no data reaches the recipient as an empty gap ("Hello ,", "Quick question about "). Use only the personalization operators that the materials provide (real base columns); if none are provided, write without any {{var}}. At most one {{var}} per subject and one per body. A subject never needs a {{var}}.
 - Numbers in the body — MINUS 63% reply; numbers in the subject — minus 34%. Avoid digits, percentages, amounts, "top-5". The single exception — one anchoring number from the materials when it IS the email's reason or the case proof: without it the fact does not work.
 - Timeline hooks ("in 2 weeks", "in N days") — minus 29% reply. Do not promise deadlines in digits.
-- The CTA "a call / 15-minute chat?" — MINUS 36.8% reply (0.70% vs 1.11%, n=682,531, p<0.001): asking for a meeting or a call in an email is banned. Every email carries exactly one CTA: one soft, pressure-free question (check interest, offer to send details/an example); an email with no CTA question at all is a gross violation. In email 1 the CTA is hybrid: ONE question (one question mark) with two branches — the recipient's interest + a frictionless referral, in natural human wording: "Is this relevant to you, or could you point me to who owns <topic> on your team?". A pure referral ask ("who is the best person to talk to?") is allowed ONLY in the last step of the sequence.
+- The CTA "a call / 15-minute chat?" — MINUS 36.8% reply (0.70% vs 1.11%, n=682,531, p<0.001): asking for a meeting or a call in an email is banned. Every email carries exactly one CTA: one soft, pressure-free question (check interest or relevance, or offer more detail on what the client actually does; never offer an asset the materials do not provide, see NO INVENTED MATERIALS); an email with no CTA question at all is a gross violation. In email 1 the CTA is hybrid: ONE question (one question mark) with two branches — the recipient's interest + a frictionless referral, in natural human wording: "Is this relevant to you, or could you point me to who owns <topic> on your team?". A pure referral ask ("who is the best person to talk to?") is allowed ONLY in the last step of the sequence.
 - A 2–4 step sequence is optimal; reply drops with every step (step 1 — 1.7%, step 5+ — 0.3%): the strongest proof goes into the first email.
 - One email — one idea; each next email — a new angle, not "just bumping this".
 - Breakup emails ("I won't bother you anymore", "this is my last email") are banned — the top marker of mass spam.
 - Company and client names — ONLY from the provided materials. An invented name is unacceptable: if no suitable case exists in the input, write nameless ("a mass-hiring provider", "a top-10 retailer").
+- NO INVENTED MATERIALS: never offer, promise or imply a report, benchmark, study, example, sample, template, case study, audit, deck, list or any other asset unless the materials explicitly provide it. "Happy to send over our benchmark report" or "Want me to send a free audit?" is banned when no such report or audit is in the materials. A soft CTA asks about interest or relevance; it never dangles an asset that does not exist.
 - CASE IN CONTEXT: use a client case once and ONLY IF relevant — its industry/domain is plausibly close to the recipient's world. Introduce the case through relevance ("we're in your space: we did <what, with what result> for <client>"); a bare "we worked with X" sticker with no explanation of why it belongs here is banned. A case from a far-away industry — write nameless ("for a corporate software vendor") or skip the case entirely: the case slot may stay empty.
 - The same client/case name — in at most one email of the sequence; repeating it in later emails is a template marker.
 - Unverifiable claims about the recipient or their market are banned ("you are unhappy with your contractor", "you get emails like this every day"): replace with a question or a fact from the materials.
+- A HYPOTHESIS IS AN ANGLE TO TEST, NOT A FACT ABOUT THE RECIPIENT: the hypotheses and their evidence describe a market or a segment, not this company. Never state that the recipient has a problem, a vacancy, a budget, a plan or a tool because a hypothesis says so; ask it as a question, or cite it as a fact about the market from the materials.
 - Stop phrases (jargon and filler — people do not talk like that): "discuss outbound", "to you or to the sales team", "demand is uneven", "many companies", "allow me to tell you", "a lucrative offer", "hoping for cooperation". Write the way a living person writes to a colleague.`;
 
 /**
@@ -163,6 +166,46 @@ ${items}
 `;
 }
 
+/**
+ * Слова клиента из брифа: оффер (offer_override) и описание бизнеса
+ * (business_override). Отдельного поля «цифры клиента» в брифе V1 нет —
+ * цифры клиента живут внутри этих двух текстов, правило блока их и держит.
+ */
+export interface HeClientWords {
+  offerOverride?: string | null;
+  businessOverride?: string | null;
+}
+
+/** Слова клиента из брифа проекта — одна выборка для стадий chain и template. */
+export function clientWordsFromBrief(brief: Record<string, unknown> | null | undefined): HeClientWords {
+  return {
+    offerOverride: typeof brief?.offer_override === 'string' ? brief.offer_override : null,
+    businessOverride: typeof brief?.business_override === 'string' ? brief.business_override : null,
+  };
+}
+
+/**
+ * EN-блок «CLIENT'S OWN WORDS»: оффер и описание бизнеса, которые человек
+ * написал в форме брифа, с правилом «дословно, не перефразировать, не
+ * округлять». Только для EN-промптов: RU/PL-сборщики его не вызывают и
+ * собираются байт-в-байт как раньше. Подзаголовок оффера оставлен русским
+ * («ОФФЕР КЛИЕНТА (offer_override)»): на него по имени ссылается EN-задача
+ * цепочки. Оба поля пусты → пустая строка (блок не инжектится).
+ */
+export function renderClientWordsBlockEn(words?: HeClientWords | null): string {
+  const offer = words?.offerOverride?.trim() ?? '';
+  const business = words?.businessOverride?.trim() ?? '';
+  if (!offer && !business) return '';
+  const parts: string[] = [];
+  if (offer) parts.push(`ОФФЕР КЛИЕНТА (offer_override), the client's offer:\n"""\n${offer}\n"""`);
+  if (business) parts.push(`The client's business description (business_override):\n"""\n${business}\n"""`);
+  return `CLIENT'S OWN WORDS (written in the brief form by the client or by our specialist who knows the client; where they differ from the site profile or the rest of the brief, trust these words):
+${parts.join('\n')}
+Rule: whenever an email states the client's offer or a fact or figure about the client, take it from these words verbatim: quote the part you need (the regulations' length limits still hold), never reword it into a different claim, and never round, convert or inflate a number ("$35,000" stays "$35,000", never "$35k" or "about $30,000"; "300+" stays "300+"). If these words are in another language than the emails, translate them faithfully: the same claims, the same figures. Attribute nothing to the client that these words and the brief do not say. The regulations still apply: a number goes into an email only under the number rule, and when it does, it is copied exactly.
+
+`;
+}
+
 export interface ChainPromptHypothesis {
   title: string;
   description: string;
@@ -185,6 +228,12 @@ export interface ChainPromptInput extends HePromptInjections {
   briefText: string;
   /** Опционально: offer_override из брифа — авторитетная формулировка оффера, использовать дословно. */
   offerOverride?: string;
+  /**
+   * Опционально: business_override из брифа — описание бизнеса, написанное
+   * человеком. Попадает в промпт только EN-цепочки (блок «CLIENT'S OWN WORDS»
+   * вместе с оффером); RU/PL-промпт его не читает и не меняется.
+   */
+  businessOverride?: string;
   /** Опционально: описание доступных операторов персонализации. */
   operatorsHint?: string;
   /**
@@ -293,12 +342,13 @@ ${'{{OPERATORS_HINT}}'}
 
   en: `You are a senior email outreach specialist with 400+ launched cold B2B campaigns (average reply rate 8–18%).
 
-Write a sequence of 4 emails (3–5 is acceptable) for a cold campaign targeting the vertical described in the materials above. The client is described in the brief/site profile in the materials — we sell their product/service; emails go to decision-makers in the target vertical.
+Write a sequence of exactly 4 emails for a cold campaign targeting the vertical described in the materials above. The client is described in the brief/site profile in the materials — we sell their product/service; emails go to decision-makers in the target vertical.
 
 How to use the materials:
 - The vertical and its synonyms are the audience: write as if you know their industry from the inside (their terms, their pains, their metrics).
 - The hypotheses list is the PRIMARY source of pains, angles and specifics: market facts, third-party cases, regulatory drivers. Items marked "✓ ПОДТВЕЖДЕНО СПЕЦИАЛИСТОМ" are human-confirmed and take priority. Do not introduce market angles or pains that contradict the list; rejected hypotheses are simply absent from the materials — never mention their existence. Rely on the list, but do NOT cite URLs in the emails and do not overload them with numbers (see the regulations).
 - The client brief is the offer and USPs. One email — one idea/one USP; spread them across the sequence.
+- If the materials contain a "CLIENT'S OWN WORDS" block — it is the client's own offer, business description and figures: whatever the emails say about the client follows it verbatim (no paraphrase into a different claim, no rounded or converted number), per the block's rule.
 - If the materials contain a "КЕЙС КЛИЕНТА" block — that is the single case slot of the sequence (brief cases remain a fallback only when this block is absent): use it once and ONLY IF relevant — the case's industry/domain is plausibly close to the recipient's world. Introduce it through relevance ("we're in your space: we did <what, with what result> for <client>"), never as a bare "we worked with X" sticker. A case from a far-away industry → write nameless ("for a corporate software vendor") or skip the case slot entirely. Real numbers only from the block, in at most ONE email, and never attribute it to an industry other than the one stated in the block.
 - The first email is the strongest: best angle + best proof. Follow-ups bring new angles, not "just bumping this".
 
@@ -311,7 +361,7 @@ The offer (parts 1–2) must be explicit in email 1: the recipient must instantl
 
 TONE — HUMAN DIALOGUE, NOT ADVERTISING. We are not blasting ads — we are having a human conversation: why we wrote, what we offer, how and why we can help.
 - The email reads as one person writing to another: "I'm writing", "we", conversational language, short sentences. Never like a landing page or a company deck.
-- Every email opens with a natural greeting ("Hello {{firstName}}", "Good afternoon") and closes with the sender's signature (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <client company> team" — NEVER invent a person's name).
+- Every email opens with a natural greeting that reads right without a name ("Hello,", "Hi there,", "Good afternoon,") and closes with the sender's signature (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <client company> team" — NEVER invent a person's name).
 - The first line is a greeting, then the reason for writing: softly and personally, in one calm sentence. In-your-face assertions about the recipient's business or market as an opener are banned ("Your market is X", "You sell Y", "Sales are hitting…"): no pathos, no teaching the recipient their own market.
 - Em dashes and en dashes ("—", "–") are banned in subjects and bodies: a dash inside a letter is a marker of machine text. Use commas, colons, periods or parentheses instead.
 - Advertising clichés are banned: "leader", "best", "effective", "stream of leads", "we guarantee", "free", "team of professionals", "individual approach" and the like.
@@ -319,13 +369,28 @@ PLAIN VOICE — THE READ-ALOUD TEST. Write like a person emailing a colleague: s
 - No marketing numbers in email 1 (digits in the body → −63% reply): phrase the recipient's outcome via roles/segments ("meetings with HR directors at large employers"), not a cadence like "3–5 meetings a month".
 
 Mandatory sequence construction:
-- Email 1 (mandatory beats, rendered as human dialogue, not a pitch): (1) A NATURAL GREETING ("Hello {{firstName}}", "Good afternoon"); (2) THE REASON FOR WRITING — softly and personally, one calm sentence: why this recipient, why now. Hierarchy: (a) an observable fact about the recipient's world from the materials — a signal from the vertical description, a brand-cloud fact, a sharp evidence number from the vertical's hypotheses (cite it naturally, in human words); (b) if nothing concrete exists — the vertical's single sharpest evidence fact with its real number as the reason. Opening with a generic segment claim ("everyone in the segment has problem X", "sales hit a traffic ceiling") is banned, as are bare categorization ("You sell into X"), unverifiable claims about the recipient themselves, and any in-your-face assertion as the first line (the first line is the greeting); (3) what I offer — one simple line: the service in plain words + for whom; (4) how and why I can help — proof/relevance (the recipient's outcome via roles/segments, no marketing numbers); (5) one soft hybrid question — ONE question (one question mark) with two branches, interest + frictionless referral, in natural human wording: "Is this relevant to you, or could you point me to who owns <topic> on your team?"; (6) THE SENDER'S SIGNATURE (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <client company> team" — NEVER invent a person's name). The 5-second test: after email 1 a stranger instantly answers — who is this, what do they offer, how does it help me; if it fails — rewrite. Self-centered process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
+- Email 1 (mandatory beats, rendered as human dialogue, not a pitch): (1) A NATURAL GREETING that reads right without a name ("Hello,", "Hi there,", "Good afternoon,"); (2) THE REASON FOR WRITING — softly and personally, one calm sentence: why this recipient, why now. Hierarchy: (a) an observable fact about the recipient's world from the materials — a signal from the vertical description, a brand-cloud fact, a sharp evidence number from the vertical's hypotheses (cite it naturally, in human words); (b) if nothing concrete exists — the vertical's single sharpest evidence fact with its real number as the reason. Opening with a generic segment claim ("everyone in the segment has problem X", "sales hit a traffic ceiling") is banned, as are bare categorization ("You sell into X"), unverifiable claims about the recipient themselves, and any in-your-face assertion as the first line (the first line is the greeting); (3) what I offer — one simple line: the service in plain words + for whom; (4) how and why I can help — proof/relevance (the recipient's outcome via roles/segments, no marketing numbers); (5) one soft hybrid question — ONE question (one question mark) with two branches, interest + frictionless referral, in natural human wording: "Is this relevant to you, or could you point me to who owns <topic> on your team?"; (6) THE SENDER'S SIGNATURE (if the materials contain a "ПОДПИСЬ ОТПРАВИТЕЛЯ" block — use it verbatim; otherwise sign as the team of the brief's company, e.g. "The <client company> team" — NEVER invent a person's name). The 5-second test: after email 1 a stranger instantly answers — who is this, what do they offer, how does it help me; if it fails — rewrite. Self-centered process descriptions ("we collect signals", "we write to context") are banned from email 1 — process belongs to emails 2+.
 - EVERY email (not just the first) opens with its own concrete reason: a new angle = a new fact-reason from the materials, never "just following up" or "bumping this".
-- A/B VARIANTS: write EVERY email in TWO variants with DIFFERENT reasons/angles. Variant A (primary, the ---LETTER N--- block) — reason anchored on the recipient's side (their world, their facts, per the hierarchy above). Variant B (the ---LETTER N B--- block) — reason anchored on the segment/market side (the vertical's sharpest evidence fact with its real number). B is not a rephrase of A but a different angle; both variants pass the whole regulations (length, {{var}}, exactly one CTA).
+- A/B VARIANTS: write EVERY email in TWO variants with DIFFERENT reasons/angles. Variant A (primary, the ---LETTER N--- block) — reason anchored on the recipient's side (their world, their facts, per the hierarchy above). Variant B (the ---LETTER N B--- block) — reason anchored on the segment/market side (the vertical's sharpest evidence fact with its real number). B is not a rephrase of A but a different angle; both variants pass the whole regulations (length, personalization, exactly one CTA).
 - A specific case/proof (client name and/or concrete result) — from the materials ONLY, used once and ONLY IF relevant to the recipient's world, introduced through relevance ("we're in your space: ..."), in exactly ONE email of the sequence: the same named case/client may not appear in more than one email. If no suitable case exists or the case is from a far-away industry — write without names or skip the case entirely; inventing names is forbidden.
 - A pure referral ask ("who should I talk to?") — only in the last email, once per sequence; in email 1 the referral branch is allowed only inside the hybrid CTA (see the regulations).
 
-FINAL SELF-CHECK: read every email aloud — grammar and agreement must be flawless; no advertising clichés; no marketing numbers in email 1 (the only allowed digit is the one anchoring evidence fact of the reason); after the greeting, every email opens with a concrete reason (a fact about the recipient/their world, not a generic segment claim); every email starts with a natural greeting and ends with the sender's signature; the first line is a greeting, never an in-your-face assertion about the recipient's business or market; no em/en dashes ("—", "–") anywhere in subjects or bodies; every email has exactly one CTA question (zero CTAs is a violation, email 1 — the hybrid question with a single question mark); every email has a B variant with a DIFFERENT reason (A — recipient-side anchor, B — segment/market anchor); body ≤ 80 words, email 1 ≤ 70.
+HARD SELF-CHECKS BEFORE YOU ANSWER (if one fails, rewrite):
+- Exactly 4 emails, and every email has its B variant (---LETTER N B---) with a DIFFERENT reason: A anchored on the recipient's side, B on the segment/market side; B is not a rephrase of A.
+- Count the words in every body: over 80, cut and recount; email 1 is at most 70 words. Every word beyond 50 carries a reason or specifics, not filler.
+- After the greeting, EVERY email opens with a concrete reason: a fact about the recipient or their world, not a generic segment claim; email 1 follows the reason hierarchy above.
+- Every email starts with a natural greeting that reads right without a name ("Hello,", "Hi there,", "Good afternoon,") and ends with the sender's signature; the first line is a greeting, never an in-your-face assertion about the recipient's business or market.
+- Paragraphs: the greeting, the message, the question and the signature are separated by blank lines; the question is its own paragraph, right before the signature.
+- No subject and no body contains an em or en dash ("—", "–"): each one is replaced with a comma, colon, period or parentheses.
+- Every email has exactly one CTA question (zero CTAs is a violation); email 1 has the hybrid question with a single question mark.
+- No email offers, promises or implies a report, example, sample, case study, audit or any other asset that the materials do not provide.
+- What the emails say about the client (offer, facts, figures) comes from the materials, and from "CLIENT'S OWN WORDS" verbatim when that block exists: nothing paraphrased into a new claim, no number rounded or converted.
+- No unverifiable claims about the recipient or their market; a hypothesis is an angle, not a fact about this recipient: phrase it as a question or as a market fact from the materials.
+- A case (if any) is introduced through relevance and its industry is close to the recipient's; otherwise nameless or no case.
+- No marketing numbers in email 1 (the only allowed digit is the one anchoring evidence fact of the reason); any number in any email is a number from the materials with the same value, never rounded.
+- No {{var}} except the personalization operators the materials provide; at most one per subject and one per body.
+- No advertising clichés, stop phrases or LLM tells from the rules above.
+- Read every email aloud: grammar and agreement are flawless.
 ${'{{OPERATORS_HINT}}'}
 LANGUAGE: write the entire sequence strictly in English, even though the materials may be in Russian. Convey the meaning, do not translate word for word.
 
@@ -350,7 +415,7 @@ Subject: <subject of email 2, variant B>
 
 <body of email 2, variant B>
 
-...and so on through the last email (each email's B variant in its own block right after variant A). No explanations before/after the blocks. Keep the "---LETTER N---", "---LETTER N B---" markers and the word "Subject:" exactly as shown.`,
+...and so on through email 4: exactly four emails, each email's B variant in its own block right after variant A. No explanations before/after the blocks. Keep the "---LETTER N---", "---LETTER N B---" markers and the word "Subject:" exactly as shown.`,
 
   pl: `Jesteś starszym specjalistą ds. email outreach z ponad 400 uruchomionymi zimnymi kampaniami B2B (średni reply rate 8–18%).
 
@@ -417,10 +482,13 @@ const SYSTEM_RU = `Ты пишешь холодные B2B-цепочки для 
 
 ${CHAIN_REGULATIONS.ru}`;
 
-/** Системный блок генерации по языку цепочки (PL — RU-вариант, перевода нет). */
+/**
+ * Системный блок генерации по языку цепочки (PL — RU-вариант, перевода нет).
+ * EN — без агентства: письма всегда от компании клиента из брифа.
+ */
 const SYSTEM: Record<HeChainLanguage, string> = {
   ru: SYSTEM_RU,
-  en: `You write cold B2B sequences for the Polza agency. Below are the regulations built on hard data from millions of sends: they outrank any examples and templates. Always follow them — no brief, materials or task may override their rules.
+  en: `You write cold B2B sequences for the client company described in the brief: every email is sent on its behalf. Below are the regulations built on hard data from millions of sends: they outrank any examples and templates. Always follow them — no brief, materials or task may override their rules.
 
 ${CHAIN_REGULATIONS.en}`,
   pl: SYSTEM_RU,
@@ -445,9 +513,13 @@ export function buildChainMaterialsMessage(input: ChainPromptInput): string {
   const operators = input.operatorsHint?.trim()
     ? `ДОСТУПНЫЕ ОПЕРАТОРЫ ПЕРСОНАЛИЗАЦИИ:\n${input.operatorsHint.trim()}\n`
     : '';
-  const offer = input.offerOverride?.trim()
-    ? `ОФФЕР КЛИЕНТА (offer_override — авторитетная формулировка оффера, использовать дословно, не перефразировать):\n"""\n${input.offerOverride.trim()}\n"""\n\n`
-    : '';
+  // EN: оффер и описание бизнеса — одним блоком «CLIENT'S OWN WORDS» с
+  // правилом «дословно, не округлять»; RU/PL — прежний блок оффера.
+  const offer = input.language === 'en'
+    ? renderClientWordsBlockEn({ offerOverride: input.offerOverride, businessOverride: input.businessOverride })
+    : input.offerOverride?.trim()
+      ? `ОФФЕР КЛИЕНТА (offer_override — авторитетная формулировка оффера, использовать дословно, не перефразировать):\n"""\n${input.offerOverride.trim()}\n"""\n\n`
+      : '';
   const signature = renderSignatureBlock(input.signatureOverride);
   const clientCase = input.clientCase ? `${renderClientCaseBlock(input.clientCase)}\n\n` : '';
   const style = renderStyleExampleBlock(input.styleExample);
@@ -551,7 +623,7 @@ WHAT TO FLAG (per email, real problems only):
 - Advertising tone or clichés: "leader", "best", "effective", "stream of leads", "we guarantee", "profitable", "free", "team of professionals", "individual approach" and the like; the email reads like a landing page, not a message from one person to another.
 - Undeliverable or unverifiable claims: promises with no backing, statements about the recipient or their market that the sender cannot know.
 - Logical vulnerabilities — anything a skeptic could pick at: the reason does not connect to the offer, the argument does not follow from the fact, the CTA is unrelated to the email text, internal contradictions.
-- Violations of the regulations above: body > 80 words (email 1 > 70 — count the words honestly), no {{var}} in the subject, not exactly one {{var}} in the body, not exactly one CTA (more than one or none), digits in the subject or body (except one anchoring reason/case number from the materials), timeline promises, breakup phrases, asking for a call/meeting, a fallback substitution not in the nominative form.
+- Violations of the regulations above: body > 80 words (email 1 > 70 — count the words honestly), more than one {{var}} in a subject or in a body (which {{var}} operators have data is checked separately against the base; do not flag a {{var}} for that), not exactly one CTA (more than one or none), digits in the subject or body (except one anchoring reason/case number from the materials), timeline promises, breakup phrases, asking for a call/meeting, a fallback substitution not in the nominative form.
 - ZERO CTAs in the email: not a single soft question with a next step. Every email in the sequence must contain exactly one CTA question — a missing CTA is not a "calm tone", it is a violation.
 - In email 1 the CTA is not hybrid (no referral branch) or is phrased clumsily, not humanly: the benchmark is "Is this relevant to you, or could you point me to who owns <topic> on your team?" (one fork, one question mark).
 - Grammar and language cleanliness: flawless agreement, no broken or unfinished phrases.
@@ -607,6 +679,9 @@ function renderLettersForReview(
  * Сообщения критик-прохода: скептичный ЛПР вертикали разбирает цепочку.
  * Ответ — JSON HeChainCritique (вызов через callLLMWithSchema): промпт
  * требует строгую форму без markdown и текста до/после.
+ * clientWords — только EN: блок «CLIENT'S OWN WORDS» перед письмами, чтобы
+ * критик сверял сказанное о клиенте с его словами (и не снимал то, что клиент
+ * в оффере правда даёт). RU/PL его не читают и собираются байт-в-байт как раньше.
  */
 export function buildChainCriticMessages(input: {
   verticalName: string;
@@ -615,6 +690,7 @@ export function buildChainCriticMessages(input: {
   language: 'ru' | 'en' | 'pl';
   styleExample?: string | null;
   winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
+  clientWords?: HeClientWords | null;
 }): LLMMessage[] {
   const lang: HeChainLanguage = input.language === 'en' || input.language === 'pl' ? input.language : 'ru';
   const style = renderStyleExampleBlock(input.styleExample);
@@ -625,7 +701,7 @@ export function buildChainCriticMessages(input: {
     lang === 'en'
       ? `VERTICAL: ${input.verticalName}
 ${summary ? `${summary}\n` : ''}
-${style}${winners}EMAIL SEQUENCE (${input.letters.length} emails, language: ${LANG_NAMES_EN[lang]} — judge with a native speaker's eye):
+${renderClientWordsBlockEn(input.clientWords)}${style}${winners}EMAIL SEQUENCE (${input.letters.length} emails, language: ${LANG_NAMES_EN[lang]} — judge with a native speaker's eye):
 ${renderLettersForReview(input.letters, lang)}
 
 Read the sequence as a busy decision-maker in this vertical who hates templated spam. Review each email against the rules above and return ONLY JSON of exactly this shape — no markdown fences, no text before or after:
@@ -677,18 +753,20 @@ ${CHAIN_REGULATIONS.ru}
 
 // EN-перевод системного блока рерайта — по смыслу; имена RU-блоков материалов
 // («ЭТАЛОН СТИЛЯ КЛИЕНТА», «ПРОВЕННЫЕ ПАТТЕРНЫ», «ПОДПИСЬ ОТПРАВИТЕЛЯ») — как в материалах.
-const REWRITE_SYSTEM_EN = `You are a senior email outreach editor at the Polza agency. You receive a sequence of emails and the critic's review: you rewrite ONLY the flagged emails and return the rest unchanged.
+// Роль — без агентства: письма всегда от компании клиента.
+const REWRITE_SYSTEM_EN = `You are a senior B2B email outreach editor. You receive a sequence of emails sent on behalf of the client company and the critic's review: you rewrite ONLY the flagged emails and return the rest unchanged.
 
 ${CHAIN_REGULATIONS.en}
 
 HARD REWRITE RULES:
 - Rewrite ONLY the emails whose letter_index appears in the critique's issues. Return all other emails VERBATIM — character for character, including the subject: no "fixed it while I was at it".
-- Close every issue of a flagged email per its fix field; after the rewrite the email must pass the ENTIRE regulations. Self-check is mandatory: count the words in the body (≤ 80, email 1 ≤ 70), the email after the greeting opens with a concrete reason (not a generic segment truism), the case — only through relevance to the recipient, {{var}} in the subject and exactly one in the body, exactly one CTA question (zero CTAs — a violation; in email 1 — a hybrid question with a single question mark), a greeting at the start, the sender's signature at the end, not a single dash ("—", "–") in the subject or body.
+- Close every issue of a flagged email per its fix field; after the rewrite the email must pass the ENTIRE regulations. Self-check is mandatory: count the words in the body (≤ 80, email 1 ≤ 70), the email after the greeting opens with a concrete reason (not a generic segment truism), the case — only through relevance to the recipient, no {{var}} beyond those already in the input email (at most one per subject and one per body), exactly one CTA question (zero CTAs — a violation; in email 1 — a hybrid question with a single question mark), a greeting at the start, the sender's signature at the end, not a single dash ("—", "–") in the subject or body.
 - The sequence construction is unchanged: same number of emails, same order and the same roles in the ladder (email 1 — the offer and the hybrid CTA, the pure referral question — only in the last one). Do not add, remove or reorder anything.
 - New facts are banned: use only what is already in the input emails and the task materials. New client names, cases, numbers and promises may not be invented — if the critic demands specifics that are not in the input, rewrite nameless.
+- Never round or restate the client's figures: a number from the input emails, the materials or a "CLIENT'S OWN WORDS" block is either copied exactly ("$35,000" stays "$35,000", never "$35k" or "about $30,000"; "300+" stays "300+") or left out, even when the critic asks for fewer digits.
 - A specific case/client name — in at most one email of the sequence; when rewriting, do not smear it across several emails.
 - Do not mix the emails' angles: a rewritten email keeps its original angle, do not drag in a neighboring email's idea.
-- Do not break the {{var}} operator format: keep operator names as they are, fallback wordings — in the nominative form.
+- Do not break the {{var}} operator format: keep operator names as they are and add no new operators (only the ones already in the input emails have data), fallback wordings — in the nominative form.
 - Tone — human dialogue, not advertising; the regulations' stop phrases and clichés are banned. The first line is a greeting, not an in-your-face assertion about the recipient's business or market; the email closes with the sender's signature; dashes ("—", "–") in subjects and bodies are banned. Read every rewritten email aloud: grammar and agreement must be flawless.
 - If the materials contain an "ЭТАЛОН СТИЛЯ КЛИЕНТА" block — the rewritten emails imitate its manner, phrasing structure and tone (this outranks the default tone rules), but the regulations, the ban on invented names and the offer structure are unchanged.
 - If the materials contain a "ПРОВЕННЫЕ ПАТТЕРНЫ" block — inspire the rewritten emails' subjects and hooks with them: adapt, do not copy verbatim, never quote reply percentages.
@@ -756,6 +834,9 @@ Temat: <temat maila 2>
  * Сообщения рерайт-прохода: переписываются только письма из issues критики,
  * остальные возвращаются дословно. Вывод — теми же маркерами ---LETTER N---,
  * что и генерация: ответ потребляет letterParser.
+ * clientWords — только EN: блок «CLIENT'S OWN WORDS» в материалах рерайта
+ * (конкретику, которую просит критик, рерайт берёт из слов клиента, а не
+ * выдумывает). RU/PL его не читают и собираются байт-в-байт как раньше.
  */
 export function buildChainRewriteMessages(input: {
   verticalName: string;
@@ -765,6 +846,7 @@ export function buildChainRewriteMessages(input: {
   styleExample?: string | null;
   winnerPatterns?: Array<{ pattern: string; reply_pct: number }>;
   signatureOverride?: string | null;
+  clientWords?: HeClientWords | null;
 }): LLMMessage[] {
   const lang: HeChainLanguage = input.language === 'en' || input.language === 'pl' ? input.language : 'ru';
   const style = renderStyleExampleBlock(input.styleExample);
@@ -775,7 +857,7 @@ export function buildChainRewriteMessages(input: {
     lang === 'en'
       ? `VERTICAL: ${input.verticalName}
 
-${style}${winners}${signature}SOURCE SEQUENCE (${input.letters.length} emails, language: ${LANG_NAMES_EN[lang]}):
+${renderClientWordsBlockEn(input.clientWords)}${style}${winners}${signature}SOURCE SEQUENCE (${input.letters.length} emails, language: ${LANG_NAMES_EN[lang]}):
 ${renderLettersForReview(input.letters, lang)}
 
 SEQUENCE CRITIQUE (verdict and problems; ONLY the emails in issues are rewritten):
@@ -800,7 +882,8 @@ ${JSON.stringify(input.critique, null, 2)}`;
  * Хинт фикс-прохода по детерминированным нарушениям регламента (letterChecks):
  * модель получает свой же черновик (assistant) + этот список проблем и правит
  * точечно, сохраняя формат блоков. Проходит ДО критика — критик ревьюит смысл,
- * а не механику. details нарушений — по-русски (читает только модель).
+ * а не механику. details нарушений (читает только модель) идут как есть:
+ * checkLetterRules пишет их по-английски для 'en' и по-русски для RU/PL.
  */
 export function buildChainRuleFixHint(
   violations: Array<{ detail: string }>,

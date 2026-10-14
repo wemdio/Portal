@@ -11,6 +11,7 @@ import {
   buildCampaignPresetUpdatePayload,
 } from '@/lib/clientLaunch/buildCampaignPayload';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
+import { checkHeEngPresetAdminEdit } from '@/lib/hypothesisEngine/engSendingPreset';
 
 export const dynamic = 'force-dynamic';
 
@@ -134,6 +135,12 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   const sanitized = sanitizeBody(body);
   if (!sanitized.ok) return jsonError(sanitized.error, 400);
+
+  // Клиент ENG-кабинета: его пресет ведёт «Пул ящиков ENG» — создать пресет,
+  // добавить ящик, сменить воркспейс или выключить stop on reply здесь нельзя
+  // (checkHeEngPresetAdminEdit). Для остальных клиентов — { ok: true }.
+  const engPool = await checkHeEngPresetAdminEdit(clientUserId, sanitized.data);
+  if (!engPool.ok) return jsonError(engPool.message, engPool.status);
 
   if (Array.isArray(sanitized.data.email_account_ids)) {
     const tariffRow = await getClientTariffRow(clientUserId);

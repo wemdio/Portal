@@ -2,19 +2,25 @@
  * Стадия base_analyze: читает he_bases (columns + sample_rows) → LLM-профиль
  * базы (гео/индустрии/типы/должности + сегменты + углы) → he_bases.analysis,
  * status 'analyzed'. Результат — основа 15% дописки стадии template.
+ *
+ * Обе записи статуса — на входе ('analyzing') и в конце ('analyzed') — CAS по
+ * ANALYZABLE_BASE_STATUSES: отменённую ('failed') базу стадия не оживляет.
  */
+
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { HeBaseAnalysisSchema } from '../schemas';
 import { buildBaseAnalysisMessages } from '../prompts/baseAnalyze';
 import { buildBaseAnalysisMessagesEn } from '../prompts/baseAnalyze.en';
 import { projectMarket } from '../market';
-import type { HeBase, HeJob } from '../types';
+import type { HeBase, HeBaseStatus, HeJob } from '../types';
 import {
   addUsage,
   newUsage,
   payloadString,
   readProject,
+  stageLog,
   truncate,
   type HeStageContext,
   type HeStageResult,
@@ -22,6 +28,38 @@ import {
 
 const MAX_SAMPLE_ROWS = 30;
 const MAX_CELL_CHARS = 120;
+
+/**
+ * Статусы he_bases, из которых стадия ведёт базу через анализ: запись
+ * 'analyzing' на входе и 'analyzed' в конце идут ТОЛЬКО поверх них. Все пять
+ * статусов (he_bases_status_check, 20260730_0003):
+ *  - 'uploaded'   — РАЗРЕШЁН. CSV специалиста: роут загрузки
+ *                   (api/tools/hypothesis-engine/projects/[id]/bases) создаёт
+ *                   базу в 'uploaded' и ставит анализ — ежедневный путь
+ *                   RU-инструмента. В конечной записи он нужен тоже: если запись
+ *                   входа не легла (сбой БД), база так и стоит 'uploaded', а
+ *                   оплаченный анализ обязан лечь, как и раньше;
+ *  - 'analyzing'  — РАЗРЕШЁН. Финал авто-сборки (stages/baseCollect.ts пишет
+ *                   'analyzing' и только потом ставит анализ), ремонт
+ *                   осиротевшей базы (repairOrphanAnalyzingBase), повтор этой же
+ *                   джобы после упавшей попытки и обычная запись конца после
+ *                   собственной записи входа;
+ *  - 'analyzed'   — РАЗРЕШЁН, как и раньше. Анализ уже записан: повтор джобы,
+ *                   чья прошлая попытка записала анализ, а done-запись не легла,
+ *                   или вторая джоба анализа той же базы (две постановки до
+ *                   индекса 20261008_0001) — стадия пересчитывает и переписывает
+ *                   анализ;
+ *  - 'failed'     — ЗАПРЕЩЁН. Терминал: так базу закрывают роуты отмены
+ *                   (клиента и специалиста), отзыв ночного тика, воркер после
+ *                   отмены (closeAnalyzingBaseAfterCancel) и отказы сборки.
+ *                   Безусловная запись здесь оживляла отменённую базу: сначала
+ *                   'analyzing', потом 'analyzed' — а по 'analyzed' базе
+ *                   «Start outreach» и ночной проход ставят платные письма;
+ *  - 'collecting' — ЗАПРЕЩЁН. Базу ведёт сборка (её start-guard требует ровно
+ *                   этот статус), строк для анализа ещё нет, а запись
+ *                   'analyzing' оборвала бы сборку.
+ */
+const ANALYZABLE_BASE_STATUSES: HeBaseStatus[] = ['uploaded', 'analyzing', 'analyzed'];
 
 function sanitizeRow(row: Record<string, unknown>, columns: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -50,10 +88,26 @@ export async function runBaseAnalyzeStage(job: HeJob, ctx: HeStageContext): Prom
     .slice(0, MAX_SAMPLE_ROWS)
     .map((r) => sanitizeRow(r, columns));
 
-  await ctx.supabase
+  // Вход — CAS по ANALYZABLE_BASE_STATUSES. Ноль строк — база уже не наша
+  // (отменена, закрыта или ещё собирается): отказ ДО вызова модели, без оплаты.
+  // Отменённую джобу воркер разбирает как отмену (попытку не тратит), иначе
+  // повтор снова пройдёт через этот же CAS до вызова модели. Сбой самой
+  // записи, как и раньше, анализ не останавливает: статус решит CAS конечной
+  // записи.
+  const { data: entered, error: enterError } = await ctx.supabase
     .from('he_bases')
     .update({ status: 'analyzing', updated_at: new Date().toISOString() })
-    .eq('id', baseId);
+    .eq('id', baseId)
+    .in('status', ANALYZABLE_BASE_STATUSES)
+    .select('id');
+  if (enterError) {
+    stageLog(ctx, `[base_analyze] запись 'analyzing' не легла (${enterError.message}) — анализ продолжаем`);
+  } else if ((entered ?? []).length === 0) {
+    throw new Error(
+      `he_bases ${baseId}: статус базы не из ${ANALYZABLE_BASE_STATUSES.join('/')} ` +
+        `(прочитан '${base.status}') — анализ не запускаем, модель не вызывалась`,
+    );
+  }
 
   let verticalName = '';
   if (base.vertical_id) {
@@ -82,11 +136,32 @@ export async function runBaseAnalyzeStage(job: HeJob, ctx: HeStageContext): Prom
   );
   addUsage(usage, llm);
 
-  const { error: updError } = await ctx.supabase
+  // Конец — тот же CAS. Ноль строк значит, что за время вызова модели базу
+  // закрыли (отмена → 'failed'): анализ не пишем и базу не оживляем. Шаблон по
+  // ней тогда не ставится никем: дочейн автопилота (afterBaseAnalyzeDone)
+  // ставит письма только по базе, которая читается 'analyzed', а у отменённой
+  // джобы done-запись воркера (CAS по 'running') не ложится вовсе, и дочейна
+  // нет. Не бросаем: модель уже оплачена, и повтор джобы (база могла прийти в
+  // разрешённый статус) заплатил бы второй раз — расход уходит воркеру
+  // результатом, как обычно.
+  // analysis — текст модели: один NUL или одиночный UTF-16 суррогат, и PostgREST
+  // отвергает запись уже после оплаченного вызова — стадия падает и на повторе
+  // платит снова. Чистка трогает только эти два символа: текст без них (вся
+  // кириллица и латиница) ложится байт-в-байт тем же.
+  const { data: analyzed, error: updError } = await ctx.supabase
     .from('he_bases')
-    .update({ analysis: llm.data, status: 'analyzed', updated_at: new Date().toISOString() })
-    .eq('id', baseId);
+    .update({ analysis: stripUnstorableJsonChars(llm.data), status: 'analyzed', updated_at: new Date().toISOString() })
+    .eq('id', baseId)
+    .in('status', ANALYZABLE_BASE_STATUSES)
+    .select('id');
   if (updError) throw new Error(`he_bases update analysis: ${updError.message}`);
+  if ((analyzed ?? []).length === 0) {
+    stageLog(
+      ctx,
+      `[base_analyze] база ${baseId} за время анализа ушла из ${ANALYZABLE_BASE_STATUSES.join('/')} ` +
+        '(отмена или закрытие) — анализ не записан, база не оживает',
+    );
+  }
 
   return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
 }

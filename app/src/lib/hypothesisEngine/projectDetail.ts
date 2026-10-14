@@ -52,8 +52,9 @@ export type HeProjectDetailResult =
 // Деталка проекта поллится каждые 4с, поэтому вырезаем harvest из ответа —
 // иначе каждая база тащит десятки МБ на каждый опрос. Остальное в tasks[]
 // (source/status/rows/…) оставляем как есть: по нему рисуется прогресс-карта.
-// Экспортировано для ENG-дашборда (api/client/eng/dashboard) — та же поллинговая
-// модель, тот же риск по объёму.
+// Экспортировано и для остановки ENG-проекта (engProjectStop) — тот же срез
+// харвеста. ENG-дашборд (api/client/eng/dashboard) читает collect_info
+// JSON-путями и харвеста от БД не получает вовсе.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
   const info = base.collect_info as { tasks?: unknown } | null | undefined;
   if (!info || !Array.isArray(info.tasks)) return base;

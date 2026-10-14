@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import { purgeUserOwnedJobs } from '@/lib/admin/purgeUserOwnedJobs';
+import { refuseEngClientDelete } from '@/lib/adminEngClientGuard';
 import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -119,6 +120,10 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
   if (targetUserId === user.id) {
     return jsonError('Нельзя удалить самого себя', 400);
   }
+
+  // Клиента английского кабинета с проектом не удаляем (adminEngClientGuard.ts).
+  const engRefusal = await refuseEngClientDelete(supabaseAdmin, targetUserId, logMeta);
+  if (engRefusal) return engRefusal;
 
   const purgeErr = await purgeUserOwnedJobs(supabaseAdmin, targetUserId);
   if (purgeErr) {

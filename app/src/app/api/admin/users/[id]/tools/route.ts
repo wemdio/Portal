@@ -6,6 +6,7 @@ import { logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import type { UserRole } from '@/types';
 import { ALL_TOOL_IDS, ALL_NAV_TAB_IDS } from '@/lib/toolsRegistry';
+import { ADMIN_ENG_CLIENT_TOOLS_TEXT, refuseAdminActionForEngClient } from '@/lib/adminEngClientGuard';
 
 const ALL_VISIBILITY_IDS = [...ALL_TOOL_IDS, ...ALL_NAV_TAB_IDS] as const;
 
@@ -90,6 +91,19 @@ export async function POST(
     tool_id: toolId,
     enabled: visibility[toolId] !== false,
   }));
+
+  // Клиенту английского кабинета внутренние инструменты не выдаём
+  // (adminEngClientGuard.ts). Отсутствующий в теле ключ пишется как
+  // включённый, поэтому сторожим по тому, что будет записано; выключить все
+  // инструменты можно всегда.
+  if (toWrite.some((row) => row.enabled)) {
+    const engRefusal = await refuseAdminActionForEngClient(auth.supabaseAdmin, targetUserId, {
+      refusal: ADMIN_ENG_CLIENT_TOOLS_TEXT,
+      event: 'admin.users.tools',
+      logMeta: { userId: auth.user.id },
+    });
+    if (engRefusal) return engRefusal;
+  }
 
   const { error: delErr } = await auth.supabaseAdmin
     .from('user_tool_visibility')

@@ -3,13 +3,18 @@
  * результаты поиска → топ ~8 прямых конкурентов. Содержание зеркалит
  * prompts/competitors.ts — правки держать синхронными с RU-оригиналом.
  * Антигаллюцинационное правило то же: URL только из реально возвращённых
- * поиском результатов.
+ * поиском результатов (на рынке us его ещё и проверяет код — хост адреса
+ * обязан встретиться в выдаче, stages/competitors.ts keepFoundCompetitors).
+ *
+ * Одно расхождение с RU намеренно: правило «пустой список — честный ответ»
+ * стоит в системном промпте, а не только в пустой выдаче. Схема рынка us
+ * (HeCompetitorListSchemaUs) пустой список принимает; RU-схема — нет.
  */
 
 import type { LLMMessage } from '../llm';
 import type { CompetitorsPromptInput } from './competitors';
 
-const SYSTEM = `You are a senior market analyst at the Polza agency. Given a client profile and real search results, you build a list of the client's DIRECT competitors — companies that sell the same product/service to the same audience.
+const SYSTEM = `You are a senior market analyst. Given a client profile and real search results, you build a list of the client's DIRECT competitors — companies that sell the same product/service to the same audience.
 
 Rules:
 - Include both US and international players (if the market is global — at least 2-3 international ones).
@@ -18,6 +23,7 @@ Rules:
 - Do not include the client itself.
 - why — one phrase: how the competitor overlaps with the client (same segment/offer/audience).
 - Sort by descending proximity to the client, maximum 8.
+- If no search result is a direct competitor, return {"competitors": []}: an empty list is a correct answer, while a stretched or invented competitor is not.
 
 Respond strictly in English, JSON ONLY.`;
 

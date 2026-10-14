@@ -12,7 +12,8 @@
 import { z } from 'zod';
 
 import { callLLMWithSchema, getVeModel } from '../llm';
-import { VeBroadHypothesesOnlySchema } from '../schemas';
+import { VeBroadHypothesesOnlySchema, VeScopedBroadHypothesesOnlySchema } from '../schemas';
+import { isVeAudienceGenerationEnabled, readVeAudienceScope, veAudienceScopeText, type VeAudienceScope } from '../audienceScope';
 import { projectMarket } from '../market';
 import { buildBroadHypothesesMessages } from '../prompts/broadHypotheses';
 import { buildBroadHypothesesMessagesEn } from '../prompts/broadHypotheses.en';
@@ -31,6 +32,7 @@ interface ExistingHypothesis {
   vertical_id: string | null;
   status: string;
   broad?: boolean | null;
+  audience_scope?: VeAudienceScope | null;
 }
 
 interface ExistingVertical {
@@ -88,6 +90,7 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
   const market = ctx.market ?? projectMarket(project);
+  const audienceScope = isVeAudienceGenerationEnabled(job.project_id);
   // Исследование перестраивает вертикали проекта — дописывать к ним нельзя.
   // Постановка такого не допускает; это страховка на случай гонки запросов.
   if (project.status === 'researching') {
@@ -97,12 +100,16 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
   }
 
   const [hypothesesRes, verticalsRes] = await Promise.all([
-    ctx.supabase.from('ve_hypotheses').select('title, vertical_id, status, broad').eq('project_id', job.project_id),
+    ctx.supabase.from('ve_hypotheses').select(audienceScope ? 'title, vertical_id, status, broad, audience_scope' : 'title, vertical_id, status, broad').eq('project_id', job.project_id),
     ctx.supabase.from('ve_verticals').select('id, name, synonyms, rank').eq('project_id', job.project_id),
   ]);
   if (hypothesesRes.error) throw new Error(`ve_hypotheses read: ${hypothesesRes.error.message}`);
   if (verticalsRes.error) throw new Error(`ve_verticals read: ${verticalsRes.error.message}`);
-  const hypotheses = (hypothesesRes.data ?? []) as ExistingHypothesis[];
+  const hypotheses = (hypothesesRes.data ?? []) as unknown as ExistingHypothesis[];
+  const existingScopes = audienceScope ? hypotheses.flatMap((hypothesis) => {
+    const scope = readVeAudienceScope(hypothesis.audience_scope);
+    return scope ? [scope] : [];
+  }) : [];
   const verticals = ((verticalsRes.data ?? []) as ExistingVertical[])
     .sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER));
   if (!verticals.length) {
@@ -120,6 +127,8 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
   const existingBroad = hypotheses.filter((h) => h.broad === true).map((h) => h.title);
   const promptInput = {
     ...clientContext,
+    audienceScope,
+    existingScopes: existingScopes.map(veAudienceScopeText),
     count: slots,
     // Вертикаль из одних широких уже перечислена среди широких.
     verticals: verticals.flatMap((v) => {
@@ -130,9 +139,10 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
     existingBroad,
   };
   stageLog(ctx, `[broad_hypotheses] просим до ${slots} широких; в проекте вертикалей: ${verticals.length}, гипотез: ${hypotheses.length}`);
+  const schema = audienceScope ? VeScopedBroadHypothesesOnlySchema : VeBroadHypothesesOnlySchema;
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildBroadHypothesesMessagesEn : buildBroadHypothesesMessages)(promptInput),
-    VeBroadHypothesesOnlySchema,
+    schema,
     { model: getVeModel('research'), maxTokens: 8192, requireCompleteJson: true, signal: ctx.signal },
   );
   addUsage(usage, llm);
@@ -144,7 +154,13 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
       ...(Array.isArray(v.synonyms) ? v.synonyms.filter((s): s is string => typeof s === 'string') : []),
     ]),
   ];
-  const { added, duplicates } = selectNewBroadCandidates(llm.data.broad_hypotheses, existingTitles, slots);
+  const parsed = schema.parse(llm.data);
+  const candidates = parsed.broad_hypotheses.map((candidate) => {
+    if (audienceScope) return candidate;
+    const { audience_scope: _scope, ...legacy } = candidate;
+    return legacy;
+  });
+  const { added, duplicates } = selectNewBroadCandidates(candidates, existingTitles, slots, existingScopes);
   if (duplicates.length) stageLog(ctx, `[broad_hypotheses] повторы отброшены: ${duplicates.join('; ')}`);
 
   ctx.signal?.throwIfAborted();

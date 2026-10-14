@@ -10,6 +10,8 @@ import {
   FIT_ECONOMICS_CORE_EN,
   HYPOTHESIS_FIELD_RULES_EN,
   buildHypothesesClientContextEn,
+  AUDIENCE_SCOPE_GENERATION_RULES_EN,
+  AUDIENCE_SCOPE_JSON_ITEM_EN,
 } from './hypotheses.en';
 import type { BroadHypothesesPromptInput } from './broadHypotheses';
 
@@ -31,6 +33,14 @@ function listOrEmpty(lines: string[]): string {
 }
 
 export function buildBroadHypothesesMessagesEn(input: BroadHypothesesPromptInput): LLMMessage[] {
+  if (input.audienceScope) return [
+    { role: 'system', content: `Research B2B audiences for the client's product. Add only new broad audiences to an existing project.\n${FIT_ECONOMICS_CORE_EN}\n${HYPOTHESIS_FIELD_RULES_EN}\n${AUDIENCE_SCOPE_GENERATION_RULES_EN}\nDo not change existing audiences or specialist restrictions or repeat them under new names. English JSON only, no search or invented evidence.` },
+    { role: 'user', content: `${buildHypothesesClientContextEn(input)}
+Existing narrow audiences: ${JSON.stringify(input.verticals)}
+Existing broad audiences: ${JSON.stringify(input.existingBroad)}
+Saved audience boundaries: ${JSON.stringify(input.existingScopes ?? [])}
+Return {"broad_hypotheses":[]} with up to ${input.count} new sectors. Candidate shape: ${AUDIENCE_SCOPE_JSON_ITEM_EN}, but kind="sector" and tier optional. Return an empty array if no distinct fitting audience remains. Do not rename an existing scope or weaken explicit client constraints.` },
+  ];
   const user = `${buildHypothesesClientContextEn(input)}
 
 MAIN LIST — ALREADY IN THE PROJECT (vertical: its hypotheses):

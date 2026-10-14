@@ -12,6 +12,12 @@
  *
  * Все внешние вызовы fail-safe: ошибка/таймаут → null, исключений наружу нет.
  * Результат складывается в he_vertical_dossiers.data.
+ *
+ * ОБА источника — российские: companies_directory ключуется по ИНН/ЕГРЮЛ и
+ * считает «всю Россию», hh.ru показывает российские вакансии. Для проекта с
+ * market='us' они не описывают рынок, поэтому при таком рынке не вызываются
+ * вовсе, а в счётчики кладётся null с заметкой. Дефолт market='ru' — путь
+ * RU-инструмента остаётся прежним до байта.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -20,6 +26,7 @@ import { getOkvedFlat, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import { searchCount } from '@/lib/companiesSearch/rpcSearch';
 import { fetchWithRetry } from '@/lib/parsers/hhParser';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { normalizeHeMarket, type HeMarket } from './market';
 
 /* Локальная копия whitelist'а категорий «Нашей базы» (ранее импортировалась
  * из projectBriefHypotheses/ourBaseValidation — тот файл пока не закоммичен,
@@ -51,6 +58,12 @@ export interface HeDossierCounters {
   companies_note?: string;
   /** Найдено открытых вакансий на hh.ru (null — запрос не удался). */
   hh_vacancies_total: number | null;
+  /**
+   * Почему hh-счётчики пусты, когда причина известна заранее (рынок не RU).
+   * Поля нет, когда hh.ru опрашивали: null там значит «запрос не удался», и
+   * выдумывать для этого случая заметку нельзя.
+   */
+  hh_note?: string;
   /** Примеры названий вакансий (до 10). */
   hh_vacancies_sample: string[];
   signals: HeDossierSignal[];
@@ -61,6 +74,11 @@ export interface CollectDossierCountersInput {
   synonyms: string[];
   /** Целевые должности (из вокабуляра/вертикали). */
   roleTitles: string[];
+  /**
+   * Рынок проекта. Не передан → 'ru': все прежние вызовы и RU-инструмент
+   * ходят в директорию и на hh.ru ровно как раньше.
+   */
+  market?: HeMarket;
   log?: (msg: string) => void;
 }
 
@@ -285,13 +303,29 @@ export async function collectDossierCounters(
   const verticalName = (input.verticalName ?? '').trim();
   const synonyms = (input.synonyms ?? []).map((s) => s.trim()).filter(Boolean);
   const roleTitles = (input.roleTitles ?? []).map((s) => s.trim()).filter(Boolean);
+  const market = normalizeHeMarket(input.market);
+  // Оба источника ниже — российские. Для market='us' их не спрашиваем: не
+  // «ошибка», а осознанное отсутствие данных, поэтому функция всё равно
+  // возвращает полный объект счётчиков с заметками. Возврат null или
+  // исключение здесь уронил бы стадию в ветку «оба источника недоступны»
+  // (stages/dossier.ts) — досье стало бы failed вместо честного «не знаем».
+  const ruSourcesApply = market === 'ru';
 
   // ── 1. Наша директория компаний (фильтр по ОКВЭД-2) ──
   let companies_total: number | null = null;
   let companies_note: string | undefined;
   const matchText = [verticalName, ...synonyms].filter(Boolean).join(' ');
-  const categories = matchText ? matchOkvedCategories(matchText) : [];
-  if (categories.length === 0) {
+  // Матчинг ОКВЭД в принципе не работает на латинице: названия категорий
+  // русские, а score считается по точному совпадению токенов или общему
+  // 4-символьному префиксу — у латинского токена с кириллическим ни того,
+  // ни другого быть не может, и для английской вертикали список категорий
+  // и так выходил пустым. Ветка по рынку нужна для остатка: у ENG-вертикали
+  // могут оказаться русские синонимы, и тогда сюда попал бы объём
+  // РОССИЙСКОГО реестра, выданный за объём американского рынка.
+  const categories = ruSourcesApply && matchText ? matchOkvedCategories(matchText) : [];
+  if (!ruSourcesApply) {
+    companies_note = `Рынок проекта — ${market}. companies_directory — российский реестр (ИНН/ЕГРЮЛ, вся Россия), объём этого рынка он не описывает: не считали.`;
+  } else if (categories.length === 0) {
     companies_note = matchText
       ? 'Нет уверенного совпадения вертикали с категориями ОКВЭД-2 — объём директории не считали.'
       : 'Не передано название вертикали — объём директории не считали.';
@@ -312,9 +346,19 @@ export async function collectDossierCounters(
   log(`[dossier] companies: ${companies_total ?? 'null'} — ${companies_note}`);
 
   // ── 2. hh.ru: вертикаль + топовая целевая должность ──
+  // Единственные числа досье, которые для нерусского рынка именно ЛГУТ:
+  // hh.ru отвечает на латинский запрос российскими вакансиями, и found
+  // приходит ненулевым. Отсюда и сигналы (kind=activity, outbound_diy), и
+  // вердикт buys_sales_channels — всё построенное на чужом рынке.
   const queries: string[] = [];
-  if (verticalName) queries.push(verticalName);
-  if (roleTitles.length > 0) queries.push(roleTitles[0]);
+  let hh_note: string | undefined;
+  if (ruSourcesApply) {
+    if (verticalName) queries.push(verticalName);
+    if (roleTitles.length > 0) queries.push(roleTitles[0]);
+  } else {
+    hh_note = `Рынок проекта — ${market}. hh.ru — российская площадка: её вакансии описывают другой рынок, поэтому не запрашивали.`;
+    log(`[dossier] hh.ru пропущен: рынок ${market}`);
+  }
   let hh_vacancies_total: number | null = null;
   const hh_vacancies_sample: string[] = [];
   for (const query of queries.slice(0, 2)) {
@@ -332,10 +376,12 @@ export async function collectDossierCounters(
     log(`[dossier] hh.ru «${query}»: found=${page.found}, sample=${page.names.length}`);
   }
 
+  // Всегда объект, никогда null и никогда throw — см. ruSourcesApply выше.
   return {
     companies_total,
     companies_note,
     hh_vacancies_total,
+    ...(hh_note ? { hh_note } : {}),
     hh_vacancies_sample,
     signals: buildSignals(hh_vacancies_total, hh_vacancies_sample),
   };

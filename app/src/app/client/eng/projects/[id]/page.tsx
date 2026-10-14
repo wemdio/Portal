@@ -5,7 +5,7 @@ import { EngProjectWizard } from '@/components/client-eng/EngProjectWizard';
 
 /**
  * /client/eng/projects/[id] — мастер проекта ENG-кабинета
- * (Brief → Verticals → Letters → Bases & Launch).
+ * (Your business → Choose markets → Launch).
  */
 export default function ClientEngProjectPage() {
   const params = useParams<{ id: string }>();

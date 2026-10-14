@@ -384,6 +384,55 @@ describe('Vertical Engine v2 base CSV export', () => {
     expect((await GET_ALL_CONTACTS(allContactsRequest(), allContactsContext())).status).toBe(401);
   });
 
+  it('combines only selected project hypotheses without duplicate recipients or bypassing exclusions and supply ownership', async () => {
+    seedAllContacts();
+    const secondId = 'bf9aac80-4f61-4890-abee-d7c629d020c9';
+    const groupedRequest = (query = `hypothesis_ids=${EXPORT_HYPOTHESIS},${secondId}`) => new NextRequest(
+      `http://portal.test/api/tools/vertical-engine-v2/projects/${EXPORT_PROJECT}/contacts/export?${query}`,
+      { headers: { authorization: 'Bearer test-token' } },
+    );
+    await mockPortalDb.from('ve_hypotheses').insert({ id: secondId, project_id: EXPORT_PROJECT, title: 'Финтех' });
+    await mockPortalDb.from('ve_bases').insert({ id: 'base-union', project_id: EXPORT_PROJECT, hypothesis_id: secondId,
+      source: 'auto', status: 'analyzed', created_at: SAVED_AT, columns: ['company', 'email', 'inn'], data: [
+        { company: 'Finance', email: 'new@finance.ru', _email_status: 'ok' },
+        { company: 'Company 2', email: 'LEAD-2@example.com', _email_status: 'ok' },
+        // An exclusion identified in either audience wins over an unlabelled duplicate.
+        { company: 'Existing client', email: 'lead-1@example.com', inn: '7701234567', _email_status: 'ok' },
+        { company: 'Missing INN duplicate', email: 'lead-0@example.com', _email_status: 'ok' },
+      ] });
+    await mockPortalDb.from('ve_launch_queue_items').insert({ id: 'item-union', project_id: EXPORT_PROJECT,
+      hypothesis_id: secondId, base_id: 'base-union', status: 'active', created_at: SAVED_AT });
+    await mockPortalDb.from('ve_contact_delivery_rows').insert({ id: 'union-history', item_id: 'item-union',
+      ve_project_id: EXPORT_PROJECT, supply_batch_id: null, status: 'accepted', created_at: SAVED_AT,
+      email_normalized: 'history@finance.ru', lead_payload: { email: 'history@finance.ru' } });
+    const mutationsBefore = mockPortalDb.mutations.length;
+    const result = await GET_ALL_CONTACTS(groupedRequest(), allContactsContext());
+    expect(result.status).toBe(200);
+    expect(result.headers.get('X-VE-Exported-Hypotheses')).toBe('2');
+    expect(result.headers.get('X-VE-Exported-Contacts')).toBe('1104');
+    const csv = await result.text();
+    expect(csv).toContain('Гипотезы;Исходные базы');
+    expect(csv).toContain('Производство | Финтех');
+    expect(csv).toContain('base-first | base-union');
+    expect(csv.match(/lead-2@example\.com/g)).toHaveLength(1);
+    for (const present of ['lead-1099@example.com', 'uploaded@archive.ru', 'new@finance.ru', 'history@finance.ru']) expect(csv).toContain(present);
+    for (const absent of ['lead-0@example.com', 'lead-1@example.com', 'other-project@example.com', '_private', 'secret']) expect(csv).not.toContain(absent);
+    expect(mockPortalDb.mutations).toHaveLength(mutationsBefore);
+    expect(mockPortalDb.rpcCalls).toHaveLength(0);
+
+    for (const query of [`hypothesis_ids=${secondId},${secondId}`, 'hypothesis_ids=',
+      `hypothesis_id=${EXPORT_HYPOTHESIS}&hypothesis_ids=${secondId}`,
+      `hypothesis_ids=${Array(51).fill(EXPORT_HYPOTHESIS).join(',')}`]) {
+      expect((await GET_ALL_CONTACTS(groupedRequest(query), allContactsContext())).status).toBe(400);
+    }
+    await mockPortalDb.from('ve_hypotheses').update({ project_id: 'another-project' }).eq('id', secondId);
+    expect((await GET_ALL_CONTACTS(groupedRequest(), allContactsContext())).status).toBe(404);
+    await mockPortalDb.from('ve_hypotheses').update({ project_id: EXPORT_PROJECT }).eq('id', secondId);
+    await mockPortalDb.from('ve_contact_supply_batches').insert({ id: 'crossed-batch', base_id: 'base-first' });
+    await mockPortalDb.from('ve_contact_delivery_rows').update({ supply_batch_id: 'crossed-batch' }).eq('id', 'union-history');
+    expect((await GET_ALL_CONTACTS(groupedRequest(), allContactsContext())).status).toBe(503);
+  });
+
   it('exports only the fresh audited, unblocked audience with its segment assignment', async () => {
     const response = await GET(request('launch-ready', true), {
       params: Promise.resolve({ id: BASE_ID }),

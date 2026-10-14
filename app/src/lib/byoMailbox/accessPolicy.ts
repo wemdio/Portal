@@ -30,3 +30,22 @@ export function mailboxConnectAllowed(input: {
   if (isEngAppHost(input.host)) return true;
   return input.profileMarket === 'eng';
 }
+
+/**
+ * ENG-клиент свои ящики НЕ подключает (решение владельца 11.10.2026): кампании
+ * ENG-кабинета шлют только из пула наших ящиков (hypothesisEngine/
+ * engSendingPreset.ts), экрана подключения у него больше нет. Гейт выше его по-
+ * прежнему пускает — список и удаление ящиков, подключённых раньше, остаются, —
+ * а точки ПОДКЛЮЧЕНИЯ (POST /api/client/mailboxes, старт OAuth Google и
+ * Яндекса) отказывают ему 403 этой проверкой (byoMailbox/access.ts,
+ * refuseOwnMailboxConnectForEng). `market` — auth.market общего гейта:
+ * ENG-хост или profiles.market='eng' (clientApiHelper.requestMarket). У 'ru'
+ * отказа нет — RU-путь не меняется.
+ */
+export const ENG_OWN_MAILBOX_UNAVAILABLE_TEXT =
+  'Your campaigns send from mailboxes we provide, so connecting your own mailbox is not available.';
+export const ENG_OWN_MAILBOX_UNAVAILABLE_CODE = 'OWN_MAILBOX_NOT_AVAILABLE';
+
+export function ownMailboxConnectRefused(market: string | null | undefined): boolean {
+  return market === 'eng';
+}

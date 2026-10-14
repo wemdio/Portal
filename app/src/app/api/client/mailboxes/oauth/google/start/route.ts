@@ -1,7 +1,7 @@
 import 'server-only';
 
 import { NextResponse, type NextRequest } from 'next/server';
-import { requireByoMailboxClient } from '@/lib/byoMailbox/access';
+import { refuseOwnMailboxConnectForEng, requireByoMailboxClient } from '@/lib/byoMailbox/access';
 import {
   buildGoogleAuthUrl,
   signOAuthState,
@@ -20,6 +20,9 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: NextRequest) {
   const res = await requireByoMailboxClient(req);
   if ('error' in res) return res.error;
+  // ENG-клиент свои ящики не подключает (byoMailbox/accessPolicy.ts); RU — дальше как было.
+  const engRefusal = refuseOwnMailboxConnectForEng(res.auth);
+  if (engRefusal) return engRefusal;
 
   // Под демо OAuth-флоу не начинаем: выданный state приведёт на callback,
   // который запишет ящик в реальный аккаунт (ревью 27.07).

@@ -15,6 +15,7 @@ import { VE_RELEVANCE_RULES_VERSION } from '@/lib/verticalEngineV2/relevanceDeci
 import { VE_RELEVANCE_TRIAGE_VERSION } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { newVeAdaptiveCollection } from '@/lib/verticalEngineV2/adaptiveCollection';
 import { checkVeContinuationRequest } from '@/lib/verticalEngineV2/preparationRequest';
+import { getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -38,6 +39,76 @@ const input = {
 };
 
 describe('VE2 base collection enqueue recovery', () => {
+  it('applies a controlled source refresh only to an explicit unlaunched preview without growing its budget', async () => {
+    const oldFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+    try {
+      for (const mode of ['explicit', 'routine', 'disabled', 'manual', 'launched', 'round-limit', 'candidate-limit', 'lost-insert', 'raced', 'retry-marker', 'saved-at-cap'] as const) {
+        process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = mode === 'disabled' ? '' : input.projectId;
+        const hypothesis = { id: 'fintech', project_id: input.projectId, vertical_id: input.verticalId,
+          title: 'Финтех и платежное посредничество', description: 'Платёжные провайдеры и финтех-компании.',
+          broad: true, origin: mode === 'manual' ? 'manual' : 'generated', status: 'approved' };
+        const progress = { status: 'limited', round: mode === 'round-limit' || mode === 'saved-at-cap' ? 100 : 3, max_rounds: 100,
+          ready_rows: 99, ready_target: 500, candidates_processed: mode === 'candidate-limit' ? 10000 : 400,
+          max_candidates: 10000, idle_streak: 4 };
+        const task = { source: 'companies_directory', directory_filters: { identityCatalog: 'payments_ru', nameTerms: ['платеж'] }, rationale: 'PSP' };
+        const info = { collection_mode: 'preview', limit: 100, ready_target: 500, hypotheses: [hypothesis],
+          target_progress: progress, target_checkpoint: { completed_round: progress.round, paid_receipt: 'preserve' },
+          niche_source_profile: 'payments', source_selection: { profile: 'payments', version: 2 },
+          plan: { tasks: [task, { ...task, directory_filters: { ...task.directory_filters, okvedCodes: ['66'] } }] },
+          tasks: [task, { ...task, directory_filters: { ...task.directory_filters, okvedCodes: ['66'] } }]
+            .map(savedTask => ({ source: 'companies_directory', status: 'done', exhausted: true, task: savedTask })),
+          ...(mode === 'saved-at-cap' ? { relevance_reserve: { version: 1,
+            rows: [{ company: 'Saved fintech', email: 'saved@example.test', _email_status: 'unknown' }] } } : {}),
+          saved_email_recovery: { version: 1, attempt_id: 'automatic:saved', generation: 1, checked: { known: 'ok' }, automatic_checked: { known: 'ok' } } };
+        const base = { id: 'saved-fintech', project_id: input.projectId, vertical_id: input.verticalId,
+          hypothesis_id: hypothesis.id, source: 'auto', status: mode === 'retry-marker' ? 'failed' : 'analyzed', row_count: 99,
+          error: mode === 'retry-marker' ? 'Provider usage journal could not be saved.' : null,
+          updated_at: '2026-10-14T00:00:00Z', collection_continuation_revision: 4, collect_info: mode === 'retry-marker'
+            ? { ...info, audience_scope_refresh_requested: true, cost_policy: { version: 1, website_discovery: 'existing_only' },
+              target_progress: { ...progress, status: 'collecting', round: 4 } } : info };
+        const db = createMockSupabase({ tables: { ve_hypotheses: [hypothesis], ve_bases: [base], ve_jobs: [],
+          ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [] },
+          ...(mode === 'lost-insert' ? { errorInserts: { ve_jobs: { code: 'timeout', message: 'response lost', commitRow: true } } } : {}),
+          ...(mode === 'raced' ? { beforeFirstUpdates: { ve_bases: (rows: Array<Record<string, unknown>>) => rows.map((row) => ({ ...row, collection_continuation_revision: 5 })) } } : {}),
+        });
+        const args = { ...input, hypothesisIds: [hypothesis.id], collectionMode: 'preview' as const,
+          ...(mode !== 'routine' ? { resumeBaseId: base.id } : {}) };
+        const before = JSON.stringify(db.getRows('ve_bases')[0].collect_info);
+        if (mode === 'explicit') expect(getVeCollectionContinuation(base, hypothesis)).toMatchObject({ code: 'source_update', available: true });
+        if (mode === 'round-limit' || mode === 'candidate-limit') expect(getVeCollectionContinuation(base, hypothesis)).toMatchObject({ available: false });
+        if (mode === 'saved-at-cap') expect(getVeCollectionContinuation(base, hypothesis)).toMatchObject({ code: 'saved_work', available: true });
+        const result = await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+        const changed = mode === 'explicit' || mode === 'lost-insert' || mode === 'retry-marker';
+        expect(result.ok).toBe(mode !== 'raced');
+        if (changed) {
+          expect(db.getRows('ve_bases')[0]).toMatchObject({ row_count: 99, status: 'collecting', collect_info: {
+            audience_scope_refresh_requested: true, cost_policy: { version: 1, website_discovery: 'existing_only' },
+            target_progress: { ...progress, status: 'collecting', round: 4 }, target_checkpoint: info.target_checkpoint,
+            saved_email_recovery: info.saved_email_recovery, tasks: info.tasks,
+          } });
+          expect(db.getRows('ve_bases')[0].collect_info).not.toHaveProperty('validation_retry');
+          await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+          expect(db.getRows('ve_jobs')).toHaveLength(1);
+        } else if (mode === 'disabled' || mode === 'manual' || mode === 'saved-at-cap') {
+          // Existing explicit continuation keeps its legacy behavior, but
+          // cannot silently acquire the new scope or source-refresh marker.
+          expect(db.getRows('ve_bases')[0].collect_info).not.toHaveProperty('audience_scope_refresh_requested');
+          expect(db.getRows('ve_bases')[0].collect_info).not.toHaveProperty('cost_policy');
+          expect(db.getRows('ve_bases')[0].collect_info).toMatchObject({ hypotheses: [hypothesis], tasks: info.tasks });
+          if (mode === 'saved-at-cap') expect(db.getRows('ve_bases')[0].collect_info).toMatchObject({
+            target_progress: { round: 100 }, validation_retry: true, relevance_review_requested: true,
+          });
+        } else {
+          expect(JSON.stringify(db.getRows('ve_bases')[0].collect_info)).toBe(before);
+          expect(db.getRows('ve_jobs')).toHaveLength(0);
+        }
+      }
+    } finally {
+      if (oldFlag === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+      else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = oldFlag;
+    }
+  });
+
   it('does not expose private candidate checkpoints on existing or mixed preview requests', async () => {
     const privateInfo = {
       collection_mode: 'preview', ready_target: 1_000, limit: 2_000,

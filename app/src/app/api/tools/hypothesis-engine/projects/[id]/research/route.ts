@@ -18,6 +18,10 @@ function jsonError(message: string, status: number) {
 // только один research-прогон: при активной research-стадии → 409.
 // Дедуп + постановка первой стадии (site_profile) — в
 // lib/hypothesisEngine/researchJob.ts (ею же пользуется клиентский ENG-контур).
+// Двойной клик, проскочивший дедуп-чтение, тоже отдаёт 409: его отсекает unique
+// index he_jobs_one_active_site_profile, и мастер показывает «Исследование уже
+// запущено» (ProjectDetail.tsx мапит 409 своим текстом) вместо 500 с сообщением
+// Postgres. Второй платный прогон стадии site_profile при этом не случается.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(
     { request: req, operation: 'tools.hypothesis-engine.research.post' },

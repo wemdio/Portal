@@ -1,0 +1,4 @@
+# /etc/cron.d/signals-ru-readonly — копия таблиц Signals RU в read-only Postgres
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/15 * * * * root flock -n /run/signals-ru-readonly-sync.lock timeout 600 python3 /opt/signals-ru-readonly/sync.py >> /var/log/signals-ru-readonly-sync.log 2>&1

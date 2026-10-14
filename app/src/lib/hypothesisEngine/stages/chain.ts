@@ -1,5 +1,6 @@
 /**
- * Стадия chain: вертикаль + бриф проекта → цепочка из 3–5 писем.
+ * Стадия chain: вертикаль + бриф проекта → цепочка из 3–5 писем (EN — ровно
+ * 4: цель промпта и порог повтора, см. HE_CHAIN_TARGET_LETTERS_EN).
  * Промпт-архитектура emailSequenceV2 (материалы → праймер → задача) +
  * CHAIN_REGULATIONS; ответ парсится маркерами ---LETTER N--- через
  * letterParser, A/B-варианты (---LETTER N B---, у каждого письма второй
@@ -15,15 +16,55 @@
  * материалов; нарушения чинятся одним фикс-проходом. После — критик-луп:
  * одна оценка цепочки (только основной вариант A) + максимум один rewrite
  * по её замечаниям; B-варианты после рерайта восстанавливаются из исходных.
+ * EN: ответ фикс-прохода, в котором чисел не из материалов больше, чем в
+ * письмах до него, не принимается; критик и рерайт видят «CLIENT'S OWN
+ * WORDS», а рерайт, после которого чисел не из материалов стало больше,
+ * откатывается (см. критик-луп ниже). Английская цепочка проекта 'us' получает
+ * бриф без пожеланий клиента по таргетингу — рамки ЦА и target_audience
+ * профиля (briefWithoutTargetingWishes): ни в материалах, ни в корпусе чисел.
+ * Цепочка 'us', когда клиент подтверждённо не мы (letterBrandGuard: английская
+ * и польская — всегда, русская — у проекта клиента ENG-кабинета): чужая
+ * компания в письмах (наш бренд «Polza» /
+ * «OutreachOS» или вымышленная компания из примера EN-промпта) идёт пунктами в
+ * тот же фикс-проход (ответ с бОльшим числом упоминаний не принимается),
+ * рерайт, добавивший упоминания, откатывается, а цепочка, в которой они
+ * остались, не сохраняется: стадия падает HeLetterBrandLeakError (не
+ * терминально — воркер повторит стадию новой генерацией). Если наш бренд
+ * назван в поле брифа, которое промпт берёт дословно (подпись, оффер,
+ * описание бизнеса), стадия отказывает ДО первого платного вызова
+ * HeLetterBrandInputError (терминально и бесплатно: с тем же брифом повтор
+ * упал бы так же, а попытку воркер не засчитывает). Русская цепочка
+ * us-проекта агентского клиента staff-инструмента не проверяется (роль
+ * RU-промпта — «Polza»).
  */
 
 import { z } from 'zod';
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
-import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages, buildChainRuleFixHint } from '../prompts/chain';
-import { checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
+import {
+  buildChainCriticMessages,
+  buildChainMessages,
+  buildChainRewriteMessages,
+  buildChainRuleFixHint,
+  clientWordsFromBrief,
+} from '../prompts/chain';
+import { checkLetterParagraphs, checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
+import {
+  HeLetterBrandInputError,
+  HeLetterBrandLeakError,
+  describeHeBrandInputLeaks,
+  describeHeBrandLeaks,
+  findHeBrandLeaks,
+  heBrandInputLeaks,
+  heBrandLeakFixItems,
+  heLetterBrandGuard,
+  heLetterBrandLeaks,
+  readHeBrandEngClient,
+} from '../letterBrandGuard';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
+import { projectMarket } from '../market';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import type { HeChainLanguage, HeChainLetter, HeEvidenceItem, HeHypothesis, HeJob, HeVertical } from '../types';
 import {
@@ -198,6 +239,55 @@ export const HeChainCritiqueSchema = z.object({
 
 const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно 3–5 писем, каждое блоком «---LETTER N---» + строка темы, плюс вариант B каждого письма блоком «---LETTER N B---» сразу после него. Верни цепочку заново, целиком, без пояснений.`;
 
+/**
+ * EN-цепочка — цель ровно 4 письма (пункт переноса D2-letters-chain-exactly-four;
+ * сам кабинет ENG числа не навязывает: показывает и отправляет столько шагов,
+ * сколько писем в цепочке). Ответ короче — один повтор с английской
+ * подсказкой, из двух ответов берётся тот, где писем больше (при равенстве —
+ * повтор). Ответ длиннее 4 принимается
+ * как есть: повтор стоил бы ещё один платный вызов, а обрезка выкинула бы
+ * последнее (реферальное) письмо. RU/PL — прежний порог «меньше 3 → повтор»;
+ * нижний порог отказа (меньше 3 писем после повтора) общий для всех языков.
+ */
+export const HE_CHAIN_TARGET_LETTERS_EN = 4;
+
+/** Подсказка повтора EN-цепочки: английская, иначе русский текст уходит посреди английской генерации. */
+const RETRY_HINT_EN = `You returned too few emails or broke the format. The sequence needs exactly ${HE_CHAIN_TARGET_LETTERS_EN} emails, each as a "---LETTER N---" block with a "Subject:" line, plus each email's B variant as a "---LETTER N B---" block right after it. Return the whole sequence again, with no explanations.`;
+
+/**
+ * Бриф английской цепочки проекта 'us' без ПОЖЕЛАНИЙ клиента по таргетингу:
+ *  - `icp` (рамка ЦА: include / exclude / size / geo) — кого клиент ХОЧЕТ
+ *    найти или обойти. Своё дело она сделала в research: гипотезы и вертикали
+ *    выбраны по ней, а письма идут в выбранную вертикаль (её имя, описание и
+ *    гипотезы — в материалах отдельно);
+ *  - `site_profile.target_audience` — единственное поле профиля, которое
+ *    EN-промпт профиля разрешает строить по этим пожеланиям
+ *    (prompts/siteProfile.en.ts). Пометить, какая часть поля с сайта, а какая
+ *    из пожеланий, нечем — поэтому поле уходит целиком.
+ * В материалах цепочки, где «бриф — это оффер и USP», пожелание читалось бы
+ * фактом: «мы помогаем стоматологиям» у клиента, среди клиентов которого
+ * стоматологий нет, — выдуманное доказательство в письме, которое из пула
+ * уходит без проверки человеком. Подпись «это пожелание, не факт» — только
+ * просьба к модели; отсутствие поля в материалах — гарантия кода. Остальной
+ * бриф (профиль сайта с current_clients и cases — дословно с сайта, см.
+ * keepSiteLiteralProof в stages/siteProfile.ts) и порядок ключей — прежние.
+ * Русская и польская цепочки и английская цепочка проекта 'ru' (его профиль
+ * строится без брифа) получают бриф как раньше.
+ */
+function briefWithoutTargetingWishes(brief: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(brief)) {
+    if (key === 'icp') continue;
+    if (key === 'site_profile' && value && typeof value === 'object' && !Array.isArray(value)) {
+      const { target_audience: _wishShaped, ...profile } = value as Record<string, unknown>;
+      out[key] = profile;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
 export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const verticalId = payloadString(job, 'vertical_id');
@@ -233,6 +323,11 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
   // в материалах.
   const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
+  // EN: business_override тоже уходит отдельным блоком («CLIENT'S OWN WORDS»
+  // вместе с оффером) — из JSON брифа EN-промпта его вырезаем. RU/PL видят
+  // бриф как раньше (business_override внутри JSON).
+  const { business_override: _biz, ...briefRestEn } = briefRest;
+  const businessOverride = typeof brief.business_override === 'string' ? brief.business_override : undefined;
 
   // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
   // цепочки. Best-effort: сбой чтения he_cases не роняет генерацию.
@@ -259,11 +354,40 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
   // генерим без паттернов, стадию это не валит.
+  // Рынок обязателен: словарь SEGMENT_LABEL_KEYWORDS содержит и английские
+  // токены (saas, logistics, retail), поэтому ENG-вертикаль матчится на
+  // RU-сегменты, и в английскую генерацию уезжают русские темы кампаний
+  // вместе с русским текстом самого блока (renderWinnerPatternsBlock).
+  const market = ctx.market ?? projectMarket(project);
+  // Снапшот брифа для материалов и корпуса чисел. Английская цепочка проекта
+  // 'us' — без пожеланий клиента по таргетингу (briefWithoutTargetingWishes).
+  const briefForPrompt =
+    language === 'en' ? (market === 'us' ? briefWithoutTargetingWishes(briefRestEn) : briefRestEn) : briefRest;
+  // Цепочка 'us': чужая компания в письмах (letterBrandGuard). Список не пуст,
+  // только когда клиент подтверждённо не мы (хост сайта проекта не наш) и
+  // цепочка английская или польская — или владелец проекта клиент
+  // ENG-кабинета (тогда и русская: его письма уходят из нашего пула). RU и наш
+  // собственный проект — пустой список всегда. Профиль владельца читается
+  // только там, где он меняет ответ (русская цепочка 'us').
+  const heEngClient =
+    market === 'us' && language === 'ru' ? await readHeBrandEngClient(ctx.supabase, project.created_by) : false;
+  const brandGuard = heLetterBrandGuard(market, { ...project, heEngClient }, language);
+  const brandLeaksOf = (ls: HeChainLetterAB[]) => heLetterBrandLeaks(brandGuard, ls);
+  // Наш бренд в поле брифа, которое промпт берёт дословно: письма с ним не
+  // пройдут проверку ни в одном прогоне — отказ до первого платного вызова.
+  const brandInputs = heBrandInputLeaks(brandGuard, brief);
+  if (brandInputs.length) {
+    stageLog(
+      ctx,
+      `[chain] поле брифа называет наш бренд, а клиент проекта — другая компания: генерацию не начинаем — ${describeHeBrandInputLeaks(brandInputs)}`,
+    );
+    throw new HeLetterBrandInputError('chain', brandInputs);
+  }
   let winnerPatterns: HeWinnerPattern[] = [];
   try {
     const terms = [vertical.name, ...(Array.isArray(vertical.synonyms) ? vertical.synonyms : [])];
     const labels = matchSegmentLabels(terms);
-    winnerPatterns = await getWinnerPatterns(labels.length ? labels : [vertical.name], 5);
+    winnerPatterns = await getWinnerPatterns(labels.length ? labels : [vertical.name], 5, { market });
   } catch (e) {
     stageLog(ctx, `[chain] winner-паттерны датасета недоступны: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -281,8 +405,9 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       confirmed: h.status === 'accepted',
       evidence: (Array.isArray(h.evidence) ? h.evidence : []) as HeEvidenceItem[],
     })),
-    briefText: JSON.stringify(briefRest),
+    briefText: JSON.stringify(briefForPrompt),
     offerOverride: typeof brief.offer_override === 'string' ? brief.offer_override : undefined,
+    businessOverride,
     operatorsHint: typeof job.payload?.operators_hint === 'string' ? job.payload.operators_hint : undefined,
     clientCase,
     styleExample,
@@ -295,16 +420,27 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   addUsage(usage, llm);
   let { parsed, letters } = buildChainLetters(llm.text);
 
-  if (parsed.length < 3) {
-    stageLog(ctx, `[chain] распознано ${parsed.length} писем — retry с фидбэком`);
+  // Порог повтора: EN — меньше 4 писем (цепочка ровно из 4), RU/PL — меньше 3.
+  const retryBelow = language === 'en' ? HE_CHAIN_TARGET_LETTERS_EN : 3;
+  if (parsed.length < retryBelow) {
+    stageLog(
+      ctx,
+      language === 'en'
+        ? `[chain] распознано ${parsed.length} писем из ${HE_CHAIN_TARGET_LETTERS_EN} — retry с фидбэком`
+        : `[chain] распознано ${parsed.length} писем — retry с фидбэком`,
+    );
+    const first = { parsed, letters, llm };
     const retryMessages: LLMMessage[] = [
       ...messages,
       { role: 'assistant', content: llm.text.slice(0, 2000) },
-      { role: 'user', content: RETRY_HINT },
+      { role: 'user', content: language === 'en' ? RETRY_HINT_EN : RETRY_HINT },
     ];
     llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildChainLetters(llm.text));
+    // EN: из двух оплаченных ответов оставляем тот, где писем больше (как V2):
+    // повтор, вернувший меньше, не должен отнять уже годную цепочку из 3.
+    if (language === 'en' && parsed.length < first.parsed.length) ({ parsed, letters, llm } = first);
   }
   if (parsed.length < 3) {
     // Диагностика в ошибку (пишется в he_jobs.error): начало сырого ответа,
@@ -340,44 +476,92 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     vertical.name,
     vertical.summary ?? '',
     clientCase ? JSON.stringify(clientCase) : '',
-    JSON.stringify(briefRest),
+    JSON.stringify(briefForPrompt),
     typeof brief.offer_override === 'string' ? brief.offer_override : '',
+    // EN: business_override вырезан из JSON брифа выше — цифры клиента из
+    // его описания бизнеса возвращаем в корпус явно, иначе они станут
+    // «выдуманными». У RU/PL он и так внутри JSON брифа — корпус прежний.
+    ...(language === 'en' ? [businessOverride ?? ''] : []),
     styleExample ?? '',
     signatureOverride ?? '',
     JSON.stringify(winnerPatterns),
   ].join('\n');
-  const facts = extractNumberFacts(factCorpus);
+  // EN читает числа по-английски («10,000» — 10000); письма сверяются тем же
+  // чтением (letterChecks помнит, как прочитан корпус).
+  const facts = extractNumberFacts(factCorpus, language);
+  // letterIndex — номер письма в цепочке для detail нарушений (учитывается для EN).
   const lettersForCheck = (ls: HeChainLetterAB[]): HeLetterForCheck[] =>
-    ls.flatMap((l) => [
-      { subject: l.subject ?? '', body: l.body, variant: 'A' },
-      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B' })),
+    ls.flatMap((l, i) => [
+      { subject: l.subject ?? '', body: l.body, variant: 'A', letterIndex: i + 1 },
+      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B', letterIndex: i + 1 })),
     ]);
   const ruleViolations = checkLetterRules(lettersForCheck(letters), language, facts);
-  if (ruleViolations.length > 0) {
-    stageLog(ctx, `[chain] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
+  // 'us', проверка включена (letterBrandGuard): чужая компания в письмах клиента (brandLeaksOf; иначе пусто) запускает
+  // этот же фикс-проход своими пунктами — без него цепочка не сохранится (ниже).
+  const brandLeaksBeforeFix = brandLeaksOf(letters);
+  if (ruleViolations.length > 0 || brandLeaksBeforeFix.length > 0) {
+    stageLog(
+      ctx,
+      `[chain] детерминированный контроль: ${ruleViolations.length} нарушений${
+        brandLeaksBeforeFix.length ? `, чужая компания в письмах: ${describeHeBrandLeaks(brandLeaksBeforeFix)}` : ''
+      } — фикс-проход`,
+    );
     // Принятие фикса: то же число писем и НЕ меньше B-вариантов (модель могла
-    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя).
+    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя). EN — и
+    // не больше чисел не из материалов, чем в письмах до него: фикс
+    // переписывает цепочку целиком и мог вписать цифру, которой в материалах
+    // нет, а рерайт ниже сравнивает числа уже с письмами после фикса. Письма
+    // цепочки стадия template кладёт в свой корпус фактов, и такая цифра там
+    // считалась бы проверенной. 'us', проверка включена — и не больше упоминаний чужой компании,
+    // чем до него. Вызов фикса уже оплачен; новых вызовов нет.
     const countB = (ls: HeChainLetterAB[]) => ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0);
     try {
       const fixMessages: LLMMessage[] = [
         ...messages,
         { role: 'assistant', content: llm.text },
-        { role: 'user', content: buildChainRuleFixHint(ruleViolations, language) },
+        {
+          role: 'user',
+          content: buildChainRuleFixHint(
+            [...ruleViolations, ...heBrandLeakFixItems(brandLeaksBeforeFix, language, brandGuard.clientCompany)],
+            language,
+          ),
+        },
       ];
       const fix = await callLLMText(fixMessages, { model, maxTokens: 16384 });
       addUsage(usage, fix);
       const fixed = buildChainLetters(fix.text);
       if (fixed.parsed.length >= 3 && fixed.letters.length === letters.length && countB(fixed.letters) >= countB(letters)) {
-        letters = fixed.letters;
-        const remaining = checkLetterRules(lettersForCheck(letters), language, facts);
-        if (remaining.length > 0) {
+        const remaining = checkLetterRules(lettersForCheck(fixed.letters), language, facts);
+        const numbersBefore = language === 'en' ? ruleViolations.filter((v) => v.rule === 'unverified_number').length : 0;
+        const numbersAfter = language === 'en' ? remaining.filter((v) => v.rule === 'unverified_number') : [];
+        const brandAfterFix = brandLeaksOf(fixed.letters);
+        if (numbersAfter.length > numbersBefore) {
           stageLog(
             ctx,
-            `[chain] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+            `[chain] фикс-проход: чисел не из материалов ${numbersAfter.length} (было ${numbersBefore}) — оставляем исходные; ${numbersAfter
               .slice(0, 3)
               .map((v) => v.detail)
               .join('; ')}`,
           );
+        } else if (brandAfterFix.length > brandLeaksBeforeFix.length) {
+          stageLog(
+            ctx,
+            `[chain] фикс-проход: чужая компания в письмах ${brandAfterFix.length} раз (было ${brandLeaksBeforeFix.length}) — оставляем исходные; ${describeHeBrandLeaks(brandAfterFix, 3)}`,
+          );
+        } else {
+          letters = fixed.letters;
+          if (remaining.length > 0) {
+            stageLog(
+              ctx,
+              `[chain] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
+                .slice(0, 3)
+                .map((v) => v.detail)
+                .join('; ')}`,
+            );
+          }
+          if (brandAfterFix.length > 0) {
+            stageLog(ctx, `[chain] после фикс-прохода чужая компания в письмах осталась: ${describeHeBrandLeaks(brandAfterFix)}`);
+          }
         }
       } else {
         stageLog(
@@ -397,6 +581,22 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // восстанавливаются из исходных писем по индексу. Без цикла. Сбой критика,
   // а также нечитаемый, урезанный или раздутый rewrite → остаются исходные
   // письма (стадию это не валит).
+  //
+  // EN: критик и рерайт получают «CLIENT'S OWN WORDS» (сборщики промптов
+  // читают clientWords только для 'en'). Рерайт фикс-проход уже не проходит,
+  // поэтому его письма заново сверяются checkLetterRules с тем же корпусом
+  // фактов (бесплатно, без вызова модели), и рерайт ОТКАТЫВАЕТСЯ к письмам до
+  // него, когда нарушений 'unverified_number' стало больше: «$35,000» →
+  // «$35k», «we helped 40 clinics». Решает только это правило. Число в
+  // цепочке — не только текст на шаге Letters: стадия template кладёт письма
+  // цепочки в свой корпус фактов, и выдуманная здесь цифра там уже считалась
+  // бы проверенной. Тире, приветствие, «?» и абзацы рерайт не откатывают: их
+  // письма шаблона проверяют сами, а откат по ним выбросил бы и правки
+  // критика по смыслу (например, снятое обещание несуществующего отчёта).
+  // Сам рерайт к этому моменту уже оплачен. RU/PL — как раньше.
+  const clientWords = clientWordsFromBrief(brief);
+  const unverifiedNumbers = (ls: HeChainLetterAB[]) =>
+    checkLetterRules(lettersForCheck(ls), language, facts).filter((v) => v.rule === 'unverified_number');
   let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
@@ -408,6 +608,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         language,
         styleExample,
         winnerPatterns,
+        clientWords,
       }),
       HeChainCritiqueSchema,
       { model, maxTokens: 4096 },
@@ -430,6 +631,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           styleExample,
           winnerPatterns,
           signatureOverride,
+          clientWords,
         }),
         { model, maxTokens: 16384 },
       );
@@ -442,12 +644,38 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       // ломаются лесенка wait_days и индексация писем.
       if (rewritten.length === letters.length) {
         const originalLetters = letters;
-        letters = parsedToChainLetters(rewritten.slice(0, 6)).map((l, i): HeChainLetterAB => {
+        const candidate = parsedToChainLetters(rewritten.slice(0, 6)).map((l, i): HeChainLetterAB => {
           const { variants: _legacy, ...rest } = l;
           const bv = originalLetters[i]?.variants;
           return bv?.length ? { ...rest, variants: bv } : rest;
         });
-        critiqueInfo.rewritten = true;
+        // EN: числа не из материалов — до рерайта и после (B-варианты в обоих
+        // наборах одни и те же, исходные).
+        const numbersBefore = language === 'en' ? unverifiedNumbers(originalLetters).length : 0;
+        const numbersAfter = language === 'en' ? unverifiedNumbers(candidate) : [];
+        // 'us', проверка включена (letterBrandGuard): рерайт, после которого упоминаний чужой компании больше, чем до
+        // него, тоже откатывается — иначе цепочка не сохранится (ниже).
+        const brandBefore = brandLeaksOf(originalLetters).length;
+        const brandAfter = brandLeaksOf(candidate);
+        if (numbersAfter.length > numbersBefore) {
+          stageLog(
+            ctx,
+            `[chain] rewrite критика откатили к письмам до него: чисел не из материалов ${numbersAfter.length} ` +
+              `(было ${numbersBefore}) — ${numbersAfter
+                .slice(0, 3)
+                .map((v) => v.detail)
+                .join('; ')}`,
+          );
+        } else if (brandAfter.length > brandBefore) {
+          stageLog(
+            ctx,
+            `[chain] rewrite критика откатили к письмам до него: чужая компания в письмах ${brandAfter.length} раз ` +
+              `(было ${brandBefore}) — ${describeHeBrandLeaks(brandAfter, 3)}`,
+          );
+        } else {
+          letters = candidate;
+          critiqueInfo.rewritten = true;
+        }
       } else {
         stageLog(ctx, `[chain] rewrite критика: ${rewritten.length} писем вместо ${letters.length} — оставляем исходные`);
       }
@@ -456,9 +684,51 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     stageLog(ctx, `[chain] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
 
+  // Абзацы EN-писем: только предупреждение в логе стадии, без фикс-прохода и
+  // без блокировки (letterChecks.checkLetterParagraphs; RU/PL — пустой список).
+  const paragraphWarnings = checkLetterParagraphs(lettersForCheck(letters), language);
+  if (paragraphWarnings.length > 0) {
+    stageLog(
+      ctx,
+      `[chain] абзацы (предупреждение, без фикс-прохода): ${paragraphWarnings.length} вариантов — ${paragraphWarnings
+        .slice(0, 3)
+        .map((v) => v.detail)
+        .join('; ')}`,
+    );
+  }
+
+  // 'us', проверка включена (letterBrandGuard): в письмах наш бренд или компания из примера промпта, а клиент
+  // подтверждённо не мы — цепочку не сохраняем: клиент читает её на шаге
+  // Letters, а стадия template пишет по ней итоговые письма. Ошибка не
+  // терминальная (воркер повторит стадию новой генерацией, MAX_ATTEMPTS).
+  // Клиента не с чем сравнить (ни сайта, ни имени компании) — проверки нет, но
+  // то, что письма называют такое слово, видно в логе.
+  const finalBrandLeaks = brandLeaksOf(letters);
+  if (finalBrandLeaks.length) {
+    stageLog(
+      ctx,
+      `[chain] в письмах назван наш бренд или компания из примера, а клиент проекта — другая компания: цепочку не сохраняем — ${describeHeBrandLeaks(finalBrandLeaks, 20)}`,
+    );
+    throw new HeLetterBrandLeakError('chain', finalBrandLeaks);
+  }
+  if (market === 'us' && language === 'en' && brandGuard.ownership === 'unknown') {
+    const named = findHeBrandLeaks(letters);
+    if (named.length) {
+      stageLog(
+        ctx,
+        `[chain] письма называют наш бренд или компанию из примера (${describeHeBrandLeaks(named, 6)}), но ни сайта, ни имени компании клиента нет — сравнить не с чем, цепочку не держим`,
+      );
+    }
+  }
+
+  // letters — текст модели (темы, тела, B-варианты): один NUL или одиночный
+  // UTF-16 суррогат, и PostgREST отвергает вставку уже после всех оплаченных
+  // вызовов (генерация, фикс-проход, критик, рерайт) — стадия падает и на
+  // повторе покупает цепочку заново. Чистка трогает только эти два символа:
+  // текст без них (вся кириллица и латиница) ложится байт-в-байт тем же.
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_chains')
-    .insert({
+    .insert(stripUnstorableJsonChars({
       vertical_id: verticalId,
       language,
       letters,
@@ -466,7 +736,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       llm_model: model,
       tokens_used: usage.tokensUsed,
       cost_usd: usage.costUsd,
-    })
+    }))
     .select('id')
     .single();
   if (insError || !inserted) throw new Error(`he_chains insert: ${insError?.message ?? 'unknown'}`);

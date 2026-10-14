@@ -51,6 +51,53 @@ const STEP_DEFS = [
  * Payload загрузки базы контактов. Собирается экраном шага 4 (и легаси-BasesTab);
  * тип экспортируется отсюда для обратной совместимости.
  */
+/**
+ * Ответ GET /projects/[id]/refill-pause. `supported`/`configured` приходят
+ * отдельно от `paused` намеренно: «колонок паузы нет на окружении» и «у
+ * проекта нет ночного добора» — не то же самое, что «добор идёт», и блок
+ * интерфейса обязан молчать во всех трёх случаях по РАЗНЫМ причинам.
+ */
+interface HeRefillPauseResponse {
+  supported?: boolean;
+  configured?: boolean;
+  paused?: boolean;
+  paused_at?: string | null;
+  reason?: string | null;
+  resumed_at?: string | null;
+  error?: string;
+}
+
+/**
+ * Начало причины паузы, которую пишет отмена проекта клиентом в ENG-кабинете, —
+ * ТОТ ЖЕ текст, что HE_CLIENT_CANCEL_PAUSE_NOTE (lib/hypothesisEngine/autoPipeline.ts),
+ * по которому ночной тик и долив отличают отмену от паузы по ёмкости
+ * (isHeClientCancelPauseReason). Импортировать константу сюда нельзя: это
+ * клиентский компонент, а autoPipeline тянет серверные модули (server-only).
+ * Поэтому копия, и держится она в одном тексте с оригиналом ВРУЧНУЮ —
+ * автоматической сверки нет. Разойдутся — карточка просто вернётся к тексту
+ * паузы по ёмкости (как до отмены клиентом), а не сломается.
+ */
+const HE_CLIENT_CANCEL_PAUSE_NOTE_COPY = 'Клиент отменил проект кнопкой «Cancel all jobs» в ENG-кабинете';
+
+function isClientCancelRefillPause(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && reason.startsWith(HE_CLIENT_CANCEL_PAUSE_NOTE_COPY);
+}
+
+/**
+ * Начало причины паузы, которую пишет ПОТОЛОК РАСХОДА ENG (ночной тик, шаг 3a-;
+ * потолок по умолчанию выключен, и такой паузы тогда нет) — ТОТ ЖЕ текст, что
+ * HE_SPEND_CEILING_PAUSE_NOTE (lib/hypothesisEngine/spendCeiling.ts,
+ * isHeSpendCeilingPauseReason; начало там объявлено неизменным машинным
+ * признаком). Копия по той же причине, что выше: spendCeiling тянет серверные
+ * модули. Разойдутся — карточка вернётся к тексту паузы по ёмкости, а не
+ * сломается.
+ */
+const HE_SPEND_CEILING_PAUSE_NOTE_COPY = 'Потолок расхода ENG достигнут';
+
+function isSpendCeilingRefillPause(reason: string | null | undefined): boolean {
+  return typeof reason === 'string' && reason.startsWith(HE_SPEND_CEILING_PAUSE_NOTE_COPY);
+}
+
 export interface BaseUploadPayload {
   vertical_id: string;
   filename: string;
@@ -72,6 +119,15 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
   const [researchStarting, setResearchStarting] = useState(false);
   const [offerSaving, setOfferSaving] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+
+  // Пауза ночного добора по ёмкости воркспейса рассыльщика. Своим запросом, а
+  // не через деталку проекта: деталку собирает общий загрузчик, который тем же
+  // кодом отдаёт данные КЛИЕНТСКОМУ ENG-контуру, а пауза — сугубо внутреннее
+  // состояние (в ней названа нагрузка других клиентов того же воркспейса).
+  // null — ещё не спрашивали либо ответ не пришёл: тогда блок просто не
+  // рисуется, как и раньше.
+  const [refillPause, setRefillPause] = useState<HeRefillPauseResponse | null>(null);
+  const [refillResuming, setRefillResuming] = useState(false);
 
   // Короткое уведомление «Шаблон собирается…» после запуска сборки.
   const [templateNotice, setTemplateNotice] = useState(false);
@@ -297,6 +353,61 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
       setCancelling(false);
     }
   }, [cancelling, projectId, load]);
+
+  /**
+   * Состояние паузы ночного добора. Спрашивается ОДИН раз на проект, а не в
+   * поллинге деталки: пауза — редкое и долгоживущее состояние (её ставит ночь,
+   * снимает человек), и дёргать её каждые 4 секунды вместе с джобами значило бы
+   * удвоить фоновые запросы ради строки, которая не меняется неделями.
+   * Ошибку не показываем: не прочиталось — блока просто нет, как до правки.
+   */
+  const loadRefillPause = useCallback(async () => {
+    const { ok, data } = await heCall<HeRefillPauseResponse>(
+      `${HE_API}/projects/${projectId}/refill-pause`,
+    );
+    setRefillPause(ok ? data : null);
+  }, [projectId]);
+
+  useEffect(() => {
+    void loadRefillPause();
+  }, [loadRefillPause]);
+
+  /**
+   * Вернуть проект в ночной добор. Подтверждение обязательно: возобновление
+   * включает платную ночную сборку, и если место в воркспейсе не освободили —
+   * она снова упрётся в тот же отказ, уже за деньги.
+   */
+  const resumeRefill = useCallback(async () => {
+    if (refillResuming) return;
+    // Условие возврата зависит от повода паузы: у ёмкости — освободившееся
+    // место, у отмены клиентом — его просьба продолжить.
+    const clientCancelled = isClientCancelRefillPause(refillPause?.reason);
+    if (
+      !window.confirm(
+        'Вернуть проект в ночной добор? Ближайшая ночь снова оплатит сборку контактов. ' +
+          (clientCancelled
+            ? 'Клиент отменил этот проект сам — возвращайте, только если он попросил продолжить.'
+            : 'Делайте это только после того, как в воркспейсе рассыльщика освободилось место.'),
+      )
+    ) {
+      return;
+    }
+    setActionError('');
+    setRefillResuming(true);
+    try {
+      const { ok, data } = await hePost<{ ok?: boolean; error?: string }>(
+        `${HE_API}/projects/${projectId}/refill-pause`,
+      );
+      if (!ok) {
+        setActionError(data.error || 'Не удалось возобновить ночной добор');
+      }
+      // Перечитываем в любом исходе: 409 «уже работает» означает, что паузу
+      // снял кто-то другой, и блок обязан исчезнуть, а не остаться висеть.
+      await loadRefillPause();
+    } finally {
+      setRefillResuming(false);
+    }
+  }, [refillResuming, refillPause?.reason, projectId, loadRefillPause]);
 
   const runChain = useCallback(
     async (verticalId: string, language: string) => {
@@ -616,6 +727,74 @@ export function ProjectDetail({ projectId, onBack }: { projectId: string; onBack
           </p>
         ) : null}
       </div>
+
+      {/* Ночной добор остановлен: переполненным воркспейсом рассыльщика,
+          отменой проекта клиентом в ENG-кабинете либо потолком расхода ENG (по
+          умолчанию выключен) — та же колонка паузы, повод — по началу причины
+          (isClientCancelRefillPause, isSpendCeilingRefillPause). Вернуть его может только
+          человек — автоснятия по таймеру нет, иначе добор пошёл бы в тот же
+          полный воркспейс или в проект, который клиент остановил. Блок
+          показывается ТОЛЬКО на паузе: у проектов без ночного добора (все RU)
+          ответ роута configured=false, и здесь не появляется ничего.
+          У отмены клиентом совета про место нет (место ни при чём), и нет
+          «пауза вернулась»: отмена ставится нажатием клиента, а не тем, что
+          место снова кончилось. Если отмена легла поверх паузы по ёмкости,
+          прежняя причина дописана в сам текст причины выше. */}
+      {refillPause?.paused ? (
+        <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-xs font-semibold uppercase tracking-widest text-amber-700">
+                Ночной добор на паузе
+              </h2>
+              <p className="mt-1 text-xs text-amber-900">
+                {refillPause.reason ?? 'В воркспейсе рассыльщика кончилось место под контакты.'}
+              </p>
+              {isClientCancelRefillPause(refillPause.reason) ? (
+                <p className="mt-1 text-[11px] text-amber-700">
+                  с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
+                  вертикали проекта. Клиент сам отменил проект в ENG-кабинете — возобновляйте ночной
+                  добор только по его просьбе.
+                </p>
+              ) : isSpendCeilingRefillPause(refillPause.reason) ? (
+                // Пауза потолка расхода: место в воркспейсе ни при чём, совет про
+                // него был бы неверным. Порог не поднят (а суточный считается за
+                // скользящие последние 24 часа, не за календарные сутки) —
+                // следующая ночь снова поставит паузу, не купив сборку.
+                <p className="mt-1 text-[11px] text-amber-700">
+                  с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
+                  вертикали проекта. Паузу поставил потолок расхода ENG, место в воркспейсе ни при
+                  чём. Сначала поднимите порог (суточный считается за последние 24 часа и отпустит,
+                  когда расход проекта за них опустится ниже него) — иначе следующая ночь снова
+                  поставит паузу.
+                  {refillPause.resumed_at
+                    ? ` Прошлый раз возобновляли ${formatDate(refillPause.resumed_at)} — пауза вернулась.`
+                    : ''}
+                </p>
+              ) : (
+                <p className="mt-1 text-[11px] text-amber-700">
+                  с {formatDate(refillPause.paused_at ?? null)} · сборки не ставятся ни одной
+                  вертикали проекта. Сначала освободите место в воркспейсе — иначе следующая
+                  ночь снова оплатит сборку, которую некуда отправить.
+                  {/* Прошлое возобновление показываем именно здесь: пауза, вернувшаяся
+                      после него, и есть признак, что место тогда не освободили. */}
+                  {refillPause.resumed_at
+                    ? ` Прошлый раз возобновляли ${formatDate(refillPause.resumed_at)} — пауза вернулась.`
+                    : ''}
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => void resumeRefill()}
+              disabled={refillResuming}
+              className="h-8 shrink-0 rounded-lg border border-amber-300 bg-white px-3 text-xs font-medium text-amber-800 transition hover:bg-amber-100 disabled:opacity-50"
+            >
+              {refillResuming ? 'Возобновляем…' : 'Возобновить ночной добор'}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {/* «С последнего визита»: что завершилось, пока пользователя не было */}
       {visitItems.length > 0 && !visitDismissed ? (

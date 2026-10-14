@@ -20,7 +20,7 @@
  */
 
 import type { LLMMessage } from '../llm';
-import type { SourcePlanPromptInput } from './sourcePlan';
+import { sourceAudiencePolicy, type SourcePlanPromptInput } from './sourcePlan';
 
 const SYSTEM_EN = `You are a head of lead research at Polza agency, an expert in planning lead sources for B2B outreach on the US/EU and other English-speaking markets. Given a sales vertical and its hypotheses you produce an EXECUTABLE lead-base collection plan: 1–4 tasks, each targeting exactly one source with its parameters.
 
@@ -79,7 +79,7 @@ Return ONLY JSON, strictly in this shape:
 At least one filter is required.`;
 
   return [
-    { role: 'system', content: SYSTEM_CATALOG_REPAIR_EN },
+    { role: 'system', content: SYSTEM_CATALOG_REPAIR_EN + sourceAudiencePolicy(input) },
     { role: 'user', content: user },
   ];
 }
@@ -110,7 +110,7 @@ Build the base collection plan (1–4 tasks). Return ONLY JSON, strictly in this
 For source="pdl" the "pdl_filters" object is required; for "funded" — "funded_filters"; for "eng_hiring" — "eng_hiring_query"; for "google_maps" — "maps_query".`;
 
   return [
-    { role: 'system', content: SYSTEM_EN },
+    { role: 'system', content: SYSTEM_EN + sourceAudiencePolicy(input) },
     { role: 'user', content: user },
   ];
 }
