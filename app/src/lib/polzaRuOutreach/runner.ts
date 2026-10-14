@@ -238,9 +238,14 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
  * 2 800–3 000), и сбор на 100 упирался в 3 000. Теперь 50 — 5 000 на сотню;
  * разбор ИИ стоит ~$0,1 на тысячу компаний.
  */
+/** Сколько кандидатов просматриваем за запуск (потолок, решение 14.10.2026). */
+export const MAX_SCAN_PER_RUN = 100_000;
+/** Предел времени запуска: дальше — штатная остановка, готовое сохраняется. */
+export const MAX_RUN_MS = 3 * 60 * 60 * 1000;
+
 export function maxCandidatesFor(target: number): number {
   // 14.10.2026: «просят 1000 — тянем, пока не наберём» — потолок 50 000 (было 20 000).
-  return Math.min(50_000, Math.max(300, target * 50));
+  return Math.min(MAX_SCAN_PER_RUN, Math.max(300, target * 50));
 }
 
 /**
@@ -816,8 +821,9 @@ async function runJob(
     // которые лимит остановил, уберём из журнала. Запас тратит только
     // писатель — у уже разобранных компаний будут письма.
     let budgetStop = false;
+    const runStartedAt = Date.now();
     const stopForBudget = (): boolean => {
-      if (!analysisBudgetLeft()) budgetStop = true;
+      if (!analysisBudgetLeft() || Date.now() - runStartedAt > MAX_RUN_MS) budgetStop = true;
       return budgetStop;
     };
     // Предохранитель «писатель молчит»: ни одного написанного шаблона, а

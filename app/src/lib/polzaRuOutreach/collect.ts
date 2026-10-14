@@ -297,7 +297,7 @@ export async function collectCandidates(
         maxRevenue: config.max_revenue,
         minEmployees: config.min_employees,
         okvedPrefixes: config.okved_prefixes,
-        limit: Math.min(50_000, Math.max(500, poolTarget)),
+        limit: Math.min(100_000, Math.max(500, poolTarget)),
       });
       for (const r of rows) {
         all.push(
@@ -355,7 +355,7 @@ export async function collectCandidates(
 
   if (src.has('ymaps_catalog')) {
     await attempt('ymaps_catalog', async () => {
-      for (const y of await loadYmapsCatalogCandidates(db, Math.min(50_000, Math.max(500, poolTarget)))) {
+      for (const y of await loadYmapsCatalogCandidates(db, Math.min(100_000, Math.max(500, poolTarget)))) {
         const domain = normalizeDomain(y.website);
         if (!domain) continue;
         all.push(
