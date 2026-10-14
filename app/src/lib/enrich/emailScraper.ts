@@ -269,8 +269,127 @@ const LINK_TEXT_PATTERN =
 
 // ── Email validation ───────────────────────────────────────────
 
-const EMAIL_REGEX = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
+// Адрес в тексте — совпадение /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi,
+// но ищем его через matchEmails ниже: сам регексп на длинном слове без '@'
+// квадратичный. Здесь — его доменная часть, она проверяется с позиции после '@'.
+const EMAIL_DOMAIN_STICKY = /[a-z0-9.\-]+\.[a-z]{2,}/iy;
 const STRICT_EMAIL_REGEX = /^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/i;
+
+// ── Linear scanning ────────────────────────────────────────────
+//
+// Почему ниже ручные циклы вместо одного регекспа. Глобальный регексп, не
+// нашедший совпадения с позиции i, пробует снова с i+1. Если попытка пробегает
+// длинный хвост строки (`[^>]+` до конца без '>', ленивое `[\s\S]*?` без
+// закрывающего тега, `[a-z0-9...]+` по слову без '@', `\s*` по полосе
+// пробелов), попыток столько же, сколько символов, и время растёт квадратично:
+// 80 000 символов — около 10 секунд, всё это время event loop воркера стоит.
+// Функции ниже дают тот же результат байт в байт (те же регекспы или их части,
+// те же совпадения в том же порядке), но каждую позицию строки смотрят O(1) раз.
+
+/** Символ локальной части адреса: [a-z0-9._%+\-] с флагом i (без юникода — только ASCII). */
+function isEmailLocalChar(code: number): boolean {
+  return (code >= 97 && code <= 122) // a-z
+    || (code >= 65 && code <= 90) // A-Z
+    || (code >= 48 && code <= 57) // 0-9
+    || code === 46 || code === 95 || code === 37 || code === 43 || code === 45; // . _ % + -
+}
+
+/**
+ * То же, что `text.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi) ?? []`.
+ *
+ * Совпадение всегда устроено так: локальная часть — вся полоса символов адреса,
+ * которая кончается прямо перед '@' (но не левее конца прошлого совпадения:
+ * `+` жадный, а '@' в полосу не входит), дальше домен, и он от начала локальной
+ * части не зависит. Поэтому идём от '@' к '@': полосу отматываем назад, домен
+ * проверяем sticky-регекспом ровно с позиции после '@'. Не подошёл домен — этот
+ * '@' не годится ни одному началу из его полосы; регексп перебрал бы их все.
+ * Полосы перед разными '@' и домены после них не пересекаются — линейно.
+ */
+function matchEmails(text: string): string[] {
+  const matches: string[] = [];
+  let lastEnd = 0;
+  let at = text.indexOf('@');
+  while (at !== -1) {
+    let start = at;
+    while (start > lastEnd && isEmailLocalChar(text.charCodeAt(start - 1))) start -= 1;
+    EMAIL_DOMAIN_STICKY.lastIndex = at + 1;
+    if (start < at && EMAIL_DOMAIN_STICKY.test(text)) {
+      lastEnd = EMAIL_DOMAIN_STICKY.lastIndex;
+      matches.push(text.slice(start, lastEnd));
+      at = text.indexOf('@', lastEnd);
+    } else {
+      at = text.indexOf('@', at + 1);
+    }
+  }
+  return matches;
+}
+
+/** Конец последнего вхождения `token` (глобальный регексп) в `s`; 0 — вхождений нет. */
+function lastMatchEnd(s: string, token: RegExp): number {
+  let end = 0;
+  token.lastIndex = 0;
+  for (let m = token.exec(s); m; m = token.exec(s)) end = token.lastIndex;
+  return end;
+}
+
+/**
+ * `s.replace(rule, replacement)` для правила, каждое совпадение которого
+ * кончается закрывающим токеном ('>' или '</script>'), где `end` — конец
+ * последнего такого токена в `s`. Правее `end` совпадений нет, и как раз там
+ * `<[^>]+>` и `<script[\s\S]*?<\/script>` квадратичны: с каждого '<' без '>'
+ * (с каждого <script> без </script>) пробегают строку до конца. Левее `end` у
+ * любого начала токен впереди есть — совпадение находится и съедает
+ * просмотренное. Попытки левее `end` читают только символы до ближайшего
+ * токена, поэтому на обрезанной строке они дают то же, что на целой.
+ */
+function replaceBefore(s: string, end: number, rule: RegExp, replacement: string): string {
+  return s.slice(0, end).replace(rule, replacement) + s.slice(end);
+}
+
+/**
+ * Первое совпадение sticky-регекспа `rule` вида `<tag[^>]+…` / `<tag[^>]*…`,
+ * где `opening` (/<tag/gi) — его начало и всё совпадение лежит до первого '>'
+ * после начала (`needsGt`: совпадение обязано на этом '>' кончаться).
+ *
+ * Сам регексп пробует каждое '<tag', и на '<meta' без '>' до конца строки
+ * каждая попытка пробегает её до конца — квадратично. Здесь после неудачи
+ * следующее начало ищется за '>': начало внутри того же тега видит те же
+ * символы до того же '>', а `[^>]` с первого начала дотягивается до всего, до
+ * чего дотянулся бы с него, — значит, и оно не совпадёт. Если '>' дальше нет,
+ * по той же причине после неудачи совпадений нет вовсе.
+ */
+function firstTagMatch(s: string, opening: RegExp, rule: RegExp, needsGt: boolean): RegExpExecArray | null {
+  opening.lastIndex = 0;
+  for (let open = opening.exec(s); open; open = opening.exec(s)) {
+    const gt = s.indexOf('>', opening.lastIndex);
+    // Без '>' такое правило не совпадёт, а его откаты на хвосте тоже квадратичны.
+    if (gt === -1 && needsGt) return null;
+    rule.lastIndex = open.index;
+    const hit = rule.exec(s);
+    if (hit || gt === -1) return hit;
+    opening.lastIndex = gt + 1;
+  }
+  return null;
+}
+
+/**
+ * `u.replace(/[#?].*$/, '').replace(/\/+$/, '')`: адрес без хвоста после '#'/'?'
+ * и без завершающих '/'. `/\/+$/` на длинной полосе '/' не в конце строки
+ * пробует снова с каждого её '/', `/[#?].*$/` — с каждого '#' строки, за которой
+ * идёт перевод строки. `.` перевод строки не пересекает, поэтому `[#?].*$` — это
+ * первый '#' или '?' после последнего перевода строки.
+ */
+function stripUrlTail(u: string): string {
+  const lineStart = Math.max(
+    u.lastIndexOf('\n'), u.lastIndexOf('\r'), u.lastIndexOf('\u2028'), u.lastIndexOf('\u2029'),
+  ) + 1;
+  const hash = u.indexOf('#', lineStart);
+  const query = u.indexOf('?', lineStart);
+  let end = hash === -1 ? query : query === -1 ? hash : Math.min(hash, query);
+  if (end === -1) end = u.length;
+  while (end > 0 && u.charCodeAt(end - 1) === 47) end -= 1; // '/'
+  return u.slice(0, end);
+}
 
 // ── Junk email filters ─────────────────────────────────────────
 
@@ -363,6 +482,20 @@ export function decodeCloudflareEmail(hex: string): string | null {
 
 function deobfuscateText(text: string): string {
   return text
+    // Полосы пробельных символов — сначала в один пробел. Шаблоны ниже
+    // начинаются с `\s*` / `\s+`, и на длинной полосе пробелов, за которой нет
+    // '[', '(', '{' или «at»/«dot», регексп пробует снова с каждого её символа —
+    // квадратично (80 000 пробелов ≈ 10 с на каждый шаблон). Адреса от схлопывания
+    // не меняются. Каждый шаблон съедает полосу целиком или не трогает её:
+    // `\s*`/`\s+` жадные, а полоса слева начинается не раньше конца прошлой
+    // замены, которая свою правую полосу уже съела. Все пробельные символы для
+    // шаблонов одинаковы, длина полосы роли не играет, поэтому на схлопнутом
+    // тексте срабатывают ровно те же замены, а замена всегда непробельная и
+    // полос не склеивает. Сами адреса пробелов не содержат, пробел остаётся
+    // разделителем — matchEmails находит те же адреса в том же порядке.
+    // Результат — как у .replace(/\s+/g, ' '), только одиночный ' ' не
+    // переписывается: обычный текст из одиночных пробелов не копируется зря.
+    .replace(/\s{2,}|[^\S ]/g, ' ')
     // Bracket variants: [at] [dot]
     .replace(/\s*\[\s*at\s*]\s*/gi, '@')
     .replace(/\s*\[\s*dot\s*]\s*/gi, '.')
@@ -416,8 +549,7 @@ export function extractEmailsAdvanced(text: string): string[] {
   const results: string[] = [];
 
   const deobfuscated = deobfuscateText(text);
-  const matches = deobfuscated.match(EMAIL_REGEX) ?? [];
-  for (const m of matches) {
+  for (const m of matchEmails(deobfuscated)) {
     const email = normalizeEmail(m);
     if (!email || seen.has(email)) continue;
     seen.add(email);
@@ -432,16 +564,36 @@ export function extractEmailsAdvanced(text: string): string[] {
 export function extractJsonLdEmails(html: string): string[] {
   const results: string[] = [];
   const seen = new Set<string>();
-  const scriptRegex = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
 
-  let match: RegExpExecArray | null;
-  while ((match = scriptRegex.exec(html)) !== null) {
+  // Совпадения /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+  // по частям того же регекспа: открывающий тег — sticky с каждого '<script'
+  // (он кончается на первом '>' после начала), содержимое — до первого
+  // '</script>' после этого '>'. Целиком регексп с каждого '<script' без '>' или
+  // без '</script>' дальше пробегает строку до конца. Здесь такой '<script'
+  // заканчивает поиск: у следующих '>' и '</script>' искались бы правее той же
+  // точки и тоже не нашлись бы. Тег, не подошедший как JSON-LD, пропускаем до
+  // его '>' — см. firstTagMatch.
+  const opening = /<script/gi;
+  const jsonLdTag = /<script[^>]+type=["']application\/ld\+json["'][^>]*>/iy;
+  const closing = /<\/script>/gi;
+  for (let open = opening.exec(html); open; open = opening.exec(html)) {
+    const gt = html.indexOf('>', opening.lastIndex);
+    if (gt === -1) break;
+    jsonLdTag.lastIndex = open.index;
+    if (!jsonLdTag.test(html)) {
+      opening.lastIndex = gt + 1;
+      continue;
+    }
+    closing.lastIndex = gt + 1;
+    const close = closing.exec(html);
+    if (!close) break;
     try {
-      const data = JSON.parse(match[1]) as Record<string, unknown>;
+      const data = JSON.parse(html.slice(gt + 1, close.index)) as Record<string, unknown>;
       collectJsonLdEmails(data, seen, results);
     } catch {
       // Invalid JSON — skip
     }
+    opening.lastIndex = closing.lastIndex;
   }
   return results;
 }
@@ -509,13 +661,34 @@ export function extractEmailsFromHtmlAdvanced(html: string): string[] {
   for (const e of extractJsonLdEmails(html)) addEmail(e);
 
   // 2. mailto: links (handle encoded entities)
-  const mailtoRegex = /href=["']mailto:([^"'?\s>]+)[^"'>]*["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = mailtoRegex.exec(html)) !== null) {
-    addEmail(decodeHtmlEntitiesInEmail(decodeURIComponent(m[1] ?? '')));
+  // Совпадения /href=["']mailto:([^"'?\s>]+)[^"'>]*["']/gi по частям. Целиком
+  // регексп на `href="mailto:` + длинный адрес без закрывающей кавычки
+  // квадратичен уже на одном начале: каждую длину адреса он пробует с хвостом
+  // `[^"'>]*` заново. А хвост от длины адреса не зависит — он всегда кончается
+  // на первой кавычке или '>' после адреса, поэтому достаточно одной попытки.
+  const mailtoStart = /href=["']mailto:/gi;
+  const mailtoAddress = /[^"'?\s>]+/iy;
+  const mailtoTail = /[^"'>]*/iy;
+  for (let start = mailtoStart.exec(html); start; start = mailtoStart.exec(html)) {
+    mailtoAddress.lastIndex = mailtoStart.lastIndex;
+    const address = mailtoAddress.exec(html);
+    let quoteAt = -1;
+    if (address) {
+      mailtoTail.lastIndex = mailtoAddress.lastIndex;
+      mailtoTail.test(html); // `[^"'>]*` совпадает всегда, хотя бы пустой строкой
+      if (html[mailtoTail.lastIndex] === '"' || html[mailtoTail.lastIndex] === "'") quoteAt = mailtoTail.lastIndex;
+    }
+    if (!address || quoteAt === -1) {
+      // Как у регекспа: следующая попытка — со следующего символа.
+      mailtoStart.lastIndex = start.index + 1;
+      continue;
+    }
+    addEmail(decodeHtmlEntitiesInEmail(decodeURIComponent(address[0])));
+    mailtoStart.lastIndex = quoteAt + 1;
   }
 
   // 3. data-email / data-mail / data-e attributes
+  let m: RegExpExecArray | null;
   const dataEmailRegex = /data-(?:email|mail|e)=["']([^"']+)["']/gi;
   while ((m = dataEmailRegex.exec(html)) !== null) {
     addEmail(m[1] ?? '');
@@ -529,11 +702,13 @@ export function extractEmailsFromHtmlAdvanced(html: string): string[] {
   }
 
   // 4. Strip scripts/styles, then extract from visible text
-  const stripped = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ');
+  // Те же правила, что html.replace(/<script[\s\S]*?<\/script>/gi, ' ')
+  // .replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' '), но каждое —
+  // только до последнего закрывающего токена (см. replaceBefore).
+  let stripped = replaceBefore(html, lastMatchEnd(html, /<\/script>/gi), /<script[\s\S]*?<\/script>/gi, ' ');
+  stripped = replaceBefore(stripped, lastMatchEnd(stripped, /<\/style>/gi), /<style[\s\S]*?<\/style>/gi, ' ');
+  stripped = replaceBefore(stripped, stripped.lastIndexOf('>') + 1, /<[^>]+>/g, ' ');
+  stripped = stripped.replace(/\s+/g, ' ');
 
   for (const e of extractEmailsAdvanced(stripped)) addEmail(e);
 
@@ -564,6 +739,24 @@ function decodeBasicEntities(s: string): string {
 }
 
 /**
+ * Группа первого совпадения /<title[^>]*>([\s\S]*?)<\/title>/i. Регексп на
+ * странице из '<title>' без '</title>' с каждого из них пробегает строку до
+ * конца. Но если первое '<title' не совпало — нет '>' после него или нет
+ * '</title>' после этого '>', — то не совпадёт и любое следующее: его '>' не
+ * левее, и закрывающего тега правее тоже нет.
+ */
+function firstTitleText(html: string): string | undefined {
+  const open = /<title/i.exec(html);
+  if (!open) return undefined;
+  const gt = html.indexOf('>', open.index + 6);
+  if (gt === -1) return undefined;
+  const closing = /<\/title>/gi;
+  closing.lastIndex = gt + 1;
+  const close = closing.exec(html);
+  return close ? html.slice(gt + 1, close.index) : undefined;
+}
+
+/**
  * Кандидат-название компании со страницы: og:site_name (чистый бренд) →
  * <title> (шумный, но почти всегда есть). Сырое — финальная чистка отдельно
  * (AI cleanCompanyNames: обрежет после -|/,:, снимет ООО/«» и т.п.).
@@ -571,11 +764,12 @@ function decodeBasicEntities(s: string): string {
 export function extractSiteName(html: string): string | null {
   const candidates: string[] = [];
 
-  const ogTag = html.match(/<meta[^>]*\bproperty=["']og:site_name["'][^>]*>/i)?.[0];
+  // Первое совпадение /<meta[^>]*\bproperty=["']og:site_name["'][^>]*>/i.
+  const ogTag = firstTagMatch(html, /<meta/gi, /<meta[^>]*\bproperty=["']og:site_name["'][^>]*>/iy, true)?.[0];
   const ogContent = ogTag?.match(/\bcontent=["']([^"']+)["']/i)?.[1];
   if (ogContent) candidates.push(ogContent);
 
-  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  const title = firstTitleText(html);
   if (title) candidates.push(title);
 
   for (const raw of candidates) {
@@ -616,12 +810,73 @@ export function filterJunkEmails(emails: string[]): string[] {
 // ── HTML fetching with encoding support ────────────────────────
 
 function extractCharsetFromMeta(html: string): string | null {
-  const metaCharset = html.match(/<meta[^>]+charset=["']?([^"'>\s]+)/i);
+  // Первое совпадение /<meta[^>]+charset=["']?([^"'>\s]+)/i.
+  const metaCharset = firstTagMatch(html, /<meta/gi, /<meta[^>]+charset=["']?([^"'>\s]+)/iy, false);
   if (metaCharset?.[1]) return metaCharset[1].trim().toLowerCase();
-  const metaContentType = html.match(
-    /<meta[^>]+http-equiv=["']?content-type["']?[^>]+content=["'][^"']*charset=([^"'>\s]+)/i,
-  );
-  if (metaContentType?.[1]) return metaContentType[1].trim().toLowerCase();
+  const metaContentType = matchHttpEquivCharset(html);
+  if (metaContentType) return metaContentType.trim().toLowerCase();
+  return null;
+}
+
+/**
+ * Группа первого совпадения
+ *   /<meta[^>]+http-equiv=["']?content-type["']?[^>]+content=["'][^"']*charset=([^"'>\s]+)/i
+ * или null. Сам регексп с двумя `[^>]+` подряд перебирает пары
+ * «http-equiv × content=» внутри тега — квадратично уже на одном длинном теге,
+ * и ещё раз с каждого '<meta' внутри него.
+ *
+ * Разбор того, что регексп находит первым с начала '<meta' (tagEnd — первый '>'
+ * после него или конец строки):
+ * - `[^>]+` откатывается с конца, но для ответа важно лишь, есть ли
+ *   `http-equiv=["']?content-type` в теге (не раньше start+6 — `+` хочет символ);
+ *   самое левое такое вхождение даёт самую широкую область для content=;
+ * - content= + кавычка — в теге хотя бы на символ правее конца content-type
+ *   (кавычка после content-type достаётся либо `["']?`, либо второму `[^>]+`);
+ *   регексп берёт самое правое такое content=, у которого дальше есть charset=;
+ * - `[^"']*` после кавычки доходит до следующей кавычки (может выйти за '>'),
+ *   и в этом отрезке берётся самый правый charset= с непустым значением.
+ * Какое из http-equiv выберет откат, на ответ не влияет: ответ определяет
+ * самое правое подходящее content=, и оно доступно с любого http-equiv левее.
+ * Начала внутри того же тега видят подмножество того же — как в firstTagMatch.
+ * Отрезки после разных content= не пересекаются (каждый кончается на кавычке
+ * следующего), теги тоже, поэтому всё вместе линейно.
+ */
+function matchHttpEquivCharset(html: string): string | null {
+  const opening = /<meta/gi;
+  for (let open = opening.exec(html); open; open = opening.exec(html)) {
+    const gt = html.indexOf('>', opening.lastIndex);
+    const value = httpEquivCharsetAt(html, open.index, gt === -1 ? html.length : gt);
+    if (value !== null || gt === -1) return value;
+    opening.lastIndex = gt + 1;
+  }
+  return null;
+}
+
+function httpEquivCharsetAt(html: string, start: number, tagEnd: number): string | null {
+  const equiv = /http-equiv=["']?content-type/i.exec(html.slice(start + 6, tagEnd));
+  if (!equiv) return null;
+  const contentFrom = start + 6 + equiv.index + equiv[0].length + 1;
+  const contentAttrs: number[] = [];
+  const contentAttr = /content=["']/gi;
+  const inTag = html.slice(contentFrom, tagEnd);
+  for (let m = contentAttr.exec(inTag); m; m = contentAttr.exec(inTag)) contentAttrs.push(contentFrom + m.index);
+
+  const charsetValue = /[^"'>\s]+/iy;
+  for (let i = contentAttrs.length - 1; i >= 0; i -= 1) {
+    const valueFrom = contentAttrs[i] + 'content="'.length; // или content=' — длина та же
+    const noQuotes = /[^"']*/iy;
+    noQuotes.lastIndex = valueFrom;
+    noQuotes.test(html); // совпадает всегда, хотя бы пустой строкой
+    const attrValue = html.slice(valueFrom, noQuotes.lastIndex);
+    const charsets: number[] = [];
+    const charsetWord = /charset=/gi;
+    for (let m = charsetWord.exec(attrValue); m; m = charsetWord.exec(attrValue)) charsets.push(valueFrom + m.index);
+    for (let j = charsets.length - 1; j >= 0; j -= 1) {
+      charsetValue.lastIndex = charsets[j] + 'charset='.length;
+      const value = charsetValue.exec(html);
+      if (value) return value[0];
+    }
+  }
   return null;
 }
 
@@ -865,7 +1120,7 @@ async function fetchPageWithRetry(
 export type SitePageCache = Map<string, string>;
 
 export function sitePageKey(url: string): string {
-  return url.replace(/[#?].*$/, '').replace(/\/+$/, '');
+  return stripUrlTail(url);
 }
 
 /**
@@ -961,7 +1216,7 @@ async function discoverEmailPageLinks(html: string, baseUrl: string): Promise<st
     }
 
     if (!absoluteUrl.startsWith(origin)) return;
-    const normalized = absoluteUrl.replace(/[#?].*$/, '').replace(/\/+$/, '');
+    const normalized = stripUrlTail(absoluteUrl);
     if (seen.has(normalized)) return;
     seen.add(normalized);
     results.push(absoluteUrl);
@@ -1082,7 +1337,7 @@ export async function scrapeEmails(
     allEmails.size > 0 &&
     filterJunkEmails(Array.from(allEmails)).length > 0;
 
-  const normalizeForDedupe = (u: string) => u.replace(/[#?].*$/, '').replace(/\/+$/, '');
+  const normalizeForDedupe = stripUrlTail;
 
   const processPage = (html: string) => {
     for (const e of extractEmailsFromHtmlAdvanced(html)) allEmails.add(e);
