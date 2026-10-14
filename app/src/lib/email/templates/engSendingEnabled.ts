@@ -5,7 +5,12 @@ import type { RenderedEmail } from './engEmailVerification';
  * state read right before sending (api/admin/users/[id]/eng-sending,
  * sendingEnabledCopy):
  *  - 'auto' — a project of the account has automatic launch on (a wanted
- *    launch intent) and this is not the first enable after an unblock;
+ *    launch intent), this is not the first enable after an unblock, the
+ *    auto-launch switch HE_ENG_AUTO_LAUNCH is on (the worker tick launches
+ *    ready markets at all) and the mailbox pool can serve those projects
+ *    (each has its own pool mailboxes, or enough are free for it). Otherwise
+ *    the route sends 'check' with facts instead — no promise that markets
+ *    start by themselves;
  *  - 'unblocked' — the first enable after an unblock (inactive
  *    he_eng_account_blocks row, no staff turn-off since the unblock), sending
  *    had been turned on before (enabled_at read before this enable), no
@@ -13,6 +18,9 @@ import type { RenderedEmail } from './engEmailVerification';
  *  - 'launch_needed' — no project has automatic launch on (never pressed
  *    «Launch», or it was cancelled), either no unblock or sending had never
  *    been turned on, and a project is researched;
+ *  ('unblocked' and 'launch_needed' say «press «Launch» to turn it on»: while
+ *  the HE_ENG_AUTO_LAUNCH switch is off that is not true, and the route sends
+ *  'check' with facts instead);
  *  - 'research' — 'unblocked' or 'launch_needed', but the account has
  *    projects and none is researched: the text says, per project, who starts
  *    its research again (facts.research);
@@ -45,6 +53,12 @@ export interface EngSendingEnabledFacts {
    * shows it (toClientEngRefillState): on, on hold on our side, off.
    */
   topUp: { on: number; held: number; off: number } | null;
+  /**
+   * The mailbox pool cannot serve the account right now: its projects have no
+   * pool mailboxes of their own and too few are free (the same rule as the
+   * pool assignment). Missing — the pool could serve it, or it was not read.
+   */
+  mailboxesShort?: boolean;
 }
 
 /** A kind alone — the text without facts (the route always sends facts it read). */
@@ -53,7 +67,10 @@ export type EngSendingEnabledCopy = EngSendingEnabledCopyKind | { kind: EngSendi
 export interface EngSendingEnabledEmailArgs {
   /** The cabinet dashboard (https://<ENG host>/client/eng/dashboard). */
   dashboardUrl: string;
-  /** Missing — 'auto'. */
+  /**
+   * Missing — 'check' (true in every state: it promises no automatic start;
+   * the enable route always passes the copy it picked).
+   */
   copy?: EngSendingEnabledCopy;
 }
 
@@ -68,6 +85,12 @@ function esc(s: string): string {
 
 const NOT_CHANGED = 'Turning sending on does not change campaigns created before; the dashboard shows the status of each.';
 const PAUSE_ANY_TIME = 'You can pause sending on your dashboard at any time.';
+/**
+ * facts.mailboxesShort — the same fact and advice as the cabinet's refusal
+ * when a launch finds no free pool mailboxes (ENG_SENDING_SHORTAGE_TEXT).
+ */
+const MAILBOXES_SHORT =
+  'The mailboxes your campaigns send from are not set up for your account yet, so sending cannot start until they are. Message Support to find out when they will be ready.';
 
 /** «your project» for a one-project account; else «one of your projects» / «N of your projects». */
 function projectsOf(n: number, total: number): string {
@@ -154,7 +177,10 @@ function paragraphs(parts: string[]): string[] {
  *     for the shapes where nothing starts by itself: the auto-launch tables
  *     are not there yet, or starting takes longer than usual (step 3 then
  *     shows «Launch now», the per-template launch route). Unchanged from S3,
- *     and it carries no facts;
+ *     and it carries no facts. The route sends it only while the tick runs
+ *     at all (HE_ENG_AUTO_LAUNCH on) and the mailbox pool can serve the
+ *     projects with automatic launch on — a market that cannot get mailboxes
+ *     does not start «as soon as» it is ready;
  *   - 'unblocked': automatic launch is off (the route checked that no project
  *     has it on), and only a new «Launch» press on step 3 of a researched
  *     project turns it on — «back on» only when «Launch» was pressed before
@@ -177,6 +203,11 @@ function paragraphs(parts: string[]): string[] {
  *     read;
  *   - "you can pause sending on your dashboard" — the Pause button of the
  *     dashboard's sending block;
+ *   - "the mailboxes your campaigns send from are not set up for your
+ *     account yet" (every text but 'auto', only with facts.mailboxesShort) —
+ *     the route read the pool right before sending: the account's projects
+ *     have no pool mailboxes and too few are free; the cabinet refuses
+ *     «Launch now» with the same advice (message Support);
  *   - "turning sending on does not change campaigns created before" —
  *     enabling touches no campaign. No promise of a Start sending button for
  *     them: a launch created before sending was set up for the project cannot
@@ -186,6 +217,12 @@ function paragraphs(parts: string[]): string[] {
 function paragraphsOf(copy: EngSendingEnabledCopy): string[] {
   const kind = typeof copy === 'string' ? copy : copy.kind;
   const facts = typeof copy === 'string' ? null : copy.facts;
+  const out = kindParagraphs(kind, facts);
+  // Not for 'auto': the route never sends it when the pool cannot serve the account.
+  return facts?.mailboxesShort === true && kind !== 'auto' ? [...out, MAILBOXES_SHORT] : out;
+}
+
+function kindParagraphs(kind: EngSendingEnabledCopyKind, facts: EngSendingEnabledFacts | null): string[] {
   const topUp = topUpSentence(facts?.topUp ?? null);
   const research = researchSentences(facts);
   switch (kind) {
@@ -245,7 +282,7 @@ function paragraphsOf(copy: EngSendingEnabledCopy): string[] {
  */
 export function renderEngSendingEnabledEmail(args: EngSendingEnabledEmailArgs): RenderedEmail {
   const subject = 'Sending is on for your outreachOS account';
-  const paragraphs = paragraphsOf(args.copy ?? 'auto');
+  const paragraphs = paragraphsOf(args.copy ?? 'check');
 
   const html = `<!doctype html>
 <html lang="en">

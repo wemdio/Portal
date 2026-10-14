@@ -27,6 +27,7 @@ import {
 import { ENG_PAID_UNAVAILABLE_TEXT } from '@/lib/hypothesisEngine/engPaidAccess';
 import {
   HE_ENG_LAUNCH_INTENT_TABLE,
+  heEngAutoLaunchEnabled,
   heEngIntentSendingWindow,
   readHeEngLaunchIntent,
   updateHeEngLaunchSchedule,
@@ -55,6 +56,11 @@ const NOT_LAUNCHED_TEXT = 'Press Launch first — the sending hours are saved wi
 const MARKETS_CHANGED_TEXT = 'The markets you chose have changed — refresh the page and try again.';
 /** «Launch N more markets» без включённого автозапуска проекта. */
 const MORE_NOT_LAUNCHED_TEXT = 'Press «Launch» first — it turns on automatic launch for your project.';
+/**
+ * То же при выключенном HE_ENG_AUTO_LAUNCH: «Launch» автозапуск сейчас не
+ * включит, но начнёт эти рынки (реконсилер берёт все выбранные).
+ */
+const MORE_NOT_LAUNCHED_SWITCH_OFF_TEXT = 'Press «Launch» to start these markets.';
 const INVALID_MARKETS_TEXT = `markets must be a list of 1 to ${HE_ENG_MARKETS_MAX_PER_SAVE} different market ids`;
 
 /**
@@ -125,8 +131,10 @@ const FAILURE_EVENT: Record<string, string> = {
 // GET — что знает шаг 3 до и после «Launch»: включён ли автозапуск (намерение
 // проекта), окно отправки будущих запусков, список зон и дней, дефолт и
 // состояние выключателя отправки аккаунта (без записи и алерта). Поллится
-// мастером — без withToolTrace. Миграции 20261012_0001 нет — available:false
-// (кабинет тогда показывает «Launch now» у каждого готового рынка).
+// мастером — без withToolTrace. Миграции 20261012_0001 нет или выключатель
+// HE_ENG_AUTO_LAUNCH выключен (тик воркера ничего не берёт) — available:false
+// (кабинет тогда показывает «Launch now» у каждого готового рынка и не обещает
+// старт «сам» и письмо о нём).
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
@@ -154,7 +162,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   }
   const intent = intentRead.kind === 'ok' ? intentRead.intent : null;
   return NextResponse.json({
-    available: intentRead.kind === 'ok',
+    available: intentRead.kind === 'ok' && heEngAutoLaunchEnabled(),
     requested: intent?.wanted === true,
     requested_at: intent?.requestedAt || null,
     cancelled_at: intent?.cancelledAt ?? null,
@@ -186,8 +194,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 //     20261012_0001 не применена; порядок выката — миграция до кода) — ответ
 //     auto_launch:'unavailable', подготовка всё равно идёт: это та же оплата,
 //     что у «Start outreach» без этой миграции, а готовые рынки шаг 3 тогда
-//     показывает с «Launch now» (тот же гейт отправки). Сбой записи — 500 до
-//     постановки.
+//     показывает с «Launch now» (тот же гейт отправки). Выключатель
+//     HE_ENG_AUTO_LAUNCH выключен — ответ тоже auto_launch:'unavailable'
+//     (готовый рынок сам не стартует, письма о старте не будет), а намерение
+//     пишется ВЫКЛЮЧЕННЫМ (writeHeEngLaunchIntent autoLaunch:false: wanted
+//     false без cancelled_at, часы и время нажатия сохранены — их берёт
+//     «Launch now»): включат выключатель — тик это нажатие не возьмёт, нужен
+//     новый «Launch». Сбой записи — 500 до постановки.
 //  5. reconcileHeAutopilotProject(trigger 'client') — тот же путь и те же
 //     правила оплаты, что у «Start outreach»: письма, сборка, анализ, финальные
 //     письма; повтор упавшего — решение клиента, сборка, которая остановится
@@ -214,6 +227,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 //  d. реконсилер с onlyVerticalIds: те же правила оплаты и потолок, только по
 //     этим рынкам. Двойной клик ничего не дублирует: дедуп активных джоб и
 //     уникальный индекс активной цепочки вертикали.
+//  Ответ auto_launch — 'on' только при включённом выключателе
+//  HE_ENG_AUTO_LAUNCH; выключен — 'unavailable' (как у «Launch»), и вместо
+//  снятия отметки «исполнено» намерение ВЫКЛЮЧАЕТСЯ (wanted=false без
+//  cancelled_at, как «Launch» при выключенном выключателе): клиенту сказано
+//  «not available», и включённый позже выключатель эти рынки сам не запустит.
+//  Кнопки при выключенном выключателе кабинет не показывает (autoOn), это —
+//  вкладка, открытая до выключения, и прямой вызов. Намерение выключено —
+//  409 not_launched с текстом про «Launch» без обещания автозапуска.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.project_launch.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -313,13 +334,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       });
     }
 
-    const intent = await writeHeEngLaunchIntent(supabaseAdmin, { projectId: id, userId, schedule: sendingWindow });
+    // Автозапуск сработает, только если намерение записано И тик воркера
+    // вообще берёт строки (выключатель HE_ENG_AUTO_LAUNCH): иначе ответ
+    // 'unavailable', и кабинет ведёт к «Launch now», а не обещает старт сам.
+    // При выключенном выключателе намерение пишется ВЫКЛЮЧЕННЫМ (часы и время
+    // нажатия сохранены): клиенту сказано «not available», и включённый через
+    // недели выключатель не запустит рынки без его нового «Launch».
+    const autoLaunchSwitchOn = heEngAutoLaunchEnabled();
+    const intent = await writeHeEngLaunchIntent(supabaseAdmin, {
+      projectId: id,
+      userId,
+      schedule: sendingWindow,
+      autoLaunch: autoLaunchSwitchOn,
+    });
     if (intent === 'error') {
       return engServerError('client.eng.project_launch.intent_failed', new Error('launch intent not written'), LAUNCH_FAILED, {
         userId,
         projectId: id,
       });
     }
+    const autoLaunch: 'on' | 'unavailable' = intent === 'ok' && autoLaunchSwitchOn ? 'on' : 'unavailable';
 
     const reconciled = await reconcileHeAutopilotProject(supabaseAdmin, {
       projectId: id,
@@ -359,7 +393,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     void logAudit('client.eng.project_launch.requested', 'ENG client pressed Launch for the project', {
       userId,
       projectId: id,
-      autoLaunch: intent === 'ok' ? 'on' : 'unavailable',
+      autoLaunch,
+      // Выключатель выключен — намерение записано выключенным (тик его не возьмёт).
+      ...(autoLaunchSwitchOn ? {} : { autoLaunchSwitch: 'off', ...(intent === 'ok' ? { intentWanted: false } : {}) }),
       sendingAccess: sending.state,
       timezone: sendingWindow.timezone,
       from: sendingWindow.from,
@@ -376,7 +412,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     return NextResponse.json({
       ok: true,
-      auto_launch: intent === 'ok' ? 'on' : 'unavailable',
+      auto_launch: autoLaunch,
       sending_access: sendingAccessWord(sending.state),
       schedule: toClientEngSendingWindow(sendingWindow),
       chains_enqueued: reconciled.counts.chainsEnqueued,
@@ -438,9 +474,17 @@ async function launchMoreMarkets(
     return engServerError('client.eng.project_launch.intent_read_failed', new Error(intentRead.message), LAUNCH_FAILED, logContext);
   }
   const intent = intentRead.kind === 'ok' ? intentRead.intent : null;
-  if (!intent || !intent.wanted || args.project.autopilot !== true) {
-    return NextResponse.json({ error: MORE_NOT_LAUNCHED_TEXT, code: 'not_launched' }, { status: 409 });
-  }
+  // Намерение включено, но тик берёт строки только при включённом выключателе
+  // HE_ENG_AUTO_LAUNCH — иначе новые рынки сами не стартуют (ответ
+  // 'unavailable', а намерение ниже выключается вместо снятия «исполнено»).
+  const autoLaunchSwitchOn = heEngAutoLaunchEnabled();
+  const autoLaunch: 'on' | 'unavailable' = autoLaunchSwitchOn ? 'on' : 'unavailable';
+  const notLaunched = () =>
+    NextResponse.json(
+      { error: autoLaunchSwitchOn ? MORE_NOT_LAUNCHED_TEXT : MORE_NOT_LAUNCHED_SWITCH_OFF_TEXT, code: 'not_launched' },
+      { status: 409 },
+    );
+  if (!intent || !intent.wanted || args.project.autopilot !== true) return notLaunched();
 
   // c. Свежее чтение: рынок, который уже трогали (цепочка, база, шаблон или
   // джоба в любом статусе), этой кнопкой не начинается.
@@ -472,7 +516,7 @@ async function launchMoreMarkets(
   }) =>
     NextResponse.json({
       ok: true,
-      auto_launch: 'on',
+      auto_launch: autoLaunch,
       sending_access: sendingAccessWord(args.sendingAccess),
       schedule,
       chains_enqueued: extra.counts?.chainsEnqueued ?? 0,
@@ -499,19 +543,25 @@ async function launchMoreMarkets(
   // Исполненное намерение тик не читает (settled_at): снять отметку, иначе
   // итоговые письма новых рынков сами не запустились бы. Только у ещё
   // включённого намерения; отмена между чтением и записью — 0 строк.
+  // Выключатель HE_ENG_AUTO_LAUNCH выключен — намерение выключается (wanted
+  // false без cancelled_at, как у «Launch» при выключенном выключателе):
+  // ответ скажет «not available — press «Launch now»», и тик после включения
+  // выключателя ни эти, ни прежние рынки проекта сам не запустит.
   const nowIso = new Date().toISOString();
   const { data: reopened, error: reopenErr } = await db
     .from(HE_ENG_LAUNCH_INTENT_TABLE)
-    .update({ settled_at: null, updated_at: nowIso })
+    .update(
+      autoLaunchSwitchOn
+        ? { settled_at: null, updated_at: nowIso }
+        : { wanted: false, cancelled_at: null, settled_at: null, updated_at: nowIso },
+    )
     .eq('project_id', projectId)
     .eq('wanted', true)
     .select('project_id');
   if (reopenErr) {
     return engServerError('client.eng.project_launch.reopen_failed', reopenErr, LAUNCH_FAILED, logContext);
   }
-  if ((reopened ?? []).length === 0) {
-    return NextResponse.json({ error: MORE_NOT_LAUNCHED_TEXT, code: 'not_launched' }, { status: 409 });
-  }
+  if ((reopened ?? []).length === 0) return notLaunched();
 
   // d. Только эти рынки.
   const reconciled = await reconcileHeAutopilotProject(db, {
@@ -548,6 +598,9 @@ async function launchMoreMarkets(
     markets,
     started,
     alreadyStarted: [...alreadyStarted, ...raced],
+    autoLaunch,
+    // Выключатель выключен — намерение проекта этим нажатием выключено (выше).
+    ...(autoLaunchSwitchOn ? {} : { autoLaunchSwitch: 'off', intentTurnedOff: true }),
     sendingAccess: args.sendingAccess,
     chainsEnqueued: reconciled.counts.chainsEnqueued,
     verticalsSkipped: reconciled.counts.verticalsSkipped,

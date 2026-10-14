@@ -81,6 +81,16 @@
  * проекта стадии ставит, отвечает auto_launch 'unavailable'; тик не делает
  * ничего (одна строка warn на процесс); кнопка «Launch now» идёт без замка, как
  * до S3. Отправка за всеми гейтами S2 в любом случае (fail-closed).
+ * Выключатель HE_ENG_AUTO_LAUNCH=0 (heEngAutoLaunchEnabled) — та же картина
+ * для клиента: «Launch» отвечает auto_launch 'unavailable' и пишет намерение
+ * ВЫКЛЮЧЕННЫМ (writeHeEngLaunchIntent autoLaunch:false — часы и время нажатия
+ * сохранены, wanted=false без cancelled_at), «Launch N more markets»
+ * выключает уже включённое намерение: клиенту сказано «not available — press
+ * «Launch now»», и выключатель, включённый через недели, не запустит его
+ * рынки без нового «Launch». Деталка и GET шага 3 — available:false, дашборд —
+ * без автозапуска; письмо «Sending is on» — текст без обещания старта «сам».
+ * Намерения, включённые ДО выключения выключателя, остаются wanted: перед его
+ * включением их список сверяют с владельцем (отчёт fix-truth, ранбук релиза).
  *
  * НЕ БРОСАЕТ: каждый исход — значение.
  */
@@ -115,15 +125,19 @@ import { isHeMissingColumnError } from './projectCancelMarker';
 export const HE_ENG_LAUNCH_INTENT_TABLE = 'he_eng_launch_intent';
 export const HE_ENG_AUTO_LAUNCH_TABLE = 'he_eng_auto_launch';
 export const HE_ENG_AUTO_LAUNCH_CLAIM_RPC = 'he_eng_auto_launch_claim';
-/** Выключатель автозапуска в воркере: '0' / 'false' / 'off' / 'no' — выключен (письма — нет). */
+/**
+ * Выключатель автозапуска: '0' / 'false' / 'off' / 'no' — выключен (тик воркера
+ * ничего не берёт, писем о старте нет; портал — тексты без «стартует сам»).
+ */
 export const HE_ENG_AUTO_LAUNCH_ENV = 'HE_ENG_AUTO_LAUNCH';
 /** Как часто воркер заходит в тик (мс); дефолт — минута. */
 export const HE_ENG_AUTO_LAUNCH_TICK_MS_ENV = 'HE_ENG_AUTO_LAUNCH_TICK_MS';
 export const HE_ENG_AUTO_LAUNCH_TICK_MS_DEFAULT = 60_000;
 /**
  * Строка 'waiting' без кода старше этого — кабинет пишет «Starting is taking
- * longer than usual» и показывает «Launch now» (автозапуск выключен, воркер
- * старше портала, тик встал).
+ * longer than usual» и показывает «Launch now» (автозапуск выключен только в
+ * окружении воркера, воркер старше портала, тик встал; выключенный в портале
+ * автозапуск синтетических 'waiting' не даёт вовсе — readHeEngAutoLaunchDetail).
  */
 export const HE_ENG_AUTO_LAUNCH_STALE_MS = 20 * 60_000;
 /**
@@ -157,7 +171,15 @@ const CLAIMS_PER_TICK = 3;
 
 const OFF_VALUES = new Set(['0', 'false', 'off', 'no']);
 
-/** Включён ли автозапуск в этом процессе (дефолт — да). */
+/**
+ * Включён ли автозапуск в этом процессе (дефолт — да). Читают его и тик
+ * воркера, и портал: шаг 3 (GET/POST api/client/eng/projects/[id]/launch и
+ * readHeEngAutoLaunchDetail), дашборд (readHeEngAutoLaunchForProjects) и текст
+ * письма «Sending is on» (api/admin/users/[id]/eng-sending). Выключатель стоит
+ * в общем env_file портала и воркера; выключен — тик ничего не берёт и писем
+ * не шлёт, поэтому кабинет и письма не обещают «стартует сам» и «напишем,
+ * когда отправка начнётся», а ведут к «Launch now».
+ */
 export function heEngAutoLaunchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return !OFF_VALUES.has((env[HE_ENG_AUTO_LAUNCH_ENV] ?? '').trim().toLowerCase());
 }
@@ -383,18 +405,36 @@ export async function readHeEngLaunchIntent(db: SupabaseClient, projectId: strin
  * отправки. Сброс строк — best-effort (warn): намерение важнее; не прочитались
  * шаблоны строк 'done cancelled' — они не поднимаются (кабинет у
  * незаконченного запуска предлагает «Launch now»).
+ *
+ * `autoLaunch: false` — нажатие при выключенном HE_ENG_AUTO_LAUNCH (роут
+ * отвечает auto_launch 'unavailable', кабинет зовёт к «Launch now»): строка
+ * пишется ВЫКЛЮЧЕННОЙ — wanted=false, cancelled_at и settled_at сняты; окно
+ * (его берёт «Launch now», heEngIntentSendingWindow) и время нажатия
+ * записаны. Тик такую строку не читает и после включения выключателя:
+ * автозапуск включит только новое «Launch» (кабинет тогда пишет «not on —
+ * press «Launch» to turn it on», а не «back on»). Строки автозапуска при этом
+ * не поднимаются: подъём — решение платить за автозапуск снова, а его здесь
+ * нет; поднимет следующее «Launch» с включённым выключателем.
  */
 export async function writeHeEngLaunchIntent(
   db: SupabaseClient,
-  args: { projectId: string; userId: string; schedule: ClientLaunchScheduleOverride; now?: Date },
+  args: {
+    projectId: string;
+    userId: string;
+    schedule: ClientLaunchScheduleOverride;
+    now?: Date;
+    /** false — выключатель HE_ENG_AUTO_LAUNCH выключен: намерение пишется выключенным (выше). Дефолт — true. */
+    autoLaunch?: boolean;
+  },
 ): Promise<'ok' | 'missing' | 'error'> {
   const nowIso = (args.now ?? new Date()).toISOString();
+  const wanted = args.autoLaunch !== false;
   try {
     const { error } = await db.from(HE_ENG_LAUNCH_INTENT_TABLE).upsert(
       {
         project_id: args.projectId,
         user_id: args.userId,
-        wanted: true,
+        wanted,
         schedule: toClientEngSendingWindow(args.schedule),
         requested_at: nowIso,
         cancelled_at: null,
@@ -416,6 +456,8 @@ export async function writeHeEngLaunchIntent(
     });
     return 'error';
   }
+  // Выключенное намерение: автозапуска нет — и строки его не поднимаются.
+  if (!wanted) return 'ok';
   try {
     const revived = {
       state: 'waiting',
@@ -1434,11 +1476,16 @@ export interface EngAutoLaunchMarket {
 
 /**
  * Автозапуск проекта для деталки (GET api/client/eng/projects/[id]):
- *  - available — миграция есть (иначе «Launch now» у каждого готового рынка);
+ *  - available — миграция есть И выключатель HE_ENG_AUTO_LAUNCH не выключен
+ *    (heEngAutoLaunchEnabled; иначе тик ничего не берёт, и у каждого готового
+ *    рынка «Launch now», а экран не обещает старт «сам» и письмо о нём);
  *  - requested — намерение включено; requested_at / cancelled_at — даты;
  *  - markets — строки шаблонов проекта плюс СИНТЕТИЧЕСКИЕ 'waiting' для
- *    кандидатов без строки (только при включённом намерении; created_at —
- *    дата шаблона: от неё кабинет считает «дольше обычного»).
+ *    кандидатов без строки (только при включённом намерении и available;
+ *    created_at — дата шаблона: от неё кабинет считает «дольше обычного»).
+ *    Строки самой таблицы отдаются и при выключенном автозапуске: их пишет и
+ *    кнопка «Launch now» (замок шаблона) — 'running' и 'done needs_support'
+ *    шаг 3 показывает при любом автозапуске.
  * Строки — только шаблонов из деталки (удалённые шаблоны строк не имеют:
  * каскад). Счётчики и аренда кабинету не нужны и не отдаются.
  */
@@ -1459,7 +1506,9 @@ export async function readHeEngAutoLaunchDetail(
     hypotheses?: ReadonlyArray<Record<string, unknown>>;
     templates?: ReadonlyArray<Record<string, unknown>>;
   },
+  opts: { env?: NodeJS.ProcessEnv } = {},
 ): Promise<EngAutoLaunchDetail | null> {
+  const switchedOn = heEngAutoLaunchEnabled(opts.env);
   const intentRead = await readHeEngLaunchIntent(db, projectId);
   if (intentRead.kind === 'missing') {
     return { available: false, requested: false, requested_at: null, cancelled_at: null, markets: [] };
@@ -1498,7 +1547,9 @@ export async function readHeEngAutoLaunchDetail(
       updated_at: r.updated_at,
       ...(heEngAutoLaunchLeaseExpired(r, nowMs) ? { stale: true } : {}),
     }));
-  if (intent?.wanted) {
+  // Синтетическое «ждёт тика» — только когда тик есть: при выключенном
+  // HE_ENG_AUTO_LAUNCH готовый рынок никто не возьмёт сам.
+  if (switchedOn && intent?.wanted) {
     const withRow = new Set(rows.map((r) => r.template_id));
     for (const c of heEngAutoLaunchCandidates({
       verticals: detail.verticals ?? [],
@@ -1518,7 +1569,7 @@ export async function readHeEngAutoLaunchDetail(
     }
   }
   return {
-    available: true,
+    available: switchedOn,
     requested: intent?.wanted === true,
     requested_at: intent?.requestedAt || null,
     cancelled_at: intent?.cancelledAt ?? null,
@@ -1529,19 +1580,31 @@ export async function readHeEngAutoLaunchDetail(
 /**
  * Намерения и строки по проектам — для дашборда (одной пачкой). null — не
  * прочиталось или миграции нет (ключа автозапуска на карточках нет).
+ *
+ * Выключатель HE_ENG_AUTO_LAUNCH выключен (heEngAutoLaunchEnabled) — `wanted`
+ * пуст: тик ни один проект не ведёт, и дашборд не обещает «sending starts
+ * automatically» (ни синтетического 'waiting', ни строк, которые он берёт
+ * только у проекта с автозапуском). Строки таблицы отдаются: роут дашборда
+ * без автозапуска берёт из них только 'running' и 'done needs_support' — их
+ * пишет и кнопка «Launch now», и шаг 3 показывает их при любом автозапуске
+ * (у 'done needs_support' — «сначала Support», а не «Launch now»).
  */
 export async function readHeEngAutoLaunchForProjects(
   db: SupabaseClient,
   projectIds: string[],
+  opts: { env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ wanted: Set<string>; rows: Map<string, HeEngAutoLaunchRow> } | null> {
   const wanted = new Set<string>();
   const rows = new Map<string, HeEngAutoLaunchRow>();
   if (projectIds.length === 0) return { wanted, rows };
+  const switchedOn = heEngAutoLaunchEnabled(opts.env);
   try {
     for (let i = 0; i < projectIds.length; i += ID_CHUNK) {
       const chunk = projectIds.slice(i, i + ID_CHUNK);
       const [intentsRes, rowsRes] = await Promise.all([
-        db.from(HE_ENG_LAUNCH_INTENT_TABLE).select('project_id, wanted').in('project_id', chunk),
+        switchedOn
+          ? db.from(HE_ENG_LAUNCH_INTENT_TABLE).select('project_id, wanted').in('project_id', chunk)
+          : Promise.resolve({ data: [] as Array<Record<string, unknown>>, error: null }),
         db.from(HE_ENG_AUTO_LAUNCH_TABLE).select(ROW_COLUMNS).in('project_id', chunk).limit(1000),
       ]);
       if (intentsRes.error || rowsRes.error) return null;

@@ -9,7 +9,7 @@
 import { authFetch } from '@/lib/authFetch';
 import type { HeEngAdminCard, HeEngAdminList } from '@/lib/hypothesisEngine/engAdminView';
 import type { HeEngBlockLine, HeEngBlockReport, HeEngUnblockReport } from '@/lib/hypothesisEngine/engAccountBlockMarker';
-import type { EngSendingPostResult } from './labels';
+import type { EngSendingGetResult, EngSendingPostResult } from './labels';
 
 async function call<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await authFetch(url, init);
@@ -58,6 +58,11 @@ export function fetchEngClients(params: { page: number; filter: string; q: strin
 
 export function fetchEngClientCard(id: string, refresh: boolean): Promise<EngClientCardResponse> {
   return call<EngClientCardResponse>(`/api/admin/eng-clients/${id}${refresh ? '?refresh=1' : ''}`);
+}
+
+/** Выключатель отправки клиента, автозапуск и пул глазами клиента — для строк рядом с «Включить отправку». */
+export function fetchEngSending(id: string): Promise<EngSendingGetResult> {
+  return call<EngSendingGetResult>(`/api/admin/users/${id}/eng-sending`);
 }
 
 export function postEngSending(id: string, enabled: boolean): Promise<EngSendingPostResult> {

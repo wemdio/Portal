@@ -8,7 +8,10 @@
  * GET  — состояние: applicable (ENG-клиент), required (требование не снято
  *        HE_US_SENDING_REQUIRES_ACTIVATION), state ('enabled' | 'not_enabled' |
  *        'revoked' | 'unavailable' | 'error'), когда клиент упёрся
- *        (requested_at), когда включили / выключили, ушло ли письмо.
+ *        (requested_at), когда включили / выключили, ушло ли письмо; плюс то,
+ *        что карточка клиента пишет рядом с «Включить отправку»: включён ли
+ *        автозапуск (auto_launch — выключатель HE_ENG_AUTO_LAUNCH) и хватит ли
+ *        пула ящиков на этого клиента (pool — readAccountPoolRoom).
  * POST { enabled: boolean }
  *   - включить: ЗАБЛОКИРОВАННОМУ клиенту — отказ 409 (активная отметка
  *     блокировки he_eng_account_blocks или бан входа в будущем): блокировка
@@ -53,8 +56,14 @@ import { sendHeEngSendingEnabledEmail } from '@/lib/hypothesisEngine/engSendingA
 import { pauseHeEngAccountSending } from '@/lib/hypothesisEngine/engCampaignSending';
 import { readHeEngAccountBlock, readHeEngAccountBlockRows } from '@/lib/hypothesisEngine/engAccountBlockMarker';
 import { readHeEngAccountResearch } from '@/lib/hypothesisEngine/engAccountBlock';
-import { HE_ENG_LAUNCH_INTENT_TABLE } from '@/lib/hypothesisEngine/engAutoLaunch';
+import { HE_ENG_LAUNCH_INTENT_TABLE, heEngAutoLaunchEnabled } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { toClientEngRefillState } from '@/lib/hypothesisEngine/clientEngProjection';
+import {
+  HE_SENDING_POOL_TABLE,
+  heSendingPoolAssignableWorkspaces,
+  readHeSendingPoolSize,
+} from '@/lib/hypothesisEngine/sendingPool';
+import { listInstantlyAccounts } from '@/lib/instantly/accounts';
 import type { EngSendingEnabledCopy, EngSendingEnabledFacts } from '@/lib/email/templates/engSendingEnabled';
 
 export const dynamic = 'force-dynamic';
@@ -92,6 +101,91 @@ function isTableMissing(error: { code?: string | null } | null | undefined): boo
   return code === '42P01' || code === 'PGRST205';
 }
 
+/** Сколько свободных строк пула читаем: нужно лишь «хватит ли на несколько проектов» — нижней оценки хватает. */
+const POOL_FREE_READ_LIMIT = 1000;
+
+/**
+ * Пул ящиков глазами одного аккаунта — то же правило, что у выдачи
+ * (he_sending_pool_assign, миграция 20261011_0001; зовёт её
+ * engSendingPreset.ensureHeEngPresetForProject при запуске):
+ *  - проект, у которого уже есть отданные ящики ('assigned'), получает их же —
+ *    пул ему не нужен (assignedProjects);
+ *  - проекту без ящиков нужно perProject (HE_US_POOL_MAILBOXES_PER_PROJECT,
+ *    дефолт 3) свободных в ОДНОМ воркспейсе выдачи — все настроенные, кроме
+ *    main (heSendingPoolAssignableWorkspaces);
+ *  - сколько проектов без ящиков пул примет (fitsNew) — как «хватит на N
+ *    новых клиентов» полосы пула раздела (engAdminView.readPoolStrip): сумма по
+ *    воркспейсам выдачи floor(свободно / perProject). Свободных читается не
+ *    больше POOL_FREE_READ_LIMIT — fitsNew тогда нижняя оценка.
+ * Закрепление воркспейса пресетом клиента (у него уже был запуск) здесь не
+ * учитывается: с одним сайтом на аккаунт второй проект без ящиков — редкость.
+ * Воркспейсы рассыльщика не читаются из окружения — 'error' (выдача при этом
+ * тоже откажет: workspaces_unconfigured). Нет таблицы пула — 'missing'.
+ * НЕ БРОСАЕТ.
+ */
+type AccountPoolRoom =
+  | { state: 'ok'; perProject: number; fitsNew: number; assignedProjects: Set<string>; assignedMailboxes: number }
+  | { state: 'missing' }
+  | { state: 'error' };
+
+async function readAccountPoolRoom(
+  db: NonNullable<typeof supabaseAdmin>,
+  projectIds: readonly string[],
+): Promise<AccountPoolRoom> {
+  try {
+    let assignable: Set<string>;
+    try {
+      const configured = listInstantlyAccounts().map((a) => a.id);
+      assignable = new Set(heSendingPoolAssignableWorkspaces(configured));
+    } catch {
+      return { state: 'error' };
+    }
+    if (assignable.size === 0) return { state: 'error' };
+    const perProject = readHeSendingPoolSize().count;
+    const [freeRes, assignedRes] = await Promise.all([
+      db.from(HE_SENDING_POOL_TABLE).select('instantly_account_id').eq('status', 'available').limit(POOL_FREE_READ_LIMIT),
+      projectIds.length > 0
+        ? db
+            .from(HE_SENDING_POOL_TABLE)
+            .select('project_id')
+            .eq('status', 'assigned')
+            .in('project_id', [...projectIds])
+            .limit(1000)
+        : Promise.resolve({ data: [] as Array<{ project_id?: unknown }>, error: null }),
+    ]);
+    if (freeRes.error || assignedRes.error) {
+      return isTableMissing(freeRes.error) || isTableMissing(assignedRes.error) ? { state: 'missing' } : { state: 'error' };
+    }
+    const freeByWorkspace = new Map<string, number>();
+    for (const r of (freeRes.data ?? []) as Array<{ instantly_account_id?: unknown }>) {
+      const ws = typeof r.instantly_account_id === 'string' ? r.instantly_account_id : '';
+      if (ws && assignable.has(ws)) freeByWorkspace.set(ws, (freeByWorkspace.get(ws) ?? 0) + 1);
+    }
+    let fitsNew = 0;
+    for (const free of freeByWorkspace.values()) fitsNew += Math.floor(free / perProject);
+    const assignedRows = (assignedRes.data ?? []) as Array<{ project_id?: unknown }>;
+    const assignedProjects = new Set(
+      assignedRows.map((r) => (typeof r.project_id === 'string' ? r.project_id : '')).filter(Boolean),
+    );
+    return { state: 'ok', perProject, fitsNew, assignedProjects, assignedMailboxes: assignedRows.length };
+  } catch {
+    return { state: 'error' };
+  }
+}
+
+/**
+ * Обслужит ли пул проекты аккаунта прямо сейчас: каждый проект из `needing`
+ * без своих ящиков получит perProject свободных (fitsNew), а если проектов
+ * для запуска нет (`needing` пуст) — хоть одному проекту аккаунта ящики уже
+ * отданы или пул примет новый. null — пул не прочитан (ни «да», ни «нет»).
+ */
+function poolServes(room: AccountPoolRoom, needing: readonly string[]): boolean | null {
+  if (room.state !== 'ok') return null;
+  if (needing.length === 0) return room.assignedProjects.size > 0 || room.fitsNew >= 1;
+  const without = needing.filter((id) => !room.assignedProjects.has(id)).length;
+  return without === 0 || room.fitsNew >= without;
+}
+
 /**
  * Какой текст письма «Sending is on» (что обещает каждый — шапка шаблона
  * engSendingEnabled.ts) — по состоянию аккаунта, прочитанному прямо перед
@@ -119,17 +213,33 @@ function isTableMissing(error: { code?: string | null } | null | undefined): boo
  * состоянии). Нет таблицы отметок — разблокировок не было; нет таблицы
  * автозапуска — 'auto' (его текст честен и без неё: «если рынок показывает
  * «Launch now», нажмите»), после разблокировки — 'check'; нет таблицы добора
- * — добора нет. НЕ БРОСАЕТ.
+ * — добора нет.
+ *
+ * ОБЕЩАНИЕ СТАРТА «САМ» ('auto') — только когда оно сбудется:
+ *  - выключатель HE_ENG_AUTO_LAUNCH выключен (heEngAutoLaunchEnabled; тот же
+ *    env_file у портала и воркера) — тик ничего не берёт: вместо 'auto' —
+ *    'check' (с фактами); 'launch_needed' и 'unblocked' («press «Launch» to
+ *    turn it on») тоже 'check' — «Launch» автозапуск сейчас не включит;
+ *  - пул ящиков не обслужит проекты с автозапуском (readAccountPoolRoom,
+ *    poolServes: у проекта нет своих ящиков, а свободных на него не хватает)
+ *    или не прочитался — вместо 'auto' 'check'. Пул не обслужит аккаунт —
+ *    факт mailboxesShort: текст говорит, что ящиков для его кампаний ещё нет
+ *    (как ENG_SENDING_SHORTAGE_TEXT кабинета), и ничего не обещает.
+ * Поведение «Launch» (платная подготовка) это не меняет — только текст.
+ * Второе возвращаемое поле — короткий итог для ответа сотруднику.
+ * НЕ БРОСАЕТ.
  */
 async function sendingEnabledCopy(
   db: NonNullable<typeof supabaseAdmin>,
   userId: string,
   revokedAt: string | null,
   enabledBefore: boolean,
-): Promise<EngSendingEnabledCopy> {
+): Promise<{ copy: EngSendingEnabledCopy; mailboxesShort: boolean }> {
+  const autoSwitchOn = heEngAutoLaunchEnabled();
+  const plain = (copy: EngSendingEnabledCopy) => ({ copy, mailboxesShort: false });
   try {
     const rows = await readHeEngAccountBlockRows(db, [userId]);
-    if (rows.state === 'error') return 'check';
+    if (rows.state === 'error') return plain('check');
     const row = rows.state === 'ok' ? (rows.rows.get(userId) ?? null) : null;
     // Непарсящиеся даты — сравнение ложно: считаем, что выключения после
     // разблокировки не было.
@@ -137,34 +247,41 @@ async function sendingEnabledCopy(
       row !== null && !row.active && (revokedAt === null || !(Date.parse(revokedAt) > Date.parse(row.unblockedAt ?? '')));
 
     const research = await readHeEngAccountResearch(db, userId);
-    if (!research.ok) return 'check';
+    if (!research.ok) return plain('check');
     const list = research.projects;
     const ids = list.map((p) => p.id);
+    const wantedIds: string[] = [];
     let anyWanted = false;
     let anyIntent = false;
     let intentMissing = false;
     let launched = false;
+    let poolRoom: AccountPoolRoom = { state: 'error' };
     const topUp: NonNullable<EngSendingEnabledFacts['topUp']> = { on: 0, held: 0, off: 0 };
     if (ids.length > 0) {
       const readConfigs = (columns: string) =>
         db.from('he_auto_pipeline_configs').select(columns).in('project_id', ids).limit(1000);
-      const [{ data: intents, error: intentErr }, first, { data: verticals, error: verticalsErr }] = await Promise.all([
+      const [{ data: intents, error: intentErr }, first, { data: verticals, error: verticalsErr }, pool] = await Promise.all([
         db.from(HE_ENG_LAUNCH_INTENT_TABLE).select('project_id, wanted').in('project_id', ids).limit(1000),
         readConfigs('project_id, enabled, refill_paused_at, refill_pause_reason'),
         db.from('he_verticals').select('id').in('project_id', ids).limit(1000),
+        readAccountPoolRoom(db, ids),
       ]);
+      poolRoom = pool;
       // Колонок паузы нет (миграция 20260930_0005) — паузы нет и у ночи: только enabled.
       const { data: configs, error: configsErr } =
         first.error?.code === '42703' ? await readConfigs('project_id, enabled') : first;
       if (intentErr) {
-        if (!isTableMissing(intentErr)) return 'check';
+        if (!isTableMissing(intentErr)) return plain('check');
         intentMissing = true;
       }
-      const intentRows = (intents ?? []) as Array<{ wanted?: unknown }>;
+      const intentRows = (intents ?? []) as Array<{ project_id?: unknown; wanted?: unknown }>;
       anyIntent = intentRows.length > 0;
+      for (const i of intentRows) {
+        if (i.wanted === true && typeof i.project_id === 'string') wantedIds.push(i.project_id);
+      }
       anyWanted = intentRows.some((i) => i.wanted === true);
       if (configsErr) {
-        if (!isTableMissing(configsErr)) return 'check';
+        if (!isTableMissing(configsErr)) return plain('check');
       } else {
         for (const cfg of (configs ?? []) as unknown as Array<Record<string, unknown>>) {
           const state = toClientEngRefillState(cfg);
@@ -174,7 +291,7 @@ async function sendingEnabledCopy(
         }
       }
       // Запуски — шаблоны рынков проекта с записью о запуске (как у паузы кампаний аккаунта).
-      if (verticalsErr) return 'check';
+      if (verticalsErr) return plain('check');
       const verticalIds = ((verticals ?? []) as Array<{ id?: unknown }>)
         .map((v) => (typeof v.id === 'string' ? v.id : ''))
         .filter(Boolean);
@@ -185,11 +302,19 @@ async function sendingEnabledCopy(
           .in('vertical_id', verticalIds)
           .not('launch_info', 'is', null)
           .limit(1);
-        if (templatesErr) return 'check';
+        if (templatesErr) return plain('check');
         launched = (templates ?? []).length > 0;
       }
+    } else {
+      poolRoom = await readAccountPoolRoom(db, ids);
     }
-    if (intentMissing) return afterUnblock ? 'check' : 'auto';
+    // Пул: обслужит ли он проекты, которые запускаются сами (намерение
+    // wanted), а без них — хоть один проект аккаунта. null — не прочитан.
+    const serves = poolServes(poolRoom, anyWanted ? wantedIds : []);
+    const mailboxesShort = serves === false;
+    // 'auto' — только при включённом автозапуске и пуле, который обслужит.
+    const autoTrue = autoSwitchOn && serves === true;
+    if (intentMissing) return plain(afterUnblock || !autoTrue ? 'check' : 'auto');
     const restarts: EngSendingEnabledFacts['research'] = { tryAgain: 0, teamFix: 0, team: 0, running: 0 };
     for (const p of list) {
       if (p.restart === 'try_again') restarts.tryAgain += 1;
@@ -204,19 +329,24 @@ async function sendingEnabledCopy(
       launched,
       research: restarts,
       topUp,
+      ...(mailboxesShort ? { mailboxesShort: true } : {}),
     };
     // Отправку ни разу не включали: «turned sending back on» было бы неправдой
     // — текст 'launch_needed' (про кампании, созданные раньше, он говорит
     // «does not change campaigns created before»).
     const kind = afterUnblock ? (anyWanted ? 'check' : enabledBefore ? 'unblocked' : 'launch_needed') : anyWanted ? 'auto' : 'launch_needed';
-    if (kind === 'auto') return 'auto';
+    if (kind === 'auto') return autoTrue ? plain('auto') : { copy: { kind: 'check', facts }, mailboxesShort };
     if ((kind === 'unblocked' || kind === 'launch_needed') && !facts.launchable) {
       // Проектов нет — 'check' с фактами («создайте проект»).
-      return { kind: facts.projects === 0 ? 'check' : 'research', facts };
+      return { copy: { kind: facts.projects === 0 ? 'check' : 'research', facts }, mailboxesShort };
     }
-    return { kind, facts };
+    // «Press «Launch» to turn it on» — неправда, пока выключатель автозапуска выключен.
+    if (!autoSwitchOn && (kind === 'unblocked' || kind === 'launch_needed')) {
+      return { copy: { kind: 'check', facts }, mailboxesShort };
+    }
+    return { copy: { kind, facts }, mailboxesShort };
   } catch {
-    return 'check';
+    return plain('check');
   }
 }
 
@@ -232,14 +362,45 @@ function view(access: HeEngSendingAccess) {
   };
 }
 
+/**
+ * Пул для карточки клиента (строка рядом с «Включить отправку»): ящики, уже
+ * отданные us-проектам клиента, и сколько новых проектов примет пул (то же
+ * «хватит на N новых клиентов», что у полосы пула раздела). Не прочиталось —
+ * state 'missing' / 'error', карточка тогда молчит.
+ */
+async function poolView(db: NonNullable<typeof supabaseAdmin>, userId: string) {
+  try {
+    const { data, error } = await db.from('he_projects').select('id').eq('created_by', userId).eq('market', 'us').limit(1000);
+    if (error) return { state: 'error' as const };
+    const ids = ((data ?? []) as Array<{ id?: unknown }>)
+      .map((p) => (typeof p.id === 'string' ? p.id : ''))
+      .filter(Boolean);
+    const room = await readAccountPoolRoom(db, ids);
+    if (room.state !== 'ok') return { state: room.state };
+    return {
+      state: 'ok' as const,
+      per_project: room.perProject,
+      fits_new_clients: room.fitsNew,
+      client_mailboxes: room.assignedMailboxes,
+      client_projects: ids.length,
+      client_projects_with_mailboxes: room.assignedProjects.size,
+    };
+  } catch {
+    return { state: 'error' as const };
+  }
+}
+
 export async function GET(req: NextRequest, ctx: RouteContext) {
   const auth = await requireAdminAuth(req);
   if ('error' in auth) return auth.error;
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
   const { id } = await ctx.params;
   if (!isValidUuid(id)) return jsonError('Некорректный id', 400);
-  const access = await readHeEngSendingAccess(supabaseAdmin, id, { skipEnv: true });
-  return NextResponse.json(view(access));
+  const [access, pool] = await Promise.all([
+    readHeEngSendingAccess(supabaseAdmin, id, { skipEnv: true }),
+    poolView(supabaseAdmin, id),
+  ]);
+  return NextResponse.json({ ...view(access), auto_launch: heEngAutoLaunchEnabled(), pool });
 }
 
 export async function POST(req: NextRequest, ctx: RouteContext) {
@@ -278,9 +439,14 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
 
   let email: 'sent' | 'no_email' | 'failed' | null = null;
   let emailCopy: EngSendingEnabledCopy | null = null;
+  let emailMailboxesShort = false;
   let paused: Awaited<ReturnType<typeof pauseHeEngAccountSending>> | null = null;
   if (set.changed && enabled) {
-    if (set.row.email) emailCopy = await sendingEnabledCopy(supabaseAdmin, id, set.row.revokedAt, enabledBefore);
+    if (set.row.email) {
+      const picked = await sendingEnabledCopy(supabaseAdmin, id, set.row.revokedAt, enabledBefore);
+      emailCopy = picked.copy;
+      emailMailboxesShort = picked.mailboxesShort;
+    }
     const sent = await sendHeEngSendingEnabledEmail(supabaseAdmin, id, set.row.email, emailCopy ?? undefined);
     email = sent.kind;
     if (sent.kind === 'failed') {
@@ -314,5 +480,14 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   );
 
   const after = await readHeEngSendingAccess(supabaseAdmin, id, { skipEnv: true });
-  return NextResponse.json({ ok: true, changed: set.changed, email, paused, ...view(after) });
+  return NextResponse.json({
+    ok: true,
+    changed: set.changed,
+    email,
+    // Какой текст ушёл и сказал ли он, что ящиков для кампаний клиента ещё нет (пул).
+    email_copy: emailCopy === null ? null : typeof emailCopy === 'string' ? emailCopy : emailCopy.kind,
+    email_mailboxes_short: email === 'sent' ? emailMailboxesShort : null,
+    paused,
+    ...view(after),
+  });
 }
