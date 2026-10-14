@@ -41,6 +41,7 @@ import { scrapeEmails, type SitePageCache } from '@/lib/enrich/emailScraper';
 import { shouldUseCachedError } from '@/lib/enrich/errorPolicy';
 import { runWithTimeout } from '@/lib/enrich/timeoutUtils';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
+import type { WebsiteFetchGuard } from '@/lib/enrich/websiteParser';
 import {
   smtpProxyAvailable,
   validateEmailForAutoPipeline,
@@ -59,6 +60,17 @@ export type OutreachEmailVerification = 'ok' | 'catch_all' | 'unverified';
  * кандидаты одного сайта не проверяют его домен заново.
  */
 export type EmailDomainCache = Map<string, DomainInfo>;
+
+/**
+ * Защита чтения и потолок тела для обхода сайта — опции guard и maxBytes
+ * scrapeEmails (lib/enrich/emailScraper.ts). Отклонённый адрес там — страница,
+ * которая не открылась, а не исключение; тело длиннее maxBytes разбирается по
+ * первым maxBytes байтам.
+ */
+export interface SiteReadLimits {
+  guard: WebsiteFetchGuard;
+  maxBytes: number;
+}
 
 export interface FindAndVerifyOptions<P extends { email: string }> {
   /** Адрес сайта компании; пустой или неразборчивый — обходится домен. */
@@ -88,6 +100,14 @@ export interface FindAndVerifyOptions<P extends { email: string }> {
   maxPages?: number;
   /** Скачанные страницы сайта компании — общие с разбором сайта, чтобы не качать его второй раз. */
   pageCache?: SitePageCache;
+  /**
+   * Защита чтения и потолок тела обхода (SiteReadLimits). Передаёт английский
+   * аутрич (polzaOutreach/findEmail.ts). Не передана — обход прежний:
+   * redirect: 'follow', тело целиком, объект опций scrapeEmails тот же.
+   * Передана — ответ, который защита урезала, в общий кэш почт не пишется
+   * (см. scrapeSiteEmails): его читают обходы без защиты.
+   */
+  siteRead?: SiteReadLimits;
 }
 
 export type VerifiedPick<P extends { email: string }> = P & { verification: OutreachEmailVerification };
@@ -298,8 +318,8 @@ async function writeCachedEmails(key: string, payload: { emails: string[]; pages
 
 /**
  * Обход сайта: минута, но не дольше, чем осталось у компании; результат — в
- * кэш. Сбой — пустой список. cutByDeadline — обход оборвал общий потолок
- * компании, а не свой минутный.
+ * кэш, кроме ответа, урезанного защитой siteRead. Сбой — пустой список.
+ * cutByDeadline — обход оборвал общий потолок компании, а не свой минутный.
  */
 async function scrapeSiteEmails(
   url: string,
@@ -307,6 +327,7 @@ async function scrapeSiteEmails(
   maxPages: number,
   budgetMs: number,
   pageCache?: SitePageCache,
+  siteRead?: SiteReadLimits,
 ): Promise<{ emails: string[]; cutByDeadline: boolean }> {
   if (budgetMs <= 0) return { emails: [], cutByDeadline: true };
   const timeoutMs = Math.min(SITE_TIMEOUT_MS, budgetMs);
@@ -314,7 +335,18 @@ async function scrapeSiteEmails(
   let timedOut = false;
   try {
     const result = await runWithTimeout(
-      scrapeEmails(url, { locale, maxPages, timeout: PAGE_TIMEOUT_MS, signal: abort.signal, pageCache }),
+      // siteRead не передан — scrapeEmails получает прежний объект опций.
+      // Передан — проверки адреса защиты (её DNS-запросы) идут под теми же
+      // сроками: попытка страницы PAGE_TIMEOUT_MS, сайт timeoutMs, компания
+      // COMPANY_TIMEOUT_MS; своих таймеров у них нет.
+      scrapeEmails(url, {
+        locale,
+        maxPages,
+        timeout: PAGE_TIMEOUT_MS,
+        signal: abort.signal,
+        pageCache,
+        ...(siteRead ? { guard: siteRead.guard, maxBytes: siteRead.maxBytes } : {}),
+      }),
       {
         timeoutMs,
         timeoutMessage: `Превышено время ожидания сайта (${Math.round(timeoutMs / 1000)}с)`,
@@ -326,7 +358,22 @@ async function scrapeSiteEmails(
       },
     );
     const emails = result.emails.slice(0, CACHE_MAX_EMAILS);
-    void writeCachedEmails(url, { emails, pagesScanned: result.pagesScanned });
+    // readLimits есть только с siteRead: что отклонила защита и что упёрлось
+    // в потолок — одной строкой на сайт. Для раннера это та же «почты нет».
+    const limits = result.readLimits;
+    const limited = limits !== undefined && (limits.refused > 0 || limits.capped > 0);
+    if (limited) {
+      warn(`site read limits (${url}): ${limits.refused} address(es) refused by the read guard, ${limits.capped} response(s) cut at ${siteRead?.maxBytes} bytes; result not cached`);
+    }
+    // Кэш общий: строку по тому же адресу читают обходы без защиты —
+    // RU-аутрич (readCachedEmails выше) и обогащение сайтов. Ответ, который
+    // урезала защита (отказ адреса или потолок тела), туда не пишем: иначе
+    // отказ стал бы для них «почты нет» на 6 ч, а урезанный список — ответом
+    // сайта на 7 дней. Следующий поиск с защитой обойдёт сайт заново. Защита
+    // передана, а readLimits нет — урезан ли ответ, неизвестно: тоже не пишем.
+    // Без siteRead запись прежняя.
+    const shapedByGuard = siteRead !== undefined && (limits === undefined || limited);
+    if (!shapedByGuard) void writeCachedEmails(url, { emails, pagesScanned: result.pagesScanned });
     return { emails, cutByDeadline: false };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Ошибка извлечения email';
@@ -390,7 +437,7 @@ export async function findAndVerifyCompanyEmail<P extends { email: string }>(
 
   let emails = await readCachedEmails(url, left());
   if (!emails) {
-    const scraped = await scrapeSiteEmails(url, opts.locale, opts.maxPages ?? DEFAULT_MAX_PAGES, left(), opts.pageCache);
+    const scraped = await scrapeSiteEmails(url, opts.locale, opts.maxPages ?? DEFAULT_MAX_PAGES, left(), opts.pageCache, opts.siteRead);
     // Для раннера это просто «почты нет»; лог отличает «не успели» от сайта,
     // где почты правда нет.
     if (scraped.cutByDeadline) warn(`company email search hit the ${COMPANY_TIMEOUT_MS}ms cap before any address (${url})`);

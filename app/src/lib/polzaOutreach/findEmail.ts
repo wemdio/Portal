@@ -26,13 +26,27 @@
  *
  * Сетевые ошибки не валят запуск: сайт не открылся — почты нет, компания
  * отсеивается с причиной no_corporate_email.
+ *
+ * Обход сайта — под защитой чтения английского рынка и с потолком тела,
+ * как у поиска почт EN-джоб конструктора баз (stepFindEmails в
+ * tools/processingSteps.ts): адреса сайтов приходят из чужих источников, а
+ * читает их воркер на нашем сервере. Защита — createUsWebsiteFetchGuard
+ * (enrich/publicAddress.ts): только публичный адрес перед каждым запросом и
+ * шагом редиректа и ещё раз при соединении прямого маршрута, не адреса наших
+ * серверов, порт только 80/443, не больше 10 шагов редиректа. Переход
+ * https → http разрешён, как у конструктора: сертификат обход почты и так не
+ * проверяет, а запрет терял бы адреса сайтов, которые так переадресуют.
+ * Потолок тела — SITE_READ_MAX_BYTES. Отклонённый адрес — страница, которая
+ * не открылась: сайт целиком отклонён — почты нет, как у неоткрывшегося.
  */
 
+import { createUsWebsiteFetchGuard } from '@/lib/enrich/publicAddress';
 import {
   findAndVerifyCompanyEmail,
   type EmailDomainCache,
   type OutreachEmailVerdict,
   type OutreachEmailVerification,
+  type SiteReadLimits,
 } from '@/lib/outreachEmail/findAndVerify';
 import type { CompanyEmail } from '@/lib/outreachEmail/companyEmails';
 
@@ -134,6 +148,29 @@ const FREE_MAIL_DOMAINS = new Set([
 // (минута) держит findAndVerify — зависший хост не тормозит запуск дольше.
 const MAX_PAGES = 10;
 
+/**
+ * Потолок тела одного ответа при обходе — 3 МиБ, тот же, что у EN-джоб
+ * конструктора баз (EN_SITE_READ_MAX_BYTES в tools/processingSteps.ts) и
+ * движка гипотез. Разбираются первые 3 МиБ: адреса на странице длиннее
+ * (редкость) дальше потолка не видны.
+ */
+export const SITE_READ_MAX_BYTES = 3 * 1024 * 1024;
+
+let siteRead: SiteReadLimits | null = null;
+
+/**
+ * Защита — одна на процесс: пул соединений прямого маршрута под ней общий
+ * (emailScraper заводит его на объект защиты), а не новый на каждую компанию.
+ * Создаётся при первом поиске почты: импорт модуля ничего не создаёт.
+ */
+function polzaSiteRead(): SiteReadLimits {
+  siteRead ??= {
+    guard: { ...createUsWebsiteFetchGuard(), allowHttpDowngrade: true },
+    maxBytes: SITE_READ_MAX_BYTES,
+  };
+  return siteRead;
+}
+
 function emailDomain(email: string): string {
   return email.split('@')[1] ?? '';
 }
@@ -201,6 +238,7 @@ export async function findCompanyEmail(
     maxPages: MAX_PAGES,
     domainCache,
     pick: (emails, excluded) => pickCompanyEmail(emails, normalizedDomain, excluded),
+    siteRead: polzaSiteRead(),
   });
   const found = search.result;
   return {
