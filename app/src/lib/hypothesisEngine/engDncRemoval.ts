@@ -9,7 +9,7 @@
  * сводка страницы не читается, удаление адреса из списка таблиц не трогает —
  * ни одного запроса в таблицы he_eng_dnc_intents / he_eng_dnc_removals и ни
  * одного вызова рассыльщика. Переменную читают порознь роут (процесс portal) и
- * воркер hypothesis-engine. Миграция 20261014_0005 — до включения.
+ * воркер hypothesis-engine. Миграция 20261015_0020 — до включения.
  *
  * ПУТЬ АДРЕСА.
  *  1. Роут POST /api/client/blocklist (ENG-ветка, _eng.ts) ДО вставки в список
@@ -1307,7 +1307,7 @@ export async function runHeEngDncRemovalPass(opts: {
       if (isMissing(intentErr)) {
         if (!missingWarned) {
           missingWarned = true;
-          opts.log('warn', '[eng-dnc] таблиц he_eng_dnc_* нет (миграция 20261014_0005) — снятие с кампаний не идёт');
+          opts.log('warn', '[eng-dnc] таблиц he_eng_dnc_* нет (миграция 20261015_0020) — снятие с кампаний не идёт');
         }
         return report;
       }
