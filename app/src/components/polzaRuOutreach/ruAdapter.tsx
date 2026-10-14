@@ -72,6 +72,7 @@ const SOURCE_SHORT: Record<SourceCode, string> = {
   contracts: 'Госконтракты',
   tenders: 'Тендеры',
   growth: 'Гранты',
+  base: 'Своя база',
   site_news: 'Новости сайтов',
   directory: 'Общая база',
   gis: '2ГИС',

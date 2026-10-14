@@ -33,6 +33,8 @@ export interface Candidate {
   vacancyCount: number;
   revenue: number | null;
   employees: number | null;
+  /** Почты из загруженной базы: поиск почты проверяет их наравне с сайтом. */
+  knownEmails: string[];
 }
 
 function base(partial: Partial<Candidate> & Pick<Candidate, 'key' | 'companyName'> & { source: SourceCode }): Candidate {
@@ -50,6 +52,7 @@ function base(partial: Partial<Candidate> & Pick<Candidate, 'key' | 'companyName
     vacancyCount: 0,
     revenue: null,
     employees: null,
+    knownEmails: [],
     ...rest,
   };
 }
@@ -254,6 +257,27 @@ export async function collectCandidates(
     });
   }
 
+  // Своя база (загруженная): компания с почтой, без повода — цепочка «только профиль».
+  if (src.has('base')) {
+    await attempt('base', async () => {
+      for (const r of await loadSignalRows(db, 'base')) {
+        const email = typeof r.details.email === 'string' && r.details.email.includes('@') ? r.details.email : null;
+        all.push(
+          base({
+            key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.company_name)}`,
+            source: 'base',
+            sourceRecordId: `base:${r.id}`,
+            companyName: r.company_name,
+            inn: r.inn,
+            website: r.company_website,
+            revenue: typeof r.details.revenue === 'number' ? r.details.revenue : null,
+            knownEmails: email ? [email] : [],
+          }),
+        );
+      }
+    });
+  }
+
   if (src.has('site_news')) {
     await attempt('site_news', async () => {
       all.push(...(await loadSiteUniverse(db)));
@@ -444,6 +468,7 @@ function merge(list: Candidate[]): Candidate[] {
     existing.amo = existing.amo ?? c.amo;
     existing.revenue = existing.revenue ?? c.revenue;
     existing.employees = existing.employees ?? c.employees;
+    existing.knownEmails = Array.from(new Set([...existing.knownEmails, ...c.knownEmails]));
     if (!existing.vacancies.length && c.vacancies.length) {
       existing.vacancies = c.vacancies;
       existing.vacancyCount = c.vacancyCount;
