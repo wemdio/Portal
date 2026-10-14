@@ -239,7 +239,8 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
  * разбор ИИ стоит ~$0,1 на тысячу компаний.
  */
 export function maxCandidatesFor(target: number): number {
-  return Math.min(20_000, Math.max(300, target * 50));
+  // 14.10.2026: «просят 1000 — тянем, пока не наберём» — потолок 50 000 (было 20 000).
+  return Math.min(50_000, Math.max(300, target * 50));
 }
 
 /**
@@ -1315,6 +1316,7 @@ async function runJob(
         signals,
         reactivation,
         taScore: site.taScore,
+        icpMinTa: config.min_ta_score,
         freshnessDays: config.freshness_days,
         revenue,
         employees,

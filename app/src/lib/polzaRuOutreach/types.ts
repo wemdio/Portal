@@ -186,6 +186,11 @@ export interface RuOutreachConfig {
   min_revenue: number;
   max_revenue: number;
   min_employees: number;
+  /**
+   * Коды ОКВЭД ЦА для «Общей базы компаний» (префиксы: 62.01, 28, 46.6).
+   * Пусто — без отбора по ОКВЭД, как раньше.
+   */
+  okved_prefixes: string[];
   include_previously_exported: boolean;
   sender_id: string | null;
   /**
@@ -236,6 +241,9 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
     min_revenue: minRevenue,
     max_revenue: Math.max(minRevenue, clampInt(raw.max_revenue, 3_000_000_000, 0, 1_000_000_000_000)),
     min_employees: clampInt(raw.min_employees, 10, 0, 100_000),
+    okved_prefixes: Array.isArray(raw.okved_prefixes)
+      ? Array.from(new Set(raw.okved_prefixes.map((s) => String(s).trim()).filter((s) => /^\d{2}(\.\d{1,2}){0,2}$/.test(s)))).slice(0, 100)
+      : [],
     include_previously_exported: raw.include_previously_exported === true,
     sender_id: senderId,
     llm_budget_usd: sanitizeLlmBudgetUsd(raw.llm_budget_usd),

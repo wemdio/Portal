@@ -72,6 +72,12 @@ export interface RouteInput {
   /** Давний отказ в AMO с записанным разговором. */
   reactivation: boolean;
   taScore: number;
+  /**
+   * С какого ЦА-балла компания без повода идёт цепочкой «Только профиль».
+   * С 14.10.2026 — ползунок «Похожесть на клиента» формы запуска (было жёстко 7:
+   * своя база по ОКВЭД ЦА давала 42 готовых из 1969). Не задан — 7.
+   */
+  icpMinTa?: number;
   freshnessDays: number;
   revenue: number | null;
   employees: number | null;
@@ -273,7 +279,7 @@ export function routeChain(input: RouteInput): Route | null {
   for (const chain of CEO_ORDER) {
     if (chain === 'reactivation') continue;
     if (chain === 'icp_only') {
-      if (input.taScore >= 7) candidates.push(evaluate('icp_only', [], input, now));
+      if (input.taScore >= (input.icpMinTa ?? 7)) candidates.push(evaluate('icp_only', [], input, now));
       continue;
     }
     const list = byChain.get(chain);

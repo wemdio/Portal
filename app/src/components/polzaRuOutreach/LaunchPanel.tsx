@@ -104,6 +104,7 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
   const [minRevenueM, setMinRevenueM] = useState((initial?.min_revenue ?? 30 * MILLION) / MILLION);
   const [maxRevenueM, setMaxRevenueM] = useState((initial?.max_revenue ?? 3000 * MILLION) / MILLION);
   const [minEmployees, setMinEmployees] = useState(initial?.min_employees ?? 10);
+  const [okvedText, setOkvedText] = useState((initial?.okved_prefixes ?? []).join(', '));
   const [includeExported, setIncludeExported] = useState(initial?.include_previously_exported ?? false);
   const [senderId, setSenderId] = useState(initial?.sender_id ?? '');
   const [budgetUsd, setBudgetUsd] = useState(initial?.llm_budget_usd ?? DEFAULT_LLM_BUDGET_USD);
@@ -125,6 +126,7 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
       min_revenue: minRevenueM * MILLION,
       max_revenue: maxRevenueM * MILLION,
       min_employees: minEmployees,
+      okved_prefixes: okvedText.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean),
       include_previously_exported: includeExported,
       sender_id: senderId || null,
       llm_budget_usd: budgetUsd,
@@ -267,6 +269,10 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mo
             </div>
           </div>
           <p className="mt-1 text-xs text-gray-500">Известный размер вне рамок — отсев. Неизвестный — компания проходит.</p>
+          <div className="mt-3">
+            <div className="mb-1 text-xs text-gray-500">ОКВЭД для общей базы (через запятую)</div>
+            <input className={input} placeholder="62.01, 62.02, 52.29, 28, 46.6" value={okvedText} onChange={(e) => setOkvedText(e.target.value)} />
+          </div>
         </div>
       </div>
 
