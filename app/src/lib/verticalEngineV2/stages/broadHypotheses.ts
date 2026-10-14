@@ -90,7 +90,7 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
   const market = ctx.market ?? projectMarket(project);
-  const audienceScope = isVeAudienceGenerationEnabled(job.project_id);
+  const audienceScope = isVeAudienceGenerationEnabled(job.project_id, project.audience_generation_version);
   // Исследование перестраивает вертикали проекта — дописывать к ним нельзя.
   // Постановка такого не допускает; это страховка на случай гонки запросов.
   if (project.status === 'researching') {
