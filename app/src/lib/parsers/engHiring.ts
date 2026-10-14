@@ -490,6 +490,39 @@ function roleTermMatches(term: string, title: string, haystack: string): boolean
     : buildRolesRegex(term).test(haystack);
 }
 
+/**
+ * Маркетинговый найм под поток заявок: Head of Demand Gen, Growth Marketing,
+ * Lead Generation, Head of Marketing (решение Максима 09.10.2026 — расширить
+ * источник английского аутрича за счёт маркетинговых вакансий).
+ *
+ * Берём только роли, которые отвечают за ПОТОК (спрос, лиды, пайплайн), — у
+ * них та же боль, что у найма продажника. Бренд, контент, коммуникации,
+ * продуктовый маркетинг и мероприятия сюда не относятся: там нашего повода нет.
+ */
+const B2B_TITLE_DEMAND_RE =
+  /\b(demand gen(?:eration)?|lead gen(?:eration)?|growth marketing|performance marketing|pipeline marketing|revenue marketing|marketing director|(?:vp|head|director|chief|lead),?\s+(?:of\s+)?marketing|chief marketing officer|\bcmo\b)\b/i;
+
+/** Маркетинг не про поток: эти слова в названии отменяют совпадение выше. */
+const DEMAND_TITLE_NOISE_RE =
+  /\b(brand|content|communications?|pr|social|community|product marketing|field marketing|marketing event|event|design(?:er)?|copywriter|seo|intern|internship|trainee|assistant|coordinator|analyst)\b/i;
+
+/** Вакансия маркетинга, годная как повод: отвечает за поток заявок. */
+export function isDemandMarketingTitle(title: string): boolean {
+  const cleanTitle = cleanPlainText(title);
+  if (!B2B_TITLE_DEMAND_RE.test(cleanTitle)) return false;
+  return !DEMAND_TITLE_NOISE_RE.test(cleanTitle);
+}
+
+/**
+ * Названия, которые мы тянем в `eng_hiring_cache` как источник английского
+ * аутрича: продажи + маркетинг потока. Шире, чем `isHighIntentB2BSalesTitle`:
+ * тот остаётся строго про продажи, потому что по нему работает обычный парсер
+ * вакансий (роль «b2b» в форме поиска), и маркетинг там не ждут.
+ */
+export function isOutreachSourceTitle(title: string): boolean {
+  return isHighIntentB2BSalesTitle(title) || isDemandMarketingTitle(title);
+}
+
 export function isHighIntentB2BSalesTitle(title: string): boolean {
   const cleanTitle = cleanPlainText(title);
   if (!B2B_TITLE_STRONG_RE.test(cleanTitle)) return false;

@@ -12,18 +12,29 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { domainFromEmail, normalizeDomain, normalizeInn } from '../company';
 
-const CLIENT_STATUSES = new Set([
-  'Успешно реализовано',
-  'Передан в работу',
-  'Продлено',
-  'Счет / договор на продление',
-  'Продление обсуждается',
-  'Риск / нужен контроль',
-  'Пауза',
+// Этапы и воронки — по id AMO, а не по названию: продажи переименовывают
+// этапы, а id остаётся прежним (так 02.10.2026 упал пятничный отчёт).
+// 142/143 — системные «Успешно» / «Закрыто и не реализовано» во всех воронках.
+const CLIENT_STATUS_IDS = new Set([
+  142, // Успешно реализовано
+  87712790, // Передан в работу
+  87712818, // Продлено
+  87712814, // Счет / договор на продление
+  87712810, // Продление обсуждается
+  87712802, // Риск / нужен контроль
+  87712822, // Пауза
 ]);
-const LOST_STATUSES = new Set(['Закрыто и не реализовано', 'Отвал / не продлен', 'Отказ']);
+const LOST_STATUS_IDS = new Set([
+  143, // Закрыто и не реализовано / «Отказ» в «Работе с базой»
+  87712830, // Отвал / не продлен
+  66740898, // Отказ («Для Вадима»)
+]);
 /** Воронки, где сделка — это разговор Polza об аутриче (а не чужой холод). */
-const REACTIVATION_PIPELINES = new Set(['Воронка - новые лиды', 'Вторичные (и не только) продажи', 'Работа с базой']);
+const REACTIVATION_PIPELINE_IDS = new Set([
+  7670334, // Воронка - новые лиды
+  11176862, // Вторичные (и не только) продажи
+  7670754, // Работа с базой
+]);
 const RECENT_CONTACT_DAYS = 30;
 
 export type AmoStatus = 'open_deal' | 'client' | 'lost_recent' | 'lost' | 'none';
@@ -32,6 +43,7 @@ export interface AmoRecord {
   amoId: number;
   status: AmoStatus;
   statusName: string;
+  pipelineId: number;
   pipelineName: string;
   companyName: string | null;
   domain: string | null;
@@ -50,9 +62,9 @@ export interface AmoIndex {
 /** Самый «запрещающий» статус побеждает: клиент > открытая сделка > свежий отказ > отказ. */
 const RANK: Record<AmoStatus, number> = { client: 4, open_deal: 3, lost_recent: 2, lost: 1, none: 0 };
 
-function classify(statusName: string, lastContactAt: string | null): AmoStatus {
-  if (CLIENT_STATUSES.has(statusName)) return 'client';
-  if (LOST_STATUSES.has(statusName)) {
+function classify(statusId: number, lastContactAt: string | null): AmoStatus {
+  if (CLIENT_STATUS_IDS.has(statusId)) return 'client';
+  if (LOST_STATUS_IDS.has(statusId)) {
     const t = lastContactAt ? new Date(lastContactAt).getTime() : NaN;
     return Number.isFinite(t) && Date.now() - t < RECENT_CONTACT_DAYS * 86_400_000 ? 'lost_recent' : 'lost';
   }
@@ -65,7 +77,7 @@ export async function loadAmoIndex(db: SupabaseClient): Promise<AmoIndex> {
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db
       .from('amo_leads')
-      .select('amo_id,company_name,company_website,contact_email,status_name,pipeline_name,updated_at,closed_at,raw')
+      .select('amo_id,company_name,company_website,contact_email,status_id,status_name,pipeline_id,pipeline_name,updated_at,closed_at,raw')
       .order('amo_id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new Error(`amo_leads load failed: ${error.message}`);
@@ -102,8 +114,9 @@ export async function loadAmoIndex(db: SupabaseClient): Promise<AmoIndex> {
     const domain = siteDomain ?? emailDomain;
     const rec: AmoRecord = {
       amoId,
-      status: classify(statusName, lastContactAt),
+      status: classify(Number(lead.status_id), lastContactAt),
       statusName,
+      pipelineId: Number(lead.pipeline_id),
       pipelineName: String(lead.pipeline_name ?? ''),
       companyName: typeof lead.company_name === 'string' && lead.company_name.trim() ? lead.company_name.trim() : null,
       domain,
@@ -136,7 +149,7 @@ export function reactivationCandidates(index: AmoIndex): AmoRecord[] {
   const out: AmoRecord[] = [];
   for (const rec of index.records) {
     if (rec.status !== 'lost' || !rec.priorContact || !rec.companyName || !rec.domain) continue;
-    if (!REACTIVATION_PIPELINES.has(rec.pipelineName)) continue;
+    if (!REACTIVATION_PIPELINE_IDS.has(rec.pipelineId)) continue;
     // Итоговый статус компании — по индексу: у неё может быть и более новая сделка.
     if (amoLookup(index, rec.domain, rec.inn)?.status !== 'lost') continue;
     if (seen.has(rec.domain)) continue;

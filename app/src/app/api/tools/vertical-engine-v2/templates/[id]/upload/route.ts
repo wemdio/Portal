@@ -14,8 +14,9 @@ export async function GET(req: NextRequest, { params }: Context) {
     if ('error' in authed) return authed.error;
     if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
     try {
-      const projectId = await loadContactUploadProject(supabaseAdmin, (await params).id);
-      return NextResponse.json(await loadContactUploadStatus(supabaseAdmin, projectId));
+      const templateId = (await params).id;
+      const projectId = await loadContactUploadProject(supabaseAdmin, templateId);
+      return NextResponse.json(await loadContactUploadStatus(supabaseAdmin, projectId, templateId));
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : 'Загрузка недоступна' }, { status: 503 });
     }

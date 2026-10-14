@@ -12,7 +12,7 @@
 // any native source. All country / title / html / json-sanitize logic is REUSED from
 // engHiring.ts so jobhive rows are treated identically to natively-fetched ones.
 
-import { cleanHtml, inferCountryCode, isHighIntentB2BSalesTitle, stripUnstorableJsonChars, type EngHiringSource } from '@/lib/parsers/engHiring';
+import { cleanHtml, inferCountryCode, isHighIntentB2BSalesTitle, isOutreachSourceTitle, stripUnstorableJsonChars, type EngHiringSource } from '@/lib/parsers/engHiring';
 import { companyDedupKey } from '@/lib/jobs/atsCompanyParser';
 
 /** Remote Parquet the ingest streams via DuckDB httpfs (override per-env for testing/mirrors). */
@@ -38,8 +38,13 @@ export const JOBHIVE_SELECT_COLUMNS = [
 ] as const;
 
 // Coarse, deliberately-broad title prefilter pushed into DuckDB to cut 4.3M rows down
-// to a sales-ish subset before Node applies the EXACT isHighIntentB2BSalesTitle filter.
+// to a sales-ish subset before Node applies the EXACT isOutreachSourceTitle filter.
 // Recall-biased: better to over-include here and let the precise JS filter trim.
+//
+// 09.10.2026: added demand-side marketing titles (Maxim's call — the sales-title
+// source was exhausted in two autofill runs). NOT a bare '%marketing%': that pulls
+// brand/content/PMM/event rows by the hundred thousand through the heavy description
+// column, and the exact filter would throw them all away anyway.
 const JOBHIVE_COARSE_SALES_TERMS = [
   '%sales%',
   '%account exec%',
@@ -54,6 +59,18 @@ const JOBHIVE_COARSE_SALES_TERMS = [
   '% sdr %',
   '% bdr %',
   '% ae %',
+  '%demand gen%',
+  '%lead gen%',
+  '%growth marketing%',
+  '%performance marketing%',
+  '%pipeline marketing%',
+  '%revenue marketing%',
+  '%head of marketing%',
+  '%director of marketing%',
+  '%marketing director%',
+  '%vp of marketing%',
+  '%vp marketing%',
+  '%chief marketing%',
 ];
 
 export interface JobhiveRow {
@@ -206,7 +223,8 @@ export function mapJobhiveRowToCacheRow(row: JobhiveRow): JobhiveCacheRow | null
 function rowFreshnessRank(row: JobhiveRow): number {
   const ms = Date.parse(String(row.posted_at ?? ''));
   const fresh = Number.isNaN(ms) ? 0 : ms;
-  // Tiny tiebreak so that, among same-dated postings, an exact-match sales title wins.
+  // Tiny tiebreak so that, among same-dated postings, a SALES title wins — over a
+  // marketing one too: hiring a rep is the stronger occasion for our letter.
   const strong = isHighIntentB2BSalesTitle(String(row.title ?? '')) ? 1 : 0;
   return fresh + strong;
 }
@@ -229,7 +247,7 @@ export function dedupeJobhiveRowsByCompanyCountry(rows: JobhiveRow[]): JobhiveRo
 export interface JobhivePipelineStats {
   /** Rows the DuckDB scan exported (after the SQL coarse filter + coarse dedup). */
   exported: number;
-  /** Rows that passed the EXACT sales-title filter. */
+  /** Rows that passed the EXACT title filter (sales + demand-side marketing). */
   titleMatched: number;
   /** Rows after the per-(company, country) dedup. */
   deduped: number;
@@ -241,11 +259,11 @@ export interface JobhivePipelineStats {
   cacheRows: JobhiveCacheRow[];
 }
 
-/** The whole Node-side pipeline after the DuckDB scan: exact sales-title filter →
+/** The whole Node-side pipeline after the DuckDB scan: exact title filter →
  *  per-(company, country) dedup → cache-row mapping. Pure (no I/O) so the real ingest
  *  and the --dry-run rehearsal share one code path and it stays unit-testable. */
 export function processJobhiveRows(rawRows: JobhiveRow[]): JobhivePipelineStats {
-  const titleMatched = rawRows.filter((row) => isHighIntentB2BSalesTitle(String(row.title ?? '')));
+  const titleMatched = rawRows.filter((row) => isOutreachSourceTitle(String(row.title ?? '')));
   const dedupedRows = dedupeJobhiveRowsByCompanyCountry(titleMatched);
   const cacheRows = dedupedRows
     .map(mapJobhiveRowToCacheRow)

@@ -73,11 +73,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         const err = result.error;
         switch (err.code) {
           case 'no_fields':
-            return jsonError('Нужен offer_override, style_override, signature_override или business_override', 400);
+            return jsonError('Нужен offer_override, style_override, signature_override, business_override или priority_niches', 400);
           case 'bad_type':
             return jsonError(`${err.field} должен быть строкой`, 400);
           case 'too_long':
             return jsonError(`${err.field}: максимум ${err.max} символов`, 413);
+          case 'invalid_niches':
+            return jsonError(err.message, 400);
+          case 'research_busy':
+            return jsonError('Исследование уже идёт. Направления можно изменить после его завершения.', 409);
           case 'not_found':
             return jsonError('Проект не найден', 404);
           default:

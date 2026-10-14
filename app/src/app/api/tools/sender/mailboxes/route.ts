@@ -4,12 +4,13 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sealMailboxSecret } from '@/lib/byoMailbox/credentials';
 import { parseMailboxFile, FileParseError } from '@/lib/sender/fileParse';
 import { parseMailboxRows } from '@/lib/sender/mailboxImport';
+import { isIpv4 } from '@/lib/sender/egress';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
 const LIST_COLS =
-  'id, provider, auth_type, enabled, google_state, google_account, email, display_name, username, smtp_host, smtp_port, smtp_tls_mode, imap_host, imap_port, status, daily_campaign_limit, daily_total_limit, last_verified_at, last_error, last_send_at, imap_checked_at, directory_synced_at, created_at, tag_id, sender_mailbox_tags(id, name)';
+  'id, provider, auth_type, enabled, google_state, google_account, email, display_name, username, smtp_host, smtp_port, smtp_tls_mode, imap_host, imap_port, status, daily_campaign_limit, daily_total_limit, last_verified_at, last_error, last_send_at, imap_checked_at, directory_synced_at, created_at, tag_id, egress_ip, sender_mailbox_tags(id, name)';
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
@@ -22,7 +23,7 @@ const PAGE_SIZE = 30;
  */
 const MAX_PAGE_SIZE = 200;
 
-const BULK_ACTIONS = ['recheck', 'enable', 'disable', 'delete', 'tag'] as const;
+const BULK_ACTIONS = ['recheck', 'enable', 'disable', 'delete', 'tag', 'move'] as const;
 type BulkAction = (typeof BULK_ACTIONS)[number];
 // Потолок на выборку: он же ограничивает длину `in (...)` в запросе к БД.
 // Страница списка — 30 ящиков, «выбрать все» на проекте с сотнями ящиков
@@ -79,6 +80,11 @@ export async function GET(req: NextRequest) {
     } else if (noTag) {
       query = query.is('tag_id', null);
     }
+
+    // Фильтр по адресу отправки: 'none' — ящики, которым адрес ещё не выдан.
+    const egressFilter = url.searchParams.get('egressIp') ?? '';
+    if (egressFilter === 'none') query = query.is('egress_ip', null);
+    else if (isIpv4(egressFilter)) query = query.eq('egress_ip', egressFilter);
 
     const { data, error, count } = await query;
 
@@ -143,7 +149,7 @@ export async function PATCH(req: NextRequest) {
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
     const body = (await req.json().catch(() => null)) as
-      | { ids?: unknown; action?: unknown; tagId?: unknown }
+      | { ids?: unknown; action?: unknown; tagId?: unknown; egressIp?: unknown }
       | null;
     if (!body) return jsonError('Невалидный JSON', 400);
 
@@ -171,6 +177,23 @@ export async function PATCH(req: NextRequest) {
       const { error, count } = await supabaseAdmin
         .from('sender_mailboxes')
         .update({ tag_id: tagId, updated_at: nowIso }, { count: 'exact' })
+        .in('id', ids);
+      if (error) return jsonError(error.message, 500);
+      return NextResponse.json({ ok: true, affected: count ?? 0 });
+    }
+
+    // «На адрес»: ящик закреплён за адресом навсегда, перенос — осознанное
+    // действие оператора (адрес умер или выгорел). updated_at не трогаем:
+    // монитор считает по нему «упавшие за час» ящики.
+    if (action === 'move') {
+      const egressIp = body.egressIp;
+      if (!isIpv4(egressIp)) return jsonError('Неизвестный адрес', 400);
+      const { data: target } = await supabaseAdmin
+        .from('sender_egress_ips').select('ip').eq('ip', egressIp).maybeSingle();
+      if (!target) return jsonError('Адрес не найден', 404);
+      const { error, count } = await supabaseAdmin
+        .from('sender_mailboxes')
+        .update({ egress_ip: egressIp }, { count: 'exact' })
         .in('id', ids);
       if (error) return jsonError(error.message, 500);
       return NextResponse.json({ ok: true, affected: count ?? 0 });

@@ -88,6 +88,12 @@ export type MoneyTotals = {
    *  без сделки в AMO. */
   unlinked: number;
   unlinkedPayments: number;
+  /** Режим «без когорты»: первичка по сделкам, заведённым ДО периода. К
+   *  первичке периода не относится, но строкой показывается — иначе экран
+   *  не сходится с выпиской. В режиме «по когорте» всегда ноль: эти деньги
+   *  там лежат в `received`. */
+  earlierDeals: number;
+  earlierDealsPayments: number;
   /** Весь приход-выручка окна по банкам — контрольная сумма экрана. */
   bankTotal: number;
   bankPayments: number;
@@ -106,6 +112,8 @@ export function emptyMoneyTotals(): MoneyTotals {
     renewalsPayments: 0,
     unlinked: 0,
     unlinkedPayments: 0,
+    earlierDeals: 0,
+    earlierDealsPayments: 0,
     bankTotal: 0,
     bankPayments: 0,
   };

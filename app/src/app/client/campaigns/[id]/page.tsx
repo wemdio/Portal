@@ -302,6 +302,11 @@ function RepliesPanel({
                         {r.subject}
                       </p>
                     )}
+                    {r.out_of_campaign && (
+                      <span className="ds-status-tag mt-1 inline-flex" style={{ color: 'var(--cp-amber)' }}>
+                        Ответ вне треда кампании
+                      </span>
+                    )}
                     {!expanded && r.content_preview && (
                       <p className="mt-1 text-[11px] sm:text-xs line-clamp-2" style={{ color: 'var(--cp-paper-faint)' }}>
                         {r.content_preview}

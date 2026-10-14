@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
 
 import EChart from '@/components/charts/EChart';
+import SeriesPicker from '@/components/charts/SeriesPicker';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -11,18 +12,26 @@ import {
   CHART_FONT,
   GRID_LINE,
   HOVER_BAND,
-  LEGEND_FONT_SIZE,
   seriesColor,
   tooltipSkin,
   useChartTheme,
   usePrefersReducedMotion,
-  verticalGradient,
+  withAlpha,
   type ChartTheme,
 } from '@/components/charts/theme';
 import type { RenewalSeriesBucket } from '@/lib/renewals/metrics';
 import type { GroupBy } from '@/lib/firstSales/buckets';
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+type MetricKey = 'count' | 'revenue';
+
+const LABELS: Record<MetricKey, string> = {
+  count: 'Продлений',
+  revenue: 'Оборот, ₽',
+};
+
+const METRICS: MetricKey[] = ['count', 'revenue'];
 
 /**
  * Поля панелей заданы числами, а не `containLabel`, и обязаны совпадать у обеих:
@@ -31,6 +40,14 @@ const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн'
  */
 const GRID_LEFT = 68;
 const GRID_RIGHT = 16;
+
+/** Высота холста (просьба 09.10.2026 — «повыше»). Делится между панелями. */
+const CHART_HEIGHT = 440;
+/** Отступы внутри холста: сверху — воздух, снизу — подписи периодов. */
+const PAD_TOP = 12;
+const PAD_BOTTOM = 34;
+/** Зазор между панелями, когда их две. */
+const PANEL_GAP = 46;
 
 // Ключ корзины всегда YYYY-MM-DD (начало корзины в МСК, см. bucketKey в
 // buckets.ts). Разбираем строку вручную, а не через `new Date(key)` — Date +
@@ -68,11 +85,11 @@ interface TooltipItem {
 
 /**
  * Количество продлений и оборот — двумя графиками друг под другом, с общей
- * осью периодов.
+ * осью периодов. Оставлен один показатель — панель у него одна, во всю высоту.
  *
  * Раньше это был один график с двумя осями Y: продления слева, рубли справа.
- * Так делать нельзя — взаимное положение столбца и линии на таком графике не
- * значит ничего, потому что задаётся выбором масштаба, а не данными. Достаточно
+ * Так делать нельзя — взаимное положение двух рядов на таком графике не значит
+ * ничего, потому что задаётся выбором масштаба, а не данными. Достаточно
  * подобрать вторую шкалу, чтобы «оборот обгоняет продления» превратилось в
  * «отстаёт». Две отдельные панели с общей осью X показывают ровно ту же связь,
  * но ни к чему не подталкивают: сравниваются формы, а не высоты.
@@ -83,7 +100,7 @@ function selectionMark(index: number) {
     silent: true,
     itemStyle: { color: HOVER_BAND },
     // Границы полуцелые: на категориальной оси число — это индекс категории,
-    // и ±0.5 даёт ровно её полосу, от середины промежутка до середины следующего.
+    // и ±0.5 даёт ровно её полосу, от середины промежутка до середины следующей.
     data: [[{ xAxis: index - 0.5 }, { xAxis: index + 0.5 }]],
   };
 }
@@ -94,15 +111,34 @@ function buildOption(
   theme: ChartTheme,
   animate: boolean,
   selectedIndex: number,
+  visible: ReadonlySet<MetricKey>,
 ): EChartsCoreOption {
   const labels = data.map((b) => formatKey(b.key, groupBy));
   const keys = data.map((b) => b.key);
-  const countColor = seriesColor(theme, 0);
-  const revenueColor = seriesColor(theme, 2);
+  const colorOf = (key: MetricKey) => seriesColor(theme, key === 'count' ? 0 : 2);
 
-  // Квадратики в подсказке — по своему списку: у столбца заливка объект-градиент,
-  // и `params.color` вернул бы его, а не строку (см. TimeSeriesChart).
-  const swatches = [countColor, revenueColor];
+  const shown = METRICS.filter((key) => visible.has(key));
+  // Квадратики в подсказке — по своему списку: подписи рядов совпадают с
+  // порядком видимых панелей, и брать цвет из params нельзя (у заливки это
+  // объект-градиент, а не строка).
+  const swatches = shown.map(colorOf);
+
+  // Панели: одна на показатель. Подписи периодов стоят один раз — под нижней.
+  //
+  // Отступ слева задан числом и ОДИНАКОВЫЙ у обеих панелей. С `containLabel`
+  // каждая панель считала бы его сама по ширине своих подписей — а они разные
+  // («7» против «1,5 млн»), — и области построения разъезжались бы по
+  // горизонтали на пару десятков пикселей. Тогда один и тот же день оказывался
+  // бы в разных местах верхней и нижней панели, что и ломало чтение.
+  const panelHeight = shown.length === 2
+    ? (CHART_HEIGHT - PAD_TOP - PAD_BOTTOM - PANEL_GAP) / 2
+    : CHART_HEIGHT - PAD_TOP - PAD_BOTTOM;
+  const grid = shown.map((_, index) => ({
+    left: GRID_LEFT,
+    right: GRID_RIGHT,
+    top: PAD_TOP + index * (panelHeight + PANEL_GAP),
+    height: panelHeight,
+  }));
 
   const axisLabel = { color: AXIS_TEXT, fontSize: AXIS_FONT_SIZE, fontFamily: CHART_FONT };
 
@@ -111,37 +147,19 @@ function buildOption(
     animationDuration: 700,
     animationEasing: 'cubicOut',
     textStyle: { fontFamily: CHART_FONT },
-    // Две панели: верхняя под количество, нижняя под деньги. Подписи периодов
-    // стоят один раз — под нижней.
-    //
-    // Отступ слева задан числом и ОДИНАКОВЫЙ у обеих панелей. С `containLabel`
-    // каждая панель считала бы его сама по ширине своих подписей — а они
-    // разные («7» против «1,5 млн»), — и области построения разъезжались бы по
-    // горизонтали на пару десятков пикселей. Тогда один и тот же день оказывался
-    // бы в разных местах верхней и нижней панели, что и ломало чтение.
-    grid: [
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 30, height: 122 },
-      { left: GRID_LEFT, right: GRID_RIGHT, top: 190, height: 96 },
-    ],
-    legend: {
-      top: 0,
-      left: 0,
-      itemGap: 16,
-      icon: 'roundRect',
-      itemWidth: 10,
-      itemHeight: 10,
-      textStyle: { color: AXIS_TEXT, fontSize: LEGEND_FONT_SIZE, fontFamily: CHART_FONT },
-    },
+    grid,
+    // Легенды нет: ряды включаются переключателями над графиком (SeriesPicker).
+    legend: { show: false },
     tooltip: {
       trigger: 'axis',
-      axisPointer: { type: 'shadow', shadowStyle: { color: HOVER_BAND } },
+      axisPointer: { type: 'line', lineStyle: { color: GRID_LINE } },
       ...tooltipSkin(theme),
       formatter: (params: unknown) => {
         const items = (Array.isArray(params) ? params : [params]) as TooltipItem[];
         const index = items[0]?.dataIndex ?? 0;
         const rows = items
           .map((item) => {
-            const isMoney = item.seriesName === 'Оборот, ₽';
+            const isMoney = item.seriesName === LABELS.revenue;
             const value = Number(item.value ?? 0);
             return `<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
                       <span style="width:10px;height:10px;border-radius:3px;background:${
@@ -160,59 +178,35 @@ function buildOption(
     // Наведение на любую из панелей подсвечивает обе — иначе связь между
     // количеством и деньгами пришлось бы искать глазами.
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
-    xAxis: [
-      {
-        type: 'category',
-        gridIndex: 0,
-        data: labels,
-        axisLine: { lineStyle: { color: AXIS_LINE } },
-        axisTick: { show: false },
-        axisLabel: { show: false },
-      },
-      {
-        type: 'category',
-        gridIndex: 1,
-        data: labels,
-        axisLine: { lineStyle: { color: AXIS_LINE } },
-        axisTick: { show: false },
-        axisLabel,
-      },
-    ],
-    yAxis: [
-      {
-        type: 'value',
-        gridIndex: 0,
-        minInterval: 1,
-        splitLine: { lineStyle: { color: GRID_LINE } },
-        axisLabel,
-      },
-      {
-        type: 'value',
-        gridIndex: 1,
-        splitLine: { lineStyle: { color: GRID_LINE } },
-        axisLabel: { ...axisLabel, formatter: (value: number) => axisAmount(value) },
-      },
-    ],
-    series: [
-      {
-        name: 'Продлений',
-        type: 'bar',
-        xAxisIndex: 0,
-        yAxisIndex: 0,
-        data: data.map((b) => b.count),
-        barMaxWidth: 26,
-        itemStyle: {
-          color: verticalGradient(countColor),
-          borderRadius: [4, 4, 0, 0] as [number, number, number, number],
-        },
-        ...(selectedIndex >= 0 ? { markArea: selectionMark(selectedIndex) } : {}),
-      },
-      {
-        name: 'Оборот, ₽',
-        type: 'line',
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        data: data.map((b) => b.revenue),
+    xAxis: shown.map((_, index) => ({
+      type: 'category' as const,
+      gridIndex: index,
+      // boundaryGap=false — линия начинается у самой оси: у линейного ряда
+      // отступы по краям оставляют пустые поля, которых нечем заполнить.
+      boundaryGap: false,
+      data: labels,
+      axisLine: { lineStyle: { color: AXIS_LINE } },
+      axisTick: { show: false },
+      // Подписи периодов — только под нижней панелью.
+      axisLabel: index === shown.length - 1 ? axisLabel : { show: false },
+    })),
+    yAxis: shown.map((key, index) => ({
+      type: 'value' as const,
+      gridIndex: index,
+      ...(key === 'count' ? { minInterval: 1 } : {}),
+      splitLine: { lineStyle: { color: GRID_LINE } },
+      axisLabel: key === 'revenue'
+        ? { ...axisLabel, formatter: (value: number) => axisAmount(value) }
+        : axisLabel,
+    })),
+    series: shown.map((key, index) => {
+      const color = colorOf(key);
+      return {
+        name: LABELS[key],
+        type: 'line' as const,
+        xAxisIndex: index,
+        yAxisIndex: index,
+        data: data.map((b) => b[key]),
         // Ломаная, а не сплайн: сглаживание между помесячными суммами рисует
         // значения, которых не существует, и вдобавок выгибается выше
         // фактического максимума. Продление — событие дискретное. Точки
@@ -220,21 +214,35 @@ function buildOption(
         // и без них ломаная читается как непрерывный процесс.
         smooth: false,
         symbol: 'circle',
+        showSymbol: data.length <= 40,
         symbolSize: 7,
-        lineStyle: { width: 2.5, color: revenueColor },
-        itemStyle: { color: revenueColor, borderColor: theme.surface, borderWidth: 2 },
+        lineStyle: { width: 2.5, color },
+        itemStyle: { color, borderColor: theme.surface, borderWidth: 2 },
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: withAlpha(color, 0.26) },
+              { offset: 1, color: withAlpha(color, 0) },
+            ],
+          },
+        },
         ...(selectedIndex >= 0 ? { markArea: selectionMark(selectedIndex) } : {}),
-      },
-    ],
+      };
+    }),
   };
 }
 
 /**
  * Помесячный (или по дню/неделе — по выбору) график продлений. Вторичен по
  * отношению к таблице ниже него на странице: продлений всего 32 за всю
- * историю, и график из двух-трёх столбиков менее полезен, чем список, где
- * видно каждое продление (см. план дашборда). Оставлен для быстрого взгляда
- * на динамику, а не как основной инструмент анализа.
+ * историю, и график из двух-трёх точек менее полезен, чем список, где видно
+ * каждое продление (см. план дашборда). Оставлен для быстрого взгляда на
+ * динамику, а не как основной инструмент анализа.
  */
 export default function RenewalsChart({
   series,
@@ -252,13 +260,23 @@ export default function RenewalsChart({
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
+  const [visible, setVisible] = useState<ReadonlySet<MetricKey>>(() => new Set(METRICS));
 
   const selectedIndex = selectedKey ? series.findIndex((b) => b.key === selectedKey) : -1;
 
   const option = useMemo(
-    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion, selectedIndex) : null),
-    [series, groupBy, theme, reducedMotion, selectedIndex],
+    () => (theme ? buildOption(series, groupBy, theme, !reducedMotion, selectedIndex, visible) : null),
+    [series, groupBy, theme, reducedMotion, selectedIndex, visible],
   );
+
+  const toggle = useCallback((key: MetricKey) => {
+    setVisible((cur) => {
+      const next = new Set(cur);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   const handleSelect = useCallback(
     (index: number) => {
@@ -270,18 +288,28 @@ export default function RenewalsChart({
     [onSelectKey, series, selectedKey],
   );
 
+  const pickerItems = useMemo(
+    () => METRICS.map((key) => ({
+      key,
+      label: LABELS[key],
+      color: theme ? seriesColor(theme, key === 'count' ? 0 : 2) : 'transparent',
+    })),
+    [theme],
+  );
+
   return (
     <div ref={rootRef} className="glass-tile p-3">
+      <SeriesPicker items={pickerItems} visible={visible} onToggle={toggle} className="mb-2" />
       {option ? (
         <EChart
           option={option}
-          height={330}
+          height={CHART_HEIGHT}
           ariaLabel="Количество продлений и оборот по периодам"
           onSelectIndex={onSelectKey ? handleSelect : undefined}
           className={onSelectKey ? 'cursor-pointer' : undefined}
         />
       ) : (
-        <div style={{ height: 330 }} />
+        <div style={{ height: CHART_HEIGHT }} />
       )}
     </div>
   );

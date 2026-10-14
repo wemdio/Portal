@@ -13,6 +13,10 @@ import type { MailboxRow } from './types';
  * sender-хоста — поэтому не из API-процесса, а через БД, как у остальной
  * отправки. Ответ уходит с закреплённого ящика лида (sticky sender) и с
  * In-Reply-To в тот же тред.
+ *
+ * Той же очередью уходит тестовое письмо себе из формы кампании: произвольное
+ * письмо с выбранного ящика, только без переписки — campaign_id и recipient_id
+ * у него пустые (миграция 20261001_0020).
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -21,8 +25,9 @@ const MAX_ATTEMPTS = 3;
 
 interface ManualRow {
   id: string;
-  campaign_id: string;
-  recipient_id: string;
+  /** null у тестового письма: его шлют себе до того, как кампания создана. */
+  campaign_id: string | null;
+  recipient_id: string | null;
   mailbox_id: string;
   to_email: string;
   subject: string;
@@ -38,13 +43,14 @@ function fromHeader(mailbox: MailboxRow): string {
 }
 
 /** Один проход дренажа ручных ответов. */
-export async function processManualMessages(opts?: { log?: Log; batchSize?: number }): Promise<number> {
+export async function processManualMessages(opts: { egressIp: string; log?: Log; batchSize?: number }): Promise<number> {
   if (!supabaseAdmin) return 0;
   const db = supabaseAdmin;
-  const log: Log = opts?.log ?? (() => {});
+  const log: Log = opts.log ?? (() => {});
 
   const { data: claimed, error: claimError } = await db.rpc('claim_sender_manual_messages', {
-    p_limit: opts?.batchSize ?? 5,
+    p_limit: opts.batchSize ?? 5,
+    p_egress_ip: opts.egressIp,
   });
   if (claimError) {
     log('warn', `Ручные ответы не забрались из очереди: ${claimError.message}`);
@@ -58,6 +64,12 @@ export async function processManualMessages(opts?: { log?: Log; batchSize?: numb
     const nowIso = new Date().toISOString();
     const { data: row } = await db.from('sender_mailboxes').select('*').eq('id', message.mailbox_id).maybeSingle();
     const mailbox = row as MailboxRow | null;
+
+    if (mailbox && mailbox.egress_ip !== opts.egressIp) {
+      // Ящик перенесли между claim и отправкой — ответ уйдёт с нового адреса.
+      await db.from('sender_manual_messages').update({ status: 'queued', updated_at: nowIso }).eq('id', message.id);
+      continue;
+    }
 
     if (!mailbox || mailbox.status !== 'verified' || !mailbox.enabled) {
       await db.from('sender_manual_messages')

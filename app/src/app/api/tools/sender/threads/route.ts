@@ -7,7 +7,8 @@ export const dynamic = 'force-dynamic';
 
 const LIST_COLS =
   'recipient_id, campaign_id, campaign_name, recipient_email, recipient_name, status, replied_at, '
-  + 'mailbox_id, mailbox_email, sent_count, last_sent_at, reply_count, last_reply_at, has_human_reply, last_activity_at';
+  + 'mailbox_id, mailbox_email, sent_count, last_sent_at, reply_count, last_reply_at, has_human_reply, last_activity_at, '
+  + 'lead_verdict, lead_verdict_source';
 
 const PAGE_SIZE = 30;
 
@@ -32,6 +33,8 @@ export async function GET(req: NextRequest) {
     const campaignId = url.searchParams.get('campaignId') ?? '';
     const mailboxId = url.searchParams.get('mailboxId') ?? '';
     const onlyReplied = url.searchParams.get('onlyReplied') === '1';
+    // «Только лиды» — итог по переписке: ручная метка или оценка квалификатора.
+    const onlyLeads = url.searchParams.get('onlyLeads') === '1';
     // Скобки и запятые — синтаксис фильтров PostgREST; в адресе им делать нечего.
     const search = (url.searchParams.get('search') ?? '').trim().replace(/[(),]/g, '').slice(0, 200);
 
@@ -46,6 +49,7 @@ export async function GET(req: NextRequest) {
     // «С ответами» = ответ живого человека. Счётчик ответов включает автоответы
     // и прогрев — фильтр по нему показывал бы пустые диалоги как «с ответами».
     if (onlyReplied) query = query.eq('has_human_reply', true);
+    if (onlyLeads) query = query.eq('lead_verdict', 'lead');
     if (search) query = query.ilike('recipient_email', `%${search}%`);
 
     const { data, error, count } = await query;

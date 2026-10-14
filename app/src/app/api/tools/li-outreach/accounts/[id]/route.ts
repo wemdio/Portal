@@ -18,8 +18,7 @@ export async function PATCH(
     const { id } = await params;
 
     // Any authenticated team member can PATCH the proxy on any account
-    // (see migration 20260708_0002). Ownership is still tracked via user_id
-    // for audit; only DELETE stays owner-only as a safety guard.
+    // (see migration 20260708_0002). user_id only records who added it.
     const { data: account } = await supabaseAdmin
       .from('li_accounts')
       .select('*')
@@ -85,15 +84,22 @@ export async function DELETE(
     const { id } = await params;
 
     // Удаляем только локальную строку li_accounts (например устаревший
-    // дубликат после reconnect в Unipile). Сам аккаунт в Unipile не трогаем.
-    // FK из li_campaigns/li_leads на account_id — ON DELETE SET NULL,
-    // кампании не каскадятся, просто теряют ссылку на мёртвый аккаунт.
-    const { error } = await supabaseAdmin
+    // дубликат после reconnect в Unipile). Сам аккаунт в Unipile не трогаем:
+    // живой аккаунт вернётся карточкой при следующей синхронизации.
+    // FK из li_campaigns/li_leads/li_campaign_logs на account_id — ON DELETE
+    // SET NULL: кампании не каскадятся, просто теряют ссылку на аккаунт.
+    //
+    // Удалять может любой специалист, а не только добавивший (08.10.2026):
+    // аккаунты общие, а владелец мог уйти из компании — дубли копились, и
+    // убрать их было некому. Запущенную кампанию удаление не блокирует —
+    // интерфейс предупреждает о ней перед подтверждением.
+    const { data: deleted, error } = await supabaseAdmin
       .from('li_accounts')
       .delete()
       .eq('id', id)
-      .eq('user_id', auth.user.id);
+      .select('id');
     if (error) return jsonError(error.message, 500);
+    if (!deleted?.length) return jsonError('Аккаунт не найден — возможно, его уже удалили', 404);
 
     return NextResponse.json({ ok: true });
   });

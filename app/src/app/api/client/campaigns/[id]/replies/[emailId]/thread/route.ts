@@ -10,6 +10,7 @@ import { resolveStrayAccess } from '@/lib/clientCampaignReplies/strayAccess';
 import { partitionForeignEmails, resolveClientMailboxes, isInboundEmail } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
 import { computeReplyAllRecipients } from '@/lib/clientCampaignReplies/participants';
 import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
+import { readClientReplyOutbox } from '@/lib/clientCampaignReplies/clientReplyOutbox';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
 import { readInstantlyEmailReadDeferral } from '@/lib/instantly/emailReadDeferral';
 import { logError, logInfo } from '@/lib/loggerServer';
@@ -51,8 +52,9 @@ export async function GET(
     // поэтому право проверяем по ящику-получателю — см. strayAccess. Адрес лида
     // берём из нашей записи: у сироты поле lead пустое, а без него ниже не
     // собрать ни остальную переписку, ни «ответить всем».
+    const replyAsNewEmail = original.campaign_id !== campaignId;
     let strayLeadEmail: string | null = null;
-    if (original.campaign_id !== campaignId) {
+    if (replyAsNewEmail) {
       const stray = await resolveStrayAccess({
         emailId,
         campaignId,
@@ -154,7 +156,21 @@ export async function GET(
     const visibleIds = new Set(visibleInbound.map((e) => e.id));
     const visibleCandidates = candidates.filter((e) => !isInboundEmail(e) || visibleIds.has(e.id));
 
-    const messages = visibleCandidates.map(mapInstantlyEmailToThreadMessage).sort((a, b) => {
+    let outboxMessages: Awaited<ReturnType<typeof readClientReplyOutbox>> = [];
+    // The provider's `lead` can differ from the actual sender of an inbound
+    // message. The send route records the real recipient, so use that same key.
+    const outboxLeadEmail = isInboundEmail(original)
+      ? (original.from_address_email ?? strayLeadEmail ?? leadEmail)
+      : leadEmail;
+    if (outboxLeadEmail) {
+      try {
+        outboxMessages = await readClientReplyOutbox({ clientUserId: userId, campaignId, leadEmail: outboxLeadEmail });
+      } catch (err) {
+        await logError('client.campaign.replies.thread.outbox_failed', err, { campaignId, emailId, userId });
+        throw err;
+      }
+    }
+    const messages = [...visibleCandidates.map(mapInstantlyEmailToThreadMessage), ...outboxMessages].sort((a, b) => {
       const ta = a.timestamp ? Date.parse(a.timestamp) : 0;
       const tb = b.timestamp ? Date.parse(b.timestamp) : 0;
       return tb - ta;
@@ -168,15 +184,21 @@ export async function GET(
       Array.isArray(original.from_address_json) && typeof original.from_address_json[0]?.name === 'string'
         ? original.from_address_json[0].name.trim() || null
         : null;
-    const replyToEmail = original.from_address_email ?? leadEmail ?? null;
+    const replyToEmail = isInboundEmail(original)
+      ? (original.from_address_email ?? strayLeadEmail)
+      : leadEmail;
     const reply_to = replyToEmail ? { email: replyToEmail, name: fromName } : null;
-    const reply_all_cc = computeReplyAllRecipients(original, { eaccount, leadEmail });
+    const reply_all_cc = computeReplyAllRecipients(original, {
+      eaccount,
+      leadEmail: original.from_address_email ?? strayLeadEmail ?? leadEmail,
+    });
 
     const payload: ClientReplyThread = {
       thread_id: threadId,
       messages,
       reply_to,
       reply_all_cc,
+      reply_as_new_email: replyAsNewEmail,
       ...(historyRetryAfterMs != null ? { history_deferred: { retry_after_ms: historyRetryAfterMs } } : {}),
     };
     return NextResponse.json(payload);

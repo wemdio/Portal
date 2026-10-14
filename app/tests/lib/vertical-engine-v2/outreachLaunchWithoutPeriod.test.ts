@@ -6,8 +6,14 @@ jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
   validateStoredAuditSnapshot: jest.fn(() => ({ state: 'current' })),
   prepareAuditSnapshot: jest.fn(),
 }));
+jest.mock('@/lib/verticalEngineV2/launchActivation', () => ({
+  activateVeLaunchPortfolioItem: jest.fn(async () => ({status: 200})),
+}));
+jest.mock('@/lib/verticalEngineV2/contactDeliveryActivation', () => ({activateDeliveredContactCampaigns: jest.fn()}));
+import { activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
+import { activateVeLaunchPortfolioItem } from '@/lib/verticalEngineV2/launchActivation';
 
-import { outreachLaunchRequestSchema, runVeOutreachStartStage } from '@/lib/verticalEngineV2/outreachLaunch';
+import { outreachLaunchRequestSchema, runVeOutreachStartStage, prepareVeOutreachLaunch } from '@/lib/verticalEngineV2/outreachLaunch';
 
 const STAFF_LINE_ID = '837cbcb1-9afb-49c9-965c-d83d1e7d8e9c';
 const VE_PROJECT_ID = '10000000-0000-4000-8000-000000000001';
@@ -29,6 +35,13 @@ const request = {
 };
 
 describe('auto-outreach launch for a Portal project without periods', () => {
+  it('rejects a stale rate approval before any launch/audience work', async () => {
+    const db = createMockSupabase({tables: {ve_contact_delivery_rates: [{project_id: VE_PROJECT_ID, preset_id: 'preset-1',
+      revision: 2, status: 'ready', template_ids: [TEMPLATE_ID]}]}});
+    await expect(prepareVeOutreachLaunch(db as never, {} as never, {projectId: VE_PROJECT_ID, userId: 'staff-1',
+      request: {...request, delivery_rate_revision: 1}})).rejects.toThrow('Темп отправки изменился');
+    expect(db.rpcCalls).toEqual([]);
+  });
   it('requires the period field but accepts an explicit null', () => {
     expect(outreachLaunchRequestSchema.safeParse(request).success).toBe(true);
     expect(outreachLaunchRequestSchema.safeParse({ ...request, expected_portal_period_id: '30000000-0000-4000-8000-000000000001' }).success).toBe(true);
@@ -36,17 +49,19 @@ describe('auto-outreach launch for a Portal project without periods', () => {
     expect(outreachLaunchRequestSchema.safeParse(missing).success).toBe(false);
   });
 
-  it('accepts already created campaigns whose launch record has no period', async () => {
+  it('finishes preparation after status sync without a Portal activation or duplicate creation', async () => {
     const portal = createMockSupabase({
       tables: {
+        ve_jobs: [{id: 'job-1', project_id: VE_PROJECT_ID, stage: 'outreach_start', status: 'running'}],
         ve_outreach_runs: [{
           id: 'run-1', project_id: VE_PROJECT_ID, requested_by: 'staff-1', status: 'running',
-          request, items: [{ ...request.items[0], status: 'queued' }], error: null,
+          request: {...request, delivery_rate_revision: 1}, items: [{ ...request.items[0], status: 'queued' }], error: null,
         }],
         ve_outreach_setups: [{
           project_id: VE_PROJECT_ID, revision: 3, selected_hypothesis_ids: [HYPOTHESIS_ID],
           approved_bases: { [BASE_ID]: { template_id: TEMPLATE_ID, revision: 'reviewed' } },
         }],
+        ve_contact_delivery_rates: [{project_id: VE_PROJECT_ID, preset_id: 'preset-1', revision: 2, status: 'pending', template_ids: [TEMPLATE_ID]}],
         ve_templates: [{
           id: TEMPLATE_ID, base_id: BASE_ID, status: 'ready', supply_batch_id: null,
           letters: [{ subject: 'Тема', body: 'Письмо', selected_variant: 'A' }],
@@ -61,7 +76,7 @@ describe('auto-outreach launch for a Portal project without periods', () => {
           collect_info: { collection_mode: 'preview' },
         }],
         ve_segmentation_audits: [{ id: AUDIT_ID, template_id: TEMPLATE_ID, base_id: BASE_ID, launch_status: 'succeeded' }],
-        ve_launch_queue_items: [{ id: 'item-1', template_id: TEMPLATE_ID, project_id: VE_PROJECT_ID, status: 'active', plan_version: 1 }],
+        ve_launch_queue_items: [{ id: 'item-1', template_id: TEMPLATE_ID, project_id: VE_PROJECT_ID, status: 'queued', plan_version: 1 }],
       },
       rpcHandlers: {
         ve_contact_supply_preview_revision: () => ({ data: 'reviewed' }),
@@ -72,13 +87,26 @@ describe('auto-outreach launch for a Portal project without periods', () => {
       },
     });
 
-    const result = await runVeOutreachStartStage(
+    const runStage = () => runVeOutreachStartStage(
       { id: 'job-1', project_id: VE_PROJECT_ID, payload: { outreach_run_id: 'run-1' } } as never,
       { supabase: portal } as never,
       createMockSupabase() as never,
     );
 
-    expect(result).toEqual({ result: { outreach_run_id: 'run-1', status: 'active' } });
+    jest.mocked(activateDeliveredContactCampaigns).mockResolvedValue({activated: 0, errors: ['API unavailable']});
+    expect(await runStage()).toEqual({result: {outreach_run_id: 'run-1', status: 'waiting'}});
+    expect(portal.getRows('ve_outreach_runs')[0]).toMatchObject({status: 'waiting', items: [expect.objectContaining({
+      status: 'waiting', code: 'VE_CAMPAIGN_SYNC_PENDING', item_id: 'item-1',
+    })]});
+    expect(portal.getRows('ve_jobs')[0].status).toBe('pending');
+    // A later worker pass still cannot fabricate the operator's review.
+    await portal.from('ve_jobs').update({status: 'running'}).eq('id', 'job-1');
+    expect(await runStage()).toEqual({result: {outreach_run_id: 'run-1', status: 'waiting'}});
+    expect(activateVeLaunchPortfolioItem).not.toHaveBeenCalled();
+    // Provider state becomes available; no separate queue action or activation.
+    jest.mocked(activateDeliveredContactCampaigns).mockResolvedValue({activated: 0, errors: []});
+    await portal.from('ve_jobs').update({status: 'running'}).eq('id', 'job-1');
+    expect(await runStage()).toEqual({ result: { outreach_run_id: 'run-1', status: 'active' } });
     expect(portal.getRows('ve_outreach_runs')[0]).toMatchObject({
       status: 'active', error: null, items: [expect.objectContaining({ status: 'active', item_id: 'item-1' })],
     });

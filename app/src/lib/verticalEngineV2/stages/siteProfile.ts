@@ -5,8 +5,9 @@
  * LLM-профиль → снапшот в ve_projects.brief.site_profile, статус проекта
  * переводится в 'researching'. Тонкий/JS-сайт (мало текста или заглушка
  * парсера) помечается brief.site_thin — UI просит ручное описание бизнеса
- * (business_override), которое стадия hypotheses кладёт в промпт поверх
- * профиля.
+ * (business_override), которое уточняет профиль и будущие гипотезы. При
+ * таймауте или недоступном HTML профиль можно построить по сохранённому описанию
+ * или клиентскому брифу; без них ошибка сохраняется для обычного повтора.
  *
  * Дополнительно — наполнение кейс-банка (ve_cases, source='site'): по тексту
  * сайта + до 3 очевидных кейс-страниц (/cases, /case-studies, /otzyvy, …)
@@ -22,10 +23,12 @@
  * (prompts/siteProfile.en), иначе — RU (обратная совместимость).
  */
 
+import { readVePriorityNiches } from '../priorityNiches';
 import { z } from 'zod';
 
 import { callLLMWithSchema, getVeActiveJobSignal, getVeModel } from '../llm';
 import { compileClientBriefForPrompt, readClientBrief } from '../clientBriefIntake';
+import { VeOperationTimeoutError } from '../operationDeadline';
 import { projectMarket, type VeMarket } from '../market';
 import { VeSiteProfileSchema } from '../schemas';
 import { heCaseDraftSchema, normalizeCaseText } from '../caseBank';
@@ -294,16 +297,37 @@ export async function refreshSiteCases(
 
 export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
   const usage = newUsage();
+  const signal = ctx.signal ?? getVeActiveJobSignal() ?? undefined;
   const project = await readProject(ctx.supabase, job.project_id);
+  signal?.throwIfAborted();
   const market = projectMarket(project);
+  const clientBrief = compileClientBriefForPrompt(readClientBrief(project));
+  const businessOverride = typeof project.brief?.business_override === 'string'
+    ? project.brief.business_override.trim() : '';
 
   const fetchText = resolveFetchText(ctx);
   stageLog(ctx, `[site_profile] фетч ${project.website_url}`);
-  const siteText = await fetchText(project.website_url);
+  let siteText = '';
+  let siteFetchError: 'timeout' | 'unavailable' | null = null;
+  try {
+    siteText = await fetchText(project.website_url);
+  } catch (error) {
+    // Only the read deadline or the parser's explicit no-HTML result may use
+    // saved facts. Do not swallow cancellation, DNS/access or arbitrary errors.
+    signal?.throwIfAborted();
+    const failure = error instanceof VeOperationTimeoutError && error.label === 'website extraction'
+      ? 'timeout'
+      : error instanceof Error && error.message === 'Не удалось получить HTML с сайта'
+        ? 'unavailable' : null;
+    if (!failure || !(clientBrief || businessOverride)) throw error;
+    siteFetchError = failure;
+    stageLog(ctx, `[site_profile] сайт недоступен (${failure}) — профиль по сохранённому описанию бизнеса/брифу`);
+  }
   // Докачка контентных/кейс-страниц: профиль по одной главной (≤3000 символов)
   // — уровень «прочитал билборд» и даёт усреднённые гипотезы. Кейс-страницы
   // из этой же пачки уходят в refreshSiteCases (без повторных фетчей).
-  const extraPages = await fetchExtraPages(fetchText, project.website_url);
+  const extraPages = siteFetchError ? { content: [], cases: [] } : await fetchExtraPages(fetchText, project.website_url);
+  signal?.throwIfAborted();
   const corpusPages = [...extraPages.content, ...extraPages.cases];
   stageLog(
     ctx,
@@ -321,38 +345,49 @@ export async function runSiteProfileStage(job: VeJob, ctx: VeStageContext): Prom
   // Бриф клиента — второй источник профиля: закрывает то, чего на сайте нет
   // (цикл сделки, чек, возражения), и остаётся единственным источником, когда
   // сайт «в разработке».
-  const clientBrief = compileClientBriefForPrompt(readClientBrief(project));
   if (clientBrief) stageLog(ctx, '[site_profile] бриф клиента подмешан в профиль');
 
-  const profileInput = { websiteUrl: project.website_url, siteText: corpus, clientBrief };
+  const profileInput = { websiteUrl: project.website_url, siteText: corpus, clientBrief, businessOverride, priorityNiches: readVePriorityNiches(project.brief) };
   const llm = await callLLMWithSchema(
     market === 'us' ? buildSiteProfileMessagesEn(profileInput) : buildSiteProfileMessages(profileInput),
     VeSiteProfileSchema,
-    { model: getVeModel('research'), maxTokens: 4096 },
+    { model: getVeModel('research'), maxTokens: 4096, signal },
   );
+  signal?.throwIfAborted();
   addUsage(usage, llm);
 
-  // Brief перечитываем прямо перед записью: за минуты LLM-вызовов пользователь
-  // мог сохранить overrides (offer/style/signature/business) через PATCH —
-  // спред от протухшего снапшота их бы затёр.
-  const { data: freshProject } = await ctx.supabase
-    .from('ve_projects')
-    .select('brief')
-    .eq('id', project.id)
-    .single();
-  const brief = {
-    ...(((freshProject as { brief?: Record<string, unknown> } | null)?.brief) ?? project.brief ?? {}),
-    website_url: project.website_url,
-    site_profile: llm.data,
-    site_thin: siteThin,
-    site_text_chars: corpus.length,
-    captured_at: new Date().toISOString(),
-  };
-  const { error } = await ctx.supabase
-    .from('ve_projects')
-    .update({ brief, status: 'researching', updated_at: new Date().toISOString() })
-    .eq('id', project.id);
-  if (error) throw new Error(`ve_projects update brief: ${error.message}`);
+  // The DB merges only stage-owned keys under the project lock: a concurrent
+  // specialist brief save cannot overwrite the profile or lose unrelated fields.
+  const { data: updatedProject, error } = await ctx.supabase.rpc('ve_patch_project_brief', {
+    p_project_id: project.id,
+    p_patch: {
+      website_url: project.website_url,
+      site_profile: llm.data,
+      site_thin: siteThin,
+      site_text_chars: corpus.length,
+      site_fetch_error: siteFetchError,
+      captured_at: new Date().toISOString(),
+    },
+  });
+  signal?.throwIfAborted();
+  if (error || updatedProject?.id !== project.id || !updatedProject?.brief?.site_profile) {
+    throw new Error(`ve_projects update brief: ${error?.message ?? 'database response did not confirm the saved profile'}`);
+  }
+
+  // Preserve the stage's previous status repair if enqueue inserted the job
+  // but its separate project update failed. This does not rewrite the brief.
+  signal?.throwIfAborted();
+  const { data: statusProject, error: statusError } = await ctx.supabase.from('ve_projects')
+    .update({ status: 'researching', updated_at: new Date().toISOString() })
+    .eq('id', project.id).select('id').single();
+  signal?.throwIfAborted();
+  if (statusError || statusProject?.id !== project.id) {
+    throw new Error(`ve_projects update status: ${statusError?.message ?? 'database response did not confirm the project'}`);
+  }
+
+  // No website evidence was obtained: preserve the existing case bank and
+  // do not spend another call or repeat crawling the same unavailable site.
+  if (siteFetchError) return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
 
   // Кейс-банк: best-effort — сбой не должен ронять основную стадию
   // (бриф уже сохранён; ve_cases может ещё не существовать на роллауте).

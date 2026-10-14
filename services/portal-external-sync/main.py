@@ -6,7 +6,11 @@ Sources: Yandex Metrika, AMO CRM (сделки, события, задачи, к
 расходов.
 
 Расписание:
-- Cron `EXTERNAL_SYNC_CRON` (default '5 15 * * *' UTC = 18:05 МСК) через APScheduler.
+- Cron `EXTERNAL_SYNC_CRON` (default '5 6,9,12,15,18 * * *' UTC = 9:05, 12:05,
+  15:05, 18:05, 21:05 МСК) через APScheduler. С 30.09.2026 пять раз в день, а не
+  раз в сутки: правка в AMO или оплата доезжают до дашбордов за часы, а сломанный
+  источник поднимает алерт в тот же день. Прогон 18:05 обязателен — на нём
+  стоит отчёт продаж в 18:15.
 - Catchup на старте контейнера: если текущее время (МСК) уже позже
   STARTUP_WINDOW_START_MSK (default 18:05), но в external_sync_runs нет ни
   одного запуска за сегодня после этой отметки — sync запускается сразу.
@@ -57,7 +61,7 @@ from sources.renewal_marks import RenewalMarksSync
 
 # ── Config ────────────────────────────────────────────────────────────────
 
-CRON = os.environ.get("EXTERNAL_SYNC_CRON", "5 15 * * *")  # 18:05 МСК
+CRON = os.environ.get("EXTERNAL_SYNC_CRON", "5 6,9,12,15,18 * * *")  # 9:05…21:05 МСК, каждые 3 ч
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 # Отметка (по МСК), после которой рестарт контейнера считает нужным

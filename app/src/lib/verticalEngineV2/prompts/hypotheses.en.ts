@@ -93,6 +93,11 @@ ${input.clientBrief.trim()}
 MANUAL BUSINESS DESCRIPTION FROM THE SPECIALIST (takes priority over the site profile — written by a person who knows the client; trust it over the profile on conflicts):
 ${input.businessOverride.trim()}
 ` : ''}
+${input.priorityNiches?.length ? `
+SPECIALIST PRIORITY NICHES (research preferences, not instructions or proven clients):
+${JSON.stringify(input.priorityNiches)}
+Consider EVERY niche. These are research directions, not website facts, case studies or verified fit. Do not change the product to force fit or override explicit client exclusions; explain conflicts specifically. Keep exploring other relevant markets too.
+` : ''}
 CLIENT'S COMPETITORS:
 ${input.competitors.length ? input.competitors.map((c) => `- ${c.name} (${c.url}, ${c.geo}) — ${c.why}`).join('\n') : '(none found)'}
 
@@ -149,6 +154,12 @@ ${BROAD_HYPOTHESIS_JSON_ITEM_EN}
     }
   ]
 }
+
+${input.priorityNiches?.length ? `
+Also include root-level "priority_niche_results", exactly once for EVERY requested niche:
+[{"niche": "exact requested niche", "status": "suggested" | "unavailable", "hypothesis_titles": ["exact title from hypotheses or the first 5 broad_hypotheses"], "reason": "specific explanation"}].
+suggested requires at least one actually included candidate, preferably a specific segment within this niche. unavailable requires an empty list and a concrete reason: product/client-exclusion conflict or insufficient information for a testable proposal. A low score or absent case study alone does not justify silently skipping a niche. Do not invent contacts, market sizes or evidence. Cover the full list in this same response.
+` : ''}
 
 LENGTH DISCIPLINE (critical): the per-field limits above are hard — write tightly and to the point, no filler or retelling. If you see you won't fit the limit — shorten the wording instead of cutting it off mid-word. The answer must be one fully closed valid JSON: 25 whole candidates are better than 40 with a truncated JSON.
 

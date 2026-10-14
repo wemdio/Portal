@@ -16,7 +16,9 @@ export function csvField(value: unknown): string {
   // Формульная инъекция: Excel/LibreOffice вычисляют ячейки, начинающиеся
   // с =,+,-,@ (значения приходят из парсеров, т.е. из недоверенного источника).
   // Нейтрализуем префиксом апострофа — до проверки на кавычки.
-  if (/^[=+\-@]/.test(s)) s = `'${s}`;
+  // Spreadsheet importers may discard leading whitespace/control characters
+  // before interpreting a formula; quoting a CSV field alone does not stop it.
+  if (/^[\s\u0000-\u001f\u007f-\u009f]*[=+\-@]/.test(s)) s = `'${s}`;
   return /[";\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

@@ -6,20 +6,19 @@ import {
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
-import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
+import { filterVeProjectExcludedRows, loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow, type VeProjectExclusions } from './projectExclusions';
+import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
+import { ContactDeliveryAnalyticsUnavailableError, loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
 import {
   describePortalProjectTerm,
   findManualFactIssue,
   loadNoPeriodPlanOwners,
-  localIsoDate,
   PORTAL_PROJECT_TERM_COLUMNS,
-  PORTAL_TERM_TEXT,
   type PortalPeriodStateRow,
   type PortalProjectTermOk,
   type PortalProjectTermRow,
-  withBoundResumeNote,
 } from './portalDeliveryTerm';
 
 export type ContactDeliveryPreviewRequest = {
@@ -142,7 +141,6 @@ export async function buildVeContactDeliveryPreview(
 
   let period: PortalPeriodRow | null = null;
   let projectTerm: PortalProjectTermOk | null = null;
-  let projectPlanBound = false;
   // Без периода факт плана — первые контакты кампаний этого VE2-проекта;
   // он известен только после сверки кампаний ниже.
   let contactsDone: number | null;
@@ -213,7 +211,6 @@ export async function buildVeContactDeliveryPreview(
       }
     }
     projectTerm = term;
-    projectPlanBound = boundHere;
     contactsDone = null;
     deadline = term.deadline;
   }
@@ -248,9 +245,6 @@ export async function buildVeContactDeliveryPreview(
     return outcome(409, 'CONTACT_DELIVERY_PLAN_INVALID', error instanceof Error ? error.message : 'Настройки плана недоступны');
   }
   const { dailyCapacity: senderCapacity, scheduleDays, timezone } = settings;
-  if (projectTerm && deadline < localIsoDate(input.now ?? new Date(), timezone)) {
-    return outcome(409, 'PROJECT_DEADLINE_PASSED', withBoundResumeNote(PORTAL_TERM_TEXT.deadlinePassed(deadline), projectPlanBound));
-  }
 
   let audits: VeSegmentationAudit[] = [];
   const auditId = cleanString(input.segmentationAuditId);
@@ -314,8 +308,15 @@ export async function buildVeContactDeliveryPreview(
     );
   }
   const estimatedValid = currentValidation.snapshot.audience.leads.length;
+  let exclusions: VeProjectExclusions;
+  try { exclusions = await loadVeProjectExclusions(portalDb, base.project_id); }
+  catch { return outcome(503, 'VE_PROJECT_EXCLUSIONS_UNAVAILABLE', 'Не удалось проверить исключения проекта. Попробуйте ещё раз.'); }
+  const policyCandidates = currentValidation.snapshot.audience.rows.map((row, index) =>
+    veProjectExclusionRow(row, currentValidation.snapshot.audience.leads[index].email));
+  const policyAudience = filterVeProjectExcludedRows(policyCandidates, exclusions);
+  const allowedRows = new Set(policyAudience.kept);
   const candidateLeads = filterBlockedLeads(
-    currentValidation.snapshot.audience.leads,
+    currentValidation.snapshot.audience.leads.filter((_, index) => allowedRows.has(policyCandidates[index])),
     blockedEmails,
   ).kept;
   let readyRemaining: number;
@@ -326,19 +327,25 @@ export async function buildVeContactDeliveryPreview(
   try {
     const [inventory, rows] = await Promise.all([
       loadVeContactDeliveryCampaignInventory(portalDb, instantlyDb, base.project_id),
-      loadVeContactDeliveryRows(portalDb, base.project_id),
+      loadVeContactDeliveryRows(portalDb, base.project_id, exclusions.inns.length + exclusions.domains.length > 0),
     ]);
     const existingEmails = new Set(rows.map((row) => row.email_normalized));
     const prospective = candidateLeads.filter((lead) => !existingEmails.has(lead.email.trim().toLowerCase())).length;
     prospectiveReady = prospective;
     const activeRows = new Set(inventory.activeCampaignRowIds);
-    const readyRows = rows.filter((row) => row.status === 'ready' && !blockedEmails.has(row.email_normalized));
+    const readyCandidates = rows.filter((row) => row.status === 'ready' && !blockedEmails.has(row.email_normalized));
+    const identities = exclusions.inns.length + exclusions.domains.length > 0
+      ? await createVeDeliveryIdentityResolver(portalDb, base.project_id)(readyCandidates) : readyCandidates.map(veDeliveryPolicyRow);
+    const readyRows = readyCandidates.filter((_, index) => !identities[index] || !matchVeProjectExclusion(identities[index], exclusions));
     readyRemaining = readyRows.filter((row) => activeRows.has(row.campaign_row_id)).length + prospective;
     reserveRemaining = readyRows.length + prospective;
     planContactsDone = contactsDone ?? inventory.observedFirstContacted;
     const committed = rows.filter((row) => ['accepted', 'attempting', 'uncertain'].includes(row.status)).length;
     outstandingCount = Math.max(0, committed - Math.min(inventory.observedFirstContacted, planContactsDone));
-  } catch {
+  } catch (error) {
+    if (error instanceof ContactDeliveryAnalyticsUnavailableError) {
+      return outcome(503, 'DELIVERY_ANALYTICS_PENDING', 'Статистика первых отправок Instantly ещё не получена. План дозагрузки будет пересчитан после синхронизации.');
+    }
     return outcome(500, 'DELIVERY_INVENTORY_UNAVAILABLE', 'Не удалось полностью сверить запас и уже загруженные контакты');
   }
 
@@ -364,7 +371,7 @@ export async function buildVeContactDeliveryPreview(
   }
 
   const remainingWorkdays = plan.days.length;
-  const requiredDaily = remainingWorkdays > 0
+  const requiredDaily = deadline < plan.businessDate ? Math.min(senderCapacity, plan.remainingContacts) : remainingWorkdays > 0
     ? Math.ceil(plan.remainingContacts / remainingWorkdays)
     : 0;
   const effectiveDaily = plan.days[0]?.quota ?? 0;
@@ -392,6 +399,8 @@ export async function buildVeContactDeliveryPreview(
         outstanding_count: outstandingCount,
         estimated_valid: estimatedValid,
         prospective_ready: prospectiveReady,
+        project_excluded_contacts: policyAudience.blockedCount,
+        project_unidentified_contacts: policyAudience.unidentifiedCount,
         sender_capacity: senderCapacity,
         daily_capacity: senderCapacity,
         supply_deficit: plan.supplyShortfall,

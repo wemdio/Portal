@@ -18,16 +18,61 @@
  *    страницы контактов. Пять страниц за тридцать секунд — это в лучшем
  *    случае главная и пара разделов.
  *
- * Сетевые ошибки не валят запуск: нет почты → needs_review('no_corporate_email'),
- * компания при этом валидная.
+ * Поиск и проверка — общие у аутричей (lib/outreachEmail/findAndVerify.ts):
+ * обход сайта через портальный кэш и SMTP-проверка адресов. Здесь только
+ * правила выбора: проверенный адрес исключается, и pickCompanyEmail берёт
+ * следующий по тем же приоритетам. В работу — до трёх рабочих адресов
+ * (emails), первый из них главный.
+ *
+ * Сетевые ошибки не валят запуск: сайт не открылся — почты нет, компания
+ * отсеивается с причиной no_corporate_email.
  */
 
-import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import {
+  findAndVerifyCompanyEmail,
+  type EmailDomainCache,
+  type OutreachEmailVerdict,
+  type OutreachEmailVerification,
+} from '@/lib/outreachEmail/findAndVerify';
+import type { CompanyEmail } from '@/lib/outreachEmail/companyEmails';
+
+export type PolzaEmailType = 'generic_company' | 'department_company' | 'person_company';
+
+/** Адрес компании в работе — элемент колонки emails строки. */
+export interface PolzaFoundEmail {
+  email: string;
+  emailType: PolzaEmailType;
+  verification: OutreachEmailVerification;
+}
 
 export interface PolzaEmailResult {
+  /** Главный адрес (= emails[0]). */
   email: string | null;
-  emailType: 'generic_company' | 'department_company' | 'person_company' | null;
+  emailType: PolzaEmailType | null;
   emailSourceUrl: string | null;
+  /** Вердикт проверки — в email_verification строки; null — адреса нет. */
+  verification: OutreachEmailVerification | null;
+  /** ok / catch_all / unverified — адрес есть; invalid — кандидаты не прошли проверку; none — адресов нет. */
+  verdict: OutreachEmailVerdict;
+  /** Адреса, отбракованные проверкой, — для журнала. */
+  triedInvalid: string[];
+  /** Адреса в работу по приоритету (1–3), главный — первым; пусто — адреса нет. */
+  emails: PolzaFoundEmail[];
+}
+
+/** Общий ящик получает письмо 1 «кто у вас за это отвечает?». */
+export function isRoutingEmailType(type: string | null | undefined): boolean {
+  return type === 'generic_company';
+}
+
+/** Адреса → колонка emails строки. */
+export function toCompanyEmails(emails: PolzaFoundEmail[]): CompanyEmail[] {
+  return emails.map((item) => ({
+    email: item.email,
+    verification: item.verification,
+    type: item.emailType,
+    is_routing: isRoutingEmailType(item.emailType),
+  }));
 }
 
 /** Роли по убыванию пользы для холодного письма в отдел продаж. */
@@ -46,6 +91,7 @@ const ROLE_PRIORITY = [
   'enquiries',
   'inquiries',
   'enquiry',
+  'inquiry',
   'contact',
   'contactus',
   'hello',
@@ -59,8 +105,13 @@ const ROLE_PRIORITY = [
   'ask',
 ] as const;
 
-/** Обезличенные «общие» ящики — в отчёте отличаются от отдела продаж. */
+/**
+ * Обезличенные «общие» ящики — в отчёте отличаются от отдела продаж, и письмо 1
+ * им идёт в варианте «кто у вас за это отвечает?» (renderTemplate): читает его
+ * не ЛПР. enquiries@ и inquiries@ — тот же общий ящик для входящих вопросов.
+ */
 const GENERIC_LOCALS = new Set([
+  'enquiries', 'inquiries', 'enquiry', 'inquiry',
   'contact', 'contactus', 'hello', 'hallo', 'hi', 'hey', 'team', 'office', 'info', 'welcome', 'ask',
 ]);
 
@@ -79,11 +130,9 @@ const FREE_MAIL_DOMAINS = new Set([
 ]);
 
 // Обход стал длиннее ровно настолько, чтобы очередь успевала дойти до
-// контактов: страниц больше, и общий потолок им под стать. Зависший хост
-// по-прежнему не держит запуск дольше минуты.
+// контактов: страниц больше, чем у русского аутрича (8). Общий потолок на сайт
+// (минута) держит findAndVerify — зависший хост не тормозит запуск дольше.
 const MAX_PAGES = 10;
-const PAGE_TIMEOUT_MS = 15_000;
-const COMPANY_TOTAL_TIMEOUT_MS = 60_000;
 
 function emailDomain(email: string): string {
   return email.split('@')[1] ?? '';
@@ -106,13 +155,13 @@ function isAllowed(email: string, companyDomain: string): boolean {
   return isOnCompanyDomain(email, companyDomain);
 }
 
-function typeForLocal(local: string): 'generic_company' | 'department_company' | 'person_company' {
+function typeForLocal(local: string): PolzaEmailType {
   if (GENERIC_LOCALS.has(local)) return 'generic_company';
   if (ROLE_PRIORITY.includes(local as (typeof ROLE_PRIORITY)[number])) return 'department_company';
   return 'person_company';
 }
 
-function pickByPriority(emails: string[]): { email: string; type: PolzaEmailResult['emailType'] } | null {
+function pickByPriority(emails: string[]): { email: string; type: PolzaEmailType } | null {
   for (const local of ROLE_PRIORITY) {
     const hit = emails.find((email) => email.split('@')[0].toLowerCase() === local);
     if (hit) return { email: hit, type: typeForLocal(local) };
@@ -125,47 +174,44 @@ function pickByPriority(emails: string[]): { email: string; type: PolzaEmailResu
   return { email: rest, type: typeForLocal(rest.split('@')[0].toLowerCase()) };
 }
 
-/** Общий таймаут на компанию: даже зависший хост не тормозит запуск дольше минуты. */
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const guard = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), timeoutMs);
-  });
-  try {
-    return await Promise.race([promise, guard]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
+/**
+ * Выбор адреса — чистая функция. excluded — адреса в нижнем регистре, которые
+ * проверка признала нерабочими: выбор идёт по тем же приоритетам среди остальных.
+ */
+export function pickCompanyEmail(
+  emails: string[],
+  normalizedDomain: string,
+  excluded: ReadonlySet<string> = new Set(),
+): { email: string; emailType: PolzaEmailType } | null {
+  const allowed = emails.filter((email) => !excluded.has(email.toLowerCase()) && isAllowed(email, normalizedDomain));
+  const picked = pickByPriority(allowed);
+  return picked ? { email: picked.email, emailType: picked.type } : null;
 }
 
+/** domainCache — один на запуск (MX и catch-all доменов для SMTP-проверки). */
 export async function findCompanyEmail(
   companyWebsite: string,
   normalizedDomain: string,
+  domainCache: EmailDomainCache,
 ): Promise<PolzaEmailResult> {
-  const result = await withTimeout(
-    scrapeEmails(companyWebsite, {
-      locale: 'en',
-      maxPages: MAX_PAGES,
-      timeout: PAGE_TIMEOUT_MS,
-    }),
-    COMPANY_TOTAL_TIMEOUT_MS,
-    null,
-  );
-
-  if (!result) {
-    return { email: null, emailType: null, emailSourceUrl: null };
-  }
-
-  const allowed = result.emails.filter((email) => isAllowed(email, normalizedDomain));
-  const picked = pickByPriority(allowed);
-  if (picked) {
-    return {
-      email: picked.email,
-      emailType: picked.type,
-      // scrapeEmails не отдаёт постраничную привязку адреса; корень обхода —
-      // честный источник «сайт компании», страница-владелец не известна.
-      emailSourceUrl: result.checkedUrls[0] ?? companyWebsite,
-    };
-  }
-  return { email: null, emailType: null, emailSourceUrl: null };
+  const search = await findAndVerifyCompanyEmail({
+    website: companyWebsite,
+    domain: normalizedDomain,
+    locale: 'en',
+    maxPages: MAX_PAGES,
+    domainCache,
+    pick: (emails, excluded) => pickCompanyEmail(emails, normalizedDomain, excluded),
+  });
+  const found = search.result;
+  return {
+    email: found?.email ?? null,
+    emailType: found?.emailType ?? null,
+    // scrapeEmails не отдаёт постраничную привязку адреса; корень обхода —
+    // честный источник «сайт компании», страница-владелец не известна.
+    emailSourceUrl: search.sourceUrl,
+    verification: found?.verification ?? null,
+    verdict: search.verdict,
+    triedInvalid: search.triedInvalid,
+    emails: search.results.map((item) => ({ email: item.email, emailType: item.emailType, verification: item.verification })),
+  };
 }

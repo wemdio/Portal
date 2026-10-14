@@ -23,6 +23,7 @@ jest.mock('@/lib/toolTrace', () => ({
 jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
 
 import { POST } from '@/app/api/tools/vertical-engine-v2/projects/[id]/broad-hypotheses/route';
+import { GET as GET_EXCLUSIONS, PUT as PUT_EXCLUSIONS } from '@/app/api/tools/vertical-engine-v2/projects/[id]/exclusions/route';
 
 const PROJECT = '8fe92ae8-d271-484e-af6c-288d20d6edaa';
 
@@ -112,6 +113,50 @@ describe('POST broad-hypotheses', () => {
     await mockDb.from('ve_jobs').update({ status: 'done' }).eq('id', first.body.job?.id);
     expect(await post()).toMatchObject({ status: 200, body: { ok: true, existing: false } });
     expect(broadJobs()).toHaveLength(2);
+
+    // Project settings do not enqueue work, alter collections, or call providers.
+    const context = { params: Promise.resolve({ id: PROJECT }) };
+    const settingsRequest = (body: unknown) => new Request('http://portal.test/exclusions', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) as NextRequest;
+    seed(tables(), { rpcHandlers: { ve_save_project_exclusions_v2: async (args, db) => {
+      const current = db.getRows('ve_project_exclusions')[0];
+      if ((current?.revision ?? 0) !== args.p_revision) return { data: { error: 'conflict' } };
+      const next = { project_id: args.p_project_id, revision: Number(args.p_revision) + 1,
+        inns: args.p_inns, domains: args.p_domains, emails: args.p_emails ?? current?.emails ?? [], updated_at: '2026-10-12T00:00:00Z' };
+      await db.from('ve_project_exclusions').upsert(next, { onConflict: 'project_id' });
+      return { data: next };
+    } } });
+    const empty = await GET_EXCLUSIONS({} as NextRequest, context);
+    expect(await empty.json()).toEqual({ revision: 0, inns: [], domains: [], emails: [], updated_at: null });
+    const bad = await PUT_EXCLUSIONS(settingsRequest({ revision: 0, inns: ['bad'], domains: ['mail.ru'] }), context);
+    expect(bad.status).toBe(400);
+    expect((await PUT_EXCLUSIONS(settingsRequest({ revision: 0, inns: [], domains: [], emails: ['*@company.ru'] }), context)).status).toBe(400);
+    expect(mockDb.rpcCalls).toHaveLength(0);
+    const saved = await PUT_EXCLUSIONS(settingsRequest({ revision: 0, inns: ['7701234567'], domains: ['https://WWW.COMPANY.RU/contact'], emails: [' CLIENT@MAIL.RU '] }), context);
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ revision: 1, inns: ['7701234567'], domains: ['company.ru'], emails: ['client@mail.ru'] });
+    expect(mockDb.rpcCalls[0]).toEqual({ fn: 've_save_project_exclusions_v2', params: {
+      p_project_id: PROJECT, p_revision: 0, p_inns: ['7701234567'], p_domains: ['company.ru'], p_actor_id: 'staff-1',
+      p_emails: ['client@mail.ru'],
+    } });
+    expect((await PUT_EXCLUSIONS(settingsRequest({ revision: 0, inns: [], domains: [] }), context)).status).toBe(409);
+    expect(mockDb.getRows('ve_project_exclusions')[0].domains).toEqual(['company.ru']);
+    const oldClient = await PUT_EXCLUSIONS(settingsRequest({ revision: 1, inns: [], domains: [] }), context);
+    expect(oldClient.status).toBe(200);
+    expect(await oldClient.json()).toMatchObject({ revision: 2, emails: ['client@mail.ru'] });
+    const cleared = await PUT_EXCLUSIONS(settingsRequest({ revision: 2, inns: [], domains: [], emails: [] }), context);
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ revision: 3, emails: [] });
+    expect(mockDb.mutations.every((mutation) => mutation.table === 've_project_exclusions')).toBe(true);
+    expect(mockDb.getRows('ve_jobs')).toHaveLength(1);
+    seed(tables(), { errorTables: { ve_project_exclusions: 'connection lost' }, rpcHandlers: {
+      ve_save_project_exclusions_v2: () => ({ data: null, error: { message: 'connection lost' } }),
+    } });
+    expect((await GET_EXCLUSIONS({} as NextRequest, context)).status).toBe(503);
+    expect((await PUT_EXCLUSIONS(settingsRequest({ revision: 1, inns: [], domains: [] }), context)).status).toBe(503);
+    seed(tables({ ve_projects: [] }));
+    expect((await GET_EXCLUSIONS({} as NextRequest, context)).status).toBe(404);
   });
 
   it('returns the concurrent task when the unique index wins the race', async () => {

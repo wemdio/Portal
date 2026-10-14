@@ -12,7 +12,6 @@ regl.docx
 companies_5000.xlsx
 companies_10000.xlsx
 .cursor
-.github/
 
 
 # next.js
@@ -203,3 +202,6 @@ app/logs/
 
 # Локальные установщики/бинарники, не для репозитория
 *.msi
+
+# Визуальный брейншторм superpowers
+.superpowers/

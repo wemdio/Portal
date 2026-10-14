@@ -5,7 +5,13 @@ import type { ReplyKind } from './types';
  * автоответ «в отпуске», отбойник почтового сервера и письмо прогрева — нет.
  */
 
-const BOUNCE_SENDERS = /(mailer-daemon|postmaster|no-?reply@.*(mail|smtp)|delivery.?subsystem)/i;
+const BOUNCE_SENDERS = /(mailer-daemon|postmaster|delivery.?subsystem)/i;
+/**
+ * noreply@ почтового сервера шлёт и отчёты о недоставке, и обычные рассылки:
+ * «noreply@email.stoking.ru» с уведомлением о заказе считался отбойником.
+ * Такой адрес — отбойник только вместе с темой или текстом отчёта.
+ */
+const NOREPLY_MAIL_SENDERS = /no-?reply@.*(mail|smtp)/i;
 const BOUNCE_SUBJECTS = /(undeliverable|delivery (status notification|has failed|failure)|returned mail|mail delivery failed|не доставлено|доставка не выполнена)/i;
 const BOUNCE_BODY = /(550|551|552|553|554|5\.1\.1|5\.4\.1|recipient address rejected|user unknown|mailbox (unavailable|not found)|does not exist)/i;
 
@@ -68,7 +74,7 @@ export function classifyReply(input: ReplyInput): ReplyKind {
     return 'bounce';
   }
   if (BOUNCE_SENDERS.test(from) || BOUNCE_SUBJECTS.test(subject)) return 'bounce';
-  if (BOUNCE_BODY.test(body) && BOUNCE_SENDERS.test(from)) return 'bounce';
+  if (NOREPLY_MAIL_SENDERS.test(from) && BOUNCE_BODY.test(body)) return 'bounce';
 
   if (WARMUP_SUBJECTS.test(subject) || INSTANTLY_WARMUP_TAG.test(subject)) return 'warmup';
   if (AUTO_SUBJECTS.test(subject) || AUTO_BODY.test(body)) return 'auto_reply';

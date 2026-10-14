@@ -6,7 +6,14 @@
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import type { DraftRow, DraftStatus, GlobalKnowledgeBase, KnowledgeBase, QualificationRow } from './types';
+import type {
+  DraftRow,
+  DraftStatus,
+  GlobalKnowledgeBase,
+  KnowledgeBase,
+  QualificationRow,
+  ReplyLanguage,
+} from './types';
 
 export function requireClients() {
   if (!supabaseAdmin || !supabaseInstantly) {
@@ -63,6 +70,24 @@ export async function getProjectCampaignIds(projectId: string): Promise<string[]
   for (const row of legacy.data ?? []) if (row.campaign_id) ids.add(row.campaign_id as string);
   for (const row of period.data ?? []) if (row.campaign_id) ids.add(row.campaign_id as string);
   return [...ids];
+}
+
+/**
+ * Кампании, привязанные к проекту не раньше `sinceIso`. Сборщик ответов берёт
+ * только привязанные кампании и письма не старше суток, поэтому у свежей
+ * привязки истории в таблице квалификатора нет — её дочитываем из Instantly.
+ */
+export async function getRecentlyLinkedCampaignIds(projectId: string, sinceIso: string): Promise<Set<string>> {
+  const { instantly } = requireClients();
+  const [legacy, period] = await Promise.all([
+    instantly.from('project_instantly_campaigns').select('campaign_id').eq('project_id', projectId).gte('created_at', sinceIso),
+    instantly.from('project_period_instantly_campaigns').select('campaign_id').eq('project_id', projectId).gte('created_at', sinceIso),
+  ]);
+  const ids = new Set<string>();
+  for (const row of [...(legacy.data ?? []), ...(period.data ?? [])]) {
+    if (row.campaign_id) ids.add(row.campaign_id as string);
+  }
+  return ids;
 }
 
 export interface CampaignCatalogEntry {
@@ -300,11 +325,12 @@ function mapQualificationRow(row: Record<string, unknown>): QualificationRow {
     eaccount: (row.eaccount as string) ?? null,
     replyTimestamp: (row.reply_timestamp as string) ?? null,
     qualificationStatus: (row.status as string) ?? null,
+    outOfCampaign: row.reply_out_of_campaign === true,
   };
 }
 
 const QUALIFICATION_COLUMNS =
-  'id, campaign_id, campaign_name, lead_email, company_name, thread_id, reply_subject, reply_body, last_outbound_preview, instantly_email_id, eaccount, reply_timestamp, status';
+  'id, campaign_id, campaign_name, lead_email, company_name, thread_id, reply_subject, reply_body, last_outbound_preview, instantly_email_id, eaccount, reply_timestamp, status, reply_out_of_campaign';
 
 /**
  * Строка поиска для фильтра PostgREST `or(...)`: запятые, скобки и
@@ -322,7 +348,7 @@ function sanitizeSearch(value: string): string {
  */
 export async function listSyncedQualifications(
   campaignIds: string[],
-  options: { limit: number; search?: string },
+  options: { limit: number; search?: string; onlyLeads?: boolean },
 ): Promise<{ rows: QualificationRow[]; total: number }> {
   if (!campaignIds.length) return { rows: [], total: 0 };
   const { instantly } = requireClients();
@@ -330,6 +356,7 @@ export async function listSyncedQualifications(
     .from('instantly_lead_qualifications')
     .select(QUALIFICATION_COLUMNS, { count: 'exact' })
     .in('campaign_id', campaignIds);
+  if (options.onlyLeads) query = query.eq('status', 'lead');
   const search = sanitizeSearch(options.search ?? '');
   if (search) query = query.or(`lead_email.ilike.*${search}*,company_name.ilike.*${search}*`);
   const { data, error, count } = await query
@@ -346,6 +373,7 @@ export async function listSyncedQualifications(
 export async function countSyncedQualificationsByCampaign(
   campaignIds: string[],
   search?: string,
+  options: { onlyLeads?: boolean } = {},
 ): Promise<Map<string, number>> {
   const { instantly } = requireClients();
   const cleaned = sanitizeSearch(search ?? '');
@@ -355,6 +383,7 @@ export async function countSyncedQualificationsByCampaign(
         .from('instantly_lead_qualifications')
         .select('id', { count: 'exact', head: true })
         .eq('campaign_id', campaignId);
+      if (options.onlyLeads) query = query.eq('status', 'lead');
       if (cleaned) query = query.or(`lead_email.ilike.*${cleaned}*,company_name.ilike.*${cleaned}*`);
       const { count, error } = await query;
       if (error) throw new Error(`qualifications count failed: ${error.message}`);
@@ -362,6 +391,93 @@ export async function countSyncedQualificationsByCampaign(
     }),
   );
   return new Map(counts);
+}
+
+const INBOX_COLUMNS = 'email_id, account_id, campaign_id, thread_id, lead_email, eaccount, subject, body_preview, reply_timestamp';
+
+function mapInboxRow(row: Record<string, unknown>): QualificationRow {
+  return {
+    id: row.email_id as string,
+    campaignId: row.campaign_id as string,
+    campaignName: null,
+    leadEmail: row.lead_email as string,
+    companyName: null,
+    threadId: (row.thread_id as string) ?? null,
+    replySubject: (row.subject as string) ?? null,
+    replyBody: (row.body_preview as string) ?? null,
+    lastOutboundPreview: null,
+    instantlyEmailId: row.email_id as string,
+    eaccount: (row.eaccount as string) ?? null,
+    replyTimestamp: (row.reply_timestamp as string) ?? null,
+    qualificationStatus: null,
+  };
+}
+
+/**
+ * Ответы без вердикта квалификатора: наши «N. Polza_…» и история кампаний до
+ * привязки (instantly_reply_inbox, пишет lib/instantly/replyInbox.ts). id строки
+ * — id письма Instantly, как у живых писем раньше: черновики к ним уже привязаны.
+ */
+export async function listInboxReplies(
+  campaignIds: string[],
+  options: { limit: number; search?: string },
+): Promise<{ rows: QualificationRow[]; total: number }> {
+  if (!campaignIds.length) return { rows: [], total: 0 };
+  const { instantly } = requireClients();
+  let query = instantly
+    .from('instantly_reply_inbox')
+    .select(INBOX_COLUMNS, { count: 'exact' })
+    .in('campaign_id', campaignIds);
+  const search = sanitizeSearch(options.search ?? '');
+  if (search) query = query.ilike('lead_email', `%${search}%`);
+  const { data, error, count } = await query
+    .order('reply_timestamp', { ascending: false, nullsFirst: false })
+    .limit(options.limit);
+  if (error) throw new Error(`reply inbox query failed: ${error.message}`);
+  return { rows: (data ?? []).map(mapInboxRow), total: count ?? data?.length ?? 0 };
+}
+
+export async function countInboxByCampaign(campaignIds: string[], search?: string): Promise<Map<string, number>> {
+  const { instantly } = requireClients();
+  const cleaned = sanitizeSearch(search ?? '');
+  const counts = await Promise.all(
+    campaignIds.map(async (campaignId) => {
+      let query = instantly
+        .from('instantly_reply_inbox')
+        .select('email_id', { count: 'exact', head: true })
+        .eq('campaign_id', campaignId);
+      if (cleaned) query = query.ilike('lead_email', `%${cleaned}%`);
+      const { count, error } = await query;
+      if (error) throw new Error(`reply inbox count failed: ${error.message}`);
+      return [campaignId, count ?? 0] as const;
+    }),
+  );
+  return new Map(counts);
+}
+
+export async function getInboxReplyById(emailId: string): Promise<{ row: QualificationRow; accountId: string } | null> {
+  const { instantly } = requireClients();
+  const { data, error } = await instantly
+    .from('instantly_reply_inbox')
+    .select(INBOX_COLUMNS)
+    .eq('email_id', emailId)
+    .maybeSingle();
+  if (error) throw new Error(`reply inbox lookup failed: ${error.message}`);
+  return data ? { row: mapInboxRow(data), accountId: (data.account_id as string) || 'main' } : null;
+}
+
+/** Есть ли у кампаний недочитанная история — экран честно пишет, что она догружается. */
+export async function inboxHistoryPending(campaignIds: string[]): Promise<boolean> {
+  if (!campaignIds.length) return false;
+  const { instantly } = requireClients();
+  const { data, error } = await instantly
+    .from('instantly_reply_inbox_backfill')
+    .select('campaign_id, done_at')
+    .in('campaign_id', campaignIds);
+  if (error) return false;
+  const done = new Set(((data ?? []) as { campaign_id: string; done_at: string | null }[])
+    .filter((row) => row.done_at).map((row) => row.campaign_id));
+  return campaignIds.some((id) => !done.has(id));
 }
 
 export async function getQualificationById(id: string): Promise<QualificationRow | null> {
@@ -375,7 +491,77 @@ export async function getQualificationById(id: string): Promise<QualificationRow
   return data ? mapQualificationRow(data) : null;
 }
 
-/** Последний статус на каждый qualification_id ('skipped' исключается из выдачи целиком в вызывающем коде). */
+/**
+ * id строк квалификатора по id писем Instantly: письмо, которое сторож Others
+ * уже перенёс в основной список, во вкладке Others — та же строка, с тем же
+ * черновиком и статусом.
+ */
+export async function findQualificationIdsByEmailIds(emailIds: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const { instantly } = requireClients();
+  for (let i = 0; i < emailIds.length; i += 50) {
+    const { data, error } = await instantly
+      .from('instantly_lead_qualifications')
+      .select('id, instantly_email_id')
+      .in('instantly_email_id', emailIds.slice(i, i + 50));
+    if (error) throw new Error(`qualification lookup by email failed: ${error.message}`);
+    for (const row of data ?? []) {
+      if (row.instantly_email_id) result.set(row.instantly_email_id as string, row.id as string);
+    }
+  }
+  return result;
+}
+
+/**
+ * Какие из писем — не первый ответ адресата: он уже писал нам раньше по
+ * кампаниям проекта. В списке такие письма помечаются «повторный», а не
+ * «новый», чтобы продолжение диалога не выглядело свежим лидом. Более ранние
+ * ответы ищем и в таблице квалификатора, и среди самих переданных писем
+ * (письма живых аккаунтов в таблицу не попадают).
+ */
+export async function findRepeatReplyIds(
+  campaignIds: string[],
+  rows: Pick<QualificationRow, 'id' | 'leadEmail' | 'replyTimestamp'>[],
+): Promise<Set<string>> {
+  const firstReplyAt = new Map<string, number>();
+  const note = (email: string | null, timestamp: string | null) => {
+    const key = (email ?? '').trim().toLowerCase();
+    const at = timestamp ? Date.parse(timestamp) : NaN;
+    if (!key || Number.isNaN(at)) return;
+    const known = firstReplyAt.get(key);
+    if (known === undefined || at < known) firstReplyAt.set(key, at);
+  };
+  for (const row of rows) note(row.leadEmail, row.replyTimestamp);
+
+  const emails = [...new Set(rows.map((row) => row.leadEmail).filter(Boolean))];
+  if (campaignIds.length && emails.length) {
+    const { instantly } = requireClients();
+    const chunks: string[][] = [];
+    for (let i = 0; i < emails.length; i += 100) chunks.push(emails.slice(i, i + 100));
+    await Promise.all(
+      chunks.map(async (chunk) => {
+        const { data, error } = await instantly
+          .from('instantly_lead_qualifications')
+          .select('lead_email, reply_timestamp')
+          .in('campaign_id', campaignIds)
+          .in('lead_email', chunk)
+          .order('reply_timestamp', { ascending: true });
+        if (error) throw new Error(`earlier replies query failed: ${error.message}`);
+        for (const row of data ?? []) note(row.lead_email as string, row.reply_timestamp as string | null);
+      }),
+    );
+  }
+
+  const repeats = new Set<string>();
+  for (const row of rows) {
+    const first = firstReplyAt.get(row.leadEmail.trim().toLowerCase());
+    const at = row.replyTimestamp ? Date.parse(row.replyTimestamp) : NaN;
+    if (first !== undefined && !Number.isNaN(at) && at > first) repeats.add(row.id);
+  }
+  return repeats;
+}
+
+/** Последний статус на каждый qualification_id('skipped' исключается из выдачи целиком в вызывающем коде). */
 export async function getLatestDraftStatuses(
   qualificationIds: string[],
 ): Promise<Record<string, DraftStatus>> {
@@ -531,4 +717,61 @@ export async function updateDraftText(draftId: string, text: string): Promise<vo
     .update({ generated_text: text })
     .eq('id', draftId);
   if (error) throw new Error(`draft text-update failed: ${error.message}`);
+}
+
+/**
+ * Что мы уже отправили по этому письму, по времени отправки. Нужно, чтобы
+ * переписка на экране показывала наш ответ сразу: Instantly отдаёт только что
+ * отправленное письмо в треде не мгновенно, и сотрудник видел диалог без
+ * своего ответа — «статус поменялся, а письма нет».
+ */
+export async function listSentDrafts(
+  qualificationId: string,
+): Promise<{ text: string; sentAt: string }[]> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_drafts')
+    .select('generated_text, sent_at')
+    .eq('qualification_id', qualificationId)
+    .eq('status', 'sent')
+    .order('sent_at', { ascending: true });
+  if (error) throw new Error(`sent drafts lookup failed: ${error.message}`);
+  return (data ?? [])
+    .filter((row) => typeof row.generated_text === 'string' && row.generated_text.trim())
+    .map((row) => ({ text: row.generated_text as string, sentAt: (row.sent_at as string) ?? '' }));
+}
+
+/**
+ * Язык письма для этой переписки. Строки нет — язык по умолчанию, русский:
+ * так же отвечаем и при ошибке чтения, чтобы переписка открывалась всегда.
+ */
+export async function getThreadLanguage(qualificationId: string): Promise<ReplyLanguage> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_thread_prefs')
+    .select('language')
+    .eq('qualification_id', qualificationId)
+    .maybeSingle();
+  if (error) throw new Error(`thread language lookup failed: ${error.message}`);
+  return data?.language === 'en' ? 'en' : 'ru';
+}
+
+export async function setThreadLanguage(
+  qualificationId: string,
+  projectId: string,
+  language: ReplyLanguage,
+  userId: string,
+): Promise<void> {
+  const { admin } = requireClients();
+  const { error } = await admin.from('reply_personalization_thread_prefs').upsert(
+    {
+      qualification_id: qualificationId,
+      project_id: projectId,
+      language,
+      updated_by: userId,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'qualification_id' },
+  );
+  if (error) throw new Error(`thread language upsert failed: ${error.message}`);
 }

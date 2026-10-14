@@ -4,7 +4,7 @@ import { assertToolAllowed, authenticateBench, isBenchAuth } from '@/lib/bench/a
 import { benchError } from '@/lib/bench/errors';
 import { toBenchJobView } from '@/lib/bench/jobView';
 import { logBenchRequest } from '@/lib/bench/journal';
-import { checkActiveJobs, checkBenchLimits } from '@/lib/bench/limits';
+import { checkActiveJobs, checkBenchLimits, mskDayStartUtc } from '@/lib/bench/limits';
 import { getBenchTool } from '@/lib/bench/registry';
 import { applyToolScope } from '@/lib/bench/scope';
 import type { BenchJobTool, JobRow } from '@/lib/bench/types';
@@ -77,7 +77,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const busy = await checkActiveJobs(auth.db, auth.key, jobTool.table, ACTIVE_STATUSES);
+  if (jobTool.checkQuota) {
+    let exceeded: Awaited<ReturnType<NonNullable<BenchJobTool['checkQuota']>>>;
+    try {
+      exceeded = await jobTool.checkQuota({
+        db: auth.db,
+        params: parsed.data,
+        dayStart: mskDayStartUtc(new Date()),
+      });
+    } catch (e) {
+      return finish(
+        benchError('server_error', e instanceof Error ? e.message : 'Не удалось проверить норму'),
+        tool.id,
+      );
+    }
+    if (exceeded) {
+      return finish(benchError('quota_exceeded', exceeded.message, exceeded.details), tool.id);
+    }
+  }
+
+  const busy = await checkActiveJobs(
+    auth.db,
+    auth.key,
+    jobTool.table,
+    ACTIVE_STATUSES,
+    jobTool.maxActiveJobs,
+  );
   if (busy) return finish(busy, tool.id);
 
   // Некоторым инструментам мало строки в таблице: обогащению по ИНН нужно
@@ -112,7 +137,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return finish(NextResponse.json(toBenchJobView(jobTool, data)), tool.id);
+  // Задача с очередью дочерних строк (валидация почт) дозаливает её здесь.
+  // Провал адаптер оформляет сам: задача уходит в failed с причиной.
+  let job: Record<string, unknown> = data;
+  if (jobTool.afterInsert) {
+    try {
+      job = await jobTool.afterInsert({ db: auth.db, job: data, params: parsed.data });
+    } catch (e) {
+      return finish(
+        benchError('server_error', e instanceof Error ? e.message : 'Не удалось поставить задачу'),
+        tool.id,
+      );
+    }
+  }
+
+  return finish(NextResponse.json(toBenchJobView(jobTool, job)), tool.id);
 }
 
 export async function GET(req: NextRequest) {

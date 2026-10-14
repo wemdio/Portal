@@ -21,6 +21,7 @@
 import { callLLMWithSchema, getVeActiveJobSignal, getVeModel } from '../llm';
 import { VeOperationTimeoutError, withVeDeadline } from '../operationDeadline';
 import { evidenceInputHash, readEvidenceCheckpoint, type EvidenceCheckpoint } from '../evidenceCheckpoint';
+import { reconcileVePriorityNicheResults, VePriorityNicheReportSchema, type VePriorityNicheResult } from '../priorityNiches';
 import { isRetryableStageError } from '../jobRetry';
 import {
   VeEvidenceVerdictSchema,
@@ -312,7 +313,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
   // Рынок: ctx.market (воркер), фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
 
-  const hypothesesResult = await withVeDeadline('evidence candidates read', READ_TIMEOUT_MS, ctx.signal, () => latestDoneJobResult<{ candidates?: VeHypothesisCandidate[] }>(
+  const hypothesesResult = await withVeDeadline('evidence candidates read', READ_TIMEOUT_MS, ctx.signal, () => latestDoneJobResult<{ candidates?: VeHypothesisCandidate[]; priority_niches?: string[]; priority_niche_results?: VePriorityNicheResult[] }>(
     ctx.supabase,
     job.project_id,
     'hypotheses',
@@ -322,6 +323,9 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
     throw new Error('Нет кандидатов: сначала выполните стадию hypotheses');
   }
 
+  const priorityNiches = hypothesesResult?.priority_niches ?? [];
+  const priorityResults = hypothesesResult?.priority_niche_results ?? [];
+  const priorityTitles = new Set(priorityResults.flatMap((result) => result.hypothesis_titles).map(normTitle));
   const model = getVeModel('research');
   const inputHash = evidenceInputHash({ project_id: job.project_id, market, profile, candidates, model });
   let checkpoint = readEvidenceCheckpoint(job.result?.evidence_checkpoint, inputHash, candidates.length);
@@ -338,6 +342,15 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
     await saveCheckpoint(ctx, job, checkpoint, candidates.length);
   }
   const { accepted, usage } = checkpoint;
+  if (priorityNiches.length) checkpoint.priority_decisions ??= [];
+  const recordPriorityDecision = (title: string, keptTitle: string | null, reason: string) => {
+    if (!priorityTitles.has(normTitle(title))) return;
+    const decisions = checkpoint.priority_decisions ?? (checkpoint.priority_decisions = []);
+    const index = decisions.findIndex((decision) => normTitle(decision.title) === normTitle(title));
+    const decision = { title, kept_title: keptTitle, reason: reason.slice(0, 2000) };
+    if (index < 0) decisions.push(decision);
+    else decisions[index] = decision;
+  };
   const portfolioProfile = checkpoint.portfolio_profile;
   const markupHistory = checkpoint.markup_history;
   const todayMoscow = checkpoint.today_moscow;
@@ -439,6 +452,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
 
         if (verdict === 'drop') {
           checkpoint.dropped += 1;
+          recordPriorityDecision(candidate.title, null, v.reason || 'Проверка источников не подтвердила пригодность сегмента для продукта клиента');
           stageLog(ctx, `[evidence] drop: ${v.reason}`);
           return;
         }
@@ -497,6 +511,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
             ) {
               target.seasonality = seasonality;
             }
+            recordPriorityDecision(candidate.title, target.title, v.reason);
             checkpoint.merged += 1;
             return;
           }
@@ -504,6 +519,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
           stageLog(ctx, `[evidence] merge-цель «${v.merge_with_title}» не найдена среди гипотез того же вида, keep`);
         }
 
+        recordPriorityDecision(candidate.title, candidate.title, v.reason);
         accepted.push({
           tier: candidate.tier,
           title: candidate.title,
@@ -530,6 +546,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
           });
           return;
         }
+        recordPriorityDecision(candidate.title, null, 'Не удалось завершить проверку этой гипотезы по источникам. Можно добавить свою гипотезу для отдельной проверки.');
         checkpoint.dropped += 1;
       }
     })();
@@ -596,6 +613,26 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
     }
     if (insError) throw new Error(`ve_hypotheses insert: ${insError.message}`);
     throwIfCancelled(ctx);
+  }
+
+  if (priorityNiches.length) {
+    throwIfCancelled(ctx);
+    const report = {
+      niches: priorityNiches,
+      results: reconcileVePriorityNicheResults(priorityResults, accepted.map((item) => item.title), checkpoint.priority_decisions ?? []),
+      generated_at: new Date().toISOString(),
+    };
+    const { data: updatedProject, error: reportError } = await ctx.supabase.rpc('ve_patch_project_brief', {
+      p_project_id: job.project_id,
+      p_patch: { priority_niche_results: report },
+      p_expected_priority_niches: priorityNiches,
+    });
+    throwIfCancelled(ctx);
+    const savedReport = VePriorityNicheReportSchema.safeParse(updatedProject?.brief?.priority_niche_results);
+    if (reportError || updatedProject?.id !== job.project_id || !savedReport.success
+      || JSON.stringify(savedReport.data) !== JSON.stringify(VePriorityNicheReportSchema.parse(report))) {
+      throw new Error(`ve priority niche report: ${reportError?.message ?? 'database response did not confirm the saved report'}`);
+    }
   }
 
   const result = {

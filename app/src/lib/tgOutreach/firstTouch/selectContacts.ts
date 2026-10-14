@@ -16,6 +16,8 @@ export interface PendingContact {
    * не наступает никогда, и один недоступный контакт крутится вечно.
    */
   attempts?: number;
+  /** Имя файла к первому сообщению из таблицы базы (attachments.ts); пусто — файл «для всех» или без файла. */
+  attachment_name?: string | null;
 }
 
 export interface SelectParams {

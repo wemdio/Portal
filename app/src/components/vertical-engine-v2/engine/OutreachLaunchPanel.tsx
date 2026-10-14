@@ -1,17 +1,20 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { VeTemplate } from '@/lib/verticalEngineV2/types';
+import type { VeSegmentationAuditSummary, VeTemplate } from '@/lib/verticalEngineV2/types';
 import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
 import type { VeOutreachLaunchRequest, VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import { VE_API, veEnginePost, type VeDeliveryPlanPreviewDto } from './api';
 import { HE } from './design';
+import { SearchableSelect } from './SearchableSelect';
 import { StatusBox } from './ui';
 import { CreateClientPresetInline, DeliveryPlanBlock, useTemplateLaunch } from './steps/Step5Template';
+import { getVeLaunchSelectionState } from './launchSelection';
+import { DeliveryRatePanel } from './DeliveryRatePanel';
 
 type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
   status: 'ready' | 'working' | 'blocked';
   error?: string;
-  summary?: { segments?: Array<{ count: number; name?: string }>; defaultGroup?: { count: number } };
+  summary?: VeSegmentationAuditSummary;
   preview?: VeDeliveryPlanPreviewDto & { prospective_ready: number };
 };
 interface Preflight {
@@ -24,6 +27,8 @@ export function OutreachLaunchPanel({
   snapshot,
   templates,
   titles,
+  hypothesisIds,
+  onBack,
   onStarted,
   onPresetChange,
 }: {
@@ -31,11 +36,13 @@ export function OutreachLaunchPanel({
   snapshot: VeOutreachSetupResponse;
   templates: VeTemplate[];
   titles: Record<string, string>;
+  hypothesisIds: string[];
+  onBack: () => void;
   onStarted: (run: VeOutreachRun) => void;
   onPresetChange: (presetId: string) => void;
 }) {
   const firstPreparation = snapshot.preparations.find(
-    (p) => p.hypothesis_id === snapshot.setup.selected_hypothesis_ids[0],
+    (p) => p.hypothesis_id === hypothesisIds[0],
   );
   const first = templates.find((t) => t.id === firstPreparation?.template_id) ?? null;
   const [preflightState, setPreflightState] = useState<{ key: string; result: Preflight } | null>(null);
@@ -48,7 +55,9 @@ export function OutreachLaunchPanel({
   const onAuditRejected = useCallback(() => setPreflightState(null), []);
   const launch = useTemplateLaunch(
     first,
-    preflightState?.result.items[0]?.segmentation_audit_id ?? null,
+    // prepare-launch owns both the audit and delivery preview. A second preview
+    // request can race the unfinished audit and leave a stale error in the form.
+    null,
     onAuditRejected,
   );
   const openForm = launch.openForm;
@@ -61,14 +70,21 @@ export function OutreachLaunchPanel({
   useEffect(() => {
     onPresetChange(launch.presetId);
   }, [launch.presetId, onPresetChange]);
+  const rateTemplates = snapshot.preparations.filter(p => hypothesisIds.includes(p.hypothesis_id) && p.template_id)
+    .map(p => p.template_id!).sort();
+  const rateKey = `${launch.presetId}/${rateTemplates.join(',')}`;
+  const [rateReady, setRateReady] = useState<{key: string; revision: number} | null>(null);
+  const onRateReady = useCallback((revision: number | null) => setRateReady(revision == null ? null : {key: rateKey, revision}), [rateKey]);
+  const rateRevision = rateReady?.key === rateKey ? rateReady.revision : null;
   const request = useMemo<VeOutreachLaunchRequest | null>(() => {
     // null — проект Portal без периодов; undefined — проект сейчас выбрать нельзя.
-    if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts)
+    if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts || !rateRevision)
       return null;
-    const ids = snapshot.setup.selected_hypothesis_ids;
+    const ids = hypothesisIds;
     if (!ids.length) return null;
     const items: VeOutreachLaunchRequest['items'] = [];
     for (const id of ids) {
+      if (!getVeLaunchSelectionState(snapshot, templates, id).ready) return null;
       const p = snapshot.preparations.find((row) => row.hypothesis_id === id);
       if (!p?.base_id || !p.template_id || p.status !== 'ready') return null;
       const review = snapshot.reviews[p.base_id],
@@ -84,12 +100,13 @@ export function OutreachLaunchPanel({
     return {
       setup_revision: snapshot.setup.revision,
       preset_id: launch.presetId,
+      delivery_rate_revision: rateRevision,
       portal_project_id: launch.portalProjectId,
       expected_portal_period_id: launch.expectedPortalPeriodId,
       target_contacts: launch.targetContacts,
       items,
     };
-  }, [snapshot, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts]);
+  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts, rateRevision]);
   const requestKey = request ? JSON.stringify(request) : '';
   const preflight = preflightState?.key === requestKey ? preflightState.result : null;
   const confirmationKey = preflight?.ready
@@ -173,28 +190,37 @@ export function OutreachLaunchPanel({
     }
   };
   const preset = launch.presets?.find((p) => p.id === launch.presetId);
-  if (!first) return <StatusBox tone="info">Дождитесь подготовки писем и одобрите базы на предыдущем шаге.</StatusBox>;
+  const selectionBlocked = !hypothesisIds.length || hypothesisIds.some((id) => !getVeLaunchSelectionState(snapshot, templates, id).ready);
+  if (!first || selectionBlocked) return (
+    <section className="space-y-3">
+      <StatusBox tone="info">Выберите готовые и одобренные базы на шаге «Базы и объём».</StatusBox>
+      {hypothesisIds.map((id) => <p key={id} className={HE.muted}>
+        {titles[id] ?? 'Гипотеза'}: {getVeLaunchSelectionState(snapshot, templates, id).label}.
+      </p>)}
+      <button type="button" className={HE.btnGhost} onClick={onBack}>К выбору баз</button>
+    </section>
+  );
   return (
     <section className="space-y-5">
+      <div className="space-y-2">
+        <h2 className="ve2-h2">Базы этого запуска: {hypothesisIds.length}</h2>
+        <ul className="space-y-1">
+          {hypothesisIds.map((id) => <li key={id}>{titles[id] ?? 'Гипотеза'}</li>)}
+        </ul>
+        <p className={HE.muted}>Остальные базы проекта в этот запуск не входят.</p>
+        <button type="button" className={HE.btnQuiet} disabled={busy} onClick={onBack}>Изменить состав запуска</button>
+      </div>
       <h2 className="ve2-h2">Клиент и отправители</h2>
       {launch.loadError ? <StatusBox tone="error">{launch.loadError}</StatusBox> : null}
-      <label className="block ve2-label">
-        Клиент
-        <select
-          aria-label="Клиент"
-          className={`${HE.input} mt-2 w-full`}
-          value={launch.presetId}
-          disabled={!!launch.boundPresetId || busy}
-          onChange={(event) => launch.setPresetId(event.target.value)}
-        >
-          <option value="">Выберите клиента</option>
-          {launch.presets?.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <SearchableSelect
+        id="ve2-outreach-client"
+        label="Клиент"
+        value={launch.presetId}
+        options={launch.presets ?? []}
+        disabled={!!launch.boundPresetId || busy}
+        onChange={launch.setPresetId}
+        placeholder="Выберите клиента"
+      />
       {preset ? (
         <p className={HE.muted}>
           {preset.instantly_account_label} ·{' '}
@@ -203,13 +229,17 @@ export function OutreachLaunchPanel({
         </p>
       ) : null}
       {launch.canCreateClient && !launch.boundPresetId ? (
-        <CreateClientPresetInline launch={launch} templateId={first.id} />
+        <fieldset disabled={busy}>
+          <CreateClientPresetInline launch={launch} templateId={first.id} />
+        </fieldset>
       ) : null}
-      <DeliveryPlanBlock launch={launch} />
+      <DeliveryPlanBlock launch={launch} disabled={busy} preparedPreview={preflight?.items[0]?.preview ?? null} />
+      {launch.presetId && rateTemplates.length ? <DeliveryRatePanel key={rateKey} projectId={projectId}
+        presetId={launch.presetId} templateIds={rateTemplates} disabled={busy} onReady={onRateReady} /> : null}
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
-          <p className={HE.muted}>Одобрите все выбранные базы, выберите клиента, проект и цель за период.</p>
+          <p className={HE.muted}>Выберите клиента, проект и цель контактов, затем примените темп.</p>
         ) : !preflight && !error ? (
           <p role="status">Проверяем аудиторию и настройки отправки…</p>
         ) : null}
@@ -225,9 +255,10 @@ export function OutreachLaunchPanel({
             </p>
             {item.status === 'ready' ? (
               <p className={HE.muted}>
-                Кампаний:{' '}
-                {(item.summary?.segments?.filter((s) => s.count > 0).length ?? 0) +
-                  (item.summary?.defaultGroup?.count ? 1 : 0)}{' '}
+                Будет создано кампаний:{' '}
+                {item.summary
+                  ? item.summary.segments.filter((s) => s.count > 0).length + (item.summary.default.count > 0 ? 1 : 0)
+                  : '—'}{' '}
                 · новых готовых контактов: {item.preview?.prospective_ready ?? '—'}
               </p>
             ) : null}
@@ -235,8 +266,8 @@ export function OutreachLaunchPanel({
         ))}
         {preflight?.ready ? (
           <p className={HE.muted}>
-            Будем пополнять эти кампании в рабочие дни. Если отправители заняты или ещё не наступила дата начала,
-            гипотеза останется в очереди.
+            Система создаст кампании в Instantly без отправки и загрузит первую порцию контактов по плану.
+            Проверьте кампании и нажмите Start в Instantly. После запуска ежедневная дозаливка продолжится автоматически.
           </p>
         ) : null}
         {error ? <StatusBox tone="error">{error}</StatusBox> : null}
@@ -253,7 +284,7 @@ export function OutreachLaunchPanel({
             checked={!!confirmationKey && confirmedKey === confirmationKey}
             onChange={(event) => setConfirmedKey(event.target.checked ? confirmationKey : null)}
           />
-          <span>Базы, письма и сегменты согласованы с заказчиком. Разрешаю создание кампаний и отправку.</span>
+          <span>Базы, письма и сегменты согласованы с заказчиком. Подтверждаю подготовку кампаний без отправки.</span>
         </label>
         <button
           type="button"
@@ -263,7 +294,7 @@ export function OutreachLaunchPanel({
           }
           onClick={() => void start()}
         >
-          {busy ? 'Сохраняем запуск…' : 'Запустить аутрич'}
+          {busy ? 'Сохраняем запрос…' : 'Подготовить кампании в Instantly'}
         </button>
       </div>
     </section>

@@ -64,6 +64,11 @@ export async function GET(req: NextRequest) {
       День: d.date,
       Операций: d.count,
       'Сумма, ₽': d.total,
+      // Справка: сколько из рублёвой суммы дня пришло валютой, в исходной валюте.
+      // Не formatCurrencyMap: тот живёт в клиентском модуле и роуту недоступен.
+      'В т.ч. в валюте': Object.entries(d.foreignByCurrency)
+        .map(([currency, amount]) => `${amount} ${currency}`)
+        .join(', '),
       'Без курса': d.withoutRate || '',
     })),
   );

@@ -24,10 +24,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (campaign.status === 'running') return jsonError('Already running', 400);
 
     if (campaign.lead_list_id) {
+      // Every lead of the list, whoever added it: lists are shared by the team
+      // (08.10.2026), and a campaign on a colleague's list used to start empty.
       const { data: leads } = await supabaseAdmin
         .from('li_leads')
         .select('id')
-        .eq('user_id', campaign.user_id)
         .eq('lead_list_id', campaign.lead_list_id)
         .limit(5000);
 

@@ -24,6 +24,8 @@ export interface ClientReply {
   content_preview: string | null;
   /** Plaintext body (html → text if needed) */
   body_text: string | null;
+  /** This inbound was attributed to the client's campaign by our intake, not Instantly. */
+  out_of_campaign?: boolean;
 }
 
 export interface ClientRepliesPage {
@@ -63,6 +65,8 @@ export interface ThreadMessage {
   to_recipients: Recipient[];
   /** Carbon-copy (CC) recipients of this message. */
   cc_recipients: Recipient[];
+  /** Local record for an out-of-campaign /emails/test send absent from Instantly Unibox. */
+  delivery_status?: 'sending' | 'accepted' | 'failed';
 }
 
 export interface ClientReplyThread {
@@ -76,6 +80,8 @@ export interface ClientReplyThread {
    * Lets the composer SHOW exactly who stays in copy before sending.
    */
   reply_all_cc?: Recipient[];
+  /** Provider cannot attach this inbound email to the client's campaign. */
+  reply_as_new_email?: boolean;
   /**
    * История переписки не загружена: общий бюджет чтения LIST /emails занят
    * (его делят кабинет и воркер квалификации ответов). В `messages` тогда

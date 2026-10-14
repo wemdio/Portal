@@ -9,6 +9,7 @@ import { CampaignStatus, type Campaign, type CampaignSequence } from '@/lib/inst
 import { buildLaunchSequence, type VeTemplateLaunchCampaign } from './launchHandoff';
 import { launchMailboxScopesEqual } from './launchPortfolio';
 import { loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDeliveryInventory';
+import { withVeDeliveryCompanyIdentity } from './projectExclusionDelivery';
 import { estimatedBundleRunDays } from './launchTemplate';
 import { buildSegmentationLaunchGroups, stableJson } from './segmentationAudit';
 import { validateStoredAuditSnapshot, type StoredAuditValidationInput } from './stages/segmentationAudit';
@@ -94,15 +95,21 @@ export async function prepareBoundContactDeliveryRecovery(input: {
     throw new ContactDeliveryRecoveryError('Не удалось проверить чёрный список клиента.',
       'CONTACT_DELIVERY_BLOCKLIST_UNAVAILABLE', 500);
   }
+  // Restore the original segment/campaign structure. A policy saved while the
+  // external result was unknown may exclude a whole segment; dropping its rows
+  // would make durable recovery impossible. Ready metrics and every upload
+  // apply current exclusions; this function never uploads these contacts.
   // Other hypotheses already owning an email win. The exact same recovered
   // bundle is exempt so a lost response may safely replay its immutable rows.
   const [inventory, ownCampaignRows] = await Promise.all([
-    loadVeContactDeliveryRows(input.portalDb, input.base.project_id),
+    loadVeContactDeliveryRows(input.portalDb, input.base.project_id, true),
     readContactDeliveryPages<{ id: string }>('recovered campaign identities', (from, to) =>
       input.portalDb.from('ve_launch_queue_campaigns').select('id', { count: 'exact' })
         .in('campaign_id', input.campaignIds).order('id', { ascending: true }).range(from, to)),
   ]);
   const ownCampaignRowIds = new Set(ownCampaignRows.map((row) => row.id));
+  const existingPayloads = new Map(inventory.filter(row => ownCampaignRowIds.has(row.campaign_row_id) && row.lead_payload)
+    .map(row => [row.email_normalized, row.lead_payload!]));
   for (const row of inventory) {
     if (!ownCampaignRowIds.has(row.campaign_row_id)) allowedEmails.delete(row.email_normalized);
   }
@@ -123,7 +130,13 @@ export async function prepareBoundContactDeliveryRecovery(input: {
     campaigns: groups.map((group) => ({ campaign_id: '', campaign_name: '', campaign_url: '',
       segment: group.segment, leads_count: 0, ready_leads_count: group.leadIndices.length })),
   });
-  return { project, preset, accountId, groups, leads: audience.leads, estimatedRunDays };
+  return { project, preset, accountId, groups,
+    leads: audience.leads.map((lead, index) => {
+      const payload = existingPayloads.get(lead.email.trim().toLowerCase());
+      // A lost finalization response may already have persisted this exact row.
+      // Preserve it byte-for-byte; enrichment would invalidate the replay CAS.
+      return payload ? { ...payload, email: lead.email } : withVeDeliveryCompanyIdentity(lead, audience.rows[index]);
+    }), estimatedRunDays };
 }
 
 export type BoundContactDeliveryRecovery = NonNullable<Awaited<ReturnType<typeof prepareBoundContactDeliveryRecovery>>>;

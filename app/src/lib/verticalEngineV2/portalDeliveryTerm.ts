@@ -3,7 +3,8 @@
  *
  * У многих проектов Portal нет ни одной строки project_periods: договором
  * служит сама карточка проекта (статус и дедлайн). Такой проект запускается
- * без периода: цель вводит специалист, темп считается до projects.deadline,
+ * без периода: цель вводит специалист, до projects.deadline темп учитывает срок,
+ * после — выбранную дневную ёмкость;
  * факт плана — первые контакты кампаний этого VE2-проекта. Накопленный
  * projects.contacts_done и текст обязательства только показываются.
  *
@@ -49,7 +50,6 @@ export type PortalProjectTermIssueCode =
   | 'PORTAL_PROJECT_NOT_IN_WORK'
   | 'PROJECT_DEADLINE_REQUIRED'
   | 'PROJECT_DEADLINE_INVALID'
-  | 'PROJECT_DEADLINE_PASSED'
   | 'PORTAL_PROJECT_MANUAL_FACT';
 
 export interface PortalProjectTermIssue {
@@ -83,11 +83,9 @@ export const PORTAL_TERM_TEXT = {
     'В карточке проекта не заполнено поле «Дедлайн». Укажите дату в формате ГГГГ-ММ-ДД — темп рассчитается до неё.',
   deadlineInvalid: (raw: string) =>
     `В карточке проекта в поле «Дедлайн» указана не дата («${raw}»). Укажите дату в формате ГГГГ-ММ-ДД — темп рассчитается до неё.`,
-  deadlinePassed: (deadline: string) =>
-    `Дедлайн проекта (${formatRuDate(deadline)}) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.`,
   /**
    * Дописывается к причине паузы уже закреплённого плана, которую снимает
-   * правка карточки (статус, пустой, не-ISO или прошедший «Дедлайн»). Если
+   * правка карточки (статус, пустой или неверный «Дедлайн»). Если
    * за паузу все кампании плана завершились, пакет уходит из портфеля
    * («Все кампании завершены») и сам не вернётся — так же, как у закрытого
    * периода. SQL ve_contact_delivery_term считает все эти случаи одинаково.
@@ -133,11 +131,6 @@ export function parseProjectDeadline(value: string): string | null {
   return isIsoCalendarDate(iso) ? iso : null;
 }
 
-function formatRuDate(value: string): string {
-  const [year, month, day] = value.split('-');
-  return day && month && year ? `${day}.${month}.${year}` : value;
-}
-
 /** Календарная дата в часовом поясе отправки, YYYY-MM-DD. */
 export function localIsoDate(now: Date, timezone: string): string {
   const parts = new Map(
@@ -160,7 +153,7 @@ export function withBoundResumeNote(error: string, bound: boolean | undefined): 
 /**
  * Можно ли вести доставку по проекту без периода. `bound` — план уже
  * закреплён без периода: появившийся период тогда означает смену режима.
- * `today` не передают, пока неизвестен часовой пояс отправки.
+ * `today` сохранён для совместимости; плановая дата больше не запрещает запуск.
  */
 export function describePortalProjectTerm(
   project: PortalProjectTermRow,
@@ -187,9 +180,8 @@ export function describePortalProjectTerm(
   if (!deadline) {
     return cardIssue('PROJECT_DEADLINE_INVALID', PORTAL_TERM_TEXT.deadlineInvalid(rawDeadline));
   }
-  if (options.today && deadline < options.today) {
-    return cardIssue('PROJECT_DEADLINE_PASSED', PORTAL_TERM_TEXT.deadlinePassed(deadline));
-  }
+  // The explicit launch remains authorized after this planning date. Closed
+  // projects/periods, changed bindings and invalid dates are still rejected.
   const startsAt = clean(project.launch_date);
   return {
     ok: true,

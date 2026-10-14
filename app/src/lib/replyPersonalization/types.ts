@@ -46,7 +46,19 @@ export interface QualificationRow {
    * бывает нужно обработать.
    */
   qualificationStatus?: string | null;
+  /**
+   * Instantly не привязал письмо к кампании (папка Others, «сироты» сторожа):
+   * ответить в тред нельзя, ответ уходит отдельным письмом с того же ящика.
+   */
+  outOfCampaign?: boolean;
 }
+
+/**
+ * Язык, на котором ИИ пишет ответ. Хранится на переписке (см. миграцию
+ * 20260930_0010): у русского и английского адресата разные ветки одной и той
+ * же кампании, и выбор должен пережить закрытие вкладки и смену сотрудника.
+ */
+export type ReplyLanguage = 'ru' | 'en';
 
 export interface ThreadMessage {
   fromUs: boolean;
@@ -76,6 +88,20 @@ export interface DraftRow {
 export interface ReplyListItem extends QualificationRow {
   /** По последнему черновику: 'sent' — ответили, 'skipped' — пропустили, иначе 'new'. */
   listStatus: 'new' | 'sent' | 'skipped';
+  /** Адресат уже отвечал раньше: необработанное письмо — «повторный», а не «новый». */
+  repeat?: boolean;
+  /** 'others' — строка вкладки Others (папка Others в Instantly). */
+  source?: 'others';
+}
+
+/** Страница вкладки Others. */
+export interface OthersPage {
+  replies: ReplyListItem[];
+  /** Курсор следующей страницы; null — дальше писем нет. */
+  nextCursor: string | null;
+  /** Что загрузить не удалось — показываем над списком. */
+  notices: string[];
+  missingReason: string | null;
 }
 
 /** Кампания проекта для кнопок-фильтров над списком писем. */

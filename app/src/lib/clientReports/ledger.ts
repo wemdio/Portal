@@ -154,6 +154,7 @@ export function buildDomainSnapshot(input: {
   scoreOrigin?: 'api' | 'cache' | 'legacy' | null;
   emails?: ReadonlyArray<{ address: string | null; validationStatus?: string | null }>;
   sourceFilename?: string | null;
+  isNoEmailRetry?: boolean;
   scoredAt: string;
   routedCampaignId?: string | null;
   routedCampaignName?: string | null;
@@ -198,6 +199,7 @@ export function buildDomainSnapshot(input: {
       email2: snapshotEmails[1]?.address ?? null,
       email2_validation_status: snapshotEmails[1]?.validationStatus ?? null,
       source_filename: input.sourceFilename?.trim() || null,
+      ...(input.isNoEmailRetry ? { is_no_email_retry: true } : {}),
     },
     scored_at: input.scoredAt,
     created_at: input.scoredAt,

@@ -1,33 +1,44 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { releaseOutreachRowsBeforeCampaignDelete, type OutreachCampaignDeleteResult } from '@/lib/outreachSender/deletion';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
+import {
+  cancelScheduledStart,
+  EDITABLE_CAMPAIGN_STATUSES,
+  projectIdOf,
+  replaceSteps,
+  scheduleCampaignStart,
+  SenderOpError,
+  startCampaign,
+  validateCampaignDraft,
+  type CampaignStepInput,
+} from '@/lib/sender/campaignOps';
+import { fillPoolFromFolder } from '@/lib/sender/folders';
 import { describeSavedRecipients, mergeVariableStats } from '@/lib/sender/recipientImport';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
-interface StepInput {
-  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
-  delayHours?: number;
-  subject?: string;
-  body?: string;
-}
-
 interface PatchBody {
-  action?: 'start' | 'pause' | 'finish';
+  action?: 'start' | 'pause' | 'finish' | 'schedule' | 'unschedule';
+  /** Отложенный запуск (action 'schedule'): момент в ISO, по UTC. */
+  startAt?: string;
   /** Правка настроек: приезжает вместо action. */
   name?: string;
   mailboxIds?: string[];
-  steps?: StepInput[];
+  steps?: CampaignStepInput[];
   timezone?: string;
   sendHourFrom?: number;
   sendHourTo?: number;
   sendWeekdays?: number[];
   gapSeconds?: number;
   gapJitterSeconds?: number;
+  /** Проект портала: null — отвязать. Нет поля — привязку не трогаем. */
+  projectId?: string | null;
+  /** Автосохранение недописанной формы: проверки откладываются до запуска. */
+  draft?: boolean;
 }
 
-const MAX_STEPS = 5;
 /**
  * Сколько получателей читаем ради примеров значений в подсказках формы.
  * Сами ключи и счётчики «заполнено у N» считаются по всей базе
@@ -36,9 +47,6 @@ const MAX_STEPS = 5;
  * сохранить.
  */
 const VARS_SAMPLE = 1000;
-
-/** Редактировать можно то, что ещё не едет: черновик и остановленную кампанию. */
-const EDITABLE_STATUSES = ['draft', 'paused'];
 
 /** GET — кампания целиком: шаги, ящики, база получателей и её переменные. */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -51,7 +59,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const [{ data: campaign }, { data: steps }, { data: pool }, { data: sample }, { count }] =
       await Promise.all([
         supabaseAdmin.from('sender_campaigns').select('*').eq('id', id).maybeSingle(),
-        supabaseAdmin.from('sender_campaign_steps').select('*').eq('campaign_id', id).order('step_no'),
+        supabaseAdmin
+          .from('sender_campaign_steps')
+          .select('*')
+          .eq('campaign_id', id)
+          .order('step_no')
+          .order('variant_no'),
         supabaseAdmin
           .from('sender_campaign_mailboxes')
           .select('mailbox_id, sender_mailboxes(id, email)')
@@ -89,6 +102,20 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const repliesByStep = stepCounts
       .map((count, index) => ({ step: index + 1, replied: count }))
       .filter((row) => row.replied > 0);
+
+    // Результаты А/Б-теста: сколько ушло и сколько ответили по каждому варианту
+    // письма. Не посчиталось — экран просто не покажет таблицу, остальное от
+    // этого не зависит.
+    const { data: variantRows } = await db.rpc('sender_campaign_variant_stats', { p_campaign_id: id });
+    const variantStats = (Array.isArray(variantRows) ? variantRows : []).map((row) => {
+      const stat = row as { step_no: number; variant_no: number; sent: number; replied: number };
+      return {
+        step: Number(stat.step_no),
+        variant: Number(stat.variant_no),
+        sent: Number(stat.sent ?? 0),
+        replied: Number(stat.replied ?? 0),
+      };
+    });
 
     // Вложенная запись приезжает объектом или массивом — приводим к одному виду.
     const mailboxes = (pool ?? []).flatMap((row) => {
@@ -131,6 +158,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       steps: steps ?? [],
       mailboxes,
       repliesByStep,
+      variantStats,
       recipients: {
         total,
         // Счётчики «заполнено у N» честны, только если посчитаны по всей
@@ -138,7 +166,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         exact,
         columns,
       },
-      editable: EDITABLE_STATUSES.includes(String(campaign.status)),
+      editable: EDITABLE_CAMPAIGN_STATUSES.includes(String(campaign.status)),
     });
   });
 }
@@ -157,19 +185,22 @@ async function updateSettings(id: string, body: PatchBody) {
   const { data: campaign } = await supabaseAdmin
     .from('sender_campaigns').select('id, status').eq('id', id).maybeSingle();
   if (!campaign) return jsonError('Кампания не найдена', 404);
-  if (!EDITABLE_STATUSES.includes(String(campaign.status))) {
+  if (!EDITABLE_CAMPAIGN_STATUSES.includes(String(campaign.status))) {
     return jsonError('Идущую и завершённую кампанию править нельзя — сначала поставьте на паузу', 409);
   }
 
-  const name = (body.name ?? '').trim();
-  if (!name) return jsonError('Укажите название кампании', 400);
-
-  const mailboxIds = [...new Set((body.mailboxIds ?? []).filter((v) => typeof v === 'string' && v))];
-  if (!mailboxIds.length) return jsonError('Выберите хотя бы один ящик', 400);
-
-  const steps = (body.steps ?? []).slice(0, MAX_STEPS).filter((step) => (step.body ?? '').trim());
-  if (!steps.length) return jsonError('Добавьте хотя бы одно письмо', 400);
-  if (!(steps[0].subject ?? '').trim()) return jsonError('У первого письма должна быть тема', 400);
+  // Та же проверка, что при создании (campaignOps): ошибка — SenderOpError,
+  // её в ответ превращает PATCH.
+  const { name, mailboxIds, steps } = validateCampaignDraft(
+    {
+      name: body.name ?? '',
+      mailboxIds: body.mailboxIds ?? [],
+      steps: body.steps ?? [],
+    },
+    // Автосохранение недописанного черновика: править его можно и пустым,
+    // отправить — нет (проверки на запуске, startCampaign).
+    { partial: body.draft === true },
+  );
 
   const nowIso = new Date().toISOString();
   const { error } = await supabaseAdmin
@@ -182,6 +213,8 @@ async function updateSettings(id: string, body: PatchBody) {
       send_weekdays: body.sendWeekdays?.length ? body.sendWeekdays : [1, 2, 3, 4, 5],
       gap_seconds: Math.max(0, Math.round(body.gapSeconds ?? 180)),
       gap_jitter_seconds: Math.max(0, Math.round(body.gapJitterSeconds ?? 120)),
+      // Без поля привязку не трогаем: кампанию правят и не из формы.
+      ...('projectId' in body ? { project_id: projectIdOf(body.projectId) } : {}),
       updated_at: nowIso,
     })
     .eq('id', id);
@@ -195,17 +228,7 @@ async function updateSettings(id: string, body: PatchBody) {
     .insert(mailboxIds.map((mailboxId) => ({ campaign_id: id, mailbox_id: mailboxId })));
   if (poolError) return jsonError(poolError.message, 500);
 
-  await supabaseAdmin.from('sender_campaign_steps').delete().eq('campaign_id', id);
-  const { error: stepsError } = await supabaseAdmin.from('sender_campaign_steps').insert(
-    steps.map((step, index) => ({
-      campaign_id: id,
-      step_no: index + 1,
-      delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
-      subject: (step.subject ?? '').trim(),
-      body: (step.body ?? '').trim(),
-    })),
-  );
-  if (stepsError) return jsonError(stepsError.message, 500);
+  await replaceSteps(id, steps);
 
   // Лид закреплён за ящиком на всю переписку. Если ящик убрали из пула, те,
   // кому ещё не писали, зависли бы навсегда: планировщик ждёт именно «свой»
@@ -233,9 +256,9 @@ async function updateSettings(id: string, body: PatchBody) {
 
 /**
  * PATCH — запустить, поставить на паузу или закрыть кампанию; без action —
- * правка настроек.
- * При запуске получатели, которым ещё ничего не отправляли, становятся в
- * очередь немедленно: дальше их разложит по окну отправки планировщик.
+ * правка настроек. Запуск — campaignOps.startCampaign: тем же путём рассылку
+ * запускает кнопка на экране автоаутрича. Рассылка папки без ящиков перед
+ * запуском берёт ящики папки (folders.fillPoolFromFolder) — как и там.
  */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.patch' }, async () => {
@@ -246,58 +269,46 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const { id } = await params;
     const body = (await req.json().catch(() => null)) as PatchBody | null;
     if (!body) return jsonError('Невалидный JSON', 400);
-    if (!body.action) return updateSettings(id, body);
 
-    const nowIso = new Date().toISOString();
-
-    if (body.action === 'start') {
-      const { count } = await supabaseAdmin
-        .from('sender_recipients')
-        .select('id', { count: 'exact', head: true })
-        .eq('campaign_id', id)
-        .eq('status', 'active');
-      if (!count) return jsonError('В кампании нет получателей', 422);
-
-      const { count: mailboxCount } = await supabaseAdmin
-        .from('sender_campaign_mailboxes')
-        .select('mailbox_id', { count: 'exact', head: true })
-        .eq('campaign_id', id);
-      if (!mailboxCount) return jsonError('В кампании нет ящиков', 422);
-
-      // Пауза отменяет запланированные письма, но строки остаются, а у очереди
-      // есть уникальность (recipient_id, step_no). Без уборки повторный запуск
-      // упирался бы в неё и молча не отправлял ничего тем, кто стоял в очереди
-      // на момент паузы. Отменённое письмо никуда не уходило — удаляем.
-      await supabaseAdmin
-        .from('sender_messages')
-        .delete()
-        .eq('campaign_id', id)
-        .eq('status', 'canceled');
-
-      await supabaseAdmin
-        .from('sender_recipients')
-        .update({ next_step_at: nowIso, updated_at: nowIso })
-        .eq('campaign_id', id)
-        .eq('status', 'active')
-        .is('next_step_at', null);
+    try {
+      if (!body.action) return await updateSettings(id, body);
+      if (body.action === 'start') {
+        // Сколько ящиков взято из папки — экран скажет, откуда они взялись.
+        const mailboxesAdded = await fillPoolFromFolder(id);
+        await startCampaign(id);
+        return NextResponse.json({ ok: true, status: 'running', mailboxesAdded });
+      }
+      if (body.action === 'schedule') {
+        // Ящики папки берём сразу: проверка запуска должна увидеть пул сейчас.
+        const mailboxesAdded = await fillPoolFromFolder(id);
+        await scheduleCampaignStart(id, new Date(String(body.startAt ?? '')));
+        return NextResponse.json({ ok: true, mailboxesAdded });
+      }
+      if (body.action === 'unschedule') {
+        await cancelScheduledStart(id);
+        return NextResponse.json({ ok: true });
+      }
+      if (body.action !== 'pause' && body.action !== 'finish') return jsonError('Неизвестное действие', 400);
+    } catch (e) {
+      if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+      throw e;
     }
 
-    const status = body.action === 'start' ? 'running' : body.action === 'pause' ? 'paused' : 'done';
-    const patch: Record<string, unknown> = { status, updated_at: nowIso };
-    if (body.action === 'start') patch.started_at = nowIso;
-
-    const { error } = await supabaseAdmin.from('sender_campaigns').update(patch).eq('id', id);
+    const status = body.action === 'pause' ? 'paused' : 'done';
+    const { error } = await supabaseAdmin
+      .from('sender_campaigns')
+      // Завершённая кампания не должна запуститься по отложенному времени.
+      .update({ status, updated_at: new Date().toISOString(), ...(status === 'done' ? { scheduled_start_at: null } : {}) })
+      .eq('id', id);
     if (error) return jsonError(error.message, 500);
 
     // Пауза и закрытие снимают уже запланированные, но ещё не отправленные
     // письма: иначе кампания продолжила бы «доезжать» после остановки.
-    if (body.action !== 'start') {
-      await supabaseAdmin
-        .from('sender_messages')
-        .update({ status: 'canceled' })
-        .eq('campaign_id', id)
-        .eq('status', 'scheduled');
-    }
+    await supabaseAdmin
+      .from('sender_messages')
+      .update({ status: 'canceled' })
+      .eq('campaign_id', id)
+      .eq('status', 'scheduled');
 
     return NextResponse.json({ ok: true, status });
   });
@@ -307,6 +318,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
  * DELETE — убрать кампанию. Идущую удалить нельзя: письма физически уходят,
  * и исчезновение кампании вместе с очередью скрыло бы факт отправки. Пауза
  * или завершение — сначала, удаление — потом.
+ *
+ * Кампания из автоаутрича: до удаления решаем, что станет с отметками
+ * заливки в строках запуска (outreachSender/deletion.ts). Письма уходили —
+ * отметки остаются, и эти компании второй раз не зальются; не уходили —
+ * отметки снимаются, и заливку можно повторить. В ответе — что вышло
+ * (outreach), экран скажет это оператору.
  */
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.delete' }, async () => {
@@ -317,7 +334,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const { id } = await params;
     const { data: campaign } = await supabaseAdmin
       .from('sender_campaigns')
-      .select('id, status')
+      .select('id, status, source_kind')
       .eq('id', id)
       .maybeSingle();
     if (!campaign) return jsonError('Кампания не найдена', 404);
@@ -325,8 +342,18 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
       return jsonError('Идущую кампанию удалить нельзя — сначала поставьте на паузу или завершите', 409);
     }
 
+    let outreach: OutreachCampaignDeleteResult | null = null;
+    if (campaign.source_kind && campaign.source_kind !== 'manual') {
+      try {
+        outreach = await releaseOutreachRowsBeforeCampaignDelete(id);
+      } catch (e) {
+        if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+        throw e;
+      }
+    }
+
     const { error } = await supabaseAdmin.from('sender_campaigns').delete().eq('id', id);
     if (error) return jsonError(error.message, 500);
-    return NextResponse.json({ ok: true });
+    return NextResponse.json(outreach ? { ok: true, outreach } : { ok: true });
   });
 }

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { fetchFullThread } from '@/lib/replyPersonalization/instantlyThread';
+import { fetchReplyThread, withSentDrafts } from '@/lib/replyPersonalization/instantlyThread';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 import { findReferredEmails } from '@/lib/replyPersonalization/referredContact';
+import { getThreadLanguage, listSentDrafts } from '@/lib/replyPersonalization/db';
 import type { ThreadMessage } from '@/lib/replyPersonalization/types';
 
 export const dynamic = 'force-dynamic';
@@ -45,12 +46,20 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const projectId = new URL(req.url).searchParams.get('projectId');
   if (!projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
 
+  // Отправленное нами и язык переписки читаем всегда мимо кэша треда: это наши
+  // же данные, они меняются от кнопки «Отправить» и переключателя языка.
+  const [sent, language] = await Promise.all([
+    listSentDrafts(qualificationId),
+    getThreadLanguage(qualificationId),
+  ]);
+
   const cached = THREAD_CACHE.get(qualificationId);
   if (cached && cached.expiresAt > Date.now()) {
     return NextResponse.json({
-      messages: cached.messages,
+      messages: withSentDrafts(cached.messages, sent),
       contextComplete: cached.contextComplete,
       referredEmails: cached.referredEmails,
+      language,
     });
   }
 
@@ -59,15 +68,7 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const { qualification, accountId } = reply;
 
   let contextComplete = true;
-  let messages: ThreadMessage[] | null = null;
-  if (qualification.threadId) {
-    messages = await fetchFullThread({
-      campaignId: qualification.campaignId,
-      leadEmail: qualification.leadEmail,
-      threadId: qualification.threadId,
-      accountId,
-    });
-  }
+  let messages: ThreadMessage[] | null = await fetchReplyThread(qualification, accountId);
   if (!messages || messages.length === 0) {
     contextComplete = false;
     messages = fallbackThread(qualification);
@@ -78,7 +79,14 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const referredEmails = findReferredEmails(lastInbound, [qualification.leadEmail, qualification.eaccount]);
 
   pruneCache();
+  // В кэш кладём то, что пришло из Instantly: наши отправки дописываются поверх
+  // при каждой отдаче, иначе свежий ответ застревал бы в кэше на пять минут.
   THREAD_CACHE.set(qualificationId, { messages, contextComplete, referredEmails, expiresAt: Date.now() + CACHE_TTL_MS });
 
-  return NextResponse.json({ messages, contextComplete, referredEmails });
+  return NextResponse.json({
+    messages: withSentDrafts(messages, sent),
+    contextComplete,
+    referredEmails,
+    language,
+  });
 });

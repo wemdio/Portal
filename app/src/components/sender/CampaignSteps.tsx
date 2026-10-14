@@ -1,9 +1,13 @@
 'use client';
 
 import { useRef, useState, type ReactNode } from 'react';
+import { Split } from 'lucide-react';
+import { hasBrokenLinkMarkup } from '@/lib/mail/linkMarkup';
 import { placeholderKeys } from '@/lib/sender/templateVars';
+import { MAX_VARIANTS, MIN_RECIPIENTS_PER_VARIANT, variantLabel } from '@/lib/sender/variants';
 import type { RecipientColumnsDto } from './api';
-import { TemplateField, insertVariable, placeCaret } from './TemplateField';
+import { LinkInsert } from './LetterLinks';
+import { TemplateField, insertLink, insertVariable, placeCaret } from './TemplateField';
 
 /**
  * Шаги формы кампании, одинаковые для создания и редактирования: оболочка
@@ -44,6 +48,36 @@ export function weekdaysLabel(days: number[]): string {
 }
 
 /**
+ * Цвет письма цепочки: полоса слева и номер шага. Письма идут друг за другом
+ * одинаковыми блоками, и без цвета это читается как одна серая простыня —
+ * особенно на тёмной теме, где все рамки сливаются.
+ *
+ * Оттенки намеренно насыщенные (400/600, а не пастельные 50): такие видно и на
+ * белом, и на чёрном без отдельных правил темы.
+ */
+const LETTER_ACCENTS = [
+  { stripe: 'border-l-blue-400', badge: 'bg-blue-600' },
+  { stripe: 'border-l-violet-400', badge: 'bg-violet-600' },
+  { stripe: 'border-l-emerald-400', badge: 'bg-emerald-600' },
+  { stripe: 'border-l-amber-400', badge: 'bg-amber-500' },
+  { stripe: 'border-l-fuchsia-400', badge: 'bg-fuchsia-600' },
+];
+
+export type StepAccent = (typeof LETTER_ACCENTS)[number];
+
+export function letterAccent(index: number): StepAccent {
+  return LETTER_ACCENTS[index % LETTER_ACCENTS.length];
+}
+
+/** Фон и чип варианта А/Б: рядом стоящие варианты должны различаться сразу. */
+const VARIANT_TONES = [
+  { card: 'border-blue-200 bg-blue-50', chip: 'bg-blue-600 text-white' },
+  { card: 'border-amber-200 bg-amber-50', chip: 'bg-amber-500 text-white' },
+  { card: 'border-emerald-200 bg-emerald-50', chip: 'bg-emerald-600 text-white' },
+  { card: 'border-violet-200 bg-violet-50', chip: 'bg-violet-600 text-white' },
+];
+
+/**
  * Шаг формы: номер, заголовок и сводка справа.
  *
  * Номера — не украшение: до них четыре одинаковых блока в рамках читались как
@@ -55,20 +89,24 @@ export function Step({
   title,
   hint,
   done,
+  accent,
   children,
 }: {
-  no: number;
+  /** Число или подпункт («1.1»). */
+  no: number | string;
   title: string;
   hint?: string;
   done: boolean;
+  /** Цвет письма цепочки; у остальных шагов его нет. */
+  accent?: StepAccent;
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-zinc-200 p-4">
+    <section className={`rounded-xl border border-zinc-200 p-4 ${accent ? `border-l-4 ${accent.stripe}` : ''}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2.5">
         <span
-          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold transition-colors ${
-            done ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-500'
+          className={`flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1 text-xs font-semibold transition-colors ${
+            done ? `${accent?.badge ?? 'bg-blue-600'} text-white` : 'bg-zinc-100 text-zinc-500'
           }`}
         >
           {no}
@@ -103,126 +141,108 @@ export function letterIssues(subject: string, body: string, columns: RecipientCo
   };
 }
 
-interface LetterProps {
-  no: number;
-  done: boolean;
+/** Одно письмо шага. Их несколько, когда у шага идёт А/Б-тест. */
+export interface LetterVariant {
   subject: string;
   body: string;
-  onSubject: (value: string) => void;
-  onBody: (value: string) => void;
-  columns: RecipientColumnsDto | null;
-  /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
-  countsExact?: boolean;
-  /** Подпись, когда базы ещё нет: у создания и у правки она разная. */
-  emptyHint: string;
-  disabled?: boolean;
-  /** Название шага: «Первое письмо», «Письмо 2»… */
-  title?: string;
-  /** Через сколько часов после предыдущего письма уйдёт этот шаг. */
-  delayHours?: number;
-  onDelayHours?: (value: number) => void;
-  onRemove?: () => void;
 }
 
 /**
- * Шаг «Письмо» цепочки: тема, текст и переменные из базы. Пустая тема у
- * follow-up — норма: письмо уйдёт ответом в тот же тред с «Re:».
+ * Поля одного письма: тема, текст, вставка ссылки и переменные базы.
+ *
+ * Отдельный компонент, потому что у шага таких писем бывает несколько
+ * (варианты А/Б-теста), и у каждого свои курсор, выделение и подсказки.
  */
-export function LetterStep({
-  no,
-  done,
-  subject,
-  body,
-  onSubject,
-  onBody,
+function LetterFields({
+  letter,
+  onChange,
   columns,
-  countsExact = true,
-  emptyHint,
-  disabled = false,
-  title = 'Первое письмо',
-  delayHours,
-  onDelayHours,
-  onRemove,
-}: LetterProps) {
+  countsExact,
+  rows,
+  subjectPlaceholder,
+  disabled,
+}: {
+  letter: LetterVariant;
+  onChange: (patch: Partial<LetterVariant>) => void;
+  columns: RecipientColumnsDto | null;
+  countsExact: boolean;
+  rows: number;
+  subjectPlaceholder: string;
+  disabled: boolean;
+}) {
   const subjectRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   // Куда вставлять переменную по клику на подсказку — в поле, где был курсор.
   const [lastField, setLastField] = useState<'subject' | 'body'>('body');
-  const { variables, unknownKeys, partlyEmpty } = letterIssues(subject, body, columns);
+  // Выделение в тексте на момент открытия окошка ссылки: пока оператор
+  // вписывает адрес, фокус уже не в письме, и выделение оттуда не прочитать.
+  const linkRange = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  const { variables, unknownKeys, partlyEmpty } = letterIssues(letter.subject, letter.body, columns);
 
   const insertAtCursor = (key: string) => {
     const isSubject = lastField === 'subject';
     const el = (isSubject ? subjectRef : bodyRef).current;
-    const text = isSubject ? subject : body;
+    const text = isSubject ? letter.subject : letter.body;
     const next = insertVariable(text, el?.selectionStart ?? text.length, key);
-    (isSubject ? onSubject : onBody)(next.text);
+    onChange(isSubject ? { subject: next.text } : { body: next.text });
     placeCaret(el, next.caret);
   };
 
+  /** Выделенный в письме текст — он же подпись будущей ссылки по умолчанию. */
+  const grabSelection = () => {
+    const el = bodyRef.current;
+    const start = el?.selectionStart ?? letter.body.length;
+    const end = el?.selectionEnd ?? start;
+    linkRange.current = { start, end };
+    return letter.body.slice(start, end).trim();
+  };
+
+  const addLink = (label: string, url: string) => {
+    const { start, end } = linkRange.current;
+    const next = insertLink(letter.body, start, end, label, url);
+    onChange({ body: next.text });
+    placeCaret(bodyRef.current, next.caret);
+  };
+
   return (
-    <Step
-      no={no}
-      title={title}
-      done={done}
-      hint={
-        delayHours != null && onDelayHours
-          ? `через ${delayHours} ч после предыдущего`
-          : undefined
-      }
-    >
-      {/* Задержка и удаление — атрибуты шага цепочки, а не письма: живут
-          в шапке шага, чтобы текст оставался только текстом. */}
-      {delayHours != null && onDelayHours ? (
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-zinc-600">
-          <span className="text-xs text-zinc-500">Отправить через</span>
-          <input
-            type="number"
-            min={1}
-            max={720}
-            value={delayHours}
-            disabled={disabled}
-            onChange={(e) => onDelayHours(Math.max(1, Math.round(Number(e.target.value) || 1)))}
-            className="w-16 rounded-lg border border-zinc-300 bg-white px-2 py-1 text-center text-sm text-zinc-900"
-          />
-          <span className="text-xs text-zinc-500">
-            ч после предыдущего письма (тему можно оставить пустой — уйдёт как «Re:» в тот же тред)
-          </span>
-          {onRemove ? (
-            <button
-              type="button"
-              onClick={onRemove}
-              disabled={disabled}
-              className="ml-auto text-xs text-zinc-400 transition-colors hover:text-red-600 disabled:opacity-50"
-            >
-              Убрать шаг
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+    <>
       <div className="mb-2">
         <TemplateField
-          value={subject}
-          onChange={onSubject}
+          value={letter.subject}
+          onChange={(value) => onChange({ subject: value })}
           variables={variables}
           fieldRef={subjectRef}
           onFocus={() => setLastField('subject')}
-          placeholder={delayHours != null ? 'Тема (пусто = «Re:» в тот же тред)' : 'Тема письма'}
+          placeholder={subjectPlaceholder}
           disabled={disabled}
           className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
         />
       </div>
       <TemplateField
         multiline
-        value={body}
-        onChange={onBody}
+        value={letter.body}
+        onChange={(value) => onChange({ body: value })}
         variables={variables}
         fieldRef={bodyRef}
         onFocus={() => setLastField('body')}
-        rows={8}
+        rows={rows}
         placeholder="Здравствуйте, {{first_name}}! Пишу по поводу {{company_name}}…"
         disabled={disabled}
         className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
       />
+
+      {/* Ссылка под словом: выделили «Alial» — кнопка подставит подпись, адрес
+          вписывается рядом. В тексте это остаётся разметкой с видимым адресом,
+          синей ссылкой её покажет предпросмотр. */}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <LinkInsert disabled={disabled} onOpen={grabSelection} onInsert={addLink} />
+        <span className="text-xs text-zinc-500">Выделите слово — оно станет подписью ссылки</span>
+      </div>
+      {hasBrokenLinkMarkup(letter.body) ? (
+        <p className="mt-2 text-sm text-amber-600">
+          Ссылка без «https://» останется в письме текстом — впишите адрес целиком.
+        </p>
+      ) : null}
 
       {/* Переменные — из колонок базы: клик вставляет в поле, где стоял
           курсор; то же самое выпадает подсказкой после «{{». */}
@@ -261,9 +281,7 @@ export function LetterStep({
             })}
           </div>
         </div>
-      ) : (
-        <p className="mt-2 text-xs text-zinc-500">{emptyHint}</p>
-      )}
+      ) : null}
 
       {unknownKeys.length ? (
         <p className="mt-2 text-sm text-red-600">
@@ -277,6 +295,169 @@ export function LetterStep({
           получателей — у них на этом месте ничего не будет.
         </p>
       ) : null}
+    </>
+  );
+}
+
+interface LetterProps {
+  no: number;
+  done: boolean;
+  /** Письма этого шага: одно — обычный шаг, несколько — А/Б-тест. */
+  variants: LetterVariant[];
+  onVariant: (index: number, patch: Partial<LetterVariant>) => void;
+  onAddVariant?: () => void;
+  onRemoveVariant?: (index: number) => void;
+  columns: RecipientColumnsDto | null;
+  /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
+  countsExact?: boolean;
+  /** Подпись, когда базы ещё нет: у создания и у правки она разная. */
+  emptyHint: string;
+  disabled?: boolean;
+  /** Название шага: «Первое письмо», «Письмо 2»… */
+  title?: string;
+  /** Цвет этого письма в цепочке — letterAccent(индекс). */
+  accent?: StepAccent;
+  /** Высота поля письма в строках: на странице настроек она больше, чем в окне. */
+  rows?: number;
+  /**
+   * Через сколько часов после предыдущего письма уйдёт этот шаг. null — поле
+   * стёрли и ещё не вписали новое; undefined — у шага задержки нет (первое письмо).
+   */
+  delayHours?: number | null;
+  onDelayHours?: (value: number | null) => void;
+  onRemove?: () => void;
+}
+
+/**
+ * Шаг «Письмо» цепочки: тема, текст и переменные из базы. Пустая тема у
+ * follow-up — норма: письмо уйдёт ответом в тот же тред с «Re:».
+ *
+ * А/Б-тест: у шага может быть несколько вариантов письма. База делится между
+ * ними поровну, каждый получатель попадает в один вариант и остаётся в нём
+ * (lib/sender/variants.ts) — иначе ответ нельзя было бы приписать тексту.
+ */
+export function LetterStep({
+  no,
+  done,
+  variants,
+  onVariant,
+  onAddVariant,
+  onRemoveVariant,
+  columns,
+  countsExact = true,
+  emptyHint,
+  disabled = false,
+  title = 'Первое письмо',
+  accent,
+  rows = 8,
+  delayHours,
+  onDelayHours,
+  onRemove,
+}: LetterProps) {
+  const testing = variants.length > 1;
+
+  return (
+    <Step
+      no={no}
+      title={title}
+      done={done}
+      accent={accent}
+      hint={[
+        delayHours != null && onDelayHours ? `через ${delayHours} ч после предыдущего` : null,
+        testing ? `А/Б-тест: ${variants.length} варианта` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ') || undefined}
+    >
+      {/* Задержка и удаление — атрибуты шага цепочки, а не письма: живут
+          в шапке шага, чтобы текст оставался только текстом. */}
+      {delayHours !== undefined && onDelayHours ? (
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-zinc-600">
+          <span className="text-xs text-zinc-500">Отправить через</span>
+          <input
+            type="number"
+            min={1}
+            max={720}
+            value={delayHours ?? ''}
+            disabled={disabled}
+            aria-invalid={delayHours === null}
+            onChange={(e) => onDelayHours(numberField(e.target.value, 1, 720))}
+            className={`w-16 rounded-lg border bg-white px-2 py-1 text-center text-sm text-zinc-900 ${
+              delayHours === null ? 'border-red-300' : 'border-zinc-300'
+            }`}
+          />
+          <span className="text-xs text-zinc-500">
+            ч после предыдущего письма (тему можно оставить пустой — уйдёт как «Re:» в тот же тред)
+          </span>
+          {onRemove ? (
+            <button
+              type="button"
+              onClick={onRemove}
+              disabled={disabled}
+              className="ml-auto text-xs text-zinc-400 transition-colors hover:text-red-600 disabled:opacity-50"
+            >
+              Убрать шаг
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {variants.map((letter, index) => {
+        const tone = VARIANT_TONES[index % VARIANT_TONES.length];
+        return (
+        <div
+          key={index}
+          className={testing ? `mb-3 rounded-lg border p-3 last:mb-0 ${tone.card}` : ''}
+        >
+          {testing ? (
+            <div className="mb-2 flex items-center gap-2">
+              <span className={`rounded-md px-2 py-0.5 text-xs font-semibold ${tone.chip}`}>
+                Вариант {variantLabel(index + 1)}
+              </span>
+              {onRemoveVariant && !disabled ? (
+                <button
+                  type="button"
+                  onClick={() => onRemoveVariant(index)}
+                  className="ml-auto text-xs text-zinc-400 transition-colors hover:text-red-600"
+                >
+                  Убрать вариант
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <LetterFields
+            letter={letter}
+            onChange={(patch) => onVariant(index, patch)}
+            columns={columns}
+            countsExact={countsExact}
+            rows={rows}
+            subjectPlaceholder={delayHours !== undefined ? 'Тема (пусто = «Re:» в тот же тред)' : 'Тема письма'}
+            disabled={disabled}
+          />
+        </div>
+        );
+      })}
+
+      {/* А/Б-тест: второй вариант письма этого же шага. База делится поровну,
+          и через неделю видно, на какой текст больше ответов. */}
+      {onAddVariant && !disabled && variants.length < MAX_VARIANTS ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onAddVariant}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-zinc-300 px-2.5 py-1 text-xs text-zinc-600 transition-colors hover:border-blue-400 hover:text-blue-600"
+          >
+            <Split className="h-3.5 w-3.5" />
+            {testing ? 'Ещё вариант' : 'А/Б-тест: второй вариант'}
+          </button>
+          <span className="text-xs text-zinc-500">
+            {testing
+              ? `База разделится поровну между вариантами — нужно от ${MIN_RECIPIENTS_PER_VARIANT} адресов на каждый`
+              : 'Два текста на одну базу — сравним по ответам'}
+          </span>
+        </div>
+      ) : null}
+
+      {columns ? null : <p className="mt-2 text-xs text-zinc-500">{emptyHint}</p>}
     </Step>
   );
 }
@@ -316,19 +497,44 @@ export function timezoneLabel(timezone: string): string {
 interface ScheduleProps {
   no: number;
   done: boolean;
-  hourFrom: number;
-  hourTo: number;
+  /** null — поле стёрли и ещё не вписали: сохранение попросит заполнить. */
+  hourFrom: number | null;
+  hourTo: number | null;
   weekdays: number[];
   timezone: string;
-  gapSeconds: number;
-  gapJitterSeconds: number;
-  onHourFrom: (value: number) => void;
-  onHourTo: (value: number) => void;
+  gapSeconds: number | null;
+  gapJitterSeconds: number | null;
+  onHourFrom: (value: number | null) => void;
+  onHourTo: (value: number | null) => void;
   onWeekdays: (days: number[]) => void;
   onTimezone: (value: string) => void;
-  onGapSeconds: (value: number) => void;
-  onGapJitterSeconds: (value: number) => void;
+  onGapSeconds: (value: number | null) => void;
+  onGapJitterSeconds: (value: number | null) => void;
   disabled?: boolean;
+  /**
+   * Своё поле пояса вместо списка TIMEZONES — у настроек папки, где пояс
+   * можно вписать руками. Подпись «Пояс» и место в строке остаются общими.
+   */
+  timezoneControl?: ReactNode;
+}
+
+/**
+ * Число из поля ввода в допустимых границах; пустое поле — null.
+ *
+ * Пустоту не подменяем ни прежним значением, ни нулём: иначе поле нельзя
+ * стереть целиком и вписать своё. Что поле пустое, говорит сохранение.
+ * Границы держим кодом, а не только атрибутами min/max: их слушают только
+ * стрелки, а вписать руками можно и 99, и −5.
+ */
+export function numberField(raw: string, min: number, max: number): number | null {
+  const value = Number(raw);
+  if (raw.trim() === '' || !Number.isFinite(value)) return null;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/** Пустое числовое поле подсвечиваем, чтобы было видно, что заполнить. */
+function emptyRing(value: number | null): string {
+  return value === null ? ' rounded ring-1 ring-red-400' : '';
 }
 
 /**
@@ -351,6 +557,7 @@ export function ScheduleStep({
   onGapSeconds,
   onGapJitterSeconds,
   disabled = false,
+  timezoneControl,
 }: ScheduleProps) {
   const toggleWeekday = (id: number) => {
     onWeekdays(
@@ -365,7 +572,7 @@ export function ScheduleStep({
       no={no}
       title="Когда отправлять"
       done={done}
-      hint={`${hourFrom}:00–${hourTo}:00 · ${weekdaysLabel(weekdays)} · ${timezoneLabel(timezone)}`}
+      hint={`${hourFrom ?? '?'}:00–${hourTo ?? '?'}:00 · ${weekdaysLabel(weekdays)} · ${timezoneLabel(timezone)}`}
     >
       <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600">
         <span className="w-10 text-xs uppercase tracking-wide text-zinc-500">Часы</span>
@@ -374,37 +581,41 @@ export function ScheduleStep({
             type="number"
             min={0}
             max={23}
-            value={hourFrom}
+            value={hourFrom ?? ''}
             disabled={disabled}
-            onChange={(e) => onHourFrom(Number(e.target.value))}
-            className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Час начала"
+            onChange={(e) => onHourFrom(numberField(e.target.value, 0, 23))}
+            className={`w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(hourFrom)}`}
           />
           <span className="text-zinc-400">—</span>
           <input
             type="number"
             min={1}
             max={24}
-            value={hourTo}
+            value={hourTo ?? ''}
             disabled={disabled}
-            onChange={(e) => onHourTo(Number(e.target.value))}
-            className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Час конца"
+            onChange={(e) => onHourTo(numberField(e.target.value, 1, 24))}
+            className={`w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(hourTo)}`}
           />
         </div>
         {/* Пояс обязателен: окно считается в локальном времени кампании, и без
             выбора всё навсегда остаётся московским — для ENG-рынка это мимо
             рабочих часов получателя. */}
         <span className="ml-2 text-xs uppercase tracking-wide text-zinc-500">Пояс</span>
-        <select
-          value={timezone}
-          disabled={disabled}
-          onChange={(e) => onTimezone(e.target.value)}
-          className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-sm font-medium text-zinc-900 focus:outline-none"
-        >
-          {/* Текущий пояс кампании может быть не в списке — показываем и его. */}
-          {[...new Set([timezone, ...TIMEZONES])].map((tz) => (
-            <option key={tz} value={tz}>{timezoneLabel(tz)}</option>
-          ))}
-        </select>
+        {timezoneControl ?? (
+          <select
+            value={timezone}
+            disabled={disabled}
+            onChange={(e) => onTimezone(e.target.value)}
+            className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-sm font-medium text-zinc-900 focus:outline-none"
+          >
+            {/* Текущий пояс кампании может быть не в списке — показываем и его. */}
+            {[...new Set([timezone, ...TIMEZONES])].map((tz) => (
+              <option key={tz} value={tz}>{timezoneLabel(tz)}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -471,20 +682,22 @@ export function ScheduleStep({
             type="number"
             min={0}
             max={3600}
-            value={gapSeconds}
+            value={gapSeconds ?? ''}
             disabled={disabled}
-            onChange={(e) => onGapSeconds(Math.max(0, Math.round(Number(e.target.value) || 0)))}
-            className="w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Пауза между письмами, секунд"
+            onChange={(e) => onGapSeconds(numberField(e.target.value, 0, 3600))}
+            className={`w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(gapSeconds)}`}
           />
           <span className="text-xs text-zinc-400">±</span>
           <input
             type="number"
             min={0}
             max={3600}
-            value={gapJitterSeconds}
+            value={gapJitterSeconds ?? ''}
             disabled={disabled}
-            onChange={(e) => onGapJitterSeconds(Math.max(0, Math.round(Number(e.target.value) || 0)))}
-            className="w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Случайная добавка к паузе, секунд"
+            onChange={(e) => onGapJitterSeconds(numberField(e.target.value, 0, 3600))}
+            className={`w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(gapJitterSeconds)}`}
           />
           <span className="text-xs text-zinc-400">сек</span>
         </div>
@@ -495,6 +708,13 @@ export function ScheduleStep({
           кнопки, а не в сообщении об ошибке после. */}
       {weekdays.length === 0 ? (
         <p className="mt-3 text-xs text-amber-600">Не выбрано ни одного дня — отправлять будет некогда.</p>
+      ) : null}
+      {/* Час начала не раньше часа конца — иначе окно пустое и письма не едут,
+          а на экране это выглядит как работающая кампания. */}
+      {hourFrom !== null && hourTo !== null && hourFrom >= hourTo ? (
+        <p className="mt-3 text-xs text-amber-600">
+          Начало не раньше конца ({hourFrom}:00–{hourTo}:00) — в такое окно отправлять нечего.
+        </p>
       ) : null}
     </Step>
   );

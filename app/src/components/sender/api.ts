@@ -1,4 +1,5 @@
 import { authFetch, authFetchJson } from '@/lib/authFetch';
+import type { BounceKinds, DomainHealth } from '@/lib/sender/domainReputation';
 
 const BASE = '/api/tools/sender';
 
@@ -12,6 +13,8 @@ export interface MailboxDto {
   google_state: 'active' | 'suspended' | 'missing' | null;
   /** Админ Workspace, из чьего каталога пришёл ящик. */
   google_account: string | null;
+  /** Адрес отправки, за которым закреплён ящик; null — выдаётся автоматически. */
+  egress_ip: string | null;
   email: string;
   display_name: string | null;
   username: string;
@@ -20,7 +23,10 @@ export interface MailboxDto {
   imap_host: string | null;
   imap_port: number;
   status: 'pending' | 'verified' | 'failed' | 'disabled';
+  /** Новых (первых) писем в день. */
   daily_campaign_limit: number;
+  /** Всего писем в день, со всеми шагами цепочек. */
+  daily_total_limit: number;
   last_verified_at: string | null;
   last_error: string | null;
   last_send_at: string | null;
@@ -58,6 +64,8 @@ export interface MailboxTagRef {
 /** Тег в окошке фильтра — со счётчиком ящиков. */
 export interface MailboxTagDto extends MailboxTagRef {
   mailboxes: number;
+  /** Номер цвета чипа, 0..TAG_TONES-1 — назначает сервер, см. assignTagTones. */
+  tone: number;
 }
 
 export interface CampaignDto {
@@ -72,6 +80,62 @@ export interface CampaignDto {
   send_weekdays: number[];
   created_at: string;
   stats: CampaignStatsDto | null;
+  /** Папка на вкладке кампаний; null — кампания вне папок («Остальные»). */
+  folder_id: string | null;
+  /** Кто создал: форма «Рассылки» или заливка автоаутрича RU / EN. */
+  source_kind: 'manual' | 'polza_ru' | 'polza_en';
+  /** Запуск автоаутрича, из которого залиты получатели. */
+  source_job_id: string | null;
+  /** Отложенный запуск (ISO): кампания стартует сама, когда наступит это время. */
+  scheduled_start_at?: string | null;
+  /** Почему отложенный запуск не состоялся. */
+  scheduled_start_error?: string | null;
+}
+
+/** Ящик папки: адрес и можно ли с него слать прямо сейчас. */
+export interface FolderMailboxDto {
+  id: string;
+  email: string;
+  status: MailboxDto['status'];
+  enabled: boolean;
+}
+
+/**
+ * Папка рассылок: настройки, которые новая рассылка автоаутрича копирует
+ * себе в момент заливки. Уже созданные рассылки правка папки не меняет.
+ */
+export interface SenderFolderDto {
+  id: string;
+  /** auto_ru / auto_en — папки автоаутричей. */
+  key: string;
+  name: string;
+  timezone: string;
+  send_hour_from: number;
+  send_hour_to: number;
+  send_weekdays: number[];
+  gap_seconds: number;
+  gap_jitter_seconds: number;
+  /** Задержки писем 2, 3, 4 от предыдущего письма, в часах. */
+  step_delays_hours: number[];
+  updated_at: string;
+  /** Существующие ящики папки в порядке выбора. */
+  mailboxes: FolderMailboxDto[];
+  mailboxCount: number;
+  /** Проверены и с галочкой «берём в рассылку». */
+  workingMailboxCount: number;
+  campaignCount: number;
+}
+
+export interface FolderSettingsInput {
+  timezone: string;
+  sendHourFrom: number;
+  sendHourTo: number;
+  sendWeekdays: number[];
+  gapSeconds: number;
+  gapJitterSeconds: number;
+  /** Задержки писем 2, 3, 4 в часах. */
+  stepDelaysHours: number[];
+  mailboxIds: string[];
 }
 
 export interface CampaignStatsDto {
@@ -115,6 +179,9 @@ export interface ThreadDto {
   last_reply_at: string | null;
   has_human_reply: boolean;
   last_activity_at: string;
+  /** Итог квалификатора по переписке или ручная метка; null — не оценивалась. */
+  lead_verdict: 'lead' | 'not_lead' | null;
+  lead_verdict_source: 'ai' | 'manual' | null;
 }
 
 /** Письмо переписки: наше исходящее или ответ получателя. */
@@ -132,13 +199,24 @@ export interface ImportRecipientsResult {
   imported: number;
   /** База была заменена, а не дополнена. */
   replaced?: boolean;
+  /** Некорректный адрес. */
   skippedInvalid: number;
+  /** Первое письмо у строки выходит пустым (пустая переменная в теме или тексте). */
+  skippedEmptyLetter?: number;
   skippedDuplicates: number;
   skippedSuppressed: number;
   /** Сколько строк с данными было в файле до обреза лимитом. */
   fileRows?: number;
   /** Сколько строк реально прочитано, если файл обрезан лимитом. */
   truncated?: number | null;
+}
+
+/** Строка результатов А/Б-теста: один вариант одного письма цепочки. */
+export interface VariantStatDto {
+  step: number;
+  variant: number;
+  sent: number;
+  replied: number;
 }
 
 /** Кампания целиком — то, с чем открывается форма редактирования. */
@@ -153,11 +231,16 @@ export interface CampaignDetailsDto {
     send_weekdays: number[];
     gap_seconds: number;
     gap_jitter_seconds: number;
+    /** Проект портала; null — кампания ни к какому не привязана. */
+    project_id: string | null;
   };
-  steps: { step_no: number; delay_hours: number; subject: string; body: string }[];
+  /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
+  steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
   mailboxes: { id: string; email: string }[];
   /** Ответили по шагам цепочки: на каком касании лид ответил (задача 6.4). */
   repliesByStep?: { step: number; replied: number }[];
+  /** Результаты А/Б-теста: сколько ушло и сколько ответили по каждому варианту. */
+  variantStats?: VariantStatDto[];
   recipients: {
     total: number;
     /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
@@ -168,11 +251,17 @@ export interface CampaignDetailsDto {
   editable: boolean;
 }
 
+/** Одно письмо: тема и текст. У шага их несколько, если идёт А/Б-тест. */
+export interface LetterInput {
+  subject: string;
+  body: string;
+}
+
 export interface StepInput {
   /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
   delayHours: number;
-  subject: string;
-  body: string;
+  /** Варианты письма шага: один — обычный шаг, несколько — А/Б-тест. */
+  variants: LetterInput[];
 }
 
 async function upload<T>(url: string, file: File, fields?: Record<string, string>): Promise<T> {
@@ -195,6 +284,8 @@ export function fetchMailboxes(
     tagIds?: string[];
     /** Вдобавок к tagIds показывать ящики без тега. */
     noTag?: boolean;
+    /** Только ящики этого адреса отправки; 'none' — ящики без адреса. */
+    egressIp?: string;
   } = {},
 ) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
@@ -202,6 +293,7 @@ export function fetchMailboxes(
   if (params.pageSize) query.set('pageSize', String(params.pageSize));
   if (params.tagIds?.length) query.set('tagIds', params.tagIds.join(','));
   if (params.noTag) query.set('noTag', '1');
+  if (params.egressIp) query.set('egressIp', params.egressIp);
   return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
     `${BASE}/mailboxes?${query.toString()}`,
   );
@@ -212,7 +304,7 @@ export function fetchMailboxTags() {
 }
 
 export function createMailboxTag(name: string) {
-  return authFetchJson<MailboxTagDto>(`${BASE}/tags`, {
+  return authFetchJson<MailboxTagRef>(`${BASE}/tags`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -246,8 +338,24 @@ export interface GoogleSyncResult {
   failed: { account: string; error: string }[];
 }
 
+/** Итог последнего синка каталога по одному Workspace (админ-аккаунту). */
+export interface GoogleSyncAccountDto {
+  account: string;
+  /** null — синка по этому аккаунту ещё не было. */
+  lastRunAt: string | null;
+  lastSource: 'auto' | 'manual' | null;
+  lastOkAt: string | null;
+  /** Остаётся и после удачных прогонов — свежая ли она, видно по lastErrorAt. */
+  lastError: string | null;
+  lastErrorAt: string | null;
+  mailboxes: number | null;
+  added: number | null;
+}
+
 export function googleWorkspaceStatus() {
-  return authFetchJson<{ configured: boolean }>(`${BASE}/mailboxes/google`);
+  return authFetchJson<{ configured: boolean; accounts: GoogleSyncAccountDto[] }>(
+    `${BASE}/mailboxes/google`,
+  );
 }
 
 /** Синхронизировать каталог прямо сейчас; раз в час это делает воркер сам. */
@@ -291,8 +399,60 @@ export function bulkMailboxes(ids: string[], action: BulkMailboxAction, tagId?: 
   });
 }
 
+/** Адрес отправки: с него выходит в интернет свой воркер. */
+export interface EgressIpDto {
+  ip: string;
+  host: string;
+  acceptsNew: boolean;
+  /** online — воркер на связи; silent — давно не выходил; error — выходит в интернет не с того адреса. */
+  state: 'online' | 'silent' | 'error';
+  lastSeenAt: string | null;
+  lastError: string | null;
+  mailboxes: number;
+  enabledMailboxes: number;
+  sentToday: number;
+}
+
+export function fetchEgressIps() {
+  return authFetchJson<{ ips: EgressIpDto[]; unassigned: number }>(`${BASE}/egress`);
+}
+
+export function setEgressAcceptsNew(ip: string, acceptsNew: boolean) {
+  return authFetchJson<{ ok: true }>(`${BASE}/egress`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip, acceptsNew }),
+  });
+}
+
+/** Перенести выбранные ящики на другой адрес отправки. */
+export function moveMailboxes(ids: string[], egressIp: string) {
+  return authFetchJson<{ ok: true; affected: number }>(`${BASE}/mailboxes`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, action: 'move', egressIp }),
+  });
+}
+
+/** truncated — в список влезли не все кампании: показаны последние. */
 export function fetchCampaigns() {
-  return authFetchJson<{ campaigns: CampaignDto[] }>(`${BASE}/campaigns`);
+  return authFetchJson<{ campaigns: CampaignDto[]; truncated?: boolean }>(`${BASE}/campaigns`);
+}
+
+export function fetchFolders() {
+  return authFetchJson<{ folders: SenderFolderDto[] }>(`${BASE}/folders`);
+}
+
+/**
+ * Сохранить настройки папки; droppedMailboxes — выбранные ящики, которых уже
+ * нет, pooledCampaigns — в сколько идущих рассылок долились новые ящики.
+ */
+export function updateFolder(id: string, body: FolderSettingsInput) {
+  return authFetchJson<{ folder: SenderFolderDto; droppedMailboxes: number; pooledCampaigns: number }>(`${BASE}/folders/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
 
 export function createCampaign(body: {
@@ -307,6 +467,10 @@ export function createCampaign(body: {
   /** Пауза между письмами одного ящика: базовая и случайная добавка, секунды. */
   gapSeconds: number;
   gapJitterSeconds: number;
+  /** Проект портала; null — без проекта. */
+  projectId: string | null;
+  /** Автосохранение недописанной формы: кампанию заведут без проверок. */
+  draft?: boolean;
 }) {
   return authFetchJson<{ id: string }>(`${BASE}/campaigns`, {
     method: 'POST',
@@ -321,12 +485,14 @@ export function fetchThreads(params: {
   mailboxId?: string;
   search?: string;
   onlyReplied?: boolean;
+  onlyLeads?: boolean;
 } = {}) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.campaignId) query.set('campaignId', params.campaignId);
   if (params.mailboxId) query.set('mailboxId', params.mailboxId);
   if (params.search) query.set('search', params.search);
   if (params.onlyReplied) query.set('onlyReplied', '1');
+  if (params.onlyLeads) query.set('onlyLeads', '1');
   return authFetchJson<{ threads: ThreadDto[]; total: number; pageSize: number }>(
     `${BASE}/threads?${query.toString()}`,
   );
@@ -382,6 +548,10 @@ export function updateCampaign(
     sendWeekdays: number[];
     gapSeconds: number;
     gapJitterSeconds: number;
+    /** Проект портала; null — отвязать. */
+    projectId: string | null;
+    /** Автосохранение недописанной формы: правки примут без проверок. */
+    draft?: boolean;
   },
 ) {
   return authFetchJson<{ ok: true; unstuck: number }>(`${BASE}/campaigns/${id}`, {
@@ -391,16 +561,47 @@ export function updateCampaign(
   });
 }
 
+/** mailboxesAdded — у запуска: сколько ящиков кампания без пула взяла из своей папки. */
 export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') {
-  return authFetchJson<{ ok: true; status: string }>(`${BASE}/campaigns/${id}`, {
+  return authFetchJson<{ ok: true; status: string; mailboxesAdded?: number }>(`${BASE}/campaigns/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action }),
   });
 }
 
+/** Отложить запуск кампании до startAt (ISO, UTC). */
+export function scheduleCampaign(id: string, startAt: string) {
+  return authFetchJson<{ ok: true; mailboxesAdded?: number }>(`${BASE}/campaigns/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'schedule', startAt }),
+  });
+}
+
+/** Отменить отложенный запуск. */
+export function unscheduleCampaign(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'unschedule' }),
+  });
+}
+
+/**
+ * Что удаление кампании автоаутрича сделало с отметками заливки в строках
+ * запуска (у ручной кампании поля нет). lettersSent — письма уходили, отметки
+ * остались, и эти компании больше не зальются; иначе released строк можно
+ * залить заново.
+ */
+export interface CampaignDeleteOutreachDto {
+  rows: number;
+  lettersSent: boolean;
+  released: number;
+}
+
 export function deleteCampaign(id: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
+  return authFetchJson<{ ok: true; outreach?: CampaignDeleteOutreachDto }>(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
 }
 
 /** Что нашлось в базе получателей — ответ /recipients/preview. */
@@ -414,8 +615,12 @@ export interface RecipientVariableDto {
 /** Предпросмотр письма на реальных строках (задача 5.6). */
 export interface PreviewSampleDto {
   email: string;
-  steps: { subject: string; body: string }[];
+  /** variant — подпись варианта А/Б-теста («А», «Б»); null — вариант один. */
+  steps: { subject: string; body: string; variant?: string | null }[];
 }
+
+/** Шаги письма для предпросмотра: как в форме, вместе с вариантами А/Б-теста. */
+export type PreviewStepInput = { variants: LetterInput[] };
 
 export interface RecipientColumnsDto {
   emailHeader: string | null;
@@ -432,7 +637,7 @@ export interface RecipientColumnsDto {
   samples?: PreviewSampleDto[];
 }
 
-export function previewRecipients(file: File, steps?: { subject: string; body: string }[]) {
+export function previewRecipients(file: File, steps?: PreviewStepInput[]) {
   return upload<RecipientColumnsDto>(
     `${BASE}/recipients/preview`,
     file,
@@ -441,12 +646,35 @@ export function previewRecipients(file: File, steps?: { subject: string; body: s
 }
 
 /** Предпросмотр шагов на реальных получателях уже загруженной базы кампании. */
-export function previewCampaignSteps(campaignId: string, steps: { subject: string; body: string }[]) {
+export function previewCampaignSteps(campaignId: string, steps: PreviewStepInput[]) {
   return authFetchJson<{ samples: PreviewSampleDto[] }>(`${BASE}/campaigns/${campaignId}/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ steps }),
   });
+}
+
+/** Состояние тестового письма в очереди отправки. */
+export interface TestLetterDto {
+  status: 'queued' | 'sending' | 'sent' | 'failed';
+  error: string | null;
+  sent_at: string | null;
+}
+
+/**
+ * Отправить письмо кампании на свой адрес. Уходит той же очередью, что и живая
+ * отправка, поэтому результат спрашиваем отдельно — fetchTestLetter.
+ */
+export function sendTestLetter(input: { mailboxId: string; to: string; subject: string; body: string }) {
+  return authFetchJson<{ id: string; from: string }>(`${BASE}/test-send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchTestLetter(id: string) {
+  return authFetchJson<{ test: TestLetterDto }>(`${BASE}/test-send?id=${encodeURIComponent(id)}`);
 }
 
 /** Строка базы кампании (экран получателей, задача 5.2). */
@@ -475,44 +703,96 @@ export function fetchCampaignRecipients(
 }
 
 /** Ответить лиду из окна переписки (задача 4.1): уходит с закреплённого ящика. */
-export function replyToThread(recipientId: string, text: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/threads/${recipientId}/reply`, {
+export function replyToThread(recipientId: string, text: string, draftId?: string | null) {
+  return authFetchJson<{ ok: true; messageId?: string }>(`${BASE}/threads/${recipientId}/reply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, draftId: draftId ?? null }),
   });
 }
 
-/** Строка стоп-листа (задача 5.3). */
+export type ReplyLanguage = 'ru' | 'en';
+
+/** Черновик персонализированного ответа ИИ (lib/senderReplies/draft.ts). */
+export interface ReplyDraftDto {
+  id: string;
+  text: string;
+  factsUsed: string;
+  sources: Array<{ url: string; title?: string }>;
+  language: ReplyLanguage;
+  createdAt: string;
+}
+
+export function fetchReplyDraft(recipientId: string) {
+  return authFetchJson<{ draft: ReplyDraftDto | null; language: ReplyLanguage; hasBrief: boolean }>(
+    `${BASE}/threads/${recipientId}/draft`,
+  );
+}
+
+export function generateReplyDraft(recipientId: string, language: ReplyLanguage) {
+  return authFetchJson<{ draft: ReplyDraftDto }>(`${BASE}/threads/${recipientId}/draft`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ language }),
+  });
+}
+
+export function saveReplyLanguage(recipientId: string, language: ReplyLanguage) {
+  return authFetchJson<{ ok: true }>(`${BASE}/threads/${recipientId}/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ language }),
+  });
+}
+
+/** Бриф, тон и пример письма кампании — база знаний ИИ-ответов. */
+export interface CampaignReplyKbDto {
+  name: string;
+  brief: string;
+  tone: string;
+  example: string;
+}
+
+export function fetchCampaignReplyKb(campaignId: string) {
+  return authFetchJson<CampaignReplyKbDto>(`${BASE}/campaigns/${campaignId}/reply-kb`);
+}
+
+export function saveCampaignReplyKb(campaignId: string, kb: Omit<CampaignReplyKbDto, 'name'>) {
+  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${campaignId}/reply-kb`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(kb),
+  });
+}
+
+/** Строка стоп-листа (задача 5.3). campaign_id null — общий стоп-лист. */
 export interface SuppressionDto {
   email: string;
   reason: string;
   note: string | null;
   created_at: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
 }
 
-export function fetchSuppressions(params: { page?: number; search?: string } = {}) {
+/** Какой стоп-лист показать: общий, кампаний или оба. */
+export type SuppressionScope = 'global' | 'campaign' | 'all';
+
+export function fetchSuppressions(params: { page?: number; search?: string; scope?: SuppressionScope } = {}) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.search) query.set('search', params.search);
+  if (params.scope) query.set('scope', params.scope);
   return authFetchJson<{ suppressions: SuppressionDto[]; total: number; pageSize: number }>(
     `${BASE}/suppressions?${query.toString()}`,
   );
 }
 
-export function addSuppressions(input: string, note?: string) {
-  const emails = input.split(/[\s,;]+/).filter(Boolean);
-  return authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ emails, note }),
-  });
-}
-
 /**
- * Большой список (загрузка файла) — частями: один запрос на десятки тысяч
- * адресов упирается в размер тела и таймаут.
+ * Добавить адреса в стоп-лист. campaignId — в стоп-лист этой кампании, без
+ * него — в общий. Большой список (загрузка файла) — частями: один запрос на
+ * десятки тысяч адресов упирается в размер тела и таймаут.
  */
-export async function addSuppressionList(emails: string[], note?: string) {
+export async function addSuppressionList(emails: string[], opts: { note?: string; campaignId?: string | null } = {}) {
   const CHUNK = 5000;
   let imported = 0;
   let skippedExisting = 0;
@@ -520,7 +800,7 @@ export async function addSuppressionList(emails: string[], note?: string) {
     const res = await authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ emails: emails.slice(i, i + CHUNK), note }),
+      body: JSON.stringify({ emails: emails.slice(i, i + CHUNK), note: opts.note, campaignId: opts.campaignId ?? null }),
     });
     imported += res.imported;
     skippedExisting += res.skippedExisting;
@@ -528,28 +808,103 @@ export async function addSuppressionList(emails: string[], note?: string) {
   return { imported, skippedExisting };
 }
 
-export function removeSuppression(email: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/suppressions?email=${encodeURIComponent(email)}`, {
+export function removeSuppression(email: string, campaignId?: string | null) {
+  const query = new URLSearchParams({ email });
+  if (campaignId) query.set('campaignId', campaignId);
+  return authFetchJson<{ ok: true }>(`${BASE}/suppressions?${query.toString()}`, {
     method: 'DELETE',
   });
 }
 
-/** Статистика ответов по ящикам и доменам (задача 6.3). */
-export interface MailboxStatRow {
+/** Вкладка «Статистика»: ответы, доставляемость, лиды за период. */
+export type SenderStatsPeriod = '7d' | '30d' | '90d' | 'all';
+
+export interface SenderStatCounters {
   reached: number;
   replied: number;
   bounced: number;
-  replyRate: number | null;
-  bounceRate: number | null;
+  leads: number;
 }
 
-export interface MailboxStatsDto {
-  mailboxes: (MailboxStatRow & { mailbox_id: string; email: string; domain: string; status: string; enabled: boolean; sent: number })[];
-  domains: (MailboxStatRow & { domain: string; mailboxes: number; sent: number })[];
+export interface SenderStatsDto {
+  period: SenderStatsPeriod;
+  /** Когорта: получатели, которым первое письмо ушло в периоде. */
+  totals: SenderStatCounters & {
+    unsubscribed: number;
+    in_progress: number;
+    median_reply_hours: number | null;
+  };
+  letters: { sent: number; failed: number };
+  /** Входящие по типу, без прогрева: human, auto_reply, bounce, unknown. */
+  inbox: Record<string, number>;
+  /** Попали в стоп-лист за период: hard_bounce, unsubscribe, complaint, manual. */
+  suppressed: Record<string, number>;
+  /** Отказы по причине (sender_bounce_category); старый расчёт без поля. */
+  bounceKinds?: BounceKinds;
+  mailboxes: { total: number; enabled: number; failed: number };
+  days: { day: string; sent: number; replied: number; bounced: number; leads: number }[];
+  campaigns: (SenderStatCounters & { id: string; name: string; status: string; sent: number })[];
+  mailboxList: (SenderStatCounters & {
+    id: string; email: string; enabled: boolean; status: string; sent: number; failed: number;
+    bounceKinds?: BounceKinds;
+  })[];
+  /** health — проверка DNS домена; null — ещё не проверялся. */
+  domains: (SenderStatCounters & {
+    domain: string; mailboxes: number; sent: number; bounceKinds: BounceKinds; health: DomainHealth | null;
+  })[];
+  steps: { step: number; reached: number; replied: number }[];
 }
 
-export function fetchMailboxStats() {
-  return authFetchJson<MailboxStatsDto>(`${BASE}/mailbox-stats`);
+/** Блок «Коды отказов»: code null — отказы, в тексте которых кода нет. */
+export interface BounceCodeCountDto {
+  code: string | null;
+  n: number;
+}
+
+export interface BounceCodeEventDto {
+  at: string;
+  /** bounce — письмо-отбойник во входящих; send — отказ при отправке. */
+  source: 'bounce' | 'send';
+  to_email: string | null;
+  mailbox_email: string | null;
+  /** null — письмо не из живой кампании «Рассылки». */
+  campaign_name: string | null;
+  detail: string | null;
+}
+
+/**
+ * Чьи входящие и отказы считать: ours — только письма «Рассылки»; all — всё,
+ * что пришло на наши ящики, включая ответы на отправки других инструментов.
+ */
+export type SenderStatsScope = 'ours' | 'all';
+
+function statsQuery(period: SenderStatsPeriod, campaignId: string | null, scope: SenderStatsScope) {
+  return `period=${period}${campaignId ? `&campaign=${encodeURIComponent(campaignId)}` : ''}&scope=${scope}`;
+}
+
+export function fetchBounceCodes(period: SenderStatsPeriod, campaignId: string | null, scope: SenderStatsScope) {
+  return authFetchJson<{ codes: BounceCodeCountDto[] }>(`${BASE}/stats/codes?${statsQuery(period, campaignId, scope)}`);
+}
+
+export function fetchBounceCodeEvents(
+  code: string | null,
+  period: SenderStatsPeriod,
+  campaignId: string | null,
+  scope: SenderStatsScope,
+) {
+  const value = encodeURIComponent(code ?? 'none');
+  return authFetchJson<{ events: BounceCodeEventDto[] }>(
+    `${BASE}/stats/codes?${statsQuery(period, campaignId, scope)}&code=${value}`,
+  );
+}
+
+/** campaignId null — все кампании сразу. */
+export function fetchSenderStats(
+  period: SenderStatsPeriod,
+  campaignId: string | null = null,
+  scope: SenderStatsScope = 'ours',
+) {
+  return authFetchJson<SenderStatsDto>(`${BASE}/stats?${statsQuery(period, campaignId, scope)}`);
 }
 
 /** mode 'replace' — заменить базу; по умолчанию новые адреса добавляются к старым. */
@@ -559,4 +914,95 @@ export function uploadRecipients(campaignId: string, file: File, mode: 'append' 
     file,
     mode === 'replace' ? { mode } : undefined,
   );
+}
+
+/** Проект портала для привязки кампании; active — в работе, тестировании или подготовке. */
+export interface SenderProjectDto {
+  id: string;
+  label: string;
+  active: boolean;
+}
+
+export function fetchSenderProjects() {
+  return authFetchJson<{ projects: SenderProjectDto[] }>(`${BASE}/projects`);
+}
+
+/** Вкладка «Контрольные ящики»: свои ящики Яндекс/Gmail/Mail.ru для проверки «входящие или спам». */
+export type SeedProviderId = 'yandex' | 'gmail' | 'mailru';
+
+export interface SeedWeekDto {
+  inbox: number;
+  spam: number;
+  missing: number;
+  /** Все пробы за 7 дней, включая ещё не проверенные и сбои. */
+  total: number;
+}
+
+export interface SeedBoxDto {
+  id: string;
+  provider: SeedProviderId;
+  email: string;
+  imap_host: string;
+  imap_port: number;
+  enabled: boolean;
+  status: 'pending' | 'ok' | 'failed';
+  last_error: string | null;
+  checked_at: string | null;
+  junk_folder: string | null;
+  /** «адрес:порт» прокси, через который входим; null — без прокси. */
+  proxy_label: string | null;
+  created_at: string;
+  week: SeedWeekDto;
+}
+
+export interface SeedBoxesResponse {
+  probesActive: boolean;
+  boxes: SeedBoxDto[];
+  providers: { provider: SeedProviderId; label: string; week: SeedWeekDto }[];
+}
+
+export interface SeedHealthDto {
+  id: string;
+  email: string;
+  inbox: number;
+  spam: number;
+  missing: number;
+  /** Доля «Входящих» за 7 дней, %; null — проверенных проб ещё нет. */
+  score: number | null;
+  last: Partial<Record<SeedProviderId, { status: string; day: string; folder: string | null }>>;
+}
+
+export function fetchSeedBoxes() {
+  return authFetchJson<SeedBoxesResponse>(`${BASE}/seed-boxes`);
+}
+
+/** Один ящик из формы или пачка строк из выдачи продавца (`lines`). */
+export function addSeedBoxes(body: { lines: string; proxies?: string } | { provider?: SeedProviderId; email: string; password: string }) {
+  return authFetchJson<{ created: { id: string; email: string }[]; skipped: string[] }>(`${BASE}/seed-boxes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export function checkSeedBox(id: string) {
+  return authFetchJson<{ ok: boolean; error: string | null; junkFolder: string | null }>(`${BASE}/seed-boxes/${id}/check`, {
+    method: 'POST',
+  });
+}
+
+export function updateSeedBox(id: string, patch: { enabled?: boolean; password?: string; proxy?: string | null }) {
+  return authFetchJson<{ ok: true }>(`${BASE}/seed-boxes/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteSeedBox(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/seed-boxes/${id}`, { method: 'DELETE' });
+}
+
+export function fetchSeedHealth() {
+  return authFetchJson<{ mailboxes: SeedHealthDto[] }>(`${BASE}/seed-boxes/health`);
 }

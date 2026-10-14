@@ -35,7 +35,7 @@ import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
 import { clearVeJobInterruptions, planVeJobFailure, VE_JOB_FREE_INTERRUPTIONS } from '@/lib/verticalEngineV2/jobRetry';
-import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
+import { retryVeJobFinalization, transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
 import {
   createVeJobShutdown,
   createVeJobWatchdog,
@@ -209,16 +209,16 @@ async function resetStuckJobs() {
   const { data, error } = await db
     .from('ve_jobs')
     .select('id')
-    .eq('status', 'running');
-  if (error) { log('error', `Stuck running jobs could not be read: ${error.message}`); return; }
+    .eq('status', 'running').abortSignal(AbortSignal.timeout(10_000));
+  if (error) throw new Error(`Stuck running jobs could not be read: ${error.message}`);
   if (data?.length) {
     log('info', `Resetting ${data.length} stuck running jobs to pending`);
     const { error: resetError } = await db
       .from('ve_jobs')
       .update({ status: 'pending', started_at: null, updated_at: new Date().toISOString() })
-      .eq('status', 'running');
+      .eq('status', 'running').abortSignal(AbortSignal.timeout(10_000));
     // A silent failure here left orphaned rows running until the next restart.
-    if (resetError) log('error', `Stuck running jobs were not reset: ${resetError.message}`);
+    if (resetError) throw new Error(`Stuck running jobs were not reset: ${resetError.message}`);
   }
 }
 
@@ -238,19 +238,21 @@ async function enqueueNextResearchStage(job: VeJob) {
   const nextStage = NEXT_RESEARCH_STAGE[job.stage];
   if (!nextStage) return;
 
-  const { data: existing } = await db
+  const { data: existing, error: readError } = await db
     .from('ve_jobs')
     .select('id')
     .eq('project_id', job.project_id)
     .eq('stage', nextStage)
     .in('status', ['pending', 'running'])
     .limit(1)
+    .abortSignal(AbortSignal.timeout(10_000))
     .maybeSingle();
+  if (readError) throw new Error(`enqueue ${nextStage} read: ${readError.message}`);
   if (existing) return;
 
   const { error } = await db
     .from('ve_jobs')
-    .insert({ project_id: job.project_id, stage: nextStage });
+    .insert({ project_id: job.project_id, stage: nextStage }).abortSignal(AbortSignal.timeout(10_000));
   if (error) throw new Error(`enqueue ${nextStage}: ${error.message}`);
   log('info', `Job ${job.id} (${job.stage}) → enqueued ${nextStage} for project ${job.project_id}`);
 }
@@ -365,86 +367,120 @@ async function handleJob(job: VeJob) {
   }
   const tokensUsed = stageResult.tokensUsed ?? 0;
   const costUsd = stageResult.costUsd ?? 0;
-
-  // base_collect и evidence переводят свою строку обратно в pending (ожидание
-  // парсеров / уступка очереди после checkpoint). Не затираем
-  // requeue финальным done-апдейтом — только накапливаем расход стадии.
-  // Сюда же попадает 'cancelled': стадия завершилась после отмены — done и
-  // дочейн следующей research-стадии не выполняем, джоба остаётся cancelled.
-  const { data: current } = await db
-    .from('ve_jobs')
-    .select('status')
-    .eq('id', job.id)
-    .maybeSingle();
-  if (current && (current as { status: string }).status !== 'running') {
-    const cancelled = (current as { status: string }).status === 'cancelled';
-    // This run ended normally, so earlier interruptions are no longer "in a row".
-    const payload = clearVeJobInterruptions(job.payload);
-    // Evidence keeps cumulative usage in its durable checkpoint until the
-    // entire stage finishes. A yield must not account it, finalize the job or
-    // enqueue clustering; even a zero-usage bookkeeping write is unnecessary.
-    if (job.stage === 'evidence' && (current as { status: string }).status === 'pending') {
-      if (payload) await db.from('ve_jobs').update({ payload }).eq('id', job.id);
-      log('info', `Job ${job.id} (evidence) → yielded with saved checkpoint`);
-      return;
-    }
-    await db
-      .from('ve_jobs')
-      .update({
-        tokens_used: (job.tokens_used ?? 0) + tokensUsed,
-        cost_usd: Number(job.cost_usd ?? 0) + costUsd,
-        updated_at: new Date().toISOString(),
-        ...(payload ? { payload } : {}),
-      })
-      .eq('id', job.id);
+  let usageRecorded = false;
+  const recordUsageOnce = async () => {
+    if (usageRecorded) return;
     await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
-    log(
-      'info',
-      cancelled
-        ? `Job ${job.id} (${job.stage}) → cancelled пользователем (+${tokensUsed} tok до отмены)`
-        : `Job ${job.id} (${job.stage}) → waiting (self-requeue, +${tokensUsed} tok)`,
-    );
-    return;
-  }
+    usageRecorded = true;
+  };
 
-  const { data: completed, error: completeError } = await db
-    .from('ve_jobs')
-    .update({
-      status: 'done',
-      result: (stageResult.result ?? {}) as Record<string, unknown>,
-      error: null,
-      finished_at: new Date().toISOString(),
-      tokens_used: (job.tokens_used ?? 0) + tokensUsed,
-      cost_usd: Number(job.cost_usd ?? 0) + costUsd,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', job.id)
-    .eq('status', 'running')
-    .select('id')
-    .maybeSingle();
-  if (completeError) throw new Error(`ve_jobs complete: ${completeError.message}`);
-  if (!completed) {
-    await db
-      .from('ve_jobs')
-      .update({
-        tokens_used: (job.tokens_used ?? 0) + tokensUsed,
-        cost_usd: Number(job.cost_usd ?? 0) + costUsd,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', job.id)
-      .eq('status', 'cancelled');
-    await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
-    log('info', `Job ${job.id} (${job.stage}) was cancelled before completion (+${tokensUsed} tok)`);
-    return;
-  }
+  // Keep the paid stage result in this invocation while the database is down.
+  // A failed done-write must not turn into a fresh paid run of the stage.
+  await retryVeJobFinalization({ shouldStop,
+    onError: (error) => log('warn', `Job ${job.id} completion deferred; retaining its result and retrying the save`, error),
+    save: async () => {
+      // base_collect и evidence переводят свою строку обратно в pending (ожидание
+      // парсеров / уступка очереди после checkpoint). Не затираем
+      // requeue финальным done-апдейтом — только накапливаем расход стадии.
+      // Сюда же попадает 'cancelled': стадия завершилась после отмены — done и
+      // дочейн следующей research-стадии не выполняем, джоба остаётся cancelled.
+      const { data: current, error: currentError } = await db
+        .from('ve_jobs')
+        .select('status,started_at')
+        .eq('id', job.id)
+        .abortSignal(AbortSignal.timeout(10_000))
+        .maybeSingle();
+      if (currentError) throw new Error(`ve_jobs completion status read: ${currentError.message}`);
+      if (!current || (current.started_at !== job.started_at
+        && Date.parse(current.started_at ?? '') !== Date.parse(job.started_at ?? ''))) return;
+      if (current.status === 'done') {
+        // The done-write committed but its response (or the following enqueue)
+        // was lost. No stage replay and no duplicate usage increment.
+        await recordUsageOnce();
+        await enqueueNextResearchStage(job);
+        if (job.stage === 'base_analyze' || job.stage === 'template') void triggerOutreachPreparationTick();
+        return;
+      }
+      if (current && (current as { status: string }).status !== 'running') {
+        const cancelled = (current as { status: string }).status === 'cancelled';
+        // This run ended normally, so earlier interruptions are no longer "in a row".
+        const payload = clearVeJobInterruptions(job.payload);
+        // Evidence keeps cumulative usage in its durable checkpoint until the
+        // entire stage finishes. A yield must not account it, finalize the job or
+        // enqueue clustering; even a zero-usage bookkeeping write is unnecessary.
+        if (job.stage === 'evidence' && (current as { status: string }).status === 'pending') {
+          if (payload) {
+            const { error } = await db.from('ve_jobs').update({ payload }).eq('id', job.id)
+              .eq('status', 'pending').abortSignal(AbortSignal.timeout(10_000));
+            if (error) throw new Error(`ve_jobs yielded payload save: ${error.message}`);
+          }
+          log('info', `Job ${job.id} (evidence) → yielded with saved checkpoint`);
+          return;
+        }
+        const { error: usageError } = await db
+          .from('ve_jobs')
+          .update({
+            tokens_used: (job.tokens_used ?? 0) + tokensUsed,
+            cost_usd: Number(job.cost_usd ?? 0) + costUsd,
+            updated_at: new Date().toISOString(),
+            ...(payload ? { payload } : {}),
+          })
+          .eq('id', job.id).eq('status', current.status).abortSignal(AbortSignal.timeout(10_000));
+        if (usageError) throw new Error(`ve_jobs yielded usage save: ${usageError.message}`);
+        await recordUsageOnce();
+        log(
+          'info',
+          cancelled
+            ? `Job ${job.id} (${job.stage}) → cancelled пользователем (+${tokensUsed} tok до отмены)`
+            : `Job ${job.id} (${job.stage}) → waiting (self-requeue, +${tokensUsed} tok)`,
+        );
+        return;
+      }
 
-  await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
-  await enqueueNextResearchStage(job);
-  if (job.stage === 'base_analyze' || job.stage === 'template') void triggerOutreachPreparationTick();
-  log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
+      let completion = db
+        .from('ve_jobs')
+        .update({
+          status: 'done',
+          result: (stageResult.result ?? {}) as Record<string, unknown>,
+          error: null,
+          finished_at: new Date().toISOString(),
+          tokens_used: (job.tokens_used ?? 0) + tokensUsed,
+          cost_usd: Number(job.cost_usd ?? 0) + costUsd,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', job.id)
+        .eq('status', 'running');
+      completion = job.started_at === null ? completion.is('started_at', null) : completion.eq('started_at', job.started_at);
+      const { data: completed, error: completeError } = await completion
+        .select('id')
+        .abortSignal(AbortSignal.timeout(10_000))
+        .maybeSingle();
+      if (completeError) throw new Error(`ve_jobs complete: ${completeError.message}`);
+      if (!completed) {
+        const { error: cancelledError } = await db
+          .from('ve_jobs')
+          .update({
+            tokens_used: (job.tokens_used ?? 0) + tokensUsed,
+            cost_usd: Number(job.cost_usd ?? 0) + costUsd,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', job.id)
+          .eq('status', 'cancelled').abortSignal(AbortSignal.timeout(10_000));
+        if (cancelledError) throw new Error(`ve_jobs cancelled usage save: ${cancelledError.message}`);
+        await recordUsageOnce();
+        log('info', `Job ${job.id} (${job.stage}) was cancelled before completion (+${tokensUsed} tok)`);
+        return;
+      }
+
+      await recordUsageOnce();
+      await enqueueNextResearchStage(job);
+      if (job.stage === 'base_analyze' || job.stage === 'template') void triggerOutreachPreparationTick();
+      log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
+    },
+  });
 }
 
-async function failJob(job: VeJob, err: unknown) {
+async function failJob(job: VeJob, err: unknown, failedAt: string) {
   if (err instanceof VePreviewCheckpointConflict) {
     // Another invocation advanced the durable base. Its continuation (or the
     // existing stale-job recovery after a crash) owns the next transition.
@@ -454,18 +490,20 @@ async function failJob(job: VeJob, err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
   // Отменённая пользователем джоба: стадия упала по AbortSignal. Это не фейл —
   // не инкрементируем attempts, не затираем 'cancelled', не валим проект/базу.
-  const { data: currentBefore } = await db
+  const { data: currentBefore, error: currentError } = await db
     .from('ve_jobs')
     .select('status')
     .eq('id', job.id)
+    .abortSignal(AbortSignal.timeout(10_000))
     .maybeSingle();
+  if (currentError) throw new Error(`ve_jobs failure status read: ${currentError.message}`);
   if (currentBefore && (currentBefore as { status: string }).status === 'cancelled') {
     log('info', `Job ${job.id} (${job.stage}) aborted by user cancel`);
     return;
   }
   // attempts — число фейлов, а не клеймов: инкремент только здесь. Зависание
   // и таймаут/обрыв запроса стадии к БД попытку не тратят (до предела подряд).
-  const plan = planVeJobFailure(job, err);
+  const plan = planVeJobFailure(job, err, Date.parse(failedAt));
   const finalFail = plan.status === 'failed';
   log('error', plan.interruption?.free
     ? `Job ${job.id} (${job.stage}) interrupted (${plan.interruption.count}/${VE_JOB_FREE_INTERRUPTIONS} in a row, attempt not spent): ${msg}`
@@ -480,32 +518,34 @@ async function failJob(job: VeJob, err: unknown) {
 
   const transition = await transitionVeJobFailure(db, {
     jobId: job.id,
+    startedAt: job.started_at,
     status: plan.status,
     attempts: plan.attempts,
     error: msg.slice(0, 500),
-    finishedAt: finalFail ? new Date().toISOString() : null,
+    finishedAt: finalFail ? failedAt : null,
     // Транзиентные ошибки пережидаем с бэкоффом (run_after в будущем), чтобы
     // провайдер успел восстановиться; постоянные клеймим сразу, как раньше.
     runAfter: plan.runAfter,
-    updatedAt: new Date().toISOString(),
+    updatedAt: failedAt,
     ...(plan.payload ? { payload: plan.payload } : {}),
   });
   if (transition.error) throw new Error(`ve_jobs fail transition: ${transition.error}`);
   if (!transition.transitioned) {
-    log('info', `Job ${job.id} (${job.stage}) cancellation won the failure transition`);
+    log('info', `Job ${job.id} (${job.stage}) failure transition no longer owns the invocation`);
     return;
   }
 
   // Финальный фейл research-стадии валит весь research-пайплайн проекта.
   if (finalFail && RESEARCH_STAGES.has(job.stage)) {
-    await db
+    const { error: projectError } = await db
       .from('ve_projects')
       .update({
         status: 'failed',
         error: `${job.stage}: ${msg}`.slice(0, 500),
         updated_at: new Date().toISOString(),
       })
-      .eq('id', job.project_id);
+      .eq('id', job.project_id).lte('updated_at', failedAt).abortSignal(AbortSignal.timeout(10_000));
+    if (projectError) throw new Error(`ve_projects failure save: ${projectError.message}`);
   }
 
   // Финальный фейл base_collect: без этого ve_bases навсегда остаётся в
@@ -518,7 +558,7 @@ async function failJob(job: VeJob, err: unknown) {
   if (finalFail && job.stage === 'base_collect') {
     const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
     if (baseId) {
-      await db
+      const { error: baseError } = await db
         .from('ve_bases')
         .update({
           status: 'failed',
@@ -526,7 +566,8 @@ async function failJob(job: VeJob, err: unknown) {
           updated_at: new Date().toISOString(),
         })
         .eq('id', baseId)
-        .eq('status', 'collecting');
+        .eq('status', 'collecting').lte('updated_at', failedAt).abortSignal(AbortSignal.timeout(10_000));
+      if (baseError) throw new Error(`ve_bases failure save: ${baseError.message}`);
     }
   }
 
@@ -552,7 +593,11 @@ async function processClaimedJob(job: VeJob): Promise<void> {
       // interruption is not a failed provider attempt and must not use retries.
       log('info', `Job ${job.id} (${job.stage}) interrupted by shutdown; preserving checkpoint for restart`);
     } else {
-      await failJob(job, err);
+      const failedAt = new Date().toISOString();
+      await retryVeJobFinalization({
+        save: () => failJob(job, err, failedAt), shouldStop,
+        onError: (error) => log('warn', `Job ${job.id} finalization deferred; retaining its queue lock and retrying the save`, error),
+      });
     }
   }
 }
@@ -573,7 +618,10 @@ async function main() {
   const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
   log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
 
-  await resetStuckJobs();
+  // No claims until startup recovery has succeeded. Otherwise a brief outage
+  // during startup strands running rows for the entire life of this process.
+  await retryVeJobFinalization({ save: resetStuckJobs, shouldStop,
+    onError: (error) => log('warn', 'Startup recovery deferred; retrying before claiming jobs', error) });
 
   const contactDeliveryTimer = setInterval(
     () => { void triggerContactDeliveryTick(); },

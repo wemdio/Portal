@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { load } from 'cheerio';
 import { recipientMailboxIdentities } from '@/lib/clientCampaignReplies/participants';
+import { isFreeProvider } from '@/lib/emailValidation/shared';
 
 import * as instantly from './client';
 import {
@@ -590,6 +592,70 @@ function normalizedSubject(value: string): string {
     .replace(/\s+/g, ' ').trim();
 }
 
+interface CitedOutboundHint {
+  id: string;
+  body: string;
+}
+
+function normalizedCitationText(value: string): string {
+  return value.normalize('NFKC').replace(/\s+/gu, '');
+}
+
+/** Thunderbird's outer Message-ID citation is a lookup hint, not ownership.
+ * Only this observed direct-reply shape may trigger one exact provider GET;
+ * arbitrary URLs, nested forwards and signature links are never followed. */
+function citedOutboundHint(reply: Email): CitedOutboundHint | null {
+  const html = typeof reply.body === 'object' ? reply.body?.html : null;
+  const mailbox = normalizeMailbox(reply.eaccount);
+  const responder = normalizeMailbox(reply.from_address_email);
+  if (!html || html.length > 2_000_000 || !/cite\s*=\s*["']mid:/i.test(html) ||
+      !mailbox || !responder || responder === mailbox || !emailTs(reply) ||
+      !recipientMailboxIdentities(reply).has(mailbox) ||
+      !/^\s*(?:re|ответ)\s*:/i.test(reply.subject ?? '') ||
+      /(?:^|:)\s*(?:fw|fwd|пересылка)(?:\[\d+\])?\s*:/i.test(reply.subject ?? '')) return null;
+  const $ = load(html);
+  const outer = $('blockquote[cite]').filter((_, node) =>
+    $(node).parents('blockquote, .gmail_quote, .yahoo_quoted, .moz-forward-container').length === 0);
+  if (outer.length !== 1 || outer.attr('type')?.toLowerCase() !== 'cite' ||
+      !outer.prev().is('.moz-cite-prefix')) return null;
+  const reference = /^mid:([a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12})@([a-z\d.-]+)$/i.exec(outer.attr('cite') ?? '');
+  if (!reference || reference[2].toLowerCase() !== mailbox.split('@')[1]) return null;
+  const quoted = outer.clone();
+  quoted.find('blockquote, .gmail_quote, .yahoo_quoted, .moz-forward-container, script, style').remove();
+  const body = normalizedCitationText(quoted.text());
+  return body.length >= 160 ? { id: reference[1].toLowerCase(), body } : null;
+}
+
+function matchesCitedOutbound(email: Email, reply: Email, hint: CitedOutboundHint | null): boolean {
+  const mailbox = normalizeMailbox(reply.eaccount);
+  if (!hint || email.id?.toLowerCase() !== hint.id || !email.campaign_id?.trim() ||
+      ![1, 3].includes(email.ue_type ?? 0) ||
+      normalizeMailbox(email.eaccount) !== mailbox || normalizeMailbox(email.from_address_email) !== mailbox ||
+      !emailTs(email) || emailTs(email) >= emailTs(reply) ||
+      !normalizedSubject(email.subject ?? '') ||
+      normalizedSubject(email.subject ?? '') !== normalizedSubject(reply.subject ?? '')) return false;
+  const recipients = [...new Set([
+    ...emailAddressTokens(email.to_address_email_list), ...jsonAddressTokens(email.to_address_json),
+  ])];
+  const responder = normalizeMailbox(reply.from_address_email)!;
+  const domain = responder.split('@')[1];
+  // A colleague may reply for the same company. A forwarded offer to another
+  // company (or two unrelated users of a public mail provider) is not proof.
+  if (recipients.length !== 1 || recipients[0] === mailbox ||
+      (recipients[0] !== responder && (!domain || isFreeProvider(domain) ||
+        recipients[0].split('@')[1] !== domain))) return false;
+  let body: string;
+  if (typeof email.body === 'object' && email.body?.html) {
+    const $ = load(email.body.html);
+    $('head, script, style').remove();
+    body = $.text();
+  } else {
+    body = getBodyText(email.body);
+  }
+  // Compare the WHOLE actual send, not just its greeting or shared signature.
+  return normalizedCitationText(body) === hint.body;
+}
+
 /** A changed-address reply needs stronger proof than a generic matching line:
  * actual provider recipient + exact sending mailbox + subject + a substantial
  * quote of the outbound body. Chronology and campaign guards still run below.
@@ -1086,6 +1152,7 @@ function verifiedConversationParents(emails: Email[], reply: Email): Email[] {
   const quote = normalizeQuotedText(getBodyText(reply.body));
   const headers = quotedOutbounds(reply);
   const subjectless = subjectlessDirectQuote(reply);
+  const citation = citedOutboundHint(reply);
   return emails
     .filter((email, index, all) => {
       if (!email.id || !email.campaign_id?.trim() ||
@@ -1095,6 +1162,7 @@ function verifiedConversationParents(emails: Email[], reply: Email): Email[] {
       const sender = normalizeMailbox(email.eaccount);
       if (!sentAt || sentAt >= replyAt || !sender ||
           normalizeMailbox(email.from_address_email) !== sender) return false;
+      if (matchesCitedOutbound(email, reply, citation)) return true;
       const recipients = [
         ...emailAddressTokens(email.to_address_email_list), ...jsonAddressTokens(email.to_address_json),
       ];
@@ -1278,10 +1346,36 @@ export async function resolveEffectiveReplyOwner(args: {
   // Actual conversation proof takes precedence over today's mailbox tags.
   // Keep this separate from mailboxVerified: the receiving mailbox may quite
   // legitimately belong to another project, and must not be globally relinked.
-  const conversationParents = verifiedConversationParents([
+  const conversationEmails = [
     ...(providerContext?.threadEmails ?? []),
     ...(providerContext?.lastOutbound ? [providerContext.lastOutbound] : []),
-  ], reply);
+  ];
+  const citation = citedOutboundHint(reply);
+  let conversationParents = verifiedConversationParents(conversationEmails, reply);
+  if (citation && conversationParents.length === 0) {
+    // Existing independently verified conversations do not depend on this
+    // optional lookup (an older quoted Message-ID can be unavailable).
+    // Run before identity-only checkpoint reads: their completed negative
+    // search never included a changed recipient recovered from this send.
+    if (!conversationEmails.some(email => email.id?.toLowerCase() === citation.id)) {
+      try {
+        const parent = await instantly.getEmail(citation.id, {
+          accountId, consumer: 'ownership_cited_parent', retryRateLimits: false,
+          timeoutMs: 20_000, timeoutIncludesBody: true,
+          requestPriority: args.evidenceMode === 'recovery' ? args.evidencePriority ?? 'recovery' : 'fresh',
+        });
+        if (parent) conversationEmails.push(parent);
+      } catch (error) {
+        return { status: 'defer', providerCampaignId,
+          reason: `cited outbound unavailable; ownership not proven: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+    const candidates = conversationEmails.filter(email => email.id?.toLowerCase() === citation.id);
+    if (!candidates.length || candidates.some(email => !matchesCitedOutbound(email, reply, citation))) {
+      return { status: 'defer', providerCampaignId, reason: 'cited outbound does not match the reply; ownership not proven' };
+    }
+    conversationParents = verifiedConversationParents(conversationEmails, reply);
+  }
   if (conversationParents.length > 0) {
     const campaignIds = [...new Set(conversationParents.map(parent => parent.campaign_id!))];
     let conversationLinks = await loadOwnershipLinks(db, campaignIds);

@@ -54,15 +54,17 @@ async function loadProject(id: string) {
  */
 async function saveClientBrief(
   projectId: string,
-  currentBrief: Record<string, unknown> | null,
   clientBrief: VeClientBrief,
 ) {
-  const brief = { ...(currentBrief ?? {}), client_brief: clientBrief };
-  const { error } = await supabaseAdmin!
-    .from('ve_projects')
-    .update({ brief, updated_at: new Date().toISOString() })
-    .eq('id', projectId);
-  return error;
+  const { data: project, error } = await supabaseAdmin!.rpc('ve_patch_project_brief', {
+    p_project_id: projectId,
+    p_patch: { client_brief: clientBrief },
+  });
+  if (error) return error;
+  if (project?.id !== projectId || !project?.brief?.client_brief) {
+    return { message: 'Не удалось подтвердить сохранение брифа' };
+  }
+  return null;
 }
 
 function briefResponse(brief: VeClientBrief | null) {
@@ -148,7 +150,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         return jsonError('Не удалось разобрать бриф — попробуйте ещё раз', 502);
       }
 
-      const saveError = await saveClientBrief(id, loaded.project.brief, parsed.brief);
+      const saveError = await saveClientBrief(id, parsed.brief);
       if (saveError) {
         await logError('tools.vertical-engine-v2.brief.save_failed', new Error(saveError.message), {
           userId,
@@ -214,7 +216,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
         body.icp as Partial<VeClientBriefIcp> | undefined,
       );
 
-      const saveError = await saveClientBrief(id, loaded.project.brief, edited);
+      const saveError = await saveClientBrief(id, edited);
       if (saveError) {
         await logError('tools.vertical-engine-v2.brief.edit_failed', new Error(saveError.message), {
           userId,

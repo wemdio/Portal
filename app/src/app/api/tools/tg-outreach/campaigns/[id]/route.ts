@@ -43,7 +43,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           return jsonError('Неверный JSON', 400);
         }
       
-        const allowed = ['name', 'openai_settings', 'telegram_settings'] as const;
+        const allowed = ['name', 'openai_settings', 'telegram_settings', 'crm_settings'] as const;
         const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
         for (const key of allowed) {
           if (body[key] !== undefined) update[key] = body[key];

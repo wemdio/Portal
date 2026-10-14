@@ -5,6 +5,8 @@ import { parseBulkDeleteBody } from '@/lib/tgOutreach/bulkDelete';
 
 export const dynamic = 'force-dynamic';
 
+const EXISTING_PAGE = 1000;
+
 export async function POST(req: NextRequest) {
   return withToolTrace(
     { request: req, operation: 'tools.tg-outreach.proxies.bulk.post' },
@@ -13,7 +15,7 @@ export async function POST(req: NextRequest) {
         const auth = await authenticateRequest(req.headers.get('authorization'));
         if ('error' in auth) return auth.error;
       
-        let body: { campaign_id?: string; proxies_text?: string };
+        let body: { campaign_id?: string; proxies_text?: string; proxy_list_id?: string | null };
         try {
           body = await req.json();
         } catch {
@@ -32,22 +34,34 @@ export async function POST(req: NextRequest) {
       
         // Дубли отсекает общий помощник: и против уже заведённых в кампании
         // адресов, и внутри самого списка.
-        const { data: existingRows } = await auth.supabase
-          .from('tg_outreach_proxies')
-          .select('url')
-          .eq('campaign_id', campaignId);
-        const { rows, skipped } = buildProxyImportRows(
-          lines,
-          (existingRows ?? []).map((r) => (r as { url: string }).url),
-          campaignId,
-        );
+        //
+        // Уже заведённые адреса читаем страницами: ответ базы ограничен тысячей
+        // строк, а пулы грузят как раз по тысяче. Без дочитывания вторая
+        // загрузка в ту же кампанию сверялась бы с обрезанным списком и
+        // завела бы двойников.
+        const existingUrls: string[] = [];
+        for (let from = 0; ; from += EXISTING_PAGE) {
+          const { data: page, error: pageError } = await auth.supabase
+            .from('tg_outreach_proxies')
+            .select('url')
+            .eq('campaign_id', campaignId)
+            .order('id')
+            .range(from, from + EXISTING_PAGE - 1);
+          if (pageError) return jsonError(pageError.message, 500);
+          for (const r of page ?? []) existingUrls.push((r as { url: string }).url);
+          if ((page?.length ?? 0) < EXISTING_PAGE) break;
+        }
+        const { rows, skipped } = buildProxyImportRows(lines, existingUrls, campaignId);
         if (rows.length === 0) {
           return NextResponse.json({ items: [], count: 0, skipped }, { status: 200 });
         }
 
+        // Список при создании: null — «Неопределённые», как у одиночного
+        // POST /proxies.
+        const proxyListId = body.proxy_list_id ?? null;
         const { data, error } = await auth.supabase
           .from('tg_outreach_proxies')
-          .insert(rows)
+          .insert(rows.map((row) => ({ ...row, proxy_list_id: proxyListId })))
           .select();
       
         if (error) return jsonError(error.message, 500);

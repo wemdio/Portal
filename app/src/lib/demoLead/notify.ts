@@ -30,12 +30,30 @@ export interface DemoLeadData {
   source?: string | null;
   referrer?: string | null;
   /**
-   * Campaign attribution captured on the landing via a parent-domain cookie
-   * (Domain=outreachos.pro) and read server-side at signup. Only the utm_* keys
-   * are rendered; referrer/landing/ts may also be present but are handled elsewhere.
+   * Campaign attribution: at signup — the landing's parent-domain cookie oos_utm
+   * (read server-side by /api/signup); at /api/demo-lead — the fields the
+   * outreachos.xyz form sends with the lead. Only its utm_* keys are rendered;
+   * referrer/landing/ts may also be present and are not read from here — callers
+   * pass what they want shown as `referrer` (signup) or `outsideReferrer` /
+   * `landingUrl` / `utmEarlierVisitAt` (demo-lead).
    */
   utm?: Record<string, string> | null;
+  /** Site the visitor came from before the landing (not the landing itself). */
+  outsideReferrer?: string | null;
+  /** URL the visitor arrived on, query string included. */
+  landingUrl?: string | null;
+  /**
+   * ISO time of the earlier visit the utm_* values come from — set only when the
+   * landing form took them from its 30-day oos_utm cookie, not from the visit that
+   * sent the lead. Shown as «(заход ДД.ММ ЧЧ:ММ МСК)» after the UTM line.
+   */
+  utmEarlierVisitAt?: string | null;
 }
+
+/** Telegram rejects sendMessage text longer than this, counted after entity parsing. */
+const TG_TEXT_MAX = 4096;
+/** What a URL — and, as a last resort, every value — is cut to when the alert is over TG_TEXT_MAX. */
+const ALERT_CUT_MAX = 200;
 
 /** Human label per lead source, for the Telegram alert title. */
 const SOURCE_LABEL: Record<string, string> = {
@@ -85,6 +103,90 @@ function getThreadId(): number | null {
 
 function esc(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** `text` cut to at most `max` UTF-16 units of whole code points, ending with «…». */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let out = '';
+  for (const ch of text) {
+    if (out.length + ch.length > max - 1) break;
+    out += ch;
+  }
+  return `${out}…`;
+}
+
+/** Length after entity parsing (tags dropped, an entity is one character), in UTF-16 units — never less than Telegram counts. */
+function visibleLength(html: string): number {
+  return html.replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt);/g, '&').length;
+}
+
+const VISIT_TIME = new Intl.DateTimeFormat('ru-RU', {
+  timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+
+/** « (заход 13.10 14:05 МСК)» for an ISO time, '' when it does not parse. */
+function earlierVisitSuffix(iso: string): string {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return '';
+  const p: Record<string, string> = {};
+  for (const part of VISIT_TIME.formatToParts(time)) p[part.type] = part.value;
+  return ` (заход ${p.day}.${p.month} ${p.hour}:${p.minute} МСК)`;
+}
+
+interface AlertCuts { url: number; message: number; value: number }
+const NO_CUTS: AlertCuts = { url: Infinity, message: Infinity, value: Infinity };
+
+function renderLeadAlert(data: DemoLeadData, cuts: AlertCuts): string {
+  const value = (text: string) => esc(clip(text, cuts.value));
+  const url = (text: string) => esc(clip(text, Math.min(cuts.url, cuts.value)));
+  const lines: string[] = [
+    titleLine(data.source),
+    '',
+    `<b>Имя:</b> ${value(data.name)}`,
+    `<b>Почта:</b> ${value(data.email)}`,
+  ];
+  if (data.company) lines.push(`<b>Компания:</b> ${value(data.company)}`);
+  if (data.phone) lines.push(`<b>Телефон:</b> ${value(data.phone)}`);
+  if (data.telegram) lines.push(`<b>Telegram:</b> ${value(data.telegram)}`);
+  if (data.utm) {
+    const u = data.utm;
+    const visit = data.utmEarlierVisitAt ? earlierVisitSuffix(data.utmEarlierVisitAt) : '';
+    const main = [u.utm_source, u.utm_medium, u.utm_campaign].filter(Boolean).join(' / ');
+    if (main) lines.push(`<b>📈 UTM:</b> ${value(main)}${visit}`);
+    const extra = [u.utm_term, u.utm_content].filter(Boolean).join(' / ');
+    if (extra) lines.push(`<b>UTM доп.:</b> ${value(extra)}${main ? '' : visit}`);
+  }
+  if (data.outsideReferrer) lines.push(`<b>Пришёл с:</b> ${url(data.outsideReferrer)}`);
+  if (data.landingUrl) lines.push(`<b>Страница входа:</b> ${url(data.landingUrl)}`);
+  if (data.message) {
+    lines.push('');
+    lines.push(esc(clip(data.message, Math.min(cuts.message, cuts.value))));
+  }
+  if (data.referrer) {
+    lines.push('');
+    lines.push(`<i>${url(data.referrer)}</i>`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The lead alert as Telegram HTML. A text within TG_TEXT_MAX is returned exactly as
+ * built. Over it, Telegram would reject the message and the alert would be lost, so
+ * only what is shown gets shorter (callers store the full values), each cut ending
+ * with «…»: first the URLs, then the message body by as much as is still over, and
+ * if that is not enough, every value.
+ */
+function leadAlertText(data: DemoLeadData): string {
+  const full = renderLeadAlert(data, NO_CUTS);
+  if (visibleLength(full) <= TG_TEXT_MAX) return full;
+  const urlsCut = renderLeadAlert(data, { ...NO_CUTS, url: ALERT_CUT_MAX });
+  const over = visibleLength(urlsCut) - TG_TEXT_MAX;
+  if (over <= 0) return urlsCut;
+  const message = Math.max(1, (data.message?.length ?? 0) - over);
+  const messageCut = renderLeadAlert(data, { ...NO_CUTS, url: ALERT_CUT_MAX, message });
+  if (visibleLength(messageCut) <= TG_TEXT_MAX) return messageCut;
+  return renderLeadAlert(data, { url: ALERT_CUT_MAX, message: ALERT_CUT_MAX, value: ALERT_CUT_MAX });
 }
 
 /**
@@ -141,34 +243,9 @@ export async function sendDemoLeadTelegramAlert(data: DemoLeadData): Promise<voi
     return;
   }
 
-  const lines: string[] = [
-    titleLine(data.source),
-    '',
-    `<b>Имя:</b> ${esc(data.name)}`,
-    `<b>Почта:</b> ${esc(data.email)}`,
-  ];
-  if (data.company) lines.push(`<b>Компания:</b> ${esc(data.company)}`);
-  if (data.phone) lines.push(`<b>Телефон:</b> ${esc(data.phone)}`);
-  if (data.telegram) lines.push(`<b>Telegram:</b> ${esc(data.telegram)}`);
-  if (data.utm) {
-    const u = data.utm;
-    const main = [u.utm_source, u.utm_medium, u.utm_campaign].filter(Boolean).join(' / ');
-    if (main) lines.push(`<b>📈 UTM:</b> ${esc(main)}`);
-    const extra = [u.utm_term, u.utm_content].filter(Boolean).join(' / ');
-    if (extra) lines.push(`<b>UTM доп.:</b> ${esc(extra)}`);
-  }
-  if (data.message) {
-    lines.push('');
-    lines.push(esc(data.message));
-  }
-  if (data.referrer) {
-    lines.push('');
-    lines.push(`<i>${esc(data.referrer)}</i>`);
-  }
-
   const payload: Record<string, unknown> = {
     chat_id: chatId,
-    text: lines.join('\n'),
+    text: leadAlertText(data),
     parse_mode: 'HTML',
     disable_web_page_preview: true,
   };

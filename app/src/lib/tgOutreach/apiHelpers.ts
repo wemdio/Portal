@@ -2,8 +2,13 @@ import { NextResponse } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { isInternalUser } from '@/lib/auth/internalGuard';
 
-export function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status });
+/**
+ * Ошибка ручки. `extra` — машиночитаемые поля рядом с текстом (например
+ * `{ code: 'stopping' }`): страница по ним решает, повторять ли действие сама,
+ * а человеку всё так же показывает `error`.
+ */
+export function jsonError(message: string, status: number, extra?: Record<string, unknown>) {
+  return NextResponse.json({ error: message, ...extra }, { status });
 }
 
 /**

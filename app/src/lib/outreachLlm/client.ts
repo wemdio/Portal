@@ -1,0 +1,741 @@
+/**
+ * Общий ИИ-клиент автоаутричей RU и EN
+ * (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §1).
+ *
+ * У каждого аутрича свой ключ Requesty (POLZA_RU_OUTREACH_API_KEY /
+ * POLZA_EN_OUTREACH_API_KEY): расход виден в кабинете отдельно, а сбой или
+ * лимит одного ключа не задевает другой аутрич и остальные фичи портала.
+ * Модель — по роли: gpt-4o-mini для разбора (analysis), Gemini 3.1 Pro для
+ * цепочек писем (writer); обе переопределяются env.
+ *
+ * Язык и бюджет приходят из контекста запуска (context.ts), и вне контекста
+ * клиент не платит вовсе: вызов без лимита — ошибка. Перед каждым запросом
+ * бюджет бронирует его оценку сверху (JobBudget.reserve) — лимит строгий и при
+ * параллельных вызовах. Каждый оплаченный ответ сразу списывается с бюджета —
+ * даже если потом не разобрался: деньги уже потрачены, и лимит обязан это
+ * видеть. Запрос, оборванный нами или сетью после отправки, тоже списывается —
+ * оценкой сверху (см. unansweredUsage).
+ *
+ * Транспорт — прямой fetch, как в lib/openrouter/client.ts: тот бросает
+ * обычный Error и теряет usage, а здесь нужны стоимость каждого ответа и типы
+ * ошибок (ключ / сбой / бюджет), от которых зависит судьба запуска.
+ */
+
+import 'server-only';
+import { currentOutreachContext, LlmAuthError, LlmCallError, type BudgetHold, type JobBudget } from './context';
+import { bareModelName, estimateCostUsd } from './prices';
+import type { OutreachLang, OutreachLlmRole } from './types';
+
+export type { OutreachLang, OutreachLlmRole } from './types';
+
+const DEFAULT_ENDPOINT = 'https://router.requesty.ai/v1/chat/completions';
+
+// Id — как в каталоге Requesty, с префиксом поставщика: без него Requesty
+// может молча ответить другой моделью (см. replyPersonalization/geminiClient.ts).
+// Разбор — gpt-4o-mini: не рассуждает, отвечает быстро и по деньгам не дороже.
+// DeepSeek V4 Flash (им собирает движок вертикалей) — reasoning-модель: скрытые
+// рассуждения съедают max_tokens, и в этом репозитории она уже возвращала
+// пустой ответ (шапка lib/constants.ts). Поставить её через env можно —
+// клиент тогда поднимает ей лимит токенов (см. REASONING_MODEL).
+const DEFAULT_MODELS: Record<OutreachLlmRole, string> = {
+  analysis: 'openai/gpt-4o-mini',
+  writer: 'google/gemini-3.1-pro-preview',
+};
+
+const API_KEY_ENV: Record<OutreachLang, string> = {
+  ru: 'POLZA_RU_OUTREACH_API_KEY',
+  en: 'POLZA_EN_OUTREACH_API_KEY',
+};
+
+const MODEL_ENV: Record<OutreachLang, Record<OutreachLlmRole, string>> = {
+  ru: { analysis: 'POLZA_RU_ANALYSIS_MODEL', writer: 'POLZA_RU_WRITER_MODEL' },
+  en: { analysis: 'POLZA_EN_ANALYSIS_MODEL', writer: 'POLZA_EN_WRITER_MODEL' },
+};
+
+const LANG_LABEL: Record<OutreachLang, string> = { ru: 'RU', en: 'EN' };
+
+// Разбор извлекает факты — выдумка не нужна; письмам нужна живость.
+const TEMPERATURE: Record<OutreachLlmRole, number> = { analysis: 0, writer: 0.4 };
+const DEFAULT_MAX_TOKENS: Record<OutreachLlmRole, number> = { analysis: 1500, writer: 8000 };
+// Меньше этого разбору не даём, даже если вызывающий попросил: с запасом по
+// токенам модель отвечает целиком с первого раза, а платим только за то, что
+// она реально написала, — повтор обрезанного ответа обошёлся бы дороже.
+const MIN_ANALYSIS_MAX_TOKENS = 1500;
+// Reasoning-модель на разборе (DeepSeek через env): её скрытые рассуждения
+// считаются в max_tokens — с обычным лимитом до ответа она не доходит и
+// возвращает пустой content. Даём запас и не меньше двух минут на ответ.
+const REASONING_MODEL = /deepseek/i;
+const REASONING_MIN_MAX_TOKENS = 5000;
+const REASONING_MIN_TIMEOUT_MS = 120_000;
+// Gemini тратит токены на размышление: обрезанный ответ повторяем с удвоенным
+// лимитом, но не выше этого.
+const MAX_TOKENS_CAP = 16_000;
+// Без таймаута зависший запрос держал бы строку, а с ней и запуск, бесконечно.
+// Писатель думает долго — ему больше, но меньше 300 с: на 300 с запрос без
+// потока оборвёт сам fetch (headersTimeout undici), и мы не узнали бы, что это
+// таймаут, за который надо списать деньги.
+const REQUEST_TIMEOUT_MS: Record<OutreachLlmRole, number> = { analysis: 120_000, writer: 280_000 };
+// 429/5xx/сеть/таймаут: ещё две попытки через 2 и 4 с. 408 и 425 — те же
+// таймауты апстрима, что и 5xx. Остальные 4xx постоянны: повтор заплатит за ту
+// же ошибку.
+const TRANSPORT_RETRIES = 2;
+const RETRY_BASE_MS = 2_000;
+const RETRYABLE_STATUS = new Set([408, 425, 429]);
+// Повтор, на который после паузы остаётся меньше этого от общего срока, всё
+// равно не успеет. Писатель (Gemini с рассуждениями) раньше чем за минуту
+// цепочку не пишет: повтор с меньшим запасом оборвётся по сроку и будет
+// списан оценкой сверху за max_tokens — деньги без ответа.
+const MIN_ATTEMPT_MS: Record<OutreachLlmRole, number> = { analysis: 1_000, writer: 60_000 };
+// Как у движка вертикалей (collectionErrors.ts): кончились деньги — это не сбой
+// одной строки, а причина остановить запуск.
+const BILLING_TEXT =
+  /not enough credits|insufficient[\s_-]+(?:funds|balance|credits)|payment[\s_-]+required|credit balance (?:is )?too low/i;
+// Модель из env Requesty не знает — упадёт каждый вызов, запуск валим сразу.
+// Между «model» и отказом — только одна фраза: точка внутри имени модели
+// («gemini-3.1») пропускается, конец предложения — нет, иначе «This model does
+// not support X. Parameter Y is not supported» валил бы запуск как чужая модель.
+const BAD_MODEL_TEXT =
+  /model[\s_-]*not[\s_-]*found|(?:unknown|invalid|unsupported|unrecognized)[\s_-]+model|not a valid model|no such model|model\b(?:[^.\n]|\.(?=\S)){0,80}?\b(?:not found|does(?:n't| not) exist|is not supported|is not available)/i;
+// 403 модерации или фильтра безопасности — отказ на конкретный текст (сайт с
+// «неудобным» содержимым), а не на ключ: это про одну строку. Но если в тексте
+// речь о ключе («API key policy…») — это ключ.
+const MODERATION_TEXT = /moderat|flagged|polic(?:y|ies)|safety/i;
+const KEY_TEXT = /api[\s_-]*key|unauthori[sz]ed|authenticat/i;
+// Таймауты самого undici: запрос уже ушёл, ответа не дождались.
+const UNDICI_TIMEOUT_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+// Сеть упала до соединения: имя не разрешилось, в соединении отказали, до хоста
+// не дойти, TLS не договорился. Запрос не ушёл — Requesty за него не платил.
+// Любой другой обрыв (сброс сокета, «terminated» при чтении ответа) — после
+// отправки: ответ мог быть сгенерирован и оплачен.
+const PRE_SEND_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'EAI_NONAME', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN',
+  'EHOSTDOWN', 'EADDRNOTAVAIL', 'UND_ERR_CONNECT_TIMEOUT',
+]);
+const PRE_SEND_TLS_CODE = /^(?:ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_(?:GET|VERIFY)_|DEPTH_ZERO_SELF_SIGNED|SELF_SIGNED_CERT)/;
+// fetch отверг сам запрос (битый адрес или заголовок) — он не ушёл.
+const PRE_SEND_TEXT = /failed to parse url|invalid url|invalid header|header value/i;
+
+// json_object-режим у части поставщиков отвечает 400, если слово «json» не
+// встречается в сообщениях (движок вертикалей наступил на это) — добавляем сами.
+const JSON_HINT: Record<OutreachLang, string> = {
+  ru: 'Верни ответ строго как валидный JSON-объект: без markdown-ограждений и без текста до или после.',
+  en: 'Return strictly a valid JSON object: no markdown fences, no text before or after.',
+};
+// Повтор того же запроса при температуре 0 вернёт тот же битый ответ — просим явно.
+const JSON_RETRY_NUDGE: Record<OutreachLang, string> = {
+  ru: 'Предыдущий ответ не разобрался как JSON-объект. Верни только валидный JSON-объект, ничего кроме него.',
+  en: 'The previous answer could not be parsed as a JSON object. Return only a valid JSON object and nothing else.',
+};
+
+export function outreachApiKey(lang: OutreachLang): string {
+  return (process.env[API_KEY_ENV[lang]] ?? '').trim();
+}
+
+export function outreachModel(lang: OutreachLang, role: OutreachLlmRole): string {
+  return (process.env[MODEL_ENV[lang][role]] ?? '').trim() || DEFAULT_MODELS[role];
+}
+
+/**
+ * Оценка сверху одного запроса к модели роли: весь промпт (~3 символа на
+ * токен) и max_tokens ответа по цене из prices.ts с наценкой Requesty. Столько
+ * клиент бронирует в лимите перед запросом и столько списывает за запрос без
+ * ответа. Раннеры по ней считают запас лимита под писателя цепочек.
+ */
+export function outreachWorstCaseUsd(lang: OutreachLang, role: OutreachLlmRole, promptChars: number, maxTokens: number): number {
+  return estimateUsd([outreachModel(lang, role)], Math.ceil(Math.max(0, promptChars) / 3), Math.max(0, maxTokens));
+}
+
+export interface OutreachLlmUsage {
+  role: OutreachLlmRole;
+  /** Модель, которая ответила по данным Requesty; если он её не назвал — запрошенная. */
+  model: string;
+  costUsd: number;
+  /**
+   * reported — usage.cost от Requesty; estimated — наша оценка по prices.ts;
+   * aborted — ответа нет, а запрос мог быть оплачен (оборван таймаутом,
+   * отменой или сетью после отправки): оценка сверху.
+   */
+  costSource: 'reported' | 'estimated' | 'aborted';
+  promptTokens: number | null;
+  completionTokens: number | null;
+}
+
+export interface OutreachLlmCallOptions {
+  role: OutreachLlmRole;
+  system: string;
+  user: string;
+  /** Короткая метка вызова для заголовка X-Title и логов: «site», «vacancy», «chain-hiring». */
+  title: string;
+  maxTokens?: number;
+  /**
+   * Язык берётся из контекста запуска; явный — проверка: вызов английского
+   * разбора внутри русского запуска (и наоборот) списал бы деньги чужого ключа
+   * с чужого лимита, поэтому он отклоняется.
+   */
+  lang?: OutreachLang;
+  /**
+   * Каждый оплаченный ответ, в том числе отвергнутый потом как битый: так
+   * шаблон цепочки знает свою стоимость и модель (polza_chain_templates).
+   */
+  onUsage?: (usage: OutreachLlmUsage) => void;
+  /**
+   * Отмена снаружи (остановка запуска, закрытый запрос роута): обрывает
+   * запрос и паузу перед повтором, повторов после неё нет, вызов отклоняется
+   * с signal.reason. Сигнал контекста запуска (остановка всего запуска)
+   * действует и без него.
+   */
+  signal?: AbortSignal;
+  /**
+   * Общий срок на весь вызов — все попытки и паузы между ними. Роуту
+   * «Переписать цепочку» нужен ответ за ~60 с, иначе его оборвёт платформа.
+   * Не уложились — LlmCallError. Без срока у каждого запроса свой таймаут по
+   * роли (120 / 280 с).
+   */
+  timeoutMs?: number;
+}
+
+/** Один вызов со строгим JSON-объектом в ответе. */
+export async function callOutreachJson(opts: OutreachLlmCallOptions): Promise<Record<string, unknown>> {
+  return callOutreach(opts, true, parseJsonObject);
+}
+
+/** Свободный текст — для писателя, если JSON неудобен. Обрезанный ответ не принимается. */
+export async function callOutreachText(opts: OutreachLlmCallOptions): Promise<string> {
+  return callOutreach(opts, false, (content) => content.trim() || null);
+}
+
+/* ─────────────────────────── Внутреннее ─────────────────────────── */
+
+interface ChatMessage {
+  role: 'system' | 'user';
+  content: string;
+}
+
+interface CallSpec {
+  lang: OutreachLang;
+  role: OutreachLlmRole;
+  title: string;
+  apiKey: string;
+  model: string;
+  json: boolean;
+  signal: AbortSignal | null;
+  /** Срок всего вызова (Date.now()), если задан opts.timeoutMs. */
+  deadline: number | null;
+  timeoutMs: number | null;
+}
+
+interface Answer {
+  content: string;
+  truncated: boolean;
+}
+
+type Outcome = { ok: true; answer: Answer } | { ok: false; error: LlmCallError };
+
+interface RequestyEnvelope {
+  model?: unknown;
+  choices?: unknown;
+  usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cost?: unknown } | null;
+  error?: unknown;
+  message?: unknown;
+}
+
+interface RequestyChoice {
+  message?: { content?: unknown } | null;
+  finish_reason?: unknown;
+}
+
+async function callOutreach<T>(
+  opts: OutreachLlmCallOptions,
+  json: boolean,
+  accept: (content: string) => T | null,
+): Promise<T> {
+  const ctx = currentOutreachContext();
+  // Ошибки программиста, а не ИИ: пусть падают громко, а не прячутся в «ИИ не
+  // ответил». Вызов без контекста запуска потратил бы деньги мимо лимита —
+  // такой не уходит вовсе, с какими бы параметрами его ни позвали.
+  if (!ctx) {
+    throw new Error(`Outreach LLM «${opts.title}»: вызов вне runWithOutreachContext — без лимита на ИИ не платим`);
+  }
+  if (opts.lang && opts.lang !== ctx.lang) {
+    throw new Error(`Outreach LLM «${opts.title}»: язык вызова (${opts.lang}) не совпадает с запуском (${ctx.lang})`);
+  }
+  const lang = ctx.lang;
+  const budget = ctx.budget;
+  const apiKey = outreachApiKey(lang);
+  if (!apiKey) {
+    throw new LlmAuthError(`Не задан ключ ИИ для ${LANG_LABEL[lang]} автоаутрича (${API_KEY_ENV[lang]})`, 'missing_key');
+  }
+  // Ключ с пробелом или кириллицей (битая строка в .env) fetch отверг бы как
+  // сетевую ошибку — каждая строка ждала бы повторов и падала бы по одной.
+  if (!/^[\x21-\x7E]+$/.test(apiKey)) {
+    throw new LlmAuthError(`Неверный ключ ИИ для ${LANG_LABEL[lang]} автоаутрича: недопустимые символы в ${API_KEY_ENV[lang]}`);
+  }
+  const timeoutMs = typeof opts.timeoutMs === 'number' && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+    ? opts.timeoutMs
+    : null;
+  const call: CallSpec = {
+    lang,
+    role: opts.role,
+    title: opts.title,
+    apiKey,
+    model: outreachModel(lang, opts.role),
+    json,
+    signal: anySignal(opts.signal, ctx.signal),
+    deadline: timeoutMs === null ? null : Date.now() + timeoutMs,
+    timeoutMs,
+  };
+  const baseMessages = buildMessages(opts, call);
+
+  // Списание с бюджета делает бронь запроса (requestWithRetries); здесь —
+  // предупреждения и учёт вызывающего.
+  const report = (usage: OutreachLlmUsage): void => {
+    if (usage.costSource === 'estimated') {
+      warnOnce(`cost:${usage.model}`, `${label(call)}: Requesty не вернул usage.cost (${usage.model}) — стоимость оценена по таблице цен`);
+    } else if (usage.costSource === 'aborted') {
+      log('warn', `${label(call)}: запрос оборван — в бюджет записана оценка сверху $${usage.costUsd.toFixed(4)}`);
+    }
+    if (bareModelName(usage.model) !== bareModelName(call.model)) {
+      warnOnce(`model:${call.model}>${usage.model}`, `${label(call)}: запрошена модель ${call.model}, ответила ${usage.model}`);
+    }
+    try {
+      opts.onUsage?.(usage);
+    } catch (err) {
+      // Учёт вызывающего не должен ронять вызов, за который уже заплатили.
+      log('warn', `${label(call)}: onUsage упал — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  let maxTokens = initialMaxTokens(opts, call.model);
+  let grewForLength = false;
+  let retriedBadAnswer = false;
+  let nudge = false;
+  for (;;) {
+    const messages = nudge ? [...baseMessages, { role: 'user' as const, content: JSON_RETRY_NUDGE[lang] }] : baseMessages;
+    const answer = await requestWithRetries(call, messages, maxTokens, budget, report);
+    // Обрезанный текст — недописанное письмо. Обрезанный JSON, если всё же
+    // разобрался, целый: скобки сошлись, значит объект закрыт — платить за
+    // повтор незачем.
+    const value = answer.truncated && !call.json ? null : accept(answer.content);
+    if (value !== null) return value;
+
+    const canGrow = maxTokens < MAX_TOKENS_CAP;
+    if (answer.truncated && call.role === 'writer' && canGrow && !grewForLength) {
+      grewForLength = true;
+      maxTokens = Math.min(maxTokens * 2, MAX_TOKENS_CAP);
+      log('info', `${label(call)}: ответ обрезан по лимиту токенов — повтор с max_tokens=${maxTokens}`);
+      continue;
+    }
+    const problem = answer.truncated
+      ? `ответ обрезан на max_tokens=${maxTokens}`
+      : call.json
+        ? 'ответ не разбирается как JSON-объект'
+        : 'пустой ответ';
+    // Обрезанный на потолке ответ обрежется и в повторе — не платим за него дважды.
+    if (retriedBadAnswer || (answer.truncated && !canGrow)) {
+      throw new LlmCallError(`${label(call)}: ${problem}`);
+    }
+    retriedBadAnswer = true;
+    if (answer.truncated) {
+      // С тем же лимитом ответ обрежется снова — повтор с запасом.
+      maxTokens = Math.min(maxTokens * 2, MAX_TOKENS_CAP);
+    } else {
+      nudge = call.json;
+    }
+    log('warn', `${label(call)}: ${problem} — повтор`);
+  }
+}
+
+function initialMaxTokens(opts: OutreachLlmCallOptions, model: string): number {
+  const requested = opts.maxTokens;
+  const wanted = typeof requested === 'number' && Number.isFinite(requested) && requested >= 1
+    ? Math.floor(requested)
+    : DEFAULT_MAX_TOKENS[opts.role];
+  if (opts.role !== 'analysis') return Math.min(wanted, MAX_TOKENS_CAP);
+  const floor = REASONING_MODEL.test(model) ? REASONING_MIN_MAX_TOKENS : MIN_ANALYSIS_MAX_TOKENS;
+  return Math.min(Math.max(wanted, floor), MAX_TOKENS_CAP);
+}
+
+/** Таймаут одного запроса по роли; reasoning-модели на разборе — не меньше двух минут. */
+function requestTimeoutMs(call: CallSpec): number {
+  const base = REQUEST_TIMEOUT_MS[call.role];
+  return call.role === 'analysis' && REASONING_MODEL.test(call.model) ? Math.max(base, REASONING_MIN_TIMEOUT_MS) : base;
+}
+
+function buildMessages(opts: OutreachLlmCallOptions, call: CallSpec): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  // Пустой system часть поставщиков отвергает с 400.
+  if (opts.system.trim()) messages.push({ role: 'system', content: opts.system });
+  messages.push({ role: 'user', content: opts.user });
+  if (call.json && !/json/i.test(`${opts.system}\n${opts.user}`)) {
+    messages.push({ role: 'user', content: JSON_HINT[call.lang] });
+  }
+  return messages;
+}
+
+/** Сигнал вызова и сигнал запуска вместе: любой из них обрывает запрос. */
+function anySignal(a: AbortSignal | undefined, b: AbortSignal | undefined): AbortSignal | null {
+  if (a && b && a !== b) return AbortSignal.any([a, b]);
+  return a ?? b ?? null;
+}
+
+async function requestWithRetries(
+  call: CallSpec,
+  messages: ChatMessage[],
+  maxTokens: number,
+  budget: JobBudget,
+  report: (usage: OutreachLlmUsage) => void,
+): Promise<Answer> {
+  const promptChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+  let lastError: LlmCallError | null = null;
+  for (let attempt = 0; attempt <= TRANSPORT_RETRIES; attempt += 1) {
+    if (attempt > 0) {
+      const pauseMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+      // Повтор не успеет до общего срока — отдаём последнюю ошибку сразу, не
+      // проспав остаток срока.
+      if (call.deadline !== null && call.deadline - Date.now() - pauseMs < MIN_ATTEMPT_MS[call.role]) break;
+      log('warn', `${lastError?.message ?? label(call)} — повтор ${attempt}/${TRANSPORT_RETRIES} через ${pauseMs / 1000} с`);
+      await sleep(pauseMs, call.signal);
+    }
+    call.signal?.throwIfAborted();
+    const remainingMs = call.deadline === null ? Infinity : call.deadline - Date.now();
+    if (remainingMs <= 0) break;
+    // Бронь — перед каждым запросом, включая повторы: оценка сверху этого
+    // запроса вместе с потраченным и бронями соседних потоков должна
+    // поместиться в лимит, иначе BudgetExceededError и запрос не уходит.
+    const hold = budget.reserve(call.role, worstCaseUsd(call, promptChars, maxTokens));
+    const timeoutMs = Math.min(requestTimeoutMs(call), remainingMs);
+    let outcome: Outcome;
+    try {
+      outcome = await requestOnce(call, messages, promptChars, maxTokens, timeoutMs, hold, report);
+    } finally {
+      // Запрос без оплаты (не ушёл, ошибка без usage) — бронь просто снимается.
+      hold.release();
+    }
+    if (outcome.ok) return outcome.answer;
+    lastError = outcome.error;
+  }
+  throw lastError ?? new LlmCallError(`${label(call)}: не уложились в ${seconds(call.timeoutMs ?? 0)} с`);
+}
+
+/**
+ * Retryable-сбой возвращается, постоянный (ключ, деньги, модель, прочие 4xx) —
+ * бросается. Оплаченный запрос закрывает бронь своей стоимостью (hold.settle).
+ */
+async function requestOnce(
+  call: CallSpec,
+  messages: ChatMessage[],
+  promptChars: number,
+  maxTokens: number,
+  timeoutMs: number,
+  hold: BudgetHold,
+  report: (usage: OutreachLlmUsage) => void,
+): Promise<Outcome> {
+  const charge = (usage: OutreachLlmUsage): void => {
+    hold.settle(usage.costUsd);
+    report(usage);
+  };
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = call.signal ? AbortSignal.any([call.signal, timeoutSignal]) : timeoutSignal;
+  let res: Response | null = null;
+  let text: string;
+  try {
+    res = await fetch(endpoint(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${call.apiKey}`,
+        'HTTP-Referer': 'https://portal.app',
+        'X-Title': headerSafe(`Portal - Polza ${LANG_LABEL[call.lang]} Outreach ${call.title}`),
+      },
+      body: JSON.stringify({
+        model: call.model,
+        messages,
+        temperature: TEMPERATURE[call.role],
+        max_tokens: maxTokens,
+        ...(call.json ? { response_format: { type: 'json_object' } } : {}),
+      }),
+      signal,
+    });
+    // Тело читаем под тем же сигналом: оборванный ответ мог быть оплачен, но
+    // usage из него уже не достать.
+    text = await res.text();
+  } catch (err) {
+    const cancelled = call.signal?.aborted === true;
+    if (cancelled || timeoutSignal.aborted || isTimeoutError(err)) {
+      charge(unansweredUsage(call, promptChars, maxTokens));
+      if (cancelled) throw call.signal?.reason;
+      return { ok: false, error: new LlmCallError(`${label(call)}: нет ответа за ${seconds(timeoutMs)} с`) };
+    }
+    // Обрыв сети. До соединения (DNS, отказ в соединении, TLS) запрос не ушёл
+    // и ничего не стоил. После — сброс сокета, «terminated» при чтении ответа
+    // (заголовки 200 уже пришли) — Requesty мог уже заплатить за ответ, которого
+    // мы не увидим: списываем оценку сверху, как оборванный запрос. Иначе два
+    // повтора после таких обрывов тратили бы деньги мимо лимита.
+    const maybePaid = res !== null || !isPreSendError(err);
+    if (maybePaid) charge(unansweredUsage(call, promptChars, maxTokens));
+    const note = maybePaid ? ' — запрос мог быть оплачен, в лимит записана оценка сверху' : '';
+    return { ok: false, error: new LlmCallError(`${label(call)}: ${networkProblem(err, call)}${note}`) };
+  }
+
+  const envelope = parseEnvelope(text);
+  const choice = firstChoice(envelope);
+  if (envelope && (envelope.usage || choice)) {
+    // Ошибки Requesty обычно бесплатны, но если он что-то посчитал — учитываем.
+    charge(usageOf(envelope, choice, call, promptChars));
+  } else if (res.ok && !envelope) {
+    // 200, а тело не читается: ответ был сгенерирован и, скорее всего,
+    // оплачен, но usage из него не достать — оценка сверху.
+    charge(unansweredUsage(call, promptChars, maxTokens));
+  }
+
+  if (res.ok) {
+    if (choice) {
+      return { ok: true, answer: { content: contentOf(choice), truncated: isTruncated(choice.finish_reason) } };
+    }
+    if (!envelope) {
+      return { ok: false, error: new LlmCallError(`${label(call)}: Requesty вернул не JSON`, res.status) };
+    }
+    // 200 без ответа модели — ошибка поставщика в конверте: код берём из неё.
+    return failure(call, errorCodeOf(envelope) ?? 502, providerMessage(envelope, text, call));
+  }
+  return failure(call, res.status, providerMessage(envelope, text, call));
+}
+
+function failure(call: CallSpec, status: number, message: string): Outcome {
+  const where = `Requesty ${status}${message ? `: ${message}` : ''}`;
+  const lang = LANG_LABEL[call.lang];
+  if (status === 402 || BILLING_TEXT.test(message)) {
+    throw new LlmAuthError(`Закончились деньги на ключе ИИ для ${lang} автоаутрича (${where})`, 'billing');
+  }
+  if ((status === 400 || status === 404) && BAD_MODEL_TEXT.test(message)) {
+    throw new LlmAuthError(
+      `Неверное имя модели ИИ (${call.model}) для ${lang} автоаутрича — проверьте ${MODEL_ENV[call.lang][call.role]} (${where})`,
+      'bad_model',
+    );
+  }
+  if (status === 403 && MODERATION_TEXT.test(message) && !KEY_TEXT.test(message)) {
+    // Тот же текст получит тот же отказ — без повтора, но и без остановки запуска.
+    throw new LlmCallError(`${label(call)}: запрос отклонён модерацией (${where})`, status);
+  }
+  if (status === 401 || status === 403) {
+    throw new LlmAuthError(`Неверный ключ ИИ для ${lang} автоаутрича (${where})`, 'rejected_key');
+  }
+  const error = new LlmCallError(`${label(call)}: ${where}`, status);
+  if (RETRYABLE_STATUS.has(status) || status >= 500) return { ok: false, error };
+  throw error;
+}
+
+function endpoint(): string {
+  return (process.env.OPENROUTER_ENDPOINT ?? '').trim() || DEFAULT_ENDPOINT;
+}
+
+function parseEnvelope(text: string): RequestyEnvelope | null {
+  const tryParse = (raw: string): RequestyEnvelope | null => {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as RequestyEnvelope) : null;
+    } catch {
+      return null;
+    }
+  };
+  // Как в openrouter/client.ts: прокси иногда дописывает мусор вокруг JSON.
+  return tryParse(text) ?? tryParse(text.match(/\{[\s\S]*\}/)?.[0] ?? '');
+}
+
+function firstChoice(envelope: RequestyEnvelope | null): RequestyChoice | null {
+  const choices = envelope?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const first = choices[0] as unknown;
+  return first && typeof first === 'object' ? (first as RequestyChoice) : null;
+}
+
+function contentOf(choice: RequestyChoice): string {
+  const content = choice.message?.content;
+  if (typeof content === 'string') return content;
+  // OpenAI-формат частями: [{ type: 'text', text }].
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string'
+        ? (part as { text: string }).text
+        : ''))
+      .join('');
+  }
+  return '';
+}
+
+function isTruncated(finishReason: unknown): boolean {
+  return typeof finishReason === 'string' && /^(?:length|max_tokens)$/i.test(finishReason);
+}
+
+function nonNegative(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Оценка по первой модели с известной ценой. Модель без цены — по тарифу
+ * писателя, самому дорогому: лимиту лучше сработать раньше, чем недосчитать.
+ */
+function estimateUsd(models: string[], tokensIn: number, tokensOut: number): number {
+  for (const model of models) {
+    const usd = estimateCostUsd(model, tokensIn, tokensOut);
+    if (usd !== null) return usd;
+  }
+  return estimateCostUsd(DEFAULT_MODELS.writer, tokensIn, tokensOut) ?? 0;
+}
+
+function usageOf(
+  envelope: RequestyEnvelope,
+  choice: RequestyChoice | null,
+  call: CallSpec,
+  promptChars: number,
+): OutreachLlmUsage {
+  const usage = envelope.usage ?? undefined;
+  const promptTokens = nonNegative(usage?.prompt_tokens);
+  const completionTokens = nonNegative(usage?.completion_tokens);
+  const model = typeof envelope.model === 'string' && envelope.model.trim() ? envelope.model.trim() : call.model;
+  const reported = nonNegative(usage?.cost);
+  if (reported !== null) {
+    return { role: call.role, model, costUsd: reported, costSource: 'reported', promptTokens, completionTokens };
+  }
+  // Без usage.cost — оценка по токенам, без токенов — по длине текста (~3
+  // символа на токен). Сначала по модели, которая ответила: Requesty мог
+  // подменить модель, и цена запрошенной была бы неверной.
+  const tokensIn = promptTokens ?? Math.ceil(promptChars / 3);
+  const tokensOut = completionTokens ?? Math.ceil((choice ? contentOf(choice).length : 0) / 3);
+  const costUsd = estimateUsd([model, call.model], tokensIn, tokensOut);
+  return { role: call.role, model, costUsd, costSource: 'estimated', promptTokens, completionTokens };
+}
+
+/**
+ * Оценка сверху одного запроса: весь промпт (~3 символа на токен) и
+ * max_tokens ответа по цене запрошенной модели. Её бронирует бюджет перед
+ * запросом (reserve) — и её же списываем за запрос без ответа.
+ */
+function worstCaseUsd(call: CallSpec, promptChars: number, maxTokens: number): number {
+  return estimateUsd([call.model], Math.ceil(promptChars / 3), maxTokens);
+}
+
+/**
+ * Запрос ушёл, а ответа нет: оборвали его мы (таймаут или отмена), сеть после
+ * отправки, или 200 пришёл нечитаемым. Requesty при этом мог уже заплатить
+ * апстриму за генерацию — ответа с usage мы не увидим никогда. Списываем
+ * оценку сверху, иначе серия таких обрывов тратила бы деньги мимо лимита.
+ */
+function unansweredUsage(call: CallSpec, promptChars: number, maxTokens: number): OutreachLlmUsage {
+  const costUsd = worstCaseUsd(call, promptChars, maxTokens);
+  return { role: call.role, model: call.model, costUsd, costSource: 'aborted', promptTokens: null, completionTokens: null };
+}
+
+function isTimeoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'TimeoutError') return true;
+  const cause = err.cause;
+  const code = cause && typeof cause === 'object' && 'code' in cause ? (cause as { code: unknown }).code : undefined;
+  return typeof code === 'string' && UNDICI_TIMEOUT_CODES.has(code);
+}
+
+/** Коды ошибок по цепочке cause (и внутри AggregateError — несколько адресов хоста). */
+function errorCodes(err: unknown, depth = 0): string[] {
+  if (!err || typeof err !== 'object' || depth > 5) return [];
+  const own = 'code' in err && typeof (err as { code: unknown }).code === 'string' ? [(err as { code: string }).code] : [];
+  const nested = err instanceof AggregateError ? err.errors.flatMap((e: unknown) => errorCodes(e, depth + 1)) : [];
+  const cause = err instanceof Error ? errorCodes(err.cause, depth + 1) : [];
+  return [...own, ...nested, ...cause];
+}
+
+/** Сбой сети до соединения или отказ fetch собрать запрос: запрос не ушёл и не оплачен. */
+function isPreSendError(err: unknown): boolean {
+  if (errorCodes(err).some((code) => PRE_SEND_CODES.has(code) || PRE_SEND_TLS_CODE.test(code))) return true;
+  return err instanceof TypeError && !err.cause && PRE_SEND_TEXT.test(err.message);
+}
+
+function errorCodeOf(envelope: RequestyEnvelope): number | null {
+  const error = envelope.error;
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  const status = typeof code === 'number' ? code : typeof code === 'string' ? Number(code) : NaN;
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : null;
+}
+
+function providerMessage(envelope: RequestyEnvelope | null, rawText: string, call: CallSpec): string {
+  const error = envelope?.error;
+  const fromError = typeof error === 'string'
+    ? error
+    : error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+      ? (error as { message: string }).message
+      : null;
+  const fromEnvelope = typeof envelope?.message === 'string' ? envelope.message : null;
+  // Сырой ответ прокси бывает HTML-страницей — теги в тексте ошибки не нужны;
+  // пустой JSON-объект ничего не объясняет — хватит кода.
+  const fallback = envelope && Object.keys(envelope).length === 0 ? '' : rawText.replace(/<[^>]*>/g, ' ');
+  return redact(fromError ?? fromEnvelope ?? fallback, call.apiKey).slice(0, 200);
+}
+
+function networkProblem(err: unknown, call: CallSpec): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error ? err.cause : undefined;
+  const code = cause && typeof cause === 'object' && 'code' in cause ? String((cause as { code: unknown }).code) : '';
+  // undici кладёт в текст ошибки значение заголовка — а там ключ.
+  return `сеть — ${redact(code ? `${message} (${code})` : message, call.apiKey)}`;
+}
+
+/** Текст ошибки уходит в логи и в журнал запуска — ключа в нём быть не должно. */
+function redact(text: string, apiKey: string): string {
+  const withoutKey = apiKey ? text.split(apiKey).join('***') : text;
+  return withoutKey.replace(/Bearer\s+\S+/gi, 'Bearer ***').replace(/\s+/g, ' ').trim();
+}
+
+/** fetch бросает TypeError на не-latin1 в заголовке: кириллица в title уронила бы каждый вызов. */
+function headerSafe(value: string): string {
+  return value.replace(/[^\x20-\x7E]/g, '?').slice(0, 150);
+}
+
+function label(call: CallSpec): string {
+  return `${LANG_LABEL[call.lang]} ${call.role} «${call.title}»`;
+}
+
+function seconds(ms: number): string {
+  return ms >= 10_000 ? String(Math.round(ms / 1000)) : String(Math.round(ms / 100) / 10);
+}
+
+/** Пауза перед повтором; отмена снаружи прерывает и её, а не ждёт до конца. */
+function sleep(ms: number, signal: AbortSignal | null): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function log(level: 'info' | 'warn', message: string): void {
+  console[level](`[outreach-llm][${level.toUpperCase()}] ${message}`);
+}
+
+const warnedOnce = new Set<string>();
+
+/** Одинаковое предупреждение на каждый вызов залило бы лог воркера — раз на процесс. */
+function warnOnce(key: string, message: string): void {
+  if (warnedOnce.has(key) || warnedOnce.size >= 200) return;
+  warnedOnce.add(key);
+  log('warn', message);
+}
+
+/** Как в polzaRuOutreach/llm.ts: снимаем markdown-ограждения, берём объект, массив не принимаем. */
+function parseJsonObject(content: string): Record<string, unknown> | null {
+  const text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  const slice = text.startsWith('{') ? text : (text.match(/\{[\s\S]*\}/)?.[0] ?? '');
+  if (!slice) return null;
+  try {
+    const parsed = JSON.parse(slice) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}

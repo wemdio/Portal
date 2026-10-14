@@ -1,12 +1,20 @@
 import {
+  countInboxByCampaign,
   countSyncedQualificationsByCampaign,
+  findQualificationIdsByEmailIds,
+  getRecentlyLinkedCampaignIds,
   getCampaignAccountIds,
   getCampaignCatalog,
+  getInboxReplyById,
   getProjectCampaignIds,
   getQualificationById,
+  inboxHistoryPending,
+  listInboxReplies,
   listSyncedQualifications,
 } from './db';
 import { getLiveReply, listLiveReplies } from './liveReplyList';
+import { getProjectMailboxes, type ProjectMailboxes } from './projectMailboxes';
+import { isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
 import type { QualificationRow, ReplyCampaignOption } from './types';
 
 /** Сколько писем отдаём за раз; прокрутка до конца списка просит следующую сотню. */
@@ -21,25 +29,52 @@ export interface ProjectRepliesPage {
   /** Писем по фильтру всего; null — точно не посчитать (есть кампании с живых аккаунтов). */
   total: number | null;
   hasMore: boolean;
+  /** История кампаний ещё догружается в базу — часть старых писем пока не видна. */
+  historyLoading: boolean;
 }
+
+/** За сколько дней привязка считается свежей: её история догружается в базу. */
+const LINK_HISTORY_DAYS = 30;
 
 /**
  * Ответы лидов по проекту — все, включая отказы. Кампании основного аккаунта
- * читаются из таблицы квалификатора, кампании остальных аккаунтов — живым
- * запросом к их Instantly. `campaignId` сужает список до одной кампании
- * проекта, `search` ищет по почте (и компании) ответившего.
+ * читаются только из базы: вердикты квалификатора и ящик ответов без вердикта
+ * (наши «N. Polza_…» и история до привязки — lib/instantly/replyInbox.ts).
+ * Кампании остальных аккаунтов — живым запросом к их Instantly: у них свой
+ * лимит, и он не занят. `campaignId` сужает список до одной кампании проекта,
+ * `search` ищет по почте (и компании) ответившего.
  */
 export async function listProjectReplies(
   projectId: string,
-  options: { campaignId?: string | null; search?: string; limit?: number } = {},
+  options: {
+    campaignId?: string | null;
+    search?: string;
+    limit?: number;
+    /**
+     * Только те ответы, которым квалификатор поставил «лид». Вердикта нет у
+     * писем с живых аккаунтов и у ящика без вердикта — под этим фильтром они
+     * не показываются вовсе, иначе «лиды» смешивались бы с непроверенными письмами.
+     */
+    onlyLeads?: boolean;
+  } = {},
 ): Promise<ProjectRepliesPage> {
+  const onlyLeads = options.onlyLeads === true;
   const projectCampaignIds = await getProjectCampaignIds(projectId);
   const catalog = await getCampaignCatalog(projectCampaignIds);
+  const accountOf = (id: string) => catalog.get(id)?.accountId ?? 'main';
+  const mainIds = projectCampaignIds.filter((id) => accountOf(id) === 'main');
+  const ownIds = mainIds.filter((id) => isOwnAgencyCampaign(catalog.get(id)?.name));
+  const syncedIds = mainIds.filter((id) => !ownIds.includes(id));
 
   // Счётчики — по всем кампаниям проекта, независимо от выбранной: кнопки
   // кампаний над списком показывают, куда переключаться.
-  const syncedCampaignIds = projectCampaignIds.filter((id) => catalog.get(id)?.accountId === 'main');
-  const counts = await countSyncedQualificationsByCampaign(syncedCampaignIds, options.search);
+  const [qualCounts, inboxCounts, recentlyLinked] = await Promise.all([
+    countSyncedQualificationsByCampaign(syncedIds, options.search, { onlyLeads }),
+    onlyLeads ? Promise.resolve(new Map<string, number>()) : countInboxByCampaign(mainIds, options.search),
+    getRecentlyLinkedCampaignIds(projectId, new Date(Date.now() - LINK_HISTORY_DAYS * 24 * 60 * 60_000).toISOString()),
+  ]);
+  const counts = new Map<string, number>();
+  for (const id of mainIds) counts.set(id, (qualCounts.get(id) ?? 0) + (inboxCounts.get(id) ?? 0));
 
   // Сверху кампании, где больше ответов; без счётчика (живые аккаунты) — в конце.
   const campaigns: ReplyCampaignOption[] = projectCampaignIds
@@ -58,22 +93,35 @@ export async function listProjectReplies(
 
   const byAccount = new Map<string, string[]>();
   for (const id of campaignIds) {
-    const account = catalog.get(id)?.accountId ?? 'main';
+    const account = accountOf(id);
     byAccount.set(account, [...(byAccount.get(account) ?? []), id]);
   }
 
   const parts = await Promise.all(
     [...byAccount].map(async ([accountId, ids]) => {
       if (accountId === 'main') {
-        const { rows, total } = await listSyncedQualifications(ids, { limit, search: options.search });
-        return { rows, total: total as number | null, hasMore: total > rows.length };
+        const [synced, inbox] = await Promise.all([
+          listSyncedQualifications(ids.filter((id) => !ownIds.includes(id)), { limit, search: options.search, onlyLeads }),
+          onlyLeads ? Promise.resolve({ rows: [] as QualificationRow[], total: 0 }) : listInboxReplies(ids, { limit, search: options.search }),
+        ]);
+        // Письмо истории, которое квалификатор потом всё-таки взял, — одна строка, с вердиктом.
+        const taken = inbox.rows.length ? await findQualificationIdsByEmailIds(inbox.rows.map((row) => row.id)) : new Map();
+        const extra = inbox.rows.filter((row) => !taken.has(row.id));
+        return {
+          rows: [...synced.rows, ...extra],
+          total: (synced.total + inbox.total - taken.size) as number | null,
+          hasMore: synced.total > synced.rows.length || inbox.total > inbox.rows.length,
+        };
       }
+      // У живого аккаунта квалификации нет — под фильтром «только лиды» такие
+      // кампании молчат, а не подмешивают непроверенные письма.
+      if (onlyLeads) return { rows: [] as QualificationRow[], total: 0 as number | null, hasMore: false };
       const { rows, hasMore } = await listLiveReplies({ campaignIds: ids, accountId, limit, search: options.search });
-      return { rows, total: null, hasMore };
+      return { rows, total: null as number | null, hasMore };
     }),
   );
 
-  // Имя кампании в строке — из каталога: у живых писем его нет вовсе.
+  // Имя кампании в строке — из каталога: у живых писем и ящика его нет вовсе.
   const campaignNames = new Map(campaigns.map((c) => [c.id, c.name]));
   const merged = parts
     .flatMap((p) => p.rows)
@@ -84,11 +132,14 @@ export async function listProjectReplies(
   const total = parts.every((p) => p.total !== null)
     ? parts.reduce((sum, p) => sum + (p.total ?? 0), 0)
     : null;
+  // История догружается фоном: пока она не дочитана, экран так и пишет.
+  const historyIds = mainIds.filter((id) => ownIds.includes(id) || recentlyLinked.has(id));
   return {
     rows,
     campaigns,
     total,
     hasMore: merged.length > limit || parts.some((p) => p.hasMore),
+    historyLoading: onlyLeads ? false : await inboxHistoryPending(historyIds),
   };
 }
 
@@ -104,8 +155,25 @@ export async function resolveProjectReply(
   }
 
   const campaignIds = await getProjectCampaignIds(projectId);
+  if (!campaignIds.length) return null;
+  // Ящик без вердикта (наши «N. Polza_…», история до привязки) — из базы, без Instantly.
+  const inbox = await getInboxReplyById(replyId);
+  if (inbox && campaignIds.includes(inbox.row.campaignId)) {
+    return { qualification: inbox.row, accountId: inbox.accountId };
+  }
   const accounts = await getCampaignAccountIds(campaignIds);
-  const liveAccounts = [...new Set([...accounts.values()])].filter((a) => a !== 'main');
-  if (!liveAccounts.length) return null;
-  return getLiveReply({ emailId: replyId, accountIds: liveAccounts, campaignIds });
+  // Живое письмо — письмо кампании другого аккаунта (их квалификатор не
+  // синкает) или письмо папки Others любого аккаунта проекта, включая основной.
+  // Основной — последним: письма его кампаний уже нашлись в таблице выше.
+  const accountIds = [...new Set(accounts.values())].sort((a, b) => Number(a === 'main') - Number(b === 'main'));
+  let mailboxes: Promise<ProjectMailboxes> | null = null;
+  return getLiveReply({
+    emailId: replyId,
+    accountIds,
+    campaignIds,
+    mailboxesFor: async (accountId) => {
+      mailboxes ??= getProjectMailboxes(campaignIds, accounts);
+      return (await mailboxes).byAccount.get(accountId);
+    },
+  });
 }

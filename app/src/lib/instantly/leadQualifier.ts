@@ -61,8 +61,10 @@ export async function fetchThreadContext(
   leadEmail: string,
   threadId?: string | null,
   accountId?: string,
+  // consumer — по умолчанию 'qualification'; drain вебхуков передаёт свой
+  // ярлык, чтобы его чтения LIST /emails были видны в почасовых счётчиках.
   requestOptions?: Pick<InstantlyRequestOptions,
-    'requestPriority' | 'timeoutMs' | 'timeoutIncludesBody' | 'retryRateLimits'>,
+    'requestPriority' | 'timeoutMs' | 'timeoutIncludesBody' | 'retryRateLimits' | 'consumer'>,
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
   let historyFetchFailed = false;
@@ -599,6 +601,10 @@ const SELF_COOPERATION_PATTERNS = [
   /\b(?:i|we)\s+hope\s+(?:for|to)\s+(?:a\s+possible\s+)?(?:cooperation|collaborate)\b/i,
 ];
 const SUBSTANTIVE_OFFER_SIGNAL_PATTERNS = [
+  // First-person supply with a concrete object is an offer too; a product
+  // seller need not say "предлагаем". Don't match questions about who buys it.
+  /(?:^|[.!?\n])\s*(?:>\s*)?(?:мы\s+)?(?:производим|поставляем|изготавливаем)\s+(?!(?:ли|не)(?:\s|$))[а-яё][^.!?\n]{8,}(?=[.!\n]|$)/iu,
+  /(?:^|[.!?\n])\s*(?:>\s*)?(?:сейчас\s+)?(?:есть\s+возможность\s+подключения|мож(?:но|ем)\s+подключить(?:ся)?)\s+к\s+(?:сервису|платформе|программе)[^.!?\n]*(?=[.!\n]|$)/iu,
   // A named software product with concrete functions is an offer even when
   // phrased as an invitation to send information. Mere "our solution" or a
   // question about who manages a process must not gain this evidence.
@@ -2297,7 +2303,7 @@ function protectedDefaultVerdict(
     !actionableDirectCta &&
     !selfCooperationInterest &&
     requestedFollowupMaterials &&
-    (!confirmedProposal || hasExplicitNegativeContext(statement))
+    ((!confirmedProposal && !semanticShortOffer) || hasExplicitNegativeContext(statement))
   ) {
     return {
       reason: confirmedProposal

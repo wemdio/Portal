@@ -13,6 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createVeDeliveryExclusionGuard } from './projectExclusionDelivery';
 import {
   AppendLeadsPartialError,
   appendLeadsToClientCampaign,
@@ -418,9 +419,7 @@ export async function runContactDeliveryDay(input: {
   if (reserveError) throw new Error(`delivery day reservation failed: ${reserveError.message}`);
   const reservation = parseReservation(reserveData);
   if (reservation.status !== 'reserved') {
-    // A process may have stopped after persisting an accepted batch but before
-    // activation. The separate activation fence reconciles it without uploading
-    // the batch again or blindly repeating an ambiguous activation request.
+    // Refresh the provider state without starting or resuming sending.
     const activation = await activateDeliveredContactCampaigns({
       portalDb: input.portalDb, veProjectId: input.veProjectId,
     });
@@ -471,6 +470,7 @@ export async function runContactDeliveryDay(input: {
         entitlementMode: 'managed_contract',
         expectedInstantlyAccountId: preflight.instantlyAccountId,
         pauseOnWorkspaceCapacity: true,
+        prepareProviderChunk: createVeDeliveryExclusionGuard(input.portalDb, input.veProjectId),
         beforeProviderRequest: async () => {
           const { data, error } = await input.portalDb.rpc('ve_renew_contact_delivery_request', {
             p_run_id: reservation.run_id, p_attempt_id: attemptId,

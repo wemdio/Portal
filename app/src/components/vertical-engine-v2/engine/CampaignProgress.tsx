@@ -1,5 +1,6 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import type { VeContactSupplyStatus } from '@/lib/verticalEngineV2/contactSupplyStatus';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
@@ -13,6 +14,7 @@ interface CampaignProgressProps {
   title: string;
   /** False for imported bases and other campaigns without automatic supply. */
   required: boolean;
+  headerAction?: ReactNode;
 }
 
 const SUPPLY_LABELS: Record<NonNullable<VeContactSupplyStatus['plan']>['status'], string> = {
@@ -26,11 +28,12 @@ const SUPPLY_LABELS: Record<NonNullable<VeContactSupplyStatus['plan']>['status']
 
 const count = (value: number) => value.toLocaleString('ru-RU');
 
-export function CampaignProgress({ template, title, required }: CampaignProgressProps) {
+export function CampaignProgress({ template, title, required, headerAction }: CampaignProgressProps) {
   const supply = useContactSupply(template.id, required, null);
   const info = parseLaunchInfo((template as VeTemplate & { launch_info?: unknown }).launch_info);
   const plan = required ? supply.data?.plan : null;
   const metrics = required ? supply.data?.metrics : null;
+  const stock = metrics ?? (required ? supply.data?.stock : null);
   const campaigns = info?.campaigns?.length ? info.campaigns : info ? [{
     campaign_id: info.campaign_id,
     campaign_name: info.campaign_name,
@@ -41,7 +44,10 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
 
   return (
     <article className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
-      <h3 className="ve2-h3">{title}</h3>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h3 className="ve2-h3">{title}</h3>
+        {headerAction}
+      </div>
       <ContactUploadNotice key={template.id} templateId={template.id} />
 
       {plan ? (
@@ -57,36 +63,36 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
         <StatusBox tone="info">Автоматический поиск для этих кампаний ещё не согласован.</StatusBox>
       ) : null}
 
-      {metrics ? (
+      {stock ? (
         <>
           <div className="ve2-stats">
             <div className="ve2-stat">
-              <p className="ve2-stat-v">{count(metrics.ready)}</p>
+              <p className="ve2-stat-v">{count(stock.ready)}</p>
               <p className="ve2-stat-k">Готовый запас</p>
             </div>
             <div className="ve2-stat">
-              <p className="ve2-stat-v">{count(metrics.uploaded_today)}</p>
+              <p className="ve2-stat-v">{count(stock.uploaded_today)}</p>
               <p className="ve2-stat-k">Добавлено сегодня в Instantly</p>
             </div>
             <div className="ve2-stat">
-              <p className="ve2-stat-v">{count(metrics.uploaded)}</p>
+              <p className="ve2-stat-v">{count(stock.uploaded)}</p>
               <p className="ve2-stat-k">Всего добавлено в кампании</p>
             </div>
           </div>
-          {metrics.hypothesis_stock_workdays !== null ? (
+          {metrics && metrics.hypothesis_stock_workdays !== null ? (
             <p className={HE.muted}>
               Готового запаса хватит примерно на {count(metrics.hypothesis_stock_workdays)} рабочих дней
               при темпе {count(metrics.hypothesis_daily_target)} контактов в день.
             </p>
           ) : null}
-          {metrics.uncertain > 0 ? (
+          {stock.uncertain > 0 ? (
             <StatusBox tone="info">
-              Для {count(metrics.uncertain)} контактов результат загрузки ещё не подтверждён.
+              Для {count(stock.uncertain)} контактов результат загрузки ещё не подтверждён.
               Повторная загрузка заблокирована до автоматической сверки с Instantly.
             </StatusBox>
           ) : null}
           <p className={HE.faint}>
-            Дата учёта: {metrics.business_date}, {metrics.timezone}.
+            Дата учёта: {stock.business_date}, {stock.timezone}.
             {' '}Загрузка в кампанию не означает первое отправленное письмо.
           </p>
         </>
@@ -95,7 +101,7 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
       ) : null}
 
       {required && supply.data?.metrics_error ? (
-        <StatusBox tone="error">{supply.data.metrics_error}</StatusBox>
+        <StatusBox tone={supply.data.analytics_pending ? 'info' : 'error'}>{supply.data.metrics_error}</StatusBox>
       ) : null}
       {required && supply.error ? <StatusBox tone="error">{supply.error}</StatusBox> : null}
 

@@ -109,6 +109,13 @@ export interface OpenAISettings {
   trigger_phrases_negative: string;
   target_chats_positive: string;
   /**
+   * Портал сам передаёт лида только по прямой просьбе: менеджер, созвон,
+   * встреча. «Расскажите подробнее» и «пришлите презентацию» решает промпт
+   * кампании — так квалификация из промпта (роль, объём, бюджет) не
+   * обходится общей проверкой интереса. Включено у АИ МОП с 08.10.2026.
+   */
+  handoff_direct_request_only?: boolean;
+  /**
    * Убрано с экрана 09.09.2026. Пусто (дефолт) — отрицательный триггер только
    * помечает диалог, никуда не пересылает. Ключ оставлен, чтобы не переписывать
    * сохранённые кампании, где чат был задан.
@@ -243,6 +250,13 @@ export interface OutreachCampaign {
   status: CampaignStatus;
   openai_settings: OpenAISettings;
   telegram_settings: TelegramSettings;
+  /** Передача лидов в CRM; null — выключена. См. lib/tgOutreach/crmPush.ts. */
+  crm_settings?: {
+    enabled: boolean;
+    connection: string | null;
+    pipeline_id: number | null;
+    status_id: number | null;
+  } | null;
   created_at: string;
   updated_at: string;
   /**
@@ -514,6 +528,17 @@ export interface OutreachDialog {
   auto_forward_chat?: string | null;
   auto_forward_error?: string | null;
   /**
+   * Кто сделал диалог лидом: ИИ по триггеру или сотрудник руками (кнопки
+   * «Лид» и «Передать лида»). Пишется с 08.10.2026, у прежних лидов пусто.
+   * Подпись на экране собирает `lib/tgOutreach/leadMark.ts`.
+   */
+  lead_source?: 'ai' | 'manual' | null;
+  lead_marked_by?: string | null;
+  lead_marked_by_name?: string | null;
+  lead_marked_at?: string | null;
+  /** Отметил лидом тот, кто смотрит. Проставляет роут списка, в таблице поля нет. */
+  lead_marked_by_me?: boolean;
+  /**
    * Последняя передача этого диалога — приклеивается роутом списка, в самой
    * таблице диалогов такого поля нет.
    *
@@ -544,6 +569,13 @@ export interface OutreachDialog {
      * Почему отправки не было: у сорвавшейся — причина сбоя целиком, по ней
      * оператор чинит и повторяет; у снятой — кто её снял.
      */
+    error_message: string | null;
+  } | null;
+  /** Сделка в CRM по переданному лиду (tg_outreach_crm_pushes). */
+  crm?: {
+    status: 'pending' | 'sent' | 'failed';
+    lead_url: string | null;
+    /** У упавшей — причина; у созданной — предупреждение (например, про «Источник»). */
     error_message: string | null;
   } | null;
 }

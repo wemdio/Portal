@@ -289,11 +289,16 @@ export interface PolzaOutreachConfig {
   countries: string[];
   posted_within_days: number;
   limit: number;
-  sources?: Array<'hiring' | 'yc'>;
+  /** 'directory' — справочник компаний (pdl_companies), с 10.10.2026. */
+  sources?: Array<'hiring' | 'yc' | 'directory'>;
   yc_batch_from_year?: number;
   min_employees?: number;
   max_employees?: number;
   write_threshold?: number;
+  /** Лимит на ИИ за запуск, $ (1–100); у запусков до 26.09.2026 его нет. */
+  llm_budget_usd?: number;
+  /** Брать и компании, уже готовые в прошлых запусках (по умолчанию нет). */
+  include_previously_exported?: boolean;
 }
 
 export interface PolzaOutreachParserJob {
@@ -317,6 +322,10 @@ export interface PolzaOutreachLetter {
   n: number;
   subject: string;
   body: string;
+  /** Письмо 1 для адресов другого вида, чем главный (lib/outreachEmail/companyEmails.ts). */
+  alt_body?: string;
+  /** Вид этого варианта: true — «кто у вас за это отвечает?». */
+  alt_routing?: boolean;
 }
 
 export interface PolzaOutreachCompanyRow {
@@ -340,8 +349,17 @@ export interface PolzaOutreachCompanyRow {
   selected_company_email?: string | null;
   email_type?: string | null;
   email_source_url?: string | null;
+  /** Вердикт SMTP-проверки адреса: ok / catch_all / unverified; у строк до 26.09.2026 — null. */
+  email_verification?: string | null;
+  /**
+   * Все адреса компании в работе (до трёх, главный — первым; с 29.09.2026):
+   * [{ email, verification, type, is_routing }] — lib/outreachEmail/companyEmails.ts.
+   */
+  emails?: unknown;
   sequence_id?: string | null;
   letters?: PolzaOutreachLetter[] | null;
+  /** Шаблон цепочки оффера, по которому собраны письма (с 26.09.2026). */
+  chain_template_id?: string | null;
   status: string;
   stage?: string | null;
   exclusion_reason?: string | null;
@@ -367,6 +385,10 @@ export interface PolzaOutreachCompanyRow {
   created_at: string;
 }
 
+/**
+ * Воронка английского аутрича; правила и порядок этапов — lib/polzaOutreach/funnel.ts
+ * (с 26.09.2026 почта идёт до Lead Score). geo_confirmed — исторический ключ «write now».
+ */
 export interface PolzaOutreachFunnel {
   vacancies: number;
   domain_found: number;

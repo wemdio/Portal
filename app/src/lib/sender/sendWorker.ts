@@ -2,13 +2,15 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { authForMailbox } from './mailboxAuth';
+import { nextGapMs, nextWindowSlot } from './sendWindow';
 import { sendSenderMail, type SendErrorCode } from './smtp';
-import type { MailboxRow, MessageRow, RecipientRow, StepRow } from './types';
+import { advanceRecipient } from './stepAdvance';
+import type { CampaignRow, MailboxRow, MessageRow, RecipientRow, StepRow } from './types';
 
 /**
  * Отправка писем из очереди. Письмо берётся атомарно (claim_sender_messages,
- * FOR UPDATE SKIP LOCKED), поэтому параллельные воркеры — сейчас один сервер,
- * дальше несколько — не отправят одно письмо дважды.
+ * FOR UPDATE SKIP LOCKED) и только для ящиков адреса этого воркера: у каждого
+ * адреса отправки свой воркер, и ящик входит в почту всегда с одного адреса.
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -17,6 +19,33 @@ const MAX_ATTEMPTS = 5;
 const BACKOFF_BASE_MS = 5 * 60 * 1000;
 /** Насколько сдвигаем письмо, возвращённое из-за проблем ящика (не письма). */
 const MAILBOX_PROBLEM_DELAY_MS = 10 * 60 * 1000;
+/** Письмо, до времени которого осталось меньше, — уходит сейчас: опрос всё равно раз в 30 с. */
+const PACE_TOLERANCE_MS = 5_000;
+
+type PaceCampaign = Pick<CampaignRow, 'timezone' | 'send_hour_from' | 'send_hour_to' | 'send_weekdays' | 'gap_seconds' | 'gap_jitter_seconds'>;
+
+/**
+ * Когда письму ящика можно уйти: не раньше паузы кампании после прошлого
+ * письма ящика и только внутри окна отправки. null — можно сейчас.
+ *
+ * Планировщик и так ставит письма ящика с паузой, но очередь, накопившаяся за
+ * простой воркера, уходила залпом: 08.10.2026 после 4 часов простоя ящик
+ * отправил 14 писем за 2 минуты при паузе 3–5 минут. Письма разных кампаний на
+ * одном ящике планировщик тоже не разносит между собой.
+ */
+export function pacedSendAt(now: Date, lastSentAt: number | null, campaign: PaceCampaign): Date | null {
+  let at = now.getTime();
+  if (lastSentAt != null && campaign.gap_seconds > 0 && lastSentAt + campaign.gap_seconds * 1000 > at) {
+    at = lastSentAt + nextGapMs(campaign.gap_seconds, campaign.gap_jitter_seconds);
+  }
+  const slot = nextWindowSlot(new Date(at), {
+    timezone: campaign.timezone,
+    sendHourFrom: campaign.send_hour_from,
+    sendHourTo: campaign.send_hour_to,
+    sendWeekdays: campaign.send_weekdays,
+  });
+  return slot.getTime() > now.getTime() + PACE_TOLERANCE_MS ? slot : null;
+}
 
 function fromHeader(mailbox: MailboxRow): string {
   const name = (mailbox.display_name ?? '').trim();
@@ -54,7 +83,7 @@ function retryPlan(code: SendErrorCode | undefined, attempts: number): 'retry' |
   }
 }
 
-async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: string): Promise<void> {
+async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: string, log: Log): Promise<void> {
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
 
@@ -66,31 +95,29 @@ async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: strin
   const recipient = recipientRow as RecipientRow | null;
   if (!recipient) return;
 
-  const { data: nextStepRow } = await db
+  // Любая строка следующего шага: при А/Б-тесте их несколько, и отсюда нужна
+  // только задержка — она у вариантов одна. Запрос на одну строку (maybeSingle)
+  // здесь нельзя: на нескольких вариантах он вернул бы ошибку, шаг счёлся бы
+  // последним, и цепочка молча обрывалась бы на предыдущем письме.
+  const { data: nextStepRows } = await db
     .from('sender_campaign_steps')
     .select('*')
     .eq('campaign_id', message.campaign_id)
     .eq('step_no', message.step_no + 1)
-    .maybeSingle();
-  const nextStep = nextStepRow as StepRow | null;
+    .order('variant_no')
+    .limit(1);
+  const nextStep = ((nextStepRows ?? [])[0] as StepRow | undefined) ?? null;
 
-  const patch: Record<string, unknown> = {
-    last_step_sent: message.step_no,
-    updated_at: sentAt,
-  };
-  // Message-ID первого письма — корень переписки: follow-up уходят ответом
-  // в него, поэтому у получателя это одна ветка, а не отдельные письма.
-  if (message.step_no === 1) patch.thread_message_id = message.message_id;
-
-  if (nextStep) {
-    const next = new Date(new Date(sentAt).getTime() + nextStep.delay_hours * 60 * 60 * 1000);
-    patch.next_step_at = next.toISOString();
-  } else {
-    patch.status = 'finished';
-    patch.next_step_at = null;
+  // Шаг, корень переписки и срок следующего шага — общим правилом с
+  // планировщиком (stepAdvance.ts).
+  try {
+    await advanceRecipient(db, { recipientId: recipient.id, stepNo: message.step_no, messageId: message.message_id, sentAt }, nextStep);
+  } catch (e) {
+    // Письмо ушло, а шаг получателя не записан. Второй раз письмо шага не
+    // поставят (уникальность шага), а получателя сдвинет планировщик, когда
+    // встретит это письмо отправленным (planner.settleTakenStep).
+    log('error', `Письмо ${message.id} ушло, но шаг получателя ${message.to_email} не записан`, e instanceof Error ? e.message : e);
   }
-
-  await db.from('sender_recipients').update(patch).eq('id', recipient.id);
   await db.from('sender_mailboxes').update({ last_send_at: sentAt }).eq('id', mailbox.id);
 }
 
@@ -98,17 +125,27 @@ async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: strin
  * Один проход отправки. Возвращает true, если что-то отправили — тогда воркер
  * сразу делает следующий проход, не выжидая интервал опроса.
  */
-export async function processSenderBatch(opts?: { batchSize?: number; log?: Log }): Promise<boolean> {
+export async function processSenderBatch(opts: { egressIp: string; batchSize?: number; log?: Log }): Promise<boolean> {
   if (!supabaseAdmin) return false;
   const db = supabaseAdmin;
-  const log: Log = opts?.log ?? (() => {});
-  const batchSize = opts?.batchSize ?? 20;
+  const log: Log = opts.log ?? (() => {});
+  const batchSize = opts.batchSize ?? 20;
 
-  const { data: claimed } = await db.rpc('claim_sender_messages', { p_limit: batchSize });
+  const { data: claimed, error: claimError } = await db.rpc('claim_sender_messages', {
+    p_limit: batchSize,
+    p_egress_ip: opts.egressIp,
+  });
+  if (claimError) {
+    log('warn', `Очередь писем не забралась: ${claimError.message}`);
+    return false;
+  }
   const messages = (claimed ?? []) as MessageRow[];
   if (!messages.length) return false;
 
   const mailboxCache = new Map<string, MailboxRow | null>();
+  const campaignCache = new Map<string, PaceCampaign | null>();
+  // Последняя отправка ящика: из базы, потом — по отправленным в этом проходе.
+  const lastSent = new Map<string, number | null>();
   let sentCount = 0;
 
   for (const message of messages) {
@@ -117,6 +154,13 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
       const { data } = await db.from('sender_mailboxes').select('*').eq('id', message.mailbox_id).maybeSingle();
       mailbox = (data as MailboxRow | null) ?? null;
       mailboxCache.set(message.mailbox_id, mailbox);
+    }
+
+    if (mailbox && mailbox.egress_ip !== opts.egressIp) {
+      // Ящик перенесли на другой адрес между claim и отправкой: письмо уйдёт
+      // с нового адреса его воркером, а не с нашего.
+      await db.from('sender_messages').update({ status: 'scheduled' }).eq('id', message.id);
+      continue;
     }
 
     if (!mailbox || mailbox.status !== 'verified') {
@@ -128,6 +172,26 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
         .from('sender_messages')
         .update({ status: 'scheduled', scheduled_at: retryAt, error: 'Ящик недоступен или не подтверждён' })
         .eq('id', message.id);
+      continue;
+    }
+
+    // Пауза ящика и окно кампании: рано — письмо обратно в очередь на своё время.
+    let campaign = campaignCache.get(message.campaign_id);
+    if (campaign === undefined) {
+      const { data } = await db
+        .from('sender_campaigns')
+        .select('timezone, send_hour_from, send_hour_to, send_weekdays, gap_seconds, gap_jitter_seconds')
+        .eq('id', message.campaign_id)
+        .maybeSingle();
+      campaign = (data as PaceCampaign | null) ?? null;
+      campaignCache.set(message.campaign_id, campaign);
+    }
+    if (!lastSent.has(mailbox.id)) {
+      lastSent.set(mailbox.id, mailbox.last_send_at ? Date.parse(mailbox.last_send_at) : null);
+    }
+    const pacedAt = campaign ? pacedSendAt(new Date(), lastSent.get(mailbox.id) ?? null, campaign) : null;
+    if (pacedAt) {
+      await db.from('sender_messages').update({ status: 'scheduled', scheduled_at: pacedAt.toISOString() }).eq('id', message.id);
       continue;
     }
 
@@ -181,7 +245,8 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
           .eq('id', message.id);
         continue;
       }
-      await afterSend(message, mailbox, sentAt);
+      await afterSend(message, mailbox, sentAt, log);
+      lastSent.set(mailbox.id, Date.parse(sentAt));
       sentCount += 1;
       continue;
     }

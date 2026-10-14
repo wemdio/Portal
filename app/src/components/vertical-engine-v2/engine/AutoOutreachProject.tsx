@@ -15,6 +15,8 @@ import {
   type VeProjectResponse,
   type VeJobResponse,
   type VeBaseSummary,
+  type VePreparationAction,
+  type VeContinuationCheck,
 } from './api';
 import { HE } from './design';
 import { StatusBox, formatDate, prettyProjectName } from './ui';
@@ -24,12 +26,21 @@ import { DossierSegmentCard, DossierSignalsCard, DossierDatasetCard } from './st
 import { BaseRow, BaseAnalysisCards } from './steps/Step4Base';
 import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
+import { DeliveryRatePanel } from './DeliveryRatePanel';
+import { DeliveryTargetPanel } from './DeliveryTargetPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
-import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
+import { ManualHypothesisForm } from './ManualHypothesisForm';
+import { PriorityNichesEditor, PriorityNicheResults, type PriorityNichesEditorHandle } from './PriorityNichesEditor';
+import { ProjectExclusions } from './ProjectExclusions';
+import { DownloadVerifiedContacts } from './DownloadVerifiedContacts';
+import { PreparationProgress, getPreparationPresentation, getPreparationActionNotice,
+  refreshPreparationRequestNotice, type PreparationPresentation, type PreparationRequestNotice } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
-import { isPartialPreview } from './collectionProgress';
-import { ContactLimitField } from './ContactLimitField';
+import { collectCount, isPartialPreview } from './collectionProgress';
+import { ContactLimitField, parseContactLimitDraft } from './ContactLimitField';
+import { getVeLaunchSelectionState } from './launchSelection';
+import { VeAutomaticContinuationChecks, veAutomaticContinuationCandidates, veAutomaticContinuationResultCurrent } from './automaticContinuationCheck';
 import {
   VE_BROAD_HYPOTHESES_EMPTY_NOTE,
   VE_BROAD_HYPOTHESES_NOTE,
@@ -40,10 +51,10 @@ import {
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
 const RUN_LABELS = {
-  queued: 'Запуск в очереди',
-  running: 'Создаём и запускаем кампании',
-  waiting: 'Ожидает отправителей или даты начала',
-  active: 'Кампании запущены',
+  queued: 'Ожидает подготовки кампаний',
+  running: 'Подготавливаем кампании без отправки',
+  waiting: 'Проверяем состояние кампаний в Instantly',
+  active: 'Кампании подготовлены в Instantly',
   blocked: 'Запуск требует внимания',
   cancelled: 'Запуск остановлен',
 };
@@ -63,7 +74,7 @@ export function AudienceSummary({
   base: VeBaseSummary;
   presetId: string;
   preparationState: PreparationPresentation;
-  onCount?: (count: number) => void;
+  onCount?: (baseId: string, count: number | null) => void;
 }) {
   const baseId = base.id;
   const [data, setData] = useState<VeBaseAudienceSummary | null>(null);
@@ -79,13 +90,17 @@ export function AudienceSummary({
         if (!response.ok) {
           setError(response.data.error ?? 'Не удалось пересчитать запас');
           setData(null);
+          onCount?.(baseId, null);
           return;
         }
         setData(response.data);
         setError('');
-        onCount?.(response.data.ready);
+        onCount?.(baseId, response.data.checked_ready);
       } catch {
-        if (!cancelled) setError('Не удалось обновить объём. Проверьте соединение');
+        if (!cancelled) {
+          setError('Не удалось обновить объём. Проверьте соединение');
+          onCount?.(baseId, null);
+        }
       }
     };
     void load();
@@ -106,17 +121,26 @@ export function AudienceSummary({
     ? `Новых контактов для резерва запуска: ${data.ready.toLocaleString('ru-RU')}. Исключения клиента и контакты, уже распределённые в кампании проекта, учтены.`
     : `До ${data.ready.toLocaleString('ru-RU')} контактов попадут в резерв запуска. Повторы с уже подготовленными кампаниями проекта исключены; точное число пересчитаем после выбора клиента и применения его списка исключений.`;
   const partial = isPartialPreview(base);
-  const collecting = base.status === 'collecting' && preparationState.tone !== 'err';
-  const waiting = collecting && preparationState.tone === 'muted';
+  const target = base.collect_info?.target_progress;
+  const counted = collectCount(target?.ready_rows);
+  const goal = collectCount(target?.ready_target ?? data.preview_target);
+  const companies = collectCount(target?.ready_companies ?? data.observed_yield?.ready_companies);
+  const perCompany = collectCount(target?.counted_per_company);
+  const readyForReview = base.status === 'analyzed' && preparationState.currentStep === 3;
   return (
     <div className="space-y-3">
       <div className="ve2-stats">
         <div className="ve2-stat">
           <p className="ve2-stat-v">
-            {(partial ? data.checked_ready : data.ready).toLocaleString('ru-RU')}
-            {partial && data.preview_target !== null ? <span className="text-base font-normal text-[var(--ve2-muted)]"> / {data.preview_target.toLocaleString('ru-RU')}</span> : null}
+            {data.checked_ready.toLocaleString('ru-RU')}
           </p>
-          <p className="ve2-stat-k">{partial ? waiting ? 'Подготовка не завершена' : collecting ? 'Сбор продолжается' : 'Сбор остановлен' : 'Готово в базе'}</p>
+          <p className="ve2-stat-k">Проверенных контактов</p>
+        </div>
+        <div className="ve2-stat">
+          <p className="ve2-stat-v">
+            {companies === null ? '—' : companies.toLocaleString('ru-RU')}
+          </p>
+          <p className="ve2-stat-k">Проверенных компаний</p>
         </div>
         <div className="ve2-stat">
           <p className="ve2-stat-v">
@@ -124,37 +148,30 @@ export function AudienceSummary({
           </p>
           <p className="ve2-stat-k">Проверено кандидатов</p>
         </div>
-        <div className="ve2-stat">
-          <p className="ve2-stat-v">
-            {data.estimate ? `~${data.estimate.contacts.toLocaleString('ru-RU')}` : 'Не рассчитан'}
-          </p>
-          <p className="ve2-stat-k">
-            {data.estimate?.companies !== undefined
-              ? `Ещё соберётся контактов (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)`
-              : 'Можно собрать дополнительно'}
-          </p>
-        </div>
       </div>
-      {data.estimate ? (
-        <p className={HE.muted}>
-          ~{data.estimate.contacts.toLocaleString('ru-RU')} ещё соберётся контактов
-          {data.estimate.companies !== undefined ? ` (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)` : ''}, оценка
-          на {formatDate(data.estimate.as_of)}; это новые компании, а не дополнительные адреса уже найденных.
-        </p>
-      ) : null}
       <p className={HE.muted}>{partial
-        ? waiting ? 'Это промежуточный результат, а не готовое превью. Текущий этап подготовки указан выше.'
-          : collecting
-          ? 'Это промежуточный результат, а не готовое превью. Показаны контакты, уже прошедшие проверки; сбор ещё продолжается.'
-          : 'Это сохранённая проверенная часть. Полное превью ещё не готово. Причина остановки — в подробностях базы.'
+        ? readyForReview
+          ? 'Проверенные контакты можно скачать и согласовать для запуска. Добор до цели не обязателен. Откройте «Контакты базы и скачивание» ниже.'
+          : data.checked_ready > 0
+            ? 'Проверенные контакты можно посмотреть и скачать ниже. Готовность к согласованию зависит от завершения разбора базы и подготовки писем. Текущий этап указан выше.'
+            : preparationState.guidance?.action === 'wait'
+              ? 'Контакты появятся здесь после проверки. Текущий этап подготовки показан выше.'
+              : 'Контактов, прошедших все проверки, пока нет. Состояние подготовки и дальнейшие действия указаны выше.'
         : preparedForLaunch}</p>
-      {!partial ? <p className={HE.faint}>
+      {partial && readyForReview ? <p className={HE.muted}>{preparedForLaunch}</p> : null}
+      {!partial || readyForReview ? <p className={HE.faint}>
         Контакты будут загружаться в Instantly дневными партиями. Темп и срок появятся на шаге «Запуск» после выбора
         проекта и настроек отправки; план считается по общему обязательству проекта сразу для всех гипотез.
       </p> : null}
       <details>
-        <summary className="ve2-link cursor-pointer">Как рассчитан объём</summary>
+        <summary className="ve2-link cursor-pointer">Расчёт объёма и прогноз</summary>
         <div className="mt-2 space-y-2">
+          {goal !== null ? <p className={HE.muted}>
+            Цель сбора: {goal.toLocaleString('ru-RU')} контактов.
+            {counted !== null ? ` В неё засчитано ${counted.toLocaleString('ru-RU')}.` : ''}
+            {perCompany ? ` При расчёте цели учитывается не больше ${perCompany} адресов одной компании.` : ''}
+            {' '}Это правило управления добором. Все {data.checked_ready.toLocaleString('ru-RU')} проверенных контактов сохранены в базе.
+          </p> : null}
           {data.observed_yield ? (
             <p className={HE.muted}>
               Проверено кандидатов: {data.observed_yield.candidates.toLocaleString('ru-RU')}. Получено готовых
@@ -164,11 +181,14 @@ export function AudienceSummary({
           ) : null}
           {data.preview_target !== null && data.checked_ready > data.preview_target ? (
             <p className={HE.muted}>
-              Цель превью — {data.preview_target.toLocaleString('ru-RU')}. Последняя проверенная партия дала{' '}
-              {(data.checked_ready - data.preview_target).toLocaleString('ru-RU')} дополнительный контакт; он сохранён в
-              готовой базе. CSV-превью содержит первые {data.preview_target.toLocaleString('ru-RU')} контактов.
+              В базе сохранены все проверенные контакты. CSV-превью содержит первые {data.preview_target.toLocaleString('ru-RU')} контактов.
             </p>
           ) : null}
+          {data.estimate ? <p className={HE.muted}>
+            Предварительная оценка добора: ~{data.estimate.contacts.toLocaleString('ru-RU')} контактов
+            {data.estimate.companies !== undefined ? ` (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)` : ''}.
+            {' '}Это оценка новых компаний, а не дополнительных адресов уже найденных. Она не гарантирует, что текущие источники дадут новые контакты, и не означает, что добор идёт.
+          </p> : null}
           <p className={HE.muted}>
             {data.estimate
               ? `Оценка с низкой уверенностью от ${formatDate(data.estimate.as_of)}. `
@@ -194,8 +214,21 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [run, setRun] = useState<VeOutreachRun | null>(null);
   const [step, setStep] = useState(1);
   const [error, setError] = useState('');
+  const [preparationNotice, setPreparationNotice] = useState<PreparationRequestNotice | null>(null);
+  const [refreshError, setRefreshError] = useState('');
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [contactLimitDraft, setContactLimitDraft] = useState<string | null>(null);
+  const [launchHypothesisIds, setLaunchHypothesisIds] = useState<string[]>([]);
+  const [checkedContactCounts, setCheckedContactCounts] = useState<Record<string, number | null>>({});
+  const updateCheckedContactCount = useCallback((baseId: string, count: number | null) => {
+    setCheckedContactCounts((current) => current[baseId] === count ? current : { ...current, [baseId]: count });
+  }, []);
   const [researchBusy, setResearchBusy] = useState(false);
+  const researchRequestRef = useRef(false);
+  const priorityNichesRef = useRef<PriorityNichesEditorHandle>(null);
+  const [priorityNichesDirty, setPriorityNichesDirty] = useState(false);
   const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
   const [presetId, setPresetId] = useState('');
@@ -211,9 +244,23 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const topRef = useRef<HTMLDivElement | null>(null);
   const initialVisit = useRef(true);
   const refreshBusy = useRef(false);
+  // A GET already in flight must not erase an additive save that completed later.
+  const detailMutationRevision = useRef(0);
+  const continuationChecks = useRef(new VeAutomaticContinuationChecks());
+  const continuationContext = useRef<{ enabled: boolean; input: Parameters<typeof veAutomaticContinuationCandidates>[0] } | null>(null);
+  const continuationRequest = useRef<AbortController | null>(null);
+  const continuationActionEpoch = useRef(0);
+  const continuationMounted = useRef(false);
+  const [continuationTick, setContinuationTick] = useState(0);
+  useEffect(() => {
+    continuationMounted.current = true;
+    return () => { continuationMounted.current = false; continuationRequest.current?.abort(); };
+  }, []);
   const refresh = useCallback(async () => {
     if (refreshBusy.current) return;
     refreshBusy.current = true;
+    setRefreshing(true);
+    const readRevision = detailMutationRevision.current;
     try {
       const results = await Promise.all([
         veEngineCall<VeProjectDetailResponse>(`${VE_API}/projects/${projectId}`),
@@ -221,7 +268,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         veEngineCall<{ run: VeOutreachRun | null; error?: string }>(`${VE_API}/projects/${projectId}/outreach/start`),
       ]);
       const [project, setup, launch] = results;
-      if (project.ok && project.data.project)
+      if (project.ok && project.data.project && readRevision === detailMutationRevision.current)
         setDetail({
           project: project.data.project,
           jobs: project.data.jobs ?? [],
@@ -236,13 +283,21 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         setSnapshot((current) =>
           !current || setup.data.setup.revision >= current.setup.revision ? setup.data : current,
         );
+      if (project.ok && setup.ok && readRevision === detailMutationRevision.current) {
+        setPreparationNotice((current) => refreshPreparationRequestNotice(current, {
+          preparations: setup.data.preparations, bases: project.data.bases ?? [], jobs: project.data.jobs ?? [],
+        }));
+      }
       if (launch.ok)
         setRun((current) =>
           !current || (launch.data.run && launch.data.run.updated_at >= current.updated_at) ? launch.data.run : current,
         );
       const failed = results.find((r) => !r.ok);
-      if (failed) setError(failed.data.error ?? 'Не удалось обновить проект');
-      else setError('');
+      if (failed) setRefreshError('Не удалось обновить все статусы. Ниже показаны последние полученные данные.');
+      else {
+        setRefreshError('');
+        setLastRefreshedAt(Date.now());
+      }
       if (initialVisit.current && project.ok && setup.ok && launch.ok) {
         initialVisit.current = false;
         if (
@@ -258,9 +313,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           setStep(2);
       }
     } catch {
-      setError('Не удалось обновить проект. Проверьте соединение');
+      setRefreshError('Не удалось обновить статус. Проверьте соединение. Ниже показаны последние полученные данные.');
     } finally {
       refreshBusy.current = false;
+      setRefreshing(false);
     }
   }, [projectId]);
   const working =
@@ -280,6 +336,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     };
   }, [refresh, working]);
   const locked = !!run && ['queued', 'running', 'waiting'].includes(run.status);
+  const contactLimit = snapshot?.setup.max_emails_per_company ?? null;
+  const contactLimitText = contactLimitDraft ?? (contactLimit === null ? '' : String(contactLimit));
+  const parsedContactLimit = parseContactLimitDraft(contactLimitText);
+  const contactLimitUnsaved = !parsedContactLimit.valid || parsedContactLimit.value !== contactLimit;
   const selectedIds = snapshot?.setup.selected_hypothesis_ids ?? [];
   const resultTemplates = (detail?.templates ?? []).filter((t) => {
     const base = detail?.bases.find((b) => b.id === t.base_id);
@@ -297,6 +357,64 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const activeId = selectedIds.includes(activeHypothesis) ? activeHypothesis : (selectedIds[0] ?? '');
   const preparation = snapshot?.preparations.find((p) => p.hypothesis_id === activeId);
   const preparationBase = detail?.bases.find((base) => base.id === preparation?.base_id);
+  useEffect(() => {
+    if (!detail || !snapshot) { continuationContext.current = null; return; }
+    const input = { projectId, step, activeHypothesisId: activeId, setupRevision: snapshot.setup.revision,
+      selectedHypothesisIds: snapshot.setup.selected_hypothesis_ids, preparations: snapshot.preparations,
+      bases: detail.bases, jobs: detail.jobs,
+      launchedBaseIds: new Set(detail.templates.filter((item) => (item as VeTemplate & { launch_info?: unknown }).launch_info != null).map((item) => item.base_id)) };
+    const enabled = !busy && !locked && !contactLimitUnsaved && (step === 2 || step === 3);
+    continuationContext.current = { enabled, input };
+    if (!enabled) return;
+    const queue = continuationChecks.current;
+    const next = queue.next(veAutomaticContinuationCandidates(input), Date.now());
+    if (!next.candidate) {
+      if (next.retryAt === undefined) return;
+      const timer = setTimeout(() => setContinuationTick((value) => value + 1), Math.max(0, next.retryAt - Date.now()));
+      return () => clearTimeout(timer);
+    }
+    const candidate = next.candidate;
+    if (!queue.start(candidate, Date.now())) return;
+    const actionEpoch = continuationActionEpoch.current;
+    const controller = new AbortController();
+    continuationRequest.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 35_000);
+    // This request only reads one saved checkpoint and caches a decision. It
+    // never calls change()/Prepare, changes the step or locks other controls.
+    void (async () => {
+      let retry = false;
+      try {
+        const response = await veEngineCall<{ continuation_check?: VeContinuationCheck }>(`${VE_API}/projects/${candidate.projectId}/outreach`, {
+          method: 'POST', signal: controller.signal,
+          body: JSON.stringify({ action: 'check_continuation', check_only: true,
+            revision: candidate.setupRevision, hypothesis_id: candidate.hypothesisId }),
+        });
+        const checked = response.data.continuation_check;
+        retry = response.status >= 500 || response.status === 429 || (response.ok && (!checked || checked.code === 'state_changed'));
+        const context = continuationContext.current;
+        if (!continuationMounted.current || !response.ok || !checked || !context?.enabled
+          || actionEpoch !== continuationActionEpoch.current) return;
+        const current = veAutomaticContinuationCandidates(context.input).find((item) => item.baseId === candidate.baseId);
+        if (!veAutomaticContinuationResultCurrent(candidate, checked, current)) return;
+        detailMutationRevision.current += 1;
+        setDetail((latest) => {
+          if (!latest || actionEpoch !== continuationActionEpoch.current) return latest;
+          const match = veAutomaticContinuationCandidates({ ...context.input, bases: latest.bases, jobs: latest.jobs })
+            .find((item) => item.baseId === candidate.baseId);
+          if (!veAutomaticContinuationResultCurrent(candidate, checked, match)) return latest;
+          return { ...latest, bases: latest.bases.map((base) => base.id === candidate.baseId ? { ...base,
+            collection_continuation: { available: checked.status === 'available', action: checked.action,
+              code: checked.code!, reason: checked.reason } } : base) };
+        });
+      } catch { retry = true; }
+      finally {
+        clearTimeout(timeout);
+        queue.finish(candidate, retry, Date.now());
+        if (continuationRequest.current === controller) continuationRequest.current = null;
+        if (continuationMounted.current) setContinuationTick((value) => value + 1);
+      }
+    })();
+  }, [projectId, step, activeId, detail, snapshot, busy, locked, contactLimitUnsaved, continuationTick]);
   const { template, previous: previousLetters } = selectHypothesisLetters(
     activeId, preparation, detail?.bases ?? [], detail?.templates ?? [],
   );
@@ -304,46 +422,83 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     (!dirtyRef.current && !libraryDirtyRef.current) ||
     window.confirm('Есть несохранённые правки писем. Перейти без сохранения?');
   const jump = (next: number) => {
-    if (!guardLeave()) return;
+    if (!guardLeave()) return false;
     setStep(next);
     topRef.current?.scrollIntoView({ block: 'start' });
+    return true;
   };
   const change = async (payload: Record<string, unknown>) => {
     if (!snapshot || busy || locked) return;
+    if (payload.action === 'prepare' && contactLimitUnsaved) {
+      setError('Сначала примените лимит адресов на шаге «Гипотезы».');
+      return;
+    }
+    // Invalidate immediately, before React's effects observe busy/new setup.
+    // A check started earlier cannot replace a specialist's newer action.
+    continuationActionEpoch.current += 1;
+    continuationContext.current = null;
     setBusy(true);
     setError('');
+    const preparing = payload.action === 'prepare';
+    const noticeHypothesisId = typeof payload.hypothesis_id === 'string' ? payload.hypothesis_id : null;
+    setPreparationNotice(preparing
+      ? { hypothesisId: noticeHypothesisId, checking: true, tone: 'info',
+        message: 'Проверяем возможность продолжения…' } : null);
     try {
-      const result = await veEnginePost<VeOutreachSetupResponse>(`${VE_API}/projects/${projectId}/outreach`, {
+      const result = await veEnginePost<VeOutreachSetupResponse & { preparation_action?: VePreparationAction }>(`${VE_API}/projects/${projectId}/outreach`, {
         revision: snapshot.setup.revision,
         ...payload,
       });
       if (!result.ok) {
-        setError(result.data.error ?? 'Не удалось сохранить выбор');
+        if (preparing) {
+          setPreparationNotice({ hypothesisId: noticeHypothesisId,
+            keepUntilStateChanges: result.data.preparation_action?.status === 'unavailable',
+            ...(result.data.preparation_action ? getPreparationActionNotice(result.data.preparation_action)
+              : { tone: 'error', message: result.data.error ?? 'Не удалось продолжить подготовку.' }) });
+          await refresh();
+        } else setError(result.data.error ?? 'Не удалось сохранить выбор');
         return;
       }
-      setSnapshot(result.data);
+      setSnapshot((current) => !current || result.data.setup.revision >= current.setup.revision ? result.data : current);
+      if (payload.action === 'select') setLaunchHypothesisIds([]);
       if (payload.action === 'select' && payload.next_run === true) setStep(1);
-      if (payload.action === 'prepare') {
-        setStep((current) => current === 3 ? 3 : 2);
+      if (preparing) {
+        const outcome = result.data.preparation_action;
+        setPreparationNotice({ hypothesisId: noticeHypothesisId, keepUntilStateChanges: outcome?.status === 'unavailable',
+          ...getPreparationActionNotice(outcome) });
+        // No-op/rejected continuations stay beside the base that was clicked.
+        // A queued response means waiting for a worker, not active collection.
+        if (outcome?.status !== 'unavailable' && outcome?.status !== 'ready')
+          setStep((current) => current === 3 ? 3 : 2);
         await refresh();
       }
       // Finished bases are re-partitioned by the worker right after the save.
-      if (payload.action === 'contact_limit') await refresh();
+      if (payload.action === 'contact_limit') {
+        setContactLimitDraft(null);
+        await refresh();
+      }
     } catch {
-      setError('Не удалось сохранить решение. Проверьте соединение');
+      if (preparing) setPreparationNotice({ hypothesisId: noticeHypothesisId, tone: 'error',
+        message: 'Ответ не получен. Обновите статус, прежде чем повторять подготовку.' });
+      else setError('Не удалось сохранить решение. Проверьте соединение');
     } finally {
       setBusy(false);
     }
   };
   const research = async () => {
-    setResearchBusy(true);
+    if (researchRequestRef.current) return;
+    researchRequestRef.current = true;
+    setError('');
     try {
+      if (priorityNichesRef.current && !(await priorityNichesRef.current.save())) return;
+      setResearchBusy(true);
       const result = await veEnginePost<VeJobResponse>(`${VE_API}/projects/${projectId}/research`);
       if (!result.ok) setError(result.data.error ?? 'Не удалось начать исследование');
       else await refresh();
     } catch {
       setError('Не удалось начать исследование. Проверьте соединение');
     } finally {
+      researchRequestRef.current = false;
       setResearchBusy(false);
     }
   };
@@ -361,6 +516,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
   };
   const saveOffer = async (value: string) => {
+    setError('');
     try {
       const result = await veEnginePatch<VeProjectResponse>(`${VE_API}/projects/${projectId}`, {
         offer_override: value,
@@ -372,6 +528,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
   };
   const runDossier = async (id: string) => {
+    setError('');
     try {
       const response = await veEnginePost<VeJobResponse>(`${VE_API}/verticals/${id}/dossier`);
       if (!response.ok) setError(response.data.error ?? 'Не удалось собрать досье');
@@ -382,6 +539,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   const restoreHypothesis = async (id: string) => {
     setBusy(true);
+    setError('');
     try {
       const response = await veEnginePatch<{ error?: string }>(`${VE_API}/hypotheses/${id}`, { status: 'proposed' });
       if (!response.ok) setError(response.data.error ?? 'Не удалось вернуть гипотезу');
@@ -401,6 +559,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       )
     )
       return;
+    setError('');
     try {
       const response = await veEnginePost<{ error?: string }>(`${VE_API}/projects/${projectId}/cancel`);
       if (!response.ok) setError(response.data.error ?? 'Не удалось остановить подготовку');
@@ -409,21 +568,41 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       setError('Не удалось остановить подготовку. Проверьте соединение');
     }
   };
-  if (!detail) return <StatusBox tone={error ? 'error' : 'info'}>{error || 'Загружаем проект…'}</StatusBox>;
+  const configureLaunch = (ids: string[]) => {
+    if (busy || locked) return;
+    if (contactLimitUnsaved) {
+      setError('Сначала примените лимит адресов на шаге «Гипотезы».');
+      return;
+    }
+    if (!ids.length || ids.some((id) => !getVeLaunchSelectionState(snapshot, detail?.templates ?? [], id).ready)) {
+      setError('Выберите готовые и одобренные базы для запуска.');
+      return;
+    }
+    if (!guardLeave()) return;
+    setError('');
+    setLaunchHypothesisIds(ids);
+    setStep(4);
+    topRef.current?.scrollIntoView({ block: 'start' });
+  };
+  if (!detail) return <StatusBox tone={error || refreshError ? 'error' : 'info'}>{error || refreshError || 'Загружаем проект…'}</StatusBox>;
   const hasJobs = detail.jobs.some((j) => ['pending', 'running'].includes(j.status));
-  const researchRunning = researchBusy || detail.project.status === 'researching';
-  const allPrepared =
-    selectedIds.length > 0 &&
-    selectedIds.every((id) => snapshot?.preparations.some((p) => p.hypothesis_id === id && p.status === 'ready'));
-  const allApproved =
-    allPrepared &&
-    selectedIds.every((id) => {
-      const p = snapshot?.preparations.find((p) => p.hypothesis_id === id);
-      if (!p?.base_id) return false;
-      const review = snapshot?.reviews[p.base_id],
-        approval = snapshot?.setup.approved_bases[p.base_id];
-      return !!review && approval?.revision === review.revision && approval.template_id === review.template_id;
-    });
+  const researchRunning = researchBusy || detail.project.status === 'researching' || detail.jobs.some((job) =>
+    ['site_profile', 'competitors', 'brand_cloud', 'hypotheses', 'evidence', 'clustering'].includes(job.stage) &&
+    ['pending', 'running'].includes(job.status));
+  const launchStates = Object.fromEntries(selectedIds.map((id) => [id, getVeLaunchSelectionState(snapshot, detail.templates, id)]));
+  const readyForLaunchCount = Object.values(launchStates).filter((state) => state.ready).length;
+  const chosenLaunchReady = launchHypothesisIds.length > 0 && launchHypothesisIds.every((id) => launchStates[id]?.ready);
+  const statusRefresh = (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <p className={HE.muted}>
+        Статус обновляется автоматически.
+        {lastRefreshedAt ? ` Проверено в ${new Date(lastRefreshedAt).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК.` : ''}
+      </p>
+      <button type="button" className={HE.btnQuiet} disabled={refreshing} onClick={() => void refresh()}>
+        Обновить статус
+      </button>
+    </div>
+  );
   const picker =
     selectedHypotheses.length > 1 ? (
       <label className="block ve2-label mb-5">
@@ -444,13 +623,22 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         </select>
       </label>
     ) : null;
-  const hypothesisGroups = groupVeHypotheses(detail.verticals, detail.hypotheses);
+  const manualHypotheses = detail.hypotheses.filter((hypothesis) =>
+    hypothesis.origin === 'manual' && detail.verticals.some((vertical) => vertical.id === hypothesis.vertical_id));
+  const generatedHypotheses = detail.hypotheses.filter((hypothesis) => hypothesis.origin !== 'manual');
+  const manualVerticalIds = new Set(manualHypotheses.map((hypothesis) => hypothesis.vertical_id));
+  const generatedVerticals = detail.verticals.filter((vertical) =>
+    !manualVerticalIds.has(vertical.id) || generatedHypotheses.some((hypothesis) => hypothesis.vertical_id === vertical.id));
+  const hypothesisGroups = groupVeHypotheses(generatedVerticals, generatedHypotheses);
   const broadAction = veBroadHypothesesAction({
     jobs: detail.jobs,
     hypotheses: detail.hypotheses,
     requesting: broadRequesting,
     researchRunning,
   });
+  const contextMutationBusy = researchRunning || broadAction.running;
+  const contextMutationReason = broadAction.running
+    ? 'Дождитесь завершения генерации широких гипотез.' : undefined;
   // Широкие дописываются только к исследованному проекту: без вертикалей кнопки нет.
   const broadControl = detail.verticals.length ? (
     <div className="ve2-broad-action">
@@ -508,7 +696,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
             Вернуть отклонённую гипотезу
           </button>
         ) : null}
-        <details className="ve2-hypothesis-evidence">
+        {h.origin === 'manual' ? <span className={`text-sm ${HE.muted}`}>Добавлена специалистом</span> : null}
+        {h.origin !== 'manual' || h.evidence?.length ? <details className="ve2-hypothesis-evidence">
           <summary className="ve2-link">Доказательства · {h.evidence?.length ?? 0}</summary>
           <div className="ve2-evidence-content">
             {h.fit_rationale ? <p className={HE.muted}>{h.fit_rationale}</p> : null}
@@ -527,7 +716,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <p className={HE.muted}>Подтверждающих источников пока нет.</p>
             ) : null}
           </div>
-        </details>
+        </details> : null}
       </div>
     </div>
   );
@@ -552,9 +741,22 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           </button>
         ) : null}
       </div>
+      <ProjectExclusions key={projectId} projectId={projectId} onSaved={() => void refresh()} />
       <details className="ve2-panel-line mb-6" open={detail.project.status !== 'researched'}>
         <summary className="ve2-link cursor-pointer p-4">Данные клиента и исследование</summary>
         <div className="p-4">
+          <PriorityNichesEditor
+            key={projectId}
+            ref={priorityNichesRef}
+            project={detail.project}
+            disabled={contextMutationBusy}
+            disabledReason={contextMutationReason}
+            onDirtyChange={setPriorityNichesDirty}
+            onSaved={(project) => {
+              detailMutationRevision.current += 1;
+              setDetail((current) => current ? { ...current, project } : current);
+            }}
+          />
           <Step1Research
             project={detail.project}
             jobs={detail.jobs}
@@ -575,6 +777,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           <StatusBox tone="error">{error}</StatusBox>
         </div>
       ) : null}
+      {refreshError ? <div className="mb-5"><StatusBox tone="error">{refreshError}</StatusBox></div> : null}
+      {preparationNotice && preparationNotice.hypothesisId === null ? <div className="mb-5">
+        <StatusBox tone={preparationNotice.tone}>{preparationNotice.message}</StatusBox>
+      </div> : null}
       <div className="ve2-wiz">
         <aside className="ve2-rail min-w-0">
           <StepNav
@@ -603,7 +809,38 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   Можно выбрать гипотезы из нескольких вертикалей. Доказательства и досье помогут проверить выбор.
                 </p>
               </header>
+              {detail.project.status === 'researched' && detail.verticals.length > 0 ? (
+                <ManualHypothesisForm
+                  key={projectId}
+                  projectId={projectId}
+                  disabled={contextMutationBusy}
+                  disabledReason={contextMutationReason}
+                  onCreated={({ hypothesis, vertical }) => {
+                    detailMutationRevision.current += 1;
+                    setDetail((current) => current ? {
+                      ...current,
+                      hypotheses: current.hypotheses.some((item) => item.id === hypothesis.id)
+                        ? current.hypotheses : [...current.hypotheses, hypothesis],
+                      verticals: current.verticals.some((item) => item.id === vertical.id)
+                        ? current.verticals : [...current.verticals, vertical],
+                    } : current);
+                    void refresh();
+                  }}
+                />
+              ) : null}
+              {!priorityNichesDirty ? <PriorityNicheResults brief={detail.project.brief} /> : null}
               <div className="ve2-vertical-list">
+                {manualHypotheses.length > 0 ? (
+                  <section className="ve2-vertical-group" aria-labelledby="manual-hypotheses-title">
+                    <header className="ve2-vertical-header">
+                      <div className="ve2-vertical-title-row">
+                        <h3 id="manual-hypotheses-title" className="ve2-vertical-title">Свои гипотезы</h3>
+                        <span className="ve2-vertical-count">Гипотез: {manualHypotheses.length}</span>
+                      </div>
+                    </header>
+                    <div className="ve2-hypothesis-list">{manualHypotheses.map(renderHypothesis)}</div>
+                  </section>
+                ) : null}
                 {hypothesisGroups.broad.length ? (
                   <section className="ve2-vertical-group ve2-broad-group" aria-labelledby="broad-hypotheses-title">
                     <header className="ve2-vertical-header">
@@ -690,11 +927,18 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     <option value="pl">Polski</option>
                   </select>
                 </label>
+                <ContactLimitField
+                  value={contactLimit}
+                  draft={contactLimitText}
+                  disabled={busy || locked || !snapshot}
+                  onDraftChange={setContactLimitDraft}
+                  onSave={(next) => void change({ action: 'contact_limit', max_emails_per_company: next })}
+                />
                 <div className="ve2-hypothesis-submit">
                   <span className={HE.muted} aria-live="polite">Выбрано: {selectedIds.length}</span>
                   <button
                     type="button"
-                    disabled={busy || locked || !selectedIds.length}
+                    disabled={busy || locked || !selectedIds.length || contactLimitUnsaved}
                     className={HE.btnPrimary}
                     onClick={() => void change({ action: 'prepare' })}
                   >
@@ -707,6 +951,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           {step === 2 ? (
             <section className="space-y-5">
               <h2 className="ve2-h2">Итоговые письма</h2>
+              {statusRefresh}
               {picker}
               {previousLetters ? <StatusBox tone="info">
                 Это ранее созданные письма этой гипотезы. Они доступны для просмотра.
@@ -727,17 +972,11 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     preparation={preparation}
                     base={preparationBase}
                     jobs={detail.jobs}
+                    onContinue={() => void change({ action: 'prepare', hypothesis_id: activeId })}
+                    continueDisabled={busy || locked}
+                    actionNotice={preparationNotice?.hypothesisId === activeId ? preparationNotice : null}
                   />
-                  {(!preparation || preparation.status === 'error') && preparationBase?.status !== 'failed' ? (
-                    <button
-                      type="button"
-                      disabled={busy || locked}
-                      className={HE.btnGhost}
-                      onClick={() => void change({ action: 'prepare', hypothesis_id: activeId })}
-                    >
-                      Продолжить подготовку
-                    </button>
-                  ) : null}
+                  {!preparation ? <button type="button" className={HE.btnGhost} onClick={() => jump(1)}>К гипотезам</button> : null}
                 </>
               )}
               <button type="button" className={HE.btnPrimary} onClick={() => jump(3)}>
@@ -748,12 +987,53 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           {step === 3 ? (
             <section className="space-y-6">
               <h2 className="ve2-h2">Базы и доступный объём</h2>
-              <ContactLimitField
-                key={snapshot?.setup.max_emails_per_company ?? 'none'}
-                value={snapshot?.setup.max_emails_per_company ?? null}
-                disabled={busy || locked || !snapshot}
-                onSave={(next) => void change({ action: 'contact_limit', max_emails_per_company: next })}
-              />
+              {statusRefresh}
+              {contactLimitUnsaved ? <StatusBox tone="info">
+                Изменение лимита ещё не применено. Перед запуском сохраните его на шаге «Гипотезы».
+                <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>К настройке лимита</button>
+              </StatusBox> : null}
+              {readyForLaunchCount > 0 ? <div className="space-y-3">
+                <h3 className="ve2-h3">Одобрены и готовы к запуску: {readyForLaunchCount}</h3>
+                <p className={HE.muted}>
+                  Выберите одну или несколько одобренных баз. Остальные могут продолжать подготовку.
+                  На следующем шаге выберите клиента и подготовьте кампанию. Отправку вы включите в Instantly.
+                </p>
+                <div className="divide-y divide-[var(--ve2-line)]">
+                  {selectedHypotheses.filter((h) => launchStates[h.id]?.ready || launchHypothesisIds.includes(h.id)).map((h) => {
+                    const state = launchStates[h.id];
+                    const selected = launchHypothesisIds.includes(h.id);
+                    const p = snapshot?.preparations.find((row) => row.hypothesis_id === h.id);
+                    const base = detail.bases.find((row) => row.id === p?.base_id);
+                    return (
+                      <div key={h.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                        <label className="flex min-w-0 flex-1 items-start gap-3">
+                          <input type="checkbox" className="ve2-cbx mt-1"
+                            aria-label={`Включить «${h.title}» в запуск`}
+                            checked={selected} disabled={busy || locked || (!state.ready && !selected)}
+                            onChange={(event) => setLaunchHypothesisIds((current) => event.target.checked
+                              ? [...current, h.id] : current.filter((id) => id !== h.id))} />
+                          <span className="min-w-0">
+                            <span className="block font-medium">{h.title}</span>
+                            <span className={`block ${HE.muted}`}>{state.label}
+                              {base && checkedContactCounts[base.id] != null
+                                ? ` · проверенных контактов: ${checkedContactCounts[base.id]!.toLocaleString('ru-RU')}` : ''}</span>
+                          </span>
+                        </label>
+                        <button type="button" className={HE.btnGhost}
+                          aria-label={`Запустить отдельно: ${h.title}`}
+                          disabled={!state.ready || busy || locked || contactLimitUnsaved}
+                          onClick={() => configureLaunch([h.id])}>Запустить отдельно</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {locked ? <p className={HE.muted}>Предыдущий запуск ещё обрабатывается. Его статус доступен в «Результатах».</p> : null}
+                <button type="button" className={HE.btnPrimary}
+                  disabled={!chosenLaunchReady || busy || locked || contactLimitUnsaved}
+                  onClick={() => configureLaunch(launchHypothesisIds)}>
+                  К запуску выбранных ({launchHypothesisIds.length})
+                </button>
+              </div> : null}
               {selectedHypotheses.map((h) => {
                 const p = snapshot?.preparations.find((p) => p.hypothesis_id === h.id),
                   base = detail.bases.find((b) => b.id === p?.base_id);
@@ -764,14 +1044,21 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 const preparationState = getPreparationPresentation({ preparation: p, base, jobs: detail.jobs });
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
-                    <h3 className="ve2-h3">{h.title}</h3>
-                    {p?.status !== 'ready' || (base && isPartialPreview(base)) ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
-                      onContinue={() => void change({ action: 'prepare', hypothesis_id: h.id })} continueDisabled={busy || locked} /> : null}
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <h3 className="ve2-h3">{h.title}</h3>
+                      <DownloadVerifiedContacts projectId={projectId} hypothesisId={h.id} />
+                    </div>
+                    {!launchStates[h.id]?.launched ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} approved={approved}
+                      onContinue={launchStates[h.id]?.launched ? undefined : () => void change({ action: 'prepare', hypothesis_id: h.id })}
+                      continueDisabled={busy || locked}
+                      actionNotice={preparationNotice?.hypothesisId === h.id ? preparationNotice : null} /> : null}
+                    {!p ? <button type="button" className={HE.btnPrimary} onClick={() => jump(1)}>К гипотезам</button> : null}
                     {base ? (
                       <>
-                        <AudienceSummary base={base} presetId={presetId} preparationState={preparationState} />
+                        <AudienceSummary base={base} presetId={presetId} preparationState={preparationState}
+                          onCount={updateCheckedContactCount} />
                         <details>
-                          <summary className="ve2-link cursor-pointer">Превью базы и подтверждения</summary>
+                          <summary className="ve2-link cursor-pointer">Контакты базы и скачивание</summary>
                           <div className="mt-3">
                             <BaseRow
                               base={base}
@@ -794,12 +1081,21 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             </div>
                           </details>
                         ) : null}
+                        {launchStates[h.id]?.launched ? (
+                          <div className="space-y-2">
+                            <p className={HE.muted}>База уже передана в запуск.</p>
+                            <button type="button" className={HE.btnGhost} onClick={() => jump(5)}>Посмотреть результаты</button>
+                          </div>
+                        ) : review && p?.status === 'ready' ? <>
+                        <button type="button" className={HE.btnGhost} onClick={() => {
+                          if (jump(2)) setActiveHypothesis(h.id);
+                        }}>Проверить письма</button>
                         <label className="flex items-start gap-3">
                           <input
                             type="checkbox"
                             className="ve2-cbx mt-1"
                             checked={approved}
-                            disabled={!review || busy || locked}
+                            disabled={busy || locked}
                             onChange={(e) =>
                               void change({
                                 action: 'approve',
@@ -810,11 +1106,15 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                               })
                             }
                           />
-                          <span>Одобряю базу для запуска</span>
+                          <span>Базу и письма проверил, одобряю для запуска</span>
                         </label>
-                        {!review ? (
-                          <p className={HE.muted}>Одобрение станет доступно после подготовки итоговых писем.</p>
-                        ) : null}
+                        {launchStates[h.id]?.ready ? <button type="button" className={HE.btnPrimary}
+                          disabled={busy || locked || contactLimitUnsaved}
+                          onClick={() => configureLaunch([h.id])}>К запуску этой базы</button>
+                        : <p className={HE.muted}>{launchStates[h.id]?.label}</p>}
+                        </> : p?.status === 'ready' ? <p className={HE.muted}>
+                          Одобрение появится после подтверждения актуальной версии базы и писем. Статус обновляется автоматически.
+                        </p> : null}
                       </>
                     ) : null}
                   </article>
@@ -823,21 +1123,38 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <p className={HE.muted}>
                 Контакты разных гипотез могут пересекаться. Перед отправкой система исключит повторы.
               </p>
-              <button type="button" className={HE.btnPrimary} disabled={!allApproved} onClick={() => jump(4)}>
-                К запуску
-              </button>
+              <details>
+                <summary className="ve2-link cursor-pointer">Настройки сбора</summary>
+                <div className="mt-3 space-y-2">
+                  <p className={HE.muted}>
+                    Сохранённый лимит адресов на компанию: {contactLimit ?? 'без ограничения'}.
+                    {' '}Запущенные базы сохраняют свои настройки.
+                  </p>
+                  <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>
+                    Изменить на шаге «Гипотезы»
+                  </button>
+                </div>
+              </details>
             </section>
           ) : null}
-          {step === 4 && snapshot ? (
+          {step === 4 && snapshot ? contactLimitUnsaved ? (
+            <section className="space-y-3">
+              <StatusBox tone="info">Перед запуском примените изменённый лимит адресов на шаге «Гипотезы».</StatusBox>
+              <button type="button" className={HE.btnGhost} onClick={() => jump(1)}>К настройке лимита</button>
+            </section>
+          ) : (
             <OutreachLaunchPanel
-              key={selectedIds[0] ?? 'empty'}
+              key={launchHypothesisIds.join(',') || 'empty'}
               projectId={projectId}
               snapshot={snapshot}
               templates={detail.templates}
               titles={titles}
+              hypothesisIds={launchHypothesisIds}
+              onBack={() => jump(3)}
               onPresetChange={setPresetId}
               onStarted={(value) => {
                 setRun(value);
+                setLaunchHypothesisIds([]);
                 setStep(5);
                 void refresh();
               }}
@@ -845,28 +1162,22 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           ) : null}
           {step === 5 ? (
             <section className="space-y-5">
-              <h2 className="ve2-h2">{run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
+              <h2 className="ve2-h2">{run?.status === 'waiting' && run.items.some(item => item.code === 'VE_LAUNCH_REVIEW_REQUIRED')
+                ? 'Кампании ожидают проверки специалиста' : run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
               {run?.error ? <StatusBox tone="error">{run.error}</StatusBox> : null}
+              {run?.request.target_contacts ? <DeliveryTargetPanel key={projectId} projectId={projectId}
+                disabled={busy || ['queued', 'running', 'waiting'].includes(run.status)} onSaved={() => void refresh()} /> : null}
+              {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
+                presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}
+                disabled={busy || ['queued', 'running'].includes(run.status)} /> : null}
               {!locked && resultTemplates.length ? (
                 <button
                   type="button"
                   className={HE.btnGhost}
                   disabled={busy}
-                  onClick={() =>
-                    void change({
-                      action: 'select',
-                      language: snapshot?.setup.language ?? 'ru',
-                      hypothesis_ids: selectedIds.filter(
-                        (id) =>
-                          !resultTemplates.some((t) =>
-                            detail.bases.some((b) => b.id === t.base_id && b.hypothesis_id === id),
-                          ),
-                      ),
-                      next_run: true,
-                    })
-                  }
+                  onClick={() => jump(3)}
                 >
-                  Подготовить следующий запуск
+                  Выбрать другую базу для запуска
                 </button>
               ) : null}
               {run?.items.map((item) => (
@@ -878,9 +1189,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         queued: 'В очереди',
                         approving: 'Фиксируем согласование',
                         creating: 'Создаём кампании',
-                        activating: 'Включаем отправку',
-                        waiting: 'Ожидает отправителей или даты',
-                        active: 'Отправка включена',
+                        activating: 'Сверяем состояние кампаний',
+                        waiting: 'Ожидаем подтверждения состояния из Instantly',
+                        active: 'Подготовка завершена. Отправкой управляет специалист в Instantly.',
                         blocked: 'Требует внимания',
                       }[item.status]}
                   </p>
@@ -896,6 +1207,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     template={t}
                     required={base?.source === 'auto' && base.collect_info?.collection_mode === 'preview'}
                     title={hypothesisId ? (titles[hypothesisId] ?? 'Гипотеза') : (base?.filename ?? 'Кампания')}
+                    headerAction={hypothesisId ? <DownloadVerifiedContacts projectId={projectId} hypothesisId={hypothesisId} /> : undefined}
                   />
                 );
               })}

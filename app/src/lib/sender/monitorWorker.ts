@@ -36,6 +36,11 @@ export const DEFAULT_THRESHOLDS: MonitorThresholds = {
   domainBounceRate: 0.1,
 };
 
+/** Воркер адреса молчит дольше — его ящики не шлют и не читают ответы. */
+export const EGRESS_SILENT_MINUTES = 10;
+/** Ящик без адреса дольше — раздать его некому. */
+const UNASSIGNED_ALERT_MINUTES = 15;
+
 export interface MonitorMetrics {
   /** Писем отправлено за последний час. */
   sentLastHour: number;
@@ -47,6 +52,10 @@ export interface MonitorMetrics {
   failedMailboxesLastHour: number;
   /** Отправлено/отбилось по доменам за 24 ч. */
   domains: { domain: string; sent: number; bounced: number }[];
+  /** Адреса отправки: сколько ящиков держат, сколько минут молчит воркер, ошибка адреса. */
+  egress?: { ip: string; host: string; mailboxes: number; silentMinutes: number; lastError: string | null }[];
+  /** Ящиков без адреса отправки дольше UNASSIGNED_ALERT_MINUTES. */
+  unassignedMailboxes?: number;
 }
 
 export interface HealthDecision {
@@ -96,6 +105,41 @@ export function evaluateSenderHealth(m: MonitorMetrics, t: MonitorThresholds): H
     });
   }
 
+  for (const e of m.egress ?? []) {
+    // Адрес без ящиков никого не держит: молчит он или нет — не важно.
+    if (e.mailboxes === 0) continue;
+    const where = e.host ? ` (сервер ${e.host})` : '';
+    if (e.lastError) {
+      alerts.push({
+        key: `egress_error:${e.ip}`,
+        title: `Рассылка: адрес ${e.ip} выходит не оттуда`,
+        lines: [
+          `${e.lastError}${where}.`,
+          `Его ${e.mailboxes} ящиков не шлют и не читают ответы, пока сеть сервера не исправят.`,
+        ],
+      });
+    } else if (e.silentMinutes >= EGRESS_SILENT_MINUTES) {
+      alerts.push({
+        key: `egress_silent:${e.ip}`,
+        title: `Рассылка: адрес ${e.ip} молчит`,
+        lines: [
+          `Воркер адреса${where} не выходил на связь ${Math.round(e.silentMinutes)} мин.`,
+          `Его ${e.mailboxes} ящиков не шлют и не читают ответы. Перенести: «Ящики» → выбрать → «На адрес».`,
+        ],
+      });
+    }
+  }
+
+  if ((m.unassignedMailboxes ?? 0) > 0) {
+    alerts.push({
+      key: 'egress_unassigned',
+      title: 'Рассылка: ящики без адреса отправки',
+      lines: [
+        `${m.unassignedMailboxes} ящиков ждут адрес дольше ${UNASSIGNED_ALERT_MINUTES} мин: нет работающего адреса, который принимает новые ящики.`,
+      ],
+    });
+  }
+
   const pauseDomains: HealthDecision['pauseDomains'] = [];
   for (const d of m.domains) {
     if (d.sent < t.domainMinSent) continue;
@@ -142,7 +186,7 @@ async function collectMetrics(log: Log): Promise<MonitorMetrics> {
   const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const nowIso = new Date().toISOString();
 
-  const [sentHour, due, oldestDue, failedBoxes, domainRows] = await Promise.all([
+  const [sentHour, due, oldestDue, failedBoxes, domainRows, egressRows, unassigned] = await Promise.all([
     db.from('sender_messages').select('id', { count: 'exact', head: true })
       .eq('status', 'sent').gte('sent_at', hourAgo),
     db.from('sender_messages').select('id', { count: 'exact', head: true })
@@ -153,11 +197,33 @@ async function collectMetrics(log: Log): Promise<MonitorMetrics> {
     db.from('sender_mailboxes').select('id', { count: 'exact', head: true })
       .eq('status', 'failed').gte('updated_at', hourAgo),
     db.rpc('sender_domain_health', { p_hours: 24 }),
+    db.rpc('sender_egress_overview', { p_since: hourAgo }),
+    db.from('sender_mailboxes').select('id', { count: 'exact', head: true })
+      .is('egress_ip', null)
+      .lt('created_at', new Date(Date.now() - UNASSIGNED_ALERT_MINUTES * 60_000).toISOString()),
   ]);
 
   if (domainRows.error) log('warn', `sender_domain_health не посчитался: ${domainRows.error.message}`);
+  if (egressRows.error) log('warn', `sender_egress_overview не посчитался: ${egressRows.error.message}`);
 
   const oldest = (oldestDue.data?.[0] as { scheduled_at?: string } | undefined)?.scheduled_at;
+
+  // Молчание считаем от заведения адреса, если воркер ещё ни разу не выходил
+  // на связь: свежезаведённый адрес не должен алертить в первую же минуту.
+  const egress = ((egressRows.data ?? []) as {
+    ip: string;
+    host: string;
+    mailboxes: number;
+    last_seen_at: string | null;
+    created_at: string;
+    last_error: string | null;
+  }[]).map((row) => ({
+    ip: row.ip,
+    host: row.host,
+    mailboxes: Number(row.mailboxes),
+    lastError: row.last_error,
+    silentMinutes: (Date.now() - new Date(row.last_seen_at ?? row.created_at).getTime()) / 60_000,
+  }));
 
   return {
     sentLastHour: sentHour.count ?? 0,
@@ -165,6 +231,8 @@ async function collectMetrics(log: Log): Promise<MonitorMetrics> {
     oldestDueMinutes: oldest ? (Date.now() - new Date(oldest).getTime()) / 60_000 : null,
     failedMailboxesLastHour: failedBoxes.count ?? 0,
     domains: ((domainRows.data ?? []) as { domain: string; sent: number; bounced: number }[]),
+    egress,
+    unassignedMailboxes: unassigned.count ?? 0,
   };
 }
 

@@ -521,9 +521,8 @@ html[data-portal-theme="dark"] .ve2 {
 }
 .ve2-hypothesis-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: 20px;
   padding: 20px 24px;
   border: 1px solid var(--ve2-line);
@@ -540,6 +539,10 @@ html[data-portal-theme="dark"] .ve2 {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
+  justify-content: space-between;
+}
+.ve2-contact-limit {
+  max-width: 70ch;
 }
 @media (max-width: 640px) {
   .ve2-vertical-group {
@@ -642,6 +645,26 @@ html[data-portal-theme="dark"] .ve2 {
   color: var(--ve2-faint);
   border-color: var(--ve2-line);
 }
+.ve2-select { position: relative; min-width: 0; }
+.ve2-select-input { padding-right: 36px; }
+.ve2-select-chevron {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; pointer-events: none; color: var(--ve2-faint);
+}
+.ve2-select-menu {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 30; margin-top: 4px;
+  background: var(--ve2-surface); color: var(--ve2-fg);
+  border: 1px solid var(--ve2-input-line); border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+.ve2-select-options { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+.ve2-select-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 40px; padding: 8px; border-radius: 3px;
+  cursor: pointer; font-size: 13px; overflow-wrap: anywhere;
+}
+.ve2-select-option:hover, .ve2-select-option[data-active="true"] { background: var(--ve2-elev); }
+.ve2-select-option[aria-selected="true"] { font-weight: 600; }
 .ve2-cbx {
   accent-color: var(--ve2-accent);
   flex: none;
@@ -1403,3 +1426,15 @@ html[data-portal-theme="dark"] .ve2 {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Final letters: editable prose with only links, no rich-format toolbar. */
+.ve2 .ve2-input.ve2-letter-body {
+  min-height: 12rem;
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+.ve2 .ve2-letter-body p { margin: 0; }
+.ve2 .ve2-letter-body[contenteditable="false"] { opacity: 0.8; }
+.ve2 .ve2-letter-link-button { display: inline-flex; align-items: center; gap: 0.5rem; }
+.ve2 .ve2-letter-gap { display: flex; align-items: center; gap: 0.75rem; }
+.ve2 .ve2-letter-gap .ve2-input { width: 6rem; }

@@ -39,15 +39,20 @@ import {
   EMAIL_VALIDATION_MAX_ATTEMPTS,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
   FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL,
+  PERSONALIZATION_CHECKPOINT_STATE_COL,
+  parsePersonalizationCheckpointResult,
   parseEmailValidationCheckpointState,
   serializeEmailValidationCheckpointState,
   stripBaseConstructorCheckpointMetadata,
   stripEnrichCheckpointMetadata,
   stripFindEmailsCheckpointMetadata,
+  stripPersonalizationCheckpointMetadata,
+  FOUND_EMAIL_ORIGIN_COL,
   type EmailValidationCheckpointEntry,
   type EmailValidationCheckpointState,
 } from './baseConstructorCheckpoint';
 import { compactWebsiteEmailPreferences, selectValidatedWebsiteEmails } from './websiteEmailPreference';
+import { compactFoundEmailOrigins, parseFoundEmailOrigin } from './foundEmailOrigin';
 import {
   CLEANUP_JSON_SYSTEM_PROMPT,
   CLEANUP_BATCH,
@@ -55,6 +60,7 @@ import {
   parseCleanupResponseJson,
   parseCleanupResponse,
 } from '@/lib/nameCleanupProtocol';
+import { fatalAiAccountError } from '@/lib/openrouter/client';
 
 // Re-export: исторический дом парсеров — здесь; тесты и внешние импортёры
 // продолжают работать. Каноничная реализация теперь в nameCleanupProtocol.
@@ -67,7 +73,9 @@ export {
   stripEnrichCheckpointMetadata,
 } from './baseConstructorCheckpoint';
 
-export type ProgressFn = (progress: number) => Promise<void>;
+import type { ConstructorProgressDetail } from './baseConstructorProgress';
+
+export type ProgressFn = (progress: number, detail?: ConstructorProgressDetail) => Promise<void>;
 export type CancelCheckFn = () => Promise<boolean>;
 export type CheckpointFn = (data: string[][]) => Promise<void>;
 
@@ -212,7 +220,7 @@ const TA_MAX_HTTP_ATTEMPTS = 16;
 const TA_BATCH_TIMEOUT_MS = 240_000;
 const TA_MAX_OUTPUT_TOKENS = 8000;
 // CLEANUP_BATCH (50, не 100) и обоснование — в nameCleanupProtocol.ts.
-const PERSONALIZATION_BATCH = 5;
+const PERSONALIZATION_CONCURRENCY = 5;
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY = 1500;
 
@@ -958,7 +966,7 @@ export async function stepSplitEmails(
   }
 
   await onProgress(100);
-  return compactWebsiteEmailPreferences([header, ...result]);
+  return compactFoundEmailOrigins(compactWebsiteEmailPreferences([header, ...result]));
 }
 
 /* ═══════════════════════════════════════════
@@ -1728,6 +1736,12 @@ export async function stepTAScore(
         if (fatalErrors.length > 0) return;
         if (err instanceof AiRequestCancelledError) { cancellationError = err; return; }
         failureReason = err instanceof Error ? err.message : String(err);
+        // Лимит расходов / мёртвый ключ не «пройдёт» на следующей пачке. Без
+        // этой ветки шаг честно дожёвывал все пачки (30.09.2026 — 209 пустых
+        // запросов), ставил всем балл 5 и порогом 7 обнулял базу: 2944 строки
+        // на входе, 0 на выходе, и ни слова о причине. Валим шаг целиком.
+        const accountFailure = fatalAiAccountError(failureReason);
+        if (accountFailure) { recordFatalError(new Error(accountFailure)); return; }
         break;
       }
       if (await isScoringStopped()) return;
@@ -1985,21 +1999,59 @@ const PERSONALIZATION_SYSTEM_PROMPT = `Ты — помощник для перс
 
 Ответ: только текст персонализации.`;
 
+export interface StepPersonalizeOptions {
+  /** Per-job override: five by default, capped at twenty concurrent requests. */
+  concurrency?: number;
+  onCheckpoint?: CheckpointFn;
+}
+
 export async function stepPersonalize(
   data: string[][],
   prompt: string,
   onProgress: ProgressFn,
   isCancelled?: CancelCheckFn,
+  options?: StepPersonalizeOptions,
 ): Promise<string[][]> {
-  const header = data[0];
-  const body = data.slice(1);
-  const result: PersonalizationRowResult[] = [];
+  const stateIndex = data[0]?.indexOf(PERSONALIZATION_CHECKPOINT_STATE_COL) ?? -1;
+  const [header = [], ...body] = stripPersonalizationCheckpointMetadata(data);
+  const result: Array<PersonalizationRowResult | undefined> = body.map((row, index) => {
+    const saved = stateIndex >= 0
+      ? parsePersonalizationCheckpointResult(data[index + 1][stateIndex])
+      : undefined;
+    return saved ? { source: row, ...saved } : undefined;
+  });
+  const pending = body.map((_row, index) => index).filter((index) => !result[index]);
+  const concurrency = boundedInteger(options?.concurrency, PERSONALIZATION_CONCURRENCY, 1, 20);
+  const shouldCheckpoint = makeCheckpointGate();
+  const activeRequests = new Set<AbortController>();
+  let fatalError: Error | undefined;
+  let done = 0;
+  let reportChain = Promise.resolve();
+  const stop = (error: unknown) => {
+    fatalError ??= error instanceof Error ? error : new Error(String(error));
+    for (const request of activeRequests) request.abort();
+  };
+  const checkCancelled = async (): Promise<boolean> => {
+    if (fatalError) return true;
+    if (isCancelled && await isCancelled()) stop(new PersonalizationCancelledError());
+    return Boolean(fatalError);
+  };
+  const checkpoint = (): string[][] => [
+    [...header, PERSONALIZATION_CHECKPOINT_STATE_COL],
+    ...body.map((row, index) => {
+      const saved = result[index];
+      return [...header.map((_column, col) => row[col] || ''), saved
+        ? JSON.stringify({ proposal: saved.proposal, ...(saved.error ? { error: saved.error } : {}) })
+        : ''];
+    }),
+  ];
 
-  for (let batch = 0; batch < body.length; batch += PERSONALIZATION_BATCH) {
-    if (isCancelled && await isCancelled()) throw new Error('Отменено');
-    const chunk = body.slice(batch, batch + PERSONALIZATION_BATCH);
-
-    const promises = chunk.map(async (row) => {
+  // A continuous pool releases each slot as soon as its own row finishes;
+  // one slow response no longer holds up every row in the next batch.
+  await processInPool(pending, concurrency, async (index) => {
+    try {
+      if (await checkCancelled()) return;
+      const row = body[index];
       const obj: Record<string, string> = {};
       header.forEach((h, c) => { obj[h] = row[c] || ''; });
       const sourceData = Object.entries(obj)
@@ -2008,6 +2060,9 @@ export async function stepPersonalize(
         .join('\n');
 
       const userMsg = `Данные: "${sourceData.slice(0, 3000)}"\n\nЗадача: ${prompt.slice(0, 2000)}\n\nСгенерируй 1 персонализированное предложение.`;
+      let personalized: PersonalizationRowResult;
+      const controller = new AbortController();
+      activeRequests.add(controller);
       try {
         const content = await generatePersonalizationCompletion({
           apiKey: OPENROUTER_PERSONALIZATION_API_KEY,
@@ -2017,23 +2072,45 @@ export async function stepPersonalize(
             { role: 'user', content: userMsg },
           ],
           title: 'Portal - Base Constructor Personalization',
-          isCancelled,
+          isCancelled: checkCancelled,
+          signal: controller.signal,
         });
-        return { source: row, proposal: content };
+        personalized = { source: row, proposal: content };
       } catch (error) {
         if (error instanceof PersonalizationCancelledError) throw error;
-        return { source: row, proposal: '', error: personalizationFailureMessage(error) };
+        personalized = { source: row, proposal: '', error: personalizationFailureMessage(error) };
+      } finally {
+        activeRequests.delete(controller);
       }
-    });
-
-    const batchResults = await Promise.all(promises);
-    if (isCancelled && await isCancelled()) throw new PersonalizationCancelledError();
-    result.push(...batchResults);
-    await onProgress(Math.round(((batch + chunk.length) / body.length) * 100));
-  }
+      if (await checkCancelled()) return;
+      result[index] = personalized;
+      // Serialize saves and progress. A failed save stops sibling requests and
+      // queued reports, rather than letting the pool swallow persistence errors.
+      reportChain = reportChain.then(async () => {
+        if (await checkCancelled()) return;
+        done += 1;
+        if (options?.onCheckpoint && shouldCheckpoint(done, done === pending.length)) {
+          await options.onCheckpoint(checkpoint());
+        }
+        if (await checkCancelled()) return;
+        // On resume this reports the unfinished tail, as expected by the worker.
+        if (done % 5 === 0 || done === pending.length) {
+          await onProgress(Math.min(99, Math.round((done / pending.length) * 100)));
+        }
+      }).catch((error) => { stop(error); throw error; });
+      await reportChain;
+    } catch (error) {
+      stop(error);
+    }
+  });
+  await reportChain;
+  await checkCancelled();
+  if (fatalError) throw fatalError;
+  const completed = result.filter((row): row is PersonalizationRowResult => Boolean(row));
+  if (completed.length !== body.length) throw new Error('Не удалось сохранить результат персонализации');
 
   await onProgress(100);
-  return buildPersonalizationTable(header, result);
+  return buildPersonalizationTable(header, completed);
 }
 
 /* ═══════════════════════════════════════════
@@ -2131,15 +2208,28 @@ export async function stepValidateEmails(
 
   const target: ValidateEmailsTarget = options?.validateTarget ?? 'original';
 
+  // Eager merge уже слил «Найденный Email» в исходную колонку и оставил
+  // FOUND_EMAIL_ORIGIN_COL (только при явном 'original' | 'found', см.
+  // foundEmailOrigin.ts): валидируем одну колонку, но только адреса
+  // запрошенного источника. Адреса другого источника — доверенные: их не
+  // проверяем и не удаляем.
+  const originIdx = header.indexOf(FOUND_EMAIL_ORIGIN_COL);
+  const perSource = originIdx >= 0 && foundEmailIdx < 0 && originalEmailIdx >= 0
+    && (target === 'original' || target === 'found');
+
   // Резолвим какие индексы реально валидируем. Если запрошен 'both' но одна
   // из колонок отсутствует — берём только что есть; если обе отсутствуют —
   // ранний return (нечего валидировать).
   const indicesToValidate: number[] = [];
-  if ((target === 'original' || target === 'both') && originalEmailIdx >= 0) {
+  if (perSource) {
     indicesToValidate.push(originalEmailIdx);
-  }
-  if ((target === 'found' || target === 'both') && foundEmailIdx >= 0) {
-    indicesToValidate.push(foundEmailIdx);
+  } else {
+    if ((target === 'original' || target === 'both') && originalEmailIdx >= 0) {
+      indicesToValidate.push(originalEmailIdx);
+    }
+    if ((target === 'found' || target === 'both') && foundEmailIdx >= 0) {
+      indicesToValidate.push(foundEmailIdx);
+    }
   }
   if (indicesToValidate.length === 0) {
     await onProgress(100);
@@ -2204,6 +2294,16 @@ export async function stepValidateEmails(
       : {},
   );
 
+  // perSource: адреса строки, которые НЕ проверяем (другой источник).
+  // Битая ячейка происхождения → доверенных нет, проверяем всё (безопасно).
+  const trustedByRow: string[][] = newBody.map((row) => {
+    if (!perSource) return [];
+    const origin = parseFoundEmailOrigin(row[originIdx]);
+    if (!origin) return [];
+    return extractEmails(row[originalEmailIdx] || '')
+      .filter((e) => (target === 'found' ? !origin.has(e) : origin.has(e)));
+  });
+
   type ProbeResult = {
     result: EmailValidationCheckpointEntry['result'];
     is_free: boolean;
@@ -2260,8 +2360,9 @@ export async function stepValidateEmails(
   const cells: CellToValidate[] = [];
   const uniqueEmails = new Set<string>();
   for (let r = 0; r < newBody.length; r += 1) {
+    const trusted = new Set(trustedByRow[r]);
     for (const m of meta) {
-      const emails = extractEmails(newBody[r][m.srcIdx] || '');
+      const emails = extractEmails(newBody[r][m.srcIdx] || '').filter((e) => !trusted.has(e));
       if (emails.length === 0) continue;
       const prevStatus = (newBody[r][m.statusIdx] || '').trim();
       const allEmailsDurablyAccountedFor = emails.every((email) => {
@@ -2434,6 +2535,8 @@ export async function stepValidateEmails(
   };
   const mainPassStartedAt = Date.now();
 
+  await onProgress(0, { phase: 'checking', completed: 0, total: toValidate.length });
+
   await processInPool(toValidate, VALIDATION_CONCURRENCY, async (email) => {
     if (checkpointError) return;
     if (isCancelled && await isCancelled()) { cancelled = true; return; }
@@ -2448,7 +2551,9 @@ export async function stepValidateEmails(
       // (autoCompleteIfStuck: для последнего шага порог 2 мин) завершить джоб
       // с нефильтрованным checkpoint'ом, пока шаг спит/допроверяет unknown.
       // Финальный onProgress(100) — в конце шага после фильтра.
-      await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)));
+      await onProgress(Math.min(99, Math.round((done / toValidate.length) * 100)), {
+        phase: 'checking', completed: done, total: toValidate.length,
+      });
     }
     if (onCheckpoint && shouldCheckpoint(done, done === toValidate.length)) {
       await enqueueCheckpoint();
@@ -2494,6 +2599,7 @@ export async function stepValidateEmails(
     const elapsed = Date.now() - mainPassStartedAt;
     const waitMs = Math.min(SECOND_PASS_DELAY_MS, Math.max(0, SECOND_PASS_DELAY_MS - elapsed));
     let waited = 0;
+    if (waitMs > 0) await onProgress(99, { phase: 'retry_wait', completed: 0, total: retryable.length });
     while (waited < waitMs) {
       const chunk = Math.min(1000, waitMs - waited);
       await sleep(chunk);
@@ -2502,12 +2608,13 @@ export async function stepValidateEmails(
       // для stale-detector'а), а прогресс остаётся 99 (см. кэп выше) — иначе
       // пауза до 5 мин после progress=100 давала stuck-reaper'у завершить джоб
       // с нефильтрованными данными.
-      if (waited % 30_000 < 1000) await onProgress(99);
+      if (waited % 30_000 < 1000) await onProgress(99, { phase: 'retry_wait', completed: 0, total: retryable.length });
       // Проверяем отмену раз в секунду, чтобы задача не висела в паузе.
       if (isCancelled && await isCancelled()) throw new Error('Отменено');
     }
     let retryDone = 0;
     const shouldRetryCheckpoint = makeCheckpointGate();
+    await onProgress(99, { phase: 'retrying', completed: 0, total: retryable.length });
     await processInPool(retryable, VALIDATION_CONCURRENCY, async (email) => {
       if (checkpointError) return;
       if (isCancelled && await isCancelled()) { cancelled = true; return; }
@@ -2518,7 +2625,9 @@ export async function stepValidateEmails(
       // Heartbeat и в самом пуле: на больших retry-списках пул идёт минуты,
       // молчание здесь — то же окно для stuck-reaper'а, что и пауза выше.
       retryDone++;
-      if (retryDone % 10 === 0) await onProgress(99);
+      if (retryDone % 10 === 0 || retryDone === retryable.length) await onProgress(99, {
+        phase: 'retrying', completed: retryDone, total: retryable.length,
+      });
       if (onCheckpoint && shouldRetryCheckpoint(retryDone, retryDone === retryable.length)) {
         await enqueueCheckpoint();
       }
@@ -2557,6 +2666,7 @@ export async function stepValidateEmails(
   const filtered = newBody.filter((row, r) => {
     let anyValid = false;
     let anyUnverifiable = false;
+    const trusted = trustedByRow[r];
     for (const m of meta) {
       const status = (row[m.statusIdx] || '').trim();
       if (status === '') continue; // пустой email в этой колонке — не учитываем
@@ -2580,13 +2690,26 @@ export async function stepValidateEmails(
             || (!keepUnverifiable && UNVERIFIABLE_STATUSES.has(st));
           return !bad;
         });
-        if (survivors.length === 0) row[m.srcIdx] = '';
+        if (trusted.length > 0) {
+          // perSource: доверенные адреса остаются в ячейке как были.
+          if (survivors.length < cell.emails.length) row[m.srcIdx] = [...trusted, ...survivors].join(', ');
+          if (survivors.length === 0) {
+            // Статус относился к удалённым адресам, оставшиеся не проверялись.
+            row[m.statusIdx] = '';
+            row[m.providerIdx] = '';
+          }
+        } else if (survivors.length === 0) row[m.srcIdx] = '';
         else if (survivors.length < cell.emails.length) row[m.srcIdx] = survivors.join(', ');
       } else if (!isValid && !isUnverifiable) {
         // Подтверждённо плохой (invalid/disposable) — или unknown/error при
         // keepUnverifiable=false — чистим src-ячейку чтобы потомки (export,
-        // merge) не видели заведомо плохой email.
-        row[m.srcIdx] = '';
+        // merge) не видели заведомо плохой email. Доверенные (perSource)
+        // адреса не трогаем.
+        row[m.srcIdx] = trusted.join(', ');
+        if (trusted.length > 0) {
+          row[m.statusIdx] = '';
+          row[m.providerIdx] = '';
+        }
       }
     }
     // Строка не имела email ни в одной валидируемой колонке (status='' везде).
@@ -2595,6 +2718,8 @@ export async function stepValidateEmails(
     // Legacy-режим (dropRowsWithoutEmail=false) — сохраняем строку. Раньше
     // legacy-поведение было хардкодом и давало 74% мусорных строк на выходе
     // (см. job polza@polza.ru 8b188038-…: 1795 пустых строк из 2418).
+    // Доверенный (непроверяемый) адрес — рабочий по выбору пользователя.
+    if (trusted.length > 0) return true;
     const hadAnyEmail = meta.some((m) => (row[m.statusIdx] || '').trim() !== '');
     if (!hadAnyEmail) return !dropRowsWithoutEmail;
     return anyValid || anyUnverifiable;
@@ -2616,6 +2741,12 @@ export interface StepCapEmailsPerCompanyOptions {
    * step_config.cap_emails_per_company.max — см. STEP_RUNNERS в worker'е.
    */
   max?: number;
+  /**
+   * Пустой статус = «подтверждён» (ранг ok). Только для validate «Только
+   * найденные»: исходные адреса там намеренно не проверялись, пользователь
+   * им доверяет. По умолчанию пустой статус — ниже всех.
+   */
+  trustEmptyStatus?: boolean;
 }
 
 /**
@@ -2670,11 +2801,12 @@ export async function stepCapEmailsPerCompany(
   }
   const keep = new Set<number>();
   for (const idxs of groups.values()) {
-    const ranked = [...idxs].sort((a, b) => {
-      const ra = statusIdx >= 0 ? statusRank((body[a][statusIdx] || '').trim()) : -1;
-      const rb = statusIdx >= 0 ? statusRank((body[b][statusIdx] || '').trim()) : -1;
-      return rb - ra || a - b;
-    });
+    const rankOf = (i: number) => {
+      if (statusIdx < 0) return -1;
+      const status = (body[i][statusIdx] || '').trim();
+      return status === '' && options?.trustEmptyStatus ? statusRank('ok') : statusRank(status);
+    };
+    const ranked = [...idxs].sort((a, b) => rankOf(b) - rankOf(a) || a - b);
     for (const i of ranked.slice(0, max)) keep.add(i);
   }
   const out = body.filter((_, i) => keep.has(i));

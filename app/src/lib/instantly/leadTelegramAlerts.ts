@@ -1,4 +1,5 @@
 import { sendOrderedLead } from './leadTelegramOrder';
+import { signLeadAlertRejection } from './handoffCallback';
 const TG_FETCH_TIMEOUT_MS = 15_000;
 
 export interface LeadTelegramSpecialistMention {
@@ -10,6 +11,15 @@ export interface LeadTelegramSpecialistMention {
 
 export interface LeadTelegramAlertData {
   expectHandoff?: boolean;
+  /**
+   * Передача ручная: лид попадёт в таблицу клиента только после отправки из
+   * карточки передачи. Специалисты дважды спрашивали «в чате есть, в таблице
+   * нет» — предупреждение нужно рядом со ссылкой на таблицу, а не только в
+   * карточке передачи ответом ниже.
+   */
+  manualHandoff?: boolean;
+  /** Explicitly disabled for automatic projects and unknown configuration. */
+  allowRejection?: boolean;
   qualificationId: string;
   campaignId: string;
   leadEmail: string;
@@ -154,6 +164,11 @@ function buildMessage(data: LeadTelegramAlertData, statusText?: string): string 
   // Reserve the durable table link and qualification ID before fitting prose.
   const footer: string[] = [];
   if (statusText) footer.push('', escapeHtml(statusText));
+  if (data.manualHandoff) {
+    footer.push('', statusText
+      ? '⚠️ В таблице клиента лид появится после передачи.'
+      : '⚠️ В таблице клиента лид появится после передачи — форма придёт ответом на это сообщение.');
+  }
   if (data.boardLink) footer.push('', `📋 <a href="${escapeHtml(data.boardLink)}">Все лиды проекта</a>`);
   footer.push('', `<code>${escapeHtml(data.qualificationId)}</code>`);
   const remaining = () => Math.max(0, 4096 - visibleLength([...lines, ...footer].join('\n')));
@@ -287,6 +302,9 @@ export async function sendLeadTelegramAlert(
   if (threadId) body.message_thread_id = threadId;
 
   return sendOrderedLead(chatId, data.qualificationId, async (late) => {
+  if (data.allowRejection === true) body.reply_markup = { inline_keyboard: [[{
+    text: 'Не лид', callback_data: signLeadAlertRejection(data.qualificationId, token),
+  }]] };
   if (late && data.expectHandoff) {
     // Keep the payload within Telegram's limit; the full lead text is preserved
     // in the guest table. The status is outside the quoted email.

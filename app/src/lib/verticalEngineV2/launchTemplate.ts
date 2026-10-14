@@ -51,7 +51,10 @@ import {
 } from './ruSeasonality';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
+import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
+import { loadVeProjectExclusions, matchVeProjectExclusion, veProjectExclusionRow } from './projectExclusions';
+import { withVeDeliveryCompanyIdentity } from './projectExclusionDelivery';
 import {
   claimProjectCampaignLinks,
   describeOwnershipConflicts,
@@ -59,8 +62,6 @@ import {
   findManualFactIssue,
   loadNoPeriodPlanOwners,
   loadPortalProjectTerm,
-  localIsoDate,
-  PORTAL_TERM_TEXT,
 } from './portalDeliveryTerm';
 
 export type VeLaunchLocale = 'ru' | 'en';
@@ -615,6 +616,20 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   if (groups.length === 0) {
     return { status: 400, body: { error: t.allContactsBlocked } };
   }
+  let projectExcludedCount = 0;
+  try {
+    const rules = await loadVeProjectExclusions(portalDb, base.project_id);
+    groups = groups.map(group => ({ ...group, leadIdx: group.leadIdx.filter(index => {
+      if (!matchVeProjectExclusion(veProjectExclusionRow(audience.rows[index], audience.leads[index].email), rules)) return true;
+      projectExcludedCount += 1;
+      return false;
+    }) })).filter(group => group.leadIdx.length > 0);
+  } catch {
+    return { status: 503, body: { code: 'VE_PROJECT_EXCLUSIONS_UNAVAILABLE', error: 'Не удалось проверить исключения проекта. Попробуйте ещё раз.' } };
+  }
+  if (groups.length === 0) {
+    return { status: 400, body: { code: 'VE_PROJECT_CONTACTS_EXCLUDED', error: 'Все доступные контакты совпали с исключениями проекта.' } };
+  }
   // Filter before creating remote campaigns; the unique DB constraint remains
   // the authority if two hypotheses prepare concurrently after this read.
   try {
@@ -632,9 +647,22 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const segmentsMaterialized = groups.some((group) => group.segment !== null);
 
+  // Human-readable identity follows the exact Portal project selected by staff.
+  // Ownership itself is claimed atomically by ID below, never inferred from this name.
+  const {data: namedProject, error: nameError} = await portalDb.from('projects')
+    .select('client, name').eq('id', portalProjectId).maybeSingle();
+  const campaignClientName = String(namedProject?.client || namedProject?.name || '').trim();
+  if (nameError || !campaignClientName) return {status: 409, body: {error: 'В выбранном проекте Portal не задано название клиента.'}};
+  let campaignAudienceName = base.filename ?? 'База';
+  if (base.hypothesis_id) {
+    const {data: hypothesis, error: hypothesisError} = await portalDb.from('ve_hypotheses')
+      .select('title').eq('id', base.hypothesis_id).eq('project_id', base.project_id).maybeSingle();
+    if (hypothesisError || !hypothesis?.title) return {status: 409, body: {error: 'Не удалось прочитать название выбранной гипотезы.'}};
+    campaignAudienceName = hypothesis.title;
+  }
+
   // A project without periods is its own term. Check it and the manual fact
   // before the first write here or in Instantly.
-  let projectTermDeadline: string | null = null;
   if (expectedPortalPeriodId === null) {
     try {
       const [{ project: portalProject, periods }, planOwners] = await Promise.all([
@@ -646,7 +674,6 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       if (!term.ok) return conflict(term.code, term.error);
       const manualFact = await findManualFactIssue(instantlyDb, portalProject);
       if (manualFact) return conflict(manualFact.code, manualFact.error);
-      projectTermDeadline = term.deadline;
     } catch (error) {
       await logError(`${eventPrefix}.portal_project_term_failed`, error, { userId, templateId, portalProjectId });
       return { status: 500, body: { error: 'Не удалось проверить проект Portal перед запуском.' } };
@@ -694,9 +721,6 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const { scheduleDays: deliveryScheduleDays, timezone: deliveryTimezone, dailyCapacity: senderDailyCapacity } = deliverySettings;
   const deliveryPlanBoundAt = new Date().toISOString();
-  if (projectTermDeadline && projectTermDeadline < localIsoDate(new Date(deliveryPlanBoundAt), deliveryTimezone)) {
-    return conflict('PROJECT_DEADLINE_PASSED', PORTAL_TERM_TEXT.deadlinePassed(projectTermDeadline));
-  }
   const { data: deliveryPlanData, error: deliveryPlanError } = await portalDb.rpc(
     've_bind_contact_delivery_plan',
     {
@@ -844,7 +868,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
 
   // 8. Instantly: по paused-кампании на группу, без немедленной загрузки базы.
   //    Проверенные контакты сохраняются в Portal как durable drip reserve и
-  //    будут передаваться точными дневными порциями после активации очереди.
+  //    будут передаваться дневными порциями. Start нажимает специалист в Instantly.
   //    Текст
   //    ошибки идёт без scrubBrand — staff-UI нужна точная формулировка API;
   //    клиентский роут скрабит бренд на своей стороне. Основная кампания
@@ -873,11 +897,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       });
       return { status: 400, body: { error: t.noLetters } };
     }
-    const campaignName = buildLaunchCampaignName(base.filename, new Date(), group.segment);
+    const campaignName = buildLaunchCampaignName({clientName: campaignClientName, audienceName: campaignAudienceName, segment: group.segment});
     let groupMutationAttempted = false;
     try {
       const payload = buildCampaignPayloadFromPreset({
-        preset,
+        preset: { ...preset, ...VE_CAMPAIGN_SENDING_SETTINGS },
         sequence: { name: campaignName, steps: sequence.steps },
       });
       await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
@@ -916,7 +940,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
           campaign_id: campaignId,
           source_row_index: sourceRowIndex,
           drip_order: dripRows.length,
-          lead_payload: { ...lead },
+          lead_payload: withVeDeliveryCompanyIdentity(lead, audience.rows[sourceRowIndex]),
           email_normalized: emailNormalized,
         });
       }
@@ -1148,6 +1172,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       targetContacts,
       totalLeads: leads.length,
       blockedContacts: blockedContactsCount,
+      projectExcludedContacts: projectExcludedCount,
       force,
     },
   );
@@ -1158,6 +1183,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       ok: !ambiguousGroupFailure,
       launch: launchInfo,
       warnings,
+      project_excluded_contacts: projectExcludedCount,
       ...(ambiguousGroupFailure
         ? { error: t.launchUncertain, code: 'TEMPLATE_LAUNCH_UNCERTAIN' }
         : {}),

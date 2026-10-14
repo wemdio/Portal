@@ -39,8 +39,18 @@ export async function loadEnCases(db: SupabaseClient): Promise<EnCase[]> {
     }));
 }
 
-export function routeEnCase(cases: EnCase[], group: IndustryGroup | null): { record: EnCase; reason: string } | null {
+/**
+ * Кейс по отраслевой группе. Подходящих кейсов у группы бывает несколько, и
+ * раньше всем доставался первый по порядку строк в базе: в запуске 23.09 у 72
+ * из 100 готовых писем стоял один и тот же Bero.pro. Теперь кейс выбирается
+ * среди подходящих по домену компании — устойчиво (у компании всегда один и
+ * тот же) и вразнобой между компаниями.
+ */
+export function routeEnCase(cases: EnCase[], group: IndustryGroup | null, key = ''): { record: EnCase; reason: string } | null {
   if (!group) return null;
-  const hit = cases.find((c) => c.groups.includes(group));
-  return hit ? { record: hit, reason: `industry group: ${group}` } : null;
+  const hits = cases.filter((c) => c.groups.includes(group)).sort((a, b) => a.caseId.localeCompare(b.caseId));
+  if (!hits.length) return null;
+  let h = 0;
+  for (const ch of key.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return { record: hits[h % hits.length], reason: `industry group: ${group}` };
 }

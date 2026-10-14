@@ -1,6 +1,12 @@
 import type { CampaignStepText } from './campaignSequence';
 import { UNIVERSAL_REPLY_RULES } from './promptRules';
-import type { GlobalKnowledgeBase, KnowledgeBase, QualificationRow, ThreadMessage } from './types';
+import type {
+  GlobalKnowledgeBase,
+  KnowledgeBase,
+  QualificationRow,
+  ReplyLanguage,
+  ThreadMessage,
+} from './types';
 
 export interface PromptMessage {
   role: 'system' | 'user';
@@ -26,24 +32,43 @@ function preferProject(projectValue: string, globalValue: string): string {
 }
 
 export function buildReplyPrompt(input: {
-  kb: KnowledgeBase;
+  /** Тон/пример/факты проекта (у «Рассылки» — кампании); пустое поле = глобальное. */
+  kb: Pick<KnowledgeBase, 'toneNotes' | 'exampleCase' | 'productFacts'>;
   /** Глобальный тон/пример — fallback для проектов без своих значений. */
   globalKb: Pick<GlobalKnowledgeBase, 'toneNotes' | 'exampleCase'>;
   /** Правила письма из глобальных настроек (правит админ); пусто — стандартные из кода. */
   systemPrompt?: string;
   /** Бриф проекта живьём из карточки (projects.brief_text), не из базы знаний. */
   brief: string;
-  qualification: QualificationRow;
+  /** Кому пишем. Instantly отдаёт строку квалификации, «Рассылка» — получателя. */
+  qualification: Pick<QualificationRow, 'companyName' | 'leadEmail'>;
   thread: ThreadMessage[];
   contextComplete: boolean;
   /** Письма цепочки кампании по порядку; пусто — не удалось получить. */
   campaignSteps?: CampaignStepText[];
   /** Новый контакт, на которого перенаправил адресат; null — ответ в ту же переписку. */
   recipientEmail?: string | null;
+  /**
+   * Наш ящик в этой переписке. Автоответчики повторяют адрес отправителя
+   * («team@... — ваше обращение в очереди»), и без подсказки ИИ принимал наш
+   * же ящик за новый контакт: «направлю информацию по указанному адресу».
+   */
+  ourEmail?: string | null;
+  /**
+   * Язык письма. Раньше его не было вовсе: правила, тон и примеры написаны
+   * по-русски, и на английскую переписку ИИ отвечал как придётся. Теперь язык
+   * задаёт сотрудник переключателем в чате; по умолчанию — русский.
+   */
+  language?: ReplyLanguage;
 }): PromptMessage[] {
   const { kb, globalKb, brief, qualification, thread, contextComplete } = input;
+  const language: ReplyLanguage = input.language === 'en' ? 'en' : 'ru';
   const recipientEmail = input.recipientEmail ?? null;
   const rules = input.systemPrompt?.trim() || UNIVERSAL_REPLY_RULES;
+
+  // Последнее письмо наше — адресат молчит, нужен пинг, а не ответ на его
+  // прошлую реплику: на неё мы уже ответили (просьба 07.10.2026).
+  const lastIsOurs = !recipientEmail && thread.length > 0 && thread[thread.length - 1].fromUs;
 
   const toneNotes = preferProject(kb.toneNotes, globalKb.toneNotes);
   const exampleCase = preferProject(kb.exampleCase, globalKb.exampleCase);
@@ -58,7 +83,7 @@ export function buildReplyPrompt(input: {
 О продукте/проекте, для которого пишешь письмо:
 
 Бриф:
-${brief || '(бриф проекта не заполнен)'}
+${brief || '(бриф проекта не заполнен — о продукте и условиях говори только то, что есть в наших письмах переписки и шагах кампании; ничего не додумывай)'}
 ${productFacts}
 Тон и ограничения этого проекта:
 ${toneNotes || '(особых ограничений нет, используй деловой тон по умолчанию)'}
@@ -71,19 +96,26 @@ ${exampleCase || '(примера нет)'}`;
 
   const user = `Компания-адресат: ${qualification.companyName || qualification.leadEmail}
 Email адресата: ${qualification.leadEmail}
-${contextComplete ? '' : 'Внимание: полный тред переписки получить не удалось, ниже только сохранённые отрывки — учитывай это и не додумывай детали, которых нет.\n'}
+${input.ourEmail ? `Наш ящик, с которого идёт переписка: ${input.ourEmail}. Если этот адрес есть в письме адресата — это наш адрес (автоответчики и почтовые программы повторяют адрес отправителя), а не новый контакт: не благодари за него и не обещай туда написать.\n` : ''}${contextComplete ? '' : 'Внимание: полный тред переписки получить не удалось, ниже только сохранённые отрывки — учитывай это и не додумывай детали, которых нет.\n'}
 Письма нашей цепочки в этой кампании:
 
 ${formatCampaignSteps(input.campaignSteps ?? [])}
 
-Переписка:
+Переписка — все письма между нами и адресатом на эту минуту, по времени: наши письма цепочки, наши ответы и его ответы. Учитывай её целиком, а не только последнюю реплику: что мы уже сказали, предложили и о чём спросили, и что он ответил.
 
 ${formatThread(thread)}
 
 ${recipientEmail
     ? `Адресат перенаправил нас к новому контакту: ${recipientEmail}. Напиши письмо НОВОМУ контакту — оно уйдёт на ${recipientEmail}, а не тому, кто ответил. Это первое письмо этому человеку: начни с того, кто перенаправил, дальше — предложение из цепочки под эту компанию.`
-    : `Напиши следующий ответ от НАС адресату, отвечая на его последнюю реплику.
-Ответ уйдёт на ${qualification.leadEmail} в эту же переписку.`}`;
+    : lastIsOurs
+      ? `Последнее письмо в переписке — НАШЕ, адресат на него ещё не ответил. Напиши короткое напоминание (пинг) от НАС в эту же переписку — оно уйдёт на ${qualification.leadEmail}.
+На реплики адресата выше мы уже ответили: не отвечай на них заново, не благодари снова за ответ и не пересказывай наше последнее письмо. Опирайся на него: одной фразой мягко напомни о нём и повтори его просьбу или вопрос (следующий шаг) проще и короче; можно добавить одну новую деталь по делу, которой в нём не было. 30-70 слов, без нажима и упрёков. Подпись — как в нашем последнем письме.`
+      : `Напиши следующий ответ от НАС адресату, отвечая на его последнюю реплику.
+Ответ уйдёт на ${qualification.leadEmail} в эту же переписку.`}
+
+${language === 'en'
+    ? 'ЯЗЫК ОТВЕТА: английский. Всё письмо целиком — на английском, включая приветствие и подпись, даже если бриф, правила и переписка на русском. Требование обращаться на «вы» к английскому тексту не применяй.'
+    : 'ЯЗЫК ОТВЕТА: русский. Всё письмо целиком — на русском, даже если адресат написал на другом языке.'}`;
 
   return [
     { role: 'system', content: system },

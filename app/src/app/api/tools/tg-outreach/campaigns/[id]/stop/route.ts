@@ -24,6 +24,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       
         if (!campaign) return jsonError('Кампания не найдена', 404);
         if (campaign.status === 'stopped') return jsonError('Кампания уже остановлена', 409);
+
+        // Остановка уже идёт: второй задачей её быстрее не сделать, а воркер
+        // потом честно отработал бы обе. Страница по коду покажет «Останавливается…».
+        const { count: activeStops } = await supabase
+          .from('tg_outreach_jobs')
+          .select('id', { count: 'exact', head: true })
+          .eq('campaign_id', id)
+          .eq('action', 'stop')
+          .in('status', ['pending', 'running']);
+        if ((activeStops ?? 0) > 0) {
+          return jsonError('Кампания уже останавливается — круг сворачивается, это пара минут.', 409, { code: 'stopping' });
+        }
         // Остановка рассылки прогрев не задевает: он живёт своим запуском и
         // сроками на аккаунтах, а не статусом кампании.
       

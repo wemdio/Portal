@@ -1,6 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { readContactDeliveryPages } from './contactDeliveryInventory';
 
 export interface VeContactUploadStatus {
+  campaigns?: Array<{campaign_id: string; campaign_name: string; remote_status: number | null;
+    status_observed_at: string | null; leads_count: number}>;
   blocked: null | { run_id: string; blocked_at: string; run_date: string; accepted: number; pending: number; uncertain: number };
 }
 
@@ -15,13 +18,23 @@ export async function loadContactUploadProject(db: SupabaseClient, templateId: s
 }
 
 /** A project pause is shared by its campaign cards, including imported bases. */
-export async function loadContactUploadStatus(db: SupabaseClient, projectId: string): Promise<VeContactUploadStatus> {
+export async function loadContactUploadStatus(db: SupabaseClient, projectId: string, templateId?: string): Promise<VeContactUploadStatus> {
   const { data, error } = await db.from('ve_contact_delivery_daily_runs')
     .select('id, run_date, upload_blocked_at, accepted_count, skipped_count, uncertain_count, reserved_count')
     .eq('ve_project_id', projectId).not('upload_blocked_at', 'is', null)
     .order('run_date', { ascending: false }).limit(1).maybeSingle();
   if (error) throw new Error('Не удалось проверить загрузку контактов');
-  return { blocked: data ? {
+  let campaigns: VeContactUploadStatus['campaigns'];
+  if (templateId) {
+    const {data: item, error: itemError} = await db.from('ve_launch_queue_items')
+      .select('id').eq('project_id', projectId).eq('template_id', templateId).maybeSingle();
+    if (itemError) throw new Error('Не удалось прочитать состояние кампаний');
+    campaigns = item ? await readContactDeliveryPages('campaign display status', (from, to) =>
+      db.from('ve_launch_queue_campaigns')
+        .select('campaign_id, campaign_name, remote_status, status_observed_at, leads_count', {count: 'exact'})
+        .eq('item_id', item.id).order('id', {ascending: true}).range(from, to)) : [];
+  }
+  return { ...(campaigns ? {campaigns} : {}), blocked: data ? {
     run_id: data.id, blocked_at: data.upload_blocked_at, run_date: data.run_date,
     accepted: data.accepted_count, uncertain: data.uncertain_count,
     pending: Math.max(0, data.reserved_count - data.accepted_count - data.skipped_count - data.uncertain_count),

@@ -9,13 +9,15 @@
  *
  * Заголовки колонок узнаём по синонимам — ЕИС и организаторы называют их
  * по-разному; неузнанные колонки сохраняются в details как есть.
+ *
+ * Коммерческие тендеры (B2B-Center, Росэлторг) — та же форма, что контракты ЕИС: победитель = компания.
  */
 
 import * as XLSX from 'xlsx';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { normalizeInn } from '../company';
 
-export type UploadKind = 'exhibitors' | 'contracts' | 'growth';
+export type UploadKind = 'exhibitors' | 'contracts' | 'growth' | 'tenders';
 
 type Field = 'company_name' | 'company_website' | 'inn' | 'record_url' | 'record_date' | 'stand' | 'category'
   | 'contract_number' | 'subject' | 'amount' | 'customer';
@@ -101,7 +103,7 @@ export function parseSignalFile(buffer: Buffer, kind: UploadKind): ParsedSignalR
     const name = String(picked.company_name ?? '').trim();
     if (!name) continue;
     const details: Record<string, unknown> =
-      kind === 'contracts'
+      kind === 'contracts' || kind === 'tenders'
         ? {
             contract_number: picked.contract_number ? String(picked.contract_number).trim() : null,
             subject: picked.subject ? String(picked.subject).trim() : null,
@@ -165,9 +167,12 @@ export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, fresh
 
   const now = Date.now();
   const day = 86_400_000;
+  const sinceDate = new Date(now - freshnessDays * day).toISOString().slice(0, 10);
   const activeUploads = (uploads ?? []).filter((u) => {
     if (kind === 'growth') return true;
-    if (kind !== 'exhibitors') return true;
+    // Контракт в окне опубликован не раньше sinceDate, а загрузка сделана после него.
+    // Отсекаем старые загрузки, иначе ежедневные из ГосПлана раздувают список id в запросе.
+    if (kind !== 'exhibitors') return String(u.created_at ?? '').slice(0, 10) >= sinceDate;
     if (!u.event_start) return false;
     const start = new Date(String(u.event_start)).getTime();
     const end = u.event_end ? new Date(String(u.event_end)).getTime() : start;
@@ -184,8 +189,7 @@ export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, fresh
       .select('id,upload_id,kind,company_name,company_website,inn,details,record_url,record_date')
       .in('upload_id', Array.from(uploadById.keys()))
       .range(from, from + PAGE - 1);
-    const sinceDate = new Date(now - freshnessDays * day).toISOString().slice(0, 10);
-    if (kind === 'contracts') q = q.gte('record_date', sinceDate);
+    if (kind === 'contracts' || kind === 'tenders') q = q.gte('record_date', sinceDate);
     const { data, error } = await q;
     if (error) throw new Error(`signal rows load failed: ${error.message}`);
     for (const r of data ?? []) {

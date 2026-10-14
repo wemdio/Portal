@@ -7,6 +7,8 @@
  * stops hammering the API for a while. This module owns:
  *
  *   - error detection from raw thrown values (`detectAccountCooldownError`)
+ *   - the one signal that is NOT a cooldown: Unipile refused access
+ *     (`isUnipileAuthFailure`) — the runner pauses campaigns instead
  *   - cooldown durations per signal kind (`COOLDOWN_MINUTES`)
  *   - small helpers used by both the campaign runner and the scraper
  *
@@ -109,6 +111,23 @@ export function detectAccountCooldownError(err: unknown): AccountCooldownDetecti
   }
 
   return null;
+}
+
+/**
+ * Unipile отказал в доступе — HTTP 401. На проде встречались два вида:
+ * `errors/invalid_credentials` (недействителен наш ключ Unipile или вход в
+ * аккаунт) и `errors/disconnected_account` (аккаунт отключён от Unipile).
+ * Само это не проходит ни через час, ни через месяц: нужен человек.
+ *
+ * Поэтому это не отлёжка. С 09.09.2026 все три аккаунта YouGo получали
+ * invalid_credentials на каждый вызов, а кампании месяц числились запущенными:
+ * раннер каждые пару минут заново открывал чат тем же пятерым лидам (~6700
+ * отказов), часть лидов ушла в 'error', а ежедневный отчёт записал всё это в
+ * «прочие ошибки». Раннер по этому признаку ставит кампании аккаунта на паузу
+ * и шлёт оповещение.
+ */
+export function isUnipileAuthFailure(err: unknown): err is UnipileError {
+  return err instanceof UnipileError && err.status === 401;
 }
 
 /**

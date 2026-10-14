@@ -5,6 +5,8 @@ export type CampaignStatus = 'draft' | 'running' | 'paused' | 'done';
 export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' | 'finished' | 'stopped';
 export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled' | 'unknown';
 export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
+/** Кто создал рассылку: человек в форме или заливка автоаутрича RU / EN. */
+export type CampaignSourceKind = 'manual' | 'polza_ru' | 'polza_en';
 
 /** password — пароль приложения из выгрузки; google_sa — ключ служебного аккаунта. */
 export type MailboxAuthType = 'password' | 'google_sa';
@@ -29,8 +31,12 @@ export interface MailboxRow {
   google_state: 'active' | 'suspended' | 'missing' | null;
   /** Админ Workspace, из чьего каталога пришёл ящик (их может быть несколько). */
   google_account: string | null;
+  /** Адрес отправки, за которым закреплён ящик; null — ещё не выдан. */
+  egress_ip: string | null;
   status: MailboxStatus;
+  /** «Новых в день»: первые письма с ящика за сутки UTC (планировщик). */
   daily_campaign_limit: number;
+  /** «Всего в день»: все письма цепочек с ящика за сутки UTC (планировщик). */
   daily_total_limit: number;
   last_verified_at: string | null;
   last_error: string | null;
@@ -51,12 +57,19 @@ export interface CampaignRow {
   gap_seconds: number;
   gap_jitter_seconds: number;
   started_at: string | null;
+  /** Папка на экране рассылок (sender_folders); null — ручная кампания вне папок. */
+  folder_id: string | null;
+  source_kind: CampaignSourceKind;
+  /** Запуск автоаутрича (parser_jobs.id), из которого залиты получатели. */
+  source_job_id: string | null;
 }
 
 export interface StepRow {
   id: string;
   campaign_id: string;
   step_no: number;
+  /** Вариант письма этого шага (А/Б-тест); без теста всегда 1. */
+  variant_no: number;
   /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
   delay_hours: number;
   subject: string;
@@ -74,6 +87,12 @@ export interface RecipientRow {
   last_step_sent: number;
   next_step_at: string | null;
   thread_message_id: string | null;
+  /**
+   * Адреса одной компании (заливка автоаутрича: id строки). Первое письмо —
+   * с того же ящика, что у соседей, и не раньше суток после их первого письма
+   * (planner.ts). null — ручная база, правило не действует.
+   */
+  group_key?: string | null;
 }
 
 export interface MessageRow {

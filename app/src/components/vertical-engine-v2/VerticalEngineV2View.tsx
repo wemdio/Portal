@@ -32,7 +32,7 @@ import { StatusDot } from './engine/design';
  * токены --ve2-*. Сам CSS подключается в роуте: app/tools/vertical-engine-v2/page.tsx.
  */
 
-type Tab = 'projects' | 'queue' | 'archive' | 'review';
+type Tab = 'projects' | 'archive' | 'review';
 
 function ErrorNotice({ message }: { message: string }) {
   return (
@@ -178,7 +178,6 @@ export function VerticalEngineV2View() {
 
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
     { id: 'projects', label: 'Проекты', count: projects.length },
-    { id: 'queue', label: 'Очередь запусков' },
     { id: 'archive', label: 'Архив', count: archive.length },
     ...(canManageArchive
       ? [
@@ -212,20 +211,19 @@ export function VerticalEngineV2View() {
   };
 
   // Когда открыт проект — мастер в фокусе, хром оболочки не нужен.
-  const showChrome = !((tab === 'projects' || tab === 'queue') && projectOpen);
+  const showChrome = !(tab === 'projects' && projectOpen);
 
   const activeTabContent = (
     <>
       {error ? <ErrorNotice message={error} /> : null}
 
-      {tab === 'projects' || tab === 'queue' ? (
+      {tab === 'projects' ? (
         <VeEngineWorkspace
-          view={tab === 'queue' ? 'launch-queue' : 'projects'}
           onProjectOpenChange={setProjectOpen}
         />
       ) : null}
 
-      {loading && tab !== 'projects' && tab !== 'queue' ? (
+      {loading && tab !== 'projects' ? (
         <div className="ve2-card ve2-mut p-10 text-center">Загружаем изолированный контур…</div>
       ) : null}
 
@@ -265,7 +263,7 @@ export function VerticalEngineV2View() {
                     <h1 className="ve2-h1">Автоаутрич</h1>
                   </div>
                   <p className="ve2-lead mt-2 max-w-2xl">
-                    Выберите гипотезы, согласуйте письма и базы — дальше система пополняет кампании автоматически.
+                    Выберите базы и согласуйте письма — система подготовит кампании. Отправку запускает специалист в Instantly.
                   </p>
                 </div>
                 <a
@@ -305,7 +303,7 @@ export function VerticalEngineV2View() {
           const active = tab === item.id;
           return (
             <div
-              // Активная панель сохраняет один key при переходе Проекты ↔ Очередь
+              // Активная панель сохраняет один key при переходе между разделами
               // и при скрытии shell chrome. Так VeEngineWorkspace не размонтируется
               // и не теряет форму создания или открытый ProjectDetail.
               key={active ? '__active_panel__' : item.id}

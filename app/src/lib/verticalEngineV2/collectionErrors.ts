@@ -38,6 +38,26 @@ export function isVeTransientDirectoryError(error: unknown): boolean {
     && /\b(?:408|429|5\d\d)\b|timeout|tim(?:ed|ing)\s+out|econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up/i.test(message);
 }
 
+/** Only read failures of the existing catalog: never billing, access or filter errors. */
+export function isVeTransientCatalogError(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /(?:yandex_maps catalog (?:read|dictionary|count):|Yandex catalog (?:page|dictionary|rubric check))/i.test(message)
+    && !/\b(?:400|401|402|403|404|422)\b|permission denied|unauthori[sz]ed|forbidden/i.test(message)
+    && /\b(?:408|429|5\d\d)\b|invalid response was received from the upstream server|timeout|tim(?:ed|ing)\s+out|econnreset|econnrefused|etimedout|enotfound|eai_again|connection lost|network|fetch failed|socket hang up/i.test(message);
+}
+
+/** Explicit continuation can retry a restored gateway without buying a new base.
+ * An HTML nginx 404 is NOT transient: automatic retries must still reject it.
+ * Structured 404s (missing RPC/table), authentication and bad filters stay errors.
+ */
+export function isVeResumableDirectoryError(error: unknown): boolean {
+  if (isVeTransientDirectoryError(error)) return true;
+  const message = errorMessage(error);
+  return /\bcompanies_directory:/i.test(message)
+    && /<html\b/i.test(message) && /\b404 Not Found\b/i.test(message)
+    && /\bnginx(?:\/|<)/i.test(message);
+}
+
 export interface VeCollectionFailure {
   kind: 'billing' | 'configuration' | 'provider' | 'incomplete_checks' | 'name_cleanup' | 'source' | 'unknown';
   message: string;

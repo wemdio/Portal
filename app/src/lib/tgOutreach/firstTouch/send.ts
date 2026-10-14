@@ -18,6 +18,10 @@ import {
 import { classifyRestriction, describeRestriction } from '../restriction';
 import { withTimeout } from '../withTimeout';
 import { expandSpintax } from './spintax';
+import { formatFirstTouch } from './formatText';
+import { ATTACHMENTS_BUCKET, resolveContactAttachment, type BaseAttachment } from './attachments';
+import { CustomFile } from 'telegram/client/uploads';
+import { NICK_MISSING_REASON, normalizeNick, shouldReportTmeDown, type TmeCheck } from '../usernameExists';
 
 /**
  * Сроки на вызовы Telegram в первом касании — та же причина, что в боевом
@@ -91,6 +95,14 @@ export interface SendBatchArgs {
    * По умолчанию замка нет — для одиночного вызова он не нужен.
    */
   claimLock?: <T>(fn: () => Promise<T>) => Promise<T>;
+  /**
+   * Проверка ников по t.me — со стороны, без наших аккаунтов (usernameExists).
+   *
+   * Разводит два случая, которые по ответу аккаунта неразличимы: ника нет
+   * вовсе или аккаунт заморожен и не видит живых. Без неё решаем по-старому,
+   * только по ответам аккаунта — так работают тесты и одиночные вызовы.
+   */
+  checkUsernames?: (usernames: string[]) => Promise<TmeCheck>;
 }
 
 export interface SendBatchResult {
@@ -109,6 +121,14 @@ export interface SendBatchResult {
    * кампании — он видит историю аккаунта, а порция видит только себя.
    */
   resolveBlocked: boolean;
+  /**
+   * Сколько ников «слепой» порции точно существуют — по t.me.
+   *
+   * Больше нуля — вывод о заморозке уже не косвенный: аккаунт не нашёл людей,
+   * которые в Telegram есть. Ноль при `resolveBlocked` — проверить ники не
+   * удалось, и вывод остаётся догадкой по одним ответам аккаунта.
+   */
+  blindOnExisting: number;
 }
 
 /** Начало текущих суток по времени сервера — для дневной нормы. */
@@ -350,7 +370,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
    */
   const log: LogFn = (level, message) => args.log(level, `Аккаунт ${account.session_name}: ${message}`);
 
-  const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0, resolveBlocked: false };
+  const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0, resolveBlocked: false, blindOnExisting: 0 };
   const maxChars = resolveMaxChars(args.maxChars);
   const resolveTimeoutMs = args.resolveTimeoutMs ?? FT_RESOLVE_TIMEOUT_MS;
   const sendTimeoutMs = args.sendTimeoutMs ?? FT_SEND_TIMEOUT_MS;
@@ -414,6 +434,20 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   /** Окно выборки: с запасом, чтобы добор не ходил в базу на каждый контакт. */
   const WINDOW = quota * 6;
 
+  // Файлы к первому сообщению у баз аккаунта; содержимое качаем из хранилища
+  // один раз на порцию — картинка у базы обычно одна на всех.
+  const baseAttachments = await fdb.loadBaseAttachments(db, baseIds);
+  const fileCache = new Map<string, Buffer>();
+  const fileBuffer = async (a: BaseAttachment): Promise<Buffer> => {
+    const cached = fileCache.get(a.storage_path);
+    if (cached) return cached;
+    const { data, error } = await db.storage.from(ATTACHMENTS_BUCKET).download(a.storage_path);
+    if (error || !data) throw new Error(error?.message ?? 'пустой ответ хранилища');
+    const buf = Buffer.from(await data.arrayBuffer());
+    fileCache.set(a.storage_path, buf);
+    return buf;
+  };
+
   const claimed = args.claimed ?? new Set<string>();
   const withClaimLock = args.claimLock ?? (<T,>(fn: () => Promise<T>) => fn());
   // RPC USERNAME_NOT_OCCUPIED неоднозначен: так Telegram отвечает и за мёртвый
@@ -468,8 +502,20 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
        * Разворот на каждый контакт, а не на порцию: смысл в том, чтобы соседние
        * получатели видели разные формулировки.
        */
-      const messageText = expandSpintax(contact.message);
-      const check = validateFirstTouch(messageText, maxChars);
+      // Разметку (**жирный**, <u>подчёркнутый</u>, ссылки) разбираем сами: длину
+      // проверяем по тому, что увидит человек, а не по тексту с маркерами.
+      const formatted = formatFirstTouch(expandSpintax(contact.message));
+      const messageText = formatted.text;
+      const attachmentPick = resolveContactAttachment(contact.attachment_name, baseAttachments.filter((a) => a.base_id === contact.base_id));
+      if (attachmentPick.kind === 'missing') {
+        const why = `в таблице указан файл «${attachmentPick.name}», а к базе он не загружен`;
+        const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
+        log('warning', `Первое касание: @${contact.username} отложен — ${why}${attemptNote(outcome)}`);
+        result.postponed++;
+        continue;
+      }
+      const attachment = attachmentPick.kind === 'file' ? attachmentPick.attachment : null;
+      const check = validateFirstTouch(messageText, maxChars, { withAttachment: Boolean(attachment) });
       if (!check.ok) {
         const why = describeFailure(check.reason, maxChars);
         const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
@@ -580,9 +626,32 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         continue;
       }
 
+      let fileData: Buffer | null = null;
+      if (attachment) {
+        try {
+          fileData = await fileBuffer(attachment);
+        } catch (err) {
+          // Хранилище не отдало файл — вина наша, а не контакта: попытку не
+          // списываем, контакт остаётся в очереди до следующего круга.
+          log('error', `Первое касание: @${contact.username} не отправлен — не смог взять файл «${attachment.file_name}» из хранилища: ${err instanceof Error ? err.message : String(err)}`);
+          result.postponed++;
+          continue;
+        }
+      }
+
       try {
         await withTimeout(
-          client.sendMessage(`@${contact.username}`, { message: messageText }),
+          attachment && fileData
+            // Файл и текст — одним сообщением: текст подписью под картинкой
+            // или документом. Два сообщения подряд от незнакомца больше похожи
+            // на спам.
+            ? client.sendFile(`@${contact.username}`, {
+                file: new CustomFile(attachment.file_name, fileData.length, '', fileData),
+                caption: messageText,
+                formattingEntities: formatted.entities,
+                forceDocument: attachment.kind === 'document',
+              })
+            : client.sendMessage(`@${contact.username}`, { message: messageText, formattingEntities: formatted.entities }),
           sendTimeoutMs,
           'отправка первого сообщения',
         );
@@ -674,7 +743,15 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         tg_username: contact.username,
         // В историю — отправленный вариант, а не шаблон: дальше по нему
         // отвечает модель, и она должна видеть то же, что и собеседник.
-        messages: [{ role: 'assistant', content: messageText, timestamp: nowIso }],
+        // Про файл — пометкой: модель должна знать, что человек видел картинку
+        // или документ, если он о них спросит.
+        messages: [{
+          role: 'assistant',
+          content: attachment ? `${messageText}
+
+[к сообщению приложен файл: ${attachment.file_name}]` : messageText,
+          timestamp: nowIso,
+        }],
         status: 'none',
         can_send: true,
         last_message_at: nowIso,
@@ -685,7 +762,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       );
       await fdb.markContactSent(db, contact.id, account.id, tgUserId);
 
-      log('info', `Первое касание: отправлено @${contact.username}`);
+      log('info', `Первое касание: отправлено @${contact.username}${attachment ? ` (с файлом «${attachment.file_name}»)` : ''}`);
       result.sent++;
     }
 
@@ -695,18 +772,61 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
     if (!resolvedAny && notOccupied.length >= RESOLVE_GIVE_UP) break;
   }
 
-  // Решаем судьбу буфера «юзернейм не найден» по итогу всего круга.
+  /**
+   * Сначала спрашиваем про сами ники — у t.me, в обход аккаунта.
+   *
+   * Ответ аккаунта «юзернейм не найден» одинаков для мёртвого ника и для
+   * живого, которого не видит замороженный номер, а t.me от наших аккаунтов не
+   * зависит. Ника там нет — контакт выбывает сразу и аккаунту в вину не
+   * ставится. 24–28.09.2026 четыре таких ника, оставшихся в хвосте базы ATOL-1,
+   * по очереди отправили на суточную паузу все 50 аккаунтов кампании: каждый
+   * брал из очереди те же четыре ника, не находил их и считался замороженным.
+   *
+   * Ник есть, а аккаунт его не нашёл — это уже не догадка, а довод против
+   * аккаунта: такой контакт остаётся в очереди для других номеров.
+   */
+  let unresolved = notOccupied;
+  let existingUnseen = 0;
+  if (notOccupied.length && args.checkUsernames) {
+    const tme = await args.checkUsernames(notOccupied.map(({ contact }) => contact.username));
+    if (tme.working) {
+      const kept: typeof notOccupied = [];
+      for (const item of notOccupied) {
+        const verdict = tme.verdicts.get(normalizeNick(item.contact.username)) ?? 'unknown';
+        if (verdict === 'missing') {
+          await fdb.markContactSkipped(db, item.contact.id, NICK_MISSING_REASON);
+          log('info', `Первое касание: @${item.contact.username} пропущен — такого ника нет в Telegram (проверил по t.me). Больше не пробуем.`);
+          result.skipped++;
+          continue;
+        }
+        if (verdict === 'exists') existingUnseen++;
+        kept.push(item);
+      }
+      unresolved = kept;
+    } else if (shouldReportTmeDown(campaignId)) {
+      log(
+        'warning',
+        'Проверить ники по t.me не удалось: сервер не достучался до t.me или страница поменяла вид. ' +
+          'Пока решаю по-старому — только по ответам аккаунта.',
+      );
+    }
+  }
+
+  // Решаем судьбу оставшихся «юзернейм не найден» по итогу всего круга.
   //
-  // Ни один ник за круг не нашёлся (и таких было хотя бы два) — подозрение,
-  // что заморожен наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное
-  // явление, а урезанный аккаунт отдаёт этот ответ на каждый резолв.
+  // Ни один ник за круг не нашёлся — подозрение, что заморожен наш аккаунт, а
+  // не что база мёртвая. Хватает одного ника, про который t.me подтвердил, что
+  // он существует; без такой проверки — двух, как раньше: мёртвый ник —
+  // одиночное явление, а урезанный аккаунт отдаёт этот ответ на каждый резолв.
   // Подозрение проверяем у @SpamBot и только подтверждённое считаем
   // ограничением.
   //
   // Если же хоть один ник за круг нашёлся, аккаунт доказал делом, что резолв у
   // него работает, — и тогда «не найден» это уже про контакт: откладываем с
   // попыткой (ветка else), но навсегда не сжигаем.
-  if (notOccupied.length >= 2 && !resolvedAny) {
+  const blind = !resolvedAny && unresolved.length > 0 && (existingUnseen > 0 || unresolved.length >= 2);
+  if (blind) {
+    result.blindOnExisting = existingUnseen;
     /**
      * Тот же ответ Telegram («юзернейм не найден») означает две разные вещи:
      * мёртвый ник в базе или живой ник, который не видит урезанный аккаунт.
@@ -732,7 +852,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
           `Аккаунт на паузе до ${cooldownLabel(parked.untilIso)}, ` +
           `контакты остаются в очереди, попытки им не засчитываем.`,
       );
-      result.postponed += notOccupied.length;
+      result.postponed += unresolved.length;
     } else if (parked.reason === 'write_failed') {
       // Пауза не записалась — про аккаунт мы по-прежнему ничего не знаем.
       // Списывать за это попытку контактам нельзя: они ни при чём.
@@ -741,7 +861,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         'Весь резолв порции вернул «юзернейм не найден», но паузу не удалось сохранить в базе. ' +
           'Контакты оставляю в очереди нетронутыми.',
       );
-      result.postponed += notOccupied.length;
+      result.postponed += unresolved.length;
     } else {
       /**
        * Порция не резолвнулась целиком, а бот ограничения не подтвердил.
@@ -753,26 +873,31 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
        * спокойно уходили с исправных номеров. Поэтому контакты здесь не
        * трогаем: неизвестность не повод портить базу.
        *
-       * Мёртвые ники всё равно выбывают — но по другой ветке (ниже), где
-       * аккаунт доказал делом, что резолвить умеет: часть порции у него
-       * прошла, а этот ник нет.
+       * Мёртвые ники всё равно выбывают — по t.me (выше) или по другой ветке
+       * (ниже), где аккаунт доказал делом, что резолвить умеет: часть порции у
+       * него прошла, а этот ник нет.
        */
       log(
         'warning',
-        'Весь резолв порции вернул «юзернейм не найден», ограничения @SpamBot не подтвердил. ' +
-          'Кто виноват — аккаунт или ники — по одной порции не понять, поэтому контакты ' +
-          'оставляю в очереди нетронутыми. Если повторится ещё круг, круг кампании уведёт ' +
-          'аккаунт на паузу.',
+        existingUnseen > 0
+          ? `Аккаунт не нашёл ни одного ника из порции, хотя ${existingUnseen} из них точно есть в Telegram ` +
+              '(проверил по t.me). Так выглядит заморозка: @SpamBot про неё не знает и ограничений не ' +
+              'подтвердил. Контакты оставляю в очереди для других аккаунтов. Если повторится ещё круг, ' +
+              'круг кампании уведёт аккаунт на паузу.'
+          : 'Весь резолв порции вернул «юзернейм не найден», ограничения @SpamBot не подтвердил. ' +
+              'Кто виноват — аккаунт или ники — по одной порции не понять, поэтому контакты ' +
+              'оставляю в очереди нетронутыми. Если повторится ещё круг, круг кампании уведёт ' +
+              'аккаунт на паузу.',
       );
       result.resolveBlocked = true;
-      result.postponed += notOccupied.length;
+      result.postponed += unresolved.length;
       // Отметку «этот контакт уже разобран» с них снимаем: её ставит тот, кто
       // может судить о нике, а слепой аккаунт не может. Пусть в этом же круге
       // их попробует следующий — на исправном номере такой ник обычно уходит.
-      for (const { contact } of notOccupied) claimed.delete(contact.id);
+      for (const { contact } of unresolved) claimed.delete(contact.id);
     }
   } else {
-    for (const { contact, attempts } of notOccupied) {
+    for (const { contact, attempts } of unresolved) {
       const outcome = await fdb.recordContactFailure(
         db,
         contact.id,

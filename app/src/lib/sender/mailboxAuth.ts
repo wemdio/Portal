@@ -22,7 +22,7 @@ export type MailboxAuthResult =
 export async function authForMailbox(mailbox: MailboxRow): Promise<MailboxAuthResult> {
   if (mailbox.auth_type === 'google_sa') {
     try {
-      const token = await accessTokenForMailbox(mailbox.email);
+      const token = await accessTokenForMailbox(mailbox.email, mailbox.google_account);
       const auth: MailboxAuth = { kind: 'oauth', accessToken: token };
       return { ok: true, smtp: auth, imap: auth };
     } catch (e) {

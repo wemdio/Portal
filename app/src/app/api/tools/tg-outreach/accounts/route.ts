@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { accountRestUntilIso } from '@/lib/tgOutreach/accountRest';
 
 export const dynamic = 'force-dynamic';
 
@@ -57,6 +58,7 @@ export async function POST(req: NextRequest) {
       const apiHash = (body.api_hash as string)?.trim();
       if (!apiId || !apiHash) return jsonError('api_id и api_hash обязательны', 400);
 
+      const restUntil = accountRestUntilIso();
       const { data, error } = await auth.supabase
         .from('tg_outreach_accounts')
         .insert({
@@ -73,6 +75,9 @@ export async function POST(req: NextRequest) {
               : Number(body.price),
           session_data: (body.session_data as string) ?? '',
           is_active: body.is_active !== false,
+          // Отлёжка после загрузки (lib/tgOutreach/accountRest.ts): свежий
+          // аккаунт не идёт в боевую рассылку первые часы, прогрев можно.
+          profile_rest_until: restUntil,
         })
         .select()
         .single();

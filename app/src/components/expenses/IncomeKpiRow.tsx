@@ -1,7 +1,7 @@
 'use client';
 
 import { DeltaTile, Tile } from '@/components/expenses/KpiTile';
-import { formatCurrencyMap, formatRub, pluralOps } from '@/lib/expenses/client';
+import { formatCurrencyMap, formatForeignNote, formatRub, pluralOps } from '@/lib/expenses/client';
 import type { IncomesSummary } from '@/lib/expenses/types';
 
 /**
@@ -15,13 +15,21 @@ import type { IncomesSummary } from '@/lib/expenses/types';
  */
 export default function IncomeKpiRow({ summary }: { summary: IncomesSummary }) {
   const unconvertedTone = summary.unconvertedCount > 0 ? 'warning' : 'normal';
+  const foreignNote = formatForeignNote(summary.foreignByCurrency);
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       <Tile
         label="Доход за период"
         value={`${formatRub(summary.total)} ₽`}
-        sub="Клиентские платежи, без возвратов и переводов себе"
+        sub={
+          <>
+            {/* Справка, сколько из рублёвого итога пришло валютой (крипта) —
+                итог остаётся в рублях по курсу ЦБ. */}
+            {foreignNote ? <span className="block text-zinc-500">{foreignNote}</span> : null}
+            Клиентские платежи, без возвратов и переводов себе
+          </>
+        }
       />
       <Tile label="В среднем в день" value={`${formatRub(summary.avgPerDay)} ₽`} />
 

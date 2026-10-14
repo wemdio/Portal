@@ -9,6 +9,16 @@
  * database client are the real ones.
  */
 jest.mock('server-only', () => ({}));
+jest.mock('@/lib/verticalEngineV2/llm', () => ({
+  ...jest.requireActual('@/lib/verticalEngineV2/llm'),
+  callLLMWithSchema: jest.fn(),
+}));
+
+import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
+import { runBaseAnalyzeStage } from '@/lib/verticalEngineV2/stages/baseAnalyze';
+import { readVeCollectionContinuationCache } from '@/lib/verticalEngineV2/collectionContinuationCache';
+import type { VeJob } from '@/lib/verticalEngineV2/types';
+import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 
 process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://db.example.test';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test';
@@ -18,7 +28,7 @@ type Row = Record<string, unknown>;
 const mockLogs: string[] = [];
 const mockTransitions: Row[] = [];
 const mockUpdates: Array<{ table: string; values: Row }> = [];
-const mockState = { jobStatus: 'running' };
+const mockState = { jobStatus: 'running', transitionFailures: 0, completionFailures: 0, baseFailures: 0, stopped: false };
 const mockPool: { run?: (job: unknown) => Promise<void> } = {};
 const mockRunVeStage = jest.fn();
 
@@ -29,8 +39,17 @@ function mockDb() {
     let columns = '';
     let values: Row = {};
     const result = () => {
-      if (op !== 'select') { mockUpdates.push({ table, values }); return { data: { id: 'x' }, error: null }; }
-      if (table === 've_jobs' && columns === 'status') return { data: { status: mockState.jobStatus }, error: null };
+      if (op !== 'select') {
+        mockUpdates.push({ table, values });
+        if (table === 've_jobs' && values.status === 'done') {
+          mockState.jobStatus = 'done';
+          // Commit succeeded; its response was lost.
+          if (mockState.completionFailures-- > 0) return { data: null, error: { message: 'fetch failed' } };
+        }
+        if (table === 've_bases' && mockState.baseFailures-- > 0) return { data: null, error: { message: 'fetch failed' } };
+        return { data: { id: 'x' }, error: null };
+      }
+      if (table === 've_jobs' && columns.startsWith('status')) return { data: { status: mockState.jobStatus, started_at: null }, error: null };
       if (table === 've_jobs') return { data: [], error: null };
       if (table === 've_projects') return { data: { market: 'ru', tokens_used: 0, cost_usd: 0 }, error: null };
       return { data: null, error: null };
@@ -52,7 +71,7 @@ function mockDb() {
 jest.mock('../../../worker/_shared', () => ({
   createWorkerLogger: () => (level: string, msg: string) => { mockLogs.push(`${level} ${msg}`); },
   requireSupabaseAdmin: () => mockDb(),
-  setupGracefulShutdown: () => () => false,
+  setupGracefulShutdown: () => () => mockState.stopped,
   pollLoop: () => new Promise(() => {}),
   startWorkerHeartbeat: () => undefined,
 }));
@@ -71,7 +90,13 @@ jest.mock('@/lib/verticalEngineV2/jobQueue', () => ({
   },
 }));
 jest.mock('@/lib/verticalEngineV2/jobFailureTransition', () => ({
-  transitionVeJobFailure: async (_db: unknown, input: Row) => { mockTransitions.push(input); return { transitioned: true, error: null }; },
+  ...jest.requireActual('@/lib/verticalEngineV2/jobFailureTransition'),
+  transitionVeJobFailure: async (_db: unknown, input: Row) => {
+    mockTransitions.push(input);
+    if (mockState.transitionFailures-- > 0) return { transitioned: false, error: 'fetch failed' };
+    mockState.jobStatus = String(input.status);
+    return { transitioned: true, error: null };
+  },
 }));
 jest.mock('@/lib/verticalEngineV2/contactDeliveryScheduler', () => ({
   createGuardedContactDeliveryTick: () => async () => false,
@@ -120,6 +145,8 @@ beforeEach(() => {
   mockTransitions.length = 0;
   mockUpdates.length = 0;
   mockState.jobStatus = 'running';
+  mockState.transitionFailures = mockState.completionFailures = mockState.baseFailures = 0;
+  mockState.stopped = false;
   mockRunVeStage.mockReset();
   global.fetch = realFetch;
 });
@@ -131,6 +158,116 @@ async function runJob(claimed: ReturnType<typeof job>, advanceMs: number): Promi
 }
 
 describe('VE2 worker: hangs do not spend attempts', () => {
+  it('retains a failed invocation until DB finalization recovers, respects cancellation, and does not replay a completed stage', async () => {
+    for (const cancelled of [false, true]) {
+      mockState.jobStatus = 'running';
+      mockState.transitionFailures = 2;
+      mockTransitions.length = 0;
+      mockUpdates.length = 0;
+      mockRunVeStage.mockReset().mockRejectedValue(new Error('terminal failure'));
+      let finished = false;
+      const pending = mockPool.run!(job()).then(() => { finished = true; });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(finished).toBe(false); // The queue lock remains held.
+      expect(mockTransitions).toHaveLength(1);
+      if (cancelled) mockState.jobStatus = 'cancelled';
+      await jest.advanceTimersByTimeAsync(60_000);
+      await pending;
+      expect(mockRunVeStage).toHaveBeenCalledTimes(1);
+      expect(mockState.jobStatus).toBe(cancelled ? 'cancelled' : 'failed');
+      expect(mockTransitions).toHaveLength(cancelled ? 1 : 3);
+      expect(mockTransitions.every((t) => t.attempts === 5)).toBe(true);
+      expect(mockUpdates.filter((u) => u.table === 've_bases')).toHaveLength(cancelled ? 0 : 1);
+    }
+    // Failure of the second write (base status), after the job failure committed.
+    mockState.jobStatus = 'running';
+    mockState.transitionFailures = 0;
+    mockState.baseFailures = 1;
+    mockRunVeStage.mockReset().mockRejectedValue(new Error('terminal failure'));
+    await runJob(job(), 60_000);
+    expect(mockRunVeStage).toHaveBeenCalledTimes(1);
+    expect(mockState.jobStatus).toBe('failed');
+
+    // Success was already paid and done committed: retry only its bookkeeping.
+    mockState.jobStatus = 'running';
+    mockState.completionFailures = 1;
+    mockTransitions.length = 0;
+    mockUpdates.length = 0;
+    mockRunVeStage.mockReset().mockResolvedValue({ result: { rows: 20 }, tokensUsed: 10, costUsd: 0.01 });
+    await runJob(job(), 60_000);
+    expect(mockRunVeStage).toHaveBeenCalledTimes(1);
+    expect(mockState.jobStatus).toBe('done');
+    expect(mockTransitions).toEqual([]);
+    expect(mockUpdates.filter((u) => u.table === 've_projects')).toHaveLength(1);
+    expect(mockUpdates.filter((u) => u.table === 've_jobs' && u.values.status === 'done')).toHaveLength(1);
+
+    // The paid analysis completes once even when its optional continuation
+    // cache loses a race. Model the DB trigger, including unchanged timestamps.
+    for (const scenario of ['available', 'target', 'before_start', 'during_analysis', 'before_cache',
+      'cache_error', 'missing_start', 'missing_finish', 'legacy'] as const) {
+      let row: Row = { id: BASE_ID, project_id: 'p1', hypothesis_id: 'h1', source: 'auto',
+        status: 'analyzing', updated_at: '2026-10-13T12:00:00Z', collection_continuation_revision: 7,
+        max_emails_per_company: null, contact_cap_applied: null, columns: [], sample_rows: [], row_count: 100,
+        collect_info: { collection_mode: 'preview', target_progress: { ready_rows: scenario === 'target' ? 500 : 100,
+          ready_target: 500, status: 'limited', round: 1, candidates_processed: 200, max_candidates: 10_000 },
+          target_checkpoint: { completed_round: 1 }, tasks: [{ source: 'companies_directory', status: 'pending',
+            task: { source: 'companies_directory', rationale: 'Каталог', directory_filters: { okvedCodes: ['58'] } } }] } };
+      if (scenario === 'legacy') delete row.collection_continuation_revision;
+      const queries: Array<{ columns: string; patch: Row | null }> = [];
+      const race = () => { row = { ...row, collect_info: {}, collection_continuation: null,
+        collection_continuation_revision: Number(row.collection_continuation_revision) + 1 }; };
+      const db = { from: (table: string) => {
+        expect(table).toBe('ve_bases');
+        let columns = '', patch: Row | null = null;
+        const filters: Array<[string, unknown]> = [];
+        const result = () => {
+          queries.push({ columns, patch });
+          if ((scenario === 'before_start' && patch?.status === 'analyzing')
+            || (scenario === 'before_cache' && patch?.collection_continuation)) race();
+          if (scenario === 'cache_error' && patch?.collection_continuation) throw new Error('cache unavailable');
+          if (!filters.every(([key, value]) => row[key] === value)) return { data: null, error: null };
+          if (patch) {
+            row = { ...row, ...patch };
+            if ('status' in patch) row = { ...row, collection_continuation: null,
+              collection_continuation_revision: Number(row.collection_continuation_revision) + 1 };
+            if ((scenario === 'missing_start' && patch.status === 'analyzing')
+              || (scenario === 'missing_finish' && patch.status === 'analyzed')) return { data: null, error: null };
+          }
+          const data = columns && columns !== '*' ? Object.fromEntries(columns.split(',').map((key) => [key, row[key]])) : row;
+          return { data: structuredClone(data), error: null };
+        };
+        const builder: Row = new Proxy({}, { get(_target, prop) {
+          if (prop === 'then') return (resolve: (value: unknown) => void, reject: (error: unknown) => void) => Promise.resolve().then(result).then(resolve, reject);
+          if (prop === 'single' || prop === 'maybeSingle') return () => Promise.resolve().then(result);
+          if (prop === 'select') return (value: string) => { columns = value; return builder; };
+          if (prop === 'update') return (value: Row) => { patch = value; return builder; };
+          if (prop === 'eq' || prop === 'is') return (key: string, value: unknown) => { filters.push([key, value]); return builder; };
+          throw new Error(`Unexpected query operation ${String(prop)}`);
+        } });
+        return builder;
+      } };
+      jest.mocked(callLLMWithSchema).mockReset().mockImplementation(async () => {
+        if (scenario === 'during_analysis') race();
+        return { data: { data_quality_notes: 'Сохранённый анализ' }, tokensUsed: 10, costUsd: 0.01 } as never;
+      });
+      const result = await runBaseAnalyzeStage({ ...job(), stage: 'base_analyze' } as VeJob,
+        { supabase: db, market: 'us' } as unknown as VeStageContext);
+      expect(result.result).toEqual({ data_quality_notes: 'Сохранённый анализ' });
+      expect(row.status).toBe('analyzed');
+      expect(callLLMWithSchema).toHaveBeenCalledTimes(1);
+      expect(queries.filter((query) => !query.patch).map((query) => query.columns)).toEqual(['*']);
+      expect(queries.filter((query) => query.patch?.status).map((query) => query.patch?.status)).toEqual(['analyzing', 'analyzed']);
+      expect(queries.filter((query) => query.patch).every((query) => !query.columns.includes('collect_info') && query.columns !== '*')).toBe(true);
+      if (scenario === 'available' || scenario === 'target') {
+        expect(readVeCollectionContinuationCache(row)).toMatchObject({ available: scenario === 'available',
+          code: scenario === 'available' ? 'sources_available' : 'target_reached' });
+      } else expect(row.collection_continuation).toBeNull();
+      if (['before_start', 'during_analysis', 'missing_start', 'missing_finish', 'legacy'].includes(scenario)) {
+        expect(queries.some((query) => query.patch?.collection_continuation)).toBe(false);
+      }
+    }
+  });
+
   it('a stage whose database read stalls goes back to the queue with the same attempts', async () => {
     global.fetch = stalledBody() as unknown as typeof fetch;
     let readError = '';

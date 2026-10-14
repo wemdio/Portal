@@ -13,6 +13,8 @@ export interface MailboxSecret {
   imapPassword?: string;
   /** refresh-token для OAuth (auth_type='oauth_google'). */
   oauthRefreshToken?: string;
+  /** Прокси для входа по IMAP (контрольные ящики «Рассылки»): в нём логин и пароль прокси. */
+  proxyUrl?: string;
 }
 
 function getCipherKey(): string {
@@ -33,6 +35,7 @@ export function sealMailboxSecret(secret: MailboxSecret): string {
       smtpPassword: secret.smtpPassword,
       imapPassword: secret.imapPassword,
       oauthRefreshToken: secret.oauthRefreshToken,
+      proxyUrl: secret.proxyUrl,
     },
     getCipherKey(),
   );
@@ -45,5 +48,6 @@ export function unsealMailboxSecret(sealed: string): MailboxSecret {
     smtpPassword: decoded?.smtpPassword ? String(decoded.smtpPassword) : undefined,
     imapPassword: decoded?.imapPassword ? String(decoded.imapPassword) : undefined,
     oauthRefreshToken: decoded?.oauthRefreshToken ? String(decoded.oauthRefreshToken) : undefined,
+    proxyUrl: decoded?.proxyUrl ? String(decoded.proxyUrl) : undefined,
   };
 }

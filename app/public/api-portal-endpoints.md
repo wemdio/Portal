@@ -307,6 +307,7 @@ curl -X POST https://polza-portal.ru/api/bench/v1/search \
 | `search` | `queries`; `search_depth` |
 | `yandex-direct` | `keyword_mode` — manual / ai; `keywords` либо `audience`; `regions`; `niche` |
 | `inn-enrich` | `inns` — список ИНН строками |
+| `email-validation` | `emails` — список адресов, до 10 000 в задаче |
 | `company-base` *(поиск)* | `country`, `industry`, `size`, `name` |
 | `2gis` *(поиск)* | `cities`, `rubric_groups`, `name`, `has_phone`, `has_email`, `has_website` |
 | `our-bases` *(поиск)* | `region_codes`, `activity_types`, `okved_codes`, `legal_forms`, `has_phone`, `has_email` |
@@ -349,6 +350,11 @@ curl -X POST https://polza-portal.ru/api/bench/v1/search \
 | новых задач в сутки | только успешные постановки |
 | строк в сутки | сумма строк из `/results` и `/search` |
 | задач одновременно | незавершённые задачи по одному инструменту |
+
+У `email-validation` свои потолки поверх этих: до 10 000 адресов в задаче,
+до 30 000 адресов в сутки (`quota_exceeded`, в `details` — `used_today`) и
+одна незавершённая проверка за раз (`conflict`). Результаты проверки
+хранятся час после завершения — забирать сразу после `done`.
 
 Суточные нормы обнуляются в полночь по Москве. При превышении в `details`
 приходит `resets_at` — когда счётчик обнулится.

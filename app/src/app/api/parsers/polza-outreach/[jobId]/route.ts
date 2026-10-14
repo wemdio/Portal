@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { jobHasSenderUploads, UPLOADED_JOB_DELETE_MESSAGE } from '@/lib/outreachSender/deletion';
 
 export const dynamic = 'force-dynamic';
 
@@ -59,11 +60,23 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ jobId: st
   return NextResponse.json({ ok: true });
 }
 
+/**
+ * Удаление запуска вместе с журналом. Запуск, залитый в «Рассылку», не
+ * удаляется: его строки — память о том, что компаниям уже писали
+ * (outreachSender/deletion.ts), без неё следующий запуск нашёл бы их снова.
+ */
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await getSupabase(req);
   if ('error' in auth) return auth.error;
   const { supabase, user } = auth;
   const { jobId } = await ctx.params;
+
+  try {
+    if (await jobHasSenderUploads(supabase, 'en', jobId)) return jsonError(UPLOADED_JOB_DELETE_MESSAGE, 409);
+  } catch (e) {
+    await logError('parser.polza_outreach.job.delete.failed', e, { jobId }, { userId: user.id });
+    return jsonError(e instanceof Error ? e.message : 'Не удалось проверить запуск', 500);
+  }
 
   const { error } = await supabase.from('parser_jobs').delete().eq('id', jobId).eq('parser_type', 'polza_outreach');
   if (error) {

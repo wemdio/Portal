@@ -1,11 +1,19 @@
 import { buildReplyPrompt } from './buildPrompt';
 import { fetchCampaignSteps } from './campaignSequence';
-import { getGlobalKnowledgeBase, getGlobalSystemPrompt, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
+import {
+  getGlobalKnowledgeBase,
+  getGlobalSystemPrompt,
+  getKnowledgeBaseOrEmpty,
+  getProjectBrief,
+  insertDraft,
+  listSentDrafts,
+  resolveBrief,
+} from './db';
 import { generateReplyWithSearch } from './geminiClient';
-import { fetchFullThread } from './instantlyThread';
+import { fetchReplyThread, withSentDrafts } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
-import type { GenerateDraftResult, ThreadMessage } from './types';
+import type { GenerateDraftResult, ReplyLanguage, ThreadMessage } from './types';
 
 export class GenerateDraftError extends Error {
   constructor(message: string, public status = 400) {
@@ -36,6 +44,8 @@ export async function generateDraftForQualification(
   userId: string,
   /** Новый контакт из ответа адресата; null/пусто — ответ в ту же переписку. */
   recipientEmail: string | null = null,
+  /** Язык письма из переключателя в чате; по умолчанию русский. */
+  language: ReplyLanguage = 'ru',
 ): Promise<GenerateDraftResult> {
   const startedAt = Date.now();
 
@@ -46,35 +56,30 @@ export async function generateDraftForQualification(
     getGlobalSystemPrompt(),
   ]);
   // Карточка проекта в приоритете; её запасной вариант из модалки нужен, пока
-  // бриф там не заполнен, иначе ответить лиду сегодня было бы нечем. Без брифа
-  // ИИ не из чего взять суть продукта — это единственный повод отказать:
-  // тон и пример подстрахованы глобальными настройками.
+  // бриф там не заполнен. Пустой бриф с 06.10.2026 не повод отказать: ИИ
+  // соберёт черновик из общих кейсов и тона, а суть предложения возьмёт из
+  // наших писем в переписке и шагов кампании (см. buildPrompt). Специалист всё
+  // равно правит текст перед отправкой.
   const brief = resolveBrief(projectBrief, kb);
-  if (!brief.trim()) {
-    throw new GenerateDraftError('В карточке проекта нет брифа — заполните его там или в базе знаний проекта', 409);
-  }
 
   const reply = await resolveProjectReply(projectId, qualificationId);
   if (!reply) throw new GenerateDraftError('Письмо не найдено', 404);
   const { qualification, accountId } = reply;
 
   let contextComplete = true;
-  const [fullThread, campaignSteps] = await Promise.all([
-    qualification.threadId
-      ? fetchFullThread({
-          campaignId: qualification.campaignId,
-          leadEmail: qualification.leadEmail,
-          threadId: qualification.threadId,
-          accountId,
-        })
-      : Promise.resolve(null),
+  const [fullThread, campaignSteps, sent] = await Promise.all([
+    fetchReplyThread(qualification, accountId),
     fetchCampaignSteps(qualification.campaignId, accountId),
+    listSentDrafts(qualificationId),
   ]);
   let thread: ThreadMessage[] | null = fullThread;
   if (!thread) {
     contextComplete = false;
     thread = fallbackThread(qualification);
   }
+  // Наши ответы из портала — как на экране переписки: Instantly их может ещё
+  // не показывать, и без них ИИ отвечал заново на уже отвеченную реплику.
+  thread = withSentDrafts(thread, sent);
   if (thread.length === 0) {
     throw new GenerateDraftError('Нет текста переписки для генерации ответа', 422);
   }
@@ -101,6 +106,8 @@ export async function generateDraftForQualification(
     contextComplete,
     campaignSteps,
     recipientEmail: newContact,
+    ourEmail: qualification.eaccount,
+    language,
   });
   const result = await generateReplyWithSearch(messages);
 

@@ -3,6 +3,7 @@ import 'server-only';
 import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { isOwnAgencyCampaign, isOwnAgencyProjectClient } from '@/lib/instantly/ownAgencyCampaign';
 import {
   resolveInstantlyAccountId,
   listInstantlyAccounts,
@@ -699,22 +700,71 @@ function wordsForStrongMatch(value: string): string[] {
 }
 
 /**
+ * Имя клиента без внутренних уточнений. Приписка в скобках — «Onlanta 2.0
+ * (АРМ)», «Когнитус (Анна)», «Мекомо (ДАНИ)» — это пометка для своих, в
+ * названиях кампаний Instantly её нет никогда. Пока она участвовала в
+ * сопоставлении, такие проекты не сходились НИ С ОДНОЙ кампанией, и
+ * специалист привязывал каждую руками.
+ */
+function clientCoreWords(clientName: string): string[] {
+  const withoutQualifiers = clientName.replace(/[([{«][^)\]}»]*[)\]}»]?/g, ' ').trim();
+  const words = wordsForStrongMatch(withoutQualifiers || clientName);
+  while (words.length > 1 && GENERIC_TOKENS.has(words.at(-1) ?? '')) {
+    words.pop();
+  }
+  return words;
+}
+
+/**
+ * Насколько точно название кампании указывает на клиента: сколько слов его
+ * имени стоят в названии подряд, или 0, если не совпало. Подстроки мало —
+ * нужно отличительное слово (4+ символов) и совпадение по границам слов.
+ * Само число нужно, чтобы из двух подошедших проектов выбрать более точный:
+ * «Onlanta 2.0» побеждает «Onlanta».
+ */
+export function clientNameMatchScore(campaignName: string, clientName: string): number {
+  const campaignWords = wordsForStrongMatch(campaignName);
+  const clientWords = clientCoreWords(clientName);
+  if (!clientWords.some((word) => word.length >= 4 && !GENERIC_TOKENS.has(word))) return 0;
+  if (clientWords.length === 0 || clientWords.length > campaignWords.length) return 0;
+  const matched = campaignWords.some((_, start) =>
+    clientWords.every((word, offset) => campaignWords[start + offset] === word));
+  return matched ? clientWords.length : 0;
+}
+
+function sharedPrefixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  return i;
+}
+
+/**
+ * Приблизительное совпадение — только для ПОДСКАЗОК в ручной привязке, не для
+ * автоматической. Ловит опечатки в названиях кампаний: «Евмаркетиг
+ * стоматологии» против проекта «Евмаркетинг» — пропущенная буква, из-за
+ * которой кампания ни к чему не привязывалась и нигде не показывалась.
+ * Автопривязке такое не отдаём намеренно: выбор подтверждает человек.
+ */
+export function isApproximateClientNameMatch(campaignName: string, clientName: string): boolean {
+  const campaignWords = wordsForStrongMatch(campaignName);
+  const clientWords = clientCoreWords(clientName).filter(
+    (word) => word.length >= 6 && !GENERIC_TOKENS.has(word),
+  );
+  return clientWords.some((clientWord) =>
+    campaignWords.some(
+      (word) =>
+        Math.abs(word.length - clientWord.length) <= 2 &&
+        sharedPrefixLength(word, clientWord) >= Math.max(6, Math.min(word.length, clientWord.length) - 2),
+    ));
+}
+
+/**
  * Replacement is destructive, so substring matching is not enough. Require a
  * distinctive token (4+ chars) and a complete token-boundary phrase. Generic
  * trailing suffixes such as "Group"/"eng" may be omitted from the brand.
  */
 function isStrongReplacementTextMatch(campaignName: string, clientName: string): boolean {
-  const campaignWords = wordsForStrongMatch(campaignName);
-  const clientWords = wordsForStrongMatch(clientName);
-  while (clientWords.length > 1 && GENERIC_TOKENS.has(clientWords.at(-1) ?? '')) {
-    clientWords.pop();
-  }
-  if (!clientWords.some((word) => word.length >= 4 && !GENERIC_TOKENS.has(word))) {
-    return false;
-  }
-  if (clientWords.length === 0 || clientWords.length > campaignWords.length) return false;
-  return campaignWords.some((_, start) =>
-    clientWords.every((word, offset) => campaignWords[start + offset] === word));
+  return clientNameMatchScore(campaignName, clientName) > 0;
 }
 
 function tokenizeClient(s: string): Set<string> {
@@ -1218,16 +1268,16 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
     match_source: string;
     baseline_contacts: number;
   }[] = [];
-  const textMatchingProjectIdsByCampaign = new Map<string, Set<string>>();
+  /** campaign_id → project_id → точность совпадения имени (см. clientNameMatchScore). */
+  const textMatchScoresByCampaign = new Map<string, Map<string, number>>();
 
   for (const project of projectRows) {
-    const clientLower = project.client.trim().toLowerCase();
-    if (clientLower.length < 2) continue;
+    if (project.client.trim().length < 2) continue;
     const activePeriod = activePeriodByProjectId.get(project.id);
 
     for (const campaign of campaigns as MatchableCampaign[]) {
-      const campaignLower = (campaign.name ?? '').toLowerCase();
-      if (!campaignLower.includes(clientLower)) continue;
+      const score = clientNameMatchScore(campaign.name ?? '', project.client);
+      if (score === 0) continue;
       const key = `${project.id}::${campaign.id}`;
       if (denylistSet.has(key)) continue;
 
@@ -1236,16 +1286,24 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       // as unchanged or because the campaign predates its new active period.
       // Otherwise nested names ("Acme" / "Acme Labs") make only the second
       // project reach the claim queue and can flap ownership every sync.
-      const textProjectIds = textMatchingProjectIdsByCampaign.get(campaign.id)
-        ?? new Set<string>();
-      textProjectIds.add(project.id);
-      textMatchingProjectIdsByCampaign.set(campaign.id, textProjectIds);
+      const scores = textMatchScoresByCampaign.get(campaign.id) ?? new Map<string, number>();
+      scores.set(project.id, Math.max(scores.get(project.id) ?? 0, score));
+      textMatchScoresByCampaign.set(campaign.id, scores);
+
+      const existingOwners = ownerProjectIdsByCampaign.get(campaign.id);
+
+      // Наши «N. Polza_…» идут в проект Polza мимо границы периода (см.
+      // lib/instantly/ownAgencyCampaign.ts): 06.10.2026 период открыли 05.10, и
+      // все «1.–11. Polza» остались без проекта — их ответы не видел никто.
+      // Уже привязанную к нему не трогаем вовсе: иначе захват перенёс бы её из
+      // прошлого периода в текущий и переписал историю периодов.
+      const ownAgency = isOwnAgencyProjectClient(project.client) && isOwnAgencyCampaign(campaign.name);
+      if (ownAgency && existingOwners?.has(project.id)) continue;
 
       // Period eligibility decides whether a link should be created. It must
       // not erase a project from the independent name-ambiguity set above.
-      if (activePeriod && !campaignStartsInsidePeriod(campaign, activePeriod)) continue;
+      if (activePeriod && !ownAgency && !campaignStartsInsidePeriod(campaign, activePeriod)) continue;
 
-      const existingOwners = ownerProjectIdsByCampaign.get(campaign.id);
       const hasForeignOwner = existingOwners
         ? [...existingOwners].some((ownerProjectId) => ownerProjectId !== project.id)
         : false;
@@ -1300,16 +1358,22 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
 
   let textMatched = 0;
   for (const [campaignId, candidates] of candidatesByCampaign) {
-    const projectIds = textMatchingProjectIdsByCampaign.get(campaignId) ?? new Set<string>();
-    if (projectIds.size !== 1) {
+    // Подошло несколько проектов — берём самый точный: у «Onlanta 2.0» имя
+    // длиннее, чем у «Onlanta», и кампания «Onlanta 2.0_…» принадлежит ему.
+    // Одинаково точные — настоящая неоднозначность, такую не привязываем.
+    const scores = textMatchScoresByCampaign.get(campaignId) ?? new Map<string, number>();
+    const best = Math.max(0, ...scores.values());
+    const winners = [...scores].filter(([, score]) => score === best).map(([projectId]) => projectId);
+    if (winners.length !== 1) {
       console.warn(
         `[instantly-catalog] ambiguous text ownership for campaign ${campaignId}: ` +
-        `${[...projectIds].join(', ')} — skipped`,
+        `${[...scores.keys()].join(', ')} — skipped`,
       );
       continue;
     }
 
-    const candidate = candidates[0];
+    const candidate = candidates.find((c) => c.project_id === winners[0]);
+    if (!candidate) continue;
     try {
       const claim = await claimCampaignProjectOwnership(supabaseAdmin, {
         projectId: candidate.project_id,

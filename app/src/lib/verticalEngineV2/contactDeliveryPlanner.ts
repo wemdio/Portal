@@ -107,9 +107,18 @@ export function buildContactDeliveryPlan(input: {
     'availableContacts',
   );
   const outstandingContacts = requireNonNegativeInteger(input.outstandingContacts ?? 0, 'outstandingContacts');
+  const remainingContacts = Math.max(0, contactsObligation - contactsDone);
+  const overdue = businessDay > deadlineDay;
 
   const dates: string[] = [];
-  for (let day = businessDay; day <= deadlineDay; day += 1) {
+  // A deadline describes the original plan, not consent to stop an approved
+  // launch. After it, forecast at the selected capacity until the target. The
+  // preview is bounded to a year of workdays even for very large obligations.
+  const overdueWorkdays = remainingContacts === 0 ? 0
+    : Math.min(366, Math.max(2, Math.ceil(remainingContacts / Math.max(1, dailyCapacity))));
+  const lastDay = overdue ? businessDay + 7 * overdueWorkdays : deadlineDay;
+  for (let day = businessDay; day <= lastDay; day += 1) {
+    if (overdue && dates.length >= overdueWorkdays) break;
     const date = new Date(day * DAY_MS);
     if (scheduleDays.has(date.getUTCDay())) {
       dates.push(formatIsoDate(day));
@@ -121,7 +130,6 @@ export function buildContactDeliveryPlan(input: {
     throw new Error('schedule capacity exceeds the safe integer range');
   }
 
-  const remainingContacts = Math.max(0, contactsObligation - contactsDone);
   const capacityDeliverable = Math.min(remainingContacts, capacityContacts);
   const plannedContacts = Math.min(capacityDeliverable, availableContacts + outstandingContacts);
   // Capacity and supply are independent explanations of risk. Their overlap
@@ -135,7 +143,7 @@ export function buildContactDeliveryPlan(input: {
   let forecastOutstanding = outstandingContacts;
   const days = dates.map((date, index) => {
     const quota = Math.min(
-      Math.ceil(forecastRemaining / (dates.length - index)),
+      overdue ? dailyCapacity : Math.ceil(forecastRemaining / (dates.length - index)),
       dailyCapacity,
       forecastSupply,
       Math.max(0, forecastRemaining - forecastOutstanding),

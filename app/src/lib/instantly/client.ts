@@ -755,6 +755,11 @@ export async function listEmails(
     lead?: string;
     search?: string;
     /**
+     * Our mailbox that sent/received the email. Instantly v2 accepts a
+     * comma-separated list of mailboxes (GET /api/v2/emails docs).
+     */
+    eaccount?: string;
+    /**
      * Per Instantly v2 docs (GET /api/v2/emails), the filter on direction is
      * `email_type` (string enum), NOT `ue_type` (which is a RESPONSE field
      * classifying the email, not a query filter). Passing an unknown param

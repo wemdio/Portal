@@ -1,31 +1,102 @@
-import { isVeProviderBillingError, isVeTransientDirectoryError } from './collectionErrors';
+import { isVeProviderBillingError, isVeTransientDirectoryError, isVeResumableDirectoryError, isVeTransientCatalogError } from './collectionErrors';
 import {
   collectionRoundLimit, veCollectionMaxRounds, VE_COLLECTION_ROUND_BUDGET, VE_COLLECTION_ROUND_CEILING,
   type VeCollectionTargetProgress,
 } from './collectionTarget';
-import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
-import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
+import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows, veSavedReviewSignature } from './relevanceReserve';
+import { hasPendingVeSavedEmailRecovery } from './savedEmailRecovery';
 import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { VE_COMPANY_CAP_FIELD } from './relevanceReserve';
 import { veCanWidenPlan } from './planWidening';
 import { isVeRenewableSourceTask, reopenVeSourceTask } from './sourceRenewal';
-import type { VeAdaptiveCollection } from './adaptiveCollection';
+import { validVeAdaptiveCollection, veAdaptiveSourceDeferred, veAdaptiveSourceDry, veSourceStrategyKey, type VeAdaptiveCollection } from './adaptiveCollection';
 import type { VeCollectTask } from './prompts/sourcePlan';
+import type { VeStaffingCorrectionScope } from './staffingCorrection';
+import { relevanceHash } from './relevanceCheckpoint';
+import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
 
-/** Explicit continuation only: a terminal partial preview is never daily supply. */
-export function canResumePartialPreview(base: Record<string, unknown>): boolean {
-  const info = base.collect_info as Record<string, unknown> | null;
-  const target = info?.target_progress as Record<string, unknown> | undefined;
-  const checkpoint = info?.target_checkpoint as Record<string, unknown> | undefined;
-  if (base.source !== 'auto' || base.status !== 'analyzed' || !base.hypothesis_id
-    || info?.collection_mode !== 'preview' || info.refill || info.supply_batch_id || !target
-    || !['limited', 'exhausted', 'error'].includes(String(target.status))
-    || typeof target.ready_rows !== 'number' || !Number.isSafeInteger(target.ready_rows) || target.ready_rows < 0
-    || typeof target.ready_target !== 'number' || !Number.isSafeInteger(target.ready_target) || target.ready_target <= 0
-    || typeof target.round !== 'number' || !Number.isSafeInteger(target.round) || target.round < 1
-    || checkpoint?.completed_round !== target.round
-    || target.ready_rows >= target.ready_target) return false;
+export interface VeCollectionContinuation {
+  available: boolean;
+  action: 'resume_collection' | 'resume_preparation' | null;
+  code: 'not_preview' | 'state_unchecked' | 'preparation_incomplete' | 'launched' | 'already_running' | 'in_progress' | 'recovery_available' | 'recovery_unavailable' | 'invalid_checkpoint'
+    | 'target_reached' | 'saved_work' | 'contact_limit_changed' | 'round_limit' | 'candidate_limit'
+    | 'source_update' | 'sources_available' | 'source_expansion' | 'low_yield' | 'sources_exhausted';
+  reason: string;
+}
+
+const record = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+const records = (value: unknown): Array<Record<string, unknown>> => Array.isArray(value)
+  ? value.flatMap((item) => { const parsed = record(item); return parsed ? [parsed] : []; }) : [];
+const available = (code: VeCollectionContinuation['code'], reason: string,
+  action: Exclude<VeCollectionContinuation['action'], null> = 'resume_preparation'): VeCollectionContinuation => ({ available: true, action, code, reason });
+const unavailable = (code: VeCollectionContinuation['code'], reason: string): VeCollectionContinuation => ({ available: false, action: null, code, reason });
+
+/** Detect the same quiescent, one-way correction as the collector, without
+ * changing cursors, receipts or the amount of work already admitted. */
+function hasSourceCorrection(info: Record<string, unknown>, tasks: Array<Record<string, unknown>>): boolean {
+  const selection = record(info.source_selection);
+  const hypotheses = records(info.hypotheses).filter((h) => typeof h.title === 'string') as Array<{ title: string }>;
+  const profile = (typeof info.niche_source_profile === 'string' ? info.niche_source_profile
+    : detectVeNicheSourceProfile(hypotheses)) as VeNicheSourceProfile | null;
+  if (!profile || !['payments', 'esoteric_platform', 'adult_platform', 'crossborder_ecommerce', 'crossborder_buyers'].includes(profile)
+    || !info.plan || !tasks.length || (selection && !(profile === 'payments' && selection.profile === 'payments' && selection.version === 1))
+    || (info.construct && record(info.construct)?.status !== 'done') || record(info.adaptive_collection)?.pending
+    || records(record(info.preview_pipeline)?.batches).length || tasks.some((task) => task.status === 'dispatched')) return false;
+  return tasks.some((state) => {
+    const task = record(state.task) as VeCollectTask | null;
+    if (!task || (state.source === 'hh_live' && state.status !== 'pending')) return false;
+    const updated = normalizeVeNicheSourceTask(task, profile);
+    const categories = record(record(state.catalog)?.filters)?.categories;
+    return veSourceStrategyKey(task) !== veSourceStrategyKey(updated)
+      || (Array.isArray(categories) && categories.some((label) => typeof label === 'string' && !veNicheRubricAllowed(profile, label)));
+  });
+}
+
+/** Only a single, explicitly identified audience can correct saved verdicts. */
+export function veSavedRelevanceScope(info: { hypotheses?: unknown }, hypothesisId: unknown): VeStaffingCorrectionScope {
+  const hypotheses = records(info.hypotheses);
+  const hypothesis = hypotheses.length === 1 && typeof hypothesisId === 'string'
+    && hypotheses[0].id === hypothesisId ? hypotheses[0] : null;
+  if (!hypothesis || hypothesis.status === 'rejected') return {};
+  return {
+    hypothesisTitle: typeof hypothesis.title === 'string' ? hypothesis.title : undefined,
+    hypothesisDescription: typeof hypothesis.description === 'string' ? hypothesis.description : undefined,
+    hypothesisOrigin: hypothesis.origin === 'generated' || hypothesis.origin === 'manual' ? hypothesis.origin : undefined,
+  };
+}
+
+/** Pure server decision; callers additionally apply live-job and launched-base guards. */
+export function getVeCollectionContinuation(base: Record<string, unknown>, currentHypothesis?: Record<string, unknown> | null): VeCollectionContinuation {
+  const info = record(base.collect_info);
+  if (base.source !== 'auto' || !base.hypothesis_id || info?.collection_mode !== 'preview' || info.refill || info.supply_batch_id) {
+    return unavailable('not_preview', 'Для этой базы продолжение сбора недоступно.');
+  }
+  if (base.status === 'collecting') return available('in_progress', 'Продолжится незавершённый этап подготовки.');
+  // Explicit preparation can undo the specialist's cancellation through its
+  // existing leased RPC; this does not authorize automatic cancellation undo.
+  if (base.status === 'failed') return base.error === 'Отменено пользователем' || previewRecoveryKind(base)
+    ? available('recovery_available', 'Продолжится этап, на котором произошёл сбой. Сохранённые результаты будут использованы повторно.')
+    : unavailable('recovery_unavailable', 'Причину остановки нужно исправить перед продолжением подготовки.');
+  const target = record(info.target_progress);
+  const checkpoint = record(info.target_checkpoint);
+  if (base.status !== 'analyzed' || !target) return unavailable('not_preview', 'Подготовка базы ещё не завершена.');
+  if (typeof target.ready_rows === 'number' && typeof target.ready_target === 'number' && target.ready_rows >= target.ready_target) {
+    return unavailable('target_reached', 'Цель сбора достигнута.');
+  }
+  if (!['limited', 'exhausted', 'error'].includes(String(target.status))
+    || !Number.isSafeInteger(target.ready_rows) || Number(target.ready_rows) < 0
+    || !Number.isSafeInteger(target.ready_target) || Number(target.ready_target) <= 0
+    || !Number.isSafeInteger(target.round) || Number(target.round) < 1 || checkpoint?.completed_round !== target.round) {
+    return unavailable('invalid_checkpoint', 'Сохранённый этап не готов к продолжению. Требуется проверка состояния базы.');
+  }
+  const tasks = records(info.tasks);
+  // Drain admitted work before applying caps or economic source holds.
+  if (info.company_name_recovery || record(info.saved_email_recovery)?.batch
+    || (record(info.construct)?.status === 'dispatched' && record(info.construct)?.bc_job_id)
+    || records(record(info.preview_pipeline)?.batches).length
+    || tasks.some((task) => task.status === 'dispatched')) return available('saved_work', 'Осталось завершить обработку уже найденных компаний.');
   const reserve = readVeRelevanceReserve(info.relevance_reserve);
   // The specialist raised the "addresses per company" limit. The addresses the
   // previous one held back are validated and waiting in the reserve, but only a
@@ -33,30 +104,66 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
   const limit = normalizeVeMaxEmailsPerCompany((base as { max_emails_per_company?: unknown }).max_emails_per_company);
   const appliedLimit = normalizeVeMaxEmailsPerCompany((base as { contact_cap_applied?: unknown }).contact_cap_applied);
   if (appliedLimit !== null && (limit === null || limit > appliedLimit)
-    && reserve.some((row) => row[VE_COMPANY_CAP_FIELD])) return true;
+    && reserve.some((row) => row[VE_COMPANY_CAP_FIELD])) return available('contact_limit_changed', 'Можно вернуть проверенные адреса из резерва с новым лимитом на компанию.');
   // Reuse current eligibility rules: completed uncertain checks do not become
   // an unlimited paid loop merely because fewer than 500 contacts were found.
   // With the calibrated triage enabled, saved uncertainty it has not read yet is
   // resumable work as well: one cheap pass per company, no sources or search.
-  if (reserve.some(needsVeSavedEmailReview) || buildVeRelevanceReviewBatch({
+  try {
+    if (hasPendingVeSavedEmailRecovery(reserve, info.saved_email_recovery)) return available('saved_work', 'Можно завершить проверку сохранённых адресов.');
+  } catch {
+    return unavailable('invalid_checkpoint', 'Сохранённые результаты проверки адресов требуют проверки.');
+  }
+  const triage = isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null);
+  const scope = veSavedRelevanceScope(currentHypothesis !== undefined ? { hypotheses: currentHypothesis ? [currentHypothesis] : [] } : info, base.hypothesis_id);
+  const batch = buildVeRelevanceReviewBatch({ ...scope,
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
-    triage: isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null),
-  }).rows.length > 0) return true;
+    allowPaidSearch: !info.niche_source_profile && !info.source_selection && record(info.search_policy)?.phase !== 'existing', triage });
+  if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { ...scope, triage }))) {
+    return available('saved_work', 'Можно уточнить соответствие уже найденных компаний.');
+  }
   // Предел раундов не препятствие: продолжение само даёт новый бюджет
   // (grantVeResumeRoundBudget). Так b5934955 после круга повторной отправки
   // стояла на 100 из 100 раундов с живым реестром, и дособрать её было нельзя.
-  if (!(Number(target.candidates_processed) < Number(target.max_candidates)) || !Array.isArray(info.tasks)) return false;
+  if (!(Number(target.candidates_processed) < Number(target.max_candidates))) {
+    return unavailable('candidate_limit', 'Достигнут лимит проверенных кандидатов. Повторное нажатие не откроет новый сбор; готовые контакты сохранены.');
+  }
+  if (Number(target.round) >= VE_COLLECTION_ROUND_CEILING) return unavailable('round_limit', 'Достигнут предел попыток сбора. Готовые контакты сохранены.');
+  const adaptive = record(info.adaptive_collection) as VeAdaptiveCollection | null;
+  if (info.adaptive_collection && (!adaptive || !validVeAdaptiveCollection(adaptive))) {
+    return unavailable('invalid_checkpoint', 'Сохранённый план сбора требует проверки. Готовые контакты сохранены.');
+  }
+  if (hasSourceCorrection(info, tasks)) return available('source_update', 'Доступен обновлённый подбор источников для этой аудитории.', 'resume_collection');
+  const policy = adaptive ?? undefined;
+  const taskHeld = (state: Record<string, unknown>) => {
+    const task = record(state.task) as VeCollectTask | null;
+    return !!policy && !!task && !!(veAdaptiveSourceDeferred(policy, veSourceStrategyKey(task))
+      || veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task)));
+  };
   // Старая задача карт (живой парсер до 16.09) тоже продолжаема: следующий
   // раунд читает её запросы из готового каталога.
-  if (info.tasks.some((task) =>
-    task && (task.status === 'pending' || task.status === 'dispatched' || isVeRenewableSourceTask(task)))) return true;
+  if (tasks.some((task) => !taskHeld(task) && (task.status === 'pending' || isVeRenewableSourceTask(task)))) {
+    return available('sources_available', 'Сбор продолжится с сохранённой позиции источников.', 'resume_collection');
+  }
   // План выбран до дна, но база ещё не расширяла срез сама (вторая очередь
   // без придуманных порогов или подбор нового среза): её можно продолжить.
   // Так остались 33 базы аудита 22.09 — «Продолжить подготовку» их не брала.
-  const planTasks = info.tasks.filter((task) => task && typeof task.task === 'object' && task.task)
-    .map((task) => task.task as VeCollectTask);
-  return target.status !== 'error'
-    && veCanWidenPlan(planTasks, info.adaptive_collection as VeAdaptiveCollection | undefined);
+  const planTasks = tasks.flatMap((task) => record(task.task) ? [task.task as VeCollectTask] : []);
+  const deferred = !!policy && tasks.some((state) => record(state.task)
+    && !!veAdaptiveSourceDeferred(policy, veSourceStrategyKey(state.task as VeCollectTask)));
+  // Economic holds close widening too; dry sources can still use an available
+  // bounded alternative plan. Neither rule resets the previous yield history.
+  if (!deferred && target.status !== 'error' && veCanWidenPlan(planTasks, policy)) {
+    return available('source_expansion', 'Доступно продолжение по следующему срезу той же аудитории.', 'resume_collection');
+  }
+  return tasks.some(taskHeld) || target.stop_cause === 'low_yield'
+    ? unavailable('low_yield', 'Текущие источники почти не дают новых контактов. Повторный запуск с теми же источниками не поможет; готовая часть сохранена.')
+    : unavailable('sources_exhausted', 'Текущий план источников обработан, незавершённых проверок нет. Готовая часть сохранена; это не означает, что весь рынок исчерпан.');
+}
+
+/** Compatibility for callers considering terminal partial previews only. */
+export function canResumePartialPreview(base: Record<string, unknown>, currentHypothesis?: Record<string, unknown> | null): boolean {
+  return base.status === 'analyzed' && getVeCollectionContinuation(base, currentHypothesis).available;
 }
 
 /**
@@ -95,7 +202,7 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   // the round is still `collecting` and every checkpoint is intact.
   if ((base.error === 'Provider usage journal could not be saved.'
     || /^(?:Requesty 429|VE2 [a-z_]+ inactivity timeout)\b/.test(String(base.error ?? ''))
-    || isVeTransientDirectoryError(base.error))
+    || isVeTransientDirectoryError(base.error) || isVeTransientCatalogError(base.error))
     && progress.status === 'collecting'
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && (checkpoint?.completed_round ?? 0) === progress.round
@@ -132,7 +239,7 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
     task?.source === 'yandex_maps' && (task.status === 'failed' || task.status === 'pending')
     && task.task?.maps_query?.queries?.length)) return 'catalog';
   if (progress.status === 'error' && Array.isArray(info.tasks) && info.tasks.some((task) =>
-    task?.source === 'companies_directory' && task.status === 'failed' && isVeTransientDirectoryError(task.error))
+    task?.source === 'companies_directory' && task.status === 'failed' && isVeResumableDirectoryError(task.error))
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && ((checkpoint?.completed_round ?? 0) === progress.round - 1 || checkpoint?.completed_round === progress.round)) return 'catalog';
   return null;

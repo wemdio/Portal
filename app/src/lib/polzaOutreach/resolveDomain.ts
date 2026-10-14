@@ -51,6 +51,7 @@ export const PDL_COUNTRY_BY_CODE: Record<string, string> = {
   nl: 'netherlands', ie: 'ireland', es: 'spain', se: 'sweden', ch: 'switzerland',
   be: 'belgium', dk: 'denmark', no: 'norway', fi: 'finland', at: 'austria',
   it: 'italy', pl: 'poland', pt: 'portugal', cz: 'czechia', sg: 'singapore', au: 'australia',
+  il: 'israel', ae: 'united arab emirates',
 };
 
 /** Хостинги вакансий и соцсети: это не сайт компании, даже если ATS отдал их. */

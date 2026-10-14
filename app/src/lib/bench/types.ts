@@ -46,7 +46,18 @@ export type BenchStopSupport =
  * элемента: в JSON-массиве нет ни id, ни порядка, кроме позиции.
  */
 export type BenchResultsSource =
-  | { kind: 'table'; table: string; jobColumn: string; orderColumn: string }
+  | {
+      kind: 'table';
+      table: string;
+      jobColumn: string;
+      orderColumn: string;
+      /**
+       * Какие колонки отдать наружу. Без него уходит `*` — годится для таблиц
+       * результатов парсеров, но не для очереди валидации: там служебные
+       * `user_id`, счётчики попыток и сырой разбор SMTP-диалога.
+       */
+      columns?: string;
+    }
   | { kind: 'inline'; field: string }
   /**
    * `file` — итог задачи это файл в хранилище, а не строки (обогащение по
@@ -94,6 +105,31 @@ export interface BenchJobTool {
    * хранилище копились бы файлы задач, которых не существует.
    */
   rollback?(prepared: JobRow): Promise<void>;
+  /**
+   * Необязательный шаг ПОСЛЕ создания строки задачи — для инструментов, у
+   * которых задача это строка плюс очередь дочерних строк (валидация почт).
+   * Возвращает итоговую строку задачи. Если шаг не удался, адаптер сам
+   * переводит задачу в провал и бросает ошибку — роут отвечает 500.
+   */
+  afterInsert?(args: { db: SupabaseClient; job: JobRow; params: unknown }): Promise<JobRow>;
+  /**
+   * Собственная суточная норма инструмента поверх общих норм ключа — там,
+   * где «одна задача» бывает и на десять адресов, и на десять тысяч, и
+   * счёт задач объёма не ограничивает. Считается через клиент робота, то
+   * есть по задачам самого ключа. Вернуть `null` — норма не исчерпана;
+   * бросить ошибку — не удалось проверить (роут ответит 500).
+   */
+  checkQuota?(args: {
+    db: SupabaseClient;
+    params: unknown;
+    dayStart: string;
+  }): Promise<{ message: string; details?: unknown } | null>;
+  /**
+   * Потолок одновременных задач инструмента, если он строже общего
+   * `max_active_jobs` ключа: у воркера валидации почт всего три слота на
+   * весь портал, и робот не должен занимать больше одного.
+   */
+  maxActiveJobs?: number;
   mapStatus(row: JobRow): BenchStatus;
   progress(row: JobRow): { done: number; total: number | null };
   rowsFound(row: JobRow): number;

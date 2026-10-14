@@ -13,11 +13,19 @@ import {
   type DedupCandidate,
 } from '@/lib/leadsReport/leadFilters';
 
-const DEFAULT_PIPELINE_NAME = 'Воронка - новые лиды';
-const QUALIFIED_STATUS = 'Квалифицированный лид';
-const MEETING_SCHEDULED_STATUS = 'Назначена встреча';
-const MEETING_HELD_STATUS = 'Встреча проведена + КП отправлено';
-const PARKING_STATUS = 'Перенос';
+// Воронку и опорные этапы ищем только по id AMO: названия продажи меняют
+// («Квалифицированный лид» → «Лид квалифицирован», 02.10.2026 — отчёт тогда
+// упал), а id при переименовании остаётся прежним. Названия — только для
+// сообщения об ошибке. Этап удалили и завели заново — у него новый id,
+// его нужно вписать сюда (`amo_statuses`, воронка 7670334).
+const PIPELINE_ID = 7670334; // «Воронка - новые лиды»
+const QUALIFIED_STATUS = { id: 87397290, name: 'Лид квалифицирован' };
+const MEETING_SCHEDULED_STATUS = { id: 63384126, name: 'Назначена встреча' };
+const MEETING_HELD_STATUS = {
+  id: 65917186,
+  name: 'Встреча проведена + КП отправлено',
+};
+const PARKING_STATUS = { id: 63387178, name: 'Перенос' };
 const WON_STATUS_ID = 142;
 const LOST_STATUS_ID = 143;
 /** Встроенный тип задачи AMO «Встреча» (1 — «Звонок»). */
@@ -30,9 +38,6 @@ const MEETING_TASK_TYPE_ID = 2;
  * «Бот: Георгий» схлопнулись бы три разных телеграм-аккаунта.
  */
 const TELEGRAM_CHAT_ID_FIELD = 'Telegram Chat ID';
-
-const normalize = (value: string | null): string =>
-  (value ?? '').trim().toLocaleLowerCase('ru-RU').replaceAll('ё', 'е');
 
 export type AmoStatusMetricRow = {
   pipeline_id: number;
@@ -99,12 +104,12 @@ type Thresholds = {
 
 function findStatus(
   statuses: AmoStatusMetricRow[],
-  name: string,
+  wanted: { id: number; name: string },
 ): AmoStatusMetricRow {
-  const found = statuses.find(
-    (status) => normalize(status.status_name) === normalize(name),
-  );
-  if (!found) throw new Error(`AMO status not found: ${name}`);
+  const found = statuses.find((status) => Number(status.status_id) === wanted.id);
+  if (!found) {
+    throw new Error(`AMO status not found: ${wanted.name} (id ${wanted.id})`);
+  }
   return found;
 }
 
@@ -403,13 +408,10 @@ export async function computeAllChannelMetrics(
   start: Date,
   end: Date,
 ): Promise<ChannelMetrics[]> {
-  const pipelineName =
-    process.env.LEADS_REPORT_PIPELINE_NAME ?? DEFAULT_PIPELINE_NAME;
-
   const { data: statusesData, error: statusesError } = await db
     .from('amo_statuses')
     .select('pipeline_id, status_id, status_name, sort')
-    .eq('pipeline_name', pipelineName);
+    .eq('pipeline_id', PIPELINE_ID);
   if (statusesError) throw statusesError;
 
   const statuses = (statusesData ?? []) as AmoStatusMetricRow[];

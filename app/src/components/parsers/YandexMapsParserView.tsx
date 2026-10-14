@@ -84,23 +84,31 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
   const loadResults = useCallback(async (jobId: string, previewOnly = false) => {
     setLoadingResults(true);
     try {
+      // Страницы по курсору card_url: offset на запуске в 194 тысячи строк
+      // задваивал и терял строки (см. lib/yandexmaps/organizationPages).
       const PAGE = 5000;
-      let offset = 0;
+      const base = `/api/parsers/yandexmaps/${jobId}/results?limit=${PAGE}`;
+      let after: string | null = null;
       let all: YandexMapsOrganizationRow[] = [];
       for (;;) {
-        const data = await authFetchJson<{ results: YandexMapsOrganizationRow[]; hasMore: boolean }>(
-          `/api/parsers/yandexmaps/${jobId}/results?limit=${PAGE}&offset=${offset}`,
+        const data: { results: YandexMapsOrganizationRow[]; nextAfter: string | null } = await authFetchJson(
+          after === null ? base : `${base}&after=${encodeURIComponent(after)}`,
         );
-        const page = data.results ?? [];
-        all = all.concat(page);
-        if (!data.hasMore || page.length === 0) break;
+        all = all.concat(data.results ?? []);
         // Пока задача идёт, тянуть всю выдачу незачем: в таблице видно первые
-        // 500, а полный список нужен только «В базу» и экспорту — то и другое
-        // доступно по завершении.
+        // 500, а полный список нужен только «В базу» — она доступна по завершении.
         if (previewOnly) break;
-        offset += page.length;
+        if (data.nextAfter === null) {
+          const rest: { results: YandexMapsOrganizationRow[] } = await authFetchJson(`${base}&nocard=1`);
+          all = all.concat(rest.results ?? []);
+          break;
+        }
+        after = data.nextAfter;
       }
       setResults(all);
+    } catch (e) {
+      // Раньше сбой страницы молча оставлял прежний неполный список.
+      setError(`Результаты загрузились не полностью: ${e instanceof Error ? e.message : 'ошибка'}`);
     } finally {
       setLoadingResults(false);
     }
@@ -261,58 +269,28 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
     return `yandex_${day}${month}${year}_${hours}${minutes}.${extension}`;
   };
 
-  const handleExportCsv = useCallback(async () => {
+  // Excel и CSV собирает сервер из всей выдачи запуска, а не из того, что
+  // успела подгрузить страница: раньше в Excel доезжали первые 5000 строк.
+  const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null);
+  const handleExport = useCallback(async (format: 'csv' | 'xlsx') => {
     if (!activeJobId) return;
+    setExporting(format);
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
       if (!token) return;
-      const res = await fetch(`/api/parsers/yandexmaps/${activeJobId}/export`, {
+      const res = await fetch(`/api/parsers/yandexmaps/${activeJobId}/export?format=${format}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(await res.text());
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = getExportFilename('csv');
-      a.click();
-      URL.revokeObjectURL(url);
+      saveAs(await res.blob(), getExportFilename(format));
     } catch (e) {
-      console.error('CSV export failed', e);
-      setError('Не удалось скачать CSV');
+      console.error('Export failed', e);
+      setError(format === 'xlsx' ? 'Не удалось скачать Excel' : 'Не удалось скачать CSV');
+    } finally {
+      setExporting(null);
     }
   }, [activeJobId]);
-
-  const handleExportExcel = useCallback(async () => {
-    if (!activeJobId || results.length === 0) return;
-    const XLSX = await import('xlsx');
-
-    const data = results.map((r) => ({
-      'Название': r.name || '',
-      'Телефон': r.phone || '',
-      'Сайт': r.website || '',
-      'Email': r.email || '',
-      'Адрес': r.address || '',
-      'Город': r.city || '',
-      'Категории': r.categories || '',
-      'Часы работы': r.working_hours || '',
-      'Рейтинг': r.rating || '',
-      'Отзывы': r.reviews_count || '',
-      'Ссылка': r.card_url || '',
-      'Telegram': r.telegram || '',
-      'VK': r.vk || '',
-      'Instagram': r.instagram || '',
-      'WhatsApp': r.whatsapp || '',
-    }));
-
-    const worksheet = XLSX.utils.json_to_sheet(data);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Organizations');
-    const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
-    const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8' });
-    saveAs(blob, getExportFilename('xlsx'));
-  }, [activeJobId, results]);
 
   useEffect(() => {
     if (!toast) return;
@@ -854,21 +832,21 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                     )}
                     <button
                       type="button"
-                      onClick={handleExportExcel}
-                      disabled={results.length === 0}
+                      onClick={() => void handleExport('xlsx')}
+                      disabled={!activeJobId || exporting !== null}
                       className={clientMode ? 'ds-btn-ghost inline-flex items-center gap-2 disabled:opacity-40' : 'inline-flex items-center gap-2 rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-emerald-500 disabled:opacity-50 shadow-sm transition-colors'}
                     >
-                      <FileSpreadsheet className="h-3.5 w-3.5" />
-                      Скачать Excel
+                      {exporting === 'xlsx' ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <FileSpreadsheet className="h-3.5 w-3.5" />}
+                      {exporting === 'xlsx' ? 'Готовлю Excel…' : 'Скачать Excel'}
                     </button>
                     <button
                       type="button"
-                      onClick={handleExportCsv}
-                      disabled={!activeJobId}
+                      onClick={() => void handleExport('csv')}
+                      disabled={!activeJobId || exporting !== null}
                       className={clientMode ? 'ds-btn-ghost inline-flex items-center gap-2 disabled:opacity-40' : 'inline-flex items-center gap-2 rounded-lg bg-gray-900 text-white px-3 py-1.5 text-xs font-medium hover:bg-gray-800 disabled:opacity-50 shadow-sm transition-colors'}
                     >
-                      <Download className="h-3.5 w-3.5" />
-                      Скачать CSV
+                      {exporting === 'csv' ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                      {exporting === 'csv' ? 'Готовлю CSV…' : 'Скачать CSV'}
                     </button>
                   </div>
                 </div>
@@ -937,7 +915,7 @@ export function YandexMapsParserView({ clientMode }: YandexMapsParserViewProps =
                   <div className="p-2 border-t border-gray-200 bg-gray-50 text-center text-xs text-gray-500">
                     {activeJob.status === 'running'
                       ? `Показано ${Math.min(results.length, 500)} из ${processedOrgs.toLocaleString('ru-RU')} собранных. Сбор продолжается.`
-                      : `Показано ${Math.min(results.length, 500)} из ${results.length.toLocaleString('ru-RU')} записей. В экспорт (Excel / CSV) попадут все ${results.length.toLocaleString('ru-RU')}.`}
+                      : `Показано ${Math.min(results.length, 500)} из ${totalOrgs.toLocaleString('ru-RU')} записей. В Excel / CSV попадут все.`}
                   </div>
                 )}
               </div>

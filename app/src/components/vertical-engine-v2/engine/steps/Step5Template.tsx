@@ -11,7 +11,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { ChevronRight, Copy, Download, Rocket, Sparkles } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
-import type { VeRuSeasonalityPrioritySnapshot, VeRuSeasonalityState, VeTemplate } from '@/lib/verticalEngineV2/types';
+import type { VeTemplate } from '@/lib/verticalEngineV2/types';
+import { splitVeEmailBody } from '@/lib/verticalEngineV2/emailBody';
+import { materializeVeFinalLetters, selectedVeBodies } from '@/lib/verticalEngineV2/finalLetters';
 import { renderTemplatePreview, type VePreviewToken } from '@/lib/verticalEngineV2/renderPreview';
 import {
   VE_LAUNCH_MAX_LEADS,
@@ -32,9 +34,8 @@ import {
   type VePortalProjectOptionDto,
 } from '../api';
 import { HE, StatusDot } from '../design';
+import { SearchableSelect } from '../SearchableSelect';
 import { ContactSupplyPanel, useContactSupply, type ContactSupplyController } from '../ContactSupplyPanel';
-import type { LaunchPortfolioResponse } from '../LaunchPortfolioView';
-import { SeasonalityStatus } from '../SeasonalitySummary';
 import { OperatorText, StatusBox, formatDate } from '../ui';
 import {
   SegmentationAuditPanel,
@@ -105,6 +106,7 @@ function PreviewTokens({
   /** Цельная фраза для screen reader; визуальные токены остаются подсвеченными. */
   plainText?: string;
 }) {
+  if (plainText && splitVeEmailBody(plainText).some(part => part.href)) return <span className={className}>{splitVeEmailBody(plainText).map((part, i) => part.href ? <a key={i} href={part.href} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">{part.text}</a> : <span key={i}>{part.text}</span>)}</span>;
   const tokenNodes = tokens.map((t, i) =>
     t.kind === 'value' ? (
       <mark key={i} className="ve2-op">
@@ -142,7 +144,7 @@ export function TemplateLeadPreview({ template, baseId }: { template: VeTemplate
 
 function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate; baseId: string }) {
   const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [subjectIndex, setSubjectIndex] = useState(0);
+  const [variantIndices, setVariantIndices] = useState<number[]>([]);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const [sample, setSample] = useState<{
@@ -174,11 +176,10 @@ function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate
       .catch(() => { if (alive.current) setState('error'); });
   };
 
-  const first = template.letters[0];
-  const subjects = first?.selected_variant
-    ? (first.selected_subject_indices ?? []).map(index => first.subject_options?.[index] ?? '')
-    : first ? [first.subject ?? '', ...(first.variants ?? []).slice(0, 3).map(variant => variant.subject ?? '')] : [];
-  const subjectVariantIndex = Math.min(subjectIndex, Math.max(0, subjects.length - 1));
+  const choices = useMemo(() => {
+    try { return materializeVeFinalLetters(template.letters).map(letter => [letter, ...(letter.variants ?? [])]); }
+    catch { return []; }
+  }, [template.letters]);
   const rendered = useMemo(() => {
     if (state !== 'ready' || !sample) return { preview: null, error: null };
     try { return { preview: renderTemplatePreview({
@@ -188,11 +189,11 @@ function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate
       columns: sample.columns,
       maxRows: 3,
       rowSegments: sample.segments ?? undefined,
-      subjectVariantIndex,
+      variantIndices,
     }), error: null }; } catch {
       return { preview: null, error: 'Не удалось показать выбранную версию письма. Проверьте тексты и темы в редакторе.' };
     }
-  }, [state, sample, template, mapping, subjectVariantIndex]);
+  }, [state, sample, template, mapping, variantIndices]);
   const preview = rendered.preview;
 
   const hasVariants = template.letters.some((l) => (l.segment_variants ?? []).length > 0);
@@ -219,13 +220,14 @@ function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate
         ) : null}
         {preview && preview.rows.length > 0 && sample ? (
           <div>
-            {subjects.length > 1 ? <label className="mb-4 block text-sm font-medium text-gray-700">
-              Вариант темы для превью
-              <select value={subjectVariantIndex} aria-label="Вариант темы для превью" className={`${HE.input} mt-2 w-full`} onChange={event => setSubjectIndex(Number(event.target.value))}>
-                {subjects.map((subject, index) => <option key={index} value={index}>{index + 1}. {subject || 'Без темы'}</option>)}
+            {choices.map((variants, letterIndex) => variants.length > 1 ? <label key={letterIndex} className="mb-4 block ve2-label">
+              Письмо {letterIndex + 1}: вариант для превью
+              <select value={variantIndices[letterIndex] ?? 0} aria-label={`Вариант письма ${letterIndex + 1} для превью`} className={`${HE.input} mt-2 w-full`} onChange={event => setVariantIndices(current => {
+                const next = [...current]; next[letterIndex] = Number(event.target.value); return next;
+              })}>
+                {variants.map((variant, index) => <option key={index} value={index}>{template.letters[letterIndex].selected_variant ? selectedVeBodies(template.letters[letterIndex]).length > 1 ? selectedVeBodies(template.letters[letterIndex])[index] : `Тема ${index + 1}` : String.fromCharCode(65 + index)} · {variant.subject || variant.body.slice(0, 60)}</option>)}
               </select>
-              {first?.selected_variant ? <span className="mt-2 block text-xs font-normal text-gray-500">Все выбранные темы используют один и тот же утверждённый текст первого письма. Получатель получит один вариант.</span> : null}
-            </label> : null}
+            </label> : null)}
             <ol className="ve2-letter-sheet">
               {preview.rows.map((leadRow, leadIdx) => {
                 const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
@@ -537,8 +539,8 @@ export function useTemplateLaunch(
           if (boundBinding && !projects.some((project) => project.id === boundBinding.portal_project_id)) {
             projects.push(portalProjectFromBinding(boundBinding, boundIssue));
           }
-          // A bound plan is immutable: keep its project and target even when
-          // the plan cannot be recalculated right now, and show why.
+          // Keep the saved project and target even when the plan cannot be
+          // recalculated. Target edits have a separate project-wide action.
           const bound = boundDeliveryPlan ?? boundBinding;
           setPortalProjects(projects);
           setPortalProjectId(bound?.portal_project_id ?? '');
@@ -819,8 +821,19 @@ function formatEmailCount(count: number | null): string {
   return formatRussianCount(count, ['почта', 'почты', 'почт']);
 }
 
-export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
-  const preview = launch.deliveryPreview;
+export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }: {
+  launch: TemplateLaunchState;
+  disabled?: boolean;
+  /** Outreach preflight supplies the preview for the current request; null means it is not ready yet. */
+  preparedPreview?: VeDeliveryPlanPreviewDto | null;
+}) {
+  const externalPreview = preparedPreview !== undefined;
+  const preparedPreviewMatches = !!preparedPreview && isValidDeliveryPreview(preparedPreview) &&
+    preparedPreview.portal_project_id === launch.portalProjectId &&
+    (preparedPreview.portal_period_id ?? null) === launch.expectedPortalPeriodId &&
+    preparedPreview.target_contacts === launch.targetContacts;
+  const preview = externalPreview ? (preparedPreviewMatches ? preparedPreview : null) : launch.deliveryPreview;
+  const previewReady = externalPreview ? preparedPreviewMatches : launch.deliveryPlanReady;
   const period = launch.activePortalPeriod;
   const targetInvalid = launch.targetContactsInput.trim() !== '' && launch.targetContacts === null;
   const periodLabel = preview?.portal_period_label?.trim() || period?.label?.trim() || 'Активный период';
@@ -829,6 +842,11 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
   // Проект без периодов: сроком служит карточка проекта.
   const term = !period ? preview?.project_term ?? launch.projectTerm : null;
   const termDeadline = preview?.deadline ?? term?.deadline ?? null;
+  const targetHint = launch.deliveryPlanLocked
+    ? 'Общую цель всех гипотез можно изменить на шаге «Результаты», в блоке «Общая цель проекта».'
+    : launch.submitting || disabled ? 'Сохраняем план выполнения…'
+      : !launch.selectedPortalProject ? 'Сначала выберите «Проект клиента». После этого можно указать цель контактов.'
+        : null;
 
   return (
     <section className="border-t border-gray-200 pt-3" aria-labelledby="ve2-delivery-plan-title">
@@ -856,27 +874,18 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
         <>
           <div className="mt-2 grid gap-3 sm:grid-cols-2">
             <div>
-              <label htmlFor="ve2-portal-project" className="ve2-label">
-                Проект клиента
-              </label>
-              <select
+              <SearchableSelect
                 id="ve2-portal-project"
+                label="Проект клиента"
                 value={launch.portalProjectId}
-                onChange={(event) => launch.selectPortalProject(event.target.value)}
-                disabled={launch.deliveryPlanLocked || launch.submitting}
-                className="ve2-input h-10 w-full px-3 text-xs"
-              >
-                <option value="">Выберите проект</option>
-                {launch.portalProjects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
+                options={launch.portalProjects}
+                onChange={launch.selectPortalProject}
+                disabled={disabled || launch.deliveryPlanLocked || launch.submitting}
+              />
             </div>
             <div>
               <label htmlFor="ve2-delivery-target" className="ve2-label">
-                {term ? 'Цель контактов до дедлайна' : 'Цель контактов за период'}
+                {term ? 'Цель новых контактов' : 'Цель контактов за период'}
               </label>
               <input
                 id="ve2-delivery-target"
@@ -886,12 +895,13 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 step={1}
                 value={launch.targetContactsInput}
                 onChange={(event) => launch.changeTargetContacts(event.target.value)}
-                disabled={!launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
-                placeholder="Точное число"
+                disabled={disabled || !launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
+                placeholder={launch.selectedPortalProject ? 'Точное число' : 'Сначала выберите проект'}
                 aria-invalid={targetInvalid}
-                aria-describedby={targetInvalid ? 've2-delivery-target-error' : undefined}
-                className="ve2-input h-10 w-full px-3 text-xs"
+                aria-describedby={[targetHint ? 've2-delivery-target-hint' : '', targetInvalid ? 've2-delivery-target-error' : ''].filter(Boolean).join(' ') || undefined}
+                className="ve2-input h-10 w-full px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
               />
+              {targetHint ? <p id="ve2-delivery-target-hint" className={`mt-2 ${HE.faint}`}>{targetHint}</p> : null}
             </div>
           </div>
 
@@ -920,12 +930,12 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 </p>
                 {/* Перепривязки плана к периоду нет: созданный период останавливает загрузку. */}
                 <p className="mt-1 text-xs text-gray-500">
-                  Продлевайте проект полем «Дедлайн» в карточке. Если создать проекту период, загрузка по этому плану остановится.
+                  Дедлайн задаёт плановую дату. После неё сбор и пополнение продолжаются в выбранном темпе до достижения цели. Если создать проекту период, загрузка по этому плану остановится.
                 </p>
               </>
             ) : null
           ) : (
-            <p className="mt-2 text-xs text-gray-500">Выберите проект явно, период подставится из Portal.</p>
+            <p className="mt-2 text-xs text-gray-500">Срок выполнения подставится из выбранного проекта Portal.</p>
           )}
 
           {targetInvalid ? (
@@ -944,18 +954,18 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
         </>
       )}
 
-      {launch.deliveryPreviewState === 'loading' ? (
+      {!externalPreview && launch.deliveryPreviewState === 'loading' ? (
         <p className="mt-2 text-xs text-gray-500" role="status">
           Считаем темп по рабочим дням…
         </p>
       ) : null}
-      {launch.portalProjects !== null && launch.deliveryPreviewState === 'error' && launch.deliveryPreviewError ? (
+      {!externalPreview && launch.portalProjects !== null && launch.deliveryPreviewState === 'error' && launch.deliveryPreviewError ? (
         <p className="mt-2 text-xs text-red-600" role="alert">
           {launch.deliveryPreviewError}
         </p>
       ) : null}
 
-      {preview && launch.deliveryPlanReady ? (
+      {preview && previewReady ? (
         <div className="mt-3" aria-live="polite">
           <dl className="grid grid-cols-2 border-y border-gray-200 text-xs sm:grid-cols-5">
             {[
@@ -1247,254 +1257,17 @@ export function CreateClientPresetInline({
   );
 }
 
-interface TemplateLaunchPortfolioDto {
-  item_id: string;
-  status: string;
-  mode: 'advisory' | 'enforced';
-  plan_version: number | null;
-  priority_snapshot: VeRuSeasonalityPrioritySnapshot;
-  capacity: {
-    max_active_bundles: number;
-    active_bundles: number;
-  };
-}
-
-const SEASONALITY_STATES = new Set<VeRuSeasonalityState>([
-  'launch_now',
-  'prepare_now',
-  'neutral',
-  'unknown',
-  'wait',
-  'avoid',
-]);
-
-const NON_QUEUED_LIFECYCLE_MESSAGE: Readonly<Record<string, string>> = {
-  prepared: 'Кампании подготовлены, но запуск ещё не поставлен в очередь',
-  activating: 'Активация отправки выполняется',
-  active: 'Отправка уже активна',
-  uncertain: 'Статус активации требует сверки',
-  released: 'Отправка завершена',
-  skipped: 'Запуск пропущен',
-  cancelled: 'Запуск отменён',
-};
-
-function readTemplateLaunchPortfolio(template: VeTemplate | null): TemplateLaunchPortfolioDto | null {
-  const raw = (template as { launch_portfolio?: unknown } | null)?.launch_portfolio;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const value = raw as Record<string, unknown>;
-  const snapshot = value.priority_snapshot;
-  const capacity = value.capacity;
-  if (
-    typeof value.item_id !== 'string' ||
-    !snapshot ||
-    typeof snapshot !== 'object' ||
-    Array.isArray(snapshot) ||
-    !capacity ||
-    typeof capacity !== 'object' ||
-    Array.isArray(capacity)
-  ) {
-    return null;
-  }
-  const priority = snapshot as Record<string, unknown>;
-  const capacityRecord = capacity as Record<string, unknown>;
-  if (
-    typeof priority.state !== 'string' ||
-    !SEASONALITY_STATES.has(priority.state as VeRuSeasonalityState) ||
-    typeof capacityRecord.max_active_bundles !== 'number' ||
-    typeof capacityRecord.active_bundles !== 'number'
-  ) {
-    return null;
-  }
-  return {
-    item_id: value.item_id,
-    status: typeof value.status === 'string' ? value.status : 'prepared',
-    mode: value.mode === 'advisory' ? 'advisory' : 'enforced',
-    plan_version:
-      typeof value.plan_version === 'number' && Number.isInteger(value.plan_version) ? value.plan_version : null,
-    priority_snapshot: priority as unknown as VeRuSeasonalityPrioritySnapshot,
-    capacity: {
-      max_active_bundles: capacityRecord.max_active_bundles,
-      active_bundles: capacityRecord.active_bundles,
-    },
-  };
-}
-
-function PreparedLaunchPortfolio({
-  info,
-  portfolio,
-  warnings,
-}: {
-  info: VeTemplateLaunchInfo;
-  portfolio: TemplateLaunchPortfolioDto;
-  warnings: string[];
-}) {
-  const [reviewed, setReviewed] = useState(false);
-  const [activating, setActivating] = useState(false);
-  const [activated, setActivated] = useState(false);
-  const [deliveryDeferred, setDeliveryDeferred] = useState(false);
-  const [activationError, setActivationError] = useState('');
-  const [queueHint, setQueueHint] = useState(false);
-  const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
-  const seasonalState = portfolio.priority_snapshot.state;
-  const seasonallyEligible =
-    portfolio.mode === 'advisory' || seasonalState === 'launch_now' || seasonalState === 'neutral';
-  const slotAvailable = portfolio.capacity.active_bundles < portfolio.capacity.max_active_bundles;
-  const hasCurrentPlan = portfolio.plan_version !== null;
-  const isQueued = portfolio.status === 'queued';
-  const lifecycleMessage = isQueued
-    ? null
-    : (portfolio.status === 'active' && info.ready_leads_count !== undefined
-      ? 'Запуск одобрен. Контакты загружаются по будням согласно плану; пустые кампании ждут первой партии.'
-      : NON_QUEUED_LIFECYCLE_MESSAGE[portfolio.status] ?? 'Текущий статус запуска не допускает активацию');
-  // Capacity in the queue response is a read snapshot. The backend activation
-  // preflight re-reads Instantly and can safely release a Completed holder.
-  const canActivate = isQueued && seasonallyEligible && hasCurrentPlan;
-
-  const activate = async () => {
-    if (!canActivate || !reviewed || activating) return;
-    setActivating(true);
-    setActivationError('');
-    const idempotencyKey =
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `${portfolio.item_id}-${Date.now()}`;
-    try {
-      const { ok, data } = await veEnginePost<{ error?: string; delivery_activation_deferred?: boolean }>(
-        `${VE_API}/launch-portfolio/${portfolio.item_id}/activate`,
-        {
-          confirm_campaign_review: true,
-          idempotency_key: idempotencyKey,
-          plan_version: portfolio.plan_version,
-        },
-      );
-      if (!ok) {
-        setActivationError(data.error || 'Не удалось активировать отправку');
-        return;
-      }
-      setActivated(true);
-      setDeliveryDeferred(data.delivery_activation_deferred === true);
-    } catch {
-      setActivationError('Не удалось активировать отправку');
-    } finally {
-      setActivating(false);
-    }
-  };
-
-  return (
-    <div className="space-y-3">
-      <section aria-label="Подготовка PAUSED-кампаний" className={`px-4 py-3 ${HE.successPanel}`}>
-        <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
-          <StatusDot tone="ok" />
-          PAUSED-кампании подготовлены.{' '}
-          {campaigns && campaigns.length > 1
-            ? `Подготовлено кампаний: ${campaigns.length} по сегментам · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`
-            : `Кампания: ${info.campaign_name} · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`}
-        </p>
-        <p className="mt-1 text-xs text-emerald-700">
-          {slotAvailable ? 'Sending slot не занят.' : 'Sending slot уже занят другой отправкой.'}
-          {info.created_at ? <span> · {formatDate(info.created_at)}</span> : null}
-        </p>
-        {info.campaign_url && !campaigns ? (
-          <a
-            href={info.campaign_url}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1 inline-block text-xs text-emerald-700 underline"
-          >
-            Открыть в Instantly
-          </a>
-        ) : null}
-        {campaigns ? (
-          <ul className="mt-1.5 space-y-0.5 text-xs text-emerald-700">
-            {campaigns.map((campaign) => (
-              <li key={campaign.campaign_id}>
-                <a href={campaign.campaign_url} target="_blank" rel="noreferrer" className="underline">
-                  {campaign.segment ?? 'Основная (дефолтный текст)'}
-                </a>
-                <span> · подготовлено: {(campaign.ready_leads_count ?? campaign.leads_count).toLocaleString('ru-RU')}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {warnings.map((warning) => (
-          <p key={warning} className="mt-1 text-xs text-amber-700">
-            {warning}
-          </p>
-        ))}
-      </section>
-
-      <section aria-label="Активация отправки" className="rounded-lg border border-gray-200 bg-gray-50/70 px-4 py-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className={HE.eyebrow}>Активация отправки</p>
-            <div className="mt-1.5">
-              <SeasonalityStatus state={seasonalState} />
-            </div>
-          </div>
-          <span className={HE.faint}>
-            Sending slot: {portfolio.capacity.active_bundles} из {portfolio.capacity.max_active_bundles}
-          </span>
-        </div>
-
-        {lifecycleMessage ? (
-          <p className="mt-3 text-sm text-gray-700">{lifecycleMessage}</p>
-        ) : !seasonallyEligible ? (
-          <p className="mt-3 text-sm text-amber-700">Требуется проверка сезонного решения.</p>
-        ) : !hasCurrentPlan ? (
-          <p className="mt-3 text-sm text-amber-700">План очереди нужно обновить перед активацией.</p>
-        ) : (
-          <>
-            {!slotAvailable ? (
-              <p className="mt-3 text-sm text-amber-700">
-                По последнему снимку sending slot занят. При активации backend обновит live-статус и безопасно освободит
-                holder, если кампания уже Completed.
-              </p>
-            ) : null}
-            <label className="mt-3 flex items-start gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={reviewed}
-                onChange={(event) => setReviewed(event.target.checked)}
-                className="mt-0.5"
-              />
-              Я проверил тексты, получателей и настройки всех PAUSED-кампаний
-            </label>
-          </>
-        )}
-
-        {isQueued ? (
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => void activate()}
-              disabled={!canActivate || !reviewed || activating || activated}
-              className={HE.btnPrimary}
-            >
-              {activated ? (deliveryDeferred ? 'Запуск одобрен' : 'Отправка активирована') : activating ? 'Активируем…' : 'Активировать отправку'}
-            </button>
-            <button type="button" onClick={() => setQueueHint(true)} className={HE.btnGhost}>
-              Пересмотреть сезонное решение
-            </button>
-          </div>
-        ) : null}
-        {deliveryDeferred ? (
-          <p className="mt-2 text-xs text-gray-600" role="status">
-            Кампании ждут первой дневной партии. После её загрузки отправка начнётся по расписанию отправки.
-          </p>
-        ) : null}
-        {queueHint ? (
-          <p className="mt-2 text-xs text-gray-600" role="status">
-            Откройте «Очередь запусков» и сохраните ручное решение с причиной.
-          </p>
-        ) : null}
-        {activationError ? (
-          <p className="mt-2 text-xs text-red-600" role="alert">
-            {activationError}
-          </p>
-        ) : null}
-      </section>
-    </div>
-  );
+function PreparedCampaigns({info, warnings}: {info: VeTemplateLaunchInfo; warnings: string[]}) {
+  const campaigns = info.campaigns?.length ? info.campaigns : [info];
+  return <section aria-label="Кампании подготовлены" className="space-y-3">
+    <p className="ve2-h3">Кампании подготовлены в Instantly</p>
+    <p className={HE.muted}>Система загружает первую порцию контактов по плану. Проверьте письма, контакты и настройки,
+      затем нажмите Start в Instantly. Запускать или подтверждать отправку в Portal не нужно.</p>
+    <p className={HE.muted}>Запуском и паузой отправки управляет специалист в Instantly.</p>
+    {campaigns.map(campaign => <a key={campaign.campaign_id} href={campaign.campaign_url} target="_blank"
+      rel="noreferrer" className="ve2-link block">Открыть в Instantly: {campaign.campaign_name}</a>)}
+    {warnings.map(warning => <StatusBox key={warning} tone="info">{warning}</StatusBox>)}
+  </section>;
 }
 
 /** Записанный запуск либо инлайн-аудит и форма выбора пресета. */
@@ -1517,94 +1290,16 @@ function LaunchSection({
 }) {
   const recorded = launch.recorded ?? (audit.phase === 'launch_succeeded' ? audit.launchInfo : null);
   const selectedPreset = launch.presets?.find((preset) => preset.id === launch.presetId) ?? null;
-  const embeddedPortfolio = useMemo(() => readTemplateLaunchPortfolio(template), [template]);
-  const [remotePortfolio, setRemotePortfolio] = useState<TemplateLaunchPortfolioDto | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!embeddedPortfolio && !recorded?.priority_snapshot) {
-      void Promise.resolve().then(() => {
-        if (!cancelled) setRemotePortfolio(null);
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
-    const market = embeddedPortfolio?.mode === 'advisory' ? 'us' : 'ru';
-    void Promise.resolve(veEngineCall<LaunchPortfolioResponse>(`${VE_API}/launch-portfolio?market=${market}`))
-      .then((response) => {
-        if (cancelled || !response?.ok) return;
-        const item = response.data.items?.find((candidate) => candidate.template_id === template.id);
-        if (!item?.priority_snapshot || !item.capacity) return;
-        setRemotePortfolio({
-          item_id: item.id,
-          status: item.status,
-          mode: response.data.mode,
-          plan_version: response.data.plan_version,
-          priority_snapshot: item.priority_snapshot,
-          capacity: {
-            max_active_bundles: item.capacity.max_active_bundles,
-            active_bundles: item.capacity.occupied_bundles,
-          },
-        });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [embeddedPortfolio, recorded?.priority_snapshot, template.id]);
-
   if (recorded) {
-    const info = recorded;
-    const portfolio = remotePortfolio ?? embeddedPortfolio;
-    if (portfolio) {
-      return <div className="space-y-3">
-        <PreparedLaunchPortfolio info={info} portfolio={portfolio} warnings={launch.warnings} />
-        <ContactSupplyPanel supply={supply} />
-        {info.portal_project_id ? (
-          launch.formOpen ? <DeliveryPlanBlock launch={launch} /> : (
-            <button type="button" onClick={launch.openForm} className="ve2-b-quiet">План и запас контактов</button>
-          )
-        ) : null}
-      </div>;
-    }
-    const campaigns = info.campaigns && info.campaigns.length > 1 ? info.campaigns : null;
-    return (
-      <div className={`px-4 py-3 ${HE.successPanel}`}>
-        <p className="flex items-center gap-2 text-sm font-medium text-emerald-800">
-          <StatusDot tone="ok" />
-          {campaigns && campaigns.length > 1
-            ? `Подготовлено кампаний: ${campaigns.length} по сегментам · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`
-            : `Кампания: ${info.campaign_name} · контактов при подготовке: ${(info.ready_leads_count ?? info.leads_count).toLocaleString('ru-RU')}`}
-        </p>
-        <p className="mt-1 text-xs text-emerald-700">
-          {info.campaign_url && !campaigns ? (
-            <a href={info.campaign_url} target="_blank" rel="noreferrer" className="underline">
-              Открыть в Instantly
-            </a>
-          ) : null}
-          {info.created_at ? <span> · {formatDate(info.created_at)}</span> : null}
-          <span> · Активация — вручную в Instantly после проверки</span>
-        </p>
-        {campaigns && campaigns.length > 1 ? (
-          <ul className="mt-1.5 space-y-0.5 text-xs text-emerald-700">
-            {campaigns.map((c) => (
-              <li key={c.campaign_id}>
-                <a href={c.campaign_url} target="_blank" rel="noreferrer" className="underline">
-                  {c.segment ?? 'Основная (дефолтный текст)'}
-                </a>
-                <span> · подготовлено: {(c.ready_leads_count ?? c.leads_count).toLocaleString('ru-RU')}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {launch.warnings.map((w) => (
-          <p key={w} className="mt-1 text-xs text-amber-700">
-            {w}
-          </p>
-        ))}
-      </div>
-    );
+    return <div className="space-y-3">
+      <PreparedCampaigns info={recorded} warnings={launch.warnings} />
+      <ContactSupplyPanel supply={supply} />
+      {recorded.portal_project_id ? (
+        launch.formOpen ? <DeliveryPlanBlock launch={launch} /> : (
+          <button type="button" onClick={launch.openForm} className="ve2-b-quiet">План и запас контактов</button>
+        )
+      ) : null}
+    </div>;
   }
 
   if (!launch.formOpen) return null;
@@ -1616,7 +1311,7 @@ function LaunchSection({
         <div className={`space-y-3 px-4 py-3 ${HE.infoPanel}`}>
           <p className="text-sm font-medium text-gray-800">
             Запуск в Instantly: кампании будут созданы <b>на паузе</b>, получатели загрузятся из проверенной раскладки.
-            Активация — вручную после проверки.
+            Запуск — кнопкой Start в Instantly после проверки.
           </p>
           {launch.presets === null && !launch.loadError ? (
             <p className="text-xs text-gray-500" role="status">Загружаем настройки отправки…</p>
@@ -1632,27 +1327,16 @@ function LaunchSection({
           {launch.presets && launch.presets.length > 0 ? (
             <div className="space-y-3">
               <div className="min-w-0 sm:max-w-sm">
-                <label htmlFor="ve2-launch-preset" className="ve2-label">
-                  Настройки отправки
-                </label>
-                <select
+                <SearchableSelect
                   id="ve2-launch-preset"
+                  label="Настройки отправки"
                   value={launch.presetId}
-                  onChange={(event) => launch.setPresetId(event.target.value)}
-                  disabled={Boolean(launch.boundPresetId)}
-                  className="ve2-input h-10 w-full px-3 text-xs"
-                  aria-describedby={selectedPreset ? 've2-launch-preset-summary' : undefined}
-                >
-                  {!launch.boundPresetId ? <option value="">Выберите клиента</option> : null}
-                  {launch.boundPresetId && !selectedPreset ? (
-                    <option value="">Настройки отправки недоступны</option>
-                  ) : null}
-                  {launch.presets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name}
-                    </option>
-                  ))}
-                </select>
+                  options={launch.presets}
+                  onChange={launch.setPresetId}
+                  disabled={Boolean(launch.boundPresetId) || launch.submitting}
+                  placeholder={launch.boundPresetId && !selectedPreset ? 'Настройки отправки недоступны' : 'Выберите клиента'}
+                  describedBy={selectedPreset ? 've2-launch-preset-summary' : undefined}
+                />
                 {launch.boundPresetId && selectedPreset ? (
                   <p className="mt-1 text-[11px] text-gray-500">Настройки отправки закреплены за проектом</p>
                 ) : null}

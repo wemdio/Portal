@@ -10,6 +10,9 @@ import {
   type StartJobRow,
 } from '@/lib/tgOutreach/watchdog';
 import { startTrace } from '@/lib/tracer';
+import { verifyBaseUsernames } from '@/lib/tgOutreach/firstTouch/verifyUsernames';
+import { shouldReportTmeDown } from '@/lib/tgOutreach/usernameExists';
+import { processCrmPushes, CRM_PUSH_POLL_INTERVAL_MS } from '@/lib/tgOutreach/crmPush';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
@@ -532,7 +535,7 @@ export async function pollOnce(): Promise<boolean> {
   return true;
 }
 
-export async function resumeRunningCampaigns() {
+export async function resumeRunningCampaigns(opts: { onBoot?: boolean } = {}) {
   // On worker boot, also rescue campaigns stuck in `error` from previous runs
   // (e.g. transient DB/proxy/network outages that flipped status to error and
   // then got cleared, but nothing brought the campaigns back).
@@ -551,16 +554,23 @@ export async function resumeRunningCampaigns() {
   const campaignIds = running.map(c => c.id);
   // During deploy drain/restart we can end up with stale stop/restart jobs
   // that would immediately kill auto-resumed campaigns on next worker boot.
-  await db
-    .from('tg_outreach_jobs')
-    .update({
-      status: 'completed',
-      finished_at: new Date().toISOString(),
-      error_message: 'Auto-completed stale stop/restart job during worker resume',
-    })
-    .in('campaign_id', campaignIds)
-    .in('action', ['stop', 'restart'])
-    .in('status', ['pending', 'running']);
+  //
+  // Только на старте процесса. Эта же функция идёт по таймеру раз в 5 минут,
+  // и там «устаревшей» оказывалась живая остановка: оператор жмёт «Остановить»
+  // на кампании в паузе, а проверка закрывает его задачу невыполненной и
+  // поднимает кампанию обратно.
+  if (opts.onBoot) {
+    await db
+      .from('tg_outreach_jobs')
+      .update({
+        status: 'completed',
+        finished_at: new Date().toISOString(),
+        error_message: 'Auto-completed stale stop/restart job during worker resume',
+      })
+      .in('campaign_id', campaignIds)
+      .in('action', ['stop', 'restart'])
+      .in('status', ['pending', 'running']);
+  }
 
   log('info', `Found ${running.length} campaigns with status running/paused, scheduling auto-resume`);
   for (const campaign of running) {
@@ -666,11 +676,13 @@ export async function resumeWarmupRuns() {
 }
 
 const RESUME_CHECK_INTERVAL_MS = 5 * 60_000;
+/** Раз в минуту по 40 ников: свежая база в 250 ников проверена за 6–7 минут. */
+const USERNAME_CHECK_INTERVAL_MS = 60_000;
 
 async function main() {
   log('info', 'TG Outreach worker starting...');
   await resetStuckJobs();
-  await resumeRunningCampaigns();
+  await resumeRunningCampaigns({ onBoot: true });
   await resumeWarmupRuns();
 
   // Independent heartbeat ticker keeps the docker healthcheck green as long
@@ -793,6 +805,52 @@ async function main() {
       log('error', `Periodic warmup resume check failed: ${err instanceof Error ? err.message : String(err)}`),
     );
   }, RESUME_CHECK_INTERVAL_MS);
+
+  /**
+   * Ники в базах — по t.me, заранее, а не когда на них споткнётся аккаунт.
+   *
+   * Мёртвый ник, дошедший до аккаунта, выглядит для портала как заморозка
+   * аккаунта: 24–28.09.2026 четыре таких ника в хвосте базы ATOL-1 отправили
+   * на паузу все 50 аккаунтов кампании. Отдельно от кругов кампаний: проверка
+   * не трогает Telegram-сессии и не должна ждать, пока круг дойдёт до базы.
+   */
+  let usernameCheckBusy = false;
+  const usernameCheckTimer = setInterval(() => {
+    if (shouldStop() || usernameCheckBusy) return;
+    usernameCheckBusy = true;
+    verifyBaseUsernames({
+      db,
+      log: (level, msg) => log(level === 'warning' ? 'warn' : level, msg),
+    })
+      .then((res) => {
+        if (!res.working && shouldReportTmeDown('base-verifier')) {
+          log('warn', 'Проверка ников по t.me на паузе: сервер не достучался до t.me или страница поменяла вид. Базы не трогаю.');
+        }
+      })
+      .catch((err) => log('error', `Проверка ников по t.me упала: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => {
+        usernameCheckBusy = false;
+      });
+  }, USERNAME_CHECK_INTERVAL_MS);
+  if (typeof usernameCheckTimer.unref === 'function') usernameCheckTimer.unref();
+
+  /**
+   * Очередь сделок в CRM по переданным лидам (tg_outreach_crm_pushes).
+   *
+   * На уровне процесса, а не внутри кампании: Telegram-сессия AMO не нужна, и
+   * остановка кампании не должна задерживать лида, который уже передан.
+   */
+  let crmPushBusy = false;
+  const crmPushTimer = setInterval(() => {
+    if (shouldStop() || crmPushBusy) return;
+    crmPushBusy = true;
+    processCrmPushes(db, (level, msg) => log(level === 'warning' ? 'warn' : level, msg))
+      .catch((err) => log('error', `Очередь CRM упала: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => {
+        crmPushBusy = false;
+      });
+  }, CRM_PUSH_POLL_INTERVAL_MS);
+  if (typeof crmPushTimer.unref === 'function') crmPushTimer.unref();
 
   await pollLoop({
     log,

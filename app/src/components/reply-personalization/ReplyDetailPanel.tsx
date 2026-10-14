@@ -1,9 +1,19 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { fetchOpenDraft, fetchThread, generateReply, skipReply, type GenerateResponse } from './api';
+import { useEffect, useRef, useState } from 'react';
+import { Bell, BellOff } from 'lucide-react';
+import { EditorResizeHandle, useEditorHeight } from '@/components/ResizableEditor';
+import {
+  fetchOpenDraft,
+  fetchThread,
+  generateReply,
+  saveReplyLanguage,
+  skipReply,
+  type GenerateResponse,
+} from './api';
 import { SendConfirmDialog } from './SendConfirmDialog';
-import type { ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
+import { playChime, primeChime } from '@/lib/doneChime';
+import type { ReplyLanguage, ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
 
 function formatTime(iso?: string) {
   if (!iso) return '';
@@ -33,6 +43,8 @@ const GEN_KEY = (id: string) => `rp-reply-generating:${id}`;
 /** Дольше генерация не идёт — старую отметку «генерирую» считаем брошенной. */
 const GEN_MAX_MS = 5 * 60_000;
 const GEN_POLL_MS = 4_000;
+/** Звук «ответ готов» — общий на все письма; 'off' — выключен. */
+const SOUND_KEY = 'rp-done-sound';
 
 function readStore(key: string): string | null {
   try {
@@ -62,7 +74,7 @@ export function ReplyDetailPanel({
 }: {
   projectId: string;
   item: ReplyListItem;
-  onHandled: () => void;
+  onHandled: (id: string, status: 'sent' | 'skipped') => void;
 }) {
   const [thread, setThread] = useState<ThreadMessage[]>([]);
   const [threadLoading, setThreadLoading] = useState(true);
@@ -77,6 +89,30 @@ export function ReplyDetailPanel({
   const [referredEmails, setReferredEmails] = useState<string[]>([]);
   /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
   const [recipient, setRecipient] = useState<string | null>(null);
+  /** Язык письма этой переписки; приходит с тредом, по умолчанию русский. */
+  const [language, setLanguage] = useState<ReplyLanguage>('ru');
+  const [soundOn, setSoundOn] = useState(true);
+  const rootRef = useRef<HTMLDivElement>(null);
+  /** Лента писем и последнее письмо в ней — чтобы открыть ветку на его начале. */
+  const threadRef = useRef<HTMLDivElement>(null);
+  const lastMessageRef = useRef<HTMLDivElement>(null);
+  // Высота поля ответа — своя ручка над блоком ответа (ResizableEditor).
+  const editor = useEditorHeight('rp-reply-editor-height', rootRef);
+
+  // Ветка открывается на начале последнего письма, как в Instantly: перед
+  // ответом нужен его контекст, а не первое письмо цепочки. Каждое письмо
+  // часто несёт под собой всю прежнюю переписку — к низу последнего листать
+  // ещё дальше. Только своя лента: страница целиком не прокручивается.
+  useEffect(() => {
+    const box = threadRef.current;
+    const last = lastMessageRef.current;
+    if (threadLoading || !box || !last) return;
+    box.scrollTop = Math.max(0, last.offsetTop - 16);
+  }, [threadLoading, thread.length]);
+
+  useEffect(() => {
+    setSoundOn(readStore(SOUND_KEY) !== 'off');
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,6 +124,7 @@ export function ReplyDetailPanel({
         setThread(res.messages);
         setThreadIncomplete(!res.contextComplete);
         setReferredEmails(res.referredEmails ?? []);
+        setLanguage(res.language === 'en' ? 'en' : 'ru');
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить переписку');
@@ -160,20 +197,38 @@ export function ReplyDetailPanel({
     const typedByHand = draftText.trim() && draftText !== draft?.text;
     if (typedByHand && !window.confirm('Заменить написанный текст черновиком от ИИ?')) return;
     const qualificationId = item.id;
+    // Звук включаем на клике: позже, когда ответ придёт, браузер иначе не даст.
+    if (soundOn) primeChime();
+    // Читаем при завершении: за время генерации звук могли выключить.
+    const chime = (kind: 'done' | 'error') => {
+      if (readStore(SOUND_KEY) !== 'off') playChime(kind);
+    };
     setGenerating(true);
     setError(null);
     writeStore(GEN_KEY(qualificationId), String(Date.now()));
     try {
-      const result = await generateReply(qualificationId, projectId, recipient);
+      const result = await generateReply(qualificationId, projectId, recipient, language);
       // Новый черновик заменяет набранный текст — и в браузере тоже.
       writeStore(TEXT_KEY(qualificationId), null);
       setDraft(result);
       setDraftText(result.text);
+      chime('done');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сгенерировать ответ');
+      chime('error');
     } finally {
       writeStore(GEN_KEY(qualificationId), null);
       setGenerating(false);
+    }
+  };
+
+  const toggleSound = () => {
+    const next = !soundOn;
+    setSoundOn(next);
+    writeStore(SOUND_KEY, next ? null : 'off');
+    if (next) {
+      primeChime();
+      playChime('done');
     }
   };
 
@@ -181,12 +236,24 @@ export function ReplyDetailPanel({
     navigator.clipboard.writeText(draftText).catch(() => {});
   };
 
+  /**
+   * Язык запоминается на переписке, а не в браузере: у русской и английской
+   * веток одной кампании выбор должен пережить и закрытие вкладки, и то, что
+   * письмо откроет другой сотрудник. Сбой сохранения не мешает генерации —
+   * язык всё равно уйдёт вместе с ней.
+   */
+  const handleLanguage = (next: ReplyLanguage) => {
+    if (next === language) return;
+    setLanguage(next);
+    void saveReplyLanguage(item.id, projectId, next).catch(() => {});
+  };
+
   const handleSkip = async () => {
     setSkipping(true);
     try {
       await skipReply(item.id, projectId);
       forgetLocal();
-      onHandled();
+      onHandled(item.id, 'skipped');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось пропустить письмо');
     } finally {
@@ -195,25 +262,35 @@ export function ReplyDetailPanel({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       {/* Шапка диалога */}
       <div className="border-b border-gray-100 px-4 py-2.5">
         <div className="text-sm font-semibold text-gray-900">{item.companyName || item.leadEmail}</div>
         <div className="text-xs text-gray-500">
           {item.leadEmail}
-          {item.campaignName ? ` · ${item.campaignName}` : ''}
+          {item.source === 'others'
+            ? item.eaccount
+              ? ` · пришло на ${item.eaccount}`
+              : ''
+            : item.campaignName
+              ? ` · ${item.campaignName}`
+              : ''}
         </div>
       </div>
 
       {/* Переписка пузырями */}
-      <div className="flex-1 space-y-2 overflow-y-auto p-4">
+      <div ref={threadRef} className="relative flex-1 space-y-2 overflow-y-auto p-4">
         {threadLoading ? (
           <div className="text-sm text-gray-500">Загружаем переписку...</div>
         ) : thread.length === 0 ? (
           <div className="text-sm text-gray-500">Переписка не найдена.</div>
         ) : (
           thread.map((m, idx) => (
-            <div key={idx} className={`flex ${m.fromUs ? 'justify-end' : 'justify-start'}`}>
+            <div
+              key={idx}
+              ref={idx === thread.length - 1 ? lastMessageRef : undefined}
+              className={`flex ${m.fromUs ? 'justify-end' : 'justify-start'}`}
+            >
               <div
                 className={`max-w-[80%] rounded-2xl border px-3.5 py-2 text-sm ${
                   m.fromUs ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-gray-50'
@@ -235,11 +312,16 @@ export function ReplyDetailPanel({
         ) : null}
       </div>
 
+      {/* Ручка высоты поля ответа — граница между перепиской и ответом:
+          тянешь вверх, поле растёт. Почему своя, а не родная у textarea, —
+          см. ResizableEditor. */}
+      <EditorResizeHandle {...editor} />
+
       {/* Кому: адресат прислал новый адрес — можно написать туда, а не ему.
           Черновик пишется под выбранного получателя, поэтому после смены
           его нужно сгенерировать заново. */}
       {referredEmails.length > 0 ? (
-        <div className="border-t border-gray-100 px-4 pt-3">
+        <div className="px-4 pt-1">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="text-gray-500">Кому:</span>
             {[null, ...referredEmails].map((email) => {
@@ -274,7 +356,7 @@ export function ReplyDetailPanel({
           только поверх сгенерированного черновика — на короткое «Спасибо,
           перезвоним» менеджер ждал генерацию. Черновик ИИ ложится в это же
           поле, дальше его можно править как свой текст. */}
-      <div className="border-t border-gray-100 p-4">
+      <div className={referredEmails.length > 0 ? 'border-t border-gray-100 p-4' : 'px-4 pb-4 pt-1'}>
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -292,15 +374,42 @@ export function ReplyDetailPanel({
           >
             {skipping ? 'Пропускаю...' : 'Пропустить'}
           </button>
+          {/* Язык письма: ИИ пишет по правилам и примерам на русском, поэтому
+              английский ответ нужно попросить явно. Выбор держится на переписке. */}
+          <div className="flex overflow-hidden rounded-lg border border-gray-300" role="group" aria-label="Язык письма">
+            {([['ru', 'Рус'], ['en', 'Англ']] as const).map(([code, label]) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => handleLanguage(code)}
+                aria-pressed={language === code}
+                title={code === 'en' ? 'ИИ напишет ответ на английском' : 'ИИ напишет ответ на русском'}
+                className={`px-2.5 py-1.5 text-sm font-medium transition ${
+                  language === code ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={toggleSound}
+            aria-pressed={soundOn}
+            title={soundOn ? 'Звук, когда ответ готов: вкл' : 'Звук, когда ответ готов: выкл'}
+            className="rounded-lg border border-gray-300 p-1.5 text-gray-600 hover:bg-gray-50"
+          >
+            {soundOn ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4 text-gray-400" />}
+          </button>
           {draft ? <span className="ml-auto text-xs text-gray-500">В поле — черновик ИИ, его можно править</span> : null}
         </div>
 
         <textarea
           value={draftText}
           onChange={(e) => updateText(e.target.value)}
-          rows={6}
+          style={{ height: editor.editorHeight }}
           placeholder="Напишите ответ сами или нажмите «Сгенерировать ответ»"
-          className="w-full rounded-lg border border-gray-300 p-3 text-sm"
+          className="w-full resize-none rounded-lg border border-gray-300 p-3 text-sm"
         />
         {draft && !draft.contextComplete ? (
           <p className="mt-1 text-xs text-amber-600">
@@ -338,14 +447,27 @@ export function ReplyDetailPanel({
           onCancel={() => setConfirmOpen(false)}
           onSent={() => {
             setConfirmOpen(false);
+            // Показываем отправленное письмо в переписке сразу. Instantly
+            // отдаёт его в треде с задержкой, а сам тред кэшируется — раньше
+            // после «Отправить» менялся только статус в списке слева, и было
+            // непонятно, ушло письмо или нет. Поле ответа при этом очищаем:
+            // текст уже не черновик, а отправленное письмо.
+            const sentText = draftText;
             forgetLocal();
-            onHandled();
+            setThread((prev) => [
+              ...prev,
+              { fromUs: true, text: sentText, timestamp: new Date().toISOString() },
+            ]);
+            setDraft(null);
+            setDraftText('');
+            onHandled(item.id, 'sent');
           }}
           qualificationId={item.id}
           projectId={projectId}
           draftId={draft?.draftId ?? null}
           toEmail={recipient ?? item.leadEmail}
           newContact={recipient !== null}
+          separateLetter={Boolean(item.outOfCampaign) && recipient === null}
         />
       </div>
     </div>

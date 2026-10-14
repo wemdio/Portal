@@ -35,7 +35,7 @@ export interface PendingHandoffRow {
 }
 
 export type HandoffSendResult =
-  | { ok: true; via: 'reply' | 'test'; replyAllCc: string[] }
+  | { ok: true; via: 'reply' | 'test'; replyAllCc: string[]; publicationPending?: true }
   | { ok: false; error: string };
 
 function buildReplySubject(subject?: string | null): string {
@@ -182,15 +182,30 @@ export async function sendHandoffNow(
     return { ok: false, error: message };
   }
 
-  await db
-    .from('instantly_pending_handoffs')
-    .update({
-      status: 'sent',
-      error_message: null,
-      ...(opts.sentByTelegramId != null ? { sent_by_telegram_id: opts.sentByTelegramId } : {}),
-      sent_at: new Date().toISOString(),
-    })
-    .eq('id', pending.id);
+  const sentPatch = {
+    status: 'sent',
+    error_message: null,
+    ...(opts.sentByTelegramId != null ? { sent_by_telegram_id: opts.sentByTelegramId } : {}),
+    sent_at: new Date().toISOString(),
+  };
+  let publicationPending = false;
+  if (opts.sentByTelegramId != null) {
+    // The manual table is published by this state transition. Retry ONLY this
+    // idempotent DB write after a lost response, never the external email send.
+    // Keep the claim held if all attempts fail: the actual email was sent.
+    publicationPending = true;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const saved = await db.from('instantly_pending_handoffs').update(sentPatch)
+          .eq('id', pending.id).select('id').maybeSingle();
+        if (!saved.error && saved.data) { publicationPending = false; break; }
+      } catch {
+        // A transport failure can arrive after COMMIT; repeat the same patch.
+      }
+    }
+  } else {
+    await db.from('instantly_pending_handoffs').update(sentPatch).eq('id', pending.id);
+  }
 
   // Best-effort tracking (mirrors the manual forward-email flow).
   try {
@@ -215,5 +230,5 @@ export async function sendHandoffNow(
     /* tracking is best-effort */
   }
 
-  return { ok: true, via, replyAllCc };
+  return { ok: true, via, replyAllCc, ...(publicationPending ? { publicationPending: true } : {}) };
 }

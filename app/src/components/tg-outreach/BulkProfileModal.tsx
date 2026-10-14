@@ -116,6 +116,7 @@ export function BulkProfileModal({
 
   const [busy, setBusy] = useState<null | 'pick' | 'save'>(null);
   const stopRef = useRef(false);
+  const pickAbortRef = useRef<AbortController | null>(null);
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const rowFileRef = useRef<HTMLInputElement>(null);
   const rowTargetRef = useRef<number | null>(null);
@@ -143,7 +144,10 @@ export function BulkProfileModal({
     const { account } = rowsRef.current[index];
     update(index, { state: 'busy', detail: 'Подбираю имя и свободный ник…' });
     try {
-      const res = await authFetch(`${API_BASE}/accounts/${account.id}/profile/autofill`, { method: 'POST' });
+      const res = await authFetch(`${API_BASE}/accounts/${account.id}/profile/autofill`, {
+        method: 'POST',
+        signal: pickAbortRef.current?.signal,
+      });
       const data = (await res.json()) as AutofillResponse;
       if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
       if (!data.username) {
@@ -164,6 +168,10 @@ export function BulkProfileModal({
         },
       });
     } catch (e) {
+      if (stopRef.current) {
+        update(index, { state: 'idle', detail: '' });
+        return;
+      }
       update(index, { state: 'error', detail: e instanceof Error ? e.message : 'Не удалось подобрать профиль' });
     }
   };
@@ -234,6 +242,7 @@ export function BulkProfileModal({
 
   const runAll = async (kind: 'pick' | 'save') => {
     stopRef.current = false;
+    pickAbortRef.current = kind === 'pick' ? new AbortController() : null;
     setBusy(kind);
 
     // Общая очередь и несколько дорожек: как только дорожка освободилась, она
@@ -256,8 +265,19 @@ export function BulkProfileModal({
     setBusy(null);
   };
 
-  const close = () => {
+  /**
+   * Подбор обрываем на лету: он в Telegram ничего не пишет, а зависший на
+   * прокси аккаунт иначе держал бы кнопку «Остановить» без эффекта. Запись не
+   * трогаем — оборванный посередине запрос оставил бы профиль наполовину
+   * применённым, её только не начинаем для следующих.
+   */
+  const stop = () => {
     stopRef.current = true;
+    pickAbortRef.current?.abort();
+  };
+
+  const close = () => {
+    stop();
     onClose();
   };
 
@@ -396,7 +416,7 @@ export function BulkProfileModal({
           {busy ? (
             <button
               type="button"
-              onClick={() => { stopRef.current = true; }}
+              onClick={stop}
               className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 transition hover:bg-gray-100"
             >
               Остановить

@@ -17,6 +17,10 @@ const AcceptedHypothesisSchema = z.object({
 const EvidenceCheckpointSchema = z.object({
   version: z.literal(1), input_hash: z.string().regex(/^[a-f0-9]{64}$/), next_index: count,
   accepted: z.array(AcceptedHypothesisSchema), merged: count, dropped: count, evidence_dropped: count,
+  // Optional for pre-feature checkpoints: no paid decisions are replayed.
+  priority_decisions: z.array(z.object({
+    title: z.string(), kept_title: z.string().nullable(), reason: z.string(),
+  })).optional(),
   usage: z.object({ tokensUsed: count, costUsd: z.number().finite().nonnegative() }),
   today_moscow: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   portfolio_profile: z.array(z.object({

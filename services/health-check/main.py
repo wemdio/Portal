@@ -117,6 +117,16 @@ HE_REFILL_STUCK_WINDOW_DAYS = 7
 # Telegram отвергает сообщение длиннее 4096 символов ЦЕЛИКОМ, а монитор шлёт
 # все проблемы цикла одним сообщением, и ключи дедупа к этому моменту уже взяты.
 HE_REFILL_ALERT_MAX_ITEMS = 5
+# «Рассылка» (свои ящики): воркер адреса отправки молчит / письма не уходят /
+# ящики отвалились. Свой монитор у рассылки есть (lib/sender/monitorWorker.ts),
+# но чат ему на серверах рассылки не задан — 08.10.2026 воркер 84.21.173.12
+# лежал 4 часа, 88 писем не ушли, а в чат не пришло ничего.
+SENDER_SILENT_MINUTES = max(5, int(os.environ.get("HEALTH_SENDER_SILENT_MIN", "10")))
+SENDER_OVERDUE_MINUTES = max(5, int(os.environ.get("HEALTH_SENDER_OVERDUE_MIN", "15")))
+SENDER_OVERDUE_MIN_MESSAGES = max(1, int(os.environ.get("HEALTH_SENDER_OVERDUE_MIN_MESSAGES", "3")))
+# Пока проблема держится — напоминание раз в столько минут.
+SENDER_REPEAT_MINUTES = max(30, int(os.environ.get("HEALTH_SENDER_REPEAT_MIN", "120")))
+SENDER_ALERT_MENTION = os.environ.get("HEALTH_SENDER_ALERT_MENTION", "@kuladmedDm").strip()
 HEALTH_CRITICAL_ENDPOINTS_RAW = os.environ.get(
     "HEALTH_CRITICAL_ENDPOINTS",
     "/,/tools,/api/user/tools",
@@ -149,6 +159,33 @@ HEALTH_ALERT_REPEAT_CYCLES = max(0, int(os.environ.get("HEALTH_ALERT_REPEAT_CYCL
 
 # Per-check consecutive-failure counters; reset to 0 on first success.
 _FAIL_COUNT: dict[str, int] = {}
+
+# Проверка прокси идёт внутри 15-минутного цикла, но не чаще
+# PROXY_CHECK_INTERVAL_SEC — её реальный шаг кратен циклу.
+_PROXY_CYCLE_SEC = -(-PROXY_CHECK_INTERVAL_SEC // max(1, HEALTH_INTERVAL_SEC)) * HEALTH_INTERVAL_SEC
+
+
+def _failure_streak_note(count: int, cycle_sec: int) -> str:
+    """« (×62 подряд, ≈15 ч)» — сколько проверок провалено подряд и сколько это времени.
+
+    Голое «×62» читалось как число отправленных сообщений. На деле алерт уходит
+    на 2-й провал и дальше раз в HEALTH_ALERT_REPEAT_CYCLES, а 62 — это длина
+    сбоя в циклах. Время здесь понятнее, чем циклы.
+    """
+    minutes = count * cycle_sec / 60
+    span = f"≈{round(minutes)} мин" if minutes < 90 else f"≈{round(minutes / 60)} ч"
+    return f" (×{count} подряд, {span})"
+
+
+def _attach_streak(problem_text: str, note: str) -> str:
+    """Счётчик сбоя — в первую строку алерта, а не в конец.
+
+    Раньше он дописывался в конец многострочного текста и прилипал к последней
+    строке. У прокси последней строкой стоит тег, и 28.09.2026 пришло
+    «@Jacob_brown (×62)» — выглядело как «тегнули 62 раза».
+    """
+    first, sep, rest = problem_text.partition("\n")
+    return first + note + sep + rest
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
@@ -2020,14 +2057,126 @@ async def check_pipeline_runs() -> list[str]:
         await conn.close()
 
 
+def _repeat_bucket(since) -> int:
+    """Номер окна напоминаний: ключ алерта меняется раз в SENDER_REPEAT_MINUTES от начала проблемы."""
+    if since is None:
+        return 0
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    minutes = (datetime.now(timezone.utc) - since).total_seconds() / 60
+    return int(minutes // SENDER_REPEAT_MINUTES)
+
+
+async def _check_sender(conn) -> list[str]:
+    """«Рассылка»: воркер адреса молчит, письма не уходят, ящики отвалились."""
+    problems: list[str] = []
+    hint = "Логи на сервере адреса: <code>docker ps -a | grep sender-worker</code>"
+
+    # 1. Воркер адреса отправки молчит, а за адресом есть включённые ящики.
+    try:
+        silent = await conn.fetch(
+            "SELECT e.ip, e.host, e.last_seen_at, "
+            "       (SELECT count(*) FROM public.sender_mailboxes m "
+            "         WHERE m.egress_ip = e.ip AND m.enabled) AS mailboxes "
+            "FROM public.sender_egress_ips e "
+            "WHERE coalesce(e.last_seen_at, e.created_at) < now() - make_interval(mins => $1)",
+            SENDER_SILENT_MINUTES,
+        )
+    except Exception as e:
+        print(f"[health] sender egress query skipped: {e}")
+        silent = []
+    for row in silent:
+        if not row["mailboxes"]:
+            continue
+        last = row["last_seen_at"]
+        key = f"sender:silent:{row['ip']}:{last.isoformat() if last else 'never'}:{_repeat_bucket(last)}"
+        if not await _claim_job_alert(conn, key):
+            continue
+        problems.append(
+            f"🔴 <b>Рассылка: воркер адреса {html.escape(str(row['ip']))} не отвечает</b>\n"
+            f"Сервер {html.escape(str(row['host']))}, последний раз на связи {_msk(last)}. "
+            f"Его {row['mailboxes']} ящиков не шлют письма и не читают ответы.\n"
+            f"{hint}"
+        )
+
+    # 2. Письма с прошедшим временем отправки не уходят — по адресам отправки.
+    try:
+        overdue = await conn.fetch(
+            "SELECT coalesce(m.egress_ip, 'без адреса') AS ip, count(*) AS n, "
+            "       min(s.scheduled_at) AS oldest, count(DISTINCT s.mailbox_id) AS mailboxes "
+            "FROM public.sender_messages s JOIN public.sender_mailboxes m ON m.id = s.mailbox_id "
+            "WHERE s.status = 'scheduled' AND s.scheduled_at < now() - make_interval(mins => $1) "
+            "GROUP BY 1 HAVING count(*) >= $2",
+            SENDER_OVERDUE_MINUTES,
+            SENDER_OVERDUE_MIN_MESSAGES,
+        )
+    except Exception as e:
+        print(f"[health] sender overdue query skipped: {e}")
+        overdue = []
+    for row in overdue:
+        oldest = row["oldest"]
+        key = f"sender:overdue:{row['ip']}:{oldest.isoformat() if oldest else ''}:{_repeat_bucket(oldest)}"
+        if not await _claim_job_alert(conn, key):
+            continue
+        problems.append(
+            f"🔴 <b>Рассылка: письма не уходят (адрес {html.escape(str(row['ip']))})</b>\n"
+            f"{row['n']} писем у {row['mailboxes']} ящиков ждут отправки дольше {SENDER_OVERDUE_MINUTES} мин, "
+            f"самое старое — с {_msk(oldest)}.\n"
+            f"{hint}"
+        )
+
+    # 3. Ящики перешли в «Ошибка» за последний час.
+    try:
+        failed = await conn.fetch(
+            "SELECT id::text AS id, email, last_error, updated_at FROM public.sender_mailboxes "
+            "WHERE status = 'failed' AND updated_at > now() - interval '1 hour' ORDER BY email"
+        )
+    except Exception as e:
+        print(f"[health] sender mailboxes query skipped: {e}")
+        failed = []
+    fresh = []
+    for r in failed:
+        if await _claim_job_alert(conn, f"sender:mailbox_failed:{r['id']}:{r['updated_at'].isoformat()}"):
+            fresh.append(r)
+    if fresh:
+        lines = "\n".join(
+            f"• {html.escape(str(r['email']))}: <code>{html.escape(str(r['last_error'] or 'без текста')[:200])}</code>"
+            for r in fresh[:15]
+        )
+        more = f"\n…и ещё {len(fresh) - 15}" if len(fresh) > 15 else ""
+        problems.append(f"🟠 <b>Рассылка: ящики перешли в «Ошибка» ({len(fresh)})</b>\n{lines}{more}")
+
+    return problems
+
+
+async def check_sender() -> list[str]:
+    """Монитор «Рассылки» — см. run_job_monitor."""
+    if not DATABASE_URL:
+        return []
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+    except Exception as e:
+        print(f"[health] sender connect error: {_normalize_network_error(e)}")
+        return []
+    try:
+        return await _check_sender(conn)
+    finally:
+        await conn.close()
+
+
 async def run_job_monitor() -> None:
     """Run parser queue/failure checks independently from general health."""
     try:
-        stuck, failed, pipelines = await asyncio.gather(
+        stuck, failed, pipelines, sender = await asyncio.gather(
             check_stuck_jobs(),
             check_failed_jobs(),
             check_pipeline_runs(),
+            check_sender(),
         )
+        if sender:
+            mention = f"\n{html.escape(SENDER_ALERT_MENTION)}" if SENDER_ALERT_MENTION else ""
+            await send_telegram(f"⚠️ <b>РАССЫЛКА</b> — {_now_msk()}\n\n" + "\n\n".join(sender) + mention)
+            print(f"[health] SENDER ALERT sent: {len(sender)} problem(s)")
         problems = [*pipelines, *stuck, *failed]
         if not problems:
             print(f"[health] job monitor OK at {_now_msk()}")
@@ -2054,9 +2203,11 @@ async def _run_health_check_inner():
     def _check(key: str, failed: bool, problem_text: str, recovery_text: str) -> None:
         emit_alert, emit_recovery = _track(key, failed)
         count = _FAIL_COUNT.get(key, 0)
-        suffix = f" (×{count})" if failed and count > HEALTH_ALERT_MIN_CONSECUTIVE else ""
         if emit_alert:
-            problems.append(problem_text + suffix)
+            if failed and count > HEALTH_ALERT_MIN_CONSECUTIVE:
+                cycle = _PROXY_CYCLE_SEC if key == "proxies" else HEALTH_INTERVAL_SEC
+                problem_text = _attach_streak(problem_text, _failure_streak_note(count, cycle))
+            problems.append(problem_text)
         if emit_recovery:
             recoveries.append(recovery_text)
 
@@ -2673,7 +2824,9 @@ async def _ping_site(count: int = 5) -> str:
     )
 
 
-async def _ping_one_proxy(url: str, count: int) -> tuple[int, list[float]]:
+async def _ping_one_proxy(
+    url: str, count: int, test_urls: list[str] | None = None
+) -> tuple[int, list[float]]:
     """Ping one proxy `count` times, return (ok_count, latencies_ms)."""
     ok = 0
     latencies: list[float] = []
@@ -2683,7 +2836,7 @@ async def _ping_one_proxy(url: str, count: int) -> tuple[int, list[float]]:
                 # Same rule as check_proxy: any non-5xx, non-407 response means
                 # the ping traversed the proxy. Fall back across targets so one
                 # flaky target doesn't drag the success rate to 0.
-                for test_url in PROXY_TEST_URLS:
+                for test_url in test_urls or PROXY_TEST_URLS:
                     try:
                         r = await client.get(test_url)
                         if r.status_code < 500 and r.status_code != 407:
@@ -2702,7 +2855,13 @@ async def _ping_proxies(count: int = 3) -> str:
     if not ALL_PROXIES:
         return "🔗 <b>Прокси</b>: не настроены"
 
-    tasks = [_ping_one_proxy(url, count) for _, url in ALL_PROXIES]
+    # RU-ноды — по российским целям, как в check_all_proxies: зарубежные
+    # cloudflare/ipify им недоступны, и в отчёте они висели «не отвечает»
+    # при живых прокси (25.09.2026: через них ya.ru 302, Яндекс Карты 200).
+    tasks = [
+        _ping_one_proxy(url, count, RU_PROXY_TEST_URLS if group.startswith("RU") else None)
+        for group, url in ALL_PROXIES
+    ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
     rows: list[tuple[str, str, bool, int, int, float]] = []
@@ -3407,6 +3566,117 @@ async def run_dataset_sync_report() -> None:
     await send_telegram("\n".join(lines), force=icon != "🟢")
 
 
+# ── Ежедневный контроль ответов клиентского кабинета (21:00 МСК) ──────────────
+# У /emails/test нет записи в Unibox: успешный HTTP сам по себе не доказывает,
+# кому адресовано письмо. Сравниваем два НЕЗАВИСИМЫХ поля аудита: фактический To
+# запроса к Instantly и From входящего письма. Старые аудиты без этих полей
+# показываем отдельно как непроверяемые, а не объявляем успешными.
+async def run_client_reply_report() -> None:
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            counts = await conn.fetchrow("""
+                SELECT
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent')::int AS sent,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test')::int AS fallback,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.failed')::int AS failed,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.recipient_blocked')::int AS blocked,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.outbox_failed')::int AS outbox_failed,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.result_unknown')::int AS result_unknown,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND context->>'outbox_confirmed' = 'false')::int AS untracked,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND (nullif(context->>'to_email', '') IS NULL
+                      OR nullif(context->>'sender_email', '') IS NULL))::int AS unverified,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND nullif(context->>'to_email', '') IS NOT NULL
+                    AND nullif(context->>'sender_email', '') IS NOT NULL
+                    AND lower(context->>'to_email') <> lower(context->>'sender_email'))::int AS wrong_recipient,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND nullif(context->>'provider_lead_email', '') IS NOT NULL
+                    AND nullif(context->>'sender_email', '') IS NOT NULL
+                    AND lower(context->>'provider_lead_email') <> lower(context->>'sender_email')
+                    AND lower(context->>'to_email') = lower(context->>'sender_email'))::int AS protected
+                FROM public.application_logs
+                WHERE created_at >= $1
+                  AND event LIKE 'client.campaign.replies.reply.%'
+            """, since)
+            incidents = await conn.fetch("""
+                SELECT created_at, event, message, context->>'emailId' AS email_id,
+                       context->>'sender_email' AS sender_email,
+                       context->>'to_email' AS to_email,
+                       context->>'outbox_confirmed' AS outbox_confirmed
+                FROM public.application_logs
+                WHERE created_at >= $1
+                  AND (
+                    event IN ('client.campaign.replies.reply.failed',
+                              'client.campaign.replies.reply.recipient_blocked',
+                              'client.campaign.replies.reply.outbox_failed',
+                              'client.campaign.replies.reply.result_unknown')
+                    OR (event = 'client.campaign.replies.reply.sent'
+                      AND context->>'via' = 'test'
+                      AND (context->>'outbox_confirmed' = 'false'
+                        OR nullif(context->>'to_email', '') IS NULL
+                        OR nullif(context->>'sender_email', '') IS NULL
+                        OR lower(context->>'to_email') <> lower(context->>'sender_email')))
+                  )
+                ORDER BY created_at DESC LIMIT 5
+            """, since)
+        finally:
+            await conn.close()
+    except Exception as error:
+        await send_telegram(
+            f"🔴 <b>Ответы клиентам: отчёт недоступен</b> — {_now_msk()}\n"
+            f"Не удалось проверить журнал отправок: {html.escape(_normalize_network_error(error))}",
+            force=True,
+        )
+        return
+
+    blocked = counts["blocked"]
+    wrong = counts["wrong_recipient"]
+    unverified = counts["unverified"]
+    failed = counts["failed"]
+    outbox_failed = counts["outbox_failed"]
+    result_unknown = counts["result_unknown"]
+    untracked = counts["untracked"]
+    icon = "🔴" if blocked or wrong or outbox_failed or result_unknown or untracked else "🟠" if failed or unverified else "🟢"
+    lines = [
+        f"{icon} <b>Ответы клиентам за 24 часа</b> — {_now_msk()}",
+        f"По журналу принято Instantly: {counts['sent']} · отдельным письмом: {counts['fallback']}",
+        f"Отказов при отправке: {failed} · блокировок адресата: {blocked}",
+        f"Адресат не совпал с автором: {wrong} · адресат не записан в старом аудите: {unverified}",
+        f"Журнал исходящих: ошибок {outbox_failed} · статус неизвестен {result_unknown} · принятых без подтверждения записи {untracked}",
+        f"Ответы с другим адресом автора, адресат проверен: {counts['protected']}",
+    ]
+    if incidents:
+        lines.append("Последние случаи для проверки:")
+        for row in incidents:
+            event = row["event"].rsplit(".", 1)[-1]
+            email_id = html.escape((row["email_id"] or "без id")[:36])
+            time_msk = row["created_at"].astimezone(timezone(timedelta(hours=3))).strftime("%H:%M")
+            detail = ""
+            if event == "sent":
+                if row["sender_email"] and row["to_email"]:
+                    detail = (
+                        f" · {html.escape(row['sender_email'][:120])} → "
+                        f"{html.escape(row['to_email'][:120])}"
+                    )
+                else:
+                    detail = " · адресат/автор не записан в старом аудите"
+                if row["outbox_confirmed"] == "false":
+                    detail += " · запись в журнал не подтверждена"
+            elif row["message"]:
+                detail = f" · {html.escape(row['message'][:100])}"
+            lines.append(f"• {time_msk} {html.escape(event)} · <code>{email_id}</code>{detail}")
+    await send_telegram("\n".join(lines), force=icon != "🟢")
+
+
 async def main():
     _require("DATABASE_URL or SUPABASE_DB_URL", DATABASE_URL)
     _require("TELEGRAM_HEALTH_CHAT_ID", TELEGRAM_CHAT_ID)
@@ -3485,6 +3755,16 @@ async def main():
         run_dataset_sync_report, "cron",
         hour=5, minute=30, timezone="UTC",
         id="dataset_sync_report",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Ответы клиентам: 21:00 МСК == 18:00 UTC. Отдельный отчёт health-бота;
+    # ошибки и недоказанный адресат видны даже когда API вернул 200.
+    scheduler.add_job(
+        run_client_reply_report, "cron",
+        hour=18, minute=0, timezone="UTC",
+        id="client_reply_report",
         max_instances=1,
         misfire_grace_time=3600,
     )

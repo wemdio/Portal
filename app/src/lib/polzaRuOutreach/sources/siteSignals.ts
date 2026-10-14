@@ -11,12 +11,19 @@
  *  - отраслевую группу для роутера кейсов.
  * Отдельно, без LLM: счётчик Яндекс.Директа / рекламные пиксели на главной —
  * только баллы скоринга, в письмо не попадают.
+ *
+ * Готовый разбор живёт 30 дней в общем кэше аутричей: повторный запуск не
+ * обходит сайт и не платит ИИ за ту же компанию.
  */
 
-import { fetchSitePageHtml } from '@/lib/enrich/emailScraper';
+import { createHash } from 'crypto';
+import { fetchSitePageHtml, type SitePageCache } from '@/lib/enrich/emailScraper';
 import { detectSignals } from '@/lib/enrich/signalDetector';
+import { outreachModel } from '@/lib/outreachLlm/client';
+import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKey } from '@/lib/outreachLlm/siteAnalysisCache';
+import { normalizeDomain } from '../company';
 import { acceptQuote, htmlToText } from '../evidence';
-import { asBool, asString, callJson } from '../llm';
+import { asBool, asString, callJson, isBoolLike } from '../llm';
 import { INDUSTRY_GROUPS, type IndustryGroup, type Signal, type SignalType } from '../types';
 
 const PAGE_TIMEOUT_MS = 12_000;
@@ -42,6 +49,8 @@ export interface SiteAnalysis {
   isB2b: boolean;
   b2bQuote: string | null;
   productSummary: string | null;
+  /** Строка письма 1 о компании — что продаёт и кому ({{о компании}}); прошла проверку aboutLineOf. */
+  aboutLine: string | null;
   customerQuote: string | null;
   excludedCategory: string | null;
   taScore: number;
@@ -57,6 +66,7 @@ export const EMPTY_SITE: SiteAnalysis = {
   isB2b: false,
   b2bQuote: null,
   productSummary: null,
+  aboutLine: null,
   customerQuote: null,
   excludedCategory: null,
   taScore: 0,
@@ -66,7 +76,7 @@ export const EMPTY_SITE: SiteAnalysis = {
   facts: [],
 };
 
-function sameSiteLinks(html: string, base: URL): string[] {
+function sameSiteLinks(html: string, base: URL, extraHint?: RegExp): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const re = /<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -81,7 +91,9 @@ function sameSiteLinks(html: string, base: URL): string[] {
     if (url.hostname.replace(/^www\./, '') !== base.hostname.replace(/^www\./, '')) continue;
     if (/\.(pdf|jpe?g|png|gif|zip|docx?|xlsx?)$/i.test(url.pathname)) continue;
     const anchor = m[2].replace(/<[^>]+>/g, ' ');
-    if (!SECTION_HINT.test(url.pathname) && !SECTION_HINT.test(anchor)) continue;
+    const hinted = SECTION_HINT.test(url.pathname) || SECTION_HINT.test(anchor)
+      || Boolean(extraHint && (extraHint.test(url.pathname) || extraHint.test(anchor)));
+    if (!hinted) continue;
     const key = `${url.origin}${url.pathname}`.replace(/\/+$/, '');
     if (seen.has(key) || key === base.origin) continue;
     seen.add(key);
@@ -90,20 +102,32 @@ function sameSiteLinks(html: string, base: URL): string[] {
   return out;
 }
 
-export async function crawlSite(website: string): Promise<{ pages: SitePage[]; homeHtml: string | null }> {
+/**
+ * Обход сайта: главная плюс до шести внутренних страниц по подсказкам разделов.
+ *
+ * pageCache — страницы, уже скачанные поиском почты той же компании: их не
+ * качаем второй раз. extraHint — дополнительные разделы для конкретного
+ * вызывающего: английский аутрич добавляет страницы вакансий, чтобы вытянуть
+ * повод «нанимают в продажи» с самого сайта компании. Без него обход прежний.
+ */
+export async function crawlSite(
+  website: string,
+  pageCache?: SitePageCache,
+  extraHint?: RegExp,
+): Promise<{ pages: SitePage[]; homeHtml: string | null }> {
   let base: URL;
   try {
     base = new URL(/^https?:\/\//.test(website) ? website : `https://${website}`);
   } catch {
     return { pages: [], homeHtml: null };
   }
-  const homeHtml = await fetchSitePageHtml(base.toString(), { timeout: PAGE_TIMEOUT_MS });
+  const homeHtml = await fetchSitePageHtml(base.toString(), { timeout: PAGE_TIMEOUT_MS, pageCache });
   if (!homeHtml) return { pages: [], homeHtml: null };
   const pages: SitePage[] = [{ url: base.toString(), text: htmlToText(homeHtml) }];
-  const links = sameSiteLinks(homeHtml, base).slice(0, MAX_EXTRA_PAGES);
+  const links = sameSiteLinks(homeHtml, base, extraHint).slice(0, MAX_EXTRA_PAGES);
   const fetched = await Promise.all(
     links.map(async (url) => {
-      const html = await fetchSitePageHtml(url, { timeout: PAGE_TIMEOUT_MS });
+      const html = await fetchSitePageHtml(url, { timeout: PAGE_TIMEOUT_MS, pageCache });
       return html ? { url, text: htmlToText(html) } : null;
     }),
   );
@@ -139,10 +163,11 @@ const POLZA_ICP_BRIEF = `Клиент Polza Agency — российская ко
 
 const SYSTEM = `Ты разбираешь страницы сайта российской компании для B2B-аутрича Polza Agency. Верни СТРОГИЙ JSON:
 {
-  "brand": string,              // название компании ДОСЛОВНО как на сайте (без ООО/АО); "" если не видно
+  "brand": string,              // короткое название, которым компания сама называет себя в тексте сайта, ДОСЛОВНО (без ООО/АО и без полного юридического наименования); "" если не видно
   "is_b2b": boolean,            // продаёт организациям
   "b2b_quote": string,          // ДОСЛОВНАЯ цитата, подтверждающая продажи организациям; ""
   "product_summary": string,    // что продаёт компания, 3–10 слов, по-русски; ""
+  "about_line": string,         // ОДНО предложение для холодного письма, обращение на «вы», 8–25 слов: что компания продаёт и кому — только по страницам сайта; простым разговорным языком, без оценок и похвалы, без цифр, без догадок о проблемах и планах; "" если со страниц это неясно
   "customer_quote": string,     // ДОСЛОВНАЯ цитата: кому продаёт (отрасли, тип клиентов); "" если прямо не написано
   "excluded_category": string,  // "recruitment_agency" | "leadgen_agency" | "b2c_only" | "marketplace" | "" — только если явно
   "ta_score": number,           // 0–10: насколько компания похожа на клиента Polza (портрет ниже). Будь строг: большинство 3–6; мало данных — не выше 5
@@ -165,13 +190,86 @@ new_production — запуск производства/мощности; partn
 dealer_search — ищут дилеров/дистрибьюторов; export_launch — начало экспорта; new_case — новый проект с конкретным клиентом.
 Жёсткие правила: цитаты и бренд копируются символ в символ со страницы; «мы растём» — не факт; не угадывай.`;
 
-export async function analyzeSite(website: string): Promise<SiteAnalysis> {
-  const { pages, homeHtml } = await crawlSite(website);
+/**
+ * Версия кода разбора ответа (что и как попадает в SiteAnalysis). Правка
+ * промпта меняет ключ кэша сама (хэш ниже), а правку разбора код не видит —
+ * её отмечаем, подняв это значение.
+ */
+const SITE_PARSER_VERSION = 'p1';
+
+/**
+ * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
+ * промпт — старые разборы просто не находятся, и 30 дней не отдаются разборы
+ * по прежним правилам, даже если версию поднять забыли.
+ */
+export const SITE_PROMPT_VERSION = `ru-site:${SITE_PARSER_VERSION}:${createHash('sha256').update(SYSTEM).digest('hex').slice(0, 12)}`;
+
+/**
+ * Ответ без главных полей (балл ЦА числом, B2B да/нет) — не разбор, а сбой
+ * модели. callJson бросает на нём LlmCallError: строка уходит в «ИИ не
+ * ответил» и в серию предохранителя, а не отсеивается молча по нулевому баллу
+ * как «мало похожа на клиента»; в кэш такой ответ не попадает, иначе компания
+ * 30 дней отсеивалась бы по пустому разбору.
+ */
+function hasCoreFields(raw: Record<string, unknown>): boolean {
+  const ta = raw.ta_score;
+  const taValid = (typeof ta === 'number' && Number.isFinite(ta)) || (typeof ta === 'string' && ta.trim() !== '' && Number.isFinite(Number(ta)));
+  return taValid && isBoolLike(raw.is_b2b);
+}
+
+// Строка о компании уходит в письмо без правки человеком: реклама, давление и
+// голос самой компании («мы», «наш» — скопировано с сайта) в ней — брак.
+const ABOUT_BANNED_RE = /уникальн|лучш|лидер|срочн|гарант|революц|инновац|идеальн|(?<![а-яё])(?:мы|нас|нам|наш[а-яё]*)(?![а-яё])/i;
+
+/**
+ * Строка {{о компании}}: одно законченное предложение 6–30 слов, без цифр
+ * (цифры в письме — только из кейса, повода и утверждённых формулировок),
+ * вопросов, восклицаний, кавычек и скобок. Не прошла — null: абзац из письма
+ * удаляется.
+ */
+export function aboutLineOf(value: unknown): string | null {
+  let line = asString(value).replace(/\s+/g, ' ').trim();
+  if (!line) return null;
+  if (!/[.]$/.test(line)) line = `${line}.`;
+  const words = line.split(' ').length;
+  if (words < 6 || words > 30) return null;
+  if (/\d|[?!{}"«»;]/.test(line) || /\.\s+\S/.test(line.slice(0, -1)) || ABOUT_BANNED_RE.test(line)) return null;
+  return line.charAt(0).toUpperCase() + line.slice(1);
+}
+
+/** Разбор из кэша — только целый и открывшийся: битая запись — промах, а не падение строки. */
+function siteFromCache(raw: unknown): SiteAnalysis | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const cached = raw as Partial<SiteAnalysis>;
+  if (cached.reachable !== true || !Array.isArray(cached.facts) || typeof cached.taScore !== 'number') return null;
+  return { ...EMPTY_SITE, ...cached, reachable: true };
+}
+
+/**
+ * Разбор сайта компании. Сайт не открылся — EMPTY_SITE (reachable: false).
+ * ИИ не ответил или ответил без главных полей — LlmCallError летит наверх как
+ * есть: раннер отличает «сайт не открылся» от «ИИ не ответил» и от
+ * исчерпанного лимита.
+ */
+export async function analyzeSite(
+  website: string,
+  domain: string | null = normalizeDomain(website),
+  pageCache?: SitePageCache,
+): Promise<SiteAnalysis> {
+  const cacheKey: SiteAnalysisCacheKey | null = domain
+    ? { lang: 'ru', domain, promptVersion: SITE_PROMPT_VERSION, model: outreachModel('ru', 'analysis') }
+    : null;
+  if (cacheKey) {
+    const cached = siteFromCache(await readSiteAnalysisCache(cacheKey));
+    if (cached) return cached;
+  }
+
+  const { pages, homeHtml } = await crawlSite(website, pageCache);
   if (!pages.length) return EMPTY_SITE;
   const hasAdPixel = homeHtml ? detectSignals(homeHtml).some((s) => s.category === 'ad_pixel') : false;
 
   const user = pages.map((p) => `=== СТРАНИЦА ${p.url} ===\n${p.text.slice(0, PAGE_TEXT_CHARS)}`).join('\n\n');
-  const raw = await callJson(SYSTEM, user, 'site', 1600);
+  const raw = await callJson(SYSTEM, user, 'site', 1600, hasCoreFields);
 
   const allText = pages.map((p) => p.text).join('\n');
   const pageByUrl = new Map(pages.map((p) => [p.url.replace(/\/+$/, ''), p]));
@@ -197,12 +295,13 @@ export async function analyzeSite(website: string): Promise<SiteAnalysis> {
   const group = asString(raw.industry_group) as IndustryGroup;
   const b2bQuote = acceptQuote(allText, asString(raw.b2b_quote));
   const ta = Number(raw.ta_score);
-  return {
+  const analysis: SiteAnalysis = {
     reachable: true,
     brand,
     isB2b: asBool(raw.is_b2b) && Boolean(b2bQuote),
     b2bQuote,
     productSummary: asString(raw.product_summary).slice(0, 120) || null,
+    aboutLine: aboutLineOf(raw.about_line),
     customerQuote: acceptQuote(allText, asString(raw.customer_quote)),
     excludedCategory: ['recruitment_agency', 'leadgen_agency', 'b2c_only', 'marketplace'].includes(excluded) ? excluded : null,
     taScore: Number.isFinite(ta) ? Math.max(0, Math.min(10, Math.round(ta))) : 0,
@@ -211,4 +310,9 @@ export async function analyzeSite(website: string): Promise<SiteAnalysis> {
     hasAdPixel,
     facts,
   };
+  // В кэш — только разобранный ИИ сайт; ответ без главных полей сюда не
+  // доходит (callJson бросил). Неоткрывшийся не запоминаем: завтра он может
+  // открыться. Свежесть событий раннер сверяет по датам при чтении.
+  if (cacheKey) await writeSiteAnalysisCache(cacheKey, analysis);
+  return analysis;
 }

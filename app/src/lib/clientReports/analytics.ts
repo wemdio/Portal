@@ -232,8 +232,32 @@ export async function loadClientReportAnalytics(input: {
   if (pipelineResult.error) {
     throw new ClientReportPipelineUnavailableError(pipelineResult.error);
   }
+  const retryDeltaResult = await supabaseAdmin.rpc('client_report_no_email_retry_delta', {
+    p_client_user_id: input.clientUserId,
+    p_from: fromUtc,
+    p_to: toExclusiveUtc,
+    p_score_code: input.filters.score === 'all' ? null : input.filters.score,
+  });
+  if (retryDeltaResult.error) throw new ClientReportPipelineUnavailableError(retryDeltaResult.error);
+  const retryDeltaPayload = Array.isArray(retryDeltaResult.data)
+    ? retryDeltaResult.data[0]
+    : retryDeltaResult.data;
+  if (!retryDeltaPayload || typeof retryDeltaPayload !== 'object' ||
+      !['scored_companies', 'working_score_companies', 'email_found_companies', 'validated_emails']
+        .every((field) => Object.prototype.hasOwnProperty.call(retryDeltaPayload, field))) {
+    throw new ClientReportPipelineUnavailableError('Retry delta is incomplete');
+  }
 
   const pipeline = unwrapPipelineRpc(pipelineResult.data);
+  const retryDelta = retryDeltaPayload as PipelineRpcRow;
+  const afterRetry = (field: 'scored_companies' | 'working_score_companies' | 'email_found_companies' | 'validated_emails') => {
+    const total = numberValue(pipeline[field]);
+    const repeated = numberValue(retryDelta[field]);
+    if (repeated > total) {
+      throw new ClientReportPipelineUnavailableError(`Retry delta exceeds pipeline ${field}`);
+    }
+    return total - repeated;
+  };
   const qualityNotices = buildReportQualityNotices({
     campaignId: input.filters.campaignId,
     legacyScoredCompanies: numberValue(pipeline.legacy_scored_companies),
@@ -251,10 +275,10 @@ export async function loadClientReportAnalytics(input: {
       campaignId: input.filters.campaignId,
     },
     funnel: {
-      scoredCompanies: numberValue(pipeline.scored_companies),
-      workingScoreCompanies: numberValue(pipeline.working_score_companies),
-      emailFoundCompanies: numberValue(pipeline.email_found_companies),
-      validatedEmails: numberValue(pipeline.validated_emails),
+      scoredCompanies: afterRetry('scored_companies'),
+      workingScoreCompanies: afterRetry('working_score_companies'),
+      emailFoundCompanies: afterRetry('email_found_companies'),
+      validatedEmails: afterRetry('validated_emails'),
       submittedContacts: numberValue(pipeline.submitted_contacts),
       confirmedContacts: numberValue(pipeline.confirmed_contacts),
       byCampaign: resolvePipelineCampaignNames(

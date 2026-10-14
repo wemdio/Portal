@@ -15,6 +15,11 @@ Env, в порядке приоритета:
   TELEGRAM_BOT_TOKEN                                    — общий fallback.
   LEADS_REPORT_TG_BOT_TOKEN / LEADS_REPORT_TG_ADMIN_IDS — последний fallback.
 
+Оформление — как у health-check: 🔴 в начале и тег ответственного в конце
+(EXTERNAL_SYNC_ALERT_MENTION, по умолчанию @kuladmedDm; пустое значение —
+без тега). Иначе сбой синка терялся среди зелёных статусов того же канала:
+Т-Банк в сентябре 2026 неделю не грузился, и заметили это по деньгам.
+
 Никогда не бросает: неудачный TG-запрос логируется в stderr и всё.
 """
 from __future__ import annotations
@@ -27,6 +32,8 @@ from typing import Mapping, Optional
 import httpx
 
 _MAX_LEN = 3800  # TG hard-limit 4096, оставляем запас на форматирование
+
+ALERT_MENTION = os.environ.get("EXTERNAL_SYNC_ALERT_MENTION", "@kuladmedDm").strip()
 
 
 def _load_creds() -> Optional[tuple[str, list[str]]]:
@@ -66,9 +73,15 @@ async def send_worker_alert(
 
     token, chat_ids = creds
     err_text = str(error) if isinstance(error, BaseException) else str(error)
+    # Режем сам текст ошибки, а не готовое сообщение: обрезка по _MAX_LEN
+    # посреди <code> оставила бы незакрытый тег, и Telegram отклонил бы весь
+    # алерт (parse_mode=HTML) — сбой снова прошёл бы молча.
+    if len(err_text) > 3000:
+        err_text = err_text[:3000] + " …"
 
     lines: list[str] = [
-        f"🚨 <b>{html.escape(worker_id)}</b>: {html.escape(subject)}",
+        f"🔴 <b>Синк данных не прошёл</b> — {html.escape(worker_id)}: "
+        f"{html.escape(subject)}",
         "",
         f"<code>{html.escape(err_text)}</code>",
     ]
@@ -80,7 +93,10 @@ async def send_worker_alert(
             lines.append(
                 f"• <i>{html.escape(str(k))}</i>: <code>{html.escape(str(v))}</code>"
             )
+    # Тег — после обрезки по длине, иначе длинная ошибка его бы съела.
     text = "\n".join(lines)[:_MAX_LEN]
+    if ALERT_MENTION:
+        text += f"\n\n{html.escape(ALERT_MENTION)}"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         for chat_id in chat_ids:

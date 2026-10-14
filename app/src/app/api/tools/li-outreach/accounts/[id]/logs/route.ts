@@ -78,45 +78,40 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       const rangeMs = RANGES[rangeKey];
       if (!rangeMs) return jsonError(`range должен быть одним из: ${Object.keys(RANGES).join(', ')}`, 400);
 
-      // Verify ownership of the account and load display data for the header.
+      // LinkedIn accounts are shared by the whole team (08.10.2026): anyone may
+      // read any account's log, whoever added it. Load display data for the header.
       const { data: account, error: accErr } = await supabaseAdmin
         .from('li_accounts')
-        .select('id, name, unipile_account_id, user_id')
+        .select('id, name, unipile_account_id')
         .eq('id', accountId)
         .maybeSingle();
       if (accErr) return jsonError(accErr.message, 500);
-      if (!account || account.user_id !== auth.user.id) {
-        return jsonError('LinkedIn-аккаунт не найден или не принадлежит пользователю', 404);
-      }
+      if (!account) return jsonError('LinkedIn-аккаунт не найден', 404);
       const accountLabel =
         (account.name as string | null)?.trim() ||
         (account.unipile_account_id as string) ||
         accountId;
 
-      // Owned campaigns for display names + the account_id constraint already
-      // pins us to user's own campaigns (li_accounts.user_id), but keep the
-      // ownership safety net anyway.
-      const { data: ownedCampaigns, error: ocErr } = await supabaseAdmin
+      // Campaign names for the lines — all campaigns, since every specialist's
+      // campaign may have run through this account.
+      const { data: campaigns, error: cErr } = await supabaseAdmin
         .from('li_campaigns')
-        .select('id, name')
-        .eq('user_id', auth.user.id);
-      if (ocErr) return jsonError(ocErr.message, 500);
-      const ownedIds = (ownedCampaigns ?? []).map((c) => c.id as string);
+        .select('id, name');
+      if (cErr) return jsonError(cErr.message, 500);
       const campaignNameById = new Map<string, string>(
-        (ownedCampaigns ?? []).map((c) => [c.id as string, c.name as string]),
+        (campaigns ?? []).map((c) => [c.id as string, c.name as string]),
       );
 
       const sinceIso = new Date(Date.now() - rangeMs).toISOString();
       const items: LogRow[] = [];
       let from = 0;
 
-      while (items.length < MAX_ROWS && ownedIds.length > 0) {
+      while (items.length < MAX_ROWS) {
         const to = from + PAGE_SIZE - 1;
         const { data, error } = await supabaseAdmin
           .from('li_campaign_logs')
           .select('created_at, level, message, lead_name, step_index, campaign_id')
           .eq('account_id', accountId)
-          .in('campaign_id', ownedIds)
           .gte('created_at', sinceIso)
           .order('created_at', { ascending: true })
           .range(from, to);

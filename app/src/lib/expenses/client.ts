@@ -112,6 +112,15 @@ export function formatCurrencyMap(map: Record<string, number>): string {
     .join(' · ');
 }
 
+/**
+ * Справка к рублёвой сумме: «в т.ч. 468 USDT». Пустая строка, если валютных
+ * денег в сумме нет, — у чисто рублёвых сумм подписи нет вовсе.
+ */
+export function formatForeignNote(map: Record<string, number> | undefined): string {
+  if (!map || Object.keys(map).length === 0) return '';
+  return `в т.ч. ${formatCurrencyMap(map)}`;
+}
+
 /** Склонение для счётчиков операций: «1 операция», «2 операции», «5 операций». */
 export function pluralOps(count: number): string {
   const mod10 = count % 10;

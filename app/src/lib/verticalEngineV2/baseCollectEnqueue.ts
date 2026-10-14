@@ -25,10 +25,10 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
-import { canResumePartialPreview, grantVeResumeRoundBudget, openNextVeCollectionRound, previewRecoveryKind } from './collectionRecovery';
+import { canResumePartialPreview, getVeCollectionContinuation, grantVeResumeRoundBudget, openNextVeCollectionRound, previewRecoveryKind, type VeCollectionContinuation } from './collectionRecovery';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
-import { isVeTransientDirectoryError } from './collectionErrors';
+import { isVeResumableDirectoryError } from './collectionErrors';
 import { compactVeRelevanceReserve } from './relevanceReserve';
 
 export interface VeBaseCollectInput {
@@ -63,7 +63,7 @@ export type VeBaseCollectResult =
   /** Сборка стартовала: созданы базы + джобы (по одной на гипотезу либо одна). */
   | { ok: true; created: true; bases: Array<Record<string, unknown>>; base: Record<string, unknown> }
   /** Существующее превью: сборка уже идёт либо результат сохранён. */
-  | { ok: true; created: false; base: Record<string, unknown> }
+  | { ok: true; created: false; base: Record<string, unknown>; continuation?: VeCollectionContinuation }
   | { ok: false; message: string };
 
 /**
@@ -120,33 +120,46 @@ function repairJobPayload(base: Record<string, unknown>): Record<string, unknown
 
 async function resumeFailedPreview(
   supabase: SupabaseClient, input: VeBaseCollectInput, hypothesisId: string,
-  activeBaseIds: string[],
+  activeBaseIds: string[], currentHypothesis: Record<string, unknown> | null,
 ): Promise<VeBaseCollectResult | null> {
   let query = supabase.from('ve_bases')
-    .select('id, project_id, vertical_id, hypothesis_id, source, status, error, collect_info, created_at')
+    .select('id, project_id, vertical_id, hypothesis_id, source, status, error, collect_info, created_at, updated_at, collection_continuation_revision, max_emails_per_company, contact_cap_applied')
     .eq('project_id', input.projectId).eq('vertical_id', input.verticalId).eq('hypothesis_id', hypothesisId)
     .eq('source', 'auto');
   query = input.resumeBaseId ? query.eq('id', input.resumeBaseId).in('status', ['failed', 'analyzed']) : query.eq('status', 'failed');
   const { data: failed, error } = await query.order('created_at', { ascending: false }).limit(100);
   if (error) return { ok: false, message: error.message };
-  const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base) || (input.resumeBaseId && canResumePartialPreview(base)));
+  const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base) || (input.resumeBaseId && canResumePartialPreview(base, currentHypothesis)));
   // A newer empty 402 attempt must not hide an older already enriched result.
   const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation')
     ?? candidates.find((base) => previewRecoveryKind(base) !== 'billing') ?? candidates[0];
-  if (!saved) return null;
+  if (!saved) {
+    const requested = input.resumeBaseId && (failed ?? []).find((base) => base.id === input.resumeBaseId);
+    return requested ? { ok: true, created: false, base: requested, continuation: getVeCollectionContinuation(requested, currentHypothesis) } : null;
+  }
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   if (saved.status === 'analyzed') {
     // A launched campaign owns this audience. Recovery must not mutate it.
     const launched = await supabase.from('ve_templates').select('id').eq('base_id', saved.id)
       .not('launch_info', 'is', null).limit(1).maybeSingle();
     if (launched.error) return { ok: false, message: launched.error.message };
-    if (launched.data) return { ok: true, created: false, base: saved };
+    if (launched.data) return { ok: true, created: false, base: saved, continuation: {
+      available: false, action: null, code: 'launched', reason: 'База уже передана в запуск. Пополнение управляется в результатах.',
+    } };
   }
   const info = { ...saved.collect_info,
+    ...(currentHypothesis && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')) ? { hypotheses: [currentHypothesis] } : {}),
     ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}),
     ...(saved.status === 'analyzed' ? { validation_retry: true, relevance_review_requested: true } : {}),
   };
-  if (info.saved_email_recovery !== undefined) {
+  // Continuing acquisition is not permission to repeat completed SMTP checks.
+  // Clear inconclusive results only when this failed preparation actually
+  // stopped on email recovery; conclusive verdicts and dispatched children
+  // are retained by the recovery helper in that case as well.
+  const emailRecoveryFailed = saved.status === 'failed' && (saved.error === 'Проверка email завершилась не полностью'
+    || info.company_name_recovery?.validation_error === 'Проверка email завершилась не полностью'
+    || (typeof info.saved_email_recovery?.error === 'string' && info.saved_email_recovery.error.length > 0));
+  if (info.saved_email_recovery !== undefined && emailRecoveryFailed) {
     info.saved_email_recovery = resumeVeSavedEmailRecovery(info.saved_email_recovery);
   }
   if (previewRecoveryKind(saved) === 'pipeline' && info.target_checkpoint?.completed_round === info.target_progress?.round) {
@@ -154,6 +167,11 @@ async function resumeFailedPreview(
     // alone cannot represent a pipelined preview. No re-scraping old inputs.
     info.validation_retry = true;
     info.relevance_review_requested = true;
+  }
+  if (info.company_name_recovery?.validation_error && info.relevance_review_requested === true) {
+    // An explicit retry must finish BOTH interrupted phases. Name cleanup can
+    // succeed while the saved validation error still needs a fresh check.
+    info.company_name_recovery = { ...info.company_name_recovery, retry_validation_after_cleanup: true };
   }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
@@ -170,7 +188,7 @@ async function resumeFailedPreview(
   if (Array.isArray(info.tasks)) {
     info.tasks = info.tasks.map((task: Record<string, unknown>) => {
       if (task.source === 'companies_directory' && task.status === 'failed'
-        && isVeTransientDirectoryError(task.error)) {
+        && isVeResumableDirectoryError(task.error)) {
         // Drain any saved prefix before reading another page. Renewable done
         // tasks reopen only after their harvest has been consumed.
         const recovered: Record<string, unknown> = { ...task,
@@ -198,9 +216,16 @@ async function resumeFailedPreview(
   }
   const claimedAt = new Date().toISOString();
   if (info.relevance_reserve) info.relevance_reserve = compactVeRelevanceReserve(info.relevance_reserve);
-  const { data: claimed, error: claimError } = await supabase.from('ve_bases')
+  let claim = supabase.from('ve_bases')
     .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
-    .eq('id', saved.id).eq('status', saved.status).select('id, status, hypothesis_id').maybeSingle();
+    .eq('id', saved.id).eq('project_id', input.projectId).eq('status', saved.status);
+  // A same-status writer may have changed the contact cap or a checkpoint.
+  // Its revision must win over this snapshot; a cache-only write changes
+  // neither revision nor timestamp and therefore does not block a real resume.
+  claim = saved.updated_at == null ? claim.is('updated_at', null) : claim.eq('updated_at', saved.updated_at);
+  claim = saved.collection_continuation_revision == null ? claim.is('collection_continuation_revision', null)
+    : claim.eq('collection_continuation_revision', saved.collection_continuation_revision);
+  const { data: claimed, error: claimError } = await claim.select('id, status, hypothesis_id').maybeSingle();
   if (claimError || !claimed) {
     // Both same-base CAS and competing-base unique races are idempotent.
     const { data: winner, error: winnerError } = await supabase.from('ve_bases')
@@ -249,13 +274,16 @@ export async function enqueueVeBaseCollect(
   // показывается заголовком на карточке (Phase 3), но filename одинаков у всех
   // баз вертикали — без суффикса карточки неразличимы и экспорт путается.
   let hypothesisTitle: Record<string, string> = {};
+  const currentHypotheses = new Map<string, Record<string, unknown>>();
   if (perHypothesis) {
     const ids = hypothesisIds as string[];
     const { data: hypRows, error: hypErr } = await supabase
       .from('ve_hypotheses')
-      .select('id, title')
+      .select('id, title, description, origin, status, broad')
+      .eq('project_id', projectId).eq('vertical_id', verticalId)
       .in('id', ids);
     if (hypErr) return { ok: false, message: hypErr.message };
+    for (const h of hypRows ?? []) currentHypotheses.set(String(h.id), h);
     hypothesisTitle = Object.fromEntries(
       (hypRows ?? []).map((h) => [String(h.id), String(h.title ?? '').trim() || String(h.id)]),
     );
@@ -432,9 +460,10 @@ export async function enqueueVeBaseCollect(
       if (preparedError) return { ok: false, message: preparedError.message };
       if (prepared) {
         if (prepared.id === input.resumeBaseId) {
-          const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
+          const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds, currentHypotheses.get(hypothesisId) ?? null);
           if (resumed) {
             if (!resumed.ok) return resumed;
+            if (!resumed.created && resumed.continuation && !resumed.continuation.available) return resumed;
             (resumed.created ? created : existing).push(resumed.base);
             continue;
           }
@@ -442,9 +471,10 @@ export async function enqueueVeBaseCollect(
         existing.push(prepared as Record<string, unknown>);
         continue;
       }
-      const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
+      const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds, currentHypotheses.get(hypothesisId) ?? null);
       if (resumed) {
         if (!resumed.ok) return resumed;
+        if (!resumed.created && resumed.continuation && !resumed.continuation.available) return resumed;
         (resumed.created ? created : existing).push(resumed.base);
         continue;
       }

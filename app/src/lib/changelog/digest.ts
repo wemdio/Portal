@@ -13,11 +13,17 @@
 
 export type DigestSectionKind = 'portal' | 'client' | 'technical' | 'other';
 
+export interface DigestItem {
+  text: string;
+  /** Подпункты: в телеграме это «- …» с отступом под номером пункта. */
+  children: string[];
+}
+
 export interface DigestSection {
   kind: DigestSectionKind;
   title: string;
   /** Пункты раздела без нумерации: список рисует разметка, а не текст. */
-  items: string[];
+  items: DigestItem[];
 }
 
 /** Заголовок раздела по первым словам: точную формулировку ИИ не гарантирует. */
@@ -38,17 +44,23 @@ function looksLikeHeading(line: string): boolean {
 /**
  * Пункт списка: «1. …», «- …», «• …».
  *
- * Вложенные пункты (с отступом) приклеиваем к предыдущему: в сводке они
- * поясняют его, а не живут сами по себе.
+ * Вложенные пункты (с отступом, или маркер «-» под нумерованным пунктом)
+ * уходят в подпункты предыдущего: в сводке они поясняют его, а не живут сами
+ * по себе. Раньше они становились отдельными номерами, и в портале «1, 2, 3»
+ * из телеграма превращались в «1…9».
  */
-function itemText(line: string): string | null {
-  const match = /^\s*(?:\d+[.)]|[-•*])\s+(.*)$/.exec(line);
-  return match ? match[1].trim() : null;
+function parseItem(line: string): { text: string; numbered: boolean; indented: boolean } | null {
+  const match = /^(\s*)(\d+[.)]|[-•*])\s+(.*)$/.exec(line);
+  if (!match) return null;
+  return { text: match[3].trim(), numbered: /\d/.test(match[2]), indented: match[1].length > 0 };
 }
 
 export function parseDigest(summary: string): DigestSection[] {
   const sections: DigestSection[] = [];
   let current: DigestSection | null = null;
+  // Последний пункт верхнего уровня был нумерованным — тогда «- …» под ним
+  // подпункт, даже если ИИ забыл отступ.
+  let lastNumbered = false;
 
   for (const raw of (summary ?? '').replace(/\r\n/g, '\n').split('\n')) {
     const line = raw.trimEnd();
@@ -57,6 +69,7 @@ export function parseDigest(summary: string): DigestSection[] {
     if (looksLikeHeading(line)) {
       current = { kind: classify(line) ?? 'other', title: line.replace(/:$/, ''), items: [] };
       sections.push(current);
+      lastNumbered = false;
       continue;
     }
 
@@ -65,14 +78,19 @@ export function parseDigest(summary: string): DigestSection[] {
       sections.push(current);
     }
 
-    const item = itemText(line);
-    if (item) {
-      current.items.push(item);
-    } else if (current.items.length) {
+    const parent = current.items[current.items.length - 1];
+    const item = parseItem(line);
+    if (item && parent && !item.numbered && (item.indented || lastNumbered)) {
+      parent.children.push(item.text);
+    } else if (item) {
+      current.items.push({ text: item.text, children: [] });
+      lastNumbered = item.numbered;
+    } else if (parent) {
       // Продолжение предыдущего пункта — перенос строки или вложенный абзац.
-      current.items[current.items.length - 1] += ` ${line.trim()}`;
+      if (parent.children.length) parent.children[parent.children.length - 1] += ` ${line.trim()}`;
+      else parent.text += ` ${line.trim()}`;
     } else {
-      current.items.push(line.trim());
+      current.items.push({ text: line.trim(), children: [] });
     }
   }
 
@@ -134,6 +152,6 @@ export function digestPreview(summary: string): string {
   const first = sections.find((s) => s.kind === 'portal') ?? sections[0];
   // Звёздочки выделения ИИ ставит всегда; в списке уведомлений разметку никто
   // не разбирает, и они остались бы видимым мусором посреди предложения.
-  const text = stripEmphasis(first?.items[0] ?? '');
+  const text = stripEmphasis(first?.items[0]?.text ?? '');
   return text.length > 180 ? `${text.slice(0, 179)}…` : text;
 }

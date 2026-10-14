@@ -51,7 +51,9 @@ function okvedPrefixes(codes: string[] | undefined): string[] | null {
 
 /** Реестровая задача плана → срез для подсчёта; прочие источники размера не имеют. */
 export function veDirectoryPopulationSlice(task: VeCollectTask): VeDirectoryPopulationSlice | null {
-  if (task.source !== 'companies_directory') return null;
+  // The shared population RPC does not understand the additional name scope.
+  // Never label the whole OKVED sector as the size of a targeted niche.
+  if (task.source !== 'companies_directory' || task.directory_filters?.nameTerms) return null;
   return veDirectoryFiltersSlice(task.directory_filters ?? {});
 }
 
@@ -124,6 +126,6 @@ const VE_UNSIZED_SOURCE_LABELS: Record<string, string> = {
 };
 
 export function veUnsizedSourceLabels(tasks: VeCollectTask[]): string[] {
-  return [...new Set(tasks.filter((task) => task.source !== 'companies_directory')
-    .map((task) => VE_UNSIZED_SOURCE_LABELS[task.source] ?? task.source))];
+  return [...new Set(tasks.filter((task) => task.source !== 'companies_directory' || task.directory_filters?.nameTerms)
+    .map((task) => task.source === 'companies_directory' ? 'прицельный поиск в реестре' : VE_UNSIZED_SOURCE_LABELS[task.source] ?? task.source))];
 }

@@ -10,6 +10,8 @@
  */
 
 import { z } from 'zod';
+import { VE_BROAD_HYPOTHESES_MAX } from './broadHypotheses';
+import { VePriorityNicheResultSchema, vePriorityNicheKey } from './priorityNiches';
 
 /* ─────────────────────── site_profile ─────────────────────── */
 
@@ -106,6 +108,48 @@ export const VeHypothesesBatchSchema = z.object({
   hypotheses: z.array(VeHypothesisCandidateSchema).min(1),
 });
 export type VeHypothesesBatchOutput = z.infer<typeof VeHypothesesBatchSchema>;
+
+/** Retained titles are the same ones passed to evidence, including the broad cap. */
+export function combineVeHypothesisCandidates(output: VeHypothesesBatchOutput): VeHypothesisCandidate[] {
+  const narrow = output.hypotheses.map(({ broad: _broad, ...candidate }) => candidate);
+  const seen = new Set(narrow.map((candidate) => vePriorityNicheKey(candidate.title)));
+  const broad: VeHypothesisCandidate[] = [];
+  for (const candidate of output.broad_hypotheses ?? []) {
+    const key = vePriorityNicheKey(candidate.title);
+    if (!key || seen.has(key) || broad.length >= VE_BROAD_HYPOTHESES_MAX) continue;
+    seen.add(key);
+    broad.push({ ...candidate, tier: 1, broad: true });
+  }
+  return [...broad, ...narrow];
+}
+
+/** Missing coverage enters the existing bounded schema retry, never a new paid call per niche. */
+export function createVePriorityHypothesesSchema(niches: readonly string[]) {
+  return VeHypothesesBatchSchema.extend({
+    priority_niche_results: z.array(VePriorityNicheResultSchema).max(8),
+  }).superRefine((output, ctx) => {
+    const keys = new Set(niches.map(vePriorityNicheKey));
+    const seen = new Set<string>();
+    const titles = new Set(combineVeHypothesisCandidates(output).map((candidate) => candidate.title));
+    for (const [index, result] of output.priority_niche_results.entries()) {
+      const key = vePriorityNicheKey(result.niche);
+      if (!keys.has(key) || seen.has(key)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['priority_niche_results', index, 'niche'], message: 'Return each requested niche exactly once, without extra niches' });
+      }
+      seen.add(key);
+      const suggested = result.status === 'suggested';
+      if ((suggested && !result.hypothesis_titles.length) || (!suggested && result.hypothesis_titles.length)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['priority_niche_results', index, 'hypothesis_titles'], message: 'suggested needs candidate titles; unavailable must have an empty list and a concrete reason' });
+      }
+      if (result.hypothesis_titles.some((title) => !titles.has(title))) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['priority_niche_results', index, 'hypothesis_titles'], message: 'Reference exact retained hypothesis titles; broad candidates beyond the first five are not retained' });
+      }
+    }
+    if (seen.size !== keys.size || niches.some((niche) => !seen.has(vePriorityNicheKey(niche)))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['priority_niche_results'], message: `Account for ALL requested niches: ${JSON.stringify(niches)}` });
+    }
+  });
+}
 
 /** Отдельная генерация широких для уже исследованного проекта: только блок широких. */
 export const VeBroadHypothesesOnlySchema = z.object({

@@ -5,6 +5,8 @@ import {
 } from '@/lib/verticalEngineV2/contactDeliveryRunner';
 import { runProjectContactSupply } from './contactSupplyRunner';
 import { reconcileContactDeliveries } from './contactDeliveryReconciliation';
+import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import { refreshDeliveryRate } from './contactDeliveryRateService';
 
 export type ContactDeliverySchedulerLog = (
   level: 'info' | 'warn' | 'error',
@@ -19,8 +21,10 @@ type RunContactDeliveryProject = (input: {
   now?: Date;
 }) => Promise<ContactDeliveryDayResult>;
 
-interface BoundProjectRow {
+export interface BoundProjectRow {
   id: string;
+  delivery_timezone: string;
+  sender_daily_capacity: number;
 }
 
 interface ActiveQueueItemRow {
@@ -36,6 +40,67 @@ export interface ContactDeliverySweepResult {
 
 const DEFAULT_RUN_PROJECT: RunContactDeliveryProject = runContactDeliveryDay;
 
+/** Дата в часовом поясе проекта — так её считает бронь дня (timezone(tz, now)::date). */
+function localDay(timeZone: string, now: Date): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
+/**
+ * Сегодня загружать нечего: день проекта забронирован и закрыт, ничего не в
+ * пути, повторов не просили, и дневная норма набрана либо свободных готовых
+ * контактов нет. Повторяет условия ve_reserve_contact_delivery_day и
+ * ve_top_up_contact_delivery_day (миграции 20260928_0005, 20260929_0061): в
+ * таком состоянии бронь вернула бы «replayed» без работы. Любое сомнение —
+ * false, и проход идёт как раньше.
+ */
+export async function deliveryDaySettled(
+  portalDb: SupabaseClient,
+  project: BoundProjectRow,
+  now: Date,
+): Promise<boolean> {
+  if (!project.delivery_timezone) return false;
+  const { data: run, error } = await portalDb
+    .from('ve_contact_delivery_daily_runs')
+    .select('id, reservation_status, status, required_daily, sender_daily_capacity, reserved_count, upload_blocked_at, upload_retry_requested_at, recovery_retry_requested_at')
+    .eq('ve_project_id', project.id)
+    .eq('run_date', localDay(project.delivery_timezone, now))
+    .maybeSingle();
+  if (error || !run) return false;
+  if (run.status !== 'completed' || run.upload_blocked_at || run.upload_retry_requested_at || run.recovery_retry_requested_at) return false;
+  if (run.reservation_status === 'not_scheduled') return true;
+  if (run.reservation_status === 'reserved') {
+    const { count: inFlight, error: inFlightError } = await portalDb
+      .from('ve_contact_delivery_rows')
+      .select('id', { count: 'exact', head: true })
+      .eq('run_id', run.id)
+      .in('status', ['reserved', 'attempting']);
+    if (inFlightError || inFlight == null || inFlight > 0) return false;
+
+    const quota = Math.min(Number(run.required_daily), Number(run.sender_daily_capacity), Number(project.sender_daily_capacity));
+    if (!Number.isFinite(quota)) return false;
+    if (Number(run.reserved_count) >= quota) return true;
+  } else if (run.reservation_status !== 'no_ready_rows') {
+    return false;
+  }
+
+  const { data: items, error: itemsError } = await portalDb
+    .from('ve_launch_queue_items')
+    .select('id')
+    .eq('project_id', project.id)
+    .eq('status', 'active');
+  if (itemsError) return false;
+  const itemIds = ((items ?? []) as { id: string }[]).map((item) => item.id);
+  if (!itemIds.length) return true;
+  const { count: ready, error: readyError } = await portalDb
+    .from('ve_contact_delivery_rows')
+    .select('id', { count: 'exact', head: true })
+    .in('item_id', itemIds)
+    .eq('status', 'ready')
+    .is('run_id', null);
+  if (readyError || ready == null) return false;
+  return ready === 0;
+}
+
 /**
  * Runs one idempotent delivery-day attempt for every fully bound VE2 project.
  *
@@ -50,6 +115,9 @@ export async function runBoundContactDeliveries(input: {
   runProject?: RunContactDeliveryProject;
   runSupply?: typeof runProjectContactSupply;
   reconcile?: typeof reconcileContactDeliveries;
+  recoverActivation?: typeof activateDeliveredContactCampaigns;
+  refreshRate?: typeof refreshDeliveryRate;
+  daySettled?: typeof deliveryDaySettled;
   /** Finish an already attempted delivery, then leave remaining work for restart. */
   shouldStop?: () => boolean;
   log: ContactDeliverySchedulerLog;
@@ -65,13 +133,12 @@ export async function runBoundContactDeliveries(input: {
     };
   }
 
-  // A prepared bundle can wait in the seasonality portfolio for weeks. Do
-  // not treat that intentional queueing as a delivery failure on every tick;
-  // only projects with an actually active bundle are due for provider work.
+  // Prepared campaigns need their first upload before the specialist presses
+  // Start in Instantly. Include paused/queued records so manual resumes are seen.
   const { data: activeItemData, error: activeItemError } = await input.portalDb
     .from('ve_launch_queue_items')
     .select('project_id')
-    .eq('status', 'active');
+    .in('status', ['prepared', 'queued', 'active', 'uncertain']);
   if (activeItemError) {
     throw new Error(`VE2 active delivery queue scan failed: ${activeItemError.message}`);
   }
@@ -93,7 +160,7 @@ export async function runBoundContactDeliveries(input: {
 
   const { data, error } = await input.portalDb
     .from('ve_projects')
-    .select('id')
+    .select('id, delivery_timezone, sender_daily_capacity')
     .in('id', activeProjectIds)
     // A NULL period is a Portal project without periods; the SQL term decides.
     .not('portal_project_id', 'is', null)
@@ -115,6 +182,16 @@ export async function runBoundContactDeliveries(input: {
   for (const project of projects) {
     if (input.shouldStop?.()) break;
     try {
+      const observed = await (input.recoverActivation ?? activateDeliveredContactCampaigns)({
+        portalDb: input.portalDb, veProjectId: project.id,
+      });
+      if (observed.errors.length) throw new Error(observed.errors.join('; '));
+    } catch (error) {
+      failedProjects += 1;
+      input.log('error', `VE2 campaign state project ${project.id} unavailable; delivery deferred`, error);
+      continue;
+    }
+    try {
       const recovery = await (input.reconcile ?? reconcileContactDeliveries)({
         portalDb: input.portalDb, veProjectId: project.id, shouldStop: input.shouldStop,
       });
@@ -122,6 +199,34 @@ export async function runBoundContactDeliveries(input: {
       if (recovery.accepted || recovery.released) input.log('info', `VE2 contact reconciliation project ${project.id}`, recovery);
     } catch (error) {
       input.log('error', `VE2 contact reconciliation project ${project.id} failed`, error);
+    }
+    if (input.shouldStop?.()) break;
+    // День уже закрыт — темп в Instantly не проверяем и день не бронируем:
+    // бронь требует темп не старше 10 минут, а проверка листает все ящики и
+    // кампании воркспейса. Подготовка контактов (supply) идёт как обычно —
+    // ей Instantly не нужен, а новые готовые контакты откроют день на следующем проходе.
+    let settled = false;
+    try {
+      settled = await (input.daySettled ?? deliveryDaySettled)(input.portalDb, project, input.now ?? new Date());
+    } catch {
+      settled = false;
+    }
+    if (settled) {
+      try {
+        await (input.runSupply ?? runProjectContactSupply)({
+          portalDb: input.portalDb, instantlyDb: input.instantlyDb, veProjectId: project.id, now: input.now,
+        });
+      } catch (error) {
+        input.log('error', `VE2 contact supply project ${project.id} failed`, error);
+      }
+      continue;
+    }
+    try {
+      await (input.refreshRate ?? refreshDeliveryRate)(input.portalDb, input.instantlyDb, project.id);
+    } catch (error) {
+      failedProjects += 1;
+      input.log('error', `VE2 rate refresh project ${project.id} failed; new delivery deferred`, error);
+      continue;
     }
     if (input.shouldStop?.()) break;
     try {

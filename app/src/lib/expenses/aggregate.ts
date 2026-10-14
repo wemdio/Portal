@@ -64,6 +64,15 @@ function addToCurrencyMap(map: Record<string, number>, currency: string, amount:
   map[currency] = (map[currency] ?? 0) + amount;
 }
 
+/** Валютная строка с рублёвой суммой — её исходная сумма идёт в `foreignByCurrency`. */
+function isConvertedForeign(r: MoneyRow): boolean {
+  return r.currency !== 'RUB' && r.amount_rub != null;
+}
+
+function addForeign(map: Record<string, number>, r: MoneyRow): void {
+  if (isConvertedForeign(r)) addToCurrencyMap(map, r.currency, r.amount);
+}
+
 /** Календарные границы бакета — нужны только чтобы определить partial, ключ группировки остаётся bucketKey. */
 function bucketBounds(bucket: string, groupBy: GroupBy): { start: string; end: string } {
   if (groupBy === 'day') return { start: bucket, end: bucket };
@@ -319,12 +328,17 @@ export function summarizeIncomes(
       total: 0,
       bySource: {},
       partial: isPartialBucket(key, groupBy, range),
+      foreignByCurrency: {},
     };
     const value = rub(r);
     point.total += value;
     point.bySource[r.source] = (point.bySource[r.source] ?? 0) + value;
+    addForeign(point.foreignByCurrency, r);
     buckets.set(key, point);
   }
+
+  const foreignByCurrency: Record<string, number> = {};
+  for (const r of revenue) addForeign(foreignByCurrency, r);
 
   const nonRevenueByReason: Record<string, number> = {};
   for (const r of nonRevenue) {
@@ -352,6 +366,7 @@ export function summarizeIncomes(
     smallCount: small.length,
     unconvertedCount: unconverted.length,
     unconvertedByCurrency,
+    foreignByCurrency,
     series: [...buckets.values()].sort((a, b) => a.bucket.localeCompare(b.bucket)),
   };
 }
@@ -397,6 +412,7 @@ export function breakdownByPayer(rows: IncomeRow[], prevRows: IncomeRow[]): Paye
       deltaPrev: null,
       unconvertedCount: 0,
       unconvertedByCurrency: {},
+      foreignByCurrency: {},
     };
     // Одному ИНН соответствует несколько написаний имени. Берём первое
     // непустое: строки приходят от свежих к старым, значит в отчёте окажется
@@ -408,6 +424,7 @@ export function breakdownByPayer(rows: IncomeRow[], prevRows: IncomeRow[]): Paye
       item.unconvertedCount += 1;
       addToCurrencyMap(item.unconvertedByCurrency, r.currency, r.amount);
     }
+    addForeign(item.foreignByCurrency, r);
     acc.set(key, item);
   }
 
@@ -426,6 +443,7 @@ export function breakdownByPayer(rows: IncomeRow[], prevRows: IncomeRow[]): Paye
       deltaPrev: null,
       unconvertedCount: 0,
       unconvertedByCurrency: {},
+      foreignByCurrency: {},
     });
   }
 

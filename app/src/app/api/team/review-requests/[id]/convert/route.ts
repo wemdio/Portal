@@ -27,7 +27,7 @@ function conversionResult(value: unknown): ConversionResult | null {
 
 function conversionError(code: string | undefined) {
   switch (code) {
-    case '40001':
+    case 'PT409':
     case '23514':
       return jsonError(
         'Review request was changed or already resolved',

@@ -1,7 +1,7 @@
 import { load } from 'cheerio';
 import { isPersonName, isRoleTitle } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, leadPhoneCandidates, normalizeLeadWebsite } from './leadContactValues';
-import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, removeLeadReplyQuotes } from './leadReplyHtml';
+import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION, removeLeadReplyQuotes } from './leadReplyHtml';
 import type { Email } from './types';
 
 export interface LeadReplyContacts {
@@ -60,6 +60,7 @@ const HISTORY_BOUNDARIES = [
   YOU_WROTE,
   LEAD_DATED_ATTRIBUTION,
   LEAD_DATE_FIRST_ATTRIBUTION,
+  LEAD_MONTH_FIRST_ATTRIBUTION,
   /^(?:Van|Verzonden|Aan|Onderwerp|De|Envoyé|À|Objet|Von|Gesendet|An|Betreff):\s+.+$/iu,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}.*(?:@|mailto:)/iu,
   /^(?:От|От кого|From|Sent|Отправлено|Кому|To|Subject|Тема):\s+.+$/i,
@@ -69,15 +70,16 @@ const HISTORY_BOUNDARIES = [
   /^(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/iu,
   /^(?:Sent\s+from\s+my\s+(?:iPhone|iPad|Android)|Отправлено\s+из\s+(?:мобильной\s+)?(?:Почты\s+Mail|мобильной\s+Яндекс\.Почты))(?:[\s:.]|$)/iu,
 ];
-const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:\s*[,.!:].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:\s*[,.!:].*)?)$/iu;
+const SIGNOFF = /^(?:--|—|[сc]\s+(?:уважением|наилучшими\s+пожеланиями)(?:\s*[,.!:].*|\s*\/\s*(?:yours\s+faithfully|best\s+regards)[,.!]*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:\s*[,.!:].*)?)$/iu;
 const SIGNOFF_PREFIX = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[\s,.!:-]+|$)/iu;
-const PHONE_LABEL = /(?:телефон|тел(?:\s*\/\s*факс)?\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|(?:напишите|на\s+пишете|пишите)\s+в\s+(?:мах|макс|max|телеграм\S*)|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
+const PHONE_LABEL = /(?:телефон|тел(?:\s*\/\s*факс)?\s*[.:]|(?:моб(?:ильный)?|сот(?:овый)?)\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звонит[еь]|наб(?:ери(?:те)?|ирайте|ерайте)|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|(?:напишите|на\s+пишете|пишите)\s+в\s+(?:мах|макс|max|телеграм\S*)|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
 const NON_PHONE_LABEL = /(?:^|\s)(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
 const WEBSITE_LABEL = /(?:сайт|website|web\s*:|\bour\s+site\b)/iu;
 const URL_CANDIDATE = /https?:\/\/[^\s<>"'()[\]{}]+|(?<![\p{L}\p{N}@._-])(?:www\.)?(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+[\p{L}]{2,}(?:\/[^\s<>"'()[\]{}]*)?/giu;
 
 function currentLines(text: string): string[] {
-  const lines = text.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').split('\n');
+  const lines = text.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').split('\n')
+    .map((line) => line.replace(/\*{1,2}/g, '').trim());
   const end = lines.findIndex((line) => HISTORY_BOUNDARIES.some((re) => re.test(line.trim())));
   if (end < 0) return lines.map((line) => line.trim());
   const current = lines.slice(0, end);
@@ -205,6 +207,12 @@ function phoneInLine(line: string, signature: boolean): string | null {
 
 function explicitCompany(line: string): string | null {
   line = line.replace(SIGNOFF_PREFIX, '').trim();
+  // Formatting/translation and a separated role are not part of the employer.
+  line = line.replace(/^((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО))(?=[«"“])/u, '$1 ')
+    .replace(/\s*\|\s*(?:И\.?\s*О\.?\s*)?(?:руководител[яь]|директор|менеджер|специалист).*$/iu, '')
+    .replace(/\s*\/\s*Company\s+["“«].*$/iu, '')
+    .replace(/\s*\(Group of Companies[^)]*\)\s*$/iu, '');
+  line = line.replace(/^ГК\s+(?=[«"“])/u, 'Компания ');
   if (/(?:переписк|конфиденциал|подлежит|disclaimer|confidential)/iu.test(line)) return null;
   if (/(?:^|\s)(?:оказывает|предоставляет|предлагает|производит|занимается|работает|осуществляет|поставляет|является|provides|offers|specializes|manufactures|works|delivers)(?:\s|$)/iu.test(line)) return null;
   // Inline HTML source wrapping must not split a legal name from its linked
@@ -286,6 +294,20 @@ function brandedCompany(line: string, website: string | null): string | null {
 }
 
 function signatureNameInLine(line: string): string | null {
+  const translated = /^([А-ЯЁ][а-яё’'-]+(?:\s+[А-ЯЁ][а-яё’'-]+){1,2})\s+\(([A-Z][a-z’'-]+(?:\s+[A-Z][a-z’'-]+){1,2})\)$/u.exec(line.trim());
+  if (translated) {
+    // Strip only a matching transliteration, not a second person's name.
+    const letters = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя';
+    const latin = ['a', 'b', 'v', 'g', 'd', 'e', 'yo', 'zh', 'z', 'i', 'y', 'k', 'l', 'm', 'n', 'o', 'p', 'r', 's', 't', 'u', 'f', 'kh', 'ts', 'ch', 'sh', 'shch', '', 'y', '', 'e', 'yu', 'ya'];
+    const transliteration = translated[1].toLowerCase().replace(/[а-яё]/gu, (letter) => latin[letters.indexOf(letter)]);
+    if (transliteration === translated[2].toLowerCase() && senderDisplayLeadName(translated[1])) return translated[1];
+  }
+  // An initial/surname followed by the matching expanded name, not a colleague.
+  const expanded = /^(\p{Lu})\.?\s+(\p{Lu}[\p{L}’'-]+)\s+\((\p{Lu}[\p{L}’'-]+)\s+(\p{Lu}[\p{L}’'-]+)(?:\s+\p{Lu}[\p{L}’'-]+)?\)$/u.exec(line.trim());
+  if (expanded && expanded[2] === expanded[3] && expanded[1] === expanded[4][0]) {
+    const full = line.slice(line.indexOf('(') + 1, line.lastIndexOf(')'));
+    if (senderDisplayLeadName(full)) return full;
+  }
   const value = line.replace(/\s+/g, ' ').trim()
     .replace(SIGNOFF_PREFIX, '')
     .replace(/^(?:фио|имя|name)\s*:\s*/iu, '')
@@ -347,7 +369,7 @@ function replyLeadName(body: string[], signature: string[]): string | null {
       phoneInLine(body[index + 1] ?? '', false)) contactCards.push(signatureNameInLine(line)!);
     for (const phone of leadPhoneCandidates(line)) {
       const before = line.slice(0, phone.start).trim();
-      const after = line.slice(phone.end).trim();
+      const after = line.slice(phone.end).trim().split(/\.\s+(?=[А-ЯЁA-Z])/u)[0];
       const leading = before.replace(/\s+(?:тел(?:ефон)?\.?)\s*:?$/iu, '').trim();
       const name = (!after && signatureNameInLine(leading)) ||
         (signatureNameInLine(after) && (!before || PHONE_LABEL.test(before)) ? signatureNameInLine(after) : null);
@@ -367,13 +389,11 @@ function replyLeadName(body: string[], signature: string[]): string | null {
   return null;
 }
 
-function extractFromText(text: string): LeadReplyContacts {
-  const lines = currentLines(text).filter(Boolean);
+function signatureStartInLines(lines: string[]): number {
   // A missing comma is fine only when the rest of the line is a name, not
   // narrative such as "С уважением относимся к вашему предложению".
   let signatureStart = lines.findIndex((line) => SIGNOFF.test(line) ||
     (SIGNOFF_PREFIX.test(line) && signatureNameInLine(line) !== null));
-  let nameStart = signatureStart;
   if (signatureStart < 0) {
     // Unmarked signatures still commonly contain a standalone company line
     // immediately above their contact details. Do not mine narrative mentions.
@@ -385,12 +405,40 @@ function extractFromText(text: string): LeadReplyContacts {
       // Unmarked personal footer: name, role, then actual contact details.
       if (signatureNameInLine(line) && isRoleTitle(tail[0] ?? '') &&
         tail.slice(1, 4).some((item) => phoneInLine(item, true) || websitesInLine(item).length)) return true;
+      // Unmarked personal signature with business descriptor lines and a
+      // complete contact card. A lone name or phone in prose is insufficient.
+      if (signatureNameInLine(line)?.includes(' ') && tail.length <= 4 &&
+        tail.some((item) => phoneInLine(item, true) && /\S+@\S+/.test(item)) &&
+        tail.every((item) => !/[!?]/u.test(item) && !/(?:пришлите|позвоните|интересует|прошу|можете|давайте|send|call)/iu.test(item))) return true;
       return Boolean(company && tail.some((item) => websitesInLine(item).length || phoneInLine(item, true) || /\S+@\S+\.\S+/.test(item)));
     });
+  }
+  return signatureStart;
+}
+
+/** Display-only removal using the same verified footer boundary as contacts.
+ * Return original lines, never rewrite/paraphrase the customer's answer. */
+export function stripLeadReplyContactSignature(text: string): string {
+  const raw = text.replace(/\r\n?/g, '\n').split('\n');
+  const indexed = raw.map((line, index) => ({ index, text: line.replace(/\*{1,2}/g, '').trim() })).filter((line) => line.text);
+  const start = signatureStartInLines(indexed.map((line) => line.text));
+  if (start < 0) return text;
+  const boundary = indexed[start].text;
+  // Contact enrichment may use an unmarked company footer; display trimming
+  // needs a sign-off or a personal signature after actual reply text.
+  if (!SIGNOFF.test(boundary) && !SIGNOFF_PREFIX.test(boundary) &&
+    !(start > 0 && signatureNameInLine(boundary))) return text;
+  return raw.slice(0, indexed[start].index).join('\n');
+}
+
+function extractFromText(text: string): LeadReplyContacts {
+  const lines = currentLines(text).filter(Boolean);
+  const signatureStart = signatureStartInLines(lines);
+  let nameStart = signatureStart;
+  if (signatureStart >= 0) {
     // Include standalone names immediately above a confirmed company/contact
     // footer. Stop at prose; keep multiple names so ambiguity is not hidden.
     // Do not expand the company/phone/site extraction window into the body.
-    nameStart = signatureStart;
     while (nameStart > Math.max(0, signatureStart - 3) && signatureNameInLine(lines[nameStart - 1])) nameStart--;
   }
   const body = signatureStart < 0 ? lines : lines.slice(0, signatureStart);

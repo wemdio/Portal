@@ -16,6 +16,9 @@ import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
 import { createVeCachedSearch, freshVeSearchCacheItems, VE_EMPTY_SEARCH_CACHE_TTL_MS, VE_SEARCH_CACHE_TTL_MS } from '@/lib/verticalEngineV2/relevanceSearchCache';
 import { resetProxyGroupsCache } from '@/lib/enrich/proxyPool';
+import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
+import { runSiteProfileStage } from '@/lib/verticalEngineV2/stages/siteProfile';
+import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -29,7 +32,7 @@ import { callLLMText, callLLMWithSchema, getVeModel, setVeActiveJobSignal, withV
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
-import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
+import { getVeCollectionFailure, isVeTransientCatalogError } from '@/lib/verticalEngineV2/collectionErrors';
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
@@ -272,6 +275,16 @@ describe('llm rawCall retry', () => {
     expect(getVeCollectionFailure('private database error').message).not.toContain('private database');
     expect(maxAttemptsFor('Requesty 502: unavailable')).toBe(5);
     expect(maxAttemptsFor('Invalid candidate 402')).toBe(3);
+    expect(isRetryableStageError('yandex_maps catalog read: An invalid response was received from the upstream server')).toBe(true);
+    for (const permanent of ['401 unauthorized', '403 forbidden', '404 missing RPC', 'permission denied',
+      'Requesty 402: insufficient balance', 'подходящие рубрики в готовом каталоге не найдены']) {
+      expect(isVeTransientCatalogError(`yandex_maps catalog read: ${permanent}`)).toBe(false);
+    }
+    for (const transport of ['fetch failed', 'EAI_AGAIN', 'connection lost']) {
+      expect(isVeTransientCatalogError(`yandex_maps catalog read: ${transport}`)).toBe(true);
+    }
+    expect(isVeTransientCatalogError('Requesty 502: unavailable')).toBe(false);
+    expect(isVeTransientCatalogError(new VeOperationTimeoutError('Yandex catalog page', 30_000))).toBe(true);
     fetchMock.mockClear().mockResolvedValueOnce(httpResponse(429, { error: 'Insufficient funds; private account' }));
     const noFunds = await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'billing-model' })
       .catch((cause: Error) => cause);
@@ -333,6 +346,102 @@ describe('llm rawCall retry', () => {
     expect(completed.decisions.get(0)?.status).toBe('relevant');
     expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model))
       .toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini']);
+  });
+
+  it('profiles an unavailable website from saved business facts, without swallowing cancellation or inventing a source', async () => {
+    const business = 'The company helps merchants connect card acquiring; it is not a bank.';
+    const profile = { company_name: 'Gateway', product_summary: business };
+    const reply = (data: unknown) => httpResponse(200, {
+      choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(data) } }], usage: {},
+    });
+    const fixture = (brief: Record<string, unknown>, market = 'ru') => {
+      const priorCase = { id: 'case', project_id: 'project', source: 'site', text: 'Previously verified case' };
+      const db = createMockSupabase({ tables: {
+        ve_projects: [{ id: 'project', website_url: 'https://gateway.test/', market, status: 'researching', brief }],
+        ve_cases: [priorCase],
+      }, rpcHandlers: {
+        ve_patch_project_brief: async (params, db) => {
+          const current = db.getRows('ve_projects').find((row) => row.id === params.p_project_id);
+          const brief = { ...(current?.brief as Record<string, unknown> ?? {}), ...(params.p_patch as Record<string, unknown>) };
+          await db.from('ve_projects').update({ brief }).eq('id', params.p_project_id);
+          return { data: { ...current, brief } };
+        },
+      } });
+      return { db, priorCase, job: { project_id: 'project' } as VeJob,
+        ctx: { supabase: db as unknown as SupabaseClient, log: jest.fn() } as VeStageContext };
+    };
+    for (const market of ['ru', 'us']) {
+      for (const brief of [
+        { business_override: business },
+        { client_brief: { fields: { product_description: business } } },
+      ]) {
+        for (const failure of ['timeout', 'unavailable'] as const) {
+          const f = fixture(brief, market);
+          const page = deferred<string>();
+          const fetchText = jest.fn(() => failure === 'timeout'
+            ? page.promise : Promise.reject(new Error('Не удалось получить HTML с сайта')));
+          const fetchMock = jest.fn().mockResolvedValue(reply(profile));
+          global.fetch = fetchMock;
+          const pending = runSiteProfileStage(f.job, { ...f.ctx, fetchText });
+          const completed = expect(pending).resolves.toEqual(expect.objectContaining({ result: expect.objectContaining(profile) }));
+          // Exercise the actual 60s IO deadline without waiting in real time.
+          await jest.advanceTimersByTimeAsync(failure === 'timeout' ? 60_000 : 0);
+          await completed;
+          expect(fetchText).toHaveBeenCalledTimes(1);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          const request = JSON.parse(fetchMock.mock.calls[0][1].body);
+          expect(request.messages[1].content).toContain(business);
+          expect(f.db.getRows('ve_projects')[0].brief).toEqual(expect.objectContaining({
+            ...brief, site_profile: expect.objectContaining(profile), site_thin: true, site_text_chars: 0, site_fetch_error: failure,
+          }));
+          expect(f.db.getRows('ve_cases')).toEqual([f.priorCase]);
+          page.resolve('Late website result');
+          await jest.advanceTimersByTimeAsync(0);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        }
+      }
+    }
+    // No saved facts, DNS/access errors and arbitrary failures must still fail.
+    for (const [brief, error] of [
+      [{ business_override: '   ' }, new VeOperationTimeoutError('website extraction', 60_000)],
+      [{ client_brief: { fields: {} } }, new Error('Не удалось получить HTML с сайта')],
+      [{ business_override: business }, new VeOperationTimeoutError('website DNS', 8_000)],
+      [{ business_override: business }, new Error('Website must resolve to a public address')],
+      [{ business_override: business }, new Error('Unexpected parser failure')],
+    ] as const) {
+      const f = fixture(brief);
+      const fetchMock = jest.fn();
+      global.fetch = fetchMock;
+      await expect(runSiteProfileStage(f.job, { ...f.ctx, fetchText: async () => { throw error; } })).rejects.toBe(error);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(f.db.mutations).toEqual([]);
+    }
+    const f = fixture({ business_override: business });
+    const parent = new AbortController();
+    const page = deferred<string>();
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock;
+    const pending = runSiteProfileStage(f.job, { ...f.ctx, signal: parent.signal, fetchText: () => page.promise });
+    const assertion = expect(pending).rejects.toThrow('User cancelled');
+    await jest.advanceTimersByTimeAsync(0);
+    parent.abort(new Error('User cancelled'));
+    await assertion;
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(f.db.mutations).toEqual([]);
+
+    // A healthy site still runs the normal profile/case path and clears the old failure marker.
+    const healthy = fixture({ business_override: business, site_fetch_error: 'unavailable' });
+    global.fetch = jest.fn().mockResolvedValueOnce(reply(profile)).mockResolvedValueOnce(reply({ cases: [] }));
+    await runSiteProfileStage(healthy.job, { ...healthy.ctx, fetchText: async (url) => {
+      if (url === 'https://gateway.test/') return 'Verified company website text. '.repeat(40);
+      throw new Error('Page not found');
+    } });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(healthy.db.getRows('ve_projects')[0].brief).toEqual(expect.objectContaining({
+      site_fetch_error: null, site_thin: false, business_override: business,
+    }));
+    expect(healthy.db.getRows('ve_cases')).toEqual([healthy.priorCase]);
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   it('gives up after exhausting retries on 502', async () => {

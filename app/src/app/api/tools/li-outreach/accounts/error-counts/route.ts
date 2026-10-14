@@ -18,7 +18,7 @@ const PAGE_SIZE = 1_000;
 
 /**
  * Returns the number of error/warning rows attributed to each LinkedIn account
- * across the requesting user's campaigns, within a time window. Used by the
+ * across all campaigns, within a time window. Used by the
  * accounts list UI to render a "⚠ N errors" chip next to each card.
  *
  * Output: { range, since, truncated, counts: { [account_id]: { error, warning } } }
@@ -42,18 +42,8 @@ export async function GET(req: NextRequest) {
       const rangeMs = RANGES[rangeKey];
       if (!rangeMs) return jsonError(`range должен быть одним из: ${Object.keys(RANGES).join(', ')}`, 400);
 
-      // Owned campaigns scope the lookup so we don't accidentally surface
-      // cross-tenant data even if RLS slips.
-      const { data: ownedCampaigns, error: ocErr } = await supabaseAdmin
-        .from('li_campaigns')
-        .select('id')
-        .eq('user_id', auth.user.id);
-      if (ocErr) return jsonError(ocErr.message, 500);
-      const ownedIds = (ownedCampaigns ?? []).map((c) => c.id as string);
-      if (ownedIds.length === 0) {
-        return NextResponse.json({ range: rangeKey, since: new Date().toISOString(), truncated: false, counts: {} });
-      }
-
+      // Counted across every campaign, not only the viewer's: accounts are
+      // shared by the team (08.10.2026), so the chip must match the account log.
       const sinceIso = new Date(Date.now() - rangeMs).toISOString();
       const counts: Record<string, { error: number; warning: number }> = {};
 
@@ -64,7 +54,6 @@ export async function GET(req: NextRequest) {
         const { data, error } = await supabaseAdmin
           .from('li_campaign_logs')
           .select('account_id, level')
-          .in('campaign_id', ownedIds)
           .not('account_id', 'is', null)
           .in('level', ['error', 'warning'])
           .gte('created_at', sinceIso)

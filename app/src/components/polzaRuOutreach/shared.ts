@@ -1,9 +1,21 @@
 'use client';
 
-import { authFetch, authFetchJson } from '@/lib/authFetch';
-import { CHAIN_LABELS, type ChainType, type Letter, type RuOutreachConfig, type Signal } from '@/lib/polzaRuOutreach/types';
+import { authFetchJson } from '@/lib/authFetch';
+import type { ChainType, Letter, RuOutreachConfig, Signal } from '@/lib/polzaRuOutreach/types';
 
 export const API = '/api/tools/polza-ru-outreach';
+
+/**
+ * Расход на ИИ за запуск (progress_detail.llm). Та же форма, что снимок
+ * бюджета в lib/outreachLlm/context.ts, но объявлена здесь: тот модуль тянет
+ * node:async_hooks, а это клиентский код.
+ */
+export interface RuJobLlmSpend {
+  spent_usd: number;
+  calls: number;
+  limit_usd: number;
+  by_role?: Record<'analysis' | 'writer', { usd: number; calls: number }>;
+}
 
 export interface RuJob {
   id: string;
@@ -19,8 +31,20 @@ export interface RuJob {
     scanned?: number;
     ready?: number;
     target?: number;
+    /**
+     * target_reached | pool_exhausted | scan_limit | budget (кончился лимит на ИИ) |
+     * awaiting_templates (заказанное набрано вместе с компаниями, которые ждут цепочку оффера).
+     */
     stop_reason?: string;
+    /** Сколько компаний ждут «Переписать цепочку» (очень спорные: цепочка оффера не готова). */
+    awaiting_templates?: number;
     reasons?: Record<string, number>;
+    source_errors?: Record<string, string>;
+    doubtful?: number;
+    /** Нет у запусков до 26.09.2026 — тогда строку расхода не показываем. */
+    llm?: RuJobLlmSpend;
+    /** У воркера нет SMTP-прокси: почты проверены только по синтаксису и MX. */
+    smtp_unavailable?: boolean;
   } | null;
   total_found: number | null;
   total_parsed: number | null;
@@ -63,36 +87,27 @@ export interface RuRow {
   email_type: string | null;
   recipient_role: string | null;
   is_routing: boolean | null;
+  /**
+   * Все адреса компании в работе (до трёх, главный — первым; с 29.09.2026):
+   * [{ email, verification, type, is_routing }] — lib/outreachEmail/companyEmails.ts.
+   */
+  emails: unknown;
   letters: Letter[] | null;
   subject_b: string | null;
   case_id: string | null;
   qa_status: string | null;
   qa_flags: string[];
-  row_status: 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed';
+  row_status: 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed' | 'doubtful';
   pipeline_stage: string | null;
   reason_code: string | null;
   reason_detail: string | null;
+  doubt_flags: string[];
+  doubt_detail: string | null;
+  route_reason: string | null;
+  route_runner_up: string | null;
 }
 
 export const api = authFetchJson;
-
-/** Скачивание файла, который собирает сервер (Excel). */
-export async function downloadFile(url: string, fallbackName: string): Promise<void> {
-  const res = await authFetch(url);
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Не удалось выгрузить (HTTP ${res.status})`);
-  }
-  const blob = await res.blob();
-  const href = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = href;
-  a.download = fallbackName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(href), 60_000);
-}
 
 export const STATUS_LABELS: Record<RuRow['row_status'], string> = {
   processing: 'в работе',
@@ -100,6 +115,7 @@ export const STATUS_LABELS: Record<RuRow['row_status'], string> = {
   rejected: 'отсеяна',
   manual_review: 'ручная проверка',
   failed: 'ошибка',
+  doubtful: 'очень спорная',
 };
 
 export const SIGNAL_LABELS: Record<string, string> = {
@@ -117,18 +133,15 @@ export const SIGNAL_LABELS: Record<string, string> = {
   dealer_search: 'ищут дилеров',
   export_launch: 'экспорт',
   new_case: 'новый кейс',
+  sales_team: 'отдел продаж (2ГИС)',
+  revenue_growth: 'рост выручки (ФНС)',
+  tender_won: 'выигранный тендер',
+  investment: 'инвестиции',
+  sales_hiring_broad: 'вакансия продаж (не SDR)',
 };
-
-export const MODE_LABELS: Record<string, string> = CHAIN_LABELS;
 
 export function fmtDate(value: string | null | undefined): string {
   if (!value) return '—';
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString('ru-RU');
-}
-
-export function fmtDateTime(value: string | null | undefined): string {
-  if (!value) return '—';
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }

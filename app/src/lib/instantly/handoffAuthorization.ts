@@ -1,6 +1,7 @@
 import type { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { supabaseInstantly } from '@/lib/supabaseInstantly';
 import type { PendingHandoffRow } from './handoffSender';
+import { INTERNAL_ROLES } from '@/lib/roles';
 
 type MainDb = NonNullable<typeof supabaseAdmin>;
 type InstantlyDb = NonNullable<typeof supabaseInstantly>;
@@ -38,6 +39,7 @@ export async function canActOnManualHandoff(
   const managerName = typeof project.manager === 'string' ? project.manager.trim() : '';
   if (!managerName) return false;
   const managerLookup = await main.from('profiles').select('id, full_name')
+    .in('role', INTERNAL_ROLES)
     .ilike('full_name', managerName);
   if (managerLookup.error) return false;
   const exactManagers = (managerLookup.data ?? []).filter((profile) =>

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authenticateRequest, jsonError, fetchOwnerNames, userOwnsAccount } from '@/lib/liOutreach/apiHelpers';
+import { authenticateRequest, jsonError, fetchOwnerNames } from '@/lib/liOutreach/apiHelpers';
 import { collectUnknownPlaceholders, unknownPlaceholderError } from '@/lib/liOutreach/campaignTextCheck';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -37,13 +37,9 @@ export async function POST(req: NextRequest) {
     if ('error' in auth) return auth.error;
 
     const body = (await req.json()) as Record<string, unknown>;
-    // A campaign may only be attached to a LinkedIn account the creator owns —
-    // the accounts list is visible cross-specialist now, so without this a user
-    // could point their campaign at someone else's account and send invites
-    // through it.
-    if (body.account_id && !(await userOwnsAccount(auth.user.id, String(body.account_id)))) {
-      return jsonError('Нельзя привязать кампанию к LinkedIn-аккаунту другого специалиста', 403);
-    }
+    // Any team member's LinkedIn account may be attached (08.10.2026), as PUT
+    // already allowed: accounts are shared, and the one who added an account
+    // may have left the company — a 403 here left their accounts unusable.
     const unknownVars = collectUnknownPlaceholders(body);
     if (unknownVars.length > 0) return jsonError(unknownPlaceholderError(unknownVars), 400);
 

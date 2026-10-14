@@ -161,7 +161,16 @@ export async function sendSenderMail(cfg: SenderSmtpConfig, mail: OutgoingMail):
   if (!guard.ok) return { ok: false, code: 'blocked_target', error: `SMTP-цель отклонена (${guard.reason})` };
 
   const transport = buildTransport(cfg);
-  const parts = buildMailParts({ from: mail.from, text: mail.text, html: mail.html });
+  // Видимой строки отказа в письмах «Рассылки» нет: письмо должно читаться как
+  // написанное человеком, а не как рассылка с подвалом. Отказаться по-прежнему
+  // можно — остаётся заголовок List-Unsubscribe, и ответ со словом «стоп»
+  // по-прежнему заносит адрес в стоп-лист (replyClassify.ts).
+  const parts = buildMailParts({
+    from: mail.from,
+    text: mail.text,
+    html: mail.html,
+    optOutLine: false,
+  });
   try {
     await transport.sendMail({
       from: mail.from,
@@ -219,6 +228,8 @@ export async function verifySenderImap(cfg: SenderImapConfig): Promise<SendResul
     greetingTimeout: 10_000,
     socketTimeout: 30_000,
   });
+  // Без слушателя событие 'error' роняет процесс (byoMailbox/imap.ts); ошибку получает await.
+  client.on('error', () => undefined);
 
   try {
     await client.connect();

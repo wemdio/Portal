@@ -11,6 +11,7 @@ export function SendConfirmDialog({
   projectId,
   toEmail,
   newContact,
+  separateLetter = false,
   onCancel,
   onSent,
 }: {
@@ -24,6 +25,8 @@ export function SendConfirmDialog({
   toEmail: string;
   /** Новый контакт вместо ответившего — письмо уйдёт на его адрес. */
   newContact: boolean;
+  /** Письмо вне кампании: в тред не ответить, уйдёт отдельным письмом с того же ящика. */
+  separateLetter?: boolean;
   onCancel: () => void;
   onSent: () => void;
 }) {
@@ -55,6 +58,12 @@ export function SendConfirmDialog({
           Письмо уйдёт через Instantly на <span className="font-medium text-zinc-800">{toEmail}</span>
           {newContact ? ' — новому контакту, а не тому, кто ответил' : ''}. Проверьте текст в последний раз:
         </p>
+        {separateLetter ? (
+          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            Письмо не привязано к кампании, и Instantly не даёт ответить в эту переписку. Ответ уйдёт
+            отдельным письмом с того же ящика, с цитатой письма адресата, и в Instantly его видно не будет.
+          </p>
+        ) : null}
         <div className="mt-3 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg bg-zinc-50 p-3 text-sm text-zinc-700">
           {text}
         </div>

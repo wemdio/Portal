@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 import { UnipileClient } from './unipileClient';
 import {
   parseMessageTemplate,
@@ -19,6 +20,7 @@ import {
   describeCooldownReason,
   detectAccountCooldownError,
   isAccountInCooldown,
+  isUnipileAuthFailure,
   type AccountCooldownKind,
 } from './accountCooldown';
 import type {
@@ -74,6 +76,80 @@ class AccountCooldownTriggered extends Error {
     super(`Account cooldown triggered: ${kind}`);
     this.name = 'AccountCooldownTriggered';
   }
+}
+
+/**
+ * Thrown when Unipile refused access (401, see isUnipileAuthFailure). Retrying
+ * never helps, so the tick is aborted and runCampaignTick pauses the account's
+ * campaigns. The lead is left as is: it isn't at fault and must continue once
+ * the campaign is started again.
+ */
+class UnipileAuthFailed extends Error {
+  constructor(public readonly detail: string) {
+    super(`Unipile auth failure: ${detail}`);
+    this.name = 'UnipileAuthFailed';
+  }
+}
+
+/** Call first in every catch around a Unipile call — before cooldown and per-lead handling. */
+function throwIfAuthFailure(e: unknown): void {
+  if (isUnipileAuthFailure(e)) throw new UnipileAuthFailed(e.message);
+}
+
+/**
+ * Pause every running campaign on the account and send one alert.
+ *
+ * The whole account, not just this campaign: a 401 is about the Unipile key or
+ * the account's connection, so its other campaigns would hit the same wall on
+ * their next tick and each send an alert of its own. 'paused' shows in the
+ * campaign list, and «▶ Запустить» resumes without resetting leads (the start
+ * route only inserts missing rows).
+ */
+async function pauseCampaignsOnAuthFailure(
+  db: NonNullable<typeof supabaseAdmin>,
+  account: { id: string; name: string | null },
+  detail: string,
+  log: LogFn,
+): Promise<void> {
+  const { data, error } = await db
+    .from('li_campaigns')
+    .update({ status: 'paused', updated_at: new Date().toISOString() })
+    .eq('account_id', account.id)
+    .eq('status', 'running')
+    .select('id, name');
+  const paused = (data ?? []) as Array<{ id: string; name: string }>;
+  const accountName = account.name || account.id;
+
+  if (error) {
+    log(
+      'error',
+      `Unipile отказал в доступе (${detail}), но поставить кампанию на паузу не удалось — ${error.message}. Остановите её вручную.`,
+    );
+  } else if (paused.length === 0) {
+    // Nothing was running any more — someone stopped it meanwhile; no alert.
+    return;
+  } else {
+    const message =
+      `Кампания на паузе: Unipile отказал в доступе — ${detail}. ` +
+      `Повторять бесполезно: проверьте ключ Unipile и подключение аккаунта «${accountName}», затем нажмите «▶ Запустить».`;
+    const { error: logErr } = await db
+      .from('li_campaign_logs')
+      .insert(paused.map((c) => ({ campaign_id: c.id, account_id: account.id, level: 'error', message })));
+    if (logErr) console.warn('[li-outreach] pause log insert failed:', logErr.message);
+  }
+
+  await sendWorkerAlert({
+    workerId: 'li-outreach',
+    subject: error
+      ? 'Unipile отказал в доступе, поставить кампании на паузу не удалось'
+      : 'Unipile отказал в доступе — кампании LinkedIn на паузе',
+    error: detail,
+    context: {
+      'Аккаунт': accountName,
+      'На паузе': paused.map((c) => c.name).join(', '),
+      'Что сделать': 'проверить ключ Unipile и подключение аккаунта, затем «▶ Запустить» в кампании',
+    },
+  });
 }
 
 function randomDelay(minSec: number, maxSec: number): Promise<void> {
@@ -167,10 +243,11 @@ export async function runCampaignTick(
   // told us to back off on a previous run).
   const { data: account } = await db
     .from('li_accounts')
-    .select('id, unipile_account_id, cooldown_until, cooldown_reason')
+    .select('id, name, unipile_account_id, cooldown_until, cooldown_reason')
     .eq('id', campaign.account_id ?? '')
     .maybeSingle<{
       id: string;
+      name: string | null;
       unipile_account_id: string;
       cooldown_until: string | null;
       cooldown_reason: AccountCooldownKind | null;
@@ -338,6 +415,13 @@ export async function runCampaignTick(
         );
         break;
       }
+      // Access refused — pause instead of retrying every tick; the lead is
+      // not marked 'error' so it continues once the campaign is restarted.
+      if (e instanceof UnipileAuthFailed) {
+        errors++;
+        await pauseCampaignsOnAuthFailure(db, account, e.detail, log);
+        break;
+      }
       const msg = e instanceof Error ? e.message : String(e);
       errors++;
       log('error', `Ошибка на шаге ${stepIdx + 1}/${steps.length} (${step.type}): ${msg}`, cl.lead.name, stepIdx);
@@ -489,6 +573,7 @@ async function processInviteStep(
         log('info', `LinkedIn ID получен и сохранён: ${providerId}`, lead.name, stepIdx);
       }
     } catch (e) {
+      throwIfAuthFailure(e);
       const msg = e instanceof Error ? e.message : String(e);
 
       // Account-level back-off takes priority (invitation_limit / restricted).
@@ -586,6 +671,7 @@ async function processInviteStep(
   try {
     await client.sendInvite(providerId, message);
   } catch (e) {
+    throwIfAuthFailure(e);
     const cooldown = detectAccountCooldownError(e);
     if (cooldown) {
       // `already_invited` is a per-lead signal, NOT an account-wide back-off.
@@ -926,6 +1012,7 @@ async function processMessageStep(
         .eq('id', lead.id);
       log('info', `Чат создан (chat_id: ${newChatId}), сообщение отправлено как initial text`, lead.name, stepIdx);
     } catch (e) {
+      throwIfAuthFailure(e);
       const msg = e instanceof Error ? e.message : String(e);
       log('warning', `Не удалось начать чат (ещё нет коннекта?): ${msg}`, lead.name, stepIdx);
       const cooldown = detectAccountCooldownError(e);
@@ -945,6 +1032,7 @@ async function processMessageStep(
     try {
       await client.sendMessage(lead.chat_id, message);
     } catch (e) {
+      throwIfAuthFailure(e);
       const cooldown = detectAccountCooldownError(e);
       if (cooldown && accountDbId) {
         const { cooldownUntil, error: cooldownErr } = await applyCooldownToAccount(db, accountDbId, cooldown.kind);

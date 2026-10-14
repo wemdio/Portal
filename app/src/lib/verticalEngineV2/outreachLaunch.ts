@@ -3,12 +3,13 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { approveVeContactSupply } from './contactSupplyApproval';
 import { buildVeContactDeliveryPreview } from './contactDeliveryPreview';
-import { activateVeLaunchPortfolioItem } from './launchActivation';
 import { parseLaunchInfo, VE_LAUNCH_MAX_LEADS } from './launchHandoff';
 import { runVeTemplateLaunch } from './launchTemplate';
 import { prepareAuditSnapshot, validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { requeueVeJob, type VeStageContext, type VeStageResult } from './stages/shared';
 import type { VeBase, VeJob, VeSegmentationAudit, VeTemplate } from './types';
+import { readDeliveryRate } from './contactDeliveryRateService';
+import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
 
 const itemSchema = z.object({
   hypothesis_id: z.string().uuid(), base_id: z.string().uuid(), template_id: z.string().uuid(),
@@ -16,6 +17,7 @@ const itemSchema = z.object({
 }).strict();
 export const outreachLaunchRequestSchema = z.object({
   setup_revision: z.number().int().positive(), preset_id: z.string().min(1).max(200),
+  delivery_rate_revision: z.number().int().positive().optional(),
   // null — проект Portal без периодов; поле обязательно, чтобы режим был выбран явно.
   portal_project_id: z.string().uuid(), expected_portal_period_id: z.string().uuid().nullable(),
   target_contacts: z.number().int().positive().max(1_000_000), items: z.array(itemSchema).min(1).max(50),
@@ -32,27 +34,31 @@ export class VeOutreachLaunchError extends Error {
   constructor(message: string, readonly status = 409) { super(message); }
 }
 function fail(message: string): never { throw new VeOutreachLaunchError(message); }
-const sorted = (values: string[]) => [...values].sort();
 function canonicalRequest(input: VeOutreachLaunchRequest): VeOutreachLaunchRequest {
   return { ...input, items: [...input.items].sort((a, b) => a.hypothesis_id.localeCompare(b.hypothesis_id)) };
 }
 function requestHash(request: VeOutreachLaunchRequest) { return createHash('sha256').update(JSON.stringify(canonicalRequest(request))).digest('hex'); }
-function activationKey(runId: string, templateId: string, planVersion: unknown): string {
-  const hex = createHash('sha256').update(JSON.stringify([runId, templateId, planVersion])).digest('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-}
 function uniqueItems(request: VeOutreachLaunchRequest) {
+  if (!request.items.length || request.items.length > 50) fail('Выберите от 1 до 50 баз для запуска.');
   for (const key of ['hypothesis_id', 'base_id', 'template_id'] as const) {
     if (new Set(request.items.map((item) => item[key])).size !== request.items.length) fail('Каждая гипотеза должна иметь одну выбранную базу и одну версию писем.');
   }
 }
-async function readSetup(db: SupabaseClient, projectId: string, request: VeOutreachLaunchRequest) {
+async function readSetup(db: SupabaseClient, projectId: string, request: VeOutreachLaunchRequest, checkRate = true) {
   uniqueItems(request);
+  if (checkRate && request.delivery_rate_revision != null) {
+    const rate = await readDeliveryRate(db, projectId);
+    if (!rate || rate.revision !== request.delivery_rate_revision || rate.preset_id !== request.preset_id
+      || !['ready', 'pending'].includes(rate.status) || request.items.some(item => !rate.template_ids.includes(item.template_id))) {
+      fail('Темп отправки изменился. Обновите расчёт и подтвердите запуск заново.');
+    }
+  }
   const { data, error } = await db.from('ve_outreach_setups').select('*').eq('project_id', projectId).maybeSingle();
   if (error) throw new VeOutreachLaunchError('Настройка запуска недоступна. Проверьте выпуск миграции автоаутрича.', 503);
   if (!data || Number(data.revision) !== request.setup_revision) fail('Выбранные гипотезы или согласования изменились. Обновите обзор запуска.');
-  if (JSON.stringify(sorted(data.selected_hypothesis_ids ?? [])) !== JSON.stringify(sorted(request.items.map((item) => item.hypothesis_id)))) {
-    fail('Состав запуска не совпадает с сохранённым выбором гипотез.');
+  const preparedIds = new Set<string>(data.selected_hypothesis_ids ?? []);
+  if (request.items.some((item) => !preparedIds.has(item.hypothesis_id))) {
+    fail('Одна из баз запуска больше не входит в выбранные гипотезы. Обновите обзор запуска.');
   }
   for (const item of request.items) {
     const approval = data.approved_bases?.[item.base_id];
@@ -68,8 +74,8 @@ async function readItem(db: SupabaseClient, projectId: string, item: LaunchItem)
   if (!template || !base || template.base_id !== base.id || base.project_id !== projectId
     || base.hypothesis_id !== item.hypothesis_id || template.status !== 'ready' || template.supply_batch_id
     || base.status !== 'analyzed' || base.collect_info?.collection_mode !== 'preview') fail('Письма или одобренная база ещё не готовы к запуску.');
-  if (!Array.isArray(template.letters) || !template.letters.length || template.letters.some((letter: { selected_variant?: unknown }) => !['A', 'B'].includes(String(letter.selected_variant)))) {
-    fail('Откройте и сохраните итоговые письма: для каждого письма нужен выбранный вариант A или B.');
+  if (!Array.isArray(template.letters) || !template.letters.length || template.letters.some((letter: { selected_variant?: unknown }) => !['A', 'B', 'C'].includes(String(letter.selected_variant)))) {
+    fail('Откройте и сохраните итоговые письма: для каждого письма нужен выбранный текст.');
   }
   const { data: revision, error } = await db.rpc('ve_contact_supply_preview_revision', { p_template_id: item.template_id });
   if (error || revision !== item.preview_revision) fail('Одобренная версия базы или писем изменилась. Требуется повторный просмотр.');
@@ -132,7 +138,7 @@ export async function prepareVeOutreachLaunch(db: SupabaseClient, instantlyDb: S
 export async function startVeOutreach(db: SupabaseClient, instantlyDb: SupabaseClient, input: {
   projectId: string; userId: string; request: VeOutreachLaunchRequest; idempotencyKey: string; confirmedCustomerApproval: boolean;
 }) {
-  if (!input.confirmedCustomerApproval) fail('Подтвердите согласование баз и писем с заказчиком и разрешение на отправку.');
+  if (!input.confirmedCustomerApproval) fail('Подтвердите согласование баз и писем с заказчиком и подготовку кампаний.');
   const request = canonicalRequest(input.request), hash = requestHash(request);
   const { data: replay, error: replayError } = await db.from('ve_outreach_runs').select('*').eq('project_id', input.projectId)
     .eq('idempotency_key', input.idempotencyKey).maybeSingle();
@@ -170,7 +176,6 @@ async function saveProgress(db: SupabaseClient, job: VeJob, run: VeOutreachRun) 
   });
   if (error || data !== true) throw new Error('Outreach run lost job ownership or could not save progress');
 }
-const WAITING_ACTIVATION_CODES = new Set(['VE_LAUNCH_SLOT_OCCUPIED', 'VE_LAUNCH_TIMING_BLOCKED', 'VE_LAUNCH_HIGHER_PRIORITY_PENDING', 'VE_LAUNCH_PLAN_STALE', 'VE_LAUNCH_CAS_LOST']);
 
 /** One durable project request, bounded to one unfinished hypothesis per worker turn. */
 export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, instantlyDb: SupabaseClient): Promise<VeStageResult> {
@@ -187,7 +192,9 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
   try {
     item.last_attempt_at = new Date().toISOString();
     ctx.signal?.throwIfAborted();
-    await readSetup(db, job.project_id, request);
+    // An explicit later rate change must not invalidate an already accepted launch.
+    // Delivery checks the current policy before uploading; content approvals remain mandatory.
+    await readSetup(db, job.project_id, request, false);
     const { template, base } = await readItem(db, job.project_id, item);
     const audit = await readAudit(db, item);
     if (validateStoredAuditSnapshot({ audit, template, base }).state !== 'current') fail('Одобренные письма или аудитория изменились. Требуется новый обзор запуска.');
@@ -219,19 +226,15 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
     const planVersion = Number(queue.plan_version);
     if (!Number.isSafeInteger(planVersion) || planVersion < 1) fail('Версия очереди запуска недоступна.');
     item.item_id = queue.id; item.campaigns = launch.campaigns ?? [{ campaign_id: launch.campaign_id, campaign_url: launch.campaign_url }];
-    if (queue.status === 'active') item.status = 'active';
-    else {
-      if (['uncertain', 'activating'].includes(queue.status)) fail('Состояние активации не подтверждено. Нужна сверка, повторная отправка не запускается.');
-      if (queue.status !== 'queued') fail('Кампании выведены из очереди или остановлены. Автоматическое возобновление отключено.');
-      item.status = 'activating'; await saveProgress(db, job, run); ctx.signal?.throwIfAborted();
-      const activated = await activateVeLaunchPortfolioItem({ portalDb: db, itemId: queue.id, actorId: run.requested_by,
-        body: { confirm_campaign_review: true, idempotency_key: activationKey(run.id, item.template_id, planVersion), plan_version: planVersion } });
-      if (activated.status === 200) item.status = 'active';
-      else if (WAITING_ACTIVATION_CODES.has(String(activated.body.code))) {
-        item.status = 'waiting'; item.code = String(activated.body.code);
-        item.error = item.code === 'VE_LAUNCH_TIMING_BLOCKED' ? 'Ожидает разрешённого времени запуска' : 'Ожидает свободных отправителей и своей очереди';
-      } else fail(typeof activated.body.error === 'string' ? activated.body.error : 'Не удалось подтвердить активацию.');
+    if (!['prepared', 'queued', 'active', 'uncertain'].includes(queue.status)) fail('Подготовка отменена или изменена. Проверьте сохранённые кампании.');
+    const observed = await activateDeliveredContactCampaigns({portalDb: db, veProjectId: job.project_id, itemId: queue.id});
+    if (observed.errors.length) {
+      item.status = 'waiting'; item.code = 'VE_CAMPAIGN_SYNC_PENDING';
+      item.error = 'Кампании сохранены. Ожидаем подтверждения их состояния из Instantly; повторно создавать их не нужно.';
+    } else {
+      item.status = 'active'; item.code = 'VE_CAMPAIGNS_PREPARED';
     }
+
   } catch (error_) {
     ctx.signal?.throwIfAborted();
     item.status = 'blocked'; item.error = error_ instanceof VeOutreachLaunchError ? error_.message : 'Запуск остановлен из-за технической ошибки. Сохранённые кампании не создаются повторно.';

@@ -1,8 +1,11 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo, type DragEvent } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, type DragEvent } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
+import { CLIENT_CONSTRUCTOR_ERROR } from '@/lib/tools/baseConstructorPresentation';
+import { describeConstructorProgress } from '@/lib/tools/baseConstructorProgress';
+import { startConstructorPolling } from '@/lib/tools/baseConstructorPolling';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 import {
@@ -15,6 +18,13 @@ import {
   formatProcessingTimeBand,
 } from '@/lib/tools/baseConstructorEta';
 import { getMappingContentWarnings } from '@/lib/tools/columnMappingWarnings';
+import {
+  EMAILS_PER_COMPANY_DEFAULT,
+  EMAILS_PER_COMPANY_MAX,
+  EMAILS_PER_COMPANY_MIN,
+  buildEmailsPerCompanyStepConfig,
+  normalizeEmailsPerCompany,
+} from '@/lib/tools/baseConstructorEmailsPerCompany';
 import {
   Eraser, CopyMinus, MailMinus, MailX, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
@@ -46,7 +56,7 @@ function isActiveJobStatus(status: string): boolean {
 
 type StepKey =
   | 'remove_empty' | 'dedup_full' | 'dedup_email' | 'clean_names'
-  | 'find_emails' | 'split_emails' | 'remove_support_emails' | 'validate_emails' | 'check_sites'
+  | 'find_emails' | 'split_emails' | 'remove_support_emails' | 'validate_emails' | 'cap_emails_per_company' | 'check_sites'
   | 'enrich_descriptions' | 'ta_scoring' | 'personalization';
 
 type CostTier = 'free' | 'cheap' | 'api' | 'ai';
@@ -86,6 +96,7 @@ interface ConstructorJob {
   total_steps: number;
   initial_row_count: number;
   result_stats?: {
+    step_progress?: unknown;
     total_rows: number;
     emails_found: number;
     avg_ta_score: number;
@@ -116,11 +127,12 @@ const STEPS: StepDef[] = [
   { key: 'remove_empty', label: 'Удалить пустые', description: 'Удаляет пустые строки и столбцы', icon: Eraser, category: 'clean', cost: 'free', priority: 10 },
   { key: 'dedup_full', label: 'Убрать дубликаты', description: 'Удаляет полностью идентичные строки', icon: CopyMinus, category: 'clean', cost: 'free', priority: 20 },
   { key: 'check_sites', label: 'Проверить сайты', description: 'Удаляет строки с мертвыми сайтами', icon: Globe, category: 'enrich', cost: 'cheap', priority: 30, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']] },
-  { key: 'find_emails', label: 'Найти Email', description: 'Ищет все email по сайту компании', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], producesColumns: ['email'], recommendedAfter: ['check_sites'] },
+  { key: 'find_emails', label: 'Найти Email', description: 'Ищет email на сайте компании до первой страницы с почтой. Больше адресов — шаг «Почт на компанию»', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], producesColumns: ['email'], recommendedAfter: ['check_sites'] },
   { key: 'split_emails', label: 'Разделить почты', description: 'Каждый email — отдельная строка', icon: Split, category: 'clean', cost: 'free', priority: 45, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['find_emails'] },
   { key: 'remove_support_emails', label: 'Убрать почты поддержки', description: 'Удаляет почты поддержки (support@, help@, zakaz@…); info@/sales@ оставляет', icon: MailX, category: 'clean', cost: 'free', priority: 47, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'] },
   { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'], autoAdds: ['split_emails'] },
   { key: 'validate_emails', label: 'Валидация Email', description: 'SMTP-проверка, удаляет невалидные и одноразовые', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'dedup_email'], autoAdds: ['split_emails'] },
+  { key: 'cap_emails_per_company', label: 'Почт на компанию', description: 'Оставляет до N почт на компанию, сначала подтверждённые. При N больше 1 «Найти Email» проходит несколько страниц сайта — дольше', icon: MailMinus, category: 'clean', cost: 'free', priority: 57, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'remove_support_emails', 'dedup_email', 'validate_emails'], autoAdds: ['split_emails'] },
   { key: 'clean_names', label: 'Очистить названия', description: 'AI убирает мусор из названий (ООО, LLC...)', icon: Sparkles, category: 'clean', cost: 'ai', priority: 60, requiresColumns: [['компания', 'company', 'name', 'название']] },
   { key: 'enrich_descriptions', label: 'Обогатить описаниями', description: 'Парсит описание компании с сайта', icon: FileText, category: 'enrich', cost: 'cheap', priority: 65, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], recommendedAfter: ['check_sites'] },
   { key: 'ta_scoring', label: 'Оценка ЦА', description: 'AI оценивает релевантность по брифу, оставляет 7–10', icon: Target, needsConfig: 'brief', category: 'ai', cost: 'ai', priority: 80, recommendedAfter: ['enrich_descriptions'], autoAdds: ['enrich_descriptions'] },
@@ -174,7 +186,7 @@ const COLUMN_ROLES: ColumnRole[] = [
     label: 'Email',
     canonical: 'email',
     aliases: ['email', 'e-mail', 'почта', 'mail', 'электронная почта', 'емейл', 'имейл'],
-    neededBy: ['split_emails', 'dedup_email', 'validate_emails'],
+    neededBy: ['split_emails', 'dedup_email', 'validate_emails', 'cap_emails_per_company'],
   },
 ];
 
@@ -364,10 +376,14 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   // Email-pipeline target options. Дефолты выставлены так, чтобы при наличии
   // в файле существующей email-колонки поведение было «безопасным»:
   //   - find_emails не перетирает исходные email, пишет в отдельную колонку;
-  //   - validate валидирует исходные (т.к. они «свои», легко проверить).
+  //   - validate проверяет обе колонки: исходные и найденные. 'original' /
+  //     'found' проверяют один источник, другой считается доверенным.
   // Юзер может переключить через UI в секции «Настройки».
   const [findEmailsTarget, setFindEmailsTarget] = useState<'same' | 'separate'>('separate');
-  const [validateTarget, setValidateTarget] = useState<'original' | 'found' | 'both'>('original');
+  const [validateTarget, setValidateTarget] = useState<'original' | 'found' | 'both'>('both');
+  // «Почт на компанию» (шаг cap_emails_per_company). Строка — чтобы поле
+  // можно было очистить при вводе; на сабмите нормализуется в 1..20.
+  const [emailsPerCompany, setEmailsPerCompany] = useState(String(EMAILS_PER_COMPANY_DEFAULT));
   const [showPreview, setShowPreview] = useState(true);
   const briefFileRef = useRef<HTMLInputElement | null>(null);
 
@@ -381,6 +397,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [error, setError] = useState('');
 
   const [activeJob, setActiveJob] = useState<ConstructorJob | null>(null);
+  const activeJobRef = useRef(activeJob);
+  useLayoutEffect(() => { activeJobRef.current = activeJob; }, [activeJob]);
+  const [statusSync, setStatusSync] = useState<{ jobId: string; receivedAt: number | null; error: string } | null>(null);
+  const retryPendingRef = useRef(false);
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<{ id: string; failedAt: string | null; message: string } | null>(null);
   // Full result blob, cached lazily for the admin "Открыть в базах" flow. Keyed by
   // job id so a job switch during an in-flight fetch can't hand back another job's rows.
   const fullDataCacheRef = useRef<{ id: string; rows: string[][] } | null>(null);
@@ -399,7 +421,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const historyFiltersRef = useRef(historyFilters);
   const historyInitialLoadRef = useRef(true);
   const [activeManualCount, setActiveManualCount] = useState<number | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<ReturnType<typeof startConstructorPolling> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -541,45 +563,80 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   /* ─── Polling ─── */
 
+  const loadHistoryRef = useRef(loadHistory);
+  useLayoutEffect(() => { loadHistoryRef.current = loadHistory; }, [loadHistory]);
+  const activeJobId = activeJob?.id;
+  const shouldPollJob = Boolean(activeJob && isActiveJobStatus(activeJob.status));
+  const jobCompleted = activeJob?.status === 'completed';
+
+  // Fetch just the preview, not the full result. A job switch invalidates
+  // the response even when the transport does not obey cancellation.
   useEffect(() => {
-    if (!activeJob || ['completed', 'failed', 'cancelled'].includes(activeJob.status)) {
-      if (pollRef.current) clearInterval(pollRef.current);
-      return;
-    }
+    if (!activeJobId || !jobCompleted) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    fullDataCacheRef.current = null;
+    void (async () => {
+      try {
+        const res = await authFetch(`/api/tools/base-constructor/${activeJobId}/data?preview=21`, {
+          cache: 'no-store', signal: controller.signal,
+        });
+        if (!res.ok) return;
+        const { data } = await res.json();
+        if (!cancelled) setPreviewData(data || null);
+      } catch { /* Download remains available if the optional preview failed. */ }
+      finally { clearTimeout(timeout); }
+    })();
+    return () => { cancelled = true; controller.abort(); clearTimeout(timeout); };
+  }, [activeJobId, jobCompleted]);
 
-    async function poll() {
-      if (!activeJob) return;
-      // Запоминаем id на момент старта запроса. Пока ответ едет (≈0.5s),
-      // юзер мог нажать «Поставить ещё базу» (activeJob → null) или
-      // кликнуть другой job в истории (activeJob → другой id). Если так —
-      // ответ от устаревшего poll'a нельзя коммитить, иначе экран мигнёт
-      // в форму и тут же откатится обратно на прогресс старой базы
-      // (баг 2026-06-18: «на 5 раз получается загрузить исходный файл»).
-      const jobIdAtStart = activeJob.id;
-      const res = await authFetch(`/api/tools/base-constructor/${jobIdAtStart}`);
-      if (!res.ok) return;
-      const { job } = await res.json();
-      // Stale-guard: коммитим свежие данные ТОЛЬКО если юзер всё ещё на
-      // той же задаче. Функциональный setState видит current на момент
-      // выполнения, а не на момент старта poll'a.
-      let committed = false;
-      setActiveJob((current) => {
-        if (!current || current.id !== jobIdAtStart) return current;
-        committed = true;
+  useEffect(() => {
+    if (!activeJobId || !shouldPollJob) return;
+    const loop = startConstructorPolling<ConstructorJob>({
+      fetch: async (signal) => {
+        const res = await authFetch(`/api/tools/base-constructor/${activeJobId}`, { cache: 'no-store', signal });
+        if (!res.ok) throw new Error(res.status === 401
+          ? 'Сессия истекла. Войдите в портал в новой вкладке, затем обновите статус.'
+          : 'Не удалось обновить статус. Показаны последние полученные данные.');
+        const { job } = await res.json();
+        if (!job || job.id !== activeJobId
+          || !['pending', 'processing', 'completed', 'failed', 'cancelled'].includes(job.status)
+          || !Array.isArray(job.selected_steps) || !Number.isFinite(job.current_step)
+          || !Number.isFinite(job.current_step_progress) || !Number.isFinite(job.total_steps)) {
+          throw new Error('Сервер вернул неполный статус. Повторяем запрос.');
+        }
         return job;
-      });
-      if (!committed) return;
-
-      if (['completed', 'failed', 'cancelled'].includes(job.status)) {
-        if (pollRef.current) clearInterval(pollRef.current);
-        loadHistory();
-        if (job.status === 'completed') loadJobPreview(job.id);
-      }
-    }
-
-    pollRef.current = setInterval(poll, 3000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [activeJob, loadHistory]);
+      },
+      onValue: (job) => {
+        if (activeJobRef.current?.id !== activeJobId || !isActiveJobStatus(activeJobRef.current.status)) return false;
+        setStatusSync({ jobId: activeJobId, receivedAt: Date.now(), error: '' });
+        setActiveJob((current) => current?.id === activeJobId && isActiveJobStatus(current.status) ? job : current);
+        if (!isActiveJobStatus(job.status)) {
+          void loadHistoryRef.current();
+          return false;
+        }
+        return true;
+      },
+      onError: (error) => setStatusSync((current) => ({
+        jobId: activeJobId,
+        receivedAt: current?.jobId === activeJobId ? current.receivedAt : null,
+        error: error instanceof Error ? error.message : 'Не удалось обновить статус.',
+      })),
+    });
+    pollRef.current = loop;
+    const refresh = () => { if (document.visibilityState === 'visible') void loop.refresh(); };
+    window.addEventListener('focus', refresh);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      loop.stop();
+      if (pollRef.current === loop) pollRef.current = null;
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [activeJobId, shouldPollJob]);
 
   /* ─── Submitting elapsed timer ──────────────────────────────────────
    *
@@ -640,17 +697,6 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   }, [submitting, submittingElapsedSec]);
 
   /* ─── Load job result data ─── */
-
-  // Preview = first ~20 rows only. The result blob can be tens of MB, so we never
-  // pull the whole thing just to render the preview table or enable download.
-  async function loadJobPreview(jobId: string) {
-    fullDataCacheRef.current = null;
-    setPreviewData(null);
-    const res = await authFetch(`/api/tools/base-constructor/${jobId}/data?preview=21`);
-    if (!res.ok) return;
-    const { data } = await res.json();
-    setPreviewData(data || null);
-  }
 
   // Full result, fetched lazily — only the admin "Открыть в базах" flow needs all rows.
   async function ensureFullData(jobId: string): Promise<string[][] | null> {
@@ -841,9 +887,14 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       if (selectedSteps.includes('find_emails')) {
         stepConfig.find_emails_target = findEmailsTarget;
       }
-      if (selectedSteps.includes('validate_emails')) {
+      // validate_target — только когда выбор был на экране: явный 'original' /
+      // 'found' включает в worker'е учёт происхождения адресов. Без выбора
+      // worker проверяет всю email-колонку, как раньше.
+      if (selectedSteps.includes('validate_emails') && showValidateTargetOption) {
         stepConfig.validate_target = validateTarget;
+        stepConfig.validate_target_explicit = true;
       }
+      Object.assign(stepConfig, buildEmailsPerCompanyStepConfig(selectedSteps, emailsPerCompany));
 
       const res = await authFetch('/api/tools/base-constructor', {
         method: 'POST',
@@ -867,6 +918,57 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       setError(err instanceof Error ? err.message : 'Ошибка сети');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  /* ─── Resume a failed manual job, without uploading/creating another ─── */
+
+  async function handleRetry() {
+    if (!activeJob || activeJob.status !== 'failed' || clientMode
+      || activeJob.workload_origin === 'automation' || retryPendingRef.current) return;
+    const jobId = activeJob.id;
+    const failedAt = activeJob.completed_at ?? null;
+    retryPendingRef.current = true;
+    setRetryingJobId(jobId);
+    setRetryError(null);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const res = await authFetch(`/api/tools/base-constructor/${jobId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ action: 'retry', failed_at: failedAt }),
+        signal: controller.signal,
+      });
+      const result = await res.json().catch(() => null);
+      if (res.status === 401) throw new Error('Сессия истекла. Войдите в портал и попробуйте снова. Прогресс сохранён.');
+      if (!res.ok) {
+        if (res.status === 409) {
+          invalidateHistoryRequests();
+          void loadHistory();
+        }
+        throw new Error(result?.error || 'Не удалось возобновить задачу. Попробуйте снова.');
+      }
+      if (result?.ok !== true || !isActiveJobStatus(result.status)) {
+        throw new Error('Не удалось подтвердить запуск. Попробуйте снова: дубликат не создастся.');
+      }
+      // A response for another selected job must not steal the user's screen.
+      const resume = (job: ConstructorJob): ConstructorJob => job.id === jobId
+        && job.status === 'failed' && (job.completed_at ?? null) === failedAt
+        ? { ...job, status: result.status, error_message: undefined, completed_at: undefined }
+        : job;
+      setActiveJob((current) => current ? resume(current) : current);
+      setHistory((current) => current.map(resume));
+      if (fullDataCacheRef.current?.id === jobId) fullDataCacheRef.current = null;
+      invalidateHistoryRequests();
+      void loadHistory();
+    } catch (err) {
+      setRetryError({ id: jobId, failedAt, message: controller.signal.aborted
+        ? 'Ответ сервера задерживается. Попробуйте снова: дубликат не создастся.'
+        : err instanceof Error ? err.message : 'Ошибка сети. Попробуйте снова.' });
+    } finally {
+      clearTimeout(timeout);
+      retryPendingRef.current = false;
+      setRetryingJobId(null);
     }
   }
 
@@ -952,6 +1054,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     setBrief('');
     setPrompt('');
     setError('');
+    setRetryError(null);
   }
 
   /* ═══════════════════════════════════════════
@@ -973,9 +1076,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const overallProgress = activeJob && activeJob.total_steps > 0
     ? Math.round(((activeJob.current_step - 1 + activeJob.current_step_progress / 100) / activeJob.total_steps) * 100)
     : 0;
+  const progressDescription = activeJob ? describeConstructorProgress(activeJob) : null;
+  const currentStatusSync = statusSync?.jobId === activeJob?.id ? statusSync : null;
 
   const needsBrief = selectedSteps.includes('ta_scoring');
   const needsPrompt = selectedSteps.includes('personalization');
+  const showEmailsPerCompanyOption = selectedSteps.includes('cap_emails_per_company');
   const neededRoles = fileData ? getNeededRoles(selectedSteps) : [];
   const unmappedRoles = neededRoles.filter((r) => !columnMapping[r.key]);
   // Есть ли в файле колонка с email — определяется по column_mapping
@@ -1003,8 +1109,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     }
   }, [showFindEmailsTargetOption, findEmailsTarget]);
   useEffect(() => {
-    if (!showValidateTargetOption && validateTarget !== 'original') {
-      setValidateTarget('original');
+    if (!showValidateTargetOption && validateTarget !== 'both') {
+      setValidateTarget('both');
     }
   }, [showValidateTargetOption, validateTarget]);
 
@@ -1550,18 +1656,58 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             )}
 
             {/* Settings: brief, prompt, email pipeline target options */}
-            {fileData && (needsBrief || needsPrompt || showFindEmailsTargetOption || showValidateTargetOption) && (
+            {fileData && (needsBrief || needsPrompt || showFindEmailsTargetOption || showValidateTargetOption || showEmailsPerCompanyOption) && (
               <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
                 <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
                   <h2 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>{neededRoles.length > 0 ? '4' : '3'}. Настройки</h2>
                 </div>
                 <div className="px-6 py-5 space-y-4">
-                  {(showFindEmailsTargetOption || showValidateTargetOption) && (
+                  {(showFindEmailsTargetOption || showValidateTargetOption || showEmailsPerCompanyOption) && (
                     <div className="space-y-3 pb-1">
                       <h3 className={`text-sm font-semibold flex items-center gap-2 ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-700'}`}>
                         <MailSearch className={`w-4 h-4 ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-500'}`} />
                         Email пайплайн
                       </h3>
+
+                      {showEmailsPerCompanyOption && (
+                        <fieldset className={clientMode ? 'border border-[var(--cp-divider)] rounded-md p-4 space-y-2' : 'border border-gray-200 rounded-xl p-4 space-y-2'}>
+                          <legend className={clientMode ? 'ds-eyebrow px-1' : 'text-xs font-semibold text-gray-700 px-1'}>
+                            Почт на компанию
+                          </legend>
+                          <p className="text-[11px] text-gray-500 mb-2">
+                            Сколько адресов оставить у одной компании. Сначала остаются подтверждённые валидацией, затем catch-all.
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min={EMAILS_PER_COMPANY_MIN}
+                              max={EMAILS_PER_COMPANY_MAX}
+                              step={1}
+                              aria-label="Почт на компанию"
+                              value={emailsPerCompany}
+                              onChange={(e) => setEmailsPerCompany(e.target.value)}
+                              onBlur={() => setEmailsPerCompany(String(normalizeEmailsPerCompany(emailsPerCompany)))}
+                              className={clientMode
+                                ? 'ds-input w-20'
+                                : 'w-20 px-3 py-2 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white'}
+                            />
+                            <span className={clientMode ? 'text-[11px] text-[var(--cp-paper-faint)]' : 'text-[11px] text-gray-500'}>
+                              {`${EMAILS_PER_COMPANY_MIN}–${EMAILS_PER_COMPANY_MAX}`}
+                            </span>
+                          </div>
+                          {selectedSteps.includes('find_emails') && normalizeEmailsPerCompany(emailsPerCompany) > 1 && (
+                            <p className={clientMode ? 'text-[11px] text-[var(--cp-paper-faint)]' : 'text-[11px] text-gray-500'}>
+                              Поиск почт пройдёт по нескольким страницам сайта, а не остановится на главной: адресов больше, поиск примерно на треть дольше.
+                            </p>
+                          )}
+                          {!selectedSteps.includes('validate_emails') && (
+                            <p className={clientMode ? 'text-[11px] text-[var(--cp-paper-faint)]' : 'text-[11px] text-gray-500'}>
+                              Без шага «Валидация Email» остаются первые адреса по порядку.
+                            </p>
+                          )}
+                        </fieldset>
+                      )}
 
                       {showFindEmailsTargetOption && (
                         <fieldset className={clientMode ? 'border border-[var(--cp-divider)] rounded-md p-4 space-y-2' : 'border border-gray-200 rounded-xl p-4 space-y-2'}>
@@ -1984,13 +2130,23 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               </div>
             </div>
             <div className="px-6 py-5 space-y-5">
+              {!clientMode && activeJob.status === 'pending' && activeJob.current_step > 0 && (
+                <p role="status" className="text-sm text-gray-600">
+                  Задача в очереди на продолжение. Сохранённый прогресс показан ниже.
+                </p>
+              )}
               {/* Overall progress bar */}
               <div>
                 <div className="flex items-center justify-between text-sm mb-2">
                   <span className={`font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>
-                    {STEP_MAP.get(activeJob.current_step_key as StepKey)?.label || 'Обработка...'}
+                    {activeJob.status === 'pending' ? 'Ожидает свободного воркера'
+                      : STEP_MAP.get(activeJob.current_step_key as StepKey)?.label || 'Обработка...'}
                   </span>
-                  <span className={`tabular-nums ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>{Math.max(0, overallProgress)}%</span>
+                  <span className={`tabular-nums shrink-0 ml-3 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                    {activeJob.current_step > 0
+                      ? `Шаг ${activeJob.current_step} из ${activeJob.total_steps}`
+                      : `Этапов: ${activeJob.total_steps}`}
+                  </span>
                 </div>
                 <div className={`w-full rounded-full h-2.5 ${clientMode ? 'bg-[var(--cp-surface-elev)]' : 'bg-gray-100'}`}>
                   <div
@@ -1998,6 +2154,23 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     style={{ width: `${Math.max(0, overallProgress)}%` }}
                   />
                 </div>
+                <p className={`text-xs mt-2 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                  Этапы занимают разное время. Полоса показывает ход обработки, а не оставшееся время.
+                </p>
+                <div className={`mt-2 text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                  {currentStatusSync?.receivedAt
+                    ? `Статус получен в ${new Date(currentStatusSync.receivedAt).toLocaleTimeString('ru-RU')}`
+                    : 'Получаем актуальный статус…'}
+                  <button type="button" onClick={() => void pollRef.current?.refresh()}
+                    className="ml-3 underline underline-offset-2 focus-visible:outline focus-visible:outline-2">
+                    Обновить статус
+                  </button>
+                </div>
+                {currentStatusSync?.error && (
+                  <p role="alert" className={`text-sm mt-2 ${clientMode ? 'text-[var(--cp-amber)]' : 'text-amber-800'}`}>
+                    {currentStatusSync.error} Автоматически повторяем запрос. Это не означает остановку обработки базы.
+                  </p>
+                )}
               </div>
 
               {/* Step-by-step indicators */}
@@ -2055,8 +2228,13 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         }`}>
                           {step.label}
                         </p>
+                        {isCurrent && progressDescription && (
+                          <p className={`text-xs mt-1 ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-blue-700'}`}>
+                            {progressDescription}
+                          </p>
+                        )}
                       </div>
-                      {isCurrent && activeJob.current_step_progress > 0 && (
+                      {isCurrent && !progressDescription && activeJob.current_step_progress > 0 && (
                         <span className={`text-xs font-medium tabular-nums ${clientMode ? 'text-[var(--cp-paper)]' : 'text-blue-600'}`}>
                           {activeJob.current_step_progress}%
                         </span>
@@ -2082,15 +2260,45 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               <h2 className={`text-base ${clientMode ? 'font-semibold m-0 text-[var(--cp-red)]' : 'font-bold text-red-700'}`}>Ошибка</h2>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <p className={`text-sm ${clientMode ? 'text-[var(--cp-red)]' : 'text-red-600'}`}>{activeJob.error_message || 'Неизвестная ошибка'}</p>
+              <p className={`text-sm ${clientMode ? 'text-[var(--cp-red)]' : 'text-red-600'}`}>
+                {clientMode ? CLIENT_CONSTRUCTOR_ERROR : activeJob.error_message || 'Неизвестная ошибка'}
+              </p>
+              {clientMode && <a href="/client/support" className="ds-btn-secondary inline-flex">Написать в поддержку</a>}
+              {!clientMode && activeJob.workload_origin !== 'automation' && (
+                <>
+                  <p className="text-sm text-gray-600">
+                    Продолжим с последней сохранённой точки. Завершённые шаги не запускаются заново.
+                    Несохранённая часть текущего шага может повториться.
+                  </p>
+                  {retryError?.id === activeJob.id && retryError.failedAt === (activeJob.completed_at ?? null) && (
+                    <p role="alert" className="text-sm text-red-600">{retryError.message}</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleRetry}
+                    disabled={retryingJobId !== null}
+                    aria-busy={retryingJobId === activeJob.id}
+                    className="mr-2 px-4 py-2 text-sm font-medium rounded-lg bg-gray-900 text-white hover:bg-gray-800 transition inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-900"
+                  >
+                    {retryingJobId === activeJob.id
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                      : <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />}
+                    {retryingJobId === activeJob.id ? 'Возобновляем…' : 'Попробовать снова'}
+                  </button>
+                </>
+              )}
+              {!clientMode && activeJob.workload_origin === 'automation' && (
+                <p className="text-sm text-gray-600">Этой задачей управляет автоматизация. Возобновите её в исходном инструменте.</p>
+              )}
               <button
+                type="button"
                 onClick={resetForm}
                 className={clientMode
                   ? 'ds-btn-secondary inline-flex items-center gap-2'
                   : 'px-4 py-2 text-sm font-medium rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 transition inline-flex items-center gap-2'}
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                Попробовать снова
+                {clientMode ? 'Попробовать снова' : 'Загрузить другую базу'}
               </button>
             </div>
           </div>
@@ -2124,7 +2332,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     {activeJob.result_stats?.emails_found ?? 0}
                   </span>
                   {' email найдено'}
-                  {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+                  {(activeJob.result_stats?.ta_scoring_failed_rows ?? 0) === 0 && (activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
                     <>
                       {' · средний ЦА '}
                       <span className="ds-mono tabular-nums font-semibold text-[var(--cp-paper)]">
@@ -2156,7 +2364,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     {activeJob.result_stats?.emails_found ?? 0}
                   </p>
                 </div>
-                {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+                {(activeJob.result_stats?.ta_scoring_failed_rows ?? 0) === 0 && (activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
                     <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Средний ЦА</p>
                     <p className="mt-2 text-2xl font-bold text-blue-600">
@@ -2180,15 +2388,15 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 <p className={`text-sm font-semibold mb-2 ${clientMode ? 'text-[var(--cp-paper)]' : 'text-blue-900'}`}>Оценка ЦА — детали</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
                   <div>
-                    <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>AI оценил</p>
+                    <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>Строк с оценкой</p>
                     <p className={clientMode ? 'font-bold text-[var(--cp-paper)]' : 'font-bold text-blue-900'}>
-                      {activeJob.result_stats.ta_scoring_pre_filter_rows} компаний
+                      {Math.max(0, activeJob.result_stats.ta_scoring_pre_filter_rows - (activeJob.result_stats.ta_scoring_failed_rows ?? 0))}
                     </p>
                   </div>
                   <div>
                     <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>Средний балл (до фильтра)</p>
                     <p className={clientMode ? 'font-bold text-[var(--cp-paper)]' : 'font-bold text-blue-900'}>
-                      {activeJob.result_stats.ta_scoring_pre_filter_avg ?? 0}
+                      {(activeJob.result_stats.ta_scoring_failed_rows ?? 0) > 0 ? 'Оценка не завершена' : activeJob.result_stats.ta_scoring_pre_filter_avg ?? 0}
                     </p>
                   </div>
                   <div>
@@ -2207,10 +2415,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         : ''}
                     </p>
                     <p className="mt-1">
-                      У них в колонке «ЦА Причина» стоит «Ошибка оценки» с баллом 5 — это не решение AI,
-                      а сбой обращения к нему. Такие строки стоит перепроверить вручную или прогнать заново.
+                      {clientMode
+                        ? 'Произошёл технический сбой при оценке. Балл 5 рядом с «Ошибка оценки» — служебная отметка, он не отражает соответствие компании вашей целевой аудитории. Обратитесь в поддержку: мы проверим сбой и поможем с повторной оценкой. Проверять эти строки вручную не требуется.'
+                        : 'В колонке «ЦА Причина» стоит «Ошибка оценки» с баллом 5 — это служебная отметка сбоя, а не оценка компании. Устраните причину и повторите оценку этих строк.'}
                     </p>
-                    {!!activeJob.result_stats.ta_scoring_errors?.length && (
+                    {clientMode && <a href="/client/support" className="mt-2 inline-flex underline">Написать в поддержку</a>}
+                    {!clientMode && !!activeJob.result_stats.ta_scoring_errors?.length && (
                       <p className="mt-1.5">
                         Причина: {activeJob.result_stats.ta_scoring_errors
                           .map((e) => `${e.reason}${e.count > 1 ? ` (×${e.count})` : ''}`)
@@ -2219,7 +2429,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     )}
                   </div>
                 )}
-                {activeJob.result_stats.total_rows === 0 && (activeJob.result_stats.ta_scoring_filtered_out ?? 0) > 0 && (
+                {(activeJob.result_stats.ta_scoring_failed_rows ?? 0) === 0 && activeJob.result_stats.total_rows === 0 && (activeJob.result_stats.ta_scoring_filtered_out ?? 0) > 0 && (
                   <p className={clientMode ? 'mt-3 text-xs text-[var(--cp-paper-mute)]' : 'mt-3 text-xs text-blue-800'}>
                     Все компании AI оценил ниже 7 — это значит, что либо бриф не подходит к базе,
                     либо описаний компаний (шаг «Обогатить описаниями») мало для уверенной оценки.
@@ -2385,8 +2595,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   <button type="button" className="min-w-0 flex-1 basis-64 text-left"
                   onClick={() => {
                     setActiveJob(j);
-                    setPreviewData(null);
-                    if (j.status === 'completed') loadJobPreview(j.id);
+                    if (activeJob?.id !== j.id) setPreviewData(null);
                   }}
                   >
                       <span className={`block break-words text-sm font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>

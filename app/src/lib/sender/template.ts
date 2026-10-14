@@ -1,7 +1,8 @@
 import { PLACEHOLDER_RE, varKey } from './templateVars';
 
-// Message-ID общий для обоих движков отправки портала — см. lib/mail/message.
-export { buildMessageId } from '@/lib/mail/message';
+// Message-ID берут прямо из lib/mail/message: через реэкспорт отсюда он тянул
+// бы в браузерную сборку node:crypto, а подстановку переменных форма кампании
+// делает на экране (тестовое письмо себе).
 
 /**
  * Подстановка {{var}} из полей получателя. Неизвестная переменная → пусто.

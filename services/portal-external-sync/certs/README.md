@@ -10,7 +10,10 @@
 
 ## russian_trusted_root_ca.pem
 
-**Кому нужен:** `sources/bank_tochka.py` — Точка Банк, `enter.tochka.com`.
+**Кому нужен:** `sources/bank_tochka.py` — Точка Банк, `enter.tochka.com`;
+`sources/bank_tbank.py` — Т-Банк, `business.tbank.ru` (переехал на УЦ Минцифры
+22–23.09.2026, синк неделю отдавал 0 операций; цепочка и отпечаток корня
+сверены вживую 29.09.2026 — совпали с этим файлом).
 
 **Зачем:** 24.08.2026 банк переехал на национальный УЦ Минцифры. С 25.08 синк
 падал с `[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in

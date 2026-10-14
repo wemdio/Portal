@@ -1,28 +1,27 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, RefreshCw, Search, Trash2, Upload, Users } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
+  fetchEgressIps,
   fetchMailboxes,
   fetchMailboxProbe,
-  fetchMailboxStats,
   fetchMailboxTags,
-  googleWorkspaceStatus,
-  syncGoogleWorkspace,
-  importMailboxes,
+  moveMailboxes,
   patchMailbox,
   startMailboxProbe,
   type BulkMailboxAction,
-  type ImportMailboxesResult,
+  type EgressIpDto,
   type MailboxDto,
-  type MailboxStatsDto,
   type MailboxTagDto,
   type ProbeResultDto,
 } from './api';
+import { AddMailboxesModal } from './AddMailboxesModal';
+import { EgressMoveMenu } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
-import { TagAssignMenu, TagChip, TagFilterMenu } from './MailboxTags';
+import { TagAssignMenu, TagChip, TagFilterMenu, tagTones } from './MailboxTags';
 import { SenderModal } from './SenderModal';
 
 const PAGE_SIZE = 30;
@@ -30,7 +29,8 @@ const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 /** Пауза между буквой и запросом: иначе поиск стоит запроса на символ. */
 const SEARCH_DEBOUNCE_MS = 300;
 
-export function MailboxesTab() {
+/** initialEgressIp — адрес, по которому пришли из вкладки «Адреса отправки». */
+export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: string | null }) {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -39,8 +39,8 @@ export function MailboxesTab() {
   // переход на другую страницу — кружок поверх уже показанных строк. Подменять
   // на заглушку и её тоже значит заставлять глаз заново искать, где он был.
   const [paging, setPaging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [result, setResult] = useState<ImportMailboxesResult | null>(null);
+  // «Добавить почты»: файл и каталог Google — в окне, список под ним свободен.
+  const [addOpen, setAddOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Выбор хранится вместе со страницей, которой он принадлежит, а не
@@ -52,11 +52,6 @@ export function MailboxesTab() {
     { page: 1, ids: new Set() },
   );
   const [bulkBusy, setBulkBusy] = useState(false);
-  // Подключение к Workspace настраивается на сервере; кнопка показывается,
-  // только если настроено, — иначе она обещала бы то, чего портал не умеет.
-  const [googleReady, setGoogleReady] = useState(false);
-  const [googleBusy, setGoogleBusy] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   // search — то, что набрано в поле; appliedSearch — то, что уже ушло в запрос.
   // Разделены, чтобы каждая буква не стоила похода на сервер, а список не
@@ -65,12 +60,16 @@ export function MailboxesTab() {
   const [appliedSearch, setAppliedSearch] = useState('');
   const searchTimer = useRef<number | null>(null);
   const [tags, setTags] = useState<MailboxTagDto[]>([]);
+  const toneByTag = useMemo(() => tagTones(tags), [tags]);
   const [untagged, setUntagged] = useState(0);
   const [tagFilter, setTagFilter] = useState<ReadonlySet<string>>(EMPTY_SELECTION);
   const [noTagFilter, setNoTagFilter] = useState(false);
   // Ключ строкой: Set в списке зависимостей useCallback сравнивается по ссылке,
   // и список перезагружался бы на каждый рендер.
   const tagFilterKey = [...tagFilter].sort().join(',');
+  const [egressIps, setEgressIps] = useState<EgressIpDto[]>([]);
+  // Фильтр по адресу — клик по адресу во вкладке «Адреса отправки».
+  const [egressFilter, setEgressFilter] = useState<string | null>(initialEgressIp);
 
   const load = useCallback(async (targetPage: number) => {
     try {
@@ -79,6 +78,7 @@ export function MailboxesTab() {
         search: appliedSearch || undefined,
         tagIds: tagFilterKey ? tagFilterKey.split(',') : undefined,
         noTag: noTagFilter || undefined,
+        egressIp: egressFilter ?? undefined,
       });
       setMailboxes(rows);
       setTotal(count);
@@ -91,7 +91,7 @@ export function MailboxesTab() {
     } finally {
       setLoading(false);
     }
-  }, [appliedSearch, tagFilterKey, noTagFilter]);
+  }, [appliedSearch, tagFilterKey, noTagFilter, egressFilter]);
 
   const loadTags = useCallback(async () => {
     try {
@@ -107,6 +107,20 @@ export function MailboxesTab() {
     void loadTags();
   }, [loadTags]);
 
+  const loadEgress = useCallback(async () => {
+    try {
+      const res = await fetchEgressIps();
+      setEgressIps(res.ips);
+    } catch {
+      /* адреса не доехали — меню «На адрес» просто не покажется */
+    }
+  }, []);
+
+  // Адреса здесь нужны только меню «На адрес»: их пульс опрашивает своя вкладка.
+  useEffect(() => {
+    void loadEgress();
+  }, [loadEgress]);
+
   // Ушли с экрана недонабрав — отложенный запрос отменяем.
   useEffect(() => () => {
     if (searchTimer.current) window.clearTimeout(searchTimer.current);
@@ -120,21 +134,6 @@ export function MailboxesTab() {
   }, [load, page]);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await googleWorkspaceStatus();
-        if (!cancelled) setGoogleReady(res.configured);
-      } catch {
-        /* не доехал статус — просто не показываем кнопку */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
     // Ящики после загрузки проверяются воркером — подтягиваем статусы, пока
     // есть хоть один в очереди на проверку. Сортировка по email стабильна,
     // поэтому опрос больше дёргает строки местами.
@@ -143,43 +142,6 @@ export function MailboxesTab() {
   }, [load, page]);
 
   const maxPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
-
-  const handleUpload = async (file: File) => {
-    setUploading(true);
-    setError(null);
-    setResult(null);
-    try {
-      setResult(await importMailboxes(file));
-      await load(page);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить файл');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const runGoogleSync = async () => {
-    setGoogleBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await syncGoogleWorkspace();
-      setNotice(
-        `Каталог Google: всего ящиков ${res.total}, новых ${res.added}`
-        + (res.suspended ? `, заблокированных ${res.suspended}` : '')
-        + (res.missing ? `, пропало из каталога ${res.missing}` : '')
-        + '. Новые ящики выключены — отметьте галочками те, с которых шлём.'
-        + (res.failed.length
-          ? ` Не прочитался каталог: ${res.failed.map((f) => `${f.account} (${f.error})`).join('; ')}.`
-          : ''),
-      );
-      await load(page);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось синхронизировать каталог Google');
-    } finally {
-      setGoogleBusy(false);
-    }
-  };
 
   const act = async (id: string, body: Record<string, unknown>) => {
     await patchMailbox(id, body);
@@ -214,22 +176,6 @@ export function MailboxesTab() {
       else setNotice('Проверок отправки с этого ящика ещё не было.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить результат проверки');
-    }
-  };
-
-  // Статистика ответов по ящикам и доменам (задача 6.3): где рассылка
-  // отвечает, а где только жжёт базу.
-  const [statsOpen, setStatsOpen] = useState(false);
-  const [stats, setStats] = useState<MailboxStatsDto | null>(null);
-  const [statsByDomain, setStatsByDomain] = useState(false);
-
-  const openStats = async () => {
-    setError(null);
-    setStatsOpen(true);
-    try {
-      setStats(await fetchMailboxStats());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить статистику');
     }
   };
 
@@ -277,6 +223,14 @@ export function MailboxesTab() {
     }, SEARCH_DEBOUNCE_MS);
   };
 
+  // Крестик сбрасывает поиск сразу, без паузы ввода.
+  const clearSearch = () => {
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    setSearch('');
+    setAppliedSearch('');
+    resetToFirstPage();
+  };
+
   const toggleTagFilter = (id: string) => {
     const next = new Set(tagFilter);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -293,6 +247,31 @@ export function MailboxesTab() {
     setTagFilter(EMPTY_SELECTION);
     setNoTagFilter(false);
     resetToFirstPage();
+  };
+
+  const filterByEgress = (ip: string | null) => {
+    setEgressFilter(ip);
+    resetToFirstPage();
+  };
+
+  /** «На адрес»: ящик закреплён за адресом, перенос — осознанное действие. */
+  const moveToEgress = async (ip: string) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!window.confirm(
+      `Перенести выбранные ящики (${ids.length}) на адрес ${ip}? Следующий вход в почту у них будет уже с нового адреса.`,
+    )) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await moveMailboxes(ids, ip);
+      setSelected(new Set());
+      await Promise.all([load(page), loadEgress()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось перенести ящики');
+    } finally {
+      setBulkBusy(false);
+    }
   };
 
   /** «Под тег» на выборку: у ящика может быть только один тег, поэтому замена. */
@@ -338,93 +317,18 @@ export function MailboxesTab() {
 
   return (
     <div className="space-y-6">
-      <div className="rounded-xl border border-zinc-200 bg-white p-5">
-        <h2 className="text-base font-semibold text-zinc-900">Подключить ящики файлом</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          Выгрузка провайдера как есть: CSV или XLSX. Колонки и сам провайдер распознаются сами — по хостам
-          в файле, шапке выгрузки и домену ящика. Ящики Google Workspace подтягиваются из каталога сами, раз
-          в час, и появляются выключенными: отметьте галочками те, с которых шлём. До проверки входа ящик в
-          рассылку не идёт.
-        </p>
+      {addOpen ? (
+        <AddMailboxesModal
+          onClose={() => setAddOpen(false)}
+          onChanged={() => void Promise.all([load(page), loadTags()])}
+        />
+      ) : null}
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
-          >
-            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-            {uploading ? 'Загружаю…' : 'Выбрать файл'}
-          </button>
+      {notice ? <p className="text-center text-sm text-emerald-600">{notice}</p> : null}
+      {error ? <p className="text-center text-sm text-red-600">{error}</p> : null}
 
-          {googleReady ? (
-            <button
-              type="button"
-              onClick={() => void runGoogleSync()}
-              disabled={googleBusy}
-              className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
-            >
-              {googleBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}
-              {googleBusy ? 'Синхронизирую…' : 'Синхронизировать с Google'}
-            </button>
-          ) : null}
-
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv,.tsv,.xlsx,.xls"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleUpload(file);
-              e.target.value = '';
-            }}
-          />
-        </div>
-
-        {result ? (
-          <div className="mt-4 rounded-lg bg-zinc-50 p-3 text-sm">
-            <p className="text-zinc-900">Подключено ящиков: {result.imported}</p>
-            {result.truncated != null && result.fileRows != null ? (
-              <p className="mt-0.5 text-amber-600">
-                В файле {result.fileRows} строк, прочитано {result.truncated} — дальше первых 20 000 портал не берёт.
-              </p>
-            ) : null}
-            {/* Провайдера выбрал портал, а не человек — значит, его решение
-                должно быть видно сразу, а не всплывать на проверке входа. */}
-            {Object.keys(result.detected ?? {}).length ? (
-              <p className="mt-0.5 text-zinc-600">
-                Распознано:{' '}
-                {Object.entries(result.detected)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([id, count]) => `${providerLabel(id)} — ${count}`)
-                  .join(', ')}
-              </p>
-            ) : null}
-            {result.errors.length ? (
-              <ul className="mt-2 space-y-1 text-zinc-600">
-                {/* line === null — сломан файл целиком: подпись «Строка N» тут
-                    отправила бы искать проблему в данных, хотя она в заголовках. */}
-                {result.errors.slice(0, 10).map((row, index) => (
-                  <li key={`${row.line ?? 'file'}-${row.email ?? ''}-${index}`}>
-                    {row.line === null
-                      ? row.message
-                      : `Строка ${row.line}${row.email ? ` (${row.email})` : ''}: ${row.message}`}
-                  </li>
-                ))}
-                {result.errors.length > 10 ? <li>…и ещё {result.errors.length - 10}</li> : null}
-              </ul>
-            ) : null}
-          </div>
-        ) : null}
-
-        {notice ? <p className="mt-3 text-sm text-emerald-600">{notice}</p> : null}
-        {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
-      </div>
-
-      {/* Поиск и фильтр тегов — между подключением и списком: это про список,
-          но нужны до того, как в нём начнёшь что-то искать глазами. */}
+      {/* Поиск, фильтр тегов и «Добавить почты» — над списком: это про список,
+          и нужны до того, как в нём начнёшь что-то искать глазами. */}
       <div className="flex flex-wrap items-center justify-center gap-2">
         <div className="relative w-full max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
@@ -433,8 +337,19 @@ export function MailboxesTab() {
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder="Поиск по адресу"
             aria-label="Поиск по адресу"
-            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-3 text-sm text-zinc-900"
+            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-9 text-sm text-zinc-900"
           />
+          {search && (
+            <button
+              type="button"
+              onClick={clearSearch}
+              aria-label="Очистить поиск"
+              title="Очистить поиск"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <TagFilterMenu
           tags={tags}
@@ -448,35 +363,23 @@ export function MailboxesTab() {
             await Promise.all([loadTags(), load(page)]);
           }}
         />
+        <button
+          type="button"
+          onClick={() => setAddOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+        >
+          <Plus className="h-4 w-4" />
+          Добавить почты
+        </button>
       </div>
 
       <div className="rounded-xl border border-zinc-200 bg-white">
-        <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
-          <h2 className="text-base font-semibold text-zinc-900">Ящики ({total})</h2>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => void openStats()}
-              className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
-            >
-              Статистика ответов
-            </button>
-            <button
-              type="button"
-              onClick={() => void load(page)}
-              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              Обновить
-            </button>
-          </div>
-        </div>
-
-        {/* Панель появляется только при выборе: пустая полоса кнопок над
-            таблицей мозолила бы глаза в обычном режиме, когда действия
-            построчные. Действия те же, что в строке, но на всю выборку. */}
+        {/* Панель действий встаёт на место заголовка, а не под него: иначе при
+            первой галочке список съезжает вниз и выбранная строка уходит из-под
+            курсора. Высота у обоих вариантов одна. Действия те же, что в
+            строке, но на всю выборку. */}
         {selected.size > 0 ? (
-          <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 bg-blue-50/60 px-5 py-2.5 text-sm">
+          <div className="flex min-h-12 flex-wrap items-center gap-2 rounded-t-xl border-b border-zinc-200 bg-blue-50/60 px-5 py-2 text-sm">
             <span className="font-medium text-zinc-900">Выбрано: {selected.size}</span>
             <button
               type="button"
@@ -511,6 +414,7 @@ export function MailboxesTab() {
               Удалить
             </button>
             <TagAssignMenu tags={tags} disabled={bulkBusy} onPick={(tagId) => void assignTag(tagId)} />
+            <EgressMoveMenu ips={egressIps} disabled={bulkBusy} onPick={(ip) => void moveToEgress(ip)} />
             <button
               type="button"
               disabled={bulkBusy}
@@ -521,7 +425,35 @@ export function MailboxesTab() {
             </button>
             {bulkBusy ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" /> : null}
           </div>
-        ) : null}
+        ) : (
+        <div className="flex min-h-12 items-center justify-between border-b border-zinc-200 px-5 py-2">
+          <h2 className="text-base font-semibold text-zinc-900">
+            Ящики ({total})
+            {egressFilter ? (
+              <span className="ml-2 font-mono text-xs font-normal text-zinc-500">адрес {egressFilter}</span>
+            ) : null}
+            {egressFilter ? (
+              <button
+                type="button"
+                onClick={() => filterByEgress(null)}
+                className="ml-2 rounded-md px-2 py-0.5 text-xs font-normal text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+              >
+                Показать ящики всех адресов
+              </button>
+            ) : null}
+          </h2>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void load(page)}
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Обновить
+            </button>
+          </div>
+        </div>
+        )}
 
         {loading ? (
           <div className="flex items-center justify-center gap-2 px-5 py-10 text-sm text-zinc-500">
@@ -530,7 +462,7 @@ export function MailboxesTab() {
           </div>
         ) : mailboxes.length === 0 ? (
           <p className="px-5 py-10 text-center text-sm text-zinc-500">
-            {appliedSearch || tagFilterKey || noTagFilter
+            {appliedSearch || tagFilterKey || noTagFilter || egressFilter
               ? 'Под фильтр не попал ни один ящик.'
               : 'Ящиков пока нет — загрузите выгрузку провайдера.'}
           </p>
@@ -563,18 +495,17 @@ export function MailboxesTab() {
                   <th className="px-3 py-2 font-medium">Ящик</th>
                   <th className="px-3 py-2 font-medium">Провайдер</th>
                   <th className="px-3 py-2 font-medium">Тег</th>
+                  <th className="px-3 py-2 font-medium">Адрес отправки</th>
                   <th className="px-3 py-2 font-medium">В рассылке</th>
-                  <th className="px-3 py-2 font-medium">В Google</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
-                  <th className="px-3 py-2 font-medium">Лимит/день</th>
-                  <th className="px-3 py-2 font-medium">SMTP</th>
-                  <th className="px-3 py-2 font-medium">IMAP</th>
+                  <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">Новых / всего в день</th>
                   <th className="px-5 py-2" />
                 </tr>
               </thead>
               <tbody>
                 {mailboxes.map((mailbox) => {
                   const status = MAILBOX_STATUS_LABELS[mailbox.status];
+                  const googleProblem = mailbox.google_state ? GOOGLE_STATE_LABELS[mailbox.google_state] : undefined;
                   return (
                     <tr
                       key={mailbox.id}
@@ -594,20 +525,9 @@ export function MailboxesTab() {
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
                         ) : null}
-                        {/* Имя отправителя в письмах («Иван <box@dom>»): правится
-                            прямо в строке, как лимит. */}
-                        <input
-                          type="text"
-                          defaultValue={mailbox.display_name ?? ''}
-                          placeholder="Имя отправителя"
-                          disabled={false}
-                          onBlur={(e) => {
-                            const next = e.target.value.trim();
-                            if (next !== (mailbox.display_name ?? '')) {
-                              void act(mailbox.id, { displayName: next });
-                            }
-                          }}
-                          className="mt-1 w-44 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-xs text-zinc-600"
+                        <SenderNameField
+                          value={mailbox.display_name ?? ''}
+                          onSave={(next) => act(mailbox.id, { displayName: next })}
                         />
                         {mailbox.probe ? (
                           <button
@@ -639,9 +559,18 @@ export function MailboxesTab() {
                       </td>
                       <td className="px-3 py-2.5">
                         {mailbox.tag ? (
-                          <TagChip name={mailbox.tag.name} />
+                          <TagChip name={mailbox.tag.name} tone={toneByTag.get(mailbox.tag.id)} />
                         ) : (
                           <span className="text-xs text-zinc-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {mailbox.egress_ip ? (
+                          <span className="font-mono text-xs text-zinc-600">{mailbox.egress_ip}</span>
+                        ) : (
+                          <span className="text-xs text-zinc-400" title="Адрес выдаётся автоматически в течение минуты">
+                            ждёт адреса
+                          </span>
                         )}
                       </td>
                       {/* Галочка прямо в строке: выбирать ящики по одному
@@ -660,22 +589,16 @@ export function MailboxesTab() {
                         </label>
                       </td>
                       <td className="px-3 py-2.5">
-                        {mailbox.google_state ? (
-                          <span
-                            className={`rounded-md px-2 py-0.5 text-xs font-medium ${
-                              GOOGLE_STATE_LABELS[mailbox.google_state]?.className ?? 'bg-zinc-100 text-zinc-600'
-                            }`}
-                          >
-                            {GOOGLE_STATE_LABELS[mailbox.google_state]?.text ?? mailbox.google_state}
+                        {/* Заблокирован или пропал в Google — это главное о
+                            ящике: синк сам снял его с рассылки, и статус входа
+                            тут уже ничего не скажет. Ящик не в рассылке —
+                            портал в него не заходит, и «Проверяется» висело бы
+                            вечно. */}
+                        {googleProblem ? (
+                          <span className={`whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium ${googleProblem.className}`}>
+                            {googleProblem.text}
                           </span>
-                        ) : (
-                          <span className="text-xs text-zinc-400">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        {/* Ящик не в рассылке — портал в него не заходит, и
-                            «Проверяется» висело бы вечно. */}
-                        {mailbox.enabled ? (
+                        ) : mailbox.enabled ? (
                           <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>
                             {status.text}
                           </span>
@@ -684,25 +607,37 @@ export function MailboxesTab() {
                         )}
                       </td>
                       <td className="px-3 py-2.5">
-                        <input
-                          type="number"
-                          min={1}
-                          max={500}
-                          defaultValue={mailbox.daily_campaign_limit}
-                          onBlur={(e) => {
-                            const next = Number(e.target.value);
-                            if (next && next !== mailbox.daily_campaign_limit) {
-                              void act(mailbox.id, { dailyCampaignLimit: next });
-                            }
-                          }}
-                          className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
-                        />
-                      </td>
-                      <td className="px-3 py-2.5 text-zinc-600">
-                        {mailbox.smtp_host}:{mailbox.smtp_port}
-                      </td>
-                      <td className="px-3 py-2.5 text-zinc-600">
-                        {mailbox.imap_host ? `${mailbox.imap_host}:${mailbox.imap_port}` : '—'}
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min={1}
+                            max={500}
+                            title="Новых (первых) писем в день"
+                            defaultValue={mailbox.daily_campaign_limit}
+                            onBlur={(e) => {
+                              const next = Number(e.target.value);
+                              if (next && next !== mailbox.daily_campaign_limit) {
+                                void act(mailbox.id, { dailyCampaignLimit: next });
+                              }
+                            }}
+                            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
+                          />
+                          <span className="text-zinc-400">/</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={500}
+                            title="Всего писем в день вместе с напоминаниями"
+                            defaultValue={mailbox.daily_total_limit}
+                            onBlur={(e) => {
+                              const next = Number(e.target.value);
+                              if (next && next !== mailbox.daily_total_limit) {
+                                void act(mailbox.id, { dailyTotalLimit: next });
+                              }
+                            }}
+                            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
+                          />
+                        </div>
                       </td>
                       <td className="px-5 py-2.5">
                         <div className="flex items-center justify-end gap-2">
@@ -768,105 +703,6 @@ export function MailboxesTab() {
         ) : null}
       </div>
 
-      {/* Статистика ответов по ящикам/доменам (задача 6.3): reply rate считается
-          от получателей, которым реально ушло письмо, а не от строк писем. */}
-      {statsOpen ? (
-        <SenderModal
-          title="Статистика ответов"
-          subtitle="Доля ответов и отбоев среди получателей, которым ушло хотя бы одно письмо"
-          size="wide"
-          onClose={() => setStatsOpen(false)}
-          footer={
-            <button
-              type="button"
-              onClick={() => setStatsOpen(false)}
-              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
-            >
-              Закрыть
-            </button>
-          }
-        >
-          <div className="mb-3 inline-flex gap-1 rounded-xl border border-zinc-200 bg-zinc-50 p-1">
-            <button
-              type="button"
-              onClick={() => setStatsByDomain(false)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                !statsByDomain ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
-              }`}
-            >
-              По ящикам
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatsByDomain(true)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                statsByDomain ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
-              }`}
-            >
-              По доменам
-            </button>
-          </div>
-
-          {!stats ? (
-            <div className="flex items-center justify-center gap-2 py-10 text-sm text-zinc-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Загрузка…
-            </div>
-          ) : statsByDomain ? (
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs uppercase text-zinc-500">
-                <tr className="border-b border-zinc-200">
-                  <th className="py-2 pr-3 font-medium">Домен</th>
-                  <th className="py-2 pr-3 font-medium">Ящиков</th>
-                  <th className="py-2 pr-3 font-medium">Писем</th>
-                  <th className="py-2 pr-3 font-medium">Получателей</th>
-                  <th className="py-2 pr-3 font-medium">Ответы</th>
-                  <th className="py-2 pr-3 font-medium">Отбои</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.domains.map((row) => (
-                  <tr key={row.domain} className="border-b border-zinc-100 last:border-0">
-                    <td className="py-2 pr-3 font-medium text-zinc-900">{row.domain}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.mailboxes}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.sent}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.reached}</td>
-                    <td className="py-2 pr-3 text-emerald-700">{row.replyRate != null ? `${row.replyRate}%` : '—'}</td>
-                    <td className="py-2 pr-3 text-amber-700">{row.bounceRate != null ? `${row.bounceRate}%` : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs uppercase text-zinc-500">
-                <tr className="border-b border-zinc-200">
-                  <th className="py-2 pr-3 font-medium">Ящик</th>
-                  <th className="py-2 pr-3 font-medium">Писем</th>
-                  <th className="py-2 pr-3 font-medium">Получателей</th>
-                  <th className="py-2 pr-3 font-medium">Ответы</th>
-                  <th className="py-2 pr-3 font-medium">Отбои</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.mailboxes.map((row) => (
-                  <tr key={row.mailbox_id} className="border-b border-zinc-100 last:border-0">
-                    <td className="py-2 pr-3 font-medium text-zinc-900">
-                      {row.email}
-                      {!row.enabled ? <span className="ml-2 text-xs text-zinc-400">выключен</span> : null}
-                    </td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.sent}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.reached}</td>
-                    <td className="py-2 pr-3 text-emerald-700">{row.replyRate != null ? `${row.replyRate}%` : '—'}</td>
-                    <td className="py-2 pr-3 text-amber-700">{row.bounceRate != null ? `${row.bounceRate}%` : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </SenderModal>
-      ) : null}
-
       {/* Разбор проверочной отправки: построчно, что отправили и что доставил
           провайдер. Одно окно — для любого ящика, открытое из строки. */}
       {probeDetail ? (
@@ -923,6 +759,96 @@ export function MailboxesTab() {
           )}
         </SenderModal>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Имя отправителя в письмах («Иван <box@dom>»). Правится только по карандашу:
+ * открытое поле в каждой строке ловило случайные клики и выглядело как форма.
+ * Enter или клик мимо — сохранить, Esc — отменить.
+ */
+function SenderNameField({ value, onSave }: { value: string; onSave: (next: string) => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  // Enter сохраняет, а следом поле теряет фокус и зовёт сохранение ещё раз.
+  const busy = useRef(false);
+
+  const start = () => {
+    setDraft(value);
+    setEditing(true);
+  };
+
+  const save = async () => {
+    if (busy.current) return;
+    const next = draft.trim();
+    if (next === value) {
+      setEditing(false);
+      return;
+    }
+    busy.current = true;
+    setSaving(true);
+    try {
+      await onSave(next);
+      setEditing(false);
+    } catch {
+      /* не сохранилось — поле остаётся открытым с набранным */
+    } finally {
+      busy.current = false;
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <div className="group mt-1 flex items-center gap-1 text-xs">
+        <span className={value ? 'text-zinc-600' : 'text-zinc-400'}>{value || 'Имя не задано'}</span>
+        <button
+          type="button"
+          onClick={start}
+          aria-label="Изменить имя отправителя"
+          title="Изменить имя отправителя"
+          className="rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 flex items-center gap-1">
+      <input
+        type="text"
+        value={draft}
+        autoFocus
+        disabled={saving}
+        placeholder="Имя отправителя"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void save();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+        onBlur={() => void save()}
+        className="w-44 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-xs text-zinc-900"
+      />
+      {saving ? (
+        <Loader2 className="h-3 w-3 animate-spin text-zinc-400" />
+      ) : (
+        // onMouseDown, а не onClick: иначе blur поля сохранит раньше клика.
+        <button
+          type="button"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+          aria-label="Сохранить имя"
+          className="rounded p-0.5 text-emerald-600 hover:bg-zinc-100"
+        >
+          <Check className="h-3 w-3" />
+        </button>
+      )}
     </div>
   );
 }

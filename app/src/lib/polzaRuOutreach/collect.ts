@@ -13,6 +13,8 @@ import { loadDirectHits } from './sources/direct';
 import { reactivationCandidates, type AmoIndex, type AmoRecord } from './sources/amo';
 import { loadHhEmployers, SALES_TITLE_PATTERN, type HhVacancyRef } from './sources/hhPool';
 import { loadSignalRows } from './sources/uploads';
+import { loadGisCandidates } from './sources/gis';
+import { loadYmapsNewBranches } from './sources/ymaps';
 import type { RuOutreachConfig, Signal, SourceCode } from './types';
 
 export interface Candidate {
@@ -83,139 +85,328 @@ async function loadSiteUniverse(db: SupabaseClient): Promise<Candidate[]> {
   return out;
 }
 
+export interface CollectResult {
+  pool: Candidate[];
+  /** Источник упал — запуск идёт без него, причина показывается на экране. */
+  sourceErrors: Partial<Record<SourceCode, string>>;
+  /** Сколько компаний не взято: их недавно уже отсеяли (recentlyRejectedDomains). */
+  skippedRecent: number;
+}
+
+/** Сколько дней не проверяем повторно компанию с окончательным отказом. */
+const REJECT_MEMORY_DAYS = 30;
+/**
+ * «Почты нет» до этой даты не помнится: тогда бесплатные адреса и второй домен
+ * компании отбрасывались (findEmail.ts), и такие компании стоит проверить заново.
+ */
+const EMAIL_RULES_SINCE = '2026-10-08T00:00:00Z';
+
+/**
+ * Домены, которые за последние 30 дней уже отсеяли окончательно: не B2B,
+ * исключённая категория, нет рабочей почты. 07.10.2026 так было 57% лимита
+ * просмотра: источник site_news берёт домены из прошлых строк, и автосбор
+ * перепроверял 2 596 уже отсеянных компаний из 3 000 — готовых из них 0.
+ * Слабый повод и «нет цепочки» не помним: новость может появиться завтра.
+ */
+async function recentlyRejectedDomains(db: SupabaseClient, now = new Date()): Promise<Set<string>> {
+  const since = new Date(now.getTime() - REJECT_MEMORY_DAYS * 86_400_000).toISOString();
+  const emailSince = since > EMAIL_RULES_SINCE ? since : EMAIL_RULES_SINCE;
+  const out = new Set<string>();
+  const page = 1000;
+  for (const [reasons, from] of [
+    [['NOT_B2B', 'EXCLUDED_CATEGORY'], since],
+    [['EMAIL_NOT_FOUND', 'EMAIL_INVALID'], emailSince],
+  ] as const) {
+    for (let offset = 0; ; offset += page) {
+      const { data, error } = await db
+        .from('polza_ru_outreach_companies')
+        .select('normalized_domain')
+        .in('reason_code', [...reasons])
+        .gte('created_at', from)
+        .not('normalized_domain', 'is', null)
+        .order('id')
+        .range(offset, offset + page - 1);
+      if (error) throw new Error(`rejected domains load failed: ${error.message}`);
+      for (const r of data ?? []) out.add(String(r.normalized_domain));
+      if (!data || data.length < page) break;
+    }
+  }
+  return out;
+}
+
+const SOURCE_POOL_LIMIT = 5000;
+
 export async function collectCandidates(
   db: SupabaseClient,
   config: RuOutreachConfig,
   amo: AmoIndex,
   poolTarget: number,
-): Promise<Candidate[]> {
+): Promise<CollectResult> {
   const src = new Set(config.sources);
   const all: Candidate[] = [];
+  const sourceErrors: CollectResult['sourceErrors'] = {};
+  const attempt = async (code: SourceCode, fn: () => Promise<void>) => {
+    try {
+      await fn();
+    } catch (err) {
+      sourceErrors[code] = err instanceof Error ? err.message.slice(0, 300) : String(err);
+    }
+  };
 
   if (src.has('crm')) {
-    for (const rec of reactivationCandidates(amo)) {
-      all.push(
-        base({
-          key: `domain:${rec.domain}`,
-          source: 'crm',
-          sourceRecordId: `amo:${rec.amoId}`,
-          companyName: rec.companyName as string,
-          inn: rec.inn,
-          website: `https://${rec.domain}`,
-          amo: rec,
-          signals: [{ type: 'crm_lost', source: 'crm', title: rec.statusName, date: rec.lastContactAt, url: null, quote: null, level: 'B' }],
-        }),
-      );
-    }
+    await attempt('crm', async () => {
+      for (const rec of reactivationCandidates(amo)) {
+        all.push(
+          base({
+            key: `domain:${rec.domain}`,
+            source: 'crm',
+            sourceRecordId: `amo:${rec.amoId}`,
+            companyName: rec.companyName as string,
+            inn: rec.inn,
+            website: `https://${rec.domain}`,
+            amo: rec,
+            signals: [{ type: 'crm_lost', source: 'crm', title: rec.statusName, date: rec.lastContactAt, url: null, quote: null, level: 'B' }],
+          }),
+        );
+      }
+    });
   }
 
   if (src.has('hh')) {
-    const employers = await loadHhEmployers(db, { pattern: SALES_TITLE_PATTERN, freshnessDays: config.freshness_days });
-    for (const e of employers) {
-      all.push(
-        base({
-          key: e.employerId ? `hh:${e.employerId}` : `name:${companyKey(e.companyName)}`,
-          source: 'hh',
-          sourceRecordId: e.vacancies[0] ? `hh:${e.vacancies[0].vacancy_id}` : null,
-          sourceUrls: e.vacancies.map((v) => v.url).filter((u): u is string => Boolean(u)),
-          companyName: e.companyName,
-          website: e.companySiteUrl,
-          hhEmployerId: e.employerId,
-          vacancies: e.vacancies,
-          vacancyCount: e.vacancyCount,
-        }),
-      );
-    }
+    await attempt('hh', async () => {
+      const employers = await loadHhEmployers(db, { pattern: SALES_TITLE_PATTERN, freshnessDays: config.freshness_days });
+      for (const e of employers) {
+        all.push(
+          base({
+            key: e.employerId ? `hh:${e.employerId}` : `name:${companyKey(e.companyName)}`,
+            source: 'hh',
+            sourceRecordId: e.vacancies[0] ? `hh:${e.vacancies[0].vacancy_id}` : null,
+            sourceUrls: e.vacancies.map((v) => v.url).filter((u): u is string => Boolean(u)),
+            companyName: e.companyName,
+            website: e.companySiteUrl,
+            hhEmployerId: e.employerId,
+            vacancies: e.vacancies,
+            vacancyCount: e.vacancyCount,
+          }),
+        );
+      }
+    });
   }
 
   if (src.has('direct')) {
-    for (const hit of await loadDirectHits(db, config.freshness_days)) {
-      all.push(
-        base({
-          key: `domain:${hit.domain}`,
-          source: 'direct',
-          sourceRecordId: `direct:${hit.domain}`,
-          sourceUrls: hit.url ? [hit.url] : [],
-          // Название компании Директ не даёт: бренд подтверждается со страницы сайта.
-          companyName: hit.domain,
-          website: `https://${hit.domain}`,
-          signals: [{ type: 'ad_running', source: 'direct', title: hit.keyword ?? hit.title ?? '', date: hit.seenAt, url: hit.url, quote: null, level: 'B', meta: { keyword: hit.keyword } }],
-        }),
-      );
-    }
+    await attempt('direct', async () => {
+      for (const hit of await loadDirectHits(db, config.freshness_days)) {
+        all.push(
+          base({
+            key: `domain:${hit.domain}`,
+            source: 'direct',
+            sourceRecordId: `direct:${hit.domain}`,
+            sourceUrls: hit.url ? [hit.url] : [],
+            // Название компании Директ не даёт: бренд подтверждается со страницы сайта.
+            companyName: hit.domain,
+            website: `https://${hit.domain}`,
+            signals: [{ type: 'ad_running', source: 'direct', title: hit.keyword ?? hit.title ?? '', date: hit.seenAt, url: hit.url, quote: null, level: 'B', meta: { keyword: hit.keyword } }],
+          }),
+        );
+      }
+    });
   }
 
-  const uploadKinds: Array<['exhibitors' | 'contracts' | 'growth', Signal['type']]> = [
+  const uploadKinds: Array<['exhibitors' | 'contracts' | 'growth' | 'tenders', Signal['type']]> = [
     ['exhibitors', 'trade_show_exhibitor'],
     ['contracts', 'contract_won'],
+    ['tenders', 'tender_won'],
     ['growth', 'grant_or_accelerator'],
   ];
   for (const [kind, type] of uploadKinds) {
     if (!src.has(kind)) continue;
-    for (const r of await loadSignalRows(db, kind, config.freshness_days)) {
-      if (kind === 'contracts' && !(Number(r.details.amount ?? 0) >= config.min_contract_amount)) continue;
-      const url = r.record_url ?? r.upload.official_url;
-      const title =
-        kind === 'exhibitors'
-          ? r.upload.title
-          : String((r.details.subject as string | undefined) ?? (r.details.program as string | undefined) ?? r.upload.title);
-      all.push(
-        base({
-          key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.company_name)}`,
-          source: kind,
-          sourceRecordId: `${kind}:${r.id}`,
-          sourceUrls: url ? [url] : [],
-          companyName: r.company_name,
-          inn: r.inn,
-          website: r.company_website,
-          signals: [{
-            type,
+    await attempt(kind, async () => {
+      for (const r of await loadSignalRows(db, kind, config.freshness_days)) {
+        if ((kind === 'contracts' || kind === 'tenders') && !(Number(r.details.amount ?? 0) >= config.min_contract_amount)) continue;
+        const url = r.record_url ?? r.upload.official_url;
+        const title =
+          kind === 'exhibitors'
+            ? r.upload.title
+            : String((r.details.subject as string | undefined) ?? (r.details.program as string | undefined) ?? r.upload.title);
+        all.push(
+          base({
+            key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.company_name)}`,
             source: kind,
-            title,
-            date: kind === 'exhibitors' ? r.upload.event_start : r.record_date,
-            url,
-            quote: null,
-            level: 'B',
-            meta: { customer: r.details.customer ?? null, event_start: r.upload.event_start, program: r.details.program ?? r.upload.title },
-          }],
-        }),
-      );
-    }
+            sourceRecordId: `${kind}:${r.id}`,
+            sourceUrls: url ? [url] : [],
+            companyName: r.company_name,
+            inn: r.inn,
+            website: r.company_website,
+            signals: [{
+              type,
+              source: kind,
+              title,
+              date: kind === 'exhibitors' ? r.upload.event_start : r.record_date,
+              url,
+              quote: null,
+              level: 'B',
+              // email — адрес из каталога выставки: поиск почты проверяет его наравне с сайтом.
+              meta: { customer: r.details.customer ?? null, event_start: r.upload.event_start, program: r.details.program ?? r.upload.title, email: r.details.email ?? null },
+            }],
+          }),
+        );
+      }
+    });
   }
 
-  if (src.has('site_news')) all.push(...(await loadSiteUniverse(db)));
+  if (src.has('site_news')) {
+    await attempt('site_news', async () => {
+      all.push(...(await loadSiteUniverse(db)));
+    });
+  }
 
   if (src.has('directory')) {
-    const rows = await loadDirectoryCandidates(db, {
-      minRevenue: config.min_revenue,
-      maxRevenue: config.max_revenue,
-      minEmployees: config.min_employees,
-      limit: Math.min(5000, Math.max(500, poolTarget)),
+    await attempt('directory', async () => {
+      const rows = await loadDirectoryCandidates(db, {
+        minRevenue: config.min_revenue,
+        maxRevenue: config.max_revenue,
+        minEmployees: config.min_employees,
+        limit: Math.min(5000, Math.max(500, poolTarget)),
+      });
+      for (const r of rows) {
+        all.push(
+          base({
+            key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.name)}`,
+            source: 'directory',
+            sourceRecordId: r.inn ? `inn:${r.inn}` : null,
+            companyName: r.name,
+            inn: r.inn,
+            website: r.website,
+            revenue: r.revenue,
+            employees: r.employees,
+          }),
+        );
+      }
     });
-    for (const r of rows) {
-      all.push(
-        base({
-          key: r.inn ? `inn:${r.inn}` : `name:${companyKey(r.name)}`,
-          source: 'directory',
-          sourceRecordId: r.inn ? `inn:${r.inn}` : null,
-          companyName: r.name,
-          inn: r.inn,
-          website: r.website,
-          revenue: r.revenue,
-          employees: r.employees,
-        }),
-      );
-    }
+  }
+
+  if (src.has('gis')) {
+    await attempt('gis', async () => {
+      for (const g of await loadGisCandidates(db, config.freshness_days, SOURCE_POOL_LIMIT)) {
+        all.push(
+          base({
+            key: `domain:${g.domain}`,
+            source: 'gis',
+            sourceRecordId: `gis:${g.twogisId}`,
+            sourceUrls: [`https://2gis.ru/firm/${g.twogisId}`],
+            companyName: g.companyName,
+            website: `https://${g.domain}`,
+            signals: g.signals,
+          }),
+        );
+      }
+    });
+  }
+
+  if (src.has('ymaps')) {
+    await attempt('ymaps', async () => {
+      for (const y of await loadYmapsNewBranches(db, config.freshness_days, SOURCE_POOL_LIMIT)) {
+        all.push(
+          base({
+            key: `domain:${y.domain}`,
+            source: 'ymaps',
+            sourceRecordId: `ymaps:${y.networkId}`,
+            sourceUrls: y.signal.url ? [y.signal.url] : [],
+            companyName: y.companyName,
+            website: `https://${y.domain}`,
+            signals: [y.signal],
+          }),
+        );
+      }
+    });
+  }
+
+  // Рост выручки проверяется в раннере по ИНН (ФНС); здесь — компании общей
+  // базы с ИНН в заданном размере, чтобы было у кого проверять.
+  if (src.has('revenue_growth') && !src.has('directory')) {
+    await attempt('revenue_growth', async () => {
+      const rows = await loadDirectoryCandidates(db, {
+        minRevenue: config.min_revenue,
+        maxRevenue: config.max_revenue,
+        minEmployees: config.min_employees,
+        limit: Math.min(SOURCE_POOL_LIMIT, Math.max(500, poolTarget)),
+      });
+      for (const r of rows) {
+        if (!r.inn) continue;
+        all.push(
+          base({
+            key: `inn:${r.inn}`,
+            source: 'revenue_growth',
+            sourceRecordId: `inn:${r.inn}`,
+            companyName: r.name,
+            inn: r.inn,
+            website: r.website,
+            revenue: r.revenue,
+            employees: r.employees,
+          }),
+        );
+      }
+    });
   }
 
   const merged = merge(all);
-  // Сначала компании с поводом и несколькими источниками, затем свежие; профиль — в конце.
-  return merged.sort(
+  // Память отказов не должна ронять запуск: без неё он просто медленнее.
+  let rejected = new Set<string>();
+  try {
+    rejected = await recentlyRejectedDomains(db);
+  } catch {
+    /* таблица недоступна — проверяем всех, как раньше */
+  }
+  const fresh = merged.filter((c) => {
+    const domain = normalizeDomain(c.website);
+    return !domain || !rejected.has(domain);
+  });
+  // Сначала источники с лучшей доходимостью, затем компании с поводом и
+  // несколькими источниками, затем свежие; профиль — в конце.
+  const pool = fresh.sort(
     (a, b) =>
-      Number(b.signals.length > 0) - Number(a.signals.length > 0) ||
-      b.sources.length - a.sources.length ||
+      sourceRank(b) - sourceRank(a) ||
+      Number(hasOutsideSignal(b)) - Number(hasOutsideSignal(a)) ||
+      sourceWeight(b) - sourceWeight(a) ||
       latest(b) - latest(a),
   );
+  return { pool, sourceErrors, skippedRecent: merged.length - fresh.length };
+}
+
+/**
+ * Старый отказ в AMO местом в очереди не распоряжается.
+ *
+ * Повод `crm_lost` есть у каждого реактивационного кандидата по построению, а
+ * источник 'crm' склеивается с hh и новостями сайта — вместе это ставило
+ * старые отказы в самое начало очереди. Запуск 01.10.2026 на 100 строк
+ * остановился по target_reached, просмотрев 433 кандидата из 35 938 в пуле:
+ * 81 готовая строка из 100 — компании, с которыми мы уже общались. В цепочку
+ * «Возврат» они по-прежнему попадают, но ждут общей очереди.
+ */
+function hasOutsideSignal(c: Candidate): boolean {
+  // Вакансия продажника hh — тоже повод, хоть и лежит не в signals.
+  return c.vacancies.length > 0 || c.signals.some((s) => s.type !== 'crm_lost');
+}
+
+/**
+ * «Уже видели домен» (site_news без найденной новости) — не второй источник:
+ * иначе повторный домен 2ГИС (site_news+gis) шёл раньше свежих hh и Директа.
+ */
+function sourceWeight(c: Candidate): number {
+  return c.sources.filter((s) => s !== 'crm' && s !== 'site_news').length;
+}
+
+/**
+ * Доходимость источника до готовой строки за 2 недели до 07.10.2026: hh — 8–12%,
+ * Директ и загружаемые поводы — ~5%, прочие — 1–3%, 2ГИС без других — меньше 1%.
+ * Лучшие стоят первыми, чтобы потолок просмотра не уходил на слабые.
+ */
+function sourceRank(c: Candidate): number {
+  const has = (s: SourceCode) => c.sources.includes(s);
+  if (has('hh') && c.vacancies.length) return 4;
+  if (has('direct') || has('exhibitors') || has('contracts') || has('tenders') || has('growth')) return 3;
+  if (c.sources.every((s) => s === 'gis' || s === 'site_news')) return 1;
+  return 2;
 }
 
 function latest(c: Candidate): number {

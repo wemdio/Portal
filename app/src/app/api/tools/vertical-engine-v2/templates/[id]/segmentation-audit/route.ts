@@ -14,7 +14,6 @@ import type { VeBase, VeSegmentationAudit, VeTemplate } from '@/lib/verticalEngi
 import { launchMailboxScopesEqual } from '@/lib/verticalEngineV2/launchPortfolio';
 import {
   VE_LAUNCH_MAX_LEADS,
-  buildLaunchCampaignName,
   instantlyCampaignUrl,
   parseLaunchInfo,
   type VeTemplateLaunchCampaign,
@@ -693,8 +692,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         return {
           campaign_id: campaignId,
           campaign_name:
+            liveCampaigns.find((campaign) => campaign.id === campaignId)?.name ||
             known?.campaign_name ||
-            `${buildLaunchCampaignName(base.filename, new Date())} · восстановлено ${index + 1}`,
+            `Кампания · восстановлено ${index + 1}`,
           campaign_url: known?.campaign_url || instantlyCampaignUrl(campaignId),
           segment: known?.segment ?? null,
           leads_count: known?.leads_count ?? 0,

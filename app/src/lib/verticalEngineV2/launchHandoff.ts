@@ -218,14 +218,16 @@ export function instantlyCampaignUrl(campaignId: string): string {
 }
 
 /** Имя кампании: узнаваемое в списке Instantly, с датой запуска (+ сегмент при сплите). */
-export function buildLaunchCampaignName(
-  baseFilename: string | null | undefined,
-  now = new Date(),
-  segment?: string | null,
-): string {
-  const base = (baseFilename ?? '').trim() || 'база';
-  const seg = (segment ?? '').trim();
-  return `HE · ${base}${seg ? ` · ${seg}` : ''} · ${now.toISOString().slice(0, 10)}`.slice(0, 200);
+export function buildLaunchCampaignName(input: {
+  clientName: string; audienceName: string; segment?: string | null; now?: Date;
+}): string {
+  const clean = (value: string) => value.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const client = clean(input.clientName);
+  if (!client) throw new Error('Название клиента для кампании не задано');
+  const audience = clean(input.audienceName).replace(/^(?:HE\s*·\s*)?auto:\s*/i, '').replace(/\.csv$/i, '') || 'База';
+  const date = (input.now ?? new Date()).toISOString().slice(0, 10);
+  const segment = clean(input.segment ?? '');
+  return `${[client, audience, segment].filter(Boolean).join(' · ').slice(0, 187)} · ${date}`;
 }
 
 export interface VeLaunchSequence {

@@ -1,6 +1,8 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
 import { logInfo, logWarn } from '@/lib/loggerServer';
+import { INTERNAL_ROLES } from '@/lib/roles';
 import {
   qualifyReply,
   getBodyText,
@@ -25,6 +27,7 @@ import {
   getOrCreateBoard,
   getBoardLinkForProject,
   upsertBoardRow,
+  requiresSpecialistReview,
 } from './leadBoardWriter';
 import {
   handoffBotToken,
@@ -52,6 +55,7 @@ import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoin
 import { captureQualificationReplySnapshot, qualificationRecoveryBackoff, qualificationReplySnapshot, type QualificationRecoveryState } from './qualificationRecovery';
 import { InstantlyApiError } from './errors';
 import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
+import { backfillReplyInboxStep, loadInboxTargets, saveInboxFromPage } from './replyInbox';
 import {
   discoverReplyIntake,
   claimReplyIntake,
@@ -84,6 +88,23 @@ const LOCAL_RETRY_QUALIFY_ERROR_RE = /Instantly email read deferred|failed after
 const RETRIABLE_BILLING_QUALIFY_ERROR_RE =
   /\b(?:insufficient credits?|insufficient balance|balance is too low|payment required|out of credits?|spend(?:ing)? limit|billing limit)\b/i;
 const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
+// Событие вебхука, для которого Instantly так и не отдал письмо/переписку,
+// раньше переоткрывалось каждые 7 с до суточного отсечения: одно такое событие
+// (прод 25.09) стоило ~470 LIST + ~470 GET в час на main и съедало общий
+// бюджет LIST /emails. Через 15 минут от прихода вебхука бросаем его: ответ
+// всё равно подберёт discovery (pollLoop → discoverQualificationRepliesCycle
+// листает полученные письма воркспейса независимо от вебхуков), а до этого
+// читаем то же событие не чаще раза в минуту.
+const WEBHOOK_CONTEXT_GIVE_UP_MS = 15 * 60_000;
+const WEBHOOK_CONTEXT_RETRY_MS = 60_000;
+// В памяти процесса: drain крутится в одном воркере, а после рестарта
+// худший случай — одно лишнее чтение на событие. Миграция ради этого не нужна.
+const webhookEventRetryAt = new Map<string, number>();
+
+function webhookContextGiveUpDue(createdAt: string | null, now = Date.now()): boolean {
+  const created = createdAt ? Date.parse(createdAt) : NaN;
+  return Number.isFinite(created) && now - created >= WEBHOOK_CONTEXT_GIVE_UP_MS;
+}
 export const OWNERSHIP_REVIEW_REASON_PREFIX =
   'Не удалось однозначно определить проект-владельца ответа:';
 export const TRANSIENT_RETRY_REASON_PREFIX =
@@ -792,6 +813,21 @@ async function getPortalLinkedCampaignIds(): Promise<string[]> {
     }
   }
 
+  // Наши «N. Polza_…» квалификатор не трогает (с 06.10.2026, просьба
+  // пользователя): ни пометки «лид», ни уведомлений, ни доски — сделки по ним
+  // продажи заводят руками, а диалоги «Персонализированные ответы» читают
+  // напрямую из Instantly. См. lib/instantly/ownAgencyCampaign.ts.
+  const { data: ownRows, error: ownError } = await supabaseAdmin
+    .from('instantly_campaign_catalog')
+    .select('id, name')
+    .ilike('name', '%polza%');
+  if (ownError) {
+    throw new Error(`own agency campaigns unavailable: ${ownError.message}`);
+  }
+  for (const row of (ownRows ?? []) as { id: string; name: string | null }[]) {
+    if (isOwnAgencyCampaign(row.name)) campaignIds.delete(row.id);
+  }
+
   return [...campaignIds];
 }
 
@@ -1150,8 +1186,32 @@ export async function discoverQualificationRepliesCycle(): Promise<DiscoveryCycl
   const db = supabaseAdmin;
   const campaigns = await getCampaignsByAccountCached();
   const maxPages = Math.max(1, Math.min(20, Math.floor(envNumber('INSTANTLY_LEADS_EMAIL_PAGES', 5))));
-  return runDiscoveryAcrossAccounts(campaigns, (accountId, campaignIds) =>
-    discoverReplyIntake(db, { accountId, campaignIds, maxPages }));
+  // Ящик «Персонализированных ответов» (replyInbox.ts): ответы наших
+  // «N. Polza_…» берём с тех же страниц, квалификатор их не видит.
+  let inboxCampaignIds = new Set<string>();
+  try {
+    inboxCampaignIds = (await loadInboxTargets(db)).own;
+  } catch (error) {
+    workerLog('warn', 'Reply inbox campaigns unavailable — discovery continues without them', error);
+  }
+  const result = await runDiscoveryAcrossAccounts(campaigns, (accountId, campaignIds) =>
+    discoverReplyIntake(db, {
+      accountId,
+      campaignIds,
+      maxPages,
+      onPage: accountId === 'main' && inboxCampaignIds.size
+        ? (emails) => saveInboxFromPage(db, emails, accountId, inboxCampaignIds)
+        : undefined,
+    }));
+  // История кампаний для того же ящика — по странице за цикл, в полосе 'bulk':
+  // свежие ответы клиентам она не задерживает.
+  try {
+    const step = await backfillReplyInboxStep(db);
+    if (step) workerLog('info', `reply inbox backfill ${step.campaignId}: saved=${step.saved}, done=${step.done}`);
+  } catch (error) {
+    workerLog('warn', 'Reply inbox backfill step failed', error);
+  }
+  return result;
 }
 
 export async function discoverQualificationReplies(): Promise<number> {
@@ -2047,6 +2107,7 @@ export async function qualifyOneReply(
           ? specialistThreadClaim.winnerQualificationId : inserted.id,
         sourceQualificationId: inserted.id,
         projectId: boardProjectId,
+        requiresSpecialistReview: await requiresSpecialistReview(supabaseMain, boardProjectId, handoffEnabled()),
         campaignId,
         campaignName,
         leadEmail,
@@ -2774,7 +2835,7 @@ export async function reprocessOwnershipReviewRows(
         try {
           fullEmail = await instantly.getEmail(emailId, {
             accountId, requestPriority: 'recovery', retryRateLimits: false,
-            timeoutMs: 20_000, timeoutIncludesBody: true,
+            timeoutMs: 20_000, timeoutIncludesBody: true, consumer: 'ownership_recovery',
           });
         } catch (error) {
           if (!(error instanceof InstantlyApiError && error.status === 404)) throw error;
@@ -3040,6 +3101,7 @@ export async function resolveColleagueWebhookReply(
   leadEmail: string,
   accountId: string,
   notBefore: number,
+  retry = false,
 ): Promise<{ reply: Email; ctx: ThreadContext } | 'expired' | 'lead_own' | 'not_indexed' | 'not_ours' | null> {
   const byId = await fetchWebhookReplyById(emailId, campaignId, accountId);
   if (!byId || byId === 'not_ours') return byId;
@@ -3049,7 +3111,10 @@ export async function resolveColleagueWebhookReply(
   if (replyAutomationExpired(notBefore, byId)) return 'expired';
   const sender = (byId.from_address_email ?? '').trim().toLowerCase();
   if (!sender || sender === leadEmail.trim().toLowerCase()) return 'lead_own';
-  const senderCtx = await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId);
+  const senderCtx = retry
+    ? await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId,
+      { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false, consumer: 'webhook_drain' })
+    : await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId, { consumer: 'webhook_drain' });
   if (!senderCtx || senderCtx.replyEmail.id !== byId.id) return 'not_indexed';
   return {
     reply: { ...senderCtx.replyEmail, campaign_id: senderCtx.replyEmail.campaign_id ?? campaignId } as Email,
@@ -3080,6 +3145,7 @@ export async function fetchWebhookReplyById(
     // последовательную очередь вебхуков 90 с, а 429 уходит в общий transient-путь.
     email = await instantly.getEmail(id, {
       accountId, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true,
+      consumer: 'webhook_drain',
     });
   } catch (error) {
     if (error instanceof InstantlyApiError && error.status === 404) return null;
@@ -3115,6 +3181,7 @@ export async function drainWebhookQueue(): Promise<number> {
   const batchSize = envNumber('INSTANTLY_WEBHOOK_DRAIN_BATCH', 25);
   const minAgeMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_MIN_AGE_MS', 3000);
   const olderThanIso = new Date(Date.now() - minAgeMs).toISOString();
+  const dueFilter = `retry_next_at.is.null,retry_next_at.lte.${new Date().toISOString()}`;
 
   // Build the complete campaign surface before claiming any event. A partial
   // legacy/period/client-access read cannot distinguish "not ours" from a DB
@@ -3131,27 +3198,41 @@ export async function drainWebhookQueue(): Promise<number> {
   //    — чтобы Instantly успел проиндексировать письмо в /emails), и атомарно их
   //    клеймим (processed=true): конкурентный поллинг очередь не читает, повторный
   //    drain их уже не возьмёт.
+  //    События, переоткрытые меньше минуты назад, пропускаем, не клеймя: иначе
+  //    одно застрявшее событие перечитывало бы Instantly каждый тик (7 с).
+  //    Выборку берём с запасом на отложенные — чтобы они, как самые старые,
+  //    не занимали весь батч и не задерживали свежие ответы.
+  const nowMs = Date.now();
+  for (const [eventId, retryAt] of webhookEventRetryAt) {
+    if (retryAt <= nowMs) webhookEventRetryAt.delete(eventId);
+  }
   const { data: candidates, error: selErr } = await db
     .from('instantly_webhook_events')
     .select('id')
     .eq('processed', false)
+    .or(dueFilter)
     .ilike('event_type', '%repl%')
     .lt('created_at', olderThanIso)
     .order('created_at', { ascending: true })
-    .limit(batchSize);
+    .limit(batchSize + Math.min(webhookEventRetryAt.size, 200));
   if (selErr) {
     workerLog('warn', `drain: select failed: ${selErr.message}`);
     return 0;
   }
   if (!candidates || candidates.length === 0) return 0;
 
-  const ids = (candidates as Array<{ id: string }>).map((c) => c.id);
+  const ids = (candidates as Array<{ id: string }>)
+    .map((c) => c.id)
+    .filter((id) => !webhookEventRetryAt.has(id))
+    .slice(0, batchSize);
+  if (ids.length === 0) return 0;
   const { data: claimed } = await db
     .from('instantly_webhook_events')
     .update({ processed: true })
     .in('id', ids)
     .eq('processed', false)
-    .select('id, email_id, campaign_id, lead_email, thread_id, created_at');
+    .or(dueFilter)
+    .select('id, email_id, campaign_id, lead_email, thread_id, created_at, retry_attempts');
   if (!claimed || claimed.length === 0) return 0;
 
   const accountForCampaign = (campaignId: string): string | null => {
@@ -3171,6 +3252,7 @@ export async function drainWebhookQueue(): Promise<number> {
     lead_email: string | null;
     thread_id: string | null;
     created_at: string | null;
+    retry_attempts?: number | null;
   }>) {
     if (replyAutomationExpired(notBefore, row)) continue;
     const campaignId = row.campaign_id ?? '';
@@ -3180,6 +3262,10 @@ export async function drainWebhookQueue(): Promise<number> {
     if (!accountId) continue; // не Portal-linked/client кампания — поллинг её тоже не берёт
 
     let replyForError: Email | null = null;
+    // Идут ли сейчас чтения Instantly за письмом/перепиской. Сбой до них или
+    // после (дедуп в БД, разбор) — не про отсутствие письма у провайдера,
+    // сдача по возрасту его не касается.
+    let awaitingProviderContext = false;
     try {
       // Polling may already have persisted this exact inbound (including a
       // durable retry). ACK its webhook without spending another /emails read.
@@ -3195,8 +3281,13 @@ export async function drainWebhookQueue(): Promise<number> {
       }
       if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
       fetched++;
+      awaitingProviderContext = true;
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
-      const found = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
+      const retry = (row.retry_attempts ?? 0) > 0;
+      const found = retry
+        ? await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId,
+          { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false, consumer: 'webhook_drain' })
+        : await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId, { consumer: 'webhook_drain' });
       // Вебхук — про конкретное письмо (row.email_id). Поиск треда идёт по
       // адресу лида, а поиск Instantly сопоставляет ОТПРАВИТЕЛЯ, поэтому ответ
       // коллеги со своего адреса (писали на info@, ответил zamkomdir@) этим
@@ -3219,7 +3310,7 @@ export async function drainWebhookQueue(): Promise<number> {
         } as Email;
       } else {
         const colleague = await resolveColleagueWebhookReply(
-          webhookEmailId, campaignId, leadEmail, accountId, notBefore,
+          webhookEmailId, campaignId, leadEmail, accountId, notBefore, retry,
         );
         if (typeof colleague === 'object' && colleague) {
           reply = colleague.reply;
@@ -3244,15 +3335,29 @@ export async function drainWebhookQueue(): Promise<number> {
           // Старое письмо, доставленное заново: автоматике не положено, закрываем.
           continue;
         } else {
-          // Без id в вебхуке, письмо ещё не отдаётся по id, отвечал сам лид или
-          // переписка коллеги ещё не ищется — ждём индекса Instantly: общий
-          // transient-путь ниже переоткроет событие (до суточного отсечения).
+          // Без id в вебхуке, письмо ещё не отдаётся по id (404), отвечал сам
+          // лид или переписка коллеги ещё не ищется — ждём индекса Instantly:
+          // общий transient-путь ниже переоткроет событие не чаще раза в
+          // минуту. Но не дольше 15 минут от прихода вебхука: дальше событие
+          // закрываем (claim уже поставил processed=true, continue его
+          // оставляет), а ответ подберёт discovery — он листает полученные
+          // письма воркспейса сам, без вебхуков, и сходится с drain на
+          // instantly_email_id.
+          if (webhookContextGiveUpDue(row.created_at)) {
+            workerLog(
+              'warn',
+              `drain: webhook event ${row.id} has no provider context after ` +
+              `${WEBHOOK_CONTEXT_GIVE_UP_MS / 60_000} min — acked, left to discovery`,
+            );
+            continue;
+          }
           throw new Error(
             `${OWNERSHIP_DEFER_ERROR_PREFIX} for webhook event ${row.id}: ` +
             'provider thread context is not available yet',
           );
         }
       }
+      awaitingProviderContext = false;
       if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
       if (replyAutomationExpired(notBefore, reply)) continue;
 
@@ -3302,13 +3407,33 @@ export async function drainWebhookQueue(): Promise<number> {
           workerLog('error', `drain: retry-row write failed for ${retryKey}: ${retryError.message}`);
         }
 
+        // Тот же предел в 15 минут для сбоев самих чтений Instantly (5xx/429/
+        // отказ бюджета на GET по id или поиске треда): письмо так и не
+        // получено, а discovery подберёт ответ сам. Событие остаётся acked.
+        if (!replyForError && awaitingProviderContext && webhookContextGiveUpDue(row.created_at)) {
+          workerLog(
+            'warn',
+            `drain: webhook event ${row.id} still failing provider reads after ` +
+            `${WEBHOOK_CONTEXT_GIVE_UP_MS / 60_000} min — acked, left to discovery`,
+          );
+          continue;
+        }
+
         // If the provider has not exposed a real email id yet (or the retry
         // row write failed), give the durable webhook queue its claim back.
+        // Persist the deadline: a worker restart must not turn a missing
+        // provider index into another tight loop consuming fresh LIST quota.
+        const attempts = Math.max(0, row.retry_attempts ?? 0) + 1;
+        const providerDelay = readInstantlyEmailReadDeferral(err)?.retryAfterMs ?? 0;
+        const delayMs = Math.max(providerDelay, Math.min(30 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 5)));
         const { error: requeueError } = await db
           .from('instantly_webhook_events')
-          .update({ processed: false })
+          .update({ processed: false, retry_attempts: attempts,
+            retry_next_at: new Date(Date.now() + delayMs).toISOString() })
           .eq('id', row.id);
         if (!requeueError) {
+          // Переоткрытое событие следующий тик не берёт — только через минуту.
+          webhookEventRetryAt.set(row.id, Date.now() + WEBHOOK_CONTEXT_RETRY_MS);
           workerLog('warn', `drain: transient failure for ${retryKey} — event requeued`);
           continue;
         }
@@ -3677,7 +3802,7 @@ async function notifySpecialistsAboutLead(
     boardLink = await getBoardLinkForProject(instantlyDb, projectId);
     const projectLookup = await supabaseMain
       .from('projects')
-      .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend, tag_project_lead_in_telegram')
+      .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend, handoff_auto_send, tag_project_lead_in_telegram')
       .eq('id', projectId)
       .maybeSingle();
     let project = projectLookup.data;
@@ -3685,7 +3810,7 @@ async function notifySpecialistsAboutLead(
     if (isMissingProjectLeadTelegramColumn(projectError)) {
       const legacyLookup = await supabaseMain
         .from('projects')
-        .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend')
+        .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend, handoff_auto_send')
         .eq('id', projectId)
         .maybeSingle();
       project = legacyLookup.data
@@ -3724,19 +3849,31 @@ async function notifySpecialistsAboutLead(
     // (инцидент PP Prod / Илиана, 2026-06-24): лид квалифицировался, но
     // notifySpecialistsAboutLead выходил с userIds.size === 0.
     if (unlinkedNames.size > 0) {
-      const { data: byName } = await supabaseMain
+      // A client account may have the same display name. Name-only routing
+      // must identify exactly one employee, never every matching profile.
+      const { data: byName, error: specialistProfileError } = await supabaseMain
         .from('profiles')
         .select('id, full_name')
+        .in('role', INTERNAL_ROLES)
         .in('full_name', [...unlinkedNames]);
-      const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
-      for (const p of matched) {
-        if (p.id) userIds.add(p.id);
-      }
-      if (matched.length < unlinkedNames.size) {
+      if (specialistProfileError) {
         workerLog(
           'warn',
-          `Specialist set as free text without a linked account (campaign ${campaignId}): [${[...unlinkedNames].join(', ')}] — matched ${matched.length}/${unlinkedNames.size} by name. Unmatched get no alert; link the specialist via the project dropdown.`,
+          `Specialist lookup failed for project ${projectId}: ${specialistProfileError.message}`,
         );
+      } else {
+        const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
+        for (const name of unlinkedNames) {
+          const exactSpecialists = matched.filter((profile) => profile.full_name === name);
+          if (exactSpecialists.length === 1 && exactSpecialists[0].id) {
+            userIds.add(exactSpecialists[0].id);
+          } else {
+            workerLog(
+              'warn',
+              `Specialist ${name} for project ${projectId} resolved to ${exactSpecialists.length} internal profiles — alert skipped; link the specialist via the project dropdown.`,
+            );
+          }
+        }
       }
     }
 
@@ -3748,6 +3885,7 @@ async function notifySpecialistsAboutLead(
         const { data: managerProfiles, error: managerProfileError } = await supabaseMain
           .from('profiles')
           .select('id, full_name')
+          .in('role', INTERNAL_ROLES)
           .ilike('full_name', managerName);
         if (managerProfileError) {
           workerLog('warn', `Lead (PM) lookup failed for project ${projectId}: ${managerProfileError.message}`);
@@ -3883,8 +4021,12 @@ async function notifySpecialistsAboutLead(
       workerLog('warn', `lead alert contact lookup failed for ${qualificationId}; sending with available metadata`, error);
     }
 
+    const handoffConfigured = handoffEnabled()
+      && Boolean(project?.specialist_user_id && project?.handoff_email?.trim() && project?.handoff_legend?.trim());
     const tgResult = await sendTelegramLeadAlertForSpecialists({
-      expectHandoff: handoffEnabled() && Boolean(project?.specialist_user_id && project?.handoff_email?.trim() && project?.handoff_legend?.trim()),
+      expectHandoff: handoffConfigured,
+      manualHandoff: handoffConfigured && project?.handoff_auto_send === false,
+      allowRejection: project?.handoff_auto_send === false && userIdList.length === 1,
       userIds: userIdList,
       projectLeadUserIds: [...projectLeadUserIds],
       qualificationId,
@@ -3984,6 +4126,7 @@ async function recoverLeadBoardRow(
       qualificationId: threadClaim.status === 'duplicate' ? threadClaim.winnerQualificationId : lead.id,
       sourceQualificationId: lead.id,
       projectId: lead.qualified_project_id,
+      requiresSpecialistReview: await requiresSpecialistReview(supabaseMain, lead.qualified_project_id, handoffEnabled()),
       campaignId: lead.campaign_id, campaignName: lead.campaign_name,
       leadEmail: lead.lead_email, leadName: senderDisplayLeadName(lead.lead_name) ?? metadata.leadName,
       companyName: lead.company_name ?? metadata.companyName,
@@ -4345,6 +4488,8 @@ async function maybeReconcileLeadNotificationDeliveries(): Promise<number> {
 
 async function sendTelegramLeadAlertForSpecialists(data: {
   expectHandoff?: boolean;
+  manualHandoff?: boolean;
+  allowRejection?: boolean;
   userIds: string[];
   projectLeadUserIds: string[];
   qualificationId: string;
@@ -4410,6 +4555,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
 
     const result = await sendLeadTelegramAlert({
       expectHandoff: data.expectHandoff,
+      manualHandoff: data.manualHandoff,
+      allowRejection: data.allowRejection,
       qualificationId: data.qualificationId,
       campaignId: data.campaignId,
       leadEmail: data.leadEmail,
@@ -4615,13 +4762,13 @@ export async function maybePostLeadHandoff(opts: {
     if (existingError) return { disposition: 'retry', detail: `pending lookup failed: ${existingError.message}` };
     if (existing) {
       const materialized = existing as unknown as PendingHandoffRow & {
-        status: 'pending' | 'sent' | 'failed';
+        status: 'pending' | 'sent' | 'failed' | 'rejected';
         auto_send?: boolean;
         error_message?: string | null;
       };
       const automatic = materialized.auto_send === true ||
         materialized.error_message?.startsWith(HANDOFF_AUTO_SEND_MARKER) === true;
-      if (!automatic || materialized.status === 'sent') {
+      if (!automatic || materialized.status === 'sent' || materialized.status === 'rejected') {
         return { disposition: 'completed', detail: 'handoff already materialized' };
       }
       const resent = await sendHandoffNow(instantlyDb, materialized);
@@ -4677,13 +4824,31 @@ export async function maybePostLeadHandoff(opts: {
       return { disposition: 'skipped', detail: 'project has no responsible specialist' };
     }
 
+    // The first board write may have failed while qualification/notification
+    // succeeded. Keep this in the durable handoff job: never offer a manual
+    // decision whose saved candidate is missing. No external reads are needed.
+    // Automatic delivery retains its existing independence from board writes.
+    if (!project.handoff_auto_send) {
+      const metadata = resolveLeadContactMetadata({
+        leads: [], leadEmail: opts.leadEmail, campaignId, replyBody: opts.reply.body,
+      });
+      await upsertBoardRow(instantlyDb, {
+        qualificationId, projectId, campaignId, campaignName: opts.campaignName,
+        leadEmail: opts.leadEmail, leadName: opts.leadName ?? metadata.leadName,
+        companyName: metadata.companyName, phone: metadata.phone, website: metadata.website,
+        requestText: leadBoardRequestText(opts.reply.body), stepNumber: null,
+        replyTimestamp: opts.reply.timestamp_email ?? null,
+        requiresSpecialistReview: true,
+      });
+    }
+
     // 2. Reply target + sending mailbox.
     const replyToUuid = opts.reply.id;
     if (!replyToUuid) return { disposition: 'skipped', detail: 'reply target is unavailable' };
     let eaccount = (opts.reply as { eaccount?: string | null }).eaccount ?? null;
     if (!eaccount) {
       try {
-        const e = await instantly.getEmail(replyToUuid, { accountId: opts.accountId });
+        const e = await instantly.getEmail(replyToUuid, { accountId: opts.accountId, consumer: 'handoff' });
         eaccount = (e as { eaccount?: string | null })?.eaccount ?? null;
       } catch {
         /* fall through to skip */
@@ -4739,7 +4904,7 @@ export async function maybePostLeadHandoff(opts: {
       boardLink ? `📋 <a href="${escapeHtml(boardLink)}">Все лиды проекта</a>` : '',
       autoSend
         ? '⚡ Автопередача включена — отправляется автоматически, без кнопки-подтверждения.'
-        : `Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может ответственный${project.tag_project_lead_in_telegram ? ' или лид проекта' : ''}.`,
+        : `До подтверждения запись не видна в таблице клиента. «Передать клиенту» — отправить письмо и добавить лид в таблицу. «Не лид» — отклонить без отправки и сохранить обратную связь. Нажать может ответственный${project.tag_project_lead_in_telegram ? ' или лид проекта' : ''}.`,
     ].filter(Boolean).join('\n');
 
     // Recovery must reply to the persisted alert, including after a restart.
@@ -4796,6 +4961,16 @@ export async function maybePostLeadHandoff(opts: {
       insErr = legacyInsert.error;
     }
     if (insErr || !pendingRow) {
+      // The specialist may reject the first alert while this draft is being
+      // prepared/posted. The unique qualification row lets that decision win
+      // without ever creating a sendable handoff, including in a stale worker.
+      const rejected = await instantlyDb.from('instantly_pending_handoffs')
+        .select('status').eq('qualification_id', qualificationId).maybeSingle();
+      if (!rejected.error && rejected.data?.status === 'rejected') {
+        await editHandoffMessage(token, chatId, messageId,
+          '🚫 <b>Не лид</b> — отмечено специалистом. Передача отменена, письмо не отправлено.');
+        return { disposition: 'completed', detail: 'lead rejected during handoff preparation' };
+      }
       workerLog('error', `Handoff: pending insert failed (qual ${qualificationId}): ${insErr?.message ?? 'no row returned'}`);
       return { disposition: 'retry', detail: `pending insert failed: ${insErr?.message ?? 'no row returned'}` };
     }

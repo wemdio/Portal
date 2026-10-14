@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { getKnowledgeBase, getLatestDraftStatuses, getProjectBrief, missingBriefReason } from '@/lib/replyPersonalization/db';
+import { findRepeatReplyIds, getKnowledgeBase, getLatestDraftStatuses, getProjectBrief, missingBriefReason } from '@/lib/replyPersonalization/db';
 import { listProjectReplies } from '@/lib/replyPersonalization/projectReply';
 import type { ReplyListItem } from '@/lib/replyPersonalization/types';
 
@@ -20,19 +20,26 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const search = (url.searchParams.get('q') ?? '').trim().slice(0, 200);
   const limitParam = Number(url.searchParams.get('limit'));
   const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined;
+  // «Только лиды» — вердикт квалификатора, он есть лишь у синхронизированных
+  // кампаний основного аккаунта; живые письма и ящик без вердикта под этим
+  // фильтром не показываем.
+  const onlyLeads = url.searchParams.get('onlyLeads') === '1';
 
-  // Письма не показываем, только если собрать ответ не из чего — нет брифа.
+  // Без брифа письма всё равно показываем (с 06.10.2026): отвечать можно
+  // руками, а ИИ соберёт черновик из общих кейсов и тона. `missingReason`
+  // уходит на экран предупреждением над списком.
   const [projectBrief, kb] = await Promise.all([getProjectBrief(projectId), getKnowledgeBase(projectId)]);
   const missingReason = missingBriefReason(projectBrief, kb?.localBrief);
-  if (missingReason) {
-    return NextResponse.json({ replies: [], campaigns: [], total: 0, hasMore: false, missingReason });
-  }
 
-  const page = await listProjectReplies(projectId, { campaignId, search, limit });
-  const statuses = await getLatestDraftStatuses(page.rows.map((q) => q.id));
+  const page = await listProjectReplies(projectId, { campaignId, search, limit, onlyLeads });
+  const [statuses, repeats] = await Promise.all([
+    getLatestDraftStatuses(page.rows.map((q) => q.id)),
+    findRepeatReplyIds(page.campaigns.map((c) => c.id), page.rows),
+  ]);
 
   const replies: ReplyListItem[] = page.rows.map((q) => ({
     ...q,
+    repeat: repeats.has(q.id),
     listStatus: statuses[q.id] === 'sent' ? 'sent' : statuses[q.id] === 'skipped' ? 'skipped' : 'new',
   }));
 
@@ -41,6 +48,7 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
     campaigns: page.campaigns,
     total: page.total,
     hasMore: page.hasMore,
-    missingReason: null,
+    historyLoading: page.historyLoading,
+    missingReason,
   });
 });

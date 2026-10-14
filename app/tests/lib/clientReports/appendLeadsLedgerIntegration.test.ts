@@ -52,6 +52,8 @@ jest.mock('@/lib/loggerServer', () => ({
 import { InstantlyApiError } from '@/lib/instantly/errors';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { runClientLaunch } from '@/lib/clientLaunch/runLaunch';
+import { createVeDeliveryExclusionGuard, withVeDeliveryCompanyIdentity } from '@/lib/verticalEngineV2/projectExclusionDelivery';
+import { mapBaseRowsToLeads } from '@/lib/verticalEngineV2/launchHandoff';
 
 const leads = [
   { email: 'one@example.com', company_name: 'One', custom_variables: { domain: 'example.com', score: '1001' } },
@@ -100,6 +102,113 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     expect(createLeadsMock).toHaveBeenCalledWith(leads, expect.anything(), expect.objectContaining({
       timeoutIncludesBody: true, timeoutMs: 90_000, retryRateLimits: false,
     }));
+
+    // A saved company INN survives operator mapping. Unknown company identity
+    // stays allowed; a revision change after rate admission cannot send the tail.
+    createLeadsMock.mockReset().mockResolvedValue({ leads_uploaded: 1, remaining_in_plan: 1 });
+    capacityMock.mockResolvedValue({ limit: 10, used: 9, remaining: 1 });
+    const policyDb = createMockSupabase({ tables: { ve_project_exclusions: [{
+      project_id: 've-project', revision: 1, inns: ['1234567890'], domains: [], emails: [], updated_at: null,
+    }] } });
+    const policyLeads = [
+      withVeDeliveryCompanyIdentity({ email: 'blocked@gmail.com' }, { 'ИНН': '1234567890' }),
+      withVeDeliveryCompanyIdentity({ email: 'unknown@gmail.com' }, {}),
+      withVeDeliveryCompanyIdentity({ email: 'tail@gmail.com' }, { inn: '9876543210' }),
+    ];
+    const guard = createVeDeliveryExclusionGuard(policyDb as never, 've-project');
+    let policyChunks = 0;
+    await expect(appendLeadsToClientCampaign({ ...capacityInput, leads: policyLeads,
+      prepareProviderChunk: async chunk => {
+        const prepared = await guard(chunk);
+        if (++policyChunks === 3) await policyDb.from('ve_project_exclusions').update({ revision: 2 }).eq('project_id', 've-project');
+        return prepared;
+      },
+    })).rejects.toMatchObject({ partialResult: { accepted: 1, skipped: 1,
+      acceptedIndexes: [1], skippedIndexes: [0], attemptedIndexes: [1], identityComplete: true } });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
+    expect(createLeadsMock.mock.calls[0][0]).toEqual([{ email: 'unknown@gmail.com' }]);
+    expect(mainDb.getRows('client_campaign_contact_ledger').every(row =>
+      !JSON.stringify(row).includes('_ve_company_identity'))).toBe(true);
+
+    createLeadsMock.mockClear();
+    const denied = createMockSupabase({ errorTables: { ve_project_exclusions: 'database unavailable' } });
+    await expect(appendLeadsToClientCampaign({ ...capacityInput,
+      prepareProviderChunk: createVeDeliveryExclusionGuard(denied as never, 've-project'),
+    })).rejects.toMatchObject({ partialResult: { attemptedIndexes: [], acceptedIndexes: [] } });
+    expect(createLeadsMock).not.toHaveBeenCalled();
+    const allExcluded = await appendLeadsToClientCampaign({ ...capacityInput, leads: [policyLeads[0]],
+      prepareProviderChunk: guard });
+    expect(allExcluded).toMatchObject({ accepted: 0, skipped: 1, skippedIndexes: [0], attemptedIndexes: [], acceptedIndexes: [] });
+    expect(createLeadsMock).not.toHaveBeenCalled();
+
+    // A pre-upgrade payload may have no canonical INN after variable mapping.
+    // Recover exact source identities, including a supply batch, but never
+    // assign another company's INN from an ambiguous shared address.
+    const legacyDb = createMockSupabase({ tables: {
+      ve_project_exclusions: [{ project_id: 'legacy-project', revision: 1, inns: ['1234567890'], domains: ['excluded-company.ru'], emails: [] }],
+      ve_contact_delivery_rows: [
+        { id: 'd1', ve_project_id: 'legacy-project', email_normalized: 'legacy@gmail.com', item_id: 'legacy-item' },
+        { id: 'd2', ve_project_id: 'legacy-project', email_normalized: 'shared@gmail.com', item_id: 'legacy-item' },
+        { id: 'd3', ve_project_id: 'legacy-project', email_normalized: 'supply@gmail.com', item_id: 'legacy-item', supply_batch_id: 'later-batch' },
+        { id: 'd4', ve_project_id: 'legacy-project', email_normalized: 'unknown-first@gmail.com', item_id: 'legacy-item' },
+      ],
+      ve_launch_queue_items: [{ id: 'legacy-item', project_id: 'legacy-project', base_id: 'legacy-base' }],
+      ve_contact_supply_batches: [{ id: 'later-batch', base_id: 'later-base' }],
+      ve_bases: [
+        { id: 'legacy-base', project_id: 'legacy-project', columns: ['Email', 'ИНН'], data: [
+          { Email: ' LEGACY@gmail.com ', 'ИНН': '1234567890' },
+          { Email: 'shared@gmail.com', 'ИНН': '1234567890' },
+          { Email: 'shared@gmail.com', 'ИНН': '9876543210' },
+          { Email: 'unknown-first@gmail.com' },
+          { Email: 'unknown-first@gmail.com', 'ИНН': '1234567890' },
+        ] },
+        { id: 'later-base', project_id: 'legacy-project', columns: ['email', 'website'], data: [
+          { email: 'supply@gmail.com', website: 'https://excluded-company.ru/about' },
+        ] },
+      ],
+    } });
+    capacityMock.mockResolvedValue(null);
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1 });
+    expect(await appendLeadsToClientCampaign({ ...capacityInput,
+      leads: ['legacy', 'shared', 'supply'].map(name => ({ email: `${name}@gmail.com` })),
+      prepareProviderChunk: createVeDeliveryExclusionGuard(legacyDb as never, 'legacy-project'),
+    })).toMatchObject({ accepted: 1, skipped: 2, acceptedIndexes: [1], skippedIndexes: [0, 2], attemptedIndexes: [1] });
+    expect(createLeadsMock.mock.calls[0][0]).toEqual([{ email: 'shared@gmail.com' }]);
+    expect(legacyDb.selects.filter(call => call.table === 've_bases')).toHaveLength(2);
+    expect(legacyDb.selects.every(call => !call.columns.includes('collect_info'))).toBe(true);
+    expect(await appendLeadsToClientCampaign({ ...capacityInput,
+      leads: [{ email: 'unknown-first@gmail.com' }],
+      prepareProviderChunk: createVeDeliveryExclusionGuard(legacyDb as never, 'legacy-project'),
+    })).toMatchObject({ accepted: 1, skipped: 0, acceptedIndexes: [0], skippedIndexes: [] });
+    const emailOnlyDb = createMockSupabase({ tables: { ve_project_exclusions: [{
+      project_id: 'email-project', revision: 1, inns: [], domains: [], emails: ['stop@gmail.com'],
+    }] } });
+    createLeadsMock.mockClear();
+    expect(await appendLeadsToClientCampaign({ ...capacityInput,
+      leads: [{ email: 'stop@gmail.com' }, { email: 'keep@gmail.com' }],
+      prepareProviderChunk: createVeDeliveryExclusionGuard(emailOnlyDb as never, 'email-project'),
+    })).toMatchObject({ accepted: 1, skipped: 1, acceptedIndexes: [1], skippedIndexes: [0], attemptedIndexes: [1] });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
+    expect(createLeadsMock.mock.calls[0][0]).toEqual([{ email: 'keep@gmail.com' }]);
+    // Exact email checks need no source-base or identity-recovery queries.
+    expect(emailOnlyDb.selects.every(call => call.table === 've_project_exclusions')).toBe(true);
+
+    // An operator may rename the original corporate email. Its domain must
+    // survive mapping when a different column provides the actual recipient.
+    const raw = { 'Почта': 'person@gmail.com', email: 'info@excluded-company.ru' };
+    const mapped = mapBaseRowsToLeads({ rows: [raw], columns: ['Почта', 'email'],
+      operatorMapping: [{ operator: 'backupEmail', column: 'email', matched: true }] });
+    expect(mapped.leads[0].email).toBe('person@gmail.com');
+    expect(mapped.leads[0].custom_variables).toMatchObject({ backupEmail: 'info@excluded-company.ru' });
+    createLeadsMock.mockClear();
+    const preservedIdentity = await appendLeadsToClientCampaign({ ...capacityInput,
+      leads: [withVeDeliveryCompanyIdentity(mapped.leads[0], raw),
+        withVeDeliveryCompanyIdentity({ email: 'other@gmail.com' }, {})],
+      prepareProviderChunk: createVeDeliveryExclusionGuard(legacyDb as never, 'legacy-project'),
+    });
+    expect(preservedIdentity).toMatchObject({ accepted: 1, skipped: 1, acceptedIndexes: [1], skippedIndexes: [0], attemptedIndexes: [1] });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
+    expect(createLeadsMock.mock.calls[0][0]).toEqual([{ email: 'other@gmail.com' }]);
   });
 
   it('continues with the untouched tail when workspace blocklist rejections leave free slots', async () => {
@@ -141,12 +250,20 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     });
   });
 
-  it('pauses before the provider call when the workspace has no free storage', async () => {
+  it('checks a zero billing hint through a journaled import instead of inventing a storage refusal', async () => {
     capacityMock.mockResolvedValue({ limit: 1000, used: 1000, remaining: 0 });
+    createLeadsMock.mockResolvedValueOnce({ leads_uploaded: 1 })
+      .mockResolvedValueOnce({ leads_uploaded: 1, remaining_in_plan: 99 });
     const result = await appendLeadsToClientCampaign(capacityInput);
-    expect(result).toMatchObject({ accepted: 0, skipped: 0, capacityBlocked: true, attemptedIndexes: [], skippedIndexes: [] });
-    expect(createLeadsMock).not.toHaveBeenCalled();
-    expect(mainDb.getRows('client_campaign_append_batches')).toHaveLength(0);
+    expect(result).toMatchObject({ accepted: 2, skipped: 0, capacityBlocked: false,
+      attemptedIndexes: [0, 1], acceptedIndexes: [0, 1], skippedIndexes: [], identityComplete: true });
+    expect(createLeadsMock.mock.calls.map(([chunk]) => chunk)).toEqual([[leads[0]], [leads[1]]]);
+    expect(mainDb.getRows('client_campaign_append_batches')).toHaveLength(2);
+
+    createLeadsMock.mockClear().mockResolvedValue({ leads_uploaded: 0, remaining_in_plan: 0 });
+    expect(await appendLeadsToClientCampaign(capacityInput)).toMatchObject({ accepted: 0, skipped: 0,
+      capacityBlocked: true, attemptedIndexes: [0], deferredIndexes: [0], skippedIndexes: [] });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
   });
 
   it('uploads only the available prefix and keeps the rest outside permanent tariff skips', async () => {
@@ -160,12 +277,24 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
 
   it('does not stop before all available provider chunks are uploaded', async () => {
     capacityMock.mockResolvedValue({ limit: 1100, used: 0, remaining: 1100 });
-    createLeadsMock.mockImplementation(async (chunk) => ({ leads_uploaded: chunk.length }));
+    let providerRemaining = 1100;
+    createLeadsMock.mockImplementation(async (chunk) => {
+      providerRemaining -= chunk.length;
+      return { leads_uploaded: chunk.length, remaining_in_plan: providerRemaining };
+    });
     const result = await appendLeadsToClientCampaign({ ...capacityInput,
       leads: Array.from({ length: 1101 }, (_, i) => ({ email: `lead-${i}@example.com` })) });
     expect(createLeadsMock.mock.calls.map((call) => call[0].length)).toEqual([1000, 100]);
     expect(result).toMatchObject({ accepted: 1100, capacityBlocked: true, skipped: 0 });
     expect(result.attemptedIndexes).toHaveLength(1100);
+
+    // A positive billing hint can also lag behind storage changes. Without a
+    // counter from the import service it must not cap the untouched tail.
+    capacityMock.mockResolvedValue({ limit: 1000, used: 999, remaining: 1 });
+    createLeadsMock.mockClear().mockImplementation(async (chunk) => ({ leads_uploaded: chunk.length }));
+    expect(await appendLeadsToClientCampaign(capacityInput)).toMatchObject({ accepted: 2,
+      acceptedIndexes: [0, 1], capacityBlocked: false, identityComplete: true });
+    expect(createLeadsMock.mock.calls.map(([chunk]) => chunk)).toEqual([[leads[0]], [leads[1]]]);
   });
 
   it('preserves exact partial acceptance when the plan fills during a request', async () => {

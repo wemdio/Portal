@@ -454,3 +454,33 @@ class RuProxyProbeTargetTests(unittest.TestCase):
     def test_russian_targets_are_not_the_foreign_ones(self):
         self.assertTrue(health.RU_PROXY_TEST_URLS)
         self.assertNotIn("https://www.cloudflare.com/cdn-cgi/trace", health.RU_PROXY_TEST_URLS)
+
+
+class FailureStreakPlacementTests(unittest.TestCase):
+    """Счётчик сбоя — в заголовке алерта, а не приклеен к последней строке.
+
+    28.09.2026 пришло «@Jacob_brown (×62)»: счётчик прилип к тегу и читался
+    как «тегнули 62 раза». На деле это 62 проверки подряд, ≈15 ч сбоя, а
+    сообщений ушло пять.
+    """
+
+    PROXY_ALERT = (
+        "🔴 <b>Прокси</b>: 4/8 работают\n"
+        "  ✖ [Proxy1] 154.194.97.117:64710: connection attempts failed\n"
+        "@Jacob_brown"
+    )
+
+    def test_streak_goes_to_the_header_not_next_to_the_mention(self):
+        text = health._attach_streak(self.PROXY_ALERT, health._failure_streak_note(62, 900))
+        lines = text.split("\n")
+        self.assertEqual(lines[0], "🔴 <b>Прокси</b>: 4/8 работают (×62 подряд, ≈16 ч)")
+        self.assertEqual(lines[-1], "@Jacob_brown")
+
+    def test_short_streak_is_shown_in_minutes(self):
+        self.assertEqual(health._failure_streak_note(3, 900), " (×3 подряд, ≈45 мин)")
+
+    def test_single_line_alert_keeps_its_shape(self):
+        self.assertEqual(
+            health._attach_streak("🔴 <b>Сайт</b>: timeout", " (×5 подряд, ≈75 мин)"),
+            "🔴 <b>Сайт</b>: timeout (×5 подряд, ≈75 мин)",
+        )

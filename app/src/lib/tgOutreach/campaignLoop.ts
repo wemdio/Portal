@@ -21,7 +21,8 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger } from './openaiChat';
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
+import { isRoleOnlyReply } from './roleFirstGate';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
   handleProxyError,
@@ -29,6 +30,7 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
+import { checkUsernamesOnTme } from './usernameExists';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { sendFreezeAppeal } from './freezeAppeal';
@@ -36,6 +38,8 @@ import { applyQueuedProfile, PROFILE_REST_HOURS, type QueuedProfilePayload } fro
 import { runLeadForwardPoller, isAccountRestrictedError } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
+import { enqueueCrmPush } from './crmPush';
+import { aiLeadMark } from './leadMark';
 import { withTimeout } from './withTimeout';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
@@ -541,9 +545,12 @@ async function extractMessagesFromHistory(
     const role = isOut ? 'assistant' : 'user';
     const timestamp = msg.date ? new Date(msg.date * 1000).toISOString() : undefined;
     const mediaTag = describeMediaType(msg);
+    // Пересланное написал не собеседник: 08.10.2026 человек переслал нам наше
+    // же первое касание коллеге, тот — обратно нам, и ИИ счёл текст его словами.
+    const fwdTag = msg.fwdFrom ? '[Переслано] ' : '';
 
     if (msg.message) {
-      const content = mediaTag ? `[${mediaTag}] ${msg.message}` : msg.message;
+      const content = fwdTag + (mediaTag ? `[${mediaTag}] ${msg.message}` : msg.message);
       chatMessages.push({ role, content, timestamp });
       continue;
     }
@@ -551,13 +558,13 @@ async function extractMessagesFromHistory(
     if (!isOut && isVoiceOrAudioMessage(msg)) {
       const text = await transcribeVoice(client, msg, log, label);
       if (text) {
-        chatMessages.push({ role: 'user', content: `[Голосовое сообщение]: ${text}`, timestamp });
+        chatMessages.push({ role: 'user', content: `${fwdTag}[Голосовое сообщение]: ${text}`, timestamp });
         continue;
       }
     }
 
     if (mediaTag) {
-      chatMessages.push({ role, content: `[${mediaTag}]`, timestamp });
+      chatMessages.push({ role, content: `${fwdTag}[${mediaTag}]`, timestamp });
     }
   }
   return chatMessages;
@@ -655,6 +662,8 @@ async function upsertDialog(
       last_message_at: lastMessageAt,
       tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
       ...(status ? { status } : {}),
+      // Лидом его сделал ИИ — если до этого лидом не отметил сотрудник.
+      ...(status === 'lead' && existing.status !== 'lead' ? aiLeadMark() : {}),
       ...autoForwardPayload(opts?.autoForward),
     };
     // initialCanSend применяется ТОЛЬКО при insert — иначе перезапишет ручной
@@ -676,6 +685,7 @@ async function upsertDialog(
       tg_is_bot: opts?.tgIsBot ?? false,
       can_send: opts?.canSend ?? opts?.initialCanSend ?? !(opts?.tgIsBot ?? false),
       last_message_at: lastMessageAt,
+      ...(status === 'lead' ? aiLeadMark() : {}),
       ...autoForwardPayload(opts?.autoForward),
     });
   }
@@ -701,6 +711,26 @@ async function isCampaignContact(
     .eq('tg_user_id', tgUserId)
     .maybeSingle();
   return Boolean(data);
+}
+
+/**
+ * То же для пачки диалогов. Догоняющие ответы и напоминания читают диалоги из
+ * базы мимо основного цикла: 08.10.2026 основной цикл писал «не из баз
+ * кампании — пропускаю», а догоняющий через минуту всё равно отвечал.
+ */
+async function campaignContactIds(
+  db: SupabaseClient,
+  campaignId: string,
+  tgUserIds: number[],
+): Promise<Set<number>> {
+  if (tgUserIds.length === 0) return new Set();
+  const { data, error } = await db
+    .from('tg_outreach_processed')
+    .select('tg_user_id')
+    .eq('campaign_id', campaignId)
+    .in('tg_user_id', tgUserIds);
+  if (error) throw new Error(`не смог сверить диалоги с базами кампании: ${error.message}`);
+  return new Set((data ?? []).map((r) => Number(r.tg_user_id)));
 }
 
 async function canSendToDialog(
@@ -1048,11 +1078,41 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
+  // Явный интерес ловим отдельной проверкой: фразу передачи модель ответа
+  // то забывает, то перефразирует, и «Да, пришлите условия» оставался без
+  // менеджера. Проверка упала — решает ответ модели, как раньше.
+  const phrase = handoffPhrase(oai);
+  const roleOnly = isRoleOnlyReply(chatMessages);
+  // Квалификацию ведёт промпт кампании: сами передаём только прямую просьбу о
+  // человеке, и она передаётся даже в ответ на вопрос о роли.
+  const directOnly = oai.handoff_direct_request_only === true;
+  let interested: boolean | null = null;
+  if (phrase && (!roleOnly || directOnly)) {
+    const check = await detectInterest(chatMessages, { directRequestOnly: directOnly });
+    interested = check.interested;
+    if (interested) {
+      log('info', directOnly
+        ? `${displayName}: просит связать с менеджером или созвониться — отвечу и передам контакт`
+        : `${displayName}: в ответе явный интерес — отвечу и передам контакт менеджеру`);
+    } else if (interested === null) {
+      log('warning', `${displayName}: проверка интереса не удалась (${check.error}) — передача только по фразе в ответе модели`);
+    }
+  }
+
   let replyText: string | null = null;
   let usedFallback = false;
   const openaiStart = Date.now();
   try {
-    replyText = await openaiGenerate(oai, chatMessages);
+    replyText = await openaiGenerate(oai, chatMessages, {
+      extraInstruction: interested && phrase && directOnly
+        ? handoffInstruction(phrase)
+        : roleOnly && directOnly
+        ? 'Наше последнее сообщение уточняло роль собеседника. Продолжи по порядку квалификации из системного промпта кампании: по названной роли задай следующий вопрос. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
+        : roleOnly
+        ? 'Наше последнее сообщение только уточняло роль собеседника; предложение ещё не прозвучало. Ответ о роли и встречное предложение своих услуг НЕ означают интереса к нашему предложению. Если роль подтвердилась, кратко объясни повод обращения, опираясь только на системный промпт этой кампании, и спроси, интересно ли человеку это обсудить. Если роль не подтвердилась или собеседник предлагает свои услуги, вежливо заверши разговор. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
+        : interested && phrase ? handoffInstruction(phrase) : null,
+      factsRule: true,
+    });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
     if (replyText) {
       log('info', `${displayName}: GPT сгенерировал ответ за ${openaiSec}с (${replyText.length} символов)`);
@@ -1085,6 +1145,13 @@ export async function handleChat(
     log('warning', `${displayName}: ответ дословно повторяет то, что мы уже писали ("${replyText}") — НЕ отправляю`);
     return { replied: false, triggerType: null };
   }
+  if (interested && phrase) {
+    replyText = ensureHandoffPhrase(replyText, phrase);
+  }
+  if (roleOnly && !interested && detectTrigger(replyText, oai) === 'positive') {
+    log('warning', `${displayName}: ответ на вопрос о роли ошибочно содержит фразу передачи; НЕ отправляю`);
+    return { replied: false, triggerType: null };
+  }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
@@ -1112,7 +1179,7 @@ export async function handleChat(
       ? oai.target_chats_positive
       : oai.target_chats_negative;
 
-    let outcome: { ok: true } | { ok: false; error: string };
+    let outcome: { ok: true } | { ok: false; error: string } | null;
     if (targetChat) {
       const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
       // Карточку шлём только положительному триггеру: отрицательный уходит в
@@ -1160,14 +1227,17 @@ export async function handleChat(
         }
       }
     } else {
-      log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
-      outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
+      // Чат не обязателен: без него передача лида — это статус «Лид» (и CRM
+      // ниже), а не сбой пересылки.
+      log('info', `${displayName}: триггер "${triggerLabel}" сработал, чат для пересылки не указан — ${triggerType === 'positive' ? 'помечен лидом без пересылки' : 'пересылка пропущена'}`);
+      outcome = null;
     }
 
     // Отметку ставим только положительному триггеру. Отрицательный тоже
     // пересылает, но в другой чат и по другому поводу: «ушёл менеджеру» про
-    // человека, который отказался, — неправда.
-    const autoForward: AutoForwardOutcome | undefined = triggerType === 'positive'
+    // человека, который отказался, — неправда. Без чата пересылки не было —
+    // и отметки нет.
+    const autoForward: AutoForwardOutcome | undefined = triggerType === 'positive' && outcome
       ? {
           chat: targetChat || null,
           at: outcome.ok ? new Date().toISOString() : null,
@@ -1177,6 +1247,12 @@ export async function handleChat(
 
     await markProcessed(db, campaign.id, tgUserId, tgUsername);
     await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead', { tgIsBot, canSend: false, autoForward });
+    // Лид по интересу — и в CRM, если она включена у кампании. Независимо от
+    // того, дошла ли карточка в чат: лид настоящий в любом случае. Карточку
+    // соберёт сама очередь из только что записанного диалога.
+    if (triggerType === 'positive') {
+      await enqueueCrmPush(db, { campaignId: campaign.id, tgUserId, accountId: account.id, log });
+    }
   } else {
     await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
   }
@@ -1244,14 +1320,24 @@ async function handleFollowUp(
     skip_already_sent: 0,
     skip_openai_empty: 0,
     skip_low_value: 0,
+    skip_not_campaign: 0,
     errors: 0,
   };
+
+  let contacts: Set<number>;
+  try {
+    contacts = await campaignContactIds(db, campaign.id, dialogs.map((d) => Number(d.tg_user_id)));
+  } catch (err) {
+    log('warning', `Аккаунт ${account.session_name}: напоминания (follow-up) — ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
 
   for (const dialog of dialogs) {
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
     if (isBot) { stats.skip_bot++; continue; }
+    if (!contacts.has(Number(tgUserId))) { stats.skip_not_campaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
 
     const messages = dialog.messages as DialogMessage[];
@@ -1268,7 +1354,7 @@ async function handleFollowUp(
         { role: 'user', content: `[Система: пользователь не ответил ${delayHours}ч ${delayMinutes}мин. ${followUpPrompt}]` },
       ];
 
-      const reply = await openaiGenerate(oai, followUpMessages);
+      const reply = await openaiGenerate(oai, followUpMessages, { factsRule: true });
       if (!reply) { stats.skip_openai_empty++; continue; }
       if (isLowValueReply(reply)) {
         stats.skip_low_value++;
@@ -1323,9 +1409,11 @@ async function handleFollowUp(
         stats.skip_bot ||
         stats.skip_blocked ||
         stats.skip_openai_empty ||
-        stats.skip_low_value
+        stats.skip_low_value ||
+        stats.skip_not_campaign
         ? ' Не отправил по причинам:'
         : '') +
+      (stats.skip_not_campaign ? ` не из баз кампании — ${stats.skip_not_campaign};` : '') +
       (stats.skip_already_sent ? ` уже напоминали ранее — ${stats.skip_already_sent};` : '') +
       (stats.skip_last_not_assistant ? ` последнее сообщение не от нас — ${stats.skip_last_not_assistant};` : '') +
       (stats.skip_empty ? ` пустая история диалога — ${stats.skip_empty};` : '') +
@@ -1383,7 +1471,16 @@ async function handleMissedRepliesLastDays(
   let skipLowValue = 0;
   let skipRepeat = 0;
   let skipCloser = 0;
+  let skipNotCampaign = 0;
   let errorsCount = 0;
+
+  let contacts: Set<number>;
+  try {
+    contacts = await campaignContactIds(db, campaign.id, dialogs.map((d) => Number(d.tg_user_id)));
+  } catch (err) {
+    log('warning', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
 
   for (const dialog of dialogs) {
     if (shouldStop?.()) break;
@@ -1393,6 +1490,7 @@ async function handleMissedRepliesLastDays(
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
     if (isBot) { skipBot++; continue; }
+    if (!contacts.has(Number(tgUserId))) { skipNotCampaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
 
     const messages = Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : [];
@@ -1406,7 +1504,7 @@ async function handleMissedRepliesLastDays(
     }
 
     try {
-      const reply = await openaiGenerate(oai, messages);
+      const reply = await openaiGenerate(oai, messages, { factsRule: true });
       if (!reply) { skipOpenaiEmpty++; continue; }
       if (isLowValueReply(reply)) {
         skipLowValue++;
@@ -1472,9 +1570,10 @@ async function handleMissedRepliesLastDays(
   log(
     'info',
     `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за ${CATCHUP_LOOKBACK_DAYS} дн.) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
-      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser
+      (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser || skipNotCampaign
         ? ' Не отправил по причинам:'
         : '') +
+      (skipNotCampaign ? ` не из баз кампании — ${skipNotCampaign};` : '') +
       (skipBot ? ` это боты — ${skipBot};` : '') +
       (skipBlocked ? ` в чёрном списке — ${skipBlocked};` : '') +
       (skipEmpty ? ` пустая история — ${skipEmpty};` : '') +
@@ -1690,7 +1789,13 @@ export async function runCampaignLoop(
     );
     // Use paused (not error) so resumeRunningCampaigns retries us automatically
     // once accounts become active again, instead of leaving the campaign stuck.
-    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+    //
+    // Остановку оператора пауза не перетирает. Обработчик «Остановить» пишет
+    // stopped ДО того, как цикл дойдёт сюда, и безусловная запись возвращала
+    // кампанию в paused: авто-возобновление раз в 5 минут снова поднимало её,
+    // она снова падала сюда — по кругу. Профили при этом не применить: они
+    // требуют остановленной кампании (30.09.2026, «АИ МОП»).
+    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId).neq('status', 'stopped');
     if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
     return;
   }
@@ -1776,7 +1881,8 @@ export async function runCampaignLoop(
     log('info', `Повторная попытка: подключились ${retryClients.length} из ${accounts.length} аккаунтов`);
     if (retryClients.length === 0) {
       log('error', 'Повторная попытка тоже провалилась — кампания на паузе. Проверьте прокси и сессии аккаунтов, затем запустите снова.');
-      const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+      // Остановку оператора не перетираем — см. такую же запись выше.
+      const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId).neq('status', 'stopped');
       if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
       return;
     }
@@ -2340,6 +2446,9 @@ export async function runCampaignLoop(
               payload: account.profile_payload as QueuedProfilePayload,
               currentUsername: account.tg_username ?? undefined,
             });
+            const restUntil = outcome.status === 'applied' && outcome.identityChanged
+              ? new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString()
+              : null;
             const { error: prErr } = await db
               .from('tg_outreach_accounts')
               .update({
@@ -2354,9 +2463,7 @@ export async function runCampaignLoop(
                 // греться в эти сутки как раз нужно. Ставим только на успешном
                 // применении: аккаунту, которому профиль не записался,
                 // отлёживаться не за что.
-                ...(outcome.status === 'applied' && outcome.identityChanged
-                  ? { profile_rest_until: new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString() }
-                  : {}),
+                ...(restUntil ? { profile_rest_until: restUntil } : {}),
                 // Что реально встало в Telegram — оттуда же, из ответа: заказ и
                 // результат расходятся, когда ник занят или значение подрезано.
                 ...(outcome.applied
@@ -2373,6 +2480,11 @@ export async function runCampaignLoop(
             if (prErr) {
               log('warning', `Аккаунт ${account.session_name}: профиль применён, но итог не записался — ${prErr.message}`);
             }
+            // И в память круга: состав перечитывается только на следующем
+            // круге, а первое касание идёт в этом же. 07.10.2026 все 40 новых
+            // аккаунтов написали незнакомому через 5–20 секунд после смены
+            // имени; 25 из них словили PEER_FLOOD на первом же сообщении.
+            if (restUntil) account.profile_rest_until = restUntil;
             log(
               outcome.status === 'applied' ? 'info' : 'warning',
               `Аккаунт ${account.session_name}: правка профиля по заказу (${who}) — ${outcome.detail}`,
@@ -2705,73 +2817,91 @@ export async function runCampaignLoop(
 
         // Первое касание — после разбора входящих и только этим же аккаунтом:
         // отвечать на ответ обязан тот, кто написал первым.
-        try {
-          const ft = await sendFirstTouchBatch({
-            db,
-            client,
-            campaignId,
-            account,
-            perDay: tg.first_touch_per_account_per_day,
-            gapMinutes: tg.first_touch_gap_minutes,
-            perGap: tg.first_touch_per_gap,
-            // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
-            cooldownHours: tg.account_cooldown_hours,
-            log,
-            shouldStop,
-            onProgress: tick,
-            gapMs: randomRange(tg.read_reply_delay_range) * 1000,
-            claimed: claimedContacts,
-            claimLock: withClaimLock,
-          });
-          if (ft.sent || ft.skipped || ft.postponed) {
-            log(
-              'info',
-              `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
-            );
-          }
+        //
+        // Отлёжку проверяем здесь ещё раз: её мог назначить этот же круг
+        // выше, при смене профиля, — до следующего круга аккаунт в составе.
+        if (!isResting(account, Date.now())) {
+          try {
+            const ft = await sendFirstTouchBatch({
+              db,
+              client,
+              campaignId,
+              account,
+              perDay: tg.first_touch_per_account_per_day,
+              gapMinutes: tg.first_touch_gap_minutes,
+              perGap: tg.first_touch_per_gap,
+              // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
+              cooldownHours: tg.account_cooldown_hours,
+              log,
+              shouldStop,
+              onProgress: tick,
+              gapMs: randomRange(tg.read_reply_delay_range) * 1000,
+              claimed: claimedContacts,
+              claimLock: withClaimLock,
+              checkUsernames: checkUsernamesOnTme,
+            });
+            if (ft.sent || ft.skipped || ft.postponed) {
+              log(
+                'info',
+                `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
+              );
+            }
 
-          // Ушедшее сообщение доказывает, что резолв у аккаунта работает —
-          // счётчик пустых кругов обнуляем.
-          if (ft.sent > 0) await writeBlankRounds(account, 0);
-          else if (ft.resolveBlocked) {
-            const blanks = readBlankRounds(account) + 1;
-            await writeBlankRounds(account, blanks);
-            if (blanks >= RESOLVE_BLOCKED_LIMIT) {
-              const detail =
-                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${blanks} круга подряд ` +
-                'ни один ник из порции не нашёлся, при том что другие аккаунты кампании с той же ' +
-                'очереди рассылают. Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
-                'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
-                'висит баннер с кнопкой обжалования.';
-              const parked = await parkAccountAfterLimit({
-                db,
-                account,
-                hours: tg.account_cooldown_hours,
-                reason: 'резолв юзернеймов не работает',
-                log,
-                // Бота не спрашиваем: он уже отвечал «ограничений нет» на
-                // каждом из этих кругов — про заморозку он не знает.
-                client: null,
-                inferred: { status: 'restricted', detail },
-              });
-              await writeBlankRounds(account, 0);
-              if (parked.parked) {
-                log(
-                  'warning',
-                  `Аккаунт ${account.session_name}: ${detail} Аккаунт на паузе до ` +
-                    `${new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}, ` +
-                    'контакты остаются в очереди нетронутыми.',
-                );
+            // Ушедшее сообщение доказывает, что резолв у аккаунта работает —
+            // счётчик пустых кругов обнуляем.
+            if (ft.sent > 0) await writeBlankRounds(account, 0);
+            else if (ft.resolveBlocked) {
+              const blanks = readBlankRounds(account) + 1;
+              await writeBlankRounds(account, blanks);
+              if (blanks >= RESOLVE_BLOCKED_LIMIT) {
+                /**
+                 * Раньше здесь стояло «при том что другие аккаунты кампании с той
+                 * же очереди рассылают» — без всякой проверки. 24–28.09.2026 в
+                 * ATOL-1 не рассылал никто: в очереди остались четыре мёртвых
+                 * ника, и эта фраза стояла в карточках всех пятидесяти аккаунтов.
+                 * Теперь довод называем тот, что есть: t.me подтвердил живые ники
+                 * или проверить их не удалось.
+                 */
+                const evidence = ft.blindOnExisting > 0
+                  ? `${blanks} круга подряд не нашёл ни одного ника из порции, хотя эти люди есть в Telegram ` +
+                    '(ники проверены по t.me).'
+                  : `${blanks} круга подряд ни один ник из порции не нашёлся; проверить ники по t.me не ` +
+                    'удалось, так что вывод косвенный — это могут быть и несуществующие ники в базе.';
+                const detail =
+                  `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${evidence} ` +
+                  'Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
+                  'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
+                  'висит баннер с кнопкой обжалования.';
+                const parked = await parkAccountAfterLimit({
+                  db,
+                  account,
+                  hours: tg.account_cooldown_hours,
+                  reason: 'резолв юзернеймов не работает',
+                  log,
+                  // Бота не спрашиваем: он уже отвечал «ограничений нет» на
+                  // каждом из этих кругов — про заморозку он не знает.
+                  client: null,
+                  inferred: { status: 'restricted', detail },
+                });
+                await writeBlankRounds(account, 0);
+                if (parked.parked) {
+                  log(
+                    'warning',
+                    `Аккаунт ${account.session_name}: ${detail} Аккаунт на паузе до ` +
+                      `${new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}, ` +
+                      'контакты остаются в очереди нетронутыми.',
+                  );
+                }
               }
             }
+          } catch (err) {
+            // Первое касание не должно ронять круг: аутрич по существующим
+            // диалогам важнее и уже отработал выше.
+            log(
+              'warning',
+              `Аккаунт ${account.session_name}: первое касание не отработало — ${err instanceof Error ? err.message : String(err)}`,
+            );
           }
-        } catch (err) {
-          // Первое касание не должно ронять круг: аутрич по существующим
-          // диалогам важнее и уже отработал выше.
-          log(
-            'warning',
-            `Аккаунт ${account.session_name}: первое касание не отработало — ${err instanceof Error ? err.message : String(err)}`,
-          );
         }
         tick();
 

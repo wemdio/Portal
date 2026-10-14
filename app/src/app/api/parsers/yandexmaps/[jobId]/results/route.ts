@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import {
+  fetchOrganizationPage,
+  fetchOrganizationsWithoutCard,
+  ORGANIZATIONS_PAGE,
+} from '@/lib/yandexmaps/organizationPages';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,17 +27,20 @@ export async function GET(req: NextRequest) {
   if (!user) return jsonError('Unauthorized', 401);
 
   const jobId = getJobIdFromUrl(req);
-  const limit = Math.max(1, Math.min(5000, Number(req.nextUrl.searchParams.get('limit') ?? '200') || 200));
-  const offset = Math.max(0, Number(req.nextUrl.searchParams.get('offset') ?? '0') || 0);
+  const limit = Math.max(1, Math.min(ORGANIZATIONS_PAGE, Number(req.nextUrl.searchParams.get('limit') ?? '200') || 200));
 
-  const { data, error } = await supabase
-    .from('yandex_maps_organizations')
-    .select('*')
-    .eq('job_id', jobId)
-    .order('created_at', { ascending: true })
-    .range(offset, offset + limit - 1);
-
-  if (error) return jsonError(error.message, 500);
-  return NextResponse.json({ results: data ?? [], limit, offset, hasMore: (data?.length ?? 0) === limit });
+  // Страницы по курсору card_url, а не offset: см. lib/yandexmaps/organizationPages.
+  // ?after=<card_url> — следующая страница; после последней клиент берёт
+  // ?nocard=1 — строки без card_url.
+  try {
+    if (req.nextUrl.searchParams.get('nocard') === '1') {
+      const results = await fetchOrganizationsWithoutCard(supabase, jobId);
+      return NextResponse.json({ results, nextAfter: null, hasMore: false });
+    }
+    const after = req.nextUrl.searchParams.get('after');
+    const page = await fetchOrganizationPage(supabase, jobId, after || null, limit);
+    return NextResponse.json({ results: page.rows, nextAfter: page.nextAfter, hasMore: page.nextAfter !== null });
+  } catch (e) {
+    return jsonError(e instanceof Error ? e.message : 'Не удалось прочитать результаты', 500);
+  }
 }
-

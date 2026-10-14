@@ -499,6 +499,131 @@
     <div class="footer-inner"><span><strong>OutreachOS</strong> · Built by Polza Agency</span><span>Research first. Thoughtful outreach. Learn as you go.</span></div>
   </footer>
   <script>
+    // Откуда пришёл посетитель: utm_* из адреса, внешний referrer (не сам лендинг) и адрес
+    // входа. Nginx отдаёт Referrer-Policy strict-origin-when-cross-origin, поэтому до
+    // портала Referer доходит без query — метки уходят отдельными полями заявки.
+    //
+    // Правило атрибуции одно для заявки и для регистрации: засчитываются последние непустые
+    // utm_*. Каждый заход с utm_* переписывает и запись вкладки (sessionStorage
+    // oos_attribution), и cookie oos_utm на весь outreachos.xyz — как RU-лендинг переписывает
+    // свою, в том же формате. Cookie живёт 30 дней, её читает регистрация в кабинете
+    // app.outreachos.xyz (/api/signup). Заход только с внешним referrer'ом метки не стирает:
+    // он записывается во вкладку, лишь пока в её записи нет utm_*, а cookie не трогает.
+    // При отправке заявки метки берутся из записи вкладки. Если в ней нет utm_* или cookie
+    // записана позже (метки пришли в другой вкладке), — из cookie, вместе с временем того
+    // захода (ts), чтобы в Telegram было видно, что метки от прошлого захода; referrer и
+    // адрес входа при этом остаются от этой вкладки. Если хранилище или cookie недоступны,
+    // работает то, что доступно; сбои здесь не ломают ни страницу, ни форму.
+    var leadAttribution = (function () {
+      var UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+      var STORE_KEY = 'oos_attribution';
+      var COOKIE_NAME = 'oos_utm';
+      // Те же схемы внешнего referrer'а, что принимает /api/demo-lead: android-app:// — так
+      // Chrome на Android отдаёт переход из приложения (LinkedIn, Gmail).
+      var REFERRER_PROTOCOLS = ['http:', 'https:', 'android-app:', 'ios-app:'];
+      var ISO_TS = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,3})?Z$/;
+      function clean(value, max) {
+        return Array.from(String(value || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim()).slice(0, max).join('').trim();
+      }
+      function hasUtm(record) {
+        return UTM_KEYS.some(function (k) { return typeof record[k] === 'string' && record[k] !== ''; });
+      }
+      function time(record) {
+        var t = typeof record.ts === 'string' && ISO_TS.test(record.ts) ? Date.parse(record.ts) : NaN;
+        return isNaN(t) ? null : t;
+      }
+      function outsideReferrer() {
+        try {
+          if (!document.referrer) return '';
+          var url = new URL(document.referrer);
+          if (REFERRER_PROTOCOLS.indexOf(url.protocol) === -1 || url.hostname === location.hostname) return '';
+          return clean(document.referrer, 500);
+        } catch (e) { return ''; /* unparsable referrer — treat as none */ }
+      }
+      function fromThisLoad() {
+        var record = {};
+        var params = new URLSearchParams(location.search);
+        UTM_KEYS.forEach(function (k) { var v = clean(params.get(k), 200); if (v) record[k] = v; });
+        var referrer = outsideReferrer();
+        if (referrer) record.referrer = referrer;
+        if (!hasUtm(record) && !referrer) return null;
+        record.landing = clean(location.origin + location.pathname + location.search, 500);
+        record.ts = new Date().toISOString();
+        return record;
+      }
+      // /api/signup режет каждое значение cookie до 300 UTF-16-единиц (String.slice): emoji
+      // на этой границе распался бы на половинку, и Postgres не принял бы profiles.signup_utm.
+      // Поэтому в cookie значение укладывается в 300 единиц целыми символами.
+      function forSignup(value) {
+        var out = '';
+        Array.from(clean(value, 300)).every(function (ch) {
+          if (out.length + ch.length > 300) return false;
+          out += ch;
+          return true;
+        });
+        return out.trim();
+      }
+      function writeSignupCookie(record) {
+        var cookie = {};
+        UTM_KEYS.forEach(function (k) { if (record[k]) cookie[k] = forSignup(record[k]); });
+        cookie.referrer = forSignup(record.referrer);
+        cookie.landing = forSignup(location.pathname + location.search);
+        cookie.ts = record.ts;
+        document.cookie = COOKIE_NAME + '=' + encodeURIComponent(JSON.stringify(cookie)) +
+          '; Path=/; Max-Age=2592000; SameSite=Lax' +
+          (location.protocol === 'https:' ? '; Secure' : '') +
+          (/(^|\.)outreachos\.xyz$/.test(location.hostname) ? '; Domain=outreachos.xyz' : '');
+      }
+      // utm_* и ts из cookie oos_utm; null, если cookie нет или в ней нет utm_* либо времени
+      // захода. Битая cookie бросает исключение — вызов обёрнут в try.
+      function readSignupCookie() {
+        var prefix = COOKIE_NAME + '=';
+        var entry = document.cookie.split(/;\s*/).filter(function (c) { return c.indexOf(prefix) === 0; })[0];
+        if (!entry) return null;
+        var stored = JSON.parse(decodeURIComponent(entry.slice(prefix.length)));
+        if (!stored || typeof stored !== 'object') return null;
+        var record = {};
+        UTM_KEYS.forEach(function (k) { var v = clean(typeof stored[k] === 'string' ? stored[k] : '', 200); if (v) record[k] = v; });
+        record.ts = stored.ts;
+        return hasUtm(record) && time(record) !== null ? record : null;
+      }
+
+      var visit = null;
+      try {
+        try {
+          visit = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null');
+        } catch (e) { /* storage blocked or corrupted — this load decides */ }
+        if (!visit || typeof visit !== 'object') visit = null;
+        var current = fromThisLoad();
+        if (current && (hasUtm(current) || !visit || !hasUtm(visit))) {
+          visit = current;
+          try { sessionStorage.setItem(STORE_KEY, JSON.stringify(current)); } catch (e) { /* kept for this page only */ }
+          if (hasUtm(current)) {
+            try { writeSignupCookie(current); } catch (e) { /* signup attribution is best-effort */ }
+          }
+        }
+      } catch (e) {
+        visit = null;
+      }
+
+      // Поля атрибуции для заявки; {} — заявка уходит как без меток.
+      return function () {
+        var fields = {};
+        try {
+          var cookie = null;
+          try { cookie = readSignupCookie(); } catch (e) { /* cookie blocked or foreign — no fallback */ }
+          var own = visit && hasUtm(visit) ? visit : null;
+          var utm = own && !(cookie && time(cookie) > (time(own) || 0)) ? own : cookie;
+          if (utm) UTM_KEYS.forEach(function (k) { if (typeof utm[k] === 'string' && utm[k]) fields[k] = utm[k]; });
+          if (utm && utm === cookie) fields.ts = cookie.ts;
+          if (visit) ['referrer', 'landing'].forEach(function (k) { if (typeof visit[k] === 'string' && visit[k]) fields[k] = visit[k]; });
+        } catch (e) {
+          fields = {};
+        }
+        return fields;
+      };
+    })();
+
     // Заявка уходит в общий приём лидов портала (POST /api/demo-lead на app.outreachos.xyz):
     // строка в demo_leads + сообщение команде в Telegram. Запрос no-cors (без preflight,
     // ответ непрозрачный), поэтому ошибку видно только при сбое сети.
@@ -515,6 +640,10 @@
         email: form.email.value.trim(),
         message: form.goal.value.trim(),
         source: 'eng_pilot'
+      });
+      var attribution = leadAttribution();
+      ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'referrer', 'landing', 'ts'].forEach(function (k) {
+        if (attribution[k]) body.set(k, attribution[k]);
       });
       button.disabled = true;
       fetch('https://app.outreachos.xyz/api/demo-lead', { method: 'POST', mode: 'no-cors', body: body })

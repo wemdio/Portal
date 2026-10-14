@@ -18,10 +18,10 @@ export async function GET(req: NextRequest) {
     const limit = Math.min(Number(url.searchParams.get('limit') ?? 200), 1000);
     const offset = Number(url.searchParams.get('offset') ?? 0);
 
+    // Leads are shared by the team (08.10.2026) — not filtered by who added them.
     let q = supabaseAdmin
       .from('li_leads')
       .select('*', { count: 'exact' })
-      .eq('user_id', auth.user.id)
       .order('created_at', { ascending: false });
 
     if (listId === '__none') q = q.is('lead_list_id', null);
@@ -67,14 +67,15 @@ export async function DELETE(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.li-outreach.leads.bulkDelete' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
+    if (!supabaseAdmin) return jsonError('Admin client not configured', 500);
 
     const body = (await req.json()) as { ids?: string[] };
     if (!body.ids?.length) return jsonError('No IDs provided', 400);
 
-    const { error } = await auth.supabase
+    // Team-wide, like the list view: RLS on li_leads is still owner-only.
+    const { error } = await supabaseAdmin
       .from('li_leads')
       .delete()
-      .eq('user_id', auth.user.id)
       .in('id', body.ids);
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ ok: true, deleted: body.ids.length });

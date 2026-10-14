@@ -27,9 +27,13 @@ import {
   stripBaseConstructorCheckpointMetadata,
   stripEmailValidationCheckpointMetadata,
   stripFindEmailsCheckpointMetadata,
+  stripPersonalizationCheckpointMetadata,
+  EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+  FOUND_EMAIL_ORIGIN_COL,
   WEBSITE_EMAIL_PREFERENCE_COL,
 } from './baseConstructorCheckpoint';
-import { extractEmail, findColumnIndex } from './dfybUtils';
+import { extractEmail, extractEmails, findColumnIndex } from './dfybUtils';
+import { parseFoundEmailOrigin, shouldTrackFoundEmailOrigin } from './foundEmailOrigin';
 import { uploadExportArtifact } from './csvExportArtifact';
 import {
   accumulateTaScoringTelemetry,
@@ -42,6 +46,7 @@ const admin = supabaseAdmin!;
 interface StepConfig {
   brief?: string;
   prompt?: string;
+  personalization?: { concurrency?: number };
   column_mapping?: string;
   /**
    * Куда find_emails пишет результат (когда в файле уже есть email-колонка):
@@ -80,6 +85,14 @@ interface StepConfig {
    * Имеет смысл только когда find_emails работал в target='separate' и колонок две.
    */
   validate_target?: 'original' | 'found' | 'both';
+  /**
+   * Выбор validate_target сделан на экране (новый UI шлёт вместе с ним).
+   * Нужен для 'original': старый UI всегда слал его по умолчанию, и такие
+   * джобы (в очереди на момент выкладки, открытые до неё вкладки) проверяют
+   * все адреса, как раньше. 'found' по умолчанию не бывал — учитывается и
+   * без метки (см. shouldTrackFoundEmailOrigin).
+   */
+  validate_target_explicit?: boolean;
   /** When true, ta_scoring annotates rows with score+reason but does NOT filter <7. */
   keepAllScored?: boolean;
   /**
@@ -508,7 +521,12 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       locale: cfg.locale,
     }),
   cap_emails_per_company: (data, prog, _cancel, cfg) =>
-    stepCapEmailsPerCompany(data, prog, { max: cfg.cap_emails_per_company?.max }),
+    stepCapEmailsPerCompany(data, prog, {
+      max: cfg.cap_emails_per_company?.max,
+      // «Только найденные»: исходные адреса не проверялись (пустой статус),
+      // но пользователь им доверяет — ранжируем их как подтверждённые.
+      trustEmptyStatus: shouldTrackFoundEmailOrigin(cfg) && cfg.validate_target === 'found',
+    }),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
   enrich_descriptions: (data, prog, cancel, cfg) =>
     stepEnrich(data, prog, cancel, cfg.onCheckpoint, { locale: cfg.locale }),
@@ -519,7 +537,10 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       onTelemetry: cfg.onTaScoringTelemetry,
       onCheckpoint: cfg.onCheckpoint,
     }),
-  personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel),
+  personalization: (data, prog, cancel, cfg) => stepPersonalize(data, cfg.prompt || '', prog, cancel, {
+    concurrency: cfg.personalization?.concurrency,
+    onCheckpoint: cfg.onCheckpoint,
+  }),
 };
 
 /**
@@ -550,17 +571,28 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
  * prefer_found_validated сохраняет запасные адреса и происхождение до
  * валидации: выбор источника делает selectValidatedWebsiteEmails.
  *
+ * trackFoundOrigin (только режим 'all'): дописывает FOUND_EMAIL_ORIGIN_COL —
+ * адреса строки, пришедшие ТОЛЬКО из found-колонки. Нужна validate_emails с
+ * validate_target 'original' | 'found' (см. foundEmailOrigin.ts).
+ *
  * @internal — exported только для тестов; не использовать снаружи модуля.
  */
 export function mergeFoundEmailColumn(
   data: string[][],
   locale: ConstructorLocale = 'ru',
   mode: 'all' | 'prefer_found' | 'prefer_found_validated' = 'all',
+  options?: { trackFoundOrigin?: boolean },
 ): string[][] {
   if (data.length === 0) return data;
   const header = data[0];
   const foundIdx = header.findIndex((h) => h.trim() === foundEmailColForLocale(locale));
   if (foundIdx < 0) return data; // нечего мерджить
+  const originRequested = options?.trackFoundOrigin === true && mode === 'all';
+  const existingOriginIdx = header.indexOf(FOUND_EMAIL_ORIGIN_COL);
+  const trackOrigin = originRequested && existingOriginIdx < 0;
+  // Колонка уже есть (например, в загруженном файле была своя «Найденный
+  // Email» и её слили до find_emails) — дополняем ячейки новыми адресами.
+  const extendOrigin = originRequested && existingOriginIdx >= 0;
 
   // Ищем исходную email-колонку (тот же набор alias'ов что и findColumnIndex
   // в шагах). Re-implementируем здесь чтобы не тащить лишний import.
@@ -579,13 +611,46 @@ export function mergeFoundEmailColumn(
     // защитимся на resume/багов будущего.
     const newHeader = [...header];
     newHeader[foundIdx] = 'Email';
-    return [newHeader, ...data.slice(1)];
+    if (extendOrigin) {
+      return [newHeader, ...data.slice(1).map((row) => {
+        const previous = parseFoundEmailOrigin(row[existingOriginIdx]);
+        if (!previous) return row;
+        const out = [...row];
+        out[existingOriginIdx] = JSON.stringify([...new Set([...previous, ...extractEmails(row[foundIdx] || '')])]);
+        return out;
+      })];
+    }
+    if (!trackOrigin) return [newHeader, ...data.slice(1)];
+    // Исходной колонки нет — всё в ней со скрейпа.
+    // Ячейку вставляем по индексу заголовка: строка из CSV с лишним
+    // разделителем длиннее заголовка, push увёл бы её мимо колонки.
+    return [[...newHeader, FOUND_EMAIL_ORIGIN_COL], ...data.slice(1).map((row) => {
+      const out = [...row];
+      while (out.length < header.length) out.push('');
+      out.splice(header.length, 0, JSON.stringify(extractEmails(row[foundIdx] || '')));
+      return out;
+    })];
   }
 
   // Email-регекс берём такой же как stepSplitEmails — общий паттерн.
   const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 
   const keepFallbackUntilValidation = mode === 'prefer_found_validated';
+  // Исходным считается адрес, который есть в исходной колонке ЛЮБОЙ строки:
+  // dedup_email может оставить строку другой компании, где он пришёл со скрейпа.
+  // При дополнении уже записанные «найденные» адреса исходными не считаются,
+  // хотя прошлое слияние и положило их в исходную колонку.
+  const previouslyFound = extendOrigin
+    ? new Set(data.slice(1).flatMap((row) => [...(parseFoundEmailOrigin(row[existingOriginIdx]) ?? [])]))
+    : new Set<string>();
+  const allOriginalEmails = trackOrigin || extendOrigin
+    ? new Set(data.slice(1).flatMap((row) => extractEmails(row[originalIdx] || ''))
+      .filter((e) => !previouslyFound.has(e)))
+    : new Set<string>();
+  const originIdxAfterMerge = existingOriginIdx > foundIdx ? existingOriginIdx - 1 : existingOriginIdx;
+  // После удаления found-колонки индекс колонки происхождения — header.length - 1
+  // (trackOrigin только в режиме 'all', колонки предпочтения VE2 нет).
+  const originCellIdx = header.length - 1;
   const mergedBody = data.slice(1).map((row, index) => {
     const origCell = row[originalIdx] || '';
     const foundCell = row[foundIdx] || '';
@@ -593,6 +658,10 @@ export function mergeFoundEmailColumn(
       // В found-колонке пусто — нечего сливать, оставляем оригинал.
       const out = [...row];
       out.splice(foundIdx, 1);
+      if (trackOrigin) {
+        while (out.length < originCellIdx) out.push('');
+        out.splice(originCellIdx, 0, '[]');
+      }
       return out;
     }
     // Парсим email'ы из обеих ячеек, дедуплицируем case-insensitive с сохранением
@@ -620,12 +689,24 @@ export function mergeFoundEmailColumn(
         group: String(index), found: (foundCell.match(EMAIL_RE) ?? []).map((email) => email.toLowerCase()),
       }));
     }
+    if (trackOrigin) {
+      while (out.length < originCellIdx) out.push('');
+      out.splice(originCellIdx, 0, JSON.stringify(extractEmails(foundCell).filter((e) => !allOriginalEmails.has(e))));
+    }
+    if (extendOrigin) {
+      const previous = parseFoundEmailOrigin(out[originIdxAfterMerge]);
+      if (previous) {
+        const added = extractEmails(foundCell).filter((e) => !allOriginalEmails.has(e));
+        out[originIdxAfterMerge] = JSON.stringify([...new Set([...previous, ...added])]);
+      }
+    }
     return out;
   });
 
   const newHeader = [...header];
   newHeader.splice(foundIdx, 1);
   if (keepFallbackUntilValidation) newHeader.push(WEBSITE_EMAIL_PREFERENCE_COL);
+  if (trackOrigin) newHeader.push(FOUND_EMAIL_ORIGIN_COL);
   return [newHeader, ...mergedBody];
 }
 
@@ -717,9 +798,18 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
     // the filtered rows. A deploy in that gap leaves only the pre-filter
     // checkpoint durable. Replaying validation is idempotent for conclusive
     // rows and is the only safe way to distinguish/recover that legacy state.
+    // Validate по источнику убирает FOUND_EMAIL_ORIGIN_COL из своего итога:
+    // повтор на итоге проверил бы и доверенный источник. Повторяем, только
+    // если сохранено состояние ДО фильтра (колонка происхождения или
+    // промежуточное состояние валидации на месте).
+    const resumedHeader: unknown[] = Array.isArray(job.data?.[0]) ? job.data[0] : [];
+    const perSourceValidationFinished = shouldTrackFoundEmailOrigin(stepConfig)
+      && !resumedHeader.includes(FOUND_EMAIL_ORIGIN_COL)
+      && !resumedHeader.includes(EMAIL_VALIDATION_CHECKPOINT_STATE_COL);
     const mustReplayCompletedValidation = isResume
       && job.current_step_key === 'validate_emails'
-      && (job.current_step_progress ?? 0) >= 100;
+      && (job.current_step_progress ?? 0) >= 100
+      && !perSourceValidationFinished;
     const resumeFromStep = isResume
       ? mustReplayCompletedValidation
         ? Math.max(0, job.current_step - 1)
@@ -830,6 +920,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         }
       }
       if (stepKey !== 'find_emails') data = stripFindEmailsCheckpointMetadata(data);
+      if (stepKey !== 'personalization') data = stripPersonalizationCheckpointMetadata(data);
 
       // On a mid-step resume the runner works only on the unprocessed tail.
       // Its local 0..100 callbacks therefore describe the tail, not the whole
@@ -846,6 +937,8 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           : Math.min(99, Math.max(0, Math.round(job.current_step_progress ?? 0)))
         : 0;
       metrics.beginStep(i + 1, stepKey, Math.max(0, data.length - 1), isResumingCurrentStep);
+      // A phase from the previous step/attempt is not current progress.
+      metrics.merge({ step_progress: null });
       const priorStats = metrics.snapshot();
       const savedTelemetry = mergeBaseConstructorStats(priorStats.ta_scoring_telemetry, {});
       const priorTelemetry = mergeBaseConstructorStats(priorStats.ta_scoring_telemetry, {
@@ -874,7 +967,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         });
       };
       let lastReportedProgress = savedProgressFloor;
-      const progressFn: ProgressFn = async (progress) => {
+      const progressFn: ProgressFn = async (progress, detail) => {
         // A step's local 100 means "the function is about to return", not
         // "its returned rows are durable". Keep persisted progress at <=99;
         // the worker publishes 100 only after saving non-final output or in
@@ -884,6 +977,12 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           ? savedProgressFloor + Math.round(((100 - savedProgressFloor) * normalized) / 100)
           : normalized);
         lastReportedProgress = Math.max(lastReportedProgress, mapped);
+        if (detail || progress >= 100) {
+          metrics!.merge({ step_progress: {
+            ...(progress >= 100 ? { phase: 'saving' } : detail),
+            step_index: i + 1, step_key: stepKey, updated_at: new Date().toISOString(),
+          } });
+        }
         await updateJobProgress(jobId, i, stepKey, lastReportedProgress, runToken, metrics!.snapshot());
       };
       await progressFn(0);
@@ -899,6 +998,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
         'find_emails',
         'validate_emails',
         'ta_scoring',
+        'personalization',
       ]);
       const effectiveStepConfig: StepConfig = {
         ...stepConfig,
@@ -984,12 +1084,20 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
       );
       // A resumed website refresh must retain the found column: it identifies
       // completed sites and keeps their original fallback separate until split.
+      // Так же при учёте происхождения адресов (validate_target по источнику):
+      // resume посреди find_emails должен дописать ту же found-колонку, иначе
+      // адреса, найденные после рестарта, сольются без происхождения.
       if (hasFoundCol && !(stepKey === 'find_emails' && (
         stepConfig.find_emails?.merge_mode === 'prefer_found'
         || stepConfig.find_emails?.merge_mode === 'prefer_found_validated'
+        || shouldTrackFoundEmailOrigin(stepConfig)
       ))) {
         const beforeMergeCols = preHeader.length;
-        data = mergeFoundEmailColumn(data, locale, stepConfig.find_emails?.merge_mode);
+        // Происхождение адресов нужно, только пока впереди validate_emails
+        // с явным выбором одного источника (ручной конструктор).
+        const trackFoundOrigin = shouldTrackFoundEmailOrigin(stepConfig)
+          && selectedSteps.slice(i).includes('validate_emails');
+        data = mergeFoundEmailColumn(data, locale, stepConfig.find_emails?.merge_mode, { trackFoundOrigin });
         const afterMergeCols = data[0]?.length ?? 0;
         console.log(
           `[base-constructor][${jobId}] eager-merged FOUND_EMAIL_COL into email column before step '${stepKey}' (cols ${beforeMergeCols} → ${afterMergeCols})`,

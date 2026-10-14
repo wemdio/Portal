@@ -210,16 +210,18 @@ function describeImapFailure(e: unknown): string {
 }
 
 /** Один проход опроса входящих. true — если что-то новое нашли. */
-export async function processSenderReplies(opts?: { log?: Log }): Promise<boolean> {
+export async function processSenderReplies(opts: { egressIp: string; log?: Log }): Promise<boolean> {
   if (!supabaseAdmin) return false;
   const db = supabaseAdmin;
-  const log: Log = opts?.log ?? (() => {});
+  const log: Log = opts.log ?? (() => {});
 
   const { data: mailboxRows } = await db
     .from('sender_mailboxes')
     .select('*')
     .eq('status', 'verified')
     .eq('enabled', true)
+    // IMAP-вход — такой же вход в ящик, как отправка: только со своего адреса.
+    .eq('egress_ip', opts.egressIp)
     .not('imap_host', 'is', null)
     .order('imap_checked_at', { ascending: true, nullsFirst: true })
     .limit(MAILBOXES_PER_PASS);

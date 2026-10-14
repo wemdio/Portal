@@ -5,6 +5,7 @@ import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
+import { BaseAttachmentsPanel } from '@/components/tg-outreach/BaseAttachmentsPanel';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
 import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
@@ -38,6 +39,7 @@ import {
   ShieldCheck,
   FileSpreadsheet,
   LayoutDashboard,
+  Power,
   PowerOff,
   FolderPlus,
   Inbox,
@@ -53,6 +55,7 @@ import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
 import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
+import CrmSettingsPanel, { type CrmSettings } from '@/components/tg-outreach/CrmSettingsPanel';
 import type {
   CampaignStatus,
   DialogStatus,
@@ -78,6 +81,7 @@ import {
   type AutoForwardMark,
 } from '@/lib/tgOutreach/autoForward';
 import { accountLabel } from '@/lib/tgOutreach/accountLabel';
+import { leadMarkLabel, type LeadByFilter } from '@/lib/tgOutreach/leadMark';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
 import {
@@ -162,6 +166,10 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   stopped: { label: 'Остановлена', cls: 'bg-gray-100 text-gray-600' },
   running: { label: 'Запущена', cls: 'bg-emerald-100 text-emerald-700' },
   stopping: { label: 'Останавливается...', cls: 'bg-amber-100 text-amber-700 animate-pulse' },
+  // «Запускается» — задача создана, но воркер ещё не взял её в работу: между
+  // нажатием и первым сообщением проходит до минуты, и всё это время кампания
+  // не «запущена». Раньше шапка врала, что уже идёт.
+  starting: { label: 'Запускается...', cls: 'bg-emerald-50 text-emerald-700 animate-pulse' },
   paused: { label: 'Пауза', cls: 'bg-amber-100 text-amber-700' },
   error: { label: 'Ошибка', cls: 'bg-rose-100 text-rose-700' },
   // Прогрев — самостоятельное состояние, а не разновидность «остановлена»:
@@ -173,11 +181,30 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
 function statusDotClass(status: string): string {
   switch (status) {
     case 'running': return 'bg-emerald-400';
+    case 'starting': return 'bg-emerald-300 animate-pulse';
+    case 'stopping': return 'bg-amber-400 animate-pulse';
+    case 'paused': return 'bg-amber-400';
     case 'warming': return 'bg-blue-400';
     case 'error': return 'bg-rose-400';
     default: return 'bg-gray-400';
   }
 }
+
+/** Как часто шапка кампании перечитывает состояние с сервера. */
+const PHASE_POLL_MS = 4000;
+/** Сколько ждём окончания остановки, прежде чем сказать, что запуск не вышел. */
+const AUTO_START_WAIT_MS = 5 * 60_000;
+
+/** Ответ /campaigns/:id/status — состояние с учётом незавершённых задач. */
+type CampaignPhase = {
+  status: string;
+  /** running | starting | stopping | paused | stopped | error */
+  phase: string;
+  has_active_start: boolean;
+  has_active_stop: boolean;
+  can_start: boolean;
+  is_running: boolean;
+};
 
 const DIALOG_STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   none: { label: '—', cls: 'text-gray-400' },
@@ -428,7 +455,7 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 /* =================== SETTINGS TAB =================== */
 function SettingsTab({ campaign, onSave }: {
   campaign: OutreachCampaign;
-  onSave: (openai: OpenAISettings, telegram: TelegramSettings) => Promise<void>;
+  onSave: (openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => Promise<void>;
 }) {
   const [openai, setOpenai] = useState<OpenAISettings>({ ...DEFAULT_OPENAI_SETTINGS, ...campaign.openai_settings });
   const [telegram, setTelegram] = useState<TelegramSettings>({
@@ -442,6 +469,9 @@ function SettingsTab({ campaign, onSave }: {
     },
   });
   const [saving, setSaving] = useState(false);
+  // Блок CRM грузит свои настройки сам и отдаёт текущий выбор сюда.
+  const [crm, setCrm] = useState<CrmSettings | null>(null);
+  const crmIncomplete = !!crm?.enabled && !crm.status_id;
   const [blockedRaw, setBlockedRaw] = useState(
     (campaign.telegram_settings?.blocked_usernames ?? []).join(', ')
   );
@@ -450,7 +480,7 @@ function SettingsTab({ campaign, onSave }: {
     setSaving(true);
     const parsed = blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
     const updatedTelegram = { ...telegram, blocked_usernames: parsed };
-    try { await onSave(openai, updatedTelegram); } finally { setSaving(false); }
+    try { await onSave(openai, updatedTelegram, crm); } finally { setSaving(false); }
   };
 
   const setOAI = <K extends keyof OpenAISettings>(k: K, v: OpenAISettings[K]) =>
@@ -472,11 +502,22 @@ function SettingsTab({ campaign, onSave }: {
           <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
         </div>
         {/* Чат пересылки наполняет автоматика по триггерной фразе; ручные
-            передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же. */}
+            передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же.
+            Пустой чат — передача лида становится просто пометкой «Лид». */}
         <p className="text-[10px] text-gray-400 -mt-2">
-          В чат пересылки бот отправляет сам, когда в его ответе встречается триггерная фраза.
+          В чат пересылки бот отправляет сам по триггерной фразе. Пусто — контакт только помечается лидом.
         </p>
+        {/* Для кампаний, где квалификацию (роль, объём, бюджет) ведёт промпт:
+            общая проверка интереса передавала лида на «расскажите подробнее»
+            в обход промпта. См. OpenAISettings.handoff_direct_request_only. */}
+        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
+          <input type="checkbox" checked={openai.handoff_direct_request_only === true} onChange={e => setOAI('handoff_direct_request_only', e.target.checked)} className="rounded border-gray-300" />
+          Передавать сам только по прямой просьбе: менеджер, созвон, встреча
+        </label>
       </section>
+
+      {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
+      <CrmSettingsPanel campaignId={campaign.id} onChange={setCrm} />
 
       {/* Заголовок «Telegram» снят с секции: экран целиком про Telegram-аутрич,
           и подпись ничего не отделяла от соседних блоков. */}
@@ -674,11 +715,14 @@ function SettingsTab({ campaign, onSave }: {
         )}
       </section>
 
-      <button type="button" onClick={handleSave} disabled={saving}
-        className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-        {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-        Сохранить настройки
-      </button>
+      <div className="flex items-center gap-3">
+        <button type="button" onClick={handleSave} disabled={saving || crmIncomplete}
+          className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Сохранить настройки
+        </button>
+        {crmIncomplete && <span className="text-[11px] text-amber-600">Выберите воронку и этап CRM</span>}
+      </div>
     </div>
   );
 }
@@ -1115,8 +1159,10 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 // Флага «своя/чужая кампания» здесь больше нет. Он появился как зеркало RLS из
 // 20260320_0003 (читать всем, писать владельцу) — а 20260807_0004 это правило
 // сняла: аутрич командный, кампанию ведут несколько специалистов.
-function DialogsTab({ campaignId }: {
+function DialogsTab({ campaignId, crmEnabled }: {
   campaignId: string;
+  /** Включена ли у кампании передача в CRM — тогда у лидов без сделки есть кнопка «В CRM». */
+  crmEnabled: boolean;
 }) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
   /** Диалог, у которого не сохранилось изменение, и причина — под его карточкой. */
@@ -1140,6 +1186,8 @@ function DialogsTab({ campaignId }: {
    * немногие, ради которых экран и открывают.
    */
   const [filterMessages, setFilterMessages] = useState<'all' | 'one' | 'many'>('all');
+  /** Кто сделал лидом: мои, ИИ, все ручные. Пусто — не фильтровать. */
+  const [filterLeadBy, setFilterLeadBy] = useState<LeadByFilter | ''>('');
   /**
    * Чьи диалоги показывать — пустая строка означает «всех аккаунтов».
    *
@@ -1157,6 +1205,7 @@ function DialogsTab({ campaignId }: {
   /** `<dialogId>:<kind>` пока собирается предпросмотр и ставится задача. */
   const [forwarding, setForwarding] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [crmPushing, setCrmPushing] = useState<string | null>(null);
   const limit = 30;
 
   const fetchAccounts = useCallback(async () => {
@@ -1208,13 +1257,14 @@ function DialogsTab({ campaignId }: {
     if (filterAccountId) params.set('account_id', filterAccountId);
     if (filterBaseId) params.set('base_id', filterBaseId);
     if (filterMessages !== 'all') params.set('messages', filterMessages);
+    if (filterLeadBy) params.set('lead_by', filterLeadBy);
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages]);
+  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages, filterLeadBy]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
   // третьей странице прошлого фильтра бессмысленно.
@@ -1300,9 +1350,34 @@ function DialogsTab({ campaignId }: {
     try {
       const previewRes = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward?kind=${kind}`);
       const preview = (await previewRes.json().catch(() => null)) as
-        { text?: string; target_chat?: string; error?: string } | null;
+        { text?: string; target_chat?: string | null; mark_only?: boolean; error?: string } | null;
       if (!previewRes.ok) {
         alert(preview?.error ?? `Не удалось собрать сообщение (${previewRes.status})`);
+        return;
+      }
+
+      // Чат для пересылки не указан — передача лида сводится к пометке «Лид»
+      // (и сделке в CRM, если она включена). В Telegram ничего не уходит.
+      if (preview?.mark_only) {
+        if (!confirm(
+          'Чат для пересылки не указан — контакт будет помечен лидом без пересылки'
+          + (crmEnabled ? ' и отправлен в CRM' : '') + '.\n\nПометить лидом?',
+        )) return;
+        const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward`, {
+          method: 'POST',
+          body: JSON.stringify({ kind }),
+        });
+        const body = (await res.json().catch(() => null)) as { error?: string; crm?: string } | null;
+        if (!res.ok) {
+          alert(body?.error ?? `Не удалось пометить лидом (${res.status})`);
+          return;
+        }
+        const patch: Partial<OutreachDialog> = { status: 'lead' };
+        if (body?.crm === 'queued') {
+          patch.crm = { status: 'pending', lead_url: null, error_message: null };
+          window.setTimeout(() => void fetchDialogs({ silent: true }), 20_000);
+        }
+        patchDialogs((d) => d.id === dialog.id, patch);
         return;
       }
 
@@ -1376,6 +1451,23 @@ function DialogsTab({ campaignId }: {
       });
     } finally {
       setCancelling(null);
+    }
+  };
+
+  /** Поставить лида в очередь CRM: повтор после сбоя или первый раз для старого лида. */
+  const pushToCrm = async (dialog: OutreachDialog) => {
+    setCrmPushing(dialog.id);
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/crm-push`, { method: 'POST' });
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        alert(body?.error ?? `Не удалось отправить в CRM (${res.status})`);
+        return;
+      }
+      patchDialogs((d) => d.id === dialog.id, { crm: { status: 'pending', lead_url: null, error_message: null } });
+      window.setTimeout(() => void fetchDialogs({ silent: true }), 20_000);
+    } finally {
+      setCrmPushing(null);
     }
   };
 
@@ -1526,38 +1618,8 @@ function DialogsTab({ campaignId }: {
               <option value="bots">Боты</option>
             </select>
           </div>
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-500">Сообщений:</span>
-            <select
-              value={filterMessages}
-              onChange={(e) => { setFilterMessages(e.target.value as typeof filterMessages); setOffset(0); }}
-              aria-label="Показывать диалоги по количеству сообщений"
-              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterMessages !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
-            >
-              <option value="all">Все</option>
-              <option value="one" title="Мы написали, ответа не было">1 сообщение</option>
-              <option value="many" title="Разговор завязался — есть хотя бы один ответ">2 и больше</option>
-            </select>
-          </div>
-          {/* База и аккаунт — те же дропдауны, но появляются не всегда:
-              с единственной базой (аккаунтом) выбирать не из чего. */}
-          {bases.length > 1 && (
-            <div className="flex items-center gap-1">
-              <span className="text-xs text-gray-500">База:</span>
-              <select
-                value={filterBaseId}
-                onChange={(e) => { setFilterBaseId(e.target.value); setOffset(0); }}
-                aria-label="Показывать диалоги только по одной базе"
-                title="Из какой базы контакт, которому писали"
-                className={`max-w-[220px] rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterBaseId ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
-              >
-                <option value="">Все</option>
-                {bases.map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
-            </div>
-          )}
+          {/* Аккаунт и база — те же дропдауны, но появляются не всегда:
+              с единственным аккаунтом (базой) выбирать не из чего. */}
           {accounts.length > 1 && (
             <div className="flex items-center gap-1">
               <span className="text-xs text-gray-500">Аккаунт:</span>
@@ -1571,6 +1633,51 @@ function DialogsTab({ campaignId }: {
                 <option value="">Все</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>{accountLabel(a) ?? a.session_name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Сообщений:</span>
+            <select
+              value={filterMessages}
+              onChange={(e) => { setFilterMessages(e.target.value as typeof filterMessages); setOffset(0); }}
+              aria-label="Показывать диалоги по количеству сообщений"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterMessages !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="one" title="Мы написали, ответа не было">1 сообщение</option>
+              <option value="many" title="Разговор завязался — есть хотя бы один ответ">2 и больше</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Передал:</span>
+            <select
+              value={filterLeadBy}
+              onChange={(e) => { setFilterLeadBy(e.target.value as LeadByFilter | ''); setOffset(0); }}
+              aria-label="Показывать лидов по тому, кто их передал"
+              title="Кто сделал диалог лидом. Лиды до 08.10.2026 метки не имеют"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterLeadBy ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="">Все</option>
+              <option value="me">Я</option>
+              <option value="ai">ИИ</option>
+              <option value="manual">Вручную (все)</option>
+            </select>
+          </div>
+          {bases.length > 1 && (
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-gray-500">База:</span>
+              <select
+                value={filterBaseId}
+                onChange={(e) => { setFilterBaseId(e.target.value); setOffset(0); }}
+                aria-label="Показывать диалоги только по одной базе"
+                title="Из какой базы контакт, которому писали"
+                className={`max-w-[220px] rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterBaseId ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+              >
+                <option value="">Все</option>
+                {bases.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
                 ))}
               </select>
             </div>
@@ -1596,7 +1703,9 @@ function DialogsTab({ campaignId }: {
                   ? 'Диалогов с ответом пока нет — во всех переписках только наше первое сообщение.'
                   : filterMessages === 'one'
                     ? 'Диалогов без ответа нет: везде переписка завязалась.'
-                    : 'Нет диалогов'}
+                    : filterLeadBy
+                      ? 'Таких лидов пока нет. Метка ставится лидам, отмеченным после 08.10.2026.'
+                      : 'Нет диалогов'}
         </p>
       ) : (
         <div className="space-y-2">
@@ -1604,6 +1713,7 @@ function DialogsTab({ campaignId }: {
             const isExpanded = expandedId === d.id;
             const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
             const autoMark = describeAutoForward(d);
+            const leadMark = leadMarkLabel(d);
             return (
               <div key={d.id} className="rounded-xl border border-gray-200 bg-white shadow-sm">
                 <button type="button" onClick={() => setExpandedId(isExpanded ? null : d.id)}
@@ -1632,6 +1742,15 @@ function DialogsTab({ campaignId }: {
                         </span>
                       )}
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>{st.label}</span>
+                      {/* Кто сделал лидом — сразу за статусом: ИИ или сотрудник. */}
+                      {leadMark && (
+                        <span
+                          title={leadMark.title}
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${leadMark.mine ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}
+                        >
+                          {leadMark.text}
+                        </span>
+                      )}
                       {d.tg_is_bot ? (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">Бот</span>
                       ) : (
@@ -1752,7 +1871,7 @@ function DialogsTab({ campaignId }: {
                             type="button"
                             disabled={forwarding === `${d.id}:lead`}
                             onClick={() => void forwardDialog(d, 'lead')}
-                            title="Передать как лида в чат из настроек кампании"
+                            title="Пометить лидом и передать в чат из настроек кампании (если он указан)"
                             className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {forwarding === `${d.id}:lead`
@@ -1815,6 +1934,30 @@ function DialogsTab({ campaignId }: {
                         Передача отменена ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}) — менеджеру ничего не ушло
                         {d.forward.error_message ? `. ${d.forward.error_message}` : ''}
                       </p>
+                    )}
+                    {/* Сделка в CRM по лиду: ссылка, очередь или причина сбоя с повтором. */}
+                    {d.crm?.status === 'sent' && (
+                      <p className="mt-1.5 text-[10px] text-emerald-700">
+                        В CRM ✓{d.crm.lead_url && (
+                          <> — <a href={d.crm.lead_url} target="_blank" rel="noreferrer" className="underline hover:text-emerald-900">сделка</a></>
+                        )}
+                        {d.crm.error_message && <span className="text-amber-700"> · {d.crm.error_message}</span>}
+                      </p>
+                    )}
+                    {d.crm?.status === 'pending' && (
+                      <p className="mt-1.5 text-[10px] text-gray-500">
+                        В CRM: в очереди{d.crm.error_message ? ` · ${d.crm.error_message}` : ''}
+                      </p>
+                    )}
+                    {(d.crm?.status === 'failed' || (crmEnabled && !d.crm && d.status === 'lead' && d.forward?.kind !== 'partner')) && (
+                      <div className={`mt-1.5 flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[10px] ${d.crm ? 'border border-amber-200 bg-amber-50 text-amber-700' : 'text-gray-500'}`}>
+                        <span>{d.crm ? `CRM: ${d.crm.error_message || 'сделка не создана'}` : 'Лид ещё не в CRM'}</span>
+                        <button type="button" disabled={crmPushing === d.id} onClick={() => void pushToCrm(d)}
+                          className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-full border border-indigo-200 bg-white px-2.5 py-0.5 font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">
+                          {crmPushing === d.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
+                          {d.crm ? 'Отправить в CRM ещё раз' : 'Отправить в CRM'}
+                        </button>
+                      </div>
                     )}
                     {/* Сорвавшаяся автопересылка: лид, который не доехал до
                         менеджера. Диалог при этом всё равно стал «Лидом» — без
@@ -2005,7 +2148,10 @@ function BulkActionsBar({
 }) {
   if (selectedCount === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+    // Прилипает к верху: в списке на сотни строк за кнопками приходилось
+    // каждый раз возвращаться в начало страницы. `bulk-actions-bar` — сплошной
+    // фон в тёмной теме (globals.css): полупрозрачный пропускал строки таблицы.
+    <div className="bulk-actions-bar sticky top-0 z-20 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 shadow-sm">
       <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
       {onCheck && (
         <button
@@ -2307,7 +2453,7 @@ interface AccountsUploadSummary {
  * неопределённым, и новая партия оказывалась где придётся.
  */
 type AccountSortKey =
-  | 'name' | 'added' | 'sending' | 'phone' | 'proxy' | 'health' | 'price' | 'active';
+  | 'name' | 'added' | 'sending' | 'status' | 'proxy' | 'health' | 'price' | 'active';
 
 interface AccountSort {
   key: AccountSortKey;
@@ -2323,7 +2469,16 @@ const TONE_RANK: Record<string, number> = {
 };
 
 /** Колонки, которые осмысленно открывать «сначала худшие»: время и проблемы. */
-const DESC_FIRST: AccountSortKey[] = ['added', 'sending', 'health', 'price'];
+const DESC_FIRST: AccountSortKey[] = ['added', 'sending', 'status', 'health', 'price'];
+
+/**
+ * Насколько плох итог проверки аккаунта — для сортировки по столбцу «Статус»:
+ * по убыванию сверху баны и заморозки, внутри группы — свежие проверки.
+ */
+const CHECK_RANK: Record<string, number> = {
+  ok: 0, queued: 1, error: 2, proxy_dead: 3, no_session: 4, session_duplicate: 5,
+  session_revoked: 6, restricted: 7, frozen: 8, banned: 9,
+};
 
 function SortHeader({
   col,
@@ -2356,7 +2511,7 @@ function SortHeader({
   );
 }
 
-const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_120px_360px_138px_92px_60px_88px] gap-4 items-center';
+const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_150px_360px_138px_92px_60px_88px] gap-4 items-center';
 
 /**
  * Ячейка здоровья: слово и цвет, объяснение — под курсором.
@@ -2535,8 +2690,13 @@ function CampaignAccountsTab({
           return ([a.first_name, a.last_name].filter(Boolean).join(' ').trim() || a.session_name).toLowerCase();
         case 'added':
           return a.created_at ? new Date(a.created_at).getTime() : null;
-        case 'phone':
-          return a.phone || null;
+        case 'status': {
+          // Группа — тяжесть итога проверки, порядок внутри — когда проверили:
+          // так видно, кого и когда заблокировало последним.
+          if (!a.check_status) return null;
+          const checked = a.checked_at ? new Date(a.checked_at).getTime() : 0;
+          return (CHECK_RANK[a.check_status] ?? 2) * 1e13 + checked;
+        }
         case 'proxy': {
           const proxy = proxies.find(p => p.id === a.proxy_id);
           return proxy ? (proxy.name || proxy.url || '').toLowerCase() : null;
@@ -3014,6 +3174,35 @@ function CampaignAccountsTab({
       patchAccount(id, { is_active: current });
       const body = await res.json().catch(() => null) as { error?: string } | null;
       alert(body?.error ?? `Не удалось изменить аккаунт (HTTP ${res.status})`);
+    }
+  };
+
+  /**
+   * «Активен» сразу всем выбранным. Партию заливают выключенной, и жать
+   * переключатель в каждой из тридцати строк — то, ради чего панель и нужна.
+   * Строки меняем по ответу сервера, а не заранее: архивные он не включает,
+   * и оптимистичная правка показала бы их включёнными.
+   */
+  const [bulkActiveBusy, setBulkActiveBusy] = useState(false);
+  const applyBulkActive = async (isActive: boolean) => {
+    if (selectedIds.length === 0 || bulkActiveBusy) return;
+    setBulkActiveBusy(true);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/bulk-active`, {
+        method: 'POST',
+        body: JSON.stringify({ ids: selectedIds, is_active: isActive }),
+      });
+      const body = await res.json().catch(() => null) as
+        | { ids?: string[]; skipped?: number; error?: string }
+        | null;
+      if (!res.ok || !body?.ids) {
+        alert(body?.error ?? `Не удалось изменить аккаунты (HTTP ${res.status})`);
+        return;
+      }
+      for (const id of body.ids) patchAccount(id, { is_active: isActive });
+      if (body.skipped) alert(`Не изменено: ${body.skipped}. Архивные аккаунты не включаются — сначала верните их из архива.`);
+    } finally {
+      setBulkActiveBusy(false);
     }
   };
 
@@ -3616,6 +3805,26 @@ function CampaignAccountsTab({
               {bulkProxyBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Network className="h-3.5 w-3.5" />}
               Назначить прокси
             </button>
+            <button
+              type="button"
+              onClick={() => { void applyBulkActive(true); }}
+              disabled={bulkActiveBusy}
+              title="Сделать выбранные аккаунты активными — рассылка начнёт их брать"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-emerald-300 hover:bg-emerald-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {bulkActiveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+              Включить
+            </button>
+            <button
+              type="button"
+              onClick={() => { void applyBulkActive(false); }}
+              disabled={bulkActiveBusy}
+              title="Сделать выбранные аккаунты неактивными — рассылка перестанет их брать"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-gray-300 hover:bg-gray-100 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <PowerOff className="h-3.5 w-3.5" />
+              Выключить
+            </button>
             {/* Перенос между кампаниями: партию закупили под один проект, а
                 нужна она в другом. Кнопка живёт только у остановленной
                 кампании — из-под работающего круга аккаунт не забрать. */}
@@ -3757,7 +3966,13 @@ function CampaignAccountsTab({
               sort={accountSort}
               onSort={toggleAccountSort}
             />
-            <SortHeader col="phone" label="Телефон" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader
+              col="status"
+              label="Статус"
+              title="Итог последней проверки аккаунта: жив, ограничен, заморожен, бан. Сортировка — сначала худшие, внутри — свежие."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
             <SortHeader col="proxy" label="Прокси" sort={accountSort} onSort={toggleAccountSort} />
             <SortHeader
               col="health"
@@ -3841,9 +4056,12 @@ function CampaignAccountsTab({
                       {errorCount}
                     </button>
                   )}
-                  {onCooldown && (
-                    <span className="text-[10px] text-amber-600 shrink-0">
-                      Кулдаун до {new Date(a.cooldown_until!).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
+                  {/* Номер и страна — рядом с именем: аккаунты зовутся
+                      «s386_tdata», и страну по имени не узнать, а прокси
+                      обязаны совпадать с ней по гео. */}
+                  {(a.phone || a.country_code) && (
+                    <span className="min-w-0 truncate text-[10px] text-gray-400">
+                      {[a.phone, accountCountryLabel(a.phone, a.country_code)].filter(Boolean).join(' · ')}
                     </span>
                   )}
                   </div>
@@ -3856,7 +4074,9 @@ function CampaignAccountsTab({
                   </div>
                   {/* Итог проверки. Чужие сеансы выносим отдельно: это ответ на
                       вопрос, почему аккаунты теряют сессии пачками. */}
-                  {(a.check_status || a.check_requested_at) && (
+                  {(a.check_requested_at || a.profile_requested_at || a.profile_status === 'failed'
+                    || a.moved_from_campaign_id || a.appeal_requested_at || a.appeal_status
+                    || (a.other_sessions?.length ?? 0) > 0 || resetError?.id === a.id) && (
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       {a.check_requested_at && (
                         <span
@@ -3865,17 +4085,6 @@ function CampaignAccountsTab({
                         >
                           проверка в очереди
                         </span>
-                      )}
-                      {a.check_status && (
-                        <span
-                          title={a.check_detail ?? undefined}
-                          className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
-                        >
-                          {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
-                        </span>
-                      )}
-                      {a.check_status === 'frozen' && (
-                        <AppealButton account={a} onDone={() => { void load(); }} />
                       )}
                       {a.profile_requested_at && (
                         <span
@@ -3960,11 +4169,6 @@ function CampaignAccountsTab({
                       {resetError?.id === a.id && (
                         <span className="text-[10px] text-rose-600">{resetError.message}</span>
                       )}
-                      {a.checked_at && (
-                        <span className="text-[10px] text-gray-400">
-                          {new Date(a.checked_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      )}
                     </div>
                   )}
                 </div>
@@ -3980,20 +4184,35 @@ function CampaignAccountsTab({
                     : '—'}
                 </span>
                 <HealthCell mark={sendingMark} />
-                {/*
-                  Страна под номером: аккаунты покупают партиями и в списке они
-                  зовутся «s386_tdata» — по имени страну не узнать. А она тут не
-                  украшение: прокси обязаны совпадать с ней по гео, и от неё же
-                  зависит, сколько писем аккаунт отдаст.
-                */}
-                <span className="min-w-0 truncate">
-                  <span className="block truncate text-xs text-gray-500">{a.phone || '—'}</span>
-                  {(a.phone || a.country_code) && (
-                    <span className="block truncate text-[10px] text-gray-400">
-                      {accountCountryLabel(a.phone, a.country_code)}
-                    </span>
+                {/* Статус блокировки отдельным столбцом: по нему сортируют,
+                    чтобы найти, кого и когда заблокировало. */}
+                <div className="min-w-0 space-y-0.5">
+                  {a.check_status ? (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span
+                        title={a.check_detail ?? undefined}
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
+                      >
+                        {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
+                      </span>
+                      {a.check_status === 'frozen' && (
+                        <AppealButton account={a} onDone={() => { void load(); }} />
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-gray-300">—</span>
                   )}
-                </span>
+                  {a.checked_at && (
+                    <div className="text-[10px] text-gray-400">
+                      {new Date(a.checked_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  )}
+                  {onCooldown && (
+                    <div className="text-[10px] text-amber-600">
+                      Кулдаун до {new Date(a.cooldown_until!).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
+                    </div>
+                  )}
+                </div>
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -4866,10 +5085,25 @@ function CampaignBasesTab({
   const [queuePending, setQueuePending] = useState<number | null>(null);
   /** База, у которой сейчас правят список рассыльщиков. */
   const [editingSendersFor, setEditingSendersFor] = useState<string | null>(null);
+  /** База, у которой открыт блок файлов к первому сообщению. */
+  const [attachmentsFor, setAttachmentsFor] = useState<string | null>(null);
   /** Открытая база в окне просмотра контактов. */
   const [viewingBase, setViewingBase] = useState<{ id: string; name: string } | null>(null);
   const [sendersDraft, setSendersDraft] = useState<Set<string>>(new Set());
   const [savingSenders, setSavingSenders] = useState(false);
+
+  /**
+   * Только список баз и без «Загрузка…»: после создания, заливки файла,
+   * удаления список обновляется на месте, а не пропадает и не отрисовывается
+   * заново со спиннером — так оператор не теряет, где был.
+   */
+  const refreshBases = useCallback(async () => {
+    const res = await authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`);
+    if (!res.ok) return;
+    const d = (await res.json()) as { items: OutreachBase[]; orphans?: OutreachBase[] };
+    setBases(d.items);
+    setOrphans(d.orphans ?? []);
+  }, [campaignId]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -4941,8 +5175,14 @@ function CampaignBasesTab({
         setError(d?.error ?? `Ошибка ${res.status}`);
         return;
       }
+      // Новая база сразу встаёт в начало списка (как в выдаче сервера —
+      // свежие сверху); перезапрашивать весь список ради неё не нужно.
+      const created = (await res.json()) as Omit<OutreachBase, 'counts'>;
+      setBases((cur) => [
+        { ...created, counts: { total: 0, pending: 0, sent: 0, replied: 0, failed: 0, skipped: 0 } },
+        ...cur.filter((b) => b.id !== created.id),
+      ]);
       setNewName('');
-      void load();
     } finally { setBusy(false); }
   };
 
@@ -4984,7 +5224,7 @@ function CampaignBasesTab({
         return;
       }
       setNotice(`База «${base.name}» перенесена в кампанию.`);
-      void load();
+      void refreshBases();
     } finally { setBusy(false); }
   };
 
@@ -5113,7 +5353,7 @@ function CampaignBasesTab({
         setError(d?.error ?? `Не удалось удалить базу (${res.status})`);
         return;
       }
-      void load();
+      void refreshBases();
     } finally { setBusy(false); }
   };
 
@@ -5139,7 +5379,7 @@ function CampaignBasesTab({
         return;
       }
       setNotice(`Возвращено в очередь: ${d?.requeued ?? 0}.`);
-      void load();
+      void refreshBases();
     } finally { setBusy(false); }
   };
 
@@ -5158,7 +5398,7 @@ function CampaignBasesTab({
       });
       const d = (await res.json().catch(() => null)) as {
         error?: string;
-        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number; spintaxVariants?: number };
+        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number; spintaxVariants?: number; withAttachment?: number };
       } | null;
       if (!res.ok) {
         setError(d?.error ?? `Ошибка загрузки (${res.status})`);
@@ -5172,10 +5412,11 @@ function CampaignBasesTab({
             ? s.spintaxVariants > 1
               ? ` Вариантов текста: ${s.spintaxVariants}.`
               : ' Вариантов текста: 1 — все получат дословно одинаковое сообщение. Добавьте синонимы в фигурных скобках.'
-            : ''),
+            : '')
+          + (s.withAttachment ? ` С файлом в таблице: ${s.withAttachment} — проверьте, что файлы загружены (кнопка «файлы» у базы).` : ''),
         );
       }
-      void load();
+      void refreshBases();
     } finally {
       setBusy(false);
       e.target.value = '';
@@ -5283,6 +5524,18 @@ function CampaignBasesTab({
                     ? `рассылают: ${b.sending_account_ids?.length} из ${accounts.length}`
                     : 'рассылают: все аккаунты'}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAttachmentsFor(attachmentsFor === b.id ? null : b.id);
+                    setEditingSendersFor(null);
+                    setEditingChatsFor(null);
+                  }}
+                  title="Картинки и документы, которые уходят вместе с первым сообщением"
+                  className="mt-0.5 block text-[10px] text-gray-400 underline decoration-dotted underline-offset-2 transition hover:text-indigo-600 cursor-pointer"
+                >
+                  файлы к сообщению
+                </button>
               </div>
               <span className="text-xs text-gray-600">{b.counts.total}</span>
               <span className="text-xs text-gray-600">{b.counts.pending}</span>
@@ -5319,6 +5572,7 @@ function CampaignBasesTab({
                 </button>
               </div>
             </div>
+            {attachmentsFor === b.id && <BaseAttachmentsPanel baseId={b.id} baseName={b.name} />}
             {editingSendersFor === b.id && (
               <div className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3">
                 <div className="text-[11px] font-medium text-gray-700">
@@ -5522,6 +5776,9 @@ function ProxyVerdict({
  */
 type ActiveProxyListKey = string | null;
 
+/** Строк прокси на странице списка. */
+const PROXY_PAGE_SIZE = 30;
+
 function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [lists, setLists] = useState<OutreachProxyList[]>([]);
   const [activeList, setActiveList] = useState<ActiveProxyListKey>(null);
@@ -5573,6 +5830,28 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 
   const proxyIds = useMemo(() => proxies.map(p => p.id), [proxies]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(proxyIds);
+
+  /**
+   * Страница списка. Пулы грузят по тысяче прокси, и тысяча строк с выпадающим
+   * списком в каждой делала вкладку тяжёлой. Страница запоминается вместе со
+   * списком, которому принадлежит: при переходе в другой список она сама
+   * становится первой, без эффекта-сбрасывателя. Выделение и «выбрать все»
+   * по-прежнему работают по всему списку, а не по странице — массовые
+   * действия (проверить, перенести, удалить) нужны именно на весь пул.
+   */
+  const [proxyPageState, setProxyPageState] = useState<{ list: string | null; page: number }>(
+    { list: null, page: 0 },
+  );
+  const proxyPageCount = Math.max(1, Math.ceil(proxies.length / PROXY_PAGE_SIZE));
+  const proxyPage = Math.min(
+    proxyPageState.list === activeList ? proxyPageState.page : 0,
+    proxyPageCount - 1,
+  );
+  const pagedProxies = useMemo(
+    () => proxies.slice(proxyPage * PROXY_PAGE_SIZE, (proxyPage + 1) * PROXY_PAGE_SIZE),
+    [proxies, proxyPage],
+  );
+  const goToProxyPage = (page: number) => setProxyPageState({ list: activeList, page });
 
   /** Итог по каждому прокси — чтобы строка списка показала его без перезагрузки. */
   const checkById = useMemo(() => {
@@ -5786,23 +6065,20 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setSaving(true);
     setProxyError(null);
     try {
-      for (let i = 0; i < lines.length; i++) {
-        const res = await authFetch(`${API_BASE}/proxies`, {
-          method: 'POST',
-          body: JSON.stringify({
-            campaign_id: campaignId,
-            url: lines[i],
-            name: '',
-            proxy_list_id: activeList,
-          }),
-        });
-        if (!res.ok) {
-          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
-          setProxyError(
-            `Строка ${i + 1}: ${errBody?.error ?? `ошибка ${res.status}`}. Остальные строки не загружены.`,
-          );
-          return;
-        }
+      // Одним запросом на весь список: по строке на запрос тысяча прокси
+      // грузилась ~9 минут без единого признака жизни (30.09.2026).
+      const res = await authFetch(`${API_BASE}/proxies/bulk`, {
+        method: 'POST',
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          proxies_text: lines.join('\n'),
+          proxy_list_id: activeList,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось загрузить прокси (ошибка ${res.status})`);
+        return;
       }
       setBulkText(''); setShowBulk(false);
       void reloadAll();
@@ -6232,16 +6508,34 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               Каждая строка — отдельный прокси. Все уйдут в <b>{activeList === null ? '«Неопределённые»' : `«${lists.find(l => l.id === activeList)?.name ?? '—'}»`}</b>.
             </p>
             <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
-              placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
+              placeholder={'host:port@user:pass\nuser:pass@host:port\nhost:port:user:pass\nпо одному прокси на строку'}
               className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
             <div className="flex gap-2">
               <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
                 className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
               </button>
+              {/* Файл провайдера как есть: читаем в поле, чтобы список был
+                  виден до отправки. Формат строк разбирает сервер. */}
+              <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+                <Upload className="h-3.5 w-3.5" />
+                Из файла .txt
+                <input type="file" accept=".txt,.csv,text/plain" className="hidden" disabled={saving}
+                  onChange={e => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    void file.text().then(text => setBulkText(text.replace(/^﻿/, '').trim()));
+                  }} />
+              </label>
               <button type="button" onClick={() => setShowBulk(false)}
                 className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
             </div>
+            {bulkText.trim() && (
+              <p className="text-xs text-gray-500">
+                Строк: {bulkText.split('\n').filter(l => l.trim()).length}
+              </p>
+            )}
           </div>
         )}
 
@@ -6384,7 +6678,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
               <span>URL / Название</span><span>Активен</span><span>Список</span><span />
             </div>
-            {proxies.map(p => {
+            {pagedProxies.map(p => {
               const check = checkById.get(p.id);
               return (
               <div
@@ -6443,6 +6737,24 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               </div>
               );
             })}
+            {proxyPageCount > 1 && (
+              <div className="flex items-center justify-between gap-3 px-4 py-2 text-xs text-gray-500 bg-gray-50">
+                <span>
+                  {proxyPage * PROXY_PAGE_SIZE + 1}–{Math.min((proxyPage + 1) * PROXY_PAGE_SIZE, proxies.length)} из {proxies.length}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => goToProxyPage(proxyPage - 1)} disabled={proxyPage === 0}
+                    className="rounded-full border border-gray-200 bg-white px-3 py-1 hover:bg-gray-100 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                    Назад
+                  </button>
+                  <span>Стр. {proxyPage + 1} из {proxyPageCount}</span>
+                  <button type="button" onClick={() => goToProxyPage(proxyPage + 1)} disabled={proxyPage >= proxyPageCount - 1}
+                    className="rounded-full border border-gray-200 bg-white px-3 py-1 hover:bg-gray-100 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                    Вперёд
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -6738,10 +7050,11 @@ const TABS = [
   // дела», а не «какие тут настройки» — их заводят один раз и больше не трогают.
   { id: 'dashboard', label: 'Сводка', icon: LayoutDashboard },
   { id: 'settings', label: 'Настройки', icon: Settings },
+  // Дальше — в порядке заполнения кампании: аккаунты, им прокси, базы, прогрев.
   { id: 'accounts', label: 'Аккаунты', icon: Users },
+  { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'bases', label: 'Базы', icon: Database },
   { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
@@ -6753,54 +7066,146 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   onDelete: (id: string) => void;
 }) {
   const [tab, setTab] = useState<string>('dashboard');
-  const [actionLoading, setActionLoading] = useState(false);
-  const [stopping, setStopping] = useState(false);
+  const [actionLoading, setActionLoading] = useState<'start' | 'stop' | null>(null);
+  /** Текст ошибки последнего действия. Раньше ответ ручки не читали вовсе. */
+  const [actionError, setActionError] = useState<string | null>(null);
+  /**
+   * Состояние кампании с сервера: статус базы плюс незавершённые задачи
+   * (`/status`). Именно оно рисует шапку — статус в списке кампаний меняется
+   * позже, чем кампания реально останавливается или стартует.
+   */
+  const [phase, setPhase] = useState<string | null>(null);
+  /**
+   * Запуск, который ждёт окончания остановки. Пока старая start-задача висит
+   * в работе, новую создать нельзя (уникальный индекс), поэтому страница ждёт
+   * сама и повторяет — вместо оператора, который раньше жал пять раз подряд.
+   */
+  const [pendingStart, setPendingStart] = useState(false);
   /** Раскрыто ли пояснение к восклицательному знаку у статуса. */
   const [warmingHint, setWarmingHint] = useState(false);
-  const stoppingRef = useRef(false);
-
-  useEffect(() => {
-    if (!stopping) return;
-    const poll = setInterval(async () => {
-      try {
-        const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/status`);
-        if (!res.ok) return;
-        const body = await res.json() as { status: string; is_running: boolean };
-        if (!body.is_running || body.status === 'stopped') {
-          setStopping(false);
-          stoppingRef.current = false;
-          onUpdate();
-        }
-      } catch { /* ignore */ }
-    }, 3000);
-    return () => clearInterval(poll);
-  }, [stopping, campaign.id, onUpdate]);
+  /** Докуда ждём автозапуска: дальше честно говорим, что не вышло. */
+  const pendingStartUntil = useRef(0);
+  /** Последнее состояние, по которому обновляли список кампаний. */
+  const lastPhase = useRef<string | null>(null);
+  /** Запуск идёт прямо сейчас — чтобы опрос не дёрнул второй. */
+  const startingRef = useRef(false);
+  // onUpdate приходит новой функцией на каждый рендер родителя: держим её в
+  // ref, чтобы опрос не пересоздавался по кругу вместе с интервалом.
+  const onUpdateRef = useRef(onUpdate);
+  useEffect(() => { onUpdateRef.current = onUpdate; }, [onUpdate]);
 
   // Кнопка Refetch убрана с карточки кампании: ручную перезагрузку пустых
   // диалогов оператор не использует. Ручка /campaigns/:id/refetch на бэкенде
   // осталась — её дёргают точечно, минуя интерфейс.
-  const doAction = async (action: 'start' | 'stop') => {
-    setActionLoading(true);
-    await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
-    if (action === 'stop') {
-      setStopping(true);
-      stoppingRef.current = true;
+
+  /** Запрос действия. Возвращает текст ошибки или null, если всё хорошо. */
+  const callAction = useCallback(async (action: 'start' | 'stop'): Promise<{ error: string | null; code?: string }> => {
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
+      if (res.ok) return { error: null };
+      const body = await res.json().catch(() => null) as { error?: string; code?: string } | null;
+      return { error: body?.error || `Ошибка ${res.status}`, code: body?.code };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : 'Сеть недоступна' };
     }
-    setActionLoading(false);
+  }, [campaign.id]);
+
+  /** Перечитать состояние с сервера. */
+  const loadPhase = useCallback(async (): Promise<CampaignPhase | null> => {
+    try {
+      const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/status`);
+      if (!res.ok) return null;
+      return await res.json() as CampaignPhase;
+    } catch {
+      return null;
+    }
+  }, [campaign.id]);
+
+  const doAction = async (action: 'start' | 'stop') => {
+    setActionLoading(action);
+    setActionError(null);
+    const { error, code } = await callAction(action);
+    if (error && code === 'stopping' && action === 'start') {
+      // Не ошибка оператора: кампания ещё сворачивается. Ждём и запускаем сами.
+      setPendingStart(true);
+      pendingStartUntil.current = Date.now() + AUTO_START_WAIT_MS;
+    } else if (error && code === 'stopping') {
+      // Остановка уже идёт — это и покажет шапка, ругаться не на что.
+    } else if (error) {
+      setActionError(error);
+    }
+    const fresh = await loadPhase();
+    if (fresh) setPhase(fresh.phase);
+    setActionLoading(null);
     onUpdate();
   };
 
-  const saveSettings = async (openai: OpenAISettings, telegram: TelegramSettings) => {
+  /**
+   * Опрос состояния, пока вкладка открыта и видима.
+   *
+   * Нужен ровно потому, что остановка и запуск не мгновенны: ручка кладёт
+   * задачу, воркер подхватывает её в течение минуты, круг сворачивается ещё
+   * минуты. Без опроса шапка показывала состояние на момент последнего клика,
+   * а список кампаний слева — тем более.
+   */
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const tick = async () => {
+      if (document.visibilityState === 'hidden') return;
+      const fresh = await loadPhase();
+      if (!active || !fresh) return;
+      setPhase(fresh.phase);
+      // Список кампаний перечитываем только когда состояние реально сменилось:
+      // иначе каждые несколько секунд перерисовывалась бы вся страница.
+      if (lastPhase.current !== null && lastPhase.current !== fresh.phase) onUpdateRef.current();
+      lastPhase.current = fresh.phase;
+
+      if (!pendingStart) return;
+      if (fresh.can_start && !startingRef.current) {
+        startingRef.current = true;
+        const { error, code } = await callAction('start');
+        startingRef.current = false;
+        if (!active) return;
+        if (!error) {
+          setPendingStart(false);
+          setActionError(null);
+          onUpdateRef.current();
+        } else if (code !== 'stopping') {
+          setPendingStart(false);
+          setActionError(error);
+        }
+      } else if (Date.now() > pendingStartUntil.current) {
+        setPendingStart(false);
+        setActionError('Запуск не удался: прошлый круг всё ещё закрывается. Попробуйте ещё раз.');
+      }
+    };
+
+    void tick();
+    timer = setInterval(() => { void tick(); }, PHASE_POLL_MS);
+    return () => { active = false; if (timer) clearInterval(timer); };
+    // onUpdate приходит из родителя новой функцией на каждый его рендер —
+    // в зависимостях он пересоздавал бы интервал по кругу; держим его в ref.
+  }, [loadPhase, callAction, pendingStart]);
+
+  const saveSettings = async (openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => {
     await authFetch(`${API_BASE}/campaigns/${campaign.id}`, {
       method: 'PUT',
-      body: JSON.stringify({ openai_settings: openai, telegram_settings: telegram }),
+      // crm null — блок CRM ещё не загрузился: не трогаем сохранённое.
+      body: JSON.stringify({ openai_settings: openai, telegram_settings: telegram, crm_settings: crm ?? undefined }),
     });
     onUpdate();
   };
 
-  const displayStatus = stopping ? 'stopping' : campaign.status;
+  // Состояние с сервера главнее статуса из списка: список мог быть прочитан
+  // до того, как воркер взялся за задачу.
+  const displayStatus = pendingStart ? 'stopping' : (phase ?? campaign.status);
   const st = STATUS_LABELS[displayStatus] ?? STATUS_LABELS.stopped;
   const warmingCount = campaign.warming_accounts ?? 0;
+  const stopping = displayStatus === 'stopping';
+  const starting = displayStatus === 'starting';
+  const running = displayStatus === 'running';
 
   return (
     <div className="space-y-4">
@@ -6834,24 +7239,48 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {campaign.status !== 'running' && !stopping ? (
-            <button type="button" onClick={() => void doAction('start')}
-              disabled={actionLoading}
-              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-              Запустить
+          {/* Пауза — не остановка: её каждые 5 минут пробует поднять
+              авто-возобновление, а профили применяются только к остановленной
+              кампании. Без этой кнопки из паузы нельзя было выйти в «остановлена». */}
+          {/* Пауза и «запускается» — состояния, из которых основная кнопка
+              выйти не даёт: в паузе её поднимает авто-возобновление, а в
+              «запускается» кампания ждёт воркера. Если воркер лежит, без этой
+              кнопки кампания зависла бы в ожидании навсегда. */}
+          {(displayStatus === 'paused' || starting) && (
+            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading !== null}
+              className="inline-flex items-center gap-1.5 rounded-full border border-rose-300 px-4 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              <Square className="h-3.5 w-3.5" />
+              Остановить
             </button>
-          ) : stopping ? (
+          )}
+          {/* Переходные состояния — кнопка без действия: нажимать нечего, пока
+              воркер не доведёт прошлое до конца. Раньше кнопка «Запустить» в
+              этот момент была живой, но ручка отвечала ошибкой, которую никто
+              не показывал, — отсюда и «жму пять раз, ничего не происходит». */}
+          {stopping ? (
             <button type="button" disabled
               className="inline-flex items-center gap-1.5 rounded-full bg-amber-500 px-5 py-2.5 text-xs font-semibold text-white opacity-80 cursor-not-allowed">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Останавливается...
+              {pendingStart ? 'Останавливается, запустим сами…' : 'Останавливается…'}
+            </button>
+          ) : starting ? (
+            <button type="button" disabled
+              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500 px-5 py-2.5 text-xs font-semibold text-white opacity-80 cursor-not-allowed">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Запускается…
+            </button>
+          ) : running ? (
+            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading !== null}
+              className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {actionLoading === 'stop' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+              Остановить
             </button>
           ) : (
-            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading}
-              className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
-              Остановить
+            <button type="button" onClick={() => void doAction('start')}
+              disabled={actionLoading !== null}
+              className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              {actionLoading === 'start' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+              Запустить
             </button>
           )}
           <button type="button" onClick={() => onDelete(campaign.id)}
@@ -6860,6 +7289,20 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           </button>
         </div>
       </div>
+
+      {/* Отказ ручки виден оператору. До 09.10.2026 ответ не читали вовсе:
+          кампания не запускалась, а на экране не было ни слова почему. */}
+      {actionError && (
+        <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          <span className="flex-1">{actionError}</span>
+          <button type="button" onClick={() => setActionError(null)} className="text-rose-400 hover:text-rose-600 cursor-pointer">×</button>
+        </div>
+      )}
+      {pendingStart && !actionError && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Кампания ещё сворачивает прошлый круг — это занимает пару минут. Запустим её сами, как только он закроется; страницу можно не трогать.
+        </div>
+      )}
 
       <div className="flex gap-1 border-b border-gray-200">
         {TABS.map(t => {
@@ -6896,7 +7339,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           <WarmupTab campaignId={campaign.id} campaignStatus={campaign.status} />
         )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
-        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
+        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} crmEnabled={Boolean(campaign.crm_settings?.enabled)} />}
         {tab === 'report' && <CampaignReportTab campaignId={campaign.id} />}
       </div>
     </div>

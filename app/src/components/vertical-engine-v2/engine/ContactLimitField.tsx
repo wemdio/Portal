@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useId } from 'react';
 import { HE } from './design';
 
 /** Project-level "addresses per company taken into work". Empty = no limit. */
@@ -12,42 +12,59 @@ export function parseContactLimitDraft(draft: string): { valid: boolean; value: 
   return value >= 1 && value <= 100 ? { valid: true, value } : { valid: false, value: null };
 }
 
-export function ContactLimitField({ value, disabled, onSave }: {
-  value: number | null; disabled: boolean; onSave: (next: number | null) => void;
+export function ContactLimitField({ value, draft, disabled, onDraftChange, onSave }: {
+  value: number | null; draft: string; disabled: boolean;
+  onDraftChange: (next: string) => void; onSave: (next: number | null) => void;
 }) {
-  // The parent remounts the field (key = saved value) when the saved limit changes.
-  const [draft, setDraft] = useState(value === null ? '' : String(value));
+  const id = useId();
   const parsed = parseContactLimitDraft(draft);
   const changed = parsed.valid && parsed.value !== value;
   return (
-    <div className="space-y-1">
-      <label className="ve2-label">
+    <div className="ve2-contact-limit space-y-2">
+      <label className="ve2-label" htmlFor={id}>
         Адресов на одну компанию
-        <span className="flex items-center gap-2">
-          <input
-            aria-label="Адресов на одну компанию"
-            aria-invalid={!parsed.valid}
-            className={HE.input}
-            inputMode="numeric"
-            placeholder="без ограничения"
-            value={draft}
-            disabled={disabled}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Enter' && changed) onSave(parsed.value); }}
-          />
-          <button type="button" className={HE.btnGhost} disabled={disabled || !changed} onClick={() => onSave(parsed.value)}>
-            Применить
-          </button>
-        </span>
       </label>
-      {!parsed.valid ? <p className={HE.muted} role="alert">Укажите целое число от 1 до 100 или оставьте поле пустым.</p> : null}
-      <p className={HE.muted}>
-        Сколько адресов одной компании брать в работу. Пусто — без ограничения. Лишние адреса не удаляются:
-        они остаются в резерве. Уменьшение применяется к уже собранным базам само, без нового сбора и без
-        оплаты — подтверждение базы при этом сбрасывается, её нужно проверить заново. Увеличение или снятие
-        лимита действует на новые сборы; чтобы вернуть адреса в готовую базу, нажмите «Продолжить подготовку».
-        Цель в 500 контактов считается уже с этим ограничением. Запущенные базы не меняются.
+      <div className="flex items-center gap-2 max-w-sm">
+        <input
+          id={id}
+          aria-invalid={!parsed.valid}
+          aria-describedby={`${id}-hint ${id}-state`}
+          className={`${HE.input} min-w-0`}
+          inputMode="numeric"
+          placeholder="без ограничения"
+          value={draft}
+          disabled={disabled}
+          onChange={(event) => onDraftChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              if (!disabled && changed) onSave(parsed.value);
+            }
+          }}
+        />
+        <button type="button" className={`${HE.btnGhost} shrink-0 whitespace-nowrap`} disabled={disabled || !changed} onClick={() => onSave(parsed.value)}>
+          Применить
+        </button>
+      </div>
+      <p id={`${id}-hint`} className={HE.muted}>
+        Задайте до начала подготовки. Лимит общий для баз проекта и учитывается при сборе 500 контактов.
+        Пустое поле: без ограничения. Остальные адреса сохраняются в резерве.
       </p>
+      <p id={`${id}-state`} className={HE.muted} aria-live="polite">
+        {!parsed.valid
+          ? 'Укажите целое число от 1 до 100 или оставьте поле пустым.'
+          : changed
+            ? 'Нажмите «Применить», чтобы сохранить лимит перед подготовкой.'
+            : `Сохранено: ${value === null ? 'без ограничения' : `не более ${value} адресов на компанию`}.`}
+      </p>
+      <details>
+        <summary className="ve2-link cursor-pointer">Если базы уже собраны</summary>
+        <p className={`${HE.muted} mt-2`}>
+          Уменьшение лимита применяется к готовым базам автоматически, без нового сбора и оплаты.
+          После изменения базу нужно одобрить заново. Увеличение или снятие лимита действует на новые сборы;
+          для возврата адресов в готовую базу нажмите «Продолжить подготовку». Запущенные базы не меняются.
+        </p>
+      </details>
     </div>
   );
 }

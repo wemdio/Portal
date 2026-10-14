@@ -3,6 +3,8 @@ import type { NextRequest } from 'next/server';
 import ExcelJS from 'exceljs';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logError } from '@/lib/loggerServer';
+import { extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
+import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -52,11 +54,17 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'Цитата про мандат', key: 'outbound_evidence', width: 48 },
   { header: 'Почта', key: 'selected_company_email', width: 28 },
   { header: 'Тип почты', key: 'email_type', width: 18 },
+  { header: 'Проверка почты', key: 'email_verification', width: 22 },
+  // У компании до трёх проверенных адресов (с 29.09.2026): остальные — со статусом.
+  { header: 'Почта 2', key: 'email_2', width: 34 },
+  { header: 'Почта 3', key: 'email_3', width: 34 },
   { header: 'Статус', key: 'status', width: 18 },
   { header: 'Причина исключения', key: 'exclusion_reason', width: 22 },
   { header: 'На ручную проверку', key: 'review_reason', width: 22 },
   { header: 'Письмо 1 — тема', key: 'letter1_subject', width: 34 },
   { header: 'Письмо 1 — текст', key: 'letter1_body', width: 60 },
+  // Среди адресов есть и личный, и общий ящик — второй вариант письма 1.
+  { header: 'Письмо 1 — второй вариант', key: 'letter1_alt_body', width: 60 },
   { header: 'Письмо 2 — тема', key: 'letter2_subject', width: 34 },
   { header: 'Письмо 2 — текст', key: 'letter2_body', width: 60 },
   { header: 'Письмо 3 — тема', key: 'letter3_subject', width: 34 },
@@ -76,6 +84,14 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
 const READY_COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'company_name', key: 'company_name', width: 28 },
   { header: 'email', key: 'selected_company_email', width: 30 },
+  // Вердикт SMTP-проверки как есть (ok / catch_all): catch-all отказа не
+  // даст, но дойдёт ли письмо — неизвестно, это видно и при отправке.
+  { header: 'email_verification', key: 'email_verification', width: 16 },
+  // Остальные адреса компании (до двух) и их вердикты — рядом с главным.
+  { header: 'email_2', key: 'email_2_plain', width: 30 },
+  { header: 'email_2_verification', key: 'email_2_verification', width: 16 },
+  { header: 'email_3', key: 'email_3_plain', width: 30 },
+  { header: 'email_3_verification', key: 'email_3_verification', width: 16 },
   { header: 'domain', key: 'normalized_domain', width: 24 },
   { header: 'country', key: 'country', width: 14 },
   { header: 'employee_range', key: 'employee_range', width: 12 },
@@ -93,6 +109,9 @@ const READY_COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'cta_type', key: 'cta_type', width: 10 },
   { header: 'letter_1_subject', key: 'letter1_subject', width: 34 },
   { header: 'letter_1_body', key: 'letter1_body', width: 60 },
+  // Письмо 1 для адресов другого вида (alt_routing: true — общий ящик).
+  { header: 'letter_1_alt_body', key: 'letter1_alt_body', width: 60 },
+  { header: 'letter_1_alt_routing', key: 'letter1_alt_routing', width: 12 },
   { header: 'letter_2_subject', key: 'letter2_subject', width: 34 },
   { header: 'letter_2_body', key: 'letter2_body', width: 60 },
   { header: 'letter_3_subject', key: 'letter3_subject', width: 34 },
@@ -117,6 +136,13 @@ const EMAIL_TYPE_RU: Record<string, string> = {
   person_company: 'личный ящик',
 };
 
+// Вердикт SMTP-проверки адреса (с 26.09.2026); у строк раньше — пусто.
+const EMAIL_VERIFICATION_RU: Record<string, string> = {
+  ok: 'проверена',
+  catch_all: 'сервер принимает любые адреса',
+  unverified: 'проверить не удалось',
+};
+
 const REASON_RU: Record<string, string> = {
   domain_not_resolved: 'домен не найден',
   competitor: 'конкурент (лидген)',
@@ -126,24 +152,28 @@ const REASON_RU: Record<string, string> = {
   size_11_50: 'размер 11–50',
   size_out_of_range: 'размер вне 3–200',
   site_unreachable: 'сайт не открылся',
+  llm_failed: 'ИИ не ответил (сбой модели или ключа)',
   not_b2b: 'не B2B',
   no_trigger: 'нет повода написать',
   low_score: 'Lead Score ниже порога',
   manual_check: 'Lead Score в зоне ручной проверки',
   limit_reached: 'лимит готовых уже набран',
   duplicate_domain: 'дубль домена',
+  previously_exported: 'уже готова в прошлом запуске',
   no_outbound_mandate: 'нет outbound-мандата',
   no_corporate_email: 'не нашли корпоративную почту',
+  email_invalid: 'почта на сайте не прошла проверку',
+  suppressed_contact: 'почта в стоп-листе Рассылки',
+  email_unverified: 'почта не проверена: SMTP-проверка не дала ответа',
   generic_company: 'слишком общее описание компании',
   low_geo_confidence: 'гео продаж подтверждено слабо',
-  letters_guard_failed: 'письма не прошли проверку правил',
 };
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-type Letter = { n: number; subject?: string | null; body?: string | null };
+type Letter = { n: number; subject?: string | null; body?: string | null; alt_body?: string | null; alt_routing?: boolean };
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const token = getBearerToken(req.headers.get('authorization'));
@@ -168,6 +198,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     .select('*')
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
     .limit(5000);
   if (statusFilter) query = query.eq('status', statusFilter);
   const { data: rows, error } = await query;
@@ -191,6 +222,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     const letters = (row.letters as Letter[] | null) ?? [];
     const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
     const reason = (value: unknown) => (typeof value === 'string' ? REASON_RU[value] ?? value : '');
+    const extra = extraCompanyEmails(row.emails, typeof row.selected_company_email === 'string' ? row.selected_company_email : null);
+    const extraCell = (i: number) => {
+      const item = extra[i];
+      if (!item) return '';
+      const status = EMAIL_VERIFICATION_RU[item.verification] ?? item.verification;
+      const type = item.type ? EMAIL_TYPE_RU[item.type] ?? item.type : '';
+      return `${item.email} (${[type, status].filter(Boolean).join(', ')})`;
+    };
+    const letter1 = letters.find((l) => l.n === 1);
 
     sheet.addRow({
       ...row,
@@ -198,9 +238,18 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       // Да/нет вместо true/false: файл читает продажник, а не разработчик.
       outbound_mandate: row.outbound_mandate === true ? 'да' : row.outbound_mandate === false ? 'нет' : '',
       email_type: typeof row.email_type === 'string' ? EMAIL_TYPE_RU[row.email_type] ?? row.email_type : '',
+      // Лист для отправки — машинные значения, как и его заголовки; журнал — по-русски.
+      email_verification:
+        typeof row.email_verification !== 'string'
+          ? ''
+          : forSending
+            ? row.email_verification
+            : EMAIL_VERIFICATION_RU[row.email_verification] ?? row.email_verification,
       status: typeof row.status === 'string' ? STATUS_RU[row.status] ?? row.status : '',
       exclusion_reason: reason(row.exclusion_reason),
-      review_reason: reason(row.review_reason),
+      // Причины ручной проверки — одни подписи с экраном (lib/polzaOutreach/types.ts),
+      // вместе с подробностью: почему цепочка не готова, какое правило писем нарушено.
+      review_reason: typeof row.review_reason === 'string' ? polzaReviewLabel(row.review_reason) : '',
       source_list: Array.isArray(row.source_list) ? (row.source_list as string[]).join(' + ') : '',
       segments: Array.isArray(row.segments) ? (row.segments as string[]).join('; ') : '',
       trigger_list: Array.isArray(row.trigger_list)
@@ -211,7 +260,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
           ? Object.entries(row.score_breakdown as Record<string, number>).map(([k, v]) => `${k}=${v}`).join(', ')
           : '',
       lead_status: row.lead_status === 'write_now' ? 'write now' : row.lead_status === 'manual_check' ? 'manual check' : row.lead_status === 'skip' ? 'skip' : '',
+      email_2: extraCell(0),
+      email_3: extraCell(1),
+      email_2_plain: extra[0]?.email ?? '',
+      email_2_verification: extra[0]?.verification ?? '',
+      email_3_plain: extra[1]?.email ?? '',
+      email_3_verification: extra[1]?.verification ?? '',
       letter1_subject: letter(1, 'subject'), letter1_body: letter(1, 'body'),
+      letter1_alt_body: letter1?.alt_body ?? '',
+      letter1_alt_routing: letter1?.alt_body ? String(letter1.alt_routing === true) : '',
       letter2_subject: letter(2, 'subject'), letter2_body: letter(2, 'body'),
       letter3_subject: letter(3, 'subject'), letter3_body: letter(3, 'body'),
       letter4_subject: letter(4, 'subject'), letter4_body: letter(4, 'body'),

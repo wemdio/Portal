@@ -4,9 +4,9 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { assertSafeImapTarget } from '@/lib/byoMailbox/netGuard';
+import { buildMessageId } from '@/lib/mail/message';
 import { authForMailbox } from './mailboxAuth';
 import { sendSenderMail } from './smtp';
-import { buildMessageId } from './template';
 import type { MailboxRow } from './types';
 
 /**
@@ -176,6 +176,8 @@ async function readDeliveredProbe(cfg: ProbeConfig, messageId: string): Promise<
     greetingTimeout: 10_000,
     socketTimeout: 30_000,
   });
+  // Без слушателя событие 'error' роняет процесс (byoMailbox/imap.ts); ошибку получает await.
+  client.on('error', () => undefined);
 
   try {
     await client.connect();
@@ -275,7 +277,11 @@ async function sendProbe(probe: { id: string; mailbox_id: string }, log: Log): P
   log('info', `Проба ${mailbox.email}: письмо ушло на ${cfg.toEmail}, ждём доставки`);
 }
 
-async function checkDeliveredProbes(log: Log): Promise<void> {
+/**
+ * Проверка доставки: читает контрольный ящик (не наш) и сравнивает заголовки.
+ * Контрольный ящик один на весь парк, поэтому проверяет его ведущий воркер.
+ */
+export async function checkDeliveredProbes(log: Log): Promise<void> {
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
   const cfg = probeConfig();
@@ -342,20 +348,32 @@ async function checkDeliveredProbes(log: Log): Promise<void> {
   }
 }
 
-/** Один тик контура проб: отправить новые, проверить ждущие. */
-export async function processSendProbes(opts?: { log?: Log }): Promise<void> {
+/**
+ * Отправка заведённых проб — только с ящиков своего адреса: проба — такой же
+ * вход в ящик, как рассылка. Доставку проверяет ведущий: checkDeliveredProbes.
+ */
+export async function sendPendingProbes(opts: { egressIp: string; log?: Log }): Promise<void> {
   if (!supabaseAdmin) return;
-  const log: Log = opts?.log ?? (() => {});
+  const db = supabaseAdmin;
+  const log: Log = opts.log ?? (() => {});
 
-  const { data: pending } = await supabaseAdmin
+  const { data: pending } = await db
     .from('sender_send_probes')
     .select('id, mailbox_id')
     .eq('status', 'pending')
     .order('created_at')
-    .limit(SEND_PER_TICK);
-  for (const probe of (pending ?? []) as { id: string; mailbox_id: string }[]) {
+    .limit(50);
+  const rows = (pending ?? []) as { id: string; mailbox_id: string }[];
+  if (!rows.length) return;
+
+  const { data: owned } = await db
+    .from('sender_mailboxes')
+    .select('id')
+    .in('id', [...new Set(rows.map((r) => r.mailbox_id))])
+    .eq('egress_ip', opts.egressIp);
+  const mine = new Set((owned ?? []).map((row) => String(row.id)));
+
+  for (const probe of rows.filter((r) => mine.has(r.mailbox_id)).slice(0, SEND_PER_TICK)) {
     await sendProbe(probe, log);
   }
-
-  await checkDeliveredProbes(log);
 }

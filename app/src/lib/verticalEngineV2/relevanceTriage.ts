@@ -18,6 +18,7 @@ import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, getVeActiveJobSignal, type LLMMessage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { VE_RELEVANCE_TARGET_RULES } from './relevanceReview';
+import { veMedicalScopeNote, type VeMedicalTarget } from './relevanceMedical';
 
 // Thresholds below were calibrated on this exact release; an alias could move them silently.
 const DEFAULT_MODEL = 'typesafe/jev-1.13.0';
@@ -44,7 +45,9 @@ const TRANSPORT_COOLDOWN_MS = 60_000;
 export const VE_TRIAGE_MAX_EXCERPTS = 24;
 // 2: requirements only from the closed list of structural conditions; context
 // (tools, processes, channels, hiring, service standards, size) never becomes one.
-export const VE_TRIAGE_RUBRIC_VERSION = 2;
+// 3: a supporting service does not turn another organization into a specialist
+// provider. Rebuild old checklists; do not reset paid company verdicts or facts.
+export const VE_TRIAGE_RUBRIC_VERSION = 3;
 
 /** Operating point validated on held-out hypotheses: proposals 97.8 % precise
  * before the semantic review; rejects 97.4 % precise, 1.9 % of them relevant. */
@@ -74,19 +77,21 @@ export const veTriageRubricSchema = z.object({
 });
 export type VeTriageRubric = z.infer<typeof veTriageRubricSchema>;
 
-export function veTriageRubricMessages(scope: string, language: 'ru' | 'en'): LLMMessage[] {
+export function veTriageRubricMessages(scope: string, language: 'ru' | 'en', origin?: VeMedicalTarget['hypothesisOrigin']): LLMMessage[] {
   const facts = language === 'ru' ? 'Russian' : 'English';
+  const medicalNote = veMedicalScopeNote(scope, origin);
   return [{ role: 'system', content: [
     `You convert ONE B2B targeting hypothesis into an English checklist for a fast yes/no classifier that will read ${facts} company facts (registry category, description, website text).`,
     VE_RELEVANCE_TARGET_RULES,
     'Return JSON only: {"activity": string, "requirements": string[], "conflicts": string[], "adjacent": string[], "activity_label": string, "conflict_labels": string[]}.',
     'activity: ONE affirmative, checkable sentence starting with "The company itself" that states the target buyer\'s core business activity according to the hypothesis title and description together. Describe WHO the buyer is (activity and type, including listed products or sub-sectors), never context, our offer, its benefits, or hypothesized pains.',
+    'For a specialized service provider or center, activity must name the provider practice or specialist unit, not merely the presence of a service or problem. Put supporting look-alikes in adjacent: for child neuropsychological/developmental correction centers, preschool speech therapy, adapted educational programs and correctional kindergarten groups alone are insufficient. Do not encode "a kindergarten without correction" as the conflict: correction within preschool education still does not establish the target center. An actual specialist practice or unit can qualify even in a multidisciplinary organization.',
     'requirements: ONLY the structural conditions from the closed list above that the hypothesis states as conditions: a network of locations or branches, an own facility named as a condition (own production, own laboratory), private or state ownership, a named region, business or consumer customers. For a network with a minimum number write "The company operates two or more locations or branches." and add the conflict "The company operates fewer than N locations." Each is one sentence starting with "The company". CONTEXT is never a requirement: software and state information systems (Mercury, EGAIS and the like), processes and operations (recipes, shifts, batches, warehouses, traceability, quality control), sales channels and customers (retail chains, marketplaces, HoReCa, export), hiring and vacancies, service standards (greeting, upselling, loyalty), pains, triggers, seasonality, and size words or figures such as "large", "leading" or "from 200 employees". When unsure, omit. Return [] when the hypothesis states no structural condition. At most 3.',
     'conflicts: 1-3 business TYPES that are INCOMPATIBLE with this target and plausibly appear among candidates (for example: only a supplier, reseller, distributor, dealer or agency serving the target industry rather than belonging to it; a state institution where a private business is required), plus the fewer-than-N-locations conflict above when a minimum network size is stated. A missing process, tool, channel or hiring is never a conflict. Each is one sentence starting with "The company".',
     'adjacent: 0-3 look-alike activities that are NOT sufficient evidence of the target activity (for example "aesthetic dentistry" for a skin/body cosmetology target). Short noun phrases.',
     'Every sentence above must be concrete, at most 28 words, in plain English, without marketing language. Do not mention the seller or its product.',
     `activity_label: the target activity as a short noun phrase in ${facts}, at most 12 words, for an interface note. conflict_labels: one short noun phrase in ${facts} per conflict, same order and count as conflicts.`,
-  ].join('\n') }, { role: 'user', content: scope }];
+  ].join('\n') }, { role: 'user', content: scope + (medicalNote ? '\n' + medicalNote : '') }];
 }
 
 export interface VeTriageTarget { vertical: string; verticalSummary: string; hypothesisTitle: string; hypothesisDescription: string }

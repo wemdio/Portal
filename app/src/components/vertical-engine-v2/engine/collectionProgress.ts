@@ -13,19 +13,18 @@ export function isPartialPreview(base: Pick<VeBaseSummary, 'status' | 'collect_i
     || (target != null && target.ready_rows < target.ready_target);
 }
 
-/**
- * Состав готовой части рядом с засчитанными в цель контактами: сколько в ней
- * компаний и, если в цель засчитаны не все адреса, сколько адресов всего.
- */
+/** Company composition; goal accounting belongs in expandable details. */
 export function describeReadyComposition(target: NonNullable<VeCollectInfo['target_progress']> | null | undefined): string | null {
   const companies = collectCount(target?.ready_companies);
-  if (!target || companies === null) return null;
-  const contacts = collectCount(target.ready_contacts);
-  const perCompany = collectCount(target.counted_per_company);
-  return `Компаний: ${companies.toLocaleString('ru-RU')}.`
-    + (contacts !== null && perCompany && contacts > target.ready_rows
-      ? ` Всего адресов в базе: ${contacts.toLocaleString('ru-RU')}; в цель засчитывается не больше ${perCompany} адресов одной компании.`
-      : '');
+  return companies === null ? null : `Компаний: ${companies.toLocaleString('ru-RU')}.`;
+}
+
+/** A normal terminal collection reason is secondary to the usable saved result. */
+export function describeCompletedCollection(target: NonNullable<VeCollectInfo['target_progress']>): string {
+  const reason = target.status === 'exhausted'
+    ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка.'
+    : target.reason?.replace(/сбор остановлен/gi, 'Добор завершён').replace(/[.\s]+$/, '');
+  return 'Добор завершён ниже цели.' + (reason ? ` ${reason.replace(/[.\s]+$/, '')}.` : ' Найденные контакты сохранены.');
 }
 
 export function collectTaskDone(status: string | undefined): boolean {
@@ -78,7 +77,7 @@ export function getCollectionQueue(
 
 export function getCollectionProgress(
   info: VeCollectInfo | null | undefined,
-  job?: Pick<VeJobSummary, 'stage' | 'status' | 'progress' | 'payload'>,
+  job?: Pick<VeJobSummary, 'stage' | 'status' | 'progress' | 'payload'> & Partial<Pick<VeJobSummary, 'started_at'>>,
 ) {
   const tasks = Array.isArray(info?.tasks) ? info.tasks : [];
   const completedCounts = tasks.filter((task) => task && collectTaskDone(task.status))
@@ -87,7 +86,14 @@ export function getCollectionProgress(
   const candidates = collectCount(info?.stats?.rows_total);
   const construct = info?.construct;
   const snapshot = construct?.progress;
+  const checkpointAt = Date.parse(job?.progress?.updated_at ?? '');
+  const startedAt = Date.parse(job?.started_at ?? '');
+  // A checkpoint from a previous claim must not override the current phase.
+  const relevanceUpdatedAt = job?.stage === 'base_collect' && job.status === 'running'
+    && job.progress?.phase === 'relevance_review' && Number.isFinite(checkpointAt)
+    && Number.isFinite(startedAt) && checkpointAt >= startedAt ? checkpointAt : null;
   const phase = info?.source_contact_discovery ? 'discovering_sites' : info?.company_name_recovery ? 'cleaning_names'
+    : relevanceUpdatedAt !== null ? 'reviewing_relevance'
     : info?.saved_email_review_pending ? 'reviewing_emails'
     : info?.relevance_review_requested || job?.payload?.review_relevance ? 'reviewing_relevance' : !construct
     ? (tasks.length > 0 || (Array.isArray(info?.plan?.tasks) && info.plan.tasks.length > 0) ? 'collecting' : 'planning')
@@ -107,6 +113,7 @@ export function getCollectionProgress(
     ? { done: namesDone, total: namesTotal } : null;
   return {
     phase, candidates, sourceRows, stepPercent, nameProgress,
+    relevanceUpdatedAt: phase === 'reviewing_relevance' ? relevanceUpdatedAt : null,
     stepKey: typeof snapshot?.current_step_key === 'string' ? snapshot.current_step_key : null,
   } as const;
 }

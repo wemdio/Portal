@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { normalizeVeCompanyInn, normalizeVeWebsiteHost } from './collectionIdentity';
 import { veOfficialWebsiteCandidates } from './relevanceEvidence';
 import { veCompanyFactKey, VE_COMPANY_FACT_TTL_MS } from './companyFacts';
+import { replaceVeSourceWebsite, VE_CONFIRMED_WEBSITE_MARK } from './sourceContacts';
 
 type Candidate = { company: string; inn: string; website: string; address: string; email: string; category: string };
 export interface VeCandidateHint { key: string; website: string; facts: string; observedAt: string; inns: string[]; ownerInns: string[] }
@@ -20,10 +21,12 @@ export function prioritizeVeCandidates<T extends Candidate>(rows: T[], hints: Ve
     const inn = normalizeVeCompanyInn(row.inn);
     const sites = veOfficialWebsiteCandidates(row.website);
     const facts = (byKey.get(veCompanyFactKey(row) ?? '') ?? []).filter((hint) =>
-      (!sites.length || sites.some((site) => normalizeVeWebsiteHost(site.href) === normalizeVeWebsiteHost(hint.website)))
-      && (!inn || (hint.ownerInns.includes(inn) && hint.inns.every((item) => item === inn))));
+      inn ? hint.ownerInns.includes(inn) && hint.ownerInns.every((item) => item === inn)
+        : !sites.length || sites.some((site) => normalizeVeWebsiteHost(site.href) === normalizeVeWebsiteHost(hint.website)));
     const best = facts.sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
-    const prepared = best && !sites.length ? { ...row, website: best.website } : row;
+    // Exact-owner facts can repair a wrong nonempty registry URL too. Emails
+    // from the replaced site cannot become fallbacks for the recovered owner.
+    const prepared = best ? replaceVeSourceWebsite(row, best.website, `${VE_CONFIRMED_WEBSITE_MARK} ${best.website}`) : row;
     const text = [row.category, (row as T & { description?: string }).description ?? '', ...facts.map((hint) => hint.facts)].join(' ').toLowerCase();
     const profile = /[\p{L}]{4}/u.test(text);
     const hits = terms.filter((term) => text.includes(term)).length;

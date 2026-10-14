@@ -1921,6 +1921,7 @@ const PAIRS: Array<[string, string]> = [
   ['Окно ожидания диалога', 'Dialog wait window'],
   ['Периоды сна', 'Sleep periods'],
   ['Отвечать только если ранее писали', 'Reply only if they wrote before'],
+  ['Передавать сам только по прямой просьбе: менеджер, созвон, встреча', 'Hand off automatically only on a direct request: manager, call, meeting'],
   ['Новым диалогам разрешать отправку автоматически', 'Automatically allow sending for new dialogs'],
   ['Игнорировать ботов', 'Ignore bots'],
   ['Игнорировать без имени пользователя', 'Ignore accounts without a username'],

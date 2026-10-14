@@ -5,8 +5,10 @@ import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
 import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
+import { sanitizeEmailsPerCompanyStepConfig } from '@/lib/tools/baseConstructorEmailsPerCompany';
 import { countActiveManualConstructorJobs } from '@/lib/tools/baseConstructorQueue';
 import { MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
+import { presentConstructorJob } from '@/lib/tools/baseConstructorPresentation';
 import {
   countClientRows,
   getBillingPeriodStart,
@@ -164,7 +166,10 @@ export async function POST(req: NextRequest) {
           file_name: file_name || null,
           data,
           selected_steps: finalSteps,
-          step_config: step_config || {},
+          step_config: sanitizeEmailsPerCompanyStepConfig(
+            (step_config || {}) as Record<string, unknown>,
+            finalSteps,
+          ),
           initial_row_count: data.length - 1,
           total_steps: finalSteps.length,
         })
@@ -189,7 +194,7 @@ export async function POST(req: NextRequest) {
         tariffUsage = await getClientTariffUsage(user.id);
       }
 
-      return NextResponse.json({ job, tariff_usage: tariffUsage });
+      return NextResponse.json({ job: presentConstructorJob(job, role), tariff_usage: tariffUsage });
     },
   );
 }
@@ -232,9 +237,10 @@ export async function GET(req: NextRequest) {
 
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       try {
+        const role = await getUserRole(user.id);
         const activeManualCount = await countActiveManualConstructorJobs(admin, user.id);
         return NextResponse.json({
-          jobs: data || [], active_manual_count: activeManualCount,
+          jobs: (data || []).map((job) => presentConstructorJob(job, role)), active_manual_count: activeManualCount,
           page, page_size: pageSize, total: count ?? 0,
           has_more: page * pageSize < (count ?? 0),
         });
