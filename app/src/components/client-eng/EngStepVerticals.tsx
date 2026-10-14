@@ -1,241 +1,133 @@
 'use client';
 
 /**
- * Шаг 2 «Verticals»: доска вертикалей с гипотезами. Кнопки Accept/Reject
- * размечают гипотезы (PATCH /api/client/eng/hypotheses/[id], % и rank
- * вертикалей пересчитываются на бэкенде). Accepted-гипотезы — основа
- * авто-сборки базы на шаге 4.
+ * Пометка «рынок снят с ежедневного добора» и её кнопка «Resume daily top-up»
+ * (POST /api/client/eng/verticals/[id]/refill) — на карточке рынка шага 3
+ * «Launch». Прежняя доска гипотез шага 2 с Accept/Reject отсюда убрана: рынки
+ * теперь выбирает шаг 2 «Choose markets» (EngStepMarkets) целиком.
  */
 
-import { useMemo, useState } from 'react';
-import { Check, Rocket, X } from 'lucide-react';
-import type { HeHypothesis, HeVertical } from '@/lib/hypothesisEngine/types';
-import { patchEngHypothesis, startEngAutopilot } from './api-client';
-import { EngBadge, EngCard, EngSpinner, hypothesisStatusTone } from './ui';
-import type { EngDetail } from './EngProjectWizard';
+import { useState } from 'react';
+import { RotateCcw } from 'lucide-react';
+import type { HeVertical } from '@/lib/hypothesisEngine/types';
+import { EngPaidAccessError, resumeEngVerticalRefill } from './api-client';
+import { EngPaidAccessNotice } from './EngPaidAccess';
+import { EngSpinner } from './ui';
 
-const TIER_LABELS: Record<number, string> = {
-  1: 'Tier 1 · obvious',
-  2: 'Tier 2 · adjacent',
-  3: 'Tier 3 · non-obvious',
-};
-
-function HypothesisCard({
-  hypothesis,
-  busy,
-  onVerdict,
-}: {
-  hypothesis: HeHypothesis;
-  busy: boolean;
-  onVerdict: (id: string, verdict: 'accept' | 'reject') => void;
-}) {
-  return (
-    <div
-      className="rounded-md p-3 flex flex-col gap-2"
-      style={{ border: '1px solid var(--cp-divider)' }}
-    >
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-semibold" style={{ color: 'var(--cp-paper)' }}>
-          {hypothesis.title}
-        </span>
-        <EngBadge label={TIER_LABELS[hypothesis.tier] ?? `Tier ${hypothesis.tier}`} tone="neutral" />
-        <span className="ml-auto ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
-          {hypothesis.potential_pct}%
-        </span>
-        <EngBadge label={hypothesis.status} tone={hypothesisStatusTone(hypothesis.status)} />
-      </div>
-      {hypothesis.description && (
-        <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--cp-text-m)' }}>
-          {hypothesis.description}
-        </p>
-      )}
-      {hypothesis.fit_rationale && (
-        <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--cp-text-l)' }}>
-          {hypothesis.fit_rationale}
-        </p>
-      )}
-      {hypothesis.status === 'proposed' && (
-        <div className="flex gap-1.5">
-          <button
-            type="button"
-            onClick={() => onVerdict(hypothesis.id, 'accept')}
-            disabled={busy}
-            className="ds-btn-secondary inline-flex items-center gap-1 text-[11px]"
-          >
-            {busy ? <EngSpinner className="h-3 w-3" /> : <Check className="h-3 w-3" />}
-            Accept
-          </button>
-          <button
-            type="button"
-            onClick={() => onVerdict(hypothesis.id, 'reject')}
-            disabled={busy}
-            className="ds-btn-ghost inline-flex items-center gap-1 text-[11px]"
-          >
-            <X className="h-3 w-3" />
-            Reject
-          </button>
-        </div>
-      )}
-    </div>
-  );
+/**
+ * Пометка «вертикаль снята с ежедневного добора»: ночной проход увидел N подряд
+ * прогонов, не добавивших ни одного контакта (lib/hypothesisEngine/autoPipeline.ts).
+ *
+ * ФОРМА ДАННЫХ РАЗБИРАЕТСЯ ЦЕЛИКОМ, а не по счастливому случаю. Пометку ставит
+ * одна запись сразу двумя полями, но экран обязан пережить любую строку,
+ * которая до него доедет (старая запись, правка руками, будущий писатель):
+ *   * штампа нет / он пустой → пометки НЕТ, карточка молчит. Штамп —
+ *     единственный признак: именно по нему правило решает, выдавать ли слот;
+ *   * штамп есть, число ночей меньше единицы (нет ключа, null, ноль, дробь
+ *     вроде 0.5 — всё это после округления вниз даёт 0) → фраза БЕЗ числа:
+ *     «0 daily top-ups in a row» было бы ложью о причине. Дробь БОЛЬШЕ
+ *     единицы округляется вниз и печатается (1.7 → «1 daily top-up»): такое
+ *     число занижает серию, но не выдумывает её;
+ *   * штамп есть, но не парсится как дата → фраза без даты, пометка остаётся.
+ * Ни в одной ветке текст не обещает того, чего не знает.
+ *
+ * Про окно рассинхрона честно: правило выключается флагом окружения ВОРКЕРА, и
+ * пометки, оставшиеся от включённого периода, снимает ночной проход — разом по
+ * всему проекту, до цикла по вертикалям, потому что до вертикали за пределами
+ * ночного бюджета цикл может и не дойти. Но ночной проход берёт только проекты
+ * с ВКЛЮЧЁННЫМ конфигом добора (autoPipeline.loadConfigs: enabled = true).
+ * Отсюда два окна:
+ *   * конфиг включён — до первого прохода, то есть максимум одна ночь,
+ *     карточка может показывать паузу, которой уже нет;
+ *   * конфиг выключен или его нет — пометка не снимается вовсе, пока клиент
+ *     не нажмёт «Resume daily top-up» или конфиг снова не включат. Ложью фраза
+ *     от этого не становится: ночного добора у такого проекта нет целиком, а
+ *     кнопка пометку снимает.
+ * Проверять флаг здесь нельзя: у кабинета и у воркера разные процессы и
+ * разное окружение, и прочитанный здесь флаг отвечал бы за чужую машину.
+ */
+function refillPauseNote(vertical: HeVertical): { headline: string; since: string } | null {
+  const since = typeof vertical.refill_dry_since === 'string' ? vertical.refill_dry_since.trim() : '';
+  if (!since) return null;
+  const raw = vertical.refill_dry_nights;
+  const nights = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : 0;
+  const headline =
+    nights >= 1
+      ? `The daily top-up is paused for this market — ${nights} daily top-up${nights === 1 ? '' : 's'} in a row brought no new contacts.`
+      : 'The daily top-up is paused for this market — its recent daily top-ups brought no new contacts.';
+  const parsed = Date.parse(since);
+  const stamp = Number.isNaN(parsed)
+    ? ''
+    : new Date(parsed).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  return { headline, since: stamp };
 }
 
-export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onChanged: () => void }) {
-  const verticals = useMemo(() => (detail.verticals ?? []) as HeVertical[], [detail]);
-  const hypotheses = useMemo(() => (detail.hypotheses ?? []) as HeHypothesis[], [detail]);
-  const jobs = useMemo(() => detail.jobs ?? [], [detail]);
-  const [busyId, setBusyId] = useState<string | null>(null);
+/**
+ * Карточка паузы добора рынка с кнопкой, которая её отменяет: причина, дата и
+ * кнопка — в одном месте. Цвет нейтральный, а не красный: ничего не сломалось и
+ * ничего не потеряно. Пометки нет и рынок не возвращали этим экраном —
+ * ничего не рисуется.
+ */
+export function EngRefillPauseNote({ vertical, onChanged }: { vertical: HeVertical; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [resumed, setResumed] = useState(false);
   const [error, setError] = useState('');
-  const [autopilotBusy, setAutopilotBusy] = useState(false);
-  const [autopilotSummary, setAutopilotSummary] = useState('');
+  const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
+  const pause = refillPauseNote(vertical);
 
-  // Автопилот уже гонит конвейер, пока жива хотя бы одна его джоба.
-  const AUTOPILOT_STAGES = useMemo(() => new Set(['chain', 'base_collect', 'base_analyze', 'template']), []);
-  const autopilotRunning = jobs.some(
-    (j) => (j.status === 'pending' || j.status === 'running') && AUTOPILOT_STAGES.has(j.stage),
-  );
-
-  const onStartOutreach = async () => {
-    if (autopilotBusy || autopilotRunning) return;
-    setAutopilotBusy(true);
+  const onResume = async () => {
+    if (busy) return;
+    setBusy(true);
     setError('');
-    setAutopilotSummary('');
+    setRefusal(null);
     try {
-      const res = await startEngAutopilot(detail.project.id);
-      if (res.ok) {
-        const parts: string[] = [];
-        if (res.chains_enqueued) parts.push(`${res.chains_enqueued} chain${res.chains_enqueued === 1 ? '' : 's'}`);
-        if (res.collects_enqueued) parts.push(`${res.collects_enqueued} base collect${res.collects_enqueued === 1 ? '' : 's'}`);
-        if (res.templates_enqueued) parts.push(`${res.templates_enqueued} template${res.templates_enqueued === 1 ? '' : 's'}`);
-        setAutopilotSummary(
-          parts.length > 0
-            ? `Autopilot started — queued ${parts.join(' · ')}. Review & Launch fills in as stages finish.`
-            : 'Autopilot is on — everything is already queued or done. See Review & Launch.',
-        );
-      } else {
-        setError(res.error ?? 'Failed to start the autopilot');
-      }
+      await resumeEngVerticalRefill(vertical.id);
+      setResumed(true);
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to start the autopilot');
+      if (e instanceof EngPaidAccessError) setRefusal(e);
+      else setError(e instanceof Error ? e.message : 'Failed to resume the daily top-up for this market');
     } finally {
-      setAutopilotBusy(false);
+      setBusy(false);
     }
   };
 
-  const onVerdict = async (id: string, verdict: 'accept' | 'reject') => {
-    if (busyId) return;
-    setBusyId(id);
-    setError('');
-    try {
-      await patchEngHypothesis(id, verdict);
-      onChanged();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save the verdict');
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  if (verticals.length === 0 && hypotheses.length === 0) {
-    return (
-      <EngCard>
-        <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          No verticals yet — they appear once the research finishes (step 1).
-        </p>
-      </EngCard>
-    );
+  // Подтверждение держится до перезагрузки деталки: пометка уже снята, и без
+  // этой строки нажатие выглядело бы как «ничего не произошло».
+  if (!pause) {
+    return resumed ? (
+      <p className="mt-2 text-xs" style={{ color: 'var(--cp-green)' }}>
+        Daily top-up resumed — this market is eligible for the daily top-up again.
+      </p>
+    ) : null;
   }
-
-  const acceptedTotal = hypotheses.filter((h) => h.status === 'accepted').length;
-  // «Start outreach» — одна кнопка вместо ручного прогона каждой стадии:
-  // доступна на researched-проекте с принятыми гипотезами.
-  const canStartOutreach = detail.project?.status === 'researched' && acceptedTotal > 0;
-  const ungrouped = hypotheses.filter(
-    (h) => !h.vertical_id || !verticals.some((v) => v.id === h.vertical_id),
-  );
-
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
-          {acceptedTotal} of {hypotheses.length} hypotheses accepted — accepted ones drive the base collection on step 4.
-        </div>
-        {canStartOutreach && (
-          <button
-            type="button"
-            onClick={() => void onStartOutreach()}
-            disabled={autopilotBusy || autopilotRunning}
-            className="ds-btn-primary ml-auto inline-flex items-center gap-1.5 text-xs"
-            title="Generate letters, collect bases and build templates for every vertical automatically"
-          >
-            {autopilotBusy || autopilotRunning ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
-            {autopilotRunning ? 'Autopilot running…' : 'Start outreach'}
-          </button>
-        )}
+    <div className="mt-2 rounded-md p-3 flex flex-col gap-2" style={{ border: '1px solid var(--cp-divider)' }}>
+      <p className="text-xs m-0" style={{ color: 'var(--cp-text-m)' }}>
+        {pause.headline}
+        {pause.since ? ` Paused on ${pause.since}.` : ''} Only the daily collection for this market stopped — the
+        campaign and everything already in it are untouched.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void onResume()}
+          disabled={busy}
+          className="ds-btn-secondary inline-flex items-center gap-1 text-[11px]"
+          title="Put this market back into the daily top-up"
+        >
+          {busy ? <EngSpinner className="h-3 w-3" /> : <RotateCcw className="h-3 w-3" />}
+          Resume daily top-up
+        </button>
+        <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          It becomes eligible for the daily top-up again.
+        </span>
       </div>
-
-      {autopilotSummary && (
-        <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-green)' }}>
-          {autopilotSummary}
-        </div>
-      )}
-
-      {verticals.map((v) => {
-        const own = hypotheses.filter((h) => h.vertical_id === v.id);
-        const accepted = own.filter((h) => h.status === 'accepted').length;
-        return (
-          <EngCard key={v.id}>
-            <div className="flex items-center gap-2">
-              <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-                #{v.rank ?? '—'}
-              </span>
-              <h4 className="text-sm font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
-                {v.name}
-              </h4>
-              <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
-                {v.potential_pct}%
-              </span>
-              <span className="ml-auto text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-                {accepted}/{own.length} accepted
-              </span>
-            </div>
-            {v.summary && (
-              <p className="mt-1.5 text-xs whitespace-pre-wrap" style={{ color: 'var(--cp-text-m)' }}>
-                {v.summary}
-              </p>
-            )}
-            <div className="mt-3 flex flex-col gap-2">
-              {own.map((h) => (
-                <HypothesisCard key={h.id} hypothesis={h} busy={busyId === h.id} onVerdict={(id, verdict) => void onVerdict(id, verdict)} />
-              ))}
-              {own.length === 0 && (
-                <p className="text-xs" style={{ color: 'var(--cp-text-l)' }}>
-                  No hypotheses linked to this vertical.
-                </p>
-              )}
-            </div>
-          </EngCard>
-        );
-      })}
-
-      {ungrouped.length > 0 && (
-        <EngCard>
-          <h4 className="text-sm font-bold m-0 mb-3" style={{ color: 'var(--cp-paper)' }}>
-            Ungrouped hypotheses
-          </h4>
-          <div className="flex flex-col gap-2">
-            {ungrouped.map((h) => (
-              <HypothesisCard key={h.id} hypothesis={h} busy={busyId === h.id} onVerdict={(id, verdict) => void onVerdict(id, verdict)} />
-            ))}
-          </div>
-        </EngCard>
-      )}
-
+      {refusal && <EngPaidAccessNotice refusal={refusal} />}
       {error && (
-        <div className="text-sm" style={{ color: 'var(--cp-red)' }}>
+        <span className="text-[11px]" style={{ color: 'var(--cp-red)' }}>
           {error}
-        </div>
+        </span>
       )}
     </div>
   );

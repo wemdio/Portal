@@ -2,72 +2,63 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { logAudit, logError } from '@/lib/loggerServer';
-import { loadClientHeProject } from '@/lib/hypothesisEngine/apiGuards';
+import { isValidUuid } from '@/lib/apiValidation';
+import { withToolTrace } from '@/lib/toolTrace';
+import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import { stopHeEngProjectWork } from '@/lib/hypothesisEngine/engProjectStop';
+import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
 
 /**
- * POST — отменить все активные задачи СВОЕГО проекта (research, цепочки,
- * сборка/анализ баз, шаблоны). Зеркалит staff-роут: pending/running джобы →
- * 'cancelled', базы 'collecting'/'analyzing' → 'failed' («Cancelled by user»),
- * проект 'researching' → 'draft' (исследование можно запустить заново).
- * Уже завершённые джобы и готовые артефакты не трогаем.
+ * POST — «Cancel all jobs»: остановить то, что СВОЙ проект делает и будет делать
+ * сам: активные джобы he_jobs (research, цепочки, сборка/анализ баз, шаблоны,
+ * ночной долив), автопилот, автозапуск, ночной добор, а у отменённых баз —
+ * джобы конструктора и дочерние джобы Google Maps. Уже завершённые джобы и
+ * готовые артефакты не трогаем.
+ *
+ * Записи и их порядок — stopHeEngProjectWork (lib/hypothesisEngine/
+ * engProjectStop.ts, режим 'client'; та же функция в режиме 'staff_block'
+ * останавливает проекты при блокировке аккаунта). Роут — проверки входа,
+ * рынка и владения и ответ:
+ *  - сбой записи автопилота — 500, ничего больше не записано;
+ *  - сбой записи джоб — 500 (автопилот, автозапуск и пауза добора уже легли:
+ *    повторное нажатие их не портит, записи идемпотентны);
+ *  - иначе { ok: true, cancelled: <сколько джоб отменено> }; ноль — штатный
+ *    ответ (автопилот выключен, отметка отмены записана, если есть колонка из
+ *    20261009_0002, добор поставлен на паузу, если у проекта есть его конфиг и
+ *    колонки паузы из 20260930_0005, застрявшие базы остановлены).
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const result = await requireClientAuth(req);
-  if ('error' in result) return result.error;
-  if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+  return withToolTrace({ request: req, operation: 'client.eng.cancel.post' }, async () => {
+    const result = await requireClientAuth(req);
+    if ('error' in result) return result.error;
+    if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
-  const { id } = await params;
-  if (!id) return jsonError('Missing id', 400);
+    const { id } = await params;
+    if (!isValidUuid(id)) return jsonError('Invalid id', 400);
 
-  const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
-  if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+    const gate = await requireEngMarket(supabaseAdmin, result.auth.userId);
+    if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
 
-  const now = new Date().toISOString();
-  const { data: cancelledJobs, error: jobsErr } = await supabaseAdmin
-    .from('he_jobs')
-    .update({ status: 'cancelled', finished_at: now, updated_at: now })
-    .eq('project_id', id)
-    .in('status', ['pending', 'running'])
-    .select('id');
-  if (jobsErr) {
-    await logError('client.eng.cancel.jobs_failed', jobsErr, { userId: result.auth.userId, projectId: id });
-    return jsonError(jobsErr.message, 500);
-  }
-  const cancelled = (cancelledJobs ?? []).length;
-  if (cancelled === 0) {
-    return jsonError('No active jobs — nothing to cancel', 409);
-  }
+    const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
+    if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
-  // Базы, которые ждали отменённые джобы, — в failed, чтобы не висели «в
-  // работе» вечно и не держали слот автосборки вертикали.
-  const { error: basesErr } = await supabaseAdmin
-    .from('he_bases')
-    .update({ status: 'failed', error: 'Cancelled by user', updated_at: now })
-    .eq('project_id', id)
-    .in('status', ['collecting', 'analyzing']);
-  if (basesErr) {
-    await logError('client.eng.cancel.bases_failed', basesErr, { userId: result.auth.userId, projectId: id });
-  }
-
-  // Research-пайплайн отменён — проект можно запустить заново с шага Brief.
-  if ((owned.project as { status?: string }).status === 'researching') {
-    const { error: updErr } = await supabaseAdmin
-      .from('he_projects')
-      .update({ status: 'draft', error: null, updated_at: now })
-      .eq('id', id);
-    if (updErr) {
-      await logError('client.eng.cancel.project_failed', updErr, { userId: result.auth.userId, projectId: id });
+    const stop = await stopHeEngProjectWork(supabaseAdmin, id, {
+      by: 'client',
+      now: new Date(),
+      userId: result.auth.userId,
+      projectStatus: (owned.project as { status?: string }).status,
+    });
+    if (stop.abort) {
+      return engServerError(
+        stop.abort.step === 'autopilot' ? 'client.eng.cancel.autopilot_failed' : 'client.eng.cancel.jobs_failed',
+        stop.abort.error,
+        'Failed to cancel the running jobs',
+        { userId: result.auth.userId, projectId: id },
+      );
     }
-  }
 
-  void logAudit('client.eng.cancelled', 'ENG cabinet project jobs cancelled', {
-    userId: result.auth.userId,
-    projectId: id,
-    cancelled,
+    return NextResponse.json({ ok: true, cancelled: typeof stop.jobs === 'number' ? stop.jobs : 0 });
   });
-
-  return NextResponse.json({ ok: true, cancelled });
 }

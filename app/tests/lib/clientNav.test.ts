@@ -155,9 +155,9 @@ describe('client nav IA', () => {
     expect(resolveActiveNavId('/client/support/foo')).toBe('support');
   });
 
-  it('resolveActiveNavId picks eng-mailboxes under /client/eng/mailboxes, not the generic eng item', () => {
-    expect(resolveActiveNavId('/client/eng/mailboxes')).toBe('eng-mailboxes');
-    expect(resolveActiveNavId('/client/eng/mailboxes/')).toBe('eng-mailboxes');
+  it('resolveActiveNavId keeps /client/eng/mailboxes on the eng item (no ENG mailboxes entry), RU mailboxes unchanged', () => {
+    expect(resolveActiveNavId('/client/eng/mailboxes')).toBe('eng');
+    expect(resolveActiveNavId('/client/mailboxes')).toBe('mailboxes');
     expect(resolveActiveNavId('/client/eng')).toBe('eng');
     expect(resolveActiveNavId('/client/eng/dashboard')).toBe('eng');
   });

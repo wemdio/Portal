@@ -116,6 +116,14 @@ export interface HeVertical {
   actual_sent?: number | null;
   /** Штамп последнего замера фактических метрик. */
   actual_measured_at?: string | null;
+  /**
+   * Ночной добор снят с вертикали правилом сухой вертикали: N подряд ночей не
+   * добавили ни одного контакта (lib/hypothesisEngine/autoPipeline.ts).
+   * null/нет ключа — пометки нет. Снимается клиентом из кабинета.
+   */
+  refill_dry_since?: string | null;
+  /** Длина серии пустых ночей на момент решения — число из фразы кабинета. */
+  refill_dry_nights?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -329,6 +337,25 @@ export interface HeOperatorMapping {
   fallback?: string;
 }
 
+/**
+ * Нарушение детерминированного регламента в финальных письмах шаблона
+ * (letterChecks: checkLetterRules, числа сегментных вариантов, абзацы EN).
+ * Только предупреждение: статус шаблона оно не меняет. Стадия template пишет
+ * список в HePersonalizationPlan.rule_violations (и в лог стадии) только у
+ * EN-шаблонов; detail — по-английски.
+ */
+export interface HeLetterRuleWarning {
+  /**
+   * 'critic' — не правило letterChecks, а замечание критика, чей рерайт
+   * откатили (новая непроверенная цифра или сломанный гейт отправки): письма
+   * ушли в шаблон без его правки, и сотрудник должен это видеть.
+   */
+  rule: 'dash' | 'greeting' | 'cta' | 'stop_phrase' | 'unverified_number' | 'tell' | 'paragraphs' | 'critic';
+  /** Номер письма (1-based); вариант (A/B) и сегмент — в detail. */
+  letter: number;
+  detail: string;
+}
+
 export interface HePersonalizationPlan {
   letters: HeLetterPersonalization[];
   additions: HeSegmentAddition[];
@@ -336,4 +363,10 @@ export interface HePersonalizationPlan {
   segment_variants?: HeLetterSegmentVariants[];
   /** Фактический маппинг операторов финальных писем на колонки базы. */
   operator_mapping?: HeOperatorMapping[];
+  /**
+   * Только EN-шаблоны, и только если список не пуст: нарушения регламента
+   * финальных писем (предупреждения). Показывает staff-экран шаблона
+   * (Step5Template); у RU/PL и у шаблонов до этой правки поля нет.
+   */
+  rule_violations?: HeLetterRuleWarning[];
 }

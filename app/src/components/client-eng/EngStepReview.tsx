@@ -1,33 +1,34 @@
 'use client';
 
 /**
- * Шаг 5 «Review & Launch»: единое окно приёмки автопилота. По каждой вертикали
- * с готовой цепочкой/базой — письма цепочки (просмотр + инлайн-правка через
- * ChainEditor шага Letters, PATCH /eng/chains/[id]), ленивое превью базы
- * (GET /eng/bases/[id]/rows, первые 100 строк, компактные колонки) и статус
- * шаблона. Вверху — общий селектор пресета и «Launch all (paused)»:
- * последовательный запуск всех ready-шаблонов без launch_info с прогрессом
- * i/N; ошибка одного шаблона показывается и не останавливает остальные.
+ * Общие куски шага 3 «Launch» (EngStepLaunch): ИТОГОВЫЕ письма шаблона, только
+ * чтение (то, что запуск кладёт в кампанию: FinalLetters — «Preview letters»),
+ * ленивое превью базы (GET /eng/bases/[id]/rows, первые 100 строк, компактные
+ * колонки: BasePreview) и ЧАСЫ ОТПРАВКИ — редактор (SendingWindowEditor) и их
+ * правка у уже запущенного рынка (LaunchedSendingWindow: PATCH
+ * /eng/templates/[id]/schedule переставляет окно во всех кампаниях запуска).
+ *
+ * Прежний шаг ревью с запуском всех шаблонов разом отсюда убран: запуск рынков теперь делает
+ * одна кнопка «Launch» шага 3 и автозапуск (S3), а у отдельного готового рынка
+ * — «Launch now» на его карточке.
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
-import type { Route } from 'next';
-import { Eye, Rocket } from 'lucide-react';
-import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
-import { parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
+import { useCallback, useEffect, useState } from 'react';
+import { Clock, Eye } from 'lucide-react';
+import type { HeTemplate } from '@/lib/hypothesisEngine/types';
+import { buildLaunchSequence } from '@/lib/hypothesisEngine/launchHandoff';
 import {
+  engTemplatePlaceholders,
   fetchEngBaseRows,
-  fetchEngLaunchPresets,
-  launchEngTemplate,
+  fetchEngSendingWindow,
+  updateEngSendingWindow,
   type EngBaseSummary,
-  type HeChainDto,
-  type HeLaunchPresetOption,
-  type HeJobSummary,
+  type EngSendingWindow,
+  type EngSendingWindowTimezoneOption,
+  type EngSendingWindowWeekdayOption,
 } from './api-client';
-import { EngBadge, EngCard, EngSpinner, baseStatusTone } from './ui';
-import { ChainEditor } from './EngStepLetters';
-import type { EngDetail } from './EngProjectWizard';
+import { EngSpinner } from './ui';
+import { engPlaceholderText } from './engText';
 
 /** Компактные колонки превью; остальные поля строки — в title строки таблицы. */
 const PREVIEW_COLUMNS = ['company', 'website', 'email'] as const;
@@ -35,7 +36,7 @@ const PREVIEW_LIMIT = 100;
 
 /* ── Ленивое превью базы (по кнопке) ── */
 
-function BasePreview({ base }: { base: EngBaseSummary }) {
+export function BasePreview({ base }: { base: EngBaseSummary }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -72,7 +73,7 @@ function BasePreview({ base }: { base: EngBaseSummary }) {
         className="ds-btn-secondary inline-flex items-center gap-1.5 text-[11px]"
       >
         {loading ? <EngSpinner className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-        {open ? 'Hide preview' : 'Preview base'}
+        {open ? 'Hide contacts' : 'Preview contacts'}
       </button>
       {error && (
         <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
@@ -125,7 +126,7 @@ function BasePreview({ base }: { base: EngBaseSummary }) {
               {preview.rows.length === 0 && (
                 <tr style={{ borderTop: '1px solid var(--cp-divider)' }}>
                   <td className="px-3 py-2" colSpan={columns.length + 1} style={{ color: 'var(--cp-text-l)' }}>
-                    No rows in the base yet.
+                    No contacts collected yet.
                   </td>
                 </tr>
               )}
@@ -140,258 +141,490 @@ function BasePreview({ base }: { base: EngBaseSummary }) {
   );
 }
 
-/* ── Карточка вертикали ── */
+/* ── Окно отправки (sending window) ── */
 
-function VerticalReviewCard({
-  vertical,
-  chain,
-  base,
-  template,
-  templateBusy,
-  onChanged,
-}: {
-  vertical: HeVertical;
-  chain: HeChainDto | undefined;
-  base: EngBaseSummary | undefined;
-  template: HeTemplate | undefined;
-  templateBusy: boolean;
-  onChanged: () => void;
-}) {
-  const launch = template ? parseLaunchInfo((template as { launch_info?: unknown }).launch_info) : null;
-  return (
-    <EngCard>
-      <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-sm font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
-          {vertical.name}
-        </h4>
-        {template && <EngBadge label={`template: ${template.status}`} tone={template.status === 'ready' ? 'green' : 'amber'} />}
-        {launch && <EngBadge label="launched (paused)" tone="green" />}
-        {!template && templateBusy && (
-          <span className="inline-flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
-            <EngSpinner className="h-3 w-3" /> building template…
-          </span>
-        )}
-        {!template && !templateBusy && (
-          <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-            no template yet
-          </span>
-        )}
-      </div>
+/**
+ * Часы для выпадашек. Рассыльщик принимает 'ЧЧ:ММ'; целого часа достаточно, а
+ * свободный ввод времени дал бы клиенту способ отправить то, что API отклонит.
+ */
+const HOUR_OPTIONS: string[] = Array.from(
+  { length: 24 },
+  (_, h) => `${String(h).padStart(2, '0')}:00`,
+);
 
-      {chain ? (
-        <ChainEditor chain={chain} onSaved={onChanged} />
-      ) : (
-        <p className="mt-2 text-xs" style={{ color: 'var(--cp-text-l)' }}>
-          No ready letters for this vertical yet.
-        </p>
-      )}
-
-      {base && (
-        <div
-          className="mt-3 rounded-md p-3"
-          style={{ border: '1px solid var(--cp-divider)' }}
-        >
-          <div className="flex items-center gap-2">
-            <span className="truncate text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>
-              {base.filename}
-            </span>
-            <EngBadge label={base.status} tone={baseStatusTone(base.status)} />
-            <span className="ml-auto ds-mono text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
-              {base.row_count.toLocaleString('en-US')} rows
-            </span>
-          </div>
-          {(base.status === 'analyzed' || base.status === 'analyzing') && <BasePreview base={base} />}
-        </div>
-      )}
-    </EngCard>
-  );
+export interface SendingWindowConfig {
+  value: EngSendingWindow;
+  timezones: EngSendingWindowTimezoneOption[];
+  weekdays: EngSendingWindowWeekdayOption[];
 }
 
-/* ── Панель запуска всех готовых шаблонов ── */
+/**
+ * Окно отправки шаблона: сохранённый выбор клиента (или дефолт) плюс списки
+ * поясов и дней, КОТОРЫЕ ПРИНИМАЕТ рассыльщик.
+ *
+ * Списки приходят с сервера намеренно: набор допустимых поясов — серверный
+ * контракт (`api/client/eng/_launchWindow.ts`), и вторая копия на фронте
+ * разъехалась бы с первой — клиент выбрал бы пояс, на который запуск отвечает
+ * отказом. Ответ без списков (демо-вкладка отдаёт `{}` на неизвестный путь) →
+ * config остаётся null: редактор не рисуем, запуск уедет с серверным дефолтом.
+ */
+function useSendingWindow(templateId: string | undefined) {
+  const [config, setConfig] = useState<SendingWindowConfig | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  // Кампании запуска сейчас не все на окне `schedule` (ответ GET, `mixed`).
+  const [mixed, setMixed] = useState(false);
 
-function LaunchAllPanel({
-  launchable,
-  onChanged,
-}: {
-  launchable: HeTemplate[];
-  onChanged: () => void;
-}) {
-  const [presets, setPresets] = useState<HeLaunchPresetOption[] | null>(null);
-  const [presetId, setPresetId] = useState('');
-  const [presetsError, setPresetsError] = useState('');
-  const [state, setState] = useState<{ running: boolean; done: number; total: number; errors: string[] }>({
-    running: false,
-    done: 0,
-    total: 0,
-    errors: [],
-  });
-
-  // Пресеты — per-client (GET launch их не привязывает к шаблону), грузим по
-  // первому ready-шаблону. Зависим от стабильного id, а не от массива.
-  const firstTemplateId = launchable[0]?.id;
   useEffect(() => {
-    if (!firstTemplateId) return;
+    if (!templateId) return;
     let cancelled = false;
+    // setState — внутри асинхронной функции, а не в теле эффекта: синхронный
+    // вызов в теле эффекта запрещён правилом react-hooks (каскадный рендер).
     void (async () => {
+      setLoading(true);
       try {
-        const list = await fetchEngLaunchPresets(firstTemplateId);
+        const res = await fetchEngSendingWindow(templateId);
         if (cancelled) return;
-        setPresets(list);
-        setPresetId((prev) => prev || (list[0]?.id ?? ''));
+        const initial = res.schedule ?? res.default;
+        setMixed(res.mixed === true);
+        if (initial && res.timezones && res.timezones.length > 0 && res.weekdays && res.weekdays.length > 0) {
+          setConfig({
+            value: { ...initial, days: [...initial.days] },
+            timezones: res.timezones,
+            weekdays: res.weekdays,
+          });
+        }
       } catch (e) {
-        if (!cancelled) setPresetsError(e instanceof Error ? e.message : 'Failed to load presets');
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'Failed to load the sending hours');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [firstTemplateId]);
+  }, [templateId]);
 
-  const onLaunchAll = async () => {
-    if (state.running || !presetId || launchable.length === 0) return;
-    const errors: string[] = [];
-    setState({ running: true, done: 0, total: launchable.length, errors: [] });
-    // Последовательно: параллельный запуск уронил бы лимиты Instantly и
-    // перемешал бы launch_info опросов.
-    for (let i = 0; i < launchable.length; i++) {
-      const tpl = launchable[i];
-      try {
-        const res = await launchEngTemplate(tpl.id, { preset_id: presetId });
-        if (!res.ok) errors.push(res.error ?? `Template ${i + 1}: launch failed`);
-      } catch (e) {
-        errors.push(e instanceof Error ? e.message : `Template ${i + 1}: launch failed`);
-      }
-      setState({ running: true, done: i + 1, total: launchable.length, errors: [...errors] });
-    }
-    setState({ running: false, done: launchable.length, total: launchable.length, errors });
-    onChanged();
+  const setValue = useCallback((next: EngSendingWindow) => {
+    setConfig((prev) => (prev ? { ...prev, value: next } : prev));
+  }, []);
+
+  return { config, setValue, loading, error, mixed };
+}
+
+/** «09:00» → «9:00»: в строке-сводке без ведущего нуля. */
+function shortHour(hhmm: string): string {
+  return hhmm.replace(/^0(\d)/, '$1');
+}
+
+/**
+ * Одна строка «когда уходят письма» — её же показываем и без редактора:
+ * «Mon–Fri, 9:00–17:00 · Eastern time — New York, Toronto». Дни подряд (в
+ * порядке списка сервера, Mon … Sun) — диапазоном, иначе через запятую. Пояс —
+ * подписью списка целиком: у «Pacific» в ней оговорка про зиму, и короткая
+ * подпись её бы спрятала.
+ */
+export function sendingWindowSummary(config: SendingWindowConfig): string {
+  const tz =
+    config.timezones.find((o) => o.value === config.value.timezone)?.label ?? config.value.timezone;
+  const order = config.weekdays.map((d) => d.value);
+  const picked = config.weekdays.filter((d) => config.value.days.includes(d.value));
+  if (picked.length === 0) return `No weekdays selected — nothing would be sent · ${tz}`;
+  const first = order.indexOf(picked[0].value);
+  const contiguous = picked.every((d, i) => order.indexOf(d.value) === first + i);
+  const days =
+    contiguous && picked.length >= 3
+      ? `${picked[0].label}–${picked[picked.length - 1].label}`
+      : picked.map((d) => d.label).join(', ');
+  return `${days}, ${shortHour(config.value.from)}–${shortHour(config.value.to)} · ${tz}`;
+}
+
+export function SendingWindowEditor({
+  config,
+  onChange,
+  disabled,
+}: {
+  config: SendingWindowConfig;
+  onChange: (next: EngSendingWindow) => void;
+  disabled?: boolean;
+}) {
+  const { value, timezones, weekdays } = config;
+  // Сохранённое значение может не совпасть со списком (окно выставили не из
+  // кабинета: получас вместо целого часа, пояс шире нашей выборки). Тогда
+  // дописываем его пунктом — иначе select нарисует первый вариант, а в
+  // состоянии останется другой, и клиент увидел бы не то, что стоит у
+  // рассыльщика.
+  const hourOptions = HOUR_OPTIONS.includes(value.from) && HOUR_OPTIONS.includes(value.to)
+    ? HOUR_OPTIONS
+    : [...new Set([...HOUR_OPTIONS, value.from, value.to])].sort();
+  const timezoneOptions = timezones.some((o) => o.value === value.timezone)
+    ? timezones
+    : [...timezones, { value: value.timezone, label: value.timezone }];
+  const toggleDay = (day: number) => {
+    const next = value.days.includes(day)
+      ? value.days.filter((d) => d !== day)
+      : [...value.days, day].sort((a, b) => a - b);
+    onChange({ ...value, days: next });
   };
 
   return (
-    <EngCard>
-      <div className="flex flex-wrap items-center gap-2">
-        {presets === null && !presetsError ? (
-          <span className="text-[11px] inline-flex items-center gap-1.5" style={{ color: 'var(--cp-text-m)' }}>
-            <EngSpinner className="h-3 w-3" /> Loading presets…
-          </span>
-        ) : presets && presets.length === 0 ? (
-          <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-            No sending preset configured yet — ask your manager to set one up.
-          </span>
-        ) : (
-          <>
-            <select
-              value={presetId}
-              onChange={(e) => setPresetId(e.target.value)}
-              className="ds-input text-xs"
-              aria-label="Sending preset"
-            >
-              {(presets ?? []).map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() => void onLaunchAll()}
-              disabled={state.running || !presetId}
-              className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
-            >
-              {state.running ? <EngSpinner className="h-3 w-3" /> : <Rocket className="h-3 w-3" />}
-              Launch all (paused)
-            </button>
-            <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-              {launchable.length} template{launchable.length === 1 ? '' : 's'} ready — campaigns stay paused for review
-            </span>
-          </>
-        )}
+    <div className="mt-3 rounded-md p-3" style={{ border: '1px solid var(--cp-divider)' }}>
+      <div className="flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: 'var(--cp-paper)' }}>
+        <Clock className="h-3 w-3" /> Sending hours
       </div>
-      {state.total > 0 && (
-        <div className="mt-2 text-[11px] ds-mono" style={{ color: 'var(--cp-text-m)' }}>
-          Launched {state.done}/{state.total}
-        </div>
-      )}
-      {state.errors.map((err, i) => (
-        <div key={i} className="mt-1 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-          {err}
-        </div>
-      ))}
-      {presetsError && (
+      <p className="mt-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+        Emails go out only inside these hours, in this timezone, on these days.
+      </p>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+          Timezone
+          <select
+            value={value.timezone}
+            disabled={disabled}
+            onChange={(e) => onChange({ ...value, timezone: e.target.value })}
+            className="ds-input mt-1 w-full text-xs"
+          >
+            {timezoneOptions.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+          Start
+          <select
+            value={value.from}
+            disabled={disabled}
+            onChange={(e) => onChange({ ...value, from: e.target.value })}
+            className="ds-input ds-mono mt-1 w-full text-xs"
+          >
+            {hourOptions.map((h) => (
+              <option key={h} value={h}>
+                {h}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+          End
+          <select
+            value={value.to}
+            disabled={disabled}
+            onChange={(e) => onChange({ ...value, to: e.target.value })}
+            className="ds-input ds-mono mt-1 w-full text-xs"
+          >
+            {hourOptions.map((h) => (
+              <option key={h} value={h}>
+                {h}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {weekdays.map((d) => {
+          const checked = value.days.includes(d.value);
+          return (
+            <button
+              key={d.value}
+              type="button"
+              disabled={disabled}
+              onClick={() => toggleDay(d.value)}
+              aria-pressed={checked}
+              className={`ds-nav-item px-2.5 py-1 text-[11px] ${checked ? 'active' : ''}`}
+            >
+              {d.label}
+            </button>
+          );
+        })}
+      </div>
+      {value.from >= value.to && (
         <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-          {presetsError}
+          The end time must be later than the start time.
         </div>
       )}
-    </EngCard>
+      {value.days.length === 0 && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
+          Pick at least one weekday — otherwise nothing is sent.
+        </div>
+      )}
+    </div>
   );
 }
 
-/* ── Основной компонент шага ── */
+/** Окно выбрано корректно — кнопку запуска/сохранения можно не блокировать. */
+export function isSendingWindowUsable(config: SendingWindowConfig | null): boolean {
+  if (!config) return true; // редактора нет — сервер применит свой дефолт
+  return config.value.days.length > 0 && config.value.from < config.value.to;
+}
 
-export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChanged: () => void }) {
-  const verticals = useMemo(() => (detail.verticals ?? []) as HeVertical[], [detail]);
-  const chains = useMemo(() => (detail.chains ?? []) as HeChainDto[], [detail]);
-  const bases = useMemo(() => (detail.bases ?? []) as EngBaseSummary[], [detail]);
-  const templates = useMemo(() => (detail.templates ?? []) as HeTemplate[], [detail]);
-  const jobs = useMemo(() => (detail.jobs ?? []) as HeJobSummary[], [detail]);
+/**
+ * Правка окна у УЖЕ запущенного шаблона. Грузим по кнопке (как превью базы):
+ * запущенных вертикалей в проекте бывает много, а окно смотрят по надобности.
+ */
+export function LaunchedSendingWindow({ templateId }: { templateId: string }) {
+  const [open, setOpen] = useState(false);
+  const { config, setValue, loading, error, mixed } = useSendingWindow(open ? templateId : undefined);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState('');
+  const [saveError, setSaveError] = useState('');
+  const [warnings, setWarnings] = useState<string[]>([]);
+  // После сохранения «разные окна» знает ответ PATCH (сколько кампаний из
+  // скольких приняли окно), а не загрузка формы. null — сохранения не было.
+  const [mixedAfterSave, setMixedAfterSave] = useState<boolean | null>(null);
+  const showMixed = mixedAfterSave ?? mixed;
 
-  // Карточка имеет смысл, только когда есть что ревьюить: готовая цепочка,
-  // база или шаблон вертикали.
-  const cards = verticals
-    .map((vertical) => ({
-      vertical,
-      chain: chains.find((c) => c.vertical_id === vertical.id && c.status === 'ready'),
-      base: bases.find((b) => b.vertical_id === vertical.id),
-      template: templates.find((t) => t.vertical_id === vertical.id),
-    }))
-    .filter((c) => c.chain || c.base || c.template);
-
-  // К запуску готовы ready-шаблоны без launch_info (уже запущенные — только бейдж).
-  const launchable = templates.filter(
-    (t) => t.status === 'ready' && !parseLaunchInfo((t as { launch_info?: unknown }).launch_info),
-  );
-
-  if (cards.length === 0) {
-    return (
-      <EngCard>
-        <p className="text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          Autopilot is still working — letters, bases and templates will appear here once they are ready.
-        </p>
-        <Link
-          href={'/client/eng/dashboard' as Route}
-          prefetch={false}
-          className="mt-2 inline-flex items-center gap-1.5 text-xs hover:underline"
-          style={{ color: 'var(--cp-paper)' }}
-        >
-          See Command Center
-        </Link>
-      </EngCard>
-    );
-  }
+  const onSave = async () => {
+    if (!config || saving || !isSendingWindowUsable(config)) return;
+    setSaving(true);
+    setSaved('');
+    setSaveError('');
+    setWarnings([]);
+    try {
+      const res = await updateEngSendingWindow(templateId, config.value);
+      if (res.error) {
+        setSaveError(res.error);
+      } else {
+        const updated = res.campaigns_updated;
+        const total = res.campaigns_total;
+        const partial = typeof updated === 'number' && typeof total === 'number' && updated < total;
+        // Часть кампаний окно не приняла — «Saved» было бы неправдой: кабинет
+        // выбор в этом случае не сохраняет, а часть кампаний на прежних часах.
+        setSaved(
+          partial
+            ? `Applied to ${updated} of ${total} campaigns`
+            : updated && updated > 1
+              ? `Saved — applied to ${updated} campaigns`
+              : 'Saved',
+        );
+        setMixedAfterSave(typeof updated === 'number' && typeof total === 'number' ? partial : null);
+        setWarnings(res.warnings ?? []);
+      }
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Failed to update the sending hours');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
-    <div className="flex flex-col gap-4">
-      {launchable.length > 0 && <LaunchAllPanel launchable={launchable} onChanged={onChanged} />}
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => {
+          // Повторное открытие перечитывает окно с сервера — прежний ответ
+          // сохранения про «разные окна» к нему уже не относится.
+          setMixedAfterSave(null);
+          setOpen((v) => !v);
+        }}
+        className="ds-btn-secondary inline-flex items-center gap-1.5 text-[11px]"
+      >
+        {loading ? <EngSpinner className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
+        {open ? 'Hide sending hours' : 'Sending hours'}
+      </button>
+      {open && error && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
+          {error}
+        </div>
+      )}
+      {open && config && (
+        <>
+          {/* Сводка «когда уходят письма» — только когда окно одно у всех
+              кампаний запуска. Иначе (окно встало у части, часть не
+              прочиталась) она выдала бы окно одной кампании за окно всех. */}
+          {showMixed ? (
+            <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+              The campaigns of this launch may not all use the hours shown below right now — save the hours
+              here to apply them to every one of them.
+            </div>
+          ) : (
+            <div className="mt-2 text-[11px] ds-mono" style={{ color: 'var(--cp-text-m)' }}>
+              {sendingWindowSummary(config)}
+            </div>
+          )}
+          <SendingWindowEditor config={config} onChange={setValue} disabled={saving} />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void onSave()}
+              disabled={saving || !isSendingWindowUsable(config)}
+              className="ds-btn-primary inline-flex items-center gap-1.5 text-[11px]"
+            >
+              {saving && <EngSpinner className="h-3 w-3" />}
+              Save sending hours
+            </button>
+            {saved && (
+              <span className="text-[11px]" style={{ color: 'var(--cp-green)' }}>
+                {saved}
+              </span>
+            )}
+          </div>
+          {saveError && (
+            <div className="mt-1 text-[11px]" style={{ color: 'var(--cp-red)' }}>
+              {saveError}
+            </div>
+          )}
+          {warnings.map((w, i) => (
+            <div key={i} className="mt-1 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+              {w}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
 
-      {cards.map(({ vertical, chain, base, template }) => {
-        const templateBusy = jobs.some(
-          (j) =>
-            j.stage === 'template' &&
-            (j.status === 'pending' || j.status === 'running') &&
-            (j.payload as { base_id?: string } | null)?.base_id === base?.id,
-        );
-        return (
-          <VerticalReviewCard
-            key={vertical.id}
-            vertical={vertical}
-            chain={chain}
-            base={base}
-            template={template}
-            templateBusy={templateBusy}
-            onChanged={onChanged}
-          />
-        );
-      })}
+/* ── Итоговые письма шаблона (то, что уходит в кампанию) ── */
+
+/**
+ * Что сейчас значат письма шаблона рынка — одна фраза над ними. Состояние
+ * считает карточка рынка шага 3 (EngStepLaunch) по тем же предикатам, что и
+ * запуск:
+ *  - `launched` — запуск записан и закончен: кампании созданы с этими
+ *    письмами (письма шаблона после запуска не меняются — правки итоговых
+ *    писем в кабинете нет);
+ *  - `unfinished` — запуск записан, но часть аудитории не уехала: достройка
+ *    (автозапуск или «Launch now») берёт письма того же шаблона;
+ *  - `next_launch` — запуска нет, письма проходят проверку: кампании рынка
+ *    создаст с ними и автозапуск, и «Launch now»;
+ *  - `rewrite_none` / `rewrite_unfinished` — письма запуск откажет
+ *    (`needs_rewrite`), причину пишет фраза engTemplateNeedsRewriteText прямо
+ *    над письмами.
+ */
+export type FinalLettersState = 'launched' | 'unfinished' | 'next_launch' | 'rewrite_none' | 'rewrite_unfinished';
+
+const FINAL_LETTERS_STATE_TEXT: Record<FinalLettersState, string> = {
+  launched: 'The campaigns of this market were created with these letters.',
+  unfinished:
+    'The campaigns of this market already use these letters; finishing its launch adds the rest of its audience with the same letters.',
+  next_launch: 'When sending for this market starts, its campaigns are created with these letters.',
+  rewrite_none: 'These letters cannot be sent as they are — see the note above.',
+  rewrite_unfinished:
+    'The campaigns already created use these letters, but they cannot finish the launch as they are — see the note above.',
+};
+
+/** «waits N days after letter M» — пауза письма так, как её получает кампания. */
+function waitText(days: number, previousLetter: number): string {
+  return `waits ${days} day${days === 1 ? '' : 's'} after letter ${previousLetter}`;
+}
+
+/**
+ * Письма шаблона ТАК, КАК ИХ ОТДАЁТ ЗАПУСК: последовательность собирает та же
+ * buildLaunchSequence (launchHandoff.ts), что и запуск, — тема только у
+ * письма 1 и его вариантов (у писем 2+ запуск тему обнуляет, и они идут в той
+ * же ветке), варианты B — те же и в том же числе, пауза — wait_days письма
+ * (у кампании это задержка перед ним). Сегментные варианты запуск ставит на
+ * место основного текста (версии A) в кампании сегмента — здесь они показаны
+ * под письмом именно так. Подстановки и их замены — из проекции
+ * (`placeholders`), без маппинга: null — сервер их не посчитал, тогда о
+ * подстановках экран ничего не утверждает.
+ */
+export function FinalLetters({ template, state }: { template: HeTemplate; state: FinalLettersState }) {
+  const letters = Array.isArray(template.letters) ? template.letters : [];
+  const sequence = buildLaunchSequence(letters);
+  const placeholders = engTemplatePlaceholders(template);
+  return (
+    <div className="mt-3 rounded-md p-3" style={{ border: '1px solid var(--cp-divider)' }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-paper)' }}>
+          Final letters
+        </span>
+        <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          read-only
+        </span>
+      </div>
+      <p className="mt-1 mb-0 text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+        {FINAL_LETTERS_STATE_TEXT[state]}
+      </p>
+      {!sequence ? (
+        <p className="mt-2 mb-0 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          This template has no letters.
+        </p>
+      ) : (
+        <div className="mt-2 flex flex-col gap-2">
+          {sequence.steps.map((step, i) => {
+            // jsonb шаблона формы не гарантирует: тема и тело — строкой.
+            const versions = [
+              { subject: String(step.subject ?? ''), body: String(step.body ?? '') },
+              ...(step.variants ?? []).map((v) => ({ subject: String(v.subject ?? ''), body: String(v.body ?? '') })),
+            ];
+            const segments = (Array.isArray(letters[i]?.segment_variants) ? letters[i].segment_variants! : []).filter(
+              (v) => typeof v?.when === 'string' && v.when.trim() !== '' && typeof v.text === 'string',
+            );
+            return (
+              <div key={i} className="rounded-md p-3" style={{ border: '1px solid var(--cp-divider)' }}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    Letter {i + 1}
+                  </span>
+                  {i > 0 && (
+                    <span className="ml-auto text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                      {waitText(step.wait_days, i)}
+                    </span>
+                  )}
+                </div>
+                {i > 0 && (
+                  <div className="mt-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    Same thread as letter 1 — no subject line of its own.
+                  </div>
+                )}
+                {versions.length > 1 && (
+                  <div className="mt-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    Each recipient gets one of these {versions.length} versions.
+                  </div>
+                )}
+                {versions.map((v, k) => (
+                  <div key={k} className="mt-2">
+                    {versions.length > 1 && (
+                      <div className="ds-mono text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+                        Version {String.fromCharCode(65 + k)}
+                      </div>
+                    )}
+                    {i === 0 && (
+                      <div className="text-xs font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                        Subject: {v.subject.trim() ? v.subject : '(empty)'}
+                      </div>
+                    )}
+                    <div className="mt-1 whitespace-pre-wrap text-xs" style={{ color: 'var(--cp-paper)' }}>
+                      {v.body}
+                    </div>
+                  </div>
+                ))}
+                {segments.map((seg, k) => (
+                  <div key={`s${k}`} className="mt-2 rounded-md p-2" style={{ border: '1px dashed var(--cp-divider)' }}>
+                    <div className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                      Companies sorted into «{seg.when.trim()}» get this text in place of{' '}
+                      {versions.length > 1 ? 'version A' : 'the text above'}:
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap text-xs" style={{ color: 'var(--cp-paper)' }}>
+                      {seg.text}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {placeholders && placeholders.length > 0 && (
+        <div className="mt-2">
+          <div className="text-[11px] font-semibold" style={{ color: 'var(--cp-paper)' }}>
+            Placeholders
+          </div>
+          <p className="mt-1 mb-0 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+            Words in double curly braces are placeholders:
+          </p>
+          <ul className="mt-1 mb-0 flex flex-col gap-0.5 pl-4 text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+            {placeholders.map((p) => (
+              <li key={p.name}>{engPlaceholderText(p)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

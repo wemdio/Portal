@@ -13,7 +13,7 @@
 import type { LLMMessage } from '../llm';
 import type { BrandCloudPromptInput } from './brandCloud';
 
-const SYSTEM = `You are a lead research analyst at the Polza agency. You are given texts from a brand's website (homepage, case studies, client logos, reviews, press mentions) — its "brand cloud".
+const SYSTEM = `You are a lead research analyst. You are given texts from a brand's website (homepage, case studies, client logos, reviews, press mentions) — its "brand cloud".
 
 Your task is to extract ALL entities (companies, brands, products, people, media) that appear as the brand's clients/partners/references, and classify each one:
 

@@ -12,6 +12,7 @@
 import { z } from 'zod';
 import { VE_BROAD_HYPOTHESES_MAX } from './broadHypotheses';
 import { VePriorityNicheResultSchema, vePriorityNicheKey } from './priorityNiches';
+import { VeAudienceScopeSchema, veAudienceScopeKey } from './audienceScope';
 
 /* ─────────────────────── site_profile ─────────────────────── */
 
@@ -85,6 +86,7 @@ export const VeHypothesisCandidateSchema = z.object({
    * блоку ответа (broad_hypotheses), а не модель у отдельной гипотезы.
    */
   broad: z.boolean().optional(),
+  audience_scope: VeAudienceScopeSchema.nullable().optional(),
 });
 export type VeHypothesisCandidate = z.infer<typeof VeHypothesisCandidateSchema>;
 
@@ -107,10 +109,42 @@ export const VeHypothesesBatchSchema = z.object({
   broad_hypotheses: VeBroadHypothesesBlockSchema,
   hypotheses: z.array(VeHypothesisCandidateSchema).min(1),
 });
+/** Opted-in generation cannot silently lose malformed/missing scope metadata. */
+const ScopedCandidateFields = {
+  title: z.string().trim().min(1).max(160).regex(/[\p{L}\p{N}]/u),
+  description: z.string().trim().min(1).max(2000),
+  fit_rationale: z.string().trim().min(1),
+};
+const VeScopedHypothesesBatchObject = z.object({
+  broad_hypotheses: z.array(VeBroadHypothesisCandidateSchema.extend({
+    ...ScopedCandidateFields,
+    audience_scope: VeAudienceScopeSchema.extend({ kind: z.literal('sector') }),
+  })).max(VE_BROAD_HYPOTHESES_MAX),
+  hypotheses: z.array(VeHypothesisCandidateSchema.extend({
+    ...ScopedCandidateFields,
+    audience_scope: VeAudienceScopeSchema.extend({ kind: z.literal('segment') }),
+  })).max(20),
+});
+function validateScopedTitles(candidates: VeHypothesisCandidate[], ctx: z.RefinementCtx): void {
+  const titles = new Map<string, string>();
+  for (const candidate of candidates) {
+    const title = vePriorityNicheKey(candidate.title);
+    const parsedScope = VeAudienceScopeSchema.safeParse(candidate.audience_scope);
+    if (!parsedScope.success) continue;
+    const scope = veAudienceScopeKey(parsedScope.data);
+    const previous = titles.get(title);
+    if (previous && previous !== scope) ctx.addIssue({ code: 'custom', message: 'Different audiences must have distinct titles; do not discard mandatory conditions through title deduplication' });
+    titles.set(title, scope);
+  }
+}
+export const VeScopedHypothesesBatchSchema = VeScopedHypothesesBatchObject.superRefine((value, ctx) => {
+  if (!value.hypotheses.length && !value.broad_hypotheses.length) ctx.addIssue({ code: 'custom', message: 'Return at least one fitting audience' });
+  validateScopedTitles([...value.broad_hypotheses, ...value.hypotheses], ctx);
+});
 export type VeHypothesesBatchOutput = z.infer<typeof VeHypothesesBatchSchema>;
 
 /** Retained titles are the same ones passed to evidence, including the broad cap. */
-export function combineVeHypothesisCandidates(output: VeHypothesesBatchOutput): VeHypothesisCandidate[] {
+export function combineVeHypothesisCandidates(output: VeHypothesesBatchOutput, useScope = true): VeHypothesisCandidate[] {
   const narrow = output.hypotheses.map(({ broad: _broad, ...candidate }) => candidate);
   const seen = new Set(narrow.map((candidate) => vePriorityNicheKey(candidate.title)));
   const broad: VeHypothesisCandidate[] = [];
@@ -120,17 +154,28 @@ export function combineVeHypothesisCandidates(output: VeHypothesesBatchOutput): 
     seen.add(key);
     broad.push({ ...candidate, tier: 1, broad: true });
   }
-  return [...broad, ...narrow];
+  const scopeKeys = new Set<string>();
+  return [...broad, ...narrow].filter((candidate) => {
+    if (!useScope || !candidate.audience_scope) return true;
+    const key = veAudienceScopeKey(candidate.audience_scope);
+    if (scopeKeys.has(key)) return false;
+    scopeKeys.add(key);
+    return true;
+  });
 }
 
 /** Missing coverage enters the existing bounded schema retry, never a new paid call per niche. */
-export function createVePriorityHypothesesSchema(niches: readonly string[]) {
-  return VeHypothesesBatchSchema.extend({
+export function createVePriorityHypothesesSchema(niches: readonly string[], scoped = false) {
+  return (scoped ? VeScopedHypothesesBatchObject : VeHypothesesBatchSchema).extend({
     priority_niche_results: z.array(VePriorityNicheResultSchema).max(8),
   }).superRefine((output, ctx) => {
+    if (scoped) {
+      const parsed = VeScopedHypothesesBatchSchema.safeParse(output);
+      if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ code: 'custom', path: issue.path, message: issue.message });
+    }
     const keys = new Set(niches.map(vePriorityNicheKey));
     const seen = new Set<string>();
-    const titles = new Set(combineVeHypothesisCandidates(output).map((candidate) => candidate.title));
+    const titles = new Set(combineVeHypothesisCandidates(output, scoped).map((candidate) => candidate.title));
     for (const [index, result] of output.priority_niche_results.entries()) {
       const key = vePriorityNicheKey(result.niche);
       if (!keys.has(key) || seen.has(key)) {
@@ -161,6 +206,12 @@ export const VeBroadHypothesesOnlySchema = z.object({
     fit_rationale: z.string().trim().min(1),
   })),
 });
+export const VeScopedBroadHypothesesOnlySchema = VeBroadHypothesesOnlySchema.extend({
+  broad_hypotheses: z.array(VeBroadHypothesisCandidateSchema.extend({
+    ...ScopedCandidateFields,
+    audience_scope: VeAudienceScopeSchema.extend({ kind: z.literal('sector') }),
+  })).max(VE_BROAD_HYPOTHESES_MAX),
+}).superRefine((value, ctx) => validateScopedTitles(value.broad_hypotheses, ctx));
 export type VeBroadHypothesesOnlyOutput = z.infer<typeof VeBroadHypothesesOnlySchema>;
 
 /* ─────────────────────── evidence (проход b) ─────────────────────── */

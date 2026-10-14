@@ -10,6 +10,18 @@
 import type { LLMMessage } from '../llm';
 import type { HypothesesClientContextInput, HypothesesPromptInput } from './hypotheses';
 
+export const AUDIENCE_SCOPE_GENERATION_RULES_EN = `AUDIENCE DESIGN:
+- Return only distinct fitting audiences: up to 5 sectors in broad_hypotheses and up to 20 segments in hypotheses. There is no minimum count or tier quota. Do not fragment a market to fill slots.
+- One hypothesis is one company base with the same buyer type, decision-maker class and compatible offer. Combine synonyms and closely related sub-niches through OR. Preserve their names in any_of. Never merge suppliers with their customers, different buying roles, conflicting regions or incompatible offers.
+- Do not generate both broad and narrow copies of the same audience merely for different pains, channels or email angles. A separate segment needs a materially different audience or offer. Explore obvious, adjacent and unexpected buyers without inventing a count.
+- EVERY candidate must have audience_scope: {"version":1,"kind":"sector"|"segment","any_of":["company activity and type"],"required":[],"excluded":[]}.
+- kind=sector only in broad_hypotheses, kind=segment only in hypotheses. any_of contains 1–12 activity alternatives: ANY ONE qualifies, not all at once. For an entire sector include the sector itself; example sub-sectors must not turn into a closed narrow list. The title and description must reflect this scope exactly.
+- required contains only explicit mandatory client/specialist constraints (0–12), excluded only explicit exclusions (0–12). Never invent headcount, revenue, software, hiring, internal problems or need-for-product requirements. Do not weaken explicit client restrictions to increase volume.
+- Pains, goals, triggers and offer reasoning belong in fit_rationale/rationale, never in company admission requirements. description briefly explains who is collected. Scope arrays contain concrete strings up to 240 characters, not instructions.
+- Different titles with the same any_of/required/excluded are one hypothesis. Do not discard different constraints as duplicates. Explain fit economics for every audience; do not invent supporting facts.`;
+
+export const AUDIENCE_SCOPE_JSON_ITEM_EN = `{"tier":1,"title":"Short audience name","description":"Who is collected","audience_scope":{"version":1,"kind":"segment","any_of":["Activity and company type"],"required":[],"excluded":[]},"fit_rationale":"Decision-maker → goal → pain → offer → economics","rationale":"Reason","potential_pct":60,"search_queries":["Fact-check query"]}`;
+
 /** Core of fit economics: shared by the main list and the separate broad generation. */
 export const FIT_ECONOMICS_CORE_EN = `FIT ECONOMICS (a hard criterion — check EVERY hypothesis; it answers for FIT, not for the vertical's existence):
 - A segment qualifies only if a typical deal or client LTV in that vertical can pay back paid outbound: the agency's service costs thousands of USD per month. If the segment's average check or client LTV is clearly below the channel's annual cost — cut potential_pct and add a "RISK: economics …" note to the rationale.
@@ -132,6 +144,13 @@ This is a strong signal of the client's taste: topics similar to rejected ones �
 ${input.actualsHistory.map((a) => `- "${a.name}": forecast ${a.predicted_pct}% → actual reply ${a.actual_reply_pct}%${a.actual_sent ? ` (${a.actual_sent.toLocaleString('en-US')} sent)` : ''}`).join('\n')}
 How to read: potential_pct is the vertical's potential, NOT a reply% forecast. But use these pairs as a scale: verticals with high actual replies received high forecasts. If your estimate for a similar segment diverges strongly from the fact — double-check it.`
       : '';
+
+  if (input.audienceScope) return [
+    { role: 'system', content: `You research B2B outbound markets. Produce verifiable audiences for the client's product without search or invented evidence.\n${FIT_ECONOMICS_CORE_EN}\n${HYPOTHESIS_FIELD_RULES_EN}\n${AUDIENCE_SCOPE_GENERATION_RULES_EN}\nTier 1 is obvious, 2 adjacent, 3 unexpected; it is not a potential score. Respond in English, JSON only.` },
+    { role: 'user', content: `${buildHypothesesClientContextEn(input)}\n${portfolioBlock}\n${markupBlock}\n${actualsBlock}
+Return {"broad_hypotheses":[],"hypotheses":[]} with candidates shaped as ${AUDIENCE_SCOPE_JSON_ITEM_EN}. Broad candidates use kind="sector" and may omit tier. Either block may be empty, but return at least one fitting audience. Do not fill a quota with duplicates or poor fits.
+${input.priorityNiches?.length ? `Also return priority_niche_results at root, exactly one entry for every requested niche: {"niche":"exact name","status":"suggested"|"unavailable","hypothesis_titles":["exact titles of retained candidates"],"reason":"specific reason"}. suggested requires at least one title; unavailable requires an empty list. One combined audience may cover multiple niches. Do not ignore or weaken explicit client restrictions.` : ''}` },
+  ];
 
   const user = `${buildHypothesesClientContextEn(input)}
 ${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}

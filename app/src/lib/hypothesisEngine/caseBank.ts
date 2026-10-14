@@ -15,7 +15,8 @@
  *    (общий хелпер для API-роута загрузки; модель getHeModel('gate'));
  *  - scoreCaseForVertical / selectCaseForVertical — подбор кейса под вертикаль
  *    (взвешенный токен-оверлап названия+синонимов вертикали по полям
- *    industry/client_type/task, порог MIN_CASE_SCORE, tie-break upload);
+ *    industry/client_type/task, порог MIN_CASE_SCORE, tie-break upload;
+ *    у market='us' — английские стоп-слова и нормализация окончаний);
  *  - normalizeCaseText — нормализация текста кейса для дедупа;
  *  - renderClientCaseBlock — блок «КЕЙС КЛИЕНТА …» для промптов chain/template.
  */
@@ -24,6 +25,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
 import { callLLMWithSchema, getHeModel, type LLMMessage } from './llm';
+import { projectMarket, type HeMarket } from './market';
 import type { HeCase } from './types';
 
 /* ─────────────────────────── Типы ─────────────────────────── */
@@ -132,6 +134,105 @@ function tokenize(text: string): string[] {
     .filter((t) => t.length >= 2 && !STOP_TOKENS.has(t));
 }
 
+/*
+ * ── Токены ENG-проекта (he_projects.market = 'us') ──
+ *
+ * У ENG вертикали и кейсы английские (кейсы сайта извлекает EN-промпт
+ * site_profile), а набор выше английскому домену не обучен: в нём только
+ * английские служебные слова. Поэтому «services», «business», «company»
+ * засчитывались как совпадение вертикали, а «clinics» не совпадало с «clinic».
+ * Итог — релевантный кейс проигрывал нерелевантным, у которых в полях те же
+ * общие слова (пример и цифры — отчёт лейна names-cases, раунд 3).
+ *
+ * RU-путь ниже не меняется ни на байт: tokenize и STOP_TOKENS прежние, и
+ * EN-ветка включается ТОЛЬКО по рынку проекта.
+ */
+
+/**
+ * Служебные слова английского, которых нет в STOP_TOKENS. Сравниваются с
+ * токеном как он есть (до нормализации окончаний).
+ */
+const EN_FUNCTION_TOKENS = new Set([
+  'with', 'by', 'from', 'into', 'via', 'per', 'as', 'is', 'are', 'be', 'our', 'your', 'their', 'its',
+  'we', 'you', 'they', 'that', 'this', 'these', 'who', 'which', 'new', 'more', 'other', 'all',
+]);
+
+/**
+ * Доменно-общие слова английских кейсов и вертикалей — тот же принцип, что у
+ * русской половины STOP_TOKENS: слово встречается в кейсах ЛЮБОЙ индустрии и
+ * поэтому не отличает одну вертикаль от другой. Формы — после нормализации
+ * множественного числа (normalizeEnPlural), то есть «services» ловится как
+ * «service».
+ *
+ * Состав:
+ *  - русская половина STOP_TOKENS по-английски: sale (продажи), service
+ *    (услуги), client/customer (клиенты), business (бизнес), lead (лиды),
+ *    inquiry/request (заявки), company (компания), market (рынок),
+ *    growth/grow (рост), work (работа), project (проект), solution (решение),
+ *    product (продукт);
+ *  - тип организации, а не отрасль: firm, agency, group, provider, owner —
+ *    «marketing agency» и «staffing agency» иначе совпадали бы по «agency»
+ *    с весом поля индустрии, а этого одного хватает до порога MIN_CASE_SCORE;
+ *  - размер и охват: small, medium, mid, midsize, large, local («small
+ *    business» стоит в client_type кейсов любой отрасли);
+ *  - industry, sector, revenue, team — рамка задачи кейса («increase
+ *    revenue», «sales team»), не отрасль.
+ *
+ * Чего в списке НЕТ, сознательно: delivery (в отличие от RU «доставка»: у ENG
+ * это и отрасль — food delivery, courier), marketing, software, startup, b2b,
+ * office, store — они называют отрасль или сегмент.
+ */
+const EN_DOMAIN_STOP_TOKENS = new Set([
+  'sale', 'service', 'client', 'customer', 'business', 'lead', 'inquiry', 'request', 'company',
+  'market', 'growth', 'grow', 'work', 'project', 'solution', 'product',
+  'firm', 'agency', 'group', 'provider', 'owner',
+  'small', 'medium', 'mid', 'midsize', 'large', 'local',
+  'industry', 'sector', 'revenue', 'team',
+]);
+
+/**
+ * Множественное число → единственное, консервативно: только латиница от 4
+ * букв; -ies → -y (agencies), -es после ss/sh/ch/x/z (businesses, boxes),
+ * иначе -s. Окончания -ss/-us/-is/-as не трогаются (glass, campus, analysis,
+ * saas).
+ */
+function normalizeEnPlural(token: string): string {
+  if (token.length < 4 || !/^[a-z]+$/.test(token)) return token;
+  if (token.length >= 5 && token.endsWith('ies')) return `${token.slice(0, -3)}y`;
+  if (/(?:ss|sh|ch|x|z)es$/.test(token)) return token.slice(0, -2);
+  if (token.endsWith('s') && !/(?:ss|us|is|as)$/.test(token)) return token.slice(0, -1);
+  return token;
+}
+
+/**
+ * -ing / -ed → основа, только если основа не короче 4 букв (staffing → staff,
+ * marketing → market; hiring и seed остаются как есть). Применяется ПОСЛЕ
+ * проверки стоп-слов: иначе «marketing» превратился бы в стоп-слово «market»
+ * и отрасль пропала бы из скора.
+ */
+function normalizeEnVerbal(token: string): string {
+  if (!/^[a-z]+$/.test(token)) return token;
+  if (token.endsWith('ing') && token.length - 3 >= 4) return token.slice(0, -3);
+  if (token.endsWith('ed') && token.length - 2 >= 4) return token.slice(0, -2);
+  return token;
+}
+
+/**
+ * Токены ENG-проекта. domainStop=false — без доменных стоп-слов (только
+ * служебные): фолбэк scoreCaseForVertical для вертикали, от названия
+ * которой после стоп-слов не осталось ничего.
+ */
+function tokenizeEn(text: string, domainStop: boolean): string[] {
+  const out: string[] = [];
+  for (const raw of text.toLowerCase().split(/[^a-zа-яё0-9]+/i)) {
+    if (raw.length < 2 || STOP_TOKENS.has(raw) || EN_FUNCTION_TOKENS.has(raw)) continue;
+    const singular = normalizeEnPlural(raw);
+    if (domainStop && EN_DOMAIN_STOP_TOKENS.has(singular)) continue;
+    out.push(normalizeEnVerbal(singular));
+  }
+  return out;
+}
+
 /**
  * Нормализация текста кейса для дедупа: lowercase + схлопывание пробельных
  * последовательностей. Один и тот же кейс с главной страницы и /cases
@@ -167,16 +268,34 @@ export const MIN_CASE_SCORE = 3;
  * вертикали + синонимов суммируются веса полей, где токен встретился
  * (industry 3 / client_type 2 / task 1; lowercase, токены ≥2 символов, без
  * стоп-слов). 0 — кейс не релевантен.
+ *
+ * market='us' — английские токены (tokenizeEn: служебные и доменные
+ * стоп-слова EN, нормализация окончаний). Фолбэк: если от НАЗВАНИЯ
+ * вертикали после стоп-слов не осталось ни одного токена (вертикаль
+ * «Business services»), обе стороны считаются без доменных стоп-слов —
+ * общие слова и есть её отрасль. Без фолбэка у такой вертикали скор всегда 0
+ * (кейса нет, даже когда он про неё) либо решают случайные слова синонимов.
+ * Смотрим на название, а не на название с синонимами: один уцелевший токен
+ * синонима («B2B service providers» → b2b) фолбэк не отменяет. У RU-пути
+ * фолбэка нет — как и было, пустой набор даёт 0.
  */
-export function scoreCaseForVertical(target: CaseScoreTarget, vertical: VerticalScoreInput): number {
-  const verticalTokens = new Set(
-    tokenize([vertical.name, ...(vertical.synonyms ?? [])].filter(Boolean).join(' ')),
-  );
+export function scoreCaseForVertical(
+  target: CaseScoreTarget,
+  vertical: VerticalScoreInput,
+  market: HeMarket = 'ru',
+): number {
+  const verticalText = [vertical.name, ...(vertical.synonyms ?? [])].filter(Boolean).join(' ');
+  let tokenizeField: (text: string) => string[] = tokenize;
+  if (market === 'us') {
+    const domainStop = tokenizeEn(vertical.name ?? '', true).length > 0;
+    tokenizeField = (text) => tokenizeEn(text, domainStop);
+  }
+  const verticalTokens = new Set(tokenizeField(verticalText));
   if (!verticalTokens.size) return 0;
   const fieldTokens: Array<[number, Set<string>]> = [
-    [FIELD_WEIGHTS.industry, new Set(tokenize(target.industry ?? ''))],
-    [FIELD_WEIGHTS.client_type, new Set(tokenize(target.client_type ?? ''))],
-    [FIELD_WEIGHTS.task, new Set(tokenize(target.task ?? ''))],
+    [FIELD_WEIGHTS.industry, new Set(tokenizeField(target.industry ?? ''))],
+    [FIELD_WEIGHTS.client_type, new Set(tokenizeField(target.client_type ?? ''))],
+    [FIELD_WEIGHTS.task, new Set(tokenizeField(target.task ?? ''))],
   ];
   let score = 0;
   for (const token of verticalTokens) {
@@ -195,23 +314,31 @@ export function scoreCaseForVertical(target: CaseScoreTarget, vertical: Vertical
  * источника первый встреченный и есть самый ранний. null, если релевантных
  * кейсов нет (в промпты тогда ничего не инжектится — fallback на кейсы из
  * брифа, см. промпты chain/template).
+ *
+ * Рынок проекта читается здесь же (he_projects.market), потому что оба
+ * вызывающих (stages/chain, stages/template) передают только вертикаль.
+ * Сбой этого чтения стадию не роняет и кейс не отнимает: скор считается
+ * прежними (RU) токенами — ровно так, как до EN-токенов считался у всех.
  */
 export async function selectCaseForVertical(
   supabase: SupabaseClient,
   projectId: string,
   vertical: VerticalScoreInput,
 ): Promise<HeCase | null> {
-  const { data, error } = await supabase
-    .from('he_cases')
-    .select('*')
-    .eq('project_id', projectId)
-    .order('created_at', { ascending: true });
+  const [{ data, error }, market] = await Promise.all([
+    supabase
+      .from('he_cases')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: true }),
+    readCaseScoringMarket(supabase, projectId),
+  ]);
   if (error) throw new Error(`he_cases read: ${error.message}`);
 
   let best: HeCase | null = null;
   let bestScore = 0;
   for (const row of (data ?? []) as HeCase[]) {
-    const score = scoreCaseForVertical(row, vertical);
+    const score = scoreCaseForVertical(row, vertical, market);
     const uploadWinsTie =
       best !== null && score === bestScore && row.source === 'upload' && best.source !== 'upload';
     if (score > bestScore || uploadWinsTie) {
@@ -220,6 +347,21 @@ export async function selectCaseForVertical(
     }
   }
   return best !== null && bestScore >= MIN_CASE_SCORE ? best : null;
+}
+
+/** Рынок проекта для подбора кейса; любой сбой чтения — 'ru' (см. выше). */
+async function readCaseScoringMarket(supabase: SupabaseClient, projectId: string): Promise<HeMarket> {
+  try {
+    const { data, error } = await supabase
+      .from('he_projects')
+      .select('market')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (error || !data) return 'ru';
+    return projectMarket(data as { market?: string | null });
+  } catch {
+    return 'ru';
+  }
 }
 
 /* ─────────────────── Рендер блока для промптов ─────────────────── */

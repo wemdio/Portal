@@ -31,7 +31,7 @@ import {
   type HypothesesPromptInput,
 } from '@/lib/verticalEngineV2/prompts/hypotheses';
 import { BROAD_HYPOTHESES_RULES_EN, buildHypothesesInstantMessagesEn } from '@/lib/verticalEngineV2/prompts/hypotheses.en';
-import { VeBroadHypothesesOnlySchema, VeHypothesesBatchSchema } from '@/lib/verticalEngineV2/schemas';
+import { VeBroadHypothesesOnlySchema, VeHypothesesBatchSchema, VeScopedBroadHypothesesOnlySchema } from '@/lib/verticalEngineV2/schemas';
 import { VE_BROAD_RESEARCH_BUSY_TEXT, selectNewBroadCandidates, veBroadTitleKey } from '@/lib/verticalEngineV2/broadHypotheses';
 import {
   VE_BROAD_ADD_LABEL,
@@ -134,6 +134,7 @@ function broadDb(tables = seedTables(), options: { error?: string; loseReply?: b
           rank: Math.max(db.getRows('ve_verticals').length, ...db.getRows('ve_verticals').map((v) => Number(v.rank ?? 0))) + 1 });
         await db.from('ve_hypotheses').insert({ id: hypothesisId, project_id: PROJECT, vertical_id: verticalId,
           tier: 1, title: c.title, description: c.description, fit_rationale: c.fit_rationale,
+          ...(c.audience_scope ? { audience_scope: c.audience_scope } : {}),
           evidence: [], seasonality: null, potential_pct: c.potential_pct, status: 'proposed', broad: true });
         added.push({ title: c.title, hypothesis_id: hypothesisId, vertical_id: verticalId });
       }
@@ -165,6 +166,31 @@ beforeEach(() => {
 afterAll(() => { delete process.env.VE_MODEL_RESEARCH; });
 
 describe('VE2 stage broad_hypotheses on an existing project', () => {
+  it('uses one scoped generation only when both flags allow it and preserves its receipt after flag removal', async () => {
+    const priorScope = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS, priorGeneration = process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS;
+    const scope = { version: 1, kind: 'sector', any_of: ['Финтех', 'Платежные провайдеры'], required: ['Россия'], excluded: [] };
+    const db = broadDb(seedTables(), { loseReply: true });
+    const before = snapshot(db);
+    try {
+      process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = PROJECT;
+      process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS = PROJECT;
+      llmReturns({ broad_hypotheses: [{ ...sector('Финтех'), audience_scope: scope },
+        { ...sector('Платформы финансов'), audience_scope: { ...scope, any_of: [...scope.any_of].reverse() } }] });
+      await expect(runVeStage(job(), { supabase: db as never })).rejects.toThrow('response lost');
+      expect(mockCallLLMWithSchema).toHaveBeenCalledTimes(1);
+      expect(mockCallLLMWithSchema.mock.calls[0][1]).toBe(VeScopedBroadHypothesesOnlySchema);
+      const inserted = db.getRows('ve_hypotheses').filter((row) => !before.ve_hypotheses.some((previous: Row) => previous.id === row.id));
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0].audience_scope).toEqual(scope);
+      delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS; delete process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS;
+      await runVeStage(job(), { supabase: db as never });
+      expect(mockCallLLMWithSchema).toHaveBeenCalledTimes(1);
+      for (const table of ['ve_bases', 've_templates', 've_outreach_setups']) expect(snapshot(db)[table]).toEqual(before[table]);
+    } finally {
+      if (priorScope === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS; else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = priorScope;
+      if (priorGeneration === undefined) delete process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS; else process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS = priorGeneration;
+    }
+  });
   it('adds only new broad hypotheses with their own verticals and leaves everything else untouched', async () => {
     const db = broadDb();
     const before = snapshot(db);
@@ -425,6 +451,9 @@ const pgliteModule = process.env.PGLITE_MODULE ?? (() => {
     const migration = read('20260924_0012_ve_broad_hypotheses_atomic.sql');
     await db.exec(migration);
     await db.exec(migration);
+    const scopedMigration = read('20261015_0001_ve_audience_scope.sql');
+    await db.exec(scopedMigration);
+    await db.exec(scopedMigration);
     const project = randomUUID(), existing = randomUUID(), job = randomUUID();
     await db.query("insert into ve_projects values ($1, 'researched')", [project]);
     await db.query("insert into ve_verticals(id,project_id,name,synonyms,rank) values ($1,$2,'Узкая','[\"Учёт\"]',7)", [existing,project]);
@@ -476,6 +505,21 @@ const pgliteModule = process.env.PGLITE_MODULE ?? (() => {
     const emptyReceipt = await invoke([],empty);
     assert.deepEqual(emptyReceipt.added,[]);
     assert.deepEqual(await invoke([candidate('F')],empty),emptyReceipt);
+    const scopedProject = randomUUID(), scopedJob = randomUUID();
+    await db.query("insert into ve_projects values ($1, 'researched')", [scopedProject]);
+    await db.query("insert into ve_verticals(id,project_id,name,rank) values ($1,$2,'Existing',1)", [randomUUID(),scopedProject]);
+    await db.query("insert into ve_jobs(id,project_id,stage,status) values ($1,$2,'broad_hypotheses','running')", [scopedJob,scopedProject]);
+    const scope = {version:1,kind:'sector',any_of:['Финтех','Платёжные провайдеры'],required:['Россия'],excluded:[]};
+    const scoped = {...candidate('Финтех и платежи'),audience_scope:scope};
+    const scopedBefore = await snapshot();
+    await assert.rejects(invoke([scoped,{...candidate('Bad'),audience_scope:{...scope,version:2}}],scopedJob,scopedProject), /Invalid broad audience scope/);
+    assert.deepEqual(await snapshot(),scopedBefore);
+    const scopedReceipt = await invoke([scoped,{...candidate('Синоним'),audience_scope:{...scope,any_of:[' ПЛАТЕЖНЫЕ  ПРОВАЙДЕРЫ ','ФИНТЕХ']}},
+      {...candidate('Другой регион'),audience_scope:{...scope,required:['Казахстан']}}],scopedJob,scopedProject);
+    assert.equal(scopedReceipt.added.length,2);
+    assert.deepEqual(scopedReceipt.duplicates,['Синоним']);
+    assert.deepEqual((await db.query('select audience_scope from ve_hypotheses where id=$1',[scopedReceipt.added[0].hypothesis_id])).rows[0].audience_scope,scope);
+    assert.deepEqual(await invoke([],scopedJob,scopedProject),scopedReceipt);
     await db.close();
     console.log('PASS atomic broad hypotheses');
   `;

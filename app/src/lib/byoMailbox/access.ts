@@ -1,16 +1,24 @@
 import 'server-only';
 
-import type { NextRequest, NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { requireClientAuth, jsonError, type ClientAuthResult } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { mailboxConnectAllowed, parseMailboxPilotUserIds } from '@/lib/byoMailbox/accessPolicy';
+import {
+  ENG_OWN_MAILBOX_UNAVAILABLE_CODE,
+  ENG_OWN_MAILBOX_UNAVAILABLE_TEXT,
+  mailboxConnectAllowed,
+  ownMailboxConnectRefused,
+  parseMailboxPilotUserIds,
+} from '@/lib/byoMailbox/accessPolicy';
 
 /**
  * Гейт подключения ящиков.
  *
  * RU-пилот по-прежнему только allowlist `BYO_MAILBOX_PILOT_USER_IDS`
- * (пустой env = у RU выключено). ENG открыт: Host ENG-кабинета или
- * profiles.market='eng'. Иначе форма на app.outreachos.xyz всегда 403.
+ * (пустой env = у RU выключено). ENG гейт пропускает (Host ENG-кабинета или
+ * profiles.market='eng') — к ящикам, подключённым раньше; ПОДКЛЮЧИТЬ новый
+ * ENG-клиент не может: refuseOwnMailboxConnectForEng ниже в каждой точке
+ * подключения.
  *
  * user_tool_visibility на этот флаг по-прежнему не влияет.
  */
@@ -69,4 +77,18 @@ export async function requireByoMailboxClient(
     return { error: jsonError('Forbidden: mailbox connect not enabled', 403) };
   }
   return res;
+}
+
+/**
+ * Точка подключения ящика (POST /api/client/mailboxes, старт OAuth) для
+ * ENG-клиента: 403 с английской фразой и кодом (accessPolicy,
+ * ENG_OWN_MAILBOX_UNAVAILABLE_*); null — не ENG, путь идёт дальше без
+ * изменений. Звать сразу после requireByoMailboxClient.
+ */
+export function refuseOwnMailboxConnectForEng(auth: ClientAuthResult): NextResponse | null {
+  if (!ownMailboxConnectRefused(auth.market)) return null;
+  return NextResponse.json(
+    { error: ENG_OWN_MAILBOX_UNAVAILABLE_TEXT, code: ENG_OWN_MAILBOX_UNAVAILABLE_CODE },
+    { status: 403 },
+  );
 }

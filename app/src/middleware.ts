@@ -9,6 +9,11 @@ import type { UserRole } from '@/types'
 const ROLE_COOKIE = 'x-portal-role'
 const ROLE_COOKIE_MAX_AGE = 30 * 60
 const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+// Страница аккаунта ENG-кабинета — единственный адрес, который вход на
+// ENG-хосте возвращает после себя (`?next=`, тот же литерал принимает
+// app/login/page.tsx). Ниже: гостя с неё уводим на /login с этим next,
+// вошедшего клиента с /login?next=<он> — прямо на неё. Только ENG-хост.
+const ENG_ACCOUNT_PATH = '/client/eng/account'
 
 // Формат куки: userId:role:market. Сегмент market добавлен позже — старые
 // куки userId:role остаются валидными: роль извлекается, market считается
@@ -303,6 +308,13 @@ export async function middleware(request: NextRequest) {
       pathname.startsWith('/leads-board/')
 
     if (!user && !isPublicPath) {
+      // ENG-хост, гость открыл страницу аккаунта (закладка, ссылка из письма):
+      // на вход с next, иначе после входа он попадёт в кабинет, а не обратно
+      // на Account. Точное совпадение пути; любой другой путь и любой другой
+      // хост — прежний голый /login.
+      if (pathname === ENG_ACCOUNT_PATH && isEngAppHost(request.headers.get('host'))) {
+        return NextResponse.redirect(new URL(`/login?next=${ENG_ACCOUNT_PATH}`, request.url))
+      }
       return NextResponse.redirect(new URL('/login', request.url))
     }
 
@@ -466,12 +478,19 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL('/client/eng', request.url))
     }
     // (а) eng-клиент вне ENG-раздела → в ENG-кабинет (на любом хосте).
+    // Исключение — чат поддержки /client/support: ENG-кабинет self-serve, и
+    // его отказы ведут в Support. Страница говорит с eng-клиентом
+    // по-английски (ENG-хост или рынок профиля — app/client/support), её API
+    // (/api/client/support/*) сюда не доходит вовсе — /api/client/* отвечен
+    // выше, рынок он не проверяет. RU-клиента правило (а) не касается.
+    const isSupportPath = pathname === '/client/support' || pathname.startsWith('/client/support/')
     if (
       user
       && userRole === 'client'
       && userMarket === 'eng'
       && pathname.startsWith('/client')
       && !isEngCabinetPath
+      && !isSupportPath
     ) {
       return NextResponse.redirect(new URL('/client/eng', request.url))
     }
@@ -501,6 +520,22 @@ export async function middleware(request: NextRequest) {
     // его всё равно не пустит default-deny ниже). Иначе был бы
     // редирект-цикл /login → / → /login. Демо на /login·/signup — исключение (см. выше).
     if (user && userRole && (pathname === '/login' || pathname === '/signup') && !isDemoOnAuthPage) {
+      // ENG-хост: ссылка «Set your own password» из письма сброса
+      // (/login?next=/client/eng/account) у того, кто ещё вошёл, ведёт сразу
+      // на Account, а не в кабинет. Только eng-клиент (стафф и ru-клиента
+      // ENG-хост уже увёл выше), только /login и только один точный next
+      // (повторённый next отвергает и app/login/page.tsx).
+      const loginNext = request.nextUrl.searchParams.getAll('next')
+      if (
+        isEngHost
+        && userRole === 'client'
+        && userMarket === 'eng'
+        && pathname === '/login'
+        && loginNext.length === 1
+        && loginNext[0] === ENG_ACCOUNT_PATH
+      ) {
+        return NextResponse.redirect(new URL(ENG_ACCOUNT_PATH, request.url))
+      }
       return NextResponse.redirect(
         new URL(userRole === 'client' ? '/client' : '/', request.url)
       )

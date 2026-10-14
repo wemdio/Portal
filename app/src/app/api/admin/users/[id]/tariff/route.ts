@@ -18,6 +18,7 @@ import {
   TARIFF_SCALE,
 } from '@/lib/tariffs';
 import { ensurePendingInvoiceForTariff } from '@/lib/billing';
+import { ADMIN_ENG_CLIENT_TARIFF_TEXT, refuseAdminActionForEngClient } from '@/lib/adminEngClientGuard';
 
 export const dynamic = 'force-dynamic';
 
@@ -134,6 +135,17 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     body = (await req.json()) as TariffBody;
   } catch {
     return jsonError('Invalid body', 400);
+  }
+
+  // Тариф RU открыл бы клиенту английского кабинета платные RU-инструменты
+  // (adminEngClientGuard.ts). Отказ на всё, кроме снятия подписки.
+  if (body.action !== 'deactivate') {
+    const engRefusal = await refuseAdminActionForEngClient(supabaseAdmin, targetUserId, {
+      refusal: ADMIN_ENG_CLIENT_TARIFF_TEXT,
+      event: 'admin.tariff',
+      logMeta: { userId: user.id },
+    });
+    if (engRefusal) return engRefusal;
   }
 
   if (body.action === 'unlock_payment') {

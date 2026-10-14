@@ -350,21 +350,66 @@ export const CLIENT_NAV_ENG: ClientNavItem = {
   label: 'Outreach',
   labelEn: 'Outreach',
   href: '/client/eng',
-  description: 'Движок вертикалей для ENG-рынка (EN-интерфейс)',
+  // Пункт рисуется только ENG-клиенту (ветка market='eng' в ClientNavList),
+  // а подсказка выбирается по locale профиля, который у него бывает и 'ru' —
+  // поэтому английская в обоих полях, как у пунктов ниже.
+  description: 'Verticals engine for the US market (English UI)',
   descriptionEn: 'Verticals engine for the US market (English UI)',
 };
 
 /**
- * Подключение своих ящиков в ENG-кабинете. Живёт под /client/eng/*,
- * иначе middleware уводит eng-клиента обратно в /client/eng.
+ * Ответы на кампании ENG-клиента (только чтение, app/client/eng/replies). Живёт
+ * под /client/eng/*, иначе middleware уводит eng-клиента обратно в /client/eng.
+ * Подписи английские в обоих полях — как у CLIENT_NAV_ENG.
  */
-export const CLIENT_NAV_ENG_MAILBOXES: ClientNavItem = {
-  id: 'eng-mailboxes',
-  label: 'Sending mailboxes',
-  labelEn: 'Sending mailboxes',
-  href: '/client/eng/mailboxes',
-  description: 'Connect your outreach mailboxes',
-  descriptionEn: 'Connect your outreach mailboxes',
+export const CLIENT_NAV_ENG_REPLIES: ClientNavItem = {
+  id: 'eng-replies',
+  label: 'Replies',
+  labelEn: 'Replies',
+  href: '/client/eng/replies',
+  description: 'Replies to your campaigns',
+  descriptionEn: 'Replies to your campaigns',
+};
+
+/**
+ * «Do not contact» ENG-клиента (app/client/eng/do-not-contact) — его чёрный
+ * список (client_blocked_contacts) через те же /api/client/blocklist. Под
+ * /client/eng/* по той же причине, что и Replies; подписи английские в обоих
+ * полях. RU-страница «Чёрный список» (/client/blocklist) не меняется.
+ */
+export const CLIENT_NAV_ENG_DO_NOT_CONTACT: ClientNavItem = {
+  id: 'eng-do-not-contact',
+  label: 'Do not contact',
+  labelEn: 'Do not contact',
+  href: '/client/eng/do-not-contact',
+  description: 'Addresses your campaigns leave out',
+  descriptionEn: 'Addresses your campaigns leave out',
+};
+
+/*
+ * Пункта «ящики клиента» в ENG-меню нет (решение владельца 11.10.2026): кампании
+ * кабинета шлют только из ящиков нашего пула, подключать свои клиенту незачем.
+ * /client/eng/mailboxes уводит на /client/eng/dashboard
+ * (app/client/eng/mailboxes/page.tsx); подключённые раньше строки
+ * client_mailbox_accounts остаются в БД как есть. RU-пункт CLIENT_NAV_MAILBOXES
+ * выше не меняется.
+ */
+
+/**
+ * Чат поддержки в ENG-кабинете — тот же /client/support, что и
+ * CLIENT_NAV_SUPPORT, с тем же id: подсветку даёт resolveActiveNavId, бейдж
+ * непрочитанных и его сброс — layout (оба сверяют id 'support'). Отличаются
+ * только подписи: у ENG-пунктов обе английские (label не зависит от locale
+ * профиля, как у CLIENT_NAV_ENG), а описание не обещает «менеджера» — кабинет
+ * self-serve, отвечает команда в этом же чате. Middleware пускает
+ * eng-клиента на /client/support отдельным исключением.
+ */
+export const CLIENT_NAV_ENG_SUPPORT: ClientNavItem = {
+  ...CLIENT_NAV_SUPPORT,
+  label: 'Support',
+  labelEn: 'Support',
+  description: 'Message our team — replies come to this chat',
+  descriptionEn: 'Message our team — replies come to this chat',
 };
 
 /**
@@ -437,14 +482,20 @@ export function resolveActiveNavId(pathname: string): string | null {
   ) {
     return 'manual-scoring';
   }
-  if (pathname === '/client/eng/mailboxes' || pathname.startsWith('/client/eng/mailboxes/')) {
-    return 'eng-mailboxes';
-  }
   if (pathname === '/client/mailboxes' || pathname.startsWith('/client/mailboxes/')) {
     return 'mailboxes';
   }
   if (pathname === '/client/gis-signals' || pathname.startsWith('/client/gis-signals/')) {
     return 'gis-signals';
+  }
+  if (pathname === CLIENT_NAV_ENG_REPLIES.href || pathname.startsWith(`${CLIENT_NAV_ENG_REPLIES.href}/`)) {
+    return CLIENT_NAV_ENG_REPLIES.id;
+  }
+  if (
+    pathname === CLIENT_NAV_ENG_DO_NOT_CONTACT.href ||
+    pathname.startsWith(`${CLIENT_NAV_ENG_DO_NOT_CONTACT.href}/`)
+  ) {
+    return CLIENT_NAV_ENG_DO_NOT_CONTACT.id;
   }
   if (pathname === '/client/eng' || pathname.startsWith('/client/eng/')) {
     return 'eng';

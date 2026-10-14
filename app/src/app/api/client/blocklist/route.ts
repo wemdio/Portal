@@ -7,6 +7,7 @@ import {
   normalizeBlockedEmail,
 } from '@/lib/clientBlocklist/blockedContacts';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { engBlocklistGet, engBlocklistPost } from './_eng';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,6 +29,15 @@ interface BlocklistEntryRow {
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  // ENG-кабинет («Do not contact»): своя страница списка и английские тексты
+  // (./_eng.ts). Ниже — RU-ветка, без изменений.
+  if (result.auth.market === 'eng') {
+    if (result.auth.isDemo) {
+      return NextResponse.json({ items: [], total: 0, matching: 0, offset: 0, next_offset: null });
+    }
+    if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
+    return engBlocklistGet(req, supabaseInstantly, result.auth.userId);
+  }
   // Демо-аккаунт: список пуст, фикстура не нужна.
   if (result.auth.isDemo) return NextResponse.json({ items: [], total: 0 });
 
@@ -69,6 +79,10 @@ export async function POST(req: NextRequest) {
   if (!db) return jsonError('Server misconfigured', 500);
 
   const { userId } = result.auth;
+
+  // ENG-кабинет: пачка из вставленного текста, строгий потолок, английские
+  // тексты (./_eng.ts). Ниже — RU-ветка, без изменений.
+  if (result.auth.market === 'eng') return engBlocklistPost(req, db, userId);
 
   let body: { email?: unknown; reason?: unknown; source?: unknown };
   try {

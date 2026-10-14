@@ -1,0 +1,34 @@
+# Read-only копия трёх таблиц Signals RU (SQLite) в отдельном Postgres.
+# Живую базу приложения не трогает: sync.py раз в 15 минут снимает снимок
+# и перезаливает таблицы целиком. Порт слушает только 127.0.0.1 —
+# внешний доступ через SSH-туннель пользователя signals-ro (см. README.md).
+#
+# После любой правки этого файла:
+#   docker compose -p signals-ru-readonly -f /opt/signals-ru-readonly/docker-compose.yml \
+#     up -d --force-recreate --no-deps db
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: signals-ru-readonly
+    restart: unless-stopped
+    env_file:
+      - /etc/signals-ru-readonly/postgres.env
+    ports:
+      - "127.0.0.1:35440:5432"
+    volumes:
+      - signals-ru-readonly-data:/var/lib/postgresql/data
+      - /var/lib/signals-ru-readonly/incoming:/incoming:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          pids: 512
+
+volumes:
+  signals-ru-readonly-data:

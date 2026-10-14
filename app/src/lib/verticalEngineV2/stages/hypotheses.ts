@@ -14,6 +14,7 @@ import {
 } from '../clientBriefIntake';
 import {
   VeHypothesesBatchSchema,
+  VeScopedHypothesesBatchSchema,
   combineVeHypothesisCandidates,
   createVePriorityHypothesesSchema,
   type VeBrandCloudOutput,
@@ -25,6 +26,7 @@ import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
 import { getPortfolioProfile, type VePortfolioEntry } from '../datasetStats';
 import { VE_BROAD_HYPOTHESES_MAX } from '../broadHypotheses';
 import { readVePriorityNiches, vePriorityNicheKey } from '../priorityNiches';
+import { isVeAudienceGenerationEnabled } from '../audienceScope';
 import type { VeJob, VeProject } from '../types';
 import {
   addUsage,
@@ -231,6 +233,7 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
   // Рынок: ctx.market (воркер), фолбэк — колонка ve_projects.market.
   const market = ctx.market ?? projectMarket(project);
   const clientContext = await loadHypothesesClientContext(ctx, project);
+  const audienceScope = isVeAudienceGenerationEnabled(job.project_id);
 
   // Калибровочные данные — best-effort: сбой любого источника → undefined,
   // мгновенный проход продолжается без калибровки.
@@ -240,19 +243,22 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
     loadActualsHistory(ctx),
   ]);
 
-  stageLog(ctx, '[hypotheses] мгновенный проход: 3–5 широких и 25–40 кандидатов…');
+  stageLog(ctx, audienceScope ? '[hypotheses] формируем непересекающиеся аудитории без квоты количества…'
+    : '[hypotheses] мгновенный проход: 3–5 широких и 25–40 кандидатов…');
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
   // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
   // так стадия компилируется и до, и после приземления промпт-контракта.
   const promptInput = {
     ...clientContext,
+    audienceScope,
     ...(portfolioProfile ? { portfolioProfile } : {}),
     ...(markupHistory ? { markupHistory } : {}),
     ...(actualsHistory ? { actualsHistory } : {}),
   };
   const priorityNiches = readVePriorityNiches(project.brief);
   const messages = (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput);
-  const schema = priorityNiches.length ? createVePriorityHypothesesSchema(priorityNiches) : VeHypothesesBatchSchema;
+  const schema = priorityNiches.length ? createVePriorityHypothesesSchema(priorityNiches, audienceScope)
+    : audienceScope ? VeScopedHypothesesBatchSchema : VeHypothesesBatchSchema;
   const llm = await callLLMWithSchema(
     messages,
     schema,
@@ -263,8 +269,13 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
   );
   addUsage(usage, llm);
 
-  const candidates = combineHypothesisCandidates(llm.data);
-  const coverage = priorityNiches.length ? createVePriorityHypothesesSchema(priorityNiches).parse(llm.data).priority_niche_results : [];
+  const parsed = schema.parse(llm.data);
+  const candidates = combineHypothesisCandidates(parsed, audienceScope).map((candidate) => {
+    if (audienceScope) return candidate;
+    const { audience_scope: _scope, ...legacy } = candidate;
+    return legacy;
+  });
+  const coverage = priorityNiches.length ? createVePriorityHypothesesSchema(priorityNiches, audienceScope).parse(llm.data).priority_niche_results : [];
   const priorityResults = priorityNiches.map((niche) => ({
     ...coverage.find((item) => vePriorityNicheKey(item.niche) === vePriorityNicheKey(niche))!, niche,
   }));
@@ -278,6 +289,7 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
 
   return {
     result: { candidates, tier_counts: tierCounts, broad_count: broadCount,
+      ...(audienceScope ? { audience_scope_version: 1 } : {}),
       ...(priorityNiches.length ? { priority_niches: priorityNiches, priority_niche_results: priorityResults } : {}) },
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,

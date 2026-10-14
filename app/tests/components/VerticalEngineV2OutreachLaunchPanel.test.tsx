@@ -6,6 +6,8 @@ import { ContactUploadNotice } from '@/components/vertical-engine-v2/engine/Cont
 import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/OutreachLaunchPanel';
 import { DeliveryTargetPanel } from '@/components/vertical-engine-v2/engine/DeliveryTargetPanel';
 import { ProjectExclusions } from '@/components/vertical-engine-v2/engine/ProjectExclusions';
+import { CombinedContactsDownload } from '@/components/vertical-engine-v2/engine/CombinedContactsDownload';
+import { AudienceScopeSummary } from '@/components/vertical-engine-v2/engine/AudienceScopeSummary';
 import { DownloadVerifiedContacts } from '@/components/vertical-engine-v2/engine/DownloadVerifiedContacts';
 
 const mockVeEnginePost = jest.fn();
@@ -101,6 +103,40 @@ function renderPanel(expectedPortalPeriodId: string | null | undefined) {
 }
 
 describe('VE2 auto-outreach launch panel', () => {
+  it('keeps combined downloads separate from launch selection and displays the saved audience conditions', async () => {
+    const user = userEvent.setup();
+    mockAuthFetch.mockReset(); mockDownloadBaseCsvResponse.mockReset(); mockVeEnginePost.mockReset();
+    const view = render(<CombinedContactsDownload projectId="project-1" hypotheses={[
+      { id: 'h2', title: 'Финтех' }, { id: 'h1', title: 'Платёжные сервисы' },
+    ]} />);
+    expect(mockAuthFetch).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Скачать несколько баз одним файлом' }));
+    expect(screen.getByRole('button', { name: 'Скачать выбранные (0)' })).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: 'Финтех' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Платёжные сервисы' }));
+    expect(mockVeEnginePost).not.toHaveBeenCalled(); expect(mockAuthFetch).not.toHaveBeenCalled();
+    let finish!: (value: unknown) => void;
+    mockAuthFetch.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await user.click(screen.getByRole('button', { name: 'Скачать выбранные (2)' }));
+    expect(screen.getByRole('checkbox', { name: 'Финтех' })).toBeDisabled();
+    expect(mockAuthFetch).toHaveBeenCalledWith('/api/tools/vertical-engine-v2/projects/project-1/contacts/export?hypothesis_ids=h1%2Ch2');
+    const response = { ok: true, headers: new Headers({ 'X-VE-Exported-Contacts': '725' }) };
+    await act(async () => { finish(response); });
+    expect(await screen.findByRole('status')).toHaveTextContent('Скачано уникальных контактов: 725');
+    expect(mockDownloadBaseCsvResponse).toHaveBeenCalledWith(response, 'combined-verified-contacts.csv');
+    expect(mockVeEnginePost).not.toHaveBeenCalled();
+    view.unmount();
+    const scopeView = render(<AudienceScopeSummary id="scope" description="Old narrower wording" scope={{
+      version: 1, kind: 'sector', any_of: ['Финтех', 'Платёжные сервисы'], required: ['Россия'], excluded: ['Страхование'],
+    }} />);
+    expect(screen.getByText(/Финтех; Платёжные сервисы/)).toBeInTheDocument();
+    expect(screen.getByText(/Обязательные условия/)).toBeInTheDocument();
+    expect(screen.getByText(/Исключаем/)).toBeInTheDocument();
+    expect(screen.queryByText('Old narrower wording')).not.toBeInTheDocument();
+    scopeView.rerender(<AudienceScopeSummary id="scope" description="Legacy description" />);
+    expect(screen.getByText('Legacy description')).toBeInTheDocument();
+  });
+
   it('shows a prominent project target, preserves edits during refresh and saves once with the displayed revision', async () => {
     const plan = { target_contacts: 2000, revision: 4, minimum_target: 38, actual_contacted: 0,
       committed_contacts: 38, reserved_contacts: 0, ready_contacts: 462, deadline: '2026-12-20',

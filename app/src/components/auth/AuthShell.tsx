@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode, InputHTMLAttributes } from 'react';
+import { useEffect, type ReactNode, type InputHTMLAttributes } from 'react';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 
 const inter = Inter({ subsets: ['latin', 'cyrillic'], display: 'swap', variable: '--font-inter' });
@@ -12,21 +12,47 @@ const jetbrainsMono = JetBrains_Mono({ subsets: ['latin', 'cyrillic'], display: 
  * the app, instead of the two mismatched ad-hoc styles they had before. Wraps
  * content in .client-portal (dark bg + fonts + tokens) and centers a neu-card with
  * the outreachOS wordmark.
+ *
+ * `lang` — язык ENG-входа и ENG-регистрации. Серверный `<html lang>` на
+ * ENG-хосте уже "en" (корневой layout решает по хосту), но в браузере
+ * UserProvider, внутри которого живёт /login, ставит `<html lang>` по локали
+ * из куки — у гостя это "ru". Без `lang` (RU-хосты) разметка прежняя до
+ * байта: атрибута нет, эффект ничего не делает.
+ *  - атрибут на обёртке есть уже в серверном HTML и покрывает карточку и модалку;
+ *  - эффект ставит его и на `<html>` — отложенно (setTimeout 0): эффект
+ *    UserProvider `lang = locale` срабатывает после эффектов детей и иначе
+ *    вернул бы "ru". На размонтировании возвращаем прежнее значение.
  */
 export function AuthShell({
   title,
   subtitle,
   children,
   overlay,
+  lang,
 }: {
   title: string;
   subtitle?: string;
   children: ReactNode;
   /** Full-screen overlay (e.g. a modal) rendered inside .client-portal but outside the card. */
   overlay?: ReactNode;
+  lang?: 'en';
 }) {
+  useEffect(() => {
+    if (!lang) return;
+    const root = document.documentElement;
+    const before = root.lang;
+    const timer = window.setTimeout(() => {
+      root.lang = lang;
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      root.lang = before;
+    };
+  }, [lang]);
+
   return (
     <div
+      lang={lang}
       className={`client-portal ${inter.variable} ${jetbrainsMono.variable}`}
       style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem 1rem' }}
     >
@@ -50,19 +76,23 @@ export function AuthShell({
 
 /**
  * One labelled input in the auth design (neu-input + a mono-ish caption label).
- * `optional` appends a muted "— по желанию"; `hint` renders a caption below.
+ * `optional` appends a muted `optionalText` (default "— по желанию"; no caller
+ * passes another text today — the ENG sign-up has no optional fields); `hint`
+ * renders a caption below.
  */
 export function AuthField({
   label,
   optional,
+  optionalText = '— по желанию',
   hint,
   ...inputProps
-}: { label: string; optional?: boolean; hint?: string } & InputHTMLAttributes<HTMLInputElement>) {
+}: { label: string; optional?: boolean; optionalText?: string; hint?: string } & InputHTMLAttributes<HTMLInputElement>) {
   return (
     <div>
       <label htmlFor={inputProps.id} className="block text-xs font-medium mb-1" style={{ color: 'var(--cp-paper-mute)' }}>
         {label}
-        {optional ? <span style={{ color: 'var(--cp-paper-faint)', fontWeight: 400 }}> — по желанию</span> : null}
+        {/* Одна текстовая нода, как до параметра: RU-разметка не меняется. */}
+        {optional ? <span style={{ color: 'var(--cp-paper-faint)', fontWeight: 400 }}>{` ${optionalText}`}</span> : null}
       </label>
       <input {...inputProps} className="neu-input w-full px-3 py-2.5 text-sm" />
       {hint ? (

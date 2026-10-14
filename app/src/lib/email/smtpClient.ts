@@ -25,6 +25,11 @@ export interface SendTransactionalEmailArgs {
   subject: string;
   html: string;
   text: string;
+  /**
+   * Display name of the sender for this one message. Unset — SMTP_FROM_NAME
+   * (or "Portal"), as before. The address is always SMTP_FROM_EMAIL / SMTP_USER.
+   */
+  fromName?: string;
 }
 
 export interface SendTransactionalEmailResult {
@@ -42,7 +47,7 @@ export async function sendTransactionalEmail(
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
   const fromEmail = process.env.SMTP_FROM_EMAIL ?? user;
-  const fromName = process.env.SMTP_FROM_NAME ?? 'Portal';
+  const fromName = args.fromName ?? process.env.SMTP_FROM_NAME ?? 'Portal';
 
   if (!host) throw new Error('SMTP_HOST is not set');
   if (!portRaw) throw new Error('SMTP_PORT is not set');

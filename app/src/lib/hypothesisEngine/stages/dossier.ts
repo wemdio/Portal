@@ -190,6 +190,11 @@ export async function runDossierStage(job: HeJob, ctx: HeStageContext): Promise<
         verticalName: vertical.name,
         synonyms,
         roleTitles,
+        // Оба счётчика внутри — российские источники (companies_directory по
+        // ИНН/ЕГРЮЛ и hh.ru). Для market='us' они не спрашиваются, а в
+        // counters приходят null с заметкой: объект не-null, поэтому ветка
+        // «оба источника недоступны» ниже не срабатывает.
+        market: projectMarket(project),
         log: (m) => stageLog(ctx, `[dossier] ${m}`),
       },
       { supabase: ctx.supabase },

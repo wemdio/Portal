@@ -17,7 +17,7 @@ const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
   process.env.WEBSITE_ENRICHMENT_MIN_MAIN_TEXT_TO_SKIP_ABOUT ?? '220',
 );
 
-import { getNonPriorityProxyDispatcher, getProxyDispatcher } from '@/lib/enrich/proxyPool';
+import { getNonPriorityProxyDispatcher, getProxyDispatcher, getProxyGroups } from '@/lib/enrich/proxyPool';
 
 type Dispatcher = import('undici').Dispatcher;
 
@@ -26,6 +26,80 @@ const BROWSER_USER_AGENT =
 
 // Пул прокси вынесен в proxyPool.ts (21.09.2026): тот же код понадобился
 // почтовому скраперу для ретрая 403 через RU-адрес. Поведение не менялось.
+
+/**
+ * Язык запроса — ОПЦИЯ со старым значением по умолчанию. Русский дефолт стоит
+ * потому, что все нынешние вызывающие читают .ru-сайты: ИНН-парсер, конструктор
+ * баз, enrich-воркер, движок вертикалей v2, staff-инструменты, поисковый
+ * парсер. Тот же приём и та же строка EN уже работают в почтовом скрапере
+ * (enrich/emailScraper.ts, локаль джобы конструктора).
+ */
+const DEFAULT_ACCEPT_LANGUAGE = 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7';
+
+/**
+ * Accept-Language английского сайта — для тех, кто передаёт `acceptLanguage`
+ * явно. Сам парсер эту строку не выбирает никогда: дефолт выше прежний.
+ *
+ * Та же строка, что у почтового скрапера при locale='en'
+ * (EN_ACCEPT_LANGUAGE в enrich/emailScraper.ts) и у чтения сайта клиента в
+ * английском кабинете (ENG_WEBSITE_ROUTE в hypothesisEngine/stages/io.ts). У тех
+ * двух пока свои копии литерала; читатель этой константы — шаг описаний
+ * конструктора при locale='en' (tools/processingSteps.ts, stepEnrich), чтобы
+ * одна EN-джоба читала сайт одним языком на обоих шагах.
+ */
+export const WEBSITE_ACCEPT_LANGUAGE_EN = 'en-US,en';
+
+/**
+ * Язык СЛУЖЕБНОГО текста, который fetchAndExtract вставляет в результат сам:
+ * подписи склейки «о компании + главная» и заглушка «HTML есть, а текста нет».
+ *
+ * Дефолт — русский, байт-в-байт прежние строки. Его читают не только люди:
+ * siteProfile движка ищет в тексте сайта оборот «требует JavaScript», чтобы
+ * отличить тонкий сайт, — поэтому русские строки не меняются и английские им
+ * не замена, а вариант по запросу вызывающего.
+ *
+ * Английский вариант нужен тому, чей результат уезжает англоязычному клиенту
+ * как данные: колонка описания EN-джобы конструктора (stepEnrich) доезжает до
+ * превью базы английского кабинета, и русская подпись там — русский текст у
+ * ENG-клиента.
+ */
+export type WebsiteTextLanguage = 'ru' | 'en';
+
+const EXTRACT_TEXT_LABELS: Record<WebsiteTextLanguage, { about: string; home: string; noText: string }> = {
+  ru: {
+    about: '--- О компании ---',
+    home: '--- Главная ---',
+    noText: 'Страница доступна, но требует JavaScript или блокирует парсер.',
+  },
+  en: {
+    about: '--- About ---',
+    home: '--- Home page ---',
+    noText: 'The page responded, but it needs JavaScript or blocks the parser.',
+  },
+};
+
+/**
+ * Заглушка английского варианта: «страница ответила, текста нет». Экспорт — для
+ * вызывающего, которому такая строка не нужна в данных (stepEnrich при
+ * locale='en' оставляет ячейку описания пустой). Сравнивать с ней можно
+ * напрямую: sanitizeText эту строку не меняет, а MAX_TEXT_LENGTH она не
+ * достигает.
+ */
+export const WEBSITE_NO_TEXT_STUB_EN = EXTRACT_TEXT_LABELS.en.noText;
+
+/**
+ * Порядок групп прокси в лестнице попыток fetchHtmlWithRetry.
+ *
+ *  - 'priority-first' — ДЕФОЛТ и сегодняшний маршрут всех вызывающих:
+ *    приоритетная (российская) группа на первой попытке, fallback на повторе.
+ *    Трогать его нельзя: инцидент 28.07.2026 — 9 из 12 нод общего пула HK/EU,
+ *    .ru-сайты отдавали им 403/геоблок, success rate ИНН-парсера 27%
+ *    (подробности в proxyPool.ts).
+ *  - 'non-priority-first' — обратный порядок для англоязычных сайтов: сначала
+ *    нода ВНЕ приоритетной группы, RU-группа остаётся вторым шансом. Включается
+ *    только из английского кабинета (hypothesisEngine/stages/io.ts, market 'us').
+ */
+export type WebsiteFetchRouteOrder = 'priority-first' | 'non-priority-first';
 
 const ABOUT_PATHS = [
   '/about',
@@ -744,17 +818,208 @@ function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
   return decoded;
 }
 
-async function fetchHtml(
+/**
+ * Защита чтения от SSRF — ОПЦИЯ `guard` (fetchHtmlWithRetry, fetchAndExtract,
+ * fetchSinglePage). Дефолта нет: без неё запрос идёт прежним путём —
+ * redirect: 'follow', адрес проверяет разве что сам вызывающий до первого
+ * запроса. Передают её движок гипотез (hypothesisEngine/stages/io.ts) и
+ * EN-джобы конструктора баз (tools/processingSteps.ts: сюда — шаг описаний,
+ * почтовый обход — через scrapeEmails, который берёт fetchFollowingGuarded и
+ * readBodyCapped отсюда); реализация — createPublicWebsiteGuard и
+ * createUsWebsiteFetchGuard в enrich/publicAddress.ts.
+ *
+ * С guard редиректы ведутся вручную: перед КАЖДЫМ запросом — первым и каждым
+ * шагом редиректа — адрес проверяет checkUrl; шагов не больше maxRedirects;
+ * схема редиректа только http/https, а https → http — только при
+ * allowHttpDowngrade. Проверки и все шаги идут под тем же сроком попытки
+ * (`timeout`), что и раньше покрывал запрос вместе с редиректами и телом.
+ * Отказ — исход 'refused': страница не читается, и попытку не повторяем —
+ * другой маршрут адрес не изменит.
+ */
+export interface WebsiteFetchGuard {
+  /** Бросает WebsiteAddressRefusedError — адрес запрещён, запрос не уходит. */
+  checkUrl: (url: URL) => Promise<void>;
+  maxRedirects: number;
+  allowHttpDowngrade: boolean;
+  /** Прямой маршрут (прокси не выбран) идёт через этот диспетчер. */
+  directDispatcher?: Dispatcher;
+}
+
+/** Адрес запроса или шага редиректа отклонён защитой чтения (WebsiteFetchGuard). */
+export class WebsiteAddressRefusedError extends Error {
+  /** Дискриминант: instanceof ложен, если в процессе окажется две копии модуля. */
+  readonly websiteAddressRefused = true as const;
+
+  constructor(reason: string) {
+    super(`адрес отклонён: ${reason}`);
+    this.name = 'WebsiteAddressRefusedError';
+  }
+}
+
+function isWebsiteAddressRefused(e: unknown): e is WebsiteAddressRefusedError {
+  if (e instanceof WebsiteAddressRefusedError) return true;
+  return (
+    typeof e === 'object' && e !== null && (e as { websiteAddressRefused?: unknown }).websiteAddressRefused === true
+  );
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Исход одной попытки чтения. Старые обёртки (fetchHtml, fetchHtmlWithRetry)
+ * сводят всё, кроме 'html', к null — ровно как раньше; различать исходы нужно
+ * строгому чтению одной страницы (fetchSinglePage):
+ *  - 'unusable' — сервер ответил, но это не страница: статус отфильтрован или
+ *    тип ответа не HTML;
+ *  - 'refused' — адрес отклонён защитой чтения (guard);
+ *  - 'failed' — ответа не было: сеть, срок попытки, TLS;
+ *  - 'aborted' — внешняя отмена.
+ */
+type HtmlFetchOutcome =
+  | { kind: 'html'; html: string; status: number; url: string }
+  | { kind: 'unusable'; status: number }
+  | { kind: 'refused' }
+  | { kind: 'failed' }
+  | { kind: 'aborted' };
+
+type FetchHtmlOptions = {
+  timeout?: number;
+  signal?: AbortSignal;
+  allowHttpErrors?: boolean;
+  preferPriority?: boolean;
+  /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
+  acceptLanguage?: string;
+  /** undefined keeps the legacy proxy selection; null explicitly fetches directly. */
+  dispatcher?: Dispatcher | null;
+  /** Защита чтения; не передана — redirect: 'follow', как до неё. */
+  guard?: WebsiteFetchGuard;
+  /** Потолок тела в байтах; не передан — тело читается целиком, как до него. */
+  maxBytes?: number;
+};
+
+/** Промис проверки под сигналом попытки: DNS-резолв сам не прерывается. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * Адрес шага редиректа — ровно так, как его строит follow-режим fetch (undici,
+ * responseLocationURL). Значение заголовка приходит строкой байтов (latin1), и
+ * если в нём есть символ вне печатного ASCII (код < 0x20 или > 0x7E — например,
+ * сырой UTF-8 «Location: /главная/» самописных PHP и CMS), undici сначала
+ * перечитывает эти байты как UTF-8 (normalizeBinaryStringToUtf8) и только потом
+ * разбирает адрес относительно адреса, ответившего редиректом. Без этого шага
+ * new URL кодировал каждый байт по отдельности (/%C3%90%C2%B3…), и ручной
+ * редирект вёл на несуществующую страницу там, где follow-режим открывал
+ * нужную, — у обоих рынков. Байты, которые не складываются в UTF-8, undici
+ * заменяет на U+FFFD и не откатывается к сырому значению; здесь так же.
+ */
+function guardedRedirectTarget(location: string, current: URL): URL {
+  let value = location;
+  for (let i = 0; i < location.length; i += 1) {
+    const code = location.charCodeAt(i);
+    if (code > 0x7e || code < 0x20) {
+      value = Buffer.from(location, 'latin1').toString('utf8');
+      break;
+    }
+  }
+  return new URL(value, current);
+}
+
+/** Адрес ответа без фрагмента — как Response.url в follow-режиме (фрагмент на сервер не уходит). */
+function guardedResponseUrl(url: URL): string {
+  const copy = new URL(url.href);
+  copy.hash = '';
+  return copy.href;
+}
+
+/**
+ * Ручные редиректы под защитой чтения; возвращает ответ и адрес последнего шага.
+ * fetchOpts — с redirect: 'manual'; тот же объект (маршрут, signal) идёт в
+ * каждый шаг. Экспорт — для почтового обхода (enrich/emailScraper.ts).
+ */
+export async function fetchFollowingGuarded(
   url: string,
-  options?: {
-    timeout?: number;
-    signal?: AbortSignal;
-    allowHttpErrors?: boolean;
-    preferPriority?: boolean;
-    /** undefined keeps the legacy proxy selection; null explicitly fetches directly. */
-    dispatcher?: Dispatcher | null;
-  },
-): Promise<{ html: string; status: number } | null> {
+  fetchOpts: RequestInit,
+  guard: WebsiteFetchGuard,
+  signal: AbortSignal,
+): Promise<{ res: Response; url: string }> {
+  let current = new URL(url);
+  for (let hops = 0; ; hops += 1) {
+    await untilAborted(guard.checkUrl(current), signal);
+    const res = await fetch(current.href, fetchOpts);
+    const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null;
+    if (!location) return { res, url: guardedResponseUrl(current) };
+    await res.body?.cancel();
+    if (hops >= guard.maxRedirects) {
+      throw new WebsiteAddressRefusedError(`больше ${guard.maxRedirects} редиректов`);
+    }
+    let next: URL;
+    try {
+      next = guardedRedirectTarget(location, current);
+    } catch {
+      throw new WebsiteAddressRefusedError('редирект на невалидный адрес');
+    }
+    if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+      throw new WebsiteAddressRefusedError(`редирект на схему ${next.protocol}`);
+    }
+    if (!guard.allowHttpDowngrade && current.protocol === 'https:' && next.protocol === 'http:') {
+      throw new WebsiteAddressRefusedError(`редирект https → http (${next.host})`);
+    }
+    current = next;
+  }
+}
+
+/**
+ * Тело не больше maxBytes: читаем потоком и обрываем на потолке. Для текста
+ * страницы (≤ MAX_TEXT_LENGTH символов) первых мегабайт хватает с запасом, а
+ * быстрый хост больше не может залить в воркер сотни мегабайт — до этой опции
+ * тело ограничивал только срок попытки. Экспорт — для почтового обхода
+ * (enrich/emailScraper.ts).
+ */
+export async function readBodyCapped(res: Response, maxBytes: number, url: string): Promise<ArrayBuffer> {
+  const reader = res.body?.getReader();
+  if (!reader) return new ArrayBuffer(0);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const room = maxBytes - total;
+    if (value.byteLength > room) {
+      chunks.push(value.subarray(0, room));
+      total += room;
+      await reader.cancel().catch(() => {});
+      console.warn(`[fetchHtml] ${url} — тело больше ${maxBytes} байт, разбираем первые ${maxBytes}`);
+      break;
+    }
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
+}
+
+async function fetchHtmlOutcome(url: string, options?: FetchHtmlOptions): Promise<HtmlFetchOutcome> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -765,10 +1030,11 @@ async function fetchHtml(
   // so stop here instead of starting another fetch that cannot be cancelled.
   if (externalSignal?.aborted) {
     clearTimeout(timer);
-    return null;
+    return { kind: 'aborted' };
   }
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+  const guard = options?.guard;
 
   try {
     // По умолчанию — приоритетная группа (RU). Retry-обёртка передаёт
@@ -776,73 +1042,202 @@ async function fetchHtml(
     const dispatcher = options?.dispatcher !== undefined
       ? options.dispatcher
       : await getProxyDispatcher(options?.preferPriority !== false);
-    if (controller.signal.aborted) return null;
+    if (controller.signal.aborted) return externalSignal?.aborted ? { kind: 'aborted' } : { kind: 'failed' };
     const fetchOpts: RequestInit & { dispatcher?: Dispatcher } = {
       method: 'GET',
       headers: {
         'User-Agent': BROWSER_USER_AGENT,
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Language': options?.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE,
       },
       signal: controller.signal,
-      redirect: 'follow',
+      redirect: guard ? 'manual' : 'follow',
     };
-    if (dispatcher) (fetchOpts as Record<string, unknown>).dispatcher = dispatcher;
+    // С защитой чтения прямой маршрут идёт через её диспетчер: он проверяет
+    // адрес ещё раз в момент соединения.
+    const route = dispatcher ?? guard?.directDispatcher;
+    if (route) (fetchOpts as Record<string, unknown>).dispatcher = route;
 
-    const res = await fetch(url, fetchOpts);
+    let res: Response;
+    let finalUrl: string;
+    if (guard) {
+      ({ res, url: finalUrl } = await fetchFollowingGuarded(url, fetchOpts, guard, controller.signal));
+    } else {
+      res = await fetch(url, fetchOpts);
+      finalUrl = res.url || url;
+    }
 
     const contentType = res.headers.get('content-type');
     if ((!options?.allowHttpErrors && res.status >= 400) || res.status >= 500 || !isHtmlLikeContentType(contentType)) {
       await res.body?.cancel();
-      return null;
+      return { kind: 'unusable', status: res.status };
     }
 
-    const body = await res.arrayBuffer();
+    const body = options?.maxBytes ? await readBodyCapped(res, options.maxBytes, url) : await res.arrayBuffer();
     const html = decodeHtml(body, contentType);
-    return { html, status: res.status };
+    return { kind: 'html', html, status: res.status, url: finalUrl };
   } catch (err) {
     // An adaptive retry cancels its losing route; this is not a website error.
-    if (externalSignal?.aborted) return null;
+    if (externalSignal?.aborted) return { kind: 'aborted' };
     const e = err as Error & { cause?: { code?: string; message?: string } };
+    const refusal = isWebsiteAddressRefused(err) ? err : isWebsiteAddressRefused(e.cause) ? e.cause : null;
+    if (refusal) {
+      console.warn(`[fetchHtml] ${url} — ${refusal.message}`);
+      return { kind: 'refused' };
+    }
     const causeCode = e.cause?.code ?? '';
     const causeMsg = e.cause?.message ?? '';
     const reason = causeCode || causeMsg || e.message || 'unknown';
     console.warn(`[fetchHtml] ${url} — ${reason}`);
-    return null;
+    return { kind: 'failed' };
   } finally {
     clearTimeout(timer);
     externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
+async function fetchHtml(url: string, options?: FetchHtmlOptions): Promise<{ html: string; status: number } | null> {
+  const outcome = await fetchHtmlOutcome(url, options);
+  return outcome.kind === 'html' ? { html: outcome.html, status: outcome.status } : null;
+}
+
+/**
+ * Перевёрнутая лестница ('non-priority-first') без «другой» ноды — СТРОКА В ЛОГ.
+ *
+ * Что происходит без неё. Первая попытка тогда идёт обычным выбором пула с
+ * preferPriority=false (proxyPool.pickProxyUrl): нода из списка
+ * YANDEXMAPS_PROXY_URLS или legacy PROXY_URLS, где перечислены и RU-ноды; если
+ * этот список пуст — RU-группа; если живой ноды не нашлось — напрямую. Вторая
+ * попытка — RU-группа. То есть лестница схлопывается почти в сегодняшний
+ * маршрут, а вызывающий об этом не узнаёт: результат выглядит как обычное
+ * чтение сайта. Причин две, и строка их различает, потому что лечатся они
+ * по-разному:
+ *  - группы вне приоритетной НЕТ (в YANDEXMAPS_PROXY_URLS нет ни одной ноды,
+ *    которой нет в YANDEXMAPS_PROXY_URLS_PRIORITY) — это конфигурация, и
+ *    правка порядка на этом хосте не делает ничего;
+ *  - группа есть, но все её ноды сейчас выбыли (proxyPool, «Выбывание нод»)
+ *    или агент ноды не создался — это состояние, оно проходит само.
+ *
+ * Не чаще раза в ROUTE_FALLBACK_WARN_EVERY_MS на процесс, с числом
+ * схлопнувшихся запросов с прошлой такой строки: один сайт — это до десятка
+ * запросов цепочки fetchAndExtract, и строка на каждый утопила бы лог. Счётчик
+ * живёт в памяти процесса и обнуляется рестартом — это строка лога, а не учёт.
+ * Никогда не бросает: диагностика не имеет права сорвать чтение сайта (в том
+ * числе там, где пул подменён и getProxyGroups нет).
+ */
+const ROUTE_FALLBACK_WARN_EVERY_MS = 10 * 60_000;
+let routeFallbackWarnedAt = 0;
+let routeFallbackSuppressed = 0;
+
+function warnNonPriorityRouteMissing(url: string): void {
+  try {
+    const now = Date.now();
+    if (now - routeFallbackWarnedAt < ROUTE_FALLBACK_WARN_EVERY_MS) {
+      routeFallbackSuppressed += 1;
+      return;
+    }
+    const suppressed = routeFallbackSuppressed;
+    routeFallbackWarnedAt = now;
+    routeFallbackSuppressed = 0;
+    let reason = 'нет живой ноды вне приоритетной группы';
+    try {
+      const { priority, fallback } = getProxyGroups();
+      reason = fallback.some((u) => !priority.includes(u))
+        ? 'все ноды вне приоритетной группы сейчас выбыли или их агент не создался'
+        : 'группы вне приоритетной нет: в YANDEXMAPS_PROXY_URLS нет нод сверх YANDEXMAPS_PROXY_URLS_PRIORITY';
+    } catch {
+      // Пул недоступен или подменён — причина остаётся общей.
+    }
+    let host = url;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      // Невалидный адрес — печатаем как есть.
+    }
+    console.warn(
+      `[fetchHtml] порядок non-priority-first не выполнен (${host}): ${reason}. ` +
+        'Первая попытка идёт обычным выбором пула (YANDEXMAPS_PROXY_URLS, при пустом списке — RU-группа, ' +
+        'без живой ноды — напрямую), то есть почти прежним маршрутом' +
+        (suppressed > 0 ? `; с прошлой такой строки — ещё ${suppressed} запросов` : '') +
+        '. Следующая такая строка — не раньше чем через 10 мин.',
+    );
+  } catch {
+    // Строка лога не должна сорвать запрос.
+  }
+}
+
+type FetchHtmlWithRetryOptions = {
+  timeout?: number;
+  signal?: AbortSignal;
+  allowHttpErrors?: boolean;
+  retries?: number;
+  /**
+   * undefined сохраняет стандартный маршрут priority → fallback.
+   * false принудительно использует fallback на всех попытках; true — priority.
+   */
+  preferPriority?: boolean;
+  /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
+  acceptLanguage?: string;
+  /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+  routeOrder?: WebsiteFetchRouteOrder;
+  /** Защита чтения (WebsiteFetchGuard); не передана — redirect: 'follow'. */
+  guard?: WebsiteFetchGuard;
+  /** Потолок тела в байтах; не передан — тело читается целиком. */
+  maxBytes?: number;
+};
+
 export async function fetchHtmlWithRetry(
   url: string,
-  options?: {
-    timeout?: number;
-    signal?: AbortSignal;
-    allowHttpErrors?: boolean;
-    retries?: number;
-    /**
-     * undefined сохраняет стандартный маршрут priority → fallback.
-     * false принудительно использует fallback на всех попытках; true — priority.
-     */
-    preferPriority?: boolean;
-  },
+  options?: FetchHtmlWithRetryOptions,
 ): Promise<{ html: string; status: number } | null> {
+  // Повтор — на любом исходе, кроме HTML, как и раньше. Исключение одно:
+  // адрес, отклонённый защитой чтения, — он бывает только с опцией guard.
+  const outcome = await fetchHtmlOutcomeWithRetry(url, options, (o) => o.kind !== 'refused');
+  return outcome.kind === 'html' ? { html: outcome.html, status: outcome.status } : null;
+}
+
+async function fetchHtmlOutcomeWithRetry(
+  url: string,
+  options: FetchHtmlWithRetryOptions | undefined,
+  retryable: (outcome: HtmlFetchOutcome) => boolean,
+): Promise<HtmlFetchOutcome> {
   const retries = Math.max(0, Math.floor(options?.retries ?? FETCH_RETRIES));
+  const nonPriorityFirst = options?.routeOrder === 'non-priority-first';
+  let outcome: HtmlFetchOutcome = { kind: 'failed' };
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     // Первая попытка — приоритетный пул (RU). Retry — уходим в fallback:
     // если RU-прокси упал/дал 403 на .ru-сайте, второй раз через тот же
     // RU-прокси обычно ничего не даст; шанс через HK/EU выше нуля.
-    const preferPriority = options?.preferPriority ?? attempt === 0;
-    const result = await fetchHtml(url, { ...options, preferPriority });
-    if (result) return result;
-    if (options?.signal?.aborted) return null;
+    //
+    // 'non-priority-first' переворачивает лестницу для англоязычного сайта:
+    // первой идёт нода вне приоритетной группы, RU становится вторым шансом —
+    // ни один маршрут не теряется, меняется только порядок. Явный
+    // preferPriority вызывающего сильнее порядка: он и был, и остаётся
+    // способом прибить все попытки к одной группе.
+    const preferPriority =
+      options?.preferPriority ?? (nonPriorityFirst ? attempt > 0 : attempt === 0);
+    // Строго «не RU» умеет только pickNonPriorityProxyUrl: preferPriority=false
+    // берёт YANDEXMAPS_PROXY_URLS, где приоритетные ноды тоже перечислены.
+    // Такой группы нет (пусто или совпадает с приоритетной) — остаёмся на
+    // обычном выборе, то есть почти на сегодняшнем маршруте, и говорим это
+    // строкой в лог (warnNonPriorityRouteMissing): молча схлопнувшаяся
+    // лестница неотличима от работающей.
+    const wantsOtherNode = nonPriorityFirst && attempt === 0 && options?.preferPriority === undefined;
+    const otherNode = wantsOtherNode ? await getNonPriorityProxyDispatcher() : undefined;
+    if (wantsOtherNode && !otherNode) warnNonPriorityRouteMissing(url);
+    outcome = await fetchHtmlOutcome(url, {
+      ...options,
+      preferPriority,
+      ...(otherNode ? { dispatcher: otherNode } : {}),
+    });
+    if (outcome.kind === 'html') return outcome;
+    if (options?.signal?.aborted) return { kind: 'aborted' };
+    if (!retryable(outcome)) return outcome;
     if (attempt < retries) {
       await sleep(FETCH_RETRY_DELAY_MS * (attempt + 1));
     }
   }
-  return null;
+  return outcome;
 }
 
 /**
@@ -1091,13 +1486,79 @@ export function reusableMainPageDescription(html: string): string {
   return text.length >= MIN_MAIN_TEXT_TO_SKIP_ABOUT ? text.slice(0, MAX_TEXT_LENGTH) : '';
 }
 
+/**
+ * Ни один адрес origin'а не отдал HTML: ни главная (со своим ретраем), ни www,
+ * ни http-вариант, ни кандидаты «о компании».
+ *
+ * Строгое чтение одной страницы (fetchSinglePage) бросает его же, когда сам
+ * адрес не ответил ни на одной попытке (сеть, срок попытки): запасных адресов
+ * у строгого чтения нет, и для вызывающего это тот же факт «хост молчит».
+ *
+ * Класс, а не текст, потому что вызывающему нужно отличать два РАЗНЫХ факта:
+ * «хост молчит вообще» (перебирать остальные пути того же origin'а бессмысленно
+ * — каждый пойдёт тем же полным кругом) и «страница отдалась, но пустая или на
+ * JS» (это свойство одной страницы, соседние могут ответить).
+ *
+ * Адрес класс НЕ несёт: единственный консьюмер (`hypothesisEngine/stages/io`)
+ * подставляет в текст свой нормализованный url, а поле, которое никто не
+ * читает, следующий читатель принял бы за живое.
+ *
+ * Правка аддитивная: сообщение байт в байт то же, что бросал прежний
+ * `new Error`, поэтому консьюмеры (`api/enrich/*`, `lib/tools/dfyb*`,
+ * `processingSteps`, `websiteEnrichmentWorker`, io-слои движков) печатают и
+ * пишут в БД ровно тот же текст, что и до неё.
+ */
+export class WebsiteNoHtmlError extends Error {
+  /** Дискриминант: instanceof ложен, если в процессе окажется две копии модуля. */
+  readonly websiteNoHtml = true as const;
+
+  constructor() {
+    super('Не удалось получить HTML с сайта');
+    this.name = 'WebsiteNoHtmlError';
+  }
+}
+
+/** Типизированная проверка «origin не отдал HTML», без разбора текста ошибки. */
+export function isWebsiteNoHtmlError(e: unknown): e is WebsiteNoHtmlError {
+  if (e instanceof WebsiteNoHtmlError) return true;
+  return (
+    typeof e === 'object' && e !== null && (e as { websiteNoHtml?: unknown }).websiteNoHtml === true
+  );
+}
+
 export async function fetchAndExtract(
   rawUrl: string,
-  options?: { timeout?: number; signal?: AbortSignal },
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
+    acceptLanguage?: string;
+    /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+    routeOrder?: WebsiteFetchRouteOrder;
+    /**
+     * Язык служебного текста результата (подписи склейки, заглушка «текста
+     * нет»); не передан — русский, прежние строки. См. WebsiteTextLanguage.
+     */
+    textLanguage?: WebsiteTextLanguage;
+    /** Защита чтения (WebsiteFetchGuard) для каждого запроса цепочки; не передана — как до неё. */
+    guard?: WebsiteFetchGuard;
+    /** Потолок тела каждого ответа цепочки в байтах; не передан — тело целиком. */
+    maxBytes?: number;
+  },
 ): Promise<string> {
   const url = normalizeUrl(rawUrl);
+  const labels = EXTRACT_TEXT_LABELS[options?.textLanguage === 'en' ? 'en' : 'ru'];
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
+  // Язык, порядок групп, защиту чтения и потолок тела получает КАЖДЫЙ запрос
+  // цепочки: главная, www, http-вариант и страницы «о компании» — это один и
+  // тот же сайт, и читать его половиной адресов иначе смысла нет.
+  const route = {
+    acceptLanguage: options?.acceptLanguage,
+    routeOrder: options?.routeOrder,
+    guard: options?.guard,
+    maxBytes: options?.maxBytes,
+  };
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
   const origin = new URL(url).origin;
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : origin;
@@ -1108,7 +1569,7 @@ export async function fetchAndExtract(
   let mainText = '';
   let hadAnyHtml = false;
 
-  mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
+  mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true, ...route });
   if (mainHtml) {
     mainText = extractTextFromHtml(mainHtml.html);
     hadAnyHtml = true;
@@ -1118,6 +1579,7 @@ export async function fetchAndExtract(
       timeout,
       signal,
       allowHttpErrors: true,
+      ...route,
     });
     if (wwwHtml) {
       mainHtml = wwwHtml;
@@ -1130,6 +1592,7 @@ export async function fetchAndExtract(
       timeout,
       signal,
       allowHttpErrors: true,
+      ...route,
     });
     if (httpHtml) {
       mainHtml = httpHtml;
@@ -1167,7 +1630,7 @@ export async function fetchAndExtract(
   let aboutText = '';
   for (const candidate of allCandidates) {
     if (signal?.aborted) break;
-    const html = await fetchHtmlWithRetry(candidate, { timeout, signal });
+    const html = await fetchHtmlWithRetry(candidate, { timeout, signal, ...route });
     if (html) {
       const text = extractTextFromHtml(html.html);
       hadAnyHtml = true;
@@ -1182,15 +1645,15 @@ export async function fetchAndExtract(
   let combined: string;
   if (aboutText.length > 0 && mainText.length > 0) {
     // About page content has priority — placed first so it doesn't get truncated
-    combined = `--- О компании ---\n${aboutText}\n\n--- Главная ---\n${mainText}`;
+    combined = `${labels.about}\n${aboutText}\n\n${labels.home}\n${mainText}`;
   } else if (aboutText.length > 0) {
     combined = aboutText;
   } else if (mainText.length > 0) {
     combined = mainText;
   } else if (hadAnyHtml) {
-    combined = 'Страница доступна, но требует JavaScript или блокирует парсер.';
+    combined = labels.noText;
   } else {
-    throw new Error('Не удалось получить HTML с сайта');
+    throw new WebsiteNoHtmlError();
   }
 
   // Final sanitization pass on the combined text
@@ -1202,6 +1665,88 @@ export async function fetchAndExtract(
   }
 
   return combined;
+}
+
+/** Строго прочитанная страница: текст ровно того адреса, где закончились редиректы. */
+export interface WebsitePage {
+  /** Адрес последнего шага редиректа — с него и пришёл текст. */
+  url: string;
+  /**
+   * Текст страницы (≤ MAX_TEXT_LENGTH символов + «…»). Пустая строка — HTML
+   * есть, текста нет: заглушку «требует JavaScript» строгое чтение не
+   * подставляет, порог полезности решает вызывающий.
+   */
+  text: string;
+}
+
+/**
+ * Повтор строгого чтения: только там, где другой маршрут может ответить иначе —
+ * ответа не было, 403/429 (бот-защита, геоблок, лимит) или 5xx. Отсутствующая
+ * страница (404, 410 и прочие 4xx), не-HTML и отклонённый адрес — свойство
+ * самой страницы, второй запрос их не изменит.
+ */
+function isStrictRetryable(outcome: HtmlFetchOutcome): boolean {
+  if (outcome.kind === 'failed') return true;
+  return outcome.kind === 'unusable' && (outcome.status === 403 || outcome.status === 429 || outcome.status >= 500);
+}
+
+/**
+ * Строгое чтение ОДНОЙ страницы — опция для тех, кому нужна именно эта
+ * страница, а не «что-нибудь с этого сайта» (fetchAndExtract): подстраница
+ * сайта клиента, источник доказательства из поиска.
+ *
+ * В отличие от fetchAndExtract: нет обхода «о компании», нет подмены главной,
+ * www- и http-вариантами; ответ ≥ 400 — не страница (allowHttpErrors не
+ * включается); возвращается адрес, где закончились редиректы.
+ *
+ * Исходы:
+ *  - WebsitePage — страница с HTML (текст может быть пустым);
+ *  - null — сервер ответил, но страницы нет (статус не 2xx, не-HTML), адрес
+ *    отклонён защитой чтения (guard) или чтение отменено;
+ *  - бросает WebsiteNoHtmlError — адрес не ответил ни на одной попытке;
+ *    невалидный адрес — ошибка normalizeUrl, как у fetchAndExtract.
+ * Попыток столько же, сколько у fetchHtmlWithRetry (retries + 1, по умолчанию
+ * две), с той же лестницей маршрутов, но повтор — только по isStrictRetryable.
+ */
+export async function fetchSinglePage(
+  rawUrl: string,
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    retries?: number;
+    /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
+    acceptLanguage?: string;
+    /** Порядок групп прокси; не передан — 'priority-first'. */
+    routeOrder?: WebsiteFetchRouteOrder;
+    /** Защита чтения (WebsiteFetchGuard); не передана — redirect: 'follow'. */
+    guard?: WebsiteFetchGuard;
+    /** Потолок тела в байтах; не передан — тело целиком. */
+    maxBytes?: number;
+  },
+): Promise<WebsitePage | null> {
+  const url = normalizeUrl(rawUrl);
+  const outcome = await fetchHtmlOutcomeWithRetry(
+    url,
+    {
+      timeout: options?.timeout ?? FETCH_TIMEOUT_MS,
+      signal: options?.signal,
+      retries: options?.retries,
+      acceptLanguage: options?.acceptLanguage,
+      routeOrder: options?.routeOrder,
+      guard: options?.guard,
+      maxBytes: options?.maxBytes,
+    },
+    isStrictRetryable,
+  );
+  if (outcome.kind === 'failed') throw new WebsiteNoHtmlError();
+  // 3xx без Location (с ним редирект пройден или отклонён) — тело заглушки,
+  // а не страница.
+  if (outcome.kind !== 'html' || outcome.status < 200 || outcome.status >= 300) return null;
+  const text = sanitizeText(extractTextFromHtml(outcome.html));
+  return {
+    url: outcome.url,
+    text: text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH).trimEnd() + '…' : text,
+  };
 }
 
 import {

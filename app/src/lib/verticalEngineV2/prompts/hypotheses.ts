@@ -85,6 +85,8 @@ ${HYPOTHESIS_FIELD_RULES}
 ${BROAD_HYPOTHESES_RULES}`;
 
 export interface HypothesesPromptInput {
+  /** Opt-in structured audience generation; legacy prompts stay unchanged. */
+  audienceScope?: boolean;
   profile: VeSiteProfileOutput;
   websiteUrl: string;
   /** Сущности brand cloud клиента+конкурентов (уже классифицированные). */
@@ -125,6 +127,18 @@ export interface HypothesesPromptInput {
     actual_sent: number | null;
   }>;
 }
+
+export const AUDIENCE_SCOPE_GENERATION_RULES = `ФОРМИРОВАНИЕ АУДИТОРИЙ:
+- Выдай столько разных подходящих аудиторий, сколько обосновано продуктом: до 5 секторов в broad_hypotheses и до 20 сегментов в hypotheses. Минимального количества и квот по тирам нет; не дроби рынок ради количества.
+- Одна гипотеза = одна база компаний с одним типом покупателя, классом ЛПР и совместимым оффером. Синонимы и максимально близкие подниши объединяй в одну аудиторию через ИЛИ. Сохраняй названия подниш в any_of, чтобы охват был виден. Не объединяй поставщика с заказчиком, разные роли покупки, географии и несовместимые офферы.
+- Не делай одновременно общую и узкую копию той же аудитории ради разных болей, каналов или тем писем. Отдельный сегмент нужен только для существенно иной аудитории или оффера. Исследуй очевидные, смежные и неочевидные рынки, не придумывая число кандидатов.
+- У КАЖДОГО кандидата обязательное поле audience_scope: {"version":1,"kind":"sector"|"segment","any_of":["деятельность и тип компании"],"required":[],"excluded":[]}.
+- kind=sector только в broad_hypotheses, kind=segment только в hypotheses. any_of — 1–12 альтернатив деятельности: достаточно ЛЮБОЙ одной, не всех сразу. Если сектор заявлен целиком, включи сам сектор; перечень примеров не должен превращаться в закрытый узкий список. Название и description точно отражают этот охват.
+- required — только явно обязательные ограничения клиента/специалиста (0–12), excluded — только явные исключения (0–12). Не добавляй в них выдуманные пороги размера, выручки, технологий, найма, внутренние проблемы или предполагаемую потребность в продукте. Прямые ограничения клиента не ослабляй и не отменяй ради объёма.
+- Боли, задачи, триггеры и аргументы оффера — только в fit_rationale/rationale; они не являются доказуемыми условиями допуска компании. description кратко объясняет «кого собираем». Все элементы массивов scope — конкретные строки до 240 символов, без инструкций.
+- Разные названия с одинаковыми any_of/required/excluded — одна гипотеза. Не объединяй разные ограничения ради удаления дубля. У каждой аудитории сохрани объяснение экономики фита; отсутствие доказанного спроса не заменяй вымышленными фактами.`;
+
+export const AUDIENCE_SCOPE_JSON_ITEM = `{"tier":1,"title":"Короткое имя аудитории","description":"Кого собираем","audience_scope":{"version":1,"kind":"segment","any_of":["Вид деятельности и тип компании"],"required":[],"excluded":[]},"fit_rationale":"ЛПР → цель → боль → оффер → экономика","rationale":"Обоснование","potential_pct":60,"search_queries":["Запрос для фактчека"]}`;
 
 /** Поля контекста клиента, общие для промптов гипотез (основной список и отдельные широкие). */
 export type HypothesesClientContextInput = Pick<
@@ -186,6 +200,13 @@ ${input.portfolioProfile.map((p) => `- ${p.segment} — ${p.clients} клиен�
 ${input.actualsHistory.map((a) => `- «${a.name}»: прогноз ${a.predicted_pct}% → фактический reply ${a.actual_reply_pct}%${a.actual_sent ? ` (${a.actual_sent.toLocaleString('ru-RU')} отправок)` : ''}`).join('\n')}
 Как читать: potential_pct — потенциал вертикали, а НЕ прогноз reply%. Но используй эти пары как масштаб: вертикали с высоким фактическим reply получали высокий прогноз. Если твоя оценка похожего сегмента сильно расходится с фактом — перепроверь её.`
       : '';
+
+  if (input.audienceScope) return [
+    { role: 'system', content: `Ты — исследователь рынков B2B-аутрича. Сформируй проверяемые аудитории для продукта клиента, без поиска и вымышленных фактов.\n${FIT_ECONOMICS_CORE}\n${HYPOTHESIS_FIELD_RULES}\n${AUDIENCE_SCOPE_GENERATION_RULES}\nТир 1 — очевидная аудитория, 2 — смежная, 3 — неочевидная; это не оценка потенциала. Ответ строго на русском, только JSON.` },
+    { role: 'user', content: `${buildHypothesesClientContext(input)}\n${portfolioBlock}\n${markupBlock}\n${actualsBlock}
+Верни {"broad_hypotheses":[],"hypotheses":[]} с кандидатами формата ${AUDIENCE_SCOPE_JSON_ITEM}. У широких kind="sector", tier можно не указывать. Пустой один из блоков допустим, хотя бы одна подходящая аудитория обязательна. Не заполняй квоту неподходящими или дублирующими аудиториями.
+${input.priorityNiches?.length ? `В корне также верни priority_niche_results: ровно по одной записи для каждой заданной ниши {"niche":"точное название","status":"suggested"|"unavailable","hypothesis_titles":["точные title включённых кандидатов"],"reason":"конкретная причина"}. suggested требует хотя бы один title, unavailable — пустой список. Одна объединённая аудитория может покрывать несколько ниш. Не игнорируй и не ослабляй прямые ограничения клиента.` : ''}` },
+  ];
 
   const user = `${buildHypothesesClientContext(input)}
 ${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}
