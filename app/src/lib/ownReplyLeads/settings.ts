@@ -11,7 +11,7 @@ import { DEFAULT_LEAD_CRITERIA, LEAD_CRITERIA_MAX, isDefaultLeadCriteria } from 
  */
 export const OWN_REPLY_PIPELINE_ID = 7670334; // «Воронка - новые лиды»
 export const OWN_REPLY_STATUS_ID = 63385358; // «Новый лид»
-export const OWN_REPLY_RESPONSIBLE_USER_ID = 10539886; // Юлия Миронова
+export const OWN_REPLY_RESPONSIBLE_USER_ID = 12036498; // Егор Каныгин (решение 14.10.2026, как у RU/EN автоаутрича)
 export const OWN_REPLY_TAG = 'портал';
 
 export interface OwnReplySettings {
