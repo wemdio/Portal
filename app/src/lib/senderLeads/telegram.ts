@@ -69,7 +69,7 @@ export interface LeadMessageInput {
 }
 
 export function buildLeadMessage(input: LeadMessageInput): string {
-  const lines: string[] = ['📨 <b>Новый лид из Рассылки</b>', ''];
+  const lines: string[] = ['📨 <b>Новый лид из Автоаутрича</b>', ''];
   const where = [input.folderName, input.campaignName].filter(Boolean).map((s) => escapeHtml(clip(s!, 200)));
   lines.push(`<b>Рассылка:</b> ${where.join(' · ')}`);
   const contact = input.replyFrom && input.replyFrom.toLowerCase() !== input.recipientEmail.toLowerCase()
