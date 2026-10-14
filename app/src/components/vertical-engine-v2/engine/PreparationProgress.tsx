@@ -14,7 +14,6 @@ interface PreparationProgressProps {
   /** Project detail supplies jobs newest first; its history is intentionally bounded. */
   jobs: readonly VeJobSummary[];
   onContinue?: () => void;
-  onCheckContinuation?: () => void;
   continueDisabled?: boolean;
   approved?: boolean;
   actionNotice?: PreparationActionNotice | null;
@@ -68,9 +67,9 @@ export interface PreparationPresentation {
   currentStep: number | null;
   tone: 'info' | 'muted' | 'err' | 'ok';
   canContinue?: boolean;
-  canCheckContinuation?: boolean;
-  /** Optional collection must never compete with reviewing a finished base. */
-  additionalCollection?: { action: 'check' | 'collect' | null; reason: string };
+  /** Historical context only; collection actions remain visible separately. */
+  collectionSummary?: string;
+  continuationUnconfirmed?: boolean;
   continueLabel?: string;
   continueHint?: string;
   awaitingStatus?: boolean;
@@ -322,30 +321,27 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
   }
   if (state.canContinue && !downstreamRetry && !canResumePreparedBase) {
     if (continuation) {
-      state.canCheckContinuation = continuation.code === 'state_unchecked';
-      state.canContinue = !state.canCheckContinuation && continuation.available && continuation.action !== null;
-      state.continuationBlocked = !state.canContinue && !state.canCheckContinuation;
+      state.continuationUnconfirmed = continuation.code === 'state_unchecked';
+      state.canContinue = !state.continuationUnconfirmed && continuation.available && continuation.action !== null;
+      state.continuationBlocked = !state.canContinue && !state.continuationUnconfirmed;
       state.continueLabel = continuation.action === 'resume_collection' ? 'Собрать ещё контакты' : 'Продолжить подготовку';
-      state.continueHint = continuation.reason;
+      state.continueHint = state.continuationUnconfirmed ? undefined : continuation.reason;
     } else if (terminalCollection) {
       // Older API snapshots omit the full saved state. Do not guess that an
       // exhausted plan has another paid or productive pass left.
       state.canContinue = false;
-      state.canCheckContinuation = true;
-      state.continueHint = 'Можно проверить, осталась ли работа для добора. Сама проверка сбор не запускает.';
+      state.continuationUnconfirmed = true;
     }
   }
   if (state.tone === 'ok') {
-    if (terminalCollection || state.canContinue || state.canCheckContinuation) {
-      state.additionalCollection = {
-        action: state.canCheckContinuation ? 'check' : state.canContinue ? 'collect' : null,
-        reason: state.canCheckContinuation
-          ? 'Проверим, осталась ли работа для добора. Сбор начнётся только по отдельной кнопке.'
-          : state.continueHint ?? '',
-      };
+    if (terminalCollection) {
+      state.collectionSummary = [state.description, state.continueHint].filter(Boolean).join(' ');
     }
-    state.canContinue = false;
-    state.canCheckContinuation = false;
+    // A finished base needs no retry. The only optional action is confirmed
+    // collection; an unknown cache is resolved automatically by the parent.
+    state.canContinue = continuation?.available === true && continuation.action === 'resume_collection'
+      && continuation.code !== 'state_unchecked';
+    if (state.canContinue) state.continueLabel = 'Собрать ещё контакты';
     state.continuationBlocked = false;
     state.continueHint = undefined;
   }
@@ -358,8 +354,8 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
     guidance = { action: 'review', title: 'База и письма готовы', next: 'Скачайте контакты или проверьте базу и письма для запуска. После проверки одобрите базу.' };
   } else if (props.context === 'letters' && props.base?.status === 'failed' && state.tone === 'muted') {
     guidance = { action: 'check', title: 'Нужно проверить состояние базы', next: 'Откройте «Базы и объём»: там указаны причина остановки и доступные действия.' };
-  } else if (state.canCheckContinuation) {
-    guidance = { action: 'check', title: 'Можно проверить возможность добора', next: 'Проверка покажет, остались ли незавершённые этапы или доступные источники. Сбор она не запускает.' };
+  } else if (state.continuationUnconfirmed) {
+    guidance = { action: 'check', title: 'Подготовка не завершена', next: 'Возможность продолжения пока не подтверждена. Новый сбор не запускается.' };
   } else if (state.canContinue) {
     guidance = { action: 'continue', title: 'Можно продолжить подготовку',
       next: `Нажмите «${state.continueLabel ?? 'Продолжить подготовку'}» ниже. Работа продолжится с сохранённого этапа.` };
@@ -405,7 +401,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
       </div>
       {!completed ? <p className="font-medium">{state.title}</p> : null}
       <p>{state.guidance.next}</p>
-      {completed && state.additionalCollection ? <p className={HE.muted}>Подготовка завершена ниже цели. Эти контакты можно использовать — добор не обязателен.</p> : null}
+      {completed && state.collectionSummary ? <p className={HE.muted}>Подготовка завершена ниже цели. Эти контакты можно использовать, добор не обязателен.</p> : null}
       {!completed && state.readiness ? <p>{state.readiness}</p> : null}
       {completed ? null : state.guidance?.action === 'wait' ? <details>
         <summary className="ve2-link cursor-pointer">Что происходит на этом этапе</summary>
@@ -442,29 +438,18 @@ export function PreparationProgress(props: PreparationProgressProps) {
           {savedReady !== null ? `; проверенных контактов: ${savedReady.toLocaleString('ru-RU')}` : ''}.
         </p>
       ) : null}
-      {!completed && props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
+      {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
         className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
-      {state.additionalCollection && props.onContinue ? <details>
-        <summary className="ve2-link cursor-pointer">Дополнительный добор</summary>
-        <div className="mt-3 space-y-3">
-          <p className={HE.muted}>{state.description}</p>
-          {state.additionalCollection.reason ? <p className={HE.muted}>{state.additionalCollection.reason}</p> : null}
-          {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
-            className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
-          {state.additionalCollection.action === 'check' && props.onCheckContinuation ? <button type="button"
-            className={HE.btnGhost} disabled={props.continueDisabled} onClick={props.onCheckContinuation}>Проверить возможность добора</button> : null}
-          {state.additionalCollection.action === 'collect' ? <button type="button"
-            className={HE.btnGhost} disabled={props.continueDisabled} onClick={props.onContinue}>Собрать ещё контакты</button> : null}
-        </div>
-      </details> : null}
-      {state.canCheckContinuation && props.onCheckContinuation ? <button type="button"
-        className={HE.btnGhost} disabled={props.continueDisabled} onClick={props.onCheckContinuation}>Проверить возможность добора</button> : null}
       {state.canContinue && props.onContinue ? <div className="space-y-2">
         <button type="button" className={state.continueLabel ? HE.btnGhost : HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
           {state.continueLabel ?? 'Продолжить подготовку'}
         </button>
       </div> : null}
       {state.continueHint ? <p className={HE.muted}>{state.continueHint}</p> : null}
+      {state.collectionSummary ? <details>
+        <summary className="ve2-link cursor-pointer">О сборе базы</summary>
+        <p className={`${HE.muted} mt-2 max-w-[70ch]`}>{state.collectionSummary}</p>
+      </details> : null}
     </div>
   );
 }

@@ -13,6 +13,9 @@ import { normalizeVeGenerationSourcePlan, stripUnfoundedSizeFilters, veCanWidenP
 import { canResumePartialPreview, getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
 import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed } from '@/lib/verticalEngineV2/clinicSourcePolicy';
 import { detectVeMediaSourceProfile, isVeMediaCatalogTask, normalizeVeMediaSourcePlan, veMediaRubricAllowed } from '@/lib/verticalEngineV2/mediaSourcePolicy';
+import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
+import { VE_RELEVANCE_TRIAGE_VERSION } from '@/lib/verticalEngineV2/relevanceTriageConfig';
+import { VE_STAFFING_CORRECTION_VERSION } from '@/lib/verticalEngineV2/staffingCorrection';
 import type { VeCollectTask } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 
 const HYPOTHESES = {
@@ -359,6 +362,62 @@ describe('вторая очередь исчерпанного реестра', 
     expect(getVeCollectionContinuation(payments)).toMatchObject({ available: true, code: 'source_update' });
     payments.collect_info.source_selection.version = 2;
     expect(getVeCollectionContinuation(payments)).toMatchObject({ available: false, code: 'sources_exhausted' });
+
+    // A staffing-only saved refusal is useful work even with no remaining
+    // source. Current metadata must win over an obsolete generated snapshot.
+    const staffingHypothesis = { id: 'h1', title: 'B2B SaaS с remote-командами',
+      description: 'SaaS-вендоры из СНГ, Европы, MENA и APAC, нанимающие специалистов в 2+ странах.',
+      origin: 'generated', status: 'accepted' };
+    const staffingRow = { company: 'Saved SaaS', website: 'https://saas.example', email: 'team@saas.example',
+      _email_status: 'ok', _ve_relevance: { version: 2, status: 'needs_review',
+        reason: 'Смысловое соответствие не подтверждено: Не подтверждена удалённая команда.',
+        context_hash: 'a'.repeat(64), evidence: [{ field: 'description', quote: 'Собственная SaaS-платформа для бизнеса.' }],
+        review_attempts: 2, website_review_version: VE_RELEVANCE_WEBSITE_VERSION,
+        rules_version: VE_RELEVANCE_RULES_VERSION, triage_version: VE_RELEVANCE_TRIAGE_VERSION } };
+    const stoppedSaas = { ...widened, collect_info: { ...widened.collect_info,
+      hypotheses: [staffingHypothesis], relevance_reserve: { version: 1, rows: [staffingRow] } } };
+    const stoppedBefore = JSON.stringify(stoppedSaas);
+    const savedWork = { available: true, code: 'saved_work', action: 'resume_preparation' };
+    const noWork = { available: false, code: 'sources_exhausted', action: null };
+    expect(getVeCollectionContinuation(stoppedSaas)).toMatchObject(savedWork);
+    expect(getVeCollectionContinuation(stoppedSaas, staffingHypothesis)).toMatchObject(savedWork);
+    expect(canResumePartialPreview(stoppedSaas, staffingHypothesis)).toBe(true);
+    for (const current of [null,
+      { ...staffingHypothesis, origin: 'manual' },
+      { ...staffingHypothesis, origin: undefined },
+      { ...staffingHypothesis, status: 'rejected' },
+      { ...staffingHypothesis, id: 'another-hypothesis' },
+      { ...staffingHypothesis, title: 'Разработчики заказного ПО' },
+      { ...staffingHypothesis, description: staffingHypothesis.description + ' Обязательно наличие удалённой команды.' },
+    ]) {
+      expect(getVeCollectionContinuation(stoppedSaas, current)).toMatchObject(noWork);
+      expect(canResumePartialPreview(stoppedSaas, current)).toBe(false);
+    }
+    for (const hypotheses of [[], [staffingHypothesis, staffingHypothesis],
+      [{ ...staffingHypothesis, id: 'another-hypothesis' }],
+      [{ title: staffingHypothesis.title }], [{ ...staffingHypothesis, origin: 'manual' }],
+    ]) {
+      const legacy = { ...stoppedSaas, collect_info: { ...stoppedSaas.collect_info, hypotheses } };
+      expect(getVeCollectionContinuation(legacy)).toMatchObject(noWork);
+      expect(getVeCollectionContinuation(legacy, staffingHypothesis)).toMatchObject(savedWork);
+    }
+    // Only unfinished correction is selectable. Other failed requirements and
+    // unusable addresses cannot open a new paid pass through this exception.
+    for (const row of [
+      { ...staffingRow, _email_status: 'invalid' },
+      { ...staffingRow, _ve_relevance: { ...staffingRow._ve_relevance,
+        staffing_correction_version: VE_STAFFING_CORRECTION_VERSION } },
+      { ...staffingRow, _ve_relevance: { ...staffingRow._ve_relevance,
+        reason: 'Не подтверждена удалённая команда. Не подтверждён собственный SaaS-продукт.' } },
+    ]) {
+      expect(getVeCollectionContinuation({ ...stoppedSaas, collect_info: { ...stoppedSaas.collect_info,
+        relevance_reserve: { version: 1, rows: [row] } } })).toMatchObject(noWork);
+    }
+    const cappedSaas = { ...stoppedSaas, collect_info: { ...stoppedSaas.collect_info,
+      target_progress: { ...stoppedSaas.collect_info.target_progress, candidates_processed: 10_000 } } };
+    expect(getVeCollectionContinuation(cappedSaas)).toMatchObject(savedWork);
+    expect(getVeCollectionContinuation(cappedSaas, null)).toMatchObject({ available: false, code: 'candidate_limit' });
+    expect(JSON.stringify(stoppedSaas)).toBe(stoppedBefore);
   });
 });
 

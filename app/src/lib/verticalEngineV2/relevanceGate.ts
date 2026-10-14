@@ -13,11 +13,12 @@ import { fetchVeRelevanceEvidence, VE_RELEVANCE_EVIDENCE_MAX_MS, type VeRelevanc
 import { proxyPoolHealth } from '@/lib/enrich/proxyPool';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
-import { reviewVeRelevanceEvidence, VE_RELEVANCE_SCOPE_NOTE, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
+import { reviewVeRelevanceEvidence, VE_RELEVANCE_SCOPE_NOTE, VE_RELEVANCE_TARGET_RULES, veStaffingScopeNote, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
 import { veMedicalScopeNote, type VeMedicalTarget } from './relevanceMedical';
 import { triageVeCompanies, veTriageAvailable, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
   VE_TRIAGE_MAX_EXCERPTS, VE_TRIAGE_RUBRIC_VERSION, type VeTriageRubric } from './relevanceTriage';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
+import { needsVeStaffingCorrection, veHasStaffingOnlyRefusal, veStaffingCorrectionApplies, VE_STAFFING_CORRECTION_VERSION } from './staffingCorrection';
 export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
@@ -235,6 +236,7 @@ const outputDecision = z.object({
 });
 function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondPass: boolean, evidenceIds = false, origin?: VeMedicalTarget['hypothesisOrigin']): LLMMessage[] {
   const medicalNote = veMedicalScopeNote(scope, origin);
+  const staffingNote = veStaffingScopeNote(scope, origin);
   return [{ role: 'system', content: [
     'Assess the actual business of each company against ONE target hypothesis, not merely its broad vertical.',
     VE_RELEVANCE_TARGET_RULES,
@@ -253,7 +255,7 @@ function messages(scope: string, batch: Fields[], language: 'ru' | 'en', secondP
     'The reason must follow from the cited service facts. Keep each reason concise, at most 240 characters. Do not claim that a company works exclusively in one area, or lacks the target service, when the excerpts merely omit other activities.',
     secondPass ? 'Independent second look using website evidence: reconsider provisional rejections AND uncertainty.' : 'Initial review: keep uncertainty explicit instead of guessing.',
     'Reasons in ' + (language === 'ru' ? 'Russian' : 'English') + '. JSON only: {"decisions":[{"i":0,"status":"needs_review","reason":"...","' + (evidenceIds ? 'evidence_ids' : 'evidence') + '":[]}]}',
-  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (medicalNote ? '\n' + medicalNote : '') + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
+  ].join('\n') }, { role: 'user', content: scope + '\n' + VE_RELEVANCE_SCOPE_NOTE + (staffingNote ? '\n' + staffingNote : '') + (medicalNote ? '\n' + medicalNote : '') + '\nReturn exactly ' + batch.length + ' decisions. Include EVERY local i exactly once: ' + batch.map((_, i) => i).join(', ') + '. Never return a partial list.\nRows, local indices 0..' + (batch.length - 1) + ':\n' + JSON.stringify(batch.map((fields, i) => ({ i, ...fields }))) }];
 }
 /** A careers/contact shell proves neither the company's business nor a conflict.
  * Keep this deliberately narrow: any remaining words leave the normal review
@@ -413,7 +415,14 @@ export async function findIrrelevantRows(input: {
     catch (e) { signal?.throwIfAborted(); throw new VeRelevanceCheckpointError(e instanceof Error ? e.message : 'Relevance checkpoint write failed'); }
     signal?.throwIfAborted();
   };
-  const record = (entry: Entry, decision: VeRelevanceDecision) => { current.set(entry, decision); if (entry.cacheable) checkpoint.verdicts[entry.key] = decision; };
+  const record = (entry: Entry, decision: VeRelevanceDecision) => {
+    // Provider failures/429/restarts keep the same correction receipt and salt.
+    // Error decisions intentionally have no quotes, but must retain its marker.
+    if (checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]?.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION) {
+      decision.staffing_correction_version = VE_STAFFING_CORRECTION_VERSION;
+    }
+    current.set(entry, decision); if (entry.cacheable) checkpoint.verdicts[entry.key] = decision;
+  };
   /** Временный сбой поиска: компания в резерве с отложенным поиском, проход не «падает». */
   const deferSearch = (entry: Entry): VeRelevanceDecision => {
     const decision: VeRelevanceDecision = { ...(current.get(entry) ?? errorDecision(SEARCH_RETRY_REASON, entry.attempts)),
@@ -513,8 +522,10 @@ export async function findIrrelevantRows(input: {
     (item.field === 'description' || item.field === 'website_text' || item.field === 'category') && activityQuote(item.quote)
       ? [{ field: item.field, quote: item.quote }] : []) });
   const semanticHash = (entry: Entry, decision: VeRelevanceDecision) =>
-    relevanceHash([checkpoint.website_evidence[entry.key]?.reader_revision === 4 ? 'semantic-review-v2-buyer-scope' : 'semantic-review-v1',
-      contextHash, cacheReviewModel, entry.key, reviewCompany(decision)]);
+    decision.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION
+      ? relevanceHash(['semantic-review-saas-staffing-correction', VE_STAFFING_CORRECTION_VERSION, contextHash, cacheReviewModel, entry.key, reviewCompany(decision)])
+      : relevanceHash([checkpoint.website_evidence[entry.key]?.reader_revision === 4 ? 'semantic-review-v2-buyer-scope' : 'semantic-review-v1',
+        contextHash, cacheReviewModel, entry.key, reviewCompany(decision)]);
   const confirms = (decision: VeRelevanceDecision, review: VeRelevanceReviewResult) =>
     (decision.status === 'relevant' && review.result === 'direct_match')
       || (decision.status === 'irrelevant' && review.result === 'direct_conflict');
@@ -560,8 +571,18 @@ export async function findIrrelevantRows(input: {
       && ![SEMANTIC_REJECTION_REASON, SEMANTIC_QUARANTINE_REASON, WEBSITE_UNCONFIRMED_REASON, WEBSITE_TIMEOUT_REASON]
         .some((reason) => decision.reason.startsWith(reason));
   const awaitsRulesRecheck = (entry: Entry, decision: VeRelevanceDecision): boolean =>
-    staleRejected(semanticFor(entry)) && !websiteBlocked(entry) && !siteClassified(entry, decision);
+    decision.staffing_correction_version !== VE_STAFFING_CORRECTION_VERSION
+      && staleRejected(semanticFor(entry)) && !websiteBlocked(entry) && !siteClassified(entry, decision);
   const rulesRechecked = new Set<Entry>();
+  const staffingRechecked = new Set<Entry>();
+  // Total correction budget survives jobs/restarts, including reservations whose
+  // result was lost. It does not grant another 200 companies on every pass.
+  const staffingReserved = new Set(Object.values(checkpoint.semantic_reviews)
+    .filter((review) => review.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION)
+    .map((review) => review.company_key));
+  // A saved correction pass must never spill into new acquisition/classification.
+  // Includes deferred-by-cap and ineligible correction candidates, for free.
+  const staffingOnly = new Set<Entry>();
   const quarantineSemantic = (entry: Entry) => {
     record(entry, { ...errorDecision(SEMANTIC_QUARANTINE_REASON, Math.max(1, entry.attempts)),
       status: 'needs_review', website_review_version: VE_RELEVANCE_WEBSITE_VERSION });
@@ -611,7 +632,8 @@ export async function findIrrelevantRows(input: {
       record(entry, errorDecision('Ожидается повторная смысловая проверка после отказа провайдера.', entry.attempts));
       return;
     }
-    if (interrupted && review.attempts >= MAX_SEMANTIC_ATTEMPTS && !review.interrupted) {
+    if (interrupted && review.attempts >= MAX_SEMANTIC_ATTEMPTS && !review.interrupted
+      && review.staffing_correction_version !== VE_STAFFING_CORRECTION_VERSION) {
       // Попыткой считается полученный ответ или ошибка модели, а не остановка
       // воркера. Возврат разовый: повторные обрывы на той же компании не
       // покупают проверку без конца, вторая остановка ведёт в карантин.
@@ -643,7 +665,9 @@ export async function findIrrelevantRows(input: {
       if (previous.status === 'started' || previous.status === 'failed') { resumeSemantic(entry, previous); return; }
       previous.proposal = decision;
       if (previous.status === 'finished') { applySemantic(entry, previous); return; }
-    } else checkpoint.semantic_reviews[hash] = { company_key: entry.key, proposal: decision, status: 'pending' };
+    } else checkpoint.semantic_reviews[hash] = { company_key: entry.key, proposal: decision, status: 'pending',
+      ...(decision.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION
+        ? { staffing_correction_version: VE_STAFFING_CORRECTION_VERSION } : {}) };
     record(entry, errorDecision('Ожидается независимая смысловая проверка доказательств.', entry.attempts));
   };
   let deferredReviewBatches = 0;
@@ -1047,12 +1071,70 @@ export async function findIrrelevantRows(input: {
     if (!hasContext) return true;
     const cached = entry.cacheable ? checkpoint.verdicts[entry.key] : undefined;
     const website = checkpoint.website_evidence[entry.key];
+    if ((!cached || cached.context_hash !== contextHash) && veStaffingCorrectionApplies(input)) {
+      const savedHint = entry.group.rowIndices.map((index) => veRelevanceDecisionSchema.safeParse(input.rows[index]._ve_relevance))
+        .find((parsed) => parsed.success && (needsVeStaffingCorrection(parsed.data, input)
+          || (parsed.data.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION
+            && (parsed.data.status === 'needs_review' || parsed.data.status === 'error'))));
+      if (savedHint?.success) {
+        // Enrichment/evidenceRows may change the immutable input key; an absent
+        // or incompatible checkpoint is not permission to buy a fresh review.
+        // Keep this saved refusal, mark the policy check, and await real new work.
+        staffingOnly.add(entry);
+        record(entry, { ...savedHint.data, status: 'needs_review', context_hash: contextHash,
+          staffing_correction_version: VE_STAFFING_CORRECTION_VERSION });
+        recoveredRepair = true;
+        return false;
+      }
+    }
     if (cached && cached.context_hash === contextHash) {
       entry.attempts = Math.max(entry.attempts, cached.review_attempts ?? 0, website?.review_attempts ?? 0);
       const reviewHash = checkpoint.semantic_review_refs[entry.key];
       const semantic = checkpoint.semantic_reviews[reviewHash];
+      // Also retain the no-acquisition boundary of a previous free policy
+      // check (missing receipt, unusable evidence or exhausted correction cap).
+      if (cached.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION
+        && (cached.status === 'needs_review' || cached.status === 'error')) {
+        staffingOnly.add(entry);
+        if (cached.status === 'error' && (semantic?.company_key !== entry.key
+          || semantic.staffing_correction_version !== VE_STAFFING_CORRECTION_VERSION)) {
+          // An error is resumable only with its own correction reservation.
+          // A missing/foreign receipt must not fall through to initial review.
+          record(entry, { ...cached, status: 'needs_review' });
+          recoveredRepair = true;
+          return false;
+        }
+      }
+      if (needsVeStaffingCorrection(cached, input)) {
+        staffingOnly.add(entry);
+        const eligibleCorrection = semantic?.company_key === entry.key && semantic.status === 'finished'
+          && semantic.result?.result === 'insufficient' && semantic.proposal.status === 'relevant'
+          && semantic.staffing_correction_version !== VE_STAFFING_CORRECTION_VERSION
+          && veHasStaffingOnlyRefusal(semantic.result.reason) && reviewCompany(semantic.proposal).evidence.length > 0
+          && !websiteBlocked(entry) && !websitePending(entry) && !siteClassified(entry, cached);
+        if (!eligibleCorrection || (staffingReserved.size >= VE_RULES_RECHECK_LIMIT && !staffingReserved.has(entry.key))) {
+          // No saved usable proposal or later website work: remember the check,
+          // preserve the refusal and don't buy evidence to manufacture a recheck.
+          record(entry, { ...cached, staffing_correction_version: VE_STAFFING_CORRECTION_VERSION });
+          recoveredRepair = true;
+        } else if (rulesRechecked.size + staffingRechecked.size < VE_RULES_RECHECK_LIMIT) {
+          const proposal: VeRelevanceDecision = { ...semantic.proposal,
+            ...(cached.website_review_version ? { website_review_version: cached.website_review_version } : {}),
+            ...(cached.triage_version ? { triage_version: cached.triage_version } : {}),
+            ...(cached.rules_version ? { rules_version: cached.rules_version } : {}),
+            staffing_correction_version: VE_STAFFING_CORRECTION_VERSION,
+            review_attempts: Math.max(semantic.proposal.review_attempts ?? 0, entry.attempts) };
+          // stageDecision reserves a *new salted* receipt. Do not delete or reset
+          // the original paid rejection, even if this attempt is interrupted.
+          stageDecision(entry, proposal);
+          staffingReserved.add(entry.key);
+          staffingRechecked.add(entry); recoveredSemantic.push(entry); recoveredRepair = true;
+        } else current.set(entry, cached);
+        return false;
+      }
       if (semantic?.company_key === entry.key) {
-        if (cached.status === 'needs_review' && rulesRechecked.size < VE_RULES_RECHECK_LIMIT
+        if (semantic.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION) staffingOnly.add(entry);
+        if (cached.status === 'needs_review' && rulesRechecked.size + staffingRechecked.size < VE_RULES_RECHECK_LIMIT
           && awaitsRulesRecheck(entry, cached) && !websitePending(entry)) {
           // One review of the same saved quotes under the current rules: no
           // website, search or classifier. Carrying the completed website and
@@ -1126,7 +1208,7 @@ export async function findIrrelevantRows(input: {
       if (cached.status !== 'error' || pendingRefinement) {
         current.set(entry, cached);
         // Saved uncertainty the triage has not seen yet: the bulk of a stalled reserve.
-        if (triageEnabled && cached.status === 'needs_review' && !pendingRefinement
+        if (triageEnabled && !staffingOnly.has(entry) && cached.status === 'needs_review' && !pendingRefinement
           && cached.triage_version !== VE_RELEVANCE_TRIAGE_VERSION) triageBacklog.push(entry);
         return false;
       }
@@ -1182,6 +1264,7 @@ export async function findIrrelevantRows(input: {
     // deciding which companies need website evidence.
     await reviewPending(entries);
     const review = entries.filter((entry) => {
+      if (staffingOnly.has(entry)) return false;
       if (!entry.fields.website && !entry.identity
         && !entry.group.rows.some((row) => rowText(row, ['address', 'адрес']) && rowText(row, ['company', 'компания']))) return false;
       const cached = checkpoint.website_evidence[entry.key];
@@ -1425,6 +1508,8 @@ export async function findIrrelevantRows(input: {
     input.log?.('[relevanceGate] перепроверка отказов по новым правилам отбора: ' + rulesRechecked.size + ' компаний, допущено '
       + admitted + (rulesDeferred ? ', ждут следующего прохода ' + rulesDeferred : ''));
   }
+  if (staffingRechecked.size) input.log?.('[relevanceGate] перепроверка сохранённых отказов по условиям найма SaaS: '
+    + staffingRechecked.size + ' компаний; новые источники и сайты не запрашивались');
   if (deferredProviderRecovery || triageStamped || rulesStamped) await save();
   result.coverage.complete = result.coverage.checkedCompanies === entries.length;
   result.retryable = transientFailure && !permanentFailure;

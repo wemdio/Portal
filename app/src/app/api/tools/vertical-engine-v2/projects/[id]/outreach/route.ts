@@ -43,6 +43,7 @@ export async function POST(req: NextRequest, { params }: Context) {
       );
       if (b.action === 'check_continuation') {
         if (!uuid(b.hypothesis_id)) return NextResponse.json({ error: 'Укажите гипотезу для проверки' }, { status: 400 });
+        if (b.check_only !== undefined && typeof b.check_only !== 'boolean') return NextResponse.json({ error: 'Некорректный режим проверки' }, { status: 400 });
         const check = await checkVeContinuationRequest(supabaseAdmin, projectId, b.revision, b.hypothesis_id);
         await logAudit('tools.vertical-engine-v2.continuation.checked', 'Проверка возможности продолжения',
           { project_id: projectId, hypothesis_id: check.hypothesis_id, base_id: check.base_id ?? null,
@@ -50,6 +51,9 @@ export async function POST(req: NextRequest, { params }: Context) {
           { userId: auth.auth.userId, route: '/api/tools/vertical-engine-v2/projects/[id]/outreach' });
         // A negative verdict is also a successful check. Never fall through to
         // the prepare RPC, even when the preflight finds available work.
+        // Automatic checks need no project-wide preview hashes. Keep the full
+        // response for a previously deployed frontend during rolling releases.
+        if (b.check_only === true) return NextResponse.json({ continuation_check: check });
         return NextResponse.json({ ...await loadVeOutreachSetup(supabaseAdmin, projectId), continuation_check: check });
       } else if (b.action === 'select') {
         if (!Array.isArray(b.hypothesis_ids) || b.hypothesis_ids.length > 50 || b.hypothesis_ids.some((id: unknown) => !uuid(id))

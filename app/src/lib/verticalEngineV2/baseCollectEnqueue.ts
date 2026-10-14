@@ -120,7 +120,7 @@ function repairJobPayload(base: Record<string, unknown>): Record<string, unknown
 
 async function resumeFailedPreview(
   supabase: SupabaseClient, input: VeBaseCollectInput, hypothesisId: string,
-  activeBaseIds: string[],
+  activeBaseIds: string[], currentHypothesis: Record<string, unknown> | null,
 ): Promise<VeBaseCollectResult | null> {
   let query = supabase.from('ve_bases')
     .select('id, project_id, vertical_id, hypothesis_id, source, status, error, collect_info, created_at, updated_at, collection_continuation_revision, max_emails_per_company, contact_cap_applied')
@@ -129,13 +129,13 @@ async function resumeFailedPreview(
   query = input.resumeBaseId ? query.eq('id', input.resumeBaseId).in('status', ['failed', 'analyzed']) : query.eq('status', 'failed');
   const { data: failed, error } = await query.order('created_at', { ascending: false }).limit(100);
   if (error) return { ok: false, message: error.message };
-  const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base) || (input.resumeBaseId && canResumePartialPreview(base)));
+  const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base) || (input.resumeBaseId && canResumePartialPreview(base, currentHypothesis)));
   // A newer empty 402 attempt must not hide an older already enriched result.
   const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation')
     ?? candidates.find((base) => previewRecoveryKind(base) !== 'billing') ?? candidates[0];
   if (!saved) {
     const requested = input.resumeBaseId && (failed ?? []).find((base) => base.id === input.resumeBaseId);
-    return requested ? { ok: true, created: false, base: requested, continuation: getVeCollectionContinuation(requested) } : null;
+    return requested ? { ok: true, created: false, base: requested, continuation: getVeCollectionContinuation(requested, currentHypothesis) } : null;
   }
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   if (saved.status === 'analyzed') {
@@ -148,6 +148,7 @@ async function resumeFailedPreview(
     } };
   }
   const info = { ...saved.collect_info,
+    ...(currentHypothesis && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')) ? { hypotheses: [currentHypothesis] } : {}),
     ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}),
     ...(saved.status === 'analyzed' ? { validation_retry: true, relevance_review_requested: true } : {}),
   };
@@ -273,13 +274,16 @@ export async function enqueueVeBaseCollect(
   // показывается заголовком на карточке (Phase 3), но filename одинаков у всех
   // баз вертикали — без суффикса карточки неразличимы и экспорт путается.
   let hypothesisTitle: Record<string, string> = {};
+  const currentHypotheses = new Map<string, Record<string, unknown>>();
   if (perHypothesis) {
     const ids = hypothesisIds as string[];
     const { data: hypRows, error: hypErr } = await supabase
       .from('ve_hypotheses')
-      .select('id, title')
+      .select('id, title, description, origin, status, broad')
+      .eq('project_id', projectId).eq('vertical_id', verticalId)
       .in('id', ids);
     if (hypErr) return { ok: false, message: hypErr.message };
+    for (const h of hypRows ?? []) currentHypotheses.set(String(h.id), h);
     hypothesisTitle = Object.fromEntries(
       (hypRows ?? []).map((h) => [String(h.id), String(h.title ?? '').trim() || String(h.id)]),
     );
@@ -456,7 +460,7 @@ export async function enqueueVeBaseCollect(
       if (preparedError) return { ok: false, message: preparedError.message };
       if (prepared) {
         if (prepared.id === input.resumeBaseId) {
-          const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
+          const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds, currentHypotheses.get(hypothesisId) ?? null);
           if (resumed) {
             if (!resumed.ok) return resumed;
             if (!resumed.created && resumed.continuation && !resumed.continuation.available) return resumed;
@@ -467,7 +471,7 @@ export async function enqueueVeBaseCollect(
         existing.push(prepared as Record<string, unknown>);
         continue;
       }
-      const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
+      const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds, currentHypotheses.get(hypothesisId) ?? null);
       if (resumed) {
         if (!resumed.ok) return resumed;
         if (!resumed.created && resumed.continuation && !resumed.continuation.available) return resumed;

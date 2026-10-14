@@ -19,11 +19,12 @@ import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veSavedReviewSig
 import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { resetVeTriageState, veTriageRubricMessages } from '@/lib/verticalEngineV2/relevanceTriage';
-import { VE_RELEVANCE_TARGET_RULES } from '@/lib/verticalEngineV2/relevanceReview';
+import { VE_RELEVANCE_TARGET_RULES, veStaffingScopeNote, relevanceReviewMessages } from '@/lib/verticalEngineV2/relevanceReview';
 import { readRelevanceCheckpoint, relevanceHash } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import type { VeRelevanceDecision } from '@/lib/verticalEngineV2/relevanceDecision';
 import savedBeforeRelease from './fixtures/relevanceCheckpointBeforeRulesV2.json';
 import { veMedicalScopeNote } from '@/lib/verticalEngineV2/relevanceMedical';
+import { veHasStaffingOnlyRefusal } from '@/lib/verticalEngineV2/staffingCorrection';
 
 const FOOD = { verticalName: 'Пищевые заводы',
   verticalSummary: 'Производители пищевой и кормовой продукции с рецептурами, партиями, сроками годности, ветсертификацией и поставками в сети; решение обычно у операционного директора, директора по производству или ИТ-директора. Покупают продукт клиента, чтобы управлять рецептурами, прослеживаемостью, сменами, складами сырья и выпуском.' };
@@ -280,6 +281,20 @@ describe('VE2 relevance selection rules', () => {
   });
 
   it('keeps the closed lists of structural conditions exact and free of size, in the rules and in the Jev checklist', () => {
+    const saas = 'Target hypothesis: B2B SaaS с remote-командами\nSaaS-вендоры из СНГ, нанимающие разработчиков в 2+ странах.';
+    const staffing = veStaffingScopeNote(saas, 'generated');
+    expect(veStaffingScopeNote(saas)).toBe('');
+    expect(veStaffingScopeNote(saas, 'manual')).toBe('');
+    for (const required of ['Обязательно remote-команды', 'Только с удалёнными командами', 'Must hire in 2+ countries']) {
+      expect(veStaffingScopeNote(saas + '\n' + required, 'generated')).toBe('');
+    }
+    expect(staffing).toContain("company's OWN remote team");
+    expect(relevanceReviewMessages(saas, [], 'ru', 'generated')[1].content).toContain(staffing);
+    // The seller's SaaS vertical or a B2C/hiring-provider target must not gain
+    // an invented B2B customer requirement from the SaaS-specific reminder.
+    for (const scope of ['Target hypothesis: B2C SaaS с remote-командами',
+      'Target hypothesis: Агентства международного найма\nVertical: B2B SaaS remote',
+      'Target hypothesis: B2B SaaS\nПродукты для бизнеса']) expect(veStaffingScopeNote(scope, 'generated')).toBe('');
     // Size is ranking, not selection: the gate never receives the registry headcount, so a size
     // condition would hold every company back, whatever words it is written in.
     const rules = /STRUCTURAL CONDITIONS are the only other requirements, and only when the hypothesis states them: (.+?)\. Warehouses/
@@ -298,6 +313,153 @@ describe('VE2 relevance selection rules', () => {
   });
 
   it('rechecks a pre-release rejection once from its saved quotes, without website, search or classifier', async () => {
+    // A targeted SaaS correction keeps the current rules/context and the old
+    // paid receipt. All providers in this test are offline doubles.
+    const saas = { verticalName: 'Продуктовые IT-компании', hypothesisTitle: 'B2B SaaS с remote-командами',
+      hypothesisDescription: 'SaaS-вендоры из СНГ, нанимающие разработчиков в 2+ странах.',
+      hypothesisOrigin: 'generated' as const, language: 'ru' as const, triage: true };
+    const saasQuote = 'Разрабатываем собственную облачную CRM-систему по подписке для бизнеса в России.';
+    const saasReason = 'B2B SaaS подтверждён, но нет данных про remote-команду в 2+ странах.';
+    expect(veHasStaffingOnlyRefusal(saasReason)).toBe(true);
+    expect(veHasStaffingOnlyRefusal('Нет данных про удалённую команду')).toBe(true);
+    for (const reason of ['Есть разработка ПО, но нет подтверждения B2B-модели и наличия remote-команд в 2+ странах.',
+      'Не подтверждён SaaS-продукт или удалённые команды в 2+ странах.',
+      'Не подтверждён регион компании, а также remote-команда.',
+      'SaaS для найма в нескольких странах не подтверждён.']) expect(veHasStaffingOnlyRefusal(reason)).toBe(false);
+    const saasRow = { company: 'Облачный продукт', website: 'https://saas-fixture.test', description: saasQuote,
+      email: 'info@saas-fixture.test', _email_status: 'ok' };
+    const saasSite = offline();
+    provider(() => 'insufficient');
+    const saasSaved = (await findIrrelevantRows({ ...saas, rows: [saasRow], fetchEvidence: saasSite })).checkpoint;
+    const saasKey = keyOf(saasSaved, saasQuote), saasRef = saasSaved.semantic_review_refs[saasKey];
+    saasSaved.verdicts[saasKey] = { ...saasSaved.verdicts[saasKey], reason: 'Смысловое соответствие не подтверждено: ' + saasReason,
+      rules_version: 2, triage_version: 1, website_review_version: 4 };
+    saasSaved.semantic_reviews[saasRef].result = { result: 'insufficient', reason: saasReason };
+    const oldPaidReceipt = structuredClone(saasSaved.semantic_reviews[saasRef]);
+    const saasReserve = [{ ...saasRow, _ve_relevance: saasSaved.verdicts[saasKey] }];
+    for (const hypothesisOrigin of ['manual', undefined] as const) {
+      expect(buildVeRelevanceReviewBatch({ ...saas, hypothesisOrigin, reserve: saasReserve, ready: [], source: [], automatic: true }).companies).toBe(0);
+      const calls = provider();
+      const untouched = await findIrrelevantRows({ ...saas, hypothesisOrigin, rows: saasReserve, checkpoint: saasSaved, fetchEvidence: saasSite });
+      expect(untouched.decisions.get(0)).toMatchObject({ status: 'needs_review' });
+      expect(untouched.decisions.get(0)?.staffing_correction_version).toBeUndefined();
+      expect(calls).toMatchObject({ classify: 0, deepseek: 0, confirm: 0, rubric: 0, jev: 0 });
+    }
+    expect(buildVeRelevanceReviewBatch({ ...saas, reserve: saasReserve, ready: [], source: [], automatic: true, allowPaidSearch: false }).companies).toBe(1);
+    expect(veSavedReviewSignature(saasReserve, { ...saas, triage: true }))
+      .not.toEqual(veSavedReviewSignature(saasReserve, { triage: true }));
+    expect(veSavedReviewSignature(saasReserve, { ...saas, hypothesisOrigin: 'manual', triage: true }))
+      .toEqual(veSavedReviewSignature(saasReserve, { triage: true }));
+    // Source enrichment changes the company's input hash; losing or changing
+    // the checkpoint likewise cannot turn correction-only work into acquisition.
+    for (const changed of [
+      { rows: [{ ...saasReserve[0], description: saasQuote + ' Дополненное описание продукта.' }], checkpoint: saasSaved },
+      { rows: saasReserve, evidenceRows: [{ ...saasRow, description: 'Дополнительные сведения о компании из HH.' }], checkpoint: saasSaved },
+      { rows: saasReserve, checkpoint: undefined },
+      { rows: saasReserve, checkpoint: { ...saasSaved, context_hash: 'f'.repeat(64) } },
+    ]) {
+      saasSite.mockClear();
+      const noCalls = provider();
+      const held = await findIrrelevantRows({ ...saas, ...changed, fetchEvidence: saasSite });
+      expect(held.decisions.get(0)).toMatchObject({ status: 'needs_review', staffing_correction_version: 1,
+        reason: saasSaved.verdicts[saasKey].reason });
+      expect(noCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+      expect(saasSite).not.toHaveBeenCalled();
+      const noReplay = provider();
+      await findIrrelevantRows({ ...saas, ...changed, rows: changed.rows.map((row) => ({ ...row, _ve_relevance: held.decisions.get(0) })),
+        checkpoint: held.checkpoint, fetchEvidence: saasSite });
+      expect(noReplay).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+      expect(saasSite).not.toHaveBeenCalled();
+    }
+    saasSite.mockClear();
+    const saasCalls = provider();
+    const reservations: VeRelevanceCheckpoint[] = [];
+    const fixedSaas = await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: saasSaved, fetchEvidence: saasSite,
+      allowPaidSearch: false, onCheckpoint: async (value) => { reservations.push(structuredClone(value)); } });
+    expect(fixedSaas.decisions.get(0)).toMatchObject({ status: 'relevant', staffing_correction_version: 1 });
+    expect(saasCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 1, confirm: 1 });
+    expect(saasSite).not.toHaveBeenCalled();
+    const correctionRef = fixedSaas.checkpoint.semantic_review_refs[saasKey];
+    expect(correctionRef).not.toBe(saasRef);
+    expect(fixedSaas.checkpoint.context_hash).toBe(saasSaved.context_hash);
+    expect(fixedSaas.checkpoint.semantic_reviews[saasRef]).toEqual(oldPaidReceipt);
+    expect(fixedSaas.checkpoint.semantic_reviews[correctionRef]).toMatchObject({ status: 'finished', attempts: 2, staffing_correction_version: 1 });
+    expect(reservations.some((saved) => saved.semantic_reviews[correctionRef]?.status === 'started'
+      && saved.semantic_reviews[correctionRef]?.attempts === 1)).toBe(true);
+    const saasReplay = provider();
+    await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: fixedSaas.checkpoint, fetchEvidence: saasSite });
+    expect(saasReplay).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+    expect(saasSite).not.toHaveBeenCalled();
+    for (const tweak of [
+      (saved: VeRelevanceCheckpoint) => { saved.semantic_reviews[saasRef].result!.result = 'direct_conflict'; },
+      (saved: VeRelevanceCheckpoint) => { saved.semantic_reviews[saasRef].proposal.status = 'irrelevant'; },
+      (saved: VeRelevanceCheckpoint) => { saved.semantic_reviews[saasRef].proposal.evidence = [{ field: 'company', quote: 'Облачный продукт' }]; },
+      (saved: VeRelevanceCheckpoint) => { saved.website_evidence[saasKey].reader_version = undefined; },
+      (saved: VeRelevanceCheckpoint) => { saved.website_evidence[saasKey].search_deferred = true; },
+    ]) {
+      const saved = structuredClone(saasSaved); tweak(saved);
+      const noCalls = provider();
+      const unchanged = await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: saved, fetchEvidence: saasSite });
+      expect(unchanged.decisions.get(0)).toMatchObject({ status: 'needs_review', staffing_correction_version: 1 });
+      expect(noCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+      expect(saasSite).not.toHaveBeenCalled();
+    }
+    const refusedCalls = provider();
+    await expect(findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: saasSaved, fetchEvidence: saasSite,
+      onCheckpoint: async () => { throw new Error('durable write refused'); } })).rejects.toThrow('durable write refused');
+    expect(refusedCalls).toMatchObject({ classify: 0, deepseek: 0, confirm: 0 });
+    provider(() => 'insufficient');
+    const refusedSaas = await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: saasSaved, fetchEvidence: saasSite });
+    expect(refusedSaas.decisions.get(0)).toMatchObject({ status: 'needs_review', staffing_correction_version: 1 });
+    const refusedReplay = provider();
+    await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: refusedSaas.checkpoint, fetchEvidence: saasSite });
+    expect(refusedReplay).toMatchObject({ classify: 0, deepseek: 0, confirm: 0, rubric: 0, jev: 0 });
+    expect(buildVeRelevanceReviewBatch({ ...saas, reserve: [{ ...saasRow, _ve_relevance: refusedSaas.decisions.get(0) }],
+      ready: [], source: [], automatic: true }).companies).toBe(0);
+
+    // Lost DB responses cannot turn a durable reservation into a fresh attempt.
+    for (const stopAt of ['started', 'finished'] as const) {
+      let durable: VeRelevanceCheckpoint | undefined;
+      const lostCalls = provider();
+      await expect(findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: saasSaved, fetchEvidence: saasSite,
+        onCheckpoint: async (value) => {
+          durable = structuredClone(value);
+          if (value.semantic_reviews[value.semantic_review_refs[saasKey]]?.status === stopAt) throw new Error('lost save response');
+        } })).rejects.toThrow('lost save response');
+      expect(lostCalls).toMatchObject(stopAt === 'started' ? { deepseek: 0, confirm: 0 } : { deepseek: 1, confirm: 1 });
+      const resumedCalls = provider();
+      const resumed = await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: durable, fetchEvidence: saasSite });
+      expect(resumed.decisions.get(0)).toMatchObject({ status: 'relevant', staffing_correction_version: 1 });
+      expect(resumedCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: stopAt === 'started' ? 1 : 0 });
+      expect(resumed.checkpoint.semantic_reviews[resumed.checkpoint.semantic_review_refs[saasKey]].attempts).toBe(2);
+      expect(saasSite).not.toHaveBeenCalled();
+    }
+    const interruptedCorrection = structuredClone(fixedSaas.checkpoint);
+    interruptedCorrection.semantic_reviews[correctionRef].status = 'started';
+    delete interruptedCorrection.semantic_reviews[correctionRef].result;
+    interruptedCorrection.verdicts[saasKey] = { ...interruptedCorrection.verdicts[saasKey], status: 'error' };
+    const exhaustedCalls = provider();
+    const exhaustedCorrection = await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: interruptedCorrection, fetchEvidence: saasSite });
+    expect(exhaustedCorrection.decisions.get(0)).toMatchObject({ status: 'needs_review', staffing_correction_version: 1 });
+    expect(exhaustedCorrection.checkpoint.semantic_reviews[correctionRef]).toMatchObject({ attempts: 2, status: 'failed' });
+    expect(exhaustedCalls).toMatchObject({ classify: 0, deepseek: 0, confirm: 0 });
+    expect(saasSite).not.toHaveBeenCalled();
+    for (const broken of ['missing', 'wrong_company', 'old_receipt'] as const) {
+      const damaged = structuredClone(interruptedCorrection);
+      if (broken === 'missing') delete damaged.semantic_reviews[correctionRef];
+      else if (broken === 'wrong_company') damaged.semantic_reviews[correctionRef].company_key = 'f'.repeat(64);
+      else damaged.semantic_review_refs[saasKey] = saasRef;
+      const calls = provider();
+      const held = await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: damaged, fetchEvidence: saasSite });
+      expect(held.decisions.get(0)).toMatchObject({ status: 'needs_review', staffing_correction_version: 1,
+        reason: interruptedCorrection.verdicts[saasKey].reason });
+      expect(calls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+      const replayCalls = provider();
+      await findIrrelevantRows({ ...saas, rows: saasReserve, checkpoint: held.checkpoint, fetchEvidence: saasSite });
+      expect(replayCalls).toMatchObject({ classify: 0, rubric: 0, jev: 0, deepseek: 0, confirm: 0 });
+      expect(saasSite).not.toHaveBeenCalled();
+    }
+
     const input = { ...HYPOTHESES.meat, language: 'ru' as const, triage: true,
       rows: [
         // Rejected, then hidden behind a later website verdict «Сайт не дал подтверждения».
@@ -872,6 +1034,29 @@ describe('VE2 relevance selection rules', () => {
   });
 
   it('rechecks at most 200 rejections per call and takes the rest on the next call', async () => {
+    // Unlike the general rules pass, the staffing correction has a durable
+    // total ceiling: another job cannot buy the next two hundred companies.
+    const saasRows = Array.from({ length: 201 }, (_, i) => ({ company: 'SaaS ' + i,
+      description: 'Продукт ' + i + ': разрабатываем собственную облачную CRM для российского бизнеса по подписке.' }));
+    const saasInput = { verticalName: 'IT', hypothesisTitle: 'B2B SaaS с remote-командами',
+      hypothesisDescription: 'SaaS-вендоры из СНГ, нанимающие разработчиков в 2+ странах.',
+      hypothesisOrigin: 'generated' as const, language: 'ru' as const, rows: saasRows };
+    provider(() => 'insufficient');
+    const saasSaved = (await findIrrelevantRows(saasInput)).checkpoint;
+    const reason = 'Нет данных про remote-команду в 2+ странах.';
+    for (const [key, verdict] of Object.entries(saasSaved.verdicts)) {
+      verdict.reason = 'Смысловое соответствие не подтверждено: ' + reason;
+      saasSaved.semantic_reviews[saasSaved.semantic_review_refs[key]].result = { result: 'insufficient', reason };
+    }
+    const saasCalls = provider(() => 'insufficient');
+    const saasCapped = await findIrrelevantRows({ ...saasInput, checkpoint: saasSaved });
+    expect(saasCalls).toMatchObject({ classify: 0, reviewed: 400, deepseek: 25, confirm: 25 });
+    expect(Object.values(saasCapped.checkpoint.semantic_reviews).filter((review) => review.staffing_correction_version === 1)).toHaveLength(200);
+    expect([...saasCapped.decisions.values()].every((decision) => decision.status === 'needs_review' && decision.staffing_correction_version === 1)).toBe(true);
+    const unchanged = provider();
+    await findIrrelevantRows({ ...saasInput, checkpoint: saasCapped.checkpoint });
+    expect(unchanged).toMatchObject({ classify: 0, reviewed: 0, deepseek: 0, confirm: 0 });
+
     const rows = Array.from({ length: 201 }, (_, i) => ({ company: 'Колбасный цех ' + i,
       description: 'Цех ' + i + ' выпускает варёные колбасы, сосиски и мясные полуфабрикаты.' }));
     const input = { ...HYPOTHESES.meat, language: 'ru' as const, rows };
