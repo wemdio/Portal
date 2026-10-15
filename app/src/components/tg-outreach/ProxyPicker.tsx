@@ -201,6 +201,9 @@ export function ProxyPicker<T extends PickerProxy>({
       </button>
 
       {open && box && createPortal(
+        // portal-shell: тёмная тема портала действует только внутри этой оболочки,
+        // а окно вынесено в body — без неё оно белое. contents не влияет на раскладку.
+        <div className="portal-shell" style={{ display: 'contents' }}>
         <div
           ref={popupRef}
           role="listbox"
@@ -259,9 +262,12 @@ export function ProxyPicker<T extends PickerProxy>({
                     {/* Приглушаем только неработающие: список ими не
                         заканчивается, но и предлагать их наравне с живыми
                         нечестно. */}
+                    {/* Страна — первой и всегда: по одному имени «mobpool…:10628» прокси не отличить. */}
+                    <span className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${proxy.country_code ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-400'}`}>
+                      {proxyCountryLabel(proxy.country_code) ?? 'страна ?'}
+                    </span>
                     <span className={`min-w-0 flex-1 truncate ${mark.tone === 'bad' ? 'text-gray-400' : 'text-gray-700'} ${proxy.id === value ? 'font-semibold' : ''}`}>
                       {proxy.name || proxy.url}
-                      {proxyCountryLabel(proxy.country_code) ? <span className="ml-1.5 text-gray-400">· {proxyCountryLabel(proxy.country_code)}</span> : null}
                     </span>
                     <span className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${healthToneClass(mark.tone)}`}>
                       {mark.label}
@@ -271,6 +277,7 @@ export function ProxyPicker<T extends PickerProxy>({
               })}
             </div>
           ))}
+        </div>
         </div>,
         document.body,
       )}
