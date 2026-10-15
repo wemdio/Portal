@@ -2,6 +2,11 @@ import 'server-only';
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { requireByoMailboxClient } from '@/lib/byoMailbox/access';
+import {
+  ENG_OWN_MAILBOX_SENDING_UNAVAILABLE_TEXT,
+  ENG_OWN_MAILBOX_UNAVAILABLE_CODE,
+  ownMailboxSendingRefused,
+} from '@/lib/byoMailbox/accessPolicy';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
@@ -10,6 +15,14 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: NextRequest) {
   const res = await requireByoMailboxClient(req);
   if ('error' in res) return res.error;
+  // ENG-клиент свои ящики не использует (как POST /api/client/byo-campaigns):
+  // ответы его кампаний — на экране Replies кабинета. RU — как было.
+  if (ownMailboxSendingRefused(res.auth.market)) {
+    return NextResponse.json(
+      { error: ENG_OWN_MAILBOX_SENDING_UNAVAILABLE_TEXT, code: ENG_OWN_MAILBOX_UNAVAILABLE_CODE },
+      { status: 403 },
+    );
+  }
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   const { data, error } = await supabaseAdmin

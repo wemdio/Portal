@@ -284,10 +284,76 @@ export function engSendingTitle(s: HeEngAdminSendingView): string {
   return parts.join('\n');
 }
 
+/**
+ * Пул ящиков глазами одного клиента (GET api/admin/users/[id]/eng-sending,
+ * `pool`): сколько новых проектов примет пул (то же «хватит на N новых
+ * клиентов», что у полосы пула списка) и сколько ящиков уже отдано его
+ * us-проектам. 'missing' / 'error' — не прочитано.
+ */
+export type EngSendingPoolView =
+  | {
+      state: 'ok';
+      per_project: number;
+      fits_new_clients: number;
+      client_mailboxes: number;
+      client_projects: number;
+      client_projects_with_mailboxes: number;
+    }
+  | { state: 'missing' | 'error' };
+
+/** Ответ GET /api/admin/users/[id]/eng-sending: поля нет — роут старше этой правки. */
+export interface EngSendingGetResult extends HeEngAdminSendingView {
+  /** Выключатель автозапуска HE_ENG_AUTO_LAUNCH в окружении портала (тот же env_file, что у воркера). */
+  auto_launch?: boolean;
+  pool?: EngSendingPoolView;
+}
+
+/**
+ * Предупреждения рядом с «Включить отправку» (null — сказать нечего):
+ *  - пул не примет ни одного нового проекта (fits_new_clients = 0), а у
+ *    клиента есть проект без своих ящиков: запуск откажет «No sending
+ *    mailboxes are free…», письмо «Sending is on» скажет клиенту, что ящики
+ *    ещё не готовы (а не «стартует сам»);
+ *  - автозапуск выключен: рынки сами не стартуют, письмо этого не обещает,
+ *    клиент запускает готовые рынки кнопкой «Launch now».
+ */
+export function engSendingEnableWarnings(info: EngSendingGetResult | null): Array<{ tone: 'amber' | 'gray'; text: string }> {
+  if (!info) return [];
+  const out: Array<{ tone: 'amber' | 'gray'; text: string }> = [];
+  const pool = info.pool;
+  if (pool && pool.state === 'ok' && pool.fits_new_clients === 0) {
+    const without = Math.max(0, pool.client_projects - pool.client_projects_with_mailboxes);
+    if (pool.client_projects === 0 || without > 0) {
+      out.push({
+        tone: 'amber',
+        text:
+          `В пуле нет места для нового клиента: свободных ящиков не хватит ни на один проект (нужно ${pool.per_project} ` +
+          `в одном воркспейсе), а ${pool.client_mailboxes > 0 ? `ящики есть не у всех проектов клиента` : 'своих ящиков у клиента нет'}. ` +
+          'Запуск откажет «No sending mailboxes are free», а письмо «Sending is on» скажет клиенту, что ящики для его ' +
+          'кампаний ещё не готовы. Сначала пополните пул.',
+      });
+    }
+  }
+  if (info.auto_launch === false) {
+    out.push({
+      tone: 'gray',
+      text:
+        'Автозапуск выключен (HE_ENG_AUTO_LAUNCH): рынки сами не стартуют. Письмо «Sending is on» этого не обещает — ' +
+        'готовые рынки клиент запускает кнопкой «Launch now».',
+    });
+  }
+  return out;
+}
+
 /** Ответ POST /api/admin/users/[id]/eng-sending. */
 export interface EngSendingPostResult extends HeEngAdminSendingView {
   changed: boolean;
   email: 'sent' | 'no_email' | 'failed' | null;
+  /**
+   * Ушедшее письмо сказало, что ящиков для кампаний клиента ещё нет (пул не
+   * обслужит его проекты); null — письмо не ушло. Поля нет — роут старше.
+   */
+  email_mailboxes_short?: boolean | null;
   paused: {
     launches: number;
     paused: number;
@@ -301,6 +367,12 @@ export interface EngSendingPostResult extends HeEngAdminSendingView {
 /** Строка итога включения / выключения для сотрудника (перенесена из /admin/users). */
 export function engSendingResultText(enabled: boolean, result: EngSendingPostResult): { tone: 'ok' | 'red'; text: string } {
   if (enabled) {
+    if (result.email === 'sent' && result.email_mailboxes_short === true) {
+      return {
+        tone: 'red',
+        text: 'Отправка включена, клиенту ушло письмо «Sending is on» — с фразой, что ящики для его кампаний ещё не готовы: пул не обслужит его проекты, пополните пул',
+      };
+    }
     if (result.email === 'sent') return { tone: 'ok', text: 'Отправка включена, клиенту ушло письмо «Sending is on»' };
     if (result.email === 'no_email') {
       return { tone: 'red', text: 'Отправка включена; адреса в профиле нет — напишите клиенту в чат поддержки' };

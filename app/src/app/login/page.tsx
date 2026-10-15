@@ -5,9 +5,11 @@ import { LoginForm, type EngSignInNext } from './LoginForm';
 
 /**
  * Единственный `?next=`, который вход принимает, и только на ENG-хосте.
- * Сюда ведут ссылка «Set your own password» из письма сброса
- * (api/auth/forgot-password, ветка ENG: /login?next=/client/eng/account) и
- * middleware, когда гость на ENG-хосте открывает /client/eng/account. Без
+ * Сюда ведёт middleware, когда гость на ENG-хосте открывает
+ * /client/eng/account (письмо сброса пароля ENG сюда больше не ведёт: в нём
+ * одноразовая ссылка на выбор нового пароля, api/auth/forgot-password/
+ * _engReset.ts, а прежняя ссылка «Set your own password» могла остаться
+ * только в старых письмах). Без
  * next после входа он попадал бы в кабинет, а не на смену пароля. Вошедшего
  * клиента с /login?next=<этот адрес> middleware сразу ведёт на Account.
  * Сравнение точное, и в форму уходит эта константа, а не пришедшая строка,

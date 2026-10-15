@@ -56,6 +56,16 @@ export {
   type HeClientFailure,
 } from '@/components/client-eng/clientFailureText';
 
+/**
+ * Якорь отказа «тонкий сайт без описания бизнеса» (HeSiteThinNeedsBusinessError,
+ * stages/siteProfile.ts): с него начинается сообщение класса, а воркер пишет
+ * его в he_projects.error / he_jobs.error с префиксом стадии (`site_profile: …`,
+ * writeJobFailure). Классификатор ниже сворачивает его в `website_thin` сверкой
+ * ВХОЖДЕНИЕМ. Живёт здесь, а не в стадии: модуль чистый, и стадия берёт якорь
+ * отсюда — текст отказа и правило кабинета читают одну константу.
+ */
+export const HE_SITE_THIN_NEEDS_BUSINESS_ANCHOR = 'Сайт клиента почти без текста';
+
 /** Вход может прийти строкой (`he_bases.error`), Error'ом стадии или строкой Supabase. */
 function errorMessage(error: unknown): string {
   if (typeof error === 'string') return error;
@@ -201,6 +211,14 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // технический website_no_html, у него на шаге 1 есть «Try again».
   if (/Сайт клиента недоступен \(no_html\)/i.test(message)) return 'website_no_html';
   if (/Сайт клиента недоступен \(dns\)/i.test(message)) return 'website_unreachable';
+  // Тонкий сайт без описания бизнеса у проекта клиента ENG-кабинета
+  // (HeSiteThinNeedsBusinessError, stages/siteProfile.ts): сайт открылся, но
+  // текста мало, и research ждёт описания. Якорь — константа выше, по которой
+  // стадия и собирает сообщение, поэтому правило и текст не разъедутся. Стоит
+  // ВЫШЕ общих по той же причине, что правила недоступного сайта: без него
+  // строка уходила в 'unknown' — «технический сбой» и «Try again», которым
+  // этот отказ не лечится, вместо просьбы об описании.
+  if (message.includes(HE_SITE_THIN_NEEDS_BUSINESS_ANCHOR)) return 'website_thin';
 
   if (/Сегмент исчерпан|не осталось новых/i.test(message)) return 'segment_exhausted';
 

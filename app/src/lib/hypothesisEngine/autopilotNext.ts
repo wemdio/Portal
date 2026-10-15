@@ -462,7 +462,20 @@ export async function clearHeSpendCeilingPauseIfSafe(
  * этот модуль не тянул spendCeiling (тот сам пишет паузу через этот модуль).
  * `stage` — что собирались поставить (строка алерта).
  */
-export type HeSpendGate = (stage: string) => Promise<boolean>;
+export type HeSpendGate = ((stage: string) => Promise<boolean>) & {
+  /**
+   * Отказ дал ОБЩИЙ потолок ENG (HE_US_ENG_DAY_SPEND_CAP_USD): паузы на
+   * проекте ворота не записали, и вызывающий свою тоже не пишет — пропуск
+   * 'spend_ceiling_global' (spendCeiling.ts, шапка «ОБЩИЙ потолок ENG»). Нет
+   * поля (ворота старого вида) или до первого отказа — false.
+   */
+  stopIsGlobal?: () => boolean;
+};
+
+/** Причина пропуска по отказу ворот потолка: общий потолок ENG — без паузы. */
+function spendGateSkip(spendGate: HeSpendGate): HeAutopilotSkipReason {
+  return spendGate.stopIsGlobal?.() === true ? 'spend_ceiling_global' : 'spend_ceiling';
+}
 
 /**
  * Лимит строк авто-сборки автопилота — 2000, как дефолт ручной кнопки
@@ -840,6 +853,13 @@ export const HE_AUTOPILOT_SKIP_REASONS = [
   'letters_exhausted',   // засчитанные прогоны писем на это поколение анализа дошли до порога
   'spend_ceiling',       // потолок расхода us-проекта достигнут (spendCeiling.ts; по умолчанию выключен)
   /**
+   * Достигнут ОБЩИЙ потолок ENG (HE_US_ENG_DAY_SPEND_CAP_USD, по умолчанию
+   * выключен): шаг не поставлен, но паузы проекта НЕТ — порог общий и
+   * скользящий, отпускает сам (spendCeiling.ts, шапка «ОБЩИЙ потолок ENG»);
+   * шаг двигает «Launch» клиента, следующий дочейн или ночной проход.
+   */
+  'spend_ceiling_global',
+  /**
    * Решение по брифу КЛИЕНТА: поле, которое промпт писем берёт дословно
    * (подпись, оффер, описание бизнеса), называет наш бренд, а клиент не мы
    * (letterBrandGuard.heBrandInputsBeforeEnqueue). Генерация писем откажет до
@@ -918,6 +938,9 @@ export function pauseForHeAutopilotSkip(
       return 'letters_exhausted';
     case 'spend_ceiling':
       return 'spend_ceiling';
+    // Общий потолок ENG — без паузы (см. причину выше).
+    case 'spend_ceiling_global':
+      return null;
     // Поле брифа клиента: поправить его может только он, и карточка рынка
     // называет поле — паузы «платный шаг остановился» здесь нет.
     case 'brand_input':
@@ -1003,9 +1026,10 @@ function jobBaseId(payload: unknown): string | null {
  * потребность, ради которой ручная кнопка и существует. «Повтор» здесь — это
  * генерация там, где шаблона у базы НЕТ (прошлое поколение писем упало):
  * базу с готовым шаблоном ни дочейн, ни реконсилер, ни клиентский роут в
- * генерацию не ставят вовсе, а стадия без форса вернула бы готовый шаблон
- * (stages/template.ts, findReusableTemplate). Пересобрать письма поверх
- * готовых может только специалист — staff-роут ставит payload.force.
+ * генерацию не ставят вовсе, а их джобы ENG несут payload.reuse — стадия с ним
+ * вернула бы готовый шаблон (stages/template.ts, findReusableTemplate).
+ * Пересобрать письма поверх готовых может специалист (staff-роут, payload.force)
+ * и «Rewrite letters» кабинета, снявший готовые письма.
  *
  * СЧИТАЕМ ПОПЫТКИ, А НЕ СТРОКИ — и попытка здесь приближение денег, а не
  * деньги. attempts в этом движке инкрементируется только на ЗАСЧИТАННОМ фейле:
@@ -1223,7 +1247,7 @@ async function afterChainDone(
   // ворот не спрашивает НАМЕРЕННО: анализ базы, строки которой уже куплены, —
   // хвост оплаченной сборки, и ни один путь к base_analyze потолок не проверяет
   // (сборка ставит его сама; см. отчёт лейна потолка).
-  if (spendGate && !(await spendGate('base_collect'))) return skipped('spend_ceiling');
+  if (spendGate && !(await spendGate('base_collect'))) return skipped(spendGateSkip(spendGate));
   const res = await enqueueHeBaseCollect(supabase, {
     verticalId,
     projectId: job.project_id,
@@ -1288,9 +1312,10 @@ async function afterBaseAnalyzeDone(
   // (специалист перезапустил разбор, ремонт доставил анализ базе, у которой
   // шаблон уже лёг): раньше каждый такой анализ платил за новые письма поверх
   // готовых и оставлял базе второй готовый шаблон — то есть вторую кампанию по
-  // тем же людям на шаге запуска. Стадия template без форса вернула бы готовый
-  // шаблон и сама (stages/template.ts, findReusableTemplate), но пустая
-  // джоба съела бы прогон бюджета и строку в очереди — не ставим её вовсе.
+  // тем же людям на шаге запуска. Стадия template с payload.reuse (его эта
+  // постановка ставит у проекта 'us', ниже) вернула бы готовый шаблон и сама
+  // (stages/template.ts, findReusableTemplate), но пустая джоба съела бы
+  // прогон бюджета и строку в очереди — не ставим её вовсе.
   // Любой статус строки шаблона считается: стадия пишет только 'ready'.
   const { data: templates, error: templatesErr } = await supabase
     .from('he_templates')
@@ -1346,12 +1371,15 @@ async function afterBaseAnalyzeDone(
     return { outcome: skipped('autopilot_off'), verticalId };
   }
   // Потолок расхода — прямо перед постановкой писем (см. afterChainDone).
-  if (spendGate && !(await spendGate('template'))) return { outcome: skipped('spend_ceiling'), verticalId };
+  if (spendGate && !(await spendGate('template'))) return { outcome: skipped(spendGateSkip(spendGate)), verticalId };
+  // reuse — только у 'us' (ENG): шаблон, легший между проверкой выше и
+  // исполнением, стадия вернёт, а не оплатит заново. Джоба проекта другого
+  // рынка (staff-инструмент) пишет письма, как до переиспользования.
   const { error: jobErr } = await supabase.from('he_jobs').insert({
     project_id: job.project_id,
     stage: 'template',
     status: 'pending',
-    payload: { base_id: baseId },
+    payload: normalizeHeMarket(briefProject.market) === 'us' ? { base_id: baseId, reuse: true } : { base_id: baseId },
   });
   // 23505 — he_jobs_one_active_template_per_base: между дедупом выше и вставкой
   // шаблон этой базы поставил кто-то другой (клиент, кнопка «Start outreach»).

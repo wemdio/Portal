@@ -20,6 +20,15 @@
  * api/client/eng/projects/[id]/research), то есть ровно там, где роут повтор
  * примет; на всё остальное роут отвечает 409 текстом.
  *
+ * ТОНКИЙ САЙТ БЕЗ ОПИСАНИЯ (код website_thin, HE_RESEARCH_NEEDS_DESCRIPTION_CODE).
+ * site_profile проекта клиента на сайте почти без текста и без описания
+ * бизнеса отказывает до первого платного вызова (stages/siteProfile.ts,
+ * HeSiteThinNeedsBusinessError). Это не сбой: вместо «Try again» шаг просит
+ * 2–3 предложения о бизнесе прямо в карточке research, и «Save and continue»
+ * сохраняет описание (тот же PATCH, что «Save overrides») и зовёт тот же роут
+ * исследования — он продолжает ту же джобу (resumeAfterBusinessDescription), без
+ * вердикта повтора и без дневного лимита стартов.
+ *
  * Кто какие поля брифа читает (поэтому что редактируется после research):
  *  - offer_override, style_override, signature_override — письма: стадии chain
  *    и template (stages/chain.ts, stages/template.ts). Из них research читает
@@ -81,13 +90,14 @@ import {
   type HeJobSummary,
 } from './api-client';
 import {
+  HE_RESEARCH_NEEDS_DESCRIPTION_CODE,
   HE_RESEARCH_STALL_GRACE_MS,
   heClientFailureFor,
   heResearchRetryAllowed,
   heResearchStopCode,
 } from './clientFailureText';
 import { heEngMarketStarted, heEngMarketsFresh } from '@/lib/hypothesisEngine/engMarkets';
-import { OFFER_OVERRIDE_MAX_LENGTH } from '@/lib/hypothesisEngine/projectBriefPatch';
+import { BUSINESS_OVERRIDE_MAX_LENGTH, OFFER_OVERRIDE_MAX_LENGTH } from '@/lib/hypothesisEngine/projectBriefPatch';
 import { EngPaidAccessNotice, EngSupportText } from './EngPaidAccess';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
@@ -107,7 +117,7 @@ const RESEARCH_STEP_LABELS: Record<string, string> = {
   clustering: 'Grouping ideas into markets',
 };
 
-type ResearchStepState = 'done' | 'running' | 'waiting' | 'stopped';
+type ResearchStepState = 'done' | 'running' | 'waiting' | 'stopped' | 'needs_input';
 
 /**
  * Список стадий research для шага 1 — по ТЕКУЩЕМУ прогону: джобы деталки
@@ -153,6 +163,8 @@ function ResearchStepRow({ label, state }: { label: string; state: ResearchStepS
           <EngSpinner className="h-3.5 w-3.5" />
         ) : state === 'stopped' ? (
           <X className="h-3.5 w-3.5" style={{ color: 'var(--cp-amber)' }} />
+        ) : state === 'needs_input' ? (
+          <CircleDashed className="h-3.5 w-3.5" style={{ color: 'var(--cp-amber)' }} />
         ) : (
           <CircleDashed className="h-3.5 w-3.5" style={{ color: 'var(--cp-text-l)' }} />
         )}
@@ -160,11 +172,21 @@ function ResearchStepRow({ label, state }: { label: string; state: ResearchStepS
       <span
         style={{
           color:
-            state === 'waiting' ? 'var(--cp-text-l)' : state === 'stopped' ? 'var(--cp-amber)' : 'var(--cp-paper)',
+            state === 'waiting'
+              ? 'var(--cp-text-l)'
+              : state === 'stopped' || state === 'needs_input'
+                ? 'var(--cp-amber)'
+                : 'var(--cp-paper)',
         }}
       >
         {label}
-        {state === 'running' ? '…' : state === 'stopped' ? ' — stopped' : ''}
+        {state === 'running'
+          ? '…'
+          : state === 'stopped'
+            ? ' — stopped'
+            : state === 'needs_input'
+              ? ' — waiting for your business description'
+              : ''}
       </span>
     </li>
   );
@@ -267,6 +289,19 @@ function isResearchActive(jobs: HeJobSummary[]): boolean {
 const STALL_GRACE_MINUTES = Math.round(HE_RESEARCH_STALL_GRACE_MS / 60_000);
 
 /**
+ * Research ждёт описания бизнеса (website_thin): что случилось — заголовком
+ * справочника (то же предложение, что «Last error» шапки и Command Center), что
+ * делать — словами этого шага (справочник говорит «Open step 1», а клиент уже
+ * на нём). «Goes on from the step where it stopped» — роут продолжает ту же
+ * джобу site_profile, а не начинает research новым стартом.
+ */
+const NEEDS_DESCRIPTION_TODO_EN =
+  'Describe in 2–3 sentences what you sell, to whom, and why clients pick you, then press «Save and continue». The research goes on from the step where it stopped and builds your business profile from your description and your website.';
+
+/** «Save and continue» без описания — подсказка вместо запроса, который роут отказал бы. */
+const DESCRIPTION_REQUIRED_EN = 'Describe your business in 2–3 sentences first.';
+
+/**
  * Состояние research для шага 1. Кнопку «Try again» решает СЕРВЕР: деталка
  * отдаёт `research_retry` — вердикт engResearchRetryVerdict, посчитанный тем же
  * чтением и той же функцией, что у роута исследования, — поэтому кнопка стоит
@@ -281,6 +316,14 @@ const STALL_GRACE_MINUTES = Math.round(HE_RESEARCH_STALL_GRACE_MS / 60_000);
  *  - 'settling'     — 'researching' без живой стадии, но окно не истекло:
  *                     обычно это доли секунды между стадиями. Кнопки нет — роут
  *                     её бы отклонил; с поллом (4 с) она появится сама;
+ *  - 'needs_description' — 'failed' кодом website_thin
+ *                     (HE_RESEARCH_NEEDS_DESCRIPTION_CODE): сайт почти без
+ *                     текста, описания бизнеса нет, research ждёт его. Не
+ *                     сбой и не 'failed_final': вместо «Try again» — форма
+ *                     описания и «Save and continue» (роут продолжает ту же
+ *                     джобу). Вердикт сервера у такого проекта — 'not_technical'
+ *                     (код в HE_RESEARCH_FINAL_STOP_CODES), поэтому решаем по
+ *                     коду ДО вердикта; живая research-джоба и отмена — раньше;
  *  - 'failed_final' — 'failed' кодом из HE_RESEARCH_FINAL_STOP_CODES (адрес
  *                     сайта не привёл к серверу; отмена): повтора в кабинете
  *                     нет, причина — в «Last error» шапки (у такого проекта
@@ -298,6 +341,7 @@ const STALL_GRACE_MINUTES = Math.round(HE_RESEARCH_STALL_GRACE_MS / 60_000);
  */
 type ResearchState =
   | 'running'
+  | 'needs_description'
   | 'retry_failed'
   | 'stalled'
   | 'settling'
@@ -318,6 +362,15 @@ function researchStateOf(input: {
 }): ResearchState {
   const { status, errorCode, researchActive, retry } = input;
   if (researchActive) return 'running';
+  if (
+    status === 'failed' &&
+    errorCode === HE_RESEARCH_NEEDS_DESCRIPTION_CODE &&
+    retry?.verdict !== 'running' &&
+    retry?.latest_job_status !== 'cancelled' &&
+    input.listLatestStatus !== 'cancelled'
+  ) {
+    return 'needs_description';
+  }
   if (retry) {
     switch (retry.verdict) {
       case 'running':
@@ -354,12 +407,16 @@ function latestResearchJob(jobs: HeJobSummary[]): HeJobSummary | null {
  * Прочитает ли рамку ЦА ещё хоть один прогон hypotheses — тогда её можно
  * править: идущий research ещё до hypotheses (последняя его стадия — одна из
  * первых трёх), повтор после сбоя или вставшей цепочки (его «Try again»
- * начинает research с первой стадии) и щель между стадиями (цепочка либо
- * пойдёт дальше, либо встанет и получит «Try again»). Во всех остальных
+ * начинает research с первой стадии), research, ждущий описания бизнеса
+ * («Save and continue» продолжает его с site_profile, до hypotheses), и щель
+ * между стадиями (цепочка либо пойдёт дальше, либо встанет и получит «Try
+ * again»). Во всех остальных
  * состояниях следующего чтения нет, и форма показывает ответы без правки.
  */
 function icpEditable(state: ResearchState, latestStage: string | null): boolean {
-  if (state === 'retry_failed' || state === 'stalled' || state === 'settling') return true;
+  if (state === 'retry_failed' || state === 'stalled' || state === 'settling' || state === 'needs_description') {
+    return true;
+  }
   return state === 'running' && latestStage !== null && STAGES_BEFORE_HYPOTHESES.includes(latestStage);
 }
 
@@ -459,6 +516,8 @@ function emptyProfileText(state: ResearchState): string {
   switch (state) {
     case 'running':
       return 'Reading your website — what we learn about your business appears here as soon as the research finishes.';
+    case 'needs_description':
+      return 'No site profile yet — the research builds it once you describe your business and press «Save and continue».';
     case 'retry_failed':
     case 'stalled':
     case 'settling':
@@ -502,8 +561,16 @@ function emptyProfileText(state: ResearchState): string {
  * website_no_html (HTML не пришёл — технический сбой) — «Try again» шага 1,
  * после website_unreachable (адрес не привёл к серверу — не технический) —
  * только команда.
+ *
+ * Research ждёт описания (состояние 'needs_description', код website_thin):
+ * описание здесь не «рекомендуем», без него research дальше не пойдёт — и
+ * подсказка говорит это прямо. Состояние решено по коду причины текущего
+ * проекта, а не по пометке прошлой проверки, поэтому — настоящее время.
  */
-function businessDescriptionHint(brief: Record<string, unknown>): string {
+function businessDescriptionHint(brief: Record<string, unknown>, state: ResearchState): string {
+  if (state === 'needs_description') {
+    return ' — needed: we could read only a little text on your site, so the research goes on only with this description (press «Save and continue» at the top of this step)';
+  }
   if (brief.site_unreachable === true) {
     return ' — our last recorded check could not open your site; the research can work from this description instead';
   }
@@ -726,7 +793,6 @@ export function EngStepBrief({
   const { project, jobs = [] } = detail;
   const brief = (project.brief ?? {}) as Record<string, unknown>;
   const siteProfile = (brief.site_profile ?? null) as Record<string, unknown> | null;
-  const businessHint = businessDescriptionHint(brief);
 
   const overrides = useServerDrafts(overridesOf(brief));
   const [saving, setSaving] = useState(false);
@@ -761,8 +827,20 @@ export function EngStepBrief({
   // Кнопка — только там, где роут повтор примет: по вердикту сервера
   // (researchStateOf), а не по своему пересчёту.
   const canRetry = researchState === 'retry_failed' || researchState === 'stalled';
+  // Research ждёт описания бизнеса: форма описания и «Save and continue».
+  const canContinue = researchState === 'needs_description';
+  const businessHint = businessDescriptionHint(brief, researchState);
   const icpOpen = icpEditable(researchState, listLatestResearch?.stage ?? null);
-  const steps = useMemo(() => researchSteps(jobs, project.status), [jobs, project.status]);
+  const steps = useMemo(() => {
+    const list = researchSteps(jobs, project.status);
+    // Остановленная site_profile у research, ждущего описания, — не «stopped»,
+    // а «ждёт описания»: её продолжает «Save and continue».
+    return canContinue
+      ? list.map((step) =>
+          step.stage === 'site_profile' && step.state === 'stopped' ? { ...step, state: 'needs_input' as const } : step,
+        )
+      : list;
+  }, [jobs, project.status, canContinue]);
   // Список стадий — когда есть что показать: research идёт или его прогон уже
   // оставил джобы (остановившийся — видно, на какой стадии).
   const showSteps = project.status === 'researching' || steps.some((step) => step.state !== 'waiting');
@@ -909,6 +987,54 @@ export function EngStepBrief({
     }
   };
 
+  // «Save and continue» — только у research, ждущего описания (canContinue).
+  // Сначала описание (если его правили: тот же PATCH, что «Save overrides», и
+  // только это поле), потом тот же роут исследования: у проекта с кодом
+  // website_thin он продолжает ту же джобу (resumeAfterBusinessDescription), а
+  // «что удалит повтор» отвечает тем же 409 с последствиями — диалог тот же.
+  // Пустое описание не уходит: стадия без него отказала бы снова.
+  const onContinueResearch = async (confirmed: boolean) => {
+    if (researchBusy || briefSaving || !canContinue) return;
+    const description = overrides.value('business_override');
+    if (!description.trim()) {
+      setError(DESCRIPTION_REQUIRED_EN);
+      return;
+    }
+    setResearchBusy(true);
+    setError('');
+    setRefusal(null);
+    let changed = false;
+    try {
+      if (overrides.changed.includes('business_override')) {
+        const sent: Partial<Record<OverrideField, string>> = { business_override: description };
+        setSaving(true);
+        try {
+          const res = await patchEngProject(project.id, sent);
+          const storedBrief = res?.project?.brief;
+          overrides.saved(storedBrief ? overridesOf(storedBrief as Record<string, unknown>) : null, sent);
+          setSavedAt(Date.now());
+          changed = true;
+        } finally {
+          setSaving(false);
+        }
+      }
+      const res = await startEngResearch(project.id, confirmed ? { confirm: true } : undefined);
+      if (res.kind === 'confirm_required') {
+        setRerunConfirm(res.consequences);
+        return;
+      }
+      setRerunConfirm(null);
+      changed = true;
+    } catch (e) {
+      setRerunConfirm(null);
+      if (e instanceof EngPaidAccessError) setRefusal(e);
+      else setError(e instanceof Error ? e.message : 'Failed to continue the research');
+    } finally {
+      setResearchBusy(false);
+      if (changed) onChanged();
+    }
+  };
+
   // Escape закрывает диалог, как и клик по подложке.
   useEffect(() => {
     if (!rerunConfirm) return;
@@ -930,7 +1056,12 @@ export function EngStepBrief({
                 <EngSpinner className="h-3 w-3" /> research in progress…
               </span>
             ) : (
-              <EngBadge label={project.status} tone={project.status === 'researched' ? 'green' : 'neutral'} />
+              // Ждёт описания — не «failed» для клиента: research остановлен
+              // до работы и продолжится его кнопкой.
+              <EngBadge
+                label={canContinue ? 'needs your input' : project.status}
+                tone={project.status === 'researched' ? 'green' : 'neutral'}
+              />
             )}
           </span>
         </div>
@@ -1023,6 +1154,37 @@ export function EngStepBrief({
             )}
           </div>
         )}
+        {/* Research ждёт описания бизнеса (website_thin): просьба и форма прямо
+            здесь, без раскрытия «What we know about your business». Поле — тот
+            же черновик, что «Business description» ниже (useServerDrafts). */}
+        {canContinue && (
+          <div
+            className="mt-3 flex flex-col gap-2 rounded-md p-3 text-xs"
+            style={{ border: '1px solid var(--cp-divider)', color: 'var(--cp-amber)' }}
+          >
+            <p className="m-0">
+              {heClientFailureFor(HE_RESEARCH_NEEDS_DESCRIPTION_CODE).title} {NEEDS_DESCRIPTION_TODO_EN}
+            </p>
+            <textarea
+              value={overrides.value('business_override')}
+              onChange={(e) => overrides.edit('business_override', e.target.value)}
+              rows={4}
+              maxLength={BUSINESS_OVERRIDE_MAX_LENGTH}
+              aria-label="Business description"
+              placeholder="What you sell, to whom, and why clients pick you — 2–3 sentences."
+              className="ds-input w-full resize-y"
+            />
+            <button
+              type="button"
+              onClick={() => void onContinueResearch(false)}
+              disabled={researchBusy || briefSaving || !overrides.value('business_override').trim()}
+              className="ds-btn-primary inline-flex items-center gap-1.5 self-start text-xs"
+            >
+              {researchBusy ? <EngSpinner className="h-3 w-3" /> : <ArrowRight className="h-3 w-3" />}
+              Save and continue
+            </button>
+          </div>
+        )}
         {refusal && (
           <div className="mt-3">
             <EngPaidAccessNotice refusal={refusal} />
@@ -1077,19 +1239,23 @@ export function EngStepBrief({
                 такие проекты; на другом рынке — прежняя фраза). Правило «бриф
                 прав на конфликте, у тонкого сайта профиль строится в основном
                 по нему» — EN-промпт профиля (prompts/siteProfile.en.ts). Сайт
-                не открылся — дальше research пускает ТОЛЬКО описание бизнеса:
-                без него site_profile отказывает до вызова модели, оффер этого
-                не меняет (stages/siteProfile.ts, `unreachable && !manualBusiness`);
-                с ним профиль строится по описанию и офферу. Research идёт один раз, поэтому
+                не открылся или текста на нём мало — дальше research пускает
+                ТОЛЬКО описание бизнеса: без него site_profile отказывает до
+                вызова модели, оффер этого не меняет (stages/siteProfile.ts:
+                `unreachable && !manualBusiness` и тонкий сайт проекта клиента
+                ENG-кабинета, HeSiteThinNeedsBusinessError; проект, созданный в
+                кабинете сотрудником для отладки, на тонком сайте идёт дальше,
+                как staff-проект); с ним профиль строится по описанию, офферу и
+                тому тексту, что на сайте есть. Research идёт один раз, поэтому
                 сохранённое после его конца читают только письма, которые пишутся
                 после сохранения (chain и template читают бриф в начале прогона). */}
             <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
               {project.market === 'us'
                 ? 'These notes steer letter generation. The research also uses your business description and offer as '
                   + 'facts about your business when it builds the site profile above. Where they differ from your '
-                  + 'website, they win. If your website has little text, the profile is built mostly from them. If your '
-                  + 'website does not open, the research can continue only when the business description is filled in; '
-                  + 'the profile is then built from it and from your offer, if you gave one. Notes saved after the '
+                  + 'website, they win. If your website has little text or does not open, the research can continue only '
+                  + 'when the business description is filled in; the profile is then built from it and from your offer, '
+                  + 'if you gave one, together with whatever text the site has. Notes saved after the '
                   + 'research has finished are used only for letters written after you save them. Leave empty to use '
                   + 'what the research inferred.'
                 : 'These notes steer letter generation. Leave empty to use what the research inferred.'}
@@ -1312,9 +1478,10 @@ export function EngStepBrief({
         </div>
       )}
 
-      {/* Диалог — только пока повтор ещё положен: начался research (сотрудник,
+      {/* Диалог — только пока повтор ещё положен (или research ждёт описания —
+          тот же диалог у «Save and continue»): начался research (сотрудник,
           вторая вкладка) — его кнопка ничего бы не поставила. */}
-      {rerunConfirm && canRetry && (
+      {rerunConfirm && (canRetry || canContinue) && (
         <div
           role="dialog"
           aria-modal="true"
@@ -1329,14 +1496,14 @@ export function EngStepBrief({
             style={{ background: 'var(--cp-surface-elev)' }}
           >
             <h2 id="eng-rerun-research-title" className="text-base font-bold mb-2" style={{ color: 'var(--cp-paper)' }}>
-              Try the research again?
+              {canContinue ? 'Continue the research?' : 'Try the research again?'}
             </h2>
             {/* «When the new research finishes»: удаляет последняя стадия
                 (кластеризация); исследование, упавшее раньше неё, ничего не
                 удалит, поэтому безусловное «is deleted» было бы неправдой. */}
             <p className="text-sm mb-2" style={{ color: 'var(--cp-text-m)' }}>
-              When the new research finishes, it rebuilds the markets of this project from scratch and
-              deletes everything built on the current ones. This cannot be undone.
+              When {canContinue ? 'this' : 'the new'} research finishes, it rebuilds the markets of this project from
+              scratch and deletes everything built on the current ones. This cannot be undone.
             </p>
             {rerunConsequenceLines(rerunConfirm).length > 0 && (
               <>
@@ -1351,19 +1518,19 @@ export function EngStepBrief({
               </>
             )}
             <p className="text-[11px] mb-4" style={{ color: 'var(--cp-text-l)' }}>
-              The markets themselves come from the new research, so they may differ from the ones you see
-              now.
+              The markets themselves come from {canContinue ? 'this' : 'the new'} research, so they may differ from
+              the ones you see now.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
-                onClick={() => void onResearch(true)}
+                onClick={() => void (canContinue ? onContinueResearch(true) : onResearch(true))}
                 disabled={researchBusy}
                 className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
                 style={{ background: 'var(--cp-red)' }}
               >
                 {researchBusy ? <EngSpinner className="h-3 w-3" /> : <RefreshCw className="h-3 w-3" />}
-                Delete and try again
+                {canContinue ? 'Delete and continue' : 'Delete and try again'}
               </button>
               <button
                 type="button"

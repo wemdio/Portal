@@ -27,6 +27,8 @@ import {
   type EngProject,
   type EngProjectDetailResponse,
 } from './api-client';
+import type { HeClientStageErrorCode } from '@/lib/hypothesisEngine/clientEngProjection';
+import { heResearchStopCode } from './clientFailureText';
 import { ENG_SENDING_OFF_EN, engAutopilotHoldText, engAutopilotIdleText, engStageErrorText } from './engText';
 import { EngBadge, EngSpinner, engBaseAnalysisStopped, fmtDate, projectStatusTone } from './ui';
 import { collectAgainBaseId, ownAutoBaseState } from './EngStepBases';
@@ -183,6 +185,22 @@ function engTeamFixHeaderText(detail: EngDetail): string | null {
   const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
   if (detail.account_access === 'revoked') return `Work on ${list} stopped. ${ENG_TEAM_FIX_STOP_EN} ${ENG_SENDING_OFF_EN}`;
   return `Work on ${list} stopped. ${ENG_TEAM_FIX_STOP_EN} Message Support to find out when it is fixed, then press «Launch» on step 3.`;
+}
+
+/**
+ * «Last error» шапки — тем же правилом, что шаг 1 (EngStepBrief,
+ * retryFailedText) и карточка проекта в списке (EngProjectsList.tsx):
+ * заголовок справочника — только у кодов, которые research действительно
+ * пишет (heResearchStopCode), и у отмены. Любой другой код на проекте — почти
+ * наверняка неверно прочитанный текст стадии (clientFailureText.ts,
+ * HE_RESEARCH_STOP_CODES), и шапка рассказала бы про базы, прогрев ящиков или
+ * тариф над шагом 1, который говорит нейтрально. Тогда — та же нейтральная
+ * фраза. 'failed_final' шага 1 («shown at the top of this page») по-прежнему
+ * правда: его коды (website_unreachable, cancelled) шапка разворачивает.
+ */
+function engProjectResearchErrorText(code: HeClientStageErrorCode): string {
+  if (code === 'cancelled' || heResearchStopCode(code)) return engStageErrorText(code, 'research');
+  return 'The research stopped.';
 }
 
 export function EngProjectWizard({ projectId }: { projectId: string }) {
@@ -473,7 +491,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
               проект в 'draft', — поэтому префикс «Last error» здесь честен. */}
           {project?.error_code && (
             <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
-              Last error: <EngSupportText text={engStageErrorText(project.error_code, 'research')} />
+              Last error: <EngSupportText text={engProjectResearchErrorText(project.error_code)} />
             </div>
           )}
 

@@ -72,9 +72,9 @@ export async function POST(req: NextRequest) {
   // разрешил общий гейт (requireClientAuth → requestMarket): ENG-хост, а вне
   // него profiles.market = 'eng'. По одному хосту запроса решать нельзя:
   // middleware пускает eng-клиента в /client/eng/** (и на страницу Account) на
-  // любом хосте, а письмо сброса выбирается по profiles.market
-  // (api/auth/forgot-password) — eng-клиент на другом хосте получал бы
-  // английское письмо и русские ответы. RU-клиент вне ENG-хоста (market не
+  // любом хосте, а сброс пароля по «Forgot password?» выбирается по
+  // profiles.market (api/auth/forgot-password: ENG — одноразовая ссылка) —
+  // eng-клиент на другом хосте получал бы английские письма и русские ответы. RU-клиент вне ENG-хоста (market не
   // 'eng') получает всё как было; на ENG-хосте RU-клиента и стафф middleware
   // уводит на основной хост.
   const eng = market === 'eng';

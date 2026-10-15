@@ -64,7 +64,11 @@
  *
  * Тормоз писем (heTemplateGenerationBudget) применяется в ОБОИХ режимах: там
  * бюджет считается по поколению анализа, и повторная кнопка тоже не должна
- * ставить новую генерацию по анализу, на котором порог уже достигнут.
+ * ставить новую генерацию по анализу, на котором порог уже достигнут. Так же
+ * и тормоз цепочек (heChainGenerationBudget, HE_CHAIN_PAID_RUNS_PER_VERTICAL,
+ * с 14.10.2026): кнопка повторяет упавшую цепочку, но не больше трёх
+ * засчитанных прогонов на вертикаль — дальше причина 'chain_exhausted'
+ * (пауза 'stage_failed'), и повтор решает Support.
  *
  * НОЧЬ НЕ НАЧИНАЕТ РЫНОК С НУЛЯ (us). Рынок, отмеченный после «Launch», ждёт
  * явного нажатия клиента (решение владельца 12.10.2026: галочка ничего не
@@ -92,7 +96,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { enqueueHeBaseCollect, isHeCollectingBaseLive } from './baseCollectEnqueue';
-import { classifyHeClientError, type HeClientErrorCode } from './clientErrors';
+import { classifyHeClientError, heTeamFixableFailureOf, type HeClientErrorCode } from './clientErrors';
 import { heCollectStopRepeats } from '@/components/client-eng/clientFailureText';
 import { defaultChainLanguageForMarket, normalizeHeMarket } from './market';
 import { flushHeOpsAlerts } from './opsAlert';
@@ -102,6 +106,7 @@ import {
   AUTOPILOT_BASE_LIMIT,
   HE_ANALYZING_BASE_FIELDS,
   HE_AUTOPILOT_PAUSE_REASONS,
+  HeAutopilotReadError,
   ORPHAN_ANALYZING_REASON,
   HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS,
   heTemplateGenerationBudget,
@@ -152,8 +157,16 @@ export type HeAutopilotRefusal = 'not_researched' | 'no_verticals';
  * клиентское нажатие этого пути; воркер её не встречает. Паузы проекта не
  * даёт (pauseForReconcileSkip). И 'not_started' — ночной проход us-проекта не
  * начинает рынок, у которого нет ни одной строки he_chains (докблок файла).
+ * И 'chain_exhausted' — тормоз цепочек (heChainGenerationBudget): засчитанные
+ * прогоны цепочки вертикали дошли до порога, и новая цепочка не ставится ни
+ * кнопкой, ни ночью (пауза 'stage_failed': оплаченная стадия падала, и
+ * второй раз за неё автопилот не платит — повтор решает Support/специалист).
  */
-export type HeAutopilotReconcileSkipReason = HeAutopilotSkipReason | 'collect_stop_repeats' | 'not_started';
+export type HeAutopilotReconcileSkipReason =
+  | HeAutopilotSkipReason
+  | 'collect_stop_repeats'
+  | 'not_started'
+  | 'chain_exhausted';
 
 function pauseForReconcileSkip(reason: HeAutopilotReconcileSkipReason): HeAutopilotPauseReason | null {
   // Решение, а не сбой: причину клиент читает у самой базы (код причины на
@@ -162,7 +175,187 @@ function pauseForReconcileSkip(reason: HeAutopilotReconcileSkipReason): HeAutopi
   if (reason === 'collect_stop_repeats') return null;
   // Рынок ждёт нажатия клиента — это не остановка.
   if (reason === 'not_started') return null;
+  // Цепочка падала столько раз, сколько мы платим, — та же пауза, что у
+  // ночного 'chain_failed_before'.
+  if (reason === 'chain_exhausted') return 'stage_failed';
   return pauseForHeAutopilotSkip(reason);
+}
+
+/* ───────────── Тормоз бесконечной платной генерации цепочки ───────────── */
+
+/**
+ * Порог тормоза цепочек: новая цепочка писем вертикали НЕ СТАВИТСЯ, когда
+ * засчитанных прогонов цепочки этой вертикали (heChainGenerationBudget) уже
+ * столько. Модель — тормоз писем по базе (autopilotNext,
+ * HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS): это порог ПОСТАНОВКИ, а не потолок
+ * расхода — начатая строка дорабатывает свои MAX_ATTEMPTS = 3 попытки
+ * воркера, бесплатные прерывания в счёт не идут (честный худший случай — в
+ * докблоке той константы).
+ *
+ * ЗАЧЕМ. Упавшая цепочка не оставляет строки he_chains, и «Launch» шага 3
+ * (реконсилер в режиме кнопки) видел «цепочки нет» и ставил её заново на
+ * каждом нажатии — до трёх платных прогонов модели за нажатие, без границы
+ * (ночной проход упавшую цепочку и так не повторяет). То же у прямого вызова
+ * роута цепочки кабинета (api/client/eng/verticals/[id]/chain).
+ */
+export const HE_CHAIN_PAID_RUNS_PER_VERTICAL = 3;
+
+export interface HeChainGenerationBudget {
+  /** Можно ли ставить ещё одну цепочку. */
+  allowed: boolean;
+  /** Засчитанные прогоны цепочки этой вертикали с начала поколения. */
+  paidRuns: number;
+  /** created_at самой новой строки he_chains вертикали (начало поколения); null — строк нет. */
+  generationAt: string | null;
+}
+
+/**
+ * Чистая часть тормоза: засчитанные прогоны chain-джоб вертикали, созданных
+ * не раньше `generationAt` (null — все). Основа — правило писем
+ * (heTemplateGenerationBudget): попытки строки (he_jobs.attempts), а
+ * закончившейся (done/failed) — минимум одна; failed-строке, закрытой
+ * бесплатным отказом за наш бренд в поле брифа (heJobUnpaidBrandInput), —
+ * только её attempts. И две поправки (аудит 14.10.2026), обе про деньги:
+ *  - failed-строка, закрытая отказом, который чинит команда (биллинг или
+ *    конфигурация провайдера — heTeamFixableFailureOf по he_jobs.error: 402,
+ *    401/403, нет ключа): последний засчитанный фейл ничего не оплатил —
+ *    провайдер отказал до работы, и этот отказ терминален с первого ответа
+ *    (воркер), — считается attempts − 1. Иначе одно нажатие «Launch» во
+ *    время сбоя баланса съедало бы бюджет рынка, не потратив ни цента, и
+ *    рынок после пополнения двигал бы только Support;
+ *  - отменённая строка, которую воркер уже взял (started_at не пуст),
+ *    считается не меньше одного прогона: платный вызов модели уже шёл, а
+ *    отмена attempts не растит — без этого цикл «Launch» → «Cancel all jobs»
+ *    → «Launch» платил бы за цепочку каждый раз, не трогая бюджет.
+ * Стоящие и не взятые отменённые — их attempts (обычно 0).
+ *
+ * ПОКОЛЕНИЕ — самая новая строка he_chains вертикали: цепочка, которая
+ * легла, — это законченная оплаченная генерация, и бюджет после неё
+ * начинается заново (новую поверх готовой кабинет не ставит вовсе; её могут
+ * снять только специалист или удаление вертикали). Строк he_chains нет —
+ * считаются ВСЕ chain-джобы вертикали: бюджет обязан остаться конечным.
+ */
+export function heChainPaidRuns(
+  jobs: readonly Row[],
+  verticalId: string,
+  generationAt: string | null,
+): number {
+  const from = generationAt ? Date.parse(generationAt) : Number.NaN;
+  let paidRuns = 0;
+  for (const row of jobs) {
+    if (row.stage !== undefined && row.stage !== 'chain') continue;
+    if (payloadField(row.payload, 'vertical_id') !== verticalId) continue;
+    if (Number.isFinite(from)) {
+      const at = Date.parse(asString(row.created_at));
+      if (Number.isFinite(at) && at < from) continue;
+    }
+    const attempts = typeof row.attempts === 'number' && row.attempts > 0 ? row.attempts : 0;
+    const ended = row.status === 'done' || row.status === 'failed';
+    const unpaid = row.status === 'failed' && heJobUnpaidBrandInput(row.payload) !== null;
+    const teamFixable = row.status === 'failed' && !unpaid && heTeamFixableFailureOf(asString(row.error)) !== null;
+    const claimedCancel = row.status === 'cancelled' && asString(row.started_at) !== '';
+    paidRuns += teamFixable
+      ? Math.max(attempts - 1, 0)
+      : (ended && !unpaid) || claimedCancel
+        ? Math.max(attempts, 1)
+        : attempts;
+  }
+  return paidRuns;
+}
+
+/** Колонки chain-джоб, которые читает тормоз цепочек (heChainPaidRuns). */
+const HE_CHAIN_BUDGET_JOB_COLUMNS = 'stage, status, attempts, payload, created_at, started_at, error';
+
+/** Самая новая строка he_chains вертикали (created_at) из уже прочитанных строк. */
+function newestChainAt(chains: readonly Row[], verticalId: string): string | null {
+  let newest: string | null = null;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const c of chains) {
+    if (c.vertical_id !== verticalId) continue;
+    const at = asString(c.created_at);
+    const ms = Date.parse(at);
+    if (Number.isFinite(ms) && ms > newestMs) {
+      newestMs = ms;
+      newest = at;
+    }
+  }
+  return newest;
+}
+
+/**
+ * ТОРМОЗ цепочек одной вертикали (см. HE_CHAIN_PAID_RUNS_PER_VERTICAL) — для
+ * роута цепочки кабинета; реконсилер считает то же по своему снапшоту
+ * (heChainPaidRuns). Сбой чтения БРОСАЕТСЯ HeAutopilotReadError: «не знаю,
+ * сколько потрачено» — не «ничего».
+ */
+export async function heChainGenerationBudget(
+  supabase: SupabaseClient,
+  args: { projectId: string; verticalId: string },
+): Promise<HeChainGenerationBudget> {
+  const { projectId, verticalId } = args;
+  const { data: chainRows, error: chainErr } = await supabase
+    .from('he_chains')
+    .select('vertical_id, created_at')
+    .eq('vertical_id', verticalId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (chainErr) throw new HeAutopilotReadError(`he_chains generation read: ${chainErr.message}`);
+  const generationAt = newestChainAt((chainRows ?? []) as Row[], verticalId);
+
+  let jobsQuery = supabase
+    .from('he_jobs')
+    .select(HE_CHAIN_BUDGET_JOB_COLUMNS)
+    .eq('project_id', projectId)
+    .eq('stage', 'chain')
+    .eq('payload->>vertical_id', verticalId);
+  if (generationAt) jobsQuery = jobsQuery.gte('created_at', generationAt);
+  const { data: jobRows, error: jobsErr } = await jobsQuery;
+  if (jobsErr) throw new HeAutopilotReadError(`he_jobs chain budget read: ${jobsErr.message}`);
+
+  const paidRuns = heChainPaidRuns((jobRows ?? []) as Row[], verticalId, generationAt);
+  return { allowed: paidRuns < HE_CHAIN_PAID_RUNS_PER_VERTICAL, paidRuns, generationAt };
+}
+
+/**
+ * Рынки проекта, у которых тормоз цепочек ИСЧЕРПАН сейчас: готовой цепочки
+ * нет, цепочка не идёт, а засчитанные прогоны (heChainPaidRuns) дошли до
+ * порога — «Launch» такой рынок пропустит ('chain_exhausted'), и роут цепочки
+ * кабинета откажет. Для деталки кабинета (api/client/eng/projects/[id],
+ * ключ `chain_exhausted`): карточка рынка шага 3 тогда зовёт в Support, а не
+ * к «Launch». `chains` — строки he_chains проекта, уже прочитанные деталкой
+ * (vertical_id, status, created_at). Один запрос: chain-джобы проекта. Сбой
+ * чтения БРОСАЕТСЯ HeAutopilotReadError — вызывающий тогда ключа не отдаёт.
+ */
+export async function readHeChainExhaustedVerticals(
+  supabase: SupabaseClient,
+  projectId: string,
+  chains: readonly unknown[],
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('he_jobs')
+    .select(HE_CHAIN_BUDGET_JOB_COLUMNS)
+    .eq('project_id', projectId)
+    .eq('stage', 'chain');
+  if (error) throw new HeAutopilotReadError(`he_jobs chain budget read: ${error.message}`);
+  const jobs = (data ?? []) as Row[];
+  const chainRows = chains.filter((c): c is Row => typeof c === 'object' && c !== null) as Row[];
+  const verticalIds = new Set<string>();
+  for (const row of jobs) {
+    const verticalId = payloadField(row.payload, 'vertical_id');
+    if (verticalId) verticalIds.add(verticalId);
+  }
+  const exhausted: string[] = [];
+  for (const verticalId of verticalIds) {
+    if (chainRows.some((c) => c.vertical_id === verticalId && c.status === 'ready')) continue;
+    const live = jobs.some(
+      (j) => (j.status === 'pending' || j.status === 'running') && payloadField(j.payload, 'vertical_id') === verticalId,
+    );
+    if (live) continue;
+    if (heChainPaidRuns(jobs, verticalId, newestChainAt(chainRows, verticalId)) >= HE_CHAIN_PAID_RUNS_PER_VERTICAL) {
+      exhausted.push(verticalId);
+    }
+  }
+  return exhausted;
 }
 
 /**
@@ -598,8 +791,49 @@ export async function reconcileHeAutopilotProject(
   ): Promise<HeAutopilotReconcileResult | null> => {
     if (await spendGate(stage)) return null;
     counts.verticalsSkipped += 1;
+    // ОБЩИЙ потолок ENG ('eng_day'): ворота паузы не записали (порог общий и
+    // скользящий, отпускает сам — spendCeiling.ts), и проход её тоже не
+    // называет: кабинет не покажет «paused on our side… continues when they
+    // resume it», а следующее нажатие под порогом поставит этот шаг.
+    // Остальные вертикали прохода встали бы на тех же воротах — выходим.
+    if (spendGate.stopIsGlobal?.() === true) {
+      details.push({ verticalId, outcome: 'skipped', reason: 'spend_ceiling_global' });
+      return { ok: true, counts, details, pause: null };
+    }
     details.push({ verticalId, outcome: 'skipped', reason: 'spend_ceiling' });
     return { ok: true, counts, details, pause: 'spend_ceiling' };
+  };
+
+  /**
+   * Тормоз цепочек (HE_CHAIN_PAID_RUNS_PER_VERTICAL) — в ОБОИХ режимах, как
+   * тормоз писем: true — бюджет вертикали не исчерпан; false — исчерпан;
+   * иначе — итог прохода (сбой чтения: причина 'read_failed', «не знаю» не
+   * разрешает платную постановку). chain-джобы проекта читаются ОДИН раз за
+   * проход, при первой вертикали, которой цепочку действительно ставили бы;
+   * поколение — самая новая строка he_chains вертикали из снапшота.
+   */
+  let chainJobsRead: Promise<Row[]> | null = null;
+  const chainBudgetLeft = async (verticalId: string): Promise<boolean | HeAutopilotReconcileResult> => {
+    if (!chainJobsRead) {
+      chainJobsRead = (async () => {
+        const { data, error } = await supabase
+          .from('he_jobs')
+          .select(HE_CHAIN_BUDGET_JOB_COLUMNS)
+          .eq('project_id', projectId)
+          .eq('stage', 'chain');
+        if (error) throw new HeAutopilotReadError(`he_jobs chain budget read: ${error.message}`);
+        return (data ?? []) as Row[];
+      })();
+    }
+    let chainJobs: Row[];
+    try {
+      chainJobs = await chainJobsRead;
+    } catch (e) {
+      await recordHeAutopilotPause(supabase, projectId, 'read_failed');
+      return { ok: false, kind: 'failed', step: 'snapshot', error: e, verticalId, pause: 'read_failed', counts };
+    }
+    const paidRuns = heChainPaidRuns(chainJobs, verticalId, newestChainAt(chains as Row[], verticalId));
+    return paidRuns < HE_CHAIN_PAID_RUNS_PER_VERTICAL;
   };
 
   for (const vertical of verticals) {
@@ -619,6 +853,7 @@ export async function reconcileHeAutopilotProject(
     let skipMessage: string | undefined;
     let skipLetters: HeAutopilotLettersBudget | undefined;
     let skipBrandInputs: HeBrandInputLeak[] | undefined;
+    let chainBudget: boolean | HeAutopilotReconcileResult;
 
     // Автопилот гонит только клиент-выбранные вертикали: без единой accepted
     // гипотезы вертикаль пропускаем (клиент её не выбирал — сборки/письма/
@@ -655,6 +890,11 @@ export async function reconcileHeAutopilotProject(
         // Рынок ещё не начинали (ни одной строки цепочки): с нуля его
         // начинает только нажатие клиента (докблок файла).
         skipReason = 'not_started';
+      } else if ((chainBudget = await chainBudgetLeft(verticalId)) !== true) {
+        // ТОРМОЗ цепочек: прогоны цепочки этой вертикали исчерпаны — новую не
+        // ставим ни кнопкой, ни ночью (HE_CHAIN_PAID_RUNS_PER_VERTICAL).
+        if (chainBudget !== false) return chainBudget;
+        skipReason = 'chain_exhausted';
       } else if ((skipBrandInputs = await brandInputsFor(language)).length > 0) {
         // Наш бренд в поле брифа — цепочку не ставим (brandInputsFor выше).
         skipReason = 'brand_input';
@@ -952,11 +1192,15 @@ export async function reconcileHeAutopilotProject(
               (await stopUnlessAutopilotOn(verticalId, analyzedBaseId))
               ?? (await stopOnSpendCeiling(verticalId, 'template'));
             if (stop) return stop;
+            // reuse: true — стадия вернёт готовый шаблон базы, если он лёг между
+            // снапшотом и исполнением (stages/template.ts, findReusableTemplate;
+            // без флага она пишет письма заново — так ведут себя джобы
+            // staff-инструмента и джобы, поставленные до этой правки).
             const { error: tplErr } = await supabase.from('he_jobs').insert({
               project_id: projectId,
               stage: 'template',
               status: 'pending',
-              payload: { base_id: analyzedBaseId },
+              payload: { base_id: analyzedBaseId, reuse: true },
             });
             if (tplErr?.code === '23505') {
               // he_jobs_one_active_template_per_base (20261008_0001): между

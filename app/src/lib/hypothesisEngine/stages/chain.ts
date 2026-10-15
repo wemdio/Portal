@@ -1,6 +1,7 @@
 /**
- * Стадия chain: вертикаль + бриф проекта → цепочка из 3–5 писем (EN — ровно
- * 4: цель промпта и порог повтора, см. HE_CHAIN_TARGET_LETTERS_EN).
+ * Стадия chain: вертикаль + бриф проекта → цепочка из 3–5 писем (английская
+ * цепочка проекта рынка 'us' — ровно 4: цель промпта и порог повтора, см.
+ * HE_CHAIN_TARGET_LETTERS_EN).
  * Промпт-архитектура emailSequenceV2 (материалы → праймер → задача) +
  * CHAIN_REGULATIONS; ответ парсится маркерами ---LETTER N--- через
  * letterParser, A/B-варианты (---LETTER N B---, у каждого письма второй
@@ -16,10 +17,17 @@
  * материалов; нарушения чинятся одним фикс-проходом. После — критик-луп:
  * одна оценка цепочки (только основной вариант A) + максимум один rewrite
  * по её замечаниям; B-варианты после рерайта восстанавливаются из исходных.
- * EN: ответ фикс-прохода, в котором чисел не из материалов больше, чем в
- * письмах до него, не принимается; критик и рерайт видят «CLIENT'S OWN
- * WORDS», а рерайт, после которого чисел не из материалов стало больше,
- * откатывается (см. критик-луп ниже). Английская цепочка проекта 'us' получает
+ * РЫНОК РЕШАЕТ, А НЕ ЯЗЫК. Всё, что перенос ENG поменял в письмах, действует
+ * только у проекта рынка 'us' (ENG-кабинет); у проекта 'ru' — staff-инструмент,
+ * где сотрудник выбирает и английскую цепочку, — стадия ровно та, что до
+ * переноса (решение владельца 14.10.2026 «Как было»): прежние английские
+ * промпты, порог повтора «меньше 3», бриф целиком, русское чтение чисел и
+ * русские пункты фикс-прохода, рерайт критика принимается без отката, запись
+ * he_chains без чистки текста. Предикат — letterChecks.heUsEnglishLetters.
+ * Английская цепочка 'us': ответ фикс-прохода, в котором чисел не из
+ * материалов больше, чем в письмах до него, не принимается; критик и рерайт
+ * видят «CLIENT'S OWN WORDS», а рерайт, после которого чисел не из материалов
+ * стало больше, откатывается (см. критик-луп ниже). Английская цепочка проекта 'us' получает
  * бриф без пожеланий клиента по таргетингу — рамки ЦА и target_audience
  * профиля (briefWithoutTargetingWishes): ни в материалах, ни в корпусе чисел.
  * Цепочка 'us', когда клиент подтверждённо не мы (letterBrandGuard: английская
@@ -50,7 +58,13 @@ import {
   buildChainRuleFixHint,
   clientWordsFromBrief,
 } from '../prompts/chain';
-import { checkLetterParagraphs, checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
+import {
+  checkLetterParagraphs,
+  checkLetterRules,
+  extractNumberFacts,
+  heUsEnglishLetters,
+  type HeLetterForCheck,
+} from '../letterChecks';
 import {
   HeLetterBrandInputError,
   HeLetterBrandLeakError,
@@ -240,18 +254,19 @@ export const HeChainCritiqueSchema = z.object({
 const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно 3–5 писем, каждое блоком «---LETTER N---» + строка темы, плюс вариант B каждого письма блоком «---LETTER N B---» сразу после него. Верни цепочку заново, целиком, без пояснений.`;
 
 /**
- * EN-цепочка — цель ровно 4 письма (пункт переноса D2-letters-chain-exactly-four;
- * сам кабинет ENG числа не навязывает: показывает и отправляет столько шагов,
- * сколько писем в цепочке). Ответ короче — один повтор с английской
- * подсказкой, из двух ответов берётся тот, где писем больше (при равенстве —
- * повтор). Ответ длиннее 4 принимается
+ * Английская цепочка проекта 'us' — цель ровно 4 письма (пункт переноса
+ * D2-letters-chain-exactly-four; сам кабинет ENG числа не навязывает:
+ * показывает и отправляет столько шагов, сколько писем в цепочке). Ответ
+ * короче — один повтор с английской подсказкой, из двух ответов берётся тот,
+ * где писем больше (при равенстве — повтор). Ответ длиннее 4 принимается
  * как есть: повтор стоил бы ещё один платный вызов, а обрезка выкинула бы
- * последнее (реферальное) письмо. RU/PL — прежний порог «меньше 3 → повтор»;
- * нижний порог отказа (меньше 3 писем после повтора) общий для всех языков.
+ * последнее (реферальное) письмо. RU/PL и английская цепочка проекта 'ru' —
+ * прежний порог «меньше 3 → повтор» с русской подсказкой; нижний порог отказа
+ * (меньше 3 писем после повтора) общий для всех.
  */
 export const HE_CHAIN_TARGET_LETTERS_EN = 4;
 
-/** Подсказка повтора EN-цепочки: английская, иначе русский текст уходит посреди английской генерации. */
+/** Подсказка повтора английской цепочки 'us': английская, иначе русский текст уходит посреди английской генерации. */
 const RETRY_HINT_EN = `You returned too few emails or broke the format. The sequence needs exactly ${HE_CHAIN_TARGET_LETTERS_EN} emails, each as a "---LETTER N---" block with a "Subject:" line, plus each email's B variant as a "---LETTER N B---" block right after it. Return the whole sequence again, with no explanations.`;
 
 /**
@@ -323,9 +338,10 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
   // в материалах.
   const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
-  // EN: business_override тоже уходит отдельным блоком («CLIENT'S OWN WORDS»
-  // вместе с оффером) — из JSON брифа EN-промпта его вырезаем. RU/PL видят
-  // бриф как раньше (business_override внутри JSON).
+  // Английская цепочка 'us': business_override тоже уходит отдельным блоком
+  // («CLIENT'S OWN WORDS» вместе с оффером) — из JSON брифа её промпта его
+  // вырезаем. RU/PL и английская цепочка проекта 'ru' видят бриф как раньше
+  // (business_override внутри JSON).
   const { business_override: _biz, ...briefRestEn } = briefRest;
   const businessOverride = typeof brief.business_override === 'string' ? brief.business_override : undefined;
 
@@ -359,10 +375,13 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // RU-сегменты, и в английскую генерацию уезжают русские темы кампаний
   // вместе с русским текстом самого блока (renderWinnerPatternsBlock).
   const market = ctx.market ?? projectMarket(project);
+  // Английская цепочка проекта 'us' — всё, что перенос ENG поменял в письмах;
+  // иначе (RU, PL и английская цепочка проекта 'ru') — как до переноса.
+  const usEnglish = heUsEnglishLetters(language, market);
   // Снапшот брифа для материалов и корпуса чисел. Английская цепочка проекта
-  // 'us' — без пожеланий клиента по таргетингу (briefWithoutTargetingWishes).
-  const briefForPrompt =
-    language === 'en' ? (market === 'us' ? briefWithoutTargetingWishes(briefRestEn) : briefRestEn) : briefRest;
+  // 'us' — без business_override (он в «CLIENT'S OWN WORDS») и без пожеланий
+  // клиента по таргетингу (briefWithoutTargetingWishes).
+  const briefForPrompt = usEnglish ? briefWithoutTargetingWishes(briefRestEn) : briefRest;
   // Цепочка 'us': чужая компания в письмах (letterBrandGuard). Список не пуст,
   // только когда клиент подтверждённо не мы (хост сайта проекта не наш) и
   // цепочка английская или польская — или владелец проекта клиент
@@ -394,6 +413,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
 
   const messages = buildChainMessages({
     language,
+    market,
     verticalName: vertical.name,
     verticalSummary: vertical.summary ?? '',
     synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
@@ -420,12 +440,13 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   addUsage(usage, llm);
   let { parsed, letters } = buildChainLetters(llm.text);
 
-  // Порог повтора: EN — меньше 4 писем (цепочка ровно из 4), RU/PL — меньше 3.
-  const retryBelow = language === 'en' ? HE_CHAIN_TARGET_LETTERS_EN : 3;
+  // Порог повтора: английская цепочка 'us' — меньше 4 писем (цепочка ровно из
+  // 4), остальные — меньше 3.
+  const retryBelow = usEnglish ? HE_CHAIN_TARGET_LETTERS_EN : 3;
   if (parsed.length < retryBelow) {
     stageLog(
       ctx,
-      language === 'en'
+      usEnglish
         ? `[chain] распознано ${parsed.length} писем из ${HE_CHAIN_TARGET_LETTERS_EN} — retry с фидбэком`
         : `[chain] распознано ${parsed.length} писем — retry с фидбэком`,
     );
@@ -433,14 +454,15 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     const retryMessages: LLMMessage[] = [
       ...messages,
       { role: 'assistant', content: llm.text.slice(0, 2000) },
-      { role: 'user', content: language === 'en' ? RETRY_HINT_EN : RETRY_HINT },
+      { role: 'user', content: usEnglish ? RETRY_HINT_EN : RETRY_HINT },
     ];
     llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildChainLetters(llm.text));
-    // EN: из двух оплаченных ответов оставляем тот, где писем больше (как V2):
-    // повтор, вернувший меньше, не должен отнять уже годную цепочку из 3.
-    if (language === 'en' && parsed.length < first.parsed.length) ({ parsed, letters, llm } = first);
+    // Английская цепочка 'us': из двух оплаченных ответов оставляем тот, где
+    // писем больше (как V2): повтор, вернувший меньше, не должен отнять уже
+    // годную цепочку из 3.
+    if (usEnglish && parsed.length < first.parsed.length) ({ parsed, letters, llm } = first);
   }
   if (parsed.length < 3) {
     // Диагностика в ошибку (пишется в he_jobs.error): начало сырого ответа,
@@ -478,24 +500,27 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     clientCase ? JSON.stringify(clientCase) : '',
     JSON.stringify(briefForPrompt),
     typeof brief.offer_override === 'string' ? brief.offer_override : '',
-    // EN: business_override вырезан из JSON брифа выше — цифры клиента из
-    // его описания бизнеса возвращаем в корпус явно, иначе они станут
-    // «выдуманными». У RU/PL он и так внутри JSON брифа — корпус прежний.
-    ...(language === 'en' ? [businessOverride ?? ''] : []),
+    // Английская цепочка 'us': business_override вырезан из JSON брифа выше —
+    // цифры клиента из его описания бизнеса возвращаем в корпус явно, иначе
+    // они станут «выдуманными». У остальных он и так внутри JSON брифа —
+    // корпус прежний.
+    ...(usEnglish ? [businessOverride ?? ''] : []),
     styleExample ?? '',
     signatureOverride ?? '',
     JSON.stringify(winnerPatterns),
   ].join('\n');
-  // EN читает числа по-английски («10,000» — 10000); письма сверяются тем же
-  // чтением (letterChecks помнит, как прочитан корпус).
-  const facts = extractNumberFacts(factCorpus, language);
-  // letterIndex — номер письма в цепочке для detail нарушений (учитывается для EN).
+  // Английская цепочка 'us' читает числа по-английски («10,000» — 10000);
+  // письма сверяются тем же чтением (letterChecks помнит, как прочитан
+  // корпус). Остальные — прежнее русское чтение.
+  const facts = extractNumberFacts(factCorpus, language, market);
+  // letterIndex — номер письма в цепочке для detail нарушений (учитывается
+  // только у английской цепочки 'us').
   const lettersForCheck = (ls: HeChainLetterAB[]): HeLetterForCheck[] =>
     ls.flatMap((l, i) => [
       { subject: l.subject ?? '', body: l.body, variant: 'A', letterIndex: i + 1 },
       ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B', letterIndex: i + 1 })),
     ]);
-  const ruleViolations = checkLetterRules(lettersForCheck(letters), language, facts);
+  const ruleViolations = checkLetterRules(lettersForCheck(letters), language, facts, market);
   // 'us', проверка включена (letterBrandGuard): чужая компания в письмах клиента (brandLeaksOf; иначе пусто) запускает
   // этот же фикс-проход своими пунктами — без него цепочка не сохранится (ниже).
   const brandLeaksBeforeFix = brandLeaksOf(letters);
@@ -507,8 +532,8 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       } — фикс-проход`,
     );
     // Принятие фикса: то же число писем и НЕ меньше B-вариантов (модель могла
-    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя). EN — и
-    // не больше чисел не из материалов, чем в письмах до него: фикс
+    // молча выкинуть блоки ---LETTER N B--- — принять такое нельзя). Английская
+    // цепочка 'us' — и не больше чисел не из материалов, чем в письмах до него: фикс
     // переписывает цепочку целиком и мог вписать цифру, которой в материалах
     // нет, а рерайт ниже сравнивает числа уже с письмами после фикса. Письма
     // цепочки стадия template кладёт в свой корпус фактов, и такая цифра там
@@ -531,9 +556,9 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
       addUsage(usage, fix);
       const fixed = buildChainLetters(fix.text);
       if (fixed.parsed.length >= 3 && fixed.letters.length === letters.length && countB(fixed.letters) >= countB(letters)) {
-        const remaining = checkLetterRules(lettersForCheck(fixed.letters), language, facts);
-        const numbersBefore = language === 'en' ? ruleViolations.filter((v) => v.rule === 'unverified_number').length : 0;
-        const numbersAfter = language === 'en' ? remaining.filter((v) => v.rule === 'unverified_number') : [];
+        const remaining = checkLetterRules(lettersForCheck(fixed.letters), language, facts, market);
+        const numbersBefore = usEnglish ? ruleViolations.filter((v) => v.rule === 'unverified_number').length : 0;
+        const numbersAfter = usEnglish ? remaining.filter((v) => v.rule === 'unverified_number') : [];
         const brandAfterFix = brandLeaksOf(fixed.letters);
         if (numbersAfter.length > numbersBefore) {
           stageLog(
@@ -582,8 +607,8 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // а также нечитаемый, урезанный или раздутый rewrite → остаются исходные
   // письма (стадию это не валит).
   //
-  // EN: критик и рерайт получают «CLIENT'S OWN WORDS» (сборщики промптов
-  // читают clientWords только для 'en'). Рерайт фикс-проход уже не проходит,
+  // Английская цепочка 'us': критик и рерайт получают «CLIENT'S OWN WORDS»
+  // (сборщики промптов читают clientWords только у неё). Рерайт фикс-проход уже не проходит,
   // поэтому его письма заново сверяются checkLetterRules с тем же корпусом
   // фактов (бесплатно, без вызова модели), и рерайт ОТКАТЫВАЕТСЯ к письмам до
   // него, когда нарушений 'unverified_number' стало больше: «$35,000» →
@@ -593,10 +618,11 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // бы проверенной. Тире, приветствие, «?» и абзацы рерайт не откатывают: их
   // письма шаблона проверяют сами, а откат по ним выбросил бы и правки
   // критика по смыслу (например, снятое обещание несуществующего отчёта).
-  // Сам рерайт к этому моменту уже оплачен. RU/PL — как раньше.
+  // Сам рерайт к этому моменту уже оплачен. RU/PL и английская цепочка
+  // проекта 'ru' — как до переноса: рерайт той же длины принимается.
   const clientWords = clientWordsFromBrief(brief);
   const unverifiedNumbers = (ls: HeChainLetterAB[]) =>
-    checkLetterRules(lettersForCheck(ls), language, facts).filter((v) => v.rule === 'unverified_number');
+    checkLetterRules(lettersForCheck(ls), language, facts, market).filter((v) => v.rule === 'unverified_number');
   let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
   try {
     const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
@@ -606,6 +632,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
         verticalSummary: vertical.summary ?? '',
         letters: criticLetters,
         language,
+        market,
         styleExample,
         winnerPatterns,
         clientWords,
@@ -628,6 +655,7 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           letters: criticLetters,
           critique: { ...critique.data, issues },
           language,
+          market,
           styleExample,
           winnerPatterns,
           signatureOverride,
@@ -649,10 +677,10 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
           const bv = originalLetters[i]?.variants;
           return bv?.length ? { ...rest, variants: bv } : rest;
         });
-        // EN: числа не из материалов — до рерайта и после (B-варианты в обоих
-        // наборах одни и те же, исходные).
-        const numbersBefore = language === 'en' ? unverifiedNumbers(originalLetters).length : 0;
-        const numbersAfter = language === 'en' ? unverifiedNumbers(candidate) : [];
+        // Английская цепочка 'us': числа не из материалов — до рерайта и после
+        // (B-варианты в обоих наборах одни и те же, исходные).
+        const numbersBefore = usEnglish ? unverifiedNumbers(originalLetters).length : 0;
+        const numbersAfter = usEnglish ? unverifiedNumbers(candidate) : [];
         // 'us', проверка включена (letterBrandGuard): рерайт, после которого упоминаний чужой компании больше, чем до
         // него, тоже откатывается — иначе цепочка не сохранится (ниже).
         const brandBefore = brandLeaksOf(originalLetters).length;
@@ -684,9 +712,10 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
     stageLog(ctx, `[chain] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
 
-  // Абзацы EN-писем: только предупреждение в логе стадии, без фикс-прохода и
-  // без блокировки (letterChecks.checkLetterParagraphs; RU/PL — пустой список).
-  const paragraphWarnings = checkLetterParagraphs(lettersForCheck(letters), language);
+  // Абзацы английских писем 'us': только предупреждение в логе стадии, без
+  // фикс-прохода и без блокировки (letterChecks.checkLetterParagraphs; у
+  // остальных — пустой список).
+  const paragraphWarnings = checkLetterParagraphs(lettersForCheck(letters), language, market);
   if (paragraphWarnings.length > 0) {
     stageLog(
       ctx,
@@ -726,17 +755,19 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // вызовов (генерация, фикс-проход, критик, рерайт) — стадия падает и на
   // повторе покупает цепочку заново. Чистка трогает только эти два символа:
   // текст без них (вся кириллица и латиница) ложится байт-в-байт тем же.
+  // Только рынок 'us': у проекта 'ru' запись — как до переноса ENG.
+  const chainRow = {
+    vertical_id: verticalId,
+    language,
+    letters,
+    status: 'ready',
+    llm_model: model,
+    tokens_used: usage.tokensUsed,
+    cost_usd: usage.costUsd,
+  };
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_chains')
-    .insert(stripUnstorableJsonChars({
-      vertical_id: verticalId,
-      language,
-      letters,
-      status: 'ready',
-      llm_model: model,
-      tokens_used: usage.tokensUsed,
-      cost_usd: usage.costUsd,
-    }))
+    .insert(market === 'us' ? stripUnstorableJsonChars(chainRow) : chainRow)
     .select('id')
     .single();
   if (insError || !inserted) throw new Error(`he_chains insert: ${insError?.message ?? 'unknown'}`);

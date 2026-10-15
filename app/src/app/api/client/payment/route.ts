@@ -12,6 +12,23 @@ import { logAudit, logError } from '@/lib/loggerServer';
 export const dynamic = 'force-dynamic';
 
 /**
+ * RU-тарифы не для аккаунтов английского кабинета (аудит 14.10.2026): ENG-
+ * аккаунт, оплативший RU-тариф, запускал бы кампании с ящиков пула мимо
+ * выключателя отправки ENG через /api/client/launches (пресет ENG ставит
+ * agency_managed=false в расчёте, что RU-тарифа у ENG нет). Административный
+ * роут тарифа ENG уже отказывает (adminEngClientGuard). `market` — рынок
+ * запроса общего гейта (ENG-хост или profiles.market='eng'). DELETE не
+ * закрыт: он только гасит неоплаченный счёт и выключает тариф. RU — как было.
+ */
+function engTariffRefusal(market: string): NextResponse | null {
+  if (market !== 'eng') return null;
+  return NextResponse.json(
+    { error: 'Plans and payments here are not available for your account.', code: 'NOT_AVAILABLE_FOR_ACCOUNT' },
+    { status: 403 },
+  );
+}
+
+/**
  * GET /api/client/payment
  *
  * Returns a YooKassa payment URL the logged-in client can use to pay their
@@ -28,6 +45,8 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  const engRefusal = engTariffRefusal(result.auth.market);
+  if (engRefusal) return engRefusal;
   const { userId } = result.auth;
 
   // Под демо (аккаунт или вкладка) инвойс не создаём: ensurePendingInvoiceForTariff
@@ -92,6 +111,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
+  const engRefusal = engTariffRefusal(result.auth.market);
+  if (engRefusal) return engRefusal;
   const { userId } = result.auth;
 
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });

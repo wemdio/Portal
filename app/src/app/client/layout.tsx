@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import type { Route } from 'next';
 import { Menu } from 'lucide-react';
@@ -25,7 +25,7 @@ import {
 import { ChevronDown } from 'lucide-react';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
 import { resolveActiveNavId, CLIENT_NAV_SUPPORT, type ClientNavMode } from '@/lib/clientNav';
-import { resolveNavMarket, type ClientMarket } from '@/lib/engMarket';
+import { isEngAppHost, resolveNavMarket, type ClientMarket } from '@/lib/engMarket';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ClientSidebar } from '@/components/client/ClientSidebar';
 import { ClientMobileDrawer } from '@/components/client/ClientMobileDrawer';
@@ -48,10 +48,40 @@ const jetbrainsMono = JetBrains_Mono({
   variable: '--font-mono',
 });
 
+const subscribeNoop = () => () => {};
+
+/**
+ * Открыт ли кабинет на ENG-хосте. Сервер хоста здесь не знает (layout
+ * клиентский), и его HTML всегда русский — как и раньше. Гидрация берёт
+ * серверное значение (false) и совпадает с этим HTML, сразу после неё React
+ * перерисовывает оболочку с настоящим (true на ENG-хосте) — без ошибки
+ * гидрации, которую дал бы useState-инициализатор по window (он разошёлся бы с
+ * серверным HTML текстом «Выйти»/«Sign out»). Навигация (ClientNavList) по той
+ * же причине рисует скелет до маунта. При клиентских переходах layout не
+ * перемонтируется, а при новом монтировании без гидрации значение настоящее
+ * сразу.
+ */
+function useEngHost(): boolean {
+  return useSyncExternalStore(
+    subscribeNoop,
+    () => isEngAppHost(window.location.hostname),
+    () => false,
+  );
+}
+
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [locale, setLocale] = useState<ClientLocale>('ru');
+  // На ENG-хосте (app.outreachos.xyz) оболочка английская («Sign out», «Open
+  // menu»), не ждёт ответа /api/user/locale, и переключателя RU/EN/ES нет
+  // вовсе — кабинет англоязычный, сменить язык оболочки клиенту там некуда.
+  // Locale профиля (у ENG-клиента бывает и 'ru') и демо на ENG-хосте не
+  // применяются: рендер берёт `locale` ниже. Вне ENG-хоста всё как раньше —
+  // 'ru' до ответа профиля, переключатель на месте. Почему не useState по
+  // window, как market: см. useEngHost.
+  const engHost = useEngHost();
+  const [profileLocale, setLocale] = useState<ClientLocale>('ru');
+  const locale: ClientLocale = engHost ? 'en' : profileLocale;
   const [navMode, setNavMode] = useState<ClientNavMode>('manual');
   // Рынок профиля для навигации (ENG-клиент видит только ENG-кабинет).
   // Начальное значение вычисляем СИНХРОННО по хосту: на app.outreachos.xyz
@@ -356,65 +386,69 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
               combo rendered as «ru RU» on systems where the Russian flag
               emoji falls back to «ru» text, reading as a duplicate. The flag
               still appears inside the dropdown panel where each row gets
-              full context. */}
-          <div ref={langRef} className="relative shrink-0">
-            <button
-              type="button"
-              onClick={() => setLangOpen((v) => !v)}
-              className="neu-pill inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold transition-colors"
-              style={{ color: 'var(--cp-text-l)' }}
-              aria-haspopup="listbox"
-              aria-expanded={langOpen}
-              aria-label={dict(commonDictionary.language, locale)}
-            >
-              <span>{currentLocaleDesc.code}</span>
-              <ChevronDown className="h-3 w-3 opacity-60" />
-            </button>
-            {langOpen && (
-              <div
-                data-i18n-skip
-                role="listbox"
+              full context.
+
+              На ENG-хосте переключателя нет (engHost выше). */}
+          {!engHost && (
+            <div ref={langRef} className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setLangOpen((v) => !v)}
+                className="neu-pill inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold transition-colors"
+                style={{ color: 'var(--cp-text-l)' }}
+                aria-haspopup="listbox"
+                aria-expanded={langOpen}
                 aria-label={dict(commonDictionary.language, locale)}
-                className="absolute right-0 top-full z-50 mt-1 w-48 overflow-hidden rounded-md"
-                style={{
-                  background: 'var(--cp-surface-elev)',
-                  border: '1px solid var(--cp-divider-strong)',
-                }}
               >
-                {CLIENT_LOCALES.map((code) => {
-                  const desc = LOCALE_DESCRIPTORS[code];
-                  const isActive = code === locale;
-                  return (
-                    <button
-                      key={code}
-                      type="button"
-                      role="option"
-                      aria-selected={isActive}
-                      onClick={() => {
-                        setLangOpen(false);
-                        if (code !== locale) void persistLocale(code);
-                      }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors"
-                      style={
-                        isActive
-                          ? { background: 'var(--cp-paper)', color: 'var(--cp-ink)' }
-                          : { color: 'var(--cp-paper-mute)' }
-                      }
-                    >
-                      <span aria-hidden className="text-base leading-none">{desc.flag}</span>
-                      <span className="font-semibold">{desc.code}</span>
-                      <span
-                        className="ml-auto text-[11px]"
-                        style={{ opacity: isActive ? 0.85 : 0.6 }}
+                <span>{currentLocaleDesc.code}</span>
+                <ChevronDown className="h-3 w-3 opacity-60" />
+              </button>
+              {langOpen && (
+                <div
+                  data-i18n-skip
+                  role="listbox"
+                  aria-label={dict(commonDictionary.language, locale)}
+                  className="absolute right-0 top-full z-50 mt-1 w-48 overflow-hidden rounded-md"
+                  style={{
+                    background: 'var(--cp-surface-elev)',
+                    border: '1px solid var(--cp-divider-strong)',
+                  }}
+                >
+                  {CLIENT_LOCALES.map((code) => {
+                    const desc = LOCALE_DESCRIPTORS[code];
+                    const isActive = code === locale;
+                    return (
+                      <button
+                        key={code}
+                        type="button"
+                        role="option"
+                        aria-selected={isActive}
+                        onClick={() => {
+                          setLangOpen(false);
+                          if (code !== locale) void persistLocale(code);
+                        }}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors"
+                        style={
+                          isActive
+                            ? { background: 'var(--cp-paper)', color: 'var(--cp-ink)' }
+                            : { color: 'var(--cp-paper-mute)' }
+                        }
                       >
-                        {desc.nativeName}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+                        <span aria-hidden className="text-base leading-none">{desc.flag}</span>
+                        <span className="font-semibold">{desc.code}</span>
+                        <span
+                          className="ml-auto text-[11px]"
+                          style={{ opacity: isActive ? 0.85 : 0.6 }}
+                        >
+                          {desc.nativeName}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           <button
             type="button"

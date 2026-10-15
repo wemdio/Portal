@@ -625,9 +625,11 @@ export function engDashAutoLaunchDetail(
       return 'sending is turned off for your account — message Support';
     case 'email_not_verified':
       return 'ready — confirm your email to start sending';
+    // Нейтрально: spend_day_limit пишет и общий потолок ENG, которого аккаунт
+    // клиента не достигал (engPaidAccess.engSpendLimitRefusal).
     case 'spend_limit':
     case 'spend_day_limit':
-      return 'ready — your spending limit stops it; see step 3';
+      return 'ready — a usage limit stops it; see step 3';
     case 'unavailable':
     case 'setup_unavailable':
     case 'mailboxes_short':

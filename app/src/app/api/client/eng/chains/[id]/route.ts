@@ -7,6 +7,8 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeChain, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { normalizeHeChainLetters } from '@/lib/hypothesisEngine/chainLetters';
 import { heClientChainLettersProblem } from '@/lib/hypothesisEngine/chainTiming';
+import { heOptOutRefusalEn, heTemplateOptOutLines } from '@/lib/hypothesisEngine/letterBrandGuard';
+import { projectMarket } from '@/lib/hypothesisEngine/market';
 import { engServerError } from '../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -21,6 +23,16 @@ const LETTERS_SAVE_FAILED = 'Failed to save the letters';
 // владельца 2026-10-10) и у письма 2+ пауза целым числом 1..90 — 0 или пусто
 // нормализатор сохранил бы нулём, а шаблон взял бы вместо него лесенку.
 // Staff-роут этих правил не знает.
+// Ещё одно правило кабинета (владелец; аудит 14.10.2026): в письмах нет строк
+// отказа от писем и прощания («let me know and I won't reach out again»,
+// «reply STOP», «this is my last email») — у проекта рынка us и английских
+// писем (letterBrandGuard.heTemplateOptOutLines). Отказ 400 называет письма и
+// фразы; ничего не сохранено. Та же проверка стоит в предполёте ядра запуска
+// (launchTemplate, шаг 4b″: отказ до классификатора и рассыльщика) и на
+// старте отправки (engCampaignSending): письма, которые этот роут не видел
+// (письма модели, шаблон), не запускаются и не стартуют. Правило требует
+// обращения к получателю («reply STOP», «I won't reach out again»), а не
+// слова: «people unsubscribe», «patients can reply STOP» проходят.
 // Скоуп: цепочка → вертикаль → проект-владелец, чужая — 404.
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.chain.letters.patch' }, async () => {
@@ -56,6 +68,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     const owned = await loadClientHeChain(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+
+    const optOut = heTemplateOptOutLines(projectMarket(owned.project as { market?: string | null }), nextLetters);
+    if (optOut.length > 0) return jsonError(heOptOutRefusalEn(optOut), 400);
 
     const { error: updateError } = await supabaseAdmin
       .from('he_chains')

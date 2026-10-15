@@ -12,7 +12,12 @@ import {
   requireEngMarket,
   requireEngPaidAccess,
 } from '@/lib/hypothesisEngine/apiGuards';
-import { startEngResearchLocked, type EngPaidAction } from '@/lib/hypothesisEngine/engPaidAccess';
+import {
+  engSpendLimitRefusal,
+  startEngResearchLocked,
+  type EngPaidAction,
+} from '@/lib/hypothesisEngine/engPaidAccess';
+import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE } from '@/components/client-eng/clientFailureText';
 import {
   HE_RESEARCH_STAGES,
   HE_RESEARCH_STALL_GRACE_MS,
@@ -29,7 +34,7 @@ import {
   type HeTemplateLaunchMark,
 } from '@/lib/hypothesisEngine/launchTemplate';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
-import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { enforceHeSpendCeiling, heSpendStopIsGlobal, type HeSpendCheck } from '@/lib/hypothesisEngine/spendCeiling';
 import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
@@ -127,6 +132,23 @@ const RERUN_BUSY_TEXT =
   'Wait until it finishes, then press «Try again».';
 
 /**
+ * Тексты продолжения research после описания бизнеса (resumeAfterBusinessDescription
+ * ниже). Нажатие «Save and continue» шага 1 сохраняет описание ДО этого запроса,
+ * поэтому до них доходит устаревшая вкладка или гонка:
+ *  - NEEDS_TEXT — описания в проекте нет (стёрли в другой вкладке, сохранение
+ *    не легло). Называет поле и кнопку шага 1 теми же словами, что экран;
+ *  - CHANGED — состояние research сменилось между чтением и записью (вторая
+ *    вкладка, сотрудник). Что именно стало — роут не знает, поэтому только
+ *    «перезагрузите».
+ */
+const RESUME_NEEDS_TEXT =
+  'The research needs a short description of your business to go on. Describe in 2–3 sentences what you sell and ' +
+  'to whom in «Business description» on step 1, then press «Save and continue».';
+const RESUME_CHANGED_TEXT =
+  'The state of this research changed while your request was on its way, so nothing was started. Reload the page ' +
+  'to see where it stands.';
+
+/**
  * Оплаченное на вертикалях, чего engResearchRerunBlockers (researchJob.ts) не
  * считает: вокабуляры (he_vocab, LLM-стадия vocab) и досье (he_vertical_dossiers,
  * стадия dossier с LLM-интерпретацией). Каскад кластеризации сносит и их:
@@ -202,6 +224,248 @@ async function readRerunSnapshot(
   };
 }
 
+/**
+ * «Что удалит повтор» (шапка POST ниже): снимок, вердикт ядра плюс
+ * RerunVerticalPrep и отказ 'launched' / 'busy' / 'confirm' ответом. Один вызов на
+ * оба пути постановки — повтор после сбоя и продолжение после описания бизнеса:
+ * оба доводят research до кластеризации, которая сносит вертикали проекта.
+ */
+async function rerunGate(
+  db: SupabaseClient,
+  ids: { userId: string; projectId: string },
+  confirm: boolean,
+): Promise<
+  | { ok: false; response: NextResponse }
+  | {
+      ok: true;
+      verdict: 'free' | 'confirm';
+      consequences: ReturnType<typeof engResearchRerunBlockers>['consequences'] & RerunVerticalPrep;
+    }
+> {
+  const read = await readRerunSnapshot(db, ids.projectId);
+  if ('error' in read) {
+    return {
+      ok: false,
+      response: await engServerError('client.eng.research.rerun_snapshot_failed', read.error, RESEARCH_START_FAILED, ids),
+    };
+  }
+  const blockers = engResearchRerunBlockers(read.snapshot);
+  // Вокабуляры и досье — тоже оплаченное, которое удалит каскад
+  // (RerunVerticalPrep): ровно то, что ядро решает о 'free', здесь становится
+  // 'confirm', если они есть. 'launched'/'busy'/'confirm' ядра не меняются.
+  const consequences = { ...blockers.consequences, ...read.prep };
+  const verdict =
+    blockers.verdict === 'free' && (read.prep.vocabularies > 0 || read.prep.dossiers > 0)
+      ? 'confirm'
+      : blockers.verdict;
+  if (verdict === 'free' || (verdict === 'confirm' && confirm)) return { ok: true, verdict, consequences };
+  void logAudit('client.eng.research.rerun_refused', `ENG cabinet research re-run refused: ${verdict}`, {
+    ...ids,
+    verdict,
+    confirm,
+    ...consequences,
+  });
+  // Числа последствий уходят наружу только с 'confirm' и только те, что
+  // печатает диалог (EngStepBrief.tsx, rerunConsequenceLines): отказы
+  // 'launched'/'busy' кабинет показывает текстом, и полный набор чисел
+  // остаётся в аудите выше. launched_templates и active_jobs у 'confirm'
+  // всегда нули (иначе вердикт был бы другим).
+  if (verdict === 'launched') return { ok: false, response: jsonError(RERUN_LAUNCHED_TEXT, 409) };
+  if (verdict === 'busy') return { ok: false, response: jsonError(RERUN_BUSY_TEXT, 409) };
+  return {
+    ok: false,
+    response: NextResponse.json(
+      {
+        error: RERUN_CONFIRM_TEXT,
+        code: RERUN_CONFIRM_CODE,
+        requires_confirm: true,
+        consequences: {
+          audiences: consequences.audiences,
+          rows: consequences.rows,
+          templates: consequences.templates,
+          letter_sequences: consequences.letter_sequences,
+          vocabularies: consequences.vocabularies,
+          dossiers: consequences.dossiers,
+        },
+      },
+      { status: 409 },
+    ),
+  };
+}
+
+/**
+ * Отказ потолка расхода проекта (enforceHeSpendCeiling) клиенту — общий у
+ * «Try again» и «Save and continue». Остановил ОБЩИЙ потолок ENG ('eng_day') —
+ * паузы на проекте нет (spendCeiling.ts, heSpendStopIsGlobal), и фраза
+ * карточки паузы была бы неправдой: тот же отказ, что у гейта платных шагов
+ * (engSpendLimitRefusal('eng_day')). Иначе — фраза карточки паузы, как раньше.
+ */
+function spendRefusal(check: HeSpendCheck): NextResponse {
+  return heSpendStopIsGlobal(check)
+    ? engPaidAccessResponse(engSpendLimitRefusal('eng_day'))
+    : jsonError(HE_SPEND_PAUSED_EN, 409);
+}
+
+/**
+ * ПРОДОЛЖЕНИЕ RESEARCH ПОСЛЕ ОПИСАНИЯ БИЗНЕСА («Save and continue» шага 1).
+ *
+ * Зачем. site_profile проекта клиента ENG-кабинета на тонком сайте без описания
+ * бизнеса отказывает ДО первого платного вызова (HeSiteThinNeedsBusinessError,
+ * stages/siteProfile.ts): проект 'failed' с кодом website_thin
+ * (HE_RESEARCH_NEEDS_DESCRIPTION_CODE). Это не технический сбой
+ * (HE_RESEARCH_FINAL_STOP_CODES), и общий путь «Try again» ниже его повтор
+ * откажет — а продолжать его нужно, как только клиент дал описание.
+ *
+ * Что делает. ТА ЖЕ строка site_profile (последняя research-джоба проекта,
+ * 'failed') возвращается в очередь: 'pending', error/started_at/finished_at
+ * сброшены, run_after — сейчас, attempts − 1 (терминальный отказ воркер
+ * засчитал попыткой, а платного в нём не было). Проект — 'researching' с
+ * error = null. Новой строки нет, поэтому:
+ *  - дневной лимит стартов (HE_US_MAX_RESEARCH_PER_DAY) её не считает — он
+ *    считает строки site_profile, созданные за сутки (engPaidAccess.ts), а эта
+ *    создана стартом, который в лимит уже вошёл; и не спрашивается: это не
+ *    новый старт, а продолжение уже начатого (гейт платных шагов зовётся с
+ *    `continuation: true` — пропускает только этот шаг);
+ *  - вердикт «повтор только после технического сбоя» (engResearchRetryVerdict)
+ *    не спрашивается и ничем не «расходуется» — у него и нет счёта;
+ *  - бюджет писем (heTemplateGenerationBudget) research не касается вовсе.
+ * Потолки расхода СПРАШИВАЮТСЯ, как у «Try again»: продолжение запускает
+ * платную цепочку research заново (профиль, кейсы, гипотезы, кластеризация), а
+ * дочейн воркера её уже не остановит. Со старта этого прогона могли
+ * измениться общий расход ENG за 24 ч (HE_US_ENG_DAY_SPEND_CAP_USD, 'eng_day'),
+ * расход клиента по другим проектам, пороги в окружении и статус почты
+ * (сверка с адресом входа auth.users) — поэтому «прошёл на старте» не
+ * довод.
+ *
+ * Что проверяется:
+ *  - описание в проекте есть (то же чтение, что у стадии: строка после trim) —
+ *    иначе стадия отказала бы снова;
+ *  - последняя research-джоба — 'failed' site_profile (её и продолжаем);
+ *  - «что удалит повтор» (rerunGate): продолжение доходит до кластеризации так
+ *    же, как повтор, и с тем же диалогом подтверждения;
+ *  - гейт платных шагов (requireEngPaidAccess, 'research', continuation):
+ *    блокировка и бан (шаг 0), подтверждённая почта, потолки расхода клиента и
+ *    общий потолок ENG — те же отказы и тексты, что у остальных платных кнопок
+ *    (engPaidAccessResponse);
+ *  - потолок расхода проекта (enforceHeSpendCeiling, как у «Try again»):
+ *    пауза проекта и алерт — там же; отказ общего потолка ENG — нейтральной
+ *    фразой engSpendLimitRefusal('eng_day') (spendRefusal ниже);
+ *  - записи — CAS: проект только из 'failed', джоба только из 'failed'.
+ *    Сначала проект, потом джоба: джоба в очереди у проекта 'failed' — это
+ *    остановленный research с живой стадией для деталки и вердикта, а её
+ *    отказ проекту не лёг бы вовсе (writeJobFailure пишет 'failed' проекта
+ *    только из 'researching'). Джоба не
+ *    легла — проект возвращается в 'failed' с прежней причиной; 23505
+ *    (he_jobs_one_active_site_profile: у проекта уже стоит другая активная
+ *    site_profile) — тот же «уже идёт».
+ */
+async function resumeAfterBusinessDescription(
+  db: SupabaseClient,
+  args: { userId: string; projectId: string; project: Record<string, unknown>; confirm: boolean },
+): Promise<NextResponse> {
+  const { userId, projectId, project, confirm } = args;
+  const ids = { userId, projectId };
+  const refuse = (reason: string, response: NextResponse): NextResponse => {
+    void logAudit('client.eng.research.resume_refused', `ENG cabinet research resume refused: ${reason}`, {
+      ...ids,
+      reason,
+    });
+    return response;
+  };
+
+  const brief = project.brief;
+  const business =
+    brief && typeof brief === 'object' && !Array.isArray(brief)
+      ? (brief as Record<string, unknown>).business_override
+      : undefined;
+  if (typeof business !== 'string' || !business.trim()) {
+    return refuse('no_business_description', jsonError(RESUME_NEEDS_TEXT, 409));
+  }
+
+  const { data: jobs, error: jobsErr } = await db
+    .from('he_jobs')
+    .select('id, stage, status, attempts')
+    .eq('project_id', projectId)
+    .in('stage', HE_RESEARCH_STAGES)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (jobsErr) {
+    return engServerError('client.eng.research.resume_job_read_failed', jobsErr, RESEARCH_START_FAILED, ids);
+  }
+  const job = ((jobs ?? [])[0] ?? null) as { id?: unknown; stage?: unknown; status?: unknown; attempts?: unknown } | null;
+  if (job && (job.status === 'pending' || job.status === 'running')) return jsonError(RESEARCH_RUNNING, 409);
+  if (!job || typeof job.id !== 'string' || job.stage !== 'site_profile' || job.status !== 'failed') {
+    return refuse('not_resumable', jsonError(RESEARCH_NO_RETRY_TEXT, 409));
+  }
+
+  const gate = await rerunGate(db, ids, confirm);
+  if (!gate.ok) return gate.response;
+
+  // Гейт платных шагов и потолок проекта — тем же порядком, что у «Try again»
+  // (после отказов «что удалит повтор»: нажатие, которое ничего бы не
+  // поставило, паузы не пишет). Отказы гейт пишет в журнал сам.
+  const access = await requireEngPaidAccess(db, userId, { action: 'research', continuation: true });
+  if (!access.ok) return engPaidAccessResponse(access.refusal);
+  const spend = await enforceHeSpendCeiling(db, {
+    projectId,
+    market: project.market ?? null,
+    projectName: typeof project.name === 'string' ? project.name : null,
+    stage: 'site_profile',
+    path: 'client_button',
+    jobId: job.id,
+    warn: (msg) => void logWarn('client.eng.research.spend_unknown', msg, ids),
+  });
+  if (!spend.allowed) return refuse('spend_ceiling', spendRefusal(spend.check));
+
+  const now = new Date().toISOString();
+  const { data: movedProject, error: projectErr } = await db
+    .from('he_projects')
+    .update({ status: 'researching', error: null, updated_at: now })
+    .eq('id', projectId)
+    .eq('created_by', userId)
+    .eq('status', 'failed')
+    .select('id');
+  if (projectErr) {
+    return engServerError('client.eng.research.resume_project_failed', projectErr, RESEARCH_START_FAILED, ids);
+  }
+  if ((movedProject ?? []).length === 0) return refuse('project_changed', jsonError(RESUME_CHANGED_TEXT, 409));
+
+  const attempts = typeof job.attempts === 'number' && job.attempts > 0 ? job.attempts - 1 : 0;
+  const { data: movedJob, error: jobErr } = await db
+    .from('he_jobs')
+    .update({ status: 'pending', attempts, error: null, started_at: null, finished_at: null, run_after: now, updated_at: now })
+    .eq('id', job.id)
+    .eq('project_id', projectId)
+    .eq('status', 'failed')
+    .select('id');
+  if (jobErr || (movedJob ?? []).length === 0) {
+    // Джоба не вернулась в очередь — проект обратно в 'failed' с прежней
+    // причиной: иначе он стоял бы 'researching' без джобы до окна «цепочка
+    // встала». CAS по 'researching': ничего другого его перевести не могло.
+    const { error: rollbackErr } = await db
+      .from('he_projects')
+      .update({ status: 'failed', error: typeof project.error === 'string' ? project.error : null, updated_at: new Date().toISOString() })
+      .eq('id', projectId)
+      .eq('status', 'researching');
+    if (rollbackErr) {
+      void logWarn('client.eng.research.resume_rollback_failed', rollbackErr.message, { ...ids, jobId: job.id });
+    }
+    if (jobErr?.code === '23505') return jsonError(RESEARCH_RUNNING, 409);
+    if (jobErr) {
+      return engServerError('client.eng.research.resume_job_failed', jobErr, RESEARCH_START_FAILED, ids);
+    }
+    return refuse('job_changed', jsonError(RESUME_CHANGED_TEXT, 409));
+  }
+
+  void logAudit('client.eng.research.resumed', 'ENG cabinet research resumed after the business description', {
+    ...ids,
+    jobId: job.id,
+    attempts,
+    ...(gate.verdict === 'confirm' ? { confirmedRerun: true, ...gate.consequences } : {}),
+  });
+  return NextResponse.json({ ok: true });
+}
+
 // POST — запустить research-пайплайн СВОЕГО проекта ещё раз (кнопка «Try
 // again» шага Brief). ТОЛЬКО ПОСЛЕ ТЕХНИЧЕСКОГО СБОЯ (решение владельца
 // 10.10.2026; engResearchRetryVerdict, researchJob.ts): проект 'failed' с
@@ -213,7 +477,11 @@ async function readRerunSnapshot(
 // 409 текстом (FINISHED / NO_RETRY / SETTLING выше, «уже идёт» —
 // RESEARCH_RUNNING), и до снимка, гейта и потолка такой запрос не доходит.
 // Повтор начинает research С ПЕРВОЙ стадии: стадии, закончившиеся до сбоя,
-// оплачиваются ещё раз (продолжения с места сбоя у research нет).
+// оплачиваются ещё раз (продолжения с места сбоя у research нет — кроме
+// одного случая: research, остановленный на тонком сайте без описания бизнеса
+// (код website_thin), продолжается той же джобой своим путём,
+// resumeAfterBusinessDescription выше: без вердикта повтора и лимита стартов
+// за сутки, но с тем же гейтом платных шагов и потолком расхода).
 // Дедуп тот же, что у staff: активная research-стадия → 409.
 // С этой же 409 приходит и проигравший гонки двойной клик: у клиента его
 // второй запрос ждёт замок he_eng_start_research и видит джобу первого, а на
@@ -270,6 +538,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
     if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
+    // Research ждёт описания бизнеса (website_thin) — не повтор после сбоя, а
+    // продолжение той же джобы: своим путём, до вердикта повтора
+    // (resumeAfterBusinessDescription выше; гейт платных шагов без лимита
+    // стартов и потолок расхода она спрашивает сама).
+    const errorCode = toClientEngStageErrorCode(owned.project.error);
+    if (owned.project.status === 'failed' && errorCode === HE_RESEARCH_NEEDS_DESCRIPTION_CODE) {
+      return resumeAfterBusinessDescription(supabaseAdmin, {
+        userId: result.auth.userId,
+        projectId: id,
+        project: owned.project as Record<string, unknown>,
+        confirm,
+      });
+    }
+
     // Положен ли повтор вообще — по статусу, коду причины проекта (тот же
     // toClientEngStageErrorCode, что в деталке) и последней research-джобе —
     // тем же чтением (readLatestHeResearchJob) и той же функцией, что деталка
@@ -282,7 +564,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         projectId: id,
       });
     }
-    const errorCode = toClientEngStageErrorCode(owned.project.error);
     const retry = engResearchRetryVerdict({
       status: owned.project.status,
       errorCode,
@@ -306,54 +587,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       return jsonError(RESEARCH_NO_RETRY_TEXT, 409);
     }
 
-    const read = await readRerunSnapshot(supabaseAdmin, id);
-    if ('error' in read) {
-      return engServerError('client.eng.research.rerun_snapshot_failed', read.error, RESEARCH_START_FAILED, {
-        userId: result.auth.userId,
-        projectId: id,
-      });
-    }
-    const blockers = engResearchRerunBlockers(read.snapshot);
-    // Вокабуляры и досье — тоже оплаченное, которое удалит каскад
-    // (RerunVerticalPrep): ровно то, что ядро решает о 'free', здесь становится
-    // 'confirm', если они есть. 'launched'/'busy'/'confirm' ядра не меняются.
-    const consequences = { ...blockers.consequences, ...read.prep };
-    const verdict =
-      blockers.verdict === 'free' && (read.prep.vocabularies > 0 || read.prep.dossiers > 0)
-        ? 'confirm'
-        : blockers.verdict;
-    if (verdict !== 'free' && !(verdict === 'confirm' && confirm)) {
-      void logAudit('client.eng.research.rerun_refused', `ENG cabinet research re-run refused: ${verdict}`, {
-        userId: result.auth.userId,
-        projectId: id,
-        verdict,
-        confirm,
-        ...consequences,
-      });
-      // Числа последствий уходят наружу только с 'confirm' и только те, что
-      // печатает диалог (EngStepBrief.tsx, rerunConsequenceLines): отказы
-      // 'launched'/'busy' кабинет показывает текстом, и полный набор чисел
-      // остаётся в аудите выше. launched_templates и active_jobs у 'confirm'
-      // всегда нули (иначе вердикт был бы другим).
-      if (verdict === 'launched') return jsonError(RERUN_LAUNCHED_TEXT, 409);
-      if (verdict === 'busy') return jsonError(RERUN_BUSY_TEXT, 409);
-      return NextResponse.json(
-        {
-          error: RERUN_CONFIRM_TEXT,
-          code: RERUN_CONFIRM_CODE,
-          requires_confirm: true,
-          consequences: {
-            audiences: consequences.audiences,
-            rows: consequences.rows,
-            templates: consequences.templates,
-            letter_sequences: consequences.letter_sequences,
-            vocabularies: consequences.vocabularies,
-            dossiers: consequences.dossiers,
-          },
-        },
-        { status: 409 },
-      );
-    }
+    // «Что удалит повтор» — общий с продолжением после описания rerunGate выше.
+    const rerun = await rerunGate(supabaseAdmin, { userId: result.auth.userId, projectId: id }, confirm);
+    if (!rerun.ok) return rerun.response;
+    const { verdict, consequences } = rerun;
 
     // Гейт платных шагов (engPaidAccess.ts): почта, стартов исследования за
     // UTC-сутки, потолок расхода клиента. После отказов «что удалит повтор»
@@ -379,8 +616,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Потолок расхода us-проекта (lib/hypothesisEngine/spendCeiling.ts; ПО
     // УМОЛЧАНИЮ ВЫКЛЮЧЕН — тогда ни одного запроса). Достигнут — исследование не
     // ставим: пауза 'spend_ceiling' на проекте и алерт команде уже сделаны в
-    // enforceHeSpendCeiling, клиент читает ту же фразу, что и карточка паузы.
-    // Неизвестный расход — ставим как без потолка (fail-open).
+    // enforceHeSpendCeiling, клиент читает ту же фразу, что и карточка паузы
+    // (остановил общий потолок ENG — паузы нет, и фраза нейтральная:
+    // spendRefusal выше). Неизвестный расход — ставим как без потолка
+    // (fail-open).
     // Стоит ПОСЛЕ отказов «что удалит повтор» (launched/busy/confirm): нажатие,
     // которое не поставило бы ничего и без потолка, не пишет паузу и не шлёт
     // алерт. Подтверждённый повтор на паузе не удаляет ничего — research не
@@ -393,7 +632,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       path: 'client_button',
       warn: (msg) => void logWarn('client.eng.research.spend_unknown', msg, { userId: result.auth.userId, projectId: id }),
     });
-    if (!spend.allowed) return jsonError(HE_SPEND_PAUSED_EN, 409);
+    if (!spend.allowed) return spendRefusal(spend.check);
 
     // Постановка. Клиент (access.limits) — he_eng_start_research (миграция
     // 20261010_0002): под замком на пользователя лимит исследований, дедуп

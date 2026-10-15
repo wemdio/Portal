@@ -23,8 +23,11 @@
  * СТРОКА ТАБЛИЦЫ. Нет строки — почта не подтверждена (новый аккаунт, который
  * ещё не получил письмо, или аккаунт, созданный между накатом миграции и
  * выкатом кода). Строка с verified_at — подтверждена, но только для адреса в
- * `email`: сменили адрес профиля — нужно подтвердить новый. Существующие ENG-
+ * `email`: сменился адрес входа — нужно подтвердить новый. Существующие ENG-
  * аккаунты с проектами миграция пометила подтверждёнными (см. её шапку).
+ *
+ * АДРЕС — адрес входа из auth.users (readHeEngAuthEmail), не profiles.email:
+ * тот клиент переписывает сам, и он не уникален (аудит 14.10.2026).
  *
  * ТАБЛИЦЫ НЕТ (миграция не применена): чтение отвечает 'table_missing', и
  * гейт платных шагов пропускает как до этой правки (engPaidAccess);
@@ -166,7 +169,7 @@ export async function readHeEngEmailVerification(db: SupabaseClient, userId: str
 }
 
 /**
- * Подтверждена ли почта ЭТОГО адреса. Адрес профиля неизвестен (null) —
+ * Подтверждена ли почта ЭТОГО адреса. Адрес входа неизвестен (null) —
  * решает одна отметка verified_at.
  */
 export function isHeEngEmailVerified(row: HeEngEmailVerificationRow, currentEmail: string | null): boolean {
@@ -196,7 +199,7 @@ export function heEngEmailLinkState(sentAt: string | null, nowMs: number): 'none
  * Состояние для кабинета и гейта:
  *  - 'not_required' — проверка не к этому аккаунту: не клиент (сотрудник в
  *    ENG-кабинете) — так же, как рыночный гейт пропускает не-клиентов;
- *  - 'verified'     — подтверждена для текущего адреса профиля;
+ *  - 'verified'     — подтверждена для текущего адреса входа (auth.users);
  *  - 'pending'      — не подтверждена. Про ссылку на ТЕКУЩИЙ адрес (ссылка
  *                     на другой адрес — как не уходившая):
  *                       `lastSentAt` — когда ушла ссылка, которая ЕЩЁ
@@ -206,7 +209,7 @@ export function heEngEmailLinkState(sentAt: string | null, nowMs: number): 'none
  *                       которой вышел (null — такой нет): «ссылка от …
  *                       истекла — отправьте новую». Задано не больше одного;
  *  - 'table_missing'— миграция 20261010_0001 не применена;
- *  - 'error'        — сбой чтения (профиль или таблица).
+ *  - 'error'        — сбой чтения (профиль, пользователь GoTrue или таблица).
  */
 export type HeEngEmailStatus =
   | { state: 'not_required'; email: string | null }
@@ -215,19 +218,49 @@ export type HeEngEmailStatus =
   | { state: 'table_missing'; email: string | null }
   | { state: 'error'; message: string };
 
+/**
+ * Адрес входа аккаунта — из auth.users (GoTrue admin API), а НЕ из
+ * profiles.email (аудит 14.10.2026): profiles.email клиент переписывает сам
+ * (column grant update(email) у authenticated, 20260730_0001), и он не
+ * уникален. Подтверждение, письма ENG-клиенту и сброс пароля должны говорить
+ * про адрес, которым клиент входит. 'missing' — пользователя нет.
+ */
+export type HeEngAuthEmailRead =
+  | { kind: 'ok'; email: string | null }
+  | { kind: 'missing' }
+  | { kind: 'error'; message: string };
+
+export async function readHeEngAuthEmail(db: SupabaseClient, userId: string): Promise<HeEngAuthEmailRead> {
+  try {
+    const { data, error } = await db.auth.admin.getUserById(userId);
+    if (error) {
+      const e = error as { status?: unknown; code?: unknown; message?: unknown };
+      if (e.status === 404 || e.code === 'user_not_found') return { kind: 'missing' };
+      return { kind: 'error', message: `auth user read: ${String(e.message ?? 'error').slice(0, 120)}` };
+    }
+    if (!data?.user) return { kind: 'missing' };
+    return { kind: 'ok', email: normalizeHeEngEmail(data.user.email) };
+  } catch (e) {
+    return { kind: 'error', message: `auth user read threw: ${e instanceof Error ? e.message.slice(0, 120) : 'unknown'}` };
+  }
+}
+
 export async function readHeEngEmailStatus(
   db: SupabaseClient,
   userId: string,
   nowMs: number = Date.now(),
 ): Promise<HeEngEmailStatus> {
-  const { data: profile, error: profileErr } = await db
-    .from('profiles')
-    .select('role, email')
-    .eq('id', userId)
-    .maybeSingle();
+  const [{ data: profile, error: profileErr }, auth] = await Promise.all([
+    db.from('profiles').select('role').eq('id', userId).maybeSingle(),
+    readHeEngAuthEmail(db, userId),
+  ]);
   if (profileErr) return { state: 'error', message: `profiles read: ${profileErr.code ?? 'error'}` };
-  const p = (profile ?? null) as { role?: unknown; email?: unknown } | null;
-  const email = normalizeHeEngEmail(p?.email);
+  if (auth.kind === 'error') return { state: 'error', message: auth.message };
+  const p = (profile ?? null) as { role?: unknown } | null;
+  // Адрес входа (readHeEngAuthEmail). Пользователя нет — адрес неизвестен
+  // (null): решает одна отметка verified_at, отправка ссылки ответит
+  // 'unavailable'.
+  const email = auth.kind === 'ok' ? auth.email : null;
   // Как requireEngMarket: не-клиентские роли (сотрудник отлаживает кабинет)
   // проходят; профиля нет — это клиент без строки, проверяем как клиента.
   if (p && typeof p.role === 'string' && p.role !== 'client') return { state: 'not_required', email };
@@ -333,7 +366,7 @@ export async function issueHeEngEmailVerification(
   },
 ): Promise<HeEngIssueOutcome> {
   const email = normalizeHeEngEmail(args.email);
-  if (!email) return { kind: 'unavailable', reason: 'profile email unknown' };
+  if (!email) return { kind: 'unavailable', reason: 'sign-in email unknown' };
   const nowMs = args.nowMs ?? Date.now();
   try {
     const read = await readHeEngEmailVerification(db, args.userId);
