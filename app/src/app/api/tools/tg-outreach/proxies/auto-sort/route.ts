@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
 
-    let body: { campaign_id?: string };
+    let body: { campaign_id?: string; list_id?: string | null };
     try {
       body = await req.json();
     } catch {
@@ -33,18 +33,40 @@ export async function POST(req: NextRequest) {
     const campaignId = body.campaign_id;
     if (!campaignId) return jsonError('campaign_id обязателен', 400);
 
-    // Проверенные прокси без списка: страницами — в кампании их тысячи.
+    // Какой список раскладываем: «Неопределённые» (list_id не задан) или один из
+    // автосписков — «Авто · …» и «Не работают»: после повторной проверки
+    // прокси «Авто · страна не определена» уходят в свою страну. Списки, которые
+    // человек назвал сам («Армения 12.10.26»), не трогаем — они его решение.
+    const listId = typeof body.list_id === 'string' && body.list_id ? body.list_id : null;
+    let currentListName: string | null = null;
+    if (listId) {
+      const { data: list, error: listErr } = await auth.supabase
+        .from('tg_outreach_proxy_lists')
+        .select('name')
+        .eq('id', listId)
+        .eq('campaign_id', campaignId)
+        .maybeSingle();
+      if (listErr) return jsonError(listErr.message, 500);
+      if (!list) return jsonError('Список не найден', 404);
+      currentListName = String((list as { name: string }).name);
+      if (!currentListName.startsWith('Авто · ') && currentListName !== DEAD_LIST) {
+        return NextResponse.json({ moved: 0, groups: [], note: 'Список назван вручную — прокси в нём не переносятся' });
+      }
+    }
+
+    // Проверенные прокси выбранного списка: страницами — в кампании их тысячи.
     const rows: { id: string; check_status: string | null; country_code: string | null }[] = [];
     const PAGE = 1000;
     for (let from = 0; ; from += PAGE) {
-      const { data, error } = await auth.supabase
+      let q = auth.supabase
         .from('tg_outreach_proxies')
         .select('id, check_status, country_code')
         .eq('campaign_id', campaignId)
-        .is('proxy_list_id', null)
         .not('checked_at', 'is', null)
         .order('id')
         .range(from, from + PAGE - 1);
+      q = listId ? q.eq('proxy_list_id', listId) : q.is('proxy_list_id', null);
+      const { data, error } = await q;
       if (error) return jsonError(error.message, 500);
       rows.push(...((data ?? []) as typeof rows));
       if (!data || data.length < PAGE) break;
@@ -58,6 +80,8 @@ export async function POST(req: NextRequest) {
             ? `Авто · ${proxyCountryName(r.country_code) ?? r.country_code}`
             : NO_COUNTRY_LIST
           : DEAD_LIST;
+      // Уже лежит в нужном списке — не переносим.
+      if (name === currentListName) continue;
       const ids = byList.get(name) ?? [];
       ids.push(r.id);
       byList.set(name, ids);
@@ -94,6 +118,6 @@ export async function POST(req: NextRequest) {
       groups.push({ name, count: ids.length });
     }
 
-    return NextResponse.json({ moved: rows.length, groups });
+    return NextResponse.json({ moved: groups.reduce((sum, g) => sum + g.count, 0), groups });
   });
 }
