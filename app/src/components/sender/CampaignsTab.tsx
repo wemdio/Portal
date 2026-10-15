@@ -1011,7 +1011,7 @@ export function CampaignsTab({
             onChange={(e) => onSearch(e.target.value)}
             placeholder="Поиск кампании по названию"
             aria-label="Поиск кампании по названию"
-            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-9 text-sm text-zinc-900"
+            className="h-9 w-full rounded-lg border border-zinc-300 bg-white pl-9 pr-9 text-sm text-zinc-900"
           />
           {search ? (
             <button
