@@ -5,9 +5,11 @@ import type { VeBaseSummary } from '@/components/vertical-engine-v2/engine/api';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { loadVeProjectDetail } from '@/lib/verticalEngineV2/projectDetail';
 import { createVeCollectionContinuationCache, readVeCollectionContinuationCache, saveVeCollectionContinuationCache } from '@/lib/verticalEngineV2/collectionContinuationCache';
-import { selectHypothesisLetters } from '@/components/vertical-engine-v2/engine/letterSelection';
-import { getPreparationActionNotice, getPreparationPresentation, refreshPreparationRequestNotice } from '@/components/vertical-engine-v2/engine/PreparationProgress';
-import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
+import { selectHypothesisLetters, selectHypothesisPreparationBase, selectPreparationHypotheses } from '@/components/vertical-engine-v2/engine/letterSelection';
+import { getPreparationActionNotice, getPreparationControl, getPreparationPresentation, refreshPreparationRequestNotice } from '@/components/vertical-engine-v2/engine/PreparationProgress';
+import { getVeLaunchSelectionState, getVePreparedBaseState } from '@/components/vertical-engine-v2/engine/launchSelection';
+import type { VeOutreachPreparation, VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
+import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { groupVeHypotheses } from '@/components/vertical-engine-v2/engine/hypothesisGroups';
 
 jest.mock('@/lib/verticalEngineV2/actualsReconcile', () => ({ reconcileProjectVerticals: jest.fn(async () => {}) }));
@@ -110,17 +112,19 @@ describe('VE2 collection progress presentation', () => {
 
       // Template/coordination changes do not touch the collection cache. They
       // must still expose preparation repair, including outside recent jobs.
-      const checkedBases = ['letters-failed', 'link-error', 'ready-partial', 'busy-1', 'busy-2', 'busy-3', 'request-pending', 'lease-live', 'launched'].map((id) => {
+      const checkedBases = ['letters-failed', 'link-error', 'ready-partial', 'busy-1', 'busy-2', 'busy-3', 'request-pending', 'independent-pending', 'legacy-pending', 'lease-live', 'launched'].map((id) => {
         const row = { ...makeBase(id, 'preview', 'analyzed', '2026-10-12T10:00:00Z'), ...snapshot,
           id, hypothesis_id: `h-${id}`, vertical_id: 'vertical-1', row_count: 22, collect_info: { collection_mode: 'preview' } };
         return { ...row, collection_continuation: createVeCollectionContinuationCache(row, verdict) };
       });
       const projectionDb = createMockSupabase({ enforceQueryWindows: true, maxRowsPerQuery: 2, tables: {
         ve_projects: [{ id: 'project-1' }], ve_verticals: [{ id: 'vertical-1', project_id: 'project-1' }],
+        ve_outreach_setups: [{ project_id: 'project-1', selected_hypothesis_ids: ['h-request-pending'] }],
         ve_bases: checkedBases,
         ve_outreach_preparations: checkedBases.map((row) => ({ project_id: 'project-1', hypothesis_id: row.hypothesis_id,
           base_id: row.id, template_id: `t-${row.id}`,
-          status: row.id === 'request-pending' ? 'pending' : row.id === 'link-error' ? 'error' : 'ready',
+          status: row.id.endsWith('-pending') ? 'pending' : row.id === 'link-error' ? 'error' : 'ready',
+          independent_control: row.id === 'independent-pending',
           locked_until: row.id === 'lease-live' ? new Date(Date.now() + 60000).toISOString() : null })),
         ve_templates: checkedBases.map((row) => ({ id: `t-${row.id}`, base_id: row.id, vertical_id: 'vertical-1',
           status: row.id === 'letters-failed' ? 'failed' : 'ready', supply_batch_id: null,
@@ -135,12 +139,12 @@ describe('VE2 collection progress presentation', () => {
       const projected = await loadVeProjectDetail(projectionDb as never, 'project-1');
       if (!projected.ok) throw new Error(projected.message);
       const decisions = new Map((projected.detail.bases as VeBaseSummary[]).map((row) => [row.id, row.collection_continuation]));
-      for (const id of ['letters-failed', 'link-error']) expect(decisions.get(id))
+      for (const id of ['letters-failed', 'link-error', 'legacy-pending']) expect(decisions.get(id))
         .toMatchObject({ available: true, action: 'resume_preparation', code: 'preparation_incomplete' });
       expect(decisions.get('ready-partial')).toEqual(verdict);
       expect(decisions.get('launched')).toMatchObject({ available: false, code: 'launched' });
       expect(projected.detail.jobs.every((job) => (job as { status: string }).status === 'done')).toBe(true);
-      for (const id of ['busy-1', 'busy-2', 'busy-3', 'request-pending', 'lease-live']) expect(decisions.get(id))
+      for (const id of ['busy-1', 'busy-2', 'busy-3', 'request-pending', 'independent-pending', 'lease-live']) expect(decisions.get(id))
         .toMatchObject({ available: false, code: 'already_running' });
     } finally {
       if (priorTriage === undefined) delete process.env.VE_RELEVANCE_TRIAGE;
@@ -171,6 +175,30 @@ describe('VE2 collection progress presentation', () => {
     preparation.template_id = current.id;
     expect(selectHypothesisLetters('h1', preparation, letterBases, [...letters, current]))
       .toEqual({ template: current, previous: false });
+    const paused = { ...preparation, paused_at: '2026-10-15T10:00:00Z', cancelled_at: '2026-10-15T10:00:00Z' };
+    expect(selectHypothesisLetters('h1', paused, letterBases, [...letters, current]))
+      .toEqual({ template: current, previous: false });
+    expect(selectHypothesisLetters('h1', paused, letterBases, [...letters, current], 'old'))
+      .toEqual({ template: savedLetters, previous: true });
+    expect(selectHypothesisLetters('h1', paused, letterBases, [...letters, current], 'other').template).toBeNull();
+    const hypotheses = ['h1', 'h2', 'h3', 'h-start', 'h-supply'].map((id) => ({ id }));
+    const visible = selectPreparationHypotheses(hypotheses, ['h-start'], [paused], [...letterBases,
+      { ...base('supply-only', '2026-10-15', { collection_mode: 'supply' }), hypothesis_id: 'h-supply' }]);
+    expect(visible.map((hypothesis) => hypothesis.id)).toEqual(['h1', 'h2', 'h-start']);
+    expect(selectPreparationHypotheses(hypotheses, [], [paused], letterBases).map((hypothesis) => hypothesis.id)).toEqual(['h1', 'h2']);
+    const readySnapshot: VeOutreachSetupResponse = {
+      setup: { project_id: 'project-1', selected_hypothesis_ids: [], language: 'ru', revision: 1,
+        approved_bases: { new: { template_id: current.id, revision: 'review', approved_at: 'now', approved_by: 'actor' } } },
+      preparations: [{ ...preparation, status: 'ready' }], reviews: { new: { template_id: current.id, revision: 'review' } },
+    };
+    const readyTemplates = [current] as unknown as VeTemplate[];
+    expect(getVePreparedBaseState(readySnapshot, readyTemplates, 'h1').ready).toBe(true);
+    expect(getVePreparedBaseState({ ...readySnapshot, preparations: [{ ...readySnapshot.preparations[0], paused_at: '2026-10-15T10:00:00Z' }] }, readyTemplates, 'h1').ready).toBe(false);
+    expect(getVeLaunchSelectionState(readySnapshot, readyTemplates, 'h1').ready).toBe(false);
+    expect(getVeLaunchSelectionState({ ...readySnapshot, setup: { ...readySnapshot.setup, selected_hypothesis_ids: ['h1'] } }, readyTemplates, 'h1').ready).toBe(true);
+    expect(getVePreparedBaseState({ ...readySnapshot, reviews: {} }, readyTemplates, 'h1').ready).toBe(false);
+    expect(getVePreparedBaseState(readySnapshot, [{ ...current, launch_info: {} }] as unknown as VeTemplate[], 'h1'))
+      .toMatchObject({ ready: false, launched: true });
     preparation.template_id = null;
     expect(getPreparationPresentation({ preparation, base: letterBases[1], jobs: [], context: 'letters' }))
       .toMatchObject({ tone: 'muted', currentStep: 0 });
@@ -241,6 +269,36 @@ describe('VE2 collection progress presentation', () => {
       template_id: null, status: 'collecting', language: 'ru', last_error: null };
     const parent = { id: 'parent', stage: 'base_collect' as const, status: 'pending' as const, attempts: 0,
       started_at: null, finished_at: null, error: null, payload: { base_id: collecting.id } };
+    expect(getPreparationControl({ jobs: [] })).toEqual({ action: 'start', label: 'Начать подготовку' });
+    expect(getPreparationControl({ base: collecting, jobs: [parent] })).toBeNull();
+    expect(getPreparationPresentation({ base: collecting, jobs: [parent] })).toMatchObject({ tone: 'info', guidance: { action: 'wait' } });
+    const orphan = { ...collecting, hypothesis_id: 'hypothesis', collect_info: { ...collecting.collect_info, collection_mode: 'preview' as const } };
+    const newer = { ...orphan, id: 'newer', status: 'analyzed' as const };
+    const orphanSelection = selectHypothesisPreparationBase('hypothesis', undefined, [newer, orphan], [parent]);
+    expect(orphanSelection).toEqual({ base: orphan, canPauseOrphan: true });
+    expect(getPreparationControl({ ...orphanSelection, jobs: [parent] })).toEqual({ action: 'pause', label: 'Приостановить' });
+    const ambiguous = selectHypothesisPreparationBase('hypothesis', undefined, [newer, orphan], [parent, { ...parent, id: 'second', payload: { base_id: newer.id } }]);
+    expect(ambiguous.canPauseOrphan).toBe(false);
+    expect(getPreparationControl({ ...ambiguous, jobs: [parent, { ...parent, id: 'second', payload: { base_id: newer.id } }] })).toBeNull();
+    expect(selectHypothesisPreparationBase('hypothesis', preparation, [newer, orphan], [parent])).toEqual({ base: orphan, canPauseOrphan: false });
+    expect(selectHypothesisPreparationBase('hypothesis', undefined, [{ ...orphan, source: 'upload' }], [parent]).canPauseOrphan).toBe(false);
+    expect(getPreparationControl({ preparation, base: collecting, jobs: [parent] }))
+      .toEqual({ action: 'pause', label: 'Приостановить' });
+    const paused = { ...preparation, status: 'error' as const, paused_at: '2026-10-15T10:00:00Z', cancelled_at: '2026-10-15T10:00:00Z' };
+    expect(getPreparationPresentation({ preparation: paused, base: collecting, jobs: [parent] }))
+      .toMatchObject({ tone: 'muted', title: 'Подготовка на паузе', canContinue: true, guidance: { action: 'continue' } });
+    expect(getPreparationControl({ preparation: paused, base: collecting, jobs: [parent] }))
+      .toEqual({ action: 'continue', label: 'Продолжить подготовку' });
+    expect(getPreparationPresentation({ preparation: { ...paused, status: 'ready' }, base: collecting, jobs: [] }))
+      .toMatchObject({ tone: 'muted', title: 'Подготовка на паузе', canContinue: true, guidance: { action: 'continue' } });
+    expect(getPreparationControl({ preparation: { ...paused, status: 'ready' }, base: collecting, jobs: [] }))
+      .toEqual({ action: 'continue', label: 'Продолжить подготовку' });
+    expect(getPreparationPresentation({ preparation: { ...preparation, status: 'pending' }, preparationSelected: false,
+      base: collecting, jobs: [] })).toMatchObject({ tone: 'muted', canContinue: true, guidance: { action: 'continue' } });
+    expect(getPreparationControl({ preparation: { ...preparation, status: 'pending' }, preparationSelected: false,
+      base: collecting, jobs: [] })).toEqual({ action: 'continue', label: 'Продолжить подготовку' });
+    expect(getPreparationControl({ preparation: { ...preparation, status: 'pending', independent_control: true }, preparationSelected: false,
+      base: collecting, jobs: [] })).toEqual({ action: 'pause', label: 'Приостановить' });
     // The coordinator yields while its constructor is active; pending must not
     // hide that activity or display the step's percentage as whole-base progress.
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [parent] }))
@@ -283,6 +341,8 @@ describe('VE2 collection progress presentation', () => {
         .toBe(readyRows > 0 ? 'launch' : 'check');
       const unavailable = { available: false, action: null, code: 'sources_exhausted', reason: 'Доступные источники обработаны.' } as const;
       const blocked = { ...stopped, collection_continuation: unavailable };
+      expect(getPreparationControl({ preparation: { ...preparation, status: 'ready' }, base: blocked, jobs: [] })).toBeNull();
+      expect(getPreparationControl({ preparation: { ...preparation, status: 'error', cancelled_at: '2026-10-14T10:00:00Z' }, base: blocked, jobs: [] })).toBeNull();
       expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: blocked, jobs: [] }))
         .toMatchObject(readyRows > 0
           ? { canContinue: false, collectionSummary: expect.stringContaining(unavailable.reason) }

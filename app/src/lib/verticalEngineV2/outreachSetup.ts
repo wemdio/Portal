@@ -13,6 +13,9 @@ export interface VeOutreachPreparation {
   project_id: string; hypothesis_id: string; base_id: string | null; template_id: string | null;
   status: 'pending' | 'collecting' | 'generating' | 'ready' | 'error';
   language: 'ru' | 'en' | 'pl'; last_error: string | null;
+  paused_at?: string | null;
+  cancelled_at?: string | null;
+  independent_control?: boolean;
 }
 export interface VeOutreachSetupResponse {
   setup: VeOutreachSetup;
@@ -64,7 +67,7 @@ export async function loadVeOutreachSetup(db: SupabaseClient, projectId: string)
     db.from('ve_projects').select('id').eq('id', projectId).maybeSingle(),
     db.from('ve_outreach_setups').select('*').eq('project_id', projectId).maybeSingle(),
     db.from('ve_outreach_preparations')
-      .select('project_id,hypothesis_id,base_id,template_id,status,language,last_error').eq('project_id', projectId),
+      .select('project_id,hypothesis_id,base_id,template_id,status,language,last_error,paused_at,cancelled_at,independent_control').eq('project_id', projectId),
   ]);
   for (const result of [project, setupResult, prepResult]) if (result.error) throw new Error(result.error.message);
   if (!project.data) throw new Error('Проект не найден');
@@ -74,7 +77,7 @@ export async function loadVeOutreachSetup(db: SupabaseClient, projectId: string)
   const preparations = (prepResult.data ?? []) as VeOutreachPreparation[];
   const reviews: VeOutreachSetupResponse['reviews'] = {};
   for (const p of preparations) {
-    if (p.status !== 'ready' || !p.base_id || !p.template_id || !setup.selected_hypothesis_ids.includes(p.hypothesis_id)) continue;
+    if (p.status !== 'ready' || !p.base_id || !p.template_id) continue;
     const { data, error } = await db.rpc('ve_contact_supply_preview_revision', { p_template_id: p.template_id });
     if (error) throw new Error(error.message);
     if (typeof data === 'string') reviews[p.base_id] = { template_id: p.template_id, revision: data };

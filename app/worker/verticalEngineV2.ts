@@ -29,7 +29,7 @@
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { markSegmentationAuditFailed, runVeStage } from '@/lib/verticalEngineV2/stages';
-import { getVeScopedJobSignal, withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { getVeScopedJobClaim, getVeScopedJobSignal, withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
 import { createVeStageSupabase, describeVeStageDbActivity } from '@/lib/verticalEngineV2/stageDb';
 import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
@@ -103,6 +103,7 @@ const stageDb = createVeStageSupabase({
   url: process.env.NEXT_PUBLIC_SUPABASE_URL!,
   serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
   jobSignal: getVeScopedJobSignal,
+  jobClaim: getVeScopedJobClaim,
   fetchImpl: supabaseAdminFetchWithRetry,
 });
 const shouldStop = setupGracefulShutdown(log);
@@ -310,10 +311,12 @@ async function handleJob(job: VeJob) {
       try {
         const { data } = await db
           .from('ve_jobs')
-          .select('status')
+          .select('status,started_at')
           .eq('id', job.id)
           .maybeSingle();
-        if (watching && data && (data as { status: string }).status === 'cancelled') abort.abort();
+        if (watching && data && (data.status === 'cancelled'
+          || (data.started_at !== job.started_at
+            && Date.parse(data.started_at ?? '') !== Date.parse(job.started_at ?? '')))) abort.abort();
       } catch {
         // Транзиентная ошибка БД не должна ронять воркер — следующий тик повторит.
       } finally {
@@ -345,7 +348,7 @@ async function handleJob(job: VeJob) {
         watchdog.touch();
         log('info', `[${job.stage} ${job.id.slice(0, 8)}] ${msg}`);
       },
-    }), () => watchdog.touch()));
+    }), () => watchdog.touch()), { id: job.id, startedAt: job.started_at });
     if (isResearch) abort.signal.throwIfAborted();
   } catch (error) {
     // The inactivity guard aborted a silent stage: whatever the stage threw
@@ -492,11 +495,13 @@ async function failJob(job: VeJob, err: unknown, failedAt: string) {
   // не инкрементируем attempts, не затираем 'cancelled', не валим проект/базу.
   const { data: currentBefore, error: currentError } = await db
     .from('ve_jobs')
-    .select('status')
+    .select('status,started_at')
     .eq('id', job.id)
     .abortSignal(AbortSignal.timeout(10_000))
     .maybeSingle();
   if (currentError) throw new Error(`ve_jobs failure status read: ${currentError.message}`);
+  if (currentBefore && currentBefore.started_at !== job.started_at
+    && Date.parse(currentBefore.started_at ?? '') !== Date.parse(job.started_at ?? '')) return;
   if (currentBefore && (currentBefore as { status: string }).status === 'cancelled') {
     log('info', `Job ${job.id} (${job.stage}) aborted by user cancel`);
     return;

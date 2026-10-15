@@ -14,6 +14,8 @@ import type { VeJob, VeProject, VeStage } from '../types';
 
 export interface VeStageContext {
   supabase: SupabaseClient; /* supabaseAdmin client — создаётся воркером и передаётся сюда */
+  /** Exact invocation owning any paid/parser child; supplied by collection. */
+  parentJob?: Pick<VeJob, 'id' | 'started_at'>;
   /** Captured per-job cancellation; never reuse a later job's signal. */
   signal?: AbortSignal;
   /** A durable write has finished; the worker may yield for deployment here. */

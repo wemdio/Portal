@@ -52,7 +52,7 @@ jest.mock('@/lib/verticalEngineV2/relevanceGate', () => ({
 }));
 
 import { createHash } from 'node:crypto';
-import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
+import { createMockSupabase as createRawMockSupabase, type MockSupabaseClient, type MockSupabaseSeed } from '@/../tests/helpers/mockSupabase';
 import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany } from '@/lib/verticalEngineV2/companyContactCap';
 import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
 import { veRelevanceRowKey } from '@/lib/verticalEngineV2/relevanceReserve';
@@ -121,6 +121,31 @@ const DIRECTORY_TASK = {
   rationale: 'Тестовый срез реестра',
   directory_filters: { okvedCodes: ['86.1', '86.2', '86.9'], includeIp: false },
 };
+
+// The SQL transaction is exercised separately against PostgreSQL. These
+// collector scenarios use its transport contract and retain one child for an
+// ambiguous/repeated request, including a completed child with paid results.
+function createMockSupabase(input: MockSupabaseSeed = {}): MockSupabaseClient {
+  const children = new Map<string, string>();
+  return createRawMockSupabase({ ...input, rpcHandlers: {
+    ve_enqueue_preparation_child: async (params, db) => {
+      expect(params.p_parent_job_id).toBeTruthy();
+      expect(params).toHaveProperty('p_parent_started_at');
+      const row = params.p_record as Record<string, unknown>;
+      const table = String(params.p_kind);
+      expect(['base_constructor_jobs', 'parser_jobs', 'google_maps_jobs']).toContain(table);
+      const key = `${table}:${row.id ?? createHash('sha256').update(JSON.stringify(row)).digest('hex')}`;
+      const known = children.get(key) ?? (row.id ? db.getRows(table).find((child) => child.id === row.id)?.id : undefined);
+      if (known) return { data: known };
+      const result = await db.from(table).insert(row).select('id').single();
+      if (result.error) return { data: null, error: result.error };
+      const id = String(result.data?.id);
+      children.set(key, id);
+      return { data: id };
+    },
+    ...input.rpcHandlers,
+  } });
+}
 
 function unifiedRow(partial: Partial<VeUnifiedRow>): VeUnifiedRow {
   const result = {} as VeUnifiedRow;
@@ -1457,7 +1482,7 @@ describe('base_collect CONSTRUCT step order', () => {
 
     // Размер среза — тем же условием, что и выборка (точный ОКВЭД с запасным),
     // а не приблизительным ОКВЭД ve_directory_segment_stats.
-    expect(db.rpcCalls).toEqual([
+    expect(db.rpcCalls.filter((call) => call.fn !== 've_enqueue_preparation_child')).toEqual([
       {
         fn: 've_directory_plan_population',
         params: {

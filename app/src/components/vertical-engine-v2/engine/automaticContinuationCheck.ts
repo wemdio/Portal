@@ -16,14 +16,17 @@ export interface VeAutomaticContinuationCandidate {
  * Polling never reads collection checkpoints itself. Unknown means inspect, not resume. */
 export function veAutomaticContinuationCandidates(input: {
   projectId: string; step: number; activeHypothesisId: string; setupRevision: number;
-  selectedHypothesisIds: readonly string[]; preparations: readonly VeOutreachPreparation[];
+  visibleHypothesisIds: readonly string[]; preparations: readonly VeOutreachPreparation[];
+  selectedHypothesisIds?: readonly string[];
   bases: readonly VeBaseSummary[]; jobs: readonly VeJobSummary[]; launchedBaseIds: ReadonlySet<string>;
 }): VeAutomaticContinuationCandidate[] {
   if (input.step !== 2 && input.step !== 3) return [];
   return input.preparations.flatMap((preparation) => {
-    if (!input.selectedHypothesisIds.includes(preparation.hypothesis_id)
+    const enabled = preparation.independent_control === true
+      || (input.selectedHypothesisIds ?? input.visibleHypothesisIds).includes(preparation.hypothesis_id);
+    if (!input.visibleHypothesisIds.includes(preparation.hypothesis_id)
       || (input.step === 2 && preparation.hypothesis_id !== input.activeHypothesisId)
-      || ['pending', 'generating'].includes(preparation.status)) return [];
+      || (enabled && ['pending', 'generating'].includes(preparation.status))) return [];
     const base = input.bases.find((item) => item.id === preparation.base_id && item.hypothesis_id === preparation.hypothesis_id);
     if (!base || base.source !== 'auto' || !['analyzed', 'failed'].includes(base.status)
       || base.collect_info?.collection_mode !== 'preview' || base.collection_continuation?.code !== 'state_unchecked'

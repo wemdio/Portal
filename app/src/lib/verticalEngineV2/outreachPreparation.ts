@@ -5,7 +5,11 @@ import type { VeOutreachPreparation } from './outreachSetup';
 
 class PreparationLeaseLost extends Error {}
 class PreparationReadError extends Error {}
-type ClaimedPreparation = VeOutreachPreparation & { claim_token: string; resume_collection_requested?: boolean };
+type ClaimedPreparation = VeOutreachPreparation & {
+  claim_token: string;
+  resume_collection_requested?: boolean;
+  pause_state?: { resumed_base_id?: string } | null;
+};
 
 // This timer runs beside research. Do not deserialize megabytes of saved
 // candidates/evidence just to inspect a base's status every ten seconds.
@@ -92,7 +96,7 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
       if (!baseId) baseId = (await latestBase())?.id ?? null;
       let base = baseId ? await readBase() : null;
       if (baseId && !base?.data) throw new Error('Сохранённая база недоступна. Обновите страницу');
-      if (retryRequested && base?.data?.status === 'failed') {
+      if (retryRequested && base?.data?.status === 'failed' && p.pause_state?.resumed_base_id !== baseId) {
         // An older finished preview can coexist with a later failed duplicate.
         // Continue preparation from that result instead of reviving collection,
         // including when the duplicate was explicitly cancelled.

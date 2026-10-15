@@ -6,6 +6,7 @@ import type { VeStageContext } from './stages/shared';
 import { VeRelevanceCheckpointError } from './relevanceCheckpoint';
 import { veRelevanceDecisionSchema } from './relevanceDecision';
 import { needsVeSavedEmailReview, singleVeSavedEmail as singleEmail } from './savedEmailReviewEligibility';
+import { enqueueVePreparationChild } from './preparationChildren';
 
 export { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 
@@ -137,16 +138,17 @@ export async function recoverVeSavedEmails(input: {
       .select('created_by').eq('id', job.project_id).single();
     ctx.signal?.throwIfAborted();
     if (ownerError || !project?.created_by) throw new Error('Saved email validation owner is unavailable');
-    const { error: insertError } = await ctx.supabase.from('base_constructor_jobs').insert({
+    let insertError: unknown;
+    try { await enqueueVePreparationChild(ctx, 'base_constructor_jobs', {
       id: batch.id, user_id: project.created_by, file_name: label, status: 'pending', locale: 'ru', workload_origin: 'automation',
       selected_steps: ['validate_emails'], step_config: { validate_emails: { keepUnverifiable: true } },
       data: [['Email', 'VE2 Key'], ...batch.emails.map((email) => [email, hash(email)])],
       initial_row_count: batch.emails.length, total_steps: 1,
-    });
+    }, job); } catch (error) { insertError = error; }
     ctx.signal?.throwIfAborted();
     // Do not generate a new child UUID after an ambiguous insertion response.
     child = await readChild();
-    if (!child) throw new Error(`Saved email child enqueue unconfirmed: ${insertError?.message ?? 'missing child'}`);
+    if (!child) throw new Error(`Saved email child enqueue unconfirmed: ${insertError instanceof Error ? insertError.message : 'missing child'}`);
   }
   if (child.file_name !== label || !Array.isArray(child.selected_steps)
     || child.selected_steps.length !== 1 || child.selected_steps[0] !== 'validate_emails') {

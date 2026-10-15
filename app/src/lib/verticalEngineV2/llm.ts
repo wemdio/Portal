@@ -251,12 +251,18 @@ export function getLLMValidationDiagnostic(
 }
 
 /** Per-job context: cancelling one project must not abort a parallel project. */
-const jobSignals = new AsyncLocalStorage<AbortSignal>();
+export interface VeJobClaimIdentity { id: string; startedAt: string | null }
+const jobSignals = new AsyncLocalStorage<{ signal: AbortSignal; claim: Readonly<VeJobClaimIdentity> | null }>();
 /** Compatibility for single-flight callers/tests; workers use the scoped API. */
 let activeJobSignal: AbortSignal | null = null;
 
-export function withVeActiveJobSignal<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
-  return jobSignals.run(signal, work);
+export function withVeActiveJobSignal<T>(signal: AbortSignal, work: () => Promise<T>, claim?: VeJobClaimIdentity): Promise<T> {
+  return jobSignals.run({ signal, claim: claim ? Object.freeze({ ...claim }) : null }, work);
+}
+
+/** Captured claim, never a new lease read from the mutable database row. */
+export function getVeScopedJobClaim(): Readonly<VeJobClaimIdentity> | null {
+  return jobSignals.getStore()?.claim ?? null;
 }
 
 export function setVeActiveJobSignal(signal: AbortSignal | null): void {
@@ -268,12 +274,12 @@ export function setVeActiveJobSignal(signal: AbortSignal | null): void {
  * with 16 parallel jobs a fallback would abort another job's database reads.
  */
 export function getVeScopedJobSignal(): AbortSignal | null {
-  return jobSignals.getStore() ?? null;
+  return jobSignals.getStore()?.signal ?? null;
 }
 
 /** Capture once per operation so late work cannot inherit the next job's signal. */
 export function getVeActiveJobSignal(): AbortSignal | null {
-  return jobSignals.getStore() ?? activeJobSignal;
+  return jobSignals.getStore()?.signal ?? activeJobSignal;
 }
 
 interface LLMCallOptions {
