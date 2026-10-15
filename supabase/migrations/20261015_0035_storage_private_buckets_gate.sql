@@ -12,11 +12,17 @@
 -- buckets:
 --   lockdown_private_buckets_gate, TO authenticated:
 --   * other buckets: unchanged (the policy is true for them);
---   * staff (public.is_internal_staff()): unchanged, every object of both buckets;
+--   * staff (public.is_internal_staff()): unchanged, i.e. exactly what the permissive
+--     policies give them today. In the repo that is every object of both buckets
+--     (briefs_authenticated_*, kb_storage_*). Prod differs: briefs has only the hand-made
+--     "briefs read own" (SELECT, owner = auth.uid()) and "briefs uploads by authenticated"
+--     (INSERT), so on prod a staff JWT sees only its own briefs uploads (read-only prod
+--     check 15.10.2026: the probe admin sees 0 of 937 briefs objects). The gate keeps that
+--     as it is; the self-check therefore compares staff before and after, not with the
+--     object total;
 --   * everybody else: only objects they own under briefs/brief-scoring/, the path
 --     BaseConstructorView.tsx uploads to on /client/base-constructor before calling
---     /api/brief-scoring/parse-pdf (which then reads the file with the service role).
---     Nothing in knowledge-base.
+--     /api/brief-scoring/parse-pdf. Nothing in knowledge-base.
 --   lockdown_private_buckets_anon_gate, TO anon: nothing in either bucket, everything
 --     else unchanged. The repo has no anon policy on these buckets, but on prod anon
 --     holds ALL on storage.objects (fix-roles.sql) and a hand-made Studio policy
@@ -28,14 +34,17 @@
 -- tg-outreach-sessions, ...), the service role (BYPASSRLS) and storage-api's own
 -- connection (superuser).
 --
--- STILL OPEN IN CODE. /api/brief-scoring/parse-pdf takes {bucket, path} from the request
--- body and downloads with the service role, so a client that knows a path can still
--- read any briefs object through it. The route must check the path prefix and the
--- object owner before its service-role download (release notes).
+-- CODE. Until the lockdown code commit is deployed, /api/brief-scoring/parse-pdf takes
+-- {bucket, path} from the request body and downloads with the service role, so a client
+-- that knows a path can still read any briefs object through it. That commit allowlists
+-- brief-scoring/ paths and makes non-staff download with their own JWT, so this gate
+-- decides.
 --
--- SAFETY. CREATE POLICY takes ACCESS EXCLUSIVE on storage.objects, which every storage
--- request reads; the lock wait is capped at 3s. The self-check probes both buckets as
--- anon, staff, a client and a JWT without a profile. Any mismatch raises and the file
+-- SAFETY. The file locks storage.objects ACCESS EXCLUSIVE first (CREATE POLICY needs that
+-- lock anyway; every storage request reads the table), so the staff "before" probe and
+-- the self-check see the same rows; the lock wait is capped at 3s. The self-check probes
+-- both buckets as anon, staff (same count as before the gate), a client (at most its own
+-- brief-scoring objects) and a JWT without a profile. Any mismatch raises and the file
 -- rolls back.
 --
 -- ROLLBACK: supabase/operator-sql/20261015_0035_storage_private_buckets_gate.rollback.sql
@@ -45,6 +54,41 @@
 
 set local lock_timeout = '3s';
 set local statement_timeout = '60s';
+
+-- Lock first, so the "before" probe and the self-check see the same rows.
+lock table storage.objects in access exclusive mode;
+
+-- What the staff probe account sees in the two buckets under today's policies. The gate must
+-- leave it exactly as it is (see FIX: on prod that is not "every object").
+create temp table lockdown_0035_staff_before (staff uuid not null, n bigint not null) on commit drop;
+do $$
+declare
+  v_prev_role   text := current_setting('role');
+  v_prev_claims text := coalesce(current_setting('request.jwt.claims', true), '');
+  v_prev_sub    text := coalesce(current_setting('request.jwt.claim.sub', true), '');
+  v_staff uuid;
+  v_n bigint;
+begin
+  if to_regclass('storage.objects') is null then
+    return; -- the next block raises with a clear message
+  end if;
+  select p.id into v_staff from public.profiles p
+   where p.role in ('technician', 'manager', 'director', 'admin', 'sales', 'marketer', 'lead')
+     and coalesce(p.is_demo, false) = false
+   order by (p.role = 'admin') desc, p.created_at nulls last, p.id limit 1;
+  if v_staff is null then
+    return;
+  end if;
+  perform set_config('request.jwt.claims', json_build_object('sub', v_staff, 'role', 'authenticated')::text, true);
+  perform set_config('request.jwt.claim.sub', v_staff::text, true);
+  perform set_config('role', 'authenticated', true);
+  select count(*) into v_n from storage.objects where bucket_id in ('briefs', 'knowledge-base');
+  perform set_config('role', v_prev_role, true);
+  perform set_config('request.jwt.claims', v_prev_claims, true);
+  perform set_config('request.jwt.claim.sub', v_prev_sub, true);
+  insert into pg_temp.lockdown_0035_staff_before (staff, n) values (v_staff, v_n);
+end;
+$$;
 
 do $$
 declare
@@ -99,10 +143,11 @@ declare
   v_prev_sub    text := coalesce(current_setting('request.jwt.claim.sub', true), '');
   v_unknown uuid := '00000000-0000-4000-8000-00000000dead';
   v_staff uuid;
+  v_staff_before bigint;
   v_client uuid;
-  v_total bigint;
   v_n bigint;
   v_expect bigint;
+  v_client_own text;
 begin
   if not exists (
     select 1 from pg_catalog.pg_policies
@@ -126,14 +171,10 @@ begin
     raise exception 'private buckets gate: % cannot SET ROLE anon/authenticated for the self-check', current_user;
   end if;
 
-  select p.id into v_staff from public.profiles p
-   where p.role in ('technician', 'manager', 'director', 'admin', 'sales', 'marketer', 'lead')
-     and coalesce(p.is_demo, false) = false
-   order by (p.role = 'admin') desc, p.created_at nulls last, p.id limit 1;
+  -- The same staff account the "before" probe used (none: no staff profile, probe skipped).
+  select b.staff, b.n into v_staff, v_staff_before from pg_temp.lockdown_0035_staff_before b limit 1;
   select p.id into v_client from public.profiles p
    where p.role = 'client' order by p.created_at nulls last, p.id limit 1;
-
-  select count(*) into v_total from storage.objects where bucket_id in ('briefs', 'knowledge-base');
 
   -- anon: nothing in the two buckets (no table privilege counts as nothing).
   perform set_config('request.jwt.claims', '{"role":"anon"}', true);
@@ -165,14 +206,21 @@ begin
     perform set_config('role', 'authenticated', true);
     select count(*) into v_n from storage.objects where bucket_id in ('briefs', 'knowledge-base');
     perform set_config('role', v_prev_role, true);
-    if v_n <> v_total then
-      raise exception 'private buckets gate probe: staff sees % of % objects', v_n, v_total;
+    if v_n is distinct from v_staff_before then
+      raise exception 'private buckets gate probe: staff sees % objects in the private buckets, % before the gate', v_n, v_staff_before;
     end if;
   end if;
 
   if v_client is not null then
-    select count(*) into v_expect from storage.objects o
-     where o.bucket_id = 'briefs' and o.name like 'brief-scoring/%' and o.owner = v_client;
+    -- Own = the gate's own predicate (owner and/or owner_id, whichever columns exist).
+    v_client_own := concat_ws(' or ',
+      case when exists (select 1 from pg_catalog.pg_attribute where attrelid = 'storage.objects'::regclass and attname = 'owner' and not attisdropped)
+           then 'o.owner = $1' end,
+      case when exists (select 1 from pg_catalog.pg_attribute where attrelid = 'storage.objects'::regclass and attname = 'owner_id' and not attisdropped)
+           then 'o.owner_id = $1::text' end);
+    execute format('select count(*) from storage.objects o where o.bucket_id = %L and o.name like %L and (%s)',
+                   'briefs', 'brief-scoring/%', v_client_own)
+       into v_expect using v_client;
     perform set_config('request.jwt.claims', json_build_object('sub', v_client, 'role', 'authenticated')::text, true);
     perform set_config('request.jwt.claim.sub', v_client::text, true);
     perform set_config('role', 'authenticated', true);

@@ -7,6 +7,11 @@
 --     {authenticated}, true) and profiles_update_own (UPDATE). Extra PERMISSIVE ones are
 --     neutralised by the fix. Any RESTRICTIVE one: stop and review (the migration probe will
 --     refuse to commit if it hides own rows or rows from staff).
+--     Prod 15.10.2026 (read-only): also "Profiles are viewable by authenticated users" and
+--     "Public profiles are viewable by everyone." (SELECT true), and "Admins can insert
+--     profiles" / "Admins can update profiles", whose expressions subquery profiles itself.
+--     Those two are why the 0030 policy has no (select ...) sublink: with one, every JWT
+--     UPDATE/INSERT on profiles raises 42P17. Probe 5e of the migration refuses that case.
 select policyname, permissive, cmd, roles, qual, with_check
 from pg_policies
 where schemaname = 'public' and tablename = 'profiles'
@@ -53,6 +58,9 @@ where p.oid = to_regprocedure('public.agent_query_readonly(text)');
 -- P6. Impact: who drops to their own row. staff_keeps_all_rows = no change. Investigate any
 --     staff_role_demo or role_null_or_other with active_30d > 0: their staff pickers
 --     (/, /tasks, /team, /projects/*) will list only themselves.
+--     active_30d comes from auth.users.last_sign_in_at. Bench robots never sign in (their
+--     JWTs are minted per request), so api_robot always shows 0 there even when the robots
+--     are busy. Robot activity is in P6b.
 select bucket,
        count(*)::int as accounts,
        count(*) filter (where last_sign_in_at > now() - interval '30 days')::int as active_30d,
@@ -75,6 +83,19 @@ from (
 ) s
 group by bucket
 order by bucket;
+-- @@
+
+-- P6b. Bench robot activity over the last 30 days, per tool and action. The Bench API logs
+--      every call in bench_api_requests. Prod 15.10.2026 (read-only): 4,677 calls from
+--      2 keys, the last on 05.10; company-base/search ran 43 times, avg 5.6 s, max 60 s.
+--      Tonight's series makes the company-base name search of the CURRENT code slow
+--      (0033 header, lib/bench/tools/companyBase.ts) until the code commit ships.
+select tool, action, count(*)::int as calls_30d, count(distinct key_id)::int as keys,
+       round(avg(duration_ms))::int as avg_ms, max(duration_ms) as max_ms, max(created_at) as last_call
+from public.bench_api_requests
+where created_at > now() - interval '30 days'
+group by tool, action
+order by calls_30d desc;
 -- @@
 
 -- P7. Name is free. Expected: null.

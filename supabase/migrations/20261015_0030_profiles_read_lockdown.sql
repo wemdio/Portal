@@ -29,16 +29,30 @@
 -- the Telegram agent on the service role (app/src/lib/telegramAgent/sqlQuery.ts), and
 -- service_role keeps EXECUTE.
 --
+-- NO SUBLINK IN THE POLICY. The policy calls auth.uid() and is_internal_staff() directly,
+-- not as (select ...) InitPlans. Prod has two hand-made policies that subquery profiles
+-- itself: "Admins can update profiles" (UPDATE USING exists (select 1 from profiles ...))
+-- and "Admins can insert profiles" (INSERT WITH CHECK, same). When PostgreSQL expands
+-- that subquery it applies the profiles SELECT policies again, and if one of them has a
+-- sublink of its own it raises 42P17 "infinite recursion detected in policy for relation
+-- profiles". With (select auth.uid()) here, every UPDATE and INSERT on profiles through
+-- a JWT (staff editing a profile, a client changing its locale) failed in a prod
+-- emulation (15.10.2026). The price is a helper call per row that is not the caller's
+-- own: about 15 us per row in PGlite, so about 1 ms for a full scan of prod's 77 profiles.
+--
 -- RULES FOR LATER CHANGES.
 --   * Never subquery public.profiles inline in a profiles policy (42P17 recursion);
 --     call a SECURITY DEFINER helper such as public.is_internal_staff().
+--   * No sublink at all, not even (select auth.uid()), in a profiles SELECT policy while
+--     any profiles policy (repo or prod-only) subqueries profiles: see above.
 --   * Never FORCE ROW LEVEL SECURITY on profiles: the helper relies on its owner
 --     bypassing RLS.
 --   * A user-JWT embed of profiles (select('..., profiles(...)') or x:profiles!fk(...))
 --     returns null for rows the caller cannot see unless the caller is staff, and an
 --     !inner embed drops the parent row. Today every such embed runs on the service role.
 --
--- SAFETY. Step 5 checks the grants, the helper's owner and the result as real callers.
+-- SAFETY. Step 5 checks the grants, the helper's owner and the result as real callers,
+-- including that an UPDATE and an INSERT on profiles through a JWT still plan (5e).
 -- Any failure raises, the whole file rolls back, and the deploy fails while the old
 -- build keeps serving the unchanged database. CREATE POLICY takes ACCESS EXCLUSIVE on
 -- profiles, which every request reads, so the lock wait is capped at 3s
@@ -82,7 +96,8 @@ grant execute on function public.is_internal_staff() to service_role;
 -- No-op today; turns RLS back on if prod ever drifted (the policy would be inert).
 alter table public.profiles enable row level security;
 
--- (select ...) makes both calls InitPlans: evaluated once per statement, not per row.
+-- Plain calls, no (select ...): see NO SUBLINK IN THE POLICY above. The own-row arm comes
+-- first, so an own-row read never calls the helper.
 -- anon is listed too: it has no table grant today, and if one ever appears it still
 -- sees nothing.
 drop policy if exists profiles_select_self_or_staff on public.profiles;
@@ -92,8 +107,8 @@ create policy profiles_select_self_or_staff
   for select
   to anon, authenticated
   using (
-    id = (select auth.uid())
-    or (select public.is_internal_staff())
+    id = auth.uid()
+    or public.is_internal_staff()
   );
 
 -- ─── 3. Close the arbitrary-SQL RPC ──────────────────────────────────────────
@@ -128,8 +143,8 @@ begin
     alter policy profiles_select_self_or_staff
       on public.profiles
       using (
-        id = (select auth.uid())
-        or (select public.is_internal_staff())
+        id = auth.uid()
+        or public.is_internal_staff()
         or current_user = 'readonly'
       );
   end if;
@@ -148,6 +163,7 @@ declare
   v_client uuid;
   v_n bigint;
   v_ok boolean;
+  v_who uuid;
 begin
   -- 5a. RLS on and not forced.
   if not exists (
@@ -245,6 +261,33 @@ begin
       raise exception 'profiles lockdown probe: staff % sees % of % rows', v_staff, v_n, v_total;
     end if;
   end if;
+
+  -- 5e. Writes through a JWT still plan. A profiles policy that subqueries profiles (prod's
+  --     hand-made "Admins can update/insert profiles") raises 42P17 when PostgreSQL rewrites
+  --     the statement, before any row or privilege check, so WHERE false is enough and
+  --     touches nothing. A missing table or column privilege (42501) is not what this
+  --     probe is about and is ignored.
+  foreach v_who in array array[v_staff, v_client] loop
+    continue when v_who is null;
+    perform set_config('request.jwt.claims', json_build_object('sub', v_who, 'role', 'authenticated')::text, true);
+    perform set_config('request.jwt.claim.sub', v_who::text, true);
+    perform set_config('role', 'authenticated', true);
+    begin
+      execute 'update public.profiles set locale = locale where false';
+    exception
+      when insufficient_privilege then null;
+      when invalid_object_definition then
+        raise exception 'profiles lockdown probe: a profiles UPDATE as % fails: %', v_who, sqlerrm;
+    end;
+    begin
+      execute 'insert into public.profiles (id) select $1 where false' using v_unknown;
+    exception
+      when insufficient_privilege then null;
+      when invalid_object_definition then
+        raise exception 'profiles lockdown probe: a profiles INSERT as % fails: %', v_who, sqlerrm;
+    end;
+    perform set_config('role', v_prev_role, true);
+  end loop;
 
   -- The MCP exemption from step 4, when it was added and the runner can check it.
   if exists (
