@@ -67,7 +67,6 @@ interface FieldDef {
   label: string;
   /** Многострочные ответы: перечисления преимуществ, сегменты ЦА и т.п. */
   long?: boolean;
-  hint?: string;
 }
 
 const SECTIONS: Array<{ title: string; fields: FieldDef[] }> = [
@@ -105,13 +104,6 @@ const SECTIONS: Array<{ title: string; fields: FieldDef[] }> = [
     fields: [
       { key: 'persona_name', label: 'Имя отправителя в письмах' },
       { key: 'persona_position', label: 'Должность отправителя' },
-      { key: 'lead_recipient_name', label: 'Получатель лидов у клиента: имя' },
-      { key: 'lead_recipient_email', label: 'Email получателя лидов' },
-      {
-        key: 'lead_recipient_position',
-        label: 'Должность получателя лидов',
-        hint: 'Контакт из брифа. Получателей уведомлений настраивают отдельно в проекте.',
-      },
       { key: 'lead_magnets', label: 'Лид-магниты', long: true },
       { key: 'guarantees', label: 'Гарантии клиенту', long: true },
     ],
@@ -323,7 +315,6 @@ export function ClientBriefBlock({
                             className={`${HE.input} mt-1 w-full`}
                           />
                         )}
-                        {field.hint ? <span className={`mt-1 block text-xs ${HE.muted2}`}>{field.hint}</span> : null}
                       </label>
                     );
                   })}
