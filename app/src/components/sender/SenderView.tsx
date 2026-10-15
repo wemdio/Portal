@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Ban, BarChart3, Mail, MessageSquare, Network, Send, ShieldCheck, type LucideIcon } from 'lucide-react';
 import { MailboxesTab } from './MailboxesTab';
@@ -46,6 +46,23 @@ function initialTab(tab: string | null, threadId: string | null): TabId {
  */
 export function SenderView() {
   const searchParams = useSearchParams();
+  // Панель разделов прижата к левому краю окна на всю высоту (как в Instantly):
+  // верх — сразу под шапкой портала, высоту шапки берём из страницы.
+  const [railTop, setRailTop] = useState(56);
+  useEffect(() => {
+    const measure = () => {
+      const header = document.querySelector('header');
+      const bottom = header ? Math.round(header.getBoundingClientRect().bottom) : 56;
+      setRailTop(Math.max(0, bottom));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, { passive: true });
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure);
+    };
+  }, []);
   const [tab, setTab] = useState<TabId>(() =>
     initialTab(searchParams.get('tab'), searchParams.get('thread')),
   );
@@ -64,7 +81,60 @@ export function SenderView() {
 
   return (
     // «Письма» — три колонки, как «Персонализированные ответы»: им нужна вся ширина.
-    // Разделы — вертикальная колонка значков слева, как в Instantly (15.10.2026).
+    // Разделы — колонка значков у левого края окна, как в Instantly (15.10.2026).
+    <div className="lg:pl-14">
+    <nav
+      aria-label="Разделы рассылки"
+      style={{ top: railTop, height: `calc(100vh - ${railTop}px)` }}
+      className="fixed left-0 z-30 hidden w-14 flex-col items-center gap-1 border-r border-zinc-200 bg-white py-3 lg:flex"
+    >
+      {TABS.map((item) => {
+        const Icon = item.icon;
+        const active = tab === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            title={item.label}
+            aria-label={item.label}
+            aria-current={active ? 'page' : undefined}
+            onClick={() => {
+              setTab(item.id as TabId);
+              setFocusCampaignId(null);
+              setEgressIp(null);
+              setStatsCampaignId(null);
+            }}
+            className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
+              active ? 'bg-blue-600/10 text-blue-600' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+            }`}
+          >
+            <Icon className="h-[18px] w-[18px]" />
+          </button>
+        );
+      })}
+    </nav>
+
+    {/* На узких экранах колонки нет — разделы лежат горизонтальной строкой. */}
+    <div className="flex gap-1 overflow-x-auto border-b border-zinc-200 px-4 lg:hidden">
+      {TABS.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          onClick={() => {
+            setTab(item.id as TabId);
+            setFocusCampaignId(null);
+            setEgressIp(null);
+            setStatsCampaignId(null);
+          }}
+          className={`-mb-px shrink-0 border-b-2 px-3 py-2 text-sm font-medium ${
+            tab === item.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-zinc-500'
+          }`}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+
     <div className={`mx-auto px-6 py-8 ${tab === 'threads' ? 'max-w-none' : 'max-w-7xl'}`}>
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-zinc-900">Рассылка</h1>
@@ -73,35 +143,6 @@ export function SenderView() {
         </p>
       </div>
 
-      <div className="flex items-start gap-5">
-      <nav aria-label="Разделы рассылки" className="sticky top-4 flex shrink-0 flex-col gap-1 rounded-xl border border-zinc-200 bg-white p-1.5">
-        {TABS.map((item) => {
-          const Icon = item.icon;
-          const active = tab === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              title={item.label}
-              aria-label={item.label}
-              aria-current={active ? 'page' : undefined}
-              onClick={() => {
-                setTab(item.id as TabId);
-                setFocusCampaignId(null);
-                setEgressIp(null);
-                setStatsCampaignId(null);
-              }}
-              className={`flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
-                active ? 'bg-blue-600/10 text-blue-600' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
-              }`}
-            >
-              <Icon className="h-[18px] w-[18px]" />
-            </button>
-          );
-        })}
-      </nav>
-
-      <div className="min-w-0 flex-1">
       {tab === 'mailboxes' ? <MailboxesTab initialEgressIp={egressIp} /> : null}
       {tab === 'campaigns' ? (
         <CampaignsTab
@@ -125,8 +166,7 @@ export function SenderView() {
           }}
         />
       ) : null}
-      </div>
-      </div>
+    </div>
     </div>
   );
 }
