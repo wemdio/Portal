@@ -39,7 +39,7 @@ const PROVIDER_TONE: Record<SeedProviderId, { text: string; badge: string }> = {
   mailru: { text: 'text-sky-500', badge: 'bg-sky-500/15 text-sky-500' },
 };
 const SEED_PAGE_SIZE = 10;
-const HEALTH_PAGE_SIZE = 50;
+const HEALTH_PAGE_SIZE = 30;
 const NO_BOXES: SeedBoxDto[] = [];
 
 /** «Вход»: сначала рабочие, потом не проверенные, потом без входа. */
