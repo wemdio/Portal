@@ -334,13 +334,7 @@ async function geoLookup(
       new Promise<string>((resolve, reject) => {
         let data = '';
         secure.on('secureConnect', () => {
-          secure.write(`GET ${path} HTTP/1.1
-Host: ${host}
-User-Agent: curl/8
-Accept: */*
-Connection: close
-
-`);
+          secure.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: curl/8\r\nAccept: */*\r\nConnection: close\r\n\r\n`);
         });
         secure.on('data', (chunk: Buffer) => {
           data += chunk.toString('utf8');
@@ -356,14 +350,9 @@ Connection: close
     const json = /"country"\s*:\s*"([A-Za-z]{2})"/.exec(body);
     if (json) return json[1].toUpperCase();
     // ipinfo.io/country отвечает голым кодом страны в теле.
-    const plain = /
-
-(?:[0-9a-f]+
-)?([A-Za-z]{2})\s*(?:
-|$)/.exec(body);
+    const plain = /\r\n\r\n(?:[0-9a-f]+\r\n)?([A-Za-z]{2})\s*(?:\r\n|$)/.exec(body);
     if (plain) return plain[1].toUpperCase();
-    throw new Error(`${host}: в ответе нет страны (${body.split('
-')[0].slice(0, 40)})`);
+    throw new Error(`${host}: в ответе нет страны (${body.split('\r\n')[0].slice(0, 40)})`);
   } finally {
     socket?.destroy();
   }
