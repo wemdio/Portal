@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { ChevronDown } from 'lucide-react';
 
 import { describeProxy, healthToneClass } from '@/lib/tgOutreach/accountHealth';
+import { proxyCountryLabel } from '@/lib/tgOutreach/proxyCountry';
 import {
   groupProxiesForPicker,
   flattenPickerGroups,
@@ -184,7 +185,12 @@ export function ProxyPicker<T extends PickerProxy>({
         className={`flex w-full items-center gap-1.5 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-left text-xs transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer ${className}`}
       >
         <span className="min-w-0 flex-1 truncate">
-          {selected ? (selected.name || selected.url) : <span className="text-gray-400">{emptyLabel}</span>}
+          {selected ? (
+            <>
+              {selected.name || selected.url}
+              {proxyCountryLabel(selected.country_code) ? <span className="ml-1.5 text-gray-400">· {proxyCountryLabel(selected.country_code)}</span> : null}
+            </>
+          ) : <span className="text-gray-400">{emptyLabel}</span>}
         </span>
         {selectedMark && (
           <span className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${healthToneClass(selectedMark.tone)}`}>
@@ -255,6 +261,7 @@ export function ProxyPicker<T extends PickerProxy>({
                         нечестно. */}
                     <span className={`min-w-0 flex-1 truncate ${mark.tone === 'bad' ? 'text-gray-400' : 'text-gray-700'} ${proxy.id === value ? 'font-semibold' : ''}`}>
                       {proxy.name || proxy.url}
+                      {proxyCountryLabel(proxy.country_code) ? <span className="ml-1.5 text-gray-400">· {proxyCountryLabel(proxy.country_code)}</span> : null}
                     </span>
                     <span className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${healthToneClass(mark.tone)}`}>
                       {mark.label}

@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
       const auth = await authenticateRequest(req.headers.get('authorization'));
       if ('error' in auth) return auth.error;
 
-      let body: { campaign_id?: string; proxy_ids?: unknown };
+      let body: { campaign_id?: string; proxy_ids?: unknown; detect_country?: boolean; save?: boolean };
       try {
         body = await req.json();
       } catch {
@@ -65,7 +65,10 @@ export async function POST(req: NextRequest) {
       const rows = (data ?? []) as { id: string; url: string; name: string | null }[];
       if (!rows.length) return jsonError('Прокси не найдены в этой кампании', 404);
 
-      const items = await checkProxies(rows, { concurrency: PROXY_CHECK_CONCURRENCY });
+      const items = await checkProxies(rows, {
+        concurrency: PROXY_CHECK_CONCURRENCY,
+        detectCountry: body.detect_country === true,
+      });
 
       const failures = items
         .map((r) => {
@@ -74,6 +77,28 @@ export async function POST(req: NextRequest) {
         })
         .filter((v): v is { id: string; reason: ProxyCheckFailureReason } => v !== null);
       if (failures.length) await recordProxyCheckFailures(auth.supabase, failures);
+
+      // Итог проверки запоминаем в строке прокси (страна и вердикт): по нему
+      // «Неопределённые» раскладываются по спискам, а в выборе прокси у
+      // аккаунта подписана страна.
+      if (body.save === true) {
+        const at = new Date().toISOString();
+        for (let i = 0; i < items.length; i += 20) {
+          await Promise.all(
+            items.slice(i, i + 20).map((r) =>
+              auth.supabase
+                .from('tg_outreach_proxies')
+                .update({
+                  check_status: r.status,
+                  checked_at: at,
+                  ...(r.country_code ? { country_code: r.country_code } : {}),
+                })
+                .eq('id', r.id)
+                .eq('campaign_id', campaignId),
+            ),
+          );
+        }
+      }
 
       const found = new Set(rows.map((r) => r.id));
       return NextResponse.json({
