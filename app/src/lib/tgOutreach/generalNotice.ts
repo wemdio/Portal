@@ -33,7 +33,7 @@ export function buildGeneralLeadMessage(input: {
   card: string;
   dealUrl: string;
 }): string {
-  const lines: string[] = ['📨 <b>Новый лид из Telegram-аутрича</b>', ''];
+  const lines: string[] = ['✈️ <b>Новый лид из Telegram-аутрича</b>', ''];
   lines.push(`<b>Компания:</b> ${escapeHtml(clip(input.campaignName || '—', 200))}`);
   lines.push(`<b>Контакт:</b> ${escapeHtml(clip(input.contact, 120))}`);
   if (input.offer) lines.push(`<b>Оффер:</b> ${escapeHtml(clip(input.offer, 200))}`);
