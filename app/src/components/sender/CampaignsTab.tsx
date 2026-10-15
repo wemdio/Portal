@@ -35,7 +35,6 @@ import {
 import { takeCampaignNotice } from './campaignNotice';
 import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
 import { FolderSettingsModal, chainDaysLabel } from './FolderSettingsModal';
-import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { RecipientsModal } from './RecipientsModal';
 import { SenderModal } from './SenderModal';
 import { formatInZone, StartCampaignModal, zoneCaption } from './StartCampaignModal';
@@ -236,157 +235,6 @@ function FolderSummary({ folder }: { folder: SenderFolderDto }) {
   );
 }
 
-function CampaignRow({
-  campaign,
-  highlighted,
-  onEdit,
-  onRecipients,
-  onStats,
-  onAction,
-}: {
-  campaign: CampaignDto;
-  /** Кампания открыта по ссылке — подсвечена, пока на неё смотрят. */
-  highlighted: boolean;
-  onEdit: () => void;
-  onRecipients: () => void;
-  onStats: () => void;
-  onAction: (action: CampaignAction) => void;
-}) {
-  const status = CAMPAIGN_STATUS_LABELS[campaign.status];
-  const stats = campaign.stats;
-  // Черновик автоаутрича, залитый, пока в папке не было ящиков: пул он
-  // возьмёт из папки при запуске — без подсказки «0 ящиков» пугал бы.
-  const poolFromFolder = Boolean(campaign.folder_id) && campaign.mailboxes.length === 0 && campaign.status === 'draft';
-
-  return (
-    <div
-      id={campaignRowId(campaign.id)}
-      className={`flex flex-wrap items-center gap-4 px-5 py-4 transition-colors duration-700 ${
-        highlighted ? 'bg-blue-50 ring-2 ring-inset ring-blue-200' : ''
-      }`}
-    >
-      <div className="min-w-48 flex-1">
-        <div className="flex items-center gap-2">
-          {/* Название — вход в настройки: отдельная кнопка «Изменить» в
-              строке была бы четвёртой подряд, а по названию кликают и так,
-              ожидая карточку. */}
-          <button
-            type="button"
-            onClick={onEdit}
-            className="rounded font-medium text-zinc-900 underline-offset-4 transition-colors hover:text-blue-600 hover:underline"
-          >
-            {campaign.name}
-          </button>
-          <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>{status.text}</span>
-        </div>
-        <div className="mt-1 text-xs text-zinc-500">
-          {stats
-            ? `${stats.recipients} получателей · отправлено ${stats.sent} · в очереди ${stats.scheduled}`
-              + ` · ответили ${stats.replied}${stats.replyRate != null ? ` (${stats.replyRate}%)` : ''}`
-              + (stats.bounced ? ` · отбоев ${stats.bounced}${stats.bounceRate != null ? ` (${stats.bounceRate}%)` : ''}` : '')
-              + (stats.failed ? ` · ошибок ${stats.failed}` : '')
-            : '—'}
-          {' · '}
-          {campaign.send_hour_from}:00–{campaign.send_hour_to}:00
-          {' · '}
-          {weekdaysLabel(campaign.send_weekdays ?? [])}
-          {' · '}
-          {timezoneLabel(campaign.timezone)}
-          {poolFromFolder ? ' · ящики возьмёт из папки при запуске' : ''}
-        </div>
-        {campaign.scheduled_start_at ? (
-          <div className="mt-1 inline-flex items-center gap-1.5 text-xs font-medium text-blue-700">
-            <CalendarClock className="h-3.5 w-3.5" />
-            Запуск {formatInZone(campaign.scheduled_start_at, campaign.timezone)}, {zoneCaption(campaign.timezone, new Date(campaign.scheduled_start_at))}
-          </div>
-        ) : campaign.scheduled_start_error ? (
-          <div className="mt-1 text-xs text-red-600">Отложенный запуск не состоялся: {campaign.scheduled_start_error}</div>
-        ) : null}
-      </div>
-
-      <div className="flex items-center gap-2">
-        {/* База получателей: кому отправлено, кто ответил, кто отбился —
-            раньше только сводная строка цифр. */}
-        <button
-          type="button"
-          onClick={onRecipients}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-        >
-          <Users className="h-3.5 w-3.5" />
-          База
-        </button>
-        {/* Полная статистика кампании — вкладка «Статистика», 30 дней. */}
-        <button
-          type="button"
-          onClick={onStats}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-        >
-          <BarChart3 className="h-3.5 w-3.5" />
-          Статистика
-        </button>
-
-        {campaign.status === 'running' ? (
-          <button
-            type="button"
-            onClick={() => onAction('pause')}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-          >
-            <Pause className="h-3.5 w-3.5" />
-            Пауза
-          </button>
-        ) : campaign.status !== 'done' && !campaign.scheduled_start_at ? (
-          // Запуск уже назначен — вместо «Запустить» только «Отменить запуск»:
-          // две кнопки запуска рядом читались как «время не сохранилось».
-          <button
-            type="button"
-            onClick={() => onAction('start')}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-          >
-            <Play className="h-3.5 w-3.5" />
-            {campaign.status === 'paused' ? 'Продолжить' : 'Запустить'}
-          </button>
-        ) : null}
-        {campaign.scheduled_start_at && campaign.status !== 'running' && campaign.status !== 'done' ? (
-          <button
-            type="button"
-            onClick={() => onAction('unschedule')}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-          >
-            <X className="h-3.5 w-3.5" />
-            Отменить запуск
-          </button>
-        ) : null}
-
-        {/* Завершение и удаление до сих пор были только в API: кампания
-            навсегда оставалась «на паузе», а ненужные черновики копились в
-            списке. */}
-        {campaign.status !== 'done' ? (
-          <button
-            type="button"
-            onClick={() => onAction('finish')}
-            title="Завершить: запланированные письма отменяются"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-          >
-            <Square className="h-3 w-3" />
-            Завершить
-          </button>
-        ) : null}
-        {campaign.status !== 'running' ? (
-          <button
-            type="button"
-            onClick={() => onAction('delete')}
-            title="Удалить кампанию"
-            aria-label="Удалить кампанию"
-            className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-red-600"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 /** Столбцы таблицы кампаний. Название показывается всегда — без него строка ничья. */
 type ColumnKey = 'status' | 'progress' | 'today' | 'created' | 'replies' | 'bounces' | 'contacts';
 
@@ -402,6 +250,7 @@ const COLUMNS: ReadonlyArray<{ key: ColumnKey; label: string }> = [
 
 const DEFAULT_COLUMNS: ColumnKey[] = ['status', 'progress', 'today', 'created'];
 const COLUMNS_STORAGE_KEY = 'portal:sender:campaign-columns';
+const AUTO_FOLDER_STORAGE_KEY = 'portal:sender:auto-folder';
 
 /** Выбор столбцов из браузера; битое или пустое сохранение — набор по умолчанию. */
 function loadColumns(): Set<ColumnKey> {
@@ -902,9 +751,24 @@ export function CampaignsTab({
   // Видимые столбцы таблицы «Компании». Из браузера — после монтирования:
   // на сервере localStorage нет, и первый рендер должен совпасть.
   const [columns, setColumns] = useState<Set<ColumnKey>>(() => new Set(DEFAULT_COLUMNS));
+  // Папка автоаутрича (RU / EN), чья таблица открыта. null — первая по порядку.
+  const [autoFolderId, setAutoFolderId] = useState<string | null>(null);
   useEffect(() => {
     setColumns(loadColumns());
+    try {
+      setAutoFolderId(window.localStorage.getItem(AUTO_FOLDER_STORAGE_KEY));
+    } catch {
+      // Не помним — откроется первая папка.
+    }
   }, []);
+  const pickAutoFolder = (id: string) => {
+    setAutoFolderId(id);
+    try {
+      window.localStorage.setItem(AUTO_FOLDER_STORAGE_KEY, id);
+    } catch {
+      // Не запомнится — не страшно.
+    }
+  };
   const toggleColumn = (key: ColumnKey) => {
     setColumns((prev) => {
       const next = new Set(prev);
@@ -941,7 +805,11 @@ export function CampaignsTab({
           if (index >= 0) setRestPage(Math.floor(index / REST_PAGE_SIZE) + 1);
           // Ссылка с экрана запуска автоаутрича ведёт в папку: открыть её блок,
           // иначе кампания окажется на скрытой вкладке.
-          else setView('auto');
+          else {
+            setView('auto');
+            const folderId = list.find((campaign) => campaign.id === target)?.folder_id;
+            if (folderId) setAutoFolderId(folderId);
+          }
         } else {
           setLinkMissing(
             cut
@@ -1049,23 +917,12 @@ export function CampaignsTab({
   );
   const folderGroups = groups.filter((group) => group.folder);
   const restGroup = groups.find((group) => !group.folder);
+  const autoGroup = folderGroups.find((group) => group.key === autoFolderId) ?? folderGroups[0] ?? null;
 
   const onSearch = (value: string) => {
     setSearch(value);
     setRestPage(1);
   };
-
-  const renderRow = (campaign: CampaignDto) => (
-    <CampaignRow
-      key={campaign.id}
-      campaign={campaign}
-      highlighted={campaign.id === highlightId}
-      onEdit={() => router.push(`/tools/sender/campaigns/${campaign.id}`)}
-      onRecipients={() => setRecipientsOf(campaign)}
-      onStats={() => onOpenStats?.(campaign.id)}
-      onAction={(action) => void act(campaign, action)}
-    />
-  );
 
   /** Шапка группы: название, счётчик и у папки — сводка и «Настройки». */
   const renderHeader = (group: CampaignGroup) => {
@@ -1168,7 +1025,7 @@ export function CampaignsTab({
           ))}
         </div>
         <div className="ml-auto flex items-center gap-2">
-          {view === 'companies' ? <ColumnsMenu visible={columns} onToggle={toggleColumn} /> : null}
+          <ColumnsMenu visible={columns} onToggle={toggleColumn} />
           <button
             type="button"
             onClick={() => router.push('/tools/sender/campaigns/new')}
@@ -1196,24 +1053,50 @@ export function CampaignsTab({
         <>
           {/* Папки автоаутричей — рядом, по половине ширины: у каждой своя
               прокрутка на ~7 кампаний, и обе видны без пролистывания страницы. */}
-          {view === 'auto' && folderGroups.length ? (
-            <div className="grid items-start gap-4 lg:grid-cols-2">
-              {folderGroups.map((group) => (
-                <section key={group.key} className="min-w-0 rounded-xl border border-zinc-200 bg-white">
-                  {renderHeader(group)}
-                  {group.campaigns.length > 0 ? (
-                    <div className="max-h-[410px] divide-y divide-zinc-100 overflow-y-auto">
-                      {group.campaigns.map(renderRow)}
-                    </div>
-                  ) : (
-                    <p className="px-5 py-8 text-center text-sm text-zinc-500">
-                      {query
-                        ? 'В этой папке ничего не нашлось.'
-                        : 'Кампаний пока нет. Они появятся здесь после кнопки «Залить в Рассылку» на экране запуска автоаутрича.'}
-                    </p>
-                  )}
-                </section>
-              ))}
+          {view === 'auto' && autoGroup ? (
+            <div className="space-y-3">
+              {/* RU и EN не смешиваем: у папок свои ящики, пояс и настройки. */}
+              <div className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1">
+                {folderGroups.map((group) => {
+                  const active = group.key === autoGroup.key;
+                  return (
+                    <button
+                      key={group.key}
+                      type="button"
+                      onClick={() => pickAutoFolder(group.key)}
+                      className={`rounded-md px-3.5 py-1 text-sm font-semibold transition ${
+                        active ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+                      }`}
+                    >
+                      {group.title.replace(/^Автоаутрич\s*/i, '') || group.title}
+                      <span className={`ml-1.5 text-xs font-normal ${active ? 'text-blue-100' : 'text-zinc-400'}`}>
+                        {group.campaigns.length}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <section className="rounded-xl border border-zinc-200 bg-white">
+                {renderHeader(autoGroup)}
+                {autoGroup.campaigns.length > 0 ? (
+                  <CampaignTable
+                    campaigns={autoGroup.campaigns}
+                    columns={columns}
+                    highlightId={highlightId}
+                    onEdit={(campaign) => router.push(`/tools/sender/campaigns/${campaign.id}`)}
+                    onRecipients={setRecipientsOf}
+                    onStats={(campaign) => onOpenStats?.(campaign.id)}
+                    onAction={(campaign, action) => void act(campaign, action)}
+                  />
+                ) : (
+                  <p className="px-5 py-8 text-center text-sm text-zinc-500">
+                    {query || statusFilter !== 'all'
+                      ? 'В этой папке ничего не нашлось.'
+                      : 'Кампаний пока нет. Они появятся здесь после кнопки «Залить в Рассылку» на экране запуска автоаутрича.'}
+                  </p>
+                )}
+              </section>
             </div>
           ) : null}
 
