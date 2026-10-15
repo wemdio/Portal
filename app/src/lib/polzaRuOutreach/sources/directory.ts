@@ -24,16 +24,13 @@ export async function loadDirectoryCandidates(
   db: SupabaseClient,
   opts: { minRevenue: number; maxRevenue: number; minEmployees: number; limit: number; okvedPrefixes?: string[] },
 ): Promise<DirectoryRow[]> {
-  // Префиксы ОКВЭД → регэксп по началу кода: «62.01» ловит 62.01 и 62.01.1,
-  // «46.6» — 46.61…46.69, «28» — весь класс (у ОКВЭД после класса всегда точка).
-  const okvedRegex = (opts.okvedPrefixes ?? []).length
-    ? String.raw`^(` + (opts.okvedPrefixes ?? []).map((p) => p.replace(/\./g, String.raw`\.`)).join('|') + ')'
-    : null;
-  const { data, error } = await db.rpc('polza_ru_directory_candidates_v2', {
+  // Префиксы ОКВЭД сравниваются в обе стороны (миграция 20261015_0005): в базе
+  // коды разной точности («62.0» и «62.01»), «62.01» подходит к обоим.
+  const { data, error } = await db.rpc('polza_ru_directory_candidates_v3', {
     p_min_revenue: opts.minRevenue,
     p_max_revenue: opts.maxRevenue,
     p_min_employees: opts.minEmployees,
-    p_okved_regex: okvedRegex,
+    p_okved_prefixes: opts.okvedPrefixes ?? [],
     p_limit: opts.limit,
   });
   if (error) throw new Error(`directory candidates failed: ${error.message}`);

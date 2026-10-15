@@ -147,6 +147,15 @@ export const INDUSTRY_GROUP_LABELS: Record<IndustryGroup, string> = {
   digital_agency: 'digital / event / маркетинг / агентства',
 };
 
+/**
+ * Целевые ОКВЭД по умолчанию (документ «ОКВЭДы ЦА», 14.10.2026): IT, digital, HR,
+ * логистика, производство, B2B-опт. Подставляются в форму запуска и в автодобор.
+ */
+export const DEFAULT_OKVED_PREFIXES = [
+  '62.01', '62.02', '63.11', '73.11', '70.22', '74.10', '78.1', '78.2', '78.3',
+  '52.29', '49.41', '52.10', '28', '27', '22', '46.6', '46.7',
+] as const;
+
 export const SOURCE_CODES = [
   'hh', 'direct', 'crm', 'exhibitors', 'contracts', 'tenders', 'growth', 'base', 'site_news', 'directory',
   'gis', 'ymaps', 'ymaps_catalog', 'revenue_growth', 'news',
@@ -242,9 +251,10 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
     min_revenue: minRevenue,
     max_revenue: Math.max(minRevenue, clampInt(raw.max_revenue, 3_000_000_000, 0, 1_000_000_000_000)),
     min_employees: clampInt(raw.min_employees, 10, 0, 100_000),
+    // Не задан — целевые ОКВЭД по умолчанию; явно пустой список — без отбора по ОКВЭД.
     okved_prefixes: Array.isArray(raw.okved_prefixes)
       ? Array.from(new Set(raw.okved_prefixes.map((s) => String(s).trim()).filter((s) => /^\d{2}(\.\d{1,2}){0,2}$/.test(s)))).slice(0, 100)
-      : [],
+      : [...DEFAULT_OKVED_PREFIXES],
     include_previously_exported: raw.include_previously_exported === true,
     sender_id: senderId,
     llm_budget_usd: sanitizeLlmBudgetUsd(raw.llm_budget_usd),
