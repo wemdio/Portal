@@ -1078,8 +1078,14 @@ export async function handleChat(
   // Квалификацию ведёт промпт кампании: сами передаём только прямую просьбу о
   // человеке, и она передаётся даже в ответ на вопрос о роли.
   const directOnly = oai.handoff_direct_request_only === true;
+  // Наше последнее сообщение — квалификационные вопросы: клиент мог ответить на
+  // часть, отделаться «да» или не ответить по сути. Кто из них готов к передаче,
+  // решает модель по промпту кампании (она видит ответ), а не код по слову
+  // «интерес»: иначе «да» после вопросов уводило лида менеджеру пустым.
+  const lastOurs = [...chatMessages].reverse().find((m) => m.role === 'assistant');
+  const awaitingQualification = Boolean(lastOurs && asksOpenQuestions(String(lastOurs.content ?? '')));
   let interested: boolean | null = null;
-  if (phrase && (!roleOnly || directOnly)) {
+  if (phrase && !awaitingQualification && (!roleOnly || directOnly)) {
     const check = await detectInterest(chatMessages, { directRequestOnly: directOnly });
     interested = check.interested;
     if (interested) {
