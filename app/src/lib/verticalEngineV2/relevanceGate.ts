@@ -8,7 +8,7 @@ import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, ge
 import { isVeProviderBillingError } from './collectionErrors';
 import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
-import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
+import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, hasVePaymentPointOnlyEvidence, isVeActivityEvidenceGuarded, type VeRelevanceDecision } from './relevanceDecision';
 import { fetchVeRelevanceEvidence, VE_RELEVANCE_EVIDENCE_MAX_MS, type VeRelevanceEvidence } from './relevanceEvidence';
 import { proxyPoolHealth } from '@/lib/enrich/proxyPool';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
@@ -20,6 +20,7 @@ import { triageVeCompanies, veTriageAvailable, veTriageReason, veTriageRubricMes
   veScopedTriageRubric, VE_TRIAGE_MAX_EXCERPTS, VE_TRIAGE_RUBRIC_VERSION, type VeTriageRubric } from './relevanceTriage';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
 import { needsVeStaffingCorrection, veHasStaffingOnlyRefusal, veStaffingCorrectionApplies, VE_STAFFING_CORRECTION_VERSION } from './staffingCorrection';
+import { veRelevanceActivityInput, veRelevanceSourceFields } from './relevanceReserve';
 export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
@@ -195,21 +196,7 @@ function groupsFor(rows: Array<Record<string, unknown>>, evidenceRows: Array<Rec
   return [...groups.values()];
 }
 function fieldsFor(group: Group): Fields {
-  // Preserve all source aliases in a stable priority order. A registry code
-  // inserted before `category` must not hide the company's actual activity.
-  const merged = (names: string[]) => [...new Set(names.flatMap((name) => group.rows.flatMap((row) =>
-    Object.entries(row).flatMap(([key, value]) => {
-      if (key.trim().toLowerCase() !== name || (typeof value !== 'string' && typeof value !== 'number')) return [];
-      if (typeof value === 'number' && !Number.isFinite(value)) return [];
-      const text = stripUnstorableJsonChars(String(value)).trim();
-      return text ? [text] : [];
-    }),
-  )))].join('\n');
-  const bounded = (names: string[], max: number) => sliceWholeChars(merged(names), 0, max);
-  return { company: bounded(['company', 'компания'], 240), website: bounded(['website', 'site', 'сайт'], 400),
-    category: bounded(['category', 'категория', 'okved', 'оквэд'], 600),
-    description: bounded(['description', 'описание', 'company_description'], 2000),
-    vacancy_title: bounded(['vacancy_title', 'vacancy', 'вакансия'], 400), website_text: '' };
+  return veRelevanceSourceFields(group.rows);
 }
 const normalized = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase();
 const activityQuote = (quote: string) => /\p{L}/u.test(quote
@@ -417,6 +404,7 @@ export async function findIrrelevantRows(input: {
   });
   type Entry = typeof entries[number];
   const current = new Map<Entry, VeRelevanceDecision>();
+  const activityGuarded = new Set<Entry>();
   const errorDecision = (reason: string, attempts = 0): VeRelevanceDecision => ({ version: 2, status: 'error', reason, evidence: [], context_hash: contextHash, review_attempts: attempts });
   const save = async (canYield = true) => {
     signal?.throwIfAborted();
@@ -431,6 +419,16 @@ export async function findIrrelevantRows(input: {
       decision.staffing_correction_version = VE_STAFFING_CORRECTION_VERSION;
     }
     current.set(entry, decision); if (entry.cacheable) checkpoint.verdicts[entry.key] = decision;
+  };
+  const guardActivityEvidence = (entry: Entry, decision: VeRelevanceDecision): boolean => {
+    if (!isVeActivityEvidenceGuarded(decision)
+      && !(decision.status === 'relevant' && hasVePaymentPointOnlyEvidence(decision))) return false;
+    activityGuarded.add(entry);
+    record(entry, { ...decision, status: 'needs_review', activity_evidence_guard: 'payment_point_category',
+      activity_evidence_guard_input: entry.key,
+      activity_evidence_guard_facts: veRelevanceActivityInput(entry.group.rows),
+      reason: 'Рубрика терминала или банкомата описывает точку обслуживания, но не подтверждает деятельность компании. Контакт сохранён в резерве.' });
+    return true;
   };
   /** Временный сбой поиска: компания в резерве с отложенным поиском, проход не «падает». */
   const deferSearch = (entry: Entry): VeRelevanceDecision => {
@@ -659,6 +657,7 @@ export async function findIrrelevantRows(input: {
   const sampledForReview = (entry: Entry) =>
     parseInt(relevanceHash(['rejection-review-sample-v1', entry.key]).slice(0, 8), 16) / 0xffffffff < REJECTION_REVIEW_SHARE;
   const stageDecision = (entry: Entry, decision: VeRelevanceDecision) => {
+    if (guardActivityEvidence(entry, decision)) return;
     if (decision.status !== 'relevant' && decision.status !== 'irrelevant') { record(entry, decision); return; }
     if (decision.status === 'irrelevant' && !sampledForReview(entry)) {
       // Отказ уже опирается на дословное противоречие с сайта. Принимаем его
@@ -681,7 +680,8 @@ export async function findIrrelevantRows(input: {
   };
   let deferredReviewBatches = 0;
   const reviewPending = async (candidates: Entry[], flush = true) => {
-    const pending = [...new Set(candidates)].filter((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]?.status === 'pending');
+    const pending = [...new Set(candidates)].filter((entry) => !activityGuarded.has(entry)
+      && checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]?.status === 'pending');
     if (!pending.length) deferredReviewBatches = 0;
     while (pending.length && !stopProviderCalls) {
       // Keep the established eight-company prompt/schema, but fill it across
@@ -1083,6 +1083,17 @@ export async function findIrrelevantRows(input: {
     if (!hasContext) return true;
     const cached = entry.cacheable ? checkpoint.verdicts[entry.key] : undefined;
     const website = checkpoint.website_evidence[entry.key];
+    if (!cached || cached.context_hash !== contextHash) {
+      const savedGuard = entry.group.rowIndices.map((index) => veRelevanceDecisionSchema.safeParse(input.rows[index]._ve_relevance))
+        .find((parsed) => parsed.success && parsed.data.context_hash === contextHash
+          && (isVeActivityEvidenceGuarded(parsed.data)
+            ? !parsed.data.activity_evidence_guard_input || parsed.data.activity_evidence_guard_input === entry.key
+            : parsed.data.status === 'relevant' && hasVePaymentPointOnlyEvidence(parsed.data)));
+      // A missing checkpoint is not permission to re-buy unsupported evidence.
+      // Once guarded, changed actual facts get a different input key and can
+      // be classified normally; an unchanged row never repeats paid work.
+      if (savedGuard?.success && guardActivityEvidence(entry, savedGuard.data)) { recoveredRepair = true; return false; }
+    }
     if (!audienceScope && (!cached || cached.context_hash !== contextHash) && veStaffingCorrectionApplies(input)) {
       const savedHint = entry.group.rowIndices.map((index) => veRelevanceDecisionSchema.safeParse(input.rows[index]._ve_relevance))
         .find((parsed) => parsed.success && (needsVeStaffingCorrection(parsed.data, input)
@@ -1101,8 +1112,13 @@ export async function findIrrelevantRows(input: {
     }
     if (cached && cached.context_hash === contextHash) {
       entry.attempts = Math.max(entry.attempts, cached.review_attempts ?? 0, website?.review_attempts ?? 0);
+      // Even a missing/interrupted semantic receipt cannot buy a new review of
+      // the same unsupported rubric. Keep all receipts unchanged for audit.
+      if (guardActivityEvidence(entry, cached)) { recoveredRepair = true; return false; }
       const reviewHash = checkpoint.semantic_review_refs[entry.key];
       const semantic = checkpoint.semantic_reviews[reviewHash];
+      if (cached.status === 'error' && semantic?.company_key === entry.key
+        && guardActivityEvidence(entry, semantic.proposal)) { recoveredRepair = true; return false; }
       // Also retain the no-acquisition boundary of a previous free policy
       // check (missing receipt, unusable evidence or exhausted correction cap).
       if (cached.staffing_correction_version === VE_STAFFING_CORRECTION_VERSION
@@ -1276,7 +1292,7 @@ export async function findIrrelevantRows(input: {
     // deciding which companies need website evidence.
     await reviewPending(entries);
     const review = entries.filter((entry) => {
-      if (staffingOnly.has(entry)) return false;
+      if (staffingOnly.has(entry) || activityGuarded.has(entry)) return false;
       if (!entry.fields.website && !entry.identity
         && !entry.group.rows.some((row) => rowText(row, ['address', 'адрес']) && rowText(row, ['company', 'компания']))) return false;
       const cached = checkpoint.website_evidence[entry.key];
@@ -1443,7 +1459,7 @@ export async function findIrrelevantRows(input: {
   for (const entry of entries) {
     let decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
     const website = checkpoint.website_evidence[entry.key];
-    if (website && searchAttemptsExhausted(website)) {
+    if (!activityGuarded.has(entry) && website && searchAttemptsExhausted(website)) {
       // A consumed retry budget is a company-local unresolved check, not an
       // outage of the whole base. Do not repay it or admit the company.
       decision = { ...errorDecision('Сервис поиска не ответил после повторных попыток; контакт сохранён в резерве.',

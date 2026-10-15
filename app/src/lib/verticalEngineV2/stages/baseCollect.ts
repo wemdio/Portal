@@ -90,6 +90,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { isTransientDbError } from '@/lib/db/transientError';
 import { enqueueVePreparationChild, type VePreparationChildTable } from '../preparationChildren';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
@@ -632,6 +633,8 @@ export interface VeCollectTaskState {
   child_job_id: string | null;
   /** Direct catalog progress; saved together with harvest, never a live parser. */
   catalog?: VeYandexCatalogCheckpoint;
+  /** Completed free pages in the current candidate batch; survives a restart. */
+  catalog_pages_read?: number;
   /** Exhaustion in the existing-stock phase covers only site/email lanes. */
   existing_contacts_only?: true;
   /** Terminal legacy parser retained for diagnostics after explicit continuation. */
@@ -768,6 +771,8 @@ export interface VeCollectInfo {
   preview_pipeline?: {
     version: 1;
     revision: number;
+    /** Identity of one CAS write, retained across an ambiguous response/retry. */
+    checkpoint_id?: string;
     batches: Array<{ id: string; rows: VeUnifiedRow[]; dispatched_at: string; inserted?: boolean }>;
     active_batch_id?: string;
     completed_batches?: number;
@@ -1004,6 +1009,9 @@ function recordProjectExclusionCoverage(ctx: VeStageContext, rows: Array<Record<
     mode: 'existing_identity', blocked_rows: blockedCount, unidentified_rows: unidentifiedCount };
 }
 
+/** A failed/unknown save must not stamp its error over a newer base snapshot. */
+class VePreviewCheckpointSaveError extends VeRelevanceCheckpointError {}
+
 async function persistCollectInfo(
   ctx: VeStageContext,
   baseId: string,
@@ -1015,16 +1023,74 @@ async function persistCollectInfo(
   if (info.preview_pipeline) {
     const revision = info.preview_pipeline.revision;
     if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Invalid preview checkpoint revision');
-    const next = { ...stored, preview_pipeline: { ...info.preview_pipeline, revision: revision + 1 } };
-    const { data, error } = await ctx.supabase.from('ve_bases')
-      .update({ ...patch, collect_info: next, updated_at: new Date().toISOString() })
-      .eq('id', baseId).eq('status', 'collecting')
-      .eq('collect_info->preview_pipeline->>revision', String(revision)).select('id').maybeSingle();
-    if (error) throw new VeRelevanceCheckpointError(`Preview checkpoint save: ${error.message}`);
-    if (!data) throw new VePreviewCheckpointConflict('Preview checkpoint changed; stale writer stopped');
-    info.preview_pipeline.revision = revision + 1;
-    ctx.onCheckpoint?.();
-    return;
+    const checkpointId = randomUUID();
+    const next = { ...stored, preview_pipeline: { ...info.preview_pipeline, revision: revision + 1, checkpoint_id: checkpointId } };
+    const snapshot = { ...patch, collect_info: next, updated_at: new Date().toISOString() };
+    let failure: unknown;
+    const saveError = (error: unknown) => new VePreviewCheckpointSaveError(`Preview checkpoint save: ${
+      String((error as { message?: unknown })?.message ?? error)}`);
+    const conflict = () => new VePreviewCheckpointConflict('Preview checkpoint changed; stale writer stopped');
+    // null means the read itself is unknown. Never infer a commit from a
+    // matching revision alone, or load the multi-megabyte base to confirm it.
+    const readId = async (query: PromiseLike<{ data: unknown; error: unknown; status?: number }>): Promise<boolean | null> => {
+      let response;
+      try { response = await query; } catch (error) { response = { data: null, error }; }
+      ctx.signal?.throwIfAborted();
+      if (!response.error) return !!response.data;
+      if (!isTransientDbError(response.error, response.status)) throw saveError(response.error);
+      failure ??= response.error;
+      return null;
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      ctx.signal?.throwIfAborted();
+      let response;
+      try {
+        response = await ctx.supabase.from('ve_bases').update(snapshot)
+          .eq('id', baseId).eq('status', 'collecting')
+          .eq('collect_info->preview_pipeline->>revision', String(revision)).select('id').maybeSingle();
+      } catch (error) { response = { data: null, error }; }
+      ctx.signal?.throwIfAborted();
+      if (response.error) {
+        if (/VE_JOB_LEASE_LOST|VE_PREPARATION_PAUSED/.test(String((response.error as { message?: unknown }).message))) throw conflict();
+        if (!isTransientDbError(response.error, response.status)) throw saveError(response.error);
+        failure = response.error;
+      } else if (!response.data && attempt === 0) throw conflict();
+
+      let confirmed = !!response.data && !response.error;
+      if (attempt > 0 || !confirmed) {
+        const job = ctx.parentJob;
+        if (!job) throw conflict();
+        let claim = ctx.supabase.from('ve_jobs').select('id').eq('id', job.id).eq('status', 'running');
+        claim = job.started_at == null ? claim.is('started_at', null) : claim.eq('started_at', job.started_at);
+        const owned = await readId(claim.maybeSingle());
+        if (owned === false) throw conflict();
+        confirmed = confirmed && owned === true;
+        if (!confirmed && owned === true) {
+          const committed = await readId(ctx.supabase.from('ve_bases').select('id')
+            .eq('id', baseId).eq('status', String(patch.status ?? 'collecting'))
+            .eq('collect_info->preview_pipeline->>revision', String(revision + 1))
+            .eq('collect_info->preview_pipeline->>checkpoint_id', checkpointId).maybeSingle());
+          confirmed = committed === true;
+          if (committed === false && await readId(ctx.supabase.from('ve_bases').select('id')
+            .eq('id', baseId).eq('status', 'collecting')
+            .eq('collect_info->preview_pipeline->>revision', String(revision)).maybeSingle()) === false) throw conflict();
+        }
+      }
+      if (confirmed) {
+        ctx.signal?.throwIfAborted();
+        info.preview_pipeline.revision = revision + 1;
+        info.preview_pipeline.checkpoint_id = checkpointId;
+        ctx.onCheckpoint?.();
+        return;
+      }
+      if (attempt < 2) await new Promise<void>((resolve, reject) => {
+        const onAbort = () => { clearTimeout(timer); ctx.signal?.removeEventListener('abort', onAbort); reject(ctx.signal!.reason); };
+        const timer = setTimeout(() => { ctx.signal?.removeEventListener('abort', onAbort); resolve(); }, 250 * 2 ** attempt);
+        ctx.signal?.addEventListener('abort', onAbort, { once: true });
+        if (ctx.signal?.aborted) onAbort();
+      });
+    }
+    throw saveError(failure);
   }
   const { error } = await ctx.supabase
     .from('ve_bases')
@@ -1929,6 +1995,7 @@ async function dispatchTask(
   audienceContext?: string,
   clinicProfile?: VeClinicSourceProfile | null,
   mediaProfile?: VeMediaSourceProfile | null,
+  savedSourceInfo?: Pick<VeCollectInfo, 'source_contact_recovery' | 'search_policy'>,
 ): Promise<void> {
   const { task } = state;
 
@@ -1936,6 +2003,7 @@ async function dispatchTask(
     if (limit < 1) { state.status = 'done'; return; }
     if (!task.maps_query?.queries?.length) throw new Error('yandex_maps: в задаче нет maps_query.queries');
     if (!state.catalog) {
+      delete state.catalog_pages_read;
       try {
         const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
           context: audienceContext ?? task.rationale,
@@ -1979,29 +2047,90 @@ async function dispatchTask(
     const excluded = await getExcludedKeys();
     state.harvest ??= [];
     state.child_job_id = null;
-    // Bound each worker tick; a heavily consumed catalog continues from the
-    // saved key, without re-reading the first pages or starting a parser.
-    for (let page = 0; page < 4 && state.harvest.length < limit && !state.exhausted; page++) {
+    const existingOnly = existingContactsOnly || Boolean(task.widened);
+    // Older pending checkpoints did not record their page count. A retained
+    // harvest proves at least one page has already consumed this batch budget.
+    if (existingOnly && state.catalog_pages_read === undefined) state.catalog_pages_read = state.harvest.length ? 1 : 0;
+    if (existingOnly && (!Number.isSafeInteger(state.catalog_pages_read) || state.catalog_pages_read! < 0 || state.catalog_pages_read! > 4)) {
+      throw new VeRelevanceCheckpointError('Invalid catalog page budget checkpoint');
+    }
+    const recoverCatalogContacts = async (rows: VeUnifiedRow[]) => {
+      if (!existingOnly || !rows.length) return rows;
+      const restored = applyVeSourceContacts(rows, savedSourceInfo?.source_contact_recovery);
+      const hints = await readVeCandidateHints(restored, ctx.supabase, ctx.signal);
+      const enriched = prioritizeVeCandidates(restored, hints, '', Date.now(), true);
+      // A warm checkpoint can already hold these observations in deferred.
+      // Carry the same recovered identity there so a later phase cannot buy
+      // discovery again for the original, still-empty representation.
+      if (savedSourceInfo?.search_policy) {
+        const replacements = new Map(rows.flatMap((row, index) =>
+          row.website !== enriched[index].website || row.email !== enriched[index].email
+            || row.source_detail !== enriched[index].source_detail
+            ? [[veAcquisitionReceipt(row), enriched[index]] as const] : []));
+        if (replacements.size) savedSourceInfo.search_policy.deferred_rows = dedupUnifiedRows(
+          savedSourceInfo.search_policy.deferred_rows.map((row) => {
+            const next = replacements.get(veAcquisitionReceipt(row));
+            return next ? { ...row, website: next.website, email: next.email, source_detail: next.source_detail } : row;
+          }),
+        );
+      }
+      return enriched;
+    };
+    const deferCatalogRows = (rows: VeUnifiedRow[]) => {
+      if (!rows.length || !savedSourceInfo?.search_policy) return;
+      savedSourceInfo.search_policy.deferred_rows = dedupUnifiedRows([
+        ...savedSourceInfo.search_policy.deferred_rows,
+        ...rows.map((row) => ({ ...row, _ve_source_strategy: candidateSourceKey(row) ?? veSourceStrategyKey(task) })),
+      ]);
+    };
+    // Old pending checkpoints may contain a full raw page. Count only usable
+    // rows, but retain the original observations for a future permitted phase.
+    if (existingOnly && state.harvest.length) {
+      const raw = state.harvest;
+      const restored = await recoverCatalogContacts(raw);
+      deferCatalogRows(raw.filter((_, index) => !hasExistingSourceContact(restored[index])));
+      state.harvest = dedupUnifiedRows(restored.flatMap((row) => {
+        if (!hasExistingSourceContact(row) || !allowedByProject(ctx, row)) return [];
+        const kept = pruneBaseRowAgainstExclusion(excluded, row);
+        return kept && hasExistingSourceContact(kept) ? [kept] : [];
+      }));
+      state.rows = state.harvest.length;
+    }
+    // The existing four-page bound also covers the whole candidate batch.
+    // Otherwise a sparse catalog could grow deferred JSON indefinitely while
+    // waiting to fill 100 usable rows across an unlimited number of ticks.
+    for (let page = existingOnly ? state.catalog_pages_read! : 0;
+      page < 4 && state.harvest.length < limit && !state.exhausted; page++) {
       const rows = await readVeYandexCatalogPage(ctx.supabase, state.catalog,
-        Math.min(500, limit - state.harvest.length), ctx.signal);
+        Math.min(500, existingOnly ? limit : limit - state.harvest.length), ctx.signal);
       if (!rows.length) state.exhausted = true;
-      for (const row of rows) {
+      const raw = rows.map(mapYandexRow);
+      const restored = await recoverCatalogContacts(raw);
+      const deferred: VeUnifiedRow[] = [];
+      for (const [index, row] of rows.entries()) {
         if (!row.yandex_id || row.yandex_id === state.catalog.after) throw new Error('yandex_maps: каталог не продвинул курсор');
-        const source = mapYandexRow(row);
+        const source = restored[index];
         if (!allowedByProject(ctx, source)) { state.catalog.after = row.yandex_id; continue; }
         const mapped = pruneBaseRowAgainstExclusion(excluded, source);
         if (!mapped && !excludedByOtherBases(excluded, source)) state.already_seen_during_fetch = (state.already_seen_during_fetch ?? 0) + 1;
         else if (!mapped || !normalizeCompanyForDedup(mapped.company)) state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + 1;
-        else if (keepWidenedSourceRow(task, mapped)) state.harvest.push(mapped);
+        else if (existingOnly && !hasExistingSourceContact(mapped)) deferred.push(raw[index]);
+        else if (existingOnly) state.harvest = dedupUnifiedRows([...state.harvest, mapped]);
+        else state.harvest.push(mapped);
         state.catalog.after = row.yandex_id;
+        // The unconsumed suffix is read again from this exact key. It must
+        // never be skipped when a free page fills the candidate batch early.
+        if (state.harvest.length >= limit) break;
       }
+      deferCatalogRows(deferred);
+      if (existingOnly) state.catalog_pages_read = page + 1;
       state.harvest = dedupUnifiedRows(state.harvest);
       state.rows = state.harvest.length;
-      state.status = state.exhausted || state.rows >= limit ? 'done' : 'pending';
+      state.status = state.exhausted || state.rows >= limit || (existingOnly && state.catalog_pages_read! >= 4) ? 'done' : 'pending';
       state.note = state.exhausted ? 'готовый каталог Яндекс Карт исчерпан' : 'выборка из готового каталога Яндекс Карт';
       await save(); // Cursor and rows commit atomically, including an empty page.
     }
-    if (state.exhausted || state.harvest.length >= limit) state.status = 'done';
+    if (state.exhausted || state.harvest.length >= limit || (existingOnly && state.catalog_pages_read! >= 4)) state.status = 'done';
     return;
   }
 
@@ -2946,9 +3075,13 @@ function veTaskAcquisitionDeferred(info: VeCollectInfo, task: VeCollectTaskState
   return !!info.adaptive_collection && !!veAdaptiveSourceDeferred(info.adaptive_collection, veSourceStrategyKey(task.task));
 }
 function veRowAcquisitionAllowed(info: VeCollectInfo, row: VeUnifiedRow): boolean {
+  const key = candidateSourceKey(row);
+  // Widened slices never buy missing-site discovery. Keeping their raw rows
+  // in the reserve must not admit them through the later paid-phase path.
+  if (!hasExistingSourceContact(row) && key
+    && info.tasks?.some((task) => task.task.widened && veSourceStrategyKey(task.task) === key)) return false;
   const policy = info.adaptive_collection;
   if (!policy) return true;
-  const key = candidateSourceKey(row);
   if (key) return !veAdaptiveSourceDeferred(policy, key);
   // Old deferred source rows lack attribution. Keep them, but do not buy a
   // new lookup that could silently reopen a held strategy. Saved reviews and
@@ -4510,7 +4643,7 @@ async function completeTargetRound(args: {
   // Форма отпечатка изменилась, поэтому после раскатки каждая база делает ровно
   // один лишний проход и только потом снова защёлкивается.
   const reviewSignature = automaticBatch?.rows.length
-    ? relevanceHash(veSavedReviewSignature(automaticBatch.rows, { ...reviewScope, triage: triageEnabled }))
+    ? relevanceHash(veSavedReviewSignature(automaticBatch.rows, { ...reviewScope, triage: triageEnabled, source: automaticBatch.evidenceRows }))
     : null;
   const previousReviewSignature = info.relevance_review_progress?.signature;
   const stalledReview = reviewSignature !== null && previousReviewSignature === reviewSignature;
@@ -5217,7 +5350,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           state.harvest = []; state.rows = 0;
         }
         state.status = 'pending';
-        if (state.catalog) { state.harvest = []; state.rows = 0; }
+        if (state.catalog) { state.harvest = []; state.rows = 0; delete state.catalog_pages_read; }
       }
     }
   }
@@ -5241,7 +5374,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         info.audience_snapshot ? veAudienceNicheProfile(info.audience_snapshot.hypotheses) ?? undefined : info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'),
         clinicProfileForInfo(info, market, base.hypothesis_id),
         base.hypothesis_id && !info.audience_snapshot?.hypotheses.some((h) => h.audience_scope)
-          ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null);
+          ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null, info);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -5428,7 +5561,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const hasDispatchedConstruct = info.construct?.status === 'dispatched' && Boolean(info.construct.bc_job_id);
 
   if (merged.length === 0 && !hasDispatchedConstruct && target && info.adaptive_collection && !info.adaptive_collection.pending
-    && !info.preview_pipeline?.error && !failed.length && target.ready_rows < target.ready_target) {
+    && !info.preview_pipeline?.error && !failed.length && waiting.length === 0 && target.ready_rows < target.ready_target) {
     const nextSources = tasks.filter((task) => task.status === 'pending' && !veTaskAcquisitionDeferred(info, task)
       && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source
       && !veAdaptiveSourceDry(info.adaptive_collection!.completed, veSourceStrategyKey(task.task)));
@@ -5897,6 +6030,10 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     // Do not reread the winner's revision and stamp our obsolete error over it.
     // The worker also leaves the winner's job lifecycle untouched.
     if (error instanceof VePreviewCheckpointConflict) throw error;
+    // The last CAS may have committed, or another writer may now own the
+    // base. Keep the normal job failure policy without rereading and marking
+    // that newer checkpoint as failed on behalf of this obsolete save.
+    if (error instanceof VePreviewCheckpointSaveError) throw error;
     // The generic worker persists Retry-After. A waiting job must not leave
     // the base's progress looking like a terminal preparation failure.
     if (error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error) || isVeTransientCatalogError(error)) throw error;

@@ -37,6 +37,23 @@ if (typeof dns.setDefaultResultOrder === 'function') {
   }
 }
 
+/**
+ * A statement_timeout (57014) that cut a `lock table` statement, i.e. the lock phase of
+ * a migration that locks its tables up front under `set local statement_timeout` (30s
+ * over all its lock waits, 20261015_0032..0034). PL/pgSQL EXECUTE names the interrupted
+ * statement in the first (innermost) line of the error context:
+ *   SQL statement "lock table public.x in access exclusive mode"
+ * Any other 57014 is not a lock wait: a timeout in a probe, a data pass or DDL repeats
+ * on the same data, and a retry would only take every lock again and run into the same
+ * cap. A manual cancel (pg_cancel_backend, "due to user request") is not a timeout.
+ */
+function isLockPhaseStatementTimeout(err) {
+  if (!err || err.code !== '57014') return false;
+  if (!String(err.message || '').includes('statement timeout')) return false;
+  const innermost = String(err.where || '').split('\n', 1)[0];
+  return /"lock table .+ in [a-z ]+ mode"$/i.test(innermost);
+}
+
 function isRetryableDbError(err) {
   const msg = (err && err.message) ? String(err.message) : '';
   const code = err && err.code;
@@ -45,7 +62,13 @@ function isRetryableDbError(err) {
     code === 'ETIMEDOUT' ||
     code === 'ENOTFOUND' ||
     code === 'ENETUNREACH' ||
+    // Lock waits only. A transactional file rolls back whole and a no-transaction file
+    // is idempotent by rule, so a new attempt starts clean: 55P03 — lock_timeout;
+    // 40P01 — this session was picked as the deadlock victim; a statement_timeout
+    // only when it cut a lock phase (see isLockPhaseStatementTimeout).
     code === '55P03' ||
+    code === '40P01' ||
+    isLockPhaseStatementTimeout(err) ||
     msg.includes('Connection terminated') ||
     msg.includes('MaxClientsInSessionMode') ||
     msg.includes('max clients reached') ||

@@ -1328,6 +1328,152 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(mockFindIrrelevantRows.mock.calls.map(([input]) => input.rows.map((row: VeUnifiedRow) => row.email)))
       .toEqual([['ready@first.test'], ['next@next.test']]);
     expect(db.inserts.filter((entry) => entry.table === 've_jobs')).toEqual([]);
+
+    // Joynio: retry only the checkpoint of an already paid/completed batch.
+    // An ambiguous commit must not rerun classification or create a new child.
+    const recoveryInfo: VeCollectInfo = { ...collectInfo([
+      unifiedRow({ company: 'Clinic One', website: 'one.test', email: 'one@one.test' }),
+      unifiedRow({ company: 'Clinic Two', website: 'two.test', email: 'two@two.test' }),
+    ]), collection_mode: 'preview', adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
+      target_progress: createCollectionTarget('preview'), preview_pipeline: { version: 1, revision: 0, batches: [] } };
+    recoveryInfo.tasks![0].exhausted = true;
+    const recoveryDb = seed(recoveryInfo);
+    await runBaseCollectStage(makeJob(), { supabase: recoveryDb as unknown as SupabaseClient });
+    const recoveryChild = recoveryDb.getRows('base_constructor_jobs')[0];
+    const recoveryGrid = recoveryChild.data as string[][];
+    await recoveryDb.from('base_constructor_jobs').update({ status: 'completed', data: [
+      [...recoveryGrid[0], 'Email Статус'], ...recoveryGrid.slice(1).map((row) => [...row, 'ok']),
+    ] }).eq('id', recoveryChild.id);
+    for (const mode of ['gateway', 'lost_response', 'lost_read', 'lost_final', 'outage', 'unknown_exhaustion', 'permanent',
+      'conflict', 'paused', 'new_claim', 'aborted', 'abort_backoff'] as const) {
+      const db = seed(structuredClone(recoveryInfo), {
+        ve_bases: structuredClone(recoveryDb.getRows('ve_bases')),
+        base_constructor_jobs: structuredClone(recoveryDb.getRows('base_constructor_jobs')),
+      });
+      const originalFrom = db.from.bind(db);
+      const controller = new AbortController();
+      const writes: Record<string, unknown>[] = [];
+      let lostRead = false;
+      let winner: VeCollectInfo | undefined;
+      let errorSnapshots = 0;
+      db.from = (table) => {
+        const builder = originalFrom(table);
+        if (table !== 've_bases') return builder;
+        let checkpoint = false;
+        let projection = '';
+        const update = builder.update.bind(builder), select = builder.select.bind(builder);
+        builder.update = (patch) => {
+          checkpoint = patch.row_count === 2 && Array.isArray(patch.data)
+            && (mode === 'lost_final' ? patch.status === 'analyzing' : patch.status === undefined);
+          if (checkpoint) writes.push(structuredClone(patch));
+          return update(patch);
+        };
+        builder.select = (columns, options) => {
+          projection = columns ?? '*';
+          if (writes.length && projection === 'status, collect_info') errorSnapshots++;
+          return select(columns, options);
+        };
+        const single = builder.maybeSingle.bind(builder);
+        builder.maybeSingle = async () => {
+          if (!checkpoint && writes.length && projection === 'id'
+            && ((mode === 'lost_read' && !lostRead) || mode === 'unknown_exhaustion')) {
+            lostRead = true;
+            return { data: null, error: { message: 'Bad Gateway' }, status: 502 } as unknown as Awaited<ReturnType<typeof single>>;
+          }
+          if (!checkpoint || (writes.length > 1 && !['outage', 'unknown_exhaustion'].includes(mode))) return single();
+          if (['lost_response', 'lost_read', 'lost_final'].includes(mode)) await single();
+          if (mode === 'unknown_exhaustion') {
+            if (writes.length === 1) await single();
+            if (writes.length === 3) {
+              winner = structuredClone(db.getRows('ve_bases')[0].collect_info) as VeCollectInfo;
+              winner.preview_pipeline!.revision++;
+              winner.preview_pipeline!.checkpoint_id = 'newer-writer';
+              await originalFrom('ve_bases').update({ collect_info: winner }).eq('id', 'b1');
+            }
+          }
+          if (mode === 'conflict') {
+            const winner = structuredClone(db.getRows('ve_bases')[0].collect_info) as VeCollectInfo;
+            winner.preview_pipeline!.revision++;
+            await originalFrom('ve_bases').update({ collect_info: winner }).eq('id', 'b1');
+          }
+          if (mode === 'paused' || mode === 'new_claim') await originalFrom('ve_jobs')
+            .update(mode === 'paused' ? { status: 'cancelled' } : { started_at: '2026-08-30T01:00:00Z' }).eq('id', makeJob().id);
+          if (mode === 'aborted') controller.abort(new Error('checkpoint cancelled'));
+          if (mode === 'abort_backoff') setTimeout(() => controller.abort(new Error('checkpoint cancelled')), 10);
+          return { data: null, error: mode === 'permanent'
+            ? { message: 'permission denied for table ve_bases', code: '42501' }
+            : { message: 'An invalid response was received from upstream server' }, status: mode === 'permanent' ? 403 : 502,
+          } as unknown as Awaited<ReturnType<typeof single>>;
+        };
+        return builder;
+      };
+      const gateCalls = mockFindIrrelevantRows.mock.calls.length;
+      const llmCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
+      const sourceCalls = jest.mocked(searchRows).mock.calls.length;
+      jest.useFakeTimers();
+      try {
+        const observed = runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient, signal: controller.signal })
+          .then((value) => ({ value, error: null }), (error: Error) => ({ value: null, error }));
+        await jest.advanceTimersByTimeAsync(5_000);
+        const outcome = await observed;
+        const succeeds = ['gateway', 'lost_response', 'lost_read', 'lost_final'].includes(mode);
+        if (succeeds) {
+          expect({ mode, error: outcome.error }).toEqual({ mode, error: null });
+          expect(db.getRows('ve_bases')[0]).toMatchObject({ row_count: 2, status: 'analyzing' });
+        } else if (['conflict', 'paused', 'new_claim'].includes(mode)) {
+          expect(outcome.error).toBeInstanceOf(VePreviewCheckpointConflict);
+          expect(db.getRows('ve_bases')[0]).toMatchObject({ row_count: 0, status: 'collecting' });
+          expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.status).not.toBe('error');
+        } else expect(outcome.error?.message).toContain(mode.startsWith('abort') ? 'checkpoint cancelled'
+          : mode === 'permanent' ? 'permission denied' : 'invalid response');
+        expect(writes).toHaveLength(['outage', 'unknown_exhaustion'].includes(mode) ? 3 : ['gateway', 'lost_read'].includes(mode) ? 2 : 1);
+        expect(new Set(writes.map((patch) => JSON.stringify(patch))).size).toBe(1);
+        expect(errorSnapshots).toBe(0);
+        if (mode === 'unknown_exhaustion') {
+          expect(db.getRows('ve_bases')[0]).toMatchObject({ row_count: 2, status: 'collecting' });
+          expect(db.getRows('ve_bases')[0].collect_info).toEqual(winner);
+        }
+        expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(gateCalls + 1);
+        // Normal name cleanup starts only after a confirmed checkpoint.
+        expect(callLLMWithSchema).toHaveBeenCalledTimes(llmCalls + Number(succeeds));
+        expect(searchRows).toHaveBeenCalledTimes(sourceCalls);
+        expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+        if (['outage', 'unknown_exhaustion'].includes(mode)) {
+          const saved = structuredClone(db.getRows('ve_bases')[0].collect_info) as VeCollectInfo;
+          // A page/constructor save can fail while durable progress is still
+          // collecting; the worker records failure only on the base/job.
+          saved.target_progress!.status = 'collecting';
+          const failed = { ...db.getRows('ve_bases')[0], collect_info: saved, status: 'failed', error: outcome.error!.message };
+          // The worker can exhaust its free DB-interruption retries with the
+          // same untouched progress; continuation must retain that pipeline too.
+          for (const reason of [failed.error,
+            'Preview checkpoint save: VE2 database PATCH request timeout after 120000ms (response body stalled)',
+            'Preview checkpoint save: VE2 database PATCH request connection lost: socket ended']) {
+            expect(previewRecoveryKind({ ...failed, error: reason })).toBe('pipeline');
+            expect(previewRecoveryKind({ ...failed, error: reason,
+              collect_info: { ...saved, preview_pipeline: undefined } })).toBeNull();
+            expect(previewRecoveryKind({ ...failed, error: reason, collect_info: { ...saved,
+              target_checkpoint: { ...saved.target_checkpoint, completed_round: 999 } } })).toBeNull();
+          }
+          for (const reason of ['Preview checkpoint save: permission denied', 'Preview checkpoint save: invalid payload',
+            'An invalid response was received from upstream server', 'VE2 database PATCH request timeout after 120000ms',
+            'VE2 database PATCH request connection lost: socket ended', 'Preview checkpoint save: provider timeout',
+            'Preview checkpoint save: VE2 job aborted']) expect(previewRecoveryKind({ ...failed, error: reason })).toBeNull();
+          await originalFrom('ve_bases').update({ status: 'failed', error: failed.error, collect_info: saved }).eq('id', 'b1');
+          await originalFrom('ve_jobs').update({ status: 'failed' }).eq('id', makeJob().id);
+          for (let click = 0; click < 2; click++) await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, {
+            projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name, hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000,
+          })).resolves.toMatchObject({ ok: true, base: { id: 'b1' } });
+          expect(db.getRows('ve_bases')).toHaveLength(1);
+          const resumed = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+          expect(resumed.target_checkpoint).toEqual(saved.target_checkpoint);
+          expect(resumed.target_progress?.candidates_processed).toBe(saved.target_progress?.candidates_processed);
+          expect(resumed.preview_pipeline?.batches).toEqual(saved.preview_pipeline?.batches);
+          expect(db.getRows('ve_jobs').filter((job) => job.status === 'pending')).toHaveLength(1);
+          expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+        }
+      } finally { jest.useRealTimers(); }
+    }
   });
 
   it('holds paused supply without blocking manual work, then resumes safely and records processing errors', async () => {
@@ -3899,6 +4045,119 @@ describe('base_collect: план кончился раньше цели', () => 
     expect((child.data as string[][]).slice(1).map((row) => row[0]).sort())
       .toEqual(['Мясная лавка Почтовая', 'Мясокомбинат Ромашка']);
     expect(fetchVeRelevanceEvidence).not.toHaveBeenCalledWith('', expect.anything());
+
+    // Sparse existing-only pages fill a batch within the existing four-page
+    // allowance. A restart cannot reset it or grow deferred JSON indefinitely.
+    for (const mode of ['bounded_batch', 'restart', 'old_pending_harvest', 'full_before_page_end', 'no_contacts', 'zero_streak'] as const) {
+      const noContacts = mode === 'no_contacts' || mode === 'zero_streak';
+      const contactEvery = mode === 'full_before_page_end' ? 3 : 5;
+      const sparseTask = { source: 'yandex_maps' as const, rationale: 'Existing catalog only',
+        maps_query: { queries: ['Мясокомбинаты'], geo: 'Россия' } };
+      const catalogRows = Array.from({ length: mode === 'zero_streak' ? 6_000 : 600 }, (_, index) => ({ yandex_id: String(index + 1),
+        name: `Мясокомбинат Каталожный ${index + 1}`, address: `Москва, Заводская улица, ${index + 1}`,
+        categories: 'Мясокомбинаты', ...(!noContacts && index % contactEvery === contactEvery - 1
+          ? { website: `catalog-${index + 1}.test`, email: `info@catalog-${index + 1}.test` } : {}) }));
+      const raw = catalogRows.map((row) => unifiedRow({ company: row.name, address: row.address,
+        category: row.categories, website: row.website ?? '', email: row.email ?? '', source_detail: 'яндекс.карты' }));
+      const sparseInfo = exhaustedInfo(sparseTask, {
+        cost_policy: { version: 1, website_discovery: 'existing_only' },
+        search_policy: { version: 1, phase: 'existing', deferred_rows: [] },
+        adaptive_collection: { ...newVeAdaptiveCollection(), active_source: veSourceStrategyKey(sparseTask) },
+        tasks: [{ source: 'yandex_maps', status: 'pending', child_job_id: null, task: sparseTask,
+          rows: mode === 'old_pending_harvest' ? 100 : 0,
+          harvest: mode === 'old_pending_harvest' ? raw.slice(0, 100) : [],
+          catalog: { version: 1, filters: { categories: ['Мясокомбинаты'], countries: ['Россия'] },
+            ...(mode === 'old_pending_harvest' ? { after: '100' } : {}) } },
+        { source: 'companies_directory', status: 'pending', child_job_id: null, rows: 0, task: MEAT_TASK, harvest: [] }],
+      });
+      if (mode === 'zero_streak') {
+        sparseInfo.tasks = sparseInfo.tasks!.slice(0, 1);
+        sparseInfo.adaptive_collection!.replan_attempts = 2;
+        sparseInfo.adaptive_collection!.widenings = 2;
+      }
+      sparseInfo.plan = { tasks: sparseInfo.tasks!.map((task) => task.task) };
+      const sparseDb = seedBase(sparseInfo, MEAT, {}, [{ id: 'already-owned-company', project_id: PROJECT.id,
+        hypothesis_id: 'another-hypothesis', status: 'analyzed',
+        data: [{ ...raw[1], website: 'https://catalog-owned.test', email: 'info@catalog-owned.test' }] }]);
+      // A free, exact company/address fact must still recover the first site
+      // before that raw company is put into the deferred reserve.
+      if (!noContacts) await sparseDb.from('ve_company_fact_pages').insert({ company_key: veCompanyFactKey(raw[0]), reader_version: 1,
+        observed_at: new Date().toISOString(), expires_at: new Date(Date.now() + VE_COMPANY_FACT_TTL_MS).toISOString(),
+        website: 'https://catalog-recovered.test', facts: 'Мясокомбинат', inns: [], owner_inns: [] });
+      if (!noContacts) await sparseDb.from('ve_company_fact_pages').insert({ company_key: veCompanyFactKey(raw[1]), reader_version: 1,
+        observed_at: new Date().toISOString(), expires_at: new Date(Date.now() + VE_COMPANY_FACT_TTL_MS).toISOString(),
+        website: 'https://catalog-owned.test', facts: 'Мясокомбинат', inns: [], owner_inns: [] });
+      const reads: Record<string, unknown>[] = [];
+      const sparseRpc = sparseDb.rpc;
+      sparseDb.rpc = ((name: string, params: Record<string, unknown>) => {
+        if (name !== 'yandex_maps_catalog_search') return sparseRpc(name, params);
+        reads.push(params);
+        const operation = Promise.resolve({ data: catalogRows.slice(Number(params.p_after ?? 0),
+          Number(params.p_after ?? 0) + Number(params.p_limit)), error: null });
+        return Object.assign(operation, { abortSignal: () => operation });
+      }) as typeof sparseDb.rpc;
+      jest.mocked(callLLMWithSchema).mockClear();
+      jest.mocked(fetchVeRelevanceEvidence).mockClear();
+      if (mode === 'restart') {
+        await expect(runBaseCollectStage(makeJob(), { supabase: sparseDb as unknown as SupabaseClient,
+          onCheckpoint: () => {
+            const saved = sparseDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+            if (saved.tasks![0].catalog?.after === '100') throw new VeWorkerShutdownError();
+          },
+        })).rejects.toMatchObject({ name: 'VeWorkerShutdownError' });
+        const saved = sparseDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+        expect(saved.tasks![0]).toMatchObject({ rows: 21, status: 'pending', catalog_pages_read: 1, catalog: { after: '100' } });
+        expect(saved.search_policy!.deferred_rows).toHaveLength(78);
+        expect(sparseDb.getRows('base_constructor_jobs')).toHaveLength(0);
+      }
+      await wake(sparseDb);
+      const saved = sparseDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      const usableCount = noContacts ? 0 : mode === 'full_before_page_end' ? 100 : 81;
+      expect(saved.tasks![0]).toMatchObject({ rows: usableCount, status: 'done',
+        catalog_pages_read: mode === 'full_before_page_end' ? 3 : 4,
+        catalog: { after: mode === 'full_before_page_end' ? '297' : '400' } });
+      expect(saved.tasks![0].harvest).toHaveLength(usableCount);
+      if (usableCount) expect(new URL(saved.tasks![0].harvest![0].website).hostname).toBe('catalog-recovered.test');
+      const deferredCount = mode === 'old_pending_harvest' ? 320 : noContacts ? 400 : mode === 'full_before_page_end' ? 196 : 318;
+      expect(saved.search_policy!.deferred_rows).toHaveLength(deferredCount);
+      expect(new Set(saved.search_policy!.deferred_rows.map((row) => row.company)).size).toBe(deferredCount);
+      if (mode === 'old_pending_harvest') expect(saved.search_policy!.deferred_rows.find((row) => row.company === raw[0].company)?.website)
+        .toBe('https://catalog-recovered.test');
+      expect(saved.search_policy!.deferred_rows.every((row) => (row as VeUnifiedRow & { _ve_source_strategy?: string })._ve_source_strategy === veSourceStrategyKey(sparseTask))).toBe(true);
+      expect(reads.map((read) => read.p_after)).toEqual(mode === 'old_pending_harvest'
+        ? ['100', '200', '300'] : mode === 'full_before_page_end' ? [null, '100', '200'] : [null, '100', '200', '300']);
+      expect(reads.every((read) => Number(read.p_limit) <= 500)).toBe(true);
+      const paid = sparseDb.getRows('base_constructor_jobs');
+      expect(paid).toHaveLength(usableCount ? 1 : 0);
+      if (!usableCount) {
+        if (mode === 'zero_streak') {
+          for (let tick = 0; tick < 5 && (sparseDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.status === 'collecting'; tick++) {
+            await wake(sparseDb);
+          }
+          const stopped = sparseDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+          expect(stopped.target_progress).toMatchObject({ status: 'limited', idle_streak: 5, candidates_processed: 2, max_candidates: 10_000 });
+          expect(stopped.search_policy!.deferred_rows).toHaveLength(2_000);
+          expect(reads).toHaveLength(20);
+          expect(sparseDb.getRows('base_constructor_jobs')).toHaveLength(0);
+        } else {
+          expect(saved.adaptive_collection!.active_source).toBe(veSourceStrategyKey(MEAT_TASK));
+          expect(saved.target_progress).toMatchObject({ round: 3, candidates_processed: 2, max_rounds: 100, max_candidates: 10_000 });
+        }
+        expect(callLLMWithSchema).not.toHaveBeenCalled();
+        expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+        continue;
+      }
+      expect(saved.adaptive_collection!.active_source).toBe(veSourceStrategyKey(sparseTask));
+      expect(paid[0].data as string[][]).toHaveLength(usableCount + 1);
+      expect((paid[0].data as string[][]).flat().some((cell) => cell.includes('catalog-owned.test'))).toBe(false);
+      const snapshot = JSON.stringify(paid);
+      await wake(sparseDb);
+      expect(JSON.stringify(sparseDb.getRows('base_constructor_jobs'))).toBe(snapshot);
+      expect(sparseDb.getRows('yandex_maps_jobs')).toHaveLength(0);
+      expect(sparseDb.getRows('parser_jobs')).toHaveLength(0);
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+      expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+    }
 
     // A specialist clinic catalogue wins over a whole-sector medical registry
     // while it remains useful. Its old cursors and the fallback's saved rows

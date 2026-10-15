@@ -2385,6 +2385,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         rows: positions.map((pos) => rows[leadRowIndices[pos]] ?? {}),
         segments: segmentWhens,
         language: detectSegmentLanguage(segmentWhens),
+        // Рынок уже прочитан (шаг 4b) — учёт расхода в llm.ts по нему, а не по
+        // журналу ENG: его у staff-запуска нет, если роут рынок не прочитал.
+        market,
       });
       noteClassification(detailed);
       const answers = new Map<number, string | null>();
@@ -2536,6 +2539,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
           segments: segmentWhens,
           language: detectSegmentLanguage(segmentWhens),
           unansweredFate: 'default',
+          market,
         });
         noteClassification(detailed);
         assignments = heLegacySegmentAssignments(detailed);

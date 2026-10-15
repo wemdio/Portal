@@ -3,11 +3,19 @@ import type { NextRequest } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { isInternalRole } from '@/lib/roles';
+import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 const BRIEF_STORAGE_BUCKET = process.env.BRIEF_STORAGE_BUCKET ?? 'briefs';
+// Object names the brief uploaders write: brief-scoring/<ts>_<name> (BaseConstructorView)
+// and brief-scoring/<uid>/<ts>-<name> (DatabaseSpreadsheet), every segment sanitised to
+// [A-Za-z0-9._-]. storage-js puts the path into the request URL as is and fetch then
+// normalises it (%2e%2e and '.<TAB>.' become '..', '?' and '#' cut the key), so any other
+// character could make the downloaded object differ from the one named here.
+const BRIEF_STORAGE_PATH = /^brief-scoring(?:\/[A-Za-z0-9._-]+)+$/;
 const MAX_BRIEF_FILE_BYTES = 20 * 1024 * 1024;
 
 function jsonError(message: string, status: number) {
@@ -20,6 +28,11 @@ function isPdfFileName(name: string) {
 
 function isPdfBuffer(buffer: Buffer) {
   return buffer.length >= 4 && buffer.toString('utf8', 0, 4) === '%PDF';
+}
+
+function isBriefStoragePath(path: string) {
+  return BRIEF_STORAGE_PATH.test(path)
+    && !path.split('/').some((segment) => segment === '.' || segment === '..');
 }
 
 async function downloadFromStorage(client: SupabaseClient, bucket: string, path: string) {
@@ -48,12 +61,15 @@ export async function POST(req: NextRequest) {
     // (otherwise a misconfig would fail OPEN for demo).
     const { data: demoProfile } = await supabase
       .from('profiles')
-      .select('is_demo')
+      .select('role, is_demo')
       .eq('id', user.id)
       .single();
     if (demoProfile?.is_demo === true) {
       return jsonError('Демо-режим: парсинг недоступен.', 403);
     }
+    // Internal non-demo staff may parse any brief PDF, as before. Everybody else reads
+    // the file with their own JWT (below). A failed profile read counts as not staff.
+    const isStaff = isInternalRole((demoProfile?.role ?? null) as UserRole | null);
 
     const contentType = req.headers.get('content-type') ?? '';
     let buffer: Buffer;
@@ -76,16 +92,23 @@ export async function POST(req: NextRequest) {
       if (!path) {
         return jsonError('Missing required field: path', 400);
       }
+      if (!isBriefStoragePath(path)) {
+        return jsonError('Invalid storage path', 400);
+      }
 
       fileName = body.fileName?.trim() || path.split('/').pop() || fileName;
       if (!isPdfFileName(fileName)) {
         return jsonError('File must be a PDF', 400);
       }
 
+      // Staff download with the service role first, as before. Nobody else ever gets the
+      // service role here: they download with their own JWT only, so storage.objects RLS
+      // (20261015_0035: own objects under brief-scoring/) decides on the very object
+      // storage-api resolves, and someone else's path fails like a missing file.
       const downloadErrors: string[] = [];
       let downloaded: Buffer | null = null;
 
-      if (supabaseAdmin) {
+      if (isStaff && supabaseAdmin) {
         try {
           downloaded = await downloadFromStorage(supabaseAdmin, bucket, path);
         } catch (err) {

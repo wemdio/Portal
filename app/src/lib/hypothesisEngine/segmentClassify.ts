@@ -47,6 +47,7 @@ import {
   LLMValidationError,
   type LLMMessage,
 } from './llm';
+import type { HeMarket } from './market';
 
 /** Строк в одном LLM-вызове (компактные ячейки, ~2-4k токенов на батч). */
 const BATCH_SIZE = 40;
@@ -73,9 +74,20 @@ export interface SegmentClassifyInput {
   language: 'ru' | 'en';
   /** Куда писать о сбоях батчей; по умолчанию — console.warn процесса. */
   log?: (msg: string) => void;
+  /**
+   * Рынок проекта — только правилу учёта расхода в llm.ts (HeLlmCallOptions.
+   * market). Передаёт запуск шаблона, который рынок уже прочитал: без него
+   * правило берётся из журнала расхода ENG, а журнала у staff-запуска нет,
+   * когда роут не прочитал рынок, — и us-вызов считался бы по RU-правилу.
+   * Промпт, батчи, модель и контракт от этого поля не зависят.
+   */
+  market?: HeMarket;
 }
 
-/** Расход модели классификатора: удачные ответы + оплаченные и отброшенные попытки. */
+/**
+ * Расход модели классификатора: удачные ответы + оплаченные и отброшенные
+ * попытки (отброшенные — только по учёту market='us', см. discardedSpendOf).
+ */
 export interface SegmentClassifyUsage {
   tokensUsed: number;
   costUsd: number;
@@ -132,6 +144,9 @@ function failureLabel(error: unknown): string {
  * текстовый — LLMValidationError несёт свою сумму строкой в сообщении. Разбор
  * ТОЛЬКО ради бухгалтерии: ни одно решение здесь на текст не опирается. Не
  * нашли — ноль, а не выдумка.
+ *
+ * Суффикс пишет только учёт market='us' (llm.ts, heLlmEngAccounting). У
+ * RU-проекта учёт как до порта ENG: отказ без суффикса, и здесь всегда ноль.
  */
 function discardedSpendOf(error: unknown): SegmentClassifyUsage {
   const match = /\[оплачено и отброшено: (\d+) tok, \$([\d.]+)\]/.exec(
@@ -244,7 +259,13 @@ export async function classifyBaseRowsIntoSegmentsDetailed(
             // хвост батча по дефолтному тексту (см. шапку файла). Кроме
             // прежнего контракта RU ('default'): там обрезанный ответ, как до
             // порта ENG, ремонтируется и разобранные строки уходят в сегменты.
-            { model: getHeModel('gate'), maxTokens: 4096, requireCompleteJson: fate !== 'default' },
+            // market — только правилу учёта расхода (см. SegmentClassifyInput).
+            {
+              model: getHeModel('gate'),
+              maxTokens: 4096,
+              requireCompleteJson: fate !== 'default',
+              ...(input.market ? { market: input.market } : {}),
+            },
           );
           result.usage.tokensUsed += llm.tokensUsed;
           result.usage.costUsd += llm.costUsd;
