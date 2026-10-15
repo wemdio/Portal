@@ -84,7 +84,7 @@ export function UnlinkedList({
     <>
       <div className="border-b border-zinc-200 px-3 py-2.5">
         <div className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-900">
-          Без привязки — {total} шт.
+          {loading ? 'Без привязки' : `Без привязки — ${total} шт.`}
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" /> : null}
         </div>
         <p className="mt-1 text-xs text-zinc-500">Письма, которые не удалось сопоставить с получателем кампании.</p>
