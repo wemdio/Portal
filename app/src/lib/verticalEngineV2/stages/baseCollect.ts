@@ -4512,7 +4512,8 @@ async function completeTargetRound(args: {
   const reviewSignature = automaticBatch?.rows.length
     ? relevanceHash(veSavedReviewSignature(automaticBatch.rows, { ...reviewScope, triage: triageEnabled }))
     : null;
-  const stalledReview = reviewSignature !== null && info.relevance_review_progress?.signature === reviewSignature;
+  const previousReviewSignature = info.relevance_review_progress?.signature;
+  const stalledReview = reviewSignature !== null && previousReviewSignature === reviewSignature;
   if (reviewSignature === null) delete info.relevance_review_progress;
   else info.relevance_review_progress = { signature: reviewSignature,
     passes: stalledReview ? (info.relevance_review_progress?.passes ?? 0) + 1 : 0 };
@@ -4822,11 +4823,15 @@ async function completeTargetRound(args: {
     stats.finished_at = new Date().toISOString();
   }
   info.stats = stats;
-  // Раунд, не сдвинувший ни раунд, ни кандидатов, ни готовые контакты, будет
-  // ждать вдвое дольше предыдущего. Счётчик едет в том же checkpoint'е, что и
-  // строки: отдельной записи он не стоит, а после рестарта воркера пауза не
-  // сбрасывается в секунду.
-  const roundAdvanced = veRoundAdvanced(args.progress, next);
+  // Разбор сохранённого резерва тоже может продвигаться без новых готовых
+  // контактов: меняются решения или состав следующей порции. Только сравнение
+  // с сохранённым отпечатком подтверждает такую работу; первый отпечаток и
+  // неизменный отбор не должны сбрасывать задержку при простое.
+  const savedReviewAdvanced = continueSavedReview
+    && typeof previousReviewSignature === 'string' && previousReviewSignature.length > 0
+    && reviewSignature !== null && reviewSignature !== previousReviewSignature;
+  // Счётчик сохраняется вместе со строками, поэтому рестарт его не сбрасывает.
+  const roundAdvanced = veRoundAdvanced(args.progress, next) || savedReviewAdvanced;
   info.idle_rounds = veNextIdleRounds(roundAdvanced, info.idle_rounds);
   const idleRounds = info.idle_rounds;
   const status = next.status === 'collecting' ? 'collecting'
