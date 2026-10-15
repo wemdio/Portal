@@ -80,8 +80,10 @@ export function OkvedPicker({ value, onChange }: { value: string; onChange: (nex
       </button>
       {open && typeof document !== 'undefined'
         ? createPortal(
+            // portal-shell: тёмная тема портала включается внутри этой оболочки, а окно
+            // рисуется порталом в body — без класса оно оставалось светлым.
             <div
-              className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4"
+              className="portal-shell fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4"
               onClick={() => setOpen(false)}
             >
               <div
