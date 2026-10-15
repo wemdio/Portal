@@ -188,7 +188,7 @@ function buildDailyOption(days: SenderStatsDto['days'], theme: ChartTheme, anima
   };
 }
 
-function DailyChart({ days }: { days: SenderStatsDto['days'] }) {
+export function DailyChart({ days }: { days: SenderStatsDto['days'] }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();

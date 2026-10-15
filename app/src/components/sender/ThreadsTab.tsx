@@ -1,13 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Loader2, MessageSquare, RefreshCw, Search, Settings } from 'lucide-react';
 import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
-import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
+import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto, type UnlinkedReplyDto } from './api';
 import { CampaignReplyKbModal } from './CampaignReplyKbModal';
 import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { SenderReplyPanel } from './SenderReplyPanel';
-import { UnlinkedReplies } from './UnlinkedReplies';
+import { UnlinkedLetter, UnlinkedList, useUnlinkedTotal } from './UnlinkedReplies';
 
 const COLUMN_DEFAULTS = { campaigns: 250, threads: 380 };
 const COLUMN_LIMITS = { campaigns: [180, 520], threads: [280, 760] } as const;
@@ -39,6 +39,13 @@ function formatAt(value: string | null): string {
 export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: string | null } = {}) {
   const [campaigns, setCampaigns] = useState<CampaignDto[]>([]);
   const [campaignId, setCampaignId] = useState('');
+  // Переписки грузятся только после выбора кампании (или «Все кампании»):
+  // сразу всё подряд — долго и не нужно. Ссылка на переписку открывает сразу.
+  const [picked, setPicked] = useState(Boolean(initialThreadId));
+  // Жёлтый пункт «Входящие без привязки» внизу колонки кампаний.
+  const [unlinkedOpen, setUnlinkedOpen] = useState(false);
+  const [unlinkedReply, setUnlinkedReply] = useState<UnlinkedReplyDto | null>(null);
+  const unlinkedTotal = useUnlinkedTotal();
   // Поиск по названиям кампаний в левой колонке (15.10.2026): их десятки.
   const [campaignSearch, setCampaignSearch] = useState('');
   const [mailboxId, setMailboxId] = useState('');
@@ -72,6 +79,10 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   }, [search]);
 
   const load = useCallback(async () => {
+    if (!picked) {
+      setLoading(false);
+      return;
+    }
     // Крутилка на каждую загрузку, а не только на первую: при смене страницы
     // список молча стоял прежним, и было непонятно, идёт ли загрузка.
     setLoading(true);
@@ -86,7 +97,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
     } finally {
       setLoading(false);
     }
-  }, [page, query, onlyReplied, onlyLeads, campaignId, mailboxId]);
+  }, [picked, page, query, onlyReplied, onlyLeads, campaignId, mailboxId]);
 
   useEffect(() => {
     // Загрузка списка при смене фильтра или страницы — запрос во внешнюю систему.
@@ -94,17 +105,45 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
     void load();
   }, [load]);
 
+  // Пока кампании не пришли — крутилка, а не «Кампаний пока нет»: список
+  // кампаний считается долго, и пустая колонка вводила в заблуждение.
+  const [campaignsState, setCampaignsState] = useState<'loading' | 'ready' | 'error'>('loading');
   useEffect(() => {
     let cancelled = false;
     fetchCampaigns()
-      .then((res) => { if (!cancelled) setCampaigns(res.campaigns); })
-      .catch(() => { /* колонка кампаний — только навигация: без неё работает «Все кампании» */ });
+      .then((res) => {
+        if (cancelled) return;
+        setCampaigns(res.campaigns);
+        setCampaignsState('ready');
+      })
+      // Колонка кампаний — только навигация: без неё работает «Все кампании».
+      .catch(() => { if (!cancelled) setCampaignsState('error'); });
     return () => { cancelled = true; };
   }, []);
 
   const columns = useColumnWidths('sender-threads:column-widths', COLUMN_DEFAULTS, COLUMN_LIMITS);
+
+  // Высота блока — ровно до низа окна от того места, где он начинается:
+  // фиксированные «100vh − 8rem» и минимум 720px не помещались на ноутбуке
+  // 15", и блок уходил под край страницы.
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [gridHeight, setGridHeight] = useState<number | null>(null);
+  // useLayoutEffect — до отрисовки: блок сразу нужной высоты, без рывка.
+  useLayoutEffect(() => {
+    const measure = () => {
+      const el = gridRef.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      setGridHeight(Math.max(480, Math.round(window.innerHeight - top - 12)));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
   const maxPage = Math.max(1, Math.ceil(total / pageSize));
   const pickCampaign = (id: string) => {
+    setUnlinkedOpen(false);
+    setPicked(true);
     setCampaignId(id);
     setMailboxId('');
     setPage(1);
@@ -115,8 +154,10 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
       {/* Высота — почти весь экран: переписке и полю ответа было тесно. Ширину
           колонок кампаний и переписок тянут мышью (ResizableColumns). */}
       <div
-        className="grid h-[calc(100vh-8rem)] min-h-[720px] grid-cols-1 overflow-hidden rounded-xl border border-zinc-200 bg-white lg:grid-cols-[var(--col-campaigns)_var(--col-threads)_minmax(0,1fr)]"
+        ref={gridRef}
+        className="grid h-[calc(100vh-14rem)] min-h-[480px] grid-cols-1 overflow-hidden rounded-xl border border-zinc-200 bg-white lg:grid-cols-[var(--col-campaigns)_var(--col-threads)_minmax(0,1fr)]"
         style={{
+          ...(gridHeight ? { height: gridHeight } : {}),
           '--col-campaigns': `${columns.widths.campaigns}px`,
           '--col-threads': `${columns.widths.threads}px`,
         } as CSSProperties}
@@ -142,12 +183,12 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               />
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto py-1">
+          <div className="min-h-0 flex-1 overflow-y-auto py-1 [scrollbar-gutter:stable]">
             <button
               type="button"
               onClick={() => pickCampaign('')}
               className={`block w-full px-4 py-2 text-left text-sm transition-colors ${
-                campaignId === '' ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
+                picked && !unlinkedOpen && campaignId === '' ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
               }`}
             >
               Все кампании
@@ -155,8 +196,8 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             {shownCampaigns.map((campaign) => (
               <div key={campaign.id}>
                 <div
-                  className={`group flex items-start gap-1 px-4 py-2 text-sm transition-colors ${
-                    campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
+                  className={`group flex items-center gap-1 px-4 py-2 text-sm transition-colors ${
+                    !unlinkedOpen && campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
                   }`}
                 >
                   {/* Статус всегда справа, у шестерёнки: длинное название
@@ -164,9 +205,12 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                   <button
                     type="button"
                     onClick={() => pickCampaign(campaign.id)}
-                    className="flex min-w-0 flex-1 items-start gap-1.5 text-left"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                   >
-                    <span className={`min-w-0 flex-1 break-words ${campaignId === campaign.id ? 'font-medium' : ''}`}>
+                    <span
+                      title={campaign.name}
+                      className={`min-w-0 flex-1 truncate ${campaignId === campaign.id ? 'font-medium' : ''}`}
+                    >
                       {campaign.name}
                     </span>
                     <span
@@ -185,38 +229,33 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                     <Settings className="h-3.5 w-3.5" />
                   </button>
                 </div>
-                {/* Ящики — только у выбранной кампании: иначе колонка превращается
-                    в список из сотен адресов всех кампаний разом. */}
-                {campaignId === campaign.id && campaign.mailboxes?.length ? (
-                  <div className="pb-1">
-                    <button
-                      type="button"
-                      onClick={() => { setMailboxId(''); setPage(1); }}
-                      className={`block w-full py-1.5 pl-8 pr-4 text-left text-xs transition-colors ${
-                        mailboxId === '' ? 'text-blue-700' : 'text-zinc-500 hover:bg-zinc-100'
-                      }`}
-                    >
-                      Все ящики
-                    </button>
-                    {campaign.mailboxes.map((mailbox) => (
-                      <button
-                        key={mailbox.id}
-                        type="button"
-                        onClick={() => { setMailboxId(mailbox.id); setPage(1); }}
-                        className={`block w-full truncate py-1.5 pl-8 pr-4 text-left text-xs transition-colors ${
-                          mailboxId === mailbox.id ? 'font-medium text-blue-700' : 'text-zinc-500 hover:bg-zinc-100'
-                        }`}
-                      >
-                        {mailbox.email}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             ))}
-            {campaigns.length === 0 ? <p className="px-4 py-3 text-xs text-zinc-500">Кампаний пока нет.</p> : null}
+            {campaignsState === 'loading' ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-5 w-5 animate-spin text-zinc-400" aria-label="Загрузка кампаний" />
+              </div>
+            ) : campaignsState === 'error' ? (
+              <p className="px-4 py-3 text-xs text-red-600">Кампании не загрузились.</p>
+            ) : campaigns.length === 0 ? (
+              <p className="px-4 py-3 text-xs text-zinc-500">Кампаний пока нет.</p>
+            ) : null}
             {campaigns.length > 0 && shownCampaigns.length === 0 ? (
               <p className="px-4 py-3 text-xs text-zinc-500">Ничего не нашлось.</p>
+            ) : null}
+            {/* Письма, которые не удалось привязать к получателю, — отдельной
+                жёлтой «кампанией» внизу: раньше это был блок под всей вкладкой. */}
+            {unlinkedTotal ? (
+              <button
+                type="button"
+                onClick={() => { setUnlinkedOpen(true); setUnlinkedReply(null); }}
+                className={`mt-1 flex w-full items-center gap-1.5 border-t border-zinc-100 px-4 py-2 text-left text-sm transition-colors ${
+                  unlinkedOpen ? 'bg-amber-50 font-medium text-amber-800' : 'text-amber-700 hover:bg-amber-50'
+                }`}
+              >
+                <span className="min-w-0 flex-1 truncate">Входящие без привязки</span>
+                <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">{unlinkedTotal}</span>
+              </button>
             ) : null}
           </div>
         </div>
@@ -228,10 +267,14 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             onMouseDown={(e) => columns.startDrag('threads', e)}
             onDoubleClick={() => columns.reset('threads')}
           />
+          {unlinkedOpen ? (
+            <UnlinkedList selectedId={unlinkedReply?.id ?? null} onSelect={setUnlinkedReply} />
+          ) : (
+          <>
           <div className="space-y-2 border-b border-zinc-200 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-900">
-                Переписок — {total} шт.
+                {picked && !loading ? `Переписок — ${total} шт.` : 'Переписок'}
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" /> : null}
               </span>
               <button
@@ -273,13 +316,14 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
 
           {error ? <p className="px-3 py-2 text-xs text-red-600">{error}</p> : null}
 
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {loading && threads.length === 0 ? (
-              <div className="flex items-center justify-center gap-2 px-3 py-10 text-sm text-zinc-500">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Загрузка…
+          <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+            {!picked ? (
+              <p className="px-4 py-12 text-center text-sm text-zinc-500">Выберите кампанию слева — или «Все кампании».</p>
+            ) : loading && threads.length === 0 ? (
+              <div className="flex items-center justify-center px-3 py-12">
+                <Loader2 className="h-5 w-5 animate-spin text-zinc-400" aria-label="Загрузка переписок" />
               </div>
-            ) : threads.length === 0 ? (
+            ) : error ? null : threads.length === 0 ? (
               <p className="px-4 py-12 text-center text-sm text-zinc-500">
                 {query || onlyReplied || onlyLeads
                   ? 'Ничего не нашлось — попробуйте снять фильтр.'
@@ -359,11 +403,21 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               </button>
             </div>
           ) : null}
+          </>
+          )}
         </div>
 
         {/* ── Переписка и ответ ── */}
         <div className="min-h-0">
-          {selected ? (
+          {unlinkedOpen ? (
+            unlinkedReply ? (
+              <UnlinkedLetter reply={unlinkedReply} />
+            ) : (
+              <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
+                Выберите письмо из списка
+              </div>
+            )
+          ) : selected ? (
             <SenderReplyPanel key={selected} recipientId={selected} onSent={() => void load()} onVerdictChange={() => void load()} />
           ) : (
             <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
@@ -372,9 +426,6 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
           )}
         </div>
       </div>
-
-      {/* Отдельным блоком: это не переписки, а письма, которые вообще не удалось к ним привязать. */}
-      <UnlinkedReplies refreshKey={page} />
 
       {kbCampaignId ? <CampaignReplyKbModal campaignId={kbCampaignId} onClose={() => setKbCampaignId(null)} /> : null}
     </div>

@@ -1,5 +1,6 @@
 'use client';
 
+import type { Route } from 'next';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, FileSpreadsheet, Loader2, Mail } from 'lucide-react';
@@ -230,6 +231,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
 
   /** Уйти в список: итог сохранения показывает уже он. */
   const leave = (result?: CampaignNotice, focusId?: string) => {
+    // Настройки существующей кампании открываются шестерёнкой со страницы её
+    // статистики — туда и возвращаемся. Новая кампания уходит в список.
+    if (editing) {
+      router.push(`/tools/sender/campaigns/${campaignId}` as Route);
+      return;
+    }
     if (result) stashCampaignNotice(result);
     router.push(focusId ? `${LIST_URL}&campaign=${focusId}` : LIST_URL);
   };
@@ -705,7 +712,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
             className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
           >
             <ArrowLeft className="h-4 w-4" />
-            Кампании
+            {editing ? 'Статистика' : 'Кампании'}
           </button>
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold text-zinc-900">

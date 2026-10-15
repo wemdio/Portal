@@ -186,28 +186,40 @@ export function SenderReplyPanel({
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        Загрузка переписки…
-      </div>
-    );
-  }
-
+  // Пока переписка грузится, каркас панели тот же — шапка, лента, поле ответа:
+  // раньше вместо них была надпись по центру, и при каждом клике по переписке
+  // вся правая часть исчезала и собиралась заново.
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
       <div className="border-b border-zinc-200 px-5 py-3">
-        <div className="truncate text-base font-semibold text-zinc-900">{header?.title ?? 'Переписка'}</div>
-        <div className="truncate text-xs text-zinc-500">
-          {header?.subtitle}
-          {header?.mailbox ? ` · пишем с ${header.mailbox}` : ''}
-        </div>
+        {loading && !header ? (
+          <>
+            <div className="h-6 w-48 animate-pulse rounded bg-zinc-100" />
+            <div className="mt-1 h-4 w-72 animate-pulse rounded bg-zinc-100" />
+          </>
+        ) : (
+          <>
+            <div className="h-6 truncate text-base font-semibold text-zinc-900">{header?.title ?? 'Переписка'}</div>
+            <div className="h-4 truncate text-xs text-zinc-500">
+              {header?.subtitle}
+              {header?.mailbox ? ` · пишем с ${header.mailbox}` : ''}
+            </div>
+          </>
+        )}
       </div>
 
-      <div ref={threadRef} className="relative min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      {/* Метка лида — вне ленты: подгружается отдельно и не должна сдвигать
+          письма, уже прокрученные к последнему. */}
+      <div className="px-5 pt-3">
         <LeadVerdictBar recipientId={recipientId} onChange={onVerdictChange} />
-        {items.length === 0 ? (
+      </div>
+
+      <div ref={threadRef} className="relative min-h-0 flex-1 overflow-y-auto px-5 pb-4 [scrollbar-gutter:stable]">
+        {loading ? (
+          <div className="flex justify-center py-12">
+            <Loader2 className="h-5 w-5 animate-spin text-zinc-400" aria-label="Загрузка переписки" />
+          </div>
+        ) : items.length === 0 ? (
           <p className="py-10 text-center text-sm text-zinc-500">Писем в этой переписке пока нет.</p>
         ) : (
           <div className="space-y-3">
@@ -246,7 +258,7 @@ export function SenderReplyPanel({
           <button
             type="button"
             onClick={() => void generate()}
-            disabled={generating || !hasIncoming}
+            disabled={loading || generating || !hasIncoming}
             title={hasIncoming ? undefined : 'Отвечать пока не на что: адресат ещё не ответил'}
             className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
           >
@@ -268,21 +280,23 @@ export function SenderReplyPanel({
               </button>
             ))}
           </div>
-          <span className="text-xs text-zinc-500">
-            {generating
-              ? 'ИИ пишет, обычно до минуты'
-              : hasBrief
-                ? 'В поле — черновик ИИ, его можно править'
-                : 'У кампании нет брифа — ИИ опирается на нашу цепочку писем (шестерёнка у кампании слева)'}
-          </span>
         </div>
+        {/* Подсказка — своей строкой фиксированной высоты: тексты разной длины
+            раньше двигали кнопки рядом. */}
+        <p className="mb-2 h-4 truncate text-xs text-zinc-500">
+          {generating
+            ? 'ИИ пишет, обычно до минуты'
+            : hasBrief
+              ? 'В поле — черновик ИИ, его можно править'
+              : 'У кампании нет брифа — ИИ опирается на нашу цепочку писем (шестерёнка у кампании слева)'}
+        </p>
 
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           style={{ height: editor.editorHeight }}
           placeholder="Ответ адресату — сгенерируйте ИИ или напишите сами"
-          disabled={generating || sending}
+          disabled={loading || generating || sending}
           className="w-full resize-none rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:bg-zinc-50"
         />
         {draft?.factsUsed ? <p className="mt-1 truncate text-xs text-zinc-500" title={draft.factsUsed}>Факты: {draft.factsUsed}</p> : null}

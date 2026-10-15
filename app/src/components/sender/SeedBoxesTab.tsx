@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { KeyRound, Loader2, Network, Plus, Power, RefreshCw, Trash2 } from 'lucide-react';
+import { RowActionsMenu } from './RowActionsMenu';
 import {
   addSeedBoxes,
   checkSeedBox,
@@ -38,7 +39,7 @@ const PROVIDER_TONE: Record<SeedProviderId, { text: string; badge: string }> = {
   mailru: { text: 'text-sky-500', badge: 'bg-sky-500/15 text-sky-500' },
 };
 const SEED_PAGE_SIZE = 10;
-const HEALTH_PAGE_SIZE = 50;
+const HEALTH_PAGE_SIZE = 30;
 const NO_BOXES: SeedBoxDto[] = [];
 
 /** «Вход»: сначала рабочие, потом не проверенные, потом без входа. */
@@ -309,22 +310,16 @@ export function SeedBoxesTab() {
                   </td>
                   <td className="py-2 pr-3 text-xs text-zinc-500">{weekLine(box.week)}</td>
                   <td className="py-2 pr-5">
-                    <div className="flex justify-end gap-1 text-xs">
-                      <button type="button" disabled={busyId !== null} onClick={() => void checkMany([box.id])} className="rounded-md px-2 py-1 text-blue-600 hover:bg-blue-50 disabled:opacity-50">
-                        Проверить
-                      </button>
-                      <button type="button" onClick={() => setPasswordFor(box)} className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100">
-                        Пароль
-                      </button>
-                      <button type="button" onClick={() => setProxyFor(box)} className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100">
-                        Прокси
-                      </button>
-                      <button type="button" onClick={() => void toggle(box)} className="rounded-md px-2 py-1 text-zinc-600 hover:bg-zinc-100">
-                        {box.enabled ? 'Выключить' : 'Включить'}
-                      </button>
-                      <button type="button" onClick={() => void remove(box)} aria-label={`Удалить ${box.email}`} className="rounded-md p-1 text-zinc-400 hover:bg-red-50 hover:text-red-600">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                    <div className="flex justify-end">
+                      <RowActionsMenu
+                        items={[
+                          { label: 'Проверить', icon: RefreshCw, disabled: busyId !== null, onClick: () => void checkMany([box.id]) },
+                          { label: 'Пароль', icon: KeyRound, onClick: () => setPasswordFor(box) },
+                          { label: 'Прокси', icon: Network, onClick: () => setProxyFor(box) },
+                          { label: box.enabled ? 'Выключить' : 'Включить', icon: Power, onClick: () => void toggle(box) },
+                          { label: 'Удалить', icon: Trash2, danger: true, onClick: () => void remove(box) },
+                        ]}
+                      />
                     </div>
                   </td>
                 </tr>

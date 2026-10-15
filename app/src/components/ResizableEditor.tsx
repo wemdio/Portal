@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
+import { useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject, useLayoutEffect } from 'react';
 
 /*
  * Высота поля ответа — «Персонализированные ответы» и «Рассылка» → «Письма».
@@ -66,8 +66,10 @@ export function useEditorHeight(
   };
 
   // Сохранённую высоту читаем после монтирования: на сервере хранилища нет, и
-  // разметка до гидрации должна совпасть. Окно сжали — поле ужимаем следом.
-  useEffect(() => {
+  // разметка до гидрации должна совпасть. useLayoutEffect, а не useEffect —
+  // до отрисовки: иначе поле сначала стандартной высоты, а потом прыгает к
+  // сохранённой вместе с перепиской над ним. Окно сжали — поле ужимаем следом.
+  useLayoutEffect(() => {
     const panel = () => rootRef.current?.clientHeight ?? window.innerHeight;
     const saved = Number(readStore(storageKey));
     const initial = clampEditorHeight(saved > 0 ? saved : defaultPx, panel());
