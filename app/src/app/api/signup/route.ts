@@ -357,6 +357,12 @@ export async function POST(req: NextRequest) {
     source: 'register',
     utm,
     referrer: utm?.referrer ?? null,
+    // Which site and cabinet the account was created on, and the landing page the
+    // visitor first arrived on (from the oos_utm cookie), so the alert says where
+    // the sign-up came from.
+    signupHost: req.headers.get('host'),
+    signupCabinet: eng ? 'eng' : 'ru',
+    landingUrl: utm?.landing ?? null,
   });
 
   return NextResponse.json({ ok: true, user_id: userId }, { status: 201 });

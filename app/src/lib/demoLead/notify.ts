@@ -57,6 +57,13 @@ export interface DemoLeadData {
    * sent the lead. Shown as «(заход ДД.ММ ЧЧ:ММ МСК)» after the UTM line.
    */
   utmEarlierVisitAt?: string | null;
+  /**
+   * Registrations only: the host the sign-up form was sent from (polza-portal.ru,
+   * app.outreachos.xyz, …) and which client cabinet that is, so the team sees at
+   * once where the account was created. Shown in the title and as «Сайт: …».
+   */
+  signupHost?: string | null;
+  signupCabinet?: 'eng' | 'ru' | null;
 }
 
 /** Telegram rejects sendMessage text longer than this, counted after entity parsing. */
@@ -77,9 +84,22 @@ function sourceLabel(source?: string | null): string {
   return (source && SOURCE_LABEL[source]) || 'лендинг';
 }
 
+const CABINET_LABEL: Record<'eng' | 'ru', string> = {
+  eng: 'английский кабинет',
+  ru: 'русский кабинет',
+};
+
+/** Host as shown in the alert: lowercase, no port, plain host characters only; '' otherwise. */
+function cleanHost(raw?: string | null): string {
+  const host = (raw ?? '').trim().toLowerCase().replace(/:\d+$/, '');
+  return /^[a-z0-9.-]{1,253}$/.test(host) ? host : '';
+}
+
 /** Headline: a registration is a sign-up notice, not a "новый лид". */
-function titleLine(source?: string | null): string {
-  if (source === 'register') return '✅ <b>Новая регистрация</b>';
+function titleLine(source?: string | null, cabinet?: 'eng' | 'ru' | null): string {
+  if (source === 'register') {
+    return cabinet ? `✅ <b>Новая регистрация — ${CABINET_LABEL[cabinet]}</b>` : '✅ <b>Новая регистрация</b>';
+  }
   return `🎯 <b>Новый лид — ${esc(sourceLabel(source))}</b>`;
 }
 
@@ -150,12 +170,13 @@ const NO_CUTS: AlertCuts = { url: Infinity, message: Infinity, value: Infinity }
 function renderLeadAlert(data: DemoLeadData, cuts: AlertCuts): string {
   const value = (text: string) => esc(clip(text, cuts.value));
   const url = (text: string) => esc(clip(text, Math.min(cuts.url, cuts.value)));
-  const lines: string[] = [
-    titleLine(data.source),
-    '',
+  const lines: string[] = [titleLine(data.source, data.signupCabinet), ''];
+  const signupHost = data.source === 'register' ? cleanHost(data.signupHost) : '';
+  if (signupHost) lines.push(`<b>Сайт:</b> ${signupHost}`);
+  lines.push(
     `<b>Имя:</b> ${value(data.name)}`,
     `<b>Почта:</b> ${value(data.email)}`,
-  ];
+  );
   if (data.company) lines.push(`<b>Компания:</b> ${value(data.company)}`);
   if (data.phone) lines.push(`<b>Телефон:</b> ${value(data.phone)}`);
   if (data.telegram) lines.push(`<b>Telegram:</b> ${value(data.telegram)}`);
