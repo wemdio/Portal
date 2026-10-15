@@ -48,10 +48,15 @@ export async function GET(req: NextRequest) {
 
       let takenUrls: string[] = [];
       if (assignedIds.length) {
-        const { data: takenRows } = await auth.supabase
-          .from('tg_outreach_proxies')
-          .select('url')
-          .in('id', assignedIds);
+        // По 100 id в адресе запроса: длинный список давал «URI too long».
+        const takenRows: { url: string }[] = [];
+        for (let i = 0; i < assignedIds.length; i += 100) {
+          const { data: part } = await auth.supabase
+            .from('tg_outreach_proxies')
+            .select('url')
+            .in('id', assignedIds.slice(i, i + 100));
+          takenRows.push(...((part ?? []) as { url: string }[]));
+        }
         takenUrls = [
           ...new Set(
             (takenRows ?? [])
