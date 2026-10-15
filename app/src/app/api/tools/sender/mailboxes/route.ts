@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sealMailboxSecret } from '@/lib/byoMailbox/credentials';
 import { parseMailboxFile, FileParseError } from '@/lib/sender/fileParse';
 import { parseMailboxRows } from '@/lib/sender/mailboxImport';
+import { HEALTH_WINDOW_DAYS, mailboxHealth } from '@/lib/sender/mailboxHealth';
 import { isIpv4 } from '@/lib/sender/egress';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -121,11 +122,33 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Здоровье ящиков страницы: отправлено / отбои / ошибки за 14 дней. Сбой
+    // расчёта не роняет список — просто без оценки.
+    const healthByMailbox = new Map<string, { sent: number; bounced: number; failed: number }>();
+    if (pageIds.length) {
+      const { data: healthRows, error: healthError } = await supabaseAdmin.rpc('sender_mailbox_health', {
+        p_ids: pageIds,
+        p_days: HEALTH_WINDOW_DAYS,
+      });
+      if (!healthError) {
+        for (const row of (healthRows ?? []) as { mailbox_id: string; sent: number | string; bounced: number | string; failed: number | string }[]) {
+          healthByMailbox.set(row.mailbox_id, { sent: Number(row.sent), bounced: Number(row.bounced), failed: Number(row.failed) });
+        }
+      }
+    }
+
     return NextResponse.json({
-      mailboxes: mailboxes.map((mailbox) => ({
-        ...mailbox,
-        probe: probeByMailbox.get(String((mailbox as { id?: string }).id)) ?? null,
-      })),
+      mailboxes: mailboxes.map((mailbox) => {
+        const id = String((mailbox as { id?: string }).id);
+        const counts = healthByMailbox.get(id);
+        return {
+          ...mailbox,
+          probe: probeByMailbox.get(id) ?? null,
+          health: counts
+            ? mailboxHealth({ ...counts, status: String((mailbox as { status?: string }).status ?? '') })
+            : null,
+        };
+      }),
       total: count ?? 0,
     });
   });
