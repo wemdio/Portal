@@ -65,10 +65,10 @@ export function SenderView() {
       }}
     />
 
-    <div className={`mx-auto px-6 pb-8 pt-5 ${tab === 'threads' ? 'max-w-none' : 'max-w-7xl'}`}>
-      <div className="mb-4">
+    <div className={`mx-auto px-6 pb-8 pt-3 ${tab === 'threads' ? 'max-w-none' : 'max-w-7xl'}`}>
+      <div className="mb-3">
         <h1 className="text-xl font-semibold text-zinc-900">{activeTab.label}</h1>
-        <p className="mt-1 text-sm text-zinc-500">{activeTab.hint}</p>
+        <p className="mt-0.5 text-sm text-zinc-500">{activeTab.hint}</p>
       </div>
 
       {tab === 'mailboxes' ? <MailboxesTab initialEgressIp={egressIp} /> : null}

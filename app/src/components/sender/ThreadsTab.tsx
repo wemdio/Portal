@@ -114,7 +114,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
       const el = gridRef.current;
       if (!el) return;
       const top = el.getBoundingClientRect().top + window.scrollY;
-      setGridHeight(Math.max(480, Math.round(window.innerHeight - top - 16)));
+      setGridHeight(Math.max(480, Math.round(window.innerHeight - top - 12)));
     };
     measure();
     window.addEventListener('resize', measure);
