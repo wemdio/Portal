@@ -1,17 +1,17 @@
 import { InDevelopmentGate } from '@/components/InDevelopmentGate';
-import { CampaignForm } from '@/components/sender/CampaignForm';
+import { CampaignOverview } from '@/components/sender/CampaignOverview';
 import { SenderRailFrame } from '@/components/sender/SenderRail';
 
 /**
- * Настройки существующей кампании «Рассылки». Сама кампания грузится формой по
- * id из адреса — на страницу можно зайти по ссылке, не открывая список.
+ * Кампания «Рассылки»: статистика, как «Analytics» в Instantly. Настройки — за
+ * шестерёнкой, на /tools/sender/campaigns/<id>/settings.
  */
-export default async function CampaignSettingsPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function CampaignPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   return (
     <InDevelopmentGate toolId="sender">
       <SenderRailFrame>
-        <CampaignForm campaignId={id} />
+        <CampaignOverview campaignId={id} />
       </SenderRailFrame>
     </InDevelopmentGate>
   );
