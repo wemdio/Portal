@@ -153,6 +153,8 @@ export interface CampaignStatsDto {
   sent: number;
   scheduled: number;
   failed: number;
+  /** Писем ушло с начала сегодняшнего дня по поясу кампании. */
+  sentToday?: number;
 }
 
 export interface ImportMailboxesResult {

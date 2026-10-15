@@ -37,7 +37,28 @@ interface CreateBody {
   draft?: boolean;
 }
 
-async function campaignStats(campaignId: string) {
+/**
+ * Начало сегодняшнего дня в поясе кампании, ISO. «Отправлено сегодня» у EN
+ * считается по Нью-Йорку: по Москве их день рвался бы посреди окна отправки.
+ */
+function startOfTodayIso(timeZone: string): string {
+  const now = new Date();
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone, hourCycle: 'h23', hour: 'numeric', minute: 'numeric', second: 'numeric',
+    }).formatToParts(now);
+  } catch {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Moscow', hourCycle: 'h23', hour: 'numeric', minute: 'numeric', second: 'numeric',
+    }).formatToParts(now);
+  }
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  const elapsedMs = ((get('hour') * 60 + get('minute')) * 60 + get('second')) * 1000 + now.getMilliseconds();
+  return new Date(now.getTime() - elapsedMs).toISOString();
+}
+
+async function campaignStats(campaignId: string, timeZone: string) {
   if (!supabaseAdmin) return null;
   const db = supabaseAdmin;
 
@@ -54,7 +75,7 @@ async function campaignStats(campaignId: string) {
       .eq('campaign_id', campaignId)
       .eq('status', status);
 
-  const [recipients, replied, bounced, reached, sent, scheduled, failed] = await Promise.all([
+  const [recipients, replied, bounced, reached, sent, scheduled, failed, sentToday] = await Promise.all([
     recipientsQuery(),
     recipientsQuery({ column: 'status', value: 'replied' }),
     recipientsQuery({ column: 'status', value: 'bounced' }),
@@ -65,6 +86,7 @@ async function campaignStats(campaignId: string) {
     messagesQuery('sent'),
     messagesQuery('scheduled'),
     messagesQuery('failed'),
+    messagesQuery('sent').gte('sent_at', startOfTodayIso(timeZone)),
   ]);
 
   const reachedCount = reached.count ?? 0;
@@ -79,6 +101,7 @@ async function campaignStats(campaignId: string) {
     sent: sent.count ?? 0,
     scheduled: scheduled.count ?? 0,
     failed: failed.count ?? 0,
+    sentToday: sentToday.count ?? 0,
   };
 }
 
@@ -145,7 +168,7 @@ export async function GET(req: NextRequest) {
           rows.slice(i, i + STATS_CHUNK).map(async (campaign) => ({
             ...campaign,
             mailboxes: pool.get(String(campaign.id)) ?? [],
-            stats: await campaignStats(String(campaign.id)),
+            stats: await campaignStats(String(campaign.id), String(campaign.timezone ?? 'Europe/Moscow')),
           })),
         )),
       );

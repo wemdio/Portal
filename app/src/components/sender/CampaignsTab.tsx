@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  MoreHorizontal,
   Pause,
   Play,
   Plus,
@@ -307,6 +308,220 @@ function CampaignRow({
   );
 }
 
+/** Статус в таблице: цветная точка и подпись, как в Instantly. */
+const STATUS_PILL: Record<CampaignDto['status'], { text: string; pill: string; dot: string }> = {
+  draft: { text: 'Черновик', pill: 'bg-zinc-100 text-zinc-600', dot: 'bg-zinc-400' },
+  running: { text: 'Идёт', pill: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500' },
+  paused: { text: 'Пауза', pill: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500' },
+  done: { text: 'Завершена', pill: 'bg-blue-100 text-blue-700', dot: 'bg-blue-500' },
+};
+
+/** Доля получателей, которым ушло хотя бы первое письмо; null — получателей нет. */
+function progressPercent(campaign: CampaignDto): number | null {
+  const stats = campaign.stats;
+  if (!stats || stats.recipients === 0) return null;
+  return Math.round((stats.reached / stats.recipients) * 100);
+}
+
+function formatCreated(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+interface MenuItem {
+  key: string;
+  label: string;
+  icon: typeof Users;
+  onClick: () => void;
+  tone?: 'danger' | 'go';
+}
+
+/** Действия кампании под «⋯»: те же кнопки, что были в строке, — с иконками и подписями. */
+function ActionsMenu({ items }: { items: MenuItem[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative inline-block text-left">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Действия с кампанией"
+        aria-expanded={open}
+        className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {open ? (
+        <div className="absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
+          {items.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  item.onClick();
+                }}
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-zinc-100 ${
+                  item.tone === 'danger' ? 'text-red-600' : item.tone === 'go' ? 'text-emerald-700' : 'text-zinc-700'
+                }`}
+              >
+                <Icon className="h-4 w-4" />
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Кампании спецов таблицей, как в Instantly: название, статус, прогресс,
+ * отправлено сегодня, дата создания; действия — под «⋯».
+ */
+function CampaignTable({
+  campaigns,
+  highlightId,
+  onEdit,
+  onRecipients,
+  onStats,
+  onAction,
+}: {
+  campaigns: CampaignDto[];
+  highlightId: string | null;
+  onEdit: (campaign: CampaignDto) => void;
+  onRecipients: (campaign: CampaignDto) => void;
+  onStats: (campaign: CampaignDto) => void;
+  onAction: (campaign: CampaignDto, action: CampaignAction) => void;
+}) {
+  const menuItems = (campaign: CampaignDto): MenuItem[] => {
+    const items: MenuItem[] = [
+      { key: 'base', label: 'База', icon: Users, onClick: () => onRecipients(campaign) },
+      { key: 'stats', label: 'Статистика', icon: BarChart3, onClick: () => onStats(campaign) },
+    ];
+    if (campaign.status === 'running') {
+      items.push({ key: 'pause', label: 'Пауза', icon: Pause, onClick: () => onAction(campaign, 'pause') });
+    } else if (campaign.status !== 'done' && !campaign.scheduled_start_at) {
+      items.push({
+        key: 'start',
+        label: campaign.status === 'paused' ? 'Продолжить' : 'Запустить',
+        icon: Play,
+        tone: 'go',
+        onClick: () => onAction(campaign, 'start'),
+      });
+    }
+    if (campaign.scheduled_start_at && campaign.status !== 'running' && campaign.status !== 'done') {
+      items.push({ key: 'unschedule', label: 'Отменить запуск', icon: X, onClick: () => onAction(campaign, 'unschedule') });
+    }
+    if (campaign.status !== 'done') {
+      items.push({ key: 'finish', label: 'Завершить', icon: Square, onClick: () => onAction(campaign, 'finish') });
+    }
+    if (campaign.status !== 'running') {
+      items.push({ key: 'delete', label: 'Удалить', icon: Trash2, tone: 'danger', onClick: () => onAction(campaign, 'delete') });
+    }
+    return items;
+  };
+
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-zinc-200 bg-blue-50/60 text-left text-[11px] font-semibold uppercase tracking-wider text-blue-700/80">
+          <th className="px-5 py-2.5">Название</th>
+          <th className="px-3 py-2.5">Статус</th>
+          <th className="px-3 py-2.5">Прогресс</th>
+          <th className="px-3 py-2.5 text-right">Сегодня</th>
+          <th className="px-3 py-2.5">Создана</th>
+          <th className="w-12 px-3 py-2.5" aria-label="Действия" />
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-zinc-100">
+        {campaigns.map((campaign) => {
+          const status = STATUS_PILL[campaign.status];
+          const percent = progressPercent(campaign);
+          const today = campaign.stats?.sentToday ?? 0;
+          return (
+            <tr
+              key={campaign.id}
+              id={campaignRowId(campaign.id)}
+              className={`transition-colors duration-700 hover:bg-zinc-50 ${
+                campaign.id === highlightId ? 'bg-blue-50 ring-2 ring-inset ring-blue-200' : ''
+              }`}
+            >
+              <td className="max-w-md px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => onEdit(campaign)}
+                  className="truncate text-left font-medium text-zinc-900 underline-offset-4 transition-colors hover:text-blue-600 hover:underline"
+                  title={campaign.name}
+                >
+                  {campaign.name}
+                </button>
+                {campaign.scheduled_start_at ? (
+                  <div className="mt-0.5 inline-flex items-center gap-1 text-xs font-medium text-blue-700">
+                    <CalendarClock className="h-3.5 w-3.5" />
+                    Запуск {formatInZone(campaign.scheduled_start_at, campaign.timezone)}
+                  </div>
+                ) : campaign.scheduled_start_error ? (
+                  <div className="mt-0.5 text-xs text-red-600">Запуск не состоялся: {campaign.scheduled_start_error}</div>
+                ) : null}
+              </td>
+              <td className="px-3 py-3">
+                <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ${status.pill}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
+                  {status.text}
+                </span>
+              </td>
+              <td className="px-3 py-3">
+                {percent === null ? (
+                  <span className="text-zinc-400">—</span>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="w-10 text-right text-xs font-semibold tabular-nums text-zinc-800">{percent}%</span>
+                    <div className="h-1.5 w-28 overflow-hidden rounded-full bg-zinc-200">
+                      <div
+                        className={`h-full rounded-full ${percent >= 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                        style={{ width: `${Math.min(100, percent)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </td>
+              <td className={`px-3 py-3 text-right tabular-nums ${today > 0 ? 'font-semibold text-blue-600' : 'text-zinc-400'}`}>
+                {today}
+              </td>
+              <td className="whitespace-nowrap px-3 py-3 text-zinc-500">{formatCreated(campaign.created_at)}</td>
+              <td className="px-3 py-3 text-right">
+                <ActionsMenu items={menuItems(campaign)} />
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 /**
  * Вкладка «Кампании»: на экране список, создание — в отдельном окне.
  *
@@ -569,7 +784,7 @@ export function CampaignsTab({
         <div
           role="tablist"
           aria-label="Компании или автоаутрич"
-          className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-zinc-50 p-1"
+          className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1"
         >
           {([
             { id: 'companies', label: 'Компании' },
@@ -581,7 +796,7 @@ export function CampaignsTab({
               role="tab"
               aria-selected={view === item.id}
               onClick={() => setView(item.id)}
-              className={`rounded-full px-3.5 py-1 text-sm font-semibold transition ${
+              className={`rounded-md px-3.5 py-1 text-sm font-semibold transition ${
                 view === item.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
               }`}
             >
@@ -641,7 +856,14 @@ export function CampaignsTab({
               {renderHeader(restGroup)}
               {restShown.length > 0 ? (
                 <>
-                  <div className="divide-y divide-zinc-100">{restShown.map(renderRow)}</div>
+                  <CampaignTable
+                    campaigns={restShown}
+                    highlightId={highlightId}
+                    onEdit={(campaign) => router.push(`/tools/sender/campaigns/${campaign.id}`)}
+                    onRecipients={setRecipientsOf}
+                    onStats={(campaign) => onOpenStats?.(campaign.id)}
+                    onAction={(campaign, action) => void act(campaign, action)}
+                  />
                   {restPages > 1 ? (
                     <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-5 py-2.5 text-sm text-zinc-600">
                       <button
