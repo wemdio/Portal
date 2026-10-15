@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import OutcomesDashboard from '@/components/mailbox-load/OutcomesDashboard';
+import BouncesBreakdown from '@/components/mailbox-load/BouncesBreakdown';
 import type {
   MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, TagStatus, InactiveTag, InactiveReason,
 } from '@/lib/instantly/mailboxLoad';
@@ -481,6 +482,9 @@ export default function MailboxLoadPage() {
         <div className="border-t border-zinc-200 pt-5">
           {/* key по дню: смена дня монтирует блок заново, со своей загрузкой */}
           <OutcomesDashboard key={data.asOfDay} day={data.asOfDay} />
+          <div className="mt-5">
+            <BouncesBreakdown key={`bounces-${data.asOfDay}`} day={data.asOfDay} />
+          </div>
         </div>
       )}
     </div>
