@@ -553,6 +553,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                   <th className="px-3 py-2 font-medium">Тег</th>
                   <th className="px-3 py-2 font-medium">Адрес отправки</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
+                  <th className="px-3 py-2 font-medium" title="Наша оценка за 14 дней: отбои и ошибки отправки. Меньше 20 писем — оценки нет">Здоровье</th>
                   <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">Новых / всего в день</th>
                   <th className="px-5 py-2 text-right font-medium">Действия</th>
                 </tr>
@@ -650,6 +651,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             Отключён
                           </span>
                         )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <HealthBadge health={mailbox.health} />
                       </td>
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1">
@@ -801,6 +805,27 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
  * открытое поле в каждой строке ловило случайные клики и выглядело как форма.
  * Enter или клик мимо — сохранить, Esc — отменить.
  */
+/** Оценка здоровья: зелёная от 85, жёлтая 60–84, красная ниже; «—» — данных мало. */
+function HealthBadge({ health }: { health: { score: number | null; sent: number; bounced: number; failed: number } | null }) {
+  if (!health || health.score === null) {
+    return (
+      <span className="text-xs text-zinc-400" title={health ? `За 14 дней отправлено ${health.sent} — для оценки нужно хотя бы 20` : 'Нет данных'}>
+        —
+      </span>
+    );
+  }
+  const tone =
+    health.score >= 85 ? 'bg-emerald-50 text-emerald-700' : health.score >= 60 ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700';
+  return (
+    <span
+      className={`rounded-md px-2 py-0.5 text-xs font-medium tabular-nums ${tone}`}
+      title={`За 14 дней: отправлено ${health.sent}, отбоев ${health.bounced}, ошибок отправки ${health.failed}`}
+    >
+      {health.score}%
+    </span>
+  );
+}
+
 interface RowAction {
   label: string;
   title?: string;
