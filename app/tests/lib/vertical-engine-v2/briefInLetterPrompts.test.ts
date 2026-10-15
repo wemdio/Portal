@@ -14,6 +14,7 @@
 
 import { EMPTY_BRIEF_FIELDS } from '@/lib/clientBrief';
 import {
+  applyClientBriefEdit,
   compileClientBriefForLetters,
   splitBriefForLetterPrompt,
   type VeClientBrief,
@@ -111,7 +112,14 @@ function chainPrompt(clientBrief?: string): string {
 
 describe('compileClientBriefForLetters', () => {
   it('keeps offer-critical wording and drops internal rows', () => {
-    const text = compileClientBriefForLetters(BRIEF);
+    const text = compileClientBriefForLetters({
+      ...BRIEF,
+      fields: {
+        ...BRIEF.fields,
+        persona_name: 'Ирина', persona_position: 'Руководитель направления',
+        lead_recipient_name: 'Алексей', lead_recipient_position: 'РОП',
+      },
+    });
 
     expect(text).toContain('Белый ВЭД под крупный бизнес');
     expect(text).toContain('Отсрочка до 90 дней');
@@ -120,6 +128,9 @@ describe('compileClientBriefForLetters', () => {
 
     expect(text).not.toContain('lead@client.ru');
     expect(text).not.toContain('+7 (988)');
+    expect(text).toContain('Ирина, Руководитель направления');
+    expect(text).not.toContain('Алексей');
+    expect(text).not.toContain('РОП');
   });
 
   it('gives the model client types instead of client names', () => {
@@ -189,6 +200,14 @@ describe('compileClientBriefForLetters', () => {
   it('returns an empty string for an empty brief', () => {
     expect(compileClientBriefForLetters({ ...BRIEF, fields: EMPTY_BRIEF_FIELDS })).toBe('');
     expect(compileClientBriefForLetters(null)).toBe('');
+    const emptyWithDashes = applyClientBriefEdit(null, {
+      company_description: '---', persona_name: ' — — — ', lead_recipient_email: '– –',
+    }, { exclude: ['---', ' — – '], include: ['B2B-SaaS'], qualification: '— —' });
+    expect(emptyWithDashes.fields.company_description).toBe('');
+    expect(emptyWithDashes.fields.persona_name).toBe('');
+    expect(emptyWithDashes.fields.lead_recipient_email).toBe('');
+    expect(emptyWithDashes.icp).toEqual({ include: ['B2B-SaaS'], exclude: [], size: '', geo: '', triggers: [], qualification: '' });
+    expect(compileClientBriefForLetters(emptyWithDashes)).toBe('');
   });
 });
 

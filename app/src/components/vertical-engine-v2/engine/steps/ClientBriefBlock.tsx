@@ -12,7 +12,7 @@
  * кабинета (lib/clientBrief), здесь только представление в токенах движка.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   ALLOWED_PRICE_TIERS,
@@ -102,11 +102,8 @@ const SECTIONS: Array<{ title: string; fields: FieldDef[] }> = [
   {
     title: 'Коммуникация',
     fields: [
-      { key: 'persona_name', label: 'От чьего лица ведём диалог — имя' },
-      { key: 'persona_position', label: 'От чьего лица — должность' },
-      { key: 'lead_recipient_name', label: 'Кому передаём лидов — имя' },
-      { key: 'lead_recipient_email', label: 'Кому передаём лидов — email' },
-      { key: 'lead_recipient_position', label: 'Кому передаём лидов — должность' },
+      { key: 'persona_name', label: 'Имя отправителя в письмах' },
+      { key: 'persona_position', label: 'Должность отправителя' },
       { key: 'lead_magnets', label: 'Лид-магниты', long: true },
       { key: 'guarantees', label: 'Гарантии клиенту', long: true },
     ],
@@ -145,7 +142,6 @@ export function ClientBriefBlock({
   const [fields, setFields] = useState<ClientBriefFields>(EMPTY_BRIEF_FIELDS);
   const [icp, setIcp] = useState<VeClientBriefIcpDto>(EMPTY_ICP);
   const [clientTypes, setClientTypes] = useState<string[]>([]);
-  const [missing, setMissing] = useState<string[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
   const [uploadedAt, setUploadedAt] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -159,7 +155,6 @@ export function ClientBriefBlock({
     setFields(data.brief?.fields ?? EMPTY_BRIEF_FIELDS);
     setIcp(data.brief?.icp ?? EMPTY_ICP);
     setClientTypes(data.brief?.client_types ?? []);
-    setMissing(data.brief?.missing ?? []);
     setFileName(data.brief?.file_name ?? null);
     setUploadedAt(data.brief?.uploaded_at ?? '');
     setDirty(false);
@@ -237,14 +232,6 @@ export function ClientBriefBlock({
     setDirty(true);
   };
 
-  const filledCount = useMemo(
-    () =>
-      SECTIONS.flatMap((s) => s.fields).filter((f) => (fields[f.key] as string).trim().length > 0)
-        .length,
-    [fields],
-  );
-  const totalCount = useMemo(() => SECTIONS.flatMap((s) => s.fields).length, []);
-
   return (
     <div className="mt-8 border-t border-gray-100 pt-6 text-left">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -300,10 +287,7 @@ export function ClientBriefBlock({
           ) : null}
 
           <p className={`text-xs ${HE.muted2}`}>
-            Заполнено {filledCount} из {totalCount} полей.
-            {missing.length
-              ? ' Пустые поля движок не выдумывает — допишите то, что знаете сами.'
-              : ''}
+            Заполняйте только известные данные. Остальные поля можно оставить пустыми.
           </p>
 
           <div className="grid gap-4 xl:grid-cols-2">
@@ -313,13 +297,9 @@ export function ClientBriefBlock({
                 <div className="mt-2 space-y-3">
                   {section.fields.map((field) => {
                     const value = fields[field.key] as string;
-                    const isGap = !value.trim();
                     return (
                       <label key={field.key} className="block">
-                        <span className={`text-xs ${isGap ? 'text-amber-600' : HE.muted2}`}>
-                          {field.label}
-                          {isGap ? ' · не заполнено' : ''}
-                        </span>
+                        <span className={`text-xs ${HE.muted2}`}>{field.label}</span>
                         {field.long ? (
                           <textarea
                             value={value}
@@ -341,9 +321,7 @@ export function ClientBriefBlock({
 
                   {section.title === 'Продукт и оффер' ? (
                     <label className="block">
-                      <span className={`text-xs ${fields.price_tier ? HE.muted2 : 'text-amber-600'}`}>
-                        Ценовая категория{fields.price_tier ? '' : ' · не заполнено'}
-                      </span>
+                      <span className={`text-xs ${HE.muted2}`}>Ценовая категория</span>
                       <select
                         value={fields.price_tier ?? ''}
                         onChange={(e) => {
@@ -381,7 +359,7 @@ export function ClientBriefBlock({
             <div className="mt-3 space-y-3">
               {ICP_LISTS.map((list) => (
                 <label key={list.key} className="block">
-                  <span className={`text-xs ${list.key === 'exclude' ? 'text-amber-600' : HE.muted2}`}>
+                  <span className={`text-xs ${HE.muted2}`}>
                     {list.label} · {list.hint}
                   </span>
                   <textarea

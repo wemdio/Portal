@@ -60,6 +60,11 @@ async function readSetup(db: SupabaseClient, projectId: string, request: VeOutre
   if (request.items.some((item) => !preparedIds.has(item.hypothesis_id))) {
     fail('Одна из баз запуска больше не входит в выбранные гипотезы. Обновите обзор запуска.');
   }
+  const paused = await db.from('ve_outreach_preparations').select('hypothesis_id')
+    .eq('project_id', projectId).in('hypothesis_id', request.items.map((item) => item.hypothesis_id))
+    .not('paused_at', 'is', null).limit(1).maybeSingle();
+  if (paused.error) throw new VeOutreachLaunchError('Не удалось проверить состояние подготовки выбранных баз.', 503);
+  if (paused.data) fail('Подготовка одной из выбранных баз на паузе. Продолжите её перед запуском.');
   for (const item of request.items) {
     const approval = data.approved_bases?.[item.base_id];
     if (approval?.template_id !== item.template_id || approval?.revision !== item.preview_revision) fail('База или письма изменились после одобрения. Проверьте их заново.');

@@ -82,6 +82,14 @@ export async function POST(req: NextRequest, { params }: Context) {
             p_project_id: projectId, p_revision: b.revision, p_hypothesis_id: b.hypothesis_id,
             p_resume_collection: preparationAction?.resume_collection === true,
           });
+      } else if (b.action === 'pause') {
+        if (!uuid(b.hypothesis_id)) return NextResponse.json({ error: 'Укажите базу для паузы' }, { status: 400 });
+        result = await supabaseAdmin.rpc('ve_pause_outreach_hypothesis_preparation', {
+          p_project_id: projectId, p_revision: b.revision, p_hypothesis_id: b.hypothesis_id,
+        });
+        if (!result.error) await logAudit('tools.vertical-engine-v2.preparation.paused', 'Подготовка базы приостановлена',
+          { project_id: projectId, hypothesis_id: b.hypothesis_id, revision: b.revision },
+          { userId: auth.auth.userId, route: '/api/tools/vertical-engine-v2/projects/[id]/outreach' });
       } else if (b.action === 'approve') {
         if (!uuid(b.base_id) || !uuid(b.template_id) || typeof b.reviewed_revision !== 'string'
           || !b.reviewed_revision.trim() || b.reviewed_revision.length > 128 || typeof b.approved !== 'boolean') {
