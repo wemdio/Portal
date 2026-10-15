@@ -12,6 +12,9 @@ export const VeAudienceScopeSchema = z.object({
 }).strict();
 export type VeAudienceScope = z.infer<typeof VeAudienceScopeSchema>;
 
+/** Stamped by the upgraded internal project-creation API, never backfilled. */
+export const VE_AUDIENCE_GENERATION_VERSION = 1;
+
 /** Missing scope is legacy. Unknown versions or malformed scopes must not
  * silently fall back to a wider title/description audience. */
 export function readVeAudienceScope(value: unknown): VeAudienceScope | null {
@@ -46,7 +49,19 @@ export function isVeAudienceScopeEnabled(projectId: string | null | undefined): 
   return allowed.includes('*') || allowed.includes(projectId);
 }
 
-export function isVeAudienceGenerationEnabled(projectId: string | null | undefined): boolean {
+export function isVeAudienceGenerationEnabled(
+  projectId: string | null | undefined,
+  generationVersion?: unknown,
+): boolean {
+  // A persisted project contract survives retries and does not depend on env
+  // allowlists. Reject future/corrupt versions before making a paid model call.
+  if (generationVersion != null) {
+    if (generationVersion !== VE_AUDIENCE_GENERATION_VERSION) {
+      throw new Error('Unsupported VE audience generation version');
+    }
+    return Boolean(projectId);
+  }
+  // Legacy projects retain the existing explicit pilot opt-in.
   if (!isVeAudienceScopeEnabled(projectId) || !projectId) return false;
   const allowed = (process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS ?? '').split(/[,\s]+/).filter(Boolean);
   return allowed.includes('*') || allowed.includes(projectId);

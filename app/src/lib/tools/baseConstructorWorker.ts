@@ -35,6 +35,7 @@ import {
 import { extractEmail, extractEmails, findColumnIndex } from './dfybUtils';
 import { parseFoundEmailOrigin, shouldTrackFoundEmailOrigin } from './foundEmailOrigin';
 import { uploadExportArtifact } from './csvExportArtifact';
+import { taJevEnabled } from '@/lib/taScoringJev';
 import {
   accumulateTaScoringTelemetry,
   createBaseConstructorMetrics,
@@ -102,6 +103,12 @@ interface StepConfig {
    * служебные колонки и EN-варианты блок-листов (см. ConstructorLocale).
    */
   locale?: ConstructorLocale;
+  /**
+   * Оценка ЦА через Jev (lib/taScoringJev). Как и locale, ставит воркер — по
+   * флагу TA_SCORING_ENGINE и владельцу задачи; значение из step_config
+   * перезаписывается.
+   */
+  taScoringJev?: boolean;
   onCheckpoint?: (data: string[][]) => Promise<void>;
   onTaScoringStats?: (stats: TaScoringStats) => void;
   onTaScoringTelemetry?: (stats: TaScoringTelemetry) => void;
@@ -532,6 +539,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
     stepEnrich(data, prog, cancel, cfg.onCheckpoint, { locale: cfg.locale }),
   ta_scoring: (data, prog, cancel, cfg) =>
     stepTAScore(data, cfg.brief || '', prog, cancel, {
+      jev: cfg.taScoringJev === true,
       keepAllScored: cfg.keepAllScored,
       onStats: cfg.onTaScoringStats,
       onTelemetry: cfg.onTaScoringTelemetry,
@@ -1015,6 +1023,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           : {}),
         ...(stepKey === 'ta_scoring'
           ? {
+              taScoringJev: taJevEnabled('constructor', job.user_id),
               onTaScoringStats: (stats) => {
                 taScoringComplete = true;
                 if (latestTaTelemetry) recordTaTelemetry({

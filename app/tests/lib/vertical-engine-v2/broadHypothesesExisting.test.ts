@@ -31,7 +31,7 @@ import {
   type HypothesesPromptInput,
 } from '@/lib/verticalEngineV2/prompts/hypotheses';
 import { BROAD_HYPOTHESES_RULES_EN, buildHypothesesInstantMessagesEn } from '@/lib/verticalEngineV2/prompts/hypotheses.en';
-import { VeBroadHypothesesOnlySchema, VeHypothesesBatchSchema, VeScopedBroadHypothesesOnlySchema } from '@/lib/verticalEngineV2/schemas';
+import { VeBroadHypothesesOnlySchema, VeHypothesesBatchSchema, VeScopedBroadHypothesesOnlySchema, VeScopedHypothesesBatchSchema } from '@/lib/verticalEngineV2/schemas';
 import { VE_BROAD_RESEARCH_BUSY_TEXT, selectNewBroadCandidates, veBroadTitleKey } from '@/lib/verticalEngineV2/broadHypotheses';
 import {
   VE_BROAD_ADD_LABEL,
@@ -166,9 +166,14 @@ beforeEach(() => {
 afterAll(() => { delete process.env.VE_MODEL_RESEARCH; });
 
 describe('VE2 stage broad_hypotheses on an existing project', () => {
-  it('uses one scoped generation only when both flags allow it and preserves its receipt after flag removal', async () => {
+  it('uses saved project generation versions or explicit legacy opt-in and preserves the scoped receipt after flag removal', async () => {
     const priorScope = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS, priorGeneration = process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS;
     const scope = { version: 1, kind: 'sector', any_of: ['Финтех', 'Платежные провайдеры'], required: ['Россия'], excluded: [] };
+    // Both titles collapse in append deduplication; different requirements must retry instead of disappearing.
+    expect(VeScopedBroadHypothesesOnlySchema.safeParse({ broad_hypotheses: [
+      { ...sector('Платёжные компании'), audience_scope: scope },
+      { ...sector('Платежные компании'), audience_scope: { ...scope, required: ['Казахстан'] } },
+    ] }).success).toBe(false);
     const db = broadDb(seedTables(), { loseReply: true });
     const before = snapshot(db);
     try {
@@ -186,6 +191,50 @@ describe('VE2 stage broad_hypotheses on an existing project', () => {
       await runVeStage(job(), { supabase: db as never });
       expect(mockCallLLMWithSchema).toHaveBeenCalledTimes(1);
       for (const table of ['ve_bases', 've_templates', 've_outreach_setups']) expect(snapshot(db)[table]).toEqual(before[table]);
+
+      // New projects persist the version at creation. Both generation stages
+      // re-read that version on later jobs without relying on rollout flags.
+      const broadCandidate = { ...sector('Финтех'), audience_scope: scope };
+      const narrowScope = { ...scope, kind: 'segment', any_of: ['Платёжные провайдеры'] };
+      for (const generationVersion of [undefined, null, 1]) {
+        const tables = seedTables();
+        if (generationVersion !== undefined) tables.ve_projects[0].audience_generation_version = generationVersion;
+        const versionDb = broadDb(tables);
+        const versionBefore = snapshot(versionDb);
+        const scoped = generationVersion === 1;
+        llmReturns({ broad_hypotheses: [broadCandidate] });
+        await runVeStage(job(), { supabase: versionDb as never, market: 'us' });
+        expect(mockCallLLMWithSchema.mock.calls.at(-1)?.[1]).toBe(scoped ? VeScopedBroadHypothesesOnlySchema : VeBroadHypothesesOnlySchema);
+        expect(versionDb.getRows('ve_hypotheses').find(row => row.broad)?.audience_scope).toEqual(scoped ? scope : undefined);
+        if (scoped) {
+          // A new append job reads the persisted version, unlike receipt replay.
+          await runVeStage(await nextJob(versionDb), { supabase: versionDb as never, market: 'us' });
+          expect(mockCallLLMWithSchema.mock.calls.at(-1)?.[1]).toBe(VeScopedBroadHypothesesOnlySchema);
+          expect(versionDb.getRows('ve_hypotheses').filter(row => row.broad)).toHaveLength(1);
+        }
+        llmReturns({ broad_hypotheses: [broadCandidate], hypotheses: [
+          { ...sector('Платёжные провайдеры'), tier: 2, audience_scope: narrowScope },
+        ] });
+        for (let pass = 0; pass < (scoped ? 2 : 1); pass++) {
+          const result = await runVeStage({ ...job(randomUUID()), stage: 'hypotheses' }, { supabase: versionDb as never, market: 'us' });
+          const output = result.result as { audience_scope_version?: number; candidates: Row[] };
+          expect(mockCallLLMWithSchema.mock.calls.at(-1)?.[1]).toBe(scoped ? VeScopedHypothesesBatchSchema : VeHypothesesBatchSchema);
+          expect(output.audience_scope_version).toBe(scoped ? 1 : undefined);
+          expect(output.candidates.map(candidate => candidate.audience_scope))
+            .toEqual(scoped ? [scope, narrowScope] : [undefined, undefined]);
+        }
+        for (const table of ['ve_projects', 've_bases', 've_templates', 've_outreach_setups']) {
+          expect(snapshot(versionDb)[table]).toEqual(versionBefore[table]);
+        }
+      }
+      const invalidTables = seedTables();
+      invalidTables.ve_projects[0].audience_generation_version = 2;
+      const invalidDb = broadDb(invalidTables);
+      const callsBeforeInvalid = mockCallLLMWithSchema.mock.calls.length;
+      for (const stage of ['broad_hypotheses', 'hypotheses'] as const) {
+        await expect(runVeStage({ ...job(), stage }, { supabase: invalidDb as never, market: 'us' })).rejects.toThrow();
+      }
+      expect(mockCallLLMWithSchema).toHaveBeenCalledTimes(callsBeforeInvalid);
     } finally {
       if (priorScope === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS; else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = priorScope;
       if (priorGeneration === undefined) delete process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS; else process.env.VE_AUDIENCE_GENERATION_PROJECT_IDS = priorGeneration;
@@ -454,8 +503,21 @@ const pgliteModule = process.env.PGLITE_MODULE ?? (() => {
     const scopedMigration = read('20261015_0001_ve_audience_scope.sql');
     await db.exec(scopedMigration);
     await db.exec(scopedMigration);
-    const project = randomUUID(), existing = randomUUID(), job = randomUUID();
-    await db.query("insert into ve_projects values ($1, 'researched')", [project]);
+    const project = randomUUID(), scopedProject = randomUUID(), omittedProject = randomUUID(), existing = randomUUID(), job = randomUUID();
+    await db.query("insert into ve_projects(id,status) values ($1, 'researched')", [project]);
+    const generationMigration = read('20261015_0002_ve_new_project_audiences.sql');
+    await db.exec(generationMigration);
+    await db.query("insert into ve_projects(id,status,audience_generation_version) values ($1, 'researched', 1)", [scopedProject]);
+    await db.query("insert into ve_projects(id,status) values ($1, 'researched')", [omittedProject]);
+    await db.exec(generationMigration);
+    for (const [id, version] of [[project,null],[omittedProject,null],[scopedProject,1]]) {
+      assert.deepEqual((await db.query('select status,audience_generation_version from ve_projects where id=$1',[id])).rows,
+        [{status:'researched',audience_generation_version:version}]);
+    }
+    for (const version of [0,2,-1]) {
+      await assert.rejects(db.query("insert into ve_projects(id,status,audience_generation_version) values ($1,'researched',$2)",
+        [randomUUID(),version]), /check constraint/i);
+    }
     await db.query("insert into ve_verticals(id,project_id,name,synonyms,rank) values ($1,$2,'Узкая','[\"Учёт\"]',7)", [existing,project]);
     await db.query("insert into ve_jobs(id,project_id,stage,status) values ($1,$2,'broad_hypotheses','running')", [job,project]);
     const candidate = (title, pct = 60) => ({title, description:'Описание', fit_rationale:'Причина', potential_pct:pct});
@@ -505,8 +567,7 @@ const pgliteModule = process.env.PGLITE_MODULE ?? (() => {
     const emptyReceipt = await invoke([],empty);
     assert.deepEqual(emptyReceipt.added,[]);
     assert.deepEqual(await invoke([candidate('F')],empty),emptyReceipt);
-    const scopedProject = randomUUID(), scopedJob = randomUUID();
-    await db.query("insert into ve_projects values ($1, 'researched')", [scopedProject]);
+    const scopedJob = randomUUID();
     await db.query("insert into ve_verticals(id,project_id,name,rank) values ($1,$2,'Existing',1)", [randomUUID(),scopedProject]);
     await db.query("insert into ve_jobs(id,project_id,stage,status) values ($1,$2,'broad_hypotheses','running')", [scopedJob,scopedProject]);
     const scope = {version:1,kind:'sector',any_of:['Финтех','Платёжные провайдеры'],required:['Россия'],excluded:[]};

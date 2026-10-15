@@ -133,6 +133,8 @@ export interface VeProject {
   created_by: string | null;
   name: string;
   website_url: string;
+  /** New internal projects use v1; null/absent preserves legacy generation. */
+  audience_generation_version?: 1 | null;
   /** First server-validated launch preset binding; null for legacy projects. */
   launch_preset_id?: string | null;
   /** Canonical Instantly workspace observed when the preset was first bound. */

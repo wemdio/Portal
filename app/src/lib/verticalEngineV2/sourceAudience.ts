@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { readVeAudienceScope, veAudienceScopeKey, veAudienceScopeText, type VeAudienceScope } from './audienceScope';
+import { VE_AUDIENCE_GENERATION_VERSION, readVeAudienceScope, veAudienceScopeKey, veAudienceScopeText, type VeAudienceScope } from './audienceScope';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, type VeNicheSourceProfile } from './nicheSourcePolicy';
 import { veSourceStrategyKey } from './adaptiveCollection';
+import type { VeMarket } from './market';
 import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
 
 export interface VeSourceAudienceHypothesis {
@@ -13,7 +14,7 @@ export interface VeCollectionAudienceSnapshot {
   version: 1; hash: string; hypotheses: VeSourceAudienceHypothesis[];
   applied_at: string; reason: 'new_preview' | 'explicit_continuation';
 }
-export interface VeSourceCostPolicy { version: 1; website_discovery: 'existing_only' }
+export interface VeSourceCostPolicy { version: 1; website_discovery: 'existing_only' | 'existing_then_configured' }
 
 const text = (value: string) => value.toLowerCase().replace(/ё/g, 'е');
 /** A sector named fintech includes payment providers, not only that subtype.
@@ -52,13 +53,26 @@ export function readVeCollectionAudienceSnapshot(value: unknown): VeCollectionAu
 export function readVeSourceCostPolicy(value: unknown): VeSourceCostPolicy | null {
   if (value === undefined || value === null) return null;
   const policy = value as VeSourceCostPolicy;
-  if (policy.version !== 1 || policy.website_discovery !== 'existing_only') throw new Error('Unknown collection cost policy');
+  if (policy.version !== 1 || !['existing_only', 'existing_then_configured'].includes(policy.website_discovery)) throw new Error('Unknown collection cost policy');
   return policy;
+}
+
+/** Freeze cost separately from scope. Ordinary new projects retain free-first
+ * discovery; the pilot and former specialty restrictions never buy more search.
+ * Mandatory conditions can prevent a plan rewrite without relaxing its cost cap. */
+export function veNewAudienceSourceCostPolicy(hypothesis: VeSourceAudienceHypothesis, generationVersion: unknown, market: VeMarket): VeSourceCostPolicy {
+  if (generationVersion != null && generationVersion !== VE_AUDIENCE_GENERATION_VERSION) throw new Error('Unsupported VE audience generation version');
+  const scope = readVeAudienceScope(hypothesis.audience_scope);
+  const restricted = market === 'ru' && (isVeBroadFintechAudience(hypothesis) || detectVeNicheSourceProfile([hypothesis])
+    || scope?.any_of.some((title) => detectVeNicheSourceProfile([{ title }])));
+  return { version: 1, website_discovery: generationVersion === VE_AUDIENCE_GENERATION_VERSION
+    && scope && !restricted ? 'existing_then_configured' : 'existing_only' };
 }
 
 /** Cost is independent of how the audience is named or a source specialized. */
 export function veSourceDiscoveryIsExistingOnly(info: { cost_policy?: unknown; niche_source_profile?: unknown; source_selection?: unknown; search_policy?: { phase?: string } }): boolean {
-  return !!readVeSourceCostPolicy(info.cost_policy) || !!info.niche_source_profile || !!info.source_selection || info.search_policy?.phase === 'existing';
+  return readVeSourceCostPolicy(info.cost_policy)?.website_discovery === 'existing_only'
+    || !!info.niche_source_profile || !!info.source_selection || info.search_policy?.phase === 'existing';
 }
 
 interface RefreshableInfo {
@@ -146,7 +160,7 @@ export function normalizeVeAudienceSourcePlan(plan: VeSourcePlan, hypotheses: Ve
  * Legacy approved previews return null and retain their existing supply path. */
 export async function loadVeApprovedSupplyAudience(db: SupabaseClient, input: {
   projectId: string; hypothesisId: string; batchId: string; baseId: string;
-}): Promise<VeCollectionAudienceSnapshot | null> {
+}): Promise<{ snapshot: VeCollectionAudienceSnapshot; costPolicy: VeSourceCostPolicy } | null> {
   const { data: batch, error: batchError } = await db.from('ve_contact_supply_batches')
     .select('plan_id,base_id').eq('id', input.batchId).maybeSingle();
   if (batchError || !batch || batch.base_id !== input.baseId || !batch.plan_id) throw new Error('Supply audience batch is unavailable');
@@ -161,7 +175,8 @@ export async function loadVeApprovedSupplyAudience(db: SupabaseClient, input: {
     .eq('id', item.base_id).maybeSingle();
   if (sourceError || !source || source.project_id !== input.projectId || source.hypothesis_id !== input.hypothesisId) throw new Error('Supply source audience is unavailable');
   const snapshot = readVeCollectionAudienceSnapshot(source.audience_snapshot);
+  const costPolicy = readVeSourceCostPolicy(source.cost_policy);
   if (snapshot && (snapshot.hypotheses.length !== 1 || snapshot.hypotheses[0].id !== input.hypothesisId
-    || !readVeSourceCostPolicy(source.cost_policy))) throw new Error('Supply source audience does not match approval');
-  return snapshot ? structuredClone(snapshot) : null;
+    || !costPolicy)) throw new Error('Supply source audience does not match approval');
+  return snapshot && costPolicy ? { snapshot: structuredClone(snapshot), costPolicy: structuredClone(costPolicy) } : null;
 }

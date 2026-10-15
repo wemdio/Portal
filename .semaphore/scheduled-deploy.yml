@@ -587,18 +587,9 @@ blocks:
                   sudo -n fuser -k \"\${port}/tcp\" 2>/dev/null || true;
                   sleep 2;
                 };
-                if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
-                  echo '--- Step 2: enable maintenance mode ---';
-                  upsert_env MAINTENANCE_MODE true;
-                  fix_env_permissions;
-                  sudo -n docker stop portal 2>/dev/null || true;
-                  sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
-                  wait_port_free 3000 15;
-                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal;
-                  maintenance_enabled=1;
-                fi;
+                # Update consumers before the new Portal can enqueue versioned work.
                 if [ -n \"\${WORKER_TARGETS}\" ]; then
-                  echo '--- Step 3: drain workers ---';
+                  echo '--- Step 2: drain workers ---';
                   sudo -n bash drain-worker.sh \${WORKER_TARGETS};
                 fi;
                 force_rm_svc() {
@@ -611,6 +602,22 @@ blocks:
                   sleep 3;
                   echo \"\${cids}\" | xargs -r sudo -n docker rm -f 2>/dev/null || true;
                 };
+                if [ -n \"\${WORKER_TARGETS}\" ]; then
+                  echo \"--- Step 3: restart selected workers: \${WORKER_TARGETS} ---\";
+                  for svc in \${WORKER_TARGETS}; do force_rm_svc \"\$svc\"; done;
+                  sudo -n docker rm -f portal-worker-enrich-10 2>/dev/null || true;
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \${WORKER_TARGETS};
+                fi;
+                if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
+                  echo '--- Step 4: enable maintenance mode ---';
+                  upsert_env MAINTENANCE_MODE true;
+                  fix_env_permissions;
+                  sudo -n docker stop portal 2>/dev/null || true;
+                  sudo -n docker rm -f portal portal-portal-1 2>/dev/null || true;
+                  wait_port_free 3000 15;
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate portal;
+                  maintenance_enabled=1;
+                fi;
                 if [ ${IDB_BACKUP_DEPLOYED} = 1 ]; then
                   echo '--- Retire legacy portal-backup from Portal host ---';
                   # После миграции 22.07.2026 portal-backup живёт в проекте
@@ -640,7 +647,7 @@ blocks:
                   echo '[deploy] Instantly DB deploy was skipped; keeping legacy portal-backup untouched';
                 fi;
                 if [ -n \"\${CORE_TARGETS}\" ]; then
-                  echo \"--- Step 4: restart selected services: \${CORE_TARGETS} ---\";
+                  echo \"--- Step 5: restart selected services: \${CORE_TARGETS} ---\";
                   for svc in \${CORE_TARGETS}; do force_rm_svc \"\$svc\"; done;
                   if [ \"\${PORTAL_CHANGED}\" = 1 ]; then wait_port_free 3000 15; fi;
                   # --remove-orphans: сервис, убранный из compose (пример:
@@ -649,7 +656,7 @@ blocks:
                   sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate --remove-orphans \${CORE_TARGETS};
                 fi;
                 if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
-                  echo '--- Step 4.1: verify Docker socket access inside portal ---';
+                  echo '--- Step 5.1: verify Docker socket access inside portal ---';
                   PORTAL_GROUPS=\$(sudo -n docker inspect portal --format '{{json .HostConfig.GroupAdd}}' 2>/dev/null || echo '[]');
                   echo \"portal GroupAdd=\${PORTAL_GROUPS}\";
                   case \"\${PORTAL_GROUPS}\" in
@@ -657,12 +664,6 @@ blocks:
                     *) echo 'portal is missing expected DOCKER_GID in GroupAdd' && exit 1;;
                   esac;
                   sudo -n docker exec portal sh -lc 'id; ls -ln /var/run/docker.sock; test -S /var/run/docker.sock && test -r /var/run/docker.sock && test -w /var/run/docker.sock';
-                fi;
-                if [ -n \"\${WORKER_TARGETS}\" ]; then
-                  echo \"--- Step 5: restart selected workers: \${WORKER_TARGETS} ---\";
-                  for svc in \${WORKER_TARGETS}; do force_rm_svc \"\$svc\"; done;
-                  sudo -n docker rm -f portal-worker-enrich-10 2>/dev/null || true;
-                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \${WORKER_TARGETS};
                 fi;
                 if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
                   echo '--- Step 6: disable maintenance mode (normal path) ---';
