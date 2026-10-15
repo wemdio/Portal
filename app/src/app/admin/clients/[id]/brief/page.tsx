@@ -15,13 +15,13 @@ export default function AdminClientBriefPage() {
   const { userRole } = useUser();
   const admin = isAdmin(userRole);
 
-  const [client, setClient] = useState<UserProfile | null>(null);
+  const [client, setClient] = useState<Pick<UserProfile, 'full_name' | 'email'> | null>(null);
 
   useEffect(() => {
     if (!admin || !clientUserId) return;
     void (async () => {
-      const { data } = await supabase.from('profiles').select('*').eq('id', clientUserId).single();
-      setClient((data as UserProfile | null) ?? null);
+      const { data } = await supabase.from('profiles').select('full_name, email').eq('id', clientUserId).single();
+      setClient((data as Pick<UserProfile, 'full_name' | 'email'> | null) ?? null);
     })();
   }, [admin, clientUserId]);
 

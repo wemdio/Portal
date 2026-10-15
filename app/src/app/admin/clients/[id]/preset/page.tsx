@@ -114,7 +114,7 @@ export default function ClientPresetPage() {
   const { userRole } = useUser();
   const admin = isAdmin(userRole);
 
-  const [client, setClient] = useState<UserProfile | null>(null);
+  const [client, setClient] = useState<Pick<UserProfile, 'full_name' | 'email'> | null>(null);
   const [preset, setPreset] = useState<PresetState>(DEFAULT_PRESET);
   const [hasExistingPreset, setHasExistingPreset] = useState(false);
   const [instantlyAccounts, setInstantlyAccounts] = useState<InstantlyAccountOption[]>([]);
@@ -169,14 +169,14 @@ export default function ClientPresetPage() {
     setError('');
     try {
       const [{ data: profileData }, presetRes] = await Promise.all([
-        supabase.from('profiles').select('*').eq('id', clientUserId).single(),
+        supabase.from('profiles').select('full_name, email').eq('id', clientUserId).single(),
         apiFetch<{
           preset: (PresetState & { id: string }) | null;
           instantly_accounts?: InstantlyAccountOption[];
         }>(`/api/admin/clients/${clientUserId}/preset`),
       ]);
 
-      setClient((profileData as UserProfile | null) ?? null);
+      setClient((profileData as Pick<UserProfile, 'full_name' | 'email'> | null) ?? null);
       setInstantlyAccounts(presetRes.instantly_accounts?.length
         ? presetRes.instantly_accounts
         : [{ id: 'main', label: 'Основной Instantly', isDefault: true }]);
