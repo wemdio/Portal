@@ -37,6 +37,7 @@ import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
 import { FolderSettingsModal, chainDaysLabel } from './FolderSettingsModal';
 import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { RecipientsModal } from './RecipientsModal';
+import { SenderModal } from './SenderModal';
 import { formatInZone, StartCampaignModal, zoneCaption } from './StartCampaignModal';
 
 type CampaignAction = 'start' | 'pause' | 'finish' | 'delete' | 'unschedule';
@@ -71,6 +72,82 @@ function deleteConfirmText(campaign: CampaignDto): string {
   return (
     `${question}\n\nКомпании в ней — из автоаутрича. Если письма из кампании уже уходили, эти компании больше `
     + 'не зальются в Рассылку — чтобы им не написали второй раз. Если писем ещё не было, их можно будет залить заново.'
+  );
+}
+
+/**
+ * Подтверждение «Завершить» / «Удалить» в окне портала вместо системного
+ * confirm(): тот выглядел чужеродно и не показывал, что удаление необратимо.
+ */
+function ConfirmActionModal({
+  campaign,
+  action,
+  onCancel,
+  onConfirm,
+}: {
+  campaign: CampaignDto;
+  action: 'finish' | 'delete';
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const isDelete = action === 'delete';
+  const paragraphs = isDelete
+    ? deleteConfirmText(campaign).split('\n\n')
+    : ['Запланированные письма отменятся, новые отправляться не будут. Статистика и база останутся.'];
+
+  return (
+    <SenderModal
+      title={isDelete ? 'Удалить кампанию?' : 'Завершить кампанию?'}
+      subtitle={`«${campaign.name}»`}
+      onClose={busy ? () => {} : onCancel}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-lg border border-zinc-300 px-3.5 py-2 text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-60"
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await onConfirm();
+              } finally {
+                setBusy(false);
+              }
+            }}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium text-white disabled:opacity-60 ${
+              isDelete ? 'bg-red-600 hover:bg-red-500' : 'bg-zinc-900 hover:bg-zinc-700'
+            }`}
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : isDelete ? <Trash2 className="h-4 w-4" /> : <Square className="h-3.5 w-3.5" />}
+            {isDelete ? 'Удалить' : 'Завершить'}
+          </button>
+        </>
+      }
+    >
+      <div className="flex gap-3">
+        <div
+          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
+            isDelete ? 'bg-red-100 text-red-600' : 'bg-amber-100 text-amber-700'
+          }`}
+        >
+          {isDelete ? <Trash2 className="h-5 w-5" /> : <Square className="h-4 w-4" />}
+        </div>
+        <div className="space-y-2 text-sm text-zinc-600">
+          {paragraphs.map((text) => (
+            <p key={text}>{text}</p>
+          ))}
+          {isDelete ? <p className="font-medium text-red-600">Отменить удаление будет нельзя.</p> : null}
+        </div>
+      </div>
+    </SenderModal>
   );
 }
 
@@ -805,6 +882,8 @@ export function CampaignsTab({
   const [recipientsOf, setRecipientsOf] = useState<CampaignDto | null>(null);
   // «Запустить» / «Продолжить» открывает выбор: сразу или отложить.
   const [startOf, setStartOf] = useState<CampaignDto | null>(null);
+  // «Завершить» / «Удалить» ждут подтверждения в окне.
+  const [confirmOf, setConfirmOf] = useState<{ campaign: CampaignDto; action: 'finish' | 'delete' } | null>(null);
   // Папка, чьи настройки открыты.
   const [folderSettings, setFolderSettings] = useState<SenderFolderDto | null>(null);
   // Кампания из ссылки ищется один раз — после первой загрузки: обновление
@@ -905,15 +984,14 @@ export function CampaignsTab({
     return () => window.clearTimeout(timer);
   }, [highlightId]);
 
-  const act = async (campaign: CampaignDto, action: CampaignAction) => {
+  const act = async (campaign: CampaignDto, action: CampaignAction, confirmed = false) => {
     if (action === 'start') {
       setStartOf(campaign);
       return;
     }
-    if (action === 'finish' && !window.confirm(`Завершить кампанию «${campaign.name}»? Запланированные письма отменятся.`)) {
-      return;
-    }
-    if (action === 'delete' && !window.confirm(deleteConfirmText(campaign))) {
+    // Завершение и удаление — только после окна подтверждения.
+    if ((action === 'finish' || action === 'delete') && !confirmed) {
+      setConfirmOf({ campaign, action });
       return;
     }
     try {
@@ -1211,6 +1289,19 @@ export function CampaignsTab({
         <RecipientsModal
           campaign={recipientsOf}
           onClose={() => setRecipientsOf(null)}
+        />
+      ) : null}
+
+      {confirmOf ? (
+        <ConfirmActionModal
+          key={`${confirmOf.action}-${confirmOf.campaign.id}`}
+          campaign={confirmOf.campaign}
+          action={confirmOf.action}
+          onCancel={() => setConfirmOf(null)}
+          onConfirm={async () => {
+            await act(confirmOf.campaign, confirmOf.action, true);
+            setConfirmOf(null);
+          }}
         />
       ) : null}
 
