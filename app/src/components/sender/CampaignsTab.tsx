@@ -582,7 +582,7 @@ export function CampaignsTab({
               aria-selected={view === item.id}
               onClick={() => setView(item.id)}
               className={`rounded-full px-3.5 py-1 text-sm font-semibold transition ${
-                view === item.id ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+                view === item.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
               }`}
             >
               {item.label}
