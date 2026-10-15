@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Loader2, MessageSquare, RefreshCw, Search, Settings } from 'lucide-react';
 import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
-import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
+import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto, type UnlinkedReplyDto } from './api';
 import { CampaignReplyKbModal } from './CampaignReplyKbModal';
 import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { SenderReplyPanel } from './SenderReplyPanel';
-import { UnlinkedReplies } from './UnlinkedReplies';
+import { UnlinkedLetter, UnlinkedList, useUnlinkedTotal } from './UnlinkedReplies';
 
 const COLUMN_DEFAULTS = { campaigns: 250, threads: 380 };
 const COLUMN_LIMITS = { campaigns: [180, 520], threads: [280, 760] } as const;
@@ -42,6 +42,10 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   // Переписки грузятся только после выбора кампании (или «Все кампании»):
   // сразу всё подряд — долго и не нужно. Ссылка на переписку открывает сразу.
   const [picked, setPicked] = useState(Boolean(initialThreadId));
+  // Жёлтый пункт «Входящие без привязки» внизу колонки кампаний.
+  const [unlinkedOpen, setUnlinkedOpen] = useState(false);
+  const [unlinkedReply, setUnlinkedReply] = useState<UnlinkedReplyDto | null>(null);
+  const unlinkedTotal = useUnlinkedTotal();
   // Поиск по названиям кампаний в левой колонке (15.10.2026): их десятки.
   const [campaignSearch, setCampaignSearch] = useState('');
   const [mailboxId, setMailboxId] = useState('');
@@ -138,6 +142,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   }, []);
   const maxPage = Math.max(1, Math.ceil(total / pageSize));
   const pickCampaign = (id: string) => {
+    setUnlinkedOpen(false);
     setPicked(true);
     setCampaignId(id);
     setMailboxId('');
@@ -183,7 +188,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               type="button"
               onClick={() => pickCampaign('')}
               className={`block w-full px-4 py-2 text-left text-sm transition-colors ${
-                picked && campaignId === '' ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
+                picked && !unlinkedOpen && campaignId === '' ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
               }`}
             >
               Все кампании
@@ -192,7 +197,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               <div key={campaign.id}>
                 <div
                   className={`group flex items-center gap-1 px-4 py-2 text-sm transition-colors ${
-                    campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
+                    !unlinkedOpen && campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
                   }`}
                 >
                   {/* Статус всегда справа, у шестерёнки: длинное название
@@ -238,6 +243,20 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             {campaigns.length > 0 && shownCampaigns.length === 0 ? (
               <p className="px-4 py-3 text-xs text-zinc-500">Ничего не нашлось.</p>
             ) : null}
+            {/* Письма, которые не удалось привязать к получателю, — отдельной
+                жёлтой «кампанией» внизу: раньше это был блок под всей вкладкой. */}
+            {unlinkedTotal ? (
+              <button
+                type="button"
+                onClick={() => { setUnlinkedOpen(true); setUnlinkedReply(null); }}
+                className={`mt-1 flex w-full items-center gap-1.5 border-t border-zinc-100 px-4 py-2 text-left text-sm transition-colors ${
+                  unlinkedOpen ? 'bg-amber-50 font-medium text-amber-800' : 'text-amber-700 hover:bg-amber-50'
+                }`}
+              >
+                <span className="min-w-0 flex-1 truncate">Входящие без привязки</span>
+                <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">{unlinkedTotal}</span>
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -248,6 +267,10 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             onMouseDown={(e) => columns.startDrag('threads', e)}
             onDoubleClick={() => columns.reset('threads')}
           />
+          {unlinkedOpen ? (
+            <UnlinkedList selectedId={unlinkedReply?.id ?? null} onSelect={setUnlinkedReply} />
+          ) : (
+          <>
           <div className="space-y-2 border-b border-zinc-200 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-900">
@@ -380,11 +403,21 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               </button>
             </div>
           ) : null}
+          </>
+          )}
         </div>
 
         {/* ── Переписка и ответ ── */}
         <div className="min-h-0">
-          {selected ? (
+          {unlinkedOpen ? (
+            unlinkedReply ? (
+              <UnlinkedLetter reply={unlinkedReply} />
+            ) : (
+              <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
+                Выберите письмо из списка
+              </div>
+            )
+          ) : selected ? (
             <SenderReplyPanel key={selected} recipientId={selected} onSent={() => void load()} onVerdictChange={() => void load()} />
           ) : (
             <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
@@ -393,9 +426,6 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
           )}
         </div>
       </div>
-
-      {/* Отдельным блоком: это не переписки, а письма, которые вообще не удалось к ним привязать. */}
-      <UnlinkedReplies refreshKey={page} />
 
       {kbCampaignId ? <CampaignReplyKbModal campaignId={kbCampaignId} onClose={() => setKbCampaignId(null)} /> : null}
     </div>
