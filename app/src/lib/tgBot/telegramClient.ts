@@ -27,6 +27,12 @@ export type SendMessageOptions = {
   messageThreadId?: number;
   replyToMessageId?: number;
   disableWebPagePreview?: boolean;
+  /**
+   * Картинка над текстом: превью этой ссылки Telegram показывает выше сообщения
+   * (так в текст без отдельной фотографии попадает логотип). Перекрывает
+   * `disableWebPagePreview`.
+   */
+  imageAboveText?: string;
 };
 
 export function escapeMarkdownV2(input: string): string {
@@ -84,7 +90,9 @@ export async function sendMessage(
     text: options.text,
     ...(options.parseMode ? { parse_mode: options.parseMode } : {}),
     ...(options.messageThreadId != null ? { message_thread_id: options.messageThreadId } : {}),
-    ...(options.disableWebPagePreview ? { disable_web_page_preview: true } : {}),
+    ...(options.imageAboveText
+      ? { link_preview_options: { url: options.imageAboveText, show_above_text: true, prefer_small_media: true } }
+      : options.disableWebPagePreview ? { disable_web_page_preview: true } : {}),
     ...(options.replyToMessageId != null
       ? {
           reply_parameters: {

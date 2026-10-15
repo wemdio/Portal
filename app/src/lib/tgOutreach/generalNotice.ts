@@ -16,6 +16,9 @@ import {
 } from '@/lib/senderLeads/telegram';
 import { TG_OUTREACH_TOOL_URL } from './leadMessage';
 
+/** Логотип Telegram над сообщением: файл лежит в public портала и открыт без входа. */
+export const TG_LOGO_URL = `${new URL(TG_OUTREACH_TOOL_URL).origin}/images/telegram-logo.png`;
+
 /** Переписка в сообщение не лезет целиком (предел Telegram 4096): оставляем конец, он свежее. */
 const DIALOG_MAX = 2200;
 const DIALOG_MARKER = '── Переписка ──';
@@ -33,7 +36,7 @@ export function buildGeneralLeadMessage(input: {
   card: string;
   dealUrl: string;
 }): string {
-  const lines: string[] = ['✈️ <b>Новый лид из Telegram-аутрича</b>', ''];
+  const lines: string[] = ['<b>Новый лид из Telegram-аутрича</b>', ''];
   lines.push(`<b>Компания:</b> ${escapeHtml(clip(input.campaignName || '—', 200))}`);
   lines.push(`<b>Контакт:</b> ${escapeHtml(clip(input.contact, 120))}`);
   if (input.offer) lines.push(`<b>Оффер:</b> ${escapeHtml(clip(input.offer, 200))}`);
@@ -52,5 +55,5 @@ export function buildGeneralLeadMessage(input: {
 export async function sendLeadToGeneral(input: Parameters<typeof buildGeneralLeadMessage>[0]): Promise<void> {
   const config = leadTelegramConfig();
   if (!config) return;
-  await sendLeadMessage(config, buildGeneralLeadMessage(input));
+  await sendLeadMessage(config, buildGeneralLeadMessage(input), TG_LOGO_URL);
 }

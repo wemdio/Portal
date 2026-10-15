@@ -97,12 +97,13 @@ export function leadMessageNote(html: string): string {
     .replace(/&amp;/g, '&');
 }
 
-export async function sendLeadMessage(config: LeadTelegramConfig, text: string): Promise<number> {
+export async function sendLeadMessage(config: LeadTelegramConfig, text: string, imageAboveText?: string): Promise<number> {
   const result = await sendMessage(config.token, {
     chatId: config.chatId,
     text,
     parseMode: 'HTML',
     disableWebPagePreview: true,
+    ...(imageAboveText ? { imageAboveText } : {}),
     ...(config.threadId ? { messageThreadId: config.threadId } : {}),
   });
   return result.message_id;
