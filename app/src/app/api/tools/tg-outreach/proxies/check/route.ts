@@ -55,14 +55,16 @@ export async function POST(req: NextRequest) {
       // Выборка сразу ограничена кампанией: id из чужой кампании просто не
       // найдётся, а доступ к самой кампании гарантирует RLS — тот же порядок,
       // что и у остальных ручек прокси.
-      const { data, error } = await auth.supabase
-        .from('tg_outreach_proxies')
-        .select('id, url, name')
-        .eq('campaign_id', campaignId)
-        .in('id', ids);
-      if (error) return jsonError(error.message, 500);
-
-      const rows = (data ?? []) as { id: string; url: string; name: string | null }[];
+      const rows: { id: string; url: string; name: string | null }[] = [];
+      for (let i = 0; i < ids.length; i += 100) {
+        const { data, error } = await auth.supabase
+          .from('tg_outreach_proxies')
+          .select('id, url, name')
+          .eq('campaign_id', campaignId)
+          .in('id', ids.slice(i, i + 100));
+        if (error) return jsonError(error.message, 500);
+        rows.push(...((data ?? []) as { id: string; url: string; name: string | null }[]));
+      }
       if (!rows.length) return jsonError('Прокси не найдены в этой кампании', 404);
 
       const items = await checkProxies(rows, {

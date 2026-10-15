@@ -42,14 +42,18 @@ export async function POST(req: NextRequest) {
         return jsonError('list_id должен быть uuid или null', 400);
       }
 
-      const { data, error } = await auth.supabase
-        .from('tg_outreach_proxies')
-        .update({ proxy_list_id: raw })
-        .eq('campaign_id', campaignId)
-        .in('id', ids)
-        .select('id');
-
-      if (error) return jsonError(error.message, 500);
+      // Id идут в адрес запроса: по 100, иначе «URI too long».
+      const data: { id: string }[] = [];
+      for (let i = 0; i < ids.length; i += 100) {
+        const { data: part, error } = await auth.supabase
+          .from('tg_outreach_proxies')
+          .update({ proxy_list_id: raw })
+          .eq('campaign_id', campaignId)
+          .in('id', ids.slice(i, i + 100))
+          .select('id');
+        if (error) return jsonError(error.message, 500);
+        data.push(...((part ?? []) as { id: string }[]));
+      }
 
       // Сколько реально обновилось — могло быть меньше ids, если часть уже
       // удалили или если RLS их отрезала. Возвращаем массив — клиент знает

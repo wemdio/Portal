@@ -7,7 +7,8 @@ export const dynamic = 'force-dynamic';
 
 const DEAD_LIST = 'Не работают';
 const NO_COUNTRY_LIST = 'Авто · страна не определена';
-const MOVE_CHUNK = 200;
+// 100 uuid в адресе запроса — предел: 500 давали «URI too long».
+const MOVE_CHUNK = 100;
 
 /**
  * POST — разложить проверенные «Неопределённые» прокси по спискам (15.10.2026).

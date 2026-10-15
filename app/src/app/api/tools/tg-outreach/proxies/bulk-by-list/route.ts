@@ -56,11 +56,13 @@ export async function POST(req: NextRequest) {
 
       const ids = (proxyRows ?? []).map((r) => (r as { id: string }).id);
       if (ids.length) {
-        const { error: accErr } = await auth.supabase
-          .from('tg_outreach_accounts')
-          .update({ proxy_id: null })
-          .in('proxy_id', ids);
-        if (accErr) return jsonError(accErr.message, 500);
+        for (let i = 0; i < ids.length; i += 100) {
+          const { error: accErr } = await auth.supabase
+            .from('tg_outreach_accounts')
+            .update({ proxy_id: null })
+            .in('proxy_id', ids.slice(i, i + 100));
+          if (accErr) return jsonError(accErr.message, 500);
+        }
 
         const { error: delErr } = await auth.supabase
           .from('tg_outreach_proxies')
