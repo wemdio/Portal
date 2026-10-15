@@ -5,8 +5,10 @@ import { useRouter } from 'next/navigation';
 import {
   BarChart3,
   CalendarClock,
+  Check,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Loader2,
   MoreHorizontal,
   Pause,
@@ -308,6 +310,185 @@ function CampaignRow({
   );
 }
 
+/** Столбцы таблицы кампаний. Название показывается всегда — без него строка ничья. */
+type ColumnKey = 'status' | 'progress' | 'today' | 'created' | 'replies' | 'bounces' | 'contacts';
+
+const COLUMNS: ReadonlyArray<{ key: ColumnKey; label: string }> = [
+  { key: 'status', label: 'Статус' },
+  { key: 'progress', label: 'Прогресс' },
+  { key: 'today', label: 'Отправлено сегодня' },
+  { key: 'created', label: 'Создана' },
+  { key: 'replies', label: 'Ответили' },
+  { key: 'bounces', label: 'Отбои' },
+  { key: 'contacts', label: 'Контактов в базе' },
+];
+
+const DEFAULT_COLUMNS: ColumnKey[] = ['status', 'progress', 'today', 'created'];
+const COLUMNS_STORAGE_KEY = 'portal:sender:campaign-columns';
+
+/** Выбор столбцов из браузера; битое или пустое сохранение — набор по умолчанию. */
+function loadColumns(): Set<ColumnKey> {
+  try {
+    const raw = window.localStorage.getItem(COLUMNS_STORAGE_KEY);
+    if (raw) {
+      const known = new Set(COLUMNS.map((c) => c.key));
+      const saved = (JSON.parse(raw) as unknown[]).filter((k): k is ColumnKey => known.has(k as ColumnKey));
+      return new Set(saved);
+    }
+  } catch {
+    // Приватное окно или битая строка — просто по умолчанию.
+  }
+  return new Set(DEFAULT_COLUMNS);
+}
+
+/** Шестерёнка: какие столбцы показывать. Выбор помнится в этом браузере. */
+function ColumnsMenu({ visible, onToggle }: { visible: Set<ColumnKey>; onToggle: (key: ColumnKey) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Настроить столбцы таблицы"
+        title="Настроить столбцы таблицы"
+        aria-expanded={open}
+        className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-300 text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
+      >
+        <Settings className="h-4 w-4" />
+      </button>
+      {open ? (
+        <div className="absolute right-0 z-30 mt-1 w-60 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
+          <div className="px-2 py-1 text-xs uppercase tracking-wide text-zinc-500">Столбцы</div>
+          <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-zinc-400">
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-blue-300 bg-blue-300 text-white">
+              <Check className="h-3 w-3" />
+            </span>
+            Название
+          </div>
+          {COLUMNS.map((column) => {
+            const checked = visible.has(column.key);
+            return (
+              <button
+                key={column.key}
+                type="button"
+                onClick={() => onToggle(column.key)}
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100"
+              >
+                <span
+                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                    checked ? 'border-blue-600 bg-blue-600 text-white' : 'border-zinc-300'
+                  }`}
+                >
+                  {checked ? <Check className="h-3 w-3" /> : null}
+                </span>
+                {column.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type StatusFilter = 'all' | CampaignDto['status'];
+
+const STATUS_FILTERS: ReadonlyArray<{ id: StatusFilter; label: string; dot?: string }> = [
+  { id: 'all', label: 'Все статусы' },
+  { id: 'running', label: 'Идёт', dot: 'bg-emerald-500' },
+  { id: 'paused', label: 'Пауза', dot: 'bg-amber-500' },
+  { id: 'draft', label: 'Черновик', dot: 'bg-zinc-400' },
+  { id: 'done', label: 'Завершена', dot: 'bg-blue-500' },
+];
+
+/** Фильтр по статусу кампании: один статус или все. */
+function StatusFilterMenu({
+  value,
+  counts,
+  onChange,
+}: {
+  value: StatusFilter;
+  counts: Record<StatusFilter, number>;
+  onChange: (next: StatusFilter) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const current = STATUS_FILTERS.find((item) => item.id === value) ?? STATUS_FILTERS[0];
+  const active = value !== 'all';
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={`inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-sm transition-colors ${
+          active ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100'
+        }`}
+      >
+        {current.dot ? <span className={`h-2 w-2 rounded-full ${current.dot}`} /> : null}
+        {current.label}
+        <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+      </button>
+      {open ? (
+        <div className="absolute left-0 z-30 mt-1 w-52 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
+          {STATUS_FILTERS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                onChange(item.id);
+                setOpen(false);
+              }}
+              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-zinc-100 ${
+                item.id === value ? 'font-semibold text-zinc-900' : 'text-zinc-700'
+              }`}
+            >
+              <span className={`h-2 w-2 shrink-0 rounded-full ${item.dot ?? 'bg-transparent'}`} />
+              <span className="flex-1">{item.label}</span>
+              <span className="text-xs text-zinc-400">{counts[item.id]}</span>
+              {item.id === value ? <Check className="h-3.5 w-3.5 text-blue-600" /> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** Статус в таблице: цветная точка и подпись, как в Instantly. */
 const STATUS_PILL: Record<CampaignDto['status'], { text: string; pill: string; dot: string }> = {
   draft: { text: 'Черновик', pill: 'bg-zinc-100 text-zinc-600', dot: 'bg-zinc-400' },
@@ -402,6 +583,7 @@ function ActionsMenu({ items }: { items: MenuItem[] }) {
  */
 function CampaignTable({
   campaigns,
+  columns,
   highlightId,
   onEdit,
   onRecipients,
@@ -409,6 +591,7 @@ function CampaignTable({
   onAction,
 }: {
   campaigns: CampaignDto[];
+  columns: Set<ColumnKey>;
   highlightId: string | null;
   onEdit: (campaign: CampaignDto) => void;
   onRecipients: (campaign: CampaignDto) => void;
@@ -446,12 +629,15 @@ function CampaignTable({
   return (
     <table className="w-full text-sm">
       <thead>
-        <tr className="border-b border-zinc-200 bg-blue-50/60 text-left text-[11px] font-semibold uppercase tracking-wider text-blue-700/80">
+        <tr className="border-b border-zinc-200 bg-blue-50/60 text-left text-[11px] font-semibold uppercase tracking-wider text-blue-700">
           <th className="px-5 py-2.5">Название</th>
-          <th className="px-3 py-2.5">Статус</th>
-          <th className="px-3 py-2.5">Прогресс</th>
-          <th className="px-3 py-2.5 text-right">Сегодня</th>
-          <th className="px-3 py-2.5">Создана</th>
+          {columns.has('status') ? <th className="px-3 py-2.5">Статус</th> : null}
+          {columns.has('progress') ? <th className="px-3 py-2.5">Прогресс</th> : null}
+          {columns.has('today') ? <th className="px-3 py-2.5 text-right">Сегодня</th> : null}
+          {columns.has('replies') ? <th className="px-3 py-2.5 text-right">Ответили</th> : null}
+          {columns.has('bounces') ? <th className="px-3 py-2.5 text-right">Отбои</th> : null}
+          {columns.has('contacts') ? <th className="px-3 py-2.5 text-right">Контактов</th> : null}
+          {columns.has('created') ? <th className="px-3 py-2.5">Создана</th> : null}
           <th className="w-12 px-3 py-2.5" aria-label="Действия" />
         </tr>
       </thead>
@@ -459,7 +645,8 @@ function CampaignTable({
         {campaigns.map((campaign) => {
           const status = STATUS_PILL[campaign.status];
           const percent = progressPercent(campaign);
-          const today = campaign.stats?.sentToday ?? 0;
+          const stats = campaign.stats;
+          const today = stats?.sentToday ?? 0;
           return (
             <tr
               key={campaign.id}
@@ -486,12 +673,15 @@ function CampaignTable({
                   <div className="mt-0.5 text-xs text-red-600">Запуск не состоялся: {campaign.scheduled_start_error}</div>
                 ) : null}
               </td>
+              {columns.has('status') ? (
               <td className="px-3 py-3">
                 <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ${status.pill}`}>
                   <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
                   {status.text}
                 </span>
               </td>
+              ) : null}
+              {columns.has('progress') ? (
               <td className="px-3 py-3">
                 {percent === null ? (
                   <span className="text-zinc-400">—</span>
@@ -507,10 +697,31 @@ function CampaignTable({
                   </div>
                 )}
               </td>
+              ) : null}
+              {columns.has('today') ? (
               <td className={`px-3 py-3 text-right tabular-nums ${today > 0 ? 'font-semibold text-blue-600' : 'text-zinc-400'}`}>
                 {today}
               </td>
+              ) : null}
+              {columns.has('replies') ? (
+              <td className={`px-3 py-3 text-right tabular-nums ${stats?.replied ? 'font-semibold text-emerald-600' : 'text-zinc-400'}`}>
+                {stats?.replyRate != null ? `${stats.replyRate}%` : '—'}
+              </td>
+              ) : null}
+              {columns.has('bounces') ? (
+              <td className={`px-3 py-3 text-right tabular-nums ${stats?.bounced ? 'font-semibold text-red-600' : 'text-zinc-400'}`}>
+                {stats?.bounced ?? 0}
+                {stats?.bounced && stats.bounceRate != null ? (
+                  <span className="ml-1 text-xs font-normal text-zinc-400">({stats.bounceRate}%)</span>
+                ) : null}
+              </td>
+              ) : null}
+              {columns.has('contacts') ? (
+              <td className="px-3 py-3 text-right tabular-nums text-zinc-700">{stats?.recipients ?? 0}</td>
+              ) : null}
+              {columns.has('created') ? (
               <td className="whitespace-nowrap px-3 py-3 text-zinc-500">{formatCreated(campaign.created_at)}</td>
+              ) : null}
               <td className="px-3 py-3 text-right">
                 <ActionsMenu items={menuItems(campaign)} />
               </td>
@@ -575,6 +786,26 @@ export function CampaignsTab({
   // Что показывать: кампании спецов или блоки автоаутричей. По умолчанию —
   // кампании: автоаутричи ведёт не каждый, и их блоки были первым, что видели все.
   const [view, setView] = useState<'companies' | 'auto'>('companies');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  // Видимые столбцы таблицы «Компании». Из браузера — после монтирования:
+  // на сервере localStorage нет, и первый рендер должен совпасть.
+  const [columns, setColumns] = useState<Set<ColumnKey>>(() => new Set(DEFAULT_COLUMNS));
+  useEffect(() => {
+    setColumns(loadColumns());
+  }, []);
+  const toggleColumn = (key: ColumnKey) => {
+    setColumns((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        window.localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        // Не запомнится — не страшно, на экране выбор уже применён.
+      }
+      return next;
+    });
+  };
 
   const load = useCallback(async () => {
     // Папки и кампании грузятся независимо: не загрузились папки — кампании
@@ -691,7 +922,20 @@ export function CampaignsTab({
   };
 
   const query = search.trim().toLowerCase();
-  const groups = groupCampaigns(campaigns.filter((campaign) => matchesSearch(campaign, query)), folders);
+  const searched = campaigns.filter((campaign) => matchesSearch(campaign, query));
+  // Счётчики в фильтре — по найденному поиском: «Пауза 3» должно значить
+  // ровно столько строк, сколько появится после выбора.
+  const statusCounts = STATUS_FILTERS.reduce(
+    (acc, item) => {
+      acc[item.id] = item.id === 'all' ? searched.length : searched.filter((c) => c.status === item.id).length;
+      return acc;
+    },
+    {} as Record<StatusFilter, number>,
+  );
+  const groups = groupCampaigns(
+    statusFilter === 'all' ? searched : searched.filter((campaign) => campaign.status === statusFilter),
+    folders,
+  );
   const folderGroups = groups.filter((group) => group.folder);
   const restGroup = groups.find((group) => !group.folder);
 
@@ -781,6 +1025,14 @@ export function CampaignsTab({
             </button>
           ) : null}
         </div>
+        <StatusFilterMenu
+          value={statusFilter}
+          counts={statusCounts}
+          onChange={(next) => {
+            setStatusFilter(next);
+            setRestPage(1);
+          }}
+        />
         <div
           role="tablist"
           aria-label="Компании или автоаутрич"
@@ -804,14 +1056,17 @@ export function CampaignsTab({
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() => router.push('/tools/sender/campaigns/new')}
-          className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
-        >
-          <Plus className="h-4 w-4" />
-          Кампания
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {view === 'companies' ? <ColumnsMenu visible={columns} onToggle={toggleColumn} /> : null}
+          <button
+            type="button"
+            onClick={() => router.push('/tools/sender/campaigns/new')}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+          >
+            <Plus className="h-4 w-4" />
+            Кампания
+          </button>
+        </div>
       </div>
 
       {foldersError ? (
@@ -858,6 +1113,7 @@ export function CampaignsTab({
                 <>
                   <CampaignTable
                     campaigns={restShown}
+                    columns={columns}
                     highlightId={highlightId}
                     onEdit={(campaign) => router.push(`/tools/sender/campaigns/${campaign.id}`)}
                     onRecipients={setRecipientsOf}
