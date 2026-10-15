@@ -6,6 +6,7 @@ import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useState } from 'react';
 
 import ExpensesView from '@/components/expenses/ExpensesView';
+import ForecastView from '@/components/expenses/ForecastView';
 import IncomesView from '@/components/expenses/IncomesView';
 import ProfitView from '@/components/expenses/ProfitView';
 import { getDefaultPeriod, type PeriodValue } from '@/components/expenses/PeriodBar';
@@ -35,7 +36,7 @@ import { getDefaultPeriod, type PeriodValue } from '@/components/expenses/Period
  * сторону нечем и незачем.
  */
 
-type Mode = 'expenses' | 'incomes' | 'profit';
+type Mode = 'expenses' | 'incomes' | 'profit' | 'forecast';
 
 const MODES: Array<{ id: Mode; label: string }> = [
   { id: 'expenses', label: 'Расходы' },
@@ -43,10 +44,12 @@ const MODES: Array<{ id: Mode; label: string }> = [
   // «Итог» стоит последним, а не первым: он выводится из двух предыдущих, и
   // порядок вкладок повторяет порядок вычисления.
   { id: 'profit', label: 'Итог' },
+  // «Прогноз» — не факт, а «что если»: после всех фактических вкладок.
+  { id: 'forecast', label: 'Прогноз' },
 ];
 
 function parseMode(value: string | null): Mode {
-  return value === 'incomes' || value === 'profit' ? value : 'expenses';
+  return value === 'incomes' || value === 'profit' || value === 'forecast' ? value : 'expenses';
 }
 
 export default function MoneyView() {
@@ -111,6 +114,8 @@ export default function MoneyView() {
       <div id="money-tabpanel" role="tabpanel" aria-labelledby={`money-tab-${mode}`}>
         {mode === 'incomes' ? (
           <IncomesView period={period} onPeriodChange={setPeriod} />
+        ) : mode === 'forecast' ? (
+          <ForecastView />
         ) : mode === 'profit' ? (
           <ProfitView period={period} onPeriodChange={setPeriod} />
         ) : (
