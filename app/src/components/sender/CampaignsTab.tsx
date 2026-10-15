@@ -236,19 +236,24 @@ function FolderSummary({ folder }: { folder: SenderFolderDto }) {
 }
 
 /** Столбцы таблицы кампаний. Название показывается всегда — без него строка ничья. */
-type ColumnKey = 'status' | 'progress' | 'today' | 'created' | 'replies' | 'bounces' | 'contacts';
+type ColumnKey =
+  | 'status' | 'progress' | 'sent' | 'reached' | 'today' | 'newToday'
+  | 'created' | 'replies' | 'bounces' | 'contacts';
 
 const COLUMNS: ReadonlyArray<{ key: ColumnKey; label: string }> = [
   { key: 'status', label: 'Статус' },
   { key: 'progress', label: 'Прогресс' },
-  { key: 'today', label: 'Отправлено сегодня' },
+  { key: 'sent', label: 'Писем отправлено (все шаги)' },
+  { key: 'reached', label: 'Контактов охвачено' },
+  { key: 'today', label: 'Писем сегодня (все шаги)' },
+  { key: 'newToday', label: 'Новых контактов сегодня' },
   { key: 'created', label: 'Создана' },
   { key: 'replies', label: 'Ответили' },
   { key: 'bounces', label: 'Отбои' },
   { key: 'contacts', label: 'Контактов в базе' },
 ];
 
-const DEFAULT_COLUMNS: ColumnKey[] = ['status', 'progress', 'today', 'created'];
+const DEFAULT_COLUMNS: ColumnKey[] = ['status', 'progress', 'sent', 'created'];
 const COLUMNS_STORAGE_KEY = 'portal:sender:campaign-columns';
 const AUTO_FOLDER_STORAGE_KEY = 'portal:sender:auto-folder';
 
@@ -591,7 +596,10 @@ function CampaignTable({
           <th className="px-5 py-2.5">Название</th>
           {columns.has('status') ? <th className="px-3 py-2.5">Статус</th> : null}
           {columns.has('progress') ? <th className="px-3 py-2.5">Прогресс</th> : null}
-          {columns.has('today') ? <th className="px-3 py-2.5">Отправлено сегодня</th> : null}
+          {columns.has('sent') ? <th className="px-3 py-2.5">Писем отправлено</th> : null}
+          {columns.has('reached') ? <th className="px-3 py-2.5">Контактов охвачено</th> : null}
+          {columns.has('today') ? <th className="px-3 py-2.5">Писем сегодня</th> : null}
+          {columns.has('newToday') ? <th className="px-3 py-2.5">Новых сегодня</th> : null}
           {columns.has('replies') ? <th className="px-3 py-2.5">Ответили</th> : null}
           {columns.has('bounces') ? <th className="px-3 py-2.5">Отбои</th> : null}
           {columns.has('contacts') ? <th className="px-3 py-2.5">Контактов</th> : null}
@@ -657,9 +665,20 @@ function CampaignTable({
                 )}
               </td>
               ) : null}
+              {columns.has('sent') ? (
+              <td className="px-3 py-3 tabular-nums text-zinc-700">{stats?.sent ?? 0}</td>
+              ) : null}
+              {columns.has('reached') ? (
+              <td className="px-3 py-3 tabular-nums text-zinc-700">{stats?.reached ?? 0}</td>
+              ) : null}
               {columns.has('today') ? (
               <td className={`px-3 py-3 tabular-nums ${today > 0 ? 'font-semibold text-blue-600' : 'text-zinc-400'}`}>
                 {today}
+              </td>
+              ) : null}
+              {columns.has('newToday') ? (
+              <td className={`px-3 py-3 tabular-nums ${stats?.newToday ? 'font-semibold text-blue-600' : 'text-zinc-400'}`}>
+                {stats?.newToday ?? 0}
               </td>
               ) : null}
               {columns.has('replies') ? (

@@ -162,6 +162,8 @@ export interface CampaignStatsDto {
   inProgress?: number;
   /** Ещё ни одного письма. */
   notContacted?: number;
+  /** Первых писем сегодня — новых контактов, начавших цепочку. */
+  newToday?: number;
 }
 
 export interface ImportMailboxesResult {

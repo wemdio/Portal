@@ -84,7 +84,7 @@ async function campaignStats(campaignId: string, timeZone: string) {
 
   const [
     recipients, replied, bounced, reached, sent, scheduled, failed, sentToday,
-    finished, unsubscribed, inProgress, notContacted,
+    finished, unsubscribed, inProgress, notContacted, newToday,
   ] = await Promise.all([
     recipientsQuery(),
     recipientsQuery({ column: 'status', value: 'replied' }),
@@ -101,6 +101,8 @@ async function campaignStats(campaignId: string, timeZone: string) {
     recipientsQuery({ column: 'status', value: 'unsubscribed' }),
     activeQuery(true),
     activeQuery(false),
+    // Первые письма сегодня — сколько новых контактов начали цепочку.
+    messagesQuery('sent').eq('step_no', 1).gte('sent_at', startOfTodayIso(timeZone)),
   ]);
 
   const reachedCount = reached.count ?? 0;
@@ -120,6 +122,7 @@ async function campaignStats(campaignId: string, timeZone: string) {
     unsubscribed: unsubscribed.count ?? 0,
     inProgress: inProgress.count ?? 0,
     notContacted: notContacted.count ?? 0,
+    newToday: newToday.count ?? 0,
   };
 }
 
