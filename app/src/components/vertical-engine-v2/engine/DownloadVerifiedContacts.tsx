@@ -8,8 +8,9 @@ import { VE_API } from './api';
 import { HE, Spinner } from './design';
 
 /** Fetch the complete saved audience only on demand, never during polling. */
-export function DownloadVerifiedContacts({ projectId, hypothesisId, hypothesisIds, disabled = false, onBusyChange }: {
+export function DownloadVerifiedContacts({ projectId, hypothesisId, hypothesisIds, hypothesisTitle, disabled = false, onBusyChange }: {
   projectId: string;
+  hypothesisTitle?: string;
   disabled?: boolean;
   onBusyChange?: (busy: boolean) => void;
 } & ({ hypothesisId: string; hypothesisIds?: never } | { hypothesisId?: never; hypothesisIds: string[] })) {
@@ -59,6 +60,7 @@ export function DownloadVerifiedContacts({ projectId, hypothesisId, hypothesisId
     <div className="min-w-0 space-y-1.5">
       <button type="button" className={`${HE.btnGhost} max-w-full !whitespace-normal text-left`}
         disabled={downloading || disabled || (hypothesisIds != null && !hypothesisIds.length)} aria-busy={downloading} aria-describedby={descriptionId}
+        aria-label={hypothesisTitle ? `${downloading ? 'Готовим CSV' : 'Скачать все проверенные контакты'}: ${hypothesisTitle}` : undefined}
         onClick={() => void download()}>
         {downloading ? <Spinner className="h-4 w-4 shrink-0" /> : <Download aria-hidden className="h-4 w-4 shrink-0" />}
         {downloading ? 'Готовим CSV…' : hypothesisIds ? `Скачать выбранные (${hypothesisIds.length})` : 'Скачать все проверенные контакты'}

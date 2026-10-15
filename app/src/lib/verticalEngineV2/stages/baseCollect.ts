@@ -90,6 +90,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { enqueueVePreparationChild, type VePreparationChildTable } from '../preparationChildren';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { loadVeProjectExclusions, matchVeProjectExclusion, filterVeProjectExcludedRows, type VeProjectExclusions } from '../projectExclusions';
@@ -1457,12 +1458,10 @@ const CHILD_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 
 async function insertChildJob(
   ctx: VeStageContext,
-  table: string,
+  table: VePreparationChildTable,
   row: Record<string, unknown>,
 ): Promise<string> {
-  const { data, error } = await ctx.supabase.from(table).insert(row).select('id').single();
-  if (error || !data) throw new Error(`${table} insert: ${error?.message ?? 'unknown'}`);
-  return (data as { id: string }).id;
+  return enqueueVePreparationChild(ctx, table, row);
 }
 
 /**
@@ -2114,7 +2113,7 @@ async function dispatchTask(
     const config: Record<string, unknown> = { text: state.hh_short_query ?? q.text, per_page: 100, area: q.area ?? '113' };
     if (q.date_from) config.date_from = q.date_from;
     if (q.date_to) config.date_to = q.date_to;
-    state.child_job_id = await insertChildJob(ctx, CHILD_JOB_TABLE.hh_live, {
+    state.child_job_id = await insertChildJob(ctx, 'parser_jobs', {
       user_id: userId,
       parser_type: 'hh_vacancies',
       status: 'pending',
@@ -2131,7 +2130,7 @@ async function dispatchTask(
       (ctx.market ?? projectMarket(project)) === 'us'
         ? { language: 'en', region: 'US' }
         : { language: 'ru', region: 'RU' };
-    state.child_job_id = await insertChildJob(ctx, CHILD_JOB_TABLE.google_maps, {
+    state.child_job_id = await insertChildJob(ctx, 'google_maps_jobs', {
       user_id: userId,
       status: 'queued',
       total_targets: inputLines.length,
@@ -2768,17 +2767,8 @@ async function dispatchConstructJob(input: {
     initial_row_count: rows.length,
     total_steps: steps.length,
   };
-  let bcJobId: string;
-  if (reservedId) {
-    // A timeout after INSERT is ambiguous. Repeating this exact ID must never
-    // reset a claimed/completed job or buy the same website scans again.
-    const { error } = await ctx.supabase.from('base_constructor_jobs')
-      .upsert(record, { onConflict: 'id', ignoreDuplicates: true });
-    if (error) throw new Error(`preview constructor insert: ${error.message}`);
-    bcJobId = reservedId;
-  } else {
-    bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', record);
-  }
+  // The RPC keeps reserved identities idempotent and fences a concurrent pause.
+  const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', record);
   return {
     bcJobId,
     locale,
@@ -5881,7 +5871,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
 /** Keep an explicit target error without erasing a committed round checkpoint. */
 export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
-  ctx = { ...ctx };
+  ctx = { ...ctx, parentJob: { id: job.id, started_at: job.started_at } };
   ctx.onCheckpoint?.();
   if (job.error && (job.result?.relevance_retry || job.result?.company_name_retry)) {
     ctx.signal?.throwIfAborted();

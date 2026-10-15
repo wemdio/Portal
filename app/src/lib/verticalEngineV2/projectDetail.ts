@@ -163,7 +163,7 @@ export async function loadVeProjectDetail(
     };
   }
 
-  const [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes, activeRes, preparationsRes] = await Promise.all([
+  const [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes, activeRes, preparationsRes, setupRes] = await Promise.all([
     supabase
       .from('ve_hypotheses')
       .select('*')
@@ -207,11 +207,12 @@ export async function loadVeProjectDetail(
       .in('stage', ['base_collect', 'base_analyze', 'template', 'base_reproject_contacts'])
       .in('status', ['pending', 'running']).order('created_at', { ascending: true }).order('id', { ascending: true }).range(from, to)),
     readDetailPages('project preparations', (from, to) => supabase.from('ve_outreach_preparations')
-      .select('hypothesis_id,base_id,template_id,status,locked_until', { count: 'exact' }).eq('project_id', projectId)
+      .select('hypothesis_id,base_id,template_id,status,locked_until,paused_at,cancelled_at,independent_control', { count: 'exact' }).eq('project_id', projectId)
       .order('hypothesis_id', { ascending: true }).range(from, to)),
+    supabase.from('ve_outreach_setups').select('selected_hypothesis_ids').eq('project_id', projectId).maybeSingle(),
   ]);
 
-  for (const res of [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes, activeRes, preparationsRes]) {
+  for (const res of [hypothesesRes, verticalsRes, basesRes, jobsRes, dossiersRes, casesRes, activeRes, preparationsRes, setupRes]) {
     if (res.error) return { ok: false, reason: 'db', message: res.error.message };
   }
 
@@ -259,6 +260,7 @@ export async function loadVeProjectDetail(
   const launchedBaseIds = new Set((templates as Record<string, unknown>[])
     .filter((template) => template.launch_info != null).map((template) => template.base_id));
   const latestTemplates = new Map<unknown, Record<string, unknown>>();
+  const selectedHypothesisIds = new Set(Array.isArray(setupRes.data?.selected_hypothesis_ids) ? setupRes.data.selected_hypothesis_ids : []);
   for (const template of templates as Record<string, unknown>[]) {
     if (!latestTemplates.has(template.base_id)) latestTemplates.set(template.base_id, template);
   }
@@ -271,14 +273,20 @@ export async function loadVeProjectDetail(
       ? base.collect_info as Record<string, unknown> : null;
     const preparedPreview = base.source === 'auto' && base.hypothesis_id && base.status === 'analyzed'
       && typeof base.row_count === 'number' && base.row_count > 0 && publicInfo?.collection_mode === 'preview';
+    const preparationEnabled = preparation?.independent_control === true || selectedHypothesisIds.has(base.hypothesis_id);
     if (launchedBaseIds.has(base.id)) decision = { available: false, action: null, code: 'launched',
       reason: 'База уже передана в запуск. Пополнение управляется в результатах.' };
-    else if (activeBaseIds.has(base.id) || preparation?.status === 'pending'
+    else if (activeBaseIds.has(base.id) || (preparation?.status === 'pending' && preparationEnabled && !preparation.paused_at && !preparation.cancelled_at)
       || (typeof preparation?.locked_until === 'string' && Date.parse(preparation.locked_until) > Date.now())) {
       decision = { available: false, action: null, code: 'already_running',
         reason: preparation?.status === 'pending' && !activeBaseIds.has(base.id)
           ? 'Подготовка в очереди. Повторно нажимать не нужно.'
           : 'Подготовка уже выполняется. Повторно нажимать не нужно.' };
+    }
+    else if (preparation && !preparationEnabled && ['pending', 'collecting', 'generating'].includes(String(preparation.status))
+      && ['collecting', 'analyzing'].includes(String(base.status))) {
+      decision = { available: true, action: 'resume_preparation', code: 'preparation_incomplete',
+        reason: 'Подготовка этой гипотезы приостановлена. Можно продолжить с сохранённого этапа.' };
     }
     // Letter jobs and preparation links change independently of the base's
     // collection cache, and their history may be outside the recent 30 jobs.

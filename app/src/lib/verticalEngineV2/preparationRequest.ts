@@ -48,7 +48,7 @@ export async function checkVePreparationRequest(
   const [setup, preparation, hypothesis] = await Promise.all([
     db.from('ve_outreach_setups').select('revision,selected_hypothesis_ids')
       .eq('project_id', projectId).maybeSingle(),
-    db.from('ve_outreach_preparations').select('base_id,template_id,status,locked_until')
+    db.from('ve_outreach_preparations').select('base_id,template_id,status,locked_until,paused_at,independent_control')
       .eq('project_id', projectId).eq('hypothesis_id', hypothesisId).maybeSingle(),
     db.from('ve_hypotheses').select('id,vertical_id,status,title,description,origin,broad')
       .eq('project_id', projectId).eq('id', hypothesisId).maybeSingle(),
@@ -59,12 +59,16 @@ export async function checkVePreparationRequest(
     ({ status, reason, hypothesis_id: hypothesisId, ...(code ? { code } : {}), ...(baseId ? { base_id: baseId } : {}),
       ...(cacheRevision !== undefined ? { cache_revision: cacheRevision } : {}) });
   if (setup.data?.revision !== revision) return outcome('unavailable', 'Выбор изменился. Обновите страницу', 'selection_changed');
-  if (!setup.data?.selected_hypothesis_ids?.includes(hypothesisId) || !hypothesis.data?.vertical_id
+  if (!hypothesis.data?.vertical_id
     || hypothesis.data.status === 'rejected') return outcome('unavailable', 'Выберите доступную гипотезу этого проекта', 'not_selected');
 
   const queued = (baseId?: string, code?: string) => outcome('queued', 'Запрос принят. Подготовка продолжится автоматически.', code, baseId);
   const busy = (baseId?: string) => outcome('already_running', 'Подготовка уже выполняется. Повторно нажимать не нужно.', 'already_running', baseId);
-  if (preparation.data?.status === 'pending'
+  // Pause has a durable receipt of the exact children and jobs to restore.
+  // Never run acquisition eligibility/replan merely to undo that pause.
+  if (preparation.data?.paused_at) return queued(preparation.data.base_id ?? undefined, 'paused');
+  if ((preparation.data?.status === 'pending'
+      && (preparation.data.independent_control || setup.data?.selected_hypothesis_ids?.includes(hypothesisId)))
     || Date.parse(preparation.data?.locked_until ?? '') > Date.now()) return busy(preparation.data?.base_id ?? undefined);
   // Match the coordinator: a finished result takes precedence over a later
   // failed duplicate. Read one saved base only, never all project checkpoints.
