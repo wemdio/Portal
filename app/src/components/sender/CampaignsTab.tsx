@@ -633,10 +633,10 @@ function CampaignTable({
           <th className="px-5 py-2.5">Название</th>
           {columns.has('status') ? <th className="px-3 py-2.5">Статус</th> : null}
           {columns.has('progress') ? <th className="px-3 py-2.5">Прогресс</th> : null}
-          {columns.has('today') ? <th className="px-3 py-2.5 text-right">Сегодня</th> : null}
-          {columns.has('replies') ? <th className="px-3 py-2.5 text-right">Ответили</th> : null}
-          {columns.has('bounces') ? <th className="px-3 py-2.5 text-right">Отбои</th> : null}
-          {columns.has('contacts') ? <th className="px-3 py-2.5 text-right">Контактов</th> : null}
+          {columns.has('today') ? <th className="px-3 py-2.5">Отправлено сегодня</th> : null}
+          {columns.has('replies') ? <th className="px-3 py-2.5">Ответили</th> : null}
+          {columns.has('bounces') ? <th className="px-3 py-2.5">Отбои</th> : null}
+          {columns.has('contacts') ? <th className="px-3 py-2.5">Контактов</th> : null}
           {columns.has('created') ? <th className="px-3 py-2.5">Создана</th> : null}
           <th className="w-12 px-3 py-2.5" aria-label="Действия" />
         </tr>
@@ -687,7 +687,7 @@ function CampaignTable({
                   <span className="text-zinc-400">—</span>
                 ) : (
                   <div className="flex items-center gap-2">
-                    <span className="w-10 text-right text-xs font-semibold tabular-nums text-zinc-800">{percent}%</span>
+                    <span className="w-10 text-xs font-semibold tabular-nums text-zinc-800">{percent}%</span>
                     <div className="h-1.5 w-28 overflow-hidden rounded-full bg-zinc-200">
                       <div
                         className={`h-full rounded-full ${percent >= 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
@@ -699,17 +699,17 @@ function CampaignTable({
               </td>
               ) : null}
               {columns.has('today') ? (
-              <td className={`px-3 py-3 text-right tabular-nums ${today > 0 ? 'font-semibold text-blue-600' : 'text-zinc-400'}`}>
+              <td className={`px-3 py-3 tabular-nums ${today > 0 ? 'font-semibold text-blue-600' : 'text-zinc-400'}`}>
                 {today}
               </td>
               ) : null}
               {columns.has('replies') ? (
-              <td className={`px-3 py-3 text-right tabular-nums ${stats?.replied ? 'font-semibold text-emerald-600' : 'text-zinc-400'}`}>
+              <td className={`px-3 py-3 tabular-nums ${stats?.replied ? 'font-semibold text-emerald-600' : 'text-zinc-400'}`}>
                 {stats?.replyRate != null ? `${stats.replyRate}%` : '—'}
               </td>
               ) : null}
               {columns.has('bounces') ? (
-              <td className={`px-3 py-3 text-right tabular-nums ${stats?.bounced ? 'font-semibold text-red-600' : 'text-zinc-400'}`}>
+              <td className={`px-3 py-3 tabular-nums ${stats?.bounced ? 'font-semibold text-red-600' : 'text-zinc-400'}`}>
                 {stats?.bounced ?? 0}
                 {stats?.bounced && stats.bounceRate != null ? (
                   <span className="ml-1 text-xs font-normal text-zinc-400">({stats.bounceRate}%)</span>
@@ -717,7 +717,7 @@ function CampaignTable({
               </td>
               ) : null}
               {columns.has('contacts') ? (
-              <td className="px-3 py-3 text-right tabular-nums text-zinc-700">{stats?.recipients ?? 0}</td>
+              <td className="px-3 py-3 tabular-nums text-zinc-700">{stats?.recipients ?? 0}</td>
               ) : null}
               {columns.has('created') ? (
               <td className="whitespace-nowrap px-3 py-3 text-zinc-500">{formatCreated(campaign.created_at)}</td>
