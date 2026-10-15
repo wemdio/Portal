@@ -31,8 +31,14 @@ export const YMAPS_TARGET_CATEGORY_REGEX = [
 
 /** Размер одной порции каталога (строк, до фильтра). */
 const PAGE_SIZE = 50_000;
-/** Сколько читаем каталога за запуск по времени: дальше — стоп, готовое сохраняется. */
-const MAX_READ_MS = 2 * 60 * 60 * 1000;
+/**
+ * Сколько читаем каталога за запуск по времени: дальше — стоп, набранное остаётся.
+ * 15.10.2026 два часа держали запуск на «Загрузке источников» 24 минуты без движения
+ * (монитор парсеров поднял тревогу), поэтому 8 минут.
+ */
+const MAX_READ_MS = 8 * 60 * 1000;
+/** Больше кандидатов из каталога за запуск не берём: страниц уходит много, а готовых из них мало. */
+const MAX_CANDIDATES = 15_000;
 
 export interface YmapsCatalogRow {
   yandexId: string;
@@ -51,7 +57,8 @@ interface PageResult {
  * Кандидаты из каталога: порции идут по возрастанию yandex_id, пока не наберётся
  * limit строк, не кончится каталог или не выйдет время чтения.
  */
-export async function loadYmapsCatalogCandidates(db: SupabaseClient, limit: number): Promise<YmapsCatalogRow[]> {
+export async function loadYmapsCatalogCandidates(db: SupabaseClient, wanted: number): Promise<YmapsCatalogRow[]> {
+  const limit = Math.min(wanted, MAX_CANDIDATES);
   const started = Date.now();
   const out: YmapsCatalogRow[] = [];
   let after = '';
