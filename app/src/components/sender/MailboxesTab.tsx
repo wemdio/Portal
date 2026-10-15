@@ -598,6 +598,8 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         />
                       </td>
                       <td className="px-3 py-2.5">
+                        {/* Колонка уже на ~30%: длинные пометки переносятся, а не растягивают таблицу. */}
+                        <div className="max-w-[390px]">
                         <div className="font-medium text-zinc-900">{mailbox.email}</div>
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
@@ -625,6 +627,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                                 : 'Проверка отправки идёт…'}
                           </button>
                         ) : null}
+                        </div>
                       </td>
                       <td className="px-3 py-2.5 text-zinc-600">
                         <div>{providerLabel(mailbox.provider)}</div>
@@ -711,6 +714,19 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             }}
                             className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
                           />
+                        </div>
+                        <div
+                          className="mt-1 text-[11px] text-zinc-500"
+                          title="Сегодня ушло: новых писем из лимита «новых» и всего писем из лимита «всего» (день по UTC)"
+                        >
+                          сегодня:{' '}
+                          <span className={(mailbox.sent_today?.first ?? 0) >= mailbox.daily_campaign_limit ? 'font-medium text-amber-600' : ''}>
+                            {mailbox.sent_today?.first ?? 0} / {mailbox.daily_campaign_limit}
+                          </span>
+                          {' · '}
+                          <span className={(mailbox.sent_today?.total ?? 0) >= mailbox.daily_total_limit ? 'font-medium text-amber-600' : ''}>
+                            {mailbox.sent_today?.total ?? 0} / {mailbox.daily_total_limit}
+                          </span>
                         </div>
                       </td>
                       <td className="px-5 py-2.5 text-right">

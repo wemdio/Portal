@@ -205,12 +205,39 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Сколько ушло сегодня (день по UTC — так же считает планировщик): всего и
+    // первых писем. Сбой чтения не роняет список — просто без счётчика.
+    const sentToday = new Map<string, { total: number; first: number }>();
+    if (pageIds.length) {
+      const dayStart = new Date();
+      dayStart.setUTCHours(0, 0, 0, 0);
+      for (let from = 0; ; from += 1000) {
+        const { data: rows, error: sentError } = await supabaseAdmin
+          .from('sender_messages')
+          .select('mailbox_id, step_no')
+          .in('mailbox_id', pageIds)
+          .eq('status', 'sent')
+          .gte('sent_at', dayStart.toISOString())
+          .order('id')
+          .range(from, from + 999);
+        if (sentError) break;
+        for (const row of (rows ?? []) as { mailbox_id: string; step_no: number }[]) {
+          const acc = sentToday.get(row.mailbox_id) ?? { total: 0, first: 0 };
+          acc.total += 1;
+          if (row.step_no === 1) acc.first += 1;
+          sentToday.set(row.mailbox_id, acc);
+        }
+        if ((rows?.length ?? 0) < 1000) break;
+      }
+    }
+
     return NextResponse.json({
       mailboxes: mailboxes.map((mailbox) => {
         const id = String((mailbox as { id?: string }).id);
         const counts = healthByMailbox.get(id);
         return {
           ...mailbox,
+          sent_today: sentToday.get(id) ?? { total: 0, first: 0 },
           probe: probeByMailbox.get(id) ?? null,
           health: counts
             ? mailboxHealth({ ...counts, status: String((mailbox as { status?: string }).status ?? '') })
