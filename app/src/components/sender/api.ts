@@ -387,6 +387,15 @@ export function fetchMailboxProbe(id: string) {
 
 export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete' | 'tag';
 
+/** «Лимиты» на выборку: новых / всего в день; не заданное поле не меняется. */
+export function bulkMailboxLimits(ids: string[], limits: { dailyCampaignLimit?: number; dailyTotalLimit?: number }) {
+  return authFetchJson<{ ok: true; affected: number }>(`${BASE}/mailboxes`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, action: 'limits', ...limits }),
+  });
+}
+
 /**
  * Действие над выборкой одним запросом: двести ящиков — это не двести запросов.
  * Для 'tag' в tagId приезжает тег или null — «снять тег».
