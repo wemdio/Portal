@@ -22,7 +22,7 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
@@ -1137,7 +1137,15 @@ export async function handleChat(
     log('warning', `${displayName}: ответ дословно повторяет то, что мы уже писали ("${replyText}") — НЕ отправляю`);
     return { replied: false, triggerType: null };
   }
-  if (interested && phrase) {
+  // Сообщение с несколькими вопросами — это квалификация: ответа ещё нет, и
+  // передавать контакт рано. Фразу не дописываем, а если модель вписала её сама,
+  // убираем: иначе по ней сработает триггер и лид уйдёт менеджеру без ответов.
+  const qualifying = asksOpenQuestions(replyText);
+  if (qualifying && phrase && detectTrigger(replyText, oai) === 'positive') {
+    log('warning', `${displayName}: в сообщении с вопросами была фраза передачи — убираю, ждём ответ клиента`);
+    replyText = stripHandoffPhrase(replyText, phrase);
+  }
+  if (interested && phrase && !qualifying) {
     replyText = ensureHandoffPhrase(replyText, phrase);
   }
   if (roleOnly && !interested && detectTrigger(replyText, oai) === 'positive') {
