@@ -1,4 +1,6 @@
 import { isVeProviderBillingError, isVeTransientDirectoryError, isVeResumableDirectoryError, isVeTransientCatalogError } from './collectionErrors';
+import { isTransientDbError } from '@/lib/db/transientError';
+import { isVeStageDbInterruption } from './stageDb';
 import {
   collectionRoundLimit, veCollectionMaxRounds, VE_COLLECTION_ROUND_BUDGET, VE_COLLECTION_ROUND_CEILING,
   type VeCollectionTargetProgress,
@@ -150,7 +152,7 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   const batch = buildVeRelevanceReviewBatch({ ...scope,
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
     allowPaidSearch: !existingOnly, triage });
-  if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { ...scope, triage }))) {
+  if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { ...scope, triage, source: batch.evidenceRows }))) {
     return available('saved_work', 'Можно уточнить соответствие уже найденных компаний.');
   }
   // Предел раундов не препятствие: продолжение само даёт новый бюджет
@@ -249,7 +251,15 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && (checkpoint?.completed_round ?? 0) === progress.round - 1) return 'discovery';
   const pipeline = info.preview_pipeline as Record<string, unknown> | undefined;
-  if (progress.status === 'error' && pipeline?.version === 1 && Array.isArray(pipeline.batches)
+  // An unknown preview save deliberately leaves the durable progress intact.
+  // Reuse only a coherent pipeline after a recognized DB outage, never buy a
+  // replacement base or reopen an arbitrary permission/schema failure.
+  const previewSaveFailure = typeof base.error === 'string' && base.error.startsWith('Preview checkpoint save: ')
+    && (isTransientDbError({ message: base.error })
+      || isVeStageDbInterruption(base.error)
+      || /^Preview checkpoint save: An invalid response was received from upstream server[.!]?$/.test(base.error));
+  if ((progress.status === 'error' || (progress.status === 'collecting' && previewSaveFailure))
+    && pipeline?.version === 1 && Array.isArray(pipeline.batches)
     && typeof pipeline.revision === 'number' && Number.isSafeInteger(pipeline.revision)
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && (checkpoint?.completed_round === progress.round

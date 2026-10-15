@@ -14,7 +14,7 @@
  */
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
-import { VE_RELEVANCE_RULES_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
+import { VE_RELEVANCE_RULES_VERSION, isVeRelevanceReady } from '@/lib/verticalEngineV2/relevanceDecision';
 import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veSavedReviewSignature } from '@/lib/verticalEngineV2/relevanceReserve';
 import { canResumePartialPreview, veSavedRelevanceScope } from '@/lib/verticalEngineV2/collectionRecovery';
 import { createVeCollectionAudienceSnapshot } from '@/lib/verticalEngineV2/sourceAudience';
@@ -210,6 +210,108 @@ describe('VE2 relevance selection rules', () => {
     expect(JSON.stringify(veSavedReviewSignature([saved], { ...scoped, triage: false }))).not.toContain('staffing_pending');
     const pending = { ...saved, _ve_relevance: { ...saved._ve_relevance, website_review_version: undefined, review_attempts: 0 } };
     expect(buildVeRelevanceReviewBatch({ ...batch, ...scoped, reserve: [pending] }).rows).toHaveLength(1);
+
+    // 15.10.2026: a ski venue's cash desk was admitted to fintech solely from
+    // the maps rubric «Платёжные терминалы». Device locations are not providers.
+    const paymentRows = [
+      { company: 'Касса', website: 'https://ski.test', category: 'Бытовые услуги / Бытовые услуги, Платёжные терминалы',
+        description: 'Горнолыжный комплекс: подъёмники, инструкторы и прокат.' },
+      { company: 'Банкомат', website: 'https://atm.test', category: 'Бизнес / Финансы, Банкоматы', description: '' },
+      { company: 'Terminal', website: 'https://terminal.test', category: 'Payment terminals', description: '' },
+      { company: 'PSP', website: 'https://psp.test', category: 'Платёжные терминалы',
+        description: 'Предоставляем платёжный API, интернет-эквайринг и обработку платежей для бизнеса.' },
+      { company: 'Bank', website: 'https://bank.test', category: 'Банк', description: '' },
+      { company: 'Manufacturer', website: 'https://manufacturer.test', category: 'Платёжные терминалы',
+        description: 'Производим платёжные терминалы и собственное программное обеспечение для них.' },
+    ];
+    const paymentFetch = jest.fn(async (_url: unknown, init: RequestInit | undefined) => {
+      const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+      const system = body.messages[0].content, user = body.messages[1].content;
+      if (system.startsWith('Independently check')) {
+        const companies = JSON.parse(user.split('index:\n')[1]) as Array<{ i: number }>;
+        return llm({ reviews: companies.map(({ i }) => ({ i, result: 'direct_match', reason: 'Деятельность подтверждена.' })) });
+      }
+      const companies = JSON.parse(user.split(/Rows, local indices [^\n]*:\n/)[1]) as Array<{ i: number; company: string; category: string; description: string }>;
+      return llm({ decisions: companies.map((item) => ({ i: item.i, status: 'relevant', reason: 'Платёжные услуги.',
+        evidence: item.description && !item.description.startsWith('Горнолыжный') ? [{ field: 'description', quote: item.description }]
+          : [{ field: 'category', quote: item.category }] })) });
+    });
+    global.fetch = paymentFetch as unknown as typeof fetch;
+    const paymentSites = offline();
+    const paymentInput = { ...base, audienceScope: { ...audienceScope, required: [], excluded: [] },
+      rows: paymentRows, fetchEvidence: paymentSites, websiteLimit: 32, allowPaidSearch: true };
+    const payment = await findIrrelevantRows(paymentInput);
+    expect([...payment.decisions.values()].map((decision) => decision.status))
+      .toEqual(['needs_review', 'needs_review', 'needs_review', 'relevant', 'relevant', 'relevant']);
+    expect(paymentFetch).toHaveBeenCalledTimes(3); // one classifier and only the three supported companies reviewed twice
+    expect(paymentSites).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i++) {
+      const decision = payment.decisions.get(i)!;
+      expect(decision).toMatchObject({ activity_evidence_guard: 'payment_point_category' });
+      const oldAdmission = { ...decision, status: 'relevant' as const };
+      delete oldAdmission.activity_evidence_guard; delete oldAdmission.activity_evidence_guard_input; delete oldAdmission.activity_evidence_guard_facts;
+      expect(isVeRelevanceReady({ ...paymentRows[i], _ve_relevance: oldAdmission })).toBe(false);
+      const guarded = { ...paymentRows[i], email: 'info@example.test', _email_status: 'ok', _ve_relevance: decision };
+      expect(needsVeRelevanceEvidence(guarded)).toBe(false);
+      expect(buildVeRelevanceReviewBatch({ reserve: [guarded], ready: [], source: [], automatic: true, triage: true }).rows).toHaveLength(0);
+    }
+    for (const i of [3, 4, 5]) expect(isVeRelevanceReady({ ...paymentRows[i], _ve_relevance: payment.decisions.get(i) })).toBe(true);
+    // Free downgrade of a saved admission, with a completed receipt or even a
+    // missing receipt: preserve every paid attempt; neither semantic nor site work is purchased.
+    const oldPayment = structuredClone(payment.checkpoint);
+    for (let i = 0; i < 3; i++) {
+      const key = payment.decisions.get(i)!.activity_evidence_guard_input!;
+      const verdict = oldPayment.verdicts[key];
+      verdict.status = 'relevant'; delete verdict.activity_evidence_guard; delete verdict.activity_evidence_guard_input; delete verdict.activity_evidence_guard_facts;
+      if (i === 0) {
+        const ref = relevanceHash(['old-terminal-receipt', key]);
+        oldPayment.semantic_review_refs[key] = ref;
+        oldPayment.semantic_reviews[ref] = { company_key: key, proposal: structuredClone(verdict), status: 'finished',
+          attempts: 2, result: { result: 'direct_match', reason: 'По рубрике' } };
+        // A spent website receipt cannot erase the free hold at final projection.
+        oldPayment.website_evidence[key] = { reader_version: 1, status: 'unavailable', text: '', url: '', reason: 'provider_error',
+          provider_error: { kind: 'transient', message: 'upstream unavailable' }, provider_error_attempts: 3,
+          review_attempt: REVIEW_ATTEMPT, review_attempts: 1, refined: true };
+      }
+    }
+    const receipts = structuredClone(oldPayment.semantic_reviews);
+    const beforeGuard = paymentFetch.mock.calls.length;
+    const downgraded = await findIrrelevantRows({ ...paymentInput, checkpoint: oldPayment });
+    await findIrrelevantRows({ ...paymentInput, checkpoint: downgraded.checkpoint });
+    expect(paymentFetch).toHaveBeenCalledTimes(beforeGuard);
+    expect(paymentSites).not.toHaveBeenCalled();
+    expect(downgraded.checkpoint.semantic_reviews).toEqual(receipts);
+    // A lost checkpoint cannot re-buy the same bad evidence. New substantive
+    // input changes its key and is allowed to prove a real PSP instead.
+    const guardedRow = { ...paymentRows[0], _ve_relevance: downgraded.decisions.get(0) };
+    expect(guardedRow._ve_relevance).toMatchObject({ activity_evidence_guard: 'payment_point_category' });
+    const withoutCheckpoint = await findIrrelevantRows({ ...paymentInput, rows: [guardedRow] });
+    expect(withoutCheckpoint.decisions.get(0)?.status).toBe('needs_review');
+    expect(paymentFetch).toHaveBeenCalledTimes(beforeGuard);
+    // Exercise the real reserve/source selector, not only a direct gate call:
+    // same data (including a manual retry) is free; new activity can prove a PSP.
+    const held = { ...paymentRows[2], email: 'info@terminal.test', _email_status: 'ok', _ve_relevance: downgraded.decisions.get(2) };
+    const richerSource = { ...paymentRows[2], company_description: paymentRows[3].description };
+    for (const automatic of [false, true]) {
+      const unchanged = buildVeRelevanceReviewBatch({ reserve: [held], ready: [], source: [{ ...paymentRows[2],
+        phone: '+000', source_detail: 'new diagnostics' }, { ...paymentRows[3], description: 'Other company facts' }], automatic, triage: true });
+      expect(unchanged.rows).toHaveLength(0);
+      const fromSource = buildVeRelevanceReviewBatch({ reserve: [held], ready: [], source: [richerSource], automatic, allowPaidSearch: false });
+      expect(fromSource.companies).toBe(1);
+      expect(fromSource.rows).toEqual([held]);
+      expect(veSavedReviewSignature(fromSource.rows, { triage: true, source: fromSource.evidenceRows }))
+        .not.toEqual(veSavedReviewSignature([held], { triage: true }));
+      const changedReserve = { ...held, description: paymentRows[3].description };
+      expect(buildVeRelevanceReviewBatch({ reserve: [changedReserve], ready: [], source: [], automatic }).rows).toEqual([changedReserve]);
+    }
+    expect(paymentFetch).toHaveBeenCalledTimes(beforeGuard);
+    const selected = buildVeRelevanceReviewBatch({ reserve: [held], ready: [], source: [richerSource], automatic: true });
+    const newFacts = await findIrrelevantRows({ ...paymentInput, rows: selected.rows, evidenceRows: selected.evidenceRows,
+      checkpoint: withoutCheckpoint.checkpoint });
+    expect(newFacts.decisions.get(0)?.status).toBe('relevant');
+    expect(isVeRelevanceReady({ _ve_relevance: newFacts.decisions.get(0) })).toBe(true);
+    const reviewed = { ...held, _ve_relevance: newFacts.decisions.get(0) };
+    expect(buildVeRelevanceReviewBatch({ reserve: [reviewed], ready: [], source: [richerSource], automatic: true }).rows).toHaveLength(0);
   });
 
   it('asks every model to prove only activity, type and structural conditions, never the vertical summary', async () => {
