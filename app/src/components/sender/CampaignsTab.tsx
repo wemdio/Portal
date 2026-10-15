@@ -629,7 +629,7 @@ function CampaignTable({
   return (
     <table className="w-full text-sm">
       <thead>
-        <tr className="border-b border-zinc-200 bg-blue-50/60 text-left text-[11px] font-semibold uppercase tracking-wider text-blue-700">
+        <tr className="sender-table-head border-b border-zinc-200 bg-blue-50/60 text-left text-[11px] font-semibold uppercase tracking-wider text-blue-700">
           <th className="px-5 py-2.5">Название</th>
           {columns.has('status') ? <th className="px-3 py-2.5">Статус</th> : null}
           {columns.has('progress') ? <th className="px-3 py-2.5">Прогресс</th> : null}

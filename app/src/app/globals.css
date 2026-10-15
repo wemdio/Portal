@@ -3816,3 +3816,10 @@ html[data-portal-theme='dark'] .glass-tile.glass-tint-red {
     border-color: var(--pd-divider-strong);
   }
 }
+
+/* Шапка таблицы кампаний «Рассылки»: в светлой теме голубая, в тёмной —
+   приглушённая, чтобы не спорить со строками (просьба 15.10.2026). */
+html[data-portal-theme='dark'] .portal-shell .sender-table-head {
+  background-color: rgba(148, 163, 184, 0.06) !important;
+  color: rgba(147, 197, 253, 0.7) !important;
+}
