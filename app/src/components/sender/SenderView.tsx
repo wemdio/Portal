@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Ban, BarChart3, Mail, MessageSquare, Network, Send, ShieldCheck, type LucideIcon } from 'lucide-react';
+import { Ban, BarChart3, Inbox, Mail, Network, Send, ShieldCheck, type LucideIcon } from 'lucide-react';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
 import { EgressTab } from './EgressTab';
@@ -17,8 +17,8 @@ import { ThreadsTab } from './ThreadsTab';
 // «Персонализированные ответы».
 const TABS: ReadonlyArray<{ id: string; label: string; icon: LucideIcon }> = [
   { id: 'campaigns', label: 'Кампании', icon: Send },
-  { id: 'mailboxes', label: 'Ящики', icon: Mail },
-  { id: 'threads', label: 'Письма', icon: MessageSquare },
+  { id: 'mailboxes', label: 'Ящики', icon: Inbox },
+  { id: 'threads', label: 'Письма', icon: Mail },
   { id: 'stats', label: 'Статистика', icon: BarChart3 },
   { id: 'seeds', label: 'Контрольные ящики', icon: ShieldCheck },
   { id: 'stoplist', label: 'Стоп-лист', icon: Ban },

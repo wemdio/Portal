@@ -34,6 +34,8 @@ export interface MailboxDto {
   tag: MailboxTagRef | null;
   /** Последняя проверочная отправка: не переписывает ли провайдер заголовки. */
   probe: MailboxProbeDto | null;
+  /** Наша оценка здоровья за 14 дней; score null — писем слишком мало. */
+  health: { score: number | null; sent: number; bounced: number; failed: number } | null;
 }
 
 /** Сводка пробы в строке ящика; полный разбор — GET /probe. */
