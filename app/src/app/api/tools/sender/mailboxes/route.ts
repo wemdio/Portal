@@ -52,16 +52,23 @@ export async function GET(req: NextRequest) {
     // нечего. Проценты и подчёркивания оставляем: как шаблон они безобидны.
     const search = (url.searchParams.get('search') ?? '').trim().replace(/[(),]/g, '').slice(0, 200);
 
-    // Сортировка строго по email: батч-импорт даёт всем строкам одинаковое
+    // Сортировка по умолчанию — по email: батч-импорт даёт всем строкам одинаковое
     // created_at, и сортировка по нему дёргает список при каждом опросе
     // статусов — строки менялись местами каждые пару секунд.
-    let query = supabaseAdmin
-      .from('sender_mailboxes')
-      .select(LIST_COLS, { count: 'exact' })
-      .order('email', { ascending: true })
-      .range((page - 1) * pageSize, page * pageSize - 1);
-
-    if (search) query = query.ilike('email', `%${search}%`);
+    // Сортировка по столбцу (?sort=…&dir=asc|desc, 15.10.2026) идёт по всему
+    // списку, а не по странице: порядок считает база. «Здоровье» в базе не
+    // лежит, поэтому по нему считаем оценку у всех подходящих ящиков и режем
+    // страницу уже после сортировки.
+    const SORT_COLUMNS: Record<string, string> = {
+      email: 'email',
+      provider: 'provider',
+      egress: 'egress_ip',
+      status: 'status',
+      new: 'daily_campaign_limit',
+      total: 'daily_total_limit',
+    };
+    const sortKey = url.searchParams.get('sort') ?? '';
+    const sortAsc = url.searchParams.get('dir') !== 'desc';
 
     // Отбор по тегу делает база, а не браузер: на экране лежит одна страница
     // из всего пула, и фильтрация на клиенте показывала бы только те совпадения,
@@ -73,21 +80,82 @@ export async function GET(req: NextRequest) {
       .filter((id) => UUID_RE.test(id))
       .slice(0, MAX_TAG_FILTER);
     const noTag = url.searchParams.get('noTag') === '1';
-
-    if (tagIds.length && noTag) {
-      query = query.or(`tag_id.in.(${tagIds.join(',')}),tag_id.is.null`);
-    } else if (tagIds.length) {
-      query = query.in('tag_id', tagIds);
-    } else if (noTag) {
-      query = query.is('tag_id', null);
-    }
-
     // Фильтр по адресу отправки: 'none' — ящики, которым адрес ещё не выдан.
     const egressFilter = url.searchParams.get('egressIp') ?? '';
-    if (egressFilter === 'none') query = query.is('egress_ip', null);
-    else if (isIpv4(egressFilter)) query = query.eq('egress_ip', egressFilter);
 
-    const { data, error, count } = await query;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const applyFilters = (q: any) => {
+      if (search) q = q.ilike('email', `%${search}%`);
+      if (tagIds.length && noTag) q = q.or(`tag_id.in.(${tagIds.join(',')}),tag_id.is.null`);
+      else if (tagIds.length) q = q.in('tag_id', tagIds);
+      else if (noTag) q = q.is('tag_id', null);
+      if (egressFilter === 'none') q = q.is('egress_ip', null);
+      else if (isIpv4(egressFilter)) q = q.eq('egress_ip', egressFilter);
+      return q;
+    };
+
+    let data: Record<string, unknown>[] | null = null;
+    let count: number | null = null;
+    let error: { message: string } | null = null;
+
+    if (sortKey === 'health') {
+      const all: { id: string; status: string; email: string }[] = [];
+      for (let from = 0; ; from += 1000) {
+        const r = await applyFilters(
+          supabaseAdmin.from('sender_mailboxes').select('id, status, email').order('email', { ascending: true }),
+        ).range(from, from + 999);
+        if (r.error) return jsonError(r.error.message, 500);
+        all.push(...((r.data ?? []) as typeof all));
+        if ((r.data?.length ?? 0) < 1000) break;
+      }
+      const score = new Map<string, number | null>();
+      for (let i = 0; i < all.length; i += 500) {
+        const chunk = all.slice(i, i + 500);
+        const { data: healthRows } = await supabaseAdmin.rpc('sender_mailbox_health', {
+          p_ids: chunk.map((m) => m.id),
+          p_days: HEALTH_WINDOW_DAYS,
+        });
+        const byId = new Map(
+          ((healthRows ?? []) as { mailbox_id: string; sent: number | string; bounced: number | string; failed: number | string }[]).map(
+            (row) => [row.mailbox_id, row],
+          ),
+        );
+        for (const m of chunk) {
+          const c = byId.get(m.id);
+          score.set(m.id, c ? mailboxHealth({ sent: Number(c.sent), bounced: Number(c.bounced), failed: Number(c.failed), status: m.status }).score : null);
+        }
+      }
+      // Ящики без оценки (мало писем) — всегда в конце, в любом направлении.
+      all.sort((a, b) => {
+        const sa = score.get(a.id) ?? null;
+        const sb = score.get(b.id) ?? null;
+        if (sa === null && sb === null) return a.email.localeCompare(b.email);
+        if (sa === null) return 1;
+        if (sb === null) return -1;
+        return (sortAsc ? sa - sb : sb - sa) || a.email.localeCompare(b.email);
+      });
+      const pageIds = all.slice((page - 1) * pageSize, page * pageSize).map((m) => m.id);
+      count = all.length;
+      if (pageIds.length) {
+        const r = await supabaseAdmin.from('sender_mailboxes').select(LIST_COLS).in('id', pageIds);
+        error = r.error;
+        const order = new Map(pageIds.map((id, i) => [id, i]));
+        data = ((r.data ?? []) as unknown as Record<string, unknown>[]).sort(
+          (a, b) => (order.get(String(a.id)) ?? 0) - (order.get(String(b.id)) ?? 0),
+        );
+      } else {
+        data = [];
+      }
+    } else {
+      const column = SORT_COLUMNS[sortKey] ?? 'email';
+      let query = applyFilters(supabaseAdmin.from('sender_mailboxes').select(LIST_COLS, { count: 'exact' }));
+      query = query.order(column, { ascending: sortAsc, nullsFirst: false });
+      if (column !== 'email') query = query.order('email', { ascending: true });
+      const r = await query.range((page - 1) * pageSize, page * pageSize - 1);
+      data = r.data as Record<string, unknown>[] | null;
+      count = r.count;
+      error = r.error;
+    }
 
     if (error) return jsonError(error.message, 500);
 
