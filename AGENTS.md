@@ -51,9 +51,9 @@
 
 ## Release and production boundary (critical)
 
-- For code or documentation changes, the default authorized stopping point is: create a focused commit and push it to the current working branch for that task.
+- For code or documentation changes, the default authorized stopping point is: create a focused commit on the current working branch for that task. **Never push on your own: after each commit (or batch of commits) ask the user whether to push it, and push only after an explicit yes.** An earlier yes covers only that push, not later commits.
 - Never switch to, commit to, or push to another developer's named branch unless the user explicitly requests that exact branch action.
-- After pushing the current working branch, stop and report the branch, commit SHA, and validation results. The user normally handles all further merges and deployment through Tasks.
+- After the user confirms and the push is done, stop and report the branch, commit SHA, and validation results. The user normally handles all further merges and deployment through Tasks.
 - Do not create or merge pull requests into `test` or `main`, trigger or rerun release/deployment tasks, or mutate production unless the user explicitly authorizes that exact phase in the current conversation.
 - Broad requests such as "fix it", "чинить", "сделай", or "доведи до конца" authorize implementation and verification, but do not authorize promotion beyond the current working branch or production deployment.
 - Never copy code directly to production or run production mutation commands such as image pulls, container recreation, migrations, or service restarts without explicit approval immediately before that action.
