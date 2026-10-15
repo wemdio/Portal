@@ -39,6 +39,9 @@ function formatAt(value: string | null): string {
 export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: string | null } = {}) {
   const [campaigns, setCampaigns] = useState<CampaignDto[]>([]);
   const [campaignId, setCampaignId] = useState('');
+  // Переписки грузятся только после выбора кампании (или «Все кампании»):
+  // сразу всё подряд — долго и не нужно. Ссылка на переписку открывает сразу.
+  const [picked, setPicked] = useState(Boolean(initialThreadId));
   // Поиск по названиям кампаний в левой колонке (15.10.2026): их десятки.
   const [campaignSearch, setCampaignSearch] = useState('');
   const [mailboxId, setMailboxId] = useState('');
@@ -72,6 +75,10 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   }, [search]);
 
   const load = useCallback(async () => {
+    if (!picked) {
+      setLoading(false);
+      return;
+    }
     // Крутилка на каждую загрузку, а не только на первую: при смене страницы
     // список молча стоял прежним, и было непонятно, идёт ли загрузка.
     setLoading(true);
@@ -86,7 +93,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
     } finally {
       setLoading(false);
     }
-  }, [page, query, onlyReplied, onlyLeads, campaignId, mailboxId]);
+  }, [picked, page, query, onlyReplied, onlyLeads, campaignId, mailboxId]);
 
   useEffect(() => {
     // Загрузка списка при смене фильтра или страницы — запрос во внешнюю систему.
@@ -130,6 +137,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   }, []);
   const maxPage = Math.max(1, Math.ceil(total / pageSize));
   const pickCampaign = (id: string) => {
+    setPicked(true);
     setCampaignId(id);
     setMailboxId('');
     setPage(1);
@@ -174,7 +182,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               type="button"
               onClick={() => pickCampaign('')}
               className={`block w-full px-4 py-2 text-left text-sm transition-colors ${
-                campaignId === '' ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
+                picked && campaignId === '' ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-100'
               }`}
             >
               Все кампании
@@ -266,7 +274,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
           <div className="space-y-2 border-b border-zinc-200 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-900">
-                Переписок — {total} шт.
+                {picked ? `Переписок — ${total} шт.` : 'Переписки'}
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" /> : null}
               </span>
               <button
@@ -309,7 +317,9 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
           {error ? <p className="px-3 py-2 text-xs text-red-600">{error}</p> : null}
 
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {loading && threads.length === 0 ? (
+            {!picked ? (
+              <p className="px-4 py-12 text-center text-sm text-zinc-500">Выберите кампанию слева — или «Все кампании».</p>
+            ) : loading && threads.length === 0 ? (
               <div className="flex items-center justify-center px-3 py-12">
                 <Loader2 className="h-5 w-5 animate-spin text-zinc-400" aria-label="Загрузка переписок" />
               </div>
