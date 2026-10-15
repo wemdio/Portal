@@ -31,8 +31,14 @@ export const YMAPS_TARGET_CATEGORY_REGEX = [
 
 /** Размер одной порции каталога (строк, до фильтра). */
 const PAGE_SIZE = 50_000;
-/** Сколько читаем каталога за запуск по времени: дальше — стоп, готовое сохраняется. */
-const MAX_READ_MS = 2 * 60 * 60 * 1000;
+/**
+ * Сколько читаем каталога за запуск по времени: дальше — стоп, набранное остаётся.
+ * 15.10.2026: 20 минут (решение пользователя) — два часа держали запуск на «Загрузке
+ * источников» без движения, и монитор парсеров поднимал тревогу.
+ */
+const MAX_READ_MS = 20 * 60 * 1000;
+/** Потолок кандидатов из каталога за запуск (решение пользователя 15.10.2026: 100 000). */
+const MAX_CANDIDATES = 100_000;
 
 export interface YmapsCatalogRow {
   yandexId: string;
@@ -51,10 +57,17 @@ interface PageResult {
  * Кандидаты из каталога: порции идут по возрастанию yandex_id, пока не наберётся
  * limit строк, не кончится каталог или не выйдет время чтения.
  */
-export async function loadYmapsCatalogCandidates(db: SupabaseClient, limit: number): Promise<YmapsCatalogRow[]> {
+export async function loadYmapsCatalogCandidates(
+  db: SupabaseClient,
+  wanted: number,
+  onLog: (message: string) => void = () => {},
+): Promise<YmapsCatalogRow[]> {
+  const limit = Math.min(wanted, MAX_CANDIDATES);
   const started = Date.now();
   const out: YmapsCatalogRow[] = [];
   let after = '';
+  let pages = 0;
+  let scanned = 0;
   for (;;) {
     const { data, error } = await db.rpc('polza_ru_ymaps_catalog_page', {
       p_after: after,
@@ -71,6 +84,12 @@ export async function loadYmapsCatalogCandidates(db: SupabaseClient, limit: numb
         website: String(r.website).split(/[\s,;]+/)[0],
         email: r.email ? String(r.email) : null,
       });
+    }
+    pages += 1;
+    scanned += PAGE_SIZE;
+    // Каждые 5 страниц — строка в журнал: чтение каталога идёт минутами.
+    if (pages % 5 === 0 || page.done) {
+      onLog(`каталог Яндекс Карт: страниц ${pages}, просмотрено ~${scanned} строк, подходящих ${out.length}, прошло ${Math.round((Date.now() - started) / 1000)} с`);
     }
     if (page.done || !page.last_id) break;
     if (out.length >= limit) break;

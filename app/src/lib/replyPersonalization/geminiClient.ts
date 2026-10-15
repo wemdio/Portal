@@ -12,6 +12,12 @@ const ENDPOINT = process.env.OPENROUTER_ENDPOINT ?? 'https://router.requesty.ai/
 // пишем в черновик из ответа (поле model), а не эту константу.
 export const REPLY_MODEL_ID = process.env.REPLY_PERSONALIZATION_MODEL_ID ?? 'google/gemini-3.1-pro-preview';
 
+// С 09.10.2026 генерация шла вдвое дольше (медиана 22→60 с, хвост 2-3 мин).
+// Pro-модель по умолчанию много «думает» перед ответом, а письмо по готовым
+// правилам и примерам такого рассуждения не требует. Пусто или «default» —
+// вернуть прежнее поведение без выкладки.
+const REASONING_EFFORT = (process.env.REPLY_PERSONALIZATION_REASONING_EFFORT ?? 'low').trim().toLowerCase();
+
 const MAX_ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 90_000;
 const TOTAL_TIMEOUT_MS = 240_000;
@@ -40,6 +46,7 @@ export async function generateReplyWithSearch(messages: { role: string; content:
 
   const deadline = Date.now() + TOTAL_TIMEOUT_MS;
   let maxTokens = INITIAL_MAX_TOKENS;
+  let useReasoningEffort = Boolean(REASONING_EFFORT) && REASONING_EFFORT !== 'default';
   let lastError: Error = new ReplyGenerationError('Generation failed for unknown reason');
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
@@ -59,12 +66,16 @@ export async function generateReplyWithSearch(messages: { role: string; content:
           max_tokens: maxTokens,
           temperature: 0.4,
           tools: [{ type: 'web_search' }],
+          ...(useReasoningEffort ? { reasoning_effort: REASONING_EFFORT } : {}),
         }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
-        lastError = new ReplyGenerationError(`Requesty error ${response.status}: ${await response.text().catch(() => '')}`);
+        const errText = await response.text().catch(() => '');
+        lastError = new ReplyGenerationError(`Requesty error ${response.status}: ${errText}`);
+        // Не приняли параметр — повторяем без него, а не роняем генерацию.
+        if (useReasoningEffort && (response.status === 400 || response.status === 422)) useReasoningEffort = false;
         continue;
       }
 
