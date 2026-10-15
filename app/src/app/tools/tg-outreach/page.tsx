@@ -2244,7 +2244,10 @@ function useRowSelection(allIds: string[]) {
 
   const clear = useCallback(() => { setRaw(new Set()); }, []);
 
-  return { selectedIds, isSelected, toggle, setAll, clear };
+  /** Выделить ровно эти строки (после загрузки — новые аккаунты). */
+  const select = useCallback((ids: string[]) => { setRaw(new Set(ids)); }, []);
+
+  return { selectedIds, isSelected, toggle, setAll, clear, select };
 }
 
 /** Результат чтения профиля из Telegram: ошибка либо обновлённые поля. */
@@ -2766,7 +2769,7 @@ function CampaignAccountsTab({
   const profileReadable = campaignStatus === 'stopped' || campaignStatus === 'error';
 
   const accountIds = useMemo(() => accounts.map(a => a.id), [accounts]);
-  const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(accountIds);
+  const { selectedIds, isSelected, toggle, setAll, clear, select } = useRowSelection(accountIds);
 
   /**
    * Прокси, которые ещё никому не назначены.
@@ -3380,7 +3383,7 @@ function CampaignAccountsTab({
       const body = await res.json().catch(() => null) as {
         error?: string;
         count?: number;
-        items?: Array<{ phone?: string | null; country_code?: string | null }>;
+        items?: Array<{ id?: string; phone?: string | null; country_code?: string | null }>;
         skipped?: Array<{ name: string; reason: string }>;
         errors?: Array<{ name: string; error: string }>;
         unchecked_existing_accounts?: number;
@@ -3429,6 +3432,10 @@ function CampaignAccountsTab({
           errors,
           unchecked: body.unchecked_existing_accounts ?? 0,
         });
+        // Только что залитые аккаунты сразу выделены: с ними обычно и начинается
+        // работа (прокси, профиль, проверка). Список обновится ниже, в finally.
+        const newIds = (body.items ?? []).map((item) => item.id).filter((id): id is string => Boolean(id));
+        if (newIds.length) select(newIds);
       }
     } catch (err) {
       // Всё остальное: отказ авторизации или наша собственная ошибка. Молчать
@@ -4103,6 +4110,14 @@ function CampaignAccountsTab({
                     {[a.first_name, a.last_name].filter(Boolean).join(' ') ||
                       (a.profile_synced_at ? 'без имени в Telegram' : 'профиль не прочитан')}
                     {a.tg_username ? ` · @${a.tg_username}` : ''}
+                    {a.tg_premium ? (
+                      <span
+                        className="ml-1.5 rounded bg-amber-50 px-1 py-px text-[10px] font-medium text-amber-700"
+                        title="У аккаунта Telegram Premium (определено при проверке)"
+                      >
+                        ★ Premium
+                      </span>
+                    ) : null}
                   </div>
                   {/* Итог проверки. Чужие сеансы выносим отдельно: это ответ на
                       вопрос, почему аккаунты теряют сессии пачками. */}

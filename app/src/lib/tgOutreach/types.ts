@@ -339,6 +339,8 @@ export interface OutreachProxyListStats {
 export interface OutreachAccount {
   id: string;
   campaign_id: string;
+  /** Telegram Premium: определяется при проверке аккаунта; null — ещё не проверяли. */
+  tg_premium?: boolean | null;
   /**
    * Перенос из другой кампании (миграция 20260921_0004). Заполнено — аккаунт
    * «в гостях»: его можно вернуть домой, но не перенести в третью кампанию.

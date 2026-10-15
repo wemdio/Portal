@@ -42,6 +42,8 @@ export interface AccountCheckResult {
   detail: string;
   tg_user_id?: number | null;
   tg_username?: string | null;
+  /** Telegram Premium у аккаунта (флаг `premium` из getMe); null — Telegram не сказал. */
+  tg_premium?: boolean | null;
   phone?: string | null;
   /** Чужие сеансы: наш собственный из списка исключён. */
   other_sessions?: OtherSession[];
@@ -324,6 +326,7 @@ export async function checkAccount(
   const identity = {
     tg_user_id: me.id != null ? Number(me.id) : null,
     tg_username: me.username ?? null,
+    tg_premium: typeof me.premium === 'boolean' ? me.premium : null,
     phone: me.phone ?? null,
     other_sessions: otherSessions,
   };
