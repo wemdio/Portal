@@ -723,7 +723,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                           <span className={(mailbox.sent_today?.first ?? 0) >= mailbox.daily_campaign_limit ? 'font-medium text-amber-600' : ''}>
                             {mailbox.sent_today?.first ?? 0} / {mailbox.daily_campaign_limit}
                           </span>
-                          {' · '}
+                          {' – '}
                           <span className={(mailbox.sent_today?.total ?? 0) >= mailbox.daily_total_limit ? 'font-medium text-amber-600' : ''}>
                             {mailbox.sent_today?.total ?? 0} / {mailbox.daily_total_limit}
                           </span>
