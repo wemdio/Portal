@@ -3038,6 +3038,7 @@ describe('base_collect: ливлок сохранённой проверки', (
     const first = await runRound();
     expect(first.relevance_review_requested).toBe(true);
     expect(first.relevance_review_progress?.passes).toBe(0);
+    expect(first.idle_rounds).toBe(1);
     expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(1);
 
     // Дочерняя валидация почт ответила по соседнему адресу «невалидный».
@@ -3055,6 +3056,66 @@ describe('base_collect: ливлок сохранённой проверки', (
     // Контакты никуда не делись: раунд завершается честно, резерв цел.
     expect(second.relevance_reserve!.rows).toHaveLength(3);
     expect(second.relevance_summary).toMatchObject({ total: 3, needs_review: 3 });
+
+    // Legarus: 499/500 leaves one website review per wake. Reviewing another
+    // saved company is progress even when no new ready contact was admitted.
+    // The acquired round and paid limits must stay exactly the same.
+    for (const mode of ['unchanged', 'invalid_noise', 'progress'] as const) {
+      const ready = Array.from({ length: 499 }, (_, index) => {
+        const row = unifiedRow({ company: `Готовая клиника ${index}`, website: `ready${index}.test`, email: `office@ready${index}.test` });
+        return { ...row, _email_status: 'ok',
+          _ve_company_name: { version: 1, source: row.company, website: row.website, status: 'ready', value: row.company } };
+      });
+      const nearReserve = structuredClone(reserve).map((row) => mode === 'invalid_noise' && row.email === 'info@a.test'
+        ? { ...row, _email_status: 'invalid' } : row);
+      const nearInfo: VeCollectInfo = {
+        ...collectInfo([]), collection_mode: 'preview', ready_target: 500, relevance_review_requested: true, idle_rounds: 9,
+        relevance_review_progress: { signature: first.relevance_review_progress!.signature, passes: 0 },
+        search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2 },
+        relevance_reserve: { version: 1, rows: nearReserve },
+        target_progress: { ...createCollectionTarget('preview'), status: 'collecting', round: 4, candidates_processed: 1000, ready_rows: 499 },
+        target_checkpoint: { completed_round: 4, seen_rows: nearReserve, processed_rows: 3 },
+        saved_email_recovery: { version: 1, attempt_id: 'automatic:b1', checked, automatic_checked: checked },
+      };
+      nearInfo.tasks![0].exhausted = true;
+      const nearDb = seed(nearInfo, { ve_bases: [{ ...makeBase(nearInfo), data: ready, row_count: 499, columns: [...VE_AUTO_COLLECT_COLUMNS] }] });
+      mockFindIrrelevantRows.mockClear().mockImplementation(async (input: { rows: Array<Record<string, unknown>>; websiteLimit: number }) => {
+        expect(input.websiteLimit).toBe(1);
+        return { flagged: new Set<number>(), unchecked: new Set(input.rows.map((_, index) => index)),
+          review: new Set(input.rows.map((_, index) => index)), errored: new Set<number>(),
+          decisions: new Map(input.rows.map((row, index) => [index, {
+            ...(row._ve_relevance as ReturnType<typeof savedNeedsReview>),
+            ...(mode === 'progress' && row.company === 'Клиника А' ? { review_attempts: 1 } : {}),
+          }])), coverage: { checkedCompanies: 2, totalCompanies: 2, complete: true }, tokensUsed: 0, costUsd: 0 };
+      });
+      jest.mocked(callLLMWithSchema).mockClear();
+      jest.mocked(searchRows).mockClear();
+      jest.mocked(fetchVeRelevanceEvidence).mockClear();
+      const started = Date.now();
+      await runBaseCollectStage(makeJob(), { supabase: nearDb as unknown as SupabaseClient });
+      const afterBase = nearDb.getRows('ve_bases')[0];
+      const after = afterBase.collect_info as VeCollectInfo;
+      expect(afterBase.row_count).toBe(499);
+      expect(after.target_progress?.candidates_processed).toBe(1000);
+      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(1);
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+      expect(searchRows).not.toHaveBeenCalled();
+      expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+      expect(nearDb.getRows('base_constructor_jobs')).toHaveLength(0);
+      if (mode === 'progress') {
+        expect(after.target_progress).toMatchObject({ status: 'collecting', round: 4, ready_rows: 499 });
+        expect(after.relevance_review_progress?.signature).not.toBe(first.relevance_review_progress!.signature);
+        expect(after.idle_rounds).toBe(0);
+        const nextRun = Date.parse(nearDb.getRows('ve_jobs')[0].run_after as string);
+        expect(nextRun - started).toBeGreaterThanOrEqual(30_000);
+        expect(nextRun).toBeLessThanOrEqual(Date.now() + 30_000);
+      } else {
+        expect(after.relevance_review_progress).toEqual({ signature: first.relevance_review_progress!.signature, passes: 1 });
+        expect(after.relevance_review_requested).toBeUndefined();
+        expect(afterBase.status).not.toBe('collecting');
+      }
+    }
   });
 });
 
