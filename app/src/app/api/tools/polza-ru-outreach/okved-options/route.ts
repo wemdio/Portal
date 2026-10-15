@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,7 +25,10 @@ export async function GET(req: NextRequest) {
 
   if (cache && Date.now() - cache.at < TTL_MS) return NextResponse.json({ options: cache.options });
 
-  const { data, error } = await auth.supabase.rpc('polza_ru_okved_options');
+  // Функция открыта только серверному ключу (миграция 20261015_0005), поэтому
+  // зовём её сервисным клиентом — после проверки доступа выше.
+  if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
+  const { data, error } = await supabaseAdmin.rpc('polza_ru_okved_options');
   if (error) return jsonError(error.message, 500);
   const options: OkvedOption[] = ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
     code: String(r.code),

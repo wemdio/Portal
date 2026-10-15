@@ -6159,19 +6159,30 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setCheckElapsed(0);
     setChecking(true);
     try {
-      const res = await authFetch(`${API_BASE}/proxies/check`, {
-        method: 'POST',
-        body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids }),
-      });
-      const body = (await res.json().catch(() => null)) as
-        | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
-        | null;
-      // Отказ ручки — не вердикт по прокси: он ничего не говорит ни о прокси, ни
-      // о Telegram, поэтому едет в общую красную плашку вкладки, а не в итоги.
-      if (!res.ok || !body?.items) {
-        setProxyError(body?.error ?? `Не удалось проверить прокси (HTTP ${res.status})`);
-        return;
+      // Любое число прокси — пачками по 50 (сервер берёт до 200), с определением
+      // страны и записью итога в строку прокси.
+      const items: ProxyCheckResult[] = [];
+      let missing = 0;
+      let checkedAt = new Date().toISOString();
+      for (let i = 0; i < ids.length; i += 50) {
+        const res = await authFetch(`${API_BASE}/proxies/check`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids.slice(i, i + 50), detect_country: true, save: true }),
+        });
+        const body = (await res.json().catch(() => null)) as
+          | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
+          | null;
+        // Отказ ручки — не вердикт по прокси: он ничего не говорит ни о прокси, ни
+        // о Telegram, поэтому едет в общую красную плашку вкладки, а не в итоги.
+        if (!res.ok || !body?.items) {
+          setProxyError(body?.error ?? `Не удалось проверить прокси (HTTP ${res.status})`);
+          return;
+        }
+        items.push(...body.items);
+        missing += body.missing_ids?.length ?? 0;
+        checkedAt = body.checked_at ?? checkedAt;
       }
+      const body = { items, missing_ids: new Array<string>(missing), checked_at: checkedAt };
       // Порядок ответа нам не обещан, а оператор ищет строки там, где выделял.
       const byId = new Map(body.items.map((r) => [r.id, r]));
       setCheckRun({
@@ -6179,6 +6190,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         missing: body.missing_ids?.length ?? 0,
         checkedAt: body.checked_at ?? new Date().toISOString(),
       });
+      void reloadAll();
     } catch (e) {
       setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -6192,8 +6204,16 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
    * спискам «Авто · Страна» и «Не работают». Пачки идут подряд, а не по одному
    * запросу на прокси: мобильный пул не получает больше 50 подключений за раз.
    */
-  const checkAndSortUndefined = async () => {
-    const targets = proxies.filter((p) => p.proxy_list_id == null).map((p) => p.id);
+  const checkAndSortUndefined = () => checkListAndSort(proxies.filter((p) => p.proxy_list_id == null).map((p) => p.id), null);
+
+  /**
+   * Перепроверка любого списка (15.10.2026): та же проверка пачками по 50 с
+   * определением страны. После неё прокси «Неопределённых» и автосписков
+   * раскладываются по странам; списки, названные вручную, остаются как есть.
+   */
+  const recheckActiveList = () => checkListAndSort(proxies.filter((p) => (p.proxy_list_id ?? null) === activeList).map((p) => p.id), activeList);
+
+  const checkListAndSort = async (targets: string[], sortListId: string | null) => {
     if (!targets.length || checking || sortRun) return;
     setProxyError(null);
     setSortRun({ done: 0, total: targets.length, working: 0 });
@@ -6215,7 +6235,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       }
       const sortRes = await authFetch(`${API_BASE}/proxies/auto-sort`, {
         method: 'POST',
-        body: JSON.stringify({ campaign_id: campaignId }),
+        body: JSON.stringify({ campaign_id: campaignId, ...(sortListId ? { list_id: sortListId } : {}) }),
       });
       const sorted = (await sortRes.json().catch(() => null)) as { moved?: number; groups?: { name: string; count: number }[]; error?: string } | null;
       if (!sortRes.ok) {
@@ -6225,7 +6245,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           done: targets.length,
           total: targets.length,
           working,
-          note: `Разложено ${sorted?.moved ?? 0}: ${(sorted?.groups ?? []).map((g) => `${g.name} — ${g.count}`).join(', ') || 'нечего раскладывать'}`,
+          note: sorted?.moved
+            ? `Разложено ${sorted.moved}: ${(sorted.groups ?? []).map((g) => `${g.name} — ${g.count}`).join(', ')}`
+            : 'Перекладывать нечего — список остался как был',
         });
       }
     } catch (e) {
@@ -6559,10 +6581,20 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {activeList !== null && (
+              <button type="button" onClick={() => { void recheckActiveList(); }}
+                disabled={Boolean(sortRun && sortRun.done < sortRun.total)}
+                title="Проверить заново все прокси этого списка и определить страну. В автосписках («Авто · …», «Не работают») прокси после этого переедут в свою страну"
+                className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-60">
+                {sortRun && sortRun.done < sortRun.total
+                  ? `Проверяю ${sortRun.done} из ${sortRun.total}…`
+                  : 'Перепроверить список и определить страну'}
+              </button>
+            )}
             {activeList === null && (
               <button type="button" onClick={() => { void checkAndSortUndefined(); }}
                 disabled={Boolean(sortRun && sortRun.done < sortRun.total)}
-                title="Проверить все прокси без списка: жив ли прокси, доходит ли Telegram, из какой страны. Потом они сами разложатся по спискам «Авто · Страна» и «Не работают»"
+                title="Проверить все прокси без списка: жив ли прокси, доходит ли Telegram, из какой страны. Потом они сами разложатся по спискам «Авто · Страна» и «Не работают"
                 className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-60">
                 {sortRun && sortRun.done < sortRun.total
                   ? `Проверяю ${sortRun.done} из ${sortRun.total}…`
