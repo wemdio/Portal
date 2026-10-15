@@ -395,7 +395,7 @@ function StatusFilterMenu({
         <ChevronDown className="h-3.5 w-3.5 opacity-60" />
       </button>
       {open ? (
-        <div className="absolute left-0 z-30 mt-1 w-52 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
+        <div className="absolute left-0 z-30 mt-1 w-60 space-y-0.5 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
           {STATUS_FILTERS.map((item) => (
             <button
               key={item.id}
@@ -404,7 +404,7 @@ function StatusFilterMenu({
                 onChange(item.id);
                 setOpen(false);
               }}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-zinc-100 ${
+              className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[15px] hover:bg-zinc-100 ${
                 item.id === value ? 'font-semibold text-zinc-900' : 'text-zinc-700'
               }`}
             >
