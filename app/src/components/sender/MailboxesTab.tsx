@@ -662,6 +662,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             min={1}
                             max={500}
                             title="Новых (первых) писем в день"
+                            // key по значению: поле с defaultValue само не обновляется после
+                            // массовой правки лимитов — без этого показывало старое число.
+                            key={`new-${mailbox.id}-${mailbox.daily_campaign_limit}`}
                             defaultValue={mailbox.daily_campaign_limit}
                             onBlur={(e) => {
                               const next = Number(e.target.value);
@@ -677,6 +680,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             min={1}
                             max={500}
                             title="Всего писем в день вместе с напоминаниями"
+                            key={`total-${mailbox.id}-${mailbox.daily_total_limit}`}
                             defaultValue={mailbox.daily_total_limit}
                             onBlur={(e) => {
                               const next = Number(e.target.value);
