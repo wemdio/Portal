@@ -7,8 +7,9 @@ import { loadVeProjectDetail } from '@/lib/verticalEngineV2/projectDetail';
 import { createVeCollectionContinuationCache, readVeCollectionContinuationCache, saveVeCollectionContinuationCache } from '@/lib/verticalEngineV2/collectionContinuationCache';
 import { selectHypothesisLetters, selectHypothesisPreparationBase, selectPreparationHypotheses } from '@/components/vertical-engine-v2/engine/letterSelection';
 import { getPreparationActionNotice, getPreparationControl, getPreparationPresentation, refreshPreparationRequestNotice } from '@/components/vertical-engine-v2/engine/PreparationProgress';
-import { getVeLaunchSelectionState, getVePreparedBaseState } from '@/components/vertical-engine-v2/engine/launchSelection';
+import { getVeLaunchSelectionState, getVePreparedBaseState, isVeHypothesisLaunchPending } from '@/components/vertical-engine-v2/engine/launchSelection';
 import type { VeOutreachPreparation, VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
+import type { VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { groupVeHypotheses } from '@/components/vertical-engine-v2/engine/hypothesisGroups';
 
@@ -199,6 +200,12 @@ describe('VE2 collection progress presentation', () => {
     expect(getVePreparedBaseState({ ...readySnapshot, reviews: {} }, readyTemplates, 'h1').ready).toBe(false);
     expect(getVePreparedBaseState(readySnapshot, [{ ...current, launch_info: {} }] as unknown as VeTemplate[], 'h1'))
       .toMatchObject({ ready: false, launched: true });
+    for (const status of ['queued', 'running', 'waiting', 'active', 'blocked', 'cancelled'] as const) {
+      const run = { status, items: [{ hypothesis_id: 'h1' }] } as unknown as VeOutreachRun;
+      expect(isVeHypothesisLaunchPending(run, 'h1')).toBe(['queued', 'running', 'waiting'].includes(status));
+      expect(isVeHypothesisLaunchPending(run, 'h2')).toBe(false);
+    }
+    expect(isVeHypothesisLaunchPending(null, 'h1')).toBe(false);
     preparation.template_id = null;
     expect(getPreparationPresentation({ preparation, base: letterBases[1], jobs: [], context: 'letters' }))
       .toMatchObject({ tone: 'muted', currentStep: 0 });
@@ -402,6 +409,14 @@ describe('VE2 collection progress presentation', () => {
     expect(savedNotice?.message).toBe(blockedNotice.message);
     expect(refreshPreparationRequestNotice(savedNotice, freshState)).toBe(savedNotice);
     expect(refreshPreparationRequestNotice(savedNotice, { ...freshState,
+      preparations: [{ ...preparation, status: 'ready' }] })).toBeNull();
+    const unknownPauseNotice = { ...blockedNotice, operation: 'pause' as const, message: 'Подтверждение паузы не получено.' };
+    expect(refreshPreparationRequestNotice(unknownPauseNotice, { ...freshState,
+      preparations: [{ ...preparation, paused_at: '2026-10-15T12:00:00Z' }] })).toBeNull();
+    expect(refreshPreparationRequestNotice(unknownPauseNotice, freshState)?.message).toBe(unknownPauseNotice.message);
+    expect(refreshPreparationRequestNotice(unknownPauseNotice, { ...freshState,
+      bases: freshState.bases.map((item) => ({ ...item, updated_at: '2026-10-15T12:01:00Z' })) })).toBe(unknownPauseNotice);
+    expect(refreshPreparationRequestNotice(unknownPauseNotice, { ...freshState,
       preparations: [{ ...preparation, status: 'ready' }] })).toBeNull();
     collecting.collect_info.relevance_review_requested = false;
     collecting.collect_info.construct.progress = { status: 'processing', current_step_key: 'validate_emails', current_step_progress: 37 };

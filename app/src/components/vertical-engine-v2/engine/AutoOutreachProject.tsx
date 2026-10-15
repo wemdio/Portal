@@ -41,7 +41,7 @@ import { PreparationProgress, getPreparationPresentation, getPreparationActionNo
 import { selectHypothesisLetters, selectHypothesisPreparationBase, selectPreparationHypotheses } from './letterSelection';
 import { collectCount, isPartialPreview } from './collectionProgress';
 import { ContactLimitField, parseContactLimitDraft } from './ContactLimitField';
-import { getVeLaunchSelectionState, getVePreparedBaseState } from './launchSelection';
+import { getVeLaunchSelectionState, getVePreparedBaseState, isVeHypothesisLaunchPending } from './launchSelection';
 import { VeAutomaticContinuationChecks, veAutomaticContinuationCandidates, veAutomaticContinuationResultCurrent } from './automaticContinuationCheck';
 import {
   VE_BROAD_HYPOTHESES_EMPTY_NOTE,
@@ -448,7 +448,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     return result.data;
   };
   const change = async (payload: Record<string, unknown>) => {
-    if (!snapshot || busy || locked) return;
+    const pausing = payload.action === 'pause';
+    const noticeHypothesisId = typeof payload.hypothesis_id === 'string' ? payload.hypothesis_id : null;
+    if (!snapshot || busy || (locked && (!pausing || !noticeHypothesisId || isVeHypothesisLaunchPending(run, noticeHypothesisId)))) return;
     if (payload.action === 'prepare' && contactLimitUnsaved) {
       setError('Сначала примените лимит адресов на шаге «Гипотезы».');
       return;
@@ -460,10 +462,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     setBusy(true);
     setError('');
     const preparing = payload.action === 'prepare';
-    const noticeHypothesisId = typeof payload.hypothesis_id === 'string' ? payload.hypothesis_id : null;
-    setPreparationNotice(preparing
+    setPreparationNotice(preparing || pausing
       ? { hypothesisId: noticeHypothesisId, checking: true, tone: 'info',
-        message: 'Проверяем возможность продолжения…' } : null);
+        ...(pausing ? { operation: 'pause' as const } : {}),
+        message: pausing ? 'Приостанавливаем подготовку… Дождитесь подтверждения.' : 'Проверяем возможность продолжения…' } : null);
     try {
       let requestSnapshot = snapshot;
       if (payload.action === 'approve') {
@@ -481,6 +483,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
             ...(result.data.preparation_action ? getPreparationActionNotice(result.data.preparation_action)
               : { tone: 'error', message: result.data.error ?? 'Не удалось продолжить подготовку.' }) });
           await refresh();
+        } else if (pausing) {
+          setPreparationNotice({ hypothesisId: noticeHypothesisId, operation: 'pause', keepUntilStateChanges: true, tone: 'error',
+            message: result.data.error ?? 'Не удалось приостановить подготовку. Обновите статус перед повторной попыткой.' });
+          await refresh();
         } else setError(result.data.error ?? 'Не удалось сохранить выбор');
         return;
       }
@@ -497,7 +503,12 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           setStep((current) => current === 3 ? 3 : 2);
         await refresh();
       }
-      if (payload.action === 'pause') await refresh();
+      if (pausing) {
+        const paused = result.data.preparations.some((item) => item.hypothesis_id === noticeHypothesisId && item.paused_at);
+        setPreparationNotice({ hypothesisId: noticeHypothesisId, operation: 'pause', tone: 'info',
+          message: paused ? 'Подготовка приостановлена. Сохранённые результаты доступны.' : 'Состояние подготовки изменилось. Обновляем статус.' });
+        await refresh();
+      }
       // Finished bases are re-partitioned by the worker right after the save.
       if (payload.action === 'contact_limit') {
         setContactLimitDraft(null);
@@ -506,6 +517,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     } catch {
       if (preparing) setPreparationNotice({ hypothesisId: noticeHypothesisId, tone: 'error',
         message: 'Ответ не получен. Обновите статус, прежде чем повторять подготовку.' });
+      else if (pausing) setPreparationNotice({ hypothesisId: noticeHypothesisId, operation: 'pause', keepUntilStateChanges: true, tone: 'error',
+        message: 'Подтверждение паузы не получено. Обновите статус, прежде чем повторять.' });
       else setError('Не удалось сохранить решение. Проверьте соединение');
     } finally {
       setBusy(false);
@@ -1021,6 +1034,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     onPause={() => void change({ action: 'pause', hypothesis_id: activeId })}
                     onContinue={() => void change({ action: 'prepare', hypothesis_id: activeId })}
                     continueDisabled={busy || locked}
+                    pauseDisabled={busy || isVeHypothesisLaunchPending(run, activeId)}
+                    pauseDisabledReason={isVeHypothesisLaunchPending(run, activeId) ? 'Эта база входит в текущий запуск. Его статус доступен в «Результатах».' : undefined}
                     prepareDisabled={contactLimitUnsaved}
                     actionNotice={preparationNotice?.hypothesisId === activeId ? preparationNotice : null}
                   />
@@ -1099,7 +1114,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <h3 className="ve2-h3">{h.title}</h3>
-                      <DownloadVerifiedContacts projectId={projectId} hypothesisId={h.id} />
+                      <DownloadVerifiedContacts projectId={projectId} hypothesisId={h.id} hypothesisTitle={h.title} />
                     </div>
                     {!launchStates[h.id]?.launched ? <PreparationProgress compact preparation={p} base={base} jobs={detail.jobs} approved={approved}
                       preparationSelected={selectedIds.includes(h.id)} hypothesisTitle={h.title}
@@ -1108,9 +1123,11 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                       onPause={() => void change({ action: 'pause', hypothesis_id: h.id })}
                       onContinue={launchStates[h.id]?.launched ? undefined : () => void change({ action: 'prepare', hypothesis_id: h.id })}
                       continueDisabled={busy || locked}
+                      pauseDisabled={busy || isVeHypothesisLaunchPending(run, h.id)}
+                      pauseDisabledReason={isVeHypothesisLaunchPending(run, h.id) ? 'Эта база входит в текущий запуск. Его статус доступен в «Результатах».' : undefined}
                       prepareDisabled={contactLimitUnsaved || h.status === 'rejected'}
                       actionNotice={preparationNotice?.hypothesisId === h.id ? preparationNotice : null} /> : null}
-                    {savedLetters ? <button type="button" className={HE.btnGhost} onClick={() => {
+                    {savedLetters ? <button type="button" className={HE.btnGhost} aria-label={`Посмотреть письма: ${h.title}`} onClick={() => {
                       if (jump(2)) { setActiveHypothesis(h.id); setActiveLetterBaseId(undefined); }
                     }}>Посмотреть письма</button> : null}
                     {approval && (p?.status !== 'ready' || p.paused_at) ? <p className={HE.muted}>
@@ -1147,7 +1164,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         {launchStates[h.id]?.launched ? (
                           <div className="space-y-2">
                             <p className={HE.muted}>База уже передана в запуск.</p>
-                            <button type="button" className={HE.btnGhost} onClick={() => jump(5)}>Посмотреть результаты</button>
+                            <button type="button" className={HE.btnGhost} aria-label={`Посмотреть результаты: ${h.title}`} onClick={() => jump(5)}>Посмотреть результаты</button>
                           </div>
                         ) : review && p?.status === 'ready' && !p.paused_at ? <>
                         <label className="flex items-start gap-3">
@@ -1155,6 +1172,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             type="checkbox"
                             className="ve2-cbx mt-1"
                             checked={approved}
+                            aria-label={`Базу и письма проверил, одобряю для запуска: ${h.title}`}
                             disabled={busy || locked}
                             onChange={(e) =>
                               void change({
@@ -1169,6 +1187,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                           <span>Базу и письма проверил, одобряю для запуска</span>
                         </label>
                         {launchStates[h.id]?.ready ? <button type="button" className={HE.btnPrimary}
+                          aria-label={`К запуску этой базы: ${h.title}`}
                           disabled={busy || locked || contactLimitUnsaved}
                           onClick={() => configureLaunch([h.id])}>К запуску этой базы</button>
                         : <p className={HE.muted}>{launchStates[h.id]?.label}</p>}

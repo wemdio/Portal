@@ -1,5 +1,12 @@
 import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
+import type { VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
+
+/** A pending campaign launch only protects its own hypotheses from pausing. */
+export function isVeHypothesisLaunchPending(run: VeOutreachRun | null, hypothesisId: string): boolean {
+  return !!run && ['queued', 'running', 'waiting'].includes(run.status)
+    && run.items.some((item) => item.hypothesis_id === hypothesisId);
+}
 
 /** Preparation selection and launch selection are separate, explicit decisions. */
 export function getVeLaunchSelectionState(

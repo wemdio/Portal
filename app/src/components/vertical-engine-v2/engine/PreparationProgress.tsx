@@ -21,6 +21,8 @@ interface PreparationProgressProps {
   onPause?: () => void;
   onContinue?: () => void;
   continueDisabled?: boolean;
+  pauseDisabled?: boolean;
+  pauseDisabledReason?: string;
   prepareDisabled?: boolean;
   approved?: boolean;
   actionNotice?: PreparationActionNotice | null;
@@ -29,6 +31,7 @@ interface PreparationProgressProps {
 export interface PreparationActionNotice { tone: 'info' | 'error'; message: string }
 export interface PreparationRequestNotice extends PreparationActionNotice {
   hypothesisId: string | null;
+  operation?: 'pause';
   checking?: boolean;
   keepUntilStateChanges?: boolean;
   stateKey?: string;
@@ -40,12 +43,19 @@ export function refreshPreparationRequestNotice(
   notice: PreparationRequestNotice | null,
   snapshot: { preparations: readonly VeOutreachPreparation[]; bases: readonly VeBaseSummary[]; jobs: readonly VeJobSummary[] },
 ): PreparationRequestNotice | null {
+  if (notice?.operation === 'pause' && snapshot.preparations.some((item) => item.hypothesis_id === notice.hypothesisId && item.paused_at)) return null;
   if (!notice || notice.checking) return notice;
   if (!notice.keepUntilStateChanges) return null;
   const preparations = snapshot.preparations.filter((item) => !notice.hypothesisId || item.hypothesis_id === notice.hypothesisId);
   const bases = snapshot.bases.filter((item) => !notice.hypothesisId || item.hypothesis_id === notice.hypothesisId
     || preparations.some((preparation) => preparation.base_id === item.id));
   const baseIds = new Set(bases.map((item) => item.id));
+  if (notice.operation === 'pause') {
+    const completed = preparations.length > 0 && preparations.every((item) => item.status === 'ready')
+      && !snapshot.jobs.some((item) => baseIds.has(item.payload?.base_id ?? '') && ['pending', 'running'].includes(item.status));
+    // Ordinary collection progress cannot confirm or dismiss a failed pause.
+    return completed ? null : notice;
+  }
   const stateKey = JSON.stringify({
     preparations: preparations.map((item) => [item.hypothesis_id, item.base_id, item.template_id, item.status, item.last_error, item.paused_at, item.cancelled_at]).sort(),
     bases: bases.map((item) => [item.id, item.status, item.updated_at, item.collection_continuation]).sort(),
@@ -458,7 +468,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
   const control = getPreparationControl(props);
   const onAction = control?.action === 'start' ? props.onStart : control?.action === 'pause' ? props.onPause : props.onContinue;
   const action = control && onAction ? <button type="button" className={HE.btnGhost}
-    disabled={props.continueDisabled || (control.action !== 'pause' && props.prepareDisabled)}
+    disabled={control.action === 'pause' ? (props.pauseDisabled ?? props.continueDisabled) : props.continueDisabled || props.prepareDisabled}
     aria-label={props.hypothesisTitle ? `${control.label}: ${props.hypothesisTitle}` : undefined} onClick={onAction}>{control.label}</button> : null;
   const completed = state.tone === 'ok';
   const job = props.jobs.find(candidate => candidate.stage === 'base_collect' && candidate.payload?.base_id === props.base?.id);
@@ -483,6 +493,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
     <p className={HE.muted}>{state.guidance.action === 'wait' ? state.description : state.guidance.next}</p>
     {state.tone === 'err' || props.preparation?.paused_at || props.preparation?.cancelled_at ? <p className={HE.muted}>{state.description}</p> : null}
     {state.continueHint ? <p className={HE.muted}>{state.continueHint}</p> : null}
+    {control?.action === 'pause' && props.pauseDisabledReason ? <p className={HE.muted}>{props.pauseDisabledReason}</p> : null}
     {collecting && savedReady !== null ? <p className={HE.muted}>Прошли все проверки: {savedReady.toLocaleString('ru-RU')}{composition ? ` · ${composition}` : ''}</p> : null}
     {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
       className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
@@ -535,6 +546,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
       {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
         className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
       {action}
+      {control?.action === 'pause' && props.pauseDisabledReason ? <p className={HE.muted}>{props.pauseDisabledReason}</p> : null}
       {state.continueHint ? <p className={HE.muted}>{state.continueHint}</p> : null}
       {state.collectionSummary ? <details>
         <summary className="ve2-link cursor-pointer">О сборе базы</summary>
