@@ -357,6 +357,9 @@ export function CampaignsTab({
   // Поиск по названию — по всем папкам сразу, на клиенте: кампаний сотни.
   const [search, setSearch] = useState('');
   const [restPage, setRestPage] = useState(1);
+  // Что показывать: кампании спецов или блоки автоаутричей. По умолчанию —
+  // кампании: автоаутричи ведёт не каждый, и их блоки были первым, что видели все.
+  const [view, setView] = useState<'companies' | 'auto'>('companies');
 
   const load = useCallback(async () => {
     // Папки и кампании грузятся независимо: не загрузились папки — кампании
@@ -378,6 +381,9 @@ export function CampaignsTab({
           const rest = list.filter((campaign) => !campaign.folder_id || !folderIds.has(campaign.folder_id));
           const index = rest.findIndex((campaign) => campaign.id === target);
           if (index >= 0) setRestPage(Math.floor(index / REST_PAGE_SIZE) + 1);
+          // Ссылка с экрана запуска автоаутрича ведёт в папку: открыть её блок,
+          // иначе кампания окажется на скрытой вкладке.
+          else setView('auto');
         } else {
           setLinkMissing(
             cut
@@ -560,6 +566,29 @@ export function CampaignsTab({
             </button>
           ) : null}
         </div>
+        <div
+          role="tablist"
+          aria-label="Компании или автоаутрич"
+          className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-zinc-50 p-1"
+        >
+          {([
+            { id: 'companies', label: 'Компании' },
+            { id: 'auto', label: 'Автоаутрич' },
+          ] as const).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={view === item.id}
+              onClick={() => setView(item.id)}
+              className={`rounded-full px-3.5 py-1 text-sm font-semibold transition ${
+                view === item.id ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           onClick={() => router.push('/tools/sender/campaigns/new')}
@@ -586,7 +615,7 @@ export function CampaignsTab({
         <>
           {/* Папки автоаутричей — рядом, по половине ширины: у каждой своя
               прокрутка на ~7 кампаний, и обе видны без пролистывания страницы. */}
-          {folderGroups.length ? (
+          {view === 'auto' && folderGroups.length ? (
             <div className="grid items-start gap-4 lg:grid-cols-2">
               {folderGroups.map((group) => (
                 <section key={group.key} className="min-w-0 rounded-xl border border-zinc-200 bg-white">
@@ -607,7 +636,7 @@ export function CampaignsTab({
             </div>
           ) : null}
 
-          {restGroup ? (
+          {view === 'companies' && restGroup ? (
             <section className="rounded-xl border border-zinc-200 bg-white">
               {renderHeader(restGroup)}
               {restShown.length > 0 ? (
