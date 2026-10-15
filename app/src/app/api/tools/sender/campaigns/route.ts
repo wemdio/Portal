@@ -75,7 +75,17 @@ async function campaignStats(campaignId: string, timeZone: string) {
       .eq('campaign_id', campaignId)
       .eq('status', status);
 
-  const [recipients, replied, bounced, reached, sent, scheduled, failed, sentToday] = await Promise.all([
+  // Активные получатели: ещё не написали / цепочка в процессе.
+  const activeQuery = (contacted: boolean) => {
+    const q = db.from('sender_recipients').select('id', { count: 'exact', head: true })
+      .eq('campaign_id', campaignId).eq('status', 'active');
+    return contacted ? q.gt('last_step_sent', 0) : q.eq('last_step_sent', 0);
+  };
+
+  const [
+    recipients, replied, bounced, reached, sent, scheduled, failed, sentToday,
+    finished, unsubscribed, inProgress, notContacted,
+  ] = await Promise.all([
     recipientsQuery(),
     recipientsQuery({ column: 'status', value: 'replied' }),
     recipientsQuery({ column: 'status', value: 'bounced' }),
@@ -87,6 +97,10 @@ async function campaignStats(campaignId: string, timeZone: string) {
     messagesQuery('scheduled'),
     messagesQuery('failed'),
     messagesQuery('sent').gte('sent_at', startOfTodayIso(timeZone)),
+    recipientsQuery({ column: 'status', value: 'finished' }),
+    recipientsQuery({ column: 'status', value: 'unsubscribed' }),
+    activeQuery(true),
+    activeQuery(false),
   ]);
 
   const reachedCount = reached.count ?? 0;
@@ -102,6 +116,10 @@ async function campaignStats(campaignId: string, timeZone: string) {
     scheduled: scheduled.count ?? 0,
     failed: failed.count ?? 0,
     sentToday: sentToday.count ?? 0,
+    finished: finished.count ?? 0,
+    unsubscribed: unsubscribed.count ?? 0,
+    inProgress: inProgress.count ?? 0,
+    notContacted: notContacted.count ?? 0,
   };
 }
 

@@ -489,6 +489,38 @@ function StatusFilterMenu({
   );
 }
 
+/** Разбивка базы по наведению на прогресс — как «Progress Overview» в Instantly. */
+function ProgressOverview({ campaign, percent }: { campaign: CampaignDto; percent: number }) {
+  const stats = campaign.stats;
+  if (!stats) return null;
+  const rows: Array<{ label: string; value: string | number; tone?: string }> = [
+    { label: 'Всего контактов', value: stats.recipients },
+    { label: 'Цепочка завершена', value: stats.finished ?? 0 },
+    { label: 'В процессе', value: stats.inProgress ?? 0, tone: 'text-blue-600' },
+    { label: 'Ещё не писали', value: stats.notContacted ?? 0 },
+    { label: 'Ответили', value: stats.replied, tone: stats.replied ? 'text-emerald-600' : undefined },
+    { label: 'Отбои', value: stats.bounced, tone: stats.bounced ? 'text-red-600' : undefined },
+    { label: 'Отписались', value: stats.unsubscribed ?? 0 },
+    { label: 'Прогресс', value: `${percent}%` },
+  ];
+  return (
+    <div
+      role="tooltip"
+      className="pointer-events-none invisible absolute left-0 top-full z-30 mt-2 w-64 rounded-xl border border-zinc-200 bg-white p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100"
+    >
+      <div className="mb-2 border-b border-zinc-200 pb-2 text-sm font-semibold text-zinc-900">Прогресс отправки</div>
+      <dl className="space-y-1.5">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-center justify-between text-sm">
+            <dt className="text-zinc-500">{row.label}</dt>
+            <dd className={`font-semibold tabular-nums ${row.tone ?? 'text-zinc-900'}`}>{row.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 /** Статус в таблице: цветная точка и подпись, как в Instantly. */
 const STATUS_PILL: Record<CampaignDto['status'], { text: string; pill: string; dot: string }> = {
   draft: { text: 'Черновик', pill: 'bg-zinc-100 text-zinc-600', dot: 'bg-zinc-400' },
@@ -686,7 +718,8 @@ function CampaignTable({
                 {percent === null ? (
                   <span className="text-zinc-400">—</span>
                 ) : (
-                  <div className="flex items-center gap-2">
+                  <div className="group relative flex w-fit cursor-default items-center gap-2 py-1">
+                    <ProgressOverview campaign={campaign} percent={percent} />
                     <span className="w-10 text-xs font-semibold tabular-nums text-zinc-800">{percent}%</span>
                     <div className="h-1.5 w-28 overflow-hidden rounded-full bg-zinc-200">
                       <div
@@ -1108,7 +1141,8 @@ export function CampaignsTab({
 
           {view === 'companies' && restGroup ? (
             <section className="rounded-xl border border-zinc-200 bg-white">
-              {renderHeader(restGroup)}
+              {/* Шапки «Остальные · N кампаний» нет: вкладка и так называется
+                  «Компании», а счётчик — в фильтре статусов. */}
               {restShown.length > 0 ? (
                 <>
                   <CampaignTable

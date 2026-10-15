@@ -155,6 +155,13 @@ export interface CampaignStatsDto {
   failed: number;
   /** Писем ушло с начала сегодняшнего дня по поясу кампании. */
   sentToday?: number;
+  /** Цепочка дошла до конца без ответа. */
+  finished?: number;
+  unsubscribed?: number;
+  /** Первое письмо ушло, цепочка ещё идёт. */
+  inProgress?: number;
+  /** Ещё ни одного письма. */
+  notContacted?: number;
 }
 
 export interface ImportMailboxesResult {
