@@ -92,6 +92,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         other_sessions?: unknown[];
         tg_user_id?: number | null;
         tg_username?: string | null;
+        tg_premium?: boolean | null;
         phone?: string | null;
         freeze_appeal_url?: string | null;
         freeze_until_at?: string | null;
@@ -110,6 +111,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
             check_requested_by_name: null,
             ...(result.tg_user_id != null ? { tg_user_id: result.tg_user_id } : {}),
             ...(result.tg_username != null ? { tg_username: result.tg_username } : {}),
+            ...(result.tg_premium != null ? { tg_premium: result.tg_premium } : {}),
             // Телефона в tdata нет — он приходит только от Telegram, и это
             // единственное место, где портал его узнаёт.
             ...(result.phone ? { phone: result.phone } : {}),

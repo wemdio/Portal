@@ -2396,6 +2396,7 @@ export async function runCampaignLoop(
                   freeze_until_at: checkResult.freeze_until_at ?? null,
                   ...(checkResult.tg_user_id != null ? { tg_user_id: checkResult.tg_user_id } : {}),
                   ...(checkResult.tg_username != null ? { tg_username: checkResult.tg_username } : {}),
+                  ...(checkResult.tg_premium != null ? { tg_premium: checkResult.tg_premium } : {}),
                   ...(checkResult.phone ? { phone: checkResult.phone } : {}),
                 })
                 .eq('id', account.id);
