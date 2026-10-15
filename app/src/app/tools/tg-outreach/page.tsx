@@ -9,7 +9,7 @@ import { BaseAttachmentsPanel } from '@/components/tg-outreach/BaseAttachmentsPa
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
 import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
-import { accountCountryLabel } from '@/lib/tgOutreach/phoneCountry';
+import { accountCountryLabel, countryByCode, countryFromPhone } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
   Plus,
@@ -2812,6 +2812,22 @@ function CampaignAccountsTab({
   );
 
   /**
+   * Страны выбранных аккаунтов (по номеру, а если его нет — по заявленной при
+   * загрузке): выберете Армению и Казахстан — прокси этих стран встанут в списке
+   * наверх. Ничего не выбрано — берём страну самого аккаунта, чью строку правим.
+   */
+  const preferProxyCountries = useCallback((ownerId?: string): string[] => {
+    const ids = selectedIds.length ? new Set(selectedIds) : new Set(ownerId ? [ownerId] : []);
+    const codes = new Set<string>();
+    for (const acc of accounts) {
+      if (!ids.has(acc.id)) continue;
+      const code = countryFromPhone(acc.phone)?.code ?? countryByCode(acc.country_code)?.code;
+      if (code) codes.add(code);
+    }
+    return [...codes].sort();
+  }, [accounts, selectedIds]);
+
+  /**
    * Свободные прокси в порядке пригодности: сначала те, что проходят круги,
    * потом ни разу не проверенные, и только в конце — с отказами.
    *
@@ -4277,6 +4293,7 @@ function CampaignAccountsTab({
                     defaultOpen
                     value={a.proxy_id ?? ''}
                     proxies={proxyOptions(a.proxy_id)}
+                    preferCountries={preferProxyCountries(a.id)}
                     now={healthNow}
                     ariaLabel={`Прокси для ${a.session_name}`}
                     onChange={(id) => { void assignProxy(a.id, id); }}
