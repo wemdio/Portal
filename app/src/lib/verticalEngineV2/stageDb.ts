@@ -157,6 +157,7 @@ export function describeVeStageDbActivity(job: AbortSignal, now = Date.now()): s
 export function createVeStageFetch(options: {
   /** Signal of the job the current async context belongs to (null outside a job). */
   jobSignal: () => AbortSignal | null | undefined;
+  jobClaim?: () => { id: string; startedAt: string | null } | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): typeof fetch {
@@ -166,6 +167,13 @@ export function createVeStageFetch(options: {
     const method = (init?.method ?? 'GET').toUpperCase();
     const job = options.jobSignal() ?? null;
     if (job?.aborted) throw jobAbortError(job.reason);
+    const claim = options.jobClaim?.();
+    if (claim) {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      headers.set('x-ve-job-id', claim.id);
+      headers.set('x-ve-job-started-at', claim.startedAt ?? 'null');
+      init = { ...init, headers };
+    }
     const trace = traceRequest(job, method, input);
     const request = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -276,6 +284,7 @@ export function createVeStageSupabase(options: {
   url: string;
   serviceRoleKey: string;
   jobSignal: () => AbortSignal | null | undefined;
+  jobClaim?: () => { id: string; startedAt: string | null } | null;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): SupabaseClient {

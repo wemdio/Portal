@@ -145,6 +145,7 @@ import {
   type ClientEngAutopilotHold,
 } from './clientEngProjection';
 import { heTeamFixableFailureOf } from './clientErrors';
+import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE } from '@/components/client-eng/clientFailureText';
 import { heBrandInputFieldLabelEn, heJobUnpaidBrandInput, type HeBrandInputLeak } from './letterBrandGuard';
 import { engAnalysisRequeues } from './engDashboard';
 import { heEngAppOrigin, HE_ENG_VERIFY_FROM_NAME } from './engEmailVerificationMail';
@@ -1098,7 +1099,11 @@ async function readLatestResearchJobs(
  *    не отменена и менялась в окне. Совет — вердиктом роута «Try again»
  *    (engResearchRetryVerdict): 'retry_failed' — «Try again» (у кода проекта
  *    'billing' / 'configuration' — 'team_fix': Support, потом «Try again»),
- *    иначе Support;
+ *    иначе Support. Кроме кода website_thin (research ждёт описания бизнеса,
+ *    HE_RESEARCH_NEEDS_DESCRIPTION_CODE): совета нет вовсе (next null —
+ *    «откройте проект, там видно, что случилось и что делать»), потому что
+ *    его продолжает «Save and continue» шага 1, а не «Try again» и не Support;
+ *    ключ — id джобы с суффиксом кода (ниже);
  *  - research_stopped, встал: проект 'researching', и вердикт того же роута —
  *    'retry_stalled' (ни одна research-стадия не идёт дольше окна шага 1,
  *    HE_RESEARCH_STALL_GRACE_MS, — «Try again» на шаге 1 уже стоит); письмо —
@@ -1235,10 +1240,29 @@ async function scanResearchEvents(db: SupabaseClient, state: ScanState): Promise
       });
       if (p.status === 'failed') {
         if (!last || ms(last.updated_at) < since || verdict === 'running') continue;
+        const code = toClientEngStageErrorCode(p.error);
+        // Research ждёт описания бизнеса (тонкий сайт, website_thin): не сбой,
+        // и ни «Try again» (его роут откажет — это не технический сбой), ни
+        // «запустить можно только через Support» (его продолжает «Save and
+        // continue» шага 1) письмо не называет — next null: «остановилось,
+        // откройте проект — там, что случилось и что можно сделать», а шаг 1
+        // просит описание. Ключ — свой (суффикс к id джобы): продолжение
+        // возвращает в очередь ТУ ЖЕ джобу, и её поздний технический сбой
+        // должен дать своё письмо, а не «дубликат» этого.
+        if (code === HE_RESEARCH_NEEDS_DESCRIPTION_CODE) {
+          candidates.push({
+            notice: {
+              kind: 'research_stopped',
+              projectId: pid,
+              refId: `${str(last.id)}:${HE_RESEARCH_NEEDS_DESCRIPTION_CODE}`,
+              next: null,
+            },
+          });
+          continue;
+        }
         // Отказ, который чинит команда (деньги или ключ провайдера): «Try
         // again» до починки упрётся в тот же отказ — сначала Support, как
         // говорит шаг 1 (retryFailedText) и справочник (TEAM_FIX_WHAT_TO_DO).
-        const code = toClientEngStageErrorCode(p.error);
         const teamFix = code === 'billing' || code === 'configuration';
         candidates.push({
           notice: {

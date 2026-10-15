@@ -167,6 +167,74 @@ describe('llm rawCall retry', () => {
         expect(JSON.stringify(journalWarning.mock.calls)).not.toContain('private diagnostic details');
       }
     }
+    // Artefakt: a transient failure before recording usage_origin must only
+    // retry/confirm the same CAS, never duplicate generation or revive a claim.
+    for (const mode of ['transient', 'lost_response', 'lost_response_and_read', 'json_null', 'permanent', 'cancelled', 'new_claim', 'other_origin', 'aborted'] as const) {
+      const startedAt = '2026-10-14T21:07:23.998Z';
+      const freshJob = { id: 'origin-job', project_id: 'project', stage: 'template', status: 'running',
+        started_at: startedAt, payload: { base_id: 'base', ...(mode === 'json_null' ? { provider_usage_origin: null } : {}) } } as unknown as VeJob;
+      const db = createMockSupabase({ tables: { ve_jobs: [{ ...freshJob }] }, beforeFirstUpdates: {
+        ve_jobs: (rows) => rows.map((row) => mode === 'cancelled' ? { ...row, status: 'cancelled' }
+          : mode === 'new_claim' ? { ...row, started_at: '2026-10-14T21:08:00Z' }
+            : mode === 'other_origin' ? { ...row, payload: { ...freshJob.payload, provider_usage_origin: { runId: 'other-origin' } } } : row),
+      } });
+      const controller = new AbortController();
+      const originalFrom = db.from.bind(db);
+      const payloads: unknown[] = [];
+      let reads = 0;
+      db.from = (table) => {
+        const builder = originalFrom(table);
+        if (table !== 've_jobs') return builder;
+        let writing = false;
+        let missingOriginPath: 'json' | 'text' | null = null;
+        const originalUpdate = builder.update.bind(builder);
+        builder.update = (patch) => { writing = true; payloads.push(patch.payload); return originalUpdate(patch); };
+        const originalIs = builder.is.bind(builder);
+        // The small shared mock does not evaluate JSON paths for .is().
+        builder.is = (column, value) => {
+          if (['payload->provider_usage_origin', 'payload->>provider_usage_origin'].includes(column) && value === null) {
+            missingOriginPath = column.includes('->>') ? 'text' : 'json';
+            return builder;
+          }
+          return originalIs(column, value);
+        };
+        const originalSingle = builder.maybeSingle.bind(builder);
+        builder.maybeSingle = async () => {
+          if (writing && mode === 'aborted') controller.abort(new Error('cancelled locally'));
+          if (writing && (mode === 'permanent' || (mode === 'transient' && payloads.length === 1))) {
+            throw new Error('fetch failed');
+          }
+          const storedOrigin = (db.getRows('ve_jobs')[0].payload as Record<string, unknown>).provider_usage_origin;
+          if (writing && missingOriginPath && (missingOriginPath === 'text' ? storedOrigin != null : storedOrigin !== undefined)) return { data: null, error: null };
+          const result = await originalSingle();
+          if (writing && payloads.length === 1 && (mode === 'lost_response' || mode === 'lost_response_and_read')) {
+            throw new Error('response lost after commit');
+          }
+          if (!writing && ++reads === 1 && mode === 'lost_response_and_read') {
+            return { data: null, error: { message: 'read unavailable' } } as unknown as Awaited<ReturnType<typeof originalSingle>>;
+          }
+          return result;
+        };
+        return builder;
+      };
+      fetchMock.mockClear().mockResolvedValue(httpResponse(200, { choices: [{ message: { content: '{"ok":true}' } }], usage: {} }));
+      const work = jest.fn(() => callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'test-model' }));
+      const operation = withVeActiveJobSignal(controller.signal, () => withVeCostTelemetry(db as unknown as SupabaseClient, freshJob, work));
+      const succeeds = ['transient', 'lost_response', 'lost_response_and_read', 'json_null'].includes(mode);
+      const observed = operation.then((value) => ({ value, error: null }), (error: Error) => ({ value: null, error: error.message }));
+      await jest.advanceTimersByTimeAsync(5000);
+      const outcome = await observed;
+      if (succeeds) expect({ mode, ...outcome }).toMatchObject({ mode, value: { data: { ok: true } }, error: null });
+      else expect({ mode, ...outcome }).toEqual({ mode, value: null,
+        error: mode === 'aborted' ? 'cancelled locally' : 'Provider usage journal could not be saved.' });
+      expect(work).toHaveBeenCalledTimes(succeeds ? 1 : 0);
+      expect(fetchMock).toHaveBeenCalledTimes(succeeds ? 1 : 0);
+      expect(new Set(payloads.map((value) => JSON.stringify(value))).size).toBe(1);
+      expect(payloads).toHaveLength(mode === 'permanent' ? 3 : ['transient', 'lost_response_and_read'].includes(mode) ? 2 : 1);
+      if (mode === 'cancelled') expect(db.getRows('ve_jobs')[0].status).toBe('cancelled');
+      if (mode === 'new_claim') expect(db.getRows('ve_jobs')[0].started_at).toBe('2026-10-14T21:08:00Z');
+      if (mode === 'other_origin') expect(db.getRows('ve_jobs')[0].payload).toMatchObject({ provider_usage_origin: { runId: 'other-origin' } });
+    }
     // A model-expanded brand must not discard the other verified names.
     // Preserve the safe source words; do not infer the name from its domain.
     const companyRows = [

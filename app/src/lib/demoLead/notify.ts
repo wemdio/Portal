@@ -19,6 +19,9 @@
 
 const TG_FETCH_TIMEOUT_MS = 10_000;
 
+/** Language versions of the outreachos.xyz landing: /en/ and /ru/. */
+export type DemoLeadPageLang = 'en' | 'ru';
+
 export interface DemoLeadData {
   name: string;
   email: string;
@@ -33,11 +36,17 @@ export interface DemoLeadData {
    * Campaign attribution: at signup — the landing's parent-domain cookie oos_utm
    * (read server-side by /api/signup); at /api/demo-lead — the fields the
    * outreachos.xyz form sends with the lead. Only its utm_* keys are rendered;
-   * referrer/landing/ts may also be present and are not read from here — callers
-   * pass what they want shown as `referrer` (signup) or `outsideReferrer` /
-   * `landingUrl` / `utmEarlierVisitAt` (demo-lead).
+   * referrer/landing/ts/lang may also be present and are not read from here —
+   * callers pass what they want shown as `referrer` (signup) or `outsideReferrer` /
+   * `landingUrl` / `utmEarlierVisitAt` / `pageLang` (demo-lead).
    */
   utm?: Record<string, string> | null;
+  /**
+   * Language version of the landing page the form was sent from (outreachos.xyz
+   * /en/ or /ru/), so the team answers in that language. Shown as
+   * «🌐 Язык страницы: RU»; absent — no line.
+   */
+  pageLang?: DemoLeadPageLang | null;
   /** Site the visitor came from before the landing (not the landing itself). */
   outsideReferrer?: string | null;
   /** URL the visitor arrived on, query string included. */
@@ -48,6 +57,13 @@ export interface DemoLeadData {
    * sent the lead. Shown as «(заход ДД.ММ ЧЧ:ММ МСК)» after the UTM line.
    */
   utmEarlierVisitAt?: string | null;
+  /**
+   * Registrations only: the host the sign-up form was sent from (polza-portal.ru,
+   * app.outreachos.xyz, …) and which client cabinet that is, so the team sees at
+   * once where the account was created. Shown in the title and as «Сайт: …».
+   */
+  signupHost?: string | null;
+  signupCabinet?: 'eng' | 'ru' | null;
 }
 
 /** Telegram rejects sendMessage text longer than this, counted after entity parsing. */
@@ -60,16 +76,30 @@ const SOURCE_LABEL: Record<string, string> = {
   hero: 'Обсудить задачу',
   register: 'Регистрация',
   demo: 'Демо',
-  eng_pilot: 'ENG-лендинг outreachos.xyz: проверка ниши',
+  // One form on both language pages (/en/, /ru/); the «🌐 Язык страницы» line tells them apart.
+  eng_pilot: 'Лендинг outreachos.xyz: проверка ниши',
 };
 
 function sourceLabel(source?: string | null): string {
   return (source && SOURCE_LABEL[source]) || 'лендинг';
 }
 
+const CABINET_LABEL: Record<'eng' | 'ru', string> = {
+  eng: 'английский кабинет',
+  ru: 'русский кабинет',
+};
+
+/** Host as shown in the alert: lowercase, no port, plain host characters only; '' otherwise. */
+function cleanHost(raw?: string | null): string {
+  const host = (raw ?? '').trim().toLowerCase().replace(/:\d+$/, '');
+  return /^[a-z0-9.-]{1,253}$/.test(host) ? host : '';
+}
+
 /** Headline: a registration is a sign-up notice, not a "новый лид". */
-function titleLine(source?: string | null): string {
-  if (source === 'register') return '✅ <b>Новая регистрация</b>';
+function titleLine(source?: string | null, cabinet?: 'eng' | 'ru' | null): string {
+  if (source === 'register') {
+    return cabinet ? `✅ <b>Новая регистрация — ${CABINET_LABEL[cabinet]}</b>` : '✅ <b>Новая регистрация</b>';
+  }
   return `🎯 <b>Новый лид — ${esc(sourceLabel(source))}</b>`;
 }
 
@@ -140,15 +170,20 @@ const NO_CUTS: AlertCuts = { url: Infinity, message: Infinity, value: Infinity }
 function renderLeadAlert(data: DemoLeadData, cuts: AlertCuts): string {
   const value = (text: string) => esc(clip(text, cuts.value));
   const url = (text: string) => esc(clip(text, Math.min(cuts.url, cuts.value)));
-  const lines: string[] = [
-    titleLine(data.source),
-    '',
+  const lines: string[] = [titleLine(data.source, data.signupCabinet), ''];
+  const signupHost = data.source === 'register' ? cleanHost(data.signupHost) : '';
+  if (signupHost) lines.push(`<b>Сайт:</b> ${signupHost}`);
+  lines.push(
     `<b>Имя:</b> ${value(data.name)}`,
     `<b>Почта:</b> ${value(data.email)}`,
-  ];
+  );
   if (data.company) lines.push(`<b>Компания:</b> ${value(data.company)}`);
   if (data.phone) lines.push(`<b>Телефон:</b> ${value(data.phone)}`);
   if (data.telegram) lines.push(`<b>Telegram:</b> ${value(data.telegram)}`);
+  // Fixed labels only, never the caller's string: the line stays short and constant,
+  // so the TG_TEXT_MAX cuts in leadAlertText have nothing to cut in it.
+  const pageLang = data.pageLang === 'ru' ? 'RU' : data.pageLang === 'en' ? 'EN' : '';
+  if (pageLang) lines.push(`<b>🌐 Язык страницы:</b> ${pageLang}`);
   if (data.utm) {
     const u = data.utm;
     const visit = data.utmEarlierVisitAt ? earlierVisitSuffix(data.utmEarlierVisitAt) : '';

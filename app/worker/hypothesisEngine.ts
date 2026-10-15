@@ -140,6 +140,9 @@ import { runHeEngClientMailScan, sendHeEngClientNotice } from '@/lib/hypothesisE
 // Заблокированный ENG-аккаунт (S3b): страж джобы в handleJob и фоновая
 // проверка между джобами (heEngBlockSweep ниже).
 import { createHeEngBlockSweepTicker, guardHeEngJobOwner } from '@/lib/hypothesisEngine/engBlockedSweep';
+// «Do not contact» ENG (решение владельца 14.10.2026): снятие людей из списка
+// клиента с его идущих кампаний — проход между джобами (heEngDncRemoval ниже).
+import { createHeEngDncRemovalTicker } from '@/lib/hypothesisEngine/engDncRemoval';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
@@ -2110,6 +2113,9 @@ async function handleJob(job: HeJob) {
   // (включая отброшенные попытки схемы) прибавляется в paid. Стадия отдаёт свой
   // расход только вместе с результатом, поэтому без этой суммы деньги прогона,
   // который бросил исключение, не попадали в he_jobs/he_projects вовсе.
+  // Только market='us' (llm.ts, heLlmEngAccounting); RU — как до порта ENG:
+  // у RU-прогона onSpend не зовётся, paid остаётся 0, и в he_jobs идёт ровно
+  // расход, который вернула стадия (упавший прогон расхода не пишет).
   const paid: HeLlmSpend = { tokensUsed: 0, costUsd: 0 };
   setHeActiveJob({
     signal: abort.signal,
@@ -3656,6 +3662,23 @@ const heEngBlockSweep = createHeEngBlockSweepTicker({
   shouldStop,
 });
 
+/**
+ * «DO NOT CONTACT» ENG — снятие адресов из списка клиента с его идущих
+ * кампаний (engDncRemoval.ts): только с HE_ENG_DNC_REMOVE=1 (по умолчанию
+ * выключено — тогда ни запроса в БД, ни вызова рассыльщика). Не чаще раза в
+ * HE_ENG_DNC_TICK_MS (1 мин); за проход — не больше HE_ENG_DNC_CALLS_PER_PASS
+ * (5) вызовов рассыльщика через общий ограничитель воркспейса; очередь обоих
+ * рынков проход держит не дольше HE_ENG_DNC_QUEUE_HOLD_MS (15 с), дальше он
+ * доходит фоном, и следующий не начнётся, пока этот не кончится. Пусто — два
+ * запроса в БД.
+ */
+const heEngDncRemoval = createHeEngDncRemovalTicker({
+  portalDb: db,
+  instantlyDb: supabaseInstantly,
+  log: (level, msg) => log(level, msg),
+  shouldStop,
+});
+
 async function pollOnce(): Promise<boolean> {
   // Брошенные строки закрываем ДО клейма: пока такая строка висит в 'running',
   // её проект стоит, а воркер один на всех.
@@ -3672,6 +3695,8 @@ async function pollOnce(): Promise<boolean> {
   if (shouldStop()) return false;
   // Заблокированные ENG-аккаунты — между джобами (см. heEngBlockSweep).
   await heEngBlockSweep.maybeRun();
+  // «Do not contact» — снятие с идущих кампаний клиента (см. heEngDncRemoval).
+  await heEngDncRemoval.maybeRun();
   // Автозапуск ENG — между джобами, до клейма (см. maybeRunHeEngAutoLaunch).
   // Запуск был — true: pollLoop сразу зайдёт снова и возьмёт джобу.
   if (await maybeRunHeEngAutoLaunch()) return true;

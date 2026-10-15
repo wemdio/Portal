@@ -19,15 +19,17 @@
  * прерывается — отменённая гипотеза не должна уехать в статистику как
  * отброшенная (dropped), это разные исходы.
  *
- * Под эти правила НЕ попадает и отказ ДОСТУПА к провайдеру (поиск: деньги,
- * ключ; модель: деньги, ключ, а на рынке us ещё и лимит частоты): он
- * перманентен для прогона, то есть повторится на каждом следующем кандидате, и
- * стадия прерывается ДО перезаписи he_hypotheses. Туда же — ПОЛНЫЙ отказ поиска
- * (ни одного обслуженного запроса за двух кандидатов подряд): «тонкие
+ * Под эти правила НЕ попадает и отказ ДОСТУПА к провайдеру на рынке us (поиск:
+ * деньги, ключ; модель: деньги, ключ, лимит частоты): он перманентен для
+ * прогона, то есть повторится на каждом следующем кандидате, и стадия
+ * прерывается ДО перезаписи he_hypotheses. Туда же — ПОЛНЫЙ отказ поиска (ни
+ * одного обслуженного запроса за двух кандидатов подряд): «тонкие
  * доказательства» это про один кандидат, а не про прогон, у которого источников
- * нет вовсе. 429 модели на RU (легаси /tools/hypothesis-engine) поглощается
- * поэлементно, как до волны 3: кандидат уходит в stage_error, стадия кончается
- * за одно исполнение (политика — heRunStoppingLlmFailure в brandCloud.ts).
+ * нет вовсе. RU-проект (легаси /tools/hypothesis-engine) — как до порта ENG
+ * (решение владельца 14.10.2026 «Как было»): любой отказ модели поглощается
+ * поэлементно — кандидат уходит в stage_error, стадия кончается за одно
+ * исполнение (политика — heRunStoppingLlmFailure в brandCloud.ts), а отказ
+ * поиска приходит пустой выдачей (io.ts resolveSearch).
  *
  * Чекпойнт перебора (только market='us'): после каждого кандидата пройденный
  * префикс (принятые гипотезы и счётчики) пишется в he_jobs.result этой же
@@ -36,9 +38,10 @@
  * не покупаются (как и поиск по их кандидатам). Механизм и его границы — у
  * HE_ITEM_CHECKPOINT_KEY в brandCloud.ts.
  *
- * Сама перезапись стала условной: снос прошлых 'proposed' гипотез проекта
- * делается только если этот прогон принял хотя бы одну — иначе ночь заменяла
- * хороший набор пустым.
+ * Сама перезапись у market='us' стала условной: снос прошлых 'proposed'
+ * гипотез проекта делается только если этот прогон принял хотя бы одну — иначе
+ * ночь заменяла хороший набор пустым. RU-проект сносит прошлые
+ * некластеризованные 'proposed' всегда, как до порта ENG.
  *
  * Кодовая верификация (verifyEvidence.ts): каждый evidence-пункт проверяется
  * против реально скачанных источников (URL ∈ fetched, цитата — подстрока
@@ -571,7 +574,11 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   // полному отказу поиска (heSearchOutageFailure) судит по ЭТОМУ исполнению —
   // о том, что поиск делает сейчас; обслуженные запросы префикса из чекпойнта
   // (только us) учитываются лишь в итоговой проверке после цикла.
+  // У RU-проекта отказ поиска сюда не доходит: resolveSearch отдаёт ему пустую
+  // выдачу, как до порта ENG (io.ts), а остановки по отказу ниже стоят только у
+  // 'us' (searchStops).
   const tally = newHeSearchTally();
+  const searchStops = market === 'us';
   const restoredSearchAnswered = restored?.search_answered ?? 0;
   let searchedThisRun = 0;
 
@@ -631,7 +638,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     // одиночный блип сюда не попадают: первая считается обслуженной, вторые два
     // не переживают следующего кандидата.
     searchedThisRun += 1;
-    const outage = heSearchOutageFailure(tally, searchedThisRun);
+    const outage = searchStops ? heSearchOutageFailure(tally, searchedThisRun) : undefined;
     if (outage) {
       stageLog(
         ctx,
@@ -697,8 +704,9 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
       // этот класс не доходил до джобы — а пауза по 429 и терминальный отказ по
       // 402/401 живут именно там. Бросаем исходную ошибку: воркеру нужен её тип
       // целым. Чекпойнт (us) при этом остаётся на предыдущем кандидате: этот в
-      // префикс не попал и на повторе будет спрошен заново. 429 на RU сюда не
-      // попадает и поглощается ниже как stage_error (heRunStoppingLlmFailure).
+      // префикс не попал и на повторе будет спрошен заново. У RU-проекта ни один
+      // отказ модели сюда не попадает и поглощается ниже как stage_error, как
+      // до порта ENG (heRunStoppingLlmFailure).
       const refusal = heRunStoppingLlmFailure(e, market);
       if (refusal) {
         stageLog(
@@ -799,7 +807,9 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   // Отказ поиска на ВСЕХ запросах (или перманентный отказ где угодно):
   // доказательств не искали, а не «не нашли». Падаем до удаления прошлых
   // предложенных гипотез — иначе проект остался бы и без старых, и без новых.
-  const searchFailure = heSearchStageFailure({ ...tally, answered: tally.answered + restoredSearchAnswered });
+  const searchFailure = searchStops
+    ? heSearchStageFailure({ ...tally, answered: tally.answered + restoredSearchAnswered })
+    : undefined;
   if (searchFailure) {
     stageLog(
       ctx,
@@ -817,14 +827,17 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   //    удаляет, а оставленные копились бы дублями рядом с новыми. Размеченные
   //    человеком (accepted/rejected) не трогает ни один рынок.
   //
-  //    Снос — ТОЛЬКО если этому прогону есть чем заменить. Пустой accepted — это
-  //    либо «модель забраковала всех кандидатов», либо «прогон не смог их
-  //    проверить», и различить их здесь нечем; а снос в обоих случаях оставлял
-  //    проект БЕЗ гипотез: хороший набор прошлой ночи молча заменялся ничем, и
-  //    кабинет показывал завершившееся исследование с пустым списком.
+  //    Снос у 'us' — ТОЛЬКО если этому прогону есть чем заменить. Пустой
+  //    accepted — это либо «модель забраковала всех кандидатов», либо «прогон
+  //    не смог их проверить», и различить их здесь нечем; а снос в обоих случаях
+  //    оставлял проект БЕЗ гипотез: хороший набор прошлой ночи молча заменялся
+  //    ничем, и кабинет показывал завершившееся исследование с пустым списком.
   //    Идемпотентность от этого не страдает: дубли создаёт только вставка, а
-  //    она в этой ветке не выполняется.
-  if (accepted.length) {
+  //    она в этой ветке не выполняется. RU-проект сносит прошлые
+  //    некластеризованные 'proposed' всегда, а вставляет только принятые, как
+  //    до порта ENG (решение владельца 14.10.2026 «Как было»).
+  const keepPriorProposed = market === 'us' && !accepted.length;
+  if (!keepPriorProposed) {
     const { error: delError } = market === 'us'
       ? await ctx.supabase
         .from('he_hypotheses')
@@ -838,7 +851,9 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
         .is('vertical_id', null)
         .eq('status', 'proposed');
     if (delError) throw new Error(`he_hypotheses cleanup: ${delError.message}`);
+  }
 
+  if (accepted.length) {
     const rows = accepted.map((a) => ({
       project_id: job.project_id,
       tier: a.tier,
@@ -853,10 +868,14 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     // или одиночный UTF-16 суррогат, и PostgREST отвергает ВСЮ вставку — после
     // уже оплаченных вердиктов по всем кандидатам и уже сделанного сноса прошлых
     // 'proposed'. Чистка трогает только эти два символа: текст без них (вся
-    // кириллица и латиница) ложится байт-в-байт тем же.
-    const { error: insError } = await ctx.supabase.from('he_hypotheses').insert(stripUnstorableJsonChars(rows));
+    // кириллица и латиница) ложится байт-в-байт тем же. Только market='us':
+    // RU-проект пишет строки как до порта ENG (решение владельца 14.10.2026
+    // «Как было»; так же chain, template, vocab, clustering и base_analyze).
+    const { error: insError } = await ctx.supabase
+      .from('he_hypotheses')
+      .insert(market === 'us' ? stripUnstorableJsonChars(rows) : rows);
     if (insError) throw new Error(`he_hypotheses insert: ${insError.message}`);
-  } else {
+  } else if (keepPriorProposed) {
     // Молчать нельзя: снаружи (и в кабинете) прогон выглядит завершившимся, а
     // гипотезы в нём — прошлой ночи. Флаг дублируется в result, чтобы это
     // читалось из he_jobs.result, а не только из лога прогона.
@@ -873,7 +892,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     merged,
     dropped,
     evidence_dropped: evidenceDropped,
-    ...(accepted.length ? {} : { prior_proposed_kept: true }),
+    ...(keepPriorProposed ? { prior_proposed_kept: true } : {}),
   };
   stageLog(ctx, `[evidence] итог: ${JSON.stringify(result)}`);
   return { result, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };

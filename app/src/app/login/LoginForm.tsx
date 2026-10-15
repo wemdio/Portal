@@ -54,9 +54,11 @@ const LOGIN_TEXT_RU = {
 type LoginText = { [K in keyof typeof LOGIN_TEXT_RU]: string };
 
 /**
- * ENG. Ссылки «Set your own» в тексте сброса нет: ссылка на страницу Account
- * приходит в самом письме с новым паролем (api/auth/forgot-password, ветка
- * ENG) и ведёт через этот вход (?next=, см. page.tsx). adminOnly на ENG-хосте
+ * ENG. Сброс пароля ENG-аккаунта — одноразовая ссылка на 1 час
+ * (api/auth/forgot-password/_engReset.ts, ENG_RESET_LINK_TTL_MS): пароль не
+ * меняется и в письме не приходит, клиент выбирает новый на странице по
+ * ссылке. Тексты forgotBody/forgotDoneBody говорят ровно это (аудит
+ * 14.10.2026: прежние обещали «новый пароль в письме»). adminOnly на ENG-хосте
  * не рисуется никогда (signupAllowed там всегда true) — перевод ради полноты
  * таблицы.
  */
@@ -71,11 +73,11 @@ const LOGIN_TEXT_EN: LoginText = {
   subtitle: 'Enter your details to sign in',
   forgotDoneTitle: 'Check your email',
   forgotDoneBody:
-    'If an account with this email exists, we sent it a new password. Sign in with it, then set your own password from the link in that email.',
+    'If an account with this email exists, we sent it a link to choose a new password. The link works once, for 1 hour.',
   forgotDoneNote: 'It can take a minute. Not there? Check spam.',
   forgotDoneOk: 'OK',
   forgotTitle: 'Reset your password',
-  forgotBody: 'Enter your account email — we will send a new password to it.',
+  forgotBody: 'Enter your account email — we will send a link to choose a new password.',
   forgotCancel: 'Cancel',
   forgotSending: 'Sending…',
   forgotSend: 'Send',
@@ -87,6 +89,21 @@ const LOGIN_TEXT_EN: LoginText = {
   noAccount: 'No account?',
   signupLink: 'Create one',
 };
+
+/**
+ * ENG-хост, вход заблокированного аккаунта. Блокировка ENG-аккаунта — бан
+ * Supabase (engAccountBlock), и GoTrue отвечает на вход кодом `user_banned` с
+ * сырым «User is banned». Фраза говорит только то, что точно известно: аккаунт
+ * заблокирован и войти нельзя. Ни причины, ни адреса для связи — адрес решает
+ * владелец (аудит 14.10.2026), а Support живёт внутри кабинета, куда этот
+ * клиент не попадёт. Вне ENG-хоста ответ показывается как раньше.
+ */
+const ENG_SIGN_IN_BLOCKED_EN = 'This account is blocked, so you cannot sign in to it.';
+
+/** GoTrue: машинный код бана в error.code, английский текст — в message. */
+function isBannedSignInError(errorCode: string, errorMessage: string): boolean {
+  return errorCode === 'user_banned' || /user is banned/i.test(errorMessage);
+}
 
 /**
  * Единственный адрес, куда вход может вернуть после себя (`?next=` на
@@ -211,7 +228,8 @@ export function LoginForm({ engHost, afterSignIn }: { engHost: boolean; afterSig
       });
       // Endpoint returns {ok:true} for every well-formed input regardless of
       // whether the email exists. So a 2xx response = "if the email matches
-      // an account, the new password is on its way." No leak either way.
+      // an account, the reset email is on its way" (RU: a new password; ENG:
+      // a one-time link to choose one). No leak either way.
       if (!res.ok) {
         setForgotError(t.forgotSendFailed);
         return;
@@ -271,7 +289,9 @@ export function LoginForm({ engHost, afterSignIn }: { engHost: boolean; afterSig
 
       // GoTrue кладёт машинный код в error.code, а в message — английский
       // текст («Invalid login credentials»). Проверяем оба.
-      if (errorCode === 'invalid_credentials' || errorMessage.includes('invalid_credentials') || /invalid login credentials/i.test(errorMessage)) {
+      if (engHost && isBannedSignInError(errorCode, errorMessage)) {
+        setError(ENG_SIGN_IN_BLOCKED_EN);
+      } else if (errorCode === 'invalid_credentials' || errorMessage.includes('invalid_credentials') || /invalid login credentials/i.test(errorMessage)) {
         setError(t.wrongCredentials);
       } else if (
         // Сервер авторизации недоступен/отвечает мусором (падение БД,

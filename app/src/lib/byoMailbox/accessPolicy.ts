@@ -49,3 +49,20 @@ export const ENG_OWN_MAILBOX_UNAVAILABLE_CODE = 'OWN_MAILBOX_NOT_AVAILABLE';
 export function ownMailboxConnectRefused(market: string | null | undefined): boolean {
   return market === 'eng';
 }
+
+/**
+ * Отправка и ответы через свои ящики для ENG-клиента закрыты так же, как
+ * подключение (аудит 14.10.2026, #8): постановка кампании в очередь
+ * (POST /api/client/byo-campaigns) шла бы мимо пула, выключателя отправки,
+ * гейта платных шагов и списка Do-not-contact, а воркер byoSend блокировку не
+ * читает. Ящики, подключённые раньше, по-прежнему видны в списке и удаляются
+ * (/api/client/mailboxes); очередь заблокированного аккаунта снимает
+ * блокировка (hypothesisEngine/engAccountBlock). `market` — auth.market общего
+ * гейта, как у подключения. У 'ru' отказа нет — RU-путь не меняется.
+ */
+export const ENG_OWN_MAILBOX_SENDING_UNAVAILABLE_TEXT =
+  'Your campaigns send from mailboxes we provide, so sending from your own mailbox is not available.';
+
+export function ownMailboxSendingRefused(market: string | null | undefined): boolean {
+  return market === 'eng';
+}

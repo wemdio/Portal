@@ -208,32 +208,43 @@ describe('VE2 base collection enqueue recovery', () => {
       expect(db.getRows('ve_jobs').every((row) => row.status === 'done')).toBe(true);
     }
 
-    let claimed = false;
-    const save = jest.fn(() => ({ data: true }));
-    const resumedDb = createMockSupabase({ tables: {
-      ve_hypotheses: [{ id: 'h1', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
-      ve_bases: [
-        { id: 'old-ready', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
-          status: 'analyzed', row_count: 128, collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
-        { id: 'cancelled-duplicate', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
-          status: 'failed', error: 'Отменено пользователем', collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
-      ],
-      ve_templates: [{ id: 'saved-letters', base_id: 'old-ready', status: 'ready', supply_batch_id: null }],
-    }, rpcHandlers: {
-      ve_claim_outreach_preparation: () => {
-        if (claimed) return { data: [] };
-        claimed = true;
-        return { data: [{ project_id: input.projectId, hypothesis_id: 'h1', base_id: 'cancelled-duplicate',
-          template_id: null, status: 'pending', language: 'ru', claim_token: 'lease' }] };
-      },
-      ve_save_outreach_preparation: save,
-    } });
-    await runVeOutreachPreparations(resumedDb as unknown as SupabaseClient);
-    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
-      p_status: 'ready', p_base_id: 'old-ready', p_template_id: 'saved-letters',
-    }), expect.anything());
-    expect(resumedDb.getRows('ve_jobs')).toHaveLength(0);
-    expect(resumedDb.rpcCalls.some((call) => call.fn === 've_resume_outreach_cancelled_base')).toBe(false);
+    for (const resumedFromPause of [false, true]) {
+      let claimed = false;
+      const save = jest.fn(() => ({ data: true }));
+      const resumedDb = createMockSupabase({ tables: {
+        ve_hypotheses: [{ id: 'h1', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+        ve_bases: [
+          { id: 'old-ready', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+            status: 'analyzed', row_count: 128, collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
+          { id: 'cancelled-duplicate', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+            status: 'failed', error: 'Отменено пользователем', collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
+        ],
+        ve_templates: [{ id: 'saved-letters', base_id: 'old-ready', status: 'ready', supply_batch_id: null }],
+        ve_jobs: resumedFromPause ? [{ id: 'resumed-job', project_id: input.projectId, stage: 'base_collect',
+          status: 'pending', payload: { base_id: 'cancelled-duplicate' } }] : [],
+      }, rpcHandlers: {
+        ve_claim_outreach_preparation: () => {
+          if (claimed) return { data: [] };
+          claimed = true;
+          return { data: [{ project_id: input.projectId, hypothesis_id: 'h1', base_id: 'cancelled-duplicate',
+            template_id: null, status: 'pending', language: 'ru', claim_token: 'lease',
+            ...(resumedFromPause ? { pause_state: { resumed_base_id: 'cancelled-duplicate' } } : {}) }] };
+        },
+        ve_save_outreach_preparation: save,
+        ve_resume_outreach_cancelled_base: async (_params, db) => {
+          await db.from('ve_bases').update({ status: 'collecting', error: null }).eq('id', 'cancelled-duplicate');
+          return { data: true };
+        },
+      } });
+      await runVeOutreachPreparations(resumedDb as unknown as SupabaseClient);
+      expect(save).toHaveBeenLastCalledWith(expect.objectContaining(resumedFromPause ? {
+        p_status: 'collecting', p_base_id: 'cancelled-duplicate', p_template_id: null,
+      } : {
+        p_status: 'ready', p_base_id: 'old-ready', p_template_id: 'saved-letters',
+      }), expect.anything());
+      expect(resumedDb.getRows('ve_jobs')).toHaveLength(resumedFromPause ? 1 : 0);
+      expect(resumedDb.rpcCalls.some((call) => call.fn === 've_resume_outreach_cancelled_base')).toBe(resumedFromPause);
+    }
 
     // A terminal partial preview is resumed only by an explicit Continue for
     // that saved base. Routine enqueue still reuses it without daily spending.
@@ -353,6 +364,23 @@ describe('VE2 base collection enqueue recovery', () => {
     expect((await request({})).status).toBe(200);
     expect(mockRouteDb.rpcCalls[1].fn).toBe('ve_request_outreach_preparation');
 
+    // Pause targets exactly one preparation; neither the project-wide stop
+    // nor a new preparation may be dispatched by this action.
+    mockRouteDb = createMockSupabase({ rpcHandlers: {
+      ve_pause_outreach_hypothesis_preparation: () => ({ data: null }),
+    } });
+    expect((await request({ action: 'pause', hypothesis_id: hypothesisId })).status).toBe(200);
+    expect(mockRouteDb.rpcCalls).toEqual([{ fn: 've_pause_outreach_hypothesis_preparation',
+      params: { p_project_id: projectId, p_revision: 7, p_hypothesis_id: hypothesisId } }]);
+    for (const invalid of [undefined, null, '', 'wrong-id']) {
+      expect((await request({ action: 'pause', hypothesis_id: invalid })).status).toBe(400);
+    }
+    expect(mockRouteDb.rpcCalls).toHaveLength(1);
+    mockRouteDb = createMockSupabase({ rpcHandlers: {
+      ve_pause_outreach_hypothesis_preparation: () => ({ data: null, error: { message: 'Выбор изменился' } }),
+    } });
+    expect((await request({ action: 'pause', hypothesis_id: hypothesisId })).status).toBe(409);
+
     // A stale browser must not turn an unavailable continuation into a new
     // paid collection or reset the ready preparation. The exact decision is
     // persisted without altering the base's worker checkpoint or timestamp.
@@ -421,7 +449,7 @@ describe('VE2 base collection enqueue recovery', () => {
         ...(mode === 'stale' ? { revision: 6 } : {}) });
       expect(checked.status).toBe(mode === 'read-failure' ? 503 : 200);
       const body = await checked.json();
-      if (mode === 'available') {
+      if (mode === 'available' || mode === 'unselected') {
         expect(body.continuation_check).toMatchObject({ status: 'available', action: 'resume_collection', base_id: 'stopped', code: 'sources_available', cache_revision: 0 });
         expect(body.continuation_check.reason).toContain('ещё не запущено');
         expect(body.continuation_check).not.toHaveProperty('resume_collection');
@@ -437,7 +465,7 @@ describe('VE2 base collection enqueue recovery', () => {
       } else if (mode === 'busy') expect(body.continuation_check).toMatchObject({ status: 'already_running', action: null, code: 'already_running' });
       else if (mode === 'launched') expect(body.continuation_check).toMatchObject({ status: 'ready', action: null, code: 'launched' });
       else if (mode !== 'read-failure') expect(body.continuation_check).toMatchObject({ status: 'unavailable',
-        code: mode === 'stale' ? 'selection_changed' : mode === 'unselected' ? 'not_selected'
+        code: mode === 'stale' ? 'selection_changed'
           : mode === 'foreign-base' ? 'base_missing' : 'state_changed' });
       expect(mockRouteDb.rpcCalls).toHaveLength(0);
       expect(mockRouteDb.inserts).toHaveLength(0);
@@ -445,6 +473,7 @@ describe('VE2 base collection enqueue recovery', () => {
       expect(mockRouteDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzed', collect_info: availableInfo,
         updated_at: '2026-10-12T10:00:00Z' });
       expect(mockRouteDb.getRows('ve_outreach_preparations')[0].status).toBe('ready');
+      expect(mockRouteDb.getRows('ve_outreach_setups')[0].selected_hypothesis_ids).toEqual(mode === 'unselected' ? [] : [hypothesisId]);
       for (const update of mockRouteDb.updates) {
         expect(update.table).toBe('ve_bases');
         expect(Object.keys(update.patch)).toEqual(['collection_continuation']);
@@ -462,7 +491,7 @@ describe('VE2 base collection enqueue recovery', () => {
     const autoBase = { ...stoppedDb.getRows('ve_bases')[0], collect_info: availableInfo,
       collection_continuation: { available: true, action: 'resume_preparation', code: 'state_unchecked', reason: 'Unknown' } } as unknown as VeBaseSummary;
     const autoInput = { projectId, step: 3, activeHypothesisId: hypothesisId, setupRevision: 7,
-      selectedHypothesisIds: [hypothesisId, 'other'],
+      visibleHypothesisIds: [hypothesisId, 'other'],
       preparations: [
         { project_id: projectId, hypothesis_id: hypothesisId, base_id: 'stopped', template_id: 'letters', status: 'ready' as const, language: 'ru' as const, last_error: null },
         { project_id: projectId, hypothesis_id: 'other', base_id: 'other', template_id: 'other-letters', status: 'error' as const, language: 'ru' as const, last_error: 'Failed' },
@@ -472,9 +501,16 @@ describe('VE2 base collection enqueue recovery', () => {
     expect(candidates.map((candidate) => candidate.baseId)).toEqual(['stopped', 'other']);
     expect(veAutomaticContinuationCandidates({ ...autoInput, step: 2 }).map((candidate) => candidate.baseId)).toEqual(['stopped']);
     expect(veAutomaticContinuationCandidates({ ...autoInput, step: 4 })).toHaveLength(0);
-    expect(veAutomaticContinuationCandidates({ ...autoInput, selectedHypothesisIds: [] })).toHaveLength(0);
+    expect(veAutomaticContinuationCandidates({ ...autoInput, visibleHypothesisIds: [] })).toHaveLength(0);
     expect(veAutomaticContinuationCandidates({ ...autoInput, launchedBaseIds: new Set(['stopped', 'other']) })).toHaveLength(0);
     expect(veAutomaticContinuationCandidates({ ...autoInput, preparations: autoInput.preparations.map((row) => ({ ...row, status: 'pending' })) })).toHaveLength(0);
+    const inactivePending = { ...autoInput, selectedHypothesisIds: [], preparations: autoInput.preparations.map((row) => ({
+      ...row, status: 'pending' as const, independent_control: false,
+    })) };
+    expect(veAutomaticContinuationCandidates(inactivePending).map((candidate) => candidate.baseId)).toContain('stopped');
+    expect(veAutomaticContinuationCandidates({ ...inactivePending, preparations: inactivePending.preparations.map((row) => ({
+      ...row, independent_control: true,
+    })) })).toHaveLength(0);
     expect(veAutomaticContinuationCandidates({ ...autoInput, bases: autoInput.bases.map((row) => ({ ...row, source: 'upload' })) })).toHaveLength(0);
     expect(veAutomaticContinuationCandidates({ ...autoInput, bases: autoInput.bases.map((row) => ({ ...row,
       collect_info: { ...row.collect_info, collection_mode: 'supply' } })) })).toHaveLength(0);

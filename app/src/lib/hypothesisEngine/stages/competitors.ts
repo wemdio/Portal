@@ -212,6 +212,9 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
         ];
 
   const searchResults: Array<{ query: string; items: Array<{ title: string; link: string; snippet?: string }> }> = [];
+  // У RU-проекта отказ поиска сюда не доходит: resolveSearch отдаёт ему пустую
+  // выдачу, как до порта ENG (io.ts), а остановка по отказу ниже стоит только
+  // у 'us' (решение владельца 14.10.2026 «Как было»).
   const tally = newHeSearchTally();
   for (const q of queries) {
     let items: Array<{ title: string; link: string; snippet?: string }> = [];
@@ -236,7 +239,7 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
   // десятками поисков, и ни один из них уже не получит выдачи — исследование
   // доехало бы до конца на приорах модели. Одна честно пустая выдача среди
   // обслуженных стадию не трогает (см. HeSearchTally).
-  const searchFailure = heSearchStageFailure(tally);
+  const searchFailure = market === 'us' ? heSearchStageFailure(tally) : undefined;
   if (searchFailure) {
     stageLog(
       ctx,

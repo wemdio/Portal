@@ -74,7 +74,7 @@
 | `HEALTH_OUTREACHOS_MISSING_AFTER_UTC_HOUR` | нет | С какого часа UTC алертить «прогон не стартовал» (по умолчанию 4, крон в 02:00 UTC) |
 | `HEALTH_AUTOPIPELINE_STUCK_MIN` | нет | Через сколько минут без heartbeat считать прогон Mailganer auto-pipeline зависшим (по умолчанию 30) |
 | `HEALTH_HE_REFILL_STALE_HOURS` | нет | Через сколько часов без обхода включённого us-конфига ночного добора ENG алертить (по умолчанию 26, минимум 25) |
-| `HEALTH_HE_REFILL_STUCK_HOURS` | нет | Через сколько часов строку `he_auto_pipeline_runs` в `collecting` считать зависшей (по умолчанию 14, минимум 13) |
+| `HEALTH_HE_REFILL_STUCK_HOURS` | нет | Через сколько часов строку `he_auto_pipeline_runs` в `collecting` считать зависшей (по умолчанию 34, минимум 33: очередь дочернего сбора до 10 ч + работа до 3 ч) |
 | `STATS_INTERVAL_SEC` | нет | Интервал статистики в секундах (по умолчанию 3600) |
 | `INSTANTLY_DATASET_DB_URL` | нет | Аналитический датасет `instantly_dataset` для утреннего разбора синка. Не задан — разбор идёт только по логам |
 | `HEALTH_DATASET_SYNC_LOG_DIR` | нет | Каталог логов ночного синка (по умолчанию `/var/log/instantly-dataset-sync`, монтируется read-only) |

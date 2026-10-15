@@ -10,11 +10,20 @@ import { HE, StatusDot } from './design';
 interface PreparationProgressProps {
   context?: 'letters' | 'base';
   preparation?: VeOutreachPreparation | null;
+  preparationSelected?: boolean;
+  hypothesisTitle?: string;
+  canPauseOrphan?: boolean;
   base?: VeBaseSummary | null;
   /** Project detail supplies jobs newest first; its history is intentionally bounded. */
   jobs: readonly VeJobSummary[];
+  compact?: boolean;
+  onStart?: () => void;
+  onPause?: () => void;
   onContinue?: () => void;
   continueDisabled?: boolean;
+  pauseDisabled?: boolean;
+  pauseDisabledReason?: string;
+  prepareDisabled?: boolean;
   approved?: boolean;
   actionNotice?: PreparationActionNotice | null;
 }
@@ -22,6 +31,7 @@ interface PreparationProgressProps {
 export interface PreparationActionNotice { tone: 'info' | 'error'; message: string }
 export interface PreparationRequestNotice extends PreparationActionNotice {
   hypothesisId: string | null;
+  operation?: 'pause';
   checking?: boolean;
   keepUntilStateChanges?: boolean;
   stateKey?: string;
@@ -33,14 +43,21 @@ export function refreshPreparationRequestNotice(
   notice: PreparationRequestNotice | null,
   snapshot: { preparations: readonly VeOutreachPreparation[]; bases: readonly VeBaseSummary[]; jobs: readonly VeJobSummary[] },
 ): PreparationRequestNotice | null {
+  if (notice?.operation === 'pause' && snapshot.preparations.some((item) => item.hypothesis_id === notice.hypothesisId && item.paused_at)) return null;
   if (!notice || notice.checking) return notice;
   if (!notice.keepUntilStateChanges) return null;
   const preparations = snapshot.preparations.filter((item) => !notice.hypothesisId || item.hypothesis_id === notice.hypothesisId);
   const bases = snapshot.bases.filter((item) => !notice.hypothesisId || item.hypothesis_id === notice.hypothesisId
     || preparations.some((preparation) => preparation.base_id === item.id));
   const baseIds = new Set(bases.map((item) => item.id));
+  if (notice.operation === 'pause') {
+    const completed = preparations.length > 0 && preparations.every((item) => item.status === 'ready')
+      && !snapshot.jobs.some((item) => baseIds.has(item.payload?.base_id ?? '') && ['pending', 'running'].includes(item.status));
+    // Ordinary collection progress cannot confirm or dismiss a failed pause.
+    return completed ? null : notice;
+  }
   const stateKey = JSON.stringify({
-    preparations: preparations.map((item) => [item.hypothesis_id, item.base_id, item.template_id, item.status, item.last_error]).sort(),
+    preparations: preparations.map((item) => [item.hypothesis_id, item.base_id, item.template_id, item.status, item.last_error, item.paused_at, item.cancelled_at]).sort(),
     bases: bases.map((item) => [item.id, item.status, item.updated_at, item.collection_continuation]).sort(),
     jobs: snapshot.jobs.filter((item) => baseIds.has(item.payload?.base_id ?? ''))
       .map((item) => [item.id, item.status, item.error]).sort(),
@@ -110,12 +127,40 @@ const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], 
   construct_failed: ['Обработка контактов остановлена', 'Обработчик сообщил об остановке. Причина появится после обновления состояния подготовки.'],
 };
 
+function hasActivePreparation({ base, jobs }: PreparationProgressProps): boolean {
+  return base?.collection_continuation?.code === 'already_running' || (!!base?.id && jobs.some((job) =>
+    job.payload?.base_id === base.id && ['pending', 'running'].includes(job.status)
+    && ['base_collect', 'base_analyze', 'template', 'base_reproject_contacts'].includes(job.stage)));
+}
+
+function isLegacyPreparationIdle(props: PreparationProgressProps): boolean {
+  return props.preparationSelected === false && !props.preparation?.independent_control
+    && !!props.preparation && ['pending', 'collecting', 'generating'].includes(props.preparation.status)
+    && !hasActivePreparation(props);
+}
+
 /** Queue evidence takes precedence over snapshots left by a previous attempt. */
-function getPreparationStage({ preparation, base, jobs, context = 'base' }: PreparationProgressProps): PreparationPresentation {
+function getPreparationStage(props: PreparationProgressProps): PreparationPresentation {
+  const { preparation, base, jobs, context = 'base' } = props;
+  if (!preparation && hasActivePreparation({ base, jobs })) return {
+    title: 'Подготовка базы выполняется',
+    description: 'Задача уже создана. Сохранённые контакты доступны ниже; состояние обновляется автоматически.',
+    currentStep: 0, tone: 'info',
+  };
   if (!preparation) return {
     title: 'Подготовка ещё не запущена',
-    description: 'Выберите гипотезы и запустите подготовку. Система соберёт и проверит базу, разберёт её состав и подготовит письма.',
+    description: 'Система соберёт и проверит базу для этой гипотезы, разберёт её состав и подготовит письма.',
     currentStep: null, tone: 'muted',
+  };
+  if (preparation.paused_at || (preparation.status !== 'ready' && preparation.cancelled_at)) return {
+    title: 'Подготовка на паузе',
+    description: 'Контакты, письма и согласования сохранены. Остальные базы работают независимо.',
+    currentStep: null, tone: 'muted', canContinue: true, continueLabel: 'Продолжить подготовку',
+  };
+  if (isLegacyPreparationIdle(props)) return {
+    title: 'Подготовка приостановлена',
+    description: 'Гипотеза была снята с подготовки. Сохранённые результаты доступны ниже.',
+    currentStep: null, tone: 'muted', canContinue: true, continueLabel: 'Продолжить подготовку',
   };
   const baseId = preparation.base_id;
   const jobFor = (stage: VeJobSummary['stage']) => baseId
@@ -345,9 +390,29 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
     state.continuationBlocked = false;
     state.continueHint = undefined;
   }
+  const paused = !!props.preparation?.paused_at || (props.preparation?.status !== 'ready' && !!props.preparation?.cancelled_at);
+  if (paused) {
+    state.title = 'Подготовка на паузе';
+    state.description = 'Контакты, письма и согласования сохранены. Остальные базы работают независимо.';
+    state.currentStep = null;
+    state.tone = 'muted';
+    // A new explicit pause fences unfinished work. Older cancellations still
+    // need a full continuation verdict, especially after an exhausted attempt.
+    if (props.preparation?.paused_at) {
+      state.canContinue = true;
+      state.continuationBlocked = false;
+      state.continuationUnconfirmed = false;
+      state.continueLabel = 'Продолжить подготовку';
+      state.continueHint = undefined;
+    }
+  }
   let guidance: NonNullable<PreparationPresentation['guidance']>;
-  if (!props.preparation) {
-    guidance = { action: 'start', title: 'Нужно начать подготовку', next: 'Вернитесь к гипотезам и нажмите «Подготовить письма и базы».' };
+  if (!props.preparation && hasActivePreparation(props)) {
+    guidance = { action: 'wait', title: 'Подготовка базы выполняется', next: 'Повторно начинать подготовку не нужно. Статус обновляется автоматически.' };
+  } else if (!props.preparation) {
+    guidance = { action: 'start', title: 'Подготовка ещё не начата', next: 'Нажмите «Начать подготовку» для этой гипотезы.' };
+  } else if (paused && state.canContinue) {
+    guidance = { action: 'continue', title: 'Подготовка на паузе', next: 'Продолжите, когда эта база понадобится. Работа начнётся с сохранённого этапа.' };
   } else if (state.tone === 'ok' && props.approved) {
     guidance = { action: 'launch', title: 'База и письма одобрены', next: 'Перейдите к запуску этой базы. Система подготовит кампанию в Instantly; отправку вы включите там сами.' };
   } else if (state.tone === 'ok') {
@@ -371,6 +436,26 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
   return { ...state, guidance };
 }
 
+/** One preparation action, separate from downloads, approval and campaign launch. */
+export function getPreparationControl(props: PreparationProgressProps): { action: 'start' | 'pause' | 'continue'; label: string } | null {
+  if (props.base?.collection_continuation?.code === 'launched') return null;
+  const state = getPreparationPresentation(props);
+  if (!props.preparation) return hasActivePreparation(props)
+    ? props.canPauseOrphan ? { action: 'pause', label: 'Приостановить' } : null
+    : { action: 'start', label: 'Начать подготовку' };
+  if (props.preparation.paused_at || props.preparation.cancelled_at) {
+    return state.canContinue ? { action: 'continue', label: state.continueLabel ?? 'Продолжить подготовку' } : null;
+  }
+  if (hasActivePreparation(props)) return { action: 'pause', label: 'Приостановить' };
+  if (state.canContinue) return { action: 'continue', label: state.continueLabel ?? 'Продолжить подготовку' };
+  if (isLegacyPreparationIdle(props)) return null;
+  const terminal = ['target_reached', 'limited', 'exhausted', 'error'].includes(props.base?.collect_info?.target_progress?.status ?? '');
+  if (['pending', 'collecting', 'generating'].includes(props.preparation.status) && !terminal && !state.awaitingStatus) {
+    return { action: 'pause', label: 'Приостановить' };
+  }
+  return null;
+}
+
 export function PreparationProgress(props: PreparationProgressProps) {
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => {
@@ -380,6 +465,11 @@ export function PreparationProgress(props: PreparationProgressProps) {
     return () => { clearTimeout(first); clearInterval(timer); };
   }, []);
   const state = getPreparationPresentation(props);
+  const control = getPreparationControl(props);
+  const onAction = control?.action === 'start' ? props.onStart : control?.action === 'pause' ? props.onPause : props.onContinue;
+  const action = control && onAction ? <button type="button" className={HE.btnGhost}
+    disabled={control.action === 'pause' ? (props.pauseDisabled ?? props.continueDisabled) : props.continueDisabled || props.prepareDisabled}
+    aria-label={props.hypothesisTitle ? `${control.label}: ${props.hypothesisTitle}` : undefined} onClick={onAction}>{control.label}</button> : null;
   const completed = state.tone === 'ok';
   const job = props.jobs.find(candidate => candidate.stage === 'base_collect' && candidate.payload?.base_id === props.base?.id);
   const progress = getCollectionProgress(props.base?.collect_info, job);
@@ -387,12 +477,27 @@ export function PreparationProgress(props: PreparationProgressProps) {
   const savedCandidates = collectCount(target?.candidates_processed);
   const savedReady = collectCount(target?.ready_contacts) ?? collectCount(target?.ready_rows);
   const composition = describeReadyComposition(target);
-  const collecting = props.base?.status === 'collecting' && state.tone !== 'err';
+  const collecting = props.base?.status === 'collecting' && state.tone !== 'err'
+    && !props.preparation?.paused_at && !props.preparation?.cancelled_at && !isLegacyPreparationIdle(props);
   const stepPercent = collecting && state.tone === 'info' ? progress.stepPercent : null;
   const started = Date.parse(job?.status === 'running' ? job.started_at ?? '' : '');
   const updated = progress.relevanceUpdatedAt ?? Date.parse(props.base?.updated_at ?? '');
   const minutes = now !== null && Number.isFinite(started) && now >= started ? Math.floor((now - started) / 60_000) : null;
   const elapsed = minutes === null ? null : minutes < 1 ? 'меньше минуты' : minutes < 60 ? `${minutes} мин` : `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
+  if (props.compact) return <div className="space-y-2" role={state.tone === 'err' ? 'alert' : 'status'} aria-live="polite">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <p className="flex items-center gap-2 font-medium"><StatusDot tone={state.tone} />
+        {state.guidance.action === 'wait' ? state.title : state.guidance.title}</p>
+      {action}
+    </div>
+    <p className={HE.muted}>{state.guidance.action === 'wait' ? state.description : state.guidance.next}</p>
+    {state.tone === 'err' || props.preparation?.paused_at || props.preparation?.cancelled_at ? <p className={HE.muted}>{state.description}</p> : null}
+    {state.continueHint ? <p className={HE.muted}>{state.continueHint}</p> : null}
+    {control?.action === 'pause' && props.pauseDisabledReason ? <p className={HE.muted}>{props.pauseDisabledReason}</p> : null}
+    {collecting && savedReady !== null ? <p className={HE.muted}>Прошли все проверки: {savedReady.toLocaleString('ru-RU')}{composition ? ` · ${composition}` : ''}</p> : null}
+    {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
+      className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
+  </div>;
   return (
     <div className="ve2-preparation" role={state.tone === 'err' ? 'alert' : 'status'} aria-live="polite">
       <div className="ve2-preparation-head">
@@ -440,11 +545,8 @@ export function PreparationProgress(props: PreparationProgressProps) {
       ) : null}
       {props.actionNotice ? <p role={props.actionNotice.tone === 'error' ? 'alert' : 'status'}
         className={props.actionNotice.tone === 'error' ? 've2-t-dan' : HE.muted}>{props.actionNotice.message}</p> : null}
-      {state.canContinue && props.onContinue ? <div className="space-y-2">
-        <button type="button" className={state.continueLabel ? HE.btnGhost : HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
-          {state.continueLabel ?? 'Продолжить подготовку'}
-        </button>
-      </div> : null}
+      {action}
+      {control?.action === 'pause' && props.pauseDisabledReason ? <p className={HE.muted}>{props.pauseDisabledReason}</p> : null}
       {state.continueHint ? <p className={HE.muted}>{state.continueHint}</p> : null}
       {state.collectionSummary ? <details>
         <summary className="ve2-link cursor-pointer">О сборе базы</summary>

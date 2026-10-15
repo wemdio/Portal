@@ -29,6 +29,7 @@ const mockLogs: string[] = [];
 const mockTransitions: Row[] = [];
 const mockUpdates: Array<{ table: string; values: Row }> = [];
 const mockState = { jobStatus: 'running', transitionFailures: 0, completionFailures: 0, baseFailures: 0, stopped: false };
+let mockJobStartedAt: string | null = null;
 const mockPool: { run?: (job: unknown) => Promise<void> } = {};
 const mockRunVeStage = jest.fn();
 
@@ -49,7 +50,7 @@ function mockDb() {
         if (table === 've_bases' && mockState.baseFailures-- > 0) return { data: null, error: { message: 'fetch failed' } };
         return { data: { id: 'x' }, error: null };
       }
-      if (table === 've_jobs' && columns.startsWith('status')) return { data: { status: mockState.jobStatus, started_at: null }, error: null };
+      if (table === 've_jobs' && columns.startsWith('status')) return { data: { status: mockState.jobStatus, started_at: mockJobStartedAt }, error: null };
       if (table === 've_jobs') return { data: [], error: null };
       if (table === 've_projects') return { data: { market: 'ru', tokens_used: 0, cost_usd: 0 }, error: null };
       return { data: null, error: null };
@@ -145,6 +146,7 @@ beforeEach(() => {
   mockTransitions.length = 0;
   mockUpdates.length = 0;
   mockState.jobStatus = 'running';
+  mockJobStartedAt = null;
   mockState.transitionFailures = mockState.completionFailures = mockState.baseFailures = 0;
   mockState.stopped = false;
   mockRunVeStage.mockReset();
@@ -159,6 +161,21 @@ async function runJob(claimed: ReturnType<typeof job>, advanceMs: number): Promi
 
 describe('VE2 worker: hangs do not spend attempts', () => {
   it('retains a failed invocation until DB finalization recovers, respects cancellation, and does not replay a completed stage', async () => {
+    // Pause and Continue can occur between cancellation polls. A rotated lease
+    // must abort the previous invocation even when the row is already running.
+    mockRunVeStage.mockImplementation(async (_job: unknown, ctx: { signal: AbortSignal }) => {
+      await new Promise((_resolve, reject) => ctx.signal.addEventListener('abort', () => reject(new Error('old invocation aborted')), { once: true }));
+      return { result: {} };
+    });
+    const superseded = mockPool.run!(job());
+    await jest.advanceTimersByTimeAsync(0);
+    mockJobStartedAt = '2026-10-15T12:00:00Z';
+    await jest.advanceTimersByTimeAsync(3_001);
+    await superseded;
+    expect(mockTransitions).toEqual([]);
+    expect(mockUpdates).toEqual([]);
+    expect(mockState.jobStatus).toBe('running');
+    mockJobStartedAt = null;
     for (const cancelled of [false, true]) {
       mockState.jobStatus = 'running';
       mockState.transitionFailures = 2;

@@ -3,6 +3,11 @@ import 'server-only';
 import { NextResponse, type NextRequest } from 'next/server';
 import { spreadSchedule } from '@/lib/mail/sendSchedule';
 import { requireByoMailboxClient } from '@/lib/byoMailbox/access';
+import {
+  ENG_OWN_MAILBOX_SENDING_UNAVAILABLE_TEXT,
+  ENG_OWN_MAILBOX_UNAVAILABLE_CODE,
+  ownMailboxSendingRefused,
+} from '@/lib/byoMailbox/accessPolicy';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
@@ -53,6 +58,14 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const res = await requireByoMailboxClient(req);
   if ('error' in res) return res.error;
+  // ENG-клиент через свои ящики не отправляет (byoMailbox/accessPolicy,
+  // ownMailboxSendingRefused): его кампании шлёт только пул. RU — как было.
+  if (ownMailboxSendingRefused(res.auth.market)) {
+    return NextResponse.json(
+      { error: ENG_OWN_MAILBOX_SENDING_UNAVAILABLE_TEXT, code: ENG_OWN_MAILBOX_UNAVAILABLE_CODE },
+      { status: 403 },
+    );
+  }
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
   let body: Record<string, unknown>;

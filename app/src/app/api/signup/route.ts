@@ -134,11 +134,21 @@ function scheduleEngVerificationEmail(userId: string, email: string): void {
  * переводит известные случаи (занятый адрес, слабый пароль, неверный адрес), а
  * остальное — общей фразой.
  *
- * profileFailed: к этому моменту пользователь auth УЖЕ создан (триггер завёл
- * профиль с ролью client и market='eng' из user_metadata), повторная
- * регистрация ответит «уже существует». Поэтому фраза ведёт ко входу, а не к
- * повтору: вход работает, ссылку подтверждения почты кабинет отправит заново
- * («Send a new link»).
+ * profileFailed: к этому моменту пользователь auth УЖЕ создан и market='eng'
+ * уже стоит (сбой — на строке тарифа), повторная регистрация ответит «уже
+ * существует». Поэтому фраза ведёт ко входу, а не к повтору: вход работает,
+ * ссылку подтверждения почты кабинет отправит заново («Send a new link»).
+ *
+ * Сбой update профиля — другое дело: market='eng' ставит ТОЛЬКО он (триггер с
+ * 20261015_0010 рынок из user_metadata не берёт, а app_metadata из createUser
+ * GoTrue пишет уже после INSERT — триггер его не видит). Профиль 'ru' на
+ * ENG-хосте middleware уводит в RU-кабинет. Поэтому update повторяется
+ * (ENG_PROFILE_RETRY_WAITS_MS), а не лёг — аккаунт удаляется и клиент слышит
+ * createFailed («попробуйте ещё раз»): регистрация с тем же адресом снова
+ * свободна. Не удалился и он (два захода) — setupStuck: аккаунт есть, но
+ * пользоваться им пока нельзя, и клиенту это сказано прямо, без обещаний
+ * (Support живёт внутри кабинета, ссылаться на него нельзя; журнал — не
+ * алерт, «мы уже знаем» было бы неправдой).
  */
 const ENG_SIGNUP_TEXT = {
   invalidRequest: 'Invalid request',
@@ -152,7 +162,42 @@ const ENG_SIGNUP_TEXT = {
   weakPassword: 'This password is not accepted. Choose a stronger one.',
   createFailed: 'Could not create the account. Try again.',
   profileFailed: 'Your account was created, but its setup did not finish. Sign in to continue; if something does not work, message Support.',
+  setupStuck: 'Your account was created, but its setup did not finish, so it cannot be used yet. Please do not sign in with it for now.',
 } as const;
+
+/** Паузы перед повторами update профиля ENG-аккаунта (до удаления аккаунта). */
+const ENG_PROFILE_RETRY_WAITS_MS = [300, 1000] as const;
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * ENG-аккаунт, которому не удалось поставить market='eng': удаляем его
+ * (createUser уже прошёл), чтобы клиент мог зарегистрироваться заново с тем
+ * же адресом, а не попал по входу в RU-кабинет. Строки тарифа ещё нет, письмо
+ * подтверждения не запланировано. Не удалился — setupStuck, в журнале
+ * signup.eng_rollback_failed (рынок проставляют руками).
+ */
+async function rollBackEngSignup(userId: string, email: string): Promise<NextResponse> {
+  let deleteErr: unknown = null;
+  for (const pause of [0, ENG_PROFILE_RETRY_WAITS_MS[ENG_PROFILE_RETRY_WAITS_MS.length - 1]]) {
+    if (pause > 0) await waitMs(pause);
+    try {
+      const { error } = await supabaseAdmin!.auth.admin.deleteUser(userId);
+      deleteErr = error ?? null;
+    } catch (err) {
+      deleteErr = err;
+    }
+    if (!deleteErr) break;
+  }
+  if (deleteErr) {
+    await logError('signup.eng_rollback_failed', deleteErr, { userId, email });
+    return NextResponse.json({ error: ENG_SIGNUP_TEXT.setupStuck }, { status: 500 });
+  }
+  await logWarn('signup.eng_rolled_back', 'ENG sign-up rolled back: the profile could not be set to market eng', { userId, email });
+  return NextResponse.json({ error: ENG_SIGNUP_TEXT.createFailed }, { status: 500 });
+}
 
 export async function POST(req: NextRequest) {
   if (!supabaseAdmin) {
@@ -205,13 +250,20 @@ export async function POST(req: NextRequest) {
     if (limited) return limited;
   }
 
-  // Триггер public.handle_new_user (последняя версия — 20260804_0004_*,
-  // поверх hardening'а 20260730_0001) автоматически создаёт строку в profiles
-  // при INSERT в auth.users: роль захардкожена 'client' (metadata не доверяем),
-  // market копируется из raw_user_meta_data->>'market' с fallback 'ru'.
-  // Поэтому передаём user_metadata, а сами в profiles не лезем (иначе
-  // primary key conflict — что и было в проде 23.06: «Ошибка создания
-  // профиля», 500).
+  // Триггер public.handle_new_user (последняя версия — 20261015_0010_*,
+  // поверх 20260804_0004 и hardening'а 20260730_0001) автоматически создаёт
+  // строку в profiles при INSERT в auth.users: роль захардкожена 'client'
+  // (metadata не доверяем), market — только из raw_app_meta_data с fallback
+  // 'ru'; caller-controlled user_metadata рынок больше не выбирает (прямой
+  // GoTrue signup с data:{market:'eng'} обходил счётчик выше). app_metadata
+  // в createUser не передаём: GoTrue (v2.188, adminUserCreate) пишет его
+  // отдельным UPDATE после INSERT (по коду GoTrue; на живом не проверялось),
+  // триггер его не видит — новый профиль всегда 'ru'.
+  // market='eng' ENG-аккаунту ставит ТОЛЬКО backstop-update ниже, сервис-
+  // ролью (с повторами и откатом аккаунта, см. ENG_SIGNUP_TEXT).
+  // user_metadata.market оставлен для триггера до 20261015_0010 (код может
+  // выехать раньше миграции). Сами в profiles не вставляем (иначе primary
+  // key conflict — что и было в проде 23.06: «Ошибка создания профиля», 500).
   const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
@@ -246,23 +298,36 @@ export async function POST(req: NextRequest) {
   // Defense-in-depth: если триггер по какой-то причине не сработал или
   // сработал без наших полей — добиваем через update. Идемпотентно: если
   // значения уже стоят — no-op. market пишем только для ENG-хоста (на RU
-  // остаётся default 'ru' из колонки).
-  const { error: profileErr } = await supabaseAdmin
+  // остаётся default 'ru' из колонки). С 20261015_0010 это ЕДИНСТВЕННОЕ место,
+  // где ENG-аккаунт получает market='eng' (сервис-роль, после счётчика выше).
+  const profilePatch = {
+    role: 'client',
+    locale,
+    full_name: fullName,
+    company,
+    phone: phone || null,
+    telegram: telegram || null,
+    signup_utm: utm,
+    ...(market === 'eng' ? { market: 'eng' } : {}),
+  };
+  let { error: profileErr } = await supabaseAdmin
     .from('profiles')
-    .update({
-      role: 'client',
-      locale,
-      full_name: fullName,
-      company,
-      phone: phone || null,
-      telegram: telegram || null,
-      signup_utm: utm,
-      ...(market === 'eng' ? { market: 'eng' } : {}),
-    })
+    .update(profilePatch)
     .eq('id', userId);
+  if (profileErr && eng) {
+    // ENG: без этого update аккаунт остался бы 'ru' (см. ENG_SIGNUP_TEXT) —
+    // повторяем, затем откатываем. RU — как было: один update.
+    for (const pause of ENG_PROFILE_RETRY_WAITS_MS) {
+      await logWarn('signup.eng_profile_update_retry', `ENG profile update failed, retrying: ${profileErr?.code ?? 'error'}`, { userId });
+      await waitMs(pause);
+      ({ error: profileErr } = await supabaseAdmin.from('profiles').update(profilePatch).eq('id', userId));
+      if (!profileErr) break;
+    }
+  }
   if (profileErr) {
     await logError('signup.profile_update_failed', profileErr, { userId });
-    return NextResponse.json({ error: eng ? ENG_SIGNUP_TEXT.profileFailed : 'Ошибка обновления профиля' }, { status: 500 });
+    if (eng) return rollBackEngSignup(userId, email);
+    return NextResponse.json({ error: 'Ошибка обновления профиля' }, { status: 500 });
   }
 
   const { error: tariffErr } = await supabaseAdmin
@@ -292,6 +357,12 @@ export async function POST(req: NextRequest) {
     source: 'register',
     utm,
     referrer: utm?.referrer ?? null,
+    // Which site and cabinet the account was created on, and the landing page the
+    // visitor first arrived on (from the oos_utm cookie), so the alert says where
+    // the sign-up came from.
+    signupHost: req.headers.get('host'),
+    signupCabinet: eng ? 'eng' : 'ru',
+    landingUrl: utm?.landing ?? null,
   });
 
   return NextResponse.json({ ok: true, user_id: userId }, { status: 201 });

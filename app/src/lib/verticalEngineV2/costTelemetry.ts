@@ -2,6 +2,7 @@ import 'server-only';
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { withProviderUsage, ProviderUsageWriteError, type ProviderUsageEvent, type ProviderUsageScope } from '@/lib/providerUsage';
+import { getVeActiveJobSignal } from './llm';
 import type { VeJob } from './types';
 
 export const VE_USAGE_SOURCE = 've_provider_usage';
@@ -108,6 +109,48 @@ function eventFields(event: ProviderUsageEvent): Record<string, unknown> {
   return out;
 }
 
+/** Establish accounting before work starts. A lost CAS response must not fail
+ * preparation or overwrite another claim's payload. Only this write retries. */
+async function initializeUsageOrigin(db: SupabaseClient, job: VeJob, runId: string) {
+  const origin = { runId, startedAt: new Date().toISOString() };
+  const payload = { ...job.payload, provider_usage_origin: origin };
+  const signal = getVeActiveJobSignal();
+  const deadline = () => signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
+  const sameClaim = (startedAt: string | null) => startedAt === (job.started_at ?? null)
+    || (startedAt != null && job.started_at != null && Date.parse(startedAt) === Date.parse(job.started_at));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    signal?.throwIfAborted();
+    try {
+      let update = db.from('ve_jobs').update({ payload })
+        .eq('id', job.id).eq('status', 'running').is('payload->>provider_usage_origin', null);
+      update = job.started_at == null ? update.is('started_at', null) : update.eq('started_at', job.started_at);
+      const { data, error } = await update.select('id').abortSignal(deadline()).maybeSingle();
+      signal?.throwIfAborted();
+      if (!error && data) { job.payload = payload; return origin; }
+    } catch { signal?.throwIfAborted(); }
+
+    // The write can commit even if its response was lost. Confirm the exact
+    // origin before retrying; never erase a cancellation or a newer claim.
+    let saved: { status: string; started_at: string | null; payload: Record<string, unknown> } | null | undefined;
+    try {
+      const { data, error } = await db.from('ve_jobs').select('status,started_at,payload')
+        .eq('id', job.id).abortSignal(deadline()).maybeSingle();
+      signal?.throwIfAborted();
+      if (!error) saved = data;
+    } catch { signal?.throwIfAborted(); }
+    if (saved !== undefined) {
+      if (!saved || saved.status !== 'running' || !sameClaim(saved.started_at)) throw new ProviderUsageWriteError();
+      const savedOrigin = saved.payload?.provider_usage_origin as { runId?: unknown } | null | undefined;
+      if (savedOrigin?.runId === runId) { job.payload = saved.payload; return origin; }
+      if (savedOrigin != null) throw new ProviderUsageWriteError();
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
+  console.warn(`[ve-cost] journal persistence failed (event=usage_origin, attempts=3, job=${job.id})`);
+  throw new ProviderUsageWriteError();
+}
+
 /** A self-requeue is a finished invocation, even though its ve_jobs row remains pending. */
 export async function withVeCostTelemetry<T>(db: SupabaseClient, job: VeJob, work: () => Promise<T>,
   /** Every provider attempt start/finish proves the stage is alive (worker inactivity guard). */
@@ -119,15 +162,7 @@ export async function withVeCostTelemetry<T>(db: SupabaseClient, job: VeJob, wor
   const runId = randomUUID();
   let origin = job.payload.provider_usage_origin as { runId?: unknown } | undefined;
   if (origin === undefined || origin === null) {
-    const payload = { ...job.payload, provider_usage_origin: { runId, startedAt: new Date().toISOString() } };
-    try {
-      const { data, error } = await db.from('ve_jobs').update({ payload })
-        .eq('id', job.id).eq('status', 'running').is('payload->provider_usage_origin', null)
-        .select('id').abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
-      if (error || !data) throw new ProviderUsageWriteError();
-      job.payload = payload;
-      origin = payload.provider_usage_origin;
-    } catch { throw new ProviderUsageWriteError(); }
+    origin = await initializeUsageOrigin(db, job, runId);
   }
   if (!identifier(origin?.runId)) throw new ProviderUsageWriteError();
   const startChildren = job.stage === 'base_collect' ? await childSnapshot(db, scope.baseId) : undefined;

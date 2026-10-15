@@ -21,6 +21,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { mergeHeIcpFrame, type HeIcpFramePatch } from './icpFrame';
+import { projectMarket } from './market';
 
 // Максимум символов эталона стиля (brief.style_override) — после trim.
 export const STYLE_OVERRIDE_MAX_LENGTH = 8000;
@@ -31,11 +32,15 @@ export const SIGNATURE_OVERRIDE_MAX_LENGTH = 500;
 // Максимум символов ручного описания бизнеса (brief.business_override) — после trim.
 export const BUSINESS_OVERRIDE_MAX_LENGTH = 3000;
 
-// Максимум символов оффера (brief.offer_override) — после trim. Оффер целиком
-// уходит в платные промпты: письма (chain, template) обоих рынков, а на рынке
-// 'us' ещё и профиль сайта (stages/siteProfile.ts). Без капа их вход не
-// ограничен ничем, кроме тела запроса. Уже сохранённое длиннее значение запись
-// не трогает; профиль 'us' режет его тем же капом при чтении.
+// Максимум символов оффера (brief.offer_override) — после trim, ТОЛЬКО у проекта
+// market='us'. Оффер целиком уходит в платные промпты: письма (chain,
+// template), а на рынке 'us' ещё и профиль сайта (stages/siteProfile.ts режет
+// его тем же капом при чтении). Клиентский ENG-кабинет (api/client/eng/
+// projects/[id]) передаёт кап правилом HeBriefPatchRules.offerMaxLength;
+// staff-PATCH правила не передаёт, и тогда кап решает рынок проекта: 'us' —
+// тот же кап и тот же отказ, RU-проект принимает оффер любой длины, как до
+// порта ENG (решение владельца 14.10.2026 «Как было»). Уже сохранённое длиннее
+// значение запись не трогает.
 export const OFFER_OVERRIDE_MAX_LENGTH = 3000;
 
 export type HeBriefField = 'offer_override' | 'style_override' | 'signature_override' | 'business_override';
@@ -45,7 +50,7 @@ export type HeBriefPatchError =
   | { code: 'no_fields' }
   /** Поле передано не строкой. */
   | { code: 'bad_type'; field: HeBriefField }
-  /** offer/style/signature/business длиннее лимита после trim. */
+  /** style/signature/business (offer — только у проекта 'us') длиннее лимита после trim. */
   | { code: 'too_long'; field: HeBriefField; max: number }
   | { code: 'not_found' }
   | { code: 'db'; message: string };
@@ -78,12 +83,34 @@ export interface HeBriefPatchClientFields {
   icp?: HeIcpFramePatch | null;
 }
 
+/**
+ * Правила записи, которые выбирает вызывающий роут. Отдельным аргументом по
+ * той же причине, что и HeBriefPatchClientFields: staff-роут зовёт функцию без
+ * него.
+ */
+export interface HeBriefPatchRules {
+  /**
+   * Максимум символов offer_override после trim (кабинет —
+   * OFFER_OVERRIDE_MAX_LENGTH). Проверка стоит на том же месте, где стояла:
+   * после проверок типов всех полей и до капов остальных полей.
+   *
+   * Не задан (staff-роут) — кап по рынку проекта: оффер длиннее
+   * OFFER_OVERRIDE_MAX_LENGTH заставляет прочитать проект раньше обычного, и
+   * у 'us' ответ — тот же отказ too_long на том же месте, у RU-проекта оффер
+   * принимается, как до порта ENG. Проект не прочитался — путь RU (прежние
+   * капы остальных полей, затем not_found/db этого же чтения): это
+   * staff-инструмент, а знать, что проект 'us', не из чего.
+   */
+  offerMaxLength?: number;
+}
+
 /** Хотя бы одно поле обязано присутствовать; применяются только строковые. */
 export async function patchHeProjectBrief(
   supabase: SupabaseClient,
   projectId: string,
   body: HeBriefPatchBody,
   clientFields?: HeBriefPatchClientFields,
+  rules?: HeBriefPatchRules,
 ): Promise<HeBriefPatchResult> {
   const offerRaw = body?.offer_override;
   const styleRaw = body?.style_override;
@@ -111,8 +138,24 @@ export async function patchHeProjectBrief(
   if (businessRaw !== undefined && typeof businessRaw !== 'string') {
     return { ok: false, error: { code: 'bad_type', field: 'business_override' } };
   }
-  if (typeof offerRaw === 'string' && offerRaw.trim().length > OFFER_OVERRIDE_MAX_LENGTH) {
-    return { ok: false, error: { code: 'too_long', field: 'offer_override', max: OFFER_OVERRIDE_MAX_LENGTH } };
+  const offerMax = rules?.offerMaxLength;
+  if (offerMax !== undefined && typeof offerRaw === 'string' && offerRaw.trim().length > offerMax) {
+    return { ok: false, error: { code: 'too_long', field: 'offer_override', max: offerMax } };
+  }
+  // Staff-роут (правила нет): кап по рынку проекта (см. HeBriefPatchRules).
+  // Чтение — только когда оффер длиннее капа; его результат идёт и в
+  // read-merge-write ниже, второго чтения нет.
+  let earlyLoad: { data: unknown; error: { code?: string; message: string } | null } | null = null;
+  if (offerMax === undefined && typeof offerRaw === 'string' && offerRaw.trim().length > OFFER_OVERRIDE_MAX_LENGTH) {
+    const { data, error } = await supabase
+      .from('he_projects')
+      .select('brief, market')
+      .eq('id', projectId)
+      .single();
+    if (!error && data && projectMarket(data as { market?: string | null }) === 'us') {
+      return { ok: false, error: { code: 'too_long', field: 'offer_override', max: OFFER_OVERRIDE_MAX_LENGTH } };
+    }
+    earlyLoad = { data, error };
   }
   if (typeof styleRaw === 'string' && styleRaw.trim().length > STYLE_OVERRIDE_MAX_LENGTH) {
     return { ok: false, error: { code: 'too_long', field: 'style_override', max: STYLE_OVERRIDE_MAX_LENGTH } };
@@ -124,11 +167,8 @@ export async function patchHeProjectBrief(
     return { ok: false, error: { code: 'too_long', field: 'business_override', max: BUSINESS_OVERRIDE_MAX_LENGTH } };
   }
 
-  const { data: current, error: loadErr } = await supabase
-    .from('he_projects')
-    .select('brief')
-    .eq('id', projectId)
-    .single();
+  const { data: current, error: loadErr } =
+    earlyLoad ?? (await supabase.from('he_projects').select('brief').eq('id', projectId).single());
   if (loadErr) {
     return {
       ok: false,
@@ -139,7 +179,7 @@ export async function patchHeProjectBrief(
     };
   }
 
-  const brief = { ...((current?.brief as Record<string, unknown> | null) ?? {}) };
+  const brief = { ...(((current as { brief?: unknown } | null)?.brief as Record<string, unknown> | null) ?? {}) };
   if (typeof offerRaw === 'string') {
     const offer = offerRaw.trim();
     if (offer) brief.offer_override = offer;

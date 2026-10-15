@@ -13,7 +13,7 @@ jest.mock('@/lib/verticalEngineV2/contactDeliveryActivation', () => ({activateDe
 import { activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
 import { activateVeLaunchPortfolioItem } from '@/lib/verticalEngineV2/launchActivation';
 
-import { outreachLaunchRequestSchema, runVeOutreachStartStage, prepareVeOutreachLaunch } from '@/lib/verticalEngineV2/outreachLaunch';
+import { outreachLaunchRequestSchema, runVeOutreachStartStage, prepareVeOutreachLaunch, startVeOutreach } from '@/lib/verticalEngineV2/outreachLaunch';
 
 const STAFF_LINE_ID = '837cbcb1-9afb-49c9-965c-d83d1e7d8e9c';
 const VE_PROJECT_ID = '10000000-0000-4000-8000-000000000001';
@@ -41,6 +41,19 @@ describe('auto-outreach launch for a Portal project without periods', () => {
     await expect(prepareVeOutreachLaunch(db as never, {} as never, {projectId: VE_PROJECT_ID, userId: 'staff-1',
       request: {...request, delivery_rate_revision: 1}})).rejects.toThrow('Темп отправки изменился');
     expect(db.rpcCalls).toEqual([]);
+    // A stale launch tab must also stop before audience/provider work when
+    // preparation was paused without discarding the saved approval.
+    const paused = createMockSupabase({tables: {
+      ve_outreach_setups: [{project_id: VE_PROJECT_ID, revision: 3, selected_hypothesis_ids: [HYPOTHESIS_ID],
+        approved_bases: {[BASE_ID]: {template_id: TEMPLATE_ID, revision: 'reviewed'}}}],
+      ve_outreach_preparations: [{project_id: VE_PROJECT_ID, hypothesis_id: HYPOTHESIS_ID,
+        paused_at: '2026-10-15T10:00:00Z'}],
+    }});
+    const input = {projectId: VE_PROJECT_ID, userId: 'staff-1', request};
+    await expect(prepareVeOutreachLaunch(paused as never, {} as never, input)).rejects.toThrow('на паузе');
+    await expect(startVeOutreach(paused as never, {} as never, {...input,
+      idempotencyKey: '20000000-0000-4000-8000-000000000001', confirmedCustomerApproval: true})).rejects.toThrow('на паузе');
+    expect(paused.rpcCalls).toEqual([]);
   });
   it('requires the period field but accepts an explicit null', () => {
     expect(outreachLaunchRequestSchema.safeParse(request).success).toBe(true);

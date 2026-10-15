@@ -44,9 +44,25 @@ import {
   fetchEngProjects,
   type EngProjectListItem,
 } from './api-client';
+import type { HeClientStageErrorCode } from '@/lib/hypothesisEngine/clientEngProjection';
+import { heResearchStopCode } from './clientFailureText';
 import { EngPaidAccessNotice, EngVerifyEmailBanner } from './EngPaidAccess';
 import { engStageErrorText } from './engText';
 import { EngBadge, EngCard, EngSpinner, fmtDate, projectStatusTone } from './ui';
+
+/**
+ * Причина остановки research на карточке проекта — тем же правилом, что шаг 1
+ * (EngStepBrief, retryFailedText): заголовок справочника — только у кодов,
+ * которые research действительно пишет (heResearchStopCode), и у отмены. Любой
+ * другой код на проекте — почти наверняка неверно прочитанный текст стадии
+ * (clientFailureText.ts, HE_RESEARCH_STOP_CODES), и его заголовок рассказал бы
+ * про базы, прогрев ящиков или тариф. Тогда — та же нейтральная фраза, что у
+ * шага 1. Та же функция — в шапке мастера (EngProjectWizard.tsx).
+ */
+function engProjectResearchErrorText(code: HeClientStageErrorCode): string {
+  if (code === 'cancelled' || heResearchStopCode(code)) return engStageErrorText(code, 'research');
+  return 'The research stopped.';
+}
 
 /** Подписи рамки ЦА — те же слова, что у шага «Brief». */
 const ICP_LABELS: Record<HeIcpField, string> = {
@@ -359,10 +375,11 @@ export function EngProjectsList() {
                 </div>
                 {/* he_projects.error (воркер пишет туда русский текст стадии с
                     префиксом её имени) в кабинет не доезжает вовсе: роут отдаёт
-                    код причины, экран — английское объяснение по коду. */}
+                    код причины, экран — английское объяснение по коду (только
+                    у кодов research, см. engProjectResearchErrorText). */}
                 {p.error_code && (
                   <div className="text-[11px]" style={{ color: 'var(--cp-red)' }}>
-                    {engStageErrorText(p.error_code, 'research')}
+                    {engProjectResearchErrorText(p.error_code)}
                   </div>
                 )}
               </Link>

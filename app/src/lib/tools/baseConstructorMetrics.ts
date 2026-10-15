@@ -41,7 +41,8 @@ export function accumulateTaScoringTelemetry(
   // Счётчики Jev есть только у прогонов, где он был включён: DeepSeek-задачи
   // сохраняют прежнюю форму телеметрии.
   for (const key of [
-    'jev_requests', 'jev_companies', 'jev_fallback_companies', 'jev_prompt_tokens', 'jev_cost_usd',
+    'jev_requests', 'jev_companies', 'jev_fallback_companies', 'jev_thin_companies',
+    'jev_prompt_tokens', 'jev_cost_usd',
   ] as const) {
     if (baseline[key] !== undefined || snapshot[key] !== undefined) {
       counters[key] = nonnegative(baseline[key]) + nonnegative(snapshot[key]);

@@ -22,9 +22,12 @@
  *   TA_SCORING_JEV_SURFACES=constructor,databases  где включать (по умолчанию обе вкладки);
  *   TA_SCORING_JEV_USERS=<uuid>,<uuid>             только задачи этих пользователей;
  *   TA_SCORING_JEV_CUT=6.5                         ожидаемый балл Jev, который считается «7»;
- *   TA_SCORING_JEV_MODEL=typesafe/jev-1.13.0       порог откалиброван на этом релизе.
- * Любой сбой (сеть, HTTP-ошибка, обрезанный или нечитаемый ответ, нет ответа по
- * компании) — эти компании оценивает прежний путь DeepSeek.
+ *   TA_SCORING_JEV_MODEL=typesafe/jev-1.13.0       порог откалиброван на этом релизе;
+ *   TA_SCORING_JEV_MIN_LETTERS=40                  меньше описательного текста — DeepSeek.
+ * Строки почти без фактов (одни адрес, сайт, телефон) Jev не получает: по ним он
+ * ставит «мало данных», а DeepSeek угадывает компанию по домену и бренду. Любой
+ * сбой (сеть, HTTP-ошибка, обрезанный или нечитаемый ответ, нет ответа по
+ * компании) — эти компании тоже оценивает прежний путь DeepSeek.
  */
 
 const REQUESTY_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -121,6 +124,39 @@ export function taJevFacts(data: Record<string, string>): Record<string, string>
     if (value) facts[key] = value.length > FACT_MAX_CHARS ? value.slice(0, FACT_MAX_CHARS) : value;
   }
   return facts;
+}
+
+// Колонки, которые говорят, где компания и куда писать, а не чем она занимается
+// (кроме колонок с описанием: «Описание сайта» — это как раз деятельность).
+const LOCATION_OR_LINK_COLUMN = /адрес|address|сайт|site|url|ссылк|link|домен|domain|card|город|city|geometry|регион|region|област|район|district|стран|country/i;
+const DESCRIPTION_COLUMN = /описани|description|текст|text/i;
+// Ссылки и домены в значениях: по ним DeepSeek угадывает компанию, Jev — нет.
+const URL_TOKEN = /(?:https?:\/\/|www\.)\S+|[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:ru|рф|su|com|net|org|info|biz|pro|online|site|store|shop|io|me|by|kz|ua|moscow|spb)\b\S*/giu;
+const LETTER = /\p{L}/gu;
+
+/**
+ * Порог описательного текста: столько букв в названии, рубрике, виде
+ * деятельности или описании, не считая адресов, ссылок и чисел. 15.10.2026 на
+ * таблице «Работы с базами» с одними адресом, сайтом и телефоном Jev ставил
+ * почти всем 3–4, а DeepSeek по домену и бренду — 7+ каждой пятой строке.
+ * Название с рубрикой (2ГИС) или видом деятельности (СБИС) порог проходят.
+ * 0 — отдавать Jev все строки.
+ */
+export function taJevMinLetters(): number {
+  const raw = Number(process.env.TA_SCORING_JEV_MIN_LETTERS);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 500 ? Math.floor(raw) : 40;
+}
+
+/** Хватит ли Jev фактов о компании, иначе её оценивает DeepSeek. */
+export function taJevHasFacts(data: Record<string, string>, minLetters = taJevMinLetters()): boolean {
+  if (minLetters <= 0) return true;
+  let letters = 0;
+  for (const [key, value] of Object.entries(taJevFacts(data))) {
+    if (LOCATION_OR_LINK_COLUMN.test(key) && !DESCRIPTION_COLUMN.test(key)) continue;
+    letters += (value.replace(URL_TOKEN, ' ').match(LETTER) ?? []).length;
+    if (letters >= minLetters) return true;
+  }
+  return false;
 }
 
 export interface TaJevCompany {

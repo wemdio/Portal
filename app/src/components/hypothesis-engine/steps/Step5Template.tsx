@@ -428,9 +428,14 @@ export function Step5Template(props: {
   template: HeTemplate | null;
   base: HeBaseSummary | null;
   jobs: HeJobSummary[];
+  /**
+   * Рынок проекта (he_projects.market). Блок «Предупреждения регламента писем»
+   * — только у проекта 'us': у 'ru' шаг 5 такой, как до переноса ENG.
+   */
+  market: string | null | undefined;
   onBuildTemplate: () => void;
 }): JSX.Element {
-  const { template, base, jobs, onBuildTemplate } = props;
+  const { template, base, jobs, market, onBuildTemplate } = props;
   const [copied, setCopied] = useState(false);
   const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
   const launch = useTemplateLaunch(template);
@@ -517,9 +522,10 @@ export function Step5Template(props: {
 
   /* ── Готовый шаблон ── */
   const mapping = template.personalization_plan?.operator_mapping ?? [];
-  // Только у EN-шаблонов с нарушениями (стадия template пишет поле лишь тогда):
-  // у RU-шаблонов его нет, и блок ниже не рисуется.
-  const ruleViolations = template.personalization_plan?.rule_violations ?? [];
+  // Только у английских шаблонов проекта 'us' с нарушениями (стадия template
+  // пишет поле лишь тогда): у проектов 'ru' — ни на каком языке, и блок ниже
+  // не рисуется (как до переноса ENG).
+  const ruleViolations = market === 'us' ? (template.personalization_plan?.rule_violations ?? []) : [];
   // Пречек лимита запуска: роут ответит 413 сверх HE_LAUNCH_MAX_LEADS —
   // не даём дойти до клика по «Отправить в запуск» с заведомо большой базой.
   const baseOverLaunchLimit = (base?.row_count ?? 0) > HE_LAUNCH_MAX_LEADS;
@@ -578,7 +584,7 @@ export function Step5Template(props: {
       {/* Превью по лидам — финальные письма с подставленными значениями базы */}
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
 
-      {/* Регламент финальных писем (EN): предупреждения, шаблон всё равно готов */}
+      {/* Регламент финальных писем (английский шаблон проекта 'us'): предупреждения, шаблон всё равно готов */}
       {ruleViolations.length > 0 ? (
         <div className="max-w-3xl rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
           <p className="text-sm font-medium text-amber-800">

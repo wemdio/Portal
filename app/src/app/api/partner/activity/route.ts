@@ -4,6 +4,7 @@ import { safeEqual } from '@/lib/crypto/safeEqual';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { listInstantlyAccounts, resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { mskDayWindowUtc, toMskIso } from '@/lib/instantly/activity';
+import { readHeEngCampaignIds } from '@/lib/hypothesisEngine/engCampaignSending';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -19,8 +20,28 @@ export const runtime = 'nodejs';
  *
  * Serves entirely from instantly_activity_events (populated by the webhook
  * receiver) → zero Instantly API calls. Scoped to a single account via
- * PARTNER_ACTIVITY_ACCOUNT_ID (defaults to the first non-main account), so the
- * partner can only ever see their own workspace's activity.
+ * PARTNER_ACTIVITY_ACCOUNT_ID (defaults to the first non-main account).
+ *
+ * The account is a whole Instantly workspace, and that workspace is SHARED:
+ * the English cabinet's sending pool (lib/hypothesisEngine/sendingPool.ts,
+ * HE_US_POOL_WORKSPACE, default 'account-2') sends from mailboxes in it, and
+ * the webhook stores replies to ENG campaigns in the same feed. So the account
+ * filter alone does NOT make this the partner's own activity. Events of ENG
+ * cabinet campaigns are dropped here (engCampaignSending.readHeEngCampaignIds):
+ *  - every campaign id in the launch records (he_templates.launch_info) of
+ *    market 'us' projects that belong to the English cabinet — the owner's
+ *    profile has market 'eng' (or no longer exists), or the project was given
+ *    pool mailboxes. This is the list Pause, staff «turn off sending», Block
+ *    and the blocked sweep use;
+ *  - campaigns of any other 'us' project launched with a preset that an ENG
+ *    project launched with (that preset is the client's pool mailboxes);
+ *  - the ENG status cache he_eng_campaign_status.
+ * Market 'us' projects that staff run for someone else (not a cabinet
+ * account, no pool mailboxes, not an ENG preset) are NOT excluded: their
+ * campaigns may be the partner's own. If the list cannot be read, the route
+ * answers 503 instead of serving unfiltered rows. Events without a campaign
+ * id are served as before. Everything else about the partner's own data is
+ * unchanged.
  *
  * Timestamps (`at`) are returned in MSK (+03:00); the `date` filter is a MSK day.
  */
@@ -81,9 +102,17 @@ export async function GET(req: NextRequest) {
 
   const accountId = resolvePartnerAccountId();
 
+  // Кампании ENG-кабинета — до чтения ленты: без полного списка исключений
+  // строки не отдаём (см. шапку).
+  const engCampaigns = await readHeEngCampaignIds(supabaseAdmin);
+  if (!engCampaigns.ok) {
+    console.warn(`[partner-activity] ENG campaign ids unreadable — refused: ${engCampaigns.error}`);
+    return jsonError('Activity is temporarily unavailable, try again later', 503);
+  }
+
   let query = supabaseAdmin
     .from('instantly_activity_events')
-    .select('lead_email,event_type,occurred_at')
+    .select('lead_email,event_type,occurred_at,campaign_id')
     .eq('instantly_account_id', accountId)
     .in('event_type', ['opened', 'replied'])
     .gte('occurred_at', startUtc)
@@ -98,8 +127,15 @@ export async function GET(req: NextRequest) {
   const { data, error } = await query;
   if (error) return jsonError(error.message, 500);
 
-  const rows = (data ?? []) as Array<{ lead_email: string; event_type: string; occurred_at: string }>;
-  const truncated = rows.length >= MAX_ROWS;
+  const fetched = (data ?? []) as Array<{
+    lead_email: string;
+    event_type: string;
+    occurred_at: string;
+    campaign_id: string | null;
+  }>;
+  // truncated — по прочитанным строкам: лимит отрезал ленту до фильтра ENG.
+  const truncated = fetched.length >= MAX_ROWS;
+  const rows = fetched.filter((r) => !(r.campaign_id && engCampaigns.ids.has(r.campaign_id)));
 
   if (distinct) {
     const emails = [...new Set(rows.map((r) => r.lead_email))];

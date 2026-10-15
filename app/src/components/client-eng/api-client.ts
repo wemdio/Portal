@@ -1633,6 +1633,14 @@ export interface EngBlockedAddress {
   created_at: string;
 }
 
+/**
+ * Снятие людей из списка с идущих кампаний клиента (engDncRemoval.ts, за
+ * выключателем HE_ENG_DNC_REMOVE). 'off' — выключено: список только не пускает
+ * адреса в новые загрузки. Ответ без поля (сервер старше снятия) — тоже 'off':
+ * такой сервер с кампаний никого не снимает.
+ */
+export type EngDncRemovalMode = 'off' | 'on';
+
 export interface EngBlockedListPage {
   items: EngBlockedAddress[];
   /** Весь список клиента. */
@@ -1642,6 +1650,26 @@ export interface EngBlockedListPage {
   offset: number;
   /** Следующая страница; null — дальше строк нет. */
   next_offset: number | null;
+  in_campaign_removal: EngDncRemovalMode;
+  /**
+   * Разных адресов ждут проверки кампаний / снять не удалось (только то, с чем
+   * клиент ещё может что-то сделать: адрес в списке, кампания его и не
+   * завершена). null — снятие выключено или сводка не прочиталась (при 'on').
+   */
+  pending: number | null;
+  failed: number | null;
+  /** До 10 адресов из `failed`, по алфавиту. */
+  failed_examples: string[];
+  /** `failed` — нижняя граница (неудач больше, чем отдала сводка). */
+  failed_at_least: boolean;
+}
+
+function dncCount(raw: unknown): number | null {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+}
+
+function dncExamples(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((e): e is string => typeof e === 'string' && e.length > 0).slice(0, 10) : [];
 }
 
 export async function fetchEngBlockedList(opts: { offset?: number; q?: string } = {}): Promise<EngBlockedListPage> {
@@ -1649,7 +1677,45 @@ export async function fetchEngBlockedList(opts: { offset?: number; q?: string } 
   if (opts.offset) qs.set('offset', String(opts.offset));
   if (opts.q) qs.set('q', opts.q);
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
-  return engApiFetch<EngBlockedListPage>(`/blocklist${suffix}`);
+  const page = await engApiFetch<EngBlockedListPage>(`/blocklist${suffix}`);
+  const on = page.in_campaign_removal === 'on';
+  const failed = on ? dncCount(page.failed) : null;
+  return {
+    ...page,
+    in_campaign_removal: on ? 'on' : 'off',
+    pending: on ? dncCount(page.pending) : null,
+    failed,
+    failed_examples: failed ? dncExamples(page.failed_examples) : [],
+    failed_at_least: failed !== null && page.failed_at_least === true,
+  };
+}
+
+/** Страниц поиска, которые findEngBlockedAddress читает в поисках точного адреса. */
+const FIND_PAGES_MAX = 3;
+
+export type EngBlockedFindResult =
+  | { kind: 'found'; entry: EngBlockedAddress }
+  | { kind: 'absent' }
+  /** Подстроку содержат больше адресов, чем прочитано страниц: точного среди них не видно. */
+  | { kind: 'not_checked' };
+
+/**
+ * Строка списка с ТОЧНО этим адресом (для «Remove from Do not contact» на
+ * Replies: DELETE берёт id строки, а добавление id не возвращает). Ищет
+ * поиском роута (`q` — подстрока), сверяет адрес целиком, до FIND_PAGES_MAX
+ * страниц. `email` — уже нормализованный (trim + lowercase, как хранит
+ * список). Бросает на сбое чтения (engApiFetch).
+ */
+export async function findEngBlockedAddress(email: string): Promise<EngBlockedFindResult> {
+  let offset = 0;
+  for (let page = 0; page < FIND_PAGES_MAX; page += 1) {
+    const res = await fetchEngBlockedList({ offset, q: email });
+    const entry = res.items.find((item) => item.email === email);
+    if (entry) return { kind: 'found', entry };
+    if (res.next_offset === null) return { kind: 'absent' };
+    offset = res.next_offset;
+  }
+  return { kind: 'not_checked' };
 }
 
 /** Недобавленное из вставки: сколько и до 10 примеров как есть. */
@@ -1667,13 +1733,49 @@ export interface EngBlockedAddResult {
   invalid: EngBlockedRejected;
   /** Размер списка после добавления; null — адресов во вставке не было. */
   total: number | null;
+  /**
+   * Снятие адресов вставки с идущих кампаний (engDncRemoval.HeEngDncRemovalView):
+   *  - 'off' — выключено (или поля нет: сервер старше снятия, или во вставке
+   *    не было адресов);
+   *  - 'none_running' — кампаний у клиента нет, снимать неоткуда;
+   *  - 'removing' — адреса разложены по `removal_campaigns` кампаниям клиента,
+   *    их проверяют и снимают найденных;
+   *  - 'deferred' — кампании сейчас не прочитались, проверку разложат позже;
+   *  - 'not_scheduled' — проверка не заявилась: кампании не проверяются, пока
+   *    адреса не добавят ещё раз.
+   */
+  removal: EngDncAddRemoval;
+  /** Сколько кампаний клиента проверяется (только при 'removing'; null — число не пришло). */
+  removal_campaigns: number | null;
+  /**
+   * Только при 'removing' / 'none_running': у клиента в этот момент шёл
+   * запуск — он ещё может добавить этих людей в кампанию, и кампании клиента
+   * проверятся ещё раз, когда он кончится.
+   */
+  removal_after_launch: boolean;
+  /**
+   * Только при 'removing' / 'none_running' и только у Block на Replies:
+   * кампания, на которую человек ответил, не проверяется (она перестала ему
+   * писать, когда он ответил), `removal_campaigns` — остальные.
+   */
+  removal_skipped_reply_campaign: boolean;
+}
+
+export type EngDncAddRemoval = 'off' | 'none_running' | 'removing' | 'deferred' | 'not_scheduled';
+
+const ADD_REMOVAL_VALUES: readonly EngDncAddRemoval[] = ['none_running', 'removing', 'deferred', 'not_scheduled'];
+
+function addRemovalOf(raw: unknown): EngDncAddRemoval {
+  return ADD_REMOVAL_VALUES.find((v) => v === raw) ?? 'off';
 }
 
 /**
  * Итог добавления. Отказ несёт английский текст роута; `reload` — состав
  * списка после ответа неизвестен или он длиннее потолка (коды
  * `add_unconfirmed`, `over_limit_stuck`, `list_over_limit`), экран
- * перечитывает список.
+ * перечитывает список. `code` — машинный код отказа роута (null — 4xx без
+ * кода): Replies по нему отличает «добавлен ли адрес, неизвестно»
+ * (`add_unconfirmed`), где текст роута отсылает к списку «below».
  *
  * `error: null` — читаемого ответа нет: не-JSON (502/504 nginx во время
  * деплоя или по таймауту), 5xx без кода, 2xx без итога. Роут мог успеть
@@ -1682,8 +1784,8 @@ export interface EngBlockedAddResult {
  */
 export type EngBlockedAddOutcome =
   | { ok: true; result: EngBlockedAddResult }
-  | { ok: false; error: string; reload: boolean }
-  | { ok: false; error: null; reload: true };
+  | { ok: false; error: string; code: string | null; reload: boolean }
+  | { ok: false; error: null; code: null; reload: true };
 
 const BLOCKED_ADD_RELOAD_CODES: readonly string[] = ['add_unconfirmed', 'over_limit_stuck', 'list_over_limit'];
 
@@ -1695,10 +1797,35 @@ function rejectedOf(raw: unknown): EngBlockedRejected {
   };
 }
 
-export async function addEngBlockedAddresses(text: string): Promise<EngBlockedAddOutcome> {
+/**
+ * Число кампаний — только у 'removing' и только положительное; иначе null
+ * (текст тогда без числа). Признаки запуска и кампании ответа — только у
+ * 'removing' / 'none_running' и только `true` (иначе false: сервер старше —
+ * про них не говорим).
+ */
+function addRemovalFields(
+  body: Record<string, unknown>,
+): Pick<EngBlockedAddResult, 'removal' | 'removal_campaigns' | 'removal_after_launch' | 'removal_skipped_reply_campaign'> {
+  const removal = addRemovalOf(body.removal);
+  const campaigns = removal === 'removing' ? dncCount(body.removal_campaigns) : null;
+  const laidOut = removal === 'removing' || removal === 'none_running';
+  return {
+    removal,
+    removal_campaigns: campaigns && campaigns > 0 ? campaigns : null,
+    removal_after_launch: laidOut && body.removal_after_launch === true,
+    removal_skipped_reply_campaign: laidOut && body.removal_skipped_reply_campaign === true,
+  };
+}
+
+/**
+ * `replyId` — только «Block» на Replies: id ответа, на карточке которого
+ * нажали (`text` — ровно его адрес). Сервер по нему не проверяет кампанию
+ * этого ответа (см. `removal_skipped_reply_campaign`).
+ */
+export async function addEngBlockedAddresses(text: string, opts: { replyId?: string } = {}): Promise<EngBlockedAddOutcome> {
   const { res, body } = await engApiFetchRaw('/blocklist', {
     method: 'POST',
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(opts.replyId ? { text, reply_id: opts.replyId } : { text }),
   });
   if (res.ok && body && typeof body.added === 'number') {
     return {
@@ -1709,6 +1836,7 @@ export async function addEngBlockedAddresses(text: string): Promise<EngBlockedAd
         domains: rejectedOf(body.domains),
         invalid: rejectedOf(body.invalid),
         total: typeof body.total === 'number' ? body.total : null,
+        ...addRemovalFields(body),
       },
     };
   }
@@ -1718,11 +1846,13 @@ export async function addEngBlockedAddresses(text: string): Promise<EngBlockedAd
     !res.ok &&
     body !== null &&
     (typeof body.code === 'string' || (res.status < 500 && typeof body.error === 'string'));
-  if (!refused) return { ok: false, error: null, reload: true };
+  if (!refused) return { ok: false, error: null, code: null, reload: true };
+  const code = typeof body.code === 'string' ? body.code : null;
   return {
     ok: false,
     error: engRawErrorText(res, body),
-    reload: typeof body.code === 'string' && BLOCKED_ADD_RELOAD_CODES.includes(body.code),
+    code,
+    reload: code !== null && BLOCKED_ADD_RELOAD_CODES.includes(code),
   };
 }
 

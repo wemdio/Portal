@@ -11,6 +11,13 @@
 -- Применение (пароль передаётся снаружи, см. finish.sh):
 --   psql -U supabase_admin -d postgres -v pgpass='<MAIN_PG_PASSWORD>' -f fix-roles.sql
 -- Скрипт идемпотентен — можно гонять повторно.
+--
+-- Один этот файл anon НЕ закрывает до конца: SECURITY DEFINER-функции после
+-- restore исполнимы через PUBLIC, вьюхи открыты authenticated, default
+-- privileges роли postgres пусты, три осознанных anon-объекта закрыты. Это
+-- делает reapply-privileges.sql (только GRANT/REVOKE, одной транзакцией) —
+-- finish.sh запускает его сразу после этого файла и без него стек не стартует
+-- (см. README, «Права после restore»).
 -- ────────────────────────────────────────────────────────────────────────────
 
 -- 1) Роли (создать недостающие)
@@ -88,13 +95,37 @@ END $$;
 
 -- 4) Доступы API-ролей (дамп --no-privileges снёс все GRANT; RLS-политики
 -- при этом в дампе ЕСТЬ — они и решают, кому что можно; GRANT — нижний слой).
+--
+-- anon — это публичный ключ из каждого браузерного бандла. До 15.10.2026 здесь
+-- стояло GRANT ALL ... TO anon, и после июльского restore любой без входа читал
+-- и писал через /rest/v1 таблицы без RLS или с политиками TO public USING (true)
+-- (разбор — supabase/migrations/20261015_0036_anon_definer_view_lockdown.sql).
+-- Теперь здесь anon получает только USAGE на схему. Три осознанных anon-объекта,
+-- SECURITY DEFINER-функции и вьюхи выставляет reapply-privileges.sql.
+--
+-- ALL ON ALL FUNCTIONS для authenticated больше не выдаём: SECURITY
+-- DEFINER-функции (agent_query_readonly, cleanup_*, ...) работают от
+-- суперпользователя мимо RLS. Обычные функции authenticated вызывает через
+-- PUBLIC, а какие definer-функции ему оставить, решает reapply-privileges.sql
+-- (список c_auth_definers, тот же, что в 0036).
 GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
-GRANT ALL ON ALL TABLES    IN SCHEMA public TO postgres, anon, authenticated, service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, anon, authenticated, service_role;
-GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO postgres, anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES    TO postgres, anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES    IN SCHEMA public TO postgres, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, authenticated, service_role;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO postgres, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES    TO postgres, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO postgres, service_role;
+
+-- Снять то, что anon мог получить до этого файла: main-init (01-init-portal.sql;
+-- копия на 144 и в репо до отдельного PR) выдаёт anon SELECT по умолчанию на всё,
+-- что создаёт supabase_admin, а pg_restore создаёт всю базу именно им; прежняя
+-- версия этого файла — ALL на всё. REVOKE ALL ON ALL TABLES касается и вьюх.
+-- Права по умолчанию других ролей чистит reapply-privileges.sql.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES    FROM anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM anon;
+REVOKE ALL ON ALL TABLES    IN SCHEMA public FROM anon;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon;
 
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role;

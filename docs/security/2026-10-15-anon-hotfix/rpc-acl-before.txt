@@ -1,0 +1,26 @@
+SET
+agent_query_readonly(text) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+cleanup_application_logs(integer) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+cleanup_expired_manual_score_runs() | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+cleanup_old_completed_tasks() | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+cleanup_old_project_notes() | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+copilot_dialog_stats(uuid) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+drain_enrich_results_buffer(integer) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+instantly_acquire_token(text,double precision,double precision,double precision) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+mailganer_acquire_score_token(text,double precision,double precision,double precision) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+tg_outreach_swap_proxy(uuid,uuid,uuid,text,integer) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+tg_parser_increment_usage(uuid) | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+tg_transcribed_chat_topic_counts() | {=X/supabase_admin,supabase_admin=X/supabase_admin,service_role=X/supabase_admin,postgres=X/supabase_admin,anon=X/supabase_admin,authenticated=X/supabase_admin}
+yandex_maps_catalog_reserve_daily_budget(integer,integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_upsert_rows(jsonb) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_claim_refresh_batch(integer,integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_record_completed(integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_refresh_dictionaries(integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_search(text[],text[],text[],integer,integer,text) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_count(text[],text[],text[],integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_seed_discovery_queue(integer,integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_claim_discovery(integer,integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_finish_discovery(bigint,integer,integer,boolean,text) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_known_ids(text[]) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_fill_job(uuid,text[],text[],text[],integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}
+yandex_maps_catalog_mark_seen(text[],text,text,text,boolean,integer) | {=X/postgres,postgres=X/postgres,service_role=X/postgres}

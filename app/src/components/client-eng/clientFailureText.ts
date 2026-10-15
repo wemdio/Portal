@@ -24,7 +24,9 @@
  * реконсилер и авто-резюм выключены по умолчанию и упавшую работу не
  * переоплачивают), ни кнопок, которых в кабинете нет. Действия называются теми
  * же словами, что и кнопки: «Try again» (шаг 1, только у research, вставшего
- * техническим сбоем — heResearchRetryAllowed ниже), «Launch»
+ * техническим сбоем — heResearchRetryAllowed ниже), «Save and continue» (шаг
+ * 1, только у research, остановленного кодом website_thin —
+ * HE_RESEARCH_NEEDS_DESCRIPTION_CODE ниже), «Launch»
  * (шаг 3) и «Collect again» (карточка рынка шага 3, только у остановок
  * HE_COLLECT_STOP_REPEATS_CODES). Повтор собирает НОВУЮ базу, а не продолжает
  * упавшую (упавшая база не переиспользуется), поэтому «всё собранное
@@ -70,6 +72,14 @@ export type HeClientErrorCode =
    * (прокси, блокировка ботов), поэтому — технический сбой.
    */
   | 'website_no_html'
+  /**
+   * Сайт клиента ENG-кабинета открылся, но текста в нём мало (или это
+   * JS-заглушка), а описания бизнеса нет: site_profile отказала до первого
+   * платного вызова (HeSiteThinNeedsBusinessError, stages/siteProfile.ts) и ждёт
+   * описания — НЕ технический сбой, повтор «Try again» ему не положен
+   * (HE_RESEARCH_FINAL_STOP_CODES), его продолжает «Save and continue» шага 1.
+   */
+  | 'website_thin'
   /** Конструктор баз не обогатил строки почтами. */
   | 'enrichment'
   /** Шаг не уложился в отведённое время. */
@@ -163,7 +173,14 @@ export function heCollectStopRepeats(code: unknown): boolean {
  *    дошёл); истёкший срок чтения — `timeout`;
  *  - `cancelled` (код проекции, не этого словаря) — проект остановили руками.
  *    Ту же отмену чаще видно по последней research-джобе 'cancelled' — её
- *    проверяет вердикт (researchJob.ts, engResearchRetryVerdict).
+ *    проверяет вердикт (researchJob.ts, engResearchRetryVerdict);
+ *  - website_thin — сайт открылся, но текста мало, а описания бизнеса нет
+ *    (HeSiteThinNeedsBusinessError, stages/siteProfile.ts): research ждёт
+ *    описания, а не повтора. Повтор «Try again» (новый старт с первой стадии,
+ *    в счёт дневного лимита стартов) ему не положен — его продолжает «Save and
+ *    continue» шага 1 (HE_RESEARCH_NEEDS_DESCRIPTION_CODE ниже): роут
+ *    исследования возвращает ту же строку site_profile в очередь, не трогая
+ *    ни этот вердикт, ни лимит стартов.
  * Причины нет (`null`/нет ключа) — «остановился без записанной причины»: тоже
  * сбой.
  *
@@ -171,7 +188,17 @@ export function heCollectStopRepeats(code: unknown): boolean {
  * пишет (audience_mismatch, segment_exhausted, subscription_*, refill_* и
  * т. д.): на проекте такой код — почти наверняка неверно прочитанный текст.
  */
-export const HE_RESEARCH_FINAL_STOP_CODES = ['website_unreachable', 'cancelled'] as const;
+export const HE_RESEARCH_FINAL_STOP_CODES = ['website_unreachable', 'website_thin', 'cancelled'] as const;
+
+/**
+ * Research ждёт описания бизнеса: site_profile отказала на тонком сайте без
+ * описания у проекта клиента ENG-кабинета (HeSiteThinNeedsBusinessError,
+ * stages/siteProfile.ts). Один код на трёх читателей: шаг 1 (форма описания и
+ * «Save and continue» вместо «Try again»), роут исследования (продолжение той
+ * же джобы без вердикта повтора и без лимита стартов) и письмо об остановке
+ * research (без совета «Try again» и без «технической проблемы»).
+ */
+export const HE_RESEARCH_NEEDS_DESCRIPTION_CODE = 'website_thin' as const satisfies HeClientErrorCode;
 
 /**
  * Можно ли клиенту запустить research упавшего ('failed') проекта ещё раз —
@@ -196,6 +223,7 @@ export const HE_RESEARCH_STOP_CODES = [
   'timeout',
   'website_unreachable',
   'website_no_html',
+  'website_thin',
   'internal',
   'unknown',
 ] as const satisfies readonly HeClientErrorCode[];
@@ -527,6 +555,33 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved: 'The project and everything you entered are saved.',
     whatToDo:
       'This can be a problem on our side as well as on the site. Check that the address opens in a browser, then press «Try again» on step 1. If it stops this way again, describe your business in a few sentences in «Business description» on step 1 and press «Try again» once more — the research can then work from that description instead of the site. If it still stops, message Support.',
+  },
+  /**
+   * Сайт открылся, но текста мало (корпус короче порога или JS-заглушка), а
+   * описания бизнеса нет — HeSiteThinNeedsBusinessError (stages/siteProfile.ts),
+   * только у проекта клиента ENG-кабинета. НЕ технический сбой
+   * (HE_RESEARCH_FINAL_STOP_CODES): «Try again» нет, есть форма описания и «Save
+   * and continue» на шаге 1. Каждая фраза правдива для любой такой строки:
+   *  - «could read only a little text» — стадия отказывает, только когда
+   *    прочитанного текста (без фразы JS-заглушки главной) меньше порога:
+   *    и у короткого корпуса, и у заглушки, к которой доп. страницы мало
+   *    добавили, и когда они не ответили в срок — прочитано правда мало, о
+   *    самом сайте не утверждаем;
+   *  - «stopped before building anything from it» — стадия отказывает до
+   *    профиля, первой из research; про деньги не говорим (решение владельца
+   *    04.10.2026: клиенту — ни слова о расходах);
+   *  - «goes on from the step where it stopped» — роут продолжения возвращает
+   *    в очередь ТУ ЖЕ строку site_profile, а не начинает research новым
+   *    стартом; «from your description and your website» — EN-промпт профиля
+   *    получает описание блоком фактов и корпус сайта (clientBriefForProfile).
+   * Встречается только у проекта: пишет его одна стадия site_profile.
+   */
+  website_thin: {
+    title:
+      'We could read only a little text on your website — not enough to tell what you sell and to whom — so the research stopped before building anything from it.',
+    whatIsSaved: 'The project and everything you entered are saved.',
+    whatToDo:
+      'Open step 1 «Your business», describe in 2–3 sentences what you sell and to whom, and press «Save and continue». The research then goes on from the step where it stopped and builds your business profile from your description and your website.',
   },
   /**
    * На упавшей базе этот код значит одно: ни одна строка не получила вердикта,

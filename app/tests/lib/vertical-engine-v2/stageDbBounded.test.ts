@@ -22,7 +22,7 @@ import {
   describeVeStageDbActivity,
   isVeStageDbInterruption,
 } from '@/lib/verticalEngineV2/stageDb';
-import { getVeScopedJobSignal, withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { getVeScopedJobClaim, getVeScopedJobSignal, withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
 
 /**
  * 23.09.2026: nginx had sent a 5.4 MB `ve_bases` response in full, the worker
@@ -166,6 +166,22 @@ describe('VE2 stage database client', () => {
     expect(await settleWithin(secondQuery, 50)).toBe(PENDING);
     second.abort(new Error('done'));
     await settleWithin(secondQuery, 200);
+
+    const sent: Headers[] = [];
+    const transport = createVeStageFetch({ jobSignal: getVeScopedJobSignal, jobClaim: getVeScopedJobClaim,
+      fetchImpl: (async (_input, init) => { sent.push(new Headers(init?.headers)); return new Response(null, { status: 204 }); }) as typeof fetch });
+    const claims = [{ id: 'job-a', startedAt: '2026-10-15T12:00:00Z' }, { id: 'job-b', startedAt: '2026-10-15T12:01:00Z' }];
+    await Promise.all(claims.map((claim) => withVeActiveJobSignal(new AbortController().signal, async () => {
+      await Promise.resolve();
+      await transport('https://db.example.test/rest/v1/ve_bases', { method: 'PATCH', headers: { authorization: 'Bearer fixture' } });
+    }, claim)));
+    expect(sent.map((headers) => [headers.get('x-ve-job-id'), headers.get('x-ve-job-started-at')]))
+      .toEqual(claims.map((claim) => [claim.id, claim.startedAt]));
+    expect(sent.every((headers) => headers.get('authorization') === 'Bearer fixture')).toBe(true);
+    // Outside the invocation, operators/coordinator requests have no borrowed lease.
+    await transport('https://db.example.test/rest/v1/ve_bases');
+    expect(sent[2].has('x-ve-job-id')).toBe(false);
+    expect(getVeScopedJobClaim()).toBeNull();
   });
 
   it('leaves no abort listener on the long-lived job signal after its requests finish', async () => {
