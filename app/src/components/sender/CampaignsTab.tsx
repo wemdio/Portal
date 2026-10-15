@@ -1043,6 +1043,29 @@ export function CampaignsTab({
             </button>
           ))}
         </div>
+        {/* RU и EN не смешиваем: у папок свои ящики, пояс и настройки. */}
+        {view === 'auto' && autoGroup ? (
+        <div className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1">
+          {folderGroups.map((group) => {
+            const active = group.key === autoGroup.key;
+            return (
+              <button
+                key={group.key}
+                type="button"
+                onClick={() => pickAutoFolder(group.key)}
+                className={`rounded-md px-3.5 py-1 text-sm font-semibold transition ${
+                  active ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
+                }`}
+              >
+                {group.title.replace(/^Автоаутрич\s*/i, '') || group.title}
+                <span className={`ml-1.5 text-xs font-normal ${active ? 'text-blue-100' : 'text-zinc-400'}`}>
+                  {group.campaigns.length}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        ) : null}
         <div className="ml-auto flex items-center gap-2">
           <ColumnsMenu visible={columns} onToggle={toggleColumn} />
           <button
@@ -1074,28 +1097,6 @@ export function CampaignsTab({
               прокрутка на ~7 кампаний, и обе видны без пролистывания страницы. */}
           {view === 'auto' && autoGroup ? (
             <div className="space-y-3">
-              {/* RU и EN не смешиваем: у папок свои ящики, пояс и настройки. */}
-              <div className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1">
-                {folderGroups.map((group) => {
-                  const active = group.key === autoGroup.key;
-                  return (
-                    <button
-                      key={group.key}
-                      type="button"
-                      onClick={() => pickAutoFolder(group.key)}
-                      className={`rounded-md px-3.5 py-1 text-sm font-semibold transition ${
-                        active ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800'
-                      }`}
-                    >
-                      {group.title.replace(/^Автоаутрич\s*/i, '') || group.title}
-                      <span className={`ml-1.5 text-xs font-normal ${active ? 'text-blue-100' : 'text-zinc-400'}`}>
-                        {group.campaigns.length}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-
               <section className="rounded-xl border border-zinc-200 bg-white">
                 {renderHeader(autoGroup)}
                 {autoGroup.campaigns.length > 0 ? (
