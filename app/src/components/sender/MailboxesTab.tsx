@@ -74,7 +74,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   const [egressFilter, setEgressFilter] = useState<string | null>(initialEgressIp);
   // Сортировка по столбцу (по всему списку, считает сервер): клик — по возрастанию,
   // ещё клик — по убыванию, третий — обратно по ящику.
-  const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
+  const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
 
   const load = useCallback(async (targetPage: number) => {
     try {
@@ -85,7 +85,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
         noTag: noTagFilter || undefined,
         egressIp: egressFilter ?? undefined,
         sort: sort?.key,
-        dir: sort?.dir,
+        dir: sort?.direction,
       });
       setMailboxes(rows);
       setTotal(count);
@@ -221,8 +221,8 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
 
   const onSort = (key: string) => {
     setSort((cur) => {
-      if (!cur || cur.key !== key) return { key, dir: 'asc' };
-      return cur.dir === 'asc' ? { key, dir: 'desc' } : null;
+      if (!cur || cur.key !== key) return { key, direction: 'asc' };
+      return cur.direction === 'asc' ? { key, direction: 'desc' } : null;
     });
     resetToFirstPage();
   };

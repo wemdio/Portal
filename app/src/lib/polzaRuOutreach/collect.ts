@@ -150,15 +150,22 @@ export async function collectCandidates(
   config: RuOutreachConfig,
   amo: AmoIndex,
   poolTarget: number,
+  /** Строка в журнал воркера: этап сбора виден, а не «тишина» на загрузке источников. */
+  onLog: (message: string) => void = () => {},
 ): Promise<CollectResult> {
   const src = new Set(config.sources);
   const all: Candidate[] = [];
   const sourceErrors: CollectResult['sourceErrors'] = {};
   const attempt = async (code: SourceCode, fn: () => Promise<void>) => {
+    const startedAt = Date.now();
+    const before = all.length;
+    onLog(`сбор: источник «${code}» — начал`);
     try {
       await fn();
+      onLog(`сбор: источник «${code}» — готово, +${all.length - before} кандидатов за ${Math.round((Date.now() - startedAt) / 1000)} с`);
     } catch (err) {
       sourceErrors[code] = err instanceof Error ? err.message.slice(0, 300) : String(err);
+      onLog(`сбор: источник «${code}» — ОШИБКА за ${Math.round((Date.now() - startedAt) / 1000)} с: ${sourceErrors[code]}`);
     }
   };
 
@@ -355,7 +362,7 @@ export async function collectCandidates(
 
   if (src.has('ymaps_catalog')) {
     await attempt('ymaps_catalog', async () => {
-      for (const y of await loadYmapsCatalogCandidates(db, Math.min(100_000, Math.max(500, poolTarget)))) {
+      for (const y of await loadYmapsCatalogCandidates(db, Math.min(100_000, Math.max(500, poolTarget)), onLog)) {
         const domain = normalizeDomain(y.website);
         if (!domain) continue;
         all.push(
@@ -400,7 +407,9 @@ export async function collectCandidates(
     });
   }
 
+  onLog(`сбор: всего кандидатов ${all.length}, склеиваю по ИНН/домену`);
   const merged = merge(all);
+  onLog(`сбор: после склейки ${merged.length}, проверяю память отказов`);
   // Память отказов не должна ронять запуск: без неё он просто медленнее.
   let rejected = new Set<string>();
   try {
@@ -421,6 +430,7 @@ export async function collectCandidates(
       sourceWeight(b) - sourceWeight(a) ||
       latest(b) - latest(a),
   );
+  onLog(`сбор: готово, в пуле ${pool.length} (пропущено по памяти отказов ${merged.length - fresh.length})`);
   return { pool, sourceErrors, skippedRecent: merged.length - fresh.length };
 }
 

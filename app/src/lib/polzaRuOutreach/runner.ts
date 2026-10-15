@@ -780,7 +780,7 @@ async function runJob(
     const exported: ExportedIndex = config.include_previously_exported
       ? { domains: new Set(), inns: new Set() }
       : await loadPreviouslyExported(db, jobId);
-    const collected = await collectCandidates(db, config, amo, maxScan);
+    const collected = await collectCandidates(db, config, amo, maxScan, (message) => log('info', `job ${jobId}: ${message}`));
     const { sourceErrors, skippedRecent } = collected;
     const doneSources = new Set(resumedJournal.map((r) => r.source_record_id).filter((v): v is string => Boolean(v)));
     const doneDomains = new Set(resumedJournal.map((r) => r.normalized_domain).filter((v): v is string => Boolean(v)));
