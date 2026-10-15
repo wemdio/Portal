@@ -23,7 +23,7 @@ const PAGE_SIZE = 30;
  */
 const MAX_PAGE_SIZE = 200;
 
-const BULK_ACTIONS = ['recheck', 'enable', 'disable', 'delete', 'tag', 'move'] as const;
+const BULK_ACTIONS = ['recheck', 'enable', 'disable', 'delete', 'tag', 'move', 'limits'] as const;
 type BulkAction = (typeof BULK_ACTIONS)[number];
 // Потолок на выборку: он же ограничивает длину `in (...)` в запросе к БД.
 // Страница списка — 30 ящиков, «выбрать все» на проекте с сотнями ящиков
@@ -149,7 +149,7 @@ export async function PATCH(req: NextRequest) {
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
     const body = (await req.json().catch(() => null)) as
-      | { ids?: unknown; action?: unknown; tagId?: unknown; egressIp?: unknown }
+      | { ids?: unknown; action?: unknown; tagId?: unknown; egressIp?: unknown; dailyCampaignLimit?: unknown; dailyTotalLimit?: unknown }
       | null;
     if (!body) return jsonError('Невалидный JSON', 400);
 
@@ -177,6 +177,23 @@ export async function PATCH(req: NextRequest) {
       const { error, count } = await supabaseAdmin
         .from('sender_mailboxes')
         .update({ tag_id: tagId, updated_at: nowIso }, { count: 'exact' })
+        .in('id', ids);
+      if (error) return jsonError(error.message, 500);
+      return NextResponse.json({ ok: true, affected: count ?? 0 });
+    }
+
+    // «Лимиты»: «новых в день» и «всего в день» на всю выборку (15.10.2026).
+    // Можно задать оба или только один; пределы те же, что у одиночной правки ящика.
+    if (action === 'limits') {
+      const patch: Record<string, unknown> = {};
+      const clamp = (v: unknown) => Math.max(1, Math.min(500, Math.floor(Number(v))));
+      if (typeof body.dailyCampaignLimit === 'number' && Number.isFinite(body.dailyCampaignLimit)) patch.daily_campaign_limit = clamp(body.dailyCampaignLimit);
+      if (typeof body.dailyTotalLimit === 'number' && Number.isFinite(body.dailyTotalLimit)) patch.daily_total_limit = clamp(body.dailyTotalLimit);
+      if (!Object.keys(patch).length) return jsonError('Укажите «новых» или «всего» в день', 400);
+      patch.updated_at = nowIso;
+      const { error, count } = await supabaseAdmin
+        .from('sender_mailboxes')
+        .update(patch, { count: 'exact' })
         .in('id', ids);
       if (error) return jsonError(error.message, 500);
       return NextResponse.json({ ok: true, affected: count ?? 0 });

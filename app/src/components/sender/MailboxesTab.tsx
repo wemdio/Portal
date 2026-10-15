@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   bulkMailboxes,
+  bulkMailboxLimits,
   deleteMailbox,
   fetchEgressIps,
   fetchMailboxes,
@@ -296,6 +297,32 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     }
   };
 
+  // Лимиты на выборку: поля в панели действий, пустое поле не меняется.
+  const [bulkNew, setBulkNew] = useState('');
+  const [bulkTotal, setBulkTotal] = useState('');
+  const applyLimits = async () => {
+    const ids = [...selected];
+    const dailyCampaignLimit = bulkNew.trim() ? Number(bulkNew) : undefined;
+    const dailyTotalLimit = bulkTotal.trim() ? Number(bulkTotal) : undefined;
+    if (!ids.length || (dailyCampaignLimit === undefined && dailyTotalLimit === undefined)) return;
+    if ([dailyCampaignLimit, dailyTotalLimit].some((v) => v !== undefined && !(v >= 1 && v <= 500))) {
+      setError('Лимит — число от 1 до 500');
+      return;
+    }
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await bulkMailboxLimits(ids, { dailyCampaignLimit, dailyTotalLimit });
+      setBulkNew('');
+      setBulkTotal('');
+      await load(page);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось задать лимиты');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const runBulk = async (action: BulkMailboxAction) => {
     const ids = [...selected];
     if (!ids.length) return;
@@ -415,6 +442,35 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
             </button>
             <TagAssignMenu tags={tags} disabled={bulkBusy} onPick={(tagId) => void assignTag(tagId)} />
             <EgressMoveMenu ips={egressIps} disabled={bulkBusy} onPick={(ip) => void moveToEgress(ip)} />
+            <div className="flex items-center gap-1" title="Новых / всего писем в день на каждый выбранный ящик">
+              <input
+                type="number"
+                min={1}
+                max={500}
+                placeholder="новых"
+                value={bulkNew}
+                onChange={(e) => setBulkNew(e.target.value)}
+                className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-900"
+              />
+              <span className="text-zinc-400">/</span>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                placeholder="всего"
+                value={bulkTotal}
+                onChange={(e) => setBulkTotal(e.target.value)}
+                className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-900"
+              />
+              <button
+                type="button"
+                disabled={bulkBusy || (!bulkNew.trim() && !bulkTotal.trim())}
+                onClick={() => void applyLimits()}
+                className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              >
+                Задать лимиты
+              </button>
+            </div>
             <button
               type="button"
               disabled={bulkBusy}
