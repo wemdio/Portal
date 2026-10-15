@@ -24,6 +24,8 @@ export interface PickerProxy extends HealthProxy {
   id: string;
   url: string;
   name?: string;
+  /** Страна выхода (ISO) — подпись рядом с адресом в выборе прокси. */
+  country_code?: string | null;
 }
 
 export interface ProxyPickerItem<T extends PickerProxy> {
