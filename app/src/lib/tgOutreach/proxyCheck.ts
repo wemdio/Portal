@@ -21,6 +21,7 @@
  */
 
 import net from 'net';
+import tls from 'tls';
 import dns from 'dns';
 import { probeProxyTcp, parseProxyUrl, type ParsedProxy } from './gramClient';
 import { openHttpConnectTunnel, HttpConnectRejectedError } from './httpProxySocket';
@@ -305,7 +306,7 @@ function openTunnel(
 }
 
 /** Сервис определения страны по IP: простой HTTP на порту 80, JSON с кодом страны. */
-const GEO_HOST = 'ip-api.com';
+const GEO_HOST = 'api.country.is';
 const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 8_000;
 
 /**
@@ -318,25 +319,33 @@ const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 8
 async function detectProxyCountry(parsed: ParsedProxy): Promise<string | null> {
   let socket: net.Socket | null = null;
   try {
+    // HTTPS (443), а не HTTP (80): HTTP-прокси пропускают CONNECT к 443, а к 80 часто нет.
     const { address } = await dns.promises.lookup(GEO_HOST, { family: 4 });
-    socket = await openTunnel(parsed, { host: address, port: 80 }, GEO_TIMEOUT_MS);
-    const sock = socket;
+    socket = await openTunnel(parsed, { host: address, port: 443 }, GEO_TIMEOUT_MS);
+    const raw = socket;
+    const secure = tls.connect({ socket: raw, servername: GEO_HOST });
     const body = await withTimeout(
       new Promise<string>((resolve, reject) => {
         let data = '';
-        sock.on('data', (chunk: Buffer) => {
-          data += chunk.toString('utf8');
-          if (data.length > 4096) sock.destroy();
+        secure.on('secureConnect', () => {
+          secure.write(`GET /json HTTP/1.1
+Host: ${GEO_HOST}
+Connection: close
+
+`);
         });
-        sock.on('end', () => resolve(data));
-        sock.on('close', () => resolve(data));
-        sock.on('error', reject);
-        sock.write(`GET /json/?fields=status,countryCode HTTP/1.1\r\nHost: ${GEO_HOST}\r\nConnection: close\r\n\r\n`);
+        secure.on('data', (chunk: Buffer) => {
+          data += chunk.toString('utf8');
+          if (data.length > 8192) secure.destroy();
+        });
+        secure.on('end', () => resolve(data));
+        secure.on('close', () => resolve(data));
+        secure.on('error', reject);
       }),
       GEO_TIMEOUT_MS,
       'определение страны прокси',
     );
-    const match = /"countryCode"\s*:\s*"([A-Za-z]{2})"/.exec(body);
+    const match = /"country"\s*:\s*"([A-Za-z]{2})"/.exec(body);
     return match ? match[1].toUpperCase() : null;
   } catch {
     return null;
