@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5f0">
+  <meta name="description" content="Find the right B2B audience, test your positioning, and launch thoughtful outbound with OutreachOS and Polza Agency.">
+  <title>OutreachOS — Find your next B2B growth channel</title>
+  <link rel="canonical" href="https://outreachos.xyz/en/">
+  <link rel="alternate" hreflang="en" href="https://outreachos.xyz/en/">
+  <link rel="alternate" hreflang="ru" href="https://outreachos.xyz/ru/">
+  <link rel="alternate" hreflang="x-default" href="https://outreachos.xyz/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="OutreachOS">
+  <meta property="og:url" content="https://outreachos.xyz/en/">
+  <meta property="og:title" content="OutreachOS — Find your next B2B growth channel">
+  <meta property="og:description" content="Find the right B2B audience, test your positioning, and launch thoughtful outbound with OutreachOS and Polza Agency.">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="ru_RU">
+  <meta property="og:image" content="https://outreachos.xyz/images/og-en.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="OutreachOS by Polza Agency: get a lead engine built for your niche.">
+  <meta name="twitter:card" content="summary_large_image">
+  <!-- Превью ссылки в мессенджерах берётся с этой страницы. В русские чаты давать /ru/ (или /?lang=ru),
+       не голый домен: бот Telegram ходит без Accept-Language и cookie и получит английскую версию.
+       После публикации обновить кэш превью /, /en/ и /ru/ через @webpagebot в Telegram. -->
+  <style>
+    :root {
+      --paper: #ffffff;
+      --white: #fff;
+      --ink: #111111;
+      --muted: #5b5b5b;
+      --line: #cfcfcf;
+      --green: #111111;
+      --lime: #f1f1f1;
+      --coral: #555555;
+      --night: #111111;
+      --serif: Georgia, "Times New Roman", serif;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(--sans); font-size: 16px; line-height: 1.55; }
+    a { color: inherit; text-decoration: none; }
+    button, input, textarea { font: inherit; }
+    .shell { width: min(1180px, calc(100% - 48px)); margin-inline: auto; }
+    .topbar { height: 78px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .brand { display: inline-flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 750; letter-spacing: 0; white-space: nowrap; }
+    .brand-mark { display: grid; place-items: center; width: 29px; height: 29px; background: var(--green); color: var(--lime); border-radius: 6px; font-size: 15px; }
+    .brand span:last-child { color: var(--muted); font-weight: 500; }
+    .nav { display: flex; align-items: center; gap: 30px; color: #46534d; font-size: 14px; }
+    .nav a:hover { color: var(--green); }
+    .button { min-height: 46px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; padding: 0 18px; border: 1px solid var(--green); border-radius: 5px; color: var(--white); background: var(--green); font-size: 14px; font-weight: 650; transition: transform .18s, background .18s; }
+    .button:hover { background: #1e4935; transform: translateY(-1px); }
+    .button-light { color: var(--ink); background: transparent; border-color: var(--line); }
+    .button-light:hover { color: var(--green); background: var(--white); }
+    .hero { display: grid; grid-template-columns: minmax(0, .93fr) minmax(460px, 1.07fr); gap: 64px; align-items: center; padding: 76px 0 78px; }
+    .eyebrow { display: flex; align-items: center; gap: 9px; margin: 0 0 21px; color: var(--green); font-size: 12px; font-weight: 750; letter-spacing: 1.1px; text-transform: uppercase; }
+    .eyebrow::before { content: ""; width: 21px; height: 2px; background: var(--coral); }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { max-width: 600px; margin-bottom: 20px; font-family: var(--serif); font-size: clamp(48px, 5vw, 66px); font-weight: 500; line-height: 1.04; letter-spacing: 0; }
+    h1 em { color: var(--green); font-weight: 500; }
+    .hero-copy { max-width: 490px; margin-bottom: 28px; color: #53605a; font-size: 18px; line-height: 1.6; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 11px; }
+    .hero-note { margin: 19px 0 0; color: var(--muted); font-size: 12px; }
+    .hero-proof { margin: 17px 0 0; color: #59665e; font-size: 12px; }
+    .hero-proof a { color: var(--green); font-weight: 750; text-decoration: underline; text-decoration-color: #91a99a; text-underline-offset: 3px; }
+    .hero-proof small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+    .visual { position: relative; padding: 15px 0 15px 15px; }
+    .visual::before { content: ""; position: absolute; inset: 0 19px 0 0; background: var(--lime); border-radius: 7px; }
+    .app-window { position: relative; min-height: 402px; overflow: hidden; border: 1px solid #d6ddd5; border-radius: 6px; background: #fbfcf9; box-shadow: 0 15px 40px #1e382517; }
+    .app-head { height: 51px; display: flex; align-items: center; justify-content: space-between; padding: 0 19px; border-bottom: 1px solid #e4e8e1; color: #56635c; font-size: 11px; }
+    .app-head strong { color: var(--ink); font-size: 12px; }
+    .app-status { display: inline-flex; align-items: center; gap: 6px; color: #34734d; font-size: 10px; font-weight: 700; }
+    .app-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #62a876; }
+    .app-body { display: grid; grid-template-columns: .94fr 1.06fr; gap: 12px; padding: 19px; }
+    .flow-step { display: grid; grid-template-columns: 28px 1fr; gap: 9px; padding: 11px 0; border-bottom: 1px solid #e8ece6; }
+    .flow-step:last-of-type { border-bottom: 0; }
+    .flow-number { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; color: var(--green); background: #edf3e8; font-size: 10px; font-weight: 750; }
+    .flow-step strong { display: block; margin: 1px 0 3px; font-size: 10px; }
+    .flow-step p { margin: 0; color: #738078; font-size: 9px; line-height: 1.4; }
+    .source-pills { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+    .source-pills span { padding: 4px 6px; color: #526158; background: #edf1eb; border-radius: 3px; font-size: 8px; }
+    .promise { display: inline-flex; gap: 8px; align-items: center; padding: 8px 10px; margin-top: 20px; border: 1px solid #cbd5c7; border-radius: 4px; color: #34473b; background: #fbfcf9; font-size: 12px; font-weight: 650; }
+    .promise b { color: var(--green); }
+    .panel-label { margin: 0 0 10px; color: #77817b; font-size: 9px; font-weight: 750; letter-spacing: .8px; text-transform: uppercase; }
+    .hypothesis { padding: 12px; margin-bottom: 8px; border: 1px solid #e1e6de; border-radius: 4px; background: var(--white); }
+    .hypothesis.active { border-color: #7eaa8c; box-shadow: inset 3px 0 var(--green); }
+    .hypothesis strong { display: block; margin-bottom: 4px; font-size: 11px; }
+    .hypothesis p { margin: 0; color: #738078; font-size: 9px; line-height: 1.45; }
+    .tag { display: inline-block; margin-top: 8px; padding: 3px 6px; color: #315f47; background: #eff5e9; border-radius: 3px; font-size: 8px; font-weight: 700; }
+    .email-card { padding: 14px; border: 1px solid #e1e6de; border-radius: 4px; background: var(--white); }
+    .email-top { padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid #edf0eb; color: #738078; font-size: 9px; }
+    .email-top b { color: #33433a; }
+    .email-card p { margin-bottom: 8px; color: #4d5952; font-size: 10px; line-height: 1.55; }
+    .email-card .subject { color: var(--ink); font-size: 11px; font-weight: 750; }
+    .review-strip { display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin-top: 10px; color: #4b6253; background: #f2f6ee; border-radius: 4px; font-size: 9px; }
+    .review-icon { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: var(--white); background: var(--green); font-size: 10px; }
+    .proofline { border-block: 1px solid var(--line); }
+    .proof-inner { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 0; }
+    .proof-lead { max-width: 220px; color: var(--muted); font-size: 12px; }
+    .proof-item { display: flex; align-items: center; gap: 11px; color: #45524b; font-size: 13px; font-weight: 600; }
+    .proof-num { color: var(--green); font-family: var(--serif); font-size: 24px; }
+    .case-proof { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; padding: 31px 0; border-bottom: 1px solid var(--line); }
+    .case-proof article { display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; }
+    .case-number { color: var(--green); font-family: var(--serif); font-size: 38px; line-height: 1; white-space: nowrap; }
+    .case-number small { display: block; margin-top: 6px; color: var(--muted); font-family: var(--sans); font-size: 10px; font-weight: 650; }
+    .case-proof h3 { margin: 0 0 4px; font-size: 13px; }
+    .case-proof p { margin: 0; color: var(--muted); font-size: 11px; }
+    .case-proof a { color: var(--green); font-weight: 700; }
+    .case-disclaimer { grid-column: 1 / -1; margin: -10px 0 0; color: var(--muted); font-size: 10px; }
+    .hero-metrics { display: flex; align-items: stretch; gap: 0; margin-top: 25px; border-block: 1px solid var(--line); }
+    .hero-metric { flex: 1; padding: 11px 13px 11px 0; }
+    .hero-metric + .hero-metric { padding-left: 13px; border-left: 1px solid var(--line); }
+    .hero-metric strong { display: block; color: var(--green); font-family: var(--serif); font-size: 23px; font-weight: 500; line-height: 1.1; }
+    .hero-metric span { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .cases-section { padding-top: 77px; }
+    .cases-heading { display: flex; align-items: end; justify-content: space-between; gap: 32px; margin-bottom: 27px; }
+    .cases-heading h2 { margin-bottom: 0; }
+    .cases-heading p { max-width: 360px; margin-bottom: 4px; color: var(--muted); font-size: 13px; }
+    .case-grid { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+    .case-card { min-height: 214px; display: flex; flex-direction: column; align-items: flex-start; padding: 20px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); transition: background .18s; }
+    .case-card:hover { background: #fff; }
+    .case-topline { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 17px; }
+    .case-sector { color: var(--green); font-size: 9px; font-weight: 750; letter-spacing: .7px; text-transform: uppercase; }
+    .case-market { color: var(--muted); font-size: 10px; }
+    .case-brand { width: 100%; min-height: 37px; display: flex; align-items: center; margin: -3px 0 12px; }
+    .case-brand img { display: block; max-width: 170px; max-height: 34px; object-fit: contain; object-position: left center; }
+    .case-brand img[src$="proxeet.png"] { width: 34px; height: 34px; }
+    .case-brand img[src$="gluemasters.png"] { width: 145px; height: 34px; }
+    .case-brand h3 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 600; }
+    .case-card p { margin: 0 0 12px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .case-outcome { margin-top: auto; color: var(--ink); font-size: 12px; font-weight: 700; }
+    .case-outcome span { color: var(--green); }
+    .case-card small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; }
+    .cases-footnote { margin: 13px 0 0; color: var(--muted); font-size: 10px; }
+    .section { padding: 92px 0; }
+    .section-kicker { margin-bottom: 13px; color: var(--green); font-size: 11px; font-weight: 750; letter-spacing: 1.2px; text-transform: uppercase; }
+    h2 { max-width: 670px; margin-bottom: 16px; font-family: var(--serif); font-size: 43px; font-weight: 500; line-height: 1.12; letter-spacing: 0; }
+    .section-intro { max-width: 600px; margin-bottom: 40px; color: var(--muted); font-size: 16px; }
+    .method { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .step { position: relative; min-height: 207px; padding: 23px 23px 24px 0; }
+    .step + .step { padding-left: 22px; border-left: 1px solid var(--line); }
+    .step-num { display: block; margin-bottom: 32px; color: var(--coral); font-family: var(--serif); font-size: 24px; }
+    .step h3 { margin-bottom: 8px; font-size: 16px; }
+    .step p { max-width: 220px; margin-bottom: 0; color: var(--muted); font-size: 13px; }
+    .sources { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; padding-top: 21px; margin-top: 18px; border-top: 1px solid var(--line); }
+    .sources-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 20px; margin-top: 34px; }
+    .sources-heading h3 { margin: 0; font-family: var(--serif); font-size: 24px; font-weight: 500; }
+    .sources-heading p { margin: 0; color: var(--muted); font-size: 11px; }
+    .source h3 { margin-bottom: 7px; font-size: 13px; }
+    .source p { margin: 0; color: var(--muted); font-size: 12px; }
+    .source small { display: block; margin-top: 7px; color: var(--green); font-size: 10px; font-weight: 700; }
+    .dark-section { color: var(--white); background: var(--night); }
+    .dark-section .section-kicker { color: var(--lime); }
+    .dark-section .section-intro { color: #b7c2bb; }
+    .split { display: grid; grid-template-columns: .9fr 1.1fr; gap: 70px; align-items: center; }
+    .list { display: grid; gap: 0; margin: 27px 0 0; padding: 0; list-style: none; }
+    .list li { display: grid; grid-template-columns: 23px 1fr; gap: 12px; padding: 14px 0; border-top: 1px solid #ffffff25; color: #d7dfd9; font-size: 14px; }
+    .check { color: var(--lime); font-weight: 800; }
+    .signal-board { padding: 22px; border: 1px solid #63756a; border-radius: 5px; background: #1c3026; }
+    .signal-title { display: flex; align-items: center; justify-content: space-between; padding-bottom: 15px; border-bottom: 1px solid #ffffff24; font-size: 12px; }
+    .signal-title span:last-child { color: var(--lime); font-size: 10px; }
+    .signal-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 16px 0; border-bottom: 1px solid #ffffff1c; }
+    .signal-row:last-child { border-bottom: 0; padding-bottom: 0; }
+    .signal-row strong { display: block; margin-bottom: 4px; font-size: 13px; }
+    .signal-row p { max-width: 360px; margin: 0; color: #afbeb4; font-size: 11px; }
+    .signal-badge { align-self: start; padding: 4px 7px; color: #e2f58e; background: #40583f; border-radius: 3px; font-size: 9px; }
+    .fit { display: grid; grid-template-columns: 1fr 1fr; gap: 54px; }
+    .fit-box { padding-top: 17px; border-top: 2px solid var(--green); }
+    .fit-box h3 { margin-bottom: 18px; font-family: var(--serif); font-size: 26px; font-weight: 500; }
+    .fit-box p { max-width: 460px; color: var(--muted); font-size: 14px; }
+    .fit-box ul { display: grid; gap: 11px; margin: 18px 0 0; padding-left: 18px; color: #46544c; font-size: 13px; }
+    .fit-box.no { border-color: #c6ccc5; }
+    .fit-box.no h3 { color: #526058; }
+    .pilot { display: grid; grid-template-columns: 1fr .8fr; gap: 60px; align-items: center; padding: 38px; border-radius: 6px; color: var(--white); background: var(--green); }
+    .pilot h2 { max-width: 540px; margin-bottom: 12px; font-size: 39px; }
+    .pilot p { max-width: 490px; margin: 0; color: #d3e3d8; font-size: 14px; }
+    .pilot-detail { padding-left: 24px; border-left: 1px solid #ffffff50; }
+    .pilot-detail strong { display: block; margin-bottom: 7px; color: var(--lime); font-size: 12px; text-transform: uppercase; letter-spacing: .8px; }
+    .pilot-detail span { display: block; color: #e2ece5; font-size: 13px; }
+    .faq { display: grid; grid-template-columns: .8fr 1.2fr; gap: 80px; }
+    .faq-list { border-top: 1px solid var(--line); }
+    details { border-bottom: 1px solid var(--line); }
+    summary { padding: 17px 2px; cursor: pointer; font-size: 14px; font-weight: 650; list-style: none; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; float: right; color: var(--green); font-size: 19px; font-weight: 400; line-height: 1; }
+    details[open] summary::after { content: "−"; }
+    details p { max-width: 600px; padding: 0 22px 15px 2px; margin: 0; color: var(--muted); font-size: 13px; }
+    .contact { padding: 36px; border: 1px solid var(--line); border-radius: 6px; background: #fbfcf9; }
+    .contact h3 { margin-bottom: 7px; font-family: var(--serif); font-size: 25px; font-weight: 500; }
+    .contact p { margin-bottom: 20px; color: var(--muted); font-size: 13px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; margin-bottom: 5px; color: #53615a; font-size: 11px; font-weight: 650; }
+    .field input, .field textarea { width: 100%; min-height: 43px; padding: 10px 11px; border: 1px solid #d5dcd4; border-radius: 4px; outline: none; background: var(--white); font-size: 13px; }
+    .field textarea { min-height: 75px; resize: vertical; }
+    .field input:focus, .field textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px #285b4520; }
+    .contact .button { width: 100%; cursor: pointer; }
+    .form-message { display: none; margin: 13px 0 0 !important; color: var(--green) !important; font-weight: 650; }
+    footer { padding: 25px 0 32px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
+    .footer-inner strong { color: var(--ink); }
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; gap: 36px; padding: 59px 0 61px; }
+      .hero-copy { max-width: 600px; }
+      .visual { max-width: 690px; }
+      .nav > a:not(.button) { display: none; }
+      .nav { gap: 0; }
+      .split { grid-template-columns: 1fr; gap: 35px; }
+      .faq { grid-template-columns: 1fr; gap: 28px; }
+      .case-proof { grid-template-columns: 1fr; gap: 20px; }
+      .sources { grid-template-columns: 1fr 1fr; }
+      .case-grid { grid-template-columns: repeat(2, 1fr); }
+      .cases-heading { display: block; }
+      .cases-heading p { margin-top: 13px; }
+      .proof-inner { flex-wrap: wrap; justify-content: flex-start; }
+      .proof-lead { flex-basis: 100%; max-width: none; }
+    }
+    @media (max-width: 650px) {
+      .shell { width: min(100% - 32px, 540px); }
+      .topbar { height: 66px; }
+      .nav > a:not(.button) { display: none; }
+      .nav { gap: 0; }
+      .nav .button { min-height: 39px; padding-inline: 12px; font-size: 12px; }
+      .hero { padding: 48px 0 49px; }
+      h1 { font-size: 48px; }
+      .hero-copy { font-size: 16px; }
+      .visual { padding: 10px 0 10px 10px; }
+      .app-window { min-height: 0; }
+      .app-body { grid-template-columns: 1fr; padding: 13px; }
+      .hypothesis { padding: 10px; }
+      .app-head { padding: 0 13px; }
+      .proof-inner { gap: 17px 22px; }
+      .proof-item { font-size: 11px; }
+      .proof-num { font-size: 21px; }
+      .section { padding: 65px 0; }
+      h2 { font-size: 36px; }
+      .method { grid-template-columns: 1fr 1fr; }
+      .step { min-height: 190px; padding: 17px 12px 20px 0; }
+      .step + .step { padding-left: 12px; }
+      .step:nth-child(3) { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
+      .step:nth-child(4) { border-top: 1px solid var(--line); }
+      .step-num { margin-bottom: 20px; }
+      .fit { grid-template-columns: 1fr; gap: 32px; }
+      .case-proof { padding-block: 24px; }
+      .case-proof article { grid-template-columns: 88px 1fr; gap: 12px; }
+      .case-number { font-size: 32px; }
+      .sources { gap: 18px 14px; }
+      .hero-metric { padding: 10px 8px 10px 0; }
+      .hero-metric + .hero-metric { padding-left: 8px; }
+      .hero-metric strong { font-size: 20px; }
+      .hero-metric span { font-size: 9px; }
+      .case-grid { grid-template-columns: 1fr; }
+      .case-card { min-height: 190px; padding: 17px; }
+      .case-brand { min-height: 32px; margin-bottom: 9px; }
+      .case-brand img { max-height: 30px; max-width: 145px; }
+      .cases-section { padding-top: 55px; }
+      .sources-heading { display: block; }
+      .sources-heading p { margin-top: 5px; }
+      .pilot { grid-template-columns: 1fr; gap: 24px; padding: 25px 21px; }
+      .pilot h2 { font-size: 33px; }
+      .pilot-detail { padding: 16px 0 0; border-top: 1px solid #ffffff50; border-left: 0; }
+      .contact { padding: 23px 18px; }
+      .footer-inner { flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition-duration: .01ms !important; } }
+    /* Monochrome editorial art direction: newspaper-like hierarchy without copying a publication's identity. */
+    body { background: #fff; color: #111; }
+    .topbar { border-top: 4px solid #111; border-bottom: 1px solid #111; }
+    .brand { font-family: var(--serif); font-size: 21px; font-weight: 700; }
+    .brand-mark { color: #fff; background: #111; border-radius: 0; }
+    .brand span:last-child { color: #555; font-family: var(--sans); font-size: 11px; }
+    .nav { color: #333; }
+    .button { border-radius: 2px; color: #fff; background: #111; border-color: #111; }
+    .button:hover { background: #383838; }
+    .button-light { color: #111; background: #fff; border-color: #777; }
+    .button-light:hover { color: #111; background: #f2f2f2; }
+    .eyebrow::before { background: #111; }
+    .hero { gap: 54px; }
+    h1 { font-family: var(--serif); font-weight: 700; }
+    h1 em { color: #111; font-style: italic; }
+    .hero-copy, .section-intro { color: #444; }
+    .hero-proof a, .case-proof a { color: #111; text-decoration-color: #777; }
+    .visual::before { background: #ededed; border-radius: 0; }
+    .app-window { border-radius: 0; box-shadow: none; }
+    .app-status { color: #222; }
+    .app-status::before { background: #111; }
+    .flow-number { color: #111; background: #ededed; border-radius: 0; }
+    .source-pills span { color: #333; background: #efefef; border-radius: 0; }
+    .review-strip { color: #222; background: #f0f0f0; border-radius: 0; }
+    .review-icon { color: #fff; background: #111; border-radius: 0; }
+    .case-grid { border-color: #aaa; }
+    .case-card { border-color: #aaa; border-radius: 0; }
+    .case-card:hover { background: #f4f4f4; }
+    .case-sector, .case-outcome span, .source small { color: #111; }
+    .case-card h3, .sources-heading h3, h2, .fit-box h3, .pilot h2 { font-family: var(--serif); font-weight: 700; }
+    .section-kicker { color: #444; }
+    .step-num { color: #444; }
+    .step + .step { border-color: #bbb; }
+    .dark-section { color: #fff; background: #111; }
+    .dark-section .section-kicker { color: #cfcfcf; }
+    .dark-section .section-intro { color: #e1e1e1; }
+    .list li { border-color: #ffffff4a; color: #f2f2f2; }
+    .check { color: #fff; }
+    .signal-board { border-color: #777; border-radius: 0; background: #1b1b1b; }
+    .signal-badge { color: #111; background: #e5e5e5; border-radius: 0; }
+    .fit-box { border-color: #111; }
+    .fit-box.no { border-color: #888; }
+    .pilot { border-radius: 0; color: #fff; background: #111; }
+    .pilot .section-kicker, .pilot-detail strong { color: #d5d5d5; }
+    .pilot p, .pilot-detail span { color: #eee; }
+    .contact { border-color: #aaa; border-radius: 0; background: #fff; }
+    .field input, .field textarea { border-radius: 0; }
+    details, .faq-list { border-color: #aaa; }
+    summary::after { color: #111; }
+    @media (max-width: 650px) {
+      .topbar { height: 66px; }
+      .hero { gap: 32px; }
+      .visual::before { background: #ededed; }
+    }
+    .brand-mark { font-family: var(--serif); font-size: 19px; }
+    .brand span:nth-child(2) { font-family: var(--serif); font-size: 19px; font-weight: 700; }
+    .brand span:last-child { color: #555; font-family: var(--sans); font-size: 10px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase; }
+    .case-card { position: relative; }
+    .case-card::after { position: absolute; right: 11px; bottom: 9px; color: #777; font-family: var(--serif); font-size: 12px; opacity: 0; transition: opacity .18s; pointer-events: none; }
+    .case-card:nth-child(1)::after { content: "α"; }
+    .case-card:nth-child(2)::after { content: "β"; }
+    .case-card:nth-child(3)::after { content: "γ"; }
+    .case-card:nth-child(4)::after { content: "δ"; }
+    .case-card:nth-child(5)::after { content: "ε"; }
+    .case-card:nth-child(6)::after { content: "ζ"; }
+    .case-card:nth-child(7)::after { content: "η"; }
+    .case-card:nth-child(8)::after { content: "θ"; }
+    .case-card:nth-child(9)::after { content: "ι"; }
+    .case-card:nth-child(10)::after { content: "κ"; }
+    .case-card:nth-child(11)::after { content: "λ"; }
+    .case-card:nth-child(12)::after { content: "μ"; }
+    .case-card::after { opacity: .28; }
+    .case-card:hover::after, .case-card:focus-visible::after { opacity: .82; }
+    .section-kicker::after { content: "  ·  α"; color: #999; font-family: var(--serif); font-size: 12px; font-weight: 400; letter-spacing: 0; }
+    .step-num { position: relative; }
+    .step-num::after { margin-left: 8px; color: #999; font-size: 12px; vertical-align: 5px; }
+    .step:nth-child(1) .step-num::after { content: "α"; }
+    .step:nth-child(2) .step-num::after { content: "β"; }
+    .step:nth-child(3) .step-num::after { content: "γ"; }
+    .step:nth-child(4) .step-num::after { content: "δ"; }
+    /* Language switcher: stays visible on phones next to the CTA (the other nav links hide). */
+    .lang-switch { display: inline-flex; align-items: center; gap: 2px; color: #777; font-size: 12px; font-weight: 700; letter-spacing: .6px; white-space: nowrap; }
+    .lang-switch > * { display: inline-flex; align-items: center; min-height: 32px; padding: 0 4px; }
+    .lang-current { color: #111; }
+    .lang-sep { padding: 0 !important; color: #bbb; font-weight: 400; }
+    .lang-option { color: #555; text-decoration: underline; text-decoration-color: #aaa; text-underline-offset: 4px; }
+    .lang-option:hover, .lang-option:focus-visible { color: #111; text-decoration-color: #111; }
+    @media (max-width: 1100px) { .nav { gap: 20px; font-size: 13px; } }
+    @media (max-width: 900px) { .nav { gap: 6px; } }
+    /* Phones: the header was already full before the switcher — show only the other language
+       and tighten the brand and the CTA so everything stays on one row down to 320 px. */
+    @media (max-width: 650px) { .lang-current, .lang-sep { display: none !important; } }
+    @media (max-width: 430px) {
+      .nav { gap: 4px; }
+      .brand { gap: 6px; }
+      .brand-mark { width: 24px; height: 24px; font-size: 16px; }
+      .brand span:nth-child(2) { font-size: 16px; }
+      .brand span:last-child { font-size: 9px; letter-spacing: .3px; }
+      .lang-switch > * { padding: 0 3px; }
+      .nav .button { padding-inline: 9px; }
+      .nav .button > span { display: none; }
+    }
+    @media (max-width: 359px) { .brand span:nth-child(2) { display: none; } }
+  </style>
+</head>
+<body>
+  <header class="shell topbar">
+    <a class="brand" href="#top" aria-label="Polza OutreachOS home"><span class="brand-mark">Π</span><span>POLZA</span><span>OutreachOS</span></a>
+    <nav class="nav" aria-label="Main navigation">
+      <a href="#how-it-works">How it works</a>
+      <a href="#sources">Data sources</a>
+      <a href="#cases">Cases</a>
+      <a href="#fit">Best-fit niches</a>
+      <div class="lang-switch" role="group" aria-label="Language">
+        <span class="lang-current" aria-current="true" title="English">EN</span><span class="lang-sep" aria-hidden="true">/</span><a class="lang-option" href="/ru/" data-lang="ru" hreflang="ru" lang="ru" aria-label="Русская версия сайта" title="Русская версия">RU</a>
+      </div>
+      <a class="button" href="#pilot">Check your niche <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="shell hero">
+      <div>
+        <p class="eyebrow">Niche-built B2B outbound</p>
+        <h1>Get a lead engine built for <em>your niche.</em></h1>
+        <p class="hero-copy">AI studies your product and drafts 10 ICP hypotheses. Our experts review them, check 20 market sources for relevant companies and signals, then test before scaling. For selected niches, we agree on a monthly lead target and guarantee it upfront.</p>
+        <div class="hero-actions">
+          <a class="button" href="#pilot">Check my niche and lead target <span aria-hidden="true">↗</span></a>
+          <a class="button button-light" href="#how-it-works">See how it works <span aria-hidden="true">↓</span></a>
+        </div>
+        <div class="hero-metrics" aria-label="Our outbound process">
+          <div class="hero-metric"><strong>20</strong><span>market sources<br>checked</span></div>
+          <div class="hero-metric"><strong>10</strong><span>ICP hypotheses<br>reviewed</span></div>
+          <div class="hero-metric"><strong>Then</strong><span>scale what the<br>market validates</span></div>
+        </div>
+        <p class="hero-proof"><a href="https://polzaagency.com/cases" target="_blank" rel="noreferrer">12 published international case studies ↗</a><small>Including 38 leads from 16+ tested hypotheses for Itexus.</small></p>
+      </div>
+
+      <div class="visual" aria-label="Illustrative OutreachOS workspace showing audience hypotheses and a researched email draft">
+        <div class="app-window">
+          <div class="app-head"><strong>Your niche-specific outbound system</strong><span class="app-status">Human reviewed</span></div>
+          <div class="app-body">
+            <div>
+              <p class="panel-label">From product to pipeline</p>
+              <div class="flow-step"><span class="flow-number">1</span><div><strong>AI researches your product</strong><p>Offer, customers, proof and competitors</p></div></div>
+              <div class="flow-step"><span class="flow-number">2</span><div><strong>Experts review each ICP hypothesis</strong><p>Who buys, why now, and what makes them fit</p></div></div>
+              <div class="flow-step"><span class="flow-number">3</span><div><strong>Find companies by signals</strong><p>Funding, hiring, company profile, location</p></div></div>
+              <div class="flow-step"><span class="flow-number">4</span><div><strong>Write, launch, learn</strong><p>Human-sounding emails; improve from replies</p></div></div>
+              <div class="source-pills"><span>Company data</span><span>Startup & funding</span><span>Jobs</span><span>Google Maps</span></div>
+            </div>
+            <div>
+              <p class="panel-label">Personalized email · Illustrative</p>
+              <div class="email-card">
+                <div class="email-top">Signal: <b>Hiring sales reps</b><br>Audience: <b>Recently funded B2B SaaS</b></div>
+                <p class="subject">Subject: Building your next sales channel</p>
+                <p>Hi Jordan,</p>
+                <p>I saw your team is hiring across sales after a recent funding round. That's often when founders start looking for a repeatable way to reach the next set of customers.</p>
+                <p>We help teams test focused outbound by audience before scaling it. Is building that channel a priority right now?</p>
+                <p>Best,<br>Your team</p>
+              </div>
+              <div class="review-strip"><span class="review-icon">✓</span><span>Signal-led. Reviewed before launch.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell section cases-section" id="cases">
+      <div class="cases-heading">
+        <div><p class="section-kicker">Proof from Polza Agency</p><h2>Different markets. Different hypotheses.</h2></div>
+        <p>12 international campaigns, each shaped around a specific buyer, signal, market and offer.</p>
+      </div>
+      <div class="case-grid">
+        <a class="case-card" href="https://polzaagency.com/cases/itexus" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">FinTech / SaaS</span><span class="case-market">US + Europe</span></div><div class="case-brand"><img src="/images/cases/itexus.svg" alt="Itexus" loading="lazy"></div><p>Tested 16+ market and buyer hypotheses; used company news to personalise outreach.</p><div class="case-outcome"><span>38 leads</span> · 4 months</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/rarematrix" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Reputation tech</span><span class="case-market">US + Europe</span></div><div class="case-brand"><img src="/images/cases/rarematrix.svg" alt="RareMatrix" loading="lazy"></div><p>Used low Google ratings as a visible need signal; led with the prospect's public reputation issue.</p><div class="case-outcome"><span>32 leads</span> · first sale on day 3</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/proxeet" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Network hardware</span><span class="case-market">USA</span></div><div class="case-brand"><img src="/images/cases/proxeet.png" alt="Proxeet" loading="lazy"></div><p>Targeted ISPs, network integrators, telecom teams and security installers by use case.</p><div class="case-outcome"><span>Sales closed</span> · first month</div><small>$150 ticket per sale.</small></a>
+        <a class="case-card" href="https://polzaagency.com/cases/inxy" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">B2B payments</span><span class="case-market">International</span></div><div class="case-brand"><img src="/images/cases/inxy.svg" alt="INXY" loading="lazy"></div><p>Segmented companies by cross-border payment context and likely finance owner.</p><div class="case-outcome"><span>12 leads</span> · email outreach</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/appslift" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Mobile marketing</span><span class="case-market">US + Europe</span></div><div class="case-brand"><img src="/images/cases/appslift.svg" alt="AppsLift" loading="lazy"></div><p>Focused on active app teams with a current growth or ASO priority; localised the angle.</p><div class="case-outcome"><span>14 leads</span> · first month</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/beautylizer" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">BeautyTech</span><span class="case-market">B2B</span></div><div class="case-brand"><img src="/images/cases/beautylizer.svg" alt="Beautylizer" loading="lazy"></div><p>Translated specialist equipment into business value for clinics and wellness operators.</p><div class="case-outcome"><span>14 leads</span> · 2 months</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/gluemasters" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Industrial adhesives</span><span class="case-market">USA</span></div><div class="case-brand"><img src="/images/cases/gluemasters.png" alt="Glue Masters" loading="lazy"></div><p>Built segments around distributor, manufacturing and professional workshop use cases.</p><div class="case-outcome"><span>15 leads</span> · 6 weeks</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/loya" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Legal operations</span><span class="case-market">UAE</span></div><div class="case-brand"><h3>Loya</h3></div><p>Used email + LinkedIn to reach service providers and operating companies around deadline risk.</p><div class="case-outcome"><span>10 leads</span> · first month</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/axisage" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Technology services</span><span class="case-market">UK</span></div><div class="case-brand"><h3>Axisage</h3></div><p>Narrowed the ICP and replaced a broad agency introduction with concise service angles.</p><div class="case-outcome"><span>12 leads</span> · first month</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/b-r-group" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Market making</span><span class="case-market">International</span></div><div class="case-brand"><h3>b-r-group</h3></div><p>Targeted crypto projects and token teams with an active liquidity need.</p><div class="case-outcome"><span>19 leads</span> · one month</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/profitsol" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Enterprise software</span><span class="case-market">B2B</span></div><div class="case-brand"><h3>Profitsol</h3></div><p>Reached commerce companies where 1C support and development are operationally critical.</p><div class="case-outcome"><span>12 leads</span> · one month</div></a>
+        <a class="case-card" href="https://polzaagency.com/cases/kitchen-no-more" target="_blank" rel="noreferrer"><div class="case-topline"><span class="case-sector">Hospitality equipment</span><span class="case-market">USA</span></div><div class="case-brand"><h3>Kitchen No More</h3></div><p>Focused on hotels and offices with a clear 24/7 food-access use case.</p><div class="case-outcome"><span>20 leads</span> · US market</div></a>
+      </div>
+      <p class="cases-footnote">These are Polza Agency campaign results, not OutreachOS self-serve product results. Lead counts and timelines are shown as published in each case.</p>
+    </section>
+
+    <section class="shell section" id="how-it-works">
+      <p class="section-kicker">Simple process. Built around your market.</p>
+      <h2>Product → hypotheses → signals → human emails → leads.</h2>
+      <p class="section-intro">We connect the steps instead of handing you another disconnected lead list or email-writing tool.</p>
+      <div class="method">
+        <article class="step"><span class="step-num">01</span><h3>AI researches your product</h3><p>It studies what you sell, your proof, competitors, and the customers you already win.</p></article>
+        <article class="step"><span class="step-num">02</span><h3>Experts review ICP hypotheses</h3><p>We check who may buy, what problem they have, and why reaching them now makes sense.</p></article>
+        <article class="step"><span class="step-num">03</span><h3>Find companies by signals</h3><p>We combine company data with clues like hiring, funding, industry, size, and location.</p></article>
+        <article class="step"><span class="step-num">04</span><h3>Send and learn</h3><p>We write relevant email sequences, launch them with review, then learn from replies.</p></article>
+      </div>
+      <div class="sources-heading"><h3>20 sources, grouped by signal</h3><p>We choose the sources that fit your market; coverage varies by niche.</p></div>
+      <div class="sources" id="sources" aria-label="Company discovery data sources">
+        <article class="source"><h3>Company databases</h3><p>Company name, website, industry, and size from an open People Data Labs dataset.</p><small>Best for: B2B company filters</small></article>
+        <article class="source"><h3>Startup & funding lists</h3><p>YC company directory and companies identified through SEC-reported funding data.</p><small>Best for: growing startups</small></article>
+        <article class="source"><h3>Hiring signals</h3><p>Fresh sales, business development, and partnership roles aggregated from 47 job sites.</p><small>Best for: teams investing in sales</small></article>
+        <article class="source"><h3>Google Maps</h3><p>Our own US business finder, including public contact details such as phone and email.</p><small>Best for: local US businesses</small></article>
+      </div>
+      <p class="hero-note">We find public company emails on company websites and check deliverability. We do not use LinkedIn or purchased contact databases in this workflow.</p>
+    </section>
+
+    <section class="dark-section">
+      <div class="shell section split">
+        <div>
+          <p class="section-kicker">Not another generic AI SDR</p>
+          <h2>AI is not the strategy. Your niche is.</h2>
+          <p class="section-intro">A general-purpose AI tool cannot know the right audience and buying signals for every business out of the box. We use AI to assemble a focused outbound workflow around your market, backed by Polza's four years of B2B work.</p>
+          <ul class="list">
+            <li><span class="check">✓</span><span>Research your offer and the customer types it can serve.</span></li>
+            <li><span class="check">✓</span><span>Choose a small set of clear, testable ICP hypotheses.</span></li>
+            <li><span class="check">✓</span><span>Match each segment to the sources and signals that can find it.</span></li>
+            <li><span class="check">✓</span><span>Use human review before email campaigns go live.</span></li>
+          </ul>
+        </div>
+        <div class="signal-board" aria-label="Example research signals; illustrative only">
+          <div class="signal-title"><strong>Example research signals</strong><span>ILLUSTRATIVE</span></div>
+          <div class="signal-row"><div><strong>Recently raised a round</strong><p>Possible reason: new growth targets and pressure to build pipeline.</p></div><span class="signal-badge">Timing</span></div>
+          <div class="signal-row"><div><strong>Hiring sales roles</strong><p>Possible reason: the company is investing in a repeatable sales motion.</p></div><span class="signal-badge">Need</span></div>
+          <div class="signal-row"><div><strong>Clear customer segment</strong><p>Possible reason: a specific buyer and business problem are visible.</p></div><span class="signal-badge">Fit</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell section" id="fit">
+      <p class="section-kicker">Where this approach fits best</p>
+      <h2>Some niches have better signals than others.</h2>
+      <p class="section-intro">We check the reachable market, offer economics, available data, and qualification criteria before agreeing to a guaranteed monthly target.</p>
+      <div class="fit">
+        <article class="fit-box"><h3>Promising starting points</h3><p>These segments map naturally to the data sources and signals available in the current workflow.</p><ul><li>B2B SaaS and startups: funding, company profile, and growth stage</li><li>B2B agencies and services: clear ICP, case studies, and niche positioning</li><li>Sales-led companies: fresh SDR, sales, or business development hiring</li><li>US local businesses: clinics, auto services, and other map-listed niches</li></ul></article>
+        <article class="fit-box no"><h3>We qualify before we promise</h3><p>A target is guaranteed only when the niche can support it and both sides agree on the definition.</p><ul><li>Agree what counts as a qualified lead</li><li>Confirm geography, audience, and monthly volume</li><li>Set the target before the campaign starts</li><li>Some niches won't qualify for a guarantee</li></ul></article>
+      </div>
+    </section>
+
+    <section class="shell" id="pilot">
+      <div class="pilot">
+        <div><p class="section-kicker">Start with your niche</p><h2>See if your market qualifies for a lead guarantee.</h2><p>We'll review your offer, the audience you want, and whether the available sources can reach enough qualified companies to set a realistic monthly target.</p></div>
+        <div class="pilot-detail"><strong>What we'll agree upfront</strong><span>Your ICP and lead definition</span><span>Monthly lead target for the niche</span><span>Sources, campaign scope, and qualification rules</span></div>
+      </div>
+    </section>
+
+    <section class="shell section">
+      <div class="faq">
+        <div><p class="section-kicker">A few straight answers</p><h2>Clear scope. Clear promise.</h2><p class="section-intro">The workflow is evolving. Here's what the first engagement looks like today.</p></div>
+        <div class="faq-list">
+          <details><summary>Is this a self-serve SaaS product?</summary><p>Not yet. OutreachOS supports the research and campaign workflow, while Polza's team helps configure and review the first tests. We are automating more of the process over time.</p></details>
+          <details><summary>Does AI write and send everything automatically?</summary><p>AI helps research companies and prepare tailored drafts. A human reviews the approach, and the team currently helps configure and activate campaigns.</p></details>
+          <details><summary>Do you guarantee a number of leads?</summary><p>For selected niches, yes. We first confirm the audience, geography, lead definition, and reachable volume, then agree the monthly target before launch. We don't apply one generic guarantee to every market.</p></details>
+          <details><summary>Who is behind OutreachOS?</summary><p>OutreachOS is built by the team at Polza Agency, drawing on four years of B2B client work in lead generation and outreach.</p></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell" aria-labelledby="contact-title">
+      <div class="contact">
+        <h3 id="contact-title">Tell us what you're selling.</h3>
+        <p>Share your website and we'll start with the audience question.</p>
+        <form id="pilotForm">
+          <div class="field"><label for="website">Company website</label><input id="website" name="website" type="url" required maxlength="200" placeholder="https://company.com"></div>
+          <div class="field"><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="320" placeholder="you@company.com"></div>
+          <div class="field"><label for="goal">What do you sell? <span style="font-weight:400">(optional)</span></label><textarea id="goal" name="goal" maxlength="2000" placeholder="One sentence is enough"></textarea></div>
+          <button class="button" type="submit">Check my niche and target <span aria-hidden="true">↗</span></button>
+          <p class="form-message" id="formMessage" role="status"></p>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell" style="margin-top: 65px">
+    <div class="footer-inner"><span><strong>OutreachOS</strong> · Built by Polza Agency</span><span>Research first. Thoughtful outreach. Learn as you go.</span></div>
+  </footer>
+  <script>
+    // Откуда пришёл посетитель: utm_* из адреса, внешний referrer (не сам лендинг) и адрес
+    // входа. Nginx отдаёт Referrer-Policy strict-origin-when-cross-origin, поэтому до
+    // портала Referer доходит без query — метки уходят отдельными полями заявки.
+    //
+    // Правило атрибуции одно для заявки и для регистрации: засчитываются последние непустые
+    // utm_*. Каждый заход с utm_* переписывает и запись вкладки (sessionStorage
+    // oos_attribution), и cookie oos_utm на весь outreachos.xyz — как RU-лендинг переписывает
+    // свою, в том же формате. Cookie живёт 30 дней, её читает регистрация в кабинете
+    // app.outreachos.xyz (/api/signup). Заход только с внешним referrer'ом метки не стирает:
+    // он записывается во вкладку, лишь пока в её записи нет utm_*, а cookie не трогает.
+    // При отправке заявки метки берутся из записи вкладки. Если в ней нет utm_* или cookie
+    // записана позже (метки пришли в другой вкладке), — из cookie, вместе с временем того
+    // захода (ts), чтобы в Telegram было видно, что метки от прошлого захода; referrer и
+    // адрес входа при этом остаются от этой вкладки. Если хранилище или cookie недоступны,
+    // работает то, что доступно; сбои здесь не ломают ни страницу, ни форму.
+    var leadAttribution = (function () {
+      var UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+      var STORE_KEY = 'oos_attribution';
+      var COOKIE_NAME = 'oos_utm';
+      var ROOT_REFERRER_KEY = 'oos_root_referrer';
+      // Те же схемы внешнего referrer'а, что принимает /api/demo-lead: android-app:// — так
+      // Chrome на Android отдаёт переход из приложения (LinkedIn, Gmail).
+      var REFERRER_PROTOCOLS = ['http:', 'https:', 'android-app:', 'ios-app:'];
+      var ISO_TS = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,3})?Z$/;
+      function clean(value, max) {
+        return Array.from(String(value || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim()).slice(0, max).join('').trim();
+      }
+      function hasUtm(record) {
+        return UTM_KEYS.some(function (k) { return typeof record[k] === 'string' && record[k] !== ''; });
+      }
+      function time(record) {
+        var t = typeof record.ts === 'string' && ISO_TS.test(record.ts) ? Date.parse(record.ts) : NaN;
+        return isNaN(t) ? null : t;
+      }
+      function sameUtm(a, b) {
+        return UTM_KEYS.every(function (k) { return (a[k] || '') === (b[k] || ''); });
+      }
+      function cameFromThisSite() {
+        try {
+          return !!document.referrer && new URL(document.referrer).hostname === location.hostname;
+        } catch (e) { return false; }
+      }
+      // Пришли ли с одной из языковых страниц (/en/ или /ru/) — так выглядит переход
+      // по переключателю языка.
+      function cameFromLanguagePage() {
+        try {
+          return cameFromThisSite() && /^\/(en|ru)\/(index\.html)?$/.test(new URL(document.referrer).pathname);
+        } catch (e) { return false; }
+      }
+      // Запасной корень (index.html, если «/» отдан без nginx-правила) уводит сюда скриптом,
+      // и тогда referrer'ом браузер называет сам корень. Настоящий внешний referrer корень
+      // оставляет во вкладке (sessionStorage oos_root_referrer) вместе со своим адресом —
+      // он засчитывается только для перехода именно с этого адреса.
+      function referrerOfThisLoad() {
+        var referrer = document.referrer || '';
+        try {
+          var handoff = JSON.parse(sessionStorage.getItem(ROOT_REFERRER_KEY) || 'null');
+          if (referrer && handoff && handoff.from === referrer && typeof handoff.referrer === 'string') return handoff.referrer;
+        } catch (e) { /* storage blocked or corrupted — the browser's referrer stands */ }
+        return referrer;
+      }
+      function outsideReferrer() {
+        try {
+          var referrer = referrerOfThisLoad();
+          if (!referrer) return '';
+          var url = new URL(referrer);
+          if (REFERRER_PROTOCOLS.indexOf(url.protocol) === -1 || url.hostname === location.hostname) return '';
+          return clean(referrer, 500);
+        } catch (e) { return ''; /* unparsable referrer — treat as none */ }
+      }
+      function fromThisLoad() {
+        var record = {};
+        var params = new URLSearchParams(location.search);
+        UTM_KEYS.forEach(function (k) { var v = clean(params.get(k), 200); if (v) record[k] = v; });
+        var referrer = outsideReferrer();
+        if (referrer) record.referrer = referrer;
+        if (!hasUtm(record) && !referrer) return null;
+        record.landing = clean(location.origin + location.pathname + location.search, 500);
+        record.ts = new Date().toISOString();
+        return record;
+      }
+      // /api/signup режет каждое значение cookie до 300 UTF-16-единиц (String.slice): emoji
+      // на этой границе распался бы на половинку, и Postgres не принял бы profiles.signup_utm.
+      // Поэтому в cookie значение укладывается в 300 единиц целыми символами.
+      function forSignup(value) {
+        var out = '';
+        Array.from(clean(value, 300)).every(function (ch) {
+          if (out.length + ch.length > 300) return false;
+          out += ch;
+          return true;
+        });
+        return out.trim();
+      }
+      function writeSignupCookie(record) {
+        var cookie = {};
+        UTM_KEYS.forEach(function (k) { if (record[k]) cookie[k] = forSignup(record[k]); });
+        cookie.referrer = forSignup(record.referrer);
+        cookie.landing = forSignup(location.pathname + location.search);
+        cookie.ts = record.ts;
+        document.cookie = COOKIE_NAME + '=' + encodeURIComponent(JSON.stringify(cookie)) +
+          '; Path=/; Max-Age=2592000; SameSite=Lax' +
+          (location.protocol === 'https:' ? '; Secure' : '') +
+          (/(^|\.)outreachos\.xyz$/.test(location.hostname) ? '; Domain=outreachos.xyz' : '');
+      }
+      // utm_*, ts, referrer и landing (путь с query) из cookie oos_utm; null, если cookie нет
+      // или в ней нет utm_* либо времени захода. Битая cookie бросает исключение — вызов
+      // обёрнут в try.
+      function readSignupCookie() {
+        var prefix = COOKIE_NAME + '=';
+        var entry = document.cookie.split(/;\s*/).filter(function (c) { return c.indexOf(prefix) === 0; })[0];
+        if (!entry) return null;
+        var stored = JSON.parse(decodeURIComponent(entry.slice(prefix.length)));
+        if (!stored || typeof stored !== 'object') return null;
+        var record = {};
+        UTM_KEYS.forEach(function (k) { var v = clean(typeof stored[k] === 'string' ? stored[k] : '', 200); if (v) record[k] = v; });
+        ['referrer', 'landing'].forEach(function (k) { var v = clean(typeof stored[k] === 'string' ? stored[k] : '', 500); if (v) record[k] = v; });
+        record.ts = stored.ts;
+        return hasUtm(record) && time(record) !== null ? record : null;
+      }
+
+      var visit = null;
+      try {
+        try {
+          visit = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null');
+        } catch (e) { /* storage blocked or corrupted — this load decides */ }
+        if (!visit || typeof visit !== 'object') visit = null;
+        var current = fromThisLoad();
+        // Переключатель языка (/en/ ↔ /ru/) несёт адресную строку дальше, вместе с utm_*.
+        // Это тот же заход, а не новый: запись вкладки и cookie остаются от первого захода —
+        // с его внешним referrer'ом, адресом входа и временем.
+        var languageSwitch = !!(current && visit && hasUtm(visit) && !current.referrer &&
+          cameFromThisSite() && sameUtm(current, visit));
+        // Переключатель открыт в новой вкладке (средняя кнопка, «Открыть в новой вкладке» —
+        // запись вкладки туда не копируется) или хранилище недоступно. Тогда тот же заход
+        // узнаётся по cookie oos_utm с теми же utm_*: cookie не переписывается, а запись
+        // вкладки заводится из неё — с внешним referrer'ом, адресом входа и временем того захода.
+        if (current && !visit && hasUtm(current) && !current.referrer && cameFromLanguagePage()) {
+          var earlier = null;
+          try { earlier = readSignupCookie(); } catch (e) { /* cookie blocked or foreign — a fresh visit */ }
+          if (earlier && sameUtm(current, earlier)) {
+            languageSwitch = true;
+            visit = {};
+            UTM_KEYS.forEach(function (k) { if (current[k]) visit[k] = current[k]; });
+            if (earlier.referrer) visit.referrer = earlier.referrer;
+            visit.landing = /^\/(?!\/)/.test(earlier.landing || '') ? clean(location.origin + earlier.landing, 500) : current.landing;
+            visit.ts = earlier.ts;
+            try { sessionStorage.setItem(STORE_KEY, JSON.stringify(visit)); } catch (e) { /* kept for this page only */ }
+          }
+        }
+        if (current && !languageSwitch && (hasUtm(current) || !visit || !hasUtm(visit))) {
+          visit = current;
+          try { sessionStorage.setItem(STORE_KEY, JSON.stringify(current)); } catch (e) { /* kept for this page only */ }
+          if (hasUtm(current)) {
+            try { writeSignupCookie(current); } catch (e) { /* signup attribution is best-effort */ }
+          }
+        }
+      } catch (e) {
+        visit = null;
+      }
+
+      // Поля атрибуции для заявки; {} — заявка уходит как без меток.
+      return function () {
+        var fields = {};
+        try {
+          var cookie = null;
+          try { cookie = readSignupCookie(); } catch (e) { /* cookie blocked or foreign — no fallback */ }
+          var own = visit && hasUtm(visit) ? visit : null;
+          var utm = own && !(cookie && time(cookie) > (time(own) || 0)) ? own : cookie;
+          if (utm) UTM_KEYS.forEach(function (k) { if (typeof utm[k] === 'string' && utm[k]) fields[k] = utm[k]; });
+          if (utm && utm === cookie) fields.ts = cookie.ts;
+          if (visit) ['referrer', 'landing'].forEach(function (k) { if (typeof visit[k] === 'string' && visit[k]) fields[k] = visit[k]; });
+        } catch (e) {
+          fields = {};
+        }
+        return fields;
+      };
+    })();
+
+    // Заявка уходит в общий приём лидов портала (POST /api/demo-lead на app.outreachos.xyz):
+    // строка в demo_leads + сообщение команде в Telegram. Запрос no-cors (без preflight,
+    // ответ непрозрачный), поэтому ошибку видно только при сбое сети.
+    document.getElementById('pilotForm').addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (!this.reportValidity()) return;
+      var form = this;
+      var button = form.querySelector('button[type="submit"]');
+      var message = document.getElementById('formMessage');
+      var website = form.website.value.trim();
+      var body = new URLSearchParams({
+        name: website,
+        company: website,
+        email: form.email.value.trim(),
+        message: form.goal.value.trim(),
+        source: 'eng_pilot',
+        lang: 'en'
+      });
+      var attribution = leadAttribution();
+      ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'referrer', 'landing', 'ts'].forEach(function (k) {
+        if (attribution[k]) body.set(k, attribution[k]);
+      });
+      button.disabled = true;
+      fetch('https://app.outreachos.xyz/api/demo-lead', { method: 'POST', mode: 'no-cors', body: body })
+        .then(function () {
+          message.textContent = "Thanks — we've got your request and will get back to you shortly.";
+          message.style.display = 'block';
+          button.textContent = 'Request sent';
+        })
+        .catch(function () {
+          message.textContent = 'We could not send your request. Please check your connection and try again.';
+          message.style.display = 'block';
+          button.disabled = false;
+        });
+    });
+
+    // Переключатель языка — обычная ссылка на /ru/ (работает и без JS). Скрипт дописывает к ней
+    // текущие query (utm_* и прочее) и якорь, а по клику запоминает выбор в cookie oos_lang
+    // на год: по ней корень outreachos.xyz/ дальше открывает выбранный язык.
+    // Параметр lang= (его приносит ссылка вида /?lang=ru) на /en/ и /ru/ ничего не решает:
+    // язык задан адресом. Поэтому он убирается из ссылки переключателя и из адресной строки,
+    // чтобы скопированная со страницы ссылка не спорила сама с собой (/en/?lang=ru).
+    // Адрес входа для заявки к этому моменту уже записан таким, каким страницу открыли.
+    (function () {
+      var LANG_COOKIE = 'oos_lang';
+      var links = Array.prototype.slice.call(document.querySelectorAll('.lang-option[data-lang]'));
+      // query без параметров lang (имя без учёта регистра, как читает nginx); если их нет,
+      // query остаётся байт в байт прежним.
+      function withoutLang(search) {
+        if (!search || search.length < 2) return search;
+        var parts = search.slice(1).split('&');
+        var kept = parts.filter(function (part) {
+          var name = part.split('=')[0];
+          try { name = decodeURIComponent(name.replace(/\+/g, ' ')); } catch (e) { /* keep the raw name */ }
+          return name.toLowerCase() !== 'lang';
+        });
+        if (kept.length === parts.length) return search;
+        kept = kept.filter(function (part) { return part !== ''; });
+        return kept.length ? '?' + kept.join('&') : '';
+      }
+      function sync() {
+        var search = withoutLang(location.search);
+        links.forEach(function (link) {
+          link.setAttribute('href', '/' + link.getAttribute('data-lang') + '/' + search + location.hash);
+        });
+      }
+      try {
+        var stripped = withoutLang(location.search);
+        if (stripped !== location.search && window.history && typeof history.replaceState === 'function') {
+          history.replaceState(history.state, '', location.pathname + stripped + location.hash);
+        }
+      } catch (e) { /* the address bar keeps lang=; the switcher link is clean anyway */ }
+      function remember(lang) {
+        try {
+          document.cookie = LANG_COOKIE + '=' + lang + '; Path=/; Max-Age=31536000; SameSite=Lax' +
+            (location.protocol === 'https:' ? '; Secure' : '') +
+            (/(^|\.)outreachos\.xyz$/.test(location.hostname) ? '; Domain=outreachos.xyz' : '');
+        } catch (e) { /* cookie заблокированы — ссылка всё равно работает, корень выберет язык по браузеру */ }
+      }
+      sync();
+      window.addEventListener('hashchange', sync);
+      links.forEach(function (link) {
+        function choose(event) {
+          if (event.type === 'auxclick' && event.button !== 1) return;
+          sync();
+          remember(link.getAttribute('data-lang'));
+        }
+        link.addEventListener('click', choose);
+        link.addEventListener('auxclick', choose);
+      });
+    })();
+  </script>
+</body>
+</html>

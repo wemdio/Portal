@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { sendDemoLeadTelegramAlert } from '@/lib/demoLead/notify';
+import { sendDemoLeadTelegramAlert, type DemoLeadPageLang } from '@/lib/demoLead/notify';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +23,21 @@ export const dynamic = 'force-dynamic';
  * demo_leads.utm and the Telegram alert. The Referer header is still stored in
  * demo_leads.referrer as before — the landing's Referrer-Policy cuts it to the
  * origin, which is why the query string has to be sent explicitly.
+ *
+ * `lang` — the language version of the landing the form was sent from
+ * (outreachos.xyz /en/ or /ru/). Only "en" and "ru" are kept, anything else is
+ * ignored; it is stored in demo_leads.utm as key `lang` (no column of its own) and
+ * shown in the Telegram alert as «🌐 Язык страницы». Callers that do not send it are
+ * unchanged.
+ *
+ * So a non-null demo_leads.utm no longer means the lead came with attribution: every
+ * lead from the /en/ and /ru/ pages has at least {"lang": "en"|"ru"}. The column
+ * comment written by 20261013_0001 («Null for leads without attribution») predates
+ * this. To count leads with campaign tags, test the keys, not the null:
+ * `utm ?| array['utm_source','utm_medium','utm_campaign','utm_term','utm_content']`;
+ * with any attribution: `utm - 'lang' <> '{}'::jsonb`. Until 20261013_0001 is applied,
+ * these leads take the insert retry without utm below, and their language stays only
+ * in the Telegram alert.
  */
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -41,8 +56,9 @@ function rateLimited(ip: string): boolean {
 
 // Lead surfaces allowed to label themselves; anything else is stored as 'unknown'
 // so a client can't inject arbitrary text into the Telegram alert title.
-// eng_pilot — форма «Check my niche» английского лендинга outreachos.xyz
-// (deploy/static/outreachos.xyz); name там — сайт компании.
+// eng_pilot — форма «Check my niche» / «Проверить нишу» лендинга outreachos.xyz, одна и
+// та же на страницах /en/ и /ru/ (deploy/static/outreachos.xyz); какая из них, говорит
+// поле lang. name там — сайт компании.
 const ALLOWED_SOURCES = new Set(['hero', 'demo', 'eng_pilot']);
 
 interface LeadFields {
@@ -53,7 +69,9 @@ interface LeadFields {
   company: string;
   message: string;
   source: string;
+  /** Attribution for demo_leads.utm, `lang` included when the form sent one. */
   utm: Record<string, string> | null;
+  lang: DemoLeadPageLang | null;
 }
 
 // Attribution fields a form may send. Only these keys are kept; anything else in the
@@ -131,11 +149,21 @@ function readUtm(get: (key: string) => string): Record<string, string> | null {
   return Object.keys(utm).length ? utm : null;
 }
 
+// Language versions of the landing. The landing sends exactly "en" or "ru"; case and
+// edge whitespace are forgiven, any other value is dropped and the lead goes on as one
+// without a language.
+const PAGE_LANG_MAX = 2;
+function readLang(value: string): DemoLeadPageLang | null {
+  const lang = bounded(value, PAGE_LANG_MAX).trim().toLowerCase();
+  return lang === 'en' || lang === 'ru' ? lang : null;
+}
+
 async function readFields(req: NextRequest): Promise<LeadFields> {
   const ct = req.headers.get('content-type') ?? '';
   const get = (v: unknown) => (typeof v === 'string' ? v : '');
   let raw: Record<string, string>;
   let utm: Record<string, string> | null;
+  let lang: DemoLeadPageLang | null;
   if (ct.includes('application/json')) {
     const b = (await req.json()) as Record<string, unknown>;
     raw = {
@@ -143,6 +171,7 @@ async function readFields(req: NextRequest): Promise<LeadFields> {
       company: get(b.company), message: get(b.message), source: get(b.source),
     };
     utm = readUtm((k) => get(b[k]));
+    lang = readLang(get(b.lang));
   } else {
     const fd = await req.formData();
     const f = (k: string) => String(fd.get(k) ?? '');
@@ -151,7 +180,11 @@ async function readFields(req: NextRequest): Promise<LeadFields> {
       company: f('company'), message: f('message'), source: f('source'),
     };
     utm = readUtm((k) => get(fd.get(k)));
+    lang = readLang(get(fd.get('lang')));
   }
+  // Stored with the attribution (demo_leads.utm.lang), so a lead without utm_* values
+  // still keeps its page language — and its utm is then non-null (see the header).
+  if (lang) utm = { ...utm, lang };
   const field = (k: keyof typeof FIELD_MAX) => bounded(raw[k], FIELD_MAX[k]).trim();
   const source = ALLOWED_SOURCES.has(field('source')) ? field('source') : 'unknown';
   return {
@@ -163,11 +196,14 @@ async function readFields(req: NextRequest): Promise<LeadFields> {
     message: field('message'),
     source,
     utm,
+    lang,
   };
 }
 
 // The app can roll out before migration 20261013_0001 adds demo_leads.utm. Then the
 // insert is retried without utm so the lead is still stored; warn once per process.
+// Every lead from the /en/ and /ru/ pages carries utm (at least lang), so all of them
+// take this retry then, and the database loses their attribution and page language.
 let utmColumnMissingWarned = false;
 function isMissingUtmColumn(error: { code?: string; message?: string }): boolean {
   return (error.code === 'PGRST204' || error.code === '42703') && /\butm\b/.test(error.message ?? '');
@@ -183,7 +219,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'Invalid body' }, { status: 400 });
   }
-  const { name, email, phone, telegram, company, message, source, utm } = fields;
+  const { name, email, phone, telegram, company, message, source, utm, lang } = fields;
 
   if (!name || name.length > 200) return NextResponse.json({ error: 'Укажите имя' }, { status: 400 });
   if (!EMAIL_RE.test(email) || email.length > 320) {
@@ -215,7 +251,7 @@ export async function POST(req: NextRequest) {
         utmColumnMissingWarned = true;
         console.warn(
           '[demo-lead] demo_leads.utm is missing (migration 20261013_0001_demo_leads_utm.sql not applied) — ' +
-            'storing leads without utm; the Telegram alert still shows it',
+            'storing leads without utm (attribution and page language); the Telegram alert still shows them',
         );
       }
       ({ error } = await supabaseAdmin.from('demo_leads').insert(row));
@@ -230,6 +266,7 @@ export async function POST(req: NextRequest) {
   await sendDemoLeadTelegramAlert({
     name, email, phone: phone || null, telegram: telegram || null,
     company: company || null, message: message || null, source, referrer,
+    ...(lang ? { pageLang: lang } : {}),
     ...(utm
       ? {
           utm,
