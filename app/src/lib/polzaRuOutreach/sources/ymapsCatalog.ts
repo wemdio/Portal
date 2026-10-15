@@ -30,7 +30,7 @@ export const YMAPS_TARGET_CATEGORY_REGEX = [
  * у ~6% карточек с сайтом (≈74 тыс. на весь каталог): 25% страниц ≈ 18 тыс.
  * кандидатов, и каждый запуск берёт свои случайные страницы.
  */
-const SAMPLE_PERCENT = 5;
+const SAMPLE_PERCENT = 15;
 
 export interface YmapsCatalogRow {
   yandexId: string;
