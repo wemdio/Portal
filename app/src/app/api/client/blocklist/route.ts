@@ -33,7 +33,18 @@ export async function GET(req: NextRequest) {
   // (./_eng.ts). Ниже — RU-ветка, без изменений.
   if (result.auth.market === 'eng') {
     if (result.auth.isDemo) {
-      return NextResponse.json({ items: [], total: 0, matching: 0, offset: 0, next_offset: null });
+      return NextResponse.json({
+        items: [],
+        total: 0,
+        matching: 0,
+        offset: 0,
+        next_offset: null,
+        in_campaign_removal: 'off',
+        pending: null,
+        failed: null,
+        failed_examples: [],
+        failed_at_least: false,
+      });
     }
     if (!supabaseInstantly) return jsonError('Server misconfigured', 500);
     return engBlocklistGet(req, supabaseInstantly, result.auth.userId);
@@ -81,7 +92,9 @@ export async function POST(req: NextRequest) {
   const { userId } = result.auth;
 
   // ENG-кабинет: пачка из вставленного текста, строгий потолок, английские
-  // тексты (./_eng.ts). Ниже — RU-ветка, без изменений.
+  // тексты (./_eng.ts); заблокированному аккаунту (отметка блокировки ENG) —
+  // 403 тем же текстом, что у рыночного гейта кабинета, до разбора тела. Ниже
+  // — RU-ветка, без изменений.
   if (result.auth.market === 'eng') return engBlocklistPost(req, db, userId);
 
   let body: { email?: unknown; reason?: unknown; source?: unknown };

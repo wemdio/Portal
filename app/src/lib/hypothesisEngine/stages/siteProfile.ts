@@ -54,6 +54,23 @@
  *  - сайт ответил, но текста мало → как и раньше brief.site_thin (UI просит
  *    ручное описание бизнеса). Таймаут в site_thin НЕ превращается.
  *
+ * Тонкий сайт у проекта клиента ENG-кабинета (решение владельца: «не
+ * запускать платное исследование на пустом сайте без описания»): прочитанного
+ * текста меньше THIN_SITE_CHARS (фраза JS-заглушки главной текстом не
+ * считается: заглушка с богатыми доп. страницами — прежний путь), ручного
+ * описания бизнеса нет — и в снимке начала стадии, и в брифе, перечитанном
+ * перед отказом, — рынок 'us', а владелец проекта — клиент ENG-кабинета
+ * (readHeProjectOwner: profiles.role 'client' и market 'eng' — то же правило,
+ * что у проверки писем и выключателя отправки; не прочитан — обычный сбой с
+ * причиной, воркер узнаёт блип БД). Тогда стадия ведёт себя как у мёртвого
+ * домена без описания: исход пишется в бриф (site_thin, site_text_chars,
+ * captured_at; site_unreachable — null, сайт-то открылся) ДО отказа, и стадия
+ * отказывает своим классом
+ * HeSiteThinNeedsBusinessError — ДО первого платного вызова прогона (см. класс).
+ * Staff-проект рынка 'us' и любой проект рынка 'ru' идут прежним путём: пометка
+ * site_thin и профиль по тому, что есть. Описание уже есть — тоже прежний путь
+ * (профиль строится и по нему).
+ *
  * Недоступный сайт (волна 4b): мёртвый домен клиента — законный исход
  * исследования, а не сбой движка, и стадия его переживает:
  *  - молчащий origin запоминается на время прогона (silentOrigins) и остальные
@@ -77,6 +94,8 @@ import { projectMarket, type HeMarket } from '../market';
 import { HeSiteProfileSchema } from '../schemas';
 import { heCaseDraftSchema, normalizeCaseText } from '../caseBank';
 import { readHeIcpFrame } from '../icpFrame';
+import { HE_SITE_THIN_NEEDS_BUSINESS_ANCHOR } from '../clientErrors';
+import { readHeProjectOwner } from '../letterBrandGuard';
 import { BUSINESS_OVERRIDE_MAX_LENGTH, OFFER_OVERRIDE_MAX_LENGTH } from '../projectBriefPatch';
 import { buildSiteCaseExtractionMessages, buildSiteProfileMessages } from '../prompts/siteProfile';
 import {
@@ -629,6 +648,55 @@ function unreachableMark(error: HeSiteUnreachableError): Record<string, unknown>
 }
 
 /**
+ * Сайт клиента ENG-кабинета открылся, но текста в нём мало (прочитанного
+ * текста без фразы JS-заглушки меньше THIN_SITE_CHARS), а ручного описания
+ * бизнеса нет — профиль строить не из чего, и платить за выдуманный профиль
+ * (и за всю цепочку research по нему) незачем.
+ *
+ * ЧТО УЖЕ СДЕЛАНО К ОТКАЗУ — НИ ОДНОГО ПЛАТНОГО ВЫЗОВА. site_profile — первая
+ * стадия цепочки (HE_RESEARCH_STAGES, researchJob.ts; NEXT_RESEARCH_STAGE
+ * воркера): до неё в прогоне не идёт ничего. Внутри стадии до этой точки —
+ * только чтение сайта: главная (fetchText) и до 14 доп. страниц
+ * (fetchExtraPages) через SSRF-гейт, свой пул прокси и локальный Playwright
+ * (io.ts → enrich/websiteParser.ts) — ни модели, ни поиска, ни каталогов. Оба
+ * платных вызова стадии (профиль и кейсы) стоят ПОСЛЕ отказа. То же чтение
+ * делает и ветка мёртвого домена до своего отказа.
+ *
+ * Класс ТЕРМИНАЛЬНЫЙ (дискриминант heJobTerminal читает воркер, isHeJobTerminal):
+ * повтор стадии с тем же брифом прочитал бы тот же сайт и отказал так же, — и
+ * сразу 'failed' проекта с этой причиной (writeJobFailure, RESEARCH_STAGES).
+ * Попытку джобы воркер при этом засчитывает (attempts + 1): бесплатного рода у
+ * терминального отказа воркер различает только отказ за бренд. Её возвращает
+ * продолжение — роут кабинета (api/client/eng/projects/[id]/research): клиент
+ * сохранил описание, и ТА ЖЕ строка site_profile уходит в 'pending' с
+ * attempts − 1, без новой строки (дневной лимит стартов считает строки
+ * site_profile, engPaidAccess.ts) и без вердикта «повтор только после
+ * технического сбоя».
+ *
+ * Текст РУССКИЙ — для he_jobs.error / he_projects.error и staff; начало —
+ * якорь HE_SITE_THIN_NEEDS_BUSINESS_ANCHOR (clientErrors.ts): по нему
+ * классификатор кабинета сворачивает причину в код `website_thin`, и якорь там
+ * же, где правило, — текст и правило не разъедутся. `corpusChars` — символов
+ * прочитанного текста без заглушки главной (по ним и решён отказ).
+ */
+export class HeSiteThinNeedsBusinessError extends Error {
+  /** Дискриминант терминального отказа (воркер: повтор стадии не назначать). */
+  readonly heJobTerminal = true as const;
+
+  constructor(
+    readonly corpusChars: number,
+    readonly jsStub: boolean,
+  ) {
+    super(
+      `${HE_SITE_THIN_NEEDS_BUSINESS_ANCHOR} (${corpusChars} символов${jsStub ? ', главная — JS-заглушка' : ''}): `
+        + 'профиль по такому тексту не строим, платных вызовов не было — клиент ENG-кабинета дописывает описание '
+        + 'бизнеса на шаге 1, и research продолжается этой же джобой site_profile',
+    );
+    this.name = 'HeSiteThinNeedsBusinessError';
+  }
+}
+
+/**
  * Патч брифа с перечитыванием прямо перед записью: за минуты LLM-вызовов
  * пользователь мог сохранить overrides (offer/style/signature/business) через
  * PATCH — спред от протухшего снапшота их бы затёр. Один хелпер на оба исхода
@@ -787,8 +855,78 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
     stageLog(ctx, `[site_profile] сайт тонкий (${corpus.length} символов) — помечен site_thin`);
   }
 
+  // Тонкий сайт без описания у проекта клиента ENG-кабинета — отказ ДО платного
+  // профиля (класс HeSiteThinNeedsBusinessError: что уже сделано и почему это
+  // не платно). Владельца читаем только здесь — у staff-проекта 'us' с тонким
+  // сайтом это одно лишнее чтение без строки лога, дальше его прежний путь; у
+  // 'ru' и у сайта с текстом — ни одного запроса.
+  //
+  // «Мало текста» для отказа считаем по ПРОЧИТАННОМУ тексту: у главной-заглушки
+  // («требует JavaScript») её фраза — не текст сайта, а доп. страницы строгого
+  // чтения могли принести его достаточно. Тогда пометка site_thin остаётся
+  // прежней (главная — заглушка), но отказа нет: сказать клиенту «прочитали
+  // мало» было бы неправдой, и профиль строится по тому, что прочитано.
+  const homeIsStub = siteText.includes(JS_STUB_MARK);
+  const readChars = homeIsStub ? corpus.slice(siteText.length).trim().length : corpus.length;
+  // Бриф для промпта профиля: снимок начала стадии, а у проекта клиента на
+  // тонком сайте — свежий (ниже), если описание сохранили, пока читался сайт.
+  let profileBrief = project.brief;
+  if (siteThin && !unreachable && !manualBusiness && market === 'us' && readChars < THIN_SITE_CHARS) {
+    const owner = await readHeProjectOwner(ctx.supabase, project.created_by);
+    if (owner.kind === 'unknown') {
+      // «Не знаю, чей проект» — не «staff»: заплатить за профиль по пустому
+      // сайту клиента значило бы ровно то, от чего эта ветка защищает, а
+      // отказать staff-проекту — соврать ему. Обычный сбой стадии, платного в
+      // прогоне ещё не было; отказ чтения — причиной (cause), чтобы воркер
+      // узнал блип БД (isTransientDbError) и взял паузу, а не сжёг попытки
+      // подряд, каждый раз заново читая сайт.
+      throw new Error(
+        'владелец проекта не прочитан (profiles) — тонкий сайт без описания бизнеса не решить, стадия повторится',
+        { cause: owner.error },
+      );
+    }
+    if (owner.kind === 'eng_client') {
+      // Описание могли сохранить, пока читался сайт (шаг 1 открыт, research
+      // идёт): решение «описания нет» принято по снимку начала стадии.
+      // Перечитываем бриф прямо перед отказом — описание есть, отказа нет, и
+      // профиль строится по свежему брифу (EN-промпт получает описание).
+      const { data: freshRow, error: freshErr } = await ctx.supabase
+        .from('he_projects')
+        .select('brief')
+        .eq('id', project.id)
+        .single();
+      if (freshErr) {
+        throw new Error('бриф проекта не перечитан — тонкий сайт без описания бизнеса не решить, стадия повторится', {
+          cause: freshErr,
+        });
+      }
+      const freshBrief = ((freshRow as { brief?: HeProject['brief'] } | null)?.brief ?? null) as HeProject['brief'];
+      if (readBusinessOverride(freshBrief)) {
+        profileBrief = freshBrief;
+        stageLog(ctx, '[site_profile] описание бизнеса сохранено по ходу чтения сайта — профиль строим с ним');
+      } else {
+        // Исход пишем ДО отказа: шаг 1 кабинета читает brief.site_thin, а
+        // site_unreachable — null: сайт открылся, и прошлая метка «не открылся»
+        // говорила бы клиенту неправду.
+        await patchBrief(ctx, project, {
+          website_url: project.website_url,
+          site_thin: true,
+          site_text_chars: corpus.length,
+          site_unreachable: null,
+          captured_at: new Date().toISOString(),
+        });
+        stageLog(
+          ctx,
+          '[site_profile] проект клиента ENG-кабинета, описания бизнеса нет — стадия отказывает до платного профиля, '
+            + 'research продолжится этой джобой, когда клиент сохранит описание',
+        );
+        throw new HeSiteThinNeedsBusinessError(readChars, homeIsStub);
+      }
+    }
+  }
+
   // Бриф клиента — второй источник профиля, только рынок 'us' (см. шапку).
-  const clientBrief = market === 'us' ? clientBriefForProfile(project.brief) : null;
+  const clientBrief = market === 'us' ? clientBriefForProfile(profileBrief) : null;
   if (clientBrief?.facts || clientBrief?.wishes) {
     stageLog(
       ctx,

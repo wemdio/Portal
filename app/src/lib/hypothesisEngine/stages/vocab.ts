@@ -7,6 +7,14 @@
  *
  * Локализация: при market='us' LLM-вызов идёт EN-промптом
  * (prompts/vocab.en.ts) — типы компаний/должности/запросы под ENG-источники.
+ *
+ * Пустой словарь и отказ поиска — по рынку (решение владельца 14.10.2026 «Как
+ * было»): порог «хотя бы один тип компаний и одна должность» с терминальным
+ * отказом (HeVocabEmptyError) — только у market='us'. RU-проект идёт прежней
+ * схемой (HeVocabSchemaAsBeforePort): пустой список принимается и
+ * сохраняется, как до порта ENG. Отказ поиска при верификации у RU-проекта
+ * приходит пустой выдачей (resolveSearch, io.ts) — термин помечается «поиском
+ * не подтверждён», как до порта.
  */
 
 import { z } from 'zod';
@@ -51,6 +59,50 @@ type RequiredVocabField = (typeof REQUIRED_VOCAB_FIELDS)[number];
 const VOCAB_MAX_TOKENS = 8192;
 
 /**
+ * Схема вокабуляра RU-проекта — та, что была до порта ENG (schemas.ts на
+ * 46bd0e82e), байт в байт по поведению: списки по умолчанию пустые, термин и
+ * должность — любая строка. Пустой список не отказ: стадия сохраняет словарь,
+ * а план сбора и досье, как и раньше, идут дальше без него («продолжаем
+ * без …» в их логах). Порог и терминальный отказ HeVocabSchema — только у
+ * market='us' (callVocabModel ниже). Выходной тип совпадает с HeVocabSchema:
+ * порог меняет проверку, а не форму.
+ */
+const HeVocabSchemaAsBeforePort = z.object({
+  company_types: z
+    .array(
+      z.object({
+        term: z.string(),
+        kind: z.enum(['canonical', 'synonym', 'geo_variant', 'adjacent', 'slang']).default('synonym'),
+        geo: z.string().optional(),
+        notes: z.string().optional(),
+      }),
+    )
+    .default([]),
+  job_titles: z
+    .array(
+      z.object({
+        title: z.string(),
+        audience_side: z.enum(['buyer', 'campaign_target']),
+        seniority: z.string().optional(),
+        function: z.string().optional(),
+        geo: z.string().optional(),
+        alt_names: z.array(z.string()).optional(),
+      }),
+    )
+    .default([]),
+  search_queries: z
+    .array(
+      z.object({
+        source: z.string(),
+        query: z.string(),
+        purpose: z.string().optional(),
+        notes: z.string().optional(),
+      }),
+    )
+    .default([]),
+});
+
+/**
  * Пустой элемент списка (`term`/`title` — пустая строка или одни пробелы)
  * выбрасываем ДО схемы, а не отвергаем им весь ответ.
  *
@@ -59,7 +111,7 @@ const VOCAB_MAX_TOKENS = 8192;
  * такой ошибки — «company_types.N.term», то есть это не «словарь пуст», и она
  * шла обычным схемным сбоем: два вызова на исполнение × MAX_ATTEMPTS = шесть
  * оплаченных bulk-вызовов и упавший вокабуляр там, где до волны 3 ответ
- * принимался с первого вызова (и на ежедневном RU-инструменте тоже). Пустой
+ * принимался с первого вызова (RU-проект так и идёт прежней схемой). Пустой
  * термин или должность не несут ни одному потребителю ничего, поэтому такой
  * элемент просто не попадает в he_vocab (до волны 3 он сохранялся пустой
  * строкой). Список, в котором НЕ осталось ни одного элемента, после этого
@@ -130,9 +182,11 @@ function vocabAnswerWasCut(rawText: string): boolean {
 }
 
 /**
- * Непригодный словарь: отказ, который повтор стадии не лечит. Два случая —
- * обязательный список пуст или его нет в ответе вовсе (ответ обрезан и закрыт
- * ремонтом JSON раньше поля либо модель поле пропустила); текст отказа
+ * Непригодный словарь (только market='us': RU-проект идёт прежней схемой без
+ * порога, см. HeVocabSchemaAsBeforePort): отказ, который повтор стадии не
+ * лечит. Два случая — обязательный список пуст или его нет в ответе вовсе
+ * (ответ обрезан и закрыт ремонтом JSON раньше поля либо модель поле
+ * пропустила); текст отказа
  * называет, какой именно.
  *
  * Класс терминальный (дискриминант heJobTerminal читает воркер, isHeJobTerminal)
@@ -158,7 +212,8 @@ class HeVocabEmptyError extends Error {
 }
 
 /**
- * Вызов модели вокабуляра с ЧЕСТНЫМ исходом «словарь пуст».
+ * Вызов модели вокабуляра с ЧЕСТНЫМ исходом «словарь пуст» — только market='us'
+ * (RU-проект зовёт модель прежней схемой, HeVocabSchemaAsBeforePort).
  *
  * Схема требует хотя бы один тип компаний и хотя бы одну должность, поэтому
  * пустой ответ модели становится ошибкой валидации и получает штатный повтор с
@@ -292,16 +347,19 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
   // план и новую пробу среза.
   const summary = vertical.summary ?? '';
   const model = getHeModel('bulk');
-  const llm = await callVocabModel(
-    (market === 'us' ? buildVocabMessagesEn : buildVocabMessages)({
-      verticalName: vertical.name,
-      verticalSummary: market === 'us' ? companyPartOfSummaryEn(summary) : summary,
-      synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
-      hypotheses,
-    }),
-    model,
-    (msg) => stageLog(ctx, msg),
-  );
+  const messages = (market === 'us' ? buildVocabMessagesEn : buildVocabMessages)({
+    verticalName: vertical.name,
+    verticalSummary: market === 'us' ? companyPartOfSummaryEn(summary) : summary,
+    synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
+    hypotheses,
+  });
+  // us — порог и честный терминальный отказ на пустой словарь (callVocabModel);
+  // RU — прежний вызов с прежней схемой: пустой словарь сохраняется, как до
+  // порта ENG (HeVocabSchemaAsBeforePort).
+  const llm =
+    market === 'us'
+      ? await callVocabModel(messages, model, (msg) => stageLog(ctx, msg))
+      : await callLLMWithSchema(messages, HeVocabSchemaAsBeforePort, { model, maxTokens: VOCAB_MAX_TOKENS });
   addUsage(usage, llm);
   const vocab = llm.data;
 
@@ -325,8 +383,10 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
     .map(({ i }) => i);
   for (const i of verifyIdxs) {
     const term = companyTypes[i];
-    // Провайдер уже отказал — остальные проверки повторят тот же отказ.
-    if (tally.failure) break;
+    // Провайдер уже отказал — остальные проверки повторят тот же отказ. Только
+    // 'us': у RU отказ приходит пустой выдачей (io.ts), а проверки идут все, как
+    // до порта ENG.
+    if (market === 'us' && tally.failure) break;
     try {
       const items = await search(`"${term.term}" ${vertical.name}`);
       noteHeSearchAnswered(tally);
@@ -355,7 +415,7 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
     .map(({ i }) => i);
   for (const i of queryIdxs) {
     const q = searchQueries[i];
-    if (tally.failure) break;
+    if (market === 'us' && tally.failure) break;
     try {
       const items = await search(q.query);
       noteHeSearchAnswered(tally);
@@ -382,17 +442,20 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
   // или одиночный UTF-16 суррогат, и PostgREST отвергает ВСЮ вставку уже после
   // оплаченного вызова — стадия падает и на повторе покупает словарь заново.
   // Чистка трогает только эти два символа: текст без них (вся кириллица и
-  // латиница) уходит байт-в-байт тем же, что и раньше.
+  // латиница) уходит байт-в-байт тем же, что и раньше. Только market='us':
+  // RU-проект пишет строку как до порта ENG (решение владельца 14.10.2026
+  // «Как было»; так же chain, template, evidence, clustering и base_analyze).
+  const vocabRow = {
+    vertical_id: verticalId,
+    company_types: companyTypes,
+    job_titles: vocab.job_titles,
+    search_queries: searchQueries,
+    status: 'ready',
+    llm_model: model,
+  };
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_vocab')
-    .insert(stripUnstorableJsonChars({
-      vertical_id: verticalId,
-      company_types: companyTypes,
-      job_titles: vocab.job_titles,
-      search_queries: searchQueries,
-      status: 'ready',
-      llm_model: model,
-    }))
+    .insert(market === 'us' ? stripUnstorableJsonChars(vocabRow) : vocabRow)
     .select('id')
     .single();
   if (insError || !inserted) throw new Error(`he_vocab insert: ${insError?.message ?? 'unknown'}`);

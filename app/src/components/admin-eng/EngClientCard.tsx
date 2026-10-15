@@ -11,7 +11,9 @@
  *    POST api/admin/users/[id]/eng-sending (включение у заблокированного роут
  *    отказывает сам; кнопка выключена с подсказкой «Сначала разблокируйте»;
  *    у выключенной сотрудником — чип «Отправка выключена сотрудником» —
- *    включение переспрашивает);
+ *    включение переспрашивает). Рядом с «Включить отправку» — строки из GET
+ *    того же роута (engSendingEnableWarnings): пул не примет нового клиента,
+ *    автозапуск выключен — включить можно, но сами рынки не стартуют;
  *  - «Заблокировать», «Заблокировать ещё раз / доставить остановку»,
  *    «Разблокировать» — POST api/admin/users/[id]/block (ветка английского
  *    кабинета: полная остановка / сначала та же остановка, потом только вход —
@@ -35,6 +37,7 @@ import type { HeEngAdminCardProject, HeEngAdminMarket } from '@/lib/hypothesisEn
 import {
   deleteEngAccount,
   fetchEngClientCard,
+  fetchEngSending,
   postEngBlock,
   postEngPassword,
   postEngSending,
@@ -53,6 +56,7 @@ import {
   campaignStatusLabel,
   clientEmailLabel,
   engSendingAllowed,
+  engSendingEnableWarnings,
   engSendingResultText,
   engSendingTitle,
   fmtDateTime,
@@ -63,6 +67,7 @@ import {
   projectStatusLabel,
   readErrorLabel,
   startErrorLabel,
+  type EngSendingGetResult,
 } from './labels';
 
 /** Итог последнего действия на карточке. */
@@ -199,11 +204,15 @@ export function EngClientCard({ userId }: { userId: string }) {
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [revealPassword, setRevealPassword] = useState(false);
+  /** GET eng-sending: автозапуск и пул глазами клиента (строки у «Включить отправку»); null — не прочитано. */
+  const [sendingInfo, setSendingInfo] = useState<EngSendingGetResult | null>(null);
+  const [sendingInfoTick, setSendingInfoTick] = useState(0);
 
   const load = useCallback(
     async (refresh: boolean) => {
       setLoading(true);
       setError(null);
+      setSendingInfoTick((t) => t + 1);
       try {
         setCard(await fetchEngClientCard(userId, refresh));
       } catch (e) {
@@ -214,6 +223,22 @@ export function EngClientCard({ userId }: { userId: string }) {
     },
     [userId],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await fetchEngSending(userId);
+        if (!cancelled) setSendingInfo(data);
+      } catch {
+        // Строки у кнопки — подсказка; не прочиталось — их нет.
+        if (!cancelled) setSendingInfo(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, sendingInfoTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -663,6 +688,13 @@ export function EngClientCard({ userId }: { userId: string }) {
         {!allowed && blocked && sending.state !== 'unavailable' && sending.state !== 'error' ? (
           <p className="mt-2 text-xs text-gray-500">Включить отправку: сначала разблокируйте.</p>
         ) : null}
+        {!allowed && sending.state !== 'unavailable' && sending.state !== 'error'
+          ? engSendingEnableWarnings(sendingInfo).map((w, i) => (
+              <p key={i} className={`mt-2 text-xs ${w.tone === 'amber' ? 'text-amber-800' : 'text-gray-500'}`}>
+                {w.text}
+              </p>
+            ))
+          : null}
         {sending.state === 'unavailable' ? (
           <p className="mt-2 text-xs text-amber-800">Выключателя отправки нет: не применена миграция 20261011_0002.</p>
         ) : null}
@@ -851,7 +883,14 @@ export function EngClientCard({ userId }: { userId: string }) {
                           ? `нажат ${fmtDateTime(p.intent.requested_at)}, автозапуск включён${
                               p.intent.settled_at ? ` — ${AUTO_LAUNCH_EXTRA_LABELS.settled}` : ''
                             }`
-                          : `автозапуск выключен${p.intent.cancelled_at ? ` ${fmtDateTime(p.intent.cancelled_at)}` : ''}`
+                          : p.intent.cancelled_at
+                            ? `автозапуск выключен ${fmtDateTime(p.intent.cancelled_at)}`
+                            : // wanted=false без отмены пишет только нажатие «Launch» или
+                              // «Launch N more markets» при выключенном HE_ENG_AUTO_LAUNCH
+                              // (роут api/client/eng/projects/[id]/launch).
+                              `автозапуск не включён: клиент нажимал при выключенном HE_ENG_AUTO_LAUNCH (последнее «Launch» ${fmtDateTime(
+                                p.intent.requested_at,
+                              )}) — после включения выключателя рынки сами не стартуют, нужен новый «Launch»`
                         : card.row.intent === 'unknown'
                           ? 'не читается'
                           : 'не нажимал'}

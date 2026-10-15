@@ -23,19 +23,32 @@
  *      RU — как раньше: дыры маппинга только в логе, шаблон 'ready';
  *  5) insert в he_templates (status 'ready', llm_model) — другого статуса
  *     стадия не пишет.
- * До шага 1, без единого платного вызова: база читается только своего проекта,
- * пустая база (row_count 0) — отказ, а готовый шаблон базы возвращается как
- * есть (result.reused, расход 0) — см. findReusableTemplate про форс и про
- * письма с чужой компанией (их не возвращает).
+ * До шага 1, без единого платного вызова: у проекта 'us' база читается только
+ * своего проекта, а пустая база (row_count 0) — отказ (у 'ru' — как до
+ * переноса ENG); у любого рынка готовый шаблон базы возвращается как
+ * есть (result.reused, расход 0): любой — только по payload.reuse (пути ENG),
+ * без него — только вставленный прошлой попыткой этой же джобы; см.
+ * findReusableTemplate про флаги и про письма с чужой компанией (их не
+ * возвращает).
  * В промпты подмешиваются style_override из брифа (styleExample),
  * signature_override (дословная подпись отправителя) и winner-паттерны
- * датасета (best-effort); у EN — ещё слова клиента из брифа (offer_override,
+ * датасета (best-effort); у английских писем 'us' — ещё слова клиента из брифа (offer_override,
  * business_override → блок «CLIENT'S OWN WORDS» плана, писем, критика и
  * рерайта). После генерации писем — критик-луп: одна оценка (только основной
  * вариант A) + максимум один rewrite по её замечаниям; B-вариант и сегментные
  * варианты после рерайта восстанавливаются из исходных писем.
  *
- * Только EN (language 'en'), RU/PL как раньше:
+ * РЫНОК РЕШАЕТ, А НЕ ЯЗЫК (решение владельца 14.10.2026 «Как было»). Всё, что
+ * перенос ENG поменял в письмах, действует только у проекта рынка 'us'; у
+ * проекта 'ru' (staff-инструмент, где сотрудник выбирает и английскую
+ * цепочку) стадия — ровно та, что до переноса: прежние промпты, пороги и
+ * подсказки повторов, русское чтение чисел, рерайт критика без отката, без
+ * personalization_plan.rule_violations, запись he_templates без чистки
+ * текста. Остаётся у всех только переиспользование готового шаблона по явной
+ * просьбе (findReusableTemplate).
+ *
+ * Только английские письма проекта 'us' (letterChecks.heUsEnglishLetters),
+ * RU/PL и английские письма проекта 'ru' как раньше:
  *  - шаблон не короче цепочки, насколько это даёт один повтор: писем меньше,
  *    чем в he_chains.letters, → тот же один повтор генерации, что и при < 3
  *    писем, с английской подсказкой (короче цепочки, но не меньше 3, шаблон
@@ -97,6 +110,7 @@ import {
   checkLetterRules,
   extractNumberFacts,
   findUnverifiedNumbers,
+  heUsEnglishLetters,
   type HeLetterForCheck,
   type HeLetterRuleViolation,
 } from '../letterChecks';
@@ -365,8 +379,8 @@ export function validateSegmentVariants(
  *  - unmatched-оператор обязан иметь fallback (иначе подставлять нечего);
  *  - оператор в теме обязан быть matched (fallback в теме невозможен).
  * Возвращает список проблем (пустой — всё чисто). opts.language === 'en' —
- * тексты по-английски (их стадия кладёт в подсказку повтора EN-генерации);
- * иначе — по-русски, как раньше.
+ * тексты по-английски (их стадия кладёт в подсказку повтора английской
+ * генерации проекта 'us' и только туда); иначе — по-русски, как раньше.
  */
 export function validateOperatorMapping(
   mapping: HeOperatorMapping[],
@@ -503,8 +517,9 @@ function lengthRetryHintEn(target: number, got: number): string {
   );
 }
 
-function shortenRetryHint(letters: HeChainLetterAB[], language: HeChainLanguage): string {
-  if (language === 'en') {
+/** english — английская подсказка (английские письма проекта 'us'); иначе прежняя русская. */
+function shortenRetryHint(letters: HeChainLetterAB[], english: boolean): string {
+  if (english) {
     const countsEn = letters.map((l, i) => `email ${i + 1}: ${countWords(l.body)} words`).join(', ');
     return (
       `Some email bodies are longer than the regulations allow (${countsEn}). The regulations are not negotiable: body ≤ 80 words, email 1 ≤ 70 words. ` +
@@ -581,18 +596,23 @@ interface HeReusableTemplate {
  * Готовый ('ready') шаблон этой базы, который стадия обязана ВЕРНУТЬ, а не
  * собрать заново за новые деньги. Самый свежий.
  *
- * Без форса — любой готовый шаблон базы: так дочейн автопилота после второго
- * done-анализа, вторая из двух гонящихся джоб (воркер берёт их по очереди) и
- * повтор джобы, у которой шаблон уже лёг, а done-запись — нет, не платят за
- * письма, которые уже есть.
+ * ПЕРЕИСПОЛЬЗОВАНИЕ — ПО ЯВНОЙ ПРОСЬБЕ (payload.reuse === true, с 14.10.2026).
+ * Его ставят пути ENG, которым письма поверх готовых не нужны: реконсилер
+ * «Launch» (autopilotReconcile.ts), дочейн автопилота после анализа у проекта
+ * 'us' (autopilotNext.ts) и роут шаблона кабинета
+ * (api/client/eng/bases/[id]/template). С ним — любой готовый шаблон базы:
+ * гонка двух постановок и повтор джобы, у которой шаблон уже лёг, а
+ * done-запись — нет, не платят за письма, которые уже есть.
  *
- * С форсом (payload.force === true; его ставит ТОЛЬКО staff-роут «Собрать
- * шаблон» — сознательная пересборка RU-инструмента) — только шаблон, созданный
- * не раньше самой джобы: старые шаблоны базы форс сознательно не берёт, а свой
- * собственный, вставленный прошлой попыткой этой же джобы (упала done-запись,
- * рестарт пода после вставки), берёт — иначе повтор форс-джобы платил бы
- * генерацию второй раз и оставлял базе второй готовый шаблон. Метки обе от
- * часов БД (default now() у he_templates и he_jobs).
+ * Без него (джобы staff-инструмента — payload.force, «Rewrite letters»
+ * кабинета, который снял готовые письма и ждёт новых, и любая джоба,
+ * поставленная кодом до этой правки с payload { base_id }) — только шаблон,
+ * созданный не раньше самой джобы: старые шаблоны базы не берутся, и джоба
+ * пишет письма заново, как до переиспользования; а свой собственный,
+ * вставленный прошлой попыткой этой же джобы (упала done-запись, рестарт пода
+ * после вставки), берётся — иначе повтор платил бы генерацию второй раз и
+ * оставлял базе второй готовый шаблон. Метки обе от часов БД (default now() у
+ * he_templates и he_jobs). force вместе с reuse — побеждает force.
  *
  * Сбой чтения бросаем: «не знаю, есть ли шаблон» — не «шаблона нет», и платная
  * генерация на догадке здесь ровно тот дефект, который чинится.
@@ -606,6 +626,11 @@ interface HeReusableTemplate {
  */
 const REUSE_SCAN = 20;
 
+/** Просит ли джоба вернуть ЛЮБОЙ готовый шаблон базы (см. findReusableTemplate). */
+function heTemplateJobReusesAny(job: HeJob): boolean {
+  return job.payload?.reuse === true && job.payload?.force !== true;
+}
+
 async function findReusableTemplate(
   ctx: HeStageContext,
   job: HeJob,
@@ -617,10 +642,10 @@ async function findReusableTemplate(
     .select(REUSABLE_TEMPLATE_COLUMNS)
     .eq('base_id', baseId)
     .eq('status', 'ready');
-  if (job.payload?.force === true) {
-    // Без метки джобы «свой» шаблон от чужого не отличить — форс тогда
-    // собирает заново, как до этой правки (воркер клеймит строку целиком,
-    // created_at в ней есть всегда; ветка — страховка от неполной строки).
+  if (!heTemplateJobReusesAny(job)) {
+    // Без метки джобы «свой» шаблон от чужого не отличить — тогда собираем
+    // заново (воркер клеймит строку целиком, created_at в ней есть всегда;
+    // ветка — страховка от неполной строки).
     if (typeof job.created_at !== 'string' || job.created_at.length === 0) return null;
     query = query.gte('created_at', job.created_at);
   }
@@ -641,25 +666,29 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const usage = newUsage();
   const baseId = payloadString(job, 'base_id');
 
-  // База — только СВОЕГО проекта: base_id приходит из payload джобы, и без
-  // скоупа джоба проекта A строила бы (и оплачивала бы проекту A) шаблон по
-  // базе проекта B.
-  const { data: baseRow, error: bError } = await ctx.supabase
-    .from('he_bases')
-    .select('*')
-    .eq('id', baseId)
-    .eq('project_id', job.project_id)
-    .single();
+  // Рынок проекта решает, что из переноса ENG здесь действует (шапка). Воркер
+  // передаёт его всегда (ctx.market); без него — из строки проекта (одно
+  // лишнее чтение, только вне воркера).
+  const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
+
+  // Рынок 'us': база — только СВОЕГО проекта: base_id приходит из payload
+  // джобы, и без скоупа джоба проекта A строила бы (и оплачивала бы проекту A)
+  // шаблон по базе проекта B. У 'ru' чтение — как до переноса ENG.
+  let baseQuery = ctx.supabase.from('he_bases').select('*').eq('id', baseId);
+  if (market === 'us') baseQuery = baseQuery.eq('project_id', job.project_id);
+  const { data: baseRow, error: bError } = await baseQuery.single();
   if (bError || !baseRow) throw new Error(`he_bases ${baseId}: ${bError?.message ?? 'not found'}`);
   const base = baseRow as HeBase;
 
-  // Пустая база — отказ ДО первого платного вызова: письма по базе без строк
-  // запускать некуда (запуск ответит «нет валидных адресов»), а план и письма
-  // уже были бы оплачены. Загрузка CSV пустой файл не принимает, поэтому у
-  // RU-инструмента сюда доходит только битая или недособранная база.
-  const rowCount = typeof base.row_count === 'number' ? base.row_count : 0;
-  if (!(rowCount > 0)) {
-    throw new Error(`he_bases ${baseId}: в базе нет строк (row_count=${rowCount}) — шаблон по пустой базе не собираем`);
+  // Рынок 'us': пустая база — отказ ДО первого платного вызова: письма по базе
+  // без строк запускать некуда (запуск ответит «нет валидных адресов»), а план
+  // и письма уже были бы оплачены. У 'ru' — как до переноса ENG (загрузка CSV
+  // пустой файл и так не принимает).
+  if (market === 'us') {
+    const rowCount = typeof base.row_count === 'number' ? base.row_count : 0;
+    if (!(rowCount > 0)) {
+      throw new Error(`he_bases ${baseId}: в базе нет строк (row_count=${rowCount}) — шаблон по пустой базе не собираем`);
+    }
   }
 
   // Проект — до переиспользования: готовый шаблон, чьи письма называют чужую
@@ -667,7 +696,6 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // сайта и бриф проекта. Строки проекта нет — база ушла вместе с ним
   // (he_bases.project_id on delete cascade), и чтение базы выше уже упало.
   const project = await readProject(ctx.supabase, job.project_id);
-  const market = ctx.market ?? projectMarket(project);
   // Владелец проекта — клиент ENG-кабинета (letterBrandGuard.heEngClient): его
   // письма проверяются на любом языке. Одно чтение профиля на джобу 'us'.
   const brandProject = {
@@ -681,7 +709,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     stageLog(
       ctx,
       `[template] у базы уже есть готовый шаблон ${reusable.id} — возвращаем его, модель не зовём` +
-        (job.payload?.force === true ? ' (его вставила прошлая попытка этой же джобы)' : ''),
+        (heTemplateJobReusesAny(job) ? '' : ' (его вставила прошлая попытка этой же джобы)'),
     );
     return {
       result: {
@@ -765,8 +793,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const signatureOverride =
     typeof brief.signature_override === 'string' ? brief.signature_override : undefined;
   // Слова клиента (offer_override, business_override) — в план, письма, критик
-  // и рерайт. Блок «CLIENT'S OWN WORDS» сборщики рендерят только для EN:
-  // RU/PL-промпты то же поле игнорируют и не меняются.
+  // и рерайт. Блок «CLIENT'S OWN WORDS» сборщики рендерят только у английских
+  // писем проекта 'us': RU/PL-промпты и английские промпты проекта 'ru' то же
+  // поле игнорируют и не меняются.
   const clientWords = clientWordsFromBrief(brief);
 
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
@@ -808,6 +837,9 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
 
   // Язык всех промптов стадии наследуется от цепочки вертикали (he_chains.language).
   const language = (chain.language === 'en' || chain.language === 'pl' ? chain.language : 'ru') as HeChainLanguage;
+  // Английские письма проекта 'us' — всё, что перенос ENG поменял в письмах;
+  // иначе (RU, PL и английские письма проекта 'ru') — как до переноса.
+  const usEnglish = heUsEnglishLetters(language, market);
 
   // Письма 'us': чужая компания в письмах (letterBrandGuard). Список не пуст,
   // только когда клиент подтверждённо не мы (хост сайта проекта не наш) и
@@ -830,6 +862,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const plan = await callLLMWithSchema(
     buildTemplatePlanMessages({
       language,
+      market,
       verticalName: vertical.name,
       verticalSummary: vertical.summary ?? '',
       chainLetters,
@@ -850,6 +883,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const model = getHeModel('chain');
   const messages = buildTemplateLettersMessages({
     language,
+    market,
     plan: plan.data,
     verticalName: vertical.name,
     chainLetters,
@@ -889,19 +923,20 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   addUsage(usage, llm);
   let { parsed, letters } = buildLetters(llm.text);
 
-  // EN: шаблон не имеет права укоротить цепочку. Цель — число писем
+  // Английские письма 'us': шаблон не имеет права укоротить цепочку. Цель — число писем
   // he_chains.letters (их клиент видел и правил на шаге Letters; второго
   // источника числа нет), не больше того, что стадия берёт вообще. Писем меньше
   // цели → тот же ОДИН повтор, что и при < 3, с английской подсказкой; из двух
   // ответов — ближайший к цели, но не меньше 3 (ничья — повтор). Отказа «по
   // длине» нет: стадия падает, только если и после повтора меньше 3 писем, как
-  // раньше. RU/PL — прежний порог < 3 и русская подсказка.
+  // раньше. RU/PL и английские письма проекта 'ru' — прежний порог < 3 и
+  // русская подсказка.
   const targetLetters = Math.min(chainLetters.length, TEMPLATE_MAX_LETTERS);
-  const retryBelow = language === 'en' ? Math.max(TEMPLATE_MIN_LETTERS, targetLetters) : TEMPLATE_MIN_LETTERS;
+  const retryBelow = usEnglish ? Math.max(TEMPLATE_MIN_LETTERS, targetLetters) : TEMPLATE_MIN_LETTERS;
   if (parsed.length < retryBelow) {
     stageLog(
       ctx,
-      language === 'en'
+      usEnglish
         ? `[template] распознано ${parsed.length} писем, в цепочке ${targetLetters} — retry с фидбэком`
         : `[template] распознано ${parsed.length} писем — retry с фидбэком`,
     );
@@ -909,13 +944,13 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     const retryMessages: LLMMessage[] = [
       ...messages,
       { role: 'assistant', content: llm.text.slice(0, 2000) },
-      { role: 'user', content: language === 'en' ? lengthRetryHintEn(targetLetters, parsed.length) : RETRY_HINT },
+      { role: 'user', content: usEnglish ? lengthRetryHintEn(targetLetters, parsed.length) : RETRY_HINT },
     ];
     llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildLetters(llm.text));
     if (
-      language === 'en' &&
+      usEnglish &&
       letterCountDistance(first.letters.length, targetLetters) < letterCountDistance(letters.length, targetLetters)
     ) {
       stageLog(
@@ -928,26 +963,26 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   if (parsed.length < 3) {
     throw new Error(`Шаблон не распарсился: ${parsed.length} писем после retry`);
   }
-  if (language === 'en' && letters.length !== targetLetters) {
+  if (usEnglish && letters.length !== targetLetters) {
     stageLog(ctx, `[template] писем в шаблоне ${letters.length}, в цепочке ${targetLetters} — число писем расходится`);
   }
 
   // Шаг 2b: длина тел — регламент ≤80 слов (письмо 1 ≤70); >85 слов → один retry на сокращение.
-  // EN: сокращённый ответ не принимается, если он дальше от числа писем цепочки.
+  // Английские письма 'us': сокращённый ответ не принимается, если он дальше от числа писем цепочки.
   if (letters.some((l) => countWords(l.body) > SHORTEN_RETRY_WORDS)) {
     stageLog(ctx, '[template] тела писем длиннее регламента — retry на сокращение');
     const retryLlm = await callLLMText(
       [
         ...messages,
         { role: 'assistant', content: llm.text.slice(0, 2000) },
-        { role: 'user', content: shortenRetryHint(letters, language) },
+        { role: 'user', content: shortenRetryHint(letters, usEnglish) },
       ],
       { model, maxTokens: 16384 },
     );
     addUsage(usage, retryLlm);
     const rebuilt = buildLetters(retryLlm.text);
     const keepsLength =
-      language !== 'en' ||
+      !usEnglish ||
       letterCountDistance(rebuilt.letters.length, targetLetters) <= letterCountDistance(letters.length, targetLetters);
     if (rebuilt.parsed.length >= 3 && keepsLength) {
       llm = retryLlm;
@@ -977,16 +1012,17 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     JSON.stringify(brief),
     JSON.stringify(winnerPatterns),
     plan.data.fixed_block,
-    // EN: слова клиента сырым текстом. Внутри JSON брифа выше они уже есть;
-    // здесь — чтобы цифры клиента, которые EN-промпт велит цитировать
-    // дословно, оставались в корпусе, даже если бриф из него когда-то уберут
-    // (стадия chain у EN так и сделала). RU/PL — корпус прежний.
-    ...(language === 'en' ? [clientWords.offerOverride ?? '', clientWords.businessOverride ?? ''] : []),
+    // Английские письма 'us': слова клиента сырым текстом. Внутри JSON брифа
+    // выше они уже есть; здесь — чтобы цифры клиента, которые их промпт велит
+    // цитировать дословно, оставались в корпусе, даже если бриф из него
+    // когда-то уберут (стадия chain у них так и сделала). Остальные — корпус прежний.
+    ...(usEnglish ? [clientWords.offerOverride ?? '', clientWords.businessOverride ?? ''] : []),
   ].join('\n');
-  // Язык чтения чисел: 'en' — запятая разделяет тысячи (letterChecks); RU/PL —
-  // прежнее чтение. Письма сверяются так же, как прочитан корпус.
-  const facts = extractNumberFacts(factCorpus, language);
-  // letterIndex — номер письма в detail нарушения (учитывается только для 'en').
+  // Чтение чисел: английские письма 'us' — запятая разделяет тысячи
+  // (letterChecks); остальные — прежнее чтение. Письма сверяются так же, как
+  // прочитан корпус.
+  const facts = extractNumberFacts(factCorpus, language, market);
+  // letterIndex — номер письма в detail нарушения (учитывается только у английских писем 'us').
   const lettersForCheck = (ls: HeChainLetterAB[]): HeLetterForCheck[] =>
     ls.flatMap((l, i) => [
       { subject: l.subject ?? '', body: l.body, variant: 'A', letterIndex: i + 1 },
@@ -999,14 +1035,14 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
           letter: i + 1,
           rule: 'unverified_number' as const,
           detail:
-            language === 'en'
+            usEnglish
               ? `letter ${i + 1}, segment variant: the number "${token}" is not in the materials; remove it or replace it with a figure from the materials`
               : `письмо ${i + 1}, сегментный вариант: число «${token}» отсутствует в материалах — удали или замени фактом из материалов`,
         })),
       ),
     );
   const collectRuleViolations = (ls: HeChainLetterAB[]) => [
-    ...checkLetterRules(lettersForCheck(ls), language, facts),
+    ...checkLetterRules(lettersForCheck(ls), language, facts, market),
     ...segmentNumberViolations(ls),
   ];
   /** Сколько нарушений — числа не из материалов (unverified_number). */
@@ -1025,7 +1061,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     );
     // Принятие фикса: то же число писем и не меньше B/сегментных вариантов
     // (модель могла молча выкинуть блоки ---LETTER N B--- / ---SEGMENT---).
-    // EN — и не больше непроверенных чисел, чем в письмах до него: фикс
+    // Английские письма 'us' — и не больше непроверенных чисел, чем в письмах до него: фикс
     // переписывает шаблон целиком и мог вписать цифру, которой нет в
     // материалах, а повтор и рерайт ниже сравнивают числа уже с письмами
     // после фикса — такая цифра ушла бы получателю (rule_violations — только
@@ -1062,8 +1098,8 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         after.seg >= before.seg
       ) {
         const remaining = collectRuleViolations(rebuilt.letters);
-        const numbersBefore = language === 'en' ? unverifiedCount(ruleViolations) : 0;
-        const numbersAfter = language === 'en' ? unverifiedCount(remaining) : 0;
+        const numbersBefore = usEnglish ? unverifiedCount(ruleViolations) : 0;
+        const numbersAfter = usEnglish ? unverifiedCount(remaining) : 0;
         const brandAfterFix = brandLeaksOf(rebuilt.letters);
         if (numbersAfter > numbersBefore) {
           stageLog(
@@ -1197,10 +1233,10 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   //     утверждать того, чего нет в материалах); не проходит ни там, ни там —
   //     откат, если проблем гейта больше.
   //  2) регламент — collectRuleViolations (letterChecks + числа сегментных
-  //     вариантов; абзацы сюда НЕ входят: они только предупреждение). EN:
-  //     сначала непроверенные числа (их больше — откат, даже если всего
-  //     нарушений столько же или меньше; меньше — принимаем), затем общее
-  //     число; RU/PL — общее число, как раньше.
+  //     вариантов; абзацы сюда НЕ входят: они только предупреждение).
+  //     Английские письма 'us': сначала непроверенные числа (их больше —
+  //     откат, даже если всего нарушений столько же или меньше; меньше —
+  //     принимаем), затем общее число; остальные — общее число, как раньше.
   type LetterStanding = {
     gate: HeTemplateOperatorGateResult | null;
     /** Упоминаний чужой компании (только когда проверка включена — letterBrandGuard; иначе 0). */
@@ -1238,7 +1274,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     if (after.brand < before.brand) {
       return numbersUp ? { kind: 'numbers', was: before.numbers, now: after.numbers } : null;
     }
-    if (language === 'en' && after.numbers !== before.numbers) {
+    if (usEnglish && after.numbers !== before.numbers) {
       return numbersUp ? { kind: 'numbers', was: before.numbers, now: after.numbers } : null;
     }
     return after.rules > before.rules ? { kind: 'rules', was: before.rules, now: after.rules } : null;
@@ -1283,7 +1319,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     const preRetry = { letters, ops, operatorMapping, mappingIssues };
     const operatorHint =
       mappingIssues.length || refusingGate
-        ? language === 'en'
+        ? usEnglish
           ? operatorIssuesHintEn([
               ...validateOperatorMapping(operatorMapping, columns, plan.data, {
                 subjectOperators: ops.subjectOperators,
@@ -1346,9 +1382,10 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // урезанный или раздутый rewrite → остаются исходные письма. Критик идёт
   // ПОСЛЕ фикс-прохода и маппинга операторов — он ревюит финальную механику
   // текста; маппинг после рерайта пересобирается детерминированно (ниже).
-  // EN: критик и рерайт видят «CLIENT'S OWN WORDS» (clientWords; сборщики
-  // читают поле только для 'en') — чтобы критик сверял сказанное о клиенте с
-  // его словами, а рерайт брал конкретику оттуда, а не выдумывал.
+  // Английские письма 'us': критик и рерайт видят «CLIENT'S OWN WORDS»
+  // (clientWords; сборщики читают поле только у них) — чтобы критик сверял
+  // сказанное о клиенте с его словами, а рерайт брал конкретику оттуда, а не
+  // выдумывал.
   //
   // Фикс-проход был до рерайта, а сам рерайт регламент не проходит. Поэтому
   // рерайт сверяется с письмами до него — бесплатно, детерминированными
@@ -1357,7 +1394,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   //     (провал на шаге 3b стоил бы всей оплаченной генерации);
   //  а′) 'us', проверка включена (letterBrandGuard): упоминаний чужой компании (brandLeaksOf) после него больше, чем
   //     до него — тот же провал шага 3b;
-  //  б) EN: чисел не из материалов (unverified_number, с сегментными
+  //  б) английские письма 'us': чисел не из материалов (unverified_number, с сегментными
   //     вариантами) стало больше — письмо не должно утверждать того, чего нет
   //     в материалах.
   // Тире, приветствие, «?», стоп-фразы, абзацы и гейт, который не пропускает
@@ -1366,10 +1403,10 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // смыслу (обещание без опоры, утверждение о рынке получателя, которого
   // отправитель знать не может), и откат за стиль выбросил бы его правки.
   // Нарушения регламента принятого рерайта ложатся в
-  // personalization_plan.rule_violations (ниже). RU/PL на рынке 'ru' — как
-  // раньше (принимается).
+  // personalization_plan.rule_violations (ниже). Рынок 'ru' (любой язык, и
+  // английский тоже) — как до переноса ENG: рерайт той же длины принимается.
   const rewriteRollbackReason = (before: HeChainLetterAB[], after: HeChainLetterAB[]): string | null => {
-    if (language !== 'en' && market !== 'us') return null;
+    if (market !== 'us') return null;
     if (market === 'us' && sendGate(before).gate.ok) {
       const gateAfter = sendGate(after).gate;
       if (!gateAfter.ok) {
@@ -1381,7 +1418,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       const now = brandLeaksOf(after);
       if (now.length > was) return `чужая компания в письмах ${now.length} раз (было ${was}): ${describeHeBrandLeaks(now, 3)}`;
     }
-    if (language === 'en') {
+    if (usEnglish) {
       const was = unverifiedCount(collectRuleViolations(before));
       const now = unverifiedCount(collectRuleViolations(after));
       if (now > was) return `непроверенных чисел ${now} (было ${was})`;
@@ -1389,7 +1426,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
     return null;
   };
   let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
-  // EN: замечания критика, чей рерайт откатили, — письма ушли в шаблон без
+  // Английские письма 'us': замечания критика, чей рерайт откатили, — письма ушли в шаблон без
   // его правки. Ложатся в rule_violations (staff-экран шаблона), иначе
   // помеченная критиком неправда уходила бы молча (только строка лога).
   let rolledBackCriticIssues: HeLetterRuleWarning[] = [];
@@ -1401,6 +1438,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         verticalSummary: vertical.summary ?? '',
         letters: criticLetters,
         language,
+        market,
         styleExample,
         winnerPatterns,
         clientWords,
@@ -1423,6 +1461,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
           letters: criticLetters,
           critique: { ...critique.data, issues },
           language,
+          market,
           styleExample,
           winnerPatterns,
           signatureOverride,
@@ -1450,7 +1489,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         const rollback = rewriteRollbackReason(originalLetters, rewritten);
         if (rollback) {
           stageLog(ctx, `[template] rewrite критика откатили к письмам до него: ${rollback}`);
-          if (language === 'en') {
+          if (usEnglish) {
             rolledBackCriticIssues = issues.map((i) => ({
               rule: 'critic' as const,
               letter: i.letter_index,
@@ -1570,16 +1609,17 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   const lengthWarnings = collectLengthWarnings(letters);
   if (lengthWarnings.length) stageLog(ctx, `[template] length_warnings: ${lengthWarnings.join(' | ')}`);
 
-  // EN: регламент ФИНАЛЬНЫХ писем (тех, что ложатся в he_templates; абзацы
+  // Английские письма 'us': регламент ФИНАЛЬНЫХ писем (тех, что ложатся в he_templates; абзацы
   // здесь тоже) — только предупреждение, статус 'ready' он не меняет. Список
   // ложится в personalization_plan.rule_violations, только если он не пуст:
   // его показывает staff-экран шаблона (Step5Template); клиенту
   // personalization_plan не отдаётся (clientEngProjection, TEMPLATE_FIELDS).
-  // RU/PL — ни списка, ни строки лога.
+  // RU/PL и английские письма проекта 'ru' — ни списка, ни строки лога (блок
+  // «Предупреждения регламента писем» шага 5 у них не появляется).
   const finalRuleViolations: HeLetterRuleWarning[] =
-    language === 'en'
+    usEnglish
       ? [
-          ...[...collectRuleViolations(letters), ...checkLetterParagraphs(lettersForCheck(letters), language)].map(
+          ...[...collectRuleViolations(letters), ...checkLetterParagraphs(lettersForCheck(letters), language, market)].map(
             ({ rule, letter, detail }) => ({ rule, letter, detail }),
           ),
           ...rolledBackCriticIssues,
@@ -1623,19 +1663,21 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
   // оплаченных вызовов (план, письма, проверки, критик, рерайт) — стадия падает
   // и на повторе покупает письма заново. Чистка трогает только эти два символа:
   // текст без них (вся кириллица и латиница) ложится байт-в-байт тем же.
+  // Только рынок 'us': у проекта 'ru' запись — как до переноса ENG.
+  const templateRow = {
+    base_id: baseId,
+    vertical_id: base.vertical_id,
+    fixed_block: plan.data.fixed_block,
+    personalization_plan: personalizationPlan,
+    letters,
+    status: 'ready',
+    llm_model: model,
+    tokens_used: usage.tokensUsed,
+    cost_usd: usage.costUsd,
+  };
   const { data: inserted, error: insError } = await ctx.supabase
     .from('he_templates')
-    .insert(stripUnstorableJsonChars({
-      base_id: baseId,
-      vertical_id: base.vertical_id,
-      fixed_block: plan.data.fixed_block,
-      personalization_plan: personalizationPlan,
-      letters,
-      status: 'ready',
-      llm_model: model,
-      tokens_used: usage.tokensUsed,
-      cost_usd: usage.costUsd,
-    }))
+    .insert(market === 'us' ? stripUnstorableJsonChars(templateRow) : templateRow)
     .select('id')
     .single();
   if (insError || !inserted) throw new Error(`he_templates insert: ${insError?.message ?? 'unknown'}`);

@@ -37,12 +37,22 @@
  *     исследование → 'draft'.
  *  d. Неотправленные письма клиенту закрыты (attempts = 3, как у повтора
  *     engClientMail): очередь повторов их больше не берёт.
+ *  e. Свои ящики клиента (BYO, lib/byoMailbox; аудит 14.10.2026, #8): все его
+ *     client_mailbox_accounts → 'disabled' (воркеры byoSend и byoReplies берут
+ *     только 'verified'; byoSend возвращает письмо ящика не 'verified' в
+ *     очередь, не отправляя), затем его client_byo_messages 'pending' и
+ *     'sending' → 'canceled' (статус из 20260610_0002 / 20260915_0002).
+ *     Ящики — первыми: письмо, которое воркер взял в эту минуту, уходит, только
+ *     если воркер прочитал ящик до выключения. Параллельно с b–d, свой срок у
+ *     каждой записи. Подключить ящик и поставить кампанию ENG-клиенту и так
+ *     нельзя (byoMailbox/accessPolicy) — шаг снимает то, что легло раньше.
  * Остановка ПОДТВЕРЖДЕНА (heEngAccountStopConfirmed) — только когда: отправка
  * выключена (или уже была); список проектов прочитан, и у каждого проекта
  * легли все записи, а «Daily top-up» выключен (или уже был, или таблицы добора
- * нет); очередь писем закрыта; у паузы failed = 0, notAttempted = 0,
- * unreadLaunches = 0 и запуски прочитаны (недоступные кабинету кампании —
- * `unreachable` — в правило не входят: решение S3b, их ставит человек).
+ * нет); очередь писем закрыта; свои ящики выключены и их очередь снята; у
+ * паузы failed = 0, notAttempted = 0, unreadLaunches = 0 и запуски прочитаны
+ * (недоступные кабинету кампании — `unreachable` — в правило не входят:
+ * решение S3b, их ставит человек).
  *
  * БЛОКИРОВКА (blockHeEngAccount):
  *  0. Чтения «до» (срок stepMs у каждого): выключатель отправки
@@ -52,10 +62,11 @@
  *     'no_config'; сбой чтения — 'unknown' у каждого проекта; список проектов
  *     не прочитан — null).
  *  1. Отметка блокировки (markHeEngAccountBlocked) — ПЕРВОЙ записью: воркер,
- *     письма клиенту, автозапуск, гейт платных шагов и ночной добор видят
- *     блокировку сразу, даже если дальше что-то не ляжет. Повтор нажатия —
- *     'repeat': состояния «до» остаются от первого нажатия эпизода.
- *  2. Остановка a–d; вход — бан 876000h (как у RU-блокировки), затем отзыв
+ *     письма клиенту, автозапуск, гейт платных шагов, ночной добор, список
+ *     Do-not-contact и снятие его адресов с кампаний видят блокировку сразу,
+ *     даже если дальше что-то не ляжет. Повтор нажатия — 'repeat': состояния
+ *     «до» остаются от первого нажатия эпизода.
+ *  2. Остановка a–e; вход — бан 876000h (как у RU-блокировки), затем отзыв
  *     сессий (RPC admin_revoke_user_sessions), и при неудачном бане — идёт
  *     параллельно с паузой, перед проектами.
  *  3. Отчёт → he_eng_account_blocks.last_stop (только своего нажатия: более
@@ -76,15 +87,29 @@
  * этим нажатием полную остановку: отметка — 'new', состояния «до» читаются
  * сейчас.
  *
+ * DO-NOT-CONTACT. Отдельного шага остановки нет — держит отметка (шаг 1).
+ * Пока она стоит, ветка ENG роута списка (/api/client/blocklist, _eng.ts)
+ * отказывает клиенту в добавлении и удалении адресов, а воркер снятия адресов
+ * с идущих кампаний (engDncRemoval.runHeEngDncRemovalPass, только при
+ * HE_ENG_DNC_REMOVE) откладывает заявки и строки аккаунта без траты попыток и
+ * рассыльщика по ним не зовёт; отметка не прочиталась — тоже не зовёт. После
+ * снятия отметки отложенное продолжается само: это не отправка и не расход, а
+ * исполнение просьбы клиента не писать этим людям. Отметка не записалась —
+ * ни список, ни этот воркер блокировку не видят (строка отчёта о ней это
+ * называет). Строка-пояснение в отчёте блокировки — при записанной отметке.
+ *
  * НЕ ОСТАНАВЛИВАЕТСЯ (строка-пояснение в отчёте): кампании, которые сотрудник
  * запустит руками у рассыльщика (их снова ставит на паузу чтение статуса —
- * engCampaignStatus, не сразу); письмо, уже отданное SMTP-серверу. Ящики пула
- * остаются за клиентом, пока сотрудник не освободит их руками.
+ * engCampaignStatus, не сразу); письмо, уже отданное SMTP-серверу; письма
+ * своего ящика, которые воркер byoSend уже взял в работу с прочитанным до
+ * выключения ящиком (он не перечитывает статус письма перед отправкой). Ящики
+ * пула остаются за клиентом, пока сотрудник не освободит их руками; свои ящики
+ * разблокировка не включает.
  *
  * РАЗБЛОКИРОВКА (unblockHeEngAccount). Сначала — заблокирован ли клиент
  * (активная отметка или бан в GoTrue): нет — ничего не делается (кнопку нажали
  * в устаревшей карточке), не прочиталось — тоже. Пока бан стоит, клиент
- * ничего не нажмёт, поэтому ДО снятия бана остановка a–d повторяется целиком
+ * ничего не нажмёт, поэтому ДО снятия бана остановка a–e повторяется целиком
  * (что уже выключено, даёт «уже»). Активной отметки нет (бан поставлен мимо
  * раздела, или при «Заблокировать» отметка не записалась) — перед остановкой
  * шаги 0–1 блокировки (чтения «до» и отметка с opened_by 'unblock': карточка
@@ -132,12 +157,13 @@
  *
  * СРОКИ при значениях по умолчанию (каждый шаг упёрся в свой срок):
  *  - блокировка (HE_ENG_BLOCK_TIMING): чтения «до» 6 с + отметка 3 с +
- *    выключатель 3 с = 12 с; дальше параллельно пауза ≤ pauseCapMs (42 с) и
- *    вход 5 + 3 с, проекты 7 × 3 = 21 с, письма 3 с (32 с); отчёт 3 с — итого
- *    ≤ 57 с;
+ *    выключатель 3 с = 12 с; дальше параллельно пауза ≤ pauseCapMs (42 с),
+ *    свои ящики 2 × 3 с и вход 5 + 3 с, проекты 7 × 3 = 21 с, письма 3 с
+ *    (32 с); отчёт 3 с — итого ≤ 57 с;
  *  - разблокировка (HE_ENG_UNBLOCK_TIMING): бан, строка отметки и проекты 5 с
  *    (параллельно); без отметки ещё чтения «до» 3 с и отметка 3 с;
- *    выключатель 3 с; пауза ≤ 26 с параллельно с проектами и письмами (24 с);
+ *    выключатель 3 с; пауза ≤ 26 с параллельно с проектами и письмами (24 с)
+ *    и своими ящиками (6 с);
  *    перечитывание отметки 3 с, снятие бана 5 с, снятие отметки 3 с и при
  *    'superseded' бан снова 5 с — с ними параллельно чтение исследования
  *    (6 с) — итого ≤ 56 с.
@@ -170,6 +196,7 @@ import {
   type HeEngUnblockReport,
   type HeEngUnreachableCampaign,
 } from './engAccountBlockMarker';
+import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE } from '@/components/client-eng/clientFailureText';
 import { toClientEngStageErrorCode } from './clientEngProjection';
 import { HE_ENG_BLOCK_SWEEP_RECHECK_MS } from './engBlockedSweep';
 import {
@@ -339,6 +366,87 @@ async function closeQueuedClientEmails(db: SupabaseClient, userId: string, now: 
     return 'failed';
   }
   return (data ?? []).length;
+}
+
+/* ─────────────── Свои ящики клиента (BYO, шаг e) ─────────────── */
+
+const BYO_MAILBOXES_TABLE = 'client_mailbox_accounts';
+const BYO_MESSAGES_TABLE = 'client_byo_messages';
+/** Статусы очереди, которые воркер byoSend ещё отправит (claim_byo_messages, 20260915_0002). */
+const BYO_UNSENT_STATUSES = ['pending', 'sending'] as const;
+/** client_byo_messages.error снятого блокировкой письма — для журнала, клиенту не показывается. */
+const BYO_CANCELED_ERROR = 'account_blocked';
+
+/**
+ * Шаг e (шапка модуля): что сделала остановка своих ящиков клиента. Таблицы
+ * нет — ящиков и очереди нет (0). Поле `byo` отчёта; в отчётах до этой правки
+ * его нет.
+ */
+export interface HeEngByoStopReport {
+  /** Сколько своих ящиков клиента стало 'disabled'. */
+  mailboxes: number | 'failed';
+  /** Сколько писем из них ('pending' / 'sending') стало 'canceled'. */
+  messages: number | 'failed';
+}
+
+/** Отчёт блокировки с шагом e (у отчёта до этой правки поля нет). */
+export type HeEngBlockReportWithByo = HeEngBlockReport & { byo?: HeEngByoStopReport };
+/** Остановка a–e. */
+export type HeEngAccountStopReportWithByo = HeEngAccountStopReport & { byo?: HeEngByoStopReport };
+
+/** Свои ящики клиента → 'disabled' (кроме уже выключенных). */
+async function disableOwnMailboxes(db: SupabaseClient, userId: string): Promise<number | 'failed'> {
+  const { data, error } = await db
+    .from(BYO_MAILBOXES_TABLE)
+    .update({ status: 'disabled' })
+    .eq('client_user_id', userId)
+    .neq('status', 'disabled')
+    .select('id');
+  if (error) {
+    if (isTableMissing(error)) return 0;
+    void logWarn('he.eng_block.byo_mailboxes_failed', pgText('client_mailbox_accounts disable', error), { userId });
+    return 'failed';
+  }
+  return (data ?? []).length;
+}
+
+/** Неотправленные письма своих ящиков клиента → 'canceled'. */
+async function cancelOwnMailboxQueue(db: SupabaseClient, userId: string): Promise<number | 'failed'> {
+  const { data, error } = await db
+    .from(BYO_MESSAGES_TABLE)
+    .update({ status: 'canceled', error: BYO_CANCELED_ERROR })
+    .eq('client_user_id', userId)
+    .in('status', [...BYO_UNSENT_STATUSES])
+    .select('id');
+  if (error) {
+    if (isTableMissing(error)) return 0;
+    void logWarn('he.eng_block.byo_messages_failed', pgText('client_byo_messages cancel', error), { userId });
+    return 'failed';
+  }
+  return (data ?? []).length;
+}
+
+/**
+ * `byo` отчёта, прочитанный без доверия к форме: отчёт блокировки лежит в
+ * jsonb (last_stop) и парсится приведением (parseHeEngBlockReport), а у
+ * отчётов до этой правки поля нет — тогда null.
+ */
+function byoReportOf(r: object): HeEngByoStopReport | null {
+  const raw = (r as { byo?: unknown }).byo;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const rec = raw as Record<string, unknown>;
+  const count = (v: unknown): number | 'failed' | null =>
+    typeof v === 'number' && Number.isFinite(v) ? v : v === 'failed' ? 'failed' : null;
+  const mailboxes = count(rec.mailboxes);
+  const messages = count(rec.messages);
+  if (mailboxes === null || messages === null) return null;
+  return { mailboxes, messages };
+}
+
+/** Шаг e лёг (поля нет — отчёт до этой правки: правило его не требует). */
+function byoStopped(r: object): boolean {
+  const byo = byoReportOf(r);
+  return byo === null || (typeof byo.mailboxes === 'number' && typeof byo.messages === 'number');
 }
 
 /* ─────────────── Шаги (общие у блокировки и разблокировки) ─────────────── */
@@ -522,6 +630,15 @@ function closeEmailsStep(env: StepEnv): Promise<number | 'failed'> {
     closeQueuedClientEmails(env.portalDb, env.userId, env.now), env.ctx);
 }
 
+/** Шаг e: свои ящики клиента — сначала ящики, потом очередь; у каждой записи свой срок. */
+async function stopOwnMailboxesStep(env: StepEnv): Promise<HeEngByoStopReport> {
+  const mailboxes = await step<number | 'failed'>('byo_mailboxes', env.timing.stepMs, 'failed', () =>
+    disableOwnMailboxes(env.portalDb, env.userId), env.ctx);
+  const messages = await step<number | 'failed'>('byo_messages', env.timing.stepMs, 'failed', () =>
+    cancelOwnMailboxQueue(env.portalDb, env.userId), env.ctx);
+  return { mailboxes, messages };
+}
+
 /* ─────────────── Правило «остановка подтверждена» ─────────────── */
 
 const TOP_UP_STOPPED: ReadonlyArray<HeEngBlockProjectReport['top_up']> = ['turned_off', 'already_off', 'unsupported'];
@@ -535,13 +652,14 @@ function campaignsStopped(c: HeEngBlockCampaignsReport): boolean {
   return !c.readFailed && c.failed === 0 && c.notAttempted === 0 && c.unreadLaunches === 0;
 }
 
-/** Остановка a–d подтверждена (правило — в шапке модуля). */
-export function heEngAccountStopConfirmed(r: HeEngAccountStopReport): boolean {
+/** Остановка a–e подтверждена (правило — в шапке модуля). */
+export function heEngAccountStopConfirmed(r: HeEngAccountStopReportWithByo): boolean {
   return (
     (r.sending_switch === 'revoked' || r.sending_switch === 'already')
     && r.projects_read === 'ok'
     && r.projects.every(projectStopped)
     && typeof r.client_emails === 'number'
+    && byoStopped(r)
     && campaignsStopped(r.campaigns)
   );
 }
@@ -550,7 +668,7 @@ export function heEngAccountStopConfirmed(r: HeEngAccountStopReport): boolean {
  * Блокировка довершена: остановка подтверждена, отметка записана, бан и отзыв
  * сессий легли, и недоступных кабинету кампаний нет (их ставит человек).
  */
-function heEngBlockComplete(r: Omit<HeEngBlockReport, 'complete'>): boolean {
+function heEngBlockComplete(r: Omit<HeEngBlockReportWithByo, 'complete'>): boolean {
   return (
     r.marker === 'ok'
     && r.ban === 'ok'
@@ -653,6 +771,28 @@ function emailsLine(r: HeEngAccountStopReport): HeEngBlockLine {
     : { tone: 'red', text: 'Очередь писем клиенту не очищена' };
 }
 
+/** Шаг e — строка отчёта; у отчёта до этой правки строки нет. */
+function byoLines(r: object, again: string): HeEngBlockLine[] {
+  const byo = byoReportOf(r);
+  if (!byo) return [];
+  const failed = [
+    byo.mailboxes === 'failed' ? 'ящики не выключены' : null,
+    byo.messages === 'failed' ? 'очередь писем из них не снята' : null,
+  ].filter((v): v is string => v !== null);
+  if (failed.length > 0) {
+    return [{ tone: 'red', text: `Свои ящики клиента: ${failed.join(', ')} — нажмите ${again}` }];
+  }
+  if (byo.mailboxes === 0 && byo.messages === 0) {
+    return [{ tone: 'ok', text: 'Свои ящики клиента: включённых нет, писем в их очереди нет' }];
+  }
+  return [
+    {
+      tone: 'ok',
+      text: `Свои ящики клиента выключены (${byo.mailboxes}), снято писем из их очереди: ${byo.messages}`,
+    },
+  ];
+}
+
 /** Недоступная кабинету кампания — одной строкой для сотрудника: что искать в Instantly и где. */
 function heEngUnreachableText(c: HeEngUnreachableCampaign): string {
   const where = [
@@ -711,23 +851,26 @@ function campaignLines(c: HeEngBlockCampaignsReport, again: string, mode: 'block
   return lines;
 }
 
-/** Остановка a–d — строки в порядке шагов (выключатель, проекты, письма, кампании). */
-function stopLines(r: HeEngAccountStopReport, again: string, mode: 'block' | 'unblock'): HeEngBlockLine[] {
+/** Остановка a–e — строки в порядке шагов (выключатель, проекты, письма, свои ящики, кампании). */
+function stopLines(r: HeEngAccountStopReportWithByo, again: string, mode: 'block' | 'unblock'): HeEngBlockLine[] {
   return [
     switchLine(r.sending_switch),
     ...projectsLines(r, again),
     emailsLine(r),
+    ...byoLines(r, again),
     ...campaignLines(r.campaigns, again, mode),
   ];
 }
 
 // Без отметки блокировку видят только проверки, которые читают и бан
 // (readHeEngOwnerHold / readHeEngAccountStanding и письма клиенту); отметку
-// одну читают страж взятия задач воркера и фоновая проверка заблокированных
-// (engBlockedSweep).
+// одну читают страж взятия задач воркера, фоновая проверка заблокированных
+// (engBlockedSweep), ветка ENG списка Do-not-contact (_eng.ts) и воркер
+// снятия его адресов с кампаний (engDncRemoval).
 const SEEN_BY_BAN =
   'блокировку видят только проверки бана (новые платные шаги, следующие шаги автопилота, автозапуск, ночной ' +
-  'добор, письма клиенту); уже поставленные задачи и фоновая проверка заблокированных её не видят';
+  'добор, письма клиенту); уже поставленные задачи, фоновая проверка заблокированных, правка списка ' +
+  'Do-not-contact и снятие его адресов с кампаний её не видят';
 const SEEN_BY_NONE =
   'блокировку не видит ни одна проверка — держат только записи самой остановки (выключатель отправки, ' +
   'автопилот, автозапуск, «Daily top-up», пауза кампаний), если они легли';
@@ -736,7 +879,7 @@ const SEEN_BY_NONE =
  * Строки отчёта блокировки (карточка клиента, ответ роута) — по одному
  * отчёту, без чтений: первая строка — итог. Красная — то, что не остановилось.
  */
-export function heEngBlockReportLines(r: HeEngBlockReport): HeEngBlockLine[] {
+export function heEngBlockReportLines(r: HeEngBlockReportWithByo): HeEngBlockLine[] {
   const lines: HeEngBlockLine[] = [];
   if (r.complete) {
     lines.push({ tone: 'ok', text: 'Клиент заблокирован, всё остановлено.' });
@@ -805,17 +948,28 @@ export function heEngBlockReportLines(r: HeEngBlockReport): HeEngBlockLine[] {
   }
 
   lines.push(...rest);
+  // Do-not-contact держит одна отметка (шапка, «DO-NOT-CONTACT»): без неё
+  // про это уже сказала строка отметки (SEEN_BY_BAN / SEEN_BY_NONE).
+  if (r.marker === 'ok') {
+    lines.push({
+      tone: 'note',
+      text:
+        'Do-not-contact: пока стоит отметка, клиент не меняет свой список, а снятие его адресов с идущих кампаний ' +
+        '(если оно включено) отложено и рассыльщика не зовёт; после разблокировки оно продолжится само.',
+    });
+  }
   lines.push({
     tone: 'note',
     text:
       'Кампании, которые сотрудник запустит руками у рассыльщика, блокировка не держит — фоновое чтение статуса ' +
-      'ставит их на паузу не сразу. Ящики отправки остаются за клиентом, пока их не освободят руками.',
+      'ставит их на паузу не сразу. Ящики отправки остаются за клиентом, пока их не освободят руками. Письмо ' +
+      'своего ящика клиента, которое рассыльщик этих ящиков уже взял в работу в эту минуту, может уйти.',
   });
   return lines;
 }
 
-/** Что из остановки a–d не подтвердилось — коротко, для алерта и фразы ошибки. */
-function stopFailedSteps(r: HeEngAccountStopReport): string[] {
+/** Что из остановки a–e не подтвердилось — коротко, для алерта и фразы ошибки. */
+function stopFailedSteps(r: HeEngAccountStopReportWithByo): string[] {
   const out: string[] = [];
   if (r.sending_switch === 'failed') out.push('выключение отправки');
   if (r.projects_read === 'failed') out.push('проекты не прочитались');
@@ -825,6 +979,7 @@ function stopFailedSteps(r: HeEngAccountStopReport): string[] {
     if (parts.length > 0) out.push(`проект ${siteOf(p)}: ${parts.join(', ')}`);
   }
   if (r.client_emails === 'failed') out.push('очередь писем клиенту');
+  if (!byoStopped(r)) out.push('свои ящики клиента (выключение или их очередь писем)');
   const c = r.campaigns;
   if (c.readFailed) out.push('пауза кампаний (запуски не прочитались)');
   else if (!campaignsStopped(c)) {
@@ -836,7 +991,7 @@ function stopFailedSteps(r: HeEngAccountStopReport): string[] {
 }
 
 /** Что не остановилось при блокировке — коротко, для алерта и фразы ошибки. Пусто — всё. */
-function heEngBlockFailedSteps(r: Omit<HeEngBlockReport, 'complete'>): string[] {
+function heEngBlockFailedSteps(r: Omit<HeEngBlockReportWithByo, 'complete'>): string[] {
   const out: string[] = [];
   if (r.marker === 'missing') out.push(`отметка блокировки (нет таблицы — миграция ${HE_ENG_ACCOUNT_BLOCKS_MIGRATION})`);
   if (r.marker === 'failed') out.push('отметка блокировки');
@@ -862,9 +1017,16 @@ function notLiftedText(r: Pick<HeEngUnblockReport, 'ban_before'>): string {
   return r.ban_before === false ? 'Отметка блокировки не снята' : r.ban_before === null ? 'Блокировка не снята' : 'Бан не снят';
 }
 
-/** Бана нет, держит одна отметка: что клиент может и чего нет. */
+/**
+ * Бана нет, держит одна отметка: что клиент может и чего нет. Отметку читает
+ * рыночный гейт кабинета (apiGuards.requireEngMarket): запросы
+ * /api/client/eng/** и подтверждения почты ему отказывают; ветка ENG списка
+ * Do-not-contact (/api/client/blocklist/**, _eng.ts) читает её сама и
+ * отказывает в добавлении и удалении — смотреть список он может.
+ */
 const MARKER_ONLY =
-  'бана нет — клиент может войти, но пока стоит отметка, платные шаги, запуск, отправку и ночной добор ему не включить';
+  'бана нет — клиент может войти, но пока стоит отметка, кабинет отказывает ему в работе с проектами (платные ' +
+  'шаги, запуск, отправка, ночной добор, письма, рынки) и в правке списка Do-not-contact (смотреть его он может)';
 
 /** Откуда остановка разблокировки и что с отметкой перед ней. */
 function unblockOriginLines(r: HeEngUnblockReport): HeEngBlockLine[] {
@@ -1013,6 +1175,9 @@ const RESEARCH_RESTART_TEXT: Record<HeEngResearchRestart, string> = {
   team:
     'исследование не закончено, и из кабинета его не запустить (кабинет повторяет его только после технического ' +
     'сбоя) — перезапустите в инструменте, если нужно',
+  describe_business:
+    'исследование ждёт описания бизнеса (на сайте почти нет текста) — клиент продолжит его сам: описание и ' +
+    '«Save and continue» на шаге 1; перезапуск в инструменте без описания остановится так же',
   running: 'исследование идёт',
 };
 
@@ -1054,6 +1219,14 @@ export function heEngUnblockReportLines(r: HeEngUnblockReport): HeEngBlockLine[]
       'Рынки сами не запустятся: клиент нажмёт «Launch» на шаге 3; кампании на паузе — «Start sending» у каждого ' +
       'рынка; ночной добор («Daily top-up») — «Turn on» на дашборде.',
   });
+  // Отложенное на время блокировки снятие адресов Do-not-contact (шапка,
+  // «DO-NOT-CONTACT») продолжается само, как только отметки нет.
+  if (r.marker === 'cleared') {
+    lines.push({
+      tone: 'note',
+      text: 'Снятие адресов Do-not-contact с кампаний клиента, отложенное на время блокировки (если оно включено), продолжится само.',
+    });
+  }
 
   const siteById = new Map(r.stop.projects.map((p) => [p.project_id, siteOf(p)]));
   const refill = r.refill_enabled_before;
@@ -1100,11 +1273,19 @@ export type HeEngAccountResearchRead =
     }
   | { ok: false };
 
-/** Вердикт шага 1 (researchJob.engResearchRetryVerdict) → кто снова запустит исследование. */
+/**
+ * Вердикт шага 1 (researchJob.engResearchRetryVerdict) → кто снова запустит
+ * исследование. Research, ждущий описания бизнеса (проект 'failed' кодом
+ * website_thin, последняя research-джоба не отменена — то же условие, что у
+ * состояния 'needs_description' шага 1, EngStepBrief.researchStateOf), вердикт
+ * получает 'not_technical' (код в HE_RESEARCH_FINAL_STOP_CODES), но это не
+ * «только команда»: его продолжает сам клиент — 'describe_business'.
+ */
 function researchRestartOf(
   verdict: ReturnType<typeof engResearchRetryVerdict>,
   status: unknown,
   errorCode: unknown,
+  lastJobStatus: unknown,
 ): HeEngResearchRestart | null {
   switch (verdict) {
     case 'finished':
@@ -1118,7 +1299,9 @@ function researchRestartOf(
       // Шаг 1 у 'billing' / 'configuration' сначала зовёт в Support, потом «Try again».
       return status === 'failed' && (errorCode === 'billing' || errorCode === 'configuration') ? 'team_fix' : 'try_again';
     case 'not_technical':
-      return 'team';
+      return status === 'failed' && errorCode === HE_RESEARCH_NEEDS_DESCRIPTION_CODE && lastJobStatus !== 'cancelled'
+        ? 'describe_business'
+        : 'team';
   }
 }
 
@@ -1166,7 +1349,7 @@ export async function readHeEngAccountResearch(
           now: now.getTime(),
           graceMs: HE_RESEARCH_STALL_GRACE_MS,
         });
-        return { id, website, status, restart: researchRestartOf(verdict, p.status, errorCode) };
+        return { id, website, status, restart: researchRestartOf(verdict, p.status, errorCode, last.job?.status) };
       }),
     );
     if (projects.some((p) => p === null)) {
@@ -1183,7 +1366,7 @@ export async function readHeEngAccountResearch(
 /* ─────────────── Блокировка ─────────────── */
 
 export interface HeEngBlockResult {
-  report: HeEngBlockReport;
+  report: HeEngBlockReportWithByo;
   /** Строки отчёта + строка о сохранении отчёта. */
   lines: HeEngBlockLine[];
   /** Одна фраза: что не остановилось; null — всё остановлено. */
@@ -1227,8 +1410,10 @@ export async function blockHeEngAccount(input: {
   // 2a. Выключатель отправки.
   const sendingSwitch = (await revokeSendingStep(env)).outcome;
 
-  // 2b. Пауза кампаний — параллельно с входом, проектами и письмами.
+  // 2b. Пауза кампаний — параллельно с входом, проектами, письмами и своими
+  // ящиками (2e).
   const pauseP = pauseCampaignsStep(env, instantlyDb);
+  const byoP = stopOwnMailboxesStep(env);
   const rest = (async () => {
     let bannedUntil: string | null = null;
     const ban = await step<'ok' | 'failed'>('ban', env.timing.authMs, 'failed', async () => {
@@ -1253,9 +1438,9 @@ export async function blockHeEngAccount(input: {
     const clientEmails = await closeEmailsStep(env);
     return { ban, sessions, bannedUntil: bannedUntil as string | null, projects, clientEmails };
   })();
-  const [campaigns, done] = await Promise.all([pauseP, rest]);
+  const [campaigns, done, byo] = await Promise.all([pauseP, rest, byoP]);
 
-  const partial: Omit<HeEngBlockReport, 'complete'> = {
+  const partial: Omit<HeEngBlockReportWithByo, 'complete'> & { byo: HeEngByoStopReport } = {
     marker,
     sending_switch: sendingSwitch,
     ban: done.ban,
@@ -1263,9 +1448,10 @@ export async function blockHeEngAccount(input: {
     projects_read: projectsRead.kind === 'ok' ? 'ok' : 'failed',
     projects: done.projects,
     client_emails: done.clientEmails,
+    byo,
     campaigns,
   };
-  const report: HeEngBlockReport = {
+  const report: HeEngBlockReportWithByo = {
     complete: heEngBlockComplete(partial),
     ...(openedByUnblock ? { opened_by: 'unblock' as const } : {}),
     ...partial,
@@ -1437,7 +1623,7 @@ export async function unblockHeEngAccount(input: {
   const reblockedMeanwhile = markerWritten === 'taken' && openedBy === 'block';
   const projectsRead = await projectsP;
 
-  // 2. Остановка a–d. Кампании, чья пауза прочитана после начала эпизода (и
+  // 2. Остановка a–e. Кампании, чья пауза прочитана после начала эпизода (и
   // не раньше окна перечитывания фоновой проверки), засчитываются без вызова.
   const sw = await revokeSendingStep(env);
   email = email ?? sw.email;
@@ -1445,15 +1631,17 @@ export async function unblockHeEngAccount(input: {
   const confirmedSinceMs = Number.isFinite(episodeMs)
     ? Math.max(episodeMs, Date.now() - HE_ENG_BLOCK_SWEEP_RECHECK_MS)
     : undefined;
-  const [campaigns, work] = await Promise.all([
+  const [campaigns, work, byo] = await Promise.all([
     pauseCampaignsStep(env, instantlyDb, confirmedSinceMs),
     (async () => ({ projects: await stopProjectsStep(env, projectsRead), clientEmails: await closeEmailsStep(env) }))(),
+    stopOwnMailboxesStep(env),
   ]);
-  const stopReport: HeEngAccountStopReport = {
+  const stopReport: HeEngAccountStopReportWithByo & { byo: HeEngByoStopReport } = {
     sending_switch: sw.outcome,
     projects_read: projectsRead.kind === 'ok' ? 'ok' : 'failed',
     projects: work.projects,
     client_emails: work.clientEmails,
+    byo,
     campaigns,
   };
   const confirmed = heEngAccountStopConfirmed(stopReport);

@@ -59,7 +59,7 @@ import {
 import { getHeActiveJobSignal } from '../llm';
 import type { HeMarket } from '../market';
 import { isHeOperationTimeout, withHeDeadline } from '../operationDeadline';
-import { defaultSearch, HE_SEARCH_TIMEOUT_MS } from './searchIo';
+import { defaultSearch, HE_SEARCH_TIMEOUT_MS, isHeSearchProviderError } from './searchIo';
 import type { HeStageContext } from './shared';
 
 export type HeFetchTextFn = (url: string) => Promise<string>;
@@ -219,6 +219,13 @@ const SEARCH_TIMEOUT_MS = HE_SEARCH_TIMEOUT_MS;
  * Стадии оба рода одинаковы (повторять пути origin'а незачем); различает их
  * только кабинет — по роду в тексте.
  *
+ * ТОЛЬКО market='us' (решение владельца 14.10.2026 «Как было»). У RU-проекта
+ * чтение сайта бросает исходную ошибку гейта или парсера, как до порта ENG:
+ * site_profile на ней останавливается прежним текстом, без пометок
+ * site_unreachable/site_thin в брифе и без продолжения по ручному описанию
+ * бизнеса (siteProfile.ts этот класс читает по типу, а RU его больше не
+ * получает). Защита чтения (heFetchGuard, потолок тела) и сроки — общие.
+ *
  * Зачем свой класс поверх чужих ошибок. Стадии нужно три разных решения на три
  * исхода одного вызова: истёк срок (транзиент, повторяем), отменили (конец
  * работы), сайт недоступен (перебирать остальные пути этого origin'а не за чем,
@@ -297,8 +304,10 @@ function asSiteUnreachable(
   kind: HeSiteUnreachableKind,
   url: string,
   signal: AbortSignal,
+  market: HeMarket,
 ): unknown {
-  if (signal.aborted || isHeOperationTimeout(e)) return e;
+  // RU — исходная ошибка, как до порта ENG (см. шапку класса).
+  if (market !== 'us' || signal.aborted || isHeOperationTimeout(e)) return e;
   return new HeSiteUnreachableError(kind, url, e instanceof Error ? e.message : String(e), e);
 }
 
@@ -421,8 +430,9 @@ function heFetchGuard(market: HeMarket): WebsiteFetchGuard {
 }
 
 /**
- * SSRF-гейт до первого запроса: адрес публичный и резолвится. Отказ — род
- * `dns` (у рынка 'us' сбой самого резолвера отделён, см. usDnsFailure).
+ * SSRF-гейт до первого запроса: адрес публичный и резолвится. Отказ у рынка
+ * 'us' — род `dns` (сбой самого резолвера отделён, см. usDnsFailure), у RU —
+ * исходная ошибка гейта, как до порта ENG.
  * Общий шаг defaultFetchText и defaultFetchPage.
  *
  * У рынка 'us' следом — политика его защиты чтения (порт и адреса наших
@@ -439,14 +449,14 @@ async function gateWebsiteAddress(normalized: string, signal: AbortSignal, marke
     );
   } catch (e) {
     if (market !== 'us' || signal.aborted || isHeOperationTimeout(e)) {
-      throw asSiteUnreachable(e, 'dns', normalized, signal);
+      throw asSiteUnreachable(e, 'dns', normalized, signal, market);
     }
     // Повторный lookup — под тем же бюджетом DNS, что и первый.
     const failure = await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
       usDnsFailure(e, normalized),
     );
     if (failure !== e) throw failure;
-    throw asSiteUnreachable(e, 'dns', normalized, signal);
+    throw asSiteUnreachable(e, 'dns', normalized, signal, market);
   }
   if (market === 'us') {
     try {
@@ -456,7 +466,7 @@ async function gateWebsiteAddress(normalized: string, signal: AbortSignal, marke
     } catch (e) {
       // Отказ политики — по дискриминанту WebsiteAddressRefusedError, не по тексту.
       const refused = (e as { websiteAddressRefused?: unknown } | null)?.websiteAddressRefused === true;
-      throw refused ? asSiteUnreachable(e, 'dns', normalized, signal) : e;
+      throw refused ? asSiteUnreachable(e, 'dns', normalized, signal, market) : e;
     }
   }
   // DNS-резолв не прерывается: его поздний результат не должен начать HTTP.
@@ -467,7 +477,8 @@ async function gateWebsiteAddress(normalized: string, signal: AbortSignal, marke
  * Дефолтный фетч: нормализация URL → SSRF-гейт (DNS/приватные адреса режем
  * до первого запроса) → fetchAndExtract (главная + «о компании», ≤3000 символов)
  * с защитой чтения и потолком тела на каждом запросе цепочки.
- * Оба шага дают собственный род недоступности — см. HeSiteUnreachableError.
+ * Оба шага дают собственный род недоступности у рынка 'us' — см.
+ * HeSiteUnreachableError; у RU — исходные ошибки гейта и парсера.
  *
  * Порядок шагов важен: проверка публичности адреса идёт ПЕРВОЙ, до любого
  * запроса, и маршрут рынка её не обходит.
@@ -493,7 +504,7 @@ export async function defaultFetchText(
     } catch (e) {
       // Пустая/JS-страница сюда НЕ попадает: у неё есть HTML, и fetchAndExtract
       // возвращает про это текст, а не бросает.
-      throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal) : e;
+      throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal, market) : e;
     }
     signal.throwIfAborted();
     return text;
@@ -529,7 +540,7 @@ export async function defaultFetchPage(
         ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
       });
     } catch (e) {
-      throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal) : e;
+      throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal, market) : e;
     }
     signal.throwIfAborted();
     return page;
@@ -578,12 +589,40 @@ export function resolveFetchPage(ctx: HeStageContext): HeFetchPageFn {
     ).finally(() => ctx.onActivity?.());
 }
 
+/**
+ * Поиск для стадии.
+ *
+ * ОТКАЗ ПОИСКА У RU-ПРОЕКТА — ПУСТАЯ ВЫДАЧА, КАК ДО ПОРТА ENG (решение
+ * владельца 14.10.2026 «Как было»). До волны 3 дефолтный поиск не бросал
+ * никогда: нет ключа, кончились кредиты, 5xx, свой таймаут — пустой массив, и
+ * стадии RU-инструмента (competitors, brand_cloud, evidence, vocab) шли дальше
+ * на том, что есть. С волны 3 defaultSearch бросает типизированный отказ
+ * (HeSearchProviderError), а стадии по счётчику отказов останавливаются
+ * (searchIo.heSearchStageFailure / heSearchOutageFailure) — это остаётся ТОЛЬКО
+ * у market='us'. У любого другого рынка дефолтный поиск снова отвечает пустой
+ * выдачей на отказ провайдера и на собственный срок поиска (SEARCH_TIMEOUT_MS):
+ * стадия не видит отказа вовсе и идёт прежним путём. Отмена задачи (сигнал
+ * джобы, в том числе сторож и срок стадии) по-прежнему бросается у обоих
+ * рынков — сроки и сторож остаются общими. Подменённый ctx.search (тесты,
+ * особые стадии) отвечает как есть: его отказы стадии ловили и до порта.
+ */
 export function resolveSearch(ctx: HeStageContext): HeSearchFn {
   // Рынок проекта ведёт geo Serper только в дефолтной реализации; подменённый
   // ctx.search (тесты, особые стадии) работает как раньше.
   const parent = heStageSignal(ctx);
-  return (q) =>
-    withHeDeadline('website search', SEARCH_TIMEOUT_MS, parent, (signal) =>
-      ctx.search ? ctx.search(q) : defaultSearch(q, ctx.market ?? 'ru', signal),
-    ).finally(() => ctx.onActivity?.());
+  const market: HeMarket = ctx.market ?? 'ru';
+  const emptyOnProviderFailure = !ctx.search && market !== 'us';
+  return (q) => {
+    const run = withHeDeadline('website search', SEARCH_TIMEOUT_MS, parent, (signal) =>
+      ctx.search ? ctx.search(q) : defaultSearch(q, market, signal),
+    );
+    const settled = emptyOnProviderFailure
+      ? run.catch((e: unknown): Awaited<ReturnType<HeSearchFn>> => {
+          if (parent?.aborted) throw e;
+          if (isHeSearchProviderError(e) || isHeOperationTimeout(e)) return [];
+          throw e;
+        })
+      : run;
+    return settled.finally(() => ctx.onActivity?.());
+  };
 }

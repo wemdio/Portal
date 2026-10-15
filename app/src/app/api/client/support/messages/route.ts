@@ -11,6 +11,26 @@ import { logError } from '@/lib/loggerServer';
 export const dynamic = 'force-dynamic';
 
 /**
+ * Имя клиента в staff-сигналах (колокольчик public.notifications и Telegram).
+ * Клиент ENG-кабинета (profiles.market='eng') помечен «[EN]»: ответ менеджера
+ * уходит ему в чат как есть, и русский ответ англоязычный клиент не прочтёт
+ * (аудит 14.10.2026). В Telegram — ещё и прямая подсказка, на каком языке
+ * отвечать. Только staff-сторона: клиенту эти строки не показываются. У
+ * RU-клиента имя то же, что и раньше, в обоих каналах.
+ */
+function supportStaffDisplayNames(
+  clientDisplayName: string,
+  engClient: boolean,
+): { notification: string; telegram: string } {
+  if (!engClient) return { notification: clientDisplayName, telegram: clientDisplayName };
+  const marked = `[EN] ${clientDisplayName}`;
+  return {
+    notification: marked,
+    telegram: `${marked} — англоязычный клиент, отвечайте по-английски`,
+  };
+}
+
+/**
  * POST /api/client/support/messages
  * body: { body: string }
  *
@@ -54,10 +74,12 @@ export async function POST(req: NextRequest) {
     });
     if (!message) return jsonError('Не удалось сохранить сообщение', 500);
 
-    // Pull the client's display name for the manager-side notification title.
+    // Pull the client's display name for the manager-side notification title,
+    // and the market: an English (ENG cabinet) client must be answered in
+    // English, because the manager's reply reaches the client verbatim.
     const { data: profile } = await adminClient
       .from('profiles')
-      .select('full_name, email')
+      .select('full_name, email, market')
       .eq('id', userId)
       .maybeSingle();
 
@@ -65,13 +87,17 @@ export async function POST(req: NextRequest) {
       (profile?.full_name as string | null)?.trim() ||
       (profile?.email as string | null) ||
       'клиент';
+    const staffNames = supportStaffDisplayNames(
+      clientDisplayName,
+      (profile as { market?: unknown } | null)?.market === 'eng',
+    );
 
     // Fanout — non-blocking semantics: even if it fails the message is saved.
     await notifyManagersOfClientMessage({
       db: adminClient,
       threadId: thread.id,
       clientUserId: userId,
-      clientDisplayName,
+      clientDisplayName: staffNames.notification,
       body: validation.body,
     });
 
@@ -79,7 +105,7 @@ export async function POST(req: NextRequest) {
     // managers miss messages when the portal isn't open). Fire-and-forget: it
     // never throws, and a TG outage must not fail the client's send.
     void sendSupportTelegramAlert({
-      clientDisplayName,
+      clientDisplayName: staffNames.telegram,
       body: validation.body,
       threadId: thread.id,
     });

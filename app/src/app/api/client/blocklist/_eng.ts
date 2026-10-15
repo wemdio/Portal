@@ -18,11 +18,29 @@
  * пока запуск уже идёт, в этот запуск ещё может попасть. Экран говорит это
  * клиенту так же.
  *
- * ЧЕГО ВЕТКА НЕ ДЕЛАЕТ. Людей, которые УЖЕ лежат в кампании, она из кампании не
- * убирает: ни одного вызова рассыльщика здесь нет. Почему — отчёт лейна
- * (`.s4-reports/do-not-contact.md`): в кодовой базе нет проверенного вызова
- * «снять одного лида с кампании», а воркспейс пула общий с другими клиентами.
- * Экран говорит это клиенту прямым текстом.
+ * ЛЮДИ, КОТОРЫЕ УЖЕ ЛЕЖАТ В КАМПАНИИ. Сама ветка рассыльщика не зовёт никогда.
+ * Снятие с идущих кампаний клиента (решение владельца 14.10.2026) — модуль
+ * `hypothesisEngine/engDncRemoval.ts`, за выключателем HE_ENG_DNC_REMOVE (по
+ * умолчанию выключен). Выключен — POST, GET и DELETE ведут себя как до него
+ * (ответ POST несёт `removal: 'off'`, GET — `in_campaign_removal: 'off'`), ни
+ * одного запроса в его таблицы. Включён — POST до вставки пишет заявку, после
+ * вставки раскладывает её по кампаниям клиента (или оставляет воркеру; идёт
+ * запуск клиента — ещё раз после него) и отвечает, что вышло (`removal`,
+ * `removal_campaigns`, `removal_after_launch`,
+ * `removal_skipped_reply_campaign`); снимает лидов воркер
+ * hypothesis-engine; GET отдаёт, сколько адресов ждут проверки и сколько снять
+ * не удалось (только то, с чем клиент ещё может что-то сделать); DELETE
+ * отменяет ждущие и неудавшиеся строки убранного адреса.
+ *
+ * ЗАБЛОКИРОВАННЫЙ АККАУНТ (отметка he_eng_account_blocks, engAccountBlock):
+ * POST и DELETE отказывают 403 тем же текстом, что рыночный гейт кабинета
+ * (apiGuards.requireEngMarket, ENG_ACCOUNT_BLOCKED_TEXT) — для сессии,
+ * пережившей блокировку (отзыв сессий не лёг). Список не меняется, заявок
+ * снятия с кампаний нет. Отметка не прочиталась — 503, ничего не записано;
+ * таблицы нет (миграция 20261013_0001) — как до блокировки. GET открыт: он
+ * ничего не меняет и не тратит. Строки, которые лежали в очереди снятия до
+ * блокировки, воркер не трогает, пока отметка стоит (engDncRemoval,
+ * runHeEngDncRemovalPass).
  *
  * Отличия от RU-ветки (она не меняется ни на байт, развилка — `auth.market`):
  *  - тексты английские: RU-фраза дошла бы до кабинета общим «problem on our
@@ -51,6 +69,17 @@ import {
   normalizeBlockedEmail,
 } from '@/lib/clientBlocklist/blockedContacts';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { ENG_ACCOUNT_BLOCKED_TEXT } from '@/lib/hypothesisEngine/apiGuards';
+import { readHeEngAccountBlock } from '@/lib/hypothesisEngine/engAccountBlockMarker';
+import {
+  heEngDncRemovalView,
+  openHeEngDncIntent,
+  readHeEngDncSummary,
+  releaseHeEngDncAddress,
+  settleHeEngDncIntent,
+  type HeEngDncAddOutcome,
+} from '@/lib/hypothesisEngine/engDncRemoval';
 
 /** Строк на странице списка. */
 export const ENG_BLOCKLIST_PAGE_SIZE = 100;
@@ -102,6 +131,8 @@ export const ENG_BLOCKLIST_TEXT = {
     `Your list went over ${MAX_TEXT} addresses, the most it can hold, and we could not undo it. ` +
     `No new contacts are added to your campaigns until you remove addresses to bring it back to ${MAX_TEXT} or fewer.`,
   removeFailed: 'Could not remove this address. Try again in a minute.',
+  // Тот же текст, что у рыночного гейта кабинета (apiGuards.requireEngMarket).
+  unavailable: 'Service temporarily unavailable — refresh the page',
 } as const;
 
 /**
@@ -111,6 +142,8 @@ export const ENG_BLOCKLIST_TEXT = {
  * должен показать его настоящий размер.
  */
 export type EngBlocklistAddCode =
+  | 'account_blocked'
+  | 'unavailable'
   | 'bad_request'
   | 'empty'
   | 'too_long'
@@ -270,6 +303,33 @@ function refusal(code: EngBlocklistAddCode, error: string, status: number) {
   return NextResponse.json({ error, code }, { status });
 }
 
+/**
+ * Отказ мутации заблокированному аккаунту (шапка, «Заблокированный аккаунт»):
+ * 403 'account_blocked' — отметка активна; 503 'unavailable' — отметка не
+ * прочиталась или основной БД нет («не прочитали» не превращается в «можно»);
+ * null — можно (отметки нет, снята, или таблицы нет). Одно чтение по ключу.
+ */
+async function engBlocklistBlockRefusal(
+  portalDb: SupabaseClient | null,
+  userId: string,
+  op: 'add' | 'remove',
+): Promise<NextResponse | null> {
+  const block = portalDb
+    ? await readHeEngAccountBlock(portalDb, userId)
+    : ({ state: 'error', detail: 'portal db is not configured', code: null } as const);
+  if (block.state === 'blocked') return refusal('account_blocked', ENG_ACCOUNT_BLOCKED_TEXT, 403);
+  if (block.state === 'error') {
+    await logError(
+      'client.blocklist.eng_block_read_failed',
+      new Error(block.detail.slice(0, 300)),
+      { op },
+      { userId },
+    );
+    return refusal('unavailable', ENG_BLOCKLIST_TEXT.unavailable, 503);
+  }
+  return null;
+}
+
 /** `%`, `_` и `\` из строки поиска — буквально, а не шаблоном ilike. */
 function likeLiteral(value: string): string {
   return value.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -303,11 +363,19 @@ async function rollbackInserted(db: SupabaseClient, userId: string, ids: string[
 /**
  * GET (ENG): страница списка, свежие сверху. `?offset=` — с какой строки,
  * `?q=` — часть адреса. `total` — весь список, `matching` — под поиском.
+ * Снятие с идущих кампаний (engDncRemoval.readHeEngDncSummary):
+ * `in_campaign_removal` 'off' | 'on'; `pending` — сколько разных адресов ждут
+ * проверки кампаний, `failed` — скольких снять не удалось (адрес ещё в списке,
+ * кампания ещё в записях клиента и шлёт или может слать), `failed_examples` —
+ * до 10 таких адресов, `failed_at_least` — `failed` нижняя граница; null —
+ * выключено или не прочиталось. `portalDb` — основная БД (его таблицы); по
+ * умолчанию supabaseAdmin.
  */
 export async function engBlocklistGet(
   req: NextRequest,
   db: SupabaseClient,
   userId: string,
+  portalDb: SupabaseClient | null = supabaseAdmin,
 ): Promise<NextResponse> {
   const params = req.nextUrl.searchParams;
   const rawOffset = Number(params.get('offset') ?? 0);
@@ -359,11 +427,22 @@ export async function engBlocklistGet(
     matching,
     offset,
     next_offset: items.length > 0 && nextOffset < matching ? nextOffset : null,
+    ...(await readHeEngDncSummary(portalDb, db, userId)),
   });
 }
 
+/** id события ответа (Block на Replies): bigint, как у курсора Replies. */
+const REPLY_ID_RE = /^\d{1,15}$/;
+
 /**
- * POST (ENG): добавить вставленный текст. Body: `{ text: string }`.
+ * POST (ENG): добавить вставленный текст. Body: `{ text: string, reply_id?: string }`.
+ *
+ * `reply_id` — только у «Block» на Replies: id ответа (instantly_activity_events),
+ * на карточке которого нажали, и ровно один адрес в `text` (иначе 400
+ * bad_request). Используется только снятием с кампаний (включённым): кампанию
+ * этого ответа не проверяют — она перестала писать человеку, когда он ответил
+ * (engDncRemoval, шапка п. 3b). Чужой id ничего не даёт: его кампания не в
+ * записях клиента. Список и его тексты от `reply_id` не зависят.
  *
  * Порядок: разбор → потолок по текущему счёту → вставка частями без
  * перезаписи (`ignoreDuplicates`: вернутся только новые строки) → пересчёт →
@@ -372,19 +451,41 @@ export async function engBlocklistGet(
  * Сбой части вставки — откат известных строк и пересчёт: «ничего не
  * добавлено» (add_failed) отвечается, только когда откат прошёл и пересчёт
  * показал прежний размер списка.
+ *
+ * Снятие с идущих кампаний (engDncRemoval.ts): до вставки — заявка
+ * (openHeEngDncIntent), после — её разворот или удаление
+ * (settleHeEngDncIntent, исход — engAddOutcome). Успешный ответ добавления
+ * дописывается ПОСЛЕ разворота и несёт `removal` (heEngDncRemovalView):
+ * 'off' — выключено; 'none_running' — кампаний у клиента нет; 'removing' —
+ * адреса разложены по `removal_campaigns` кампаниям, воркер их проверяет;
+ * 'deferred' — кампании сейчас не прочитались, разложит воркер;
+ * 'not_scheduled' — заявка не записалась, кампании не проверяются, пока
+ * адреса не добавят ещё раз. К ним `removal_after_launch` — у клиента идёт
+ * запуск, и его кампании проверятся ещё раз, когда он кончится, и
+ * `removal_skipped_reply_campaign` — кампания ответа (Block) не проверяется.
+ * Отказы (4xx/5xx) — тела S4 без этих полей. Заблокированный аккаунт —
+ * первым делом, до разбора тела (engBlocklistBlockRefusal).
  */
 export async function engBlocklistPost(
   req: NextRequest,
   db: SupabaseClient,
   userId: string,
+  portalDb: SupabaseClient | null = supabaseAdmin,
 ): Promise<NextResponse> {
-  let body: { text?: unknown };
+  const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'add');
+  if (blocked) return blocked;
+
+  let body: { text?: unknown; reply_id?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
   }
   if (!body || typeof body !== 'object' || typeof body.text !== 'string') {
+    return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
+  }
+  const replyId = body.reply_id === undefined || body.reply_id === null ? null : body.reply_id;
+  if (replyId !== null && (typeof replyId !== 'string' || !REPLY_ID_RE.test(replyId))) {
     return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
   }
   if (body.text.length > ENG_BLOCKLIST_MAX_TEXT) {
@@ -398,6 +499,10 @@ export async function engBlocklistPost(
   if (paste.emails.length > ENG_BLOCKLIST_MAX_PER_ADD) {
     return refusal('too_many', ENG_BLOCKLIST_TEXT.tooMany(paste.emails.length), 400);
   }
+  // Block шлёт ровно один адрес; ответ относится только к нему.
+  if (replyId !== null && paste.emails.length > 1) {
+    return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
+  }
   if (paste.emails.length === 0) {
     return NextResponse.json({
       added: 0,
@@ -408,6 +513,52 @@ export async function engBlocklistPost(
     });
   }
 
+  const intent = await openHeEngDncIntent({ portalDb, userId, emails: paste.emails, replyId });
+  const res = await engBlocklistAddParsed(db, userId, paste);
+  const settle = await settleHeEngDncIntent(intent, await engAddOutcome(res), { portalDb, instantlyDb: db });
+  if (res.status < 200 || res.status >= 300) return res;
+  // Что сказать про кампании, известно только после разворота: дописываем.
+  const view = heEngDncRemovalView(intent, settle);
+  let addedBody: Record<string, unknown>;
+  try {
+    addedBody = (await res.clone().json()) as Record<string, unknown>;
+  } catch {
+    return res;
+  }
+  return NextResponse.json(
+    {
+      ...addedBody,
+      removal: view.removal,
+      removal_campaigns: view.campaigns,
+      removal_after_launch: view.afterLaunch,
+      removal_skipped_reply_campaign: view.skippedReplyCampaign,
+    },
+    { status: res.status },
+  );
+}
+
+/**
+ * Исход добавления для заявки снятия: ответ 2xx — адреса запроса в списке;
+ * 400 и add_failed — доказанно ничего не добавлено; прочее (add_unconfirmed,
+ * over_limit_stuck, нечитаемый ответ) — состав неизвестен.
+ */
+async function engAddOutcome(res: NextResponse): Promise<HeEngDncAddOutcome> {
+  if (res.status >= 200 && res.status < 300) return 'added';
+  if (res.status === 400) return 'nothing_added';
+  try {
+    const body = (await res.clone().json()) as { code?: unknown };
+    return body?.code === 'add_failed' ? 'nothing_added' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** Вставка разобранных адресов — порядок в докблоке engBlocklistPost. */
+async function engBlocklistAddParsed(
+  db: SupabaseClient,
+  userId: string,
+  paste: EngBlocklistPaste,
+): Promise<NextResponse> {
   const before = await countList(db, userId);
   if (before === null) {
     await logError('client.blocklist.eng_add_failed', new Error('не прочитался счёт списка до вставки'), {}, { userId });
@@ -512,12 +663,21 @@ export async function engBlocklistPost(
   );
 }
 
-/** DELETE (ENG): тот же скоуп, что у RU-ветки; чужой id даёт removed: 0. */
+/**
+ * DELETE (ENG): тот же скоуп, что у RU-ветки; чужой id даёт removed: 0.
+ * Снятие с кампаний включено — ждущие и неудавшиеся строки убранного адреса
+ * отменяются (engDncRemoval.releaseHeEngDncAddress; выключено — без запроса).
+ * Заблокированный аккаунт — отказ до удаления (engBlocklistBlockRefusal).
+ */
 export async function engBlocklistDelete(
   db: SupabaseClient,
   userId: string,
   id: string,
+  portalDb: SupabaseClient | null = supabaseAdmin,
 ): Promise<NextResponse> {
+  const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'remove');
+  if (blocked) return blocked;
+
   const { data, error } = await db
     .from('client_blocked_contacts')
     .delete()
@@ -532,12 +692,9 @@ export async function engBlocklistDelete(
 
   const removed = (data ?? []).length;
   if (removed > 0) {
-    await logAudit(
-      'client.blocklist.removed',
-      'Client unblocked a contact',
-      { email: (data as { email: string }[])[0]?.email },
-      { userId },
-    );
+    const email = (data as { email: string }[])[0]?.email;
+    await logAudit('client.blocklist.removed', 'Client unblocked a contact', { email }, { userId });
+    await releaseHeEngDncAddress({ portalDb, userId, email });
   }
   return NextResponse.json({ removed });
 }

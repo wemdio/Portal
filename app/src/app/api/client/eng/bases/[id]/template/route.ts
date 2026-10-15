@@ -17,7 +17,8 @@ import {
   toClientEngJobRow,
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { HE_SPEND_PAUSED_EN } from '@/lib/hypothesisEngine/clientErrors';
-import { enforceHeSpendCeiling } from '@/lib/hypothesisEngine/spendCeiling';
+import { enforceHeSpendCeiling, heSpendStopIsGlobal } from '@/lib/hypothesisEngine/spendCeiling';
+import { engSpendLimitRefusal } from '@/lib/hypothesisEngine/engPaidAccess';
 import { engSendingSwitchRefusal } from '@/lib/hypothesisEngine/engSendingSwitchGuard';
 import { heBrandInputRefusalEn, heBrandInputsBeforeEnqueue } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
@@ -59,10 +60,11 @@ async function findActiveTemplateJob(projectId: string, baseId: string) {
 // (20261008_0001_he_active_job_unique.sql): проигравшая вставка получает 23505
 // и отвечает тем же 200 с уже стоящей джобой. Если индекс ещё не применён,
 // вторая из двух вставленных джоб всё равно не платит: воркер берёт их по
-// очереди, а стадия без payload.force возвращает уже готовый шаблон базы
-// (stages/template.ts, findReusableTemplate). force этот роут не ставит
-// никогда — пересборка писем кабинета («Rewrite letters») идёт отдельным
-// роутом templates/[id]/rewrite, тоже без force.
+// очереди, а стадия с payload.reuse (его ставит этот роут) возвращает уже
+// готовый шаблон базы (stages/template.ts, findReusableTemplate). force этот
+// роут не ставит никогда — пересборка писем кабинета («Rewrite letters») идёт
+// отдельным роутом templates/[id]/rewrite, без force и без reuse: ей нужны
+// новые письма.
 //
 // Генерация ПЛАТНАЯ (LLM), а из кабинета этот роут сейчас никто не зовёт
 // (buildEngTemplate без вызывающего — шаблоны ставит автопилот), то есть сюда
@@ -213,18 +215,26 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       baseId: id,
       warn: (msg) => void logWarn('client.eng.template.spend_unknown', msg, { userId: result.auth.userId, baseId: id }),
     });
-    if (!spend.allowed) return jsonError(HE_SPEND_PAUSED_EN, 409);
+    // Общий потолок ENG паузы на проекте не пишет (spendCeiling.ts) — фраза
+    // карточки паузы («…continues when they resume it») была бы неправдой.
+    if (!spend.allowed) {
+      return heSpendStopIsGlobal(spend.check)
+        ? engPaidAccessResponse(engSpendLimitRefusal('eng_day'))
+        : jsonError(HE_SPEND_PAUSED_EN, 409);
+    }
 
     // `.select()` без аргументов вернул бы строку he_jobs целиком, вместе с
     // tokens_used/cost_usd и сырым текстом error: обе ветки роута отдают
     // джобу клиенту, значит и читать они обязаны одинаково.
+    // reuse: true — готовый шаблон базы, легший между проверкой и исполнением,
+    // стадия вернёт, а не оплатит заново (stages/template.ts, findReusableTemplate).
     const { data: job, error: jobErr } = await supabaseAdmin
       .from('he_jobs')
       .insert({
         project_id: owned.base.project_id as string,
         stage: 'template',
         status: 'pending',
-        payload: { base_id: id },
+        payload: { base_id: id, reuse: true },
       })
       .select(HE_JOB_CLIENT_COLUMNS)
       .single();

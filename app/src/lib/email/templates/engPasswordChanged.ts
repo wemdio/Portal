@@ -15,17 +15,20 @@ function esc(s: string): string {
 }
 
 /**
- * English "password changed" notice for the ENG cabinet (POST
- * /api/client/password from /client/eng/account). Unlike the RU letter
- * (passwordChanged.ts) it does NOT repeat the new password: the reader just
- * typed it, and a password in a mailbox is one more place to steal it from.
+ * English "password changed" notice for the ENG cabinet. Sent by POST
+ * /api/client/password (from /client/eng/account) and by the reset-link page
+ * (api/auth/forgot-password/_engReset.ts) after a new password was saved.
+ * Unlike the RU letter (passwordChanged.ts) it does NOT repeat the new
+ * password: the reader just typed it, and a password in a mailbox is one more
+ * place to steal it from.
  *
  * What the copy promises, and why it is true:
- *   - "was changed on <time>" — the route sends it only after the change
- *     succeeded, for a signed-in session that also passed the current
- *     password;
- *   - "reset it on the sign-in page" — «Forgot password?» on the ENG sign-in
- *     page mails a new password to this address (api/auth/forgot-password).
+ *   - "was changed on <time>" — both senders send it only after the change
+ *     succeeded (a signed-in session that also passed the current password,
+ *     or a one-time reset link GoTrue accepted);
+ *   - "get a link to choose a new password" — «Forgot password?» on the ENG
+ *     sign-in page mails a one-time link to the sign-in address
+ *     (api/auth/forgot-password, ENG branch); it never mails a password.
  */
 export function renderEngPasswordChangedEmail(args: EngPasswordChangedEmailArgs): RenderedEmail {
   const subject = 'Your outreachOS password was changed';
@@ -43,7 +46,7 @@ export function renderEngPasswordChangedEmail(args: EngPasswordChangedEmailArgs)
           </p>
           <hr style="border:none;border-top:1px solid #eee;margin:24px 0;" />
           <p style="font-size:13px;line-height:1.5;margin:0;color:#a00;">
-            <strong>If it was not you</strong>, press «Forgot password?» on the sign-in page to get a new password by email, then message Support from your cabinet.
+            <strong>If it was not you</strong>, press «Forgot password?» on the sign-in page to get a link to choose a new password, then message Support from your cabinet.
           </p>
         </td></tr>
       </table>
@@ -57,7 +60,7 @@ export function renderEngPasswordChangedEmail(args: EngPasswordChangedEmailArgs)
     '',
     `The password of your outreachOS account was changed on ${args.changedAtUtc}. If it was you, there is nothing else to do.`,
     '',
-    'If it was not you, press «Forgot password?» on the sign-in page to get a new password by email, then message Support from your cabinet.',
+    'If it was not you, press «Forgot password?» on the sign-in page to get a link to choose a new password, then message Support from your cabinet.',
   ].join('\n');
 
   return { subject, html, text };

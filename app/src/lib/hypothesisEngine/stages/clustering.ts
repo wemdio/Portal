@@ -16,7 +16,23 @@
  * этом нет, потому что evidence ничего не вставлял, а прошлые вертикали этот
  * прогон сносит и привязку пересобирает целиком (ниже). Рынок 'ru' кластеризует
  * все гипотезы проекта, как раньше.
+ *
+ * Рынок 'us', ЗАПУСК (аудит 14.10.2026): снос вертикалей уносит каскадом
+ * he_templates.launch_info — единственный список кампаний запуска, по которому
+ * их ставят на паузу клиент, «Выключить отправку», блокировка, engBlockedSweep
+ * и по которому he_sending_pool_launched держит ящики пула за проектом. Живые
+ * кампании остались бы у рассыльщика без паузы и блокировки («бан
+ * останавливает всё» перестало бы быть правдой), а ящики ушли бы следующему
+ * проекту. Поэтому до платного вызова модели и ещё раз прямо перед сносом —
+ * та же проверка, что у staff-роута исследования
+ * (readHeResearchRerunLaunchBlock ниже); запуск есть — стадия ничего не
+ * трогает и отказывает терминально (HeResearchRerunLaunchedError). Это
+ * страховка: повтор, который до неё дошёл, уже прошёл стадии до
+ * кластеризации (бриф, гипотезы и доказательства переписаны); основная
+ * защита — отказ роутов исследования до постановки.
  */
+
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
@@ -26,6 +42,12 @@ import { projectMarket } from '../market';
 import { buildClusteringMessages } from '../prompts/clustering';
 import { buildClusteringMessagesEn } from '../prompts/clustering.en';
 import type { HeHypothesis, HeJob } from '../types';
+import {
+  HE_TEMPLATE_LAUNCH_MARK_COLUMNS,
+  heTemplateLaunchMarked,
+  type HeTemplateLaunchMark,
+} from '../launchTemplate';
+import { engResearchRerunBlockers } from '../researchJob';
 import {
   addUsage,
   newUsage,
@@ -198,6 +220,132 @@ export function applyClusteringDecisions(
   }));
 }
 
+/* ───────────── us-проект с запуском: повтор исследования запрещён ───────────── */
+
+export type HeResearchRerunLaunchCheck =
+  | {
+      ok: true;
+      /** Запуск есть: шаблон с меткой запуска ИЛИ he_sending_pool_launched. */
+      launched: boolean;
+      /** Шаблонов проекта с меткой запуска (heTemplateLaunchMarked). */
+      launchedTemplates: number;
+      /** Ответ he_sending_pool_launched([проект]). */
+      poolLaunched: boolean;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Есть ли у проекта запуск, который повтор исследования стёр бы вместе с
+ * вертикалями. Правило — то же, что у research-роута ENG-кабинета
+ * (engResearchRerunBlockers, вердикт 'launched': шаблон вертикали проекта с
+ * меткой heTemplateLaunchMarked — кампания в записи или живая аренда), и
+ * вдобавок функция пула he_sending_pool_launched (20261011_0001: то же правило
+ * в SQL, ещё и по шаблонам баз проекта, а неразборчивую аренду считает
+ * запуском). Запуск — если любое из двух говорит «да».
+ *
+ * Зовут: staff-роут исследования (api/tools/hypothesis-engine/projects/[id]/
+ * research) до постановки и эта стадия перед сносом вертикалей — обе только у
+ * рынка 'us'. Не бросает; сбой любого чтения — { ok: false } (вызывающий
+ * отказывает: «не знаю, есть ли запуск» не равно «запуска нет»).
+ */
+export async function readHeResearchRerunLaunchBlock(
+  db: SupabaseClient,
+  projectId: string,
+): Promise<HeResearchRerunLaunchCheck> {
+  const fail = (what: string, error: { code?: unknown; message?: unknown } | null | undefined) => ({
+    ok: false as const,
+    error: `${what}: ${String(error?.code ?? 'error')} ${String(error?.message ?? '').slice(0, 200)}`.trim(),
+  });
+  try {
+    const [verticalsRes, poolRes] = await Promise.all([
+      db.from('he_verticals').select('id').eq('project_id', projectId),
+      db.rpc('he_sending_pool_launched', { p_project_ids: [projectId] }),
+    ]);
+    if (verticalsRes.error) return fail('he_verticals read', verticalsRes.error);
+    if (poolRes.error) return fail('he_sending_pool_launched rpc', poolRes.error);
+    const verticalIds = (verticalsRes.data ?? [])
+      .map((v) => (v as { id?: unknown }).id)
+      .filter((v): v is string => typeof v === 'string' && v.length > 0);
+    let marks: HeTemplateLaunchMark[] = [];
+    if (verticalIds.length > 0) {
+      const { data, error } = await db
+        .from('he_templates')
+        .select(HE_TEMPLATE_LAUNCH_MARK_COLUMNS)
+        .in('vertical_id', verticalIds);
+      if (error) return fail('he_templates read', error);
+      marks = (data ?? []) as HeTemplateLaunchMark[];
+    }
+    const now = Date.now();
+    // Снимок только с шаблонами: из вердиктов engResearchRerunBlockers здесь
+    // важен лишь 'launched' — staff-повтор при 'busy' и 'confirm' идёт, как
+    // раньше (он не спрашивает подтверждения и не ждёт работу по вертикалям).
+    const { verdict, consequences } = engResearchRerunBlockers({
+      bases: [],
+      templates: marks.map((row) => ({ launched: heTemplateLaunchMarked(row, now) })),
+      letterSequences: 0,
+      activeWork: 0,
+    });
+    const poolLaunched = poolRes.data === true;
+    return {
+      ok: true,
+      launched: verdict === 'launched' || poolLaunched,
+      launchedTemplates: consequences.launched_templates,
+      poolLaunched,
+    };
+  } catch (e) {
+    return { ok: false, error: `launch check threw: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}` };
+  }
+}
+
+/**
+ * Кластеризация us-проекта с запуском отказала до сноса вертикалей. Класс
+ * ТЕРМИНАЛЬНЫЙ (дискриминант heJobTerminal читает воркер, isHeJobTerminal):
+ * повтор стадии упрётся в тот же запуск. Текст — he_jobs.error, его читает
+ * сотрудник.
+ */
+export class HeResearchRerunLaunchedError extends Error {
+  /** Дискриминант: instanceof ложен, если в бандле окажется две копии модуля. */
+  readonly heJobTerminal = true as const;
+  readonly code = 'research_rerun_launched' as const;
+
+  constructor(check: { launchedTemplates: number; poolLaunched: boolean }) {
+    super(
+      'Кластеризация остановлена до удаления рынков: из этого проекта английского кабинета уже запускали ' +
+        `отправку (шаблонов с записью о запуске: ${check.launchedTemplates}` +
+        `${check.poolLaunched ? '; пул ящиков тоже считает проект запущенным' : ''}). Повтор исследования удалил бы ` +
+        'рынки вместе с записями о запуске, и живые кампании остались бы без паузы клиента, выключения отправки ' +
+        'и блокировки. Рынки, письма и записи о запуске не тронуты.',
+    );
+    this.name = 'HeResearchRerunLaunchedError';
+  }
+}
+
+/**
+ * Проверка стадии (только рынок 'us'). Сбой чтения — обычная ошибка: воркер
+ * повторит стадию, ничего не удалено. Запуск есть — проект возвращается в
+ * 'researched' (рынки и запуски на месте; CAS по 'researching' — отмену не
+ * затираем): тогда воркер не пишет проекту 'failed' (он пишет его только из
+ * 'researching'), кабинет клиента показывает прежние рынки, а не упавшее
+ * исследование, и письма «research stopped» клиенту нет. Джоба — 'failed' с
+ * текстом для сотрудника (HeResearchRerunLaunchedError, терминальный).
+ */
+async function refuseIfLaunched(job: HeJob, ctx: HeStageContext): Promise<void> {
+  const launch = await readHeResearchRerunLaunchBlock(ctx.supabase, job.project_id);
+  if (!launch.ok) throw new Error(`launch check before clustering: ${launch.error}`);
+  if (!launch.launched) return;
+  const { error: restoreError } = await ctx.supabase
+    .from('he_projects')
+    .update({ status: 'researched', updated_at: new Date().toISOString() })
+    .eq('id', job.project_id)
+    .eq('status', 'researching');
+  if (restoreError) stageLog(ctx, `[clustering] project status restore: ${restoreError.message}`);
+  stageLog(
+    ctx,
+    `[clustering] у us-проекта есть запуск (шаблонов: ${launch.launchedTemplates}, пул: ${launch.poolLaunched}) — вертикали не трогаем`,
+  );
+  throw new HeResearchRerunLaunchedError(launch);
+}
+
 /* ───────────────── Стадия ───────────────── */
 
 export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -225,6 +373,10 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
     throw new Error('Нет верифицированных гипотез: сначала выполните стадию evidence');
   }
 
+  // us-проект с запуском — отказ ДО платного вызова модели (шапка файла):
+  // запуск, который был до старта исследования, виден уже здесь.
+  if (market === 'us') await refuseIfLaunched(job, ctx);
+
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildClusteringMessagesEn : buildClusteringMessages)({
       hypotheses: hypotheses.map((h) => ({
@@ -242,6 +394,11 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
 
   const verticals = applyClusteringDecisions(hypotheses, llm.data.verticals);
   stageLog(ctx, `[clustering] вертикалей: ${verticals.length} из ${hypotheses.length} гипотез`);
+
+  // us-проект с запуском: ни отвязки, ни сноса (шапка файла). Вторая проверка —
+  // прямо перед перезаписью: запуск, начатый, пока шёл вызов модели, тоже
+  // виден (окно до удаления — одно чтение).
+  if (market === 'us') await refuseIfLaunched(job, ctx);
 
   // Идемпотентная перезапись: отвязываем гипотезы, сносим старые вертикали.
   const { error: unlinkError } = await ctx.supabase
@@ -262,17 +419,20 @@ export async function runClusteringStage(job: HeJob, ctx: HeStageContext): Promi
     // после сноса прошлых вертикалей выше. Чистка трогает только эти два
     // символа: текст без них (вся кириллица и латиница) ложится байт-в-байт тем
     // же. Привязка гипотез ниже идёт по memberTitles — заголовкам из he_hypotheses,
-    // а не по тексту модели, и чистка её не задевает.
+    // а не по тексту модели, и чистка её не задевает. Только market='us':
+    // RU-проект пишет строку как до порта ENG (решение владельца 14.10.2026
+    // «Как было»; так же chain, template, vocab, evidence и base_analyze).
+    const verticalRow = {
+      project_id: job.project_id,
+      name: v.name,
+      summary: v.summary,
+      synonyms: v.synonyms,
+      potential_pct: v.potential_pct,
+      rank: v.rank,
+    };
     const { data: inserted, error: insError } = await ctx.supabase
       .from('he_verticals')
-      .insert(stripUnstorableJsonChars({
-        project_id: job.project_id,
-        name: v.name,
-        summary: v.summary,
-        synonyms: v.synonyms,
-        potential_pct: v.potential_pct,
-        rank: v.rank,
-      }))
+      .insert(market === 'us' ? stripUnstorableJsonChars(verticalRow) : verticalRow)
       .select('id')
       .single();
     if (insError || !inserted) throw new Error(`he_verticals insert: ${insError?.message ?? 'unknown'}`);

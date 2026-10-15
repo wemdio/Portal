@@ -48,6 +48,13 @@
  *    не читаются постоянным сбоем (не блип: например 42501 — нет прав), его
  *    заметил страж джоб воркера или фоновая проверка заблокированных
  *    (engBlockedSweep). Ключ — код сбоя: раз в час на код;
+ *  - 'dnc_removal_failed' — адрес из «Do not contact» не снят с идущей
+ *    кампании клиента (engDncRemoval.ts): строка очереди или заявка стала
+ *    'failed' (10 попыток, или кампании больше нет в записях о запуске
+ *    клиента, или запуск клиента не кончился за 6 ч после добавления —
+ *    launch_still_running). Ключ — аккаунт: раз в час на клиента. В тексте — SQL, которым
+ *    сотрудник закрывает строки, снятые руками, и возвращает в очередь
+ *    починенные;
  *  - 'setup_unavailable' — старт отказан из-за настройки на нашей стороне, а
  *    не из-за кампании: таблицы пула нет, ящики проекта в разных воркспейсах,
  *    ящик проекта стоит у другого клиента, пресет записи о запуске не клиента /
@@ -186,6 +193,16 @@ export type HeEngSendingAlert =
       detail: string;
       /** Кто заметил: страж джобы воркера или фоновая проверка заблокированных. */
       where: 'job_guard' | 'sweep';
+    }
+  | {
+      kind: 'dnc_removal_failed';
+      userId: string;
+      /** Строк he_eng_dnc_removals (адрес × кампания), ставших 'failed' в этом проходе воркера. */
+      removals: number;
+      /** Заявок he_eng_dnc_intents, ставших 'failed' в этом проходе (адреса не развернулись в строки). */
+      intents: number;
+      /** Код последней причины (engDncRemoval.ts), без адресов. */
+      reason: string;
     };
 
 /** Окно повтора алерта 'block_incomplete' по аккаунту (решение S3b: 10 минут). */
@@ -308,6 +325,8 @@ function alertKey(alert: HeEngSendingAlert): string {
       return `campaigns_unreachable|${alert.userId}|${alert.where}`;
     case 'block_marker_unreadable':
       return `block_marker_unreadable|${alert.code}`;
+    case 'dnc_removal_failed':
+      return `dnc_removal_failed|${alert.userId}`;
   }
 }
 
@@ -638,6 +657,47 @@ function alertBody(alert: HeEngSendingAlert): {
           'сделать':
             'поставить эти кампании на паузу руками в Instantly (воркспейс — в списке; где он неизвестен — искать по ' +
             'имени или id). Кабинет их не видит: повторные нажатия в карточке их не остановят',
+        },
+      };
+    case 'dnc_removal_failed':
+      return {
+        subject: 'ENG: человека из «Do not contact» не удалось снять с идущей кампании клиента',
+        error:
+          `Воркер hypothesis-engine сдался: строк «адрес × кампания» — ${alert.removals}, ` +
+          `неразвёрнутых добавлений — ${alert.intents}. Последняя причина: ${heOpsReasonText(alert.reason)}. ` +
+          'Эти люди могут продолжать получать письма кампании.',
+        context: {
+          'клиент': alert.userId,
+          'карточка': `/admin/eng-clients/${alert.userId}`,
+          'клиент видит':
+            'на странице «Do not contact» красную строку «We could not take N people out of your campaigns» с ' +
+            'адресами — только пока адрес в его списке, а кампания строки в его записях о запуске, не завершена и не ' +
+            'пропала у рассыльщика (у заявки — пока у него есть такая кампания). Повторное добавление адреса клиентом ' +
+            'возвращает его строки в очередь и вычёркивает адрес из заявки',
+          'строки':
+            `select email, campaign_id, workspace, attempts, last_error, lead_ids from he_eng_dnc_removals ` +
+            `where user_id = '${alert.userId}' and status = 'failed'; ` +
+            `select id, emails, attempts, last_error from he_eng_dnc_intents where user_id = '${alert.userId}' and status = 'failed'`,
+          'сделать':
+            '1) снять этих людей с кампаний руками в Instantly (найти лида по адресу в кампании и удалить) или ' +
+            'поставить кампанию на паузу. 2) Сняли руками — закрыть строки, иначе клиент так и видит «не удалось»: ' +
+            `update he_eng_dnc_removals set status = 'done', last_error = 'manual', updated_at = now() ` +
+            `where user_id = '${alert.userId}' and status = 'failed'; ` +
+            `у заявки (адреса не разложились по кампаниям вовсе, снимали руками по всем кампаниям клиента) — ` +
+            `delete from he_eng_dnc_intents where user_id = '${alert.userId}' and status = 'failed'. ` +
+            '3) Причина починена и снять надо силами воркера — вернуть строки в очередь: ' +
+            `update he_eng_dnc_removals set status = 'queued', attempts = 0, next_at = now(), settled_at = null, ` +
+            `last_error = null where user_id = '${alert.userId}' and status = 'failed' ` +
+            `and last_error is distinct from 'campaign_not_in_records' ` +
+            `(у заявок — update he_eng_dnc_intents set status = 'pending', attempts = 0, next_at = now() ` +
+            `where user_id = '${alert.userId}' and status = 'failed'). Строку с причиной campaign_not_in_records ` +
+            'воркер не тронет никогда (этой кампании больше нет в записях о запуске клиента): только руками и п. 2. ' +
+            'Заявка с причиной launch_still_running: адреса добавлены, пока у клиента шёл запуск, а он не кончился ' +
+            'за 6 ч (живая аренда he_eng_auto_launch.lease_until или he_templates.launch_info->>running_until) — ' +
+            'проверить, не завис ли запуск; эти люди могли попасть в его кампании. Когда запуск кончится, вернуть ' +
+            `заявку: update he_eng_dnc_intents set status = 'after_launch', attempts = 0, next_at = now(), ` +
+            `watch_from = now() where user_id = '${alert.userId}' and status = 'failed' ` +
+            `and last_error = 'launch_still_running'`,
         },
       };
     case 'block_marker_unreadable':

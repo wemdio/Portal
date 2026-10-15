@@ -18,8 +18,10 @@ import {
 } from '@/lib/hypothesisEngine/researchJob';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { isAnalyzingBaseLive, liveBaseIdsFromJobs } from '@/lib/hypothesisEngine/autopilotNext';
+import { readHeChainExhaustedVerticals } from '@/lib/hypothesisEngine/autopilotReconcile';
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import {
+  OFFER_OVERRIDE_MAX_LENGTH,
   patchHeProjectBrief,
   type HeBriefField,
   type HeBriefPatchBody,
@@ -428,6 +430,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // ОСТАНОВКИ, КОТОРЫЕ ЧИНИТ КОМАНДА (readTeamFixStops): только у исследованного
   // проекта — карточки рынков шага 3 и шапка мастера рисуются у него.
   //
+  // ИСЧЕРПАННЫЙ ТОРМОЗ ЦЕПОЧЕК (readHeChainExhaustedVerticals, 14.10.2026):
+  // рынки, чьи засчитанные прогоны цепочки дошли до порога, — «Launch» их
+  // пропустит, поэтому карточка шага 3 зовёт в Support, а не к «Launch». Только
+  // у исследованного проекта; сбой чтения — ключа нет (карточка говорит
+  // по-старому).
+  //
   // ВЫКЛЮЧАТЕЛЬ ОТПРАВКИ АККАУНТА (readHeEngSendingAccess — то же чтение, что у
   // GET …/launch, без записи и алерта): тоже только у исследованного проекта.
   // При 'revoked' «Launch», «Launch now», «Rewrite letters» и «Collect again»
@@ -435,7 +443,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // рисует или выключает; с опросом деталки экран видит включение и выключение
   // без перезагрузки. Сбой чтения и нет таблицы — ключа нет (экран берёт
   // чтение GET …/launch).
-  const [autoLaunch, durations, teamFixStops, sendingAccess] = await Promise.all([
+  const [autoLaunch, durations, teamFixStops, sendingAccess, chainExhausted] = await Promise.all([
     readHeEngAutoLaunchDetail(supabaseAdmin, id, {
       verticals: detail.detail.verticals as Array<Record<string, unknown>>,
       hypotheses: detail.detail.hypotheses as Array<Record<string, unknown>>,
@@ -444,6 +452,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     readHeEngTypicalDurations(supabaseAdmin),
     rawProject.status === 'researched' ? readTeamFixStops(id) : Promise.resolve(null),
     rawProject.status === 'researched' ? readHeEngSendingAccess(supabaseAdmin, result.auth.userId) : Promise.resolve(null),
+    rawProject.status === 'researched'
+      ? readHeChainExhaustedVerticals(
+        supabaseAdmin,
+        id,
+        Array.isArray(detail.detail.chains) ? detail.detail.chains : [],
+      ).catch(() => null)
+      : Promise.resolve(null),
   ]);
   const accountAccess: 'not_enabled' | 'revoked' | null | undefined =
     sendingAccess === null || sendingAccess.state === 'error' || sendingAccess.state === 'unavailable'
@@ -489,6 +504,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     estimates: { research_minutes: durations.researchMinutes, prepare_hours: durations.prepareHours },
     ...(teamFixStops ? { team_fix_stops: teamFixStops } : {}),
     ...(accountAccess !== undefined ? { account_access: accountAccess } : {}),
+    ...(chainExhausted ? { chain_exhausted: chainExhausted } : {}),
   });
 }
 
@@ -613,8 +629,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     // Рамка ЦА уходит отдельным аргументом: overrides и рамка ложатся одной
     // записью brief (один read-merge-write), а staff-роут, который зовёт
-    // ту же функцию без него, `icp` не пишет вовсе.
-    const patch = await patchHeProjectBrief(supabaseAdmin, id, body, icpRequested ? { icp: icpPatch } : undefined);
+    // ту же функцию без него, `icp` не пишет вовсе. Кап оффера этот роут
+    // передаёт правилом (staff-PATCH правила не передаёт, и кап там решает
+    // рынок проекта: 'us' — тот же отказ, RU — оффер любой длины, как до порта
+    // ENG); проверка стоит в функции на прежнем месте, поэтому порядок отказов
+    // кабинета прежний.
+    const patch = await patchHeProjectBrief(
+      supabaseAdmin,
+      id,
+      body,
+      icpRequested ? { icp: icpPatch } : undefined,
+      { offerMaxLength: OFFER_OVERRIDE_MAX_LENGTH },
+    );
     if (!patch.ok) {
       const err = patch.error;
       switch (err.code) {
