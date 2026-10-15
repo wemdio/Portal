@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Check, Loader2, MoreHorizontal, Pencil, Plus, RefreshCw, Search, X } from 'lucide-react';
 import {
   bulkMailboxes,
   bulkMailboxLimits,
@@ -552,10 +552,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                   <th className="px-3 py-2 font-medium">Провайдер</th>
                   <th className="px-3 py-2 font-medium">Тег</th>
                   <th className="px-3 py-2 font-medium">Адрес отправки</th>
-                  <th className="px-3 py-2 font-medium">В рассылке</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
                   <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">Новых / всего в день</th>
-                  <th className="px-5 py-2" />
+                  <th className="px-5 py-2 text-right font-medium">Действия</th>
                 </tr>
               </thead>
               <tbody>
@@ -629,21 +628,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                           </span>
                         )}
                       </td>
-                      {/* Галочка прямо в строке: выбирать ящики по одному
-                          удобнее здесь, а пачкой — панелью над таблицей. */}
-                      <td className="px-3 py-2.5">
-                        <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-zinc-600">
-                          <input
-                            type="checkbox"
-                            checked={mailbox.enabled}
-                            onChange={() =>
-                              void act(mailbox.id, { action: mailbox.enabled ? 'disable' : 'enable' })
-                            }
-                            className="h-4 w-4 cursor-pointer rounded border-zinc-300"
-                          />
-                          Шлём
-                        </label>
-                      </td>
                       <td className="px-3 py-2.5">
                         {/* Заблокирован или пропал в Google — это главное о
                             ящике: синк сам снял его с рассылки, и статус входа
@@ -659,7 +643,12 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             {status.text}
                           </span>
                         ) : (
-                          <span className="text-xs text-zinc-400">—</span>
+                          <span
+                            className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500"
+                            title="Ящик не в рассылке: письма с него не уходят"
+                          >
+                            Отключён
+                          </span>
                         )}
                       </td>
                       <td className="px-3 py-2.5">
@@ -695,34 +684,22 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                           />
                         </div>
                       </td>
-                      <td className="px-5 py-2.5">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void act(mailbox.id, { action: 'recheck' })}
-                            title="Проверить вход по SMTP/IMAP"
-                            className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100"
-                          >
-                            Проверить
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void runProbe(mailbox)}
-                            disabled={probeBusy === mailbox.id}
-                            title="Отправить проверочное письмо на контрольный адрес и сравнить заголовки доставленного"
-                            className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100 disabled:opacity-50"
-                          >
-                            {probeBusy === mailbox.id ? '…' : 'Отправка'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void remove(mailbox)}
-                            aria-label="Убрать ящик"
-                            className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-red-600"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
+                      <td className="px-5 py-2.5 text-right">
+                        <RowActionsMenu
+                          items={[
+                            { label: 'Проверить вход', title: 'Проверить вход по SMTP/IMAP', onClick: () => void act(mailbox.id, { action: 'recheck' }) },
+                            {
+                              label: probeBusy === mailbox.id ? 'Проверка отправки…' : 'Проверка отправки',
+                              title: 'Отправить проверочное письмо на контрольный адрес и сравнить заголовки доставленного',
+                              disabled: probeBusy === mailbox.id,
+                              onClick: () => void runProbe(mailbox),
+                            },
+                            mailbox.enabled
+                              ? { label: 'Не использовать', title: 'Снять ящик с рассылки', onClick: () => void act(mailbox.id, { action: 'disable' }) }
+                              : { label: 'Использовать', title: 'Вернуть ящик в рассылку', onClick: () => void act(mailbox.id, { action: 'enable' }) },
+                            { label: 'Удалить', danger: true, onClick: () => void remove(mailbox) },
+                          ]}
+                        />
                       </td>
                     </tr>
                   );
@@ -824,6 +801,88 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
  * открытое поле в каждой строке ловило случайные клики и выглядело как форма.
  * Enter или клик мимо — сохранить, Esc — отменить.
  */
+interface RowAction {
+  label: string;
+  title?: string;
+  disabled?: boolean;
+  danger?: boolean;
+  onClick: () => void;
+}
+
+/**
+ * Действия строки в меню «⋯» (дизайн как в Instantly, 15.10.2026). Список
+ * рисуется fixed от кнопки: таблица в overflow-x-auto обрезала бы обычный
+ * выпадающий список у нижних строк.
+ */
+function RowActionsMenu({ items }: { items: RowAction[] }) {
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!pos) return;
+    const close = () => setPos(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [pos]);
+
+  const toggle = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (pos) return setPos(null);
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const menuHeight = items.length * 34 + 8;
+    const top = rect.bottom + menuHeight > window.innerHeight ? Math.max(8, rect.top - menuHeight - 4) : rect.bottom + 4;
+    setPos({ top, right: Math.max(8, window.innerWidth - rect.right) });
+  };
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={toggle}
+        aria-label="Действия"
+        className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {pos ? (
+        <div
+          role="menu"
+          style={{ position: 'fixed', top: pos.top, right: pos.right }}
+          className="z-50 min-w-44 rounded-lg border border-zinc-200 bg-white py-1 text-left shadow-lg"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {items.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              role="menuitem"
+              title={item.title}
+              disabled={item.disabled}
+              onClick={() => {
+                setPos(null);
+                item.onClick();
+              }}
+              className={`block w-full px-3 py-1.5 text-left text-xs hover:bg-zinc-50 disabled:opacity-50 ${
+                item.danger ? 'text-red-600' : 'text-zinc-700'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function SenderNameField({ value, onSave }: { value: string; onSave: (next: string) => Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
