@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Loader2, MessageSquare, RefreshCw, Search, Settings } from 'lucide-react';
 import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
 import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
@@ -124,7 +124,8 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   // 15", и блок уходил под край страницы.
   const gridRef = useRef<HTMLDivElement>(null);
   const [gridHeight, setGridHeight] = useState<number | null>(null);
-  useEffect(() => {
+  // useLayoutEffect — до отрисовки: блок сразу нужной высоты, без рывка.
+  useLayoutEffect(() => {
     const measure = () => {
       const el = gridRef.current;
       if (!el) return;
@@ -177,7 +178,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               />
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto py-1">
+          <div className="min-h-0 flex-1 overflow-y-auto py-1 [scrollbar-gutter:stable]">
             <button
               type="button"
               onClick={() => pickCampaign('')}
@@ -190,7 +191,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             {shownCampaigns.map((campaign) => (
               <div key={campaign.id}>
                 <div
-                  className={`group flex items-start gap-1 px-4 py-2 text-sm transition-colors ${
+                  className={`group flex items-center gap-1 px-4 py-2 text-sm transition-colors ${
                     campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
                   }`}
                 >
@@ -199,9 +200,12 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                   <button
                     type="button"
                     onClick={() => pickCampaign(campaign.id)}
-                    className="flex min-w-0 flex-1 items-start gap-1.5 text-left"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                   >
-                    <span className={`min-w-0 flex-1 break-words ${campaignId === campaign.id ? 'font-medium' : ''}`}>
+                    <span
+                      title={campaign.name}
+                      className={`min-w-0 flex-1 truncate ${campaignId === campaign.id ? 'font-medium' : ''}`}
+                    >
                       {campaign.name}
                     </span>
                     <span
@@ -220,33 +224,6 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                     <Settings className="h-3.5 w-3.5" />
                   </button>
                 </div>
-                {/* Ящики — только у выбранной кампании: иначе колонка превращается
-                    в список из сотен адресов всех кампаний разом. */}
-                {campaignId === campaign.id && campaign.mailboxes?.length ? (
-                  <div className="pb-1">
-                    <button
-                      type="button"
-                      onClick={() => { setMailboxId(''); setPage(1); }}
-                      className={`block w-full py-1.5 pl-8 pr-4 text-left text-xs transition-colors ${
-                        mailboxId === '' ? 'text-blue-700' : 'text-zinc-500 hover:bg-zinc-100'
-                      }`}
-                    >
-                      Все ящики
-                    </button>
-                    {campaign.mailboxes.map((mailbox) => (
-                      <button
-                        key={mailbox.id}
-                        type="button"
-                        onClick={() => { setMailboxId(mailbox.id); setPage(1); }}
-                        className={`block w-full truncate py-1.5 pl-8 pr-4 text-left text-xs transition-colors ${
-                          mailboxId === mailbox.id ? 'font-medium text-blue-700' : 'text-zinc-500 hover:bg-zinc-100'
-                        }`}
-                      >
-                        {mailbox.email}
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             ))}
             {campaignsState === 'loading' ? (
@@ -316,7 +293,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
 
           {error ? <p className="px-3 py-2 text-xs text-red-600">{error}</p> : null}
 
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
             {!picked ? (
               <p className="px-4 py-12 text-center text-sm text-zinc-500">Выберите кампанию слева — или «Все кампании».</p>
             ) : loading && threads.length === 0 ? (
