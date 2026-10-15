@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Loader2, MessageSquare, RefreshCw, Search, Settings } from 'lucide-react';
 import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
 import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
@@ -103,6 +103,23 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   }, []);
 
   const columns = useColumnWidths('sender-threads:column-widths', COLUMN_DEFAULTS, COLUMN_LIMITS);
+
+  // Высота блока — ровно до низа окна от того места, где он начинается:
+  // фиксированные «100vh − 8rem» и минимум 720px не помещались на ноутбуке
+  // 15", и блок уходил под край страницы.
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [gridHeight, setGridHeight] = useState<number | null>(null);
+  useEffect(() => {
+    const measure = () => {
+      const el = gridRef.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      setGridHeight(Math.max(480, Math.round(window.innerHeight - top - 24)));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
   const maxPage = Math.max(1, Math.ceil(total / pageSize));
   const pickCampaign = (id: string) => {
     setCampaignId(id);
@@ -115,8 +132,10 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
       {/* Высота — почти весь экран: переписке и полю ответа было тесно. Ширину
           колонок кампаний и переписок тянут мышью (ResizableColumns). */}
       <div
-        className="grid h-[calc(100vh-8rem)] min-h-[720px] grid-cols-1 overflow-hidden rounded-xl border border-zinc-200 bg-white lg:grid-cols-[var(--col-campaigns)_var(--col-threads)_minmax(0,1fr)]"
+        ref={gridRef}
+        className="grid h-[calc(100vh-14rem)] min-h-[480px] grid-cols-1 overflow-hidden rounded-xl border border-zinc-200 bg-white lg:grid-cols-[var(--col-campaigns)_var(--col-threads)_minmax(0,1fr)]"
         style={{
+          ...(gridHeight ? { height: gridHeight } : {}),
           '--col-campaigns': `${columns.widths.campaigns}px`,
           '--col-threads': `${columns.widths.threads}px`,
         } as CSSProperties}
