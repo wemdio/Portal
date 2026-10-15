@@ -4,6 +4,8 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyTelegramLinkToken } from '@/lib/telegram';
 import { TELEGRAM_BOT_TOKEN } from '@/lib/constants';
+import { isInternalRole } from '@/lib/roles';
+import type { UserRole } from '@/types';
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
@@ -34,6 +36,20 @@ export async function POST(req: NextRequest) {
   if (!verified.ok) return jsonError(verified.error, 401);
 
   if (!supabaseAdmin) return jsonError('Linking is not configured', 500);
+
+  // telegram_links feeds the Telegram agent, which runs service-role SQL over every
+  // table. Only internal non-demo staff may link (same rule as the middleware staff
+  // API gate). LoginForm only logs a failed link, so a client's Mini App login goes on.
+  const { data: actor, error: actorError } = await supabaseAdmin
+    .from('profiles')
+    .select('role, is_demo')
+    .eq('id', user.id)
+    .maybeSingle();
+  if (actorError) return jsonError(actorError.message, 500);
+  const actorRole = (actor?.role ?? null) as UserRole | null;
+  if (!actor || !isInternalRole(actorRole) || actor.is_demo === true) {
+    return jsonError('Telegram linking is available to staff only', 403);
+  }
 
   const telegramId = verified.payload.telegram_id;
 

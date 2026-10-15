@@ -15,13 +15,29 @@
  *    32 000 символов); остальные вызовы — по-русски, как раньше
  *    (jsonHintLanguage).
  *
- * Расход вызова берётся из usage.cost роутера — это цена, которую Requesty
- * выставил (с его наценкой, кешем и фактической моделью ответа). Таблица
- * MODEL_PRICES (USD/M токенов, прайс Requesty на момент написания) — только
- * запасной путь, когда роутер usage.cost не вернул; при смене моделей её всё
- * равно обновлять. Фолбэка «считать по самой дорогой» больше нет: он завышал
- * самый массовый вызов движка в ~33 раза. Модель без ставки прогон не
- * останавливает, а сам пробел в таблице виден в логе (см. costOfCall).
+ * Учёт расхода — ДВА правила, развилка по рынку проекта (heLlmEngAccounting):
+ *
+ *  - market='us' (ENG). Расход вызова берётся из usage.cost роутера — это
+ *    цена, которую Requesty выставил (с его наценкой, кешем и фактической
+ *    моделью ответа). Таблица MODEL_PRICES (USD/M токенов, прайс Requesty на
+ *    момент написания) — только запасной путь, когда роутер usage.cost не
+ *    вернул, с наценкой роутера; при смене моделей её всё равно обновлять.
+ *    Фолбэка «считать по самой дорогой» здесь нет. Модель без ставки прогон не
+ *    останавливает, а сам пробел в таблице виден в логе (см. costOfCall).
+ *    Оплаченные и отброшенные попытки схемы входят в итог вызова, в канал
+ *    расхода воркера (onSpend) и в текст отказа («оплачено и отброшено»).
+ *    От этого правила зависят журнал расхода и потолки ENG — не трогать.
+ *  - любой другой рынок (RU-инструмент специалистов) — как до порта ENG
+ *    (решение владельца 14.10.2026 «Как было», подтверждено 15.10.2026; код
+ *    46bd0e82e): цена — только по замороженной таблице HE_RU_MODEL_PRICES,
+ *    неизвестная модель — по ставке opus; usage.cost и наценка не читаются; в
+ *    итог вызова идёт расход только принятой попытки; канал onSpend молчит;
+ *    текст отказа — прежний, без суффикса.
+ *
+ * Развилка по рынку — ТОЛЬКО учёт расхода. Промпты и тела запросов у RU — как
+ * до порта, а транспорт (повторы внутри вызова, срок попытки, классы сбоя
+ * HeLlmHttpError) общий для обоих рынков: он остаётся у RU по тому же решению
+ * (паузы повторов, сроки и сторож — в списке «оставить»).
  *
  * Транспорт (раздел «Транспорт» ниже): у каждой ПОПЫТКИ есть свой срок и
  * ограниченные повторы. Классы сбоя — типизированные (HeLlmHttpError.kind,
@@ -56,6 +72,7 @@ import {
   type HeProviderCallOutcome,
   type HeRequestyCall,
 } from './costTelemetry';
+import type { HeMarket } from './market';
 import { HE_US_REQUESTY_KEY_ENV, heUsProviderKey } from './providerKeys';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
@@ -154,7 +171,8 @@ function getApiKey(): string {
 const REQUESTY_MARKUP = 1.05;
 
 /**
- * Стоимость вызова. Порядок: фактический `usage.cost` роутера → ставка из
+ * Стоимость вызова по правилу ENG (market='us', heLlmEngAccounting; RU-проекты
+ * считает ruCostOfCall). Порядок: фактический `usage.cost` роутера → ставка из
  * MODEL_PRICES с наценкой роутера → 0 с записью в лог.
  *
  * usage.cost — первым: это цена, которую выставил Requesty (в VE2 это и есть
@@ -196,6 +214,59 @@ function costOfCall(
 /** Оценка по ставке таблицы с наценкой роутера — одна формула для he_jobs и журнала. */
 function tableCostOfCall(p: ModelPrices, promptTokens: number, completionTokens: number): number {
   return ((promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out) * REQUESTY_MARKUP;
+}
+
+/**
+ * Прайс RU-учёта — ЗАМОРОЖЕННАЯ копия таблицы до порта ENG (46bd0e82e), байт в
+ * байт: gpt-5.5 по 4.5/27.0, строки gpt-4o-mini нет (вызовы роли gate RU —
+ * гейт, классификатор, кейсы, пробы — поэтому, как и до порта, считаются по
+ * opus, примерно в 33 раза дороже факта). Решение владельца 14.10.2026 «Как
+ * было» (подтверждено 15.10.2026): cost_usd RU-проектов считается так же, как
+ * до порта, поэтому правки MODEL_PRICES (ставки ENG и журнала) сюда НЕ
+ * переносятся. Новую модель в RU — дописать сюда отдельным решением, иначе она
+ * считается по opus.
+ */
+const HE_RU_MODEL_PRICES: Record<string, ModelPrices> = {
+  'claude-opus-5':                  { in: 5.0, out: 25.0 },
+  'anthropic/claude-opus-5':        { in: 5.0, out: 25.0 },
+  'claude-opus-4-8':                { in: 5.0, out: 25.0 },
+  'anthropic/claude-opus-4-8':      { in: 5.0, out: 25.0 },
+  'claude-sonnet-4-6':              { in: 3.0, out: 15.0 },
+  'anthropic/claude-sonnet-4-6':    { in: 3.0, out: 15.0 },
+  'gpt-5.2':                        { in: 1.25, out: 10.0 },
+  'openai/gpt-5.2':                 { in: 1.25, out: 10.0 },
+  'gpt-5.5':                        { in: 4.5, out: 27.0 },
+  'openai/gpt-5.5':                 { in: 4.5, out: 27.0 },
+  'gemini-3.1-pro-preview':         { in: 1.8, out: 10.8 },
+  'google/gemini-3.1-pro-preview':  { in: 1.8, out: 10.8 },
+  'claude-haiku-4-5':               { in: 1.0, out: 5.0 },
+  'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },
+};
+
+/** Фолбэк RU-учёта, как до порта: модель без ставки — по самой дорогой (opus). */
+const HE_RU_FALLBACK_PRICES: ModelPrices = HE_RU_MODEL_PRICES['anthropic/claude-opus-4-8'];
+
+/**
+ * Стоимость вызова RU-проекта — формула до порта ENG (estimateCost из
+ * 46bd0e82e): только таблица, без usage.cost роутера, без наценки, без
+ * дат-алиасов и без строки в лог.
+ */
+function ruCostOfCall(model: string, promptTokens: number, completionTokens: number): number {
+  const p = HE_RU_MODEL_PRICES[model] ?? HE_RU_FALLBACK_PRICES;
+  return (promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out;
+}
+
+/**
+ * Считать ли этот вызов по правилу ENG (см. шапку файла). Рынок — явный
+ * opts.market вызывающего, а без него — рынок работы под журналом расхода ENG
+ * (costTelemetry.ts: журнал открыт только у проектов market='us' — джобы
+ * воркера, оба роута запуска шаблона, автозапуск). Всё остальное — RU-учёт,
+ * как до порта: RU-джобы, staff-роуты RU и вызов, рынок которого не известен
+ * (запуск шаблона с непрочитанным рынком проекта). Ошибка в сторону RU даёт
+ * ровно прежнее поведение RU-инструмента.
+ */
+function heLlmEngAccounting(market: HeMarket | undefined): boolean {
+  return (market ?? heProviderJournalMarket()) === 'us';
 }
 
 /**
@@ -303,7 +374,8 @@ export function getHeModel(kind: HeModelKind): string {
       model,
       'config',
       `роль '${kind}' (${configured ? HE_MODEL_ENV[kind] : `HE_MODEL_DEFAULTS.${kind}`}) — ` +
-        `расход считается по usage.cost роутера, а когда его нет — в ноль: допишите ставку в hypothesisEngine/llm.ts`,
+        `расход проектов market='us' считается по usage.cost роутера, а когда его нет — в ноль ` +
+        `(RU-проекты — по HE_RU_MODEL_PRICES, как до порта ENG): допишите ставку в hypothesisEngine/llm.ts`,
     );
   }
   return model;
@@ -370,6 +442,14 @@ export function llmValidationIssuePaths(error: unknown): string[] {
 export interface HeLlmCallOptions {
   model: string;
   maxTokens?: number;
+  /**
+   * Рынок проекта — только для правила учёта расхода (heLlmEngAccounting).
+   * Передаёт его вызывающий, который работает ВНЕ журнала расхода ENG, но знает
+   * рынок (staff-структуризация кейса). Без него рынок берётся из журнала, а
+   * без журнала — RU-учёт, как до порта. Ключ, язык служебных сообщений и
+   * журнал от этого поля не зависят.
+   */
+  market?: HeMarket;
 }
 
 export interface HeLlmSchemaCallOptions extends HeLlmCallOptions {
@@ -420,6 +500,10 @@ export interface HeActiveJobChannel {
    * вызов решит свою судьбу, поэтому до воркера доходят и деньги вызова,
    * который в итоге бросил исключение (стадия их уже не вернёт: usage у неё
    * приезжает только вместе с результатом).
+   *
+   * Только по правилу учёта ENG (market='us', heLlmEngAccounting). У вызова
+   * RU-проекта канал молчит, как до порта: в he_jobs идёт ровно то, что
+   * вернула стадия, а упавший прогон расхода не записывает.
    *
    * Канал запоминается в начале вызова, а не читается на каждом ответе: поздний
    * ответ вызова, переживший свою джобу, иначе записался бы на следующую.
@@ -1152,7 +1236,17 @@ export async function callLLMWithSchema<T>(
   const maxTokens = opts.maxTokens ?? 4096;
   // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
   const job = activeJob;
-  return callLLMWithSchemaAttempts(messages, schema, opts, maxTokens, job?.signal ?? null, job?.onSpend);
+  // Правило учёта — тоже один раз на вызов (см. шапку файла).
+  const eng = heLlmEngAccounting(opts.market);
+  return callLLMWithSchemaAttempts(
+    messages,
+    schema,
+    opts,
+    maxTokens,
+    job?.signal ?? null,
+    eng ? job?.onSpend : undefined,
+    eng,
+  );
 }
 
 async function callLLMWithSchemaAttempts<T>(
@@ -1162,6 +1256,8 @@ async function callLLMWithSchemaAttempts<T>(
   maxTokens: number,
   parent: AbortSignal | null,
   onSpend: ((spend: HeLlmSpend) => void) | undefined,
+  /** Правило учёта ENG (heLlmEngAccounting); false — RU-учёт, как до порта. */
+  eng: boolean,
 ): Promise<LLMResult<T>> {
   const attempts: Array<{
     text: string;
@@ -1176,7 +1272,8 @@ async function callLLMWithSchemaAttempts<T>(
    * числе за тот, который не прошёл схему или приехал обрезанным, — а учёт
    * читал usage только удачной попытки, и вторая оплата была невидима в
    * cost_usd. Копим и добавляем к итогу: переплата обязана быть видна там же,
-   * где считается стоимость прогона.
+   * где считается стоимость прогона. Только по правилу ENG; у RU-проекта
+   * остаётся нулём (учёт как до порта — см. keepDiscardedUsage).
    */
   const discarded = { tokensUsed: 0, promptTokens: 0, completionTokens: 0, costUsd: 0 };
   // Язык служебных сообщений — по ИСХОДНЫМ сообщениям, один раз на вызов:
@@ -1218,13 +1315,21 @@ async function callLLMWithSchemaAttempts<T>(
       (signal) => rawCall(currentMessages, opts.model, maxTokens, true, signal, hintLanguage),
     );
     const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
-    const costUsd = costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd);
+    const costUsd = eng
+      ? costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd)
+      : ruCostOfCall(opts.model, promptTokens, completionTokens);
     // Ответ оплачен — воркер узнаёт об этом сразу, до решения о его годности:
     // если следующая попытка бросит (транспорт, срок, прерывание), расход
     // этой иначе не дошёл бы никуда (discarded живёт только до return).
+    // У RU-проекта onSpend нет (см. callLLMWithSchema).
     onSpend?.({ tokensUsed, costUsd });
-    /** Отброшенная попытка тоже оплачена: копим её расход (см. discarded). */
+    /**
+     * Отброшенная попытка тоже оплачена: копим её расход (см. discarded).
+     * Только по правилу ENG: RU-учёт, как до порта, берёт расход одной
+     * принятой попытки и об отброшенной не пишет.
+     */
     const keepDiscardedUsage = () => {
+      if (!eng) return;
       discarded.tokensUsed += tokensUsed;
       discarded.promptTokens += promptTokens;
       discarded.completionTokens += completionTokens;
@@ -1298,8 +1403,9 @@ async function callLLMWithSchemaAttempts<T>(
       : `LLM вернул невалидный JSON дважды: ${last.error}`) +
       // Оплаченное и выброшенное — в тексте отказа: стадия этот расход уже не
       // вернёт (usage приезжает только с результатом), но невидимым он быть
-      // не должен.
-      ` [оплачено и отброшено: ${discarded.tokensUsed} tok, $${discarded.costUsd.toFixed(6)}]`,
+      // не должен. Только по правилу ENG: у RU-проекта текст отказа (он же
+      // he_jobs.error) прежний, без суффикса.
+      (eng ? ` [оплачено и отброшено: ${discarded.tokensUsed} tok, $${discarded.costUsd.toFixed(6)}]` : ''),
     last.text,
     // Причина уровня схемы нужна стадии: по путям она отличает «список пуст»
     // от «элемент кривой» (llmValidationIssuePaths).
@@ -1319,6 +1425,8 @@ export async function callLLMText(
   const maxTokens = opts.maxTokens ?? 8192;
   // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
   const job = activeJob;
+  // Правило учёта — тоже один раз на вызов (см. шапку файла).
+  const eng = heLlmEngAccounting(opts.market);
   // Попытка одна (повтора схемы у свободного текста нет), поэтому срок попытки
   // ограничивает и весь вызов.
   const { text, response } = await withLlmDeadline(
@@ -1328,8 +1436,11 @@ export async function callLLMText(
     (signal) => rawCall(messages, opts.model, maxTokens, false, signal),
   );
   const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
-  const costUsd = costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd);
-  job?.onSpend?.({ tokensUsed, costUsd });
+  const costUsd = eng
+    ? costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd)
+    : ruCostOfCall(opts.model, promptTokens, completionTokens);
+  // Канал расхода — только по правилу ENG (у RU-проекта молчит, как до порта).
+  if (eng) job?.onSpend?.({ tokensUsed, costUsd });
   return {
     text: text.trim(),
     tokensUsed,

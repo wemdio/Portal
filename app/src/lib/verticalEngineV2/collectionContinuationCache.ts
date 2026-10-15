@@ -5,7 +5,7 @@ import { isVeAudienceScopeEnabled } from './audienceScope';
 
 /** Bump when the continuation predicate or its underlying selection rules
  * change: an old negative verdict must not hide newly available work. */
-export const VE_COLLECTION_CONTINUATION_CACHE_VERSION = 3;
+export const VE_COLLECTION_CONTINUATION_CACHE_VERSION = 4;
 
 interface VeContinuationCache {
   version: number;

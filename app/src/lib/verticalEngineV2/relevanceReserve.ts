@@ -1,9 +1,11 @@
 import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
-import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION } from './relevanceDecision';
+import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION, isVeActivityEvidenceGuarded } from './relevanceDecision';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
 import { needsVeStaffingCorrection, VE_STAFFING_CORRECTION_VERSION, type VeStaffingCorrectionScope } from './staffingCorrection';
+import { relevanceHash } from './relevanceCheckpoint';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 /** Validated address of a relevant company kept out of the ready base only by the
  * specialist's "addresses per company" limit (companyContactCap.ts). Recomputed
@@ -59,6 +61,39 @@ export function veRelevanceCompanyKey(row: Record<string, unknown>): string {
 /** Include company identity: an email shared by two entities must retain both facts. */
 export function veRelevanceRowKey(row: Record<string, unknown>): string {
   return JSON.stringify([veRelevanceCompanyKey(row), cell(row.email).toLocaleLowerCase()]);
+}
+
+/** The exact bounded source projection used by the gate. Keep source aliases
+ * and their order here so the free reserve selector compares the same facts. */
+export function veRelevanceSourceFields(rows: Array<Record<string, unknown>>) {
+  const merged = (names: string[]) => [...new Set(names.flatMap((name) => rows.flatMap((row) =>
+    Object.entries(row).flatMap(([key, value]) => {
+      if (key.trim().toLowerCase() !== name || (typeof value !== 'string' && typeof value !== 'number')) return [];
+      if (typeof value === 'number' && !Number.isFinite(value)) return [];
+      const text = stripUnstorableJsonChars(String(value)).trim();
+      return text ? [text] : [];
+    }),
+  )))].join('\n');
+  const bounded = (names: string[], max: number) => sliceWholeChars(merged(names), 0, max);
+  return { company: bounded(['company', 'компания'], 240), website: bounded(['website', 'site', 'сайт'], 400),
+    category: bounded(['category', 'категория', 'okved', 'оквэд'], 600),
+    description: bounded(['description', 'описание', 'company_description'], 2000),
+    vacancy_title: bounded(['vacancy_title', 'vacancy', 'вакансия'], 400), website_text: '' };
+}
+
+/** Only new business-activity facts can reopen the free payment-point hold;
+ * changed emails, contact details or source diagnostics cannot buy a review. */
+export function veRelevanceActivityInput(rows: Array<Record<string, unknown>>): string {
+  const fields = veRelevanceSourceFields(rows);
+  return relevanceHash(['payment-point-activity-v1', fields.category, fields.description]);
+}
+
+function activityInputs(rows: Array<Record<string, unknown>>, source: Array<Record<string, unknown>>) {
+  const groups = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of rows) if (isVeActivityEvidenceGuarded(row._ve_relevance)) groups.set(veRelevanceCompanyKey(row), []);
+  if (!groups.size) return new Map<string, string>();
+  for (const row of [...rows, ...source]) groups.get(veRelevanceCompanyKey(row))?.push(row);
+  return new Map([...groups].map(([key, group]) => [key, veRelevanceActivityInput(group)]));
 }
 
 export function readVeRelevanceReserve(value: unknown): Array<Record<string, unknown>> {
@@ -163,6 +198,9 @@ export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>
 
 /** Only uncertain/failed classification is automatically revisited; rejects stay auditable. */
 export function needsVeRelevanceReview(row: Record<string, unknown>): boolean {
+  // Do not turn a free withdrawal of unsupported admission into paid work.
+  // The company batch selector separately admits changed source activity facts.
+  if (isVeActivityEvidenceGuarded(row._ve_relevance)) return false;
   const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
     ? row._ve_relevance as { status?: unknown } : null;
   return decision?.status === 'needs_review' || decision?.status === 'error'
@@ -226,8 +264,9 @@ function awaitsVeRulesReview(row: Record<string, unknown>): boolean {
  */
 export function veSavedReviewSignature(
   rows: Array<Record<string, unknown>>,
-  options: { triage: boolean } & VeStaffingCorrectionScope,
+  options: { triage: boolean; source?: Array<Record<string, unknown>> } & VeStaffingCorrectionScope,
 ): unknown[] {
+  const activity = activityInputs(rows, options.source ?? []);
   return rows.map((row) => {
     const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
       ? row._ve_relevance as Record<string, unknown> : undefined;
@@ -245,7 +284,8 @@ export function veSavedReviewSignature(
       // An old no-progress signature must not hide this newly available work.
       // Unrelated hypotheses/rows retain exactly their former fingerprint.
       ...(needsVeStaffingCorrection(decision, options) ? ['staffing_pending', VE_STAFFING_CORRECTION_VERSION] : []),
-      ...(decision?.staffing_correction_version !== undefined ? ['staffing', decision.staffing_correction_version] : [])];
+      ...(decision?.staffing_correction_version !== undefined ? ['staffing', decision.staffing_correction_version] : []),
+      ...(isVeActivityEvidenceGuarded(decision) ? ['activity_evidence', activity.get(veRelevanceCompanyKey(row))] : [])];
   }).sort();
 }
 
@@ -276,7 +316,13 @@ export function buildVeRelevanceReviewBatch(input: VeStaffingCorrectionScope & {
   const withEvidence = new Set([...saved, ...input.source]
     .filter(hasEvidenceSource)
     .map(veRelevanceCompanyKey));
+  const activity = activityInputs(saved, input.source);
   const selected = new Set(input.reserve.filter((row) => {
+    if (isVeActivityEvidenceGuarded(row._ve_relevance)) {
+      const previous = (row._ve_relevance as { activity_evidence_guard_facts?: string }).activity_evidence_guard_facts;
+      return isVeAcceptedEmailStatus(row._email_status) && typeof previous === 'string'
+        && previous !== activity.get(veRelevanceCompanyKey(row));
+    }
     if (!needsVeRelevanceReview(row)) return false;
     // A correction only reuses a saved semantic proposal. The gate checks its
     // full receipt and website guards; no search capability is required here.

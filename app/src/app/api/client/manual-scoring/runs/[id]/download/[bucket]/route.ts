@@ -13,6 +13,8 @@
 
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { isInternalRole } from '@/lib/roles';
+import type { UserRole } from '@/types';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -58,11 +60,26 @@ export async function GET(
 
   // RLS гарантирует что клиент видит только свои прогоны.
   // Сначала убедимся что run принадлежит этому юзеру и не expired.
-  const { data: runData, error: runErr } = await supabase
+  // Defence in depth: не-сотрудника дополнительно пиним к своим прогонам прямо в
+  // запросе — если политика когда-нибудь снова откроет таблицу, чужой run_id всё
+  // равно даст 404, и строки чужого прогона ниже не читаются. Сотрудники (внутренние
+  // роли, не демо) — как раньше, по RLS. Ошибка чтения профиля = не сотрудник.
+  const { data: actor } = await supabase
+    .from('profiles')
+    .select('role, is_demo')
+    .eq('id', user.id)
+    .maybeSingle();
+  const isStaff = actor?.is_demo !== true
+    && isInternalRole((actor?.role ?? null) as UserRole | null);
+
+  let runQuery = supabase
     .from('client_manual_score_runs')
     .select('id, status, source_filename, started_at')
-    .eq('id', id)
-    .single();
+    .eq('id', id);
+  if (!isStaff) {
+    runQuery = runQuery.eq('client_user_id', user.id);
+  }
+  const { data: runData, error: runErr } = await runQuery.single();
 
   if (runErr || !runData) {
     return new Response('Run not found', { status: 404 });

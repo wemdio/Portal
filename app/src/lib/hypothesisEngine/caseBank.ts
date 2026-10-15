@@ -104,11 +104,15 @@ ${rawText}
 /**
  * Структурировать вставленный текст кейса через LLM (роль gate — мини-модель).
  * Бросает LLMValidationError при двойном невалидном ответе — роут маппит в 502.
+ *
+ * market — рынок проекта для правила учёта расхода в llm.ts: staff-роут
+ * работает вне журнала ENG, и без рынка us-проект считался бы по RU-правилу.
  */
-export async function structureCaseText(rawText: string): Promise<HeCaseDraft> {
+export async function structureCaseText(rawText: string, market?: HeMarket): Promise<HeCaseDraft> {
   const llm = await callLLMWithSchema(buildCaseStructuringMessages(rawText), heCaseDraftSchema, {
     model: getHeModel('gate'),
     maxTokens: 2048,
+    ...(market ? { market } : {}),
   });
   return llm.data;
 }
