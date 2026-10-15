@@ -86,7 +86,7 @@ export function SenderView() {
     <nav
       aria-label="Разделы рассылки"
       style={{ top: railTop, height: `calc(100vh - ${railTop}px)` }}
-      className="fixed left-0 z-30 hidden w-14 flex-col items-center gap-1 border-r border-zinc-200 bg-white py-3 lg:flex"
+      className="fixed left-0 z-30 hidden w-14 flex-col items-center justify-center gap-1 border-r border-zinc-200 bg-white py-3 lg:flex"
     >
       {TABS.map((item) => {
         const Icon = item.icon;

@@ -288,6 +288,9 @@ export function fetchMailboxes(
     noTag?: boolean;
     /** Только ящики этого адреса отправки; 'none' — ящики без адреса. */
     egressIp?: string;
+    /** Сортировка по столбцу: email | provider | egress | status | health | new | total. */
+    sort?: string;
+    dir?: 'asc' | 'desc';
   } = {},
 ) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
@@ -296,6 +299,10 @@ export function fetchMailboxes(
   if (params.tagIds?.length) query.set('tagIds', params.tagIds.join(','));
   if (params.noTag) query.set('noTag', '1');
   if (params.egressIp) query.set('egressIp', params.egressIp);
+  if (params.sort) {
+    query.set('sort', params.sort);
+    query.set('dir', params.dir ?? 'asc');
+  }
   return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
     `${BASE}/mailboxes?${query.toString()}`,
   );
