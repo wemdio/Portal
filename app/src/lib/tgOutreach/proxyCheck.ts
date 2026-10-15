@@ -308,8 +308,17 @@ function openTunnel(
 }
 
 /** Сервис определения страны по IP: простой HTTP на порту 80, JSON с кодом страны. */
-const GEO_HOST = 'api.country.is';
-const GEO_HOST_FALLBACK = 'ipinfo.io';
+/**
+ * Сервисы страны выхода по порядку. У каждого свой путь и формат ответа; все
+ * ходят через сам прокси. Первый, кто ответил кодом страны, побеждает.
+ * 15.10.2026: api.country.is отдаёт корень «/», а не «/json» (404); ipinfo.io
+ * при тысяче проверок с одного адреса сервера ограничивает запросы (429).
+ */
+const GEO_SOURCES: { host: string; path: string; pattern: RegExp }[] = [
+  { host: 'api.country.is', path: '/', pattern: /"country"\s*:\s*"([A-Za-z]{2})"/ },
+  { host: 'ipwho.is', path: '/', pattern: /"country_code"\s*:\s*"([A-Za-z]{2})"/ },
+  { host: 'ipinfo.io', path: '/country', pattern: /\r\n\r\n(?:[0-9a-f]+\r\n)?([A-Za-z]{2})\s*(?:\r\n|$)/ },
+];
 const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 15_000;
 
 /**
@@ -323,6 +332,7 @@ async function geoLookup(
   parsed: ParsedProxy,
   host: string,
   path: string,
+  pattern: RegExp,
 ): Promise<string | null> {
   let socket: net.Socket | null = null;
   try {
@@ -347,11 +357,8 @@ async function geoLookup(
       GEO_TIMEOUT_MS,
       'определение страны прокси',
     );
-    const json = /"country"\s*:\s*"([A-Za-z]{2})"/.exec(body);
-    if (json) return json[1].toUpperCase();
-    // ipinfo.io/country отвечает голым кодом страны в теле.
-    const plain = /\r\n\r\n(?:[0-9a-f]+\r\n)?([A-Za-z]{2})\s*(?:\r\n|$)/.exec(body);
-    if (plain) return plain[1].toUpperCase();
+    const match = pattern.exec(body);
+    if (match) return match[1].toUpperCase();
     throw new Error(`${host}: в ответе нет страны (${body.split('\r\n')[0].slice(0, 40)})`);
   } finally {
     socket?.destroy();
@@ -361,9 +368,9 @@ async function geoLookup(
 /** Страна выхода: основной сервис, при неудаче запасной; причина — в error. */
 async function detectProxyCountry(parsed: ParsedProxy): Promise<{ code: string | null; error: string | null }> {
   const errors: string[] = [];
-  for (const [host, path] of [[GEO_HOST, '/json'], [GEO_HOST_FALLBACK, '/country']] as const) {
+  for (const { host, path, pattern } of GEO_SOURCES) {
     try {
-      const code = await geoLookup(parsed, host, path);
+      const code = await geoLookup(parsed, host, path, pattern);
       if (code) return { code, error: null };
     } catch (e) {
       errors.push(`${host}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 120));
