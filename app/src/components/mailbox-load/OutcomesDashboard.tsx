@@ -99,7 +99,8 @@ function buildOption(
     animation: animate,
     animationDuration: 700,
     textStyle: { fontFamily: CHART_FONT },
-    grid: { left: 4, right: 4, top: 16, bottom: 4, containLabel: true },
+    // right 28: подпись последней даты по оси X стоит у самого края и обрезалась.
+    grid: { left: 4, right: 28, top: 16, bottom: 4, containLabel: true },
     legend: { show: false },
     tooltip: {
       trigger: 'axis',
