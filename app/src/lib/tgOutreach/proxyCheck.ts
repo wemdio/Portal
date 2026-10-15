@@ -92,6 +92,8 @@ export interface ProxyCheckResult {
   reason: string | null;
   /** Страна выхода прокси (ISO, например UZ); null — не определяли или не вышло. */
   country_code?: string | null;
+  /** Почему страну определить не вышло (только при detectCountry). */
+  country_error?: string | null;
 }
 
 export interface ProxyCheckInput {
@@ -307,7 +309,8 @@ function openTunnel(
 
 /** Сервис определения страны по IP: простой HTTP на порту 80, JSON с кодом страны. */
 const GEO_HOST = 'api.country.is';
-const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 8_000;
+const GEO_HOST_FALLBACK = 'ipinfo.io';
+const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 15_000;
 
 /**
  * Страна, из которой прокси выходит в интернет. Открываем туннель до сервиса
@@ -316,22 +319,27 @@ const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 8
  * литерал. Ничего не бросает: нет страны — null, на вердикт проверки это не
  * влияет.
  */
-async function detectProxyCountry(parsed: ParsedProxy): Promise<string | null> {
+async function geoLookup(
+  parsed: ParsedProxy,
+  host: string,
+  path: string,
+): Promise<string | null> {
   let socket: net.Socket | null = null;
   try {
     // HTTPS (443), а не HTTP (80): HTTP-прокси пропускают CONNECT к 443, а к 80 часто нет.
-    const { address } = await dns.promises.lookup(GEO_HOST, { family: 4 });
+    const { address } = await dns.promises.lookup(host, { family: 4 });
     socket = await openTunnel(parsed, { host: address, port: 443 }, GEO_TIMEOUT_MS);
-    const raw = socket;
-    const secure = tls.connect({ socket: raw, servername: GEO_HOST });
+    const secure = tls.connect({ socket, servername: host });
     const body = await withTimeout(
       new Promise<string>((resolve, reject) => {
         let data = '';
         secure.on('secureConnect', () => {
-          secure.write(`GET /json HTTP/1.1
-Host: ${GEO_HOST}
-Connection: close
-
+          secure.write(`GET ${path} HTTP/1.1
+Host: ${host}
+User-Agent: curl/8
+Accept: */*
+Connection: close
+
 `);
         });
         secure.on('data', (chunk: Buffer) => {
@@ -345,13 +353,34 @@ Connection: close
       GEO_TIMEOUT_MS,
       'определение страны прокси',
     );
-    const match = /"country"\s*:\s*"([A-Za-z]{2})"/.exec(body);
-    return match ? match[1].toUpperCase() : null;
-  } catch {
-    return null;
+    const json = /"country"\s*:\s*"([A-Za-z]{2})"/.exec(body);
+    if (json) return json[1].toUpperCase();
+    // ipinfo.io/country отвечает голым кодом страны в теле.
+    const plain = /
+
+(?:[0-9a-f]+
+)?([A-Za-z]{2})\s*(?:
+|$)/.exec(body);
+    if (plain) return plain[1].toUpperCase();
+    throw new Error(`${host}: в ответе нет страны (${body.split('
+')[0].slice(0, 40)})`);
   } finally {
     socket?.destroy();
   }
+}
+
+/** Страна выхода: основной сервис, при неудаче запасной; причина — в error. */
+async function detectProxyCountry(parsed: ParsedProxy): Promise<{ code: string | null; error: string | null }> {
+  const errors: string[] = [];
+  for (const [host, path] of [[GEO_HOST, '/json'], [GEO_HOST_FALLBACK, '/country']] as const) {
+    try {
+      const code = await geoLookup(parsed, host, path);
+      if (code) return { code, error: null };
+    } catch (e) {
+      errors.push(`${host}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 120));
+    }
+  }
+  return { code: null, error: errors.join(' · ') };
 }
 
 /**
@@ -411,7 +440,7 @@ export async function checkProxy(
       telegram_latency_ms: latency,
       status: 'ok',
       reason: null,
-      ...(opts.detectCountry ? { country_code: await detectProxyCountry(parsed) } : {}),
+      ...(opts.detectCountry ? await detectProxyCountry(parsed).then((g) => ({ country_code: g.code, country_error: g.error })) : {}),
     };
   } catch (e) {
     const latency = Date.now() - startedAt;

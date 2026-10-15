@@ -6231,6 +6231,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           break;
         }
         working += body.items.filter((r) => r.status === 'ok').length;
+        const geoErr = body.items.find((r) => r.status === 'ok' && !r.country_code && r.country_error)?.country_error;
+        if (geoErr) setProxyError(`Страна не определилась: ${geoErr}`);
         setSortRun({ done: Math.min(i + ids.length, targets.length), total: targets.length, working });
       }
       const sortRes = await authFetch(`${API_BASE}/proxies/auto-sort`, {
@@ -6278,14 +6280,18 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setBulkDeleting(true);
     setProxyError(null);
     try {
-      const res = await authFetch(`${API_BASE}/proxies/bulk`, {
-        method: 'DELETE',
-        body: JSON.stringify({ campaign_id: campaignId, ids }),
-      });
-      if (!res.ok) {
-        const d = (await res.json().catch(() => null)) as { error?: string } | null;
-        setProxyError(d?.error ?? `Не удалось удалить (${res.status})`);
-        return;
+      // Любое число — пачками по 500 (лимит сервера на один запрос).
+      for (let i = 0; i < ids.length; i += 500) {
+        const res = await authFetch(`${API_BASE}/proxies/bulk`, {
+          method: 'DELETE',
+          body: JSON.stringify({ campaign_id: campaignId, ids: ids.slice(i, i + 500) }),
+        });
+        if (!res.ok) {
+          const d = (await res.json().catch(() => null)) as { error?: string } | null;
+          setProxyError(d?.error ?? `Не удалось удалить (${res.status})`);
+          void reloadAll();
+          return;
+        }
       }
       clear();
       void reloadAll();
@@ -6304,18 +6310,22 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setSaving(true);
     setProxyError(null);
     try {
-      const res = await authFetch(`${API_BASE}/proxies/bulk-move`, {
-        method: 'POST',
-        body: JSON.stringify({
-          campaign_id: campaignId,
-          ids,
-          list_id: targetList,
-        }),
-      });
-      if (!res.ok) {
-        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
-        setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
-        return;
+      // Любое число — пачками по 500.
+      for (let i = 0; i < ids.length; i += 500) {
+        const res = await authFetch(`${API_BASE}/proxies/bulk-move`, {
+          method: 'POST',
+          body: JSON.stringify({
+            campaign_id: campaignId,
+            ids: ids.slice(i, i + 500),
+            list_id: targetList,
+          }),
+        });
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+          setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
+          void reloadAll();
+          return;
+        }
       }
       setMoveTarget(null);
       clear();
