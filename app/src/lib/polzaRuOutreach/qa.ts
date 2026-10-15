@@ -121,9 +121,8 @@ export function runQa(input: QaInput): QaResult {
     flags.push('case_text_mismatch');
   }
 
-  if (bodyWords.length === 4) {
-    if (!(bodyWords[3] < bodyWords[1] && bodyWords[3] < bodyWords[2])) flags.push('L4:not_shortest');
-  }
+  // Правило «письмо 4 короче 2 и 3» снято 15.10.2026 вместе с шаблонным: при пределе
+  // длины письма почти одинаковые, и проверка браковала готовые письма.
 
   return { status: flags.length ? 'failed' : 'passed', flags };
 }
@@ -293,7 +292,8 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
     // Лимит длины (14.10.2026, бережём ящики): свой текст писателя без
     // приветствия, подписи и плейсхолдеров — не больше TEMPLATE_OWN_TEXT_MAX.
     const own = plain.replace(/^Добрый день!/, '').replace(/С уважением,\s*$/, '').replace(/\s+/g, ' ').trim().length;
-    if (own > TEMPLATE_OWN_TEXT_MAX) flags.push(`${tag}:too_long(${own} симв.)`);
+    // Запас 10%: писатель промахивается на единицы символов, а повторы платные.
+    if (own > Math.round(TEMPLATE_OWN_TEXT_MAX * 1.1)) flags.push(`${tag}:too_long(${own} симв.)`);
 
     const questions = countOf(text, '?');
     if (questions === 0) flags.push(`${tag}:no_cta`);
@@ -330,8 +330,10 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
   // в варианте с кейсом {{кейс}} — одно слово шаблона, а в письме это 20–40
   // слов кейса, и письмо 4 CEO «длиннее» его только на бумаге. Готовые письма
   // runQa сверяет честно, после подстановки.
-  const last = words.get('L4');
-  if (last !== undefined && ['L2', 'L3'].some((tag) => (words.get(tag) ?? Infinity) <= last)) flags.push('L4:not_shortest');
+  // С 15.10.2026 правило отключено: у писем жёсткий предел длины (200 символов),
+  // все четыре письма почти одной длины, и «письмо 4 короче 2 и 3» браковало цепочки
+  // (840 компаний «Найм SDR/BDR» 14.10.2026 застряли в «Очень спорных»).
+  // «Письмо 4 самое короткое» осталось пожеланием в задании писателю.
 
   return { status: flags.length ? 'failed' : 'passed', flags };
 }
