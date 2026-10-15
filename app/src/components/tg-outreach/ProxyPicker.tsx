@@ -62,6 +62,7 @@ export function ProxyPicker<T extends PickerProxy>({
   emptyLabel = 'Без прокси',
   ariaLabel = 'Прокси',
   className = '',
+  preferCountries = [],
 }: {
   /** id выбранного прокси; пустая строка — «Без прокси». */
   value: string;
@@ -77,6 +78,8 @@ export function ProxyPicker<T extends PickerProxy>({
   emptyLabel?: string;
   ariaLabel?: string;
   className?: string;
+  /** Страны выбранных аккаунтов (ISO): их прокси встают наверх списка. */
+  preferCountries?: string[];
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -84,7 +87,7 @@ export function ProxyPicker<T extends PickerProxy>({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
 
-  const groups = useMemo(() => groupProxiesForPicker(proxies, now), [proxies, now]);
+  const groups = useMemo(() => groupProxiesForPicker(proxies, now, preferCountries), [proxies, now, preferCountries]);
   /** Пункт «Без прокси» идёт первым и в клавиатурном обходе тоже — индекс 0. */
   const flat = useMemo(() => flattenPickerGroups(groups), [groups]);
   const selected = useMemo(() => proxies.find((p) => p.id === value) ?? null, [proxies, value]);
