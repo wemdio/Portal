@@ -5,6 +5,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { structureCaseText } from '@/lib/hypothesisEngine/caseBank';
+import { projectMarket } from '@/lib/hypothesisEngine/market';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -76,10 +77,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           ? body.filename.trim().slice(0, 500)
           : null;
 
-      // Проект существует?
-      const { error: projErr } = await supabaseAdmin
+      // Проект существует? Тем же чтением — рынок: правило учёта расхода
+      // структуризации в llm.ts (us — как в ENG, остальные — как до порта).
+      const { data: proj, error: projErr } = await supabaseAdmin
         .from('he_projects')
-        .select('id')
+        .select('id, market')
         .eq('id', id)
         .single();
       if (projErr) {
@@ -91,7 +93,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
       let structured;
       try {
-        structured = await structureCaseText(text);
+        structured = await structureCaseText(text, projectMarket((proj ?? {}) as { market?: string | null }));
       } catch (e) {
         await logError('tools.hypothesis-engine.cases.structure_failed', e, { userId, projectId: id });
         return jsonError('Не удалось разобрать текст кейса', 502);

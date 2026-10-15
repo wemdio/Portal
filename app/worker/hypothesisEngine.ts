@@ -2113,6 +2113,9 @@ async function handleJob(job: HeJob) {
   // (включая отброшенные попытки схемы) прибавляется в paid. Стадия отдаёт свой
   // расход только вместе с результатом, поэтому без этой суммы деньги прогона,
   // который бросил исключение, не попадали в he_jobs/he_projects вовсе.
+  // Только market='us' (llm.ts, heLlmEngAccounting); RU — как до порта ENG:
+  // у RU-прогона onSpend не зовётся, paid остаётся 0, и в he_jobs идёт ровно
+  // расход, который вернула стадия (упавший прогон расхода не пишет).
   const paid: HeLlmSpend = { tokensUsed: 0, costUsd: 0 };
   setHeActiveJob({
     signal: abort.signal,
