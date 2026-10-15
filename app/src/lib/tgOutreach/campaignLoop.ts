@@ -22,7 +22,7 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
@@ -1078,8 +1078,14 @@ export async function handleChat(
   // Квалификацию ведёт промпт кампании: сами передаём только прямую просьбу о
   // человеке, и она передаётся даже в ответ на вопрос о роли.
   const directOnly = oai.handoff_direct_request_only === true;
+  // Наше последнее сообщение — квалификационные вопросы: клиент мог ответить на
+  // часть, отделаться «да» или не ответить по сути. Кто из них готов к передаче,
+  // решает модель по промпту кампании (она видит ответ), а не код по слову
+  // «интерес»: иначе «да» после вопросов уводило лида менеджеру пустым.
+  const lastOurs = [...chatMessages].reverse().find((m) => m.role === 'assistant');
+  const awaitingQualification = Boolean(lastOurs && asksOpenQuestions(String(lastOurs.content ?? '')));
   let interested: boolean | null = null;
-  if (phrase && (!roleOnly || directOnly)) {
+  if (phrase && !awaitingQualification && (!roleOnly || directOnly)) {
     const check = await detectInterest(chatMessages, { directRequestOnly: directOnly });
     interested = check.interested;
     if (interested) {
@@ -1137,7 +1143,15 @@ export async function handleChat(
     log('warning', `${displayName}: ответ дословно повторяет то, что мы уже писали ("${replyText}") — НЕ отправляю`);
     return { replied: false, triggerType: null };
   }
-  if (interested && phrase) {
+  // Сообщение с несколькими вопросами — это квалификация: ответа ещё нет, и
+  // передавать контакт рано. Фразу не дописываем, а если модель вписала её сама,
+  // убираем: иначе по ней сработает триггер и лид уйдёт менеджеру без ответов.
+  const qualifying = asksOpenQuestions(replyText);
+  if (qualifying && phrase && detectTrigger(replyText, oai) === 'positive') {
+    log('warning', `${displayName}: в сообщении с вопросами была фраза передачи — убираю, ждём ответ клиента`);
+    replyText = stripHandoffPhrase(replyText, phrase);
+  }
+  if (interested && phrase && !qualifying) {
     replyText = ensureHandoffPhrase(replyText, phrase);
   }
   if (roleOnly && !interested && detectTrigger(replyText, oai) === 'positive') {
