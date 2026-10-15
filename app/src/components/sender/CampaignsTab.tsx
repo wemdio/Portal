@@ -307,7 +307,7 @@ function ColumnsMenu({ visible, onToggle }: { visible: Set<ColumnKey>; onToggle:
       {open ? (
         <div className="absolute right-0 z-30 mt-1 w-64 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
           <div className="px-2 py-1 text-xs uppercase tracking-wide text-zinc-500">Столбцы</div>
-          <div className="flex items-center gap-2.5 rounded-lg px-2 py-2 text-[15px] text-zinc-400" title="Название показывается всегда">
+          <div className="flex items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-sm text-zinc-400" title="Название показывается всегда">
             <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-blue-600 bg-blue-600 text-white opacity-50">
               <Check className="h-3 w-3" />
             </span>
@@ -320,7 +320,7 @@ function ColumnsMenu({ visible, onToggle }: { visible: Set<ColumnKey>; onToggle:
                 key={column.key}
                 type="button"
                 onClick={() => onToggle(column.key)}
-                className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[15px] text-zinc-700 hover:bg-zinc-100"
+                className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-sm text-zinc-700 hover:bg-zinc-100"
               >
                 <span
                   className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
@@ -395,7 +395,7 @@ function StatusFilterMenu({
         <ChevronDown className="h-3.5 w-3.5 opacity-60" />
       </button>
       {open ? (
-        <div className="absolute left-0 z-30 mt-1 w-60 space-y-0.5 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
+        <div className="absolute left-0 z-30 mt-1 w-56 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg">
           {STATUS_FILTERS.map((item) => (
             <button
               key={item.id}
@@ -404,7 +404,7 @@ function StatusFilterMenu({
                 onChange(item.id);
                 setOpen(false);
               }}
-              className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[15px] hover:bg-zinc-100 ${
+              className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-[7px] text-left text-sm hover:bg-zinc-100 ${
                 item.id === value ? 'font-semibold text-zinc-900' : 'text-zinc-700'
               }`}
             >
