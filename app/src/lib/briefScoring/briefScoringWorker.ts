@@ -9,7 +9,9 @@ import {
   resolveBriefScoringConcurrency,
 } from '@/lib/briefScoring/concurrency';
 import { fatalAiAccountError } from '@/lib/openrouter/client';
-import { TA_JEV_BATCH, TaJevBreaker, scoreTaWithJev, taJevCut, taJevEnabled } from '@/lib/taScoringJev';
+import {
+  TA_JEV_BATCH, TaJevBreaker, scoreTaWithJev, taJevCut, taJevEnabled, taJevHasFacts, taJevMinLetters,
+} from '@/lib/taScoringJev';
 
 type QueueItem = {
   id: string;
@@ -220,7 +222,8 @@ export async function runBriefScoringJob(jobId: string) {
     // по 10 с одним брифом; предохранитель общий на задачу.
     const jevBreaker = taJevEnabled('databases', job.user_id) ? new TaJevBreaker() : null;
     const jevCut = taJevCut();
-    const jevStats = { requests: 0, companies: 0, fallback: 0, costUsd: 0 };
+    const jevMinLetters = taJevMinLetters();
+    const jevStats = { requests: 0, companies: 0, fallback: 0, thin: 0, costUsd: 0 };
 
     trace = await startTrace({
       name: 'database.brief_scoring',
@@ -385,11 +388,17 @@ export async function runBriefScoringJob(jobId: string) {
         };
 
         let rest = activeItems;
-        if (jevBreaker?.available) {
+        // Строки почти без фактов (одни адрес, сайт, телефон) Jev не получает: их
+        // оценивает DeepSeek, который угадывает компанию по домену и бренду.
+        const jevCandidates = jevBreaker
+          ? activeItems.filter((item) => taJevHasFacts(toCompanyData(item.company_data), jevMinLetters))
+          : [];
+        if (jevBreaker) jevStats.thin += activeItems.length - jevCandidates.length;
+        if (jevBreaker?.available && jevCandidates.length > 0) {
           const result = await scoreTaWithJev({
             apiKey: OPENROUTER_BRIEF_API_KEY,
             brief: job.brief_text.slice(0, 5000),
-            companies: activeItems.map((item) => ({ key: item.id, data: toCompanyData(item.company_data) })),
+            companies: jevCandidates.map((item) => ({ key: item.id, data: toCompanyData(item.company_data) })),
             cut: jevCut,
             title: 'Portal - Brief Scoring (Jev)',
           });
@@ -402,11 +411,12 @@ export async function runBriefScoringJob(jobId: string) {
           jevStats.requests += 1;
           jevStats.companies += result.verdicts.size;
           jevStats.costUsd += result.costUsd;
-          rest = [];
-          for (const item of activeItems) {
+          rest = activeItems.filter((item) => !jevCandidates.includes(item));
+          for (const item of jevCandidates) {
             const verdict = result.verdicts.get(item.id);
             if (!verdict) {
               rest.push(item);
+              jevStats.fallback += 1;
               continue;
             }
             const completed = await updateQueueCompleted(item, { idx: item.row_index, score: verdict.score, reason: verdict.reason });
@@ -421,10 +431,9 @@ export async function runBriefScoringJob(jobId: string) {
               }
             }
           }
-          jevStats.fallback += rest.length;
-        } else if (jevBreaker) {
+        } else if (jevBreaker && !jevBreaker.available) {
           // Предохранитель уже выключил Jev: вся пачка — DeepSeek.
-          jevStats.fallback += activeItems.length;
+          jevStats.fallback += jevCandidates.length;
         }
         for (let i = 0; i < rest.length; i += MODEL_BATCH_SIZE) {
           await scoreWithDeepSeek(rest.slice(i, i + MODEL_BATCH_SIZE));
@@ -507,6 +516,7 @@ export async function runBriefScoringJob(jobId: string) {
             jevRequests: jevStats.requests,
             jevCompanies: jevStats.companies,
             jevFallbackCompanies: jevStats.fallback,
+            jevThinCompanies: jevStats.thin,
             jevCostUsd: Math.round(jevStats.costUsd * 1e6) / 1e6,
             jevDisabledReason: jevBreaker.disabledReason,
           }
