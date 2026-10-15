@@ -30,6 +30,7 @@ import {
   type CrmQueueRow,
   type CrmSettings,
 } from '@/lib/crm/dealQueue';
+import { sendLeadToGeneral } from './generalNotice';
 import { buildLeadMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
 
@@ -157,6 +158,14 @@ export async function processCrmPushes(db: SupabaseClient, log: LogFn): Promise<
           { fieldId: POLZA_SOURCE_FIELD_ID, fieldName: 'Источник', value: POLZA_SOURCE_TG_OUTREACH },
           { fieldId: POLZA_CONTOUR_FIELD_ID, fieldName: 'Контур', value: POLZA_CONTOUR_TG_OUTREACH },
         ],
+        // Сделка уже есть — лид дублируется в общий чат продаж со ссылкой на неё.
+        afterDeal: ({ leadUrl }) => sendLeadToGeneral({
+          campaignName: row.campaign_name,
+          contact: who,
+          offer: row.offer,
+          card: row.message_text,
+          dealUrl: leadUrl,
+        }),
         label: `${who} (${row.campaign_name})`,
       };
     },

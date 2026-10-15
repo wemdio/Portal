@@ -33,11 +33,11 @@ export function leadTelegramConfig(env: NodeJS.ProcessEnv = process.env): LeadTe
   };
 }
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function clip(text: string, max: number): string {
+export function clip(text: string, max: number): string {
   const t = text.trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
