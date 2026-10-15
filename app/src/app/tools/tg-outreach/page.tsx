@@ -6231,6 +6231,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           break;
         }
         working += body.items.filter((r) => r.status === 'ok').length;
+        const geoErr = body.items.find((r) => r.status === 'ok' && !r.country_code && r.country_error)?.country_error;
+        if (geoErr) setProxyError(`Страна не определилась: ${geoErr}`);
         setSortRun({ done: Math.min(i + ids.length, targets.length), total: targets.length, working });
       }
       const sortRes = await authFetch(`${API_BASE}/proxies/auto-sort`, {
