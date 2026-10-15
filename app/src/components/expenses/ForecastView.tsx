@@ -106,7 +106,8 @@ const RATE_GROUPS: Array<{ title: string; fields: Field[] }> = [
   },
 ];
 
-function loadInputs(): ForecastInputs {
+/** Сохранённые значения; null — вкладку в этом браузере ещё не открывали. */
+function loadSaved(): ForecastInputs | null {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     // Поверх умолчаний: новое поле в модели не должно приходить пустым из
@@ -115,17 +116,57 @@ function loadInputs(): ForecastInputs {
   } catch {
     // Повреждённое сохранение — просто начинаем с умолчаний.
   }
-  return DEFAULT_INPUTS;
+  return null;
 }
 
-/** Границы прошлого полного месяца по Москве, YYYY-MM-DD. */
-function previousMonth(): { from: string; to: string; label: string } {
+type FactMode = 'previous' | 'current';
+
+interface FactWindow {
+  from: string;
+  to: string;
+  /** Во сколько раз растянуть факт до полного месяца: 1 для прошлого, дни месяца / прошедшие для текущего. */
+  scale: number;
+  label: string;
+}
+
+/**
+ * Окно факта по Москве. Текущий месяц — «в темпе»: потрачено с 1-го по
+ * сегодня, растянутое на весь месяц. Сегодня считается целым днём: занижать
+ * темп хуже, чем завышать, — маржа выйдет красивее правды.
+ */
+function factWindow(mode: FactMode): FactWindow {
   const now = new Date(Date.now() + 3 * 60 * 60 * 1000);
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
   const iso = (d: Date) => d.toISOString().slice(0, 10);
-  const label = start.toLocaleDateString('ru-RU', { month: 'long', timeZone: 'UTC' });
-  return { from: iso(start), to: iso(end), label };
+  const monthName = (d: Date) => d.toLocaleDateString('ru-RU', { month: 'long', timeZone: 'UTC' });
+
+  if (mode === 'previous') {
+    const start = new Date(Date.UTC(y, m - 1, 1));
+    return { from: iso(start), to: iso(new Date(Date.UTC(y, m, 0))), scale: 1, label: monthName(start) };
+  }
+  const start = new Date(Date.UTC(y, m, 1));
+  const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const elapsed = now.getUTCDate();
+  return {
+    from: iso(start),
+    to: iso(now),
+    scale: daysInMonth / elapsed,
+    label: `${monthName(start)} в темпе`,
+  };
+}
+
+async function fetchOtherCosts(mode: FactMode): Promise<number> {
+  const span = factWindow(mode);
+  const query = new URLSearchParams({ from: span.from, to: span.to, groupBy: 'month' });
+  const summary = await expensesFetch<ExpensesSummary>(`/summary?${query.toString()}`);
+  let total = 0;
+  for (const point of summary.series) {
+    for (const [category, amount] of Object.entries(point.byCategory)) {
+      if (!MODELLED_CATEGORIES.has(category)) total += amount;
+    }
+  }
+  return Math.round(total * span.scale);
 }
 
 function NumberField({
@@ -158,14 +199,22 @@ function NumberField({
 export default function ForecastView() {
   const [inputs, setInputs] = useState<ForecastInputs>(DEFAULT_INPUTS);
   const [loaded, setLoaded] = useState(false);
-  const [factLoading, setFactLoading] = useState(false);
+  const [factLoading, setFactLoading] = useState<FactMode | null>(null);
   const [factError, setFactError] = useState<string | null>(null);
 
   // localStorage читаем после монтирования: на сервере его нет, и разметка
   // первого рендера должна совпасть.
   useEffect(() => {
-    setInputs(loadInputs());
+    const saved = loadSaved();
+    if (saved) setInputs(saved);
     setLoaded(true);
+    // Первое открытие: прочие расходы сразу из факта прошлого месяца, иначе
+    // при нуле маржа выглядит лучше, чем есть.
+    if (!saved) {
+      fetchOtherCosts('previous')
+        .then((otherCosts) => setInputs((prev) => ({ ...prev, otherCosts })))
+        .catch((e: unknown) => logError('money.forecast.fact_prefill_failed', e));
+    }
   }, []);
 
   useEffect(() => {
@@ -183,26 +232,22 @@ export default function ForecastView() {
   const result = useMemo(() => computeForecast(inputs), [inputs]);
   const belowTarget = result.margin !== null && result.margin < inputs.targetMarginPct / 100;
   const levers = useMemo(() => (belowTarget ? marginLevers(inputs) : null), [belowTarget, inputs]);
-  const prevMonth = useMemo(() => previousMonth(), []);
+  const factLabels = useMemo(
+    () => ({ previous: factWindow('previous').label, current: factWindow('current').label }),
+    [],
+  );
 
-  const fillOtherCostsFromFact = async () => {
-    setFactLoading(true);
+  const fillOtherCostsFromFact = async (mode: FactMode) => {
+    setFactLoading(mode);
     setFactError(null);
     try {
-      const query = new URLSearchParams({ from: prevMonth.from, to: prevMonth.to, groupBy: 'month' });
-      const summary = await expensesFetch<ExpensesSummary>(`/summary?${query.toString()}`);
-      let total = 0;
-      for (const point of summary.series) {
-        for (const [category, amount] of Object.entries(point.byCategory)) {
-          if (!MODELLED_CATEGORIES.has(category)) total += amount;
-        }
-      }
-      setInputs((prev) => ({ ...prev, otherCosts: Math.round(total) }));
+      const otherCosts = await fetchOtherCosts(mode);
+      setInputs((prev) => ({ ...prev, otherCosts }));
     } catch (e) {
       logError('money.forecast.fact_failed', e);
       setFactError(e instanceof Error ? e.message : 'Не удалось загрузить расходы');
     } finally {
-      setFactLoading(false);
+      setFactLoading(null);
     }
   };
 
@@ -331,14 +376,18 @@ export default function ForecastView() {
             </div>
           ))}
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            <button
-              type="button"
-              onClick={() => void fillOtherCostsFromFact()}
-              disabled={factLoading}
-              className="rounded-full border border-zinc-200 px-3 py-1 text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
-            >
-              {factLoading ? 'Загружаю…' : `Прочие расходы — факт за ${prevMonth.label}`}
-            </button>
+            <span className="text-zinc-500">Прочие расходы — факт:</span>
+            {(['previous', 'current'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => void fillOtherCostsFromFact(mode)}
+                disabled={factLoading !== null}
+                className="rounded-full border border-zinc-200 px-3 py-1 text-zinc-600 hover:bg-zinc-100 disabled:opacity-50"
+              >
+                {factLoading === mode ? 'Загружаю…' : factLabels[mode]}
+              </button>
+            ))}
             <span className="text-zinc-400">без ФОТ и налогов</span>
             {factError ? <span className="text-red-600">{factError}</span> : null}
           </div>
