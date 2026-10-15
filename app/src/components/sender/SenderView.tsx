@@ -15,14 +15,15 @@ import { ThreadsTab } from './ThreadsTab';
 // их с получателями кампаний и обрывает цепочку ответившим. Ответы лиду
 // пишутся прямо там же (задача 4.1); разбор входящих остаётся в инструменте
 // «Персонализированные ответы».
-const TABS: ReadonlyArray<{ id: string; label: string; icon: LucideIcon }> = [
-  { id: 'campaigns', label: 'Кампании', icon: Send },
-  { id: 'mailboxes', label: 'Ящики', icon: Inbox },
-  { id: 'threads', label: 'Письма', icon: Mail },
-  { id: 'stats', label: 'Статистика', icon: BarChart3 },
-  { id: 'seeds', label: 'Контрольные ящики', icon: ShieldCheck },
-  { id: 'stoplist', label: 'Стоп-лист', icon: Ban },
-  { id: 'egress', label: 'Адреса отправки', icon: Network },
+// hint — одна строка под заголовком: что на вкладке можно сделать.
+const TABS: ReadonlyArray<{ id: string; label: string; hint: string; icon: LucideIcon }> = [
+  { id: 'campaigns', label: 'Кампании', hint: 'Создавайте, запускайте и ставьте на паузу рассылки.', icon: Send },
+  { id: 'mailboxes', label: 'Ящики', hint: 'Подключайте ящики и задавайте им дневные лимиты.', icon: Inbox },
+  { id: 'threads', label: 'Письма', hint: 'Читайте ответы и отвечайте лидам прямо отсюда.', icon: Mail },
+  { id: 'stats', label: 'Статистика', hint: 'Смотрите отправки, ответы и отбои по дням и кампаниям.', icon: BarChart3 },
+  { id: 'seeds', label: 'Контрольные ящики', hint: 'Проверяйте, попадают письма во входящие или в спам.', icon: ShieldCheck },
+  { id: 'stoplist', label: 'Стоп-лист', hint: 'Адреса, которым рассылка больше не пишет.', icon: Ban },
+  { id: 'egress', label: 'Адреса отправки', hint: 'С каких IP уходят письма и какие ящики на каждом.', icon: Network },
 ];
 
 type TabId = 'campaigns' | 'mailboxes' | 'threads' | 'stats' | 'seeds' | 'stoplist' | 'egress';
@@ -78,6 +79,8 @@ export function SenderView() {
   // Кампания, по которой нажали «Статистика» в списке: вкладка статистики
   // открывается сразу с ней.
   const [statsCampaignId, setStatsCampaignId] = useState<string | null>(null);
+
+  const activeTab = TABS.find((item) => item.id === tab) ?? TABS[0];
 
   return (
     // «Письма» — три колонки, как «Персонализированные ответы»: им нужна вся ширина.
@@ -137,10 +140,8 @@ export function SenderView() {
 
     <div className={`mx-auto px-6 py-8 ${tab === 'threads' ? 'max-w-none' : 'max-w-7xl'}`}>
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-zinc-900">Рассылка</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Своя отправка писем с подключённых ящиков провайдера.
-        </p>
+        <h1 className="text-xl font-semibold text-zinc-900">{activeTab.label}</h1>
+        <p className="mt-1 text-sm text-zinc-500">{activeTab.hint}</p>
       </div>
 
       {tab === 'mailboxes' ? <MailboxesTab initialEgressIp={egressIp} /> : null}
