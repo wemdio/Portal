@@ -284,6 +284,11 @@ export interface OutreachProxy {
    * введения списков.
    */
   proxy_list_id?: string | null;
+  /** Страна выхода прокси (ISO) по последней проверке с определением страны. */
+  country_code?: string | null;
+  /** Итог последней проверки: ok | proxy_dead | proxy_rejected | telegram_unreachable | … */
+  check_status?: string | null;
+  checked_at?: string | null;
   /**
    * Здоровье прокси (миграция 20260603_0001). Ручка отдаёт строку целиком, и
    * экран этими полями уже пользуется — колонка «Здоровье прокси» и выбор

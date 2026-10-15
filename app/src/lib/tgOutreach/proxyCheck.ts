@@ -21,6 +21,7 @@
  */
 
 import net from 'net';
+import dns from 'dns';
 import { probeProxyTcp, parseProxyUrl, type ParsedProxy } from './gramClient';
 import { openHttpConnectTunnel, HttpConnectRejectedError } from './httpProxySocket';
 import { withTimeout } from './withTimeout';
@@ -88,6 +89,8 @@ export interface ProxyCheckResult {
   status: ProxyCheckStatus;
   /** Человеческая причина отказа по-русски; null, когда всё хорошо. */
   reason: string | null;
+  /** Страна выхода прокси (ISO, например UZ); null — не определяли или не вышло. */
+  country_code?: string | null;
 }
 
 export interface ProxyCheckInput {
@@ -102,6 +105,8 @@ export interface ProxyCheckOptions {
   /** Куда проверять проходимость. Подменяется в тестах на локальную заглушку. */
   target?: { host: string; port: number };
   concurrency?: number;
+  /** Определить страну выхода: ещё один лёгкий запрос через рабочий прокси. */
+  detectCountry?: boolean;
 }
 
 /** Прокси ответил, но пускать нас отказался (учётка, белый список, ACL). */
@@ -299,6 +304,47 @@ function openTunnel(
   );
 }
 
+/** Сервис определения страны по IP: простой HTTP на порту 80, JSON с кодом страны. */
+const GEO_HOST = 'ip-api.com';
+const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 8_000;
+
+/**
+ * Страна, из которой прокси выходит в интернет. Открываем туннель до сервиса
+ * определения страны через сам прокси и читаем один короткий ответ. Адрес
+ * сервиса резолвим у себя в IPv4: SOCKS-рукопожатие выше принимает только
+ * литерал. Ничего не бросает: нет страны — null, на вердикт проверки это не
+ * влияет.
+ */
+async function detectProxyCountry(parsed: ParsedProxy): Promise<string | null> {
+  let socket: net.Socket | null = null;
+  try {
+    const { address } = await dns.promises.lookup(GEO_HOST, { family: 4 });
+    socket = await openTunnel(parsed, { host: address, port: 80 }, GEO_TIMEOUT_MS);
+    const sock = socket;
+    const body = await withTimeout(
+      new Promise<string>((resolve, reject) => {
+        let data = '';
+        sock.on('data', (chunk: Buffer) => {
+          data += chunk.toString('utf8');
+          if (data.length > 4096) sock.destroy();
+        });
+        sock.on('end', () => resolve(data));
+        sock.on('close', () => resolve(data));
+        sock.on('error', reject);
+        sock.write(`GET /json/?fields=status,countryCode HTTP/1.1\r\nHost: ${GEO_HOST}\r\nConnection: close\r\n\r\n`);
+      }),
+      GEO_TIMEOUT_MS,
+      'определение страны прокси',
+    );
+    const match = /"countryCode"\s*:\s*"([A-Za-z]{2})"/.exec(body);
+    return match ? match[1].toUpperCase() : null;
+  } catch {
+    return null;
+  } finally {
+    socket?.destroy();
+  }
+}
+
 /**
  * Проверить один прокси. Никогда не бросает: проверка идёт пачкой, и один
  * сломанный прокси не должен обрывать остальные — его беда становится строкой
@@ -356,6 +402,7 @@ export async function checkProxy(
       telegram_latency_ms: latency,
       status: 'ok',
       reason: null,
+      ...(opts.detectCountry ? { country_code: await detectProxyCountry(parsed) } : {}),
     };
   } catch (e) {
     const latency = Date.now() - startedAt;

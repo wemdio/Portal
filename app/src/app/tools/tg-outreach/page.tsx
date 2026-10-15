@@ -5871,6 +5871,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [checking, setChecking] = useState(false);
+  // «Проверить неопределённые»: прогресс по пачкам и итог раскладки по спискам.
+  const [sortRun, setSortRun] = useState<{ done: number; total: number; working: number; note?: string } | null>(null);
   /**
    * Секунды с начала проверки. Проверка идёт одним запросом на сервере, и
    * прогресса по одному прокси у нас нет — но сорок штук занимают до минуты, и
@@ -6181,6 +6183,55 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setChecking(false);
+    }
+  };
+
+  /**
+   * «Проверить неопределённые»: все прокси без списка проверяются пачками по 50
+   * (прокси жив, Telegram доступен, страна выхода), потом сами раскладываются по
+   * спискам «Авто · Страна» и «Не работают». Пачки идут подряд, а не по одному
+   * запросу на прокси: мобильный пул не получает больше 50 подключений за раз.
+   */
+  const checkAndSortUndefined = async () => {
+    const targets = proxies.filter((p) => p.proxy_list_id == null).map((p) => p.id);
+    if (!targets.length || checking || sortRun) return;
+    setProxyError(null);
+    setSortRun({ done: 0, total: targets.length, working: 0 });
+    let working = 0;
+    try {
+      for (let i = 0; i < targets.length; i += 50) {
+        const ids = targets.slice(i, i + 50);
+        const res = await authFetch(`${API_BASE}/proxies/check`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids, detect_country: true, save: true }),
+        });
+        const body = (await res.json().catch(() => null)) as { items?: ProxyCheckResult[]; error?: string } | null;
+        if (!res.ok || !body?.items) {
+          setProxyError(body?.error ?? `Проверка остановилась на ${i} из ${targets.length} (HTTP ${res.status})`);
+          break;
+        }
+        working += body.items.filter((r) => r.status === 'ok').length;
+        setSortRun({ done: Math.min(i + ids.length, targets.length), total: targets.length, working });
+      }
+      const sortRes = await authFetch(`${API_BASE}/proxies/auto-sort`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId }),
+      });
+      const sorted = (await sortRes.json().catch(() => null)) as { moved?: number; groups?: { name: string; count: number }[]; error?: string } | null;
+      if (!sortRes.ok) {
+        setProxyError(sorted?.error ?? `Не удалось разложить по спискам (HTTP ${sortRes.status})`);
+      } else {
+        setSortRun({
+          done: targets.length,
+          total: targets.length,
+          working,
+          note: `Разложено ${sorted?.moved ?? 0}: ${(sorted?.groups ?? []).map((g) => `${g.name} — ${g.count}`).join(', ') || 'нечего раскладывать'}`,
+        });
+      }
+    } catch (e) {
+      setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      void reloadAll();
     }
   };
 
@@ -6508,6 +6559,16 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {activeList === null && (
+              <button type="button" onClick={() => { void checkAndSortUndefined(); }}
+                disabled={Boolean(sortRun && sortRun.done < sortRun.total)}
+                title="Проверить все прокси без списка: жив ли прокси, доходит ли Telegram, из какой страны. Потом они сами разложатся по спискам «Авто · Страна» и «Не работают»"
+                className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-60">
+                {sortRun && sortRun.done < sortRun.total
+                  ? `Проверяю ${sortRun.done} из ${sortRun.total}…`
+                  : 'Проверить неопределённые'}
+              </button>
+            )}
             <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); setProxyError(null); }}
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
               Массовое добавление
@@ -6524,6 +6585,18 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         {proxyError && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
             {proxyError}
+          </div>
+        )}
+        {sortRun && (
+          <div className="flex items-start justify-between gap-2 rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-900">
+            <span>
+              {sortRun.done < sortRun.total
+                ? `Проверка неопределённых: ${sortRun.done} из ${sortRun.total}, работает ${sortRun.working}`
+                : `Проверено ${sortRun.total}, работает ${sortRun.working}. ${sortRun.note ?? ''}`}
+            </span>
+            {sortRun.done >= sortRun.total && (
+              <button type="button" onClick={() => setSortRun(null)} className="text-indigo-400 hover:text-indigo-700">✕</button>
+            )}
           </div>
         )}
 
