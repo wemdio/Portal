@@ -94,11 +94,19 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
     void load();
   }, [load]);
 
+  // Пока кампании не пришли — крутилка, а не «Кампаний пока нет»: список
+  // кампаний считается долго, и пустая колонка вводила в заблуждение.
+  const [campaignsState, setCampaignsState] = useState<'loading' | 'ready' | 'error'>('loading');
   useEffect(() => {
     let cancelled = false;
     fetchCampaigns()
-      .then((res) => { if (!cancelled) setCampaigns(res.campaigns); })
-      .catch(() => { /* колонка кампаний — только навигация: без неё работает «Все кампании» */ });
+      .then((res) => {
+        if (cancelled) return;
+        setCampaigns(res.campaigns);
+        setCampaignsState('ready');
+      })
+      // Колонка кампаний — только навигация: без неё работает «Все кампании».
+      .catch(() => { if (!cancelled) setCampaignsState('error'); });
     return () => { cancelled = true; };
   }, []);
 
@@ -233,7 +241,15 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                 ) : null}
               </div>
             ))}
-            {campaigns.length === 0 ? <p className="px-4 py-3 text-xs text-zinc-500">Кампаний пока нет.</p> : null}
+            {campaignsState === 'loading' ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-5 w-5 animate-spin text-zinc-400" aria-label="Загрузка кампаний" />
+              </div>
+            ) : campaignsState === 'error' ? (
+              <p className="px-4 py-3 text-xs text-red-600">Кампании не загрузились.</p>
+            ) : campaigns.length === 0 ? (
+              <p className="px-4 py-3 text-xs text-zinc-500">Кампаний пока нет.</p>
+            ) : null}
             {campaigns.length > 0 && shownCampaigns.length === 0 ? (
               <p className="px-4 py-3 text-xs text-zinc-500">Ничего не нашлось.</p>
             ) : null}
@@ -294,11 +310,10 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
 
           <div className="min-h-0 flex-1 overflow-y-auto">
             {loading && threads.length === 0 ? (
-              <div className="flex items-center justify-center gap-2 px-3 py-10 text-sm text-zinc-500">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Загрузка…
+              <div className="flex items-center justify-center px-3 py-12">
+                <Loader2 className="h-5 w-5 animate-spin text-zinc-400" aria-label="Загрузка переписок" />
               </div>
-            ) : threads.length === 0 ? (
+            ) : error ? null : threads.length === 0 ? (
               <p className="px-4 py-12 text-center text-sm text-zinc-500">
                 {query || onlyReplied || onlyLeads
                   ? 'Ничего не нашлось — попробуйте снять фильтр.'
