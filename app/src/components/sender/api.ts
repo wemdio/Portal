@@ -36,6 +36,8 @@ export interface MailboxDto {
   probe: MailboxProbeDto | null;
   /** Наша оценка здоровья за 14 дней; score null — писем слишком мало. */
   health: { score: number | null; sent: number; bounced: number; failed: number } | null;
+  /** Отправлено сегодня (день по UTC): всего и первых писем. */
+  sent_today?: { total: number; first: number };
 }
 
 /** Сводка пробы в строке ящика; полный разбор — GET /probe. */
