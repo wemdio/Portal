@@ -592,7 +592,7 @@ export function CampaignsTab({
                 <section key={group.key} className="min-w-0 rounded-xl border border-zinc-200 bg-white">
                   {renderHeader(group)}
                   {group.campaigns.length > 0 ? (
-                    <div className="max-h-[600px] divide-y divide-zinc-100 overflow-y-auto">
+                    <div className="max-h-[410px] divide-y divide-zinc-100 overflow-y-auto">
                       {group.campaigns.map(renderRow)}
                     </div>
                   ) : (
