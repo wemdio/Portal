@@ -6,6 +6,7 @@ import { parseBulkDeleteBody } from '@/lib/tgOutreach/bulkDelete';
 export const dynamic = 'force-dynamic';
 
 const EXISTING_PAGE = 1000;
+const ID_CHUNK = 100;
 
 export async function POST(req: NextRequest) {
   return withToolTrace(
@@ -92,22 +93,27 @@ export async function DELETE(req: NextRequest) {
       const parsed = parseBulkDeleteBody(body);
       if (!parsed.ok) return jsonError(parsed.error, 400);
 
-      const { error: unlinkError } = await auth.supabase
-        .from('tg_outreach_accounts')
-        .update({ proxy_id: null })
-        .eq('campaign_id', parsed.campaignId)
-        .in('proxy_id', parsed.ids);
-      if (unlinkError) return jsonError(unlinkError.message, 500);
+      // Id идут в адрес запроса: 500 штук разом давали «URI too long», поэтому по 100.
+      let deleted = 0;
+      for (let i = 0; i < parsed.ids.length; i += ID_CHUNK) {
+        const part = parsed.ids.slice(i, i + ID_CHUNK);
+        const { error: unlinkError } = await auth.supabase
+          .from('tg_outreach_accounts')
+          .update({ proxy_id: null })
+          .eq('campaign_id', parsed.campaignId)
+          .in('proxy_id', part);
+        if (unlinkError) return jsonError(unlinkError.message, 500);
 
-      const { data, error } = await auth.supabase
-        .from('tg_outreach_proxies')
-        .delete()
-        .eq('campaign_id', parsed.campaignId)
-        .in('id', parsed.ids)
-        .select('id');
-
-      if (error) return jsonError(error.message, 500);
-      return NextResponse.json({ ok: true, count: data?.length ?? 0 });
+        const { data, error } = await auth.supabase
+          .from('tg_outreach_proxies')
+          .delete()
+          .eq('campaign_id', parsed.campaignId)
+          .in('id', part)
+          .select('id');
+        if (error) return jsonError(error.message, 500);
+        deleted += data?.length ?? 0;
+      }
+      return NextResponse.json({ ok: true, count: deleted });
     },
   );
 }
