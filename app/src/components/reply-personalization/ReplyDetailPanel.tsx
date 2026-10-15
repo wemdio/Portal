@@ -401,7 +401,11 @@ export function ReplyDetailPanel({
           >
             {soundOn ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4 text-gray-400" />}
           </button>
-          {draft ? <span className="ml-auto text-xs text-gray-500">В поле — черновик ИИ, его можно править</span> : null}
+          {generating ? (
+            <span className="ml-auto text-xs text-gray-500">ИИ пишет, обычно до минуты</span>
+          ) : draft ? (
+            <span className="ml-auto text-xs text-gray-500">В поле — черновик ИИ, его можно править</span>
+          ) : null}
         </div>
 
         <textarea
