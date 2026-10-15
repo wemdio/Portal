@@ -272,6 +272,24 @@ export function handoffInstruction(phrase: string): string {
  * Модель могла не послушаться — фразу дописываем сами: без неё лид не уйдёт
  * менеджеру, а человек не узнает, что с ним свяжутся.
  */
+/**
+ * В ответе несколько вопросов, ответа на которые ждём: квалификация из трёх
+ * вопросов. Передавать контакт менеджеру в таком сообщении нельзя — человек ещё
+ * не ответил (15.10.2026: «Передаю ваш контакт менеджеру» уходила в одном
+ * сообщении с тремя квалификационными вопросами, лид попадал к менеджеру пустым).
+ */
+export function asksOpenQuestions(reply: string): boolean {
+  return (reply.match(/\?/g)?.length ?? 0) >= 2;
+}
+
+/** Убрать фразу передачи из ответа, который сам задаёт вопросы. */
+export function stripHandoffPhrase(reply: string, phrase: string): string {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return reply
+    .replace(new RegExp(String.raw`\s*[.!…]?\s*${escaped}[^.!?…\n]*[.!…]?`, 'gi'), '')
+    .trim();
+}
+
 export function ensureHandoffPhrase(reply: string, phrase: string): string {
   if (reply.toLowerCase().includes(phrase.toLowerCase())) return reply;
   let trimmed = reply.trim();
