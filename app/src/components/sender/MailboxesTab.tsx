@@ -365,12 +365,12 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
         />
       ) : null}
 
-      {notice ? <p className="text-center text-sm text-emerald-600">{notice}</p> : null}
-      {error ? <p className="text-center text-sm text-red-600">{error}</p> : null}
+      {notice ? <p className="text-sm text-emerald-600">{notice}</p> : null}
+      {error ? <p className="text-sm text-red-600">{error}</p> : null}
 
       {/* Поиск, фильтр тегов и «Добавить почты» — над списком: это про список,
           и нужны до того, как в нём начнёшь что-то искать глазами. */}
-      <div className="flex flex-wrap items-center justify-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-full max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
           <input
