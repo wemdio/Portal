@@ -57,11 +57,17 @@ interface PageResult {
  * Кандидаты из каталога: порции идут по возрастанию yandex_id, пока не наберётся
  * limit строк, не кончится каталог или не выйдет время чтения.
  */
-export async function loadYmapsCatalogCandidates(db: SupabaseClient, wanted: number): Promise<YmapsCatalogRow[]> {
+export async function loadYmapsCatalogCandidates(
+  db: SupabaseClient,
+  wanted: number,
+  onLog: (message: string) => void = () => {},
+): Promise<YmapsCatalogRow[]> {
   const limit = Math.min(wanted, MAX_CANDIDATES);
   const started = Date.now();
   const out: YmapsCatalogRow[] = [];
   let after = '';
+  let pages = 0;
+  let scanned = 0;
   for (;;) {
     const { data, error } = await db.rpc('polza_ru_ymaps_catalog_page', {
       p_after: after,
@@ -78,6 +84,12 @@ export async function loadYmapsCatalogCandidates(db: SupabaseClient, wanted: num
         website: String(r.website).split(/[\s,;]+/)[0],
         email: r.email ? String(r.email) : null,
       });
+    }
+    pages += 1;
+    scanned += PAGE_SIZE;
+    // Каждые 5 страниц — строка в журнал: чтение каталога идёт минутами.
+    if (pages % 5 === 0 || page.done) {
+      onLog(`каталог Яндекс Карт: страниц ${pages}, просмотрено ~${scanned} строк, подходящих ${out.length}, прошло ${Math.round((Date.now() - started) / 1000)} с`);
     }
     if (page.done || !page.last_id) break;
     if (out.length >= limit) break;
