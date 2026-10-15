@@ -24,6 +24,7 @@ import { EgressMoveMenu } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 import { TagAssignMenu, TagChip, TagFilterMenu, tagTones } from './MailboxTags';
 import { SenderModal } from './SenderModal';
+import { SortableTh } from '@/components/ui/SortableTh';
 
 const PAGE_SIZE = 30;
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
@@ -71,6 +72,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   const [egressIps, setEgressIps] = useState<EgressIpDto[]>([]);
   // Фильтр по адресу — клик по адресу во вкладке «Адреса отправки».
   const [egressFilter, setEgressFilter] = useState<string | null>(initialEgressIp);
+  // Сортировка по столбцу (по всему списку, считает сервер): клик — по возрастанию,
+  // ещё клик — по убыванию, третий — обратно по ящику.
+  const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
 
   const load = useCallback(async (targetPage: number) => {
     try {
@@ -80,6 +84,8 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
         tagIds: tagFilterKey ? tagFilterKey.split(',') : undefined,
         noTag: noTagFilter || undefined,
         egressIp: egressFilter ?? undefined,
+        sort: sort?.key,
+        dir: sort?.dir,
       });
       setMailboxes(rows);
       setTotal(count);
@@ -92,7 +98,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     } finally {
       setLoading(false);
     }
-  }, [appliedSearch, tagFilterKey, noTagFilter, egressFilter]);
+  }, [appliedSearch, tagFilterKey, noTagFilter, egressFilter, sort]);
 
   const loadTags = useCallback(async () => {
     try {
@@ -211,6 +217,14 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   const resetToFirstPage = () => {
     setPage(1);
     setSelection({ page: 1, ids: new Set() });
+  };
+
+  const onSort = (key: string) => {
+    setSort((cur) => {
+      if (!cur || cur.key !== key) return { key, dir: 'asc' };
+      return cur.dir === 'asc' ? { key, dir: 'desc' } : null;
+    });
+    resetToFirstPage();
   };
 
   const onSearchChange = (value: string) => {
@@ -548,13 +562,20 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                       className="h-4 w-4 cursor-pointer rounded border-zinc-300"
                     />
                   </th>
-                  <th className="px-3 py-2 font-medium">Ящик</th>
-                  <th className="px-3 py-2 font-medium">Провайдер</th>
+                  <SortableTh label="Ящик" sortKey="email" sort={sort} onSort={onSort} />
+                  <SortableTh label="Провайдер" sortKey="provider" sort={sort} onSort={onSort} />
                   <th className="px-3 py-2 font-medium">Тег</th>
-                  <th className="px-3 py-2 font-medium">Адрес отправки</th>
-                  <th className="px-3 py-2 font-medium">Статус</th>
-                  <th className="px-3 py-2 font-medium" title="Наша оценка за 14 дней: отбои и ошибки отправки. Меньше 20 писем — оценки нет">Здоровье</th>
-                  <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">Новых / всего в день</th>
+                  <SortableTh label="Адрес отправки" sortKey="egress" sort={sort} onSort={onSort} />
+                  <SortableTh label="Статус" sortKey="status" sort={sort} onSort={onSort} />
+                  <SortableTh label="Здоровье" sortKey="health" sort={sort} onSort={onSort} />
+                  <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">
+                    <span className="inline-flex items-center gap-1">
+                      <SortableTh label="Новых" sortKey="new" sort={sort} onSort={onSort} inline />
+                      <span className="text-zinc-300">/</span>
+                      <SortableTh label="всего" sortKey="total" sort={sort} onSort={onSort} inline />
+                      <span>в день</span>
+                    </span>
+                  </th>
                   <th className="px-5 py-2 text-right font-medium">Действия</th>
                 </tr>
               </thead>
