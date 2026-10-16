@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Manrope } from 'next/font/google';
 
 // «Жидкое стекло» Рассылки — слой стилей только под .sender-glass.
+import '../../liquid-scene.css';
 import './sender-glass.css';
 
 /**
@@ -15,5 +16,5 @@ const senderFont = Manrope({
 });
 
 export default function SenderLayout({ children }: { children: ReactNode }) {
-  return <div className={`sender-glass ${senderFont.className}`}>{children}</div>;
+  return <div className={`liquid-scene sender-glass ${senderFont.className}`}>{children}</div>;
 }
