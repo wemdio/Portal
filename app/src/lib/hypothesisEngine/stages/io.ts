@@ -324,10 +324,23 @@ function asSiteUnreachable(
  * Рынок 'ru' не передаёт ничего: и заголовок, и порядок там ровно те же, что
  * были до этой правки. Строка языка совпадает с EN_ACCEPT_LANGUAGE почтового
  * скрапера — два места, куда уезжает английская локаль, обязаны просить одно.
+ *
+ * layoutAware (2026-10-16): разбор HTML, который не снимает вёрстку Elementor,
+ * HubSpot CMS и Squarespace как «шум» — см. ExtractTextOptions в
+ * websiteParser. Без него главная сайта на этих конструкторах схлопывалась до
+ * <title>, и site_profile отказывал клиенту «сайт почти без текста» (hst.ie:
+ * 176 символов при ~25 000 видимых). И главная (fetchAndExtract), и строгие
+ * страницы (fetchSinglePage) читаются этим разбором — один сайт, одно
+ * правило. RU по-прежнему читает прежним разбором.
  */
-const ENG_WEBSITE_ROUTE: { routeOrder: WebsiteFetchRouteOrder; acceptLanguage: string } = {
+const ENG_WEBSITE_ROUTE: {
+  routeOrder: WebsiteFetchRouteOrder;
+  acceptLanguage: string;
+  layoutAware: true;
+} = {
   routeOrder: 'non-priority-first',
   acceptLanguage: 'en-US,en',
+  layoutAware: true,
 };
 
 /**
