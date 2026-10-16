@@ -21,7 +21,9 @@ const REASONING_EFFORT = (process.env.REPLY_PERSONALIZATION_REASONING_EFFORT ?? 
 const MAX_ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 90_000;
 const TOTAL_TIMEOUT_MS = 240_000;
-const INITIAL_MAX_TOKENS = 1500;
+// 16.10.2026: 1500 не хватало на размышление + письмо, часть ответов обрезалась
+// (finish_reason=length) и генерировалась заново — время удваивалось.
+const INITIAL_MAX_TOKENS = 4000;
 const MAX_TOKENS_CAP = 6000;
 
 export class ReplyGenerationError extends Error {}
