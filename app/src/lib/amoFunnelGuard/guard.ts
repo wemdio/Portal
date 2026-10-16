@@ -31,6 +31,21 @@ async function amoRequest<T>(
   return (await res.json()) as T;
 }
 
+/** Этот переход — откат, который мы сделали сами минуту назад. */
+async function isOwnRevert(change: StatusChange): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  const since = new Date(Date.now() - 2 * 60_000).toISOString();
+  const { data } = await supabaseAdmin
+    .from('amo_funnel_reverts')
+    .select('id')
+    .eq('amo_deal_id', change.leadId)
+    .eq('bad_status_id', change.oldStatusId)
+    .eq('restored_status_id', change.statusId)
+    .gte('reverted_at', since)
+    .limit(1);
+  return (data ?? []).length > 0;
+}
+
 export type GuardResult = 'ok' | 'reverted' | 'stale' | 'no-credentials';
 
 /**
@@ -50,29 +65,44 @@ export async function enforceTransition(change: StatusChange): Promise<GuardResu
   });
   if (verdict.allowed) return 'ok';
 
+  // Наш собственный откат пришёл новым вебхуком — повторно его не трогаем,
+  // иначе он «откатит откат» и сделка заметалась бы между этапами.
+  if (await isOwnRevert(change)) return 'ok';
+
   const env = amoEnv();
   if (!env) return 'no-credentials';
 
   const current = await amoRequest<{ status_id?: number }>(env, 'GET', `/api/v4/leads/${change.leadId}`);
   if (current.status_id !== change.statusId) return 'stale';
 
-  await amoRequest(env, 'PATCH', `/api/v4/leads/${change.leadId}`, {
-    status_id: change.oldStatusId,
-    pipeline_id: change.pipelineId,
-  });
-
   // Откат оставляет в истории AMO пару «туда — обратно». Фиксируем его, чтобы
   // дашборды (view amo_status_events_v) не считали сделку побывавшей на
-  // запрещённом этапе. Без записи статистика соврёт — поэтому громкая ошибка.
+  // запрещённом этапе. Запись — ДО отката: вебхук самого отката должен найти
+  // её и не откатывать откат. Без записи статистика соврёт — громкая ошибка.
+  let logId: number | null = null;
   if (supabaseAdmin) {
-    const { error } = await supabaseAdmin.from('amo_funnel_reverts').insert({
+    const { data, error } = await supabaseAdmin.from('amo_funnel_reverts').insert({
       amo_deal_id: change.leadId,
       bad_status_id: change.statusId,
       restored_status_id: change.oldStatusId,
-    });
+    }).select('id').single();
     if (error) console.error('[amo-funnel-guard] revert not logged', change.leadId, error.message);
+    else logId = (data as { id: number }).id;
   } else {
     console.error('[amo-funnel-guard] supabaseAdmin missing, revert not logged', change.leadId);
+  }
+
+  try {
+    await amoRequest(env, 'PATCH', `/api/v4/leads/${change.leadId}`, {
+      status_id: change.oldStatusId,
+      pipeline_id: change.pipelineId,
+    });
+  } catch (err) {
+    // Откат не удался — сделка осталась на месте, вычёркивать из истории нечего.
+    if (logId !== null && supabaseAdmin) {
+      await supabaseAdmin.from('amo_funnel_reverts').delete().eq('id', logId);
+    }
+    throw err;
   }
 
   const to = STAGE_NAMES[change.statusId] ?? String(change.statusId);
