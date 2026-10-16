@@ -1,0 +1,123 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   «Жидкое стекло» Рассылки (16.10.2026) — в духе iOS 26 / HyperOS.
+
+   Слой целиком под .sender-glass (обёртка в app/tools/sender/layout.tsx): на
+   другие страницы портала не влияет. Компоненты не трогаем — стекло ложится
+   на их классы (rounded-xl/2xl + border — это панели и таблицы Рассылки).
+
+   Стеклу нужно, что преломлять: под панелями — фон с мягкими цветными
+   пятнами. Сами панели — полупрозрачная заливка, сильное размытие с
+   насыщенностью, светлый «блик» по верхней кромке и мягкая тень.
+
+   Специфичность — html body .sender-glass …: тёмная тема портала перебивает
+   bg-white правилами вида html[data-portal-theme='dark'] .portal-shell
+   .bg-white {… !important}, и стекло должно быть сильнее их.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.sender-glass {
+  --lg-fill: rgba(255, 255, 255, 0.52);
+  --lg-fill-strong: rgba(255, 255, 255, 0.82);
+  --lg-fill-control: rgba(255, 255, 255, 0.6);
+  --lg-edge: rgba(255, 255, 255, 0.75);
+  --lg-highlight: rgba(255, 255, 255, 0.9);
+  --lg-lowlight: rgba(255, 255, 255, 0.25);
+  --lg-shadow: 0 12px 40px -18px rgba(30, 41, 80, 0.35);
+  --lg-blob-1: rgba(96, 165, 250, 0.35);
+  --lg-blob-2: rgba(167, 139, 250, 0.3);
+  --lg-blob-3: rgba(45, 212, 191, 0.22);
+  --lg-base: #eef1f7;
+
+  position: relative;
+  isolation: isolate;
+  min-height: 100%;
+}
+
+html[data-portal-theme='dark'] .sender-glass {
+  --lg-fill: rgba(255, 255, 255, 0.06);
+  --lg-fill-strong: rgba(28, 30, 38, 0.88);
+  --lg-fill-control: rgba(255, 255, 255, 0.06);
+  --lg-edge: rgba(255, 255, 255, 0.12);
+  --lg-highlight: rgba(255, 255, 255, 0.22);
+  --lg-lowlight: rgba(255, 255, 255, 0.04);
+  --lg-shadow: 0 16px 48px -20px rgba(0, 0, 0, 0.75);
+  --lg-blob-1: rgba(59, 130, 246, 0.22);
+  --lg-blob-2: rgba(139, 92, 246, 0.18);
+  --lg-blob-3: rgba(20, 184, 166, 0.12);
+  --lg-base: #0d0f14;
+}
+
+/* Сцена: цветные пятна на всё окно, под контентом и не прокручиваются. */
+.sender-glass::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: var(--lg-base);
+  background-image:
+    radial-gradient(40% 45% at 12% 18%, var(--lg-blob-1) 0%, transparent 70%),
+    radial-gradient(38% 42% at 88% 22%, var(--lg-blob-2) 0%, transparent 70%),
+    radial-gradient(45% 50% at 55% 92%, var(--lg-blob-3) 0%, transparent 70%),
+    radial-gradient(30% 35% at 30% 70%, var(--lg-blob-2) 0%, transparent 70%);
+}
+
+/* ─── Панели: блоки, таблицы, колонки «Писем», окна ─── */
+html body .sender-glass .rounded-xl.border,
+html body .sender-glass .rounded-2xl.border {
+  background-color: var(--lg-fill) !important;
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  backdrop-filter: blur(28px) saturate(1.8);
+  border-color: var(--lg-edge) !important;
+  box-shadow:
+    inset 0 1px 0 var(--lg-highlight),
+    inset 0 -1px 0 var(--lg-lowlight),
+    var(--lg-shadow);
+}
+
+/* Выпадающие меню и окна поверх — плотнее, иначе текст под ними мешает читать. */
+html body .sender-glass .rounded-xl.border.shadow-lg,
+html body .sender-glass .rounded-xl.border.shadow-xl,
+html body .sender-glass [role='dialog'] > .rounded-2xl.border,
+html body .sender-glass [role='menu'] {
+  background-color: var(--lg-fill-strong) !important;
+}
+
+/* Вложенные белые подложки внутри стекла — прозрачные, чтобы блок был цельным. */
+html body .sender-glass .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button) {
+  background-color: transparent !important;
+}
+
+/* ─── Боковая панель разделов ─── */
+html body .sender-glass nav[aria-label='Разделы рассылки'] {
+  background-color: var(--lg-fill) !important;
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  backdrop-filter: blur(28px) saturate(1.8);
+  border-color: var(--lg-edge) !important;
+  box-shadow: inset -1px 0 0 var(--lg-lowlight);
+}
+
+/* ─── Поля и кнопки с обводкой — «капли» стекла ─── */
+html body .sender-glass input:not([type='checkbox']):not([type='radio']),
+html body .sender-glass textarea,
+html body .sender-glass select,
+html body .sender-glass button.border:not([class*='bg-blue']):not([class*='bg-emerald']):not([class*='bg-red']) {
+  background-color: var(--lg-fill-control) !important;
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
+  backdrop-filter: blur(12px) saturate(1.6);
+  border-color: var(--lg-edge) !important;
+  box-shadow: inset 0 1px 0 var(--lg-highlight);
+}
+
+/* Переключатели-«таблетки» (Компании / Автоаутрич, RU / EN, периоды). */
+html body .sender-glass .rounded-lg.border.bg-zinc-50.p-1 {
+  background-color: var(--lg-fill-control) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(1.7);
+  backdrop-filter: blur(16px) saturate(1.7);
+  border-color: var(--lg-edge) !important;
+  box-shadow: inset 0 1px 0 var(--lg-highlight);
+}
+
+/* Шапка таблиц — без сплошной заливки, стекло видно и под ней. */
+html body .sender-glass .sender-table-head {
+  background-color: rgba(96, 165, 250, 0.08) !important;
+}
