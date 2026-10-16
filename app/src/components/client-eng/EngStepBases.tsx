@@ -9,6 +9,11 @@
  * «Collect again» у последней базы рынка, остановившейся решением, которое
  * новая сборка повторит (HE_COLLECT_STOP_REPEATS_CODES): «Launch» такой рынок
  * заново не собирает, и повтор — только это явное нажатие.
+ *
+ * Список Do not contact клиента (план §1B): сборка пропускает компании из него
+ * (`collect_info.stats.excluded_do_not_contact` — «N companies skipped»), а
+ * компании, внесённые в список после сборки, остаются в базе, но в кампании не
+ * уходят — запуск и долив сверяют список сами; панель объёма так и говорит.
  */
 
 import { useEffect, useState } from 'react';
@@ -18,6 +23,28 @@ import { EngSupportText } from './EngPaidAccess';
 import { EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
+/* ── Список Do not contact в сборке ── */
+
+/** «12 companies skipped — on your Do not contact list»; null — пропусков нет (или поля нет). */
+function dncSkippedText(base: EngBaseSummary): string | null {
+  const n = base.collect_info?.stats?.excluded_do_not_contact;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return null;
+  return `${n.toLocaleString('en-US')} ${n === 1 ? 'company' : 'companies'} skipped — on your Do not contact list`;
+}
+
+/** Оговорка панели объёма: база не перечищается, список сверяют запуск и долив. */
+const DNC_OLDER_BASES_NOTE = 'Companies on your Do not contact list stay in older bases but are not added to campaigns.';
+
+function DncNotes({ base }: { base: EngBaseSummary }) {
+  const skipped = dncSkippedText(base);
+  return (
+    <div className="flex flex-col gap-0.5" style={{ color: 'var(--cp-text-l)' }}>
+      {skipped && <div className="ds-mono">{skipped}</div>}
+      <div>{DNC_OLDER_BASES_NOTE}</div>
+    </div>
+  );
+}
+
 /* ── Прогресс авто-сборки (collecting-база) ── */
 
 export function CollectProgress({ base }: { base: EngBaseSummary }) {
@@ -25,6 +52,7 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
   const tasks = info?.tasks ?? [];
   const stats = info?.stats;
   const construct = info?.construct;
+  const skipped = dncSkippedText(base);
   return (
     <div
       className="rounded-md p-3 mt-2 flex flex-col gap-1.5"
@@ -50,6 +78,11 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
       {stats && (
         <div className="text-[11px] ds-mono" style={{ color: 'var(--cp-text-m)' }}>
           {stats.tasks_done ?? 0}/{stats.tasks_total ?? 0} tasks · {(stats.rows_total ?? 0).toLocaleString('en-US')} rows
+        </div>
+      )}
+      {skipped && (
+        <div className="text-[11px] ds-mono" style={{ color: 'var(--cp-text-l)' }}>
+          {skipped}
         </div>
       )}
       {construct && (
@@ -254,6 +287,7 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
             }
           />
         </div>
+        <DncNotes base={base} />
       </div>
     );
   }
@@ -285,6 +319,7 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
           }
         />
       </div>
+      <DncNotes base={base} />
     </div>
   );
 }

@@ -18,7 +18,8 @@ import type { VeStaffingCorrectionScope } from './staffingCorrection';
 import { relevanceHash } from './relevanceCheckpoint';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
 import { isVeAudienceScopeEnabled } from './audienceScope';
-import { needsLegacyFintechAudienceRefresh, readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
+import { veAutomaticAudienceReviewRows } from './audienceReviewHold';
+import { needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, readVeCollectionAudienceSnapshot, veAudienceNicheProfile, veSourceDiscoveryIsExistingOnly, type VeSourceAudienceHypothesis } from './sourceAudience';
 
 export interface VeCollectionContinuation {
   available: boolean;
@@ -42,11 +43,12 @@ const unavailable = (code: VeCollectionContinuation['code'], reason: string): Ve
 export function needsVeControlledAudienceRefresh(base: Record<string, unknown>, currentHypothesis?: Record<string, unknown> | null): boolean {
   const info = record(base.collect_info);
   if (!info || base.status !== 'analyzed' || base.source !== 'auto'
-    || !isVeAudienceScopeEnabled(typeof base.project_id === 'string' ? base.project_id : null)
     || !currentHypothesis || currentHypothesis.id !== base.hypothesis_id || currentHypothesis.status === 'rejected') return false;
   const saved = records(info.hypotheses);
   if (saved.length !== 1 || saved[0].id !== base.hypothesis_id) return false;
-  return needsLegacyFintechAudienceRefresh({ ...info, hypotheses: [currentHypothesis as unknown as VeSourceAudienceHypothesis] });
+  const candidate = { ...info, hypotheses: [currentHypothesis as unknown as VeSourceAudienceHypothesis] };
+  return (currentHypothesis.collection_market === 'ru' && needsLegacyRetailAudienceRefresh(candidate))
+    || (isVeAudienceScopeEnabled(typeof base.project_id === 'string' ? base.project_id : null) && needsLegacyFintechAudienceRefresh(candidate));
 }
 
 /** Detect the same quiescent, one-way correction as the collector, without
@@ -137,12 +139,29 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   const appliedLimit = normalizeVeMaxEmailsPerCompany((base as { contact_cap_applied?: unknown }).contact_cap_applied);
   if (appliedLimit !== null && (limit === null || limit > appliedLimit)
     && reserve.some((row) => row[VE_COMPANY_CAP_FIELD])) return available('contact_limit_changed', 'Можно вернуть проверенные адреса из резерва с новым лимитом на компанию.');
+  // An audited source correction must not first buy reviews under the old
+  // audience. In-flight children were handled above; untouched reserve rows
+  // are held when the explicit refresh is persisted by the worker.
+  if (currentHypothesis && needsLegacyRetailAudienceRefresh({ ...info,
+    hypotheses: [currentHypothesis as unknown as VeSourceAudienceHypothesis] })
+    && needsVeControlledAudienceRefresh(base, currentHypothesis)) {
+    if (!(Number(target.candidates_processed) < Number(target.max_candidates))) {
+      return unavailable('candidate_limit', 'Сохранённый бюджет кандидатов исчерпан. Готовые контакты сохранены.');
+    }
+    if (Number(target.round) >= Math.min(VE_COLLECTION_ROUND_CEILING, veCollectionMaxRounds(target.max_rounds))) {
+      return unavailable('round_limit', 'Сохранённый бюджет сбора исчерпан. Обновление источников само не увеличивает его; готовые контакты сохранены.');
+    }
+    if (info.adaptive_collection && !validVeAdaptiveCollection(info.adaptive_collection as VeAdaptiveCollection)) {
+      return unavailable('invalid_checkpoint', 'Сохранённый план сбора требует проверки. Готовые контакты сохранены.');
+    }
+    return available('source_update', 'Доступен обновлённый подбор источников в пределах сохранённого бюджета.', 'resume_collection');
+  }
   // Reuse current eligibility rules: completed uncertain checks do not become
   // an unlimited paid loop merely because fewer than 500 contacts were found.
   // With the calibrated triage enabled, saved uncertainty it has not read yet is
   // resumable work as well: one cheap pass per company, no sources or search.
   try {
-    if (hasPendingVeSavedEmailRecovery(reserve, info.saved_email_recovery)) return available('saved_work', 'Можно завершить проверку сохранённых адресов.');
+    if (hasPendingVeSavedEmailRecovery(veAutomaticAudienceReviewRows(reserve, record(info.audience_source_refresh)?.held_review_companies), info.saved_email_recovery)) return available('saved_work', 'Можно завершить проверку сохранённых адресов.');
   } catch {
     return unavailable('invalid_checkpoint', 'Сохранённые результаты проверки адресов требуют проверки.');
   }
@@ -150,7 +169,8 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   const scope = veSavedRelevanceScope(info.audience_snapshot || currentHypothesis === undefined
     ? info : { hypotheses: currentHypothesis ? [currentHypothesis] : [] }, base.hypothesis_id);
   const batch = buildVeRelevanceReviewBatch({ ...scope,
-    reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+    reserve: veAutomaticAudienceReviewRows(reserve, record(info.audience_source_refresh)?.held_review_companies),
+    ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
     allowPaidSearch: !existingOnly, triage });
   if (batch.rows.length && record(info.relevance_review_progress)?.signature !== relevanceHash(veSavedReviewSignature(batch.rows, { ...scope, triage, source: batch.evidenceRows }))) {
     return available('saved_work', 'Можно уточнить соответствие уже найденных компаний.');

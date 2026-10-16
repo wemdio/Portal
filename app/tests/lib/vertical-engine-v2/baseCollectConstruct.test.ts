@@ -74,6 +74,8 @@ import {
 } from '@/lib/verticalEngineV2/stages/baseCollect';
 import { searchVeNicheDirectoryRows } from '@/lib/verticalEngineV2/nicheDirectory';
 import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, loadVeApprovedSupplyAudience, veNewAudienceSourceCostPolicy, veSourceDiscoveryIsExistingOnly, normalizeVeAudienceSourcePlan, veAudienceNicheProfile, needsLegacyFintechAudienceRefresh } from '@/lib/verticalEngineV2/sourceAudience';
+import { deriveVeRetailAudienceScope } from '@/lib/verticalEngineV2/legacyRetailAudience';
+import { veAudienceReviewHold, veAutomaticAudienceReviewRows } from '@/lib/verticalEngineV2/audienceReviewHold';
 import { buildSourcePlanMessages } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 import { buildSourcePlanMessagesEn, buildCatalogRepairMessagesEn } from '@/lib/verticalEngineV2/prompts/sourcePlan.en';
 import { selectRefillLeadRows } from '@/lib/verticalEngineV2/stages/baseCollectRefill';
@@ -3318,6 +3320,82 @@ describe('base_collect: план кончился раньше цели', () => 
   };
   const planLlmReply = (tasks: unknown[]) => ({ data: { tasks }, tokensUsed: 10, costUsd: 0.01,
     promptTokens: 5, completionTokens: 5, rawResponse: '' });
+
+  it('explicit retail correction preserves receipts and budgets, checks new candidates and never buys an automatic review of the old reserve', async () => {
+    const jewelry = { id: 'h1', status: 'accepted', origin: 'generated' as const, broad: false,
+      title: 'Ювелирные заводы и сети украшений',
+      description: 'Производители золотых и серебряных украшений с фирменной розницей и интернет-витриной. Сложность удержания клиента между покупками к праздничным датам.' };
+    const oldTask = { source: 'companies_directory' as const, rationale: 'Old broad plan',
+      directory_filters: { okvedCodes: ['32', '47.7'], includeIp: false } };
+    const hhTask = { source: 'hh_live' as const, rationale: 'Already paid', hh_query: { text: 'Ювелир', date_to: '2026-02-10' } };
+    const oldReserve = { ...unifiedRow({ company: 'Old uncertain shop', website: 'old-shop.test', email: 'mail@old-shop.test' }),
+      _email_status: 'ok', _ve_relevance: { version: 2, status: 'error', reason: 'old pending check' } };
+    const info = exhaustedInfo(oldTask, { hypotheses: [jewelry], audience_scope_refresh_requested: true,
+      construct: { status: 'done', bc_job_id: 'old-paid-constructor' },
+      relevance_reserve: { version: 1, rows: [oldReserve] },
+    });
+    info.tasks![0].directory_cursors = { previous_slice: 1000 };
+    info.tasks!.push({ source: 'hh_live', status: 'done', child_job_id: 'old-paid-hh', rows: 0, harvest: [], task: hhTask, exhausted: true });
+    const snapshot = createVeCollectionAudienceSnapshot([{ ...jewelry, audience_scope: deriveVeRetailAudienceScope(jewelry)! }],
+      'explicit_continuation', '2026-10-16T12:00:00Z');
+    const immutable = JSON.stringify([info.target_progress, info.target_checkpoint, info.adaptive_collection, info.relevance_reserve, info.tasks![1]]);
+    const waiting = structuredClone(info);
+    waiting.tasks![1].status = 'dispatched';
+    expect(applyVeAudienceSourceRefresh(waiting, snapshot)).toBe(false);
+    expect(applyVeAudienceSourceRefresh(info, snapshot)).toBe(true);
+    expect(JSON.stringify([info.target_progress, info.target_checkpoint, info.adaptive_collection, info.relevance_reserve, info.tasks![1]])).toBe(immutable);
+    expect(info.tasks![0].task.directory_filters?.okvedCodes).toEqual(['32.12', '47.77']);
+    expect(info.tasks![0].directory_cursors).toEqual({ previous_slice: 1000 });
+    expect(info.cost_policy?.website_discovery).toBe('existing_only');
+    expect(info.validation_retry).toBeUndefined();
+    expect(info.relevance_review_requested).toBeUndefined();
+    expect(info.construct).toBeUndefined();
+    expect(info.audience_source_refresh?.held_review_companies).toEqual(veAudienceReviewHold([oldReserve]));
+    expect(stripTaskHarvest({ collect_info: { audience_source_refresh: info.audience_source_refresh } }).collect_info).not.toHaveProperty('audience_source_refresh');
+    expect(applyVeAudienceSourceRefresh(info, snapshot)).toBe(false);
+    const fresh = unifiedRow({ company: 'New jewelry producer', inn: '7700000909', website: 'new-jewelry.test', email: 'mail@new-jewelry.test' });
+    expect(veAutomaticAudienceReviewRows([oldReserve, fresh], info.audience_source_refresh?.held_review_companies)).toEqual([fresh]);
+    expect(veAutomaticAudienceReviewRows([oldReserve], undefined)).toEqual([oldReserve]);
+    expect(() => veAutomaticAudienceReviewRows([oldReserve], ['broken'])).toThrow('Invalid source refresh review hold');
+
+    jest.mocked(searchRows).mockResolvedValue({ rows: [{ name: fresh.company, inn: fresh.inn, okved_main: '32.12',
+      site: fresh.website, email: fresh.email }] });
+    const db = seedBase(info, jewelry);
+    mockFindIrrelevantRows.mockClear();
+    await wake(db);
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+    await completeConstructor(db);
+    const result = await wake(db);
+    expect(mockFindIrrelevantRows).toHaveBeenCalled();
+    for (const [request] of mockFindIrrelevantRows.mock.calls) {
+      expect(request.allowPaidSearch).toBe(false);
+      expect(request.rows.some((row: Record<string, unknown>) => row.website === oldReserve.website)).toBe(false);
+    }
+    const finalInfo = result.collect_info as VeCollectInfo;
+    expect(finalInfo.relevance_reserve?.rows.some((row) => row.website === oldReserve.website)).toBe(true);
+    expect(finalInfo.relevance_review_requested).not.toBe(true);
+    expect((result.data as Record<string, unknown>[]).some((row) => row.email === fresh.email)).toBe(true);
+    expect(finalInfo.target_progress?.max_candidates).toBe(info.target_progress?.max_candidates);
+    expect(db.getRows('hh_jobs')).toHaveLength(0);
+
+    // A later automatic follow-up may review a NEW uncertain company, while
+    // preserving the held reserve through the recovery save callback/merge.
+    const followup = structuredClone(info);
+    followup.relevance_review_requested = true;
+    followup.validation_retry = true;
+    followup.target_checkpoint!.completed_round = followup.target_progress!.round;
+    for (const state of followup.tasks!) { state.status = 'done'; state.exhausted = true; }
+    followup.relevance_reserve = { version: 1, rows: [oldReserve, { ...fresh, _email_status: 'ok',
+      _ve_relevance: { version: 2, status: 'error', reason: 'new interrupted check' } }] };
+    const followupDb = seedBase(followup, jewelry);
+    mockFindIrrelevantRows.mockClear();
+    const followed = await wake(followupDb);
+    expect(mockFindIrrelevantRows).toHaveBeenCalled();
+    const reviewedSites = mockFindIrrelevantRows.mock.calls.flatMap(([request]) => request.rows.map((row: Record<string, unknown>) => row.website));
+    expect(reviewedSites).toContain(fresh.website);
+    expect(reviewedSites).not.toContain(oldReserve.website);
+    expect((followed.collect_info as VeCollectInfo).relevance_reserve?.rows.some((row) => row.website === oldReserve.website)).toBe(true);
+  });
 
   it('исчерпанный реестр с придуманным порогом открывает срез без порогов, повторное исчерпание честно завершает базу', async () => {
     const db = seedBase(exhaustedInfo(MEAT_TASK), MEAT);

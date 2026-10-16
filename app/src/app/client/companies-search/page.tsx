@@ -26,15 +26,20 @@
  *   Carryover — RegionsModal scrim swapped to var(--cp-scrim) token.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Building2, Download, FileSpreadsheet, FileText, RotateCcw, Search, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Building2, FileSpreadsheet, FileText, RotateCcw, Search, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ToolPaywallCard } from '@/components/client/ToolPaywallCard';
 import { FEDERAL_DISTRICTS, ALL_REGION_CODES } from '@/lib/companiesSearch/regions';
 import { OkvedTreeModalClient } from '@/components/client/OkvedTreeModalClient';
+import { companyExportFilterKey, type CompanyExportFilters } from '@/lib/companiesSearch/exportFilters';
+import { removeOkvedBranch } from '@/lib/companiesSearch/okvedSelection';
 import { reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import type { Locale } from '@/lib/i18n';
+
+type SavedCompanyExport = { id: string; rowCount: number; createdAt: string; filters: CompanyExportFilters };
+type CompanyDownload = SavedCompanyExport & { filename: string; downloadUrl: string };
 
 type Mode = 'activity' | 'inn';
 type L = Locale;
@@ -51,6 +56,7 @@ const LEGAL_FORMS = [
 ];
 
 const DRAFT_KEY = 'client.companies-search.filters.v1';
+const EXPORT_INTENT_KEY = 'client.companies-search.export-intent.v1:';
 
 interface DraftPayload {
   mode: Mode;
@@ -70,6 +76,7 @@ interface DraftPayload {
   hasEdo: boolean;
   hasEgais: boolean;
   includeIp: boolean;
+  includeSeen?: boolean;
   savedAt: string;
 }
 
@@ -216,11 +223,31 @@ export default function CompaniesSearchPage() {
   const [seenStats, setSeenStats] = useState<{ seenTotal: number; lastExportedAt: string | null } | null>(null);
 
   const [calcLoading, setCalcLoading] = useState(false);
-  const [calcResult, setCalcResult] = useState<{ count: number; remaining: number } | null>(null);
+  const [calcResult, setCalcResult] = useState<{ count: number; remaining: number; filtersKey: string } | null>(null);
   const [calcError, setCalcError] = useState<string | null>(null);
 
   const [exportLoading, setExportLoading] = useState<'csv' | 'xlsx' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  const [savedExports, setSavedExports] = useState<SavedCompanyExport[]>([]);
+  const [downloadLink, setDownloadLink] = useState<CompanyDownload | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const exportBusy = useRef(false);
+  const exportIntent = useRef<{ filtersKey: string; requestId: string } | null>(null);
+
+  const loadSavedExports = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const data = await clientApiFetch<{ exports: SavedCompanyExport[] }>('/companies-search/export');
+      setSavedExports(data.exports);
+      setHistoryError(null);
+    } catch {
+      setHistoryError(t('Не удалось загрузить сохранённые выгрузки.', 'Could not load saved exports.', locale));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [locale]);
 
   // Draft persistence — see DRAFT_KEY comment.
   const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
@@ -244,7 +271,6 @@ export default function CompaniesSearchPage() {
   }, []);
 
   // Restore once on mount.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(DRAFT_KEY);
@@ -272,6 +298,7 @@ export default function CompaniesSearchPage() {
       if (typeof draft.hasEdo === 'boolean') setHasEdo(draft.hasEdo);
       if (typeof draft.hasEgais === 'boolean') setHasEgais(draft.hasEgais);
       if (typeof draft.includeIp === 'boolean') setIncludeIp(draft.includeIp);
+      if (typeof draft.includeSeen === 'boolean') setIncludeSeen(draft.includeSeen);
       if (typeof draft.savedAt === 'string') {
         const d = new Date(draft.savedAt);
         if (!Number.isNaN(d.getTime())) setDraftSavedAt(d);
@@ -302,7 +329,7 @@ export default function CompaniesSearchPage() {
       !hasWebsite &&
       !hasEdo &&
       !hasEgais &&
-      !includeIp;
+      !includeIp && !includeSeen;
     if (isDefault) return;
     const t = setTimeout(() => {
       try {
@@ -324,6 +351,7 @@ export default function CompaniesSearchPage() {
           hasEdo,
           hasEgais,
           includeIp,
+          includeSeen,
           savedAt: new Date().toISOString(),
         };
         window.localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
@@ -353,6 +381,7 @@ export default function CompaniesSearchPage() {
     hasEdo,
     hasEgais,
     includeIp,
+    includeSeen,
   ]);
 
   const clearAllFilters = useCallback(() => {
@@ -373,6 +402,7 @@ export default function CompaniesSearchPage() {
     setHasEdo(false);
     setHasEgais(false);
     setIncludeIp(false);
+    setIncludeSeen(false);
     setCalcResult(null);
     setCalcError(null);
     setDraftSavedAt(null);
@@ -391,11 +421,7 @@ export default function CompaniesSearchPage() {
   }, []);
 
   const removeOkved = useCallback((code: string) => {
-    setSelectedOkveds((prev) => {
-      const next = new Set(prev);
-      next.delete(code);
-      return next;
-    });
+    setSelectedOkveds((prev) => removeOkvedBranch(code, prev));
   }, []);
 
   // Chip strip items.
@@ -409,7 +435,7 @@ export default function CompaniesSearchPage() {
 
   const okvedChips = useMemo(() => {
     if (selectedOkveds.size === 0) return [];
-    return Array.from(selectedOkveds).map((code) => ({ code, label: code }));
+    return reduceToTopCodes(selectedOkveds).map((code) => ({ code, label: code }));
   }, [selectedOkveds]);
 
   const buildFilters = () => {
@@ -448,10 +474,16 @@ export default function CompaniesSearchPage() {
     };
   };
 
+  const currentFiltersKey = companyExportFilterKey(buildFilters());
+  const matchingSavedExport = savedExports.find((item) => companyExportFilterKey(item.filters) === currentFiltersKey);
+
   const handleCalculate = async () => {
     setCalcLoading(true);
     setCalcError(null);
     setCalcResult(null);
+    setExportError(null);
+    const filters = buildFilters();
+    const filtersKey = companyExportFilterKey(filters);
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -468,7 +500,7 @@ export default function CompaniesSearchPage() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ ...buildFilters(), countOnly: true }),
+        body: JSON.stringify({ ...filters, countOnly: true }),
       });
 
       if (!res.ok) {
@@ -484,7 +516,7 @@ export default function CompaniesSearchPage() {
         seenTotal?: number;
         lastExportedAt?: string | null;
       };
-      setCalcResult({ count: data.count, remaining: data.remaining });
+      setCalcResult({ count: data.count, remaining: data.remaining, filtersKey });
       setSeenStats({ seenTotal: data.seenTotal ?? 0, lastExportedAt: data.lastExportedAt ?? null });
     } catch (err) {
       setCalcError(err instanceof Error ? err.message : t('Ошибка', 'Error', locale));
@@ -493,47 +525,60 @@ export default function CompaniesSearchPage() {
     }
   };
 
-  const handleExport = async (format: 'csv' | 'xlsx') => {
+  const startDownload = (data: CompanyDownload) => {
+    setDownloadLink(data);
+    // Native download from durable storage: no large browser Blob and no
+    // prematurely revoked object URL. Keep a visible link for manual retry.
+    const link = document.createElement('a');
+    link.href = data.downloadUrl;
+    link.download = data.filename;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const handleExport = async (format: 'csv' | 'xlsx', savedId?: string, newExport = false) => {
+    if (exportBusy.current) return;
+    exportBusy.current = true;
     setExportLoading(format);
     setExportError(null);
-
+    setDownloadLink(null);
+    const filters = buildFilters();
+    const filtersKey = companyExportFilterKey(filters);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token;
-      if (!token) {
-        setExportError(t('Требуется авторизация', 'Authorization required', locale));
-        setExportLoading(null);
+      if (savedId) {
+        startDownload(await clientApiFetch<CompanyDownload>(`/companies-search/export?id=${savedId}&format=${format}`));
         return;
       }
-
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error(t('Требуется авторизация', 'Authorization required', locale));
+      const storageKey = EXPORT_INTENT_KEY + session.user.id;
+      let intent = exportIntent.current;
+      try {
+        const stored = JSON.parse(localStorage.getItem(storageKey) ?? 'null');
+        if (stored?.filtersKey === filtersKey && typeof stored.requestId === 'string') intent = stored;
+      } catch { /* storage can be disabled */ }
+      if (newExport && intent?.filtersKey !== filtersKey) {
+        intent = { filtersKey, requestId: crypto.randomUUID() };
+        exportIntent.current = intent;
+        try { localStorage.setItem(storageKey, JSON.stringify(intent)); } catch { /* in-memory retry still works */ }
+      }
       const res = await fetch(`/api/client/companies-search/export?format=${format}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(buildFilters()),
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ ...filters, exportRequestId: intent?.filtersKey === filtersKey ? intent.requestId : undefined }),
       });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: t('Ошибка', 'Error', locale) }));
-        setExportError(err.error || `HTTP ${res.status}`);
-        setExportLoading(null);
-        return;
-      }
-
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `companies_${new Date().toISOString().slice(0, 10)}.${format}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      exportIntent.current = null;
+      try { localStorage.removeItem(storageKey); } catch { /* no storage */ }
+      setSavedExports((prev) => [data, ...prev.filter((item) => item.id !== data.id)].slice(0, 10));
+      startDownload(data as CompanyDownload);
     } catch (err) {
-      setExportError(err instanceof Error ? err.message : t('Ошибка', 'Error', locale));
+      setExportError(err instanceof Error ? err.message : t('Ошибка скачивания', 'Download failed', locale));
     } finally {
+      exportBusy.current = false;
       setExportLoading(null);
     }
   };
@@ -561,6 +606,9 @@ export default function CompaniesSearchPage() {
       cancelled = true;
     };
   }, []);
+  useEffect(() => {
+    if (tariffStatus === 'active' || tariffStatus === 'setup') void Promise.resolve().then(loadSavedExports);
+  }, [tariffStatus, loadSavedExports]);
   const tariffNotPaid = tariffStatus === 'inactive' || tariffStatus === 'expired';
 
   // ── Пейволл: тариф не оплачен / оформлен, но ждёт первой оплаты ──
@@ -842,7 +890,7 @@ export default function CompaniesSearchPage() {
                   min={0}
                   value={employeesFrom}
                   onChange={(e) => setEmployeesFrom(e.target.value)}
-                  className="ds-input flex-1 text-sm"
+                  className="ds-input min-w-0 flex-1 text-sm"
                   placeholder="0"
                 />
                 <span
@@ -856,7 +904,7 @@ export default function CompaniesSearchPage() {
                   min={0}
                   value={employeesTo}
                   onChange={(e) => setEmployeesTo(e.target.value)}
-                  className="ds-input flex-1 text-sm"
+                  className="ds-input min-w-0 flex-1 text-sm"
                 />
               </div>
             </div>
@@ -908,7 +956,7 @@ export default function CompaniesSearchPage() {
                   min={0}
                   value={revenueFrom}
                   onChange={(e) => setRevenueFrom(e.target.value)}
-                  className="ds-input flex-1 text-sm"
+                  className="ds-input min-w-0 flex-1 text-sm"
                 />
                 <span
                   className="ds-mono text-[11px] shrink-0"
@@ -921,7 +969,7 @@ export default function CompaniesSearchPage() {
                   min={0}
                   value={revenueTo}
                   onChange={(e) => setRevenueTo(e.target.value)}
-                  className="ds-input flex-1 text-sm"
+                  className="ds-input min-w-0 flex-1 text-sm"
                 />
               </div>
             </div>
@@ -949,7 +997,7 @@ export default function CompaniesSearchPage() {
                   min={0}
                   value={costFrom}
                   onChange={(e) => setCostFrom(e.target.value)}
-                  className="ds-input flex-1 text-sm"
+                  className="ds-input min-w-0 flex-1 text-sm"
                 />
                 <span
                   className="ds-mono text-[11px] shrink-0"
@@ -962,7 +1010,7 @@ export default function CompaniesSearchPage() {
                   min={0}
                   value={costTo}
                   onChange={(e) => setCostTo(e.target.value)}
-                  className="ds-input flex-1 text-sm"
+                  className="ds-input min-w-0 flex-1 text-sm"
                 />
               </div>
             </div>
@@ -1014,15 +1062,15 @@ export default function CompaniesSearchPage() {
             locale,
           )}
           title={t(
-            'По умолчанию повторы исключаются: каждая выгрузка отдаёт следующий срез базы, чтобы вы не писали одним и тем же компаниям.',
-            'Repeats are excluded by default: each export returns the next slice of the directory so you do not email the same companies twice.',
+            'При создании новой выгрузки уже полученные компании исключаются. Сохранённые файлы можно скачать повторно без этой галочки.',
+            'New exports exclude companies you already received. Saved files can be downloaded again without this checkbox.',
             locale,
           )}
         />
         <p className="text-xs mt-3 leading-relaxed" style={{ color: 'var(--cp-paper-mute)' }}>
           {t(
-            'Мы запоминаем, какие компании вы уже скачивали, и не отдаём их повторно — включите галочку, если нужен именно повтор.',
-            'We remember which companies you already downloaded and skip them — tick the box if you specifically need repeats.',
+            'Включите галочку, чтобы добавить ранее полученные компании в новую выборку. Для повторного скачивания готового файла используйте сохранённые выгрузки ниже.',
+            'Check this to include previously received companies in a new selection. To download an existing file again, use saved exports below.',
             locale,
           )}
         </p>
@@ -1032,8 +1080,8 @@ export default function CompaniesSearchPage() {
       <div className="flex flex-col items-center gap-4">
         <button
           type="button"
-          onClick={handleCalculate}
-          disabled={calcLoading}
+          onClick={() => void handleCalculate()}
+          disabled={calcLoading || exportLoading !== null}
           className="ds-btn-primary px-12 py-4 text-base disabled:opacity-60"
         >
           {calcLoading
@@ -1052,7 +1100,7 @@ export default function CompaniesSearchPage() {
           </div>
         )}
 
-        {calcResult && (
+        {calcResult && calcResult.filtersKey === currentFiltersKey && (
           <div className="flex flex-col items-center gap-2">
             <p className="text-sm" style={{ color: 'var(--cp-paper-mute)' }}>
               {t('Найдено компаний: ', 'Companies found: ', locale)}
@@ -1062,7 +1110,7 @@ export default function CompaniesSearchPage() {
               >
                 {calcResult.count.toLocaleString(locale === 'en' ? 'en-US' : 'ru-RU')}
               </span>
-              {calcResult.count > 0 && (
+              {calcResult.count > 0 && !matchingSavedExport && (
                 <span
                   className="ds-mono text-xs ml-2"
                   style={{ color: calcResult.count > calcResult.remaining ? 'var(--cp-amber)' : 'var(--cp-paper-faint)' }}
@@ -1081,6 +1129,12 @@ export default function CompaniesSearchPage() {
                 </span>
               )}
             </p>
+
+            {matchingSavedExport && (
+              <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+                {t(`Скачивание вернёт сохранённый файл: ${matchingSavedExport.rowCount.toLocaleString('ru-RU')} компаний, без повторного списания.`, `Download will return the saved file: ${matchingSavedExport.rowCount.toLocaleString('en-US')} companies, with no additional charge.`, locale)}
+              </p>
+            )}
 
             {seenStats && seenStats.seenTotal > 0 && (
               <p className="text-xs" style={{ color: 'var(--cp-paper-faint)' }}>
@@ -1137,21 +1191,50 @@ export default function CompaniesSearchPage() {
                     )}
                   </button>
                 </div>
-                {exportError && (
-                  <div className="flex items-center gap-2.5 text-sm">
-                    <span
-                      aria-hidden
-                      className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
-                      style={{ background: 'var(--cp-red)' }}
-                    />
-                    <span style={{ color: 'var(--cp-paper)' }}>{exportError}</span>
-                  </div>
-                )}
               </>
             )}
           </div>
         )}
       </div>
+
+      {(savedExports.length > 0 || historyError) && (
+        <section className="space-y-3 rounded-lg border p-4" style={{ borderColor: 'var(--cp-divider)' }}>
+          <h2 className="text-sm font-semibold">{t('Сохранённые выгрузки', 'Saved exports', locale)}</h2>
+          <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+            {t('Оба формата содержат одни и те же компании. Повторное скачивание не расходует лимит.', 'Both formats contain the same companies. Repeat downloads do not use your quota.', locale)}
+          </p>
+          {historyError && <p className="text-sm">{historyError} <button type="button" disabled={historyLoading} onClick={() => void loadSavedExports()} className="underline">{t('Повторить', 'Retry', locale)}</button></p>}
+          {savedExports.map((item) => (
+            <div key={item.id} className="flex flex-wrap items-center gap-3 text-sm">
+              <span>{new Date(item.createdAt).toLocaleString(locale === 'en' ? 'en-US' : 'ru-RU')} · {item.rowCount.toLocaleString('ru-RU')} {t('компаний', 'companies', locale)}</span>
+              {item.filters.okvedCodes?.length ? <span className="ds-mono text-xs" style={{ color: 'var(--cp-paper-mute)' }}>{t('ОКВЭД: ', 'OKVED: ', locale)}{reduceToTopCodes(new Set(item.filters.okvedCodes)).join(', ')}</span> : null}
+              {(['xlsx', 'csv'] as const).map((format) => (
+                <button key={format} type="button" className="ds-btn-secondary px-3 py-1 text-xs disabled:opacity-60" disabled={exportLoading !== null} onClick={() => void handleExport(format, item.id)}>
+                  {format.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          ))}
+          {matchingSavedExport && (
+            <div className="space-y-2 pt-2">
+              <p className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
+                {t('Для текущих фильтров уже есть файл. Если нужна свежая выборка, создайте новую выгрузку. Её строки спишутся из лимита при подготовке файлов.', 'A file already exists for these filters. To get fresh results, create a new export. Its rows will use your quota when the files are prepared.', locale)}
+              </p>
+              <button type="button" className="ds-btn-secondary px-3 py-2 text-xs disabled:opacity-60" disabled={calcLoading || exportLoading !== null} onClick={() => void handleExport('xlsx', undefined, true)}>
+                {t('Создать новую выгрузку XLSX', 'Create a new XLSX export', locale)}
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+      {exportError && <p role="alert" className="text-sm" style={{ color: 'var(--cp-red)' }}>{exportError}</p>}
+      {downloadLink && (
+        <p role="status" className="text-sm">
+          {t(`Файл готов: ${downloadLink.rowCount.toLocaleString('ru-RU')} компаний. Если скачивание не началось, `, `File ready: ${downloadLink.rowCount.toLocaleString('en-US')} companies. If the download did not start, `, locale)}
+          <a className="underline" href={downloadLink.downloadUrl} download={downloadLink.filename} rel="noopener">{t('скачайте по ссылке', 'use this link', locale)}</a>.
+          {' '}{t('Ссылка действует 10 минут; новую можно получить кнопкой XLSX или CSV выше.', 'The link lasts 10 minutes; use the XLSX or CSV button above to get a new one.', locale)}
+        </p>
+      )}
 
       {regionsModalOpen && (
         <RegionsModal

@@ -1,0 +1,26 @@
+{
+ "include": [
+  "Fund administrators, ManCos and asset managers in Ireland and Luxembourg: data platform modernisation and regulatory reporting (AIFMD, UCITS)",
+  "Fund services and fund technology firms (transfer agency, depositary, fund data) in Ireland, Luxembourg and the UK",
+  "Wealth managers, private banks and investment platforms in Ireland, the UK and the EU with their own technology teams",
+  "Insurers and insurtechs in Ireland, the UK and the EU: real time partner and claims data, AI that goes live in production",
+  "Retail banks, private banks and digital banks in the UK, the EU and the US East Coast that need senior engineering capacity",
+  "Banks and digital asset firms working on client onboarding, KYC or custody infrastructure",
+  "Payments companies, e-money institutions and fintechs with an existing engineering function",
+  "B2B software vendors selling into financial services or other regulated markets, with an engineering team of 20+",
+  "Asset and fund managers in the UK, Germany, the Netherlands and the Nordics: data platform modernisation and regulatory reporting",
+  "Insurance brokers, MGAs and reinsurers in Ireland, the UK and the EU with in-house technology teams"
+ ],
+ "exclude": [
+  "Software development agencies, IT consultancies, outsourcing and staff augmentation firms (competitors, not buyers)",
+  "Management and digital consultancies and system integrators",
+  "Recruitment agencies, staffing firms and IT contractor marketplaces",
+  "Companies with no in-house technology, engineering or delivery function",
+  "Independent financial advisers, small advisory practices, accountancy firms and other small firms without a technology team",
+  "Consumer retail, e-commerce, hospitality, construction, media, local services and other sectors outside financial services and insurance",
+  "Healthcare, pharma, energy and other non-financial regulated companies themselves (B2B software vendors selling to them do qualify)",
+  "Students, job seekers and individual freelancers"
+ ],
+ "size": "200+ employees, or smaller fintechs, insurtechs and software vendors (from 50 employees) with an in-house engineering team of 20+",
+ "geo": "Ireland, United Kingdom, EU (priority: Netherlands, Luxembourg, Germany, Denmark, Sweden, Finland, Norway) and US East Coast states only (e.g. New York, Massachusetts, New Jersey, Connecticut)"
+}

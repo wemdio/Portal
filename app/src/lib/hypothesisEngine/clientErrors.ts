@@ -220,6 +220,19 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // этот отказ не лечится, вместо просьбы об описании.
   if (message.includes(HE_SITE_THIN_NEEDS_BUSINESS_ANCHOR)) return 'website_thin';
 
+  // Список Do not contact клиента и список стран проекта на сборке
+  // (stages/baseCollect.ts; план docs/handoff/2026-10-16-eng-countries, §1A/§1B).
+  // ВЫШЕ `segment_exhausted`, `timeout`, `already_collected` и `source`: все
+  // четыре текста начинаются с «Авто-сборка не дала строк» либо несут хвост
+  // чужого сбоя (сообщение чтения списка), и общие правила сказали бы клиенту
+  // «запустите ещё раз» там, где помогает только правка списка. Порядок между
+  // ними: нечитаемый список — сбой у нас (internal), раньше «сверх лимита» и
+  // «все в списке»; «нет источника для стран» — последним.
+  if (/Список Do not contact клиента не прочитан/i.test(message)) return 'internal';
+  if (/Список Do not contact клиента больше/i.test(message)) return 'do_not_contact_over_cap';
+  if (/в списке Do not contact клиента/i.test(message)) return 'do_not_contact';
+  if (/нет источника для стран проекта/i.test(message)) return 'countries_uncovered';
+
   if (/Сегмент исчерпан|не осталось новых/i.test(message)) return 'segment_exhausted';
 
   // Конструктор баз: таймаут ожидания отделяем от прочих его исходов.

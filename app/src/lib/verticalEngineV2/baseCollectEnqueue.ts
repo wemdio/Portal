@@ -30,7 +30,7 @@ import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 import { isVeResumableDirectoryError } from './collectionErrors';
 import { compactVeRelevanceReserve } from './relevanceReserve';
-import { readVeSourceCostPolicy } from './sourceAudience';
+import { readVeSourceCostPolicy, withVeRetailRefreshMarket } from './sourceAudience';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -298,11 +298,14 @@ export async function enqueueVeBaseCollect(
     const ids = hypothesisIds as string[];
     const { data: hypRows, error: hypErr } = await supabase
       .from('ve_hypotheses')
-      .select('id, title, description, origin, status, broad')
+      .select('id, title, description, origin, status, broad, audience_scope')
       .eq('project_id', projectId).eq('vertical_id', verticalId)
       .in('id', ids);
     if (hypErr) return { ok: false, message: hypErr.message };
-    for (const h of hypRows ?? []) currentHypotheses.set(String(h.id), h);
+    for (const h of hypRows ?? []) {
+      try { currentHypotheses.set(String(h.id), input.resumeBaseId ? await withVeRetailRefreshMarket(supabase, projectId, h) : h); }
+      catch (error) { return { ok: false, message: error instanceof Error ? error.message : 'Collection audience market read failed' }; }
+    }
     hypothesisTitle = Object.fromEntries(
       (hypRows ?? []).map((h) => [String(h.id), String(h.title ?? '').trim() || String(h.id)]),
     );

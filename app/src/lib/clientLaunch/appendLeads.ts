@@ -22,6 +22,7 @@ import { isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
+import { filterBlockedContacts, getBlockedContactSnapshot } from '@/lib/clientBlocklist/blockedDomains';
 import { filterClientDomainLeads } from '@/lib/clientBlocklist/domainPolicy';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -88,6 +89,14 @@ export interface AppendLeadsToClientCampaignInput {
     inputIndexes: number[];
     beforeRequest?: () => Promise<void>;
   }>;
+  /**
+   * ENG-only (the HE nightly refill passes `market === 'us'`): read the client's
+   * Do not contact list as a snapshot of addresses AND company domains
+   * (blockedDomains.ts) and match the email host and `lead.website` against
+   * the domain entries. Undefined/false keeps the address-only blocklist path
+   * byte-identical for every RU caller.
+   */
+  blocklistDomains?: boolean;
   /** Durable reporting provenance for this append operation. */
   ledgerSource?: {
     kind: string;
@@ -211,11 +220,22 @@ export async function appendLeadsToClientCampaign(
     kept: domainAllowedLeads,
     blockedCount: domainPolicyBlockedCount,
   } = filterClientDomainLeads(leads, userId);
-  const blockedSet = await getBlockedEmailSet(supabaseInstantly, userId);
-  const {
-    kept: allowedLeads,
-    blockedCount: emailBlockedCount,
-  } = filterBlockedLeads(domainAllowedLeads, blockedSet);
+  //     ENG (blocklistDomains) reads the snapshot with domain entries; its
+  //     domain hits count as blocklist hits (emailBlocked) — same skip, same
+  //     indexes. Without the flag the address-only path below is unchanged.
+  let allowedLeads: LeadCreatePayload[];
+  let emailBlockedCount: number;
+  if (input.blocklistDomains) {
+    const snapshot = await getBlockedContactSnapshot(supabaseInstantly, userId);
+    const filtered = filterBlockedContacts(domainAllowedLeads, snapshot);
+    allowedLeads = filtered.kept;
+    emailBlockedCount = filtered.blockedCount;
+  } else {
+    const blockedSet = await getBlockedEmailSet(supabaseInstantly, userId);
+    const filtered = filterBlockedLeads(domainAllowedLeads, blockedSet);
+    allowedLeads = filtered.kept;
+    emailBlockedCount = filtered.blockedCount;
+  }
   const blockedCount = domainPolicyBlockedCount + emailBlockedCount;
   if (allowedLeads.length === 0) {
     await logAudit(

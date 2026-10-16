@@ -10,6 +10,8 @@ import { createEngProjectLocked, engCreateProjectUnavailableRefusal } from '@/li
 import { normalizeWebsiteInput } from '@/lib/hypothesisEngine/websiteUrl';
 import { buildHeEngCreateBrief } from '@/lib/hypothesisEngine/projectBriefPatch';
 import { heIcpFrameInputErrorText, parseHeIcpFramePatch, type HeIcpFramePatch } from '@/lib/hypothesisEngine/icpFrame';
+import { heCollectCountriesErrorText, parseHeCollectCountries } from '@/lib/hypothesisEngine/engCountries';
+import { heEngCollectCountriesEnabled } from '@/lib/hypothesisEngine/engRolloutFlags';
 import { enqueueHeResearchJob } from '@/lib/hypothesisEngine/researchJob';
 import {
   HE_PROJECT_CLIENT_COLUMNS,
@@ -144,10 +146,13 @@ export async function GET(req: NextRequest) {
       vertical_count: verticalCounts.get(p.id as string) ?? 0,
       base_count: baseCounts.get(p.id as string) ?? 0,
     })),
+    // Выключатель выбора стран — и на верхнем уровне: форма создания
+    // показывается только при пустом списке, где строк с этим полем нет.
+    collect_countries_enabled: heEngCollectCountriesEnabled(),
   });
 }
 
-// POST — создать проект { website_url, name?, business_override?, icp? }:
+// POST — создать проект { website_url, name?, business_override?, icp?, collect_countries? }:
 // market='us' принудительно, имя по умолчанию — hostname; research
 // (site_profile) ставится сразу, чтобы мастер кабинета начинал с прогресса
 // исследования. business_override и icp — ответы формы создания, которые
@@ -167,7 +172,13 @@ export async function POST(req: NextRequest) {
     const gate = await requireEngMarket(supabaseAdmin, userId);
     if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
 
-    let body: { website_url?: unknown; name?: unknown; business_override?: unknown; icp?: unknown };
+    let body: {
+      website_url?: unknown;
+      name?: unknown;
+      business_override?: unknown;
+      icp?: unknown;
+      collect_countries?: unknown;
+    };
     try {
       body = (await req.json()) as typeof body;
     } catch {
@@ -194,7 +205,25 @@ export async function POST(req: NextRequest) {
       if (!parsed.ok) return jsonError(heIcpFrameInputErrorText(parsed.error), 400);
       icpPatch = parsed.patch;
     }
-    const built = buildHeEngCreateBrief(body, { icp: icpPatch });
+    // Страны сбора (необязательно) — так же строго и под тем же выключателем,
+    // что у PATCH проекта (план 2026-10-16-eng-countries, §1A). Проект
+    // кабинета всегда 'us', поэтому отказа по рынку здесь нет.
+    let collectCountries: string[] | undefined;
+    if (body?.collect_countries !== undefined) {
+      if (!heEngCollectCountriesEnabled()) {
+        return NextResponse.json(
+          { error: 'Choosing countries is not available yet.', code: 'countries_unavailable' },
+          { status: 400 },
+        );
+      }
+      const parsed = parseHeCollectCountries(body.collect_countries);
+      if (!parsed.ok) return jsonError(heCollectCountriesErrorText(parsed), 400);
+      collectCountries = parsed.countries;
+    }
+    const built = buildHeEngCreateBrief(body, {
+      icp: icpPatch,
+      ...(collectCountries !== undefined ? { collect_countries: collectCountries } : {}),
+    });
     if (!built.ok) {
       return built.error.code === 'bad_type'
         ? jsonError(`${built.error.field} must be a string`, 400)

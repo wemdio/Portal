@@ -39,6 +39,8 @@ export async function GET(req: NextRequest) {
         matching: 0,
         offset: 0,
         next_offset: null,
+        domains_total: 0,
+        domains_enabled: false,
         in_campaign_removal: 'off',
         pending: null,
         failed: null,
