@@ -1,4 +1,5 @@
 import { createAmoClient } from '@/lib/crm/amoClient';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { checkTransition, STAGE_NAMES, type StatusChange } from './rules';
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -59,6 +60,20 @@ export async function enforceTransition(change: StatusChange): Promise<GuardResu
     status_id: change.oldStatusId,
     pipeline_id: change.pipelineId,
   });
+
+  // Откат оставляет в истории AMO пару «туда — обратно». Фиксируем его, чтобы
+  // дашборды (view amo_status_events_v) не считали сделку побывавшей на
+  // запрещённом этапе. Без записи статистика соврёт — поэтому громкая ошибка.
+  if (supabaseAdmin) {
+    const { error } = await supabaseAdmin.from('amo_funnel_reverts').insert({
+      amo_deal_id: change.leadId,
+      bad_status_id: change.statusId,
+      restored_status_id: change.oldStatusId,
+    });
+    if (error) console.error('[amo-funnel-guard] revert not logged', change.leadId, error.message);
+  } else {
+    console.error('[amo-funnel-guard] supabaseAdmin missing, revert not logged', change.leadId);
+  }
 
   const to = STAGE_NAMES[change.statusId] ?? String(change.statusId);
   const from = STAGE_NAMES[change.oldStatusId] ?? String(change.oldStatusId);
