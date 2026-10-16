@@ -438,17 +438,21 @@ function recipientsOf(row: OutreachRow): RecipientInput[] {
 
 const MSK_DAY_MONTH = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit' });
 
-function companiesLabel(count: number): string {
+function contactsLabel(count: number): string {
   const mod10 = count % 10;
   const mod100 = count % 100;
-  if (mod10 === 1 && mod100 !== 11) return `${count} компания`;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} компании`;
-  return `${count} компаний`;
+  if (mod10 === 1 && mod100 !== 11) return `${count} контакт`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} контакта`;
+  return `${count} контактов`;
 }
 
-/** «RU · 26.09 · 500 компаний»: язык, день запуска по Москве, сколько компаний заливали. */
-function campaignNameFor(source: OutreachSource, jobCreatedAt: string, companies: number): string {
-  return `${source.label} · ${MSK_DAY_MONTH.format(new Date(jobCreatedAt))} · ${companiesLabel(companies)}`;
+/**
+ * «RU · 26.09 · 640 контактов»: язык, день запуска по Москве, сколько адресов
+ * легло в рассылку. До 16.10.2026 в имени было число компаний, а на экране
+ * «Рассылки» — число контактов: у компании до трёх адресов, и цифры не сходились.
+ */
+function campaignNameFor(source: OutreachSource, jobCreatedAt: string, contacts: number): string {
+  return `${source.label} · ${MSK_DAY_MONTH.format(new Date(jobCreatedAt))} · ${contactsLabel(contacts)}`;
 }
 
 /**
@@ -729,11 +733,11 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
     );
     if (!landedRows.size) throw new SenderOpError(nothingLandedMessage(imported), 422);
 
-    // «RU · 26.09 · N компаний» — N по факту: стоп-лист, дубли и строки без
+    // «RU · 26.09 · N контактов» — N по факту: стоп-лист, дубли и строки без
     // письма в рассылку не легли. Имя — для людей, сбой переименования
     // заливку не отменяет.
     if (!target) {
-      const finalName = campaignNameFor(source, job.createdAt, landedRows.size);
+      const finalName = campaignNameFor(source, job.createdAt, imported.inserted);
       if (finalName !== campaignName) {
         const { error: renameError } = await db()
           .from('sender_campaigns')

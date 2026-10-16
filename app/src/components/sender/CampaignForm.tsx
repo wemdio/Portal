@@ -704,7 +704,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     <div className="mx-auto max-w-[1600px]">
       {/* Шапка не уезжает при прокрутке: что мешает сохранить и сама кнопка
           нужны из любого места длинной формы. */}
-      <div className="sticky top-0 z-20 mb-4 rounded-xl border border-zinc-200 bg-white/95 backdrop-blur">
+      <div className="sticky top-0 z-20 mb-4 border-b border-zinc-200 backdrop-blur-xl">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <button
             type="button"
@@ -730,23 +730,6 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
             ) : (
               <span className="text-xs text-zinc-500">{statusHint}</span>
             )}
-            {/* Дописывать за один раз не обязательно: форма сохраняется сама,
-                и к кампании можно вернуться. */}
-            {readOnly ? null : (
-              <span className="text-xs text-zinc-500">
-                {draftSavedAt
-                  ? `Сохранено в ${draftSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-                  : 'Сохраняется само'}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={() => void closePage()}
-              disabled={saving}
-              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100 disabled:opacity-50"
-            >
-              {readOnly ? 'Закрыть' : 'Выйти'}
-            </button>
             {readOnly ? null : (
               <button
                 type="button"
