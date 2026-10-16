@@ -36,6 +36,11 @@
  * каталожных ярлыков, плюс пункт 6 самопроверки. Имя видит клиент (шаг выбора
  * рынков), и оно же уезжает в план источников и пробу среза.
  * RU-промпт шарится с legacy-инструментом /tools/hypothesis-engine — не менять.
+ *
+ * Третье расхождение (16.10.2026, «шире и меньше», см. prompts/hypotheses.en.ts):
+ * 3–8 вертикалей вместо 4–12 — гипотез теперь до 15 широких, и вертикаль — это
+ * одна база контактов: две тонкие вертикали одного типа компаний собирались бы
+ * из одного и того же каталога порознь.
  */
 
 import type { LLMMessage } from '../llm';
@@ -52,7 +57,7 @@ HARD CRITERION FOR A VERTICAL:
 
 MERGING RULES:
 - Merge only what belongs to the same client company type: synonyms and sub-segments of one market. Classic example: "banks", "payment services", "e-money issuers", "neobanks", "payment processors" → one "Fintech & payments" vertical.
-- Do not inflate the count: 4–12 verticals. One vertical = one meaningful offer.
+- Do not inflate the count: 3–8 verticals (fewer when the hypotheses are few). One vertical = one meaningful offer and one lead base, so prefer a broader vertical over two thin ones of the same company type.
 - Different tiers MAY live in one vertical: a tier-3 hypothesis about neobanks goes into the same fintech vertical as a tier-1 about banks.
 
 VERTICAL FORMAT:
@@ -76,7 +81,7 @@ export function buildClusteringMessagesEn(input: ClusteringPromptInput): LLMMess
   const user = `VERIFIED HYPOTHESES (${input.hypotheses.length}):
 ${list}
 
-Compress them into 4–12 verticals. Return JSON ONLY:
+Compress them into 3–8 verticals. Return JSON ONLY:
 {
   "verticals": [
     { "name": string, "summary": string, "synonyms": string[], "member_titles": string[] }
