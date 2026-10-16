@@ -421,7 +421,7 @@ function StatusFilterMenu({
 }
 
 /** Разбивка базы по наведению на прогресс — как «Progress Overview» в Instantly. */
-function ProgressOverview({ campaign, percent }: { campaign: CampaignDto; percent: number }) {
+function ProgressOverview({ campaign, percent, above }: { campaign: CampaignDto; percent: number; above: boolean }) {
   const stats = campaign.stats;
   if (!stats) return null;
   const rows: Array<{ label: string; value: string | number; tone?: string }> = [
@@ -437,7 +437,7 @@ function ProgressOverview({ campaign, percent }: { campaign: CampaignDto; percen
   return (
     <div
       role="tooltip"
-      className="pointer-events-none invisible absolute left-0 top-full z-30 mt-2 w-64 rounded-xl border border-zinc-200 bg-white p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100"
+      className={`pointer-events-none invisible absolute left-0 z-30 w-64 ${above ? 'bottom-full mb-2' : 'top-full mt-2'} rounded-xl border border-zinc-200 bg-white p-3 opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100`}
     >
       <div className="mb-2 border-b border-zinc-200 pb-2 text-sm font-semibold text-zinc-900">Прогресс отправки</div>
       <dl className="space-y-1.5">
@@ -448,6 +448,33 @@ function ProgressOverview({ campaign, percent }: { campaign: CampaignDto; percen
           </div>
         ))}
       </dl>
+    </div>
+  );
+}
+
+/**
+ * Прогресс в строке и разбивка при наведении. Карточка открывается вверх,
+ * если снизу до края окна для неё не хватает места — у последних строк она
+ * уходила за экран.
+ */
+function ProgressCell({ campaign, percent }: { campaign: CampaignDto; percent: number }) {
+  const [above, setAbove] = useState(false);
+  return (
+    <div
+      className="group relative flex w-fit cursor-default items-center gap-2 py-1"
+      onMouseEnter={(e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        setAbove(window.innerHeight - rect.bottom < 300);
+      }}
+    >
+      <ProgressOverview campaign={campaign} percent={percent} above={above} />
+      <span className="w-10 text-xs font-semibold tabular-nums text-zinc-800">{percent}%</span>
+      <div className="h-1.5 w-28 overflow-hidden rounded-full bg-zinc-200">
+        <div
+          className={`h-full rounded-full ${percent >= 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
+          style={{ width: `${Math.min(100, percent)}%` }}
+        />
+      </div>
     </div>
   );
 }
@@ -662,16 +689,7 @@ function CampaignTable({
                 {percent === null ? (
                   <span className="text-zinc-400">—</span>
                 ) : (
-                  <div className="group relative flex w-fit cursor-default items-center gap-2 py-1">
-                    <ProgressOverview campaign={campaign} percent={percent} />
-                    <span className="w-10 text-xs font-semibold tabular-nums text-zinc-800">{percent}%</span>
-                    <div className="h-1.5 w-28 overflow-hidden rounded-full bg-zinc-200">
-                      <div
-                        className={`h-full rounded-full ${percent >= 100 ? 'bg-emerald-500' : 'bg-blue-500'}`}
-                        style={{ width: `${Math.min(100, percent)}%` }}
-                      />
-                    </div>
-                  </div>
+                  <ProgressCell campaign={campaign} percent={percent} />
                 )}
               </td>
               ) : null}
