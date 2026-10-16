@@ -105,6 +105,26 @@ async function campaignStats(campaignId: string, timeZone: string) {
     messagesQuery('sent').eq('step_no', 1).gte('sent_at', startOfTodayIso(timeZone)),
   ]);
 
+  // Сколько писем кампания должна отправить всего: уже ушедшие плюс те, что
+  // осталось отправить получателям, у которых цепочка ещё идёт. Ответившие,
+  // отбившиеся и отписавшиеся остаток не получат — иначе кампания никогда не
+  // дошла бы до 100%. Нужен для «прогресса по письмам».
+  const { data: stepRows } = await db.from('sender_campaign_steps').select('step_no').eq('campaign_id', campaignId);
+  const stepCount = (stepRows ?? []).reduce((max, row) => Math.max(max, Number(row.step_no) || 0), 0);
+  let lettersTotal: number | null = null;
+  if (stepCount > 0) {
+    // Активные по числу уже отправленных писем: на шаге k осталось stepCount − k.
+    const midChain = await Promise.all(
+      Array.from({ length: Math.max(0, stepCount - 1) }, (_, i) => i + 1).map((k) =>
+        db.from('sender_recipients').select('id', { count: 'exact', head: true })
+          .eq('campaign_id', campaignId).eq('status', 'active').eq('last_step_sent', k),
+      ),
+    );
+    const remaining = (notContacted.count ?? 0) * stepCount
+      + midChain.reduce((sum, res, i) => sum + (res.count ?? 0) * (stepCount - (i + 1)), 0);
+    lettersTotal = (sent.count ?? 0) + remaining;
+  }
+
   const reachedCount = reached.count ?? 0;
   return {
     recipients: recipients.count ?? 0,
@@ -123,6 +143,7 @@ async function campaignStats(campaignId: string, timeZone: string) {
     inProgress: inProgress.count ?? 0,
     notContacted: notContacted.count ?? 0,
     newToday: newToday.count ?? 0,
+    lettersTotal,
   };
 }
 
