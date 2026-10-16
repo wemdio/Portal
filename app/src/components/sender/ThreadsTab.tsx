@@ -243,21 +243,22 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             {campaigns.length > 0 && shownCampaigns.length === 0 ? (
               <p className="px-4 py-3 text-xs text-zinc-500">Ничего не нашлось.</p>
             ) : null}
-            {/* Письма, которые не удалось привязать к получателю, — отдельной
-                жёлтой «кампанией» внизу: раньше это был блок под всей вкладкой. */}
-            {unlinkedTotal ? (
-              <button
-                type="button"
-                onClick={() => { setUnlinkedOpen(true); setUnlinkedReply(null); }}
-                className={`mt-1 flex w-full items-center gap-1.5 border-t border-zinc-100 px-4 py-2 text-left text-sm transition-colors ${
-                  unlinkedOpen ? 'bg-amber-50 font-medium text-amber-800' : 'text-amber-700 hover:bg-amber-50'
-                }`}
-              >
-                <span className="min-w-0 flex-1 truncate">Входящие без привязки</span>
-                <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">{unlinkedTotal}</span>
-              </button>
-            ) : null}
           </div>
+          {/* Письма, которые не удалось привязать к получателю, — отдельной
+              жёлтой «кампанией» внизу: раньше это был блок под всей вкладкой. */}
+          {/* Прибит к низу колонки: не прыгает, пока грузятся кампании. */}
+          {unlinkedTotal ? (
+            <button
+              type="button"
+              onClick={() => { setUnlinkedOpen(true); setUnlinkedReply(null); }}
+              className={`flex w-full shrink-0 items-center gap-1.5 border-t border-zinc-200 px-4 py-2.5 text-left text-sm transition-colors ${
+                unlinkedOpen ? 'bg-amber-50 font-medium text-amber-800' : 'text-amber-700 hover:bg-amber-50'
+              }`}
+            >
+              <span className="min-w-0 flex-1 truncate">Входящие без привязки</span>
+              <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">{unlinkedTotal}</span>
+            </button>
+          ) : null}
         </div>
 
         {/* ── Переписки ── */}
