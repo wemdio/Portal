@@ -39,6 +39,75 @@ const input = {
 };
 
 describe('VE2 base collection enqueue recovery', () => {
+  it('refreshes audited retail previews before optional old reserve work without changing paid receipts or limits', async () => {
+    const oldFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+    process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = '';
+    try {
+      for (const mode of ['explicit', 'old-reserve', 'routine', 'manual', 'typed', 'us', 'launched', 'ongoing', 'child', 'round-limit'] as const) {
+        const hypothesis = { id: 'retail-materials', project_id: input.projectId, vertical_id: input.verticalId,
+          title: 'Производители строительно-отделочных материалов',
+          description: 'Заводы сухих смесей, напольных покрытий, плитки и ЛКМ с собственным шоурумом и интернет-магазином. Потеря прямых частных заказов при передаче их сторонним дилерам.',
+          broad: false, origin: mode === 'manual' ? 'manual' : 'generated', status: 'approved',
+          ...(mode === 'typed' ? { audience_scope: { version: 1, kind: 'segment', any_of: ['Производители стройматериалов'],
+            required: ['Собственный шоурум'], excluded: [] } } : {}) };
+        const progress = { mode: 'preview', status: 'limited', round: mode === 'round-limit' ? 100 : 49, max_rounds: 100,
+          ready_rows: 27, ready_target: 500, candidates_processed: 3151, max_candidates: 10000, idle_streak: 1 };
+        const task = { source: 'companies_directory', directory_filters: { okvedCodes: ['28.29'] }, rationale: 'Old generator plan' };
+        const ready = [{ company: 'Saved producer', email: 'ready@example.test', _email_status: 'ok' }];
+        const info = { collection_mode: 'preview', hypotheses: [hypothesis], target_progress: progress,
+          target_checkpoint: { completed_round: progress.round, seen_rows: [{ company: 'Seen producer', email: 'seen@example.test' }], processed_rows: 3151 },
+          plan: { tasks: [task] }, tasks: [{ source: task.source, task, status: 'done', exhausted: true,
+            child_job_id: 'paid-directory-child', directory_cursors: { old: 400 } }],
+          source_contact_recovery: { version: 1, checked: { paid: { website: 'https://saved.test' } } },
+          adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 1 },
+          saved_email_recovery: { version: 1, attempt_id: 'automatic:saved-retail', checked: { receipt: 'ok' }, automatic_checked: { receipt: 'ok' } },
+          ...(mode === 'old-reserve' ? { relevance_reserve: { version: 1, rows: [
+            { company: 'Old pending producer', email: 'pending@example.test', _email_status: 'unknown', _relevance_unchecked: true },
+          ] } } : {}),
+          ...(mode === 'child' ? { preview_pipeline: { version: 1, batches: [{ id: 'already-paid-child', bc_job_id: 'paid-constructor' }] } } : {}),
+        };
+        const base = { id: 'saved-retail', project_id: input.projectId, vertical_id: input.verticalId,
+          hypothesis_id: hypothesis.id, source: 'auto', status: 'analyzed', row_count: 29, data: ready,
+          updated_at: '2026-10-15T20:06:33Z', collection_continuation_revision: 4, collect_info: info };
+        const db = createMockSupabase({ tables: { ve_hypotheses: [hypothesis], ve_bases: [base],
+          ve_projects: [{ id: input.projectId, market: mode === 'us' ? 'us' : 'ru' }],
+          ve_jobs: mode === 'ongoing' ? [{ id: 'current-job', project_id: input.projectId, stage: 'base_collect', status: 'running', payload: { base_id: base.id } }] : [],
+          ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [],
+        } });
+        const expectedRefresh = mode === 'explicit' || mode === 'old-reserve';
+        if (expectedRefresh) expect(getVeCollectionContinuation(base, { ...hypothesis, collection_market: 'ru' })).toMatchObject({ available: true, code: 'source_update' });
+        if (mode === 'child') expect(getVeCollectionContinuation(base, hypothesis)).toMatchObject({ available: true, code: 'saved_work' });
+        if (mode === 'round-limit') expect(getVeCollectionContinuation(base, { ...hypothesis, collection_market: 'ru' })).toMatchObject({ available: false, code: 'round_limit' });
+        const args = { ...input, hypothesisIds: [hypothesis.id], collectionMode: 'preview' as const,
+          ...(mode === 'routine' ? {} : { resumeBaseId: base.id }) };
+        await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, args)).resolves.toMatchObject({ ok: true });
+        const saved = db.getRows('ve_bases')[0];
+        expect(saved).toMatchObject({ row_count: 29, data: ready });
+        if (expectedRefresh) {
+          expect(saved.collect_info).toMatchObject({ audience_scope_refresh_requested: true,
+            cost_policy: { version: 1, website_discovery: 'existing_only' },
+            target_progress: { ...progress, status: 'collecting', round: 50 },
+            target_checkpoint: info.target_checkpoint, tasks: info.tasks,
+            source_contact_recovery: info.source_contact_recovery,
+            saved_email_recovery: info.saved_email_recovery, adaptive_collection: info.adaptive_collection,
+          });
+          expect(saved.collect_info).not.toHaveProperty('validation_retry');
+          expect(saved.collect_info).not.toHaveProperty('relevance_review_requested');
+          if (mode === 'old-reserve') expect(saved.collect_info).toMatchObject({ relevance_reserve: info.relevance_reserve });
+          await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+          expect(db.getRows('ve_jobs')).toHaveLength(1);
+        } else {
+          expect(saved.collect_info).not.toHaveProperty('audience_scope_refresh_requested');
+          if (['routine', 'launched', 'round-limit'].includes(mode)) expect(db.getRows('ve_jobs')).toHaveLength(0);
+          if (mode === 'ongoing') expect(db.getRows('ve_jobs')).toHaveLength(1);
+        }
+      }
+    } finally {
+      if (oldFlag === undefined) delete process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
+      else process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = oldFlag;
+    }
+  });
+
   it('applies a controlled source refresh only to an explicit unlaunched preview without growing its budget', async () => {
     const oldFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
     try {

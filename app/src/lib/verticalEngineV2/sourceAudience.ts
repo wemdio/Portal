@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { VE_AUDIENCE_GENERATION_VERSION, readVeAudienceScope, veAudienceScopeKey, veAudienceScopeText, type VeAudienceScope } from './audienceScope';
-import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, type VeNicheSourceProfile } from './nicheSourcePolicy';
+import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, normalizeVeRetailSourcePlan, type VeNicheSourceProfile } from './nicheSourcePolicy';
+import { deriveVeRetailAudienceScope, veRetailSourceProfileForScope, type VeRetailSourceProfile } from './legacyRetailAudience';
+import { VE_YANDEX_CATALOG_MAPPING_REVISION } from './yandexCatalog';
 import { veSourceStrategyKey } from './adaptiveCollection';
-import type { VeMarket } from './market';
+import { projectMarket, type VeMarket } from './market';
 import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
 
 export interface VeSourceAudienceHypothesis {
@@ -15,6 +17,17 @@ export interface VeCollectionAudienceSnapshot {
   applied_at: string; reason: 'new_preview' | 'explicit_continuation';
 }
 export interface VeSourceCostPolicy { version: 1; website_discovery: 'existing_only' | 'existing_then_configured' }
+
+/** Read market only for the narrowly eligible legacy correction. Missing
+ * metadata is not permission to enqueue a RU-only rewrite in an ENG project. */
+export async function withVeRetailRefreshMarket<T extends Record<string, unknown>>(
+  db: SupabaseClient, projectId: string, hypothesis: T,
+): Promise<T & { collection_market?: VeMarket }> {
+  if (!deriveVeRetailAudienceScope(hypothesis as unknown as VeSourceAudienceHypothesis)) return hypothesis;
+  const { data, error } = await db.from('ve_projects').select('market').eq('id', projectId).maybeSingle();
+  if (error || !data) throw new Error(`Collection audience market: ${error?.message ?? 'project unavailable'}`);
+  return { ...hypothesis, collection_market: projectMarket(data) };
+}
 
 const text = (value: string) => value.toLowerCase().replace(/ё/g, 'е');
 /** A sector named fintech includes payment providers, not only that subtype.
@@ -63,7 +76,7 @@ export function readVeSourceCostPolicy(value: unknown): VeSourceCostPolicy | nul
 export function veNewAudienceSourceCostPolicy(hypothesis: VeSourceAudienceHypothesis, generationVersion: unknown, market: VeMarket): VeSourceCostPolicy {
   if (generationVersion != null && generationVersion !== VE_AUDIENCE_GENERATION_VERSION) throw new Error('Unsupported VE audience generation version');
   const scope = readVeAudienceScope(hypothesis.audience_scope);
-  const restricted = market === 'ru' && (isVeBroadFintechAudience(hypothesis) || detectVeNicheSourceProfile([hypothesis])
+  const restricted = market === 'ru' && (isVeBroadFintechAudience(hypothesis) || veAudienceRetailProfile([hypothesis]) || detectVeNicheSourceProfile([hypothesis])
     || scope?.any_of.some((title) => detectVeNicheSourceProfile([{ title }])));
   return { version: 1, website_discovery: generationVersion === VE_AUDIENCE_GENERATION_VERSION
     && scope && !restricted ? 'existing_then_configured' : 'existing_only' };
@@ -79,7 +92,7 @@ interface RefreshableInfo {
   collection_mode?: string; audience_snapshot?: unknown; audience_scope_refresh_requested?: boolean;
   hypotheses?: VeSourceAudienceHypothesis[]; refill?: boolean; campaign_id?: string; supply_batch_id?: string;
   construct?: { status?: string }; preview_pipeline?: { batches: unknown[] };
-  adaptive_collection?: { pending?: unknown }; tasks?: Array<{ status?: string; source?: string; task?: VeCollectTask }>;
+  adaptive_collection?: { pending?: unknown }; tasks?: Array<{ status?: string; source?: string; task?: VeCollectTask; catalog?: { mapping_revision?: number } }>;
   company_name_recovery?: unknown; validation_retry?: boolean; relevance_review_requested?: boolean;
   saved_email_recovery?: { batch?: unknown };
 }
@@ -96,6 +109,25 @@ export function needsLegacyFintechAudienceRefresh(info: RefreshableInfo): boolea
   const next = normalizeVeAudienceSourcePlan({ tasks: old }, info.hypotheses).plan.tasks;
   return next.some((task, index) => ['companies_directory', 'yandex_maps'].includes(task.source)
     && veSourceStrategyKey(task) !== veSourceStrategyKey(old[index]));
+}
+/** Preview-only correction of the two audited legacy generator definitions.
+ * A changed or manual brief cannot opt in through title keywords alone. */
+export function needsLegacyRetailAudienceRefresh(info: RefreshableInfo): boolean {
+  if (!canRefreshVeAudienceSources(info) || info.hypotheses?.length !== 1
+    || !info.tasks?.length || info.tasks.some((state) => !state.task)) return false;
+  const hypothesis = info.hypotheses[0];
+  const scope = deriveVeRetailAudienceScope(hypothesis);
+  if (!scope) return false;
+  const profile = veRetailSourceProfileForScope(scope, hypothesis.origin);
+  if (!profile) return false;
+  const next = normalizeVeRetailSourcePlan({ tasks: info.tasks.map((state) => state.task!) }, profile);
+  return info.tasks.some((state, index) => ['companies_directory', 'yandex_maps'].includes(state.source ?? '')
+    && (veSourceStrategyKey(state.task!) !== veSourceStrategyKey(next.tasks[index])
+      || (state.source === 'yandex_maps' && state.catalog?.mapping_revision !== VE_YANDEX_CATALOG_MAPPING_REVISION)));
+}
+export function veAudienceRetailProfile(hypotheses: VeSourceAudienceHypothesis[]): VeRetailSourceProfile | null {
+  if (hypotheses.length !== 1) return null;
+  return veRetailSourceProfileForScope(hypotheses[0].audience_scope, hypotheses[0].origin);
 }
 /** Every alternative must share a niche before it can specialize the entire
  * plan. Title words or one PSP branch cannot override a mixed sector scope. */
@@ -115,8 +147,10 @@ const FINTECH_TERMS = ['финтех', 'fintech', 'финансовые техн
  * tools or queries are appended; one existing directory branch retains PSP
  * identity lookup when another directory branch can cover the wider sector. */
 export function normalizeVeAudienceSourcePlan(plan: VeSourcePlan, hypotheses: VeSourceAudienceHypothesis[]): {
-  plan: VeSourcePlan; profile: VeNicheSourceProfile | null; decision: 'sector_fintech' | 'niche' | 'unchanged';
+  plan: VeSourcePlan; profile: VeNicheSourceProfile | null; decision: 'sector_fintech' | 'retail' | 'niche' | 'unchanged';
 } {
+  const retail = veAudienceRetailProfile(hypotheses);
+  if (retail) return { plan: normalizeVeRetailSourcePlan(plan, retail), profile: null, decision: 'retail' };
   const scope = hypotheses.length === 1 ? readVeAudienceScope(hypotheses[0].audience_scope) : null;
   const fintech = hypotheses.length === 1 && isVeBroadFintechAudience(hypotheses[0])
     && (!scope || (scope.required.length === 0 && scope.any_of.every((title) => /финтех|fintech/.test(text(title))
