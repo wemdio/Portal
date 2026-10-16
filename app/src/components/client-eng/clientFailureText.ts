@@ -201,6 +201,34 @@ export const HE_RESEARCH_FINAL_STOP_CODES = ['website_unreachable', 'website_thi
 export const HE_RESEARCH_NEEDS_DESCRIPTION_CODE = 'website_thin' as const satisfies HeClientErrorCode;
 
 /**
+ * Проект ЖДЁТ ОПИСАНИЯ БИЗНЕСА, а не стоит на сбое: 'failed' кодом
+ * HE_RESEARCH_NEEDS_DESCRIPTION_CODE. Пара точная: продолжение (роут
+ * исследования) первым делом переводит проект в 'researching' с error = null,
+ * отмена — в 'draft' с error = null, поэтому 'failed' + website_thin значит
+ * ровно «research ждёт 2–3 предложений клиента» (шаг 1, 'needs_description').
+ *
+ * Читатели — шапка мастера, карточка проекта в списке, Command Center: такой
+ * проект они рисуют нейтральным «needs your input» (ENG_NEEDS_INPUT_LABEL_EN),
+ * без красного «stopped» и без красной «Last error», которая повторяла бы
+ * янтарную просьбу шага 1 словами сбоя. Настоящие сбои research остаются
+ * красными.
+ */
+export function heProjectAwaitsDescription(status: unknown, errorCode: unknown): boolean {
+  return status === 'failed' && errorCode === HE_RESEARCH_NEEDS_DESCRIPTION_CODE;
+}
+
+/** Подпись состояния «ждём ответа клиента» — бейдж проекта и тег рынка Command Center. */
+export const ENG_NEEDS_INPUT_LABEL_EN = 'needs your input';
+
+/**
+ * Одна строка «что ждёт research» там, где самой просьбы шага 1 нет: шапка
+ * мастера на шагах 2–3, карточка проекта в списке, лента и карточка рынка
+ * Command Center. Без «stopped» и «failed»: это пауза до ответа клиента.
+ */
+export const ENG_NEEDS_DESCRIPTION_SHORT_EN =
+  'The research is waiting for a short description of your business: we could read only a little text on your website.';
+
+/**
  * Можно ли клиенту запустить research упавшего ('failed') проекта ещё раз —
  * по коду причины из проекции (toClientEngStageErrorCode). Один предикат на
  * роут исследования и экран шага 1: разойдись они, кабинет рисовал бы кнопку,
@@ -578,7 +606,7 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
    */
   website_thin: {
     title:
-      'We could read only a little text on your website — not enough to tell what you sell and to whom — so the research stopped before building anything from it.',
+      'We could read only a little text on your website — not enough to tell what you sell and to whom.',
     whatIsSaved: 'The project and everything you entered are saved.',
     whatToDo:
       'Open step 1 «Your business», describe in 2–3 sentences what you sell and to whom, and press «Save and continue». The research then goes on from the step where it stopped and builds your business profile from your description and your website.',

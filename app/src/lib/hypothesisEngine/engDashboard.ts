@@ -22,8 +22,9 @@ import type { HeEngClientState, HeEngSendingAccessView } from './engCampaignStat
 // Только типы: модуль читают и экраны кабинета, а engAutoLaunch — серверный.
 import type { HeEngAutoLaunchCode, HeEngAutoLaunchState } from './engAutoLaunch';
 // Справочник клиентских текстов без зависимостей (тот же, что реэкспортирует
-// clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда.
-import { HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
+// clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда,
+// и код «research ждёт описания бизнеса» (лента событий ниже).
+import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE, HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
 // Порог списка Do not contact — фразе ленты о пропущенной ночи (шаг 3a- autoPipeline.ts).
 import { BLOCKLIST_MAX_ENTRIES } from '@/lib/clientBlocklist/blockedContacts';
 
@@ -890,7 +891,11 @@ function engDashAttentionOf(input: EngDashVerticalSlice): EngDashAttentionInfo |
 function attentionDetail(attention: EngDashAttentionInfo): string {
   switch (attention.reason) {
     case 'project_failed':
-      return attention.code === 'cancelled' ? 'research cancelled' : 'research stopped';
+      if (attention.code === 'cancelled') return 'research cancelled';
+      // Research ждёт описания бизнеса (website_thin): та же пауза до ответа
+      // клиента, что у тега «needs your input» и строки карточки, — не «stopped».
+      if (attention.code === HE_RESEARCH_NEEDS_DESCRIPTION_CODE) return 'research waiting for your description';
+      return 'research stopped';
     case 'base_stopped':
       return attention.code === 'cancelled' ? 'collection cancelled' : 'collection stopped';
     case 'base_empty':
@@ -1272,6 +1277,13 @@ export interface EngDashEvent {
      * нет в клиентском union, значит рисовать событие значком по умолчанию.
      */
     | 'refill_empty'
+    /**
+     * Research ждёт ответа клиента, а не упал: site_profile отказала кодом
+     * website_thin (сайт почти без текста, описания бизнеса нет) и продолжится
+     * той же джобой после «Save and continue» шага 1. Под 'failed' лента
+     * рисовала это красным «research failed» — словами и цветом сбоя.
+     */
+    | 'needs_input'
     | 'failed';
   text: string;
   /** ISO-время события (сортировка desc по нему). */
@@ -1303,6 +1315,10 @@ function withVertical(text: string, name: string): string {
  * События из уже выбранных сущностей (без доп. запросов): финишированные
  * джобы (по updated_at), запуски кампаний (launch_info.created_at) и
  * refill-прогоны (completed_at). Отсортированы desc, кап eventsLimit.
+ *
+ * У упавшей джобы роут может положить `error_code` — код причины
+ * (toClientEngStageErrorCode по he_jobs.error, сырой текст сюда не нужен):
+ * упавшая site_profile с кодом website_thin — не сбой, а 'needs_input'.
  */
 export function buildEngDashboardEvents(input: {
   jobs: Array<Record<string, unknown>>;
@@ -1335,6 +1351,10 @@ export function buildEngDashboardEvents(input: {
     const vname =
       nameOfVertical(asStr(payload.vertical_id)) || nameByBaseId(asStr(payload.base_id));
 
+    if (status === 'failed' && stage === 'site_profile' && job.error_code === HE_RESEARCH_NEEDS_DESCRIPTION_CODE) {
+      events.push({ type: 'needs_input', text: 'research is waiting for your business description', at });
+      continue;
+    }
     if (status === 'failed') {
       events.push({
         type: 'failed',

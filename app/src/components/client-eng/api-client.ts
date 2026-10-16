@@ -1547,6 +1547,7 @@ export interface EngDashboardEvent {
     | 'launch_unfinished'
     | 'refill_appended'
     | 'refill_empty'
+    | 'needs_input'
     | 'failed';
   text: string;
   at: string;
@@ -1566,6 +1567,11 @@ export interface EngDashboardResponse {
     id: string;
     name: string;
     status: string;
+    /**
+     * Research ждёт описания бизнеса (упал кодом website_thin) — пауза до
+     * ответа клиента на шаге 1, не сбой. Нет поля — ответ старше правки: false.
+     */
+    awaits_description?: boolean;
     /**
      * Пауза автопилота проекта; `null` — паузы нет либо колонки ещё нет в БД
      * (роут читает её отдельным best-effort запросом и при отказе молча
