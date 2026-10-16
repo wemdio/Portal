@@ -18,6 +18,7 @@
   --lg-fill: rgba(255, 255, 255, 0.52);
   --lg-fill-strong: rgba(255, 255, 255, 0.82);
   --lg-fill-control: rgba(255, 255, 255, 0.6);
+  --lg-solid: #ffffff;
   --lg-edge: rgba(255, 255, 255, 0.75);
   --lg-highlight: rgba(255, 255, 255, 0.9);
   --lg-lowlight: rgba(255, 255, 255, 0.25);
@@ -28,6 +29,7 @@ html[data-portal-theme='dark'] .sender-glass {
   --lg-fill: rgba(255, 255, 255, 0.06);
   --lg-fill-strong: rgba(28, 30, 38, 0.88);
   --lg-fill-control: rgba(255, 255, 255, 0.06);
+  --lg-solid: #1c1e26;
   --lg-edge: rgba(255, 255, 255, 0.12);
   --lg-highlight: rgba(255, 255, 255, 0.22);
   --lg-lowlight: rgba(255, 255, 255, 0.04);
@@ -57,8 +59,32 @@ html body .sender-glass [role='menu'] {
   background-color: var(--lg-fill-strong) !important;
 }
 
+/* Подсказка «Прогресс отправки» — без прозрачности и размытия: поверх строк
+   таблицы любая просвечивающая заливка даёт кашу из двух текстов. */
+html body .sender-glass .rounded-xl.border.shadow-xl[role='tooltip'] {
+  background-color: var(--lg-solid) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Подсветка строки таблицы кампаний — на ячейках, а не на самой строке:
+   у строки нет скругления, и на последней строке закрашенный прямоугольник
+   вылезал острым углом за скруглённый край панели. */
+html body .sender-glass section.rounded-xl.border > table > tbody > tr:hover {
+  background-color: transparent !important;
+}
+html body .sender-glass section.rounded-xl.border > table > tbody > tr:hover > td {
+  background-color: var(--glass-row-hover);
+}
+html body .sender-glass section.rounded-xl.border > table > tbody > tr:last-child > td:first-child {
+  border-bottom-left-radius: 0.75rem;
+}
+html body .sender-glass section.rounded-xl.border > table > tbody > tr:last-child > td:last-child {
+  border-bottom-right-radius: 0.75rem;
+}
+
 /* Вложенные белые подложки внутри стекла — прозрачные, чтобы блок был цельным. */
-html body .sender-glass .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button) {
+html body .sender-glass .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button):not([role='tooltip']) {
   background-color: transparent !important;
 }
 
