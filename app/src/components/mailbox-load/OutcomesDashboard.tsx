@@ -199,7 +199,7 @@ export default function OutcomesDashboard({ data, error }: { data: MailboxOutcom
               tone={bounced !== null && t.sent > 0 && bounced / t.sent > 0.05 ? 'bad' : null}
             />
             <Tile label="Ответы" value={nf(t.replies)} sub={`${share(t.replies, t.sent)} от писем, по людям`} />
-            <Tile label="Лиды" value={nf(t.leads)} sub={`${share(t.leads, t.replies)} от ответов · наша квалификация`} />
+            <Tile label="Лиды" value={nf(t.leads)} sub={`${share(t.leads, t.replies)} от ответов · переданы клиенту`} />
           </div>
 
           <div className="rounded-xl border border-zinc-200 bg-white p-4">
