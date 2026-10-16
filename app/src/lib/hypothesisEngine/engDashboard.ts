@@ -1548,7 +1548,7 @@ export function buildEngDashboardEvents(input: {
                 type: 'refill_empty',
                 text: withVertical(
                   `daily top-up skipped — your Do not contact list held more than ${BLOCKLIST_MAX_ENTRIES.toLocaleString('en-US')} ` +
-                    'addresses, so no one could be checked against it; remove addresses on the Do not contact page',
+                    'entries, so no one could be checked against it; remove entries on the Do not contact page',
                   vname,
                 ),
                 at,

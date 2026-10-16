@@ -4,9 +4,12 @@
  * Шаг 3 «Launch» клиентского ENG-кабинета — ОДНА кнопка и дальше прогресс.
  *
  * До нажатия: какие рынки запускаются («Change» — на шаг 2), часы отправки
- * (редактор SendingWindowEditor; пояс браузера, если он есть в списке
- * сервера, иначе дефолт сервера), что произойдёт дальше и строка про доступ к
- * отправке (GET /api/client/eng/projects/[id]/launch). «Launch» —
+ * (редактор SendingWindowEditor; пункты — `timezone_options ?? timezones`
+ * ответа, план §1C; стартовый пояс — сохранённый с «Launch», иначе
+ * `suggested_timezone` по странам сбора проекта, иначе пояс браузера среди
+ * прежних 8 `timezones`, иначе дефолт сервера), что произойдёт дальше и строка
+ * про доступ к отправке (GET /api/client/eng/projects/[id]/launch). Страны
+ * проекта без США и без подсказки пояса — строка «выберите пояс сами». «Launch» —
  * POST .../launch {schedule}: записывает желание «запускай сам» и ставит
  * работу тем же реконсилером, что прежняя кнопка автопилота (письма → сборка →
  * анализ → итоговые письма), а готовый рынок запускает автозапуск воркера тем
@@ -45,6 +48,7 @@ import {
   EngPaidAccessError,
   collectEngBase,
   engLaunchRunDays,
+  engCollectCountriesOf,
   engSendingAccessOf,
   engTemplateNeedsRewrite,
   fetchEngProjectLaunch,
@@ -98,14 +102,21 @@ import {
   FinalLetters,
   LaunchedSendingWindow,
   SendingWindowEditor,
+  engTimezoneFallbackLabel,
+  engTimezoneOptionsOf,
   isSendingWindowUsable,
   sendingWindowSummary,
+  tzOffsetMinutes,
   type FinalLettersState,
   type SendingWindowConfig,
 } from './EngStepReview';
 import { EngRefillPauseNote } from './EngStepVerticals';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner, engBaseAnalysisStopped, fmtDate } from './ui';
 import type { EngDetail } from './EngProjectWizard';
+import { ENG_COUNTRY_US } from '@/lib/hypothesisEngine/engCountries';
+
+/** Страны проекта в разных поясах, и сервер пояс не подсказал (план §1C). */
+const MULTI_ZONE_HINT = 'Your countries are in different time zones. Choose the time zone your emails should follow.';
 
 /**
  * Через сколько готовый рынок, который автозапуск ещё не взял, получает «Starting
@@ -132,31 +143,14 @@ const AUTO_RETRY_LAUNCH_NOW_CODES: ReadonlySet<string> = new Set(['server_error'
 
 /* ── Пояс браузера в списке сервера ── */
 
-/** Смещение пояса от UTC в минутах на момент `at`; null — пояс не читается. */
-function tzOffsetMinutes(timeZone: string, at: Date): number | null {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      hourCycle: 'h23',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).formatToParts(at);
-    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
-    const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'));
-    return Number.isFinite(asUtc) ? Math.round((asUtc - at.getTime()) / 60_000) : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Пояс браузера клиента — если он есть в списке сервера: тот же идентификатор
- * или пояс списка с теми же часами и зимой, и летом (America/New_York →
- * America/Detroit). Не нашёлся — null, и редактор открывается с дефолтом
- * сервера.
+ * Пояс браузера клиента — если он есть в списке: тот же идентификатор или пояс
+ * списка с теми же часами и зимой, и летом (America/New_York →
+ * America/Detroit). Список — только прежние 8 `timezones` ответа, НЕ полный
+ * `timezone_options` (план §1C): подбор по браузеру остаётся прежним, а
+ * европейские часы клиент выбирает сам или их подсказывают страны проекта
+ * (`suggested_timezone`). Не нашёлся — null, и редактор открывается с
+ * дефолтом сервера.
  */
 function browserTimezoneIn(options: readonly EngSendingWindowTimezoneOption[]): string | null {
   let own = '';
@@ -1799,19 +1793,47 @@ export function EngStepLaunch({
     };
   }, [projectId]);
 
+  // Прежние 8 — только для подбора по браузеру; в выпадашке — полный список, если он пришёл.
   const timezones = useMemo(() => (info && Array.isArray(info.timezones) ? info.timezones : []), [info]);
+  /**
+   * Пояс по странам проекта. Он НЕ за выключателем полного списка: сервер
+   * (launchSchedule, источник 'suggested') отправляет в нём, когда клиент пояс
+   * не выбрал, — значит, и редактор обязан открыться на нём. Пока полный
+   * список выключен, такого пояса среди пунктов нет: дописываем его в конец
+   * пунктом с понятной подписью (смещения из Intl, а не название из
+   * идентификатора: Arctic/Longyearbyen стоит здесь за Амстердам и Берлин).
+   */
+  const suggestedTz =
+    info && typeof info.suggested_timezone === 'string' && info.suggested_timezone ? info.suggested_timezone : null;
+  const timezoneOptions = useMemo(() => {
+    const list = info ? engTimezoneOptionsOf(info) : [];
+    if (!suggestedTz || list.length === 0 || list.some((o) => o.value === suggestedTz)) return list;
+    return [...list, { value: suggestedTz, label: engTimezoneFallbackLabel(suggestedTz, { suggested: true }) }];
+  }, [info, suggestedTz]);
   const weekdays = useMemo(() => (info && Array.isArray(info.weekdays) ? info.weekdays : []), [info]);
-  /** Часы, с которых открывается редактор: сохранённые с «Launch», иначе дефолт сервера в поясе браузера. */
+  /**
+   * Часы, с которых открывается редактор: сохранённые с «Launch»; иначе дефолт
+   * сервера в поясе по странам проекта (`suggested_timezone`), иначе в поясе
+   * браузера среди прежних 8, иначе как есть.
+   */
   const baseWindow = useMemo<EngSendingWindow | null>(() => {
     if (!info) return null;
     if (info.schedule) return { ...info.schedule, days: [...info.schedule.days] };
     if (!info.default) return null;
-    const browserTz = browserTimezoneIn(timezones);
-    return { ...info.default, days: [...info.default.days], ...(browserTz ? { timezone: browserTz } : {}) };
-  }, [info, timezones]);
+    const startTz = suggestedTz ?? browserTimezoneIn(timezones);
+    return { ...info.default, days: [...info.default.days], ...(startTz ? { timezone: startTz } : {}) };
+  }, [info, timezones, suggestedTz]);
   const windowValue = windowDraft ?? baseWindow;
   const windowConfig: SendingWindowConfig | null =
-    windowValue && timezones.length > 0 && weekdays.length > 0 ? { value: windowValue, timezones, weekdays } : null;
+    windowValue && timezoneOptions.length > 0 && weekdays.length > 0
+      ? { value: windowValue, timezones: timezoneOptions, weekdays }
+      : null;
+  // Страны сбора без США, и сервер общий пояс не подсказал — просим выбрать.
+  const projectCountries = engCollectCountriesOf(detail.project.brief).countries;
+  const tzHint =
+    info && projectCountries.length > 0 && !projectCountries.includes(ENG_COUNTRY_US) && !suggestedTz
+      ? MULTI_ZONE_HINT
+      : undefined;
   const windowUsable = isSendingWindowUsable(windowConfig);
 
   const auto = detail.auto_launch ?? null;
@@ -2023,12 +2045,21 @@ export function EngStepLaunch({
           </span>
         )}
       </div>
+      {/* Подсказка про пояса стран — и у свёрнутой сводки: иначе клиент с
+          европейским списком запустил бы рынок по часам Детройта, не открыв
+          редактор. В открытом редакторе она стоит под выпадашкой поясов. */}
+      {tzHint && windowConfig && !editingWindow && (
+        <span className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+          {tzHint}
+        </span>
+      )}
       {editingWindow && windowConfig && (
         <>
           <SendingWindowEditor
             config={windowConfig}
             onChange={setWindowDraft}
             disabled={launching || savingWindow}
+            hint={tzHint}
           />
           {mode === 'intent' && (
             <div className="mt-2 flex flex-wrap items-center gap-2">

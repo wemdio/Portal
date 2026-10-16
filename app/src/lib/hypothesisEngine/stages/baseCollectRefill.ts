@@ -242,6 +242,7 @@ import { InstantlyApiError, isInstantlyContactCapacityError } from '@/lib/instan
 import { probeLeadPresence } from '@/lib/instantly/leadPresenceProbe';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
+import { filterBlockedContacts, getBlockedContactSnapshot } from '@/lib/clientBlocklist/blockedDomains';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import {
   HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
@@ -913,6 +914,11 @@ export interface HeRefillStats {
   appended: number;
   /** Отрезано blocklist'ом владельца пресета. */
   skipped_blocklist: number;
+  /**
+   * Из skipped_blocklist — закрыто доменной записью Do not contact (домен
+   * адреса или сайта компании). Только market='us'; нет ключа — не 'us'.
+   */
+  skipped_blocklist_domain?: number;
   /** Отсеяно Instantly при загрузке (дубли кампании и пр.). */
   skipped_instantly: number;
   /**
@@ -2271,7 +2277,7 @@ async function refillFailStreak(
   }
 }
 
-interface RefillTemplatePick {
+export interface RefillTemplatePick {
   /** Основная кампания запуска (segment=null) — цель долива по умолчанию. */
   campaignId: string;
   presetId: string;
@@ -5450,9 +5456,35 @@ export async function runHeRefillAppend(args: {
 
     // 4. Blocklist владельца (сами считаем — число нужно в журнале;
     //    appendLeadsToClientCampaign продублирует фильтр внутри, это дёшево).
-    const blockedSet = await getBlockedEmailSet(supabaseInstantly, ownerUserId);
-    const { kept, blockedCount } = filterBlockedLeads(sendLeads, blockedSet);
-    runStats.skipped_blocklist = blockedCount;
+    //    us — снимок адресов И доменов компаний (план 2026-10-16-eng-countries,
+    //    §1B): доменная запись закрывает домен адреса, lead.website и сайт
+    //    строки базы лида — своей (колонки finalColumns) или базы-источника
+    //    перенесённой компании (её колонки); строку и колонки лида знает
+    //    leadSources. Сбой снимка бросает, как и прежнее чтение: ночь не шлёт.
+    //    Остальные рынки — прежние две строки.
+    let kept: typeof sendLeads;
+    if (args.market === 'us') {
+      const snapshot = await getBlockedContactSnapshot(supabaseInstantly, ownerUserId);
+      const websiteColumnOf = new Map<string[], string | null>();
+      const filtered = filterBlockedContacts(sendLeads, snapshot, (lead) => {
+        const source = leadSources.get(lead);
+        if (!source) return null;
+        let column = websiteColumnOf.get(source.columns);
+        if (column === undefined) {
+          column = findCompanyKeyColumns(source.columns).website;
+          websiteColumnOf.set(source.columns, column);
+        }
+        return column ? source.row[column] : null;
+      });
+      kept = filtered.kept;
+      runStats.skipped_blocklist = filtered.blockedCount;
+      runStats.skipped_blocklist_domain = filtered.blockedByDomain;
+    } else {
+      const blockedSet = await getBlockedEmailSet(supabaseInstantly, ownerUserId);
+      const filtered = filterBlockedLeads(sendLeads, blockedSet);
+      kept = filtered.kept;
+      runStats.skipped_blocklist = filtered.blockedCount;
+    }
     ownKept = kept;
     if (carryClaim && carryClaim.companies.length > 0) {
       carriedInKept = new Set();
@@ -5797,6 +5829,9 @@ export async function runHeRefillAppend(args: {
         // рядом, и разница «некуда грузить» против «адреса плохие» решает,
         // пересобирать базу или ждать места.
         pauseOnWorkspaceCapacity: true,
+        // us — фильтр внутри долива тоже по снимку с доменами (шаг 4 выше);
+        // остальные рынки — прежний фильтр адресов.
+        blocklistDomains: args.market === 'us',
         // Признак жизни на КАЖДОЙ попытке отправки чанка (хук зовётся после
         // допуска лимитера, прямо перед HTTP). Без него ночной долив был
         // невидим для сторожа простоя стадии: blocklist, кап и загрузка идут
@@ -6155,7 +6190,10 @@ export async function runHeRefillAppend(args: {
         `, лидов ${runStats.appended} ` +
         `(valid ${runStats.valid}, без вердикта ${runStats.unverified}, ` +
         (runStats.held_unfilled ? `письмо прочиталось бы неверно ${runStats.held_unfilled}, ` : '') +
-        `blocklist ${runStats.skipped_blocklist}, кап-отрез ${runStats.capped}` +
+        `blocklist ${runStats.skipped_blocklist}` +
+        // Из них доменными записями — только у us, где ключ есть: строка RU прежняя.
+        (runStats.skipped_blocklist_domain ? ` (из них по домену ${runStats.skipped_blocklist_domain})` : '') +
+        `, кап-отрез ${runStats.capped}` +
         // Причина отреза и сколько КОМПАНИЙ остались без письма — рядом с
         // числом строк: «отрезано 150» без них не отличает дневной кап от
         // повтора прогона и не говорит, сколько оплаченных компаний сгорело.

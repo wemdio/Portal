@@ -31,8 +31,13 @@ import { getCampaign, updateCampaign } from '@/lib/instantly/client';
 import type { InstantlyRequestOptions } from '@/lib/instantly/accounts';
 import type { CampaignSchedule } from '@/lib/instantly/types';
 import { buildCampaignSchedule } from '@/lib/clientLaunch/scheduleMapping';
-import { isInstantlyValidTimezone, normalizeInstantlyTimezone } from '@/lib/clientLaunch/timezones';
+import {
+  INSTANTLY_VALID_TIMEZONES,
+  isInstantlyValidTimezone,
+  normalizeInstantlyTimezone,
+} from '@/lib/clientLaunch/timezones';
 import type { ClientLaunchScheduleOverride } from '@/lib/clientLaunch/types';
+import { ENG_TIMEZONE_ECHO_ALIASES, ENG_TIMEZONE_TABLE } from './_launchTimezones';
 
 /** Пункт выпадашки кабинета: клиент видит подпись, наружу уезжает value. */
 export interface EngSendingWindowTimezoneOption {
@@ -46,10 +51,21 @@ export interface EngSendingWindowWeekdayOption {
   label: string;
 }
 
+/** Пункт полного списка поясов (`timezone_options`): плюс заголовок группы. */
+export interface EngSendingWindowTimezoneGroupedOption extends EngSendingWindowTimezoneOption {
+  group: string;
+}
+
 /**
  * Зоны, которые предлагаем английскому клиенту. Каждая обязана быть в белом
  * списке рассыльщика — `America/New_York` и `America/Los_Angeles` в нём НЕТ,
  * поэтому те же смещения берём разрешёнными идентификаторами.
+ *
+ * Белый список — 102 идентификатора (`INSTANTLY_VALID_TIMEZONES`); «~92» в
+ * шапке `lib/clientLaunch/timezones.ts` устарело (файл общий с RU-стеком,
+ * поэтому поправка записана здесь). Эти восемь — прежнее поле `timezones`
+ * (подписи байт в байт, от них же зависит предвыбор по поясу браузера в
+ * кабинете); все 102 с группами — `ENG_SENDING_WINDOW_TIMEZONE_OPTIONS` ниже.
  *
  * `America/Dawson` — единственный доступный «Pacific»: с 2020 года Юкон живёт
  * на постоянном UTC-7, то есть летом зона совпадает с Лос-Анджелесом, а зимой
@@ -87,6 +103,52 @@ export const ENG_SENDING_WINDOW_TIMEZONES: readonly EngSendingWindowTimezoneOpti
 export const ENG_SENDING_WINDOW_TIMEZONES_DROPPED: readonly string[] = Object.freeze(
   TIMEZONE_CANDIDATES.filter((o) => !isInstantlyValidTimezone(o.value)).map((o) => o.value),
 );
+
+/**
+ * Полный список поясов (поле `timezone_options`, выключатель
+ * HE_ENG_TIMEZONES_ALL): каждый идентификатор белого списка, в порядке и с
+ * подписями таблицы `_launchTimezones.ts`. Проверка ввода от списка не
+ * зависит — сервер и так принимает любой идентификатор белого списка.
+ *  - есть в белом списке, нет в таблице — в конец, группа 'Other', подпись —
+ *    сам идентификатор (`…_UNLABELED`): клиент пункт не теряет;
+ *  - есть в таблице, нет в белом списке — не предлагаем (`…_DROPPED`).
+ * Оба списка пусты в норме; непустые роут schedule пишет в лог раз на процесс.
+ */
+const TABLE_VALUES = new Set(ENG_TIMEZONE_TABLE.map((o) => o.value));
+
+export const ENG_SENDING_WINDOW_TIMEZONE_OPTIONS_UNLABELED: readonly string[] = Object.freeze(
+  INSTANTLY_VALID_TIMEZONES.filter((tz) => !TABLE_VALUES.has(tz)),
+);
+
+export const ENG_SENDING_WINDOW_TIMEZONE_OPTIONS_DROPPED: readonly string[] = Object.freeze(
+  ENG_TIMEZONE_TABLE.filter((o) => !isInstantlyValidTimezone(o.value)).map((o) => o.value),
+);
+
+export const ENG_SENDING_WINDOW_TIMEZONE_OPTIONS: readonly EngSendingWindowTimezoneGroupedOption[] =
+  Object.freeze([
+    ...ENG_TIMEZONE_TABLE.filter((o) => isInstantlyValidTimezone(o.value)).map((o) =>
+      Object.freeze({ value: o.value, label: o.label, group: o.group }),
+    ),
+    ...ENG_SENDING_WINDOW_TIMEZONE_OPTIONS_UNLABELED.map((tz) => Object.freeze({ value: tz, label: tz, group: 'Other' })),
+  ]);
+
+/** Свежие объекты для ответа роута: наружу — ровно три поля пункта. */
+export function engSendingWindowTimezoneOptions(): EngSendingWindowTimezoneGroupedOption[] {
+  return ENG_SENDING_WINDOW_TIMEZONE_OPTIONS.map((o) => ({ value: o.value, label: o.label, group: o.group }));
+}
+
+/**
+ * Пояс, каким его вернул рассыльщик, → идентификатор белого списка: свой —
+ * как есть; каноническое имя IANA нашей ссылки (America/Nuuk вместо
+ * America/Godthab) — по `ENG_TIMEZONE_ECHO_ALIASES`; иначе — общий
+ * `normalizeInstantlyTimezone` (старые идентификаторы пресетов). Только для
+ * показа окна, прочитанного у кампании.
+ */
+function engEchoedTimezone(raw: string): string {
+  if (isInstantlyValidTimezone(raw)) return raw;
+  if (Object.prototype.hasOwnProperty.call(ENG_TIMEZONE_ECHO_ALIASES, raw)) return ENG_TIMEZONE_ECHO_ALIASES[raw];
+  return normalizeInstantlyTimezone(raw);
+}
 
 /**
  * Дни недели с понедельника: американский клиент читает неделю так же, как
@@ -310,7 +372,9 @@ export async function loadEngSendingWindow(
  * — для экрана «вот ваше окно» это была бы выдумка): одно расписание, часы
  * ЧЧ:ММ, конец позже начала, хотя бы один день, пояс из белого списка. Что не
  * разобралось — `window: null`, «окно у кампании есть, но кабинет его показать
- * не может»; решает вызывающий роут.
+ * не может»; решает вызывающий роут. Пояс, возвращённый каноническим именем
+ * IANA вместо нашей ссылки, приводим к идентификатору белого списка
+ * (`engEchoedTimezone`) — это тот же пояс, а не подстановка.
  */
 export async function readEngCampaignSendingWindow(args: {
   campaignId: string;
@@ -334,7 +398,7 @@ export async function readEngCampaignSendingWindow(args: {
     if (dayMap[d]) days.push(d);
   }
   const parsed = parseEngSendingWindow({
-    timezone: typeof entry?.timezone === 'string' ? normalizeInstantlyTimezone(entry.timezone) : '',
+    timezone: typeof entry?.timezone === 'string' ? engEchoedTimezone(entry.timezone) : '',
     from: entry?.timing?.from,
     to: entry?.timing?.to,
     days,

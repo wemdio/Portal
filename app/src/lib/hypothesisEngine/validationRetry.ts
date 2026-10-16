@@ -353,6 +353,8 @@ export type HeRecoveryRefusalCode =
   | 'superseded'
   | 'constructor_empty'
   | 'all_rows_in_other_bases'
+  /** Строк не осталось, и главная причина — список Do not contact клиента (§1B). */
+  | 'all_rows_do_not_contact'
   | 'launched'
   | 'no_owner'
   | 'raced';
@@ -1081,6 +1083,19 @@ export async function importHeLateConstructForBase(
       refusal: refuse(
         'all_rows_in_other_bases',
         `Все ${prepared.gridRows} строк сетки — домены или адреса, которые уже лежат в других базах проекта`,
+      ),
+    };
+  }
+  // Тот же отказ, что выше, но главная причина — список Do not contact клиента
+  // (§1B плана docs/handoff/2026-10-16-eng-countries): снято по нему не меньше,
+  // чем по другим базам. Импортировать нечего, база остаётся как есть.
+  if (prepared.kind === 'all_do_not_contact') {
+    return {
+      kind: 'refused',
+      refusal: refuse(
+        'all_rows_do_not_contact',
+        `Все ${prepared.gridRows} строк сетки сняты: ${prepared.droppedDoNotContact} — домены в списке Do not contact ` +
+          'клиента, остальные уже лежат в других базах проекта',
       ),
     };
   }

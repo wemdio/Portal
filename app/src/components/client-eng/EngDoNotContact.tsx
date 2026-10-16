@@ -37,6 +37,17 @@
  * что у фильтров, плюс консервативная форма адреса); сайты, домены и шаблоны
  * роут не добавляет и называет.
  *
+ * ДОМЕНЫ КОМПАНИЙ (план §1B, выключатель HE_ENG_DNC_DOMAINS, `domains_enabled`
+ * ответа GET). Включён — у формы добавления два режима, «Email addresses» и
+ * «Company domains»: домены шлются тем же POST с `kind: 'domains'`, проверяет
+ * и нормализует их сервер (blockedDomains.ts — в бандл не едет: tldts и
+ * словари почтовых сервисов), экран печатает его итог. Домен блокирует
+ * компанию целиком: сборка её не берёт, запуск и долив не добавляют никого с
+ * адресом на этом домене или его поддоменах и никого с этим сайтом компании.
+ * Строка-домен в списке — `value` с меткой «Whole company». Снятие домена
+ * честно оговаривает: компании, которые сборка пропустила, пока он стоял,
+ * могут не вернуться в те же поиски (закладки каталога ушли дальше).
+ *
  * Список длиннее BLOCKLIST_MAX_ENTRIES (сбой отката, потерянный ответ
  * вставки) читатели не принимают вовсе: запуск отказывает, долив не добавляет
  * никого. Пока так, экран держит об этом постоянную строку с настоящими
@@ -49,10 +60,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { BLOCKLIST_MAX_ENTRIES } from '@/lib/clientBlocklist/blockedContacts';
 import {
   addEngBlockedAddresses,
+  addEngBlockedDomains,
+  engBlockedIsDomain,
+  engBlockedValue,
   fetchEngBlockedList,
   removeEngBlockedAddress,
   type EngBlockedAddResult,
   type EngBlockedAddress,
+  type EngBlockedDomainsResult,
   type EngBlockedListPage,
   type EngBlockedRejected,
   type EngDncAddRemoval,
@@ -75,6 +90,12 @@ const REMOVE_NO_ANSWER =
   "We did not get an answer from the server, so we can't tell whether the address was removed. " +
   'Refresh this page to check.';
 const EMPTY_PASTE = 'Paste at least one email address.';
+const EMPTY_DOMAINS_PASTE = 'Paste at least one company domain.';
+const ADD_DOMAINS_NO_ANSWER =
+  "We did not get an answer from the server, so we can't tell whether the domains were added. " +
+  'Check your list below.';
+/** Оговорка снятия домена (план §1B): закладки каталога ушли дальше пропущенных компаний. */
+const DOMAIN_REMOVAL_CAVEAT = 'Companies we skipped while it was listed may not be collected again.';
 
 function fmtCount(n: number): string {
   return n.toLocaleString('en-US');
@@ -82,6 +103,14 @@ function fmtCount(n: number): string {
 
 function addresses(n: number): string {
   return `${fmtCount(n)} ${n === 1 ? 'address' : 'addresses'}`;
+}
+
+function entries(n: number): string {
+  return `${fmtCount(n)} ${n === 1 ? 'entry' : 'entries'}`;
+}
+
+function domains(n: number): string {
+  return `${fmtCount(n)} ${n === 1 ? 'domain' : 'domains'}`;
 }
 
 function people(n: number): string {
@@ -261,8 +290,62 @@ function examplesText(r: EngBlockedRejected): string {
   return rest > 0 ? `${list} and ${fmtCount(rest)} more` : list;
 }
 
-/** Строки итога добавления; каждая верна для любого сочетания чисел. */
-function addResultLines(r: EngBlockedAddResult): string[] {
+/**
+ * Строки итога добавления доменов (план §1B, тексты дизайна); каждая верна для
+ * любого сочетания чисел. Строка про идущие кампании — всегда, когда домен
+ * теперь в списке: снятие с кампаний доменов не касается (engDncRemoval
+ * строки '@…' пропускает).
+ */
+function addDomainsResultLines(r: EngBlockedDomainsResult): string[] {
+  const lines: string[] = [];
+  if (r.added > 0) lines.push(`Added ${domains(r.added)} to your list.`);
+  if (r.already_listed > 0) {
+    lines.push(
+      r.already_listed === 1
+        ? '1 domain was already on your list.'
+        : `${fmtCount(r.already_listed)} domains were already on your list.`,
+    );
+  }
+  if (r.added === 0 && r.already_listed === 0) lines.push('Nothing was added.');
+  if (r.personal.count > 0) {
+    lines.push(
+      "Not added, because personal email providers can't be blocked as a whole: " +
+        `${examplesText(r.personal)}. Add the person's address instead.`,
+    );
+  }
+  if (r.not_company.count > 0) {
+    lines.push(
+      `Not added, because ${r.not_company.count === 1 ? 'this is not a company domain' : 'these are not company domains'}: ` +
+        `${examplesText(r.not_company)}.`,
+    );
+  }
+  if (r.invalid.count > 0) {
+    lines.push(
+      `Not added, because ${r.invalid.count === 1 ? 'this is not a domain' : 'these are not domains'}: ` +
+        `${examplesText(r.invalid)}.`,
+    );
+  }
+  if (r.subdomains.count > 0) {
+    lines.push(
+      `Added as you typed: ${examplesText(r.subdomains)}. This blocks only that part of the site. To block the whole ` +
+        'company, add the parent domain, for example acme.com for shop.acme.com.',
+    );
+  }
+  if (r.added + r.already_listed > 0) {
+    lines.push(
+      'People at these companies who are already in a running campaign stay in it. To stop their emails now, add ' +
+        'their addresses too, or press «Pause» on Outreach.',
+    );
+  }
+  return lines;
+}
+
+/**
+ * Строки итога добавления; каждая верна для любого сочетания чисел.
+ * `domainsEnabled` — у формы есть режим «Company domains»: строка про домены
+ * зовёт туда.
+ */
+function addResultLines(r: EngBlockedAddResult, domainsEnabled: boolean): string[] {
   const lines: string[] = [];
   if (r.added > 0) lines.push(`Added ${addresses(r.added)} to your list.`);
   if (r.already_listed > 0) {
@@ -278,8 +361,11 @@ function addResultLines(r: EngBlockedAddResult): string[] {
     // или шаблона (`@acme.com`, `*@acme.com`, `https://…`, `www.…`, путь) —
     // голое слово с точкой идёт в «not an email address» ниже.
     lines.push(
-      'Not added, because only exact email addresses can be added, not websites, whole domains or patterns: ' +
-        `${examplesText(r.domains)}.`,
+      domainsEnabled
+        ? `Not added here, because these look like websites or domains: ${examplesText(r.domains)}. To block a ` +
+            'whole company, add its domain under «Company domains».'
+        : 'Not added, because only exact email addresses can be added, not websites, whole domains or patterns: ' +
+            `${examplesText(r.domains)}.`,
     );
   }
   if (r.invalid.count > 0) {
@@ -323,7 +409,7 @@ function OutreachLink() {
  * «How it works» по режиму снятия. `mode` null — список ещё не прочитан или
  * не прочитался: только пункты, верные в обоих режимах.
  */
-function HowItWorks({ mode }: { mode: EngDncRemovalMode | null }) {
+function HowItWorks({ mode, domainsEnabled }: { mode: EngDncRemovalMode | null; domainsEnabled: boolean }) {
   const item = 'text-sm m-0';
   const color = { color: 'var(--cp-text-m)' };
   return (
@@ -338,9 +424,22 @@ function HowItWorks({ mode }: { mode: EngDncRemovalMode | null }) {
           list at that moment is left out. Someone you add while a launch or a top-up is already running may still
           be included in it.
         </li>
-        <li className={item} style={color}>
-          It matches exact email addresses only. A whole domain, such as company.com, can&apos;t be added.
-        </li>
+        {domainsEnabled ? (
+          <>
+            <li className={item} style={color}>
+              An email address blocks one person. A company domain blocks the whole company: we don&apos;t collect it
+              for your markets, and nobody with an address at that domain or its subdomains, or listed with that
+              company website, is added to your campaigns.
+            </li>
+            <li className={item} style={color}>
+              List every domain a company uses, for example waystone.com and waystone.ie.
+            </li>
+          </>
+        ) : (
+          <li className={item} style={color}>
+            It matches exact email addresses only. A whole domain, such as company.com, can&apos;t be added.
+          </li>
+        )}
         {mode === 'off' && (
           <>
             <li className={item} style={color}>
@@ -481,7 +580,7 @@ function OverLimitNotice({ total }: { total: number }) {
   return (
     <EngCard>
       <p className="text-sm m-0" style={{ color: 'var(--cp-red)' }}>
-        Your list holds {addresses(total)}, more than the {fmtCount(BLOCKLIST_MAX_ENTRIES)} it can hold. Until you
+        Your list holds {entries(total)}, more than the {fmtCount(BLOCKLIST_MAX_ENTRIES)} it can hold. Until you
         remove at least {fmtCount(total - BLOCKLIST_MAX_ENTRIES)}, no new contacts are added to your campaigns: a
         launch stops with an error before adding anyone, and the daily top-up adds no one.
       </p>
@@ -489,25 +588,73 @@ function OverLimitNotice({ total }: { total: number }) {
   );
 }
 
-function AddAddresses({ onAdded }: { onAdded: () => void }) {
+type AddMode = 'emails' | 'domains';
+
+/**
+ * Добавление домена: тот же исход, что у адресов, но свои тексты. Поле пустеет,
+ * когда отказов нормализации нет (поддомены добавлены — это не отказ).
+ */
+async function submitDomains(
+  text: string,
+  setNote: (note: Note) => void,
+  setText: (text: string) => void,
+  onAdded: () => void,
+): Promise<void> {
+  const outcome = await addEngBlockedDomains(text);
+  if (outcome.ok) {
+    const r = outcome.result;
+    setNote({ tone: r.added > 0 || r.already_listed > 0 ? 'ok' : 'error', lines: addDomainsResultLines(r) });
+    if (r.invalid.count === 0 && r.personal.count === 0 && r.not_company.count === 0) setText('');
+    if (r.added > 0) onAdded();
+  } else {
+    setNote({ tone: 'error', lines: [outcome.error ?? ADD_DOMAINS_NO_ANSWER] });
+    // Выключатель доменов погас — перечитанный список уберёт режим доменов.
+    if (outcome.reload || outcome.code === 'domains_unavailable') onAdded();
+  }
+}
+
+function AddAddresses({ onAdded, domainsEnabled }: { onAdded: () => void; domainsEnabled: boolean }) {
   const [text, setText] = useState('');
   const [adding, setAdding] = useState(false);
   const [note, setNote] = useState<Note | null>(null);
+  const [modeChoice, setModeChoice] = useState<AddMode>('emails');
+  // Выключатель доменов погас (перечитанный список) — режим доменов недоступен.
+  const mode: AddMode = domainsEnabled ? modeChoice : 'emails';
+
+  const switchMode = (next: AddMode) => {
+    if (next === mode || adding) return;
+    setModeChoice(next);
+    setNote(null);
+  };
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (adding) return;
     if (!text.trim()) {
-      setNote({ tone: 'error', lines: [EMPTY_PASTE] });
+      setNote({ tone: 'error', lines: [mode === 'domains' ? EMPTY_DOMAINS_PASTE : EMPTY_PASTE] });
       return;
     }
     setAdding(true);
     setNote(null);
+    if (mode === 'domains') {
+      try {
+        await submitDomains(text, setNote, setText, onAdded);
+      } catch (err) {
+        setNote({ tone: 'error', lines: [engDncErrorText(err, ADD_DOMAINS_NO_ANSWER)] });
+        onAdded();
+      } finally {
+        setAdding(false);
+      }
+      return;
+    }
     try {
       const outcome = await addEngBlockedAddresses(text);
       if (outcome.ok) {
         const r = outcome.result;
-        setNote({ tone: r.added > 0 || r.already_listed > 0 ? 'ok' : 'error', lines: addResultLines(r) });
+        setNote({
+          tone: r.added > 0 || r.already_listed > 0 ? 'ok' : 'error',
+          lines: addResultLines(r, domainsEnabled),
+        });
         // Всё принято — поле пустеет; что-то не добавлено — текст остаётся,
         // чтобы клиент поправил именно его. При 'not_scheduled' — тоже
         // остаётся: «добавьте ещё раз» — это та же кнопка с тем же текстом.
@@ -529,26 +676,53 @@ function AddAddresses({ onAdded }: { onAdded: () => void }) {
     }
   };
 
+  const domainMode = mode === 'domains';
   return (
     <EngCard>
-      <EngEyebrow>Add addresses</EngEyebrow>
+      <EngEyebrow>{domainsEnabled ? 'Add to your list' : 'Add addresses'}</EngEyebrow>
+      {domainsEnabled && (
+        <div role="group" aria-label="What to add" className="mb-3 flex flex-wrap gap-2">
+          {(
+            [
+              ['emails', 'Email addresses'],
+              ['domains', 'Company domains'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={mode === value}
+              onClick={() => switchMode(value)}
+              disabled={adding}
+              className={`${mode === value ? 'ds-btn-secondary' : 'ds-btn-ghost'} text-xs disabled:opacity-50`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       <form onSubmit={(e) => void onSubmit(e)} className="flex flex-col gap-2">
         <label className="flex flex-col gap-1">
           <span className="text-[11px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
-            Email addresses
+            {domainMode ? 'Company domains' : 'Email addresses'}
           </span>
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={5}
-            placeholder={'jane@company.com\njohn@company.com'}
+            placeholder={domainMode ? 'waystone.com\nfundbank.com' : 'jane@company.com\njohn@company.com'}
             className="ds-input w-full resize-y"
             spellCheck={false}
           />
         </label>
         <p className="text-[11px] m-0" style={{ color: 'var(--cp-text-l)' }}>
-          Paste one or more addresses: one per line, or separated by commas or spaces. Up to 1,000 at a time; the
-          list holds up to 10,000.
+          {domainMode
+            ? 'Paste company domains or website addresses, one per line or separated by commas. Each domain also ' +
+              'covers its subdomains, so waystone.com covers eu.waystone.com and anyone@waystone.com. If you paste ' +
+              "email addresses here, we use their domain. Personal email providers such as gmail.com or outlook.com " +
+              "can't be added. Up to 1,000 at a time; your list holds up to 10,000 entries."
+            : 'Paste one or more addresses: one per line, or separated by commas or spaces. Up to 1,000 at a time; ' +
+              'the list holds up to 10,000 entries.'}
         </p>
         <div>
           <button
@@ -557,7 +731,7 @@ function AddAddresses({ onAdded }: { onAdded: () => void }) {
             className="ds-btn-primary inline-flex items-center gap-1.5 text-xs disabled:opacity-50"
           >
             {adding && <EngSpinner />}
-            {adding ? 'Adding…' : 'Add to list'}
+            {adding ? 'Adding…' : domainMode ? 'Add domains' : 'Add to list'}
           </button>
         </div>
       </form>
@@ -595,12 +769,22 @@ function AddressRow({
     }
   };
 
+  const isDomain = engBlockedIsDomain(entry);
+  const value = engBlockedValue(entry);
   return (
     <li className="py-2.5 border-b last:border-b-0" style={{ borderColor: 'var(--cp-divider)' }}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <span className="ds-mono text-sm break-all" style={{ color: 'var(--cp-paper)' }}>
-          {entry.email}
+          {value}
         </span>
+        {isDomain && (
+          <span
+            className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+            style={{ border: '1px solid var(--cp-divider)', color: 'var(--cp-text-m)' }}
+          >
+            Whole company
+          </span>
+        )}
         <span className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
           Added {fmtDate(entry.created_at)}
         </span>
@@ -608,7 +792,9 @@ function AddressRow({
           {confirming ? (
             <>
               <span className="text-xs" style={{ color: 'var(--cp-text-m)' }}>
-                Remove from your list?
+                {isDomain
+                  ? `Remove ${value}? This company can be collected and contacted again. ${DOMAIN_REMOVAL_CAVEAT}`
+                  : 'Remove from your list?'}
               </span>
               <button
                 type="button"
@@ -750,17 +936,22 @@ export function EngDoNotContact() {
   };
 
   const onRemoved = (entry: EngBlockedAddress, removed: number) => {
+    const isDomain = engBlockedIsDomain(entry);
+    const value = engBlockedValue(entry);
     if (removed === 0) {
       // Строки уже нет (другая вкладка) — список перечитывается целиком.
-      setRemovedNote(`${entry.email} was already removed from your list.`);
+      setRemovedNote(`${value} was already removed from your list.`);
       reload();
       return;
     }
     setRemovedNote(
-      `Removed ${entry.email}. From now on, it can be included again when we add contacts to your campaigns.` +
-        (list?.in_campaign_removal === 'on'
-          ? ' If we already took this person out of a campaign, they are not put back into it.'
-          : ''),
+      isDomain
+        ? `Removed ${value}. From now on, this company can be included again when we collect companies and add ` +
+            `contacts. ${DOMAIN_REMOVAL_CAVEAT}`
+        : `Removed ${value}. From now on, it can be included again when we add contacts to your campaigns.` +
+            (list?.in_campaign_removal === 'on'
+              ? ' If we already took this person out of a campaign, they are not put back into it.'
+              : ''),
     );
     // Свежие сверху: удалённая строка стояла до следующей страницы, поэтому
     // её граница сдвигается на одну строку вверх.
@@ -770,6 +961,8 @@ export function EngDoNotContact() {
             ...prev,
             items: prev.items.filter((r) => r.id !== entry.id),
             total: Math.max(0, prev.total - 1),
+            domains_total:
+              isDomain && prev.domains_total !== null ? Math.max(0, prev.domains_total - 1) : prev.domains_total,
             matching: Math.max(0, prev.matching - 1),
             next_offset: prev.next_offset === null ? null : Math.max(0, prev.next_offset - 1),
           }
@@ -788,6 +981,10 @@ export function EngDoNotContact() {
     setLoading(true);
     setQuery(next);
   };
+
+  const domainsEnabled = list?.domains_enabled === true;
+  // Домены в списке есть или их можно добавить — тексты списка про «entries».
+  const hasDomains = domainsEnabled || (list?.domains_total ?? 0) > 0 || (list?.items ?? []).some(engBlockedIsDomain);
 
   let content: React.ReactNode;
   if (loading && !list) {
@@ -819,7 +1016,7 @@ export function EngDoNotContact() {
   } else if (list.matching === 0) {
     content = (
       <p className="text-sm m-0 break-words" style={{ color: 'var(--cp-paper-mute)' }}>
-        No address on your list contains “{query}”.
+        {hasDomains ? 'No entry' : 'No address'} on your list contains “{query}”.
       </p>
     );
   } else {
@@ -859,8 +1056,11 @@ export function EngDoNotContact() {
           Do not contact
         </h1>
         <p className="mt-1 text-sm m-0" style={{ color: 'var(--cp-paper-mute)' }}>
-          Your blocked-contacts list. We check it before we add new contacts to your campaigns and leave these
-          addresses out.
+          {domainsEnabled
+            ? 'Your do-not-contact list. Block single people by email address, or whole companies by domain. We check ' +
+              'it before we collect companies for your markets and before we add contacts to your campaigns.'
+            : 'Your blocked-contacts list. We check it before we add new contacts to your campaigns and leave these ' +
+              'addresses out.'}
         </p>
       </header>
 
@@ -878,16 +1078,21 @@ export function EngDoNotContact() {
         />
       )}
 
-      <HowItWorks mode={list ? list.in_campaign_removal : null} />
+      <HowItWorks mode={list ? list.in_campaign_removal : null} domainsEnabled={domainsEnabled} />
 
-      <AddAddresses onAdded={reload} />
+      <AddAddresses onAdded={reload} domainsEnabled={domainsEnabled} />
 
       <EngCard>
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <EngEyebrow>On your list</EngEyebrow>
           {list && list.total > 0 && (
             <span className="text-xs" style={{ color: 'var(--cp-paper-mute)' }}>
-              {addresses(list.total)}
+              {/* Счёт доменов не прочитан (null) — только общее число. */}
+              {hasDomains
+                ? list.domains_total === null
+                  ? entries(list.total)
+                  : `${entries(list.total)} · ${domains(list.domains_total)}`
+                : addresses(list.total)}
             </span>
           )}
           {loading && list && <EngSpinner />}
@@ -898,7 +1103,7 @@ export function EngDoNotContact() {
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search addresses"
+              placeholder={hasDomains ? 'Search addresses and domains' : 'Search addresses'}
               className="ds-input text-xs flex-1 min-w-[12rem]"
               spellCheck={false}
             />

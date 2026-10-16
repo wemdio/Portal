@@ -41,6 +41,7 @@ import { projectMarket, type HeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
 import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
 import { readHeIcpFrame } from '../icpFrame';
+import { HE_COLLECT_COUNTRIES_INVALID, engCountryLabel, readHeCollectCountries } from '../engCountries';
 import { getPortfolioProfile, type HePortfolioEntry } from '../datasetStats';
 import type { HeJob } from '../types';
 import {
@@ -391,6 +392,25 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
     );
   }
 
+  // Страны сбора проекта (brief.collect_countries) — замок сборки: компании вне
+  // списка не соберутся, и промпт обязан не предлагать рынки, которых в этих
+  // странах нет (план 2026-10-16-eng-countries, §1A). Только us и только
+  // непустой список — иначе вход промпта прежний байт в байт. Значения, которых
+  // справочник больше не знает, и заглушка испорченного ключа в промпт не идут:
+  // по ним не собирается ничего. Уже написанные гипотезы не переписываются —
+  // список действует на новые прогоны.
+  const collectCountries = market === 'us'
+    ? (() => {
+      const read = readHeCollectCountries(project.brief?.collect_countries);
+      return read.countries
+        .filter((c) => c !== HE_COLLECT_COUNTRIES_INVALID && !read.unavailable.includes(c))
+        .map(engCountryLabel);
+    })()
+    : [];
+  if (collectCountries.length) {
+    stageLog(ctx, `[hypotheses] страны сбора проекта в промпте: ${collectCountries.length}`);
+  }
+
   // Отклонённые человеком гипотезы проекта (us): запрет в промпте и фильтр ниже.
   const rejectedTitles = market === 'us' ? await readRejectedTitles(ctx, job.project_id) : [];
   if (rejectedTitles.length) {
@@ -417,6 +437,7 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
       ? { businessOverride: project.brief.business_override.trim() }
       : {}),
     ...(icpFrame ? { icpFrame } : {}),
+    ...(collectCountries.length ? { collectCountries } : {}),
     ...(rejectedTitles.length ? { rejectedTitles: rejectedTitles.slice(0, REJECTED_TITLES_PROMPT_LIMIT) } : {}),
   };
   const messages = (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput);

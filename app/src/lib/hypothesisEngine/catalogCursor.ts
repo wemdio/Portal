@@ -224,6 +224,13 @@ export function heCatalogSliceKey(task: HeCollectTask, widen = 0): string | null
  * ENG-вертикаль один раз покупает новый план и пробу среза (именно это и
  * означает «включить ремонт»); закладки срезов, чьи фильтры не изменились,
  * совпадут по ключу фильтров и сохранятся.
+ *
+ * СТРАНЫ ПРОЕКТА — ЧАСТЬ ВХОДА, БЕЗ ПОДЪЁМА РЕВИЗИИ. Список стран сбора
+ * (`brief.collect_countries`, замороженный в `collect_info.countries` базы)
+ * входит в `input` полем `countries` — и только когда он непуст: stableHash
+ * отбрасывает undefined, поэтому ключи RU и us без списка байт-в-байт прежние.
+ * Смена списка — смена входа: план перестраивается сам, ревизию не поднимаем
+ * (docs/handoff/2026-10-16-eng-countries/implementation-plan.md, §1A «Plan key»).
  */
 export const HE_SOURCE_PLAN_REVISION = 2;
 
@@ -298,6 +305,26 @@ export async function loadHeCatalogCursor(
  * у каждой ночи новая.
  */
 export const HE_WIDEN_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Памятка «для стран проекта источника нет» (§1A «Empty plan caused by the
+ * list»): пустой план `{tasks: [], countries_empty_at}` под тем же ключом входа.
+ * Миграции нет — это обычные plan/plan_key стора. Пока ключ совпадает и памятке
+ * меньше недели, стадия не платит за планировщик и починку повторно и
+ * останавливается той же причиной. Возвращает отметку (ISO) или null.
+ */
+export function heCountriesEmptyMemoAt(
+  row: HeCatalogCursorRow | null,
+  planKey: string,
+  nowMs: number,
+): string | null {
+  if (!row?.plan || row.planKey !== planKey) return null;
+  if (Array.isArray(row.plan.tasks) && row.plan.tasks.length > 0) return null;
+  const at = (row.plan as { countries_empty_at?: unknown }).countries_empty_at;
+  if (typeof at !== 'string' || !at) return null;
+  const ms = Date.parse(at);
+  return Number.isFinite(ms) && nowMs - ms >= 0 && nowMs - ms < HE_WIDEN_COOLDOWN_MS ? at : null;
+}
 
 /** Остывание ещё идёт: покупать расширение рано. */
 export function heWidenOnCooldown(row: HeCatalogCursorRow | null, nowMs: number): boolean {

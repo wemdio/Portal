@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
+import { logAudit, logWarn } from '@/lib/loggerServer';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { isValidUuid } from '@/lib/apiValidation';
@@ -22,10 +23,20 @@ import { readHeChainExhaustedVerticals } from '@/lib/hypothesisEngine/autopilotR
 import { projectMarket } from '@/lib/hypothesisEngine/market';
 import {
   OFFER_OVERRIDE_MAX_LENGTH,
+  heCollectCountriesBroadened,
   patchHeProjectBrief,
+  resumeHeDryVerticalsAfterCountriesBroadened,
   type HeBriefField,
   type HeBriefPatchBody,
+  type HeBriefPatchClientFields,
 } from '@/lib/hypothesisEngine/projectBriefPatch';
+import {
+  heCollectCountriesErrorText,
+  parseHeCollectCountries,
+  readHeCollectCountries,
+} from '@/lib/hypothesisEngine/engCountries';
+import { heEngCollectCountriesEnabled } from '@/lib/hypothesisEngine/engRolloutFlags';
+import { resumeHeVerticalNightlyRefill } from '@/lib/hypothesisEngine/autoPipeline';
 import {
   heIcpFrameInputErrorText,
   parseHeIcpFramePatch,
@@ -253,7 +264,11 @@ const SETTING_SAVE_FAILED = 'Failed to save the project setting';
  * PATCH-роутов только этот) и настройка проекта «до N адресов одной компании». Значения
  * приходят `unknown` — проверяют их нормализаторы, а не тип запроса.
  */
-type EngProjectPatchBody = HeBriefPatchBody & { max_emails_per_company?: unknown; icp?: unknown };
+type EngProjectPatchBody = HeBriefPatchBody & {
+  max_emails_per_company?: unknown;
+  icp?: unknown;
+  collect_countries?: unknown;
+};
 
 /**
  * Единственный текст отказа по значению настройки. Границы подставляются из
@@ -266,7 +281,8 @@ const CONTACT_CAP_RANGE =
   + ` to ${HE_MAX_EMAILS_PER_COMPANY_MAX}, or null to use the default`;
 
 const NO_FIELDS =
-  'Provide offer_override, style_override, signature_override, business_override, icp or max_emails_per_company';
+  'Provide offer_override, style_override, signature_override, business_override, icp, collect_countries'
+  + ' or max_emails_per_company';
 
 /**
  * Рамку ЦА читают только EN-промпты (рынок us): профиля сайта
@@ -277,6 +293,20 @@ const NO_FIELDS =
  * лишь запрос в обход формы.
  */
 const ICP_MARKET_ONLY_US = 'The target audience fields apply only to projects in the US market';
+
+/**
+ * Страны сбора (brief.collect_countries) соблюдает только сборка рынка us
+ * (план 2026-10-16-eng-countries, §1A): на проекте другого рынка список лёг бы
+ * в brief и не читался бы никогда.
+ */
+const COUNTRIES_MARKET_ONLY_US = 'Countries apply only to projects in the US market';
+
+/**
+ * Запись списка стран выключена (HE_ENG_COLLECT_COUNTRIES): пока хоть один
+ * контейнер работает на старой сборке, его воркер проигнорировал бы список
+ * молча. Машинный код — чтобы экран отличал «недоступно» от ошибки ввода.
+ */
+const COUNTRIES_UNAVAILABLE = 'Choosing countries is not available yet.';
 
 // GET — деталка СВОЕГО проекта (та же сборка, что у staff-роута, но со скоупом
 // владельца: чужой проект отвечает 404, существование не раскрываем) —
@@ -566,6 +596,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       icpPatch = parsed.patch;
     }
 
+    // Страны сбора — до БД и строго (parseHeCollectCountries): незнакомая или
+    // скрытая страна — 400, а не тихий пропуск. null и [] — снять список.
+    // Выключатель проверяется первым: при выключенном запись не принимается
+    // вовсе, каким бы ни было значение.
+    const countriesRequested = body?.collect_countries !== undefined;
+    let countries: string[] = [];
+    if (countriesRequested) {
+      if (!heEngCollectCountriesEnabled()) {
+        return NextResponse.json({ error: COUNTRIES_UNAVAILABLE, code: 'countries_unavailable' }, { status: 400 });
+      }
+      const parsed = parseHeCollectCountries(body.collect_countries);
+      if (!parsed.ok) return jsonError(heCollectCountriesErrorText(parsed), 400);
+      countries = parsed.countries;
+    }
+
     // Поля брифа мержит общий со staff `patchHeProjectBrief`, и он же отвечает
     // `no_fields` на пустое тело. Звать его на запрос ТОЛЬКО с настройкой
     // нельзя — вернул бы 400 на корректный запрос, поэтому наличие полей
@@ -574,7 +619,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       || body?.style_override !== undefined
       || body?.signature_override !== undefined
       || body?.business_override !== undefined
-      || icpRequested;
+      || icpRequested
+      || countriesRequested;
     if (!capRequested && !briefRequested) return jsonError(NO_FIELDS, 400);
 
     const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
@@ -583,6 +629,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // сохранённой.
     if (icpRequested && projectMarket(owned.project as { market?: string | null }) !== 'us') {
       return jsonError(ICP_MARKET_ONLY_US, 409);
+    }
+    if (countriesRequested && projectMarket(owned.project as { market?: string | null }) !== 'us') {
+      return jsonError(COUNTRIES_MARKET_ONLY_US, 409);
     }
 
     // Настройка пишется ПЕРВОЙ: ответ обеих ветвей собирается из строки,
@@ -634,11 +683,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // рынок проекта: 'us' — тот же отказ, RU — оффер любой длины, как до порта
     // ENG); проверка стоит в функции на прежнем месте, поэтому порядок отказов
     // кабинета прежний.
+    // Страны — тем же аргументом и той же записью; без них аргумент прежний
+    // (undefined, если нет и рамки).
+    const clientFields: HeBriefPatchClientFields | undefined = icpRequested || countriesRequested
+      ? {
+        ...(icpRequested ? { icp: icpPatch } : {}),
+        ...(countriesRequested ? { collect_countries: countries } : {}),
+      }
+      : undefined;
     const patch = await patchHeProjectBrief(
       supabaseAdmin,
       id,
       body,
-      icpRequested ? { icp: icpPatch } : undefined,
+      clientFields,
       { offerMaxLength: OFFER_OVERRIDE_MAX_LENGTH },
     );
     if (!patch.ok) {
@@ -658,6 +715,33 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             userId: result.auth.userId,
             projectId: id,
           });
+      }
+    }
+
+    if (countriesRequested) {
+      // «До» — сохранённое прочтение (fail-closed, как его видит сборка), «после» —
+      // ровно то, что записано.
+      const before = readHeCollectCountries(
+        ((owned.project as { brief?: Record<string, unknown> | null }).brief ?? null)?.collect_countries,
+      ).countries;
+      void logAudit('client.eng.project.collect_countries_changed', 'ENG cabinet collection countries changed', {
+        userId: result.auth.userId,
+        projectId: id,
+        before,
+        after: countries,
+      });
+      // Расширение — новые компании: «сухие» ночные доборы рынков проекта снова
+      // в деле (одна перепланировка на рынок). Best effort: запись уже прошла.
+      if (heCollectCountriesBroadened(before, countries)) {
+        const reset = await resumeHeDryVerticalsAfterCountriesBroadened(supabaseAdmin, id, resumeHeVerticalNightlyRefill);
+        if (reset.failed.length > 0) {
+          void logWarn('client.eng.project.collect_countries_dry_reset_failed', 'Dry refill reset after countries broadening failed', {
+            userId: result.auth.userId,
+            projectId: id,
+            resumed: reset.resumed,
+            failed: reset.failed,
+          });
+        }
       }
     }
 

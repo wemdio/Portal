@@ -4,7 +4,8 @@
  *
  * GET  — что предложить клиенту: окно, которое СЕЙЧАС стоит у кампаний
  *        запуска (или, до запуска, дефолт), список поясов и дней, которые
- *        рассыльщик принимает, и флаг «шаблон уже запущен». Работает и до
+ *        рассыльщик принимает (с HE_ENG_TIMEZONES_ALL — ещё `timezone_options`,
+ *        все пояса с группами), и флаг «шаблон уже запущен». Работает и до
  *        запуска: тем же ответом кабинет заполняет форму на шаге «Review &
  *        Launch». Кабинет печатает `schedule ?? default` как текущее окно
  *        (EngStepReview.tsx), поэтому у запущенного шаблона `schedule` обязан
@@ -43,13 +44,16 @@ import { resolveInstantlyAccountId, type InstantlyRequestOptions } from '@/lib/i
 import type { ClientLaunchScheduleOverride } from '@/lib/clientLaunch/types';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { logAudit, logError, logWarn } from '@/lib/loggerServer';
+import { heEngTimezonesAllEnabled } from '@/lib/hypothesisEngine/engRolloutFlags';
 import { engServerError } from '../../../_shared';
 import {
   ENG_SENDING_WINDOW_TIMEZONES,
   ENG_SENDING_WINDOW_TIMEZONES_DROPPED,
+  ENG_SENDING_WINDOW_TIMEZONE_OPTIONS_UNLABELED,
   ENG_SENDING_WINDOW_WEEKDAYS,
   applyEngSendingWindow,
   engDefaultSendingWindow,
+  engSendingWindowTimezoneOptions,
   loadEngSendingWindow,
   parseEngSendingWindow,
   readEngCampaignSendingWindow,
@@ -81,18 +85,33 @@ const WARNING_PARTIAL_NOT_RECORDED =
  */
 const SENDING_WINDOW_TABLE = 'he_launch_schedule';
 
-/** Один раз на процесс: опечатка в списке поясов молча отняла бы пункт. */
+/**
+ * Один раз на процесс: опечатка в списке поясов молча отняла бы пункт, а пояс
+ * белого списка без строки таблицы (`…_UNLABELED`) ушёл бы клиенту голым
+ * идентификатором в группе 'Other'.
+ */
 let droppedTimezonesLogged = false;
+let unlabeledTimezonesLogged = false;
 
 async function noteDroppedTimezones(userId: string): Promise<void> {
-  if (droppedTimezonesLogged || ENG_SENDING_WINDOW_TIMEZONES_DROPPED.length === 0) return;
-  droppedTimezonesLogged = true;
-  await logWarn(
-    'client.eng.template.schedule.timezone_dropped',
-    'ENG sending-window timezone option is not accepted by the sending service',
-    { dropped: [...ENG_SENDING_WINDOW_TIMEZONES_DROPPED] },
-    { userId },
-  );
+  if (!droppedTimezonesLogged && ENG_SENDING_WINDOW_TIMEZONES_DROPPED.length > 0) {
+    droppedTimezonesLogged = true;
+    await logWarn(
+      'client.eng.template.schedule.timezone_dropped',
+      'ENG sending-window timezone option is not accepted by the sending service',
+      { dropped: [...ENG_SENDING_WINDOW_TIMEZONES_DROPPED] },
+      { userId },
+    );
+  }
+  if (!unlabeledTimezonesLogged && ENG_SENDING_WINDOW_TIMEZONE_OPTIONS_UNLABELED.length > 0) {
+    unlabeledTimezonesLogged = true;
+    await logWarn(
+      'client.eng.template.schedule.timezone_unlabeled',
+      'ENG sending-window timezone has no label in the timezone table',
+      { unlabeled: [...ENG_SENDING_WINDOW_TIMEZONE_OPTIONS_UNLABELED] },
+      { userId },
+    );
+  }
 }
 
 /**
@@ -284,6 +303,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     ...(mixed ? { mixed: true } : {}),
     default: toClientEngSendingWindow(engDefaultSendingWindow()),
     timezones: ENG_SENDING_WINDOW_TIMEZONES.map((o) => ({ value: o.value, label: o.label })),
+    // Полный список поясов — только под выключателем HE_ENG_TIMEZONES_ALL (как в GET запуска проекта).
+    ...(heEngTimezonesAllEnabled() ? { timezone_options: engSendingWindowTimezoneOptions() } : {}),
     weekdays: ENG_SENDING_WINDOW_WEEKDAYS.map((o) => ({ value: o.value, label: o.label })),
     launched: launch !== null,
   });

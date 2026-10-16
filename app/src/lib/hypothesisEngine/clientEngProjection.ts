@@ -85,6 +85,9 @@ import {
 import { heBrandInputLeaks, heLetterBrandGuard, heTemplateBrandLeaks, type HeBrandProject } from './letterBrandGuard';
 // Рамка ЦА клиента (brief.icp): нужной формы или null, что бы ни лежало в jsonb.
 import { readHeIcpFrame } from './icpFrame';
+// Страны сбора (brief.collect_countries): прочтение fail-closed, как у сборки.
+import { HE_COLLECT_COUNTRIES_INVALID, readHeCollectCountries } from './engCountries';
+import { heEngCollectCountriesEnabled } from './engRolloutFlags';
 import { projectMarket, type HeMarket } from './market';
 import type { HeChainLetter, HeOperatorMapping } from './types';
 
@@ -517,6 +520,10 @@ const COLLECT_STATS_FIELDS = [
   'tasks_failed',
   'rows_total',
   'low_relevance',
+  // Компании, отсеянные списком Do not contact клиента (план
+  // 2026-10-16-eng-countries, §1B): клиент сам их туда внёс, и число объясняет
+  // ему, почему база меньше ожидаемого.
+  'excluded_do_not_contact',
 ] as const;
 
 // `note` СКВОЗЬ НЕ ПРОХОДИТ (как и tasks[].source) — переводится подписью,
@@ -1283,6 +1290,10 @@ export function toClientEngProjectRow(project: Row): Row {
    * поэтому паузу не рисует, а мастер рисует.
    */
   if ('autopilot_error' in project) out.autopilot_hold = toClientEngAutopilotHold(project);
+  // Запись списка стран открыта (HE_ENG_COLLECT_COUNTRIES): экран рисует
+  // карточку «Countries» только при true. Сохранённый список сборка соблюдает
+  // и при false.
+  out.collect_countries_enabled = heEngCollectCountriesEnabled();
   if ('brief' in project) {
     const brief = asRow(project.brief);
     if (brief) {
@@ -1305,6 +1316,16 @@ export function toClientEngProjectRow(project: Row): Row {
       // jsonb отдаёт что угодно, экран шага Brief ждёт рамку нужной формы
       // (readHeIcpFrame: лимиты и чистка те же, что у записи) или null.
       clientBrief.icp = readHeIcpFrame(brief.icp);
+      // Страны сбора — тем же прочтением, что у сборки (readHeCollectCountries,
+      // fail-closed): что лежит, то и соблюдается. Значения, которых справочник
+      // больше не знает, — отдельным списком: экран говорит, что по ним ничего
+      // не собирается. Испорченный ключ (заглушка '__invalid__') наружу не
+      // уходит — клиенту его показать нечем, сборка по нему не собирает ничего.
+      const countries = readHeCollectCountries(brief.collect_countries);
+      clientBrief.collect_countries = countries.countries.filter(
+        (c) => c !== HE_COLLECT_COUNTRIES_INVALID && !countries.unavailable.includes(c),
+      );
+      clientBrief.collect_countries_unavailable = countries.unavailable;
       out.brief = clientBrief;
     } else {
       out.brief = project.brief;

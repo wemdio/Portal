@@ -34,11 +34,15 @@ import {
   writeHeEngLaunchIntent,
 } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { HE_ENG_MARKETS_MAX_PER_SAVE, heEngMarketPending } from '@/lib/hypothesisEngine/engMarkets';
+import { heEngTimezonesAllEnabled } from '@/lib/hypothesisEngine/engRolloutFlags';
+import { suggestEngTimezoneForCountries } from '@/lib/hypothesisEngine/engCountryTimezone';
+import { readHeCollectCountries } from '@/lib/hypothesisEngine/engCountries';
 import { engServerError } from '../../../_shared';
 import {
   ENG_SENDING_WINDOW_TIMEZONES,
   ENG_SENDING_WINDOW_WEEKDAYS,
   engDefaultSendingWindow,
+  engSendingWindowTimezoneOptions,
   parseEngSendingWindow,
   toClientEngSendingWindow,
 } from '../../../_launchWindow';
@@ -131,10 +135,12 @@ const FAILURE_EVENT: Record<string, string> = {
 // GET — что знает шаг 3 до и после «Launch»: включён ли автозапуск (намерение
 // проекта), окно отправки будущих запусков, список зон и дней, дефолт и
 // состояние выключателя отправки аккаунта (без записи и алерта). Поллится
-// мастером — без withToolTrace. Миграции 20261012_0001 нет или выключатель
-// HE_ENG_AUTO_LAUNCH выключен (тик воркера ничего не берёт) — available:false
-// (кабинет тогда показывает «Launch now» у каждого готового рынка и не обещает
-// старт «сам» и письмо о нём).
+// мастером — без withToolTrace. С HE_ENG_TIMEZONES_ALL — ещё timezone_options
+// (все пояса рассыльщика с группами); suggested_timezone — пояс по списку
+// стран проекта, если он однозначен (иначе ключа нет). Миграции 20261012_0001
+// нет или выключатель HE_ENG_AUTO_LAUNCH выключен (тик воркера ничего не
+// берёт) — available:false (кабинет тогда показывает «Launch now» у каждого
+// готового рынка и не обещает старт «сам» и письмо о нём).
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
@@ -161,6 +167,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     });
   }
   const intent = intentRead.kind === 'ok' ? intentRead.intent : null;
+  // Пояс по списку стран проекта — тот же, что сервер берёт источником
+  // 'suggested' (launchSchedule), поэтому без выключателя. Сторожевое значение
+  // непрочитанного списка в карте стран не найдётся — подсказки не будет.
+  const brief = (owned.project as { brief?: unknown }).brief;
+  const briefCountries =
+    brief && typeof brief === 'object' ? (brief as { collect_countries?: unknown }).collect_countries : undefined;
+  const suggestedTimezone = suggestEngTimezoneForCountries(readHeCollectCountries(briefCountries).countries);
   return NextResponse.json({
     available: intentRead.kind === 'ok' && heEngAutoLaunchEnabled(),
     requested: intent?.wanted === true,
@@ -169,6 +182,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     schedule: intent ? toClientEngSendingWindow(heEngIntentSendingWindow(intent)) : null,
     default: toClientEngSendingWindow(engDefaultSendingWindow()),
     timezones: ENG_SENDING_WINDOW_TIMEZONES.map((o) => ({ value: o.value, label: o.label })),
+    // Полный список поясов — только под выключателем HE_ENG_TIMEZONES_ALL:
+    // старый кабинет поле не знает и рисует `timezones`, новый — `timezone_options ?? timezones`.
+    ...(heEngTimezonesAllEnabled() ? { timezone_options: engSendingWindowTimezoneOptions() } : {}),
+    ...(suggestedTimezone ? { suggested_timezone: suggestedTimezone } : {}),
     weekdays: ENG_SENDING_WINDOW_WEEKDAYS.map((o) => ({ value: o.value, label: o.label })),
     sending_access: sendingAccessWord(access.state),
   });

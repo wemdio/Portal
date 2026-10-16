@@ -83,6 +83,7 @@ import {
 } from './engPaidAccess';
 import { enforceHeSpendCeiling } from './spendCeiling';
 import { resolveHeLaunchSendingWindow } from './launchSchedule';
+import { readHeCollectCountries } from './engCountries';
 import {
   heLaunchOutcomeCode,
   heLaunchConflictOf,
@@ -596,11 +597,27 @@ async function heEngLaunchWindowPlan(
     if (typeof campaignId !== 'string' || campaignId.length === 0) {
       return { kind: 'first', window: args.requested };
     }
+    const market = projectMarket(args.project as { market?: string | null });
+    const projectId = typeof args.project.id === 'string' && args.project.id ? args.project.id : null;
+    // Страны проекта — подсказанному поясу (§1C плана 2026-10-16-eng-countries).
+    // Скоуп владельца (loadOwnedProject) брифа не читает — дочитываем его у
+    // us-проекта; сбой чтения — тот же отказ, что у окна рынка.
+    let brief: unknown = args.project.brief;
+    if (brief === undefined && market === 'us' && projectId) {
+      const briefRead = await portalDb.from('he_projects').select('brief').eq('id', projectId).maybeSingle();
+      if (briefRead.error) {
+        return { kind: 'unavailable', reason: `project countries not read: ${briefRead.error.message}` };
+      }
+      brief = (briefRead.data as { brief?: unknown } | null)?.brief ?? null;
+    }
     const plan = await resolveHeLaunchSendingWindow({
       db: portalDb,
-      market: projectMarket(args.project as { market?: string | null }),
+      market,
       templateId: args.templateId,
       clientUserId: args.userId,
+      projectId,
+      projectCountries: readHeCollectCountries((brief as { collect_countries?: unknown } | null | undefined)?.collect_countries)
+        .countries,
       explicit: null,
     });
     if (plan.readError) {

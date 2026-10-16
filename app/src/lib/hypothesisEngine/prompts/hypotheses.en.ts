@@ -72,7 +72,36 @@ import type { HypothesesPromptInput } from './hypotheses';
 export type HypothesesPromptInputEn = HypothesesPromptInput & {
   icpFrame?: HeIcpFrame | null;
   rejectedTitles?: string[];
+  /**
+   * Страны сбора проекта (brief.collect_countries) — английскими подписями
+   * (engCountryLabel). Стадия передаёт их только на рынке us и только при
+   * непустом списке (план 2026-10-16-eng-countries, §1A «Prompts»).
+   */
+  collectCountries?: string[];
 };
+
+/**
+ * Блок стран сбора и его пункт самопроверки; обе строки пустые, если списка
+ * нет, — тогда промпт байт-в-байт прежний. Список — не подсказка, как рамка ЦА,
+ * а жёсткий замок сборки (sourcePlanCountryGate.ts): компании вне его не
+ * соберутся, и гипотеза о рынке, который существует только вне списка, станет
+ * базой без строк. Поэтому блок прямо отменяет два места SYSTEM, которые тянут
+ * за пределы списка: чек-лист макросекторов США и ход «US → EU/LatAm».
+ * SYSTEM не меняется. Подписи — наши, не ввод клиента: справочник engCountries.
+ */
+function collectCountriesParts(countries: string[] | undefined): { block: string; selfCheck: string } {
+  const list = (countries ?? []).map((c) => c.trim()).filter(Boolean);
+  if (!list.length) return { block: '', selfCheck: '' };
+  return {
+    block: `TARGET COUNTRIES (set by the client; a hard limit — companies are collected ONLY in these countries, anything outside them is never collected):
+${list.join('; ')}
+How to apply it:
+- Every hypothesis must be a segment that exists in these countries. Do not propose a segment that exists only outside them.
+- This overrides the system prompt where they conflict: walk the macro-sector checklist for these countries instead of the US, and keep any geographic-transfer move inside this list.
+- Do not name a country outside this list in a description as a selection condition.`,
+    selfCheck: ' Does every candidate exist in the target countries, with no geography outside them?',
+  };
+}
 
 /**
  * Блок отклонённых рынков и его пункт самопроверки; обе строки пустые, если
@@ -239,6 +268,7 @@ How to read: potential_pct is the vertical's potential, NOT a reply% forecast. B
   const frame = icpFrameParts(input.icpFrame);
   const frameBlock = frame.block;
   const rejected = rejectedParts(input.rejectedTitles);
+  const countries = collectCountriesParts(input.collectCountries);
 
   const user = `CLIENT PROFILE (website ${input.websiteUrl}):
 ${JSON.stringify(input.profile, null, 2)}
@@ -254,7 +284,7 @@ ${potential.length ? potential.map((e) => `- ${e.name} (${e.potential_pct}%): ${
 
 BRAND CLOUD — "noise" (typical clients, background):
 ${noise.length ? noise.map((e) => `- ${e.name}`).join('\n') : '(empty)'}
-${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}${frameBlock ? `\n${frameBlock}\n` : ''}${rejected.block ? `\n${rejected.block}\n` : ''}
+${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}${frameBlock ? `\n${frameBlock}\n` : ''}${countries.block ? `\n${countries.block}\n` : ''}${rejected.block ? `\n${rejected.block}\n` : ''}
 TASK: produce 25–40 market hypotheses following the system prompt rules${frameBlock ? " and the client's targeting frame above" : ''}.
 
 FORMAT — JSON ONLY:
@@ -274,7 +304,7 @@ FORMAT — JSON ONLY:
 
 LENGTH DISCIPLINE (critical): the per-field limits above are hard — write tightly and to the point, no filler or retelling. If you see you won't fit the limit — shorten the wording instead of cutting it off mid-word. The answer must be one fully closed valid JSON: 25 whole candidates are better than 40 with a truncated JSON.
 
-Check yourself before answering: 25–40 candidates? tier 2 ≥ 8? tier 3 ≥ 8? Macro-sector checklist walked — every relevant sector covered by at least one hypothesis? No macro-sector holds more than ~25% of candidates? Does each candidate's tier reflect obviousness of the connection, not potential_pct? Do candidates with an incompatible sales motion carry "RISK: …" in the rationale? Does every candidate's fit_rationale contain all four chain links (decision-maker → goal → pain → offer) plus the fifth link — why the economics work — and not repeat the description? Do segments with unrecoverable economics have their pct cut and a "RISK: economics …" note? Does every tier-3 without a portfolio match have another evidentiary path to effectiveness? Does every description open with WHO THEY ARE and keep the pain in a separate sentence after it? Are all titles unique? Not a single URL in the answer?${frame.selfCheck}${rejected.selfCheck}`;
+Check yourself before answering: 25–40 candidates? tier 2 ≥ 8? tier 3 ≥ 8? Macro-sector checklist walked — every relevant sector covered by at least one hypothesis? No macro-sector holds more than ~25% of candidates? Does each candidate's tier reflect obviousness of the connection, not potential_pct? Do candidates with an incompatible sales motion carry "RISK: …" in the rationale? Does every candidate's fit_rationale contain all four chain links (decision-maker → goal → pain → offer) plus the fifth link — why the economics work — and not repeat the description? Do segments with unrecoverable economics have their pct cut and a "RISK: economics …" note? Does every tier-3 without a portfolio match have another evidentiary path to effectiveness? Does every description open with WHO THEY ARE and keep the pain in a separate sentence after it? Are all titles unique? Not a single URL in the answer?${frame.selfCheck}${countries.selfCheck}${rejected.selfCheck}`;
 
   return [
     { role: 'system', content: SYSTEM },
