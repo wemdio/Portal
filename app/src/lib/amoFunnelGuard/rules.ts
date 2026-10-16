@@ -6,9 +6,9 @@
  *
  * Правила (просьба Дмитрия, 16.10.2026):
  *  1. Вперёд — строго на соседний этап основной цепочки.
- *  2. «Новый лид» и «Взят в работу» → только «Лид квалифицирован» или
- *     «Закрыто и не реализовано» (плюс «Новый лид» → «Взят в работу»:
- *     иначе второй этап недостижим).
+ *  2. «Новый лид» → только «Взят в работу» или «Закрыто и не реализовано»;
+ *     «Взят в работу» → только «Лид квалифицирован» или «Закрыто и не
+ *     реализовано» (уточнение Дмитрия, 16.10.2026).
  *  3. «Закрыто и не реализовано» — с любого этапа.
  *
  * Допущения, которых в просьбе не было (одна строка в таблице ниже, если не так):
@@ -105,11 +105,11 @@ export function checkTransition(input: {
 
   const early = from === STAGE.NEW || from === STAGE.TAKEN;
   if (early) {
-    const ok = to === STAGE.QUALIFIED || (from === STAGE.NEW && to === STAGE.TAKEN);
-    if (ok) return { allowed: true };
+    const next = from === STAGE.NEW ? STAGE.TAKEN : STAGE.QUALIFIED;
+    if (to === next) return { allowed: true };
     return {
       allowed: false,
-      reason: `Из «${stageName(from)}» сделку можно перенести только в «${stageName(STAGE.QUALIFIED)}» или «${stageName(STAGE.LOST)}».`,
+      reason: `Из «${stageName(from)}» сделку можно перенести только в «${stageName(next)}» или «${stageName(STAGE.LOST)}».`,
     };
   }
 
