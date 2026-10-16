@@ -87,6 +87,8 @@ export function checkTransition(input: {
   oldPipelineId: number | null;
   fromStatusId: number;
   toStatusId: number;
+  /** Этап, на котором сделка стояла до «Переноса»; нужен только при выходе из него. */
+  parkedFromStatusId?: number | null;
 }): TransitionVerdict {
   const { pipelineId, oldPipelineId, fromStatusId: from, toStatusId: to } = input;
 
@@ -123,14 +125,30 @@ export function checkTransition(input: {
     };
   }
 
-  // Боковой этап — в него можно с «Лид квалифицирован» и дальше (ранние этапы выше).
-  if (SIDE_STAGES.has(to)) return { allowed: true };
+  // «Не вышел на звонок» — только после «Встреча назначена»; «Перенос» (парковка)
+  // — с «Лид квалифицирован» и дальше (ранние этапы отсечены выше).
+  if (to === STAGE.NO_SHOW) {
+    if (from === STAGE.MEETING_SCHEDULED) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `В «${stageName(STAGE.NO_SHOW)}» сделку можно перенести только из «${stageName(STAGE.MEETING_SCHEDULED)}».`,
+    };
+  }
+  if (to === STAGE.PARKING) return { allowed: true };
 
   const fromIdx = CHAIN.indexOf(SIDE_STAGES.has(from) ? SIDE_ANCHOR[from] : from);
   const toIdx = CHAIN.indexOf(to);
 
-  // Из «Переноса» возвращаются на любой этап: где сделка стояла до него, мы не знаем.
-  if (from === STAGE.PARKING) return { allowed: true };
+  // Из «Переноса» — туда, откуда сделку туда положили, или на соседний с ним
+  // этап. Если прежний этап неизвестен, не ограничиваем.
+  if (from === STAGE.PARKING) {
+    const parked = input.parkedFromStatusId != null ? CHAIN.indexOf(input.parkedFromStatusId) : -1;
+    if (parked < 0 || (toIdx >= parked - 1 && toIdx <= parked + 1)) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `Из «${stageName(STAGE.PARKING)}» сделку можно вернуть на «${stageName(CHAIN[parked])}» или на соседний этап.`,
+    };
+  }
 
   // Назад — тоже только на один этап (просьба продаж, 16.10.2026): иначе
   // сделку, случайно уехавшую далеко вперёд, можно вернуть на «Лид

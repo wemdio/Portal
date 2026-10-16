@@ -1,6 +1,6 @@
 import { createAmoClient } from '@/lib/crm/amoClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { checkTransition, STAGE_NAMES, type StatusChange } from './rules';
+import { checkTransition, STAGE, STAGE_NAMES, type StatusChange } from './rules';
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -31,6 +31,35 @@ async function amoRequest<T>(
   return (await res.json()) as T;
 }
 
+/** Этап, с которого сделку в последний раз положили в «Перенос» (по журналу AMO). */
+async function statusBeforeParking(leadId: number): Promise<number | null> {
+  const env = amoEnv();
+  if (!env) return null;
+  try {
+    const data = await amoRequest<{
+      _embedded?: {
+        events?: Array<{
+          created_at?: number;
+          value_before?: Array<{ lead_status?: { id?: number } }>;
+          value_after?: Array<{ lead_status?: { id?: number } }>;
+        }>;
+      };
+    }>(
+      env,
+      'GET',
+      `/api/v4/events?filter[entity][]=lead&filter[entity_id][]=${leadId}`
+        + '&filter[type][]=lead_status_changed&limit=100',
+    );
+    const parked = (data._embedded?.events ?? [])
+      .filter((e) => e.value_after?.[0]?.lead_status?.id === STAGE.PARKING)
+      .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+    return parked?.value_before?.[0]?.lead_status?.id ?? null;
+  } catch (err) {
+    console.warn('[amo-funnel-guard] parking origin unknown', leadId, err);
+    return null;
+  }
+}
+
 /** Этот переход — откат, который сделали мы сами (запись о нём лежит рядом по времени). */
 async function isOwnRevert(change: StatusChange): Promise<boolean> {
   if (!supabaseAdmin) return false;
@@ -58,12 +87,18 @@ export type GuardResult = 'ok' | 'reverted' | 'stale' | 'no-credentials';
  * разрешено, поэтому повторный вебхук от самого отката цикла не даёт.
  */
 export async function enforceTransition(change: StatusChange): Promise<GuardResult> {
-  const verdict = checkTransition({
+  const input = {
     pipelineId: change.pipelineId,
     oldPipelineId: change.oldPipelineId,
     fromStatusId: change.oldStatusId,
     toStatusId: change.statusId,
-  });
+  };
+  let verdict = checkTransition(input);
+  if (verdict.allowed && change.oldStatusId === STAGE.PARKING) {
+    // Выход из «Переноса»: правило зависит от того, где сделка стояла до него.
+    const parkedFrom = await statusBeforeParking(change.leadId);
+    verdict = checkTransition({ ...input, parkedFromStatusId: parkedFrom });
+  }
   if (verdict.allowed) return 'ok';
 
   // Наш собственный откат пришёл новым вебхуком — повторно его не трогаем,
