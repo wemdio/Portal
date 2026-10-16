@@ -128,3 +128,25 @@ html body .sender-glass .relative > svg.absolute,
 html body .sender-glass .relative > button.absolute {
   z-index: 1;
 }
+
+/* ─── Тёмная тема: меньше серого ───
+   Поля — не светлые «капли», а утопленные тёмные: на тёмном стекле светлая
+   заливка давала сплошной серый. Блоки внутри блоков (часы, дни в форме
+   кампании) — без своего стекла: стекло в стекле накапливало серость. */
+html[data-portal-theme='dark'] body .sender-glass input:not([type='checkbox']):not([type='radio']),
+html[data-portal-theme='dark'] body .sender-glass textarea,
+html[data-portal-theme='dark'] body .sender-glass select {
+  background-color: rgba(0, 0, 0, 0.22) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+html body .sender-glass .rounded-xl.border .rounded-xl.border:not(.shadow-lg):not(.shadow-xl),
+html body .sender-glass .rounded-2xl.border .rounded-xl.border:not(.shadow-lg):not(.shadow-xl) {
+  background-color: transparent !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: none;
+}

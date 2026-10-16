@@ -704,7 +704,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     <div className="mx-auto max-w-[1600px]">
       {/* Шапка не уезжает при прокрутке: что мешает сохранить и сама кнопка
           нужны из любого места длинной формы. */}
-      <div className="sticky top-0 z-20 mb-4 rounded-xl border border-zinc-200 bg-white/95 backdrop-blur">
+      <div className="sticky top-0 z-20 mb-4 border-b border-zinc-200 backdrop-blur-xl">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <button
             type="button"
