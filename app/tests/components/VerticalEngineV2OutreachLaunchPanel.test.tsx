@@ -5,6 +5,7 @@ import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSet
 import { ContactUploadNotice } from '@/components/vertical-engine-v2/engine/ContactUploadNotice';
 import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/OutreachLaunchPanel';
 import { DeliveryTargetPanel } from '@/components/vertical-engine-v2/engine/DeliveryTargetPanel';
+import { ContactUploadModePanel } from '@/components/vertical-engine-v2/engine/ContactUploadModePanel';
 import { ProjectExclusions } from '@/components/vertical-engine-v2/engine/ProjectExclusions';
 import { CombinedContactsDownload } from '@/components/vertical-engine-v2/engine/CombinedContactsDownload';
 import { AudienceScopeSummary } from '@/components/vertical-engine-v2/engine/AudienceScopeSummary';
@@ -89,6 +90,8 @@ function renderPanel(expectedPortalPeriodId: string | null | undefined) {
   const onStarted = jest.fn();
   render(
     <OutreachLaunchPanel
+      uploadMode="daily"
+      onUploadModeSaved={jest.fn()}
       projectId={PROJECT_ID}
       snapshot={snapshot}
       templates={[template]}
@@ -168,6 +171,28 @@ describe('VE2 auto-outreach launch panel', () => {
     expect(onSaved).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     view.unmount();
+
+    const modeSaved = jest.fn(), modePending = jest.fn();
+    const modeView = render(<ContactUploadModePanel projectId="project-1" mode="daily"
+      onSaved={modeSaved} onPendingChange={modePending} />);
+    await user.click(screen.getByRole('radio', { name: 'Все готовые контакты сразу' }));
+    expect(modePending).toHaveBeenLastCalledWith(true);
+    mockVeEnginePost.mockResolvedValueOnce({ ok: false, data: { error: 'Режим изменён в другой вкладке' } });
+    await user.click(screen.getByRole('button', { name: 'Применить режим загрузки' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Режим изменён');
+    expect(modeSaved).not.toHaveBeenCalled();
+    mockVeEnginePost.mockResolvedValueOnce({ ok: true, data: { mode: 'all_ready' } });
+    await user.click(screen.getByRole('button', { name: 'Применить режим загрузки' }));
+    expect(mockVeEnginePost).toHaveBeenLastCalledWith('/api/tools/vertical-engine-v2/projects/project-1/contact-upload-mode', {
+      mode: 'all_ready', expected_mode: 'daily',
+    });
+    expect(modeSaved).toHaveBeenCalledTimes(1);
+    expect(modeSaved).toHaveBeenCalledWith('all_ready');
+    modeView.rerender(<ContactUploadModePanel projectId="project-1" mode="all_ready"
+      onSaved={modeSaved} onPendingChange={modePending} />);
+    expect(screen.getByRole('radio', { name: 'Все готовые контакты сразу' })).toBeChecked();
+    expect(modePending).toHaveBeenLastCalledWith(false);
+    modeView.unmount();
 
     // Project settings keep unsaved pasted identifiers through polling and
     // require an explicit reload after concurrent or ambiguous saves.

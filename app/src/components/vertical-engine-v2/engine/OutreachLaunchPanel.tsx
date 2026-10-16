@@ -10,6 +10,7 @@ import { StatusBox } from './ui';
 import { CreateClientPresetInline, DeliveryPlanBlock, useTemplateLaunch } from './steps/Step5Template';
 import { getVeLaunchSelectionState } from './launchSelection';
 import { DeliveryRatePanel } from './DeliveryRatePanel';
+import { ContactUploadModePanel, type ContactUploadMode } from './ContactUploadModePanel';
 
 type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
   status: 'ready' | 'working' | 'blocked';
@@ -31,6 +32,8 @@ export function OutreachLaunchPanel({
   onBack,
   onStarted,
   onPresetChange,
+  uploadMode,
+  onUploadModeSaved,
 }: {
   projectId: string;
   snapshot: VeOutreachSetupResponse;
@@ -40,6 +43,8 @@ export function OutreachLaunchPanel({
   onBack: () => void;
   onStarted: (run: VeOutreachRun) => void;
   onPresetChange: (presetId: string) => void;
+  uploadMode: ContactUploadMode;
+  onUploadModeSaved: (mode: ContactUploadMode) => void;
 }) {
   const firstPreparation = snapshot.preparations.find(
     (p) => p.hypothesis_id === hypothesisIds[0],
@@ -49,6 +54,11 @@ export function OutreachLaunchPanel({
   const [confirmedKey, setConfirmedKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [uploadModePending, setUploadModePending] = useState(false);
+  const onUploadModePending = useCallback((pending: boolean) => {
+    setUploadModePending(pending);
+    if (pending) setConfirmedKey(null);
+  }, []);
   const [retry, setRetry] = useState(0);
   const retryRequest = useRef(0);
   const idempotency = useRef<{ key: string; id: string } | null>(null);
@@ -78,7 +88,7 @@ export function OutreachLaunchPanel({
   const rateRevision = rateReady?.key === rateKey ? rateReady.revision : null;
   const request = useMemo<VeOutreachLaunchRequest | null>(() => {
     // null — проект Portal без периодов; undefined — проект сейчас выбрать нельзя.
-    if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts || !rateRevision)
+    if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts || !rateRevision || uploadModePending)
       return null;
     const ids = hypothesisIds;
     if (!ids.length) return null;
@@ -106,11 +116,12 @@ export function OutreachLaunchPanel({
       target_contacts: launch.targetContacts,
       items,
     };
-  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts, rateRevision]);
+  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts, rateRevision, uploadModePending]);
   const requestKey = request ? JSON.stringify(request) : '';
-  const preflight = preflightState?.key === requestKey ? preflightState.result : null;
+  const preflightKey = requestKey ? `${uploadMode}/${requestKey}` : '';
+  const preflight = preflightState?.key === preflightKey ? preflightState.result : null;
   const confirmationKey = preflight?.ready
-    ? requestKey + JSON.stringify(preflight.items.map((i) => i.segmentation_audit_id))
+    ? preflightKey + JSON.stringify(preflight.items.map((i) => i.segmentation_audit_id))
     : '';
   useEffect(() => {
     if (!requestKey) return;
@@ -135,7 +146,7 @@ export function OutreachLaunchPanel({
           return;
         }
         setError('');
-        setPreflightState({ key: requestKey, result: result.data });
+        setPreflightState({ key: preflightKey, result: result.data });
         if (result.data.ready || result.data.items.some((i) => i.status === 'blocked')) clearInterval(timer);
       } catch {
         if (!cancelled) {
@@ -153,7 +164,7 @@ export function OutreachLaunchPanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [projectId, requestKey, retry]);
+  }, [projectId, requestKey, preflightKey, retry]);
   const start = async () => {
     if (!request || !preflight?.ready || confirmedKey !== confirmationKey || busy) return;
     if (idempotency.current?.key !== confirmationKey)
@@ -233,13 +244,15 @@ export function OutreachLaunchPanel({
           <CreateClientPresetInline launch={launch} templateId={first.id} />
         </fieldset>
       ) : null}
-      <DeliveryPlanBlock launch={launch} disabled={busy} preparedPreview={preflight?.items[0]?.preview ?? null} />
+      <DeliveryPlanBlock launch={launch} disabled={busy} uploadMode={uploadMode} preparedPreview={preflight?.items[0]?.preview ?? null} />
+      <ContactUploadModePanel projectId={projectId} mode={uploadMode} disabled={busy}
+        onSaved={onUploadModeSaved} onPendingChange={onUploadModePending} />
       {launch.presetId && rateTemplates.length ? <DeliveryRatePanel key={rateKey} projectId={projectId}
-        presetId={launch.presetId} templateIds={rateTemplates} disabled={busy} onReady={onRateReady} /> : null}
+        presetId={launch.presetId} templateIds={rateTemplates} disabled={busy} onReady={onRateReady} supplyOnly={uploadMode === 'all_ready'} /> : null}
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
-          <p className={HE.muted}>Выберите клиента, проект и цель контактов, затем примените темп.</p>
+          <p className={HE.muted}>{uploadModePending ? 'Примените выбранный режим загрузки.' : 'Выберите клиента, проект и цель контактов, затем примените темп.'}</p>
         ) : !preflight && !error ? (
           <p role="status">Проверяем аудиторию и настройки отправки…</p>
         ) : null}
@@ -266,8 +279,10 @@ export function OutreachLaunchPanel({
         ))}
         {preflight?.ready ? (
           <p className={HE.muted}>
-            Система создаст кампании в Instantly без отправки и загрузит первую порцию контактов по плану.
-            Проверьте кампании и нажмите Start в Instantly. После запуска ежедневная дозаливка продолжится автоматически.
+            {uploadMode === 'all_ready'
+              ? 'Система создаст кампании без отправки и начнёт загружать весь готовый запас в пределах общей цели проекта. Новые готовые контакты будут добавляться автоматически.'
+              : 'Система создаст кампании в Instantly без отправки и загрузит первую порцию контактов по плану. После запуска ежедневная дозаливка продолжится автоматически.'}
+            {' '}Проверьте кампании и нажмите Start в Instantly.
           </p>
         ) : null}
         {error ? <StatusBox tone="error">{error}</StatusBox> : null}

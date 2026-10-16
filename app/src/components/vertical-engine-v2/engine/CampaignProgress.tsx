@@ -7,6 +7,7 @@ import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { useContactSupply } from './ContactSupplyPanel';
 import { ContactUploadNotice } from './ContactUploadNotice';
 import { HE } from './design';
+import type { ContactUploadMode } from './ContactUploadModePanel';
 import { StatusBox } from './ui';
 
 interface CampaignProgressProps {
@@ -15,6 +16,7 @@ interface CampaignProgressProps {
   /** False for imported bases and other campaigns without automatic supply. */
   required: boolean;
   headerAction?: ReactNode;
+  uploadMode?: ContactUploadMode;
 }
 
 const SUPPLY_LABELS: Record<NonNullable<VeContactSupplyStatus['plan']>['status'], string> = {
@@ -28,7 +30,7 @@ const SUPPLY_LABELS: Record<NonNullable<VeContactSupplyStatus['plan']>['status']
 
 const count = (value: number) => value.toLocaleString('ru-RU');
 
-export function CampaignProgress({ template, title, required, headerAction }: CampaignProgressProps) {
+export function CampaignProgress({ template, title, required, headerAction, uploadMode = 'daily' }: CampaignProgressProps) {
   const supply = useContactSupply(template.id, required, null);
   const info = parseLaunchInfo((template as VeTemplate & { launch_info?: unknown }).launch_info);
   const plan = required ? supply.data?.plan : null;
@@ -79,7 +81,7 @@ export function CampaignProgress({ template, title, required, headerAction }: Ca
               <p className="ve2-stat-k">Всего добавлено в кампании</p>
             </div>
           </div>
-          {metrics && metrics.hypothesis_stock_workdays !== null ? (
+          {uploadMode === 'daily' && metrics && metrics.hypothesis_stock_workdays !== null ? (
             <p className={HE.muted}>
               Готового запаса хватит примерно на {count(metrics.hypothesis_stock_workdays)} рабочих дней
               при темпе {count(metrics.hypothesis_daily_target)} контактов в день.

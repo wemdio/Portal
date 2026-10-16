@@ -192,6 +192,17 @@ describe('VE2 launch for a Portal project without periods', () => {
     // VE2 never creates periods and never touches the project's own fact.
     expect(portal.mutations.filter((mutation) => ['projects', 'project_periods'].includes(mutation.table))).toEqual([]);
     expect(portal.getRows('projects')[0].contacts_done).toBe('25905');
+    // Upload-all never inherits the preset's small first-contact quota. The
+    // collection forecast and manual Instantly Start remain unchanged.
+    mockCreateCampaign.mockClear();
+    const allReady = portalDb();
+    await allReady.from('ve_projects').update({ contact_upload_mode: 'all_ready' }).eq('id', VE_PROJECT_ID);
+    expect((await launch(allReady)).outcome.status).toBe(200);
+    expect(mockCreateCampaign).toHaveBeenCalledWith(expect.objectContaining({
+      daily_limit: 1000, daily_max_leads: 1000, open_tracking: false, link_tracking: false,
+    }), expect.anything());
+    expect(allReady.rpcCalls.find(call => call.fn === 've_bind_contact_delivery_plan')?.params.p_sender_daily_capacity).toBe(30);
+    expect(mockUpdateCampaign.mock.calls.some(([, patch]) => patch.status === 1)).toBe(false);
   });
 
   it('keeps an ownership conflict uncertain instead of taking part of the campaigns', async () => {
