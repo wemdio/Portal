@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
 
 import EChart from '@/components/charts/EChart';
@@ -18,8 +18,6 @@ import {
   withAlpha,
   type ChartTheme,
 } from '@/components/charts/theme';
-import { authFetch } from '@/lib/authFetch';
-import { logError } from '@/lib/loggerClient';
 import type { MailboxOutcomes, OutcomeDay } from '@/lib/instantly/mailboxOutcomes';
 
 /**
@@ -29,9 +27,10 @@ import type { MailboxOutcomes, OutcomeDay } from '@/lib/instantly/mailboxOutcome
  * этих писем вышло: сколько ушло, сколько не доехало, сколько ответили и
  * сколько ответов оказались лидами (просьба Ника 09.10.2026).
  *
- * Грузится своим запросом, а не вместе с нагрузкой: запросы к датасету тяжелее,
- * и таблица ящиков не должна их ждать. Своя ошибка тоже остаётся своей —
- * страница выше продолжает работать.
+ * Данные приходят готовыми от страницы: она грузит их параллельно с таблицей
+ * ящиков и показывает всё сразу (16.10.2026 — раньше блок монтировался после
+ * таблицы и сам ходил за данными, поэтому «Загрузка…» мигала внизу готовой
+ * страницы). Своя ошибка остаётся своей — таблица выше продолжает работать.
  */
 
 type MetricKey = 'sent' | 'bounced' | 'replies' | 'leads';
@@ -153,44 +152,11 @@ function buildOption(
   };
 }
 
-export default function OutcomesDashboard({ day }: { day: string }) {
+export default function OutcomesDashboard({ data, error }: { data: MailboxOutcomes | null; error: string | null }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
-  const [data, setData] = useState<MailboxOutcomes | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [visible, setVisible] = useState<ReadonlySet<MetricKey>>(() => new Set(METRICS));
-
-  // Фетч в эффекте; спиннер даёт initial loading=true. Повторно его здесь не
-  // ставим (это setState в эффекте, лишний каскад и предупреждение правила):
-  // при смене дня страница монтирует блок заново по key — состояние и так
-  // начинается с загрузки.
-  useEffect(() => {
-    if (!day) return;
-    let active = true;
-    const run = async () => {
-      try {
-        const res = await authFetch(`/api/analytics/mailbox-load/outcomes?day=${encodeURIComponent(day)}`);
-        const body = (await res.json().catch(() => null)) as { data: MailboxOutcomes | null; error?: string; detail?: string } | null;
-        if (!res.ok) {
-          const code = body?.error || `HTTP ${res.status}`;
-          throw new Error(body?.detail ? `${code} — ${body.detail}` : code);
-        }
-        if (!active) return;
-        setError(null);
-        setData(body?.data ?? null);
-      } catch (e) {
-        if (!active) return;
-        logError('mailbox-load outcomes failed', e);
-        setError((e as Error).message);
-      } finally {
-        if (active) setLoading(false);
-      }
-    };
-    void run();
-    return () => { active = false; };
-  }, [day]);
 
   const option = useMemo(
     () => (theme && data ? buildOption(data.days, theme, !reducedMotion, visible) : null),
@@ -216,14 +182,13 @@ export default function OutcomesDashboard({ day }: { day: string }) {
         <p className="text-xs text-zinc-500">За тот же день, что и таблица выше; на графике — он и 29 дней до него.</p>
       </div>
 
-      {loading && <div className="py-8 text-center text-sm text-zinc-400">Загрузка…</div>}
-      {error && !loading && (
+      {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           Не удалось посчитать исходы: {error}
         </div>
       )}
 
-      {!loading && !error && data && t && (
+      {!error && data && t && (
         <>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Tile label="Отправлено" value={nf(t.sent)} sub="писем за день" />
