@@ -2152,13 +2152,10 @@ async def _check_sender(conn) -> list[str]:
             title = f"🔴 <b>Рассылка: письма не уходят (адрес {ip})</b>"
             tail = f"За последние {SENDER_OVERDUE_MINUTES} мин с этого адреса не ушло ни одного письма."
         problems.append(
-            f"{title}
-"
+            f"{title}\n"
             f"{row['n']} писем у {row['mailboxes']} ящиков ждут отправки дольше {SENDER_OVERDUE_MINUTES} мин, "
-            f"самое старое — с {_msk(oldest)} (отстаёт на {lag_min} мин).
-"
-            f"{tail}
-"
+            f"самое старое — с {_msk(oldest)} (отстаёт на {lag_min} мин).\n"
+            f"{tail}\n"
             f"{hint}"
         )
 
