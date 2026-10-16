@@ -1,9 +1,9 @@
 /**
- * Contract-aware weekday drip for Vertical Engine v2.
+ * Contract-aware contact upload for Vertical Engine v2.
  *
  * The main DB owns the exact row reservation and Moscow/local business date.
  * This runner deliberately performs no read-then-send quota calculation: it
- * verifies campaign ownership first, asks the DB for one frozen daily batch,
+ * verifies campaign ownership first, asks the DB for a frozen row batch,
  * fences every provider attempt, and persists exact accepted/uncertain row ids.
  * `projects/project_periods.contacts_done` remains the fulfillment fact; an
  * accepted upload here is only a technical delivery event. A plan bound to a
@@ -48,6 +48,7 @@ interface BoundVeProject {
   sender_daily_capacity: number | null;
   launch_preset_id: string | null;
   launch_instantly_account_id: string | null;
+  contact_upload_mode?: 'daily' | 'all_ready';
 }
 
 interface ActivePeriod {
@@ -266,7 +267,7 @@ async function loadPreflight(
   const { data: projectData, error: projectError } = await portalDb
     .from('ve_projects')
     .select(
-      'id, portal_project_id, portal_period_id, target_contacts, delivery_schedule_days, delivery_timezone, sender_daily_capacity, launch_preset_id, launch_instantly_account_id',
+      'id, portal_project_id, portal_period_id, target_contacts, delivery_schedule_days, delivery_timezone, sender_daily_capacity, launch_preset_id, launch_instantly_account_id, contact_upload_mode',
     )
     .eq('id', veProjectId)
     .maybeSingle();
@@ -409,7 +410,9 @@ export async function runContactDeliveryDay(input: {
   }
 
   const { data: reserveData, error: reserveError } = await input.portalDb.rpc(
-    've_reserve_contact_delivery_day',
+    preflight.project.contact_upload_mode === 'all_ready'
+      ? 've_reserve_all_ready_contact_delivery_day'
+      : 've_reserve_contact_delivery_day',
     {
       p_ve_project_id: input.veProjectId,
       p_now: (input.now ?? new Date()).toISOString(),

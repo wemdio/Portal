@@ -901,7 +901,9 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     let groupMutationAttempted = false;
     try {
       const payload = buildCampaignPayloadFromPreset({
-        preset: { ...preset, ...VE_CAMPAIGN_SENDING_SETTINGS },
+        preset: { ...preset, ...VE_CAMPAIGN_SENDING_SETTINGS,
+          ...(deliverySettings.uploadMode === 'all_ready' ? { daily_max_leads: VE_CAMPAIGN_SENDING_SETTINGS.daily_limit } : {}),
+        },
         sequence: { name: campaignName, steps: sequence.steps },
       });
       await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });

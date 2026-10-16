@@ -46,6 +46,9 @@ jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
 }));
 
 import { POST } from '@/app/api/tools/vertical-engine-v2/templates/[id]/launch/delivery-preview/route';
+import { POST as POST_UPLOAD_MODE } from '@/app/api/tools/vertical-engine-v2/projects/[id]/contact-upload-mode/route';
+import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
+import { NextResponse } from 'next/server';
 import { GET as GET_SUPPLY, POST as POST_SUPPLY } from '@/app/api/tools/vertical-engine-v2/templates/[id]/supply/route';
 import { approveVeContactSupply } from '@/lib/verticalEngineV2/contactSupplyApproval';
 
@@ -187,6 +190,34 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
     const unavailable = await approveVeContactSupply(mockPortalDb as never, mockInstantlyDb as never, { ...input, confirmed: true });
     expect(unavailable.status).toBe(503);
     expect(mockPortalDb.rpcCalls.some((call) => call.fn === 've_approve_contact_supply')).toBe(false);
+    // Upload policy changes need authenticated identity, explicit CAS and a
+    // verified database result; changing policy must never call the provider.
+    mockPortalDb = createMockSupabase({ rpcHandlers: {
+      ve_set_contact_upload_mode: params => ({ data: { mode: params.p_mode } }),
+    } });
+    const modeParams = { params: Promise.resolve({ id: '20000000-0000-4000-8000-000000000001' }) };
+    const modeRequest = (body: Record<string, unknown>) => new Request('http://portal.test/upload-mode', {
+      method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' },
+    }) as NextRequest;
+    const valid = { mode: 'all_ready', expected_mode: 'daily' };
+    jest.mocked(requireInternalToolAuth).mockResolvedValueOnce({ error: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) });
+    expect((await POST_UPLOAD_MODE(modeRequest(valid), modeParams)).status).toBe(403);
+    for (const invalid of [{ mode: 'all_ready' }, { ...valid, mode: 'unlimited' }, { ...valid, userId: 'forged' }]) {
+      expect((await POST_UPLOAD_MODE(modeRequest(invalid), modeParams)).status).toBe(400);
+    }
+    expect(mockPortalDb.rpcCalls).toHaveLength(0);
+    const saved = await POST_UPLOAD_MODE(modeRequest(valid), modeParams);
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toEqual({ mode: 'all_ready' });
+    expect(mockPortalDb.rpcCalls).toEqual([{ fn: 've_set_contact_upload_mode', params: {
+      p_project_id: '20000000-0000-4000-8000-000000000001', p_mode: 'all_ready',
+      p_expected_mode: 'daily', p_actor_id: 'user-preview-1',
+    } }]);
+    mockPortalDb = createMockSupabase({ rpcHandlers: { ve_set_contact_upload_mode: () => ({
+      data: null, error: { message: 'stale mode', code: 'P0001' },
+    }) } });
+    expect((await POST_UPLOAD_MODE(modeRequest(valid), modeParams)).status).toBe(409);
+    expect([mockPortalDb.mutations, mockInstantlyDb.mutations, mockInstantlyDb.rpcCalls]).toEqual([[], [], []]);
   });
 
   it.each([

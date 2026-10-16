@@ -25,6 +25,7 @@ export interface BoundProjectRow {
   id: string;
   delivery_timezone: string;
   sender_daily_capacity: number;
+  contact_upload_mode?: 'daily' | 'all_ready';
 }
 
 interface ActiveQueueItemRow {
@@ -67,7 +68,8 @@ export async function deliveryDaySettled(
     .maybeSingle();
   if (error || !run) return false;
   if (run.status !== 'completed' || run.upload_blocked_at || run.upload_retry_requested_at || run.recovery_retry_requested_at) return false;
-  if (run.reservation_status === 'not_scheduled') return true;
+  const allReady = project.contact_upload_mode === 'all_ready';
+  if (run.reservation_status === 'not_scheduled' && !allReady) return true;
   if (run.reservation_status === 'reserved') {
     const { count: inFlight, error: inFlightError } = await portalDb
       .from('ve_contact_delivery_rows')
@@ -76,10 +78,13 @@ export async function deliveryDaySettled(
       .in('status', ['reserved', 'attempting']);
     if (inFlightError || inFlight == null || inFlight > 0) return false;
 
-    const quota = Math.min(Number(run.required_daily), Number(run.sender_daily_capacity), Number(project.sender_daily_capacity));
-    if (!Number.isFinite(quota)) return false;
-    if (Number(run.reserved_count) >= quota) return true;
-  } else if (run.reservation_status !== 'no_ready_rows') {
+    if (!allReady) {
+      const quota = Math.min(Number(run.required_daily), Number(run.sender_daily_capacity), Number(project.sender_daily_capacity));
+      if (!Number.isFinite(quota)) return false;
+      if (Number(run.reserved_count) >= quota) return true;
+    }
+  } else if (run.reservation_status !== 'no_ready_rows'
+    && !(allReady && ['not_scheduled', 'fulfilled', 'awaiting_delivery'].includes(run.reservation_status))) {
     return false;
   }
 
@@ -87,7 +92,7 @@ export async function deliveryDaySettled(
     .from('ve_launch_queue_items')
     .select('id')
     .eq('project_id', project.id)
-    .eq('status', 'active');
+    .in('status', allReady ? ['prepared', 'queued', 'active', 'uncertain'] : ['active']);
   if (itemsError) return false;
   const itemIds = ((items ?? []) as { id: string }[]).map((item) => item.id);
   if (!itemIds.length) return true;
@@ -160,21 +165,24 @@ export async function runBoundContactDeliveries(input: {
 
   const { data, error } = await input.portalDb
     .from('ve_projects')
-    .select('id, delivery_timezone, sender_daily_capacity')
+    .select('id, delivery_timezone, sender_daily_capacity, contact_upload_mode')
     .in('id', activeProjectIds)
     // A NULL period is a Portal project without periods; the SQL term decides.
     .not('portal_project_id', 'is', null)
     .gt('target_contacts', 0)
     .not('delivery_schedule_days', 'is', null)
     .not('delivery_timezone', 'is', null)
-    .gt('sender_daily_capacity', 0)
     .not('delivery_plan_bound_at', 'is', null)
     .not('delivery_plan_bound_by', 'is', null)
     .not('launch_preset_id', 'is', null)
     .order('id', { ascending: true });
   if (error) throw new Error(`VE2 contact delivery project scan failed: ${error.message}`);
 
-  const projects = (data ?? []) as BoundProjectRow[];
+  // A sender-capacity estimate governs collection and daily upload pacing.
+  // Explicit all-ready uploads must also work while that estimate is zero or
+  // unavailable; their reservation RPC still enforces the contract and ledger.
+  const projects = ((data ?? []) as BoundProjectRow[]).filter((project) =>
+    project.contact_upload_mode === 'all_ready' || Number(project.sender_daily_capacity) > 0);
   const runProject = input.runProject ?? DEFAULT_RUN_PROJECT;
   let failedProjects = 0;
   let attemptedProjects = 0;
@@ -224,9 +232,14 @@ export async function runBoundContactDeliveries(input: {
     try {
       await (input.refreshRate ?? refreshDeliveryRate)(input.portalDb, input.instantlyDb, project.id);
     } catch (error) {
-      failedProjects += 1;
-      input.log('error', `VE2 rate refresh project ${project.id} failed; new delivery deferred`, error);
-      continue;
+      if (project.contact_upload_mode !== 'all_ready') {
+        failedProjects += 1;
+        input.log('error', `VE2 rate refresh project ${project.id} failed; new delivery deferred`, error);
+        continue;
+      }
+      // All-ready changes upload pacing only. Supply retains its saved bounded
+      // estimate and checks; ready rows do not depend on a fresh rate preview.
+      input.log('warn', `VE2 rate refresh project ${project.id} failed; ready upload can continue`, error);
     }
     if (input.shouldStop?.()) break;
     try {
