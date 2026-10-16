@@ -202,19 +202,38 @@ export default function ForecastView() {
   const [factLoading, setFactLoading] = useState<FactMode | null>(null);
   const [factError, setFactError] = useState<string | null>(null);
 
-  // localStorage читаем после монтирования: на сервере его нет, и разметка
-  // первого рендера должна совпасть.
+  // Последний расчёт хранится за пользователем на сервере (fin_forecast_inputs),
+  // браузер — только быстрый черновик: закрыл портал, открыл на другом
+  // компьютере — те же цифры. Сначала показываем копию из браузера, следом
+  // подменяем сохранённой на сервере.
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   useEffect(() => {
-    const saved = loadSaved();
-    if (saved) setInputs(saved);
-    setLoaded(true);
-    // Первое открытие: прочие расходы сразу из факта прошлого месяца, иначе
-    // при нуле маржа выглядит лучше, чем есть.
-    if (!saved) {
-      fetchOtherCosts('previous')
-        .then((otherCosts) => setInputs((prev) => ({ ...prev, otherCosts })))
-        .catch((e: unknown) => logError('money.forecast.fact_prefill_failed', e));
-    }
+    let cancelled = false;
+    const local = loadSaved();
+    if (local) setInputs(local);
+    expensesFetch<{ inputs: Partial<ForecastInputs> | null }>('/forecast')
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.inputs) {
+          // Поверх умолчаний: новое поле модели не придёт пустым из старого сохранения.
+          setInputs({ ...DEFAULT_INPUTS, ...res.inputs });
+        } else if (!local) {
+          // Первое открытие: прочие расходы сразу из факта прошлого месяца,
+          // иначе при нуле маржа выглядит лучше, чем есть.
+          const otherCosts = await fetchOtherCosts('previous').catch((e: unknown) => {
+            logError('money.forecast.fact_prefill_failed', e);
+            return null;
+          });
+          if (!cancelled && otherCosts !== null) setInputs((prev) => ({ ...prev, otherCosts }));
+        }
+        // Если на сервере пусто, а в браузере расчёт был — он уедет на сервер
+        // первым же сохранением ниже.
+      })
+      .catch((e: unknown) => logError('money.forecast.load_failed', e))
+      .finally(() => {
+        if (!cancelled) setLoaded(true);
+      });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -222,8 +241,23 @@ export default function ForecastView() {
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(inputs));
     } catch {
-      // Приватное окно — прогноз работает, просто не запомнится.
+      // Приватное окно — сервер всё равно сохранит.
     }
+    // На сервер — не на каждую цифру, а когда ввод затих.
+    const timer = window.setTimeout(() => {
+      setSaveState('saving');
+      expensesFetch<{ ok: true }>('/forecast', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs }),
+      })
+        .then(() => setSaveState('saved'))
+        .catch((e: unknown) => {
+          logError('money.forecast.save_failed', e);
+          setSaveState('error');
+        });
+    }, 800);
+    return () => window.clearTimeout(timer);
   }, [inputs, loaded]);
 
   const set = (key: keyof ForecastInputs) => (value: number) =>
@@ -262,6 +296,14 @@ export default function ForecastView() {
           <h1 className="text-lg font-semibold text-zinc-900">Прогноз</h1>
           <p className="text-xs text-zinc-500">Месяц по введённым цифрам и ставкам мотивации.</p>
         </div>
+        <div className="flex items-center gap-3">
+        {saveState === 'error' ? (
+          <span className="text-xs text-red-600">Не сохранилось — цифры только в этом браузере</span>
+        ) : saveState === 'saving' ? (
+          <span className="text-xs text-zinc-400">Сохраняю…</span>
+        ) : saveState === 'saved' ? (
+          <span className="text-xs text-zinc-400">Сохранено</span>
+        ) : null}
         <button
           type="button"
           onClick={() => setInputs(DEFAULT_INPUTS)}
@@ -269,6 +311,7 @@ export default function ForecastView() {
         >
           Сбросить
         </button>
+        </div>
       </div>
 
       <div className="glass-panel grid gap-4 px-4 py-3 md:grid-cols-[1fr_1fr_1.5fr]">
