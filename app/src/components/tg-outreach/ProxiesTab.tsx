@@ -7,6 +7,7 @@ import { tgOutreachFetch } from '@/lib/tgOutreach/fetcher';
 import { AddProxyModal } from './AddProxyModal';
 import { BulkPasteProxyModal } from './BulkPasteProxyModal';
 import type { TgOutreachProxy, TgOutreachTag } from '@/lib/tgOutreach/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 type SortKey = 'ip' | 'port' | 'type' | 'created_at';
 type SortDir = 'asc' | 'desc';
@@ -195,7 +196,7 @@ export function ProxiesTab({ allTags }: Props) {
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
         </div>
       ) : error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center text-sm text-red-600">

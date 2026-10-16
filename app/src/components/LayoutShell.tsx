@@ -13,8 +13,41 @@ import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
 import { GlobalTextTranslator, LanguageLoadingOverlay } from '@/components/GlobalTextTranslator';
 import { dict, commonDictionary, normalizeLocale, type Locale } from '@/lib/i18n';
+// «Жидкое стекло» — фон-сцена и стёкла панелей на экранах из GLASS_PREFIXES.
+import '@/app/liquid-scene.css';
+import '@/app/portal-glass.css';
 
 const MD_BREAKPOINT = 768;
+
+// Экраны со стеклом (16.10.2026): проекты, аналитика проектов, нагрузка почт,
+// задачи, доска, команда, Instantly, оплаты, календари, регламент, админ, счета,
+// чаты клиентов, профиль, уведомления. Дашборды и «Рассылка» подключают сцену
+// в своих layout.tsx.
+const GLASS_PREFIXES = [
+  '/projects',
+  '/analytics/projects',
+  '/analytics/mailbox-load',
+  '/tasks',
+  '/board',
+  '/team',
+  '/instantly',
+  '/payments',
+  '/billing-calendar',
+  '/tech-calendar',
+  '/reglament',
+  '/admin',
+  '/invoices',
+  '/support',
+  '/profile',
+  '/notifications',
+  '/tools',
+];
+
+// /tools/sender — своя обёртка .sender-glass с тем же фоном, сюда не берём.
+function hasGlass(pathname: string): boolean {
+  if (pathname.startsWith('/tools/sender')) return false;
+  return pathname === '/' || GLASS_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
 
 function LocaleTextTranslator() {
   const { locale } = useUser();
@@ -41,6 +74,7 @@ export function LayoutShell({
   const isMaintenancePage = pathname === '/maintenance';
   const useDocumentScroll = pathname === '/payments';
   const isTma = useIsTma();
+  const glassClass = !isTma && hasGlass(pathname) ? ' liquid-scene portal-glass' : '';
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMobileLayout, setIsMobileLayout] = useState(false);
   const locale = normalizeLocale(initialLocale);
@@ -139,7 +173,7 @@ export function LayoutShell({
     <PortalDocumentTitle />
     <PortalLoadingProvider>
     <div
-      className={`${shellClassName} portal-shell`}
+      className={`${shellClassName} portal-shell${glassClass}`}
       style={{
         minHeight: 'var(--app-viewport-height, 100vh)',
         ...(!isTma && !useDocumentScroll ? { height: 'var(--app-viewport-height, 100vh)' } : {}),

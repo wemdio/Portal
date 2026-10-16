@@ -13,6 +13,7 @@ import { isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import type { Campaign, Account } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels, AccountStatus, WarmupStatus } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 type CampaignStats = {
   totalCampaigns: number;
@@ -173,7 +174,7 @@ export default function InstantlyDashboard() {
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
         </div>
       ) : (
         <>

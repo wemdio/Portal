@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
 import { Manrope } from 'next/font/google';
 
-// «Жидкое стекло» Рассылки — слой стилей только под .sender-glass.
+// «Жидкое стекло» — общий слой стилей, здесь под .sender-glass.
 import '../../liquid-scene.css';
-import './sender-glass.css';
+import '../../portal-glass.css';
 
 /**
  * Шрифт «Рассылки» — ближе к Instantly. У них Averta, она платная; Manrope —

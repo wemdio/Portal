@@ -9,6 +9,7 @@ import {
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, PaginatedResponse } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 const STATUS_FILTERS = [
   { label: 'Все', value: undefined },
@@ -181,7 +182,7 @@ export default function CampaignsPage() {
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
         </div>
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-zinc-200 bg-white py-16 text-center">
