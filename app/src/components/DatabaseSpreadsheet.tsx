@@ -605,6 +605,12 @@ const MIN_COLUMN_WIDTH = 30;
 const COMPANY_HEADER_REGEX = /(компан|company|организац)/i;
 const HEADER_LABEL_HINT_REGEX =
   /(названи|компан|company|сайт|website|url|домен|email|почта|контакт|телефон|phone|industry|сфера|описан|about|адрес|address)/i;
+// Колонки, которые «Оценка ЦА» отправляет ИИ сверх подсказок заголовка: название
+// и деятельность компании. Без них выгрузки Яндекс Карт (Name, Categories)
+// уходили в оценку одними адресом, сайтом и телефоном (15.10.2026). Отдельно от
+// HEADER_LABEL_HINT_REGEX, чтобы не менять распознавание строки заголовков.
+const BRIEF_SCORING_EXTRA_FIELD_REGEX =
+  /(\bname\b|categor|категор|рубрик|деятельн|оквэд|okved|отрасл|специализ|description)/i;
 const ENRICHMENT_COLUMN_REGEX =
   /(обогащен|описан|description|about|сфера|industry|сотрудник|employee|штат|revenue|оборот|инн|телефон|phone|dadata|фнс|город|city|регион|region)/i;
 
@@ -5587,7 +5593,9 @@ export function DatabaseSpreadsheet() {
         const header = (headerLabels[c] || toColumnLabel(c)).trim();
         if (!header) continue;
         const headerLower = header.toLowerCase();
-        const isHinted = HEADER_LABEL_HINT_REGEX.test(headerLower) || COMPANY_HEADER_REGEX.test(headerLower);
+        const isHinted = HEADER_LABEL_HINT_REGEX.test(headerLower)
+          || COMPANY_HEADER_REGEX.test(headerLower)
+          || BRIEF_SCORING_EXTRA_FIELD_REGEX.test(headerLower);
         if (!isHinted) continue;
         addField(header, row[c] ?? '');
       }
