@@ -72,12 +72,15 @@ export interface EngClientNoticeEmailArgs {
    */
   brandInputs?: EngClientNoticeBrandInput[] | null;
   /**
-   * Only for action_needed: the event's own reason, the `ref_id` of the
+   * For action_needed: the event's own reason, the `ref_id` of the
    * letter. autopilot_hold — the cabinet's hold code (clientEngProjection.ts,
    * HeClientAutopilotHoldCode);
    * needs_support — the outcome class of the automatic launch ('not_started',
    * 'unfinished', 'failed', 'refused', 'spend_limit', 'sending_turned_off').
-   * Anything else or null — the general copy of the code.
+   * For research_stopped: 'website_thin' (RESEARCH_NEEDS_DESCRIPTION) — the
+   * research is waiting for the client's description of the business, not
+   * stopped on a failure.
+   * Anything else or null — the general copy of the kind or code.
    */
   reason?: string | null;
   /** The market (vertical) name; null — not known, the copy names no market. */
@@ -138,6 +141,9 @@ interface NoticeCopy {
  *    of the two the route of «Try again» accepts, and 'team_fix' when the
  *    project's reason is a billing or configuration refusal (step 1 then says
  *    «Message Support to find out when it is fixed, then press «Try again»»).
+ *    With reason 'website_thin' the project is 'failed' because the research
+ *    waits for a description of the business: the letter asks for it, as the
+ *    amber request on step 1 does, and «Save and continue» there goes on.
  *  - sending_waiting — the automatic launch is held on the account switch
  *    (sending not turned on yet), so the market's final letters and contacts
  *    are ready (the candidate is a ready template). The switch letter
@@ -173,6 +179,17 @@ const AFTER_THE_FIX = 'Message Support to find out when it is fixed, then open y
  */
 const SENDING_OFF = 'Sending is turned off for your account. Message Support from your cabinet.';
 
+/**
+ * research_stopped's reason when the research waits for the client
+ * (clientFailureText.ts, HE_RESEARCH_NEEDS_DESCRIPTION_CODE): site_profile read
+ * too little text on the website and there is no description of the business.
+ * «Save and continue» on step 1 goes on with the same research — there is no
+ * «Try again» for it and nothing for Support to do — so the letter asks for the
+ * description in the cabinet's words (step 1, the same request) and does not
+ * call it a stop.
+ */
+const RESEARCH_NEEDS_DESCRIPTION = 'website_thin';
+
 function noticeCopy(args: EngClientNoticeEmailArgs): NoticeCopy {
   const market = oneLine(args.marketName, 80);
   const website = oneLine(args.website, 120);
@@ -191,6 +208,17 @@ function noticeCopy(args: EngClientNoticeEmailArgs): NoticeCopy {
         cta: 'Choose markets',
       };
     case 'research_stopped': {
+      if (args.reason === RESEARCH_NEEDS_DESCRIPTION) {
+        return {
+          subject: 'We need a short description of your business',
+          heading: 'Your research needs a short description',
+          paragraphs: [
+            `We could read only a little text on ${website ?? 'your website'} — not enough to tell what you sell and to whom.`,
+            'Open your project, describe in 2–3 sentences what you sell and to whom on step 1 «Your business», and press «Save and continue». The research then goes on from the step where it stopped and builds your business profile from your description and your website.',
+          ],
+          cta: 'Describe your business',
+        };
+      }
       const research = `The research of ${website ?? 'your website'}`;
       const stopped = `${research} stopped before it finished.`;
       return {

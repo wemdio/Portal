@@ -739,6 +739,20 @@ async function loadNoticeContext(
   };
 }
 
+/**
+ * research_stopped о research, который ждёт описания бизнеса (website_thin), а
+ * не упал: его ключ — id джобы с суффиксом кода (scanResearchEvents), и суффикс
+ * живёт в ref_id строки письма, поэтому повтор после сбоя SMTP (строка
+ * перечитывается из таблицы) узнаёт его так же. next и ключ не меняются —
+ * меняется только текст письма (engClientNotice.ts, RESEARCH_NEEDS_DESCRIPTION).
+ */
+function researchAwaitsDescription(notice: HeEngClientNotice): boolean {
+  return (
+    notice.kind === 'research_stopped' &&
+    (notice.refId?.trim() ?? '').endsWith(`:${HE_RESEARCH_NEEDS_DESCRIPTION_CODE}`)
+  );
+}
+
 /** Куда ведёт кнопка письма. */
 function ctaUrlOf(notice: HeEngClientNotice): string {
   const origin = heEngAppOrigin();
@@ -764,11 +778,14 @@ async function deliver(notice: HeEngClientNotice, ctx: NoticeContext, key: strin
       code: notice.kind === 'action_needed' ? notice.code ?? null : null,
       next: notice.next ?? null,
       // Причина события: код паузы (autopilot_hold) или класс итога
-      // автозапуска (needs_support) — письмо говорит по ней своё предложение.
+      // автозапуска (needs_support) — письмо говорит по ней своё предложение;
+      // у research_stopped — research, ждущий описания бизнеса (website_thin).
       reason:
         notice.kind === 'action_needed' && (notice.code === 'autopilot_hold' || notice.code === 'needs_support')
           ? notice.refId?.trim() || null
-          : null,
+          : researchAwaitsDescription(notice)
+            ? HE_RESEARCH_NEEDS_DESCRIPTION_CODE
+            : null,
       marketName: ctx.marketName,
       website: ctx.website,
       ctaUrl: ctaUrlOf(notice),
@@ -1100,10 +1117,10 @@ async function readLatestResearchJobs(
  *    (engResearchRetryVerdict): 'retry_failed' — «Try again» (у кода проекта
  *    'billing' / 'configuration' — 'team_fix': Support, потом «Try again»),
  *    иначе Support. Кроме кода website_thin (research ждёт описания бизнеса,
- *    HE_RESEARCH_NEEDS_DESCRIPTION_CODE): совета нет вовсе (next null —
- *    «откройте проект, там видно, что случилось и что делать»), потому что
- *    его продолжает «Save and continue» шага 1, а не «Try again» и не Support;
- *    ключ — id джобы с суффиксом кода (ниже);
+ *    HE_RESEARCH_NEEDS_DESCRIPTION_CODE): кнопки-совета нет (next null),
+ *    потому что его продолжает «Save and continue» шага 1, а не «Try again» и
+ *    не Support; письмо по суффиксу ключа просит описание бизнеса
+ *    (researchAwaitsDescription); ключ — id джобы с суффиксом кода (ниже);
  *  - research_stopped, встал: проект 'researching', и вердикт того же роута —
  *    'retry_stalled' (ни одна research-стадия не идёт дольше окна шага 1,
  *    HE_RESEARCH_STALL_GRACE_MS, — «Try again» на шаге 1 уже стоит); письмо —
@@ -1244,9 +1261,9 @@ async function scanResearchEvents(db: SupabaseClient, state: ScanState): Promise
         // Research ждёт описания бизнеса (тонкий сайт, website_thin): не сбой,
         // и ни «Try again» (его роут откажет — это не технический сбой), ни
         // «запустить можно только через Support» (его продолжает «Save and
-        // continue» шага 1) письмо не называет — next null: «остановилось,
-        // откройте проект — там, что случилось и что можно сделать», а шаг 1
-        // просит описание. Ключ — свой (суффикс к id джобы): продолжение
+        // continue» шага 1) письмо не называет — next null, а текст по
+        // суффиксу ключа (researchAwaitsDescription) просит 2–3 предложения
+        // на шаге 1, как и сам шаг 1. Ключ — свой (суффикс к id джобы): продолжение
         // возвращает в очередь ТУ ЖЕ джобу, и её поздний технический сбой
         // должен дать своё письмо, а не «дубликат» этого.
         if (code === HE_RESEARCH_NEEDS_DESCRIPTION_CODE) {

@@ -28,9 +28,9 @@ import {
   type EngProjectDetailResponse,
 } from './api-client';
 import type { HeClientStageErrorCode } from '@/lib/hypothesisEngine/clientEngProjection';
-import { heResearchStopCode } from './clientFailureText';
+import { ENG_NEEDS_DESCRIPTION_SHORT_EN, heProjectAwaitsDescription, heResearchStopCode } from './clientFailureText';
 import { ENG_SENDING_OFF_EN, engAutopilotHoldText, engAutopilotIdleText, engStageErrorText } from './engText';
-import { EngBadge, EngSpinner, engBaseAnalysisStopped, fmtDate, projectStatusTone } from './ui';
+import { EngProjectStatusBadge, EngSpinner, engBaseAnalysisStopped, fmtDate } from './ui';
 import { collectAgainBaseId, ownAutoBaseState } from './EngStepBases';
 import { EngStepBrief } from './EngStepBrief';
 import { EngStepMarkets } from './EngStepMarkets';
@@ -418,6 +418,13 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
    * частый опрос (engWizardLiveWork), — один на оба места.
    */
   const hasCancellableWork = detail ? engWizardLiveWork(detail) : false;
+  /**
+   * Research ждёт описания бизнеса (heProjectAwaitsDescription) — пауза до
+   * ответа клиента, а не сбой: бейдж нейтральный, красной «Last error» нет.
+   * Просьба с формой — на шаге 1 (EngStepBrief, янтарём); на шагах 2–3, где её
+   * не видно, шапка говорит одной нейтральной строкой, куда идти.
+   */
+  const awaitsDescription = project ? heProjectAwaitsDescription(project.status, project.error_code) : false;
 
   return (
     <div className="flex flex-col gap-5">
@@ -454,7 +461,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
             <h1 className="truncate text-xl font-bold m-0" style={{ color: 'var(--cp-paper)' }}>
               {project?.name}
             </h1>
-            {project && <EngBadge label={project.status} tone={projectStatusTone(project.status)} />}
+            {project && <EngProjectStatusBadge status={project.status} errorCode={project.error_code} />}
             {hasActiveJobs && (
               <span className="inline-flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
                 <EngSpinner className="h-3 w-3" /> working…
@@ -488,10 +495,26 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
               роут отдаёт код причины (toClientEngStageErrorCode), экран
               разворачивает его в английский текст. Отмена до шапки проекта не
               доходит — cancel-роут ставит he_projects.error = null и возвращает
-              проект в 'draft', — поэтому префикс «Last error» здесь честен. */}
-          {project?.error_code && (
+              проект в 'draft', — поэтому префикс «Last error» здесь честен.
+              Кроме research, ждущего описания бизнеса (awaitsDescription): это
+              не ошибка, и красная плашка повторяла бы янтарную просьбу шага 1
+              словами сбоя. */}
+          {project?.error_code && !awaitsDescription && (
             <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
               Last error: <EngSupportText text={engProjectResearchErrorText(project.error_code)} />
+            </div>
+          )}
+          {awaitsDescription && step !== 1 && (
+            <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-text-m)' }}>
+              {ENG_NEEDS_DESCRIPTION_SHORT_EN}{' '}
+              <button
+                type="button"
+                onClick={() => goToStep(1)}
+                className="underline"
+                style={{ color: 'var(--cp-paper)' }}
+              >
+                Open step 1 «Your business»
+              </button>
             </div>
           )}
 
