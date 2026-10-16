@@ -458,7 +458,7 @@ export async function computeAllChannelMetrics(
   const eventChunks = await Promise.all(
     chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
       const { data, error } = await db
-        .from('amo_events')
+        .from('amo_status_events_v')
         .select('amo_deal_id, changed_at, from_value, to_value')
         .eq('event_type', 'lead_status_changed')
         .in('amo_deal_id', chunk);

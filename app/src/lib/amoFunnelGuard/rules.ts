@@ -6,18 +6,19 @@
  *
  * Правила (просьба Дмитрия, 16.10.2026):
  *  1. Вперёд — строго на соседний этап основной цепочки.
- *  2. «Новый лид» и «Взят в работу» → только «Лид квалифицирован» или
- *     «Закрыто и не реализовано» (плюс «Новый лид» → «Взят в работу»:
- *     иначе второй этап недостижим).
- *  3. «Закрыто и не реализовано» — с любого этапа.
+ *  2. «Новый лид» → только «Взят в работу» или «Закрыто и не реализовано»;
+ *     «Взят в работу» → только «Лид квалифицирован» или «Закрыто и не
+ *     реализовано» (уточнение Дмитрия, 16.10.2026).
+ *  3. «Закрыто и не реализовано» — с любого этапа; из него — только в «Взят в работу».
  *
  * Допущения, которых в просьбе не было (одна строка в таблице ниже, если не так):
- *  - назад двигать можно — это исправление ошибки, этап не перескакивается,
- *    и на этом держится откат запрещённого перехода (он сам идёт «назад»);
+ *  - назад — тоже только на соседний этап (просьба продаж, 16.10.2026);
+ *    откат запрещённого перехода сам может быть «запрещённым» ходом, поэтому
+ *    guard узнаёт свои откаты по таблице amo_funnel_reverts;
  *  - «Не вышел на звонок» и «Перенос» — боковые этапы, в цепочку не входят:
  *    в них можно с «Лид квалифицирован» и дальше, из них — в любой этап
  *    с «Лид квалифицирован»; с первых двух этапов — нельзя;
- *  - «Успешно реализовано» не проверяем: его ставят оплата и автоматизации.
+ *  - «Успешно реализовано» — только из «Оплата получена» (полный цикл).
  */
 
 export const FUNNEL_PIPELINE_ID = 7670334;
@@ -47,17 +48,17 @@ const CHAIN: number[] = [
   STAGE.MEETING_SCHEDULED,
   STAGE.MEETING_HELD,
   STAGE.PROPOSAL_SENT,
+  STAGE.PARKING,
   STAGE.INVOICE_SENT,
   STAGE.CONTRACT,
   STAGE.PAID,
 ];
 
-const SIDE_STAGES = new Set<number>([STAGE.NO_SHOW, STAGE.PARKING]);
+const SIDE_STAGES = new Set<number>([STAGE.NO_SHOW]);
 
 /** Где в цепочке «стоит» боковой этап, когда из него выходят. */
 const SIDE_ANCHOR: Record<number, number> = {
   [STAGE.NO_SHOW]: STAGE.MEETING_SCHEDULED,
-  [STAGE.PARKING]: STAGE.QUALIFIED,
 };
 
 export const STAGE_NAMES: Record<number, string> = {
@@ -94,10 +95,27 @@ export function checkTransition(input: {
   if (oldPipelineId !== null && oldPipelineId !== FUNNEL_PIPELINE_ID) return { allowed: true };
   if (from === to) return { allowed: true };
 
-  // Закрытие в минус — с любого этапа; выигрыш и выход из «Неразобранного»,
-  // «Успешно» и «Закрыто» (переоткрытие) не ограничиваем.
-  if (to === STAGE.LOST || to === STAGE.WON) return { allowed: true };
-  if (from === STAGE.UNSORTED || from === STAGE.WON || from === STAGE.LOST) return { allowed: true };
+  // Закрытие в минус — с любого этапа.
+  if (to === STAGE.LOST) return { allowed: true };
+  // Успешно реализовано — только после полного цикла, то есть с «Оплата получена»
+  // (просьба Дмитрия, 16.10.2026): иначе сделка засчитается выигранной без оплаты.
+  if (to === STAGE.WON) {
+    if (from === STAGE.PAID) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `«${stageName(STAGE.WON)}» ставится только после «${stageName(STAGE.PAID)}».`,
+    };
+  }
+  // Выход из «Неразобранного» и переоткрытие «Успешно» не ограничиваем.
+  if (from === STAGE.UNSORTED || from === STAGE.WON) return { allowed: true };
+  // Из «Закрыто и не реализовано» — только вернуть в работу (Дмитрий, 16.10.2026).
+  if (from === STAGE.LOST) {
+    if (to === STAGE.TAKEN) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `Из «${stageName(STAGE.LOST)}» сделку можно вернуть только в «${stageName(STAGE.TAKEN)}».`,
+    };
+  }
 
   const toKnown = CHAIN.includes(to) || SIDE_STAGES.has(to);
   const fromKnown = CHAIN.includes(from) || SIDE_STAGES.has(from);
@@ -105,27 +123,37 @@ export function checkTransition(input: {
 
   const early = from === STAGE.NEW || from === STAGE.TAKEN;
   if (early) {
-    const ok = to === STAGE.QUALIFIED || (from === STAGE.NEW && to === STAGE.TAKEN);
-    if (ok) return { allowed: true };
+    const next = from === STAGE.NEW ? STAGE.TAKEN : STAGE.QUALIFIED;
+    if (to === next) return { allowed: true };
     return {
       allowed: false,
-      reason: `Из «${stageName(from)}» сделку можно перенести только в «${stageName(STAGE.QUALIFIED)}» или «${stageName(STAGE.LOST)}».`,
+      reason: `Из «${stageName(from)}» сделку можно перенести только в «${stageName(next)}» или «${stageName(STAGE.LOST)}».`,
     };
   }
 
-  // Боковой этап — в него можно с «Лид квалифицирован» и дальше (ранние этапы выше).
-  if (SIDE_STAGES.has(to)) return { allowed: true };
+  // «Не вышел на звонок» — только после «Встреча назначена».
+  if (to === STAGE.NO_SHOW) {
+    if (from === STAGE.MEETING_SCHEDULED) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `В «${stageName(STAGE.NO_SHOW)}» сделку можно перенести только из «${stageName(STAGE.MEETING_SCHEDULED)}».`,
+    };
+  }
 
   const fromIdx = CHAIN.indexOf(SIDE_STAGES.has(from) ? SIDE_ANCHOR[from] : from);
   const toIdx = CHAIN.indexOf(to);
 
-  // Назад — исправление ошибки; из «Переноса» можно вернуться на любой этап.
-  if (toIdx <= fromIdx || from === STAGE.PARKING) return { allowed: true };
-  if (toIdx === fromIdx + 1) return { allowed: true };
 
+  // Назад — тоже только на один этап (просьба продаж, 16.10.2026): иначе
+  // сделку, случайно уехавшую далеко вперёд, можно вернуть на «Лид
+  // квалифицирован» и она засчитается там повторно. Из «Не вышел на звонок»
+  // можно и на тот же этап, что и из встречи (перенос встречи).
+  if (toIdx >= fromIdx - 1 && toIdx <= fromIdx + 1) return { allowed: true };
+
+  const back = fromIdx > 0 ? `«${stageName(CHAIN[fromIdx - 1])}», ` : '';
   return {
     allowed: false,
-    reason: `Этапы воронки проходим по порядку: из «${stageName(from)}» можно перейти в «${stageName(CHAIN[fromIdx + 1])}» или «${stageName(STAGE.LOST)}».`,
+    reason: `Этапы воронки проходим по порядку: из «${stageName(from)}» можно перейти в ${back}«${stageName(CHAIN[fromIdx + 1])}» или «${stageName(STAGE.LOST)}».`,
   };
 }
 
@@ -136,6 +164,8 @@ export interface StatusChange {
   oldPipelineId: number | null;
   statusId: number;
   oldStatusId: number;
+  /** Когда переход случился; у вебхука не задан — берём «сейчас». */
+  occurredAt?: Date;
 }
 
 /**
