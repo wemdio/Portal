@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { sendDemoLeadTelegramAlert, type DemoLeadPageLang } from '@/lib/demoLead/notify';
+import { leadAlertText, sendDemoLeadTelegramAlert, type DemoLeadData, type DemoLeadPageLang } from '@/lib/demoLead/notify';
+import { enqueueOutreachOsRegistration } from '@/lib/outreachOsLeads/process';
 
 export const dynamic = 'force-dynamic';
 
@@ -263,7 +264,7 @@ export async function POST(req: NextRequest) {
 
   // Awaited best-effort (never throws) — serverless can freeze after the response,
   // so don't fire-and-forget the notify.
-  await sendDemoLeadTelegramAlert({
+  const alert: DemoLeadData = {
     name, email, phone: phone || null, telegram: telegram || null,
     company: company || null, message: message || null, source, referrer,
     ...(lang ? { pageLang: lang } : {}),
@@ -275,7 +276,18 @@ export async function POST(req: NextRequest) {
           utmEarlierVisitAt: utm.ts ?? null,
         }
       : {}),
-  });
+  };
+  await sendDemoLeadTelegramAlert(alert);
+  // Копия в General «Продажи Polza» и сделка в нашей AMO (lib/outreachOsLeads).
+  if (supabaseAdmin) {
+    try {
+      await enqueueOutreachOsRegistration(supabaseAdmin, {
+        source: source || 'landing', email, name: name || null, company: company || null, tgHtml: leadAlertText(alert),
+      });
+    } catch (err) {
+      console.error('[demo-lead] OutreachOS lead enqueue failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
 
   return NextResponse.json({ ok: true });
 }

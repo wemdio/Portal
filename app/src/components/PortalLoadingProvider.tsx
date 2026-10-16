@@ -11,7 +11,6 @@ import {
   useState,
 } from 'react';
 import { usePathname, useSearchParams } from 'next/navigation';
-import { Loader2 } from 'lucide-react';
 
 const STUCK_NAV_CLEAR_MS = 12000;
 
@@ -134,7 +133,7 @@ function PortalLoadingPill({ visible }: { visible: boolean }) {
       aria-busy="true"
       className="pointer-events-none fixed top-14 left-1/2 z-[100] flex -translate-x-1/2 items-center gap-2 rounded-full border border-zinc-200/90 bg-white/95 px-4 py-2.5 text-sm font-medium text-zinc-800 shadow-lg shadow-zinc-900/10 backdrop-blur-sm sm:top-16"
     >
-      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-600" aria-hidden />
+      <span className="portal-spinner portal-spinner-sm block shrink-0" aria-hidden />
       <span>Загрузка страницы…</span>
     </div>
   );

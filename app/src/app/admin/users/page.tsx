@@ -30,6 +30,7 @@ import {
   filterAdminUsers,
   isEngCabinetClient,
 } from '@/components/admin-eng/usersFilter';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 type TariffData = {
   tariff_type: TariffType;
@@ -1671,7 +1672,7 @@ export default function UsersPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-gray-500">Загрузка...</div>
+        <PortalSpinner />
       </div>
     );
   }

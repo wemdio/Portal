@@ -1,5 +1,6 @@
 import { Suspense } from 'react';
 import { EngClientsList } from '@/components/admin-eng/EngClientsList';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 /**
  * Раздел админки «Английские клиенты» — список аккаунтов английского кабинета
@@ -9,7 +10,7 @@ import { EngClientsList } from '@/components/admin-eng/EngClientsList';
  */
 export default function EngClientsPage() {
   return (
-    <Suspense fallback={<div className="py-10 text-center text-sm text-gray-400">Загрузка…</div>}>
+    <Suspense fallback={<div className="flex justify-center py-10"><PortalSpinner /></div>}>
       <EngClientsList />
     </Suspense>
   );

@@ -1,20 +1,21 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    «Жидкое стекло» Рассылки (16.10.2026) — в духе iOS 26 / HyperOS.
 
-   Слой целиком под .sender-glass (обёртка в app/tools/sender/layout.tsx): на
-   другие страницы портала не влияет. Компоненты не трогаем — стекло ложится
-   на их классы (rounded-xl/2xl + border — это панели и таблицы Рассылки).
+   Слой под .sender-glass (обёртка app/tools/sender/layout.tsx) и .portal-glass
+   (оболочка портала, components/LayoutShell.tsx — список экранов GLASS_PREFIXES
+   там же): остальные страницы не затронуты. Компоненты не трогаем — стекло
+   ложится на их классы (rounded-xl/2xl + border — это панели и таблицы).
 
    Стеклу нужно, что преломлять: под панелями — фон с мягкими цветными
    пятнами. Сами панели — полупрозрачная заливка, сильное размытие с
    насыщенностью, светлый «блик» по верхней кромке и мягкая тень.
 
-   Специфичность — html body .sender-glass …: тёмная тема портала перебивает
+   Специфичность — html body :is(.sender-glass, .portal-glass) …: тёмная тема портала перебивает
    bg-white правилами вида html[data-portal-theme='dark'] .portal-shell
    .bg-white {… !important}, и стекло должно быть сильнее их.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-.sender-glass {
+:is(.sender-glass, .portal-glass) {
   --lg-fill: rgba(255, 255, 255, 0.52);
   --lg-fill-strong: rgba(255, 255, 255, 0.82);
   --lg-fill-control: rgba(255, 255, 255, 0.6);
@@ -25,7 +26,7 @@
   --lg-shadow: 0 12px 40px -18px rgba(30, 41, 80, 0.35);
 }
 
-html[data-portal-theme='dark'] .sender-glass {
+html[data-portal-theme='dark'] :is(.sender-glass, .portal-glass) {
   --lg-fill: rgba(255, 255, 255, 0.06);
   --lg-fill-strong: rgba(28, 30, 38, 0.88);
   --lg-fill-control: rgba(255, 255, 255, 0.06);
@@ -39,8 +40,8 @@ html[data-portal-theme='dark'] .sender-glass {
 /* Фон-сцена (пятна на всё окно) — общий, в app/liquid-scene.css. */
 
 /* ─── Панели: блоки, таблицы, колонки «Писем», окна ─── */
-html body .sender-glass .rounded-xl.border,
-html body .sender-glass .rounded-2xl.border {
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border,
+html body :is(.sender-glass, .portal-glass) .rounded-2xl.border {
   background-color: var(--lg-fill) !important;
   -webkit-backdrop-filter: blur(28px) saturate(1.8);
   backdrop-filter: blur(28px) saturate(1.8);
@@ -52,16 +53,16 @@ html body .sender-glass .rounded-2xl.border {
 }
 
 /* Выпадающие меню и окна поверх — плотнее, иначе текст под ними мешает читать. */
-html body .sender-glass .rounded-xl.border.shadow-lg,
-html body .sender-glass .rounded-xl.border.shadow-xl,
-html body .sender-glass [role='dialog'] > .rounded-2xl.border,
-html body .sender-glass [role='menu'] {
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border.shadow-lg,
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border.shadow-xl,
+html body :is(.sender-glass, .portal-glass) [role='dialog'] > .rounded-2xl.border,
+html body :is(.sender-glass, .portal-glass) [role='menu'] {
   background-color: var(--lg-fill-strong) !important;
 }
 
 /* Подсказка «Прогресс отправки» — без прозрачности и размытия: поверх строк
    таблицы любая просвечивающая заливка даёт кашу из двух текстов. */
-html body .sender-glass .rounded-xl.border.shadow-xl[role='tooltip'] {
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border.shadow-xl[role='tooltip'] {
   background-color: var(--lg-solid) !important;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -70,26 +71,26 @@ html body .sender-glass .rounded-xl.border.shadow-xl[role='tooltip'] {
 /* Подсветка строки таблицы кампаний — на ячейках, а не на самой строке:
    у строки нет скругления, и на последней строке закрашенный прямоугольник
    вылезал острым углом за скруглённый край панели. */
-html body .sender-glass section.rounded-xl.border > table > tbody > tr:hover {
+html body :is(.sender-glass, .portal-glass) section.rounded-xl.border > table > tbody > tr:hover {
   background-color: transparent !important;
 }
-html body .sender-glass section.rounded-xl.border > table > tbody > tr:hover > td {
+html body :is(.sender-glass, .portal-glass) section.rounded-xl.border > table > tbody > tr:hover > td {
   background-color: var(--glass-row-hover);
 }
-html body .sender-glass section.rounded-xl.border > table > tbody > tr:last-child > td:first-child {
+html body :is(.sender-glass, .portal-glass) section.rounded-xl.border > table > tbody > tr:last-child > td:first-child {
   border-bottom-left-radius: 0.75rem;
 }
-html body .sender-glass section.rounded-xl.border > table > tbody > tr:last-child > td:last-child {
+html body :is(.sender-glass, .portal-glass) section.rounded-xl.border > table > tbody > tr:last-child > td:last-child {
   border-bottom-right-radius: 0.75rem;
 }
 
 /* Вложенные белые подложки внутри стекла — прозрачные, чтобы блок был цельным. */
-html body .sender-glass .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button):not([role='tooltip']) {
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border .bg-white:not(input):not(textarea):not(select):not(button):not([role='tooltip']) {
   background-color: transparent !important;
 }
 
 /* ─── Боковая панель разделов ─── */
-html body .sender-glass nav[aria-label='Разделы рассылки'] {
+html body :is(.sender-glass, .portal-glass) nav[aria-label='Разделы рассылки'] {
   background-color: var(--lg-fill) !important;
   -webkit-backdrop-filter: blur(28px) saturate(1.8);
   backdrop-filter: blur(28px) saturate(1.8);
@@ -98,10 +99,10 @@ html body .sender-glass nav[aria-label='Разделы рассылки'] {
 }
 
 /* ─── Поля и кнопки с обводкой — «капли» стекла ─── */
-html body .sender-glass input:not([type='checkbox']):not([type='radio']),
-html body .sender-glass textarea,
-html body .sender-glass select,
-html body .sender-glass button.border:not([class*='bg-blue']):not([class*='bg-emerald']):not([class*='bg-red']) {
+html body :is(.sender-glass, .portal-glass) input:not([type='checkbox']):not([type='radio']),
+html body :is(.sender-glass, .portal-glass) textarea,
+html body :is(.sender-glass, .portal-glass) select,
+html body :is(.sender-glass, .portal-glass) button.border:not([class*='bg-blue']):not([class*='bg-emerald']):not([class*='bg-red']) {
   background-color: var(--lg-fill-control) !important;
   -webkit-backdrop-filter: blur(12px) saturate(1.6);
   backdrop-filter: blur(12px) saturate(1.6);
@@ -110,7 +111,7 @@ html body .sender-glass button.border:not([class*='bg-blue']):not([class*='bg-em
 }
 
 /* Переключатели-«таблетки» (Компании / Автоаутрич, RU / EN, периоды). */
-html body .sender-glass .rounded-lg.border.bg-zinc-50.p-1 {
+html body :is(.sender-glass, .portal-glass) .rounded-lg.border.bg-zinc-50.p-1 {
   background-color: var(--lg-fill-control) !important;
   -webkit-backdrop-filter: blur(16px) saturate(1.7);
   backdrop-filter: blur(16px) saturate(1.7);
@@ -119,14 +120,14 @@ html body .sender-glass .rounded-lg.border.bg-zinc-50.p-1 {
 }
 
 /* Шапка таблиц — без сплошной заливки, стекло видно и под ней. */
-html body .sender-glass .sender-table-head {
+html body :is(.sender-glass, .portal-glass) .sender-table-head {
   background-color: rgba(96, 165, 250, 0.08) !important;
 }
 
 /* Иконки внутри полей (лупа поиска): у поля со стеклом свой слой отрисовки,
    и оно перекрывало иконку, стоящую в разметке раньше него. */
-html body .sender-glass .relative > svg.absolute,
-html body .sender-glass .relative > button.absolute {
+html body :is(.sender-glass, .portal-glass) .relative > svg.absolute,
+html body :is(.sender-glass, .portal-glass) .relative > button.absolute {
   z-index: 1;
 }
 
@@ -134,9 +135,9 @@ html body .sender-glass .relative > button.absolute {
    Поля — не светлые «капли», а утопленные тёмные: на тёмном стекле светлая
    заливка давала сплошной серый. Блоки внутри блоков (часы, дни в форме
    кампании) — без своего стекла: стекло в стекле накапливало серость. */
-html[data-portal-theme='dark'] body .sender-glass input:not([type='checkbox']):not([type='radio']),
-html[data-portal-theme='dark'] body .sender-glass textarea,
-html[data-portal-theme='dark'] body .sender-glass select {
+html[data-portal-theme='dark'] body :is(.sender-glass, .portal-glass) input:not([type='checkbox']):not([type='radio']),
+html[data-portal-theme='dark'] body :is(.sender-glass, .portal-glass) textarea,
+html[data-portal-theme='dark'] body :is(.sender-glass, .portal-glass) select {
   background-color: rgba(0, 0, 0, 0.22) !important;
   border-color: rgba(255, 255, 255, 0.1) !important;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
@@ -144,10 +145,32 @@ html[data-portal-theme='dark'] body .sender-glass select {
   backdrop-filter: none;
 }
 
-html body .sender-glass .rounded-xl.border .rounded-xl.border:not(.shadow-lg):not(.shadow-xl),
-html body .sender-glass .rounded-2xl.border .rounded-xl.border:not(.shadow-lg):not(.shadow-xl) {
+html body :is(.sender-glass, .portal-glass) .rounded-xl.border .rounded-xl.border:not(.shadow-lg):not(.shadow-xl),
+html body :is(.sender-glass, .portal-glass) .rounded-2xl.border .rounded-xl.border:not(.shadow-lg):not(.shadow-xl) {
   background-color: transparent !important;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   box-shadow: none;
+}
+
+/* «Оплаты» кладут свой bg-gray-50 на корневой блок — он закрывал фон-сцену
+   чёрным. Под стеклом портала блок прозрачный, фон виден. */
+html[data-portal-theme='dark'] body .portal-glass section[aria-label='Оплаты'],
+html body .portal-glass section[aria-label='Оплаты'] {
+  background-color: transparent !important;
+}
+
+/* Корневой блок страниц (регламент и др.) — полупрозрачный bg-slate-50/50:
+   в тёмной теме он даёт тёмный прямоугольник поверх фона. Под стеклом — прозрачный. */
+html[data-portal-theme='dark'] body .portal-glass .bg-slate-50\/50,
+html body .portal-glass .bg-slate-50\/50 {
+  background-color: transparent !important;
+}
+
+/* Карточки на странице «Инструменты»: подсветка при наведении была только у
+   карточек с плашкой (hover:bg-blue-50/60 в tools/page.tsx). Теперь у всех. */
+html[data-portal-theme='dark'] body .portal-glass a.group.rounded-2xl.border:hover,
+html body .portal-glass a.group.rounded-2xl.border:hover {
+  background-color: rgba(96, 165, 250, 0.14) !important;
+  border-color: rgba(96, 165, 250, 0.45) !important;
 }

@@ -1,5 +1,6 @@
 'use client';
 
+import { PortalSpinner } from '@/components/PortalSpinner';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Link from 'next/link';
 import type { Route } from 'next';
@@ -461,7 +462,7 @@ export default function AccountsPage() {
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
         </div>
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-zinc-200 bg-white py-16 text-center">

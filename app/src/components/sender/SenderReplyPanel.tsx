@@ -280,6 +280,26 @@ export function SenderReplyPanel({
               </button>
             ))}
           </div>
+          <span className="ml-auto flex gap-2">
+            <button
+              type="button"
+              onClick={() => void copy()}
+              disabled={!text.trim()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+            >
+              <Copy className="h-4 w-4" />
+              {copied ? 'Скопировано' : 'Копировать'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              disabled={!text.trim() || generating || sending}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              <Send className="h-4 w-4" />
+              Отправить ответ
+            </button>
+          </span>
         </div>
         {/* Подсказка — своей строкой фиксированной высоты: тексты разной длины
             раньше двигали кнопки рядом. */}
@@ -321,31 +341,9 @@ export function SenderReplyPanel({
               </button>
             </span>
           </div>
-        ) : (
-          <div className="mt-2 flex items-center justify-between gap-3">
-            {error ? <span className="text-sm text-red-600">{error}</span> : <span />}
-            <span className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => void copy()}
-                disabled={!text.trim()}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
-              >
-                <Copy className="h-4 w-4" />
-                {copied ? 'Скопировано' : 'Копировать'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirming(true)}
-                disabled={!text.trim() || generating || sending}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-              >
-                <Send className="h-4 w-4" />
-                Отправить ответ
-              </button>
-            </span>
-          </div>
-        )}
+        ) : error ? (
+          <p className="mt-2 text-sm text-red-600">{error}</p>
+        ) : null}
       </div>
     </div>
   );

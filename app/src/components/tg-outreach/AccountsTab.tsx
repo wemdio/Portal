@@ -9,6 +9,7 @@ import { AccountSettingsModal } from './AccountSettingsModal';
 import { CheckDropdown } from './CheckDropdown';
 import { UnblockDropdown } from './UnblockDropdown';
 import type { TgOutreachAccount, TgOutreachTag, AccountStatus } from '@/lib/tgOutreach/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 type SortKey = 'first_name' | 'phone' | 'username' | 'status' | 'created_at';
 type SortDir = 'asc' | 'desc';
@@ -232,7 +233,7 @@ export function AccountsTab({ allTags, onTagsChange: _onTagsChange }: Props) {
       {/* Table */}
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
         </div>
       ) : error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center text-sm text-red-600">

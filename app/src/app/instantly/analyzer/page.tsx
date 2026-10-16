@@ -13,6 +13,7 @@ import { isAdmin } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
 import { CampaignStatus, CampaignStatusLabels } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 const ANALYZABLE_STATUSES = [
   CampaignStatus.Completed,
@@ -327,7 +328,7 @@ export default function CompletedCampaignAnalyzer() {
   if (authorized === null) {
     return (
       <div className="flex items-center justify-center py-32">
-        <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+        <PortalSpinner />
       </div>
     );
   }
@@ -402,7 +403,7 @@ export default function CompletedCampaignAnalyzer() {
 
       {loading ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
           <p className="text-sm text-zinc-400">Загрузка кампаний и аналитики…</p>
         </div>
       ) : (

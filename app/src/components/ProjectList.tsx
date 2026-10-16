@@ -46,6 +46,7 @@ import {
   type ProjectPace,
   type ProjectPaceInput,
 } from '@/lib/projects/paceCalculator';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 /**
  * Колонки списка проектов. Раньше был select('*') — все 50 полей, 2.5 МБ JSON
@@ -250,7 +251,7 @@ function PaceTooltip({
           }
         >
           {loading ? (
-            <div className="text-center text-zinc-400">Загрузка...</div>
+            <div className="flex justify-center"><PortalSpinner small /></div>
           ) : !pace || pace.dataPoints < 2 ? (
             <div className="text-center text-zinc-400">Недостаточно данных (нужно 2+ дня)</div>
           ) : (
@@ -1671,7 +1672,7 @@ export function ProjectList() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-zinc-400 text-sm">Загрузка...</div>
+        <PortalSpinner />
       </div>
     );
   }

@@ -10,6 +10,7 @@ import TypeBreakdown from '@/components/tech-calendar/TypeBreakdown';
 import UpcomingList from '@/components/tech-calendar/UpcomingList';
 import { daysUntil, mskDateStr } from '@/lib/techCalendar/dates';
 import type { ServiceType, TechProviderBalance, TechRenewalEvent, TechSubscription } from '@/lib/techCalendar/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
@@ -312,7 +313,7 @@ export default function TechCalendarView() {
       </div>
 
       {loading ? (
-        <div className="rounded-xl border border-gray-100 bg-white p-8 text-center text-sm text-gray-500">Загрузка…</div>
+        <div className="rounded-xl border border-gray-100 bg-white p-8 flex justify-center p-8"><PortalSpinner /></div>
       ) : (
         <MonthGrid
           subscriptions={visible}

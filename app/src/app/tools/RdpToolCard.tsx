@@ -35,7 +35,7 @@ export function RdpToolCard() {
         </div>
         <Monitor className="h-8 w-8 text-gray-400 group-hover:text-blue-600 transition-colors shrink-0" />
       </div>
-      <div className="mt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">{openLabel}</div>
+      <div className="mt-auto pt-4 text-sm font-medium text-blue-600 group-hover:text-blue-700">{openLabel}</div>
     </>
   );
 
@@ -48,7 +48,7 @@ export function RdpToolCard() {
         </div>
         <Monitor className="h-8 w-8 text-gray-400 shrink-0" />
       </div>
-      <div className="mt-4 text-sm font-medium text-gray-400">{openLabel}</div>
+      <div className="mt-auto pt-4 text-sm font-medium text-gray-400">{openLabel}</div>
     </>
   );
 

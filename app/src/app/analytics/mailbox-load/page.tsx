@@ -13,6 +13,7 @@ import {
   sortTags, sortSpecialists, nextSort,
   type SortState, type TagSortKey, type SpecialistSortKey,
 } from '@/lib/instantly/mailboxLoadSort';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 // ── визуальные пресеты статусов утилизации ────────────────────────────────────
 // Пороги и статус считает ТОЛЬКО сервер (classify в mailboxLoad.ts) — здесь
@@ -379,7 +380,7 @@ export default function MailboxLoadPage() {
         ))}
       </div>
 
-      {loading && <div className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>}
+      {loading && <div className="flex justify-center py-10"><PortalSpinner /></div>}
       {error && !loading && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           Ошибка загрузки: {error}
