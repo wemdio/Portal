@@ -75,8 +75,18 @@ function shouldRetryBriefScoringError(errorMessage: string, attemptCount: number
     'timeout',
     'network',
     'ошибка сети',
+    // Ответ DeepSeek без массива или пустой — сбой одной пачки, а не строки:
+    // в другой пачке та же строка обычно оценивается (15.10.2026 ~1% строк
+    // оставались без балла с этими причинами).
+    'некорректн',
+    'пустой ответ',
   ];
   return retryable.some((token) => lower.includes(token));
+}
+
+/** Строку, которую DeepSeek пропустил в ответе, отправляем в очередь ещё раз. */
+function shouldRetryMissingScore(attemptCount: number): boolean {
+  return attemptCount < MAX_ATTEMPTS;
 }
 
 function toCompanyData(value: unknown): Record<string, string> {
@@ -340,6 +350,11 @@ export async function runBriefScoringJob(jobId: string) {
             for (const item of items) {
               const score = scoresByRow.get(item.row_index);
               if (!score) {
+                // Модель пропустила строку: в следующей пачке, с другими соседями,
+                // она обычно оценивается. Попытки ограничены MAX_ATTEMPTS.
+                if (shouldRetryMissingScore(item.attempt_count) && await requeueItem(item, 'Нет оценки от AI')) {
+                  continue;
+                }
                 const failed = await updateQueueFailed(item, 'Нет оценки от AI');
                 if (failed) {
                   errors += 1;
