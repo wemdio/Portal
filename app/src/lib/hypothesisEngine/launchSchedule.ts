@@ -40,6 +40,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { ClientLaunchScheduleOverride } from '@/lib/clientLaunch/types';
 import { isInstantlyValidTimezone } from '@/lib/clientLaunch/timezones';
 import { suggestEngTimezoneForCountries } from './engCountryTimezone';
+import { heEngTimezonesAllEnabled } from './engRolloutFlags';
 import {
   engDefaultSendingWindow,
   loadEngSendingWindow,
@@ -207,8 +208,14 @@ export async function resolveHeLaunchSendingWindow(args: {
   }
 
   // Подсказка по странам: пояс — когда все страны списка в одном поясном
-  // классе и США в нём нет; часы и дни — дефолта кабинета.
-  const suggestedTimezone = suggestEngTimezoneForCountries(args.projectCountries ?? []);
+  // классе и США в нём нет; часы и дни — дефолта кабинета. Только с
+  // HE_ENG_TIMEZONES_ALL: подсказанные пояса (Europe/Isle_of_Man и др.) вне
+  // прежних восьми и уходят рассыльщику лишь после живой проверки поясов
+  // (§1C, шаг выката 6); до неё — прежний дефолт. Тот же выключатель у
+  // suggested_timezone в GET запуска — экран и сервер совпадают.
+  const suggestedTimezone = heEngTimezonesAllEnabled()
+    ? suggestEngTimezoneForCountries(args.projectCountries ?? [])
+    : null;
   if (suggestedTimezone) {
     const suggested: ClientLaunchScheduleOverride = { ...engDefaultSendingWindow(), timezone: suggestedTimezone };
     if (acceptable(suggested)) return { window: suggested, source: 'suggested', readError };

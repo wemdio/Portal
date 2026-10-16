@@ -221,6 +221,7 @@ import {
   heUsMapsAddress,
   type HeCountryDropReason,
 } from '../sourcePlanCountryGate';
+import { heEngDncDomainsEnabled } from '../engRolloutFlags';
 import {
   findIrrelevantRows,
   findOffTargetRows,
@@ -2618,7 +2619,7 @@ async function widenPlanWithPaidSlice(
     heWithoutUnfoundedSizeFilters(ctx, [gatedWiden.task], input.promptInput),
     'расширение плана',
   );
-  const [task] = labelled.tasks;
+  const [labelledTask] = labelled.tasks;
   // Ни одной метки оси в каталоге — срез не найдёт ни строки. За ответ уже
   // заплачено, и он ничего не дал: это 'failed' с остыванием, как у повтора
   // прочитанного среза, а не задача, которую стор вертикали повторял бы каждую
@@ -2628,6 +2629,19 @@ async function widenPlanWithPaidSlice(
     stageLog(ctx, '[base_collect] расширение плана: в срезе нет ни одной метки каталога — план не тронут');
     return null;
   }
+  // Метки каталога могли снять из countries страну списка, которой в каталоге
+  // нет (перезаливка каталога). Возвращаем список целиком — так же, как гейты
+  // buildPlan после меток: иначе ключ среза не совпал бы ни с задачами плана,
+  // ни со стором (rememberPlan снова ставит список), проверка на повтор ниже
+  // промахивалась бы, и дочитанный срез покупался бы каждую ночь как новый.
+  // Без списка — та же задача.
+  const relocked = gateHeTaskCountries(labelledTask, countries);
+  if ('dropped' in relocked) {
+    info.plan_widening = { outcome: 'failed', error: 'срез вне списка стран проекта', at };
+    stageLog(ctx, `[base_collect] расширение плана: после меток срез вне списка стран проекта (${relocked.dropped}) — план не тронут`);
+    return null;
+  }
+  const task = relocked.task;
   const key = heCatalogSliceKey(task);
   const known = new Set(
     plan.tasks.map((t) => heCatalogSliceKey(t)).filter((k): k is string => k !== null),
@@ -6848,9 +6862,18 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         if (labelDead > 0) parts.push(`pdl-срезов без меток каталога: ${labelDead}`);
         if (repairError) parts.push(`добавить каталожный срез не удалось: ${repairError}`);
         const why = parts.join('; ');
-        const note = `Авто-сборка не дала строк: нет источника для стран проекта — ${why}. Коллекторы не вызывались.`;
         const providerRepairFailure = info.plan_repair?.outcome === 'failed' && info.plan_repair.countries_gate !== true;
-        if (catalog && !providerRepairFailure) await catalog.rememberEmptyCountriesPlan(planned.planKey, why);
+        // Причина «нет источника для стран» (и памятка) — только когда план
+        // опустошил сам список: снятие дубля среза его не опустошает, а
+        // починка, упавшая на провайдере или ответе модели, могла бы дать
+        // годный срез. Тогда — общая причина «план пуст»: классификатор
+        // кабинета отдаст код провайдера (billing / configuration / provider)
+        // или `source`, и совет «запустите ещё раз» там правдив.
+        const countryCaused = countryDropped.some((d) => d.reason !== 'duplicate_slice') && !providerRepairFailure;
+        const note = countryCaused
+          ? `Авто-сборка не дала строк: нет источника для стран проекта — ${why}. Коллекторы не вызывались.`
+          : `Авто-сборка не дала строк: план пуст — ${why}. Коллекторы не вызывались.`;
+        if (catalog && countryCaused) await catalog.rememberEmptyCountriesPlan(planned.planKey, why);
         await paidCheckpointDb(ctx)
           .from('he_bases')
           .update({
@@ -7030,6 +7053,23 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       return null;
     } catch (e) {
       if (heStageInterrupted(ctx, e)) throw e;
+      // Выключатель доменов (HE_ENG_DNC_DOMAINS) выключен — сборка не берёт на
+      // себя новый отказ: до этой правки она список не читала вовсе, и сбой
+      // БД рассыльщика или старая кривая строка списка не роняли ENG-сборку.
+      // Идём без проверки списка на уровне сборки (как после оплаченного
+      // конструктора ниже); отправку держат запуск (шаг 5a) и долив (шаг 4),
+      // оба fail-closed.
+      if (!heEngDncDomainsEnabled()) {
+        dncLoaded = true;
+        dncDomains = null;
+        dncUnchecked = true;
+        stageLog(
+          ctx,
+          `[base_collect] Do not contact: список не прочитан (${(e instanceof Error ? e.message : String(e)).slice(0, 200)}) — ` +
+            'выключатель доменов выключен, сборка идёт без проверки списка; запуск и долив проверяют его сами',
+        );
+        return null;
+      }
       const failBase = async (note: string): Promise<never> => {
         await paidCheckpointDb(ctx)
           .from('he_bases')

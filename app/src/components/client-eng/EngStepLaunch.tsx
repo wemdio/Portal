@@ -1796,12 +1796,12 @@ export function EngStepLaunch({
   // Прежние 8 — только для подбора по браузеру; в выпадашке — полный список, если он пришёл.
   const timezones = useMemo(() => (info && Array.isArray(info.timezones) ? info.timezones : []), [info]);
   /**
-   * Пояс по странам проекта. Он НЕ за выключателем полного списка: сервер
-   * (launchSchedule, источник 'suggested') отправляет в нём, когда клиент пояс
-   * не выбрал, — значит, и редактор обязан открыться на нём. Пока полный
-   * список выключен, такого пояса среди пунктов нет: дописываем его в конец
-   * пунктом с понятной подписью (смещения из Intl, а не название из
-   * идентификатора: Arctic/Longyearbyen стоит здесь за Амстердам и Берлин).
+   * Пояс по странам проекта. Сервер отдаёт его под тем же выключателем, что и
+   * полный список (HE_ENG_TIMEZONES_ALL), и отправляет в нём (launchSchedule,
+   * источник 'suggested'), когда клиент пояс не выбрал, — значит, и редактор
+   * обязан открыться на нём. Если пояса среди пунктов всё же нет, дописываем
+   * его в конец пунктом с понятной подписью (смещения из Intl, а не название
+   * из идентификатора: Arctic/Longyearbyen стоит здесь за Амстердам и Берлин).
    */
   const suggestedTz =
     info && typeof info.suggested_timezone === 'string' && info.suggested_timezone ? info.suggested_timezone : null;
@@ -1829,9 +1829,12 @@ export function EngStepLaunch({
       ? { value: windowValue, timezones: timezoneOptions, weekdays }
       : null;
   // Страны сбора без США, и сервер общий пояс не подсказал — просим выбрать.
+  // Только при полном списке поясов: без него сервер подсказку не считает
+  // вовсе, и фраза «страны в разных поясах» могла бы оказаться неправдой.
   const projectCountries = engCollectCountriesOf(detail.project.brief).countries;
+  const fullTimezoneList = Array.isArray(info?.timezone_options) && (info?.timezone_options?.length ?? 0) > 0;
   const tzHint =
-    info && projectCountries.length > 0 && !projectCountries.includes(ENG_COUNTRY_US) && !suggestedTz
+    info && fullTimezoneList && projectCountries.length > 0 && !projectCountries.includes(ENG_COUNTRY_US) && !suggestedTz
       ? MULTI_ZONE_HINT
       : undefined;
   const windowUsable = isSendingWindowUsable(windowConfig);

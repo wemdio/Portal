@@ -168,12 +168,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   }
   const intent = intentRead.kind === 'ok' ? intentRead.intent : null;
   // Пояс по списку стран проекта — тот же, что сервер берёт источником
-  // 'suggested' (launchSchedule), поэтому без выключателя. Сторожевое значение
-  // непрочитанного списка в карте стран не найдётся — подсказки не будет.
+  // 'suggested' (launchSchedule), и под тем же выключателем HE_ENG_TIMEZONES_ALL:
+  // до живой проверки поясов подсказки нет ни на экране, ни у рассыльщика.
+  // Сторожевое значение непрочитанного списка в карте стран не найдётся —
+  // подсказки не будет.
   const brief = (owned.project as { brief?: unknown }).brief;
   const briefCountries =
     brief && typeof brief === 'object' ? (brief as { collect_countries?: unknown }).collect_countries : undefined;
-  const suggestedTimezone = suggestEngTimezoneForCountries(readHeCollectCountries(briefCountries).countries);
+  const suggestedTimezone = heEngTimezonesAllEnabled()
+    ? suggestEngTimezoneForCountries(readHeCollectCountries(briefCountries).countries)
+    : null;
   return NextResponse.json({
     available: intentRead.kind === 'ok' && heEngAutoLaunchEnabled(),
     requested: intent?.wanted === true,

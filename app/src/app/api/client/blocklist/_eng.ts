@@ -677,6 +677,13 @@ async function engBlocklistPostDomains(
           : 'not_eng_market';
     return refusal(code, market.failure.message, market.failure.status);
   }
+  // requireEngMarket пропускает не-клиентские роли с ЛЮБЫМ рынком профиля, а
+  // доменная запись в списке не-ENG владельца уронила бы его RU-читателей
+  // (getBlockedEmailSet бросает на '@host'). Поэтому — только рынок 'eng'
+  // (§1B плана 2026-10-16-eng-countries: «ok with market 'eng'»).
+  if (market.market !== 'eng') {
+    return refusal('not_eng_market', 'This section is not available for your account', 403);
+  }
   const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'add');
   if (blocked) return blocked;
 

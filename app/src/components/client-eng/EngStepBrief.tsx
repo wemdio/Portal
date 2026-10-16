@@ -1292,7 +1292,11 @@ export function EngStepBrief({
       {/* Страны сбора (план §1A): своя карточка над свёрнутым «What we know
           about your business», не под замком рамки ЦА — это дефолт проекта
           для будущих сборок, как «Contacts per company». */}
-      {countriesEnabled && (
+      {/* Выключатель выбора стран могут выключить, когда списки уже сохранены, —
+          а сборка соблюдает сохранённый список всегда. Поэтому карточка есть и
+          тогда: список виден (только для чтения), и клиент знает, откуда
+          ограничение и что говорит про него причина остановки сборки. */}
+      {(countriesEnabled || savedCountriesAll(savedCountries).length > 0) && (
         <EngCard>
           <EngEyebrow>Countries</EngEyebrow>
           <p className="mb-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
@@ -1309,8 +1313,13 @@ export function EngStepBrief({
               setCountriesError('');
               countriesForm.edit('countries', countriesDraftOf(next));
             }}
-            disabled={countriesSaving}
+            disabled={countriesSaving || !countriesEnabled}
           />
+          {!countriesEnabled && (
+            <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+              Changing countries is temporarily unavailable. Collections still use only the countries listed here.
+            </p>
+          )}
           {countryList.length > 0 && !countryList.includes(ENG_COUNTRY_US) && (
             <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
               Local business listings cover the United States only, so they are not used for these countries.
@@ -1328,6 +1337,7 @@ export function EngStepBrief({
               countries.
             </p>
           )}
+          {countriesEnabled && (
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <button
               type="button"
@@ -1344,6 +1354,7 @@ export function EngStepBrief({
               unsaved={countriesForm.changed.length > 0}
             />
           </div>
+          )}
           {countriesError && (
             <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
               {countriesError}

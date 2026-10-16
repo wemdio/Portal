@@ -84,6 +84,7 @@ import {
 import { enforceHeSpendCeiling } from './spendCeiling';
 import { resolveHeLaunchSendingWindow } from './launchSchedule';
 import { readHeCollectCountries } from './engCountries';
+import { heEngTimezonesAllEnabled } from './engRolloutFlags';
 import {
   heLaunchOutcomeCode,
   heLaunchConflictOf,
@@ -602,8 +603,11 @@ async function heEngLaunchWindowPlan(
     // Страны проекта — подсказанному поясу (§1C плана 2026-10-16-eng-countries).
     // Скоуп владельца (loadOwnedProject) брифа не читает — дочитываем его у
     // us-проекта; сбой чтения — тот же отказ, что у окна рынка.
+    // Список стран нужен только подсказанному поясу, а он — только с
+    // HE_ENG_TIMEZONES_ALL (launchSchedule): без выключателя бриф не читаем, и у
+    // достройки запуска нет нового повода для отказа.
     let brief: unknown = args.project.brief;
-    if (brief === undefined && market === 'us' && projectId) {
+    if (brief === undefined && market === 'us' && projectId && heEngTimezonesAllEnabled()) {
       const briefRead = await portalDb.from('he_projects').select('brief').eq('id', projectId).maybeSingle();
       if (briefRead.error) {
         return { kind: 'unavailable', reason: `project countries not read: ${briefRead.error.message}` };
