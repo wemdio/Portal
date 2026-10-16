@@ -52,8 +52,8 @@ export function ContactUploadModePanel({ projectId, mode, disabled = false, onSa
         </label>)}
     </fieldset>
     <p id={`${id}-hint`} className={HE.muted}>{selected === 'all_ready'
-      ? 'Для всех кампаний проекта: загружаем готовый запас в пределах общей цели и свободного места в Instantly. Отправку запускаете в Instantly, скорость задают лимиты почт.'
-      : 'Общая дневная порция для всех кампаний проекта. Размер задаётся темпом ниже.'}</p>
+      ? 'Для всех кампаний проекта, в пределах цели и свободного места. Отправку запускаете в Instantly.'
+      : 'Дневной лимит для всех кампаний проекта задаётся ниже.'}</p>
     {dirty ? <button type="button" className={HE.btnGhost} disabled={busy || disabled} onClick={() => void save()}>
       {busy ? 'Сохраняем…' : 'Применить режим загрузки'}
     </button> : null}

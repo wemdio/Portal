@@ -94,7 +94,7 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
     expect(mockVeEnginePost).toHaveBeenCalledWith('/api/tools/vertical-engine-v2/projects/ve/delivery-rate', {
       preset_id: 'preset', template_ids: ['template-1'], mode: 'manual', manual_limit: 20, expected_revision: 0,
     });
-    expect(screen.getByText(/Система применит его перед следующей загрузкой/)).toBeInTheDocument();
+    expect(screen.getByText('Темп сохранён для следующих загрузок.')).toBeInTheDocument();
     await user.clear(screen.getByLabelText('Не больше новых контактов в день'));
     expect(ready).toHaveBeenLastCalledWith(null);
     expect(screen.getByRole('button', {name: 'Применить темп'})).toBeDisabled();

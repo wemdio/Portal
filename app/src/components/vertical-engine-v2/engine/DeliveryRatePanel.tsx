@@ -76,37 +76,35 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
     } finally { if (currentIdentity.current === savingIdentity) setBusy(false); }
   };
   return <section className="border-t border-[var(--ve2-line)] pt-5 space-y-3" aria-labelledby={`${id}-title`}>
-    <h3 id={`${id}-title`} className="ve2-h3">{supplyOnly ? 'Темп добора новых контактов' : 'Темп новых контактов'}</h3>
+    <h3 id={`${id}-title`} className="ve2-h3">{supplyOnly ? 'Темп добора' : 'Дневной лимит загрузки'}</h3>
     <p className={HE.muted}>{supplyOnly
-      ? 'По этому темпу система рассчитывает запас для дальнейшего сбора. Готовые контакты загружаются целиком, без дневного ограничения Portal.'
-      : 'Общий лимит для всех запусков этого проекта. До дедлайна дневной план учитывает оставшуюся цель и рабочие дни. После дедлайна пополнение продолжается в выбранном темпе до достижения цели. Пауза кампании в Instantly останавливает дозагрузку.'}</p>
+      ? 'Для расчёта запаса. Загрузку готовых контактов не ограничивает.'
+      : 'Общий лимит для всех кампаний проекта.'}</p>
     <fieldset disabled={busy || disabled} className="space-y-3">
       <legend className="sr-only">{supplyOnly ? 'Режим расчёта запаса' : 'Режим дневного лимита'}</legend>
       <label className="flex items-start gap-2"><input type="radio" name={id} checked={mode === 'auto'} onChange={() => { setMode('auto'); invalidate(); }} className="mt-1" />
-        <span>Автоматически <span className={HE.muted}>— по доступным отправителям, с запасом для продолжений цепочки</span></span></label>
+        <span>Автоматически</span></label>
       <label className="flex items-start gap-2"><input type="radio" name={id} checked={mode === 'manual'} onChange={() => { setMode('manual'); invalidate(); }} className="mt-1" />
         <span>Ограничить вручную</span></label>
       {mode === 'manual' ? <div className="max-w-sm space-y-1">
-        <label htmlFor={`${id}-limit`} className="block text-sm">{supplyOnly ? 'Контактов в день для расчёта запаса' : 'Не больше новых контактов в день'}</label>
+        <label htmlFor={`${id}-limit`} className="block text-sm">{supplyOnly ? 'Контактов в день' : 'Не больше новых контактов в день'}</label>
         <input id={`${id}-limit`} type="number" inputMode="numeric" min={1} max={100000} step={1} value={limit}
           className={HE.input} aria-invalid={!valid} onChange={event => { setLimit(event.target.value); invalidate(); }} />
         {!valid ? <p className="text-sm text-red-500">Укажите целое число от 1 до 100 000.</p> : null}
       </div> : null}
     </fieldset>
     {snapshot ? <div className="space-y-1">
-      <p><strong>{supplyOnly ? 'Расчёт запаса: ' : 'До '}{valid ? cap : snapshot.max_new_contacts} новых контактов в день</strong></p>
-      <p className={HE.muted}>Доступно почт: {snapshot.usable_mailboxes} из {snapshot.mailbox_count}. В расчёте — до {snapshot.sequence_steps} писем на контакт, включая продолжения.</p>
-      {snapshot.busy_mailboxes > 0 ? <p className={HE.muted}>Почт, используемых также в других активных кампаниях: {snapshot.busy_mailboxes}. Это допустимо: Instantly делит общий дневной лимит каждой почты между кампаниями. Фактический темп здесь может быть ниже расчётного.</p> : null}
-      {snapshot.max_new_contacts === 0 ? <p className={HE.muted}>{supplyOnly ? 'Сейчас по лимитам и состоянию почт нельзя рассчитать добор. Проверьте их в Instantly, затем обновите расчёт.' : 'Сейчас лимиты и состояние почт не позволяют добавлять новые контакты. Проверьте их в Instantly, затем обновите расчёт.'}</p> : null}
-      {snapshot.unavailable_mailboxes > 0 ? <p className={HE.muted}>Недоступно или не настроено почт: {snapshot.unavailable_mailboxes}.</p> : null}
-      {snapshot.slow_ramp_mailboxes > 0 ? <p className={HE.muted}>У {snapshot.slow_ramp_mailboxes} почт включён постепенный разгон. Instantly не сообщает текущую ступень: учитываем по 2 письма в день, пока разгон включён.</p> : null}
-      <p className={HE.muted}>{supplyOnly ? 'Это ориентир для добора, а не ограничение загрузки или обещание отправки. Лимиты почт не меняются.' : 'Это верхняя граница, а не обещание отправки. Лимиты самих почт не повышаются. Расчёт обновляется перед очередной загрузкой.'}</p>
+      <p><strong>{supplyOnly ? 'Ориентир: ' : 'До '}{valid ? cap : snapshot.max_new_contacts} новых контактов в день</strong></p>
+      {snapshot.max_new_contacts === 0 ? <p className={HE.muted}>Проверьте почты и их лимиты в Instantly, затем обновите расчёт.</p> : <>
+        {snapshot.busy_mailboxes > 0 ? <p className={HE.muted}>Почты используются и в других кампаниях. Фактический темп может быть ниже.</p> : null}
+        {snapshot.unavailable_mailboxes > 0 ? <p className={HE.muted}>Часть почт недоступна. В расчёте: {snapshot.usable_mailboxes} из {snapshot.mailbox_count}.</p> : null}
+        {snapshot.slow_ramp_mailboxes > 0 ? <p className={HE.muted}>На {snapshot.slow_ramp_mailboxes} почтах включён разгон, поэтому темп снижен.</p> : null}
+      </>}
     </div> : busy ? <p role="status">Проверяем отправителей в Instantly…</p> : null}
     {data?.rate && !dirty ? <p role="status" className={HE.muted}>{data.rate.status === 'ready'
       ? 'Темп сохранён.' : data.rate.status === 'blocked'
-        ? supplyOnly ? 'Расчёт добора отложен: система повторит проверку темпа.' : 'Новая загрузка отложена: система повторит проверку темпа.'
-        : supplyOnly ? 'Темп сохранён для следующего расчёта добора.' : 'Темп сохранён. Система применит его перед следующей загрузкой.'}</p> : null}
-    {data?.bound && !supplyOnly ? <p className={HE.muted}>Уже загруженные и зарезервированные контакты не загружаются заново. Новый лимит действует на следующие порции; сегодняшняя зарезервированная порция остаётся прежней.</p> : null}
+        ? supplyOnly ? 'Расчёт добора отложен. Повторим автоматически.' : 'Загрузка отложена. Повторим расчёт автоматически.'
+        : supplyOnly ? 'Темп сохранён.' : 'Темп сохранён для следующих загрузок.'}</p> : null}
     {error ? <StatusBox tone="error">{error}</StatusBox> : null}
     <div className="flex flex-wrap gap-3">
       <button type="button" className={HE.btnGhost} disabled={disabled || busy || !data || !valid || !cap} onClick={() => void save()}>{busy ? 'Проверяем…' : 'Применить темп'}</button>
