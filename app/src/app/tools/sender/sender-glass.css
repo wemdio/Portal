@@ -22,9 +22,9 @@
   --lg-highlight: rgba(255, 255, 255, 0.9);
   --lg-lowlight: rgba(255, 255, 255, 0.25);
   --lg-shadow: 0 12px 40px -18px rgba(30, 41, 80, 0.35);
-  --lg-blob-1: rgba(96, 165, 250, 0.35);
-  --lg-blob-2: rgba(167, 139, 250, 0.3);
-  --lg-blob-3: rgba(45, 212, 191, 0.22);
+  --lg-blob-1: rgba(96, 165, 250, 0.24);
+  --lg-blob-2: rgba(167, 139, 250, 0.2);
+  --lg-blob-3: rgba(45, 212, 191, 0.15);
   --lg-base: #eef1f7;
 
   position: relative;
@@ -40,9 +40,9 @@ html[data-portal-theme='dark'] .sender-glass {
   --lg-highlight: rgba(255, 255, 255, 0.22);
   --lg-lowlight: rgba(255, 255, 255, 0.04);
   --lg-shadow: 0 16px 48px -20px rgba(0, 0, 0, 0.75);
-  --lg-blob-1: rgba(59, 130, 246, 0.22);
-  --lg-blob-2: rgba(139, 92, 246, 0.18);
-  --lg-blob-3: rgba(20, 184, 166, 0.12);
+  --lg-blob-1: rgba(59, 130, 246, 0.15);
+  --lg-blob-2: rgba(139, 92, 246, 0.12);
+  --lg-blob-3: rgba(20, 184, 166, 0.08);
   --lg-base: #0d0f14;
 }
 
