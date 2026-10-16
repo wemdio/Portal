@@ -33,7 +33,18 @@ function batchYear(batch: string | null): number | null {
   return m ? Number(m[1]) : null;
 }
 
-export async function loadYcCompanies(db: SupabaseClient, config: PolzaOutreachConfig): Promise<YcCompany[]> {
+/**
+ * `skipDomains` — домены, которые брать не надо: готовы в другом запуске или
+ * отсеяны за месяц по причине, которая сама не изменится. Без этого одни и те
+ * же ~1 450 компаний YC перебирались в каждом запуске и почти все отсеивались
+ * заново (нет корпоративной почты, уже выгружены), занимая место в потолке
+ * просмотра.
+ */
+export async function loadYcCompanies(
+  db: SupabaseClient,
+  config: PolzaOutreachConfig,
+  options: { skipDomains?: ReadonlySet<string> } = {},
+): Promise<YcCompany[]> {
   const countries = config.countries.map((c) => PDL_COUNTRY_BY_CODE[c]).filter(Boolean);
   const out: YcCompany[] = [];
   const seen = new Set<string>();
@@ -56,7 +67,7 @@ export async function loadYcCompanies(db: SupabaseClient, config: PolzaOutreachC
       const year = batchYear(r.batch ? String(r.batch) : null);
       if (!year || year < config.yc_batch_from_year) continue;
       const domain = normalizeDomain(String(r.website ?? ''));
-      if (!domain || !domain.includes('.') || seen.has(domain)) continue;
+      if (!domain || !domain.includes('.') || seen.has(domain) || options.skipDomains?.has(domain)) continue;
       seen.add(domain);
       out.push({
         name: String(r.name),
