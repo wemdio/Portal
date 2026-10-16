@@ -121,3 +121,10 @@ html body .sender-glass .rounded-lg.border.bg-zinc-50.p-1 {
 html body .sender-glass .sender-table-head {
   background-color: rgba(96, 165, 250, 0.08) !important;
 }
+
+/* Иконки внутри полей (лупа поиска): у поля со стеклом свой слой отрисовки,
+   и оно перекрывало иконку, стоящую в разметке раньше него. */
+html body .sender-glass .relative > svg.absolute,
+html body .sender-glass .relative > button.absolute {
+  z-index: 1;
+}
