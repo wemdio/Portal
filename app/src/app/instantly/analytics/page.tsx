@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Campaign, CampaignAnalytics } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 function MetricCard({ label, value, icon: Icon, color }: {
   label: string;
@@ -113,7 +114,7 @@ export default function AnalyticsPage() {
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
         </div>
       ) : (
         <>

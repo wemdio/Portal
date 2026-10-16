@@ -12,6 +12,7 @@ import {
   isWithinDays,
   parseFlexibleDate,
 } from '@/lib/dateUtils';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 const STATUS_CONFIG: Record<string, { label: string; className: string }> = {
   'в работе': { label: 'В работе', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
@@ -326,7 +327,7 @@ export default function ProjectsAnalyticsPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-gray-500">Загрузка...</div>
+        <PortalSpinner />
       </div>
     );
   }

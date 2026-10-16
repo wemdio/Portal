@@ -24,6 +24,7 @@ import { isLead as checkIsLead } from '@/lib/roles';
 import { useUser } from '@/lib/UserProvider';
 import type { Locale } from '@/lib/i18n';
 import { NativePickerField, openNativePicker } from '@/components/tasks/NativePickerField';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 const DEFAULT_BOARD_ID = '00000000-0000-0000-0000-000000000001';
 const COLUMN_DRAG_PREFIX = 'column-';
@@ -1444,7 +1445,7 @@ export default function TasksPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-gray-500">Загрузка...</div>
+        <PortalSpinner />
       </div>
     );
   }

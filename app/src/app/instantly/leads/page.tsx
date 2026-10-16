@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Lead, PaginatedResponse, Campaign, LeadList } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 const INTEREST_LABELS: Record<number, { label: string; cls: string }> = {
   0: { label: 'Не обработан', cls: 'bg-zinc-100 text-zinc-600' },
@@ -22,7 +23,7 @@ export default function LeadsPage() {
   return (
     <Suspense fallback={
       <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+        <PortalSpinner />
       </div>
     }>
       <LeadsContent />
@@ -145,7 +146,7 @@ function LeadsContent() {
         </div>
       ) : loading && leads.length === 0 ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
+          <PortalSpinner />
         </div>
       ) : leads.length === 0 ? (
         <div className="rounded-xl border border-zinc-200 bg-white py-16 text-center">
