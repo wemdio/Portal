@@ -343,7 +343,7 @@ export function SenderReplyPanel({
           </div>
         ) : error ? (
           <p className="mt-2 text-sm text-red-600">{error}</p>
-        ) : null        )}
+        ) : null}
       </div>
     </div>
   );
