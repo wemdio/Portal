@@ -460,11 +460,21 @@ const STATUS_PILL: Record<CampaignDto['status'], { text: string; pill: string; d
   done: { text: 'Завершена', pill: 'bg-blue-100 text-blue-700', dot: 'bg-blue-500' },
 };
 
-/** Доля получателей, которым ушло хотя бы первое письмо; null — получателей нет. */
+/**
+ * Прогресс как в Instantly: доля контактов, у которых цепочка закончилась —
+ * дошли до последнего письма, ответили, отбились или отписались. Раньше
+ * считали «первое письмо ушло», и кампания с сотнями неотправленных повторных
+ * писем показывала 100%. null — получателей нет.
+ */
 function progressPercent(campaign: CampaignDto): number | null {
   const stats = campaign.stats;
   if (!stats || stats.recipients === 0) return null;
-  return Math.round((stats.reached / stats.recipients) * 100);
+  // Старый ответ API без разбивки — по-прежнему по первому письму.
+  if (stats.inProgress == null || stats.notContacted == null) {
+    return Math.round((stats.reached / stats.recipients) * 100);
+  }
+  const open = stats.inProgress + stats.notContacted;
+  return Math.floor(((stats.recipients - open) / stats.recipients) * 100);
 }
 
 function formatCreated(iso: string): string {
