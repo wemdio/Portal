@@ -75,7 +75,7 @@ export default function AdminEnvPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [rawMode, setRawMode] = useState(false);
+  const [rawMode, setRawMode] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [envPath, setEnvPath] = useState('');
   const [dirty, setDirty] = useState(false);
@@ -330,19 +330,8 @@ export default function AdminEnvPage() {
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() => switchMode(false)}
-            className={`px-3 py-1.5 text-sm rounded-l-lg border transition-colors ${
-              !rawMode
-                ? 'bg-blue-600 text-white border-blue-600'
-                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-            }`}
-          >
-            <List className="h-4 w-4 inline mr-1" />
-            Таблица
-          </button>
-          <button
             onClick={() => switchMode(true)}
-            className={`px-3 py-1.5 text-sm rounded-r-lg border transition-colors ${
+            className={`px-3 py-1.5 text-sm rounded-l-lg border transition-colors ${
               rawMode
                 ? 'bg-blue-600 text-white border-blue-600'
                 : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
@@ -350,6 +339,17 @@ export default function AdminEnvPage() {
           >
             <Code className="h-4 w-4 inline mr-1" />
             Текст
+          </button>
+          <button
+            onClick={() => switchMode(false)}
+            className={`px-3 py-1.5 text-sm rounded-r-lg border transition-colors ${
+              !rawMode
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+            }`}
+          >
+            <List className="h-4 w-4 inline mr-1" />
+            Таблица
           </button>
         </div>
       </div>

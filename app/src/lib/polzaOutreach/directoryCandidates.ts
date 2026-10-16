@@ -107,13 +107,6 @@ const PAGE = 1000;
  */
 const MAX_RANDOM_OFFSET = 50_000;
 
-interface LoadOptions {
-  /** Сколько компаний нужно набрать. */
-  want: number;
-  /** Домены, которые брать не надо: уже готовы или недавно отсеяны. */
-  skipDomains: ReadonlySet<string>;
-}
-
 /** Вилки размера, попадающие в настройки запуска (min_employees…max_employees). */
 function sizesFor(config: PolzaOutreachConfig): string[] {
   return SIZE_ORDER.filter((size) => {
@@ -122,31 +115,46 @@ function sizesFor(config: PolzaOutreachConfig): string[] {
   });
 }
 
-export async function loadDirectoryCompanies(
+/**
+ * Лента компаний справочника: отдаёт их порциями, помня, где остановилась.
+ *
+ * Зачем лента, а не один большой запрос. Потолок просмотра — до 100 000
+ * компаний, а запуск обычно останавливается задолго до него (цель набрана).
+ * Читать сотню страниц справочника на старте ради этого незачем: лента
+ * подгружает следующую порцию, только когда прошлая просмотрена.
+ */
+export interface DirectoryFeed {
+  /** Следующая порция (не меньше `want`, если справочник не кончился). Пусто — кончился. */
+  next(want: number): Promise<DirectoryCompany[]>;
+}
+
+export function createDirectoryFeed(
   db: SupabaseClient,
   config: PolzaOutreachConfig,
-  options: LoadOptions,
-): Promise<DirectoryCompany[]> {
-  const want = Math.max(0, options.want);
-  if (want === 0) return [];
+  options: { skipDomains: ReadonlySet<string> },
+): DirectoryFeed {
   const countries = config.countries.map((c) => PDL_COUNTRY_BY_CODE[c]).filter(Boolean);
-  if (!countries.length) return [];
   const sizes = sizesFor(config);
-  if (!sizes.length) return [];
-
-  const out: DirectoryCompany[] = [];
+  // Обход: очередь отраслей × вилка размера. Порядок тот же, что и был.
+  const combos = countries.length && sizes.length
+    ? DIRECTORY_INDUSTRY_TIERS.flatMap((industries) => sizes.map((size) => ({ industries, size })))
+    : [];
   const seen = new Set<string>();
+  let comboIdx = 0;
+  // Сдвиг случайный, но один на (очередь × размер): страницы внутри идут
+  // подряд, иначе выборка рвалась бы и повторялась.
+  let from: number | null = null;
+  let restarted = false;
 
-  for (const industries of DIRECTORY_INDUSTRY_TIERS) {
-    for (const size of sizes) {
-      if (out.length >= want) return out;
-      // Сдвиг случайный, но один на (очередь × размер): страницы внутри идут
-      // подряд, иначе выборка рвалась бы и повторялась.
-      let from = Math.floor(Math.random() * MAX_RANDOM_OFFSET);
-      // Сдвиг мог оказаться дальше конца выборки — тогда начинаем сначала.
-      // Без этого отрасль с десятью тысячами компаний молча давала бы ноль.
-      let restarted = false;
-      while (out.length < want) {
+  return {
+    async next(want: number): Promise<DirectoryCompany[]> {
+      const out: DirectoryCompany[] = [];
+      while (out.length < want && comboIdx < combos.length) {
+        const { industries, size } = combos[comboIdx];
+        if (from === null) {
+          from = Math.floor(Math.random() * MAX_RANDOM_OFFSET);
+          restarted = false;
+        }
         const { data, error } = await db
           .from('pdl_companies')
           .select('name,website,industry,size,country,description')
@@ -159,11 +167,14 @@ export async function loadDirectoryCompanies(
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw new Error(`directory companies load failed: ${error.message}`);
+        // Сдвиг мог оказаться дальше конца выборки — тогда начинаем сначала.
+        // Без этого отрасль с десятью тысячами компаний молча давала бы ноль.
         if (!data?.length && from > 0 && !restarted) {
           restarted = true;
           from = 0;
           continue;
         }
+        // Страницу берём целиком: остаток не теряем, лента не помнит «полстраницы».
         for (const row of data ?? []) {
           const domain = normalizeDomain(String(row.website ?? ''));
           if (!domain || !domain.includes('.')) continue;
@@ -180,14 +191,34 @@ export async function loadDirectoryCompanies(
             country: row.country ? String(row.country) : null,
             description: row.description ? String(row.description) : null,
           });
-          if (out.length >= want) break;
         }
-        // Страница короче запрошенной — отрасль с этим размером кончилась.
-        if (!data || data.length < PAGE) break;
-        from += PAGE;
+        if (!data || data.length < PAGE) {
+          // Страница короче запрошенной — отрасль с этим размером кончилась.
+          comboIdx += 1;
+          from = null;
+        } else {
+          from += PAGE;
+        }
       }
-    }
-  }
+      return out;
+    },
+  };
+}
 
-  return out;
+interface LoadOptions {
+  /** Сколько компаний нужно набрать. */
+  want: number;
+  /** Домены, которые брать не надо: уже готовы или недавно отсеяны. */
+  skipDomains: ReadonlySet<string>;
+}
+
+/** Разовая выборка: то же, что лента, но одной порцией на `want` компаний. */
+export async function loadDirectoryCompanies(
+  db: SupabaseClient,
+  config: PolzaOutreachConfig,
+  options: LoadOptions,
+): Promise<DirectoryCompany[]> {
+  const want = Math.max(0, options.want);
+  if (want === 0) return [];
+  return (await createDirectoryFeed(db, config, { skipDomains: options.skipDomains }).next(want)).slice(0, want);
 }
