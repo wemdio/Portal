@@ -9,7 +9,7 @@
  *  2. «Новый лид» → только «Взят в работу» или «Закрыто и не реализовано»;
  *     «Взят в работу» → только «Лид квалифицирован» или «Закрыто и не
  *     реализовано» (уточнение Дмитрия, 16.10.2026).
- *  3. «Закрыто и не реализовано» — с любого этапа.
+ *  3. «Закрыто и не реализовано» — с любого этапа; из него — только в «Взят в работу».
  *
  * Допущения, которых в просьбе не было (одна строка в таблице ниже, если не так):
  *  - назад двигать можно — это исправление ошибки, этап не перескакивается,
@@ -97,7 +97,16 @@ export function checkTransition(input: {
   // Закрытие в минус — с любого этапа; выигрыш и выход из «Неразобранного»,
   // «Успешно» и «Закрыто» (переоткрытие) не ограничиваем.
   if (to === STAGE.LOST || to === STAGE.WON) return { allowed: true };
-  if (from === STAGE.UNSORTED || from === STAGE.WON || from === STAGE.LOST) return { allowed: true };
+  if (from === STAGE.UNSORTED || from === STAGE.WON) return { allowed: true };
+
+  // Из «Закрыто и не реализовано» — только вернуть в работу (Дмитрий, 16.10.2026).
+  if (from === STAGE.LOST) {
+    if (to === STAGE.TAKEN) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `Из «${stageName(STAGE.LOST)}» сделку можно вернуть только в «${stageName(STAGE.TAKEN)}».`,
+    };
+  }
 
   const toKnown = CHAIN.includes(to) || SIDE_STAGES.has(to);
   const fromKnown = CHAIN.includes(from) || SIDE_STAGES.has(from);
