@@ -212,7 +212,7 @@ function renderLeadAlert(data: DemoLeadData, cuts: AlertCuts): string {
  * with «…»: first the URLs, then the message body by as much as is still over, and
  * if that is not enough, every value.
  */
-function leadAlertText(data: DemoLeadData): string {
+export function leadAlertText(data: DemoLeadData): string {
   const full = renderLeadAlert(data, NO_CUTS);
   if (visibleLength(full) <= TG_TEXT_MAX) return full;
   const urlsCut = renderLeadAlert(data, { ...NO_CUTS, url: ALERT_CUT_MAX });
