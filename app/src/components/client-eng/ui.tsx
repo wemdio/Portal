@@ -8,6 +8,7 @@
  */
 
 import { Loader2 } from 'lucide-react';
+import { ENG_NEEDS_INPUT_LABEL_EN, heProjectAwaitsDescription } from './clientFailureText';
 
 export type EngTone = 'neutral' | 'accent' | 'green' | 'amber' | 'red';
 
@@ -135,6 +136,21 @@ export function projectStatusTone(status: string | undefined): EngTone {
     default:
       return 'neutral';
   }
+}
+
+/**
+ * Бейдж статуса проекта — одно правило на шапку мастера и карточку списка.
+ * Проект, который ждёт описания бизнеса (heProjectAwaitsDescription: 'failed'
+ * кодом website_thin), — нейтральное «needs your input», а не красное
+ * «stopped»: это не сбой, research продолжится после ответа клиента. Любой
+ * другой 'failed' — по-прежнему красный.
+ */
+export function EngProjectStatusBadge({ status, errorCode }: { status: string; errorCode: unknown }) {
+  return heProjectAwaitsDescription(status, errorCode) ? (
+    <EngBadge label={ENG_NEEDS_INPUT_LABEL_EN} tone="neutral" />
+  ) : (
+    <EngBadge label={status} tone={projectStatusTone(status)} />
+  );
 }
 
 /** Тон бейджа для статуса базы HE. */

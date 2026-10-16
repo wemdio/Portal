@@ -35,6 +35,8 @@ import { isAuthExpiredError } from '@/lib/authFetch';
 // наших каталогов и таблиц и русские фразы стадий, и всё это уезжало в чанк
 // /client/eng. Разбор сырых строк живёт на сервере (проекция отдаёт код).
 import {
+  ENG_NEEDS_DESCRIPTION_SHORT_EN,
+  HE_RESEARCH_NEEDS_DESCRIPTION_CODE,
   HE_REFILL_HOLD_LIFT_EN,
   HE_REFILL_RUN_KEPT_EN,
   HE_REFILL_RUN_WHAT_TO_DO_EN,
@@ -316,6 +318,8 @@ export function engDashAttentionText(attention: EngDashAttention): string {
       return attention.code ? heClientFailureFor(attention.code).title : ATTENTION_NO_REASON_BASE_EN;
     case 'project_failed':
       if (attention.code === 'cancelled') return ATTENTION_CANCELLED_RESEARCH_EN;
+      // Research ждёт описания бизнеса — пауза до ответа клиента, без «stopped».
+      if (attention.code === HE_RESEARCH_NEEDS_DESCRIPTION_CODE) return ENG_NEEDS_DESCRIPTION_SHORT_EN;
       return attention.code ? heClientFailureFor(attention.code).title : ATTENTION_NO_REASON_RESEARCH_EN;
   }
 }

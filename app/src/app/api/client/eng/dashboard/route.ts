@@ -48,6 +48,7 @@ import {
   type EngTeamFixStop,
 } from '@/lib/hypothesisEngine/engDashboard';
 import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
+import { heProjectAwaitsDescription } from '@/components/client-eng/clientFailureText';
 import {
   HE_ENG_AUTO_LAUNCH_STALE_MS,
   heEngAutoLaunchLeaseExpired,
@@ -204,8 +205,17 @@ export async function GET(req: NextRequest) {
   if (projErr) return engServerError('client.eng.dashboard.projects_failed', projErr, DASHBOARD_LOAD_FAILED, { userId });
 
   const projectRows = projects ?? [];
+  // Research ждёт описания бизнеса (website_thin): у такого проекта рынков ещё
+  // нет, и пустая карточка Command Center просит описание, а не «No markets yet».
+  const awaitsDescriptionOf = (p: { status?: unknown; error?: unknown }) =>
+    heProjectAwaitsDescription(p.status, p.status === 'failed' ? toClientEngStageErrorCode(p.error) : null);
   const emptyAggregate = {
-    projects: projectRows.map((p) => ({ id: p.id, name: p.name, status: p.status })),
+    projects: projectRows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      status: p.status,
+      awaits_description: awaitsDescriptionOf(p),
+    })),
     verticals: [] as unknown[],
     today: { appended: 0, valid: 0, collected: 0, collected_companies: 0 },
     autoRefill: { next_run_at: nextDailyRunIso(now), daily_cap: 0 },
@@ -252,7 +262,7 @@ export async function GET(req: NextRequest) {
         .limit(ACTIVE_JOBS_LIMIT),
       supabaseAdmin
         .from('he_jobs')
-        .select('id, project_id, stage, status, payload, progress, created_at, updated_at')
+        .select('id, project_id, stage, status, payload, progress, error, created_at, updated_at')
         .in('project_id', projectIds)
         .in('status', ['done', 'failed'])
         .order('updated_at', { ascending: false })
@@ -327,7 +337,13 @@ export async function GET(req: NextRequest) {
   // спроецированный `collect_info` ключа `companies_total` уже не несёт.
   const companiesByBaseId = new Map(rawBaseRows.map((b) => [str(b.id), companiesTotalOf(b)]));
   const activeJobRows = activeJobsRes.data ?? [];
-  const finishedJobRows = finishedJobsRes.data ?? [];
+  // Упавшей джобе — код причины (toClientEngStageErrorCode): лента событий
+  // отличает по нему research, ждущий описания бизнеса (website_thin), от
+  // сбоя. Сырой he_jobs.error дальше роута не уходит: события несут только
+  // свои английские фразы.
+  const finishedJobRows = (finishedJobsRes.data ?? []).map((j) =>
+    j.status === 'failed' ? { ...j, error_code: toClientEngStageErrorCode(j.error) } : j,
+  );
   /**
    * Активные джобы для СУДА этапа вертикали (deriveEngVerticalStage), а не для
    * показа. Этап 'attention' («вертикаль встала») ставится только без идущей
@@ -1188,6 +1204,7 @@ export async function GET(req: NextRequest) {
       id: p.id,
       name: p.name,
       status: p.status,
+      awaits_description: awaitsDescriptionOf(p),
       autopilot_hold: autopilotHoldByProjectId.get(p.id as string) ?? null,
       // Состояние ночного добора ПРОЕКТА, а не аккаунта: карточки вертикалей
       // печатают «next: daily refill …» по своему проекту (у вертикали есть

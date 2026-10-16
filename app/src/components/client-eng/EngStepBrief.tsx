@@ -90,6 +90,7 @@ import {
   type HeJobSummary,
 } from './api-client';
 import {
+  ENG_NEEDS_INPUT_LABEL_EN,
   HE_RESEARCH_NEEDS_DESCRIPTION_CODE,
   HE_RESEARCH_STALL_GRACE_MS,
   heClientFailureFor,
@@ -290,7 +291,8 @@ const STALL_GRACE_MINUTES = Math.round(HE_RESEARCH_STALL_GRACE_MS / 60_000);
 
 /**
  * Research ждёт описания бизнеса (website_thin): что случилось — заголовком
- * справочника (то же предложение, что «Last error» шапки и Command Center), что
+ * справочника (шапка мастера и Command Center этот код красной «Last error» не
+ * показывают — у них нейтральное «needs your input», heProjectAwaitsDescription), что
  * делать — словами этого шага (справочник говорит «Open step 1», а клиент уже
  * на нём). «Goes on from the step where it stopped» — роут продолжает ту же
  * джобу site_profile, а не начинает research новым стартом.
@@ -1057,9 +1059,10 @@ export function EngStepBrief({
               </span>
             ) : (
               // Ждёт описания — не «failed» для клиента: research остановлен
-              // до работы и продолжится его кнопкой.
+              // до работы и продолжится его кнопкой. Та же подпись, что у
+              // бейджа шапки мастера и карточки списка (EngProjectStatusBadge).
               <EngBadge
-                label={canContinue ? 'needs your input' : project.status}
+                label={canContinue ? ENG_NEEDS_INPUT_LABEL_EN : project.status}
                 tone={project.status === 'researched' ? 'green' : 'neutral'}
               />
             )}
