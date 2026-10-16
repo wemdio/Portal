@@ -38,6 +38,10 @@ Also: `do_not_contact_over_cap` added to `HE_COLLECT_STOP_REPEATS_CODES` (its te
 - Owner-visible: staff launches now prefer the project's «Launch» window and look for the client's last window only inside the same project.
 - A refill base where every row is on the DNC list still ends `no_new` (no `do_not_contact` note).
 
-## Waits for the Mac session / owner «да»
-Rollout per plan §4: read-only pre-checks (`'@%'` count = 0; funded `country` and jobhive `country_code` distributions) → deploy with flags off → confirm all containers → `HE_ENG_COLLECT_COUNTRIES` on → `HE_ENG_DNC_DOMAINS` on → live Instantly enum check of the 94 new ids (incl. the 9 suggested ones) → `HE_ENG_TIMEZONES_ALL` on → HST list via the staff route `PUT /api/tools/hypothesis-engine/projects/2971d740-…/collect-countries`.
-Owner decisions still open (plan §6 item 15): hidden jurisdictions, suggested-zone default, live check, HST list and research rerun, DNC on + rollback floor, later country filter for prepared companies, max 50.
+## Owner decisions, 2026-10-16 evening (memory note `notes/vertical-engine/2026-10-16-e7a026229e9d.md`)
+- **Rollout: everything at once.** Put all three flags into the prod env together with the deploy (daytime, not during the nightly refill). Right after the deploy: confirm every container runs the new build; live Instantly check of the 94 new zone ids (incl. the 9 suggested ones) on one paused test campaign with no leads; then test on HST. HST is a test client and is re-run from scratch anyway. Merge/deploy and every prod write still need the owner's «да» for that step.
+- **Before rolling code back below this release** once domain rows exist: remove the `'@%'` rows first (rollback floor, plan §1B).
+- **HST is run like any client, through the cabinet** (business description, target audience, «Countries», Do not contact domains) — no hand-written staff/SQL fields. Countries: Ireland, United Kingdom, Netherlands, Luxembourg, Germany, Denmark, Sweden, Finland, Norway, United States.
+- Hidden jurisdictions and the 50-country cap: keep as built.
+- **Deferred (do not forget):** per-region sending windows — (a) know each prepared company's country and drop out-of-list companies at send time; (b) split a market's launch into per-region campaigns with their own windows. Meanwhile, for mixed EU + US lists: 13:00–17:00 London time.
+- **Letters rule (to implement):** a call ask is allowed only if the client's offer includes a call, and only from email 2 of the sequence on — never in email 1. No opt-out lines (decided earlier).
