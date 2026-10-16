@@ -111,7 +111,7 @@ export async function fetchFirstSalesStageFunnel(
     // ничего бы не добавил.
     cohort
       ? fetchAllPages<{ amo_deal_id: number }>((a, b) =>
-        db.from('amo_events').select('amo_deal_id')
+        db.from('amo_status_events_v').select('amo_deal_id')
           .eq('event_type', 'lead_status_changed')
           .gte('changed_at', fromIso).lte('changed_at', toIso)
           .order('id').range(a, b))
@@ -140,7 +140,7 @@ export async function fetchFirstSalesStageFunnel(
     // последний переход ДО его конца, и он мог случиться задолго до начала.
     Promise.all(chunkArray(ids, IN_CHUNK_SIZE).map((chunk) =>
       fetchAllPages<EventRow>((a, b) =>
-        db.from('amo_events')
+        db.from('amo_status_events_v')
           .select('amo_deal_id, changed_at, from_value, to_value, after:payload->value_after, before:payload->value_before')
           .eq('event_type', 'lead_status_changed')
           .in('amo_deal_id', chunk)
