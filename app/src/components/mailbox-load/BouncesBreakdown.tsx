@@ -1,9 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-
 type Row = { key: string; bounced: number };
-type Breakdown = {
+export type Breakdown = {
   day: string;
   total: number;
   mailboxes: Row[];
@@ -21,28 +19,8 @@ const SECTIONS: Array<{ key: 'mailboxes' | 'campaigns' | 'steps' | 'domains'; ti
 
 const nf = (n: number) => n.toLocaleString('ru-RU');
 
-export default function BouncesBreakdown({ day }: { day: string }) {
-  const [data, setData] = useState<Breakdown | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    setData(null);
-    setError(null);
-    fetch(`/api/analytics/mailbox-load/bounces?day=${encodeURIComponent(day)}`)
-      .then(async (res) => {
-        const body = await res.json();
-        if (!res.ok || !body.data) throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`);
-        if (alive) setData(body.data as Breakdown);
-      })
-      .catch((e: Error) => {
-        if (alive) setError(e.message);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [day]);
-
+/** Данные приходят готовыми от страницы (грузятся параллельно с таблицей ящиков). */
+export default function BouncesBreakdown({ data, error }: { data: Breakdown | null; error: string | null }) {
   if (error) {
     return <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">Не удалось посчитать отбои: {error}</div>;
   }

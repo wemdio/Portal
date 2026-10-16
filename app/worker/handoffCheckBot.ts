@@ -119,7 +119,7 @@ async function pause(ms: number, shouldStop: () => boolean): Promise<void> {
 async function evaluate(
   ctx: Ctx,
   amoId: number | null,
-  stated: { amount: number | null; source: string | null },
+  stated: { amount: number | null; source: string | null; addendum?: boolean },
 ): Promise<CheckOutcome> {
   if (amoId == null) return { kind: 'no_link' };
   try {
@@ -327,7 +327,7 @@ export async function handleUpdate(ctx: Ctx, update: TelegramUpdate): Promise<vo
   // Сделку ведёт более новое сообщение — правка старого ничего не меняет.
   if (prev?.status === 'superseded') return;
 
-  const outcome = await evaluate(ctx, parsed.amoId, { amount: parsed.statedAmount, source: parsed.statedSource });
+  const outcome = await evaluate(ctx, parsed.amoId, { amount: parsed.statedAmount, source: parsed.statedSource, addendum: parsed.isAddendum });
   const decision = decide(prev, outcome, 'message', new Date());
   await applyDecision(
     ctx,
@@ -373,6 +373,7 @@ async function recheckRow(ctx: Ctx, row: HandoffCheckRow, now: Date): Promise<vo
   const stated = {
     amount: row.stated_amount == null ? null : Number(row.stated_amount),
     source: row.stated_source,
+    addendum: row.message_text ? parseHandoff(row.message_text).isAddendum : false,
   };
   const outcome = await evaluate(ctx, row.amo_id, stated);
   const decision = decide(row, outcome, 'daily', now);

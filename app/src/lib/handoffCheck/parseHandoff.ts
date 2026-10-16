@@ -11,6 +11,12 @@ export interface ParsedHandoff {
   statedAmount: number | null;
   /** Текст из «Откуда лид: …». */
   statedSource: string | null;
+  /**
+   * Продажа оформлена доп. соглашением («ДС», «доп. соглашение») к старому
+   * договору. В сообщении тогда стоит сумма только НОВОГО платежа, а в сделке —
+   * прежние платежи плюс новый (79k + 120k = 199k).
+   */
+  isAddendum: boolean;
 }
 
 // Разделитель после «Стоимость»/«Откуда лид» — двоеточие или любое тире
@@ -32,6 +38,10 @@ const MARKER_CHECKS: Array<(text: string) => boolean> = [
   (t) => new RegExp(`откуда\\s+лид\\s*${SEP}`, 'i').test(t),
   (t) => /ссылка\s+на\s+амо/i.test(t),
 ];
+
+// «ДС» — только отдельным словом («через ДС», «ДС вложением», «ДС1»), чтобы не ловить
+// «ТДС» или «ДСП». «Доп(олнительное) соглашение» — в любой падежной форме.
+const ADDENDUM_RE = /(?:^|[^а-яёa-z])(?:дс(?![а-яёa-z])|доп\.?\s*соглашени|дополнительн\S*\s+соглашени|допсоглашени)/i;
 
 const AMOUNT_LINE_RE = new RegExp(`стоимость\\s*${SEP}\\s*(.+)`, 'i');
 const SOURCE_LINE_RE = new RegExp(`откуда\\s+лид\\s*${SEP}\\s*(.+)`, 'i');
@@ -98,5 +108,5 @@ export function parseHandoff(text: string): ParsedHandoff {
   const statedSourceRaw = sourceLine ? sourceLine[1].trim() : '';
   const statedSource = statedSourceRaw.length > 0 ? statedSourceRaw : null;
 
-  return { isHandoff, amoId, amoUrl, statedAmount, statedSource };
+  return { isHandoff, amoId, amoUrl, statedAmount, statedSource, isAddendum: ADDENDUM_RE.test(text) };
 }
