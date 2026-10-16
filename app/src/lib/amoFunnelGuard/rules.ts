@@ -152,6 +152,8 @@ export interface StatusChange {
   oldPipelineId: number | null;
   statusId: number;
   oldStatusId: number;
+  /** Когда переход случился; у вебхука не задан — берём «сейчас». */
+  occurredAt?: Date;
 }
 
 /**

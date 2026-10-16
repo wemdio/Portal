@@ -31,17 +31,18 @@ async function amoRequest<T>(
   return (await res.json()) as T;
 }
 
-/** Этот переход — откат, который мы сделали сами минуту назад. */
+/** Этот переход — откат, который сделали мы сами (запись о нём лежит рядом по времени). */
 async function isOwnRevert(change: StatusChange): Promise<boolean> {
   if (!supabaseAdmin) return false;
-  const since = new Date(Date.now() - 2 * 60_000).toISOString();
+  const at = (change.occurredAt ?? new Date()).getTime();
   const { data } = await supabaseAdmin
     .from('amo_funnel_reverts')
     .select('id')
     .eq('amo_deal_id', change.leadId)
     .eq('bad_status_id', change.oldStatusId)
     .eq('restored_status_id', change.statusId)
-    .gte('reverted_at', since)
+    .gte('reverted_at', new Date(at - 10 * 60_000).toISOString())
+    .lte('reverted_at', new Date(at + 60_000).toISOString())
     .limit(1);
   return (data ?? []).length > 0;
 }

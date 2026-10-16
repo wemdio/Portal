@@ -8,7 +8,8 @@
 -- историю переходов без этой пары, и по ней считают первичка и недельный отчёт.
 --
 -- Парные события ищем по сделке, паре этапов и окну по времени вокруг отката
--- (сам откат происходит через секунды после переноса). Вычёркиваем ОБА
+-- (откат идёт через секунды после переноса, а при сбое вебхука — страховочным
+-- прогоном reconcile, до 3 часов спустя). Вычёркиваем ОБА
 -- события: у оставшегося «обратно» from_value был бы запрещённым этапом, и
 -- расчёт «этапа создания» по самому раннему переходу ошибся бы.
 
@@ -43,7 +44,7 @@ where e.event_type = 'lead_status_changed'
       and (
         (e.from_value = r.restored_status_id::text
           and e.to_value = r.bad_status_id::text
-          and e.changed_at between r.reverted_at - interval '10 minutes' and r.reverted_at)
+          and e.changed_at between r.reverted_at - interval '3 hours' and r.reverted_at)
         or
         (e.from_value = r.bad_status_id::text
           and e.to_value = r.restored_status_id::text
