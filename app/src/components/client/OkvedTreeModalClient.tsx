@@ -19,6 +19,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import { OKVED2_TREE, type OkvedNode } from '@/lib/companiesSearch/okved2';
+import { filterOkvedTree, getOkvedSelectionState, toggleVisibleOkved } from '@/lib/companiesSearch/okvedSelection';
 import type { Locale } from '@/lib/i18n';
 
 type Props = {
@@ -33,59 +34,7 @@ function t(ru: string, en: string, locale: Locale) {
   return locale === 'en' ? en : ru;
 }
 
-function collectAllCodes(node: OkvedNode): string[] {
-  const codes = [node.code];
-  if (node.children) {
-    for (const child of node.children) {
-      codes.push(...collectAllCodes(child));
-    }
-  }
-  return codes;
-}
-
-function getSelectionState(
-  node: OkvedNode,
-  selected: Set<string>,
-): 'none' | 'all' | 'partial' {
-  if (!node.children || node.children.length === 0) {
-    return selected.has(node.code) ? 'all' : 'none';
-  }
-
-  let allSelected = true;
-  let anySelected = selected.has(node.code);
-
-  for (const child of node.children) {
-    const state = getSelectionState(child, selected);
-    if (state !== 'all') allSelected = false;
-    if (state !== 'none') anySelected = true;
-  }
-
-  if (allSelected) return 'all';
-  if (anySelected) return 'partial';
-  return 'none';
-}
-
-function matchesSearch(node: OkvedNode, query: string): boolean {
-  const text = `${node.code} ${node.name}`.toLowerCase();
-  if (text.includes(query)) return true;
-  if (node.children) {
-    return node.children.some((child) => matchesSearch(child, query));
-  }
-  return false;
-}
-
-function filterTree(nodes: OkvedNode[], query: string): OkvedNode[] {
-  if (!query) return nodes;
-  return nodes
-    .filter((node) => matchesSearch(node, query))
-    .map((node) => {
-      if (!node.children) return node;
-      const filteredChildren = filterTree(node.children, query);
-      return { ...node, children: filteredChildren.length > 0 ? filteredChildren : node.children };
-    });
-}
-
-/** Буквенный раздел (A-U) — нечекабельный заголовок-разделитель */
+/** Буквенный раздел (A-U) — выбор видимых веток и заголовок-разделитель */
 function SectionHeader({
   node,
   selected,
@@ -100,7 +49,7 @@ function SectionHeader({
   onToggleExpand: (code: string) => void;
 }) {
   const isExpanded = expanded.has(node.code);
-  const selectionState = getSelectionState(node, selected);
+  const selectionState = getOkvedSelectionState(node, selected);
 
   return (
     <div>
@@ -173,7 +122,7 @@ function TreeNode({
 }) {
   const hasChildren = node.children && node.children.length > 0;
   const isExpanded = expanded.has(node.code);
-  const selectionState = getSelectionState(node, selected);
+  const selectionState = getOkvedSelectionState(node, selected);
 
   return (
     <div>
@@ -241,7 +190,7 @@ export function OkvedTreeModalClient({ selected, onChange, onClose, locale = 'ru
   const filteredTree = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return OKVED2_TREE;
-    return filterTree(OKVED2_TREE, q);
+    return filterOkvedTree(OKVED2_TREE, q);
   }, [search]);
 
   const expandedForSearch = useMemo(() => {
@@ -271,17 +220,7 @@ export function OkvedTreeModalClient({ selected, onChange, onClose, locale = 'ru
 
   const toggleNode = useCallback(
     (node: OkvedNode) => {
-      const allCodes = collectAllCodes(node);
-      const state = getSelectionState(node, selected);
-      const next = new Set(selected);
-
-      if (state === 'all') {
-        for (const code of allCodes) next.delete(code);
-      } else {
-        for (const code of allCodes) next.add(code);
-      }
-
-      onChange(next);
+      onChange(toggleVisibleOkved(node, selected));
     },
     [selected, onChange],
   );
