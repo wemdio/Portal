@@ -48,17 +48,17 @@ const CHAIN: number[] = [
   STAGE.MEETING_SCHEDULED,
   STAGE.MEETING_HELD,
   STAGE.PROPOSAL_SENT,
+  STAGE.PARKING,
   STAGE.INVOICE_SENT,
   STAGE.CONTRACT,
   STAGE.PAID,
 ];
 
-const SIDE_STAGES = new Set<number>([STAGE.NO_SHOW, STAGE.PARKING]);
+const SIDE_STAGES = new Set<number>([STAGE.NO_SHOW]);
 
 /** Где в цепочке «стоит» боковой этап, когда из него выходят. */
 const SIDE_ANCHOR: Record<number, number> = {
   [STAGE.NO_SHOW]: STAGE.MEETING_SCHEDULED,
-  [STAGE.PARKING]: STAGE.QUALIFIED,
 };
 
 export const STAGE_NAMES: Record<number, string> = {
@@ -87,8 +87,6 @@ export function checkTransition(input: {
   oldPipelineId: number | null;
   fromStatusId: number;
   toStatusId: number;
-  /** Этап, на котором сделка стояла до «Переноса»; нужен только при выходе из него. */
-  parkedFromStatusId?: number | null;
 }): TransitionVerdict {
   const { pipelineId, oldPipelineId, fromStatusId: from, toStatusId: to } = input;
 
@@ -133,8 +131,7 @@ export function checkTransition(input: {
     };
   }
 
-  // «Не вышел на звонок» — только после «Встреча назначена»; «Перенос» (парковка)
-  // — с «Лид квалифицирован» и дальше (ранние этапы отсечены выше).
+  // «Не вышел на звонок» — только после «Встреча назначена».
   if (to === STAGE.NO_SHOW) {
     if (from === STAGE.MEETING_SCHEDULED) return { allowed: true };
     return {
@@ -142,21 +139,10 @@ export function checkTransition(input: {
       reason: `В «${stageName(STAGE.NO_SHOW)}» сделку можно перенести только из «${stageName(STAGE.MEETING_SCHEDULED)}».`,
     };
   }
-  if (to === STAGE.PARKING) return { allowed: true };
 
   const fromIdx = CHAIN.indexOf(SIDE_STAGES.has(from) ? SIDE_ANCHOR[from] : from);
   const toIdx = CHAIN.indexOf(to);
 
-  // Из «Переноса» — туда, откуда сделку туда положили, или на соседний с ним
-  // этап. Если прежний этап неизвестен, не ограничиваем.
-  if (from === STAGE.PARKING) {
-    const parked = input.parkedFromStatusId != null ? CHAIN.indexOf(input.parkedFromStatusId) : -1;
-    if (parked < 0 || (toIdx >= parked - 1 && toIdx <= parked + 1)) return { allowed: true };
-    return {
-      allowed: false,
-      reason: `Из «${stageName(STAGE.PARKING)}» сделку можно вернуть на «${stageName(CHAIN[parked])}» или на соседний этап.`,
-    };
-  }
 
   // Назад — тоже только на один этап (просьба продаж, 16.10.2026): иначе
   // сделку, случайно уехавшую далеко вперёд, можно вернуть на «Лид
