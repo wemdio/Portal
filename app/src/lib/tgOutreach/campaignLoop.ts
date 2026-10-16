@@ -22,7 +22,9 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase } from './openaiChat';
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
+  stripRepeatGreeting,
+} from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
@@ -1134,6 +1136,9 @@ export async function handleChat(
     log('warning', `${displayName}: ${usedFallback ? 'fallback' : 'GPT'} вернул бессмысленный ответ "${replyText}" — НЕ отправляю`);
     return { replied: false, triggerType: null };
   }
+  // Второй раз за день не здороваемся: модель дат не видит и начинает каждый
+  // ответ с «Здравствуйте», даже через 20 минут после нашего «Добрый день!».
+  replyText = stripRepeatGreeting(replyText, chatMessages);
   // Молча промолчать лучше, чем повторить себя же: в тупике разговора модели
   // нечего сказать, и она слово в слово шлёт свою прощальную реплику. Человек
   // видит сломанного бота, а Telegram — одинаковые сообщения, то есть признак

@@ -290,6 +290,31 @@ export function stripHandoffPhrase(reply: string, phrase: string): string {
     .trim();
 }
 
+/** Календарный день по Москве: «2026-10-16». */
+function moscowDay(iso: string): string | null {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t + 3 * 3600_000).toISOString().slice(0, 10) : null;
+}
+
+/** Приветствие в начале ответа: «Здравствуйте, Михаил.», «Добрый день!», «Привет,». */
+const LEADING_GREETING_RE =
+  /^\s*(?:[Зз]дравствуйте|[Зз]дравствуй|[Дд]обрый\s+(?:день|вечер)|[Дд]оброе\s+утро|[Дд]оброго\s+(?:дня|времени\s+суток)|[Пп]риветствую|[Пп]ривет|[Hh]ello|[Hh]i)(?=[\s,.!])(?:,?\s+\p{Lu}[\p{L}-]{0,30}(?:\s+\p{Lu}[\p{L}-]{0,30})?)?\s*[.!,]?\s+/u;
+
+/**
+ * Второй раз за день не здороваемся (16.10.2026: в 14:34 — «Добрый день!»,
+ * человек ответил в 14:42, а в 14:59 модель снова начала со «Здравствуйте,
+ * Михаил»). Модель дат сообщений не видит, поэтому решает код: если мы уже
+ * писали собеседнику сегодня по Москве, приветствие из начала ответа срезаем.
+ */
+export function stripRepeatGreeting(reply: string, history: DialogMessage[], now: Date = new Date()): string {
+  const today = moscowDay(now.toISOString());
+  const wroteToday = history.some((m) => m.role === 'assistant' && m.timestamp && moscowDay(m.timestamp) === today);
+  if (!wroteToday) return reply;
+  const rest = reply.replace(LEADING_GREETING_RE, '');
+  if (rest === reply || !rest.trim()) return reply;
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
 export function ensureHandoffPhrase(reply: string, phrase: string): string {
   if (reply.toLowerCase().includes(phrase.toLowerCase())) return reply;
   let trimmed = reply.trim();
