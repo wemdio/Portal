@@ -1,0 +1,42 @@
+[
+ {
+  "project_id": "2971d740-1f5e-4eb9-a9e5-c04faaf8794c",
+  "source": "upload",
+  "filename": "Waystone",
+  "industry": "Fund administration, fund governance, ManCos and asset management",
+  "client_type": "Global fund governance firm (ManCo and fund administrator), €1.3T+ assets under management",
+  "task": "Replace a fragile legacy SQL Server and SSIS data platform for holdings, risk and regulatory reporting",
+  "metrics": {
+   "assets_under_management": "€1.3T+",
+   "data_processed_daily": "100TB+",
+   "analyst_time_freed": "up to 40%"
+  },
+  "result": "100TB+ of data processed daily on monitored pipelines, and committee and regulatory packs now come from a single trusted data layer with full audit trails.",
+  "text": "Waystone, a global fund governance firm with €1.3T+ assets under management, had a legacy SQL Server estate with fragile nightly SSIS jobs. HST moved core holdings and risk data to a monitored AWS data lake and consolidated risk and oversight reporting in Power BI. 100TB+ of data is now processed daily, regulatory packs come from a single trusted data layer with full audit trails, and a separate ETL tool frees up to 40% of analyst time."
+ },
+ {
+  "project_id": "2971d740-1f5e-4eb9-a9e5-c04faaf8794c",
+  "source": "upload",
+  "filename": "Companjon",
+  "industry": "Insurance, insurers and insurtech (embedded insurance)",
+  "client_type": "European embedded insurer (insurtech) selling through e-commerce, travel and mobility partners",
+  "task": "Process continuous partner API traffic in real time without slowing production",
+  "metrics": {
+   "api_gateway_traffic_captured": "100%",
+   "latency_impact_on_production": "zero"
+  },
+  "result": "100% of API gateway traffic captured in real time with zero latency impact on production, so product and partner teams decide on live data.",
+  "text": "Companjon sells embedded insurance through e-commerce, travel and mobility partners across Europe, and every partner creates continuous API traffic. HST built a Kafka pipeline mirroring all API gateway traffic, streaming into Databricks, with near real time partner dashboards and access controls. Result: 100% of API traffic captured in real time with zero latency impact on production."
+ },
+ {
+  "project_id": "2971d740-1f5e-4eb9-a9e5-c04faaf8794c",
+  "source": "upload",
+  "filename": "iRace Digital (FundBank)",
+  "industry": "Banking, fund services and digital asset custody",
+  "client_type": "Regulated bank serving institutional investors and fund structures in the US, Luxembourg and the Cayman Islands",
+  "task": "Rebuild client onboarding and KYC for three jurisdictions and run its own digital asset custody infrastructure",
+  "metrics": {},
+  "result": "A new onboarding journey is mostly configuration, and the bank keeps full control of its key material with controls it can show a supervisor.",
+  "text": "iRace Digital (FundBank) serves institutional investors and fund structures across the US, Luxembourg and the Cayman Islands, so onboarding has to satisfy three regulators at once. HST built a shared data model and portal foundation for onboarding (KYC, beneficial ownership, sanctions and PEP screening, FATCA and CRS) and automated self hosted digital asset custody infrastructure on AWS. Result: a new onboarding journey is mostly configuration, and the bank keeps full control of its key material."
+ }
+]

@@ -1,5 +1,7 @@
 # Handoff 2026-10-16: ENG country lock, domain do-not-contact, Instantly time zones
 
+**Full material (ready implementation plan, specs, HST client drafts, memory notes): `docs/handoff/2026-10-16-eng-countries/README.md`.**
+
 Branch for the work: start from `Sergey` (this doc is on it). Code goes to `Sergey` only; merges to test/main and deploys are the owner's (Сергей), each needs his explicit «да».
 The cloud session has NO SSH to production: every prod read/write (HST data, research rerun, checks) waits for the local Mac session.
 
