@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
   }
   const minutes = Math.min(1440, Math.max(5, Number(req.nextUrl.searchParams.get('minutes')) || 180));
   try {
-    return NextResponse.json({ ok: true, ...(await reconcileRecentTransitions(minutes)) });
+    return NextResponse.json({ ok: true, counts: await reconcileRecentTransitions(minutes) });
   } catch (err) {
     console.error('[amo-funnel-guard] reconcile failed', err);
     return NextResponse.json({ ok: false }, { status: 500 });
