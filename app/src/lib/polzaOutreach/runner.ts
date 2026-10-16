@@ -95,7 +95,7 @@ import {
   type PolzaOutreachVacancyCandidate,
   type PolzaVacancyAnalysis,
 } from './types';
-import { loadDirectoryCompanies, type DirectoryCompany } from './directoryCandidates';
+import { createDirectoryFeed, type DirectoryCompany } from './directoryCandidates';
 import { loadYcCompanies, type YcCompany } from './ycCandidates';
 
 /** Целое из env в рамках. Пусто или мусор — значение по умолчанию: NaN в пуле дал бы ноль потоков. */
@@ -239,8 +239,21 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
 }
 
 /** Общий потолок просмотренных кандидатов — страховка от бесконечного прогона. */
+export const MAX_SCAN_CANDIDATES = 100_000;
+/** Во сколько раз просматриваем больше компаний, чем заказано готовых. */
+const SCAN_PER_READY = 125;
+/** Порция справочника, подгружаемая в пул, когда прошлая просмотрена. */
+const DIRECTORY_CHUNK = 2000;
+
+/**
+ * Сколько компаний запуск вправе просмотреть, чтобы набрать `target` готовых.
+ * Из справочника выходит 6–7% готовых, из YC и вакансий — единицы процентов, так
+ * что на 800 готовых нужно 12–13 тысяч просмотров. Прежний потолок в 4 000
+ * (16.10.2026) не давал добрать заказанное: автодобор EN собирал 150 из 800.
+ * Лишних денег потолок не стоит: запуск останавливается, как только набрана цель.
+ */
 export function maxCandidatesFor(target: number): number {
-  return Math.min(4000, Math.max(300, target * 25));
+  return Math.min(MAX_SCAN_CANDIDATES, Math.max(300, target * SCAN_PER_READY));
 }
 
 export function nextWaveSize(target: number, totals: { vacancies: number; ready: number }): number {
@@ -337,14 +350,22 @@ function mergeCandidates(
   // сильнее. Справочник идёт сразу за ними, а не «если останется место»:
   // вакансии кончаются на второй-третьей сотне кандидатов, и без этого
   // остальной прогон простаивал бы (решение 10.10.2026).
-  const knownDomains = new Set<string>([
+  const directoryOnly = toDirectoryCandidates(directory, knownDomainsOf(vacancies, ycs));
+  return [...both, ...hiringOnly, ...ycOnly, ...directoryOnly];
+}
+
+/** Домены вакансий и YC: компания справочника с таким доменом уже в пуле. */
+function knownDomainsOf(vacancies: PolzaOutreachVacancyCandidate[], ycs: YcCompany[]): Set<string> {
+  return new Set<string>([
     ...ycs.map((y) => y.domain),
     ...vacancies.map((v) => normalizeDomain(String(v.companySiteUrl ?? ''))).filter(Boolean),
   ]);
-  const directoryOnly = directory
+}
+
+function toDirectoryCandidates(directory: DirectoryCompany[], knownDomains: ReadonlySet<string>): Candidate[] {
+  return directory
     .filter((d) => !knownDomains.has(d.domain))
     .map((d) => ({ companyName: d.name, vacancy: null, yc: null, directory: d }));
-  return [...both, ...hiringOnly, ...ycOnly, ...directoryOnly];
 }
 
 /**
@@ -902,20 +923,43 @@ async function runJob(
     const vacancies = config.sources.includes('hiring')
       ? (await selectVacancies(db, config, { want: maxCandidates, seenCompanies: skippedCompanies })).candidates
       : [];
-    const ycs = config.sources.includes('yc') ? await loadYcCompanies(db, config) : [];
+    // Домены, которые брать не надо: готовы в других запусках или отсеяны за
+    // месяц по неизменной причине. Общие для YC и справочника — иначе одни и те
+    // же компании перебирались бы и оплачивались разбором в каждом запуске.
+    const skipDomains = config.sources.includes('yc') || config.sources.includes('directory')
+      ? await loadSkippedDomains(db, jobId, Boolean(config.include_previously_exported))
+      : new Set<string>();
+    const ycs = config.sources.includes('yc') ? await loadYcCompanies(db, config, { skipDomains }) : [];
     /**
      * Справочник добирает пул до потолка просмотра: вакансий и YC на весь
      * прогон не хватает, а сканировать меньше, чем разрешено, смысла нет.
-     * Домены, уже готовые или недавно отсеянные наглухо, не берём — за них
-     * платить разбором второй раз незачем.
+     * Грузим его порциями (DIRECTORY_CHUNK) по мере просмотра: потолок — до
+     * 100 000, и читать их все на старте незачем, запуск обычно кончается раньше.
      */
-    const directory = config.sources.includes('directory')
-      ? await loadDirectoryCompanies(db, config, {
-        want: Math.max(0, maxCandidates - vacancies.length - ycs.length),
-        skipDomains: await loadSkippedDomains(db, jobId, Boolean(config.include_previously_exported)),
-      })
-      : [];
+    const directoryFeed = config.sources.includes('directory')
+      ? createDirectoryFeed(db, config, { skipDomains })
+      : null;
+    const directoryRoom = (): number => Math.max(0, maxCandidates - vacancies.length - ycs.length - directoryLoaded);
+    let directoryLoaded = 0;
+    const directory = directoryFeed ? await directoryFeed.next(Math.min(DIRECTORY_CHUNK, directoryRoom())) : [];
+    directoryLoaded = directory.length;
+    const knownDomains = knownDomainsOf(vacancies, ycs);
     const pool = mergeCandidates(vacancies, ycs, directory);
+    // Пул кончился, а справочник нет: подгружаем следующую порцию. false — пополнять нечем.
+    const refillPool = async (): Promise<boolean> => {
+      if (!directoryFeed) return false;
+      while (directoryRoom() > 0) {
+        const chunk = await directoryFeed.next(Math.min(DIRECTORY_CHUNK, directoryRoom()));
+        if (!chunk.length) return false;
+        directoryLoaded += chunk.length;
+        const fresh = toDirectoryCandidates(chunk, knownDomains);
+        if (fresh.length) {
+          pool.push(...fresh);
+          return true;
+        }
+      }
+      return false;
+    };
     const cases = await loadEnCases(db);
     // Повторы между запусками — домены компаний, готовых в других запусках.
     // Галочка «Брать компании, которые уже выгружались раньше» их не отсеивает.
@@ -1527,7 +1571,7 @@ async function runJob(
 
     // Компании, ждущие цепочку, уже занимают место в лимите готовых: докупать
     // за них разбор новых компаний незачем — «Переписать цепочку» доведёт их.
-    while (totals.ready + awaitingTemplate < target && cursor < pool.length && totals.vacancies < maxCandidates) {
+    while (totals.ready + awaitingTemplate < target && totals.vacancies < maxCandidates && (cursor < pool.length || (await refillPool()))) {
       // Лимит на ИИ исчерпан — новую волну не начинаем: её строкам нужен разбор.
       // Внутри волны шаг почты ИИ не тратит, поэтому лимит в нём не кончается.
       if (stopForBudget()) break;
@@ -1537,6 +1581,8 @@ async function runJob(
         nextWaveSize(target, { vacancies: totals.vacancies, ready: totals.ready + awaitingTemplate }),
         maxCandidates - totals.vacancies,
       );
+      // Волна неполная — до неё подгружаем справочник, не дробя работу мелкими шагами.
+      while (pool.length - cursor < want && (await refillPool())) { /* порция добавлена */ }
       const wave = pool.slice(cursor, cursor + want);
       cursor += wave.length;
 
