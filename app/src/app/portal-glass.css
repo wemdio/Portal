@@ -52,12 +52,29 @@ html body :is(.sender-glass, .portal-glass) .rounded-2xl.border {
     var(--lg-shadow);
 }
 
-/* Выпадающие меню и окна поверх — плотнее, иначе текст под ними мешает читать. */
+/* Всё, что всплывает поверх, — сплошное и без размытия: модалки, меню,
+   поповеры. Сквозь стекло (в тёмной теме это 6% заливки) просвечивали строки
+   страницы, и текст окна читался плохо. Модалки — панели внутри затемнения
+   .fixed.inset-0: роли dialog у большинства нет, поэтому ловим по нему. */
 html body :is(.sender-glass, .portal-glass) .rounded-xl.border.shadow-lg,
 html body :is(.sender-glass, .portal-glass) .rounded-xl.border.shadow-xl,
-html body :is(.sender-glass, .portal-glass) [role='dialog'] > .rounded-2xl.border,
+html body :is(.sender-glass, .portal-glass) .rounded-2xl.border.shadow-xl,
+html body :is(.sender-glass, .portal-glass) .rounded-2xl.border.shadow-2xl,
+html body :is(.sender-glass, .portal-glass) .fixed.inset-0 .rounded-xl.border,
+html body :is(.sender-glass, .portal-glass) .fixed.inset-0 .rounded-2xl.border,
+html body :is(.sender-glass, .portal-glass) [role='dialog'] .rounded-xl.border,
+html body :is(.sender-glass, .portal-glass) [role='dialog'] .rounded-2xl.border,
 html body :is(.sender-glass, .portal-glass) [role='menu'] {
-  background-color: var(--lg-fill-strong) !important;
+  background-color: var(--lg-solid) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Подсказки графиков (ECharts) берут фон с карточки под графиком, а она под
+   стеклом полупрозрачная — подсказка просвечивала. Плотный цвет поверхности
+   для них — переменная --chart-surface (components/charts/theme.ts). */
+:is(.sender-glass, .portal-glass) {
+  --chart-surface: var(--lg-solid);
 }
 
 /* Подсказка «Прогресс отправки» — без прозрачности и размытия: поверх строк
