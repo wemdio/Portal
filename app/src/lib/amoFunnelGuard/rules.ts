@@ -18,7 +18,7 @@
  *  - «Не вышел на звонок» и «Перенос» — боковые этапы, в цепочку не входят:
  *    в них можно с «Лид квалифицирован» и дальше, из них — в любой этап
  *    с «Лид квалифицирован»; с первых двух этапов — нельзя;
- *  - «Успешно реализовано» не проверяем: его ставят оплата и автоматизации.
+ *  - «Успешно реализовано» — только из «Оплата получена» (полный цикл).
  */
 
 export const FUNNEL_PIPELINE_ID = 7670334;
@@ -97,11 +97,19 @@ export function checkTransition(input: {
   if (oldPipelineId !== null && oldPipelineId !== FUNNEL_PIPELINE_ID) return { allowed: true };
   if (from === to) return { allowed: true };
 
-  // Закрытие в минус — с любого этапа; выигрыш и выход из «Неразобранного»,
-  // «Успешно» и «Закрыто» (переоткрытие) не ограничиваем.
-  if (to === STAGE.LOST || to === STAGE.WON) return { allowed: true };
+  // Закрытие в минус — с любого этапа.
+  if (to === STAGE.LOST) return { allowed: true };
+  // Успешно реализовано — только после полного цикла, то есть с «Оплата получена»
+  // (просьба Дмитрия, 16.10.2026): иначе сделка засчитается выигранной без оплаты.
+  if (to === STAGE.WON) {
+    if (from === STAGE.PAID) return { allowed: true };
+    return {
+      allowed: false,
+      reason: `«${stageName(STAGE.WON)}» ставится только после «${stageName(STAGE.PAID)}».`,
+    };
+  }
+  // Выход из «Неразобранного» и переоткрытие «Успешно» не ограничиваем.
   if (from === STAGE.UNSORTED || from === STAGE.WON) return { allowed: true };
-
   // Из «Закрыто и не реализовано» — только вернуть в работу (Дмитрий, 16.10.2026).
   if (from === STAGE.LOST) {
     if (to === STAGE.TAKEN) return { allowed: true };
