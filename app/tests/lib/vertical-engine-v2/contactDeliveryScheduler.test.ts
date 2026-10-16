@@ -4,10 +4,11 @@ import { ContactDeliveryAnalyticsUnavailableError } from '@/lib/verticalEngineV2
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import {
   createGuardedContactDeliveryTick,
+  deliveryDaySettled,
   runBoundContactDeliveries,
 } from '@/lib/verticalEngineV2/contactDeliveryScheduler';
 import { buildContactSupplyRequests, runProjectContactSupply } from '@/lib/verticalEngineV2/contactSupplyRunner';
-import { allocateContactSupplyTargets } from '@/lib/verticalEngineV2/contactSupplyPlanner';
+import { allocateContactSupplyTargets, buildAllReadyContactSupplyRequests } from '@/lib/verticalEngineV2/contactSupplyPlanner';
 import { prepareAuditSnapshot, runSegmentationAuditStage, toStoredAuditSummary } from '@/lib/verticalEngineV2/stages/segmentationAudit';
 import { buildSegmentationAudit } from '@/lib/verticalEngineV2/segmentationAudit';
 import { createVeJobShutdown, createVeJobWatchdog, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
@@ -31,6 +32,44 @@ const COMPLETE_BINDING = {
 
 describe('VE2 contact delivery scheduler', () => {
   it('changes only owned campaign sending settings, verifies the result and defers delivery after partial provider failure', async () => {
+    { // Upload-all bypasses pacing, while the existing daily path below stays strict.
+      const now = new Date('2026-09-06T12:00:00Z');
+      const project = { id: 've', ...COMPLETE_BINDING, contact_upload_mode: 'daily' as 'daily' | 'all_ready' };
+      const portal = createMockSupabase({ enforceQueryWindows: true, tables: {
+        ve_projects: [project],
+        ve_launch_queue_items: [{ id: 'new-item', project_id: 've', status: 'prepared' }],
+        ve_contact_delivery_daily_runs: [{ id: 'run', ve_project_id: 've', run_date: '2026-09-06',
+          status: 'completed', reservation_status: 'reserved', required_daily: 20, sender_daily_capacity: 20, reserved_count: 20 }],
+        ve_contact_delivery_rows: [{ id: 'ready', item_id: 'new-item', status: 'ready', run_id: null }],
+      } });
+      expect(await deliveryDaySettled(portal as never, project, now)).toBe(true);
+      project.contact_upload_mode = 'all_ready';
+      expect(await deliveryDaySettled(portal as never, project, now)).toBe(false);
+      await portal.from('ve_contact_delivery_daily_runs').update({ reservation_status: 'not_scheduled' }).eq('id', 'run');
+      expect(await deliveryDaySettled(portal as never, project, now)).toBe(false);
+      await portal.from('ve_projects').update({ contact_upload_mode: 'all_ready', sender_daily_capacity: 0 }).eq('id', 've');
+      const runProject = jest.fn().mockResolvedValue({ status: 'completed' });
+      const runSupply = jest.fn().mockResolvedValue({});
+      const refreshRate = jest.fn().mockRejectedValue(new Error('rate unavailable'));
+      const result = await runBoundContactDeliveries({ portalDb: portal as never, instantlyDb: {} as never, now,
+        recoverActivation: async () => ({ activated: 0, errors: [] }), reconcile: async () => ({ accepted: 0, released: 0, errors: [] }),
+        runProject, runSupply, refreshRate, log: jest.fn() });
+      expect(result).toMatchObject({ eligibleProjects: 1, attemptedProjects: 1, failedProjects: 0 });
+      expect(runProject).toHaveBeenCalledTimes(1);
+      expect(runSupply).toHaveBeenCalledTimes(1);
+      // Once the ready stock is consumed, the inexpensive settled check applies
+      // again; it must never consume or reset previously accepted ledger rows.
+      await portal.from('ve_contact_delivery_rows').update({ status: 'accepted', run_id: 'run' }).eq('id', 'ready');
+      expect(await deliveryDaySettled(portal as never, project, now)).toBe(true);
+      for (const reservation_status of ['fulfilled', 'awaiting_delivery']) {
+        await portal.from('ve_contact_delivery_daily_runs').update({ reservation_status }).eq('id', 'run');
+        expect(await deliveryDaySettled(portal as never, project, now)).toBe(true);
+        expect(await deliveryDaySettled(portal as never, { ...project, contact_upload_mode: 'daily' }, now)).toBe(false);
+        await portal.from('ve_contact_delivery_rows').insert({ id: 'later', item_id: 'new-item', status: 'ready', run_id: null });
+        expect(await deliveryDaySettled(portal as never, project, now)).toBe(false);
+        await portal.from('ve_contact_delivery_rows').delete().eq('id', 'later');
+      }
+    }
     const accounts = jest.spyOn(instantlyClient, 'listAccounts').mockResolvedValue({items: [
       {email: 'sender@example.test', status: 1, daily_limit: 90},
     ]} as never);
@@ -59,6 +98,18 @@ describe('VE2 contact delivery scheduler', () => {
       update.mockClear();
       await refreshDeliveryRate(portal as never, presets as never, 've');
       expect(update).not.toHaveBeenCalled(); // same limit needs no provider write
+      await portal.from('ve_projects').update({ contact_upload_mode: 'all_ready' }).eq('id', 've');
+      await refreshDeliveryRate(portal as never, presets as never, 've');
+      expect(update).toHaveBeenCalledWith('own-campaign', { daily_limit: 1000, daily_max_leads: 1000,
+        open_tracking: false, link_tracking: false }, expect.objectContaining({ accountId: 'main' }));
+      expect(portal.rpcCalls.at(-1)).toMatchObject({ fn: 've_finish_contact_delivery_rate', params: { p_snapshot: { effective_capacity: 20 } } });
+      update.mockClear();
+      await refreshDeliveryRate(portal as never, presets as never, 've');
+      expect(update).not.toHaveBeenCalled();
+      await portal.from('ve_projects').update({ contact_upload_mode: 'daily' }).eq('id', 've');
+      await refreshDeliveryRate(portal as never, presets as never, 've');
+      expect(live.daily_max_leads).toBe(20);
+      update.mockClear();
       campaigns.mockResolvedValue({items: [{id: 'tagged', status: 1, email_list: [], email_tag_list: ['tag-1']},
         {id: 'paused-tagged', status: 2, email_list: [], email_tag_list: ['ignored-tag']}] as never});
       accounts.mockImplementation(async (params) => params?.tag_ids
@@ -297,6 +348,26 @@ describe('VE2 contact delivery scheduler', () => {
     expect(buildContactSupplyRequests(5000, [{ id: 'large', weight: 1, ready: 0 }]))
       .toEqual([{ itemId: 'large', readyTarget: 1000 }]);
     expect(() => buildContactSupplyRequests(Number.NaN, [])).toThrow();
+    expect(buildAllReadyContactSupplyRequests(100, [
+      { id: 'first', weight: 60, ready: 10, outstanding: 50 },
+      { id: 'second', weight: 40, ready: 0, outstanding: 40 },
+    ], 1000)).toEqual([]);
+    // A surplus from an earlier launch does not suppress another hypothesis's
+    // own buffer; historical stock still limits the shared goal headroom.
+    const uneven = [{ id: 'full', weight: 1, ready: 0, outstanding: 500 },
+      { id: 'empty', weight: 1, ready: 0, outstanding: 0 }];
+    expect(buildAllReadyContactSupplyRequests(100, uneven, 500)).toEqual([{ itemId: 'empty', readyTarget: 50 }]);
+    expect(buildAllReadyContactSupplyRequests(100, uneven, 7)).toEqual([{ itemId: 'empty', readyTarget: 7 }]);
+    expect(buildAllReadyContactSupplyRequests(100, uneven, 0)).toEqual([]);
+    expect(buildAllReadyContactSupplyRequests(100, [
+      { id: 'a', weight: 1, ready: 0, outstanding: 0 }, { id: 'b', weight: 1, ready: 0, outstanding: 0 },
+    ], 70)).toEqual([{ itemId: 'a', readyTarget: 50 }, { itemId: 'b', readyTarget: 20 }]);
+    expect(buildAllReadyContactSupplyRequests(5000, [{ id: 'a', weight: 1, ready: 0, outstanding: 0 }], 5000))
+      .toEqual([{ itemId: 'a', readyTarget: 1000 }]);
+    for (const invalid of [-1, Number.NaN, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => buildAllReadyContactSupplyRequests(100, [], invalid)).toThrow();
+      expect(() => buildAllReadyContactSupplyRequests(100, [{ id: 'a', weight: 1, ready: 0, outstanding: invalid }], 100)).toThrow();
+    }
   });
 
   it('fences supply approval, reuses one batch, audits fully and appends only into original campaigns', async () => {
@@ -589,6 +660,87 @@ describe('VE2 contact delivery scheduler', () => {
       expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch')).toHaveLength(totalRequested);
       // This sweep prepares stock only: it never reserves or uploads a day.
       expect(portal.rpcCalls.every((call) => ['ve_contact_supply_approval_current', 've_enqueue_contact_supply_batch'].includes(call.fn))).toBe(true);
+    }
+
+    // Upload-all moves stock, it must not keep buying new batches merely
+    // because Portal's ready rows now live in Instantly instead.
+    for (const scenario of [
+      { goal: 1010, committed: 710, expected: 17 },
+      { goal: 410, committed: 210, expected: 197 }, // pending stock deducted once near the goal
+      { goal: 1010, committed: 910, expected: 0 },
+    ]) {
+      const allReady = createMockSupabase({ enforceQueryWindows: true, tables: tables({ deadline: '2026-09-04' }), rpcHandlers: handlers });
+      await allReady.from('ve_projects').update({ contact_upload_mode: 'all_ready', target_contacts: scenario.goal, sender_daily_capacity: 360 }).eq('id', 've');
+      await allReady.from('ve_contact_delivery_rows').insert(Array.from({ length: scenario.committed }, (_, n) => ({
+        id: `committed-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row',
+        email_normalized: `committed${n}@example.test`, status: n === 0 ? 'attempting' : n === 1 ? 'uncertain' : 'accepted',
+      })));
+      await runProjectContactSupply({ portalDb: allReady as never, instantlyDb: instantly as never, veProjectId: 've', now });
+      const queued = () => allReady.rpcCalls.filter(call => call.fn === 've_enqueue_contact_supply_batch');
+      expect(queued().at(-1)?.params.p_limit ?? 0).toBe(scenario.expected);
+      if (scenario.goal === 1010 && scenario.expected === 17) {
+        await allReady.from('ve_contact_delivery_rows').insert(Array.from({ length: 17 }, (_, n) => ({
+          id: `new-ready-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row',
+          email_normalized: `newready${n}@example.test`, status: 'ready',
+        })));
+        await runProjectContactSupply({ portalDb: allReady as never, instantlyDb: instantly as never, veProjectId: 've', now });
+        expect(queued()).toHaveLength(1);
+        await allReady.from('ve_contact_delivery_rows').update({ status: 'accepted' }).eq('status', 'ready');
+        await runProjectContactSupply({ portalDb: allReady as never, instantlyDb: instantly as never, veProjectId: 've', now });
+        expect(queued()).toHaveLength(1);
+        // Replenish only the 20 contacts that actually received a first send.
+        await instantly.from('instantly_campaign_catalog').update({ new_leads_contacted_count: 30 }).eq('id', 'original-campaign');
+        await runProjectContactSupply({ portalDb: allReady as never, instantlyDb: instantly as never, veProjectId: 've', now });
+        expect(queued()).toHaveLength(2);
+        expect(queued().at(-1)?.params.p_limit).toBe(20);
+        // An unavailable count cannot be interpreted as empty inventory.
+        await instantly.from('instantly_campaign_catalog').update({ new_leads_contacted_count: null }).eq('id', 'original-campaign');
+        const missingCampaign = jest.spyOn(instantlyClient, 'getCampaign').mockRejectedValueOnce(new Error('analytics unavailable'));
+        await expect(runProjectContactSupply({ portalDb: allReady as never, instantlyDb: instantly as never, veProjectId: 've', now }))
+          .rejects.toBeInstanceOf(ContactDeliveryAnalyticsUnavailableError);
+        expect(queued()).toHaveLength(2);
+        missingCampaign.mockRestore();
+        await instantly.from('instantly_campaign_catalog').update({ new_leads_contacted_count: 10 }).eq('id', 'original-campaign');
+      }
+      expect(allReady.rpcCalls.every(call => ['ve_contact_supply_approval_current', 've_enqueue_contact_supply_batch'].includes(call.fn))).toBe(true);
+    }
+    {
+      // A large pending stock for A must not stop B's own two-day share. A
+      // released campaign's ready/reserved stock also owns shared headroom.
+      const portfolio = createMockSupabase({ enforceQueryWindows: true, tables: tables({ deadline: '2026-09-04' }), rpcHandlers: handlers });
+      await portfolio.from('ve_projects').update({ contact_upload_mode: 'all_ready', target_contacts: 1000 }).eq('id', 've');
+      await portfolio.from('ve_launch_queue_items').update({ potential_pct: 50 }).eq('id', 'item');
+      await portfolio.from('ve_launch_queue_items').insert([
+        { id: 'second-item', project_id: 've', status: 'active', potential_pct: 50 },
+        { id: 'old-item', project_id: 've', status: 'released', potential_pct: 50 },
+      ]);
+      await portfolio.from('ve_contact_supply_plans').insert({ id: 'second-plan', project_id: 've', hypothesis_id: 'second-hyp',
+        template_id: 'second-template', item_id: 'second-item', status: 'active', source_state: {} });
+      await portfolio.from('ve_launch_queue_campaigns').insert([
+        { id: 'second-row', item_id: 'second-item', campaign_id: 'second-campaign', segment: null, remote_status: 1, status_observed_at: now.toISOString() },
+        { id: 'old-row', item_id: 'old-item', campaign_id: 'old-campaign', segment: null, remote_status: 2, status_observed_at: now.toISOString() },
+      ]);
+      await instantly.from('instantly_campaign_catalog').insert([
+        { id: 'second-campaign', new_leads_contacted_count: 0 }, { id: 'old-campaign', new_leads_contacted_count: 0 },
+      ]);
+      await portfolio.from('ve_contact_delivery_rows').insert(Array.from({ length: 110 }, (_, n) => ({
+        id: `pending-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row',
+        email_normalized: `pending${n}@example.test`, status: 'accepted',
+      })));
+      await runProjectContactSupply({ portalDb: portfolio as never, instantlyDb: instantly as never, veProjectId: 've', now });
+      const queued = () => portfolio.rpcCalls.filter(call => call.fn === 've_enqueue_contact_supply_batch');
+      expect(queued().at(-1)?.params).toMatchObject({ p_plan_id: 'second-plan', p_limit: 20 });
+      await portfolio.from('ve_contact_delivery_rows').insert(Array.from({ length: 880 }, (_, n) => ({
+        id: `old-stock-${n}`, ve_project_id: 've', campaign_row_id: 'old-row',
+        email_normalized: `oldstock${n}@example.test`, status: n % 2 ? 'ready' : 'reserved',
+      })));
+      await runProjectContactSupply({ portalDb: portfolio as never, instantlyDb: instantly as never, veProjectId: 've', now });
+      expect(queued().at(-1)?.params).toMatchObject({ p_plan_id: 'second-plan', p_limit: 7 });
+      // Another campaign's sent count cannot cancel A's unsent inventory.
+      await instantly.from('instantly_campaign_catalog').update({ new_leads_contacted_count: 100 }).eq('id', 'second-campaign');
+      await runProjectContactSupply({ portalDb: portfolio as never, instantlyDb: instantly as never, veProjectId: 've', now });
+      expect(queued()).toHaveLength(2);
+      await instantly.from('instantly_campaign_catalog').delete().in('id', ['second-campaign', 'old-campaign']);
     }
 
     const afterPeriod = createMockSupabase({ enforceQueryWindows: true, rpcHandlers: handlers,

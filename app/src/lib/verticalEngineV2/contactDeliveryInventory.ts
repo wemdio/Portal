@@ -93,6 +93,7 @@ export async function loadVeContactDeliveryCampaignInventory(
   activeCampaignIds: string[];
   activeCampaignRowIds: string[];
   observedFirstContacted: number;
+  observedFirstContactedByCampaignRow: Record<string, number>;
 }> {
   const items = await readContactDeliveryPages<{ id: string; status: string; instantly_account_id?: string }>(
     'delivery queue inventory',
@@ -115,6 +116,7 @@ export async function loadVeContactDeliveryCampaignInventory(
   const initialEmptyCampaignIds = new Set<string>();
   const childIds = new Set<string>();
   const campaignAccounts = new Map<string, string | undefined>();
+  const campaignRowIds = new Map<string, string>();
   const itemAccounts = new Map(items.map(item => [item.id, item.instantly_account_id]));
   for (let offset = 0; offset < itemIds.length; offset += ID_BATCH_SIZE) {
     const ids = itemIds.slice(offset, offset + ID_BATCH_SIZE);
@@ -140,6 +142,7 @@ export async function loadVeContactDeliveryCampaignInventory(
       childIds.add(campaign.id);
       if (allIds.has(campaign.campaign_id)) throw new Error('delivery campaign identity belongs to multiple launch rows');
       allIds.add(campaign.campaign_id);
+      campaignRowIds.set(campaign.campaign_id, campaign.id);
       campaignAccounts.set(campaign.campaign_id, itemAccounts.get(campaign.item_id));
       if (campaign.leads_count === 0 && campaign.activated_at === null &&
         (campaign.remote_status === CampaignStatus.Draft || campaign.remote_status === CampaignStatus.Paused) &&
@@ -159,6 +162,7 @@ export async function loadVeContactDeliveryCampaignInventory(
 
   const allCampaignIds = [...allIds].sort();
   let observedFirstContacted = 0;
+  const observedFirstContactedByCampaignRow: Record<string, number> = {};
   const observedIds = new Set<string>();
   for (let offset = 0; offset < allCampaignIds.length; offset += ID_BATCH_SIZE) {
     const ids = allCampaignIds.slice(offset, offset + ID_BATCH_SIZE);
@@ -189,18 +193,22 @@ export async function loadVeContactDeliveryCampaignInventory(
         throw new Error('delivery catalog has invalid or duplicate campaign identities');
       }
       observedIds.add(campaign.id);
+      observedFirstContactedByCampaignRow[campaignRowIds.get(campaign.id)!] = contacts;
       observedFirstContacted += contacts;
       if (!Number.isSafeInteger(observedFirstContacted)) {
         throw new Error('delivery first-contacted total exceeds the safe integer range');
       }
     }
     for (const id of ids.filter(id => !observedIds.has(id))) {
-      observedFirstContacted += await readMissingCampaignCount(id, campaignAccounts.get(id));
+      const contacts = await readMissingCampaignCount(id, campaignAccounts.get(id));
+      observedFirstContactedByCampaignRow[campaignRowIds.get(id)!] = contacts;
+      observedFirstContacted += contacts;
       if (!Number.isSafeInteger(observedFirstContacted)) throw new Error('delivery first-contacted total exceeds the safe integer range');
       observedIds.add(id);
     }
   }
-  return { allCampaignIds, activeCampaignIds: [...activeIds].sort(), activeCampaignRowIds: [...activeCampaignRowIds], observedFirstContacted };
+  return { allCampaignIds, activeCampaignIds: [...activeIds].sort(), activeCampaignRowIds: [...activeCampaignRowIds],
+    observedFirstContacted, observedFirstContactedByCampaignRow };
 }
 
 export type ContactDeliveryInventoryRow = {

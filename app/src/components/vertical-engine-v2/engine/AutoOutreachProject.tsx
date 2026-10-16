@@ -27,6 +27,7 @@ import { BaseRow, BaseAnalysisCards } from './steps/Step4Base';
 import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { DeliveryRatePanel } from './DeliveryRatePanel';
+import { ContactUploadModePanel, type ContactUploadMode } from './ContactUploadModePanel';
 import { DeliveryTargetPanel } from './DeliveryTargetPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
@@ -162,8 +163,8 @@ export function AudienceSummary({
         : preparedForLaunch}</p>
       {partial && readyForReview ? <p className={HE.muted}>{preparedForLaunch}</p> : null}
       {!partial || readyForReview ? <p className={HE.faint}>
-        Контакты будут загружаться в Instantly дневными партиями. Темп и срок появятся на шаге «Запуск» после выбора
-        проекта и настроек отправки; план считается по общему обязательству проекта сразу для всех гипотез.
+        На шаге «Запуск» выберите загрузку всех готовых контактов сразу или дневными порциями.
+        Общая цель проекта учитывает все запущенные гипотезы.
       </p> : null}
       <details>
         <summary className="ve2-link cursor-pointer">Расчёт объёма и прогноз</summary>
@@ -320,6 +321,12 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       setRefreshing(false);
     }
   }, [projectId]);
+  const uploadModeSaved = useCallback((mode: ContactUploadMode) => {
+    detailMutationRevision.current += 1;
+    setDetail(current => current ? { ...current, project: { ...current.project, contact_upload_mode: mode } } : current);
+    void refresh();
+  }, [refresh]);
+  const uploadMode = detail?.project.contact_upload_mode === 'all_ready' ? 'all_ready' : 'daily';
   const working =
     detail?.jobs.some((j) => ['pending', 'running'].includes(j.status)) ||
     snapshot?.preparations.some(
@@ -1236,6 +1243,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               key={launchHypothesisIds.join(',') || 'empty'}
               projectId={projectId}
               snapshot={snapshot}
+              uploadMode={uploadMode}
+              onUploadModeSaved={uploadModeSaved}
               templates={detail.templates}
               titles={titles}
               hypothesisIds={launchHypothesisIds}
@@ -1254,11 +1263,13 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <h2 className="ve2-h2">{run?.status === 'waiting' && run.items.some(item => item.code === 'VE_LAUNCH_REVIEW_REQUIRED')
                 ? 'Кампании ожидают проверки специалиста' : run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
               {run?.error ? <StatusBox tone="error">{run.error}</StatusBox> : null}
-              {run?.request.target_contacts ? <DeliveryTargetPanel key={projectId} projectId={projectId}
+              {run ? <ContactUploadModePanel key={projectId} projectId={projectId} mode={uploadMode}
+                disabled={busy || ['queued', 'running'].includes(run.status)} onSaved={uploadModeSaved} /> : null}
+              {run?.request.target_contacts ? <DeliveryTargetPanel key={projectId} projectId={projectId} uploadMode={uploadMode}
                 disabled={busy || ['queued', 'running', 'waiting'].includes(run.status)} onSaved={() => void refresh()} /> : null}
               {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
                 presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}
-                disabled={busy || ['queued', 'running'].includes(run.status)} /> : null}
+                disabled={busy || ['queued', 'running'].includes(run.status)} supplyOnly={uploadMode === 'all_ready'} /> : null}
               {!locked && resultTemplates.length ? (
                 <button
                   type="button"
@@ -1294,6 +1305,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   <CampaignProgress
                     key={t.id}
                     template={t}
+                    uploadMode={uploadMode}
                     required={base?.source === 'auto' && base.collect_info?.collection_mode === 'preview'}
                     title={hypothesisId ? (titles[hypothesisId] ?? 'Гипотеза') : (base?.filename ?? 'Кампания')}
                     headerAction={hypothesisId ? <DownloadVerifiedContacts projectId={projectId} hypothesisId={hypothesisId} /> : undefined}

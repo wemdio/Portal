@@ -908,6 +908,196 @@ try {
   });
   await commit();
 
+  // Upload all checked inventory without changing sending/supply capacity.
+  // These are real SQL calls in the same isolated PostgreSQL engine.
+  await db.exec(migration('20261016_0002_ve_all_ready_contact_upload.sql'));
+  const allReadySql='select public.ve_reserve_all_ready_contact_delivery_day($1,$2::timestamptz,$3) as r';
+  const reserveAll=async (project=VE,at=refillNow,observed=0)=>(await one(allReadySql,[project,at,observed])).r;
+  const modeSql='select public.ve_set_contact_upload_mode($1,$2,$3,$4) as r';
+  const setMode=async (mode,previous='daily',project=VE)=>(await one(modeSql,[project,mode,previous,USER])).r;
+  await begin();
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids);
+    const initial=await reserve();
+    check(batchIds(initial).length===20,'all-ready: daily remains the default with its original quota');
+    const originalQuota=await one('select required_daily,sender_daily_capacity from public.ve_contact_delivery_daily_runs where id=$1',[initial.run_id]);
+    await finish(initial,initial.batches[0],await mark(initial,initial.batches[0]));
+    const before=await rows("select id,status,attempt_id from public.ve_contact_delivery_rows where status='accepted' and ve_project_id=$1 order by id",[VE]);
+    await asRole('service_role',()=>setMode('all_ready'));
+    await expectError('all-ready: stale mode edit is rejected',modeSql,[VE,'daily','daily',USER],/другой вкладке/);
+    const filled=await reserveAll();
+    check(filled.run_id===initial.run_id && batchIds(filled).length===10 && filled.effective_count===30,
+      'all-ready: fills remaining inventory after the old daily quota was already consumed');
+    check(JSON.stringify(originalQuota)===JSON.stringify(await one('select required_daily,sender_daily_capacity from public.ve_contact_delivery_daily_runs where id=$1',[filled.run_id])),
+      'all-ready: original daily quota snapshots are preserved');
+    check(JSON.stringify(before)===JSON.stringify(await rows("select id,status,attempt_id from public.ve_contact_delivery_rows where status='accepted' and ve_project_id=$1 order by id",[VE])),
+      'all-ready: existing uploads and attempt identities survive mode change');
+    const replay=await reserveAll();
+    check(JSON.stringify(batchIds(filled))===JSON.stringify(batchIds(replay)),'all-ready: lost reservation response replays the same durable rows');
+    const attempt=await mark(filled,filled.batches[0]);
+    check((await reserveAll()).batches.length===0,'all-ready: in-flight provider attempt cannot be reserved again');
+    await finish(filled,filled.batches[0],attempt,[],[],filled.batches[0].row_ids);
+    check((await reserveAll()).batches.length===0,'all-ready: unknown provider result remains fenced');
+  });
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids.slice(0,5));
+    await rows('update public.ve_launch_queue_campaigns set remote_status=0,activated_at=null where item_id=$1',[ITEM]);
+    await setMode('all_ready');
+    const draft=await reserveAll();
+    await finish(draft,draft.batches[0],await mark(draft,draft.batches[0]));
+    await ready(ids.slice(5));
+    const second=await reserveAll();
+    check(batchIds(second).length===25 && second.run_id===draft.run_id,
+      'all-ready: never-started draft receives more than its first provider tranche');
+    await setMode('daily','all_ready');
+    const attempt=await mark(second,second.batches[0]);
+    await finish(second,second.batches[0],attempt);
+    check((await reserve()).batches.length===0,'all-ready: switching back keeps reserved uploads but grants no additional daily quota');
+    check((await one('select sender_daily_capacity from public.ve_projects where id=$1',[VE])).sender_daily_capacity===20,
+      'all-ready: project sender/supply capacity never increases');
+  });
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids);
+    await setMode('all_ready');
+    const weekend=new Date(refillNow); while(weekend.getUTCDay()!==6) weekend.setUTCDate(weekend.getUTCDate()+1);
+    const at=weekend.toISOString();
+    await rows('update public.ve_launch_queue_campaigns set status_observed_at=$2 where item_id=$1',[ITEM,at]);
+    const filled=await reserveAll(VE,at);
+    check(batchIds(filled).length===30,'all-ready: checked inventory uploads on weekends without changing send schedule');
+    await rows('update public.ve_contact_delivery_daily_runs set upload_blocked_at=$2 where id=$1',[filled.run_id,at]);
+    check((await reserveAll(VE,at)).status==='capacity_blocked','all-ready: workspace storage refusal still blocks subsequent requests');
+  });
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids); await setMode('all_ready');
+    await rows('update public.ve_launch_queue_campaigns set remote_status=2 where item_id=$1',[ITEM]);
+    check((await reserveAll()).batches.length===0,'all-ready: explicit pause after activation still blocks upload');
+    await rows("update public.ve_launch_queue_campaigns set remote_status=1,status_observed_at=$2::timestamptz-interval '6 minutes' where item_id=$1",[ITEM,refillNow]);
+    check((await reserveAll()).batches.length===0,'all-ready: stale campaign observation is not sufficient');
+    await rows('update public.ve_launch_queue_campaigns set status_observed_at=$2 where item_id=$1',[ITEM,refillNow]);
+    await rows("update public.ve_contact_supply_plans set approval_snapshot='{}' where id=$1",[PLAN]);
+    await expectError('all-ready: stale approval cannot upload',allReadySql,[VE,refillNow,0],/approval is stale/);
+  });
+  await inRollback(async () => {
+    const ids=await setupRefill(VEP,periodFinal.queue_item.id); await ready(ids);
+    await rows("update public.project_periods set contacts_done='10' where id=$1",[PERIOD]);
+    await setMode('all_ready','daily',VEP);
+    const filled=await reserveAll(VEP,refillNow,3);
+    check(batchIds(filled).length===13,'all-ready: shared project target and period fact still cap inventory');
+    await finish(filled,filled.batches[0],await mark(filled,filled.batches[0]));
+    const remainder=await reserveAll(VEP,refillNow,3);
+    check(batchIds(remainder).length===3,'all-ready: independent period/VE facts allow only evidenced target headroom');
+    await finish(remainder,remainder.batches[0],await mark(remainder,remainder.batches[0]));
+    check((await reserveAll(VEP,refillNow,3)).batches.length===0,'all-ready: accepted but unsent inventory still consumes target headroom');
+    await rows("update public.project_periods set status='closed' where id=$1",[PERIOD]);
+    await expectError('all-ready: closed period still blocks upload',allReadySql,[VEP,refillNow,3],/not active/);
+  });
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids);
+    await rows(`insert into public.ve_contact_delivery_rates(project_id,preset_id,template_ids,mode,revision,status,
+      effective_capacity,snapshot,checked_at,updated_by,lease_until)
+      values($1,$2,array[$3::uuid],'auto',1,'updating',20,'{}',now(),$4,now()+interval '1 minute')`,[VE,PRESET,TPL,USER]);
+    await expectError('all-ready: cannot race an in-flight campaign rate update',modeSql,[VE,'all_ready','daily',USER],/Воркер применяет темп/);
+    await rows('update public.ve_contact_delivery_rates set lease_until=null where project_id=$1',[VE]);
+    await setMode('all_ready');
+    check((await setMode('all_ready')).mode==='all_ready','all-ready: replay of a lost mode-save response is idempotent');
+    const rate=await one('select status,checked_at,effective_capacity from public.ve_contact_delivery_rates where project_id=$1',[VE]);
+    check(rate.status==='pending' && rate.checked_at===null && rate.effective_capacity===20,
+      'all-ready: mode switch requests campaign-limit refresh without inflating source capacity');
+    check(batchIds(await reserveAll()).length===30,'all-ready: upload does not depend on stale sender-rate calculation');
+  });
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids.slice(0,5)); await setMode('all_ready');
+    const held=await reserveAll();
+    await rows('update public.ve_launch_queue_campaigns set remote_status=2 where item_id=$1',[ITEM]);
+    const extra=await one('select gen_random_uuid() item,gen_random_uuid() campaign,gen_random_uuid() reservation');
+    await rows(`insert into public.ve_launch_queue_items select (jsonb_populate_record(null::public.ve_launch_queue_items,
+      to_jsonb(q)||jsonb_build_object('id',$2::uuid,'prepare_reservation_id',$3::uuid,'ready_leads_count',0,'ready_remaining_count',0))).*
+      from public.ve_launch_queue_items q where q.id=$1`,[ITEM,extra.item,extra.reservation]);
+    await rows(`insert into public.ve_launch_queue_campaigns select (jsonb_populate_record(null::public.ve_launch_queue_campaigns,
+      to_jsonb(c)||jsonb_build_object('id',$2::uuid,'item_id',$3::uuid,'campaign_id','camp-2','leads_count',0,
+        'ready_leads_count',0,'ready_remaining_count',0,'remote_status',1))).*
+      from public.ve_launch_queue_campaigns c where c.item_id=$1`,[ITEM,extra.campaign,extra.item]);
+    const more=[];
+    for (let n=0;n<5;n++) {
+      const id=(await one('select gen_random_uuid() id')).id;
+      sourceRows.set(id,{...sourceRows.get(ids[0]),id,item_id:extra.item,campaign_row_id:extra.campaign,
+        source_row_index:n,drip_order:n,email_normalized:`sibling${n}@example.test`,lead_payload:{email:`sibling${n}@example.test`}});
+      more.push(id);
+    }
+    await ready(more);
+    const sibling=await reserveAll();
+    check(sibling.run_id===held.run_id && sibling.effective_count===10 && batchIds(sibling).length===5
+      && sibling.batches.every(batch=>batch.campaign_id==='camp-2'),
+    'all-ready: paused old reservation remains accounted but is not returned ahead of eligible sibling');
+    await finish(sibling,sibling.batches[0],await mark(sibling,sibling.batches[0]));
+    check((await reserveAll()).batches.length===0,'all-ready: finalized sibling cannot reactivate the paused reservation');
+    await rows('update public.ve_launch_queue_campaigns set remote_status=1,status_observed_at=$2 where item_id=$1',[ITEM,refillNow]);
+    const resumed=await reserveAll();
+    check(JSON.stringify(batchIds(resumed))===JSON.stringify(batchIds(held)),
+      'all-ready: provider reactivation returns the exact existing unattempted reservation');
+    await finish(resumed,resumed.batches[0],await mark(resumed,resumed.batches[0]));
+    check((await reserveAll()).batches.length===0,'all-ready: paused/reactivated delivery uploads every identity once');
+  });
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids.slice(0,5)); await setMode('all_ready');
+    const old=await reserveAll(); const attempt=await mark(old,old.batches[0]);
+    await finish(old,old.batches[0],attempt,[],[],old.batches[0].row_ids);
+    await rows('update public.ve_contact_delivery_daily_runs set run_date=run_date-1 where id=$1',[old.run_id]);
+    await ready(ids.slice(5,10));
+    const next=await reserveAll();
+    check(next.run_id!==old.run_id && batchIds(next).length===5 && !batchIds(next).some(id=>batchIds(old).includes(id)),
+      'all-ready: prior-day unknown upload never becomes a fresh upload identity');
+    check((await one("select count(*)::int n from public.ve_contact_delivery_rows where run_id=$1 and status='uncertain' and attempt_id=$2",[old.run_id,attempt])).n===5,
+      'all-ready: prior-day uncertainty keeps its immutable provider attempt and target commitment');
+  });
+  await inRollback(async () => {
+    const ids=await one(`select gen_random_uuid() portal,gen_random_uuid() ve,gen_random_uuid() vert,
+      gen_random_uuid() base,gen_random_uuid() tpl,gen_random_uuid() audit,gen_random_uuid() reservation`);
+    await rows("insert into public.projects(id,client,status,deadline) values($1,'Large checked inventory','В работе','2000-01-01')",[ids.portal]);
+    await insertVeProject(ids.ve,'Large checked inventory');
+    await rows("insert into public.ve_verticals(id,project_id,name,potential_pct) values($1,$2,'HR',50)",[ids.vert,ids.ve]);
+    await rows(`insert into public.ve_bases(id,project_id,vertical_id,columns,data,source,status)
+      values($1,$2,$3,'["email"]','[]','auto','analyzed')`,[ids.base,ids.ve,ids.vert]);
+    await rows(`insert into public.ve_templates(id,base_id,vertical_id,letters,status)
+      values($1,$2,$3,'[{"subject":"s","body":"b"}]','ready')`,[ids.tpl,ids.base,ids.vert]);
+    await rows(`insert into public.ve_segmentation_audits(id,project_id,template_id,base_id,requested_by,status,input_hash,summary,launch_status,launch_reservation_id)
+      values($1,$2,$3,$4,$5,'ready',repeat('a',64),'{}','running',$6)`,[ids.audit,ids.ve,ids.tpl,ids.base,USER,ids.reservation]);
+    await one(bindSql,[ids.ve,ids.portal,null,10000,USER,refillNow]);
+    const info={...launchInfo,portal_project_id:ids.portal,target_contacts:10000,campaign_id:'large-camp',
+      campaigns:[{...launchInfo.campaigns[0],campaign_id:'large-camp'}]};
+    const payload=Array.from({length:5001},(_,n)=>({campaign_id:'large-camp',source_row_index:n,drip_order:n,
+      lead_payload:{email:`large${n}@example.test`}}));
+    const finalized=(await one(finalizeSql,[ids.audit,ids.tpl,ids.reservation,JSON.stringify(info),refillNow,JSON.stringify(payload)])).r;
+    await rows("update public.ve_launch_queue_items set status='active' where id=$1",[finalized.queue_item.id]);
+    await rows('update public.ve_launch_queue_campaigns set remote_status=0,activated_at=null,status_observed_at=$2 where item_id=$1',[finalized.queue_item.id,refillNow]);
+    await setMode('all_ready','daily',ids.ve);
+    const first=await reserveAll(ids.ve);
+    check(batchIds(first).length===5000,'all-ready: large checked inventory uses a bounded transport tranche');
+    await finish(first,first.batches[0],await mark(first,first.batches[0]));
+    const second=await reserveAll(ids.ve);
+    check(second.run_id===first.run_id && batchIds(second).length===1 && !batchIds(first).includes(batchIds(second)[0]),
+      'all-ready: remaining inventory is available immediately in the same day without duplication');
+    await finish(second,second.batches[0],await mark(second,second.batches[0]));
+    check((await reserveAll(ids.ve)).batches.length===0,'all-ready: transport continuation ends when all checked contacts are uploaded');
+  });
+  await inRollback(async () => {
+    await rows(`insert into public.ve_contact_delivery_rates(project_id,preset_id,template_ids,mode,revision,status,
+      effective_capacity,snapshot,checked_at,updated_by)
+      values($1,$2,array[$3::uuid],'auto',1,'ready',20,'{}',now(),$4)`,[VE_SECOND,PRESET,TPL,USER]);
+    const initial=await one('select status,checked_at,effective_capacity,revision from public.ve_contact_delivery_rates where project_id=$1',[VE_SECOND]);
+    await setMode('all_ready','daily',VE_SECOND);
+    const after=await one('select status,checked_at,effective_capacity,revision from public.ve_contact_delivery_rates where project_id=$1',[VE_SECOND]);
+    check(JSON.stringify(initial)===JSON.stringify(after),
+      'all-ready: prelaunch mode selection preserves the ready sender forecast for launch admission');
+    await rows("update public.ve_contact_delivery_rates set lease_until=now()+interval '1 minute' where project_id=$1",[VE_SECOND]);
+    await expectError('all-ready: prelaunch mode edit still respects an active rate lease',modeSql,[VE_SECOND,'daily','all_ready',USER],/Воркер применяет темп/);
+  });
+  for (const role of ['anon','authenticated']) await asRole(role,async ()=>{
+    await expectError(`${role} cannot change upload policy`,modeSql,[VE,'all_ready','daily',USER],/permission denied/i);
+    await expectError(`${role} cannot reserve all-ready inventory`,allReadySql,[VE,refillNow,0],/permission denied/i);
+  });
+  await commit();
+
   // ── Помощники не доступны ролям API ──
   await db.exec('set role service_role');
   await expectError('service_role cannot bypass the reservation wrapper for refill',

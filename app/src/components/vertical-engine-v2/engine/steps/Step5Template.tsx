@@ -821,11 +821,12 @@ function formatEmailCount(count: number | null): string {
   return formatRussianCount(count, ['почта', 'почты', 'почт']);
 }
 
-export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }: {
+export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview, uploadMode = 'daily' }: {
   launch: TemplateLaunchState;
   disabled?: boolean;
   /** Outreach preflight supplies the preview for the current request; null means it is not ready yet. */
   preparedPreview?: VeDeliveryPlanPreviewDto | null;
+  uploadMode?: 'daily' | 'all_ready';
 }) {
   const externalPreview = preparedPreview !== undefined;
   const preparedPreviewMatches = !!preparedPreview && isValidDeliveryPreview(preparedPreview) &&
@@ -976,7 +977,7 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }:
               ['Осталось', preview.remaining.toLocaleString('ru-RU')],
               ['Рабочих дней', preview.remaining_workdays.toLocaleString('ru-RU')],
               ['Нужно в день', preview.required_daily.toLocaleString('ru-RU')],
-              ['Следующая партия', preview.effective_daily.toLocaleString('ru-RU')],
+              [uploadMode === 'all_ready' ? 'Оценка отправки в день' : 'Следующая партия', preview.effective_daily.toLocaleString('ru-RU')],
             ].map(([label, value]) => (
               <div
                 key={label}
@@ -996,8 +997,9 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }:
           <p className="mt-1 text-[11px] text-gray-500">
             Всего в резерве: {(preview.reserve_remaining ?? preview.ready_remaining).toLocaleString('ru-RU')}
             {' · '}Загружено, ждёт первого контакта: {(preview.outstanding_count ?? 0).toLocaleString('ru-RU')}.
-            {' '}Загрузка не засчитывается в обязательство. Прогноз предполагает отправку в пределах дневного лимита;
-            дата допуска новой гипотезы зависит от очереди и сезонности.
+            {' '}{uploadMode === 'all_ready'
+              ? 'Загрузка не засчитывается в обязательство. Прогноз отправки не ограничивает загрузку готовых контактов. Расписание и скорость отправки задаются в Instantly.'
+              : 'Загрузка не засчитывается в обязательство. Прогноз предполагает отправку в пределах дневного лимита; дата допуска новой гипотезы зависит от очереди и сезонности.'}
           </p>
 
           {preview.supply_deficit > 0 ? (

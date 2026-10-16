@@ -28,7 +28,7 @@ const ITEM_ID = '40000000-0000-0000-0000-000000000001';
 const RUN_ID = '50000000-0000-0000-0000-000000000001';
 const ATTEMPT_ID = '60000000-0000-0000-0000-000000000001';
 
-function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: boolean; capacityBlocked?: boolean; twoBatches?: boolean } = {}) {
+function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: boolean; capacityBlocked?: boolean; twoBatches?: boolean; uploadMode?: 'daily' | 'all_ready' } = {}) {
   let reserveCalls = 0;
   return createMockSupabase({
     tables: {
@@ -42,6 +42,7 @@ function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: bool
         sender_daily_capacity: 10,
         launch_preset_id: 'preset-1',
         launch_instantly_account_id: 'workspace-1',
+        contact_upload_mode: options.uploadMode ?? 'daily',
       }],
       project_periods: [{
         id: PERIOD_ID,
@@ -73,7 +74,7 @@ function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: bool
       ],
     },
     rpcHandlers: {
-      ve_reserve_contact_delivery_day: () => {
+      [options.uploadMode === 'all_ready' ? 've_reserve_all_ready_contact_delivery_day' : 've_reserve_contact_delivery_day']: () => {
         reserveCalls += 1;
         if (options.capacityBlocked) return { data: { status: 'capacity_blocked', run_id: RUN_ID, run_date: '2026-09-07', batches: [] } };
         if (options.awaitingDelivery) {
@@ -145,6 +146,35 @@ describe('VE2 contact delivery runner', () => {
     expect(rpc).toHaveBeenCalledTimes(2);
   });
   it('uses the explicit Portal project, active period and complete child campaign set before reserving rows', async () => {
+    { // All-ready uses the same ownership, exclusions and exact-row fencing.
+      const portal = portalDb({ uploadMode: 'all_ready', replayAfterFirst: true });
+      const appendLeads = jest.fn().mockResolvedValue({ accepted: 1, skipped: 1, attemptedIndexes: [1],
+        acceptedIndexes: [1], skippedIndexes: [0], identityComplete: true });
+      const input = { portalDb: portal as never, instantlyDb: instantlyDb() as never, veProjectId: VE_PROJECT_ID,
+        // A weekend must still reach the mode-aware reservation; SQL owns target
+        // headroom and the decision to upload, never a local day/quota shortcut.
+        now: new Date('2026-09-06T06:00:00Z'), deps: {
+          reservePeriodCampaignLinks: async () => ({ status: 'claimed' as const, conflictingProjectIds: [] }),
+          appendLeads, createAttemptId: () => ATTEMPT_ID,
+        } };
+      expect(await runContactDeliveryDay(input)).toMatchObject({ status: 'completed', accepted: 1, skipped: 1 });
+      expect(await runContactDeliveryDay(input)).toMatchObject({ status: 'replayed', accepted: 0 });
+      expect(appendLeads).toHaveBeenCalledTimes(1);
+      expect(appendLeads).toHaveBeenCalledWith(expect.objectContaining({
+        skipIfInCampaign: false, pauseOnWorkspaceCapacity: true, prepareProviderChunk: expect.any(Function),
+        beforeProviderRequest: expect.any(Function),
+      }));
+      expect(portal.rpcCalls.filter(call => call.fn.includes('reserve'))).toEqual([
+        { fn: 've_reserve_all_ready_contact_delivery_day', params: {
+          p_ve_project_id: VE_PROJECT_ID, p_now: input.now.toISOString(), p_observed_ve_first_contacted: 10,
+        } },
+        { fn: 've_reserve_all_ready_contact_delivery_day', params: {
+          p_ve_project_id: VE_PROJECT_ID, p_now: input.now.toISOString(), p_observed_ve_first_contacted: 10,
+        } },
+      ]);
+      expect(portal.rpcCalls.find(call => call.fn === 've_finalize_contact_delivery_attempt')?.params)
+        .toMatchObject({ p_accepted_row_ids: ['row-2'], p_skipped_row_ids: ['row-1'], p_uncertain_row_ids: [] });
+    }
     const portal = portalDb();
     const instantly = instantlyDb();
     activateDelivered.mockImplementationOnce(async () => {
@@ -470,8 +500,8 @@ describe('VE2 workspace capacity pause', () => {
     now: new Date('2026-09-07T06:00:00Z'), deps: deps(append),
   });
 
-  it('persists a capacity pause with exact accepted and deferred rows and stops sibling campaigns', async () => {
-    const portal = portalDb({ twoBatches: true });
+  it.each(['daily', 'all_ready'] as const)('persists a capacity pause in %s with exact accepted and deferred rows and stops sibling campaigns', async (uploadMode) => {
+    const portal = portalDb({ twoBatches: true, uploadMode });
     const append = jest.fn().mockResolvedValue({ accepted: 1, skipped: 0, attemptedIndexes: [0, 1],
       acceptedIndexes: [1], deferredIndexes: [0], identityComplete: true, capacityBlocked: true });
     expect(await run(portal, append)).toMatchObject({ status: 'capacity_blocked', accepted: 1, skipped: 0 });

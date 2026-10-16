@@ -39,3 +39,29 @@ export function buildContactSupplyRequests(
     return readyTarget > 0 ? [{ itemId: item.id, readyTarget }] : [];
   });
 }
+
+/** Uploading ready stock does not create new collection demand. Each launch
+ * keeps its weighted two-day share across Portal and unsent Instantly stock.
+ * Excess stock in one launch cannot consume another launch's buffer share;
+ * the project's uncommitted goal still caps all new collection together.
+ */
+export function buildAllReadyContactSupplyRequests(
+  bufferTarget: number,
+  items: readonly { id: string; weight: number; ready: number; outstanding: number }[],
+  uncommittedHeadroom: number,
+): Array<{ itemId: string; readyTarget: number }> {
+  if (!Number.isSafeInteger(uncommittedHeadroom) || uncommittedHeadroom < 0
+    || items.some((item) => !Number.isSafeInteger(item.ready) || item.ready < 0
+      || !Number.isSafeInteger(item.outstanding) || item.outstanding < 0
+      || !Number.isSafeInteger(item.ready + item.outstanding))) {
+    throw new Error('Supply buffer requires exact non-negative inventory and headroom');
+  }
+  const targets = allocateContactSupplyTargets(bufferTarget, items);
+  let remaining = uncommittedHeadroom;
+  return items.flatMap((item, index) => {
+    const readyTarget = Math.min(MAX_READY_BATCH, remaining,
+      Math.max(0, targets[index].contacts - item.ready - item.outstanding));
+    remaining -= readyTarget;
+    return readyTarget > 0 ? [{ itemId: item.id, readyTarget }] : [];
+  });
+}
