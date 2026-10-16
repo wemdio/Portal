@@ -82,6 +82,7 @@ import {
 } from './engText';
 import { EngPaidAccessNotice, EngResendLinkControls, EngSupportText } from './EngPaidAccess';
 import { EngSendingBlock } from './EngSending';
+import { heProjectAwaitsDescription } from './clientFailureText';
 import {
   AutopilotDecisions,
   CollectProgress,
@@ -1940,15 +1941,20 @@ export function EngStepLaunch({
   };
 
   // Рынков нет: исследование не закончено или ни один рынок не выбран.
+  // Research, ждущий описания бизнеса (heProjectAwaitsDescription), — пауза до
+  // ответа клиента, как в шапке мастера над карточкой, а не «stopped … tried
+  // again»: повтора у этого кода нет, шаг 1 просит 2–3 предложения.
   if (status !== 'researched' && cardVerticals.length === 0) {
     return (
       <EngCard>
         <p className="m-0 text-sm" style={{ color: 'var(--cp-text-m)' }}>
           {status === 'researching'
             ? 'Launch opens as soon as the research of your business finishes and you have chosen your markets — step 1 «Your business» shows how far the research has got.'
-            : status === 'failed'
-              ? 'Launch opens on a researched project — the research of your business stopped, and step 1 «Your business» shows what happened and whether it can be tried again.'
-              : 'Launch opens once the research of your business is finished, and it is not running on this project — step 1 «Your business» says what to do.'}
+            : heProjectAwaitsDescription(status, detail.project.error_code)
+              ? 'Launch opens once you describe your business in 2–3 sentences on step 1 «Your business», the research finishes and you have chosen your markets on step 2.'
+              : status === 'failed'
+                ? 'Launch opens on a researched project — the research of your business stopped, and step 1 «Your business» shows what happened and whether it can be tried again.'
+                : 'Launch opens once the research of your business is finished, and it is not running on this project — step 1 «Your business» says what to do.'}
         </p>
         <button
           type="button"

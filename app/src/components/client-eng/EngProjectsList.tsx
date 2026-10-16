@@ -45,10 +45,10 @@ import {
   type EngProjectListItem,
 } from './api-client';
 import type { HeClientStageErrorCode } from '@/lib/hypothesisEngine/clientEngProjection';
-import { heResearchStopCode } from './clientFailureText';
+import { ENG_NEEDS_DESCRIPTION_SHORT_EN, heProjectAwaitsDescription, heResearchStopCode } from './clientFailureText';
 import { EngPaidAccessNotice, EngVerifyEmailBanner } from './EngPaidAccess';
 import { engStageErrorText } from './engText';
-import { EngBadge, EngCard, EngSpinner, fmtDate, projectStatusTone } from './ui';
+import { EngCard, EngProjectStatusBadge, EngSpinner, fmtDate } from './ui';
 
 /**
  * Причина остановки research на карточке проекта — тем же правилом, что шаг 1
@@ -356,7 +356,7 @@ export function EngProjectsList() {
                     {p.name}
                   </span>
                   <span className="ml-auto shrink-0">
-                    <EngBadge label={p.status} tone={projectStatusTone(p.status)} />
+                    <EngProjectStatusBadge status={p.status} errorCode={p.error_code} />
                   </span>
                 </div>
                 <div className="truncate text-xs" style={{ color: 'var(--cp-text-l)' }}>
@@ -376,12 +376,19 @@ export function EngProjectsList() {
                 {/* he_projects.error (воркер пишет туда русский текст стадии с
                     префиксом её имени) в кабинет не доезжает вовсе: роут отдаёт
                     код причины, экран — английское объяснение по коду (только
-                    у кодов research, см. engProjectResearchErrorText). */}
-                {p.error_code && (
-                  <div className="text-[11px]" style={{ color: 'var(--cp-red)' }}>
-                    {engProjectResearchErrorText(p.error_code)}
-                  </div>
-                )}
+                    у кодов research, см. engProjectResearchErrorText). Research,
+                    ждущий описания бизнеса, — не сбой: нейтральная строка
+                    вместо красной (heProjectAwaitsDescription). */}
+                {p.error_code &&
+                  (heProjectAwaitsDescription(p.status, p.error_code) ? (
+                    <div className="text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+                      {ENG_NEEDS_DESCRIPTION_SHORT_EN}
+                    </div>
+                  ) : (
+                    <div className="text-[11px]" style={{ color: 'var(--cp-red)' }}>
+                      {engProjectResearchErrorText(p.error_code)}
+                    </div>
+                  ))}
               </Link>
             ))}
           </div>

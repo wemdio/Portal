@@ -24,6 +24,7 @@ import {
   Database,
   LayoutGrid,
   Mail,
+  PenLine,
   RefreshCw,
   Rocket,
   UserRound,
@@ -50,7 +51,12 @@ import {
 } from './engText';
 import { EngPaidAccessNotice, EngSupportText, EngVerifyEmailBanner } from './EngPaidAccess';
 import { EngSendingBlock } from './EngSending';
-import { HE_TEAM_ON_IT_SHORT_EN } from './clientFailureText';
+import {
+  ENG_NEEDS_DESCRIPTION_SHORT_EN,
+  ENG_NEEDS_INPUT_LABEL_EN,
+  HE_RESEARCH_NEEDS_DESCRIPTION_CODE,
+  HE_TEAM_ON_IT_SHORT_EN,
+} from './clientFailureText';
 // Только тип — см. пояснение в engText.ts: набор состояний один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
 import type { HeClientRefillState } from '@/lib/hypothesisEngine/clientEngProjection';
@@ -105,14 +111,26 @@ function sendingStatusOf(vertical: EngDashboardVertical): StageStatus | null {
 }
 
 /**
+ * Research ждёт описания бизнеса (код website_thin у 'project_failed'): не сбой,
+ * а шаг клиента — янтарь легенды выше, без «needs attention» красным.
+ */
+function attentionAwaitsDescription(attention: EngDashAttentionInfo | null | undefined): boolean {
+  return attention?.reason === 'project_failed' && attention.code === HE_RESEARCH_NEEDS_DESCRIPTION_CODE;
+}
+
+/**
  * Тег этапа 'attention' по причине. Красный — сбой (упавшая база, упавший
- * research); янтарь — тупик без сбоя (база вернулась пустой: решает команда через Support);
+ * research); янтарь — тупик без сбоя (база вернулась пустой: решает команда через Support)
+ * и research, ждущий описания бизнеса (шаг клиента);
  * серый — отмена, это решение человека, а не поломка.
  */
 function attentionStatus(attention: EngDashAttentionInfo | null | undefined): StageStatus {
   if (!attention) return STAGE_STATUS.attention;
   if (attention.code === 'cancelled') {
     return { tag: 'cancelled', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' };
+  }
+  if (attentionAwaitsDescription(attention)) {
+    return { tag: ENG_NEEDS_INPUT_LABEL_EN, dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
   }
   if (attention.reason === 'base_empty') {
     return { tag: 'needs attention', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' };
@@ -144,7 +162,9 @@ function attentionNextLine(attention: EngDashAttentionInfo | null | undefined): 
     case 'base_empty':
       return 'next: message Support about this market';
     case 'project_failed':
-      return 'next: open step 1 «Your business» — it shows whether the research can be tried again';
+      return attentionAwaitsDescription(attention)
+        ? 'next: open step 1 «Your business» and describe your business in 2–3 sentences'
+        : 'next: open step 1 «Your business» — it shows whether the research can be tried again';
     case 'analysis_stopped':
       // Без `requeues` «Launch» этот анализ заново не ставит — тот же Support,
       // что у карточки рынка на шаге 3 и в письме об этой остановке. Анализ
@@ -729,11 +749,12 @@ function buildPipelineRows(
   const attention = vertical.stage === 'attention';
   const notSelected = vertical.stage === 'not_selected';
   // Маркер строки, на которой вертикаль встала: тот же цвет, что у тега
-  // (attentionStatus) — отмена серая, пустая база янтарная, сбой красный.
+  // (attentionStatus) — отмена серая, пустая база и research, ждущий описания
+  // бизнеса, янтарные, сбой красный.
   const attentionMarker: PipeRow['marker'] =
     vertical.attention?.code === 'cancelled'
       ? 'quiet'
-      : vertical.attention?.reason === 'base_empty'
+      : vertical.attention?.reason === 'base_empty' || attentionAwaitsDescription(vertical.attention)
         ? 'held'
         : 'red';
   // Признак ставится только шаблону этапа 'template' / 'launch_unfinished'.
@@ -1017,6 +1038,9 @@ const EVENT_ICON: Record<EngDashboardEvent['type'], { Icon: typeof Mail; color: 
   launch_unfinished: { Icon: Rocket, color: 'var(--cp-amber)' },
   refill_appended: { Icon: RefreshCw, color: 'var(--cp-green)' },
   refill_empty: { Icon: RefreshCw, color: 'var(--cp-paper-faint)' },
+  // Research ждёт описания бизнеса — шаг клиента, не сбой: янтарь, как у
+  // незаконченного запуска.
+  needs_input: { Icon: PenLine, color: 'var(--cp-amber)' },
   failed: { Icon: AlertTriangle, color: 'var(--cp-red)' },
 };
 
@@ -1406,6 +1430,9 @@ export function EngDashboard() {
   }, [load]);
 
   const projects = data?.projects ?? [];
+  // Один аккаунт — один сайт: единственный проект, чей research ждёт описания
+  // бизнеса, — пустая карточка рынков просит описание (рынков у него ещё нет).
+  const awaitingProject = projects.length === 1 && projects[0].awaits_description === true ? projects[0] : null;
   const verticals: EngDashboardVertical[] = data?.verticals ?? [];
   const events = data?.events ?? [];
   const activeJobs = data?.activeJobs ?? [];
@@ -1723,7 +1750,11 @@ export function EngDashboard() {
                   проектов нет; есть — путь в него (несколько — у аккаунта,
                   создавшего их до этого правила, — в список). */}
               <p className="text-sm font-semibold m-0" style={{ color: 'var(--cp-paper)' }}>
-                {projects.length === 0 ? 'No project yet' : 'No markets yet'}
+                {projects.length === 0
+                  ? 'No project yet'
+                  : awaitingProject
+                    ? 'We need a short description of your business'
+                    : 'No markets yet'}
               </p>
               {/* Письма, базу, итоговые письма и запуск после «Launch» шага 3
                   ведут автопилот и автозапуск — и только по выбранным рынкам.
@@ -1733,7 +1764,12 @@ export function EngDashboard() {
                   как у карточек рынков. Исследование выключатель не
                   спрашивает, кнопка ниже работает. */}
               <p className="text-xs m-0 max-w-md" style={{ color: 'var(--cp-paper-mute)' }}>
-                {data?.account_access === 'revoked' ? (
+                {awaitingProject ? (
+                  <>
+                    {ENG_NEEDS_DESCRIPTION_SHORT_EN} Describe in 2–3 sentences what you sell and to whom on step 1
+                    «Your business» — the research then goes on and finds the markets that could buy from you.
+                  </>
+                ) : data?.account_access === 'revoked' ? (
                   <EngSupportText
                     text={`We research your business and find the markets that could buy from you. ${ENG_SENDING_OFF_EN}`}
                   />
@@ -1749,18 +1785,22 @@ export function EngDashboard() {
                 href={
                   (projects.length === 0
                     ? '/client/eng'
-                    : projects.length === 1
-                      ? `/client/eng/projects/${projects[0].id}`
-                      : '/client/eng?list=1') as Route
+                    : awaitingProject
+                      ? `/client/eng/projects/${awaitingProject.id}?step=1`
+                      : projects.length === 1
+                        ? `/client/eng/projects/${projects[0].id}`
+                        : '/client/eng?list=1') as Route
                 }
                 prefetch={false}
                 className="ds-btn-primary inline-flex items-center gap-2"
               >
                 {projects.length === 0
                   ? 'Create your project'
-                  : projects.length === 1
-                    ? 'Open your project'
-                    : 'Open your projects'}
+                  : awaitingProject
+                    ? 'Describe your business'
+                    : projects.length === 1
+                      ? 'Open your project'
+                      : 'Open your projects'}
                 <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </EngCard>

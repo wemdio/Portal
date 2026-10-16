@@ -33,6 +33,7 @@ import {
 } from '@/lib/hypothesisEngine/engMarkets';
 import { engSendingAccessOf, fetchEngProjectLaunch, saveEngMarkets, type EngSendingAccessState } from './api-client';
 import { EngSupportText } from './EngPaidAccess';
+import { heProjectAwaitsDescription } from './clientFailureText';
 import { EngBadge, EngCard, EngSpinner } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -41,14 +42,22 @@ import type { EngDetail } from './EngProjectWizard';
  * делать: рынки появляются только у законченного исследования, а что с ним,
  * говорит шаг 1. `never` в конце заставит компилятор потребовать текст для
  * нового статуса.
+ *
+ * 'failed' с research, ждущим описания бизнеса (heProjectAwaitsDescription), —
+ * не «stopped … tried again»: повтора у этого кода нет (шаг 1 просит 2–3
+ * предложения), а шапка мастера над карточкой говорит о той же паузе
+ * нейтрально — карточка обязана говорить то же.
  */
-function notResearchedText(status: Exclude<HeProjectStatus, 'researched'>): string {
+function notResearchedText(status: Exclude<HeProjectStatus, 'researched'>, awaitsDescription: boolean): string {
   switch (status) {
     case 'draft':
       return 'Your markets appear here once the research of your business is finished, and it is not running on this project — step 1 «Your business» says what to do.';
     case 'researching':
       return 'Your markets appear here as soon as the research of your business finishes — step 1 «Your business» shows how far it has got.';
     case 'failed':
+      if (awaitsDescription) {
+        return 'Your markets appear here once you describe your business in 2–3 sentences on step 1 «Your business» and the research finishes.';
+      }
       return 'The research of your business stopped before it found your markets — step 1 «Your business» shows what happened and whether it can be tried again.';
     default: {
       const exhaustive: never = status;
@@ -234,7 +243,7 @@ export function EngStepMarkets({
     return (
       <EngCard>
         <p className="m-0 text-sm" style={{ color: 'var(--cp-text-m)' }}>
-          {notResearchedText(status)}
+          {notResearchedText(status, heProjectAwaitsDescription(status, detail.project.error_code))}
         </p>
         <button
           type="button"

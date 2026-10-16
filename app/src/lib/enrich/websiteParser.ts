@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import type { AnyNode } from 'domhandler';
 import iconv from 'iconv-lite';
 import { buildAboutCandidates, DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
@@ -660,16 +661,94 @@ export function sanitizeText(text: string): string {
 }
 
 /**
- * Extract readable text from an HTML string using cheerio.
- * Strips scripts, styles, nav, footer, etc.
+ * Опции разбора HTML → текст (extractTextFromHtml и цепочки чтения
+ * fetchAndExtract / fetchSinglePage, которые передают их каждому разбору).
  */
-export function extractTextFromHtml(html: string): string {
-  const $ = cheerio.load(html);
+export interface ExtractTextOptions {
+  /**
+   * Разбор, который не принимает вёрстку конструкторов сайтов за мусор.
+   *
+   * Прежний разбор чистит «шум» по ПОДСТРОКЕ класса, и на трёх массовых
+   * конструкторах под чистку уходит сама страница, а текстом остаётся <title>
+   * (замер 2026-10-16 на 41 сайте B2B-услуг из США: 9 сайтов с ≥ 800 символов
+   * видимого текста получили 11–179 символов):
+   *  - `[class*="widget"]` (задуман для виджетов сайдбара WordPress) снимает
+   *    каждый элемент Elementor (`elementor-widget*`) и каждую ячейку
+   *    HubSpot CMS (`widget-span widget-type-cell`, `hs_cos_wrapper_widget`);
+   *  - `[class*="overlay"]` / `popup` / `modal` снимает сам <body> на
+   *    Squarespace 7.1 (классы шаблона `header-overlay-alignment-center`,
+   *    `tweak-portfolio-grid-overlay-*` стоят на <body> всегда);
+   *  - корень текста `main, article, [role="main"]` без <main> берёт сетку
+   *    карточек блога или кейсов (<article>), а вложенный `main > article`
+   *    считает дважды.
+   *
+   * С опцией меняются ровно эти три правила (layoutNoiseCleanup и
+   * layoutTextRoot ниже); остальное — снятие script/style/header/footer/nav,
+   * форм, cookie-баннеров, запасной текст из <title> и описания короче
+   * MIN_TEXT_LENGTH — то же самое.
+   *
+   * Не передана — прежний разбор байт в байт: его читают RU-движки, конструктор
+   * баз, enrich-воркер, dfyb, ИНН-парсер и почтовый скрапер, и их сайты этим
+   * замером не проверены. Включает опцию чтение сайта английского рынка
+   * (ENG_WEBSITE_ROUTE в hypothesisEngine/stages/io.ts).
+   */
+  layoutAware?: boolean;
+}
 
-  // Remove non-content elements
-  $('script, style, noscript, iframe, svg, link, meta, header, footer, nav').remove();
-  $('[role="navigation"], [role="banner"], [role="contentinfo"]').remove();
-  $('form, .cookie-banner, .cookie-consent, #cookie-banner, #cookie-consent').remove();
+/** Сама страница: её не снимает ни один фильтр «шума» по подстроке класса. */
+const LAYOUT_PAGE_ROOTS = 'html, body, main, [role="main"]';
+const LAYOUT_MAIN_SELECTOR = 'main, [role="main"]';
+/** Доля текста <body>, начиная с которой <main> (или единственный <article>) — корень текста. */
+const LAYOUT_ROOT_MIN_SHARE = 0.5;
+
+/**
+ * Класс виджета сайдбара WordPress — ТОКЕН класса, а не подстрока:
+ * `widget`, `widget-area`, `widget_*` (`widget_text`, `widget_block`…).
+ * `elementor-widget*`, `widget-span`, `widget-type-*`, `hs_cos_wrapper_widget`
+ * — вёрстка страницы, не виджет.
+ */
+function isSidebarWidgetClassToken(token: string): boolean {
+  return token === 'widget' || token === 'widget-area' || token.startsWith('widget_');
+}
+
+/**
+ * Элементы, внутри которых лежит <main>/[role=main]: предки каждого из них.
+ *
+ * Один проход вверх от каждого <main> с остановкой на предке, который уже в
+ * наборе (выше него все уже там) — линейно по документу. Проверка «содержит
+ * ли элемент <main>» поиском вниз (`$(el).find(…)`) на каждый элемент «шума»
+ * квадратична: вложенные совпадения обходят одно поддерево снова и снова, а
+ * cheerio-select внутри `.find()` ещё и квадратичен по числу детей. Разбор
+ * синхронный, его не прерывает ни срок стадии, ни сторож простоя, ни пульс
+ * воркера: страница в 86 КБ (200 вложенных `share` вокруг 20 000 `<br>`)
+ * держала цикл событий HE-воркера 18 с на чтение, 223 КБ — 9,5 мин.
+ *
+ * Считать заново перед КАЖДЫМ фильтром: <main>, снятый прошлым фильтром, уже
+ * не держит своих предков.
+ */
+function layoutMainHolders($: cheerio.CheerioAPI): Set<AnyNode> {
+  const holders = new Set<AnyNode>();
+  $(LAYOUT_MAIN_SELECTOR).each((_, el) => {
+    for (let p: AnyNode | null = el.parent; p && !holders.has(p); p = p.parent) holders.add(p);
+  });
+  return holders;
+}
+
+/** Снять «шум», кроме самой страницы и того, что её содержит (см. layoutMainHolders). */
+function removeLayoutNoise(
+  $: cheerio.CheerioAPI,
+  selector: string,
+  isNoise: (el: AnyNode) => boolean = () => true,
+): void {
+  const holdsMain = layoutMainHolders($);
+  $(selector)
+    .not(LAYOUT_PAGE_ROOTS)
+    .filter((_, el) => !holdsMain.has(el) && isNoise(el))
+    .remove();
+}
+
+/** Прежний разбор (без layoutAware): «шум» по подстроке класса, корень — все main/article. */
+function legacyTextSource($: cheerio.CheerioAPI) {
   // Remove social sharing / widget blocks
   $('[class*="share"], [class*="social"], [class*="widget"], [id*="sidebar"]').remove();
   // Remove popup / modal overlays
@@ -678,10 +757,108 @@ export function extractTextFromHtml(html: string): string {
   $('[class*="breadcrumb"], [aria-label="breadcrumb"], nav, .pagination').remove();
 
   // Prefer main content areas if available
-  let textSource = $('main, article, [role="main"]');
-  if (textSource.length === 0) {
-    textSource = $('body');
+  const mainContent = $('main, article, [role="main"]');
+  return mainContent.length === 0 ? $('body') : mainContent;
+}
+
+/** Разбор layoutAware: правила 1–2 (layoutNoiseCleanup), затем правило 3 (layoutTextRoot). */
+function layoutTextSource($: cheerio.CheerioAPI) {
+  layoutNoiseCleanup($);
+  return layoutTextRoot($);
+}
+
+/** Правила 1–2 layoutAware: те же группы «шума», что у прежнего разбора, без самой страницы. */
+function layoutNoiseCleanup($: cheerio.CheerioAPI): void {
+  // Social sharing / sidebar
+  removeLayoutNoise($, '[class*="share"], [class*="social"], [id*="sidebar"]');
+  // Sidebar widgets — by class token, not substring
+  removeLayoutNoise($, '[class]', (el) => ($(el).attr('class') ?? '').split(/\s+/).some(isSidebarWidgetClassToken));
+  // Popup / modal overlays
+  removeLayoutNoise($, '[class*="popup"], [class*="modal"], [class*="overlay"], [class*="backdrop"]');
+  // Breadcrumbs
+  removeLayoutNoise($, '[class*="breadcrumb"], [aria-label="breadcrumb"], .pagination');
+}
+
+/**
+ * Элементы селектора, у которых нет предка из того же селектора: вложенный
+ * текст не дважды. Линейно: «есть ли совпадение выше» запоминается на каждом
+ * пройденном предке, и путь вверх идёт только до первого уже известного —
+ * `$(el).parents(selector)` на каждое совпадение стоил бы совпадения × глубину
+ * (сетка в 100 000 карточек на глубине 1 000).
+ */
+function outermostOf($: cheerio.CheerioAPI, selector: string) {
+  const matched = $(selector);
+  if (matched.length <= 1) return matched;
+  const isMatch = new Set<AnyNode>(matched.toArray());
+  /** Узел сам из селектора или лежит внутри такого. */
+  const insideMatch = new Map<AnyNode, boolean>();
+  const hasMatchAbove = (el: AnyNode): boolean => {
+    const path: AnyNode[] = [];
+    let known = false;
+    for (let p: AnyNode | null = el.parent; p; p = p.parent) {
+      const memo = insideMatch.get(p);
+      if (memo !== undefined) {
+        known = memo;
+        break;
+      }
+      path.push(p);
+    }
+    for (let i = path.length - 1; i >= 0; i--) {
+      known = known || isMatch.has(path[i]);
+      insideMatch.set(path[i], known);
+    }
+    return known;
+  };
+  return matched.filter((_, el) => !hasMatchAbove(el));
+}
+
+/**
+ * Правило 3 layoutAware — корень текста там, где страница на самом деле:
+ * внешний <main>/[role=main], если в нём не меньше половины текста <body>;
+ * без <main> — единственный внешний <article> с той же долей (страница-статья);
+ * иначе <body> целиком. Сетка карточек — несколько <article> — корнем не
+ * становится никогда.
+ */
+function layoutTextRoot($: cheerio.CheerioAPI) {
+  const body = $('body');
+  const minChars = sanitizeText(body.text()).length * LAYOUT_ROOT_MIN_SHARE;
+  const mains = outermostOf($, LAYOUT_MAIN_SELECTOR);
+  if (mains.length > 0) {
+    return sanitizeText(mains.text()).length >= minChars ? mains : body;
   }
+  const articles = outermostOf($, 'article');
+  if (articles.length === 1 && sanitizeText(articles.text()).length >= minChars) return articles;
+  return body;
+}
+
+/**
+ * Extract readable text from an HTML string using cheerio.
+ * Strips scripts, styles, nav, footer, etc.
+ * `options.layoutAware` — см. ExtractTextOptions; без него — прежний разбор.
+ */
+export function extractTextFromHtml(html: string, options?: ExtractTextOptions): string {
+  if (options?.layoutAware === true) {
+    try {
+      return extractTextFromLoadedHtml(html, true);
+    } catch (err) {
+      // Разбор с учётом вёрстки читает весь <body> рекурсивно: на разметке
+      // глубже ~2 000 уровней стек кончается. Тогда — прежний разбор, который
+      // берёт только main/article, а не отказ всего чтения сайта.
+      if (!(err instanceof RangeError)) throw err;
+    }
+  }
+  return extractTextFromLoadedHtml(html, false);
+}
+
+function extractTextFromLoadedHtml(html: string, layoutAware: boolean): string {
+  const $ = cheerio.load(html);
+
+  // Remove non-content elements
+  $('script, style, noscript, iframe, svg, link, meta, header, footer, nav').remove();
+  $('[role="navigation"], [role="banner"], [role="contentinfo"]').remove();
+  $('form, .cookie-banner, .cookie-consent, #cookie-banner, #cookie-consent').remove();
+
+  const textSource = layoutAware ? layoutTextSource($) : legacyTextSource($);
 
   // Get text, collapsing whitespace
   const raw = textSource.text();
@@ -1544,6 +1721,11 @@ export async function fetchAndExtract(
     guard?: WebsiteFetchGuard;
     /** Потолок тела каждого ответа цепочки в байтах; не передан — тело целиком. */
     maxBytes?: number;
+    /**
+     * Разбор HTML → текст с учётом вёрстки конструкторов (ExtractTextOptions)
+     * для КАЖДОЙ страницы цепочки; не передан — прежний разбор.
+     */
+    layoutAware?: boolean;
   },
 ): Promise<string> {
   const url = normalizeUrl(rawUrl);
@@ -1559,6 +1741,9 @@ export async function fetchAndExtract(
     guard: options?.guard,
     maxBytes: options?.maxBytes,
   };
+  // Разбор — тот же для главной, www, http-варианта и «о компании»: страница
+  // одного сайта, прочитанная одним правилом.
+  const extractOptions: ExtractTextOptions = { layoutAware: options?.layoutAware };
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
   const origin = new URL(url).origin;
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : origin;
@@ -1571,7 +1756,7 @@ export async function fetchAndExtract(
 
   mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true, ...route });
   if (mainHtml) {
-    mainText = extractTextFromHtml(mainHtml.html);
+    mainText = extractTextFromHtml(mainHtml.html, extractOptions);
     hadAnyHtml = true;
   }
   if (!mainText && tryWithWww) {
@@ -1583,7 +1768,7 @@ export async function fetchAndExtract(
     });
     if (wwwHtml) {
       mainHtml = wwwHtml;
-      mainText = extractTextFromHtml(wwwHtml.html);
+      mainText = extractTextFromHtml(wwwHtml.html, extractOptions);
       hadAnyHtml = true;
     }
   }
@@ -1596,7 +1781,7 @@ export async function fetchAndExtract(
     });
     if (httpHtml) {
       mainHtml = httpHtml;
-      mainText = extractTextFromHtml(httpHtml.html);
+      mainText = extractTextFromHtml(httpHtml.html, extractOptions);
       hadAnyHtml = true;
     }
   }
@@ -1632,7 +1817,7 @@ export async function fetchAndExtract(
     if (signal?.aborted) break;
     const html = await fetchHtmlWithRetry(candidate, { timeout, signal, ...route });
     if (html) {
-      const text = extractTextFromHtml(html.html);
+      const text = extractTextFromHtml(html.html, extractOptions);
       hadAnyHtml = true;
       if (text.length >= MIN_TEXT_LENGTH) {
         aboutText = text;
@@ -1722,6 +1907,8 @@ export async function fetchSinglePage(
     guard?: WebsiteFetchGuard;
     /** Потолок тела в байтах; не передан — тело целиком. */
     maxBytes?: number;
+    /** Разбор HTML → текст с учётом вёрстки конструкторов (ExtractTextOptions); не передан — прежний. */
+    layoutAware?: boolean;
   },
 ): Promise<WebsitePage | null> {
   const url = normalizeUrl(rawUrl);
@@ -1742,7 +1929,7 @@ export async function fetchSinglePage(
   // 3xx без Location (с ним редирект пройден или отклонён) — тело заглушки,
   // а не страница.
   if (outcome.kind !== 'html' || outcome.status < 200 || outcome.status >= 300) return null;
-  const text = sanitizeText(extractTextFromHtml(outcome.html));
+  const text = sanitizeText(extractTextFromHtml(outcome.html, { layoutAware: options?.layoutAware }));
   return {
     url: outcome.url,
     text: text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH).trimEnd() + '…' : text,
