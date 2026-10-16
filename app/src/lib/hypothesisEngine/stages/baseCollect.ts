@@ -143,6 +143,14 @@ import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/r
 // месте стадии: у финальной записи базы, повтор которой бесплатен, а повтор
 // стадии — нет.
 import { isTransientDbError } from '@/lib/db/transientError';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
+// Список Do not contact клиента на сборке (market='us', §1B плана
+// docs/handoff/2026-10-16-eng-countries): только доменные записи.
+import {
+  blockedDomainHit,
+  BlockedContactsOverCapError,
+  getBlockedContactSnapshot,
+} from '@/lib/clientBlocklist/blockedDomains';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
@@ -158,6 +166,7 @@ import {
 import {
   heCatalogPlanKey,
   heCatalogSliceKey,
+  heCountriesEmptyMemoAt,
   isHeCatalogSource,
   heWidenOnCooldown,
   loadHeCatalogCursor,
@@ -190,6 +199,7 @@ import {
 import { withHeCleanCompanyNames } from '../companyNameCleanup';
 import type { HeCompanyCleanRow } from '../companyNames';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
+import { readHeCollectCountries } from '../engCountries';
 import { projectMarket, type HeMarket } from '../market';
 // Метки pdl-среза → значения каталога (только market='us', fail-open).
 import { loadHePdlFacets, resolveHePdlFilters } from '../pdlCatalog';
@@ -200,6 +210,18 @@ import {
   heSourceAllowedForMarket,
   HeSourceMarketRefusal,
 } from '../sourcePlanMarketGate';
+// Замок стран проекта (market='us' и непустой список; §1A): накладывается ПОСЛЕ
+// набора рынка и ДО снятия порогов и разбора меток — на каждом месте плана.
+import {
+  gateHeSourcePlanCountries,
+  gateHeTaskCountries,
+  gateHeWidenTaskCountries,
+  HeCountryRefusal,
+  heTaskWithinCountries,
+  heUsMapsAddress,
+  type HeCountryDropReason,
+} from '../sourcePlanCountryGate';
+import { heEngDncDomainsEnabled } from '../engRolloutFlags';
 import {
   findIrrelevantRows,
   findOffTargetRows,
@@ -225,6 +247,7 @@ import {
   buildCatalogWidenMessagesEn,
   buildSourcePlanMessagesEn,
   type HeTriedSlice,
+  type SourcePlanPromptInputEn,
 } from '../prompts/sourcePlan.en';
 import {
   HE_FUNDED_SCOPE_FILTER_KEYS,
@@ -250,6 +273,7 @@ import {
   countHeRefillCarryover,
   heRefillCarryKeyFn,
   loadHeRefillReleasedCompanies,
+  pickRefillTemplate,
   resolveHeRefillCollectCompanies,
   runHeRefillAppend,
   type HeRefillResult,
@@ -780,6 +804,13 @@ export interface HeCollectTaskState {
    */
   excluded_during_fetch?: number;
   /**
+   * ENG-каталоги (market='us'): строк пропущено на выборке, потому что домен
+   * компании — в списке Do not contact клиента (§1B плана
+   * docs/handoff/2026-10-16-eng-countries). Отдельно от excluded_during_fetch:
+   * эти компании не «уже собраны», и в sliceAlreadyHarvested они не входят.
+   */
+  excluded_dnc_during_fetch?: number;
+  /**
    * Выдача источника под фильтры среза КОНЧИЛАСЬ раньше limit — продолжать
    * этим срезом нечем. Ставят обе ветки: реестр и живые фиды ENG (читают с
    * начала, значит «кончилась вся выдача») и pdl (читает с закладки, значит
@@ -971,6 +1002,12 @@ export interface HePlanRepair {
   pdl_filters?: HeCollectTask['pdl_filters'];
   /** Причина провала починки (outcome='failed'). */
   error?: string;
+  /**
+   * Срез починки снят замком стран проекта (нет отрасли или имени): провал не
+   * от провайдера, а от списка стран — план с такой починкой запоминается
+   * (heRememberablePlan), иначе каждая ночь покупала бы ту же починку.
+   */
+  countries_gate?: true;
 }
 
 /**
@@ -1021,7 +1058,12 @@ export interface HePlanWidening {
  * автопилоту честнее пропустить вертикаль, чем разослать по мусору.
  */
 export interface HeSliceProbe {
-  outcome: 'passed' | 'repaired' | 'repair_failed' | 'rejected';
+  /**
+   * repair_discarded — перепланированный срез снят замком стран проекта (нет
+   * отрасли или имени): план остаётся прежним (уже под замком), вторая проба не
+   * оплачивается, план запоминается.
+   */
+  outcome: 'passed' | 'repaired' | 'repair_failed' | 'rejected' | 'repair_discarded';
   /** Доля строк выборки, признанных принадлежащими вертикали (0..1). */
   hit_rate: number;
   sampled: number;
@@ -1055,6 +1097,23 @@ export interface HeCollectInfo {
   /** Итог refill-ветки (stages/baseCollectRefill.ts). */
   refill_result?: HeRefillResult;
   plan?: HeSourcePlan;
+  /**
+   * Список стран сбора (market='us'), ЗАМОРОЖЕННЫЙ на тике плана из
+   * `brief.collect_countries` проекта — той же записью-чекпоинтом, что и план.
+   * Пишется только непустым. Все дальнейшие тики базы (диспатч, harvest,
+   * расширение, импорт) берут его, а не бриф: правка списка действует со
+   * следующей сборки. Ключа нет — ограничения нет (база до выката или проект
+   * без списка). В клиентскую проекцию не входит (COLLECT_INFO_FIELDS).
+   */
+  countries?: string[];
+  /**
+   * Сколько раз ПОДРЯД не прочитался список Do not contact клиента на сборке
+   * (§1B). Каждый отказ — перепостановка без траты попытки; после
+   * HE_DNC_READ_MAX_FAILURES — провал базы (до конструктора) или сборка без
+   * DNC на уровне сборки (после оплаты конструктора; запуск и долив всё равно
+   * проверяют список fail-closed). Удачное чтение снимает ключ.
+   */
+  dnc_read_failures?: number;
   /**
    * Починка плана без каталожного источника (ensureCatalogSource, market='us').
    * Ключа нет — план пришёл от планировщика как есть ЛИБО взят из
@@ -1144,6 +1203,22 @@ export interface HeCollectInfo {
      * без этого счётчика.
      */
     dropped_in_other_bases?: number;
+    /**
+     * Компаний снято, потому что их домен — в списке Do not contact клиента
+     * (market='us', §1B): на выборке каталога плюс на harvest. Читает кабинет
+     * (COLLECT_STATS_FIELDS): «N companies skipped — on your Do not contact list».
+     */
+    excluded_do_not_contact?: number;
+    /** Строк конструктора снято повторной сверкой по списку Do not contact (heRecheckImportedRows). */
+    dropped_do_not_contact?: number;
+    /** Строк карт снято на harvest при списке стран проекта: адрес не распознан как американский (heUsMapsAddress). */
+    excluded_outside_countries?: number;
+    /**
+     * Список Do not contact на сборке не прочитан, а конструктор уже оплачен —
+     * сборка продолжена без проверки на уровне сборки (запуск и долив проверяют
+     * список сами, fail-closed).
+     */
+    dnc_unchecked?: true;
     finished_at: string;
   };
 }
@@ -1470,7 +1545,8 @@ function dropCollectWorkState(info: HeCollectInfo): HeCollectInfo {
  * специалиста.
  */
 interface HePlanInput {
-  promptInput: SourcePlanPromptInput;
+  /** У us со списком стран — плюс `countries` (EN-промпты печатают блок TARGET COUNTRIES). */
+  promptInput: SourcePlanPromptInputEn;
   /** Провенанс плана: по каким гипотезам он строится (для collect_info и UI). */
   usedHypotheses: Array<{ id: string; title: string; status: string | null }>;
   /** Хеш входа: пока совпадает, сохранённый план годен (catalogCursor). */
@@ -1482,6 +1558,8 @@ async function collectPlanInput(
   ctx: HeStageContext,
   vertical: HeVertical,
   market: HeMarket,
+  // Список стран сбора базы (§1A; пусто у RU и у us без списка).
+  countries: readonly string[] = [],
 ): Promise<HePlanInput> {
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
   // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
@@ -1551,13 +1629,17 @@ async function collectPlanInput(
   // переиспользование плана на правке, которой модель не видит, — специалист
   // принял все предложенные гипотезы, текст промпта тот же, а ночь платит за
   // новый план и новую пробу среза (см. heCatalogPlanKey в catalogCursor.ts).
-  const promptInput: SourcePlanPromptInput = {
+  const promptInput: SourcePlanPromptInputEn = {
     verticalName: vertical.name,
     verticalSummary: vertical.summary,
     synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
     hypotheses: hypotheses.map((h) => ({ title: h.title, description: h.description, tier: h.tier })),
     companyTypes,
   };
+  // Список стран — часть входа планировщика (и ключа плана), но ТОЛЬКО непустой:
+  // поля нет — ключ RU и us без списка байт-в-байт прежний (stableHash
+  // отбрасывает undefined; см. heCatalogPlanKey).
+  if (countries.length > 0) promptInput.countries = [...countries];
 
   return {
     promptInput,
@@ -1920,30 +2002,64 @@ function heSizeOrEmpty(sizes: ReadonlySet<string>, value: unknown): boolean {
   return size === '' || sizes.has(size);
 }
 
+/** Задача, снятая замком стран проекта (§1A), — для лога и причины «план пуст». */
+interface HeCountryDrop {
+  source: string;
+  reason: HeCountryDropReason;
+}
+
+/** Причина снятия словами — для лога стадии и причины «план пуст» (staff, RU). */
+const HE_COUNTRY_DROP_TEXT: Record<HeCountryDropReason, string> = {
+  pdl_no_scope: 'срез каталога без отрасли и имени',
+  maps_us_not_listed: 'карты только по США, а США нет в списке',
+  hiring_no_codes: 'у стран списка нет кодов фида вакансий',
+  duplicate_slice: 'повтор среза после наложения списка',
+};
+
+function heCountryDropsText(drops: readonly HeCountryDrop[]): string {
+  return drops.map((d) => `${d.source} — ${HE_COUNTRY_DROP_TEXT[d.reason] ?? d.reason}`).join(', ');
+}
+
 /**
- * Снять из плана задачи вне набора источников рынка (sourcePlanMarketGate) и
- * сказать об этом в лог стадии. Снятые источники дописываются в `dropped` —
- * причина остановки, если план после снятия опустеет (см. «ПЛАН ПУСТ ПОСЛЕ
- * НАБОРА РЫНКА» в стадии). У RU набора нет: возвращается тот же объект плана,
+ * Снять из плана задачи вне набора источников рынка (sourcePlanMarketGate),
+ * затем наложить замок стран проекта (sourcePlanCountryGate, только us и
+ * непустой список) и сказать об этом в лог стадии. Снятые источники
+ * дописываются в `marketDropped` / `countryDropped` — причина остановки, если
+ * план после снятия опустеет (см. «ПЛАН ПУСТ ПОСЛЕ НАБОРА РЫНКА» в стадии). У
+ * RU набора нет, у пустого списка замка нет: возвращается тот же объект плана,
  * лог молчит.
  */
-function heGatePlanForMarket(
+function heGatePlan(
   ctx: HeStageContext,
   plan: HeSourcePlan,
   market: HeMarket,
+  countries: readonly string[],
   where: string,
-  dropped: string[],
+  marketDropped: string[],
+  countryDropped: HeCountryDrop[],
 ): HeSourcePlan {
   const gated = gateHeSourcePlan(plan, market);
   if (gated.dropped.length > 0) {
-    dropped.push(...gated.dropped);
+    marketDropped.push(...gated.dropped);
     stageLog(
       ctx,
       `[base_collect] ${where}: сняты задачи вне набора источников рынка ${market} ` +
         `(${gated.dropped.join(', ')}) — коллекторы по ним не вызываются`,
     );
   }
-  return gated.plan;
+  const byCountries = gateHeSourcePlanCountries(gated.plan, market, countries);
+  if (byCountries.dropped.length > 0) {
+    countryDropped.push(...byCountries.dropped);
+    stageLog(
+      ctx,
+      `[base_collect] ${where}: сняты задачи вне списка стран проекта (${heCountryDropsText(byCountries.dropped)}) — ` +
+        'коллекторы по ним не вызываются',
+    );
+  }
+  if (byCountries.changed > 0) {
+    stageLog(ctx, `[base_collect] ${where}: задач приведено к списку стран проекта — ${byCountries.changed}`);
+  }
+  return byCountries.plan;
 }
 
 /**
@@ -1966,17 +2082,23 @@ async function buildPlan(
   input: HePlanInput,
   usage: HeUsage,
   market: HeMarket,
+  // Список стран сбора (§1A): пусто у RU и у us без списка — тогда замок стран
+  // не делает ничего, и план байт-в-байт прежний.
+  countries: readonly string[] = [],
 ): Promise<{
   plan: HeSourcePlan;
   planRepair?: HePlanRepair;
   sliceProbe?: HeSliceProbe;
   /** Источники задач, снятых набором рынка (пусто у RU и у чистого us-плана). */
   marketDropped: string[];
+  /** Задачи, снятые замком стран проекта (пусто без списка). */
+  countryDropped: HeCountryDrop[];
   /** Сколько pdl-срезов ответа модели снято как мёртвые по меткам каталога (только us). */
   labelDead: number;
 }> {
   const { promptInput } = input;
   const marketDropped: string[] = [];
+  const countryDropped: HeCountryDrop[] = [];
 
   const llm = await callLLMWithSchema(
     // Рынок 'us' — EN-промпт с ENG-источниками (pdl/funded/eng_hiring/google_maps).
@@ -1985,7 +2107,10 @@ async function buildPlan(
     { model: getHeModel('bulk') },
   );
   addUsage(usage, llm);
-  const answered = heGatePlanForMarket(ctx, llm.data, market, 'план модели', marketDropped);
+  // Порядок на каждом месте плана: набор рынка → замок стран → снятие порогов
+  // без основания → метки каталога. Замок пишет в срез countries := L, и метки
+  // сверяют уже итоговые страны.
+  const answered = heGatePlan(ctx, llm.data, market, countries, 'план модели', marketDropped, countryDropped);
 
   // Придуманные пороги размера снимаем ДО починки и ДО пробы среза: и та, и
   // другая должны смотреть ровно тот срез, который пойдёт в сбор.
@@ -2011,13 +2136,28 @@ async function buildPlan(
     }
   }
 
-  const withCatalog = await ensureCatalogSource(ctx, labelled, promptInput, usage, market);
-  const repaired = heGatePlanForMarket(ctx, withCatalog.plan, market, 'план после починки каталога', marketDropped);
+  const withCatalog = await ensureCatalogSource(ctx, labelled, promptInput, usage, market, countries);
+  const repaired = heGatePlan(
+    ctx,
+    withCatalog.plan,
+    market,
+    countries,
+    'план после починки каталога',
+    marketDropped,
+    countryDropped,
+  );
   // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
   // не существует, а добавленный срез проверяется на общих основаниях.
-  const probed = await ensureSliceMatchesVertical(ctx, repaired, vertical, promptInput, usage, market);
-  const plan = heGatePlanForMarket(ctx, probed.plan, market, 'план после пробы среза', marketDropped);
-  return { plan, planRepair: withCatalog.planRepair, sliceProbe: probed.sliceProbe, marketDropped, labelDead };
+  const probed = await ensureSliceMatchesVertical(ctx, repaired, vertical, promptInput, usage, market, countries);
+  const plan = heGatePlan(ctx, probed.plan, market, countries, 'план после пробы среза', marketDropped, countryDropped);
+  return {
+    plan,
+    planRepair: withCatalog.planRepair,
+    sliceProbe: probed.sliceProbe,
+    marketDropped,
+    countryDropped,
+    labelDead,
+  };
 }
 
 /**
@@ -2044,9 +2184,10 @@ async function buildPlan(
 async function ensureCatalogSource(
   ctx: HeStageContext,
   plan: HeSourcePlan,
-  promptInput: SourcePlanPromptInput,
+  promptInput: SourcePlanPromptInputEn,
   usage: HeUsage,
   market: HeMarket,
+  countries: readonly string[] = [],
 ): Promise<{ plan: HeSourcePlan; planRepair?: HePlanRepair }> {
   if (market !== 'us') return { plan };
   if (plan.tasks.some((t) => t.source === 'pdl' || t.source === 'funded')) return { plan };
@@ -2069,15 +2210,25 @@ async function ensureCatalogSource(
   // Метки — к каталогу. Мёртвый ответ починки (ни одной метки оси в каталоге)
   // остаётся в плане как есть: второй платный вызов здесь не покупаем, а
   // строка лога называет срез, который не найдёт ни строки.
+  //
+  // Замок стран (§1A) — ДО порогов и меток. Срез без отрасли и имени при
+  // списке стран снимается: починка провалена, но это провал от списка, а не
+  // от провайдера, — план с ним запоминается (countries_gate, см.
+  // heRememberablePlan), иначе каждая ночь покупала бы ту же починку.
+  const gatedRepair = gateHeTaskCountries(
+    { source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters },
+    countries,
+  );
+  if ('dropped' in gatedRepair) {
+    const error = 'срез починки вне списка стран проекта (нет отрасли или имени)';
+    stageLog(ctx, `[base_collect] починка плана: ${error} — ${JSON.stringify(repair.data.pdl_filters)}`);
+    return { plan, planRepair: { reason: 'no_catalog_source', outcome: 'failed', error, countries_gate: true } };
+  }
   const {
     tasks: [task],
   } = await heResolvePdlLabels(
     ctx,
-    heWithoutUnfoundedSizeFilters(
-      ctx,
-      [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
-      promptInput,
-    ),
+    heWithoutUnfoundedSizeFilters(ctx, [gatedRepair.task], promptInput),
     'починка плана',
   );
   // Потолок плана — 4 задачи (HeSourcePlanSchema). Если модель уже выбрала
@@ -2175,9 +2326,10 @@ async function ensureSliceMatchesVertical(
   ctx: HeStageContext,
   plan: HeSourcePlan,
   vertical: HeVertical,
-  promptInput: SourcePlanPromptInput,
+  promptInput: SourcePlanPromptInputEn,
   usage: HeUsage,
   market: HeMarket,
+  countries: readonly string[] = [],
 ): Promise<{ plan: HeSourcePlan; sliceProbe?: HeSliceProbe }> {
   if (market !== 'us') return { plan };
   const catalogIdx = findCatalogTasks(plan);
@@ -2242,15 +2394,34 @@ async function ensureSliceMatchesVertical(
   // Тот же ремонтный вызов — тот же придуманный порог; снимаем ДО второй пробы,
   // иначе проба мерила бы один срез, а сбор шёл по другому. По той же причине
   // ДО пробы — и метки каталога (мёртвый срез проба увидит пустым).
+  //
+  // Замок стран (§1A) — ещё раньше: вторая проба обязана мерить тот срез,
+  // который пойдёт в сбор. Срез без отрасли и имени при списке стран снимается:
+  // план остаётся прежним (он уже под замком), вторая проба не оплачивается,
+  // исход 'repair_discarded' запоминается вместе с планом.
+  const gatedRetry = gateHeTaskCountries(
+    { source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters },
+    countries,
+  );
+  if ('dropped' in gatedRetry) {
+    const error = 'перепланированный срез вне списка стран проекта (нет отрасли или имени)';
+    stageLog(ctx, `[base_collect] ${error} — план не тронут, вторая проба не оплачивается`);
+    return {
+      plan,
+      sliceProbe: {
+        outcome: 'repair_discarded',
+        hit_rate: first.hitRate,
+        sampled: first.sampled,
+        off_target_examples: first.offTargetExamples,
+        error,
+      },
+    };
+  }
   const {
     tasks: [retried],
   } = await heResolvePdlLabels(
     ctx,
-    heWithoutUnfoundedSizeFilters(
-      ctx,
-      [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
-      promptInput,
-    ),
+    heWithoutUnfoundedSizeFilters(ctx, [gatedRetry.task], promptInput),
     'перепланирование среза',
   );
   const second = await probe([retried]);
@@ -2325,7 +2496,11 @@ function heWidenFailed(info: HeCollectInfo): boolean {
  * появления стора; дороже одного такого платежа на сборку это не становится.
  */
 function heRememberablePlan(info: HeCollectInfo): boolean {
-  return info.plan_repair?.outcome !== 'failed' && info.slice_probe?.outcome !== 'repair_failed';
+  // Провал починки ОТ СПИСКА СТРАН (countries_gate) — не разовый отказ, а
+  // ответ, который по тому же входу повторится: такой план запоминаем, иначе
+  // каждая ночь покупала бы ту же починку (§1A).
+  const repairOk = info.plan_repair?.outcome !== 'failed' || info.plan_repair.countries_gate === true;
+  return repairOk && info.slice_probe?.outcome !== 'repair_failed';
 }
 
 /**
@@ -2371,9 +2546,12 @@ async function widenPlanWithPaidSlice(
     limit: number;
     usage: HeUsage;
     market: HeMarket;
+    /** Замороженный список стран базы (пусто — без списка). */
+    countries?: readonly string[];
   },
 ): Promise<HeCollectTaskState | null> {
   const { info, input, catalogStates, harvested, limit, usage, market } = args;
+  const countries = args.countries ?? [];
   const plan = info.plan;
   if (!plan) return null;
   const at = new Date().toISOString();
@@ -2413,16 +2591,35 @@ async function widenPlanWithPaidSlice(
   // сравнивать надо ровно тот срез, который пойдёт в сбор. По той же причине до
   // неё и метки каталога: «hospital and health care» и «hospital & health care»
   // — один и тот же срез.
+  //
+  // Замок стран (§1A) — ПЕРВЫМ, до порогов и меток (прежний порядок «метки,
+  // потом проверки» здесь сменён: метка 'EU' или 'luxemburg' до замка сделала
+  // бы срез мёртвым или пропустила бы неразобранную страну). У расширения
+  // замок строже обычного: страна вне списка или нераспознанная — отказ, а не
+  // подмена на список; срез без отрасли и имени — тоже отказ. За ответ
+  // заплачено — это 'failed' с недельным остыванием.
+  const gatedWiden = gateHeWidenTaskCountries(
+    { source: 'pdl', rationale: widened.data.rationale, pdl_filters: widened.data.pdl_filters },
+    countries,
+  );
+  if ('refused' in gatedWiden) {
+    const error =
+      gatedWiden.refused === 'pdl_no_scope'
+        ? 'срез вне списка стран проекта (нет отрасли или имени)'
+        : 'срез вне списка стран проекта';
+    info.plan_widening = { outcome: 'failed', error, at };
+    stageLog(
+      ctx,
+      `[base_collect] расширение плана: ${error} — ${JSON.stringify(widened.data.pdl_filters)}; план не тронут`,
+    );
+    return null;
+  }
   const labelled = await heResolvePdlLabels(
     ctx,
-    heWithoutUnfoundedSizeFilters(
-      ctx,
-      [{ source: 'pdl', rationale: widened.data.rationale, pdl_filters: widened.data.pdl_filters }],
-      input.promptInput,
-    ),
+    heWithoutUnfoundedSizeFilters(ctx, [gatedWiden.task], input.promptInput),
     'расширение плана',
   );
-  const [task] = labelled.tasks;
+  const [labelledTask] = labelled.tasks;
   // Ни одной метки оси в каталоге — срез не найдёт ни строки. За ответ уже
   // заплачено, и он ничего не дал: это 'failed' с остыванием, как у повтора
   // прочитанного среза, а не задача, которую стор вертикали повторял бы каждую
@@ -2432,6 +2629,19 @@ async function widenPlanWithPaidSlice(
     stageLog(ctx, '[base_collect] расширение плана: в срезе нет ни одной метки каталога — план не тронут');
     return null;
   }
+  // Метки каталога могли снять из countries страну списка, которой в каталоге
+  // нет (перезаливка каталога). Возвращаем список целиком — так же, как гейты
+  // buildPlan после меток: иначе ключ среза не совпал бы ни с задачами плана,
+  // ни со стором (rememberPlan снова ставит список), проверка на повтор ниже
+  // промахивалась бы, и дочитанный срез покупался бы каждую ночь как новый.
+  // Без списка — та же задача.
+  const relocked = gateHeTaskCountries(labelledTask, countries);
+  if ('dropped' in relocked) {
+    info.plan_widening = { outcome: 'failed', error: 'срез вне списка стран проекта', at };
+    stageLog(ctx, `[base_collect] расширение плана: после меток срез вне списка стран проекта (${relocked.dropped}) — план не тронут`);
+    return null;
+  }
+  const task = relocked.task;
   const key = heCatalogSliceKey(task);
   const known = new Set(
     plan.tasks.map((t) => heCatalogSliceKey(t)).filter((k): k is string => k !== null),
@@ -2780,6 +2990,11 @@ interface HeCatalogFetch {
   /** Строк пропущено на выборке — компании уже есть в других базах проекта. */
   excludedDuringFetch: number;
   /**
+   * Строк пропущено на выборке, потому что домен компании — в списке Do not
+   * contact клиента (только market='us', §1B). Нет ключа — ноль.
+   */
+  excludedDncDuringFetch?: number;
+  /**
    * Выдача КОНЧИЛАСЬ: цикл вышел на КОРОТКОЙ странице, то есть источник отдал
    * всё, что у него есть за закладкой под фильтры этого среза.
    *
@@ -2892,6 +3107,7 @@ async function fetchPdlRows(
   const sizeKeep =
     widen === 1 && filters?.sizes?.length ? new Set(lowerList(filters.sizes)) : null;
   let excludedDuringFetch = 0;
+  let excludedDncDuringFetch = 0;
   let lastId = usableBookmark('pdl', slot?.from ?? undefined)?.id ?? '';
   let page = 0;
   // Выход на короткой странице — единственная причина, по которой «строк
@@ -2927,6 +3143,7 @@ async function fetchPdlRows(
       return {
         rows,
         excludedDuringFetch,
+        ...(excludedDncDuringFetch > 0 ? { excludedDncDuringFetch } : {}),
         exhausted: false,
         hitCeiling: false,
         next: prefix.value(),
@@ -2940,8 +3157,12 @@ async function fetchPdlRows(
       // права перешагнуть строку, которую мы не смотрели.
       if (rows.length >= limit) break;
       scanned += 1;
-      if (excludedKeys && matchesExclusion(excludedKeys, cell(r.name), undefined, r.website)) {
-        excludedDuringFetch += 1;
+      // Do not contact проверяется первым и считается отдельно (§1B): закладка
+      // перешагивает такую строку так же, как уже собранную.
+      const excludedAs = excludedKeys ? exclusionReason(excludedKeys, cell(r.name), undefined, r.website) : null;
+      if (excludedAs) {
+        if (excludedAs === 'dnc') excludedDncDuringFetch += 1;
+        else excludedDuringFetch += 1;
         prefix.closed(catalogBookmark('pdl', r));
         continue;
       }
@@ -2996,7 +3217,14 @@ async function fetchPdlRows(
     if (!lastId) break;
   }
   const hitCeiling = rows.length < limit && page >= ENG_CATALOG_MAX_PAGES;
-  return { rows, excludedDuringFetch, exhausted: reachedEnd, hitCeiling, next: prefix.value() };
+  return {
+    rows,
+    excludedDuringFetch,
+    ...(excludedDncDuringFetch > 0 ? { excludedDncDuringFetch } : {}),
+    exhausted: reachedEnd,
+    hitCeiling,
+    next: prefix.value(),
+  };
 }
 
 /**
@@ -3043,6 +3271,7 @@ async function fetchFundedRows(
       : null;
   const rows: Record<string, unknown>[] = [];
   let excludedDuringFetch = 0;
+  let excludedDncDuringFetch = 0;
   let lastId = '';
   // Курсор страниц ЭТОГО прогона; закладку из стора не берём никогда (см.
   // шапку функции), поэтому каждая сборка начинает срез с первой строки.
@@ -3085,6 +3314,7 @@ async function fetchFundedRows(
       return {
         rows,
         excludedDuringFetch,
+        ...(excludedDncDuringFetch > 0 ? { excludedDncDuringFetch } : {}),
         exhausted: false,
         hitCeiling: false,
         next: null,
@@ -3096,8 +3326,10 @@ async function fetchFundedRows(
     for (const r of pageRows) {
       if (rows.length >= limit) break;
       scanned += 1;
-      if (excludedKeys && matchesExclusion(excludedKeys, cell(r.name), undefined, r.website)) {
-        excludedDuringFetch += 1;
+      const excludedAs = excludedKeys ? exclusionReason(excludedKeys, cell(r.name), undefined, r.website) : null;
+      if (excludedAs) {
+        if (excludedAs === 'dnc') excludedDncDuringFetch += 1;
+        else excludedDuringFetch += 1;
         continue;
       }
       // Безымянная строка всё равно умрёт на HARVEST (дедуп по имени).
@@ -3120,7 +3352,14 @@ async function fetchFundedRows(
     if (slot ? !from : !lastId) break;
   }
   const hitCeiling = rows.length < limit && page >= ENG_CATALOG_MAX_PAGES;
-  return { rows, excludedDuringFetch, exhausted: reachedEnd, hitCeiling, next: null };
+  return {
+    rows,
+    excludedDuringFetch,
+    ...(excludedDncDuringFetch > 0 ? { excludedDncDuringFetch } : {}),
+    exhausted: reachedEnd,
+    hitCeiling,
+    next: null,
+  };
 }
 
 /** Время published_at как timestamp; мусор/пусто → 0 (в сортировке уходит в хвост). */
@@ -3361,6 +3600,7 @@ async function fetchEngHiringRows(
   }
 
   let excludedDuringFetch = 0;
+  let excludedDncDuringFetch = 0;
   // Компания → лучшая (самая свежая) её вакансия из прочитанного. Порядок
   // вставки Map — порядок ПЕРВОЙ ВСТРЕЧИ компании; в мёрдж уходит порядок по
   // свежести вакансии (сортировка `out` ниже), тот же, что в режиме вне
@@ -3389,8 +3629,12 @@ async function fetchEngHiringRows(
       if (!rolesRegex.test(cell(r.vacancy_title))) continue;
       const key = normalizeCompanyForDedup(cell(r.company_name));
       if (!key) continue;
-      if (excludedKeys && matchesExclusion(excludedKeys, cell(r.company_name), undefined, r.company_site_url)) {
-        excludedDuringFetch += 1;
+      const excludedAs = excludedKeys
+        ? exclusionReason(excludedKeys, cell(r.company_name), undefined, r.company_site_url)
+        : null;
+      if (excludedAs) {
+        if (excludedAs === 'dnc') excludedDncDuringFetch += 1;
+        else excludedDuringFetch += 1;
         continue;
       }
       const known = byCompany.get(key);
@@ -3417,6 +3661,7 @@ async function fetchEngHiringRows(
   return {
     rows: out,
     excludedDuringFetch,
+    ...(excludedDncDuringFetch > 0 ? { excludedDncDuringFetch } : {}),
     exhausted: reachedEnd,
     hitCeiling,
     next: null,
@@ -3500,11 +3745,29 @@ interface HeCatalogRun {
   widenOnCooldown(planKey: string): boolean;
   /** Запомнить безрезультатную покупку рядом с планом. */
   rememberWidenFailure(): Promise<void>;
+  /**
+   * Памятка «для стран проекта источника нет» под этим ключом входа, моложе
+   * недели (heCountriesEmptyMemoAt): отметка ISO и записанная причина, или
+   * null. Пока она есть, планировщик и починка не оплачиваются повторно.
+   */
+  emptyCountriesMemo(planKey: string): { at: string; why: string } | null;
+  /**
+   * Записать памятку: пустой план `{tasks: [], countries_empty_at}` под ключом
+   * входа. Закладки остаются все (их ключи передаются как срезы плана):
+   * вернётся прежний список — прежние срезы продолжат с места.
+   */
+  rememberEmptyCountriesPlan(planKey: string, why: string): Promise<void>;
 }
 
 function createHeCatalogRun(
   ctx: HeStageContext,
-  args: { verticalId: string; market: HeMarket; stored: HeCatalogCursorRow | null },
+  args: {
+    verticalId: string;
+    market: HeMarket;
+    stored: HeCatalogCursorRow | null;
+    /** Замороженный список стран базы (пусто — без списка). */
+    countries: readonly string[];
+  },
 ): HeCatalogRun {
   // Снимок строки стора. После удачной записи плана обновляется здесь же: тот
   // же прогон спрашивает остывание ПОСЛЕ фазы PLAN, и вчерашняя отметка
@@ -3542,7 +3805,9 @@ function createHeCatalogRun(
       // задачи записаны до набора, мог донести сюда русскую задачу через запись
       // после платного расширения. Чтение плана из стора её и так снимет, но
       // стор, в который она не попадает вовсе, честнее.
-      const plan = gateHeSourcePlan(rawPlan, args.market).plan;
+      // И замок стран (§1A): план базы уже под ним, наложение идемпотентно —
+      // это защита стора, а не второе решение.
+      const plan = gateHeSourcePlanCountries(gateHeSourcePlan(rawPlan, args.market).plan, args.market, args.countries).plan;
       const db = paidCheckpointDb(ctx);
       // Ключи ВСЕХ ступеней каждого среза, а не только нулевой: закладки
       // ослабленных ступеней принадлежат тем же задачам плана, и запись,
@@ -3601,6 +3866,32 @@ function createHeCatalogRun(
       }
       stored = { ...stored, plan, planKey, widenFailedAt };
     },
+    emptyCountriesMemo(planKey) {
+      const at = heCountriesEmptyMemoAt(stored, planKey, Date.now());
+      if (!at) return null;
+      const why = (stored?.plan as { countries_empty_why?: unknown } | null)?.countries_empty_why;
+      return { at, why: typeof why === 'string' && why ? why : 'план под этот список стран пуст' };
+    },
+    async rememberEmptyCountriesPlan(planKey, why) {
+      if (!stored) return;
+      // Причина — рядом с отметкой: повтор без оплаты называет ту же причину.
+      const plan = {
+        tasks: [],
+        countries_empty_at: new Date().toISOString(),
+        countries_empty_why: why.slice(0, 300),
+      } as HeSourcePlan;
+      const ok = await saveHeCatalogCursor(
+        paidCheckpointDb(ctx),
+        {
+          verticalId: args.verticalId,
+          market: args.market,
+          bookmarks,
+          plan: { plan, planKey, sliceKeys: Object.keys(bookmarks) },
+        },
+        (m) => stageLog(ctx, m),
+      );
+      if (ok) stored = { ...stored, plan, planKey };
+    },
     slotFor(task, widen = 0) {
       if (!isHeCatalogSource(task.source)) return null;
       const key = heCatalogSliceKey(task, widen);
@@ -3629,6 +3920,27 @@ function createHeCatalogRun(
   };
 }
 
+/**
+ * Задача под замком стран (§1A) — последний рубеж перед коллектором.
+ *
+ * Строже F2-assert'а нельзя, мягче — ровно на один случай: разбор меток
+ * каталога (heResolvePdlLabels) снимает из `countries := L` значение, которого
+ * в каталоге больше нет (устаревшая страна сохранённого списка). Такой
+ * pdl-срез — ПОДМНОЖЕСТВО L со скоупом, то есть строже замка; без этого
+ * исключения assert ронял бы каждую pdl-задачу проекта с устаревшей страной.
+ */
+function heTaskCountriesOk(task: HeCollectTask, countries: readonly string[]): boolean {
+  if (heTaskWithinCountries(task, countries)) return true;
+  if (task.source !== 'pdl' || countries.length === 0) return false;
+  const pinned = task.pdl_filters?.countries ?? [];
+  if (pinned.length === 0 || !pinned.every((c) => countries.includes(c))) return false;
+  return heTaskWithinCountries({ ...task, pdl_filters: { ...task.pdl_filters, countries: [...countries] } }, countries);
+}
+
+function heAssertTaskCountries(task: HeCollectTask, countries: readonly string[]): void {
+  if (!heTaskCountriesOk(task, countries)) throw new HeCountryRefusal(String(task?.source ?? ''));
+}
+
 async function dispatchTask(
   ctx: HeStageContext,
   state: HeCollectTaskState,
@@ -3637,6 +3949,8 @@ async function dispatchTask(
   getExcludedKeys: () => Promise<HeBaseExclusionKeys>,
   catalog: HeCatalogRun | null,
   widenMode: HeWidenMode = 'off',
+  // Замороженный список стран базы (collect_info.countries; пусто — без списка).
+  countries: readonly string[] = [],
 ): Promise<void> {
   const { task } = state;
 
@@ -3647,6 +3961,10 @@ async function dispatchTask(
   // которому ветвится диспатч (task.source). У RU набора нет: assert не
   // бросает никогда.
   assertHeSourceAllowedForMarket(ctx.market ?? projectMarket(project), task.source);
+  // Тот же рубеж для списка стран проекта (§1A): задача вне замка —
+  // HeCountryRefusal до коллектора, runDispatch валит только её. Пустой список —
+  // ничего.
+  heAssertTaskCountries(task, countries);
 
   // Реестр — синхронно, без дочерней джобы: строки сразу ложатся в задачу.
   // Компании других баз проекта исключаются ещё на выборке (fetchDirectoryRows),
@@ -3706,6 +4024,7 @@ async function dispatchTask(
     /** id строк, уже взятых этой задачей: ослабленная ступень читает НАДМНОЖЕСТВО. */
     const seen = new Set<string>();
     let excludedDuringFetch = 0;
+    let excludedDncDuringFetch = 0;
     let continued = false;
     let movedAny = false;
     let level: HeWidenLevel = 0;
@@ -3724,6 +4043,7 @@ async function dispatchTask(
             : await fetchEngHiringRows(ctx, task.eng_hiring_query, remaining, excluded, stepSlot);
       level = step;
       excludedDuringFetch += fetched.excludedDuringFetch;
+      excludedDncDuringFetch += fetched.excludedDncDuringFetch ?? 0;
       if (stepSlot?.from) continued = true;
       const moved = stepSlot && !sameBookmark(fetched.next, stepSlot.from) ? fetched.next : null;
       if (stepSlot && moved) {
@@ -3778,6 +4098,16 @@ async function dispatchTask(
         ctx,
         `[base_collect] ${task.source}: ${excludedDuringFetch} строк пропущено на выборке — ` +
           'компании уже есть в других базах проекта',
+      );
+    }
+    // Do not contact — отдельный счётчик и отдельная строка лога: эти компании
+    // не «уже собраны», и staff должен видеть, сколько срезал список клиента.
+    if (excludedDncDuringFetch > 0) {
+      state.excluded_dnc_during_fetch = excludedDncDuringFetch;
+      stageLog(
+        ctx,
+        `[base_collect] ${task.source}: ${excludedDncDuringFetch} строк пропущено на выборке — ` +
+          'домен компании в списке Do not contact клиента',
       );
     }
     // Чтение стартовало с сохранённой закладки: срез уже листали прошлые
@@ -4192,10 +4522,20 @@ export interface HeBaseExclusionKeys {
    * пусты и не заполняются — RU-исключение остаётся «имя + ИНН».
    */
   useWebsite: boolean;
+  /**
+   * Домены из списка Do not contact клиента (market='us', §1B плана
+   * docs/handoff/2026-10-16-eng-countries): компания, чей сайт или адрес — на
+   * таком домене или его поддомене, не собирается. Пусто у RU, у
+   * heCarryExclusionKeys и у us-проекта без доменных записей — тогда
+   * матчеры идут прежним путём.
+   */
+  dncDomains: ReadonlySet<string>;
 }
 
+const NO_DNC_DOMAINS: ReadonlySet<string> = new Set<string>();
+
 /** Пустые ключи исключения: RU — «имя + ИНН», us — плюс домен и адрес. */
-function emptyExclusionKeys(useWebsite: boolean): HeBaseExclusionKeys {
+function emptyExclusionKeys(useWebsite: boolean, dncDomains: ReadonlySet<string> = NO_DNC_DOMAINS): HeBaseExclusionKeys {
   return {
     nameInns: new Map<string, Set<string>>(),
     inns: new Set<string>(),
@@ -4203,7 +4543,19 @@ function emptyExclusionKeys(useWebsite: boolean): HeBaseExclusionKeys {
     sites: newHeSiteSet(),
     emails: new Set<string>(),
     useWebsite,
+    dncDomains,
   };
+}
+
+/**
+ * Компания — в списке Do not contact клиента: сайт строки или любой адрес её
+ * ячейки email на домене из списка (или его поддомене). Только доменные записи:
+ * точные адреса на сборке не снимаются (не в v1), их держат запуск и долив.
+ */
+function matchesDoNotContact(keys: HeBaseExclusionKeys, website: unknown, email: unknown): boolean {
+  if (keys.dncDomains.size === 0) return false;
+  if (blockedDomainHit(keys.dncDomains, website)) return true;
+  return heEmailIdentities(email).some((address) => blockedDomainHit(keys.dncDomains, address) !== null);
 }
 
 /** Тот же ящик лежит в другой базе (только useWebsite — у RU набор пуст). */
@@ -4217,6 +4569,32 @@ function matchesExclusionEmail(keys: HeBaseExclusionKeys, email: unknown): boole
  * последних — только market='us') или имя (с уточнением, см. выше).
  */
 function matchesExclusion(
+  keys: HeBaseExclusionKeys,
+  company: string,
+  inn: unknown,
+  website?: unknown,
+  email?: unknown,
+): boolean {
+  return exclusionReason(keys, company, inn, website, email) !== null;
+}
+
+/**
+ * Почему строка исключена: 'dnc' — список Do not contact клиента (проверяется
+ * ПЕРВЫМ, считается отдельно), 'other' — компания или адрес уже в другой базе
+ * проекта, null — не исключена. С пустым dncDomains — ровно прежнее правило.
+ */
+function exclusionReason(
+  keys: HeBaseExclusionKeys,
+  company: string,
+  inn: unknown,
+  website?: unknown,
+  email?: unknown,
+): 'dnc' | 'other' | null {
+  if (matchesDoNotContact(keys, website, email)) return 'dnc';
+  return matchesOtherBase(keys, company, inn, website, email) ? 'other' : null;
+}
+
+function matchesOtherBase(
   keys: HeBaseExclusionKeys,
   company: string,
   inn: unknown,
@@ -4256,6 +4634,7 @@ function matchesExclusion(
  * (одноимённые фирмы на разных доменах — вопрос владельца).
  */
 function matchesExclusionContact(keys: HeBaseExclusionKeys, website: unknown, email: unknown): boolean {
+  if (matchesDoNotContact(keys, website, email)) return true;
   if (!keys.useWebsite) return false;
   const site = heCompanySiteIdentity(website);
   if (site && heSameCompanySite(keys.sites, site)) return true;
@@ -4315,6 +4694,10 @@ async function loadOtherBaseExclusionKeys(
   projectId: string,
   baseId: string,
   market: HeMarket,
+  // Домены Do not contact клиента (§1B): снимок читает стадия ВНЕ catch'а
+  // диспатча (ensureDnc) и передаёт сюда; null — проверки нет (RU, сбой чтения
+  // после оплаты конструктора).
+  dncDomains: ReadonlySet<string> | null = null,
 ): Promise<HeBaseExclusionKeys> {
   const { data, error } = await ctx.supabase
     .from('he_bases')
@@ -4326,7 +4709,7 @@ async function loadOtherBaseExclusionKeys(
   const released = market === 'us' ? await loadHeRefillReleasedCompanies(ctx, projectId) : null;
   const carryKeyOf = released && released.size > 0 ? heRefillCarryKeyFn(HE_AUTO_COLLECT_COLUMNS) : null;
 
-  const keys = emptyExclusionKeys(market === 'us');
+  const keys = emptyExclusionKeys(market === 'us', market === 'us' && dncDomains ? dncDomains : NO_DNC_DOMAINS);
   for (const row of (data ?? []) as Array<{ id?: unknown; data?: unknown }>) {
     const rows = Array.isArray(row.data) ? row.data.slice(0, MAX_ROWS_LIMIT) : [];
     const releasedHere =
@@ -4339,6 +4722,98 @@ async function loadOtherBaseExclusionKeys(
     }
   }
   return keys;
+}
+
+/* ───────────── Список Do not contact клиента на сборке (§1B) ───────────── */
+
+/**
+ * Сколько раз ПОДРЯД список может не прочитаться, прежде чем стадия перестанет
+ * ждать: до конструктора база падает, после — сборка идёт без проверки на
+ * уровне сборки (запуск и долив проверяют список сами, fail-closed). Каждый
+ * отказ — перепостановка через HE_DNC_REQUEUE_MS без траты попытки.
+ */
+const HE_DNC_READ_MAX_FAILURES = 6;
+const HE_DNC_REQUEUE_MS = 300_000;
+
+/**
+ * Чей список Do not contact действует на сборке. Первая сборка —
+ * `he_projects.created_by` (ENG-клиент). Ночной добор — владелец пресета
+ * запущенного шаблона вертикали (то же чтение, что у долива: pickRefillTemplate
+ * + client_campaign_presets): именно его список применят запуск и долив. Два
+ * владельца разные — строка лога; шаблона нет — created_by; created_by пуст —
+ * null (список пуст, DNC держат запуск и долив). Ошибка чтения бросается —
+ * для стадии это отказ чтения списка.
+ */
+async function resolveHeDncOwner(
+  ctx: HeStageContext,
+  project: HeProject,
+  args: { verticalId: string; isRefill: boolean; campaignId: string | null },
+): Promise<string | null> {
+  const createdBy = project.created_by ?? null;
+  if (!args.isRefill) return createdBy;
+  const { data: templateRows, error } = await ctx.supabase
+    .from('he_templates')
+    .select('id, launch_info, personalization_plan, letters, created_at')
+    .eq('vertical_id', args.verticalId)
+    .not('launch_info', 'is', null);
+  if (error) throw new Error(`he_templates read: ${error.message}`);
+  const pick = pickRefillTemplate((templateRows ?? []) as Array<Record<string, unknown>>, args.campaignId);
+  if (!pick) return createdBy;
+  if (!supabaseInstantly) throw new Error('supabaseInstantly не сконфигурирован (INSTANTLY_SUPABASE_URL)');
+  const { data: presetRow, error: pErr } = await supabaseInstantly
+    .from('client_campaign_presets')
+    .select('client_user_id')
+    .eq('id', pick.presetId)
+    .maybeSingle();
+  if (pErr) throw new Error(`client_campaign_presets read: ${pErr.message}`);
+  const owner = (presetRow as { client_user_id?: unknown } | null)?.client_user_id;
+  if (typeof owner !== 'string' || !owner) return createdBy;
+  if (createdBy && owner !== createdBy) {
+    stageLog(
+      ctx,
+      `[base_collect] Do not contact: владелец кампании (${owner}) не автор проекта (${createdBy}) — ` +
+        'на сборке действует список владельца кампании, как на доливе',
+    );
+  }
+  return owner;
+}
+
+/**
+ * Домены списка Do not contact владельца. Владельца нет — пустой набор.
+ * Бросает: отказ чтения (Error) и список сверх лимита
+ * (BlockedContactsOverCapError) — решение принимает вызывающий.
+ */
+async function loadHeDncDomains(ownerId: string | null): Promise<ReadonlySet<string>> {
+  if (!ownerId) return NO_DNC_DOMAINS;
+  if (!supabaseInstantly) throw new Error('supabaseInstantly не сконфигурирован (INSTANTLY_SUPABASE_URL)');
+  return (await getBlockedContactSnapshot(supabaseInstantly, ownerId)).domains;
+}
+
+/**
+ * Мягкое чтение для путей, где база уже куплена и строки всё равно пройдут
+ * проверку на отправке (поздний импорт сотрудника, ремонт refill-базы после
+ * финального фейла): не прочитался или сверх лимита — без DNC на уровне сборки
+ * и строка лога. Только market='us'; у RU — null без единого чтения.
+ */
+async function loadHeDncDomainsDegraded(
+  ctx: HeStageContext,
+  market: HeMarket,
+  ownerId: () => Promise<string | null>,
+  where: string,
+): Promise<ReadonlySet<string> | null> {
+  if (market !== 'us') return null;
+  try {
+    return await loadHeDncDomains(await ownerId());
+  } catch (e) {
+    if (heStageInterrupted(ctx, e)) throw e;
+    const message = e instanceof Error ? e.message : String(e);
+    stageLog(
+      ctx,
+      `[base_collect] ${where}: список Do not contact не прочитан (${message.slice(0, 160)}) — ` +
+        'строки идут без проверки на сборке; запуск и долив проверяют список сами',
+    );
+    return null;
+  }
 }
 
 /**
@@ -4432,19 +4907,44 @@ function harvestSlice(
   market: HeMarket,
   existingKeys: HeBaseExclusionKeys,
   limit: number,
-): { interleaved: HeUnifiedRow[]; kept: HeUnifiedRow[]; merged: HeUnifiedRow[] } {
+  // Замороженный список стран базы (collect_info.countries; пусто — без списка).
+  countries: readonly string[] = [],
+): {
+  interleaved: HeUnifiedRow[];
+  kept: HeUnifiedRow[];
+  merged: HeUnifiedRow[];
+  /** Строк снято списком Do not contact клиента (входят в interleaved, не в kept). */
+  excludedDnc: number;
+  /** Строк карт снято: адрес не американский при списке стран (§1A). */
+  excludedOutsideCountries: number;
+} {
+  // Строки карт при списке стран — только с американским адресом (heUsMapsAddress):
+  // выдача карт не знает страны, а гео запроса — лишь подсказка поисковику.
+  // Пустой адрес снимается. Без списка (и у RU) — ровно прежний срез.
+  const mapsFilter = market === 'us' && countries.length > 0;
+  let excludedOutsideCountries = 0;
   const interleaved = dedupUnifiedRows(
     interleaveTaskHarvests(
       done
         .filter((t) => heSourceAllowedForMarket(market, t.source))
         .map((t) => {
-          const rows = (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '');
+          let rows = (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '');
+          if (mapsFilter && t.source === 'google_maps') {
+            const before = rows.length;
+            rows = rows.filter((r) => heUsMapsAddress(cell(r.address)));
+            excludedOutsideCountries += before - rows.length;
+          }
           return market === 'us' ? contactableFirst(rows) : rows;
         }),
     ),
   );
-  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn, r.website, r.email));
-  return { interleaved, kept, merged: kept.slice(0, limit) };
+  let excludedDnc = 0;
+  const kept = interleaved.filter((r) => {
+    const why = exclusionReason(existingKeys, r.company, r.inn, r.website, r.email);
+    if (why === 'dnc') excludedDnc += 1;
+    return why === null;
+  });
+  return { interleaved, kept, merged: kept.slice(0, limit), excludedDnc, excludedOutsideCountries };
 }
 
 /** Итог повторной сверки строк конструктора с другими базами проекта. */
@@ -4454,6 +4954,8 @@ export interface HeImportRecheck<T> {
   emailStatuses: Array<string | null>;
   /** Строк снято: собственный домен или адрес уже лежит в другой базе проекта. */
   droppedInOtherBases: number;
+  /** Строк снято: домен сайта или адреса — в списке Do not contact клиента (§1B). */
+  droppedDoNotContact: number;
 }
 
 /**
@@ -4488,11 +4990,20 @@ export function heRecheckImportedRows<T extends HeUnifiedRow>(input: {
   market: HeMarket;
 }): HeImportRecheck<T> {
   const { rows, emailStatuses, keys, market } = input;
-  if (market !== 'us' || !keys.useWebsite) return { rows, emailStatuses, droppedInOtherBases: 0 };
+  if (market !== 'us' || !keys.useWebsite) {
+    return { rows, emailStatuses, droppedInOtherBases: 0, droppedDoNotContact: 0 };
+  }
   const keptRows: T[] = [];
   const keptStatuses: Array<string | null> = [];
   let dropped = 0;
+  let droppedDnc = 0;
   rows.forEach((row, i) => {
+    // Do not contact — первым и отдельным счётчиком: адрес, найденный
+    // конструктором на домене из списка, снимается здесь.
+    if (matchesDoNotContact(keys, row.website, row.email)) {
+      droppedDnc += 1;
+      return;
+    }
     if (matchesExclusionContact(keys, row.website, row.email)) {
       dropped += 1;
       return;
@@ -4500,7 +5011,7 @@ export function heRecheckImportedRows<T extends HeUnifiedRow>(input: {
     keptRows.push(row);
     keptStatuses.push(emailStatuses[i] ?? null);
   });
-  return { rows: keptRows, emailStatuses: keptStatuses, droppedInOtherBases: dropped };
+  return { rows: keptRows, emailStatuses: keptStatuses, droppedInOtherBases: dropped, droppedDoNotContact: droppedDnc };
 }
 
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
@@ -5674,9 +6185,23 @@ export async function closeHeRefillBaseAfterFinalFail(
           let limit = totalRowsCap(job);
           if (typeof info.limit === 'number' && Number.isFinite(info.limit)) limit = Math.min(limit, info.limit);
           const done = (info.tasks ?? []).filter((t) => t.status === 'done');
-          const existingKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, market);
+          // Список Do not contact — мягко (§1B): срез уже куплен, а строки всё
+          // равно пройдут проверку долива. Страны — замороженные базой (§1A).
+          const dncDomains = await loadHeDncDomainsDegraded(
+            ctx,
+            market,
+            () =>
+              resolveHeDncOwner(ctx, project, {
+                verticalId: row.vertical_id,
+                isRefill: true,
+                campaignId: typeof info.campaign_id === 'string' && info.campaign_id ? info.campaign_id : null,
+              }),
+            'ремонт refill-базы',
+          );
+          const existingKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, market, dncDomains);
+          const countries = market === 'us' && Array.isArray(info.countries) ? info.countries : [];
           return {
-            rows: harvestSlice(done, market, existingKeys, limit).merged,
+            rows: harvestSlice(done, market, existingKeys, limit, countries).merged,
             columns: [...HE_AUTO_COLLECT_COLUMNS],
           };
         }
@@ -5691,6 +6216,11 @@ export type HeLateConstructImport =
   | { kind: 'empty' }
   /** Все строки сетки — домены или адреса, которые уже лежат в других базах проекта. */
   | { kind: 'all_in_other_bases'; gridRows: number }
+  /**
+   * Строк не осталось, и главная причина — список Do not contact клиента
+   * (снято по нему не меньше, чем по другим базам; §1B).
+   */
+  | { kind: 'all_do_not_contact'; gridRows: number; droppedDoNotContact: number }
   | {
       kind: 'rows';
       /** Поля записи he_bases; статус, error, updated_at и CAS ставит вызывающий. */
@@ -5747,14 +6277,31 @@ export async function prepareHeLateConstructImport(
   const { baseId, projectId, info, construct, contactCap, at } = input;
   const imported = await importConstructRows(ctx, construct.bc_job_id);
   if (!imported) return { kind: 'empty' };
-  const keys = await loadOtherBaseExclusionKeys(ctx, projectId, baseId, 'us');
+  // Список Do not contact — мягко (§1B): конструктор оплачен, строки всё равно
+  // пройдут проверку запуска. Refill-базы сюда не идут, владелец — автор проекта.
+  const dncDomains = await loadHeDncDomainsDegraded(
+    ctx,
+    'us',
+    async () => (await readProject(ctx.supabase, projectId)).created_by ?? null,
+    'поздний импорт',
+  );
+  const keys = await loadOtherBaseExclusionKeys(ctx, projectId, baseId, 'us', dncDomains);
   const rechecked = heRecheckImportedRows({
     rows: imported.rows,
     emailStatuses: imported.emailStatuses,
     keys,
     market: 'us',
   });
-  if (rechecked.rows.length === 0) return { kind: 'all_in_other_bases', gridRows: imported.rows.length };
+  if (rechecked.rows.length === 0) {
+    if (rechecked.droppedDoNotContact > 0 && rechecked.droppedDoNotContact >= rechecked.droppedInOtherBases) {
+      return {
+        kind: 'all_do_not_contact',
+        gridRows: imported.rows.length,
+        droppedDoNotContact: rechecked.droppedDoNotContact,
+      };
+    }
+    return { kind: 'all_in_other_bases', gridRows: imported.rows.length };
+  }
   // Кап компаний — лимит сборки, записанный постановкой (у стадии это тот же
   // limit, по которому строилась сетка). Нет — сетка уже не больше лимита.
   const companyCap =
@@ -5790,6 +6337,10 @@ export async function prepareHeLateConstructImport(
     dropped_over_contact_cap: capped.droppedOverContactCap,
     dropped_over_company_cap: capped.droppedOverCompanyCap,
     dropped_in_other_bases: rechecked.droppedInOtherBases,
+    ...(prior?.excluded_do_not_contact ? { excluded_do_not_contact: prior.excluded_do_not_contact } : {}),
+    ...(rechecked.droppedDoNotContact > 0 ? { dropped_do_not_contact: rechecked.droppedDoNotContact } : {}),
+    ...(prior?.excluded_outside_countries ? { excluded_outside_countries: prior.excluded_outside_countries } : {}),
+    ...(prior?.dnc_unchecked || dncDomains === null ? { dnc_unchecked: true as const } : {}),
     finished_at: at,
   };
   // Пометка без подписи для кабинета (CONSTRUCT_NOTE_LABELS её не знает — клиент
@@ -5939,6 +6490,20 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const info: HeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
 
+  // ─── СПИСОК СТРАН СБОРА (§1A плана docs/handoff/2026-10-16-eng-countries) ───
+  // Только market='us'. Тик без плана читает бриф проекта (fail-closed:
+  // испорченный ключ — заглушка, которая не пропускает ничего) и замораживает
+  // список в collect_info.countries той же записью, что и план. Каждый
+  // следующий тик базы берёт замороженный: правка списка действует со
+  // следующей сборки. База, спланированная до выката, ключа не имеет — без
+  // списка. Пусто — замок стран не делает ничего, всё байт-в-байт прежнее.
+  const collectCountries: string[] =
+    market !== 'us'
+      ? []
+      : info.plan
+        ? readHeCollectCountries(info.countries).countries
+        : readHeCollectCountries(project.brief?.collect_countries).countries;
+
   // ─── РАЗМЕР REFILL-СБОРКИ ───
   // Ночной долив просит КОМПАНИИ, а его дневной бюджет daily_leads_cap считает
   // СТРОКИ-лиды, и одна компания после разноса адресов даёт их до contactCap.
@@ -6070,7 +6635,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     if (!catalogLoaded) {
       catalogLoaded = true;
       const stored = await loadHeCatalogCursor(ctx.supabase, base.vertical_id, (m) => stageLog(ctx, m));
-      catalogRun = createHeCatalogRun(ctx, { verticalId: base.vertical_id, market, stored });
+      catalogRun = createHeCatalogRun(ctx, { verticalId: base.vertical_id, market, stored, countries: collectCountries });
     }
     return catalogRun;
   };
@@ -6092,7 +6657,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const getPlanInput = async (): Promise<HePlanInput | null> => {
     if (planInput) return planInput;
     try {
-      planInput = await collectPlanInput(job, ctx, vertical, market);
+      planInput = await collectPlanInput(job, ctx, vertical, market, collectCountries);
     } catch (e) {
       stageLog(
         ctx,
@@ -6106,8 +6671,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // Вход планировщика читается бесплатно (гипотезы + вокабуляр) — по его хешу
     // и решается, нужен ли платный вызов модели вообще. Бросает здесь, как и
     // раньше: пустое пересечение с выбором специалиста — честный фейл.
-    const planned = await collectPlanInput(job, ctx, vertical, market);
+    const planned = await collectPlanInput(job, ctx, vertical, market, collectCountries);
     planInput = planned;
+    if (collectCountries.length > 0) {
+      stageLog(ctx, `[base_collect] список стран проекта (${collectCountries.length}): ${collectCountries.join(', ')}`);
+    }
     const catalog = await getCatalog();
     /**
      * Источники задач, снятых набором рынка (sourcePlanMarketGate) в этой фазе:
@@ -6115,6 +6683,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
      * массив пуст всегда.
      */
     const marketDropped: string[] = [];
+    /** Задачи, снятые замком стран проекта в этой фазе (пусто без списка). */
+    const countryDropped: HeCountryDrop[] = [];
     /**
      * СОХРАНЁННЫЙ ПЛАН — ЧЕРЕЗ НАБОР РЫНКА НА ЧТЕНИИ, каждый раз. План живёт в
      * сторе вертикали неделями (he_catalog_cursors), и план, записанный до
@@ -6135,17 +6705,32 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     const storedPlan = catalog?.reusablePlan(planned.planKey) ?? null;
     let reusedPlan: HeSourcePlan | null = null;
     if (storedPlan) {
-      const gatedStored = heGatePlanForMarket(ctx, storedPlan, market, 'план из закладки вертикали', marketDropped);
+      // И замок стран (§1A), бесплатно, на каждом чтении: план, построенный под
+      // тот же список (ключ входа его включает), он не меняет.
+      const gatedStored = heGatePlan(
+        ctx,
+        storedPlan,
+        market,
+        collectCountries,
+        'план из закладки вертикали',
+        marketDropped,
+        countryDropped,
+      );
       if (gatedStored.tasks.length > 0) {
         reusedPlan = gatedStored;
       } else {
         stageLog(
           ctx,
-          `[base_collect] план из закладки вертикали целиком вне набора источников рынка ${market} — ` +
+          `[base_collect] план из закладки вертикали целиком вне набора источников рынка ${market}` +
+            `${countryDropped.length > 0 ? ' или списка стран проекта' : ''} — ` +
             'планируем заново (вызов планировщика оплачивается)',
         );
       }
     }
+    // Снятия сохранённого плана — не причина остановки нового: новый план
+    // судится своими снятиями (buildPlan), иначе «план пуст» назвал бы задачи,
+    // которых в нём не было.
+    countryDropped.length = 0;
     // Провенанс плана считаем всегда по ТЕКУЩЕМУ чтению гипотез, а не копией из
     // стора: иначе переиспользование показывало бы вчерашнюю разметку.
     info.hypotheses = planned.usedHypotheses;
@@ -6153,6 +6738,33 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     let sliceProbe: HeSliceProbe | undefined;
     // pdl-срезы ответа модели, снятые как мёртвые по меткам каталога (buildPlan).
     let labelDead = 0;
+    /**
+     * ПАМЯТКА «ДЛЯ СТРАН ПРОЕКТА ИСТОЧНИКА НЕТ» (§1A). Прошлая сборка с ТЕМ ЖЕ
+     * входом (список стран входит в ключ) уже заплатила за планировщик и
+     * починку и получила пустой план из-за списка; меньше недели назад —
+     * повторять оплату незачем: тот же ответ, та же остановка. Без списка
+     * памятки не бывает (ни записи, ни чтения).
+     */
+    const countriesMemo =
+      !reusedPlan && collectCountries.length > 0 ? (catalog?.emptyCountriesMemo(planned.planKey) ?? null) : null;
+    if (countriesMemo) {
+      info.tasks = [];
+      info.countries = [...collectCountries];
+      const note =
+        `Авто-сборка не дала строк: нет источника для стран проекта — ${countriesMemo.why}. ` +
+        'Коллекторы не вызывались. (повтор без оплаты)';
+      stageLog(ctx, `[base_collect] памятка от ${countriesMemo.at}: план под этот список стран пуст — планировщик не вызываем`);
+      await paidCheckpointDb(ctx)
+        .from('he_bases')
+        .update({
+          status: 'failed',
+          error: note.slice(0, 500),
+          collect_info: dropCollectWorkState(info),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', baseId);
+      throw new Error(note);
+    }
     if (reusedPlan) {
       // Тот же вход планировщика, что и у сохранённого плана: срезы те же, и
       // закладки в сторе указывают ровно в них. Экономия — вызов планировщика
@@ -6164,15 +6776,19 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           `${reusedPlan.tasks.map((t) => t.source).join(', ')}) — планировщик и проба среза не оплачиваются`,
       );
     } else {
-      const built = await buildPlan(ctx, vertical, planned, usage, market);
+      const built = await buildPlan(ctx, vertical, planned, usage, market, collectCountries);
       info.plan = built.plan;
       planRepair = built.planRepair;
       sliceProbe = built.sliceProbe;
       marketDropped.push(...built.marketDropped);
+      countryDropped.push(...built.countryDropped);
       labelDead = built.labelDead;
     }
     if (planRepair) info.plan_repair = planRepair;
     if (sliceProbe) info.slice_probe = sliceProbe;
+    // Заморозка списка стран (§1A) — той же записью, что и план (чекпойнт
+    // оплаты ниже). Только непустой: без списка ключа нет, как до выката.
+    if (collectCountries.length > 0) info.countries = [...collectCountries];
 
     // Отказ пробы: срез не про эту вертикаль и перепланирование не помогло.
     // Сохраняем провенанс и валим сбор ДО дозвона до коллекторов — час
@@ -6231,6 +6847,44 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       info.tasks = [];
       const dropped = [...new Set(marketDropped)];
       const repairError = info.plan_repair?.outcome === 'failed' ? info.plan_repair.error : undefined;
+      /**
+       * ПУСТ ИЗ-ЗА СПИСКА СТРАН (§1A): замок снял хотя бы одну задачу. Своя
+       * причина («нет источника для стран проекта» → код кабинета
+       * countries_uncovered: «запустите ещё раз» тут не поможет, помогает
+       * правка списка) и памятка в сторе вертикали — неделю тот же вход не
+       * платит за планировщик и починку повторно. Памятку не пишем, когда
+       * починка упала отказом провайдера (не от списка): такой провал разовый,
+       * и следующая сборка вправе попробовать.
+       */
+      if (countryDropped.length > 0) {
+        const parts = [`сняты задачи вне списка стран проекта: ${heCountryDropsText(countryDropped)}`];
+        if (dropped.length > 0) parts.push(`вне набора источников рынка ${market}: ${dropped.join(', ')}`);
+        if (labelDead > 0) parts.push(`pdl-срезов без меток каталога: ${labelDead}`);
+        if (repairError) parts.push(`добавить каталожный срез не удалось: ${repairError}`);
+        const why = parts.join('; ');
+        const providerRepairFailure = info.plan_repair?.outcome === 'failed' && info.plan_repair.countries_gate !== true;
+        // Причина «нет источника для стран» (и памятка) — только когда план
+        // опустошил сам список: снятие дубля среза его не опустошает, а
+        // починка, упавшая на провайдере или ответе модели, могла бы дать
+        // годный срез. Тогда — общая причина «план пуст»: классификатор
+        // кабинета отдаст код провайдера (billing / configuration / provider)
+        // или `source`, и совет «запустите ещё раз» там правдив.
+        const countryCaused = countryDropped.some((d) => d.reason !== 'duplicate_slice') && !providerRepairFailure;
+        const note = countryCaused
+          ? `Авто-сборка не дала строк: нет источника для стран проекта — ${why}. Коллекторы не вызывались.`
+          : `Авто-сборка не дала строк: план пуст — ${why}. Коллекторы не вызывались.`;
+        if (catalog && countryCaused) await catalog.rememberEmptyCountriesPlan(planned.planKey, why);
+        await paidCheckpointDb(ctx)
+          .from('he_bases')
+          .update({
+            status: 'failed',
+            error: note.slice(0, 500),
+            collect_info: dropCollectWorkState(info),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', baseId);
+        throw new Error(note);
+      }
       const why =
         labelDead > 0
           ? `у pdl-срезов плана нет ни одной метки каталога (снято: ${labelDead})` +
@@ -6354,9 +7008,118 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   let excludedKeysCache: HeBaseExclusionKeys | null = null;
   const getExcludedKeys = async (): Promise<HeBaseExclusionKeys> => {
     if (!excludedKeysCache) {
-      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, market);
+      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, market, dncDomains);
     }
     return excludedKeysCache;
+  };
+
+  /**
+   * СПИСОК DO NOT CONTACT КЛИЕНТА НА СБОРКЕ (только market='us'; §1B плана
+   * docs/handoff/2026-10-16-eng-countries). Читается ДО ключей исключения и ВНЕ
+   * catch'а runDispatch — в двух точках: перед диспатчем, если есть
+   * каталожная задача в 'pending', и перед HARVEST (он же покрывает тик
+   * импорта, который берёт те же ключи). Внутри catch'а отказ чтения уронил бы
+   * одну задачу в 'failed' — и сборка тихо шла бы без проверки списка.
+   *
+   * Отказ чтения: счётчик dnc_read_failures, запись, перепостановка через
+   * HE_DNC_REQUEUE_MS (попытка джобы не тратится). На HE_DNC_READ_MAX_FAILURES
+   * подряд: конструктора ещё нет — база 'failed' (кабинет: internal); есть —
+   * конструктор оплачен, сборка идёт без проверки списка на уровне сборки
+   * (stats.dnc_unchecked), а запуск и долив проверяют его сами, fail-closed.
+   * Список сверх лимита — база 'failed' в любой точке (кабинет:
+   * do_not_contact_over_cap). Возвращает результат стадии, если тик кончился
+   * здесь, иначе null. У RU — null без единого чтения.
+   */
+  let dncDomains: ReadonlySet<string> | null = null;
+  let dncLoaded = false;
+  let dncUnchecked = false;
+  const ensureDnc = async (): Promise<HeStageResult | null> => {
+    if (market !== 'us' || dncLoaded) return null;
+    try {
+      const owner = await resolveHeDncOwner(ctx, project, {
+        verticalId: base.vertical_id,
+        isRefill,
+        campaignId: typeof info.campaign_id === 'string' && info.campaign_id ? info.campaign_id : null,
+      });
+      dncDomains = await loadHeDncDomains(owner);
+      dncLoaded = true;
+      if (dncDomains.size > 0) {
+        stageLog(ctx, `[base_collect] Do not contact: доменов в списке клиента — ${dncDomains.size}`);
+      }
+      if (info.dnc_read_failures !== undefined) {
+        delete info.dnc_read_failures;
+        await persistCollectInfo(ctx, baseId, info);
+      }
+      return null;
+    } catch (e) {
+      if (heStageInterrupted(ctx, e)) throw e;
+      // Выключатель доменов (HE_ENG_DNC_DOMAINS) выключен — сборка не берёт на
+      // себя новый отказ: до этой правки она список не читала вовсе, и сбой
+      // БД рассыльщика или старая кривая строка списка не роняли ENG-сборку.
+      // Идём без проверки списка на уровне сборки (как после оплаченного
+      // конструктора ниже); отправку держат запуск (шаг 5a) и долив (шаг 4),
+      // оба fail-closed.
+      if (!heEngDncDomainsEnabled()) {
+        dncLoaded = true;
+        dncDomains = null;
+        dncUnchecked = true;
+        stageLog(
+          ctx,
+          `[base_collect] Do not contact: список не прочитан (${(e instanceof Error ? e.message : String(e)).slice(0, 200)}) — ` +
+            'выключатель доменов выключен, сборка идёт без проверки списка; запуск и долив проверяют его сами',
+        );
+        return null;
+      }
+      const failBase = async (note: string): Promise<never> => {
+        await paidCheckpointDb(ctx)
+          .from('he_bases')
+          .update({
+            status: 'failed',
+            error: note.slice(0, 500),
+            collect_info: dropCollectWorkState(info),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', baseId);
+        if (info.construct?.status === 'dispatched') await cancelAbandonedConstructJob(ctx, info.construct.bc_job_id);
+        throw new Error(note);
+      };
+      if (e instanceof BlockedContactsOverCapError) {
+        return await failBase(
+          'Список Do not contact клиента больше 10 000 записей — сборка не может его проверить. Коллекторы не вызывались.',
+        );
+      }
+      const message = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+      const failures = (info.dnc_read_failures ?? 0) + 1;
+      if (failures >= HE_DNC_READ_MAX_FAILURES) {
+        if (!info.construct) {
+          return await failBase(`Список Do not contact клиента не прочитан (${failures} раз подряд): ${message}`);
+        }
+        // Конструктор оплачен — не выбрасываем его работу: дальше без проверки
+        // списка на уровне сборки. Отправку держат запуск (шаг 5a) и долив (шаг 4).
+        dncLoaded = true;
+        dncDomains = null;
+        dncUnchecked = true;
+        stageLog(
+          ctx,
+          `[base_collect] Do not contact: список не прочитан ${failures} раз подряд (${message}) — конструктор уже ` +
+            'оплачен, сборка идёт без проверки списка; запуск и долив проверяют его сами',
+        );
+        return null;
+      }
+      info.dnc_read_failures = failures;
+      stageLog(
+        ctx,
+        `[base_collect] Do not contact: список не прочитан (${failures}/${HE_DNC_READ_MAX_FAILURES}): ${message} — ` +
+          `повтор через ${HE_DNC_REQUEUE_MS / 60_000} мин`,
+      );
+      await persistCollectInfo(ctx, baseId, info);
+      await requeueSelf(ctx, job, HE_DNC_REQUEUE_MS);
+      return {
+        result: { waiting: true, base_id: baseId, dnc_read_failures: failures },
+        tokensUsed: usage.tokensUsed,
+        costUsd: usage.costUsd,
+      };
+    }
   };
 
   // ─── DISPATCH ───
@@ -6371,9 +7134,15 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // каталожного прогона не заводит, но платное расширение плана на нём ещё
   // может понадобиться.
   const widenMode: HeWidenMode = market === 'us' ? heWidenMode(ctx) : 'off';
+  // Точка 1 списка Do not contact: каталожная задача ждёт диспатча — ключи
+  // исключения на выборке обязаны его нести.
+  if (dispatchCatalog) {
+    const stopped = await ensureDnc();
+    if (stopped) return stopped;
+  }
   const runDispatch = async (state: HeCollectTaskState, catalog: HeCatalogRun | null): Promise<void> => {
     try {
-      await dispatchTask(ctx, state, project, limit, getExcludedKeys, catalog, widenMode);
+      await dispatchTask(ctx, state, project, limit, getExcludedKeys, catalog, widenMode, collectCountries);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -6475,6 +7244,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         limit,
         usage,
         market,
+        countries: collectCountries,
       });
       // Ответ модели ничего не дал — отмечаем это У ПЛАНА, иначе завтрашняя
       // база с пустым collect_info купит ровно тот же отказ ещё раз, и так
@@ -6504,6 +7274,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         // следующая ночь той же вертикали. Не дошла запись и здесь — её
         // повторит тик импорта этой же базы (ветка ниже).
         if (heRememberablePlan(info)) await replanCatalog.rememberPlan(info.plan, input.planKey);
+        // Купленный срез — каталожный: ключам выборки нужен список Do not contact.
+        const stopped = await ensureDnc();
+        if (stopped) return stopped;
         await runDispatch(added, replanCatalog);
       }
     }
@@ -6638,12 +7411,37 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // реестра это страховка (основное исключение прошло на выборке), для
   // hh/карт — единственная точка исключения. Сам мёрдж — harvestSlice (limit
   // уже посчитан выше: totalRowsCap(job), у refill — уменьшенный под дневной кап).
+  //
+  // Точка 2 списка Do not contact — до ключей исключения (их же берёт тик
+  // импорта для повторной сверки сетки конструктора).
+  const dncStop = await ensureDnc();
+  if (dncStop) return dncStop;
   const existingKeys = await getExcludedKeys();
-  const { interleaved, kept, merged } = harvestSlice(done, market, existingKeys, limit);
-  const excludedExisting = interleaved.length - kept.length;
+  const { interleaved, kept, merged, excludedDnc, excludedOutsideCountries } = harvestSlice(
+    done,
+    market,
+    existingKeys,
+    limit,
+    collectCountries,
+  );
+  // Do not contact считается отдельно и в «уже есть в других базах» не входит.
+  const excludedExisting = interleaved.length - kept.length - excludedDnc;
   if (excludedExisting > 0) {
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
   }
+  if (excludedDnc > 0) {
+    stageLog(ctx, `[base_collect] исключено ${excludedDnc} строк — домен компании в списке Do not contact клиента`);
+  }
+  if (excludedOutsideCountries > 0) {
+    stageLog(
+      ctx,
+      `[base_collect] карты: снято ${excludedOutsideCountries} строк — адрес не распознан как американский ` +
+        '(список стран проекта)',
+    );
+  }
+  // На выборке каталога (задачи) плюс на harvest: сколько компаний срезал список.
+  const excludedDoNotContact =
+    excludedDnc + tasks.reduce((sum, t) => sum + (t.excluded_dnc_during_fetch ?? 0), 0);
 
   // ЕДИНСТВЕННЫЙ замер эффекта contactableFirst: сколько строк со связью
   // получила база и сколько их было во всём харвесте. Пишем только когда кап
@@ -6667,6 +7465,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     rows_total: merged.length,
     excluded_existing_bases: excludedExisting,
     excluded_during_fetch: tasks.reduce((sum, t) => sum + (t.excluded_during_fetch ?? 0), 0),
+    // Ключи — только когда есть что сказать: у RU и у сборки без списков их нет.
+    ...(excludedDoNotContact > 0 ? { excluded_do_not_contact: excludedDoNotContact } : {}),
+    ...(excludedOutsideCountries > 0 ? { excluded_outside_countries: excludedOutsideCountries } : {}),
+    ...(dncUnchecked ? { dnc_unchecked: true as const } : {}),
     finished_at: new Date().toISOString(),
   };
 
@@ -6819,7 +7621,23 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     throw new Error(note);
   };
 
-  if (merged.length === 0) return await closeWithoutRows(stats, null);
+  if (merged.length === 0) {
+    /**
+     * Нулевая сборка, главная причина которой — список Do not contact клиента
+     * (§1B): по нему снято не меньше компаний, чем по другим базам проекта, и
+     * ни одна задача не упала. Своя причина (кабинет: do_not_contact) — «запустите
+     * ещё раз» не поможет, помогает правка списка. Иначе — прежний терминал.
+     */
+    const otherExcluded = excludedExisting + stats.excluded_during_fetch;
+    const dncDominant = excludedDoNotContact > 0 && excludedDoNotContact >= otherExcluded && failed.length === 0;
+    return await closeWithoutRows(
+      stats,
+      dncDominant
+        ? `все найденные компании — в списке Do not contact клиента (снято: ${excludedDoNotContact}` +
+            `${otherExcluded > 0 ? `, ещё ${otherExcluded} уже есть в других базах проекта` : ''})`
+        : null,
+    );
+  }
 
   // ─── CONSTRUCT ───
   // Обогащение собранных строк конструктором баз (валидация почт ВСЕГДА,
@@ -6841,6 +7659,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // только market='us'): null — сверка на этой сборке не запускалась (RU,
   // конструктор не вернул сетку), и ключа в воронке нет.
   let droppedInOtherBases: number | null = null;
+  // Что сняла та же сверка по списку Do not contact клиента (§1B): 0 — ничего.
+  let droppedDoNotContact = 0;
   // Компаний в готовой базе. Без конструктора это сами merged-строки: их ключи
   // «компания|домен» уникальны после дедупа HARVEST, то есть строка = компания.
   let companiesTotal = merged.length;
@@ -7114,6 +7934,14 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
             : null;
         if (rechecked) {
           droppedInOtherBases = rechecked.droppedInOtherBases;
+          droppedDoNotContact = rechecked.droppedDoNotContact;
+          if (rechecked.droppedDoNotContact > 0) {
+            stageLog(
+              ctx,
+              `[base_collect] повторная сверка после конструктора: снято ${rechecked.droppedDoNotContact} ` +
+                `из ${imported.rows.length} строк — домен сайта или адреса в списке Do not contact клиента`,
+            );
+          }
           if (rechecked.droppedInOtherBases > 0) {
             stageLog(
               ctx,
@@ -7125,17 +7953,31 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           // проекта уже есть. Базу из одних отложенных гейтом строк (им письмо
           // не уйдёт) не пишем — тот же терминал, что у пустого merged.
           if (rechecked.rows.length === 0) {
+            // Главная причина — список Do not contact клиента (снято по нему не
+            // меньше, чем по другим базам): своя причина и свой код кабинета.
+            const dncDominant =
+              rechecked.droppedDoNotContact > 0 && rechecked.droppedDoNotContact >= rechecked.droppedInOtherBases;
             info.construct = {
               ...construct,
               status: bcStatus === 'completed' ? 'done' : bcStatus,
               emails_found: imported.emailsFound,
               valid_count: 0,
-              note: 'все строки конструктора уже есть в других базах проекта — импортировать нечего',
+              note: dncDominant
+                ? 'все строки конструктора — домены из списка Do not contact клиента или уже в других базах проекта — импортировать нечего'
+                : 'все строки конструктора уже есть в других базах проекта — импортировать нечего',
             };
             return await closeWithoutRows(
-              { ...stats, dropped_in_other_bases: rechecked.droppedInOtherBases },
-              `все ${imported.rows.length} строк, которые вернул конструктор, — компании и адреса, ` +
-                'которые уже есть в других базах проекта (вторая база написала бы им повторно)',
+              {
+                ...stats,
+                dropped_in_other_bases: rechecked.droppedInOtherBases,
+                ...(rechecked.droppedDoNotContact > 0 ? { dropped_do_not_contact: rechecked.droppedDoNotContact } : {}),
+              },
+              dncDominant
+                ? `все найденные компании — в списке Do not contact клиента (снято строк конструктора: ` +
+                    `${rechecked.droppedDoNotContact} из ${imported.rows.length}` +
+                    `${rechecked.droppedInOtherBases > 0 ? `, ещё ${rechecked.droppedInOtherBases} уже есть в других базах проекта` : ''})`
+                : `все ${imported.rows.length} строк, которые вернул конструктор, — компании и адреса, ` +
+                    'которые уже есть в других базах проекта (вторая база написала бы им повторно)',
             );
           }
         }
@@ -7380,6 +8222,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // Только когда повторная сверка запускалась (market='us' с импортом):
     // у RU ключа нет, как и до правки.
     ...(droppedInOtherBases !== null ? { dropped_in_other_bases: droppedInOtherBases } : {}),
+    ...(droppedDoNotContact > 0 ? { dropped_do_not_contact: droppedDoNotContact } : {}),
     // Причина «нулевой» базы машинно, а не только в тексте he_bases.error: у
     // базы, где гейт снял ВСЁ, low_relevance == rows_total и ok_contacts == 0
     // выглядят так же, как у базы, которой конструктор не нашёл ни одного

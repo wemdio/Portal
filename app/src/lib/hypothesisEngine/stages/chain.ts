@@ -336,8 +336,16 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // style_override/offer_override/signature_override попадают в промпт
   // отдельными блоками (styleExample / offerOverride / signatureOverride) —
   // из JSON-снапшота брифа их вырезаем, чтобы не дублировать длинные тексты
-  // в материалах.
-  const { style_override: _s, offer_override: _o, signature_override: _sig, ...briefRest } = brief;
+  // в материалах. collect_countries (страны сбора — замок сборки, план
+  // 2026-10-16-eng-countries) письмам не нужен и в материалы не идёт; ключа
+  // нет — JSON прежний байт в байт.
+  const {
+    style_override: _s,
+    offer_override: _o,
+    signature_override: _sig,
+    collect_countries: _cc,
+    ...briefRest
+  } = brief;
   // Английская цепочка 'us': business_override тоже уходит отдельным блоком
   // («CLIENT'S OWN WORDS» вместе с оффером) — из JSON брифа её промпта его
   // вырезаем. RU/PL и английская цепочка проекта 'ru' видят бриф как раньше

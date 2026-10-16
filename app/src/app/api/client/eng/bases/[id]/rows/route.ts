@@ -4,7 +4,11 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { isValidUuid } from '@/lib/apiValidation';
-import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
+import {
+  filterBlockedContacts,
+  getBlockedContactSnapshot,
+  type BlockedContactSnapshot,
+} from '@/lib/clientBlocklist/blockedDomains';
 import { logWarn } from '@/lib/loggerServer';
 import { loadClientHeBase, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import {
@@ -13,6 +17,7 @@ import {
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import {
   HE_LAUNCH_MAX_LEADS,
+  findCompanyKeyColumns,
   findEmailColumn,
   heConstructContactCap,
   heLaunchEmailVerdict,
@@ -56,7 +61,7 @@ interface EngReadyToSend {
   unusable: number;
   /** Повтор адреса, который уже посчитан. */
   repeated: number;
-  /** В «Do not contact» клиента. */
+  /** В «Do not contact» клиента: адрес или домен компании (адреса или сайта). */
   blocked: number;
   /** Сверх потолка одного запуска (`limit`). */
   over_limit: number;
@@ -73,8 +78,9 @@ interface EngReadyToSend {
  *     «проверенные» они не входят;
  *  2. mapBaseRowsToLeads с колонкой адреса ядра (findEmailColumn по всем
  *     строкам): не один адрес в ячейке — `unusable`, повтор — `repeated`;
- *  3. чёрный список клиента (getBlockedEmailSet + filterBlockedLeads) —
- *     `blocked`, список передаёт вызывающий;
+ *  3. чёрный список клиента (getBlockedContactSnapshot + filterBlockedContacts:
+ *     адреса и домены, сайт строки — колонкой findCompanyKeyColumns, как у
+ *     ядра) — `blocked`, снимок передаёт вызывающий;
  *  4. потолок запуска (selectLeadsWithinLaunchCap, HE_LAUNCH_MAX_LEADS) —
  *     `over_limit`.
  * Отказы ядра, которые снимают запуск целиком (база собрана до разноса
@@ -87,7 +93,7 @@ function countReadyToSend(input: {
   rows: Array<Record<string, unknown>>;
   columns: string[];
   isAutoBase: boolean;
-  blocked: ReadonlySet<string>;
+  blocked: BlockedContactSnapshot;
 }): EngReadyToSend {
   const { rows, columns, isAutoBase } = input;
   const emailColumn = findEmailColumn(columns, rows);
@@ -111,9 +117,13 @@ function countReadyToSend(input: {
   const mapped = mapBaseRowsToLeads({ rows: passed, columns, emailColumn });
   const unusable = mapped.multiAddressRows + mapped.malformedEmailRows;
   const repeated = passed.length - unusable - mapped.leads.length;
-  const filtered = filterBlockedLeads(mapped.leads, input.blocked);
-  const allowed = new Set(filtered.kept.map((l) => l.email));
-  const keptRowIndices = mapped.leadRowIndices.filter((_, i) => allowed.has(mapped.leads[i].email));
+  const websiteColumn = findCompanyKeyColumns(columns).website;
+  const filtered = filterBlockedContacts(mapped.leads, input.blocked, (_lead, i) =>
+    websiteColumn ? passed[mapped.leadRowIndices[i]]?.[websiteColumn] : null,
+  );
+  // `kept` — те же объекты лидов: строки восстанавливаются по ссылке.
+  const allowed = new Set<object>(filtered.kept);
+  const keptRowIndices = mapped.leadRowIndices.filter((_, i) => allowed.has(mapped.leads[i]));
   const toSend =
     filtered.kept.length > HE_LAUNCH_MAX_LEADS
       ? selectLeadsWithinLaunchCap({ rows: passed, columns, leadRowIndices: keptRowIndices, limit: HE_LAUNCH_MAX_LEADS })
@@ -194,7 +204,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       rows.some((r) => heLaunchEmailVerdict(r._email_status) !== 'missing');
     if (!legacy && supabaseInstantly) {
       try {
-        const blocked = await getBlockedEmailSet(supabaseInstantly, result.auth.userId);
+        const blocked = await getBlockedContactSnapshot(supabaseInstantly, result.auth.userId);
         ready = countReadyToSend({
           rows,
           columns,

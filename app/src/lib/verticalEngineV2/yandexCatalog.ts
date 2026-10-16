@@ -10,8 +10,11 @@ export class VeYandexCatalogUnavailableError extends Error {
   readonly name = 'VeYandexCatalogUnavailableError';
 }
 
+export const VE_YANDEX_CATALOG_MAPPING_REVISION = 2;
+
 export interface VeYandexCatalogCheckpoint {
   version: 1;
+  mapping_revision?: number;
   filters: YandexMapsCatalogFilters;
   after?: string;
 }
@@ -46,11 +49,22 @@ function compoundOf(word: string, first: string, second: string): boolean {
   return false;
 }
 
+// The catalog calls jewellery shops «Ювелирные». Keep this explicit: dropping
+// generic nouns from arbitrary queries could turn equipment suppliers into the
+// businesses they serve, or a manufacturer into every shop selling its goods.
+const CATALOG_QUERY_ALIASES = new Map<string, readonly string[]>([
+  ['ювелирные', ['ювелирный магазин', 'магазин ювелирных изделий']],
+]);
+
 /** Рубрика называет ту же деятельность, что запрос, в другой форме: число,
- * регистр или слитное написание. Такая рубрика выбирается без модели. */
+ * регистр, слитное написание или явный синоним каталога. Выбирается без модели. */
 export function isVeRubricVariant(label: string, query: string): boolean {
   const rubric = wordForms(label), asked = wordForms(query);
   if (!rubric.length || !asked.length) return false;
+  if (CATALOG_QUERY_ALIASES.get(normalized(label))?.some((alias) => {
+    const equivalent = wordForms(alias);
+    return equivalent.length === asked.length && equivalent.every((word, index) => sameWordForm(word, asked[index] ?? ''));
+  })) return true;
   if (rubric.length === asked.length) return rubric.every((word, index) => sameWordForm(word, asked[index] ?? ''));
   const [head = '', ...tail] = rubric, [first = '', second = '', ...rest] = asked;
   return asked.length === rubric.length + 1 && compoundOf(head, first, second)
@@ -205,6 +219,8 @@ export async function resolveVeYandexCatalogFilters(input: {
   const context = [...input.query.queries, input.context ?? ''].map(wordForms).filter((phrase) => phrase.length);
   const picked = [...new Set(selected.category_ids.map((id) => categories[id].label))]
     .filter((label) => sharesRootWith(label, context));
+  // A model mapping needed by one query must not discard populated direct
+  // matches for the others (for example shops when it picks only workshops).
   const candidates = [...new Set([...variants.flat(), ...picked])];
   if (!candidates.length) throw new VeYandexCatalogUnavailableError('yandex_maps: подходящие рубрики в готовом каталоге не найдены');
   const kept = await populated(candidates, scope);

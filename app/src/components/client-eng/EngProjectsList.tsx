@@ -23,6 +23,14 @@
  * гипотез). Те же ключи brief, что правит шаг «Brief», те же лимиты
  * (BUSINESS_OVERRIDE_MAX_LENGTH, icpFrame.ts), та же проверка рамки до
  * отправки (parseHeIcpFramePatch). Шлётся только заполненное.
+ *
+ * Страны сбора (brief.collect_countries, план §1A) — необязательный свёрнутый
+ * «Countries (optional)» с тем же выбором, что карточка шага 1
+ * (EngCountryPicker). Форма бывает только у пустого списка, а выключатель
+ * выбора стран роут отдаёт на строках проекта — значит, здесь он почти всегда
+ * не известен (null): тогда блок рисуется свёрнутым, а отказ 400
+ * `countries_unavailable` (выбор выключен, проект НЕ создан) убирает блок и
+ * просит нажать «Create» ещё раз — уже без стран. Явный false — блока нет.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -38,12 +46,15 @@ import {
   type HeIcpFrameInputError,
 } from '@/lib/hypothesisEngine/icpFrame';
 import { BUSINESS_OVERRIDE_MAX_LENGTH } from '@/lib/hypothesisEngine/projectBriefPatch';
+import { heCollectCountriesErrorText, parseHeCollectCountries } from '@/lib/hypothesisEngine/engCountries';
 import {
+  EngCountriesUnavailableError,
   EngPaidAccessError,
   createEngProject,
-  fetchEngProjects,
+  fetchEngProjectsPage,
   type EngProjectListItem,
 } from './api-client';
+import { EngCountryPicker } from './EngCountryPicker';
 import type { HeClientStageErrorCode } from '@/lib/hypothesisEngine/clientEngProjection';
 import { ENG_NEEDS_DESCRIPTION_SHORT_EN, heProjectAwaitsDescription, heResearchStopCode } from './clientFailureText';
 import { EngPaidAccessNotice, EngVerifyEmailBanner } from './EngPaidAccess';
@@ -103,13 +114,21 @@ export function EngProjectsList() {
   const [name, setName] = useState('');
   const [business, setBusiness] = useState('');
   const [icp, setIcp] = useState<Record<HeIcpField, string>>(EMPTY_ICP);
+  const [countries, setCountries] = useState<string[]>([]);
+  /** Выключатель выбора стран: null — сервер не сказал, false — выключен (блока нет). */
+  const [countriesEnabled, setCountriesEnabled] = useState<boolean | null>(null);
   const [creating, setCreating] = useState(false);
   /** Отказ гейта платных шагов на создании (почта, один сайт, потолок) — с действием. */
   const [refusal, setRefusal] = useState<EngPaidAccessError | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setProjects(await fetchEngProjects());
+      const page = await fetchEngProjectsPage();
+      setProjects(page.projects);
+      // Отказ 400 уже сказал «выключено» — повторное чтение без ключа его не отменяет.
+      setCountriesEnabled((cur) =>
+        cur === false && page.collectCountriesEnabled === null ? cur : page.collectCountriesEnabled,
+      );
       setLoadError('');
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : 'Failed to load projects');
@@ -154,6 +173,15 @@ export function EngProjectsList() {
       }
     }
 
+    const sendCountries = countriesEnabled !== false && countries.length > 0;
+    if (sendCountries) {
+      const checked = parseHeCollectCountries(countries);
+      if (!checked.ok) {
+        setError(heCollectCountriesErrorText(checked));
+        return;
+      }
+    }
+
     setCreating(true);
     try {
       const res = await createEngProject({
@@ -161,6 +189,7 @@ export function EngProjectsList() {
         name: name.trim() || undefined,
         ...(business.trim() ? { business_override: business.trim() } : {}),
         ...(hasIcp ? { icp: icpInput } : {}),
+        ...(sendCountries ? { collect_countries: countries } : {}),
       });
       if (res.project?.id) {
         router.push(`/client/eng/projects/${res.project.id}` as Route);
@@ -168,7 +197,16 @@ export function EngProjectsList() {
       }
       setError(res.error ?? 'Failed to create the project');
     } catch (err) {
-      if (err instanceof EngPaidAccessError) {
+      if (err instanceof EngCountriesUnavailableError) {
+        // Выбор стран выключен: проект не создан. Убираем блок и просим
+        // нажать ещё раз — без стран, а не создаём молча другой проект.
+        setCountriesEnabled(false);
+        setCountries([]);
+        setError(
+          'Choosing countries is not available yet, so the project was not created. Press «Create & start research» '
+            + 'again to create it without a country list.',
+        );
+      } else if (err instanceof EngPaidAccessError) {
         setRefusal(err);
         // Проект появился с другой вкладки — экран должен это показать.
         if (err.code === 'project_limit') void load();
@@ -294,6 +332,22 @@ export function EngProjectsList() {
                 </div>
                 {hint('These answers steer which market hypotheses the research proposes.')}
               </fieldset>
+
+              {countriesEnabled !== false && (
+                <details className="flex flex-col gap-2">
+                  <summary className="cursor-pointer text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    Countries (optional){countries.length > 0 ? ` · ${countries.length} chosen` : ''}
+                  </summary>
+                  <div className="mt-2 flex flex-col gap-2">
+                    <EngCountryPicker value={countries} onChange={setCountries} disabled={creating} />
+                    {hint(
+                      'We collect companies only from the countries you choose here. Leave it empty and we choose the '
+                        + 'countries for each market — companies can then come from any country in our catalog. You can '
+                        + 'change this later on step 1.',
+                    )}
+                  </div>
+                </details>
+              )}
 
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <button

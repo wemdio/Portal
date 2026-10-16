@@ -1,0 +1,16 @@
+We put a senior engineer into your team, backed by a solutions architect, a project manager and DevOps, all under one contract and at a fixed monthly price. Built for fund administrators, asset managers, banks, payments firms, insurers, insurtechs and software vendors that sell into regulated markets.
+
+Precision Pod: 1 senior engineer (5+ years experience), PM included (up to 6 to 8 hours per month), architecture reviews (up to 2 hours per week), DevOps and QA assist. From €5k to €6k per month.
+Pair Pod: 2 senior engineers (for example Data plus Backend). From €10k to €11k per month.
+Mini Team: 3 engineers (for example Data plus Backend plus DevOps). From €15k to €16k per month.
+Also available: managed teams, staff augmentation and fixed price projects.
+
+How it starts: the engineer joins your standups and works in your tools within 7 to 10 business days of a signed agreement. 3 month minimum, then 30 days notice. No hidden overages: anything beyond the included PM and architecture hours is agreed upfront. You own the code and the IP.
+
+We add capacity alongside your team or current vendor, often starting with one engineer on a specific backlog item or pipeline problem. We work in your stack: if you are on Azure and Power BI, we work in Azure and Power BI, and we modernise step by step, proving value before expanding scope.
+
+Swap guarantee: if the engineer is not the right fit in the first 2 weeks, we replace them within 5 business days at no cost.
+
+We are ISO 27001:2022 and ISO 22301:2019 certified, DORA aligned and GDPR compliant, so vendor due diligence moves quickly.
+
+Easiest first step: we send the Waystone case study (published on hst.ie) or our 1 page Stabilise and Ship plan for taking a fragile data platform to production ready (assess in week 1, stabilise by week 6, ship by week 12).

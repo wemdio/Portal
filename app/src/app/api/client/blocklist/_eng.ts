@@ -70,7 +70,9 @@ import {
 } from '@/lib/clientBlocklist/blockedContacts';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { ENG_ACCOUNT_BLOCKED_TEXT } from '@/lib/hypothesisEngine/apiGuards';
+import { ENG_ACCOUNT_BLOCKED_TEXT, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import { contactHost, normalizeBlockedDomain, parseBlockedEntry } from '@/lib/clientBlocklist/blockedDomains';
+import { heEngDncDomainsEnabled } from '@/lib/hypothesisEngine/engRolloutFlags';
 import { readHeEngAccountBlock } from '@/lib/hypothesisEngine/engAccountBlockMarker';
 import {
   heEngDncRemovalView,
@@ -109,28 +111,33 @@ export const ENG_BLOCKLIST_TEXT = {
   tooMany: (n: number) =>
     `You pasted ${n.toLocaleString('en-US')} different addresses. Add at most ${PER_ADD_TEXT} at a time.`,
   listFull:
-    `Your list already holds ${MAX_TEXT} addresses, the most it can hold. ` +
-    'Remove addresses you no longer need to add new ones.',
+    `Your list already holds ${MAX_TEXT} entries, the most it can hold. ` +
+    'Remove entries you no longer need to add new ones.',
   // Список уже длиннее потолка (сбой отката или потерянный ответ вставки):
   // число — настоящее, а не «10 000», и сказано, что это значит для кампаний.
   listOverLimit: (count: number) =>
-    `Your list holds ${count.toLocaleString('en-US')} addresses, more than the ${MAX_TEXT} it can hold, ` +
+    `Your list holds ${count.toLocaleString('en-US')} entries, more than the ${MAX_TEXT} it can hold, ` +
     'so nothing was added. ' +
     `Until you remove at least ${(count - BLOCKLIST_MAX_ENTRIES).toLocaleString('en-US')}, ` +
     'no new contacts are added to your campaigns.',
   overLimit: (room: number) =>
-    `These addresses would take your list over ${MAX_TEXT}, the most it can hold, so none of them were added. ` +
-    `You can add up to ${room.toLocaleString('en-US')} more, or remove addresses you no longer need.`,
-  addFailed: 'Could not add these addresses, and none of them were added. Try again in a minute.',
+    `These would take your list over ${MAX_TEXT} entries, the most it can hold, so none of them were added. ` +
+    `You can add up to ${room.toLocaleString('en-US')} more, or remove entries you no longer need.`,
+  addFailed: 'Could not add these entries, and none of them were added. Try again in a minute.',
   // Экран после этого кода сам перечитывает список (reload) — отсюда «below».
   addUnconfirmed:
-    'Could not finish adding these addresses, and some of them may be on your list now. ' +
+    'Could not finish adding these entries, and some of them may be on your list now. ' +
     'Check your list below. ' +
-    `While it holds more than ${MAX_TEXT} addresses, no new contacts are added to your campaigns.`,
+    `While it holds more than ${MAX_TEXT} entries, no new contacts are added to your campaigns.`,
   overLimitStuck:
-    `Your list went over ${MAX_TEXT} addresses, the most it can hold, and we could not undo it. ` +
-    `No new contacts are added to your campaigns until you remove addresses to bring it back to ${MAX_TEXT} or fewer.`,
-  removeFailed: 'Could not remove this address. Try again in a minute.',
+    `Your list went over ${MAX_TEXT} entries, the most it can hold, and we could not undo it. ` +
+    `No new contacts are added to your campaigns until you remove entries to bring it back to ${MAX_TEXT} or fewer.`,
+  removeFailed: 'Could not remove this entry. Try again in a minute.',
+  // Домены компаний (kind 'domains', план 2026-10-16-eng-countries, §1B).
+  emptyDomains: 'Paste at least one company domain.',
+  tooManyDomains: (n: number) =>
+    `You pasted ${n.toLocaleString('en-US')} different domains. Add at most ${PER_ADD_TEXT} at a time.`,
+  domainsUnavailable: 'Blocking whole companies by domain is not available yet.',
   // Тот же текст, что у рыночного гейта кабинета (apiGuards.requireEngMarket).
   unavailable: 'Service temporarily unavailable — refresh the page',
 } as const;
@@ -144,6 +151,8 @@ export const ENG_BLOCKLIST_TEXT = {
 export type EngBlocklistAddCode =
   | 'account_blocked'
   | 'unavailable'
+  | 'domains_unavailable'
+  | 'not_eng_market'
   | 'bad_request'
   | 'empty'
   | 'too_long'
@@ -299,6 +308,57 @@ export function parseEngBlocklistPaste(text: string): EngBlocklistPaste {
   return { emails, domains, invalid };
 }
 
+export interface EngBlocklistDomainsPaste {
+  /** Разные домены (normalizeBlockedDomain: хост как набран, punycode), в порядке вставки. */
+  domains: string[];
+  /** Не хост: обрывки, IP, localhost, без зоны. */
+  invalid: Rejected;
+  /** Личная почта (gmail.com, outlook.com…): компанией не закрывается. */
+  personal: Rejected;
+  /** Не домен компании: публичный суффикс, соцсеть, конструктор сайтов. */
+  notCompany: Rejected;
+  /**
+   * Добавленные поддомены (shop.acme.com) — добавляются как набраны, а
+   * примеры — подсказка добавить домен компании (`subdomainOf`).
+   */
+  subdomains: Rejected;
+}
+
+/**
+ * Разбор вставки «Company domains»: та же чистка, что у адресов (символы
+ * формата, mailto, обёртки, разделители), затем каждый токен —
+ * normalizeBlockedDomain (blockedDomains.ts): адрес даёт свой домен, ссылка —
+ * свой хост. Повторы считаются один раз.
+ */
+export function parseEngBlocklistDomains(text: string): EngBlocklistDomainsPaste {
+  const domains: string[] = [];
+  const seenDomains = new Set<string>();
+  const invalid: Rejected = { count: 0, examples: [] };
+  const personal: Rejected = { count: 0, examples: [] };
+  const notCompany: Rejected = { count: 0, examples: [] };
+  const subdomains: Rejected = { count: 0, examples: [] };
+  const seenRejected = new Set<string>();
+  const seenSubdomains = new Set<string>();
+  const prepared = text.replace(FORMAT_CHARS_RE, '').replace(MAILTO_RE, mailtoAddresses);
+  for (const piece of prepared.split(SPLIT_RE)) {
+    const token = piece.replace(WRAP_HEAD_RE, '').replace(WRAP_TAIL_RE, '');
+    if (!token) continue;
+    const parsed = normalizeBlockedDomain(token);
+    if (parsed.ok) {
+      if (seenDomains.has(parsed.domain)) continue;
+      seenDomains.add(parsed.domain);
+      domains.push(parsed.domain);
+      if (parsed.subdomainOf) pushExample(subdomains, seenSubdomains, parsed.domain);
+      continue;
+    }
+    // Личный и «не компания» — примером хост (gmail.com), а не каждый адрес
+    // целиком: клиенту важно, какой домен не принят. Мусор — как вставлен.
+    if (parsed.refused === 'invalid') pushExample(invalid, seenRejected, token);
+    else pushExample(parsed.refused === 'personal' ? personal : notCompany, seenRejected, contactHost(token) ?? token);
+  }
+  return { domains, invalid, personal, notCompany, subdomains };
+}
+
 function refusal(code: EngBlocklistAddCode, error: string, status: number) {
   return NextResponse.json({ error, code }, { status });
 }
@@ -343,6 +403,16 @@ async function countList(db: SupabaseClient, userId: string, q = ''): Promise<nu
     .eq('client_user_id', userId);
   if (q) query = query.ilike('email', `%${likeLiteral(q)}%`);
   const { count, error } = await query;
+  return error || typeof count !== 'number' ? null : count;
+}
+
+/** Доменных записей ('@' + хост) в списке клиента; null — не прочитался. */
+async function countDomains(db: SupabaseClient, userId: string): Promise<number | null> {
+  const { count, error } = await db
+    .from('client_blocked_contacts')
+    .select('id', { count: 'exact', head: true })
+    .eq('client_user_id', userId)
+    .like('email', '@%');
   return error || typeof count !== 'number' ? null : count;
 }
 
@@ -419,7 +489,14 @@ export async function engBlocklistGet(
     return NextResponse.json({ error: ENG_BLOCKLIST_TEXT.loadFailed }, { status: 500 });
   }
 
-  const items = pastEnd ? [] : ((pageRes.data ?? []) as EngBlockedRow[]);
+  // Строка — адрес или домен компании ('@' + хост, план 2026-10-16-eng-countries,
+  // §1B): `kind` и `value` (домен — без '@'); `email` — сырьё, как раньше.
+  const items = (pastEnd ? [] : ((pageRes.data ?? []) as EngBlockedRow[])).map((row) => {
+    const entry = parseBlockedEntry(row.email);
+    return entry?.kind === 'domain'
+      ? { ...row, kind: 'domain' as const, value: entry.domain }
+      : { ...row, kind: 'email' as const, value: entry?.email ?? row.email };
+  });
   const nextOffset = offset + items.length;
   return NextResponse.json({
     items,
@@ -427,6 +504,12 @@ export async function engBlocklistGet(
     matching,
     offset,
     next_offset: items.length > 0 && nextOffset < matching ? nextOffset : null,
+    // Доменов во всём списке (без поиска); null — счёт не прочитался (страница
+    // от этого не падает: число — подпись «N entries · M domains»).
+    domains_total: await countDomains(db, userId),
+    // Добавление доменов открыто (HE_ENG_DNC_DOMAINS): экран показывает
+    // переключатель «Company domains» только при true.
+    domains_enabled: heEngDncDomainsEnabled(),
     ...(await readHeEngDncSummary(portalDb, db, userId)),
   });
 }
@@ -435,7 +518,9 @@ export async function engBlocklistGet(
 const REPLY_ID_RE = /^\d{1,15}$/;
 
 /**
- * POST (ENG): добавить вставленный текст. Body: `{ text: string, reply_id?: string }`.
+ * POST (ENG): добавить вставленный текст. Body: `{ text: string, reply_id?: string,
+ * kind?: 'emails' | 'domains' }`. `kind` нет или 'emails' — адреса, как раньше;
+ * 'domains' — домены компаний (engBlocklistPostDomains, свой порядок проверок).
  *
  * `reply_id` — только у «Block» на Replies: id ответа (instantly_activity_events),
  * на карточке которого нажали, и ровно один адрес в `text` (иначе 400
@@ -472,16 +557,28 @@ export async function engBlocklistPost(
   userId: string,
   portalDb: SupabaseClient | null = supabaseAdmin,
 ): Promise<NextResponse> {
-  const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'add');
-  if (blocked) return blocked;
-
-  let body: { text?: unknown; reply_id?: unknown };
+  // Тело читается до отметки блокировки, но ветка адресов отвечает в прежнем
+  // порядке: сначала блокировка, потом нечитаемое тело. Ветка доменов —
+  // выключатель и рыночный гейт раньше всего остального (engBlocklistPostDomains).
+  let body: { text?: unknown; reply_id?: unknown; kind?: unknown };
+  let bodyOk = true;
   try {
     body = (await req.json()) as typeof body;
   } catch {
+    body = {};
+    bodyOk = false;
+  }
+  if (bodyOk && body && typeof body === 'object' && body.kind === 'domains') {
+    return engBlocklistPostDomains(body, db, userId, portalDb);
+  }
+
+  const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'add');
+  if (blocked) return blocked;
+
+  if (!bodyOk || !body || typeof body !== 'object' || typeof body.text !== 'string') {
     return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
   }
-  if (!body || typeof body !== 'object' || typeof body.text !== 'string') {
+  if (body.kind !== undefined && body.kind !== null && body.kind !== 'emails') {
     return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
   }
   const replyId = body.reply_id === undefined || body.reply_id === null ? null : body.reply_id;
@@ -537,6 +634,115 @@ export async function engBlocklistPost(
   );
 }
 
+/** Примеров в аудите добавления доменов (домены компаний — не персональные данные). */
+const DOMAINS_AUDIT_SAMPLE = 20;
+
+/**
+ * POST (ENG), `kind: 'domains'` — домены компаний в «Do not contact» (план
+ * docs/handoff/2026-10-16-eng-countries/implementation-plan.md, §1B). Запись —
+ * `'@' + хост` в той же колонке email, source 'manual'.
+ *
+ * Порядок проверок — до разбора текста и до любой записи:
+ *  1. выключатель HE_ENG_DNC_DOMAINS — выключен: 400 'domains_unavailable';
+ *  2. requireEngMarket по профилю (не по хосту запроса: `auth.market` берётся
+ *     из хоста, и RU-клиент на ENG-хосте попал бы сюда; RU-запуск HE при сбое
+ *     чтения списка идёт без списка вовсе — launchTemplate.ts, путь «как до
+ *     порта», — поэтому доменная строка в RU-списке недопустима); отказ — его
+ *     статус (403/503), ничего не записано;
+ *  3. отметка блокировки аккаунта (engBlocklistBlockRefusal), как у адресов.
+ * Дальше — та же механика вставки и те же коды отказов, что у адресов
+ * (engBlocklistInsertEntries). Заявки снятия с кампаний нет: люди этих компаний,
+ * уже стоящие в идущих кампаниях, в них остаются (экран говорит это). Ответ:
+ * `{kind:'domains', added, already_listed, invalid, personal, not_company,
+ * subdomains, total}`, где invalid/personal/not_company/subdomains — `{count,
+ * examples}`.
+ */
+async function engBlocklistPostDomains(
+  body: { text?: unknown; reply_id?: unknown },
+  db: SupabaseClient,
+  userId: string,
+  portalDb: SupabaseClient | null,
+): Promise<NextResponse> {
+  if (!heEngDncDomainsEnabled()) {
+    return refusal('domains_unavailable', ENG_BLOCKLIST_TEXT.domainsUnavailable, 400);
+  }
+  if (!portalDb) return refusal('unavailable', ENG_BLOCKLIST_TEXT.unavailable, 503);
+  const market = await requireEngMarket(portalDb, userId);
+  if (!market.ok) {
+    const code: EngBlocklistAddCode =
+      market.failure.status === 503
+        ? 'unavailable'
+        : market.failure.message === ENG_ACCOUNT_BLOCKED_TEXT
+          ? 'account_blocked'
+          : 'not_eng_market';
+    return refusal(code, market.failure.message, market.failure.status);
+  }
+  // requireEngMarket пропускает не-клиентские роли с ЛЮБЫМ рынком профиля, а
+  // доменная запись в списке не-ENG владельца уронила бы его RU-читателей
+  // (getBlockedEmailSet бросает на '@host'). Поэтому — только рынок 'eng'
+  // (§1B плана 2026-10-16-eng-countries: «ok with market 'eng'»).
+  if (market.market !== 'eng') {
+    return refusal('not_eng_market', 'This section is not available for your account', 403);
+  }
+  const blocked = await engBlocklistBlockRefusal(portalDb, userId, 'add');
+  if (blocked) return blocked;
+
+  if (typeof body.text !== 'string') return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
+  // Block на Replies — только адрес человека, не компания.
+  if (body.reply_id !== undefined && body.reply_id !== null) {
+    return refusal('bad_request', ENG_BLOCKLIST_TEXT.badRequest, 400);
+  }
+  if (body.text.length > ENG_BLOCKLIST_MAX_TEXT) {
+    return refusal('too_long', ENG_BLOCKLIST_TEXT.tooLong, 400);
+  }
+
+  const paste = parseEngBlocklistDomains(body.text);
+  if (
+    paste.domains.length === 0
+    && paste.invalid.count === 0
+    && paste.personal.count === 0
+    && paste.notCompany.count === 0
+  ) {
+    return refusal('empty', ENG_BLOCKLIST_TEXT.emptyDomains, 400);
+  }
+  if (paste.domains.length > ENG_BLOCKLIST_MAX_PER_ADD) {
+    return refusal('too_many', ENG_BLOCKLIST_TEXT.tooManyDomains(paste.domains.length), 400);
+  }
+  const rejectedFields = {
+    invalid: paste.invalid,
+    personal: paste.personal,
+    not_company: paste.notCompany,
+    subdomains: paste.subdomains,
+  };
+  if (paste.domains.length === 0) {
+    return NextResponse.json({ kind: 'domains', added: 0, already_listed: 0, ...rejectedFields, total: null });
+  }
+
+  const inserted = await engBlocklistInsertEntries(db, userId, paste.domains.map((d) => `@${d}`));
+  if (!inserted.ok) return inserted.response;
+  const { insertedIds, after } = inserted;
+  const alreadyListed = paste.domains.length - insertedIds.length;
+
+  if (insertedIds.length > 0) {
+    await logAudit(
+      'client.blocklist.eng_domains_added',
+      'ENG-клиент добавил домены компаний в «Do not contact»',
+      {
+        added: insertedIds.length,
+        alreadyListed,
+        total: after,
+        sample: paste.domains.slice(0, DOMAINS_AUDIT_SAMPLE),
+      },
+      { userId },
+    );
+  }
+
+  return NextResponse.json(
+    { kind: 'domains', added: insertedIds.length, already_listed: alreadyListed, ...rejectedFields, total: after },
+    { status: insertedIds.length > 0 ? 201 : 200 },
+  );
+}
+
 /**
  * Исход добавления для заявки снятия: ответ 2xx — адреса запроса в списке;
  * 400 и add_failed — доказанно ничего не добавлено; прочее (add_unconfirmed,
@@ -559,27 +765,64 @@ async function engBlocklistAddParsed(
   userId: string,
   paste: EngBlocklistPaste,
 ): Promise<NextResponse> {
+  const inserted = await engBlocklistInsertEntries(db, userId, paste.emails);
+  if (!inserted.ok) return inserted.response;
+  const { insertedIds, after } = inserted;
+
+  if (insertedIds.length > 0) {
+    await logAudit(
+      'client.blocklist.eng_added',
+      'ENG-клиент добавил адреса в «Do not contact»',
+      { added: insertedIds.length, alreadyListed: paste.emails.length - insertedIds.length, total: after },
+      { userId },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      added: insertedIds.length,
+      already_listed: paste.emails.length - insertedIds.length,
+      domains: paste.domains,
+      invalid: paste.invalid,
+      total: after,
+    },
+    { status: insertedIds.length > 0 ? 201 : 200 },
+  );
+}
+
+/**
+ * Механика вставки, общая для адресов и доменов ('@' + хост): счёт до →
+ * потолок → вставка частями без перезаписи → пересчёт → откат своих строк при
+ * переросте потолка. Отказ — готовый ответ; успех — id новых строк и размер
+ * списка после.
+ */
+async function engBlocklistInsertEntries(
+  db: SupabaseClient,
+  userId: string,
+  entries: string[],
+): Promise<{ ok: false; response: NextResponse } | { ok: true; insertedIds: string[]; after: number }> {
+  const fail = (response: NextResponse) => ({ ok: false as const, response });
   const before = await countList(db, userId);
   if (before === null) {
     await logError('client.blocklist.eng_add_failed', new Error('не прочитался счёт списка до вставки'), {}, { userId });
-    return refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500);
+    return fail(refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500));
   }
   if (before > BLOCKLIST_MAX_ENTRIES) {
-    return refusal('list_over_limit', ENG_BLOCKLIST_TEXT.listOverLimit(before), 400);
+    return fail(refusal('list_over_limit', ENG_BLOCKLIST_TEXT.listOverLimit(before), 400));
   }
   if (before === BLOCKLIST_MAX_ENTRIES) {
-    return refusal('list_full', ENG_BLOCKLIST_TEXT.listFull, 400);
+    return fail(refusal('list_full', ENG_BLOCKLIST_TEXT.listFull, 400));
   }
 
   // Вставка частями по INSERT_CHUNK строк: RETURNING каждой части заведомо
   // меньше потолка строк ответа PostgREST, значит, id вернутся ВСЕ — откат ниже
   // держится на этом. Сбой части — откат уже вставленных частей.
   const insertedIds: string[] = [];
-  for (let i = 0; i < paste.emails.length; i += INSERT_CHUNK) {
+  for (let i = 0; i < entries.length; i += INSERT_CHUNK) {
     const { data, error } = await db
       .from('client_blocked_contacts')
       .upsert(
-        paste.emails
+        entries
           .slice(i, i + INSERT_CHUNK)
           .map((email) => ({ client_user_id: userId, email, reason: null, source: 'manual' })),
         { onConflict: 'client_user_id,email', ignoreDuplicates: true },
@@ -602,11 +845,13 @@ async function engBlocklistAddParsed(
         { userId },
       );
       if (now !== null && now > BLOCKLIST_MAX_ENTRIES) {
-        return refusal('over_limit_stuck', ENG_BLOCKLIST_TEXT.overLimitStuck, 500);
+        return fail(refusal('over_limit_stuck', ENG_BLOCKLIST_TEXT.overLimitStuck, 500));
       }
-      return rolledBack && now === before
-        ? refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500)
-        : refusal('add_unconfirmed', ENG_BLOCKLIST_TEXT.addUnconfirmed, 500);
+      return fail(
+        rolledBack && now === before
+          ? refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500)
+          : refusal('add_unconfirmed', ENG_BLOCKLIST_TEXT.addUnconfirmed, 500),
+      );
     }
     for (const row of data as { id: string }[]) insertedIds.push(row.id);
   }
@@ -625,42 +870,28 @@ async function engBlocklistAddParsed(
       { userId },
     );
     if (after === null) {
-      return rolledBack
-        ? refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500)
-        : refusal('add_unconfirmed', ENG_BLOCKLIST_TEXT.addUnconfirmed, 500);
+      return fail(
+        rolledBack
+          ? refusal('add_failed', ENG_BLOCKLIST_TEXT.addFailed, 500)
+          : refusal('add_unconfirmed', ENG_BLOCKLIST_TEXT.addUnconfirmed, 500),
+      );
     }
-    if (!rolledBack) return refusal('over_limit_stuck', ENG_BLOCKLIST_TEXT.overLimitStuck, 500);
+    if (!rolledBack) return fail(refusal('over_limit_stuck', ENG_BLOCKLIST_TEXT.overLimitStuck, 500));
     // Размер без своих строк: другая вкладка могла за это время дописать
     // столько, что список и без нас длиннее потолка, — тогда число настоящее.
     const without = after - insertedIds.length;
     if (without > BLOCKLIST_MAX_ENTRIES) {
-      return refusal('list_over_limit', ENG_BLOCKLIST_TEXT.listOverLimit(without), 400);
+      return fail(refusal('list_over_limit', ENG_BLOCKLIST_TEXT.listOverLimit(without), 400));
     }
     const room = BLOCKLIST_MAX_ENTRIES - without;
-    return room > 0
-      ? refusal('over_limit', ENG_BLOCKLIST_TEXT.overLimit(room), 400)
-      : refusal('list_full', ENG_BLOCKLIST_TEXT.listFull, 400);
-  }
-
-  if (insertedIds.length > 0) {
-    await logAudit(
-      'client.blocklist.eng_added',
-      'ENG-клиент добавил адреса в «Do not contact»',
-      { added: insertedIds.length, alreadyListed: paste.emails.length - insertedIds.length, total: after },
-      { userId },
+    return fail(
+      room > 0
+        ? refusal('over_limit', ENG_BLOCKLIST_TEXT.overLimit(room), 400)
+        : refusal('list_full', ENG_BLOCKLIST_TEXT.listFull, 400),
     );
   }
 
-  return NextResponse.json(
-    {
-      added: insertedIds.length,
-      already_listed: paste.emails.length - insertedIds.length,
-      domains: paste.domains,
-      invalid: paste.invalid,
-      total: after,
-    },
-    { status: insertedIds.length > 0 ? 201 : 200 },
-  );
+  return { ok: true, insertedIds, after };
 }
 
 /**
@@ -693,8 +924,17 @@ export async function engBlocklistDelete(
   const removed = (data ?? []).length;
   if (removed > 0) {
     const email = (data as { email: string }[])[0]?.email;
-    await logAudit('client.blocklist.removed', 'Client unblocked a contact', { email }, { userId });
-    await releaseHeEngDncAddress({ portalDb, userId, email });
+    const entry = parseBlockedEntry(email);
+    if (entry?.kind === 'domain') {
+      // Домен компании: свой аудит; заявок снятия с кампаний у доменов нет
+      // (добавление их не открывает), отменять нечего.
+      await logAudit('client.blocklist.eng_domain_removed', 'ENG-клиент убрал домен компании из «Do not contact»', {
+        domain: entry.domain,
+      }, { userId });
+    } else {
+      await logAudit('client.blocklist.removed', 'Client unblocked a contact', { email }, { userId });
+      await releaseHeEngDncAddress({ portalDb, userId, email });
+    }
   }
   return NextResponse.json({ removed });
 }

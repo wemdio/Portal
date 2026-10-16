@@ -48,8 +48,14 @@
  *    чисел. После того как hypotheses её прочитала, на гипотезы
  *    она уже не влияет, поэтому форма рамки открыта только пока следующее её
  *    чтение впереди (icpEditable ниже), а дальше показывает ответы без правки;
- *  - max_emails_per_company (колонка проекта, не бриф) — будущие сборки баз.
- * Overrides и настройка поэтому редактируются всегда.
+ *  - max_emails_per_company (колонка проекта, не бриф) — будущие сборки баз;
+ *  - collect_countries (страны сбора, план §1A) — будущие сборки баз: план
+ *    сборки читает список и замораживает его в базе. Карточка «Countries» —
+ *    своя, НАД свёрнутым «What we know about your business» и вне замка рамки
+ *    ЦА (icpEditable), рисуется только при включённом выборе стран
+ *    (`collect_countries_enabled`). Ей же гипотезы research: новый прогон
+ *    читает список, уже написанные гипотезы не переписываются.
+ * Overrides, настройка и страны поэтому редактируются всегда.
  *
  * Все три формы шага держат черновики поверх значений сервера
  * (useServerDrafts ниже): открываются с сохранённым, полл не трогает
@@ -82,7 +88,17 @@ import {
   type HeIcpFrameInputError,
 } from '@/lib/hypothesisEngine/icpFrame';
 import {
+  ENG_COUNTRY_US,
+  engCountryLabel,
+  heCollectCountriesErrorText,
+  normalizeEngCountry,
+  parseHeCollectCountries,
+} from '@/lib/hypothesisEngine/engCountries';
+import {
   EngPaidAccessError,
+  engCollectCountriesEnabled,
+  engCollectCountriesOf,
+  engCountriesErrorText,
   patchEngProject,
   startEngResearch,
   type EngBriefPatch,
@@ -101,6 +117,7 @@ import { heEngMarketStarted, heEngMarketsFresh } from '@/lib/hypothesisEngine/en
 import { BUSINESS_OVERRIDE_MAX_LENGTH, OFFER_OVERRIDE_MAX_LENGTH } from '@/lib/hypothesisEngine/projectBriefPatch';
 import { EngPaidAccessNotice, EngSupportText } from './EngPaidAccess';
 import { EngBadge, EngCard, EngEyebrow, EngSpinner } from './ui';
+import { EngCountryPicker } from './EngCountryPicker';
 import type { EngDetail } from './EngProjectWizard';
 
 const RESEARCH_STAGES = ['site_profile', 'competitors', 'brand_cloud', 'hypotheses', 'evidence', 'clustering'];
@@ -241,6 +258,29 @@ const CONTACT_CAP_DEFAULT = 5;
 function contactCapOf(project: unknown): number {
   const raw = (project as { max_emails_per_company?: unknown } | null)?.max_emails_per_company;
   return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : CONTACT_CAP_DEFAULT;
+}
+
+/**
+ * Черновик стран — строкой (useServerDrafts держит строки): значения каталога
+ * по алфавиту через перевод строки. Сервер хранит список так же отсортированным,
+ * поэтому «вернул как было» снимает черновик.
+ */
+function countriesDraftOf(countries: readonly string[]): string {
+  return [...countries].sort().join('\n');
+}
+
+/** Сохранённый список целиком: действующие и недоступные значения. */
+function savedCountriesAll(saved: { countries: string[]; unavailable: string[] }): string[] {
+  return [...new Set([...saved.countries, ...saved.unavailable])];
+}
+
+function countriesFromDraft(draft: string): string[] {
+  return draft ? draft.split('\n').filter(Boolean) : [];
+}
+
+/** «Ireland, United Kingdom» — подписи через запятую. */
+function countryLabels(values: readonly string[]): string {
+  return values.map(engCountryLabel).join(', ');
 }
 
 /** «1 audience» / «3 audiences»; число — en-US. */
@@ -814,6 +854,20 @@ export function EngStepBrief({
   const cap = Number(capForm.value('cap'));
   const [capSaving, setCapSaving] = useState(false);
   const [capSavedAt, setCapSavedAt] = useState(0);
+  // Страны сбора — та же схема черновика; карточка — только при включённом выборе.
+  const countriesEnabled = engCollectCountriesEnabled(detail);
+  // Сервер отдаёт действующие страны и отдельно — сохранённые, которых каталог
+  // больше не знает (по ним ничего не собирается). В черновике — обе группы:
+  // чип такой страны видно и можно снять, а без неё «Save» записал бы список
+  // без неё молча.
+  const savedCountries = engCollectCountriesOf(brief);
+  const countriesForm = useServerDrafts({ countries: countriesDraftOf(savedCountriesAll(savedCountries)) });
+  const countryList = countriesFromDraft(countriesForm.value('countries'));
+  const [countriesSaving, setCountriesSaving] = useState(false);
+  const [countriesSavedAt, setCountriesSavedAt] = useState(0);
+  const [countriesError, setCountriesError] = useState('');
+  const unavailableCountries = savedCountries.unavailable;
+  const hasHypotheses = (detail.hypotheses ?? []).length > 0;
 
   const researchActive = useMemo(() => isResearchActive(jobs), [jobs]);
   const listLatestResearch = useMemo(() => latestResearchJob(jobs), [jobs]);
@@ -882,7 +936,8 @@ export function EngStepBrief({
   // сверки версии (patchHeProjectBrief): два запроса в полёте читают один и тот
   // же brief, и записанный последним возвращает поле первого к прежнему
   // значению. Поэтому, пока идёт одно сохранение брифа, второе не уходит.
-  const briefSaving = saving || icpSaving;
+  // Карточка «Countries» пишет тот же brief — в том же замке.
+  const briefSaving = saving || icpSaving || countriesSaving;
 
   // Только изменённые поля: присланное роут перезаписывает (пустое — удаляет),
   // неприсланное не трогает.
@@ -959,6 +1014,45 @@ export function EngStepBrief({
       setError(e instanceof Error ? e.message : 'Failed to save');
     } finally {
       setCapSaving(false);
+    }
+  };
+
+  // Страны сбора: PATCH шлёт ТОЛЬКО collect_countries — список целиком
+  // (пустой — null: «выбираем сами»). Проверка — та же, что у роута, до
+  // отправки. Значение, которого каталог больше не знает, сервер отклонил бы:
+  // просим снять его явно, а не выбрасываем молча — иначе из списка
+  // «только Х» молча получилось бы «любая страна».
+  const onSaveCountries = async () => {
+    if (briefSaving || countriesForm.changed.length === 0) return;
+    const sentDraft = countriesForm.value('countries');
+    const list = countriesFromDraft(sentDraft);
+    const stale = list.filter((c) => normalizeEngCountry(c) === null);
+    if (stale.length > 0) {
+      setCountriesError(`Remove the countries that are no longer available before saving: ${countryLabels(stale)}.`);
+      return;
+    }
+    const checked = parseHeCollectCountries(list);
+    if (!checked.ok) {
+      setCountriesError(heCollectCountriesErrorText(checked));
+      return;
+    }
+    setCountriesSaving(true);
+    setCountriesError('');
+    try {
+      const res = await patchEngProject(project.id, {
+        collect_countries: checked.countries.length > 0 ? checked.countries : null,
+      });
+      const storedBrief = res?.project?.brief;
+      countriesForm.saved(
+        storedBrief ? { countries: countriesDraftOf(savedCountriesAll(engCollectCountriesOf(storedBrief))) } : null,
+        { countries: sentDraft },
+      );
+      setCountriesSavedAt(Date.now());
+      onChanged();
+    } catch (e) {
+      setCountriesError(engCountriesErrorText(e instanceof Error ? e.message : 'Failed to save'));
+    } finally {
+      setCountriesSaving(false);
     }
   };
 
@@ -1194,6 +1288,80 @@ export function EngStepBrief({
           </div>
         )}
       </EngCard>
+
+      {/* Страны сбора (план §1A): своя карточка над свёрнутым «What we know
+          about your business», не под замком рамки ЦА — это дефолт проекта
+          для будущих сборок, как «Contacts per company». */}
+      {/* Выключатель выбора стран могут выключить, когда списки уже сохранены, —
+          а сборка соблюдает сохранённый список всегда. Поэтому карточка есть и
+          тогда: список виден (только для чтения), и клиент знает, откуда
+          ограничение и что говорит про него причина остановки сборки. */}
+      {(countriesEnabled || savedCountriesAll(savedCountries).length > 0) && (
+        <EngCard>
+          <EngEyebrow>Countries</EngEyebrow>
+          <p className="mb-1 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+            We collect companies only from the countries you choose here. Leave it empty and we choose the countries
+            for each market — companies can then come from any country in our catalog.
+          </p>
+          <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+            Changes apply from the next collection. A collection that is already running finishes with the countries
+            it started with. Companies we prepared before the change can still be emailed.
+          </p>
+          <EngCountryPicker
+            value={countryList}
+            onChange={(next) => {
+              setCountriesError('');
+              countriesForm.edit('countries', countriesDraftOf(next));
+            }}
+            disabled={countriesSaving || !countriesEnabled}
+          />
+          {!countriesEnabled && (
+            <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+              Changing countries is temporarily unavailable. Collections still use only the countries listed here.
+            </p>
+          )}
+          {countryList.length > 0 && !countryList.includes(ENG_COUNTRY_US) && (
+            <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+              Local business listings cover the United States only, so they are not used for these countries.
+            </p>
+          )}
+          {unavailableCountries.length > 0 && (
+            <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+              No longer available in our catalog: {countryLabels(unavailableCountries)}. Nothing is collected for{' '}
+              {unavailableCountries.length === 1 ? 'it' : 'them'}.
+            </p>
+          )}
+          {hasHypotheses && countryList.length > 0 && (
+            <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+              Market ideas written before you chose countries are not rewritten; new collections still use only these
+              countries.
+            </p>
+          )}
+          {countriesEnabled && (
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void onSaveCountries()}
+              disabled={briefSaving || countriesForm.changed.length === 0}
+              className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+            >
+              {countriesSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+              Save
+            </button>
+            <SaveStatus
+              saving={countriesSaving}
+              savedAt={countriesSavedAt}
+              unsaved={countriesForm.changed.length > 0}
+            />
+          </div>
+          )}
+          {countriesError && (
+            <p className="m-0 mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
+              {countriesError}
+            </p>
+          )}
+        </EngCard>
+      )}
 
       <details
         open={aboutOpen}

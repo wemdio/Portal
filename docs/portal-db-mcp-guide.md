@@ -817,3 +817,10 @@ ORDER BY bt.occurred_at DESC;
 - `project_periods` небольшая — её можно выбирать целиком.
 - Nolock, MVCC — параллельные апдейты от прода не блокируют чтение, но могут возвращать
   разные снапшоты между запросами.
+
+
+## B2B-поиск: учёт и повторное скачивание выгрузок
+
+Реализация от 2026-10-16 в ветке `codex/companies-export-reliability`; наличие миграции в целевом окружении проверять отдельно. `client_companies_search_exports` остаётся журналом списаний (`user_id`, `row_count`, `created_at`). Новые nullable-поля: `request_key` (идемпотентность внутри пользователя), `filter_hash`, `filters` (точные параметры), `storage_prefix` (сохранённые XLSX/CSV в MAIN S3). Записи без `storage_prefix` являются прежним учётом без восстановимого файла.
+
+`commit_companies_search_export` атомарно добавляет списание и `client_companies_search_seen`; выполнять его через MCP нельзя. Повторное скачивание существующего файла не добавляет строк учёта. Для диагностики сверяйте `id`, `row_count`, `created_at`, наличие `storage_prefix` и фильтры конкретного пользователя. Не выдавайте seen-журнал за состав отдельного старого экспорта. Подробности и проверки: [companies-search-saved-exports.md](./companies-search-saved-exports.md).

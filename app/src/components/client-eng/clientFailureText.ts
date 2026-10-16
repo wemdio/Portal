@@ -61,6 +61,19 @@ export type HeClientErrorCode =
   /** Источник не отдал строк (ошибка чтения каталога или пустая выдача). */
   | 'source'
   /**
+   * План сборки пуст из-за списка стран проекта: ни один источник не покрывает
+   * выбранные страны для этого рынка, коллекторы не вызывались
+   * (stages/baseCollect.ts; план docs/handoff/2026-10-16-eng-countries, §1A).
+   */
+  | 'countries_uncovered'
+  /**
+   * Сборка не дала строк, и главная причина — список Do not contact клиента:
+   * все найденные компании на его доменах (§1B).
+   */
+  | 'do_not_contact'
+  /** Список Do not contact клиента больше лимита — сборка не может его проверить (§1B). */
+  | 'do_not_contact_over_cap'
+  /**
    * Адрес сайта клиента не привёл к публичному серверу (род `dns`
    * HeSiteUnreachableError: домен не резолвится, адрес невалидный или
    * приватный) — исследованию нечего было читать.
@@ -141,6 +154,12 @@ export const HE_COLLECT_STOP_REPEATS_CODES = [
   'audience_mismatch',
   'hypothesis_mismatch',
   'segment_exhausted',
+  // Повтор упрётся в тот же список стран / тот же Do not contact, пока клиент
+  // его не поправит (§1A, §1B). Список сверх лимита — так же: его текст зовёт
+  // «Collect again», а кнопка рисуется только у кодов этого списка.
+  'countries_uncovered',
+  'do_not_contact',
+  'do_not_contact_over_cap',
 ] as const satisfies readonly HeClientErrorCode[];
 
 export function heCollectStopRepeats(code: unknown): boolean {
@@ -527,6 +546,34 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
       'Those companies and addresses stay in the audiences that already hold them; this collection does not add them a second time.',
     whatToDo:
       'Press «Launch» on step 3 to collect this market again — a new collection skips the companies you already have; if it keeps coming back empty, message Support.',
+  },
+  /**
+   * Список стран проекта (§1A): план сборки опустел, потому что ни один
+   * источник не покрывает выбранные страны для этого рынка. Коллекторы не
+   * вызывались — компаний не покупали. «Launch» такую вертикаль заново не
+   * собирает (HE_COLLECT_STOP_REPEATS_CODES); повтор — явная «Collect again»
+   * после правки списка на шаге 1.
+   */
+  countries_uncovered: {
+    title: 'None of our company sources cover the countries chosen for this project for this market.',
+    whatIsSaved: 'No companies were collected or bought for this market in this collection. ' + FINISHED_WORK_KEPT,
+    whatToDo:
+      'Add countries or clear the list in «Countries» on step 1, then press «Collect again» for this market on step 3.',
+  },
+  /**
+   * Список Do not contact клиента (§1B): все компании, которые нашла сборка,
+   * — на доменах из списка. Они не добавлены ни в эту базу, ни в кампании.
+   */
+  do_not_contact: {
+    title: 'Every company found for this market is on your Do not contact list.',
+    whatIsSaved: 'None of those companies were added. ' + FINISHED_WORK_KEPT,
+    whatToDo: 'Remove the domains you want to reach from Do not contact, then press «Collect again».',
+  },
+  /** Список Do not contact сверх лимита (§1B): сборка не может его проверить и остановилась. */
+  do_not_contact_over_cap: {
+    title: 'Your Do not contact list is over its limit of 10,000 entries.',
+    whatIsSaved: FINISHED_WORK_KEPT,
+    whatToDo: 'Remove entries you no longer need, then press «Collect again».',
   },
   source: {
     title: 'The company sources did not return any rows for this market.',

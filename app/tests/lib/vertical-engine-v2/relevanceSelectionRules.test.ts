@@ -19,13 +19,14 @@ import { buildVeRelevanceReviewBatch, needsVeRelevanceEvidence, veSavedReviewSig
 import { canResumePartialPreview, veSavedRelevanceScope } from '@/lib/verticalEngineV2/collectionRecovery';
 import { createVeCollectionAudienceSnapshot } from '@/lib/verticalEngineV2/sourceAudience';
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
-import { resetVeTriageState, veTriageRubricMessages } from '@/lib/verticalEngineV2/relevanceTriage';
+import { resetVeTriageState, veScopedTriageRubric, veTriageRubricMessages } from '@/lib/verticalEngineV2/relevanceTriage';
 import { VE_RELEVANCE_TARGET_RULES, veStaffingScopeNote, relevanceReviewMessages } from '@/lib/verticalEngineV2/relevanceReview';
 import { readRelevanceCheckpoint, relevanceHash } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import type { VeRelevanceDecision } from '@/lib/verticalEngineV2/relevanceDecision';
 import savedBeforeRelease from './fixtures/relevanceCheckpointBeforeRulesV2.json';
 import { veMedicalScopeNote } from '@/lib/verticalEngineV2/relevanceMedical';
 import { veHasStaffingOnlyRefusal } from '@/lib/verticalEngineV2/staffingCorrection';
+import { deriveVeRetailAudienceScope, veRetailSourceProfileForScope } from '@/lib/verticalEngineV2/legacyRetailAudience';
 
 const FOOD = { verticalName: 'Пищевые заводы',
   verticalSummary: 'Производители пищевой и кормовой продукции с рецептурами, партиями, сроками годности, ветсертификацией и поставками в сети; решение обычно у операционного директора, директора по производству или ИТ-директора. Покупают продукт клиента, чтобы управлять рецептурами, прослеживаемостью, сменами, складами сырья и выпуском.' };
@@ -165,6 +166,51 @@ describe('VE2 relevance selection rules', () => {
     delete process.env.VE_RELEVANCE_TRIAGE; delete process.env.VE_RELEVANCE_TRIAGE_PROJECTS;
   });
   afterEach(() => { process.env = { ...env }; });
+
+  it('corrects only the audited generated retail scopes and preserves explicit conditions and exclusions', () => {
+    const materials = { origin: 'generated' as const, title: 'Производители строительно-отделочных материалов',
+      description: 'Заводы сухих смесей, напольных покрытий, плитки и ЛКМ с собственным шоурумом и интернет-магазином. Потеря прямых частных заказов при передаче их сторонним дилерам.' };
+    const jewelry = { origin: 'generated' as const, title: 'Ювелирные заводы и сети украшений',
+      description: 'Производители золотых и серебряных украшений с фирменной розницей и интернет-витриной. Сложность удержания клиента между покупками к праздничным датам.' };
+    const initial = structuredClone([materials, jewelry]);
+    const materialScope = deriveVeRetailAudienceScope(materials)!;
+    const jewelryScope = deriveVeRetailAudienceScope(jewelry)!;
+    expect(materialScope.any_of).toEqual([
+      'Производители сухих строительных смесей', 'Производители напольных покрытий',
+      'Производители плитки', 'Производители лакокрасочных материалов',
+    ]);
+    expect(jewelryScope.any_of).toEqual([
+      'Производители ювелирных изделий из золота или серебра',
+      'Розничные сети ювелирных украшений из золота или серебра',
+    ]);
+    expect(jewelryScope.excluded).toEqual(expect.arrayContaining([
+      'Компании, занимающиеся только ремонтом ювелирных изделий без производства или розничной сети',
+      'Ломбарды и скупщики ювелирных изделий',
+      'Производители и продавцы только бижутерии, без ювелирных изделий из золота или серебра',
+    ]));
+    expect(veScopedTriageRubric(jewelryScope).requirements).toEqual([]);
+    expect(veScopedTriageRubric(jewelryScope).activity).toContain('(OR, not AND)');
+    expect(veScopedTriageRubric(jewelryScope).conflicts.join(' ')).toContain('Ломбарды');
+    expect(veRetailSourceProfileForScope(materialScope, 'generated')).toBe('material_manufacturers');
+    expect(veRetailSourceProfileForScope(jewelryScope, 'generated')).toBe('jewelry_manufacturers_or_chains');
+    for (const hypothesis of [materials, jewelry]) {
+      expect(deriveVeRetailAudienceScope({ ...hypothesis, origin: 'manual' })).toBeNull();
+      expect(deriveVeRetailAudienceScope({ ...hypothesis, origin: undefined })).toBeNull();
+      expect(deriveVeRetailAudienceScope({ ...hypothesis, description: hypothesis.description + ' Только Москва.' })).toBeNull();
+      expect(deriveVeRetailAudienceScope({ ...hypothesis, description: hypothesis.description + ' Обязателен интернет-магазин.' })).toBeNull();
+      expect(deriveVeRetailAudienceScope({ ...hypothesis, audience_scope: jewelryScope })).toBeNull();
+      expect(() => deriveVeRetailAudienceScope({ ...hypothesis, audience_scope: { ...jewelryScope, version: 2 } as never })).toThrow();
+    }
+    expect(veRetailSourceProfileForScope(jewelryScope, 'manual')).toBeNull();
+    expect(veRetailSourceProfileForScope({ ...jewelryScope, required: ['Обязательно собственное производство и розничная сеть'] })).toBeNull();
+    expect(veRetailSourceProfileForScope({ ...jewelryScope, excluded: [...jewelryScope.excluded, 'Москва'] })).toBeNull();
+    expect(veRetailSourceProfileForScope({ ...jewelryScope, any_of: [...jewelryScope.any_of, 'Магазины одежды'] })).toBeNull();
+    expect(veRetailSourceProfileForScope({ ...jewelryScope, any_of: [jewelryScope.any_of[0]] })).toBeNull();
+    expect(veRetailSourceProfileForScope({ ...jewelryScope, any_of: [...jewelryScope.any_of].reverse() })).toBe('jewelry_manufacturers_or_chains');
+    expect([materials, jewelry]).toEqual(initial);
+    materialScope.any_of.push('Чужой вид деятельности');
+    expect(deriveVeRetailAudienceScope(materials)!.any_of).toHaveLength(4);
+  });
 
   it('uses the frozen structured policy in every check, keeps explicit requirements and separates saved verdicts', async () => {
     const audienceScope = { version: 1 as const, kind: 'sector' as const, any_of: ['Fintech platforms', 'Payment providers'],

@@ -109,7 +109,7 @@ import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
-import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, VeYandexCatalogUnavailableError, veRuMapsUseCatalog, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
+import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, VeYandexCatalogUnavailableError, veRuMapsUseCatalog, VE_YANDEX_CATALOG_MAPPING_REVISION, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
 import { isVeLegacyMapsTask, isVeRenewableSourceTask, reopenVeSourceTask } from '../sourceRenewal';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
 import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, countVeSourceDiscoveryContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
@@ -164,10 +164,12 @@ import { searchVeNicheDirectoryRows } from '../nicheDirectory';
 import { isVeAudienceScopeEnabled, veAudienceScopeText } from '../audienceScope';
 import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, readVeSourceCostPolicy,
   veSourceDiscoveryIsExistingOnly, veNewAudienceSourceCostPolicy, veAudienceNicheProfile, normalizeVeAudienceSourcePlan, loadVeApprovedSupplyAudience,
-  canRefreshVeAudienceSources, needsLegacyFintechAudienceRefresh, isVeBroadFintechAudience,
+  canRefreshVeAudienceSources, needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, veAudienceRetailProfile,
   type VeCollectionAudienceSnapshot, type VeSourceCostPolicy, type VeSourceAudienceHypothesis } from '../sourceAudience';
 import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyHint } from '../paymentCompanyDirectory';
-import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed,
+import { deriveVeRetailAudienceScope, type VeRetailSourceProfile } from '../legacyRetailAudience';
+import { veAudienceReviewHold, veAutomaticAudienceReviewRows } from '../audienceReviewHold';
+import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, veRetailRubricAllowed,
   type VeNicheSourceProfile } from '../nicheSourcePolicy';
 import { detectVeClinicSourceProfile, isVeClinicCatalogTask, normalizeVeClinicSourcePlan, veClinicRubricAllowed,
   type VeClinicSourceProfile } from '../clinicSourcePolicy';
@@ -741,7 +743,7 @@ export interface VeCollectInfo {
   audience_snapshot?: VeCollectionAudienceSnapshot;
   /** Set only by explicit continuation of an unlaunched, quiescent preview. */
   audience_scope_refresh_requested?: boolean;
-  audience_source_refresh?: { version: 1; previous_tasks: NonNullable<VeCollectInfo['source_selection']>['previous_tasks']; previous_construct?: VeConstructInfo };
+  audience_source_refresh?: { version: 1; previous_tasks: NonNullable<VeCollectInfo['source_selection']>['previous_tasks']; previous_construct?: VeConstructInfo; held_review_companies?: string[] };
   /** Independent durable spend guard, preserved when source profiles change. */
   cost_policy?: VeSourceCostPolicy;
   /** Confirmed RU niche: constrain new spend even while draining saved work. */
@@ -1996,6 +1998,7 @@ async function dispatchTask(
   clinicProfile?: VeClinicSourceProfile | null,
   mediaProfile?: VeMediaSourceProfile | null,
   savedSourceInfo?: Pick<VeCollectInfo, 'source_contact_recovery' | 'search_policy'>,
+  retailProfile?: VeRetailSourceProfile | null,
 ): Promise<void> {
   const { task } = state;
 
@@ -2007,11 +2010,12 @@ async function dispatchTask(
       try {
         const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
           context: audienceContext ?? task.rationale,
-          rubricAllowed: sourceProfile ? (label) => veNicheRubricAllowed(sourceProfile, label)
+          rubricAllowed: retailProfile ? (label) => veRetailRubricAllowed(retailProfile, label)
+            : sourceProfile ? (label) => veNicheRubricAllowed(sourceProfile, label)
             : clinicProfile && isVeClinicCatalogTask(task, clinicProfile) ? (label) => veClinicRubricAllowed(clinicProfile, label)
             : mediaProfile ? (label) => veMediaRubricAllowed(mediaProfile, label) : undefined,
           signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
-        state.catalog = { version: 1, filters };
+        state.catalog = { version: 1, mapping_revision: VE_YANDEX_CATALOG_MAPPING_REVISION, filters };
       } catch (error) {
         ctx.signal?.throwIfAborted();
         if (!(error instanceof VeYandexCatalogUnavailableError)) throw error;
@@ -2922,9 +2926,17 @@ const candidateSourceKey = (row: VeUnifiedRow) => (row as VeUnifiedRow & { _ve_s
 /** Explicit preview continuation only: rewrite future free-source reads while
  * preserving paid observations, target caps, old cursors and source attribution. */
 export function applyVeAudienceSourceRefresh(info: VeCollectInfo, snapshot: VeCollectionAudienceSnapshot): boolean {
-  if (!info.plan || !info.tasks?.length || !needsLegacyFintechAudienceRefresh({ ...info, hypotheses: snapshot.hypotheses })) return false;
+  if (!info.plan || !info.tasks?.length || !canRefreshVeAudienceSources(info)) return false;
+  const retail = needsLegacyRetailAudienceRefresh(info);
+  // Retail eligibility is checked against the original audited definition;
+  // the proposed snapshot must be exactly that correction, not an arbitrary scope.
+  const expectedRetail = retail ? createVeCollectionAudienceSnapshot(info.hypotheses!.map((h) => ({
+    ...h, audience_scope: deriveVeRetailAudienceScope(h),
+  })), snapshot.reason, snapshot.applied_at) : null;
+  if (expectedRetail ? expectedRetail.hash !== snapshot.hash
+    : !needsLegacyFintechAudienceRefresh({ ...info, hypotheses: snapshot.hypotheses })) return false;
   const decision = normalizeVeAudienceSourcePlan({ ...info.plan, tasks: info.tasks.map((state) => state.task) }, snapshot.hypotheses);
-  if (decision.decision !== 'sector_fintech') return false;
+  if (decision.decision !== (retail ? 'retail' : 'sector_fintech')) return false;
   const previous = info.tasks.map((state) => ({ task: state.task, catalog: state.catalog,
     directory_cursors: state.directory_cursors, status: state.status, child_job_id: state.child_job_id,
     exhausted: state.exhausted, unavailable: state.unavailable }));
@@ -2932,16 +2944,19 @@ export function applyVeAudienceSourceRefresh(info: VeCollectInfo, snapshot: VeCo
   for (let index = 0; index < info.tasks.length; index++) {
     const state = info.tasks[index], task = decision.plan.tasks[index];
     // Historical paid children and unchanged cursors never run a second time.
+    const staleMapping = retail && state.source === 'yandex_maps'
+      && state.catalog?.mapping_revision !== VE_YANDEX_CATALOG_MAPPING_REVISION;
     if (!task || !['companies_directory', 'yandex_maps'].includes(state.source)
-      || veSourceStrategyKey(task) === veSourceStrategyKey(state.task)) continue;
+      || (veSourceStrategyKey(task) === veSourceStrategyKey(state.task) && !staleMapping)) continue;
     state.harvest = taggedHarvest(state);
     state.task = task;
     state.status = 'pending';
     if (state.source === 'yandex_maps') delete state.catalog;
     delete state.exhausted; delete state.hit_ceiling; delete state.unavailable;
-    state.note = 'Источник уточнён под полный финтех-сектор; результаты, расходы и общий предел сохранены.';
+    state.note = 'Источник уточнён под выбранную аудиторию; результаты, расходы и общий предел сохранены.';
   }
-  info.audience_source_refresh = { version: 1, previous_tasks: previous, ...(info.construct ? { previous_construct: info.construct } : {}) };
+  info.audience_source_refresh = { version: 1, previous_tasks: previous, ...(info.construct ? { previous_construct: info.construct } : {}),
+    ...(retail ? { held_review_companies: veAudienceReviewHold(readVeRelevanceReserve(info.relevance_reserve)) } : {}) };
   delete info.construct;
   info.plan = { ...info.plan, tasks: info.tasks.map((state) => state.task) };
   info.hypotheses = snapshot.hypotheses;
@@ -2990,7 +3005,9 @@ async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAu
   // edited while this job waited cannot silently change that authorization.
   if (refreshing && (readVeSourceCostPolicy(info.cost_policy)?.website_discovery !== 'existing_only' || info.hypotheses?.length !== 1
     || info.hypotheses[0].id !== base.hypothesis_id)) throw new Error('Collection audience refresh authorization is unavailable');
-  const h = refreshing ? info.hypotheses![0] : hypothesis as VeSourceAudienceHypothesis;
+  const original = refreshing ? info.hypotheses![0] : hypothesis as VeSourceAudienceHypothesis;
+  const retailScope = market === 'ru' ? deriveVeRetailAudienceScope(original) : null;
+  const h = retailScope ? { ...original, audience_scope: retailScope } : original;
   const typed = h.audience_scope !== undefined && h.audience_scope !== null;
   if (!typed && !refreshing && (!isVeAudienceScopeEnabled(job.project_id) || market !== 'ru' || info.collection_mode !== 'preview')) return;
   if (!typed && h.origin === 'manual') {
@@ -3002,7 +3019,7 @@ async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAu
   const reason = refreshing ? 'explicit_continuation' : 'new_preview';
   const snapshot = createVeCollectionAudienceSnapshot([h], reason, new Date().toISOString());
   if (refreshing) {
-    if (market !== 'ru' || !isVeBroadFintechAudience(h) || !applyVeAudienceSourceRefresh(info, snapshot)) throw new Error('No safe source-only audience correction is available');
+    if (market !== 'ru' || !applyVeAudienceSourceRefresh(info, snapshot)) throw new Error('No safe source-only audience correction is available');
   } else {
     info.cost_policy = veNewAudienceSourceCostPolicy(h, generationVersion, market);
     info.audience_snapshot = snapshot;
@@ -4035,26 +4052,30 @@ async function reviewSavedRelevance(
 ): Promise<VeStageResult> {
   const automatic = info.relevance_review_requested === true && job.payload?.review_relevance !== true;
   let savedReserve = retainProjectExclusions(ctx, readVeRelevanceReserve(info.relevance_reserve));
+  const reviewReserve = automatic ? veAutomaticAudienceReviewRows(savedReserve, info.audience_source_refresh?.held_review_companies) : savedReserve;
+  const selectedRows = reviewReserve === savedReserve ? null : new Set(reviewReserve);
+  const heldReserve = selectedRows ? savedReserve.filter((row) => !selectedRows.has(row)) : [];
   let emailRecoveryError: string | null = null;
   let emailRecoveryWaiting = false;
   if (automatic || job.payload?.review_relevance === true) {
     const recovered = await recoverVeSavedEmails({
-      ctx, job, baseId: base.id, rows: savedReserve, state: info.saved_email_recovery, automatic,
+      ctx, job, baseId: base.id, rows: reviewReserve, state: info.saved_email_recovery, automatic,
       save: async (state: VeSavedEmailRecoveryState, rows: Array<Record<string, unknown>>) => {
         info.saved_email_recovery = state;
-        info.relevance_reserve = { ...info.relevance_reserve, version: 1, rows };
-        info.relevance_summary = summarizeVeRelevanceReserve(rows);
+        const preserved = heldReserve.length ? mergeVeRelevanceRows(heldReserve, rows) : rows;
+        info.relevance_reserve = { ...info.relevance_reserve, version: 1, rows: preserved };
+        info.relevance_summary = summarizeVeRelevanceReserve(preserved);
         await persistCollectInfo(ctx, base.id, info);
       },
     });
-    savedReserve = recovered.rows;
+    savedReserve = heldReserve.length ? mergeVeRelevanceRows(heldReserve, recovered.rows) : recovered.rows;
     info.saved_email_recovery = recovered.state;
     emailRecoveryWaiting = recovered.waiting;
     emailRecoveryError = recovered.error ?? null;
   }
   const { rows, evidenceRows, companies } = buildVeRelevanceReviewBatch({
     ...veSavedRelevanceScope(info, base.hypothesis_id),
-    reserve: savedReserve,
+    reserve: automatic ? veAutomaticAudienceReviewRows(savedReserve, info.audience_source_refresh?.held_review_companies) : savedReserve,
     ready: projectAllowedRows(ctx, Array.isArray(base.data) ? base.data : []),
     source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic,
     allowPaidSearch: !usesExistingSourceContacts(info),
@@ -4622,14 +4643,15 @@ async function completeTargetRound(args: {
   let next = finish(targetRows, cleaned.summary.error);
   const reviewablePending = reserveRows.some((row) => isVeAcceptedEmailStatus(row._email_status)
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
-  const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(reserveRows, info.saved_email_recovery);
+  const automaticReserve = veAutomaticAudienceReviewRows(reserveRows, info.audience_source_refresh?.held_review_companies);
+  const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(automaticReserve, info.saved_email_recovery);
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
   const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
     && targetRows < progress.ready_target;
   const triageEnabled = isVeRelevanceTriageEnabled(job.project_id);
   const reviewScope = veSavedRelevanceScope(info, base.hypothesis_id);
   const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({ ...reviewScope,
-    reserve: reserveRows, ready: cleaned.rows, source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic: true,
+    reserve: automaticReserve, ready: cleaned.rows, source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic: true,
     allowPaidSearch: !existingFirst, triage: triageEnabled,
   }) : null;
   // A saved-review pass that leaves its own selection byte-identical cannot
@@ -5374,7 +5396,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         info.audience_snapshot ? veAudienceNicheProfile(info.audience_snapshot.hypotheses) ?? undefined : info.source_selection?.profile, info.hypotheses?.map((hypothesis) => [hypothesis.title, hypothesis.description].filter(Boolean).join(': ')).join('\n'),
         clinicProfileForInfo(info, market, base.hypothesis_id),
         base.hypothesis_id && !info.audience_snapshot?.hypotheses.some((h) => h.audience_scope)
-          ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null, info);
+          ? detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses ?? [] }) : null, info,
+        info.audience_snapshot && market === 'ru' ? veAudienceRetailProfile(info.audience_snapshot.hypotheses) : null);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
