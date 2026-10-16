@@ -164,6 +164,8 @@ export interface CampaignStatsDto {
   notContacted?: number;
   /** Первых писем сегодня — новых контактов, начавших цепочку. */
   newToday?: number;
+  /** Всего писем к отправке: ушедшие + остаток у тех, чья цепочка ещё идёт. null — шагов нет. */
+  lettersTotal?: number | null;
 }
 
 export interface ImportMailboxesResult {

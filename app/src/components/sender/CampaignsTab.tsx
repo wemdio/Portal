@@ -425,6 +425,7 @@ function ProgressOverview({ campaign, percent, above }: { campaign: CampaignDto;
   const stats = campaign.stats;
   if (!stats) return null;
   const rows: Array<{ label: string; value: string | number; tone?: string }> = [
+    ...(stats.lettersTotal ? [{ label: 'Писем отправлено', value: `${stats.sent} из ${stats.lettersTotal}` }] : []),
     { label: 'Всего контактов', value: stats.recipients },
     { label: 'Цепочка завершена', value: stats.finished ?? 0 },
     { label: 'В процессе', value: stats.inProgress ?? 0, tone: 'text-blue-600' },
@@ -488,14 +489,19 @@ const STATUS_PILL: Record<CampaignDto['status'], { text: string; pill: string; d
 };
 
 /**
- * Прогресс как в Instantly: доля контактов, у которых цепочка закончилась —
- * дошли до последнего письма, ответили, отбились или отписались. Раньше
- * считали «первое письмо ушло», и кампания с сотнями неотправленных повторных
- * писем показывала 100%. null — получателей нет.
+ * Прогресс по письмам: сколько писем ушло из всех, что кампания должна
+ * отправить (16.10.2026). Прежняя «доля завершённых цепочек» показывала 13% у
+ * кампании, из которой ушло 922 письма из ~1300: цепочка из четырёх писем
+ * тянется ~12 дней, и «завершённых» долго почти нет. Ответившим, отбившимся и
+ * отписавшимся остаток писем не положен, поэтому в знаменатель он не входит.
+ * Старый ответ API без числа писем считает по прежнему правилу. null — получателей нет.
  */
 function progressPercent(campaign: CampaignDto): number | null {
   const stats = campaign.stats;
   if (!stats || stats.recipients === 0) return null;
+  if (stats.lettersTotal != null && stats.lettersTotal > 0) {
+    return Math.min(100, Math.floor((stats.sent / stats.lettersTotal) * 100));
+  }
   // Старый ответ API без разбивки — по-прежнему по первому письму.
   if (stats.inProgress == null || stats.notContacted == null) {
     return Math.round((stats.reached / stats.recipients) * 100);
