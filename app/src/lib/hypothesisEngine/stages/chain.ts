@@ -79,6 +79,7 @@ import {
 } from '../letterBrandGuard';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
 import { projectMarket } from '../market';
+import { readHeEngBaseFirst } from '../engBaseFirst';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import type { HeChainLanguage, HeChainLetter, HeEvidenceItem, HeHypothesis, HeJob, HeVertical } from '../types';
 import {
@@ -317,6 +318,13 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   const vertical = verticalRow as HeVertical;
 
   const project = await readProject(ctx.supabase, job.project_id);
+  // A chain queued before the ENG cutover can still reach this worker.
+  // Finish it without a model call; its normal follow-up resumes collection.
+  // Staff/legacy projects and the RU engine retain the original stage.
+  if (await readHeEngBaseFirst(ctx.supabase, project)) {
+    stageLog(ctx, '[chain] ENG writes letters after base analysis; preliminary sequence skipped');
+    return { result: { skipped: 'eng_base_first' }, tokensUsed: 0, costUsd: 0 };
+  }
 
   const { data: hyps, error: hError } = await ctx.supabase
     .from('he_hypotheses')

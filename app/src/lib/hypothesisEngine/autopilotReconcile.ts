@@ -70,11 +70,17 @@
  * засчитанных прогонов на вертикаль — дальше причина 'chain_exhausted'
  * (пауза 'stage_failed'), и повтор решает Support.
  *
+ * Клиентский ENG начинает со сборки и анализа базы, затем пишет итоговые
+ * письма один раз. Черновая chain ему не нужна; старые цепочки и их джобы
+ * остаются совместимыми. RU и staff/legacy сохраняют прежний порядок.
+ *
  * НОЧЬ НЕ НАЧИНАЕТ РЫНОК С НУЛЯ (us). Рынок, отмеченный после «Launch», ждёт
  * явного нажатия клиента (решение владельца 12.10.2026: галочка ничего не
  * тратит). Поэтому ночной проход у проекта market='us' пропускает выбранную
- * вертикаль, у которой нет НИ ОДНОЙ строки he_chains (причина 'not_started',
- * без паузы): цепочку с нуля ставят только «Launch» и «Launch N more markets».
+ * вертикаль без следов начатой подготовки (причина 'not_started', без паузы).
+ * Для клиентского ENG это база, шаблон или прежняя chain/её джоба; для
+ * staff/legacy остаётся прежний признак — строка he_chains. С нуля начинают
+ * только «Launch» и «Launch N more markets».
  *
  * СУЖЕННЫЙ ВЫЗОВ (`onlyVerticalIds`, «Launch N more markets» шага 3): те же
  * правила оплаты и тот же потолок, но только по перечисленным вертикалям —
@@ -102,6 +108,7 @@ import { defaultChainLanguageForMarket, normalizeHeMarket } from './market';
 import { flushHeOpsAlerts } from './opsAlert';
 import { heBrandInputsBeforeEnqueue, heJobUnpaidBrandInput, type HeBrandInputLeak } from './letterBrandGuard';
 import { createHeSpendGate } from './spendCeiling';
+import { readHeEngBaseFirst } from './engBaseFirst';
 import {
   AUTOPILOT_BASE_LIMIT,
   HE_ANALYZING_BASE_FIELDS,
@@ -531,6 +538,16 @@ export async function reconcileHeAutopilotProject(
     return { ok: false, kind: 'refused', refusal: 'not_researched' };
   }
 
+  // market='us' не отличает ENG-клиента от staff/legacy. Неизвестный владелец
+  // останавливает проход до платной постановки, а не включает старую chain.
+  let baseFirst: boolean;
+  try {
+    baseFirst = await readHeEngBaseFirst(supabase, project);
+  } catch (error) {
+    await recordHeAutopilotPause(supabase, projectId, 'read_failed');
+    return { ok: false, kind: 'failed', step: 'snapshot', error, pause: 'read_failed' };
+  }
+
   const { data: allVerticals, error: vertErr } = await supabase
     .from('he_verticals')
     .select('id, name')
@@ -868,12 +885,35 @@ export async function reconcileHeAutopilotProject(
       continue;
     }
 
+    // Refill — долив уже запущенной кампании, не основная база подготовки.
+    const autoBases = bases.filter(
+      (b) =>
+        b.vertical_id === verticalId &&
+        b.source === 'auto' &&
+        !asString((b as Row).filename).startsWith('auto-refill'),
+    );
+    const hasChain = chains.some((c) => c.vertical_id === verticalId);
+    const hasTemplate = templates.some((t) => t.vertical_id === verticalId);
     const readyChain = chains.some((c) => c.vertical_id === verticalId && c.status === 'ready');
     const activeChain = activeJobs.some(
       (j) => j.stage === 'chain' && payloadField((j as Row).payload, 'vertical_id') === verticalId,
     );
 
-    if (!readyChain && !activeChain) {
+    if (
+      baseFirst && nightly && !readyChain && !activeChain && autoBases.length === 0 && !hasTemplate &&
+      cancelledChainVerticals.has(verticalId)
+    ) {
+      // Отменённая до перехода chain не разрешает ночью начать новую платную
+      // сборку. Явный Launch возобновит рынок уже с базы.
+      skipReason = 'chain_cancelled';
+    } else if (
+      baseFirst && nightly && !hasChain && !activeChain && autoBases.length === 0 && !hasTemplate &&
+      !failedChainVerticals.has(verticalId)
+    ) {
+      // Галочка на новом рынке не разрешает платить за него ночью. Старая
+      // упавшая chain доказывает прежний старт, но больше не нужна для базы.
+      skipReason = 'not_started';
+    } else if (!baseFirst && !readyChain && !activeChain) {
       if (nightly && cancelledChainVerticals.has(verticalId)) {
         // Цепочку остановил клиент. Ночью не возобновляем: возобновление —
         // его же кнопка «Start outreach».
@@ -935,19 +975,10 @@ export async function reconcileHeAutopilotProject(
           enqueued = true;
         }
       }
-    } else if (!readyChain) {
+    } else if (!baseFirst && !readyChain) {
       // Цепочка ещё генерируется — ниже по конвейеру делать нечего.
       skipReason = 'chain_running';
     } else {
-      // Auto-базы вертикали БЕЗ refill-баз auto-pipeline («auto-refill: …»):
-      // refill — дочерний долив кампании, он ни основной базой не считается,
-      // ни шаблон по себе не требует. Свежее — первой (created_at desc).
-      const autoBases = bases.filter(
-        (b) =>
-          b.vertical_id === verticalId &&
-          b.source === 'auto' &&
-          !asString((b as Row).filename).startsWith('auto-refill'),
-      );
       // 'collecting' — две разные вещи. Живая сборка (активная джоба по базе
       // или запись её строки в пределах окна постановки — isHeCollectingBaseLive)
       // занимает вертикаль. Без того и другого база — сирота: ниже её ведут к
@@ -1081,7 +1112,12 @@ export async function reconcileHeAutopilotProject(
           // явная «Collect again» на шаге 4 кабинета.
           skipReason = 'collect_stop_repeats';
           skipStopCode = repeatStop;
+        } else if (baseFirst && (skipBrandInputs = await brandInputsFor('en')).length > 0) {
+          // Раньше этот отказ стоял перед chain. В ENG не покупаем базу,
+          // если по текущему брифу итоговые письма заведомо будут запрещены.
+          skipReason = 'brand_input';
         } else {
+          skipBrandInputs = undefined;
           const stop =
             (await stopUnlessAutopilotOn(verticalId)) ?? (await stopOnSpendCeiling(verticalId, 'base_collect'));
           if (stop) return stop;
@@ -1163,14 +1199,14 @@ export async function reconcileHeAutopilotProject(
               counts,
             };
           }
-          // Язык итоговых писем — самая новая цепочка вертикали (как у стадии
-          // template); у вертикали с готовой цепочкой она в снапшоте есть.
+          // ENG пишет по базе на английском без chain. Legacy наследует язык
+          // самой новой цепочки вертикали, как и до нового порядка.
           const newestChain = chains
             .filter((c) => c.vertical_id === verticalId)
             .sort((a, b) => Date.parse(asString((b as Row).created_at)) - Date.parse(asString((a as Row).created_at)))[0] as
             | Row
             | undefined;
-          const chainLanguage = asString(newestChain?.language);
+          const chainLanguage = baseFirst ? 'en' : asString(newestChain?.language);
           if (!budget.allowed) {
             skipReason = 'letters_exhausted';
             // Числа решения — вместе с причиной: иначе тормоз считает их и

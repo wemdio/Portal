@@ -3,8 +3,8 @@
 /**
  * Command Center (/client/eng/dashboard): общий экран по всем ENG-проектам
  * клиента. IA карточки вертикали — «карта пайплайна»: вертикальный список
- * стадий человеческими именами (Research → Letters → Lead base → Email
- * enrichment → Analysis → Template → Launch, у запущенной вертикали + Daily top-up)
+ * стадий человеческими именами (Research → Lead base → Email
+ * enrichment → Analysis → Letters → Launch, у запущенной вертикали + Daily top-up)
  * с маркерами done/current/future и короткими доказательствами цифрами из
  * агрегата; строка «next: …» внизу — следующий шаг конвейера.
  *
@@ -440,40 +440,32 @@ interface PipeRow {
   evidence?: React.ReactNode;
 }
 
-/** Индекс текущей стадии в пайплайне (0 Research … 6 Launch). */
+/** Индекс текущей стадии в пайплайне (0 Research … 5 Launch). */
 function currentIndexFor(vertical: EngDashboardVertical): number {
   switch (vertical.stage) {
     case 'research':
       return 0;
     case 'attention':
-      // Встало там, где остановилось: research — строка Research, анализ —
-      // строка Analysis, остальное про базу — строка Lead base.
       return vertical.attention?.reason === 'project_failed'
         ? 0
         : vertical.attention?.reason === 'analysis_stopped'
-          ? 4
-          : 2;
+          ? 3
+          : 1;
     case 'not_selected':
-      // Текущей строки нет: вертикаль никуда не движется (buildPipelineRows).
       return -1;
-    case 'letters':
-      // Цепочка уже готова (вторая точка агрегата) — фронт работы сместился
-      // на сбор базы; сами письма при этом показываем пройденными.
-      return vertical.dots[1] === true ? 2 : 1;
     case 'collecting':
-      return 2;
+      return 1;
     case 'construct':
-      return 3;
+      return 2;
     case 'analyzing':
-      return 4;
+      return 3;
     case 'analyzed':
-      return 5;
+    case 'letters':
+      return 4;
     case 'template':
-      return 6;
     case 'launch_unfinished':
-      return 6;
     case 'launched':
-      return 6;
+      return 5;
   }
 }
 
@@ -672,7 +664,7 @@ function nextLineFor(
   if ((vertical.team_fix === 'letters' || vertical.team_fix === 'final_letters') && vertical.spend_paused !== true) {
     return launchOff ?? TEAM_FIX_LAUNCH_NEXT_LINE;
   }
-  // Сбор после писем и итоговые письма после проверки ставит только автопилот
+  // Письма после проверки базы ставит только автопилот
   // (autopilotNext.ts). Выключен — никто не поставит, пока клиент не нажмёт
   // «Launch» шага 3 (реконсилер включает автопилот и ставит недостающее); не
   // прочитан — ни того, ни другого не обещаем.
@@ -681,12 +673,7 @@ function nextLineFor(
     case 'research':
       return 'next: choose your markets';
     case 'letters':
-      if (vertical.spend_paused === true) return spendHeld;
-      return autopilot === true
-        ? 'next: base collection'
-        : autopilot === false
-          ? (launchOff ?? 'next: press «Launch» on step 3 «Launch» to collect contacts')
-          : 'next: step 3 «Launch» shows what comes next';
+      return 'next: review the letters on step 3 «Launch»';
     case 'collecting':
       return 'next: email enrichment (after collection)';
     case 'construct':
@@ -696,9 +683,9 @@ function nextLineFor(
       // Без внутреннего «85/15» — это доля текста шаблона, а не шаг клиента.
       if (vertical.spend_paused === true) return spendHeld;
       return autopilot === true
-        ? 'next: template'
+        ? 'next: writing letters for the checked contacts'
         : autopilot === false
-          ? (launchOff ?? 'next: press «Launch» on step 3 «Launch» to have the final letters written')
+          ? (launchOff ?? 'next: press «Launch» on step 3 «Launch» to have the letters written')
           : 'next: step 3 «Launch» shows what comes next';
     case 'template':
       return templateNextLine(vertical, access);
@@ -759,16 +746,17 @@ function buildPipelineRows(
         : 'red';
   // Признак ставится только шаблону этапа 'template' / 'launch_unfinished'.
   const rewrite = lettersNeedRewrite(vertical) && (vertical.stage === 'template' || launchUnfinished);
-  // Письма сняты, новых нет (этап 'analyzed'): строка Template — текущая и
+  // Письма сняты, новых нет (этап 'analyzed'): строка Letters — текущая и
   // неподвижная, сама не сдвинется.
   const retired = vertical.letters_retired === true;
   const dryHere = refill === 'running' && vertical.refill_dry === true;
   const cur = currentIndexFor(vertical);
-  // Невыбранная вертикаль: пройдено то, что уже есть (точки агрегата: research,
-  // письма, база со строками — сборка, обогащение и анализ), остальное —
-  // впереди; текущей строки, а значит и пульса, нет.
+  // У невыбранного рынка отмечаем только реально завершённые этапы.
   const notSelectedDone = (i: number): boolean =>
-    i === 0 ? vertical.dots[0] === true : i === 1 ? vertical.dots[1] === true : i <= 4 ? vertical.dots[2] === true : false;
+    i === 0 ? vertical.dots[0] === true
+      : i === 1 ? vertical.dots[1] === true
+        : i <= 3 ? vertical.dots[2] === true
+          : i === 4 ? vertical.dots[3] === true : false;
   const stateOf = (i: number): PipeRow['state'] =>
     notSelected
       ? notSelectedDone(i)
@@ -816,35 +804,25 @@ function buildPipelineRows(
             : '',
     },
     {
-      key: 'letters',
-      label: 'Letters',
-      state: stateOf(1),
-      // Счётчика писем в агрегате нет — показываем только живую строку этапа.
-      evidence:
-        vertical.stage === 'letters' && vertical.dots[1] !== true
-          ? withEta(vertical.stageDetail)
-          : '',
-    },
-    {
       key: 'lead-base',
       label: 'Lead base',
-      state: stateOf(2),
-      ...(attention && cur === 2 ? { marker: attentionMarker } : {}),
+      state: stateOf(1),
+      ...(attention && cur === 1 ? { marker: attentionMarker } : {}),
       evidence:
         vertical.stage === 'collecting'
           ? withEta(vertical.stageDetail)
-          : attention && cur === 2
+          : attention && cur === 1
             ? vertical.stageDetail
-            : stateOf(2) === 'done'
+            : stateOf(1) === 'done'
               ? collected('')
               : '',
     },
     {
       key: 'enrichment',
       label: 'Email enrichment',
-      state: stateOf(3),
+      state: stateOf(2),
       evidence:
-        stateOf(3) !== 'future' && s.emails_found > 0
+        stateOf(2) !== 'future' && s.emails_found > 0
           ? `${fmt(s.valid_count)} / ${fmt(s.emails_found)} valid`
           : vertical.stage === 'construct'
             ? 'finding & validating emails…'
@@ -853,36 +831,36 @@ function buildPipelineRows(
     {
       key: 'analysis',
       label: 'Analysis',
-      state: stateOf(4),
-      ...(attention && cur === 4 ? { marker: attentionMarker } : {}),
+      state: stateOf(3),
+      ...(attention && cur === 3 ? { marker: attentionMarker } : {}),
       evidence:
         vertical.stage === 'analyzing'
           ? withEta(vertical.stageDetail)
-          : attention && cur === 4
+          : attention && cur === 3
             ? vertical.stageDetail
-            : stateOf(4) === 'done'
+            : stateOf(3) === 'done'
               ? collected('analyzed ')
               : '',
     },
     {
-      key: 'template',
-      label: 'Template',
-      state: stateOf(5),
+      key: 'letters',
+      label: 'Letters',
+      state: stateOf(4),
       ...(retired ? { marker: 'held' as const } : {}),
       evidence: retired
         ? 'new letters not written'
-        : stateOf(5) === 'done'
+        : stateOf(4) === 'done'
           ? rewrite
             ? 'letters need rewriting'
-            : 'template ready'
-          : vertical.stage === 'analyzed' && job?.stage === 'template'
-            ? withEta('building template…')
+            : 'letters ready'
+          : vertical.stage === 'letters' || (vertical.stage === 'analyzed' && job?.stage === 'template')
+            ? withEta('writing letters…')
             : '',
     },
     {
       key: 'launch',
       label: 'Launch',
-      state: stateOf(6),
+      state: stateOf(5),
       // Незаконченный запуск сам не достроится — точка неподвижная (held), а
       // не «идёт работа». Так же у шаблона, чьи письма запуск откажет: до
       // переписки писем запуска не будет.
@@ -1776,8 +1754,8 @@ export function EngDashboard() {
                 ) : (
                   <>
                     We research your business and find the markets that could buy from you. Choose the ones you want
-                    on step 2 and press «Launch» on step 3 — we write the letters, collect and check contacts, write
-                    the final letters and start sending for each market you chose. Every market shows up here.
+                    on step 2 and press «Launch» on step 3 — we collect and check contacts, then write
+                    the letters and start sending for each market you chose. Every market shows up here.
                   </>
                 )}
               </p>
