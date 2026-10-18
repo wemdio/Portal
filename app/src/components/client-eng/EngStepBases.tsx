@@ -21,6 +21,7 @@ import { fetchEngBaseRows, type EngBaseSummary, type EngReadyToSend } from './ap
 import { heCollectStopRepeats } from './clientFailureText';
 import { EngSupportText } from './EngPaidAccess';
 import { EngSpinner } from './ui';
+import { EngCollectionProgress } from './EngCollectionProgress';
 import type { EngDetail } from './EngProjectWizard';
 
 /* ── Список Do not contact в сборке ── */
@@ -58,10 +59,14 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
       className="rounded-md p-3 mt-2 flex flex-col gap-1.5"
       style={{ border: '1px solid var(--cp-divider)' }}
     >
-      <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--cp-amber)' }}>
-        <EngSpinner className="h-3 w-3" />
-        Collecting contacts{info?.limit ? ` (limit ${info.limit.toLocaleString('en-US')})` : ''}…
-      </div>
+      {construct?.status === 'dispatched' ? (
+        <EngCollectionProgress progress={base.collection_progress} />
+      ) : !construct ? (
+        <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--cp-amber)' }}>
+          <EngSpinner className="h-3 w-3" />
+          Collecting contacts{info?.limit ? ` (up to ${info.limit.toLocaleString('en-US')})` : ''}…
+        </div>
+      ) : null}
       {tasks.length > 0 && (
         <ul className="flex flex-col gap-1">
           {tasks.map((t, i) => (
@@ -87,11 +92,6 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
       )}
       {construct && (
         <div className="text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
-          {construct.status === 'dispatched' && (
-            <span className="inline-flex items-center gap-1.5" style={{ color: 'var(--cp-amber)' }}>
-              <EngSpinner className="h-3 w-3" /> Finding &amp; validating emails…
-            </span>
-          )}
           {construct.status === 'done' && (
             <span className="ds-mono">
               Emails found: {(construct.emails_found ?? 0).toLocaleString('en-US')} · valid:{' '}

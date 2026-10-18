@@ -49,6 +49,7 @@ import {
 import { readHeEngAutoLaunchDetail } from '@/lib/hypothesisEngine/engAutoLaunch';
 import { readHeEngTypicalDurations } from '@/lib/hypothesisEngine/engEstimates';
 import { readHeEngSendingAccess } from '@/lib/hypothesisEngine/engSendingAccess';
+import { readHeEngCollectionProgress } from '@/lib/hypothesisEngine/engCollectionProgress';
 import { heBrandNeedsOwner, readHeBrandEngClient } from '@/lib/hypothesisEngine/letterBrandGuard';
 import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
 import {
@@ -466,7 +467,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // рисует или выключает; с опросом деталки экран видит включение и выключение
   // без перезагрузки. Сбой чтения и нет таблицы — ключа нет (экран берёт
   // чтение GET …/launch).
-  const [autoLaunch, durations, teamFixStops, sendingAccess] = await Promise.all([
+  const [autoLaunch, durations, teamFixStops, sendingAccess, collectionProgress] = await Promise.all([
     readHeEngAutoLaunchDetail(supabaseAdmin, id, {
       verticals: detail.detail.verticals as Array<Record<string, unknown>>,
       hypotheses: detail.detail.hypotheses as Array<Record<string, unknown>>,
@@ -475,6 +476,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     readHeEngTypicalDurations(supabaseAdmin),
     rawProject.status === 'researched' ? readTeamFixStops(id) : Promise.resolve(null),
     rawProject.status === 'researched' ? readHeEngSendingAccess(supabaseAdmin, result.auth.userId) : Promise.resolve(null),
+    readHeEngCollectionProgress(supabaseAdmin, result.auth.userId, Array.isArray(detail.detail.bases) ? detail.detail.bases : []),
   ]);
   const accountAccess: 'not_enabled' | 'revoked' | null | undefined =
     sendingAccess === null || sendingAccess.state === 'error' || sendingAccess.state === 'unavailable'
@@ -505,13 +507,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   );
   return NextResponse.json({
     ...projected,
-    bases:
-      analysisLive.size === 0
-        ? refill.bases
-        : refill.bases.map((b) => {
-            const live = typeof b.id === 'string' ? analysisLive.get(b.id) : undefined;
-            return live === undefined ? b : { ...b, analysis_live: live };
-          }),
+    bases: refill.bases.map((b) => {
+      const baseId = typeof b.id === 'string' ? b.id : '';
+      const live = analysisLive.get(baseId);
+      return {
+        ...b,
+        ...(live === undefined ? {} : { analysis_live: live }),
+        ...(collectionProgress.has(baseId) ? { collection_progress: collectionProgress.get(baseId) } : {}),
+      };
+    }),
     templates: withRunDays(projected.templates, Array.isArray(detail.detail.templates) ? detail.detail.templates : []),
     ...(refill.totals.length > 0 ? { refill_totals: refill.totals } : {}),
     ...(busyRes.error ? {} : { has_active_jobs: (busyRes.data ?? []).length > 0 }),
