@@ -22,7 +22,7 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
   stripRepeatGreeting,
 } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
@@ -1099,18 +1099,22 @@ export async function handleChat(
     }
   }
 
+  // Русская фраза передачи иноязычному собеседнику уходит переводом, а лид
+  // засчитываем по самому интересу, а не по тексту фразы.
+  const translateHandoff = Boolean(phrase && needsTranslatedHandoff(phrase, chatMessages));
+
   let replyText: string | null = null;
   let usedFallback = false;
   const openaiStart = Date.now();
   try {
     replyText = await openaiGenerate(oai, chatMessages, {
       extraInstruction: interested && phrase && directOnly
-        ? handoffInstruction(phrase)
+        ? handoffInstruction(phrase, translateHandoff)
         : roleOnly && directOnly
         ? 'Наше последнее сообщение уточняло роль собеседника. Продолжи по порядку квалификации из системного промпта кампании: по названной роли задай следующий вопрос. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
         : roleOnly
         ? 'Наше последнее сообщение только уточняло роль собеседника; предложение ещё не прозвучало. Ответ о роли и встречное предложение своих услуг НЕ означают интереса к нашему предложению. Если роль подтвердилась, кратко объясни повод обращения, опираясь только на системный промпт этой кампании, и спроси, интересно ли человеку это обсудить. Если роль не подтвердилась или собеседник предлагает свои услуги, вежливо заверши разговор. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
-        : interested && phrase ? handoffInstruction(phrase) : null,
+        : interested && phrase ? handoffInstruction(phrase, translateHandoff) : null,
       factsRule: true,
     });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
@@ -1156,7 +1160,8 @@ export async function handleChat(
     log('warning', `${displayName}: в сообщении с вопросами была фраза передачи — убираю, ждём ответ клиента`);
     replyText = stripHandoffPhrase(replyText, phrase);
   }
-  if (interested && phrase && !qualifying) {
+  const forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
+  if (interested && phrase && !qualifying && !translateHandoff) {
     replyText = ensureHandoffPhrase(replyText, phrase);
   }
   if (roleOnly && !interested && detectTrigger(replyText, oai) === 'positive') {
@@ -1180,7 +1185,7 @@ export async function handleChat(
     timestamp: new Date().toISOString(),
   });
 
-  const triggerType = detectTrigger(replyText, oai);
+  const triggerType = forcePositive ? 'positive' : detectTrigger(replyText, oai);
 
   if (triggerType) {
     const triggerLabel = triggerType === 'positive' ? 'положительный (заинтересован)' : 'отрицательный (не заинтересован)';
