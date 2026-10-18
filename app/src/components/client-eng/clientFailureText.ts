@@ -49,6 +49,8 @@ export type HeClientErrorCode =
    * принадлежать вертикали.
    */
   | 'hypothesis_mismatch'
+  /** No company had confirmed evidence for both the selected audience and countries. */
+  | 'company_unverified'
   /** В источниках не осталось новых компаний после исключения уже собранных. */
   | 'segment_exhausted'
   /**
@@ -153,6 +155,7 @@ export interface HeClientFailure {
 export const HE_COLLECT_STOP_REPEATS_CODES = [
   'audience_mismatch',
   'hypothesis_mismatch',
+  'company_unverified',
   'segment_exhausted',
   // Повтор упрётся в тот же список стран / тот же Do not contact, пока клиент
   // его не поправит (§1A, §1B). Список сверх лимита — так же: его текст зовёт
@@ -477,6 +480,11 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved: 'No contacts were bought for this market.',
     whatToDo:
       `This was a deliberate stop — mailing such a list would hurt the markets that do work. ${COLLECT_AGAIN_EN} To collect another market instead, tick it on step 2 «Choose markets» and press «Launch» on step 3.`,
+  },
+  company_unverified: {
+    title: 'No companies could be confirmed for the selected audience and countries.',
+    whatIsSaved: 'No contacts from this collection are ready to send. Your other bases and campaigns are not affected.',
+    whatToDo: 'Review the selected audience and countries before collecting again. Message Support if these choices are correct; repeating the same collection may give the same result.',
   },
   /**
    * Сборка, в которой релевант-гейт снял все компании, судя целью по

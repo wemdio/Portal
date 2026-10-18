@@ -80,7 +80,7 @@ const STAGE_STATUS: Record<EngDashStage, StageStatus> = {
   research: { tag: 'research', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   letters: { tag: 'letters', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   collecting: { tag: 'collecting', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
-  construct: { tag: 'enrichment', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  construct: { tag: 'checking', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   analyzing: { tag: 'analysis', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   analyzed: { tag: 'analyzed', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
   template: { tag: 'ready to launch', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
@@ -675,7 +675,7 @@ function nextLineFor(
     case 'letters':
       return 'next: review the letters on step 3 «Launch»';
     case 'collecting':
-      return 'next: email enrichment (after collection)';
+      return 'next: contact checks (after collection)';
     case 'construct':
       return 'next: analysis (after enrichment)';
     case 'analyzing':
@@ -819,13 +819,13 @@ function buildPipelineRows(
     },
     {
       key: 'enrichment',
-      label: 'Email enrichment',
+      label: 'Contact checks',
       state: stateOf(2),
       evidence:
-        stateOf(2) !== 'future' && s.emails_found > 0
-          ? `${fmt(s.emails_found)} addresses found`
-          : vertical.stage === 'construct'
-            ? 'finding & validating emails…'
+        vertical.stage === 'construct'
+          ? vertical.stageDetail
+          : stateOf(2) !== 'future' && s.emails_found > 0
+            ? `${fmt(s.emails_found)} addresses found`
             : '',
     },
     {

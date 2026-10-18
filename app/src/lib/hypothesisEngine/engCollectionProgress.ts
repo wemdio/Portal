@@ -9,6 +9,7 @@ const COLLECTION_STEPS = [
   'dedup_email',
   'validate_emails',
   'cap_emails_per_company',
+  'company_qualification',
   'done',
 ] as const;
 
@@ -24,8 +25,16 @@ export interface EngCollectionProgress {
   step_percent: number | null;
   /** Companies handed to the constructor, before splitting into email rows. */
   company_count: number | null;
-  /** started_at is the constructor worker's last heartbeat, not a start time. */
+  /** Last constructor heartbeat or company-check checkpoint, not a start time. */
   heartbeat_at: string | null;
+  /** Present only while checking each company's audience and country evidence. */
+  companies_checked?: number;
+}
+
+export interface EngCompanyQualificationSummary {
+  total: number;
+  checked: number;
+  excluded: number;
 }
 
 const JOBS_LIMIT = 100;
@@ -39,6 +48,58 @@ function record(value: unknown): Row | null {
 
 function count(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/** Only aggregate counts leave the server, never evidence, verdicts or scope keys. */
+export function engCompanyQualificationSummary(info: Row): EngCompanyQualificationSummary | null {
+  // Dashboard reads this small checkpoint instead of every company's evidence.
+  const progress = record(info.eng_company_qualification_progress);
+  const progressTotal = count(progress?.total);
+  const progressChecked = count(progress?.checked);
+  const progressExcluded = count(progress?.excluded);
+  if (progressTotal !== null && progressChecked !== null && progressExcluded !== null &&
+    progressChecked <= progressTotal && progressExcluded <= progressChecked) {
+    return { total: progressTotal, checked: progressChecked, excluded: progressExcluded };
+  }
+  const total = count(info.eng_company_qualification_total);
+  const memo = record(info.eng_company_qualification);
+  const verdicts = record(memo?.verdicts);
+  if (total === null || memo?.version !== 1 || typeof memo.scopeKey !== 'string' || !memo.scopeKey || !verdicts) return null;
+  let checked = 0;
+  let excluded = 0;
+  for (const [key, raw] of Object.entries(verdicts)) {
+    const verdict = record(raw);
+    if (!verdict || verdict.version !== 1 || verdict.scopeKey !== memo.scopeKey || verdict.companyKey !== key ||
+      !['accepted', 'rejected', 'unverified'].includes(String(verdict.status))) continue;
+    checked += 1;
+    if (verdict.status !== 'accepted') excluded += 1;
+  }
+  // A stale/malformed memo must not show more companies checked than entered.
+  return checked <= total ? { total, checked, excluded } : null;
+}
+
+function companyQualificationProgress(info: Row): EngCollectionProgress | null {
+  const summary = engCompanyQualificationSummary(info);
+  if (!summary) return null;
+  const memo = record(info.eng_company_qualification);
+  const updatedAt = record(info.eng_company_qualification_progress)?.updated_at;
+  let heartbeat = typeof updatedAt === 'string' ? Date.parse(updatedAt) : NaN;
+  for (const raw of Object.values(record(memo?.verdicts) ?? {})) {
+    const verdict = record(raw);
+    if (!verdict || verdict.scopeKey !== memo?.scopeKey || typeof verdict.checkedAt !== 'string') continue;
+    const checkedAt = Date.parse(verdict.checkedAt);
+    if (Number.isFinite(checkedAt) && (!Number.isFinite(heartbeat) || checkedAt > heartbeat)) heartbeat = checkedAt;
+  }
+  return {
+    status: 'processing',
+    step_key: 'company_qualification',
+    step_index: null,
+    total_steps: null,
+    step_percent: summary.total > 0 ? (summary.checked / summary.total) * 100 : 100,
+    company_count: summary.total,
+    companies_checked: summary.checked,
+    heartbeat_at: Number.isFinite(heartbeat) ? new Date(heartbeat).toISOString() : null,
+  };
 }
 
 function progressOf(row: Row): EngCollectionProgress | null {
@@ -74,7 +135,13 @@ export async function readHeEngCollectionProgress(
   for (const raw of scopedBases) {
     const base = record(raw);
     if (!base || base.status !== 'collecting' || typeof base.id !== 'string') continue;
-    const construct = record(record(base.collect_info)?.construct);
+    const info = record(base.collect_info);
+    const qualification = info ? companyQualificationProgress(info) : null;
+    if (qualification) {
+      progress.set(base.id, qualification);
+      continue;
+    }
+    const construct = record(info?.construct);
     if (construct?.status !== 'dispatched') continue;
     progress.set(base.id, null);
     const jobId = construct.bc_job_id;

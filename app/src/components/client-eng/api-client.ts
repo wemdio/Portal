@@ -40,7 +40,7 @@ import type {
 // Только тип: код отказа гейта платных шагов (lib/hypothesisEngine/engPaidAccess)
 // — один словарь на роуты и на экран; сам модуль в клиентский бандл не едет.
 import type { EngPaidAccessCode } from '@/lib/hypothesisEngine/engPaidAccess';
-import type { EngCollectionProgress } from '@/lib/hypothesisEngine/engCollectionProgress';
+import type { EngCollectionProgress, EngCompanyQualificationSummary } from '@/lib/hypothesisEngine/engCollectionProgress';
 import type { HeBrandInputLeak } from '@/lib/hypothesisEngine/letterBrandGuard';
 import type { EngResearchRetryVerdict } from '@/lib/hypothesisEngine/researchJob';
 // Только типы автозапуска (S3) — см. «Запуск проекта одной кнопкой» ниже.
@@ -233,6 +233,8 @@ export interface EngConstructInfo {
  */
 export interface EngCollectInfo extends HeCollectInfo {
   construct?: EngConstructInfo;
+  /** Aggregate company checks only; the underlying verdicts stay on the server. */
+  company_qualification?: EngCompanyQualificationSummary;
   stats?: {
     tasks_total?: number;
     tasks_done?: number;

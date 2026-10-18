@@ -38,8 +38,13 @@ const DNC_OLDER_BASES_NOTE = 'Companies on your Do not contact list stay in olde
 
 function DncNotes({ base }: { base: EngBaseSummary }) {
   const skipped = dncSkippedText(base);
+  const qualification = base.collect_info?.company_qualification;
+  const excluded = qualification && qualification.checked === qualification.total ? qualification.excluded : 0;
   return (
     <div className="flex flex-col gap-0.5" style={{ color: 'var(--cp-text-l)' }}>
+      {excluded > 0 && (
+        <div>{excluded.toLocaleString('en-US')} {excluded === 1 ? 'company' : 'companies'} excluded: the audience or country could not be confirmed.</div>
+      )}
       {skipped && <div className="ds-mono">{skipped}</div>}
       <div>{DNC_OLDER_BASES_NOTE}</div>
     </div>
@@ -59,7 +64,7 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
       className="rounded-md p-3 mt-2 flex flex-col gap-1.5"
       style={{ border: '1px solid var(--cp-divider)' }}
     >
-      {construct?.status === 'dispatched' ? (
+      {base.collection_progress?.step_key === 'company_qualification' || construct?.status === 'dispatched' ? (
         <EngCollectionProgress progress={base.collection_progress} />
       ) : !construct ? (
         <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--cp-amber)' }}>

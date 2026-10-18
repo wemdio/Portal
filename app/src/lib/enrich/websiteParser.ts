@@ -4,6 +4,7 @@ import iconv from 'iconv-lite';
 import { buildAboutCandidates, DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
 import { extractEmailsFromHtml } from '@/lib/enrich/emailExtractor';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import type { Browser } from 'playwright';
 
 const FETCH_TIMEOUT_MS = 8_000;
@@ -1862,6 +1863,144 @@ export interface WebsitePage {
    * подставляет, порог полезности решает вызывающий.
    */
   text: string;
+  /** Реальные ссылки страницы; только при явном companyEvidence. */
+  companyEvidenceLinks?: Array<{ url: string; kind: 'about' | 'contact' | 'locations' }>;
+}
+
+type CompanyEvidenceLink = NonNullable<WebsitePage['companyEvidenceLinks']>[number];
+const COMPANY_EVIDENCE_SECTION_SEPARATOR = '\n\n[source section]\n\n';
+
+/** Ссылки для проверки компании: не угадываем адреса и не доверяем префиксу origin. */
+function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEvidenceLink[] {
+  const base = new URL(pageUrl);
+  const host = base.hostname.replace(/^www\./, '');
+  const links: CompanyEvidenceLink[] = [];
+  const seen = new Set<string>();
+  $('a[href]').each((_, el) => {
+    if (links.length >= 24) return false;
+    const href = $(el).attr('href')?.trim();
+    if (!href || href.startsWith('#')) return;
+    let url: URL;
+    try { url = new URL(href, base); } catch { return; }
+    if (!['http:', 'https:'].includes(url.protocol)
+      || url.hostname.replace(/^www\./, '') !== host
+      || url.port !== base.port || url.username || url.password || url.search || url.hash
+      || (base.protocol === 'https:' && url.protocol !== 'https:')) return;
+    const path = url.pathname;
+    if (/\/(?:auth|account|login|logout|sign[-_]?in|sign[-_]?up|facebook|twitter|linkedin|instagram|youtube)(?:\/|$)/i.test(path)
+      || /\.[a-z0-9]{2,5}$/i.test(path) && !/\.(?:html?|php|aspx?)$/i.test(path)) return;
+    const label = $(el).text().replace(/\s+/g, ' ').trim();
+    const kind: CompanyEvidenceLink['kind'] | null =
+      /\/(?:[a-z-]*-)?(?:locations?|offices?)(?:[-_/]|$)/i.test(path)
+        || /\b(?:locations?|our offices|global offices|office locations)\b/i.test(label) ? 'locations'
+        : /\/(?:contact(?:[-_]?us)?|contacts)(?:\/|$)/i.test(path)
+          || /^(?:contact(?: us)?|get in touch)$/i.test(label) ? 'contact'
+          : ABOUT_HREF_PATTERN.test(path) || ABOUT_TEXT_PATTERN.test(label) ? 'about' : null;
+    if (!kind) return;
+    const key = `${host}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    links.push({ url: url.href, kind });
+  });
+  return links;
+}
+
+/** JSON-LD — только данные организации/адреса, без WebPage, Product, reviews и произвольных scripts. */
+function companyStructuredText($: cheerio.CheerioAPI): string {
+  const excerpts: string[] = [];
+  const seen = new Set<string>();
+  const scalar = (value: unknown): value is string | number => typeof value === 'string' || typeof value === 'number';
+  const typeIs = (value: unknown, type: string) => (Array.isArray(value) ? value : [value])
+    .some((item) => typeof item === 'string' && (item === type || item === `https://schema.org/${type}` || item === `http://schema.org/${type}`));
+  const address = (value: unknown): unknown => {
+    if (scalar(value)) return value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const input = value as Record<string, unknown>;
+    if (input['@type'] && !typeIs(input['@type'], 'PostalAddress')) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const key of ['@type', 'name', 'streetAddress', 'postOfficeBoxNumber', 'addressLocality', 'addressRegion', 'postalCode', 'addressCountry']) {
+      if (scalar(input[key])) out[key] = input[key];
+    }
+    const country = input.addressCountry;
+    if (country && typeof country === 'object' && !Array.isArray(country)) {
+      const countryName = (country as Record<string, unknown>).name;
+      if (scalar(countryName)) out.addressCountry = { name: countryName };
+    }
+    return Object.keys(out).length ? out : undefined;
+  };
+  $('script[type="application/ld+json"]').slice(0, 16).each((_, el) => {
+    const source = $(el).text();
+    if (source.length > 256_000) return;
+    let parsed: unknown;
+    try { parsed = JSON.parse(source); } catch { return; }
+    const pending: unknown[] = [parsed];
+    for (let index = 0; index < pending.length && index < 512; index++) {
+      const value = pending[index];
+      if (Array.isArray(value)) { pending.push(...value.slice(0, 512)); continue; }
+      if (!value || typeof value !== 'object') continue;
+      const input = value as Record<string, unknown>;
+      // Only top-level/graph entities; a customer's address inside a review is not the site's office.
+      if (Array.isArray(input['@graph'])) pending.push(...input['@graph'].slice(0, 512));
+      let out: Record<string, unknown> | undefined;
+      if (typeIs(input['@type'], 'Organization')) {
+        out = {};
+        for (const key of ['@type', 'name', 'legalName', 'alternateName', 'url']) {
+          if (scalar(input[key])) out[key] = input[key];
+        }
+        const addresses = Array.isArray(input.address) ? input.address.slice(0, 12).map(address).filter(Boolean) : address(input.address);
+        if (addresses && (!Array.isArray(addresses) || addresses.length)) out.address = addresses;
+      } else if (typeIs(input['@type'], 'PostalAddress')) {
+        out = address(input) as Record<string, unknown> | undefined;
+      }
+      if (!out || !Object.keys(out).length) continue;
+      // Property names and values are copied from the source; do not label an address as HQ or an office.
+      const text = JSON.stringify(out);
+      if (!seen.has(text)) { seen.add(text); excerpts.push(text); }
+    }
+  });
+  return excerpts.join(COMPANY_EVIDENCE_SECTION_SEPARATOR);
+}
+
+/** Отдельный ENG opt-in: основной текст + зарезервированное место адресам и JSON-LD. */
+function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boolean): WebsitePage {
+  const $ = cheerio.load(html);
+  const links = companyEvidenceLinks($, url);
+  const structured = companyStructuredText($);
+  $('script, style, noscript, iframe, svg, form, .cookie-banner, .cookie-consent, #cookie-banner, #cookie-consent').remove();
+  // Keep the source's address fields readable when they occupy adjacent block elements.
+  $('br').replaceWith('\n');
+  $('p, div, li, address, section, h1, h2, h3, h4, h5, h6').append('\n');
+  const addresses = outermostOf($, 'address, [itemprop="address"]').toArray()
+    .map((el) => sanitizeText($(el).text())).filter(Boolean);
+  $('footer nav, footer [role="navigation"], [role="contentinfo"] nav, [role="contentinfo"] [role="navigation"]').remove();
+  const footers = outermostOf($, 'footer, [role="contentinfo"]').toArray()
+    .map((el) => sanitizeText($(el).text())).filter(Boolean);
+  const main = sanitizeText(extractTextFromHtml(html, { layoutAware }));
+  // Each part has a floor so a long homepage/footer cannot consume the entire evidence budget.
+  const parts = [main, [...new Set(addresses)].join(COMPANY_EVIDENCE_SECTION_SEPARATOR), structured,
+    [...new Set(footers)].join(COMPANY_EVIDENCE_SECTION_SEPARATOR)];
+  // These explicit boundaries must survive whitespace normalization in the quote verifier.
+  const sectionSeparator = COMPANY_EVIDENCE_SECTION_SEPARATOR;
+  const omissionSeparator = '\n\n[excerpt omitted]\n\n';
+  const budgets = [1400, 480, 620, 400];
+  const spare = MAX_TEXT_LENGTH - sectionSeparator.length * (parts.length - 1)
+    - parts.reduce((sum, part, i) => sum + Math.min(part.length, budgets[i]), 0);
+  let remaining = spare;
+  for (const index of [1, 2, 0, 3]) {
+    const extra = Math.min(remaining, Math.max(0, parts[index].length - budgets[index]));
+    budgets[index] += extra;
+    remaining -= extra;
+  }
+  const text = parts.map((part, i) => {
+    const limit = budgets[i];
+    if (part.length <= limit) return part;
+    if (i === 0) return sliceWholeChars(part, 0, limit).trimEnd();
+    // Addresses commonly end in the country; long footer navigation must not cut off that tail.
+    const head = Math.floor((limit - omissionSeparator.length) / 2);
+    const tailStart = part.length - (limit - head - omissionSeparator.length);
+    return `${sliceWholeChars(part, 0, head).trimEnd()}${omissionSeparator}${sliceWholeChars(part, tailStart, part.length).trimStart()}`;
+  }).filter(Boolean).join(sectionSeparator);
+  return { url, text: stripUnstorableJsonChars(text), companyEvidenceLinks: links };
 }
 
 /**
@@ -1909,6 +2048,8 @@ export async function fetchSinglePage(
     maxBytes?: number;
     /** Разбор HTML → текст с учётом вёрстки конструкторов (ExtractTextOptions); не передан — прежний. */
     layoutAware?: boolean;
+    /** Отдельное чтение доказательств о компании для ENG; не передано — прежний текст/поля. */
+    companyEvidence?: boolean;
   },
 ): Promise<WebsitePage | null> {
   const url = normalizeUrl(rawUrl);
@@ -1929,6 +2070,9 @@ export async function fetchSinglePage(
   // 3xx без Location (с ним редирект пройден или отклонён) — тело заглушки,
   // а не страница.
   if (outcome.kind !== 'html' || outcome.status < 200 || outcome.status >= 300) return null;
+  if (options?.companyEvidence === true) {
+    return extractCompanyEvidencePage(outcome.html, outcome.url, options.layoutAware);
+  }
   const text = sanitizeText(extractTextFromHtml(outcome.html, { layoutAware: options?.layoutAware }));
   return {
     url: outcome.url,

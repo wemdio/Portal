@@ -12,6 +12,7 @@ const STEP_LABELS: Record<string, string> = {
   dedup_email: 'Removing duplicate addresses',
   validate_emails: 'Checking email addresses',
   cap_emails_per_company: 'Applying your contact limit',
+  company_qualification: 'Checking companies and countries…',
 };
 
 /** An old heartbeat is not proof of a failure, or of work still advancing. */
@@ -41,6 +42,11 @@ export function engCollectionProgressView(progress: CollectionProgress | null | 
   const percent = processing && progress.step_key && STEP_LABELS[progress.step_key] &&
     typeof progress.step_percent === 'number' && Number.isFinite(progress.step_percent)
     ? Math.min(100, Math.max(0, Math.round(progress.step_percent))) : null;
+  const companyCheck = progress?.step_key === 'company_qualification';
+  const checkedLabel = companyCheck && typeof progress.companies_checked === 'number' &&
+    typeof progress.company_count === 'number'
+    ? `${progress.companies_checked.toLocaleString('en-US')} of ${progress.company_count.toLocaleString('en-US')} companies checked`
+    : null;
   const activity = complete
     ? 'Preparing the results for your base.'
     : stopped
@@ -53,7 +59,7 @@ export function engCollectionProgressView(progress: CollectionProgress | null | 
   const lastActivity = age === null ? null : age < 60_000 ? 'just now'
     : age < 3_600_000 ? `${Math.floor(age / 60_000)} min ago`
       : `${Math.floor(age / 3_600_000)} hr ago`;
-  return { title, stepLabel, percent, activity, lastActivity, active, complete, stopped };
+  return { title, stepLabel, percent, checkedLabel, activity, lastActivity, active, complete, stopped };
 }
 
 /** Real per-step progress, readable even when reduced motion stops the spinner. */
@@ -86,7 +92,7 @@ export function EngCollectionProgress({ progress }: { progress: CollectionProgre
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={view.percent}
-            aria-valuetext={`${view.percent}% of this step${view.active ? '' : ', last reported progress'}`}
+            aria-valuetext={`${view.checkedLabel ?? `${view.percent}% of this step`}${view.active ? '' : ', last reported progress'}`}
             className="h-1.5 overflow-hidden rounded-full"
             style={{ background: 'var(--cp-divider)' }}
           >
@@ -96,8 +102,8 @@ export function EngCollectionProgress({ progress }: { progress: CollectionProgre
             />
           </div>
           <div className="mt-1 flex flex-wrap justify-between gap-x-3 gap-y-1 text-[11px] ds-mono" style={{ color: 'var(--cp-text-m)' }}>
-            <span>{view.percent}% of this step{view.active ? '' : ' (last reported)'}</span>
-            {typeof progress?.company_count === 'number' && progress.company_count > 0 && (
+            <span>{view.checkedLabel ?? `${view.percent}% of this step`}{view.active ? '' : ' (last reported)'}</span>
+            {!view.checkedLabel && typeof progress?.company_count === 'number' && progress.company_count > 0 && (
               <span>{progress.company_count.toLocaleString('en-US')} companies in this batch</span>
             )}
           </div>

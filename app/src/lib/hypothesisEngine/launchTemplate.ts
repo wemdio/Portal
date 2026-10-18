@@ -194,6 +194,15 @@ import {
 import { describeHeLaunchWindow, resolveHeLaunchSendingWindow, type HeLaunchWindowSource } from './launchSchedule';
 import { readHeCollectCountries } from './engCountries';
 import { readHeEngEmailPolicy } from './engEmailPolicy';
+import {
+  HE_ENG_COMPANY_QUALIFICATION_REQUIRED,
+  heEngCompanyQualified,
+  heEngLaunchQualified,
+  heEngQualifiedLaunchStamp,
+  heEngScopeWithinCurrentCountries,
+  readHeEngQualificationScope,
+  type HeEngQualificationScope,
+} from './engCompanyQualificationPolicy';
 import { projectMarket, type HeMarket } from './market';
 import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
 import {
@@ -1463,7 +1472,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //    отличие от data.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('he_bases')
-    .select('id, project_id, filename, columns, data, source, collect_info')
+    .select('id, project_id, vertical_id, filename, columns, data, source, collect_info')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -1473,6 +1482,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     };
   }
   const base = baseRow as Pick<HeBase, 'id' | 'project_id' | 'filename' | 'columns' | 'data'> & {
+    vertical_id?: string;
     source?: string;
     collect_info?: unknown;
   };
@@ -1594,6 +1604,29 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   } catch (err) {
     await logError(`${eventPrefix}.email_policy_failed`, err, { userId, templateId, projectId: base.project_id });
     return { status: 500, body: { error: t.marketReadFailed } };
+  }
+  let qualificationScope: HeEngQualificationScope | null = null;
+  const qualificationBrief = projectRow.brief as Record<string, unknown> | null | undefined;
+  if (allowCatchAll && base.source === 'auto') {
+    try {
+      if (!base.vertical_id || base.vertical_id !== template.vertical_id) {
+        throw new Error('ENG company qualification: base vertical does not match the template');
+      }
+      qualificationScope = await readHeEngQualificationScope(portalDb, {
+        project: { id: base.project_id, brief: qualificationBrief },
+        verticalId: base.vertical_id,
+        collectInfo: base.collect_info as Record<string, unknown> | null,
+      });
+      // Existing campaigns may contain recipients absent from today's base.
+      // A filtered retry must never grant a stamp to their unknown history.
+      if (!heEngScopeWithinCurrentCountries(qualificationScope, qualificationBrief) ||
+          (existingLaunch && !heEngLaunchQualified(template.launch_info, qualificationScope, base.id))) {
+        return { status: 409, body: { error: HE_ENG_COMPANY_QUALIFICATION_REQUIRED } };
+      }
+    } catch (err) {
+      await logError(`${eventPrefix}.company_qualification_failed`, err, { userId, templateId, projectId: base.project_id });
+      return { status: 409, body: { error: HE_ENG_COMPANY_QUALIFICATION_REQUIRED } };
+    }
   }
   // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
   const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
@@ -1974,8 +2007,13 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   let skippedUnverified = 0;
   let unverifiedSent = 0;
   let skippedIrrelevant = 0;
+  let skippedCompanyQualification = 0;
   const rows = filterRows
     ? allRows.filter((r) => {
+        if (qualificationScope && !heEngCompanyQualified(r, qualificationScope)) {
+          skippedCompanyQualification += 1;
+          return false;
+        }
         // Порядок причин прежний: строка и нерелевантная, и невалидная
         // по-прежнему считается нерелевантной (чтобы счётчики RU-запуска
         // автобазы не поехали).
@@ -2001,6 +2039,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         return true;
       })
     : allRows;
+  if (skippedCompanyQualification > 0) {
+    return { status: 409, body: { error: HE_ENG_COMPANY_QUALIFICATION_REQUIRED } };
+  }
   // Sort before address deduplication: if the same address occurs twice,
   // its ok row wins over catch_all. The resulting sender order also puts ok
   // first when the base is below the launch cap. Legacy staff keeps its order.
@@ -2825,6 +2866,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       preset_id: effectivePresetId,
       created_at: attemptStartedAt,
       campaigns: all,
+      ...(qualificationScope
+        ? { eng_company_qualification: heEngQualifiedLaunchStamp(qualificationScope, base.id) }
+        : {}),
       // Счётчики рассыльщика целиком, а не только принятые: без «сколько
       // запрошено» молчаливая частичная загрузка неотличима от «столько адресов
       // и было» (launchHandoff.ts, HeTemplateLaunchCampaign).

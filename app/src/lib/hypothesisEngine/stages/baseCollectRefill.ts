@@ -316,6 +316,14 @@ import {
 // проверка, что у запуска (launchTemplate.ts, шаг 4b″).
 import { describeHeBrandLeaks, heBrandNeedsOwner, heTemplateBrandLeaks, readHeBrandEngClient } from '../letterBrandGuard';
 import { readHeEngEmailPolicy } from '../engEmailPolicy';
+import {
+  HE_ENG_COMPANY_QUALIFICATION_REQUIRED,
+  heEngCompanyQualified,
+  heEngLaunchQualified,
+  heEngScopeWithinCurrentCountries,
+  readHeEngQualificationScope,
+  type HeEngQualificationScope,
+} from '../engCompanyQualificationPolicy';
 import type { HeMarket } from '../market';
 import type { HeChainLetter, HeJob, HeOperatorMapping } from '../types';
 import { addUsage, stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
@@ -884,6 +892,8 @@ export interface HeRefillSkipProbe {
 }
 
 export interface HeRefillStats {
+  /** Company proof is missing/stale; no provider call and no failed-slice penalty. */
+  company_qualification_held?: true;
   /** Строк собрано сборкой (после импорта конструктора). */
   collected: number;
   /** Строк с непустым email. */
@@ -2171,8 +2181,10 @@ function refillStreakVerdict(
       cancelled?: unknown;
       budget_outcome?: unknown;
       sending_skip?: unknown;
+      company_qualification_held?: unknown;
     };
     if (stats.cancelled === true) return 'skip';
+    if (stats.company_qualification_held === true) return 'skip';
     if (typeof stats.sending_skip === 'string') return 'skip';
     if (stats.budget_outcome === 'cap_exhausted' || stats.budget_outcome === 'already_reserved') {
       return 'skip';
@@ -2519,6 +2531,27 @@ export function pickRefillTemplate(
  * отдельно: ночной долив идёт без человека рядом, и «валидация не доработала»
  * обязано быть видно в воронке, а не выглядеть как «адреса плохие».
  */
+class HeRefillCompanyQualificationHold extends Error {
+  constructor(cause?: unknown) {
+    super(HE_ENG_COMPANY_QUALIFICATION_REQUIRED, { cause });
+    this.name = 'HeRefillCompanyQualificationHold';
+  }
+}
+
+/** Refuse before mapping/claim settlement: missing proof is not an invalid email. */
+function assertRefillCompanyQualification(
+  rows: HeUnifiedRow[],
+  emailStatuses: Array<string | null> | null,
+  scope: HeEngQualificationScope | null,
+): void {
+  if (!scope) return;
+  const unqualified = rows.some((row, i) => row.email.trim() !== '' &&
+    (row as { _low_relevance?: boolean })._low_relevance !== true &&
+    heLaunchEmailVerdict(emailStatuses?.[i] ?? null, { allowCatchAll: true }) === 'accepted' &&
+    !heEngCompanyQualified(row, scope));
+  if (unqualified) throw new HeRefillCompanyQualificationHold();
+}
+
 export function selectRefillLeadRows(
   rows: HeUnifiedRow[],
   emailStatuses: Array<string | null> | null,
@@ -5154,7 +5187,7 @@ export async function runHeRefillAppend(args: {
     // 1. Кампания и маппинг — из запущенного шаблона вертикали.
     const { data: templateRows, error: tErr } = await ctx.supabase
       .from('he_templates')
-      .select('id, launch_info, personalization_plan, letters, created_at')
+      .select('id, base_id, launch_info, personalization_plan, letters, created_at')
       .eq('vertical_id', base.vertical_id)
       .not('launch_info', 'is', null);
     if (tErr) throw new Error(`he_templates read: ${tErr.message}`);
@@ -5191,6 +5224,7 @@ export async function runHeRefillAppend(args: {
     //     (общий catch): не знаем, чьи это письма, — не отправляем.
     let brandHold: string | null = null;
     let allowCatchAll = false;
+    let qualificationScope: HeEngQualificationScope | null = null;
     if (usLetterGate) {
       const { data: projectRow, error: projectErr } = await ctx.supabase
         .from('he_projects')
@@ -5201,6 +5235,43 @@ export async function runHeRefillAppend(args: {
       if (!projectRow) throw new Error(`he_projects ${job.project_id}: not found`);
       const brandRow = projectRow as { website_url?: unknown; brief?: unknown; created_by?: unknown };
       allowCatchAll = await readHeEngEmailPolicy(ctx.supabase, projectRow);
+      if (allowCatchAll) {
+        try {
+          const brief = projectRow.brief as Record<string, unknown> | null;
+          qualificationScope = await readHeEngQualificationScope(ctx.supabase, {
+            project: { id: job.project_id, brief },
+            verticalId: base.vertical_id,
+            collectInfo: info as unknown as Record<string, unknown>,
+          });
+          if (!heEngScopeWithinCurrentCountries(qualificationScope, brief)) {
+            throw new HeRefillCompanyQualificationHold();
+          }
+          const targetTemplate = (templateRows ?? []).find((row) => row.id === pick.templateId);
+          if (!targetTemplate || typeof targetTemplate.base_id !== 'string') {
+            throw new HeRefillCompanyQualificationHold();
+          }
+          const { data: targetBase, error: targetError } = await ctx.supabase.from('he_bases')
+            .select('id, source, collect_info')
+            .eq('id', targetTemplate.base_id).eq('project_id', job.project_id)
+            .eq('vertical_id', base.vertical_id).maybeSingle();
+          if (targetError) throw targetError;
+          if (!targetBase) throw new HeRefillCompanyQualificationHold();
+          if (targetBase.source === 'auto') {
+            const targetScope = await readHeEngQualificationScope(ctx.supabase, {
+              project: { id: job.project_id, brief },
+              verticalId: base.vertical_id,
+              collectInfo: targetBase.collect_info as Record<string, unknown> | null,
+            });
+            if (targetScope.key !== qualificationScope.key ||
+                !heEngLaunchQualified(targetTemplate.launch_info, targetScope, targetTemplate.base_id) ||
+                !heEngScopeWithinCurrentCountries(targetScope, brief)) {
+              throw new HeRefillCompanyQualificationHold();
+            }
+          }
+        } catch (err) {
+          throw err instanceof HeRefillCompanyQualificationHold ? err : new HeRefillCompanyQualificationHold(err);
+        }
+      }
       const brandLeaks = heTemplateBrandLeaks(
         'us',
         {
@@ -5219,6 +5290,7 @@ export async function runHeRefillAppend(args: {
 
     // 3. Лиды: email + допущенный вердикт валидации, маппинг колонок →
     //    переменные шаблона.
+    assertRefillCompanyQualification(finalRows, emailStatuses, qualificationScope);
     const { leadRows, leadRowIndexes, withEmail, valid, unverified } =
       selectRefillLeadRows(finalRows, emailStatuses, { allowCatchAll });
     runStats.with_email = withEmail;
@@ -5377,6 +5449,11 @@ export async function runHeRefillAppend(args: {
         const carriedLeads: typeof leads = [];
         const carriedSourceRows: number[] = [];
         for (const company of carryClaim.companies) {
+          assertRefillCompanyQualification(
+            company.rows,
+            company.rows.map((row) => typeof row._email_status === 'string' ? row._email_status : null),
+            qualificationScope,
+          );
           const picked = selectRefillLeadRows(
             company.rows,
             company.rows.map((row) => (typeof row._email_status === 'string' ? row._email_status : null)),
@@ -6359,6 +6436,8 @@ export async function runHeRefillAppend(args: {
     // компании в пул без серии отказов, без очереди собственных компаний.
     const cancelled = refillUserCancelled(ctx) || ownershipLoss !== null;
     if (cancelled) runStats.cancelled = true;
+    const companyQualificationHeld = e instanceof HeRefillCompanyQualificationHold;
+    if (companyQualificationHeld) runStats.company_qualification_held = true;
     // Отмена выигрывает у пропуска шага 4c: чтения проверки после обрыва
     // сигнала отказывают, и её «не читается» — следствие отмены, а не причина.
     if (cancelled) delete runStats.sending_skip;
@@ -6438,7 +6517,7 @@ export async function runHeRefillAppend(args: {
     } else if ((budgetSpentElsewhere || sendingSkipped) && ownQueue && (await writeHeRefillCarryQueue(ctx, ownQueue))) {
       released = false;
       budgetStopCarried = true;
-    } else if (budgetSpentElsewhere || sendingSkipped || cancelled) {
+    } else if (budgetSpentElsewhere || sendingSkipped || cancelled || companyQualificationHeld) {
       released = true;
     } else {
       failStreak = await refillFailStreak(ctx, base.vertical_id, base.id);

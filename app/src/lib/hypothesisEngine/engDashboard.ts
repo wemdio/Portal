@@ -27,6 +27,7 @@ import type { HeEngAutoLaunchCode, HeEngAutoLaunchState } from './engAutoLaunch'
 import { HE_RESEARCH_NEEDS_DESCRIPTION_CODE, HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
 // Порог списка Do not contact — фразе ленты о пропущенной ночи (шаг 3a- autoPipeline.ts).
 import { BLOCKLIST_MAX_ENTRIES } from '@/lib/clientBlocklist/blockedContacts';
+import { engCompanyQualificationSummary } from './engCollectionProgress';
 
 /* ─────────────────────────── Время (UTC) ─────────────────────────── */
 
@@ -1012,6 +1013,18 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   if (analyzingBase) return analyzingStage;
   if (collectingBase) {
     const info = collectInfo(collectingBase);
+    const qualification = engCompanyQualificationSummary(info);
+    if (qualification) {
+      return {
+        stage: 'construct',
+        stageDetail: `Checking companies and countries: ${qualification.checked.toLocaleString('en-US')} of ${qualification.total.toLocaleString('en-US')} checked`,
+        dots: [true, true, false, false, false],
+        mainBase,
+        launch: null,
+        lettersNeedRewrite: false,
+        attention: null,
+      };
+    }
     const construct =
       info.construct && typeof info.construct === 'object'
         ? (info.construct as Record<string, unknown>)

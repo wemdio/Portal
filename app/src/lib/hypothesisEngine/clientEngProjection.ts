@@ -48,6 +48,7 @@
  */
 
 import type { HeProjectDetail } from './projectDetail';
+import { engCompanyQualificationSummary } from './engCollectionProgress';
 import {
   HE_ENG_CAMPAIGN_NAMING,
   buildLaunchSequence,
@@ -852,6 +853,9 @@ function toClientConstruct(construct: Row): Row {
 export function toClientEngCollectInfo(info: Row): Row {
   const out = pick(info, COLLECT_INFO_FIELDS);
 
+  const qualification = engCompanyQualificationSummary(info);
+  if (qualification) out.company_qualification = qualification;
+
   if ('tasks' in info) out.tasks = pickList(info.tasks, toClientCollectTask);
 
   const stats = pickNested(info, 'stats', COLLECT_STATS_FIELDS);
@@ -1332,7 +1336,8 @@ export function toClientEngBaseColumns(columns: readonly string[]): string[] {
  * HE_AUTO_COLLECT_COLUMNS может добавиться `description`). Белый список молча
  * съедал бы данные, за которые клиент заплатил. Наших полей в строке ровно
  * два вида — провенанс источника и пометки с префиксом `_`, — и оба закрыты
- * по умолчанию.
+ * по умолчанию. Это включает `_eng_company_qualification`: доказательства
+ * проверки компании и страны не являются клиентскими колонками.
  */
 export function toClientEngBaseDataRow(row: Row): Row {
   const out: Row = {};

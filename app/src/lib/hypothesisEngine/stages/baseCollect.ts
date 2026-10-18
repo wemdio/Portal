@@ -201,6 +201,13 @@ import type { HeCompanyCleanRow } from '../companyNames';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
+import { runHeEngCompanyQualification } from '../engCompanyQualification';
+import {
+  heEngCompanyKey,
+  heEngCompanyQualified,
+  readHeEngQualificationScope,
+  type HeEngQualificationMemo,
+} from '../engCompanyQualificationPolicy';
 import { projectMarket, type HeMarket } from '../market';
 // Метки pdl-среза → значения каталога (только market='us', fail-open).
 import { loadHePdlFacets, resolveHePdlFilters } from '../pdlCatalog';
@@ -1081,6 +1088,10 @@ export interface HeSliceProbe {
 }
 
 export interface HeCollectInfo {
+  /** ENG client only: checkpointed company/site evidence, separate from the legacy gate. */
+  eng_company_qualification?: HeEngQualificationMemo;
+  eng_company_qualification_total?: number;
+  eng_company_qualification_progress?: { total: number; checked: number; excluded: number; updated_at: string };
   /**
    * Лимит сборки (в компаниях), выбранный при запуске (постановка пишет его
    * при создании базы). У refill-сборки стадия перезаписывает его размером
@@ -6329,7 +6340,24 @@ export async function prepareHeLateConstructImport(
     const status = capped.emailStatuses[i];
     return status ? { ...r, _email_status: status } : r;
   });
-  const stored = withHeCleanCompanyNames(marked).rows;
+  let stored = withHeCleanCompanyNames(marked).rows;
+  if (engEmailPolicy) {
+    // Late email recovery must not start a new paid company check, or bless
+    // an old base which never had one. Only restore already paid evidence.
+    if (!info.eng_company_qualification) return { kind: 'empty' };
+    const { data: sourceBase, error: sourceError } = await ctx.supabase.from('he_bases')
+      .select('vertical_id').eq('id', baseId).eq('project_id', projectId).single();
+    if (sourceError || !sourceBase) throw new Error('ENG company qualification: late import base could not be read');
+    const scope = await readHeEngQualificationScope(ctx.supabase, {
+      project, verticalId: sourceBase.vertical_id, collectInfo: info,
+    });
+    const memo = info.eng_company_qualification;
+    stored = stored.map((row) => ({
+      ...row,
+      _eng_company_qualification: memo.scopeKey === scope.key ? memo.verdicts[heEngCompanyKey(row)] : undefined,
+    })).filter((row) => heEngCompanyQualified(row, scope));
+    if (!stored.length) return { kind: 'empty' };
+  }
   const okContacts = engEmailPolicy
     ? stored.length
     : stored.reduce((n, r) => n + (r._email_status === 'ok' ? 1 : 0), 0);
@@ -6346,7 +6374,7 @@ export async function prepareHeLateConstructImport(
     excluded_during_fetch:
       prior?.excluded_during_fetch ?? tasks.reduce((sum, t) => sum + (t.excluded_during_fetch ?? 0), 0),
     low_relevance: 0,
-    companies_total: capped.companies,
+    companies_total: engEmailPolicy ? new Set(stored.map(heCompanyRowKey)).size : capped.companies,
     ok_contacts: okContacts,
     dropped_over_contact_cap: capped.droppedOverContactCap,
     dropped_over_company_cap: capped.droppedOverCompanyCap,
@@ -6363,7 +6391,7 @@ export async function prepareHeLateConstructImport(
     ...construct,
     status: 'done',
     emails_found: imported.emailsFound,
-    valid_count: capped.validCount,
+    valid_count: engEmailPolicy ? stored.length : capped.validCount,
     note: `результат джобы конструктора ${construct.bc_job_id} принят после того, как стадия перестала его ждать`,
     late_import_at: at,
   };
@@ -6377,8 +6405,8 @@ export async function prepareHeLateConstructImport(
       collect_info: { ...dropCollectWorkState(info), construct: nextConstruct, stats },
     },
     gridRows: imported.rows.length,
-    companies: capped.companies,
-    validCount: capped.validCount,
+    companies: engEmailPolicy ? new Set(stored.map(heCompanyRowKey)).size : capped.companies,
+    validCount: engEmailPolicy ? stored.length : capped.validCount,
     droppedInOtherBases: rechecked.droppedInOtherBases,
     droppedOverContactCap: capped.droppedOverContactCap,
     droppedOverCompanyCap: capped.droppedOverCompanyCap,
@@ -7794,7 +7822,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // опрашивать ЖИВУЮ джобу, и оплаченный результат конструктора терялся молча.
   // У RU-инструмента и у ENG-сборки без пометок условие прежнее: constructRows
   // это merged, а merged здесь непуст по построению (пустой ушёл выше).
-  if ((!construct && needsConstruct(constructRows)) || construct?.status === 'dispatched') {
+  if ((!construct && needsConstruct(constructRows)) || construct?.status === 'dispatched' ||
+      (engEmailPolicy && !!construct?.bc_job_id && !!info.eng_company_qualification)) {
+    // A checkpoint during company qualification already records CONSTRUCT as
+    // done. Re-import that same result on retry to restore its address verdicts;
+    // never feed raw catalog rows into the qualification continuation.
     // Резерв без подтверждённой вставки (`inserted === false`) — это тоже
     // постановка, а не ожидание: прошлая попытка записала id и умерла до вставки
     // или потеряла ответ на неё. Повтор вставляет ТОТ ЖЕ id (dispatchConstructJob:
@@ -8171,12 +8203,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         `${relevanceGate?.hypothesis_scope ? 'вне гипотез вертикали' : 'вне вертикали'}`,
     );
   }
-  if (!gateRan) {
-    // Прежний путь — судим строки ПОСЛЕ импорта. Здесь три случая: RU-сборка
-    // легаси-инструмента (её поведение обязано остаться прежним), ENG-база,
-    // чья фаза CONSTRUCT началась ДО переноса гейта (записи relevance_gate у
-    // неё нет), и ENG-база, у которой гейт до конструктора НЕ отработал
-    // (ran=false) — её строки иначе не проверил бы никто.
+  if (!gateRan && !engEmailPolicy) {
+    // Сохраняем прежний post-import путь для staff/RU. У подтверждённого
+    // ENG-клиента ниже работает проверка по сайту с сохранением результата:
+    // повторять здесь старую платную оценку на каждом её тике не нужно.
     try {
       const { data: vrow } = await ctx.supabase
         .from('he_verticals')
@@ -8219,11 +8249,52 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     }
   }
   const rowsBeforeEmailPolicy = storedRows.length;
+  let companyQualificationExcluded = 0;
   if (engEmailPolicy) {
     // Constructor checkpoints and partial/empty results can bypass its final
     // validation filter. The client base still contains only accepted addresses;
     // the constructor keeps the source rows for diagnostics.
     storedRows = selectHeEngEmailRows(storedRows);
+    if (storedRows.length > 0) {
+      const scope = await readHeEngQualificationScope(ctx.supabase, {
+        project, verticalId: base.vertical_id, collectInfo: info,
+      });
+      const candidates = storedRows.length;
+      const companyKeys = new Set(storedRows.map(heEngCompanyKey));
+      info.eng_company_qualification_total = companyKeys.size;
+      if (info.eng_company_qualification?.scopeKey !== scope.key || info.eng_company_qualification.version !== 1) {
+        info.eng_company_qualification = { version: 1, scopeKey: scope.key, verdicts: {} };
+      }
+      const checkpoint = async (memo: HeEngQualificationMemo) => {
+        info.eng_company_qualification = memo;
+        const verdicts = Object.values(memo.verdicts).filter((v) => companyKeys.has(v.companyKey));
+        info.eng_company_qualification_progress = {
+          total: companyKeys.size, checked: verdicts.length,
+          excluded: verdicts.filter((v) => v.status !== 'accepted').length,
+          updated_at: new Date().toISOString(),
+        };
+        const saved = await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
+        if (!saved) throw new Error('ENG company qualification: collection is no longer active');
+      };
+      await checkpoint(info.eng_company_qualification);
+      const qualified = await runHeEngCompanyQualification(ctx, {
+        rows: storedRows, scope, memo: info.eng_company_qualification, onCheckpoint: checkpoint, maxCompanies: 16,
+      });
+      usage.tokensUsed += qualified.tokensUsed;
+      usage.costUsd += qualified.costUsd;
+      if (!qualified.complete) {
+        await requeueSelf(ctx, job, 1000);
+        return {
+          result: { waiting: true, base_id: baseId, company_qualification: 'processing' },
+          tokensUsed: usage.tokensUsed,
+          costUsd: usage.costUsd,
+        };
+      }
+      storedRows = qualified.rows;
+      companyQualificationExcluded = candidates - storedRows.length;
+      stageLog(ctx, `[base_collect] company qualification: ${info.eng_company_qualification_total} companies checked; ` +
+        `${storedRows.length} addresses accepted, ${companyQualificationExcluded} excluded by company/country evidence`);
+    }
     finalEmailStatuses = storedRows.map((row) => row._email_status ?? null);
     companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
     if (info.construct) info.construct = { ...info.construct, valid_count: storedRows.length };
@@ -8248,6 +8319,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ok_contacts: okContacts,
     dropped_over_contact_cap: droppedOverContactCap,
     dropped_over_company_cap: droppedOverCompanyCap,
+    ...(engEmailPolicy ? { company_qualification_excluded_contacts: companyQualificationExcluded } : {}),
     // Только когда повторная сверка запускалась (market='us' с импортом):
     // у RU ключа нет, как и до правки.
     ...(droppedInOtherBases !== null ? { dropped_in_other_bases: droppedInOtherBases } : {}),
@@ -8260,7 +8332,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ...(allOffTarget ? { all_off_target: true } : {}),
   };
   if (engEmailPolicy && storedRows.length === 0 && !allOffTarget) {
-    return await closeWithoutRows(statsWithQuality, 'после проверки нет адресов со статусом ok или catch_all');
+    return await closeWithoutRows(statsWithQuality, companyQualificationExcluded > 0
+      ? 'Company qualification: no companies with verified fit for the selected hypotheses and target countries. Review the audience before collecting again.'
+      : 'после проверки нет адресов со статусом ok или catch_all');
   }
   // Потолок мастера считает АДРЕСА (HE_LAUNCH_MAX_LEADS лидов), а число клиента
   // — КОМПАНИИ, и после разноса адресов по строкам одна компания даёт до
