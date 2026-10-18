@@ -193,6 +193,7 @@ import {
 } from './templateOperatorGate';
 import { describeHeLaunchWindow, resolveHeLaunchSendingWindow, type HeLaunchWindowSource } from './launchSchedule';
 import { readHeCollectCountries } from './engCountries';
+import { readHeEngEmailPolicy } from './engEmailPolicy';
 import { projectMarket, type HeMarket } from './market';
 import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
 import {
@@ -215,6 +216,7 @@ import {
   findCompanyKeyColumns,
   findEmailColumn,
   heConstructContactCap,
+  heLaunchEmailStrength,
   heLaunchEmailVerdict,
   heLaunchIsIncomplete,
   heLaunchRefusesOverCap,
@@ -1584,6 +1586,15 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       segmentWhens,
     });
   }
+  // Only a confirmed ENG owner permits catch_all. An unreadable owner must
+  // stop before any sender call; locale or project market alone is not enough.
+  let allowCatchAll: boolean;
+  try {
+    allowCatchAll = await readHeEngEmailPolicy(portalDb, projectRow);
+  } catch (err) {
+    await logError(`${eventPrefix}.email_policy_failed`, err, { userId, templateId, projectId: base.project_id });
+    return { status: 500, body: { error: t.marketReadFailed } };
+  }
   // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
   const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
 
@@ -1908,7 +1919,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //     отдельное решение владельца, см. отчёт лейна.
   if (market === 'us' && heConstructContactCap(base.collect_info) === null) {
     const rowsWithVerdict = allRows.reduce(
-      (n, r) => n + (heLaunchEmailVerdict(r._email_status) === 'missing' ? 0 : 1),
+      (n, r) => n + (heLaunchEmailVerdict(r._email_status, { allowCatchAll }) === 'missing' ? 0 : 1),
       0,
     );
     if (rowsWithVerdict > 0) {
@@ -1973,7 +1984,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
           return false;
         }
         if (gateEmailColumn && String(r[gateEmailColumn] ?? '').trim() === '') return true;
-        const verdict = heLaunchEmailVerdict(r._email_status);
+        const verdict = heLaunchEmailVerdict(r._email_status, { allowCatchAll });
         if (verdict === 'rejected') {
           skippedInvalid += 1;
           return false;
@@ -1990,6 +2001,12 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         return true;
       })
     : allRows;
+  // Sort before address deduplication: if the same address occurs twice,
+  // its ok row wins over catch_all. The resulting sender order also puts ok
+  // first when the base is below the launch cap. Legacy staff keeps its order.
+  if (allowCatchAll) {
+    rows.sort((a, b) => heLaunchEmailStrength(b._email_status, { allowCatchAll }) - heLaunchEmailStrength(a._email_status, { allowCatchAll }));
+  }
   const {
     leads: mappedLeads,
     emailColumn,
@@ -2167,8 +2184,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //
   //     Теперь у market='us' потолок ВЫБИРАЕТ, а не отказывает: сначала по
   //     одному сильнейшему адресу каждой компании, потом вторые (правило и его
-  //     причина — selectLeadsWithinLaunchCap в launchHandoff.ts). Компании при
-  //     этом не пропадают молча: сколько компаний и адресов уехало и сколько
+  //     причина — selectLeadsWithinLaunchCap в launchHandoff.ts). У ENG
+  //     компании обходятся отдельно внутри ok, затем catch_all: любой ok
+  //     имеет приоритет перед catch_all другой компании.
+  //     Компании при этом не пропадают молча: сколько компаний и адресов уехало и сколько
   //     снял потолок, идёт в warnings ответа (его читает и кабинет) и в аудит.
   //     Сам HE_LAUNCH_MAX_LEADS не меняется: его величина — решение владельца с
   //     последствиями для чанкования на стороне рассыльщика, см. отчёт лейна.
@@ -2205,8 +2224,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       columns,
       leadRowIndices,
       limit: HE_LAUNCH_MAX_LEADS,
+      allowCatchAll,
     });
-    // Оба массива переписываются вместе и в исходном порядке базы: их
+    // Оба массива переписываются вместе в порядке отбора (ENG: ok первыми): их
     // параллельность держит сплит по сегментам ниже, а порядок — приоритет
     // задач плана сборки.
     const keptLeads: typeof leads = [];

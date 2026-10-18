@@ -823,7 +823,7 @@ function buildPipelineRows(
       state: stateOf(2),
       evidence:
         stateOf(2) !== 'future' && s.emails_found > 0
-          ? `${fmt(s.valid_count)} / ${fmt(s.emails_found)} valid`
+          ? `${fmt(s.emails_found)} addresses found`
           : vertical.stage === 'construct'
             ? 'finding & validating emails…'
             : '',

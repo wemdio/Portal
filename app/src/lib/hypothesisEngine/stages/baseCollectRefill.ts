@@ -253,6 +253,7 @@ import {
   findCompanyKeyColumns,
   heLaunchCompanyKey,
   heLaunchEmailVerdict,
+  heLaunchEmailStrength,
   mapBaseRowsToLeads,
   parseLaunchInfo,
   selectLeadsWithinLaunchCap,
@@ -314,6 +315,7 @@ import {
 // Чужая компания в письмах кампании (только us; правило языка — letterBrandGuard) — та же
 // проверка, что у запуска (launchTemplate.ts, шаг 4b″).
 import { describeHeBrandLeaks, heBrandNeedsOwner, heTemplateBrandLeaks, readHeBrandEngClient } from '../letterBrandGuard';
+import { readHeEngEmailPolicy } from '../engEmailPolicy';
 import type { HeMarket } from '../market';
 import type { HeChainLetter, HeJob, HeOperatorMapping } from '../types';
 import { addUsage, stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
@@ -2511,7 +2513,7 @@ export function pickRefillTemplate(
  * регистра/пробелов. Здесь он НЕ переписан осознанно: два пути допуска
  * адресов, которые можно поправить по отдельности, рано или поздно разойдутся,
  * а расхождение видно только по баунсам, то есть уже по репутации доменов.
- * Почему catch_all не допущен — в докблоке HE_LAUNCH_ACCEPTED_EMAIL_STATUSES.
+ * Для подтверждённого ENG-клиента также допускается catch_all, после OK.
  *
  * 'missing' (вердикта нет вовсе) отклоняется, как и 'rejected', но считается
  * отдельно: ночной долив идёт без человека рядом, и «валидация не доработала»
@@ -2520,6 +2522,7 @@ export function pickRefillTemplate(
 export function selectRefillLeadRows(
   rows: HeUnifiedRow[],
   emailStatuses: Array<string | null> | null,
+  options: { allowCatchAll?: boolean } = {},
 ): {
   leadRows: HeUnifiedRow[];
   /**
@@ -2543,11 +2546,25 @@ export function selectRefillLeadRows(
     // Строки вне вертикали (релевант-гейт base_collect) в долив не идут.
     if ((row as { _low_relevance?: boolean })._low_relevance === true) continue;
     withEmail += 1;
-    const verdict = heLaunchEmailVerdict(emailStatuses?.[i] ?? null);
+    const verdict = heLaunchEmailVerdict(emailStatuses?.[i] ?? null, options);
     if (verdict === 'missing') unverified += 1;
     if (verdict !== 'accepted') continue;
-    leadRows.push(row);
+    leadRows.push(options.allowCatchAll ? { ...row, _email_status: emailStatuses?.[i] } as HeUnifiedRow : row);
     leadRowIndexes.push(i);
+  }
+  if (options.allowCatchAll) {
+    // Address deduplication happens in mapBaseRowsToLeads next. Put the OK
+    // occurrence first, keeping its index in the persisted source base.
+    const ordered = leadRows.map((row, i) => ({ row, sourceIndex: leadRowIndexes[i] }))
+      .sort((a, b) => heLaunchEmailStrength(emailStatuses?.[b.sourceIndex], options) -
+        heLaunchEmailStrength(emailStatuses?.[a.sourceIndex], options));
+    return {
+      leadRows: ordered.map(({ row }) => row),
+      leadRowIndexes: ordered.map(({ sourceIndex }) => sourceIndex),
+      withEmail,
+      valid: leadRows.length,
+      unverified,
+    };
   }
   return { leadRows, leadRowIndexes, withEmail, valid: leadRows.length, unverified };
 }
@@ -2574,6 +2591,7 @@ function selectRefillLeadsByCompany<L extends object>(input: {
   leadRows: HeUnifiedRow[];
   columns: string[];
   granted: number;
+  allowCatchAll?: boolean;
 }): { toSend: L[]; companiesHeldBack: number } {
   const positionOf = new Map<L, number>();
   input.leads.forEach((lead, position) => positionOf.set(lead, position));
@@ -2586,6 +2604,7 @@ function selectRefillLeadsByCompany<L extends object>(input: {
     columns: input.columns,
     leadRowIndices: keptRowIndices,
     limit: input.granted,
+    allowCatchAll: input.allowCatchAll,
   });
   return {
     toSend: selection.keptLeadPositions.map((position) => input.kept[position]),
@@ -5171,15 +5190,17 @@ export async function runHeRefillAppend(args: {
     //     Сайт и бриф проекта не прочитались — отказ долива до провайдера
     //     (общий catch): не знаем, чьи это письма, — не отправляем.
     let brandHold: string | null = null;
+    let allowCatchAll = false;
     if (usLetterGate) {
       const { data: projectRow, error: projectErr } = await ctx.supabase
         .from('he_projects')
-        .select('website_url, brief, created_by')
+        .select('website_url, brief, created_by, market')
         .eq('id', job.project_id)
         .maybeSingle();
       if (projectErr) throw new Error(`he_projects read: ${projectErr.message}`);
       if (!projectRow) throw new Error(`he_projects ${job.project_id}: not found`);
       const brandRow = projectRow as { website_url?: unknown; brief?: unknown; created_by?: unknown };
+      allowCatchAll = await readHeEngEmailPolicy(ctx.supabase, projectRow);
       const brandLeaks = heTemplateBrandLeaks(
         'us',
         {
@@ -5199,7 +5220,7 @@ export async function runHeRefillAppend(args: {
     // 3. Лиды: email + допущенный вердикт валидации, маппинг колонок →
     //    переменные шаблона.
     const { leadRows, leadRowIndexes, withEmail, valid, unverified } =
-      selectRefillLeadRows(finalRows, emailStatuses);
+      selectRefillLeadRows(finalRows, emailStatuses, { allowCatchAll });
     runStats.with_email = withEmail;
     runStats.valid = valid;
     runStats.unverified = unverified;
@@ -5359,6 +5380,7 @@ export async function runHeRefillAppend(args: {
           const picked = selectRefillLeadRows(
             company.rows,
             company.rows.map((row) => (typeof row._email_status === 'string' ? row._email_status : null)),
+            { allowCatchAll },
           );
           let heldHere = 0;
           const offset = carriedRows.length;
@@ -5412,17 +5434,39 @@ export async function runHeRefillAppend(args: {
           // Снятых лидов не больше допущенных строк: лид растёт из строки.
           carriedValid += picked.valid - heldHere;
         }
-        // Один адрес — один лид: свой лид с адресом, который уже несёт
-        // перенесённая компания, в пачку не идёт (провайдер отсеял бы его как
-        // дубль, но решать это до отправки дешевле и честнее для воронки).
-        const carriedEmails = new Set(carriedLeads.map((lead) => lead.email));
-        sendLeads = [...carriedLeads];
-        sendLeadSourceRows = [...carriedSourceRows];
-        leads.forEach((lead, i) => {
-          if (carriedEmails.has(lead.email)) return;
-          sendLeads.push(lead);
-          sendLeadSourceRows.push(carriedRows.length + leadSourceRows[i]);
-        });
+        // Один адрес — один лид. ENG сохраняет сильнейший вердикт вместе с
+        // его источником; при равенстве перенос остаётся первым. Остальные
+        // проекты сохраняют прежний безусловный приоритет переноса.
+        if (allowCatchAll) {
+          // A stronger own row may replace carried catch_all, and two carried
+          // companies may contain the same address. Keep the winning lead
+          // object so leadSources/ownLeadRow/carriedLeadOwner stay attached.
+          const candidates = [
+            ...carriedLeads.map((lead, i) => ({ lead, rowIndex: carriedSourceRows[i] })),
+            ...leads.map((lead, i) => ({ lead, rowIndex: carriedRows.length + leadSourceRows[i] })),
+          ].sort((a, b) =>
+            heLaunchEmailStrength(leadSources.get(b.lead)?.row._email_status, { allowCatchAll }) -
+            heLaunchEmailStrength(leadSources.get(a.lead)?.row._email_status, { allowCatchAll }),
+          );
+          const seen = new Set<string>();
+          sendLeads = [];
+          sendLeadSourceRows = [];
+          for (const { lead, rowIndex } of candidates) {
+            if (seen.has(lead.email)) continue;
+            seen.add(lead.email);
+            sendLeads.push(lead);
+            sendLeadSourceRows.push(rowIndex);
+          }
+        } else {
+          const carriedEmails = new Set(carriedLeads.map((lead) => lead.email));
+          sendLeads = [...carriedLeads];
+          sendLeadSourceRows = [...carriedSourceRows];
+          leads.forEach((lead, i) => {
+            if (carriedEmails.has(lead.email)) return;
+            sendLeads.push(lead);
+            sendLeadSourceRows.push(carriedRows.length + leadSourceRows[i]);
+          });
+        }
         sendLeadRows = [...carriedRows, ...leadRows];
       }
     }
@@ -5484,6 +5528,11 @@ export async function runHeRefillAppend(args: {
       const filtered = filterBlockedLeads(sendLeads, blockedSet);
       kept = filtered.kept;
       runStats.skipped_blocklist = filtered.blockedCount;
+    }
+    if (allowCatchAll) {
+      kept.sort((a, b) =>
+        heLaunchEmailStrength(leadSources.get(b)?.row._email_status, { allowCatchAll }) -
+        heLaunchEmailStrength(leadSources.get(a)?.row._email_status, { allowCatchAll }));
     }
     ownKept = kept;
     if (carryClaim && carryClaim.companies.length > 0) {
@@ -5641,6 +5690,7 @@ export async function runHeRefillAppend(args: {
           leadRows: sendLeadRows,
           columns: finalColumns,
           granted: budget.granted,
+          allowCatchAll,
         });
         toSend = cut.toSend;
         if (cut.companiesHeldBack > 0) runStats.capped_companies = cut.companiesHeldBack;

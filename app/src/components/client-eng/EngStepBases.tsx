@@ -2,7 +2,7 @@
 
 /**
  * Куски карточки рынка шага 3 «Launch» (EngStepLaunch) про его КОНТАКТЫ: живой
- * прогресс сборки (фазы задач + счётчики конструктора: найдено/валидных почт
+ * прогресс сборки (фазы задач + число найденных адресов
  * из collect_info.construct — CollectProgress), объём, который реально уедет в
  * рассылку (SendVolume: строк в базе и контактов в кампании — разные числа),
  * решения автопилота по плану источников (AutopilotDecisions) и правило кнопки
@@ -94,8 +94,7 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
         <div className="text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
           {construct.status === 'done' && (
             <span className="ds-mono">
-              Emails found: {(construct.emails_found ?? 0).toLocaleString('en-US')} · valid:{' '}
-              {(construct.valid_count ?? 0).toLocaleString('en-US')}
+              Emails found: {(construct.emails_found ?? 0).toLocaleString('en-US')}
             </span>
           )}
           {(construct.status === 'failed' || construct.status === 'cancelled') && (
@@ -117,8 +116,8 @@ const fmtCount = (n: number) => n.toLocaleString('en-US');
  * (countReadyToSend роута: правило us-запуска по всем строкам и чёрному
  * списку клиента). Один запрос на базу при показе карточки и заново, когда
  * меняется число строк; опрос деталки его не повторяет. null — ещё не пришёл,
- * не прочитался или сервер честно посчитать не может: панель тогда говорит
- * прежнее «X of Y rows with a verified email».
+ * не прочитался или сервер честно посчитать не может: панель тогда показывает
+ * только размер базы, без предположения о количестве готовых контактов.
  */
 function useReadyToSend(baseId: string | null, rowCount: number): EngReadyToSend | null {
   const key = baseId ? `${baseId}:${rowCount}` : null;
@@ -157,36 +156,11 @@ function readyToSendReasons(ready: EngReadyToSend): string[] {
 }
 
 /**
- * Честный объём ДО запуска. Строк в базе и контактов в кампании — разные
- * числа: запуск (`runHeTemplateLaunch`) отправляет только строки с вердиктом
- * валидации 'ok', строки вне вертикали выбрасывает, а повторный адрес грузит
- * один раз (`mapBaseRowsToLeads`, дедуп по email). База на 2000 строк уезжает
- * сотнями, и до этой правки клиент узнавал об этом только после запуска.
- *
- * ЧИСЛО «READY TO SEND» у готовой ('analyzed') базы считает СЕРВЕР по самим
- * строкам (useReadyToSend → countReadyToSend роута строк): те же функции и
- * тот же порядок, что у us-запуска, плюс чёрный список клиента и потолок
- * одного запуска. Деталка проекта `data` не возит (projectDetail.ts:
- * HE_BASE_LIST_COLUMNS без `data`, опрос раз в 4 с), поэтому счёт — отдельный
- * запрос раз на базу. Из двух счётчиков `collect_info` точное число не
- * выводится (пересечение «ok» и «вне вертикали» неизвестно), и экран сам его
- * не выводит: пока счёта нет — прежние числа, каждое своим именем, и «точное
- * число — при запуске». У 'analyzing'-базы счёта нет: её анализ ещё идёт.
- * После запуска карточка рынка печатает факт (`launch_info.leads_count`).
- *
- * ТРИ ветки из четырёх говорят не «сколько уедет», а «не уедет ничего»: база
- * без вердиктов, база, собранная прежним контрактом (вердикт не построчный), и
- * база, где ни один вердикт не 'ok'. Все три запуск ENG-клиента отклоняет до
- * создания кампании (runHeTemplateLaunch: baseNotVerified /
- * baseCollectedBeforeSplit / noValidEmails), поэтому здесь про это сказано
- * прямо — клиент не должен узнавать об отказе только при запуске, пройдя часы сборки.
- *
- * КОМУ ПАНЕЛЬ ВООБЩЕ ПОЛОЖЕНА. Только базе, которую ещё можно запустить: авто-
- * база вертикали в 'analyzing' или 'analyzed'. Упавшую базу запуск не берёт (у
- * неё не бывает шаблона), а объяснение причины у неё своё — код стадии ниже;
- * панель рядом с ним спорила бы с ним («проверка не доработала» против «срез
- * не про вертикаль»). Прогон ежедневного долива не запускается вовсе — его
- * строки уходят прямо в идущую кампанию, и «уточним при запуске» про него ложь.
+ * Объём до запуска считает сервер по строкам базы, списку Do not contact и
+ * лимиту кампании. Счётчик valid_count из конструктора не заменяет этот расчёт:
+ * у старых баз он не включает все адреса, допустимые текущей политикой ENG.
+ * Пока готового расчёта нет, показываем только размер базы. Для analyzing
+ * проверка ещё идёт; для refill отдельного запуска нет, поэтому панель скрыта.
  */
 export function SendVolume({ base }: { base: EngBaseSummary }) {
   // Только авто-база: у загруженного файла движок строки не размечает, и
@@ -200,43 +174,26 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
   const construct = base.collect_info?.construct;
   // valid_count пишется только вместе с импортом результата конструктора;
   // у фазы в состоянии 'dispatched' его ещё нет.
-  const verified =
-    construct && construct.status !== 'dispatched' && typeof construct.valid_count === 'number'
-      ? construct.valid_count
-      : null;
-  // `stats.low_relevance` отдаёт проекция (COLLECT_STATS_FIELDS).
-  const flagged = base.collect_info?.stats?.low_relevance ?? 0;
-  // Счёт «к отправке» — только там, где ниже рисуется последняя ветка (есть
-  // проверенные адреса, вердикты построчные) и база готова.
+  const verificationFinished =
+    construct && construct.status !== 'dispatched' && typeof construct.valid_count === 'number';
+  // Ноль в старом valid_count не означает, что все адреса непригодны.
+  // Готовую базу с построчной проверкой считает сервер, включая такой случай.
   const ready = useReadyToSend(
-    shown && base.status === 'analyzed' && verified !== null && verified > 0 && construct?.per_address_verdicts !== false
+    shown && base.status === 'analyzed' && verificationFinished && construct?.per_address_verdicts !== false
       ? base.id
       : null,
     base.row_count,
   );
   if (!shown) return null;
 
-  // Вердиктов нет ВООБЩЕ — и это не «узнаем на запуске», а отказ запуска.
-  // `valid_count` пишется ровно тем же импортом результата конструктора, что и
-  // пометки `_email_status` на строках (stages/baseCollect.ts: finalEmailStatuses
-  // ← capImportedRows, оба в одной ветке), поэтому его отсутствие означает «ни
-  // на одной строке вердикта нет». У market='us' вердикт обязателен
-  // (runHeTemplateLaunch, пятый шаг ядра: verdict 'missing' → строка снята), так что
-  // лидов не останется и запуск вернёт 400 baseNotVerified. Пересобрать базу
-  // из кабинета клиент не может (кнопка «Collect again» есть только у
-  // остановленной сборки, и её роут откажет вертикали с готовой базой, а
-  // «Launch» новой сборки при готовой базе не ставит), поэтому
-  // действие — Support (сборку заново ставит команда), той же фразой, что у
-  // отказа запуска baseNotVerified.
-  // Легаси-база сюда НЕ попадает: импорт до
-  // 26.09.2026 тоже писал valid_count — её разбирает следующая ветка.
-  if (verified === null) {
+  // Импорт записывает valid_count вместе с построчными результатами проверки.
+  // Отсутствие этого маркера означает, что проверка не завершилась.
+  if (!verificationFinished) {
     return (
       <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
         <EngSupportText
           text={
-            'Email verification did not finish on this base, so none of its rows has a verified email — and an ' +
-            'unverified address is never mailed. This base cannot be launched: its launch would be refused. ' +
+            'Email checks did not finish on this base. It cannot be launched yet. ' +
             'Message Support to have this audience collected again; a new collection runs verification to the end.'
           }
         />
@@ -264,11 +221,8 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
     );
   }
 
-  // Счёт сервера пришёл: одно число «к отправке» из проверенных и причины
-  // остальных. Ноль к отправке — запуск такой базы откажет (ядро: noValidEmails
-  // / allContactsBlocked — лидов не осталось). Проверенных нет вовсе (счёт
-  // разошёлся с valid_count) — прежняя ветка ниже.
-  if (ready && ready.checked > 0) {
+  // Только ответ сервера определяет доступный объём, в том числе нулевой.
+  if (ready) {
     const reasons = readyToSendReasons(ready);
     return (
       <div
@@ -282,7 +236,7 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
           <EngSupportText
             text={
               ready.to_send === 0
-                ? `Not one checked address can be mailed now: ${reasons.join(', ')}. A launch of this base would be refused. Message Support.`
+                ? `No contacts are ready to send${reasons.length > 0 ? `: ${reasons.join(', ')}` : ''}. This base cannot be launched yet. Message Support.`
                 : `${reasons.length > 0 ? `The rest will not be mailed: ${reasons.join(', ')}. ` : ''}The launch counts again when it starts, so the number can still change.`
             }
           />
@@ -293,31 +247,12 @@ export function SendVolume({ base }: { base: EngBaseSummary }) {
   }
 
   return (
-    <div
-      className="mt-2 flex flex-col gap-1 text-[11px]"
-      // Ноль проверенных — не «меньше», а «нечего»: тот же сигнал, что у ветки
-      // без вердиктов.
-      style={{ color: verified === 0 ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}
-    >
-      <div className="ds-mono">
-        {verified.toLocaleString('en-US')} of {base.row_count.toLocaleString('en-US')} rows with a verified email
-        {/* «not a fit», а не «outside this vertical»: при включённом
-            HE_GATE_HYPOTHESIS_SCOPE (по умолчанию выключен) гейт судит по
-            неотклонённым гипотезам вертикали (relevanceGate, gateScopeEn) и
-            помечает и компанию из самой вертикали, не подходящую ни под одну из
-            них. Фраза верна при обоих правилах гейта. */}
-        {flagged > 0 ? ` · ${flagged.toLocaleString('en-US')} flagged as not a fit for this market` : ''}
-      </div>
+    <div className="mt-2 flex flex-col gap-1 text-[11px]" style={{ color: 'var(--cp-text-m)' }}>
+      <div className="ds-mono">{fmtCount(base.row_count)} rows collected</div>
       <div style={{ color: 'var(--cp-text-l)' }}>
-        <EngSupportText
-          text={
-            verified === 0
-              ? // Вердикты есть, но ни один не 'ok' — запуск вернёт 400 noValidEmails
-                // (все строки снимет гейт как rejected), лидов не останется.
-                'Not one address here passed verification, and only a verified email is mailed — so this base cannot be launched. Message Support to have this audience collected again.'
-              : 'Only rows with a verified email are mailed; flagged rows are skipped and a repeated address is mailed once — so a launch sends fewer contacts than the base has rows. The exact number is confirmed at launch.'
-          }
-        />
+        {base.status === 'analyzing'
+          ? 'Contacts are being checked. The number ready to send will be shown when the base is ready.'
+          : 'The number ready to send is not available yet. It will be checked before launch.'}
       </div>
       <DncNotes base={base} />
     </div>

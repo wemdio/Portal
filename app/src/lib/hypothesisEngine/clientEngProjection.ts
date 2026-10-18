@@ -53,7 +53,6 @@ import {
   buildLaunchSequence,
   findEmailColumn,
   heConstructContactCap,
-  heLaunchEmailVerdict,
 } from './launchHandoff';
 import { classifyHeClientError, type HeClientErrorCode } from './clientErrors';
 // Пауза автопилота читается ТОЛЬКО разбором соседней полосы: второго источника
@@ -505,7 +504,7 @@ const CYRILLIC_RE = /[\u0400-\u04FF]/;
  * этого числа карточка базы обещает клиенту объём, которого не будет.
  *
  * Это ЧИСЛО, а не пометки строк: сами `_low_relevance` по-прежнему заперты
- * default-deny по префиксу (BASE_ROW_KEPT_MARKER) — там наша оценка КОНКРЕТНОЙ
+ * default-deny по префиксу — там наша оценка КОНКРЕТНОЙ
  * строки клиента, здесь только её количество. Тот же уровень раскрытия, что
  * уже даёт кабинету проба среза (`slice_probe.hit_rate` и off-target примеры,
  * EngStepBases → AutopilotDecisions).
@@ -600,40 +599,6 @@ const COLLECT_INFO_FIELDS = ['limit'] as const;
  * нет (PREVIEW_COLUMNS — только company/website/email).
  */
 const BASE_ROW_INTERNAL_COLUMNS = new Set(['source_detail']);
-
-/**
- * Служебные пометки строки движок кладёт с префиксом `_` (baseCollect.ts:2238):
- * `_email_status` — вердикт валидации почты, `_low_relevance` — вердикт
- * релевант-гейта. В `columns` их нет, но в jsonb-строке они есть.
- *
- * Правило default-deny по префиксу, а не список: `_low_relevance` — наша
- * внутренняя оценка строки клиента, и следующая такая пометка не должна
- * доехать до кабинета только потому, что про неё здесь забыли. Исключение
- * ровно одно — статус почты, его превью рисует отдельной колонкой.
- */
-const BASE_ROW_KEPT_MARKER = '_email_status';
-
-/**
- * Вердикт валидации почты наружу. В jsonb лежит ячейка из выгрузки
- * конструктора (колонка «email статус») — свободный текст подрядчика в
- * неизвестном нам словаре, в том числе русский; превью печатает его как есть
- * (EngStepReview, колонка «email status»). Поэтому выпускаем только СВОИ
- * константы — и в словаре ЗАПУСКА с того же шага, иначе превью и отчёт запуска
- * называют одну и ту же строку противоположными словами:
- *  - `ok`         — допущенный вердикт (heLaunchEmailVerdict → 'accepted');
- *  - `invalid`    — вердикт есть, но не допущен ('rejected'; запуск: «with an
- *                   invalid email»);
- *  - `unverified` — адрес в строке есть, вердикта нет ('missing'; запуск:
- *                   «has no validation verdict… An unverified address is never
- *                   contacted»);
- *  - ключа нет    — в строке нет и адреса: компания без найденной почты. Запуск
- *                   такую строку молча отбрасывает и в «непроверенные» не
- *                   считает — значит и превью не должно.
- * Раскраска ячейки смотрит на 'ok' / непустую строку / пусто — она сохраняется.
- */
-const EMAIL_STATUS_OK = 'ok';
-const EMAIL_STATUS_INVALID = 'invalid';
-const EMAIL_STATUS_UNVERIFIED = 'unverified';
 
 // personalization_plan (маппинг операторов) и fixed_block — внутренняя кухня
 // генерации; letters клиент и так читает. Маппинг проекция ЧИТАЕТ (признак
@@ -1353,9 +1318,9 @@ export function toClientEngProjectRow(project: Row): Row {
 
 /* ── Превью строк собранной базы (GET /bases/[id]/rows) ── */
 
-/** Список колонок базы без внутреннего провенанса (см. BASE_ROW_INTERNAL_COLUMNS). */
+/** Список колонок базы без источников и служебных пометок строк. */
 export function toClientEngBaseColumns(columns: readonly string[]): string[] {
-  return columns.filter((c) => !BASE_ROW_INTERNAL_COLUMNS.has(c));
+  return columns.filter((c) => !BASE_ROW_INTERNAL_COLUMNS.has(c) && !c.startsWith('_'));
 }
 
 /**
@@ -1375,20 +1340,6 @@ export function toClientEngBaseDataRow(row: Row): Row {
     if (BASE_ROW_INTERNAL_COLUMNS.has(key)) continue;
     if (key.startsWith('_')) continue;
     out[key] = value;
-  }
-  // Тот же предикат вердикта, что у запуска (heLaunchEmailVerdict), и та же
-  // колонка адреса (findEmailColumn) — по уже очищенной строке, иначе служебная
-  // `_email_status` сама сошла бы за колонку «email».
-  const verdict = heLaunchEmailVerdict(row[BASE_ROW_KEPT_MARKER]);
-  if (verdict === 'accepted') {
-    out[BASE_ROW_KEPT_MARKER] = EMAIL_STATUS_OK;
-  } else if (verdict === 'rejected') {
-    out[BASE_ROW_KEPT_MARKER] = EMAIL_STATUS_INVALID;
-  } else {
-    const emailColumn = findEmailColumn(Object.keys(out), [out]);
-    if (emailColumn && String(out[emailColumn] ?? '').trim() !== '') {
-      out[BASE_ROW_KEPT_MARKER] = EMAIL_STATUS_UNVERIFIED;
-    }
   }
   return out;
 }

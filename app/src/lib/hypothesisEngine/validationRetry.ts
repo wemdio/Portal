@@ -111,7 +111,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { extractEmails } from '@/lib/tools/dfybUtils';
 
-import { heConstructContactCap } from './launchHandoff';
+import { heConstructContactCap, heLaunchEmailVerdict, type HeLaunchEmailPolicy } from './launchHandoff';
+import { readHeEngEmailPolicy } from './engEmailPolicy';
 import { HE_TEMPLATE_LAUNCH_MARK_COLUMNS, heTemplateLaunchMarked, type HeTemplateLaunchMark } from './launchTemplate';
 import { normalizeHeMarket, type HeMarket } from './market';
 import { isHeMissingColumnError } from './projectCancelMarker';
@@ -302,6 +303,7 @@ export function parseHeRevalidationGrid(grid: unknown, emails: string[]): Map<st
 export function applyHeRevalidationVerdicts(
   rows: Array<Record<string, unknown>>,
   verdicts: Map<string, string>,
+  policy: HeLaunchEmailPolicy = {},
 ): { rows: Array<Record<string, unknown>>; changed: number; recovered: number } {
   let changed = 0;
   let recovered = 0;
@@ -312,18 +314,18 @@ export function applyHeRevalidationVerdicts(
     const before = typeof row._email_status === 'string' ? row._email_status.trim().toLowerCase() : '';
     if (before === verdict) return row;
     changed += 1;
-    if (verdict === 'ok') recovered += 1;
+    if (heLaunchEmailVerdict(verdict, policy) === 'accepted') recovered += 1;
     return { ...row, _email_status: verdict };
   });
   return { rows: next, changed, recovered };
 }
 
 /** Числа, которые кабинет и журнал читают рядом со строками (как у финала стадии). */
-function verdictCounts(rows: Array<Record<string, unknown>>): { valid: number; okContacts: number } {
+function verdictCounts(rows: Array<Record<string, unknown>>, policy: HeLaunchEmailPolicy = {}): { valid: number; okContacts: number } {
   let valid = 0;
   let okContacts = 0;
   for (const row of rows) {
-    if (row._email_status !== 'ok') continue;
+    if (heLaunchEmailVerdict(row._email_status, policy) !== 'accepted') continue;
     valid += 1;
     if (row._low_relevance !== true) okContacts += 1;
   }
@@ -1242,6 +1244,7 @@ export async function advanceHeBaseRevalidation(
   const project = await readRecoveryProject(supabase, base.project_id);
   const common = commonRefusal(base, project);
   if (common) return { kind: 'refused', refusal: common };
+  const allowCatchAll = await readHeEngEmailPolicy(supabase, { market: project.market, created_by: project.createdBy });
 
   let info: HeCollectInfo = base.collect_info;
   let state = readRevalidationState(info.revalidation);
@@ -1350,7 +1353,7 @@ export async function advanceHeBaseRevalidation(
       // Джоба закончилась (completed / failed / cancelled / иной статус): берём
       // то, что в сетке есть.
       const verdicts = parseHeRevalidationGrid(child.data, round.emails);
-      const applied = applyHeRevalidationVerdicts(rows, verdicts);
+      const applied = applyHeRevalidationVerdicts(rows, verdicts, { allowCatchAll });
       rows = applied.rows;
       const tally: Record<string, number> = {};
       for (const verdict of verdicts.values()) tally[verdict] = (tally[verdict] ?? 0) + 1;
@@ -1368,7 +1371,7 @@ export async function advanceHeBaseRevalidation(
       // часть адресов не проверена, и следующий раунд возьмёт их снова (адреса,
       // уже получившие окончательный вердикт, кандидатами быть перестали).
       state = { cursor: child.status === 'completed' ? round.end : state.cursor, last: closed };
-      const counts = verdictCounts(rows);
+      const counts = verdictCounts(rows, { allowCatchAll });
       info = {
         ...info,
         ...(info.construct ? { construct: { ...info.construct, valid_count: counts.valid } } : {}),
@@ -1376,7 +1379,7 @@ export async function advanceHeBaseRevalidation(
       };
       log(
         `[revalidate] база ${base.id}: раунд ${round.bc_job_id} (${child.status}) — адресов ${round.emails.length}, ` +
-          `вердиктов ${verdicts.size}, изменено строк ${applied.changed}, стали ok ${applied.recovered}; ` +
+          `вердиктов ${verdicts.size}, изменено строк ${applied.changed}, допущено ${applied.recovered}; ` +
           `валидных в базе ${counts.valid}`,
       );
     }

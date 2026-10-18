@@ -1018,13 +1018,12 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
         : null;
     if (construct && asStr(construct.status) === 'dispatched') {
       const emails = asNum(construct.emails_found);
-      const valid = asNum(construct.valid_count);
       return {
         stage: 'construct',
         // Имя шага — как у строки карты пайплайна («Email enrichment»), а не
         // внутреннее «constructor».
         stageDetail:
-          emails > 0 ? `email enrichment: ${valid}/${emails} valid` : 'email enrichment: finding emails…',
+          emails > 0 ? `email enrichment: ${emails} addresses found` : 'email enrichment: finding emails…',
         dots: [true, true, false, false, false],
         mainBase,
         launch: null,
