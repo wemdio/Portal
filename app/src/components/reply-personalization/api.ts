@@ -167,10 +167,12 @@ export function generateReply(
   projectId: string,
   recipientEmail: string | null = null,
   language: ReplyLanguage = 'ru',
+  /** Присланные адресатом адреса, которые встанут в копию ответа ему. */
+  ccEmails: string[] = [],
 ) {
   return fetchWithAuth<GenerateResponse>(`${BASE}/replies/${qualificationId}/generate`, {
     method: 'POST',
-    body: JSON.stringify({ projectId, recipientEmail, language }),
+    body: JSON.stringify({ projectId, recipientEmail, language, ccEmails }),
   });
 }
 
@@ -185,7 +187,7 @@ export function saveReplyLanguage(qualificationId: string, projectId: string, la
 /** draftId — ответ по сгенерированному черновику; null — ответ, написанный вручную. */
 export function sendReply(
   qualificationId: string,
-  input: { draftId: string | null; projectId: string; text: string; toEmail?: string | null },
+  input: { draftId: string | null; projectId: string; text: string; toEmail?: string | null; ccEmails?: string[] },
 ) {
   return fetchWithAuth<{ ok: true }>(`${BASE}/replies/${qualificationId}/send`, {
     method: 'POST',
@@ -194,6 +196,7 @@ export function sendReply(
       projectId: input.projectId,
       text: input.text,
       toEmail: input.toEmail ?? undefined,
+      ccEmails: input.ccEmails?.length ? input.ccEmails : undefined,
     }),
   });
 }

@@ -89,6 +89,10 @@ export function ReplyDetailPanel({
   const [referredEmails, setReferredEmails] = useState<string[]>([]);
   /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
   const [recipient, setRecipient] = useState<string | null>(null);
+  /** Присланные адресатом адреса, которые уйдут в копию ответа ему (при recipient === null). */
+  const [ccEmails, setCcEmails] = useState<string[]>([]);
+  /** С какой копией написан текущий черновик — чтобы подсказать, что пора перегенерировать. */
+  const [draftCc, setDraftCc] = useState<string[]>([]);
   /** Язык письма этой переписки; приходит с тредом, по умолчанию русский. */
   const [language, setLanguage] = useState<ReplyLanguage>('ru');
   const [soundOn, setSoundOn] = useState(true);
@@ -118,6 +122,8 @@ export function ReplyDetailPanel({
     let cancelled = false;
     setThreadLoading(true);
     setThreadIncomplete(false);
+    setCcEmails([]);
+    setDraftCc([]);
     fetchThread(item.id, projectId)
       .then((res) => {
         if (cancelled) return;
@@ -207,10 +213,11 @@ export function ReplyDetailPanel({
     setError(null);
     writeStore(GEN_KEY(qualificationId), String(Date.now()));
     try {
-      const result = await generateReply(qualificationId, projectId, recipient, language);
+      const result = await generateReply(qualificationId, projectId, recipient, language, recipient === null ? ccEmails : []);
       // Новый черновик заменяет набранный текст — и в браузере тоже.
       writeStore(TEXT_KEY(qualificationId), null);
       setDraft(result);
+      setDraftCc(recipient === null ? ccEmails : []);
       setDraftText(result.text);
       chime('done');
     } catch (err) {
@@ -343,6 +350,27 @@ export function ReplyDetailPanel({
               );
             })}
           </div>
+          {recipient === null ? (
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+              <span className="text-gray-500">Ответ-предложение, в копию:</span>
+              {referredEmails.map((email) => (
+                <label key={email} className="inline-flex cursor-pointer items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={ccEmails.includes(email)}
+                    onChange={(e) => setCcEmails((cur) => (e.target.checked ? [...cur, email] : cur.filter((x) => x !== email)))}
+                    className="rounded border-gray-300"
+                  />
+                  {email}
+                </label>
+              ))}
+            </div>
+          ) : null}
+          {draft && recipient === null && (draft.recipientEmail ?? null) === null && ccEmails.join() !== draftCc.join() ? (
+            <p className="mt-1 text-xs text-amber-600">
+              Копия изменилась — нажмите «Сгенерировать заново», чтобы текст писался под неё.
+            </p>
+          ) : null}
           {draft && (draft.recipientEmail ?? null) !== recipient ? (
             <p className="mt-1 text-xs text-amber-600">
               Черновик написан для {draft.recipientEmail ?? item.leadEmail} — нажмите «Сгенерировать заново».
@@ -471,6 +499,7 @@ export function ReplyDetailPanel({
           draftId={draft?.draftId ?? null}
           toEmail={recipient ?? item.leadEmail}
           newContact={recipient !== null}
+          ccEmails={recipient === null ? ccEmails : []}
           separateLetter={Boolean(item.outOfCampaign) && recipient === null}
         />
       </div>

@@ -46,6 +46,8 @@ export async function generateDraftForQualification(
   recipientEmail: string | null = null,
   /** Язык письма из переключателя в чате; по умолчанию русский. */
   language: ReplyLanguage = 'ru',
+  /** Присланные адресатом адреса, которые встанут в копию ответа ему. */
+  ccEmails: string[] = [],
 ): Promise<GenerateDraftResult> {
   const startedAt = Date.now();
 
@@ -95,6 +97,16 @@ export async function generateDraftForQualification(
     }
   }
   const newContact = recipient && recipient !== qualification.leadEmail.toLowerCase() ? recipient : null;
+  // Копия имеет смысл только при ответе в переписку, и адреса — только из ответа адресата.
+  let cc: string[] = [];
+  if (!newContact && ccEmails.length > 0) {
+    const lastInbound = [...thread].reverse().find((m) => !m.fromUs)?.text ?? qualification.replyBody ?? '';
+    const referred = findReferredEmails(lastInbound, [qualification.leadEmail, qualification.eaccount]);
+    if (ccEmails.some((e) => !referred.includes(e))) {
+      throw new GenerateDraftError('Адреса для копии нет в ответе адресата', 422);
+    }
+    cc = ccEmails;
+  }
 
   const messages = buildReplyPrompt({
     kb,
@@ -106,6 +118,7 @@ export async function generateDraftForQualification(
     contextComplete,
     campaignSteps,
     recipientEmail: newContact,
+    ccEmails: cc,
     ourEmail: qualification.eaccount,
     language,
   });

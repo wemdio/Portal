@@ -42,6 +42,16 @@ export function findReferredEmails(replyText: string, exclude: Array<string | nu
   return [...found];
 }
 
+/** Адреса копии из запроса: строки-адреса без повторов и пустых значений. */
+export function parseCcEmails(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out = new Set<string>();
+  for (const v of value) {
+    if (typeof v === 'string' && isValidEmail(v.trim())) out.add(v.trim().toLowerCase());
+  }
+  return [...out];
+}
+
 export function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value);
 }

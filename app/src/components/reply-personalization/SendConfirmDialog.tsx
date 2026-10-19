@@ -11,6 +11,7 @@ export function SendConfirmDialog({
   projectId,
   toEmail,
   newContact,
+  ccEmails = [],
   separateLetter = false,
   onCancel,
   onSent,
@@ -25,6 +26,8 @@ export function SendConfirmDialog({
   toEmail: string;
   /** Новый контакт вместо ответившего — письмо уйдёт на его адрес. */
   newContact: boolean;
+  /** Присланные адресатом адреса в копии ответа ему. */
+  ccEmails?: string[];
   /** Письмо вне кампании: в тред не ответить, уйдёт отдельным письмом с того же ящика. */
   separateLetter?: boolean;
   onCancel: () => void;
@@ -40,7 +43,7 @@ export function SendConfirmDialog({
     setError(null);
     try {
       // Уходит ровно тот текст, что показан в модалке (с правками сотрудника).
-      await sendReply(qualificationId, { draftId, projectId, text, toEmail: newContact ? toEmail : null });
+      await sendReply(qualificationId, { draftId, projectId, text, toEmail: newContact ? toEmail : null, ccEmails: newContact ? [] : ccEmails });
       onSent();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось отправить письмо');
@@ -56,7 +59,8 @@ export function SendConfirmDialog({
         <h3 className="text-center text-lg font-semibold text-zinc-900">Отправить этот ответ?</h3>
         <p className="mt-2 text-center text-sm text-zinc-500">
           Письмо уйдёт через Instantly на <span className="font-medium text-zinc-800">{toEmail}</span>
-          {newContact ? ' — новому контакту, а не тому, кто ответил' : ''}. Проверьте текст в последний раз:
+          {newContact ? ' — новому контакту, а не тому, кто ответил' : ''}
+          {!newContact && ccEmails.length > 0 ? <>, в копии: <span className="font-medium text-zinc-800">{ccEmails.join(', ')}</span></> : null}. Проверьте текст в последний раз:
         </p>
         {separateLetter ? (
           <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">

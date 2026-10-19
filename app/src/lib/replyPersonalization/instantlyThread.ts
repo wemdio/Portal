@@ -42,6 +42,8 @@ function isQuoteStart(line: string): boolean {
     || /^On\s.*\b\d{4}\b.*\d{1,2}:\d{2}/i.test(t)
     || /\bwrote:$/i.test(t)
     || /(?:написал|писал|пишет)(?:а|\(а\))?:$/i.test(t)
+    // «Tatiana Kovaleva писал(а) 2026-10-16 14:26:» — дата между «писал» и двоеточием.
+    || /(?:написал|писал|пишет)(?:а|\(а\))?\s.*\d{1,2}:\d{2}(?::\d{2})?:$/i.test(t)
     || /\d{1,2}:\d{2}.*<[^<>\s]+@[^<>\s]+>:$/.test(t)
     || LEAD_DATED_ATTRIBUTION.test(t)
     || LEAD_DATE_FIRST_ATTRIBUTION.test(t)
@@ -58,7 +60,16 @@ function isQuoteStart(line: string): boolean {
 function cutQuotedHistory(text: string): string {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const cut = lines.findIndex(isQuoteStart);
-  return (cut > 0 ? lines.slice(0, cut) : lines).join('\n').trim();
+  if (cut > 0) return lines.slice(0, cut).join('\n').trim();
+  if (cut === 0) {
+    // Ответ под цитатой (19.10.2026: «Не интересно» стояло в самом низу, после
+    // всей процитированной ветки) — берём то, что ниже последней строки с «>».
+    let last = -1;
+    lines.forEach((line, i) => { if (line.trim().startsWith('>')) last = i; });
+    const below = last >= 0 ? lines.slice(last + 1).join('\n').trim() : '';
+    if (below) return below;
+  }
+  return lines.join('\n').trim();
 }
 
 /** Текстовая версия тоже приходит с &gt; вместо «>»; теги в ней не трогаем — «<a@b>» это адрес. */
@@ -87,11 +98,31 @@ function extractEmailText(body: Email['body']): string {
   return '';
 }
 
-function toThreadMessages(emails: Email[]): ThreadMessage[] {
+/**
+ * Письмо написал не сам адресат, а третий человек с нашей стороны — например,
+ * заказчик, которого добавили в копию, и он написал в общую ветку «Уточните,
+ * удалось ли посмотреть?». Instantly помечает такое как входящее (ue_type 2),
+ * и ИИ отвечал на пинг заказчика, а не пинговал молчащего адресата. Признак:
+ * отправитель — не адресат, а сам адресат среди получателей письма.
+ */
+function isOurSideThirdParty(email: Email, leadEmail: string): boolean {
+  const lead = leadEmail.toLowerCase();
+  const sender = (email.from_address_email ?? email.from_address_json?.[0]?.address ?? '').toLowerCase();
+  if (!sender || sender === lead) return false;
+  const recipients = [
+    ...(email.to_address_email_list ?? '').split(/[,;\s]+/),
+    ...(email.cc_address_email_list ?? '').split(/[,;\s]+/),
+    ...(email.to_address_json ?? []).map((r) => r.address),
+    ...(email.cc_address_json ?? []).map((r) => r.address),
+  ].map((e) => (e ?? '').toLowerCase());
+  return recipients.includes(lead);
+}
+
+function toThreadMessages(emails: Email[], leadEmail: string): ThreadMessage[] {
   return [...emails]
     .sort((a, b) => (a.timestamp_created ?? '').localeCompare(b.timestamp_created ?? ''))
     .map((email) => ({
-      fromUs: email.ue_type === 1 || email.ue_type === 3,
+      fromUs: email.ue_type === 1 || email.ue_type === 3 || isOurSideThirdParty(email, leadEmail),
       text: extractEmailText(email.body),
       timestamp: email.timestamp_created,
     }))
@@ -122,7 +153,7 @@ export async function fetchFullThread(params: {
     // поле lead.
     const leadEmail = params.leadEmail.toLowerCase();
     const messages = toThreadMessages((response.items ?? []).filter((email) =>
-      email.thread_id === params.threadId || (email.lead ?? '').toLowerCase() === leadEmail));
+      email.thread_id === params.threadId || (email.lead ?? '').toLowerCase() === leadEmail), leadEmail);
     return messages.length > 0 ? messages : null;
   } catch {
     // Сбой живого запроса не должен ронять генерацию — вызывающий код
@@ -148,7 +179,7 @@ async function fetchMailboxConversation(params: {
       },
       { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'interactive', consumer: 'personalization_thread' },
     );
-    const messages = toThreadMessages(response.items ?? []);
+    const messages = toThreadMessages(response.items ?? [], params.leadEmail);
     return messages.length > 0 ? messages : null;
   } catch {
     return null;
