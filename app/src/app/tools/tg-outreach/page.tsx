@@ -67,6 +67,7 @@ import type {
   OutreachProxyList,
   OutreachProxyListStats,
   OutreachDialog,
+  DialogMessage,
   OutreachLog,
   OutreachBlockedUser,
   OpenAISettings,
@@ -1214,6 +1215,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
+  // Сообщения бота, по которым ушла задача на удаление в Telegram: ключ — диалог, время и текст.
+  const [deletingMsgs, setDeletingMsgs] = useState<Set<string>>(new Set());
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   /** Базы кампании — для фильтра «показать только диалоги этой гипотезы». */
   const [bases, setBases] = useState<Array<{ id: string; name: string }>>([]);
@@ -1508,6 +1511,25 @@ function DialogsTab({ campaignId, crmEnabled }: {
     if (!res?.ok) {
       setDialogs((cur) => cur.map((d) => (sameUser(d) ? (before.find((b) => b.id === d.id) ?? d) : d)));
       setDialogSaveError({ id: dialog.id, message: 'не удалось добавить в чёрный список' });
+    }
+  };
+
+  const deleteBotMessage = async (dialogId: string, m: DialogMessage) => {
+    if (!window.confirm('Удалить это сообщение в Telegram у обеих сторон? Отменить нельзя.')) return;
+    const key = `${dialogId}|${m.timestamp ?? ''}|${m.content}`;
+    setDeletingMsgs((cur) => new Set(cur).add(key));
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${dialogId}/delete-message`, {
+        method: 'POST',
+        body: JSON.stringify({ timestamp: m.timestamp ?? null, content: m.content }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `сервер ответил ${res.status}`);
+      }
+    } catch (err) {
+      setDeletingMsgs((cur) => { const next = new Set(cur); next.delete(key); return next; });
+      setDialogSaveError({ id: dialogId, message: err instanceof Error ? err.message : 'не удалось удалить сообщение' });
     }
   };
 
@@ -2061,6 +2083,15 @@ function DialogsTab({ campaignId, crmEnabled }: {
                                     {messageTimeLabel(m.timestamp)}
                                   </span>
                                 )}
+                                {m.role === 'assistant' && (deletingMsgs.has(`${d.id}|${m.timestamp ?? ''}|${m.content}`) ? (
+                                  <span className="shrink-0 text-[10px] text-gray-400">удаляется…</span>
+                                ) : (
+                                  <button type="button" onClick={() => void deleteBotMessage(d.id, m)}
+                                    className={`${m.timestamp ? '' : 'ml-auto '}shrink-0 cursor-pointer text-gray-300 hover:text-red-500 transition`}
+                                    title="Удалить это сообщение в Telegram">
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                ))}
                               </div>
                               {m.content}
                             </div>
