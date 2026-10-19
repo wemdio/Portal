@@ -71,7 +71,8 @@ export interface HeFetchedPage {
   url: string;
   /** Текст страницы, ≤3000 символов; пустой — HTML есть, текста нет. */
   text: string;
-  companyEvidenceLinks?: Array<{ url: string; kind: 'about' | 'contact' | 'locations' }>;
+  companyEvidenceLinks?: Array<{ url: string; kind: 'legal' | 'about' | 'contact' | 'locations' | 'services'; priority?: number; label?: string }>;
+  companyEvidenceTextTruncated?: boolean;
 }
 export type HeFetchPageFn = (url: string) => Promise<HeFetchedPage | null>;
 
@@ -550,7 +551,7 @@ export async function defaultFetchPage(
       page = await fetchSinglePage(normalized, {
         timeout: WEBSITE_FETCH_TIMEOUT_MS,
         signal,
-        guard: heFetchGuard(market),
+        guard: { ...heFetchGuard(market), ...(market === 'us' && options?.companyEvidence === true ? { preferHttpsRedirects: true } : {}) },
         maxBytes: HE_PAGE_MAX_BYTES,
         ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
         ...(options?.companyEvidence === true ? { companyEvidence: true } : {}),

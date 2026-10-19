@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { normalizeEngCountry, readHeCollectCountries } from './engCountries';
+import { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
 
-export const HE_ENG_COMPANY_QUALIFICATION_VERSION = 1;
+export { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
 
 export interface HeEngQualificationScope {
   key: string;
@@ -11,6 +12,7 @@ export interface HeEngQualificationScope {
   verticalId: string;
   hypotheses: Array<{ id: string; title: string; description: string }>;
   countries: string[];
+  countryPolicy: 'qualified_local_entity';
   /** Customer targeting constraints are data, never model instructions. */
   icp: unknown;
 }
@@ -22,7 +24,7 @@ export interface HeEngCompanyEvidence {
 }
 
 export interface HeEngCompanyVerdict {
-  version: 1;
+  version: typeof HE_ENG_COMPANY_QUALIFICATION_VERSION;
   scopeKey: string;
   companyKey: string;
   status: 'accepted' | 'rejected' | 'unverified';
@@ -34,9 +36,28 @@ export interface HeEngCompanyVerdict {
 }
 
 export interface HeEngQualificationMemo {
-  version: 1;
+  version: typeof HE_ENG_COMPANY_QUALIFICATION_VERSION;
   scopeKey: string;
   verdicts: Record<string, HeEngCompanyVerdict>;
+  /** Retryable failures are progress, not a permanent company verdict. */
+  attempts?: Record<string, HeEngQualificationAttempt>;
+  /** Reuse a paid decision only when a partial website retry has identical inputs. */
+  partial?: Record<string, { inputHash: string; verdict: HeEngCompanyVerdict }>;
+}
+
+export interface HeEngQualificationAttempt {
+  attempts: number;
+  kind: 'site_transient' | 'model_transient' | 'model_invalid' | 'site_unavailable';
+}
+
+/** A retry cannot repair changed or missing paid criteria. Never pay again implicitly. */
+export class HeEngQualificationScopeError extends Error {
+  readonly heJobTerminal = true as const;
+
+  constructor(reason: string) {
+    super(`ENG company qualification: ${reason}. Review the audience and collect a new base.`);
+    this.name = 'HeEngQualificationScopeError';
+  }
 }
 
 export interface HeEngQualificationRow {
@@ -47,6 +68,40 @@ export interface HeEngQualificationRow {
 
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function scopeKey(scope: Omit<HeEngQualificationScope, 'key'>): string {
+  return digest({ version: HE_ENG_COMPANY_QUALIFICATION_VERSION, ...scope });
+}
+
+/** JSON stored by this stage must be self-consistent before it can authorize paid work. */
+function frozenScope(raw: unknown, projectId: string, verticalId: string): HeEngQualificationScope {
+  const scope = raw as Partial<HeEngQualificationScope> | null;
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope) ||
+      scope.projectId !== projectId || scope.verticalId !== verticalId ||
+      scope.countryPolicy !== 'qualified_local_entity' ||
+      typeof scope.key !== 'string' || !Object.hasOwn(scope, 'icp') ||
+      !Array.isArray(scope.hypotheses) || scope.hypotheses.length === 0 ||
+      scope.hypotheses.some((h) => !h || typeof h.id !== 'string' || !h.id ||
+        typeof h.title !== 'string' || !h.title.trim() || typeof h.description !== 'string') ||
+      new Set(scope.hypotheses.map((h) => h.id)).size !== scope.hypotheses.length ||
+      !Array.isArray(scope.countries) || scope.countries.some((c) => typeof c !== 'string' || normalizeEngCountry(c) !== c) ||
+      new Set(scope.countries).size !== scope.countries.length) {
+    throw new HeEngQualificationScopeError('saved criteria are invalid');
+  }
+  const criteria = { projectId, verticalId, hypotheses: scope.hypotheses, countries: scope.countries,
+    countryPolicy: 'qualified_local_entity' as const, icp: scope.icp };
+  if (scopeKey(criteria) !== scope.key) throw new HeEngQualificationScopeError('saved criteria do not match their fingerprint');
+  return { key: scope.key, ...criteria };
+}
+
+function assertMemoScope(info: Record<string, unknown>, scope: HeEngQualificationScope): void {
+  if (!Object.hasOwn(info, 'eng_company_qualification')) return;
+  const memo = info.eng_company_qualification as Partial<HeEngQualificationMemo> | null;
+  if (!memo || memo.version !== HE_ENG_COMPANY_QUALIFICATION_VERSION || memo.scopeKey !== scope.key ||
+      !memo.verdicts || typeof memo.verdicts !== 'object' || Array.isArray(memo.verdicts)) {
+    throw new HeEngQualificationScopeError('saved progress uses different or invalid criteria');
+  }
 }
 
 export function heEngCompanyKey(row: HeEngQualificationRow): string {
@@ -63,10 +118,19 @@ export async function readHeEngQualificationScope(
     project: { id: string; brief?: Record<string, unknown> | null };
     verticalId: string;
     collectInfo?: object | null;
+    /** Collection resumes its paid snapshot; audience use must still match current criteria. */
+    mode?: 'collection';
   },
 ): Promise<HeEngQualificationScope> {
   const { project, verticalId } = input;
   const info = (input.collectInfo ?? {}) as Record<string, unknown>;
+  const saved = Object.hasOwn(info, 'eng_company_qualification_scope')
+    ? frozenScope(info.eng_company_qualification_scope, project.id, verticalId)
+    : null;
+  if (saved) {
+    assertMemoScope(info, saved);
+    if (input.mode === 'collection') return saved;
+  }
   const { data, error } = await db.from('he_hypotheses')
     .select('id,title,description,status')
     .eq('project_id', project.id).eq('vertical_id', verticalId).neq('status', 'rejected');
@@ -81,34 +145,40 @@ export async function readHeEngQualificationScope(
     : info.hypothesis_ids;
   if (idsValue !== undefined && idsValue !== null) {
     if (!Array.isArray(idsValue) || idsValue.length === 0 || idsValue.some((id) => typeof id !== 'string' || !id)) {
-      throw new Error('ENG company qualification: selected hypotheses are invalid; collect the base again');
+      throw new HeEngQualificationScopeError('selected hypotheses are invalid');
     }
     const ids = new Set(idsValue as string[]);
     candidates = candidates.filter((h) => ids.has(h.id));
     if (candidates.length !== ids.size) {
-      throw new Error('ENG company qualification: selected hypotheses changed; collect the base again');
+      throw new HeEngQualificationScopeError('selected hypotheses changed');
     }
   } else {
     const accepted = candidates.filter((h) => h.status === 'accepted');
     if (accepted.length) candidates = accepted;
   }
   if (!candidates.length || candidates.some((h) => !h.title?.trim())) {
-    throw new Error('ENG company qualification: no selected hypotheses; collect the base again');
+    throw new HeEngQualificationScopeError('no selected hypotheses');
   }
   const hypotheses = candidates.map((h) => ({ id: h.id, title: h.title, description: h.description ?? '' }))
     .sort((a, b) => a.id.localeCompare(b.id));
   const rawCountries = Object.hasOwn(info, 'countries') ? info.countries : project.brief?.collect_countries;
   if (rawCountries !== undefined && rawCountries !== null &&
       (!Array.isArray(rawCountries) || rawCountries.some((c) => typeof c !== 'string' || !c.trim()))) {
-    throw new Error('ENG company qualification: target countries are invalid');
+    throw new HeEngQualificationScopeError('target countries are invalid');
   }
   const countries = readHeCollectCountries(rawCountries).countries;
   if (countries.some((c) => normalizeEngCountry(c) !== c)) {
-    throw new Error('ENG company qualification: target countries are invalid');
+    throw new HeEngQualificationScopeError('target countries are invalid');
   }
   const icp = project.brief?.icp ?? null;
-  const criteria = { version: HE_ENG_COMPANY_QUALIFICATION_VERSION, projectId: project.id, verticalId, hypotheses, countries, icp };
-  return { key: digest(criteria), projectId: project.id, verticalId, hypotheses, countries, icp };
+  const criteria = { projectId: project.id, verticalId, hypotheses, countries,
+    countryPolicy: 'qualified_local_entity' as const, icp };
+  const current = { key: scopeKey(criteria), ...criteria };
+  if (saved && saved.key !== current.key) throw new HeEngQualificationScopeError('the audience criteria changed after collection');
+  // A legacy memo has no full snapshot. It can be adopted only when its exact
+  // fingerprint still matches; changing criteria must never silently reset it.
+  assertMemoScope(info, current);
+  return saved ?? current;
 }
 
 /** Evidence belongs to this company AND this exact target, not another base. */
@@ -132,7 +202,7 @@ export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQu
 
 /** Every provider upload in this launch passed company qualification. */
 export interface HeEngQualifiedLaunchStamp {
-  version: 1;
+  version: typeof HE_ENG_COMPANY_QUALIFICATION_VERSION;
   scope_key: string;
   base_id: string;
 }

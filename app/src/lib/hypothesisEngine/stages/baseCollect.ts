@@ -203,10 +203,15 @@ import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
 import { runHeEngCompanyQualification } from '../engCompanyQualification';
 import {
+  HE_ENG_COMPANY_QUALIFICATION_VERSION,
+  HeEngQualificationScopeError,
   heEngCompanyKey,
   heEngCompanyQualified,
+  heEngLaunchQualified,
+  heEngScopeWithinCurrentCountries,
   readHeEngQualificationScope,
   type HeEngQualificationMemo,
+  type HeEngQualificationScope,
 } from '../engCompanyQualificationPolicy';
 import { projectMarket, type HeMarket } from '../market';
 // Метки pdl-среза → значения каталога (только market='us', fail-open).
@@ -1090,6 +1095,8 @@ export interface HeSliceProbe {
 export interface HeCollectInfo {
   /** ENG client only: checkpointed company/site evidence, separate from the legacy gate. */
   eng_company_qualification?: HeEngQualificationMemo;
+  /** Full criteria frozen before the first company check, reused by every continuation. */
+  eng_company_qualification_scope?: HeEngQualificationScope;
   eng_company_qualification_total?: number;
   eng_company_qualification_progress?: { total: number; checked: number; excluded: number; updated_at: string };
   /**
@@ -4747,6 +4754,44 @@ async function loadOtherBaseExclusionKeys(
 const HE_DNC_READ_MAX_FAILURES = 6;
 const HE_DNC_REQUEUE_MS = 300_000;
 
+/** Do not buy a refill that the launched audience's qualification guard will refuse. */
+async function readHeEngRefillQualificationTarget(
+  ctx: HeStageContext,
+  project: HeProject,
+  verticalId: string,
+  info: HeCollectInfo,
+): Promise<HeEngQualificationScope | null> {
+  const { data: templates, error } = await ctx.supabase.from('he_templates')
+    .select('id, base_id, launch_info, created_at')
+    .eq('vertical_id', verticalId).not('launch_info', 'is', null);
+  if (error) throw new Error(`ENG company qualification: refill campaign could not be read: ${error.message}`);
+  const preferred = typeof info.campaign_id === 'string' && info.campaign_id ? info.campaign_id : null;
+  const pick = pickRefillTemplate((templates ?? []) as Array<Record<string, unknown>>, preferred);
+  const target = (templates ?? []).find((row) => row.id === pick?.templateId);
+  if (!target || typeof target.base_id !== 'string') {
+    throw new HeEngQualificationScopeError('no qualified campaign is available for refill');
+  }
+  const { data: origin, error: originError } = await ctx.supabase.from('he_bases')
+    .select('id, source, collect_info')
+    .eq('id', target.base_id).eq('project_id', project.id).eq('vertical_id', verticalId).maybeSingle();
+  if (originError) throw new Error(`ENG company qualification: campaign base could not be read: ${originError.message}`);
+  if (!origin) throw new HeEngQualificationScopeError('the campaign base is unavailable');
+  // The campaign was launched from a manual upload; preserve that existing path.
+  if (origin.source !== 'auto') return null;
+  const targetScope = await readHeEngQualificationScope(ctx.supabase, {
+    project, verticalId, collectInfo: origin.collect_info as Record<string, unknown> | null,
+  });
+  if (!heEngLaunchQualified(target.launch_info, targetScope, target.base_id) ||
+      !heEngScopeWithinCurrentCountries(targetScope, project.brief)) {
+    throw new HeEngQualificationScopeError('the campaign requires a new qualified base before refill');
+  }
+  const ownScope = await readHeEngQualificationScope(ctx.supabase, { project, verticalId, collectInfo: info });
+  if (ownScope.key !== targetScope.key) {
+    throw new HeEngQualificationScopeError('refill criteria differ from the launched audience');
+  }
+  return ownScope;
+}
+
 /**
  * Чей список Do not contact действует на сборке. Первая сборка —
  * `he_projects.created_by` (ENG-клиент). Ночной добор — владелец пресета
@@ -6533,6 +6578,29 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const info: HeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
 
+  // Resume paid criteria before entering any earlier collection phases. A memo
+  // from before snapshots may be adopted only if its fingerprint still matches.
+  // In particular, a changed brief must not silently buy the same checks again.
+  let companyQualificationScope: HeEngQualificationScope | undefined;
+  if (engEmailPolicy && (Object.hasOwn(info, 'eng_company_qualification_scope') ||
+      Object.hasOwn(info, 'eng_company_qualification'))) {
+    companyQualificationScope = await readHeEngQualificationScope(ctx.supabase, {
+      project, verticalId: base.vertical_id, collectInfo: info, mode: 'collection',
+    });
+    if (!info.eng_company_qualification_scope) {
+      info.eng_company_qualification_scope = companyQualificationScope;
+      if (!(await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true }))) {
+        throw new Error('ENG company qualification: collection is no longer active');
+      }
+    }
+  }
+  if (engEmailPolicy && isRefill) {
+    // This is before sizing, plan generation, provider fetches and constructor
+    // dispatch. The append guard remains in place for changes during this tick.
+    const refillScope = await readHeEngRefillQualificationTarget(ctx, project, base.vertical_id, info);
+    if (refillScope) companyQualificationScope = refillScope;
+  }
+
   // ─── СПИСОК СТРАН СБОРА (§1A плана docs/handoff/2026-10-16-eng-countries) ───
   // Только market='us'. Тик без плана читает бриф проекта (fail-closed:
   // испорченный ключ — заглушка, которая не пропускает ничего) и замораживает
@@ -8256,14 +8324,15 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // the constructor keeps the source rows for diagnostics.
     storedRows = selectHeEngEmailRows(storedRows);
     if (storedRows.length > 0) {
-      const scope = await readHeEngQualificationScope(ctx.supabase, {
-        project, verticalId: base.vertical_id, collectInfo: info,
+      const scope = companyQualificationScope ?? await readHeEngQualificationScope(ctx.supabase, {
+        project, verticalId: base.vertical_id, collectInfo: info, mode: 'collection',
       });
       const candidates = storedRows.length;
       const companyKeys = new Set(storedRows.map(heEngCompanyKey));
       info.eng_company_qualification_total = companyKeys.size;
-      if (info.eng_company_qualification?.scopeKey !== scope.key || info.eng_company_qualification.version !== 1) {
-        info.eng_company_qualification = { version: 1, scopeKey: scope.key, verdicts: {} };
+      info.eng_company_qualification_scope = scope;
+      if (!info.eng_company_qualification) {
+        info.eng_company_qualification = { version: HE_ENG_COMPANY_QUALIFICATION_VERSION, scopeKey: scope.key, verdicts: {} };
       }
       const checkpoint = async (memo: HeEngQualificationMemo) => {
         info.eng_company_qualification = memo;
@@ -8283,7 +8352,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       usage.tokensUsed += qualified.tokensUsed;
       usage.costUsd += qualified.costUsd;
       if (!qualified.complete) {
-        await requeueSelf(ctx, job, 1000);
+        await requeueSelf(ctx, job, qualified.retryAfterMs ?? 1000);
         return {
           result: { waiting: true, base_id: baseId, company_qualification: 'processing' },
           tokensUsed: usage.tokensUsed,
