@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { isValidUuid } from '@/lib/apiValidation';
+import { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
 
 const COLLECTION_STATUSES = ['pending', 'processing', 'completed', 'failed', 'cancelled'] as const;
 const COLLECTION_STEPS = [
@@ -64,12 +65,14 @@ export function engCompanyQualificationSummary(info: Row): EngCompanyQualificati
   const total = count(info.eng_company_qualification_total);
   const memo = record(info.eng_company_qualification);
   const verdicts = record(memo?.verdicts);
-  if (total === null || memo?.version !== 1 || typeof memo.scopeKey !== 'string' || !memo.scopeKey || !verdicts) return null;
+  // Old summaries are safe to display; only the current proof version can authorize sending.
+  if (total === null || !memo || (memo.version !== 1 && memo.version !== HE_ENG_COMPANY_QUALIFICATION_VERSION) ||
+      typeof memo.scopeKey !== 'string' || !memo.scopeKey || !verdicts) return null;
   let checked = 0;
   let excluded = 0;
   for (const [key, raw] of Object.entries(verdicts)) {
     const verdict = record(raw);
-    if (!verdict || verdict.version !== 1 || verdict.scopeKey !== memo.scopeKey || verdict.companyKey !== key ||
+    if (!verdict || verdict.version !== memo.version || verdict.scopeKey !== memo.scopeKey || verdict.companyKey !== key ||
       !['accepted', 'rejected', 'unverified'].includes(String(verdict.status))) continue;
     checked += 1;
     if (verdict.status !== 'accepted') excluded += 1;

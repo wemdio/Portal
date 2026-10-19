@@ -71,7 +71,8 @@ export interface HeFetchedPage {
   url: string;
   /** Текст страницы, ≤3000 символов; пустой — HTML есть, текста нет. */
   text: string;
-  companyEvidenceLinks?: Array<{ url: string; kind: 'about' | 'contact' | 'locations' }>;
+  companyEvidenceLinks?: Array<{ url: string; kind: 'legal' | 'about' | 'contact' | 'locations' | 'services'; priority?: number; label?: string }>;
+  companyEvidenceTextTruncated?: boolean;
 }
 export type HeFetchPageFn = (url: string) => Promise<HeFetchedPage | null>;
 
