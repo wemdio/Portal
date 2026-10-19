@@ -62,7 +62,8 @@ import {
 } from '@/lib/nameCleanupProtocol';
 import { fatalAiAccountError } from '@/lib/openrouter/client';
 import {
-  TaJevBreaker, scoreTaWithJev, taJevCut, taJevHasFacts, taJevMinLetters, taJevModel, type TaJevCallResult,
+  TaJevBreaker, scoreTaWithJev, taJevCut, taJevHasFacts, taJevMinConfidence, taJevMinLetters, taJevModel,
+  type TaJevCallResult,
 } from '@/lib/taScoringJev';
 
 // Re-export: исторический дом парсеров — здесь; тесты и внешние импортёры
@@ -1422,12 +1423,14 @@ export interface TaScoringTelemetry {
   errors: Array<{ reason: string; count: number }>;
   /**
    * Только при оценке через Jev: запросы, оценённые им компании, отданные
-   * DeepSeek после сбоя Jev и отданные DeepSeek сразу — почти без фактов.
+   * DeepSeek после сбоя Jev, сразу — почти без фактов, и после неуверенного
+   * ответа Jev.
    */
   jev_requests?: number;
   jev_companies?: number;
   jev_fallback_companies?: number;
   jev_thin_companies?: number;
+  jev_uncertain_companies?: number;
   jev_prompt_tokens?: number;
   jev_cost_usd?: number;
 }
@@ -1588,16 +1591,19 @@ export async function stepTAScore(
   const jevBreaker = options?.jev ? new TaJevBreaker() : null;
   const jevCut = taJevCut();
   const jevMinLetters = taJevMinLetters();
+  const jevMinConfidence = taJevMinConfidence();
   if (jevBreaker) {
     telemetry.jev_requests = 0;
     telemetry.jev_companies = 0;
     telemetry.jev_fallback_companies = 0;
     telemetry.jev_thin_companies = 0;
+    telemetry.jev_uncertain_companies = 0;
     telemetry.jev_prompt_tokens = 0;
     telemetry.jev_cost_usd = 0;
     console.log(
       `[ta_scoring] оценка через Jev (${taJevModel()}, порог ${jevCut}); без ответа Jev ` +
-        `и без фактов (меньше ${jevMinLetters} букв описания) — DeepSeek`,
+        `без фактов (меньше ${jevMinLetters} букв описания) и с неуверенным ответом ` +
+        `(ни один уровень не набрал ${jevMinConfidence}) — DeepSeek`,
     );
   }
   const publishTelemetry = () => {
@@ -1756,11 +1762,12 @@ export async function stepTAScore(
           brief: brief.slice(0, 4000),
           companies: jevCandidates,
           cut: jevCut,
+          minConfidence: jevMinConfidence,
           title: 'Portal - Base Constructor TA Scoring (Jev)',
         });
       } catch (err) {
         result = {
-          verdicts: new Map(), error: err instanceof Error ? err.message : String(err),
+          verdicts: new Map(), uncertain: 0, error: err instanceof Error ? err.message : String(err),
           attempts: 0, durationMs: 0, promptTokens: 0, costUsd: 0,
         };
       }
@@ -1776,8 +1783,9 @@ export async function stepTAScore(
       telemetry.api_duration_ms += result.durationMs;
       telemetry.jev_requests = (telemetry.jev_requests ?? 0) + 1;
       telemetry.jev_companies = (telemetry.jev_companies ?? 0) + result.verdicts.size;
+      telemetry.jev_uncertain_companies = (telemetry.jev_uncertain_companies ?? 0) + result.uncertain;
       telemetry.jev_fallback_companies = (telemetry.jev_fallback_companies ?? 0)
-        + jevCandidates.length - result.verdicts.size;
+        + jevCandidates.length - result.verdicts.size - result.uncertain;
       telemetry.jev_prompt_tokens = (telemetry.jev_prompt_tokens ?? 0) + result.promptTokens;
       telemetry.jev_cost_usd = (telemetry.jev_cost_usd ?? 0) + result.costUsd;
       if (result.model && /^[\w./:-]{1,120}$/.test(result.model)
@@ -1988,7 +1996,8 @@ export async function stepTAScore(
   if (jevBreaker) {
     console.log(
       `[ta_scoring] Jev: оценил ${telemetry.jev_companies} компаний, DeepSeek — ${telemetry.jev_fallback_companies} ` +
-        `после сбоя Jev и ${telemetry.jev_thin_companies} без фактов; ` +
+        `после сбоя Jev, ${telemetry.jev_thin_companies} без фактов и ` +
+        `${telemetry.jev_uncertain_companies} с неуверенным ответом; ` +
         `запросов ${telemetry.jev_requests}, $${(telemetry.jev_cost_usd ?? 0).toFixed(4)}` +
         (jevBreaker.disabledReason ? `; выключен по ходу: ${jevBreaker.disabledReason}` : ''),
     );
