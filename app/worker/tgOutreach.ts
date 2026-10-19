@@ -1,5 +1,5 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
-import { runCampaignLoop, refetchEmptyDialogs } from '@/lib/tgOutreach/campaignLoop';
+import { runCampaignLoop, refetchEmptyDialogs, deleteDialogMessages } from '@/lib/tgOutreach/campaignLoop';
 import { runWarmupLoop } from '@/lib/tgOutreach/warmup/loop';
 import { writeHeartbeat } from '@/lib/tgOutreach/gramClient';
 import {
@@ -168,7 +168,7 @@ const ORPHAN_START_JOB_GRACE_MS = 2 * 60_000;
 // до истечения (см. resumeRunningCampaigns:249 — auto-completes stale через
 // 5 мин). Инцидент 29.07.2026: 5 running кампаний → 4 стоп-клика подряд ушли
 // в stale, кампании продолжали работать.
-export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages', 'warmup_stop'] as const;
+export const CONTROL_ACTIONS = ['stop', 'restart', 'refetch_messages', 'delete_messages', 'warmup_stop'] as const;
 export const START_ACTIONS = ['start', 'warmup_start'] as const;
 
 /**
@@ -354,6 +354,20 @@ async function handleRestartJob(job: { id: string; campaign_id: string }) {
   await handleStartJob(job);
 }
 
+async function handleDeleteMessagesJob(job: { id: string; campaign_id: string }) {
+  const { data: row } = await db.from('tg_outreach_jobs').select('payload').eq('id', job.id).maybeSingle();
+  const payload = (row?.payload ?? null) as { dialog_id?: string; timestamp?: string; content?: string } | null;
+  try {
+    if (!payload?.dialog_id || !payload.content) throw new Error('В задаче нет диалога или текста сообщения');
+    await deleteDialogMessages(job.campaign_id, db, { dialogId: payload.dialog_id, timestamp: payload.timestamp ?? null, content: payload.content });
+    await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log('error', `Delete messages failed for ${job.campaign_id}: ${errMsg}`);
+    await db.from('tg_outreach_jobs').update({ status: 'failed', error_message: errMsg, finished_at: new Date().toISOString() }).eq('id', job.id);
+  }
+}
+
 async function handleRefetchJob(job: { id: string; campaign_id: string }) {
   const campaignId = job.campaign_id;
   log('info', `Refetch messages for campaign ${campaignId}`);
@@ -484,6 +498,9 @@ async function dispatchJob(job: { id: string; campaign_id: string; action: strin
         break;
       case 'refetch_messages':
         await handleRefetchJob(job);
+        break;
+      case 'delete_messages':
+        await handleDeleteMessagesJob(job);
         break;
       case 'warmup_start':
         await handleWarmupStartJob(job);

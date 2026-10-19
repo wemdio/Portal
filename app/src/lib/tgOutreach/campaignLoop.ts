@@ -3229,3 +3229,102 @@ export async function refetchEmptyDialogs(
   await disconnectAll(clients);
   log('info', `Refetch завершён: ${fetched} обновлено, ${errors} ошибок из ${total} диалогов`);
 }
+
+/**
+ * Удалить в Telegram (у обеих сторон) одно сообщение, которое мы написали
+ * собеседнику, и пересобрать переписку из Telegram. Только базой портала не
+ * обойтись: воркер каждый раз читает историю заново и вернул бы сообщение.
+ *
+ * Сообщение ищем среди исходящих по тексту и ближайшей дате: в базе у него
+ * нет id из Telegram.
+ */
+export async function deleteDialogMessages(
+  campaignId: string,
+  db: SupabaseClient,
+  target: { dialogId: string; timestamp: string | null; content: string },
+) {
+  const log: LogFn = (level, msg) => {
+    console.log(`[tg-outreach-delete][${campaignId.slice(0, 8)}][${level}] ${msg}`);
+    void writeLog(db, campaignId, level, msg);
+  };
+
+  const { data: campaign } = await db.from('tg_outreach_campaigns').select('*').eq('id', campaignId).single();
+  if (!campaign) throw new Error('Кампания не найдена');
+  const tg = campaign.telegram_settings as TelegramSettings;
+
+  const { data: dialog } = await db
+    .from('tg_outreach_dialogs')
+    .select('id, tg_user_id, tg_username, account_id, tg_is_bot')
+    .eq('id', target.dialogId)
+    .eq('campaign_id', campaignId)
+    .maybeSingle();
+  if (!dialog) throw new Error('Диалог не найден');
+
+  const { data: accounts } = await db
+    .from('tg_outreach_accounts')
+    .select('*')
+    .eq('id', dialog.account_id as string)
+    .eq('is_active', true);
+  if (!accounts?.length) throw new Error('Аккаунт диалога неактивен — удалить сообщение нельзя');
+
+  const { data: proxies } = await db
+    .from('tg_outreach_proxies')
+    .select('*')
+    .eq('campaign_id', campaignId)
+    .eq('is_active', true);
+
+  const clients = await buildClients(accounts as OutreachAccount[], proxies ?? [], log, (p: string) => downloadSessionToTemp(db, p), db);
+  if (clients.length === 0) throw new Error('Аккаунт не подключился к Telegram');
+
+  try {
+    const client = clients[0].client;
+    const tgUserId = dialog.tg_user_id as number;
+    const tgUsername = dialog.tg_username as string | null;
+    let entity;
+    try {
+      entity = await withTimeout(client.getEntity(tgUserId), TG_RESOLVE_TIMEOUT_MS, 'поиск собеседника по id');
+    } catch {
+      if (!tgUsername) throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
+      entity = await withTimeout(client.getEntity(tgUsername), TG_RESOLVE_TIMEOUT_MS, 'поиск собеседника по юзернейму');
+    }
+
+    const history = await withTimeout(
+      client.getMessages(entity, { limit: tg.history_limit }),
+      TG_HISTORY_TIMEOUT_MS,
+      'чтение истории диалога',
+    );
+
+    const wantedText = target.content.trim();
+    const wantedAt = target.timestamp ? Date.parse(target.timestamp) : NaN;
+    const candidates = history
+      .filter((m) => m.out && (m.message ?? '').trim() === wantedText)
+      .sort((a, b) => {
+        if (!Number.isFinite(wantedAt)) return 0;
+        return Math.abs((a.date ?? 0) * 1000 - wantedAt) - Math.abs((b.date ?? 0) * 1000 - wantedAt);
+      });
+    const found = candidates[0];
+    if (!found) throw new Error('Сообщение не нашлось в Telegram — возможно, его уже удалили');
+
+    await withTimeout(
+      client.deleteMessages(entity, [found.id], { revoke: true }),
+      TG_SEND_TIMEOUT_MS,
+      'удаление сообщения',
+    );
+    log('info', `Удалил в Telegram сообщение нашего аккаунта для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
+
+    const fresh = await withTimeout(
+      client.getMessages(entity, { limit: tg.history_limit }),
+      TG_HISTORY_TIMEOUT_MS,
+      'чтение истории диалога',
+    );
+    const label = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
+    const chatMessages = await extractMessagesFromHistory(client, [...fresh].reverse(), log, label);
+    await upsertDialog(
+      db, campaignId, dialog.account_id as string,
+      tgUserId, tgUsername, chatMessages, undefined,
+      { tgIsBot: Boolean(dialog.tg_is_bot) },
+    );
+  } finally {
+    await disconnectAll(clients);
+  }
+}
