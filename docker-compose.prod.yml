@@ -13,8 +13,13 @@ services:
       - transcribe-worker
     env_file:
       - .env
+    # Только loopback: снаружи портал доступен через nginx (proxy_pass http://127.0.0.1:3000
+    # во всех vhost), там же X-Real-IP = $remote_addr. С "3000:3000" порт был открыт в интернет
+    # (Docker публикует мимо ufw), и прямой запрос на :3000 сам задавал X-Real-IP — обход
+    # лимитов /api/demo-lead и /api/signup. Контейнеры ходят на portal:3000 по сети compose.
+    # Правка этого файла = полный деплой; на сервере после неё нужен --force-recreate portal.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.env:/app/host.env

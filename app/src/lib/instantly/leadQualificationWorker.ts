@@ -46,7 +46,7 @@ import type { Email, Lead } from './types';
 import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { loadCachedLeadContacts } from './cachedLeadContacts';
 import { senderDisplayLeadName } from './leadReplyContacts';
-import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
+import { resolveEffectiveReplyOwner, resolveOriginalCompanyContactEmail } from './replyOwnershipResolver';
 import { resolveSentHandoffClientEcho } from './clientEchoOwner';
 import { resolveInstantlyAccountId } from './accounts';
 import { enqueueOutreachOsReplyLead, OUTREACHOS_CLIENT_USER_ID } from '@/lib/outreachOsLeads/process';
@@ -1993,13 +1993,44 @@ export async function qualifyOneReply(
   // The loaded base also lives in payload/custom_variables. Reply fallback
   // retains the responder's signature, never quoted outbound contact details.
   // Phone/site belong to the board, not instantly_lead_qualifications.
-  const { leadName, companyName, phone: leadPhone, website: leadWebsite } = resolveLeadContactMetadata({
+  const metadataInput = {
     leads: leadMetadata,
     cachedLeads,
     leadEmail,
     campaignId,
     replyBody: (result.threadContext?.replyEmail ?? effectiveReply).body,
-  });
+  };
+  let contactMetadata = resolveLeadContactMetadata(metadataInput);
+  if ((customMatch || result.isLead) && (!contactMetadata.companyName || !contactMetadata.website) &&
+      (!result.threadContext || result.threadContext.replyEmail.id === reply.id)) {
+    const originalEmail = resolveOriginalCompanyContactEmail(reply, ctx, campaignId);
+    if (originalEmail) {
+      // Optional company-only lookup. Never replace the actual responder's
+      // address/name/phone or fail qualification when enrichment is unavailable.
+      let originalLeads: Lead[] = [];
+      try {
+        originalLeads = await loadCachedLeadContacts(db, campaignId, originalEmail);
+      } catch (error) {
+        workerLog('warn', 'Original lead company cache unavailable; using API', error);
+      }
+      try {
+        const fromCache = resolveLeadContactMetadata({ ...metadataInput,
+          originalCompanyContact: { email: originalEmail, leads: originalLeads } });
+        contactMetadata = fromCache;
+        if (!fromCache.companyName || !fromCache.website) {
+          const fetched = await instantly.getLeadsByEmail({ email: originalEmail, campaign_id: campaignId },
+            { accountId, consumer: 'qualification_company', retryRateLimits: false,
+              timeoutMs: 10_000, timeoutIncludesBody: true });
+          originalLeads = [...(Array.isArray(fetched) ? fetched : []), ...originalLeads];
+        }
+        contactMetadata = resolveLeadContactMetadata({ ...metadataInput,
+          originalCompanyContact: { email: originalEmail, leads: originalLeads } });
+      } catch (error) {
+        workerLog('warn', 'Original lead company metadata unavailable', error);
+      }
+    }
+  }
+  const { leadName, companyName, phone: leadPhone, website: leadWebsite } = contactMetadata;
 
   const replyText = result.threadContext
     ? getBodyText(result.threadContext.replyEmail.body)

@@ -942,6 +942,68 @@ describe('VE2 base collection enqueue recovery', () => {
       }
     }
 
+    // A coordinator DB response is not the paid worker's outcome. Keep the
+    // same request across a gateway blip; real worker failures remain terminal.
+    for (const mode of ['save-response', 'save-rejected', 'release-response', 'queue-response', 'read-rejected', 'permission', 'lease', 'failed-worker'] as const) {
+      const gateway = 'An invalid response was received from the upstream server';
+      let claims = 0;
+      let saves = 0;
+      const save = jest.fn((_params: Record<string, unknown>) => {
+        saves++;
+        if (saves === (mode === 'release-response' ? 2 : 1)) {
+          if (mode === 'save-rejected') throw new TypeError('fetch failed');
+          if (mode === 'save-response' || mode === 'release-response') return { data: null, error: { message: gateway } };
+          if (mode === 'permission') return { data: null, error: { message: 'permission denied for function ve_save_outreach_preparation' } };
+          if (mode === 'lease') return { data: false };
+        }
+        return { data: true };
+      });
+      const preparation = { project_id: input.projectId, hypothesis_id: 'h1', base_id: 'live-base',
+        template_id: null, status: 'collecting', language: 'ru', claim_token: 'lease' };
+      const runningDb = createMockSupabase({ tables: {
+        ve_hypotheses: [{ id: 'h1', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+        ve_bases: [{ id: 'live-base', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+          status: mode === 'queue-response' ? 'analyzed' : 'collecting', row_count: 32, collection_mode: 'preview' }],
+        ve_jobs: [{ id: 'live-job', project_id: input.projectId, stage: 'base_collect',
+          status: mode === 'failed-worker' ? 'failed' : mode === 'queue-response' ? 'done' : 'running',
+          error: mode === 'failed-worker' ? gateway : null, payload: { base_id: 'live-base' } }],
+        ve_templates: [],
+      }, rpcHandlers: {
+        ve_claim_outreach_preparation: () => ({ data: claims++ === 0 ? [preparation] : [] }),
+        ve_save_outreach_preparation: save,
+        ve_enqueue_outreach_preparation_job: () => ({ data: null, error: { message: gateway } }),
+      } });
+      const originalRows = structuredClone({ bases: runningDb.getRows('ve_bases'), jobs: runningDb.getRows('ve_jobs') });
+      if (mode === 'read-rejected') {
+        const from = runningDb.from.bind(runningDb);
+        jest.spyOn(runningDb, 'from').mockImplementation((table) => {
+          const query = from(table);
+          if (table === 've_jobs') jest.spyOn(query, 'maybeSingle').mockRejectedValueOnce(new TypeError('fetch failed'));
+          return query;
+        });
+      }
+      await runVeOutreachPreparations(runningDb as unknown as SupabaseClient);
+      if (mode === 'lease') expect(save).toHaveBeenCalledTimes(1);
+      else expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+        p_status: mode === 'permission' || mode === 'failed-worker' ? 'error' : 'collecting',
+        p_base_id: 'live-base', p_release: true,
+      }), expect.anything());
+      expect(runningDb.getRows('ve_bases')).toEqual(originalRows.bases);
+      expect(runningDb.getRows('ve_jobs')).toEqual(originalRows.jobs);
+      expect(runningDb.inserts).toHaveLength(0);
+      if (mode !== 'queue-response') expect(runningDb.rpcCalls.some((call) => call.fn === 've_enqueue_outreach_preparation_job')).toBe(false);
+      if (mode === 'save-response' || mode === 'save-rejected' || mode === 'release-response') {
+        // A later healthy poll observes the existing worker, without another
+        // base/job or an implicit collection retry permission.
+        claims = 0;
+        await runVeOutreachPreparations(runningDb as unknown as SupabaseClient);
+        expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ p_status: 'collecting', p_error: null }), expect.anything());
+        expect(save.mock.calls.some(([params]) => params.p_status === 'error' || params.p_status === 'pending')).toBe(false);
+        expect(runningDb.getRows('ve_jobs')).toEqual(originalRows.jobs);
+        expect(runningDb.inserts).toHaveLength(0);
+      }
+    }
+
     // A busy coordinator advances beyond two preparations per tick, but never
     // spins around a short queue redoing the same preparation repeatedly.
     for (const size of [2, 50]) {
