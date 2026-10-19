@@ -42,6 +42,8 @@ function isQuoteStart(line: string): boolean {
     || /^On\s.*\b\d{4}\b.*\d{1,2}:\d{2}/i.test(t)
     || /\bwrote:$/i.test(t)
     || /(?:написал|писал|пишет)(?:а|\(а\))?:$/i.test(t)
+    // «Tatiana Kovaleva писал(а) 2026-10-16 14:26:» — дата между «писал» и двоеточием.
+    || /(?:написал|писал|пишет)(?:а|\(а\))?\s.*\d{1,2}:\d{2}(?::\d{2})?:$/i.test(t)
     || /\d{1,2}:\d{2}.*<[^<>\s]+@[^<>\s]+>:$/.test(t)
     || LEAD_DATED_ATTRIBUTION.test(t)
     || LEAD_DATE_FIRST_ATTRIBUTION.test(t)
@@ -58,7 +60,16 @@ function isQuoteStart(line: string): boolean {
 function cutQuotedHistory(text: string): string {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const cut = lines.findIndex(isQuoteStart);
-  return (cut > 0 ? lines.slice(0, cut) : lines).join('\n').trim();
+  if (cut > 0) return lines.slice(0, cut).join('\n').trim();
+  if (cut === 0) {
+    // Ответ под цитатой (19.10.2026: «Не интересно» стояло в самом низу, после
+    // всей процитированной ветки) — берём то, что ниже последней строки с «>».
+    let last = -1;
+    lines.forEach((line, i) => { if (line.trim().startsWith('>')) last = i; });
+    const below = last >= 0 ? lines.slice(last + 1).join('\n').trim() : '';
+    if (below) return below;
+  }
+  return lines.join('\n').trim();
 }
 
 /** Текстовая версия тоже приходит с &gt; вместо «>»; теги в ней не трогаем — «<a@b>» это адрес. */
