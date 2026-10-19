@@ -500,15 +500,16 @@ export function segmentVariantsWarning(sequence: HeLaunchSequence): string | nul
  * (`stages/baseCollect.ts`). Пустая ячейка означает «вердикта нет»: шаг не
  * дошёл до адреса или не запускался вовсе.
  *
- * Пропускаем ТОЛЬКО 'ok'. Почему не catch_all: такой домен подтверждает на
- * SMTP любой ящик, поэтому несуществующий адрес не отваливается на
- * рукопожатии, а превращается в поздний hard bounce или в попадание в
- * спам-ловушку — то есть бьёт уже по репутации домена отправителя. Обратной
- * связи по баунсам у движка нет ни в одном из контуров, чинить репутацию
- * будет нечем. Внутренний V2 катает catch_all осознанно (свои домены, ручной
- * присмотр специалиста) — для клиентских доменов это не аргумент.
+ * По умолчанию пропускаем только 'ok': правило RU и legacy staff не меняется.
+ * Подтверждённый ENG-клиент может также отправлять 'catch_all', с приоритетом
+ * 'ok'. Вызывающий передаёт allowCatchAll только после проверки владельца
+ * (project us + profile role client / market eng), а не по рынку одному.
  */
 export const HE_LAUNCH_ACCEPTED_EMAIL_STATUSES: readonly string[] = ['ok'];
+
+export interface HeLaunchEmailPolicy {
+  allowCatchAll?: boolean;
+}
 
 /**
  * Что вердикт строки говорит о её адресе: допускаем / отклоняем / вердикта
@@ -524,11 +525,20 @@ export const HE_LAUNCH_ACCEPTED_EMAIL_STATUSES: readonly string[] = ['ok'];
 export type HeLaunchEmailVerdict = 'accepted' | 'rejected' | 'missing';
 
 /** Вердикт по значению `_email_status` строки базы (регистр и пробелы неважны). */
-export function heLaunchEmailVerdict(rawStatus: unknown): HeLaunchEmailVerdict {
+export function heLaunchEmailVerdict(rawStatus: unknown, opts: HeLaunchEmailPolicy = {}): HeLaunchEmailVerdict {
   if (typeof rawStatus !== 'string') return 'missing';
   const status = rawStatus.trim().toLowerCase();
   if (!status) return 'missing';
-  return HE_LAUNCH_ACCEPTED_EMAIL_STATUSES.includes(status) ? 'accepted' : 'rejected';
+  return HE_LAUNCH_ACCEPTED_EMAIL_STATUSES.includes(status) || (opts.allowCatchAll === true && status === 'catch_all')
+    ? 'accepted' : 'rejected';
+}
+
+/** ENG: ok > catch_all > missing > rejected. Default ranking stays unchanged. */
+export function heLaunchEmailStrength(rawStatus: unknown, opts: HeLaunchEmailPolicy = {}): number {
+  const verdict = heLaunchEmailVerdict(rawStatus, opts);
+  if (verdict === 'missing') return 1;
+  if (verdict === 'rejected') return 0;
+  return opts.allowCatchAll === true && typeof rawStatus === 'string' && rawStatus.trim().toLowerCase() === 'ok' ? 3 : 2;
 }
 
 /**
@@ -1062,21 +1072,9 @@ export function heLaunchCompanyKey(
 }
 
 /**
- * Сила вердикта строки при выборе, какой адрес компании сильнее. Порядок тот
- * же, что у heLaunchEmailVerdict: допущенный адрес сильнее непроверенного,
- * непроверенный — сильнее отклонённого.
- *
- * Отклонённые и (у market='us') непроверенные строки до потолка не доходят —
- * их снял гейт запуска. Ранг всё равно задан для всех трёх: в RU-контуре
- * непроверенные строки законно уезжают, и там «сначала проверенный адрес
- * компании» — единственный осмысленный порядок.
+ * Потолок получает уже допущенные строки. Политика влияет на приоритет:
+ * у ENG ok сильнее catch_all, у остальных прежний порядок по компаниям.
  */
-const HE_LAUNCH_VERDICT_STRENGTH: Record<HeLaunchEmailVerdict, number> = {
-  accepted: 2,
-  missing: 1,
-  rejected: 0,
-};
-
 export interface HeLaunchCapInput {
   /** Строки базы, из которых собраны лиды (уже после гейта вердиктов). */
   rows: Array<Record<string, unknown>>;
@@ -1085,10 +1083,12 @@ export interface HeLaunchCapInput {
   leadRowIndices: readonly number[];
   /** Потолок АДРЕСОВ; по умолчанию HE_LAUNCH_MAX_LEADS. */
   limit?: number;
+  /** Only after the caller confirms an ENG client: ok addresses precede catch_all. */
+  allowCatchAll?: boolean;
 }
 
 export interface HeLaunchCapSelection {
-  /** Позиции лидов, которые уезжают, в ИСХОДНОМ порядке базы. */
+  /** Позиции лидов: исходный порядок; у ENG сначала ok, затем catch_all. */
   keptLeadPositions: number[];
   /** Компаний, у которых уехал хотя бы один адрес. */
   companiesSent: number;
@@ -1133,9 +1133,11 @@ export interface HeLaunchCapSelection {
  * занимает до capа строк. Запуск на 2000 компаний по одному адресу — это 2000
  * шансов на ответ; запуск на 400 компаний по пять адресов — 400 шансов и пять
  * писем в одну приёмную. Внутри компании порядок — сила вердикта
- * (HE_LAUNCH_VERDICT_STRENGTH), при равенстве — порядок строк базы, то есть
+ * (heLaunchEmailStrength), при равенстве — порядок строк базы, то есть
  * приоритет задач плана сборки; порядок компаний — первое появление в базе (то
- * же свойство, на которое опирается capImportedRows).
+ * же свойство, на которое опирается capImportedRows). У подтверждённого ENG
+ * сначала выбираются все доступные ok, затем catch_all; раунды компаний
+ * сохраняются внутри каждого вердикта.
  *
  * Потолок НЕ поднимается и не отказывает: он выбирает. Ни одна снятая строка
  * при этом не помечается отправленной — функция чистая и ничего не пишет.
@@ -1163,18 +1165,23 @@ export function selectLeadsWithinLaunchCap(input: HeLaunchCapInput): HeLaunchCap
   });
 
   const strengthOf = (leadPos: number): number =>
-    HE_LAUNCH_VERDICT_STRENGTH[heLaunchEmailVerdict(rows[leadRowIndices[leadPos]]?._email_status)];
+    heLaunchEmailStrength(rows[leadRowIndices[leadPos]]?._email_status, input);
   const ranked = [...groups.values()].map((positions) =>
     [...positions].sort((a, b) => strengthOf(b) - strengthOf(a) || a - b),
   );
 
   const kept = new Set<number>();
-  const deepest = ranked.reduce((max, group) => Math.max(max, group.length), 0);
-  for (let depth = 0; depth < deepest && kept.size < limit; depth += 1) {
-    for (const group of ranked) {
-      if (kept.size >= limit) break;
-      const leadPos = group[depth];
-      if (leadPos !== undefined) kept.add(leadPos);
+  const tiers = input.allowCatchAll === true
+    ? [3, 2, 1, 0].map((strength) => ranked.map((group) => group.filter((pos) => strengthOf(pos) === strength)))
+    : [ranked];
+  for (const tier of tiers) {
+    const deepest = tier.reduce((max, group) => Math.max(max, group.length), 0);
+    for (let depth = 0; depth < deepest && kept.size < limit; depth += 1) {
+      for (const group of tier) {
+        if (kept.size >= limit) break;
+        const leadPos = group[depth];
+        if (leadPos !== undefined) kept.add(leadPos);
+      }
     }
   }
 
@@ -1186,7 +1193,9 @@ export function selectLeadsWithinLaunchCap(input: HeLaunchCapInput): HeLaunchCap
   }
 
   return {
-    keptLeadPositions: [...kept].sort((a, b) => a - b),
+    keptLeadPositions: [...kept].sort((a, b) =>
+      input.allowCatchAll === true ? strengthOf(b) - strengthOf(a) || a - b : a - b,
+    ),
     companiesSent,
     addressesSent: kept.size,
     addressesHeldBack: leadRowIndices.length - kept.size,

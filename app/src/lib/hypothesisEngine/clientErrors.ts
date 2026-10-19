@@ -158,6 +158,7 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // «не покрывается каталогом» в этом тексте НЕ встречается: про такую базу он
   // неправда — компании могли принадлежать вертикали.
   if (/не подходит под гипотезы вертикали/i.test(message)) return 'hypothesis_mismatch';
+  if (/Company qualification: no companies with verified fit for the selected hypotheses and target countries\./i.test(message)) return 'company_unverified';
   if (/не покрывается каталогом/i.test(message)) return 'audience_mismatch';
 
   // Тарифные отказы (ClientLaunchError из clientLaunch/appendLeads) доезжают

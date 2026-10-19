@@ -14,6 +14,8 @@
  * между этими чтениями.
  *
  * Правила:
+ *  - клиентский ENG начинает сборку прямо из реконсилера, без chain; прежняя
+ *    chain done всё ещё обслуживается для уже поставленных до перехода джоб;
  *  - chain done        → сборка базы вертикали (enqueueHeBaseCollect, лимит
  *                        AUTOPILOT_BASE_LIMIT, accepted-гипотезы вертикали;
  *                        пустой список → null = по всем). Повторный chain при
@@ -73,6 +75,7 @@ import {
   type HeBrandInputLeak,
 } from './letterBrandGuard';
 import { normalizeHeMarket } from './market';
+import { readHeEngBaseFirst } from './engBaseFirst';
 
 /* ───────────── Владелец заблокирован? (S3b) ───────────── */
 
@@ -1353,10 +1356,13 @@ async function afterBaseAnalyzeDone(
   const briefProject = (projectRow ?? {}) as { market?: unknown; website_url?: unknown; brief?: unknown; created_by?: unknown };
   let brandInputs;
   try {
+    const baseFirst = await readHeEngBaseFirst(supabase, briefProject);
     brandInputs = await heBrandInputsBeforeEnqueue(supabase, {
       market: normalizeHeMarket(briefProject.market),
       project: briefProject,
-      ...(verticalId ? { verticalId } : {}),
+      // Без chain общий читатель языка возвращает ru. Итоговые письма
+      // подтверждённого ENG-клиента всегда en; staff/legacy — как раньше.
+      ...(baseFirst ? { language: 'en' } : verticalId ? { verticalId } : {}),
     });
   } catch (e) {
     throw new HeAutopilotReadError(`autopilot letters language read: ${e instanceof Error ? e.message : String(e)}`);

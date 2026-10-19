@@ -40,6 +40,7 @@ import type {
 // Только тип: код отказа гейта платных шагов (lib/hypothesisEngine/engPaidAccess)
 // — один словарь на роуты и на экран; сам модуль в клиентский бандл не едет.
 import type { EngPaidAccessCode } from '@/lib/hypothesisEngine/engPaidAccess';
+import type { EngCollectionProgress, EngCompanyQualificationSummary } from '@/lib/hypothesisEngine/engCollectionProgress';
 import type { HeBrandInputLeak } from '@/lib/hypothesisEngine/letterBrandGuard';
 import type { EngResearchRetryVerdict } from '@/lib/hypothesisEngine/researchJob';
 // Только типы автозапуска (S3) — см. «Запуск проекта одной кнопкой» ниже.
@@ -70,6 +71,7 @@ import type {
 // Письмо цепочки у обоих контуров одно и то же, его реэкспорт остаётся.
 export type { HeChainLetterDto } from '@/components/hypothesis-engine/api';
 export type { HeEngSendingAction, HeEngSendingSecondaryAction, HeEngSendingSummary, HeEngStartErrorCode };
+export type { EngCollectionProgress, EngCollectionStep } from '@/lib/hypothesisEngine/engCollectionProgress';
 
 import type { HeBaseSummary as HeBaseSummaryDto } from '@/components/hypothesis-engine/api';
 
@@ -231,6 +233,8 @@ export interface EngConstructInfo {
  */
 export interface EngCollectInfo extends HeCollectInfo {
   construct?: EngConstructInfo;
+  /** Aggregate company checks only; the underlying verdicts stay on the server. */
+  company_qualification?: EngCompanyQualificationSummary;
   stats?: {
     tasks_total?: number;
     tasks_done?: number;
@@ -265,6 +269,8 @@ export type EngBaseSummary = Omit<
 > & {
   analysis: EngBaseAnalysis | null;
   collect_info?: EngCollectInfo | null;
+  /** Live constructor metadata in ENG detail; null means the snapshot could not be read. */
+  collection_progress?: EngCollectionProgress | null;
   /**
    * Причина падения сборки. Обязательна на экране с тех пор, как автопилот
    * умеет осознанно НЕ строить базу (проба среза): один статус 'failed'

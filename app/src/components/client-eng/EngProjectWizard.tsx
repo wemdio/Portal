@@ -207,6 +207,8 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
   const searchParams = useSearchParams();
   const [detail, setDetail] = useState<EngDetail | null>(null);
   const [error, setError] = useState('');
+  const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   // Глубокая ссылка вида ?step=3 (дашборд ведёт на нужный шаг по этапу
   // рынка); вне диапазона — стартовый шаг 1.
   const [step, setStep] = useState<number>(() => stepFromQuery(searchParams?.get('step')));
@@ -270,11 +272,15 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
               wasLiveRef.current = live;
               setHandoffPolls((left) => (live ? 0 : handoff ? AUTOPILOT_HANDOFF_POLLS : Math.max(0, left - 1)));
               setDetail(next);
+              setLastCheckedAt(new Date().toISOString());
+              setRefreshFailed(false);
               setError('');
-            } else if (!silent) {
-              setError(data.error ?? 'Project not found');
+            } else {
+              setRefreshFailed(true);
+              if (!silent) setError(data.error ?? 'Project not found');
             }
           } catch (e) {
+            setRefreshFailed(true);
             if (!silent) {
               setError(e instanceof Error ? e.message : 'Failed to load the project');
             }
@@ -622,8 +628,10 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
           )}
 
           <div className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
-            Updated {fmtDate(project?.updated_at)}
-            {working ? ' · auto-refreshing every 4s' : ' · auto-refreshing every 30s'}
+            {lastCheckedAt && <>Last checked <time dateTime={lastCheckedAt}>{new Date(lastCheckedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time></>}
+            {refreshFailed
+              ? <span role="status"> · Automatic updates unavailable. Retrying…</span>
+              : working ? ' · auto-refreshing every 4s' : ' · auto-refreshing every 30s'}
           </div>
         </>
       )}
