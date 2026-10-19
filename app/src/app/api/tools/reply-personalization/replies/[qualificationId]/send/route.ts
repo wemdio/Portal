@@ -3,6 +3,7 @@ import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { getDraftById, insertDraft } from '@/lib/replyPersonalization/db';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 import { sendDraft, SendDraftError } from '@/lib/replyPersonalization/sendDraft';
+import { parseCcEmails } from '@/lib/replyPersonalization/referredContact';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,7 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
   if (!qualificationId) return NextResponse.json({ error: 'qualificationId is required' }, { status: 400 });
 
   const body = (await req.json().catch(() => null)) as
-    | { draftId?: string; projectId?: string; text?: string; toEmail?: string | null }
+    | { draftId?: string; projectId?: string; text?: string; toEmail?: string | null; ccEmails?: unknown }
     | null;
   if (typeof body?.text !== 'string' || !body.text.trim()) {
     return NextResponse.json({ error: 'text is required' }, { status: 400 });
@@ -55,7 +56,7 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
   }
 
   try {
-    await sendDraft(draftId, body.text, typeof body.toEmail === 'string' ? body.toEmail : null);
+    await sendDraft(draftId, body.text, typeof body.toEmail === 'string' ? body.toEmail : null, parseCcEmails(body.ccEmails));
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof SendDraftError) {

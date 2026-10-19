@@ -79,7 +79,13 @@ function buildQuoteSource(qualification: QualificationRow, original: Email | nul
  * только если этот адрес есть в его ответе; письмо уходит с того же ящика,
  * что вёл переписку. Пусто или тот же адрес — ответ в ту же переписку.
  */
-export async function sendDraft(draftId: string, finalText: string, toEmail: string | null = null): Promise<void> {
+export async function sendDraft(
+  draftId: string,
+  finalText: string,
+  toEmail: string | null = null,
+  /** Присланные адресатом адреса в копию ответа ему; при новом контакте не используются. */
+  ccEmails: string[] = [],
+): Promise<void> {
   if (typeof finalText !== 'string' || !finalText.trim()) {
     throw new SendDraftError('Пустой текст ответа', 422);
   }
@@ -117,6 +123,16 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
     }
   }
 
+  const cc = newContact ? [] : ccEmails.filter((e) => e !== qualification.leadEmail.toLowerCase());
+  if (cc.length > 0) {
+    const thread = await fetchReplyThread(qualification, accountId);
+    const lastInbound = [...(thread ?? [])].reverse().find((m) => !m.fromUs)?.text ?? qualification.replyBody ?? '';
+    const referred = findReferredEmails(lastInbound, [qualification.leadEmail, qualification.eaccount]);
+    if (cc.some((e) => !referred.includes(e))) {
+      throw new SendDraftError('Адреса для копии нет в ответе адресата — отправить с ним нельзя', 422);
+    }
+  }
+
   await updateDraftText(draftId, finalText);
 
   // Instantly рендерит тело как HTML: голый { text } с \n схлопывается в один
@@ -133,7 +149,8 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
     // провальный reply не тратим.
     const sendAsNewLetter = () =>
       sendTestEmail(
-        { eaccount, to_address_email_list: qualification.leadEmail, subject, body: { html: bodyHtml } },
+        // У тест-эндпоинта нет cc: копию кладём в список получателей.
+        { eaccount, to_address_email_list: [qualification.leadEmail, ...cc].join(', '), subject, body: { html: bodyHtml } },
         { accountId },
       );
     if (qualification.outOfCampaign) {
@@ -146,6 +163,7 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
             eaccount,
             subject,
             body: { html: bodyHtml, text: bodyText },
+            ...(cc.length ? { cc_address_email_list: cc.join(', ') } : {}),
           },
           { accountId },
         );
