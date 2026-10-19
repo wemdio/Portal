@@ -149,7 +149,7 @@ export async function openaiGenerate(
  * interested: true — интерес есть, false — нет, null — проверка не удалась
  * (тогда всё решает ответ модели, как раньше; причина — в error).
  */
-const INTEREST_MODEL = 'openai/gpt-4o-mini';
+const INTEREST_MODEL = 'policy/claude-haiku-4-5';
 const INTEREST_TIMEOUT_MS = 30_000;
 const INTEREST_HISTORY_MESSAGES = 10;
 
