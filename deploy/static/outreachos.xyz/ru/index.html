@@ -26,6 +26,105 @@
   <!-- Превью ссылки в мессенджерах берётся с этой страницы. В русские чаты давать /ru/ (или /?lang=ru),
        не голый домен: бот Telegram ходит без Accept-Language и cookie и получит английскую версию.
        После публикации обновить кэш превью /, /en/ и /ru/ через @webpagebot в Telegram. -->
+  <!-- Структурированные данные для поисковиков и ИИ-агентов: только текст этой страницы, без цен и контактов. Меняются ВМЕСТЕ с hero, блоком #pilot и FAQ ниже — иначе разметка будет спорить со страницей. -->
+  <script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "Organization",
+   "@id": "https://polzaagency.com/#organization",
+   "name": "Polza Agency",
+   "url": "https://polzaagency.com"
+  },
+  {
+   "@type": "WebSite",
+   "@id": "https://outreachos.xyz/#website",
+   "url": "https://outreachos.xyz/",
+   "name": "OutreachOS",
+   "inLanguage": [
+    "en",
+    "ru"
+   ],
+   "publisher": {
+    "@id": "https://polzaagency.com/#organization"
+   }
+  },
+  {
+   "@type": "Service",
+   "@id": "https://outreachos.xyz/ru/#service",
+   "name": "OutreachOS",
+   "serviceType": "Нишевый B2B-аутрич",
+   "brand": {
+    "@type": "Brand",
+    "name": "OutreachOS"
+   },
+   "provider": {
+    "@id": "https://polzaagency.com/#organization"
+   },
+   "url": "https://outreachos.xyz/ru/",
+   "description": "AI изучает ваш продукт и готовит 10 гипотез об идеальном клиенте (ICP). Наши эксперты проверяют их, ищут нужные компании и сигналы в 20 источниках данных и тестируют гипотезы до масштабирования. Для подходящих ниш мы заранее согласуем месячный план по лидам и гарантируем его.",
+   "offers": {
+    "@type": "Offer",
+    "name": "Проверить нишу и план по лидам",
+    "url": "https://outreachos.xyz/ru/#pilot",
+    "description": "Мы разберём ваш оффер и нужную вам аудиторию и оценим, найдётся ли в доступных источниках достаточно подходящих компаний, чтобы поставить реалистичный месячный план."
+   }
+  },
+  {
+   "@type": [
+    "WebPage",
+    "FAQPage"
+   ],
+   "@id": "https://outreachos.xyz/ru/#webpage",
+   "url": "https://outreachos.xyz/ru/",
+   "name": "OutreachOS — найдите новый канал роста в B2B",
+   "description": "Найдите нужную B2B-аудиторию, проверьте позиционирование и запустите продуманный аутрич вместе с OutreachOS и Polza Agency.",
+   "inLanguage": "ru",
+   "isPartOf": {
+    "@id": "https://outreachos.xyz/#website"
+   },
+   "about": {
+    "@id": "https://outreachos.xyz/ru/#service"
+   },
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "Это SaaS-продукт, которым можно пользоваться самостоятельно?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Пока нет. OutreachOS помогает с исследованием и работой с кампаниями, а команда Polza — с настройкой и проверкой первых тестов. Со временем мы автоматизируем всё больше этапов."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "AI сам пишет и отправляет все письма?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "AI помогает изучать компании и готовить черновики под каждую из них. Подход проверяет человек, а настраивать и запускать кампании пока помогает наша команда."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Вы гарантируете количество лидов?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Для подходящих ниш — да. Сначала мы подтверждаем аудиторию, географию, определение лида и достижимый объём, а затем до запуска согласуем месячный план. Одну общую гарантию на все рынки мы не даём."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Кто стоит за OutreachOS?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "OutreachOS создаёт команда Polza Agency — с опорой на четыре года работы с B2B-клиентами в лидогенерации и аутриче."
+     }
+    }
+   ]
+  }
+ ]
+}
+  </script>
   <style>
     :root {
       --paper: #ffffff;
@@ -199,6 +298,12 @@
     .field input:focus, .field textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px #285b4520; }
     .contact .button { width: 100%; cursor: pointer; }
     .form-message { display: none; margin: 13px 0 0 !important; color: var(--green) !important; font-weight: 650; }
+    /* Возврат после отправки формы мимо скрипта: /api/demo-lead отвечает 303 на #sent.
+       Без JS «спасибо» показывает CSS (content), а не текст в разметке: агент, читающий
+       страницу как текст, не должен видеть «заявка получена» до отправки. Со скриптом
+       тот же текст кладёт блок #sent в конце страницы, и :empty гасит CSS-копию. */
+    #sent:target, #sent.is-shown { display: block; }
+    #sent:target:empty::after { content: "Спасибо! Мы получили заявку и скоро с вами свяжемся."; }
     footer { padding: 25px 0 32px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
     .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
     .footer-inner strong { color: var(--ink); }
@@ -540,12 +645,15 @@
       <div class="contact">
         <h3 id="contact-title">Расскажите, что&nbsp;вы&nbsp;продаёте.</h3>
         <p>Оставьте ссылку на&nbsp;сайт&nbsp;— начнём с&nbsp;вашей аудитории.</p>
-        <form id="pilotForm">
+        <form id="pilotForm" action="https://app.outreachos.xyz/api/demo-lead" method="post">
+          <input type="hidden" name="source" value="eng_pilot">
+          <input type="hidden" name="lang" value="ru">
           <div class="field"><label for="website">Сайт компании</label><input id="website" name="website" type="url" required maxlength="200" placeholder="https://company.com"></div>
           <div class="field"><label for="email">Рабочий email</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="320" placeholder="you@company.com"></div>
           <div class="field"><label for="goal">Что&nbsp;вы&nbsp;продаёте? <span style="font-weight:400">(необязательно)</span></label><textarea id="goal" name="goal" maxlength="2000" placeholder="Достаточно одного предложения"></textarea></div>
           <button class="button" type="submit">Проверить нишу и&nbsp;план по&nbsp;лидам <span aria-hidden="true">↗</span></button>
           <p class="form-message" id="formMessage" role="status"></p>
+          <p class="form-message" id="sent" role="status"></p>
         </form>
       </div>
     </section>
@@ -796,6 +904,20 @@
           button.disabled = false;
         });
     });
+
+    // Возврат после отправки формы мимо скрипта: /api/demo-lead отвечает 303 на эту страницу
+    // с #sent. Без JS «спасибо» показывает CSS (#sent:target). Здесь — случай, когда скрипт
+    // работает, а форму отправили мимо него (агент вызвал form.submit()): кладём тот же текст
+    // в #sent, чтобы его было видно и в тексте страницы, и убираем #sent из адреса, чтобы
+    // обновление страницы или скопированная ссылка не показывали его снова.
+    if (location.hash === '#sent') {
+      var sentMessage = document.getElementById('sent');
+      sentMessage.textContent = 'Спасибо! Мы получили заявку и скоро с вами свяжемся.';
+      sentMessage.classList.add('is-shown');
+      try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) { /* #sent остаётся в адресе */ }
+      var contactTitle = document.getElementById('contact-title');
+      if (contactTitle) contactTitle.scrollIntoView();
+    }
 
     // Переключатель языка — обычная ссылка на /en/ (работает и без JS). Скрипт дописывает к ней
     // текущие query (utm_* и прочее) и якорь, а по клику запоминает выбор в cookie oos_lang

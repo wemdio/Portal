@@ -12,6 +12,12 @@ export interface LeadContactMetadata {
   website: string | null;
 }
 
+/** Only supply after proving the original recipient against an actual send. */
+export interface OriginalCompanyContact {
+  email: string;
+  leads: readonly Lead[];
+}
+
 const COMPANY_KEYS = ['company_name', 'company', 'organization', 'organization_name',
   'organisation', 'organisation_name', 'business_name', 'legal_name',
   'компания', 'название компании', 'наименование компании', 'организация',
@@ -136,6 +142,7 @@ export function resolveLeadContactMetadata(input: {
   leadEmail: string;
   campaignId: string;
   replyBody: Email['body'];
+  originalCompanyContact?: OriginalCompanyContact;
 }): LeadContactMetadata {
   const sources = [
     ...matchedLeads(input.leads, input.leadEmail, input.campaignId),
@@ -159,7 +166,7 @@ export function resolveLeadContactMetadata(input: {
   // A bare imported domain is a fallback label, not stronger than an explicit
   // legal name in the current reply. Real uploaded company names keep priority.
   const replyCompany = companyValue(reply.companyName);
-  return {
+  const metadata: LeadContactMetadata = {
     leadName: replacesUploaded ? reply.leadName : uploadedName || reply.leadName,
     companyName: uploadedCompany && normalizeLeadWebsite(uploadedCompany) && replyCompany
       ? replyCompany : uploadedCompany || replyCompany,
@@ -175,4 +182,23 @@ export function resolveLeadContactMetadata(input: {
       firstField(sources, DOMAIN_KEYS, normalizeLeadWebsite, 'domain') || normalizeLeadWebsite(reply.website) ||
       (emailDomain ? normalizeLeadWebsite(emailDomain) : null),
   };
+  const original = input.originalCompanyContact;
+  if (!original || normalizeEmail(original.email) === normalizeEmail(input.leadEmail)) return metadata;
+  // Cross-address fallback needs a positively scoped record, even though the
+  // normal exact-sender lookup also tolerates provider responses without scope.
+  const originalSources = matchedLeads(original.leads, original.email, input.campaignId)
+    .filter(lead => lead.campaign_id === input.campaignId || lead.campaign === input.campaignId)
+    .flatMap(sourcesForLead);
+  if (!originalSources.length) return metadata;
+  const companyName = firstField(originalSources, COMPANY_KEYS, companyValue, 'company');
+  const website = firstField(originalSources, WEBSITE_KEYS, normalizeLeadWebsite, 'website') ||
+    firstField(originalSources, DOMAIN_KEYS, normalizeLeadWebsite, 'domain');
+  const companyKey = (value: string) => value.normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]/gu, '');
+  const siteHost = (value: string) => new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`)
+    .hostname.toLowerCase().replace(/^www\./, '');
+  // An explicit different organization/site in the responder's own data may
+  // mean a forwarded offer, not a second mailbox of the original company.
+  if ((metadata.companyName && (!companyName || companyKey(metadata.companyName) !== companyKey(companyName))) ||
+      (metadata.website && (!website || siteHost(metadata.website) !== siteHost(website)))) return metadata;
+  return { ...metadata, companyName: metadata.companyName || companyName, website: metadata.website || website };
 }

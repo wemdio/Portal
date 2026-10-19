@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { load } from 'cheerio';
-import { recipientMailboxIdentities } from '@/lib/clientCampaignReplies/participants';
+import { getEmailRecipients, recipientMailboxIdentities } from '@/lib/clientCampaignReplies/participants';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
 
 import * as instantly from './client';
@@ -1182,6 +1182,38 @@ function verifiedConversationParents(emails: Email[], reply: Email): Email[] {
         normalizedSubject(header.subject) === subject &&
         normalizeQuotedText(header.body).includes(body));
     });
+}
+
+/** Company enrichment only: a provider lead pointer alone is not proof that
+ * a changed sender belongs to that contact. Reuse the already-read, quoted
+ * outbound proof without changing ownership, reply recipients or history reads. */
+export function resolveOriginalCompanyContactEmail(
+  reply: Email, context: ThreadContext | null | undefined, campaignId: string,
+): string | null {
+  if (!context || !reply.id || reply.campaign_id !== campaignId ||
+      context.replyEmail.id !== reply.id || context.replyEmail.campaign_id !== campaignId ||
+      normalizeMailbox(context.replyEmail.from_address_email) !== normalizeMailbox(reply.from_address_email) ||
+      normalizeMailbox(context.replyEmail.eaccount) !== normalizeMailbox(reply.eaccount)) return null;
+  const original = normalizeMailbox(reply.lead ?? context.replyEmail.lead);
+  const sender = normalizeMailbox(reply.from_address_email);
+  if (!original || !sender || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(original) ||
+      original === sender || original === normalizeMailbox(reply.eaccount) ||
+      (reply.lead && context.replyEmail.lead && normalizeMailbox(reply.lead) !== normalizeMailbox(context.replyEmail.lead))) return null;
+  const source = { ...reply, lead: original };
+  if (!recipientMailboxIdentities(source).has(normalizeMailbox(reply.eaccount) ?? '')) return null;
+  const parents = verifiedConversationParents([
+    ...context.threadEmails, ...(context.lastOutbound ? [context.lastOutbound] : []),
+  ], source);
+  // Reject conflicting conversation evidence, not just the first matching send.
+  if (!parents.length || parents.some(parent => parent.campaign_id !== campaignId)) return null;
+  const matches = parents.every(parent => {
+    const { to, cc } = getEmailRecipients(parent);
+    const recipients = [...new Set(to.map(item => normalizeMailbox(item.email)))];
+    return recipients.length === 1 && recipients[0] === original && cc.length === 0 &&
+      normalizeMailbox(parent.eaccount) === normalizeMailbox(reply.eaccount) &&
+      (!parent.lead || normalizeMailbox(parent.lead) === original);
+  });
+  return matches ? original : null;
 }
 
 async function resolveProviderCampaignFallback(args: {

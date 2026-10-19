@@ -1,0 +1,38 @@
+# OutreachOS
+
+> OutreachOS by Polza Agency: niche-built B2B outbound. AI studies your product and drafts 10 ICP hypotheses. Our experts review them, check 20 market sources for relevant companies and signals, then test before scaling. For selected niches, we agree on a monthly lead target and guarantee it upfront.
+
+This file restates the landing page https://outreachos.xyz/en/ in plain text. What the first engagement looks like today, per the page FAQ:
+
+- It is not a self-serve SaaS product yet. OutreachOS supports the research and campaign workflow, while Polza's team helps configure and review the first tests.
+- AI helps research companies and prepare tailored drafts. A human reviews the approach, and the team currently helps configure and activate campaigns.
+- Lead guarantee for selected niches only: the audience, geography, lead definition and reachable volume are confirmed first, then the monthly target is agreed before launch. Some niches won't qualify for a guarantee.
+
+How it works:
+
+1. AI researches your product: what you sell, your proof, competitors, and the customers you already win.
+2. Experts review ICP hypotheses: who may buy, what problem they have, and why reaching them now makes sense.
+3. Find companies by signals: company data combined with clues like hiring, funding, industry, size, and location.
+4. Send and learn: relevant email sequences, launched with review, then learning from replies.
+
+Signals are grouped as company databases, startup and funding lists, hiring signals, and map-listed US local businesses; sources are chosen per market and coverage varies by niche. Public company emails are found on company websites and checked for deliverability. LinkedIn and purchased contact databases are not used in this workflow.
+
+Best-fit niches: B2B SaaS and startups; B2B agencies and services; sales-led companies; US local businesses such as clinics, auto services and other map-listed niches.
+
+## Niche check request
+
+- [Request form](https://outreachos.xyz/en/#contact-title): company website (required), work email (required), what you sell (optional, one sentence is enough).
+- [What is agreed upfront](https://outreachos.xyz/en/#pilot): your ICP and lead definition, the monthly lead target for the niche, and the sources, campaign scope and qualification rules.
+
+## Pages
+
+- [OutreachOS, English](https://outreachos.xyz/en/): offer, process, data sources, best-fit niches, FAQ and the request form
+- [OutreachOS, Russian](https://outreachos.xyz/ru/): the same page in Russian
+
+## Proof
+
+- [Polza Agency case studies](https://polzaagency.com/cases): 12 published international campaigns. These are Polza Agency campaign results, not OutreachOS self-serve product results.
+
+## Optional
+
+- [Polza Agency](https://polzaagency.com): OutreachOS is built by the team at Polza Agency, drawing on four years of B2B client work in lead generation and outreach.
