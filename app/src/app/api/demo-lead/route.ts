@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { sendDemoLeadTelegramAlert, type DemoLeadPageLang } from '@/lib/demoLead/notify';
+import { sendDemoLeadTelegramAlert, type DemoLeadAgentHints, type DemoLeadPageLang } from '@/lib/demoLead/notify';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,6 +38,14 @@ export const dynamic = 'force-dynamic';
  * with any attribution: `utm - 'lang' <> '{}'::jsonb`. Until 20261013_0001 is applied,
  * these leads take the insert retry without utm below, and their language stays only
  * in the Telegram alert.
+ *
+ * The outreachos.xyz form also works as a plain HTML form (method="post" with
+ * hidden source/lang): with no page script — or when a buyer's AI agent submits the
+ * form as it reads it — the browser posts the form's own names website/email/goal,
+ * which are read as name+company/email/message when those are empty. A top-level
+ * form navigation gets a 303 back to the page (FORM_RETURN_URL); fetch() and HTTP
+ * clients keep getting JSON. Signs that an AI agent sent the lead (agentHints) go to
+ * the Telegram alert only; demo_leads does not store them.
  */
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -45,9 +53,25 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Best-effort per-instance rate limit (public, unauthenticated endpoint).
 const WINDOW_MS = 60_000;
 const MAX_HITS = 20;
+// Past this many tracked addresses, idle ones are dropped before the next count.
+const HITS_PRUNE_AT = 5_000;
 const hits = new Map<string, number[]>();
+
+// The rate-limit key. nginx sets X-Real-IP from $remote_addr (deploy/nginx/*.conf);
+// the FIRST X-Forwarded-For entry is whatever the client sent, so a random value there
+// used to give every request a fresh bucket. Same rule as /api/signup (signupClientIp).
+function clientIp(req: NextRequest): string {
+  const real = req.headers.get('x-real-ip')?.trim();
+  if (real) return real;
+  const hops = (req.headers.get('x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+  return hops[hops.length - 1] || 'unknown';
+}
+
 function rateLimited(ip: string): boolean {
   const now = Date.now();
+  if (hits.size > HITS_PRUNE_AT) {
+    for (const [key, times] of hits) if (now - times[times.length - 1] >= WINDOW_MS) hits.delete(key);
+  }
   const recent = (hits.get(ip) ?? []).filter((t) => now - t < WINDOW_MS);
   recent.push(now);
   hits.set(ip, recent);
@@ -92,6 +116,17 @@ const VISIT_TS_MAX = 24;
 // Control characters and lone UTF-16 surrogates: Postgres rejects \u0000 and an
 // unpaired surrogate inside jsonb, which would fail the whole insert.
 const UNSAFE_CHARS = /[\p{Cc}\p{Cs}]/gu;
+// Lead fields come from strangers (and now from their AI agents) and go to the
+// Telegram alert. Invisible marks — bidi controls (text that reads in a misleading
+// order), zero-width characters, BOM — and lone surrogates are deleted from every
+// field, so 'ivan<U+200B>@mail.ru' pasted from a page still validates as an email.
+// In one-line fields the remaining control characters and line separators, newlines
+// included (they could fake extra alert lines), become one space; the message keeps
+// its line breaks (\r\n -> \n) and tabs and loses the rest. NUL is gone either way,
+// so it can no longer fail the insert and leave the lead only in Telegram.
+const INVISIBLE_MARKS = /[\p{Cs}\u061C\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/gu;
+const LINE_BREAKS = /[\p{Cc}\u2028\u2029]+/gu;
+const MESSAGE_CONTROLS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/gu;
 
 // Caps of the lead fields as the validation in POST enforces them. `source` has no
 // length check — only the ALLOWED_SOURCES names pass, and they are far shorter.
@@ -164,11 +199,14 @@ async function readFields(req: NextRequest): Promise<LeadFields> {
   let raw: Record<string, string>;
   let utm: Record<string, string> | null;
   let lang: DemoLeadPageLang | null;
+  // website/goal are the outreachos.xyz form's own field names, which is what a plain
+  // HTML post of it (no page script, or an agent submitting the form as it reads it)
+  // sends. The page script maps them to name/company/message itself, so those win.
   if (ct.includes('application/json')) {
     const b = (await req.json()) as Record<string, unknown>;
     raw = {
-      name: get(b.name), email: get(b.email), phone: get(b.phone), telegram: get(b.telegram),
-      company: get(b.company), message: get(b.message), source: get(b.source),
+      name: get(b.name) || get(b.website), email: get(b.email), phone: get(b.phone), telegram: get(b.telegram),
+      company: get(b.company) || get(b.website), message: get(b.message) || get(b.goal), source: get(b.source),
     };
     utm = readUtm((k) => get(b[k]));
     lang = readLang(get(b.lang));
@@ -176,8 +214,8 @@ async function readFields(req: NextRequest): Promise<LeadFields> {
     const fd = await req.formData();
     const f = (k: string) => String(fd.get(k) ?? '');
     raw = {
-      name: f('name'), email: f('email'), phone: f('phone'), telegram: f('telegram'),
-      company: f('company'), message: f('message'), source: f('source'),
+      name: f('name') || f('website'), email: f('email'), phone: f('phone'), telegram: f('telegram'),
+      company: f('company') || f('website'), message: f('message') || f('goal'), source: f('source'),
     };
     utm = readUtm((k) => get(fd.get(k)));
     lang = readLang(get(fd.get('lang')));
@@ -185,7 +223,13 @@ async function readFields(req: NextRequest): Promise<LeadFields> {
   // Stored with the attribution (demo_leads.utm.lang), so a lead without utm_* values
   // still keeps its page language — and its utm is then non-null (see the header).
   if (lang) utm = { ...utm, lang };
-  const field = (k: keyof typeof FIELD_MAX) => bounded(raw[k], FIELD_MAX[k]).trim();
+  const field = (k: keyof typeof FIELD_MAX) => {
+    const value = bounded(raw[k], FIELD_MAX[k]);
+    return (k === 'message'
+      ? value.replace(INVISIBLE_MARKS, '').replace(/\r\n?/g, '\n').replace(MESSAGE_CONTROLS, '')
+      : value.replace(INVISIBLE_MARKS, '').replace(LINE_BREAKS, ' ')
+    ).trim();
+  };
   const source = ALLOWED_SOURCES.has(field('source')) ? field('source') : 'unknown';
   return {
     name: field('name'),
@@ -200,6 +244,55 @@ async function readFields(req: NextRequest): Promise<LeadFields> {
   };
 }
 
+// After a plain HTML form post (the landing without its script) the browser goes back
+// to the page: a fixed address per page language, never one taken from the request, so
+// this is no open redirect. The fragment never reaches a server or the access log.
+const FORM_RETURN_URL: Record<DemoLeadPageLang, string> = {
+  en: 'https://outreachos.xyz/en/#sent',
+  ru: 'https://outreachos.xyz/ru/#sent',
+};
+const LANDING_ORIGIN = 'https://outreachos.xyz';
+
+/** A top-level browser form submission — not fetch(), XHR, curl or an agent's HTTP call. */
+function isFormNavigation(req: NextRequest): boolean {
+  const mode = req.headers.get('sec-fetch-mode');
+  if (mode) return mode === 'navigate' && req.headers.get('sec-fetch-dest') === 'document';
+  // No Fetch Metadata (Safari before 16.4): a browser navigation asks for HTML first and
+  // always sends Origin on POST; HTTP clients that copy a browser Accept header do not.
+  return req.headers.get('origin') === LANDING_ORIGIN && /^\s*text\/html/i.test(req.headers.get('accept') ?? '');
+}
+
+// Mailbox services that give AI agents their own address (2026-10). An alert-only hint
+// for the team: a reply to such a lead goes to the agent, so ask for the person's email.
+const AGENT_MAIL_DOMAINS = ['mail.grokbot.com', 'agentmail.to', 'mail.manus.ai', 'manus.bot', 'inbox.ai', 'nylas.email'];
+const AGENT_UA_RE = /\b(GrokAgent|ChatGPT-User|Claude-User)\//;
+
+/**
+ * Signs that an AI agent sent the lead, for one line in the Telegram alert. Every one of
+ * them can be faked (Web Bot Auth signatures included), so this labels and never gates,
+ * and none of it is written to demo_leads: demo_leads.utm keeps its meaning (see the header).
+ */
+function agentHints(req: NextRequest, email: string): DemoLeadAgentHints | null {
+  const hints: DemoLeadAgentHints = {};
+  // Web Bot Auth: Signature-Agent names the signer's key directory, e.g. "https://chatgpt.com"
+  // (ChatGPT agent) or "https://cursorusercontent.com" (Grok Bot). Not verified here.
+  const signer = (req.headers.get('signature-agent') ?? '').slice(0, 300).match(/https:\/\/[^"\s,;]+/);
+  if (signer) {
+    try {
+      const host = new URL(signer[0]).hostname.toLowerCase();
+      if (/^[a-z0-9.-]{1,253}$/.test(host)) hints.signer = host;
+    } catch { /* not a URL — no hint */ }
+  }
+  const domain = email.slice(email.lastIndexOf('@') + 1);
+  const mail = AGENT_MAIL_DOMAINS.find((d) => domain === d || domain.endsWith(`.${d}`));
+  if (mail) hints.mailbox = mail;
+  const ua = (req.headers.get('user-agent') ?? '').slice(0, 500).match(AGENT_UA_RE);
+  if (ua) hints.userAgent = ua[1];
+  // Browsers always send Origin on POST: none and no Fetch Metadata means a direct HTTP client.
+  if (!req.headers.get('origin') && !req.headers.get('sec-fetch-mode')) hints.httpClient = true;
+  return Object.keys(hints).length ? hints : null;
+}
+
 // The app can roll out before migration 20261013_0001 adds demo_leads.utm. Then the
 // insert is retried without utm so the lead is still stored; warn once per process.
 // Every lead from the /en/ and /ru/ pages carries utm (at least lang), so all of them
@@ -210,8 +303,7 @@ function isMissingUtmColumn(error: { code?: string; message?: string }): boolean
 }
 
 export async function POST(req: NextRequest) {
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
-  if (rateLimited(ip)) return NextResponse.json({ error: 'Too Many Requests' }, { status: 429 });
+  if (rateLimited(clientIp(req))) return NextResponse.json({ error: 'Too Many Requests' }, { status: 429 });
 
   let fields: LeadFields;
   try {
@@ -263,10 +355,12 @@ export async function POST(req: NextRequest) {
 
   // Awaited best-effort (never throws) — serverless can freeze after the response,
   // so don't fire-and-forget the notify.
+  const agent = agentHints(req, email);
   await sendDemoLeadTelegramAlert({
     name, email, phone: phone || null, telegram: telegram || null,
     company: company || null, message: message || null, source, referrer,
     ...(lang ? { pageLang: lang } : {}),
+    ...(agent ? { agentHints: agent } : {}),
     ...(utm
       ? {
           utm,
@@ -277,5 +371,6 @@ export async function POST(req: NextRequest) {
       : {}),
   });
 
+  if (isFormNavigation(req)) return NextResponse.redirect(FORM_RETURN_URL[lang ?? 'en'], 303);
   return NextResponse.json({ ok: true });
 }

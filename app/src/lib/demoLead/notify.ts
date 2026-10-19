@@ -22,6 +22,21 @@ const TG_FETCH_TIMEOUT_MS = 10_000;
 /** Language versions of the outreachos.xyz landing: /en/ and /ru/. */
 export type DemoLeadPageLang = 'en' | 'ru';
 
+/**
+ * Signs that an AI agent sent the lead (/api/demo-lead agentHints). Every one can be
+ * faked, so the alert shows them as a hint, never as proof.
+ */
+export interface DemoLeadAgentHints {
+  /** Host of the Web Bot Auth Signature-Agent header, e.g. chatgpt.com. */
+  signer?: string;
+  /** The email is on a mailbox service for AI agents, e.g. mail.grokbot.com. */
+  mailbox?: string;
+  /** Agent token in the User-Agent, e.g. GrokAgent. */
+  userAgent?: string;
+  /** A POST with no Origin and no Fetch Metadata: a direct HTTP client, not a browser. */
+  httpClient?: boolean;
+}
+
 export interface DemoLeadData {
   name: string;
   email: string;
@@ -64,6 +79,11 @@ export interface DemoLeadData {
    */
   signupHost?: string | null;
   signupCabinet?: 'eng' | 'ru' | null;
+  /**
+   * demo-lead only: signs of an AI agent behind the lead, shown as one
+   * «🤖 Похоже на ИИ-агента … (не доказательство)» line; absent — no line.
+   */
+  agentHints?: DemoLeadAgentHints | null;
 }
 
 /** Telegram rejects sendMessage text longer than this, counted after entity parsing. */
@@ -184,6 +204,16 @@ function renderLeadAlert(data: DemoLeadData, cuts: AlertCuts): string {
   // so the TG_TEXT_MAX cuts in leadAlertText have nothing to cut in it.
   const pageLang = data.pageLang === 'ru' ? 'RU' : data.pageLang === 'en' ? 'EN' : '';
   if (pageLang) lines.push(`<b>🌐 Язык страницы:</b> ${pageLang}`);
+  const agent = data.agentHints;
+  if (agent) {
+    const signs = [
+      agent.signer && `подпись ${agent.signer}`,
+      agent.mailbox && `почта ${agent.mailbox}`,
+      agent.userAgent && `браузер ${agent.userAgent}`,
+      agent.httpClient && 'не из браузера',
+    ].filter(Boolean).join(' · ');
+    if (signs) lines.push(`<b>🤖 Похоже на ИИ-агента:</b> ${value(signs)} <i>(не доказательство)</i>`);
+  }
   if (data.utm) {
     const u = data.utm;
     const visit = data.utmEarlierVisitAt ? earlierVisitSuffix(data.utmEarlierVisitAt) : '';
