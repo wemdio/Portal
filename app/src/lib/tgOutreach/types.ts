@@ -90,6 +90,7 @@ export type JobAction =
   | 'stop'
   | 'restart'
   | 'refetch_messages'
+  | 'delete_messages'
   | 'warmup_start'
   | 'warmup_stop';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
