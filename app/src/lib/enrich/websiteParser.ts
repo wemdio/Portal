@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import iconv from 'iconv-lite';
+import { getDomain } from 'tldts';
 import { buildAboutCandidates, DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
 import { extractEmailsFromHtml } from '@/lib/enrich/emailExtractor';
@@ -1019,6 +1020,8 @@ export interface WebsiteFetchGuard {
   checkUrl: (url: URL) => Promise<void>;
   maxRedirects: number;
   allowHttpDowngrade: boolean;
+  /** ENG evidence opt-in: keep an advertised HTTP redirect on HTTPS; never send HTTP. */
+  preferHttpsRedirects?: boolean;
   /** Прямой маршрут (прокси не выбран) идёт через этот диспетчер. */
   directDispatcher?: Dispatcher;
 }
@@ -1156,7 +1159,12 @@ export async function fetchFollowingGuarded(
       throw new WebsiteAddressRefusedError(`редирект на схему ${next.protocol}`);
     }
     if (!guard.allowHttpDowngrade && current.protocol === 'https:' && next.protocol === 'http:') {
-      throw new WebsiteAddressRefusedError(`редирект https → http (${next.host})`);
+      if (!guard.preferHttpsRedirects) {
+        throw new WebsiteAddressRefusedError(`редирект https → http (${next.host})`);
+      }
+      // Same advertised destination, HTTPS only. The next iteration applies
+      // the unchanged address/DNS/port guard before any connection is made.
+      next.protocol = 'https:';
     }
     current = next;
   }
@@ -1864,7 +1872,15 @@ export interface WebsitePage {
    */
   text: string;
   /** Реальные ссылки страницы; только при явном companyEvidence. */
-  companyEvidenceLinks?: Array<{ url: string; kind: 'about' | 'contact' | 'locations' }>;
+  companyEvidenceLinks?: Array<{
+    url: string;
+    kind: 'legal' | 'about' | 'contact' | 'locations' | 'services';
+    /** Higher values point to more specific company/address evidence. */
+    priority?: number;
+    label?: string;
+  }>;
+  /** ENG evidence only: some complete source blocks did not fit the text budget. */
+  companyEvidenceTextTruncated?: boolean;
 }
 
 type CompanyEvidenceLink = NonNullable<WebsitePage['companyEvidenceLinks']>[number];
@@ -1874,44 +1890,102 @@ const COMPANY_EVIDENCE_SECTION_SEPARATOR = '\n\n[source section]\n\n';
 function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEvidenceLink[] {
   const base = new URL(pageUrl);
   const host = base.hostname.replace(/^www\./, '');
+  const domain = getDomain(base.hostname, { allowPrivateDomains: true });
   const links: CompanyEvidenceLink[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, CompanyEvidenceLink>();
   $('a[href]').each((_, el) => {
-    if (links.length >= 24) return false;
     const href = $(el).attr('href')?.trim();
     if (!href || href.startsWith('#')) return;
     let url: URL;
     try { url = new URL(href, base); } catch { return; }
+    const sameCompanyDomain = url.hostname.replace(/^www\./, '') === host
+      || !!domain && getDomain(url.hostname, { allowPrivateDomains: true }) === domain;
     if (!['http:', 'https:'].includes(url.protocol)
-      || url.hostname.replace(/^www\./, '') !== host
+      || !sameCompanyDomain
       || url.port !== base.port || url.username || url.password || url.search || url.hash
       || (base.protocol === 'https:' && url.protocol !== 'https:')) return;
     const path = url.pathname;
-    if (/\/(?:auth|account|login|logout|sign[-_]?in|sign[-_]?up|facebook|twitter|linkedin|instagram|youtube)(?:\/|$)/i.test(path)
+    if (/\/(?:auth|account|login|logout|sign[-_]?in|sign[-_]?up|careers?|jobs?|karriere|facebook|twitter|linkedin|instagram|youtube)(?:\/|$)/i.test(path)
       || /\.[a-z0-9]{2,5}$/i.test(path) && !/\.(?:html?|php|aspx?)$/i.test(path)) return;
-    const label = $(el).text().replace(/\s+/g, ' ').trim();
-    const kind: CompanyEvidenceLink['kind'] | null =
-      /\/(?:[a-z-]*-)?(?:locations?|offices?)(?:[-_/]|$)/i.test(path)
-        || /\b(?:locations?|our offices|global offices|office locations)\b/i.test(label) ? 'locations'
-        : /\/(?:contact(?:[-_]?us)?|contacts)(?:\/|$)/i.test(path)
-          || /^(?:contact(?: us)?|get in touch)$/i.test(label) ? 'contact'
-          : ABOUT_HREF_PATTERN.test(path) || ABOUT_TEXT_PATTERN.test(label) ? 'about' : null;
+    const label = $(el).text().replace(/\s+/g, ' ').trim().slice(0, 160);
+    const purpose = `${path.replace(/[-_]+/g, ' ')} ${label}`;
+    const leaf = (path.split('/').filter(Boolean).at(-1) ?? '').replace(/\.(?:html?|php|aspx?)$/i, '').replace(/[-_]+/g, ' ');
+    const precisePurpose = `${leaf} ${label}`;
+    const isServicePath = /\/(?:[^/]*[-_])?(?:services?|solutions?|capabilities|products?|produkte|leistungen|expertise|what[-_]we[-_]do)(?:[-_/]|$)/i.test(path);
+    const isBusinessHub = /\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/|$)/i.test(path)
+      || /^(?:www\.)?(?:business|commercial|corporate|institutional)\./i.test(url.hostname)
+        && /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i.test(path);
+    let kind: CompanyEvidenceLink['kind'] | null = null;
+    let priority = 0;
+    if (/\b(?:registered (?:addresses?|offices?|seats?)|headquarters|head office|legal address|sitz der gesellschaft|siege social)\b/i.test(purpose)) {
+      kind = 'legal'; priority = 100;
+    } else if (/\b(?:impressum|imprint|legal notice|legal entit(?:y|ies)|mentions legales|aviso legal|company (?:registration|structure)|corporate structure|group structure)\b/i.test(precisePurpose)
+      || /^(?:company information|company registration|company structure)$/i.test(leaf)
+      || !isServicePath && /\bcorporate governance\b/i.test(precisePurpose)) {
+      kind = 'legal'; priority = 95;
+    } else if (/\b(?:legal|regulatory information|regulatory disclosures)\b/i.test(purpose) && !/\b(?:privacy|cookies?|terms)\b/i.test(purpose)) {
+      kind = 'legal'; priority = 90;
+    } else if (/\/(?:contact(?:[-_]?us)?|contacts|kontakt)(?:\/|$)/i.test(path)
+      || /\b(?:contact(?: us)?|contact and enquiries|get in touch|kontakt)\b/i.test(label)) {
+      kind = 'contact'; priority = 85;
+    } else if (/\/(?:[a-z-]*-)?(?:locations?|offices?)(?:[-_/]|$)/i.test(path)
+      || /\b(?:locations?|our offices|global offices|office locations)\b/i.test(label)) {
+      kind = 'locations'; priority = 80;
+    } else if (isServicePath || isBusinessHub
+      || /\b(?:our services|our solutions|our capabilities|our products|our expertise|what we do|produkte|leistungen)\b/i.test(label)) {
+      kind = 'services'; priority = 60;
+    } else if (ABOUT_HREF_PATTERN.test(path) || ABOUT_TEXT_PATTERN.test(label)
+      || /\/(?:ueber-uns|uber-uns|unternehmen|company-information)(?:\/|$)/i.test(path)
+      || /(?:^|\s)(?:über uns|ueber uns|unternehmen)(?:$|\s)/i.test(label)) {
+      kind = 'about'; priority = 70;
+    }
     if (!kind) return;
-    const key = `${host}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    links.push({ url: url.href, kind });
+    const key = `${url.hostname.replace(/^www\./, '')}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
+    const previous = seen.get(key);
+    if (previous && (previous.priority ?? 0) >= priority) return;
+    const link = { url: url.href, kind, priority, ...(label ? { label } : {}) };
+    if (previous) links.splice(links.indexOf(previous), 1);
+    seen.set(key, link);
+    links.push(link);
   });
-  return links;
+  // Rank before limiting: an early menu must not push a later registered-address link out.
+  const ranked = links.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+  const balanced = new Set<CompanyEvidenceLink>();
+  for (const kind of ['legal', 'contact', 'locations', 'about', 'services'] as const) {
+    for (const link of ranked.filter((item) => item.kind === kind).slice(0, kind === 'services' ? 16 : 4)) balanced.add(link);
+  }
+  for (const link of ranked) {
+    if (balanced.size >= 36) break;
+    balanced.add(link);
+  }
+  return [...balanced].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
 }
 
 /** JSON-LD — только данные организации/адреса, без WebPage, Product, reviews и произвольных scripts. */
-function companyStructuredText($: cheerio.CheerioAPI): string {
+function companyStructuredText($: cheerio.CheerioAPI): string[] {
   const excerpts: string[] = [];
   const seen = new Set<string>();
   const scalar = (value: unknown): value is string | number => typeof value === 'string' || typeof value === 'number';
   const typeIs = (value: unknown, type: string) => (Array.isArray(value) ? value : [value])
     .some((item) => typeof item === 'string' && (item === type || item === `https://schema.org/${type}` || item === `http://schema.org/${type}`));
+  // Explicit schema.org Organization/LocalBusiness families. A Product/Review
+  // containing a customer's address is still not a company location source.
+  const organizationTypes = [
+    'Organization', 'Corporation', 'LocalBusiness', 'FinancialService', 'AccountingService',
+    'BankOrCreditUnion', 'InsuranceAgency', 'ProfessionalService', 'LegalService', 'Attorney',
+    'EmploymentAgency', 'GovernmentOrganization', 'NGO', 'EducationalOrganization',
+    'MedicalOrganization', 'MedicalBusiness', 'OnlineBusiness', 'OnlineStore', 'Store',
+    'RealEstateAgent', 'TravelAgency', 'LodgingBusiness', 'Hotel', 'AutomotiveBusiness',
+    'HomeAndConstructionBusiness', 'EntertainmentBusiness', 'FoodEstablishment',
+    'SportsActivityLocation', 'HealthAndBeautyBusiness', 'ShoppingCenter',
+    'Dentist', 'MedicalClinic', 'Physician', 'Hospital', 'Pharmacy', 'VeterinaryCare',
+    'Electrician', 'Plumber', 'GeneralContractor', 'HVACBusiness', 'RoofingContractor',
+    'Locksmith', 'MovingCompany', 'HousePainter', 'AutoDealer', 'AutoRepair', 'AutoRental',
+    'AutoBodyShop', 'AutoPartsStore', 'MotorcycleDealer', 'MotorcycleRepair', 'Restaurant',
+    'CafeOrCoffeeShop', 'Bakery', 'BarOrPub', 'Brewery', 'Winery', 'Distillery',
+    'GroceryStore', 'WholesaleStore', 'DepartmentStore', 'HardwareStore', 'OfficeEquipmentStore',
+    'ElectronicsStore', 'FurnitureStore', 'ClothingStore', 'ComputerStore',
+  ];
   const address = (value: unknown): unknown => {
     if (scalar(value)) return value;
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -1942,7 +2016,7 @@ function companyStructuredText($: cheerio.CheerioAPI): string {
       // Only top-level/graph entities; a customer's address inside a review is not the site's office.
       if (Array.isArray(input['@graph'])) pending.push(...input['@graph'].slice(0, 512));
       let out: Record<string, unknown> | undefined;
-      if (typeIs(input['@type'], 'Organization')) {
+      if (organizationTypes.some((type) => typeIs(input['@type'], type))) {
         out = {};
         for (const key of ['@type', 'name', 'legalName', 'alternateName', 'url']) {
           if (scalar(input[key])) out[key] = input[key];
@@ -1958,7 +2032,63 @@ function companyStructuredText($: cheerio.CheerioAPI): string {
       if (!seen.has(text)) { seen.add(text); excerpts.push(text); }
     }
   });
-  return excerpts.join(COMPANY_EVIDENCE_SECTION_SEPARATOR);
+  return excerpts;
+}
+
+const COMPANY_ADDRESS_ROLE = /\b(?:registered\s+(?:address(?:es)?|office|seat)|headquarters|head\s+office|legal\s+address|hauptsitz|geschaftssitz|geschäftssitz|sitz\s+der\s+gesellschaft|hoofdkantoor|statutaire\s+zetel|huvudkontor|hovedkontor|forretningsadresse|kotipaikka|si[eè]ge\s+social)\b/i;
+const COMPANY_ADDRESS_BLOCK_LIMIT = 1400;
+
+/** Preserve one contiguous DOM block, including its nearby entity/role heading. */
+function companyAddressBlocks($: cheerio.CheerioAPI): string[] {
+  const candidates: Array<{ text: string; priority: number }> = [];
+  const seen = new Set<string>();
+  const semantic = 'address, [itemprop="address"], [class*="address" i], [id*="address" i]';
+  const mostlyNavigation = (node: cheerio.Cheerio<AnyNode>, text: string) => {
+    const anchors = node.find('a');
+    return anchors.length > 4 && sanitizeText(anchors.text()).length > text.length / 2;
+  };
+  const add = (el: AnyNode, priority: number) => {
+    let node = $(el);
+    let text = sanitizeText(node.text());
+    if (!text || text.length > COMPANY_ADDRESS_BLOCK_LIMIT || mostlyNavigation(node, text)) return;
+    // Keep the entity heading with the address when their shared wrapper is small.
+    // Never concatenate remote headings or neighbouring company blocks ourselves.
+    for (let depth = 0; depth < 2; depth++) {
+      const parent = node.parent();
+      if (!parent.length || parent.is('body, html, footer, [role="contentinfo"]')) break;
+      const parentText = sanitizeText(parent.text());
+      if (parentText.length > COMPANY_ADDRESS_BLOCK_LIMIT || mostlyNavigation(parent, parentText)) break;
+      node = parent;
+      text = parentText;
+    }
+    if (!seen.has(text)) { seen.add(text); candidates.push({ text, priority }); }
+  };
+  // An address is sometimes a heading followed by one short paragraph per
+  // field inside a much larger article. Keep that contiguous sibling run;
+  // never skip other content or add our own entity/country labels.
+  $('p, h1, h2, h3, h4, h5, h6').each((_, el) => {
+    const first = $(el);
+    const heading = sanitizeText(first.text());
+    if (heading.length > 220 || !COMPANY_ADDRESS_ROLE.test(heading)) return;
+    const fields = [heading];
+    let next = first.next();
+    while (fields.length < 8 && next.is('p, address')) {
+      const value = sanitizeText(next.text());
+      if (!value || value.length > 180 || COMPANY_ADDRESS_ROLE.test(value)) break;
+      fields.push(value);
+      next = next.next();
+    }
+    const text = fields.join('\n\n');
+    if (fields.length > 1 && text.length <= COMPANY_ADDRESS_BLOCK_LIMIT && !seen.has(text)) {
+      seen.add(text); candidates.push({ text, priority: 4 });
+    }
+  });
+  $(semantic).each((_, el) => { add(el, 2); });
+  $('p, li, div, section, article, td').each((_, el) => {
+    const text = sanitizeText($(el).text());
+    if (text.length <= COMPANY_ADDRESS_BLOCK_LIMIT && COMPANY_ADDRESS_ROLE.test(text)) add(el, 3);
+  });
+  return candidates.sort((a, b) => b.priority - a.priority).map((item) => item.text);
 }
 
 /** Отдельный ENG opt-in: основной текст + зарезервированное место адресам и JSON-LD. */
@@ -1970,37 +2100,54 @@ function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boo
   // Keep the source's address fields readable when they occupy adjacent block elements.
   $('br').replaceWith('\n');
   $('p, div, li, address, section, h1, h2, h3, h4, h5, h6').append('\n');
-  const addresses = outermostOf($, 'address, [itemprop="address"]').toArray()
-    .map((el) => sanitizeText($(el).text())).filter(Boolean);
-  $('footer nav, footer [role="navigation"], [role="contentinfo"] nav, [role="contentinfo"] [role="navigation"]').remove();
-  const footers = outermostOf($, 'footer, [role="contentinfo"]').toArray()
-    .map((el) => sanitizeText($(el).text())).filter(Boolean);
-  const main = sanitizeText(extractTextFromHtml(html, { layoutAware }));
-  // Each part has a floor so a long homepage/footer cannot consume the entire evidence budget.
-  const parts = [main, [...new Set(addresses)].join(COMPANY_EVIDENCE_SECTION_SEPARATOR), structured,
-    [...new Set(footers)].join(COMPANY_EVIDENCE_SECTION_SEPARATOR)];
-  // These explicit boundaries must survive whitespace normalization in the quote verifier.
-  const sectionSeparator = COMPANY_EVIDENCE_SECTION_SEPARATOR;
-  const omissionSeparator = '\n\n[excerpt omitted]\n\n';
-  const budgets = [1400, 480, 620, 400];
-  const spare = MAX_TEXT_LENGTH - sectionSeparator.length * (parts.length - 1)
-    - parts.reduce((sum, part, i) => sum + Math.min(part.length, budgets[i]), 0);
-  let remaining = spare;
-  for (const index of [1, 2, 0, 3]) {
-    const extra = Math.min(remaining, Math.max(0, parts[index].length - budgets[index]));
-    budgets[index] += extra;
-    remaining -= extra;
+  $('header, nav, [role="navigation"]').remove();
+  // Some sites use Bootstrap/WordPress menus without a semantic nav element.
+  // Remove the link list, not its outer banner, which can contain the page title.
+  removeLayoutNoise($, '.navbar-nav, .navbar-collapse, .child-pages-nav, .main-menu, #main-menu, .menu-main-menu-container, [role="menu"], [role="menubar"]', (el) => {
+    const node = $(el);
+    const anchors = node.find('a');
+    return anchors.length >= 2 && !node.find('h1, h2, h3, h4, h5, h6, address, [itemprop="address"]').length
+      && sanitizeText(anchors.text()).length >= sanitizeText(node.text()).length * 0.7;
+  });
+  const addresses = companyAddressBlocks($);
+  const footers: string[] = [];
+  outermostOf($, 'footer, [role="contentinfo"]').each((_, el) => {
+    const footer = $(el);
+    const text = sanitizeText(footer.text());
+    if (text.length <= COMPANY_ADDRESS_BLOCK_LIMIT) { if (text) footers.push(text); return; }
+    // Whole local blocks only: a country in the middle of a long footer must
+    // not disappear between a head excerpt and a tail excerpt.
+    footer.find('p, address, li, div').each((_, child) => {
+      const block = sanitizeText($(child).text());
+      if (block && block.length <= COMPANY_ADDRESS_BLOCK_LIMIT) footers.push(block);
+    });
+  });
+  const main = sanitizeText(extractTextFromHtml($.html(), { layoutAware }));
+  const parts: string[] = [];
+  let length = 0;
+  let truncated = false;
+  const addWhole = (part: string) => {
+    if (!part || parts.some((saved) => saved.includes(part))) return;
+    const extra = part.length + (parts.length ? COMPANY_EVIDENCE_SECTION_SEPARATOR.length : 0);
+    if (length + extra > MAX_TEXT_LENGTH) { truncated = true; return; }
+    parts.push(part);
+    length += extra;
+  };
+  // Keep room for complete address/structured blocks even on long homepages.
+  const mainLimit = addresses.length || structured.length ? 1200 : footers.length ? 2000 : MAX_TEXT_LENGTH;
+  let mainExcerpt = sliceWholeChars(main, 0, mainLimit);
+  if (mainExcerpt.length < main.length) {
+    mainExcerpt = sliceWholeChars(mainExcerpt, 0, mainLimit - '\n[excerpt omitted]'.length);
+    const boundary = Math.max(mainExcerpt.lastIndexOf('\n'), mainExcerpt.lastIndexOf('. '));
+    if (boundary > 400) mainExcerpt = mainExcerpt.slice(0, boundary + 1).trimEnd();
+    mainExcerpt += '\n[excerpt omitted]';
+    truncated = true;
   }
-  const text = parts.map((part, i) => {
-    const limit = budgets[i];
-    if (part.length <= limit) return part;
-    if (i === 0) return sliceWholeChars(part, 0, limit).trimEnd();
-    // Addresses commonly end in the country; long footer navigation must not cut off that tail.
-    const head = Math.floor((limit - omissionSeparator.length) / 2);
-    const tailStart = part.length - (limit - head - omissionSeparator.length);
-    return `${sliceWholeChars(part, 0, head).trimEnd()}${omissionSeparator}${sliceWholeChars(part, tailStart, part.length).trimStart()}`;
-  }).filter(Boolean).join(sectionSeparator);
-  return { url, text: stripUnstorableJsonChars(text), companyEvidenceLinks: links };
+  addWhole(mainExcerpt);
+  for (const part of [...addresses, ...structured, ...new Set(footers)]) addWhole(part);
+  // All evidence sections are contiguous source blocks; none is cut through an address or JSON value.
+  const text = parts.join(COMPANY_EVIDENCE_SECTION_SEPARATOR);
+  return { url, text: stripUnstorableJsonChars(text), companyEvidenceLinks: links, companyEvidenceTextTruncated: truncated };
 }
 
 /**

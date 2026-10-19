@@ -10,7 +10,8 @@ import {
 } from '@/lib/briefScoring/concurrency';
 import { fatalAiAccountError } from '@/lib/openrouter/client';
 import {
-  TA_JEV_BATCH, TaJevBreaker, scoreTaWithJev, taJevCut, taJevEnabled, taJevHasFacts, taJevMinLetters,
+  TA_JEV_BATCH, TaJevBreaker, scoreTaWithJev, taJevCut, taJevEnabled, taJevHasFacts, taJevMinConfidence,
+  taJevMinLetters,
 } from '@/lib/taScoringJev';
 
 type QueueItem = {
@@ -233,7 +234,8 @@ export async function runBriefScoringJob(jobId: string) {
     const jevBreaker = taJevEnabled('databases', job.user_id) ? new TaJevBreaker() : null;
     const jevCut = taJevCut();
     const jevMinLetters = taJevMinLetters();
-    const jevStats = { requests: 0, companies: 0, fallback: 0, thin: 0, costUsd: 0 };
+    const jevMinConfidence = taJevMinConfidence();
+    const jevStats = { requests: 0, companies: 0, fallback: 0, thin: 0, uncertain: 0, costUsd: 0 };
 
     trace = await startTrace({
       name: 'database.brief_scoring',
@@ -415,6 +417,7 @@ export async function runBriefScoringJob(jobId: string) {
             brief: job.brief_text.slice(0, 5000),
             companies: jevCandidates.map((item) => ({ key: item.id, data: toCompanyData(item.company_data) })),
             cut: jevCut,
+            minConfidence: jevMinConfidence,
             title: 'Portal - Brief Scoring (Jev)',
           });
           if (jevBreaker.record(result)) {
@@ -425,13 +428,15 @@ export async function runBriefScoringJob(jobId: string) {
           }
           jevStats.requests += 1;
           jevStats.companies += result.verdicts.size;
+          jevStats.uncertain += result.uncertain;
+          // Без оценки Jev: неуверенный ответ (учтён выше) или сбой Jev.
+          jevStats.fallback += jevCandidates.length - result.verdicts.size - result.uncertain;
           jevStats.costUsd += result.costUsd;
           rest = activeItems.filter((item) => !jevCandidates.includes(item));
           for (const item of jevCandidates) {
             const verdict = result.verdicts.get(item.id);
             if (!verdict) {
               rest.push(item);
-              jevStats.fallback += 1;
               continue;
             }
             const completed = await updateQueueCompleted(item, { idx: item.row_index, score: verdict.score, reason: verdict.reason });
@@ -532,6 +537,7 @@ export async function runBriefScoringJob(jobId: string) {
             jevCompanies: jevStats.companies,
             jevFallbackCompanies: jevStats.fallback,
             jevThinCompanies: jevStats.thin,
+            jevUncertainCompanies: jevStats.uncertain,
             jevCostUsd: Math.round(jevStats.costUsd * 1e6) / 1e6,
             jevDisabledReason: jevBreaker.disabledReason,
           }

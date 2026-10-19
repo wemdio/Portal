@@ -34,7 +34,7 @@ import { normalizeVeFinalLetters, materializeVeFinalLetters } from '@/lib/vertic
 import { veEmailLinkUrl, veEmailBodyDocument, veEmailBodyText } from '@/lib/verticalEngineV2/emailBody';
 import { renderTemplatePreview } from '@/lib/verticalEngineV2/renderPreview';
 import { buildLaunchSequence } from '@/lib/verticalEngineV2/launchHandoff';
-import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
+import { buildCampaignPayloadFromPreset, toInstantlyHtmlBody } from '@/lib/clientLaunch/buildCampaignPayload';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import type { VeChainLetter, VeJob } from '@/lib/verticalEngineV2/types';
 import { refreshSiteCases } from '@/lib/verticalEngineV2/stages/siteProfile';
@@ -629,6 +629,58 @@ describe('VE2 follow-up timing through generation and launch', () => {
     const href = veEmailLinkUrl('https://client.test/offer(old)?keep=1#pricing', { utm_source: 'email', utm_campaign: 'Клиент' });
     const linked = `Вариант C: [условия](${href})\n\n[сайт](https://client.test/)`;
     expect(veEmailBodyText(veEmailBodyDocument(linked))).toBe(linked);
+    // Enter creates a paragraph; Shift+Enter creates a line break within it.
+    // Stored text and the Instantly payload must preserve that distinction.
+    expect(veEmailBodyDocument('Первый абзац\n\nВторой абзац')).toEqual({
+      type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'Первый абзац' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: 'Второй абзац' }] },
+      ],
+    });
+    expect(veEmailBodyDocument('Имя\nДолжность')).toEqual({
+      type: 'doc', content: [{ type: 'paragraph', content: [
+        { type: 'text', text: 'Имя' }, { type: 'hardBreak' }, { type: 'text', text: 'Должность' },
+      ] }],
+    });
+    const paragraphsText = veEmailBodyText({ type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: 'Первый абзац' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: 'Второй абзац' }] },
+    ] });
+    const signatureText = veEmailBodyText({ type: 'doc', content: [{ type: 'paragraph', content: [
+      { type: 'text', text: 'Имя' }, { type: 'hardBreak' }, { type: 'text', text: 'Должность' },
+    ] }] });
+    expect(paragraphsText).toBe('Первый абзац\n\nВторой абзац');
+    expect(signatureText).toBe('Имя\nДолжность');
+    expect(toInstantlyHtmlBody(paragraphsText)).toBe('<div>Первый абзац</div><div><br></div><div>Второй абзац</div>');
+    expect(toInstantlyHtmlBody(signatureText)).toBe('<div>Имя</div><div>Должность</div>');
+    expect(veEmailBodyText({ type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: 'А' }] },
+      { type: 'paragraph', content: [] },
+      { type: 'paragraph', content: [{ type: 'text', text: 'Б' }] },
+    ] })).toBe('А\n\n\n\nБ');
+    // Opening and saving an old body must not silently reformat its whitespace.
+    for (const oldBody of [
+      '', 'Старый текст без переносов', '  Привет 👋\n\nСпасибо,\n  Команда  ',
+      'А\\n\\nБ', '<p>Текст</p>\n\n{{firstName}} & компания',
+      linked, `${linked}\nПодпись`, `\n${linked}\n\n`,
+      'А\r\nБ', 'А\r\n\r\nБ', '\r\nА\r\n\r\n',
+    ]) expect(veEmailBodyText(veEmailBodyDocument(oldBody))).toBe(oldBody);
+    for (const lfCount of [1, 2, 3, 4, 5, 6]) {
+      const separator = '\n'.repeat(lfCount);
+      for (const oldBody of [separator, `А${separator}Б`, `${separator}А`, `А${separator}`]) {
+        expect(veEmailBodyText(veEmailBodyDocument(oldBody))).toBe(oldBody);
+      }
+    }
+    for (const [stored, html] of [
+      ['', ''],
+      ['А\nБ', '<div>А</div><div>Б</div>'],
+      ['А\n\nБ', '<div>А</div><div><br></div><div>Б</div>'],
+      ['А\n\n\nБ', '<div>А</div><div><br></div><div><br></div><div>Б</div>'],
+      ['А\n\n\n\nБ', '<div>А</div><div><br></div><div><br></div><div><br></div><div>Б</div>'],
+      ['\nА\n', '<div><br></div><div>А</div><div><br></div>'],
+      ['\n\nА\n\n', '<div><br></div><div><br></div><div>А</div><div><br></div><div><br></div>'],
+      ['<b>Текст</b>\n\n{{firstName}} & компания', '<div>&lt;b&gt;Текст&lt;/b&gt;</div><div><br></div><div>{{firstName}} &amp; компания</div>'],
+    ]) expect(toInstantlyHtmlBody(veEmailBodyText(veEmailBodyDocument(stored)))).toBe(html);
     expect(href).toContain('offer%28old%29?keep=1&utm_source=email&');
     expect(href).toContain('#pricing');
     for (const invalid of ['javascript:alert(1)', 'data:text/html,x', 'https://name:pass@client.test', 'https://client.test/ bad']) expect(() => veEmailLinkUrl(invalid)).toThrow();
@@ -656,7 +708,9 @@ describe('VE2 follow-up timing through generation and launch', () => {
     expect(editedPayload.text_only).toBe(false);
     expect(editedPayload.open_tracking).toBe(false);
     expect(editedPayload.link_tracking).toBe(false);
-    expect(editedPayload.sequences![0].steps[0].variants![2].body).toContain(`<a href="${href.replace(/&/g, '&amp;')}">условия</a>`);
+    expect(editedPayload.sequences![0].steps[0].variants![2].body).toBe(
+      `<div>Вариант C: <a href="${href.replace(/&/g, '&amp;')}">условия</a></div><div><br></div><div><a href="https://client.test/">сайт</a></div>`,
+    );
     expect(normalizeVeFinalLetters([{ ...edited[0], selected_subject_indices: [0, 1] }]).error).toContain('общую тему');
     expect(normalizeVeFinalLetters([{ ...edited[0], selected_variants: ['C'], variants: [] }]).error).toBeDefined();
     expect(normalizeVeFinalLetters([{ ...edited[0], body: '[плохая](javascript:alert(1))' }]).error).toBeDefined();
