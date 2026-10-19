@@ -1,4 +1,9 @@
 import { buildSequenceHandoffSteps } from '@/lib/clientLaunch/sequenceHandoff';
+import {
+  clientLaunchStepsToCampaignSequences,
+  editableStepsFromCampaignSteps,
+} from '@/lib/clientLaunch/campaignSequences';
+import { toInstantlyHtmlBody } from '@/lib/clientLaunch/buildCampaignPayload';
 
 const L = (subject: string, body: string, wait_days = 2) => ({ subject, body, wait_days });
 
@@ -7,67 +12,73 @@ describe('buildSequenceHandoffSteps', () => {
     expect(buildSequenceHandoffSteps([])).toEqual([]);
   });
 
-  it('темы писем становятся A/B-вариантами первого шага (одинаковое тело = тело 1-го), фоллоу-апы — пустая тема', () => {
+  it('сохраняет пары тема/текст и интервалы при переносе, отправке и повторном открытии редактора', () => {
     const letters = [
-      L('Тема 1', 'Тело 1', 0),
-      L('Тема 2', 'Тело 2', 2),
-      L('Тема 3', 'Тело 3', 4),
+      L('Тема 1', 'Первое письмо\n\nС уважением, команда', 0),
+      L('Тема 2', 'Второе письмо', 7),
+      L('Тема 3', 'Третье письмо', 7),
+      L('Тема 4', 'Четвёртое письмо', 2),
     ];
     const steps = buildSequenceHandoffSteps(letters);
+    expect(steps).toEqual(letters);
+    expect(steps.every((step) => !step.variants?.length)).toBe(true);
 
-    expect(steps).toHaveLength(3);
-    // Первый шаг: тема из письма 1, варианты — темы 2 и 3, ВСЕ с телом первого письма.
-    expect(steps[0].subject).toBe('Тема 1');
-    expect(steps[0].body).toBe('Тело 1');
-    expect(steps[0].wait_days).toBe(0);
-    expect(steps[0].variants).toEqual([
-      { subject: 'Тема 2', body: 'Тело 1' },
-      { subject: 'Тема 3', body: 'Тело 1' },
+    const payload = clientLaunchStepsToCampaignSequences(steps, { bodyFormatter: toInstantlyHtmlBody })!;
+    expect(payload[0].steps.map((step) => step.delay)).toEqual([7, 7, 2, 1]);
+    // The provider's GET response omits the default day unit.
+    const returned = payload[0].steps.map(({ delay_unit: _unit, ...step }) => step);
+    expect(editableStepsFromCampaignSteps(returned)).toEqual(letters);
+    expect(clientLaunchStepsToCampaignSequences(editableStepsFromCampaignSteps(returned), {
+      bodyFormatter: toInstantlyHtmlBody,
+    })).toEqual(payload);
+  });
+
+  it('не обрезает темы длинной цепочки до лимита A/B-вариантов', () => {
+    const letters = Array.from({ length: 6 }, (_, i) => L(`T${i + 1}`, `B${i + 1}`, i === 0 ? 0 : 2));
+    expect(buildSequenceHandoffSteps(letters)).toEqual(letters);
+  });
+
+  it('оставляет повторяющиеся темы у соответствующих писем', () => {
+    const letters = [L('Одна тема', 'B1', 0), L('Одна тема', 'B2', 2)];
+    expect(buildSequenceHandoffSteps(letters)).toEqual(letters);
+  });
+
+  it('сохраняет явно пустую тему продолжения, не подменяя первую тему последующей', () => {
+    expect(buildSequenceHandoffSteps([L('   ', 'B1', 0), L('Тема 2', 'B2', 2), L('', 'B3', 3)]))
+      .toEqual([L('', 'B1', 0), L('Тема 2', 'B2', 2), L('', 'B3', 3)]);
+  });
+
+  it('первое письмо отправляется сразу, отсутствующий интервал продолжения получает 2 дня', () => {
+    expect(buildSequenceHandoffSteps([
+      L('T', 'B', 5), { subject: null, body: 'Follow-up' }, L('Last', 'Body', -1),
+    ])).toEqual([L('T', 'B', 0), L('', 'Follow-up', 2), L('Last', 'Body', 0)]);
+  });
+});
+
+describe('editableStepsFromCampaignSteps', () => {
+  it('сохраняет ручные варианты и скрытые ссылки при повторном сохранении', () => {
+    const original = [{
+      subject: 'A', body: 'Текст\n\n[Каталог](https://example.com/?a=1&b=2)', wait_days: 0,
+      variants: [{ subject: 'B', body: 'Другой текст\nВторая строка' }],
+    }, { subject: '', body: 'Продолжение', wait_days: 3 }];
+    const payload = clientLaunchStepsToCampaignSequences(original, { bodyFormatter: toInstantlyHtmlBody })!;
+    expect(editableStepsFromCampaignSteps(payload[0].steps)).toEqual(original);
+  });
+
+  it('использует предыдущую задержку, а не терминальную задержку самого письма', () => {
+    const editable = editableStepsFromCampaignSteps([
+      { delay: 7, delay_unit: 'days', variants: [{ subject: 'First', body: 'First' }] },
+      { delay: 2, variants: [{ subject: 'Second', body: 'Second' }] },
+      { delay: 1, variants: [{ subject: 'Third', body: 'Third' }] },
     ]);
-    // Фоллоу-апы: пустая тема (та же ветка), СВОИ тела и задержки.
-    expect(steps[1]).toEqual({ subject: '', body: 'Тело 2', wait_days: 2 });
-    expect(steps[2]).toEqual({ subject: '', body: 'Тело 3', wait_days: 4 });
+    expect(editable.map((s) => s.wait_days)).toEqual([0, 7, 2]);
   });
 
-  it('лимит вариантов: >4 уникальных тем → только первые 4 как A/B/C/D', () => {
-    const letters = [
-      L('T1', 'B1', 0),
-      L('T2', 'B2', 2),
-      L('T3', 'B3', 2),
-      L('T4', 'B4', 2),
-      L('T5', 'B5', 2),
-      L('T6', 'B6', 2),
-    ];
-    const steps = buildSequenceHandoffSteps(letters, 4);
-    // 4 темы всего: главная + 3 варианта; T5/T6 как темы отброшены.
-    expect(steps[0].variants).toHaveLength(3);
-    expect([steps[0].subject, ...steps[0].variants!.map((v) => v.subject)]).toEqual(['T1', 'T2', 'T3', 'T4']);
-    // но тела всех 6 писем сохранены отдельными шагами.
-    expect(steps).toHaveLength(6);
-    expect(steps.slice(1).map((s) => s.body)).toEqual(['B2', 'B3', 'B4', 'B5', 'B6']);
-    expect(steps.slice(1).every((s) => s.subject === '')).toBe(true);
-  });
-
-  it('одинаковые темы дедуплицируются → без вариантов', () => {
-    const steps = buildSequenceHandoffSteps([L('Одна тема', 'B1', 0), L('Одна тема', 'B2', 2)]);
-    expect(steps[0].subject).toBe('Одна тема');
-    expect(steps[0].variants).toBeUndefined();
-    expect(steps[1]).toEqual({ subject: '', body: 'B2', wait_days: 2 });
-  });
-
-  it('пустые темы игнорируются в пуле вариантов', () => {
-    const steps = buildSequenceHandoffSteps([L('Тема 1', 'B1', 0), L('   ', 'B2', 2)]);
-    expect(steps[0].subject).toBe('Тема 1');
-    expect(steps[0].variants).toBeUndefined();
-  });
-
-  it('одно письмо → один шаг, без вариантов и фоллоу-апов', () => {
-    const steps = buildSequenceHandoffSteps([L('Тема', 'Тело', 0)]);
-    expect(steps).toEqual([{ subject: 'Тема', body: 'Тело', wait_days: 0 }]);
-  });
-
-  it('первое письмо всегда wait_days=0 (даже если в цепочке было иначе)', () => {
-    const steps = buildSequenceHandoffSteps([L('T', 'B', 5)]);
-    expect(steps[0].wait_days).toBe(0);
+  it('не принимает явно заданные часы за дни и поддерживает legacy wait_days', () => {
+    const editable = editableStepsFromCampaignSteps([
+      { delay: 12, delay_unit: 'hours', subject: 'First', body: 'First' },
+      { wait_days: 3, subject: 'Second', body: 'Second' },
+    ]);
+    expect(editable.map((s) => s.wait_days)).toEqual([0, 3]);
   });
 });

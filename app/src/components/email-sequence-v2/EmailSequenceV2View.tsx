@@ -891,8 +891,7 @@ export function EmailSequenceV2View({ clientMode = false }: { clientMode?: boole
       if (existing && !window.confirm('В мастере запуска уже есть черновик — заменить его этой цепочкой?')) {
         return;
       }
-      // Темы писем → A/B-варианты первого шага; тела фоллоу-апов → отдельные
-      // шаги с пустой темой (та же ветка). См. buildSequenceHandoffSteps.
+      // Переносим каждое сохранённое письмо вместе с его темой и интервалом.
       const steps = buildSequenceHandoffSteps(letters);
       const draft = {
         campaignName: run?.company_name ?? '',

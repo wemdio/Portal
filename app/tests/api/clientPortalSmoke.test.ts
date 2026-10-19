@@ -1399,6 +1399,32 @@ describe('Client Portal — RBAC isolation across clients', () => {
     expect(mockGetCampaign).toHaveBeenCalledWith(ALLOWED_CAMPAIGN, { accountId: 'main' });
   });
 
+  it('GET /campaigns/[id] does not serve a stale editable campaign from the analytics cache', async () => {
+    const { cached } = await import('@/lib/clientCache');
+    const cacheMock = jest.mocked(cached);
+    const cacheImplementation = cacheMock.getMockImplementation()!;
+    const staleCampaign = { id: ALLOWED_CAMPAIGN, name: 'Before edit' };
+    cacheMock.mockImplementation(async <T,>(key: string, fn: () => Promise<T>) => (
+      key.includes(':campaign:') ? staleCampaign as T : fn()
+    ));
+    try {
+      mockGetCampaign.mockResolvedValue({
+        id: ALLOWED_CAMPAIGN, name: 'Saved edit',
+        sequences: [{ steps: [{ variants: [{ subject: 'New subject', body: 'New body' }] }] }],
+      });
+      const { GET } = await import('@/app/api/client/campaigns/[id]/route');
+      const res = await GET(makeReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}`), {
+        params: Promise.resolve({ id: ALLOWED_CAMPAIGN }),
+      });
+      const body = await res.json();
+      expect(body.campaign.name).toBe('Saved edit');
+      expect(body.campaign.sequences[0].steps[0].variants[0].subject).toBe('New subject');
+      expect(mockGetCampaign).toHaveBeenCalledWith(ALLOWED_CAMPAIGN, { accountId: 'main' });
+    } finally {
+      cacheMock.mockImplementation(cacheImplementation);
+    }
+  });
+
   it('GET /campaigns/[id] falls back to launch journal sequence when Instantly returns an empty sequence', async () => {
     dbState.rowsByTable.client_campaign_launches = [
       {
@@ -1520,6 +1546,52 @@ describe('Client Portal — RBAC isolation across clients', () => {
       ),
     ).toBe(true);
     expect(body.campaign.sequences[0].steps[0].variants[0].body).toBe('<div>Line 1</div><div>Line 2</div>');
+  });
+
+  it('PATCH /campaigns/[id] preserves the accepted edit when the provider returns a nonempty old sequence', async () => {
+    dbState.rowsByTable.client_campaign_launches = [{
+      id: 'launch-1', client_user_id: AUTH_USER_ID, instantly_campaign_id: ALLOWED_CAMPAIGN,
+    }];
+    mockUpdateCampaign.mockResolvedValueOnce({
+      id: ALLOWED_CAMPAIGN, name: 'Old name', status: 1, text_only: false,
+      email_list: ['sender@example.com'],
+      sequences: [{ steps: [{ delay: 2, variants: [{ subject: 'Old subject', body: '<div>Old body</div>' }] }] }],
+      campaign_schedule: { schedules: [{ name: 'Unchanged schedule' }] },
+    });
+    const sequence = [
+      { subject: 'Intro', body: 'Edited first letter', wait_days: 0 },
+      { subject: 'Speed', body: 'Second letter', wait_days: 7 },
+      { subject: 'Privacy', body: 'Third letter', wait_days: 7 },
+      { subject: 'Logistics', body: 'Fourth letter', wait_days: 2 },
+    ];
+    const { PATCH } = await import('@/app/api/client/campaigns/[id]/route');
+    const res = await PATCH(makeJsonReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}`, 'PATCH', {
+      campaign_name: 'Saved name', sequence_steps: sequence,
+    }), { params: Promise.resolve({ id: ALLOWED_CAMPAIGN }) });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.campaign.name).toBe('Saved name');
+    expect(body.campaign.text_only).toBe(true);
+    expect(body.campaign.email_list).toEqual(['sender@example.com']);
+    expect(body.campaign.campaign_schedule).toEqual({ schedules: [{ name: 'Unchanged schedule' }] });
+    expect(body.campaign.sequences).toEqual(mockUpdateCampaign.mock.calls[0][1].sequences);
+    expect(body.launch.sequence_steps).toEqual(sequence);
+    expect(body.campaign.sequences[0].steps.map((s: { delay: number }) => s.delay)).toEqual([7, 7, 2, 1]);
+    const { upsertInstantlyCatalogFromCampaign } = await import('@/lib/tools/instantlyCampaignCatalog');
+    expect(upsertInstantlyCatalogFromCampaign).toHaveBeenLastCalledWith(body.campaign, 'main');
+  });
+
+  it('PATCH /campaigns/[id] does not report an edit saved when the provider rejects it', async () => {
+    dbState.rowsByTable.client_campaign_launches = [{
+      id: 'launch-1', client_user_id: AUTH_USER_ID, instantly_campaign_id: ALLOWED_CAMPAIGN,
+    }];
+    mockUpdateCampaign.mockRejectedValueOnce(new Error('Provider unavailable'));
+    const { PATCH } = await import('@/app/api/client/campaigns/[id]/route');
+    const res = await PATCH(makeJsonReq(`http://x/api/client/campaigns/${ALLOWED_CAMPAIGN}`, 'PATCH', {
+      campaign_name: 'Edited name', sequence_steps: [{ subject: 'New', body: 'New body', wait_days: 0 }],
+    }), { params: Promise.resolve({ id: ALLOWED_CAMPAIGN }) });
+    expect(res.status).toBe(500);
+    expect(dbState.updateCalls.filter((call) => call.table === 'client_campaign_launches')).toHaveLength(0);
   });
 
   it('PATCH /campaigns/[id] of unallowed campaign -> 404 and does not call Instantly', async () => {
