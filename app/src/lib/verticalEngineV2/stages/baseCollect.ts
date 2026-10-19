@@ -117,7 +117,7 @@ import {
   mergeVeSourceFactText, normalizeVeCompanyInn, normalizeVeCompanyName, normalizeVeWebsiteHost,
   veCompanyWebsiteKey, veAcquisitionReceipt,
 } from '../collectionIdentity';
-import { buildVeSeenCompanies, veSeenCompanyCovers, type VeSeenCompanies } from '../seenCompanies';
+import { buildVeSeenCompanies, veSeenCompanyCovers, veUnseenCompanyEmails, type VeSeenCompanies } from '../seenCompanies';
 import { getVeDirectoryPlanPopulation, veDirectoryPopulationSlice, veUnsizedSourceLabels } from '../directoryPopulation';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
@@ -131,6 +131,7 @@ import {
   veRelevanceCompanyKey, veRelevanceRowKey, veSavedReviewSignature, type VeRelevanceReserve, type VeRelevanceReserveSummary,
 } from '../relevanceReserve';
 import { veSavedRelevanceScope } from '../collectionRecovery';
+import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES, VE_KNOWN_WEBSITE_CATALOG, veKnownWebsiteAudienceEligible, type VeKnownWebsiteSourceReceipt } from '../knownWebsiteDirectory';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
 import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
 import { singleVeSavedEmail } from '../savedEmailReviewEligibility';
@@ -166,7 +167,7 @@ import { createVeCollectionAudienceSnapshot, readVeCollectionAudienceSnapshot, r
   veSourceDiscoveryIsExistingOnly, veNewAudienceSourceCostPolicy, veAudienceNicheProfile, normalizeVeAudienceSourcePlan, loadVeApprovedSupplyAudience,
   canRefreshVeAudienceSources, needsLegacyFintechAudienceRefresh, needsLegacyRetailAudienceRefresh, veAudienceRetailProfile,
   type VeCollectionAudienceSnapshot, type VeSourceCostPolicy, type VeSourceAudienceHypothesis } from '../sourceAudience';
-import { VE_PAYMENT_DIRECTORY_REVISION, vePaymentCompanyHint } from '../paymentCompanyDirectory';
+import { vePaymentCompanyHint } from '../paymentCompanyDirectory';
 import { deriveVeRetailAudienceScope, type VeRetailSourceProfile } from '../legacyRetailAudience';
 import { veAudienceReviewHold, veAutomaticAudienceReviewRows } from '../audienceReviewHold';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, veRetailRubricAllowed,
@@ -739,6 +740,7 @@ export interface VeSliceProbe {
 }
 
 export interface VeCollectInfo {
+  known_website_source?: VeKnownWebsiteSourceReceipt;
   /** Frozen source/relevance audience; a rollout flag change never reinterprets it. */
   audience_snapshot?: VeCollectionAudienceSnapshot;
   /** Set only by explicit continuation of an unlaunched, quiescent preview. */
@@ -2002,6 +2004,17 @@ async function dispatchTask(
 ): Promise<void> {
   const { task } = state;
 
+  if (task.source === 'known_websites') {
+    if (!existingContactsOnly || task.known_websites?.catalog !== VE_KNOWN_WEBSITE_CATALOG || limit < 1) {
+      throw new Error('Invalid bounded website source');
+    }
+    state.harvest = VE_KNOWN_ADULT_WEBSITES.map((hint) => unifiedRow({ company: hint.brand,
+      website: hint.website, source_detail: `official-site hint ${VE_KNOWN_WEBSITE_CATALOG}: ${hint.source}` }));
+    state.rows = state.harvest.length;
+    state.status = 'done'; state.exhausted = true;
+    return;
+  }
+
   if (task.source === 'yandex_maps') {
     if (limit < 1) { state.status = 'done'; return; }
     if (!task.maps_query?.queries?.length) throw new Error('yandex_maps: в задаче нет maps_query.queries');
@@ -2402,9 +2415,9 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
  * Email остаётся независимым ключом защиты от повторной отправки.
  */
 export interface VeBaseExclusionKeys {
-  /** Exact observations consumed by THIS base only, including rows without IDs. */
+  /** Exact observations consumed by this hypothesis, including rows without IDs. */
   receipts?: Set<string>;
-  /** Компании, уже отправленные ЭТОЙ базой, с их адресами и сайтами (seenCompanies.ts). */
+  /** Companies checked by this base or earlier bases of the same hypothesis. */
   seen?: VeSeenCompanies;
   /** Пара «имя + сайт» → ИНН'ы; пустая строка означает неизвестный ИНН. */
   websiteInns: Map<string, Set<string>>;
@@ -2461,11 +2474,12 @@ export function pruneBaseRowAgainstExclusion(
   if (keys.receipts?.has(veAcquisitionReceipt(row))) return null;
   if (baseRowMatchesCompanyExclusion(keys, row)) return null;
   const emails = extractEmails(row.email);
-  const freshEmails = emails.filter((email) => !keys.emails.has(email));
+  let freshEmails = emails.filter((email) => !keys.emails.has(email));
   if (emails.length > 0 && freshEmails.length === 0) return null;
   // Эта база уже отправляла компанию, а после вычёркивания занятых адресов
   // строка не несёт ни нового адреса, ни нового сайта.
   if (keys.seen && veSeenCompanyCovers(keys.seen, row, freshEmails)) return null;
+  if (keys.seen) freshEmails = veUnseenCompanyEmails(keys.seen, row, freshEmails);
   if (freshEmails.length === emails.length) return row;
   const pruned = { ...row, email: freshEmails.join(', ') };
   // Отметка прошлого раунда записана на уже урезанную строку.
@@ -2480,9 +2494,10 @@ export function baseRowMatchesExclusion(
   if (keys.receipts?.has(veAcquisitionReceipt(row))) return true;
   if (baseRowMatchesCompanyExclusion(keys, row)) return true;
   const emails = extractEmails(row.email);
-  const freshEmails = emails.filter((email) => !keys.emails.has(email));
+  let freshEmails = emails.filter((email) => !keys.emails.has(email));
   if (emails.length > 0 && freshEmails.length === 0) return true;
   if (keys.seen && veSeenCompanyCovers(keys.seen, row, freshEmails)) return true;
+  if (keys.seen) freshEmails = veUnseenCompanyEmails(keys.seen, row, freshEmails);
   return freshEmails.length < emails.length && !!keys.receipts?.has(veAcquisitionReceipt({ ...row, email: freshEmails.join(', ') }));
 }
 
@@ -2566,10 +2581,20 @@ export function buildBaseExclusionKeysFromRows(rows: unknown[]): VeBaseExclusion
 const seenCompaniesByCheckpoint = new WeakMap<object, VeSeenCompanies>();
 
 function addAcquisitionReceipts(keys: VeBaseExclusionKeys, rows: Array<Partial<VeUnifiedRow>>, source: VeUnifiedRow[] = []): VeBaseExclusionKeys {
-  keys.receipts = new Set(rows.map(veAcquisitionReceipt));
+  keys.receipts = new Set([...(keys.receipts ?? []), ...rows.map(veAcquisitionReceipt)]);
   let seen = seenCompaniesByCheckpoint.get(rows);
   if (!seen) seenCompaniesByCheckpoint.set(rows, seen = buildVeSeenCompanies(rows));
-  keys.seen = seen;
+  if (keys.seen?.size) {
+    // Copies share immutable indexes. Merge without mutating the prior-base
+    // snapshot used by exclusions/counters or losing earlier batch history.
+    const merged = new Map(keys.seen);
+    for (const [key, entry] of seen) {
+      const previous = merged.get(key);
+      merged.set(key, previous ? { emails: new Set([...previous.emails, ...entry.emails]),
+        hosts: new Set([...previous.hosts, ...entry.hosts]) } : entry);
+    }
+    keys.seen = merged;
+  } else keys.seen = seen;
   const legacyMatches = new Map<string, VeUnifiedRow[]>();
   for (const row of source) {
     const legacy = veAcquisitionReceipt({ company: row.company, website: row.website, inn: row.inn, email: row.email });
@@ -2622,6 +2647,7 @@ async function loadOtherBaseExclusionKeys(
     inns: new Set<string>(),
     emails: new Set<string>(),
   };
+  const priorSeen: Array<Partial<VeUnifiedRow>> = [];
   for (const row of (data ?? []) as Array<{
     data?: unknown; columns?: string[]; source?: string; hypothesis_id?: string; target_checkpoint?: VeCollectInfo['target_checkpoint'];
     collect_info?: VeCollectInfo;
@@ -2635,9 +2661,12 @@ async function loadOtherBaseExclusionKeys(
     addRowsToExclusionKeys(keys, reservedRows);
     if (checkpointHypothesisId && row.hypothesis_id === checkpointHypothesisId) {
       const checkpoint = row.target_checkpoint ?? row.collect_info?.target_checkpoint;
-      addRowsToExclusionKeys(keys, Array.isArray(checkpoint?.seen_rows) ? checkpoint.seen_rows : []);
+      // A checked candidate is not a collected company. A later source can
+      // supply a new address or official site; identical inputs stay consumed.
+      if (Array.isArray(checkpoint?.seen_rows)) priorSeen.push(...checkpoint.seen_rows);
     }
   }
+  if (priorSeen.length) addAcquisitionReceipts(keys, priorSeen);
   return keys;
 }
 
@@ -3089,10 +3118,13 @@ export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNich
 
 /** New acquisitions only: never use this guard to discard saved/in-flight rows. */
 function veTaskAcquisitionDeferred(info: VeCollectInfo, task: VeCollectTaskState): boolean {
+  if (info.known_website_source?.continuation_only && task.source !== 'known_websites') return true;
   return !!info.adaptive_collection && !!veAdaptiveSourceDeferred(info.adaptive_collection, veSourceStrategyKey(task.task));
 }
 function veRowAcquisitionAllowed(info: VeCollectInfo, row: VeUnifiedRow): boolean {
   const key = candidateSourceKey(row);
+  if (info.known_website_source?.continuation_only
+    && !info.tasks?.some((task) => task.source === 'known_websites' && key === veSourceStrategyKey(task.task))) return false;
   // Widened slices never buy missing-site discovery. Keeping their raw rows
   // in the reserve must not admit them through the later paid-phase path.
   if (!hasExistingSourceContact(row) && key
@@ -3104,6 +3136,11 @@ function veRowAcquisitionAllowed(info: VeCollectInfo, row: VeUnifiedRow): boolea
   // new lookup that could silently reopen a held strategy. Saved reviews and
   // immutable constructor inputs do not use this new-acquisition guard.
   return !(info.tasks ?? []).some((task) => veTaskAcquisitionDeferred(info, task));
+}
+
+function automaticReviewRows<T extends Record<string, unknown>>(info: VeCollectInfo, rows: T[]): T[] {
+  return veAutomaticAudienceReviewRows(veAutomaticAudienceReviewRows(rows, info.audience_source_refresh?.held_review_companies),
+    info.known_website_source?.continuation_only ? info.known_website_source.held_review_companies : undefined);
 }
 
 /** A v1 source correction kept the previous page's attribution. Rows which
@@ -3275,6 +3312,13 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task))
     && !veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task.task)));
   const planExhausted = policy.replan_reason === 'plan_exhausted';
+  const known = alternatives.find((task) => task.source === 'known_websites');
+  if (known && !policy.completed.some((batch) => batch.source_key === veSourceStrategyKey(known.task))) {
+    policy.active_source = veSourceStrategyKey(known.task);
+    policy.replan_needed = false; delete policy.replan_reason; policy.switches += 1;
+    await persistCollectInfo(ctx, base.id, info);
+    return;
+  }
   if (policy.replan_needed && !planExhausted && alternatives.length) {
     policy.active_source = chooseVeAdaptiveSource(policy, clinicSourceKeys(info, alternatives.map((task) => veSourceStrategyKey(task.task)), market, base.hypothesis_id));
     policy.replan_needed = false; delete policy.replan_reason; policy.switches += 1;
@@ -3282,7 +3326,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     await persistCollectInfo(ctx, base.id, info);
     return;
   }
-  if (policy.replan_needed && policy.replan_attempts < 2 && tasks.length < VE_PLAN_MAX_TASKS) {
+  if (!info.known_website_source?.continuation_only && policy.replan_needed && policy.replan_attempts < 2 && tasks.length < VE_PLAN_MAX_TASKS) {
     const original = tasks.find((task) => veSourceStrategyKey(task.task) === policy.active_source) ?? tasks[0];
     if (!original) return;
     policy.replan_attempts += 1;
@@ -3460,6 +3504,7 @@ async function prefetchBufferedPreviewBatches(args: {
   target: VeCollectionTargetProgress; market: VeMarket;
 }): Promise<void> {
   const { ctx, base, info, target } = args;
+  if (info.known_website_source?.continuation_only) return;
   const pipeline = info.preview_pipeline;
   if (!pipeline || pipeline.error || info.validation_retry || info.adaptive_collection?.pending || target.ready_rows >= target.ready_target
     || target.round >= target.max_rounds
@@ -3961,7 +4006,7 @@ async function resumeSavedPreviewValidation(
 ): Promise<VeStageResult> {
   // New previews retain every round's pending candidates, not just the last BC
   // output. Reuse that durable reserve before considering legacy BC recovery.
-  if (readVeRelevanceReserve(info.relevance_reserve).some(needsVeRelevanceReview)) {
+  if (automaticReviewRows(info, readVeRelevanceReserve(info.relevance_reserve)).some(needsVeRelevanceReview)) {
     info.relevance_review_requested = true;
     return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
   }
@@ -4052,7 +4097,7 @@ async function reviewSavedRelevance(
 ): Promise<VeStageResult> {
   const automatic = info.relevance_review_requested === true && job.payload?.review_relevance !== true;
   let savedReserve = retainProjectExclusions(ctx, readVeRelevanceReserve(info.relevance_reserve));
-  const reviewReserve = automatic ? veAutomaticAudienceReviewRows(savedReserve, info.audience_source_refresh?.held_review_companies) : savedReserve;
+  const reviewReserve = automatic ? automaticReviewRows(info, savedReserve) : savedReserve;
   const selectedRows = reviewReserve === savedReserve ? null : new Set(reviewReserve);
   const heldReserve = selectedRows ? savedReserve.filter((row) => !selectedRows.has(row)) : [];
   let emailRecoveryError: string | null = null;
@@ -4075,7 +4120,7 @@ async function reviewSavedRelevance(
   }
   const { rows, evidenceRows, companies } = buildVeRelevanceReviewBatch({
     ...veSavedRelevanceScope(info, base.hypothesis_id),
-    reserve: automatic ? veAutomaticAudienceReviewRows(savedReserve, info.audience_source_refresh?.held_review_companies) : savedReserve,
+    reserve: automatic ? automaticReviewRows(info, savedReserve) : savedReserve,
     ready: projectAllowedRows(ctx, Array.isArray(base.data) ? base.data : []),
     source: projectAllowedRows(ctx, readVeRelevanceSourceRows(info.relevance_reserve)), automatic,
     allowPaidSearch: !usesExistingSourceContacts(info),
@@ -4357,6 +4402,7 @@ async function widenExhaustedPlan(
   /** narrow_market: план жив, но по прогнозу срез мал для базы; dry_sources: все живые источники сухие. */
   cause: 'plan_exhausted' | 'narrow_market' | 'dry_sources' = 'plan_exhausted',
 ): Promise<boolean> {
+  if (info.known_website_source?.continuation_only) return false;
   const policy = info.adaptive_collection ?? newVeAdaptiveCollection();
   const widenings = policy.widenings ?? 0;
   if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
@@ -4415,7 +4461,7 @@ async function completeTargetRound(args: {
   const progress = args.progress.mode === 'preview'
     ? { ...args.progress, ready_target: VE_PREVIEW_READY_TARGET } : args.progress;
   info.ready_target = progress.ready_target;
-  const tasks = info.tasks ?? [];
+  const tasks = (info.tasks ?? []).filter((task) => !info.known_website_source?.continuation_only || task.source === 'known_websites');
   const reviewOnly = job.payload?.review_relevance === true;
   const prior = info.target_checkpoint;
   const validationRetry = info.validation_retry === true || !!info.company_name_recovery || info.relevance_review_requested === true;
@@ -4643,7 +4689,7 @@ async function completeTargetRound(args: {
   let next = finish(targetRows, cleaned.summary.error);
   const reviewablePending = reserveRows.some((row) => isVeAcceptedEmailStatus(row._email_status)
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
-  const automaticReserve = veAutomaticAudienceReviewRows(reserveRows, info.audience_source_refresh?.held_review_companies);
+  const automaticReserve = automaticReviewRows(info, reserveRows);
   const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(automaticReserve, info.saved_email_recovery);
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
   const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
@@ -4958,13 +5004,21 @@ async function completeTargetRound(args: {
     // info уже держит прежний объект раунда (см. остановку по размеру рынка выше).
     info.target_progress = next;
   }
+  if (info.known_website_source?.continuation_only && tasks.length === 1 && tasks[0].status === 'done' && tasks[0].exhausted
+    && !args.hasBufferedCandidates && !pendingSources && !pendingDiscovery && !pendingBatches.length
+    && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
+    && cleaned.summary.status === 'complete' && targetRows < progress.ready_target) {
+    next = { ...next, round: progress.round, status: 'limited', max_rounds: progress.max_rounds,
+      reason: 'Доступные официальные сайты платформ проверены. Проверенные контакты сохранены; это не оценка всего рынка.' };
+    info.target_progress = next;
+  }
   if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
     // input round becomes pending. Resuming must never revalidate these rows.
     delete info.construct;
     if (info.search_policy) delete info.search_policy.construct_rows;
     delete stats.finished_at;
-    info.tasks = pipeline || info.adaptive_collection ? tasks : tasks.map((state) =>
+    info.tasks = info.known_website_source?.continuation_only ? info.tasks : pipeline || info.adaptive_collection ? tasks : tasks.map((state) =>
       ((state.source === 'companies_directory' || !!state.catalog) && !state.exhausted && !state.hit_ceiling)
         || isVeLegacyMapsTask(state)
         // Закладку выдачи переносим вместе с задачей. Без неё следующий раунд
@@ -5087,6 +5141,15 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     throw new Error('Collection audience does not belong to the base hypothesis');
   }
   readVeSourceCostPolicy(info.cost_policy);
+  if (info.tasks?.some((task) => task.source === 'known_websites')
+    && (info.known_website_source?.catalog !== VE_KNOWN_WEBSITE_CATALOG || info.collection_mode !== 'preview'
+      || info.refill || info.supply_batch_id || !veKnownWebsiteAudienceEligible(info) || !usesExistingSourceContacts(info))) {
+    throw new VeRelevanceCheckpointError('Invalid bounded website source checkpoint');
+  }
+  if (info.known_website_source?.continuation_only) {
+    if (!Array.isArray(info.known_website_source.held_review_companies)) throw new VeRelevanceCheckpointError('Missing bounded source review hold');
+    automaticReviewRows(info, []);
+  }
   if (info.audience_snapshot && !info.cost_policy) throw new Error('Collection audience is missing its cost policy');
   collectionProjectRules.set(ctx, { rules: await loadVeProjectExclusions(ctx.supabase, job.project_id), info });
   restoreAllowedProjectReserve(ctx);
@@ -5120,6 +5183,14 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     const previous = info.target_progress;
     // Холостые раунды и «Продолжить подготовку» двигают предел базы вверх.
     target.max_rounds = veCollectionMaxRounds(previous?.max_rounds);
+    if (info.known_website_source?.continuation_only && previous) {
+      if (!Number.isSafeInteger(previous.max_rounds) || previous.max_rounds < 1
+        || !Number.isSafeInteger(previous.max_candidates) || previous.max_candidates < 1 || previous.max_candidates > target.max_candidates) {
+        throw new VeRelevanceCheckpointError('Invalid bounded website budget');
+      }
+      target.max_rounds = previous.max_rounds;
+      target.max_candidates = previous.max_candidates;
+    }
     if (previous) {
       const firstRoundCandidates = previous.first_round_candidates ?? 2_000;
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
@@ -5241,7 +5312,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     && !info.tasks?.some((task) => task.status === 'dispatched')
     && (target.mode === 'supply' || target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES || target.candidates_processed > 0)) {
     info.adaptive_collection = newVeAdaptiveCollection();
-    target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
+    if (!info.known_website_source?.continuation_only) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
     await persistCollectInfo(ctx, baseId, info);
   }
 
@@ -5293,6 +5364,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       rows: 0,
       task,
     }));
+    addVeKnownWebsiteSource(info);
     await persistCollectInfo(ctx, baseId, info);
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
   }
@@ -5308,7 +5380,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     await refreshPlanPopulation(ctx, base, info);
     await persistCollectInfo(ctx, baseId, info);
   }
-  const tasks = info.tasks ?? [];
+  const tasks = (info.tasks ?? []).filter((task) => !info.known_website_source?.continuation_only || task.source === 'known_websites');
 
   // Ключи компаний других баз проекта: нужны реестру ещё на DISPATCH
   // (исключение на выборке — продолжение больших сегментов) и повторно на
@@ -5320,17 +5392,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       const otherBases = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
       excludedKeysCache = target ? { ...copyExclusionKeys(otherBases), otherBases } : otherBases;
       if (target) {
-        const seenRows = info.target_checkpoint?.seen_rows ?? [];
-        const canRepairPaymentIdentity = info.niche_source_profile === 'payments'
-          && info.tasks?.some((task) => task.task.directory_filters?.identityCatalog === VE_PAYMENT_DIRECTORY_REVISION);
-        // Only a new exact-owner website may revisit a consumed company. Its
-        // old receipts remain intact, and the seen-company host index stops
-        // this exception after one acquisition of the corrected website.
-        const consumedCompanies = canRepairPaymentIdentity ? seenRows.filter((row) => {
-          const hint = vePaymentCompanyHint(row.inn);
-          return !hint || normalizeVeWebsiteHost(row.website) === normalizeVeWebsiteHost(hint.website);
-        }) : seenRows;
-        addRowsToExclusionKeys(excludedKeysCache, consumedCompanies);
+        // Match HARVEST: only a new address/host can revisit a checked company.
+        // In particular an exact-owner payment website no longer needs a
+        // special exemption from a blanket INN reservation.
         addAcquisitionReceipts(excludedKeysCache, info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
         addRowsToExclusionKeys(excludedKeysCache, Array.isArray(base.data) ? base.data : []);
       }
@@ -5460,8 +5524,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Исключаем компании/контакты, уже собранные в других базах этого проекта. Для
   // реестра это страховка (основное исключение прошло на выборке), для
   // hh/карт — единственная точка исключения.
-  // Source pagination excludes consumed legal entities; publication instead
-  // compares exact same-base observations. A newly recovered website/email is
+  // Source pagination and publication compare consumed observations, not
+  // entire unadmitted legal entities. A newly recovered website/email is
   // new evidence even when the old unusable row already had an INN.
   const otherBaseKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
   // Свои строки добавляются в копию: счётчики ниже отделяют «заняты другими
@@ -5548,7 +5612,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
   delete info.source_contact_discovery;
-  if (target && info.source_contact_recovery) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
+  if (target && info.source_contact_recovery && !info.known_website_source?.continuation_only) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
   const considered = prepared.filter((row, index) => ownsLegacyInput
     || (veRowAcquisitionAllowed(info, row) && (existingFirst ? hasExistingSourceContact(row) : hasExistingSourceContact(row) || !pendingSourceRows.has(interleaved[index]))
       // An unsuccessful lookup must not move empty source rows into another

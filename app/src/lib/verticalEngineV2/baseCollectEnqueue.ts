@@ -29,8 +29,10 @@ import { canResumePartialPreview, getVeCollectionContinuation, grantVeResumeRoun
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 import { isVeResumableDirectoryError } from './collectionErrors';
-import { compactVeRelevanceReserve } from './relevanceReserve';
+import { compactVeRelevanceReserve, readVeRelevanceReserve } from './relevanceReserve';
+import { veAudienceReviewHold } from './audienceReviewHold';
 import { readVeSourceCostPolicy, withVeRetailRefreshMarket } from './sourceAudience';
+import { addVeKnownWebsiteSource, needsVeKnownWebsiteContinuation } from './knownWebsiteDirectory';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -149,6 +151,8 @@ async function resumeFailedPreview(
     } };
   }
   const continuation = getVeCollectionContinuation(saved, currentHypothesis);
+  const refreshKnownWebsites = input.resumeBaseId === saved.id && continuation.code === 'source_update'
+    && continuation.action === 'resume_collection' && needsVeKnownWebsiteContinuation(saved, currentHypothesis);
   const refreshAudience = input.resumeBaseId === saved.id && continuation.code === 'source_update'
     && continuation.action === 'resume_collection' && needsVeControlledAudienceRefresh(saved, currentHypothesis);
   const pendingAudienceRefresh = saved.collect_info?.audience_scope_refresh_requested === true;
@@ -157,7 +161,8 @@ async function resumeFailedPreview(
       if (readVeSourceCostPolicy(saved.collect_info.cost_policy)?.website_discovery !== 'existing_only') throw new Error('Missing source refresh cost policy');
     } catch { return { ok: false, message: 'Сохранённое обновление источников требует проверки условий расходов.' }; }
   }
-  const sourceRefresh = refreshAudience || pendingAudienceRefresh;
+  const sourceRefresh = refreshAudience || pendingAudienceRefresh || refreshKnownWebsites
+    || saved.collect_info?.known_website_source?.continuation_only === true;
   const info = { ...saved.collect_info,
     ...(currentHypothesis && (refreshAudience || (!pendingAudienceRefresh && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')))) ? { hypotheses: [currentHypothesis] } : {}),
     ...(previewRecoveryKind(saved) === 'validation' && !sourceRefresh ? { validation_retry: true } : {}),
@@ -165,6 +170,22 @@ async function resumeFailedPreview(
     ...(refreshAudience ? { audience_scope_refresh_requested: true,
       cost_policy: { version: 1, website_discovery: 'existing_only' } } : {}),
   };
+  if (refreshKnownWebsites) {
+    if (!addVeKnownWebsiteSource(info)) return { ok: false, message: 'Состояние источников изменилось. Обновите страницу.' };
+    info.known_website_source.continuation_only = true;
+    info.known_website_source.held_review_companies = veAudienceReviewHold(readVeRelevanceReserve(info.relevance_reserve));
+    // Keep all old receipts/rows, but the completed constructor cannot be
+    // imported a second time as the new round's result.
+    delete info.construct;
+    if (info.search_policy) { info.search_policy = { ...info.search_policy }; delete info.search_policy.construct_rows; }
+  }
+  if (saved.status === 'failed' && info.known_website_source?.continuation_only
+    && info.target_checkpoint?.completed_round === info.target_progress?.round) {
+    // The bounded round already saved its observations. Retry only its saved
+    // validation, using the old-reserve hold, not another discovery round.
+    info.validation_retry = true;
+    info.relevance_review_requested = true;
+  }
   // Continuing acquisition is not permission to repeat completed SMTP checks.
   // Clear inconclusive results only when this failed preparation actually
   // stopped on email recovery; conclusive verdicts and dispatched children
@@ -188,7 +209,7 @@ async function resumeFailedPreview(
   }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
-  if (refreshAudience) {
+  if (refreshAudience || refreshKnownWebsites) {
     // A closed source round advances once; its saved spending envelope and
     // low-yield history do not grow just because the source plan was fixed.
     info.target_progress.round += 1;

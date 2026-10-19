@@ -51,6 +51,7 @@ jest.mock('@/lib/verticalEngineV2/relevanceGate', () => ({
   },
 }));
 
+import { addVeKnownWebsiteSource, VE_KNOWN_ADULT_WEBSITES } from '@/lib/verticalEngineV2/knownWebsiteDirectory';
 import { createHash } from 'node:crypto';
 import { createMockSupabase as createRawMockSupabase, type MockSupabaseClient, type MockSupabaseSeed } from '@/../tests/helpers/mockSupabase';
 import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany } from '@/lib/verticalEngineV2/companyContactCap';
@@ -97,6 +98,7 @@ import { recoverVeSavedEmails, resumeVeSavedEmailRecovery, hasPendingVeSavedEmai
 import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
 import { normalizeVeSourceContacts, VE_CONFIRMED_WEBSITE_MARK } from '@/lib/verticalEngineV2/sourceContacts';
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
+import { buildVeSeenCompanies } from '@/lib/verticalEngineV2/seenCompanies';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { planVeJobFailure } from '@/lib/verticalEngineV2/jobRetry';
 import { isVeRenewableSourceTask } from '@/lib/verticalEngineV2/sourceRenewal';
@@ -3321,7 +3323,105 @@ describe('base_collect: план кончился раньше цели', () => 
   const planLlmReply = (tasks: unknown[]) => ({ data: { tasks }, tokensUsed: 10, costUsd: 0.01,
     promptTokens: 5, completionTokens: 5, rawResponse: '' });
 
-  it('explicit retail correction preserves receipts and budgets, checks new candidates and never buys an automatic review of the old reserve', async () => {
+  it('explicit source corrections preserve receipts and budgets, check new candidates and never buy an automatic review of the old reserve', async () => {
+    const adult = { id: 'h1', status: 'accepted', title: 'Платформы веб-моделей и взрослого контента',
+      description: 'Стриминговые платформы для взрослых и фан-сообщества 18+.' };
+    const emptyTask = { source: 'companies_directory' as const, rationale: 'Exhausted', directory_filters: { okvedCodes: ['63'] } };
+    const adultInfo = exhaustedInfo(emptyTask, { hypotheses: [adult], niche_source_profile: 'adult_platform',
+      cost_policy: { version: 1, website_discovery: 'existing_only' },
+      target_progress: { ...createCollectionTarget('preview'), round: 3, max_rounds: 50, candidates_processed: 2, ready_rows: 0 },
+      tasks: [{ source: emptyTask.source, task: emptyTask, status: 'done', exhausted: true, child_job_id: null, rows: 0 }],
+      adaptive_collection: { ...newVeAdaptiveCollection(), active_source: veSourceStrategyKey(emptyTask), replan_attempts: 2,
+        replan_needed: true, replan_reason: 'plan_exhausted', widenings: 2 },
+      relevance_reserve: { version: 1, rows: [{ company: 'Old unrelated company', website: 'old.test', email: 'old@old.test', _relevance_unchecked: true }] },
+    });
+    expect(addVeKnownWebsiteSource(adultInfo)).toBe(true);
+    adultInfo.known_website_source!.continuation_only = true;
+    adultInfo.known_website_source!.held_review_companies = veAudienceReviewHold(adultInfo.relevance_reserve!.rows);
+    const oldPaidTask = { source: 'hh_live' as const, rationale: 'Old paid scrape', hh_query: { text: 'платежи' } };
+    adultInfo.tasks!.push({ source: 'hh_live', task: oldPaidTask, status: 'done', child_job_id: 'already-paid-hh', rows: 1,
+      harvest: [unifiedRow({ company: 'Old unrelated company', website: 'old.test', email: 'old@old.test' })] });
+    adultInfo.plan = { tasks: adultInfo.tasks!.map(task => task.task) };
+    const sourceOnlyFixture = structuredClone(adultInfo);
+    const adultDb = seedBase(adultInfo, adult, { data: [], row_count: 0 });
+    let adultBase = await wake(adultDb);
+    const child = adultDb.getRows('base_constructor_jobs')[0];
+    const grid = child.data as string[][];
+    const emailColumn = 2, websiteColumn = 1;
+    expect(grid.slice(1)).toHaveLength(VE_KNOWN_ADULT_WEBSITES.length);
+    expect(grid.slice(1).every(row => row[emailColumn] === '')).toBe(true);
+    expect(adultDb.getRows('parser_jobs')).toHaveLength(0);
+    expect(searchRows).not.toHaveBeenCalled();
+    expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
+    await wake(adultDb);
+    expect(adultDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    await adultDb.from('base_constructor_jobs').update({ status: 'completed', data: [[...grid[0], 'Email Статус'],
+      ...grid.slice(1).map((row, index) => { const found = [...row]; found[emailColumn] = `info@${new URL(row[websiteColumn]).hostname}`;
+        return [...found, index === 0 ? 'invalid' : 'ok']; })] }).eq('id', child.id);
+    adultBase = await wake(adultDb);
+    expect(mockFindIrrelevantRows).toHaveBeenCalled();
+    for (const [call] of mockFindIrrelevantRows.mock.calls) {
+      expect(call.allowPaidSearch).toBe(false);
+      expect(call.rows.every((row: VeUnifiedRow) => row.company !== 'Old unrelated company')).toBe(true);
+    }
+    const completedAdult = adultBase.collect_info as VeCollectInfo;
+    expect(completedAdult.target_progress).toMatchObject({ status: 'limited', max_rounds: 50, candidates_processed: 12 });
+    expect(completedAdult.adaptive_collection).toMatchObject({ replan_attempts: 2, widenings: 2 });
+    expect(completedAdult).not.toHaveProperty('relevance_review_requested');
+    expect(completedAdult.tasks![0]).toMatchObject({ source: 'known_websites', status: 'done', exhausted: true, rows: 10 });
+    expect(completedAdult.tasks![1]).toEqual(sourceOnlyFixture.tasks![1]);
+    expect(adultBase.row_count).toBe(9);
+    expect(stripTaskHarvest({ collect_info: completedAdult }).collect_info).not.toHaveProperty('known_website_source');
+    expect((adultBase.data as VeUnifiedRow[]).every(row => row.email !== 'info@bongacams.com' && row.email !== 'old@old.test')).toBe(true);
+    const jobsBefore = adultDb.getRows('base_constructor_jobs').length;
+    await wake(adultDb);
+    expect(adultDb.getRows('base_constructor_jobs')).toHaveLength(jobsBefore);
+    // One remaining candidate is a hard cap, not permission to admit all ten.
+    const tailInfo = structuredClone(sourceOnlyFixture);
+    tailInfo.target_progress!.candidates_processed = 5237;
+    tailInfo.target_progress!.max_candidates = 5238;
+    tailInfo.target_checkpoint!.processed_rows = 5237;
+    const tailDb = seedBase(tailInfo, adult, { data: [], row_count: 0 });
+    await wake(tailDb);
+    const tailChild = tailDb.getRows('base_constructor_jobs')[0];
+    expect((tailChild.data as string[][]).slice(1)).toHaveLength(1);
+    const tailSaved = tailDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(tailSaved.target_progress!.max_candidates).toBe(5238);
+    expect(tailSaved.tasks![0].harvest).toHaveLength(10);
+    expect(tailSaved.tasks![1]).toEqual(sourceOnlyFixture.tasks![1]);
+    const invalidInfo = structuredClone(sourceOnlyFixture);
+    Object.assign(invalidInfo.tasks![0].task, { known_websites: { catalog: 'untrusted-catalog' } });
+    const invalidDb = seedBase(invalidInfo, adult, { data: [], row_count: 0 });
+    const invalidBase = await wake(invalidDb);
+    expect(invalidBase.status).toBe('failed');
+    expect(invalidDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(invalidDb.getRows('parser_jobs')).toHaveLength(0);
+    // A closed failed round resumes only its saved validation and SAME child.
+    const retryInfo = structuredClone(completedAdult);
+    retryInfo.target_progress!.status = 'error';
+    retryInfo.target_progress!.reason = 'Проверка релевантности завершилась не полностью';
+    retryInfo.stats!.relevance_coverage_complete = false;
+    const oldRow = retryInfo.relevance_reserve!.rows.find(row => row.company === 'Old unrelated company')!;
+    const newRow = structuredClone((adultBase.data as Array<Record<string, unknown>>).find(row => row.company === 'Chaturbate')!);
+    expect(newRow).toBeDefined();
+    newRow._relevance_unchecked = true;
+    newRow._ve_relevance = { version: 2, status: 'error', reason: 'transient', context_hash: 'b'.repeat(64), evidence: [] };
+    retryInfo.relevance_reserve!.rows = [oldRow, newRow];
+    const retryDb = seedBase(retryInfo, adult, { status: 'failed', error: retryInfo.target_progress!.reason, data: [], row_count: 0 });
+    await retryDb.from('ve_jobs').update({ status: 'failed' }).eq('id', 'job-1');
+    const resume = await enqueueVeBaseCollect(retryDb as unknown as SupabaseClient, { projectId: 'p1', verticalId: 'v1',
+      verticalName: 'Платформы', limit: 100, hypothesisIds: ['h1'], collectionMode: 'preview', resumeBaseId: 'b1' });
+    expect(resume.ok).toBe(true);
+    const resumed = retryDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(resumed).toMatchObject({ validation_retry: true, relevance_review_requested: true,
+      construct: completedAdult.construct, target_progress: { round: completedAdult.target_progress!.round, max_rounds: 50 } });
+    mockFindIrrelevantRows.mockClear();
+    await wake(retryDb);
+    expect(retryDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(mockFindIrrelevantRows).toHaveBeenCalled();
+    for (const [call] of mockFindIrrelevantRows.mock.calls) expect(call.rows.every((row: VeUnifiedRow) => row.company !== 'Old unrelated company')).toBe(true);
+    expect((retryDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![1]).toEqual(sourceOnlyFixture.tasks![1]);
+    jest.clearAllMocks();
     const jewelry = { id: 'h1', status: 'accepted', origin: 'generated' as const, broad: false,
       title: 'Ювелирные заводы и сети украшений',
       description: 'Производители золотых и серебряных украшений с фирменной розницей и интернет-витриной. Сложность удержания клиента между покупками к праздничным датам.' };
@@ -4711,6 +4811,96 @@ describe('base_collect: круг повторной отправки одних 
         data: [NEIGHBOUR, cafeNeighbour] }] });
     await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
     expect(constructorCompanies(db)).toEqual([FRESH.company]);
+
+    // Both entry points must match the immutable receipt of an already pruned
+    // observation, including a new site whose old email was stripped.
+    for (const email of [`${FRESH.email}, new@uralmet.test`, FRESH.email]) {
+      const incoming = { ...FRESH, email, website: 'new-uralmet.test' };
+      const pruned = { ...incoming, email: email.includes(',') ? 'new@uralmet.test' : '' };
+      const keys = { ...buildBaseExclusionKeysFromRows([]), seen: buildVeSeenCompanies([FRESH]),
+        receipts: new Set([veAcquisitionReceipt(pruned)]) };
+      expect(pruneBaseRowAgainstExclusion(keys, incoming)).toBeNull();
+      expect(baseRowMatchesExclusion(keys, incoming)).toBe(true);
+    }
+
+    // A previous supply batch only checked these companies. Preserve its
+    // observations across multiple bases, but accept genuinely new contacts.
+    for (const source of ['saved', 'directory', 'catalog'] as const) {
+      const observed = (n: number) => unifiedRow({ company: `Клиника ${n}`, inn: `77000000${String(n).padStart(2, '0')}`,
+        website: `clinic-${n}.test`, email: `old@clinic-${n}.test`, source_detail: 'реестр' });
+      const a = observed(11), b = observed(12), c = observed(13), owned = observed(14), current = observed(15);
+      const unrelated = observed(16), sameEmailOtherInn = { ...observed(17), email: a.email };
+      const cSecond = { ...c, email: 'second@clinic-13.test' };
+      const ownRepeat = observed(18), anonymous = unifiedRow({ company: 'Без идентификатора', source_detail: 'реестр' });
+      const inputs = [
+        { ...a, email: `${a.email}, new@clinic-11.test` },
+        ...(source === 'catalog' ? [] : [{ ...b, website: 'new-clinic-12.test' }]),
+        { ...c, email: `${c.email}, ${cSecond.email}`, source_detail: 'из другого источника' },
+        { ...owned, email: 'new@clinic-14.test' },
+        { ...current, email: 'new@clinic-15.test' },
+        unrelated, sameEmailOtherInn, ownRepeat, anonymous,
+      ];
+      const info: VeCollectInfo = { ...collectInfo(source === 'saved' ? inputs : []), collection_mode: 'preview',
+        search_policy: { version: 1, phase: 'existing', deferred_rows: [] },
+        target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: 20 },
+        target_checkpoint: { completed_round: 2, seen_rows: [current, ownRepeat], processed_rows: 2 } };
+      if (source === 'saved') info.tasks![0].exhausted = true;
+      if (source === 'directory') info.tasks![0].status = 'pending';
+      if (source === 'catalog') {
+        const task = { source: 'yandex_maps' as const, rationale: 'Профильные клиники',
+          maps_query: { queries: ['Стоматология'], geo: 'Россия' } };
+        info.plan = { tasks: [task] };
+        info.tasks = [{ source: 'yandex_maps', status: 'pending', child_job_id: null, rows: 0, task,
+          catalog: { version: 1, filters: { categories: ['Стоматология'], countries: ['Россия'] }, after: 'prior-cursor' } }];
+      }
+      const prior = (id: string, rows: VeUnifiedRow[]) => ({ ...makeBase({
+        target_checkpoint: { completed_round: 1, seen_rows: rows, processed_rows: rows.length },
+      }), id, status: 'analyzed', columns: [...VE_AUTO_COLLECT_COLUMNS] });
+      const nextDb = seed(info, { ve_bases: [makeBase(info), prior('prior-a', [a, b, c, anonymous]),
+        prior('prior-b', [cSecond]), { ...prior('other-hypothesis', [unrelated]), hypothesis_id: 'h2',
+          data: [{ ...owned, _email_status: 'ok' }] }] });
+      const priorSnapshot = JSON.stringify(nextDb.getRows('ve_bases').slice(1));
+      jest.mocked(searchRows).mockReset();
+      jest.mocked(searchRows).mockResolvedValue({ rows: [] });
+      if (source === 'directory') jest.mocked(searchRows).mockResolvedValueOnce({ rows: inputs.map((row) => ({
+        name: row.company, inn: row.inn, website: row.website, email: row.email,
+      })) });
+      if (source === 'catalog') {
+        const originalRpc = nextDb.rpc;
+        nextDb.rpc = ((name: string, params: Record<string, unknown>) => {
+          if (name !== 'yandex_maps_catalog_search') return originalRpc(name, params);
+          nextDb.rpcCalls.push({ fn: name, params });
+          const operation = Promise.resolve({ data: params.p_after === 'prior-cursor' ? inputs.map((row, i) => ({
+            yandex_id: String(i + 1), name: row.company, website: row.website, email: row.email,
+          })) : [], error: null });
+          return Object.assign(operation, { abortSignal: () => operation });
+        }) as typeof nextDb.rpc;
+      }
+      jest.mocked(callLLMWithSchema).mockClear();
+      jest.mocked(fetchVeRelevanceEvidence).mockClear();
+      await runBaseCollectStage(makeJob(), { supabase: nextDb as unknown as SupabaseClient });
+      expect(constructorCompanies(nextDb).sort()).toEqual([
+        a.company, ...(source === 'catalog' ? [] : [b.company]), current.company, unrelated.company, sameEmailOtherInn.company,
+      ].sort());
+      const paid = nextDb.getRows('base_constructor_jobs');
+      expect(paid).toHaveLength(1);
+      const grid = paid[0].data as string[][];
+      const emailIndex = grid[0].indexOf('Email');
+      expect(grid.find((row) => row[0] === a.company)![emailIndex]).toBe('new@clinic-11.test');
+      if (source !== 'catalog') expect(grid.find((row) => row[0] === b.company)![emailIndex]).toBe('');
+      expect(JSON.stringify(nextDb.getRows('ve_bases').slice(1))).toBe(priorSnapshot);
+      const saved = nextDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      expect(saved.target_progress).toMatchObject({ candidates_processed: 20, max_candidates: 10_000, max_rounds: 100 });
+      expect(saved.target_checkpoint).toEqual(info.target_checkpoint);
+      if (source === 'catalog') expect(nextDb.rpcCalls.find((call) => call.fn === 'yandex_maps_catalog_search')!.params.p_after).toBe('prior-cursor');
+      const paidSnapshot = JSON.stringify(paid);
+      await runBaseCollectStage(makeJob(), { supabase: nextDb as unknown as SupabaseClient });
+      expect(JSON.stringify(nextDb.getRows('base_constructor_jobs'))).toBe(paidSnapshot);
+      expect(callLLMWithSchema).not.toHaveBeenCalled();
+      expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+      expect(nextDb.getRows('parser_jobs')).toHaveLength(0);
+      expect(nextDb.getRows('yandex_maps_jobs')).toHaveLength(0);
+    }
   });
 
   it('холостой раунд не тратит бюджет раундов, а несколько холостых подряд честно останавливают сбор', () => {
