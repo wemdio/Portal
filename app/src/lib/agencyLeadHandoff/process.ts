@@ -83,7 +83,7 @@ async function queueSender(db: SupabaseClient, row: HandoffRow, settings: Agency
   const to = norm(reply.from_email || recipient.email);
   if (to !== norm(row.lead_email)) throw new SkipHandoff('Ответ пришёл с другого адреса: нужна ручная передача');
   const cc = ccFor(settings, mailbox.email, to);
-  const text = handoffText(settings, mailbox.email);
+  const text = handoffText(settings, row.id);
   const history = [
     ...(messagesResult.data ?? []).map(m => `${mailbox.email}:\n${m.body ?? ''}`),
     `${to}:\n${reply.body ?? ''}`,
@@ -133,7 +133,7 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
   if (manualError) throw new Error(manualError.message);
   if (manual?.length) throw new SkipHandoff('В переписке уже ответил оператор');
   const cc = mergeCcLists(ccFor(settings, sender, row.lead_email), computeReplyAllCc(original, { eaccount: sender, leadEmail: row.lead_email }));
-  const text = handoffText(settings, sender);
+  const text = handoffText(settings, row.id);
   const history = [...thread.filter(e => e.id !== original.id), original]
     .sort((a, b) => stamp(a) - stamp(b))
     .map(e => `${e.from_address_email || (e.ue_type === 2 ? row.lead_email : sender)}:\n${getBodyText(e.body)}`).join('\n\n');

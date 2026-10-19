@@ -23,14 +23,13 @@ const addresses = (s: string) => s.split(/[,;\s]+/).map(v => v.trim()).filter(Bo
 function SettingsForm({ value, reload }: { value: AgencyHandoffSettings; reload: () => Promise<void> }) {
   const [form, setForm] = useState(value);
   const [cc, setCc] = useState(value.cc_emails.join(', '));
-  const [self, setSelf] = useState(value.self_sender_emails.join(', '));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const save = async () => {
     setBusy(true); setMessage('');
     try {
       await authFetchJson(API, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...form, cc_emails: addresses(cc), self_sender_emails: addresses(self) }) });
+        body: JSON.stringify({ ...form, cc_emails: addresses(cc) }) });
       await reload(); setMessage('Сохранено');
     } catch (err) { setMessage(err instanceof Error ? err.message : 'Не удалось сохранить'); }
     finally { setBusy(false); }
@@ -45,16 +44,13 @@ function SettingsForm({ value, reload }: { value: AgencyHandoffSettings; reload:
     <label className="block text-sm">Почта ответственного в копии (можно несколько через запятую)
       <input value={cc} onChange={e => setCc(e.target.value)} className={field} placeholder="name@company.ru" />
     </label>
-    <label className="block text-sm">Ответ при передаче коллеге
+    <label className="block text-sm">Вариант 1: передаю коллеге
       <textarea value={form.colleague_text} onChange={e => setForm({ ...form, colleague_text: e.target.value })} maxLength={3000} rows={3} className={field} />
     </label>
-    <label className="block text-sm">Ящики, которые пишут от лица самого ответственного
-      <textarea value={self} onChange={e => setSelf(e.target.value)} rows={2} className={field} placeholder="Ящики Юли, если в копии её основная почта" />
-    </label>
-    <label className="block text-sm">Ответ с этих ящиков
+    <label className="block text-sm">Вариант 2: добавляю свою основную почту
       <textarea value={form.self_text} onChange={e => setForm({ ...form, self_text: e.target.value })} maxLength={3000} rows={3} className={field} />
     </label>
-    <p className="text-xs text-zinc-500">Текст отправляется дословно. Укажите имя коллеги в тексте, если нужно. Письмо уйдёт с прежнего ящика, в копии будет ответственный, под ответом будет переписка.</p>
+    <p className="text-xs text-zinc-500">Для каждого нового лида случайно выбирается один из двух текстов с вероятностью 50/50. При повторной обработке вариант сохраняется. Текст отправляется дословно, с прежнего ящика, с ответственным в копии и историей переписки.</p>
     <button type="button" disabled={busy} onClick={() => void save()} className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white disabled:opacity-50">{busy ? 'Сохраняю…' : 'Сохранить передачу'}</button>
     {message && <p role="status" className="text-sm">{message}</p>}
   </div>;
