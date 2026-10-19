@@ -66,3 +66,10 @@ export function veSeenCompanyCovers(
   return emails.every((email) => entries.some((entry) => entry.emails.has(email)))
     && websiteHosts(row.website).every((host) => entries.some((entry) => entry.hosts.has(host)));
 }
+
+/** A genuinely new address/site must not purchase validation of this company's
+ * old addresses again. Unidentified companies do not share an email blacklist. */
+export function veUnseenCompanyEmails(seen: VeSeenCompanies, row: VeSeenRow, emails: string[]): string[] {
+  const entries = lookupKeys(row).map((key) => seen.get(key));
+  return emails.filter((email) => !entries.some((entry) => entry?.emails.has(email)));
+}

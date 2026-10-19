@@ -14,6 +14,7 @@ import { veCanWidenPlan } from './planWidening';
 import { isVeRenewableSourceTask, reopenVeSourceTask } from './sourceRenewal';
 import { validVeAdaptiveCollection, veAdaptiveSourceDeferred, veAdaptiveSourceDry, veSourceStrategyKey, type VeAdaptiveCollection } from './adaptiveCollection';
 import type { VeCollectTask } from './prompts/sourcePlan';
+import { needsVeKnownWebsiteContinuation } from './knownWebsiteDirectory';
 import type { VeStaffingCorrectionScope } from './staffingCorrection';
 import { relevanceHash } from './relevanceCheckpoint';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
@@ -131,6 +132,14 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
     || (record(info.construct)?.status === 'dispatched' && record(info.construct)?.bc_job_id)
     || records(record(info.preview_pipeline)?.batches).length
     || tasks.some((task) => task.status === 'dispatched')) return available('saved_work', 'Осталось завершить обработку уже найденных компаний.');
+  // Source-only correction precedes optional reviews of the old reserve. Its
+  // own predicate requires BOTH original budgets and a quiescent free slot.
+  if (needsVeKnownWebsiteContinuation(base, currentHypothesis)) {
+    return available('source_update', 'Доступна проверка официальных сайтов платформ в пределах сохранённого бюджета.', 'resume_collection');
+  }
+  if (record(info.known_website_source)?.continuation_only === true) {
+    return unavailable('sources_exhausted', 'Проверка доступных официальных сайтов завершена. Проверенные контакты сохранены.');
+  }
   const reserve = readVeRelevanceReserve(info.relevance_reserve);
   // The specialist raised the "addresses per company" limit. The addresses the
   // previous one held back are validated and waiting in the reserve, but only a

@@ -16,6 +16,9 @@ import { VE_RELEVANCE_TRIAGE_VERSION } from '@/lib/verticalEngineV2/relevanceTri
 import { newVeAdaptiveCollection } from '@/lib/verticalEngineV2/adaptiveCollection';
 import { checkVeContinuationRequest } from '@/lib/verticalEngineV2/preparationRequest';
 import { getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRecovery';
+import { addVeKnownWebsiteSource, canAddVeKnownWebsiteSource, VE_KNOWN_WEBSITE_CATALOG } from '@/lib/verticalEngineV2/knownWebsiteDirectory';
+import type { VeCollectInfo } from '@/lib/verticalEngineV2/stages/baseCollect';
+import { VeSourcePlanSchema } from '@/lib/verticalEngineV2/schemas';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -40,6 +43,69 @@ const input = {
 
 describe('VE2 base collection enqueue recovery', () => {
   it('refreshes audited retail previews before optional old reserve work without changing paid receipts or limits', async () => {
+    // The bounded official-site correction shares the explicit source-only
+    // lifecycle; it cannot reopen the old reserve or buy another HH scrape.
+    for (const mode of ['explicit', 'routine', 'round-limit', 'candidate-limit', 'geo', 'geo-rf', 'required', 'studio', 'supply', 'launched', 'bad-checkpoint', 'live-cursor'] as const) {
+      const adult = { id: 'adult', project_id: input.projectId, vertical_id: input.verticalId, status: 'proposed',
+        title: mode === 'studio' ? 'Вебкам студии' : 'Платформы веб-моделей и взрослого контента',
+        description: mode === 'geo' ? 'Платформы, зарегистрированные в России.' : mode === 'geo-rf' ? 'Платформы в РФ.' : 'Стриминговые платформы для взрослых и фан-сообщества 18+.',
+        ...(mode === 'required' ? { audience_scope: { version: 1 as const, kind: 'segment' as const,
+          any_of: ['Платформы взрослого контента'], required: ['Собственный офис'], excluded: [] } } : {}) };
+      const weak = { source: 'companies_directory' as const, rationale: 'Old exhausted slice', directory_filters: { okvedCodes: ['63'] } };
+      const paid = { source: 'hh_live' as const, rationale: 'Paid before', hh_query: { text: 'платежи' } };
+      const target = { mode: 'preview' as const, status: 'limited' as const, round: mode === 'round-limit' ? 175 : 75,
+        max_rounds: 175, ready_rows: 0, ready_target: 500, candidates_processed: mode === 'candidate-limit' ? 10000 : 5237,
+        max_candidates: 10000, first_round_candidates: 100 };
+      const info: VeCollectInfo = { collection_mode: mode === 'supply' ? 'supply' : 'preview', hypotheses: [adult],
+        niche_source_profile: 'adult_platform', target_progress: target,
+        target_checkpoint: { completed_round: target.round - Number(mode === 'bad-checkpoint'), seen_rows: [], processed_rows: 5237 },
+        plan: { tasks: [weak, paid] }, tasks: [
+          { source: weak.source, task: weak, status: mode === 'live-cursor' ? 'pending' : 'done', rows: 0, child_job_id: null,
+            exhausted: mode !== 'live-cursor', directory_cursors: { old: 900 } },
+          { source: paid.source, task: paid, status: 'done', rows: 1974, child_job_id: 'paid-hh' }],
+        adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, widenings: 2 },
+        construct: { status: 'done', bc_job_id: 'paid-constructor' },
+        relevance_reserve: { version: 1, rows: [{ company: 'Old unrelated', website: 'old.test', email: 'old@old.test', _relevance_unchecked: true }] },
+      };
+      const base = { id: 'adult-base', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: adult.id,
+        source: 'auto', status: 'analyzed', row_count: 0, data: [], collect_info: info, updated_at: '2026-10-11T00:00:00Z' };
+      const before = structuredClone(info);
+      const db = createMockSupabase({ tables: { ve_hypotheses: [adult], ve_bases: [base], ve_jobs: [],
+        ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [] } });
+      const args = { ...input, hypothesisIds: [adult.id], collectionMode: 'preview' as const,
+        ...(mode === 'routine' ? {} : { resumeBaseId: base.id }) };
+      await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+      const stored = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      if (mode === 'explicit') {
+        expect(stored.known_website_source).toMatchObject({ catalog: VE_KNOWN_WEBSITE_CATALOG, continuation_only: true,
+          previous_task: before.tasks![0], previous_construct: before.construct });
+        expect(stored.tasks).toHaveLength(2);
+        expect(stored.tasks![1]).toEqual(before.tasks![1]);
+        expect(stored.target_progress).toMatchObject({ ...target, round: 76, status: 'collecting' });
+        expect(stored.relevance_reserve).toEqual(before.relevance_reserve);
+        expect(stored.adaptive_collection).toEqual(before.adaptive_collection);
+        expect(stored).not.toHaveProperty('validation_retry');
+        expect(stored).not.toHaveProperty('relevance_review_requested');
+        expect(stored).not.toHaveProperty('construct');
+        await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+        expect(db.getRows('ve_jobs')).toHaveLength(1);
+        expect(addVeKnownWebsiteSource(stored)).toBe(false);
+        expect(VeSourcePlanSchema.safeParse(stored.plan).success).toBe(false);
+        const fresh = structuredClone(before);
+        fresh.target_progress = { ...target, round: 1, candidates_processed: 0 };
+        delete fresh.target_checkpoint; delete fresh.construct;
+        fresh.tasks = Array.from({ length: 4 }, () => ({ source: weak.source, task: weak, status: 'pending' as const, child_job_id: null, rows: 0 }));
+        fresh.plan = { tasks: fresh.tasks.map(state => state.task) };
+        expect(addVeKnownWebsiteSource(fresh)).toBe(true);
+        expect(fresh.tasks).toHaveLength(4);
+        expect(fresh.known_website_source?.previous_task).toMatchObject({ status: 'pending' });
+        expect(fresh.known_website_source?.continuation_only).toBeUndefined();
+        expect(addVeKnownWebsiteSource(fresh)).toBe(false);
+      } else expect(stored).not.toHaveProperty('known_website_source');
+      if (['round-limit', 'candidate-limit', 'geo', 'geo-rf', 'required', 'studio', 'supply', 'live-cursor'].includes(mode)) {
+        expect(canAddVeKnownWebsiteSource(before)).toBe(false);
+      }
+    }
     const oldFlag = process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS;
     process.env.VE_AUDIENCE_SCOPE_PROJECT_IDS = '';
     try {
