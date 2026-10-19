@@ -298,6 +298,12 @@
     .field input:focus, .field textarea:focus { border-color: var(--green); box-shadow: 0 0 0 2px #285b4520; }
     .contact .button { width: 100%; cursor: pointer; }
     .form-message { display: none; margin: 13px 0 0 !important; color: var(--green) !important; font-weight: 650; }
+    /* Возврат после отправки формы мимо скрипта: /api/demo-lead отвечает 303 на #sent.
+       Без JS «спасибо» показывает CSS (content), а не текст в разметке: агент, читающий
+       страницу как текст, не должен видеть «заявка получена» до отправки. Со скриптом
+       тот же текст кладёт блок #sent в конце страницы, и :empty гасит CSS-копию. */
+    #sent:target, #sent.is-shown { display: block; }
+    #sent:target:empty::after { content: "Thanks — we've got your request and will get back to you shortly."; }
     footer { padding: 25px 0 32px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
     .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
     .footer-inner strong { color: var(--ink); }
@@ -629,12 +635,15 @@
       <div class="contact">
         <h3 id="contact-title">Tell us what you're selling.</h3>
         <p>Share your website and we'll start with the audience question.</p>
-        <form id="pilotForm">
+        <form id="pilotForm" action="https://app.outreachos.xyz/api/demo-lead" method="post">
+          <input type="hidden" name="source" value="eng_pilot">
+          <input type="hidden" name="lang" value="en">
           <div class="field"><label for="website">Company website</label><input id="website" name="website" type="url" required maxlength="200" placeholder="https://company.com"></div>
           <div class="field"><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="320" placeholder="you@company.com"></div>
           <div class="field"><label for="goal">What do you sell? <span style="font-weight:400">(optional)</span></label><textarea id="goal" name="goal" maxlength="2000" placeholder="One sentence is enough"></textarea></div>
           <button class="button" type="submit">Check my niche and target <span aria-hidden="true">↗</span></button>
           <p class="form-message" id="formMessage" role="status"></p>
+          <p class="form-message" id="sent" role="status"></p>
         </form>
       </div>
     </section>
@@ -857,6 +866,20 @@
           button.disabled = false;
         });
     });
+
+    // Возврат после отправки формы мимо скрипта: /api/demo-lead отвечает 303 на эту страницу
+    // с #sent. Без JS «спасибо» показывает CSS (#sent:target). Здесь — случай, когда скрипт
+    // работает, а форму отправили мимо него (агент вызвал form.submit()): кладём тот же текст
+    // в #sent, чтобы его было видно и в тексте страницы, и убираем #sent из адреса, чтобы
+    // обновление страницы или скопированная ссылка не показывали его снова.
+    if (location.hash === '#sent') {
+      var sentMessage = document.getElementById('sent');
+      sentMessage.textContent = "Thanks — we've got your request and will get back to you shortly.";
+      sentMessage.classList.add('is-shown');
+      try { history.replaceState(history.state, '', location.pathname + location.search); } catch (e) { /* #sent остаётся в адресе */ }
+      var contactTitle = document.getElementById('contact-title');
+      if (contactTitle) contactTitle.scrollIntoView();
+    }
 
     // Переключатель языка — обычная ссылка на /ru/ (работает и без JS). Скрипт дописывает к ней
     // текущие query (utm_* и прочее) и якорь, а по клику запоминает выбор в cookie oos_lang
