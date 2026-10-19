@@ -19,7 +19,9 @@ import type { LLMMessage } from '../llm';
 import { readVeAudienceScope, veAudienceScopeText, type VeAudienceScope } from '../audienceScope';
 
 export interface VeCollectTask {
-  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring';
+  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring' | 'known_websites';
+  /** Code-owned discovery hints, intentionally absent from the LLM schema. */
+  known_websites?: { catalog: 'adult-platforms-2026-10-19' };
   /** Что и зачем собираем, 1 строка. */
   rationale: string;
   directory_filters?: {
