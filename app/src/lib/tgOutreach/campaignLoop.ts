@@ -1098,6 +1098,19 @@ export async function handleChat(
       log('warning', `${displayName}: проверка интереса не удалась (${check.error}) — передача только по фразе в ответе модели`);
     }
   }
+  // Обязательная квалификация: вопросы заданы и клиент ответил на все — передаём
+  // сами, а не ждём, что модель вспомнит фразу передачи (19.10.2026: англоязычный
+  // клиент ответил на все три вопроса, бот написал «Thank you» и не передал).
+  if (phrase && !interested && awaitingQualification && oai.qualification_required) {
+    const questions = parseQualificationQuestions(oai.qualification_questions);
+    if (questions.length > 0) {
+      const qa = await checkQualification(chatMessages, questions);
+      if (qa?.asked && qa.missing.length === 0) {
+        interested = true;
+        log('info', `${displayName}: ответил на все контрольные вопросы — передаю контакт менеджеру`);
+      }
+    }
+  }
 
   // Русская фраза передачи иноязычному собеседнику уходит переводом, а лид
   // засчитываем по самому интересу, а не по тексту фразы.
