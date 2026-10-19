@@ -26,6 +26,105 @@
   <!-- Превью ссылки в мессенджерах берётся с этой страницы. В русские чаты давать /ru/ (или /?lang=ru),
        не голый домен: бот Telegram ходит без Accept-Language и cookie и получит английскую версию.
        После публикации обновить кэш превью /, /en/ и /ru/ через @webpagebot в Telegram. -->
+  <!-- Структурированные данные для поисковиков и ИИ-агентов: только текст этой страницы, без цен и контактов. Меняются ВМЕСТЕ с hero, блоком #pilot и FAQ ниже — иначе разметка будет спорить со страницей. -->
+  <script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "Organization",
+   "@id": "https://polzaagency.com/#organization",
+   "name": "Polza Agency",
+   "url": "https://polzaagency.com"
+  },
+  {
+   "@type": "WebSite",
+   "@id": "https://outreachos.xyz/#website",
+   "url": "https://outreachos.xyz/",
+   "name": "OutreachOS",
+   "inLanguage": [
+    "en",
+    "ru"
+   ],
+   "publisher": {
+    "@id": "https://polzaagency.com/#organization"
+   }
+  },
+  {
+   "@type": "Service",
+   "@id": "https://outreachos.xyz/en/#service",
+   "name": "OutreachOS",
+   "serviceType": "Niche-built B2B outbound",
+   "brand": {
+    "@type": "Brand",
+    "name": "OutreachOS"
+   },
+   "provider": {
+    "@id": "https://polzaagency.com/#organization"
+   },
+   "url": "https://outreachos.xyz/en/",
+   "description": "AI studies your product and drafts 10 ICP hypotheses. Our experts review them, check 20 market sources for relevant companies and signals, then test before scaling. For selected niches, we agree on a monthly lead target and guarantee it upfront.",
+   "offers": {
+    "@type": "Offer",
+    "name": "Check my niche and lead target",
+    "url": "https://outreachos.xyz/en/#pilot",
+    "description": "We'll review your offer, the audience you want, and whether the available sources can reach enough qualified companies to set a realistic monthly target."
+   }
+  },
+  {
+   "@type": [
+    "WebPage",
+    "FAQPage"
+   ],
+   "@id": "https://outreachos.xyz/en/#webpage",
+   "url": "https://outreachos.xyz/en/",
+   "name": "OutreachOS — Find your next B2B growth channel",
+   "description": "Find the right B2B audience, test your positioning, and launch thoughtful outbound with OutreachOS and Polza Agency.",
+   "inLanguage": "en",
+   "isPartOf": {
+    "@id": "https://outreachos.xyz/#website"
+   },
+   "about": {
+    "@id": "https://outreachos.xyz/en/#service"
+   },
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "Is this a self-serve SaaS product?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Not yet. OutreachOS supports the research and campaign workflow, while Polza's team helps configure and review the first tests. We are automating more of the process over time."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Does AI write and send everything automatically?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "AI helps research companies and prepare tailored drafts. A human reviews the approach, and the team currently helps configure and activate campaigns."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Do you guarantee a number of leads?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "For selected niches, yes. We first confirm the audience, geography, lead definition, and reachable volume, then agree the monthly target before launch. We don't apply one generic guarantee to every market."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Who is behind OutreachOS?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "OutreachOS is built by the team at Polza Agency, drawing on four years of B2B client work in lead generation and outreach."
+     }
+    }
+   ]
+  }
+ ]
+}
+  </script>
   <style>
     :root {
       --paper: #ffffff;

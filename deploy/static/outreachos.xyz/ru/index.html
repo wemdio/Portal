@@ -26,6 +26,105 @@
   <!-- Превью ссылки в мессенджерах берётся с этой страницы. В русские чаты давать /ru/ (или /?lang=ru),
        не голый домен: бот Telegram ходит без Accept-Language и cookie и получит английскую версию.
        После публикации обновить кэш превью /, /en/ и /ru/ через @webpagebot в Telegram. -->
+  <!-- Структурированные данные для поисковиков и ИИ-агентов: только текст этой страницы, без цен и контактов. Меняются ВМЕСТЕ с hero, блоком #pilot и FAQ ниже — иначе разметка будет спорить со страницей. -->
+  <script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "Organization",
+   "@id": "https://polzaagency.com/#organization",
+   "name": "Polza Agency",
+   "url": "https://polzaagency.com"
+  },
+  {
+   "@type": "WebSite",
+   "@id": "https://outreachos.xyz/#website",
+   "url": "https://outreachos.xyz/",
+   "name": "OutreachOS",
+   "inLanguage": [
+    "en",
+    "ru"
+   ],
+   "publisher": {
+    "@id": "https://polzaagency.com/#organization"
+   }
+  },
+  {
+   "@type": "Service",
+   "@id": "https://outreachos.xyz/ru/#service",
+   "name": "OutreachOS",
+   "serviceType": "Нишевый B2B-аутрич",
+   "brand": {
+    "@type": "Brand",
+    "name": "OutreachOS"
+   },
+   "provider": {
+    "@id": "https://polzaagency.com/#organization"
+   },
+   "url": "https://outreachos.xyz/ru/",
+   "description": "AI изучает ваш продукт и готовит 10 гипотез об идеальном клиенте (ICP). Наши эксперты проверяют их, ищут нужные компании и сигналы в 20 источниках данных и тестируют гипотезы до масштабирования. Для подходящих ниш мы заранее согласуем месячный план по лидам и гарантируем его.",
+   "offers": {
+    "@type": "Offer",
+    "name": "Проверить нишу и план по лидам",
+    "url": "https://outreachos.xyz/ru/#pilot",
+    "description": "Мы разберём ваш оффер и нужную вам аудиторию и оценим, найдётся ли в доступных источниках достаточно подходящих компаний, чтобы поставить реалистичный месячный план."
+   }
+  },
+  {
+   "@type": [
+    "WebPage",
+    "FAQPage"
+   ],
+   "@id": "https://outreachos.xyz/ru/#webpage",
+   "url": "https://outreachos.xyz/ru/",
+   "name": "OutreachOS — найдите новый канал роста в B2B",
+   "description": "Найдите нужную B2B-аудиторию, проверьте позиционирование и запустите продуманный аутрич вместе с OutreachOS и Polza Agency.",
+   "inLanguage": "ru",
+   "isPartOf": {
+    "@id": "https://outreachos.xyz/#website"
+   },
+   "about": {
+    "@id": "https://outreachos.xyz/ru/#service"
+   },
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "Это SaaS-продукт, которым можно пользоваться самостоятельно?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Пока нет. OutreachOS помогает с исследованием и работой с кампаниями, а команда Polza — с настройкой и проверкой первых тестов. Со временем мы автоматизируем всё больше этапов."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "AI сам пишет и отправляет все письма?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "AI помогает изучать компании и готовить черновики под каждую из них. Подход проверяет человек, а настраивать и запускать кампании пока помогает наша команда."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Вы гарантируете количество лидов?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Для подходящих ниш — да. Сначала мы подтверждаем аудиторию, географию, определение лида и достижимый объём, а затем до запуска согласуем месячный план. Одну общую гарантию на все рынки мы не даём."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Кто стоит за OutreachOS?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "OutreachOS создаёт команда Polza Agency — с опорой на четыре года работы с B2B-клиентами в лидогенерации и аутриче."
+     }
+    }
+   ]
+  }
+ ]
+}
+  </script>
   <style>
     :root {
       --paper: #ffffff;
