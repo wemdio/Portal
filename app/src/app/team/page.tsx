@@ -18,6 +18,7 @@ import TeamReviewRequestForm from '@/components/team/TeamReviewRequestForm';
 import TeamSharedReviewRequestsPanel from '@/components/team/TeamSharedReviewRequestsPanel';
 import { useTeamReviewRequestSummary } from '@/components/team/useTeamReviewRequestSummary';
 import type { TeamReviewRequestPerson, TeamReviewRequestProject } from '@/components/team/teamApi';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 interface ProjectData {
   id: string;
@@ -879,7 +880,7 @@ export default function TeamPage() {
       {activeWorkspaceView === 'load' ? (
         loading ? (
           <div className="flex h-64 items-center justify-center rounded-2xl border border-gray-200 bg-white">
-            <div className="text-sm text-gray-400">Загрузка...</div>
+            <PortalSpinner />
           </div>
         ) : (
           <div className={isTma ? 'space-y-5' : 'space-y-6'}>

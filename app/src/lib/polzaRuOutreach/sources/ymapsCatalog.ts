@@ -2,6 +2,10 @@
  * Каталог Яндекс Карт (yandex_maps_company_catalog, ~10 млн организаций) —
  * кандидаты по рубрикам ЦА (документ «ОКВЭДы ЦА», 14.10.2026).
  *
+ * Читаем каталог порциями по ключу yandex_id (уникальный индекс): одна порция —
+ * одна короткая база-функция, без одного большого запроса. Идём по каталогу,
+ * пока не наберём лимит кандидатов или не выйдет время (MAX_READ_MS).
+ *
  * ОКВЭД и выручки в каталоге нет — только рубрики, поэтому отбор по ним грубый,
  * а «наш ли это клиент» решает разбор сайта (ЦА-балл) дальше по конвейеру.
  * Почта из карточки идёт в поиск почты наравне с сайтом.
@@ -25,12 +29,16 @@ export const YMAPS_TARGET_CATEGORY_REGEX = [
   'оптовая торговля', 'оптом', 'дистрибьют',
 ].join('|');
 
+/** Размер одной порции каталога (строк, до фильтра). */
+const PAGE_SIZE = 50_000;
 /**
- * Какую долю страниц каталога смотрим за запуск. По выборке 14.10.2026 рубрики ЦА
- * у ~6% карточек с сайтом (≈74 тыс. на весь каталог): 25% страниц ≈ 18 тыс.
- * кандидатов, и каждый запуск берёт свои случайные страницы.
+ * Сколько читаем каталога за запуск по времени: дальше — стоп, набранное остаётся.
+ * 15.10.2026: 20 минут (решение пользователя) — два часа держали запуск на «Загрузке
+ * источников» без движения, и монитор парсеров поднимал тревогу.
  */
-const SAMPLE_PERCENT = 25;
+const MAX_READ_MS = 20 * 60 * 1000;
+/** Потолок кандидатов из каталога за запуск (решение пользователя 15.10.2026: 100 000). */
+const MAX_CANDIDATES = 100_000;
 
 export interface YmapsCatalogRow {
   yandexId: string;
@@ -39,19 +47,54 @@ export interface YmapsCatalogRow {
   email: string | null;
 }
 
-export async function loadYmapsCatalogCandidates(db: SupabaseClient, limit: number): Promise<YmapsCatalogRow[]> {
-  const { data, error } = await db.rpc('polza_ru_ymaps_catalog_candidates', {
-    p_category_regex: YMAPS_TARGET_CATEGORY_REGEX,
-    p_sample_percent: SAMPLE_PERCENT,
-    p_limit: limit,
-  });
-  if (error) throw new Error(`ymaps catalog candidates failed: ${error.message}`);
-  return ((data ?? []) as Array<Record<string, unknown>>)
-    .filter((r) => r.name && r.website)
-    .map((r) => ({
-      yandexId: String(r.yandex_id ?? ''),
-      name: String(r.name),
-      website: String(r.website).split(/[\s,;]+/)[0],
-      email: r.email ? String(r.email) : null,
-    }));
+interface PageResult {
+  rows: Array<Record<string, unknown>>;
+  last_id: string | null;
+  done: boolean;
+}
+
+/**
+ * Кандидаты из каталога: порции идут по возрастанию yandex_id, пока не наберётся
+ * limit строк, не кончится каталог или не выйдет время чтения.
+ */
+export async function loadYmapsCatalogCandidates(
+  db: SupabaseClient,
+  wanted: number,
+  onLog: (message: string) => void = () => {},
+): Promise<YmapsCatalogRow[]> {
+  const limit = Math.min(wanted, MAX_CANDIDATES);
+  const started = Date.now();
+  const out: YmapsCatalogRow[] = [];
+  let after = '';
+  let pages = 0;
+  let scanned = 0;
+  for (;;) {
+    const { data, error } = await db.rpc('polza_ru_ymaps_catalog_page', {
+      p_after: after,
+      p_page: PAGE_SIZE,
+      p_category_regex: YMAPS_TARGET_CATEGORY_REGEX,
+    });
+    if (error) throw new Error(`ymaps catalog page failed: ${error.message}`);
+    const page = data as PageResult;
+    for (const r of page.rows ?? []) {
+      if (!r.name || !r.website) continue;
+      out.push({
+        yandexId: String(r.yandex_id ?? ''),
+        name: String(r.name),
+        website: String(r.website).split(/[\s,;]+/)[0],
+        email: r.email ? String(r.email) : null,
+      });
+    }
+    pages += 1;
+    scanned += PAGE_SIZE;
+    // Каждые 5 страниц — строка в журнал: чтение каталога идёт минутами.
+    if (pages % 5 === 0 || page.done) {
+      onLog(`каталог Яндекс Карт: страниц ${pages}, просмотрено ~${scanned} строк, подходящих ${out.length}, прошло ${Math.round((Date.now() - started) / 1000)} с`);
+    }
+    if (page.done || !page.last_id) break;
+    if (out.length >= limit) break;
+    if (Date.now() - started > MAX_READ_MS) break;
+    after = page.last_id;
+  }
+  return out.slice(0, limit);
 }

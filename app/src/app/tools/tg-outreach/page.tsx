@@ -9,7 +9,7 @@ import { BaseAttachmentsPanel } from '@/components/tg-outreach/BaseAttachmentsPa
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
 import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
-import { accountCountryLabel } from '@/lib/tgOutreach/phoneCountry';
+import { accountCountryLabel, countryByCode, countryFromPhone } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
   Plus,
@@ -67,6 +67,7 @@ import type {
   OutreachProxyList,
   OutreachProxyListStats,
   OutreachDialog,
+  DialogMessage,
   OutreachLog,
   OutreachBlockedUser,
   OpenAISettings,
@@ -516,6 +517,20 @@ function SettingsTab({ campaign, onSave }: {
           <input type="checkbox" checked={openai.handoff_direct_request_only === true} onChange={e => setOAI('handoff_direct_request_only', e.target.checked)} className="rounded border-gray-300" />
           Передавать сам только по прямой просьбе: менеджер, созвон, встреча
         </label>
+        {/* Жёсткое правило поверх промпта: лид уходит менеджеру только после
+            ответов на эти вопросы. См. OpenAISettings.qualification_required. */}
+        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
+          <input type="checkbox" checked={openai.qualification_required === true} onChange={e => setOAI('qualification_required', e.target.checked)} className="rounded border-gray-300" />
+          Передавать только после квалификации
+        </label>
+        {openai.qualification_required === true && (
+          <>
+            <FieldArea label="Контрольные вопросы (по одному в строке)" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
+            <p className="text-[10px] text-gray-400 -mt-2">
+              Не ответил на все — бот спросит один раз. Всё равно не ответил — лид уйдёт с пометкой «без полной квалификации».
+            </p>
+          </>
+        )}
       </section>
 
       {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
@@ -1200,6 +1215,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
+  // Сообщения бота, по которым ушла задача на удаление в Telegram: ключ — диалог, время и текст.
+  const [deletingMsgs, setDeletingMsgs] = useState<Set<string>>(new Set());
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
   /** Базы кампании — для фильтра «показать только диалоги этой гипотезы». */
   const [bases, setBases] = useState<Array<{ id: string; name: string }>>([]);
@@ -1494,6 +1511,25 @@ function DialogsTab({ campaignId, crmEnabled }: {
     if (!res?.ok) {
       setDialogs((cur) => cur.map((d) => (sameUser(d) ? (before.find((b) => b.id === d.id) ?? d) : d)));
       setDialogSaveError({ id: dialog.id, message: 'не удалось добавить в чёрный список' });
+    }
+  };
+
+  const deleteBotMessage = async (dialogId: string, m: DialogMessage) => {
+    if (!window.confirm('Удалить это сообщение в Telegram у обеих сторон? Отменить нельзя.')) return;
+    const key = `${dialogId}|${m.timestamp ?? ''}|${m.content}`;
+    setDeletingMsgs((cur) => new Set(cur).add(key));
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${dialogId}/delete-message`, {
+        method: 'POST',
+        body: JSON.stringify({ timestamp: m.timestamp ?? null, content: m.content }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? `сервер ответил ${res.status}`);
+      }
+    } catch (err) {
+      setDeletingMsgs((cur) => { const next = new Set(cur); next.delete(key); return next; });
+      setDialogSaveError({ id: dialogId, message: err instanceof Error ? err.message : 'не удалось удалить сообщение' });
     }
   };
 
@@ -2047,6 +2083,15 @@ function DialogsTab({ campaignId, crmEnabled }: {
                                     {messageTimeLabel(m.timestamp)}
                                   </span>
                                 )}
+                                {m.role === 'assistant' && (deletingMsgs.has(`${d.id}|${m.timestamp ?? ''}|${m.content}`) ? (
+                                  <span className="shrink-0 text-[10px] text-gray-400">удаляется…</span>
+                                ) : (
+                                  <button type="button" onClick={() => void deleteBotMessage(d.id, m)}
+                                    className={`${m.timestamp ? '' : 'ml-auto '}shrink-0 cursor-pointer text-gray-300 hover:text-red-500 transition`}
+                                    title="Удалить это сообщение в Telegram">
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
+                                ))}
                               </div>
                               {m.content}
                             </div>
@@ -2244,7 +2289,10 @@ function useRowSelection(allIds: string[]) {
 
   const clear = useCallback(() => { setRaw(new Set()); }, []);
 
-  return { selectedIds, isSelected, toggle, setAll, clear };
+  /** Выделить ровно эти строки (после загрузки — новые аккаунты). */
+  const select = useCallback((ids: string[]) => { setRaw(new Set(ids)); }, []);
+
+  return { selectedIds, isSelected, toggle, setAll, clear, select };
 }
 
 /** Результат чтения профиля из Telegram: ошибка либо обновлённые поля. */
@@ -2766,7 +2814,7 @@ function CampaignAccountsTab({
   const profileReadable = campaignStatus === 'stopped' || campaignStatus === 'error';
 
   const accountIds = useMemo(() => accounts.map(a => a.id), [accounts]);
-  const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(accountIds);
+  const { selectedIds, isSelected, toggle, setAll, clear, select } = useRowSelection(accountIds);
 
   /**
    * Прокси, которые ещё никому не назначены.
@@ -2807,6 +2855,22 @@ function CampaignAccountsTab({
     (currentId: string | null) => proxyOptionsFor(currentId, proxies, freeProxies),
     [freeProxies, proxies],
   );
+
+  /**
+   * Страны выбранных аккаунтов (по номеру, а если его нет — по заявленной при
+   * загрузке): выберете Армению и Казахстан — прокси этих стран встанут в списке
+   * наверх. Ничего не выбрано — берём страну самого аккаунта, чью строку правим.
+   */
+  const preferProxyCountries = useCallback((ownerId?: string): string[] => {
+    const ids = selectedIds.length ? new Set(selectedIds) : new Set(ownerId ? [ownerId] : []);
+    const codes = new Set<string>();
+    for (const acc of accounts) {
+      if (!ids.has(acc.id)) continue;
+      const code = countryFromPhone(acc.phone)?.code ?? countryByCode(acc.country_code)?.code;
+      if (code) codes.add(code);
+    }
+    return [...codes].sort();
+  }, [accounts, selectedIds]);
 
   /**
    * Свободные прокси в порядке пригодности: сначала те, что проходят круги,
@@ -3380,7 +3444,7 @@ function CampaignAccountsTab({
       const body = await res.json().catch(() => null) as {
         error?: string;
         count?: number;
-        items?: Array<{ phone?: string | null; country_code?: string | null }>;
+        items?: Array<{ id?: string; phone?: string | null; country_code?: string | null }>;
         skipped?: Array<{ name: string; reason: string }>;
         errors?: Array<{ name: string; error: string }>;
         unchecked_existing_accounts?: number;
@@ -3429,6 +3493,10 @@ function CampaignAccountsTab({
           errors,
           unchecked: body.unchecked_existing_accounts ?? 0,
         });
+        // Только что залитые аккаунты сразу выделены: с ними обычно и начинается
+        // работа (прокси, профиль, проверка). Список обновится ниже, в finally.
+        const newIds = (body.items ?? []).map((item) => item.id).filter((id): id is string => Boolean(id));
+        if (newIds.length) select(newIds);
       }
     } catch (err) {
       // Всё остальное: отказ авторизации или наша собственная ошибка. Молчать
@@ -4103,6 +4171,14 @@ function CampaignAccountsTab({
                     {[a.first_name, a.last_name].filter(Boolean).join(' ') ||
                       (a.profile_synced_at ? 'без имени в Telegram' : 'профиль не прочитан')}
                     {a.tg_username ? ` · @${a.tg_username}` : ''}
+                    {a.tg_premium ? (
+                      <span
+                        className="ml-1.5 rounded bg-amber-50 px-1 py-px text-[10px] font-medium text-amber-700"
+                        title="У аккаунта Telegram Premium (определено при проверке)"
+                      >
+                        ★ Premium
+                      </span>
+                    ) : null}
                   </div>
                   {/* Итог проверки. Чужие сеансы выносим отдельно: это ответ на
                       вопрос, почему аккаунты теряют сессии пачками. */}
@@ -4262,6 +4338,7 @@ function CampaignAccountsTab({
                     defaultOpen
                     value={a.proxy_id ?? ''}
                     proxies={proxyOptions(a.proxy_id)}
+                    preferCountries={preferProxyCountries(a.id)}
                     now={healthNow}
                     ariaLabel={`Прокси для ${a.session_name}`}
                     onChange={(id) => { void assignProxy(a.id, id); }}
@@ -5856,6 +5933,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [checking, setChecking] = useState(false);
+  // «Проверить неопределённые»: прогресс по пачкам и итог раскладки по спискам.
+  const [sortRun, setSortRun] = useState<{ done: number; total: number; working: number; note?: string } | null>(null);
   /**
    * Секунды с начала проверки. Проверка идёт одним запросом на сервере, и
    * прогресса по одному прокси у нас нет — но сорок штук занимают до минуты, и
@@ -6142,19 +6221,30 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setCheckElapsed(0);
     setChecking(true);
     try {
-      const res = await authFetch(`${API_BASE}/proxies/check`, {
-        method: 'POST',
-        body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids }),
-      });
-      const body = (await res.json().catch(() => null)) as
-        | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
-        | null;
-      // Отказ ручки — не вердикт по прокси: он ничего не говорит ни о прокси, ни
-      // о Telegram, поэтому едет в общую красную плашку вкладки, а не в итоги.
-      if (!res.ok || !body?.items) {
-        setProxyError(body?.error ?? `Не удалось проверить прокси (HTTP ${res.status})`);
-        return;
+      // Любое число прокси — пачками по 50 (сервер берёт до 200), с определением
+      // страны и записью итога в строку прокси.
+      const items: ProxyCheckResult[] = [];
+      let missing = 0;
+      let checkedAt = new Date().toISOString();
+      for (let i = 0; i < ids.length; i += 50) {
+        const res = await authFetch(`${API_BASE}/proxies/check`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids.slice(i, i + 50), detect_country: true, save: true }),
+        });
+        const body = (await res.json().catch(() => null)) as
+          | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
+          | null;
+        // Отказ ручки — не вердикт по прокси: он ничего не говорит ни о прокси, ни
+        // о Telegram, поэтому едет в общую красную плашку вкладки, а не в итоги.
+        if (!res.ok || !body?.items) {
+          setProxyError(body?.error ?? `Не удалось проверить прокси (HTTP ${res.status})`);
+          return;
+        }
+        items.push(...body.items);
+        missing += body.missing_ids?.length ?? 0;
+        checkedAt = body.checked_at ?? checkedAt;
       }
+      const body = { items, missing_ids: new Array<string>(missing), checked_at: checkedAt };
       // Порядок ответа нам не обещан, а оператор ищет строки там, где выделял.
       const byId = new Map(body.items.map((r) => [r.id, r]));
       setCheckRun({
@@ -6162,10 +6252,72 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         missing: body.missing_ids?.length ?? 0,
         checkedAt: body.checked_at ?? new Date().toISOString(),
       });
+      void reloadAll();
     } catch (e) {
       setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setChecking(false);
+    }
+  };
+
+  /**
+   * «Проверить неопределённые»: все прокси без списка проверяются пачками по 50
+   * (прокси жив, Telegram доступен, страна выхода), потом сами раскладываются по
+   * спискам «Авто · Страна» и «Не работают». Пачки идут подряд, а не по одному
+   * запросу на прокси: мобильный пул не получает больше 50 подключений за раз.
+   */
+  const checkAndSortUndefined = () => checkListAndSort(proxies.filter((p) => p.proxy_list_id == null).map((p) => p.id), null);
+
+  /**
+   * Перепроверка любого списка (15.10.2026): та же проверка пачками по 50 с
+   * определением страны. После неё прокси «Неопределённых» и автосписков
+   * раскладываются по странам; списки, названные вручную, остаются как есть.
+   */
+  const recheckActiveList = () => checkListAndSort(proxies.filter((p) => (p.proxy_list_id ?? null) === activeList).map((p) => p.id), activeList);
+
+  const checkListAndSort = async (targets: string[], sortListId: string | null) => {
+    if (!targets.length || checking || sortRun) return;
+    setProxyError(null);
+    setSortRun({ done: 0, total: targets.length, working: 0 });
+    let working = 0;
+    try {
+      for (let i = 0; i < targets.length; i += 50) {
+        const ids = targets.slice(i, i + 50);
+        const res = await authFetch(`${API_BASE}/proxies/check`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids, detect_country: true, save: true }),
+        });
+        const body = (await res.json().catch(() => null)) as { items?: ProxyCheckResult[]; error?: string } | null;
+        if (!res.ok || !body?.items) {
+          setProxyError(body?.error ?? `Проверка остановилась на ${i} из ${targets.length} (HTTP ${res.status})`);
+          break;
+        }
+        working += body.items.filter((r) => r.status === 'ok').length;
+        const geoErr = body.items.find((r) => r.status === 'ok' && !r.country_code && r.country_error)?.country_error;
+        if (geoErr) setProxyError(`Страна не определилась: ${geoErr}`);
+        setSortRun({ done: Math.min(i + ids.length, targets.length), total: targets.length, working });
+      }
+      const sortRes = await authFetch(`${API_BASE}/proxies/auto-sort`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, ...(sortListId ? { list_id: sortListId } : {}) }),
+      });
+      const sorted = (await sortRes.json().catch(() => null)) as { moved?: number; groups?: { name: string; count: number }[]; error?: string } | null;
+      if (!sortRes.ok) {
+        setProxyError(sorted?.error ?? `Не удалось разложить по спискам (HTTP ${sortRes.status})`);
+      } else {
+        setSortRun({
+          done: targets.length,
+          total: targets.length,
+          working,
+          note: sorted?.moved
+            ? `Разложено ${sorted.moved}: ${(sorted.groups ?? []).map((g) => `${g.name} — ${g.count}`).join(', ')}`
+            : 'Перекладывать нечего — список остался как был',
+        });
+      }
+    } catch (e) {
+      setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      void reloadAll();
     }
   };
 
@@ -6190,14 +6342,18 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setBulkDeleting(true);
     setProxyError(null);
     try {
-      const res = await authFetch(`${API_BASE}/proxies/bulk`, {
-        method: 'DELETE',
-        body: JSON.stringify({ campaign_id: campaignId, ids }),
-      });
-      if (!res.ok) {
-        const d = (await res.json().catch(() => null)) as { error?: string } | null;
-        setProxyError(d?.error ?? `Не удалось удалить (${res.status})`);
-        return;
+      // Любое число — пачками по 500 (лимит сервера на один запрос).
+      for (let i = 0; i < ids.length; i += 500) {
+        const res = await authFetch(`${API_BASE}/proxies/bulk`, {
+          method: 'DELETE',
+          body: JSON.stringify({ campaign_id: campaignId, ids: ids.slice(i, i + 500) }),
+        });
+        if (!res.ok) {
+          const d = (await res.json().catch(() => null)) as { error?: string } | null;
+          setProxyError(d?.error ?? `Не удалось удалить (${res.status})`);
+          void reloadAll();
+          return;
+        }
       }
       clear();
       void reloadAll();
@@ -6216,18 +6372,22 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setSaving(true);
     setProxyError(null);
     try {
-      const res = await authFetch(`${API_BASE}/proxies/bulk-move`, {
-        method: 'POST',
-        body: JSON.stringify({
-          campaign_id: campaignId,
-          ids,
-          list_id: targetList,
-        }),
-      });
-      if (!res.ok) {
-        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
-        setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
-        return;
+      // Любое число — пачками по 500.
+      for (let i = 0; i < ids.length; i += 500) {
+        const res = await authFetch(`${API_BASE}/proxies/bulk-move`, {
+          method: 'POST',
+          body: JSON.stringify({
+            campaign_id: campaignId,
+            ids: ids.slice(i, i + 500),
+            list_id: targetList,
+          }),
+        });
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+          setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
+          void reloadAll();
+          return;
+        }
       }
       setMoveTarget(null);
       clear();
@@ -6493,6 +6653,26 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {activeList !== null && (
+              <button type="button" onClick={() => { void recheckActiveList(); }}
+                disabled={Boolean(sortRun && sortRun.done < sortRun.total)}
+                title="Проверить заново все прокси этого списка и определить страну. В автосписках («Авто · …», «Не работают») прокси после этого переедут в свою страну"
+                className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-60">
+                {sortRun && sortRun.done < sortRun.total
+                  ? `Проверяю ${sortRun.done} из ${sortRun.total}…`
+                  : 'Перепроверить список и определить страну'}
+              </button>
+            )}
+            {activeList === null && (
+              <button type="button" onClick={() => { void checkAndSortUndefined(); }}
+                disabled={Boolean(sortRun && sortRun.done < sortRun.total)}
+                title="Проверить все прокси без списка: жив ли прокси, доходит ли Telegram, из какой страны. Потом они сами разложатся по спискам «Авто · Страна» и «Не работают"
+                className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-60">
+                {sortRun && sortRun.done < sortRun.total
+                  ? `Проверяю ${sortRun.done} из ${sortRun.total}…`
+                  : 'Проверить неопределённые'}
+              </button>
+            )}
             <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); setProxyError(null); }}
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
               Массовое добавление
@@ -6507,8 +6687,21 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         {/* Без привязки к showAdd/showBulk: ошибка массового удаления приходит при
             закрытых формах и иначе была бы не видна вообще. */}
         {proxyError && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-            {proxyError}
+          <div className="flex items-start justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            <span>{proxyError}</span>
+            <button type="button" onClick={() => setProxyError(null)} aria-label="Закрыть" className="shrink-0 text-red-400 hover:text-red-700 cursor-pointer">✕</button>
+          </div>
+        )}
+        {sortRun && (
+          <div className="flex items-start justify-between gap-2 rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-900">
+            <span>
+              {sortRun.done < sortRun.total
+                ? `Проверка неопределённых: ${sortRun.done} из ${sortRun.total}, работает ${sortRun.working}`
+                : `Проверено ${sortRun.total}, работает ${sortRun.working}. ${sortRun.note ?? ''}`}
+            </span>
+            {sortRun.done >= sortRun.total && (
+              <button type="button" onClick={() => setSortRun(null)} className="text-indigo-400 hover:text-indigo-700">✕</button>
+            )}
           </div>
         )}
 
@@ -7596,9 +7789,10 @@ function CampaignsSection() {
             const st = STATUS_LABELS[c.status] ?? STATUS_LABELS.stopped;
             return (
               <button key={c.id} type="button" onClick={() => setSelectedId(c.id)} title={st.label}
-                className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
+                className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600 font-semibold ring-2 ring-indigo-300 ring-offset-2 ring-offset-transparent shadow-md' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(c.status)}`} />
                 {c.name}
+                {selectedId === c.id && <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] uppercase tracking-wide">открыта</span>}
               </button>
             );
           })}

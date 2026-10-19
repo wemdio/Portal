@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Check, Loader2, Pencil, Plus, RefreshCw, Search, X } from 'lucide-react';
 import {
   bulkMailboxes,
+  bulkMailboxLimits,
   deleteMailbox,
   fetchEgressIps,
   fetchMailboxes,
@@ -22,7 +23,9 @@ import { AddMailboxesModal } from './AddMailboxesModal';
 import { EgressMoveMenu } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 import { TagAssignMenu, TagChip, TagFilterMenu, tagTones } from './MailboxTags';
+import { RowActionsMenu } from './RowActionsMenu';
 import { SenderModal } from './SenderModal';
+import { SortableTh } from '@/components/ui/SortableTh';
 
 const PAGE_SIZE = 30;
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
@@ -70,6 +73,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   const [egressIps, setEgressIps] = useState<EgressIpDto[]>([]);
   // Фильтр по адресу — клик по адресу во вкладке «Адреса отправки».
   const [egressFilter, setEgressFilter] = useState<string | null>(initialEgressIp);
+  // Сортировка по столбцу (по всему списку, считает сервер): клик — по возрастанию,
+  // ещё клик — по убыванию, третий — обратно по ящику.
+  const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
 
   const load = useCallback(async (targetPage: number) => {
     try {
@@ -79,6 +85,8 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
         tagIds: tagFilterKey ? tagFilterKey.split(',') : undefined,
         noTag: noTagFilter || undefined,
         egressIp: egressFilter ?? undefined,
+        sort: sort?.key,
+        dir: sort?.direction,
       });
       setMailboxes(rows);
       setTotal(count);
@@ -91,7 +99,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     } finally {
       setLoading(false);
     }
-  }, [appliedSearch, tagFilterKey, noTagFilter, egressFilter]);
+  }, [appliedSearch, tagFilterKey, noTagFilter, egressFilter, sort]);
 
   const loadTags = useCallback(async () => {
     try {
@@ -212,6 +220,14 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     setSelection({ page: 1, ids: new Set() });
   };
 
+  const onSort = (key: string) => {
+    setSort((cur) => {
+      if (!cur || cur.key !== key) return { key, direction: 'asc' };
+      return cur.direction === 'asc' ? { key, direction: 'desc' } : null;
+    });
+    resetToFirstPage();
+  };
+
   const onSearchChange = (value: string) => {
     setSearch(value);
     if (searchTimer.current) window.clearTimeout(searchTimer.current);
@@ -296,6 +312,32 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     }
   };
 
+  // Лимиты на выборку: поля в панели действий, пустое поле не меняется.
+  const [bulkNew, setBulkNew] = useState('');
+  const [bulkTotal, setBulkTotal] = useState('');
+  const applyLimits = async () => {
+    const ids = [...selected];
+    const dailyCampaignLimit = bulkNew.trim() ? Number(bulkNew) : undefined;
+    const dailyTotalLimit = bulkTotal.trim() ? Number(bulkTotal) : undefined;
+    if (!ids.length || (dailyCampaignLimit === undefined && dailyTotalLimit === undefined)) return;
+    if ([dailyCampaignLimit, dailyTotalLimit].some((v) => v !== undefined && !(v >= 1 && v <= 500))) {
+      setError('Лимит — число от 1 до 500');
+      return;
+    }
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await bulkMailboxLimits(ids, { dailyCampaignLimit, dailyTotalLimit });
+      setBulkNew('');
+      setBulkTotal('');
+      await load(page);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось задать лимиты');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const runBulk = async (action: BulkMailboxAction) => {
     const ids = [...selected];
     if (!ids.length) return;
@@ -324,12 +366,12 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
         />
       ) : null}
 
-      {notice ? <p className="text-center text-sm text-emerald-600">{notice}</p> : null}
-      {error ? <p className="text-center text-sm text-red-600">{error}</p> : null}
+      {notice ? <p className="text-sm text-emerald-600">{notice}</p> : null}
+      {error ? <p className="text-sm text-red-600">{error}</p> : null}
 
       {/* Поиск, фильтр тегов и «Добавить почты» — над списком: это про список,
           и нужны до того, как в нём начнёшь что-то искать глазами. */}
-      <div className="flex flex-wrap items-center justify-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-full max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
           <input
@@ -415,6 +457,35 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
             </button>
             <TagAssignMenu tags={tags} disabled={bulkBusy} onPick={(tagId) => void assignTag(tagId)} />
             <EgressMoveMenu ips={egressIps} disabled={bulkBusy} onPick={(ip) => void moveToEgress(ip)} />
+            <div className="flex items-center gap-1" title="Новых / всего писем в день на каждый выбранный ящик">
+              <input
+                type="number"
+                min={1}
+                max={500}
+                placeholder="новых"
+                value={bulkNew}
+                onChange={(e) => setBulkNew(e.target.value)}
+                className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-900"
+              />
+              <span className="text-zinc-400">/</span>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                placeholder="всего"
+                value={bulkTotal}
+                onChange={(e) => setBulkTotal(e.target.value)}
+                className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-900"
+              />
+              <button
+                type="button"
+                disabled={bulkBusy || (!bulkNew.trim() && !bulkTotal.trim())}
+                onClick={() => void applyLimits()}
+                className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              >
+                Задать лимиты
+              </button>
+            </div>
             <button
               type="button"
               disabled={bulkBusy}
@@ -492,14 +563,21 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                       className="h-4 w-4 cursor-pointer rounded border-zinc-300"
                     />
                   </th>
-                  <th className="px-3 py-2 font-medium">Ящик</th>
-                  <th className="px-3 py-2 font-medium">Провайдер</th>
+                  <SortableTh label="Ящик" sortKey="email" sort={sort} onSort={onSort} />
+                  <SortableTh label="Провайдер" sortKey="provider" sort={sort} onSort={onSort} />
                   <th className="px-3 py-2 font-medium">Тег</th>
-                  <th className="px-3 py-2 font-medium">Адрес отправки</th>
-                  <th className="px-3 py-2 font-medium">В рассылке</th>
-                  <th className="px-3 py-2 font-medium">Статус</th>
-                  <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">Новых / всего в день</th>
-                  <th className="px-5 py-2" />
+                  <SortableTh label="Адрес отправки" sortKey="egress" sort={sort} onSort={onSort} />
+                  <SortableTh label="Статус" sortKey="status" sort={sort} onSort={onSort} />
+                  <SortableTh label="Здоровье" sortKey="health" sort={sort} onSort={onSort} />
+                  <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">
+                    <span className="inline-flex items-center gap-1">
+                      <SortableTh label="Новых" sortKey="new" sort={sort} onSort={onSort} inline />
+                      <span className="text-zinc-300">/</span>
+                      <SortableTh label="всего" sortKey="total" sort={sort} onSort={onSort} inline />
+                      <span>в день</span>
+                    </span>
+                  </th>
+                  <th className="px-5 py-2 text-right font-medium">Действия</th>
                 </tr>
               </thead>
               <tbody>
@@ -521,6 +599,8 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         />
                       </td>
                       <td className="px-3 py-2.5">
+                        {/* Колонка уже на ~30%: длинные пометки переносятся, а не растягивают таблицу. */}
+                        <div className="max-w-[390px]">
                         <div className="font-medium text-zinc-900">{mailbox.email}</div>
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
@@ -548,6 +628,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                                 : 'Проверка отправки идёт…'}
                           </button>
                         ) : null}
+                        </div>
                       </td>
                       <td className="px-3 py-2.5 text-zinc-600">
                         <div>{providerLabel(mailbox.provider)}</div>
@@ -573,21 +654,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                           </span>
                         )}
                       </td>
-                      {/* Галочка прямо в строке: выбирать ящики по одному
-                          удобнее здесь, а пачкой — панелью над таблицей. */}
-                      <td className="px-3 py-2.5">
-                        <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-zinc-600">
-                          <input
-                            type="checkbox"
-                            checked={mailbox.enabled}
-                            onChange={() =>
-                              void act(mailbox.id, { action: mailbox.enabled ? 'disable' : 'enable' })
-                            }
-                            className="h-4 w-4 cursor-pointer rounded border-zinc-300"
-                          />
-                          Шлём
-                        </label>
-                      </td>
                       <td className="px-3 py-2.5">
                         {/* Заблокирован или пропал в Google — это главное о
                             ящике: синк сам снял его с рассылки, и статус входа
@@ -603,8 +669,16 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             {status.text}
                           </span>
                         ) : (
-                          <span className="text-xs text-zinc-400">—</span>
+                          <span
+                            className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-500"
+                            title="Ящик не в рассылке: письма с него не уходят"
+                          >
+                            Отключён
+                          </span>
                         )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <HealthBadge health={mailbox.health} />
                       </td>
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-1">
@@ -613,6 +687,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             min={1}
                             max={500}
                             title="Новых (первых) писем в день"
+                            // key по значению: поле с defaultValue само не обновляется после
+                            // массовой правки лимитов — без этого показывало старое число.
+                            key={`new-${mailbox.id}-${mailbox.daily_campaign_limit}`}
                             defaultValue={mailbox.daily_campaign_limit}
                             onBlur={(e) => {
                               const next = Number(e.target.value);
@@ -628,6 +705,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             min={1}
                             max={500}
                             title="Всего писем в день вместе с напоминаниями"
+                            key={`total-${mailbox.id}-${mailbox.daily_total_limit}`}
                             defaultValue={mailbox.daily_total_limit}
                             onBlur={(e) => {
                               const next = Number(e.target.value);
@@ -638,35 +716,36 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                             className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
                           />
                         </div>
-                      </td>
-                      <td className="px-5 py-2.5">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void act(mailbox.id, { action: 'recheck' })}
-                            title="Проверить вход по SMTP/IMAP"
-                            className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100"
-                          >
-                            Проверить
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void runProbe(mailbox)}
-                            disabled={probeBusy === mailbox.id}
-                            title="Отправить проверочное письмо на контрольный адрес и сравнить заголовки доставленного"
-                            className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100 disabled:opacity-50"
-                          >
-                            {probeBusy === mailbox.id ? '…' : 'Отправка'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void remove(mailbox)}
-                            aria-label="Убрать ящик"
-                            className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 hover:text-red-600"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                        <div
+                          className="mt-1 text-[11px] text-zinc-500"
+                          title="Сегодня ушло: новых писем из лимита «новых» и всего писем из лимита «всего» (день по UTC)"
+                        >
+                          сегодня:{' '}
+                          <span className={(mailbox.sent_today?.first ?? 0) >= mailbox.daily_campaign_limit ? 'font-medium text-amber-600' : ''}>
+                            {mailbox.sent_today?.first ?? 0} / {mailbox.daily_campaign_limit}
+                          </span>
+                          {' – '}
+                          <span className={(mailbox.sent_today?.total ?? 0) >= mailbox.daily_total_limit ? 'font-medium text-amber-600' : ''}>
+                            {mailbox.sent_today?.total ?? 0} / {mailbox.daily_total_limit}
+                          </span>
                         </div>
+                      </td>
+                      <td className="px-5 py-2.5 text-right">
+                        <RowActionsMenu
+                          items={[
+                            { label: 'Проверить вход', title: 'Проверить вход по SMTP/IMAP', onClick: () => void act(mailbox.id, { action: 'recheck' }) },
+                            {
+                              label: probeBusy === mailbox.id ? 'Проверка отправки…' : 'Проверка отправки',
+                              title: 'Отправить проверочное письмо на контрольный адрес и сравнить заголовки доставленного',
+                              disabled: probeBusy === mailbox.id,
+                              onClick: () => void runProbe(mailbox),
+                            },
+                            mailbox.enabled
+                              ? { label: 'Не использовать', title: 'Снять ящик с рассылки', onClick: () => void act(mailbox.id, { action: 'disable' }) }
+                              : { label: 'Использовать', title: 'Вернуть ящик в рассылку', onClick: () => void act(mailbox.id, { action: 'enable' }) },
+                            { label: 'Удалить', danger: true, onClick: () => void remove(mailbox) },
+                          ]}
+                        />
                       </td>
                     </tr>
                   );
@@ -768,6 +847,27 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
  * открытое поле в каждой строке ловило случайные клики и выглядело как форма.
  * Enter или клик мимо — сохранить, Esc — отменить.
  */
+/** Оценка здоровья: зелёная от 85, жёлтая 60–84, красная ниже; «—» — данных мало. */
+function HealthBadge({ health }: { health: { score: number | null; sent: number; bounced: number; failed: number } | null }) {
+  if (!health || health.score === null) {
+    return (
+      <span className="text-xs text-zinc-400" title={health ? `За 14 дней отправлено ${health.sent} — для оценки нужно хотя бы 20` : 'Нет данных'}>
+        —
+      </span>
+    );
+  }
+  const tone =
+    health.score >= 85 ? 'bg-emerald-50 text-emerald-700' : health.score >= 60 ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700';
+  return (
+    <span
+      className={`rounded-md px-2 py-0.5 text-xs font-medium tabular-nums ${tone}`}
+      title={`За 14 дней: отправлено ${health.sent}, отбоев ${health.bounced}, ошибок отправки ${health.failed}`}
+    >
+      {health.score}%
+    </span>
+  );
+}
+
 function SenderNameField({ value, onSave }: { value: string; onSave: (next: string) => Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);

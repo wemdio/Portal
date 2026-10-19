@@ -36,7 +36,9 @@ export function LeadVerdictBar({ recipientId, onChange }: { recipientId: string;
     };
   }, [recipientId]);
 
-  if (!data) return null;
+  // Пока метка грузится — пустая полоса той же высоты: иначе она появляется
+  // позже переписки и сталкивает письма вниз.
+  if (!data) return <div aria-hidden className="mb-4 h-[46px] rounded-lg border border-zinc-200 bg-zinc-50" />;
 
   const mark = async (verdict: LeadVerdict) => {
     setBusy(true);

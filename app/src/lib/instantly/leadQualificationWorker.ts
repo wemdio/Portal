@@ -49,6 +49,7 @@ import { senderDisplayLeadName } from './leadReplyContacts';
 import { resolveEffectiveReplyOwner, resolveOriginalCompanyContactEmail } from './replyOwnershipResolver';
 import { resolveSentHandoffClientEcho } from './clientEchoOwner';
 import { resolveInstantlyAccountId } from './accounts';
+import { enqueueOutreachOsReplyLead, OUTREACHOS_CLIENT_USER_ID } from '@/lib/outreachOsLeads/process';
 import { randomUUID } from 'node:crypto';
 import { qualificationAutomationPolicy, replyAutomationExpired } from './qualificationAutomationPolicy';
 import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
@@ -3661,6 +3662,24 @@ export async function notifyClientOfReply(
       }
       for (const a of (access ?? []) as { client_user_id: string | null }[]) {
         if (a.client_user_id) clientUserIds.add(a.client_user_id);
+      }
+    }
+
+    // Кабинет OutreachOS — наш: его лиды, кроме бота кабинета, уходят в General
+    // и в нашу AMO (lib/outreachOsLeads, с 16.10.2026). Сбой здесь DM не трогает.
+    if (data.isLead && data.qualificationId && supabaseMain && clientUserIds.has(OUTREACHOS_CLIENT_USER_ID)) {
+      try {
+        await enqueueOutreachOsReplyLead(supabaseMain, {
+          qualificationId: data.qualificationId,
+          campaignName: data.campaignName,
+          leadEmail: data.leadEmail,
+          leadName: data.leadName,
+          companyName: data.companyName,
+          replySubject: data.replySubject,
+          replyBody: data.replyBody,
+        });
+      } catch (error) {
+        workerLog('warn', `OutreachOS lead enqueue failed (campaign ${campaignId})`, error);
       }
     }
 

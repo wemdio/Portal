@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Subsequence, Campaign, PaginatedResponse } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 export default function SubsequencesPage() {
   const [subsequences, setSubsequences] = useState<Subsequence[]>([]);
@@ -74,7 +75,7 @@ export default function SubsequencesPage() {
       {error && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
 
       {loading ? (
-        <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-400" /></div>
+        <div className="flex items-center justify-center py-20"><PortalSpinner /></div>
       ) : subsequences.length === 0 ? (
         <div className="rounded-xl border border-zinc-200 bg-white py-16 text-center">
           <GitBranch className="mx-auto h-8 w-8 text-zinc-300" />

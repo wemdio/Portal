@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { ChevronDown } from 'lucide-react';
 
 import { describeProxy, healthToneClass } from '@/lib/tgOutreach/accountHealth';
+import { proxyCountryLabel } from '@/lib/tgOutreach/proxyCountry';
 import {
   groupProxiesForPicker,
   flattenPickerGroups,
@@ -61,6 +62,7 @@ export function ProxyPicker<T extends PickerProxy>({
   emptyLabel = 'Без прокси',
   ariaLabel = 'Прокси',
   className = '',
+  preferCountries = [],
 }: {
   /** id выбранного прокси; пустая строка — «Без прокси». */
   value: string;
@@ -76,6 +78,8 @@ export function ProxyPicker<T extends PickerProxy>({
   emptyLabel?: string;
   ariaLabel?: string;
   className?: string;
+  /** Страны выбранных аккаунтов (ISO): их прокси встают наверх списка. */
+  preferCountries?: string[];
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -83,7 +87,7 @@ export function ProxyPicker<T extends PickerProxy>({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
 
-  const groups = useMemo(() => groupProxiesForPicker(proxies, now), [proxies, now]);
+  const groups = useMemo(() => groupProxiesForPicker(proxies, now, preferCountries), [proxies, now, preferCountries]);
   /** Пункт «Без прокси» идёт первым и в клавиатурном обходе тоже — индекс 0. */
   const flat = useMemo(() => flattenPickerGroups(groups), [groups]);
   const selected = useMemo(() => proxies.find((p) => p.id === value) ?? null, [proxies, value]);
@@ -184,7 +188,12 @@ export function ProxyPicker<T extends PickerProxy>({
         className={`flex w-full items-center gap-1.5 rounded border border-gray-200 bg-white px-1.5 py-0.5 text-left text-xs transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer ${className}`}
       >
         <span className="min-w-0 flex-1 truncate">
-          {selected ? (selected.name || selected.url) : <span className="text-gray-400">{emptyLabel}</span>}
+          {selected ? (
+            <>
+              {selected.name || selected.url}
+              {proxyCountryLabel(selected.country_code) ? <span className="ml-1.5 text-gray-400">· {proxyCountryLabel(selected.country_code)}</span> : null}
+            </>
+          ) : <span className="text-gray-400">{emptyLabel}</span>}
         </span>
         {selectedMark && (
           <span className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${healthToneClass(selectedMark.tone)}`}>
@@ -195,6 +204,9 @@ export function ProxyPicker<T extends PickerProxy>({
       </button>
 
       {open && box && createPortal(
+        // portal-shell: тёмная тема портала действует только внутри этой оболочки,
+        // а окно вынесено в body — без неё оно белое. contents не влияет на раскладку.
+        <div className="portal-shell" style={{ display: 'contents' }}>
         <div
           ref={popupRef}
           role="listbox"
@@ -253,6 +265,10 @@ export function ProxyPicker<T extends PickerProxy>({
                     {/* Приглушаем только неработающие: список ими не
                         заканчивается, но и предлагать их наравне с живыми
                         нечестно. */}
+                    {/* Страна — первой и всегда: по одному имени «mobpool…:10628» прокси не отличить. */}
+                    <span className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${proxy.country_code ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-400'}`}>
+                      {proxyCountryLabel(proxy.country_code) ?? 'страна ?'}
+                    </span>
                     <span className={`min-w-0 flex-1 truncate ${mark.tone === 'bad' ? 'text-gray-400' : 'text-gray-700'} ${proxy.id === value ? 'font-semibold' : ''}`}>
                       {proxy.name || proxy.url}
                     </span>
@@ -264,6 +280,7 @@ export function ProxyPicker<T extends PickerProxy>({
               })}
             </div>
           ))}
+        </div>
         </div>,
         document.body,
       )}

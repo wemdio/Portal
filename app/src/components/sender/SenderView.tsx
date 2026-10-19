@@ -5,26 +5,14 @@ import { useSearchParams } from 'next/navigation';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
 import { EgressTab } from './EgressTab';
+import { SENDER_TABS, SenderRail, type SenderTabId } from './SenderRail';
 import { SeedBoxesTab } from './SeedBoxesTab';
 import { StatsTab } from './StatsTab';
 import { StoplistTab } from './StoplistTab';
 import { ThreadsTab } from './ThreadsTab';
 
-// «Письма» — переписка после отправки: воркер читает входящие по IMAP, сводит
-// их с получателями кампаний и обрывает цепочку ответившим. Ответы лиду
-// пишутся прямо там же (задача 4.1); разбор входящих остаётся в инструменте
-// «Персонализированные ответы».
-const TABS = [
-  { id: 'campaigns', label: 'Кампании' },
-  { id: 'mailboxes', label: 'Ящики' },
-  { id: 'threads', label: 'Письма' },
-  { id: 'stats', label: 'Статистика' },
-  { id: 'seeds', label: 'Контрольные ящики' },
-  { id: 'stoplist', label: 'Стоп-лист' },
-  { id: 'egress', label: 'Адреса отправки' },
-] as const;
-
-type TabId = (typeof TABS)[number]['id'];
+const TABS = SENDER_TABS;
+type TabId = SenderTabId;
 
 /**
  * Вкладка из адреса: ?tab=mailboxes. Без вкладки открываются «Кампании»;
@@ -32,7 +20,7 @@ type TabId = (typeof TABS)[number]['id'];
  */
 function initialTab(tab: string | null, threadId: string | null): TabId {
   const known = TABS.find((item) => item.id === tab);
-  if (known) return known.id;
+  if (known) return known.id as TabId;
   return threadId ? 'threads' : 'campaigns';
 }
 
@@ -61,36 +49,26 @@ export function SenderView() {
   // открывается сразу с ней.
   const [statsCampaignId, setStatsCampaignId] = useState<string | null>(null);
 
+  const activeTab = TABS.find((item) => item.id === tab) ?? TABS[0];
+
   return (
     // «Письма» — три колонки, как «Персонализированные ответы»: им нужна вся ширина.
-    <div className={`mx-auto px-6 py-8 ${tab === 'threads' ? 'max-w-none' : 'max-w-6xl'}`}>
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold text-zinc-900">Рассылка</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Своя отправка писем с подключённых ящиков провайдера.
-        </p>
-      </div>
+    // Разделы — колонка значков у левого края окна, как в Instantly (15.10.2026).
+    <div className="lg:pl-14">
+    <SenderRail
+      active={tab}
+      onSelect={(next) => {
+        setTab(next);
+        setFocusCampaignId(null);
+        setEgressIp(null);
+        setStatsCampaignId(null);
+      }}
+    />
 
-      <div className="mb-6 flex gap-2 border-b border-zinc-200">
-        {TABS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => {
-              setTab(item.id);
-              setFocusCampaignId(null);
-              setEgressIp(null);
-              setStatsCampaignId(null);
-            }}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
-              tab === item.id
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-zinc-500 hover:text-zinc-700'
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
+    <div className={`mx-auto px-6 pb-8 pt-3 ${tab === 'threads' ? 'max-w-none' : 'max-w-7xl'}`}>
+      <div className="mb-3">
+        <h1 className="text-xl font-semibold text-zinc-900">{activeTab.label}</h1>
+        <p className="mt-0.5 text-sm text-zinc-500">{activeTab.hint}</p>
       </div>
 
       {tab === 'mailboxes' ? <MailboxesTab initialEgressIp={egressIp} /> : null}
@@ -116,6 +94,7 @@ export function SenderView() {
           }}
         />
       ) : null}
+    </div>
     </div>
   );
 }

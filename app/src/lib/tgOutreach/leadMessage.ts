@@ -28,12 +28,17 @@ export interface LeadMessageInput {
   sourceChat?: string | null;
   messages: Array<{ role?: string; content?: string; timestamp?: string }>;
   tzOffsetHours?: number;
+  /** Пометка менеджеру над перепиской, например «без полной квалификации». */
+  note?: string | null;
 }
 
 const HEADER: Record<ForwardKind, string> = {
-  lead: 'Лид',
+  lead: 'Лид из Telegram-аутрича',
   partner: 'Кандидат в партнёры',
 };
+
+/** Инструмент, где ведётся переписка: менеджер открывает его по ссылке из карточки. */
+export const TG_OUTREACH_TOOL_URL = 'https://polza-portal.ru/tools/tg-outreach';
 
 /** Предел одного сообщения Telegram. */
 export const TELEGRAM_MESSAGE_LIMIT = 4096;
@@ -65,10 +70,11 @@ export function buildLeadMessage(input: LeadMessageInput): string {
   lines.push('');
   lines.push(`Никнейм: ${nick(input.username, input.tgUserId)}`);
   lines.push(`Оффер: ${input.baseName?.trim() || '—'}`);
-  // Чат, из которого спарсили контакт. Он известен не у всех баз, а строка
-  // «Источник: —» менеджеру ничего не сообщает — тогда её просто нет.
-  const source = input.sourceChat?.trim();
-  if (source) lines.push(`Источник: ${source}`);
+  lines.push(`Инструмент: ${TG_OUTREACH_TOOL_URL}`);
+  if (input.note) {
+    lines.push('');
+    lines.push(input.note);
+  }
   lines.push('');
   lines.push('── Переписка ──');
 

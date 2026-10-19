@@ -12,12 +12,6 @@ export const dynamic = 'force-dynamic';
  * рассылки другого. Постраничности нет: кампаний — сотни, не тысячи.
  */
 const LIST_LIMIT = 200;
-/**
- * Кампаний, чья статистика считается одновременно. У каждой — семь запросов
- * счётчиков, и 200 кампаний разом — это 1400 запросов в пул PostgREST на
- * 30 соединений.
- */
-const STATS_CHUNK = 20;
 /** Кампаний на один запрос пулов: id уезжают в адрес запроса. */
 const POOL_CHUNK = 50;
 
@@ -37,48 +31,53 @@ interface CreateBody {
   draft?: boolean;
 }
 
-async function campaignStats(campaignId: string) {
-  if (!supabaseAdmin) return null;
-  const db = supabaseAdmin;
+type StatsRow = {
+  campaign_id: string;
+  recipients: number; replied: number; bounced: number; reached: number;
+  finished: number; unsubscribed: number; in_progress: number; not_contacted: number;
+  sent: number; scheduled: number; failed: number; sent_today: number; new_today: number;
+  step_count: number; remaining: number;
+};
 
-  const recipientsQuery = (filter?: { column?: string; value?: unknown; gtColumn?: string; gtValue?: number }) => {
-    let q = db.from('sender_recipients').select('id', { count: 'exact', head: true }).eq('campaign_id', campaignId);
-    if (filter?.column) q = q.eq(filter.column, filter.value);
-    if (filter?.gtColumn) q = q.gt(filter.gtColumn, filter.gtValue);
-    return q;
-  };
-  const messagesQuery = (status: string) =>
-    db
-      .from('sender_messages')
-      .select('id', { count: 'exact', head: true })
-      .eq('campaign_id', campaignId)
-      .eq('status', status);
+/**
+ * Статистика всех кампаний одним вызовом sender_campaign_stats_all: раньше
+ * здесь было ~16 запросов счётчиков на кампанию, и список грузился секундами.
+ * «Сегодня» считается в поясе кампании — у EN по Нью-Йорку.
+ */
+async function statsByCampaign() {
+  const out = new Map<string, ReturnType<typeof toStats>>();
+  if (!supabaseAdmin) return out;
+  const { data, error } = await supabaseAdmin.rpc('sender_campaign_stats_all');
+  if (error) throw new Error(error.message);
+  for (const row of (data ?? []) as StatsRow[]) out.set(String(row.campaign_id), toStats(row));
+  return out;
+}
 
-  const [recipients, replied, bounced, reached, sent, scheduled, failed] = await Promise.all([
-    recipientsQuery(),
-    recipientsQuery({ column: 'status', value: 'replied' }),
-    recipientsQuery({ column: 'status', value: 'bounced' }),
-    // Знаменатель reply rate — те, кому реально ушло хотя бы одно письмо.
-    // Счётчик «отправлено» для этого не годится: он считает строки писем,
-    // то есть каждый шаг цепочки, и процент вышел бы заниженным в разы.
-    recipientsQuery({ gtColumn: 'last_step_sent', gtValue: 0 }),
-    messagesQuery('sent'),
-    messagesQuery('scheduled'),
-    messagesQuery('failed'),
-  ]);
-
-  const reachedCount = reached.count ?? 0;
+function toStats(row: StatsRow) {
+  const n = (v: unknown) => Number(v) || 0;
+  const reached = n(row.reached);
+  const replied = n(row.replied);
+  const bounced = n(row.bounced);
+  const sent = n(row.sent);
   return {
-    recipients: recipients.count ?? 0,
-    replied: replied.count ?? 0,
-    bounced: bounced.count ?? 0,
-    reached: reachedCount,
+    recipients: n(row.recipients),
+    replied,
+    bounced,
+    reached,
     // Проценты не считаем здесь при нуле знаменателя — UI покажет «—».
-    replyRate: reachedCount > 0 ? Math.round(((replied.count ?? 0) / reachedCount) * 1000) / 10 : null,
-    bounceRate: reachedCount > 0 ? Math.round(((bounced.count ?? 0) / reachedCount) * 1000) / 10 : null,
-    sent: sent.count ?? 0,
-    scheduled: scheduled.count ?? 0,
-    failed: failed.count ?? 0,
+    replyRate: reached > 0 ? Math.round((replied / reached) * 1000) / 10 : null,
+    bounceRate: reached > 0 ? Math.round((bounced / reached) * 1000) / 10 : null,
+    sent,
+    scheduled: n(row.scheduled),
+    failed: n(row.failed),
+    sentToday: n(row.sent_today),
+    finished: n(row.finished),
+    unsubscribed: n(row.unsubscribed),
+    inProgress: n(row.in_progress),
+    notContacted: n(row.not_contacted),
+    newToday: n(row.new_today),
+    // Ушедшие плюс те, что осталось отправить активным, — для «прогресса по письмам».
+    lettersTotal: n(row.step_count) > 0 ? sent + n(row.remaining) : null,
   };
 }
 
@@ -137,19 +136,15 @@ export async function GET(req: NextRequest) {
     if (error) return jsonError(error.message, 500);
 
     const rows = (data ?? []).slice(0, LIST_LIMIT);
-    const pool = await mailboxesByCampaign(rows.map((c) => String(c.id)));
-    const campaigns: Record<string, unknown>[] = [];
-    for (let i = 0; i < rows.length; i += STATS_CHUNK) {
-      campaigns.push(
-        ...(await Promise.all(
-          rows.slice(i, i + STATS_CHUNK).map(async (campaign) => ({
-            ...campaign,
-            mailboxes: pool.get(String(campaign.id)) ?? [],
-            stats: await campaignStats(String(campaign.id)),
-          })),
-        )),
-      );
-    }
+    const [pool, stats] = await Promise.all([
+      mailboxesByCampaign(rows.map((c) => String(c.id))),
+      statsByCampaign(),
+    ]);
+    const campaigns = rows.map((campaign) => ({
+      ...campaign,
+      mailboxes: pool.get(String(campaign.id)) ?? [],
+      stats: stats.get(String(campaign.id)) ?? null,
+    }));
 
     return NextResponse.json({ campaigns, truncated: (data ?? []).length > LIST_LIMIT });
   });

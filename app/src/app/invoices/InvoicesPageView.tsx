@@ -1,5 +1,6 @@
 'use client';
 
+import { PortalSpinner } from '@/components/PortalSpinner';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { authFetch, authFetchJson } from '@/lib/authFetch';
 import { normalizeTariffType, TARIFF_LAUNCH } from '@/lib/tariffPricing';
@@ -861,7 +862,7 @@ export default function InvoicesPageView() {
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div>
       ) : loading && invoices.length === 0 ? (
         <div className="flex justify-center py-12">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-300" />
+          <PortalSpinner />
         </div>
       ) : invoices.length === 0 ? (
         <div className="rounded-xl border border-zinc-200 bg-white px-6 py-12 text-center">

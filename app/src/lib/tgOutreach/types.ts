@@ -90,6 +90,7 @@ export type JobAction =
   | 'stop'
   | 'restart'
   | 'refetch_messages'
+  | 'delete_messages'
   | 'warmup_start'
   | 'warmup_stop';
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
@@ -115,6 +116,13 @@ export interface OpenAISettings {
    * обходится общей проверкой интереса. Включено у АИ МОП с 08.10.2026.
    */
   handoff_direct_request_only?: boolean;
+  /**
+   * Передавать лида только после ответов на контрольные вопросы
+   * (`qualification_questions`, по одному в строке). Не ответил на все после
+   * одного напоминания — передаём с пометкой «без полной квалификации».
+   */
+  qualification_required?: boolean;
+  qualification_questions?: string;
   /**
    * Убрано с экрана 09.09.2026. Пусто (дефолт) — отрицательный триггер только
    * помечает диалог, никуда не пересылает. Ключ оставлен, чтобы не переписывать
@@ -284,6 +292,11 @@ export interface OutreachProxy {
    * введения списков.
    */
   proxy_list_id?: string | null;
+  /** Страна выхода прокси (ISO) по последней проверке с определением страны. */
+  country_code?: string | null;
+  /** Итог последней проверки: ok | proxy_dead | proxy_rejected | telegram_unreachable | … */
+  check_status?: string | null;
+  checked_at?: string | null;
   /**
    * Здоровье прокси (миграция 20260603_0001). Ручка отдаёт строку целиком, и
    * экран этими полями уже пользуется — колонка «Здоровье прокси» и выбор
@@ -339,6 +352,8 @@ export interface OutreachProxyListStats {
 export interface OutreachAccount {
   id: string;
   campaign_id: string;
+  /** Telegram Premium: определяется при проверке аккаунта; null — ещё не проверяли. */
+  tg_premium?: boolean | null;
   /**
    * Перенос из другой кампании (миграция 20260921_0004). Заполнено — аккаунт
    * «в гостях»: его можно вернуть домой, но не перенести в третью кампанию.

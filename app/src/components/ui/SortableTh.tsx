@@ -25,6 +25,7 @@ export function SortableTh({
   onSort,
   align = 'left',
   className = '',
+  inline = false,
 }: {
   label: React.ReactNode;
   sortKey: string;
@@ -32,14 +33,15 @@ export function SortableTh({
   onSort: (key: string) => void;
   align?: 'left' | 'right';
   className?: string;
+  /** Только кнопка, без <th>: два сортируемых заголовка в одной ячейке. */
+  inline?: boolean;
 }) {
   const isActive = sort !== null && sort.key === sortKey;
   const direction = isActive ? sort.direction : null;
   const ariaSort: 'ascending' | 'descending' | 'none' =
     direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none';
 
-  return (
-    <th scope="col" aria-sort={ariaSort} className={`select-none px-3 py-2 font-medium ${className}`}>
+  const button = (
       <button
         type="button"
         onClick={() => onSort(sortKey)}
@@ -53,6 +55,11 @@ export function SortableTh({
         {direction === 'desc' && <ArrowDown className="h-3 w-3 shrink-0" aria-hidden />}
         {direction === null && <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-50" aria-hidden />}
       </button>
+  );
+  if (inline) return button;
+  return (
+    <th scope="col" aria-sort={ariaSort} className={`select-none px-3 py-2 font-medium ${className}`}>
+      {button}
     </th>
   );
 }

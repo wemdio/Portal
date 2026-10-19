@@ -89,6 +89,12 @@ export interface CrmDealSpec {
   existingLeadPatch?: (lead: { id: number; name: string }) => Record<string, unknown>;
   /** Доп. колонки строки канала, когда создана новая сделка. */
   createdLeadPatch?: Record<string, unknown>;
+  /**
+   * После того как сделка заведена и переписка записана — только в нашей AMO
+   * (клиентские сделки в наши чаты не попадают). Сбой хука сделку не портит:
+   * она уже в CRM, строка уже `sent`, повтора не будет.
+   */
+  afterDeal?: (deal: { leadId: number; leadUrl: string; existing: boolean }) => Promise<void>;
   /** Кого создаём — в журнал. */
   label: string;
 }
@@ -209,6 +215,14 @@ async function pushOne(db: SupabaseClient, table: string, task: CrmQueueRow, spe
       .update({ status: 'sent', sent_at: new Date().toISOString(), error_message: warning })
       .eq('id', task.id);
     log('info', `CRM: ${existing ? `переписка добавлена в сделку ${leadId}` : `сделка ${leadId} создана`} — ${spec.label}${warning ? ` — ${warning}` : ''}`);
+
+    if (isPolza && spec.afterDeal) {
+      try {
+        await spec.afterDeal({ leadId, leadUrl: `${client.baseUrl}/leads/detail/${leadId}`, existing: Boolean(existing) });
+      } catch (hookErr) {
+        log('warning', `CRM: сделка ${leadId} заведена, но уведомление не ушло — ${spec.label} — ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`);
+      }
+    }
   } catch (err) {
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 500);
     const attempts = task.attempts + 1;

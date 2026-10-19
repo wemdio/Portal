@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError, logWarn } from '@/lib/loggerServer';
-import { sendDemoLeadTelegramAlert } from '@/lib/demoLead/notify';
+import { leadAlertText, sendDemoLeadTelegramAlert, type DemoLeadData } from '@/lib/demoLead/notify';
+import { enqueueOutreachOsRegistration } from '@/lib/outreachOsLeads/process';
 import { CLIENT_LOCALE_COOKIE, normalizeClientLocale } from '@/lib/clientI18n';
 import { TARIFF_LAUNCH } from '@/lib/tariffPricing';
 import { marketFromRequestHeaders } from '@/lib/engMarket';
@@ -348,7 +349,7 @@ export async function POST(req: NextRequest) {
   await logAudit('signup.created', `New client signed up: ${email}`, { userId, email });
 
   // Treat a new registration as a sales lead — best-effort TG ping (never throws).
-  await sendDemoLeadTelegramAlert({
+  const alert: DemoLeadData = {
     name: fullName,
     email,
     phone: phone || null,
@@ -363,7 +364,16 @@ export async function POST(req: NextRequest) {
     signupHost: req.headers.get('host'),
     signupCabinet: eng ? 'eng' : 'ru',
     landingUrl: utm?.landing ?? null,
-  });
+  };
+  await sendDemoLeadTelegramAlert(alert);
+  // Копия в General «Продажи Polza» и сделка в нашей AMO (lib/outreachOsLeads).
+  try {
+    await enqueueOutreachOsRegistration(supabaseAdmin, {
+      source: 'register', email, name: fullName || null, company: company || null, tgHtml: leadAlertText(alert),
+    });
+  } catch (err) {
+    await logWarn('signup.outreachos_lead_enqueue_failed', err instanceof Error ? err.message : String(err), { userId });
+  }
 
   return NextResponse.json({ ok: true, user_id: userId }, { status: 201 });
 }

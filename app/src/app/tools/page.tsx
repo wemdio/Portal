@@ -179,7 +179,7 @@ function ToolLinkCard({
           </div>
           <Icon className="h-8 w-8 shrink-0 text-gray-300" />
         </div>
-        <div className="mt-4 text-sm font-medium text-gray-400">{locale === 'en' ? 'Unavailable' : 'Недоступно'}</div>
+        <div className="mt-auto pt-4 text-sm font-medium text-gray-400">{locale === 'en' ? 'Unavailable' : 'Недоступно'}</div>
       </div>
     );
   }
@@ -216,7 +216,7 @@ function ToolLinkCard({
         </div>
         <Icon className={`h-8 w-8 shrink-0 transition-colors ${iconClass}`} />
       </div>
-      <div className={`mt-4 text-sm font-medium ${linkClass}`}>{locale === 'en' ? 'Open →' : 'Открыть →'}</div>
+      <div className={`mt-auto pt-4 text-sm font-medium ${linkClass}`}>{locale === 'en' ? 'Open →' : 'Открыть →'}</div>
     </Link>
   );
 }

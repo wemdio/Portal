@@ -9,6 +9,7 @@ import {
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import { authFetchJson, getAccessToken } from '@/lib/authFetch';
 import type { Campaign, PaginatedResponse } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 type BriefCampaign = { id: string; campaign_id: string };
 type Brief = {
@@ -394,7 +395,7 @@ export default function BriefsPage() {
 
       {loading ? (
         <div className="flex items-center justify-center py-24">
-          <Loader2 className="h-6 w-6 animate-spin text-zinc-300" />
+          <PortalSpinner />
         </div>
       ) : briefs.length === 0 ? (
         <div className="rounded-2xl border border-zinc-200 bg-white py-20 text-center shadow-sm">

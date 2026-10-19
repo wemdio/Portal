@@ -15,6 +15,7 @@ import { InstantlyInsightsSection } from '@/components/projects/InstantlyInsight
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
 import { buildCampaignPickerEntries } from '@/lib/projects/campaignPicker';
 import { BOARD_COLUMN_LABELS } from '@/lib/leadBoard/boardColumns';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
 const LEAD_SOURCE_OPTIONS = ['Аутрич', 'Телеграм', 'Лидскан', 'ЛинкедИн', 'Перфоманс', 'Органика', 'Партнер'];
@@ -441,7 +442,7 @@ export default function ProjectPage() {
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center">
-        <div className="text-gray-500">Загрузка...</div>
+        <PortalSpinner />
       </div>
     );
   }

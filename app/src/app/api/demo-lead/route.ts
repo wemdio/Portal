@@ -1,7 +1,14 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { sendDemoLeadTelegramAlert, type DemoLeadAgentHints, type DemoLeadPageLang } from '@/lib/demoLead/notify';
+import {
+  leadAlertText,
+  sendDemoLeadTelegramAlert,
+  type DemoLeadAgentHints,
+  type DemoLeadData,
+  type DemoLeadPageLang,
+} from '@/lib/demoLead/notify';
+import { enqueueOutreachOsRegistration } from '@/lib/outreachOsLeads/process';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,7 +52,8 @@ export const dynamic = 'force-dynamic';
  * which are read as name+company/email/message when those are empty. A top-level
  * form navigation gets a 303 back to the page (FORM_RETURN_URL); fetch() and HTTP
  * clients keep getting JSON. Signs that an AI agent sent the lead (agentHints) go to
- * the Telegram alert only; demo_leads does not store them.
+ * the Telegram alert — and so into the General/AMO copy built from leadAlertText —
+ * but demo_leads does not store them.
  */
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -356,7 +364,7 @@ export async function POST(req: NextRequest) {
   // Awaited best-effort (never throws) — serverless can freeze after the response,
   // so don't fire-and-forget the notify.
   const agent = agentHints(req, email);
-  await sendDemoLeadTelegramAlert({
+  const alert: DemoLeadData = {
     name, email, phone: phone || null, telegram: telegram || null,
     company: company || null, message: message || null, source, referrer,
     ...(lang ? { pageLang: lang } : {}),
@@ -369,7 +377,18 @@ export async function POST(req: NextRequest) {
           utmEarlierVisitAt: utm.ts ?? null,
         }
       : {}),
-  });
+  };
+  await sendDemoLeadTelegramAlert(alert);
+  // Копия в General «Продажи Polza» и сделка в нашей AMO (lib/outreachOsLeads).
+  if (supabaseAdmin) {
+    try {
+      await enqueueOutreachOsRegistration(supabaseAdmin, {
+        source: source || 'landing', email, name: name || null, company: company || null, tgHtml: leadAlertText(alert),
+      });
+    } catch (err) {
+      console.error('[demo-lead] OutreachOS lead enqueue failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
 
   if (isFormNavigation(req)) return NextResponse.redirect(FORM_RETURN_URL[lang ?? 'en'], 303);
   return NextResponse.json({ ok: true });

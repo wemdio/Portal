@@ -30,6 +30,7 @@ function isRetryable(status: number): boolean {
  * обращаясь к нам.
  */
 export const OUTREACH_FACTS_RULE = `Жёсткие правила поверх инструкции выше:
+- Отвечай на языке последнего сообщения собеседника: написал по-английски — весь ответ по-английски, даже если инструкция и эти правила на русском.
 - Не выдумывай о нас ничего, чего нет в инструкции: имена и должности сотрудников, телефоны, сроки и время звонка или встречи. Спросят, кто свяжется, — ответь, что напишет коллега из команды, без имени.
 - Не обещай позвонить сам. Номер телефона не давай.
 - Имя, с которым собеседник здоровается («Андрей, здравствуйте»), — это обращение к нам, а не его имя. Называй собеседника только именем, которым он сам представился.
@@ -148,7 +149,7 @@ export async function openaiGenerate(
  * interested: true — интерес есть, false — нет, null — проверка не удалась
  * (тогда всё решает ответ модели, как раньше; причина — в error).
  */
-const INTEREST_MODEL = 'openai/gpt-4o-mini';
+const INTEREST_MODEL = DEFAULT_MODEL;
 const INTEREST_TIMEOUT_MS = 30_000;
 const INTEREST_HISTORY_MESSAGES = 10;
 
@@ -251,6 +252,87 @@ export async function detectInterest(
   return { interested: null, error };
 }
 
+/** Контрольные вопросы кампании: по одному в строке, нумерация в начале не нужна. */
+export function parseQualificationQuestions(raw: string | undefined | null): string[] {
+  return String(raw ?? '')
+    .split(/\r?\n/)
+    .map((q) => q.trim().replace(/^\d+[.)]\s*/, ''))
+    .filter(Boolean);
+}
+
+export interface QualificationCheck {
+  /** Мы уже задавали эти вопросы собеседнику (своими словами тоже считается). */
+  asked: boolean;
+  /** Номера (с 1) вопросов, на которые собеседник по существу не ответил. */
+  missing: number[];
+}
+
+/**
+ * Ответил ли собеседник на контрольные вопросы кампании. null — проверка не
+ * удалась: тогда передачу не блокируем, потерянный лид хуже неполной карточки.
+ */
+export async function checkQualification(
+  chatHistory: DialogMessage[],
+  questions: string[],
+): Promise<QualificationCheck | null> {
+  const apiKey = process.env.OPENROUTER_TG_OUTREACH_API_KEY;
+  if (!apiKey || questions.length === 0) return null;
+
+  const transcript = chatHistory
+    .slice(-INTEREST_HISTORY_MESSAGES)
+    .map(m => `${m.role === 'assistant' ? 'Мы' : 'Собеседник'}: ${m.content}`)
+    .join('\n\n');
+  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+  const system = `Ты проверяешь переписку менеджера по продажам с потенциальным клиентом.
+
+Контрольные вопросы:
+${list}
+
+Определи:
+1. Задавали ли «Мы» собеседнику эти вопросы (хотя бы по смыслу, своими словами).
+2. На какие из них собеседник ответил по существу. «Да», «ок», «интересно», «пришлите кейсы» и отказ отвечать — это НЕ ответ.
+
+Ответь ровно двумя строками:
+ЗАДАНЫ: ДА или НЕТ
+БЕЗ ОТВЕТА: номера вопросов через запятую, или НЕТ если ответил на все`;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 2_000));
+    try {
+      const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: INTEREST_MODEL,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: transcript }],
+          max_tokens: 40,
+          temperature: 0,
+        }),
+        signal: AbortSignal.timeout(INTEREST_TIMEOUT_MS),
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as OpenRouterResponse;
+      const answer = data.choices?.[0]?.message?.content?.trim() ?? '';
+      const askedLine = answer.match(/ЗАДАНЫ:\s*(\S+)/i)?.[1]?.toLowerCase();
+      const missingLine = answer.match(/БЕЗ ОТВЕТА:\s*(.*)/i)?.[1] ?? '';
+      if (!askedLine) continue;
+      const missing = (missingLine.match(/\d+/g) ?? [])
+        .map(Number)
+        .filter((n) => n >= 1 && n <= questions.length);
+      return { asked: askedLine.startsWith('да') || askedLine.startsWith('yes'), missing: [...new Set(missing)] };
+    } catch {
+      // вторая попытка, потом null
+    }
+  }
+  return null;
+}
+
+/** Указание модели: задать только контрольные вопросы, передачу не делать. */
+export function qualificationInstruction(questions: string[], phrase: string | null): string {
+  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+  return `Передавать контакт менеджеру пока рано: собеседник не ответил на контрольные вопросы. Коротко ответь на его реплику (без выдуманных фактов о нас) и задай нумерованным списком ровно эти вопросы, на языке собеседника:\n${list}\nПопроси ответить коротко. ${phrase ? `Фразу «${phrase}» и любые слова о передаче менеджеру не используй.` : 'Слова о передаче менеджеру не используй.'}`;
+}
+
 /** Фраза передачи менеджеру — первая строка положительных триггеров кампании. */
 export function handoffPhrase(settings: OpenAISettings): string | null {
   const first = (settings.trigger_phrases_positive ?? '')
@@ -264,14 +346,73 @@ export function handoffPhrase(settings: OpenAISettings): string | null {
  * Указание модели ответа, когда проверка увидела явный интерес: ответить на
  * просьбу и закончить фразой передачи.
  */
-export function handoffInstruction(phrase: string): string {
-  return `Собеседник проявил явный интерес. Коротко ответь на его просьбу или вопрос (если просил условия — кратко изложи их) и закончи сообщение точной фразой «${phrase}». Фразу не меняй и не перефразируй, после неё ничего не пиши и вопросов не задавай.`;
+export function handoffInstruction(phrase: string, translate = false): string {
+  const ending = translate
+    ? `закончи сообщение фразой «${phrase}», переведённой на язык собеседника (пиши только на его языке, русских слов не оставляй)`
+    : `закончи сообщение точной фразой «${phrase}». Фразу не меняй и не перефразируй`;
+  return `Собеседник проявил явный интерес. Коротко ответь на его просьбу или вопрос (если просил условия — кратко изложи их) и ${ending}, после неё ничего не пиши и вопросов не задавай.`;
+}
+
+/**
+ * Собеседник пишет не по-русски, а фраза передачи русская: 18.10.2026 англоязычному
+ * лиду ушло «Я помощник Polza Agency… Передаю ваш контакт менеджеру».
+ */
+export function needsTranslatedHandoff(phrase: string, history: DialogMessage[]): boolean {
+  if (!/[а-яё]/i.test(phrase)) return false;
+  const lastTheirs = [...history].reverse().find((m) => m.role === 'user');
+  const text = String(lastTheirs?.content ?? '');
+  const latin = (text.match(/[a-z]/gi) ?? []).length;
+  const cyrillic = (text.match(/[а-яё]/gi) ?? []).length;
+  return latin > cyrillic;
 }
 
 /**
  * Модель могла не послушаться — фразу дописываем сами: без неё лид не уйдёт
  * менеджеру, а человек не узнает, что с ним свяжутся.
  */
+/**
+ * В ответе несколько вопросов, ответа на которые ждём: квалификация из трёх
+ * вопросов. Передавать контакт менеджеру в таком сообщении нельзя — человек ещё
+ * не ответил (15.10.2026: «Передаю ваш контакт менеджеру» уходила в одном
+ * сообщении с тремя квалификационными вопросами, лид попадал к менеджеру пустым).
+ */
+export function asksOpenQuestions(reply: string): boolean {
+  return (reply.match(/\?/g)?.length ?? 0) >= 2;
+}
+
+/** Убрать фразу передачи из ответа, который сам задаёт вопросы. */
+export function stripHandoffPhrase(reply: string, phrase: string): string {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return reply
+    .replace(new RegExp(String.raw`\s*[.!…]?\s*${escaped}[^.!?…\n]*[.!…]?`, 'gi'), '')
+    .trim();
+}
+
+/** Календарный день по Москве: «2026-10-16». */
+function moscowDay(iso: string): string | null {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t + 3 * 3600_000).toISOString().slice(0, 10) : null;
+}
+
+/** Приветствие в начале ответа: «Здравствуйте, Михаил.», «Добрый день!», «Привет,». */
+const LEADING_GREETING_RE =
+  /^\s*(?:[Зз]дравствуйте|[Зз]дравствуй|[Дд]обрый\s+(?:день|вечер)|[Дд]оброе\s+утро|[Дд]оброго\s+(?:дня|времени\s+суток)|[Пп]риветствую|[Пп]ривет|[Hh]ello|[Hh]i)(?=[\s,.!])(?:,?\s+\p{Lu}[\p{L}-]{0,30}(?:\s+\p{Lu}[\p{L}-]{0,30})?)?\s*[.!,]?\s+/u;
+
+/**
+ * Второй раз за день не здороваемся (16.10.2026: в 14:34 — «Добрый день!»,
+ * человек ответил в 14:42, а в 14:59 модель снова начала со «Здравствуйте,
+ * Михаил»). Модель дат сообщений не видит, поэтому решает код: если мы уже
+ * писали собеседнику сегодня по Москве, приветствие из начала ответа срезаем.
+ */
+export function stripRepeatGreeting(reply: string, history: DialogMessage[], now: Date = new Date()): string {
+  const today = moscowDay(now.toISOString());
+  const wroteToday = history.some((m) => m.role === 'assistant' && m.timestamp && moscowDay(m.timestamp) === today);
+  if (!wroteToday) return reply;
+  const rest = reply.replace(LEADING_GREETING_RE, '');
+  if (rest === reply || !rest.trim()) return reply;
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
 export function ensureHandoffPhrase(reply: string, phrase: string): string {
   if (reply.toLowerCase().includes(phrase.toLowerCase())) return reply;
   let trimmed = reply.trim();

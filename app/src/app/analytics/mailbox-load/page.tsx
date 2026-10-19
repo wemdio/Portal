@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import OutcomesDashboard from '@/components/mailbox-load/OutcomesDashboard';
+import BouncesBreakdown, { type Breakdown } from '@/components/mailbox-load/BouncesBreakdown';
+import type { MailboxOutcomes } from '@/lib/instantly/mailboxOutcomes';
 import type {
   MailboxLoad, TagLoad, SpecialistLoad, MailboxRow, TagStatus, InactiveTag, InactiveReason,
 } from '@/lib/instantly/mailboxLoad';
@@ -11,6 +13,7 @@ import {
   sortTags, sortSpecialists, nextSort,
   type SortState, type TagSortKey, type SpecialistSortKey,
 } from '@/lib/instantly/mailboxLoadSort';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 // ── визуальные пресеты статусов утилизации ────────────────────────────────────
 // Пороги и статус считает ТОЛЬКО сервер (classify в mailboxLoad.ts) — здесь
@@ -143,10 +146,29 @@ function SummaryTile({ label, value, sub }: { label: string; value: string; sub?
 // смены дня, доезжает после очистки кэша и не должен выдаваться за новый день)
 type DrillState = { loading: boolean; error: boolean; day: string; tag: string | null; mailboxes: MailboxRow[] } | undefined;
 
+/** Побочный блок страницы: сбой возвращается значением, а не исключением. */
+async function loadSide<T>(url: string): Promise<{ data: T | null; error: string | null }> {
+  try {
+    const res = await authFetch(url);
+    const body = (await res.json().catch(() => null)) as { data?: T | null; error?: string; detail?: string } | null;
+    if (!res.ok || !body?.data) {
+      const code = body?.error || `HTTP ${res.status}`;
+      return { data: null, error: body?.detail ? `${code} — ${body.detail}` : code };
+    }
+    return { data: body.data, error: null };
+  } catch (e) {
+    logError('mailbox-load side block failed', e);
+    return { data: null, error: (e as Error).message };
+  }
+}
+
 export default function MailboxLoadPage() {
   const [data, setData] = useState<MailboxLoad | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Исходы и отбои грузятся вместе с таблицей и показываются с ней одновременно.
+  const [outcomes, setOutcomes] = useState<{ data: MailboxOutcomes | null; error: string | null }>({ data: null, error: null });
+  const [bounces, setBounces] = useState<{ data: Breakdown | null; error: string | null }>({ data: null, error: null });
   const [day, setDay] = useState<string>(''); // '' = авто (последний полный день)
   const [reloadKey, setReloadKey] = useState(0); // кнопка «Обновить»
   const [view, setView] = useState<'tags' | 'specialists'>('tags');
@@ -172,7 +194,16 @@ export default function MailboxLoadPage() {
     const run = async () => {
       try {
         const qs = day ? `?day=${encodeURIComponent(day)}` : '';
-        const res = await authFetch(`/api/analytics/mailbox-load${qs}`);
+        // Все три запроса уходят сразу: страница отрисовывается целиком, а не
+        // «таблица, потом внизу догружается дашборд». Исходы и отбои не роняют
+        // страницу — у каждого своя ошибка. Каждый сам определяет «последний
+        // полный день», когда день не выбран.
+        const [res, outcomesRes, bouncesRes] = await Promise.all([
+          authFetch(`/api/analytics/mailbox-load${qs}`),
+          loadSide<MailboxOutcomes>(`/api/analytics/mailbox-load/outcomes${qs}`),
+          loadSide<Breakdown>(`/api/analytics/mailbox-load/bounces${qs}`),
+        ]);
+        if (!active) return;
         if (!res.ok) {
           // тело несёт код причины (dataset_not_configured / build_failed /
           // role_check_failed) и, для build_failed, текст самой ошибки. Код без
@@ -187,6 +218,8 @@ export default function MailboxLoadPage() {
         if (!json.data) throw new Error(json.error || 'Нет данных');
         setError(null);
         setData(json.data);
+        setOutcomes(outcomesRes);
+        setBounces(bouncesRes);
         setExpanded(null);
         setExpandedSpec(null);
         setDrill({});
@@ -347,7 +380,7 @@ export default function MailboxLoadPage() {
         ))}
       </div>
 
-      {loading && <div className="py-10 text-center text-sm text-zinc-400">Загрузка…</div>}
+      {loading && <div className="flex justify-center py-10"><PortalSpinner /></div>}
       {error && !loading && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           Ошибка загрузки: {error}
@@ -475,12 +508,14 @@ export default function MailboxLoadPage() {
         </ul>
       )}
 
-      {/* Исходы отправок — внизу страницы и своим запросом: таблица ящиков не
-          ждёт тяжёлых запросов к письмам, а их сбой не роняет страницу. */}
+      {/* Исходы отправок — внизу страницы; грузятся вместе с таблицей, а их сбой
+          не роняет страницу. */}
       {!loading && !error && data?.asOfDay && (
         <div className="border-t border-zinc-200 pt-5">
-          {/* key по дню: смена дня монтирует блок заново, со своей загрузкой */}
-          <OutcomesDashboard key={data.asOfDay} day={data.asOfDay} />
+          <OutcomesDashboard data={outcomes.data} error={outcomes.error} />
+          <div className="mt-5">
+            <BouncesBreakdown data={bounces.data} error={bounces.error} />
+          </div>
         </div>
       )}
     </div>

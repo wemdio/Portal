@@ -112,7 +112,7 @@ function formatRub(amount: number): string {
 
 export function checkCard(
   card: CardData,
-  stated: { amount: number | null; source: string | null },
+  stated: { amount: number | null; source: string | null; addendum?: boolean },
   firstSalesPipelineId: number,
 ): Problem[] {
   if (!card.found) {
@@ -164,10 +164,16 @@ export function checkCard(
     const statedText = stated.amount != null ? `, а в сообщении ${formatRub(stated.amount)}` : '';
     problems.push({ code: 'NO_BUDGET', text: `бюджет 0 ₽${statedText}` });
   } else if (stated.amount != null && Math.abs(card.price - stated.amount) / stated.amount > 0.01) {
-    problems.push({
-      code: 'BUDGET_MISMATCH',
-      text: `бюджет в карточке ${formatRub(card.price)}, а в сообщении ${formatRub(stated.amount)}`,
-    });
+    // Доп. соглашение: в сообщении сумма только нового платежа, а в сделке —
+    // прежние плюс новый, поэтому бюджет карточки закономерно БОЛЬШЕ. Меньше —
+    // по-прежнему ошибка: деньги недосчитаются (16.10.2026, 79k + 120k = 199k).
+    const coversAddendum = Boolean(stated.addendum) && card.price >= stated.amount;
+    if (!coversAddendum) {
+      problems.push({
+        code: 'BUDGET_MISMATCH',
+        text: `бюджет в карточке ${formatRub(card.price)}, а в сообщении ${formatRub(stated.amount)}`,
+      });
+    }
   }
 
   if (!card.responsibleUserId) {

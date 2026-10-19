@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { generateDraftForQualification, GenerateDraftError } from '@/lib/replyPersonalization/generateDraft';
 import { getOpenDraft, setThreadLanguage } from '@/lib/replyPersonalization/db';
+import { parseCcEmails } from '@/lib/replyPersonalization/referredContact';
 import type { ReplyLanguage } from '@/lib/replyPersonalization/types';
 
 export const dynamic = 'force-dynamic';
@@ -13,6 +14,7 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
   const body = (await req.json().catch(() => null)) as {
     projectId?: string;
     recipientEmail?: string | null;
+    ccEmails?: unknown;
     language?: string;
   } | null;
   if (!body?.projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
@@ -29,6 +31,7 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
       user.id,
       recipientEmail,
       language,
+      parseCcEmails(body.ccEmails),
     );
     return NextResponse.json(result);
   } catch (err) {

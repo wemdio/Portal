@@ -21,6 +21,8 @@
  */
 
 import net from 'net';
+import tls from 'tls';
+import dns from 'dns';
 import { probeProxyTcp, parseProxyUrl, type ParsedProxy } from './gramClient';
 import { openHttpConnectTunnel, HttpConnectRejectedError } from './httpProxySocket';
 import { withTimeout } from './withTimeout';
@@ -88,6 +90,10 @@ export interface ProxyCheckResult {
   status: ProxyCheckStatus;
   /** Человеческая причина отказа по-русски; null, когда всё хорошо. */
   reason: string | null;
+  /** Страна выхода прокси (ISO, например UZ); null — не определяли или не вышло. */
+  country_code?: string | null;
+  /** Почему страну определить не вышло (только при detectCountry). */
+  country_error?: string | null;
 }
 
 export interface ProxyCheckInput {
@@ -102,6 +108,8 @@ export interface ProxyCheckOptions {
   /** Куда проверять проходимость. Подменяется в тестах на локальную заглушку. */
   target?: { host: string; port: number };
   concurrency?: number;
+  /** Определить страну выхода: ещё один лёгкий запрос через рабочий прокси. */
+  detectCountry?: boolean;
 }
 
 /** Прокси ответил, но пускать нас отказался (учётка, белый список, ACL). */
@@ -299,6 +307,78 @@ function openTunnel(
   );
 }
 
+/** Сервис определения страны по IP: простой HTTP на порту 80, JSON с кодом страны. */
+/**
+ * Сервисы страны выхода по порядку. У каждого свой путь и формат ответа; все
+ * ходят через сам прокси. Первый, кто ответил кодом страны, побеждает.
+ * 15.10.2026: api.country.is отдаёт корень «/», а не «/json» (404); ipinfo.io
+ * при тысяче проверок с одного адреса сервера ограничивает запросы (429).
+ */
+const GEO_SOURCES: { host: string; path: string; pattern: RegExp }[] = [
+  { host: 'api.country.is', path: '/', pattern: /"country"\s*:\s*"([A-Za-z]{2})"/ },
+  { host: 'ipwho.is', path: '/', pattern: /"country_code"\s*:\s*"([A-Za-z]{2})"/ },
+  { host: 'ipinfo.io', path: '/country', pattern: /\r\n\r\n(?:[0-9a-f]+\r\n)?([A-Za-z]{2})\s*(?:\r\n|$)/ },
+];
+const GEO_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_GEO_TIMEOUT_MS) || 15_000;
+
+/**
+ * Страна, из которой прокси выходит в интернет. Открываем туннель до сервиса
+ * определения страны через сам прокси и читаем один короткий ответ. Адрес
+ * сервиса резолвим у себя в IPv4: SOCKS-рукопожатие выше принимает только
+ * литерал. Ничего не бросает: нет страны — null, на вердикт проверки это не
+ * влияет.
+ */
+async function geoLookup(
+  parsed: ParsedProxy,
+  host: string,
+  path: string,
+  pattern: RegExp,
+): Promise<string | null> {
+  let socket: net.Socket | null = null;
+  try {
+    // HTTPS (443), а не HTTP (80): HTTP-прокси пропускают CONNECT к 443, а к 80 часто нет.
+    const { address } = await dns.promises.lookup(host, { family: 4 });
+    socket = await openTunnel(parsed, { host: address, port: 443 }, GEO_TIMEOUT_MS);
+    const secure = tls.connect({ socket, servername: host });
+    const body = await withTimeout(
+      new Promise<string>((resolve, reject) => {
+        let data = '';
+        secure.on('secureConnect', () => {
+          secure.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: curl/8\r\nAccept: */*\r\nConnection: close\r\n\r\n`);
+        });
+        secure.on('data', (chunk: Buffer) => {
+          data += chunk.toString('utf8');
+          if (data.length > 8192) secure.destroy();
+        });
+        secure.on('end', () => resolve(data));
+        secure.on('close', () => resolve(data));
+        secure.on('error', reject);
+      }),
+      GEO_TIMEOUT_MS,
+      'определение страны прокси',
+    );
+    const match = pattern.exec(body);
+    if (match) return match[1].toUpperCase();
+    throw new Error(`${host}: в ответе нет страны (${body.split('\r\n')[0].slice(0, 40)})`);
+  } finally {
+    socket?.destroy();
+  }
+}
+
+/** Страна выхода: основной сервис, при неудаче запасной; причина — в error. */
+async function detectProxyCountry(parsed: ParsedProxy): Promise<{ code: string | null; error: string | null }> {
+  const errors: string[] = [];
+  for (const { host, path, pattern } of GEO_SOURCES) {
+    try {
+      const code = await geoLookup(parsed, host, path, pattern);
+      if (code) return { code, error: null };
+    } catch (e) {
+      errors.push(`${host}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 120));
+    }
+  }
+  return { code: null, error: errors.join(' · ') };
+}
+
 /**
  * Проверить один прокси. Никогда не бросает: проверка идёт пачкой, и один
  * сломанный прокси не должен обрывать остальные — его беда становится строкой
@@ -356,6 +436,7 @@ export async function checkProxy(
       telegram_latency_ms: latency,
       status: 'ok',
       reason: null,
+      ...(opts.detectCountry ? await detectProxyCountry(parsed).then((g) => ({ country_code: g.code, country_error: g.error })) : {}),
     };
   } catch (e) {
     const latency = Date.now() - startedAt;

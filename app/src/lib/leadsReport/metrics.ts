@@ -339,7 +339,18 @@ export function computeMetricsFromRows(
     // см. `isLostByEnd`. Отсев идёт ДО дедупа лид-магнита намеренно: иначе
     // закрытая заявка могла бы выиграть группу у живой и утащить с собой
     // весь телеграм-аккаунт.
-    if (isLostByEnd(lead, leadEvents, end)) continue;
+    //
+    // Исключение (Дмитрий, 16.10.2026): дошедшая до «Лид квалифицирован» —
+    // точно лид, даже если потом закрыта в минус; такая считается как обычно.
+    const peak = computePeak(lead, leadEvents, thresholds, end);
+    const heldByTask = heldByTaskDeals.has(lead.amo_id);
+    if (
+      isLostByEnd(lead, leadEvents, end)
+      && peak < thresholds.qualifiedSort
+      && !heldByTask
+    ) {
+      continue;
+    }
 
     prepared.push({
       amoId: lead.amo_id,
@@ -348,8 +359,8 @@ export function computeMetricsFromRows(
       channel,
       createdAt: lead.created_at,
       wonByEnd: isWonByEnd(lead, leadEvents, end),
-      peak: computePeak(lead, leadEvents, thresholds, end),
-      heldByTask: heldByTaskDeals.has(lead.amo_id),
+      peak,
+      heldByTask,
     });
   }
 
@@ -447,7 +458,7 @@ export async function computeAllChannelMetrics(
   const eventChunks = await Promise.all(
     chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
       const { data, error } = await db
-        .from('amo_events')
+        .from('amo_status_events_v')
         .select('amo_deal_id, changed_at, from_value, to_value')
         .eq('event_type', 'lead_status_changed')
         .in('amo_deal_id', chunk);

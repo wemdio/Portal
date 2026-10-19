@@ -34,6 +34,10 @@ export interface MailboxDto {
   tag: MailboxTagRef | null;
   /** Последняя проверочная отправка: не переписывает ли провайдер заголовки. */
   probe: MailboxProbeDto | null;
+  /** Наша оценка здоровья за 14 дней; score null — писем слишком мало. */
+  health: { score: number | null; sent: number; bounced: number; failed: number } | null;
+  /** Отправлено сегодня (день по UTC): всего и первых писем. */
+  sent_today?: { total: number; first: number };
 }
 
 /** Сводка пробы в строке ящика; полный разбор — GET /probe. */
@@ -149,6 +153,19 @@ export interface CampaignStatsDto {
   sent: number;
   scheduled: number;
   failed: number;
+  /** Писем ушло с начала сегодняшнего дня по поясу кампании. */
+  sentToday?: number;
+  /** Цепочка дошла до конца без ответа. */
+  finished?: number;
+  unsubscribed?: number;
+  /** Первое письмо ушло, цепочка ещё идёт. */
+  inProgress?: number;
+  /** Ещё ни одного письма. */
+  notContacted?: number;
+  /** Первых писем сегодня — новых контактов, начавших цепочку. */
+  newToday?: number;
+  /** Всего писем к отправке: ушедшие + остаток у тех, чья цепочка ещё идёт. null — шагов нет. */
+  lettersTotal?: number | null;
 }
 
 export interface ImportMailboxesResult {
@@ -286,6 +303,9 @@ export function fetchMailboxes(
     noTag?: boolean;
     /** Только ящики этого адреса отправки; 'none' — ящики без адреса. */
     egressIp?: string;
+    /** Сортировка по столбцу: email | provider | egress | status | health | new | total. */
+    sort?: string;
+    dir?: 'asc' | 'desc';
   } = {},
 ) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
@@ -294,6 +314,10 @@ export function fetchMailboxes(
   if (params.tagIds?.length) query.set('tagIds', params.tagIds.join(','));
   if (params.noTag) query.set('noTag', '1');
   if (params.egressIp) query.set('egressIp', params.egressIp);
+  if (params.sort) {
+    query.set('sort', params.sort);
+    query.set('dir', params.dir ?? 'asc');
+  }
   return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
     `${BASE}/mailboxes?${query.toString()}`,
   );
@@ -386,6 +410,15 @@ export function fetchMailboxProbe(id: string) {
 }
 
 export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete' | 'tag';
+
+/** «Лимиты» на выборку: новых / всего в день; не заданное поле не меняется. */
+export function bulkMailboxLimits(ids: string[], limits: { dailyCampaignLimit?: number; dailyTotalLimit?: number }) {
+  return authFetchJson<{ ok: true; affected: number }>(`${BASE}/mailboxes`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, action: 'limits', ...limits }),
+  });
+}
 
 /**
  * Действие над выборкой одним запросом: двести ящиков — это не двести запросов.

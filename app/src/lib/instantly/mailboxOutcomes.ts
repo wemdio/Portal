@@ -21,9 +21,12 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
  *  - ответы:       `raw_emails` ue_type=2, один ответ на человека за день.
  *                 Повторы автоответчиков (до 12 строк на лида, 20% ue2) иначе
  *                 раздули бы ответы вдвое — тот же дедуп, что в `v_reply_facts`.
- *  - лиды:         наша ИИ-квалификация ответов для проектов. Один лид = один
- *                 выбранный тред проекта, который идёт в TG и таблицу лидов;
- *                 метки interested от Instantly здесь не участвуют.
+ *  - лиды:         лиды, ПЕРЕДАННЫЕ клиенту: строки в его таблице лидов
+ *                 (`project_client_lead_board_rows`, по одной на тред проекта).
+ *                 Отклонённые специалистом («Не лид») и не отправленные ручные
+ *                 передачи в таблицу не попадают и не считаются; метки
+ *                 interested от Instantly здесь не участвуют (решение CEO
+ *                 16.10.2026, раньше считали все тредам с алертом в TG).
  *  - отбои:       timestamped `email_bounced` webhooks, received by Portal.
  *                 Instantly's daily analytics omits bounces. Before webhook
  *                 coverage begins, the daily value is unknown (never zero).
@@ -176,7 +179,7 @@ export async function buildMailboxOutcomes(day: string): Promise<MailboxOutcomes
   });
 
   const last = series[series.length - 1];
-  notes.push('Отбои — по событиям Instantly с момента подключения; лиды — по нашей квалификации для проектов, один на переписку.');
+  notes.push('Отбои — по событиям Instantly с момента подключения; лиды — переданные клиенту: строки в его таблице лидов, один на переписку.');
 
   return {
     day,

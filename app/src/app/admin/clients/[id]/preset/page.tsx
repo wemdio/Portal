@@ -15,6 +15,7 @@ import {
   type Account,
   type AccountStatusValue,
 } from '@/lib/instantly/types';
+import { PortalSpinner } from '@/components/PortalSpinner';
 
 interface PresetState {
   instantly_account_id: string;
@@ -337,7 +338,7 @@ export default function ClientPresetPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="text-gray-500">Загрузка...</div>
+        <PortalSpinner />
       </div>
     );
   }

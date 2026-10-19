@@ -1,5 +1,6 @@
 'use client';
 
+import type { Route } from 'next';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, FileSpreadsheet, Loader2, Mail } from 'lucide-react';
@@ -230,6 +231,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
 
   /** Уйти в список: итог сохранения показывает уже он. */
   const leave = (result?: CampaignNotice, focusId?: string) => {
+    // Настройки существующей кампании открываются шестерёнкой со страницы её
+    // статистики — туда и возвращаемся. Новая кампания уходит в список.
+    if (editing) {
+      router.push(`/tools/sender/campaigns/${campaignId}` as Route);
+      return;
+    }
     if (result) stashCampaignNotice(result);
     router.push(focusId ? `${LIST_URL}&campaign=${focusId}` : LIST_URL);
   };
@@ -697,7 +704,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     <div className="mx-auto max-w-[1600px]">
       {/* Шапка не уезжает при прокрутке: что мешает сохранить и сама кнопка
           нужны из любого места длинной формы. */}
-      <div className="sticky top-0 z-20 mb-4 rounded-xl border border-zinc-200 bg-white/95 backdrop-blur">
+      <div className="sticky top-0 z-20 mb-4 border-b border-zinc-200 backdrop-blur-xl">
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <button
             type="button"
@@ -705,7 +712,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
             className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
           >
             <ArrowLeft className="h-4 w-4" />
-            Кампании
+            {editing ? 'Статистика' : 'Кампании'}
           </button>
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold text-zinc-900">
@@ -723,23 +730,6 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
             ) : (
               <span className="text-xs text-zinc-500">{statusHint}</span>
             )}
-            {/* Дописывать за один раз не обязательно: форма сохраняется сама,
-                и к кампании можно вернуться. */}
-            {readOnly ? null : (
-              <span className="text-xs text-zinc-500">
-                {draftSavedAt
-                  ? `Сохранено в ${draftSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-                  : 'Сохраняется само'}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={() => void closePage()}
-              disabled={saving}
-              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100 disabled:opacity-50"
-            >
-              {readOnly ? 'Закрыть' : 'Выйти'}
-            </button>
             {readOnly ? null : (
               <button
                 type="button"

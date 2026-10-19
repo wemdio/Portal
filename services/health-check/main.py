@@ -127,6 +127,8 @@ HE_REFILL_ALERT_MAX_ITEMS = 5
 SENDER_SILENT_MINUTES = max(5, int(os.environ.get("HEALTH_SENDER_SILENT_MIN", "10")))
 SENDER_OVERDUE_MINUTES = max(5, int(os.environ.get("HEALTH_SENDER_OVERDUE_MIN", "15")))
 SENDER_OVERDUE_MIN_MESSAGES = max(1, int(os.environ.get("HEALTH_SENDER_OVERDUE_MIN_MESSAGES", "3")))
+# Пока отправка идёт, отставание алертим только от этого числа минут.
+SENDER_LAG_ALERT_MINUTES = max(SENDER_OVERDUE_MINUTES, int(os.environ.get("HEALTH_SENDER_LAG_ALERT_MIN", "180")))
 # Пока проблема держится — напоминание раз в столько минут.
 SENDER_REPEAT_MINUTES = max(30, int(os.environ.get("HEALTH_SENDER_REPEAT_MIN", "120")))
 SENDER_ALERT_MENTION = os.environ.get("HEALTH_SENDER_ALERT_MENTION", "@kuladmedDm").strip()
@@ -2106,7 +2108,11 @@ async def _check_sender(conn) -> list[str]:
     try:
         overdue = await conn.fetch(
             "SELECT coalesce(m.egress_ip, 'без адреса') AS ip, count(*) AS n, "
-            "       min(s.scheduled_at) AS oldest, count(DISTINCT s.mailbox_id) AS mailboxes "
+            "       min(s.scheduled_at) AS oldest, count(DISTINCT s.mailbox_id) AS mailboxes, "
+            "       (SELECT max(x.sent_at) FROM public.sender_messages x "
+            "          JOIN public.sender_mailboxes mx ON mx.id = x.mailbox_id "
+            "         WHERE coalesce(mx.egress_ip, 'без адреса') = coalesce(m.egress_ip, 'без адреса') "
+            "           AND x.sent_at > now() - interval '1 day') AS last_sent "
             "FROM public.sender_messages s JOIN public.sender_mailboxes m ON m.id = s.mailbox_id "
             "WHERE s.status = 'scheduled' AND s.scheduled_at < now() - make_interval(mins => $1) "
             "GROUP BY 1 HAVING count(*) >= $2",
@@ -2116,15 +2122,40 @@ async def _check_sender(conn) -> list[str]:
     except Exception as e:
         print(f"[health] sender overdue query skipped: {e}")
         overdue = []
+    now_utc = datetime.now(timezone.utc)
     for row in overdue:
         oldest = row["oldest"]
+        last_sent = row["last_sent"]
+        if last_sent is not None and last_sent.tzinfo is None:
+            last_sent = last_sent.replace(tzinfo=timezone.utc)
+        sending = (
+            last_sent is not None
+            and (now_utc - last_sent).total_seconds() < SENDER_OVERDUE_MINUTES * 60
+        )
+        if oldest is not None and oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        lag_min = int((now_utc - oldest).total_seconds() // 60) if oldest else 0
+        # Письма уходят, но очередь больше пропускной способности ящиков (пауза
+        # между письмами одного ящика) — это отставание, а не поломка. Молчим,
+        # пока оно не вырастет до SENDER_LAG_ALERT_MINUTES: 16.10.2026 алерт
+        # «письма не уходят» шёл каждые 5 минут при живой отправке.
+        if sending and lag_min < SENDER_LAG_ALERT_MINUTES:
+            continue
         key = f"sender:overdue:{row['ip']}:{oldest.isoformat() if oldest else ''}:{_repeat_bucket(oldest)}"
         if not await _claim_job_alert(conn, key):
             continue
+        ip = html.escape(str(row['ip']))
+        if sending:
+            title = f"🟠 <b>Рассылка: письма отстают от расписания (адрес {ip})</b>"
+            tail = f"Отправка идёт, последнее письмо ушло {_msk(last_sent)}, но очередь не разбирается."
+        else:
+            title = f"🔴 <b>Рассылка: письма не уходят (адрес {ip})</b>"
+            tail = f"За последние {SENDER_OVERDUE_MINUTES} мин с этого адреса не ушло ни одного письма."
         problems.append(
-            f"🔴 <b>Рассылка: письма не уходят (адрес {html.escape(str(row['ip']))})</b>\n"
+            f"{title}\n"
             f"{row['n']} писем у {row['mailboxes']} ящиков ждут отправки дольше {SENDER_OVERDUE_MINUTES} мин, "
-            f"самое старое — с {_msk(oldest)}.\n"
+            f"самое старое — с {_msk(oldest)} (отстаёт на {lag_min} мин).\n"
+            f"{tail}\n"
             f"{hint}"
         )
 

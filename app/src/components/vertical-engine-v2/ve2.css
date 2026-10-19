@@ -67,6 +67,12 @@ html[data-portal-theme="dark"] .ve2 {
 .ve2-page {
   min-height: calc(100dvh - 56px);
 }
+/* В тёмной теме страница движка закрывает градиент портала целиком: без
+   отступа общего контейнера по краям не видна полоса фона. :has матчит
+   только пока движок на экране — остальных страниц правило не касается. */
+html[data-portal-theme="dark"] main:has(.ve2-page) {
+  padding: 0;
+}
 .ve2-page > div {
   padding-bottom: 88px;
 }

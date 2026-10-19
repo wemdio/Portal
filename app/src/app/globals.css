@@ -3736,6 +3736,18 @@ html[data-portal-theme='dark'] .glass-stage {
   background-color: var(--glass-rows);
 }
 
+/* Подложки шапки и строк — прямоугольники: без скругления по краям рамки
+   их острые углы торчат за скруглённый контур. overflow:hidden не ставим —
+   он обрежет выпадающие меню внутри рамки. */
+.glass-frame > :first-child {
+  border-top-left-radius: calc(0.75rem - 1px);
+  border-top-right-radius: calc(0.75rem - 1px);
+}
+.glass-frame > :last-child {
+  border-bottom-left-radius: calc(0.75rem - 1px);
+  border-bottom-right-radius: calc(0.75rem - 1px);
+}
+
 .glass-frame thead {
   background-color: var(--glass-fill-soft);
 }
@@ -3815,4 +3827,39 @@ html[data-portal-theme='dark'] .glass-tile.glass-tint-red {
     background-color: var(--pd-surface);
     border-color: var(--pd-divider-strong);
   }
+}
+
+/* Шапка таблицы кампаний «Рассылки»: в светлой теме голубая, в тёмной —
+   приглушённая, чтобы не спорить со строками (просьба 15.10.2026). */
+html[data-portal-theme='dark'] .portal-shell .sender-table-head {
+  background-color: rgba(148, 163, 184, 0.06) !important;
+  color: rgba(147, 197, 253, 0.7) !important;
+}
+
+/* ─── Спиннер загрузки страниц ─────────────────────────────────────────────
+   Кольцо с плавным переходом тёмно-фиолетовый → изумрудный и мягким свечением.
+   Кольцо — conic-gradient, вырезанный маской до обода; цвета те же, что у пятен
+   «жидкого стекла» (liquid-scene.css), поэтому он ложится на фон. */
+.portal-spinner {
+  --ps-size: 44px;
+  --ps-thickness: 4px;
+  width: var(--ps-size);
+  height: var(--ps-size);
+  border-radius: 9999px;
+  background: conic-gradient(from 0deg, rgba(76, 29, 149, 0) 0%, #5b21b6 30%, #7c3aed 52%, #10b981 82%, #34d399 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--ps-thickness)), #000 calc(100% - var(--ps-thickness) + 1px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--ps-thickness)), #000 calc(100% - var(--ps-thickness) + 1px));
+  filter: drop-shadow(0 0 8px rgba(124, 58, 237, 0.45)) drop-shadow(0 0 14px rgba(16, 185, 129, 0.3));
+  animation: portal-spinner-rotate 0.9s linear infinite;
+}
+.portal-spinner-sm {
+  --ps-size: 18px;
+  --ps-thickness: 2.5px;
+  filter: drop-shadow(0 0 4px rgba(124, 58, 237, 0.4));
+}
+@keyframes portal-spinner-rotate {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-spinner { animation-duration: 2.4s; }
 }

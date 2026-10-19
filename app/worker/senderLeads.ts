@@ -1,3 +1,4 @@
+import { runOutreachOsLeadsPass } from '@/lib/outreachOsLeads/process';
 import { runOwnReplyLeadsPass } from '@/lib/ownReplyLeads/process';
 import { runSenderLeadsPass, senderLeadsAi } from '@/lib/senderLeads/process';
 import { leadTelegramConfig } from '@/lib/senderLeads/telegram';
@@ -9,7 +10,10 @@ import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep 
  * лиды RU/EN автоаутрича после доставки в General передаются в AMO
  * (docs/superpowers/specs/2026-09-29-sender-reply-leads-design.md).
  *
- * Здесь же — ответы наших email-кампаний «N. Polza_…» из Instantly → оценка →
+ * Здесь же — заявки OutreachOS (lib/outreachOsLeads, с 16.10.2026): лиды
+ * кабинета и регистрации → сделка в AMO → General со ссылкой на сделку.
+ *
+ * И ответы наших email-кампаний «N. Polza_…» из Instantly → оценка →
  * сделка в нашей AMO → сообщение в чат (lib/ownReplyLeads, с 11.10.2026): тот
  * же ключ ИИ и тот же бот. Блок «Instantly · X. Polza» вкладки «Квалификация».
  *
@@ -61,6 +65,13 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       log('error', 'Круг ответов «N. Polza» упал', err);
+    }
+    // Заявки OutreachOS (лиды кабинета, регистрации) → AMO → General со ссылкой на сделку.
+    try {
+      const oos = await runOutreachOsLeadsPass(db, log);
+      if (oos.pushed || oos.delivered) log('info', `OutreachOS: в AMO ${oos.pushed}, в чат ${oos.delivered}`);
+    } catch (err) {
+      log('error', 'Круг заявок OutreachOS упал', err);
     }
     await sleep(INTERVAL_MS);
   }

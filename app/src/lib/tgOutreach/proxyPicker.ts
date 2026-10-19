@@ -24,6 +24,8 @@ export interface PickerProxy extends HealthProxy {
   id: string;
   url: string;
   name?: string;
+  /** Страна выхода (ISO) — подпись рядом с адресом в выборе прокси. */
+  country_code?: string | null;
 }
 
 export interface ProxyPickerItem<T extends PickerProxy> {
@@ -38,6 +40,8 @@ export interface ProxyPickerGroup<T extends PickerProxy> {
   title: string;
   /** Что этот статус означает для выбора — строкой под заголовком. */
   hint: string;
+  /** Верхняя секция «страна выбранных аккаунтов»: в ней уже собраны прокси разной пригодности. */
+  priority?: boolean;
   items: ProxyPickerItem<T>[];
 }
 
@@ -82,17 +86,43 @@ const GROUP_ORDER: { tone: HealthTone; title: string; hint: string }[] = [
 export function groupProxiesForPicker<T extends PickerProxy>(
   proxies: T[],
   now: number,
+  /**
+   * Страны выбранных аккаунтов (ISO): прокси этих стран идут отдельной секцией
+   * сверху — работающие первыми, неработающие не предлагаем. Из остальных секций
+   * они убираются, чтобы не встречаться дважды.
+   */
+  preferCountries: string[] = [],
 ): ProxyPickerGroup<T>[] {
+  const wanted = new Set(preferCountries.map((c) => c.toUpperCase()));
   const byTone = new Map<HealthTone, ProxyPickerItem<T>[]>();
+  const preferred: ProxyPickerItem<T>[] = [];
   for (const proxy of proxies) {
     const mark = describeProxy(proxy, now);
+    if (wanted.size && proxy.country_code && wanted.has(proxy.country_code.toUpperCase()) && mark.tone !== 'bad') {
+      preferred.push({ proxy, mark });
+      continue;
+    }
     const bucket = byTone.get(mark.tone);
     if (bucket) bucket.push({ proxy, mark });
     else byTone.set(mark.tone, [{ proxy, mark }]);
   }
-  return GROUP_ORDER
-    .map((g) => ({ ...g, items: byTone.get(g.tone) ?? [] }))
-    .filter((g) => g.items.length > 0);
+  const rank = (tone: HealthTone) => GROUP_ORDER.findIndex((g) => g.tone === tone);
+  preferred.sort((a, b) => rank(a.mark.tone) - rank(b.mark.tone));
+  const top: ProxyPickerGroup<T>[] = preferred.length
+    ? [{
+        tone: 'ok',
+        title: 'Страна выбранных аккаунтов',
+        hint: 'Прокси страны, в которой куплены аккаунты, — сначала рабочие',
+        priority: true,
+        items: preferred,
+      }]
+    : [];
+  return [
+    ...top,
+    ...GROUP_ORDER
+      .map((g) => ({ ...g, items: byTone.get(g.tone) ?? [] }))
+      .filter((g) => g.items.length > 0),
+  ];
 }
 
 /**
@@ -109,5 +139,5 @@ export function flattenPickerGroups<T extends PickerProxy>(
 
 /** Сколько прокси в списке можно брать не задумываясь — для строки-итога. */
 export function readyProxyCount<T extends PickerProxy>(groups: ProxyPickerGroup<T>[]): number {
-  return groups.find((g) => g.tone === 'ok')?.items.length ?? 0;
+  return groups.find((g) => g.tone === 'ok' && !g.priority)?.items.length ?? 0;
 }
