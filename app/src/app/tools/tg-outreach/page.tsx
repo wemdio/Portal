@@ -7758,9 +7758,10 @@ function CampaignsSection() {
             const st = STATUS_LABELS[c.status] ?? STATUS_LABELS.stopped;
             return (
               <button key={c.id} type="button" onClick={() => setSelectedId(c.id)} title={st.label}
-                className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
+                className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600 font-semibold ring-2 ring-indigo-300 ring-offset-2 ring-offset-transparent shadow-md' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(c.status)}`} />
                 {c.name}
+                {selectedId === c.id && <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] uppercase tracking-wide">открыта</span>}
               </button>
             );
           })}
