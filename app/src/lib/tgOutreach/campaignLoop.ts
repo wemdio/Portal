@@ -1160,6 +1160,13 @@ export async function handleChat(
     log('warning', `${displayName}: в сообщении с вопросами была фраза передачи — убираю, ждём ответ клиента`);
     replyText = stripHandoffPhrase(replyText, phrase);
   }
+  // Модель берёт русскую фразу из промпта кампании и дописывает её как есть,
+  // несмотря на просьбу перевести (19.10.2026: английский ответ кончался
+  // «Передаю ваш контакт менеджеру.»). Оставшийся русский хвост срезаем.
+  if (translateHandoff && phrase && replyText.toLowerCase().includes(phrase.toLowerCase())) {
+    const stripped = stripHandoffPhrase(replyText, phrase);
+    if (stripped) replyText = stripped;
+  }
   const forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
   if (interested && phrase && !qualifying && !translateHandoff) {
     replyText = ensureHandoffPhrase(replyText, phrase);
