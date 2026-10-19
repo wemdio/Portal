@@ -18,11 +18,14 @@ import {
   type HeEngQualificationScope,
 } from './engCompanyQualificationPolicy';
 import { callLLMWithSchema, getHeModel, heLlmFailureOf, isHeLlmTimeout, LLMValidationError, type LLMMessage } from './llm';
-import { heStageSignal, isHeSiteUnreachable, resolveFetchPage, type HeFetchedPage, type HeFetchPageFn } from './stages/io';
+import { isHeOperationTimeout } from './operationDeadline';
+import { heStageSignal, isHeSiteUnreachable, resolveFetchPage, resolveSearch, type HeFetchedPage, type HeFetchPageFn } from './stages/io';
+import { isHeSearchProviderError } from './stages/searchIo';
 import type { HeStageContext } from './stages/shared';
 
 const MAX_PAGES = 6;
 const MAX_PAGE_DEPTH = 2;
+const MAX_SEARCH_PAGES = 3;
 const MAX_COMPANY_ATTEMPTS = 3;
 const COMPANY_RETRY_MS = 30_000;
 const MAX_PAGE_TEXT = 3000;
@@ -158,6 +161,12 @@ function repairCandidateHint(evidence: SourceEvidence, context: DecisionContext,
   const candidates = [...new Set([...decision.identity.entity_links.map((link) => link.entity_name), ...headings])]
     .filter((name) => claimedServices.some((item) => mentionsName(item.quote, name))).slice(0, 16);
   const blocks = [...evidence.quotes.entries()].sort((a, b) => a[1].quote.length - b[1].quote.length);
+  const namedIdentity = blocks.filter(([, quote]) => mentionsName(quote.quote, decision.identity.observed_name) &&
+    verifiedQuotes([quote], context.pages, context.website, 'identity').length);
+  const identitySource = namedIdentity.find(([, quote]) => decision.identity.evidence.some((current) =>
+    urlKey(current.url) === urlKey(quote.url) && quoteText(current.quote) === quote.quote)) ?? namedIdentity[0];
+  if (!identitySource) return null;
+  const [identityId, identityQuote] = identitySource;
   const relations: Decision['identity']['entity_links'][number]['relationship'][] = ['operating_company', 'subsidiary', 'branch', 'division', 'same_legal_entity', 'trading_name'];
   const roles: Decision['locations'][number]['relationship'][] = ['registered_office', 'headquarters', 'operating_office'];
   for (const entity of candidates) {
@@ -178,15 +187,15 @@ function repairCandidateHint(evidence: SourceEvidence, context: DecisionContext,
           if (!countryAddressClause(addressQuote.quote, entity, country, role)) continue;
           for (const [serviceId, serviceQuote] of services) for (const hypothesisId of hypothesisIds) {
             // Validate the exact replacement below, including its single entity link.
-            const trial: Decision = { ...decision, identity: { ...decision.identity, entity_links: [
+            const trial: Decision = { ...decision, identity: { ...decision.identity, evidence: [identityQuote], entity_links: [
               { entity_name: entity, relationship: relation, evidence: [linkQuote] },
             ] }, locations: [{ entity_name: entity, relationship: role, country, country_text: literal,
               evidence: addressQuote, service_evidence: [serviceQuote], service_hypothesis_id: hypothesisId }] };
             if (decisionVerdict(context.row, context.website, context.scope, context.pages, trial).status !== 'accepted') continue;
-            const fragment = { identity: { entity_links: [{ entity_name: entity, relationship: relation, evidence: [{ quote_id: linkId }] }] },
+            const fragment = { identity: { evidence: [{ quote_id: identityId }], entity_links: [{ entity_name: entity, relationship: relation, evidence: [{ quote_id: linkId }] }] },
               locations: [{ entity_name: entity, relationship: role, country, country_text: literal, evidence: { quote_id: addressId },
                 service_evidence: [{ quote_id: serviceId }], service_hypothesis_id: hypothesisId }] };
-            const hint = `Replace BOTH identity.entity_links and locations; preserve other required fields. ${JSON.stringify(fragment)}`;
+            const hint = `Replace identity.evidence, identity.entity_links and locations together; preserve other required fields. ${JSON.stringify(fragment)}`;
             // Leave room for Zod's JSON wrapper in the existing 800-character retry budget.
             return hint.length <= 650 ? hint : null;
           }
@@ -195,6 +204,30 @@ function repairCandidateHint(evidence: SourceEvidence, context: DecisionContext,
     }
   }
   return null;
+}
+
+/** Resolve only an enum mismatch in already selected, exact source evidence. */
+function normalizeSelectedEntityRelationships(context: DecisionContext, decision: Decision): Decision {
+  if (decision.identity.verdict !== 'same_company' || decision.activity.verdict !== 'matches' ||
+      decision.customer_constraints.verdict !== 'clear' || !decision.locations.length) return decision;
+  if (decisionVerdict(context.row, context.website, context.scope, context.pages, decision).status === 'accepted') return decision;
+  const expected = typeof context.row.company === 'string' ? context.row.company : '';
+  const relationships: Decision['identity']['entity_links'][number]['relationship'][] =
+    ['trading_name', 'division', 'same_legal_entity', 'branch', 'subsidiary', 'operating_company'];
+  let changed = false;
+  const entityLinks = decision.identity.entity_links.map((link) => {
+    const quotes = verifiedQuotes(link.evidence, context.pages, context.website, 'identity');
+    const supported = relationships.filter((relationship) => quotes.some((item) =>
+      explicitEntityLink(item.quote, expected, link.entity_name, relationship)));
+    if (supported.includes(link.relationship) || supported.length !== 1) return link;
+    changed = true;
+    return { ...link, relationship: supported[0] };
+  });
+  if (!changed) return decision;
+  const trial: Decision = { ...decision, identity: { ...decision.identity, entity_links: entityLinks } };
+  // Never infer a new entity, location, service, country or model verdict. An
+  // unsupported/ambiguous claim still follows the existing bounded schema retry.
+  return decisionVerdict(context.row, context.website, context.scope, context.pages, trial).status === 'accepted' ? trial : decision;
 }
 
 function referencedDecisionSchema(evidence: SourceEvidence, context: DecisionContext) {
@@ -209,10 +242,40 @@ function referencedDecisionSchema(evidence: SourceEvidence, context: DecisionCon
     activity: DecisionSchema.shape.activity.extend({ evidence: z.array(quote).max(3) }),
     customer_constraints: DecisionSchema.shape.customer_constraints.extend({ evidence: z.array(quote).max(3) }),
     locations: z.array(DecisionSchema.shape.locations.element.extend({ evidence: quote, service_evidence: z.array(quote).max(3) })).max(8),
-  }).superRefine((decision, refinement) => {
+  }).transform((decision) => DecisionSchema.safeParse(decision).success
+    ? normalizeSelectedEntityRelationships(context, decision) : decision).superRefine((decision, refinement) => {
     // A failed quote-ID refinement can leave an untransformed nested value.
     // Its existing schema issue is sufficient; do not inspect it as a Quote.
     if (!DecisionSchema.safeParse(decision).success) return;
+    const identityIssue = decision.identity.verdict === 'same_company' && !decision.identity.evidence.some((item) =>
+      mentionsName(item.quote, decision.identity.observed_name));
+    const repairs: string[] = [];
+    if (identityIssue) {
+      // One existing schema retry must repair the whole contradictory claim,
+      // not spend its only attempt on identity while leaving a wrong local entity.
+      const completeHint = repairCandidateHint(evidence, context, decision);
+      if (completeHint) {
+        refinement.addIssue({ code: 'custom', message: completeHint });
+        return;
+      }
+      const seen = new Set<string>();
+      const identitySourceScore = (text: string) => /^\{\s*"@type"\s*:/u.test(text) ? 2
+        : /\b(?:is (?:a|the)|a division of|trading name)\b/i.test(text) ? 1 : 0;
+      const namedIds = [...evidence.quotes].filter(([, item]) => item.quote.length >= 40 &&
+        mentionsName(item.quote, decision.identity.observed_name) && verifiedQuotes([item], context.pages, context.website, 'identity').length)
+        .sort((a, b) => identitySourceScore(b[1].quote) - identitySourceScore(a[1].quote) || a[1].quote.length - b[1].quote.length).filter(([, item]) => {
+          if (seen.has(item.quote)) return false;
+          seen.add(item.quote); return true;
+        }).slice(0, 3).map(([id]) => id);
+      repairs.push(`identity: same_company evidence must name observed_name, not an anonymous slogan. Named source candidates: ${namedIds.join(', ') || 'none'}. Verify them; use an existing quote_id proving this same company, or unverified.`);
+    }
+    if (decision.customer_constraints.verdict === 'excluded' && (!decision.customer_constraints.evidence.length || identityIssue)) {
+      repairs.push('customer_constraints: excluded needs own-business evidence for an exact ICP exclude category. Copyright/division text proves no exclusion; technology, integrations or consultation alone do not make a bank an agency/consultancy. Recheck: clear if no exclusion applies, unverified if uncertain, else excluded with supporting quote_id.');
+    }
+    if (repairs.length) {
+      refinement.addIssue({ code: 'custom', message: repairs.join(' ') });
+      return;
+    }
     // Only repair contradictory positive claims within the existing two schema
     // attempts. Honest abstention or a genuine rejection does not spend a retry.
     if (decision.identity.verdict !== 'same_company' || decision.activity.verdict !== 'matches' ||
@@ -331,10 +394,23 @@ function explicitEntityLink(quote: string, first: string, second: string, relati
   return related(a, relation, b) || related(b, relation, a);
 }
 
+const QUALIFICATION_SITE_BUILDERS = [
+  'wixsite.com', 'squarespace.com', 'webflow.io', 'tilda.ws', 'weebly.com',
+  'wordpress.com', 'godaddysites.com', 'myshopify.com', 'business.site',
+];
+
+/** Shared hosting is not company ownership, even when the PSL omits the platform. */
+function siteBoundary(raw: string): string | null {
+  const site = heCompanySiteIdentity(raw);
+  if (!site) return null;
+  return QUALIFICATION_SITE_BUILDERS.some((host) => site.host === host || site.host.endsWith(`.${host}`))
+    ? site.host : site.registrable;
+}
+
 function sameSite(raw: string, website: string): boolean {
-  const expected = heCompanySiteIdentity(website);
-  const actual = heCompanySiteIdentity(raw);
-  return !!expected && !!actual && expected.registrable === actual.registrable;
+  const expected = siteBoundary(website);
+  const actual = siteBoundary(raw);
+  return !!expected && !!actual && expected === actual;
 }
 
 /** Full country names only: bare US/IN/DE in prose are not country evidence. */
@@ -447,15 +523,61 @@ function hypothesisWords(scope: HeEngQualificationScope, titlesOnly = false): Se
     .filter((word) => !generic.has(word)).map(serviceStem));
 }
 
-async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, website: string, scope: HeEngQualificationScope): Promise<PageRead> {
+/** Search queries are data-only; names/titles cannot introduce search operators. */
+function companySearchQueries(company: string, website: string, scope: HeEngQualificationScope): string[] {
+  const domain = siteBoundary(website);
+  const term = (value: string, limit: number) => withoutEmails(value).replace(/[^\p{L}\p{N}\s&.-]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limit);
+  const name = term(company, 160);
+  const services = scope.hypotheses.slice(0, 4).map((hypothesis) => term(hypothesis.title, 90)).filter(Boolean);
+  if (!domain || !name || !services.length) return [];
+  return [
+    `site:${domain} "${name}" (${services.join(' OR ')}) services`,
+    `site:${domain} "${name}" ("registered office" OR headquarters OR contact OR locations)`,
+  ];
+}
+
+function officialSearchPage(raw: string, website: string): string | null {
+  const key = urlKey(raw);
+  if (!key) return null;
+  const url = new URL(key);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || !sameSite(key, website)) return null;
+  let path: string;
+  try { path = decodeURIComponent(url.pathname); } catch { return null; }
+  if (/\.(?:pdf|docx?|xlsx?|pptx?|zip|gz|csv|json|xml|png|jpe?g|gif|svg|webp|mp[34])$/i.test(path) ||
+      /\/(?:log[-_]?in|log[-_]?out|sign[-_]?in|sign[-_]?out|auth|oauth|account|myaccount|portal|checkout|cart|subscribe|unsubscribe|password|reset)(?:[./]|$)/i.test(path)) return null;
+  return key;
+}
+
+/** Retrieval hints only: final admission still requires the exact entity/service/address proofs. */
+function needsOfficialSiteSearch(pages: HeFetchedPage[], company: string, scope: HeEngQualificationScope): boolean {
+  const blocks = [...sourceEvidence(pages, { company }, scope).quotes.values()].map((item) => item.quote);
+  const titleWords = hypothesisWords(scope, true);
+  const serviceSource = blocks.some((text) => text.split(/[.!?;](?:\s+|$)/u).some((clause) => {
+    if (!mentionsName(clause, company)) return false;
+    const ownService = clause.replace(new RegExp(namePattern(company), 'giu'), '');
+    const hits = new Set((ownService.toLowerCase().match(/[a-z]{4,}/g) ?? []).map(serviceStem).filter((word) => titleWords.has(word)));
+    return [...hits].some((word) => word.length >= 6) || hits.size >= 2;
+  }));
+  const roles: Decision['locations'][number]['relationship'][] = ['headquarters', 'registered_office', 'operating_office'];
+  const countrySource = blocks.some((text) =>
+    mentionsName(text, company) && roles.some((role) => locationRoleInQuote(text, role)) &&
+    [...COUNTRY_NAMES, ...ADDRESS_COUNTRY_ALIASES].some(([name, country]) =>
+      (!scope.countries.length || scope.countries.includes(country)) &&
+      new RegExp(`(?:^|[^\\p{L}\\p{N}])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(text) &&
+      roles.some((role) => countryAddressClause(text, company, country, role))));
+  return !serviceSource || !countrySource;
+}
+
+async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, website: string, scope: HeEngQualificationScope, company = ''): Promise<PageRead> {
   const pages: HeFetchedPage[] = [];
   const attempted = new Set<string>();
   const words = hypothesisWords(scope);
   const titleWords = hypothesisWords(scope, true);
-  type Candidate = { url: string; depth: number; priority: number; kind: string };
+  type Candidate = { url: string; depth: number; priority: number; kind: string; specificService?: boolean };
   const queue: Candidate[] = [{ url: website, depth: 0, priority: 1000, kind: 'home' }];
   let retryableFailure = false;
   const attemptedKinds: string[] = [];
+  let readSpecificService = false;
   let fallbackTried = false;
   function fallbackOrigin(): boolean {
     if (fallbackTried) return false;
@@ -478,7 +600,8 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     }
     if (!queue.length) break;
     const preferred = attempted.size <= 1 ? ['legal', 'about']
-      : count('services') === 0 ? ['services', 'about', 'contact', 'locations']
+      : count('services') === 0 && queue.some((item) => item.kind === 'services') ? ['services', 'about', 'contact', 'locations']
+        : !readSpecificService && queue.some((item) => item.specificService) ? ['services', 'about', 'contact', 'locations']
         : count('about') === 0 ? ['about', 'contact', 'locations']
           : count('contact') + count('locations') === 0 ? ['contact', 'locations'] : [];
     let next = -1;
@@ -503,21 +626,82 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     }
     if (page.text.trim() && !pages.some((saved) => urlKey(saved.url) === urlKey(page!.url))) {
       pages.push({ ...page, text: sliceWholeChars(stripUnstorableJsonChars(withoutEmails(page.text)), 0, MAX_PAGE_TEXT) });
+      readSpecificService ||= candidate.specificService === true;
     }
     if (candidate.depth >= MAX_PAGE_DEPTH) continue;
     for (const link of page.companyEvidenceLinks ?? []) {
       const linkKey = urlKey(link.url);
       if (!linkKey || attempted.has(linkKey) || !sameSite(link.url, website) || (website.startsWith('https:') && !link.url.startsWith('https:')) || queue.some((item) => urlKey(item.url) === linkKey)) continue;
-      const labelWords = `${link.label ?? ''} ${new URL(link.url).pathname}`.toLowerCase().match(/[a-z]{4,}/g) ?? [];
+      const path = new URL(link.url).pathname;
+      const labelWords = `${link.label ?? ''} ${path}`.toLowerCase().match(/[a-z]{4,}/g) ?? [];
       const stemmed = labelWords.map(serviceStem);
-      const titleOverlap = new Set(stemmed.filter((word) => titleWords.has(word))).size;
+      const titleHits = new Set(stemmed.filter((word) => titleWords.has(word)));
       const overlap = new Set(stemmed.filter((word) => words.has(word))).size;
-      if (link.kind === 'services' && overlap === 0) continue;
-      const priority = (link.kind === 'legal' ? 900 : link.kind === 'contact' ? 600 : link.kind === 'locations' ? 600 : link.kind === 'services' ? 700 : 400)
-        + titleOverlap * 30 + Math.min(overlap, 2) * 2 + Math.min(Math.max(link.priority ?? 0, 0), 150);
-      queue.push({ url: link.url, depth: candidate.depth + 1, priority, kind: link.kind });
+      // A real service hub may have no niche word until its next-level links.
+      // A generic "funds" payment page must not outrank a custody/service match.
+      const purpose = `${path.split('/').filter(Boolean).at(-1) ?? ''} ${link.label ?? ''}`.replace(/[-_]/g, ' ');
+      const editorial = /\/(?:news(?:-and-views)?|articles?|blog|insights?|press|media|case-studies|customer-stories)(?:\/|$)/i.test(path)
+        || /\/(?:[^/]*-)?sustainability\/[^/]*(?:partnership|report|news)/i.test(path);
+      const kind = editorial && link.kind === 'services' ? 'supporting' : link.kind;
+      const specificService = kind === 'services' && ([...titleHits].some((word) => word.length >= 6) || titleHits.size >= 2);
+      const businessHub = kind === 'services' && (/\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/|$)/i.test(path)
+        || /\b(?:business(?:es)? (?:and |& )?institutions|our businesses|business areas)\b/i.test(purpose)
+        || /^(?:www\.)?(?:business|commercial|corporate|institutional)\./i.test(new URL(link.url).hostname) && /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i.test(path));
+      const companyOverview = /\b(?:company overview|about (?:us|our company)|who we are|get to know|corporate profile)\b/i.test(purpose);
+      const peripheral = editorial || /\b(?:suppliers?|careers?|vacancies|leadership|privacy|security|cookies?|testimonials|media contacts?|press contacts?|journalists?)\b/i.test(purpose);
+      const priority = (kind === 'legal' ? 900 : kind === 'contact' ? 600 : kind === 'locations' ? 600 : kind === 'services' ? 700 : 400)
+        + (specificService ? 150 : businessHub ? 100 : 0) + Math.min(overlap, 2) * 2 + (companyOverview ? 120 : 0) - (peripheral ? 250 : 0)
+        + Math.min(Math.max(link.priority ?? 0, 0), 150);
+      queue.push({ url: link.url, depth: candidate.depth + 1, priority, kind, specificService });
     }
     queue.sort((a, b) => b.priority - a.priority || a.depth - b.depth);
+  }
+  if (company && needsOfficialSiteSearch(pages, company, scope)) {
+    const search = resolveSearch({ ...ctx, market: 'us' });
+    const lanes: string[][] = [];
+    for (const query of companySearchQueries(company, website, scope)) {
+      interrupted(ctx);
+      try {
+        const results = await search(query);
+        interrupted(ctx);
+        const urls: string[] = [];
+        for (const result of results.slice(0, 10)) {
+          // Search titles/snippets never enter the evidence or model input.
+          const key = officialSearchPage(result.link, website);
+          if (!key || attempted.has(key) || urls.includes(key)) continue;
+          urls.push(key);
+        }
+        lanes.push(urls);
+      } catch (error) {
+        interrupted(ctx, error);
+        if (isHeOperationTimeout(error) || (isHeSearchProviderError(error) && error.kind === 'transient')) {
+          retryableFailure = true;
+          lanes.push([]);
+        } else throw error; // Billing/configuration must hold the stage, never resemble empty results.
+      }
+    }
+    // Alternate service/address results: one lane cannot consume every remaining page.
+    let extraPages = 0;
+    while (extraPages < MAX_SEARCH_PAGES && lanes.some((lane) => lane.length)) {
+      for (const lane of lanes) {
+        if (extraPages >= MAX_SEARCH_PAGES) break;
+        let url = lane.shift();
+        while (url && attempted.has(url)) url = lane.shift();
+        if (!url) continue;
+        interrupted(ctx);
+        extraPages += 1; attempted.add(url);
+        try {
+          const page = await fetchPage(url);
+          interrupted(ctx);
+          if (!page || !page.url.startsWith('https:') || !sameSite(page.url, website) || !page.text.trim() ||
+              pages.some((saved) => urlKey(saved.url) === urlKey(page.url))) continue;
+          pages.push({ ...page, text: sliceWholeChars(stripUnstorableJsonChars(withoutEmails(page.text)), 0, MAX_PAGE_TEXT) });
+        } catch (error) {
+          interrupted(ctx, error);
+          retryableFailure ||= !(isHeSiteUnreachable(error) && error.kind === 'dns');
+        }
+      }
+    }
   }
   return { pages, retryableFailure };
 }
@@ -543,8 +727,12 @@ function messages(row: HeEngQualificationRow, website: string, scope: HeEngQuali
       'Activity: the company ITSELF must deliver the type of service described by at least one selected hypothesis. Return its exact hypothesis_id. ' +
       'A broad financial-services label, selling to the target sector, a customer logo, a case study, a vacancy or merely mentioning a service is insufficient. ' +
       'For example, a bank/insurer/asset manager is not a fund service provider without its own third-party fund administration, custody, depositary, transfer agency or comparable selected service. ' +
+      'Missing service proof on this limited set of pages means activity unverified, not does_not_match. Use does_not_match only for affirmative evidence of an incompatible business; a broad bank/group description alone cannot rule out a qualifying division. ' +
       'Hypotheses describe a company type and a possible reason to buy; do not demand evidence of speculative pains, budgets, intent or decision makers. ' +
-      'Customer constraints: apply include/exclude company types from ICP. Excluded agencies/consultancies/integrators/recruiters cannot pass merely because they sell to the target sector. ' +
+      'Customer constraints: compare the company\'s OWN business model with each exact ICP exclude category separately from its selected-hypothesis activity. ' +
+      'Use excluded only when source evidence establishes that the company ITSELF is an excluded type; always include its supporting quote_id. Otherwise use clear when no exclusion applies, or unverified when the business model is unclear. ' +
+      'A financial services provider offering its own software/platform, integrations, professional support or a consultation does not thereby become a software development agency, system integrator, consultancy or recruiter. ' +
+      'Conversely, an actual agency/consultancy/integrator/recruiter cannot pass merely because its customers are financial companies or its site mentions the selected service. Broad ICP include categories never replace the selected-hypothesis service proof. ' +
       'Honor explicit contradictory company-size evidence; absence of headcount is not by itself a rejection because size was a catalog filter. ' +
       'Country policy: qualify the named company or its directly evidenced local branch/subsidiary/division in a selected country when that SAME local entity itself delivers the selected services. ' +
       'Use a headquarters, registered office or genuine operating office of that entity. A local entity/operating office MUST have service_evidence quoting its own selected services, not the global group offering, and service_hypothesis_id matching that service. ' +
@@ -619,6 +807,7 @@ function decisionVerdict(row: HeEngQualificationRow, website: string, scope: HeE
         !countryAddressClause(evidence[0].quote, location.entity_name, country, location.relationship)) return [];
     const local = entityLinks.find((link) => sameName(link.name, location.entity_name));
     const serviceEvidence = verifiedQuotes(location.service_evidence, pages, website, 'activity');
+    let hypothesisId = decision.activity.hypothesis_id;
     if (location.relationship === 'operating_office' || (local && ['branch', 'subsidiary', 'division', 'operating_company'].includes(local.relationship))) {
       const hypothesis = scope.hypotheses.find((item) => item.id === location.service_hypothesis_id);
       const titleWords = hypothesis ? hypothesisWords({ ...scope, hypotheses: [hypothesis] }, true) : new Set<string>();
@@ -629,15 +818,16 @@ function decisionVerdict(row: HeEngQualificationRow, website: string, scope: HeE
       };
       if (!hypothesis || !serviceEvidence.some((item) => mentionsName(item.quote, location.entity_name) && hasService(item.quote)) ||
           serviceEvidence.some((item) => /\b(?:dormant|holding\s+company|no\s+(?:staff|operations|services)|(?:does?|do)\s+not\s+(?:provide|offer|deliver)|sales[-\s]only)\b/i.test(item.quote))) return [];
+      hypothesisId = hypothesis.id;
     }
-    return [{ country, evidence: evidence[0], serviceEvidence }];
+    return [{ country, evidence: evidence[0], serviceEvidence, hypothesisId }];
   });
   const location = locations.find((item) => !scope.countries.length || scope.countries.includes(item.country));
   if (!location) {
     return { ...verdict, status: locations.length ? 'rejected' : 'unverified', reason: locations.length ? 'country_outside_target' : 'country_unverified',
       evidence: [...verdict.evidence, ...locations.slice(0, 2).map((item) => item.evidence)] };
   }
-  return { ...verdict, status: 'accepted', reason: 'official_site_confirmed', country: location.country,
+  return { ...verdict, status: 'accepted', reason: 'official_site_confirmed', country: location.country, hypothesisId: location.hypothesisId,
     evidence: [...verdict.evidence, location.evidence, ...location.serviceEvidence].slice(0, 12) };
 }
 
@@ -732,7 +922,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
           await save();
           continue;
         }
-        const read = await companyPages(ctx, fetchPage, website, scope);
+        const read = await companyPages(ctx, fetchPage, website, scope, row.company);
         if (!read.pages.length) {
           recordFailure(key, read.retryableFailure ? 'site_transient' : 'site_unavailable', !read.retryableFailure);
           await save();
@@ -748,7 +938,9 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
           if (cached?.inputHash === inputHash) verdict = cached.verdict;
           else {
             const llm = await callLLMWithSchema(prompt, referencedDecisionSchema(sources, { row, website, scope, pages: read.pages }),
-              { model: getHeModel('gate'), maxTokens: 3000, market: 'us', requireCompleteJson: true });
+              // Multi-entity service/address proof needs the ENG analysis model;
+              // the cheap shared gate remains unchanged for RU and simple classifiers.
+              { model: getHeModel('bulk'), maxTokens: 3000, market: 'us', requireCompleteJson: true });
             tokensUsed += llm.tokensUsed;
             costUsd += llm.costUsd;
             verdict = decisionVerdict(row, website, scope, read.pages, llm.data);

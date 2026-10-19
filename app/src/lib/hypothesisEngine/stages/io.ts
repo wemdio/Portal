@@ -551,7 +551,7 @@ export async function defaultFetchPage(
       page = await fetchSinglePage(normalized, {
         timeout: WEBSITE_FETCH_TIMEOUT_MS,
         signal,
-        guard: heFetchGuard(market),
+        guard: { ...heFetchGuard(market), ...(market === 'us' && options?.companyEvidence === true ? { preferHttpsRedirects: true } : {}) },
         maxBytes: HE_PAGE_MAX_BYTES,
         ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
         ...(options?.companyEvidence === true ? { companyEvidence: true } : {}),

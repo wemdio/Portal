@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
 import type { AnyNode } from 'domhandler';
 import iconv from 'iconv-lite';
+import { getDomain } from 'tldts';
 import { buildAboutCandidates, DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
 import { extractEmailsFromHtml } from '@/lib/enrich/emailExtractor';
@@ -1019,6 +1020,8 @@ export interface WebsiteFetchGuard {
   checkUrl: (url: URL) => Promise<void>;
   maxRedirects: number;
   allowHttpDowngrade: boolean;
+  /** ENG evidence opt-in: keep an advertised HTTP redirect on HTTPS; never send HTTP. */
+  preferHttpsRedirects?: boolean;
   /** Прямой маршрут (прокси не выбран) идёт через этот диспетчер. */
   directDispatcher?: Dispatcher;
 }
@@ -1156,7 +1159,12 @@ export async function fetchFollowingGuarded(
       throw new WebsiteAddressRefusedError(`редирект на схему ${next.protocol}`);
     }
     if (!guard.allowHttpDowngrade && current.protocol === 'https:' && next.protocol === 'http:') {
-      throw new WebsiteAddressRefusedError(`редирект https → http (${next.host})`);
+      if (!guard.preferHttpsRedirects) {
+        throw new WebsiteAddressRefusedError(`редирект https → http (${next.host})`);
+      }
+      // Same advertised destination, HTTPS only. The next iteration applies
+      // the unchanged address/DNS/port guard before any connection is made.
+      next.protocol = 'https:';
     }
     current = next;
   }
@@ -1882,6 +1890,7 @@ const COMPANY_EVIDENCE_SECTION_SEPARATOR = '\n\n[source section]\n\n';
 function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEvidenceLink[] {
   const base = new URL(pageUrl);
   const host = base.hostname.replace(/^www\./, '');
+  const domain = getDomain(base.hostname, { allowPrivateDomains: true });
   const links: CompanyEvidenceLink[] = [];
   const seen = new Map<string, CompanyEvidenceLink>();
   $('a[href]').each((_, el) => {
@@ -1889,39 +1898,49 @@ function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEv
     if (!href || href.startsWith('#')) return;
     let url: URL;
     try { url = new URL(href, base); } catch { return; }
+    const sameCompanyDomain = url.hostname.replace(/^www\./, '') === host
+      || !!domain && getDomain(url.hostname, { allowPrivateDomains: true }) === domain;
     if (!['http:', 'https:'].includes(url.protocol)
-      || url.hostname.replace(/^www\./, '') !== host
+      || !sameCompanyDomain
       || url.port !== base.port || url.username || url.password || url.search || url.hash
       || (base.protocol === 'https:' && url.protocol !== 'https:')) return;
     const path = url.pathname;
-    if (/\/(?:auth|account|login|logout|sign[-_]?in|sign[-_]?up|facebook|twitter|linkedin|instagram|youtube)(?:\/|$)/i.test(path)
+    if (/\/(?:auth|account|login|logout|sign[-_]?in|sign[-_]?up|careers?|jobs?|karriere|facebook|twitter|linkedin|instagram|youtube)(?:\/|$)/i.test(path)
       || /\.[a-z0-9]{2,5}$/i.test(path) && !/\.(?:html?|php|aspx?)$/i.test(path)) return;
     const label = $(el).text().replace(/\s+/g, ' ').trim().slice(0, 160);
     const purpose = `${path.replace(/[-_]+/g, ' ')} ${label}`;
-    const isServicePath = /\/(?:[^/]*[-_])?(?:services?|solutions?|capabilities|products?|expertise|what[-_]we[-_]do)(?:[-_/]|$)/i.test(path);
+    const leaf = (path.split('/').filter(Boolean).at(-1) ?? '').replace(/\.(?:html?|php|aspx?)$/i, '').replace(/[-_]+/g, ' ');
+    const precisePurpose = `${leaf} ${label}`;
+    const isServicePath = /\/(?:[^/]*[-_])?(?:services?|solutions?|capabilities|products?|produkte|leistungen|expertise|what[-_]we[-_]do)(?:[-_/]|$)/i.test(path);
+    const isBusinessHub = /\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/|$)/i.test(path)
+      || /^(?:www\.)?(?:business|commercial|corporate|institutional)\./i.test(url.hostname)
+        && /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i.test(path);
     let kind: CompanyEvidenceLink['kind'] | null = null;
     let priority = 0;
     if (/\b(?:registered (?:addresses?|offices?|seats?)|headquarters|head office|legal address|sitz der gesellschaft|siege social)\b/i.test(purpose)) {
       kind = 'legal'; priority = 100;
-    } else if (/\b(?:impressum|imprint|legal notice|legal entit(?:y|ies)|mentions legales|aviso legal|company (?:registration|information|structure)|corporate structure)\b/i.test(purpose)
-      || !isServicePath && /\bcorporate governance\b/i.test(purpose)) {
+    } else if (/\b(?:impressum|imprint|legal notice|legal entit(?:y|ies)|mentions legales|aviso legal|company (?:registration|structure)|corporate structure|group structure)\b/i.test(precisePurpose)
+      || /^(?:company information|company registration|company structure)$/i.test(leaf)
+      || !isServicePath && /\bcorporate governance\b/i.test(precisePurpose)) {
       kind = 'legal'; priority = 95;
     } else if (/\b(?:legal|regulatory information|regulatory disclosures)\b/i.test(purpose) && !/\b(?:privacy|cookies?|terms)\b/i.test(purpose)) {
       kind = 'legal'; priority = 90;
-    } else if (/\/(?:contact(?:[-_]?us)?|contacts)(?:\/|$)/i.test(path)
-      || /\b(?:contact(?: us)?|contact and enquiries|get in touch)\b/i.test(label)) {
+    } else if (/\/(?:contact(?:[-_]?us)?|contacts|kontakt)(?:\/|$)/i.test(path)
+      || /\b(?:contact(?: us)?|contact and enquiries|get in touch|kontakt)\b/i.test(label)) {
       kind = 'contact'; priority = 85;
     } else if (/\/(?:[a-z-]*-)?(?:locations?|offices?)(?:[-_/]|$)/i.test(path)
       || /\b(?:locations?|our offices|global offices|office locations)\b/i.test(label)) {
       kind = 'locations'; priority = 80;
-    } else if (isServicePath
-      || /\b(?:our services|our solutions|our capabilities|our products|our expertise|what we do)\b/i.test(label)) {
+    } else if (isServicePath || isBusinessHub
+      || /\b(?:our services|our solutions|our capabilities|our products|our expertise|what we do|produkte|leistungen)\b/i.test(label)) {
       kind = 'services'; priority = 60;
-    } else if (ABOUT_HREF_PATTERN.test(path) || ABOUT_TEXT_PATTERN.test(label)) {
+    } else if (ABOUT_HREF_PATTERN.test(path) || ABOUT_TEXT_PATTERN.test(label)
+      || /\/(?:ueber-uns|uber-uns|unternehmen|company-information)(?:\/|$)/i.test(path)
+      || /(?:^|\s)(?:über uns|ueber uns|unternehmen)(?:$|\s)/i.test(label)) {
       kind = 'about'; priority = 70;
     }
     if (!kind) return;
-    const key = `${host}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
+    const key = `${url.hostname.replace(/^www\./, '')}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
     const previous = seen.get(key);
     if (previous && (previous.priority ?? 0) >= priority) return;
     const link = { url: url.href, kind, priority, ...(label ? { label } : {}) };
@@ -2044,6 +2063,26 @@ function companyAddressBlocks($: cheerio.CheerioAPI): string[] {
     }
     if (!seen.has(text)) { seen.add(text); candidates.push({ text, priority }); }
   };
+  // An address is sometimes a heading followed by one short paragraph per
+  // field inside a much larger article. Keep that contiguous sibling run;
+  // never skip other content or add our own entity/country labels.
+  $('p, h1, h2, h3, h4, h5, h6').each((_, el) => {
+    const first = $(el);
+    const heading = sanitizeText(first.text());
+    if (heading.length > 220 || !COMPANY_ADDRESS_ROLE.test(heading)) return;
+    const fields = [heading];
+    let next = first.next();
+    while (fields.length < 8 && next.is('p, address')) {
+      const value = sanitizeText(next.text());
+      if (!value || value.length > 180 || COMPANY_ADDRESS_ROLE.test(value)) break;
+      fields.push(value);
+      next = next.next();
+    }
+    const text = fields.join('\n\n');
+    if (fields.length > 1 && text.length <= COMPANY_ADDRESS_BLOCK_LIMIT && !seen.has(text)) {
+      seen.add(text); candidates.push({ text, priority: 4 });
+    }
+  });
   $(semantic).each((_, el) => { add(el, 2); });
   $('p, li, div, section, article, td').each((_, el) => {
     const text = sanitizeText($(el).text());
