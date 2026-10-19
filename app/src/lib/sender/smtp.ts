@@ -145,6 +145,7 @@ export function classifySmtpError(error: unknown): SendErrorCode {
 export interface OutgoingMail {
   from: string;
   to: string;
+  cc?: string[];
   subject: string;
   text: string;
   /** Письмо целиком в HTML, если оно так написано. Обычно его нет: текст один. */
@@ -172,9 +173,10 @@ export async function sendSenderMail(cfg: SenderSmtpConfig, mail: OutgoingMail):
     optOutLine: false,
   });
   try {
-    await transport.sendMail({
+    const info = await transport.sendMail({
       from: mail.from,
       to: mail.to,
+      cc: mail.cc?.length ? mail.cc : undefined,
       subject: mail.subject,
       // Обе части сразу: nodemailer соберёт multipart/alternative. Холодное
       // письмо из одной части фильтры считают машинной рассылкой.
@@ -187,6 +189,11 @@ export async function sendSenderMail(cfg: SenderSmtpConfig, mail: OutgoingMail):
       inReplyTo: mail.inReplyTo ?? undefined,
       references: mail.references ?? undefined,
     });
+    // SMTP may accept the lead but refuse a CC recipient. Replaying would duplicate
+    // the message to the lead, so report an ambiguous/partial delivery instead.
+    if (mail.cc?.length && info.rejected?.length) {
+      return { ok: false, code: 'inflight_drop', error: `Письмо принято частично; отклонены: ${info.rejected.join(', ')}` };
+    }
     return { ok: true };
   } catch (e) {
     return { ok: false, code: classifySmtpError(e), error: messageOf(e) };

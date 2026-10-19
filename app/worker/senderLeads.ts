@@ -2,6 +2,7 @@ import { runOutreachOsLeadsPass } from '@/lib/outreachOsLeads/process';
 import { runOwnReplyLeadsPass } from '@/lib/ownReplyLeads/process';
 import { runSenderLeadsPass, senderLeadsAi } from '@/lib/senderLeads/process';
 import { leadTelegramConfig } from '@/lib/senderLeads/telegram';
+import { runAgencyLeadHandoffs } from '@/lib/agencyLeadHandoff/process';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
@@ -65,6 +66,12 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       log('error', 'Круг ответов «N. Polza» упал', err);
+    }
+    // Agency email replies: only API/queue work here; SMTP stays on isolated sender hosts.
+    try {
+      await runAgencyLeadHandoffs(db, log);
+    } catch (err) {
+      log('error', 'Передача лидов по email упала', err);
     }
     // Заявки OutreachOS (лиды кабинета, регистрации) → AMO → General со ссылкой на сделку.
     try {

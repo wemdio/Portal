@@ -13,6 +13,7 @@ import type {
 } from '@/lib/senderLeads/history';
 import { fetchLeadHistory, fetchLeadSettings, fetchOwnSettings, saveLeadSettings, saveOwnSettings, setLeadVerdict } from './api';
 import { OwnRepliesHistory } from './OwnRepliesHistory';
+import { HandoffSettings } from './HandoffSettings';
 
 const FILTERS: { id: LeadHistoryFilter; label: string; tone: string }[] = [
   { id: 'all', label: 'Всего', tone: 'text-zinc-900' },
@@ -396,6 +397,7 @@ export function QualificationTab({ folderKey }: { folderKey: string }) {
   return (
     <div className="space-y-4">
       <SettingsCard folderKey={folderKey} />
+      <HandoffSettings folderKey={folderKey} />
 
       <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
         {FILTERS.map((item) => (
