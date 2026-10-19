@@ -200,6 +200,14 @@ import { withHeCleanCompanyNames } from '../companyNameCleanup';
 import type { HeCompanyCleanRow } from '../companyNames';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
+import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
+import { runHeEngCompanyQualification } from '../engCompanyQualification';
+import {
+  heEngCompanyKey,
+  heEngCompanyQualified,
+  readHeEngQualificationScope,
+  type HeEngQualificationMemo,
+} from '../engCompanyQualificationPolicy';
 import { projectMarket, type HeMarket } from '../market';
 // Метки pdl-среза → значения каталога (только market='us', fail-open).
 import { loadHePdlFacets, resolveHePdlFilters } from '../pdlCatalog';
@@ -1080,6 +1088,10 @@ export interface HeSliceProbe {
 }
 
 export interface HeCollectInfo {
+  /** ENG client only: checkpointed company/site evidence, separate from the legacy gate. */
+  eng_company_qualification?: HeEngQualificationMemo;
+  eng_company_qualification_total?: number;
+  eng_company_qualification_progress?: { total: number; checked: number; excluded: number; updated_at: string };
   /**
    * Лимит сборки (в компаниях), выбранный при запуске (постановка пишет его
    * при создании базы). У refill-сборки стадия перезаписывает его размером
@@ -5622,7 +5634,7 @@ export interface HeImportCapResult<T> {
   emailStatuses: Array<string | null>;
   /** Компаний в базе после капа — уникальных ключей «компания|домен». */
   companies: number;
-  /** Адресов с вердиктом 'ok' среди ОСТАВЛЕННЫХ строк. */
+  /** Допущенных адресов среди ОСТАВЛЕННЫХ строк: ENG ok/catch_all, остальные ok. */
   validCount: number;
   /** Адресов отброшено сверх капа «адресов на компанию». */
   droppedOverContactCap: number;
@@ -5664,16 +5676,23 @@ export interface HeImportCapResult<T> {
  * вернёт строки компаний, которых мы ему не отдавали: молча потерять
  * оплаченные компании нельзя.
  *
- * Пустой базы кап не делает никогда: у каждой компании остаётся минимум одна
- * строка, а companyCap ≥ 1 оставляет минимум одну компанию.
+ * Без ENG-политики у каждой компании остаётся минимум одна строка. Для
+ * подтверждённого ENG-клиента до капа снимаются все недопущенные адреса:
+ * компания без ok/catch_all не занимает лимит, результат может быть пустым.
  */
 export function capImportedRows<T extends HeUnifiedRow>(input: {
   rows: T[];
   emailStatuses: Array<string | null>;
   contactCap: number;
   companyCap: number;
+  /** Confirmed ENG clients keep only ok/catch_all, with ok first, before either cap. */
+  allowCatchAll?: boolean;
 }): HeImportCapResult<T> {
-  const { rows, emailStatuses } = input;
+  const selected = input.allowCatchAll
+    ? selectHeEngEmailRows(input.rows.map((row, i) => ({ row, _email_status: input.emailStatuses[i] ?? null })))
+    : null;
+  const rows = selected ? selected.map(({ row }) => row) : input.rows;
+  const emailStatuses = selected ? selected.map(({ _email_status }) => _email_status) : input.emailStatuses;
   // Кап 0 обнулил бы оплаченную сборку: мусор в настройке не должен
   // превращаться в «ни одного адреса» (та же граница, что у
   // normalizeHeMaxEmailsPerCompany).
@@ -5725,7 +5744,7 @@ export function capImportedRows<T extends HeUnifiedRow>(input: {
   rows.forEach((row, i) => {
     if (!keep.has(i)) return;
     const status = emailStatuses[i] ?? null;
-    if (status === 'ok') validCount += 1;
+    if (input.allowCatchAll || status === 'ok') validCount += 1;
     keptRows.push(row);
     keptStatuses.push(status);
   });
@@ -6277,12 +6296,14 @@ export async function prepareHeLateConstructImport(
   const { baseId, projectId, info, construct, contactCap, at } = input;
   const imported = await importConstructRows(ctx, construct.bc_job_id);
   if (!imported) return { kind: 'empty' };
+  const project = await readProject(ctx.supabase, projectId);
+  const engEmailPolicy = await readHeEngEmailPolicy(ctx.supabase, project);
   // Список Do not contact — мягко (§1B): конструктор оплачен, строки всё равно
   // пройдут проверку запуска. Refill-базы сюда не идут, владелец — автор проекта.
   const dncDomains = await loadHeDncDomainsDegraded(
     ctx,
     'us',
-    async () => (await readProject(ctx.supabase, projectId)).created_by ?? null,
+    async () => project.created_by ?? null,
     'поздний импорт',
   );
   const keys = await loadOtherBaseExclusionKeys(ctx, projectId, baseId, 'us', dncDomains);
@@ -6311,14 +6332,35 @@ export async function prepareHeLateConstructImport(
     emailStatuses: rechecked.emailStatuses,
     contactCap,
     companyCap,
+    allowCatchAll: engEmailPolicy,
   });
+  if (engEmailPolicy && capped.rows.length === 0) return { kind: 'empty' };
   type LateRow = HeUnifiedRow & HeCompanyCleanRow & { description: string; _email_status?: string };
   const marked: LateRow[] = capped.rows.map((r, i) => {
     const status = capped.emailStatuses[i];
     return status ? { ...r, _email_status: status } : r;
   });
-  const stored = withHeCleanCompanyNames(marked).rows;
-  const okContacts = stored.reduce((n, r) => n + (r._email_status === 'ok' ? 1 : 0), 0);
+  let stored = withHeCleanCompanyNames(marked).rows;
+  if (engEmailPolicy) {
+    // Late email recovery must not start a new paid company check, or bless
+    // an old base which never had one. Only restore already paid evidence.
+    if (!info.eng_company_qualification) return { kind: 'empty' };
+    const { data: sourceBase, error: sourceError } = await ctx.supabase.from('he_bases')
+      .select('vertical_id').eq('id', baseId).eq('project_id', projectId).single();
+    if (sourceError || !sourceBase) throw new Error('ENG company qualification: late import base could not be read');
+    const scope = await readHeEngQualificationScope(ctx.supabase, {
+      project, verticalId: sourceBase.vertical_id, collectInfo: info,
+    });
+    const memo = info.eng_company_qualification;
+    stored = stored.map((row) => ({
+      ...row,
+      _eng_company_qualification: memo.scopeKey === scope.key ? memo.verdicts[heEngCompanyKey(row)] : undefined,
+    })).filter((row) => heEngCompanyQualified(row, scope));
+    if (!stored.length) return { kind: 'empty' };
+  }
+  const okContacts = engEmailPolicy
+    ? stored.length
+    : stored.reduce((n, r) => n + (r._email_status === 'ok' ? 1 : 0), 0);
   const tasks = info.tasks ?? [];
   // Воронка до конструктора — из stats терминальной записи (таймаут пишет её),
   // иначе из задач; строки базы и числа после импорта — свои.
@@ -6332,7 +6374,7 @@ export async function prepareHeLateConstructImport(
     excluded_during_fetch:
       prior?.excluded_during_fetch ?? tasks.reduce((sum, t) => sum + (t.excluded_during_fetch ?? 0), 0),
     low_relevance: 0,
-    companies_total: capped.companies,
+    companies_total: engEmailPolicy ? new Set(stored.map(heCompanyRowKey)).size : capped.companies,
     ok_contacts: okContacts,
     dropped_over_contact_cap: capped.droppedOverContactCap,
     dropped_over_company_cap: capped.droppedOverCompanyCap,
@@ -6349,7 +6391,7 @@ export async function prepareHeLateConstructImport(
     ...construct,
     status: 'done',
     emails_found: imported.emailsFound,
-    valid_count: capped.validCount,
+    valid_count: engEmailPolicy ? stored.length : capped.validCount,
     note: `результат джобы конструктора ${construct.bc_job_id} принят после того, как стадия перестала его ждать`,
     late_import_at: at,
   };
@@ -6363,8 +6405,8 @@ export async function prepareHeLateConstructImport(
       collect_info: { ...dropCollectWorkState(info), construct: nextConstruct, stats },
     },
     gridRows: imported.rows.length,
-    companies: capped.companies,
-    validCount: capped.validCount,
+    companies: engEmailPolicy ? new Set(stored.map(heCompanyRowKey)).size : capped.companies,
+    validCount: engEmailPolicy ? stored.length : capped.validCount,
     droppedInOtherBases: rechecked.droppedInOtherBases,
     droppedOverContactCap: capped.droppedOverContactCap,
     droppedOverCompanyCap: capped.droppedOverCompanyCap,
@@ -6479,6 +6521,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // Рынок проекта: выбор промпта планировщика (EN-источники при 'us').
   // ctx.market прокидывает воркер, фолбэк — колонка he_projects.market.
   const market = ctx.market ?? projectMarket(project);
+  const engEmailPolicy = await readHeEngEmailPolicy(ctx.supabase, project);
 
   // Кап «адресов на компанию» для этой базы: штамп с проекта, поставленный при
   // постановке сборки (baseCollectEnqueue), иначе дефолт движка — прежняя
@@ -7614,6 +7657,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       .update({
         status: 'failed',
         error: note.slice(0, 500),
+        ...(engEmailPolicy ? { data: [], sample_rows: [], row_count: 0 } : {}),
         collect_info: { ...dropCollectWorkState(info), stats: closeStats },
         updated_at: new Date().toISOString(),
       })
@@ -7778,7 +7822,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // опрашивать ЖИВУЮ джобу, и оплаченный результат конструктора терялся молча.
   // У RU-инструмента и у ENG-сборки без пометок условие прежнее: constructRows
   // это merged, а merged здесь непуст по построению (пустой ушёл выше).
-  if ((!construct && needsConstruct(constructRows)) || construct?.status === 'dispatched') {
+  if ((!construct && needsConstruct(constructRows)) || construct?.status === 'dispatched' ||
+      (engEmailPolicy && !!construct?.bc_job_id && !!info.eng_company_qualification)) {
+    // A checkpoint during company qualification already records CONSTRUCT as
+    // done. Re-import that same result on retry to restore its address verdicts;
+    // never feed raw catalog rows into the qualification continuation.
     // Резерв без подтверждённой вставки (`inserted === false`) — это тоже
     // постановка, а не ожидание: прошлая попытка записала id и умерла до вставки
     // или потеряла ответ на неё. Повтор вставляет ТОТ ЖЕ id (dispatchConstructJob:
@@ -7990,6 +8038,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           emailStatuses: rechecked ? rechecked.emailStatuses : imported.emailStatuses,
           contactCap,
           companyCap: limit,
+          allowCatchAll: engEmailPolicy,
         });
         finalRows = capped.rows;
         finalEmailStatuses = capped.emailStatuses;
@@ -7997,13 +8046,14 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         droppedOverCompanyCap = capped.droppedOverCompanyCap;
         companiesTotal = capped.companies;
         if (imported.hasDescription) finalColumns = [...HE_AUTO_COLLECT_COLUMNS, 'description'];
-        // Строки, вычеркнутые гейтом ДО конструктора, он не видел, а
+        // Legacy: строки, вычеркнутые гейтом ДО конструктора, он не видел, а
         // finalRows = capped.rows заменяет массив ЦЕЛИКОМ — без дописывания
         // исключённые компании исчезли бы из базы молча, и ни клиент, ни
         // воронка не узнали бы, что именно отсеяно. Вердикта валидации у них
         // нет (мы за него не платили): в finalEmailStatuses кладём им null,
-        // иначе вердикты всех строк сдвинулись бы на одну.
-        if (gateHeldRows.length > 0) {
+        // иначе вердикты всех строк сдвинулись бы на одну. ENG-клиенту строки
+        // без допущенного адреса не возвращаем; исходники остаются в сборке.
+        if (!engEmailPolicy && gateHeldRows.length > 0) {
           finalRows = [
             ...finalRows,
             ...gateHeldRows.map((r) => (imported.hasDescription ? { ...r, description: '' } : r)),
@@ -8128,8 +8178,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     HeCompanyCleanRow & { _email_status?: string; _low_relevance?: boolean };
   let storedRows: StoredRow[] = finalRows;
   if (finalEmailStatuses) {
+    const emailStatuses = finalEmailStatuses;
     storedRows = storedRows.map((r, i) => {
-      const st = finalEmailStatuses[i];
+      const st = emailStatuses[i];
       return st ? { ...r, _email_status: st } : r;
     });
   }
@@ -8152,12 +8203,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         `${relevanceGate?.hypothesis_scope ? 'вне гипотез вертикали' : 'вне вертикали'}`,
     );
   }
-  if (!gateRan) {
-    // Прежний путь — судим строки ПОСЛЕ импорта. Здесь три случая: RU-сборка
-    // легаси-инструмента (её поведение обязано остаться прежним), ENG-база,
-    // чья фаза CONSTRUCT началась ДО переноса гейта (записи relevance_gate у
-    // неё нет), и ENG-база, у которой гейт до конструктора НЕ отработал
-    // (ran=false) — её строки иначе не проверил бы никто.
+  if (!gateRan && !engEmailPolicy) {
+    // Сохраняем прежний post-import путь для staff/RU. У подтверждённого
+    // ENG-клиента ниже работает проверка по сайту с сохранением результата:
+    // повторять здесь старую платную оценку на каждом её тике не нужно.
     try {
       const { data: vrow } = await ctx.supabase
         .from('he_verticals')
@@ -8199,17 +8248,68 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+  const rowsBeforeEmailPolicy = storedRows.length;
+  let companyQualificationExcluded = 0;
+  if (engEmailPolicy) {
+    // Constructor checkpoints and partial/empty results can bypass its final
+    // validation filter. The client base still contains only accepted addresses;
+    // the constructor keeps the source rows for diagnostics.
+    storedRows = selectHeEngEmailRows(storedRows);
+    if (storedRows.length > 0) {
+      const scope = await readHeEngQualificationScope(ctx.supabase, {
+        project, verticalId: base.vertical_id, collectInfo: info,
+      });
+      const candidates = storedRows.length;
+      const companyKeys = new Set(storedRows.map(heEngCompanyKey));
+      info.eng_company_qualification_total = companyKeys.size;
+      if (info.eng_company_qualification?.scopeKey !== scope.key || info.eng_company_qualification.version !== 1) {
+        info.eng_company_qualification = { version: 1, scopeKey: scope.key, verdicts: {} };
+      }
+      const checkpoint = async (memo: HeEngQualificationMemo) => {
+        info.eng_company_qualification = memo;
+        const verdicts = Object.values(memo.verdicts).filter((v) => companyKeys.has(v.companyKey));
+        info.eng_company_qualification_progress = {
+          total: companyKeys.size, checked: verdicts.length,
+          excluded: verdicts.filter((v) => v.status !== 'accepted').length,
+          updated_at: new Date().toISOString(),
+        };
+        const saved = await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
+        if (!saved) throw new Error('ENG company qualification: collection is no longer active');
+      };
+      await checkpoint(info.eng_company_qualification);
+      const qualified = await runHeEngCompanyQualification(ctx, {
+        rows: storedRows, scope, memo: info.eng_company_qualification, onCheckpoint: checkpoint, maxCompanies: 16,
+      });
+      usage.tokensUsed += qualified.tokensUsed;
+      usage.costUsd += qualified.costUsd;
+      if (!qualified.complete) {
+        await requeueSelf(ctx, job, 1000);
+        return {
+          result: { waiting: true, base_id: baseId, company_qualification: 'processing' },
+          tokensUsed: usage.tokensUsed,
+          costUsd: usage.costUsd,
+        };
+      }
+      storedRows = qualified.rows;
+      companyQualificationExcluded = candidates - storedRows.length;
+      stageLog(ctx, `[base_collect] company qualification: ${info.eng_company_qualification_total} companies checked; ` +
+        `${storedRows.length} addresses accepted, ${companyQualificationExcluded} excluded by company/country evidence`);
+    }
+    finalEmailStatuses = storedRows.map((row) => row._email_status ?? null);
+    companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
+    if (info.construct) info.construct = { ...info.construct, valid_count: storedRows.length };
+  }
   // Считаем по САМИМ строкам, а не по размеру набора ключей: у одной компании
   // после split_emails несколько строк, и оба шага выше могли пометить одну и
   // ту же (у базы с отказавшим гейтом до конструктора — реально могут).
   const lowRelevanceCount = storedRows.reduce((n, r) => n + (r._low_relevance === true ? 1 : 0), 0);
-  // Адресов, которые запуск реально возьмёт: вердикт 'ok' И строка не помечена
-  // вне вертикали — те же два фильтра, что у launchTemplate. Это ОЦЕНКА СВЕРХУ:
+  // Адресов, которые запуск реально возьмёт: для ENG допущенные ok/catch_all,
+  // для остальных прежний 'ok'; строка не помечена вне вертикали. Это ОЦЕНКА СВЕРХУ:
   // запуск ещё выбросит строки без разбираемого адреса, повторные адреса (после
   // split_emails + dedup_email их быть не должно) и контакты из чёрного списка
   // клиента. Число нужно и воронке, и сравнению с потолком запуска ниже.
   const okContacts = storedRows.reduce(
-    (n, r) => n + (r._email_status === 'ok' && r._low_relevance !== true ? 1 : 0),
+    (n, r) => n + ((engEmailPolicy || r._email_status === 'ok') && r._low_relevance !== true ? 1 : 0),
     0,
   );
   const statsWithQuality = {
@@ -8219,6 +8319,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ok_contacts: okContacts,
     dropped_over_contact_cap: droppedOverContactCap,
     dropped_over_company_cap: droppedOverCompanyCap,
+    ...(engEmailPolicy ? { company_qualification_excluded_contacts: companyQualificationExcluded } : {}),
     // Только когда повторная сверка запускалась (market='us' с импортом):
     // у RU ключа нет, как и до правки.
     ...(droppedInOtherBases !== null ? { dropped_in_other_bases: droppedInOtherBases } : {}),
@@ -8230,6 +8331,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // каждой сборке.
     ...(allOffTarget ? { all_off_target: true } : {}),
   };
+  if (engEmailPolicy && storedRows.length === 0 && !allOffTarget) {
+    return await closeWithoutRows(statsWithQuality, companyQualificationExcluded > 0
+      ? 'Company qualification: no companies with verified fit for the selected hypotheses and target countries. Review the audience before collecting again.'
+      : 'после проверки нет адресов со статусом ok или catch_all');
+  }
   // Потолок мастера считает АДРЕСА (HE_LAUNCH_MAX_LEADS лидов), а число клиента
   // — КОМПАНИИ, и после разноса адресов по строкам одна компания даёт до
   // contactCap адресов: 2000 компаний × 5 адресов — до 10 000 лидов при потолке
@@ -8245,7 +8351,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   if (market === 'us' && okContacts > HE_LAUNCH_MAX_LEADS) {
     stageLog(
       ctx,
-      `[base_collect] адресов с вердиктом ok ${okContacts} при потолке запуска ` +
+      `[base_collect] ${engEmailPolicy ? 'допущенных адресов ok/catch_all' : 'адресов с вердиктом ok'} ${okContacts} при потолке запуска ` +
         `${HE_LAUNCH_MAX_LEADS}: запуск не откажет — возьмёт по сильнейшему адресу каждой ` +
         `компании, пока не наберёт потолок, остальные адреса не уедут. ` +
         `Компаний ${companiesTotal}, кап ${contactCap} адресов на компанию`,
@@ -8318,7 +8424,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const offTargetNote = !allOffTarget
     ? null
     : gateHypothesisScope
-      ? `Вертикаль «${vertical.name}»: ни одна из ${storedRows.length} собранных компаний не подходит под ` +
+      ? `Вертикаль «${vertical.name}»: ни одна из ${rowsBeforeEmailPolicy} собранных компаний не подходит под ` +
         'гипотезы вертикали — релевант-гейт снял все' +
         (gateHypothesisScope.unlisted > 0
           ? ` (модели показаны ${gateHypothesisScope.listed} из ` +
@@ -8327,7 +8433,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           : ` (судил по ${gateHypothesisScope.listed} неотклонённым гипотезам). `) +
         'Поиск и проверка адресов не запускались.'
       : `Вертикаль «${vertical.name}» не покрывается каталогом: релевант-гейт снял все ` +
-        `${storedRows.length} собранных компаний как не принадлежащие вертикали. ` +
+        `${rowsBeforeEmailPolicy} собранных компаний как не принадлежащие вертикали. ` +
         'Поиск и проверка адресов не запускались — рассылка по такому срезу навредила бы ' +
         'рабочим вертикалям.';
   const harvestRow = {

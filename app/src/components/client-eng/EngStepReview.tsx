@@ -30,7 +30,7 @@ import {
 import { EngSpinner } from './ui';
 import { engPlaceholderText } from './engText';
 
-/** Компактные колонки превью; остальные поля строки — в title строки таблицы. */
+/** Только клиентские колонки: служебные поля не попадают и в подсказки. */
 const PREVIEW_COLUMNS = ['company', 'website', 'email'] as const;
 const PREVIEW_LIMIT = 100;
 
@@ -61,8 +61,7 @@ export function BasePreview({ base }: { base: EngBaseSummary }) {
     }
   };
 
-  // Только компактные колонки, реально присутствующие в базе; email-статус —
-  // служебное поле строки (_email_status), в columns его нет.
+  // Только компактные колонки, реально присутствующие в базе.
   const columns = (base.columns ?? []).filter((c) => (PREVIEW_COLUMNS as readonly string[]).includes(c));
 
   return (
@@ -93,39 +92,32 @@ export function BasePreview({ base }: { base: EngBaseSummary }) {
                     {c}
                   </th>
                 ))}
-                <th className="px-3 py-2 font-semibold">email status</th>
               </tr>
             </thead>
             <tbody>
               {preview.rows.map((row, i) => (
                 <tr
                   key={i}
-                  title={JSON.stringify(row).slice(0, 600)}
                   style={{ borderTop: '1px solid var(--cp-divider)' }}
                 >
-                  {columns.map((c) => (
-                    <td key={c} className="px-3 py-1.5 truncate max-w-[220px]" style={{ color: 'var(--cp-paper)' }}>
-                      {typeof row[c] === 'string' || typeof row[c] === 'number' ? String(row[c]) : ''}
-                    </td>
-                  ))}
-                  <td
-                    className="px-3 py-1.5 ds-mono"
-                    style={{
-                      color:
-                        row._email_status === 'ok'
-                          ? 'var(--cp-green)'
-                          : row._email_status
-                            ? 'var(--cp-amber)'
-                            : 'var(--cp-text-l)',
-                    }}
-                  >
-                    {typeof row._email_status === 'string' ? row._email_status : ''}
-                  </td>
+                  {columns.map((c) => {
+                    const value = typeof row[c] === 'string' || typeof row[c] === 'number' ? String(row[c]) : '';
+                    return (
+                      <td
+                        key={c}
+                        title={value}
+                        className="px-3 py-1.5 truncate max-w-[220px]"
+                        style={{ color: 'var(--cp-paper)' }}
+                      >
+                        {value}
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
               {preview.rows.length === 0 && (
                 <tr style={{ borderTop: '1px solid var(--cp-divider)' }}>
-                  <td className="px-3 py-2" colSpan={columns.length + 1} style={{ color: 'var(--cp-text-l)' }}>
+                  <td className="px-3 py-2" colSpan={Math.max(1, columns.length)} style={{ color: 'var(--cp-text-l)' }}>
                     No contacts collected yet.
                   </td>
                 </tr>

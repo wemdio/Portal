@@ -3,8 +3,8 @@ import 'server-only';
 /**
  * Письма ENG-клиенту в ключевые моменты self-serve пути — ОДИН раз на событие.
  *
- * ЗАЧЕМ. После круга S3 клиент жмёт одну кнопку «Launch» и уходит: письма,
- * сбор базы, итоговые письма и запуск идут сами, часами. Экран обещает «We'll
+ * ЗАЧЕМ. После круга S3 клиент жмёт одну кнопку «Launch» и уходит: сбор
+ * и проверка базы, письма и запуск идут сами, часами. Экран обещает «We'll
  * email you when your markets are ready» и «We'll email you when sending starts
  * or if something needs you» — этот модуль и есть то обещание.
  *
@@ -22,8 +22,8 @@ import 'server-only';
  *      · у проектов с включённым автозапуском (нажат «Launch»):
  *        collect_stopped, autopilot_hold (паузы из MAILED_HOLD_CODES; пауза
  *        'retrying' — только продержавшаяся RETRYING_PERSIST_MS) и остановки
- *        платных стадий рынка — letters_stopped (цепочка писем),
- *        check_stopped (проверка контактов, base_analyze), final_letters_stopped
+ *        платных стадий рынка — check_stopped (проверка контактов, base_analyze),
+ *        final_letters_stopped
  *        (первые итоговые письма базы), rewrite_stopped (итоговые письма
  *        «Rewrite letters»). Об остановках стадий и о продержавшейся паузе
  *        'retrying' вместе с письмом уходит алерт команде (opsAlert,
@@ -268,16 +268,16 @@ const HOLD_PAGE = 200;
  * которых пишем сразу после отстоя. 'retrying' — отдельно: только
  * продержавшаяся RETRYING_PERSIST_MS, с советом «Launch» и алертом команде.
  * 'stage_stopped' НЕ пишем: каждую его причину (pauseForHeAutopilotSkip —
- * base_failed / collect_failed_before, chain_failed_before,
- * analysis_failed_before) уже пишет своё письмо этого прохода —
- * collect_stopped, letters_stopped, check_stopped — с проверенным советом
+ * base_failed / collect_failed_before, analysis_failed_before) уже пишет
+ * своё письмо этого прохода —
+ * collect_stopped, check_stopped — с проверенным советом
  * (у отказа, который чинит команда, — Support прежде кнопки). Второе письмо о
  * той же остановке звало бы к «Launch» без этой проверки.
  */
 const MAILED_HOLD_CODES = new Set(['letters_exhausted', 'target_missing', 'spend_paused']);
 
-/** Стадии рынка, окончательную остановку которых проход пишет клиенту. */
-const STAGE_STOP_STAGES = ['chain', 'base_analyze', 'template'];
+/** ENG writes letters only after checking the base; legacy draft failures are not actionable. */
+const STAGE_STOP_STAGES = ['base_analyze', 'template'];
 
 /**
  * Таблица намерения запуска. Владелец имени — engAutoLaunch.ts
@@ -957,6 +957,17 @@ async function retryUnsent(db: SupabaseClient, state: ScanState): Promise<'ok' |
     };
     if (!key || !notice.projectId || !isNoticeKind(notice.kind)) continue;
 
+    // A failed preliminary draft no longer holds ENG preparation. Retire an
+    // old queued notice without SMTP, including notices claimed before cutover.
+    if (notice.kind === 'action_needed' && notice.code === 'letters_stopped') {
+      await db
+        .from(HE_ENG_CLIENT_EMAILS_TABLE)
+        .update({ attempts: MAX_ATTEMPTS, last_attempt_at: new Date(state.now).toISOString() })
+        .eq('dedupe_key', key)
+        .is('sent_at', null);
+      continue;
+    }
+
     const loaded = await loadNoticeContext(db, notice, state.memo);
     if (loaded.kind === 'failed') continue; // сбой чтения — попытку не тратим
     if (loaded.kind !== 'ok') {
@@ -1352,7 +1363,6 @@ interface StageSnapshot {
   selected: Map<string, Set<string>>;
   /** Базы упавших джоб и не доливные базы их рынков. */
   bases: Row[];
-  chains: Row[];
   templates: Row[];
   /** Проекты, чей кусок чтения упёрся в limit: событий по ним в этом проходе нет. */
   cutProjects: Set<string>;
@@ -1360,9 +1370,9 @@ interface StageSnapshot {
   cutVerticals: Set<string>;
 }
 
-/** Ключ цели джобы: цепочка — вертикаль, остальные стадии — база. */
+/** Проверка и письма ENG относятся к конкретной базе. */
 function stageTarget(job: Row): string {
-  return job.stage === 'chain' ? `v:${str(job.vertical_id)}` : `b:${str(job.base_id)}`;
+  return `b:${str(job.base_id)}`;
 }
 
 /** Шаблон помечен запуском: кампания в записи или живая аренда попытки (heTemplateLaunchMarked). */
@@ -1382,16 +1392,13 @@ function isOwnAutoBase(b: Row): boolean {
  * двигается. Чистая функция; правила ровно те, что у пути «Launch»
  * (reconcileHeAutopilotProject, trigger 'client') и роута «Rewrite letters»:
  *
- *  - letters_stopped: последняя джоба цепочки ВЫБРАННОЙ вертикали 'failed',
- *    готовой цепочки нет, цепочка не идёт. «Launch» ставит цепочку заново
- *    (новый платный прогон, сколько нажатий — столько прогонов);
  *  - check_stopped: последний base_analyze базы 'failed', база всё ещё
  *    'analyzing' (финальный фейл анализа базу не трогает), по ней ничего не
  *    идёт. «Launch» ставит анализ заново ремонтом осиротевшей базы — только
  *    при условиях engAnalysisRequeues (та же функция, что у шага 3);
  *  - final_letters_stopped: последняя template-джоба 'analyzed'-базы 'failed',
  *    у базы нет ни одного шаблона. «Launch» ставит генерацию, только если это
- *    свежая своя analyzed-база рынка со строками при готовой цепочке И бюджет
+ *    свежая своя analyzed-база рынка со строками И бюджет
  *    писем не исчерпан (иначе реконсилер пишет letters_exhausted);
  *  - rewrite_stopped: то же, но у базы только снятые «Rewrite letters»
  *    шаблоны ('failed'). «Launch» это НЕ двигает (реконсилер считает шаблон
@@ -1414,6 +1421,7 @@ function stageStopEvents(input: {
   const { snapshot, projects, since, settled, nowMs } = input;
   const latestEnded = new Map<string, Row>();
   for (const job of snapshot.ended) {
+    if (!STAGE_STOP_STAGES.includes(str(job.stage))) continue;
     const key = `${str(job.project_id)}|${str(job.stage)}|${stageTarget(job)}`;
     const prev = latestEnded.get(key);
     if (!prev || ms(job.created_at) > ms(prev.created_at) || (ms(job.created_at) === ms(prev.created_at) && str(job.id) > str(prev.id))) {
@@ -1432,20 +1440,12 @@ function stageStopEvents(input: {
     const live = snapshot.live.filter((j) => str(j.project_id) === pid);
     const stage = str(job.stage);
 
-    let verticalId: string;
-    let base: Row | null = null;
-    if (stage === 'chain') {
-      verticalId = str(job.vertical_id);
-    } else {
-      base = snapshot.bases.find((b) => str(b.id) === str(job.base_id) && str(b.project_id) === pid) ?? null;
-      if (!base || isRefillBase(base)) continue;
-      verticalId = str(base.vertical_id);
-    }
+    const base = snapshot.bases.find((b) => str(b.id) === str(job.base_id) && str(b.project_id) === pid) ?? null;
+    if (!base || isRefillBase(base)) continue;
+    const verticalId = str(base.vertical_id);
     if (!verticalId || !selected.has(verticalId) || snapshot.cutVerticals.has(verticalId)) continue;
     const vTemplates = snapshot.templates.filter((t) => str(t.vertical_id) === verticalId);
     if (vTemplates.some((t) => t.status !== 'failed' || templateLaunchMarked(t, nowMs))) continue;
-    const vChains = snapshot.chains.filter((c) => str(c.vertical_id) === verticalId);
-    const chainReady = vChains.some((c) => c.status === 'ready');
     const common = {
       projectId: pid,
       verticalId,
@@ -1455,35 +1455,21 @@ function stageStopEvents(input: {
       brandInput: str(job.unpaid_refusal) === 'brand_input',
     };
 
-    if (stage === 'chain') {
-      if (chainReady) continue;
-      if (live.some((j) => j.stage === 'chain' && str(j.vertical_id) === verticalId)) continue;
-      out.push({
-        ...common,
-        code: 'letters_stopped',
-        alertStage: 'chain',
-        baseId: null,
-        button: project.spendPaused ? null : 'launch',
-        lettersBudget: false,
-      });
-      continue;
-    }
-
-    const baseId = str(base?.id);
+    const baseId = str(base.id);
     if (live.some((j) => str(j.base_id) === baseId)) continue;
     const vBases = snapshot.bases.filter((b) => str(b.vertical_id) === verticalId);
     // Состояние рынка решает его ПОСЛЕДНЯЯ своя авто-база (как у
     // collect_stopped и карточки рынка на шаге 3): остановка на более старой
     // базе рынок не держит, а у более новой — своё событие.
     const latestOwn = latestBy(vBases.filter(isOwnAutoBase), 'created_at');
-    if (!base || str(latestOwn?.id) !== baseId) continue;
+    if (str(latestOwn?.id) !== baseId) continue;
 
     if (stage === 'base_analyze') {
       if (base.status !== 'analyzing') continue;
       const requeues = engAnalysisRequeues(
         { id: baseId, row_count: base.row_count },
         vBases.map((b) => ({ id: b.id, status: b.status, source: b.source, refill: isRefillBase(b) })),
-        vChains,
+        [],
       );
       out.push({
         ...common,
@@ -1501,9 +1487,9 @@ function stageStopEvents(input: {
     const baseTemplates = vTemplates.filter((t) => str(t.base_id) === baseId);
     if (baseTemplates.length === 0) {
       // Реконсилер ставит письма свежей своей analyzed-базе рынка (это она —
-      // последняя своя) при готовой цепочке; базе без строк кабинет советует
+      // последняя своя); базе без строк кабинет советует
       // Support, а не «Launch».
-      const launchable = chainReady && num(base.row_count) > 0;
+      const launchable = num(base.row_count) > 0;
       out.push({
         ...common,
         code: 'final_letters_stopped',
@@ -1529,8 +1515,6 @@ function stageStopEvents(input: {
 /** Коды, которыми может быть заявлено письмо об упавшей джобе стадии. */
 function stageStopCodesOf(job: Row): HeEngStageStopCode[] {
   switch (job.stage) {
-    case 'chain':
-      return ['letters_stopped'];
     case 'base_analyze':
       return ['check_stopped'];
     case 'template':
@@ -1556,9 +1540,8 @@ const STAGE_BASE_COLUMNS =
  * событие по времени (окно, отстой, после нажатия Launch). Джобы, письмо о
  * которых уже заявлено, срез не читают: иначе каждое событие стоило бы пачки
  * чтений каждую минуту все 6 часов окна. Остальное читается только по ещё не
- * заявленным упавшим джобам: их базы (по id), их рынки (вертикаль цепочки или
- * базы) — выбор, не доливные базы, цепочки и шаблоны этих рынков — и идущие
- * джобы их проектов. Кусок, упёршийся в limit, даёт cutProjects / cutVerticals.
+ * заявленным упавшим джобам: их базы (по id), их рынки — выбор, не доливные
+ * базы и шаблоны этих рынков — и идущие джобы их проектов. Кусок, упёршийся в limit, даёт cutProjects / cutVerticals.
  */
 async function readStageSnapshot(
   db: SupabaseClient,
@@ -1592,7 +1575,6 @@ async function readStageSnapshot(
     live: [],
     selected: new Map(),
     bases: [],
-    chains: [],
     templates: [],
     cutProjects,
     cutVerticals,
@@ -1604,19 +1586,13 @@ async function readStageSnapshot(
   const withFailed = [...new Set(open.map((j) => str(j.project_id)))];
   if (withFailed.length === 0) return empty();
 
-  // Базы упавших джоб (базовых стадий) — по id; рынки — их вертикали и
-  // вертикали упавших цепочек.
-  const baseIds = [...new Set(open.filter((j) => j.stage !== 'chain').map((j) => str(j.base_id)).filter(Boolean))];
+  // Базы упавших проверок/писем — по id; рынки — их вертикали.
+  const baseIds = [...new Set(open.map((j) => str(j.base_id)).filter(Boolean))];
   const ownBases = await readIn(baseIds, ID_CHUNK, 'he.eng_client_mail.stage_context_failed', (part) =>
     db.from('he_bases').select(STAGE_BASE_COLUMNS).in('id', part).limit(part.length),
   );
   if (!ownBases) return null;
-  const verticalIds = [
-    ...new Set([
-      ...open.filter((j) => j.stage === 'chain').map((j) => str(j.vertical_id)),
-      ...ownBases.rows.map((b) => str(b.vertical_id)),
-    ]),
-  ].filter(Boolean);
+  const verticalIds = [...new Set(ownBases.rows.map((b) => str(b.vertical_id)).filter(Boolean))];
 
   const live = await readIn(
     withFailed,
@@ -1637,7 +1613,7 @@ async function readStageSnapshot(
   if (verticalIds.length === 0) {
     return { ...empty(), ended, live: live.rows, bases: ownBases.rows };
   }
-  const [hypotheses, marketBases, chains, templates] = await Promise.all([
+  const [hypotheses, marketBases, templates] = await Promise.all([
     readIn(
       verticalIds,
       MANY_CHUNK,
@@ -1668,13 +1644,6 @@ async function readStageSnapshot(
       verticalIds,
       MANY_CHUNK,
       'he.eng_client_mail.stage_context_failed',
-      (part) => db.from('he_chains').select('vertical_id, status').in('vertical_id', part).limit(READ_LIMIT),
-      READ_LIMIT,
-    ),
-    readIn(
-      verticalIds,
-      MANY_CHUNK,
-      'he.eng_client_mail.stage_context_failed',
       (part) =>
         db
           .from('he_templates')
@@ -1684,8 +1653,8 @@ async function readStageSnapshot(
       READ_LIMIT,
     ),
   ]);
-  if (!hypotheses || !marketBases || !chains || !templates) return null;
-  for (const read of [hypotheses, marketBases, chains, templates]) {
+  if (!hypotheses || !marketBases || !templates) return null;
+  for (const read of [hypotheses, marketBases, templates]) {
     for (const vid of read.cut) cutVerticals.add(vid);
   }
   const selected = new Map<string, Set<string>>();
@@ -1703,7 +1672,6 @@ async function readStageSnapshot(
     live: live.rows,
     selected,
     bases: [...basesById.values()],
-    chains: chains.rows,
     templates: templates.rows,
     cutProjects,
     cutVerticals,
@@ -1760,7 +1728,7 @@ function clientSeesText(
 
 const STAGE_STOP_HEADING: Record<HeEngStageStopCode, string> = {
   letters_stopped: 'Writing the letters stopped',
-  final_letters_stopped: 'Writing the final letters stopped',
+  final_letters_stopped: 'Writing the letters stopped',
   check_stopped: 'Checking the contacts stopped',
   rewrite_stopped: 'Rewriting the letters stopped',
 };

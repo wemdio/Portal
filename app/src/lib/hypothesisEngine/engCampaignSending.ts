@@ -105,6 +105,14 @@ import { logAudit, logWarn } from '@/lib/loggerServer';
 import { parseLaunchInfo, readHeLaunchLease, type HeTemplateLaunchInfo } from './launchHandoff';
 import { heTemplateNeedsRewrite } from './clientEngProjection';
 import { describeHeOptOutLines, heBrandNeedsOwner, heTemplateOptOutLines, readHeBrandEngClient } from './letterBrandGuard';
+import { readHeEngEmailPolicy } from './engEmailPolicy';
+import {
+  HE_ENG_COMPANY_QUALIFICATION_REQUIRED,
+  heEngCompanyQualified,
+  heEngLaunchQualified,
+  heEngScopeWithinCurrentCountries,
+  readHeEngQualificationScope,
+} from './engCompanyQualificationPolicy';
 import {
   checkHeCampaignAgainstAssignment,
   describeHeSendingPoolMailboxUses,
@@ -658,15 +666,44 @@ export async function startHeEngLaunchSending(input: {
     //    причины ядра запуска (шаг 4b″) — подстановки и чужая компания в
     //    письмах (с сайтом и брифом проекта, letterBrandGuard).
     if (template.status !== 'ready') return refused(409, 'letters_need_rewrite', ENG_START_LETTERS_TEXT);
+    // loadLaunch already verified the project's stored market is 'us'.
+    const companyQualification = await readHeEngEmailPolicy(portalDb, { market: 'us', created_by: loaded.project.created_by });
     let base: Record<string, unknown> | undefined;
     if (typeof template.base_id === 'string' && template.base_id) {
-      const { data: baseRow, error: baseErr } = await portalDb
+      let baseQuery = portalDb
         .from('he_bases')
-        .select('id, columns, sample_rows')
-        .eq('id', template.base_id)
-        .maybeSingle();
+        .select(companyQualification ? 'id, source, data, collect_info, columns, sample_rows' : 'id, columns, sample_rows')
+        .eq('id', template.base_id);
+      if (companyQualification) baseQuery = baseQuery.eq('project_id', projectId).eq('vertical_id', String(template.vertical_id ?? ''));
+      const { data: baseRow, error: baseErr } = await baseQuery.maybeSingle();
       if (baseErr) return refused(503, 'sending_read_failed', ENG_SENDING_ACCESS_BLIP_TEXT);
       base = (baseRow ?? undefined) as Record<string, unknown> | undefined;
+    }
+    if (companyQualification && !base) {
+      return refused(409, 'record_mismatch', HE_ENG_COMPANY_QUALIFICATION_REQUIRED);
+    }
+    if (companyQualification && base?.source === 'auto') {
+      try {
+        const brief = loaded.project.brief as Record<string, unknown> | null;
+        const scope = await readHeEngQualificationScope(portalDb, {
+          project: { id: projectId, brief },
+          verticalId: String(template.vertical_id ?? ''),
+          collectInfo: base.collect_info as Record<string, unknown> | null,
+        });
+        // A current base alone cannot prove the contents of an old campaign.
+        // Only launches whose uploads were gated have this internal stamp;
+        // later refills must match its scope before they append any recipients.
+        const rows = Array.isArray(base.data) ? base.data : [];
+        if (!heEngLaunchQualified(template.launch_info, scope, String(base.id ?? '')) ||
+            !heEngScopeWithinCurrentCountries(scope, brief) || rows.length === 0 ||
+            !rows.every((row) => row && typeof row === 'object' && !Array.isArray(row) && heEngCompanyQualified(row, scope))) {
+          return refused(409, 'record_mismatch', HE_ENG_COMPANY_QUALIFICATION_REQUIRED);
+        }
+      } catch (err) {
+        void logWarn('he.eng_sending.company_qualification_failed',
+          err instanceof Error ? err.message : String(err), ctx);
+        return refused(409, 'record_mismatch', HE_ENG_COMPANY_QUALIFICATION_REQUIRED);
+      }
     }
     // Владелец — клиент ENG-кабинета: его письма проверяются на любом языке;
     // профиль читается, только когда он меняет ответ (heBrandNeedsOwner).
