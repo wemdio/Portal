@@ -28,6 +28,8 @@ export interface LeadMessageInput {
   sourceChat?: string | null;
   messages: Array<{ role?: string; content?: string; timestamp?: string }>;
   tzOffsetHours?: number;
+  /** Пометка менеджеру над перепиской, например «без полной квалификации». */
+  note?: string | null;
 }
 
 const HEADER: Record<ForwardKind, string> = {
@@ -69,6 +71,10 @@ export function buildLeadMessage(input: LeadMessageInput): string {
   lines.push(`Никнейм: ${nick(input.username, input.tgUserId)}`);
   lines.push(`Оффер: ${input.baseName?.trim() || '—'}`);
   lines.push(`Инструмент: ${TG_OUTREACH_TOOL_URL}`);
+  if (input.note) {
+    lines.push('');
+    lines.push(input.note);
+  }
   lines.push('');
   lines.push('── Переписка ──');
 

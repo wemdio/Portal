@@ -252,6 +252,94 @@ export async function detectInterest(
   return { interested: null, error };
 }
 
+/** Контрольные вопросы кампании: по одному в строке, нумерация в начале не нужна. */
+export function parseQualificationQuestions(raw: string | undefined | null): string[] {
+  return String(raw ?? '')
+    .split('
+')
+    .map((q) => q.trim().replace(/^\d+[.)]\s*/, ''))
+    .filter(Boolean);
+}
+
+export interface QualificationCheck {
+  /** Мы уже задавали эти вопросы собеседнику (своими словами тоже считается). */
+  asked: boolean;
+  /** Номера (с 1) вопросов, на которые собеседник по существу не ответил. */
+  missing: number[];
+}
+
+/**
+ * Ответил ли собеседник на контрольные вопросы кампании. null — проверка не
+ * удалась: тогда передачу не блокируем, потерянный лид хуже неполной карточки.
+ */
+export async function checkQualification(
+  chatHistory: DialogMessage[],
+  questions: string[],
+): Promise<QualificationCheck | null> {
+  const apiKey = process.env.OPENROUTER_TG_OUTREACH_API_KEY;
+  if (!apiKey || questions.length === 0) return null;
+
+  const transcript = chatHistory
+    .slice(-INTEREST_HISTORY_MESSAGES)
+    .map(m => `${m.role === 'assistant' ? 'Мы' : 'Собеседник'}: ${m.content}`)
+    .join('
+
+');
+  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('
+');
+  const system = `Ты проверяешь переписку менеджера по продажам с потенциальным клиентом.
+
+Контрольные вопросы:
+${list}
+
+Определи:
+1. Задавали ли «Мы» собеседнику эти вопросы (хотя бы по смыслу, своими словами).
+2. На какие из них собеседник ответил по существу. «Да», «ок», «интересно», «пришлите кейсы» и отказ отвечать — это НЕ ответ.
+
+Ответь ровно двумя строками:
+ЗАДАНЫ: ДА или НЕТ
+БЕЗ ОТВЕТА: номера вопросов через запятую, или НЕТ если ответил на все`;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 2_000));
+    try {
+      const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: INTEREST_MODEL,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: transcript }],
+          max_tokens: 40,
+          temperature: 0,
+        }),
+        signal: AbortSignal.timeout(INTEREST_TIMEOUT_MS),
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as OpenRouterResponse;
+      const answer = data.choices?.[0]?.message?.content?.trim() ?? '';
+      const askedLine = answer.match(/ЗАДАНЫ:\s*(\S+)/i)?.[1]?.toLowerCase();
+      const missingLine = answer.match(/БЕЗ ОТВЕТА:\s*(.*)/i)?.[1] ?? '';
+      if (!askedLine) continue;
+      const missing = (missingLine.match(/\d+/g) ?? [])
+        .map(Number)
+        .filter((n) => n >= 1 && n <= questions.length);
+      return { asked: askedLine.startsWith('да') || askedLine.startsWith('yes'), missing: [...new Set(missing)] };
+    } catch {
+      // вторая попытка, потом null
+    }
+  }
+  return null;
+}
+
+/** Указание модели: задать только контрольные вопросы, передачу не делать. */
+export function qualificationInstruction(questions: string[], phrase: string | null): string {
+  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('
+');
+  return `Передавать контакт менеджеру пока рано: собеседник не ответил на контрольные вопросы. Коротко ответь на его реплику (без выдуманных фактов о нас) и задай нумерованным списком ровно эти вопросы, на языке собеседника:
+${list}
+Попроси ответить коротко. ${phrase ? `Фразу «${phrase}» и любые слова о передаче менеджеру не используй.` : 'Слова о передаче менеджеру не используй.'}`;
+}
+
 /** Фраза передачи менеджеру — первая строка положительных триггеров кампании. */
 export function handoffPhrase(settings: OpenAISettings): string | null {
   const first = (settings.trigger_phrases_positive ?? '')

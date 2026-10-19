@@ -22,7 +22,7 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, parseQualificationQuestions, checkQualification, qualificationInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
   stripRepeatGreeting,
 } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
@@ -1167,9 +1167,38 @@ export async function handleChat(
     const stripped = stripHandoffPhrase(replyText, phrase);
     if (stripped) replyText = stripped;
   }
-  const forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
+  let forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
   if (interested && phrase && !qualifying && !translateHandoff) {
     replyText = ensureHandoffPhrase(replyText, phrase);
+  }
+  // Обязательная квалификация: передача лида — только после ответов на
+  // контрольные вопросы кампании. Не ответил — один раз спрашиваем сами; не
+  // ответил и после этого — передаём, но с пометкой для менеджера.
+  let unqualifiedNote: string | null = null;
+  const qaQuestions = oai.qualification_required ? parseQualificationQuestions(oai.qualification_questions) : [];
+  if (qaQuestions.length > 0 && (forcePositive || detectTrigger(replyText, oai) === 'positive')) {
+    const qa = await checkQualification(chatMessages, qaQuestions);
+    if (qa === null) {
+      log('warning', `${displayName}: проверка квалификации не удалась — передача без неё`);
+    } else if (qa.missing.length > 0 && !qa.asked) {
+      log('info', `${displayName}: контрольные вопросы ещё не задавали — передачу откладываю, спрашиваю сами`);
+      try {
+        const asked = await openaiGenerate(oai, chatMessages, {
+          extraInstruction: qualificationInstruction(qaQuestions, phrase),
+          factsRule: true,
+        });
+        if (!asked) return { replied: false, triggerType: null };
+        replyText = phrase ? stripHandoffPhrase(asked, phrase) : asked;
+        forcePositive = false;
+      } catch (err) {
+        log('error', `${displayName}: не смог сформулировать контрольные вопросы — ${err instanceof Error ? err.message : String(err)}`);
+        return { replied: false, triggerType: null };
+      }
+    } else if (qa.missing.length > 0) {
+      const lost = qa.missing.map((n) => qaQuestions[n - 1]).join('; ');
+      unqualifiedNote = `⚠️ Без полной квалификации: клиент не ответил на вопросы (${lost}). Обсудите детали с ним сами.`;
+      log('warning', `${displayName}: на контрольные вопросы не ответил (${lost}) — передаю с пометкой «без квалификации»`);
+    }
   }
   if (roleOnly && !interested && detectTrigger(replyText, oai) === 'positive') {
     log('warning', `${displayName}: ответ на вопрос о роли ошибочно содержит фразу передачи; НЕ отправляю`);
@@ -1219,6 +1248,7 @@ export async function handleChat(
             baseName: origin.baseName,
             sourceChat: origin.sourceChat,
             messages: chatMessages,
+            note: unqualifiedNote,
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

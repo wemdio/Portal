@@ -516,6 +516,20 @@ function SettingsTab({ campaign, onSave }: {
           <input type="checkbox" checked={openai.handoff_direct_request_only === true} onChange={e => setOAI('handoff_direct_request_only', e.target.checked)} className="rounded border-gray-300" />
           Передавать сам только по прямой просьбе: менеджер, созвон, встреча
         </label>
+        {/* Жёсткое правило поверх промпта: лид уходит менеджеру только после
+            ответов на эти вопросы. См. OpenAISettings.qualification_required. */}
+        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
+          <input type="checkbox" checked={openai.qualification_required === true} onChange={e => setOAI('qualification_required', e.target.checked)} className="rounded border-gray-300" />
+          Передавать только после квалификации
+        </label>
+        {openai.qualification_required === true && (
+          <>
+            <FieldArea label="Контрольные вопросы (по одному в строке)" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
+            <p className="text-[10px] text-gray-400 -mt-2">
+              Не ответил на все — бот спросит один раз. Всё равно не ответил — лид уйдёт с пометкой «без полной квалификации».
+            </p>
+          </>
+        )}
       </section>
 
       {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
