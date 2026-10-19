@@ -255,8 +255,7 @@ export async function detectInterest(
 /** Контрольные вопросы кампании: по одному в строке, нумерация в начале не нужна. */
 export function parseQualificationQuestions(raw: string | undefined | null): string[] {
   return String(raw ?? '')
-    .split('
-')
+    .split(/\r?\n/)
     .map((q) => q.trim().replace(/^\d+[.)]\s*/, ''))
     .filter(Boolean);
 }
@@ -282,11 +281,8 @@ export async function checkQualification(
   const transcript = chatHistory
     .slice(-INTEREST_HISTORY_MESSAGES)
     .map(m => `${m.role === 'assistant' ? 'Мы' : 'Собеседник'}: ${m.content}`)
-    .join('
-
-');
-  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('
-');
+    .join('\n\n');
+  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
   const system = `Ты проверяешь переписку менеджера по продажам с потенциальным клиентом.
 
 Контрольные вопросы:
@@ -333,11 +329,8 @@ ${list}
 
 /** Указание модели: задать только контрольные вопросы, передачу не делать. */
 export function qualificationInstruction(questions: string[], phrase: string | null): string {
-  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('
-');
-  return `Передавать контакт менеджеру пока рано: собеседник не ответил на контрольные вопросы. Коротко ответь на его реплику (без выдуманных фактов о нас) и задай нумерованным списком ровно эти вопросы, на языке собеседника:
-${list}
-Попроси ответить коротко. ${phrase ? `Фразу «${phrase}» и любые слова о передаче менеджеру не используй.` : 'Слова о передаче менеджеру не используй.'}`;
+  const list = questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
+  return `Передавать контакт менеджеру пока рано: собеседник не ответил на контрольные вопросы. Коротко ответь на его реплику (без выдуманных фактов о нас) и задай нумерованным списком ровно эти вопросы, на языке собеседника:\n${list}\nПопроси ответить коротко. ${phrase ? `Фразу «${phrase}» и любые слова о передаче менеджеру не используй.` : 'Слова о передаче менеджеру не используй.'}`;
 }
 
 /** Фраза передачи менеджеру — первая строка положительных триггеров кампании. */
