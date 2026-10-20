@@ -19,7 +19,9 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { withVeDeadline } from './operationDeadline';
 import { beginProviderUsage, getProviderUsageScope } from '@/lib/providerUsage';
 import { veLlmRateLimit } from './llmRateLimit';
-import { isVeProviderBillingError } from './collectionErrors';
+import { isVeProviderBillingError, isVeRequestyBillingError } from './collectionErrors';
+import { getVeRequestyApiKey, veRequestyKeyFingerprint } from './requestyBalance';
+import { VeRequestyBillingError } from './requestyBillingRecovery';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -74,14 +76,6 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'claude-haiku-4-5':               { in: 1.0, out: 5.0 },
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },
 };
-
-function getApiKey(): string {
-  const key = process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY;
-  if (!key) {
-    throw new Error('OPENROUTER_HYPOTHESIS_ENGINE_API_KEY не задан (и нет fallback OPENROUTER_BRIEF_API_KEY)');
-  }
-  return key;
-}
 
 const nonnegative = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
@@ -252,12 +246,23 @@ export function getLLMValidationDiagnostic(
 
 /** Per-job context: cancelling one project must not abort a parallel project. */
 export interface VeJobClaimIdentity { id: string; startedAt: string | null }
-const jobSignals = new AsyncLocalStorage<{ signal: AbortSignal; claim: Readonly<VeJobClaimIdentity> | null }>();
+const jobSignals = new AsyncLocalStorage<{ signal: AbortSignal; claim: Readonly<VeJobClaimIdentity> | null;
+  billingError?: VeRequestyBillingError }>();
 /** Compatibility for single-flight callers/tests; workers use the scoped API. */
 let activeJobSignal: AbortSignal | null = null;
 
 export function withVeActiveJobSignal<T>(signal: AbortSignal, work: () => Promise<T>, claim?: VeJobClaimIdentity): Promise<T> {
-  return jobSignals.run({ signal, claim: claim ? Object.freeze({ ...claim }) : null }, work);
+  return jobSignals.run({ signal, claim: claim ? Object.freeze({ ...claim }) : null }, async () => {
+    try { return await work(); }
+    catch (error) {
+      const billing = jobSignals.getStore()?.billingError;
+      // Some collection checkpoints preserve errors as text. Recover typed
+      // provenance only for the actual response observed in this invocation;
+      // a child parser's402 or stale checkpoint cannot adopt this key.
+      if (billing && isVeRequestyBillingError(error)) throw billing;
+      throw error;
+    }
+  });
 }
 
 /** Captured claim, never a new lease read from the mutable database row. */
@@ -380,7 +385,7 @@ async function rawCall(
     if (attempt > 0) await sleep(RAW_RETRY_BASE_MS * 2 ** (attempt - 1), signal);
     signal.throwIfAborted();
 
-    const apiKey = getApiKey();
+    const apiKey = getVeRequestyApiKey();
     const rateGeneration = veLlmRateLimit.beforeRequest(model);
     const metering = await beginProviderUsage('requesty', { requestedModel: model });
     const scope = getProviderUsageScope();
@@ -448,7 +453,12 @@ async function rawCall(
     // A short in-call retry storm exhausts every base's budget. The worker
     // persists this wait and releases its slot, preserving paid checkpoints.
     if (rateLimit) throw rateLimit;
-    if (billing) throw err;
+    if (billing) {
+      const active = jobSignals.getStore();
+      const failure = new VeRequestyBillingError(err.message, veRequestyKeyFingerprint(apiKey));
+      if (active) active.billingError = failure;
+      throw failure;
+    }
     if (status < 500 && !RAW_RETRYABLE_STATUSES.has(status)) throw err;
     lastError = err;
   }
