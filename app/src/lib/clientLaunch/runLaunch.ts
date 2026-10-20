@@ -58,7 +58,7 @@ export interface RunClientLaunchInput {
   leads: LeadCreatePayload[];
   /** Optional schedule override; falls back to preset values. */
   scheduleOverride?: ClientLaunchScheduleOverride;
-  /** Optional behavior override (open_tracking, stop_on_reply). */
+  /** Optional client-editable behavior override (stop_on_reply). */
   behaviorOverride?: ClientLaunchBehaviorOverride;
   /**
    * Optional per-launch subset of mailboxes. When present, validated as

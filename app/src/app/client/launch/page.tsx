@@ -30,7 +30,6 @@ interface PresetSummary {
   email_account_ids: string[];
   daily_limit: number;
   daily_max_leads: number;
-  open_tracking: boolean;
   stop_on_reply: boolean;
   schedule_from: string;
   schedule_to: string;
@@ -39,7 +38,6 @@ interface PresetSummary {
 }
 
 interface LaunchBehaviorSettings {
-  open_tracking: boolean;
   stop_on_reply: boolean;
 }
 
@@ -251,7 +249,6 @@ export default function ClientLaunchPage() {
   });
   const [scheduleHydrated, setScheduleHydrated] = useState(false);
   const [behavior, setBehavior] = useState<LaunchBehaviorSettings>({
-    open_tracking: true,
     stop_on_reply: true,
   });
   // Per-launch mailbox selection. NULL = «not yet hydrated from preset».
@@ -301,8 +298,10 @@ export default function ClientLaunchPage() {
         setSchedule(draft.schedule);
         restoredFromDraftRef.current = true;
       }
-      if (draft.behavior && typeof draft.behavior === 'object') {
-        setBehavior(draft.behavior);
+      if (draft.behavior && typeof draft.behavior.stop_on_reply === 'boolean') {
+        // Only restore settings the client can edit. Old drafts may contain
+        // a hidden open_tracking flag that is now owned by the server preset.
+        setBehavior({ stop_on_reply: draft.behavior.stop_on_reply });
         restoredFromDraftRef.current = true;
       }
       if (Array.isArray(draft.selectedEmailAccountIds)) {
@@ -438,7 +437,6 @@ export default function ClientLaunchPage() {
       timezone: normalizeInstantlyTimezone(preset.schedule_timezone || 'Europe/Kirov'),
     });
     setBehavior({
-      open_tracking: preset.open_tracking !== false,
       stop_on_reply: preset.stop_on_reply !== false,
     });
     // Default mailbox selection: all preset mailboxes. Same draft-wins
@@ -2013,9 +2011,9 @@ function EmailAccountsPicker({
 /**
  * Тумблера «Отслеживать открытия писем» здесь больше нет: метрику открытий
  * убрали из клиентской статистики как недостоверную (см. lib/clientOpenMetrics.ts),
- * а настройка без видимого результата только путает. Поле open_tracking
- * осталось в behavior — оно приходит из пресета менеджера и уходит в payload
- * как раньше, просто клиент его больше не переключает.
+ * а настройка без видимого результата только путает. Трекинг сервер берёт
+ * из актуального пресета менеджера; в клиентских настройках и черновике
+ * остаётся только доступная клиенту остановка цепочки при ответе.
  */
 function BehaviorEditor({
   behavior,
