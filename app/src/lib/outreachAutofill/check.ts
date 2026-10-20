@@ -130,20 +130,26 @@ async function handleFinishedJob(lang: AutofillLang, now: Date, log: Log): Promi
   const state = folder ? stateOf(folder, now) : row.last_state;
   const until = shortDate(state?.baseUntil ?? null);
 
-  const short = target > 0 && companies < target / 2;
+  // Авария сбора или заливки не доказывает, что источники иссякли.
+  const short = status === 'completed' && !problem && target > 0 && companies < target / 2;
   const streak = short ? row.short_streak + 1 : 0;
 
-  if (status === 'failed' && companies === 0) {
-    await notifyAutofill(lang, `автосбор упал: ${String(job.error_message ?? 'причина не записана')}. База до ${until}`, { tag: true });
+  if (status === 'failed') {
+    const reason = String(job.error_message ?? '').trim() || 'причина не записана';
+    const deliveryProblem = problem ? ` ${problem}.` : '';
+    await notifyAutofill(
+      lang,
+      `автосбор остановился с ошибкой: ${reason}. Нужно ${target}, собрано ${companies}. База до ${until}.${deliveryProblem}`,
+      { tag: true },
+    );
   } else if (problem) {
     await notifyAutofill(lang, problem, { tag: true });
   } else if (companies >= target) {
     await notifyAutofill(lang, `добрано ${companies} компаний, база до ${until}`, { tag: false });
   } else {
     const why = stopReason ? ` (${stopReason})` : '';
-    // Когда следующая проверка — вечером того же дня, «завтра доберу» было
-    // неправдой: добор будет через несколько часов.
-    const when = nextCheckIsToday(now) ? 'вечером доберу' : 'завтра доберу';
+    // Сообщаем время проверки, не обещаем успешный добор после остановки.
+    const when = nextCheckIsToday(now) ? 'следующая проверка базы — вечером' : 'следующая проверка базы — завтра утром';
     await notifyAutofill(lang, `нужно ${target}, собрано ${companies}${why}, база до ${until}, ${when}`, { tag: true });
   }
   if (streak >= 2) {

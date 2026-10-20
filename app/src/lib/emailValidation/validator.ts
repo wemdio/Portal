@@ -301,6 +301,20 @@ function isInconclusiveTransport(r: SmtpCheckResult): boolean {
 const RCPT_4XX_EGRESS_RE =
   /(cannot find your (host)?name|client host rejected|unknown (client|host)|reverse.?dns|missing.?ptr|no.?ptr|ptr.?record|\brdns\b|fcrdns|helo.?(command|name)?.?reject|reputation|spamhaus|barracuda|block.?list)/i;
 
+// Только явные признаки блокировки НАШЕГО IP, не произвольный policy/5.7.1:
+// ограничения получателя, квота и настоящий user-unknown сменой IP не лечатся.
+const RCPT_5XX_EGRESS_RE =
+  /(spamhaus|barracuda|spamcop|client host rejected|cannot find your (host)?name|reverse.?dns|missing.?ptr|no.?ptr|ptr.?record|\brdns\b|fcrdns|(?:sending|sender|source|client|remote)\s+(?:ip|host|address).{0,100}(?:block|blacklist|denylist|reputation)|\bip(?:\s+address)?\b.{0,100}(?:blacklist|denylist|reputation|blocked))/i;
+
+function isPermanentEgressRejection(result: SmtpCheckResult, email: string): boolean {
+  if (result.code < 500 || result.code >= 600 || result.exists === true || result.isCatchAll === true || result.greylist) return false;
+  if (classifyRcpt5xx(result.smtpText, email) !== 'unknown') return false;
+  // Не принимаем имя/домен самого адресата в эхо-ответе за признак блокировки.
+  const escapedEmail = email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const text = (result.smtpText ?? '').replace(/<[^>]*>/g, ' ').replace(new RegExp(escapedEmail, 'gi'), ' ');
+  return !RCPT_QUOTA_RE.test(text) && RCPT_5XX_EGRESS_RE.test(text);
+}
+
 async function smtpVerifyViaProxy(
   email: string,
   mxHost: string,
@@ -345,6 +359,21 @@ async function smtpVerifyViaProxy(
       }
 
       const result = (await res.json()) as SmtpCheckResult;
+      // Например, Microsoft 550 «Client host [IP] blocked using Spamhaus»:
+      // другой egress может подтвердить тот же ящик. Запоминаем блокировку
+      // только для этого MX, как при сетевом отказе; проверяем каждый прокси
+      // не более одного раза. Если не помог ни один, результат остаётся unknown.
+      if (isPermanentEgressRejection(result, email)) {
+        markEgressBlocked(mxHost, baseUrl);
+        lastInconclusive = {
+          ...result,
+          exists: null,
+          isCatchAll: null,
+          error: `Egress rejected by MX policy (${result.code}): ${result.smtpText}`,
+        };
+        lastError = lastInconclusive.error;
+        continue;
+      }
       // Definitive answer (mailbox exists/catch-all/greylist, or a plain
       // all-null with no transport error) → return immediately.
       if (!isInconclusiveTransport(result)) {
