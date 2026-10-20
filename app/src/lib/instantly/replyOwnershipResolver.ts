@@ -38,6 +38,8 @@ const RECOVERY_EVIDENCE_TIME_BUDGET_MS = 45_000;
 interface MappedCampaigns {
   allCampaignIds: string[];
   currentCampaignIds: string[];
+  draftCampaignIds: string[];
+  knownMappingStatuses: boolean;
   /** A live positive cache omitted the email's provider campaign, so we refreshed it. */
   refreshedForProviderMismatch?: boolean;
 }
@@ -200,21 +202,27 @@ async function getMappedCampaigns(
   // getAccountCampaignMappings drains every provider cursor (the live endpoint
   // otherwise defaults to 10). Draft/completed (0/3) assignments are history;
   // paused, subsequence and temporary account-health states still own replies.
-  const items = parseAccountCampaignMappingItems(raw)
+  const rawItems = parseAccountCampaignMappingItems(raw);
+  const items = rawItems
     .map((item) => ({
       id: mappingCampaignId(item),
+      draft: item.status === CampaignStatus.Draft,
       current:
         typeof item.status === 'number' &&
         item.status !== CampaignStatus.Draft &&
         item.status !== CampaignStatus.Completed,
       createdAt: Date.parse(item.timestamp_created ?? '') || 0,
     }))
-    .filter((item): item is { id: string; current: boolean; createdAt: number } =>
+    .filter((item): item is { id: string; draft: boolean; current: boolean; createdAt: number } =>
       Boolean(item.id),
     )
     .sort((a, b) => Number(b.current) - Number(a.current) || b.createdAt - a.createdAt);
   const value: MappedCampaigns = {
     allCampaignIds: [...new Set(items.map((item) => item.id))],
+    draftCampaignIds: [...new Set(items.filter((item) => item.draft &&
+      !items.some(other => other.id === item.id && !other.draft)).map((item) => item.id))],
+    knownMappingStatuses: rawItems.every(item => Object.values(CampaignStatus)
+      .some(status => status === item.status)),
     currentCampaignIds: [
       ...new Set(items.filter((item) => item.current).map((item) => item.id)),
     ],
@@ -380,6 +388,16 @@ async function recoverCurrentTagOwners(
   const denied = await db.from('project_instantly_campaigns_denylist')
     .select('campaign_id').eq('project_id', projectId).in('campaign_id', current);
   if (denied.error || denied.data?.length) return recovered;
+  if (!await shareExclusiveProjectTag(current, accountId)) return recovered;
+  for (const id of unknown) {
+    links.projectsByCampaign.set(id, new Set([projectId]));
+    recovered.add(id);
+  }
+  return recovered;
+}
+
+async function shareExclusiveProjectTag(current: string[], accountId?: string): Promise<boolean> {
+  if (!current.length || current.length > MAX_SENDER_SCOPE_INSPECTIONS) return false;
   const reserveTags = await reservedPoolTagIds(accountId);
   const projectTags = reservedTagCache.get(accountId ?? 'main')!.nonReserveIds;
   let commonTag: string | undefined;
@@ -396,14 +414,10 @@ async function recoverCurrentTagOwners(
       campaignScopeCache.set(key, scope);
     }
     const tag = scope.exclusiveTagId;
-    if (!tag || !projectTags.has(tag) || (commonTag && commonTag !== tag)) return recovered;
+    if (!tag || !projectTags.has(tag) || (commonTag && commonTag !== tag)) return false;
     commonTag = tag;
   }
-  for (const id of unknown) {
-    links.projectsByCampaign.set(id, new Set([projectId]));
-    recovered.add(id);
-  }
-  return recovered;
+  return true;
 }
 
 function campaignOwnerKeys(links: OwnershipLinks, campaignId: string): string[] {
@@ -497,12 +511,14 @@ interface SubjectlessDirectQuote {
   body: string;
 }
 
-/** A direct changed-address reply may omit Subject from its quoted headers.
+/** A direct reply may omit Subject from its quoted headers.
  * Keep this separate from quotedOutbounds(): it is only a bounded lookup hint
  * until a real send matches its full body, addresses, subject and sent minute.
+ * Same-recipient parsing is opt-in for the independent mailbox-project guard;
+ * it must not widen the existing changed-address conversation-proof paths.
  * Unsupported dates, forwards and contradictory headers stay on the old path.
  */
-function subjectlessDirectQuote(reply: Email): SubjectlessDirectQuote | null {
+function subjectlessDirectQuote(reply: Email, allowSameRecipient = false): SubjectlessDirectQuote | null {
   const mailbox = normalizeMailbox(reply.eaccount);
   const responder = normalizeMailbox(reply.from_address_email);
   const replyAt = emailTs(reply);
@@ -547,7 +563,7 @@ function subjectlessDirectQuote(reply: Email): SubjectlessDirectQuote | null {
 
   // Only the observed timezone-bearing format, not locale-dependent Date.parse.
   const dated = /^(?:[А-ЯЁа-яё]+,\s*)?(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(\d{4}),?\s+(\d{2}):(\d{2})\s+([+-])(\d{2}):(\d{2})$/iu.exec(date);
-  if (!dated || !recipient || recipient === responder || recipient === mailbox) return null;
+  if (!dated || !recipient || (!allowSameRecipient && recipient === responder) || recipient === mailbox) return null;
   const month = [
     'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
     'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
@@ -567,6 +583,41 @@ function subjectlessDirectQuote(reply: Email): SubjectlessDirectQuote | null {
   const body = lines.slice(bodyAt).join('\n');
   if (at >= replyAt || !subject || normalizeQuotedText(body).length < 160) return null;
   return { sender: mailbox, recipient, at, subject, body };
+}
+
+/** No outbound was found: recover only a PROJECT from independently exclusive
+ * mailbox configuration, not a conversation from untrusted quoted text. A
+ * same-address, same-day direct reply limits this fallback; any known mailbox
+ * rotation or non-draft unknown mapping still needs a real outbound parent.
+ * The manual anchor is a representative campaign, never a claim that it sent
+ * the quoted offer. Do not persist campaign links or fabricate lastOutbound.
+ */
+async function directReplyMailboxProject(args: {
+  db: SupabaseClient; reply: Email; leadEmail: string; providerCampaignId: string;
+  mappings: MappedCampaigns; links: OwnershipLinks; accountId?: string;
+}): Promise<{ campaignId: string; projectId: string } | null> {
+  const { db, reply, leadEmail, providerCampaignId, mappings, links, accountId } = args;
+  if (!mappings.knownMappingStatuses || mappings.allCampaignIds.includes(providerCampaignId)) return null;
+  const quote = subjectlessDirectQuote(reply, true);
+  const responder = normalizeMailbox(reply.from_address_email);
+  if (!quote || quote.recipient !== responder || normalizeMailbox(leadEmail) !== responder ||
+      normalizeMailbox(reply.lead) !== responder || recipientMailboxIdentities(reply).size !== 1 ||
+      emailTs(reply) - quote.at > 24 * 60 * 60 * 1000) return null;
+  const current = mappings.currentCampaignIds;
+  const owners = [...new Set(current.flatMap(id => campaignOwnerKeys(links, id)))];
+  if (owners.length !== 1 || !owners[0].startsWith('project:')) return null;
+  const campaignId = current.find(id => links.manualCampaignIds.has(id));
+  if (!campaignId) return null;
+  const projectId = projectIdFromOwnerKey(owners[0])!;
+  // Only an unlinked draft can be ignored. Completed/unknown-status mappings,
+  // self-service clients, duplicate links and any historical foreign project
+  // are not evidence of an exclusive owner, even if today's tags agree.
+  if (mappings.allCampaignIds.some(id => campaignOwnerKeys(links, id).some(owner =>
+    owner !== owners[0] && !(owner.startsWith('unknown:') && mappings.draftCampaignIds.includes(id))))) return null;
+  const denied = await db.from('project_instantly_campaigns_denylist')
+    .select('campaign_id').eq('project_id', projectId).in('campaign_id', mappings.allCampaignIds);
+  if (denied.error || denied.data?.length || !await shareExclusiveProjectTag(current, accountId)) return null;
+  return { campaignId, projectId };
 }
 
 function matchesSubjectlessDirectQuote(
@@ -712,6 +763,16 @@ function collectCampaignEvidence(
   const quotes = quotedOutbounds(reply, mailbox);
   const conversationParents = new Set(verifiedConversationParents(emails, reply)
     .map(email => `${email.campaign_id}:${email.id}`));
+  // The missing-send fallback must not erase a real parent merely because its
+  // old campaign is no longer mapped to this mailbox. Retain it as a veto, not
+  // an inferred owner; ordinary candidate-based resolution is unchanged.
+  const directQuote = subjectlessDirectQuote(reply, true);
+  if (directQuote?.recipient === normalizeMailbox(reply.from_address_email)) {
+    for (const email of emails) {
+      if (email.campaign_id && (matchesSubjectlessDirectQuote(email, reply, directQuote) ||
+          conversationParents.has(`${email.campaign_id}:${email.id}`))) campaignSet.add(email.campaign_id);
+    }
+  }
   const identities = new Set(
     [reply.lead, leadEmail, reply.from_address_email]
       .flatMap((value) => emailAddressTokens(value))
@@ -735,7 +796,7 @@ function collectCampaignEvidence(
   }
 
   const evidence = new Map<string, CampaignEvidence>();
-  for (const campaignId of campaignIds) {
+  for (const campaignId of campaignSet) {
     const contextEmails = [...unique.values()]
       .filter((email) => email.campaign_id === campaignId)
       .sort((a, b) => emailTs(a) - emailTs(b));
@@ -1016,7 +1077,9 @@ async function resumeWorkspaceEvidence(args: {
     // Prior negative searches excluded cross-mailbox original recipients/sends.
     // Keep durable pagination, but never reuse their incomplete proof.
     // Only this new shape invalidates searches that omitted its original recipient.
-    evidenceVersion: subjectlessDirectQuote(args.reply) ? 4 : 3,
+    // Previous same-recipient checkpoints discarded parents outside mappings.
+    evidenceVersion: subjectlessDirectQuote(args.reply, true)?.recipient === normalizeMailbox(args.reply.from_address_email)
+      ? 5 : subjectlessDirectQuote(args.reply) ? 4 : 3,
     accountId: args.accountId ?? 'main',
     // Changing a body, mailbox, identity, timestamp, thread or owner scope
     // invalidates both cursors. Never reuse another reply's classification.
@@ -1472,6 +1535,9 @@ export async function resolveEffectiveReplyOwner(args: {
   // the refreshed mapping permanently. That is a reason to prove the parent,
   // not to defer before every evidence scan and restart this loop forever.
 
+  // Keep the unfiltered history for the stricter missing-send fallback below:
+  // removing reserve mappings must not silently erase its rotation veto.
+  const unfilteredMappings = mappings;
   // Exact-mailbox mappings are ownership evidence unless their campaign uses a
   // reserve inventory tag. Current mappings choose the representative campaign
   // when all valid mappings belong to one owner; historical mappings remain
@@ -1722,6 +1788,24 @@ export async function resolveEffectiveReplyOwner(args: {
       candidateProjectIds,
       reason: 'workspace ownership evidence exceeded the bounded page budget',
     };
+  }
+  if (campaignParentMatches(workspaceEvidence.evidence, [...workspaceEvidence.evidence.keys()]).length === 0 &&
+      !conversationEmails.some(email => email.ue_type === 1 || email.ue_type === 3)) {
+    try {
+      const owner = await directReplyMailboxProject({
+        db, reply, leadEmail, providerCampaignId, mappings: unfilteredMappings, links, accountId,
+      });
+      if (owner) return {
+        status: 'resolved', providerCampaignId, effectiveCampaignId: owner.campaignId,
+        effectiveProjectId: owner.projectId,
+        context: correctedContext(reply, owner.campaignId, mailbox, [], null),
+        corrected: true, mailboxVerified: true,
+        reason: 'complete parent search found no outbound; same-day direct reply and exclusive project tag/manual anchor prove mailbox project (representative campaign, not a verified send)',
+      };
+    } catch (error) {
+      return { status: 'defer', providerCampaignId,
+        reason: `exclusive mailbox project evidence unavailable: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
   // Historical assignments alone are not a present-day ownership conflict.
   // This fallback is deliberately AFTER the complete parent search: a late
