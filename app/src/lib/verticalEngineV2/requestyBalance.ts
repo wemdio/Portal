@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 
 const ORG_URL = 'https://api-v2.requesty.ai/v1/manage/org';
-const SELF_URL = 'https://api-v2.requesty.ai/v1/manage/apikey/self';
+const KEY_URL = 'https://api-v2.requesty.ai/v1/manage/apikey';
+const SELF_URL = `${KEY_URL}/self`;
 const TIMEOUT_MS = 8_000;
 const MAX_RESPONSE_BYTES = 32_768;
 
@@ -21,7 +22,7 @@ interface VeRequestyKnownBalance extends VeRequestyCreditSignal {
 type UnavailableReason = 'missing_api_key' | 'invalid_api_key' | 'authentication_failed'
   | 'management_forbidden' | 'rate_limited' | 'provider_unavailable' | 'http_error'
   | 'invalid_response' | 'response_too_large' | 'timeout' | 'aborted' | 'network_error'
-  | 'group_budget_unknown';
+  | 'group_budget_unknown' | 'invalid_management_key' | 'management_key_mismatch';
 
 export type VeRequestyBalanceResult =
   | (VeRequestyKnownBalance & { status: 'usable'; reason: 'credit_available' })
@@ -66,7 +67,7 @@ function discardBody(response: Response): void {
   void response.body?.cancel().catch(() => undefined);
 }
 
-async function managementJson(url: typeof ORG_URL | typeof SELF_URL, apiKey: string,
+async function managementJson(url: typeof ORG_URL | `${typeof KEY_URL}/${string}`, apiKey: string,
   fetchImpl: typeof fetch, signal: AbortSignal): Promise<Record<string, unknown>> {
   const response = await fetchImpl(url, {
     method: 'GET', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
@@ -114,8 +115,9 @@ async function managementJson(url: typeof ORG_URL | typeof SELF_URL, apiKey: str
 }
 
 /**
- * Read-only management checks with the same credential as inference. No model
- * probe, retry, alternative key, configurable origin, or response logging.
+ * Read-only management checks. An optional management credential reads the org
+ * balance; the inference credential still proves its own identity and budget.
+ * No model probe, retry, configurable origin, or response logging.
  *
  * `usable` is a billing signal, not proof that an arbitrary model call will
  * succeed. The caller must match keyFingerprint and require a genuine credit
@@ -124,6 +126,7 @@ async function managementJson(url: typeof ORG_URL | typeof SELF_URL, apiKey: str
  */
 export async function readVeRequestyBalance(options: {
   apiKey?: string;
+  managementApiKey?: string;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
 } = {}): Promise<VeRequestyBalanceResult> {
@@ -137,6 +140,11 @@ export async function readVeRequestyBalance(options: {
   const unavailable = (reason: UnavailableReason): VeRequestyBalanceResult =>
     ({ status: 'unavailable', reason, keyFingerprint });
   if (options.signal?.aborted) return unavailable('aborted');
+  const managementApiKey = options.managementApiKey ?? process.env.VE_REQUESTY_MANAGEMENT_API_KEY ?? '';
+  if (managementApiKey.length > 4_096 || /\s/.test(managementApiKey)) {
+    return unavailable('invalid_management_key');
+  }
+  const orgApiKey = managementApiKey || apiKey;
 
   const controller = new AbortController();
   let timedOut = false;
@@ -152,7 +160,7 @@ export async function readVeRequestyBalance(options: {
     const fetchImpl = options.fetchImpl ?? fetch;
     const [org, key] = await Promise.race([
       Promise.all([
-        managementJson(ORG_URL, apiKey, fetchImpl, controller.signal),
+        managementJson(ORG_URL, orgApiKey, fetchImpl, controller.signal),
         managementJson(SELF_URL, apiKey, fetchImpl, controller.signal),
       ]), stopped,
     ]);
@@ -162,11 +170,21 @@ export async function readVeRequestyBalance(options: {
     const permissions = record(key.permissions);
     if (balanceUsd === null || monthlySpendUsd === null || monthlyLimitUsd === null
       || typeof key.id !== 'string' || !key.id || key.id.length > 128
+      || !/^[a-zA-Z0-9_-]+$/.test(key.id) || key.id === 'self'
       || !permissions || typeof permissions.manage !== 'string'
       || !['none', 'read', 'write'].includes(permissions.manage)
       || typeof permissions.completions !== 'string'
       || !['none', 'read', 'write'].includes(permissions.completions)) {
       return unavailable('invalid_response');
+    }
+    if (orgApiKey !== apiKey) {
+      // A funded key from another organization must not resume this job. Prove
+      // that the management credential can read the exact inference key in its
+      // org, without trusting a configured key ID or the management key's limit.
+      const managedKey = await Promise.race([
+        managementJson(`${KEY_URL}/${key.id}`, orgApiKey, fetchImpl, controller.signal), stopped,
+      ]);
+      if (managedKey.id !== key.id) return unavailable('management_key_mismatch');
     }
     if (key.group != null) return unavailable('group_budget_unknown');
     const creditSignal = { balanceUsd, monthlySpendUsd, monthlyLimitUsd };
