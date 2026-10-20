@@ -20,6 +20,16 @@ const LEAVE_SUBSTITUTE_NOTICE = new RegExp(
   String.raw`^(?:с\s+\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4})?\s+)?(?:я\s+)?нахожусь\s+в\s+декретном\s+отпуске[.!]?\s+по\s+всем\s+вопросам\s+(?:прошу\s+)?обращаться\s+к\s+(?:региональному\s+менеджеру|менеджеру|моему\s+коллеге|коллеге)\s+[А-ЯЁ][а-яё-]{1,40}(?:\s+[А-ЯЁ][а-яё-]{1,40}){0,2}\s+\((${NOTICE_EMAIL})\)[,.]?\s*(?:тел\.?\s*[+:]?\s*[\d ()+-]{7,30})?[.!]?$`,
   'iu',
 );
+const NOTICE_PERSON = String.raw`[А-ЯЁ][а-яё-]{1,40}(?:\s+[А-ЯЁ][а-яё-]{1,40}){1,2}`;
+const NOTICE_COMPANY = String.raw`(?:АО|ПАО|ООО)\s+(?:"[\p{L}\p{N} .&()/-]{1,100}"|«[\p{L}\p{N} .&()/-]{1,100}»)`;
+const DEPARTURE_COMPANY_SIGNATURE = new RegExp(String.raw`^${NOTICE_COMPANY}$`, 'iu');
+// A complete staff-change notice is administrative, even under a project's
+// "shared a contact" criterion. Require the successor AND no-reply footer;
+// additional human discussion must fail open, not disappear behind a keyword.
+const DEPARTED_EMPLOYEE_NOTICE = new RegExp(
+  String.raw`^${NOTICE_PERSON}\s+(?:(?:более|больше)\s+)?не\s+работает\s+в\s+${NOTICE_COMPANY},\s*(?:е[её]|его)\s+дела\s+переданы\s+${NOTICE_PERSON}\s+${NOTICE_EMAIL}\.?\s+(?:телефон\s+компании:\s*[+\d ()-]{7,30}\s+)?(?:данное|это)\s+(?:письмо|сообщение)\s+(?:не\s+)?ответа\s+не\s+требует[.!]?$`,
+  'iu',
+);
 const UNAVAILABLE_DIRECTORY_SUBJECT = /^данная почта недоступна,\s*по всем вопросам обращайтесь пожалуйста к нужному специалисту:\s*(?:(?:re|fw|fwd):[\s\S]*)?$/iu;
 const DIRECTORY_ROLE = String.raw`(?:административный специалист|бухгалтерия|отдел продаж|инструкции на прием порожних|импорт|экспорт|отдел по работе с клиентами)`;
 const DIRECTORY_CONTACT = new RegExp(
@@ -45,12 +55,19 @@ function isUnavailableMailboxDirectory(subject: string, body: string): boolean {
 export function classifyCompleteAuthoredServiceReply(
   authoredBody: string,
   subject = '',
+  signatureTail = '',
 ): 'auto_reply' | 'service_acknowledgement' | null {
   if (isUnavailableMailboxDirectory(subject, authoredBody)) return 'auto_reply';
   const compact = authoredBody.replace(/\s+/gu, ' ').trim();
   if (!compact || compact.length > 1_000) return null;
   const content = compact.replace(SIMPLE_GREETING, '').trim();
   if (LEAVE_SUBSTITUTE_NOTICE.test(content)) return 'auto_reply';
+  // The caller has removed the signature from authoredBody. For this terminal
+  // shortcut, accept only an empty tail or the company field, never arbitrary
+  // prose below "regards" (a buyer request need not have a question or P.S.).
+  const signature = signatureTail.replace(/\s+/gu, ' ').trim();
+  if (DEPARTED_EMPLOYEE_NOTICE.test(content) &&
+      (!signature || DEPARTURE_COMPANY_SIGNATURE.test(signature))) return 'auto_reply';
   const withoutReceipt = content.replace(RECEIPT_ONLY, '').trim();
   if (withoutReceipt !== content &&
       (!withoutReceipt || GENERIC_CONTACT_PROMISE.test(withoutReceipt) ||
