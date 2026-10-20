@@ -28,10 +28,14 @@ type Row = Record<string, unknown>;
 const mockLogs: string[] = [];
 const mockTransitions: Row[] = [];
 const mockUpdates: Array<{ table: string; values: Row }> = [];
-const mockState = { jobStatus: 'running', transitionFailures: 0, completionFailures: 0, baseFailures: 0, stopped: false };
+const mockState = {
+  jobStatus: 'running', transitionFailures: 0, completionFailures: 0, baseFailures: 0, stopped: false,
+  recoveryBaseStatus: null as string | null, recoveryPreparationPaused: false, recoveryEligibilityReadError: false,
+};
 let mockJobStartedAt: string | null = null;
 const mockPool: { run?: (job: unknown) => Promise<void> } = {};
 const mockRunVeStage = jest.fn();
+let mockBillingError: new (message: string, keyFingerprint: string) => Error;
 
 /** Just enough of the admin client for the worker's own bookkeeping. */
 function mockDb() {
@@ -42,6 +46,10 @@ function mockDb() {
     const result = () => {
       if (op !== 'select') {
         mockUpdates.push({ table, values });
+        if (table === 've_jobs' && values.status === 'pending') {
+          mockState.jobStatus = 'pending';
+          if (values.started_at === null) mockJobStartedAt = null;
+        }
         if (table === 've_jobs' && values.status === 'done') {
           mockState.jobStatus = 'done';
           // Commit succeeded; its response was lost.
@@ -53,6 +61,14 @@ function mockDb() {
       if (table === 've_jobs' && columns.startsWith('status')) return { data: { status: mockState.jobStatus, started_at: mockJobStartedAt }, error: null };
       if (table === 've_jobs') return { data: [], error: null };
       if (table === 've_projects') return { data: { market: 'ru', tokens_used: 0, cost_usd: 0 }, error: null };
+      if (table === 've_bases' && mockState.recoveryBaseStatus !== null) {
+        return mockState.recoveryEligibilityReadError
+          ? { data: null, error: { message: 'fetch failed' } }
+          : { data: { id: BASE_ID, project_id: 'p1', status: mockState.recoveryBaseStatus }, error: null };
+      }
+      if (table === 've_outreach_preparations') return {
+        data: mockState.recoveryPreparationPaused ? [{ paused_at: '2026-10-20T10:00:00Z', cancelled_at: null }] : [], error: null,
+      };
       return { data: null, error: null };
     };
     const builder: Row = new Proxy({}, {
@@ -114,7 +130,7 @@ const BASE_ID = '0482f88b-0c6d-4509-a6ce-22278847ad21';
 // Job 896efda6 on production, with four failed attempts behind it.
 const job = (extra: Row = {}) => ({
   id: '896efda6-4713-49e6-8003-bdc29510fd9d', project_id: 'p1', stage: 'base_collect', status: 'running',
-  attempts: 4, error: null, started_at: null, tokens_used: 0, cost_usd: 0, result: null,
+  attempts: 4, error: null, started_at: null as string | null, tokens_used: 0, cost_usd: 0, result: null as Row | null,
   created_at: '2026-09-23T05:42:33Z', updated_at: '2026-09-23T09:05:38Z',
   payload: { limit: 5000, base_id: BASE_ID, ready_target: 500, hypothesis_id: 'h1', collection_mode: 'target', ...extra },
 });
@@ -134,8 +150,13 @@ beforeAll(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
   processExit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
   // The worker starts itself on import (main()); load it once the fake clock is set.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  jest.isolateModules(() => { require('../../../worker/verticalEngineV2'); });
+  jest.isolateModules(() => {
+    // The error and worker must share the same module/class identity.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    mockBillingError = require('@/lib/verticalEngineV2/requestyBillingRecovery').VeRequestyBillingError;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('../../../worker/verticalEngineV2');
+  });
 });
 afterAll(() => {
   jest.useRealTimers();
@@ -149,6 +170,8 @@ beforeEach(() => {
   mockJobStartedAt = null;
   mockState.transitionFailures = mockState.completionFailures = mockState.baseFailures = 0;
   mockState.stopped = false;
+  mockState.recoveryBaseStatus = null;
+  mockState.recoveryPreparationPaused = mockState.recoveryEligibilityReadError = false;
   mockRunVeStage.mockReset();
   global.fetch = realFetch;
 });
@@ -160,6 +183,80 @@ async function runJob(claimed: ReturnType<typeof job>, advanceMs: number): Promi
 }
 
 describe('VE2 worker: hangs do not spend attempts', () => {
+  it('parks a proven Requesty billing failure without failing a base or project, and preserves cancellation and newer claims', async () => {
+    const checkpoint = { relevance_checkpoint: { accepted: ['saved-company'] } };
+    for (const stage of ['base_collect', 'base_analyze', 'template', 'site_profile', 'segmentation_audit']) {
+      mockState.jobStatus = 'running';
+      mockTransitions.length = 0;
+      mockUpdates.length = 0;
+      mockRunVeStage.mockReset().mockRejectedValue(new mockBillingError('Requesty 402: payment required', 'a'.repeat(64)));
+      const claimed = { ...job(), stage, result: checkpoint };
+      await runJob(claimed, 0);
+      expect(mockRunVeStage).toHaveBeenCalledTimes(1);
+      expect(mockState.jobStatus).toBe('pending');
+      expect(mockTransitions).toEqual([expect.objectContaining({
+        jobId: claimed.id, status: 'pending', attempts: 4, finishedAt: null,
+        runAfter: '9999-12-31T00:00:00.000Z',
+        payload: expect.objectContaining({ base_id: BASE_ID, limit: 5000,
+          requesty_billing_wait: expect.objectContaining({ version: 1, key_fingerprint: 'a'.repeat(64) }) }),
+      })]);
+      expect(mockTransitions[0]).not.toHaveProperty('result');
+      expect(claimed.result).toBe(checkpoint);
+      expect(mockUpdates.filter((u) => u.table === 've_bases' || u.table === 've_projects')).toEqual([]);
+    }
+    for (const reason of ['cancelled', 'newer_claim']) {
+      mockState.jobStatus = 'running';
+      mockTransitions.length = 0;
+      mockRunVeStage.mockReset().mockImplementation(async () => {
+        if (reason === 'cancelled') mockState.jobStatus = 'cancelled';
+        else mockJobStartedAt = new Date(Date.now() + 1000).toISOString();
+        throw new mockBillingError('Requesty 402: payment required', 'a'.repeat(64));
+      });
+      await runJob(job(), 0);
+      expect(mockTransitions).toEqual([]);
+      mockJobStartedAt = null;
+    }
+    // A stored error from another worker/key has no authority to auto-resume.
+    mockState.jobStatus = 'running';
+    mockRunVeStage.mockReset().mockRejectedValue(new Error('Requesty 402: payment required'));
+    await runJob(job(), 0);
+    expect(mockState.jobStatus).toBe('failed');
+    expect(mockTransitions[0]).toMatchObject({ status: 'failed', attempts: 5 });
+
+    // A confirmed top-up can release a job before a specialist pauses it. The
+    // actual worker must recheck permission before dispatching the paid stage.
+    for (const mode of ['paused', 'eligibility_unreadable', 'eligible', 'already_analyzed']) {
+      mockState.jobStatus = 'running';
+      mockState.recoveryBaseStatus = mode === 'already_analyzed' ? 'analyzed' : 'analyzing';
+      mockState.recoveryPreparationPaused = mode === 'paused';
+      mockState.recoveryEligibilityReadError = mode === 'eligibility_unreadable';
+      mockTransitions.length = mockUpdates.length = mockLogs.length = 0;
+      mockRunVeStage.mockReset().mockResolvedValue({ result: { analysis: 'saved' } });
+      const claimed = { ...job({ requesty_billing_wait: null, requesty_billing_recovery: {
+        version: 1, key_fingerprint: 'a'.repeat(64), blocked_at: '2026-10-20T09:00:00Z', resumed_at: '2026-10-20T10:00:00Z',
+      } }), stage: 'base_analyze', started_at: new Date().toISOString(), result: checkpoint };
+      mockJobStartedAt = claimed.started_at;
+      const nextCheck = new Date(Date.now() + 5 * 60_000).toISOString();
+      await runJob(claimed, 0);
+      const held = mode === 'paused' || mode === 'eligibility_unreadable';
+      expect(mockRunVeStage).toHaveBeenCalledTimes(held ? 0 : 1);
+      expect(mockState.jobStatus).toBe(held ? 'pending' : 'done');
+      expect(mockTransitions).toEqual([]);
+      if (held) {
+        expect(mockUpdates).toEqual([{ table: 've_jobs', values: {
+          status: 'pending', started_at: null, run_after: nextCheck, updated_at: new Date().toISOString(),
+        } }]);
+        expect(claimed.result).toBe(checkpoint);
+        expect(claimed.attempts).toBe(4);
+        expect(claimed.payload).toMatchObject({ requesty_billing_recovery: { version: 1 } });
+      }
+      if (mode === 'eligibility_unreadable') expect(mockLogs.some((line) => line.includes('recovery eligibility unavailable'))).toBe(true);
+    }
+    mockState.recoveryBaseStatus = null;
+    mockState.recoveryPreparationPaused = mockState.recoveryEligibilityReadError = false;
+    mockJobStartedAt = null;
+  });
+
   it('retains a failed invocation until DB finalization recovers, respects cancellation, and does not replay a completed stage', async () => {
     // Pause and Continue can occur between cancellation polls. A rotated lease
     // must abort the previous invocation even when the row is already running.

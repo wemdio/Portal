@@ -1,5 +1,5 @@
 import type { Email } from './types';
-import { isCompleteServiceReceipt } from './machineReplyTemplates';
+import { classifyCompleteAuthoredServiceReply, isCompleteHoldingReply, isCompleteServiceReceipt } from './machineReplyTemplates';
 import type { InstantlyRequestOptions } from './accounts';
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import * as instantly from './client';
@@ -795,6 +795,41 @@ interface TicketReplySegment {
   history: string;
 }
 
+function authoredTextAfterSignature(fullBody: string): string {
+  const lines = fullBody.replace(/\r\n?/g, '\n').split('\n');
+  const quotedAt = lines.findIndex(line => QUOTED_REPLY_BOUNDARY_PATTERNS.some(pattern => pattern.test(line.trim())));
+  const beforeQuote = quotedAt < 0 ? lines : lines.slice(0, quotedAt);
+  const signatureAt = beforeQuote.findIndex(line => SIGNATURE_BOUNDARY_PATTERN.test(line.trim()));
+  return signatureAt >= 0 ? beforeQuote.slice(signatureAt + 1).join('\n') : '';
+}
+
+function hasHumanAdditionAfterSignature(fullBody: string): boolean {
+  return hasHumanReplyContinuation(authoredTextAfterSignature(fullBody));
+}
+
+function hasUnknownAdditionAfterSignature(fullBody: string): boolean {
+  // Do not invent a closed list of buyer intents for a postscript. Unknown
+  // questions/additions invalidate only the new whole-authored shortcuts;
+  // legacy complete machine notices may have their own boilerplate P.S.
+  const tail = authoredTextAfterSignature(fullBody).replace(/https?:\/\/\S+/giu, '');
+  return /[?？]/u.test(tail) ||
+    /(?:^|\n)\s*(?:p\.?\s*s\.?|п\.?\s*с\.?)\s*[:.—-]?\s*\S/iu.test(tail);
+}
+
+function isOnlyHoldingReply(fullBody: string): boolean {
+  return !hasUnknownAdditionAfterSignature(fullBody) && !hasHumanAdditionAfterSignature(fullBody) &&
+    isCompleteHoldingReply(extractAuthoredReplyText(fullBody));
+}
+
+function holdingReplyNonLead(): QualificationResult {
+  return {
+    isLead: false, customCriteriaMatched: false, proposalSeen: false,
+    interestSignals: [], nonLeadKind: 'service_followup', machineReplyKind: null,
+    reason: 'Получатель лишь обещал ответить позже, не выразив интереса к предложению.',
+    confidence: 0.99, needsReview: false, objectionHandleable: false, objectionDraft: null,
+  };
+}
+
 /**
  * A helpdesk notification is an envelope, not necessarily an automatic reply.
  * Recognize a complete reply-above-line envelope and repeated author/time
@@ -1258,7 +1293,8 @@ function classifySystemEnvelope(sender: string, subject: string, text: string): 
 }
 
 /**
- * Детерминированный шлюз только для доказанных машинных писем. Адреса вроде
+ * Детерминированный шлюз для служебных уведомлений и целиком шаблонных
+ * подтверждений/обещаний ответить без интереса к предложению. Адреса вроде
  * support@/info@ сами по себе ничего не решают: сомнительные и человеческие
  * ответы продолжают идти в AI по обычным критериям.
  */
@@ -1279,11 +1315,10 @@ export function classifyMachineReply(
   // A human sometimes adds a P.S. below a copied signature. Do not let the
   // signature cutter hide that request from the early terminal filter. Old
   // quoted messages still cannot contribute a buyer signal to the new reply.
-  const lines = fullBody.replace(/\r\n?/g, '\n').split('\n');
-  const quotedAt = lines.findIndex(line => QUOTED_REPLY_BOUNDARY_PATTERNS.some(pattern => pattern.test(line.trim())));
-  const beforeQuote = quotedAt < 0 ? lines : lines.slice(0, quotedAt);
-  const signatureAt = beforeQuote.findIndex(line => SIGNATURE_BOUNDARY_PATTERN.test(line.trim()));
-  if (signatureAt >= 0 && hasHumanReplyContinuation(beforeQuote.slice(signatureAt + 1).join('\n'))) return null;
+  if (hasHumanAdditionAfterSignature(fullBody)) return null;
+  const completeServiceReply = hasUnknownAdditionAfterSignature(fullBody)
+    ? null : classifyCompleteAuthoredServiceReply(authoredBody, subject);
+  if (completeServiceReply) return completeServiceReply;
 
   const deliverySubject = DELIVERY_FAILURE_SUBJECT_PATTERN.test(subject);
   const deliveryBody = DELIVERY_FAILURE_BODY_PATTERN.test(authoredBody);
@@ -1345,7 +1380,7 @@ export function classifyMachineReply(
 function machineReplyReason(kind: MachineReplyKind): string {
   if (kind === 'delivery_failure') return 'Служебное уведомление о недоставке письма';
   if (kind === 'service_acknowledgement') {
-    return 'Служебное подтверждение получения обращения';
+    return 'Служебное подтверждение получения или обещание ответить без интереса к предложению';
   }
   return 'Автоответ, служебное уведомление или отписка';
 }
@@ -1931,6 +1966,35 @@ function hasActionableDirectCommercialRequest(authoredReply: string): boolean {
   });
 }
 
+/** A current budget/test request is not just "send some materials". Keep the
+ * model's verdict for these narrow buyer-evaluation cases; do not force a lead
+ * or let an unrelated, conditional future call negate the current request. */
+function hasIndependentProductEvaluationRequest(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply);
+  if (EXPLICIT_REFUSAL_PATTERN.test(statement) || THIRD_PARTY_INTEREST_PATTERN.test(statement) ||
+      /(?:коллег[а-яё]*|руководств[а-яё]*|руководител[а-яё]*|директор[а-яё]*|(?:ему|ей|он|она)\s+(?:будет\s+)?интересн)/i.test(statement)) {
+    return false;
+  }
+  const budgetRequest = new RegExp(
+    String.raw`${LETTER_TOKEN_START_SOURCE}(?:пришлите|вышлите|направьте|отправьте|предоставьте)\s+(?:пожалуйста[,\s]+)?(?:(?:презентацию|материалы)(?:\s+по\s+(?:вашему\s+)?предложению)?\s+и\s+)?(?:(?:примерный|ориентировочный|предварительный)\s+)?бюджет(?=\s*(?:[,;.!?]|$))`,
+    'i',
+  );
+  const accessRequest = /(?:предоставьте|дайте|откройте|(?:можете|сможете)\s+(?:предоставить|дать|открыть))\s+(?:(?:нам|мне)\s+)?тестовый\s+доступ(?:\s+к\s+(?:системе|сервису))?\s*$/i;
+  const condition = new RegExp(String.raw`${LETTER_TOKEN_START_SOURCE}(?:если|в\s+случае)${LETTER_TOKEN_END_SOURCE}`, 'i');
+  const ownEvaluation = statement.split(/[.!?;]+/).some((clause) =>
+    /^(?:(?:нам|мне)\s+(?:важно|нужно|необходимо)|(?:мы\s+)?хотим)\s+(?:оценить|проверить|протестировать)\s+(?:интерфейс|систему|сервис)(?:\s+и\s+сравнить\s+(?:ваши\s+)?тарифы(?:\s+с\s+нашими\s+текущими\s+контрактами)?)?$/i.test(clause.trim()));
+  return Array.from(statement.matchAll(/[^.!?;]+/g)).some((clauseMatch) => {
+    const clause = clauseMatch[0];
+    // Only the polite ability condition is a current request. A buying decision
+    // conditional before this request must not disappear at a sentence split.
+    const withoutPoliteAbility = clause.replace(/если\s+вы\s+(?=сможете\s+(?:предоставить|дать|открыть))/gi, '');
+    if (condition.test(statement.slice(0, clauseMatch.index)) ||
+        condition.test(withoutPoliteAbility) || hasConditionalOrThirdPartyInterest(clause)) return false;
+    return hasNonNegatedPatternMatch(clause, budgetRequest) ||
+      (ownEvaluation && hasNonNegatedPatternMatch(clause, accessRequest));
+  });
+}
+
 interface TextSpan {
   start: number;
   end: number;
@@ -2303,6 +2367,7 @@ function protectedDefaultVerdict(
     !actionableDirectCta &&
     !selfCooperationInterest &&
     requestedFollowupMaterials &&
+    !hasIndependentProductEvaluationRequest(statement) &&
     ((!confirmedProposal && !semanticShortOffer) || hasExplicitNegativeContext(statement))
   ) {
     return {
@@ -2552,8 +2617,9 @@ function buildSystemPrompt(
 
 КОНКРЕТНЫЙ КОММЕРЧЕСКИЙ ЗАПРОС — ЭТО ЛИД:
 - Искренний запрос КП или коммерческого предложения, кроме общего ознакомительного запроса после известного пустого письма-знакомства (intro_request).
-- Запрос цены, стоимости, тарифов, расчёта или сметы.
+- Запрос цены, стоимости, тарифов, расчёта, сметы или бюджета. «Пришлите презентацию и примерный бюджет, изучим. В случае заинтересованности запланируем созвон» — собственный коммерческий запрос сейчас; условие относится к будущему звонку, а не отменяет текущий запрос бюджета.
 - Запрос конкретных условий сделки вместе с намерением купить, протестировать, встретиться или созвониться.
+- «Готовы рассмотреть вас как поставщика; пришлите условия работы для агентств и тестовый доступ, чтобы оценить интерфейс и сравнить тарифы» — самостоятельная оценка покупки, даже после поиска ответственного без раскрытого оффера. Это не общая просьба прислать ознакомительные материалы.
 - Эти сигналы могут быть достаточны сами по себе, когда исходящее письмо не восстановилось в API. Но известный пустой opener и явное сообщение «не прочитали ваше письмо» — другая ситуация; сарказм также не является покупательским запросом.
 
 ПОЛОЖИТЕЛЬНЫЙ ИНТЕРЕС К ОФФЕРУ — ЭТО ЛИД:
@@ -2563,9 +2629,9 @@ function buildSystemPrompt(
 - После подтверждённого оффера просьба прислать предложение, информацию, материалы, презентацию, кейсы или примеры означает продолжение интереса и является лидом. В том числе «пришлите материалы, возможно, когда-нибудь посмотрим». Но просьба о материалах не отменяет явный отказ или условный интерес третьих лиц. Простое указание себя как адресата («рассказать можно мне» в ответ на поиск ответственного) не подменяй запросом материалов.
 - Отложенный интерес — «вернитесь через месяц», «напишите летом», «через месяц напишите мне», «летом свяжитесь со мной», «давайте обсудим позже», «сейчас не актуально, но напишите через месяц», готовность сотрудничать в будущем — является лидом только после подтверждённого содержательного оффера. После одного запроса контакта или без подтверждения оффера такой перенос сам по себе НЕ лид: is_lead=false, needs_review=false. Слова «к теме» или «к вашему предложению» сами по себе не доказывают понимания, что именно предлагается. Самодостаточный запрос КП/цены/покупки или явное согласие на звонок, встречу, демо или тест оценивай отдельно: это самостоятельное основание даже без найденного исходящего письма. Категоричный отказ («не интересно») и перенаправление к другому человеку, чужому менеджеру/коллеге или в общий отдел отложенным интересом не являются; дата такого перенаправления ничего не меняет.
 - После подтверждённого оффера неопределённое «возможно, когда-нибудь посмотрим» считается отложенным интересом. Без подтверждённого оффера такой ответ сам по себе не является лидом: is_lead=false, needs_review=false.
-- «С сервисами знакомы, пока не готовы технически к интеграции. В следующем году, думаю, будет актуально» после раскрытого оффера — собственный отложенный интерес, is_lead=true, needs_review=false. Дальний срок и отсутствие явного «напишите позже» не отменяют этот интерес. Отличай от одного «сейчас не готовы» без будущей актуальности и от даты появления другого сотрудника.
+- «С сервисами знакомы, пока не готовы технически к интеграции. В следующем году, думаю, будет актуально» или «На данный момент не рассматриваем, возможно со следующего года» после раскрытого оффера — собственный отложенный интерес, is_lead=true, needs_review=false. Дальний срок и отсутствие явного «напишите позже» не отменяют этот интерес. Отличай от одного «сейчас не готовы» без будущей актуальности, от служебного «позже вам отвечу» и от даты появления другого сотрудника.
 - Сам по себе срок организационного изменения («новый логист появится через 2–3 недели», «руководитель вернётся в октябре») не выражает отложенного интереса и не является просьбой связаться позже. Не придумывай приглашение к повторному контакту из календарной даты. «Пишите в следующем году» или «свяжитесь в октябре» после подтверждённого оффера, напротив, содержат собственную просьбу вернуться и остаются лидами.
-- Явное отрицание («не интересно», «не актуально») и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
+- Явное отрицание («не интересно», «не актуально») без отдельного собственного положительного или отложенного интереса и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
 
 ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
 - «Буду рада пообщаться подробнее, предлагаю перейти в Telegram» после одного поиска контакта без понятного оффера — только готовность выслушать. Никнейм мессенджера не является назначенной встречей или коммерческим запросом. После раскрытого оффера и при конкретной договорённости о звонке оценивай интерес по обычным правилам.
@@ -3440,6 +3506,9 @@ function applyQualificationGuards(
   // Do not let contact/CTA postprocessing undo that verdict on either pass.
   if (aiResult.machineReplyKind) return aiResult;
   if (aiResult.nonLeadKind === 'nonliteral_interest') return aiResult;
+  if (!leadCriteria?.trim() && isOnlyHoldingReply(replyText)) {
+    return holdingReplyNonLead();
+  }
   if (!leadCriteria?.trim() && isContactClarificationRouting(replyText)) {
     return contactClarificationRoutingNonLead(ctx, aiResult);
   }
@@ -3536,6 +3605,12 @@ export async function qualifyReply(
       ...machineReplyNonLead(machineReply),
       threadContext: ctx,
     };
+  }
+  // A human holding reply is not evidence of buying intent under the default
+  // policy. Unlike a complete service receipt, custom human-reply criteria may
+  // accept it, so never put this rule into the global machine filter.
+  if (!hasCustomCriteria && isOnlyHoldingReply(replyText)) {
+    return { ...holdingReplyNonLead(), threadContext: ctx };
   }
 
   // A generic application form is not a shared decision-maker contact or a

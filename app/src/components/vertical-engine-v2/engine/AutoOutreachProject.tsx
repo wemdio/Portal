@@ -235,6 +235,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
   const [activeLetterBaseId, setActiveLetterBaseId] = useState<string | undefined>();
+  const resultTemplateToFocus = useRef<string | null>(null);
   const [presetId, setPresetId] = useState('');
   const dirtyRef = useRef(false);
   const libraryDirtyRef = useRef(false);
@@ -359,6 +360,14 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         run?.items.some((item) => item.template_id === t.id))
     );
   });
+  useEffect(() => {
+    if (step !== 5 || !resultTemplateToFocus.current) return;
+    const card = document.getElementById(`ve-campaign-${resultTemplateToFocus.current}`);
+    resultTemplateToFocus.current = null;
+    if (!card) return;
+    card.focus({ preventScroll: true });
+    card.scrollIntoView({ block: 'start' });
+  }, [step]);
   const visibleHypotheses = selectPreparationHypotheses(detail?.hypotheses ?? [], selectedIds,
     snapshot?.preparations ?? [], detail?.bases ?? []);
   const titles = useMemo(
@@ -1112,6 +1121,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 const { base, canPauseOrphan } = selectHypothesisPreparationBase(h.id, p, detail.bases, detail.jobs);
                 const historicalBases = savedBases.filter((item) => item.id !== base?.id);
                 const savedLetters = selectHypothesisLetters(h.id, p, detail.bases, detail.templates).template;
+                const launchedTemplate = resultTemplates.find((item) => item.id === p?.template_id)
+                  ?? resultTemplates.find((item) => item.base_id === base?.id);
                 const review = base ? snapshot?.reviews[base.id] : null,
                   approval = base ? snapshot?.setup.approved_bases[base.id] : null;
                 const approved =
@@ -1123,6 +1134,13 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                       <h3 className="ve2-h3">{h.title}</h3>
                       <DownloadVerifiedContacts projectId={projectId} hypothesisId={h.id} hypothesisTitle={h.title} />
                     </div>
+                    {launchStates[h.id]?.launched ? (
+                      <button type="button" className={HE.btnGhost}
+                        aria-label={`Управлять добором: ${h.title}`}
+                        onClick={() => {
+                          if (jump(5)) resultTemplateToFocus.current = launchedTemplate?.id ?? null;
+                        }}>Управлять добором</button>
+                    ) : null}
                     {!launchStates[h.id]?.launched ? <PreparationProgress compact preparation={p} base={base} jobs={detail.jobs} approved={approved}
                       preparationSelected={selectedIds.includes(h.id)} hypothesisTitle={h.title}
                       canPauseOrphan={canPauseOrphan && h.status !== 'rejected' && !!h.vertical_id}
@@ -1168,12 +1186,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             </div>
                           </details>
                         ) : null}
-                        {launchStates[h.id]?.launched ? (
-                          <div className="space-y-2">
-                            <p className={HE.muted}>База уже передана в запуск.</p>
-                            <button type="button" className={HE.btnGhost} aria-label={`Посмотреть результаты: ${h.title}`} onClick={() => jump(5)}>Посмотреть результаты</button>
-                          </div>
-                        ) : review && p?.status === 'ready' && !p.paused_at ? <>
+                        {!launchStates[h.id]?.launched && review && p?.status === 'ready' && !p.paused_at ? <>
                         <label className="flex items-start gap-3">
                           <input
                             type="checkbox"
@@ -1198,7 +1211,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                           disabled={busy || locked || contactLimitUnsaved}
                           onClick={() => configureLaunch([h.id])}>К запуску этой базы</button>
                         : <p className={HE.muted}>{launchStates[h.id]?.label}</p>}
-                        </> : p?.status === 'ready' && !p.paused_at ? <p className={HE.muted}>
+                        </> : !launchStates[h.id]?.launched && p?.status === 'ready' && !p.paused_at ? <p className={HE.muted}>
                           Одобрение появится после подтверждения актуальной версии базы и писем. Статус обновляется автоматически.
                         </p> : null}
                       </>

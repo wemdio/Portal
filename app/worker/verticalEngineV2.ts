@@ -36,6 +36,7 @@ import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
 import { clearVeJobInterruptions, planVeJobFailure, VE_JOB_FREE_INTERRUPTIONS } from '@/lib/verticalEngineV2/jobRetry';
 import { retryVeJobFinalization, transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
+import { deferVeRequestyRecoveryWhileIneligible, planVeRequestyBillingWait, resumeVeRequestyBillingJobs, VE_REQUESTY_BILLING_INTERVAL_MS } from '@/lib/verticalEngineV2/requestyBillingRecovery';
 import {
   createVeJobShutdown,
   createVeJobWatchdog,
@@ -145,6 +146,22 @@ function triggerTransientResumeSweep(): Promise<void> {
     .catch((error) => log('warn', '[auto-resume] sweep failed', { error: error instanceof Error ? error.message : String(error) }))
     .finally(() => { if (activeTransientResume === promise) activeTransientResume = null; });
   activeTransientResume = promise;
+  return promise;
+}
+
+let activeBillingResume: Promise<void> | null = null;
+let lastBillingReason: string | null = null;
+function triggerBillingResumeSweep(): Promise<void> {
+  if (shouldStop() || activeBillingResume) return activeBillingResume ?? Promise.resolve();
+  const promise = resumeVeRequestyBillingJobs(db, { shouldStop }).then((outcome) => {
+    if (outcome.resumed) log('info', `[requesty-balance] продолжено с сохранённого этапа: ${outcome.resumed}`);
+    if (outcome.waiting && outcome.reason !== lastBillingReason) {
+      log('info', '[requesty-balance] состояние проверки', { reason: outcome.reason, waiting: outcome.waiting });
+    }
+    lastBillingReason = outcome.waiting ? outcome.reason : null;
+  }).catch(() => log('warn', '[requesty-balance] проверка отложена; задания остаются в ожидании'))
+    .finally(() => { if (activeBillingResume === promise) activeBillingResume = null; });
+  activeBillingResume = promise;
   return promise;
 }
 
@@ -337,7 +354,11 @@ async function handleJob(job: VeJob) {
     const market = normalizeVeMarket((proj as { market?: string } | null)?.market);
     if (isResearch) abort.signal.throwIfAborted();
 
-    stageResult = await withVeActiveJobSignal(abort.signal, () => withVeCostTelemetry(db, job, () => runVeStage(job, {
+    stageResult = await deferVeRequestyRecoveryWhileIneligible(db, job, { signal: abort.signal,
+      onUnreadableEligibility: () => log('warn', `Job ${job.id} recovery eligibility unavailable; retaining the saved work`),
+    })
+      ? { result: { waiting: true, requesty_recovery_held: true } }
+      : await withVeActiveJobSignal(abort.signal, () => withVeCostTelemetry(db, job, () => runVeStage(job, {
       supabase: stageDb,
       market,
       signal: abort.signal,
@@ -508,9 +529,12 @@ async function failJob(job: VeJob, err: unknown, failedAt: string) {
   }
   // attempts — число фейлов, а не клеймов: инкремент только здесь. Зависание
   // и таймаут/обрыв запроса стадии к БД попытку не тратят (до предела подряд).
-  const plan = planVeJobFailure(job, err, Date.parse(failedAt));
+  const billingWait = planVeRequestyBillingWait(job, err, Date.parse(failedAt));
+  const plan = billingWait ?? planVeJobFailure(job, err, Date.parse(failedAt));
   const finalFail = plan.status === 'failed';
-  log('error', plan.interruption?.free
+  log(billingWait ? 'info' : 'error', billingWait
+    ? `Job ${job.id} (${job.stage}) waits for Requesty credit; checkpoint and attempt allowance preserved`
+    : plan.interruption?.free
     ? `Job ${job.id} (${job.stage}) interrupted (${plan.interruption.count}/${VE_JOB_FREE_INTERRUPTIONS} in a row, attempt not spent): ${msg}`
     : `Job ${job.id} (${job.stage}) failed (attempt ${plan.attempts}/${plan.attemptCap}${plan.retryable ? ', retryable' : ''}): ${msg}`);
 
@@ -642,6 +666,8 @@ async function main() {
   if (typeof contactCapTimer.unref === 'function') contactCapTimer.unref();
   const transientResumeTimer = setInterval(() => { void triggerTransientResumeSweep(); }, TRANSIENT_RESUME_INTERVAL_MS);
   if (typeof transientResumeTimer.unref === 'function') transientResumeTimer.unref();
+  const billingResumeTimer = setInterval(() => { void triggerBillingResumeSweep(); }, VE_REQUESTY_BILLING_INTERVAL_MS);
+  if (typeof billingResumeTimer.unref === 'function') billingResumeTimer.unref();
 
   try {
     // Delivery is independent from VE research/template jobs; do not hold the
@@ -652,6 +678,7 @@ async function main() {
     void triggerOutreachPreparationTick();
     void triggerContactCapSweep();
     void triggerTransientResumeSweep();
+    void triggerBillingResumeSweep();
     await pollLoop({
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -661,6 +688,7 @@ async function main() {
     });
   } finally {
     clearInterval(transientResumeTimer);
+    clearInterval(billingResumeTimer);
     clearInterval(contactDeliveryTimer);
     clearInterval(outreachPreparationTimer);
     clearInterval(contactCapTimer);
@@ -668,6 +696,7 @@ async function main() {
     if (activeContactDeliveryTick) await activeContactDeliveryTick;
     if (activeOutreachPreparationTick) await activeOutreachPreparationTick;
     if (activeContactCapSweep) await activeContactCapSweep;
+    if (activeBillingResume) await activeBillingResume;
     clearInterval(heartbeat);
   }
 

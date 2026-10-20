@@ -5,8 +5,70 @@ const VERTICER_FAQ = "Geachte relatie, Bedankt voor uw e-mail, wij streven ernaa
 // prose anywhere in this suffix (including a P.S.) invalidates the template.
 const VERTICER_FOOTER = /^Met vriendelijke groet, Servicedesk Verticer B\.V\. Postbus \d{1,6} \d{4} [A-Z]{2} [A-Z ]{2,60} servicedesk@verticer\.eu \[servicedesk@verticer\.eu\] www\.verticer\.eu \[https:\/\/verticer\.eu\/\] Handelsregister: [\p{L} -]{2,60} \d{6,12} IBAN: [A-Z]{2}\d{2}[A-Z\d]{10,30} Swift: BIC [A-Z\d]{8,11} VertiCer Logo\.png \* Denk aan het milieu\. Print dit bericht alleen als het noodzakelijk is\.$/u;
 
+// This complete receipt has an unusually long commercial/legal signature.
+// Its EDI identifiers are boilerplate, not a reply about the offered service.
+// Keep field-shaped values and the terminal address: never swallow arbitrary
+// signature prose or a buyer request added before/after the footer.
+const PARTS_COMPANY_RECEIPT = /^Ваше письмо получено\. Скоро мы с Вами свяжемся\. Наша организация "[\p{L}\p{N} -]{2,80}" поставляет запчасти к дорожной, строительной и спецтехнике\. Данная компания включена в официальный реестр «Надежный поставщик» и настоящим получает право использования логотипа «Надежный поставщик»\. Сертификат серия \d{1,6} №\d{1,12}\. Оператор ООО "Компания "Тензор" ЭДО ид [a-z\d]{10,60} ЭТрН Тензор СБИС [a-z\d]{10,60} https?:\/\/[a-z\d.-]+\/o-kompanii\/ https?:\/\/[a-z\d.-]+\/kontakty\/ Тел: [\d ()+-]{7,30}, [\d ()+-]{7,30}\. https?:\/\/[a-z\d.-]+ [^\s@]+@[^\s@]+\.[^\s@]+ ИНН \d{10,12} г\.[\p{L}-]{2,40}, ул\.[\p{L} -]{2,60}, д\.\d{1,5}[а-яё]?\.?$/iu;
+
+const SIMPLE_GREETING = /^(?:здравствуйте|добрый день|доброе утро|добрый вечер)[!,.]\s*/iu;
+const RECEIPT_ONLY = /^ваше письмо получено[.!]?\s*/iu;
+const GENERIC_CONTACT_PROMISE = /^(?:скоро\s+)?(?:(?:я|мы)\s+)?(?:обязательно\s+)?(?:свяжусь|свяжемся)\s+с\s+вами(?:\s+(?:позже|в\s+ближайшее\s+время))?[.!]?$/iu;
+const GENERIC_REPLY_PROMISE = /^(?:(?:я|мы)\s+)?(?:позже\s+(?:вам\s+)?(?:отвечу|ответим)|(?:отвечу|ответим)\s+(?:вам\s+)?позже)[.!]?$/iu;
+const NOTICE_EMAIL = String.raw`[a-z\d.!#$%&'*+/=?^_\x60{|}~-]+@[a-z\d.-]+\.[a-z]{2,}`;
+const LEAVE_SUBSTITUTE_NOTICE = new RegExp(
+  String.raw`^(?:с\s+\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+\d{4})?\s+)?(?:я\s+)?нахожусь\s+в\s+декретном\s+отпуске[.!]?\s+по\s+всем\s+вопросам\s+(?:прошу\s+)?обращаться\s+к\s+(?:региональному\s+менеджеру|менеджеру|моему\s+коллеге|коллеге)\s+[А-ЯЁ][а-яё-]{1,40}(?:\s+[А-ЯЁ][а-яё-]{1,40}){0,2}\s+\((${NOTICE_EMAIL})\)[,.]?\s*(?:тел\.?\s*[+:]?\s*[\d ()+-]{7,30})?[.!]?$`,
+  'iu',
+);
+const UNAVAILABLE_DIRECTORY_SUBJECT = /^данная почта недоступна,\s*по всем вопросам обращайтесь пожалуйста к нужному специалисту:\s*(?:(?:re|fw|fwd):[\s\S]*)?$/iu;
+const DIRECTORY_ROLE = String.raw`(?:административный специалист|бухгалтерия|отдел продаж|инструкции на прием порожних|импорт|экспорт|отдел по работе с клиентами)`;
+const DIRECTORY_CONTACT = new RegExp(
+  String.raw`^(?:${NOTICE_EMAIL}(?:\s*-\s*${DIRECTORY_ROLE})?|(?:запросы на возврат порожних|импорт|экспорт)\s*-\s*${NOTICE_EMAIL})$`, 'iu',
+);
+
+function isUnavailableMailboxDirectory(subject: string, body: string): boolean {
+  if (!UNAVAILABLE_DIRECTORY_SUBJECT.test(subject.trim()) || body.length > 5_000) return false;
+  const lines = body.replace(/\r\n?/gu, '\n').split('\n').map(line => line.trim()).filter(Boolean);
+  if (/^команда [a-z -]{2,80}\.$/iu.test(lines.at(-1) ?? '') &&
+      /^с уважением,$/iu.test(lines.at(-2) ?? '')) lines.splice(-2);
+  // No arbitrary prose, signatures or buyer questions may hide in the list.
+  const city = (line: string) => /^[А-ЯЁ][А-ЯЁа-яё-]{1,40}:$/u.test(line);
+  return lines.filter(city).length >= 2 &&
+    lines.filter(line => DIRECTORY_CONTACT.test(line)).length >= 4 &&
+    lines.every(line => city(line) || DIRECTORY_CONTACT.test(line));
+}
+
+/** Only complete administrative notices or receipts, never a positive or negative
+ * opinion about the offer. The caller supplies the authored (non-quoted) body
+ * and checks for human additions hidden below a signature first. Unknown prose
+ * fails open, including real deferred interest, questions and meeting times. */
+export function classifyCompleteAuthoredServiceReply(
+  authoredBody: string,
+  subject = '',
+): 'auto_reply' | 'service_acknowledgement' | null {
+  if (isUnavailableMailboxDirectory(subject, authoredBody)) return 'auto_reply';
+  const compact = authoredBody.replace(/\s+/gu, ' ').trim();
+  if (!compact || compact.length > 1_000) return null;
+  const content = compact.replace(SIMPLE_GREETING, '').trim();
+  if (LEAVE_SUBSTITUTE_NOTICE.test(content)) return 'auto_reply';
+  const withoutReceipt = content.replace(RECEIPT_ONLY, '').trim();
+  if (withoutReceipt !== content &&
+      (!withoutReceipt || GENERIC_CONTACT_PROMISE.test(withoutReceipt) ||
+        GENERIC_REPLY_PROMISE.test(withoutReceipt))) return 'service_acknowledgement';
+  return null;
+}
+
+/** A bare promise to answer is not evidence of automation. Use this only for
+ * the default interest policy; custom rules may accept every human response. */
+export function isCompleteHoldingReply(authoredBody: string): boolean {
+  const compact = authoredBody.replace(/\s+/gu, ' ').trim();
+  return compact.length <= 1_000 &&
+    GENERIC_REPLY_PROMISE.test(compact.replace(SIMPLE_GREETING, '').trim());
+}
+
 export function isCompleteServiceReceipt(sender: string, body: string): boolean {
   const compact = body.replace(/\[data:image\/[^\]]+\]/g, '').replace(/\s+/g, ' ').trim();
+  if (PARTS_COMPANY_RECEIPT.test(compact)) return true;
   if (sender === 'noreply@verticer.eu' && compact.startsWith(VERTICER_FAQ + ' ') &&
     VERTICER_FOOTER.test(compact.slice(VERTICER_FAQ.length).trim())) return true;
   // Zendesk's Dutch initial receipt. Later human ticket updates have a different
