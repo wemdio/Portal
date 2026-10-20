@@ -15,6 +15,7 @@ import { reconcileProjectVerticals } from './actualsReconcile';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { readVeCollectionContinuationCache } from './collectionContinuationCache';
 import type { VeCollectionContinuation } from './collectionRecovery';
+import { redactVeRequestyBillingPayload } from './requestyBillingState';
 
 // Без data — тяжёлое jsonb-поле, деталка проекта его не тянет. sample_rows
 // (≤30 строк, серверный кап при записи) и columns лёгкие: шаг «База» рисует
@@ -321,7 +322,7 @@ export async function loadVeProjectDetail(
       // падала с «Не удалось обновить проект». Один белый список, одно место.
       bases,
       templates,
-      jobs: jobsRes.data ?? [],
+      jobs: (jobsRes.data ?? []).map((job) => ({ ...job, payload: redactVeRequestyBillingPayload(job.payload) })),
       dossiers: dossiersRes.data ?? [],
       cases: casesRes.data ?? [],
     },

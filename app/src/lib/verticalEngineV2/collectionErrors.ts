@@ -13,6 +13,11 @@ export function isVeProviderBillingError(error: unknown): boolean {
       && /not enough credits|insufficient[\s_-]+(?:funds|balance|credits|search credits)|payment[\s_-]+required|credit balance (?:is )?too low/i.test(message));
 }
 
+/** Only Requesty can be resumed from a Requesty balance observation. */
+export function isVeRequestyBillingError(error: unknown): boolean {
+  return /\bRequesty\b/i.test(errorMessage(error)) && isVeProviderBillingError(error);
+}
+
 export function isVeProviderConfigurationError(error: unknown): boolean {
   const message = errorMessage(error);
   return /\bSerper configuration:/i.test(message)

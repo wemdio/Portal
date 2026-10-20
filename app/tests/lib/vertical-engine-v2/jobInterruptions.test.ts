@@ -21,8 +21,11 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { readRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { retryVeJobFinalization, transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
-import { createVeJobPool, canRunVeJob } from '@/lib/verticalEngineV2/jobQueue';
+import { createVeJobPool, canRunVeJob, claimVeJob } from '@/lib/verticalEngineV2/jobQueue';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
+import { deferVeRequestyRecoveryWhileIneligible, planVeRequestyBillingWait, resumeVeRequestyBillingJobs, VeRequestyBillingError,
+  veRequestyCreditImproved, VE_REQUESTY_BILLING_RUN_AFTER } from '@/lib/verticalEngineV2/requestyBillingRecovery';
+import type { VeRequestyBalanceResult, VeRequestyCreditSignal } from '@/lib/verticalEngineV2/requestyBalance';
 
 const NOW = Date.parse('2026-09-23T09:26:23.776Z');
 // The payload of job 896efda6 (base 0482f88b) on production.
@@ -32,6 +35,24 @@ const payload = {
 };
 const job = (attempts: number, extra: Record<string, unknown> = {}): { id: string; attempts: number; payload: Record<string, unknown> } =>
   ({ id: '896efda6-4713-49e6-8003-bdc29510fd9d', attempts, payload: { ...payload, ...extra } });
+
+const BILLING_KEY = 'a'.repeat(64);
+const billingCredit = (balanceUsd = 50, monthlySpendUsd = 10, monthlyLimitUsd = 0): VeRequestyCreditSignal =>
+  ({ balanceUsd, monthlySpendUsd, monthlyLimitUsd });
+const fundedProbe = (creditSignal = billingCredit()): VeRequestyBalanceResult => ({
+  status: 'usable', reason: 'credit_available', keyFingerprint: BILLING_KEY,
+  ...creditSignal, creditSignal, availableCreditUsd: Math.min(creditSignal.balanceUsd,
+    creditSignal.monthlyLimitUsd === 0 ? creditSignal.balanceUsd : creditSignal.monthlyLimitUsd - creditSignal.monthlySpendUsd),
+});
+const waitingJob = (id = 'billing-job', extraWait: Record<string, unknown> = {}) => ({
+  id, project_id: 'billing-project', stage: 'base_collect', status: 'pending', attempts: 3,
+  updated_at: new Date(NOW).toISOString(), run_after: VE_REQUESTY_BILLING_RUN_AFTER,
+  error: 'Requesty 402: insufficient balance', finished_at: null, result: { paid_checkpoint: { completed: [1, 2] } },
+  payload: { ...payload, requesty_billing_wait: { version: 1, key_fingerprint: BILLING_KEY,
+    blocked_at: new Date(NOW - 1_000).toISOString(), ...extraWait } },
+});
+const billingBase = () => ({ id: payload.base_id, project_id: 'billing-project', status: 'collecting',
+  row_count: 37, data: [['saved company', 'saved email']], collect_info: { budget: 100, checkpoint: 'paid' } });
 
 /** The message a stage throws after its read of the project's other bases stalled. */
 async function stalledReadMessage(): Promise<string> {
@@ -45,6 +66,221 @@ async function stalledReadMessage(): Promise<string> {
 }
 
 describe('VE2 job interruptions do not spend attempts', () => {
+  it('parks only attributable Requesty failures without losing saved work or spending attempts', async () => {
+    const original = { ...waitingJob(), status: 'running', started_at: new Date(NOW - 500).toISOString(),
+      payload: { ...payload, requesty_billing_recovery: { key_fingerprint: BILLING_KEY, credit_signal: billingCredit() } } };
+    const failure = new VeRequestyBillingError('Requesty 402: insufficient balance', BILLING_KEY);
+    const planned = planVeRequestyBillingWait(original, failure, NOW)!;
+    expect(planned).toMatchObject({ status: 'pending', attempts: 3, attemptCap: 3,
+      retryable: false, runAfter: VE_REQUESTY_BILLING_RUN_AFTER,
+      payload: { ...payload, requesty_billing_wait: { key_fingerprint: BILLING_KEY, last_credit: billingCredit() } } });
+    expect(planVeRequestyBillingWait(original, new Error(failure.message), NOW)).toBeNull();
+    expect(planVeRequestyBillingWait(original, new VeRequestyBillingError(failure.message, 'not-a-fingerprint'), NOW)).toBeNull();
+    // An earlier successful HTTP response is not proof of saved progress.
+    // A repeated billing failure always retains the last recovery baseline.
+    const sameWork = { ...original, result: { checkpoint: 'unchanged' } };
+    const repeated = planVeRequestyBillingWait(sameWork, failure, NOW + 1_000)!;
+    expect(repeated.payload!.requesty_billing_wait).toHaveProperty('last_credit', billingCredit());
+    const changedKey = planVeRequestyBillingWait(original, new VeRequestyBillingError(failure.message, 'b'.repeat(64)), NOW)!;
+    expect(changedKey.payload!.requesty_billing_wait).not.toHaveProperty('last_credit');
+
+    const db = createMockSupabase({ tables: { ve_jobs: [original], ve_bases: [billingBase()] } });
+    await expect(transitionVeJobFailure(db as unknown as SupabaseClient, {
+      jobId: original.id, startedAt: original.started_at, status: planned.status,
+      attempts: planned.attempts, error: failure.message, finishedAt: null,
+      runAfter: planned.runAfter, updatedAt: new Date(NOW).toISOString(), payload: planned.payload,
+    })).resolves.toEqual({ transitioned: true, error: null });
+    const parked = db.getRows('ve_jobs')[0] as unknown as VeJob;
+    expect(parked).toMatchObject({ id: original.id, status: 'pending', attempts: 3,
+      result: original.result, run_after: VE_REQUESTY_BILLING_RUN_AFTER });
+    expect(canRunVeJob(parked, [])).toBe(false);
+    // An accidental run_after change cannot bypass the separate wait marker.
+    expect(canRunVeJob({ ...parked, payload: { ...parked.payload, requesty_billing_wait: false } }, [])).toBe(false);
+    await expect(claimVeJob(db as unknown as SupabaseClient, new Date(NOW + 86_400_000))).resolves.toBeNull();
+    expect(db.getRows('ve_bases')).toEqual([billingBase()]);
+    expect(db.inserts).toEqual([]);
+  });
+
+  it('checks credit only for waiting jobs and releases the same job once per real credit improvement', async () => {
+    const empty = createMockSupabase({ tables: { ve_jobs: [] } });
+    const probe = jest.fn<Promise<VeRequestyBalanceResult>, []>().mockResolvedValue(fundedProbe());
+    const sweep = (db: ReturnType<typeof createMockSupabase>, now = NOW + 60_000) => resumeVeRequestyBillingJobs(
+      db as unknown as SupabaseClient, { now: new Date(now), probe, keyFingerprint: BILLING_KEY });
+    await expect(sweep(empty)).resolves.toMatchObject({ waiting: 0, resumed: 0, reason: 'no_work' });
+    expect(probe).not.toHaveBeenCalled();
+    const zero = billingCredit(0);
+    for (const unavailable of [
+      { status: 'blocked', reason: 'insufficient_balance', keyFingerprint: BILLING_KEY, ...zero,
+        creditSignal: zero, availableCreditUsd: 0 },
+      { status: 'unavailable', reason: 'management_forbidden', keyFingerprint: BILLING_KEY },
+      { ...fundedProbe(), keyFingerprint: 'b'.repeat(64) },
+    ] as VeRequestyBalanceResult[]) {
+      const db = createMockSupabase({ tables: { ve_jobs: [waitingJob()], ve_bases: [billingBase()] } });
+      probe.mockResolvedValue(unavailable);
+      expect((await sweep(db)).resumed).toBe(0);
+      expect(db.getRows('ve_jobs')[0]).toMatchObject({ status: 'pending', attempts: 3,
+        run_after: VE_REQUESTY_BILLING_RUN_AFTER, result: waitingJob().result });
+    }
+    for (const lastCredit of [false, '', {}, { balanceUsd: 20 },
+      { balanceUsd: '20', monthlySpendUsd: 10, monthlyLimitUsd: 0 }, billingCredit(-1)]) {
+      const invalid = waitingJob('corrupt-wait', { last_credit: lastCredit });
+      const corrupt = createMockSupabase({ tables: { ve_jobs: [invalid], ve_bases: [billingBase()] } });
+      probe.mockResolvedValue(fundedProbe());
+      expect((await sweep(corrupt)).resumed).toBe(0);
+      expect(corrupt.getRows('ve_jobs')).toEqual([invalid]);
+      expect(corrupt.mutations).toEqual([]);
+    }
+    const old = waitingJob();
+    const otherKey = { ...waitingJob('other-key'), payload: { ...payload, requesty_billing_wait: {
+      ...old.payload.requesty_billing_wait, key_fingerprint: 'b'.repeat(64) } } };
+    const db = createMockSupabase({ enforceQueryWindows: true,
+      tables: { ve_jobs: [old, otherKey], ve_bases: [billingBase()], ve_campaigns: [{ id: 'untouched', status: 'paused' }] } });
+    probe.mockResolvedValue(fundedProbe());
+    expect(await sweep(db)).toMatchObject({ waiting: 1, resumed: 1 });
+    expect(db.getRows('ve_jobs')).toHaveLength(2);
+    expect(db.getRows('ve_jobs')[0]).toMatchObject({ id: old.id, status: 'pending', attempts: 3,
+      result: old.result, error: null, finished_at: null, run_after: new Date(NOW + 60_000).toISOString(),
+      payload: { ...payload, requesty_billing_wait: null,
+        requesty_billing_recovery: { key_fingerprint: BILLING_KEY, credit_signal: billingCredit() } } });
+    expect(db.getRows('ve_jobs')[1]).toEqual(otherKey);
+    expect(db.getRows('ve_bases')).toEqual([billingBase()]);
+    expect(db.getRows('ve_campaigns')).toEqual([{ id: 'untouched', status: 'paused' }]);
+    expect(db.inserts).toEqual([]);
+    expect(db.mutations.every((item) => item.table === 've_jobs' && item.kind === 'update')).toBe(true);
+    probe.mockClear();
+    expect((await sweep(db)).resumed).toBe(0);
+    expect(probe).not.toHaveBeenCalled();
+
+    // Another 402 at the same still-positive balance must not loop. Observe
+    // reduced credit without waking, then allow a later genuine top-up.
+    const again = createMockSupabase({ tables: { ve_jobs: [waitingJob('again', { last_credit: billingCredit() })],
+      ve_bases: [billingBase()] } });
+    probe.mockResolvedValue(fundedProbe());
+    expect((await sweep(again)).resumed).toBe(0);
+    probe.mockResolvedValue(fundedProbe(billingCredit(20, 40)));
+    expect((await sweep(again, NOW + 120_000)).resumed).toBe(0);
+    expect(again.getRows('ve_jobs')[0]).toMatchObject({ payload: { requesty_billing_wait: {
+      last_credit: billingCredit(20, 40),
+    } } });
+    probe.mockResolvedValue(fundedProbe(billingCredit(30, 40)));
+    expect((await sweep(again, NOW + 180_000)).resumed).toBe(1);
+    const released = again.getRows('ve_jobs')[0] as unknown as VeJob;
+    const secondFailure = planVeRequestyBillingWait(released,
+      new VeRequestyBillingError('Requesty 402: insufficient balance', BILLING_KEY), NOW + 181_000)!;
+    const stillBlocked = createMockSupabase({ tables: { ve_jobs: [{ ...released,
+      payload: secondFailure.payload, run_after: secondFailure.runAfter }], ve_bases: [billingBase()] } });
+    for (let i = 0; i < 3; i++) {
+      expect((await sweep(stillBlocked, NOW + 240_000 + i * 60_000)).resumed).toBe(0);
+      expect(stillBlocked.getRows('ve_jobs')[0]).toMatchObject({ payload: { requesty_billing_wait: {
+        last_credit: billingCredit(30, 40),
+      } } });
+    }
+    expect(veRequestyCreditImproved(billingCredit(50, 20, 20), billingCredit(40, 20, 30))).toBe(true);
+    expect(veRequestyCreditImproved(billingCredit(50, 20, 20), billingCredit(40, 0, 20))).toBe(true);
+    expect(veRequestyCreditImproved(billingCredit(50, 20, 20), billingCredit(40, 20, 0))).toBe(true);
+    expect(veRequestyCreditImproved(billingCredit(50, 20, 0), billingCredit(40, 21, 0))).toBe(false);
+
+    const many = createMockSupabase({ enforceQueryWindows: true, tables: {
+      ve_jobs: Array.from({ length: 105 }, (_, i) => ({ ...waitingJob(`wait-${String(i).padStart(3, '0')}`),
+        stage: 'site_profile', payload: { requesty_billing_wait: waitingJob().payload.requesty_billing_wait } })),
+    } });
+    probe.mockReset().mockResolvedValue(fundedProbe());
+    expect(await sweep(many)).toMatchObject({ waiting: 105, resumed: 4 });
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(await sweep(many, NOW + 120_000)).toMatchObject({ waiting: 101, resumed: 4 });
+    expect(many.inserts).toEqual([]);
+  });
+
+  it('keeps paused, cancelled and superseded jobs asleep and stops recovery during shutdown', async () => {
+    for (const mode of ['paused', 'cancelled_preparation', 'failed_base', 'supply_paused', 'cancelled_job', 'cancel_race', 'new_claim', 'new_wait'] as const) {
+      const current = waitingJob();
+      const db = createMockSupabase({ tables: {
+        ve_jobs: [{ ...current, ...(mode === 'cancelled_job' ? { status: 'cancelled' } : {}) }],
+        ve_bases: [{ ...billingBase(), ...(mode === 'failed_base' ? { status: 'failed' } : {}) }],
+        ve_outreach_preparations: [{ project_id: current.project_id, base_id: payload.base_id,
+          paused_at: mode === 'paused' ? new Date(NOW).toISOString() : null,
+          cancelled_at: mode === 'cancelled_preparation' ? new Date(NOW).toISOString() : null }],
+        ve_contact_supply_batches: mode === 'supply_paused' ? [{ base_id: payload.base_id, plan_id: 'supply', status: 'collecting' }] : [],
+        ve_contact_supply_plans: [{ id: 'supply', project_id: current.project_id, status: 'paused' }],
+      }, beforeFirstUpdates: ['cancel_race', 'new_claim', 'new_wait'].includes(mode) ? {
+        ve_jobs: (rows) => rows.map((row) => mode === 'cancel_race' ? { ...row, status: 'cancelled' }
+          : mode === 'new_claim' ? { ...row, status: 'running', updated_at: new Date(NOW + 1).toISOString() }
+            : { ...row, updated_at: new Date(NOW + 1).toISOString(), payload: { ...current.payload,
+              requesty_billing_wait: { ...current.payload.requesty_billing_wait, blocked_at: new Date(NOW + 1).toISOString() } } }),
+      } : undefined });
+      const probe = jest.fn().mockResolvedValue(fundedProbe());
+      expect((await resumeVeRequestyBillingJobs(db as unknown as SupabaseClient,
+        { now: new Date(NOW + 60_000), probe, keyFingerprint: BILLING_KEY })).resumed).toBe(0);
+      expect(db.getRows('ve_jobs')[0]).toMatchObject({ attempts: 3, result: current.result,
+        run_after: VE_REQUESTY_BILLING_RUN_AFTER });
+      expect(db.getRows('ve_jobs')[0].payload).toHaveProperty('requesty_billing_wait');
+      if (mode === 'cancelled_job') expect(probe).not.toHaveBeenCalled();
+      if (mode === 'cancel_race') expect(db.getRows('ve_jobs')[0].status).toBe('cancelled');
+      if (mode === 'new_claim') expect(db.getRows('ve_jobs')[0].status).toBe('running');
+      expect(db.inserts).toEqual([]);
+    }
+    // A specialist can pause after credit release but before the next claim.
+    // The execution guard must hold that same claim without buying work or
+    // overriding cancellation, while still allowing a saved terminal no-op.
+    for (const mode of ['eligible', 'paused_after_release', 'supply_paused_after_release', 'stale_approval',
+      'cancel_after_release', 'new_claim_after_release', 'finished_collection', 'saved_analysis', 'eligibility_unreadable'] as const) {
+      const released = { ...waitingJob(), stage: mode === 'finished_collection' ? 'base_collect' : 'base_analyze',
+        status: 'running', started_at: new Date(NOW).toISOString(), payload: { ...payload,
+          requesty_billing_wait: null, requesty_billing_recovery: { version: 1, key_fingerprint: BILLING_KEY,
+            credit_signal: billingCredit(), blocked_at: new Date(NOW - 60_000).toISOString(), resumed_at: new Date(NOW).toISOString() } } };
+      const base = { ...billingBase(), status: mode === 'saved_analysis' ? 'analyzed' : 'analyzing' };
+      const shouldHold = !['eligible', 'finished_collection', 'saved_analysis'].includes(mode);
+      const executionDb = createMockSupabase({ tables: {
+        ve_jobs: [released], ve_bases: [base],
+        ve_outreach_preparations: [{ project_id: released.project_id, base_id: payload.base_id,
+          paused_at: mode === 'paused_after_release' ? new Date(NOW).toISOString() : null, cancelled_at: null }],
+        ve_contact_supply_batches: [{ base_id: payload.base_id, plan_id: 'execution-supply', status: 'auditing' }],
+        ve_contact_supply_plans: [{ id: 'execution-supply', project_id: released.project_id,
+          status: mode === 'supply_paused_after_release' ? 'paused' : 'active' }],
+      }, errorTables: mode === 'eligibility_unreadable' ? { ve_bases: 'fetch failed' } : undefined,
+      beforeFirstUpdates: ['cancel_after_release', 'new_claim_after_release'].includes(mode) ? {
+        ve_jobs: (rows) => rows.map((row) => mode === 'cancel_after_release' ? { ...row, status: 'cancelled' }
+          : { ...row, started_at: new Date(NOW + 1_000).toISOString() }),
+      } : undefined });
+      executionDb.rpc = (() => {
+        const result = Promise.resolve({ data: null, error: ['stale_approval', 'cancel_after_release', 'new_claim_after_release'].includes(mode)
+          ? { message: 'supply approval rules are stale' } : null });
+        return Object.assign(result, { abortSignal: () => result });
+      }) as typeof executionDb.rpc;
+      expect(await deferVeRequestyRecoveryWhileIneligible(executionDb as unknown as SupabaseClient,
+        released as unknown as VeJob, { now: new Date(NOW + 60_000) })).toBe(shouldHold);
+      expect(executionDb.getRows('ve_bases')).toEqual([base]);
+      expect(executionDb.getRows('ve_jobs')[0]).toMatchObject({ attempts: 3, result: released.result, payload: released.payload });
+      if (['paused_after_release', 'supply_paused_after_release', 'stale_approval', 'eligibility_unreadable'].includes(mode)) {
+        expect(executionDb.getRows('ve_jobs')[0]).toMatchObject({ status: 'pending', started_at: null,
+          run_after: new Date(NOW + 360_000).toISOString() });
+      } else if (mode === 'cancel_after_release') expect(executionDb.getRows('ve_jobs')[0].status).toBe('cancelled');
+      else if (mode === 'new_claim_after_release') expect(executionDb.getRows('ve_jobs')[0].started_at).toBe(new Date(NOW + 1_000).toISOString());
+      else expect(executionDb.mutations).toEqual([]);
+      expect(executionDb.inserts).toEqual([]);
+    }
+    const failedRead = createMockSupabase({ tables: { ve_jobs: [waitingJob()], ve_bases: [billingBase()] },
+      errorTables: { ve_bases: 'unavailable' } });
+    await expect(resumeVeRequestyBillingJobs(failedRead as unknown as SupabaseClient,
+      { probe: async () => fundedProbe(), keyFingerprint: BILLING_KEY })).rejects.toThrow('base read failed');
+    expect(failedRead.mutations).toEqual([]);
+
+    for (const stopAt of ['before_read', 'during_probe', 'during_eligibility'] as const) {
+      const db = createMockSupabase({ tables: { ve_jobs: [waitingJob()], ve_bases: [billingBase()] } });
+      let stopped = stopAt === 'before_read';
+      const originalFrom = db.from.bind(db);
+      db.from = (table) => {
+        if (stopAt === 'during_eligibility' && table === 've_contact_supply_batches') stopped = true;
+        return originalFrom(table);
+      };
+      const probe = jest.fn(async () => { if (stopAt === 'during_probe') stopped = true; return fundedProbe(); });
+      expect((await resumeVeRequestyBillingJobs(db as unknown as SupabaseClient,
+        { probe, keyFingerprint: BILLING_KEY, shouldStop: () => stopped })).resumed).toBe(0);
+      expect(db.mutations).toEqual([]);
+      if (stopAt === 'before_read') expect(probe).not.toHaveBeenCalled();
+    }
+  });
+
   it('resumes metering failures only for collection with a valid saved checkpoint, and bounds repeated failures', () => {
     const checkpoint = readRelevanceCheckpoint(null, 'a'.repeat(64));
     checkpoint.verdicts['b'.repeat(64)] = { version: 2, status: 'needs_review', reason: 'Saved check', evidence: [], context_hash: checkpoint.context_hash };

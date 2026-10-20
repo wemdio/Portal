@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
+import { veRequestyBillingWaitState } from '@/lib/verticalEngineV2/requestyBillingState';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary, VePreparationAction } from './api';
 import { collectCount, describeCompletedCollection, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
 import { HE, StatusDot } from './design';
@@ -327,6 +328,18 @@ function getPreparationStage(props: PreparationProgressProps): PreparationPresen
 
 /** Explain who acts next without treating missing queue evidence as active work. */
 export function getPreparationPresentation(props: PreparationProgressProps): PreparationPresentation & Required<Pick<PreparationPresentation, 'guidance'>> {
+  const paused = !!props.preparation?.paused_at || (props.preparation?.status !== 'ready' && !!props.preparation?.cancelled_at);
+  const baseId = props.preparation?.base_id ?? props.base?.id;
+  // Only the latest pending invocation of this base's stage can be waiting.
+  // A cancelled/failed historical job never promises automatic continuation.
+  const billingWait = !paused && baseId ? ['base_collect', 'base_analyze', 'template']
+    .map((stage) => props.jobs.find((job) => job.payload?.base_id === baseId && job.stage === stage))
+    .map((job) => job?.status === 'pending' ? veRequestyBillingWaitState(job.payload) : null)
+    .find((wait) => wait !== null) : null;
+  if (billingWait) return {
+    title: billingWait.title, description: billingWait.description, currentStep: null, tone: 'muted',
+    guidance: { action: billingWait.requiresAdmin ? 'check' : 'wait', title: billingWait.title, next: billingWait.description },
+  };
   const state = getPreparationStage(props);
   const continuation = props.base?.collection_continuation;
   const target = props.base?.collect_info?.target_progress;
@@ -390,7 +403,6 @@ export function getPreparationPresentation(props: PreparationProgressProps): Pre
     state.continuationBlocked = false;
     state.continueHint = undefined;
   }
-  const paused = !!props.preparation?.paused_at || (props.preparation?.status !== 'ready' && !!props.preparation?.cancelled_at);
   if (paused) {
     state.title = 'Подготовка на паузе';
     state.description = 'Контакты, письма и согласования сохранены. Остальные базы работают независимо.';
@@ -504,11 +516,11 @@ export function PreparationProgress(props: PreparationProgressProps) {
         <StatusDot tone={state.tone} />
         <h3 className={HE.cardTitle}>{state.guidance.title}</h3>
       </div>
-      {!completed ? <p className="font-medium">{state.title}</p> : null}
+      {!completed && state.title !== state.guidance.title ? <p className="font-medium">{state.title}</p> : null}
       <p>{state.guidance.next}</p>
       {completed && state.collectionSummary ? <p className={HE.muted}>Подготовка завершена ниже цели. Эти контакты можно использовать, добор не обязателен.</p> : null}
       {!completed && state.readiness ? <p>{state.readiness}</p> : null}
-      {completed ? null : state.guidance?.action === 'wait' ? <details>
+      {completed || state.description === state.guidance.next ? null : state.guidance?.action === 'wait' ? <details>
         <summary className="ve2-link cursor-pointer">Что происходит на этом этапе</summary>
         <p className={`${HE.muted} mt-2 max-w-[70ch]`}>{state.description}</p>
       </details> : <p className={HE.muted}>{state.description}</p>}
