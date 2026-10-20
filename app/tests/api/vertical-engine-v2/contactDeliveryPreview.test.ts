@@ -79,8 +79,11 @@ function seed(options: {
   blocklistError?: string;
   blockedEmails?: string[];
   supplyRevision?: string;
+  supplyCurrent?: boolean;
+  enforceQueryWindows?: boolean;
 } = {}) {
   mockPortalDb = createMockSupabase({
+    enforceQueryWindows: options.enforceQueryWindows,
     tables: {
       ve_projects: [{ id: VE_PROJECT_ID }],
       ve_templates: [{ id: TEMPLATE_ID, base_id: BASE_ID, status: 'ready' }],
@@ -120,7 +123,7 @@ function seed(options: {
     },
     rpcHandlers: options.supplyRevision ? {
       ve_contact_supply_preview_revision: () => ({ data: options.supplyRevision }),
-      ve_contact_supply_approval_current: () => ({ data: true }),
+      ve_contact_supply_approval_current: () => ({ data: options.supplyCurrent !== false }),
       ve_approve_contact_supply: () => ({ data: 'supply-plan-1' }),
     } : undefined,
   });
@@ -242,7 +245,8 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
   });
 
   it('reports unblocked hypothesis stock, local uploads and the frozen day plan without reviving an unknown later estimate', async () => {
-    seed({ supplyRevision: 'reviewed' });
+    const supplyOptions = { supplyRevision: 'reviewed', supplyCurrent: true, enforceQueryWindows: true };
+    seed(supplyOptions);
     const estimate = { contacts: 10, as_of: '2026-09-06T12:00:00.000Z', scope: 'Observed directory yield', confidence: 'low' };
     await mockPortalDb.from('ve_bases').update({ collect_info: { collection_mode: 'preview', estimate: { remaining_ready_estimate: estimate } } }).eq('id', BASE_ID);
     await mockPortalDb.from('ve_contact_supply_plans').insert({
@@ -281,6 +285,60 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
     };
     const status = await read();
     expect(status).toMatchObject({ required: true, preview_revision: 'reviewed', estimate, plan: { current: true, launched: true } });
+    const wait = { version: 1, blocked_at: '2026-09-06T12:00:00Z',
+      probe_status: 'unavailable', probe_reason: 'management_forbidden',
+      key_fingerprint: 'private-key-identity', last_credit: { balanceUsd: 987.65 } };
+    await mockPortalDb.from('ve_contact_supply_batches').insert([
+      { id: 'old-batch', plan_id: 'supply-plan-1', base_id: 'old-supply-base', status: 'collecting', created_at: '2026-09-05T12:00:00Z' },
+      { id: 'latest-batch', plan_id: 'supply-plan-1', base_id: 'latest-supply-base', status: 'collecting', created_at: '2026-09-06T12:00:00Z' },
+    ]);
+    await mockPortalDb.from('ve_jobs').insert([
+      { id: 'old-wait', project_id: VE_PROJECT_ID, status: 'pending', created_at: '2026-09-05T12:00:00Z',
+        'payload->>base_id': 'old-supply-base', requesty_billing_wait: wait },
+      // The mock keeps projected JSON aliases as literal columns.
+      { id: 'current-wait', project_id: VE_PROJECT_ID, status: 'pending', created_at: '2026-09-06T12:00:00Z',
+        'payload->>base_id': 'latest-supply-base', requesty_billing_wait: wait },
+      { id: 'other-project', project_id: 'other-project', status: 'done', created_at: '2026-09-07T12:00:00Z',
+        'payload->>base_id': 'latest-supply-base' },
+    ]);
+    const mutationCount = mockPortalDb.mutations.length;
+    const waiting = await read();
+    expect(waiting.plan.billing_wait).toEqual({ version: 1, blocked_at: wait.blocked_at,
+      probe_status: 'unavailable', probe_reason: 'management_forbidden' });
+    expect(JSON.stringify(waiting)).not.toMatch(/private-key-identity|987\.65|last_credit/);
+    expect(mockPortalDb.mutations).toHaveLength(mutationCount);
+    expect(mockPortalDb.getRows('ve_jobs').find(row => row.id === 'current-wait')?.requesty_billing_wait).toEqual(wait);
+    expect(mockPortalDb.selects.find(query => query.table === 've_jobs')?.columns)
+      .toBe('status,requesty_billing_wait:payload->requesty_billing_wait');
+    await mockPortalDb.from('ve_jobs').insert({ id: 'newer-done', project_id: VE_PROJECT_ID, status: 'done',
+      created_at: '2026-09-06T13:00:00Z', 'payload->>base_id': 'latest-supply-base' });
+    expect((await read()).plan.billing_wait).toBeUndefined();
+    await mockPortalDb.from('ve_jobs').delete().eq('id', 'newer-done');
+    await mockPortalDb.from('ve_contact_supply_batches').update({ status: 'appended' }).eq('id', 'latest-batch');
+    expect((await read()).plan.billing_wait).toBeUndefined();
+    await mockPortalDb.from('ve_contact_supply_batches').update({ status: 'auditing' }).eq('id', 'latest-batch');
+    for (const patch of [{ status: 'paused' }, { status: 'error', last_error: 'Requesty 402' }]) {
+      await mockPortalDb.from('ve_contact_supply_plans').update(patch).eq('id', 'supply-plan-1');
+      expect((await read()).plan.billing_wait).toBeUndefined();
+    }
+    await mockPortalDb.from('ve_contact_supply_plans').update({ status: 'active', last_error: null }).eq('id', 'supply-plan-1');
+    supplyOptions.supplyCurrent = false;
+    expect((await read()).plan).toMatchObject({ current: false });
+    expect((await read()).plan.billing_wait).toBeUndefined();
+    supplyOptions.supplyCurrent = true;
+    // A failed status read must not return an apparently active plan or raw DB error.
+    const originalFrom = mockPortalDb.from;
+    for (const table of ['ve_contact_supply_batches', 've_jobs']) {
+      const unavailable = createMockSupabase({ errorTables: { [table]: 'private database failure' } });
+      const from = jest.spyOn(mockPortalDb, 'from').mockImplementation(name =>
+        name === table ? unavailable.from(name) : originalFrom(name));
+      try {
+        const response = await GET_SUPPLY(new Request('http://portal.test/supply') as NextRequest,
+          { params: Promise.resolve({ id: TEMPLATE_ID }) });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: 'Не удалось проверить состояние текущего добора' });
+      } finally { from.mockRestore(); }
+    }
     expect(status.metrics).toEqual({
       ready: 2, uploaded: 2, uploaded_today: 1, uncertain: 2, project_first_contacted: 10,
       project_daily_plan: 0, project_required_daily: 2, project_ready: 5, project_stock_workdays: 2,

@@ -16,8 +16,11 @@ import { veRequestyBillingWaitMessage, redactVeRequestyBillingPayload } from '@/
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { Step1Research } from '@/components/vertical-engine-v2/engine/steps/Step1Research';
+import { CampaignProgress } from '@/components/vertical-engine-v2/engine/CampaignProgress';
+import { useContactSupply } from '@/components/vertical-engine-v2/engine/ContactSupplyPanel';
 
 jest.mock('@/lib/verticalEngineV2/actualsReconcile', () => ({ reconcileProjectVerticals: jest.fn(async () => {}) }));
+jest.mock('@/components/vertical-engine-v2/engine/ContactSupplyPanel', () => ({ useContactSupply: jest.fn() }));
 
 function base(id: string, createdAt: string, info: VeBaseSummary['collect_info'] = {}): VeBaseSummary {
   return {
@@ -371,6 +374,27 @@ describe('VE2 collection progress presentation', () => {
     const markup = renderToStaticMarkup(createElement(Step1Research, researchProps));
     expect(markup).toContain('Нужен доступ к балансу Requesty');
     expect(markup).not.toMatch(/Идёт исследование|несколько минут|animate-pulse|Попробовать снова|private-key-identity|987\.65/);
+    const campaign = (patch: Record<string, unknown> = {}) => {
+      jest.mocked(useContactSupply).mockReturnValue({
+        data: { plan: { current: true, status: 'active', launched: true, billing_wait: wait, ...patch } },
+        busy: false, error: '', act: jest.fn(),
+      } as unknown as ReturnType<typeof useContactSupply>);
+      return renderToStaticMarkup(createElement(CampaignProgress,
+        { template: { id: 'launched-template' } as VeTemplate, required: true, title: 'Гипотеза' }));
+    };
+    const waitingCampaign = campaign();
+    expect(waitingCampaign).toMatch(/Ожидаем пополнения Requesty/);
+    expect(waitingCampaign).toContain('Приостановить поиск');
+    expect(waitingCampaign).not.toMatch(/Автоматический поиск новых контактов включён|Продолжить поиск|private-key-identity|987\.65/);
+    const forbiddenCampaign = campaign({ billing_wait: forbiddenJob.payload.requesty_billing_wait });
+    expect(forbiddenCampaign).toContain('Администратору нужно разрешить проверку баланса');
+    expect(forbiddenCampaign).not.toContain('Продолжим автоматически');
+    for (const patch of [{ status: 'paused' }, { current: false }]) {
+      expect(campaign(patch)).not.toMatch(/Ожидаем пополнения Requesty|Продолжим автоматически/);
+    }
+    const oldBillingCampaign = campaign({ status: 'error', billing_wait: undefined, error: 'Requesty 402: private provider body' });
+    expect(oldBillingCampaign).toContain('Продолжить поиск');
+    expect(oldBillingCampaign).not.toMatch(/Продолжим автоматически|private provider body/);
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...parent, status: 'failed', error: 'Stopped' }] }))
       .toMatchObject({ tone: 'err', guidance: { action: 'continue' } });
     expect(getPreparationPresentation({ preparation, base: { ...collecting, collect_info: {} }, jobs: [parent] }))

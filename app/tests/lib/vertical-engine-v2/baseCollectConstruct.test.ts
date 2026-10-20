@@ -1358,6 +1358,78 @@ describe('base_collect CONSTRUCT step order', () => {
       .toEqual([['ready@first.test'], ['next@next.test']]);
     expect(db.inserts.filter((entry) => entry.table === 've_jobs')).toEqual([]);
 
+    // Legacy supply failures can have a done parent and a CLOSED round. The
+    // explicit SQL repair reopens those same IDs with this saved-review marker.
+    // Recheck only the unfinished verdict: no replacement source/SMTP batch and
+    // no second accounting of the 6,753 already processed candidates.
+    for (const bounded of [false, true]) {
+      const savedReady = { ...first, _email_status: 'ok', _ve_relevance: {
+        version: 2, status: 'relevant', reason: 'Confirmed clinic', context_hash: 'a'.repeat(64),
+        evidence: [{ field: 'description', quote: 'Clinic' }],
+      }, _ve_company_name: { version: 1, status: 'ready', value: first.company, source: first.company, website: first.website } };
+      const pending = { ...unifiedRow({ company: 'Saved Pending Clinic', website: 'pending.test', email: 'mail@pending.test' }),
+        _email_status: 'ok', _relevance_unchecked: true };
+      const round = bounded ? 5 : 71;
+      const maxRounds = bounded ? 5 : 100;
+      const resumeInfo: VeCollectInfo = {
+        ...collectInfo([first, pending], { bc_job_id: 'bc-billing-complete', status: 'done' }),
+        collection_mode: 'supply', supply_batch_id: 'supply-saved', ready_target: bounded ? 3 : 2,
+        adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
+        target_progress: { ...createCollectionTarget('supply', bounded ? 3 : 2),
+          round, max_rounds: maxRounds, max_candidates: 10_000, candidates_processed: 6753, ready_rows: 1 },
+        target_checkpoint: { completed_round: round, seen_rows: [first, pending], processed_rows: 10475 },
+        relevance_review_requested: true,
+        relevance_reserve: { version: 1, rows: [savedReady, pending] },
+        supply_billing_resume: { version: 1, batch_id: 'supply-saved', job_id: 'job-1',
+          blocked_at: '2026-08-30T00:00:00Z', resumed_at: '2026-08-31T00:00:00Z',
+          max_rounds: maxRounds, max_candidates: 10_000 },
+      };
+      resumeInfo.tasks![0].exhausted = !bounded;
+      resumeInfo.tasks![0].directory_cursors = { saved_lane: 9000 };
+      const resumeJob = { ...makeJob(), payload: { ...makeJob().payload,
+        collection_mode: 'supply', supply_batch_id: 'supply-saved' }, attempts: 0 };
+      const paidChild = { id: 'bc-billing-complete', status: 'completed', selected_steps: ['split_emails', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'Email Статус'],
+          [first.company, first.website, first.email, 'ok'], [pending.company, pending.website, pending.email, 'ok']] };
+      const resumeDb = seed(resumeInfo, {
+        ve_bases: [{ ...makeBase(resumeInfo), data: [savedReady], row_count: 1, columns: [...VE_AUTO_COLLECT_COLUMNS] }],
+        ve_jobs: [resumeJob as unknown as Record<string, unknown>],
+        ve_contact_supply_batches: [{ id: 'supply-saved', plan_id: 'supply-plan', base_id: 'b1', status: 'collecting' }],
+        base_constructor_jobs: [structuredClone(paidChild)],
+      });
+      const originalRpc = resumeDb.rpc;
+      let active = false;
+      resumeDb.rpc = (name, params) => name === 've_require_contact_supply_active'
+        ? Promise.resolve(active ? { data: { id: 'supply-plan' }, error: null }
+          : { data: null, error: { message: 'supply plan is not active (paused or stopped)' } })
+        : originalRpc(name, params);
+      const sourceCalls = jest.mocked(searchRows).mock.calls.length;
+      const gateCalls = mockFindIrrelevantRows.mock.calls.length;
+      await expect(runBaseCollectStage(resumeJob, { supabase: resumeDb as unknown as SupabaseClient }))
+        .resolves.toMatchObject({ result: { supply_held: true } });
+      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(gateCalls);
+      active = true;
+      await resumeDb.from('ve_jobs').update({ status: 'running' }).eq('id', resumeJob.id);
+      await runBaseCollectStage(resumeJob, { supabase: resumeDb as unknown as SupabaseClient });
+      const saved = resumeDb.getRows('ve_bases')[0];
+      expect(saved).toMatchObject({ status: 'analyzed', row_count: 2 });
+      expect((saved.collect_info as VeCollectInfo).target_progress).toMatchObject({
+        status: bounded ? 'limited' : 'target_reached', round, max_rounds: maxRounds,
+        max_candidates: 10_000, candidates_processed: 6753, ready_rows: 2,
+      });
+      expect((saved.collect_info as VeCollectInfo).target_checkpoint?.processed_rows).toBe(10475);
+      expect((saved.collect_info as VeCollectInfo).tasks![0].directory_cursors).toEqual({ saved_lane: 9000 });
+      expect(mockFindIrrelevantRows.mock.calls.slice(gateCalls).map(([input]) => input.rows.map((row: VeUnifiedRow) => row.email)))
+        .toEqual([['mail@pending.test']]);
+      expect(searchRows).toHaveBeenCalledTimes(sourceCalls);
+      expect(resumeDb.getRows('base_constructor_jobs')).toEqual([paidChild]);
+      expect(resumeDb.getRows('ve_contact_supply_batches')).toHaveLength(1);
+      expect(resumeDb.inserts).toEqual([]);
+      const reviewed = mockFindIrrelevantRows.mock.calls.length;
+      await runBaseCollectStage(resumeJob, { supabase: resumeDb as unknown as SupabaseClient });
+      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(reviewed);
+    }
+
     // Joynio: retry only the checkpoint of an already paid/completed batch.
     // An ambiguous commit must not rerun classification or create a new child.
     const recoveryInfo: VeCollectInfo = { ...collectInfo([
@@ -1543,47 +1615,56 @@ describe('base_collect CONSTRUCT step order', () => {
 
     // Seven hours waiting for credit are not seven hours of parent execution.
     // Repeated wakes reuse the timer receipt, and a manual supply pause still wins.
-    const now = Date.now();
-    const dispatch = new Date(now - 9 * 60 * 60_000).toISOString();
-    const blockedAt = new Date(now - 8 * 60 * 60_000).toISOString();
-    const resumedAt = new Date(now - 1 * 60 * 60_000).toISOString();
-    const billingInfo: VeCollectInfo = { ...collectInfo([
-      unifiedRow({ company: 'Saved Clinic', email: 'saved@clinic.test', website: 'saved.test' }),
-    ], { bc_job_id: 'bc-billing', status: 'dispatched', dispatched_at: dispatch }),
-    collection_mode: 'supply', ready_target: 10, supply_batch_id: 'batch-billing' };
-    billingInfo.tasks![0].dispatched_at = dispatch;
-    const billingDb = seed(billingInfo, {
-      ve_contact_supply_batches: [{ id: 'batch-billing', base_id: 'b1', plan_id: 'plan-billing' }],
-      base_constructor_jobs: [{ id: 'bc-billing', status: 'processing' }],
-    });
-    const billingRpc = billingDb.rpc;
-    let billingEligible = false;
-    billingDb.rpc = (name, params) => name === 've_require_contact_supply_active'
-      ? Promise.resolve(billingEligible ? { data: { id: 'plan-billing' }, error: null }
-        : { data: null, error: { message: 'supply plan is not active (paused or stopped)' } })
-      : billingRpc(name, params);
-    const billingJob = { ...makeJob(), payload: { ...makeJob().payload, collection_mode: 'supply',
-      ready_target: 10, supply_batch_id: 'batch-billing', requesty_billing_recovery: {
-        version: 1, blocked_at: blockedAt, resumed_at: resumedAt,
-      } } };
-    const billingClient = billingDb as unknown as SupabaseClient;
-    await expect(runBaseCollectStage(billingJob, { supabase: billingClient }))
-      .resolves.toMatchObject({ result: { supply_held: true } });
-    const afterCredit = billingDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
-    const shiftedDispatch = new Date(now - 2 * 60 * 60_000).toISOString();
-    expect(afterCredit.construct?.dispatched_at).toBe(shiftedDispatch);
-    expect(afterCredit.tasks![0].dispatched_at).toBe(shiftedDispatch);
-    expect(afterCredit.requesty_billing_timer_recovery).toEqual({ blocked_at: blockedAt, resumed_at: resumedAt });
-    expect(billingDb.getRows('base_constructor_jobs')).toHaveLength(1);
-    expect(billingDb.getRows('base_constructor_jobs')[0].status).toBe('processing');
-    await expect(runBaseCollectStage(billingJob, { supabase: billingClient }))
-      .resolves.toMatchObject({ result: { supply_held: true } });
-    expect((billingDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).construct?.dispatched_at).toBe(shiftedDispatch);
-    billingEligible = true;
-    await expect(runBaseCollectStage(billingJob, { supabase: billingClient }))
-      .resolves.toMatchObject({ result: { waiting: true } });
-    expect(billingDb.getRows('ve_bases')[0].status).toBe('collecting');
-    expect(billingDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    for (const manual of [false, true]) {
+      const now = Date.now();
+      const dispatch = new Date(now - 9 * 60 * 60_000).toISOString();
+      const blockedAt = new Date(now - 8 * 60 * 60_000).toISOString();
+      const resumedAt = new Date(now - 1 * 60 * 60_000).toISOString();
+      const billingInfo: VeCollectInfo = { ...collectInfo([
+        unifiedRow({ company: 'Saved Clinic', email: 'saved@clinic.test', website: 'saved.test' }),
+      ], { bc_job_id: 'bc-billing', status: 'dispatched', dispatched_at: dispatch }),
+      collection_mode: 'supply', ready_target: 10, supply_batch_id: 'batch-billing' };
+      if (manual) {
+        billingInfo.target_progress = createCollectionTarget('supply', 10);
+        billingInfo.supply_billing_resume = { version: 1, batch_id: 'batch-billing', job_id: 'job-1',
+          blocked_at: blockedAt, resumed_at: resumedAt, max_rounds: 5, max_candidates: 10_000 };
+      }
+      billingInfo.tasks![0].dispatched_at = dispatch;
+      const billingDb = seed(billingInfo, {
+        ve_contact_supply_batches: [{ id: 'batch-billing', base_id: 'b1', plan_id: 'plan-billing' }],
+        base_constructor_jobs: [{ id: 'bc-billing', status: 'processing' }],
+      });
+      const billingRpc = billingDb.rpc;
+      let billingEligible = false;
+      billingDb.rpc = (name, params) => name === 've_require_contact_supply_active'
+        ? Promise.resolve(billingEligible ? { data: { id: 'plan-billing' }, error: null }
+          : { data: null, error: { message: 'supply plan is not active (paused or stopped)' } })
+        : billingRpc(name, params);
+      const billingJob = { ...makeJob(), payload: { ...makeJob().payload, collection_mode: 'supply',
+        ready_target: 10, supply_batch_id: 'batch-billing', ...(!manual ? { requesty_billing_recovery: {
+          version: 1, blocked_at: blockedAt, resumed_at: resumedAt,
+        } } : {}) } };
+      const billingClient = billingDb as unknown as SupabaseClient;
+      await expect(runBaseCollectStage(billingJob, { supabase: billingClient }))
+        .resolves.toMatchObject({ result: { supply_held: true } });
+      const afterCredit = billingDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      const shiftedDispatch = new Date(now - 2 * 60 * 60_000).toISOString();
+      expect(afterCredit.construct?.dispatched_at).toBe(shiftedDispatch);
+      expect(afterCredit.tasks![0].dispatched_at).toBe(shiftedDispatch);
+      expect(afterCredit.requesty_billing_timer_recovery).toEqual({ blocked_at: blockedAt, resumed_at: resumedAt });
+      expect(billingDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(billingDb.getRows('base_constructor_jobs')[0].status).toBe('processing');
+      await expect(runBaseCollectStage(billingJob, { supabase: billingClient }))
+        .resolves.toMatchObject({ result: { supply_held: true } });
+      expect((billingDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).construct?.dispatched_at).toBe(shiftedDispatch);
+      billingEligible = true;
+      await expect(runBaseCollectStage(billingJob, { supabase: billingClient }))
+        .resolves.toMatchObject({ result: { waiting: true } });
+      expect(billingDb.getRows('ve_bases')[0].status).toBe('collecting');
+      expect(billingDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      if (manual) expect((billingDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
+        .toMatchObject({ round: 1, max_rounds: 5, max_candidates: 10_000, candidates_processed: 0 });
+    }
   });
 
   it.each([
