@@ -37,9 +37,21 @@ try {
     await db.exec(migration('20261020_0001_ve_supply_billing_resume.sql'));
     // External shared child/preparation tables are read only by recovery.
     await db.exec(`create table public.base_constructor_jobs(id uuid primary key,status text);
-      create table public.ve_outreach_preparations(project_id uuid,hypothesis_id uuid,base_id uuid,
-        paused_at timestamptz,cancelled_at timestamptz,primary key(project_id,hypothesis_id));`);
+      create table public.ve_outreach_preparations(project_id uuid,hypothesis_id uuid,base_id uuid,template_id uuid,
+        status text not null default 'error',language text not null default 'ru',independent_control boolean not null default false,
+        locked_until timestamptz,claim_token uuid,last_error text,updated_at timestamptz not null default now(),
+        paused_at timestamptz,cancelled_at timestamptz,primary key(project_id,hypothesis_id));
+      create table public.ve_outreach_setups(project_id uuid primary key,selected_hypothesis_ids uuid[] not null default '{}',
+        approved_bases jsonb not null default '{}',language text not null default 'ru');
+      create table public.ve_outreach_runs(id uuid primary key,project_id uuid,status text,request jsonb);`);
     await db.exec(migration('20261020_0002_ve_legacy_supply_credit_recovery.sql'));
+    // Execute the real shared frozen-audience predicate; remaining setup rows
+    // above are narrow external-table fixtures, with the production columns.
+    const frozenPredicate = migration('20260920_0001_ve_emails_per_company.sql')
+      .match(/create or replace function public\.ve_base_audience_frozen[\s\S]+?\$\$;/)?.[0];
+    assert.ok(frozenPredicate);
+    await db.exec(frozenPredicate);
+    await db.exec(migration('20261020_0006_ve_legacy_requesty_preview_recovery.sql'));
   }
   const now = '2030-09-02T10:00:00Z'; // Monday, independent of machine weekday.
   const id = Object.fromEntries(['project', 'period', 've', 'actor', 'vertical', 'hypothesis', 'base', 'template', 'audit', 'reservation', 'preset']
@@ -496,6 +508,145 @@ try {
     await fixture.query('rollback to savepoint infrastructure_refusal');
     assert.deepEqual(await fixture.snapshot(), before, 'infrastructure errors propagate and roll back all repaired rows');
   });
+  // Historical preview recovery has no launch/supply plan. Preserve the
+  // current paid preparation rather than using explicit retry's new allowance.
+  const withBillingPreview = async (run, { pipeline = true, closed = true } = {}) => db.transaction(async (tx) => {
+    const query = async (sql, args = []) => (await tx.query(sql, args)).rows;
+    const one = async (sql, args = []) => (await query(sql, args))[0];
+    const key = Object.fromEntries(['project', 'vertical', 'hypothesis', 'base', 'job', 'child'].map(k => [k, randomUUID()]));
+    const checkpoint = { completed_round: closed ? 24 : 23, processed_rows: 2025,
+      seen_rows: [{ company: 'Saved source', website: 'saved.example.org' }] };
+    const info = { collection_mode: 'preview', ready_target: 500,
+      target_progress: { mode: 'preview', status: 'error', reason: billingError, round: 24, max_rounds: 102,
+        max_candidates: 10000, candidates_processed: 2025, ready_rows: 22, ready_target: 500, first_round_candidates: 100 },
+      target_checkpoint: checkpoint, tasks: [{ source: 'companies_directory', status: 'done', harvest: [{ company: 'Saved candidate' }],
+        directory_cursors: { existing_lane: 700 } }, { source: 'yandex_maps', status: 'pending' }],
+      construct: { bc_job_id: key.child, status: 'done' },
+      relevance_reserve: { version: 1, rows: [{ company: 'Saved review', _relevance_unchecked: true }] },
+      relevance_checkpoint: { version: 2, verdicts: { paid: 'preserved' } },
+      cost_policy: { version: 1, website_discovery: 'existing_then_configured' },
+      search_policy: { version: 1, phase: 'existing', deferred_rows: [] },
+      ...(pipeline ? { preview_pipeline: { version: 1, revision: 1546, checkpoint_id: randomUUID(), batches: [],
+        completed_batches: 1, job_ids: [key.child] } } : {}),
+    };
+    const data = Array.from({ length: 22 }, (_, i) => ({ company: `Saved ${i}`, email: `saved${i}@example.org` }));
+    await query("insert into ve_projects(id,created_by,name,website_url,status) values($1,$2,'Preview test','https://example.org','researched')", [key.project, id.actor]);
+    await query("insert into ve_verticals(id,project_id,name,potential_pct) values($1,$2,'Clinical',50)", [key.vertical, key.project]);
+    await query("insert into ve_hypotheses(id,project_id,vertical_id,title,tier,status) values($1,$2,$3,'Dentistry',1,'accepted')", [key.hypothesis, key.project, key.vertical]);
+    await query(`insert into ve_bases(id,project_id,vertical_id,hypothesis_id,source,status,collect_info,data,row_count,error,updated_at)
+      values($1,$2,$3,$4,'auto','failed',$5,$6,22,$7,'2030-09-02T10:12:00Z')`, [key.base, key.project, key.vertical, key.hypothesis, info, data, billingError]);
+    await query("insert into base_constructor_jobs values($1,'completed')", [key.child]);
+    await query(`insert into ve_jobs(id,project_id,stage,status,payload,result,attempts,tokens_used,cost_usd,finished_at)
+      values($1,$2,'base_collect','done',$3,$4,1,4567,0.0125,'2030-09-02T10:12:01Z')`, [key.job, key.project,
+      { base_id: key.base, collection_mode: 'preview', hypothesis_id: key.hypothesis, vertical_id: key.vertical },
+      { rows: 22, base_id: key.base, target_status: 'error', relevance_checkpoint: info.relevance_checkpoint }]);
+    await query('insert into ve_outreach_setups(project_id,selected_hypothesis_ids) values($1,$2)', [key.project, [key.hypothesis]]);
+    await query(`insert into ve_outreach_preparations(project_id,hypothesis_id,base_id,independent_control,last_error,updated_at)
+      values($1,$2,$3,true,$4,'2030-09-02T10:12:02Z')`, [key.project, key.hypothesis, key.base, billingError]);
+    const snapshot = async () => ({
+      preparation: (await one('select to_jsonb(p) value from ve_outreach_preparations p where project_id=$1', [key.project])).value,
+      base: (await one('select to_jsonb(b) value from ve_bases b where id=$1', [key.base])).value,
+      job: (await one('select to_jsonb(j) value from ve_jobs j where id=$1', [key.job])).value,
+      child: (await one('select to_jsonb(c) value from base_constructor_jobs c where id=$1', [key.child]))?.value,
+      counts: await one(`select (select count(*)::int from ve_jobs) jobs,(select count(*)::int from ve_bases) bases,
+        (select count(*)::int from base_constructor_jobs) children,(select count(*)::int from ve_contact_supply_batches) batches`),
+    });
+    const resume = async (overrides = {}) => (await one('select ve_resume_legacy_requesty_preview($1,$2,$3,$4,$5,$6,$7,$8) result',
+      [key.project, key.hypothesis, key.base, overrides.updatedAt ?? (await snapshot()).preparation.updated_at,
+        overrides.fingerprint ?? fingerprint, overrides.credit ?? fundedCredit,
+        overrides.observedAt ?? '2030-09-02T10:14:50Z', overrides.now ?? resumedAt])).result;
+    await run({ key, query, one, info, snapshot, resume });
+    await tx.rollback();
+  });
+  for (const pipeline of [false, true]) for (const closed of [false, true]) await withBillingPreview(async f => {
+    const before = await f.snapshot();
+    assert.deepEqual(await f.resume(), { resumed: true, reason: 'credit_available' });
+    const after = await f.snapshot();
+    assert.deepEqual(after.counts, before.counts);
+    assert.equal(after.preparation.status, 'collecting');
+    assert.equal(after.preparation.base_id, before.preparation.base_id);
+    assert.equal(after.preparation.independent_control, true);
+    assert.equal(after.job.id, before.job.id);
+    assert.equal(after.job.status, 'pending');
+    for (const field of ['attempts', 'tokens_used', 'cost_usd', 'result']) assert.deepEqual(after.job[field], before.job[field]);
+    for (const field of ['data', 'row_count', 'sample_rows', 'columns']) assert.deepEqual(after.base[field], before.base[field]);
+    assert.deepEqual(after.child, before.child);
+    for (const field of ['target_checkpoint','preview_pipeline','construct','tasks','search_policy','cost_policy','relevance_checkpoint','relevance_reserve']) {
+      assert.deepEqual(after.base.collect_info[field], before.base.collect_info[field], field);
+    }
+    assert.equal(after.base.collect_info.relevance_review_requested, closed ? true : undefined);
+    const expectedTarget = { ...f.info.target_progress, status: 'collecting' };
+    delete expectedTarget.reason;
+    assert.deepEqual(after.base.collect_info.target_progress, expectedTarget);
+    assert.equal(after.base.collect_info.preview_billing_resume.max_rounds, 102);
+    assert.equal(after.base.collect_info.preview_billing_resume.max_candidates, 10000);
+    assert.equal(after.job.payload.requesty_billing_recovery.source, 'legacy_preview');
+    assert.deepEqual(after.job.payload.requesty_billing_recovery.credit_signal, fundedCredit);
+    assert.equal((await f.resume({ updatedAt: before.preparation.updated_at })).resumed, false);
+    assert.deepEqual(await f.snapshot(), after);
+    await f.query(`update ve_bases set status='failed',error=$2,collect_info=jsonb_set(collect_info,'{target_progress}',
+      collect_info->'target_progress'||jsonb_build_object('status','error','reason',$2::text)) where id=$1`, [f.key.base, billingError]);
+    await f.query("update ve_jobs set status='done' where id=$1", [f.key.job]);
+    await f.query("update ve_outreach_preparations set status='error',last_error=$2 where project_id=$1", [f.key.project, billingError]);
+    const repeated = await f.snapshot();
+    assert.equal((await f.resume()).reason, 'awaiting_credit_change');
+    assert.deepEqual(await f.snapshot(), repeated);
+    assert.equal((await f.resume({ credit: { ...fundedCredit, balanceUsd: 20 } })).resumed, true);
+  }, { pipeline, closed });
+  for (const [name, mutate, overrides] of [
+    ['zero balance', null, { credit: { ...fundedCredit, balanceUsd: 0 } }],
+    ['stale probe', null, { observedAt: '2030-09-02T10:12:59Z' }],
+    ['stale CAS', null, { updatedAt: '2030-09-02T10:12:01Z' }],
+    ['paused', f => f.query('update ve_outreach_preparations set paused_at=$2 where project_id=$1', [f.key.project, resumedAt])],
+    ['cancelled', f => f.query('update ve_outreach_preparations set cancelled_at=$2 where project_id=$1', [f.key.project, resumedAt])],
+    ['deselected', async f => { await f.query('update ve_outreach_preparations set independent_control=false where project_id=$1', [f.key.project]);
+      await f.query("update ve_outreach_setups set selected_hypothesis_ids='{}' where project_id=$1", [f.key.project]); }],
+    ['language changed', async f => { await f.query('update ve_outreach_preparations set independent_control=false where project_id=$1', [f.key.project]);
+      await f.query("update ve_outreach_setups set language='en' where project_id=$1", [f.key.project]); }],
+    ['hypothesis rejected', f => f.query("update ve_hypotheses set status='rejected' where id=$1", [f.key.hypothesis])],
+    ['preparation pointer changed', f => f.query('update ve_outreach_preparations set base_id=$2 where project_id=$1', [f.key.project, randomUUID()])],
+    ['claimed preparation', f => f.query('update ve_outreach_preparations set locked_until=$2 where project_id=$1', [f.key.project, '2030-09-02T10:16:00Z'])],
+    ['job cancelled', f => f.query("update ve_jobs set status='cancelled' where id=$1", [f.key.job])],
+    ['job running', f => f.query("update ve_jobs set status='running' where id=$1", [f.key.job])],
+    ['new failed job', f => f.query(`insert into ve_jobs(project_id,stage,status,payload,created_at) values($1,'base_collect','failed',$2,clock_timestamp()+interval '1 second')`,
+      [f.key.project, { base_id: f.key.base }])],
+    ['already launched', f => f.query(`insert into ve_outreach_runs values($1,$2,'queued',$3)`, [randomUUID(), f.key.project, { items: [{ hypothesis_id: f.key.hypothesis }] }])],
+    ['approved', f => f.query('update ve_outreach_setups set approved_bases=$2 where project_id=$1', [f.key.project, { [f.key.base]: {} }])],
+    ['frozen audience', f => f.query(`insert into ve_templates(base_id,vertical_id,status,letters,launch_info) values($1,$2,'ready','[]','{}')`, [f.key.base, f.key.vertical])],
+    ['non Requesty', f => f.query("update ve_bases set error='Serper 402' where id=$1", [f.key.base])],
+    ['unrelated job failure', f => f.query("update ve_jobs set error='Directory 404' where id=$1", [f.key.job])],
+    ['malformed checkpoint', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{target_checkpoint,completed_round}','"24"') where id=$1`, [f.key.base])],
+    ['missing reserve', f => f.query("update ve_bases set collect_info=collect_info-'relevance_reserve' where id=$1", [f.key.base])],
+    ['failed source', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{tasks,0,status}','"failed"') where id=$1`, [f.key.base])],
+    ['pending child identity', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{tasks,1,child_job_id}',to_jsonb($2::text)) where id=$1`, [f.key.base, f.key.child])],
+    ['child failed', f => f.query("update base_constructor_jobs set status='failed' where id=$1", [f.key.child])],
+    ['child missing', f => f.query('delete from base_constructor_jobs where id=$1', [f.key.child])],
+    ['pending pipeline', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{preview_pipeline,batches}','[{"id":"pending"}]') where id=$1`, [f.key.base])],
+    ['different recovery key', f => f.query(`update ve_jobs set payload=payload||jsonb_build_object('requesty_billing_recovery',$2::jsonb) where id=$1`,
+      [f.key.job, { ...previousRecovery(), key_fingerprint: 'b'.repeat(64) }])],
+  ]) await withBillingPreview(async f => {
+    if (mutate) await mutate(f);
+    const before = await f.snapshot();
+    assert.equal((await f.resume(overrides)).resumed, false, name);
+    assert.deepEqual(await f.snapshot(), before, name);
+  });
+  await withBillingPreview(async f => {
+    await f.query("update ve_outreach_setups set selected_hypothesis_ids='{}' where project_id=$1", [f.key.project]);
+    assert.equal((await f.resume()).resumed, true, 'independent control survives checkbox deselection');
+  });
+  await withBillingPreview(async f => {
+    await f.query('update ve_outreach_preparations set independent_control=false where project_id=$1', [f.key.project]);
+    assert.equal((await f.resume()).resumed, true, 'still-selected legacy control resumes');
+  });
+  await withBillingPreview(async f => {
+    await f.query(`create function test_preview_failure() returns trigger language plpgsql as $$ begin raise exception 'Preview write failed'; end; $$`);
+    await f.query(`create trigger test_preview_failure before update on ve_outreach_preparations for each row execute function test_preview_failure()`);
+    const before = await f.snapshot();
+    await f.query('savepoint preview_failure');
+    await assert.rejects(() => f.resume(), /Preview write failed/);
+    await f.query('rollback to savepoint preview_failure');
+    assert.deepEqual(await f.snapshot(), before, 'late write failure rolls back job and base too');
+  });
   await rows("update ve_templates set letters='[{\"body\":\"Changed\"}]' where id=$1", [id.template]);
   assert.equal(await scalar('select ve_contact_supply_approval_current($1) result', [plan.id]), false);
   await fails(() => scalar('select ve_reserve_contact_delivery_day($1,$2,0) result', [id.ve, now]), /approval is stale/);
@@ -508,6 +659,8 @@ try {
   await db.exec('set role authenticated');
   await fails(() => scalar('select ve_resume_legacy_requesty_supply($1,$2,$3,$4,$5,$6) result',
     [plan.id, now, fingerprint, fundedCredit, now, now]), /permission denied/i);
+  await fails(() => scalar('select ve_resume_legacy_requesty_preview($1,$2,$3,$4,$5,$6,$7,$8) result',
+    [id.ve,id.hypothesis,id.base,now,fingerprint,fundedCredit,now,now]), /permission denied/i);
   await db.exec('reset role');
   console.log('PASS continuous supply: approval, atomic enqueue/append/replay, campaign reuse, pause/stale rules, empty-day retry, saved billing-batch resume, and automatic credit recovery/rollback.');
 } catch (error) {

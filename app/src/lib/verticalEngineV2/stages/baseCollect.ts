@@ -801,6 +801,9 @@ export interface VeCollectInfo {
   /** Explicit legacy supply repair keeps the original batch and exact budget. */
   supply_billing_resume?: { version: 1; batch_id: string; job_id: string; blocked_at: string; resumed_at: string;
     max_rounds: number; max_candidates: number };
+  /** Automatic legacy preview repair retains the same acquisition envelope. */
+  preview_billing_resume?: { version: 1; job_id: string; blocked_at: string; resumed_at: string;
+    max_rounds: number; max_candidates: number };
   target_progress?: VeCollectionTargetProgress;
   /** Explicit manual recovery: recheck persisted constructor output, not sources. */
   validation_retry?: boolean;
@@ -4615,7 +4618,7 @@ async function completeTargetRound(args: {
     });
     // Explicit billing recovery does not grant rounds, including idle-round
     // allowances. Saved review can finish at the cap; new source work cannot.
-    if (info.supply_billing_resume) {
+    if (info.supply_billing_resume || info.preview_billing_resume) {
       result.max_rounds = progress.max_rounds;
       if (result.status === 'collecting' && result.round > progress.max_rounds) {
         result.round = progress.round;
@@ -5250,6 +5253,19 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         || !Number.isFinite(Date.parse(receipt.blocked_at)) || !Number.isFinite(Date.parse(receipt.resumed_at))
         || Date.parse(receipt.resumed_at) < Date.parse(receipt.blocked_at)) {
         throw new VeRelevanceCheckpointError('Invalid saved supply billing recovery');
+      }
+      target.max_rounds = receipt.max_rounds;
+      target.max_candidates = receipt.max_candidates;
+    }
+    if (info.preview_billing_resume) {
+      const receipt = info.preview_billing_resume;
+      if (receipt.version !== 1 || mode !== 'preview' || typeof receipt.job_id !== 'string'
+        || !previous || !Number.isSafeInteger(receipt.max_rounds) || receipt.max_rounds < 1 || receipt.max_rounds > 10_000
+        || !Number.isSafeInteger(receipt.max_candidates) || receipt.max_candidates < 1 || receipt.max_candidates > target.max_candidates
+        || previous.max_rounds !== receipt.max_rounds || previous.max_candidates !== receipt.max_candidates
+        || !Number.isFinite(Date.parse(receipt.blocked_at)) || !Number.isFinite(Date.parse(receipt.resumed_at))
+        || Date.parse(receipt.resumed_at) < Date.parse(receipt.blocked_at)) {
+        throw new VeRelevanceCheckpointError('Invalid saved preview billing recovery');
       }
       target.max_rounds = receipt.max_rounds;
       target.max_candidates = receipt.max_candidates;

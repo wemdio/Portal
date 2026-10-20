@@ -23,6 +23,7 @@ const MAX_LEGACY_ATTEMPTS = 20;
 // A bad historical checkpoint must not keep all newer failures behind it.
 // The cursor only limits reads; all permission/state checks remain in the RPC.
 const legacySupplyCursors = new WeakMap<SupabaseClient, string>();
+const legacyPreviewCursors = new WeakMap<SupabaseClient, string>();
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -57,9 +58,10 @@ export function veRequestyCreditImproved(previous: VeRequestyCreditSignal | null
 
 type WaitingJob = Pick<VeJob, 'id' | 'project_id' | 'stage' | 'payload' | 'updated_at'>;
 type LegacySupply = { id: string; updated_at: string; last_error: string | null };
+type LegacyPreview = { project_id: string; hypothesis_id: string; base_id: string; updated_at: string; last_error: string | null };
 // Historical rows lack typed provider provenance. Accept only the old direct
 // Requesty HTTP402 form, not "Requesty timeout; Serper402" or a child summary.
-const isLegacySupplyBillingError = (value: unknown): boolean => typeof value === 'string'
+const isLegacyRequestyBillingError = (value: unknown): boolean => typeof value === 'string'
   && /^\s*Requesty\s*(?:HTTP\s*)?[:(]?\s*402\b/i.test(value)
   && !/\b(?:Serper|OpenRouter|Polza)\b/i.test(value);
 
@@ -82,11 +84,37 @@ async function legacySupplyPage(db: SupabaseClient): Promise<LegacySupply[]> {
   return page;
 }
 
+async function legacyPreviewPage(db: SupabaseClient): Promise<LegacyPreview[]> {
+  const read = async (after?: string) => {
+    // Hypothesis IDs are globally unique. The cursor reads lifecycle fields
+    // only; the RPC locks/rechecks the complete paid checkpoint before writes.
+    let query = db.from('ve_outreach_preparations')
+      .select('project_id,hypothesis_id,base_id,updated_at,last_error')
+      .eq('status', 'error').is('paused_at', null).is('cancelled_at', null).not('base_id', 'is', null)
+      .order('hypothesis_id', { ascending: true }).limit(MAX_LEGACY_SCANS);
+    if (after) query = query.gt('hypothesis_id', after);
+    const result = await query.abortSignal(AbortSignal.timeout(10_000));
+    if (result.error) throw new Error('Requesty recovery historical preview read failed');
+    return (result.data ?? []) as LegacyPreview[];
+  };
+  const cursor = legacyPreviewCursors.get(db);
+  let page = await read(cursor);
+  if (!page.length && cursor) {
+    legacyPreviewCursors.delete(db);
+    page = await read();
+  }
+  return page;
+}
+
 /** Read-only eligibility. The final CAS fences cancellation; stages recheck
  * supply authorization before paid work. Never activate a paused plan here. */
 async function canResume(db: SupabaseClient, job: WaitingJob, execution = false, now = new Date()): Promise<boolean> {
   const baseId = typeof job.payload.base_id === 'string' ? job.payload.base_id : null;
-  const legacyRecovery = record(job.payload.requesty_billing_recovery)?.source === 'legacy_supply';
+  const recoverySource = record(job.payload.requesty_billing_recovery)?.source;
+  const legacyRecovery = recoverySource === 'legacy_supply';
+  const legacyPreview = recoverySource === 'legacy_preview';
+  if (legacyPreview && (!baseId || job.payload.collection_mode !== 'preview'
+    || typeof job.payload.hypothesis_id !== 'string')) return false;
   if (legacyRecovery && (!baseId || job.payload.collection_mode !== 'supply'
     || typeof job.payload.supply_batch_id !== 'string')) return false;
   if (baseId) {
@@ -102,6 +130,26 @@ async function canResume(db: SupabaseClient, job: WaitingJob, execution = false,
       .eq('project_id', job.project_id).eq('base_id', baseId).abortSignal(AbortSignal.timeout(10_000));
     if (preparations.error) throw new Error('Requesty recovery preparation read failed');
     if (preparations.data?.some((p) => p.paused_at || p.cancelled_at)) return false;
+    if (legacyPreview) {
+      if (base.data.hypothesis_id !== job.payload.hypothesis_id) return false;
+      const preparation = await db.from('ve_outreach_preparations')
+        .select('base_id,paused_at,cancelled_at,independent_control,language')
+        .eq('project_id', job.project_id).eq('hypothesis_id', base.data.hypothesis_id)
+        .abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
+      const setup = await db.from('ve_outreach_setups').select('selected_hypothesis_ids,language')
+        .eq('project_id', job.project_id).abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
+      const hypothesis = await db.from('ve_hypotheses').select('status,vertical_id')
+        .eq('project_id', job.project_id).eq('id', base.data.hypothesis_id)
+        .abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
+      for (const result of [preparation, setup, hypothesis]) {
+        if (result.error) throw new Error('Requesty recovery preview eligibility read failed');
+      }
+      const p = preparation.data;
+      if (!p || p.base_id !== baseId || p.paused_at || p.cancelled_at || !setup.data
+        || (!p.independent_control && (p.language !== setup.data.language
+          || !setup.data.selected_hypothesis_ids?.includes(base.data.hypothesis_id)))
+        || !hypothesis.data?.vertical_id || hypothesis.data.status === 'rejected') return false;
+    }
     // Batch identity is found by base as well: not every stage payload carries it.
     const batch = await db.from('ve_contact_supply_batches').select('id,plan_id,status')
       .eq('base_id', baseId).abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
@@ -208,10 +256,13 @@ export async function resumeVeRequestyBillingJobs(db: SupabaseClient, options: {
   }
   if (shouldStop()) return { waiting: jobs.length, resumed: 0, reason: 'shutdown' };
   const legacyPage = await legacySupplyPage(db);
-  const legacy = legacyPage.filter((plan) => isLegacySupplyBillingError(plan.last_error));
-  const waiting = jobs.length + legacy.length;
+  const legacy = legacyPage.filter((plan) => isLegacyRequestyBillingError(plan.last_error));
+  const previewPage = await legacyPreviewPage(db);
+  const preview = previewPage.filter((p) => isLegacyRequestyBillingError(p.last_error));
+  const waiting = jobs.length + legacy.length + preview.length;
   if (!waiting) {
     if (legacyPage.length) legacySupplyCursors.set(db, legacyPage[legacyPage.length - 1].id);
+    if (previewPage.length) legacyPreviewCursors.set(db, previewPage[previewPage.length - 1].hypothesis_id);
     return { waiting: 0, resumed: 0, reason: 'no_work' };
   }
   if (shouldStop()) return { waiting, resumed: 0, reason: 'shutdown' };
@@ -240,8 +291,8 @@ export async function resumeVeRequestyBillingJobs(db: SupabaseClient, options: {
     const payload = release ? { ...job.payload, requesty_billing_wait: null, requesty_billing_recovery: {
       version: 1, key_fingerprint: keyFingerprint, credit_signal: probe.status === 'usable' ? probe.creditSignal : null,
       blocked_at: wait.blocked_at, resumed_at: now,
-      ...(record(job.payload.requesty_billing_recovery)?.source === 'legacy_supply'
-        ? { source: 'legacy_supply' } : {}),
+      ...(['legacy_supply', 'legacy_preview'].includes(String(record(job.payload.requesty_billing_recovery)?.source))
+        ? { source: record(job.payload.requesty_billing_recovery)!.source } : {}),
     } } : { ...job.payload, requesty_billing_wait: nextWait };
     if (shouldStop()) break;
     if (!release && JSON.stringify(wait) === JSON.stringify(nextWait)) continue;
@@ -256,23 +307,35 @@ export async function resumeVeRequestyBillingJobs(db: SupabaseClient, options: {
   }
   if (probe.status === 'usable') {
     let attempted = 0;
-    for (const plan of legacyPage) {
+    // Interleave both histories so unrepairable supply checkpoints cannot
+    // starve previews (or vice versa) while all work shares one bounded cap.
+    const candidates: Array<{ kind: 'supply'; row: LegacySupply } | { kind: 'preview'; row: LegacyPreview }> = [];
+    for (let index = 0; index < Math.max(legacyPage.length, previewPage.length); index++) {
+      if (legacyPage[index]) candidates.push({ kind: 'supply', row: legacyPage[index] });
+      if (previewPage[index]) candidates.push({ kind: 'preview', row: previewPage[index] });
+    }
+    for (const candidate of candidates) {
       if (shouldStop() || resumed >= MAX_RESUMES_PER_SWEEP || attempted >= MAX_LEGACY_ATTEMPTS) break;
-      legacySupplyCursors.set(db, plan.id);
-      if (!isLegacySupplyBillingError(plan.last_error)) continue;
+      if (candidate.kind === 'supply') legacySupplyCursors.set(db, candidate.row.id);
+      else legacyPreviewCursors.set(db, candidate.row.hypothesis_id);
+      if (!isLegacyRequestyBillingError(candidate.row.last_error)) continue;
       attempted += 1;
-      // The transaction checks the latest batch/base/job, specialist controls,
-      // previous credit baseline and the exact saved budget before any write.
-      const result = await db.rpc('ve_resume_legacy_requesty_supply', {
-        p_plan_id: plan.id, p_expected_updated_at: plan.updated_at,
+      // The transaction rechecks the saved preparation/batch/job and budget.
+      const result = candidate.kind === 'supply' ? await db.rpc('ve_resume_legacy_requesty_supply', {
+        p_plan_id: candidate.row.id, p_expected_updated_at: candidate.row.updated_at,
+        p_key_fingerprint: keyFingerprint, p_credit_signal: probe.creditSignal,
+        p_credit_observed_at: now, p_now: (options.now ?? new Date()).toISOString(),
+      }).abortSignal(AbortSignal.timeout(10_000)) : await db.rpc('ve_resume_legacy_requesty_preview', {
+        p_project_id: candidate.row.project_id, p_hypothesis_id: candidate.row.hypothesis_id,
+        p_base_id: candidate.row.base_id, p_expected_updated_at: candidate.row.updated_at,
         p_key_fingerprint: keyFingerprint, p_credit_signal: probe.creditSignal,
         p_credit_observed_at: now, p_now: (options.now ?? new Date()).toISOString(),
       }).abortSignal(AbortSignal.timeout(10_000));
       const outcome = record(result.data);
       // An uncertain commit consumes the rest of this sweep: continuing could
-      // exceed the shared release cap after an RPC response was lost.
+      // exceed the shared cap after a committed RPC response was lost.
       if (result.error || typeof outcome?.resumed !== 'boolean') {
-        throw new Error('Requesty recovery historical supply result unconfirmed');
+        throw new Error(`Requesty recovery historical ${candidate.kind} result unconfirmed`);
       }
       if (outcome.resumed) resumed += 1;
     }

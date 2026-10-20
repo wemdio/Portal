@@ -401,6 +401,10 @@ describe('VE2 base collection enqueue recovery', () => {
       const target = { mode: 'preview', status: 'limited', ready_rows: readyRows.length, ready_target: 500,
         candidates_processed: 17, round: 1, max_rounds: 100, max_candidates: 10000, first_round_candidates: 100 };
       const partialInfo = { collection_mode: 'preview', target_progress: target,
+        // A later explicit continuation may allocate its normal round budget;
+        // the automatic billing receipt only constrains the original recovery.
+        preview_billing_resume: { version: 1, job_id: 'old-billing-job', blocked_at: '2026-10-19T00:00:00Z',
+          resumed_at: '2026-10-20T00:00:00Z', max_rounds: 100, max_candidates: 10000 },
         target_checkpoint: { completed_round: 1, seen_rows: readyRows, processed_rows: 17 },
         relevance_reserve: { version: 1, rows: [{ company: 'Plant', website: 'plant.test', email: 'info@plant.test',
           _email_status: 'ok', _ve_relevance: { status: 'needs_review', review_attempts: 1,
@@ -463,7 +467,8 @@ describe('VE2 base collection enqueue recovery', () => {
           payload: { base_id: 'saved-partial', hypothesis_id: 'h1', collection_mode: 'preview' } });
         expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting',
           collect_info: { relevance_review_requested: true, validation_retry: true,
-            target_progress: { ready_rows: readyRows.length, candidates_processed: 17, round: 1 } } });
+            target_progress: { ready_rows: readyRows.length, candidates_processed: 17, round: 1, max_rounds: 101, max_candidates: 10000 } } });
+        expect(partialDb.getRows('ve_bases')[0].collect_info).not.toHaveProperty('preview_billing_resume');
         if (staffing) expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ row_count: readyRows.length, data: readyRows,
           collect_info: { hypotheses: [currentHypothesis], source_contact_recovery: sourceReceipts, tasks: savedTasks,
             target_checkpoint: partialInfo.target_checkpoint, relevance_reserve: partialInfo.relevance_reserve,
@@ -473,6 +478,7 @@ describe('VE2 base collection enqueue recovery', () => {
         expect(partialDb.getRows('ve_jobs')).toHaveLength(1);
       } else {
         expect(partialDb.getRows('ve_bases')[0].status).toBe('analyzed');
+        expect(partialDb.getRows('ve_bases')[0].collect_info).toHaveProperty('preview_billing_resume', partialInfo.preview_billing_resume);
         if (mode === 'manual') expect(partialDb.getRows('ve_bases')[0]).toMatchObject({
           data: readyRows, collect_info: partialInfo, updated_at: '2026-10-14T00:00:00Z' });
       }
