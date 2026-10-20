@@ -1297,6 +1297,15 @@ function sameContactSite(candidate: string, root: string): boolean {
   } catch { return false; }
 }
 
+/** ENG pages may route by query; the shared legacy cache key intentionally does not. */
+function engContactPageKey(raw: string): string {
+  const url = new URL(raw);
+  url.hash = '';
+  let end = url.pathname.length;
+  while (end > 0 && url.pathname.charCodeAt(end - 1) === 47) end -= 1;
+  return `${url.origin}${url.pathname.slice(0, end)}${url.search}`;
+}
+
 function contactCandidateKind(href: string, text: string): { kind: EngContactPageKind; priority: number } | null {
   let pathname = '';
   try { pathname = decodeURIComponent(new URL(href).pathname); } catch { /* Label may still identify the page. */ }
@@ -1326,7 +1335,7 @@ async function discoverEngContactPages(html: string, baseUrl: string, root: stri
     let url: string;
     try { url = new URL(href, baseUrl).href; } catch { return; }
     if (!sameContactSite(url, root)) return;
-    const normalized = stripUrlTail(url);
+    const normalized = engContactPageKey(url);
     if (seen.has(normalized)) return;
     const kind = contactCandidateKind(url, ($(el).text() ?? '').trim());
     if (!kind) return;
@@ -1402,7 +1411,7 @@ async function scrapeEngContactEmails(
   const queued = new Set<string>();
   const canFetch = () => !controller.signal.aborted && diagnostics.attempts < maxAttempts && diagnostics.pagesRead < maxPages;
   const enqueue = (candidate: EngContactCandidate) => {
-    const key = stripUrlTail(candidate.url);
+    const key = engContactPageKey(candidate.url);
     if (!sameContactSite(candidate.url, root) || seen.has(key) || queued.has(key)) return;
     queued.add(key);
     queue.push(candidate);
@@ -1411,9 +1420,9 @@ async function scrapeEngContactEmails(
   };
   const read = async (candidate: EngContactCandidate, dispatcher?: unknown): Promise<PageFetchResult> => {
     diagnostics.attempts += 1;
-    if (!seen.has(stripUrlTail(candidate.url))) checkedUrls.push(candidate.url);
-    seen.add(stripUrlTail(candidate.url));
-    const cached = dispatcher ? undefined : options.pageCache?.get(sitePageKey(candidate.url));
+    if (!seen.has(engContactPageKey(candidate.url))) checkedUrls.push(candidate.url);
+    seen.add(engContactPageKey(candidate.url));
+    const cached = dispatcher ? undefined : options.pageCache?.get(engContactPageKey(candidate.url));
     let result: PageFetchResult;
     try {
       result = cached !== undefined
@@ -1446,13 +1455,13 @@ async function scrapeEngContactEmails(
         ? failure : 'network_error';
       return result;
     }
-    const finalKey = stripUrlTail(finalUrl);
+    const finalKey = engContactPageKey(finalUrl);
     if (!readFinalUrls.has(finalKey)) {
       diagnostics.pagesRead += 1;
       readFinalUrls.add(finalKey);
     }
     seen.add(finalKey);
-    options.pageCache?.set(sitePageKey(finalUrl), result.html);
+    options.pageCache?.set(engContactPageKey(finalUrl), result.html);
     try {
       const emails = extractEmailsFromHtmlAdvanced(result.html);
       for (const email of emails) allEmails.add(email);
@@ -1525,7 +1534,7 @@ async function scrapeEngContactEmails(
     while (queue.length > 0 && canFetch()) {
       if (options.stopAtFirstUsableEmail && filterJunkEmails([...allEmails]).length > 0) break;
       const candidate = queue.shift()!;
-      if (seen.has(stripUrlTail(candidate.url))) continue;
+      if (seen.has(engContactPageKey(candidate.url))) continue;
       await read(candidate);
     }
     if (controller.signal.aborted) diagnostics.stopReason = 'deadline';

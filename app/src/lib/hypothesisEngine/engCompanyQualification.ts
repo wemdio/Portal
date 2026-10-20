@@ -240,8 +240,45 @@ function evidenceNoise(text: string): boolean {
     !/\b(?:is (?:a |the )?(?:brand|division|part) of|wholly[- ]owned|is now|eine marke|gehört zu)\b/i.test(text);
 }
 
+/** Contiguous excerpts: punctuation touching the next heading cannot erase text. */
+function boundedParagraphExcerpts(raw: string): string[] {
+  const text = quoteText(raw);
+  const result: string[] = [];
+  let start = 0;
+  const safeEnd = (end: number) => end > start && /[\uD800-\uDBFF]/u.test(text[end - 1])
+    && /[\uDC00-\uDFFF]/u.test(text[end] ?? '') ? end - 1 : end;
+  while (start < text.length) {
+    let end = safeEnd(Math.min(start + 1400, text.length));
+    if (end < text.length) {
+      // Prefer a complete sentence, including minified ".Next heading" HTML.
+      // A long sentence/word still gets bounded excerpts rather than disappearing.
+      const minimum = start + 700;
+      const window = text.slice(start, end);
+      let sentenceEnd = -1;
+      for (const match of window.matchAll(/[.!?]+["'’”)\]]*(?=\s|[\p{Lu}]|$)/gu)) {
+        const candidate = start + match.index + match[0].length;
+        if (candidate >= minimum) sentenceEnd = candidate;
+      }
+      const wordEnd = text.lastIndexOf(' ', end - 1);
+      if (sentenceEnd >= minimum) end = sentenceEnd;
+      else if (wordEnd >= minimum) end = wordEnd;
+      // Do not leave a final fragment below the evidence minimum.
+      if (text.length - end < 24) {
+        const tailStart = text.length - 24;
+        const beforeTailWord = text.lastIndexOf(' ', tailStart);
+        end = beforeTailWord >= minimum ? beforeTailWord : tailStart;
+      }
+      end = safeEnd(end);
+    }
+    const excerpt = text.slice(start, end).trim();
+    if (excerpt) result.push(excerpt);
+    start = end;
+  }
+  return result;
+}
+
 /** Whole service/about passages, deduplicated across pages before buying a model request. */
-function fitInput(key: string, row: HeEngQualificationRow, website: string, pages: QualificationPage[], scope: HeEngQualificationScope): HeEngCompanyFitInput {
+function fitInput(key: string, row: HeEngQualificationRow, website: string, pages: QualificationPage[], scope: HeEngQualificationScope, excerptVersion?: 2): HeEngCompanyFitInput {
   const name = withoutEmails(typeof row.company === 'string' ? row.company : '').slice(0, 300);
   const words = hypothesisWords(scope);
   const candidates: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website'; normalized: string; score: number; order: number }> = [];
@@ -271,7 +308,11 @@ function fitInput(key: string, row: HeEngQualificationRow, website: string, page
           add(`${paragraph} ${paragraphs[index + 1]}`);
         }
         if (heading.length > 1400) {
-          for (const sentence of paragraph.match(/[^.!?]+(?:[.!?](?=\s|$)|$)/gu) ?? []) add(sentence);
+          // Missing version means an existing paid checkpoint: preserve its
+          // exact quote IDs/text for proposal validation and independent review.
+          const excerpts = excerptVersion === 2 ? boundedParagraphExcerpts(paragraph)
+            : paragraph.match(/[^.!?]+(?:[.!?](?=\s|$)|$)/gu) ?? [];
+          for (const excerpt of excerpts) add(excerpt);
         }
       }
     }
@@ -393,7 +434,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   memo.economy = { version: 1, workflow: 'fit_review_v3_single', budget, prepared: {}, proposals: {} };
   const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT),
     evidenceSource: z.enum(['constructor_website', 'website']).optional() })).max(MAX_PAGES + 3),
-    retryableFailure: z.boolean(), collectedJobId: z.string().uuid().optional() });
+    retryableFailure: z.boolean(), collectedJobId: z.string().uuid().optional(), excerptVersion: z.literal(2).optional() });
   if (Object.keys(saved?.prepared ?? {}).length > 16 || Object.keys(saved?.proposals ?? {}).length > 16) throw new HeEngQualificationScopeError('too many cached companies');
   const preparedHistory = new Set<string>();
   for (const [key, raw] of Object.entries(saved?.prepared ?? {})) {
@@ -413,7 +454,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     if (!preparedHistory.has(key)) throw new HeEngQualificationScopeError('saved proposal has no source evidence');
     const row = pending.get(key), cached = memo.economy.prepared[key];
     if (!row || !cached) continue;
-    const company = fitInput(key, row, cached.website, cached.pages, scope);
+    const company = fitInput(key, row, cached.website, cached.pages, scope, cached.excerptVersion);
     const parsed = validateHeEngCompanyFitDecision(proposal, company, safeScope);
     if (!parsed || parsed.status === 'unverified') throw new HeEngQualificationScopeError('invalid saved review proposal');
     if (heEngCompanyFitNeedsReview(parsed)) memo.economy.proposals![key] = parsed;
@@ -433,7 +474,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const prepared = memo.economy!.prepared[key];
     const row = pending.get(key);
     if (prepared && row) {
-      const company = fitInput(key, row, prepared.website, prepared.pages, scope);
+      const company = fitInput(key, row, prepared.website, prepared.pages, scope, prepared.excerptVersion);
       const proposal = classifier ?? memo.economy!.proposals![key];
       verdict.audit = { version: 1, quotes: company.quotes.map((quote) => ({ ...quote, source: quote.source ?? 'website' })),
         ...(prepared.collectedJobId ? { collectedJobId: prepared.collectedJobId } : {}),
@@ -494,7 +535,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
         const collected = input.collectedEvidence?.[key];
         const reused = collectedPages(row, collected, website);
         const sufficient = reused.length > 0 && !collected!.pages.some((page) => page.truncated) &&
-          enoughCollectedText(fitInput(key, row, website, reused, scope), scope);
+          enoughCollectedText(fitInput(key, row, website, reused, scope, 2), scope);
         const read: PageRead = sufficient ? { pages: [], retryableFailure: false, unverifiedRedirect: false }
           : await companyPages(ctx, fetchPage, website, scope);
         const pages: QualificationPage[] = [...reused, ...read.pages.map(({ url, text }) => ({ url, text, evidenceSource: 'website' as const }))];
@@ -502,7 +543,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
           const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
           memo.attempts![key] = { attempts, kind: read.retryableFailure ? 'site_transient' : 'site_unavailable' };
           if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) finish(key, unverified(scope, key, read.unverifiedRedirect ? 'website_redirect_unverified' : 'site_unavailable_exhausted'));
-        } else memo.economy!.prepared[key] = { website, pages, retryableFailure: read.retryableFailure,
+        } else memo.economy!.prepared[key] = { website, pages, retryableFailure: read.retryableFailure, excerptVersion: 2,
           ...(reused.length ? { collectedJobId: collected!.jobId } : {}) };
         await save();
       } catch (error) { if (!failed) { failed = true; readFailure = error; } }
@@ -513,7 +554,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   const ready = candidates.flatMap(([key, row]) => {
     const company = memo.economy!.prepared[key];
     if (!company || memo.verdicts[key]) return [];
-    const evidence = fitInput(key, row, company.website, company.pages, scope);
+    const evidence = fitInput(key, row, company.website, company.pages, scope, company.excerptVersion);
     if (evidence.quotes.length) return [evidence];
     finish(key, unverified(scope, key, 'activity_unverified'));
     return [];
