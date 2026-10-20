@@ -51,6 +51,10 @@ export type HeClientErrorCode =
   | 'hypothesis_mismatch'
   /** No company had confirmed evidence for both the selected audience and countries. */
   | 'company_unverified'
+  /** Company checking stopped at its own lifetime spending limit. */
+  | 'qualification_limit'
+  /** A paid company-check result is missing or cannot be trusted. */
+  | 'qualification_incomplete'
   /** В источниках не осталось новых компаний после исключения уже собранных. */
   | 'segment_exhausted'
   /**
@@ -156,6 +160,8 @@ export const HE_COLLECT_STOP_REPEATS_CODES = [
   'audience_mismatch',
   'hypothesis_mismatch',
   'company_unverified',
+  'qualification_limit',
+  'qualification_incomplete',
   'segment_exhausted',
   // Повтор упрётся в тот же список стран / тот же Do not contact, пока клиент
   // его не поправит (§1A, §1B). Список сверх лимита — так же: его текст зовёт
@@ -439,6 +445,16 @@ export const HE_REFILL_RUN_WHAT_TO_DO_EN =
   'This was one run of the daily top-up, and a top-up run is not restarted by hand; «Daily top-up» in the Command Center shows whether it goes on. Message Support if it keeps stopping.';
 
 const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
+  qualification_limit: {
+    title: 'Company checking stopped at its spending limit.',
+    whatIsSaved: 'Completed checks are saved. Companies without confirmed evidence were not added to this base.',
+    whatToDo: 'Contact Support to review the saved results before starting another collection. A new collection may reach the same limit.',
+  },
+  qualification_incomplete: {
+    title: 'Company checking could not complete reliably.',
+    whatIsSaved: 'Saved results are kept. Unchecked companies were not treated as unsuitable or added to this base.',
+    whatToDo: 'Contact Support to review the saved results before starting another collection.',
+  },
   // 'billing' и 'configuration' читаются клиентом ОДИНАКОВО (HE_TEAM_ON_IT_EN):
   // «команда уже работает» здесь правда, потому что воркер шлёт алерт на каждый
   // такой отказ (opsAlert.ts). «Продолжится само» не пишем: шаг терминален.

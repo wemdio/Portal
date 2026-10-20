@@ -1887,7 +1887,7 @@ type CompanyEvidenceLink = NonNullable<WebsitePage['companyEvidenceLinks']>[numb
 const COMPANY_EVIDENCE_SECTION_SEPARATOR = '\n\n[source section]\n\n';
 
 /** Ссылки для проверки компании: не угадываем адреса и не доверяем префиксу origin. */
-function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEvidenceLink[] {
+function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string, evidenceTerms: readonly string[] = []): CompanyEvidenceLink[] {
   const base = new URL(pageUrl);
   const host = base.hostname.replace(/^www\./, '');
   const domain = getDomain(base.hostname, { allowPrivateDomains: true });
@@ -1940,6 +1940,22 @@ function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEv
       kind = 'about'; priority = 70;
     }
     if (!kind) return;
+    if (evidenceTerms.length) {
+      // ENG only: rank real service links before the bounded menu is cut.
+      // Otherwise a long industry/news menu hides later, specific offerings.
+      const words = precisePurpose.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [];
+      const generic = new Set(['fund', 'service', 'services', 'business', 'company', 'companies', 'provider', 'providers', 'financial', 'solution', 'solutions']);
+      const hits = evidenceTerms.filter((term) => !generic.has(term) && words.some((word) => word.startsWith(term))).length;
+      const peripheral = /\/(?:news|articles?|blog|insights?|press|media|business[-_]expertise|careers?|jobs?|security|fraud)(?:\/|$)/i.test(path)
+        || /\b(?:newsletters?|privacy|cookies?|careers?|vacancies|fraud|scams?|market insights|trending topics)\b/i.test(precisePurpose);
+      const serviceLeaf = kind === 'services' && /\/(?:services?|solutions?|capabilities|products?|leistungen|produkte)\//i.test(path);
+      const directService = serviceLeaf && /\/(?:services?|solutions?|capabilities|products?|leistungen|produkte)\/[^/]+\/?$/i.test(path);
+      const businessOverview = kind === 'services' && /\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/(?:index\.(?:html?|php|aspx?))?)?\/?$/i.test(path);
+      const organizationService = serviceLeaf && /\b(?:institutional|enterprise|corporate|commercial)\b/i.test(precisePurpose);
+      priority += Math.min(hits, 2) * 70 + Number(serviceLeaf) * 30 + Number(directService) * 20
+        + Number(businessOverview) * 70 + Number(organizationService) * 35
+        - Number(peripheral && !(serviceLeaf && hits > 0)) * 100;
+    }
     const key = `${url.hostname.replace(/^www\./, '')}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
     const previous = seen.get(key);
     if (previous && (previous.priority ?? 0) >= priority) return;
@@ -2092,9 +2108,11 @@ function companyAddressBlocks($: cheerio.CheerioAPI): string[] {
 }
 
 /** Отдельный ENG opt-in: основной текст + зарезервированное место адресам и JSON-LD. */
-function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boolean): WebsitePage {
+function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boolean, evidenceTerms?: string[]): WebsitePage {
   const $ = cheerio.load(html);
-  const links = companyEvidenceLinks($, url);
+  const terms = [...new Set((evidenceTerms ?? []).slice(0, 32).flatMap((term) => typeof term === 'string'
+    ? term.slice(0, 200).normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [] : []))].slice(0, 32);
+  const links = companyEvidenceLinks($, url, terms);
   const structured = companyStructuredText($);
   $('script, style, noscript, iframe, svg, form, .cookie-banner, .cookie-consent, #cookie-banner, #cookie-consent').remove();
   // Keep the source's address fields readable when they occupy adjacent block elements.
@@ -2109,6 +2127,19 @@ function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boo
     return anchors.length >= 2 && !node.find('h1, h2, h3, h4, h5, h6, address, [itemprop="address"]').length
       && sanitizeText(anchors.text()).length >= sanitizeText(node.text()).length * 0.7;
   });
+  // ENG opt-in terms only rank real, whole source paragraphs. They never add
+  // catalogue facts or combine one company's service with another's address.
+  const serviceParagraphs: Array<{ text: string; score: number; order: number }> = [];
+  if (terms.length) $('p, li, td').each((order, el) => {
+    const node = $(el);
+    if (node.closest('footer, [role="contentinfo"]').length) return;
+    const text = sanitizeText(node.text());
+    if (text.length < 30 || text.length > 1400) return;
+    const words = text.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [];
+    const score = terms.filter((term) => words.some((word) => word.startsWith(term))).length;
+    if (score && !serviceParagraphs.some((item) => item.text === text)) serviceParagraphs.push({ text, score, order });
+  });
+  const textLimit = terms.length ? 6000 : MAX_TEXT_LENGTH;
   const addresses = companyAddressBlocks($);
   const footers: string[] = [];
   outermostOf($, 'footer, [role="contentinfo"]').each((_, el) => {
@@ -2129,7 +2160,7 @@ function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boo
   const addWhole = (part: string) => {
     if (!part || parts.some((saved) => saved.includes(part))) return;
     const extra = part.length + (parts.length ? COMPANY_EVIDENCE_SECTION_SEPARATOR.length : 0);
-    if (length + extra > MAX_TEXT_LENGTH) { truncated = true; return; }
+    if (length + extra > textLimit) { truncated = true; return; }
     parts.push(part);
     length += extra;
   };
@@ -2144,6 +2175,12 @@ function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boo
     truncated = true;
   }
   addWhole(mainExcerpt);
+  // Leave at least 1800 characters for whole address/structured source blocks.
+  for (const { text } of serviceParagraphs.sort((a, b) => b.score - a.score || a.order - b.order)) {
+    const extra = text.length + (parts.length ? COMPANY_EVIDENCE_SECTION_SEPARATOR.length : 0);
+    if (length + extra <= textLimit - 1800) addWhole(text);
+    else truncated = true;
+  }
   for (const part of [...addresses, ...structured, ...new Set(footers)]) addWhole(part);
   // All evidence sections are contiguous source blocks; none is cut through an address or JSON value.
   const text = parts.join(COMPANY_EVIDENCE_SECTION_SEPARATOR);
@@ -2197,6 +2234,8 @@ export async function fetchSinglePage(
     layoutAware?: boolean;
     /** Отдельное чтение доказательств о компании для ENG; не передано — прежний текст/поля. */
     companyEvidence?: boolean;
+    /** ENG-only source paragraph ranking; at most 32 bounded words, never facts. */
+    companyEvidenceTerms?: string[];
   },
 ): Promise<WebsitePage | null> {
   const url = normalizeUrl(rawUrl);
@@ -2218,7 +2257,7 @@ export async function fetchSinglePage(
   // а не страница.
   if (outcome.kind !== 'html' || outcome.status < 200 || outcome.status >= 300) return null;
   if (options?.companyEvidence === true) {
-    return extractCompanyEvidencePage(outcome.html, outcome.url, options.layoutAware);
+    return extractCompanyEvidencePage(outcome.html, outcome.url, options.layoutAware, options.companyEvidenceTerms);
   }
   const text = sanitizeText(extractTextFromHtml(outcome.html, { layoutAware: options?.layoutAware }));
   return {

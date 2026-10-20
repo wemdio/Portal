@@ -1,0 +1,174 @@
+import { heCompanySiteIdentity } from './collectionIdentity';
+import { ENG_COUNTRIES, ENG_COUNTRY_US, normalizeEngCountry } from './engCountries';
+
+// Same actual-address rule as the existing Maps country gate. Kept local so
+// this proof reader does not import catalogCursor and its database clients.
+const US_STATE_CODES = 'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC';
+function verifiedUsMapsAddress(address: string): boolean {
+  return new RegExp(`\\b(?:${US_STATE_CODES})\\s+\\d{5}(?:-\\d{4})?\\b`).test(address) || /,\s*(?:united states|usa)\s*$/i.test(address);
+}
+
+export type HeEngCountrySource = 'pdl' | 'funded' | 'eng_hiring' | 'google_maps';
+
+/** Server-origin metadata, never a CSV column or a client's country selection. */
+export interface HeEngSourceCountryProof {
+  version: 1;
+  source: HeEngCountrySource;
+  country: string;
+  sourceCountry: string;
+  sourceCountryCode?: string;
+  sourceName: string;
+  sourceWebsite: string;
+  sourceAddress?: string;
+  sourceId?: string;
+}
+
+export interface HeEngCountryRow {
+  company?: unknown;
+  website?: unknown;
+  _eng_source_country?: unknown;
+}
+
+/** null is a persistent conflict, not permission to choose the first country. */
+export type HeEngSourceCountryRegistry = Record<string, HeEngSourceCountryProof | null>;
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function nameKey(value: unknown): string {
+  // Keep legal forms and all name words: no parent/subsidiary or alias inference.
+  return text(value).normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join(' ') ?? '';
+}
+
+function siteKey(value: unknown): string {
+  const raw = text(value);
+  if (!raw) return '';
+  try {
+    const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.port) return '';
+    // Exact host, including tenant/subdomain. Scheme, www and path are cosmetic.
+    return heCompanySiteIdentity(raw)?.host ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function heEngSourceCountryKey(row: HeEngCountryRow): string | null {
+  const name = nameKey(row.company);
+  const site = siteKey(row.website);
+  return name && site ? JSON.stringify([name, site]) : null;
+}
+
+function sourceCountry(raw: unknown): string | null {
+  const value = text(raw);
+  return normalizeEngCountry(value) ??
+    ENG_COUNTRIES.find((country) => country.iso2.toLowerCase() === value.toLowerCase())?.value ?? null;
+}
+
+function verifiedProof(row: HeEngCountryRow, raw: unknown): HeEngSourceCountryProof | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const proof = raw as Partial<HeEngSourceCountryProof>;
+  if (proof.version !== 1 || !['pdl', 'funded', 'eng_hiring', 'google_maps'].includes(String(proof.source))) return null;
+  const key = heEngSourceCountryKey(row);
+  if (!key || key !== heEngSourceCountryKey({ company: proof.sourceName, website: proof.sourceWebsite })) return null;
+  const country = sourceCountry(proof.sourceCountry);
+  if (!country || country !== proof.country) return null;
+  if (proof.sourceCountryCode !== undefined && sourceCountry(proof.sourceCountryCode) !== country) return null;
+  if (proof.source === 'google_maps' && (country !== ENG_COUNTRY_US || !verifiedUsMapsAddress(text(proof.sourceAddress)))) return null;
+  return {
+    version: 1, source: proof.source as HeEngCountrySource, country,
+    sourceCountry: text(proof.sourceCountry), sourceName: text(proof.sourceName), sourceWebsite: text(proof.sourceWebsite),
+    ...(proof.sourceCountryCode !== undefined ? { sourceCountryCode: text(proof.sourceCountryCode) } : {}),
+    ...(proof.sourceAddress !== undefined ? { sourceAddress: text(proof.sourceAddress) } : {}),
+    ...(proof.sourceId !== undefined ? { sourceId: text(proof.sourceId) } : {}),
+  };
+}
+
+/** Only call at a trusted provider-row ingress, before any constructor enrichment. */
+export function withHeEngSourceCountry<T extends HeEngCountryRow>(
+  row: T,
+  input: {
+    source: HeEngCountrySource;
+    sourceName: unknown;
+    sourceWebsite: unknown;
+    country?: unknown;
+    countryCode?: unknown;
+    address?: unknown;
+    id?: unknown;
+  },
+): T {
+  const { _eng_source_country: _discarded, ...clean } = row;
+  const raw = input.source === 'google_maps' ? ENG_COUNTRY_US : text(input.country) || text(input.countryCode);
+  const country = sourceCountry(raw);
+  if (!country) return clean as T;
+  const proof: HeEngSourceCountryProof = {
+    version: 1, source: input.source, country, sourceCountry: raw,
+    sourceName: text(input.sourceName), sourceWebsite: text(input.sourceWebsite),
+    ...(text(input.countryCode) ? { sourceCountryCode: text(input.countryCode) } : {}),
+    ...(input.source === 'google_maps' ? { sourceAddress: text(input.address) } : {}),
+    ...(text(input.id) ? { sourceId: text(input.id) } : {}),
+  };
+  return verifiedProof(clean, proof) ? { ...clean, _eng_source_country: proof } as T : clean as T;
+}
+
+export function readHeEngSourceCountry(row: HeEngCountryRow): HeEngSourceCountryProof | null {
+  return verifiedProof(row, row._eng_source_country);
+}
+
+/** Embedded server proof remains independently checkable after collect-info cleanup. */
+export function heEngCompanyCountryProofValid(
+  row: HeEngCountryRow, raw: unknown, countries: readonly string[],
+): boolean {
+  const proof = verifiedProof(row, raw);
+  if (!proof || !countries.includes(proof.country)) return false;
+  if (row._eng_source_country !== undefined) {
+    const marker = readHeEngSourceCountry(row);
+    if (!marker || JSON.stringify(marker) !== JSON.stringify(proof)) return false;
+  }
+  return true;
+}
+
+export function heEngSourceCountry(row: HeEngCountryRow, countries: readonly string[]): {
+  status: 'confirmed' | 'outside' | 'unknown' | 'conflict';
+  country: string | null;
+  proof?: HeEngSourceCountryProof;
+} {
+  const proof = readHeEngSourceCountry(row);
+  if (proof) return { status: countries.includes(proof.country) ? 'confirmed' : 'outside', country: proof.country, proof };
+  const marker = row._eng_source_country;
+  const conflict = marker && typeof marker === 'object' && !Array.isArray(marker) &&
+    (marker as { conflict?: unknown }).conflict === true &&
+    (marker as { companyKey?: unknown }).companyKey === heEngSourceCountryKey(row);
+  return { status: conflict ? 'conflict' : 'unknown', country: null };
+}
+
+/** Build before dedup so contradictory source countries cannot disappear in a merge. */
+export function collectHeEngSourceCountries(
+  rows: readonly HeEngCountryRow[], previous: HeEngSourceCountryRegistry = {},
+): HeEngSourceCountryRegistry {
+  const registry: HeEngSourceCountryRegistry = { ...previous };
+  for (const row of rows) {
+    const key = heEngSourceCountryKey(row);
+    const proof = readHeEngSourceCountry(row);
+    if (!key || !proof) continue;
+    if (Object.hasOwn(registry, key)) {
+      if (registry[key] === null || registry[key]?.country !== proof.country) registry[key] = null;
+    } else registry[key] = proof;
+  }
+  return registry;
+}
+
+/** Constructor/client metadata is ignored; only exact server-registry matches restore it. */
+export function restoreHeEngSourceCountries<T extends HeEngCountryRow>(
+  rows: readonly T[], registry: HeEngSourceCountryRegistry,
+): T[] {
+  return rows.map((row) => {
+    const { _eng_source_country: _discarded, ...clean } = row;
+    const key = heEngSourceCountryKey(row);
+    if (!key || !Object.hasOwn(registry, key)) return clean as T;
+    const proof = registry[key];
+    if (proof === null) return { ...clean, _eng_source_country: { version: 1, conflict: true, companyKey: key } } as T;
+    return verifiedProof(clean, proof) ? { ...clean, _eng_source_country: proof } as T : clean as T;
+  });
+}

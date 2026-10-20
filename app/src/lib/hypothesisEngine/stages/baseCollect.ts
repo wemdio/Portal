@@ -201,12 +201,20 @@ import type { HeCompanyCleanRow } from '../companyNames';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
-import { runHeEngCompanyQualification } from '../engCompanyQualification';
 import {
-  HE_ENG_COMPANY_QUALIFICATION_VERSION,
+  collectHeEngSourceCountries,
+  restoreHeEngSourceCountries,
+  withHeEngSourceCountry,
+  type HeEngSourceCountryRegistry,
+} from '../engCompanyCountry';
+import { runHeEngCompanyQualification } from '../engCompanyQualification';
+import { heEngQualificationBudgetHoldReason, type HeEngQualificationBudgetHoldReason } from '../engQualificationBudget';
+import { engCompanyQualificationStopReason, type EngCompanyQualificationStopReason } from '../engCollectionProgress';
+import {
   HeEngQualificationScopeError,
   heEngCompanyKey,
   heEngCompanyQualified,
+  heEngQualificationVersion,
   heEngLaunchQualified,
   heEngScopeWithinCurrentCountries,
   readHeEngQualificationScope,
@@ -463,8 +471,8 @@ export function mapYandexRow(row: Record<string, unknown>): HeUnifiedRow {
 }
 
 /** Место Google Maps → унифицированная строка. */
-export function mapGoogleRow(row: Record<string, unknown>): HeUnifiedRow {
-  return unifiedRow({
+export function mapGoogleRow(row: Record<string, unknown>, countryProvenance = false): HeUnifiedRow {
+  const out = unifiedRow({
     company: cell(row.name),
     website: cell(row.website),
     email: firstCell(row.emails),
@@ -473,6 +481,9 @@ export function mapGoogleRow(row: Record<string, unknown>): HeUnifiedRow {
     category: cell(row.category),
     source_detail: 'google maps',
   });
+  return countryProvenance === true ? withHeEngSourceCountry(out, {
+    source: 'google_maps', sourceName: row.name, sourceWebsite: row.website, address: row.address,
+  }) : out;
 }
 
 /** Локаль из полей справочника: «город, регион, страна» без пустых кусков. */
@@ -481,8 +492,8 @@ function composeAddress(...parts: unknown[]): string {
 }
 
 /** Строка каталога PDL (market='us') → унифицированная строка (size-бакет → employees). */
-export function mapPdlRow(row: Record<string, unknown>): HeUnifiedRow {
-  return unifiedRow({
+export function mapPdlRow(row: Record<string, unknown>, countryProvenance = false): HeUnifiedRow {
+  const out = unifiedRow({
     company: cell(row.name),
     website: cell(row.website),
     address: composeAddress(row.locality, row.region, row.country),
@@ -490,17 +501,23 @@ export function mapPdlRow(row: Record<string, unknown>): HeUnifiedRow {
     employees: cell(row.size),
     source_detail: 'pdl',
   });
+  return countryProvenance === true ? withHeEngSourceCountry(out, {
+    source: 'pdl', sourceName: row.name, sourceWebsite: row.website, country: row.country, id: row.id,
+  }) : out;
 }
 
 /** Стартап funded_companies → унифицированная строка (источник данных — в source_detail). */
-export function mapFundedRow(row: Record<string, unknown>): HeUnifiedRow {
-  return unifiedRow({
+export function mapFundedRow(row: Record<string, unknown>, countryProvenance = false): HeUnifiedRow {
+  const out = unifiedRow({
     company: cell(row.name),
     website: cell(row.website),
     address: composeAddress(row.locality, row.region, row.country),
     category: cell(row.industry),
     source_detail: `funded:${cell(row.source) || 'unknown'}`,
   });
+  return countryProvenance === true ? withHeEngSourceCountry(out, {
+    source: 'funded', sourceName: row.name, sourceWebsite: row.website, country: row.country, id: row.id,
+  }) : out;
 }
 
 /**
@@ -538,14 +555,20 @@ export function mapFundedRow(row: Record<string, unknown>): HeUnifiedRow {
  * старше окна ENG_HIRING_FEED_FRESH_DAYS. Даты нет (запрос вне market='us') —
  * поля нет, и строка ровно прежняя.
  */
-export function mapEngHiringRow(row: Record<string, unknown>): HeUnifiedRow & HeHiringSeenRow {
-  const out = unifiedRow({
+export function mapEngHiringRow(row: Record<string, unknown>, countryProvenance = false): HeUnifiedRow & HeHiringSeenRow {
+  let out = unifiedRow({
     company: cell(row.company_name),
     website: cell(row.company_site_url),
     vacancy_title: cell(row.vacancy_title),
     address: cell(row.location) || cell(row.country),
     category: blurbCell(row.company_description),
     source_detail: `eng_hiring:${cell(row.source) || 'unknown'}`,
+  });
+  if (countryProvenance === true) out = withHeEngSourceCountry(out, {
+    source: 'eng_hiring', sourceName: row.company_name,
+    // A website guessed later by enrichment cannot inherit the feed's country.
+    sourceWebsite: Object.hasOwn(row, '_eng_country_source_website') ? row._eng_country_source_website : row.company_site_url,
+    country: row.country, countryCode: row.country_code, id: row.id,
   });
   const seenMs = typeof row.last_seen_at === 'string' ? Date.parse(row.last_seen_at) : NaN;
   return Number.isFinite(seenMs) ? { ...out, _hiring_seen_at: new Date(seenMs).toISOString() } : out;
@@ -1093,12 +1116,17 @@ export interface HeSliceProbe {
 }
 
 export interface HeCollectInfo {
+  /** Trusted provider countries survive constructor grids and harvest cleanup. */
+  eng_source_countries?: HeEngSourceCountryRegistry;
   /** ENG client only: checkpointed company/site evidence, separate from the legacy gate. */
   eng_company_qualification?: HeEngQualificationMemo;
   /** Full criteria frozen before the first company check, reused by every continuation. */
   eng_company_qualification_scope?: HeEngQualificationScope;
   eng_company_qualification_total?: number;
-  eng_company_qualification_progress?: { total: number; checked: number; excluded: number; updated_at: string };
+  eng_company_qualification_progress?: {
+    total: number; checked: number; excluded: number; updated_at: string;
+    stop_reason?: EngCompanyQualificationStopReason;
+  };
   /**
    * Лимит сборки (в компаниях), выбранный при запуске (постановка пишет его
    * при создании базы). У refill-сборки стадия перезаписывает его размером
@@ -3537,6 +3565,7 @@ async function fetchEngHiringRows(
   limit: number,
   excludedKeys: HeBaseExclusionKeys | null,
   slot: HeCatalogSlot | null,
+  countryProvenance = false,
 ): Promise<HeCatalogFetch> {
   const roles = query?.roles ?? [];
   const rolesRegex = buildRolesRegex(roles.join(', '));
@@ -3609,7 +3638,7 @@ async function fetchEngHiringRows(
       seen.add(key);
       if (out.length < limit) out.push(r);
     }
-    await resolveEngHiringSites(ctx, out);
+    await resolveEngHiringSites(ctx, out, countryProvenance);
     // Режим без закладки менять нельзя, и признак исчерпания здесь не нужен:
     // читателя у него ровно один (разбор нулевой сборки), а тот берёт признак
     // только в паре с `continued`, которого без закладки не бывает. Отдавать
@@ -3675,7 +3704,7 @@ async function fetchEngHiringRows(
   );
   // Досбор сайтов — ПОСЛЕ дедупа: резолвим только те строки, что реально уйдут
   // в базу, а не каждую просканированную вакансию.
-  await resolveEngHiringSites(ctx, out);
+  await resolveEngHiringSites(ctx, out, countryProvenance);
   const hitCeiling = !readError && out.length < limit && page >= ENG_HIRING_MAX_PAGES;
   return {
     rows: out,
@@ -3689,7 +3718,8 @@ async function fetchEngHiringRows(
 }
 
 /** Досбор сайтов у строк без него + строка лога (общая для обоих режимов). */
-async function resolveEngHiringSites(ctx: HeStageContext, out: Record<string, unknown>[]): Promise<void> {
+async function resolveEngHiringSites(ctx: HeStageContext, out: Record<string, unknown>[], countryProvenance = false): Promise<void> {
+  if (countryProvenance) for (const row of out) row._eng_country_source_website = cell(row.company_site_url);
   const missing = out.filter((r) => !cell(r.company_site_url)).length;
   if (missing === 0) return;
   const filled = await fillMissingCompanySites(ctx, out);
@@ -3970,6 +4000,7 @@ async function dispatchTask(
   widenMode: HeWidenMode = 'off',
   // Замороженный список стран базы (collect_info.countries; пусто — без списка).
   countries: readonly string[] = [],
+  countryProvenance = false,
 ): Promise<void> {
   const { task } = state;
 
@@ -4059,7 +4090,7 @@ async function dispatchTask(
           ? await fetchPdlRows(ctx, task.pdl_filters, remaining, excluded, stepSlot, step, seen)
           : task.source === 'funded'
             ? await fetchFundedRows(ctx, task.funded_filters, remaining, excluded, stepSlot, step, seen)
-            : await fetchEngHiringRows(ctx, task.eng_hiring_query, remaining, excluded, stepSlot);
+            : await fetchEngHiringRows(ctx, task.eng_hiring_query, remaining, excluded, stepSlot, countryProvenance);
       level = step;
       excludedDuringFetch += fetched.excludedDuringFetch;
       excludedDncDuringFetch += fetched.excludedDncDuringFetch ?? 0;
@@ -4105,9 +4136,8 @@ async function dispatchTask(
     if (fetched?.error && rows.length === 0 && !movedAny) {
       throw new Error(`${task.source}: ${fetched.error}`);
     }
-    state.harvest = rows.map(
-      task.source === 'pdl' ? mapPdlRow : task.source === 'funded' ? mapFundedRow : mapEngHiringRow,
-    );
+    const mapper = task.source === 'pdl' ? mapPdlRow : task.source === 'funded' ? mapFundedRow : mapEngHiringRow;
+    state.harvest = rows.map((row) => mapper(row, countryProvenance));
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
@@ -4254,6 +4284,7 @@ async function readChildRows(
   ctx: HeStageContext,
   state: HeCollectTaskState,
   limit: number,
+  countryProvenance = false,
 ): Promise<HeUnifiedRow[]> {
   const jobId = state.child_job_id;
   if (!jobId) return [];
@@ -4285,7 +4316,7 @@ async function readChildRows(
     .eq('job_id', jobId)
     .limit(limit);
   if (error) throw new Error(`google_maps_places read: ${error.message}`);
-  return (data ?? []).map((r) => mapGoogleRow(r as Record<string, unknown>));
+  return (data ?? []).map((r) => mapGoogleRow(r as Record<string, unknown>, countryProvenance));
 }
 
 /** Сколько прошло от ISO-штампа; null — штампа нет или он не читается. */
@@ -4309,7 +4340,7 @@ function msSince(iso: unknown): number | null {
  * работы считается от started_at джобы, а срока очереди и общего потолка нет —
  * как и раньше.
  */
-async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: number): Promise<void> {
+async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: number, countryProvenance = false): Promise<void> {
   // До poll доходят только источники с дочерними джобами (остальные done на dispatch).
   const table = CHILD_JOB_TABLE[state.source as keyof typeof CHILD_JOB_TABLE];
   if (!table || !state.child_job_id) return;
@@ -4329,7 +4360,7 @@ async function pollTask(ctx: HeStageContext, state: HeCollectTaskState, limit: n
   const row = data as { status?: unknown; error_message?: unknown; started_at?: unknown };
   const status = String(row.status ?? '');
   if (status === 'completed') {
-    state.harvest = await readChildRows(ctx, state, limit);
+    state.harvest = await readChildRows(ctx, state, limit, countryProvenance);
     state.status = 'done';
     state.rows = state.harvest.length;
     return;
@@ -6387,6 +6418,7 @@ export async function prepareHeLateConstructImport(
   });
   let stored = withHeCleanCompanyNames(marked).rows;
   if (engEmailPolicy) {
+    stored = restoreHeEngSourceCountries(stored, info.eng_source_countries ?? {});
     // Late email recovery must not start a new paid company check, or bless
     // an old base which never had one. Only restore already paid evidence.
     if (!info.eng_company_qualification) return { kind: 'empty' };
@@ -7253,7 +7285,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
   const runDispatch = async (state: HeCollectTaskState, catalog: HeCatalogRun | null): Promise<void> => {
     try {
-      await dispatchTask(ctx, state, project, limit, getExcludedKeys, catalog, widenMode, collectCountries);
+      await dispatchTask(ctx, state, project, limit, getExcludedKeys, catalog, widenMode, collectCountries, engEmailPolicy);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -7427,7 +7459,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // Сроки ожидания (работа от started_at джобы, очередь и общий потолок от
     // dispatched_at) проверяет pollTask ПОСЛЕ чтения статуса — см. CHILD_TIMEOUT_MS.
     try {
-      await pollTask(ctx, state, limit);
+      await pollTask(ctx, state, limit, engEmailPolicy);
       if (state.wait_read_failing_since !== undefined) {
         delete state.wait_read_failing_since;
         waitMarkChanged = true;
@@ -7518,6 +7550,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // ─── HARVEST ───
   const done = tasks.filter((t) => t.status === 'done');
   const failed = tasks.filter((t) => t.status === 'failed');
+  if (engEmailPolicy) {
+    // Read all trusted source rows BEFORE dedup can hide a conflicting country.
+    info.eng_source_countries = collectHeEngSourceCountries(done.flatMap((task) => task.harvest ?? []), info.eng_source_countries);
+  }
   // Исключаем компании, уже собранные в других базах этого проекта. Для
   // реестра это страховка (основное исключение прошло на выборке), для
   // hh/карт — единственная точка исключения. Сам мёрдж — harvestSlice (limit
@@ -8256,6 +8292,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // конструктора, — обратно на строки (граница срока переноса крючка, см.
   // withHiringSeenAt). RU не затронут: у его строк этого поля нет.
   if (market === 'us') storedRows = withHiringSeenAt(storedRows, merged);
+  if (engEmailPolicy) storedRows = restoreHeEngSourceCountries(storedRows, info.eng_source_countries ?? {});
   // ENG: гейт отработал ДО конструктора, и платить второй раз не за что.
   // Помечаем по ключам компаний: вычеркнутые строки дописаны в конец
   // finalRows, а среди оплаченных таких ключей быть не может — конструктор
@@ -8318,6 +8355,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
   const rowsBeforeEmailPolicy = storedRows.length;
   let companyQualificationExcluded = 0;
+  let companyQualificationNote: string | null = null;
   if (engEmailPolicy) {
     // Constructor checkpoints and partial/empty results can bypass its final
     // validation filter. The client base still contains only accepted addresses;
@@ -8332,15 +8370,17 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       info.eng_company_qualification_total = companyKeys.size;
       info.eng_company_qualification_scope = scope;
       if (!info.eng_company_qualification) {
-        info.eng_company_qualification = { version: HE_ENG_COMPANY_QUALIFICATION_VERSION, scopeKey: scope.key, verdicts: {} };
+        info.eng_company_qualification = { version: heEngQualificationVersion(scope)!, scopeKey: scope.key, verdicts: {} };
       }
       const checkpoint = async (memo: HeEngQualificationMemo) => {
         info.eng_company_qualification = memo;
         const verdicts = Object.values(memo.verdicts).filter((v) => companyKeys.has(v.companyKey));
+        const stopReason = memo.economy ? engCompanyQualificationStopReason(verdicts) : undefined;
         info.eng_company_qualification_progress = {
           total: companyKeys.size, checked: verdicts.length,
           excluded: verdicts.filter((v) => v.status !== 'accepted').length,
           updated_at: new Date().toISOString(),
+          ...(stopReason ? { stop_reason: stopReason } : {}),
         };
         const saved = await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
         if (!saved) throw new Error('ENG company qualification: collection is no longer active');
@@ -8359,10 +8399,38 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           costUsd: usage.costUsd,
         };
       }
+      if (qualified.memo.economy) {
+        const budgetHold: HeEngQualificationBudgetHoldReason | null =
+          heEngQualificationBudgetHoldReason(qualified.memo.economy.budget);
+        const unverifiedReasons = new Set(Object.values(qualified.memo.verdicts)
+          .filter((verdict) => companyKeys.has(verdict.companyKey) && verdict.status === 'unverified')
+          .map((verdict) => verdict.reason));
+        if (budgetHold && (unverifiedReasons.has('model_budget_exhausted') || unverifiedReasons.has('model_cost_exceeded_reservation'))) {
+          companyQualificationNote = 'Company qualification stopped at its spending limit. ' +
+            'Some companies remain unverified; saved results were kept. Review the saved results before collecting again.';
+        } else if (unverifiedReasons.has('model_cost_unknown')) {
+          companyQualificationNote = 'Company qualification paused because a previous charge could not be confirmed. ' +
+            'Verified results were kept; further paid checks are blocked for this base.';
+        } else if (unverifiedReasons.has('model_invalid')) {
+          companyQualificationNote = 'Company qualification could not verify the model response. ' +
+            'Some companies remain unverified; saved results were kept. Review the saved results before collecting again.';
+        } else if (unverifiedReasons.has('model_response_unavailable')) {
+          companyQualificationNote = 'Company qualification has no saved response for a previous model request. ' +
+            'Its outcome is unknown; saved results were kept. Review the saved results before collecting again.';
+        } else if (unverifiedReasons.has('model_provider_unavailable')) {
+          companyQualificationNote = 'Company qualification stopped because the model service could not complete the request. ' +
+            'Some companies remain unverified; saved results were kept. Review the saved results before collecting again.';
+        }
+        if (!companyQualificationNote && unverifiedReasons.size) {
+          companyQualificationNote = 'Some companies could not be confirmed from the available information and are not included. Verified results were kept.';
+        }
+        if (companyQualificationNote) stageLog(ctx, `[base_collect] ${companyQualificationNote}`);
+      }
       storedRows = qualified.rows;
       companyQualificationExcluded = candidates - storedRows.length;
-      stageLog(ctx, `[base_collect] company qualification: ${info.eng_company_qualification_total} companies checked; ` +
-        `${storedRows.length} addresses accepted, ${companyQualificationExcluded} excluded by company/country evidence`);
+      stageLog(ctx, `[base_collect] company qualification: ${info.eng_company_qualification_total} companies processed; ` +
+        `${storedRows.length} addresses accepted, ${companyQualificationExcluded} excluded without confirmed company/country evidence` +
+        (companyQualificationNote ? '; some company checks did not complete' : ''));
     }
     finalEmailStatuses = storedRows.map((row) => row._email_status ?? null);
     companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
@@ -8401,9 +8469,15 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ...(allOffTarget ? { all_off_target: true } : {}),
   };
   if (engEmailPolicy && storedRows.length === 0 && !allOffTarget) {
-    return await closeWithoutRows(statsWithQuality, companyQualificationExcluded > 0
+    const closed = await closeWithoutRows(statsWithQuality, companyQualificationNote ?? (companyQualificationExcluded > 0
       ? 'Company qualification: no companies with verified fit for the selected hypotheses and target countries. Review the audience before collecting again.'
-      : 'после проверки нет адресов со статусом ok или catch_all');
+      : 'после проверки нет адресов со статусом ok или catch_all'));
+    return companyQualificationNote
+      ? { ...closed, result: {
+        ...(closed.result && typeof closed.result === 'object' && !Array.isArray(closed.result) ? closed.result : {}),
+        company_qualification_note: companyQualificationNote,
+      } }
+      : closed;
   }
   // Потолок мастера считает АДРЕСА (HE_LAUNCH_MAX_LEADS лидов), а число клиента
   // — КОМПАНИИ, и после разноса адресов по строкам одна компания даёт до
@@ -8450,7 +8524,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // уже запущенную кампанию, база → терминальный 'analyzed', итог — в
   // collect_info.refill_result и he_auto_pipeline_runs.
   if (isRefill) {
-    return await runHeRefillAppend({
+    const refillResult = await runHeRefillAppend({
       ctx,
       job,
       base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
@@ -8465,6 +8539,12 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       // Перенос неотправленных компаний — только 'us' (решает сам долив).
       market,
     });
+    return companyQualificationNote
+      ? { ...refillResult, result: {
+        ...(refillResult.result && typeof refillResult.result === 'object' && !Array.isArray(refillResult.result) ? refillResult.result : {}),
+        company_qualification_note: companyQualificationNote,
+      } }
+      : refillResult;
   }
 
   // Вертикаль, в которой не прошла ни одна строка (см. allOffTarget выше):
@@ -8591,6 +8671,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       tasks_done: done.length,
       tasks_failed: failed.length,
       failed_sources: failed.map((f) => f.source),
+      ...(companyQualificationNote ? { company_qualification_note: companyQualificationNote } : {}),
     },
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,

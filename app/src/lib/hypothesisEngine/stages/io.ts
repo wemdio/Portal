@@ -541,7 +541,7 @@ export async function defaultFetchPage(
   url: string,
   parent?: AbortSignal,
   market: HeMarket = 'ru',
-  options?: { companyEvidence?: boolean },
+  options?: { companyEvidence?: boolean; companyEvidenceTerms?: string[] },
 ): Promise<HeFetchedPage | null> {
   const normalized = normalizeUrl(url);
   return withHeDeadline('website page', WEBSITE_PAGE_TIMEOUT_MS, parent, async (signal) => {
@@ -555,6 +555,8 @@ export async function defaultFetchPage(
         maxBytes: HE_PAGE_MAX_BYTES,
         ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
         ...(options?.companyEvidence === true ? { companyEvidence: true } : {}),
+        ...(market === 'us' && options?.companyEvidence === true && options.companyEvidenceTerms
+          ? { companyEvidenceTerms: options.companyEvidenceTerms } : {}),
       });
     } catch (e) {
       throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal, market) : e;
@@ -595,7 +597,7 @@ export function resolveFetchText(ctx: HeStageContext): HeFetchTextFn {
  * стадии) отвечает и здесь — его текст считается текстом запрошенного адреса,
  * статуса у него нет, поэтому null он не даёт.
  */
-export function resolveFetchPage(ctx: HeStageContext, options?: { companyEvidence?: boolean }): HeFetchPageFn {
+export function resolveFetchPage(ctx: HeStageContext, options?: { companyEvidence?: boolean; companyEvidenceTerms?: string[] }): HeFetchPageFn {
   const parent = heStageSignal(ctx);
   const market = ctx.market;
   const custom = ctx.fetchText;
