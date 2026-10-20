@@ -17,10 +17,12 @@ export const dynamic = 'force-dynamic';
  * (req) + optional phone/telegram/company/message from a landing contact form (the
  * hero "Обсудить задачу" form; `source` discriminates the surface). We persist the
  * lead (demo_leads) and ping the team on Telegram with a source-labeled title.
- * Public (allowlisted in middleware, like /api/signup). The landing posts
- * cross-origin in `no-cors` mode with application/x-www-form-urlencoded (no
- * preflight, opaque response), so this is best-effort capture — it must never throw
- * back at the visitor.
+ * Public (allowlisted in middleware, like /api/signup). The landings post
+ * cross-origin with application/x-www-form-urlencoded, a simple request with no
+ * preflight. The outreachos.xyz pages read the answer (mode 'cors'), so for the
+ * origins in LEAD_FORM_ORIGINS every response carries Access-Control-Allow-Origin;
+ * other callers post no-cors and get an opaque answer as before. This is best-effort
+ * capture — it must never throw back at the visitor.
  *
  * Optional campaign attribution rides along as extra fields (the outreachos.xyz form
  * sends them): utm_source/utm_medium/utm_campaign/utm_term/utm_content, `referrer`
@@ -310,7 +312,30 @@ function isMissingUtmColumn(error: { code?: string; message?: string }): boolean
   return (error.code === 'PGRST204' || error.code === '42703') && /\butm\b/.test(error.message ?? '');
 }
 
+// Landing pages that post the lead form cross-origin and read the answer, so a 400,
+// a 429 or a failure shows an error instead of «Thanks» (fetch mode 'cors'). A
+// form-encoded POST is a simple request: no preflight, no OPTIONS handler needed.
+// outreachos.pro is the RU landing (wemdio/outreachos-landing); it still posts no-cors.
+// The outreachos.xyz pages depend on this header: without it (an app rollback past this
+// change, or the landing published before the app) every stored lead shows an error on
+// screen and visitors resubmit. Removing an origin here means switching that landing
+// back to no-cors first. Pre-publish check that creates no lead:
+//   curl -si -X POST -H 'Origin: https://outreachos.xyz' https://app.outreachos.xyz/api/demo-lead
+// → 400 «Invalid body» with access-control-allow-origin: https://outreachos.xyz.
+const LEAD_FORM_ORIGINS = new Set(['https://outreachos.xyz', 'https://outreachos.pro', 'https://www.outreachos.pro']);
+
+function withLeadFormCors(req: NextRequest, res: NextResponse): NextResponse {
+  const origin = req.headers.get('origin');
+  if (origin && LEAD_FORM_ORIGINS.has(origin)) res.headers.set('Access-Control-Allow-Origin', origin);
+  res.headers.append('Vary', 'Origin');
+  return res;
+}
+
 export async function POST(req: NextRequest) {
+  return withLeadFormCors(req, await handleLead(req));
+}
+
+async function handleLead(req: NextRequest): Promise<NextResponse> {
   if (rateLimited(clientIp(req))) return NextResponse.json({ error: 'Too Many Requests' }, { status: 429 });
 
   let fields: LeadFields;

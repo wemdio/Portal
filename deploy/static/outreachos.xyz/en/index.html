@@ -639,7 +639,7 @@
           <input type="hidden" name="source" value="eng_pilot">
           <input type="hidden" name="lang" value="en">
           <div class="field"><label for="website">Company website</label><input id="website" name="website" type="url" required maxlength="200" placeholder="https://company.com"></div>
-          <div class="field"><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="320" placeholder="you@company.com"></div>
+          <div class="field"><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="320" pattern="[^\s@]+@[^\s@]+\.[^\s@]+" title="you@company.com" placeholder="you@company.com"></div>
           <div class="field"><label for="goal">What do you sell? <span style="font-weight:400">(optional)</span></label><textarea id="goal" name="goal" maxlength="2000" placeholder="One sentence is enough"></textarea></div>
           <button class="button" type="submit">Check my niche and target <span aria-hidden="true">↗</span></button>
           <p class="form-message" id="formMessage" role="status"></p>
@@ -832,8 +832,12 @@
     })();
 
     // Заявка уходит в общий приём лидов портала (POST /api/demo-lead на app.outreachos.xyz):
-    // строка в demo_leads + сообщение команде в Telegram. Запрос no-cors (без preflight,
-    // ответ непрозрачный), поэтому ошибку видно только при сбое сети.
+    // строка в demo_leads + сообщение команде в Telegram. Запрос mode 'cors' без preflight
+    // (форма в x-www-form-urlencoded); /api/demo-lead отдаёт этой странице
+    // Access-Control-Allow-Origin, поэтому ответ читается: «спасибо» — только при 2xx, а 400,
+    // 429, 5xx (например, во время деплоя) и сбой сети показывают ошибку и снова включают
+    // кнопку. Иначе человек или его агент решил бы, что заявка ушла. pattern у почты совпадает
+    // с проверкой сервера (EMAIL_RE): адрес без точки в домене браузер не пропустит.
     document.getElementById('pilotForm').addEventListener('submit', function (event) {
       event.preventDefault();
       if (!this.reportValidity()) return;
@@ -854,8 +858,12 @@
         if (attribution[k]) body.set(k, attribution[k]);
       });
       button.disabled = true;
-      fetch('https://app.outreachos.xyz/api/demo-lead', { method: 'POST', mode: 'no-cors', body: body })
-        .then(function () {
+      // Прежний итог (ошибка прошлой попытки) не висит на экране, пока идёт новая отправка.
+      message.textContent = '';
+      message.style.display = 'none';
+      fetch('https://app.outreachos.xyz/api/demo-lead', { method: 'POST', mode: 'cors', body: body })
+        .then(function (response) {
+          if (!response.ok) throw new Error('HTTP ' + response.status);
           message.textContent = "Thanks — we've got your request and will get back to you shortly.";
           message.style.display = 'block';
           button.textContent = 'Request sent';
