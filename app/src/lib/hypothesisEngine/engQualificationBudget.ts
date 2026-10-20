@@ -1,8 +1,10 @@
 import { z } from 'zod';
-import type { LLMMessage } from './llm';
+import type { LLMMessage, HeLlmTextCallOptions } from './llm';
 
 /** ENG qualification owns its model; shared HE_MODEL_* overrides cannot make it expensive. */
 export const HE_ENG_QUALIFICATION_MODEL = 'deepinfra/deepseek-v4-flash-0731' as const;
+export const HE_ENG_QUALIFICATION_REVIEW_MODEL = 'openai/gpt-5-mini' as const;
+type QualificationModel = typeof HE_ENG_QUALIFICATION_MODEL | typeof HE_ENG_QUALIFICATION_REVIEW_MODEL;
 export const HE_ENG_QUALIFICATION_BUDGET_USD = 0.50;
 export const HE_ENG_QUALIFICATION_SEARCH_LIMIT = 0;
 
@@ -19,16 +21,22 @@ const MAX_OUTPUT_TOKENS = 16_384;
 // schema repair; any additional paid call needs its own persisted reservation.
 const INPUT_RATE_HUNDREDTHS = 9;
 const OUTPUT_RATE_HUNDREDTHS = 18;
+// Independent short review, verified on the same router /v1/models: $0.25/$2 per M.
+const REVIEW_INPUT_RATE_HUNDREDTHS = 25;
+const REVIEW_OUTPUT_RATE_HUNDREDTHS = 200;
 const RATE_CUSHION = 2;
 
 export type HeEngQualificationBudgetHoldReason =
   | 'model_budget_exhausted'
-  | 'model_cost_exceeded_reservation';
+  | 'model_cost_exceeded_reservation'
+  | 'model_cost_unknown';
 
 const MicrosSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const ReservationSchema = z.object({
   reservedMicrousd: MicrosSchema.positive(),
   actualMicrousd: MicrosSchema.optional(),
+  /** Absent only in historical single-model reservations. */
+  model: z.enum([HE_ENG_QUALIFICATION_MODEL, HE_ENG_QUALIFICATION_REVIEW_MODEL]).optional(),
 }).strict();
 
 export const HeEngQualificationBudgetSchema = z.object({
@@ -42,7 +50,7 @@ export const HeEngQualificationBudgetSchema = z.object({
   reservedMicrousd: MicrosSchema,
   actualMicrousd: MicrosSchema,
   reservations: z.record(z.string(), ReservationSchema),
-  holdReason: z.enum(['model_budget_exhausted', 'model_cost_exceeded_reservation']).nullable(),
+  holdReason: z.enum(['model_budget_exhausted', 'model_cost_exceeded_reservation', 'model_cost_unknown']).nullable(),
 }).strict().superRefine((value, ctx) => {
   let reserved = 0;
   let actual = 0;
@@ -113,9 +121,10 @@ export function readHeEngQualificationBudget(
 export interface HeEngQualificationModelReservation {
   id: string;
   reservedMicrousd: number;
-  model: typeof HE_ENG_QUALIFICATION_MODEL;
+  model: QualificationModel;
   maxTokens: number;
   transportRetries: 0;
+  jsonSchema?: HeLlmTextCallOptions['jsonSchema'];
 }
 
 export function heEngQualificationBudgetHoldReason(
@@ -135,6 +144,7 @@ export function reserveHeEngQualificationModel(
   budget: HeEngQualificationBudget,
   messages: readonly LLMMessage[],
   maxTokens: number,
+  options: { review?: boolean; jsonSchema?: HeLlmTextCallOptions['jsonSchema'] } = {},
 ): HeEngQualificationModelReservation | null {
   assertBudget(budget);
   if (heEngQualificationBudgetHoldReason(budget)) return null;
@@ -144,20 +154,24 @@ export function reserveHeEngQualificationModel(
     throw new HeEngQualificationBudgetError('invalid_model_input');
   }
   // Includes the optional JSON-mode hint added by llm.ts when the prompt omits JSON.
-  const inputTokenBound = 512 + messages.reduce((sum, message) => sum + Buffer.byteLength(message.content, 'utf8') + 64, 0);
+  const schemaBytes = options.jsonSchema ? Buffer.byteLength(JSON.stringify(options.jsonSchema), 'utf8') + 128 : 0;
+  const inputTokenBound = 512 + schemaBytes + messages.reduce((sum, message) => sum + Buffer.byteLength(message.content, 'utf8') + 64, 0);
   // Keep the bounded qualification input contract even though this provider
   // currently has a larger context window and a single pricing tier.
   if (inputTokenBound > 272_000) throw new HeEngQualificationBudgetError('invalid_model_input');
   const reservedMicrousd = Math.ceil(RATE_CUSHION *
-    (inputTokenBound * INPUT_RATE_HUNDREDTHS + maxTokens * OUTPUT_RATE_HUNDREDTHS) / 100);
+    (inputTokenBound * (options.review ? REVIEW_INPUT_RATE_HUNDREDTHS : INPUT_RATE_HUNDREDTHS)
+      + maxTokens * (options.review ? REVIEW_OUTPUT_RATE_HUNDREDTHS : OUTPUT_RATE_HUNDREDTHS)) / 100);
   if (!Number.isSafeInteger(reservedMicrousd) || reservedMicrousd > budget.limitMicrousd - budget.reservedMicrousd) {
     budget.holdReason = 'model_budget_exhausted';
     return null;
   }
   const id = String(budget.nextReservationId++);
-  budget.reservations[id] = { reservedMicrousd };
+  const model = options.review ? HE_ENG_QUALIFICATION_REVIEW_MODEL : HE_ENG_QUALIFICATION_MODEL;
+  budget.reservations[id] = { reservedMicrousd, ...(options.review ? { model } : {}) };
   budget.reservedMicrousd += reservedMicrousd;
-  return { id, reservedMicrousd, model: HE_ENG_QUALIFICATION_MODEL, maxTokens, transportRetries: 0 };
+  return { id, reservedMicrousd, model, maxTokens, transportRetries: 0,
+    ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}) };
 }
 
 /**
@@ -172,8 +186,8 @@ export function settleHeEngQualificationModel(
 ): void {
   assertBudget(budget);
   const saved = budget.reservations[reservation.id];
-  if (!saved || saved.reservedMicrousd !== reservation.reservedMicrousd ||
-      reservation.model !== HE_ENG_QUALIFICATION_MODEL || reservation.transportRetries !== 0) {
+  if (!Object.hasOwn(budget.reservations, reservation.id) || !saved || saved.reservedMicrousd !== reservation.reservedMicrousd ||
+      (saved.model ?? HE_ENG_QUALIFICATION_MODEL) !== reservation.model || reservation.transportRetries !== 0) {
     throw new HeEngQualificationBudgetError('invalid_budget');
   }
   if (typeof costUsd !== 'number' || !Number.isFinite(costUsd) || costUsd < 0) return;

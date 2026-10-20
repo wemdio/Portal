@@ -468,6 +468,8 @@ export interface HeLlmTextCallOptions extends HeLlmCallOptions {
   transportRetries?: 0;
   /** Ask for one JSON object without adding schema repair attempts. Default text behavior is unchanged. */
   jsonMode?: true;
+  /** Opt-in native structure; local parsing still validates every answer. No repair call. */
+  jsonSchema?: { name: string; schema: Record<string, unknown> };
   fallbackModel?: string;
   minChars?: number;
   log?: (msg: string) => void;
@@ -1046,6 +1048,7 @@ async function rawCall(
   /** Язык подсказки json_object-режима (jsonHintLanguage); без JSON-режима не читается. */
   hintLanguage: HeJsonHintLanguage = 'ru',
   maxRetries: number = MAX_HTTP_RETRIES,
+  jsonSchema?: HeLlmTextCallOptions['jsonSchema'],
 ): Promise<{ text: string; response: RequestyResponse }> {
   // Ключ читаем ДО цикла: пробел в конфигурации повтором не лечится, а сообщение
   // с именем env-переменной клиентский маппинг узнаёт как 'configuration'.
@@ -1054,7 +1057,8 @@ async function rawCall(
     model,
     messages: jsonMode ? withJsonModeHint(messages, hintLanguage) : messages,
     max_tokens: maxTokens,
-    ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+    ...(jsonSchema ? { response_format: { type: 'json_schema', json_schema: { ...jsonSchema, strict: true } } }
+      : jsonMode ? { response_format: { type: 'json_object' } } : {}),
   });
 
   for (let attempt = 0; ; attempt++) {
@@ -1440,7 +1444,7 @@ export async function callLLMText(
     job?.signal ?? null,
     (signal) => rawCall(messages, opts.model, maxTokens, opts.jsonMode === true, signal,
       opts.jsonMode === true ? jsonHintLanguage(messages) : undefined,
-      opts.transportRetries === 0 ? 0 : MAX_HTTP_RETRIES),
+      opts.transportRetries === 0 ? 0 : MAX_HTTP_RETRIES, opts.jsonSchema),
   );
   const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
   const costUsd = eng

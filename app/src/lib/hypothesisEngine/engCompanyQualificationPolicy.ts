@@ -2,18 +2,22 @@ import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { normalizeEngCountry, readHeCollectCountries } from './engCountries';
-import { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
+import { HE_ENG_COMPANY_QUALIFICATION_VERSION, type HeEngCompanyQualificationVersion } from './engCompanyQualificationVersion';
 import type { HeEngQualificationBudget } from './engQualificationBudget';
+import type { HeEngCompanyFitDecision } from './engCompanyFit';
+import { heEngCompanyCountryProofValid, readHeEngSourceCountry } from './engCompanyCountry';
 
 export { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
 
 export interface HeEngQualificationScope {
+  /** v2 snapshots predate this field; every new source-country snapshot sets 3. */
+  version?: HeEngCompanyQualificationVersion;
   key: string;
   projectId: string;
   verticalId: string;
   hypotheses: Array<{ id: string; title: string; description: string }>;
   countries: string[];
-  countryPolicy: 'qualified_local_entity';
+  countryPolicy: 'qualified_local_entity' | 'source_country';
   /** Customer targeting constraints are data, never model instructions. */
   icp: unknown;
 }
@@ -25,7 +29,7 @@ export interface HeEngCompanyEvidence {
 }
 
 export interface HeEngCompanyVerdict {
-  version: typeof HE_ENG_COMPANY_QUALIFICATION_VERSION;
+  version: HeEngCompanyQualificationVersion;
   scopeKey: string;
   companyKey: string;
   status: 'accepted' | 'rejected' | 'unverified';
@@ -34,10 +38,14 @@ export interface HeEngCompanyVerdict {
   hypothesisId: string | null;
   evidence: HeEngCompanyEvidence[];
   checkedAt: string;
+  /** v3 only: trusted source provenance, validated independently of model output. */
+  countryProof?: unknown;
+  /** v3 only: an independent reviewer confirmed the selected activity evidence. */
+  fitReview?: { model: 'openai/gpt-5-mini'; status: 'match'; hypothesisId: string };
 }
 
 export interface HeEngQualificationMemo {
-  version: typeof HE_ENG_COMPANY_QUALIFICATION_VERSION;
+  version: HeEngCompanyQualificationVersion;
   scopeKey: string;
   verdicts: Record<string, HeEngCompanyVerdict>;
   /** Retryable failures are progress, not a permanent company verdict. */
@@ -47,7 +55,10 @@ export interface HeEngQualificationMemo {
   /** Execution progress only: it never replaces the versioned company proof. */
   economy?: {
     version: 1;
+    workflow?: 'fit_review_v3';
     budget: HeEngQualificationBudget;
+    /** First paid decision is durable before independent review. */
+    proposals?: Record<string, HeEngCompanyFitDecision>;
     /** Bounded current batch; terminal verdicts no longer need prepared pages. */
     prepared: Record<string, {
       website: string;
@@ -55,7 +66,7 @@ export interface HeEngQualificationMemo {
       retryableFailure: boolean;
     }>;
     /** Durable before the request; a missing response must not buy it again. */
-    inFlight?: { reservationId: string; companyKeys: string[] };
+    inFlight?: { reservationId: string; companyKeys: string[]; phase?: 'classifier' | 'review' };
   };
 }
 
@@ -78,22 +89,35 @@ export interface HeEngQualificationRow {
   company?: unknown;
   website?: unknown;
   _eng_company_qualification?: unknown;
+  _eng_source_country?: unknown;
 }
 
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+export function heEngQualificationVersion(scope: Pick<HeEngQualificationScope, 'version' | 'countryPolicy'>): HeEngCompanyQualificationVersion | null {
+  if ((scope.version === undefined || scope.version === 2) && scope.countryPolicy === 'qualified_local_entity') return 2;
+  return scope.version === 3 && scope.countryPolicy === 'source_country' ? 3 : null;
+}
+
 function scopeKey(scope: Omit<HeEngQualificationScope, 'key'>): string {
-  return digest({ version: HE_ENG_COMPANY_QUALIFICATION_VERSION, ...scope });
+  const version = heEngQualificationVersion(scope);
+  if (!version) throw new HeEngQualificationScopeError('criteria version is invalid');
+  return digest({ version, projectId: scope.projectId, verticalId: scope.verticalId,
+    hypotheses: scope.hypotheses, countries: scope.countries, countryPolicy: scope.countryPolicy, icp: scope.icp });
 }
 
 /** JSON stored by this stage must be self-consistent before it can authorize paid work. */
 function frozenScope(raw: unknown, projectId: string, verticalId: string): HeEngQualificationScope {
   const scope = raw as Partial<HeEngQualificationScope> | null;
+  // v2 snapshots predate an explicit version field. Their original hash and
+  // country policy remain authoritative; never stamp them as a v3 decision.
+  const version = scope?.version ?? (scope?.countryPolicy === 'qualified_local_entity' ? 2 : undefined);
   if (!scope || typeof scope !== 'object' || Array.isArray(scope) ||
       scope.projectId !== projectId || scope.verticalId !== verticalId ||
-      scope.countryPolicy !== 'qualified_local_entity' ||
+      !((version === 2 && scope.countryPolicy === 'qualified_local_entity') ||
+        (version === 3 && scope.countryPolicy === 'source_country')) ||
       typeof scope.key !== 'string' || !Object.hasOwn(scope, 'icp') ||
       !Array.isArray(scope.hypotheses) || scope.hypotheses.length === 0 ||
       scope.hypotheses.some((h) => !h || typeof h.id !== 'string' || !h.id ||
@@ -103,8 +127,9 @@ function frozenScope(raw: unknown, projectId: string, verticalId: string): HeEng
       new Set(scope.countries).size !== scope.countries.length) {
     throw new HeEngQualificationScopeError('saved criteria are invalid');
   }
-  const criteria = { projectId, verticalId, hypotheses: scope.hypotheses, countries: scope.countries,
-    countryPolicy: 'qualified_local_entity' as const, icp: scope.icp };
+  const criteria = { version: version as HeEngCompanyQualificationVersion, projectId, verticalId,
+    hypotheses: scope.hypotheses, countries: scope.countries,
+    countryPolicy: scope.countryPolicy as HeEngQualificationScope['countryPolicy'], icp: scope.icp };
   if (scopeKey(criteria) !== scope.key) throw new HeEngQualificationScopeError('saved criteria do not match their fingerprint');
   return { key: scope.key, ...criteria };
 }
@@ -112,7 +137,7 @@ function frozenScope(raw: unknown, projectId: string, verticalId: string): HeEng
 function assertMemoScope(info: Record<string, unknown>, scope: HeEngQualificationScope): void {
   if (!Object.hasOwn(info, 'eng_company_qualification')) return;
   const memo = info.eng_company_qualification as Partial<HeEngQualificationMemo> | null;
-  if (!memo || memo.version !== HE_ENG_COMPANY_QUALIFICATION_VERSION || memo.scopeKey !== scope.key ||
+  if (!memo || memo.version !== heEngQualificationVersion(scope) || memo.scopeKey !== scope.key ||
       !memo.verdicts || typeof memo.verdicts !== 'object' || Array.isArray(memo.verdicts)) {
     throw new HeEngQualificationScopeError('saved progress uses different or invalid criteria');
   }
@@ -185,8 +210,13 @@ export async function readHeEngQualificationScope(
     throw new HeEngQualificationScopeError('target countries are invalid');
   }
   const icp = project.brief?.icp ?? null;
-  const criteria = { projectId: project.id, verticalId, hypotheses, countries,
-    countryPolicy: 'qualified_local_entity' as const, icp };
+  // Audience checks of a historical base compare its current criteria under
+  // the same policy/hash version. A rollout alone must not revoke its launch.
+  const legacyMemo = info.eng_company_qualification as Partial<HeEngQualificationMemo> | null | undefined;
+  const version = saved?.version ?? (legacyMemo?.version === 2 ? 2 : HE_ENG_COMPANY_QUALIFICATION_VERSION);
+  const criteria = { version,
+    projectId: project.id, verticalId, hypotheses, countries,
+    countryPolicy: saved?.countryPolicy ?? (version === 2 ? 'qualified_local_entity' : 'source_country') as HeEngQualificationScope['countryPolicy'], icp };
   const current = { key: scopeKey(criteria), ...criteria };
   if (saved && saved.key !== current.key) throw new HeEngQualificationScopeError('the audience criteria changed after collection');
   // A legacy memo has no full snapshot. It can be adopted only when its exact
@@ -197,8 +227,9 @@ export async function readHeEngQualificationScope(
 
 /** Evidence belongs to this company AND this exact target, not another base. */
 export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQualificationScope): boolean {
+  const version = heEngQualificationVersion(scope);
   const proof = row._eng_company_qualification as Partial<HeEngCompanyVerdict> | null | undefined;
-  if (!proof || proof.version !== HE_ENG_COMPANY_QUALIFICATION_VERSION || proof.status !== 'accepted' ||
+  if (!version || !proof || proof.version !== version || proof.status !== 'accepted' ||
       proof.scopeKey !== scope.key || proof.companyKey !== heEngCompanyKey(row)) return false;
   const country = normalizeEngCountry(proof.country);
   if (!country || (scope.countries.length > 0 && !scope.countries.includes(country))) return false;
@@ -206,7 +237,17 @@ export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQu
   if (!Array.isArray(proof.evidence)) return false;
   const site = heCompanySiteIdentity(typeof row.website === 'string' ? row.website : '');
   if (!site) return false;
-  return (['identity', 'activity', 'country'] as const).every((kind) => proof.evidence!.some((e) => {
+  if (version === 3) {
+    const review = proof.fitReview;
+    if (scope.countryPolicy !== 'source_country' || review?.model !== 'openai/gpt-5-mini' ||
+        review.status !== 'match' || review.hypothesisId !== proof.hypothesisId ||
+        !heEngCompanyCountryProofValid(row, proof.countryProof, scope.countries) ||
+        readHeEngSourceCountry({ ...row, _eng_source_country: proof.countryProof })?.country !== country) return false;
+  }
+  // v2 remains exactly the historical site-proof contract. v3 does not invent
+  // identity/address quotes: its country provenance has a separate verifier.
+  const required = version === 2 ? ['identity', 'activity', 'country'] as const : ['activity'] as const;
+  return required.every((kind) => proof.evidence!.some((e) => {
     if (!e || typeof e !== 'object') return false;
     if (e.kind !== kind || typeof e.quote !== 'string' || e.quote.trim().length < 8 || typeof e.url !== 'string') return false;
     const source = heCompanySiteIdentity(e.url);
@@ -216,7 +257,7 @@ export function heEngCompanyQualified(row: HeEngQualificationRow, scope: HeEngQu
 
 /** Every provider upload in this launch passed company qualification. */
 export interface HeEngQualifiedLaunchStamp {
-  version: typeof HE_ENG_COMPANY_QUALIFICATION_VERSION;
+  version: HeEngCompanyQualificationVersion;
   scope_key: string;
   base_id: string;
 }
@@ -225,14 +266,17 @@ export const HE_ENG_COMPANY_QUALIFICATION_REQUIRED =
   'Company qualification is required. Collect a new base and create a new campaign before starting or resuming sending.';
 
 export function heEngQualifiedLaunchStamp(scope: HeEngQualificationScope, baseId: string): HeEngQualifiedLaunchStamp {
-  return { version: HE_ENG_COMPANY_QUALIFICATION_VERSION, scope_key: scope.key, base_id: baseId };
+  const version = heEngQualificationVersion(scope);
+  if (!version) throw new HeEngQualificationScopeError('criteria version is invalid');
+  return { version, scope_key: scope.key, base_id: baseId };
 }
 
 /** Read raw launch_info: parseLaunchInfo intentionally omits internal metadata. */
 export function heEngLaunchQualified(raw: unknown, scope: HeEngQualificationScope, baseId: string): boolean {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
   const stamp = (raw as { eng_company_qualification?: Partial<HeEngQualifiedLaunchStamp> | null }).eng_company_qualification;
-  return !!stamp && stamp.version === HE_ENG_COMPANY_QUALIFICATION_VERSION &&
+  const version = heEngQualificationVersion(scope);
+  return !!version && !!stamp && stamp.version === version &&
     stamp.scope_key === scope.key && stamp.base_id === baseId;
 }
 
