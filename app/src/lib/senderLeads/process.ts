@@ -18,8 +18,9 @@ import { processSenderAutoLeadCrm } from './crm';
  * 4. Доставленных лидов RU/EN автоаутрича ставим в очередь AMO.
  *
  * Сбой ИИ не теряет ответ: строка остаётся pending с растущей паузой, после
- * пяти попыток — error. Сбой ТГ не трогает оценку: доставка повторяется
- * отдельно.
+ * пяти попыток — error с повтором в ежечасном обходе, максимум 48 часов.
+ * Затем — окончательная ошибка с последней причиной. Сбой ТГ не трогает
+ * оценку: доставка повторяется отдельно.
  */
 
 const BATCH = 20;
@@ -27,6 +28,8 @@ const MAX_ATTEMPTS = 5;
 const RETRY_DELAYS_MIN = [1, 5, 15, 60];
 /** Строку «в работе» без следующей попытки считаем брошенной (упал процесс) через столько минут. */
 const STALE_PENDING_MIN = 15;
+export const SENDER_LEADS_RECOVERY_INTERVAL_MS = 60 * 60_000;
+const RETRY_WINDOW_MS = 48 * 60 * 60_000;
 
 export type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
 
@@ -47,6 +50,16 @@ interface QualificationRow {
   recipient_id: string;
   campaign_id: string;
   attempts: number;
+  status: 'pending' | 'error';
+  updated_at: string;
+  retry_deadline_at: string | null;
+  last_error: string | null;
+}
+
+const QUALIFICATION_SELECT = 'reply_id, recipient_id, campaign_id, attempts, status, updated_at, retry_deadline_at, last_error';
+
+function exhaustedError(lastError: string | null): string {
+  return `Не удалось квалифицировать ответ за 48 часов. Автоматические попытки остановлены. Последняя причина: ${lastError?.trim() || 'причина последнего сбоя не сохранена'}`;
 }
 
 function retryAt(attempts: number): string {
@@ -73,10 +86,14 @@ async function claimNew(db: SupabaseClient): Promise<QualificationRow[]> {
   const { data: inserted, error: insertError } = await db
     .from('sender_reply_qualifications')
     .upsert(
-      queue.map((q) => ({ ...q, status: 'pending', attempts: 0, next_attempt_at: now })),
+      queue.map((q) => ({
+        ...q, status: 'pending', attempts: 0, updated_at: now,
+        retry_deadline_at: new Date(Date.now() + RETRY_WINDOW_MS).toISOString(),
+        next_attempt_at: new Date(Date.now() + STALE_PENDING_MIN * 60_000).toISOString(),
+      })),
       { onConflict: 'reply_id', ignoreDuplicates: true },
     )
-    .select('reply_id, recipient_id, campaign_id, attempts');
+    .select(QUALIFICATION_SELECT);
   if (insertError) throw new Error(`sender_reply_qualifications insert: ${insertError.message}`);
   return (inserted ?? []) as QualificationRow[];
 }
@@ -87,16 +104,56 @@ async function dueRetries(db: SupabaseClient, exclude: Set<string>): Promise<Qua
   const stale = new Date(now.getTime() - STALE_PENDING_MIN * 60_000).toISOString();
   const { data, error } = await db
     .from('sender_reply_qualifications')
-    .select('reply_id, recipient_id, campaign_id, attempts')
-    .eq('status', 'pending')
-    // Повтор после сбоя — по своему времени; строка без попыток, застрявшая
-    // «в работе», — только когда явно брошена, иначе её взял бы второй круг,
-    // пока первый ещё ждёт ответа ИИ.
-    .or(`and(attempts.gt.0,next_attempt_at.lte.${now.toISOString()}),and(attempts.eq.0,updated_at.lte.${stale})`)
+    .select(QUALIFICATION_SELECT)
+    .in('status', ['pending', 'error'])
+    .is('retry_exhausted_at', null)
+    // next_attempt_at — также срок владения выполняемой попыткой. После
+    // падения процесса подхватываем и строки с attempts > 0 без расписания.
+    // Истечение 48 часов закрываем и без ключа ИИ, не ожидая следующего
+    // часового обхода. Действующую попытку не отбираем до конца её lease.
+    .or(`and(status.eq.pending,or(next_attempt_at.lte.${now.toISOString()},and(next_attempt_at.is.null,updated_at.lte.${stale}))),and(retry_deadline_at.lte.${now.toISOString()},or(status.eq.error,next_attempt_at.is.null,next_attempt_at.lte.${now.toISOString()}))`)
     .order('next_attempt_at')
     .limit(BATCH);
   if (error) throw new Error(`sender_reply_qualifications retries: ${error.message}`);
   return ((data ?? []) as QualificationRow[]).filter((r) => !exclude.has(r.reply_id));
+}
+
+/** Временные ошибки проверяем раз в час; окончательные больше не подхватываются. */
+async function dueRecovery(db: SupabaseClient): Promise<QualificationRow[]> {
+  const now = new Date().toISOString();
+  const { data, error } = await db
+    .from('sender_reply_qualifications')
+    .select(QUALIFICATION_SELECT)
+    .eq('status', 'error')
+    .is('retry_exhausted_at', null)
+    .or(`next_attempt_at.is.null,next_attempt_at.lte.${now}`)
+    .order('updated_at')
+    .limit(BATCH);
+  if (error) throw new Error(`sender_reply_qualifications recovery: ${error.message}`);
+  return (data ?? []) as QualificationRow[];
+}
+
+/** Сверка версии не даёт двум процессам одновременно оплатить одну попытку. */
+async function claimAttempt(db: SupabaseClient, row: QualificationRow): Promise<boolean> {
+  const claimedAt = Math.max(Date.now(), Date.parse(row.updated_at) + 1);
+  const now = new Date(claimedAt).toISOString();
+  const deadline = row.retry_deadline_at ?? new Date(claimedAt + RETRY_WINDOW_MS).toISOString();
+  const { data, error } = await db
+    .from('sender_reply_qualifications')
+    .update({
+      status: 'pending', updated_at: now,
+      retry_deadline_at: deadline,
+      next_attempt_at: new Date(claimedAt + STALE_PENDING_MIN * 60_000).toISOString(),
+    })
+    .eq('reply_id', row.reply_id)
+    .eq('status', row.status)
+    .eq('updated_at', row.updated_at)
+    .is('retry_exhausted_at', null)
+    .select('reply_id')
+    .maybeSingle();
+  if (error) throw new Error(`sender_reply_qualifications claim: ${error.message}`);
+  if (data) row.retry_deadline_at = deadline;
+  return Boolean(data);
 }
 
 async function markRow(db: SupabaseClient, replyId: string, patch: Record<string, unknown>): Promise<void> {
@@ -108,28 +165,54 @@ async function markRow(db: SupabaseClient, replyId: string, patch: Record<string
 }
 
 /** Итог по переписке — если человек не поставил метку руками. */
-async function setRecipientVerdict(db: SupabaseClient, recipientId: string, isLead: boolean): Promise<void> {
+async function setRecipientVerdict(
+  db: SupabaseClient, row: QualificationRow, replyAt: string, isLead: boolean,
+): Promise<boolean> {
+  // Восстановленная старая ошибка не меняет итог более позднего ответа и
+  // не порождает уведомление о лиде, который уже получил более свежую оценку.
+  const { data: newer, error: newerError } = await db
+    .from('sender_reply_qualifications')
+    .select('reply_id, sender_replies!inner(received_at, created_at)')
+    .eq('recipient_id', row.recipient_id)
+    .neq('reply_id', row.reply_id)
+    .in('status', ['lead', 'not_lead'])
+    .or(`received_at.gt.${replyAt},and(received_at.is.null,created_at.gt.${replyAt})`, { referencedTable: 'sender_replies' })
+    .limit(1);
+  if (newerError) throw new Error(`sender_reply_qualifications newer: ${newerError.message}`);
+  if (newer?.length) return false;
   const { error } = await db
     .from('sender_recipients')
     .update({ lead_verdict: isLead ? 'lead' : 'not_lead', lead_verdict_source: 'ai', lead_verdict_at: new Date().toISOString() })
-    .eq('id', recipientId)
+    .eq('id', row.recipient_id)
     .or('lead_verdict_source.is.null,lead_verdict_source.eq.ai');
   if (error) throw new Error(`sender_recipients verdict: ${error.message}`);
+  return true;
 }
 
 async function qualifyOne(
   db: SupabaseClient,
   row: QualificationRow,
   settings: LeadSettings,
-  ai: SenderLeadsAi,
+  ai: SenderLeadsAi | null,
   log: Log,
 ): Promise<boolean> {
+  const deadline = Date.parse(row.retry_deadline_at!);
+  if (Date.now() >= deadline) {
+    const message = exhaustedError(row.last_error);
+    await markRow(db, row.reply_id, {
+      status: 'error', retry_exhausted_at: new Date().toISOString(),
+      next_attempt_at: null, last_error: message,
+    });
+    log('error', `Ответ ${row.reply_id}: ${message}`);
+    return false;
+  }
   if (!settings.enabled) {
     await markRow(db, row.reply_id, { status: 'skipped', last_error: 'квалификация папки выключена' });
     return false;
   }
   const attempts = row.attempts + 1;
   try {
+    if (!ai) throw new Error('Ключ ИИ для квалификации не настроен (SENDER_LEADS_AI_API_KEY)');
     const thread = await loadSenderThread(db, row.reply_id, row.recipient_id);
     if (!thread) {
       await markRow(db, row.reply_id, { status: 'skipped', attempts, last_error: 'ответ или переписка не найдены' });
@@ -161,17 +244,25 @@ async function qualifyOne(
       last_error: null,
       qualified_at: new Date().toISOString(),
     });
-    await setRecipientVerdict(db, row.recipient_id, verdict.isLead);
+    const applied = await setRecipientVerdict(db, row, thread.context.replyEmail.timestamp_email!, verdict.isLead);
+    if (!applied) {
+      await markRow(db, row.reply_id, { tg_attempts: MAX_ATTEMPTS, tg_error: 'есть более свежая оценка переписки' });
+    }
     return verdict.isLead;
   } catch (err) {
     const message = errorText(err);
     const final = attempts >= MAX_ATTEMPTS;
+    const expired = Date.now() >= deadline;
     log(final ? 'error' : 'warn', `Оценка ответа ${row.reply_id} не удалась (попытка ${attempts}): ${message}`);
     await markRow(db, row.reply_id, {
-      status: final ? 'error' : 'pending',
+      status: expired || final ? 'error' : 'pending',
       attempts,
-      next_attempt_at: final ? null : retryAt(attempts),
-      last_error: message,
+      retry_exhausted_at: expired ? new Date().toISOString() : null,
+      next_attempt_at: expired ? null : new Date(Math.min(
+        deadline,
+        final ? Date.now() + SENDER_LEADS_RECOVERY_INTERVAL_MS : Date.parse(retryAt(attempts)),
+      )).toISOString(),
+      last_error: expired ? exhaustedError(message) : message,
     });
     return false;
   }
@@ -248,28 +339,35 @@ export interface PassResult {
   leads: number;
   delivered: number;
   crm: number;
+  recoveryHasMore: boolean;
 }
 
-export async function runSenderLeadsPass(db: SupabaseClient, log: Log): Promise<PassResult> {
+export async function runSenderLeadsPass(
+  db: SupabaseClient, log: Log, recoverErrors = false,
+): Promise<PassResult> {
   const ai = senderLeadsAi();
-  const result: PassResult = { qualified: 0, leads: 0, delivered: 0, crm: 0 };
+  const result: PassResult = { qualified: 0, leads: 0, delivered: 0, crm: 0, recoveryHasMore: false };
 
-  if (ai) {
-    const fresh = await claimNew(db);
-    const retries = await dueRetries(db, new Set(fresh.map((r) => r.reply_id)));
-    const rows = [...fresh, ...retries];
-    if (rows.length) {
-      const settings = await loadCampaignSettings(db, rows.map((r) => r.campaign_id));
-      for (const row of rows) {
-        const campaign = settings.get(row.campaign_id);
-        if (!campaign) {
-          await markRow(db, row.reply_id, { status: 'skipped', last_error: 'рассылка не найдена' });
-          continue;
-        }
-        const isLead = await qualifyOne(db, row, campaign.settings, ai, log);
-        result.qualified += 1;
-        if (isLead) result.leads += 1;
+  const fresh = await claimNew(db);
+  const retries = await dueRetries(db, new Set(fresh.map((r) => r.reply_id)));
+  const recovery = recoverErrors ? await dueRecovery(db) : [];
+  // Большой хвост разбираем порциями между обычными кругами, а не
+  // оставляем всё сверх первой двадцатки ждать ещё час.
+  result.recoveryHasMore = recovery.length === BATCH;
+  const rows = [...new Map([...fresh, ...retries, ...recovery].map((row) => [row.reply_id, row])).values()];
+  if (recovery.length) log('info', `Ежечасный обход: найдено ${recovery.length} ответов с ошибкой квалификации`);
+  if (rows.length) {
+    const settings = await loadCampaignSettings(db, rows.map((r) => r.campaign_id));
+    for (const row of rows) {
+      if (!await claimAttempt(db, row)) continue;
+      const campaign = settings.get(row.campaign_id);
+      if (!campaign) {
+        await markRow(db, row.reply_id, { status: 'skipped', last_error: 'рассылка не найдена' });
+        continue;
       }
+      const isLead = await qualifyOne(db, row, campaign.settings, ai, log);
+      result.qualified += 1;
+      if (isLead) result.leads += 1;
     }
   }
 

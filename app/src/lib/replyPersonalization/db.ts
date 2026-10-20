@@ -578,6 +578,10 @@ export async function getLatestDraftStatuses(
     const qid = row.qualification_id as string;
     if (!(qid in result)) result[qid] = row.status as DraftStatus;
   }
+  const handoffs = await admin.from('agency_lead_handoffs').select('source_id')
+    .eq('source', 'instantly').eq('status', 'sent').in('source_id', qualificationIds);
+  if (handoffs.error) throw new Error(`handoff status query failed: ${handoffs.error.message}`);
+  for (const row of handoffs.data ?? []) result[row.source_id] = 'sent';
   return result;
 }
 
@@ -736,9 +740,15 @@ export async function listSentDrafts(
     .eq('status', 'sent')
     .order('sent_at', { ascending: true });
   if (error) throw new Error(`sent drafts lookup failed: ${error.message}`);
-  return (data ?? [])
+  const handoffs = await admin.from('agency_lead_handoffs').select('body, sent_at')
+    .eq('source', 'instantly').eq('source_id', qualificationId).eq('status', 'sent');
+  if (handoffs.error) throw new Error(`sent handoff lookup failed: ${handoffs.error.message}`);
+  return [...(data ?? [])
     .filter((row) => typeof row.generated_text === 'string' && row.generated_text.trim())
-    .map((row) => ({ text: row.generated_text as string, sentAt: (row.sent_at as string) ?? '' }));
+    .map((row) => ({ text: row.generated_text as string, sentAt: (row.sent_at as string) ?? '' })),
+    ...(handoffs.data ?? []).filter(row => row.body && row.sent_at)
+      .map(row => ({ text: row.body as string, sentAt: row.sent_at as string })),
+  ].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
 }
 
 /**
