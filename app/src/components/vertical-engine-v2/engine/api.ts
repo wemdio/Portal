@@ -217,7 +217,7 @@ export type VeJobSummary = Pick<
 > & {
   finished_at: string | null;
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
-  payload?: { vertical_id?: string; base_id?: string; review_relevance?: boolean } | null;
+  payload?: { vertical_id?: string; base_id?: string; review_relevance?: boolean; requesty_billing_wait?: unknown } | null;
   /** Живой прогресс стадии (ve_jobs.progress): счётчик «— 14/33 · проверяем гипотезу». */
   progress?: { done?: number; total?: number; label?: string; phase?: string; updated_at?: string } | null;
 };

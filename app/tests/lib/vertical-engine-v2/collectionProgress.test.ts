@@ -12,8 +12,15 @@ import type { VeOutreachPreparation, VeOutreachSetupResponse } from '@/lib/verti
 import type { VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { groupVeHypotheses } from '@/components/vertical-engine-v2/engine/hypothesisGroups';
+import { veRequestyBillingWaitMessage, redactVeRequestyBillingPayload } from '@/lib/verticalEngineV2/requestyBillingState';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { Step1Research } from '@/components/vertical-engine-v2/engine/steps/Step1Research';
+import { CampaignProgress } from '@/components/vertical-engine-v2/engine/CampaignProgress';
+import { useContactSupply } from '@/components/vertical-engine-v2/engine/ContactSupplyPanel';
 
 jest.mock('@/lib/verticalEngineV2/actualsReconcile', () => ({ reconcileProjectVerticals: jest.fn(async () => {}) }));
+jest.mock('@/components/vertical-engine-v2/engine/ContactSupplyPanel', () => ({ useContactSupply: jest.fn() }));
 
 function base(id: string, createdAt: string, info: VeBaseSummary['collect_info'] = {}): VeBaseSummary {
   return {
@@ -40,6 +47,12 @@ describe('VE2 collection progress presentation', () => {
     const db = createMockSupabase({ enforceQueryWindows: true, maxRowsPerQuery: 2, tables: {
       ve_projects: [{ id: 'project-1' }], ve_verticals: [{ id: 'vertical-1', project_id: 'project-1', rank: 1 }],
       ve_bases: [...publicBases, ...historical, makeBase('supply-active', 'supply', 'collecting', '2026-09-02T14:00:00Z')],
+      ve_jobs: [{ id: 'billing-wait', project_id: 'project-1', stage: 'base_collect', status: 'pending',
+        created_at: '2026-10-20T00:00:00Z', payload: { base_id: 'preview-new', review_relevance: true,
+          requesty_billing_wait: { version: 1, blocked_at: '2026-10-20T00:00:00Z',
+            key_fingerprint: 'private-key-identity', probe_status: 'unavailable', probe_reason: 'management_forbidden',
+            last_credit: { balanceUsd: 987.65, monthlySpendUsd: 3, monthlyLimitUsd: 10 } },
+          requesty_billing_recovery: { version: 1, key_fingerprint: 'private-key-identity', credit_signal: { balanceUsd: 987.65 } } } }],
       ve_templates: [...publicBases, ...historical].map((row) => ({
         id: `template-${row.id}`, base_id: row.id, vertical_id: 'vertical-1', created_at: row.created_at,
         supply_batch_id: row['collect_info->>collection_mode'] === 'supply' ? `batch-${row.id}` : null,
@@ -48,6 +61,14 @@ describe('VE2 collection progress presentation', () => {
     const result = await loadVeProjectDetail(db as never, 'project-1');
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.message);
+    expect(result.detail.jobs).toEqual([expect.objectContaining({ payload: { base_id: 'preview-new', review_relevance: true,
+      requesty_billing_wait: { version: 1, blocked_at: '2026-10-20T00:00:00Z',
+        probe_status: 'unavailable', probe_reason: 'management_forbidden' } } })]);
+    expect(JSON.stringify(result.detail.jobs)).not.toMatch(/private-key-identity|987\.65|last_credit|requesty_billing_recovery/);
+    expect(db.getRows('ve_jobs')[0].payload).toMatchObject({
+      requesty_billing_wait: { key_fingerprint: 'private-key-identity', last_credit: { balanceUsd: 987.65 } },
+      requesty_billing_recovery: { key_fingerprint: 'private-key-identity' },
+    });
     const bases = result.detail.bases as VeBaseSummary[];
     expect(bases.map((row) => row.id)).toEqual(['supply-active', 'preview-new', 'legacy-old', 'preview-old']);
     expect(result.detail.templates.map((row) => (row as { id: string }).id)).toEqual(['template-preview-new', 'template-legacy-old', 'template-preview-old']);
@@ -311,6 +332,69 @@ describe('VE2 collection progress presentation', () => {
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [parent] }))
       .toMatchObject({ title: 'Проверяем email', tone: 'info', currentStep: 0,
         guidance: { action: 'wait', title: 'От вас сейчас ничего не требуется' } });
+    const wait = { version: 1, blocked_at: '2026-10-20T00:00:00Z', key_fingerprint: 'private-key-identity',
+      last_credit: { balanceUsd: 987.65, monthlySpendUsd: 3, monthlyLimitUsd: 10 } };
+    const waitingJob = { ...parent, payload: { ...parent.payload, requesty_billing_wait: wait } };
+    for (const stage of ['base_collect', 'base_analyze', 'template'] as const) {
+      const presentation = getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...waitingJob, stage }] });
+      expect(presentation).toMatchObject({ title: 'Ожидаем пополнения Requesty', currentStep: null,
+        tone: 'muted', guidance: { action: 'wait' } });
+      expect(presentation.description).toMatch(/Продолжим автоматически/);
+      expect(JSON.stringify(presentation)).not.toMatch(/private-key-identity|987\.65/);
+    }
+    expect(getPreparationPresentation({ base: collecting, jobs: [waitingJob] }).title).toBe('Ожидаем пополнения Requesty');
+    expect(getPreparationControl({ preparation, base: collecting, jobs: [waitingJob] })).toEqual({ action: 'pause', label: 'Приостановить' });
+    expect(getPreparationPresentation({ preparation: paused, base: collecting, jobs: [waitingJob] }))
+      .toMatchObject({ title: 'Подготовка на паузе', guidance: { action: 'continue' } });
+    const forbiddenJob = { ...waitingJob, payload: { ...waitingJob.payload,
+      requesty_billing_wait: { ...wait, probe_status: 'unavailable', probe_reason: 'management_forbidden' } } };
+    expect(getPreparationPresentation({ preparation, base: collecting, jobs: [forbiddenJob] }))
+      .toMatchObject({ title: 'Нужен доступ к балансу Requesty', guidance: { action: 'check' } });
+    expect(veRequestyBillingWaitMessage(forbiddenJob.payload)).toMatch(/разрешить проверку баланса/);
+    const deferredJob = { ...waitingJob, payload: { ...waitingJob.payload,
+      requesty_billing_wait: { ...wait, probe_status: 'unavailable', probe_reason: 'timeout' } } };
+    expect(getPreparationPresentation({ preparation, base: collecting, jobs: [deferredJob] }))
+      .toMatchObject({ title: 'Проверка баланса Requesty отложена', guidance: { action: 'wait' } });
+    const unknownReason = { requesty_billing_wait: { ...wait, probe_status: 'unavailable', probe_reason: 'private provider reply' } };
+    expect(veRequestyBillingWaitMessage(unknownReason)).not.toMatch(/private provider reply|private-key-identity|987\.65/);
+    expect(JSON.stringify(redactVeRequestyBillingPayload(unknownReason))).not.toContain('private provider reply');
+    for (const marker of [null, { ...wait, version: 2 }, { ...wait, blocked_at: 'invalid' }]) {
+      expect(veRequestyBillingWaitMessage({ requesty_billing_wait: marker })).toBeNull();
+    }
+    expect(veRequestyBillingWaitMessage({ error: 'Requesty 402' })).toBeNull();
+    const legacyFailure = getPreparationPresentation({ preparation, base: collecting,
+      jobs: [{ ...parent, status: 'failed', error: 'Requesty 402: insufficient balance' }] });
+    expect(legacyFailure.canContinue).toBe(true);
+    expect(legacyFailure.description).toMatch(/затем продолжите/);
+    expect(getPreparationPresentation({ preparation, base: collecting,
+      jobs: [{ ...parent, status: 'done' }, waitingJob] }).title).not.toBe('Ожидаем пополнения Requesty');
+    const researchProps = { project: { status: 'researching' } as never, busy: false,
+      onStartResearch: () => {}, offerValue: '', onSaveOffer: () => {},
+      jobs: [{ ...forbiddenJob, stage: 'site_profile' as const }, { ...parent, stage: 'site_profile' as const, status: 'failed' as const }] };
+    const markup = renderToStaticMarkup(createElement(Step1Research, researchProps));
+    expect(markup).toContain('Нужен доступ к балансу Requesty');
+    expect(markup).not.toMatch(/Идёт исследование|несколько минут|animate-pulse|Попробовать снова|private-key-identity|987\.65/);
+    const campaign = (patch: Record<string, unknown> = {}) => {
+      jest.mocked(useContactSupply).mockReturnValue({
+        data: { plan: { current: true, status: 'active', launched: true, billing_wait: wait, ...patch } },
+        busy: false, error: '', act: jest.fn(),
+      } as unknown as ReturnType<typeof useContactSupply>);
+      return renderToStaticMarkup(createElement(CampaignProgress,
+        { template: { id: 'launched-template' } as VeTemplate, required: true, title: 'Гипотеза' }));
+    };
+    const waitingCampaign = campaign();
+    expect(waitingCampaign).toMatch(/Ожидаем пополнения Requesty/);
+    expect(waitingCampaign).toContain('Приостановить поиск');
+    expect(waitingCampaign).not.toMatch(/Автоматический поиск новых контактов включён|Продолжить поиск|private-key-identity|987\.65/);
+    const forbiddenCampaign = campaign({ billing_wait: forbiddenJob.payload.requesty_billing_wait });
+    expect(forbiddenCampaign).toContain('Администратору нужно разрешить проверку баланса');
+    expect(forbiddenCampaign).not.toContain('Продолжим автоматически');
+    for (const patch of [{ status: 'paused' }, { current: false }]) {
+      expect(campaign(patch)).not.toMatch(/Ожидаем пополнения Requesty|Продолжим автоматически/);
+    }
+    const oldBillingCampaign = campaign({ status: 'error', billing_wait: undefined, error: 'Requesty 402: private provider body' });
+    expect(oldBillingCampaign).toContain('Продолжить поиск');
+    expect(oldBillingCampaign).not.toMatch(/Продолжим автоматически|private provider body/);
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...parent, status: 'failed', error: 'Stopped' }] }))
       .toMatchObject({ tone: 'err', guidance: { action: 'continue' } });
     expect(getPreparationPresentation({ preparation, base: { ...collecting, collect_info: {} }, jobs: [parent] }))

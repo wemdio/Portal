@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState, type JSX } from 'react';
 import { Play, RotateCcw } from 'lucide-react';
 import type { VeStage } from '@/lib/verticalEngineV2/types';
+import { veRequestyBillingWaitState } from '@/lib/verticalEngineV2/requestyBillingState';
 import { StatusBox } from '../ui';
 import { HE, Spinner, StatusDot } from '../design';
 import { ClientBriefBlock } from './ClientBriefBlock';
@@ -58,12 +59,9 @@ const RESEARCH_STAGES: Array<{ stage: VeStage; line: string; name: string }> = [
 
 const RESEARCH_STAGE_SET: ReadonlySet<VeStage> = new Set(RESEARCH_STAGES.map((s) => s.stage));
 
-/** Последняя (по порядку в выдаче) джоба данной стадии. */
+/** Project detail returns recent jobs newest first. */
 function latestJobOf(jobs: VeJobSummary[], stage: VeStage): VeJobSummary | undefined {
-  for (let i = jobs.length - 1; i >= 0; i -= 1) {
-    if (jobs[i].stage === stage) return jobs[i];
-  }
-  return undefined;
+  return jobs.find((job) => job.stage === stage);
 }
 
 export interface Step1ResearchProps {
@@ -118,6 +116,9 @@ export function Step1Research({
   const researchJobs = jobs.filter((j) => RESEARCH_STAGE_SET.has(j.stage));
   const hasActiveResearch = researchJobs.some((j) => j.status === 'pending' || j.status === 'running');
   const failedStages = RESEARCH_STAGES.filter(({ stage }) => latestJobOf(jobs, stage)?.status === 'failed');
+  const billingWait = RESEARCH_STAGES.map(({ stage }) => latestJobOf(jobs, stage))
+    .map((job) => job?.status === 'pending' ? veRequestyBillingWaitState(job.payload) : null)
+    .find((wait) => wait !== null);
 
   const running = busy || hasActiveResearch || status === 'researching';
   const done = !running && status === 'researched';
@@ -149,15 +150,16 @@ export function Step1Research({
       >
         <div className="mb-2 flex items-baseline justify-between gap-3">
           <h2 id="ve2-research-running-title" className={HE.secTitle}>
-            Идёт исследование…
+            {billingWait?.title ?? 'Идёт исследование…'}
           </h2>
           <span className="ve2-faint">прогресс обновляется автоматически</span>
         </div>
-        <StageChecklist jobs={jobs} running />
-        {failedStages.length > 0 ? (
+        <StageChecklist jobs={jobs} running={!billingWait} />
+        {!billingWait && failedStages.length > 0 ? (
           <FailureNote failedStages={failedStages} jobs={jobs} busy={busy} onRetry={onStartResearch} />
         ) : null}
-        <p className={`mt-4 text-xs ${HE.muted}`}>Это займёт несколько минут, страницу можно не держать открытой.</p>
+        <p className={`mt-4 text-xs ${HE.muted}`}>{billingWait?.description
+          ?? 'Это займёт несколько минут, страницу можно не держать открытой.'}</p>
       </section>
     );
   }
@@ -639,7 +641,7 @@ function StyleBlock({
   );
 }
 
-type StageState = 'done' | 'current' | 'upcoming' | 'failed';
+type StageState = 'done' | 'current' | 'waiting' | 'upcoming' | 'failed';
 
 /** Текст живого счётчика стадии: «14/33 · проверяем гипотезу» (из ve_jobs.progress). */
 function progressText(job: VeJobSummary | undefined): string | null {
@@ -656,6 +658,7 @@ function progressText(job: VeJobSummary | undefined): string | null {
 const STAGE_DOT_TONE: Record<StageState, 'ok' | 'info' | 'muted' | 'err'> = {
   done: 'ok',
   current: 'info',
+  waiting: 'muted',
   upcoming: 'muted',
   failed: 'err',
 };
@@ -671,8 +674,9 @@ function StageChecklist({ jobs, running }: { jobs: VeJobSummary[]; running: bool
       case 'failed':
         return 'failed';
       case 'running':
-      case 'pending':
         return 'current';
+      case 'pending':
+        return veRequestyBillingWaitState(job.payload) ? 'waiting' : 'current';
       default:
         return 'upcoming';
     }

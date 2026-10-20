@@ -34,6 +34,7 @@ export function canRunVeJob(
   active: readonly JobScope[],
   collectLimit = veBaseCollectConcurrency(process.env.VE_BASE_COLLECT_CONCURRENCY),
 ): boolean {
+  if (job.payload?.requesty_billing_wait != null) return false;
   if (job.stage === COLLECT_STAGE) {
     const bases = collectingBases(active);
     if (!bases.has(baseKey(job) ?? job.id) && bases.size >= collectLimit) return false;
@@ -62,7 +63,7 @@ export async function claimVeJob(
   // base jobs cannot indefinitely bypass that older research/manual operation.
   for (let offset = 0; !pending;) {
     let query = db.from('ve_jobs').select('id,project_id,stage,payload')
-      .eq('status', 'pending').lte('run_after', nowIso);
+      .eq('status', 'pending').is('payload->>requesty_billing_wait', null).lte('run_after', nowIso);
     if (collectFull) query = query.neq('stage', COLLECT_STAGE);
     for (const projectId of blocked) query = query.neq('project_id', projectId);
     const { data, error } = await query.order('run_after', { ascending: true })
@@ -87,6 +88,7 @@ export async function claimVeJob(
     .update({ status: 'running', started_at: nowIso, updated_at: nowIso })
     .eq('id', (pending as VeJob).id)
     .eq('status', 'pending')
+    .is('payload->>requesty_billing_wait', null)
     .lte('run_after', nowIso)
     .select('*')
     .maybeSingle();

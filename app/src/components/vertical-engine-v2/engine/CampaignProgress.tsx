@@ -2,6 +2,8 @@
 
 import type { ReactNode } from 'react';
 import type { VeContactSupplyStatus } from '@/lib/verticalEngineV2/contactSupplyStatus';
+import { isVeRequestyBillingError } from '@/lib/verticalEngineV2/collectionErrors';
+import { veRequestyBillingWaitState } from '@/lib/verticalEngineV2/requestyBillingState';
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { useContactSupply } from './ContactSupplyPanel';
@@ -43,9 +45,13 @@ export function CampaignProgress({ template, title, required, headerAction, uplo
   }] : [];
   const canPause = plan?.launched && plan.current && plan.status === 'active';
   const canResume = plan?.launched && plan.current && ['paused', 'error'].includes(plan.status);
+  const billingStopped = plan?.status === 'error' && isVeRequestyBillingError(plan.error);
+  const billingWait = plan?.current && plan.status === 'active'
+    ? veRequestyBillingWaitState({ requesty_billing_wait: plan.billing_wait }) : null;
 
   return (
-    <article className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
+    <article id={`ve-campaign-${template.id}`} tabIndex={-1}
+      aria-label={`Добор контактов: ${title}`} className="border-t border-[var(--ve2-line)] pt-5 space-y-3 scroll-mt-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <h3 className="ve2-h3">{title}</h3>
         {headerAction}
@@ -54,12 +60,16 @@ export function CampaignProgress({ template, title, required, headerAction, uplo
 
       {plan ? (
         <div className="space-y-2">
-          <StatusBox tone={!plan.current || plan.status === 'error' ? 'error' : 'info'}>
+          <StatusBox tone={!plan.current || plan.status === 'error' || billingWait?.requiresAdmin ? 'error' : 'info'}>
             {plan.current
-              ? SUPPLY_LABELS[plan.status]
+              ? billingWait
+                ? <><span className="block">{billingWait.title}</span><span className="block">{billingWait.description}</span></>
+                : billingStopped
+                ? 'Поиск остановился из-за нехватки средств в Requesty. После пополнения нажмите «Продолжить поиск».'
+                : SUPPLY_LABELS[plan.status]
               : 'Согласование устарело. Автоматический поиск и загрузка контактов заблокированы.'}
           </StatusBox>
-          {plan.error ? <StatusBox tone="error">{plan.error}</StatusBox> : null}
+          {plan.error && !billingStopped && !billingWait ? <StatusBox tone="error">{plan.error}</StatusBox> : null}
         </div>
       ) : required && supply.data?.required ? (
         <StatusBox tone="info">Автоматический поиск для этих кампаний ещё не согласован.</StatusBox>
@@ -132,10 +142,11 @@ export function CampaignProgress({ template, title, required, headerAction, uplo
             type="button"
             className={HE.btnGhost}
             disabled={supply.busy}
+            aria-label={`${canPause ? 'Приостановить поиск' : 'Продолжить поиск'}: ${title}`}
             onClick={() => void supply.act(canPause ? 'pause' : 'resume')}
           >
             {supply.busy ? 'Сохраняем…' : canPause ? 'Приостановить поиск'
-              : plan?.status === 'error' ? 'Повторить поиск' : 'Возобновить поиск'}
+              : 'Продолжить поиск'}
           </button>
         </div>
       ) : null}
