@@ -394,7 +394,8 @@ describe('VE2 collection progress presentation', () => {
     }
     const oldBillingCampaign = campaign({ status: 'error', billing_wait: undefined, error: 'Requesty 402: private provider body' });
     expect(oldBillingCampaign).toContain('Продолжить поиск');
-    expect(oldBillingCampaign).not.toMatch(/Продолжим автоматически|private provider body/);
+    expect(oldBillingCampaign).toContain('Результаты сохранены.');
+    expect(oldBillingCampaign).not.toMatch(/После пополнения нажмите|Продолжим автоматически|private provider body/);
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...parent, status: 'failed', error: 'Stopped' }] }))
       .toMatchObject({ tone: 'err', guidance: { action: 'continue' } });
     expect(getPreparationPresentation({ preparation, base: { ...collecting, collect_info: {} }, jobs: [parent] }))

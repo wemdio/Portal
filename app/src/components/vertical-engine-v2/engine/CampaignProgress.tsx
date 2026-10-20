@@ -65,7 +65,7 @@ export function CampaignProgress({ template, title, required, headerAction, uplo
               ? billingWait
                 ? <><span className="block">{billingWait.title}</span><span className="block">{billingWait.description}</span></>
                 : billingStopped
-                ? 'Поиск остановился из-за нехватки средств в Requesty. После пополнения нажмите «Продолжить поиск».'
+                ? 'Поиск остановился из-за нехватки средств в Requesty. Результаты сохранены.'
                 : SUPPLY_LABELS[plan.status]
               : 'Согласование устарело. Автоматический поиск и загрузка контактов заблокированы.'}
           </StatusBox>

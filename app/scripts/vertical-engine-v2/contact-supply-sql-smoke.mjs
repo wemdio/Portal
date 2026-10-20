@@ -35,6 +35,11 @@ try {
   if (!process.env.SUPPLY_SMOKE_BASELINE) {
     await db.exec(migration('20260903_0001_vertical_engine_v2_contact_supply.sql'));
     await db.exec(migration('20261020_0001_ve_supply_billing_resume.sql'));
+    // External shared child/preparation tables are read only by recovery.
+    await db.exec(`create table public.base_constructor_jobs(id uuid primary key,status text);
+      create table public.ve_outreach_preparations(project_id uuid,hypothesis_id uuid,base_id uuid,
+        paused_at timestamptz,cancelled_at timestamptz,primary key(project_id,hypothesis_id));`);
+    await db.exec(migration('20261020_0002_ve_legacy_supply_credit_recovery.sql'));
   }
   const now = '2030-09-02T10:00:00Z'; // Monday, independent of machine weekday.
   const id = Object.fromEntries(['project', 'period', 've', 'actor', 'vertical', 'hypothesis', 'base', 'template', 'audit', 'reservation', 'preset']
@@ -185,6 +190,8 @@ try {
       started_at='2030-09-02T10:11:00Z',finished_at='2030-09-02T10:12:01Z',
       updated_at='2030-09-02T10:12:01Z' where id=$1`, [jobId, result]);
     await query("select ve_finish_contact_supply_batch($1,'error',$2,'2030-09-02T10:12:02Z')", [batchId, billingError]);
+    await query("insert into base_constructor_jobs values($1,'completed')", [info.construct.bc_job_id]);
+    await query("update ve_launch_queue_campaigns set remote_status=1,status_observed_at='2030-09-02T10:14:30Z' where item_id=$1", [itemId]);
     const snapshot = async () => ({
       base: (await one('select to_jsonb(b) value from ve_bases b where id=$1', [baseId])).value,
       batch: (await one('select to_jsonb(b) value from ve_contact_supply_batches b where id=$1', [batchId])).value,
@@ -349,6 +356,146 @@ try {
     assert.deepEqual(after.job, before.job);
     assert.deepEqual(after.counts, before.counts);
   });
+  // Automatic legacy recovery uses a fresh management credit observation,
+  // and must not convert repeated 402s into an unbounded paid retry loop.
+  const fingerprint = 'c'.repeat(64);
+  const fundedCredit = { balanceUsd: 10, monthlySpendUsd: 5, monthlyLimitUsd: 100 };
+  const observeAndResume = async (fixture, overrides = {}) => {
+    const current = await fixture.snapshot();
+    return (await fixture.one('select ve_resume_legacy_requesty_supply($1,$2,$3,$4,$5,$6) result',
+      [plan.id, overrides.updatedAt ?? current.plan.updated_at, overrides.fingerprint ?? fingerprint,
+        JSON.stringify(overrides.credit === undefined ? fundedCredit : overrides.credit),
+        overrides.observedAt ?? '2030-09-02T10:14:50Z', overrides.now ?? resumedAt])).result;
+  };
+  const previousRecovery = (credit = fundedCredit) => ({
+    version: 1, source: 'legacy_supply', origin: 'automatic_requesty_credit',
+    key_fingerprint: fingerprint, credit_signal: credit, credit_observed_at: '2030-09-02T10:11:00Z',
+    blocked_at: '2030-09-02T10:10:00Z', resumed_at: '2030-09-02T10:11:00Z',
+  });
+  const setPreviousRecovery = (fixture, recovery) => fixture.query(`update ve_jobs
+    set payload=payload||jsonb_build_object('requesty_billing_recovery',$2::jsonb) where id=$1`, [fixture.jobId, recovery]);
+  for (const closed of [true, false]) await withBillingBatch(async (fixture) => {
+    const before = await fixture.snapshot();
+    assert.deepEqual(await observeAndResume(fixture), { resumed: true, reason: 'credit_available' });
+    const after = await fixture.snapshot();
+    assert.deepEqual(after.counts, before.counts);
+    assert.equal(after.plan.status, 'active');
+    assert.equal(after.batch.status, 'collecting');
+    assert.equal(after.base.status, 'collecting');
+    assert.equal(after.job.status, 'pending');
+    assert.equal(after.base.row_count, 191);
+    assert.deepEqual(after.base.data, before.base.data);
+    assert.deepEqual(after.job.result, before.job.result);
+    assert.equal(after.job.attempts, before.job.attempts);
+    assert.equal(after.job.tokens_used, before.job.tokens_used);
+    assert.equal(after.job.cost_usd, before.job.cost_usd);
+    for (const key of ['target_checkpoint', 'tasks', 'construct', 'search_policy', 'relevance_reserve',
+      'relevance_checkpoint', 'company_name_checkpoint']) assert.deepEqual(after.base.collect_info[key], before.base.collect_info[key], key);
+    for (const key of ['round', 'max_rounds', 'max_candidates', 'candidates_processed', 'ready_rows', 'ready_target']) {
+      assert.equal(after.base.collect_info.target_progress[key], before.base.collect_info.target_progress[key], key);
+    }
+    assert.equal(after.base.collect_info.supply_billing_resume.origin, 'automatic_requesty_credit');
+    const recovery = after.job.payload.requesty_billing_recovery;
+    assert.equal(recovery.version, 1);
+    assert.equal(recovery.source, 'legacy_supply');
+    assert.equal(recovery.origin, 'automatic_requesty_credit');
+    assert.equal(recovery.key_fingerprint, fingerprint);
+    assert.deepEqual(recovery.credit_signal, fundedCredit);
+    assert.equal(Date.parse(recovery.resumed_at), Date.parse(resumedAt));
+    assert.equal(after.job.payload.saved_receipt, 'keep');
+    assert.equal((await observeAndResume(fixture, { updatedAt: before.plan.updated_at })).resumed, false);
+    assert.deepEqual(await fixture.snapshot(), after);
+    // The same stage fails again after recovery, with an unchanged positive
+    // visible balance. Keep the baseline and wait for an actual improvement.
+    await fixture.query(`update ve_bases set status='failed',error=$2,updated_at='2030-09-02T10:16:00Z',
+      collect_info=jsonb_set(collect_info,'{target_progress}',collect_info->'target_progress'||
+        jsonb_build_object('status','error','reason',$2::text)) where id=$1`, [fixture.baseId, billingError]);
+    await fixture.query("update ve_jobs set status='done',finished_at='2030-09-02T10:16:00Z' where id=$1", [fixture.jobId]);
+    await fixture.query("select ve_finish_contact_supply_batch($1,'error',$2,'2030-09-02T10:16:01Z')", [fixture.batchId, billingError]);
+    const repeatedFailure = await fixture.snapshot();
+    assert.deepEqual(await observeAndResume(fixture, { now: '2030-09-02T10:16:10Z', observedAt: '2030-09-02T10:16:05Z' }),
+      { resumed: false, reason: 'awaiting_credit_change' });
+    assert.deepEqual(await fixture.snapshot(), repeatedFailure);
+    if (closed) {
+      assert.equal((await observeAndResume(fixture, { now: '2030-09-02T10:16:10Z', observedAt: '2030-09-02T10:16:05Z',
+        credit: { ...fundedCredit, balanceUsd: 20 } })).resumed, true);
+      assert.deepEqual((await fixture.snapshot()).counts, before.counts);
+    }
+  }, { closed });
+  for (const [previous, next] of [
+    [fundedCredit, { ...fundedCredit, balanceUsd: 11 }],
+    [fundedCredit, { ...fundedCredit, monthlyLimitUsd: 0 }],
+    [fundedCredit, { ...fundedCredit, monthlyLimitUsd: 200 }],
+    [fundedCredit, { ...fundedCredit, monthlySpendUsd: 0 }],
+  ]) await withBillingBatch(async (fixture) => {
+    await setPreviousRecovery(fixture, previousRecovery(previous));
+    assert.equal((await observeAndResume(fixture, { credit: next })).resumed, true);
+  });
+  const deniedAutomaticCases = [
+    ['expired credit probe', null, { observedAt: '2030-09-02T10:12:59Z' }],
+    ['future credit probe', null, { observedAt: '2030-09-02T10:15:01Z' }],
+    ['numeric string credit', null, { credit: { ...fundedCredit, balanceUsd: '10' } }],
+    ['missing credit field', null, { credit: { balanceUsd: 10, monthlySpendUsd: 0 } }],
+    ['invalid credit object', null, { credit: 'bad' }],
+    ['negative credit', null, { credit: { ...fundedCredit, balanceUsd: -1 } }],
+    ['zero credit', null, { credit: { ...fundedCredit, balanceUsd: 0 } }],
+    ['monthly cap exhausted', null, { credit: { ...fundedCredit, monthlyLimitUsd: 5 } }],
+    ['stale plan CAS', null, { updatedAt: '2030-09-02T10:11:00Z' }],
+    ['manual plan pause', f => f.query("update ve_contact_supply_plans set status='paused' where id=$1", [plan.id])],
+    ['approved but unlaunched plan', f => f.query("update ve_contact_supply_plans set status='approved' where id=$1", [plan.id])],
+    ['missing launch item', f => f.query('update ve_contact_supply_plans set item_id=null where id=$1', [plan.id])],
+    ['cancelled launch', f => f.query("update ve_launch_queue_items set status='cancelled' where id=$1", [itemId])],
+    ['paused campaign', f => f.query("update ve_launch_queue_campaigns set remote_status=2 where item_id=$1", [itemId])],
+    ['stale campaign', f => f.query("update ve_launch_queue_campaigns set status_observed_at='2030-09-02T10:00:00Z' where item_id=$1", [itemId])],
+    ...['paused_at', 'cancelled_at'].map(field => [`specialist ${field} on original preview`, f => f.query(
+      `insert into ve_outreach_preparations(project_id,hypothesis_id,base_id,${field}) values($1,$2,$3,$4)`,
+      [id.ve, id.hypothesis, id.base, resumedAt])]),
+    ['failed shared child', f => f.query("update base_constructor_jobs set status='failed' where id=$1", [f.info.construct.bc_job_id])],
+    ['missing shared child', f => f.query('delete from base_constructor_jobs where id=$1', [f.info.construct.bc_job_id])],
+    ['failed source child', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{tasks,0,status}','"failed"') where id=$1`, [f.baseId])],
+    ['dispatched source child', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{tasks,0,status}','"dispatched"') where id=$1`, [f.baseId])],
+    ['malformed task array', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{tasks}','{}') where id=$1`, [f.baseId])],
+    ['null task array', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{tasks}','null') where id=$1`, [f.baseId])],
+    ['malformed task entry', f => f.query(`update ve_bases set collect_info=jsonb_set(collect_info,'{tasks}','[null]') where id=$1`, [f.baseId])],
+    ['already waiting', f => f.query(`update ve_jobs set payload=payload||'{"requesty_billing_wait":{}}' where id=$1`, [f.jobId])],
+    ['malformed previous recovery', f => setPreviousRecovery(f, {})],
+    ['other key recovery', f => setPreviousRecovery(f, { ...previousRecovery(), key_fingerprint: 'd'.repeat(64) })],
+    ['previous numeric string', f => setPreviousRecovery(f, previousRecovery({ ...fundedCredit, balanceUsd: '10' }))],
+    ['unchanged previous credit', f => setPreviousRecovery(f, previousRecovery())],
+    ['less current credit', f => setPreviousRecovery(f, previousRecovery({ ...fundedCredit, balanceUsd: 11 }))],
+    ['mixed provider plan', f => f.query("update ve_contact_supply_plans set last_error='Requesty timeout; Serper 402 insufficient balance' where id=$1", [plan.id])],
+    ['ambiguous nested provider', f => f.query("update ve_contact_supply_plans set last_error='Requesty 402: Polza insufficient balance' where id=$1", [plan.id])],
+    ['4020 is not 402', f => f.query("update ve_contact_supply_plans set last_error='Requesty 4020 insufficient balance' where id=$1", [plan.id])],
+    ['mixed provider base', f => f.query(`update ve_bases set error='Requesty timeout; Serper 402',
+      collect_info=jsonb_set(collect_info,'{target_progress,reason}','"Requesty timeout; Serper 402"') where id=$1`, [f.baseId])],
+    ['stale billing reason with current unrelated failure', f => f.query("update ve_bases set error='Directory 404' where id=$1", [f.baseId])],
+    ...deniedBillingCases.map(([label, change]) => [`saved state: ${label}`, change]),
+  ];
+  for (const [label, change, overrides] of deniedAutomaticCases) await withBillingBatch(async (fixture) => {
+    if (change) await change(fixture);
+    const before = await fixture.snapshot();
+    assert.equal((await observeAndResume(fixture, overrides)).resumed, false, label);
+    assert.deepEqual(await fixture.snapshot(), before, `${label}: automatic refusal must be atomic`);
+  });
+  await withBillingBatch(async (fixture) => {
+    // Underlying normal eligibility fails *after* the manual repair. The
+    // wrapper's subtransaction must undo every repaired row, not only plan.
+    await fixture.query("update project_periods set status='closed' where id=$1", [id.period]);
+    const before = await fixture.snapshot();
+    assert.deepEqual(await observeAndResume(fixture), { resumed: false, reason: 'checkpoint_not_resumable' });
+    assert.deepEqual(await fixture.snapshot(), before);
+  });
+  await withBillingBatch(async (fixture) => {
+    await fixture.query(`create function public.test_recovery_infrastructure_failure() returns trigger
+      language plpgsql as $$ begin raise exception 'Infrastructure write failed'; end; $$`);
+    await fixture.query(`create trigger test_recovery_infrastructure_failure before update on ve_jobs
+      for each row when (new.status='pending') execute function test_recovery_infrastructure_failure()`);
+    const before = await fixture.snapshot();
+    await fixture.query('savepoint infrastructure_refusal');
+    await assert.rejects(() => observeAndResume(fixture), /Infrastructure write failed/);
+    await fixture.query('rollback to savepoint infrastructure_refusal');
+    assert.deepEqual(await fixture.snapshot(), before, 'infrastructure errors propagate and roll back all repaired rows');
+  });
   await rows("update ve_templates set letters='[{\"body\":\"Changed\"}]' where id=$1", [id.template]);
   assert.equal(await scalar('select ve_contact_supply_approval_current($1) result', [plan.id]), false);
   await fails(() => scalar('select ve_reserve_contact_delivery_day($1,$2,0) result', [id.ve, now]), /approval is stale/);
@@ -358,7 +505,11 @@ try {
   await fails(() => rows('delete from ve_contact_supply_plans'), /permission denied/i);
   await fails(() => scalar('select ve_reserve_contact_delivery_day_before_supply($1,$2,0) result', [id.ve, now]), /permission denied/i);
   await db.exec('reset role');
-  console.log('PASS continuous supply: approval, atomic enqueue/append/replay, campaign reuse, pause/stale rules, empty-day retry, and saved billing-batch resume/rollback.');
+  await db.exec('set role authenticated');
+  await fails(() => scalar('select ve_resume_legacy_requesty_supply($1,$2,$3,$4,$5,$6) result',
+    [plan.id, now, fingerprint, fundedCredit, now, now]), /permission denied/i);
+  await db.exec('reset role');
+  console.log('PASS continuous supply: approval, atomic enqueue/append/replay, campaign reuse, pause/stale rules, empty-day retry, saved billing-batch resume, and automatic credit recovery/rollback.');
 } catch (error) {
   console.error(error.message, error.where || '', error.stack?.split('\n').slice(1, 3).join('\n') || '');
   process.exitCode = 1;

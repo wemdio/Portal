@@ -51,8 +51,18 @@ const waitingJob = (id = 'billing-job', extraWait: Record<string, unknown> = {})
   payload: { ...payload, requesty_billing_wait: { version: 1, key_fingerprint: BILLING_KEY,
     blocked_at: new Date(NOW - 1_000).toISOString(), ...extraWait } },
 });
-const billingBase = () => ({ id: payload.base_id, project_id: 'billing-project', status: 'collecting',
+const billingBase = () => ({ id: payload.base_id, project_id: 'billing-project', hypothesis_id: payload.hypothesis_id, status: 'collecting',
   row_count: 37, data: [['saved company', 'saved email']], collect_info: { budget: 100, checkpoint: 'paid' } });
+const legacyBillingPlan = (id = 'legacy-supply') => ({ id, status: 'error', item_id: 'existing-launch',
+  updated_at: new Date(NOW - 86_400_000).toISOString(), last_error: 'Requesty 402: insufficient balance' });
+function withAbortableRpc(db: ReturnType<typeof createMockSupabase>) {
+  const rpc = db.rpc.bind(db);
+  db.rpc = ((...args: Parameters<typeof rpc>) => {
+    const pending = rpc(...args);
+    return Object.assign(pending, { abortSignal: () => pending });
+  }) as typeof db.rpc;
+  return db;
+}
 
 /** The message a stage throws after its read of the project's other bases stalled. */
 async function stalledReadMessage(): Promise<string> {
@@ -175,6 +185,25 @@ describe('VE2 job interruptions do not spend attempts', () => {
         last_credit: billingCredit(30, 40),
       } } });
     }
+    const legacyRecovery = { ...waitingJob('legacy-repeated'), payload: { ...payload,
+      collection_mode: 'supply', supply_batch_id: 'legacy-repeat-batch',
+      requesty_billing_recovery: { version: 1, source: 'legacy_supply', key_fingerprint: BILLING_KEY,
+        credit_signal: billingCredit() } } };
+    const legacyWait = planVeRequestyBillingWait(legacyRecovery,
+      new VeRequestyBillingError('Requesty 402: insufficient balance', BILLING_KEY), NOW)!;
+    const legacyAgain = createMockSupabase({ tables: {
+      ve_jobs: [{ ...legacyRecovery, payload: legacyWait.payload, run_after: legacyWait.runAfter }],
+      ve_bases: [billingBase()],
+      ve_contact_supply_batches: [{ id: 'legacy-repeat-batch', base_id: payload.base_id, plan_id: 'legacy-repeat-plan', status: 'collecting' }],
+      ve_contact_supply_plans: [{ id: 'legacy-repeat-plan', project_id: legacyRecovery.project_id,
+        status: 'active', item_id: 'legacy-item', hypothesis_id: payload.hypothesis_id }],
+    } });
+    probe.mockResolvedValue(fundedProbe());
+    expect((await sweep(legacyAgain)).resumed).toBe(0);
+    probe.mockResolvedValue(fundedProbe(billingCredit(60)));
+    expect((await sweep(legacyAgain)).resumed).toBe(1);
+    expect(legacyAgain.getRows('ve_jobs')[0].payload).toHaveProperty('requesty_billing_recovery.source', 'legacy_supply');
+    expect(legacyAgain.getRows('ve_jobs')[0].payload).toHaveProperty('requesty_billing_recovery.credit_signal', billingCredit(60));
     expect(veRequestyCreditImproved(billingCredit(50, 20, 20), billingCredit(40, 20, 30))).toBe(true);
     expect(veRequestyCreditImproved(billingCredit(50, 20, 20), billingCredit(40, 0, 20))).toBe(true);
     expect(veRequestyCreditImproved(billingCredit(50, 20, 20), billingCredit(40, 20, 0))).toBe(true);
@@ -189,6 +218,122 @@ describe('VE2 job interruptions do not spend attempts', () => {
     expect(probe).toHaveBeenCalledTimes(1);
     expect(await sweep(many, NOW + 120_000)).toMatchObject({ waiting: 101, resumed: 4 });
     expect(many.inserts).toEqual([]);
+
+    // Historical source failures use the same one probe, but only the atomic
+    // RPC may restore their paid base/batch/job. Never use a generic status
+    // update or create a replacement source when the RPC refuses its CAS.
+    const nonBilling = createMockSupabase({ tables: { ve_contact_supply_plans: [
+      { ...legacyBillingPlan('http-404'), last_error: 'Catalog HTTP 404' },
+      { ...legacyBillingPlan('other-provider'), last_error: 'Other provider 402: payment required' },
+      { ...legacyBillingPlan('mixed-provider'), last_error: 'Requesty timeout; Serper 402: insufficient balance' },
+      { ...legacyBillingPlan('not-402'), last_error: 'Requesty HTTP 4020: unexpected response' },
+      { ...legacyBillingPlan('manual-pause'), status: 'paused' },
+      { ...legacyBillingPlan('never-launched'), item_id: null },
+    ] } });
+    probe.mockClear();
+    expect(await sweep(nonBilling)).toMatchObject({ resumed: 0, reason: 'no_work' });
+    expect(probe).not.toHaveBeenCalled();
+    expect(nonBilling.rpcCalls).toEqual([]);
+    expect(nonBilling.mutations).toEqual([]);
+    for (const blocked of [
+      { status: 'blocked', reason: 'insufficient_balance', keyFingerprint: BILLING_KEY, ...zero,
+        creditSignal: zero, availableCreditUsd: 0 },
+      { status: 'unavailable', reason: 'management_forbidden', keyFingerprint: BILLING_KEY },
+      { ...fundedProbe(), keyFingerprint: 'b'.repeat(64) },
+    ] as VeRequestyBalanceResult[]) {
+      const held = createMockSupabase({ tables: { ve_contact_supply_plans: [legacyBillingPlan()] } });
+      probe.mockClear().mockResolvedValue(blocked);
+      expect((await sweep(held)).resumed).toBe(0);
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(held.rpcCalls).toEqual([]);
+      expect(held.mutations).toEqual([]);
+    }
+    const historical = legacyBillingPlan();
+    let acceptedLegacy = false;
+    const legacyDb = withAbortableRpc(createMockSupabase({ tables: {
+      ve_contact_supply_plans: [historical], ve_jobs: [{ ...waitingJob('old-done'), status: 'done', payload }],
+      ve_bases: [{ ...billingBase(), status: 'failed' }], ve_campaigns: [{ id: 'existing', status: 'active' }],
+    }, rpcHandlers: { ve_resume_legacy_requesty_supply: (params) => {
+      expect(params).toMatchObject({ p_plan_id: historical.id, p_expected_updated_at: historical.updated_at,
+        p_key_fingerprint: BILLING_KEY, p_credit_signal: billingCredit() });
+      expect(params.p_credit_observed_at).toBe(new Date(NOW + 60_000).toISOString());
+      expect(params.p_now).toBe(new Date(NOW + 60_000).toISOString());
+      const resumed = !acceptedLegacy;
+      acceptedLegacy = true;
+      return { data: { resumed, reason: resumed ? 'resumed' : 'stale' } };
+    } } }));
+    const savedLegacy = ['ve_contact_supply_plans', 've_jobs', 've_bases', 've_campaigns']
+      .map((table) => legacyDb.getRows(table));
+    probe.mockClear().mockResolvedValue(fundedProbe());
+    expect((await sweep(legacyDb)).resumed).toBe(1);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(legacyDb.rpcCalls).toHaveLength(1);
+    expect((await sweep(legacyDb)).resumed).toBe(0);
+    expect(legacyDb.rpcCalls).toHaveLength(2);
+    expect(legacyDb.rpcCalls.every((call) => call.fn === 've_resume_legacy_requesty_supply')).toBe(true);
+    expect(['ve_contact_supply_plans', 've_jobs', 've_bases', 've_campaigns']
+      .map((table) => legacyDb.getRows(table))).toEqual(savedLegacy);
+    expect(legacyDb.mutations).toEqual([]);
+    for (const reason of ['paused', 'cancelled', 'stale', 'malformed_checkpoint', 'awaiting_credit_change']) {
+      const refused = withAbortableRpc(createMockSupabase({ tables: {
+        ve_contact_supply_plans: [legacyBillingPlan(reason)],
+      }, rpcHandlers: { ve_resume_legacy_requesty_supply: () => ({ data: { resumed: false, reason } }) } }));
+      expect((await sweep(refused)).resumed).toBe(0);
+      expect(refused.rpcCalls).toHaveLength(1);
+      expect(refused.mutations).toEqual([]);
+    }
+    for (const response of [
+      { data: null, error: { message: 'connection lost after commit' } },
+      { data: null },
+      { data: { resumed: 'true', reason: 'invalid response' } },
+    ]) {
+      const uncertain = withAbortableRpc(createMockSupabase({ tables: {
+        ve_contact_supply_plans: [legacyBillingPlan('uncertain-a'), legacyBillingPlan('uncertain-b')],
+      }, rpcHandlers: { ve_resume_legacy_requesty_supply: () => response } }));
+      await expect(sweep(uncertain)).rejects.toThrow();
+      // The first transaction may have committed. Do not buy more recovery
+      // work when its response cannot confirm whether it consumed a slot.
+      expect(uncertain.rpcCalls).toHaveLength(1);
+      expect(uncertain.mutations).toEqual([]);
+    }
+    const refusedMany = withAbortableRpc(createMockSupabase({ enforceQueryWindows: true, tables: {
+      ve_contact_supply_plans: Array.from({ length: 25 }, (_, i) => legacyBillingPlan(`refused-${String(i).padStart(3, '0')}`)),
+    }, rpcHandlers: { ve_resume_legacy_requesty_supply: () => ({ data: { resumed: false, reason: 'checkpoint_not_resumable' } }) } }));
+    probe.mockClear();
+    expect((await sweep(refusedMany)).resumed).toBe(0);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(refusedMany.rpcCalls).toHaveLength(20);
+    expect((await sweep(refusedMany)).resumed).toBe(0);
+    expect(refusedMany.rpcCalls).toHaveLength(25);
+    expect(new Set(refusedMany.rpcCalls.map((call) => call.params.p_plan_id)).size).toBe(25);
+    expect(refusedMany.mutations).toEqual([]);
+    const scanning = withAbortableRpc(createMockSupabase({ enforceQueryWindows: true, tables: {
+      ve_contact_supply_plans: [
+        ...Array.from({ length: 105 }, (_, i) => ({ ...legacyBillingPlan(`scan-${String(i).padStart(3, '0')}`),
+          last_error: 'Catalog HTTP 404' })),
+        legacyBillingPlan('scan-105'),
+      ],
+    }, rpcHandlers: { ve_resume_legacy_requesty_supply: () => ({ data: { resumed: true, reason: 'resumed' } }) } }));
+    probe.mockClear();
+    expect((await sweep(scanning)).resumed).toBe(0);
+    expect(probe).not.toHaveBeenCalled();
+    expect((await sweep(scanning)).resumed).toBe(1);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(scanning.rpcCalls).toHaveLength(1);
+    expect(scanning.mutations).toEqual([]);
+    for (const nativeCount of [3, 4]) {
+      const mixed = withAbortableRpc(createMockSupabase({ enforceQueryWindows: true, tables: {
+        ve_jobs: Array.from({ length: nativeCount }, (_, i) => ({ ...waitingJob(`native-${i}`),
+          stage: 'site_profile', payload: { requesty_billing_wait: waitingJob().payload.requesty_billing_wait } })),
+        ve_contact_supply_plans: [legacyBillingPlan('legacy-a'), legacyBillingPlan('legacy-b')],
+      }, rpcHandlers: { ve_resume_legacy_requesty_supply: () => ({ data: { resumed: true, reason: 'resumed' } }) } }));
+      probe.mockClear();
+      expect((await sweep(mixed)).resumed).toBe(4);
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(mixed.rpcCalls).toHaveLength(4 - nativeCount);
+      expect(mixed.mutations.every((change) => change.kind === 'update' && change.table === 've_jobs')).toBe(true);
+      expect(mixed.inserts).toEqual([]);
+    }
   });
 
   it('keeps paused, cancelled and superseded jobs asleep and stops recovery during shutdown', async () => {
@@ -259,6 +404,43 @@ describe('VE2 job interruptions do not spend attempts', () => {
       else expect(executionDb.mutations).toEqual([]);
       expect(executionDb.inserts).toEqual([]);
     }
+    for (const mode of ['eligible', 'hypothesis_paused', 'hypothesis_cancelled', 'campaign_paused',
+      'campaign_stale', 'campaign_future', 'campaign_missing', 'batch_missing', 'batch_changed', 'base_id_missing',
+      'wrong_collection_mode', 'plan_item_missing', 'plan_hypothesis_missing', 'plan_hypothesis_changed', 'approval_stale'] as const) {
+      const released = { ...waitingJob(`legacy-${mode}`), status: 'running', started_at: new Date(NOW).toISOString(),
+        payload: { ...payload, ...(mode === 'base_id_missing' ? { base_id: null } : {}),
+          collection_mode: mode === 'wrong_collection_mode' ? 'preview' : 'supply', supply_batch_id: 'legacy-batch',
+          requesty_billing_wait: null, requesty_billing_recovery: { version: 1, source: 'legacy_supply',
+            key_fingerprint: BILLING_KEY, credit_signal: billingCredit(),
+            blocked_at: new Date(NOW - 60_000).toISOString(), resumed_at: new Date(NOW).toISOString() } } };
+      const executionDb = withAbortableRpc(createMockSupabase({ enforceQueryWindows: true, tables: {
+        ve_jobs: [released], ve_bases: [billingBase()],
+        ve_outreach_preparations: [{ project_id: released.project_id, hypothesis_id: payload.hypothesis_id,
+          base_id: 'initial-preview-not-source-base', paused_at: mode === 'hypothesis_paused' ? new Date(NOW).toISOString() : null,
+          cancelled_at: mode === 'hypothesis_cancelled' ? new Date(NOW).toISOString() : null }],
+        ve_contact_supply_batches: mode === 'batch_missing' ? []
+          : [{ id: mode === 'batch_changed' ? 'other-batch' : 'legacy-batch',
+            base_id: payload.base_id, plan_id: 'legacy-plan', status: 'collecting' }],
+        ve_contact_supply_plans: [{ id: 'legacy-plan', project_id: released.project_id, status: 'active',
+          item_id: mode === 'plan_item_missing' ? null : 'legacy-launch',
+          hypothesis_id: mode === 'plan_hypothesis_missing' ? null
+            : mode === 'plan_hypothesis_changed' ? 'other-hypothesis' : payload.hypothesis_id }],
+        ve_launch_queue_campaigns: mode === 'campaign_missing' ? [] : [{ id: 'campaign', item_id: 'legacy-launch',
+          remote_status: mode === 'campaign_paused' ? 2 : 1,
+          status_observed_at: new Date(mode === 'campaign_stale' ? NOW - 360_000
+            : mode === 'campaign_future' ? NOW + 180_000 : NOW).toISOString() }],
+      }, rpcHandlers: { ve_require_contact_supply_active: () => ({ data: null,
+        ...(mode === 'approval_stale' ? { error: { message: 'supply approval rules are stale' } } : {}) }) } }));
+      expect(await deferVeRequestyRecoveryWhileIneligible(executionDb as unknown as SupabaseClient,
+        released as unknown as VeJob, { now: new Date(NOW + 60_000) })).toBe(mode !== 'eligible');
+      expect(executionDb.rpcCalls).toHaveLength(['eligible', 'approval_stale'].includes(mode) ? 1 : 0);
+      expect(executionDb.getRows('ve_jobs')[0]).toMatchObject({
+        status: mode === 'eligible' ? 'running' : 'pending', attempts: released.attempts,
+        payload: released.payload, result: released.result,
+      });
+      expect(executionDb.getRows('ve_bases')).toEqual([billingBase()]);
+      expect(executionDb.inserts).toEqual([]);
+    }
     const failedRead = createMockSupabase({ tables: { ve_jobs: [waitingJob()], ve_bases: [billingBase()] },
       errorTables: { ve_bases: 'unavailable' } });
     await expect(resumeVeRequestyBillingJobs(failedRead as unknown as SupabaseClient,
@@ -277,6 +459,22 @@ describe('VE2 job interruptions do not spend attempts', () => {
       expect((await resumeVeRequestyBillingJobs(db as unknown as SupabaseClient,
         { probe, keyFingerprint: BILLING_KEY, shouldStop: () => stopped })).resumed).toBe(0);
       expect(db.mutations).toEqual([]);
+      if (stopAt === 'before_read') expect(probe).not.toHaveBeenCalled();
+    }
+    for (const stopAt of ['before_read', 'during_probe', 'after_first_resume'] as const) {
+      let stopped = stopAt === 'before_read';
+      const legacy = withAbortableRpc(createMockSupabase({ tables: {
+        ve_contact_supply_plans: [legacyBillingPlan('first'), legacyBillingPlan('second')],
+      }, rpcHandlers: { ve_resume_legacy_requesty_supply: () => {
+        if (stopAt === 'after_first_resume') stopped = true;
+        return { data: { resumed: true, reason: 'resumed' } };
+      } } }));
+      const probe = jest.fn(async () => { if (stopAt === 'during_probe') stopped = true; return fundedProbe(); });
+      expect((await resumeVeRequestyBillingJobs(legacy as unknown as SupabaseClient,
+        { now: new Date(NOW + 60_000), probe, keyFingerprint: BILLING_KEY, shouldStop: () => stopped })).resumed)
+        .toBe(stopAt === 'after_first_resume' ? 1 : 0);
+      expect(legacy.rpcCalls).toHaveLength(stopAt === 'after_first_resume' ? 1 : 0);
+      expect(legacy.mutations).toEqual([]);
       if (stopAt === 'before_read') expect(probe).not.toHaveBeenCalled();
     }
   });
