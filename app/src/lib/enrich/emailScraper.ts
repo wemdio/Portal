@@ -933,6 +933,8 @@ type PageFetchResult = {
    * защитой чтения — на него запрос не уходил. Повтор не нужен: адрес тот же.
    */
   refused?: true;
+  /** Only requested by the opt-in ENG contact crawl. */
+  finalUrl?: string;
 };
 
 async function fetchPage(
@@ -943,6 +945,7 @@ async function fetchPage(
     acceptLanguage?: string;
     dispatcher?: unknown;
     limits?: PageReadLimits;
+    trackFinalUrl?: boolean;
   },
 ): Promise<PageFetchResult> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
@@ -971,6 +974,7 @@ async function fetchPage(
         acceptLanguage: options?.acceptLanguage,
         dispatcher: options?.dispatcher,
         limits: options?.limits,
+        trackFinalUrl: options?.trackFinalUrl,
       }),
       bounded,
     ]);
@@ -988,6 +992,7 @@ async function fetchPageInner(
     acceptLanguage?: string;
     dispatcher?: unknown;
     limits?: PageReadLimits;
+    trackFinalUrl?: boolean;
   },
 ): Promise<PageFetchResult> {
   const { timeout } = options;
@@ -1017,17 +1022,18 @@ async function fetchPageInner(
       redirect: 'follow',
       ...(options.dispatcher ? { dispatcher: options.dispatcher } : dispatcher ? { dispatcher } : {}),
     } as RequestInit;
-    if (options.limits) return await fetchPageLimited(url, init, options.limits, options.dispatcher, controller.signal);
+    if (options.limits) return await fetchPageLimited(url, init, options.limits, options.dispatcher, controller.signal, options.trackFinalUrl);
     const res = await fetch(url, init);
+    const finalUrl = options.trackFinalUrl ? { finalUrl: res.url || url } : {};
     if (res.status >= 400) {
-      return { html: null, failure: describeFetchStatus(res.status), status: res.status };
+      return { html: null, failure: describeFetchStatus(res.status), status: res.status, ...finalUrl };
     }
     const contentType = res.headers.get('content-type');
     if (!isHtmlLikeContentType(contentType)) {
-      return { html: null, failure: 'Страница не отдала HTML', status: res.status };
+      return { html: null, failure: 'Страница не отдала HTML', status: res.status, ...finalUrl };
     }
     const body = await res.arrayBuffer();
-    return { html: decodeHtml(body, contentType), failure: null, status: res.status };
+    return { html: decodeHtml(body, contentType), failure: null, status: res.status, ...finalUrl };
   } catch (err) {
     return { html: null, failure: describeFetchError(err) };
   } finally {
@@ -1062,9 +1068,11 @@ async function fetchPageLimited(
   limits: PageReadLimits,
   proxyDispatcher: unknown,
   signal: AbortSignal,
+  trackFinalUrl = false,
 ): Promise<PageFetchResult> {
   const parser = await import('@/lib/enrich/websiteParser');
   let res: Response;
+  let responseUrl = url;
   try {
     if (limits.guard) {
       const route = proxyDispatcher
@@ -1072,9 +1080,10 @@ async function fetchPageLimited(
       const guardedInit = { ...init, redirect: 'manual' } as RequestInit & { dispatcher?: unknown };
       if (route) guardedInit.dispatcher = route;
       else delete guardedInit.dispatcher;
-      ({ res } = await parser.fetchFollowingGuarded(url, guardedInit, limits.guard, signal));
+      ({ res, url: responseUrl } = await parser.fetchFollowingGuarded(url, guardedInit, limits.guard, signal));
     } else {
       res = await fetch(url, init);
+      responseUrl = res.url || url;
     }
   } catch (err) {
     // Отказ при соединении fetch отдаёт как cause своей ошибки.
@@ -1082,17 +1091,18 @@ async function fetchPageLimited(
     limits.counts.refused += 1;
     return { html: null, failure: ADDRESS_REFUSED_FAILURE, refused: true };
   }
+  const finalUrl = trackFinalUrl ? { finalUrl: responseUrl } : {};
   if (res.status >= 400) {
-    return { html: null, failure: describeFetchStatus(res.status), status: res.status };
+    return { html: null, failure: describeFetchStatus(res.status), status: res.status, ...finalUrl };
   }
   const contentType = res.headers.get('content-type');
   if (!isHtmlLikeContentType(contentType)) {
-    return { html: null, failure: 'Страница не отдала HTML', status: res.status };
+    return { html: null, failure: 'Страница не отдала HTML', status: res.status, ...finalUrl };
   }
   const body = limits.maxBytes ? await parser.readBodyCapped(res, limits.maxBytes, url) : await res.arrayBuffer();
   // Ровно maxBytes байт тоже считается: тело дошло до потолка.
   if (limits.maxBytes && body.byteLength >= limits.maxBytes) limits.counts.capped += 1;
-  return { html: decodeHtml(body, contentType), failure: null, status: res.status };
+  return { html: decodeHtml(body, contentType), failure: null, status: res.status, ...finalUrl };
 }
 
 async function fetchPageWithRetry(
@@ -1225,6 +1235,301 @@ async function discoverEmailPageLinks(html: string, baseUrl: string): Promise<st
   return results;
 }
 
+type EngContactFailure =
+  | 'invalid_url' | 'http_error' | 'timeout' | 'dns' | 'tls' | 'connection'
+  | 'network_error' | 'address_refused' | 'cross_site_redirect' | 'non_html' | 'parse_error';
+type EngContactPageKind = 'home' | 'contact' | 'legal' | 'about' | 'team' | 'fallback';
+type EngContactPageSource = 'input' | 'discovered' | 'static' | 'www_fallback';
+
+/** Operational counts and bounded, redacted URLs; never mailbox values or response bodies. */
+export type EngContactDiagnostics = {
+  version: 1;
+  strategy: 'eng_contact_first';
+  maxPages: number;
+  maxAttempts: number;
+  attempts: number;
+  stopReason: 'completed' | 'page_limit' | 'attempt_limit' | 'deadline' | 'usable_email';
+  failure?: EngContactFailure;
+  pagesRead: number;
+  emailsFound: number;
+  rawEmailsFound: number;
+  pages: Array<{
+    url: string;
+    finalUrl?: string;
+    kind: EngContactPageKind;
+    source: EngContactPageSource;
+    route: 'direct' | 'proxy';
+    status?: number;
+    outcome: 'read' | 'http_error' | 'timeout' | 'network_error' | 'address_refused' | 'non_html' | 'parse_error';
+    failure?: EngContactFailure;
+    emailsFound: number;
+  }>;
+};
+
+type EngContactCandidate = {
+  url: string;
+  kind: EngContactPageKind;
+  source: EngContactPageSource;
+  priority: number;
+  depth: number;
+};
+
+function contactDiagnosticUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    // Paths can occasionally contain mailboxes, too; do not retain those in diagnostics.
+    let path = url.pathname;
+    try { path = decodeURIComponent(path); } catch { /* Keep the bounded encoded path. */ }
+    path = path.replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[redacted]');
+    return `${url.protocol}//${url.host}${path.slice(0, 240)}`;
+  } catch { return '[invalid-url]'; }
+}
+
+function sameContactSite(candidate: string, root: string): boolean {
+  try {
+    const a = new URL(candidate);
+    const b = new URL(root);
+    return (a.protocol === 'https:' || a.protocol === 'http:')
+      && !a.username && !a.password
+      && (!a.port || a.port === '80' || a.port === '443')
+      && a.hostname.toLowerCase().replace(/^www\./, '') === b.hostname.toLowerCase().replace(/^www\./, '');
+  } catch { return false; }
+}
+
+function contactCandidateKind(href: string, text: string): { kind: EngContactPageKind; priority: number } | null {
+  let pathname = '';
+  try { pathname = decodeURIComponent(new URL(href).pathname); } catch { /* Label may still identify the page. */ }
+  const words = `${pathname.replace(/[/_.-]+/g, ' ')} ${text}`.toLowerCase();
+  if (/\b(contact(?:s|ez)?|kontakt(?:e|ieren)?|contatti|contato|contacto)\b/.test(words)) {
+    return { kind: 'contact', priority: 100 };
+  }
+  if (/\b(imprint|impressum|legal|rechtliches|mentions legales)\b/.test(words)) {
+    return { kind: 'legal', priority: 90 };
+  }
+  if (/\b(privacy|datenschutz|confidentialit[eé]|data protection)\b/.test(words)) {
+    return { kind: 'legal', priority: 80 };
+  }
+  if (/\b(about|company|über uns|uber uns)\b/.test(words)) return { kind: 'about', priority: 30 };
+  if (/\b(team|staff|people)\b/.test(words)) return { kind: 'team', priority: 20 };
+  return null;
+}
+
+async function discoverEngContactPages(html: string, baseUrl: string, root: string, depth: number): Promise<EngContactCandidate[]> {
+  const cheerio = await import('cheerio');
+  const $ = cheerio.load(html);
+  const seen = new Set<string>();
+  const candidates: EngContactCandidate[] = [];
+  $('a[href]').each((_, el) => {
+    const href = ($(el).attr('href') ?? '').trim();
+    if (!href || /^(#|mailto:|tel:|javascript:)/i.test(href)) return;
+    let url: string;
+    try { url = new URL(href, baseUrl).href; } catch { return; }
+    if (!sameContactSite(url, root)) return;
+    const normalized = stripUrlTail(url);
+    if (seen.has(normalized)) return;
+    const kind = contactCandidateKind(url, ($(el).text() ?? '').trim());
+    if (!kind) return;
+    seen.add(normalized);
+    candidates.push({ url, ...kind, source: 'discovered', depth });
+  });
+  // HTML order is only a tie-breaker, so an early About menu cannot hide footer contacts.
+  return candidates.sort((a, b) => b.priority - a.priority).slice(0, 40);
+}
+
+function contactFetchFailure(result: PageFetchResult): EngContactFailure {
+  if (result.refused) return 'address_refused';
+  if (result.status !== undefined && result.status >= 400) return 'http_error';
+  if (result.failure === 'Страница не отдала HTML') return 'non_html';
+  if (result.failure === 'Сайт не ответил за отведённое время') return 'timeout';
+  if (result.failure === 'Домен не резолвится') return 'dns';
+  if (result.failure === 'Сертификат сайта не прошёл проверку' || result.failure === 'Ошибка TLS-соединения') return 'tls';
+  if (result.failure === 'Соединение отклонено' || result.failure === 'Соединение разорвано' || result.failure === 'Хост недоступен') return 'connection';
+  return 'network_error';
+}
+
+/** Separate opt-in path: callers without the strategy keep the legacy crawler below. */
+async function scrapeEngContactEmails(
+  rawUrl: string,
+  options: NonNullable<Parameters<typeof scrapeEmails>[1]>,
+): Promise<ScrapeEmailsResult> {
+  const maxPages = Math.max(1, Math.min(20, Math.floor(Number(options.maxPages) || DEFAULT_MAX_PAGES)));
+  const maxAttempts = Math.min(2 * maxPages, 12);
+  const diagnostics: EngContactDiagnostics = {
+    version: 1, strategy: 'eng_contact_first', maxPages, maxAttempts, attempts: 0,
+    stopReason: 'completed', pagesRead: 0, emailsFound: 0, rawEmailsFound: 0, pages: [],
+  };
+  const allEmails = new Set<string>();
+  const checkedUrls: string[] = [];
+  let siteName: string | null = null;
+  let description: string | undefined;
+  let mainFailure: PageFetchFailure | null = null;
+  const limits: PageReadLimits | undefined = options.guard || options.maxBytes
+    ? { guard: options.guard, maxBytes: options.maxBytes, counts: { refused: 0, capped: 0 } } : undefined;
+  const finish = (): ScrapeEmailsResult => {
+    const allEmailsRaw = [...allEmails];
+    const emails = filterJunkEmails(allEmailsRaw);
+    diagnostics.rawEmailsFound = allEmailsRaw.length;
+    diagnostics.emailsFound = emails.length;
+    return {
+      emails, allEmailsRaw, checkedUrls, pagesScanned: checkedUrls.length, siteName,
+      ...(description ? { description } : {}),
+      failureReason: mainFailure,
+      ...(limits ? { readLimits: { ...limits.counts } } : {}),
+      contactDiagnostics: diagnostics,
+    };
+  };
+  let root: string;
+  try {
+    root = normalizeUrl(rawUrl);
+    if (!sameContactSite(root, root)) throw new Error('invalid_url');
+  } catch {
+    diagnostics.failure = 'invalid_url';
+    mainFailure = 'Некорректный адрес сайта';
+    return finish();
+  }
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  options.signal?.addEventListener('abort', abort, { once: true });
+  if (options.signal?.aborted) controller.abort();
+  const deadline = setTimeout(abort, 30_000);
+  const seen = new Set<string>();
+  const readFinalUrls = new Set<string>();
+  const queue: EngContactCandidate[] = [];
+  const queued = new Set<string>();
+  const canFetch = () => !controller.signal.aborted && diagnostics.attempts < maxAttempts && diagnostics.pagesRead < maxPages;
+  const enqueue = (candidate: EngContactCandidate) => {
+    const key = stripUrlTail(candidate.url);
+    if (!sameContactSite(candidate.url, root) || seen.has(key) || queued.has(key)) return;
+    queued.add(key);
+    queue.push(candidate);
+    queue.sort((a, b) => b.priority - a.priority);
+    if (queue.length > 40) queue.length = 40;
+  };
+  const read = async (candidate: EngContactCandidate, dispatcher?: unknown): Promise<PageFetchResult> => {
+    diagnostics.attempts += 1;
+    if (!seen.has(stripUrlTail(candidate.url))) checkedUrls.push(candidate.url);
+    seen.add(stripUrlTail(candidate.url));
+    const cached = dispatcher ? undefined : options.pageCache?.get(sitePageKey(candidate.url));
+    let result: PageFetchResult;
+    try {
+      result = cached !== undefined
+        ? { html: cached, failure: null, finalUrl: candidate.url }
+        : await fetchPage(candidate.url, {
+          timeout: Math.min(Math.max(1, options.timeout ?? FETCH_TIMEOUT_MS), 8_000),
+          signal: controller.signal, acceptLanguage: EN_ACCEPT_LANGUAGE, limits, dispatcher, trackFinalUrl: true,
+        });
+    } catch {
+      result = { html: null, failure: 'Сайт не открылся' };
+    }
+    const page: EngContactDiagnostics['pages'][number] = {
+      url: contactDiagnosticUrl(candidate.url),
+      ...(result.finalUrl ? { finalUrl: contactDiagnosticUrl(result.finalUrl) } : {}),
+      kind: candidate.kind, source: candidate.source, route: dispatcher ? 'proxy' : 'direct',
+      ...(result.status !== undefined ? { status: result.status } : {}),
+      outcome: 'read', emailsFound: 0,
+    };
+    diagnostics.pages.push(page);
+    const finalUrl = result.finalUrl || candidate.url;
+    if (!sameContactSite(finalUrl, root)) {
+      page.outcome = 'address_refused';
+      page.failure = 'cross_site_redirect';
+      return { html: null, failure: ADDRESS_REFUSED_FAILURE, refused: true };
+    }
+    if (!result.html) {
+      const failure = contactFetchFailure(result);
+      page.failure = failure;
+      page.outcome = failure === 'address_refused' || failure === 'http_error' || failure === 'timeout' || failure === 'non_html'
+        ? failure : 'network_error';
+      return result;
+    }
+    const finalKey = stripUrlTail(finalUrl);
+    if (!readFinalUrls.has(finalKey)) {
+      diagnostics.pagesRead += 1;
+      readFinalUrls.add(finalKey);
+    }
+    seen.add(finalKey);
+    options.pageCache?.set(sitePageKey(finalUrl), result.html);
+    try {
+      const emails = extractEmailsFromHtmlAdvanced(result.html);
+      for (const email of emails) allEmails.add(email);
+      page.emailsFound = filterJunkEmails(emails).length;
+    } catch {
+      page.outcome = 'parse_error';
+      page.failure = 'parse_error';
+    }
+    if (candidate.kind === 'home') {
+      siteName = extractSiteName(result.html);
+      if (options.includeDescription) {
+        try { description = (await import('@/lib/enrich/websiteParser')).reusableMainPageDescription(result.html); }
+        catch { /* Email results remain available if optional description parsing fails. */ }
+      }
+    }
+    if (candidate.depth < 2) {
+      try {
+        for (const link of await discoverEngContactPages(result.html, finalUrl, root, candidate.depth + 1)) enqueue(link);
+      } catch {
+        page.outcome = 'parse_error';
+        page.failure = 'parse_error';
+      }
+    }
+    return result;
+  };
+  const readHome = async (candidate: EngContactCandidate): Promise<PageFetchResult> => {
+    let result = await read(candidate);
+    if (PROXY_RETRY_ENABLED && !result.html && result.status !== undefined && PROXY_RETRY_STATUSES.has(result.status) && canFetch()) {
+      const release = tryAcquireProxySlot();
+      if (release) {
+        try {
+          // Existing configured website proxies only. Every route consumes the same attempt budget.
+          for (const getDispatcher of [getNonPriorityProxyDispatcher, () => getProxyDispatcher(true)]) {
+            if (!canFetch()) break;
+            const dispatcher = await getDispatcher();
+            if (!dispatcher || !canFetch()) continue;
+            result = await read(candidate, dispatcher);
+            if (result.html || result.refused) break;
+          }
+        } catch { /* Keep the recorded direct/proxy result. */ }
+        finally { release(); }
+      }
+    }
+    return result;
+  };
+  try {
+    let home: PageFetchResult = { html: null, failure: null };
+    if (canFetch()) home = await readHome({ url: root, kind: 'home', source: 'input', priority: 200, depth: 0 });
+    const rootUrl = new URL(root);
+    if (!home.html && !home.refused && !rootUrl.hostname.startsWith('www.')
+      && !/^[\d.]+$|:/.test(rootUrl.hostname) && canFetch()) {
+      const www = new URL(root);
+      www.hostname = `www.${www.hostname}`;
+      home = await readHome({ url: www.href, kind: 'home', source: 'www_fallback', priority: 200, depth: 0 });
+    }
+    mainFailure = home.html ? null : home.failure;
+    const base = home.html && home.finalUrl ? home.finalUrl : root;
+    const staticPaths = ['/contact', '/contact-us', '/kontakt', '/impressum', '/imprint', '/privacy', '/datenschutz', '/legal'];
+    for (const path of staticPaths) {
+      enqueue({ url: new URL(path, base).href, kind: 'fallback', source: 'static', priority: 10, depth: 1 });
+    }
+    while (queue.length > 0 && canFetch()) {
+      if (options.stopAtFirstUsableEmail && filterJunkEmails([...allEmails]).length > 0) break;
+      const candidate = queue.shift()!;
+      if (seen.has(stripUrlTail(candidate.url))) continue;
+      await read(candidate);
+    }
+    if (controller.signal.aborted) diagnostics.stopReason = 'deadline';
+    else if (options.stopAtFirstUsableEmail && filterJunkEmails([...allEmails]).length > 0) diagnostics.stopReason = 'usable_email';
+    else if (diagnostics.pagesRead >= maxPages) diagnostics.stopReason = 'page_limit';
+    else if (diagnostics.attempts >= maxAttempts) diagnostics.stopReason = 'attempt_limit';
+    if (diagnostics.pagesRead === 0) diagnostics.failure = diagnostics.pages[0]?.failure ?? 'timeout';
+    return finish();
+  } finally {
+    clearTimeout(deadline);
+    options.signal?.removeEventListener('abort', abort);
+  }
+}
+
 // ── Main scraper function ──────────────────────────────────────
 
 export type ScrapeEmailsResult = {
@@ -1251,6 +1556,7 @@ export type ScrapeEmailsResult = {
    * потолка maxBytes (разобраны первые maxBytes байт).
    */
   readLimits?: { refused: number; capped: number };
+  contactDiagnostics?: EngContactDiagnostics;
 };
 
 /**
@@ -1291,6 +1597,8 @@ export async function scrapeEmails(
      * Пробрасывается из stepFindEmails (job.locale конструктора баз).
      */
     locale?: 'ru' | 'en';
+    /** ENG caller opt-in only; undefined preserves the legacy traversal and result shape. */
+    contactPageStrategy?: 'eng_contact_first';
     includeDescription?: boolean;
     /**
      * Защита чтения (WebsiteFetchGuard, например createUsWebsiteFetchGuard из
@@ -1307,6 +1615,9 @@ export async function scrapeEmails(
     pageCache?: SitePageCache;
   },
 ): Promise<ScrapeEmailsResult> {
+  if (options?.locale === 'en' && options.contactPageStrategy === 'eng_contact_first') {
+    return scrapeEngContactEmails(rawUrl, options);
+  }
   const url = normalizeUrl(rawUrl);
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
