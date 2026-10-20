@@ -148,6 +148,7 @@ async function loadClassifier(maxTokens) {
   const pureModules = {
     './qualificationAiCheckpoint': path.join(APP, 'src/lib/instantly/qualificationAiCheckpoint.ts'),
     './emailReadDeferral': path.join(APP, 'src/lib/instantly/emailReadDeferral.ts'),
+    './machineReplyTemplates': path.join(APP, 'src/lib/instantly/machineReplyTemplates.ts'),
   };
   const blocked = 'throw new Error("EVALUATION_BLOCKED_EXTERNAL_DEPENDENCY");';
   const stubs = {
