@@ -1887,7 +1887,7 @@ type CompanyEvidenceLink = NonNullable<WebsitePage['companyEvidenceLinks']>[numb
 const COMPANY_EVIDENCE_SECTION_SEPARATOR = '\n\n[source section]\n\n';
 
 /** Ссылки для проверки компании: не угадываем адреса и не доверяем префиксу origin. */
-function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEvidenceLink[] {
+function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string, evidenceTerms: readonly string[] = []): CompanyEvidenceLink[] {
   const base = new URL(pageUrl);
   const host = base.hostname.replace(/^www\./, '');
   const domain = getDomain(base.hostname, { allowPrivateDomains: true });
@@ -1940,6 +1940,22 @@ function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string): CompanyEv
       kind = 'about'; priority = 70;
     }
     if (!kind) return;
+    if (evidenceTerms.length) {
+      // ENG only: rank real service links before the bounded menu is cut.
+      // Otherwise a long industry/news menu hides later, specific offerings.
+      const words = precisePurpose.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [];
+      const generic = new Set(['fund', 'service', 'services', 'business', 'company', 'companies', 'provider', 'providers', 'financial', 'solution', 'solutions']);
+      const hits = evidenceTerms.filter((term) => !generic.has(term) && words.some((word) => word.startsWith(term))).length;
+      const peripheral = /\/(?:news|articles?|blog|insights?|press|media|business[-_]expertise|careers?|jobs?|security|fraud)(?:\/|$)/i.test(path)
+        || /\b(?:newsletters?|privacy|cookies?|careers?|vacancies|fraud|scams?|market insights|trending topics)\b/i.test(precisePurpose);
+      const serviceLeaf = kind === 'services' && /\/(?:services?|solutions?|capabilities|products?|leistungen|produkte)\//i.test(path);
+      const directService = serviceLeaf && /\/(?:services?|solutions?|capabilities|products?|leistungen|produkte)\/[^/]+\/?$/i.test(path);
+      const businessOverview = kind === 'services' && /\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/(?:index\.(?:html?|php|aspx?))?)?\/?$/i.test(path);
+      const organizationService = serviceLeaf && /\b(?:institutional|enterprise|corporate|commercial)\b/i.test(precisePurpose);
+      priority += Math.min(hits, 2) * 70 + Number(serviceLeaf) * 30 + Number(directService) * 20
+        + Number(businessOverview) * 70 + Number(organizationService) * 35
+        - Number(peripheral && !(serviceLeaf && hits > 0)) * 100;
+    }
     const key = `${url.hostname.replace(/^www\./, '')}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
     const previous = seen.get(key);
     if (previous && (previous.priority ?? 0) >= priority) return;
@@ -2094,7 +2110,9 @@ function companyAddressBlocks($: cheerio.CheerioAPI): string[] {
 /** Отдельный ENG opt-in: основной текст + зарезервированное место адресам и JSON-LD. */
 function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boolean, evidenceTerms?: string[]): WebsitePage {
   const $ = cheerio.load(html);
-  const links = companyEvidenceLinks($, url);
+  const terms = [...new Set((evidenceTerms ?? []).slice(0, 32).flatMap((term) => typeof term === 'string'
+    ? term.slice(0, 200).normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [] : []))].slice(0, 32);
+  const links = companyEvidenceLinks($, url, terms);
   const structured = companyStructuredText($);
   $('script, style, noscript, iframe, svg, form, .cookie-banner, .cookie-consent, #cookie-banner, #cookie-consent').remove();
   // Keep the source's address fields readable when they occupy adjacent block elements.
@@ -2111,8 +2129,6 @@ function extractCompanyEvidencePage(html: string, url: string, layoutAware?: boo
   });
   // ENG opt-in terms only rank real, whole source paragraphs. They never add
   // catalogue facts or combine one company's service with another's address.
-  const terms = [...new Set((evidenceTerms ?? []).slice(0, 32).flatMap((term) => typeof term === 'string'
-    ? term.slice(0, 200).normalize('NFKC').toLocaleLowerCase().match(/[\p{L}]{4,}/gu) ?? [] : []))].slice(0, 32);
   const serviceParagraphs: Array<{ text: string; score: number; order: number }> = [];
   if (terms.length) $('p, li, td').each((order, el) => {
     const node = $(el);

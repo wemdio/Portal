@@ -55,7 +55,7 @@ export interface HeEngQualificationMemo {
   /** Execution progress only: it never replaces the versioned company proof. */
   economy?: {
     version: 1;
-    workflow?: 'fit_review_v3';
+    workflow?: 'fit_review_v3' | 'fit_review_v3_single';
     budget: HeEngQualificationBudget;
     /** First paid decision is durable before independent review. */
     proposals?: Record<string, HeEngCompanyFitDecision>;

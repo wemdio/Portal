@@ -6,7 +6,7 @@ import { heCompanySiteIdentity } from './collectionIdentity';
 import { heEngSourceCountry } from './engCompanyCountry';
 import {
   buildHeEngCompanyFitClassifierRequest, buildHeEngCompanyFitReviewRequest,
-  parseHeEngCompanyFitResponse, finalizeHeEngCompanyFit,
+  parseHeEngCompanyFitResponse, finalizeHeEngCompanyFit, validateHeEngCompanyFitDecision, heEngCompanyFitNeedsReview,
   type HeEngCompanyFitInput, type HeEngCompanyFitDecision, type HeEngCompanyFitRequest,
 } from './engCompanyFit';
 import {
@@ -28,8 +28,9 @@ const MAX_PAGE_DEPTH = 3;
 const MAX_COMPANY_ATTEMPTS = 3;
 const COMPANY_RETRY_MS = 30_000;
 const MAX_PAGE_TEXT = 6000;
-const MODEL_BATCH_SIZE = 8;
-const MAX_COMPANY_SOURCE_CHARS = 8000;
+const MODEL_BATCH_SIZE = 1;
+const MAX_COMPANY_SOURCE_CHARS = 6000;
+const MAX_COMPANY_QUOTES = 24;
 const EMAIL = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu;
 const StoredVerdictSchema = z.object({
   version: z.union([z.literal(2), z.literal(3)]),
@@ -78,7 +79,7 @@ function interrupted(ctx: HeStageContext, error?: unknown): void {
   if (candidate?.name === 'AbortError' || candidate?.heJobInterruption === true) throw error;
 }
 
-type PageRead = { pages: HeFetchedPage[]; retryableFailure: boolean };
+type PageRead = { pages: HeFetchedPage[]; retryableFailure: boolean; unverifiedRedirect: boolean };
 
 function serviceStem(word: string): string {
   return word.toLowerCase().replace(/ies$/, 'y').replace(/s$/, '').replace(/(?:ors?|ion|ian|ing|y)$/, '');
@@ -98,6 +99,7 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
   type Candidate = { url: string; depth: number; priority: number; kind: string; specificService?: boolean };
   const queue: Candidate[] = [{ url: website, depth: 0, priority: 1000, kind: 'home' }];
   let retryableFailure = false;
+  let unverifiedRedirect = false;
   const attemptedKinds: string[] = [];
   let readSpecificService = false;
   let fallbackTried = false;
@@ -118,7 +120,10 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     // Activity and company overview pages take priority over legal boilerplate.
     const count = (kind: string) => attemptedKinds.filter((value) => value === kind).length;
     for (let i = queue.length - 1; i >= 0; i -= 1) {
-      if ((queue[i].kind === 'legal' || queue[i].kind === 'services') && count(queue[i].kind) >= 2) queue.splice(i, 1);
+      // A large site can require a business hub and a service hub before the
+      // actual service page. Keep the total nine-page limit, not a two-hop cutoff.
+      if (queue[i].kind === 'legal' && count('legal') >= 2
+        || queue[i].kind === 'services' && count('services') >= 5) queue.splice(i, 1);
     }
     if (!queue.length) break;
     const preferred = attempted.size <= 1 ? ['services', 'about']
@@ -143,6 +148,7 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     }
     interrupted(ctx);
     if (!page || !sameSite(page.url, website) || (website.startsWith('https:') && !page.url.startsWith('https:'))) {
+      unverifiedRedirect ||= !!page && !sameSite(page.url, website);
       if (candidate.depth === 0) { retryableFailure ||= !page; if (!fallbackOrigin()) break; }
       continue;
     }
@@ -166,7 +172,7 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
         || /\/(?:[^/]*-)?sustainability\/[^/]*(?:partnership|report|news)/i.test(path);
       const kind = editorial && link.kind === 'services' ? 'supporting' : link.kind;
       const specificService = kind === 'services' && ([...titleHits].some((word) => word.length >= 6) || titleHits.size >= 2);
-      const businessHub = kind === 'services' && (/\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/|$)/i.test(path)
+      const businessHub = kind === 'services' && (/\/(?:businesses[-_]institutions|our[-_]business(?:es)?|business[-_]areas)(?:\/|\.html?)?$/i.test(path)
         || /\b(?:business(?:es)? (?:and |& )?institutions|our businesses|business areas)\b/i.test(purpose)
         || /^(?:www\.)?(?:business|commercial|corporate|institutional)\./i.test(new URL(link.url).hostname) && /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/?)?$/i.test(path));
       const companyOverview = /\b(?:company overview|about (?:us|our company)|who we are|get to know|corporate profile)\b/i.test(purpose);
@@ -179,14 +185,24 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     queue.sort((a, b) => b.priority - a.priority || a.depth - b.depth);
   }
   // Only official-site links are followed. Qualification never buys search credits.
-  return { pages, retryableFailure };
+  return { pages, retryableFailure, unverifiedRedirect };
 }
 
-/** Whole service/about passages, with short sentences only as a fallback for oversized paragraphs. */
+/** Remove only obvious short site chrome; activity and brand relationships remain evidence. */
+function evidenceNoise(text: string): boolean {
+  if (text.length > 180) return false;
+  const chrome = /^(?:(?:get in touch|contact us|contact|learn more|read more|find out more|view all|view reports|request a call back|sorry we are closed|registered addresses|employee information|investor settings|about cookies|privacy (?:policy|notice)|data privacy notice|terms (?:and|&) conditions|data protection|legal information|all rights reserved|copyright|additional links|menu|home|search|login|log in|sign in|downloads|download|follow us|cookie settings|cookie einstellungen|datenschutz(?: und| &)? cookies|rechtliche informationen|kontakt aufnehmen)[.!?:,\s]*)+$/i;
+  if (chrome.test(text)) return true;
+  return /(?:copyright|©)/i.test(text) &&
+    !/\b(?:provides?|offers?|deliver\w*|speciali[sz]\w*|administ\w*|our (?:services|business)|we (?:are|help|manage))\b/i.test(text) &&
+    !/\b(?:is (?:a |the )?(?:brand|division|part) of|wholly[- ]owned|is now|eine marke|gehört zu)\b/i.test(text);
+}
+
+/** Whole service/about passages, deduplicated across pages before buying a model request. */
 function fitInput(key: string, row: HeEngQualificationRow, website: string, pages: HeFetchedPage[], scope: HeEngQualificationScope): HeEngCompanyFitInput {
   const name = withoutEmails(typeof row.company === 'string' ? row.company : '').slice(0, 300);
   const words = hypothesisWords(scope);
-  const candidates: Array<{ id: string; url: string; text: string; score: number; order: number }> = [];
+  const candidates: Array<{ id: string; url: string; text: string; normalized: string; score: number; order: number }> = [];
   for (const [pageIndex, page] of pages.entries()) {
     if (!sameSite(page.url, website)) continue;
     const add = (raw: string) => {
@@ -198,6 +214,7 @@ function fitInput(key: string, row: HeEngQualificationRow, website: string, page
       const boilerplate = /\b(?:privacy policy|cookie policy|all rights reserved|registered office|regulated by|copyright)\b/i.test(text);
       const named = name.length > 2 && text.toLowerCase().includes(name.toLowerCase());
       candidates.push({ id: `p${pageIndex + 1}q${candidates.length + 1}`, url: page.url, text,
+        normalized: text.normalize('NFKC').toLocaleLowerCase(),
         score: Math.min(hits, 6) * 5 + Number(substantive) * 12 + Number(named) * 5 - Number(boilerplate) * 15,
         order: candidates.length });
     };
@@ -205,20 +222,31 @@ function fitInput(key: string, row: HeEngQualificationRow, website: string, page
       const paragraphs = section.split(/\n\s*\n/u).map((value) => value.trim()).filter(Boolean);
       for (const [index, paragraph] of paragraphs.entries()) {
         add(paragraph);
-        // Preserve a service heading with its own paragraph, not an unrelated company/address list.
-        if (quoteText(paragraph).length < 120 && paragraphs[index + 1]) add(`${paragraph} ${paragraphs[index + 1]}`);
-        if (quoteText(paragraph).length > 1400) {
+        const heading = quoteText(paragraph);
+        const next = paragraphs[index + 1] && quoteText(paragraphs[index + 1]);
+        // Pair a heading with substantive context, not two navigation labels.
+        if (heading.length < 120 && next && next.length >= 80 && !evidenceNoise(heading) && !evidenceNoise(next)) {
+          add(`${paragraph} ${paragraphs[index + 1]}`);
+        }
+        if (heading.length > 1400) {
           for (const sentence of paragraph.match(/[^.!?]+(?:[.!?](?=\s|$)|$)/gu) ?? []) add(sentence);
         }
       }
     }
   }
+  const unique = new Map<string, typeof candidates[number]>();
+  for (const item of candidates) {
+    if (!evidenceNoise(item.text) && !unique.has(item.normalized)) unique.set(item.normalized, item);
+  }
   let characters = 0;
   const selected: typeof candidates = [];
-  for (const item of candidates.sort((a, b) => b.score - a.score || a.order - b.order)) {
-    if (selected.length >= 40 || characters + item.text.length > MAX_COMPANY_SOURCE_CHARS ||
-        selected.some((other) => other.url === item.url && other.text.includes(item.text))) continue;
-    selected.push(item); characters += item.text.length;
+  for (const item of [...unique.values()].sort((a, b) => b.score - a.score || a.order - b.order)) {
+    if (selected.some((other) => other.normalized.includes(item.normalized))) continue;
+    const covered = selected.filter((other) => item.normalized.includes(other.normalized));
+    const replacedChars = covered.reduce((sum, other) => sum + other.text.length, 0);
+    if (selected.length - covered.length >= MAX_COMPANY_QUOTES || characters - replacedChars + item.text.length > MAX_COMPANY_SOURCE_CHARS) continue;
+    for (const old of covered) selected.splice(selected.indexOf(old), 1);
+    selected.push(item); characters += item.text.length - replacedChars;
   }
   return { id: key, name, website, quotes: selected.sort((a, b) => a.order - b.order).map(({ id, url, text }) => ({ id, url, text })) };
 }
@@ -303,13 +331,19 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     memo.attempts![key] = parsed.data;
   }
   const saved = input.memo?.economy;
-  if (saved && (saved.version !== 1 || saved.workflow !== 'fit_review_v3' || !Object.hasOwn(saved, 'budget') || saved.budget === undefined ||
+  // Completed proofs retain their paid history across the request-format change.
+  // An unfinished older workflow must be reviewed, never silently repurchased.
+  if (saved?.workflow === 'fit_review_v3' && pending.size === 0) {
+    Object.assign(memo, structuredClone(input.memo));
+    return output();
+  }
+  if (saved && (saved.version !== 1 || saved.workflow !== 'fit_review_v3_single' || !Object.hasOwn(saved, 'budget') || saved.budget === undefined ||
       !saved.prepared || typeof saved.prepared !== 'object' || Array.isArray(saved.prepared) ||
       !saved.proposals || typeof saved.proposals !== 'object' || Array.isArray(saved.proposals))) throw new HeEngQualificationScopeError('invalid saved economy state');
   const budget = readHeEngQualificationBudget(saved?.budget, {
     hasPaidHistory: !!input.memo && !saved && (Object.keys(memo.verdicts).length > 0 || Object.keys(memo.attempts!).length > 0 || Object.keys(input.memo.partial ?? {}).length > 0),
   });
-  memo.economy = { version: 1, workflow: 'fit_review_v3', budget, prepared: {}, proposals: {} };
+  memo.economy = { version: 1, workflow: 'fit_review_v3_single', budget, prepared: {}, proposals: {} };
   const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT) })).max(MAX_PAGES), retryableFailure: z.boolean() });
   if (Object.keys(saved?.prepared ?? {}).length > 16 || Object.keys(saved?.proposals ?? {}).length > 16) throw new HeEngQualificationScopeError('too many cached companies');
   const preparedHistory = new Set<string>();
@@ -331,9 +365,10 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const row = pending.get(key), cached = memo.economy.prepared[key];
     if (!row || !cached) continue;
     const company = fitInput(key, row, cached.website, cached.pages, scope);
-    const parsed = parseHeEngCompanyFitResponse(JSON.stringify({ companies: [{ id: key, decision: proposal }] }), [company], safeScope).get(key)!;
-    if (parsed.status === 'unverified') throw new HeEngQualificationScopeError('invalid saved review proposal');
-    memo.economy.proposals![key] = parsed;
+    const parsed = validateHeEngCompanyFitDecision(proposal, company, safeScope);
+    if (!parsed || parsed.status === 'unverified') throw new HeEngQualificationScopeError('invalid saved review proposal');
+    if (heEngCompanyFitNeedsReview(parsed)) memo.economy.proposals![key] = parsed;
+    else finish(key, fitVerdict(row, company, scope, finalizeHeEngCompanyFit(new Map([[key, parsed]]), new Map()).get(key)!));
   }
   let checkpoint = Promise.resolve();
   async function save(): Promise<void> {
@@ -397,7 +432,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
         if (!read.pages.length) {
           const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
           memo.attempts![key] = { attempts, kind: read.retryableFailure ? 'site_transient' : 'site_unavailable' };
-          if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) finish(key, unverified(scope, key, 'site_unavailable_exhausted'));
+          if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) finish(key, unverified(scope, key, read.unverifiedRedirect ? 'website_redirect_unverified' : 'site_unavailable_exhausted'));
         } else memo.economy!.prepared[key] = { website, pages: read.pages.map(({ url, text }) => ({ url, text })), retryableFailure: read.retryableFailure };
         await save();
       } catch (error) { if (!failed) { failed = true; readFailure = error; } }
@@ -407,12 +442,17 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   if (failed) throw readFailure;
   const ready = candidates.flatMap(([key, row]) => {
     const company = memo.economy!.prepared[key];
-    return company && !memo.verdicts[key] ? [fitInput(key, row, company.website, company.pages, scope)] : [];
+    if (!company || memo.verdicts[key]) return [];
+    const evidence = fitInput(key, row, company.website, company.pages, scope);
+    if (evidence.quotes.length) return [evidence];
+    finish(key, unverified(scope, key, 'activity_unverified'));
+    return [];
   });
+  await save();
   let purchaseHold: string | null = null;
   // Budget, selected company keys and phase are durable before each paid request.
   async function purchase(request: HeEngCompanyFitRequest, companies: HeEngCompanyFitInput[], review: boolean): Promise<Map<string, HeEngCompanyFitDecision> | null> {
-    const reservation = reserveHeEngQualificationModel(budget, request.messages, Math.min(6000, 700 * companies.length + 400), { review, jsonSchema: request.jsonSchema });
+    const reservation = reserveHeEngQualificationModel(budget, request.messages, review ? 2500 : 1100, { review, jsonSchema: request.jsonSchema });
     if (!reservation) { finishRemaining(heEngQualificationBudgetHoldReason(budget) ?? 'model_budget_exhausted'); await save(); return null; }
     memo.economy!.inFlight = { reservationId: reservation.id, companyKeys: companies.map((company) => company.id), phase: review ? 'review' : 'classifier' };
     await save();
@@ -422,7 +462,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       tokensUsed += response.tokensUsed; costUsd += response.costUsd;
       const reportedCost = knownResponseCost(response.rawResponse);
       settleHeEngQualificationModel(budget, reservation, reportedCost);
-      const result = parseHeEngCompanyFitResponse(response.finishReason === 'length' ? '' : response.text, companies, safeScope);
+      const result = parseHeEngCompanyFitResponse(response.finishReason === 'length' ? '' : response.text, companies, safeScope, request);
       delete memo.economy!.inFlight;
       if (reportedCost === undefined) budget.holdReason ??= 'model_cost_unknown';
       purchaseHold = heEngQualificationBudgetHoldReason(budget);
@@ -448,7 +488,8 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       if (!proposals) return output();
       for (const company of fresh) {
         const proposal = proposals.get(company.id)!;
-        if (proposal.status === 'unverified') finish(company.id, fitVerdict(pending.get(company.id)!, company, scope, proposal));
+        if (!heEngCompanyFitNeedsReview(proposal)) finish(company.id, fitVerdict(pending.get(company.id)!, company, scope,
+          finalizeHeEngCompanyFit(new Map([[company.id, proposal]]), new Map()).get(company.id)!));
         else memo.economy!.proposals![company.id] = proposal;
       }
       await save(); // Persist the first paid answer before buying independent review.
