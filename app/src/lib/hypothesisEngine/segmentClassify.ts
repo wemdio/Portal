@@ -37,6 +37,7 @@
  * откладывается, а уходит в основную кампанию с основным текстом.
  */
 
+import { rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import { z } from 'zod';
 import {
   callLLMWithSchema,
@@ -305,6 +306,7 @@ export async function classifyBaseRowsIntoSegmentsDetailed(
             );
           }
         } catch (e) {
+          rethrowHeEngBaseBudgetError(e);
           result.failedBatches += 1;
           result.failureKinds.push(failureLabel(e));
           const spent = discardedSpendOf(e);
