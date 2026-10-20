@@ -25,6 +25,8 @@ export interface QualificationResult {
    */
   customCriteriaMatched: boolean;
   proposalSeen: boolean;
+  /** Optional semantic evidence from the current authored reply, not quoted history. */
+  ownApplicationQuote?: string | null;
   interestSignals: string[];
   reason: string;
   confidence: number;
@@ -796,7 +798,7 @@ interface TicketReplySegment {
 }
 
 function authoredTextAfterSignature(fullBody: string): string {
-  const lines = fullBody.replace(/\r\n?/g, '\n').split('\n');
+  const lines = (extractBottomPostedReplyBlock(fullBody) ?? fullBody).replace(/\r\n?/g, '\n').split('\n');
   const quotedAt = lines.findIndex(line => QUOTED_REPLY_BOUNDARY_PATTERNS.some(pattern => pattern.test(line.trim())));
   const beforeQuote = quotedAt < 0 ? lines : lines.slice(0, quotedAt);
   const signatureAt = beforeQuote.findIndex(line => SIGNATURE_BOUNDARY_PATTERN.test(line.trim()));
@@ -877,9 +879,28 @@ function extractLatestTicketReply(text: string): TicketReplySegment | null {
   };
 }
 
+function extractBottomPostedReplyBlock(text: string): string | null {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const firstContent = lines.findIndex(line => line.trim());
+  if (firstContent < 0) return null;
+  const lastQuoted = lines.findLastIndex(line => line.trim().startsWith('>'));
+  // Require a sender header and a fully >-prefixed quotation. An arbitrary
+  // signature, unprefixed history or interleaved reply is not proof of authorship.
+  if (
+    (/^On\s+.+\s+wrote:\s*$/iu.test(lines[firstContent].trim()) ||
+      STRUCTURED_QUOTED_SENDER_PATTERNS.some(pattern => pattern.test(lines[firstContent].trim()))) &&
+    lastQuoted > firstContent &&
+    lines.slice(firstContent + 1, lastQuoted + 1).every(line => !line.trim() || line.trim().startsWith('>'))
+  ) {
+    return lines.slice(lastQuoted + 1).join('\n').trim() || null;
+  }
+  return null;
+}
+
 export function extractAuthoredReplyText(text: string): string {
   const latestTicketReply = extractLatestTicketReply(text);
-  const lines = (latestTicketReply?.message ?? text).replace(/\r\n?/g, '\n').split('\n');
+  const message = latestTicketReply?.message ?? text;
+  const lines = (extractBottomPostedReplyBlock(message) ?? message).replace(/\r\n?/g, '\n').split('\n');
   const boundaryIndex = lines.findIndex((line, index) => {
     const trimmed = line.trim();
     if (!trimmed) return false;
@@ -2251,6 +2272,7 @@ function protectedDefaultVerdict(
   confirmedProposal: boolean,
   semanticShortOffer = false,
   contactOpenerSeen = false,
+  semanticOwnApplication = false,
 ): ProtectedDefaultVerdict | null {
   const statement = normalizeAuthoredStatement(authoredReply);
   const deferredClauses = findDeferredFollowupClauses(statement);
@@ -2368,6 +2390,7 @@ function protectedDefaultVerdict(
     !selfCooperationInterest &&
     requestedFollowupMaterials &&
     !hasIndependentProductEvaluationRequest(statement) &&
+    !(semanticOwnApplication && !hasExplicitNegativeContext(statement)) &&
     ((!confirmedProposal && !semanticShortOffer) || hasExplicitNegativeContext(statement))
   ) {
     return {
@@ -2405,6 +2428,47 @@ function hasVagueDeferredInterest(authoredReply: string): boolean {
     !hasExplicitNegativeContext(statement) &&
     VAGUE_DEFERRED_INTEREST_PATTERN.test(statement)
   );
+}
+
+function hasVerifiedOwnApplicationInterest(authoredReply: string, result: QualificationResult): boolean {
+  if (!result.isLead || result.needsReview || result.nonLeadKind) return false;
+  const quote = result.ownApplicationQuote?.replace(/\s+/gu, ' ').trim();
+  if (!quote || !authoredReply.replace(/\s+/gu, ' ').includes(quote)) return false;
+  // Exact evidence is necessary, not sufficient: an AI can quote a role,
+  // request for materials or neutral fact perfectly and still misinterpret it.
+  // Require both an affirmative evaluation of our offer and an own-use scope.
+  // Unsupported phrasing keeps the old conservative material-request guard.
+  const splitClauses = (text: string): string[] => {
+    const paragraphs = text.replace(/\r\n?/gu, '\n').split(/\n[^\S\n]*\n/u);
+    const contactEnd = new RegExp(String.raw`(?:${CONTACT_EMAIL_SOURCE}|https?:\/\/[^\s<>]+)[\])>]*$`, 'iu');
+    // A contact paragraph often has no final dot. Preserve that structural
+    // boundary, but never detach a natural-language "I don't think …" or
+    // "our partner says:" prefix merely because it is followed by blank lines.
+    const joined = paragraphs.map((part, index) =>
+      `${index > 0 && contactEnd.test(paragraphs[index - 1].trim()) ? ';' : ' '}${part}`).join('');
+    return joined.split(/[.!?;]+/u)
+      .map(clause => clause.replace(/\s+/gu, ' ').trim()).filter(Boolean);
+  };
+  const quotedClauses = splitClauses(quote);
+  const authoredClauses = splitClauses(authoredReply);
+  // A quote may contain several complete sentences of context. Require a
+  // contiguous sequence of FULL authored clauses, never selected fragments
+  // inside "I don't think …" / "our partner says …", or stitched sentences.
+  const start = authoredClauses.findIndex((_, index) =>
+    quotedClauses.length > 0 && quotedClauses.every((clause, offset) =>
+      clause === authoredClauses[index + offset]));
+  if (start < 0) return false;
+  const supportedOwnInterest = authoredClauses.slice(start, start + quotedClauses.length).some(raw => {
+    const clause = raw.trim().replace(/^(?:но|а)[,\s]+/iu, '')
+      .replace(/^(?:возможно|пожалуй)[,\s]+/iu, '');
+    const ownUse = /(?:для|в\s+перспективе)\s+(?:наших|моих|своих|собственных)\s+(?:проектов|задач|потребностей|нужд)(?=[\s,]|$)/iu.test(clause);
+    const evaluation = /^(?:(?:нам|мне)\s+)?(?:будет\s+)?интересно\s+рассмотреть\s+(?:ваше|это)\s+(?:предложение|решение|продукт)(?=[\s,]|$)/iu.test(clause) ||
+      (/^(?:мы\s+заинтересованы|я\s+заинтересован[а]?|нам\s+нужн[а-яё]*|мне\s+нужн[а-яё]*)\s/iu.test(clause) &&
+        hasExplicitBuyerInterest(clause));
+    return ownUse && evaluation;
+  });
+  const unread = /не\s+(?:прочитал[аи]?|читали?|ознакомил[а-яё]*)|(?:haven't|have\s+not|didn't|did\s+not)\s+read/iu.test(authoredReply);
+  return supportedOwnInterest && !unread && !hasExplicitNegativeContext(authoredReply);
 }
 
 function outboundRequestsOwnPhone(outboundText: string): boolean {
@@ -2458,6 +2522,12 @@ function normalizeDefaultLeadSignals(
       text.trim().length > 0 && text.length < 200 &&
       SUBSTANTIVE_OFFER_SIGNAL_PATTERNS.some((pattern) => pattern.test(text)),
     );
+  // A request for materials may accompany a concrete use for our proposal,
+  // even after a contact opener. Let a completed semantic positive survive
+  // that one generic-material veto only when its evidence is actually in the
+  // current answer. This field never promotes a negative or removes another
+  // guard; absent fields in legacy/checkpoint results keep previous behavior.
+  const semanticOwnApplication = hasVerifiedOwnApplicationInterest(authoredReply, result);
 
   const protectedVerdict = protectedDefaultVerdict(
     authoredReply,
@@ -2466,6 +2536,7 @@ function normalizeDefaultLeadSignals(
     [...outboundTexts, quotedText].some((text) =>
       RESPONSIBLE_RECIPIENT_REQUEST_PATTERNS.some((pattern) => pattern.test(text)),
     ),
+    semanticOwnApplication,
   );
   if (protectedVerdict) {
     return {
@@ -2558,6 +2629,7 @@ function buildSystemPrompt(
     ? `\n\nФИНАЛЬНАЯ ПРОВЕРКА КАСТОМНОГО КРИТЕРИЯ:
 - Сначала исключи полностью служебное/машинное уведомление и нелитеральный интерес (сарказм), затем сверь с определением проекта выше только основной ответ человека. Для человеческого ответа при противоречии со стандартными критериями ПРИОРИТЕТ у кастомного определения.
 - Ставь custom_criteria_matched=true, только когда основной ответ сам соответствует хотя бы одному позитивному условию кастомного определения.
+- Критерий «потенциальная потребность / вернёмся позже» требует собственной возможной потребности в предложенном продукте или услуге. Дежурное «мы свяжемся в случае необходимости» не сообщает такой потребности и само по себе этому критерию НЕ соответствует. Это уточнение смысла потенциального интереса, а не запрет других кастомных оснований: явно заданные «любой человеческий ответ, включая отказ» или «передали контакт» по-прежнему применяются.
 - Явные пункты «НЕ лид» и исключения в определении проекта — это запрет: они не могут одновременно давать custom_criteria_matched=true.
 - При custom_criteria_matched=true обязательно ставь is_lead=true, needs_review=false. Код применит это как однозначный итоговый вердикт.
 - Не считай совпадением данные только из подписи, процитированной переписки или автоответа. В таких случаях custom_criteria_matched=false, если в основном ответе нет отдельного подходящего сигнала.`
@@ -2577,6 +2649,7 @@ function buildSystemPrompt(
 - Тот же запрет относится к «напишите, что конкретно вы готовы предложить для продвижения нашей компании и на каких условиях» после поиска контакта: сначала нужно раскрыть услугу. Слова «условия», «продвижение» и описание роли не превращают первичное разъяснение в запрос цены уже понятного решения. «Чтобы понять, в чём суть вопроса, давайте созвонимся» — тоже intro_request, а не коммерческий звонок. Для явного первичного разъяснения всегда заполняй non_lead_kind="intro_request", needs_review=false, а не только is_lead=false.
 - Отличай этот случай от ОТСУТСТВУЮЩЕЙ истории: при ответе с другого адреса прошлый оффер мог не восстановиться. Тогда искренний запрос КП/цены сам по себе может быть лидом. Также учитывай реальный оффер из более раннего исходящего или пересланной цитаты. Если даже после пустого первого письма человек сам сформулировал конкретную потребность в нашей услуге/товаре, заказ, расчёт своей задачи — это самостоятельный покупательский запрос, non_lead_kind=null.
 - «Не увидели / не прочитали ваше сообщение, перезвоните +номер» без отдельной потребности — восстановление связи, не интерес к офферу: non_lead_kind="intro_request", is_lead=false, needs_review=false. Если это полностью автоматический шаблон, используй machine_reply_kind. Не применяй запрет к «первое письмо пропустили, теперь изучили каталог, нужны 20 штук» или обычной просьбе позвонить после оффера.
+- Источник интереса — весь НОВЫЙ нецитированный ответ, в том числе ответ, написанный ПОСЛЕ блока старой переписки. Само расположение под цитатой не превращает его в историю. Призыв в подписи/старой цитате, напротив, не является новым действием получателя.
 - Эти смысловые ограничения приоритетнее стандартных позитивных признаков ниже. Для intro_request явный положительный кастомный критерий первичного контакта сохраняет приоритет; nonliteral_interest не может подтвердить намерение даже при кастомном критерии.
 
 КАТЕГОРИИ:
@@ -2598,7 +2671,9 @@ function buildSystemPrompt(
 - Вежливая готовность сотрудничать, личный телефон и предложение созвониться внутри встречной продажи не меняют направление интереса. Для полностью встречного предложения ставь non_lead_kind="seller_pitch".
 - non_lead_kind="service_followup" — служебное продолжение тикета/обслуживания, в котором поставщик ждёт нашу обратную связь или обсуждает выполнение своего запроса, без интереса приобрести наше предложение. Это может быть живой человек, а не автоответ. Одни лишь адрес support@, номер тикета или слова «обратная связь» НЕ доказывают эту категорию: сверяй роли отправителей, содержание и контекст.
 - Ответ поддержки «открыты к партнёрствам, заполните форму; рассмотрим заявку и свяжемся в случае взаимной заинтересованности» — только порядок подачи обращения, а не подтверждённый интерес к нашему предложению (non_lead_kind="service_followup"). Общая готовность рассматривать заявки не равна согласию на сотрудничество. Если вместе с формой есть конкретный интерес к нашему продукту или запрос цены/демонстрации, оцени его отдельно по контексту и критериям проекта.
+- Такой же принцип действует для закупок: ссылка на правила конкурса, сообщение «закупаем через тендер» или требование пройти аккредитацию описывают порядок допуска поставщиков, но сами по себе не выражают интереса к нашему предложению. Даже после раскрытого оффера это non_lead_kind="service_followup", is_lead=false. Если отдельно запросили наш расчёт под конкретную закупку или согласовали обсуждение нашего решения, оцени этот самостоятельный интерес; не запрещай все упоминания тендеров.
 - non_lead_kind="contact_routing" — только передача контакта/перенаправление к коллеге или в отдел без собственного интереса: «можно связаться с Юлией, она отвечает за партнёрства»; «send the requested information to affiliates@..., this team cannot help». Это не собственное согласие на звонок и не запрос нашей цены, даже после подробного оффера.
+- В том числе «позвоните по номеру …, [имя], руководитель отдела» — передача чужого контакта, а не согласованный звонок самого отвечающего. Не заменяй собственное намерение словом «позвоните». Явный кастомный критерий передачи контактов сохраняет приоритет.
 - Разрешение «Вы можете отправить ваше коммерческое предложение на почту contact@example.org», если это весь смысл ответа, — тоже contact_routing, is_lead=false, needs_review=false: указан канал приёма предложений, а не собственный интерес. Уже раскрытый оффер не превращает такое разрешение в покупательский запрос. Не применяй это исключение только по наличию другого email или слова «можете»: «Пришлите КП, рассмотрим», «Можете отправить мне расчёт?», согласие на наше предложение прислать КП, конкретные условия/объём, интерес к продукту или согласие на звонок — самостоятельные сигналы, оцени их отдельно. Положительный кастомный критерий, прямо допускающий передачу контакта, сохраняет приоритет.
 - Подтверждение СЕБЯ как адресата тоже может быть contact_routing: на вопрос «кто отвечает за документы / кому адресовать письмо?» ответили только «Рассказать можно мне», «Это ко мне», «Я отвечаю за это», «You can tell me». По дефолту это is_lead=false, needs_review=false: человек указал, КОМУ рассказывать, но не выразил интерес к решению. Наличие описания продукта, длина исходящего письма и его цитата не меняют этот смысл. Не путай с ответом на предложение провести демо/встречу или рассказать о решении: учитывай, на какой вопрос ответил человек. Если рядом есть «интересно ваше решение», запрос цены/КП, материалов после оффера или согласие на звонок — оцени этот отдельный интерес, non_lead_kind=null. Положительный кастомный критерий «ответственный ответил сам / назвал себя — лид» имеет приоритет; одного номера или email в подписи для такого совпадения недостаточно.
 - Если в том же основном ответе есть реальный покупательский интерес к НАШЕМУ предложению (вопрос о нашей цене, запрос нашего КП, согласие обсуждать наше решение), ставь non_lead_kind=null и оцени этот интерес. Описание своего бизнеса не отменяет покупательский запрос. «Пришлите ваше КП, передам руководству» после оффера или при отсутствующей истории — лид, но не после известного пустого opener; простое перенаправление к коллеге без такого запроса — нет.
@@ -2625,6 +2700,8 @@ function buildSystemPrompt(
 ПОЛОЖИТЕЛЬНЫЙ ИНТЕРЕС К ОФФЕРУ — ЭТО ЛИД:
 - После подтверждённого оффера ответы «интересно», «нам интересно», «возможно, нам это интересно» выражают собственный положительный интерес: ставь is_lead=true, needs_review=false даже без назначенного следующего шага.
 - Самостоятельное «Надеюсь на возможное сотрудничество», «Будем рады сотрудничеству» или «Хотели бы сотрудничать» также является лидом, даже если исходящее письмо не восстановилось.
+- Собственный сценарий применения может быть сформулирован самим получателем: «Пришлите предложение; для заказчиков используем их фирстиль, но ваши шрифты интересно рассмотреть для собственных проектов агентства». Это собственный возможный интерес, а не только контакт директора или чужая будущая заинтересованность; is_lead=true допустим даже после короткого обращения. Отличай от простого «можете направить предложение мне», описания своей должности и «если понадобится, сами свяжемся».
+- own_application_quote заполняй только точной ПОЛНОЙ фразой из НОВОГО ответа, в которой человек связывает наше предложение со своим конкретным применением/потребностью и выражает интерес к его рассмотрению, включая возможное будущее применение. Сохраняй начало фразы, отрицания и указание, чей это интерес; не вырезай удобный положительный фрагмент. Иначе null. Не подставляй цитату из исходящего письма, подписи или истории; общее «интересно», разрешение прислать информацию, отрицание интереса и интерес третьих лиц не подтверждают этот признак. Сам признак не отменяет отказ, сарказм или кастомные ограничения.
 - Выполнение прямого CTA из содержательного предложения — например, мы попросили личный номер, а человек передал свой номер — является лидом.
 - После подтверждённого оффера просьба прислать предложение, информацию, материалы, презентацию, кейсы или примеры означает продолжение интереса и является лидом. В том числе «пришлите материалы, возможно, когда-нибудь посмотрим». Но просьба о материалах не отменяет явный отказ или условный интерес третьих лиц. Простое указание себя как адресата («рассказать можно мне» в ответ на поиск ответственного) не подменяй запросом материалов.
 - Отложенный интерес — «вернитесь через месяц», «напишите летом», «через месяц напишите мне», «летом свяжитесь со мной», «давайте обсудим позже», «сейчас не актуально, но напишите через месяц», готовность сотрудничать в будущем — является лидом только после подтверждённого содержательного оффера. После одного запроса контакта или без подтверждения оффера такой перенос сам по себе НЕ лид: is_lead=false, needs_review=false. Слова «к теме» или «к вашему предложению» сами по себе не доказывают понимания, что именно предлагается. Самодостаточный запрос КП/цены/покупки или явное согласие на звонок, встречу, демо или тест оценивай отдельно: это самостоятельное основание даже без найденного исходящего письма. Категоричный отказ («не интересно») и перенаправление к другому человеку, чужому менеджеру/коллеге или в общий отдел отложенным интересом не являются; дата такого перенаправления ничего не меняет.
@@ -2632,8 +2709,11 @@ function buildSystemPrompt(
 - «С сервисами знакомы, пока не готовы технически к интеграции. В следующем году, думаю, будет актуально» или «На данный момент не рассматриваем, возможно со следующего года» после раскрытого оффера — собственный отложенный интерес, is_lead=true, needs_review=false. Дальний срок и отсутствие явного «напишите позже» не отменяют этот интерес. Отличай от одного «сейчас не готовы» без будущей актуальности, от служебного «позже вам отвечу» и от даты появления другого сотрудника.
 - Сам по себе срок организационного изменения («новый логист появится через 2–3 недели», «руководитель вернётся в октябре») не выражает отложенного интереса и не является просьбой связаться позже. Не придумывай приглашение к повторному контакту из календарной даты. «Пишите в следующем году» или «свяжитесь в октябре» после подтверждённого оффера, напротив, содержат собственную просьбу вернуться и остаются лидами.
 - Явное отрицание («не интересно», «не актуально») без отдельного собственного положительного или отложенного интереса и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
+- Отличай отложенный собственный интерес от дежурного условного прощания: «Мы свяжемся с вами в случае необходимости» без своей потребности, вопроса или запроса материалов — не лид, даже после оффера. Оно не равно «в следующем году будет актуально» и не подтверждает критерий потенциальной потребности. При явно ином кастомном основании (например, «любой человеческий ответ») следуй ему.
 
 ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
+- Короткое согласие оценивай по тому, с ЧЕМ согласились. «Хорошо» на наше «если когда-нибудь понадобится, напишите нам; оставляю контакты» лишь подтверждает получение, не заказывает материалы и не выражает интереса. Но «да / хорошо, присылайте» в ответ на конкретное предложение сейчас прислать КП/демо после понятного оффера может подтверждать CTA.
+- Вопрос, оспаривающий НАШЕ утверждение о проблеме («о какой неоднозначной информации о нашей компании идёт речь?»), не равен запросу нашей услуги. Без отдельного интереса к решению это is_lead=false, non_lead_kind="intro_request", needs_review=false. Не считай любой предметный вопрос покупательским; отличай проверку/оспаривание основания рассылки от вопроса о работе предлагаемого решения.
 - «Буду рада пообщаться подробнее, предлагаю перейти в Telegram» после одного поиска контакта без понятного оффера — только готовность выслушать. Никнейм мессенджера не является назначенной встречей или коммерческим запросом. После раскрытого оффера и при конкретной договорённости о звонке оценивай интерес по обычным правилам.
 - Служебное «Укажите контакты для связи» в тикете саппорта не означает принятие нашего оффера. Но сам адрес support или номер тикета не отменяют самостоятельный запрос цены, заказа или обсуждения нашей услуги.
 - Вопрос о том, правильно ли мы выбрали адресата/отрасль («вы про наш вид перевозок или перепутали профиль?»), перечисление собственного ассортимента и упрёк в нерелевантной рассылке не означают интереса к нашей услуге. После одного поиска ответственного без раскрытого оффера такой ответ — is_lead=false, proposal_seen=false. Не превращай упоминание специфики бизнеса в запрос цены или условий. Отдельный самостоятельный заказ/расчёт с конкретной задачей либо явный запрос нашей услуги оценивай отдельно; наличие вопросительного знака не является коммерческим сигналом.
@@ -2648,6 +2728,7 @@ function buildSystemPrompt(
 - Запрос только первичного РАЗЪЯСНЕНИЯ («что вы предлагаете?», «о чём речь?», «что это за решение?», «в чём суть?»), в том числе через звонок, означает, что человек ещё не понял оффер: ставь non_lead_kind="intro_request", is_lead=false, needs_review=false. Не применяй это к предметному вопросу об описанном решении или согласованию конкретной деловой встречи по правилу выше.
 - Отличай общее разъяснение от ПРЕДМЕТНОГО вопроса о реализации описанного решения. «В какой системе?» после предложения настроить электронные транспортные документы, «С какой 1С работает?», «Есть интеграция с нашей CRM?» уточняют технические условия уже описанной услуги и являются интересом к ней: is_lead=true, needs_review=false. Название продукта, цена и длинная презентация для этого не обязательны. Но один поиск «кто отвечает за документы/IT?» без описания того, что мы предлагаем сделать, такого контекста не создаёт: не домысливай оффер из брифа или названия кампании.
 - Простое описание текущего порядка работы НЕ является таким вопросом: «Оплата только через банк ВТБ» после предложения платежного сервиса — is_lead=false, needs_review=false. Нельзя додумывать «готов купить, если работаете через ВТБ». Но «Сможете провести через наш банк?», «Готовы попробовать, если оплата через наш банк» или отдельный запрос цены — уже другие ответы: оцени их собственный интерес, не запрещай все упоминания банков/действующего подрядчика.
+- То же относится к факту «У нас 1С комплексная автоматизация»: это описание текущей системы, а не согласие на демо и не вопрос о совместимости. Не выдумывай ни интереса, ни несовместимости. «Ваше решение работает с нашей 1С?» — уже самостоятельный вопрос о предложенном решении. Фактический ответ внутри уже согласованного коммерческого обсуждения оценивай с его контекстом, а не как новый отказ по типу бизнеса.
 
 НЕ является лидом:
 - Автоответ/отпуск
@@ -2660,6 +2741,7 @@ function buildSystemPrompt(
 - Явная личная просьба позвонить или встретиться ("наберите меня завтра", "давайте созвонимся") может быть лидом даже без найденного исходящего письма. Не применяй это исключение к первичному выяснению ещё не раскрытого запроса (правило выше). Телефон в подписи или дежурное "звоните по любым вопросам" — не лид.
 - «По какому вопросу хотите обратиться? Можете написать сюда или позвонить по телефону…» лишь уточняет тему и перечисляет каналы первичного обращения, это contact_routing, не личное согласие на коммерческий звонок. Не извлекай отдельный CTA «можете позвонить» из такого предложения. Отдельные «наберите меня», назначенное время звонка, запрос цены/КП или покупательский вопрос рядом оценивай самостоятельно; положительный кастомный критерий передачи контакта сохраняет приоритет.
 - Перенаправление в приёмную, отдел или по общему номеру без собственной готовности обсуждать предложение и без коммерческого запроса не является коммерческим CTA: ставь is_lead=false, needs_review=false, даже если предложение процитировано.
+- После содержательного коммерческого предложения прямое приглашение продолжить общение С НАМИ в мессенджере («Message us directly via WhatsApp» + ссылка, отдельным новым ответом) — согласие на следующий шаг, is_lead=true, non_lead_kind=null. Это не передача контакта чужого сотрудника. Не применяй это правило к ссылке в подписи, шаблонному справочнику каналов поддержки или первичному уточнению ещё непонятного обращения. Явный кастомный запрет одной смены канала без интереса сохраняет приоритет.
 - Вежливость ("спасибо", "благодарю за информацию") без прямого CTA или конкретного коммерческого запроса — НЕ лид.
 ${criteriaReminder}
 
@@ -2691,6 +2773,7 @@ ${adjudication ? `
   "is_lead": true/false,
   "custom_criteria_matched": true/false,
   "proposal_seen": true/false,
+  "own_application_quote": "точная цитата собственного применения и интереса из нового ответа"/null,
   "interest_signals": ["список конкретных сигналов интереса"],
   "reason": "краткое объяснение на русском, 1-2 предложения",
   "confidence": 0.0-1.0,
@@ -3030,6 +3113,7 @@ interface AIQualificationPayload {
   is_lead: boolean;
   custom_criteria_matched: boolean;
   proposal_seen: boolean;
+  own_application_quote?: string | null;
   interest_signals: string[];
   reason: string;
   confidence: number;
@@ -3075,6 +3159,13 @@ function validateAIResult(value: unknown): asserts value is AIQualificationPaylo
   }
   if (typeof fields.reason !== 'string' || !fields.reason.trim()) {
     throw new InvalidAIQualificationResponseError('Missing or empty qualification reason');
+  }
+  if (
+    fields.own_application_quote !== undefined &&
+    fields.own_application_quote !== null &&
+    typeof fields.own_application_quote !== 'string'
+  ) {
+    throw new InvalidAIQualificationResponseError('Invalid own_application_quote');
   }
   if (typeof fields.confidence !== 'number' || !Number.isFinite(fields.confidence)) {
     throw new InvalidAIQualificationResponseError('Missing or invalid confidence');
@@ -3124,6 +3215,7 @@ function parseAIResult(content: string): QualificationResult {
     isLead: parsed.is_lead,
     customCriteriaMatched: parsed.custom_criteria_matched,
     proposalSeen: parsed.proposal_seen,
+    ownApplicationQuote: parsed.own_application_quote ?? null,
     interestSignals: parsed.interest_signals,
     reason: parsed.reason,
     confidence: Math.max(0, Math.min(1, parsed.confidence)),
