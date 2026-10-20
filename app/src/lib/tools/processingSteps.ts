@@ -20,6 +20,16 @@ import {
 } from './dfybUtils';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import {
+  ENG_CONTACT_DIAGNOSTIC_ROW_LIMIT,
+  engContactIdentity,
+  engContactGridFingerprint,
+  engEmailValidationReason,
+  sanitizeEngContactDiagnostics,
+  type EngContactDiagnosticOptions,
+  type EngContactCollectionDiagnostics,
+  type EngContactFindRow,
+} from './engContactDiagnostics';
+import {
   fetchAndExtract,
   WEBSITE_ACCEPT_LANGUAGE_EN,
   WEBSITE_NO_TEXT_STUB_EN,
@@ -505,7 +515,7 @@ export function descriptionColForLocale(locale?: ConstructorLocale): string {
   return locale === 'en' ? 'Description' : 'Описание';
 }
 
-export interface StepFindEmailsOptions {
+export interface StepFindEmailsOptions extends EngContactDiagnosticOptions {
   /**
    * Куда писать scrape-результат:
    *   - 'same' (legacy): дополняем существующую email-колонку (или создаём если её нет).
@@ -776,9 +786,42 @@ export async function stepFindEmails(
   let header = [...data[0]];
   let body = data.slice(1).map((r) => [...r]);
   const siteColumnIndexes = findPreferredSiteColumnIndexes(header);
-  if (siteColumnIndexes.length === 0) { await onProgress(100); return data; }
-
   const locale = normalizeConstructorLocale(options?.locale);
+  const contactDiagnosticsEnabled = locale === 'en' && options?.contactPageStrategy === 'eng_contact_first';
+  const contactDiagnostics: EngContactCollectionDiagnostics = sanitizeEngContactDiagnostics(options?.initialContactDiagnostics)
+    ?? { version: 1, strategy: 'eng_contact_first' };
+  const companyIdx = findColumnIndex(header, 'company', 'компания', 'company name');
+  const contactRows = new Map<number, EngContactFindRow>();
+  if (contactDiagnosticsEnabled) {
+    for (const row of contactDiagnostics.find?.rows ?? []) {
+      // Row indices refer to the unchanged find_emails input, before split/dedup.
+      if (attemptedRows.has(row.row)) contactRows.set(row.row, row);
+    }
+  }
+  const recordContactRow = (index: number, reason: string, emailsStored = 0, crawl?: EngContactFindRow['crawl']) => {
+    if (!contactDiagnosticsEnabled || index >= ENG_CONTACT_DIAGNOSTIC_ROW_LIMIT) return;
+    contactRows.set(index, {
+      row: index,
+      ...engContactIdentity(body[index]?.[companyIdx] || '', getPreferredSiteUrl(body[index] ?? [], siteColumnIndexes)),
+      reason, emailsStored, ...(crawl ? { crawl } : {}),
+    });
+  };
+  const contactSnapshot = (complete: boolean): EngContactCollectionDiagnostics => ({
+    ...contactDiagnostics,
+    find: {
+      inputRows: body.length, complete, rows: [...contactRows.values()].sort((a, b) => a.row - b.row),
+      omittedRows: Math.max(0, body.length - ENG_CONTACT_DIAGNOSTIC_ROW_LIMIT),
+    },
+  });
+  if (siteColumnIndexes.length === 0) {
+    if (contactDiagnosticsEnabled) {
+      body.forEach((_, index) => recordContactRow(index, 'no_website'));
+      await options?.onContactDiagnostics?.(contactSnapshot(true));
+    }
+    await onProgress(100);
+    return data;
+  }
+
   const foundEmailCol = foundEmailColForLocale(locale);
   const existingEmailIdx = findColumnIndex(header, 'email', 'e-mail', 'почта', 'mail');
   const wantsSeparate = options?.target === 'separate';
@@ -826,7 +869,22 @@ export async function stepFindEmails(
     .filter((r) => r.url && !attemptedRows.has(r.i)
       && !extractEmail(r.row[targetIdx] || '') && !isNonScrapeableHost(r.url, locale));
 
-  if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
+  if (contactDiagnosticsEnabled) {
+    body.forEach((row, index) => {
+      if (contactRows.has(index)) return;
+      const url = getPreferredSiteUrl(row, siteColumnIndexes);
+      const existing = extractEmails(row[targetIdx] || '');
+      if (attemptedRows.has(index)) recordContactRow(index, 'resumed_without_diagnostics', existing.length);
+      else if (existing.length) recordContactRow(index, 'existing_email', existing.length);
+      else if (!url) recordContactRow(index, 'no_website');
+      else if (isNonScrapeableHost(url, locale)) recordContactRow(index, 'blocked_host');
+    });
+  }
+  if (toProcess.length === 0) {
+    if (contactDiagnosticsEnabled) await options?.onContactDiagnostics?.(contactSnapshot(true));
+    await onProgress(100);
+    return [header, ...body];
+  }
 
   // EN: защита чтения и потолок тела в каждый обход (см. EN_SITE_READ_MAX_BYTES).
   // Переход https → http почтовому обходу разрешён: сертификат он и так не
@@ -866,6 +924,7 @@ export async function stepFindEmails(
         maxPages: options?.maxPages ?? 5,
         stopAtFirstUsableEmail,
         locale,
+        ...(contactDiagnosticsEnabled ? { contactPageStrategy: 'eng_contact_first' as const } : {}),
         ...(options?.reuseWebsiteDescription ? { includeDescription: true } : {}),
         ...(controller ? { signal: controller.signal } : {}),
         ...(enRead ?? {}),
@@ -891,7 +950,16 @@ export async function stepFindEmails(
       if (emails.length > 0) {
         body[item.i][targetIdx] = (maxPerSite === null ? emails : emails.slice(0, maxPerSite)).join(', ');
       }
-    } catch { /* No site result: preserve the original email fallback. */ }
+      const crawl = result?.contactDiagnostics;
+      const reason = emails.length ? 'found'
+        : !result || controller?.signal.aborted || crawl?.stopReason === 'deadline' ? 'deadline'
+          : crawl && crawl.pagesRead === 0 ? 'website_unreadable'
+            : 'no_email_found';
+      recordContactRow(item.i, reason, maxPerSite === null ? emails.length : Math.min(maxPerSite, emails.length), crawl);
+    } catch {
+      recordContactRow(item.i, controller?.signal.aborted ? 'deadline' : 'scrape_error');
+      /* No site result: preserve the original email fallback. */
+    }
     finally {
       if (deadline !== null) clearTimeout(deadline);
       if (hardDeadline !== undefined) clearTimeout(hardDeadline);
@@ -906,10 +974,12 @@ export async function stepFindEmails(
         while (out.length < header.length) out.push('');
         return [...out, attemptedRows.has(index) ? '1' : ''];
       })] : null;
+    const diagnosticSnapshot = checkpoint && contactDiagnosticsEnabled ? contactSnapshot(false) : null;
     // Serialize snapshots so an older concurrent write cannot overwrite a
     // newer one. The pool swallows item errors; retain persistence failures
     // on this chain and rethrow after draining in-flight lookups.
     reportChain = reportChain.then(async () => {
+      if (diagnosticSnapshot) await options?.onContactDiagnostics?.(diagnosticSnapshot);
       if (checkpoint && onCheckpoint) await onCheckpoint(checkpoint);
       if (progress !== null) await onProgress(progress);
     }).catch((error) => {
@@ -931,6 +1001,7 @@ export async function stepFindEmails(
   }
   if (cancelled || (isCancelled && await isCancelled())) throw new Error('Отменено');
   if (done !== toProcess.length) throw new Error('Не удалось завершить поиск почт');
+  if (contactDiagnosticsEnabled) await options?.onContactDiagnostics?.(contactSnapshot(true));
   await onProgress(100);
   return [header, ...body];
 }
@@ -2235,7 +2306,7 @@ const withConstructorProbe = createConstructorProbePool(20);
 
 export type ValidateEmailsTarget = 'original' | 'found' | 'both';
 
-export interface StepValidateEmailsOptions {
+export interface StepValidateEmailsOptions extends EngContactDiagnosticOptions {
   /**
    * Какие колонки валидировать (имеет смысл когда find_emails работал в target='separate'
    * и создал FOUND_EMAIL_COL рядом с исходной):
@@ -2312,6 +2383,18 @@ export async function stepValidateEmails(
   isCancelled?: CancelCheckFn,
   options?: StepValidateEmailsOptions,
 ): Promise<string[][]> {
+  const contactDiagnosticsEnabled = options?.locale === 'en' && options?.contactPageStrategy === 'eng_contact_first';
+  const contactDiagnostics: EngContactCollectionDiagnostics = sanitizeEngContactDiagnostics(options?.initialContactDiagnostics)
+    ?? { version: 1, strategy: 'eng_contact_first' };
+  // A worker can persist the filtered grid and crash before marking the step
+  // complete. Its retained diagnostics describe the original, larger input.
+  // Replay only an exact completed output, never an arbitrary same-size grid.
+  if (contactDiagnosticsEnabled && contactDiagnostics.validation?.complete
+    && contactDiagnostics.validation.outputFingerprint === engContactGridFingerprint(stripBaseConstructorCheckpointMetadata(data))) {
+    await options?.onContactDiagnostics?.(contactDiagnostics);
+    await onProgress(100);
+    return stripBaseConstructorCheckpointMetadata(data);
+  }
   const dropRowsWithoutEmail = options?.dropRowsWithoutEmail ?? true;
   const keepUnverifiable = options?.keepUnverifiable ?? true;
   const header = data[0];
@@ -2422,6 +2505,7 @@ export async function stepValidateEmails(
     is_free: boolean;
     is_catch_all: boolean;
     errorText: string;
+    diagnosticReason?: string;
   };
   const results = new Map<string, ProbeResult>();
   const attemptsByEmail = new Map<string, number>();
@@ -2447,6 +2531,10 @@ export async function stepValidateEmails(
           is_free: entry.isFree,
           is_catch_all: entry.isCatchAll,
           errorText: entry.errorText,
+          ...(contactDiagnosticsEnabled ? {
+            diagnosticReason: entry.engReason && !['unknown', 'error'].includes(entry.engReason)
+              ? entry.engReason : engEmailValidationReason(entry.result, entry.errorText),
+          } : {}),
         });
       }
     }
@@ -2515,7 +2603,12 @@ export async function stepValidateEmails(
         if (isCancelled && await isCancelled()) throw new Error('Отменено');
         return validateEmail(email, domainCache);
       });
-      return { result: r.result, is_free: r.is_free, is_catch_all: r.is_catch_all, errorText: r.error || '' };
+      return {
+        result: r.result, is_free: r.is_free, is_catch_all: r.is_catch_all, errorText: r.error || '',
+        ...(contactDiagnosticsEnabled ? {
+          diagnosticReason: engEmailValidationReason(r.result, r.error || '', r.details?.step),
+        } : {}),
+      };
     } catch (err) {
       return {
         result: 'error',
@@ -2568,6 +2661,7 @@ export async function stepValidateEmails(
         isFree: result.is_free,
         isCatchAll: result.is_catch_all,
         errorText: result.errorText,
+        ...(contactDiagnosticsEnabled && result.diagnosticReason ? { engReason: result.diagnosticReason } : {}),
       };
       newBody[rowIdx][checkpointStateIdx] = serializeEmailValidationCheckpointState(
         checkpointStateByRow[rowIdx],
@@ -2599,6 +2693,62 @@ export async function stepValidateEmails(
   // per address and is the source of truth after a crash, while the public
   // status may have been captured one callback earlier.
   for (const cell of cells) applyCellStatus(cell);
+
+  // Build this BEFORE the destructive filter. Only counts/opaque company keys
+  // leave the validator; mailbox values and raw SMTP responses stay in its
+  // existing private checkpoint. Rebuilding from input+durable verdicts also
+  // avoids double counting after resume.
+  const validationSnapshot = (complete: boolean, retained?: Set<string[]>): EngContactCollectionDiagnostics => {
+    const statuses: Record<string, number> = {};
+    const reasons: Record<string, number> = {};
+    const seen = new Set<string>();
+    const siteIndexes = findPreferredSiteColumnIndexes(newHeader);
+    const companyIdx = findColumnIndex(newHeader, 'company', 'company name', 'компания');
+    const increment = (map: Record<string, number>, key: string) => { map[key] = (map[key] ?? 0) + 1; };
+    const rows = newBody.map((row, index) => {
+      const rowStatuses: Record<string, number> = {};
+      const rowReasons: Record<string, number> = {};
+      const rowEmails = new Set<string>();
+      const trusted = new Set(trustedByRow[index]);
+      for (const m of meta) {
+        for (const email of extractEmails(row[m.srcIdx] || '')) {
+          if (rowEmails.has(email)) continue;
+          rowEmails.add(email);
+          const verdict = results.get(email);
+          const previous = (row[m.statusIdx] || '').trim();
+          const status = trusted.has(email) ? 'trusted_unchecked'
+            : verdict?.result ?? (CONCLUSIVE_STATUSES.has(previous) ? previous : 'pending');
+          const reason = verdict?.diagnosticReason ?? status;
+          increment(rowStatuses, status);
+          increment(rowReasons, reason);
+          if (!seen.has(email)) {
+            seen.add(email);
+            increment(statuses, status);
+            increment(reasons, reason);
+          }
+        }
+      }
+      if (!rowEmails.size) {
+        increment(rowReasons, 'no_email');
+        increment(reasons, 'no_email');
+      }
+      return {
+        row: index,
+        ...engContactIdentity(row[companyIdx] || '', getPreferredSiteUrl(row, siteIndexes)),
+        emails: rowEmails.size, statuses: rowStatuses, reasons: rowReasons,
+        ...(retained ? { retained: retained.has(row) } : {}),
+      };
+    });
+    return {
+      ...contactDiagnostics,
+      validation: {
+        inputRows: newBody.length, complete, ...(retained ? { outputRows: retained.size } : {}),
+        uniqueEmails: seen.size, statuses, reasons,
+        rows: rows.slice(0, ENG_CONTACT_DIAGNOSTIC_ROW_LIMIT),
+        omittedRows: Math.max(0, rows.length - ENG_CONTACT_DIAGNOSTIC_ROW_LIMIT),
+      },
+    };
+  };
 
   // Round-robin по доменам: группируем адреса по домену и интерливим,
   // чтобы 10 одновременных проб пула не уперлись бурстом в один
@@ -2636,9 +2786,11 @@ export async function stepValidateEmails(
       [...newHeader],
       ...newBody.map((row) => [...row]),
     ];
+    const diagnostics = contactDiagnosticsEnabled ? validationSnapshot(false) : null;
     checkpointChain = checkpointChain.then(async () => {
       if (checkpointError) return;
       try {
+        if (diagnostics) await options?.onContactDiagnostics?.(diagnostics);
         await onCheckpoint(snapshot);
       } catch (err) {
         checkpointError = err instanceof Error ? err : new Error(String(err));
@@ -2776,6 +2928,8 @@ export async function stepValidateEmails(
   // по-старому целиком — пер-адресных вердиктов по ним у нас нет.
   const cellByRowCol = new Map<string, CellToValidate>();
   for (const cell of cells) cellByRowCol.set(`${cell.rowIdx}:${cell.srcIdx}`, cell);
+  const beforeFilterDiagnostics = contactDiagnosticsEnabled ? validationSnapshot(false) : null;
+  if (beforeFilterDiagnostics) await options?.onContactDiagnostics?.(beforeFilterDiagnostics);
   const filtered = newBody.filter((row, r) => {
     let anyValid = false;
     let anyUnverifiable = false;
@@ -2838,10 +2992,25 @@ export async function stepValidateEmails(
     return anyValid || anyUnverifiable;
   });
 
+  const finalData = stripBaseConstructorCheckpointMetadata(selectValidatedWebsiteEmails([newHeader, ...filtered]));
+  if (beforeFilterDiagnostics?.validation) {
+    const retained = new Set(filtered);
+    // The addresses were removed above. Use the saved pre-filter counters.
+    await options?.onContactDiagnostics?.({
+      ...beforeFilterDiagnostics,
+      validation: {
+        ...beforeFilterDiagnostics.validation, complete: true, outputRows: finalData.length - 1,
+        outputFingerprint: engContactGridFingerprint(finalData),
+        rows: beforeFilterDiagnostics.validation.rows.map((row) => ({
+          ...row, retained: retained.has(newBody[row.row]),
+        })),
+      },
+    });
+  }
   await onProgress(100);
   // Attempt counters are strictly worker state. Neither the next pipeline
   // step nor a completed export may observe the private JSON column.
-  return stripBaseConstructorCheckpointMetadata(selectValidatedWebsiteEmails([newHeader, ...filtered]));
+  return finalData;
 }
 
 /* ═══════════════════════════════════════════

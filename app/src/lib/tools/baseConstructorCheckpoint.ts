@@ -75,6 +75,8 @@ export interface EmailValidationCheckpointEntry {
   isFree: boolean;
   isCatchAll: boolean;
   errorText: string;
+  /** Only populated by the opted-in ENG contact diagnostics. */
+  engReason?: string;
 }
 
 export type EmailValidationCheckpointState = Record<
@@ -121,6 +123,12 @@ export function parseEmailValidationCheckpointState(
       isFree: entry.isFree === true,
       isCatchAll: entry.isCatchAll === true,
       errorText: typeof entry.errorText === 'string' ? entry.errorText.slice(0, 500) : '',
+      ...(typeof entry.engReason === 'string' && [
+        'no_mx', 'invalid_syntax', 'smtp_rejected', 'dns_unconfirmed',
+        'smtp_policy_refused', 'catch_all_unconfirmed', 'greylisted',
+        'smtp_timeout', 'smtp_connection_failed', 'mailbox_quota',
+        'ok', 'invalid', 'disposable', 'catch_all', 'unknown', 'error',
+      ].includes(entry.engReason) ? { engReason: entry.engReason } : {}),
     };
   }
   return state;

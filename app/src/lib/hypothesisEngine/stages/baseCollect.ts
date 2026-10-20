@@ -202,6 +202,10 @@ import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
 import {
+  sanitizeEngContactDiagnostics,
+  type EngContactCollectionDiagnostics,
+} from '@/lib/tools/engContactDiagnostics';
+import {
   collectHeEngSourceCountries,
   restoreHeEngSourceCountries,
   withHeEngSourceCountry,
@@ -931,6 +935,8 @@ export interface HeConstructInfo {
   emails_found?: number;
   /** Почт с вердиктом ok после валидации (колонка «Email Статус» сетки). */
   valid_count?: number;
+  /** Aggregate ENG crawl/validation losses survive an empty constructor grid. */
+  eng_contact_diagnostics?: HeEngContactDiagnosticsSummary;
   /**
    * Кап «адресов на компанию», переданный этой BC-джобе
    * (step_config.cap_emails_per_company.max). ЕДИНСТВЕННАЯ запись этого
@@ -967,6 +973,64 @@ export interface HeConstructInfo {
    * модуль; в клиентскую проекцию не входит (CONSTRUCT_FIELDS).
    */
   late_import_undo?: HeLateImportUndo;
+}
+
+interface HeEngContactDiagnosticsSummary {
+  version: 1;
+  strategy: 'eng_contact_first';
+  find?: Pick<NonNullable<EngContactCollectionDiagnostics['find']>, 'inputRows' | 'complete' | 'omittedRows'> & {
+    recordedRows: number;
+    rowsWithEmails: number;
+    emailsStored: number;
+    reasons: Record<string, number>;
+    pageFailures: Record<string, number>;
+  };
+  validation?: Omit<NonNullable<EngContactCollectionDiagnostics['validation']>, 'rows'>;
+}
+
+/** No site paths, company identities or mailbox values enter the HE summary. */
+function summarizeEngContactDiagnostics(value: unknown): HeEngContactDiagnosticsSummary | undefined {
+  const diagnostics = sanitizeEngContactDiagnostics(value);
+  if (!diagnostics) return undefined;
+  const out: HeEngContactDiagnosticsSummary = { version: 1, strategy: 'eng_contact_first' };
+  if (diagnostics.find) {
+    const find = diagnostics.find;
+    const reasons: Record<string, number> = Object.create(null);
+    const pageFailures: Record<string, number> = Object.create(null);
+    const addReason = (target: Record<string, number>, reason: string) => {
+      const key = Object.hasOwn(target, reason) || Object.keys(target).length < 31 ? reason : 'other';
+      target[key] = (target[key] ?? 0) + 1;
+    };
+    for (const row of find.rows) {
+      addReason(reasons, row.reason);
+      for (const page of row.crawl?.pages ?? []) {
+        if (page.failure) addReason(pageFailures, page.failure);
+      }
+    }
+    out.find = {
+      inputRows: find.inputRows,
+      complete: find.complete,
+      omittedRows: find.omittedRows,
+      recordedRows: find.rows.length,
+      rowsWithEmails: find.rows.filter((row) => row.emailsStored > 0).length,
+      emailsStored: find.rows.reduce((sum, row) => sum + row.emailsStored, 0),
+      reasons,
+      pageFailures,
+    };
+  }
+  if (diagnostics.validation) {
+    const validation = diagnostics.validation;
+    out.validation = {
+      inputRows: validation.inputRows,
+      complete: validation.complete,
+      uniqueEmails: validation.uniqueEmails,
+      statuses: validation.statuses,
+      reasons: validation.reasons,
+      omittedRows: validation.omittedRows,
+      ...(validation.outputRows === undefined ? {} : { outputRows: validation.outputRows }),
+    };
+  }
+  return out;
 }
 
 /**
@@ -5367,16 +5431,33 @@ function buildConstructGrid(rows: HeUnifiedRow[], market: HeMarket): string[][] 
 async function readConstructJobStatus(
   ctx: HeStageContext,
   bcJobId: string,
-): Promise<{ status: string; error_message: string | null; selected_steps: string[] | null } | null> {
+  includeEngContactDiagnostics = false,
+): Promise<{
+  status: string;
+  error_message: string | null;
+  selected_steps: string[] | null;
+  eng_contact_diagnostics?: HeEngContactDiagnosticsSummary;
+} | null> {
   const { data, error } = await ctx.supabase
     .from('base_constructor_jobs')
-    .select('status, error_message, workload_origin, selected_steps')
+    .select(includeEngContactDiagnostics
+      ? 'status, error_message, workload_origin, selected_steps, result_stats'
+      : 'status, error_message, workload_origin, selected_steps')
     .eq('id', bcJobId)
     .maybeSingle();
   if (error) throw new Error(`base_constructor_jobs read: ${error.message}`);
   if (!data) return null;
-  if (data.workload_origin !== 'automation') await markAutomatedConstructor(ctx.supabase, bcJobId);
-  const row = data as { status?: unknown; error_message?: unknown; selected_steps?: unknown };
+  const row = data as unknown as {
+    status?: unknown;
+    error_message?: unknown;
+    selected_steps?: unknown;
+    workload_origin?: unknown;
+    result_stats?: { eng_contact_diagnostics?: unknown };
+  };
+  if (row.workload_origin !== 'automation') await markAutomatedConstructor(ctx.supabase, bcJobId);
+  const contactDiagnostics = includeEngContactDiagnostics
+    ? summarizeEngContactDiagnostics(row.result_stats?.eng_contact_diagnostics)
+    : undefined;
   return {
     status: String(row.status ?? ''),
     error_message: typeof row.error_message === 'string' ? row.error_message : null,
@@ -5386,6 +5467,7 @@ async function readConstructJobStatus(
     selected_steps: Array.isArray(row.selected_steps)
       ? row.selected_steps.map((s) => String(s))
       : null,
+    ...(contactDiagnostics ? { eng_contact_diagnostics: contactDiagnostics } : {}),
   };
 }
 
@@ -5470,10 +5552,15 @@ async function dispatchConstructJob(input: {
    */
   harvest?: HeUnifiedRow[];
   market: HeMarket;
+  /** Verified client ownership; market='us' also includes legacy staff projects. */
+  engClientContactCollection: boolean;
   /** Кап «адресов на компанию» этой базы (см. resolveContactCap у стадии). */
   contactCap: number;
 }): Promise<HeConstructDispatch> {
-  const { ctx, job, baseId, info, reserved, extra, ownerId, baseLabel, rows, harvest, market, contactCap } = input;
+  const {
+    ctx, job, baseId, info, reserved, extra, ownerId, baseLabel, rows, harvest, market,
+    engClientContactCollection, contactCap,
+  } = input;
   if (!ownerId) {
     throw new Error('he_projects.created_by пуст — джобе конструктора некому принадлежать');
   }
@@ -5507,6 +5594,7 @@ async function dispatchConstructJob(input: {
           stop_at_first: false,
           max_per_site: constructFindEmailsPerSite(contactCap),
           max_pages: CONSTRUCT_FIND_EMAILS_MAX_PAGES,
+          ...(engClientContactCollection ? { contact_page_strategy: 'eng_contact_first' as const } : {}),
         }
       : null;
   // 1. РЕЗЕРВ (см. докблок): id — до вставки, в collect_info. Повтор с
@@ -7952,6 +8040,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         // Весь harvest — только для теста «бедная база» (см. constructStepsFor).
         harvest: merged,
         market,
+        engClientContactCollection: engEmailPolicy,
         contactCap,
       });
       // Базу закрыли (отмена) раньше вставки: джобы конструктора нет, и
@@ -7984,7 +8073,13 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     }
 
     // WAIT-CONSTRUCT: опрос BC-джобы до терминального статуса.
-    const bc = await readConstructJobStatus(ctx, construct.bc_job_id);
+    const bc = await readConstructJobStatus(ctx, construct.bc_job_id, engEmailPolicy);
+    // Read the aggregate before importing a grid: validation may have removed
+    // every row. Keep it on the shared construct object used by all exits.
+    if (bc?.eng_contact_diagnostics) {
+      construct.eng_contact_diagnostics = bc.eng_contact_diagnostics;
+      info.construct = construct;
+    }
     const bcStatus = bc?.status ?? 'failed';
     if (isConstructJobSettled(bcStatus)) {
       // ENG: джоба могла быть поставлена ДО того, как split_emails стал
@@ -8045,6 +8140,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           rows: constructRows,
           harvest: merged,
           market,
+          engClientContactCollection: engEmailPolicy,
           contactCap,
         });
         if (replacement.kind === 'base_closed') {
