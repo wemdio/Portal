@@ -15,11 +15,12 @@ import {
   heEngCompanyKey, heEngCompanyQualified, heEngQualificationVersion,
   type HeEngCompanyVerdict, type HeEngQualificationMemo,
   type HeEngQualificationRow, type HeEngQualificationScope,
+  type HeEngCollectedCompanyEvidence, type HeEngCompanyQualificationAssessment,
 } from './engCompanyQualificationPolicy';
 import { callLLMText, heLlmFailureOf, isHeLlmTimeout } from './llm';
 import {
   readHeEngQualificationBudget, reserveHeEngQualificationModel, settleHeEngQualificationModel,
-  heEngQualificationBudgetHoldReason, HE_ENG_QUALIFICATION_REVIEW_MODEL,
+  heEngQualificationBudgetHoldReason, HE_ENG_QUALIFICATION_REVIEW_MODEL, HE_ENG_QUALIFICATION_MODEL,
 } from './engQualificationBudget';
 import { heStageSignal, isHeSiteUnreachable, resolveFetchPage, type HeFetchedPage, type HeFetchPageFn } from './stages/io';
 import type { HeStageContext } from './stages/shared';
@@ -33,6 +34,14 @@ const MODEL_BATCH_SIZE = 1;
 const MAX_COMPANY_SOURCE_CHARS = 6000;
 const MAX_COMPANY_QUOTES = 24;
 const EMAIL = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu;
+const AssessmentSchema = z.object({ model: z.string().max(100), status: z.enum(['match', 'mismatch', 'unverified']),
+  reason: z.string().max(100), hypothesisId: z.string().max(200).nullable(), quoteIds: z.array(z.string().max(200)).max(2),
+  explanation: z.string().max(400) });
+const AuditSchema = z.object({ version: z.literal(1),
+  quotes: z.array(z.object({ id: z.string().max(200), url: z.string().max(2000), text: z.string().min(12).max(1400),
+    source: z.enum(['constructor_website', 'website']) })).max(MAX_COMPANY_QUOTES),
+  collectedJobId: z.string().uuid().optional(), classifier: AssessmentSchema.optional(), review: AssessmentSchema.optional(),
+}).refine((audit) => audit.quotes.reduce((sum, quote) => sum + quote.text.length, 0) <= MAX_COMPANY_SOURCE_CHARS);
 const StoredVerdictSchema = z.object({
   version: z.union([z.literal(2), z.literal(3)]),
   scopeKey: z.string(), companyKey: z.string(),
@@ -42,6 +51,7 @@ const StoredVerdictSchema = z.object({
     url: z.string().min(1).max(2000), quote: z.string().min(12).max(1400) })).max(12),
   checkedAt: z.string().datetime(), countryProof: z.unknown().optional(),
   fitReview: z.object({ model: z.literal(HE_ENG_QUALIFICATION_REVIEW_MODEL), status: z.literal('match'), hypothesisId: z.string() }).optional(),
+  audit: AuditSchema.optional(),
 });
 
 function withoutEmails(value: string): string { return value.replace(EMAIL, '[email removed]'); }
@@ -81,6 +91,37 @@ function interrupted(ctx: HeStageContext, error?: unknown): void {
 }
 
 type PageRead = { pages: HeFetchedPage[]; retryableFailure: boolean; unverifiedRedirect: boolean };
+type QualificationPage = { url: string; text: string; evidenceSource?: 'constructor_website' | 'website' };
+
+/** Country proof is checked separately. A constructor description never supplies geography. */
+function collectedPages(row: HeEngQualificationRow, evidence: HeEngCollectedCompanyEvidence | undefined, website: string): QualificationPage[] {
+  if (!evidence || evidence.version !== 1 || evidence.source !== 'constructor_website' ||
+      !z.string().uuid().safeParse(evidence.jobId).success || typeof evidence.website !== 'string' ||
+      heEngCompanyKey(evidence) !== heEngCompanyKey(row) || !Array.isArray(evidence.pages) ||
+      !evidence.pages.length || evidence.pages.length > 3 || evidence.pages.some((page) =>
+        !page || typeof page.text !== 'string' || typeof page.url !== 'string' || page.url.length > 2000 ||
+        !sameSite(page.url, website) || (website.startsWith('https:') && !page.url.startsWith('https:'))) ||
+      evidence.pages.reduce((sum, page) => sum + page.text.length, 0) > MAX_PAGE_TEXT) return [];
+  return evidence.pages.flatMap((page) => {
+    const text = stripUnstorableJsonChars(withoutEmails(page.text)).trim();
+    return text ? [{ url: page.url, text, evidenceSource: 'constructor_website' as const }] : [];
+  });
+}
+
+/** This only decides whether another free site read is useful; the models still decide eligibility. */
+function enoughCollectedText(company: HeEngCompanyFitInput, scope: HeEngQualificationScope): boolean {
+  const specific = new Set([...hypothesisWords(scope, true)].filter((word) => word.length >= 5 &&
+    !['provid', 'servic', 'financ', 'busines', 'solut'].includes(word)));
+  return company.quotes.reduce((sum, quote) => sum + quote.text.length, 0) >= 250 &&
+    // A generic full homepage can still hide a relevant business unit. Only
+    // a substantive passage naming the selected activity can avoid the crawl;
+    // the two model assessments remain mandatory for acceptance.
+    company.quotes.some((quote) => quote.text.length >= 80 &&
+      (quote.text.toLowerCase().match(/[a-z]{4,}/g) ?? []).some((word) => specific.has(serviceStem(word)))) &&
+    company.quotes.some((quote) => quote.text.length >= 80 &&
+      /\b(?:provides?|offers?|deliver\w*|speciali[sz]\w*|administ\w*|our (?:services|business)|we (?:are|help|manage))\b/i.test(quote.text)) &&
+    !company.quotes.some((quote) => /(?:verify (?:you are|that you are) human|access denied|enable javascript|checking your browser)/i.test(quote.text));
+}
 
 function serviceStem(word: string): string {
   return word.toLowerCase().replace(/ies$/, 'y').replace(/s$/, '').replace(/(?:ors?|ion|ian|ing|y)$/, '');
@@ -200,21 +241,21 @@ function evidenceNoise(text: string): boolean {
 }
 
 /** Whole service/about passages, deduplicated across pages before buying a model request. */
-function fitInput(key: string, row: HeEngQualificationRow, website: string, pages: HeFetchedPage[], scope: HeEngQualificationScope): HeEngCompanyFitInput {
+function fitInput(key: string, row: HeEngQualificationRow, website: string, pages: QualificationPage[], scope: HeEngQualificationScope): HeEngCompanyFitInput {
   const name = withoutEmails(typeof row.company === 'string' ? row.company : '').slice(0, 300);
   const words = hypothesisWords(scope);
-  const candidates: Array<{ id: string; url: string; text: string; normalized: string; score: number; order: number }> = [];
+  const candidates: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website'; normalized: string; score: number; order: number }> = [];
   for (const [pageIndex, page] of pages.entries()) {
     if (!sameSite(page.url, website)) continue;
     const add = (raw: string) => {
       const text = quoteText(raw);
-      if (text.length < 12 || text.length > 1400 || text.includes('[email removed]') ||
+      if (text.length < 12 || text.length > 1400 || (!page.evidenceSource && text.includes('[email removed]')) ||
           candidates.some((quote) => quote.url === page.url && quote.text === text)) return;
       const hits = new Set((text.toLowerCase().match(/[a-z]{4,}/g) ?? []).map(serviceStem).filter((word) => words.has(word))).size;
       const substantive = /\b(?:provides?|offers?|deliver\w*|speciali[sz]\w*|administ\w*|our (?:services|business)|we (?:are|help|manage))\b/i.test(text);
       const boilerplate = /\b(?:privacy policy|cookie policy|all rights reserved|registered office|regulated by|copyright)\b/i.test(text);
       const named = name.length > 2 && text.toLowerCase().includes(name.toLowerCase());
-      candidates.push({ id: `p${pageIndex + 1}q${candidates.length + 1}`, url: page.url, text,
+      candidates.push({ id: `p${pageIndex + 1}q${candidates.length + 1}`, url: page.url, text, source: page.evidenceSource ?? 'website',
         normalized: text.normalize('NFKC').toLocaleLowerCase(),
         score: Math.min(hits, 6) * 5 + Number(substantive) * 12 + Number(named) * 5 - Number(boilerplate) * 15,
         order: candidates.length });
@@ -249,7 +290,7 @@ function fitInput(key: string, row: HeEngQualificationRow, website: string, page
     for (const old of covered) selected.splice(selected.indexOf(old), 1);
     selected.push(item); characters += item.text.length - replacedChars;
   }
-  return { id: key, name, website, quotes: selected.sort((a, b) => a.order - b.order).map(({ id, url, text }) => ({ id, url, text })) };
+  return { id: key, name, website, quotes: selected.sort((a, b) => a.order - b.order).map(({ id, url, text, source }) => ({ id, url, text, source })) };
 }
 
 function unverified(scope: HeEngQualificationScope, key: string, reason: string): HeEngCompanyVerdict {
@@ -282,7 +323,9 @@ function knownResponseCost(response: unknown): number | undefined {
 /** Caller has confirmed ENG ownership and selected only OK/catch-all rows. */
 export async function runHeEngCompanyQualification<T extends HeEngQualificationRow>(
   ctx: HeStageContext,
-  input: { rows: T[]; scope: HeEngQualificationScope; memo?: HeEngQualificationMemo; maxCompanies?: number; onCheckpoint: (memo: HeEngQualificationMemo) => Promise<void> },
+  input: { rows: T[]; scope: HeEngQualificationScope; memo?: HeEngQualificationMemo; maxCompanies?: number;
+    collectedEvidence?: Readonly<Record<string, HeEngCollectedCompanyEvidence>>;
+    onCheckpoint: (memo: HeEngQualificationMemo) => Promise<void> },
 ): Promise<{ rows: T[]; memo: HeEngQualificationMemo; tokensUsed: number; costUsd: number; complete: boolean; retryAfterMs?: number; pendingCompanyCount: number }> {
   const { scope } = input;
   const version = heEngQualificationVersion(scope);
@@ -312,7 +355,10 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   let costUsd = 0;
   const output = () => {
     const rows = input.rows.flatMap((row) => {
-      const qualified = { ...row, _eng_company_qualification: memo.verdicts[heEngCompanyKey(row)] };
+      const savedVerdict = memo.verdicts[heEngCompanyKey(row)];
+      // Audit belongs once in collect_info, not duplicated into every contact/export.
+      const proof = savedVerdict ? Object.fromEntries(Object.entries(savedVerdict).filter(([key]) => key !== 'audit')) : undefined;
+      const qualified = { ...row, _eng_company_qualification: proof };
       return heEngCompanyQualified(qualified, scope) ? [qualified] : [];
     });
     const remaining = [...pending.keys()].filter((key) => !memo.verdicts[key]);
@@ -345,7 +391,9 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     hasPaidHistory: !!input.memo && !saved && (Object.keys(memo.verdicts).length > 0 || Object.keys(memo.attempts!).length > 0 || Object.keys(input.memo.partial ?? {}).length > 0),
   });
   memo.economy = { version: 1, workflow: 'fit_review_v3_single', budget, prepared: {}, proposals: {} };
-  const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT) })).max(MAX_PAGES), retryableFailure: z.boolean() });
+  const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT),
+    evidenceSource: z.enum(['constructor_website', 'website']).optional() })).max(MAX_PAGES + 3),
+    retryableFailure: z.boolean(), collectedJobId: z.string().uuid().optional() });
   if (Object.keys(saved?.prepared ?? {}).length > 16 || Object.keys(saved?.proposals ?? {}).length > 16) throw new HeEngQualificationScopeError('too many cached companies');
   const preparedHistory = new Set<string>();
   for (const [key, raw] of Object.entries(saved?.prepared ?? {})) {
@@ -369,7 +417,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const parsed = validateHeEngCompanyFitDecision(proposal, company, safeScope);
     if (!parsed || parsed.status === 'unverified') throw new HeEngQualificationScopeError('invalid saved review proposal');
     if (heEngCompanyFitNeedsReview(parsed)) memo.economy.proposals![key] = parsed;
-    else finish(key, fitVerdict(row, company, scope, finalizeHeEngCompanyFit(new Map([[key, parsed]]), new Map()).get(key)!));
+    else finish(key, fitVerdict(row, company, scope, finalizeHeEngCompanyFit(new Map([[key, parsed]]), new Map()).get(key)!), parsed);
   }
   let checkpoint = Promise.resolve();
   async function save(): Promise<void> {
@@ -377,7 +425,21 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     checkpoint = checkpoint.catch(() => undefined).then(() => input.onCheckpoint(snapshot));
     await checkpoint;
   }
-  function finish(key: string, verdict: HeEngCompanyVerdict): void {
+  function assessment(model: string, decision: HeEngCompanyFitDecision): HeEngCompanyQualificationAssessment {
+    return { model, status: decision.status, reason: decision.reason, hypothesisId: decision.hypothesisId,
+      quoteIds: [...decision.activityQuoteIds], explanation: withoutEmails(decision.explanation).slice(0, 400) };
+  }
+  function finish(key: string, verdict: HeEngCompanyVerdict, classifier?: HeEngCompanyFitDecision, review?: HeEngCompanyFitDecision): void {
+    const prepared = memo.economy!.prepared[key];
+    const row = pending.get(key);
+    if (prepared && row) {
+      const company = fitInput(key, row, prepared.website, prepared.pages, scope);
+      const proposal = classifier ?? memo.economy!.proposals![key];
+      verdict.audit = { version: 1, quotes: company.quotes.map((quote) => ({ ...quote, source: quote.source ?? 'website' })),
+        ...(prepared.collectedJobId ? { collectedJobId: prepared.collectedJobId } : {}),
+        ...(proposal ? { classifier: assessment(HE_ENG_QUALIFICATION_MODEL, proposal) } : {}),
+        ...(review ? { review: assessment(HE_ENG_QUALIFICATION_REVIEW_MODEL, review) } : {}) };
+    }
     memo.verdicts[key] = verdict;
     delete memo.economy!.prepared[key];
     delete memo.economy!.proposals![key];
@@ -429,12 +491,19 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
         if (!website || typeof row.company !== 'string' || !row.company.trim()) {
           finish(key, unverified(scope, key, website ? 'company_name_missing' : 'website_invalid')); await save(); continue;
         }
-        const read = await companyPages(ctx, fetchPage, website, scope);
-        if (!read.pages.length) {
+        const collected = input.collectedEvidence?.[key];
+        const reused = collectedPages(row, collected, website);
+        const sufficient = reused.length > 0 && !collected!.pages.some((page) => page.truncated) &&
+          enoughCollectedText(fitInput(key, row, website, reused, scope), scope);
+        const read: PageRead = sufficient ? { pages: [], retryableFailure: false, unverifiedRedirect: false }
+          : await companyPages(ctx, fetchPage, website, scope);
+        const pages: QualificationPage[] = [...reused, ...read.pages.map(({ url, text }) => ({ url, text, evidenceSource: 'website' as const }))];
+        if (!pages.length) {
           const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
           memo.attempts![key] = { attempts, kind: read.retryableFailure ? 'site_transient' : 'site_unavailable' };
           if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) finish(key, unverified(scope, key, read.unverifiedRedirect ? 'website_redirect_unverified' : 'site_unavailable_exhausted'));
-        } else memo.economy!.prepared[key] = { website, pages: read.pages.map(({ url, text }) => ({ url, text })), retryableFailure: read.retryableFailure };
+        } else memo.economy!.prepared[key] = { website, pages, retryableFailure: read.retryableFailure,
+          ...(reused.length ? { collectedJobId: collected!.jobId } : {}) };
         await save();
       } catch (error) { if (!failed) { failed = true; readFailure = error; } }
     }
@@ -491,7 +560,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       for (const company of fresh) {
         const proposal = proposals.get(company.id)!;
         if (!heEngCompanyFitNeedsReview(proposal)) finish(company.id, fitVerdict(pending.get(company.id)!, company, scope,
-          finalizeHeEngCompanyFit(new Map([[company.id, proposal]]), new Map()).get(company.id)!));
+          finalizeHeEngCompanyFit(new Map([[company.id, proposal]]), new Map()).get(company.id)!), proposal);
         else memo.economy!.proposals![company.id] = proposal;
       }
       await save(); // Persist the first paid answer before buying independent review.
@@ -504,7 +573,8 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     const reviews = await purchase(request, request.companies, true);
     if (!reviews) return output();
     const final = finalizeHeEngCompanyFit(proposals, reviews);
-    for (const company of remaining) finish(company.id, fitVerdict(pending.get(company.id)!, company, scope, final.get(company.id)!));
+    for (const company of remaining) finish(company.id, fitVerdict(pending.get(company.id)!, company, scope, final.get(company.id)!),
+      proposals.get(company.id), reviews.get(company.id));
     // Keep a completed, independently checked result even if its charge is unknown.
     // The same durable hold prevents any further purchase in this base.
     if (purchaseHold) finishRemaining(purchaseHold);

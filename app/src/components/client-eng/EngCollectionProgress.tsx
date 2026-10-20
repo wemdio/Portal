@@ -17,11 +17,11 @@ const STEP_LABELS: Record<string, string> = {
 
 /** An old heartbeat is not proof of a failure, or of work still advancing. */
 export function engCollectionProgressView(progress: CollectionProgress | null | undefined, now: number) {
-  if (progress?.step_key === 'company_qualification' && progress.company_qualification_note) {
+  if (progress?.step_key === 'company_qualification' && progress.company_qualification_note && progress.status !== 'processing') {
     return {
       title: 'Some company checks stopped', stepLabel: null, percent: null, checkedLabel: null,
       activity: progress.company_qualification_note, lastActivity: null,
-      active: false, complete: false, stopped: true, qualificationStopped: true,
+      active: false, complete: false, stopped: true, qualificationStopped: true, qualificationNote: null,
     };
   }
   const heartbeat = progress?.heartbeat_at ? Date.parse(progress.heartbeat_at) : NaN;
@@ -50,6 +50,9 @@ export function engCollectionProgressView(progress: CollectionProgress | null | 
     typeof progress.step_percent === 'number' && Number.isFinite(progress.step_percent)
     ? Math.min(100, Math.max(0, Math.round(progress.step_percent))) : null;
   const companyCheck = progress?.step_key === 'company_qualification';
+  // A company can be unconfirmed while the remaining checks are still running.
+  // Keep every warning visible without treating it as the status of the whole job.
+  const qualificationNote = companyCheck ? progress.company_qualification_note ?? null : null;
   const checkedLabel = companyCheck && typeof progress.companies_checked === 'number' &&
     typeof progress.company_count === 'number'
     ? `${progress.companies_checked.toLocaleString('en-US')} of ${progress.company_count.toLocaleString('en-US')} companies checked`
@@ -66,7 +69,7 @@ export function engCollectionProgressView(progress: CollectionProgress | null | 
   const lastActivity = age === null ? null : age < 60_000 ? 'just now'
     : age < 3_600_000 ? `${Math.floor(age / 60_000)} min ago`
       : `${Math.floor(age / 3_600_000)} hr ago`;
-  return { title, stepLabel, percent, checkedLabel, activity, lastActivity, active, complete, stopped, qualificationStopped: false };
+  return { title, stepLabel, percent, checkedLabel, activity, lastActivity, active, complete, stopped, qualificationStopped: false, qualificationNote };
 }
 
 /** Real per-step progress, readable even when reduced motion stops the spinner. */
@@ -115,6 +118,9 @@ export function EngCollectionProgress({ progress }: { progress: CollectionProgre
             )}
           </div>
         </div>
+      )}
+      {view.qualificationNote && (
+        <div className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>{view.qualificationNote}</div>
       )}
       <div className="text-[11px]" style={{ color: 'var(--cp-text-m)' }}>{view.activity}</div>
       {view.lastActivity && !view.complete && !view.stopped && (

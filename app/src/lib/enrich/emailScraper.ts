@@ -1363,6 +1363,7 @@ async function scrapeEngContactEmails(
   const checkedUrls: string[] = [];
   let siteName: string | null = null;
   let description: string | undefined;
+  const websiteEvidencePages: Array<{ url: string; text: string; truncated?: boolean }> = [];
   let mainFailure: PageFetchFailure | null = null;
   const limits: PageReadLimits | undefined = options.guard || options.maxBytes
     ? { guard: options.guard, maxBytes: options.maxBytes, counts: { refused: 0, capped: 0 } } : undefined;
@@ -1374,6 +1375,7 @@ async function scrapeEngContactEmails(
     return {
       emails, allEmailsRaw, checkedUrls, pagesScanned: checkedUrls.length, siteName,
       ...(description ? { description } : {}),
+      ...(websiteEvidencePages.length ? { websiteEvidencePages } : {}),
       failureReason: mainFailure,
       ...(limits ? { readLimits: { ...limits.counts } } : {}),
       contactDiagnostics: diagnostics,
@@ -1466,6 +1468,14 @@ async function scrapeEngContactEmails(
         catch { /* Email results remain available if optional description parsing fails. */ }
       }
     }
+    // ENG only: preserve the actual source already read while finding contacts.
+    // A generic Description cell cannot prove where its text came from.
+    if (options.includeDescription && websiteEvidencePages.length < 3) {
+      try {
+        const text = (await import('@/lib/enrich/websiteParser')).extractTextFromHtml(result.html);
+        if (text.trim()) websiteEvidencePages.push({ url: finalUrl, text: text.slice(0, 6000), ...(text.length > 6000 ? { truncated: true } : {}) });
+      } catch { /* Optional evidence must not discard collected addresses. */ }
+    }
     if (candidate.depth < 2) {
       try {
         for (const link of await discoverEngContactPages(result.html, finalUrl, root, candidate.depth + 1)) enqueue(link);
@@ -1542,6 +1552,8 @@ export type ScrapeEmailsResult = {
   siteName: string | null;
   /** Opt-in, extracted with the description parser's existing sufficiency rule. */
   description?: string;
+  /** ENG contact-first only: actual fetched URLs, before display-description truncation. */
+  websiteEvidencePages?: Array<{ url: string; text: string; truncated?: boolean }>;
   /**
    * Почему не удалось прочитать главную страницу: сертификат, 403, таймаут,
    * DNS. null — главная открылась (адресов на сайте может всё равно не быть).
