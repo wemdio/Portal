@@ -29,7 +29,19 @@ describe('auto-pipeline cooperative worker lifecycle', () => {
       domain: `blocked-${id}.com`, score: 2000, company_name: 'Company', scored_at: '2026-09-05',
     }));
     cached.push({ domain: 'allowed.com.ru', score: 2000, company_name: 'Allowed', scored_at: '2026-09-01' });
-    mockSourceDb = createMockSupabase({ enforceQueryWindows: true, tables: { mailganer_domain_scores: cached } });
+    mockSourceDb = createMockSupabase({
+      enforceQueryWindows: true,
+      tables: { mailganer_domain_scores: cached },
+      rpcHandlers: {
+        mailganer_cache_topup_candidates: (params, db) => ({
+          data: {
+            rows: db.getRows('mailganer_domain_scores').filter((row) =>
+              !(params.p_excluded_suffixes as string[]).some((suffix) => String(row.domain).endsWith(suffix))),
+            has_more: false,
+          },
+        }),
+      },
+    });
     const input = { neededCount: 1, seenDomains: new Set<string>(), excludePatterns: [], clientUserId };
     const fromCache = await fetchTopUpFromCache(input);
     expect(fromCache.employers.map((employer) => employer.siteUrl)).toEqual(['https://allowed.com.ru']);
