@@ -2,24 +2,23 @@ import { z } from 'zod';
 import type { LLMMessage } from './llm';
 
 /** ENG qualification owns its model; shared HE_MODEL_* overrides cannot make it expensive. */
-export const HE_ENG_QUALIFICATION_MODEL = 'openai/gpt-6-luna' as const;
+export const HE_ENG_QUALIFICATION_MODEL = 'deepinfra/deepseek-v4-flash-0731' as const;
 export const HE_ENG_QUALIFICATION_BUDGET_USD = 0.50;
 export const HE_ENG_QUALIFICATION_SEARCH_LIMIT = 0;
 
 const USD_MICROS = 1_000_000;
 const LIMIT_MICROS = 500_000;
 const MAX_OUTPUT_TOKENS = 16_384;
-// Rates verified 2026-10-20: $0.10/$0.50 per million input/output tokens.
-// https://developers.openai.com/api/docs/models/gpt-6-luna and
-// https://router.requesty.ai/v1/models (input_price=1e-7, output_price=5e-7).
-// Short-context only; cache writes cost 1.25x input. The 2x reserve covers
-// that and Requesty's documented 5% markup (https://www.requesty.ai/pricing).
+// Rates verified 2026-10-20: $0.09/$0.18 per million input/output tokens.
+// https://router.requesty.ai/v1/models (input_price=9e-8, output_price=1.8e-7;
+// one pricing tier). Reserve ignores cache discounts and includes a 2x cushion
+// covering Requesty's documented 5% markup (https://www.requesty.ai/pricing).
 // These are an explicit pricing assumption, not a live provider price guarantee.
 // Reserve twice that rate, count every UTF-8 byte as a possible input token,
 // and include framing headroom. This API requires transportRetries: 0 and no
 // schema repair; any additional paid call needs its own persisted reservation.
-const INPUT_RATE_HUNDREDTHS = 10;
-const OUTPUT_RATE_HUNDREDTHS = 50;
+const INPUT_RATE_HUNDREDTHS = 9;
+const OUTPUT_RATE_HUNDREDTHS = 18;
 const RATE_CUSHION = 2;
 
 export type HeEngQualificationBudgetHoldReason =
@@ -146,8 +145,8 @@ export function reserveHeEngQualificationModel(
   }
   // Includes the optional JSON-mode hint added by llm.ts when the prompt omits JSON.
   const inputTokenBound = 512 + messages.reduce((sum, message) => sum + Buffer.byteLength(message.content, 'utf8') + 64, 0);
-  // Above this threshold the provider charges a long-context premium. Do not
-  // send an oversized request using a reservation for the lower tariff.
+  // Keep the bounded qualification input contract even though this provider
+  // currently has a larger context window and a single pricing tier.
   if (inputTokenBound > 272_000) throw new HeEngQualificationBudgetError('invalid_model_input');
   const reservedMicrousd = Math.ceil(RATE_CUSHION *
     (inputTokenBound * INPUT_RATE_HUNDREDTHS + maxTokens * OUTPUT_RATE_HUNDREDTHS) / 100);
