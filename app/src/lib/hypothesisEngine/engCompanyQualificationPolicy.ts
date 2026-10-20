@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { normalizeEngCountry, readHeCollectCountries } from './engCountries';
 import { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
+import type { HeEngQualificationBudget } from './engQualificationBudget';
 
 export { HE_ENG_COMPANY_QUALIFICATION_VERSION } from './engCompanyQualificationVersion';
 
@@ -43,6 +44,19 @@ export interface HeEngQualificationMemo {
   attempts?: Record<string, HeEngQualificationAttempt>;
   /** Reuse a paid decision only when a partial website retry has identical inputs. */
   partial?: Record<string, { inputHash: string; verdict: HeEngCompanyVerdict }>;
+  /** Execution progress only: it never replaces the versioned company proof. */
+  economy?: {
+    version: 1;
+    budget: HeEngQualificationBudget;
+    /** Bounded current batch; terminal verdicts no longer need prepared pages. */
+    prepared: Record<string, {
+      website: string;
+      pages: Array<{ url: string; text: string }>;
+      retryableFailure: boolean;
+    }>;
+    /** Durable before the request; a missing response must not buy it again. */
+    inFlight?: { reservationId: string; companyKeys: string[] };
+  };
 }
 
 export interface HeEngQualificationAttempt {

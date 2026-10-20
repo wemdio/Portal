@@ -42,7 +42,9 @@ function DncNotes({ base }: { base: EngBaseSummary }) {
   const excluded = qualification && qualification.checked === qualification.total ? qualification.excluded : 0;
   return (
     <div className="flex flex-col gap-0.5" style={{ color: 'var(--cp-text-l)' }}>
-      {excluded > 0 && (
+      {qualification?.note ? (
+        <div style={{ color: 'var(--cp-amber)' }}>{qualification.note}</div>
+      ) : excluded > 0 && (
         <div>{excluded.toLocaleString('en-US')} {excluded === 1 ? 'company' : 'companies'} excluded: the audience or country could not be confirmed.</div>
       )}
       {skipped && <div className="ds-mono">{skipped}</div>}

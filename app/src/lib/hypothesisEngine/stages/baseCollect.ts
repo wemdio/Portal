@@ -202,6 +202,8 @@ import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
 import { runHeEngCompanyQualification } from '../engCompanyQualification';
+import { heEngQualificationBudgetHoldReason, type HeEngQualificationBudgetHoldReason } from '../engQualificationBudget';
+import { engCompanyQualificationStopReason, type EngCompanyQualificationStopReason } from '../engCollectionProgress';
 import {
   HE_ENG_COMPANY_QUALIFICATION_VERSION,
   HeEngQualificationScopeError,
@@ -1098,7 +1100,10 @@ export interface HeCollectInfo {
   /** Full criteria frozen before the first company check, reused by every continuation. */
   eng_company_qualification_scope?: HeEngQualificationScope;
   eng_company_qualification_total?: number;
-  eng_company_qualification_progress?: { total: number; checked: number; excluded: number; updated_at: string };
+  eng_company_qualification_progress?: {
+    total: number; checked: number; excluded: number; updated_at: string;
+    stop_reason?: EngCompanyQualificationStopReason;
+  };
   /**
    * Лимит сборки (в компаниях), выбранный при запуске (постановка пишет его
    * при создании базы). У refill-сборки стадия перезаписывает его размером
@@ -8318,6 +8323,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
   const rowsBeforeEmailPolicy = storedRows.length;
   let companyQualificationExcluded = 0;
+  let companyQualificationNote: string | null = null;
   if (engEmailPolicy) {
     // Constructor checkpoints and partial/empty results can bypass its final
     // validation filter. The client base still contains only accepted addresses;
@@ -8337,10 +8343,12 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       const checkpoint = async (memo: HeEngQualificationMemo) => {
         info.eng_company_qualification = memo;
         const verdicts = Object.values(memo.verdicts).filter((v) => companyKeys.has(v.companyKey));
+        const stopReason = memo.economy ? engCompanyQualificationStopReason(verdicts) : undefined;
         info.eng_company_qualification_progress = {
           total: companyKeys.size, checked: verdicts.length,
           excluded: verdicts.filter((v) => v.status !== 'accepted').length,
           updated_at: new Date().toISOString(),
+          ...(stopReason ? { stop_reason: stopReason } : {}),
         };
         const saved = await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
         if (!saved) throw new Error('ENG company qualification: collection is no longer active');
@@ -8359,10 +8367,32 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           costUsd: usage.costUsd,
         };
       }
+      if (qualified.memo.economy) {
+        const budgetHold: HeEngQualificationBudgetHoldReason | null =
+          heEngQualificationBudgetHoldReason(qualified.memo.economy.budget);
+        const unverifiedReasons = new Set(Object.values(qualified.memo.verdicts)
+          .filter((verdict) => companyKeys.has(verdict.companyKey) && verdict.status === 'unverified')
+          .map((verdict) => verdict.reason));
+        if (budgetHold && (unverifiedReasons.has('model_budget_exhausted') || unverifiedReasons.has('model_cost_exceeded_reservation'))) {
+          companyQualificationNote = 'Company qualification stopped at its spending limit. ' +
+            'Some companies remain unverified; saved results were kept. Review the saved results before collecting again.';
+        } else if (unverifiedReasons.has('model_invalid')) {
+          companyQualificationNote = 'Company qualification could not verify the model response. ' +
+            'Some companies remain unverified; saved results were kept. Review the saved results before collecting again.';
+        } else if (unverifiedReasons.has('model_response_unavailable')) {
+          companyQualificationNote = 'Company qualification has no saved response for a previous model request. ' +
+            'Its outcome is unknown; saved results were kept. Review the saved results before collecting again.';
+        } else if (unverifiedReasons.has('model_provider_unavailable')) {
+          companyQualificationNote = 'Company qualification stopped because the model service could not complete the request. ' +
+            'Some companies remain unverified; saved results were kept. Review the saved results before collecting again.';
+        }
+        if (companyQualificationNote) stageLog(ctx, `[base_collect] ${companyQualificationNote}`);
+      }
       storedRows = qualified.rows;
       companyQualificationExcluded = candidates - storedRows.length;
-      stageLog(ctx, `[base_collect] company qualification: ${info.eng_company_qualification_total} companies checked; ` +
-        `${storedRows.length} addresses accepted, ${companyQualificationExcluded} excluded by company/country evidence`);
+      stageLog(ctx, `[base_collect] company qualification: ${info.eng_company_qualification_total} companies processed; ` +
+        `${storedRows.length} addresses accepted, ${companyQualificationExcluded} excluded without confirmed company/country evidence` +
+        (companyQualificationNote ? '; some company checks did not complete' : ''));
     }
     finalEmailStatuses = storedRows.map((row) => row._email_status ?? null);
     companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
@@ -8401,9 +8431,15 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ...(allOffTarget ? { all_off_target: true } : {}),
   };
   if (engEmailPolicy && storedRows.length === 0 && !allOffTarget) {
-    return await closeWithoutRows(statsWithQuality, companyQualificationExcluded > 0
+    const closed = await closeWithoutRows(statsWithQuality, companyQualificationNote ?? (companyQualificationExcluded > 0
       ? 'Company qualification: no companies with verified fit for the selected hypotheses and target countries. Review the audience before collecting again.'
-      : 'после проверки нет адресов со статусом ok или catch_all');
+      : 'после проверки нет адресов со статусом ok или catch_all'));
+    return companyQualificationNote
+      ? { ...closed, result: {
+        ...(closed.result && typeof closed.result === 'object' && !Array.isArray(closed.result) ? closed.result : {}),
+        company_qualification_note: companyQualificationNote,
+      } }
+      : closed;
   }
   // Потолок мастера считает АДРЕСА (HE_LAUNCH_MAX_LEADS лидов), а число клиента
   // — КОМПАНИИ, и после разноса адресов по строкам одна компания даёт до
@@ -8450,7 +8486,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // уже запущенную кампанию, база → терминальный 'analyzed', итог — в
   // collect_info.refill_result и he_auto_pipeline_runs.
   if (isRefill) {
-    return await runHeRefillAppend({
+    const refillResult = await runHeRefillAppend({
       ctx,
       job,
       base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
@@ -8465,6 +8501,12 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       // Перенос неотправленных компаний — только 'us' (решает сам долив).
       market,
     });
+    return companyQualificationNote
+      ? { ...refillResult, result: {
+        ...(refillResult.result && typeof refillResult.result === 'object' && !Array.isArray(refillResult.result) ? refillResult.result : {}),
+        company_qualification_note: companyQualificationNote,
+      } }
+      : refillResult;
   }
 
   // Вертикаль, в которой не прошла ни одна строка (см. allOffTarget выше):
@@ -8591,6 +8633,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       tasks_done: done.length,
       tasks_failed: failed.length,
       failed_sources: failed.map((f) => f.source),
+      ...(companyQualificationNote ? { company_qualification_note: companyQualificationNote } : {}),
     },
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,

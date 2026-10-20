@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
@@ -13,22 +12,21 @@ import {
   type HeEngCompanyEvidence,
   type HeEngCompanyVerdict,
   type HeEngQualificationMemo,
-  type HeEngQualificationAttempt,
   type HeEngQualificationRow,
   type HeEngQualificationScope,
 } from './engCompanyQualificationPolicy';
-import { callLLMWithSchema, getHeModel, heLlmFailureOf, isHeLlmTimeout, LLMValidationError, type LLMMessage } from './llm';
-import { isHeOperationTimeout } from './operationDeadline';
-import { heStageSignal, isHeSiteUnreachable, resolveFetchPage, resolveSearch, type HeFetchedPage, type HeFetchPageFn } from './stages/io';
-import { isHeSearchProviderError } from './stages/searchIo';
+import { callLLMText, heLlmFailureOf, isHeLlmTimeout, type LLMMessage } from './llm';
+import { readHeEngQualificationBudget, reserveHeEngQualificationModel, settleHeEngQualificationModel, heEngQualificationBudgetHoldReason } from './engQualificationBudget';
+import { heStageSignal, isHeSiteUnreachable, resolveFetchPage, type HeFetchedPage, type HeFetchPageFn } from './stages/io';
 import type { HeStageContext } from './stages/shared';
 
-const MAX_PAGES = 6;
-const MAX_PAGE_DEPTH = 2;
-const MAX_SEARCH_PAGES = 3;
+const MAX_PAGES = 9;
+const MAX_PAGE_DEPTH = 3;
 const MAX_COMPANY_ATTEMPTS = 3;
 const COMPANY_RETRY_MS = 30_000;
-const MAX_PAGE_TEXT = 3000;
+const MAX_PAGE_TEXT = 6000;
+const MODEL_BATCH_SIZE = 8;
+const MAX_COMPANY_SOURCE_CHARS = 8000;
 const EMAIL = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu;
 const QuoteSchema = z.object({ url: z.string().min(1).max(2000), quote: z.string().min(12).max(1400) });
 const DecisionSchema = z.object({
@@ -149,63 +147,6 @@ function sourceEvidence(pages: HeFetchedPage[], row: HeEngQualificationRow, scop
 
 type DecisionContext = { row: HeEngQualificationRow; website: string; scope: HeEngQualificationScope; pages: HeFetchedPage[] };
 
-/** A retry hint, never an admission: every suggested combination passes the same final gate. */
-function repairCandidateHint(evidence: SourceEvidence, context: DecisionContext, decision: Decision): string | null {
-  const expected = typeof context.row.company === 'string' ? context.row.company : '';
-  const claimedServices = decision.locations.flatMap((location) => location.service_evidence);
-  const hypothesisIds = [...new Set([decision.activity.hypothesis_id, ...decision.locations.map((location) => location.service_hypothesis_id)])]
-    .filter((id): id is string => !!id && context.scope.hypotheses.some((hypothesis) => hypothesis.id === id));
-  const headings = context.pages.flatMap((page) => page.text.split(/\n\s*\n/u).map(quoteText)).filter((text) =>
-    text.length <= 180 && /\b(?:limited|ltd|llc|plc|inc|corporation|corp|gmbh|ag|bv|oy|ab)\b/i.test(text) &&
-    !/\b(?:registered|regulated|authorised|authorized|directors|provides|services\s+to)\b/i.test(text));
-  const candidates = [...new Set([...decision.identity.entity_links.map((link) => link.entity_name), ...headings])]
-    .filter((name) => claimedServices.some((item) => mentionsName(item.quote, name))).slice(0, 16);
-  const blocks = [...evidence.quotes.entries()].sort((a, b) => a[1].quote.length - b[1].quote.length);
-  const namedIdentity = blocks.filter(([, quote]) => mentionsName(quote.quote, decision.identity.observed_name) &&
-    verifiedQuotes([quote], context.pages, context.website, 'identity').length);
-  const identitySource = namedIdentity.find(([, quote]) => decision.identity.evidence.some((current) =>
-    urlKey(current.url) === urlKey(quote.url) && quoteText(current.quote) === quote.quote)) ?? namedIdentity[0];
-  if (!identitySource) return null;
-  const [identityId, identityQuote] = identitySource;
-  const relations: Decision['identity']['entity_links'][number]['relationship'][] = ['operating_company', 'subsidiary', 'branch', 'division', 'same_legal_entity', 'trading_name'];
-  const roles: Decision['locations'][number]['relationship'][] = ['registered_office', 'headquarters', 'operating_office'];
-  for (const entity of candidates) {
-    const services = blocks.filter(([, quote]) => mentionsName(quote.quote, entity) && claimedServices.some((source) =>
-      urlKey(source.url) === urlKey(quote.url) && quoteText(source.quote).includes(quote.quote)));
-    for (const [linkId, linkQuote] of blocks) {
-      const relation = relations.find((value) => explicitEntityLink(linkQuote.quote, expected, entity, value));
-      if (!relation) continue;
-      for (const [addressId, addressQuote] of blocks.filter(([, quote]) => mentionsName(quote.quote, entity))) {
-        const role = roles.find((value) => locationRoleInQuote(addressQuote.quote, value));
-        if (!role) continue;
-        const address = addressQuote.quote.toLocaleLowerCase();
-        const countryNames = [...COUNTRY_NAMES, ...ADDRESS_COUNTRY_ALIASES].filter(([name, country]) =>
-          (!context.scope.countries.length || context.scope.countries.includes(country)) && address.includes(name.toLocaleLowerCase()));
-        for (const [name, country] of countryNames) {
-          const start = address.indexOf(name.toLocaleLowerCase());
-          const literal = addressQuote.quote.slice(start, start + name.length);
-          if (!countryAddressClause(addressQuote.quote, entity, country, role)) continue;
-          for (const [serviceId, serviceQuote] of services) for (const hypothesisId of hypothesisIds) {
-            // Validate the exact replacement below, including its single entity link.
-            const trial: Decision = { ...decision, identity: { ...decision.identity, evidence: [identityQuote], entity_links: [
-              { entity_name: entity, relationship: relation, evidence: [linkQuote] },
-            ] }, locations: [{ entity_name: entity, relationship: role, country, country_text: literal,
-              evidence: addressQuote, service_evidence: [serviceQuote], service_hypothesis_id: hypothesisId }] };
-            if (decisionVerdict(context.row, context.website, context.scope, context.pages, trial).status !== 'accepted') continue;
-            const fragment = { identity: { evidence: [{ quote_id: identityId }], entity_links: [{ entity_name: entity, relationship: relation, evidence: [{ quote_id: linkId }] }] },
-              locations: [{ entity_name: entity, relationship: role, country, country_text: literal, evidence: { quote_id: addressId },
-                service_evidence: [{ quote_id: serviceId }], service_hypothesis_id: hypothesisId }] };
-            const hint = `Replace identity.evidence, identity.entity_links and locations together; preserve other required fields. ${JSON.stringify(fragment)}`;
-            // Leave room for Zod's JSON wrapper in the existing 800-character retry budget.
-            return hint.length <= 650 ? hint : null;
-          }
-        }
-      }
-    }
-  }
-  return null;
-}
-
 /** Resolve only an enum mismatch in already selected, exact source evidence. */
 function normalizeSelectedEntityRelationships(context: DecisionContext, decision: Decision): Decision {
   if (decision.identity.verdict !== 'same_company' || decision.activity.verdict !== 'matches' ||
@@ -226,7 +167,7 @@ function normalizeSelectedEntityRelationships(context: DecisionContext, decision
   if (!changed) return decision;
   const trial: Decision = { ...decision, identity: { ...decision.identity, entity_links: entityLinks } };
   // Never infer a new entity, location, service, country or model verdict. An
-  // unsupported/ambiguous claim still follows the existing bounded schema retry.
+  // unsupported/ambiguous claim remains subject to the same proof checks.
   return decisionVerdict(context.row, context.website, context.scope, context.pages, trial).status === 'accepted' ? trial : decision;
 }
 
@@ -241,71 +182,16 @@ function referencedDecisionSchema(evidence: SourceEvidence, context: DecisionCon
     }),
     activity: DecisionSchema.shape.activity.extend({ evidence: z.array(quote).max(3) }),
     customer_constraints: DecisionSchema.shape.customer_constraints.extend({ evidence: z.array(quote).max(3) }),
-    locations: z.array(DecisionSchema.shape.locations.element.extend({ evidence: quote, service_evidence: z.array(quote).max(3) })).max(8),
+    locations: z.preprocess((value) => Array.isArray(value)
+      ? value.filter((item) => !(item && typeof item === 'object' && Array.isArray(item.evidence) && item.evidence.length === 0))
+      : value, z.array(DecisionSchema.shape.locations.element.extend({
+        evidence: quote, service_evidence: z.array(quote).max(3),
+        service_hypothesis_id: z.string().nullable().optional().transform((value) => value ?? null),
+      })).max(8)),
   }).transform((decision) => DecisionSchema.safeParse(decision).success
-    ? normalizeSelectedEntityRelationships(context, decision) : decision).superRefine((decision, refinement) => {
-    // A failed quote-ID refinement can leave an untransformed nested value.
-    // Its existing schema issue is sufficient; do not inspect it as a Quote.
-    if (!DecisionSchema.safeParse(decision).success) return;
-    const identityIssue = decision.identity.verdict === 'same_company' && !decision.identity.evidence.some((item) =>
-      mentionsName(item.quote, decision.identity.observed_name));
-    const repairs: string[] = [];
-    if (identityIssue) {
-      // One existing schema retry must repair the whole contradictory claim,
-      // not spend its only attempt on identity while leaving a wrong local entity.
-      const completeHint = repairCandidateHint(evidence, context, decision);
-      if (completeHint) {
-        refinement.addIssue({ code: 'custom', message: completeHint });
-        return;
-      }
-      const seen = new Set<string>();
-      const identitySourceScore = (text: string) => /^\{\s*"@type"\s*:/u.test(text) ? 2
-        : /\b(?:is (?:a|the)|a division of|trading name)\b/i.test(text) ? 1 : 0;
-      const namedIds = [...evidence.quotes].filter(([, item]) => item.quote.length >= 40 &&
-        mentionsName(item.quote, decision.identity.observed_name) && verifiedQuotes([item], context.pages, context.website, 'identity').length)
-        .sort((a, b) => identitySourceScore(b[1].quote) - identitySourceScore(a[1].quote) || a[1].quote.length - b[1].quote.length).filter(([, item]) => {
-          if (seen.has(item.quote)) return false;
-          seen.add(item.quote); return true;
-        }).slice(0, 3).map(([id]) => id);
-      repairs.push(`identity: same_company evidence must name observed_name, not an anonymous slogan. Named source candidates: ${namedIds.join(', ') || 'none'}. Verify them; use an existing quote_id proving this same company, or unverified.`);
-    }
-    if (decision.customer_constraints.verdict === 'excluded' && (!decision.customer_constraints.evidence.length || identityIssue)) {
-      repairs.push('customer_constraints: excluded needs own-business evidence for an exact ICP exclude category. Copyright/division text proves no exclusion; technology, integrations or consultation alone do not make a bank an agency/consultancy. Recheck: clear if no exclusion applies, unverified if uncertain, else excluded with supporting quote_id.');
-    }
-    if (repairs.length) {
-      refinement.addIssue({ code: 'custom', message: repairs.join(' ') });
-      return;
-    }
-    // Only repair contradictory positive claims within the existing two schema
-    // attempts. Honest abstention or a genuine rejection does not spend a retry.
-    if (decision.identity.verdict !== 'same_company' || decision.activity.verdict !== 'matches' ||
-        decision.customer_constraints.verdict !== 'clear' || !decision.locations.length) return;
-    const verdict = decisionVerdict(context.row, context.website, context.scope, context.pages, decision);
-    if (verdict.reason !== 'country_unverified') return;
-    for (const [index, location] of decision.locations.entries()) {
-      if (!['headquarters', 'registered_office', 'operating_office'].includes(location.relationship)) continue;
-      const entity = location.entity_name.slice(0, 180);
-      const local = decision.identity.entity_links.find((link) => sameName(link.entity_name, entity));
-      const needsOwnService = location.relationship === 'operating_office' ||
-        (local && ['branch', 'subsidiary', 'division', 'operating_company'].includes(local.relationship));
-      let message: string;
-      let field = 'evidence';
-      if (needsOwnService && !location.service_evidence.some((item) => mentionsName(item.quote, entity))) {
-        field = 'service_evidence';
-        message = `Service evidence does not name the claimed entity "${entity}". Choose the EXACT legal entity named in its own service block, then that entity's address and direct group link. Do not borrow another entity's services.`;
-      } else if (!mentionsName(location.evidence.quote, entity)) {
-        message = `Address evidence does not name "${entity}". Select one source block containing this exact entity, its office role and explicit country together.`;
-      } else {
-        message = `The positive location claim for "${entity}" is not supported by its exact office/country block, direct group link and own selected services. Use consistent evidence for ONE entity.`;
-      }
-      const hint = repairCandidateHint(evidence, context, decision);
-      refinement.addIssue({ code: 'custom', path: hint ? [] : ['locations', index, field], message: hint
-        ? hint
-        : `${message} If unsupported, remove this location or mark it unverified; do not invent evidence.` });
-      // Keep feedback specific and short enough for the schema retry's issue budget.
-      break;
-    }
-  });
+    ? normalizeSelectedEntityRelationships(context, decision) : decision);
+  // Unsupported claims are handled by decisionVerdict's unchanged proof gate.
+  // No schema-repair prompt or second model purchase is generated here.
 }
 
 function withoutEmails(value: string): string {
@@ -523,52 +409,7 @@ function hypothesisWords(scope: HeEngQualificationScope, titlesOnly = false): Se
     .filter((word) => !generic.has(word)).map(serviceStem));
 }
 
-/** Search queries are data-only; names/titles cannot introduce search operators. */
-function companySearchQueries(company: string, website: string, scope: HeEngQualificationScope): string[] {
-  const domain = siteBoundary(website);
-  const term = (value: string, limit: number) => withoutEmails(value).replace(/[^\p{L}\p{N}\s&.-]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, limit);
-  const name = term(company, 160);
-  const services = scope.hypotheses.slice(0, 4).map((hypothesis) => term(hypothesis.title, 90)).filter(Boolean);
-  if (!domain || !name || !services.length) return [];
-  return [
-    `site:${domain} "${name}" (${services.join(' OR ')}) services`,
-    `site:${domain} "${name}" ("registered office" OR headquarters OR contact OR locations)`,
-  ];
-}
-
-function officialSearchPage(raw: string, website: string): string | null {
-  const key = urlKey(raw);
-  if (!key) return null;
-  const url = new URL(key);
-  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || !sameSite(key, website)) return null;
-  let path: string;
-  try { path = decodeURIComponent(url.pathname); } catch { return null; }
-  if (/\.(?:pdf|docx?|xlsx?|pptx?|zip|gz|csv|json|xml|png|jpe?g|gif|svg|webp|mp[34])$/i.test(path) ||
-      /\/(?:log[-_]?in|log[-_]?out|sign[-_]?in|sign[-_]?out|auth|oauth|account|myaccount|portal|checkout|cart|subscribe|unsubscribe|password|reset)(?:[./]|$)/i.test(path)) return null;
-  return key;
-}
-
-/** Retrieval hints only: final admission still requires the exact entity/service/address proofs. */
-function needsOfficialSiteSearch(pages: HeFetchedPage[], company: string, scope: HeEngQualificationScope): boolean {
-  const blocks = [...sourceEvidence(pages, { company }, scope).quotes.values()].map((item) => item.quote);
-  const titleWords = hypothesisWords(scope, true);
-  const serviceSource = blocks.some((text) => text.split(/[.!?;](?:\s+|$)/u).some((clause) => {
-    if (!mentionsName(clause, company)) return false;
-    const ownService = clause.replace(new RegExp(namePattern(company), 'giu'), '');
-    const hits = new Set((ownService.toLowerCase().match(/[a-z]{4,}/g) ?? []).map(serviceStem).filter((word) => titleWords.has(word)));
-    return [...hits].some((word) => word.length >= 6) || hits.size >= 2;
-  }));
-  const roles: Decision['locations'][number]['relationship'][] = ['headquarters', 'registered_office', 'operating_office'];
-  const countrySource = blocks.some((text) =>
-    mentionsName(text, company) && roles.some((role) => locationRoleInQuote(text, role)) &&
-    [...COUNTRY_NAMES, ...ADDRESS_COUNTRY_ALIASES].some(([name, country]) =>
-      (!scope.countries.length || scope.countries.includes(country)) &&
-      new RegExp(`(?:^|[^\\p{L}\\p{N}])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(text) &&
-      roles.some((role) => countryAddressClause(text, company, country, role))));
-  return !serviceSource || !countrySource;
-}
-
-async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, website: string, scope: HeEngQualificationScope, company = ''): Promise<PageRead> {
+async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, website: string, scope: HeEngQualificationScope): Promise<PageRead> {
   const pages: HeFetchedPage[] = [];
   const attempted = new Set<string>();
   const words = hypothesisWords(scope);
@@ -656,53 +497,7 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     }
     queue.sort((a, b) => b.priority - a.priority || a.depth - b.depth);
   }
-  if (company && needsOfficialSiteSearch(pages, company, scope)) {
-    const search = resolveSearch({ ...ctx, market: 'us' });
-    const lanes: string[][] = [];
-    for (const query of companySearchQueries(company, website, scope)) {
-      interrupted(ctx);
-      try {
-        const results = await search(query);
-        interrupted(ctx);
-        const urls: string[] = [];
-        for (const result of results.slice(0, 10)) {
-          // Search titles/snippets never enter the evidence or model input.
-          const key = officialSearchPage(result.link, website);
-          if (!key || attempted.has(key) || urls.includes(key)) continue;
-          urls.push(key);
-        }
-        lanes.push(urls);
-      } catch (error) {
-        interrupted(ctx, error);
-        if (isHeOperationTimeout(error) || (isHeSearchProviderError(error) && error.kind === 'transient')) {
-          retryableFailure = true;
-          lanes.push([]);
-        } else throw error; // Billing/configuration must hold the stage, never resemble empty results.
-      }
-    }
-    // Alternate service/address results: one lane cannot consume every remaining page.
-    let extraPages = 0;
-    while (extraPages < MAX_SEARCH_PAGES && lanes.some((lane) => lane.length)) {
-      for (const lane of lanes) {
-        if (extraPages >= MAX_SEARCH_PAGES) break;
-        let url = lane.shift();
-        while (url && attempted.has(url)) url = lane.shift();
-        if (!url) continue;
-        interrupted(ctx);
-        extraPages += 1; attempted.add(url);
-        try {
-          const page = await fetchPage(url);
-          interrupted(ctx);
-          if (!page || !page.url.startsWith('https:') || !sameSite(page.url, website) || !page.text.trim() ||
-              pages.some((saved) => urlKey(saved.url) === urlKey(page.url))) continue;
-          pages.push({ ...page, text: sliceWholeChars(stripUnstorableJsonChars(withoutEmails(page.text)), 0, MAX_PAGE_TEXT) });
-        } catch (error) {
-          interrupted(ctx, error);
-          retryableFailure ||= !(isHeSiteUnreachable(error) && error.kind === 'dns');
-        }
-      }
-    }
-  }
+  // Only official-site links are followed. Qualification never buys search credits.
   return { pages, retryableFailure };
 }
 
@@ -767,10 +562,11 @@ function decisionVerdict(row: HeEngQualificationRow, website: string, scope: HeE
     status: 'unverified', reason: 'identity_unverified', country: null, hypothesisId: null, evidence: [], checkedAt: new Date().toISOString(),
   };
   const identity = verifiedQuotes(decision.identity.evidence, pages, website, 'identity');
-  if (decision.identity.verdict === 'different_company' && identity.length) {
+  const expectedName = typeof row.company === 'string' ? row.company : '';
+  if (decision.identity.verdict === 'different_company' && identity.length &&
+      !sameName(expectedName, decision.identity.observed_name)) {
     return { ...verdict, status: 'rejected', reason: 'identity_mismatch', evidence: identity };
   }
-  const expectedName = typeof row.company === 'string' ? row.company : '';
   const observedName = decision.identity.observed_name;
   const entityLinks = decision.identity.entity_links.flatMap((link) => {
     const evidence = verifiedQuotes(link.evidence, pages, website, 'identity');
@@ -836,11 +632,81 @@ function unverified(scope: HeEngQualificationScope, key: string, reason: string)
     country: null, hypothesisId: null, evidence: [], checkedAt: new Date().toISOString() };
 }
 
-function discardedSpend(error: unknown): { tokensUsed: number; costUsd: number } {
-  const match = /\[оплачено и отброшено: (\d+) tok, \$([\d.]+)\]/.exec(error instanceof Error ? error.message : String(error));
-  const tokensUsed = match ? Number(match[1]) : 0;
-  const costUsd = match ? Number(match[2]) : 0;
-  return { tokensUsed: Number.isFinite(tokensUsed) ? tokensUsed : 0, costUsd: Number.isFinite(costUsd) ? costUsd : 0 };
+/** Keep source IDs stable while removing duplicate passages and balancing the evidence. */
+function compactSources(source: SourceEvidence, row: HeEngQualificationRow, scope: HeEngQualificationScope): SourceEvidence {
+  const name = typeof row.company === 'string' ? row.company : '';
+  const words = hypothesisWords(scope, true);
+  const entries = [...source.quotes].map(([id, quote], order) => {
+    const role = locationRoleInQuote(quote.quote, 'headquarters') || locationRoleInQuote(quote.quote, 'registered_office') || locationRoleInQuote(quote.quote, 'operating_office');
+    const service = new Set((quote.quote.toLowerCase().match(/[a-z]{4,}/g) ?? []).map(serviceStem).filter((word) => words.has(word))).size;
+    const link = /\b(?:trading name|division of|branch of|subsidiary of|operated by|made up of|comprises?|consists? of)\b/i.test(quote.quote);
+    return { id, quote, order, role, service, link, named: mentionsName(quote.quote, name) };
+  });
+  const chosen = new Set<string>();
+  let characters = 0;
+  const add = (entry: typeof entries[number]) => {
+    if (chosen.has(entry.id) || characters + entry.quote.quote.length > MAX_COMPANY_SOURCE_CHARS || chosen.size >= 40) return;
+    // A short address/service clause can bind one entity while its enclosing
+    // passage names several companies or countries. Keep both source IDs.
+    if (entries.some((other) => chosen.has(other.id) && other.quote.url === entry.quote.url && other.quote.quote === entry.quote.quote)) return;
+    chosen.add(entry.id); characters += entry.quote.quote.length;
+  };
+  // Preserve complete group relationships before their smaller constituent sentences.
+  entries.filter((e) => e.link && e.named).sort((a, b) => b.quote.quote.length - a.quote.quote.length).slice(0, 2).forEach(add);
+  entries.filter((e) => e.role).sort((a, b) => Number(b.named) - Number(a.named) || a.quote.quote.length - b.quote.quote.length).slice(0, 7).forEach(add);
+  entries.filter((e) => e.service > 0).sort((a, b) => b.service - a.service || Number(b.named) - Number(a.named) || a.quote.quote.length - b.quote.quote.length).slice(0, 10).forEach(add);
+  entries.filter((e) => e.named).sort((a, b) => a.quote.quote.length - b.quote.quote.length).slice(0, 5).forEach(add);
+  entries.sort((a, b) => (Number(b.role) * 4 + b.service * 2 + Number(b.named)) - (Number(a.role) * 4 + a.service * 2 + Number(a.named)) || a.order - b.order).forEach(add);
+  return {
+    pages: source.pages.map((page) => ({ ...page, evidence_blocks: page.evidence_blocks.filter((block) => chosen.has(block.id)) })).filter((page) => page.evidence_blocks.length),
+    quotes: new Map([...source.quotes].filter(([id]) => chosen.has(id))),
+  };
+}
+
+type PreparedCompany<T extends HeEngQualificationRow = HeEngQualificationRow> = {
+  key: string; row: T; website: string; pages: HeFetchedPage[]; sources: SourceEvidence;
+};
+
+function batchMessages(companies: PreparedCompany[], scope: HeEngQualificationScope): LLMMessage[] {
+  const inputs = companies.map((company) => messages(company.row, company.website, scope, company.sources));
+  const first = JSON.parse(inputs[0][1].content) as Record<string, unknown>;
+  return [
+    { role: 'system', content: inputs[0][0].content.replace('Qualify one company', 'Qualify each company independently') +
+      ' The schema above applies to EACH decision. Return one JSON object {"companies":[{"id":"exact supplied id","decision":{...}}]} with exactly one item for every supplied company. ' +
+      'Source IDs are local to their company; never use another company’s sources. Do not omit uncertain companies: return unverified. No markdown or explanation.' },
+    { role: 'user', content: JSON.stringify({ target_criteria: first.target_criteria, companies: inputs.map((input, index) => {
+      const item = JSON.parse(input[1].content) as Record<string, unknown>;
+      delete item.target_criteria;
+      return { id: companies[index].key, ...item };
+    }) }) },
+  ];
+}
+
+/** Invalid/missing answers never trigger a repair purchase or silently pass a company. */
+function batchVerdicts(text: string, companies: PreparedCompany[], scope: HeEngQualificationScope): Map<string, HeEngCompanyVerdict> {
+  const result = new Map<string, HeEngCompanyVerdict>();
+  let parsed: unknown;
+  try { parsed = JSON.parse(text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); } catch { return result; }
+  const envelope = z.object({ companies: z.array(z.object({ id: z.string(), decision: z.unknown() })).max(MODEL_BATCH_SIZE) }).safeParse(parsed);
+  if (!envelope.success) return result;
+  const expected = new Set(companies.map((company) => company.key));
+  if (envelope.data.companies.some((item) => !expected.has(item.id))) return result;
+  for (const company of companies) {
+    const matches = envelope.data.companies.filter((item) => item.id === company.key);
+    if (matches.length !== 1) continue;
+    const context = { row: company.row, website: company.website, scope, pages: company.pages };
+    const decision = referencedDecisionSchema(company.sources, context).safeParse(matches[0].decision);
+    if (decision.success) result.set(company.key, decisionVerdict(company.row, company.website, scope, company.pages, decision.data));
+  }
+  return result;
+}
+
+function knownResponseCost(response: unknown): number | undefined {
+  const usage = (response as { usage?: { cost?: unknown } } | null)?.usage;
+  if (typeof usage?.cost === 'number' && Number.isFinite(usage.cost) && usage.cost >= 0) return usage.cost;
+  // Only a reported charge can release headroom. A token-price estimate or a
+  // helper's fallback zero cannot rule out unknown provider fees.
+  return undefined;
 }
 
 /** Caller has confirmed the ENG owner and selected only OK/catch-all rows. */
@@ -849,146 +715,181 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   input: { rows: T[]; scope: HeEngQualificationScope; memo?: HeEngQualificationMemo; maxCompanies?: number; onCheckpoint: (memo: HeEngQualificationMemo) => Promise<void> },
 ): Promise<{ rows: T[]; memo: HeEngQualificationMemo; tokensUsed: number; costUsd: number; complete: boolean; retryAfterMs?: number; pendingCompanyCount: number }> {
   const { scope } = input;
-  if (!scope.hypotheses.length) throw new Error('ENG company qualification: selected hypotheses are required');
+  if (!scope.hypotheses.length) throw new HeEngQualificationScopeError('selected hypotheses are required');
   if (input.memo && (input.memo.version !== HE_ENG_COMPANY_QUALIFICATION_VERSION || input.memo.scopeKey !== scope.key)) {
-    throw new HeEngQualificationScopeError('ENG company qualification: saved memo version/scope mismatch; explicit review required');
+    throw new HeEngQualificationScopeError('saved memo version/scope mismatch');
   }
   const memo: HeEngQualificationMemo = { version: HE_ENG_COMPANY_QUALIFICATION_VERSION, scopeKey: scope.key, verdicts: {}, attempts: {}, partial: {} };
   for (const [key, value] of Object.entries(input.memo?.verdicts ?? {})) {
     const parsed = StoredVerdictSchema.safeParse(value);
-    if (!parsed.success || parsed.data.scopeKey !== scope.key || parsed.data.companyKey !== key) {
-      throw new HeEngQualificationScopeError('ENG company qualification: invalid saved verdict; explicit review required');
-    }
+    if (!parsed.success || parsed.data.scopeKey !== scope.key || parsed.data.companyKey !== key) throw new HeEngQualificationScopeError('invalid saved verdict');
     memo.verdicts[key] = parsed.data;
   }
   for (const [key, value] of Object.entries(input.memo?.attempts ?? {})) {
     const parsed = z.object({ attempts: z.number().int().min(1).max(MAX_COMPANY_ATTEMPTS), kind: z.enum(['site_transient', 'model_transient', 'model_invalid', 'site_unavailable']) }).safeParse(value);
-    if (!parsed.success) throw new HeEngQualificationScopeError('ENG company qualification: invalid saved attempts; explicit review required');
+    if (!parsed.success) throw new HeEngQualificationScopeError('invalid saved attempts');
     memo.attempts![key] = parsed.data;
   }
   for (const [key, cached] of Object.entries(input.memo?.partial ?? {})) {
     const parsed = StoredVerdictSchema.safeParse(cached.verdict);
-    if (!/^[a-f0-9]{64}$/.test(cached.inputHash) || !parsed.success || parsed.data.status !== 'unverified' ||
-        parsed.data.scopeKey !== scope.key || parsed.data.companyKey !== key) {
-      throw new HeEngQualificationScopeError('ENG company qualification: invalid saved partial answer; explicit review required');
+    if (!/^[a-f0-9]{64}$/.test(cached.inputHash) || !parsed.success || parsed.data.status !== 'unverified' || parsed.data.scopeKey !== scope.key || parsed.data.companyKey !== key) {
+      throw new HeEngQualificationScopeError('invalid saved partial answer');
     }
     memo.partial![key] = { inputHash: cached.inputHash, verdict: parsed.data };
   }
-  const fetchPage = resolveFetchPage({ ...ctx, market: 'us' }, { companyEvidence: true });
-  let tokensUsed = 0;
-  let costUsd = 0;
   const pending = new Map<string, T>();
   for (const row of input.rows) {
     const key = heEngCompanyKey(row);
     const verdict = memo.verdicts[key];
-    if (verdict?.status === 'accepted' && !heEngCompanyQualified({ ...row, _eng_company_qualification: verdict }, scope)) {
-      throw new HeEngQualificationScopeError('ENG company qualification: invalid saved acceptance; explicit review required');
-    }
+    if (verdict?.status === 'accepted' && !heEngCompanyQualified({ ...row, _eng_company_qualification: verdict }, scope)) throw new HeEngQualificationScopeError('invalid saved acceptance');
     if (!verdict && !pending.has(key)) pending.set(key, row);
   }
-  const limit = Number.isFinite(input.maxCompanies) && input.maxCompanies! >= 1 ? Math.floor(input.maxCompanies!) : 16;
-  // Fresh companies progress before retrying a temporary failure from an earlier tick.
-  const batch = [...pending].sort(([a], [b]) => (memo.attempts![a]?.attempts ?? 0) - (memo.attempts![b]?.attempts ?? 0)).slice(0, limit);
-  let cursor = 0;
-  let failure: unknown;
-  let failed = false;
+  let tokensUsed = 0;
+  let costUsd = 0;
+  const output = () => {
+    const rows = input.rows.flatMap((row) => {
+      const qualified = { ...row, _eng_company_qualification: memo.verdicts[heEngCompanyKey(row)] };
+      return heEngCompanyQualified(qualified, scope) ? [qualified] : [];
+    });
+    const remaining = [...pending.keys()].filter((key) => !memo.verdicts[key]);
+    const fresh = remaining.some((key) => !memo.attempts![key]);
+    return { rows, memo, tokensUsed, costUsd, complete: remaining.length === 0, pendingCompanyCount: remaining.length,
+      ...(remaining.length ? { retryAfterMs: fresh ? 1000 : COMPANY_RETRY_MS } : {}) };
+  };
+  // Existing accepted proofs remain usable. A legacy partially paid run must not
+  // silently acquire a fresh budget merely because the implementation changed.
+  if (!pending.size && !input.memo?.economy) return output();
+  const saved = input.memo?.economy;
+  if (saved && (saved.version !== 1 || !Object.hasOwn(saved, 'budget') || saved.budget === undefined ||
+      !saved.prepared || typeof saved.prepared !== 'object' || Array.isArray(saved.prepared))) {
+    throw new HeEngQualificationScopeError('invalid saved economy state');
+  }
+  const budget = readHeEngQualificationBudget(saved?.budget, {
+    hasPaidHistory: !!input.memo && !saved && (Object.keys(memo.verdicts).length > 0 || Object.keys(memo.attempts!).length > 0 || Object.keys(memo.partial!).length > 0),
+  });
+  memo.economy = { version: 1, budget, prepared: {} };
+  const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT) })).max(MAX_PAGES), retryableFailure: z.boolean() });
+  if (Object.keys(saved?.prepared ?? {}).length > 16) throw new HeEngQualificationScopeError('too many cached companies');
+  const preparedHistory = new Set<string>();
+  for (const [key, raw] of Object.entries(saved?.prepared ?? {})) {
+    const item = preparedSchema.safeParse(raw);
+    if (!/^[a-f0-9]{64}$/.test(key) || !item.success || !normalizeLeadWebsite(item.data.website) || item.data.pages.some((page) =>
+      !sameSite(page.url, item.data.website) || (item.data.website.startsWith('https:') && !page.url.startsWith('https:')) || withoutEmails(page.text) !== page.text)) {
+      throw new HeEngQualificationScopeError('invalid cached company evidence');
+    }
+    preparedHistory.add(key);
+    const row = pending.get(key);
+    // Another base can claim the company between ticks. Its free cached pages
+    // are no longer needed, but remain proof that an interrupted request knew it.
+    if (!row) continue;
+    const normalized = normalizeLeadWebsite(row.website);
+    const website = normalized && (/^https?:\/\//i.test(normalized) ? normalized : `https://${normalized}`);
+    if (item.data.website !== website) {
+      throw new HeEngQualificationScopeError('invalid cached company evidence');
+    }
+    memo.economy.prepared[key] = item.data;
+  }
   let checkpoint = Promise.resolve();
   async function save(): Promise<void> {
-    const snapshot = { ...memo, verdicts: { ...memo.verdicts }, attempts: { ...memo.attempts }, partial: { ...memo.partial } };
-    // A later full snapshot can persist already-paid results even after an earlier DB write failed.
+    // Capture before queuing I/O: a newer snapshot must not be overwritten by
+    // an older free reader, nor mutate the nested state already being saved.
+    const snapshot = structuredClone(memo);
     checkpoint = checkpoint.catch(() => undefined).then(() => input.onCheckpoint(snapshot));
     await checkpoint;
   }
-  function recordFailure(key: string, kind: HeEngQualificationAttempt['kind'], terminal = false): void {
-    const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
-    memo.attempts![key] = { attempts, kind };
-    if (terminal || attempts >= MAX_COMPANY_ATTEMPTS) memo.verdicts[key] = unverified(scope, key, `${kind}_exhausted`);
+  function finish(key: string, verdict: HeEngCompanyVerdict): void {
+    memo.verdicts[key] = verdict;
+    delete memo.economy!.prepared[key];
+    delete memo.partial![key];
   }
-  async function work(): Promise<void> {
-    while (!failed && cursor < batch.length) {
-      const [key, row] = batch[cursor++];
+  function finishRemaining(reason: string): void {
+    for (const key of pending.keys()) if (!memo.verdicts[key]) finish(key, unverified(scope, key, reason));
+  }
+  if (saved?.inFlight) {
+    const flight = saved.inFlight;
+    if (typeof flight.reservationId !== 'string' || !Object.hasOwn(budget.reservations, flight.reservationId) ||
+        !Array.isArray(flight.companyKeys) || !flight.companyKeys.length || flight.companyKeys.length > MODEL_BATCH_SIZE ||
+        new Set(flight.companyKeys).size !== flight.companyKeys.length || flight.companyKeys.some((key) =>
+          typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key) || (!preparedHistory.has(key) && !Object.hasOwn(memo.verdicts, key)))) {
+      throw new HeEngQualificationScopeError('invalid interrupted request');
+    }
+    for (const key of flight.companyKeys) if (!memo.verdicts[key]) finish(key, unverified(scope, key, 'model_response_unavailable'));
+    // The previous response may have been billed. Its reservation is retained;
+    // never purchase the same request again just because the worker restarted.
+    await save();
+  }
+  const hold = heEngQualificationBudgetHoldReason(budget);
+  if (hold) { finishRemaining(hold); await save(); return output(); }
+  const fetchPage = resolveFetchPage({ ...ctx, market: 'us' }, {
+    companyEvidence: true, companyEvidenceTerms: [...hypothesisWords(scope, true)].slice(0, 32),
+  });
+  const limit = Number.isFinite(input.maxCompanies) && input.maxCompanies! >= 1 ? Math.min(16, Math.floor(input.maxCompanies!)) : 16;
+  const candidates = [...pending].filter(([key]) => !memo.verdicts[key]).sort(([a], [b]) =>
+    Number(!!memo.economy!.prepared[b]) - Number(!!memo.economy!.prepared[a]) || (memo.attempts![a]?.attempts ?? 0) - (memo.attempts![b]?.attempts ?? 0)).slice(0, limit);
+  // Free site reads are checkpointed once. Only the short selected passages go
+  // to the model, and a stage retry reuses the same official-site snapshot.
+  let cursor = 0;
+  let readFailure: unknown;
+  let failed = false;
+  async function prepare(): Promise<void> {
+    while (!failed && cursor < candidates.length) {
+      const [key, row] = candidates[cursor++];
       try {
         interrupted(ctx);
-        const previous = memo.attempts![key];
-        if (previous && previous.attempts >= MAX_COMPANY_ATTEMPTS) {
-          memo.verdicts[key] = unverified(scope, key, `${previous.kind}_exhausted`);
-          await save();
-          continue;
-        }
+        if (memo.economy!.prepared[key]) continue;
         const normalized = normalizeLeadWebsite(row.website);
         const website = normalized ? (/^https?:\/\//i.test(normalized) ? normalized : `https://${normalized}`) : '';
         if (!website || typeof row.company !== 'string' || !row.company.trim()) {
-          memo.verdicts[key] = unverified(scope, key, website ? 'company_name_missing' : 'website_invalid');
-          await save();
-          continue;
+          finish(key, unverified(scope, key, website ? 'company_name_missing' : 'website_invalid')); await save(); continue;
         }
-        const read = await companyPages(ctx, fetchPage, website, scope, row.company);
+        const read = await companyPages(ctx, fetchPage, website, scope);
         if (!read.pages.length) {
-          recordFailure(key, read.retryableFailure ? 'site_transient' : 'site_unavailable', !read.retryableFailure);
-          await save();
-          interrupted(ctx);
-          continue;
-        }
-        let verdict: HeEngCompanyVerdict;
-        const sources = sourceEvidence(read.pages, row, scope);
-        const prompt = messages(row, website, scope, sources);
-        const inputHash = createHash('sha256').update(JSON.stringify(prompt)).digest('hex');
-        try {
-          const cached = memo.partial![key];
-          if (cached?.inputHash === inputHash) verdict = cached.verdict;
-          else {
-            const llm = await callLLMWithSchema(prompt, referencedDecisionSchema(sources, { row, website, scope, pages: read.pages }),
-              // Multi-entity service/address proof needs the ENG analysis model;
-              // the cheap shared gate remains unchanged for RU and simple classifiers.
-              { model: getHeModel('bulk'), maxTokens: 3000, market: 'us', requireCompleteJson: true });
-            tokensUsed += llm.tokensUsed;
-            costUsd += llm.costUsd;
-            verdict = decisionVerdict(row, website, scope, read.pages, llm.data);
-          }
-        } catch (error) {
-          const spend = discardedSpend(error);
-          tokensUsed += spend.tokensUsed;
-          costUsd += spend.costUsd;
-          const facts = heLlmFailureOf(error);
-          if (error instanceof LLMValidationError || (error as { name?: unknown })?.name === 'LLMValidationError') {
-            // callLLMWithSchema has already made its bounded schema repair attempt.
-            recordFailure(key, 'model_invalid', true);
-          } else if (facts?.kind === 'transient' || isHeLlmTimeout(error)) {
-            interrupted(ctx, error);
-            recordFailure(key, 'model_transient');
-          } else {
-            // Billing, configuration, 429 and unknown implementation failures hold the stage.
-            interrupted(ctx, error);
-            throw error;
-          }
-          await save();
-          interrupted(ctx);
-          continue;
-        }
-        if (verdict.status === 'unverified' && read.retryableFailure) {
-          memo.partial![key] = { inputHash, verdict };
-          recordFailure(key, 'site_transient');
+          const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
+          memo.attempts![key] = { attempts, kind: read.retryableFailure ? 'site_transient' : 'site_unavailable' };
+          if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) finish(key, unverified(scope, key, 'site_unavailable_exhausted'));
         } else {
-          memo.verdicts[key] = verdict;
-          delete memo.partial![key];
+          memo.economy!.prepared[key] = { website, pages: read.pages.map(({ url, text }) => ({ url, text })), retryableFailure: read.retryableFailure };
         }
-        // Save the paid answer before observing an abort that arrived during the model response.
         await save();
-        interrupted(ctx);
-      } catch (error) {
-        if (!failed) { failed = true; failure = error; }
-      }
+      } catch (error) { if (!failed) { failed = true; readFailure = error; } }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(4, batch.length) }, () => work()));
-  if (failed) throw failure;
-  interrupted(ctx);
-  const rows = input.rows.flatMap((row) => {
-    const qualified = { ...row, _eng_company_qualification: memo.verdicts[heEngCompanyKey(row)] };
-    return heEngCompanyQualified(qualified, scope) ? [qualified] : [];
+  await Promise.all(Array.from({ length: Math.min(4, candidates.length) }, () => prepare()));
+  if (failed) throw readFailure;
+  const ready: PreparedCompany<T>[] = candidates.flatMap(([key, row]) => {
+    const company = memo.economy!.prepared[key];
+    return company && !memo.verdicts[key] ? [{ key, row, ...company, sources: compactSources(sourceEvidence(company.pages, row, scope), row, scope) }] : [];
   });
-  const remaining = [...pending.keys()].filter((key) => !memo.verdicts[key]);
-  const freshRemaining = remaining.some((key) => !memo.attempts![key]);
-  return { rows, memo, tokensUsed, costUsd, complete: remaining.length === 0, pendingCompanyCount: remaining.length,
-    ...(remaining.length ? { retryAfterMs: freshRemaining ? 1000 : COMPANY_RETRY_MS } : {}) };
+  for (let start = 0; start < ready.length; start += MODEL_BATCH_SIZE) {
+    interrupted(ctx);
+    const companies = ready.slice(start, start + MODEL_BATCH_SIZE);
+    const prompt = batchMessages(companies, scope);
+    const reservation = reserveHeEngQualificationModel(budget, prompt, Math.min(12_000, 1600 * companies.length + 200));
+    if (!reservation) { finishRemaining(heEngQualificationBudgetHoldReason(budget) ?? 'model_budget_exhausted'); await save(); break; }
+    memo.economy.inFlight = { reservationId: reservation.id, companyKeys: companies.map((company) => company.key) };
+    await save(); // No paid request is sent before its budget and keys are durable.
+    interrupted(ctx);
+    let verdicts = new Map<string, HeEngCompanyVerdict>();
+    try {
+      const response = await callLLMText(prompt, { ...reservation, market: 'us', jsonMode: true });
+      tokensUsed += response.tokensUsed; costUsd += response.costUsd;
+      settleHeEngQualificationModel(budget, reservation, knownResponseCost(response.rawResponse));
+      if (response.finishReason !== 'length') verdicts = batchVerdicts(response.text, companies, scope);
+    } catch (error) {
+      // Abort/unknown implementation errors retain the in-flight checkpoint.
+      interrupted(ctx, error);
+      if (!heLlmFailureOf(error) && !isHeLlmTimeout(error)) throw error;
+      finishRemaining('model_provider_unavailable');
+      delete memo.economy.inFlight;
+      await save();
+      return output();
+    }
+    for (const company of companies) finish(company.key, verdicts.get(company.key) ?? unverified(scope, company.key, 'model_invalid'));
+    delete memo.economy.inFlight;
+    await save(); // Save the paid response even if an abort arrived during it.
+    interrupted(ctx);
+    const after = heEngQualificationBudgetHoldReason(budget);
+    if (after) { finishRemaining(after); await save(); break; }
+  }
+  return output();
 }

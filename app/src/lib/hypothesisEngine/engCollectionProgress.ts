@@ -30,12 +30,38 @@ export interface EngCollectionProgress {
   heartbeat_at: string | null;
   /** Present only while checking each company's audience and country evidence. */
   companies_checked?: number;
+  /** Fixed safe copy; a stopped check is not 100% verified coverage. */
+  company_qualification_note?: string;
+}
+
+export type EngCompanyQualificationStopReason =
+  | 'model_budget_exhausted'
+  | 'model_invalid'
+  | 'model_response_unavailable'
+  | 'model_provider_unavailable';
+
+const QUALIFICATION_STOP_NOTES: Record<EngCompanyQualificationStopReason, string> = {
+  model_budget_exhausted: 'Company checking reached its spending limit. Some companies were not fully checked and are not included. Verified contacts are kept. Contact Support before collecting again.',
+  model_invalid: 'Some company checks returned a result we could not verify. Those companies are not included. Verified contacts are kept. Contact Support before collecting again.',
+  model_response_unavailable: 'Some company checks stopped without a saved response. Those companies are not included. Verified contacts are kept. Contact Support before collecting again.',
+  model_provider_unavailable: 'The company-checking service could not complete some checks. Those companies are not included. Verified contacts are kept. Contact Support before collecting again.',
+};
+
+/** Derive a display reason only from known terminal outcomes, never raw error text. */
+export function engCompanyQualificationStopReason(verdicts: readonly unknown[]): EngCompanyQualificationStopReason | undefined {
+  const reasons = new Set(verdicts.flatMap((raw) => {
+    const verdict = record(raw);
+    return verdict?.status === 'unverified' && typeof verdict.reason === 'string' ? [verdict.reason] : [];
+  }));
+  if (reasons.has('model_cost_exceeded_reservation')) reasons.add('model_budget_exhausted');
+  return (Object.keys(QUALIFICATION_STOP_NOTES) as EngCompanyQualificationStopReason[]).find((reason) => reasons.has(reason));
 }
 
 export interface EngCompanyQualificationSummary {
   total: number;
   checked: number;
   excluded: number;
+  note?: string;
 }
 
 const JOBS_LIMIT = 100;
@@ -58,9 +84,12 @@ export function engCompanyQualificationSummary(info: Row): EngCompanyQualificati
   const progressTotal = count(progress?.total);
   const progressChecked = count(progress?.checked);
   const progressExcluded = count(progress?.excluded);
+  const stopReason = typeof progress?.stop_reason === 'string' && Object.hasOwn(QUALIFICATION_STOP_NOTES, progress.stop_reason)
+    ? progress.stop_reason as EngCompanyQualificationStopReason : undefined;
   if (progressTotal !== null && progressChecked !== null && progressExcluded !== null &&
     progressChecked <= progressTotal && progressExcluded <= progressChecked) {
-    return { total: progressTotal, checked: progressChecked, excluded: progressExcluded };
+    return { total: progressTotal, checked: progressChecked, excluded: progressExcluded,
+      ...(stopReason ? { note: QUALIFICATION_STOP_NOTES[stopReason] } : {}) };
   }
   const total = count(info.eng_company_qualification_total);
   const memo = record(info.eng_company_qualification);
@@ -70,15 +99,19 @@ export function engCompanyQualificationSummary(info: Row): EngCompanyQualificati
       typeof memo.scopeKey !== 'string' || !memo.scopeKey || !verdicts) return null;
   let checked = 0;
   let excluded = 0;
+  const validVerdicts: Row[] = [];
   for (const [key, raw] of Object.entries(verdicts)) {
     const verdict = record(raw);
     if (!verdict || verdict.version !== memo.version || verdict.scopeKey !== memo.scopeKey || verdict.companyKey !== key ||
       !['accepted', 'rejected', 'unverified'].includes(String(verdict.status))) continue;
     checked += 1;
+    validVerdicts.push(verdict);
     if (verdict.status !== 'accepted') excluded += 1;
   }
   // A stale/malformed memo must not show more companies checked than entered.
-  return checked <= total ? { total, checked, excluded } : null;
+  const memoStopReason = engCompanyQualificationStopReason(validVerdicts);
+  return checked <= total ? { total, checked, excluded,
+    ...(memoStopReason ? { note: QUALIFICATION_STOP_NOTES[memoStopReason] } : {}) } : null;
 }
 
 function companyQualificationProgress(info: Row): EngCollectionProgress | null {
@@ -101,6 +134,7 @@ function companyQualificationProgress(info: Row): EngCollectionProgress | null {
     step_percent: summary.total > 0 ? (summary.checked / summary.total) * 100 : 100,
     company_count: summary.total,
     companies_checked: summary.checked,
+    ...(summary.note ? { company_qualification_note: summary.note } : {}),
     heartbeat_at: Number.isFinite(heartbeat) ? new Date(heartbeat).toISOString() : null,
   };
 }

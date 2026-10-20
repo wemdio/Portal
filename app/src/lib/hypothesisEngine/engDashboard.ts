@@ -923,7 +923,7 @@ function attentionDetail(attention: EngDashAttentionInfo): string {
  * 'analyzing' (у вертикали идёт другая джоба, проект в research или последняя
  * своя база — другая).
  */
-export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStageInfo {
+function deriveEngVerticalStageInfo(input: EngDashVerticalSlice): EngDashStageInfo {
   const { projectStatus, bases, templates, activeJobs } = input;
 
   const launched = latestLaunchedTemplate(templates);
@@ -1017,7 +1017,7 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     if (qualification) {
       return {
         stage: 'construct',
-        stageDetail: `Checking companies and countries: ${qualification.checked.toLocaleString('en-US')} of ${qualification.total.toLocaleString('en-US')} checked`,
+        stageDetail: qualification.note ?? `Checking companies and countries: ${qualification.checked.toLocaleString('en-US')} of ${qualification.total.toLocaleString('en-US')} checked`,
         dots: [true, true, false, false, false],
         mainBase,
         launch: null,
@@ -1224,6 +1224,19 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     lettersNeedRewrite: false,
     attention: null,
   };
+}
+
+/** Keep a partial company-check outcome visible after the accepted base advances. */
+export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStageInfo {
+  const stage = deriveEngVerticalStageInfo(input);
+  if (!['analyzing', 'analyzed', 'letters', 'template', 'launched', 'launch_unfinished'].includes(stage.stage)) return stage;
+  const base = stage.stage === 'analyzing'
+    ? latest(input.bases.filter((row) => asStr(row.status) === 'analyzing' && !input.stalledAnalysis?.has(asStr(row.id))))
+    : stage.mainBase;
+  const note = base ? engCompanyQualificationSummary(collectInfo(base))?.note : undefined;
+  return note && stage.stageDetail !== note
+    ? { ...stage, stageDetail: `${stage.stageDetail}. ${note}` }
+    : stage;
 }
 
 /* ─────────────────────────── Лента событий ─────────────────────────── */

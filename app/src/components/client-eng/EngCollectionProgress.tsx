@@ -17,6 +17,13 @@ const STEP_LABELS: Record<string, string> = {
 
 /** An old heartbeat is not proof of a failure, or of work still advancing. */
 export function engCollectionProgressView(progress: CollectionProgress | null | undefined, now: number) {
+  if (progress?.step_key === 'company_qualification' && progress.company_qualification_note) {
+    return {
+      title: 'Some company checks stopped', stepLabel: null, percent: null, checkedLabel: null,
+      activity: progress.company_qualification_note, lastActivity: null,
+      active: false, complete: false, stopped: true, qualificationStopped: true,
+    };
+  }
   const heartbeat = progress?.heartbeat_at ? Date.parse(progress.heartbeat_at) : NaN;
   const age = Number.isFinite(heartbeat) ? Math.max(0, now - heartbeat) : null;
   const fresh = age !== null && age < 3 * 60_000;
@@ -59,7 +66,7 @@ export function engCollectionProgressView(progress: CollectionProgress | null | 
   const lastActivity = age === null ? null : age < 60_000 ? 'just now'
     : age < 3_600_000 ? `${Math.floor(age / 60_000)} min ago`
       : `${Math.floor(age / 3_600_000)} hr ago`;
-  return { title, stepLabel, percent, checkedLabel, activity, lastActivity, active, complete, stopped };
+  return { title, stepLabel, percent, checkedLabel, activity, lastActivity, active, complete, stopped, qualificationStopped: false };
 }
 
 /** Real per-step progress, readable even when reduced motion stops the spinner. */
@@ -71,7 +78,7 @@ export function EngCollectionProgress({ progress }: { progress: CollectionProgre
     return () => clearInterval(timer);
   }, []);
   const view = engCollectionProgressView(progress, now);
-  const color = view.complete ? 'var(--cp-green)' : view.stopped ? 'var(--cp-red)' : 'var(--cp-amber)';
+  const color = view.complete ? 'var(--cp-green)' : view.stopped && !view.qualificationStopped ? 'var(--cp-red)' : 'var(--cp-amber)';
   return (
     <div className="flex flex-col gap-2">
       <div role="status" className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs">

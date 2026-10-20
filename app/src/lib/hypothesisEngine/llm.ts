@@ -464,6 +464,10 @@ export interface HeLlmSchemaCallOptions extends HeLlmCallOptions {
 }
 
 export interface HeLlmTextCallOptions extends HeLlmCallOptions {
+  /** Explicitly budgeted ENG calls may forbid transport repeats; ordinary callers keep all three retries. */
+  transportRetries?: 0;
+  /** Ask for one JSON object without adding schema repair attempts. Default text behavior is unchanged. */
+  jsonMode?: true;
   fallbackModel?: string;
   minChars?: number;
   log?: (msg: string) => void;
@@ -1041,6 +1045,7 @@ async function rawCall(
   signal: AbortSignal,
   /** Язык подсказки json_object-режима (jsonHintLanguage); без JSON-режима не читается. */
   hintLanguage: HeJsonHintLanguage = 'ru',
+  maxRetries: number = MAX_HTTP_RETRIES,
 ): Promise<{ text: string; response: RequestyResponse }> {
   // Ключ читаем ДО цикла: пробел в конфигурации повтором не лечится, а сообщение
   // с именем env-переменной клиентский маппинг узнаёт как 'configuration'.
@@ -1139,12 +1144,12 @@ async function rawCall(
     }
 
     const elapsedMs = Date.now() - sentAt;
-    const waitMs = retryWaitMs(failure, attempt, elapsedMs);
+    const waitMs = attempt >= maxRetries ? null : retryWaitMs(failure, attempt, elapsedMs);
     if (waitMs === null) {
       // Транзиент, которому повтор не положен только из-за окна, — в лог: иначе
       // по логу не отличить «повторы кончились» от «повтор мог оплатить
       // генерацию второй раз».
-      if (failure.kind === 'transient' && attempt < MAX_HTTP_RETRIES && elapsedMs > LLM_UNCERTAIN_RETRY_WINDOW_MS) {
+      if (failure.kind === 'transient' && attempt < maxRetries && elapsedMs > LLM_UNCERTAIN_RETRY_WINDOW_MS) {
         llmLog(
           `[he-llm] ${model}: ${failure.kind} (${failure.message.slice(0, 160)}) через ${elapsedMs} мс после отправки — ` +
             `внутри вызова не повторяем: провайдер мог исполнить запрос и выставить счёт`,
@@ -1157,7 +1162,7 @@ async function rawCall(
     // повтор. Вне воркера — прежний console.warn процесса.
     llmLog(
       `[he-llm] ${model}: ${failure.kind} (${failure.message.slice(0, 160)}) — ` +
-        `повтор ${attempt + 1}/${MAX_HTTP_RETRIES} через ${waitMs} мс`,
+        `повтор ${attempt + 1}/${maxRetries} через ${waitMs} мс`,
     );
     await sleep(waitMs, signal);
   }
@@ -1420,7 +1425,7 @@ async function callLLMWithSchemaAttempts<T>(
  */
 export async function callLLMText(
   messages: LLMMessage[],
-  opts: HeLlmCallOptions,
+  opts: HeLlmTextCallOptions,
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
   // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
@@ -1433,7 +1438,9 @@ export async function callLLMText(
     'LLM request',
     llmAttemptTimeoutMs(maxTokens),
     job?.signal ?? null,
-    (signal) => rawCall(messages, opts.model, maxTokens, false, signal),
+    (signal) => rawCall(messages, opts.model, maxTokens, opts.jsonMode === true, signal,
+      opts.jsonMode === true ? jsonHintLanguage(messages) : undefined,
+      opts.transportRetries === 0 ? 0 : MAX_HTTP_RETRIES),
   );
   const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
   const costUsd = eng
