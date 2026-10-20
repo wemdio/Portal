@@ -798,6 +798,9 @@ export interface VeCollectInfo {
   supply_hold_since?: string;
   /** Last billing hold excluded from parent dispatch timers; repeated wakes are idempotent. */
   requesty_billing_timer_recovery?: { blocked_at: string; resumed_at: string };
+  /** Explicit legacy supply repair keeps the original batch and exact budget. */
+  supply_billing_resume?: { version: 1; batch_id: string; job_id: string; blocked_at: string; resumed_at: string;
+    max_rounds: number; max_candidates: number };
   target_progress?: VeCollectionTargetProgress;
   /** Explicit manual recovery: recheck persisted constructor output, not sources. */
   validation_retry?: boolean;
@@ -3735,7 +3738,7 @@ function resumeHeldSupplyTimers(info: VeCollectInfo): void {
 
 /** Child workers keep their own execution clock. Only VE2's dispatch wait is suspended. */
 function resumeRequestyBillingTimers(info: VeCollectInfo, job: VeJob): boolean {
-  const recovery = job.payload?.requesty_billing_recovery;
+  const recovery = job.payload?.requesty_billing_recovery ?? info.supply_billing_resume;
   if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) return false;
   const receipt = recovery as Record<string, unknown>;
   if (receipt.version !== 1 || typeof receipt.blocked_at !== 'string' || typeof receipt.resumed_at !== 'string') return false;
@@ -4610,6 +4613,16 @@ async function completeTargetRound(args: {
       error: phaseError ?? pipeline?.error ?? null,
       idle: idleRound,
     });
+    // Explicit billing recovery does not grant rounds, including idle-round
+    // allowances. Saved review can finish at the cap; new source work cannot.
+    if (info.supply_billing_resume) {
+      result.max_rounds = progress.max_rounds;
+      if (result.status === 'collecting' && result.round > progress.max_rounds) {
+        result.round = progress.round;
+        result.status = 'limited';
+        result.reason = 'Достигнут сохранённый предел раундов; контакты сохранены';
+      }
+    }
     // The other child is already paid for. Drain it even if this batch reaches
     // the goal or fails; do not orphan its results or start replacement work.
     if (pipeline && pendingBatches.length > 0 && !nameError && !reviewOnly) {
@@ -5225,6 +5238,22 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     const previous = info.target_progress;
     // Холостые раунды и «Продолжить подготовку» двигают предел базы вверх.
     target.max_rounds = veCollectionMaxRounds(previous?.max_rounds);
+    if (info.supply_billing_resume) {
+      const receipt = info.supply_billing_resume;
+      // job_id is audit lineage. A later explicit name-only retry can have a
+      // different job ID but must retain this batch's original safety caps.
+      if (receipt.version !== 1 || mode !== 'supply' || receipt.batch_id !== info.supply_batch_id || typeof receipt.job_id !== 'string'
+        || receipt.batch_id !== job.payload?.supply_batch_id
+        || !previous || !Number.isSafeInteger(receipt.max_rounds) || receipt.max_rounds < 1 || receipt.max_rounds > 10_000
+        || !Number.isSafeInteger(receipt.max_candidates) || receipt.max_candidates < 1 || receipt.max_candidates > target.max_candidates
+        || previous.max_rounds !== receipt.max_rounds || previous.max_candidates !== receipt.max_candidates
+        || !Number.isFinite(Date.parse(receipt.blocked_at)) || !Number.isFinite(Date.parse(receipt.resumed_at))
+        || Date.parse(receipt.resumed_at) < Date.parse(receipt.blocked_at)) {
+        throw new VeRelevanceCheckpointError('Invalid saved supply billing recovery');
+      }
+      target.max_rounds = receipt.max_rounds;
+      target.max_candidates = receipt.max_candidates;
+    }
     if (info.known_website_source?.continuation_only && previous) {
       if (!Number.isSafeInteger(previous.max_rounds) || previous.max_rounds < 1
         || !Number.isSafeInteger(previous.max_candidates) || previous.max_candidates < 1 || previous.max_candidates > target.max_candidates) {
@@ -5355,7 +5384,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     && !info.tasks?.some((task) => task.status === 'dispatched')
     && (target.mode === 'supply' || target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES || target.candidates_processed > 0)) {
     info.adaptive_collection = newVeAdaptiveCollection();
-    if (!info.known_website_source?.continuation_only) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
+    if (!info.known_website_source?.continuation_only && !info.supply_billing_resume) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
     await persistCollectInfo(ctx, baseId, info);
   }
 
@@ -5655,7 +5684,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
   delete info.source_contact_discovery;
-  if (target && info.source_contact_recovery && !info.known_website_source?.continuation_only) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
+  if (target && info.source_contact_recovery && !info.known_website_source?.continuation_only && !info.supply_billing_resume) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
   const considered = prepared.filter((row, index) => ownsLegacyInput
     || (veRowAcquisitionAllowed(info, row) && (existingFirst ? hasExistingSourceContact(row) : hasExistingSourceContact(row) || !pendingSourceRows.has(interleaved[index]))
       // An unsuccessful lookup must not move empty source rows into another

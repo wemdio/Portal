@@ -2,6 +2,7 @@ import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { companyNameSource, VE_COMPANY_NAME_FIELD } from './companyNames';
+import { isVeRequestyBillingError } from './collectionErrors';
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -39,6 +40,9 @@ export async function prepareVeSupplyNameResume(
   const info = record(base.collect_info);
   if (!info || !hasPendingSupplyNames(info.company_name_recovery, info.company_name_cleanup)) return false;
   if (batch.status !== 'collecting') {
+    // Closed Requesty failures are restored atomically by the status RPC:
+    // the original batch, collection job and paid checkpoints remain together.
+    if (isVeRequestyBillingError(record(info.target_progress)?.reason)) return false;
     throw new Error('Партия с незавершённой очисткой уже закрыта. Нужна проверка администратора; новый сбор не запущен.');
   }
   if (!['failed', 'collecting'].includes(base.status)) return false;
