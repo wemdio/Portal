@@ -1735,6 +1735,8 @@ export async function fetchAndExtract(
      * для КАЖДОЙ страницы цепочки; не передан — прежний разбор.
      */
     layoutAware?: boolean;
+    /** Opt-in ENG reuse: observed final URL and extracted text, before display truncation. */
+    onExtractedPage?: (page: { url: string; text: string }) => void;
   },
 ): Promise<string> {
   const url = normalizeUrl(rawUrl);
@@ -1753,6 +1755,15 @@ export async function fetchAndExtract(
   // Разбор — тот же для главной, www, http-варианта и «о компании»: страница
   // одного сайта, прочитанная одним правилом.
   const extractOptions: ExtractTextOptions = { layoutAware: options?.layoutAware };
+  const read = async (target: string, readOptions: FetchHtmlWithRetryOptions) => {
+    if (!options?.onExtractedPage) return fetchHtmlWithRetry(target, readOptions);
+    const outcome = await fetchHtmlOutcomeWithRetry(target, readOptions, (value) => value.kind !== 'refused');
+    if (outcome.kind !== 'html') return null;
+    if (outcome.status >= 200 && outcome.status < 400) {
+      options.onExtractedPage({ url: outcome.url, text: extractTextFromHtml(outcome.html, extractOptions) });
+    }
+    return { html: outcome.html, status: outcome.status };
+  };
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
   const origin = new URL(url).origin;
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : origin;
@@ -1763,13 +1774,13 @@ export async function fetchAndExtract(
   let mainText = '';
   let hadAnyHtml = false;
 
-  mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true, ...route });
+  mainHtml = await read(url, { timeout, signal, allowHttpErrors: true, ...route });
   if (mainHtml) {
     mainText = extractTextFromHtml(mainHtml.html, extractOptions);
     hadAnyHtml = true;
   }
   if (!mainText && tryWithWww) {
-    const wwwHtml = await fetchHtmlWithRetry(`${wwwOrigin}`, {
+    const wwwHtml = await read(`${wwwOrigin}`, {
       timeout,
       signal,
       allowHttpErrors: true,
@@ -1782,7 +1793,7 @@ export async function fetchAndExtract(
     }
   }
   if (!mainText && origin.startsWith('https://')) {
-    const httpHtml = await fetchHtmlWithRetry(`${httpOrigin}`, {
+    const httpHtml = await read(`${httpOrigin}`, {
       timeout,
       signal,
       allowHttpErrors: true,
@@ -1824,7 +1835,7 @@ export async function fetchAndExtract(
   let aboutText = '';
   for (const candidate of allCandidates) {
     if (signal?.aborted) break;
-    const html = await fetchHtmlWithRetry(candidate, { timeout, signal, ...route });
+    const html = await read(candidate, { timeout, signal, ...route });
     if (html) {
       const text = extractTextFromHtml(html.html, extractOptions);
       hadAnyHtml = true;

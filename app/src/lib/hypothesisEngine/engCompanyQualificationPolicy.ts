@@ -28,6 +28,35 @@ export interface HeEngCompanyEvidence {
   quote: string;
 }
 
+/** Server-only input from this base's verified constructor job, never a grid/CSV description. */
+export interface HeEngCollectedCompanyEvidence {
+  version: 1;
+  source: 'constructor_website';
+  jobId: string;
+  company: string;
+  website: string;
+  /** Actual page URLs captured by the constructor, after its same-site redirect checks. */
+  pages: Array<{ url: string; text: string; truncated?: boolean }>;
+}
+
+export interface HeEngCompanyQualificationAudit {
+  version: 1;
+  /** Exact bounded classifier input; retained in the memo, not copied to contact rows. */
+  quotes: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website' }>;
+  collectedJobId?: string;
+  classifier?: HeEngCompanyQualificationAssessment;
+  review?: HeEngCompanyQualificationAssessment;
+}
+
+export interface HeEngCompanyQualificationAssessment {
+  model: string;
+  status: HeEngCompanyFitDecision['status'];
+  reason: string;
+  hypothesisId: string | null;
+  quoteIds: string[];
+  explanation: string;
+}
+
 export interface HeEngCompanyVerdict {
   version: HeEngCompanyQualificationVersion;
   scopeKey: string;
@@ -42,6 +71,7 @@ export interface HeEngCompanyVerdict {
   countryProof?: unknown;
   /** v3 only: an independent reviewer confirmed the selected activity evidence. */
   fitReview?: { model: 'openai/gpt-5-mini'; status: 'match'; hypothesisId: string };
+  audit?: HeEngCompanyQualificationAudit;
 }
 
 export interface HeEngQualificationMemo {
@@ -59,11 +89,12 @@ export interface HeEngQualificationMemo {
     budget: HeEngQualificationBudget;
     /** First paid decision is durable before independent review. */
     proposals?: Record<string, HeEngCompanyFitDecision>;
-    /** Bounded current batch; terminal verdicts no longer need prepared pages. */
+    /** Bounded current batch; terminal verdicts retain selected input in audit. */
     prepared: Record<string, {
       website: string;
-      pages: Array<{ url: string; text: string }>;
+      pages: Array<{ url: string; text: string; evidenceSource?: 'constructor_website' | 'website' }>;
       retryableFailure: boolean;
+      collectedJobId?: string;
     }>;
     /** Durable before the request; a missing response must not buy it again. */
     inFlight?: { reservationId: string; companyKeys: string[]; phase?: 'classifier' | 'review' };

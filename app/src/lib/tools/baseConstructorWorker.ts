@@ -552,7 +552,11 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
     }),
   check_sites: (data, prog, cancel) => stepSiteCheck(data, prog, cancel),
   enrich_descriptions: (data, prog, cancel, cfg) =>
-    stepEnrich(data, prog, cancel, cfg.onCheckpoint, { locale: cfg.locale }),
+    stepEnrich(data, prog, cancel, cfg.onCheckpoint, {
+      locale: cfg.locale,
+      ...(cfg.locale === 'en' && cfg.find_emails?.contact_page_strategy === 'eng_contact_first'
+        ? { preserveEngWebsiteEvidence: true } : {}),
+    }),
   ta_scoring: (data, prog, cancel, cfg) =>
     stepTAScore(data, cfg.brief || '', prog, cancel, {
       jev: cfg.taScoringJev === true,

@@ -135,7 +135,7 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  * вариации поисковых запросов — future work.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 // «Блип БД или приговор» — нейтральный предикат (lib/db/transientError.ts, без
@@ -144,6 +144,7 @@ import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/r
 // стадии — нет.
 import { isTransientDbError } from '@/lib/db/transientError';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 // Список Do not contact клиента на сборке (market='us', §1B плана
 // docs/handoff/2026-10-16-eng-countries): только доменные записи.
 import {
@@ -207,6 +208,7 @@ import {
   sanitizeEngContactDiagnostics,
   type EngContactCollectionDiagnostics,
 } from '@/lib/tools/engContactDiagnostics';
+import { ENG_WEBSITE_EVIDENCE_COL, readEngWebsiteEvidence } from '@/lib/tools/engWebsiteEvidence';
 import {
   collectHeEngSourceCountries,
   restoreHeEngSourceCountries,
@@ -224,6 +226,7 @@ import {
   heEngLaunchQualified,
   heEngScopeWithinCurrentCountries,
   readHeEngQualificationScope,
+  type HeEngCollectedCompanyEvidence,
   type HeEngQualificationMemo,
   type HeEngQualificationScope,
 } from '../engCompanyQualificationPolicy';
@@ -389,12 +392,21 @@ export const HE_AUTO_COLLECT_COLUMNS = [
   'source_detail',
 ] as const;
 
-export type HeUnifiedRow = Record<(typeof HE_AUTO_COLLECT_COLUMNS)[number], string>;
+export type HeUnifiedRow = Record<(typeof HE_AUTO_COLLECT_COLUMNS)[number], string> & {
+  /** ENG catalog evidence for the early screen only; never a website description. */
+  _eng_source_description?: string;
+};
 
 function cell(value: unknown): string {
   if (value == null) return '';
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
   return String(value).trim();
+}
+
+function engCatalogText(value: unknown, maxChars: number): string {
+  if (typeof value !== 'string') return '';
+  const withoutEmails = value.replace(/[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu, '[email removed]');
+  return sliceWholeChars(stripUnstorableJsonChars(withoutEmails).replace(/\s+/g, ' ').trim(), 0, maxChars).trimEnd();
 }
 
 /** Первый элемент массива как строка (phones[0], emails[0]); не массив — пусто. */
@@ -507,6 +519,13 @@ export function mapPdlRow(row: Record<string, unknown>, countryProvenance = fals
     employees: cell(row.size),
     source_detail: 'pdl',
   });
+  // The caller enables country provenance only for a verified ENG client.
+  // Keep catalog text separate: putting it in Description would make the
+  // constructor skip its website read and mislabel catalog text as site evidence.
+  if (countryProvenance === true && typeof row.description === 'string') {
+    const description = engCatalogText(row.description, 1200);
+    if (description) out._eng_source_description = description;
+  }
   return countryProvenance === true ? withHeEngSourceCountry(out, {
     source: 'pdl', sourceName: row.name, sourceWebsite: row.website, country: row.country, id: row.id,
   }) : out;
@@ -1094,6 +1113,22 @@ export interface HeRelevanceGateInfo {
    * выбирают слова строки лога гейта («вне гипотез вертикали»).
    */
   hypothesis_scope?: HeGateHypothesisScopeUsed;
+  /** ENG-only bounded evidence survives removal of working flagged_keys. */
+  eng_selection_audit?: {
+    version: 1;
+    scope_key: string;
+    excluded_total: number;
+    omitted: number;
+    companies: Array<{
+      company_key: string;
+      company: string;
+      website: string;
+      category: string;
+      description_excerpt: string;
+      description_sha256: string;
+      reason: 'model_incompatible_selected_hypotheses' | 'configured_off_target_marker';
+    }>;
+  };
 }
 
 /** Провенанс починки плана: почему её запускали и чем кончилось. */
@@ -5704,6 +5739,8 @@ export interface HeConstructImport {
   validCount: number;
   /** В сетке была колонка описания — добавить 'description' в заголовки базы. */
   hasDescription: boolean;
+  /** Verified constructor evidence, kept separate from customer rows/columns. */
+  collectedEvidence?: Record<string, HeEngCollectedCompanyEvidence>;
 }
 
 /**
@@ -5713,10 +5750,14 @@ export interface HeConstructImport {
  * merged-ячейки (контракт he_bases — один email на строку). Строки без
  * компании отбрасываются. null — данных нет/пусто (импортировать нечего).
  */
-async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promise<HeConstructImport | null> {
+async function importConstructRows(
+  ctx: HeStageContext,
+  bcJobId: string,
+  engEvidence?: { baseId: string; projectId: string; ownerId: string | null },
+): Promise<HeConstructImport | null> {
   const { data, error } = await ctx.supabase
     .from('base_constructor_jobs')
-    .select('data, result_stats')
+    .select(engEvidence ? 'data, result_stats, user_id, workload_origin, locale, step_config' : 'data, result_stats')
     .eq('id', bcJobId)
     .maybeSingle();
   if (error) throw new Error(`base_constructor_jobs data read: ${error.message}`);
@@ -5730,6 +5771,18 @@ async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promis
     if (key && !idxByKey.has(key)) idxByKey.set(key, i);
   });
   const statusIdx = header.indexOf('email статус');
+  const constructor = data as {
+    user_id?: unknown; workload_origin?: unknown; locale?: unknown;
+    step_config?: { he_eng_base_budget?: { base_id?: unknown; project_id?: unknown }; find_emails?: { contact_page_strategy?: unknown } };
+  } | null;
+  const trustedEvidence = !!engEvidence?.ownerId && constructor?.user_id === engEvidence.ownerId &&
+    constructor.workload_origin === 'automation' && constructor.locale === 'en' &&
+    constructor.step_config?.he_eng_base_budget?.base_id === engEvidence.baseId &&
+    constructor.step_config.he_eng_base_budget.project_id === engEvidence.projectId &&
+    constructor.step_config.find_emails?.contact_page_strategy === 'eng_contact_first';
+  const evidenceIdx = trustedEvidence ? header.indexOf(ENG_WEBSITE_EVIDENCE_COL) : -1;
+  const collectedEvidence: Record<string, HeEngCollectedCompanyEvidence> = {};
+  const conflictingEvidence = new Set<string>();
 
   const rows: Array<HeUnifiedRow & { description: string }> = [];
   const emailStatuses: Array<string | null> = [];
@@ -5742,6 +5795,19 @@ async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promis
     const company = get('company');
     // Мусорные строки (пустая/схлопнутая компания) — как на HARVEST: выбросить.
     if (!normalizeCompanyForDedup(company)) continue;
+    if (evidenceIdx >= 0) {
+      const website = get('website');
+      const captured = readEngWebsiteEvidence(bodyRow[evidenceIdx], website);
+      if (captured) {
+        const key = heEngCompanyKey({ company, website });
+        const evidence: HeEngCollectedCompanyEvidence = { ...captured, jobId: bcJobId, company, website };
+        const prior = collectedEvidence[key];
+        if (prior && JSON.stringify(prior) !== JSON.stringify(evidence)) {
+          delete collectedEvidence[key];
+          conflictingEvidence.add(key);
+        } else if (!conflictingEvidence.has(key)) collectedEvidence[key] = evidence;
+      }
+    }
     const emailStatus = statusIdx >= 0 ? String(bodyRow[statusIdx] ?? '').trim().toLowerCase() : '';
     if (emailStatus === 'ok') validCount += 1;
     emailStatuses.push(emailStatus || null);
@@ -5771,7 +5837,8 @@ async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promis
     typeof stats?.emails_found === 'number' && Number.isFinite(stats.emails_found)
       ? stats.emails_found
       : rows.filter((r) => r.email !== '').length;
-  return { rows, emailStatuses, emailsFound, validCount, hasDescription: idxByKey.has('description') };
+  return { rows, emailStatuses, emailsFound, validCount, hasDescription: idxByKey.has('description'),
+    ...(Object.keys(collectedEvidence).length ? { collectedEvidence } : {}) };
 }
 
 /* ────────── Пост-импортный кап: «N компаний × до K адресов» ────────── */
@@ -6038,10 +6105,12 @@ async function heGateHypothesesFor(
  * 200 символов и ещё раз гейтом), и сегодня у jobhive оно пустое всегда. У
  * каталогов текст о компании в таблицах есть (pdl_companies.description —
  * его возвращает search_pdl_companies; funded_companies.description и
- * short_description), но mapPdlRow и mapFundedRow его не переносят, а выборка
- * funded его не читает, — до строки, а значит и до гейта, он не доезжает.
+ * short_description). У подтверждённого ENG-клиента mapPdlRow сохраняет его
+ * отдельно в _eng_source_description для этого раннего прохода. Legacy и
+ * funded по-прежнему не переносят описание каталога в строку.
  *
- * ЦЕЛЬ. По умолчанию (HE_GATE_HYPOTHESIS_SCOPE выключен) — прежний вопрос
+ * ЦЕЛЬ. Подтверждённый ENG-клиент передаёт точный сохранённый выбор гипотез
+ * независимо от флага. У legacy по умолчанию (HE_GATE_HYPOTHESIS_SCOPE выключен) — прежний вопрос
  * «принадлежит вертикали»: `hypotheses` пуст, а гейт сам игнорирует и его, и
  * другие имена вертикали. При включённом флаге — неотклонённые гипотезы
  * вертикали (см. heGateHypothesesFor) и другие имена вертикали: гейт
@@ -6081,8 +6150,11 @@ async function judgeRowsBeforeConstruct(input: {
   vertical: HeVertical;
   brief?: Record<string, unknown> | null;
   hypotheses: HeGateHypothesis[];
+  /** Exact saved selection, supplied only after verifying ENG client ownership. */
+  engSelectedHypotheses?: ReadonlyArray<HeGateHypothesis>;
+  engSelectionScopeKey?: string;
 }): Promise<HeRelevanceGateInfo> {
-  const { ctx, rows, vertical, brief, hypotheses } = input;
+  const { ctx, rows, vertical, brief, hypotheses, engSelectedHypotheses, engSelectionScopeKey } = input;
   const judgedAt = new Date().toISOString();
   // Префильтр — до модели: его строки модели не отдаём, это единственная
   // экономия, которую он приносит (и она нулевая, пока маркеров нет, см.
@@ -6099,11 +6171,14 @@ async function judgeRowsBeforeConstruct(input: {
   let error: string | null = null;
   try {
     const gate = await findIrrelevantRows({
-      rows: judged,
+      rows: engSelectedHypotheses
+        ? judged.map((row) => ({ ...row, description: engCatalogText(row._eng_source_description, 1200) }))
+        : judged,
       verticalName: vertical.name,
       verticalSummary: vertical.summary ?? '',
       language: 'en',
       hypotheses,
+      ...(engSelectedHypotheses ? { engSelectedHypotheses } : {}),
       synonyms: vertical.synonyms,
       log: (m) => stageLog(ctx, m),
     });
@@ -6128,6 +6203,28 @@ async function judgeRowsBeforeConstruct(input: {
     error = e instanceof Error ? e.message : String(e);
   }
   if (error) stageLog(ctx, `[base_collect] релевант-гейт не отработал: ${error}`);
+  let engSelectionAudit: HeRelevanceGateInfo['eng_selection_audit'];
+  if (engSelectedHypotheses && engSelectionScopeKey) {
+    const excluded = rows.flatMap((row, i) => flaggedKeys.has(heCompanyRowKey(row)) ? [{ row, i }] : []);
+    engSelectionAudit = {
+      version: 1,
+      scope_key: engSelectionScopeKey,
+      excluded_total: excluded.length,
+      omitted: Math.max(0, excluded.length - 2000),
+      companies: excluded.slice(0, 2000).map(({ row, i }) => {
+        const description = engCatalogText(row._eng_source_description, 1200);
+        return {
+          company_key: heEngCompanyKey(row),
+          company: engCatalogText(row.company, 160),
+          website: normalizeWebsiteForDedup(row.website),
+          category: engCatalogText(row.category, 160),
+          description_excerpt: sliceWholeChars(description, 0, 300),
+          description_sha256: createHash('sha256').update(description).digest('hex'),
+          reason: offTarget.has(i) ? 'configured_off_target_marker' : 'model_incompatible_selected_hypotheses',
+        };
+      }),
+    };
+  }
   return {
     // Суд состоялся, если вердикт получила хоть одна строка ЛИБО судить моделью
     // было нечего, потому что префильтр снял всё сам (детерминированный проход,
@@ -6142,6 +6239,7 @@ async function judgeRowsBeforeConstruct(input: {
     cost_usd: costUsd,
     judged_at: judgedAt,
     ...(hypothesisScope ? { hypothesis_scope: hypothesisScope } : {}),
+    ...(engSelectionAudit ? { eng_selection_audit: engSelectionAudit } : {}),
   };
 }
 
@@ -7893,6 +7991,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // BC-джобы).
   let finalRows: HeUnifiedRow[] = merged;
   let finalColumns: string[] = [...HE_AUTO_COLLECT_COLUMNS];
+  let collectedCompanyEvidence: Record<string, HeEngCollectedCompanyEvidence> | undefined;
   // Вердикты валидации по строкам (из импорта конструктора) — refill-ветке и
   // пометке строк (_email_status) при финальной записи: null, когда
   // конструктор не запускался / вернул пусто.
@@ -7932,12 +8031,26 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // стоит после импорта и судит те же строки, что судил.
   let relevanceGate: HeRelevanceGateInfo | null = info.relevance_gate ?? null;
   if (market === 'us' && relevanceGate?.ran !== true && !construct?.bc_job_id && needsConstruct(merged)) {
+    if (engEmailPolicy && !companyQualificationScope) {
+      companyQualificationScope = await readHeEngQualificationScope(ctx.supabase, {
+        project, verticalId: base.vertical_id, collectInfo: info, mode: 'collection',
+      });
+      // Freeze before the first paid screen so retries and final qualification
+      // use the same selected hypotheses, even when the brief changes meanwhile.
+      info.eng_company_qualification_scope = companyQualificationScope;
+      if (!(await persistCollectInfo(ctx, baseId, info))) {
+        throw new Error('ENG company qualification: collection is no longer active');
+      }
+    }
     relevanceGate = await judgeRowsBeforeConstruct({
       ctx,
       rows: merged,
       vertical,
       brief: project.brief,
-      hypotheses: await heGateHypothesesFor(ctx, job.project_id, vertical.id),
+      hypotheses: engEmailPolicy ? [] : await heGateHypothesesFor(ctx, job.project_id, vertical.id),
+      ...(engEmailPolicy && companyQualificationScope
+        ? { engSelectedHypotheses: companyQualificationScope.hypotheses, engSelectionScopeKey: companyQualificationScope.key }
+        : {}),
     });
     info.relevance_gate = relevanceGate;
     // Пишем ДО диспатча и КЛИЕНТОМ БЕЗ СИГНАЛА ДЖОБЫ (paidCheckpoint): это запись
@@ -8172,12 +8285,15 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       }
       // IMPORT: failed/cancelled базу НЕ валит — импортируем частичный data,
       // если он есть, иначе идём в analyzing без обогащения.
-      const imported = await importConstructRows(ctx, construct.bc_job_id);
+      const imported = await importConstructRows(ctx, construct.bc_job_id, engEmailPolicy
+        ? { baseId, projectId: job.project_id, ownerId: project.created_by }
+        : undefined);
       const failNote =
         bcStatus === 'completed'
           ? null
           : `конструктор завершился со статусом ${bcStatus}${bc?.error_message ? `: ${bc.error_message}` : ''}`;
       if (imported) {
+        collectedCompanyEvidence = imported.collectedEvidence;
         // ПОВТОРНАЯ СВЕРКА с другими базами проекта — до капа, на тех же ключах,
         // что у харвеста этого тика (existingKeys прочитаны свежими выше).
         // Только market='us': у RU сетка импортируется как раньше.
@@ -8495,6 +8611,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       await checkpoint(info.eng_company_qualification);
       const qualified = await runHeEngCompanyQualification(ctx, {
         rows: storedRows, scope, memo: info.eng_company_qualification, onCheckpoint: checkpoint, maxCompanies: 16,
+        ...(collectedCompanyEvidence ? { collectedEvidence: collectedCompanyEvidence } : {}),
       });
       usage.tokensUsed += qualified.tokensUsed;
       usage.costUsd += qualified.costUsd;
