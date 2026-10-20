@@ -198,6 +198,7 @@ import {
 // Название компании для писем ENG-базы (только детерминированные правила).
 import { withHeCleanCompanyNames } from '../companyNameCleanup';
 import type { HeCompanyCleanRow } from '../companyNames';
+import { heEngBaseBudgetActive, rethrowHeEngBaseBudgetError } from '../engBaseBudget';
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
@@ -2309,6 +2310,7 @@ async function ensureCatalogSource(
       model: getHeModel('bulk'),
     });
   } catch (e) {
+    rethrowHeEngBaseBudgetError(e);
     const message = e instanceof Error ? e.message : String(e);
     stageLog(ctx, `[base_collect] починка плана (нет каталога) не удалась: ${message}`);
     return { plan, planRepair: { reason: 'no_catalog_source', outcome: 'failed', error: message } };
@@ -2485,6 +2487,7 @@ async function ensureSliceMatchesVertical(
       model: getHeModel('bulk'),
     });
   } catch (e) {
+    rethrowHeEngBaseBudgetError(e);
     // Перепланировать не вышло — идём с исходным срезом: он плох, но отказ
     // из-за сбоя модели был бы хуже. Причина остаётся в collect_info.
     const message = e instanceof Error ? e.message : String(e);
@@ -2685,6 +2688,7 @@ async function widenPlanWithPaidSlice(
       { model: getHeModel('bulk') },
     );
   } catch (e) {
+    rethrowHeEngBaseBudgetError(e);
     if (heStageInterrupted(ctx, e)) throw e;
     const message = e instanceof Error ? e.message : String(e);
     if (!(e instanceof LLMValidationError)) {
@@ -5646,6 +5650,9 @@ async function dispatchConstructJob(input: {
         selected_steps: steps,
         // Кап «до N почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
         step_config: {
+          // The child worker has no LLM budget context. Only its free native
+          // contact steps may run for a base with the shared spending limit.
+          ...(heEngBaseBudgetActive() ? { he_eng_base_budget: { base_id: baseId, project_id: job.project_id } } : {}),
           cap_emails_per_company: { max: contactCap },
           ...(findEmailsConfig ? { find_emails: findEmailsConfig } : {}),
         },
@@ -6116,6 +6123,7 @@ async function judgeRowsBeforeConstruct(input: {
           : `модель не дала ни одного вердикта по ${checked} строкам`;
     }
   } catch (e) {
+    rethrowHeEngBaseBudgetError(e);
     error = e instanceof Error ? e.message : String(e);
   }
   if (error) stageLog(ctx, `[base_collect] релевант-гейт не отработал: ${error}`);
@@ -7380,6 +7388,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           `${state.child_job_id ? ` (job ${state.child_job_id})` : ''}, строк: ${state.rows}`,
       );
     } catch (e) {
+      rethrowHeEngBaseBudgetError(e);
       // Прерывание — не провал задачи: см. heStageInterrupted. Задача остаётся
       // 'pending' (ничего не записываем), и бесплатный повтор прогона
       // диспатчит её заново.
@@ -8446,6 +8455,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         );
       }
     } catch (e) {
+      rethrowHeEngBaseBudgetError(e);
       stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
     }
   }

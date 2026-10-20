@@ -58,7 +58,6 @@ export interface ClientLaunchScheduleOverride {
 }
 
 export interface ClientLaunchBehaviorOverride {
-  open_tracking: boolean;
   stop_on_reply: boolean;
 }
 

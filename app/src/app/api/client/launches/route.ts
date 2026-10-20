@@ -72,11 +72,9 @@ function isStringArray(v: unknown): v is string[] {
 function parseBehaviorOverride(raw: unknown): ClientLaunchBehaviorOverride | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const obj = raw as Record<string, unknown>;
-  const openTracking = typeof obj.open_tracking === 'boolean' ? obj.open_tracking : undefined;
   const stopOnReply = typeof obj.stop_on_reply === 'boolean' ? obj.stop_on_reply : undefined;
-  if (openTracking === undefined || stopOnReply === undefined) return undefined;
+  if (stopOnReply === undefined) return undefined;
   return {
-    open_tracking: openTracking,
     stop_on_reply: stopOnReply,
   };
 }

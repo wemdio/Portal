@@ -1,3 +1,4 @@
+import { rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import { z } from 'zod';
 
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
@@ -471,6 +472,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       }
       return result;
     } catch (error) {
+      rethrowHeEngBaseBudgetError(error);
       // Unknown implementation errors/abort keep the durable in-flight marker.
       interrupted(ctx, error);
       if (!heLlmFailureOf(error) && !isHeLlmTimeout(error)) throw error;
