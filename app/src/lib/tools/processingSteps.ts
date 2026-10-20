@@ -19,6 +19,7 @@ import {
   extractEmails,
 } from './dfybUtils';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import { ENG_WEBSITE_EVIDENCE_COL, buildEngWebsiteEvidence, type EngWebsiteEvidencePage } from './engWebsiteEvidence';
 import {
   ENG_CONTACT_DIAGNOSTIC_ROW_LIMIT,
   engContactIdentity,
@@ -860,6 +861,12 @@ export async function stepFindEmails(
     header.push(descriptionColForLocale(locale));
     body = body.map((row) => [...row, '']);
   }
+  let websiteEvidenceIdx = header.indexOf(ENG_WEBSITE_EVIDENCE_COL);
+  if (contactDiagnosticsEnabled && options?.reuseWebsiteDescription && websiteEvidenceIdx < 0) {
+    websiteEvidenceIdx = header.length;
+    header.push(ENG_WEBSITE_EVIDENCE_COL);
+    body = body.map((row) => [...row, '']);
+  }
 
   // Для строк где target-колонка уже заполнена — скипаем (идемпотентно
   // при resume, и сохраняет ручной ввод когда target='same').
@@ -946,6 +953,10 @@ export async function stepFindEmails(
       if (options?.reuseWebsiteDescription && descriptionIdx >= 0 && result?.description
         && !(body[item.i][descriptionIdx] || '').trim()) {
         body[item.i][descriptionIdx] = result.description.slice(0, 2000);
+      }
+      if (contactDiagnosticsEnabled && websiteEvidenceIdx >= 0 && result?.websiteEvidencePages) {
+        const evidence = buildEngWebsiteEvidence(item.url, result.websiteEvidencePages);
+        if (evidence) body[item.i][websiteEvidenceIdx] = JSON.stringify(evidence);
       }
       if (emails.length > 0) {
         body[item.i][targetIdx] = (maxPerSite === null ? emails : emails.slice(0, maxPerSite)).join(', ');
@@ -1220,6 +1231,8 @@ export interface StepEnrichOptions {
    * пишется. Default 'ru' — прежнее поведение.
    */
   locale?: ConstructorLocale;
+  /** Explicit ENG client path only; RU and VE2 retain their existing output. */
+  preserveEngWebsiteEvidence?: boolean;
 }
 
 export async function stepEnrich(
@@ -1252,6 +1265,13 @@ export async function stepEnrich(
   const newHeader = needsNewCol ? [...header, descriptionColForLocale(locale)] : [...header];
 
   const newBody = needsNewCol ? body.map((row) => [...row, '']) : body.map((row) => [...row]);
+  const preserveEvidence = locale === 'en' && options?.preserveEngWebsiteEvidence === true;
+  let websiteEvidenceIdx = newHeader.indexOf(ENG_WEBSITE_EVIDENCE_COL);
+  if (preserveEvidence && websiteEvidenceIdx < 0) {
+    websiteEvidenceIdx = newHeader.length;
+    newHeader.push(ENG_WEBSITE_EVIDENCE_COL);
+    for (const row of newBody) { while (row.length < newHeader.length) row.push(''); }
+  }
 
   const toProcess = newBody
     .map((row, i) => ({ row, i, url: (row[siteIdx] || '').trim() }))
@@ -1329,6 +1349,7 @@ export async function stepEnrich(
   await processInPool(toProcess, ENRICH_CONCURRENCY, async (item, _i, signal) => {
     if (isCancelled && await isCancelled()) return;
     try {
+      const evidencePages: EngWebsiteEvidencePage[] = [];
       // signal comes from the pool's per-task watchdog. Pass it down so a
       // tarpit website's fetch is aborted at ENRICH_PER_SITE_TIMEOUT_MS.
       const text = await fetchAndExtract(item.url, {
@@ -1336,6 +1357,10 @@ export async function stepEnrich(
         signal,
         ...enFetch,
         ...(enGuard ? { guard: guardNotingRefusals(enGuard, () => refusedRows.add(item.i)) } : {}),
+        ...(preserveEvidence ? { onExtractedPage: (page: EngWebsiteEvidencePage) => {
+          if (evidencePages.length < 3) evidencePages.push({ ...page, text: page.text.slice(0, 6000),
+            ...(page.text.length > 6000 ? { truncated: true } : {}) });
+        } } : {}),
       });
       // EN: «страница ответила, текста нет» — не описание компании, и клиенту
       // в колонке Description она не нужна; ячейка остаётся пустой.
@@ -1344,6 +1369,10 @@ export async function stepEnrich(
       // must not mutate data after its timeout checkpoint was persisted.
       if (text && usable && !settledIndexes.has(_i)) {
         newBody[item.i][targetDescIdx] = text.slice(0, 2000);
+        if (preserveEvidence && websiteEvidenceIdx >= 0) {
+          const evidence = buildEngWebsiteEvidence(item.url, evidencePages);
+          if (evidence) newBody[item.i][websiteEvidenceIdx] = JSON.stringify(evidence);
+        }
       }
     } catch {
       // Other errors silently skipped: site is unreachable / blocked.

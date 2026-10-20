@@ -1098,6 +1098,92 @@ try {
   });
   await commit();
 
+  // Goal edits must not invalidate an already prepared campaign's historical
+  // launch snapshot. Exercise the real RPCs, edit ledger, provider fence and
+  // persisted reservations together, without model or provider requests.
+  await db.exec(`create table public.ve_outreach_runs (
+    id uuid primary key default gen_random_uuid(), project_id uuid references public.ve_projects(id), status text
+  )`);
+  await db.exec(migration('20261007_0060_ve_edit_contact_target.sql'));
+  await db.exec(migration('20261020_0005_ve_launch_goal_binding.sql'));
+  await db.exec(migration('20261020_0005_ve_launch_goal_binding.sql')); // idempotent
+  const editGoalSql='select public.ve_change_contact_target($1,$2,$3,$4,$5,0) as r';
+  const observeGoalSql='select public.ve_observe_manual_campaigns($1,$2::jsonb,$3::timestamptz) as r';
+  await begin();
+  await inRollback(async () => {
+    const ids=await setupRefill(); await ready(ids.slice(0,5));
+    await rows(`update public.ve_templates set launch_info=launch_info || jsonb_build_object('segmentation_audit_id',$2::text) where id=$1`,[TPL,AUDIT]);
+    const observed=status=>JSON.stringify([{campaign_id:'camp-1',status,status_observed_at:refillNow}]);
+    const observe=status=>one(observeGoalSql,[ITEM,observed(status),refillNow]);
+    const first=await reserve(); const attempt=await mark(first,first.batches[0]);
+    await finish(first,first.batches[0],attempt,first.batches[0].row_ids.slice(0,3),[],first.batches[0].row_ids.slice(3));
+    await ready(ids.slice(5));
+    const held=await reserve();
+    const ledgerBefore=await rows('select * from public.ve_contact_delivery_rows where ve_project_id=$1 order by id',[VE]);
+    const quotaBefore=await rows('select * from public.ve_contact_delivery_daily_runs where ve_project_id=$1 order by id',[VE]);
+    const templateBefore=await one('select launch_info from public.ve_templates where id=$1',[TPL]);
+    await asRole('service_role',async () => {
+      const higher=(await one(editGoalSql,[VE,0,4000,30000,USER])).r;
+      check(higher.target_contacts===30000 && higher.revision===1,'goal: explicit increase uses the existing versioned edit RPC');
+      check((await observe(1)).r.observed,'goal: worker observes a historical launch after increasing the project target');
+      const lower=(await one(editGoalSql,[VE,1,30000,50,USER])).r;
+      check(lower.target_contacts===50 && lower.revision===2 && (await observe(1)).r.observed,
+        'goal: two audited increases/decreases remain connected to the original launch');
+      await expectError('goal: reduction below committed/reserved rows remains forbidden',editGoalSql,[VE,2,50,1,USER],/не может быть меньше/);
+      await expectError('goal: stale editor cannot overwrite a new revision',editGoalSql,[VE,1,30000,60,USER],/уже изменена/);
+    });
+    check(JSON.stringify(templateBefore)===JSON.stringify(await one('select launch_info from public.ve_templates where id=$1',[TPL])),
+      'goal: completed launch snapshot is retained verbatim');
+    check(JSON.stringify(ledgerBefore)===JSON.stringify(await rows('select * from public.ve_contact_delivery_rows where ve_project_id=$1 order by id',[VE]))
+      && JSON.stringify(quotaBefore)===JSON.stringify(await rows('select * from public.ve_contact_delivery_daily_runs where ve_project_id=$1 order by id',[VE])),
+    'goal: accepted/uncertain identities, held reservations and daily quota stay unchanged');
+    check((await one('select public.ve_contact_supply_approval_current($1) ok',[PLAN])).ok,
+      'goal: audited numeric edit keeps the existing supply approval current');
+    const replay=await reserve();
+    check(replay.run_id===held.run_id && JSON.stringify(batchIds(replay))===JSON.stringify(batchIds(held))
+      && !batchIds(replay).some(id=>batchIds(first).includes(id)),
+    'goal: next delivery returns the same held rows and never repeats accepted or uncertain contacts');
+    for (const mutation of [
+      "delete from public.ve_contact_target_changes where project_id=$1 and revision=1",
+      "update public.ve_contact_target_changes set target_contacts=29999 where project_id=$1 and revision=2",
+      "update public.ve_contact_target_changes set revision=3 where project_id=$1 and revision=1",
+    ]) await inRollback(async () => {
+      await rows(mutation,[VE]);
+      await expectError('goal: missing, broken or future audit links reject historical launch',observeGoalSql,[ITEM,observed(1),refillNow],/bound delivery plan/);
+    });
+    await inRollback(async () => {
+      await rows('update public.ve_contact_target_changes set project_id=$2 where project_id=$1',[VE,VE_SECOND]);
+      await expectError('goal: another project audit history cannot authorize this launch',observeGoalSql,[ITEM,observed(1),refillNow],/bound delivery plan/);
+    });
+    for (const patch of [
+      {target_contacts:3999},{portal_project_id:PP},{portal_period_id:PERIOD},
+      {preset_id:'00000000-0000-4000-8000-000000000099'},
+      {instantly_account_id:'foreign'}, {reconciliation_required:true},
+    ]) await inRollback(async () => {
+      await rows('update public.ve_templates set launch_info=launch_info || $2::jsonb where id=$1',[TPL,JSON.stringify(patch)]);
+      await expectError('goal: original identity, period, preset, account and reconciliation fences remain enforced',observeGoalSql,
+        [ITEM,observed(1),refillNow],/bound delivery plan/);
+    });
+    await inRollback(async () => {
+      await rows("update public.ve_segmentation_audits set launch_status='failed' where id=$1",[AUDIT]);
+      await expectError('goal: failed preparation cannot observe provider state',observeGoalSql,[ITEM,observed(1),refillNow],/bound delivery plan/);
+    });
+    await inRollback(async () => {
+      await rows("update public.ve_contact_supply_plans set approval_snapshot='{}'::jsonb where id=$1",[PLAN]);
+      await expectError('goal: an edited goal never overrides stale supply approval',observeGoalSql,[ITEM,observed(1),refillNow],/approval is stale/);
+    });
+    await observe(2);
+    check((await reserve()).batches.length===0,'goal: specialist Pause still blocks delivery after the goal edit');
+    await observe(1);
+    await rows("update public.projects set status='Завершен' where id=$1",[STAFF]);
+    await expectError('goal: closed project remains blocked at reservation','select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,0)',[VE,refillNow],/not launchable/);
+  });
+  await commit();
+  for (const role of ['anon','authenticated','service_role']) await asRole(role,async () => {
+    await expectError(`${role} cannot call the private historical-goal helper`,
+      'select public.ve_launch_contact_target_current($1,4000)',[VE],/permission denied/i);
+  });
+
   // ── Помощники не доступны ролям API ──
   await db.exec('set role service_role');
   await expectError('service_role cannot bypass the reservation wrapper for refill',

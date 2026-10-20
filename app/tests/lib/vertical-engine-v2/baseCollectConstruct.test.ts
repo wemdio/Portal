@@ -1362,7 +1362,7 @@ describe('base_collect CONSTRUCT step order', () => {
     // explicit SQL repair reopens those same IDs with this saved-review marker.
     // Recheck only the unfinished verdict: no replacement source/SMTP batch and
     // no second accounting of the 6,753 already processed candidates.
-    for (const bounded of [false, true]) {
+    for (const collectionMode of ['supply', 'preview'] as const) for (const bounded of [false, true]) {
       const savedReady = { ...first, _email_status: 'ok', _ve_relevance: {
         version: 2, status: 'relevant', reason: 'Confirmed clinic', context_hash: 'a'.repeat(64),
         evidence: [{ field: 'description', quote: 'Clinic' }],
@@ -1370,31 +1370,36 @@ describe('base_collect CONSTRUCT step order', () => {
       const pending = { ...unifiedRow({ company: 'Saved Pending Clinic', website: 'pending.test', email: 'mail@pending.test' }),
         _email_status: 'ok', _relevance_unchecked: true };
       const round = bounded ? 5 : 71;
-      const maxRounds = bounded ? 5 : 100;
+      const maxRounds = bounded ? 5 : collectionMode === 'preview' ? 102 : 100;
+      const readyTarget = collectionMode === 'preview' ? 500 : bounded ? 3 : 2;
       const resumeInfo: VeCollectInfo = {
         ...collectInfo([first, pending], { bc_job_id: 'bc-billing-complete', status: 'done' }),
-        collection_mode: 'supply', supply_batch_id: 'supply-saved', ready_target: bounded ? 3 : 2,
+        collection_mode: collectionMode, ...(collectionMode === 'supply' ? { supply_batch_id: 'supply-saved' } : {}), ready_target: readyTarget,
         adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
-        target_progress: { ...createCollectionTarget('supply', bounded ? 3 : 2),
+        target_progress: { ...createCollectionTarget(collectionMode, readyTarget),
           round, max_rounds: maxRounds, max_candidates: 10_000, candidates_processed: 6753, ready_rows: 1 },
         target_checkpoint: { completed_round: round, seen_rows: [first, pending], processed_rows: 10475 },
         relevance_review_requested: true,
         relevance_reserve: { version: 1, rows: [savedReady, pending] },
-        supply_billing_resume: { version: 1, batch_id: 'supply-saved', job_id: 'job-1',
+        ...(collectionMode === 'supply' ? { supply_billing_resume: { version: 1 as const, batch_id: 'supply-saved', job_id: 'job-1',
           blocked_at: '2026-08-30T00:00:00Z', resumed_at: '2026-08-31T00:00:00Z',
-          max_rounds: maxRounds, max_candidates: 10_000 },
+          max_rounds: maxRounds, max_candidates: 10_000 } } : {
+          preview_billing_resume: { version: 1 as const, job_id: 'job-1', blocked_at: '2026-08-30T00:00:00Z',
+            resumed_at: '2026-08-31T00:00:00Z', max_rounds: maxRounds, max_candidates: 10_000 },
+          preview_pipeline: { version: 1 as const, revision: 1546, batches: [], completed_batches: 1, job_ids: ['bc-billing-complete'] },
+        }),
       };
       resumeInfo.tasks![0].exhausted = !bounded;
       resumeInfo.tasks![0].directory_cursors = { saved_lane: 9000 };
       const resumeJob = { ...makeJob(), payload: { ...makeJob().payload,
-        collection_mode: 'supply', supply_batch_id: 'supply-saved' }, attempts: 0 };
+        collection_mode: collectionMode, ...(collectionMode === 'supply' ? { supply_batch_id: 'supply-saved' } : {}) }, attempts: 0 };
       const paidChild = { id: 'bc-billing-complete', status: 'completed', selected_steps: ['split_emails', 'validate_emails'],
         data: [['Компания', 'Сайт', 'Email', 'Email Статус'],
           [first.company, first.website, first.email, 'ok'], [pending.company, pending.website, pending.email, 'ok']] };
       const resumeDb = seed(resumeInfo, {
         ve_bases: [{ ...makeBase(resumeInfo), data: [savedReady], row_count: 1, columns: [...VE_AUTO_COLLECT_COLUMNS] }],
         ve_jobs: [resumeJob as unknown as Record<string, unknown>],
-        ve_contact_supply_batches: [{ id: 'supply-saved', plan_id: 'supply-plan', base_id: 'b1', status: 'collecting' }],
+        ve_contact_supply_batches: collectionMode === 'supply' ? [{ id: 'supply-saved', plan_id: 'supply-plan', base_id: 'b1', status: 'collecting' }] : [],
         base_constructor_jobs: [structuredClone(paidChild)],
       });
       const originalRpc = resumeDb.rpc;
@@ -1405,16 +1410,18 @@ describe('base_collect CONSTRUCT step order', () => {
         : originalRpc(name, params);
       const sourceCalls = jest.mocked(searchRows).mock.calls.length;
       const gateCalls = mockFindIrrelevantRows.mock.calls.length;
-      await expect(runBaseCollectStage(resumeJob, { supabase: resumeDb as unknown as SupabaseClient }))
-        .resolves.toMatchObject({ result: { supply_held: true } });
-      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(gateCalls);
+      if (collectionMode === 'supply') {
+        await expect(runBaseCollectStage(resumeJob, { supabase: resumeDb as unknown as SupabaseClient }))
+          .resolves.toMatchObject({ result: { supply_held: true } });
+        expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(gateCalls);
+      }
       active = true;
       await resumeDb.from('ve_jobs').update({ status: 'running' }).eq('id', resumeJob.id);
       await runBaseCollectStage(resumeJob, { supabase: resumeDb as unknown as SupabaseClient });
       const saved = resumeDb.getRows('ve_bases')[0];
-      expect(saved).toMatchObject({ status: 'analyzed', row_count: 2 });
+      expect(saved).toMatchObject({ status: collectionMode === 'preview' ? 'analyzing' : 'analyzed', row_count: 2 });
       expect((saved.collect_info as VeCollectInfo).target_progress).toMatchObject({
-        status: bounded ? 'limited' : 'target_reached', round, max_rounds: maxRounds,
+        status: bounded ? 'limited' : collectionMode === 'preview' ? 'exhausted' : 'target_reached', round, max_rounds: maxRounds,
         max_candidates: 10_000, candidates_processed: 6753, ready_rows: 2,
       });
       expect((saved.collect_info as VeCollectInfo).target_checkpoint?.processed_rows).toBe(10475);
@@ -1423,8 +1430,11 @@ describe('base_collect CONSTRUCT step order', () => {
         .toEqual([['mail@pending.test']]);
       expect(searchRows).toHaveBeenCalledTimes(sourceCalls);
       expect(resumeDb.getRows('base_constructor_jobs')).toEqual([paidChild]);
-      expect(resumeDb.getRows('ve_contact_supply_batches')).toHaveLength(1);
-      expect(resumeDb.inserts).toEqual([]);
+      expect(resumeDb.getRows('ve_contact_supply_batches')).toHaveLength(collectionMode === 'supply' ? 1 : 0);
+      expect(resumeDb.inserts).toHaveLength(collectionMode === 'preview' ? 1 : 0);
+      if (collectionMode === 'preview') expect(resumeDb.getRows('ve_jobs')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ stage: 'base_analyze', payload: { base_id: 'b1' } }),
+      ]));
       const reviewed = mockFindIrrelevantRows.mock.calls.length;
       await runBaseCollectStage(resumeJob, { supabase: resumeDb as unknown as SupabaseClient });
       expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(reviewed);

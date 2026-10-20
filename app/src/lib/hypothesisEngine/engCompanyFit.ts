@@ -7,7 +7,7 @@ export interface HeEngCompanyFitInput {
   id: string;
   name: string;
   website: string;
-  quotes: Array<{ id: string; url: string; text: string }>;
+  quotes: Array<{ id: string; url: string; text: string; source?: 'constructor_website' | 'website' }>;
 }
 
 export interface HeEngCompanyFitScope {

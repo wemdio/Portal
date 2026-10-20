@@ -249,7 +249,12 @@ async function resumeFailedPreview(
     });
   }
   // «Продолжить подготовку» этой базы — новый бюджет раундов.
-  if (input.resumeBaseId === saved.id && !sourceRefresh) grantVeResumeRoundBudget(info);
+  if (input.resumeBaseId === saved.id && !sourceRefresh) {
+    // Only an explicit later continuation grants a new envelope. Automatic
+    // billing recovery itself never calls this path or clears its receipt.
+    delete info.preview_billing_resume;
+    grantVeResumeRoundBudget(info);
+  }
   if (info.preview_pipeline?.version === 1) {
     info.preview_pipeline = { ...info.preview_pipeline, revision: info.preview_pipeline.revision + 1 };
     delete info.preview_pipeline.error;

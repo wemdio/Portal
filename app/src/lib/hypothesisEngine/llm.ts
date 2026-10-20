@@ -62,6 +62,8 @@
  * бросает: платный вызов её не ждёт, и её сбой стадию не роняет.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { z } from 'zod';
 
 import { isHeProviderBillingError, isHeProviderConfigurationError } from './clientErrors';
@@ -481,10 +483,10 @@ export interface HeLlmTextCallOptions extends HeLlmCallOptions {
 }
 
 /**
- * Канал активной джобы воркера: отмена, признак жизни и лог прогона. Воркер
- * single-flight (handleJob выполняет строго одну джобу за раз), поэтому канал —
- * модульный: worker/hypothesisEngine.ts ставит его перед runHeStage и снимает
- * после. Вне воркера (API-роуты, CLI) канала нет — поведение прежнее.
+ * Канал активной джобы воркера: отмена, признак жизни и лог прогона. Параллельные
+ * ENG-сборки открывают withHeActiveJobScope; worker/hypothesisEngine.ts ставит
+ * канал перед runHeStage и снимает после. Последовательные legacy-вызовы
+ * сохраняют модульный канал. Вне воркера (API-роуты, CLI) его по-прежнему нет.
  */
 export interface HeActiveJobChannel {
   /**
@@ -528,29 +530,46 @@ export interface HeLlmSpend {
   costUsd: number;
 }
 
+// Старые последовательные вызовы сохраняют прежний канал. Только явно
+// обёрнутые ENG-джобы получают собственный канал для всех async-потомков.
 let activeJob: HeActiveJobChannel | null = null;
+const activeJobStorage = new AsyncLocalStorage<{ channel: HeActiveJobChannel | null }>();
+
+export function withHeActiveJobScope<T>(work: () => Promise<T>): Promise<T> {
+  return activeJobStorage.run({ channel: null }, work);
+}
+
+function getHeActiveJob(): HeActiveJobChannel | null {
+  const scope = activeJobStorage.getStore();
+  // Пустой scoped-канал не наследует legacy-джобу. После finally её сигнал,
+  // лог и расход также не должны попасть в поздний ответ ENG-запроса.
+  return scope ? scope.channel : activeJob;
+}
 
 export function setHeActiveJob(channel: HeActiveJobChannel | null): void {
-  activeJob = channel;
+  const scope = activeJobStorage.getStore();
+  if (scope) scope.channel = channel;
+  else activeJob = channel;
 }
 
 /**
  * Сигнал того же канала для стадий (stages/io.ts): отмена доходит не только до
  * LLM-запроса, но и до чтения сайта и поиска. Отдельного параметра контракта
- * для этого не вводим — воркер односоточный, источник сигнала один.
+ * для этого не вводим: ENG-джоба читает свой async-контекст, последовательные
+ * legacy-вызовы — прежний общий канал.
  */
 export function getHeActiveJobSignal(): AbortSignal | null {
-  return activeJob?.signal ?? null;
+  return getHeActiveJob()?.signal ?? null;
 }
 
 /** Попытка запроса началась/ответила — продлить окно сторожа простоя. */
 function noteLlmActivity(): void {
-  activeJob?.onActivity?.();
+  getHeActiveJob()?.onActivity?.();
 }
 
 /** Строка транспорта в лог прогона (или в лог процесса, если канала нет). */
 function llmLog(msg: string): void {
-  const sink = activeJob?.log;
+  const sink = getHeActiveJob()?.log;
   if (sink) sink(msg);
   else console.warn(msg);
 }
@@ -1268,7 +1287,7 @@ export async function callLLMWithSchema<T>(
 ): Promise<LLMResult<T>> {
   const maxTokens = opts.maxTokens ?? 4096;
   // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
-  const job = activeJob;
+  const job = getHeActiveJob();
   // Правило учёта — тоже один раз на вызов (см. шапку файла).
   const eng = heLlmEngAccounting(opts.market);
   return callLLMWithSchemaAttempts(
@@ -1457,7 +1476,7 @@ export async function callLLMText(
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
   // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
-  const job = activeJob;
+  const job = getHeActiveJob();
   // Правило учёта — тоже один раз на вызов (см. шапку файла).
   const eng = heLlmEngAccounting(opts.market);
   // Попытка одна (повтора схемы у свободного текста нет), поэтому срок попытки
