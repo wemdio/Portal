@@ -155,18 +155,24 @@ async function probeOnFreshConnection(
   let socket: net.Socket | null = null;
   try {
     socket = await new Promise<net.Socket>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('SMTP connect timeout')), timeout);
       const s = net.createConnection(
         // family:4 — PTR/HELO настроены под IPv4 egress'а; выбор AAAA на VPS
         // без IPv6 убивал пробу с ENETUNREACH.
         { host: mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS, family: 4 },
-        () => {
-          clearTimeout(timer);
-          resolve(s);
-        },
       );
+      // Own the pending socket too: a connect timeout must not leave it alive.
+      socket = s;
+      const timer = setTimeout(() => {
+        s.destroy();
+        reject(new Error('SMTP connect timeout'));
+      }, timeout);
+      s.once('connect', () => {
+        clearTimeout(timer);
+        resolve(s);
+      });
       s.once('error', (err) => {
         clearTimeout(timer);
+        s.destroy();
         reject(err);
       });
     });
@@ -217,18 +223,24 @@ export async function smtpCheck(req: SmtpCheckRequest): Promise<SmtpCheckResult>
 
   try {
     socket = await new Promise<net.Socket>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('SMTP connect timeout')), timeout);
       const s = net.createConnection(
         // family:4 — PTR/HELO настроены под IPv4 egress'а; выбор AAAA на VPS
         // без IPv6 убивал пробу с ENETUNREACH.
         { host: req.mxHost, port: SMTP_PROBE_PORT, timeout, localAddress: SMTP_PROBE_LOCAL_ADDRESS, family: 4 },
-        () => {
-          clearTimeout(timer);
-          resolve(s);
-        },
       );
+      // Own the pending socket too: a connect timeout must not leave it alive.
+      socket = s;
+      const timer = setTimeout(() => {
+        s.destroy();
+        reject(new Error('SMTP connect timeout'));
+      }, timeout);
+      s.once('connect', () => {
+        clearTimeout(timer);
+        resolve(s);
+      });
       s.once('error', (err) => {
         clearTimeout(timer);
+        s.destroy();
         reject(err);
       });
     });
