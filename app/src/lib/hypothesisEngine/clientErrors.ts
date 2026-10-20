@@ -138,6 +138,13 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   if (/\b(?:Requesty|Serper|OpenRouter)\s*(?:HTTP\s*)?[:(]?\s*(?:429|5\d\d)\b/i.test(message)) return 'provider';
   if (/\bSerper transient:/i.test(message)) return 'provider';
 
+  // A qualification stop is not a source/audience mismatch or an invitation to repay it.
+  if (/Company qualification stopped at its spending limit\./i.test(message)) return 'qualification_limit';
+  if (/Company qualification (?:could not verify the model response|has no saved response for a previous model request|stopped because the model service could not complete the request)\./i.test(message) ||
+      /ENG company qualification: (?:unsupported_model|invalid_budget|missing_budget_history|invalid_model_input);/i.test(message)) {
+    return 'qualification_incomplete';
+  }
+
   // Осознанные остановки сборки — СРАЗУ после правил провайдера, выше тарифных
   // и всех остальных. Оба якоря пишет только наш код (stages/baseCollect.ts:
   // отказ пробы среза и терминал «релевант-гейт снял все строки»,
