@@ -4562,6 +4562,7 @@ function AccountProfileModal({
    * нельзя, иначе это выглядит как «у аккаунта нет фото».
    */
   const [avatarWarning, setAvatarWarning] = useState<string | null>(null);
+  const [photoCleanupWarning, setPhotoCleanupWarning] = useState<string | null>(null);
 
   const pickAvatar = (file: File | null) => {
     setAvatar((prev) => {
@@ -4601,6 +4602,8 @@ function AccountProfileModal({
   const save = async () => {
     setSaving(true);
     setError(null);
+    setAvatarWarning(null);
+    setPhotoCleanupWarning(null);
     try {
       const token = await getAccessToken();
       const form = new FormData();
@@ -4621,6 +4624,7 @@ function AccountProfileModal({
         (Partial<OutreachAccount> & {
           error?: string;
           avatar_error?: string;
+          photo_cleanup_error?: string;
           queued?: boolean;
           message?: string;
           rest_until?: string;
@@ -4631,7 +4635,7 @@ function AccountProfileModal({
       }
       // Строку списка обновляем ответом, а не перечитыванием всего списка:
       // ответ и есть то, что реально встало в Telegram.
-      const { error: _e, avatar_error: _a, queued: _q, message: _m, rest_until: restUntil, ...applied } =
+      const { error: _e, avatar_error: _a, photo_cleanup_error: photoCleanupError, queued: _q, message: _m, rest_until: restUntil, ...applied } =
         body ?? {};
       if (!body?.queued) {
         onSaved({ ...applied, ...(restUntil ? { profile_rest_until: restUntil } : {}) });
@@ -4646,6 +4650,7 @@ function AccountProfileModal({
       // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
       // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
       if (body?.avatar_error) setAvatarWarning(body.avatar_error);
+      if (photoCleanupError) setPhotoCleanupWarning(photoCleanupError);
       /**
        * Отлёжка после смены имени или аватарки — говорим сразу, а не плашкой в
        * списке постфактум.
@@ -4665,7 +4670,7 @@ function AccountProfileModal({
           + 'в это время разрешён.',
         );
       }
-      if (body?.avatar_error || body?.rest_until) return;
+      if (body?.avatar_error || photoCleanupError || body?.rest_until) return;
       onClose();
     } finally {
       setSaving(false);
@@ -4684,6 +4689,7 @@ function AccountProfileModal({
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             Меняется настоящий профиль аккаунта в Telegram. Частая смена имени и особенно аватарки — сигнал для
             антиспама: настраивайте один раз перед запуском. Кампания должна быть остановлена.
+            При сохранении номер телефона скрывается. Новая аватарка заменяет все старые фото профиля.
           </div>
 
           {/* Текущая аватарка и загрузка новой: кликабельно всё — и картинка,
@@ -4843,6 +4849,11 @@ function AccountProfileModal({
           </label>
 
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
+          {photoCleanupWarning && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {photoCleanupWarning}
+            </div>
+          )}
           {avatarWarning && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               Аватарка не сохранилась в портале: {avatarWarning}. В Telegram она при этом на месте —

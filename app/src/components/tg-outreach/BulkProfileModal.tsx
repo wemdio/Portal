@@ -37,7 +37,7 @@ const MAX_AVATAR_BYTES = 1024 * 1024;
 /** Сколько аккаунтов обрабатываем одновременно. */
 const LANE_COUNT = 3;
 
-type RowState = 'idle' | 'busy' | 'done' | 'queued' | 'error';
+type RowState = 'idle' | 'busy' | 'done' | 'warning' | 'queued' | 'error';
 
 interface Proposal {
   firstName: string;
@@ -77,6 +77,7 @@ interface ApplyResponse {
   tg_username?: string;
   avatar_url?: string;
   avatar_error?: string;
+  photo_cleanup_error?: string;
   error?: string;
 }
 
@@ -217,8 +218,11 @@ export function BulkProfileModal({
         ...(data.avatar_url ? { avatar_url: data.avatar_url } : {}),
       });
       update(index, {
-        state: 'done',
-        detail: data.avatar_error ? `Профиль записан, аватарка — нет: ${data.avatar_error}` : 'Сохранено',
+        state: data.photo_cleanup_error || data.avatar_error ? 'warning' : 'done',
+        detail: [
+          data.photo_cleanup_error,
+          data.avatar_error ? `Аватарка не сохранилась в портале: ${data.avatar_error}` : '',
+        ].filter(Boolean).join(' ') || 'Сохранено',
         // Подобранное уже применено: держать его дальше значит предлагать
         // сохранить второй раз то же самое. Файл отпускаем, а картинку в строке
         // оставляем — иначе аватарка исчезала ровно в момент «Сохранено», и это
@@ -284,6 +288,7 @@ export function BulkProfileModal({
   const pending = rows.filter((r) => r.proposal || r.avatar).length;
   const saved = rows.filter((r) => r.state === 'done').length;
   const queued = rows.filter((r) => r.state === 'queued').length;
+  const warnings = rows.filter((r) => r.state === 'warning').length;
   const failed = rows.filter((r) => r.state === 'error').length;
 
   return (
@@ -304,6 +309,9 @@ export function BulkProfileModal({
             <p className="mt-0.5 text-xs text-gray-500">
               Выбрано аккаунтов: {rows.length}. «Подобрать имена» только предлагает — в Telegram ничего
               не уйдёт, пока не нажмёте «Сохранить изменения».
+            </p>
+            <p className="mt-1 text-xs text-gray-500">
+              При сохранении номер телефона скрывается. Новая аватарка заменяет все старые фото профиля.
             </p>
           </div>
           <button
@@ -329,9 +337,10 @@ export function BulkProfileModal({
           <span className="text-[11px] text-gray-400">
             Можно выбрать сразу несколько — разложатся по аккаунтам сверху вниз. До 1 МБ каждая.
           </span>
-          {saved || queued || failed ? (
+          {saved || warnings || queued || failed ? (
             <span className="ml-auto text-xs text-gray-500">
               Сохранено {saved}
+              {warnings ? ` · с предупреждением ${warnings}` : ''}
               {queued ? ` · в очереди ${queued}` : ''}
               {failed ? ` · с ошибкой ${failed}` : ''}
             </span>
@@ -397,6 +406,8 @@ export function BulkProfileModal({
                   <Check className="ml-auto h-4 w-4 text-emerald-500" />
                 ) : row.state === 'queued' ? (
                   <Clock className="ml-auto h-4 w-4 text-amber-500" />
+                ) : row.state === 'warning' ? (
+                  <AlertCircle className="ml-auto h-4 w-4 text-amber-500" />
                 ) : row.state === 'error' ? (
                   <AlertCircle className="ml-auto h-4 w-4 text-rose-500" />
                 ) : null}
