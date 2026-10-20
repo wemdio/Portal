@@ -202,6 +202,7 @@ import { heEngBaseBudgetActive, rethrowHeEngBaseBudgetError } from '../engBaseBu
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
+import { withHeEngCollectionCommitLock } from '../engCollectionLocks';
 import {
   sanitizeEngContactDiagnostics,
   type EngContactCollectionDiagnostics,
@@ -8545,7 +8546,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // Считаем по САМИМ строкам, а не по размеру набора ключей: у одной компании
   // после split_emails несколько строк, и оба шага выше могли пометить одну и
   // ту же (у базы с отказавшим гейтом до конструктора — реально могут).
-  const lowRelevanceCount = storedRows.reduce((n, r) => n + (r._low_relevance === true ? 1 : 0), 0);
+  let lowRelevanceCount = storedRows.reduce((n, r) => n + (r._low_relevance === true ? 1 : 0), 0);
   // Адресов, которые запуск реально возьмёт: для ENG допущенные ok/catch_all,
   // для остальных прежний 'ok'; строка не помечена вне вертикали. Это ОЦЕНКА СВЕРХУ:
   // запуск ещё выбросит строки без разбираемого адреса, повторные адреса (после
@@ -8555,7 +8556,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     (n, r) => n + ((engEmailPolicy || r._email_status === 'ok') && r._low_relevance !== true ? 1 : 0),
     0,
   );
-  const statsWithQuality = {
+  let statsWithQuality = {
     ...stats,
     low_relevance: lowRelevanceCount,
     companies_total: companiesTotal,
@@ -8691,65 +8692,112 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         `${rowsBeforeEmailPolicy} собранных компаний как не принадлежащие вертикали. ` +
         'Поиск и проверка адресов не запускались — рассылка по такому срезу навредила бы ' +
         'рабочим вертикалям.';
-  const harvestRow = {
-    columns: finalColumns,
-    sample_rows: storedRows.slice(0, SAMPLE_ROWS),
-    data: storedRows,
-    row_count: storedRows.length,
-    status: offTargetNote ? 'failed' : 'analyzing',
-    ...(offTargetNote ? { error: offTargetNote.slice(0, 500) } : {}),
-    collect_info: { ...dropCollectWorkState(info), stats: statsWithQuality },
-    // Кап «адресов на компанию» живёт в collect_info.construct.contact_cap —
-    // там его и читают (запуск, долив); отдельной колонки под него у he_bases
-    // нет (см. HeConstructInfo.contact_cap).
-    updated_at: new Date().toISOString(),
-  };
-  /**
-   * Финальную запись при БЛИПЕ БД повторяем — повторяется ЗАПРОС, не стадия.
-   *
-   * Это самая дорогая точка невозврата в движке: до неё уже оплачены план,
-   * коллекторы, конструктор и релевант-гейт, а сама запись адресована по id и
-   * идемпотентна (одни и те же строки, статус и collect_info). Отказ здесь
-   * уходил в фейл джобы, воркер поднимал стадию заново, и повтор доходил до
-   * этого места СНОВА через суд релевант-гейта ПОСЛЕ импорта (единственная
-   * платная работа, которая на повторе не memoized, — путь RU-инструмента,
-   * gateRan=false): три попытки = до трёх оплаченных судов там, где не сохранился
-   * один апдейт. 502/503 шлюза лечится тремя секундами ожидания, а не деньгами.
-   *
-   * Постоянный отказ (невалидный JSON, права, ограничение) не повторяем: он не
-   * изменится, и прежний путь — фейл джобы с причиной — остаётся его путём.
-   *
-   * И по той же причине запись идёт КЛИЕНТОМ БЕЗ СИГНАЛА ДЖОБЫ (paidCheckpointDb):
-   * повторы внутри запроса не помогут, если сам запрос отвергнут за то, что джобу
-   * уже прервали. Статус базы эта запись МЕНЯЕТ, поэтому барьера `'collecting'` у
-   * неё нет — он превратил бы отказ в тихий ноль строк, а ниже по коду стоит
-   * постановка анализа. Гонка «отмена пользователем прилетела ровно между
-   * start-guard'ом и этой записью → база оживает в 'analyzing'» этим не создаётся:
-   * так же было и до волны 4b, когда стадия работала общим клиентом без сигнала.
-   * Чем она кончается с 08.10.2026: анализ отменённой сборке не ставится
-   * (ensureBaseAnalyzeJob проверяет владение строкой джобы перед вставкой), а
-   * ожившую базу без живой джобы закрывает воркер, разбирая отмену
-   * (worker/hypothesisEngine.ts: closeAnalyzingBaseAfterCancel → 'failed' с
-   * текстом отмены).
-   */
-  let updErrorMsg: string | null = null;
-  for (let attempt = 1; attempt <= HARVEST_WRITE_ATTEMPTS; attempt += 1) {
-    const { error } = await paidCheckpointDb(ctx).from('he_bases').update(harvestRow).eq('id', baseId);
-    if (!error) {
-      updErrorMsg = null;
-      break;
+  let finalFailureNote = offTargetNote;
+  const writeHarvest = async (): Promise<void> => {
+    if (engEmailPolicy) {
+      // Another ENG vertical can finish while this one qualifies companies.
+      // Re-read inside the project commit lock: the earlier per-tick cache is
+      // deliberately not reused. No provider calls run in this critical section.
+      const freshKeys = await loadOtherBaseExclusionKeys(
+        { ...ctx, supabase: paidCheckpointDb(ctx) }, job.project_id, baseId, market, dncDomains,
+      );
+      const rechecked = heRecheckImportedRows({
+        rows: storedRows,
+        emailStatuses: storedRows.map((row) => row._email_status ?? null),
+        keys: freshKeys,
+        market,
+      });
+      storedRows = rechecked.rows;
+      finalEmailStatuses = rechecked.emailStatuses;
+      droppedInOtherBases = (droppedInOtherBases ?? 0) + rechecked.droppedInOtherBases;
+      droppedDoNotContact += rechecked.droppedDoNotContact;
+      companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
+      lowRelevanceCount = storedRows.reduce((n, row) => n + (row._low_relevance === true ? 1 : 0), 0);
+      statsWithQuality = {
+        ...statsWithQuality,
+        low_relevance: lowRelevanceCount,
+        companies_total: companiesTotal,
+        ok_contacts: storedRows.length - lowRelevanceCount,
+        dropped_in_other_bases: droppedInOtherBases,
+        ...(droppedDoNotContact > 0 ? { dropped_do_not_contact: droppedDoNotContact } : {}),
+      };
+      if (info.construct) info.construct = { ...info.construct, valid_count: storedRows.length };
+      if (rechecked.droppedInOtherBases > 0 || rechecked.droppedDoNotContact > 0) {
+        stageLog(ctx, `[base_collect] final ENG recheck: ${rechecked.droppedInOtherBases} addresses already in other bases, ` +
+          `${rechecked.droppedDoNotContact} on Do not contact; ${storedRows.length} kept`);
+      }
+      if (storedRows.length === 0 && !finalFailureNote) {
+        finalFailureNote = rechecked.droppedDoNotContact > 0 &&
+          rechecked.droppedDoNotContact >= rechecked.droppedInOtherBases
+          ? 'Авто-сборка не дала строк: все оставшиеся адреса — в списке Do not contact клиента'
+          : 'Авто-сборка не дала строк: все оставшиеся компании уже есть в других базах проекта';
+      }
     }
-    updErrorMsg = error.message;
-    if (attempt >= HARVEST_WRITE_ATTEMPTS || !isTransientDbError(error)) break;
-    stageLog(
-      ctx,
-      `[base_collect] финальная запись базы отвергнута (попытка ${attempt}/${HARVEST_WRITE_ATTEMPTS}), ` +
-        `повторяем — блип БД: ${error.message}`,
-    );
-    await sleep(HARVEST_WRITE_RETRY_BASE_MS * attempt);
+    const harvestRow = {
+      columns: finalColumns,
+      sample_rows: storedRows.slice(0, SAMPLE_ROWS),
+      data: storedRows,
+      row_count: storedRows.length,
+      status: finalFailureNote ? 'failed' : 'analyzing',
+      ...(finalFailureNote ? { error: finalFailureNote.slice(0, 500) } : {}),
+      collect_info: { ...dropCollectWorkState(info), stats: statsWithQuality },
+      // Кап «адресов на компанию» живёт в collect_info.construct.contact_cap —
+      // там его и читают (запуск, долив); отдельной колонки под него у he_bases
+      // нет (см. HeConstructInfo.contact_cap).
+      updated_at: new Date().toISOString(),
+    };
+    /**
+     * Финальную запись при БЛИПЕ БД повторяем — повторяется ЗАПРОС, не стадия.
+     *
+     * Это самая дорогая точка невозврата в движке: до неё уже оплачены план,
+     * коллекторы, конструктор и релевант-гейт, а сама запись адресована по id и
+     * идемпотентна (одни и те же строки, статус и collect_info). Отказ здесь
+     * уходил в фейл джобы, воркер поднимал стадию заново, и повтор доходил до
+     * этого места СНОВА через суд релевант-гейта ПОСЛЕ импорта (единственная
+     * платная работа, которая на повторе не memoized, — путь RU-инструмента,
+     * gateRan=false): три попытки = до трёх оплаченных судов там, где не сохранился
+     * один апдейт. 502/503 шлюза лечится тремя секундами ожидания, а не деньгами.
+     *
+     * Постоянный отказ (невалидный JSON, права, ограничение) не повторяем: он не
+     * изменится, и прежний путь — фейл джобы с причиной — остаётся его путём.
+     *
+     * И по той же причине запись идёт КЛИЕНТОМ БЕЗ СИГНАЛА ДЖОБЫ (paidCheckpointDb):
+     * повторы внутри запроса не помогут, если сам запрос отвергнут за то, что джобу
+     * уже прервали. Статус базы эта запись МЕНЯЕТ, поэтому барьера `'collecting'` у
+     * неё нет — он превратил бы отказ в тихий ноль строк, а ниже по коду стоит
+     * постановка анализа. Гонка «отмена пользователем прилетела ровно между
+     * start-guard'ом и этой записью → база оживает в 'analyzing'» этим не создаётся:
+     * так же было и до волны 4b, когда стадия работала общим клиентом без сигнала.
+     * Чем она кончается с 08.10.2026: анализ отменённой сборке не ставится
+     * (ensureBaseAnalyzeJob проверяет владение строкой джобы перед вставкой), а
+     * ожившую базу без живой джобы закрывает воркер, разбирая отмену
+     * (worker/hypothesisEngine.ts: closeAnalyzingBaseAfterCancel → 'failed' с
+     * текстом отмены).
+     */
+    let updErrorMsg: string | null = null;
+    for (let attempt = 1; attempt <= HARVEST_WRITE_ATTEMPTS; attempt += 1) {
+      const { error } = await paidCheckpointDb(ctx).from('he_bases').update(harvestRow).eq('id', baseId);
+      if (!error) {
+        updErrorMsg = null;
+        break;
+      }
+      updErrorMsg = error.message;
+      if (attempt >= HARVEST_WRITE_ATTEMPTS || !isTransientDbError(error)) break;
+      stageLog(
+        ctx,
+        `[base_collect] финальная запись базы отвергнута (попытка ${attempt}/${HARVEST_WRITE_ATTEMPTS}), ` +
+          `повторяем — блип БД: ${error.message}`,
+      );
+      await sleep(HARVEST_WRITE_RETRY_BASE_MS * attempt);
+    }
+    if (updErrorMsg) throw new Error(`he_bases harvest update: ${updErrorMsg}`);
+  };
+  if (engEmailPolicy) {
+    await withHeEngCollectionCommitLock(job.project_id, writeHarvest);
+  } else {
+    await writeHarvest();
   }
-  if (updErrorMsg) throw new Error(`he_bases harvest update: ${updErrorMsg}`);
-  if (offTargetNote) {
+  if (finalFailureNote) {
     // Анализ не ставим — анализировать нечего, а поставленный base_analyze увёл
     // бы базу обратно в живой статус. Бросаем той же причиной, как отказ пробы
     // среза, и повтор джобы НИЧЕГО не переплачивает: база уже в терминальном
@@ -8759,8 +8807,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // Причину читает кабинет из he_bases.error, и она доживает: базу в
     // терминальном статусе repairBaseAfterCollectFinalFail не трогает
     // (HE_BASE_TERMINAL_STATUSES → return).
-    stageLog(ctx, `[base_collect] ${offTargetNote}`);
-    throw new Error(offTargetNote);
+    stageLog(ctx, `[base_collect] ${finalFailureNote}`);
+    throw new Error(finalFailureNote);
   }
 
   // Постановка анализа — через дедуп (ensureBaseAnalyzeJob): повторный вход в
