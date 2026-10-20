@@ -35,6 +35,9 @@ interface ManualRow {
   message_id: string;
   in_reply_to: string | null;
   attempts: number;
+  cc_emails?: string[];
+  agency_handoff_id?: string | null;
+  created_at?: string;
 }
 
 function fromHeader(mailbox: MailboxRow): string {
@@ -62,6 +65,29 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
   let sent = 0;
   for (const message of messages) {
     const nowIso = new Date().toISOString();
+    if (message.agency_handoff_id) {
+      // Recheck immediately before SMTP: a queued introduction is cancelled by
+      // disabling the setting, opt-out, manual rejection or an operator's reply.
+      const [handoff, recipient, manual, suppression] = await Promise.all([
+        db.from('agency_lead_handoffs').select('scope, created_at').eq('id', message.agency_handoff_id).maybeSingle(),
+        db.from('sender_recipients').select('status, lead_verdict, lead_verdict_source').eq('id', message.recipient_id!).maybeSingle(),
+        db.from('sender_manual_messages').select('id').eq('recipient_id', message.recipient_id!)
+          .is('agency_handoff_id', null).limit(1),
+        db.from('sender_suppressions').select('email').eq('email', message.to_email).limit(1),
+      ]);
+      const config = handoff.data ? await db.from('agency_lead_handoff_settings').select('enabled, enabled_at')
+        .eq('scope', handoff.data.scope).maybeSingle() : null;
+      const r = recipient.data;
+      const blocked = handoff.error || recipient.error || manual.error || suppression.error || config?.error ||
+        !config?.data?.enabled || !config.data.enabled_at || !handoff.data || handoff.data.created_at < config.data.enabled_at ||
+        !r || ['unsubscribed', 'bounced', 'stopped'].includes(r.status) ||
+        (r.lead_verdict_source === 'manual' && r.lead_verdict === 'not_lead') || manual.data?.length || suppression.data?.length;
+      if (blocked) {
+        await db.from('sender_manual_messages').update({ status: 'failed',
+          error: 'Автопередача отменена: проверьте настройки, состояние переписки и ручные ответы', updated_at: nowIso }).eq('id', message.id);
+        continue;
+      }
+    }
     const { data: row } = await db.from('sender_mailboxes').select('*').eq('id', message.mailbox_id).maybeSingle();
     const mailbox = row as MailboxRow | null;
 
@@ -97,6 +123,7 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
       {
         from: fromHeader(mailbox),
         to: message.to_email,
+        cc: message.cc_emails,
         subject: message.subject,
         text: message.body,
         messageId: message.message_id,
@@ -117,7 +144,7 @@ export async function processManualMessages(opts: { egressIp: string; log?: Log;
     // Ручной ответ ретраим мягко: оставляем в 'sending' — stale-ветка claim
     // подберёт его через 10 минут (это и есть задержка ретрая), вечного цикла
     // нет из-за потолка попыток.
-    if (attempts < MAX_ATTEMPTS && result.code !== 'recipient_rejected' && result.code !== 'rejected') {
+    if (!message.agency_handoff_id && attempts < MAX_ATTEMPTS && result.code !== 'recipient_rejected' && result.code !== 'rejected') {
       await db.from('sender_manual_messages')
         .update({ attempts, error: result.error ?? null })
         .eq('id', message.id);

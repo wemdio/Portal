@@ -51,6 +51,7 @@
 
 ## Release and production boundary (critical)
 
+- Do not create a new branch for each feature or fix automatically. Before creating any new branch, ask the user whether this task should use a new branch and wait for an explicit yes. If the user already requested a new branch for this task, that request is sufficient. Otherwise, use the current working branch within the authorization below; if that branch is not authorized, ask the user which existing branch to use.
 - For code or documentation changes, the default authorized stopping point is: create a focused commit on the current working branch for that task. **Never push on your own: after each commit (or batch of commits) ask the user whether to push it, and push only after an explicit yes.** An earlier yes covers only that push, not later commits.
 - Never switch to, commit to, or push to another developer's named branch unless the user explicitly requests that exact branch action.
 - After the user confirms and the push is done, stop and report the branch, commit SHA, and validation results. The user normally handles all further merges and deployment through Tasks.

@@ -8,6 +8,8 @@
 import { Api } from 'telegram';
 import type { TelegramClient } from 'telegram';
 import { CustomFile } from 'telegram/client/uploads';
+import bigInt from 'big-integer';
+import { withTimeout } from '../withTimeout';
 import { normalizeUsername, type ProfileInput } from './validateProfile';
 
 export interface ApplyProfileArgs {
@@ -28,6 +30,59 @@ export interface AppliedProfile {
   bio: string;
   tg_username: string;
   tg_user_id: number | null;
+  /** Новая аватарка уже стоит, но очистка старых фото завершилась не полностью. */
+  photo_cleanup_error?: string;
+}
+
+/** Уже скрытый номер не перенастраиваем; разрешающие исключения тоже убираем. */
+async function hidePhoneNumber(client: TelegramClient): Promise<void> {
+  const key = new Api.InputPrivacyKeyPhoneNumber();
+  const hidden = (rules: Api.TypePrivacyRule[]) =>
+    rules.length === 1 && rules[0] instanceof Api.PrivacyValueDisallowAll;
+  const current = await withTimeout(
+    client.invoke(new Api.account.GetPrivacy({ key })), 30_000, 'проверка видимости номера',
+  );
+  if (hidden(current.rules)) return;
+
+  const updated = await withTimeout(
+    client.invoke(new Api.account.SetPrivacy({ key, rules: [new Api.InputPrivacyValueDisallowAll()] })),
+    30_000, 'скрытие номера',
+  );
+  if (!hidden(updated.rules)) throw new Error('Telegram не подтвердил скрытие номера телефона.');
+}
+
+/** Снимок ДО загрузки: новая фотография никогда не попадёт в список удаления. */
+async function oldProfilePhotos(client: TelegramClient): Promise<Api.InputPhoto[]> {
+  const photos = new Map<string, Api.Photo>();
+  let offset = 0;
+  while (true) {
+    const page = await withTimeout(
+      client.invoke(new Api.photos.GetUserPhotos({
+        userId: new Api.InputUserSelf(), offset, maxId: bigInt.zero, limit: 100,
+      })),
+      30_000, 'чтение старых фото профиля',
+    );
+    if (!page.photos.length) break;
+    const previousSize = photos.size;
+    for (const photo of page.photos) {
+      if (photo instanceof Api.Photo) photos.set(photo.id.toString(), photo);
+    }
+    offset += page.photos.length;
+    if (!(page instanceof Api.photos.PhotosSlice) || offset >= page.count) break;
+    if (photos.size === previousSize) throw new Error('Telegram не вернул следующую страницу старых фото.');
+  }
+
+  // Отдельное публичное фото может показываться вместо основного из-за
+  // приватности аватарки и не входить в её обычную историю.
+  const full = await withTimeout(
+    client.invoke(new Api.users.GetFullUser({ id: new Api.InputUserSelf() })),
+    30_000, 'чтение публичного фото профиля',
+  );
+  const fallback = full.fullUser.fallbackPhoto;
+  if (fallback instanceof Api.Photo) photos.set(fallback.id.toString(), fallback);
+  return [...photos.values()].map((photo) => new Api.InputPhoto({
+    id: photo.id, accessHash: photo.accessHash, fileReference: photo.fileReference,
+  }));
 }
 
 export async function applyProfile({
@@ -36,6 +91,8 @@ export async function applyProfile({
   avatar,
   currentUsername,
 }: ApplyProfileArgs): Promise<AppliedProfile> {
+  // Выполняется и для одиночного/массового сохранения, и для заказа в круге.
+  await hidePhoneNumber(client);
   await client.invoke(
     new Api.account.UpdateProfile({
       firstName: profile.first_name.trim(),
@@ -59,12 +116,35 @@ export async function applyProfile({
     }
   }
 
+  let photoCleanupError: string | undefined;
   if (avatar) {
+    const oldPhotos = await oldProfilePhotos(client);
     const file = await client.uploadFile({
       file: new CustomFile(avatar.name, avatar.buffer.length, avatar.name, avatar.buffer),
       workers: 1,
     });
-    await client.invoke(new Api.photos.UploadProfilePhoto({ file }));
+    const uploaded = await client.invoke(new Api.photos.UploadProfilePhoto({ file }));
+    if (!(uploaded.photo instanceof Api.Photo)) {
+      throw new Error('Telegram не подтвердил установку новой аватарки. Старые фото сохранены.');
+    }
+    // Дополнительная защита на случай, если Telegram вернул уже существующее фото.
+    const removable = oldPhotos.filter((photo) => !photo.id.equals(uploaded.photo.id));
+    try {
+      for (let i = 0; i < removable.length; i += 100) {
+        const batch = removable.slice(i, i + 100);
+        const deleted = await withTimeout(
+          client.invoke(new Api.photos.DeletePhotos({ id: batch })), 30_000, 'удаление старых фото профиля',
+        );
+        const deletedIds = new Set(deleted.map((id) => id.toString()));
+        if (batch.some((photo) => !deletedIds.has(photo.id.toString()))) {
+          throw new Error('Telegram не подтвердил удаление всех старых фото.');
+        }
+      }
+    } catch (err) {
+      // Фото уже загружено: возвращаем реальный профиль, чтобы портал сохранил
+      // аватарку и отлёжку, а оператор увидел незавершённую очистку.
+      photoCleanupError = `Новая аватарка установлена, но старые фото удалены не полностью: ${describeTelegramError(err)}`;
+    }
   }
 
   const me = (await client.getEntity('me')) as {
@@ -82,6 +162,7 @@ export async function applyProfile({
     bio: profile.bio.trim(),
     tg_username: me.username ?? '',
     tg_user_id: me.id != null ? Number(me.id) : null,
+    ...(photoCleanupError ? { photo_cleanup_error: photoCleanupError } : {}),
   };
 }
 
