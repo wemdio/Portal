@@ -74,6 +74,11 @@ import {
 } from './costTelemetry';
 import type { HeMarket } from './market';
 import { HE_US_REQUESTY_KEY_ENV, heUsProviderKey } from './providerKeys';
+import {
+  rethrowHeEngBaseBudgetError,
+  reserveHeEngRequestyCall,
+  settleHeEngRequestyCall,
+} from './engBaseBudget';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -1063,18 +1068,27 @@ async function rawCall(
 
   for (let attempt = 0; ; attempt++) {
     signal.throwIfAborted();
+    // Only confirmed client ENG base scopes have a ledger. Every real POST,
+    // including retries/repairs/fallbacks, reserves its full upper cost first.
+    // A denied reservation stays outside the transport catch: no paid request
+    // was made and a budget stop must never turn into a transient retry.
+    const budgetCall = await reserveHeEngRequestyCall(model, body, maxTokens, signal);
     let failure: HeLlmHttpError | HeLlmTransportError;
     // Отсчёт от отправки ЭТОЙ попытки (пауза бэкоффа сюда не входит): по нему
     // retryWaitMs отличает отказ «на входе» от отказа после генерации.
     const sentAt = Date.now();
     // Код ответа этой попытки — для строки журнала расхода (journalRequestyCall).
     let httpStatus: number | undefined;
+    let dispatched = false;
+    let journaled = false;
     try {
       // Признак жизни ДО запроса и сразу ПОСЛЕ ответа: между ними идёт самое
       // длинное законное молчание движка — генерация ответа моделью. Отметка на
       // каждой попытке, включая транспортные повторы, — именно этим сторож
       // простоя отличает работающий платный вызов от зависшей стадии.
       noteLlmActivity();
+      signal.throwIfAborted();
+      dispatched = true;
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -1115,6 +1129,10 @@ async function rawCall(
         // Ответ принят — строка журнала с токенами и ценой (до решения
         // вызывающего о годности ответа: оплачен он в любом случае).
         journalRequestyCall(model, 'ok', httpStatus, response);
+        journaled = true;
+        // Settle the provider's actual charge before any schema validation can
+        // request another paid repair. Unknown charge retains its entire reserve.
+        await settleHeEngRequestyCall(budgetCall, response.usage?.cost);
         return { text: response.choices?.[0]?.message?.content ?? '', response };
       }
       const text = await res.text();
@@ -1131,10 +1149,16 @@ async function rawCall(
           : undefined,
       );
       journalRequestyCall(model, 'failed', httpStatus);
+      journaled = true;
+      // HTTP failures do not establish a zero provider charge. A scoped ENG
+      // base pauses instead of paying for another uncertain request.
+      await settleHeEngRequestyCall(budgetCall, undefined);
     } catch (err) {
       // Пригодного ответа нет: отмена, свой срок, обрыв, тело 200 не
       // дочиталось или не конверт чата — исполнен ли запрос, неизвестно.
-      journalRequestyCall(model, 'aborted', httpStatus);
+      if (!journaled) journalRequestyCall(model, 'aborted', httpStatus);
+      await settleHeEngRequestyCall(budgetCall, dispatched ? undefined : 0);
+      rethrowHeEngBaseBudgetError(err);
       throwIfInterrupted(signal, err);
       // Уже классифицированный отказ (конверт 200 выше) сохраняем как есть:
       // иначе класс снова назначал бы catch-all, и «тот же запрос ответит тем

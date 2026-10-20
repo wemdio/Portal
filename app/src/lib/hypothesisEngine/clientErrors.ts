@@ -133,6 +133,9 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   const message = errorMessage(error);
   if (!message.trim()) return 'unknown';
 
+  if (/ENG base budget:\s*budget_exhausted\b/i.test(message)) return 'base_budget_limit';
+  if (/ENG base budget:/i.test(message)) return 'base_budget_unavailable';
+
   const teamFixable = heTeamFixableFailureOf(message);
   if (teamFixable) return teamFixable;
   if (/\b(?:Requesty|Serper|OpenRouter)\s*(?:HTTP\s*)?[:(]?\s*(?:429|5\d\d)\b/i.test(message)) return 'provider';

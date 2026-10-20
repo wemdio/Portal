@@ -55,6 +55,10 @@ export type HeClientErrorCode =
   | 'qualification_limit'
   /** A paid company-check result is missing or cannot be trusted. */
   | 'qualification_incomplete'
+  /** The base's shared collection, analysis and letters budget is exhausted. */
+  | 'base_budget_limit'
+  /** Its remaining budget or a provider price cannot be verified safely. */
+  | 'base_budget_unavailable'
   /** В источниках не осталось новых компаний после исключения уже собранных. */
   | 'segment_exhausted'
   /**
@@ -162,6 +166,8 @@ export const HE_COLLECT_STOP_REPEATS_CODES = [
   'company_unverified',
   'qualification_limit',
   'qualification_incomplete',
+  'base_budget_limit',
+  'base_budget_unavailable',
   'segment_exhausted',
   // Повтор упрётся в тот же список стран / тот же Do not contact, пока клиент
   // его не поправит (§1A, §1B). Список сверх лимита — так же: его текст зовёт
@@ -445,6 +451,16 @@ export const HE_REFILL_RUN_WHAT_TO_DO_EN =
   'This was one run of the daily top-up, and a top-up run is not restarted by hand; «Daily top-up» in the Command Center shows whether it goes on. Message Support if it keeps stopping.';
 
 const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
+  base_budget_limit: {
+    title: 'Preparation stopped to keep this base within its $5 limit.',
+    whatIsSaved: 'Completed work is kept. Collection, analysis and letters share this limit.',
+    whatToDo: 'Review the saved results with Support. Retrying the same base does not reset its budget.',
+  },
+  base_budget_unavailable: {
+    title: 'Preparation stopped because the remaining budget could not be confirmed.',
+    whatIsSaved: 'Completed work is kept. No further paid requests will run while the cost is uncertain.',
+    whatToDo: 'Contact Support to check the cost record before continuing.',
+  },
   qualification_limit: {
     title: 'Company checking stopped at its spending limit.',
     whatIsSaved: 'Completed checks are saved. Companies without confirmed evidence were not added to this base.',

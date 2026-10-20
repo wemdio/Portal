@@ -193,7 +193,9 @@ import {
 } from './templateOperatorGate';
 import { describeHeLaunchWindow, resolveHeLaunchSendingWindow, type HeLaunchWindowSource } from './launchSchedule';
 import { readHeCollectCountries } from './engCountries';
-import { readHeEngEmailPolicy } from './engEmailPolicy';
+import { readHeEngBaseFirst } from './engBaseFirst';
+import { rethrowHeEngBaseBudgetError, withHeEngBaseBudget } from './engBaseBudget';
+import { getHeClientFailure } from './clientErrors';
 import {
   HE_ENG_COMPANY_QUALIFICATION_REQUIRED,
   heEngCompanyQualified,
@@ -1600,11 +1602,15 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   // stop before any sender call; locale or project market alone is not enough.
   let allowCatchAll: boolean;
   try {
-    allowCatchAll = await readHeEngEmailPolicy(portalDb, projectRow);
+    allowCatchAll = await readHeEngBaseFirst(portalDb, projectRow);
   } catch (err) {
     await logError(`${eventPrefix}.email_policy_failed`, err, { userId, templateId, projectId: base.project_id });
     return { status: 500, body: { error: t.marketReadFailed } };
   }
+  // Both client and staff launch routes reach this shared continuation. Only
+  // verified ENG-client ownership opens the same persistent budget as collection
+  // and letters; the RU return above and US staff projects keep their old path.
+  const runUsLaunch = async (): Promise<HeTemplateLaunchOutcome> => {
   let qualificationScope: HeEngQualificationScope | null = null;
   const qualificationBrief = projectRow.brief as Record<string, unknown> | null | undefined;
   if (allowCatchAll && base.source === 'auto') {
@@ -2493,6 +2499,12 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       detailed.assignments.forEach((segment, idx) => answers.set(positions[idx], segment));
       return { answers, held: detailed.unanswered.map((idx) => positions[idx]) };
     } catch (err) {
+      try {
+        rethrowHeEngBaseBudgetError(err);
+      } catch (budgetError) {
+        await releaseClaim();
+        throw budgetError;
+      }
       await logError(`${eventPrefix}.segment_classify_failed`, err, { userId, templateId });
       classifier.failureKinds.push('unknown');
       return { answers: new Map(), held: [...positions] };
@@ -3505,6 +3517,22 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
         : {}),
     },
   };
+  };
+  try {
+    return allowCatchAll
+      ? await withHeEngBaseBudget(portalDb, base.id, base.project_id, runUsLaunch, 'launch')
+      : await runUsLaunch();
+  } catch (error) {
+    let budgetError: unknown;
+    try {
+      rethrowHeEngBaseBudgetError(error);
+    } catch (stopped) {
+      budgetError = stopped;
+    }
+    if (!budgetError) throw error;
+    const failure = getHeClientFailure(budgetError);
+    return { status: 409, body: { error: failure.title, code: failure.code } };
+  }
 }
 
 /* ───────────── RU-проект: запуск как до порта ENG ───────────── */

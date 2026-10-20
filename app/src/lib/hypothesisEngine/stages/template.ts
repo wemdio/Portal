@@ -93,6 +93,7 @@
  */
 
 import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+import { rethrowHeEngBaseBudgetError } from '../engBaseBudget';
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, type LLMMessage } from '../llm';
 import {
@@ -1194,6 +1195,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
         );
       }
     } catch (e) {
+      rethrowHeEngBaseBudgetError(e);
       stageLog(ctx, `[template] фикс-проход недоступен: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
@@ -1567,6 +1569,7 @@ export async function runTemplateStage(job: HeJob, ctx: HeStageContext): Promise
       }
     }
   } catch (e) {
+    rethrowHeEngBaseBudgetError(e);
     stageLog(ctx, `[template] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
   }
 

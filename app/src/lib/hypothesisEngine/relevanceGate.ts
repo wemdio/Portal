@@ -82,6 +82,7 @@
  */
 
 import { z } from 'zod';
+import { rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import {
   callLLMWithSchema,
   getHeActiveJobSignal,
@@ -1188,6 +1189,7 @@ export async function findIrrelevantRows(input: {
         result.judgedRows += segment.length;
         return 'judged';
       } catch (e) {
+        rethrowHeEngBaseBudgetError(e);
         const message = e instanceof Error ? e.message : String(e);
         // 1) Задачу прервали (отмена клиентом, сторож простоя, рестарт). Идти
         //    дальше некуда: следующий сегмент упрётся в тот же сигнал.
@@ -1286,6 +1288,7 @@ export async function findIrrelevantRows(input: {
       for (const idx of llm.data.irrelevant) if (own.has(idx)) result.flagged.add(idx);
       result.judgedRows += batch.length;
     } catch (e) {
+      rethrowHeEngBaseBudgetError(e);
       log?.(
         `[relevanceGate] батч ${batch[0].i}–${batch[batch.length - 1].i} пропущен: ` +
           `${e instanceof Error ? e.message : String(e)}`,

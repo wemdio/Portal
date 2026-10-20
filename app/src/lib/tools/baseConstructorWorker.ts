@@ -49,6 +49,8 @@ import {
 const admin = supabaseAdmin!;
 
 interface StepConfig {
+  /** Server-created ENG child job: do not run paid steps outside its parent ledger. */
+  he_eng_base_budget?: { base_id: string; project_id: string };
   brief?: string;
   prompt?: string;
   personalization?: { concurrency?: number };
@@ -793,6 +795,15 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
 
     const selectedSteps: StepKey[] = job.selected_steps || [];
     const stepConfig: StepConfig = job.step_config || {};
+    if (stepConfig.he_eng_base_budget) {
+      const freeEngSteps = new Set([
+        'find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email',
+        'dedup_full', 'remove_empty', 'validate_emails', 'cap_emails_per_company',
+      ]);
+      if (selectedSteps.some((step) => !freeEngSteps.has(step))) {
+        throw new Error('ENG base budget: unbudgeted_constructor_step');
+      }
+    }
     // Локаль джобы (миграция добавила base_constructor_jobs.locale NOT NULL
     // DEFAULT 'ru'; до деплоя миграции колонки может не быть — читаем с
     // fallback'ом). 'en' включает ENG-локаль конструктора: EN-алиасы
