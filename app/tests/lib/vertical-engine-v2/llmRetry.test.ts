@@ -72,6 +72,7 @@ describe('llm rawCall retry', () => {
 
   beforeEach(() => {
     process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = 'test-key';
+    delete process.env.VE_REQUESTY_MANAGEMENT_API_KEY;
     process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
     process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
     delete process.env.VE_LLM_TIMEOUT_MS;
@@ -454,8 +455,8 @@ describe('llm rawCall retry', () => {
     expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model))
       .toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini']);
 
-    // The free management probe must use the failed inference credential, not
-    // another organization's funded admin key or a paid "test" completion.
+    // The free probe must preserve the failed inference credential's identity
+    // and budget, even when a separate key reads its organization's balance.
     const probeKey = 'test-requesty-probe-secret';
     const keyInfo = { id: 'test-key-id', monthly_spend: '12.50', monthly_limit: '20.00',
       permissions: { manage: 'read', completions: 'write' } };
@@ -480,6 +481,77 @@ describe('llm rawCall retry', () => {
       expect(init).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store',
         headers: { Authorization: `Bearer ${probeKey}`, Accept: 'application/json' } });
       expect(init.body).toBeUndefined();
+    }
+    const managementKey = 'test-management-secret';
+    const splitProbe = (fetchImpl: typeof fetch, signal?: AbortSignal) =>
+      readVeRequestyBalance({ apiKey: probeKey, managementApiKey: managementKey, fetchImpl, signal });
+    const splitFetch = jest.fn(async (url: string, init?: RequestInit) => {
+      const authorization = (init?.headers as Record<string, string>).Authorization;
+      expect(authorization).toBe(`Bearer ${url.endsWith('/self') ? probeKey : managementKey}`);
+      expect(init).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store' });
+      expect(init?.body).toBeUndefined();
+      return probeResponse(url.endsWith('/org') ? { balance: '49.73' }
+        : url.endsWith('/self') ? { ...keyInfo, permissions: { manage: 'none', completions: 'write' } }
+          // This lookup proves membership only; limits still come from /self.
+          : { id: keyInfo.id, monthly_spend: 0, monthly_limit: 0 });
+    });
+    expect(await splitProbe(splitFetch as typeof fetch)).toEqual(funded);
+    expect(splitFetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://api-v2.requesty.ai/v1/manage/org', 'https://api-v2.requesty.ai/v1/manage/apikey/self',
+      'https://api-v2.requesty.ai/v1/manage/apikey/test-key-id',
+    ]);
+    const forbiddenManagement = jest.fn(async (url: string) => probeResponse(
+      url.endsWith('/org') ? {} : keyInfo, url.endsWith('/org') ? 403 : 200));
+    expect(await splitProbe(forbiddenManagement as typeof fetch)).toMatchObject({
+      status: 'unavailable', reason: 'management_forbidden', keyFingerprint: funded.keyFingerprint,
+    });
+    expect(forbiddenManagement).toHaveBeenCalledTimes(2);
+    for (const membership of [{ status: 403 }, { status: 404 }, { id: 'another-key' }, {}]) {
+      const read = jest.fn(async (url: string) => probeResponse(url.endsWith('/org') ? { balance: 50 }
+        : url.endsWith('/self') ? keyInfo : membership, url.endsWith('/test-key-id') && 'status' in membership
+          ? membership.status : 200));
+      const result = await splitProbe(read as typeof fetch);
+      expect(result.status).toBe('unavailable');
+      expect(result.keyFingerprint).toBe(funded.keyFingerprint);
+      expect(JSON.stringify(result)).not.toMatch(/management-secret|probe-secret|test-key-id/);
+    }
+    for (const [patch, expected] of [
+      [{ monthly_spend: 20 }, { status: 'blocked', reason: 'key_limit_reached' }],
+      [{ permissions: { manage: 'none', completions: 'none' } }, { status: 'blocked', reason: 'completions_forbidden' }],
+      [{ group: { id: 'group' } }, { status: 'unavailable', reason: 'group_budget_unknown' }],
+      [{ id: '../org' }, { status: 'unavailable', reason: 'invalid_response' }],
+      [{ id: 'self' }, { status: 'unavailable', reason: 'invalid_response' }],
+    ] as const) {
+      const read = jest.fn(async (url: string) => probeResponse(url.endsWith('/org') ? { balance: 50 }
+        : url.endsWith('/self') ? { ...keyInfo, ...patch } : { id: keyInfo.id }));
+      expect(await splitProbe(read as typeof fetch)).toMatchObject(expected);
+    }
+    const previousManagementKey = process.env.VE_REQUESTY_MANAGEMENT_API_KEY;
+    try {
+      process.env.VE_REQUESTY_MANAGEMENT_API_KEY = managementKey;
+      expect(await probe(splitFetch as typeof fetch)).toEqual(funded);
+      const noRequest = jest.fn();
+      process.env.VE_REQUESTY_MANAGEMENT_API_KEY = ' invalid-management-key ';
+      expect(await probe(noRequest)).toMatchObject({ status: 'unavailable', reason: 'invalid_management_key' });
+      expect(noRequest).not.toHaveBeenCalled();
+    } finally {
+      if (previousManagementKey === undefined) delete process.env.VE_REQUESTY_MANAGEMENT_API_KEY;
+      else process.env.VE_REQUESTY_MANAGEMENT_API_KEY = previousManagementKey;
+    }
+    for (const abort of [false, true]) {
+      const parent = new AbortController();
+      const read = jest.fn(async (url: string) => {
+        if (url.endsWith('/org')) return probeResponse({ balance: 50 });
+        if (url.endsWith('/self')) return probeResponse(keyInfo);
+        return new Promise<Response>(() => undefined);
+      });
+      const pending = splitProbe(read as typeof fetch, parent.signal);
+      await jest.advanceTimersByTimeAsync(0);
+      expect(read).toHaveBeenCalledTimes(3);
+      if (abort) parent.abort();
+      else await jest.advanceTimersByTimeAsync(8000);
+      expect(await pending).toMatchObject({ status: 'unavailable', reason: abort ? 'aborted' : 'timeout' });
+      expect(jest.getTimerCount()).toBe(0);
     }
     for (const [orgPatch, keyPatch, expected] of [
       [{ balance: 0 }, {}, { status: 'blocked', reason: 'insufficient_balance' }],
