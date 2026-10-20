@@ -1287,8 +1287,21 @@ async function resolveProviderCampaignFallback(args: {
   reply: Email;
   mailbox: string | null;
   leadEmail: string;
+  requireIndependentProof?: boolean;
 }): Promise<ReplyOwnershipResolution> {
   const { db, providerCampaignId, providerContext, reason } = args;
+  const providerParent = args.mailbox ? strongExactProviderParent({
+    context: providerContext, reply: args.reply, providerCampaignId,
+    mailbox: args.mailbox, leadEmail: args.leadEmail,
+  }) : null;
+  // A later empty/failed history read must not erase an already observed
+  // cross-project mailbox conflict. Manual campaign links prove who owns the
+  // campaign, not that this inbound belongs to it. A real parent can clear the
+  // fence; exact-mailbox / verified-conversation paths resolve before here.
+  if (args.requireIndependentProof && !providerParent) {
+    return { status: 'defer', providerCampaignId,
+      reason: 'previous mailbox conflict still requires an exact mailbox mapping or matching outbound parent' };
+  }
   let owner;
   try {
     owner = await resolveCampaignProjectOwner(db, providerCampaignId);
@@ -1313,10 +1326,7 @@ async function resolveProviderCampaignFallback(args: {
   // before notifying on an automatic text-only link with no mailbox mapping.
   // This is intentionally narrower than requiring a parent for every reply:
   // a unique exact-mailbox owner remains valid even if old history is absent.
-  if (owner.status === 'resolved' && (!args.mailbox || !strongExactProviderParent({
-    context: providerContext, reply: args.reply, providerCampaignId,
-    mailbox: args.mailbox, leadEmail: args.leadEmail,
-  }))) {
+  if (owner.status === 'resolved' && !providerParent) {
     const [legacy, period] = await Promise.all([
       db.from('project_instantly_campaigns').select('project_id, match_source')
         .eq('campaign_id', providerCampaignId),
@@ -1375,6 +1385,8 @@ export async function resolveEffectiveReplyOwner(args: {
   evidencePriority?: 'fresh' | 'recovery';
   /** A provider page was durably saved, not merely attempted or cache-read. */
   onEvidenceProgress?: () => void;
+  /** Durable, identity-checked mailbox conflict; a provider label cannot clear it. */
+  requireIndependentProof?: boolean;
 }): Promise<ReplyOwnershipResolution> {
   const {
     db,
@@ -1434,6 +1446,7 @@ export async function resolveEffectiveReplyOwner(args: {
       providerCampaignId,
       providerContext,
       reply, mailbox, leadEmail,
+      requireIndependentProof: args.requireIndependentProof,
       reason: 'reply has no eaccount; provider campaign retained',
     });
   }
@@ -1527,6 +1540,7 @@ export async function resolveEffectiveReplyOwner(args: {
       providerCampaignId,
       providerContext,
       reply, mailbox, leadEmail,
+      requireIndependentProof: args.requireIndependentProof,
       reason: 'mailbox has no current campaign mappings; provider campaign retained',
     });
   }

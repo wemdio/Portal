@@ -7,6 +7,7 @@ import { buildVeBaseAudienceSummary, type VeAudienceBase, type VeBaseAudienceSum
 import { localIsoDate } from './portalDeliveryTerm';
 import { loadVeProjectExclusions, matchVeProjectExclusion } from './projectExclusions';
 import { createVeDeliveryIdentityResolver, veDeliveryPolicyRow } from './projectExclusionDelivery';
+import { redactVeRequestyBillingPayload } from './requestyBillingState';
 
 type SupplyStock = {
   ready: number; uploaded: number; uploaded_today: number; uncertain: number;
@@ -28,6 +29,13 @@ export interface VeContactSupplyStatus {
     portal_period_id: string | null;
     target_contacts: number;
     error: string | null;
+    /** Public wait marker only; no provider/key identity or credit details. */
+    billing_wait?: {
+      version: 1;
+      blocked_at: string;
+      probe_status?: 'blocked' | 'unavailable';
+      probe_reason?: string;
+    };
   };
   metrics: null | {
     ready: number;
@@ -80,6 +88,29 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
     launched: Boolean(plan.item_id), preset_id: binding.preset_id, portal_project_id: binding.portal_project_id,
     portal_period_id: binding.portal_period_id ?? null, target_contacts: binding.target_contacts, error: plan.last_error,
   };
+  if (result.plan.current && result.plan.status === 'active') {
+    // Read the newest batch/job before checking their states: filtering for
+    // waiting work first could revive an obsolete wait from an earlier attempt.
+    const { data: batch, error: batchError } = await db.from('ve_contact_supply_batches')
+      .select('id,base_id,status').eq('plan_id', plan.id)
+      .order('created_at', { ascending: false }).order('id', { ascending: false })
+      .limit(1).abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
+    if (batchError) throw new Error('Не удалось проверить состояние текущего добора');
+    if (batch?.base_id && ['collecting', 'auditing'].includes(batch.status)) {
+      const { data: job, error: jobError } = await db.from('ve_jobs')
+        .select('status,requesty_billing_wait:payload->requesty_billing_wait')
+        .eq('project_id', base.project_id).eq('payload->>base_id', batch.base_id)
+        .order('created_at', { ascending: false }).order('id', { ascending: false })
+        .limit(1).abortSignal(AbortSignal.timeout(10_000)).maybeSingle();
+      if (jobError) throw new Error('Не удалось проверить состояние текущего добора');
+      if (job?.status === 'pending') {
+        const publicPayload = redactVeRequestyBillingPayload({
+          requesty_billing_wait: job.requesty_billing_wait,
+        }) as { requesty_billing_wait?: NonNullable<VeContactSupplyStatus['plan']>['billing_wait'] };
+        if (publicPayload.requesty_billing_wait) result.plan.billing_wait = publicPayload.requesty_billing_wait;
+      }
+    }
+  }
   // A later batch with unknown coverage invalidates the first preview's estimate,
   // including while analytics/forecast are unavailable.
   const estimate = plan.source_state?.previous_base_id

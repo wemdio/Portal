@@ -95,7 +95,7 @@ import { enqueueVePreparationChild, type VePreparationChildTable } from '../prep
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { loadVeProjectExclusions, matchVeProjectExclusion, filterVeProjectExcludedRows, type VeProjectExclusions } from '../projectExclusions';
-import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError, isVeTransientCatalogError } from '../collectionErrors';
+import { isVeProviderBillingError, isVeRequestyBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError, isVeTransientCatalogError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veAdaptiveSourceDeferred, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
@@ -796,6 +796,11 @@ export interface VeCollectInfo {
   supply_batch_id?: string;
   supply_hold?: boolean;
   supply_hold_since?: string;
+  /** Last billing hold excluded from parent dispatch timers; repeated wakes are idempotent. */
+  requesty_billing_timer_recovery?: { blocked_at: string; resumed_at: string };
+  /** Explicit legacy supply repair keeps the original batch and exact budget. */
+  supply_billing_resume?: { version: 1; batch_id: string; job_id: string; blocked_at: string; resumed_at: string;
+    max_rounds: number; max_candidates: number };
   target_progress?: VeCollectionTargetProgress;
   /** Explicit manual recovery: recheck persisted constructor output, not sources. */
   validation_retry?: boolean;
@@ -3731,6 +3736,30 @@ function resumeHeldSupplyTimers(info: VeCollectInfo): void {
   delete info.supply_hold_since;
 }
 
+/** Child workers keep their own execution clock. Only VE2's dispatch wait is suspended. */
+function resumeRequestyBillingTimers(info: VeCollectInfo, job: VeJob): boolean {
+  const recovery = job.payload?.requesty_billing_recovery ?? info.supply_billing_resume;
+  if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)) return false;
+  const receipt = recovery as Record<string, unknown>;
+  if (receipt.version !== 1 || typeof receipt.blocked_at !== 'string' || typeof receipt.resumed_at !== 'string') return false;
+  const blockedAt = Date.parse(receipt.blocked_at);
+  const resumedAt = Date.parse(receipt.resumed_at);
+  if (!Number.isFinite(blockedAt) || !Number.isFinite(resumedAt) || resumedAt < blockedAt
+    || Date.parse(info.requesty_billing_timer_recovery?.resumed_at ?? '') >= resumedAt) return false;
+  // A manual supply pause has its own timer adjustment. Do not count overlap twice.
+  const heldAt = Date.parse(info.supply_hold_since ?? '');
+  const end = info.supply_hold && Number.isFinite(heldAt) ? Math.min(resumedAt, heldAt) : resumedAt;
+  const adjusted = (value: string) => {
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? new Date(time + Math.max(0, end - Math.max(blockedAt, time))).toISOString() : value;
+  };
+  if (info.construct?.dispatched_at) info.construct.dispatched_at = adjusted(info.construct.dispatched_at);
+  for (const task of info.tasks ?? []) if (task.dispatched_at) task.dispatched_at = adjusted(task.dispatched_at);
+  for (const batch of info.preview_pipeline?.batches ?? []) batch.dispatched_at = adjusted(batch.dispatched_at);
+  info.requesty_billing_timer_recovery = { blocked_at: receipt.blocked_at, resumed_at: receipt.resumed_at };
+  return true;
+}
+
 async function ensureTargetBaseAnalysis(ctx: VeStageContext, job: VeJob, baseId: string): Promise<void> {
   const { data, error } = await ctx.supabase.from('ve_jobs').select('id, payload')
     .eq('project_id', job.project_id).eq('stage', 'base_analyze').in('status', ['pending', 'running']);
@@ -3908,6 +3937,10 @@ async function checkCollectedRelevance(args: {
     if (gate.checkpoint) info.relevance_checkpoint = gate.checkpoint;
     usage.tokensUsed += gate.tokensUsed;
     usage.costUsd += gate.costUsd;
+    // The gate persists every completed verdict before returning a provider
+    // refusal. Keep this job and its constructor checkpoint available for the
+    // billing wait; do not finish the round as a failed source batch.
+    if (isVeRequestyBillingError(gate.error)) throw new Error(gate.error!);
     // Keep the completed constructor and per-company verdicts. Re-entering the
     // same stage reads these checkpoints; it does not buy another source round.
     // The budget is durable for this job/context, including across worker exits.
@@ -3973,7 +4006,7 @@ async function checkCollectedRelevance(args: {
   } catch (e) {
     ctx.signal?.throwIfAborted();
     if (e instanceof VeRelevanceCheckpointError || e instanceof VeRelevanceRetryScheduled
-      || (e instanceof Error && e.name === 'AbortError')) throw e;
+      || isVeRequestyBillingError(e) || (e instanceof Error && e.name === 'AbortError')) throw e;
     relevanceError = e instanceof Error ? e.message : String(e);
     // Неожиданный сбой вне never-throw контракта gate тоже fail-closed: ни одна
     // строка без verdict не должна попасть в проверенный итог или refill.
@@ -4580,6 +4613,16 @@ async function completeTargetRound(args: {
       error: phaseError ?? pipeline?.error ?? null,
       idle: idleRound,
     });
+    // Explicit billing recovery does not grant rounds, including idle-round
+    // allowances. Saved review can finish at the cap; new source work cannot.
+    if (info.supply_billing_resume) {
+      result.max_rounds = progress.max_rounds;
+      if (result.status === 'collecting' && result.round > progress.max_rounds) {
+        result.round = progress.round;
+        result.status = 'limited';
+        result.reason = 'Достигнут сохранённый предел раундов; контакты сохранены';
+      }
+    }
     // The other child is already paid for. Drain it even if this batch reaches
     // the goal or fails; do not orphan its results or start replacement work.
     if (pipeline && pendingBatches.length > 0 && !nameError && !reviewOnly) {
@@ -4654,6 +4697,18 @@ async function completeTargetRound(args: {
   // трёх адресов одной компании; сама база при этом хранит все адреса.
   const targetCount = countVeTargetContacts(readyRows, { limit: contactLimit, mode: progress.mode });
   const targetRows = targetCount.counted;
+  if (isVeRequestyBillingError(cleaned.summary.error)) {
+    // Names already paid for are durable in job.result. Save their projection
+    // and the exact round count, retaining company_name_recovery so the same
+    // job resumes only missing names after the provider becomes available.
+    info.target_progress = withVeTargetComposition({ ...progress, status: 'collecting', ready_rows: targetRows,
+      candidates_processed: stats.rows_total }, targetCount, readyRows.length);
+    delete info.target_progress.reason;
+    await persistCollectInfo(ctx, base.id, info, {
+      data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: readyRows.slice(0, SAMPLE_ROWS),
+    });
+    throw new Error(cleaned.summary.error!);
+  }
   const nameRetry = job.result?.company_name_retry as { context?: unknown; attempts?: unknown } | undefined;
   const nameAttempts = nameRetry?.context === cleaned.checkpoint.context
     ? Number.isSafeInteger(nameRetry.attempts) && Number(nameRetry.attempts) >= 0 ? Number(nameRetry.attempts) : 3
@@ -5183,6 +5238,22 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     const previous = info.target_progress;
     // Холостые раунды и «Продолжить подготовку» двигают предел базы вверх.
     target.max_rounds = veCollectionMaxRounds(previous?.max_rounds);
+    if (info.supply_billing_resume) {
+      const receipt = info.supply_billing_resume;
+      // job_id is audit lineage. A later explicit name-only retry can have a
+      // different job ID but must retain this batch's original safety caps.
+      if (receipt.version !== 1 || mode !== 'supply' || receipt.batch_id !== info.supply_batch_id || typeof receipt.job_id !== 'string'
+        || receipt.batch_id !== job.payload?.supply_batch_id
+        || !previous || !Number.isSafeInteger(receipt.max_rounds) || receipt.max_rounds < 1 || receipt.max_rounds > 10_000
+        || !Number.isSafeInteger(receipt.max_candidates) || receipt.max_candidates < 1 || receipt.max_candidates > target.max_candidates
+        || previous.max_rounds !== receipt.max_rounds || previous.max_candidates !== receipt.max_candidates
+        || !Number.isFinite(Date.parse(receipt.blocked_at)) || !Number.isFinite(Date.parse(receipt.resumed_at))
+        || Date.parse(receipt.resumed_at) < Date.parse(receipt.blocked_at)) {
+        throw new VeRelevanceCheckpointError('Invalid saved supply billing recovery');
+      }
+      target.max_rounds = receipt.max_rounds;
+      target.max_candidates = receipt.max_candidates;
+    }
     if (info.known_website_source?.continuation_only && previous) {
       if (!Number.isSafeInteger(previous.max_rounds) || previous.max_rounds < 1
         || !Number.isSafeInteger(previous.max_candidates) || previous.max_candidates < 1 || previous.max_candidates > target.max_candidates) {
@@ -5227,6 +5298,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       || !Array.isArray(info.search_policy.deferred_rows)) throw new VeRelevanceCheckpointError('Invalid search policy checkpoint');
     if (!previous) await persistCollectInfo(ctx, baseId, info);
   }
+  if (resumeRequestyBillingTimers(info, job)) await persistCollectInfo(ctx, baseId, info);
   if (target && await holdInactiveSupply(ctx, job, base, info)) {
     return { result: { waiting: true, base_id: baseId, supply_held: true } };
   }
@@ -5312,7 +5384,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     && !info.tasks?.some((task) => task.status === 'dispatched')
     && (target.mode === 'supply' || target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES || target.candidates_processed > 0)) {
     info.adaptive_collection = newVeAdaptiveCollection();
-    if (!info.known_website_source?.continuation_only) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
+    if (!info.known_website_source?.continuation_only && !info.supply_billing_resume) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
     await persistCollectInfo(ctx, baseId, info);
   }
 
@@ -5612,7 +5684,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
   delete info.source_contact_discovery;
-  if (target && info.source_contact_recovery && !info.known_website_source?.continuation_only) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
+  if (target && info.source_contact_recovery && !info.known_website_source?.continuation_only && !info.supply_billing_resume) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
   const considered = prepared.filter((row, index) => ownsLegacyInput
     || (veRowAcquisitionAllowed(info, row) && (existingFirst ? hasExistingSourceContact(row) : hasExistingSourceContact(row) || !pendingSourceRows.has(interleaved[index]))
       // An unsuccessful lookup must not move empty source rows into another
@@ -6123,7 +6195,8 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     if (error instanceof VePreviewCheckpointSaveError) throw error;
     // The generic worker persists Retry-After. A waiting job must not leave
     // the base's progress looking like a terminal preparation failure.
-    if (error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error) || isVeTransientCatalogError(error)) throw error;
+    if (error instanceof VeLlmRateLimitError || isVeRequestyBillingError(error)
+      || isVeTransientDirectoryError(error) || isVeTransientCatalogError(error)) throw error;
     if (error instanceof VeRelevanceRetryScheduled) {
       return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
         tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };

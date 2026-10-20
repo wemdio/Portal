@@ -267,7 +267,7 @@ export async function runProjectContactSupply(input: {
   const broadHypotheses = await readBroadHypothesisIds(portalDb, sendingPlans.map((plan) => plan.hypothesis_id));
   const batches = await readContactDeliveryPages<SupplyBatch>('contact supply batches', (from, to) => portalDb
     .from('ve_contact_supply_batches').select('id, plan_id, base_id, template_id, audit_id, status, appended_count, error', { count: 'exact' })
-    .in('plan_id', sendingPlans.map((plan) => plan.id)).order('created_at', { ascending: false }).order('id', { ascending: true }).range(from, to));
+    .in('plan_id', sendingPlans.map((plan) => plan.id)).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to));
   let pendingWork = false;
   for (const plan of sendingPlans) {
     if (!context.campaigns.some((campaign) => campaign.item_id === plan.item_id)) continue;
