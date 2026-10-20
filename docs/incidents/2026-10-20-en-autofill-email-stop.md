@@ -89,3 +89,27 @@ breaker. Preserve definitive mailbox rejections and do not mark unknown
 addresses ready. Review suspicious extracted subdomain addresses with their
 source context. Infrastructure changes, deployment and a production rerun are
 not authorized by this diagnostic request.
+
+## Follow-up: dynamic failover for explicit IP refusals
+
+Following the user's request to switch rejected proxies dynamically, the local
+validator now tries the next configured proxy for explicit permanent IP/egress
+refusals such as the recorded Microsoft Spamhaus response. It reuses the
+existing per-MX block memory: the rejected endpoint moves behind alternatives
+for 30 minutes, is still available as a last resort, and becomes eligible again
+after expiry. A failure at one MX does not disable that proxy at other MX hosts.
+
+Generic 5xx policy responses, recipient quotas, definitive mailbox rejections,
+and ordinary greylisting do not trigger this new path. Recipient-address echoes
+are removed before looking for IP-block signals. Each endpoint is tried at most
+once per SMTP probe; if alternatives remain inconclusive, validation stays
+unknown. An alternative confirming the recipient without determining catch-all
+also remains unknown under the existing corporate-domain rule.
+
+Verification: 18 offline scenarios using the actual validator passed, including
+replay of the recorded 550/250 sequence, TTL expiry, per-MX isolation, all proxies
+blocked, final recipient rejection, quota, greylist affinity, existing transport
+and 4xx failover, and inconclusive catch-all. The 23 related Jest suites passed
+all 280 assertions in approximately 10 seconds; core TypeScript and ESLint passed.
+No permanent tests or production changes were made. This follow-up does not
+address suspicious extracted subdomain addresses or change the EN stop threshold.
