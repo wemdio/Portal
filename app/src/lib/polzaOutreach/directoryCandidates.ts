@@ -21,6 +21,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { PdlCompanyReadError } from '@/lib/companyBase/pdlSearch';
 import { normalizeDomain, PDL_COUNTRY_BY_CODE } from './resolveDomain';
 import type { PolzaOutreachConfig } from './types';
 
@@ -162,11 +163,15 @@ export function createDirectoryFeed(
           .eq('size', size)
           .in('industry', industries as string[])
           .not('website', 'is', null)
-          // Порядок обязателен: без него страницы range() не повторяемы и
-          // строка может выпасть или прийти дважды.
+          // Сначала ключи фильтра: order(id) на широких фильтрах заставлял
+          // Postgres перебирать pkey всей таблицы и упирался в таймаут Kong.
+          // Страна/отрасль позволяют читать индекс фильтра, id завершает
+          // уникальный порядок: страницы range() остаются воспроизводимыми.
+          .order('country', { ascending: true })
+          .order('industry', { ascending: true })
           .order('id', { ascending: true })
           .range(from, from + PAGE - 1);
-        if (error) throw new Error(`directory companies load failed: ${error.message}`);
+        if (error) throw new PdlCompanyReadError(error.message);
         // Сдвиг мог оказаться дальше конца выборки — тогда начинаем сначала.
         // Без этого отрасль с десятью тысячами компаний молча давала бы ноль.
         if (!data?.length && from > 0 && !restarted) {

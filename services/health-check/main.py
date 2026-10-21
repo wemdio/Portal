@@ -1417,12 +1417,24 @@ def _job_owner(row) -> str:
     return str(row["owner_name"] or row["owner_email"] or "системная задача")
 
 
+def _job_presentation(spec: JobMonitorSpec, row) -> tuple[str, str]:
+    if spec.table == "parser_jobs":
+        outreach = {
+            "polza_outreach": ("Автоаутрич EN", "portal-worker-polza-outreach"),
+            "polza_ru_outreach": ("Автоаутрич RU", "portal-worker-polza-outreach"),
+        }
+        if match := outreach.get(str(row.get("parser_type") or "")):
+            return match
+    return spec.label, spec.log_hint
+
+
 def _job_context(spec: JobMonitorSpec, row) -> str:
     owner = html.escape(_job_owner(row))
     job_id = html.escape(str(row["id"])[:8])
+    _, log_hint = _job_presentation(spec, row)
     log_commands = " / ".join(
         f"<code>docker logs {html.escape(container.strip())} --tail 200</code>"
-        for container in spec.log_hint.split(" / ")
+        for container in log_hint.split(" / ")
     )
     return (
         f"{owner} · <code>#{job_id}</code>\n"
@@ -1477,8 +1489,9 @@ async def _fetch_active_job_rows(conn, spec: JobMonitorSpec):
         else ""
     )
     extra_filter = f" AND ({spec.extra_predicate})" if spec.extra_predicate else ""
+    parser_type_select = "j.parser_type, " if spec.table == "parser_jobs" else ""
     return await conn.fetch(
-        f"SELECT j.id::text AS id, j.status, {_progress_sql(spec)} AS progress, "
+        f"SELECT j.id::text AS id, j.status, {parser_type_select}{_progress_sql(spec)} AS progress, "
         f"  {activity_secs} AS activity_secs, "
         f"  extract(epoch FROM (now() - {start_anchor}))::int AS active_secs, "
         f"  extract(epoch FROM (now() - {queue_anchor}))::int AS age_secs, "
@@ -1556,8 +1569,9 @@ async def check_stuck_jobs() -> list[str]:
                 if not await _claim_job_alert(conn, alert_key):
                     continue
                 progress = html.escape(str(row["progress"] or "нет данных")[:180])
+                label, _ = _job_presentation(spec, row)
                 problems.append(
-                    f"🟠 <b>Долго висит: {html.escape(spec.label)}</b>\n"
+                    f"🟠 <b>Долго висит: {html.escape(label)}</b>\n"
                     f"Нет обновлений {stalled_secs // 60} мин · статус <code>{html.escape(status)}</code>\n"
                     f"Прогресс: <code>{progress}</code>\n"
                     f"{_job_context(spec, row)}"
@@ -1631,10 +1645,11 @@ async def check_failed_jobs() -> list[str]:
                 else ""
             )
             extra_filter = f" AND ({spec.extra_predicate})" if spec.extra_predicate else ""
+            parser_type_select = "j.parser_type, " if spec.table == "parser_jobs" else ""
             try:
                 rows = await conn.fetch(
                     "SELECT j.id::text AS id, j.status, j.error_message, "
-                    f"  {owner_select} "
+                    f"  {parser_type_select}{owner_select} "
                     f"FROM public.{spec.table} j "
                     f"{owner_join} "
                     "WHERE j.status = ANY($1::text[]) "
@@ -1654,8 +1669,9 @@ async def check_failed_jobs() -> list[str]:
                 if not await _claim_job_alert(conn, alert_key):
                     continue
                 error_text = html.escape(error_message[:500])
+                label, _ = _job_presentation(spec, row)
                 problems.append(
-                    f"🔴 <b>Ошибка парсера: {html.escape(spec.label)}</b>\n"
+                    f"🔴 <b>Ошибка парсера: {html.escape(label)}</b>\n"
                     f"Статус: <code>{html.escape(str(row['status']))}</code>\n"
                     f"Ошибка: <code>{error_text}</code>\n"
                     f"{_job_context(spec, row)}"
