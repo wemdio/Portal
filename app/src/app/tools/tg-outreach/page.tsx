@@ -458,8 +458,9 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 /* =================== SETTINGS TAB =================== */
 function SettingsTab({ campaign, onSave }: {
   campaign: OutreachCampaign;
-  onSave: (openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => Promise<void>;
+  onSave: (name: string, openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => Promise<void>;
 }) {
+  const [campaignName, setCampaignName] = useState(campaign.name);
   const [openai, setOpenai] = useState<OpenAISettings>({ ...DEFAULT_OPENAI_SETTINGS, ...campaign.openai_settings });
   const [telegram, setTelegram] = useState<TelegramSettings>({
     ...DEFAULT_TELEGRAM_SETTINGS,
@@ -472,6 +473,8 @@ function SettingsTab({ campaign, onSave }: {
     },
   });
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
   // Блок CRM грузит свои настройки сам и отдаёт текущий выбор сюда.
   const [crm, setCrm] = useState<CrmSettings | null>(null);
   const crmIncomplete = !!crm?.enabled && !crm.status_id;
@@ -480,10 +483,25 @@ function SettingsTab({ campaign, onSave }: {
   );
 
   const handleSave = async () => {
+    if (!campaignName.trim()) {
+      setSaveError('Название кампании обязательно');
+      setSaved(false);
+      return;
+    }
     setSaving(true);
+    setSaveError(null);
+    setSaved(false);
     const parsed = blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
     const updatedTelegram = { ...telegram, blocked_usernames: parsed };
-    try { await onSave(openai, updatedTelegram, crm); } finally { setSaving(false); }
+    try {
+      await onSave(campaignName.trim(), openai, updatedTelegram, crm);
+      setCampaignName(campaignName.trim());
+      setSaved(true);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Не удалось сохранить настройки');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const setOAI = <K extends keyof OpenAISettings>(k: K, v: OpenAISettings[K]) =>
@@ -492,11 +510,15 @@ function SettingsTab({ campaign, onSave }: {
     setTelegram(prev => ({ ...prev, [k]: v }));
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" onChangeCapture={() => { setSaved(false); setSaveError(null); }}>
       {/* Промпт, триггеры и чаты-приёмники. Заголовка нет намеренно: «OpenRouter»
           называл поставщика модели, а не то, что оператор здесь настраивает. */}
       <section className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-1">
+            <Field label="Название кампании" value={campaignName} onChange={setCampaignName} />
+            <p className="text-[10px] text-gray-400">Отображается в списке кампаний и заголовке.</p>
+          </div>
           <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
         </div>
         <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={6} />
@@ -733,13 +755,15 @@ function SettingsTab({ campaign, onSave }: {
       </section>
 
       <div className="flex items-center gap-3">
-        <button type="button" onClick={handleSave} disabled={saving || crmIncomplete}
+        <button type="button" onClick={handleSave} disabled={saving || crmIncomplete || !campaignName.trim()}
           className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           Сохранить настройки
         </button>
         {crmIncomplete && <span className="text-[11px] text-amber-600">Выберите воронку и этап CRM</span>}
       </div>
+      {saveError && <p role="alert" className="text-xs text-red-600">{saveError}</p>}
+      {saved && <p role="status" className="text-xs text-emerald-600">Настройки сохранены</p>}
     </div>
   );
 }
@@ -4562,6 +4586,7 @@ function AccountProfileModal({
    * нельзя, иначе это выглядит как «у аккаунта нет фото».
    */
   const [avatarWarning, setAvatarWarning] = useState<string | null>(null);
+  const [photoCleanupWarning, setPhotoCleanupWarning] = useState<string | null>(null);
 
   const pickAvatar = (file: File | null) => {
     setAvatar((prev) => {
@@ -4601,6 +4626,8 @@ function AccountProfileModal({
   const save = async () => {
     setSaving(true);
     setError(null);
+    setAvatarWarning(null);
+    setPhotoCleanupWarning(null);
     try {
       const token = await getAccessToken();
       const form = new FormData();
@@ -4621,6 +4648,7 @@ function AccountProfileModal({
         (Partial<OutreachAccount> & {
           error?: string;
           avatar_error?: string;
+          photo_cleanup_error?: string;
           queued?: boolean;
           message?: string;
           rest_until?: string;
@@ -4631,7 +4659,7 @@ function AccountProfileModal({
       }
       // Строку списка обновляем ответом, а не перечитыванием всего списка:
       // ответ и есть то, что реально встало в Telegram.
-      const { error: _e, avatar_error: _a, queued: _q, message: _m, rest_until: restUntil, ...applied } =
+      const { error: _e, avatar_error: _a, photo_cleanup_error: photoCleanupError, queued: _q, message: _m, rest_until: restUntil, ...applied } =
         body ?? {};
       if (!body?.queued) {
         onSaved({ ...applied, ...(restUntil ? { profile_rest_until: restUntil } : {}) });
@@ -4646,6 +4674,7 @@ function AccountProfileModal({
       // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
       // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
       if (body?.avatar_error) setAvatarWarning(body.avatar_error);
+      if (photoCleanupError) setPhotoCleanupWarning(photoCleanupError);
       /**
        * Отлёжка после смены имени или аватарки — говорим сразу, а не плашкой в
        * списке постфактум.
@@ -4665,7 +4694,7 @@ function AccountProfileModal({
           + 'в это время разрешён.',
         );
       }
-      if (body?.avatar_error || body?.rest_until) return;
+      if (body?.avatar_error || photoCleanupError || body?.rest_until) return;
       onClose();
     } finally {
       setSaving(false);
@@ -4684,6 +4713,7 @@ function AccountProfileModal({
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             Меняется настоящий профиль аккаунта в Telegram. Частая смена имени и особенно аватарки — сигнал для
             антиспама: настраивайте один раз перед запуском. Кампания должна быть остановлена.
+            При сохранении номер телефона скрывается. Новая аватарка заменяет все старые фото профиля.
           </div>
 
           {/* Текущая аватарка и загрузка новой: кликабельно всё — и картинка,
@@ -4843,6 +4873,11 @@ function AccountProfileModal({
           </label>
 
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
+          {photoCleanupWarning && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {photoCleanupWarning}
+            </div>
+          )}
           {avatarWarning && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               Аватарка не сохранилась в портале: {avatarWarning}. В Telegram она при этом на месте —
@@ -7421,12 +7456,16 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     // в зависимостях он пересоздавал бы интервал по кругу; держим его в ref.
   }, [loadPhase, callAction, pendingStart]);
 
-  const saveSettings = async (openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => {
-    await authFetch(`${API_BASE}/campaigns/${campaign.id}`, {
+  const saveSettings = async (name: string, openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => {
+    const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}`, {
       method: 'PUT',
       // crm null — блок CRM ещё не загрузился: не трогаем сохранённое.
-      body: JSON.stringify({ openai_settings: openai, telegram_settings: telegram, crm_settings: crm ?? undefined }),
+      body: JSON.stringify({ name, openai_settings: openai, telegram_settings: telegram, crm_settings: crm ?? undefined }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null) as { error?: string } | null;
+      throw new Error(data?.error || 'Не удалось сохранить настройки');
+    }
     onUpdate();
   };
 

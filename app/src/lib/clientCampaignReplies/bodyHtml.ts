@@ -13,5 +13,7 @@ export function textToReplyHtml(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-  return escaped.replace(/\r\n|\r|\n/g, '<br>\n');
+  // A source newline after <br> becomes a leading space when HTML is displayed
+  // or converted back to plain text. The tag alone already carries the break.
+  return escaped.replace(/\r\n|\r|\n/g, '<br>');
 }

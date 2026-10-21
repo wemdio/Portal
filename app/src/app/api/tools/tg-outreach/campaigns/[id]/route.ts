@@ -43,8 +43,14 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           return jsonError('Неверный JSON', 400);
         }
       
-        const allowed = ['name', 'openai_settings', 'telegram_settings', 'crm_settings'] as const;
+        const allowed = ['openai_settings', 'telegram_settings', 'crm_settings'] as const;
         const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+        if (body.name !== undefined) {
+          if (typeof body.name !== 'string' || !body.name.trim()) {
+            return jsonError('Название кампании обязательно', 400);
+          }
+          update.name = body.name.trim();
+        }
         for (const key of allowed) {
           if (body[key] !== undefined) update[key] = body[key];
         }

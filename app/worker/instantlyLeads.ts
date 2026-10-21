@@ -9,6 +9,7 @@ import {
   drainWebhookQueue,
 } from '@/lib/instantly/leadQualificationWorker';
 import { pollOthersOnce } from '@/lib/instantly/othersWatchdog';
+import { syncOneProjectContactBlock } from '@/lib/instantly/projectContactBlockSync';
 import { createWorkerLogger, setupGracefulShutdown } from './_shared';
 
 const POLL_INTERVAL_MS = envMs('WORKER_POLL_INTERVAL_MS', 30_000, 10_000);
@@ -231,6 +232,17 @@ async function drainLoop(shouldStop: () => boolean): Promise<void> {
   }
 }
 
+async function projectBlocksLoop(shouldStop: () => boolean): Promise<void> {
+  while (!shouldStop()) {
+    try {
+      await syncOneProjectContactBlock();
+    } catch (error) {
+      log('error', 'Не удалось применить блокировку контакта проекта', error);
+    }
+    await sleep(60_000);
+  }
+}
+
 async function main(): Promise<void> {
   log('info', `Starting Instantly lead qualification worker (pid=${process.pid})`);
 
@@ -241,7 +253,7 @@ async function main(): Promise<void> {
 
   const shouldStop = setupGracefulShutdown(log);
 
-  const loops = [pollLoop(shouldStop), qualificationLoop(shouldStop), recoveryLoop(shouldStop), deliveryLoop(shouldStop)];
+  const loops = [pollLoop(shouldStop), qualificationLoop(shouldStop), recoveryLoop(shouldStop), deliveryLoop(shouldStop), projectBlocksLoop(shouldStop)];
   if (OTHERS_ENABLED) {
     log('info', `Others watchdog ENABLED (every ${OTHERS_INTERVAL_MS}ms)`);
     loops.push(othersLoop(shouldStop));

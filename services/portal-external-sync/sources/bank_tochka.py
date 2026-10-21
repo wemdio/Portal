@@ -121,8 +121,12 @@ PERIODS = [
     ("2026-01-01", date.today().isoformat()),
 ]
 
-POLL_ATTEMPTS = 30
-POLL_INTERVAL_SEC = 1.5
+POLL_ATTEMPTS = 8
+POLL_INTERVAL_SEC = 90
+
+
+class TochkaStatementError(RuntimeError):
+    """Controlled error text, safe to include in the health alert."""
 
 
 def _parse_amount(t: dict) -> float | None:
@@ -323,6 +327,12 @@ def map_transaction(
 
 class BankTochkaSync(SyncSource):
     name = "bank_tochka"
+    # Eight 90-second waits, plus bounded HTTP calls and database writes.
+    # Accounts run concurrently, so this budget does not grow per account.
+    recent_timeout_sec = 30 * 60
+
+    def __init__(self, periods: list[tuple[str, str]] | None = None):
+        self.periods = periods
 
     async def run(self, conn: asyncpg.Connection) -> int:
         if not JWT:
@@ -332,6 +342,11 @@ class BankTochkaSync(SyncSource):
         total = 0
         skip_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
+        failures: list[str] = []
+        # End date must move even when the worker has not restarted for days.
+        periods = self.periods if self.periods is not None else [
+            *PERIODS[:-1], (PERIODS[-1][0], date.today().isoformat()),
+        ]
 
         async with httpx.AsyncClient(
             timeout=90, headers=headers, verify=tochka_ssl_context()
@@ -342,8 +357,11 @@ class BankTochkaSync(SyncSource):
                 b["accountId"] for b in bal.json().get("Data", {}).get("Balance", [])
             })
 
-            for acc in accounts:
-                for st, en in PERIODS:
+            write_lock = asyncio.Lock()
+
+            async def sync_account(account_index: int, acc: str) -> None:
+                nonlocal total
+                for st, en in periods:
                     # Изоляция периода: сбой одного счёта/периода (сеть, битые
                     # данные, ошибка upsert) не должен обрывать остальные —
                     # источник обязан дойти до конца и залить то, что удалось.
@@ -352,13 +370,20 @@ class BankTochkaSync(SyncSource):
                             client, acc, st, en, skip_counts, status_counts
                         )
                         if rows:
-                            await self._upsert(conn, rows)
-                            total += len(rows)
+                            # asyncpg allows one operation on this connection.
+                            # Only bank HTTP waits overlap; writes stay serial.
+                            async with write_lock:
+                                await self._upsert(conn, rows)
+                                total += len(rows)
                     except Exception as e:
+                        reason = str(e) if isinstance(e, TochkaStatementError) else type(e).__name__
+                        failures.append(f"счёт {account_index}, {st}..{en}: {reason}")
                         print(
                             f"[bank_tochka] period FAIL acc={acc} {st}..{en}: {e}\n{traceback.format_exc()}",
                             flush=True,
                         )
+
+            await asyncio.gather(*(sync_account(index, acc) for index, acc in enumerate(accounts, 1)))
 
         if skip_counts:
             total_skipped = sum(skip_counts.values())
@@ -380,6 +405,8 @@ class BankTochkaSync(SyncSource):
             )
             print(f"[bank_tochka] statuses seen: {breakdown}", flush=True)
 
+        if failures:
+            raise RuntimeError(f"Точка: залито {total}, неполная синхронизация: {'; '.join(failures)}")
         return total
 
     async def _fetch_period(
@@ -396,21 +423,38 @@ class BankTochkaSync(SyncSource):
             json={"Data": {"Statement": {"accountId": acc, "startDateTime": st, "endDateTime": en}}},
         )
         if create.status_code >= 400:
-            return []
+            raise TochkaStatementError(f"Создание выписки: HTTP {create.status_code}")
         sid = create.json()["Data"]["Statement"]["statementId"]
         accq = quote(acc, safe="")
 
         stmt = None
+        last_response = "ответ не получен"
         for _ in range(POLL_ATTEMPTS):
+            # One statement order, checked at 1:30, 3:00, ... 12:00.
+            # No extra sleep after the last unsuccessful check.
+            await asyncio.sleep(POLL_INTERVAL_SEC)
             r = await client.get(f"{API_BASE}/accounts/{accq}/statements/{sid}")
+            last_response = f"HTTP {r.status_code}"
+            if r.status_code in (401, 403):
+                raise TochkaStatementError(f"Получение выписки: {last_response}")
             if r.status_code == 200:
                 st_arr = r.json().get("Data", {}).get("Statement") or []
-                if st_arr and st_arr[0].get("status") == "Ready":
-                    stmt = st_arr[0]
-                    break
-            await asyncio.sleep(POLL_INTERVAL_SEC)
+                if st_arr:
+                    status = str(st_arr[0].get("status") or "missing")
+                    # Never place arbitrary response bodies, URLs or account IDs
+                    # in the alert. The status is a short bank-provided enum.
+                    safe_status = "".join(c for c in status if c.isascii() and (c.isalnum() or c in "_-"))[:32]
+                    last_response += f", status={safe_status or 'unknown'}"
+                    if status == "Ready":
+                        stmt = st_arr[0]
+                        break
+                else:
+                    last_response += ", выписка отсутствует в ответе"
         if not stmt:
-            return []
+            raise TochkaStatementError(
+                f"Готовая выписка не получена за {POLL_ATTEMPTS} проверок "
+                f"с интервалом {POLL_INTERVAL_SEC} с; последний ответ: {last_response}"
+            )
 
         mapped_rows: list[dict] = []
         for t in stmt.get("Transaction", []) or []:
@@ -432,6 +476,12 @@ class BankTochkaSync(SyncSource):
                  purpose, is_revenue, exclude_reason, raw
                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
                ON CONFLICT (bank, transaction_id) DO UPDATE SET
+                 occurred_at    = EXCLUDED.occurred_at,
+                 amount         = EXCLUDED.amount,
+                 currency       = EXCLUDED.currency,
+                 payer_name     = EXCLUDED.payer_name,
+                 payer_inn      = EXCLUDED.payer_inn,
+                 purpose        = EXCLUDED.purpose,
                  direction      = EXCLUDED.direction,
                  payee_name     = EXCLUDED.payee_name,
                  payee_inn      = EXCLUDED.payee_inn,

@@ -26,6 +26,7 @@ import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffIn
   stripRepeatGreeting,
 } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
+import { addReferralToBase, findReferredUsername, referralFirstTouchInstruction } from './referral';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
   handleProxyError,
@@ -1098,6 +1099,40 @@ export async function handleChat(
       log('warning', `${displayName}: проверка интереса не удалась (${check.error}) — передача только по фразе в ответе модели`);
     }
   }
+  // Обязательная квалификация: вопросы заданы и клиент ответил на все — передаём
+  // сами, а не ждём, что модель вспомнит фразу передачи (19.10.2026: англоязычный
+  // клиент ответил на все три вопроса, бот написал «Thank you» и не передал).
+  if (phrase && !interested && awaitingQualification && oai.qualification_required) {
+    const questions = parseQualificationQuestions(oai.qualification_questions);
+    if (questions.length > 0) {
+      const qa = await checkQualification(chatMessages, questions);
+      if (qa?.asked && qa.missing.length === 0) {
+        interested = true;
+        log('info', `${displayName}: ответил на все контрольные вопросы — передаю контакт менеджеру`);
+      }
+    }
+  }
+
+  // Дал контакт коллеги — ник в базу кампании, первое касание ему отправит
+  // обычная очередь (19.10.2026: бот обещал «напишу коллеге» и не писал).
+  let referralNote: string | null = null;
+  const referred = findReferredUsername(chatMessages, [tgUsername, oai.target_chats_positive]);
+  if (referred) {
+    try {
+      const res = await addReferralToBase(db, campaign.id, tgUsername, referred, () =>
+        openaiGenerate(oai, chatMessages, { extraInstruction: referralFirstTouchInstruction(referred, tgUsername), factsRule: true }));
+      if (res === 'added') {
+        log('info', `${displayName}: дал контакт коллеги @${referred} — добавил в базу кампании, первое касание уйдёт по очереди`);
+        referralNote = `Собеседник дал контакт коллеги @${referred}, мы напишем ему отдельно. Коротко поблагодари за контакт; не пиши, что уже написал коллеге, и не проси других контактов.`;
+      } else if (res === 'already_known') {
+        log('info', `${displayName}: дал контакт @${referred}, но он уже есть в базах кампании или ему уже писали`);
+      } else if (res === 'no_base') {
+        log('warning', `${displayName}: дал контакт @${referred}, но у кампании нет базы — добавить некуда`);
+      }
+    } catch (err) {
+      log('warning', `${displayName}: не смог добавить контакт коллеги @${referred} — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   // Русская фраза передачи иноязычному собеседнику уходит переводом, а лид
   // засчитываем по самому интересу, а не по тексту фразы.
@@ -1114,7 +1149,7 @@ export async function handleChat(
         ? 'Наше последнее сообщение уточняло роль собеседника. Продолжи по порядку квалификации из системного промпта кампании: по названной роли задай следующий вопрос. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
         : roleOnly
         ? 'Наше последнее сообщение только уточняло роль собеседника; предложение ещё не прозвучало. Ответ о роли и встречное предложение своих услуг НЕ означают интереса к нашему предложению. Если роль подтвердилась, кратко объясни повод обращения, опираясь только на системный промпт этой кампании, и спроси, интересно ли человеку это обсудить. Если роль не подтвердилась или собеседник предлагает свои услуги, вежливо заверши разговор. Сейчас не передавай контакт менеджеру и не используй фразу передачи.'
-        : interested && phrase ? handoffInstruction(phrase, translateHandoff) : null,
+        : interested && phrase ? handoffInstruction(phrase, translateHandoff) : referralNote,
       factsRule: true,
     });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);

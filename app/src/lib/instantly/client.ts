@@ -468,6 +468,31 @@ export async function getWorkspaceContactCapacity(requestOptions?: InstantlyRequ
 
 export async function createLeads(
   leads: LeadCreatePayload[],
+  options?: Parameters<typeof createAllowedLeads>[1],
+  requestOptions?: InstantlyRequestOptions,
+): Promise<BulkLeadImportResult> {
+  const { filterProjectBlockedLeads, recheckProjectBlocksAfterImport } = await import('./projectContactBlocks');
+  const filtered = await filterProjectBlockedLeads(leads, options?.campaign_id);
+  const blockedCount = leads.length - filtered.leads.length;
+  const result = filtered.leads.length
+    ? await createAllowedLeads(filtered.leads, options, requestOptions)
+    : normalizeBulkLeadImportResult({ leads_uploaded: 0, total_sent: 0 }, 0);
+  await recheckProjectBlocksAfterImport(filtered.leads, options?.campaign_id);
+  if (result.created_leads.some((lead) => filtered.indexes[lead.index] === undefined)) {
+    throw new Error('Instantly вернул неверный индекс импортированного контакта');
+  }
+  return {
+    ...result,
+    total_sent: result.total_sent + blockedCount,
+    in_blocklist: result.in_blocklist + blockedCount,
+    skipped_count: result.skipped_count + blockedCount,
+    blocklist_used: blockedCount ? 'portal_project' : result.blocklist_used,
+    created_leads: result.created_leads.map((lead) => ({ ...lead, index: filtered.indexes[lead.index] })),
+  };
+}
+
+async function createAllowedLeads(
+  leads: LeadCreatePayload[],
   options?: {
     campaign_id?: string;
     list_id?: string;
@@ -682,14 +707,27 @@ export async function getLeadListVerificationStats(id: string) {
 
 // ─── Block List ───────────────────────────────────────────────────────────────
 
-export async function listBlockListEntries(params?: PaginationParams) {
-  return request<PaginatedResponse<BlockListEntry>>('/block-lists-entries', {
-    params: params as Record<string, string | number>,
-  });
+type ProviderBlockListEntry = Omit<BlockListEntry, 'value'> & { bl_value: string; is_domain: boolean };
+
+function normalizeBlockListEntry(entry: ProviderBlockListEntry): BlockListEntry {
+  return { ...entry, value: entry.bl_value, type: entry.is_domain ? 'domain' : 'email' };
 }
 
-export async function createBlockListEntry(payload: { value: string; type?: string }) {
-  return request<BlockListEntry>('/block-lists-entries', { method: 'POST', body: payload });
+export async function listBlockListEntries(
+  params?: PaginationParams & { search?: string; domains_only?: boolean },
+  options?: InstantlyRequestOptions,
+) {
+  const result = await request<PaginatedResponse<ProviderBlockListEntry>>('/block-lists-entries', {
+    params: params as Record<string, string | number | boolean>,
+  }, options);
+  return { ...result, items: result.items.map(normalizeBlockListEntry) };
+}
+
+export async function createBlockListEntry(payload: { value: string; type?: string }, options?: InstantlyRequestOptions) {
+  const result = await request<ProviderBlockListEntry>('/block-lists-entries', {
+    method: 'POST', body: { bl_value: payload.value },
+  }, options);
+  return normalizeBlockListEntry(result);
 }
 
 export async function updateBlockListEntry(id: string, payload: { value?: string }) {

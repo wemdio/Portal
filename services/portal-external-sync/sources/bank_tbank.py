@@ -380,6 +380,9 @@ def reconcile_period_totals(
 class BankTBankSync(SyncSource):
     name = "bank_tbank"
 
+    def __init__(self, periods: list[tuple[str, str]] | None = None):
+        self.periods = periods
+
     async def run(self, conn: asyncpg.Connection) -> int:
         tokens = load_tokens()
         if not tokens:
@@ -505,7 +508,10 @@ class BankTBankSync(SyncSource):
         """Все периоды одного счёта. Возвращает число залитых строк."""
         total = 0
 
-        for frm, till in PERIODS:
+        periods = self.periods if self.periods is not None else [
+            *PERIODS[:-1], (PERIODS[-1][0], date.today().isoformat()),
+        ]
+        for frm, till in periods:
             # Изоляция периода: сбой одного периода (сеть, битые данные,
             # ошибка upsert) не должен обрывать остальные — источник обязан
             # дойти до конца и залить то, что удалось.
@@ -571,6 +577,12 @@ class BankTBankSync(SyncSource):
                  purpose, is_revenue, exclude_reason, raw
                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
                ON CONFLICT (bank, transaction_id) DO UPDATE SET
+                 occurred_at    = EXCLUDED.occurred_at,
+                 amount         = EXCLUDED.amount,
+                 currency       = EXCLUDED.currency,
+                 payer_name     = EXCLUDED.payer_name,
+                 payer_inn      = EXCLUDED.payer_inn,
+                 purpose        = EXCLUDED.purpose,
                  direction      = EXCLUDED.direction,
                  payee_name     = EXCLUDED.payee_name,
                  payee_inn      = EXCLUDED.payee_inn,

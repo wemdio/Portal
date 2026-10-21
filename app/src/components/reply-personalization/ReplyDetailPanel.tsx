@@ -1,11 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Bell, BellOff } from 'lucide-react';
+import { Ban, Bell, BellOff } from 'lucide-react';
 import { EditorResizeHandle, useEditorHeight } from '@/components/ResizableEditor';
 import {
   fetchOpenDraft,
   fetchThread,
+  fetchContactBlock,
+  blockReplyContact,
   generateReply,
   saveReplyLanguage,
   skipReply,
@@ -13,6 +15,7 @@ import {
 } from './api';
 import { SendConfirmDialog } from './SendConfirmDialog';
 import { playChime, primeChime } from '@/lib/doneChime';
+import { normalizeReplyText } from '@/lib/replyPersonalization/normalizeReplyText';
 import type { ReplyLanguage, ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
 
 function formatTime(iso?: string) {
@@ -85,6 +88,12 @@ export function ReplyDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  const blockKey = `${projectId}:${item.id}`;
+  const [blockStatus, setBlockStatus] = useState<{ key: string; blocked: boolean; syncPending?: boolean; error: string | null } | null>(null);
+  const blockLoading = blockStatus?.key !== blockKey;
+  const contactBlocked = !blockLoading && blockStatus.blocked;
+  const blockError = !blockLoading ? blockStatus.error : null;
+  const [blocking, setBlocking] = useState(false);
   /** Адреса, на которые адресат перенаправил («пишите Екатерине, почта ...»). */
   const [referredEmails, setReferredEmails] = useState<string[]>([]);
   /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
@@ -120,6 +129,25 @@ export function ReplyDetailPanel({
 
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const read = async () => {
+      try {
+        const result = await fetchContactBlock(item.id, projectId);
+        if (cancelled) return;
+        setBlockStatus({ key: blockKey, ...result, error: null });
+        if (result.syncPending) timer = setTimeout(read, 10_000);
+      } catch {
+        if (cancelled) return;
+        setBlockStatus((previous) => ({ key: blockKey, blocked: previous?.key === blockKey && previous.blocked, error: 'Не удалось проверить стоп-лист проекта. При отправке проверим повторно.' }));
+        timer = setTimeout(read, 10_000);
+      }
+    };
+    void read();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [item.id, projectId, blockKey, blocking]);
+
+  useEffect(() => {
+    let cancelled = false;
     setThreadLoading(true);
     setThreadIncomplete(false);
     setCcEmails([]);
@@ -151,15 +179,15 @@ export function ReplyDetailPanel({
     const savedText = readStore(TEXT_KEY(item.id));
     const genStartedAt = Number(readStore(GEN_KEY(item.id)) ?? 0);
     const genInFlight = genStartedAt > 0 && Date.now() - genStartedAt < GEN_MAX_MS;
-    if (savedText) setDraftText(savedText);
+    if (savedText) setDraftText(normalizeReplyText(savedText));
     if (genInFlight) setGenerating(true);
 
     const apply = (found: (GenerateResponse & { createdAt: string }) | null) => {
       if (!found) return false;
-      setDraft(found);
+      setDraft({ ...found, text: normalizeReplyText(found.text) });
       setRecipient(found.recipientEmail ?? null);
       // Свой текст главнее: он мог быть правкой этого же черновика.
-      if (!readStore(TEXT_KEY(item.id))) setDraftText(found.text);
+      if (!readStore(TEXT_KEY(item.id))) setDraftText(normalizeReplyText(found.text));
       return true;
     };
 
@@ -216,9 +244,9 @@ export function ReplyDetailPanel({
       const result = await generateReply(qualificationId, projectId, recipient, language, recipient === null ? ccEmails : []);
       // Новый черновик заменяет набранный текст — и в браузере тоже.
       writeStore(TEXT_KEY(qualificationId), null);
-      setDraft(result);
+      setDraft({ ...result, text: normalizeReplyText(result.text) });
       setDraftCc(recipient === null ? ccEmails : []);
-      setDraftText(result.text);
+      setDraftText(normalizeReplyText(result.text));
       chime('done');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сгенерировать ответ');
@@ -240,7 +268,7 @@ export function ReplyDetailPanel({
   };
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(draftText).catch(() => {});
+    navigator.clipboard.writeText(normalizeReplyText(draftText)).catch(() => {});
   };
 
   /**
@@ -268,21 +296,62 @@ export function ReplyDetailPanel({
     }
   };
 
+  const handleBlock = async () => {
+    if (!window.confirm(
+      `Заблокировать ${item.leadEmail} только в выбранном проекте?\n\nОстановим рассылки в кампаниях этого проекта и запретим повторную загрузку адреса через портал. Другие проекты не затрагиваются.`,
+    )) return;
+    setBlocking(true);
+    setBlockStatus({ key: blockKey, blocked: false, error: null });
+    setConfirmOpen(false);
+    try {
+      const result = await blockReplyContact(item.id, projectId);
+      setBlockStatus({ key: blockKey, ...result, error: null });
+    } catch (err) {
+      setBlockStatus({ key: blockKey, blocked: false, error: err instanceof Error ? err.message : 'Не удалось заблокировать контакт' });
+    } finally {
+      setBlocking(false);
+    }
+  };
+
+  const replyBlocked = contactBlocked && recipient === null;
+
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       {/* Шапка диалога */}
       <div className="border-b border-gray-100 px-4 py-2.5">
-        <div className="text-sm font-semibold text-gray-900">{item.companyName || item.leadEmail}</div>
-        <div className="text-xs text-gray-500">
-          {item.leadEmail}
-          {item.source === 'others'
-            ? item.eaccount
-              ? ` · пришло на ${item.eaccount}`
-              : ''
-            : item.campaignName
-              ? ` · ${item.campaignName}`
-              : ''}
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-gray-900">{item.companyName || item.leadEmail}</div>
+            <div className="text-xs text-gray-500">
+              {item.leadEmail}
+              {item.source === 'others'
+                ? item.eaccount
+                  ? ` · пришло на ${item.eaccount}`
+                  : ''
+                : item.campaignName
+                  ? ` · ${item.campaignName}`
+                  : ''}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleBlock}
+            disabled={blockLoading || blocking || contactBlocked}
+            title="Запретить рассылки на email контакта только в выбранном проекте"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+          >
+            <Ban className="h-3.5 w-3.5" />
+            {blocking ? 'Блокируем...' : blockLoading ? 'Проверяем блокировку...' : contactBlocked ? 'Контакт заблокирован' : 'Заблокировать контакт'}
+          </button>
         </div>
+        {contactBlocked ? (
+          <p role="status" className="mt-2 text-xs text-red-700">
+            {blockStatus?.syncPending
+              ? `Адрес ${item.leadEmail} заблокирован в проекте. Останавливаем рассылки в его текущих кампаниях...`
+              : `Рассылки на ${item.leadEmail} запрещены только в выбранном проекте.`}
+          </p>
+        ) : null}
+        {blockError ? <p role="alert" className="mt-2 text-xs text-red-600">{blockError}</p> : null}
       </div>
 
       {/* Переписка пузырями */}
@@ -307,7 +376,7 @@ export function ReplyDetailPanel({
                   {m.fromUs ? 'Мы' : 'Адресат'}
                   {m.timestamp ? ` · ${formatTime(m.timestamp)}` : ''}
                 </div>
-                <div className="whitespace-pre-wrap break-words text-gray-900">{m.text}</div>
+                <div className="whitespace-pre-wrap break-words text-gray-900">{m.fromUs ? normalizeReplyText(m.text) : m.text}</div>
               </div>
             </div>
           ))
@@ -389,7 +458,7 @@ export function ReplyDetailPanel({
           <button
             type="button"
             onClick={handleGenerate}
-            disabled={generating}
+            disabled={generating || replyBlocked || blocking}
             className="rounded-lg bg-blue-600 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
           >
             {generating ? 'Генерирую...' : draft ? 'Сгенерировать заново' : 'Сгенерировать ответ'}
@@ -464,7 +533,7 @@ export function ReplyDetailPanel({
           <button
             type="button"
             onClick={() => setConfirmOpen(true)}
-            disabled={!draftText.trim()}
+            disabled={!draftText.trim() || replyBlocked || blocking || blockLoading}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
           >
             Отправить ответ
@@ -474,8 +543,8 @@ export function ReplyDetailPanel({
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
 
         <SendConfirmDialog
-          open={confirmOpen}
-          text={draftText}
+          open={confirmOpen && !replyBlocked && !blocking}
+          text={normalizeReplyText(draftText)}
           onCancel={() => setConfirmOpen(false)}
           onSent={() => {
             setConfirmOpen(false);
@@ -484,7 +553,7 @@ export function ReplyDetailPanel({
             // после «Отправить» менялся только статус в списке слева, и было
             // непонятно, ушло письмо или нет. Поле ответа при этом очищаем:
             // текст уже не черновик, а отправленное письмо.
-            const sentText = draftText;
+            const sentText = normalizeReplyText(draftText);
             forgetLocal();
             setThread((prev) => [
               ...prev,

@@ -3,16 +3,13 @@
 ## Архитектура
 
 Instantly DB живёт на **отдельном сервере** от Portal, в `deploy/instantly-db/docker-compose.yml`.
-Два инстанса (prod + dev) с отдельными pgAdmin; автобэкапы включены только для production. На хосте используются **нестандартные порты** (не 5432/3001), чтобы не пересекаться с другими сервисами на том же сервере. Внутри Docker-сети Postgres по-прежнему на `5432`, PostgREST на `3000`.
+Один инстанс (prod) с pgAdmin; dev-контур удалён 21.10.2026 (им никто не пользовался). На хосте используются **нестандартные порты** (не 5432/3001), чтобы не пересекаться с другими сервисами на том же сервере. Внутри Docker-сети Postgres по-прежнему на `5432`, PostgREST на `3000`.
 
 | Порт на хосте | Сервис | Кто подключается |
 |---------------|--------|------------------|
 | 35432 | PG prod | Portal-сервер (portal, instantly-sync-bot) |
-| 35433 | PG dev | Разработчики (2 человека) |
 | 35401 | PostgREST prod | Portal-сервер (Next.js через supabaseInstantly.ts) |
-| 35402 | PostgREST dev | Разработчики |
 | 127.0.0.1:35410 | pgAdmin prod | SSH tunnel |
-| 127.0.0.1:35411 | pgAdmin dev | SSH tunnel |
 
 ## Деплой DB-сервера
 
@@ -47,10 +44,7 @@ cp .env.example .env
 node -e "const c=require('crypto');
 console.log('INSTANTLY_PROD_PG_PASSWORD=' + c.randomBytes(24).toString('base64'));
 console.log('INSTANTLY_PROD_JWT_SECRET=' + c.randomBytes(32).toString('base64'));
-console.log('INSTANTLY_PROD_PGADMIN_PASSWORD=' + c.randomBytes(24).toString('base64'));
-console.log('INSTANTLY_DEV_PG_PASSWORD=' + c.randomBytes(24).toString('base64'));
-console.log('INSTANTLY_DEV_JWT_SECRET=' + c.randomBytes(32).toString('base64'));
-console.log('INSTANTLY_DEV_PGADMIN_PASSWORD=' + c.randomBytes(24).toString('base64'));"
+console.log('INSTANTLY_PROD_PGADMIN_PASSWORD=' + c.randomBytes(24).toString('base64'));"
 ```
 
 ### 3. Запуск
@@ -68,14 +62,8 @@ Backup-контейнер по отдельному profile запускаетс
 # Postgres prod healthy?
 docker inspect instantly-postgres-prod --format '{{.State.Health.Status}}'
 
-# Postgres dev healthy?
-docker inspect instantly-postgres-dev --format '{{.State.Health.Status}}'
-
 # PostgREST prod отвечает?
 curl -s http://localhost:35401/
-
-# PostgREST dev отвечает?
-curl -s http://localhost:35402/
 
 # Migrator отработал?
 docker logs instantly-migrator
@@ -95,14 +83,6 @@ INSTANTLY_SUPABASE_URL=http://<DB_SERVER_IP>:35401
 INSTANTLY_SUPABASE_SERVICE_ROLE_KEY=local-no-supabase
 ```
 
-Для **локальной разработки** (`.env` на машинах разработчиков):
-
-```env
-INSTANTLY_DATABASE_URL=postgresql://instantly:<DEV_PG_PASSWORD>@<DB_SERVER_IP>:35433/instantly
-INSTANTLY_SUPABASE_URL=http://<DB_SERVER_IP>:35402
-INSTANTLY_SUPABASE_SERVICE_ROLE_KEY=local-no-supabase
-```
-
 ## Подключение к pgAdmin
 
 pgAdmin доступен только через SSH tunnel:
@@ -112,13 +92,10 @@ pgAdmin доступен только через SSH tunnel:
 ssh -L 5050:127.0.0.1:35410 <user>@<DB_SERVER_IP>
 # Открыть http://localhost:5050
 
-# Dev pgAdmin (удалённый 35411 → локальный 5051)
-ssh -L 5051:127.0.0.1:35411 <user>@<DB_SERVER_IP>
-# Открыть http://localhost:5051
 ```
 
 В UI pgAdmin создать сервер:
-- Host: `instantly-postgres-prod` (или `instantly-postgres-dev`)
+- Host: `instantly-postgres-prod`
 - Port: `5432`
 - Database: `instantly`
 - Username: `instantly`
@@ -220,8 +197,7 @@ compose: необходимые бинарники расширений пред
 ### Параметры в `/opt/instantly-db/.env`
 
 URL подключения вручную переносить не нужно: compose собирает их из уже
-существующих `MAIN_PG_PASSWORD`, `INSTANTLY_PROD_PG_PASSWORD` и
-`INSTANTLY_DEV_PG_PASSWORD`, а хостами служат локальные контейнеры.
+существующих `MAIN_PG_PASSWORD` и `INSTANTLY_PROD_PG_PASSWORD`, а хостами служат локальные контейнеры.
 
 С Portal-сервера нужно перенести только параметры S3 и Telegram:
 

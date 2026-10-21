@@ -1,7 +1,8 @@
 import { runOutreachOsLeadsPass } from '@/lib/outreachOsLeads/process';
 import { runOwnReplyLeadsPass } from '@/lib/ownReplyLeads/process';
-import { runSenderLeadsPass, senderLeadsAi } from '@/lib/senderLeads/process';
+import { runSenderLeadsPass, senderLeadsAi, SENDER_LEADS_RECOVERY_INTERVAL_MS } from '@/lib/senderLeads/process';
 import { leadTelegramConfig } from '@/lib/senderLeads/telegram';
+import { runAgencyLeadHandoffs } from '@/lib/agencyLeadHandoff/process';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 
@@ -40,6 +41,9 @@ const INTERVAL_MS = envMs('SENDER_LEADS_INTERVAL_MS', 60_000, 10_000);
 async function main(): Promise<void> {
   const db = requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
+  // Первый обход — сразу после старта. Расписание каждой повторной попытки
+  // хранится в БД, поэтому redeploy не обнуляет час ожидания после ошибки.
+  let nextRecoveryAt = 0;
 
   // Без ключа или токена воркер не падает: так видно в логах, чего не хватает,
   // а контейнер не уходит в перезапуски.
@@ -50,7 +54,9 @@ async function main(): Promise<void> {
 
   while (!shouldStop()) {
     try {
-      const pass = await runSenderLeadsPass(db, log);
+      const recoverErrors = Date.now() >= nextRecoveryAt;
+      const pass = await runSenderLeadsPass(db, log, recoverErrors);
+      if (recoverErrors && !pass.recoveryHasMore) nextRecoveryAt = Date.now() + SENDER_LEADS_RECOVERY_INTERVAL_MS;
       if (pass.qualified || pass.delivered || pass.crm) {
         log('info', `Оценено ${pass.qualified}, лидов ${pass.leads}, в чат ушло ${pass.delivered}, AMO обработано ${pass.crm}`);
       }
@@ -65,6 +71,12 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       log('error', 'Круг ответов «N. Polza» упал', err);
+    }
+    // Agency email replies: only API/queue work here; SMTP stays on isolated sender hosts.
+    try {
+      await runAgencyLeadHandoffs(db, log);
+    } catch (err) {
+      log('error', 'Передача лидов по email упала', err);
     }
     // Заявки OutreachOS (лиды кабинета, регистрации) → AMO → General со ссылкой на сделку.
     try {
