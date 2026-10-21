@@ -208,6 +208,20 @@ export function skipReply(qualificationId: string, projectId: string) {
   });
 }
 
+export function fetchContactBlock(qualificationId: string, projectId: string) {
+  return fetchWithAuth<{ email: string; blocked: boolean }>(
+    `${BASE}/replies/${qualificationId}/block?projectId=${encodeURIComponent(projectId)}`,
+    { cache: 'no-store' },
+  );
+}
+
+export function blockReplyContact(qualificationId: string, projectId: string) {
+  return fetchWithAuth<{ email: string; blocked: boolean }>(`${BASE}/replies/${qualificationId}/block`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  });
+}
+
 /**
  * Извлечь текст из файла (PDF/DOCX/TXT/MD) для полей базы знаний.
  * Отдельно от fetchWithAuth: multipart-форма не должна получать
