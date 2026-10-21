@@ -1,4 +1,4 @@
-import { rethrowHeEngBaseBudgetError } from './engBaseBudget';
+import { isHeEngBaseBudgetPreflightFailure, rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import { z } from 'zod';
 
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
@@ -583,6 +583,16 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       }
       return result;
     } catch (error) {
+      // This purchase is a single callLLMText attempt, transportRetries: 0,
+      // with no model/schema fallback. Only a live transport receipt can prove
+      // zero provider work. Clear our local marker before propagating the stop,
+      // so a future approved resume does not discard all remaining companies.
+      // Global ledger holds/reservations and historical inFlight stay intact.
+      if (isHeEngBaseBudgetPreflightFailure(error)) {
+        settleHeEngQualificationModel(budget, reservation, 0);
+        delete memo.economy!.inFlight;
+        await save();
+      }
       rethrowHeEngBaseBudgetError(error);
       // Unknown implementation errors/abort keep the durable in-flight marker.
       interrupted(ctx, error);

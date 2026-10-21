@@ -21,6 +21,14 @@ interface BaseBudgetScope {
 }
 
 const scopeStorage = new AsyncLocalStorage<BaseBudgetScope>();
+// In-process evidence only: an error/property restored from JSON cannot prove
+// that a provider was never called. This marker covers one physical attempt.
+const preflightFailures = new WeakSet<Error>();
+
+/** Only valid for a single callLLMText attempt with transportRetries: 0. */
+export function isHeEngBaseBudgetPreflightFailure(error: unknown): boolean {
+  return error instanceof Error && preflightFailures.has(error);
+}
 
 export class HeEngBaseBudgetGuardError extends Error {
   readonly heEngBaseBudgetError = true as const;
@@ -256,6 +264,10 @@ export async function reserveHeEngRequestyCall(
   } catch (error) {
     if (signal.aborted) throw signal.reason ?? error;
     const failure = budgetFailure(error, 'reservation_failed', 'the request budget could not be reserved.');
+    // llm.ts awaits this function before entering the paid HTTP transport.
+    // An ambiguous global reservation is still retained by the ledger; this
+    // only proves that THIS provider attempt was not dispatched.
+    preflightFailures.add(failure);
     scope.stopped = failure;
     throw failure;
   }
