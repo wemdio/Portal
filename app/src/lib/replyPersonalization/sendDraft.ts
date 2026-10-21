@@ -12,10 +12,12 @@ import {
 import { forwardEmail, getEmail, replyToEmail, sendTestEmail } from '@/lib/instantly/client';
 import { isNotPartOfCampaignError } from '@/lib/instantly/notPartOfCampaign';
 import { isContactBlocked } from '@/lib/instantly/contactBlocklist';
+import { getProjectContactBlock } from '@/lib/instantly/projectContactBlocks';
 import { getDraftById, markDraftSent, updateDraftText } from './db';
 import { fetchReplyThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
+import { normalizeReplyText } from './normalizeReplyText';
 import type { Email } from '@/lib/instantly/types';
 import type { QualificationRow } from './types';
 
@@ -93,6 +95,7 @@ export async function sendDraft(
   if (finalText.length > MAX_SEND_TEXT_LENGTH) {
     throw new SendDraftError('Текст ответа слишком длинный', 422);
   }
+  finalText = normalizeReplyText(finalText);
 
   const draft = await getDraftById(draftId);
   if (!draft) throw new SendDraftError('Черновик не найден', 404);
@@ -138,8 +141,8 @@ export async function sendDraft(
   // protects an old open draft and the /emails/test fallback from bypassing DNC.
   const checkBlocklist = async () => {
     for (const email of new Set([newContact || qualification.leadEmail, ...cc])) {
-      if (await isContactBlocked(email, accountId)) {
-        throw new SendDraftError(`Адрес ${email} заблокирован в Instantly. Отправка запрещена.`, 409);
+      if ((await getProjectContactBlock(draft.projectId, email)).blocked || await isContactBlocked(email, accountId)) {
+        throw new SendDraftError(`Адрес ${email} заблокирован. Отправка в этом проекте запрещена.`, 409);
       }
     }
   };

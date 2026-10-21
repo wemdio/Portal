@@ -22,6 +22,7 @@ import { heCollectStopRepeats } from './clientFailureText';
 import { EngSupportText } from './EngPaidAccess';
 import { EngSpinner } from './ui';
 import { EngCollectionProgress } from './EngCollectionProgress';
+import { EngCollectionTargetSummary, engCollectionTargetView } from './EngCollectionTarget';
 import type { EngDetail } from './EngProjectWizard';
 
 /* ── Список Do not contact в сборке ── */
@@ -61,17 +62,26 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
   const stats = info?.stats;
   const construct = info?.construct;
   const skipped = dncSkippedText(base);
+  const collectionTarget = engCollectionTargetView(base);
   return (
     <div
       className="rounded-md p-3 mt-2 flex flex-col gap-1.5"
       style={{ border: '1px solid var(--cp-divider)' }}
     >
+      {collectionTarget && <EngCollectionTargetSummary base={base} />}
+      {collectionTarget && (
+        <div className="pt-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          Current batch
+        </div>
+      )}
       {base.collection_progress?.step_key === 'company_qualification' || construct?.status === 'dispatched' ? (
         <EngCollectionProgress progress={base.collection_progress} />
       ) : !construct ? (
         <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--cp-amber)' }}>
           <EngSpinner className="h-3 w-3" />
-          Collecting contacts{info?.limit ? ` (up to ${info.limit.toLocaleString('en-US')})` : ''}…
+          {collectionTarget
+            ? 'Finding companies for this batch…'
+            : `Collecting contacts${info?.limit ? ` (up to ${info.limit.toLocaleString('en-US')})` : ''}…`}
         </div>
       ) : null}
       {tasks.length > 0 && (
@@ -82,14 +92,14 @@ export function CollectProgress({ base }: { base: EngBaseSummary }) {
                 {t.status ?? 'pending'}
               </span>
               <span>{t.source ?? 'source'}</span>
-              {typeof t.rows === 'number' && <span className="ml-auto">{t.rows.toLocaleString('en-US')} rows</span>}
+              {typeof t.rows === 'number' && <span className="ml-auto">{t.rows.toLocaleString('en-US')} {collectionTarget ? 'candidates' : 'rows'}</span>}
             </li>
           ))}
         </ul>
       )}
       {stats && (
         <div className="text-[11px] ds-mono" style={{ color: 'var(--cp-text-m)' }}>
-          {stats.tasks_done ?? 0}/{stats.tasks_total ?? 0} tasks · {(stats.rows_total ?? 0).toLocaleString('en-US')} rows
+          {stats.tasks_done ?? 0}/{stats.tasks_total ?? 0} tasks · {(stats.rows_total ?? 0).toLocaleString('en-US')} {collectionTarget ? 'candidates' : 'rows'}
         </div>
       )}
       {skipped && (

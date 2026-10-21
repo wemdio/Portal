@@ -468,6 +468,31 @@ export async function getWorkspaceContactCapacity(requestOptions?: InstantlyRequ
 
 export async function createLeads(
   leads: LeadCreatePayload[],
+  options?: Parameters<typeof createAllowedLeads>[1],
+  requestOptions?: InstantlyRequestOptions,
+): Promise<BulkLeadImportResult> {
+  const { filterProjectBlockedLeads, recheckProjectBlocksAfterImport } = await import('./projectContactBlocks');
+  const filtered = await filterProjectBlockedLeads(leads, options?.campaign_id);
+  const blockedCount = leads.length - filtered.leads.length;
+  const result = filtered.leads.length
+    ? await createAllowedLeads(filtered.leads, options, requestOptions)
+    : normalizeBulkLeadImportResult({ leads_uploaded: 0, total_sent: 0 }, 0);
+  await recheckProjectBlocksAfterImport(filtered.leads, options?.campaign_id);
+  if (result.created_leads.some((lead) => filtered.indexes[lead.index] === undefined)) {
+    throw new Error('Instantly вернул неверный индекс импортированного контакта');
+  }
+  return {
+    ...result,
+    total_sent: result.total_sent + blockedCount,
+    in_blocklist: result.in_blocklist + blockedCount,
+    skipped_count: result.skipped_count + blockedCount,
+    blocklist_used: blockedCount ? 'portal_project' : result.blocklist_used,
+    created_leads: result.created_leads.map((lead) => ({ ...lead, index: filtered.indexes[lead.index] })),
+  };
+}
+
+async function createAllowedLeads(
+  leads: LeadCreatePayload[],
   options?: {
     campaign_id?: string;
     list_id?: string;

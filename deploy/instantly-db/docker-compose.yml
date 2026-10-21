@@ -1,9 +1,8 @@
-# DB infrastructure: Instantly (prod/dev) + Main Portal DB
+# DB infrastructure: Instantly (prod) + Main Portal DB
 # Deploy on a dedicated DB server, separate from the Portal app server.
 #
 # Host ports (avoid 5432/3000/3001 defaults on shared servers):
 #   instantly prod: PG 35432, PostgREST 35401, pgAdmin 127.0.0.1:35410
-#   instantly dev:  PG 35433, PostgREST 35402, pgAdmin 127.0.0.1:35411
 #   main portal:    PG 35434, pgAdmin 127.0.0.1:35412
 #
 # Usage:
@@ -98,93 +97,6 @@ services:
       - prod-pgadmin-data:/var/lib/pgadmin
     ports:
       - "127.0.0.1:35410:5050"
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '0.2'
-          pids: 512
-    restart: unless-stopped
-    networks:
-      - instantly-network
-
-  # ─── DEV ───────────────────────────────────────────────────────────────────────
-
-  instantly-postgres-dev:
-    image: postgres:16-alpine
-    container_name: instantly-postgres-dev
-    command:
-      - postgres
-      - -c
-      - max_connections=20
-      - -c
-      - shared_buffers=128MB
-    environment:
-      POSTGRES_DB: instantly
-      POSTGRES_USER: instantly
-      POSTGRES_PASSWORD: ${INSTANTLY_DEV_PG_PASSWORD}
-    volumes:
-      - dev-pg-data:/var/lib/postgresql/data
-    ports:
-      - "0.0.0.0:35433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U instantly -d instantly"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-          pids: 512
-    restart: unless-stopped
-    networks:
-      - instantly-network
-
-  instantly-postgrest-dev:
-    image: postgrest/postgrest:v12.2.8
-    container_name: instantly-postgrest-dev
-    environment:
-      PGRST_DB_URI: postgresql://instantly:${INSTANTLY_DEV_PG_PASSWORD}@instantly-postgres-dev:5432/instantly
-      PGRST_DB_POOL: 5
-      PGRST_DB_POOL_ACQUISITION_TIMEOUT: 10
-      PGRST_DB_ANON_ROLE: instantly
-      PGRST_DB_SCHEMAS: public
-      PGRST_JWT_SECRET: ${INSTANTLY_DEV_JWT_SECRET:-instantly-dev-jwt-secret}
-    depends_on:
-      instantly-postgres-dev:
-        condition: service_healthy
-    # 22.07.2026: distroless image, см. коммент у postgrest-prod.
-    healthcheck:
-      disable: true
-    ports:
-      - "0.0.0.0:35402:3000"
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: '0.1'
-          pids: 512
-    restart: unless-stopped
-    networks:
-      - instantly-network
-
-  instantly-pgadmin-dev:
-    image: dpage/pgadmin4:9.3
-    container_name: instantly-pgadmin-dev
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${INSTANTLY_DEV_PGADMIN_EMAIL:-admin@portal.local}
-      PGADMIN_DEFAULT_PASSWORD: ${INSTANTLY_DEV_PGADMIN_PASSWORD}
-      PGADMIN_LISTEN_PORT: 5050
-    depends_on:
-      instantly-postgres-dev:
-        condition: service_healthy
-    volumes:
-      - dev-pgadmin-data:/var/lib/pgadmin
-    ports:
-      - "127.0.0.1:35411:5050"
     deploy:
       resources:
         limits:
@@ -331,7 +243,7 @@ services:
       - instantly-network
 
   # ─── MIGRATOR ──────────────────────────────────────────────────────────────────
-  # Applies pending SQL migrations to both prod and dev databases on every `up`.
+  # Applies pending SQL migrations to the prod database on every `up`.
 
   instantly-migrator:
     image: node:20-alpine
@@ -342,11 +254,8 @@ services:
       - ./scripts:/app/scripts:ro
     environment:
       INSTANTLY_PROD_DATABASE_URL: postgresql://instantly:${INSTANTLY_PROD_PG_PASSWORD}@instantly-postgres-prod:5432/instantly
-      INSTANTLY_DEV_DATABASE_URL: postgresql://instantly:${INSTANTLY_DEV_PG_PASSWORD}@instantly-postgres-dev:5432/instantly
     depends_on:
       instantly-postgres-prod:
-        condition: service_healthy
-      instantly-postgres-dev:
         condition: service_healthy
     entrypoint: ["sh", "-c"]
     command:
@@ -355,8 +264,6 @@ services:
         npm install --no-save pg dotenv 2>/dev/null
         echo "[migrator] Applying migrations to PROD..."
         INSTANTLY_DATABASE_URL="$$INSTANTLY_PROD_DATABASE_URL" node scripts/db/ensureDatabase.js
-        echo "[migrator] Applying migrations to DEV..."
-        INSTANTLY_DATABASE_URL="$$INSTANTLY_DEV_DATABASE_URL" node scripts/db/ensureDatabase.js
         echo "[migrator] Done."
     restart: "no"
     networks:
@@ -365,8 +272,6 @@ services:
 volumes:
   prod-pg-data:
   prod-pgadmin-data:
-  dev-pg-data:
-  dev-pgadmin-data:
   main-supabase-pg-data:
   main-pgadmin-data:
   portal-backup-data:

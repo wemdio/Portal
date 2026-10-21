@@ -15,12 +15,12 @@ import { runClusteringStage } from './clustering';
 import { runChainStage } from './chain';
 import { runVocabStage } from './vocab';
 import { runBaseAnalyzeStage } from './baseAnalyze';
-import { runBaseCollectStage } from './baseCollect';
+import { runBaseCollectStage, finishHeEngTargetBudgetStop } from './baseCollect';
 import { runTemplateStage } from './template';
 import { runDossierStage } from './dossier';
 import { readHeEngBaseFirst } from '../engBaseFirst';
 import { withHeEngBaseBudget } from '../engBaseBudget';
-import { HeEngBaseBudgetError } from '../engBaseBudgetLedger';
+import { HeEngBaseBudgetError, isHeEngBaseBudgetError } from '../engBaseBudgetLedger';
 
 export type { HeStageContext, HeStageResult } from './shared';
 
@@ -35,9 +35,21 @@ export async function runHeStage(job: HeJob, ctx: HeStageContext): Promise<HeSta
     if (await readHeEngBaseFirst(ctx.supabase, project)) {
       const baseId = job.payload?.base_id;
       if (typeof baseId !== 'string' || !baseId) throw new HeEngBaseBudgetError('missing_history');
-      return withHeEngBaseBudget(
-        ctx.supabase, baseId, job.project_id, () => dispatchHeStage(job, ctx), job.stage,
-      );
+      try {
+        return await withHeEngBaseBudget(
+          ctx.supabase, baseId, job.project_id, () => dispatchHeStage(job, ctx), job.stage,
+        );
+      } catch (error) {
+        // Publish only previously checked waves after a terminal money guard.
+        // No providers, reservation releases or budget resets run here.
+        if (job.stage === 'base_collect' && isHeEngBaseBudgetError(error)) {
+          const reason = error instanceof HeEngBaseBudgetError && error.reason === 'budget_exhausted'
+            ? 'budget_limit' : 'error';
+          const result = await finishHeEngTargetBudgetStop(job, ctx, reason);
+          if (result) return result;
+        }
+        throw error;
+      }
     }
   }
   return dispatchHeStage(job, ctx);

@@ -3,6 +3,8 @@
 // компании-адресата. Не переиспользует openrouter/client.ts: тот не
 // поддерживает поле `tools`, нужное здесь.
 
+import { normalizeReplyText } from './normalizeReplyText';
+
 const ENDPOINT = process.env.OPENROUTER_ENDPOINT ?? 'https://router.requesty.ai/v1/chat/completions';
 
 // Id — ровно как в каталоге Requesty (GET router.requesty.ai/v1/models), с
@@ -83,7 +85,7 @@ export async function generateReplyWithSearch(messages: { role: string; content:
 
       const data = (await response.json()) as { choices?: RequestyChoice[]; model?: string };
       const choice = data.choices?.[0];
-      const content = choice?.message?.content?.trim() ?? '';
+      const content = normalizeReplyText(choice?.message?.content ?? '');
 
       if (choice?.finish_reason === 'length') {
         lastError = new ReplyGenerationError('Ответ обрезан по длине (finish_reason=length)');

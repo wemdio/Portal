@@ -226,6 +226,19 @@ export interface EngConstructInfo {
   per_address_verdicts?: boolean;
 }
 
+/** Actual checked contacts, not an estimate of the audience still available. */
+export interface EngCollectionTarget {
+  version: 1;
+  ready_target: number;
+  reserve_target: number;
+  ready_count: number;
+  reserve_count: number;
+  total_ready: number;
+  phase: 'collecting' | 'building_reserve' | 'complete' | 'stopped';
+  stop_reason: 'budget_limit' | 'sources_exhausted' | 'low_yield' | 'safety_limit' | 'error' | null;
+  rounds_completed: number;
+}
+
 /**
  * collect_info с полями ENG-конвейера (construct + stats). Только то, что
  * отдаёт проекция (COLLECT_STATS_FIELDS / CONSTRUCT_FIELDS): поле, которого
@@ -233,6 +246,8 @@ export interface EngConstructInfo {
  */
 export interface EngCollectInfo extends HeCollectInfo {
   construct?: EngConstructInfo;
+  /** New target-based collections only; older bases have no target metadata. */
+  eng_collection_target?: EngCollectionTarget;
   /** Aggregate company checks only; the underlying verdicts stay on the server. */
   company_qualification?: EngCompanyQualificationSummary;
   stats?: {

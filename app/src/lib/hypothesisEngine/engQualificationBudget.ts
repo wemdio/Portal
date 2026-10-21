@@ -10,6 +10,8 @@ export const HE_ENG_QUALIFICATION_SEARCH_LIMIT = 0;
 
 const USD_MICROS = 1_000_000;
 const LIMIT_MICROS = 500_000;
+/** New adaptive bases share the existing global $5 ledger; this is not extra money. */
+export const HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD = 5_000_000;
 const MAX_OUTPUT_TOKENS = 16_384;
 // Rates verified 2026-10-20: $0.09/$0.18 per million input/output tokens.
 // https://router.requesty.ai/v1/models (input_price=9e-8, output_price=1.8e-7;
@@ -42,7 +44,7 @@ const ReservationSchema = z.object({
 export const HeEngQualificationBudgetSchema = z.object({
   version: z.literal(1),
   model: z.literal(HE_ENG_QUALIFICATION_MODEL),
-  limitMicrousd: z.literal(LIMIT_MICROS),
+  limitMicrousd: z.union([z.literal(LIMIT_MICROS), z.literal(HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD)]),
   searchLimit: z.literal(HE_ENG_QUALIFICATION_SEARCH_LIMIT),
   searchCalls: z.literal(0),
   nextReservationId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -68,7 +70,7 @@ export const HeEngQualificationBudgetSchema = z.object({
       actual !== value.actualMicrousd || !Number.isSafeInteger(reserved) || !Number.isSafeInteger(actual)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Qualification budget totals do not match reservations' });
   }
-  if ((overReservation || reserved > LIMIT_MICROS) && value.holdReason !== 'model_cost_exceeded_reservation') {
+  if ((overReservation || reserved > value.limitMicrousd) && value.holdReason !== 'model_cost_exceeded_reservation') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Unexpected provider charge must hold further calls' });
   }
 });
@@ -97,14 +99,22 @@ function assertBudget(value: unknown): asserts value is HeEngQualificationBudget
 /** Missing budget on an already paid legacy memo is not permission for a fresh allowance. */
 export function readHeEngQualificationBudget(
   value?: unknown,
-  options: { hasPaidHistory?: boolean } = {},
+  options: {
+    hasPaidHistory?: boolean;
+    /** Fresh adaptive target only. Caller must retain the active global base ledger. */
+    freshLimitMicrousd?: typeof LIMIT_MICROS | typeof HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD;
+  } = {},
 ): HeEngQualificationBudget {
   if (value === undefined) {
     if (options.hasPaidHistory) throw new HeEngQualificationBudgetError('missing_budget_history');
+    const limit = options.freshLimitMicrousd ?? LIMIT_MICROS;
+    if (limit !== LIMIT_MICROS && limit !== HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD) {
+      throw new HeEngQualificationBudgetError('invalid_budget');
+    }
     return {
       version: 1,
       model: HE_ENG_QUALIFICATION_MODEL,
-      limitMicrousd: LIMIT_MICROS,
+      limitMicrousd: limit,
       searchLimit: HE_ENG_QUALIFICATION_SEARCH_LIMIT,
       searchCalls: 0,
       nextReservationId: 1,

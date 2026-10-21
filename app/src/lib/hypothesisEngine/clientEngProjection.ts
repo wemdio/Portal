@@ -852,6 +852,13 @@ function toClientConstruct(construct: Row): Row {
  */
 export function toClientEngCollectInfo(info: Row): Row {
   const out = pick(info, COLLECT_INFO_FIELDS);
+  const target = asRow(info.eng_collection_target);
+  if (target?.version === 1) {
+    out.eng_collection_target = pick(target, [
+      'version', 'ready_target', 'reserve_target', 'ready_count', 'reserve_count',
+      'total_ready', 'phase', 'stop_reason', 'rounds_completed',
+    ]);
+  }
 
   const qualification = engCompanyQualificationSummary(info);
   if (qualification) out.company_qualification = qualification;

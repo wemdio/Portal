@@ -200,6 +200,19 @@ import {
 import { withHeCleanCompanyNames } from '../companyNameCleanup';
 import type { HeCompanyCleanRow } from '../companyNames';
 import { heEngBaseBudgetActive, rethrowHeEngBaseBudgetError } from '../engBaseBudget';
+import {
+  appendHeEngCollectionRound, readHeEngCollectionCheckpoint, nextHeEngCollectionBatchSize,
+  stopHeEngCollectionTarget, partitionHeEngCollectionRows,
+  type HeEngCollectionTarget, type HeEngCollectionPool, type HeEngCollectionStopReason,
+} from '../engCollectionTarget';
+import { pickHeEngTargetSource, heEngTargetSourceStopReason, type HeEngSourceHistoryEntry } from '../engCollectionSources';
+import { buildHeEngReadyBaseAnalysis } from '../engReadyBaseAnalysis';
+import {
+  createHeEngCompanySearchPlan, createHeEngCompanySearchCheckpoint, runHeEngCompanySearchPage,
+  type HeEngCompanySearchPlan, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchCandidate,
+} from '../engCompanySearch';
+import { resolveHeEngSearchCompanyEvidence } from '../engSearchCompanyEvidence';
+
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
@@ -294,6 +307,7 @@ import {
 // глотать его в catch задачи нельзя (см. runDispatch).
 import { heCheckpointSupabase, isHeStageDbInterruption } from '../stageDb';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
+import { compactHeEngCollectionQualificationMemo } from '../engCollectionAudit';
 // Только типы восстановления (collect_info.revalidation и
 // construct.late_import_undo): модуль сам импортирует стадию, поэтому здесь —
 // import type, без цикла в рантайме.
@@ -1221,7 +1235,29 @@ export interface HeSliceProbe {
   error?: string;
 }
 
+interface HeEngCollectionWork {
+  version: 1;
+  round: number;
+  batch_size: number;
+  active_source_key: string | null;
+  seen_companies: Array<{ company: string; website: string }>;
+  history: HeEngSourceHistoryEntry[];
+  candidate_rows?: Array<{ company: string; website: string }>;
+  search_candidates?: HeEngCompanySearchCandidate[];
+  search_pages?: number;
+  search_resolved?: number;
+  search_rows?: HeUnifiedRow[];
+  search_exclusions?: Record<string, number>;
+}
+
 export interface HeCollectInfo {
+  eng_collection_target?: HeEngCollectionTarget;
+  eng_collection_pool?: HeEngCollectionPool;
+  eng_collection_work?: HeEngCollectionWork;
+  eng_collection_round_audit?: Array<{ round: number; constructor?: HeConstructInfo; search_exclusions?: Record<string, number> }>;
+
+  eng_company_search?: { plan: HeEngCompanySearchPlan; checkpoint: HeEngCompanySearchCheckpoint };
+
   /** Free manual ENG candidate slices stay out of the reusable/refill plan. */
   eng_pdl_name_priority?: HeEngPdlNamePriority;
   /** Trusted provider countries survive constructor grids and harvest cleanup. */
@@ -4114,6 +4150,7 @@ async function dispatchTask(
   countryProvenance = false,
 ): Promise<void> {
   const { task } = state;
+  if (task.source === 'web_search') throw new Error('Company search requires the ENG adaptive dispatcher');
 
   // Последний рубеж набора источников рынка — ДО любого коллектора: ни
   // дочерней джобы, ни чтения каталога, то есть ничего не оплачено. Отказ —
@@ -4862,7 +4899,7 @@ async function loadOtherBaseExclusionKeys(
 ): Promise<HeBaseExclusionKeys> {
   const { data, error } = await ctx.supabase
     .from('he_bases')
-    .select(market === 'us' ? 'id, data' : 'data')
+    .select(market === 'us' ? 'id, data, eng_collection_pool:collect_info->eng_collection_pool' : 'data')
     .eq('project_id', projectId)
     .neq('status', 'failed')
     .neq('id', baseId);
@@ -4871,8 +4908,9 @@ async function loadOtherBaseExclusionKeys(
   const carryKeyOf = released && released.size > 0 ? heRefillCarryKeyFn(HE_AUTO_COLLECT_COLUMNS) : null;
 
   const keys = emptyExclusionKeys(market === 'us', market === 'us' && dncDomains ? dncDomains : NO_DNC_DOMAINS);
-  for (const row of (data ?? []) as Array<{ id?: unknown; data?: unknown }>) {
+  for (const row of (data ?? []) as Array<{ id?: unknown; data?: unknown; eng_collection_pool?: { rows?: unknown } }>) {
     const rows = Array.isArray(row.data) ? row.data.slice(0, MAX_ROWS_LIMIT) : [];
+    if (market === 'us' && Array.isArray(row.eng_collection_pool?.rows)) rows.push(...row.eng_collection_pool.rows.slice(0, 5500));
     const releasedHere =
       carryKeyOf && released && typeof row.id === 'string' ? released.get(row.id) : undefined;
     for (const item of rows) {
@@ -6726,6 +6764,250 @@ function heRefuseForeignTasks(ctx: HeStageContext, tasks: HeCollectTaskState[], 
 
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
+/** One bounded search wave; cursor + paid response are committed together. */
+async function dispatchHeEngSearchBatch(
+  ctx: HeStageContext, job: HeJob, baseId: string, info: HeCollectInfo,
+  state: HeCollectTaskState, scope: HeEngQualificationScope,
+): Promise<void> {
+  const work = info.eng_collection_work!;
+  if (!scope.countries.length) {
+    state.status = 'failed'; state.error = 'Search requires explicit countries'; state.rows = 0;
+    return;
+  }
+  if (!info.eng_company_search) {
+    const plan = createHeEngCompanySearchPlan({ hypotheses: scope.hypotheses, allowedCountries: scope.countries });
+    info.eng_company_search = { plan, checkpoint: createHeEngCompanySearchCheckpoint(plan) };
+    if (!(await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true }))) throw new Error('ENG collection cancelled');
+  }
+  const search = info.eng_company_search;
+  // Five independent pages, at most 50 candidates, then qualify their actual
+  // websites. Do not buy every result page before learning whether it works.
+  while ((work.search_pages ?? 0) < 5 && !search.checkpoint.unavailable &&
+      search.checkpoint.exhaustedTaskIds.length < search.plan.tasks.length) {
+    const before = search.checkpoint.calls;
+    const result = await runHeEngCompanySearchPage({
+      db: paidCheckpointDb(ctx), baseId, projectId: job.project_id,
+      plan: search.plan, checkpoint: search.checkpoint,
+      seenWebsites: [...work.seen_companies, ...(work.search_candidates ?? [])].map((row) => row.website),
+      signal: ctx.signal,
+      onCheckpoint: async (checkpoint, candidates) => {
+        search.checkpoint = checkpoint;
+        work.search_candidates = [...(work.search_candidates ?? []), ...candidates];
+        work.search_pages = (work.search_pages ?? 0) + Math.max(0, checkpoint.calls - before);
+        if (!(await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true }))) throw new Error('ENG collection cancelled');
+      },
+    });
+    if (result.status !== 'more') break;
+  }
+  // Country/size come from independent catalogue or own structured address,
+  // never the search phrase. These reads are free, bounded and checkpointed.
+  const candidates = work.search_candidates ?? [];
+  while ((work.search_resolved ?? 0) < candidates.length) {
+    const candidate = candidates[work.search_resolved ?? 0];
+    const evidence = await resolveHeEngSearchCompanyEvidence(ctx, candidate, {
+      allowedCountries: scope.countries, icp: scope.icp, hypotheses: scope.hypotheses,
+    });
+    if (evidence.row) {
+      work.search_rows = [...(work.search_rows ?? []), { ...unifiedRow({
+        company: cell(evidence.row.company), website: cell(evidence.row.website),
+        address: cell(evidence.row.address), employees: cell(evidence.row.employees),
+        source_detail: 'web search',
+      }), ...evidence.row } as HeUnifiedRow];
+    } else {
+      work.search_exclusions ??= {};
+      work.search_exclusions[evidence.reason] = (work.search_exclusions[evidence.reason] ?? 0) + 1;
+    }
+    work.search_resolved = (work.search_resolved ?? 0) + 1;
+    if (!(await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true }))) throw new Error('ENG collection cancelled');
+  }
+  state.harvest = work.search_rows ?? [];
+  state.rows = state.harvest.length;
+  state.status = search.checkpoint.unavailable && !state.rows ? 'failed' : 'done';
+  state.exhausted = search.checkpoint.exhaustedTaskIds.length === search.plan.tasks.length;
+  if (search.checkpoint.unavailable) state.error = search.checkpoint.unavailable;
+}
+
+/** Publish only already qualified addresses; all waves share this base/ledger. */
+async function finishHeEngTargetRound(
+  ctx: HeStageContext, job: HeJob, base: HeAutoBase, info: HeCollectInfo,
+  rows: readonly Record<string, unknown>[], columns: readonly string[], usage: HeUsage,
+  forcedStop?: HeEngCollectionStopReason,
+): Promise<HeStageResult> {
+  const baseId = base.id;
+  const project = await readProject(paidCheckpointDb(ctx), job.project_id);
+  if (!(await readHeEngEmailPolicy(paidCheckpointDb(ctx), project)) || info.refill === true || job.payload?.refill === true) {
+    throw new Error('ENG collection target is not a manual client base');
+  }
+  const saved = readHeEngCollectionCheckpoint(info.eng_collection_target, info.eng_collection_pool);
+  const work = info.eng_collection_work;
+  if (!work || work.version !== 1 || work.round !== saved.pool.rounds.length + 1) throw new Error('ENG collection source checkpoint missing');
+  const scope = info.eng_company_qualification_scope;
+  const owner = await resolveHeDncOwner(ctx, project, { verticalId: base.vertical_id, isRefill: false, campaignId: null });
+  if (!owner) throw new Error('ENG collection: client owner unavailable');
+  const blockedDomains = await loadHeDncDomains(owner);
+  let continuing = false;
+  let readyCount = 0;
+  await withHeEngCollectionCommitLock(job.project_id, async () => {
+    await assertOwnRunningJob(ctx, job, 'ENG round checkpoint refused');
+    const freshKeys = await loadOtherBaseExclusionKeys({ ...ctx, supabase: paidCheckpointDb(ctx) },
+      job.project_id, baseId, 'us', blockedDomains);
+    const checked = (items: readonly Record<string, unknown>[]) => {
+      const eligible = selectHeEngEmailRows(items).filter((row) => !!scope && heEngCompanyQualified(row, scope));
+      return heRecheckImportedRows({ rows: eligible as HeUnifiedRow[], emailStatuses: eligible.map((row) => cell(row._email_status)),
+        keys: freshKeys, market: 'us' }).rows;
+    };
+    // DNC/another completed base may have changed while this wave ran. Apply
+    // the same checks to the real reserve, and promote surviving reserve rows.
+    const previous = partitionHeEngCollectionRows(checked(saved.pool.rows), {
+      maxEmailsPerCompany: saved.pool.max_emails_per_company,
+    });
+    const previousRows = [...previous.readyRows, ...previous.reserveRows];
+    const previousTarget: HeEngCollectionTarget = { ...saved.target,
+      ready_count: previous.readyRows.length, reserve_count: previous.reserveRows.length, total_ready: previousRows.length,
+      phase: previous.reserveRows.length >= saved.target.reserve_target ? 'complete'
+        : previous.readyRows.length >= saved.target.ready_target ? 'building_reserve' : 'collecting', stop_reason: null };
+    const active = info.tasks?.[0];
+    const waveCandidates = work.candidate_rows ?? active?.harvest?.map(({ company, website }) => ({ company, website })) ?? [];
+    const searched = work.search_candidates ?? [];
+    const candidatesProcessed = active?.source === 'web_search' ? searched.length : waveCandidates.length;
+    const round = appendHeEngCollectionRound({ target: previousTarget, pool: { ...saved.pool, rows: previousRows },
+      roundId: String(work.round), qualifiedRows: checked(rows), candidatesProcessed, stopReason: forcedStop });
+    if (!round.duplicateRound && work.active_source_key && active) {
+      work.history.push({ sourceKey: work.active_source_key, source: active.source,
+        candidates: candidatesProcessed, readyContacts: Math.max(0, round.pool.rows.length - previousRows.length),
+        exhausted: active.exhausted === true, failed: active.status === 'failed',
+        ...(info.construct?.bc_job_id ? { constructorId: info.construct.bc_job_id } : {}) });
+      const seen = new Map(work.seen_companies.map((row) => [heEngCompanyKey(row), row]));
+      for (const row of [...waveCandidates, ...searched]) seen.set(heEngCompanyKey(row), { company: row.company, website: row.website });
+      work.seen_companies = [...seen.values()];
+    }
+    const search = info.eng_company_search;
+    const sourceOptions = { searchExhausted: search ? search.checkpoint.exhaustedTaskIds.length === search.plan.tasks.length : false,
+      searchUnavailable: !!search?.checkpoint.unavailable };
+    if (round.target.phase !== 'complete' && round.target.phase !== 'stopped' &&
+        !pickHeEngTargetSource(info.plan?.tasks ?? [], work.history, sourceOptions)) {
+      round.target = stopHeEngCollectionTarget(round.target,
+        heEngTargetSourceStopReason(info.plan?.tasks ?? [], work.history, sourceOptions));
+    }
+    if (info.eng_company_qualification) {
+      info.eng_company_qualification = compactHeEngCollectionQualificationMemo(info.eng_company_qualification);
+    }
+    // Do not start another paid wave with an ever-growing JSON checkpoint.
+    // Keep every verdict/proof and the actual contacts; stop truthfully before
+    // accumulated history can turn each small model checkpoint into a huge write.
+    const durableBytes = Buffer.byteLength(JSON.stringify({
+      memo: info.eng_company_qualification, pool: round.pool,
+      countries: info.eng_source_countries, seen: work.seen_companies, history: work.history,
+    }), 'utf8');
+    if (durableBytes > 16 * 1024 * 1024 && round.target.phase !== 'stopped') {
+      round.target = stopHeEngCollectionTarget(round.target, 'safety_limit');
+    }
+    continuing = round.target.phase !== 'complete' && round.target.phase !== 'stopped';
+    readyCount = round.readyRows.length;
+    info.eng_collection_target = round.target;
+    info.eng_collection_pool = round.pool;
+    info.stats = { tasks_total: work.history.length, tasks_done: work.history.filter((h) => !h.failed).length,
+      tasks_failed: work.history.filter((h) => h.failed).length, rows_total: round.pool.candidates_processed,
+      excluded_existing_bases: 0, excluded_during_fetch: 0, companies_total: new Set(round.readyRows.map(heEngCompanyKey)).size,
+      ok_contacts: readyCount, finished_at: new Date().toISOString() };
+    // Reset only per-wave work. Paid qualification decisions, countries, search
+    // cursor, seen candidates, real contact pool and ledger remain intact.
+    info.eng_collection_work = { version: 1, round: work.round + 1,
+      batch_size: Math.max(1, nextHeEngCollectionBatchSize(round)), active_source_key: null,
+      seen_companies: work.seen_companies, history: work.history };
+    info.eng_collection_round_audit = [...(info.eng_collection_round_audit ?? []), {
+      round: work.round, ...(info.construct ? { constructor: info.construct } : {}),
+      ...(work.search_exclusions ? { search_exclusions: work.search_exclusions } : {}),
+    }];
+    if (continuing) delete info.construct;
+    else info.construct = { bc_job_id: null, status: 'done', contact_cap: saved.pool.max_emails_per_company,
+      valid_count: readyCount, note: 'Completed checked contact batches; per-batch results retained in the collection audit.' };
+    delete info.relevance_gate;
+    delete info.eng_company_qualification_progress;
+    delete info.eng_company_qualification_total;
+    info.tasks = [];
+    const outputColumns = [...new Set([...HE_AUTO_COLLECT_COLUMNS, ...columns, 'description'])];
+    const { data, error } = await paidCheckpointDb(ctx).from('he_bases').update({
+      collect_info: info, data: round.readyRows, sample_rows: round.readyRows.slice(0, SAMPLE_ROWS),
+      row_count: readyCount, columns: outputColumns,
+      status: continuing ? 'collecting' : readyCount ? 'analyzed' : 'failed',
+      error: !continuing && !readyCount ? `ENG collection stopped: ${round.target.stop_reason ?? 'no_contacts'}` : null,
+      // The verified audience already supplies factual distributions. Do not
+      // buy a model summary after every wave or after the $5 guard stopped work.
+      ...(!continuing && readyCount ? { analysis: buildHeEngReadyBaseAnalysis(round.readyRows, {
+        reserveCount: round.reserveRows.length, stopReason: round.target.stop_reason,
+      }) } : {}),
+      updated_at: new Date().toISOString(),
+    }).eq('id', baseId).eq('status', 'collecting')
+      .eq('collect_info->eng_collection_work->>round', String(work.round)).select('id');
+    if (error) throw new Error(`ENG collection checkpoint: ${error.message}`);
+    if (!data?.length) throw new Error('ENG collection cancelled before checkpoint');
+  });
+  if (continuing) await requeueSelf(ctx, job, 1000);
+  return { result: { base_id: baseId, rows: readyCount, reserve: info.eng_collection_target!.reserve_count,
+    ...(continuing ? { waiting: true } : {}), collection_target: info.eng_collection_target!.phase }, ...usage };
+}
+
+/** A crash after the atomic terminal write must not restart or analyse a base. */
+async function finishedHeEngTargetResult(ctx: HeStageContext, job: HeJob, base: HeAutoBase): Promise<HeStageResult | null> {
+  const info = base.collect_info;
+  if (!info?.eng_collection_target) return null;
+  if (base.project_id !== job.project_id || base.source !== 'auto') throw new Error('ENG collection target: base/project mismatch');
+  if (!['analyzed', 'failed'].includes(base.status) ||
+      info.refill === true || job.payload?.refill === true) return null;
+  const project = await readProject(paidCheckpointDb(ctx), job.project_id);
+  if (projectMarket(project) !== 'us' || !(await readHeEngEmailPolicy(paidCheckpointDb(ctx), project))) return null;
+  const saved = readHeEngCollectionCheckpoint(info.eng_collection_target, info.eng_collection_pool);
+  if (!['complete', 'stopped'].includes(saved.target.phase)) return null;
+  return { result: { base_id: base.id, rows: saved.target.ready_count, reserve: saved.target.reserve_count,
+    collection_target: saved.target.phase, already_completed: true }, ...newUsage() };
+}
+
+/** Outside the paid scope: preserve completed waves when any money guard stops. */
+export async function finishHeEngTargetBudgetStop(job: HeJob, ctx: HeStageContext, reason: HeEngCollectionStopReason): Promise<HeStageResult | null> {
+  const baseId = payloadString(job, 'base_id');
+  const { data, error } = await paidCheckpointDb(ctx).from('he_bases').select('*').eq('id', baseId).single();
+  if (error || !data) throw new Error('ENG collection budget stop: base could not be read');
+  const base = data as HeAutoBase;
+  const info = base.collect_info;
+  if (!info?.eng_collection_target) return null;
+  if (base.project_id !== job.project_id || base.source !== 'auto') throw new Error('ENG budget stop: base/project mismatch');
+  const finished = await finishedHeEngTargetResult(ctx, job, base);
+  if (finished) return finished;
+  if (!info?.eng_collection_target || !info.eng_collection_work || base.status !== 'collecting') return null;
+  let rows: Array<Record<string, unknown>> = [];
+  let columns: string[] = [];
+  if (info.construct?.bc_job_id) {
+    const { data: constructor, error: readError } = await ctx.supabase.from('base_constructor_jobs')
+      .select('status, selected_steps, user_id, workload_origin, locale, step_config')
+      .eq('id', info.construct.bc_job_id).maybeSingle();
+    if (readError) throw new Error('ENG budget stop: constructor result is unavailable');
+    if (constructor && !isConstructJobSettled(constructor.status) && !constructWaitExpired(info.construct)) {
+      // A previously dispatched constructor may still be settling its own
+      // charge. Observe it for free; never re-dispatch or release its reserve.
+      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      return { result: { waiting: true, base_id: baseId, budget_stop: reason }, ...newUsage() };
+    }
+    const project = await readProject(ctx.supabase, job.project_id);
+    if (constructor?.workload_origin === 'automation' && constructor.locale === 'en' &&
+        constructor.user_id === project.created_by && constructor.selected_steps?.includes('split_emails') &&
+        constructor.step_config?.he_eng_base_budget?.base_id === baseId &&
+        constructor.step_config.he_eng_base_budget.project_id === job.project_id) {
+      const imported = await importConstructRows(ctx, info.construct.bc_job_id);
+      if (imported) {
+        columns = [...HE_AUTO_COLLECT_COLUMNS, ...(imported.hasDescription ? ['description'] : [])];
+        rows = restoreHeEngSourceCountries(imported.rows, info.eng_source_countries ?? {}).map((row, i) => {
+          const verdict = info.eng_company_qualification?.verdicts[heEngCompanyKey(row)];
+          const publicVerdict = verdict ? { ...verdict } : undefined;
+          if (publicVerdict) delete publicVerdict.audit;
+          return { ...row, _email_status: imported.emailStatuses[i], _eng_company_qualification: publicVerdict };
+        });
+      }
+    }
+  }
+  return finishHeEngTargetRound(ctx, job, base, info, rows, columns, newUsage(), reason);
+}
+
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const baseId = payloadString(job, 'base_id');
@@ -6750,6 +7032,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     throw new Error(`he_bases ${baseId}: source='${base.source ?? 'upload'}' — base_collect работает только с source='auto'`);
   }
   if (base.status !== 'collecting') {
+    const finished = await finishedHeEngTargetResult(ctx, job, base);
+    if (finished) return finished;
     /**
      * НЕЗАКРЫТАЯ ПАРА «база в analyzing + поставленный base_analyze».
      *
@@ -6817,6 +7101,27 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
 
   const info: HeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+
+  const adaptive = Object.hasOwn(info, 'eng_collection_target');
+  if (adaptive) {
+    if (!engEmailPolicy || market !== 'us' || isRefill || !heEngBaseBudgetActive()) {
+      throw new Error('ENG collection target requires a budgeted client collection');
+    }
+    const saved = readHeEngCollectionCheckpoint(info.eng_collection_target, info.eng_collection_pool);
+    if (saved.pool.max_emails_per_company !== contactCap) throw new Error('ENG collection contact cap changed');
+    if (!info.eng_collection_work) {
+      if (saved.pool.rounds.length) throw new Error('ENG collection lost its source progress');
+      info.eng_collection_work = { version: 1, round: 1, batch_size: nextHeEngCollectionBatchSize(saved),
+        active_source_key: null, seen_companies: [], history: [] };
+    }
+    const work = info.eng_collection_work;
+    if (work.version !== 1 || work.round !== saved.pool.rounds.length + 1 ||
+        !Array.isArray(work.history) || !Array.isArray(work.seen_companies) ||
+        !Number.isSafeInteger(work.batch_size) || work.batch_size < 1 || work.batch_size > 200) {
+      throw new Error('ENG collection: invalid saved source progress');
+    }
+    limit = work.batch_size;
+  }
 
   // Resume paid criteria before entering any earlier collection phases. A memo
   // from before snapshots may be adopted only if its fingerprint still matches.
@@ -7098,7 +7403,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
      */
     const countriesMemo =
       !reusedPlan && collectCountries.length > 0 ? (catalog?.emptyCountriesMemo(planned.planKey) ?? null) : null;
-    if (countriesMemo) {
+    if (countriesMemo && !adaptive) {
       info.tasks = [];
       info.countries = [...collectCountries];
       const note =
@@ -7116,7 +7421,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         .eq('id', baseId);
       throw new Error(note);
     }
-    if (reusedPlan) {
+    if (adaptive && countriesMemo) {
+      info.plan = { tasks: [] };
+    } else if (reusedPlan) {
       // Тот же вход планировщика, что и у сохранённого плана: срезы те же, и
       // закладки в сторе указывают ровно в них. Экономия — вызов планировщика
       // и проба среза, то есть весь платёж фазы PLAN.
@@ -7144,7 +7451,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // Отказ пробы: срез не про эту вертикаль и перепланирование не помогло.
     // Сохраняем провенанс и валим сбор ДО дозвона до коллекторов — час
     // конструктора и рассылка по мусору дороже пропущенной вертикали.
-    if (sliceProbe?.outcome === 'rejected') {
+    if (adaptive && sliceProbe?.outcome === 'rejected') info.plan = { tasks: [] };
+    if (!adaptive && sliceProbe?.outcome === 'rejected') {
       info.tasks = [];
       const examples = sliceProbe.off_target_examples?.slice(0, 3).join(', ');
       const note =
@@ -7194,7 +7502,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
      * (buildPlan, `labelDead`): они сняты, а починка не удалась. Причина тогда
      * называет их; без них текст байт-в-байт прежний.
      */
-    if (market === 'us' && info.plan.tasks.length === 0) {
+    if (!adaptive && market === 'us' && info.plan.tasks.length === 0) {
       info.tasks = [];
       const dropped = [...new Set(marketDropped)];
       const repairError = info.plan_repair?.outcome === 'failed' ? info.plan_repair.error : undefined;
@@ -7304,6 +7612,19 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     }
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
   }
+  if (adaptive && !info.eng_collection_work!.active_source_key) {
+    const search = info.eng_company_search;
+    const options = { searchExhausted: search ? search.checkpoint.exhaustedTaskIds.length === search.plan.tasks.length : false,
+      searchUnavailable: !!search?.checkpoint.unavailable };
+    const choice = pickHeEngTargetSource(info.plan?.tasks ?? [], info.eng_collection_work!.history, options);
+    if (!choice) {
+      return finishHeEngTargetRound(ctx, job, base, info, [], [], usage,
+        heEngTargetSourceStopReason(info.plan?.tasks ?? [], info.eng_collection_work!.history, options));
+    }
+    info.eng_collection_work!.active_source_key = choice.sourceKey;
+    info.tasks = [{ source: choice.task.source, task: choice.task, status: 'pending', child_job_id: null, rows: 0 }];
+    if (!(await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true }))) throw new Error('ENG collection cancelled');
+  }
   const tasks = info.tasks ?? [];
 
   /**
@@ -7376,6 +7697,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const getExcludedKeys = async (): Promise<HeBaseExclusionKeys> => {
     if (!excludedKeysCache) {
       excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, market, dncDomains);
+      if (adaptive) for (const row of info.eng_collection_work!.seen_companies) addExclusionRow(excludedKeysCache, row);
     }
     return excludedKeysCache;
   };
@@ -7509,7 +7831,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
   const runDispatch = async (state: HeCollectTaskState, catalog: HeCatalogRun | null): Promise<void> => {
     try {
-      await dispatchTask(ctx, state, project, limit, getExcludedKeys, catalog, widenMode, collectCountries, engEmailPolicy);
+      if (state.source === 'web_search') {
+        if (!adaptive) throw new Error('Company search requires an ENG target collection');
+        companyQualificationScope ??= await readHeEngQualificationScope(ctx.supabase, {
+          project, verticalId: base.vertical_id, collectInfo: info, mode: 'collection',
+        });
+        info.eng_company_qualification_scope = companyQualificationScope;
+        await dispatchHeEngSearchBatch(ctx, job, baseId, info, state, companyQualificationScope);
+      } else {
+        await dispatchTask(ctx, state, project, limit, getExcludedKeys, catalog, adaptive ? 'off' : widenMode, collectCountries, engEmailPolicy);
+      }
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -7517,6 +7848,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       );
     } catch (e) {
       rethrowHeEngBaseBudgetError(e);
+      if (state.source === 'web_search') throw e;
       // Прерывание — не провал задачи: см. heStageInterrupted. Задача остаётся
       // 'pending' (ничего не записываем), и бесплатный повтор прогона
       // диспатчит её заново.
@@ -7573,7 +7905,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const harvestedUpperBound = tasks.reduce((sum, t) => sum + (t.status === 'done' ? t.rows : 0), 0);
   const boughtWidening = info.plan_widening?.outcome === 'added' ? info.plan_widening : null;
   if (
-    widenMode === 'replan' &&
+    !adaptive && widenMode === 'replan' &&
     !info.plan_widening &&
     !info.relevance_gate &&
     !info.construct &&
@@ -7791,13 +8123,14 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const dncStop = await ensureDnc();
   if (dncStop) return dncStop;
   const existingKeys = await getExcludedKeys();
-  const { interleaved, kept, merged, excludedDnc, excludedOutsideCountries } = harvestSlice(
+  const { interleaved, kept, merged: harvestedRows, excludedDnc, excludedOutsideCountries } = harvestSlice(
     done,
     market,
     existingKeys,
     limit,
     collectCountries,
   );
+  let merged = harvestedRows;
   // Do not contact считается отдельно и в «уже есть в других базах» не входит.
   const excludedExisting = interleaved.length - kept.length - excludedDnc;
   if (excludedExisting > 0) {
@@ -7864,6 +8197,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     closeStats: NonNullable<HeCollectInfo['stats']>,
     importReason: string | null,
   ): Promise<HeStageResult> => {
+    if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, [], [], usage);
     // Сюда же доходит тик ИМПОРТА, если за время работы конструктора
     // межбазовое исключение выросло настолько, что merged опустел, — и
     // результат конструктора тогда не импортируется. Это сознательно, а не
@@ -8014,6 +8348,41 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     );
   }
 
+  if (adaptive) {
+    const work = info.eng_collection_work!;
+    if (!work.candidate_rows) {
+      work.candidate_rows = merged.map(({ company, website }) => ({ company, website }));
+      await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
+    }
+    const scope = companyQualificationScope ?? await readHeEngQualificationScope(ctx.supabase, {
+      project, verticalId: base.vertical_id, collectInfo: info, mode: 'collection',
+    });
+    info.eng_company_qualification_scope = scope;
+    companyQualificationScope = scope;
+    const companyKeys = new Set(merged.map(heEngCompanyKey));
+    const qualified = await runHeEngCompanyQualification(ctx, {
+      rows: restoreHeEngSourceCountries(merged, info.eng_source_countries ?? {}), scope,
+      memo: info.eng_company_qualification, maxCompanies: 16, collectionTargetBudget: true,
+      onCheckpoint: async (memo) => {
+        info.eng_company_qualification = memo;
+        const verdicts = Object.values(memo.verdicts).filter((v) => companyKeys.has(v.companyKey));
+        info.eng_company_qualification_total = companyKeys.size;
+        info.eng_company_qualification_progress = { total: companyKeys.size, checked: verdicts.length,
+          excluded: verdicts.filter((v) => v.status !== 'accepted').length, updated_at: new Date().toISOString() };
+        if (!(await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true }))) throw new Error('ENG collection cancelled');
+      },
+    });
+    usage.tokensUsed += qualified.tokensUsed;
+    usage.costUsd += qualified.costUsd;
+    if (!qualified.complete) {
+      await requeueSelf(ctx, job, qualified.retryAfterMs ?? 1000);
+      return { result: { waiting: true, base_id: baseId, company_qualification: 'processing' }, ...usage };
+    }
+    merged = qualified.rows;
+    if (!merged.length) return finishHeEngTargetRound(ctx, job, base, info, [], [], usage,
+      qualified.memo.economy && heEngQualificationBudgetHoldReason(qualified.memo.economy.budget) ? 'error' : undefined);
+  }
+
   // ─── CONSTRUCT ───
   // Обогащение собранных строк конструктором баз (валидация почт ВСЕГДА,
   // поиск — для бедных баз, см. constructStepsFor). Пропуск — только когда
@@ -8063,7 +8432,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // RU-инструмент /tools/hypothesis-engine не затронут: у него гейт по-прежнему
   // стоит после импорта и судит те же строки, что судил.
   let relevanceGate: HeRelevanceGateInfo | null = info.relevance_gate ?? null;
-  if (market === 'us' && relevanceGate?.ran !== true && !construct?.bc_job_id && needsConstruct(merged)) {
+  if (!adaptive && market === 'us' && relevanceGate?.ran !== true && !construct?.bc_job_id && needsConstruct(merged)) {
     if (engEmailPolicy && !companyQualificationScope) {
       companyQualificationScope = await readHeEngQualificationScope(ctx.supabase, {
         project, verticalId: base.vertical_id, collectInfo: info, mode: 'collection',
@@ -8646,6 +9015,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       await checkpoint(info.eng_company_qualification);
       const qualified = await runHeEngCompanyQualification(ctx, {
         rows: storedRows, scope, memo: info.eng_company_qualification, onCheckpoint: checkpoint, maxCompanies: 16,
+        ...(adaptive ? { collectionTargetBudget: true as const } : {}),
         ...(collectedCompanyEvidence ? { collectedEvidence: collectedCompanyEvidence } : {}),
       });
       usage.tokensUsed += qualified.tokensUsed;
@@ -8695,6 +9065,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     companiesTotal = new Set(storedRows.map(heCompanyRowKey)).size;
     if (info.construct) info.construct = { ...info.construct, valid_count: storedRows.length };
   }
+  if (adaptive) return finishHeEngTargetRound(ctx, job, base, info, storedRows, finalColumns, usage);
   // Считаем по САМИМ строкам, а не по размеру набора ключей: у одной компании
   // после split_emails несколько строк, и оба шага выше могли пометить одну и
   // ту же (у базы с отказавшим гейтом до конструктора — реально могут).

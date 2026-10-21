@@ -6,7 +6,7 @@ Sources: Yandex Metrika, AMO CRM (сделки, события, задачи, к
 расходов.
 
 Расписание:
-- Банки и USDT TRC-20: короткие проверки каждые 10 минут (`BANK_SYNC_CRON`),
+- Банки и USDT TRC-20: короткие проверки каждые 15 минут (`BANK_SYNC_CRON`),
   затем новые поступления → ветка оплат через PolzaSiteFeedbackBot.
 - Cron `EXTERNAL_SYNC_CRON` (default '5 6,9,12,15,18 * * *' UTC = 9:05, 12:05,
   15:05, 18:05, 21:05 МСК) через APScheduler. С 30.09.2026 пять раз в день, а не
@@ -68,7 +68,7 @@ from sources.renewal_marks import RenewalMarksSync
 # ── Config ────────────────────────────────────────────────────────────────
 
 CRON = os.environ.get("EXTERNAL_SYNC_CRON", "5 6,9,12,15,18 * * *")  # 9:05…21:05 МСК, каждые 3 ч
-BANK_CRON = os.environ.get("BANK_SYNC_CRON", "*/10 * * * *")
+BANK_CRON = os.environ.get("BANK_SYNC_CRON", "*/15 * * * *")
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 # Отметка (по МСК), после которой рестарт контейнера считает нужным
@@ -172,7 +172,7 @@ async def run_banks() -> None:
         periods = recent_bank_periods(datetime.now(timezone.utc))
         since = datetime.fromisoformat(periods[0][0]).replace(tzinfo=MSK_TZ)
         # Independent APIs use independent DB sessions. A slow bank must not
-        # delay crypto or the next ten-minute tick of the other bank.
+        # delay crypto or the next fifteen-minute tick of the other bank.
         sources = (BankTochkaSync(periods), BankTBankSync(periods), CryptoUsdtSync(since))
         await asyncio.gather(*(_run_recent_source(src) for src in sources))
         # Portal's RUB income totals need the rate for newly arrived USDT dates.
