@@ -67,14 +67,26 @@ describe('адаптер конструктора баз', () => {
   });
 
   it('строит строку задачи с владельцем и счётчиками', () => {
+    const data = [
+      ['Email', 'ИНН', 'Выручка', 'Заметка'],
+      ['example@example.invalid', '0012345678', 0, null],
+      ['other@example.invalid', 1234567890, 1234.5, '  текст  '],
+    ];
     const params = baseConstructorTool.paramsSchema.parse({
-      data: DATA,
+      data,
       selected_steps: ['remove_empty', 'dedup_full'],
     });
+    const original = structuredClone(params);
     const row = baseConstructorTool.buildRow(params, OWNER) as Record<string, unknown>;
     expect(row.user_id).toBe(OWNER);
-    expect(row.initial_row_count).toBe(1);
+    expect(row.initial_row_count).toBe(2);
     expect(row.total_steps).toBe(2);
+    expect(row.data).toEqual([
+      data[0],
+      ['example@example.invalid', '0012345678', '0', ''],
+      ['other@example.invalid', '1234567890', '1234.5', '  текст  '],
+    ]);
+    expect(params).toEqual(original);
     // status не задаём: у таблицы есть default 'pending'.
     expect(row.status).toBeUndefined();
   });

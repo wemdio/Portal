@@ -22,6 +22,7 @@ jest.mock('@/lib/supabaseAdmin', () => ({
 }));
 
 import { sanitizeRowsForJsonb } from '@/lib/tools/baseConstructorWorker';
+import { normalizeConstructorRows } from '@/lib/tools/baseConstructorData';
 
 // Через \u-escape'ы JS вычисляет нужные кодпоинты в runtime'е, в исходнике
 // не остаётся литеральных NUL/LS/PS/orphan-суррогатов (редакторы их теряют,
@@ -102,6 +103,20 @@ describe('sanitizeRowsForJsonb', () => {
     expect(out[1][0]).toBe(42);
     expect(out[1][1]).toBe(true);
     expect(out[1][2]).toBe(null);
+  });
+
+  it('normalizes scalar input before processing without changing strings or saved rows', () => {
+    const textRow = Object.freeze([' 00123 ', '{"retry":1}', '😀']);
+    const scalarRow = Object.freeze([0, null, undefined, false, 12.5]);
+    const input = Object.freeze([textRow, scalarRow]);
+    const result = normalizeConstructorRows(input);
+    expect(result).toEqual([textRow, ['0', '', '', 'false', '12.5']]);
+    expect(result[0]).toBe(textRow);
+    expect(input[1]).toBe(scalarRow);
+    expect(normalizeConstructorRows([])).toEqual([]);
+    for (const invalid of [null, {}, [null], [[{}]], [[[]]], [[NaN]], [[Infinity]]]) {
+      expect(() => normalizeConstructorRows(invalid)).toThrow();
+    }
   });
 
   it('result must JSON.stringify roundtrip cleanly (PGRST102 regression)', () => {

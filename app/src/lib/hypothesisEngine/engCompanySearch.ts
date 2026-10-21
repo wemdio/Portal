@@ -81,6 +81,14 @@ function searchTerm(value: string): string {
     .replace(/\b(?:OR|AND|NOT)\b/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
 }
 
+function companySearchPlanFingerprint(tasks: readonly HeEngCompanySearchTask[]): string {
+  // JSONB can reorder object keys when a paid plan is read back. Rebuild the
+  // original v1 field order so existing fingerprints and page cursors survive.
+  // Task order and every supported field remain part of the fingerprint.
+  return createHash('sha256').update(JSON.stringify(tasks.map(({ id, query, country, gl }) =>
+    ({ id, query, country, gl })))).digest('hex');
+}
+
 /** Deterministic discovery, using only the selected hypotheses, never broad ICP. */
 export function createHeEngCompanySearchPlan(input: {
   hypotheses: ReadonlyArray<{ title: string; description?: string }>;
@@ -119,7 +127,7 @@ export function createHeEngCompanySearchPlan(input: {
     }
   }
   if (!tasks.length) throw new Error('ENG company search has no usable selected terms.');
-  return { version: 1, fingerprint: createHash('sha256').update(JSON.stringify(tasks)).digest('hex'), tasks };
+  return { version: 1, fingerprint: companySearchPlanFingerprint(tasks), tasks };
 }
 
 export function createHeEngCompanySearchCheckpoint(plan: HeEngCompanySearchPlan): HeEngCompanySearchCheckpoint {
@@ -142,9 +150,13 @@ export function heEngCompanySearchAvailability(env: NodeJS.ProcessEnv = process.
 
 function validateCheckpoint(plan: HeEngCompanySearchPlan, saved?: HeEngCompanySearchCheckpoint): HeEngCompanySearchCheckpoint {
   if (plan.version !== 1 || !Array.isArray(plan.tasks) || !plan.tasks.length || plan.tasks.length > MAX_QUERIES ||
-      plan.fingerprint !== createHash('sha256').update(JSON.stringify(plan.tasks)).digest('hex') ||
-      plan.tasks.some(task => !/^[a-f0-9]{24}$/.test(task.id) || !task.query || task.query.length > 300 ||
-        normalizeEngCountry(task.country) !== task.country || engCountryIso2(task.country) !== task.gl)) {
+      plan.tasks.some(task => !record(task) || Object.keys(task).length !== 4 ||
+        !['id', 'query', 'country', 'gl'].every(key => Object.hasOwn(task, key)) ||
+        typeof task.id !== 'string' || !/^[a-f0-9]{24}$/.test(task.id) ||
+        typeof task.query !== 'string' || !task.query || task.query.length > 300 ||
+        typeof task.country !== 'string' || typeof task.gl !== 'string' ||
+        normalizeEngCountry(task.country) !== task.country || engCountryIso2(task.country) !== task.gl) ||
+      plan.fingerprint !== companySearchPlanFingerprint(plan.tasks)) {
     throw new Error('ENG company search plan is invalid.');
   }
   const state = saved ? structuredClone(saved) : createHeEngCompanySearchCheckpoint(plan);

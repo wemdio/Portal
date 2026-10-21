@@ -27,6 +27,8 @@ import { describeConstructorProgress } from '@/lib/tools/baseConstructorProgress
 import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  stepEmailDedup,
+  stepSplitEmails,
   stepValidateEmails,
   type ProgressFn,
 } from '@/lib/tools/processingSteps';
@@ -84,9 +86,9 @@ jest.mock('@/lib/tools/processingSteps', () => {
     ...original,
     stepRemoveEmpty: stepNoop,
     stepFullDedup: stepNoop,
-    stepEmailDedup: stepNoop,
+    stepEmailDedup: jest.fn(stepNoop),
     stepFindEmails: stepNoop,
-    stepSplitEmails: stepNoop,
+    stepSplitEmails: jest.fn(stepNoop),
     stepSiteCheck: stepNoop,
     stepEnrich: stepNoop,
     stepNameCleanup: stepNoop,
@@ -216,6 +218,45 @@ describe('runBaseConstructorJob resume logic', () => {
     expect(stepKeys).not.toContain('dedup_full');
     expect(stepKeys).not.toContain('check_sites');
     expect(stepKeys).not.toContain('find_emails');
+  });
+
+  it('normalizes scalar cells before mapping and real email dedup on fresh and resumed jobs', async () => {
+    const actual = jest.requireActual<typeof import('@/lib/tools/processingSteps')>('@/lib/tools/processingSteps');
+    for (const locale of ['ru', 'en']) {
+      for (const resumed of [false, true]) {
+        admin.__reset();
+        jest.clearAllMocks();
+        jest.mocked(stepEmailDedup).mockImplementationOnce(actual.stepEmailDedup);
+        const saved = [
+          ['Inbox', 2026, 'ИНН', 'Выручка', 'Заметка', 'Flag'],
+          ['example@example.invalid', 'tag', '0012345678', 0, null, false],
+          ['example@example.invalid', 'tag', '0012345678', 0, '  подробнее  ', false],
+          ['other@example.invalid', 7, 1234567890, 1234.5, null, true],
+        ];
+        const original = structuredClone(saved);
+        admin.__setCurrentJob({
+          id: 'job-scalar-cells', user_id: 'u', file_name: 'test.csv', locale,
+          status: resumed ? 'processing' : 'pending',
+          selected_steps: resumed ? ['split_emails', 'dedup_email'] : ['dedup_email'],
+          step_config: { column_mapping: JSON.stringify({ email: 'Inbox' }) },
+          current_step: resumed ? 2 : 0,
+          current_step_key: resumed ? 'dedup_email' : null,
+          current_step_progress: resumed ? 50 : 0,
+          data: saved,
+        });
+
+        await runBaseConstructorJob('job-scalar-cells');
+
+        expect(stepSplitEmails).not.toHaveBeenCalled();
+        expect(stepEmailDedup).toHaveBeenCalledTimes(1);
+        expect(admin.__getUpdates().find(update => update.status === 'completed')?.data).toEqual([
+          [locale === 'en' ? 'Email' : 'email', '2026', 'ИНН', 'Выручка', 'Заметка', 'Flag'],
+          ['example@example.invalid', 'tag', '0012345678', '0', '  подробнее  ', 'false'],
+          ['other@example.invalid', '7', '1234567890', '1234.5', '', 'true'],
+        ]);
+        expect(saved).toEqual(original);
+      }
+    }
   });
 
   it('resume with mid-step (progress<100): re-runs current step', async () => {

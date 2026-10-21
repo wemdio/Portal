@@ -20,7 +20,8 @@ import { VeJobInactivityError } from '@/lib/verticalEngineV2/workerLiveness';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { readRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
-import { retryVeJobFinalization, transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
+import { retryVeJobFinalization, transitionVeJobFailure, VeJobQueuePersistenceError } from '@/lib/verticalEngineV2/jobFailureTransition';
+import { requeueVeJob } from '@/lib/verticalEngineV2/stages/shared';
 import { createVeJobPool, canRunVeJob, claimVeJob } from '@/lib/verticalEngineV2/jobQueue';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { deferVeRequestyRecoveryWhileIneligible, planVeRequestyBillingWait, resumeVeRequestyBillingJobs, VeRequestyBillingError,
@@ -648,6 +649,83 @@ describe('VE2 job interruptions do not spend attempts', () => {
     expect(plan.payload).toEqual({ ...payload, interruptions: 1 });
     // Backoff as for a transient error, not an immediate reclaim.
     expect(plan.runAfter).toBe(new Date(NOW + 30_000).toISOString());
+  });
+
+  it('retries only the saved queue transition and respects cancellation, ownership and a lost response', async () => {
+    jest.useFakeTimers();
+    try {
+      for (const mode of ['gateway', 'lost-response', 'lost-response-read', 'cancelled', 'new-owner', 'aborted', 'backoff-cancel', 'deadline', 'permanent', 'outage'] as const) {
+        jest.setSystemTime(NOW);
+        const original = { id: 'saved-job', project_id: 'p', stage: 'base_collect', status: 'running',
+          started_at: new Date(NOW).toISOString(), attempts: 3, payload: { base_id: 'b', ready_target: 500 },
+          result: { paid_result: 'already saved' } } as unknown as VeJob;
+        const db = createMockSupabase({ tables: { ve_jobs: [{ ...original }] }, beforeFirstUpdates: {
+          ve_jobs: rows => rows.map(row => mode === 'cancelled' ? { ...row, status: 'cancelled' }
+            : mode === 'new-owner' ? { ...row, started_at: new Date(NOW + 1_000).toISOString() } : row),
+        } });
+        const from = db.from.bind(db), patches: unknown[] = [];
+        let reads = 0;
+        const abort = new AbortController();
+        db.from = table => {
+          const builder = from(table);
+          if (table !== 've_jobs') return builder;
+          const update = builder.update.bind(builder), single = builder.maybeSingle.bind(builder);
+          // The generic fixture's maybeSingle infers only successful responses;
+          // this transport adapter also exercises real PostgREST error replies.
+          const failed = (message: string, code?: string) => ({ data: null,
+            error: { message, ...(code ? { code } : {}) } }) as unknown as Awaited<ReturnType<typeof single>>;
+          let writing = false;
+          builder.update = patch => { writing = true; patches.push(patch); return update(patch); };
+          builder.maybeSingle = async () => {
+            if (writing && mode === 'aborted') abort.abort(new Error('specialist paused'));
+            if (writing && (mode === 'outage' || (['gateway', 'backoff-cancel'].includes(mode) && patches.length === 1))) {
+              return failed('An invalid response was received from the upstream server');
+            }
+            if (writing && mode === 'deadline' && patches.length === 1) {
+              return failed('TimeoutError: The operation was aborted due to timeout');
+            }
+            if (writing && mode === 'permanent') return failed('permission denied', '42501');
+            if (mode === 'lost-response-read') {
+              if (!writing && ++reads === 1) return failed('fetch failed');
+              if (writing && patches.length > 1) return failed('VE_JOB_LEASE_LOST');
+            }
+            const saved = await single();
+            if (writing && ['lost-response', 'lost-response-read'].includes(mode)) return failed('The upstream server is currently unavailable');
+            return saved;
+          };
+          return builder;
+        };
+        const timeout = mode === 'deadline' ? jest.spyOn(AbortSignal, 'timeout').mockImplementationOnce(() => {
+          const deadline = new AbortController(); deadline.abort(new DOMException('request deadline', 'TimeoutError')); return deadline.signal;
+        }) : null;
+        const paidWork = jest.fn().mockResolvedValue(undefined);
+        const pending = (async () => { await paidWork(); await requeueVeJob({ supabase: db as unknown as SupabaseClient,
+          signal: abort.signal }, original, 30_000); })().then(() => null, (error: Error) => error);
+        if (mode === 'backoff-cancel') setTimeout(() => abort.abort(new Error('specialist paused')), 100);
+        await jest.advanceTimersByTimeAsync(60_000);
+        const error = await pending;
+        timeout?.mockRestore();
+        expect(paidWork).toHaveBeenCalledTimes(1);
+        expect(new Set(patches.map(patch => JSON.stringify(patch))).size).toBe(1);
+        expect(db.getRows('ve_jobs')[0]).toMatchObject({ attempts: 3, payload: original.payload, result: original.result });
+        if (mode === 'outage') {
+          expect(error).toBeInstanceOf(VeJobQueuePersistenceError);
+          expect(patches).toHaveLength(6);
+          expect(planVeJobFailure(original, error, NOW)).toMatchObject({ status: 'pending', attempts: 3,
+            retryable: true, interruption: { count: 1, free: true } });
+        } else if (mode === 'permanent') { expect(error?.message).toContain('permission denied'); expect(patches).toHaveLength(1); }
+        else if (mode === 'aborted' || mode === 'backoff-cancel') {
+          expect(error?.message).toBe('specialist paused'); expect(patches).toHaveLength(1);
+        }
+        else {
+          expect(error).toBeNull();
+          expect(patches).toHaveLength(['gateway', 'deadline', 'lost-response-read'].includes(mode) ? 2 : 1);
+          expect(db.getRows('ve_jobs')[0]).toMatchObject(mode === 'cancelled' ? { status: 'cancelled' }
+            : mode === 'new-owner' ? { status: 'running', started_at: new Date(NOW + 1_000).toISOString() }
+              : { status: 'pending', started_at: null, run_after: new Date(NOW + 30_000).toISOString() });
+        }
+      }
+    } finally { jest.useRealTimers(); }
   });
 
   it('an inactivity-guard abort returns the job to the queue with the same attempts', () => {

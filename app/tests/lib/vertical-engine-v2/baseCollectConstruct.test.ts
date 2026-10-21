@@ -3581,6 +3581,70 @@ describe('base_collect: план кончился раньше цели', () => 
     expect(mockFindIrrelevantRows).toHaveBeenCalled();
     for (const [call] of mockFindIrrelevantRows.mock.calls) expect(call.rows.every((row: VeUnifiedRow) => row.company !== 'Old unrelated company')).toBe(true);
     expect((retryDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![1]).toEqual(sourceOnlyFixture.tasks![1]);
+    // A source-only restaurant correction is allowed to inspect one new
+    // existing-catalogue lane. Empty/duplicate pages cannot buy idle rounds.
+    jest.clearAllMocks();
+    const restaurant = { id: 'h1', status: 'accepted', origin: 'generated' as const, broad: false,
+      title: 'Ресторанные сети', description: 'Ресторанные холдинги, сети кафе и фудмоллы.' };
+    const catalogTask = { source: 'yandex_maps' as const, rationale: 'Existing catalogue',
+      maps_query: { queries: ['Рестораны', 'Кафе', 'Фудмоллы'], geo: 'Россия' } };
+    const catalogKey = veSourceStrategyKey(catalogTask);
+    const idleInfo: VeCollectInfo = { collection_mode: 'preview', hypotheses: [restaurant],
+      plan: { tasks: [catalogTask] }, tasks: [{ source: 'yandex_maps', task: catalogTask, status: 'pending', rows: 0, child_job_id: null,
+        catalog: { version: 1, filters: { categories: ['Рестораны', 'Кафе', 'Фудмоллы'], countries: ['Россия'] }, after: 'old' } }],
+      target_progress: { ...createCollectionTarget('preview'), round: 50, max_rounds: 50, candidates_processed: processed.length, ready_rows: 0 },
+      target_checkpoint: { completed_round: 49, processed_rows: processed.length, seen_rows: processed },
+      cost_policy: { version: 1, website_discovery: 'existing_only' },
+      adaptive_collection: { ...newVeAdaptiveCollection(), active_source: catalogKey },
+      relevance_reserve: { version: 1, rows: [{ ...processed[0], _relevance_unchecked: true }] },
+      restaurant_source_refresh: { version: 1, source_key: catalogKey,
+        previous_task: { source: 'hh_live', status: 'done', rows: 0, child_job_id: 'old-paid-hh' },
+        held_review_companies: veAudienceReviewHold(processed) } };
+    const restaurantFixture = structuredClone(idleInfo);
+    const idleDb = seedBase(idleInfo, restaurant, { data: [], row_count: 0 });
+    const oldRpc = idleDb.rpc;
+    idleDb.rpc = ((name: string, params: Record<string, unknown>) => {
+      if (name !== 'yandex_maps_catalog_search') return oldRpc(name, params);
+      const result = Promise.resolve({ data: Array.from({ length: Number(params.p_limit) }, (_, i) => ({
+        yandex_id: String(i + 1), name: processed[0].company, website: processed[0].website, email: processed[0].email,
+      })), error: null });
+      return Object.assign(result, { abortSignal: () => result });
+    }) as typeof idleDb.rpc;
+    const idleBase = await wake(idleDb);
+    const idleSaved = idleBase.collect_info as VeCollectInfo;
+    expect(idleSaved.target_progress).toMatchObject({ status: 'limited', round: 50, max_rounds: 50, candidates_processed: processed.length });
+    expect(idleDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(idleDb.getRows('parser_jobs')).toHaveLength(0);
+    expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
+    expect(callLLMWithSchema).not.toHaveBeenCalled();
+    expect(stripTaskHarvest({ collect_info: idleSaved }).collect_info).not.toHaveProperty('restaurant_source_refresh');
+    // A genuinely new catalogue candidate does reach the ordinary constructor
+    // and relevance gate; the held legacy company must not accompany it.
+    const newInfo = structuredClone(restaurantFixture);
+    newInfo.target_progress = { ...newInfo.target_progress!, round: 3 };
+    newInfo.target_checkpoint = { ...newInfo.target_checkpoint!, completed_round: 2 };
+    const newDb = seedBase(newInfo, restaurant, { data: [], row_count: 0 });
+    const newRpc = newDb.rpc;
+    newDb.rpc = ((name: string, params: Record<string, unknown>) => {
+      if (name !== 'yandex_maps_catalog_search') return newRpc(name, params);
+      const result = Promise.resolve({ data: params.p_after === 'old' ? [{ yandex_id: 'new-restaurant', name: 'Сеть ресторанов',
+        website: 'https://restaurants.test', email: 'info@restaurants.test' }] : [], error: null });
+      return Object.assign(result, { abortSignal: () => result });
+    }) as typeof newDb.rpc;
+    await wake(newDb);
+    expect((newDb.getRows('base_constructor_jobs')[0].data as string[][]).slice(1).map((row) => row[0])).toEqual(['Сеть ресторанов']);
+    await completeConstructor(newDb);
+    const newBase = await wake(newDb);
+    expect(newBase.row_count).toBe(1);
+    expect((newBase.collect_info as VeCollectInfo).target_progress).toMatchObject({ max_rounds: 50, candidates_processed: 3 });
+    for (const [call] of mockFindIrrelevantRows.mock.calls) {
+      expect(call.allowPaidSearch).toBe(false);
+      expect(call.rows.every((row: VeUnifiedRow) => row.company !== processed[0].company)).toBe(true);
+    }
+    expect(newDb.getRows('parser_jobs')).toHaveLength(0);
+    expect(newDb.getRows('yandex_maps_jobs')).toHaveLength(0);
+    expect(callLLMWithSchema).toHaveBeenCalledTimes(1);
+    expect(jest.mocked(callLLMWithSchema).mock.calls[0][0][0].content).toContain('названия компаний');
     jest.clearAllMocks();
     const jewelry = { id: 'h1', status: 'accepted', origin: 'generated' as const, broad: false,
       title: 'Ювелирные заводы и сети украшений',
@@ -5112,8 +5176,11 @@ describe('base_collect: круг повторной отправки одних 
     expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.max_rounds).toBeGreaterThanOrEqual(200);
     const wake = async () => {
       const queued = db.getRows('ve_jobs').filter((row) => row.stage === 'base_collect' && row.status === 'pending').at(-1)!;
-      await db.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
-      await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] },
+      // Like claimVeJob, persist and pass the same invocation timestamp.
+      // A fabricated old started_at correctly loses the queue-write fence.
+      const startedAt = new Date().toISOString();
+      await db.from('ve_jobs').update({ status: 'running', started_at: startedAt }).eq('id', queued.id);
+      await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'], started_at: startedAt },
         { supabase: db as unknown as SupabaseClient });
       return db.getRows('ve_bases')[0];
     };

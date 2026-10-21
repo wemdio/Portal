@@ -1,5 +1,13 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+/** Only the queue write failed; paid work is already in its durable checkpoint. */
+export class VeJobQueuePersistenceError extends Error {
+  constructor(cause: unknown) {
+    super(`ve_jobs requeue: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'VeJobQueuePersistenceError';
+  }
+}
+
 export interface VeJobFailureTransitionInput {
   jobId: string;
   /** Fence retries to the invocation that failed, not a later claim of the job. */
