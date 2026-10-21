@@ -46,14 +46,12 @@ export async function GET(req: NextRequest) {
     if (campaign && !UUID_RE.test(campaign)) return jsonError('Неизвестная кампания', 400);
     const source = req.nextUrl.searchParams.get('source') || null;
     if (source && source !== 'polza_ru' && source !== 'polza_en') return jsonError('Неизвестный автоаутрич', 400);
-    // ?scope=all — входящие и отказы всех писем с наших ящиков, включая чужие
-    // отправки; по умолчанию только письма «Рассылки».
-    const onlyLinked = req.nextUrl.searchParams.get('scope') !== 'all';
-
+    // Только письма кампаний «Рассылки», независимо от статуса кампании.
+    // Старый scope=all не должен примешивать почту других инструментов.
     const { data, error } = await supabaseAdmin.rpc('sender_stats_dashboard', {
       p_since: since,
       p_campaign_id: campaign,
-      p_only_linked: onlyLinked,
+      p_only_linked: true,
       p_source_kind: source,
     });
     if (error) return jsonError(error.message, 500);

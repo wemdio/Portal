@@ -9,7 +9,6 @@ import {
   type BounceCodeCountDto,
   type BounceCodeEventDto,
   type SenderStatsPeriod,
-  type SenderStatsScope,
   type SenderStatsSource,
 } from './api';
 
@@ -68,13 +67,11 @@ function EventsList({ events }: { events: BounceCodeEventDto[] }) {
 export function BounceCodes({
   period,
   campaignId,
-  scope,
   source = null,
   reloadKey,
 }: {
   period: SenderStatsPeriod;
   campaignId: string | null;
-  scope: SenderStatsScope;
   source?: SenderStatsSource | null;
   reloadKey: number;
 }) {
@@ -87,7 +84,7 @@ export function BounceCodes({
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetchBounceCodes(period, campaignId, scope, source);
+        const res = await fetchBounceCodes(period, campaignId, source);
         if (cancelled) return;
         // Раскрытые письма относятся к прошлому фильтру — сбрасываем вместе с кодами
         setOpenKey(null);
@@ -99,7 +96,7 @@ export function BounceCodes({
       }
     })();
     return () => { cancelled = true; };
-  }, [period, campaignId, scope, source, reloadKey]);
+  }, [period, campaignId, source, reloadKey]);
 
   const toggle = async (code: string | null) => {
     const key = keyOf(code);
@@ -108,7 +105,7 @@ export function BounceCodes({
     if (Array.isArray(events[key]) || events[key] === 'loading') return;
     setEvents((prev) => ({ ...prev, [key]: 'loading' }));
     try {
-      const res = await fetchBounceCodeEvents(code, period, campaignId, scope, source);
+      const res = await fetchBounceCodeEvents(code, period, campaignId, source);
       setEvents((prev) => ({ ...prev, [key]: res.events }));
     } catch {
       setEvents((prev) => ({ ...prev, [key]: 'error' }));
