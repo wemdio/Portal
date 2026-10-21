@@ -616,6 +616,12 @@ const SUBSTANTIVE_OFFER_SIGNAL_PATTERNS = [
   /наш[а-яё]*\s+(?:решение|сервис|продукт|платформа|система)/i,
   /решение\s+(?:помогает|позволяет|сокращает|автоматизирует|обеспечивает)/i,
   /мы[^.!?\n]{0,100}(?:помогаем|поможем|можем\s+(?:закрыть|решить|сократить|увеличить|автоматизировать|обеспечить)|сократим|увеличим|автоматизируем|обеспечим)/i,
+  // Concrete delivery can be described without "we offer". Keep the own
+  // action and its object: a question about a contact or another supplier is
+  // not evidence that we have already explained our service.
+  /(?:^|[.!?\n])\s*(?:>\s*)?(?![^.!?\n]{0,80}\sне\s+помогает)[\p{L}\p{N}«»" -]{2,80}\s+помогает\s+агентствам\s+(?:делать|создавать)\s+цифровую\s+часть\s+клиентских\s+мероприятий[^.!?\n]{0,180}\.\s*(?:мы\s+)?можем\s+работать\s+от\s+имени\s+агентства/iu,
+  /(?:^|[.!?\n])\s*(?:>\s*)?мы\s+(?:в\s+типографии\s+[«"][\p{L}\p{N} &.-]{2,80}[»"]\s+привыкли\s+работать\s+с\s+[^.!?\n]{2,100},\s*)?закрываем\s+задачу\s+полиграфии\s+под\s+ключ\s*:/iu,
+  /(?:^|[.!?\n])\s*(?:>\s*)?наша\s+(?:команда|компания)\s+внедряет\s+внутренний\s+эдо\s+на\s+[\p{L}\p{N}-]{2,40}\s*:\s*система\s+показывает\s+маршрут,\s*ответственного\s+и\s+историю\s+решений/iu,
   /наш[иаяе][^.!?\n]{0,50}цен[а-яё]*[^.!?\n]{0,30}ниж[а-яё]*/i,
   /\bwe\s+(?:offer|provide|help|build)|\bour\s+(?:solution|service|product|platform|system)/i,
   // A concrete promised outcome is an offer even without literal "we offer".
@@ -1990,7 +1996,7 @@ function hasActionableDirectCommercialRequest(authoredReply: string): boolean {
 /** A current budget/test request is not just "send some materials". Keep the
  * model's verdict for these narrow buyer-evaluation cases; do not force a lead
  * or let an unrelated, conditional future call negate the current request. */
-function hasIndependentProductEvaluationRequest(authoredReply: string): boolean {
+function hasIndependentProductEvaluationRequest(authoredReply: string, confirmedProposal = false): boolean {
   const statement = normalizeAuthoredStatement(authoredReply);
   if (EXPLICIT_REFUSAL_PATTERN.test(statement) || THIRD_PARTY_INTEREST_PATTERN.test(statement) ||
       /(?:коллег[а-яё]*|руководств[а-яё]*|руководител[а-яё]*|директор[а-яё]*|(?:ему|ей|он|она)\s+(?:будет\s+)?интересн)/i.test(statement)) {
@@ -2002,6 +2008,18 @@ function hasIndependentProductEvaluationRequest(authoredReply: string): boolean 
   );
   const accessRequest = /(?:предоставьте|дайте|откройте|(?:можете|сможете)\s+(?:предоставить|дать|открыть))\s+(?:(?:нам|мне)\s+)?тестовый\s+доступ(?:\s+к\s+(?:системе|сервису))?\s*$/i;
   const condition = new RegExp(String.raw`${LETTER_TOKEN_START_SOURCE}(?:если|в\s+случае)${LETTER_TOKEN_END_SOURCE}`, 'i');
+  // A present request to examine our actual cases is independent of a later
+  // conditional meeting. Require the concrete question and own evaluation
+  // goal before ANY condition; generic materials/third-party interest and
+  // an unconfirmed contact opener keep the existing veto.
+  const currentPart = statement.slice(0, condition.exec(statement)?.index ?? statement.length);
+  // Keep the old handling whenever completed refusal is mentioned, even when
+  // negated or about another object. Only this new exception is withheld.
+  const pastRefusal = /(?<![\p{L}\p{N}_])отказал(?:ись|ся|ась)(?![\p{L}\p{N}_])/iu;
+  const caseStudyEvaluation = confirmedProposal && !pastRefusal.test(statement) &&
+    /(?:^|[.!?;])\s*как\s+это\s+работает(?:,\s*как\s+было\s+с\s+вашими\s+клиентами)?\s*(?=[.!?;]|$)/i.test(currentPart) &&
+    /(?:^|[.!?;])\s*(?:чтобы\s+)?(?:мы\s+могли|я\s+мог(?:ла)?|нам|мне)\s+(?:изучить|оценить)\s+(?:данный\s+вопрос|ваше\s+решение)\s*(?=[.!?;]|$)/i.test(currentPart);
+  const caseRequest = /^(?:предоставьте|пришлите|направьте|отправьте)\s+(?:(?:нам|мне)\s+)?(?:ваши\s+)?(?:кейсы|примеры)(?=\s|[,;.!?]|$)/i;
   const ownEvaluation = statement.split(/[.!?;]+/).some((clause) =>
     /^(?:(?:нам|мне)\s+(?:важно|нужно|необходимо)|(?:мы\s+)?хотим)\s+(?:оценить|проверить|протестировать)\s+(?:интерфейс|систему|сервис)(?:\s+и\s+сравнить\s+(?:ваши\s+)?тарифы(?:\s+с\s+нашими\s+текущими\s+контрактами)?)?$/i.test(clause.trim()));
   return Array.from(statement.matchAll(/[^.!?;]+/g)).some((clauseMatch) => {
@@ -2011,7 +2029,8 @@ function hasIndependentProductEvaluationRequest(authoredReply: string): boolean 
     const withoutPoliteAbility = clause.replace(/если\s+вы\s+(?=сможете\s+(?:предоставить|дать|открыть))/gi, '');
     if (condition.test(statement.slice(0, clauseMatch.index)) ||
         condition.test(withoutPoliteAbility) || hasConditionalOrThirdPartyInterest(clause)) return false;
-    return hasNonNegatedPatternMatch(clause, budgetRequest) ||
+    return (caseStudyEvaluation && caseRequest.test(clause.trim())) ||
+      hasNonNegatedPatternMatch(clause, budgetRequest) ||
       (ownEvaluation && hasNonNegatedPatternMatch(clause, accessRequest));
   });
 }
@@ -2389,7 +2408,7 @@ function protectedDefaultVerdict(
     !actionableDirectCta &&
     !selfCooperationInterest &&
     requestedFollowupMaterials &&
-    !hasIndependentProductEvaluationRequest(statement) &&
+    !hasIndependentProductEvaluationRequest(statement, confirmedProposal) &&
     !(semanticOwnApplication && !hasExplicitNegativeContext(statement)) &&
     ((!confirmedProposal && !semanticShortOffer) || hasExplicitNegativeContext(statement))
   ) {
