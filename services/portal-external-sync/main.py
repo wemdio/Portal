@@ -6,8 +6,8 @@ Sources: Yandex Metrika, AMO CRM (сделки, события, задачи, к
 расходов.
 
 Расписание:
-- Банки: короткая выписка каждые 10 минут (`BANK_SYNC_CRON`), затем новые
-  клиентские поступления → ветка оплат через PolzaSiteFeedbackBot.
+- Банки и USDT TRC-20: короткие проверки каждые 10 минут (`BANK_SYNC_CRON`),
+  затем новые поступления → ветка оплат через PolzaSiteFeedbackBot.
 - Cron `EXTERNAL_SYNC_CRON` (default '5 6,9,12,15,18 * * *' UTC = 9:05, 12:05,
   15:05, 18:05, 21:05 МСК) через APScheduler. С 30.09.2026 пять раз в день, а не
   раз в сутки: правка в AMO или оплата доезжают до дашбордов за часы, а сломанный
@@ -118,18 +118,18 @@ SOURCES = [
 # ── Run pipeline ──────────────────────────────────────────────────────────
 
 async def run_source(conn: asyncpg.Connection, src, mode: str = "full") -> None:
-    # Both schedules share a session lock per bank, also across worker replicas.
-    lock_id = {"bank_tochka": 1, "bank_tbank": 2}.get(src.name)
+    # Both schedules share a lock per source, also across worker replicas.
+    lock_id = {"bank_tochka": 1, "bank_tbank": 2, "crypto_usdt": 4, "fx_cbr": 5}.get(src.name)
     if lock_id is not None:
         locked = await conn.fetchval("SELECT pg_try_advisory_lock($1, $2)", LOCK_NAMESPACE, lock_id)
         if not locked:
-            print(f"[{src.name}] {mode}: another bank sync is running", flush=True)
+            print(f"[{src.name}] {mode}: another sync of this source is running", flush=True)
             return
     try:
         run_id = await log_run_start(conn, src.name)
         try:
             if mode == "recent":
-                n = await asyncio.wait_for(src.run(conn), timeout=240)
+                n = await asyncio.wait_for(src.run(conn), timeout=90 if src.name == "fx_cbr" else 240)
             else:
                 n = await src.run(conn)
             await log_run_finish(conn, run_id, "success", records=n, meta={"mode": mode})
@@ -170,8 +170,13 @@ async def run_banks() -> None:
     try:
         config = await prepare_bank_income(conn)
         periods = recent_bank_periods(datetime.now(timezone.utc))
-        for src in (BankTochkaSync(periods), BankTBankSync(periods)):
-            await run_source(conn, src, mode="recent")
+        since = datetime.fromisoformat(periods[0][0]).replace(tzinfo=MSK_TZ)
+        # Independent APIs use independent DB sessions. A slow bank must not
+        # delay crypto or the next ten-minute tick of the other bank.
+        sources = (BankTochkaSync(periods), BankTBankSync(periods), CryptoUsdtSync(since))
+        await asyncio.gather(*(_run_recent_source(src) for src in sources))
+        # Portal's RUB income totals need the rate for newly arrived USDT dates.
+        await run_source(conn, FxCbrSync(), mode="recent")
         if config:
             try:
                 await dispatch_income(conn, config)
@@ -181,6 +186,18 @@ async def run_banks() -> None:
                 print(f"[bank-income] dispatch failed ({type(e).__name__})", flush=True)
     finally:
         await conn.close()
+
+
+async def _run_recent_source(src) -> None:
+    conn = None
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await run_source(conn, src, mode="recent")
+    except Exception as e:
+        await send_worker_alert("portal-external-sync", f"{src.name}: recent sync failed", type(e).__name__)
+    finally:
+        if conn is not None:
+            await conn.close()
 
 
 async def run_all() -> None:

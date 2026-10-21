@@ -1,4 +1,4 @@
-"""New client bank receipts → PolzaSiteFeedbackBot, without replaying history.
+"""New bank / USDT receipts → PolzaSiteFeedbackBot, without replaying history.
 
 Only sendMessage/getMe: the bot's webhook belongs to the existing lead service.
 Telegram has no idempotency key. Ambiguous sends are quarantined for manual
@@ -18,6 +18,7 @@ import asyncpg
 import httpx
 
 from alerts import send_worker_alert
+from sources.crypto_usdt import USDT_TRC20_CONTRACT
 
 MSK = timezone(timedelta(hours=3))
 LOCK_NAMESPACE = 726462
@@ -94,6 +95,24 @@ def format_income(row: dict) -> str:
     ])
 
 
+def format_crypto_income(row: dict) -> str:
+    amount = f"{Decimal(str(row['amount'])):,.6f}".rstrip("0").rstrip(".")
+    amount = amount.replace(",", " ").replace(".", ",")
+    occurred = row["occurred_at"].astimezone(MSK).strftime("%d.%m.%Y %H:%M:%S МСК")
+    detected = row["created_at"].astimezone(MSK).strftime("%d.%m.%Y %H:%M МСК")
+    return "\n".join([
+        "💰 <b>Поступление USDT</b>", "",
+        f"<b>Сумма:</b> {amount} USDT",
+        "<b>Сеть:</b> Tron (TRC-20)",
+        f"<b>Дата/время перевода:</b> {occurred}",
+        f"<b>Обнаружено:</b> {detected}",
+        f"<b>Отправитель:</b> <code>{_clip(row['from_address'], 80)}</code>",
+        f"<b>Наш кошелёк:</b> <code>{_clip(row['wallet_address'], 80)}</code>",
+        f"<b>Транзакция:</b> <code>{_clip(row['transaction_id'], 128)}</code>",
+        "<b>Юрлицо / назначение:</b> неизвестны по данным перевода USDT",
+    ])
+
+
 async def prepare_income(conn: asyncpg.Connection, config: IncomeConfig) -> None:
     # Verify the exact named bot before baselining or transmitting financial data.
     try:
@@ -109,8 +128,13 @@ async def prepare_income(conn: asyncpg.Connection, config: IncomeConfig) -> None
         # httpx exceptions contain the request URL, hence the secret bot token.
         raise RuntimeError(f"Проверка бота оплат не прошла ({type(error).__name__})") from None
     await conn.execute(
-        """INSERT INTO bank_income_notification_state (id, baseline_id)
-           SELECT true, coalesce(max(id), 0) FROM bank_transactions
+        """WITH bank_baseline AS (
+             INSERT INTO bank_income_notification_state (id, baseline_id)
+             SELECT true, coalesce(max(id), 0) FROM bank_transactions
+             ON CONFLICT (id) DO NOTHING RETURNING id
+           )
+           INSERT INTO crypto_income_notification_state (id, baseline_id)
+           SELECT true, coalesce(max(id), 0) FROM crypto_income_transfers
            ON CONFLICT (id) DO NOTHING"""
     )
 
@@ -119,6 +143,8 @@ async def prepare_income(conn: asyncpg.Connection, config: IncomeConfig) -> None
 ELIGIBLE = """b.bank IN ('tochka', 'tbank') AND b.direction = 'credit'
     AND b.is_revenue IS TRUE AND b.amount > 0
     AND b.payer_inn ~ '^([0-9]{10}|[0-9]{12})$'"""
+CRYPTO_ELIGIBLE = f"""b.network='tron' AND b.token_contract='{USDT_TRC20_CONTRACT}'
+    AND b.currency='USDT' AND b.amount > 0"""
 
 
 async def _deliver(client: httpx.AsyncClient, config: IncomeConfig, text: str) -> tuple[str, int | None, int]:
@@ -155,75 +181,94 @@ async def dispatch_income(conn: asyncpg.Connection, config: IncomeConfig) -> Non
     locked = await conn.fetchval("SELECT pg_try_advisory_lock($1, $2)", LOCK_NAMESPACE, DELIVERY_LOCK)
     if not locked:
         return
-    issues: list[int] = []
+    issues: list[str] = []
     try:
-        # With this exclusive session lock no other dispatcher can own sending.
-        stale = await conn.fetch(
-            """UPDATE bank_income_notifications SET status='unknown', updated_at=now(),
-                 error='Процесс прервался во время отправки; проверьте ветку перед повтором'
-               WHERE status='sending' RETURNING bank_transaction_id"""
-        )
-        issues.extend(row["bank_transaction_id"] for row in stale)
-        await conn.execute(
-            f"""INSERT INTO bank_income_notifications (bank_transaction_id, chat_id, thread_id)
-                SELECT b.id, $1, $2 FROM bank_transactions b
-                CROSS JOIN bank_income_notification_state s
-                WHERE b.id > s.baseline_id AND {ELIGIBLE}
-                  AND b.occurred_at >= date_trunc('day', s.started_at AT TIME ZONE 'Europe/Moscow')
-                                         AT TIME ZONE 'Europe/Moscow'
-                ON CONFLICT (bank_transaction_id) DO NOTHING""", config.chat_id, config.thread_id,
-        )
-        # A correction to the bank classification before sending cancels the alert.
-        await conn.execute(
-            f"""UPDATE bank_income_notifications n SET status='skipped', updated_at=now()
-                FROM bank_transactions b WHERE b.id=n.bank_transaction_id
-                AND n.status='pending' AND ({ELIGIBLE}) IS NOT TRUE"""
-        )
-        rows = await conn.fetch(
-            """SELECT n.bank_transaction_id
-               FROM bank_income_notifications n JOIN bank_transactions b ON b.id=n.bank_transaction_id
-               WHERE n.status='pending' AND n.next_attempt_at <= now()
-                 AND n.chat_id=$1 AND n.thread_id=$2
-               ORDER BY n.created_at, n.bank_transaction_id LIMIT 20""", config.chat_id, config.thread_id,
-        )
-        deadline = monotonic() + 30
         async with httpx.AsyncClient(timeout=15) as client:
-            for row in rows:
-                if monotonic() >= deadline:
-                    break
-                tx_id = row["bank_transaction_id"]
-                claimed = await conn.fetchrow(
-                    f"""UPDATE bank_income_notifications n SET status='sending', attempts=attempts+1,
-                         updated_at=now() FROM bank_transactions b
-                       WHERE n.bank_transaction_id=$1 AND n.status='pending'
-                         AND b.id=n.bank_transaction_id AND {ELIGIBLE}
-                       RETURNING n.attempts, n.created_at, b.bank, b.payer_name, b.payer_inn,
-                         b.amount, b.currency, b.purpose, b.occurred_at, b.raw""", tx_id,
-                )
-                if claimed is None:
-                    continue
-                text = format_income(dict(claimed))
-                status, message_id, delay = await _deliver(client, config, text)
-                if status == "pending" and claimed["attempts"] >= 10:
-                    status = "failed"
-                await conn.execute(
-                    """UPDATE bank_income_notifications SET status=$2, message_id=$3, updated_at=now(),
-                         sent_at=CASE WHEN $2='sent' THEN now() ELSE NULL END,
-                         next_attempt_at=now()+make_interval(secs => $4::int),
-                         error=CASE WHEN $2='unknown' THEN 'Доставка не подтверждена; проверьте ветку'
-                                    WHEN $2='failed' THEN 'Telegram отклонил отправку или исчерпан лимит повторов'
-                                    WHEN $2='pending' THEN 'Отправка отложена, ожидается повтор' ELSE NULL END
-                       WHERE bank_transaction_id=$1""", tx_id, status, message_id, delay,
-                )
-                if status in ("unknown", "failed"):
-                    issues.append(tx_id)
-                # A limit or bad destination affects the next message as well.
-                if status != "sent":
+            for kind in ("bank", "crypto"):
+                if not await _dispatch_queue(conn, client, config, kind, issues):
                     break
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1, $2)", LOCK_NAMESPACE, DELIVERY_LOCK)
         if issues:
             await send_worker_alert(
                 "bank-income", "доставка оплат требует проверки", "Проверьте ветку оплат и журнал доставки",
-                {"bank_transaction_ids": ",".join(map(str, issues))},
+                {"income_events": ",".join(issues)},
             )
+
+
+async def _dispatch_queue(
+    conn: asyncpg.Connection, client: httpx.AsyncClient, config: IncomeConfig,
+    kind: str, issues: list[str],
+) -> bool:
+    # SQL identifiers come exclusively from these two fixed internal definitions.
+    crypto = kind == "crypto"
+    journal = "crypto_income_notifications" if crypto else "bank_income_notifications"
+    source = "crypto_income_transfers" if crypto else "bank_transactions"
+    state = "crypto_income_notification_state" if crypto else "bank_income_notification_state"
+    key = "crypto_transfer_id" if crypto else "bank_transaction_id"
+    eligible = CRYPTO_ELIGIBLE if crypto else ELIGIBLE
+    columns = ("b.from_address, b.wallet_address, b.transaction_id" if crypto
+               else "b.bank, b.payer_name, b.payer_inn, b.currency, b.purpose, b.raw")
+    formatter = format_crypto_income if crypto else format_income
+    # With the exclusive session lock no other dispatcher can own sending.
+    stale = await conn.fetch(
+            f"""UPDATE {journal} SET status='unknown', updated_at=now(),
+                 error='Процесс прервался во время отправки; проверьте ветку перед повтором'
+               WHERE status='sending' RETURNING {key} AS source_id"""
+        )
+    issues.extend(f"{kind}:{row['source_id']}" for row in stale)
+    await conn.execute(
+            f"""INSERT INTO {journal} ({key}, chat_id, thread_id)
+                SELECT b.id, $1, $2 FROM {source} b
+                CROSS JOIN {state} s
+                WHERE b.id > s.baseline_id AND {eligible}
+                  AND b.occurred_at >= date_trunc('day', s.started_at AT TIME ZONE 'Europe/Moscow')
+                                         AT TIME ZONE 'Europe/Moscow'
+                ON CONFLICT ({key}) DO NOTHING""", config.chat_id, config.thread_id,
+        )
+    # A correction to classification before sending cancels the alert.
+    await conn.execute(
+            f"""UPDATE {journal} n SET status='skipped', updated_at=now()
+                FROM {source} b WHERE b.id=n.{key}
+                AND n.status='pending' AND ({eligible}) IS NOT TRUE"""
+        )
+    rows = await conn.fetch(
+            f"""SELECT n.{key} AS source_id
+               FROM {journal} n JOIN {source} b ON b.id=n.{key}
+               WHERE n.status='pending' AND n.next_attempt_at <= now()
+                 AND n.chat_id=$1 AND n.thread_id=$2
+               ORDER BY n.created_at, n.{key} LIMIT 20""", config.chat_id, config.thread_id,
+        )
+    deadline = monotonic() + 30
+    for row in rows:
+        if monotonic() >= deadline:
+            break
+        tx_id = row["source_id"]
+        claimed = await conn.fetchrow(
+            f"""UPDATE {journal} n SET status='sending', attempts=attempts+1,
+                 updated_at=now() FROM {source} b
+               WHERE n.{key}=$1 AND n.status='pending'
+                 AND b.id=n.{key} AND {eligible}
+               RETURNING n.attempts, n.created_at, {columns}, b.amount, b.occurred_at""", tx_id,
+        )
+        if claimed is None:
+            continue
+        text = formatter(dict(claimed))
+        status, message_id, delay = await _deliver(client, config, text)
+        if status == "pending" and claimed["attempts"] >= 10:
+            status = "failed"
+        await conn.execute(
+            f"""UPDATE {journal} SET status=$2, message_id=$3, updated_at=now(),
+                 sent_at=CASE WHEN $2='sent' THEN now() ELSE NULL END,
+                 next_attempt_at=now()+make_interval(secs => $4::int),
+                 error=CASE WHEN $2='unknown' THEN 'Доставка не подтверждена; проверьте ветку'
+                            WHEN $2='failed' THEN 'Telegram отклонил отправку или исчерпан лимит повторов'
+                            WHEN $2='pending' THEN 'Отправка отложена, ожидается повтор' ELSE NULL END
+               WHERE {key}=$1""", tx_id, status, message_id, delay,
+        )
+        if status in ("unknown", "failed"):
+            issues.append(f"{kind}:{tx_id}")
+        # A limit or bad destination affects the next message as well.
+        if status != "sent":
+            return False
+    return True

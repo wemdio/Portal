@@ -322,6 +322,9 @@ def to_row(d: dict) -> tuple:
 class CryptoUsdtSync(SyncSource):
     name = "crypto_usdt"
 
+    def __init__(self, since: datetime | None = None):
+        self.since = since
+
     async def run(self, conn: asyncpg.Connection) -> int:
         if not WALLET_ADDRESS:
             raise NotImplementedError("TRON_USDT_WALLET_ADDRESS не задан")
@@ -334,8 +337,11 @@ class CryptoUsdtSync(SyncSource):
         params: dict[str, object] = {
             "limit": PAGE_LIMIT,
             "only_to": "true",
+            "only_confirmed": "true",
             "contract_address": USDT_TRC20_CONTRACT,
         }
+        if self.since is not None:
+            params["min_timestamp"] = int(self.since.timestamp() * 1000)
 
         total = 0
         seen = 0
@@ -343,6 +349,7 @@ class CryptoUsdtSync(SyncSource):
         fingerprint: str | None = None
         skip_counts: dict[str, int] = {}
         hit_page_cap = False
+        failure: str | None = None
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
             for page in range(MAX_PAGES):
@@ -364,15 +371,19 @@ class CryptoUsdtSync(SyncSource):
                             f"{resp.status_code}, обход прерван",
                             flush=True,
                         )
+                        failure = f"TronGrid HTTP {resp.status_code}, страница {page + 1}"
                         break
 
                     body = resp.json()
+                    if not isinstance(body, dict) or body.get("success") is not True:
+                        raise ValueError("TronGrid не подтвердил успешный ответ")
                 except Exception as e:
                     print(
                         f"[crypto_usdt] страница {page + 1} FAIL: {e}\n"
                         f"{traceback.format_exc()}",
                         flush=True,
                     )
+                    failure = f"TronGrid: страница {page + 1}, {type(e).__name__}"
                     break
 
                 records = body.get("data") or []
@@ -401,6 +412,7 @@ class CryptoUsdtSync(SyncSource):
                         f"{page + 1} — обход прерван",
                         flush=True,
                     )
+                    failure = "TronGrid: повторный курсор"
                     break
                 fingerprint = next_fingerprint
             else:
@@ -413,6 +425,7 @@ class CryptoUsdtSync(SyncSource):
                 f"первый бэкфилл, значит курсор не заканчивается",
                 flush=True,
             )
+            failure = "TronGrid: достигнут лимит страниц"
 
         if skip_counts:
             total_skipped = sum(skip_counts.values())
@@ -442,6 +455,8 @@ class CryptoUsdtSync(SyncSource):
                 flush=True,
             )
 
+        if failure:
+            raise RuntimeError(f"{failure}; записано {total}, синк неполный")
         return total
 
     async def _upsert(self, conn: asyncpg.Connection, rows: list[tuple]) -> None:
