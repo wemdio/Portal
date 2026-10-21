@@ -273,7 +273,7 @@ function fmcsa(row: Row, task: HeEngRegistryTask, excluded: Record<string, numbe
     sourceUrl: `https://safer.fmcsa.dot.gov/query.asp?query_type=queryCarrierSnapshot&query_param=USDOT&query_string=${recordId}` };
 }
 
-function companiesHouse(row: Row, task: HeEngRegistryTask, excluded: Record<string, number>): HeEngRegistryCandidate | null {
+export function mapHeEngCompaniesHouseRecord(row: Row, task: HeEngRegistryTask, excluded: Record<string, number>): HeEngRegistryCandidate | null {
   const recordId = str(row.company_number); const company = str(row.company_name); const address = object(row.registered_office_address);
   if (!/^[A-Z0-9]{8}$/.test(recordId) || !company) return exclude(excluded, 'missing_identity');
   if (row.company_status !== 'active') return exclude(excluded, 'inactive');
@@ -328,7 +328,7 @@ export async function readHeEngRegistryPage(task: HeEngRegistryTask, position: n
   // source exhausted. Preserve the cursor and let the controller record failure.
   if (rows.length === 0 && total !== null && total > position) fail('registry_invalid_response');
   const excluded: Record<string, number> = {}; const candidates: HeEngRegistryCandidate[] = []; const seen = new Set<string>();
-  const mapper = { brreg, france, fdic, nppes, fmcsa, companies_house: companiesHouse }[task.provider];
+  const mapper = { brreg, france, fdic, nppes, fmcsa, companies_house: mapHeEngCompaniesHouseRecord }[task.provider];
   for (const rawRow of rows) {
     const row = object(rawRow);
     if (!row) { exclude(excluded, 'invalid_record'); continue; }

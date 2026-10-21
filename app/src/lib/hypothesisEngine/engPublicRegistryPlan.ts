@@ -54,7 +54,9 @@ const SECTORS: readonly Sector[] = [
 
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 function fields(task: HeEngRegistryTask): unknown[] {
-  return [task.provider, task.country, task.category, task.minEmployees ?? null, task.maxEmployees ?? null];
+  const legacy = [task.provider, task.country, task.category, task.minEmployees ?? null, task.maxEmployees ?? null];
+  // Preserve every saved API task ID and plan fingerprint byte-for-byte.
+  return task.transport === undefined ? legacy : [...legacy, task.transport];
 }
 function taskId(scopeKey: string, task: HeEngRegistryTask): string { return hash([scopeKey, ...fields(task)]).slice(0, 24); }
 function fingerprint(scopeKey: string, tasks: readonly HeEngRegistryTask[]): string {
@@ -109,6 +111,7 @@ export function createHeEngRegistryPlan(input: {
     const [provider, category] = selected.split(':') as [HeEngRegistryProvider, string];
     if (PROVIDER_ISO[provider] !== engCountryIso2(country)) continue;
     const task: HeEngRegistryTask = { id: '', provider, country, category,
+      ...(provider === 'companies_house' ? { transport: 'csv' as const } : {}),
       ...(range ? { minEmployees: range.min, ...(range.max !== null ? { maxEmployees: range.max } : {}) } : {}) };
     task.id = taskId(input.scopeKey, task);
     tasks.push(task);
@@ -121,10 +124,11 @@ export function createHeEngRegistryPlan(input: {
 
 export function validateHeEngRegistryTask(task: HeEngRegistryTask): void {
   if (!task || typeof task !== 'object' || Array.isArray(task) ||
-    Object.keys(task).some(key => !['id', 'provider', 'country', 'category', 'minEmployees', 'maxEmployees'].includes(key)) ||
+    Object.keys(task).some(key => !['id', 'provider', 'country', 'category', 'transport', 'minEmployees', 'maxEmployees'].includes(key)) ||
     typeof task.id !== 'string' || !/^[a-f0-9]{24}$/.test(task.id) ||
     !Object.hasOwn(HE_ENG_REGISTRY_CATEGORIES, task.provider) ||
     !HE_ENG_REGISTRY_CATEGORIES[task.provider].includes(task.category) ||
+    (task.transport !== undefined && (task.transport !== 'csv' || task.provider !== 'companies_house')) ||
     normalizeEngCountry(task.country) !== task.country || engCountryIso2(task.country) !== PROVIDER_ISO[task.provider] ||
     (task.minEmployees !== undefined && (!Number.isSafeInteger(task.minEmployees) || task.minEmployees < 0)) ||
     (task.maxEmployees !== undefined && (!Number.isSafeInteger(task.maxEmployees) || task.maxEmployees < (task.minEmployees ?? 0)))) {

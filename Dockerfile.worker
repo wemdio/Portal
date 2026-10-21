@@ -88,6 +88,11 @@ COPY --from=deps /app/node_modules ./node_modules
 # Compiled worker bundles
 COPY --from=builder /app/dist/workers ./workers
 
+# Persist the ENG Companies House snapshot index across HE container recreation.
+# Docker initializes a new named volume with these non-root ownership settings.
+RUN mkdir -p /var/lib/portal-eng-companies-house \
+    && chown 1001:1001 /var/lib/portal-eng-companies-house
+
 USER worker
 
 ENV WORKER_KIND=all

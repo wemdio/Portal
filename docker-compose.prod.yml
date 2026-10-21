@@ -808,6 +808,8 @@ services:
   worker-hypothesis-engine:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-hypothesis-engine
+    volumes:
+      - he-eng-companies-house:/var/lib/portal-eng-companies-house
     env_file:
       - .env
     environment:
@@ -1971,6 +1973,7 @@ services:
 
 volumes:
   telegram-bot-api-data:
+  he-eng-companies-house:
 
 networks:
   portal-network:

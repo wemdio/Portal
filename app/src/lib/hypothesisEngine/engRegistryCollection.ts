@@ -9,6 +9,8 @@ import type { HeStageContext } from './stages/shared';
 import { heStageSignal } from './stages/io';
 import { addHeSite, heCompanySiteIdentity, heSameCompanySite, newHeSiteSet } from './collectionIdentity';
 import { HeEngRegistryRetryError } from './engRegistryRetry';
+import { getHeEngCompaniesHouseSnapshot, readHeEngCompaniesHouseCsvPage, validateHeEngCompaniesHouseSnapshot,
+  type HeEngCompaniesHouseSnapshot } from './engCompaniesHouseCsv';
 
 export { HeEngRegistryRetryError } from './engRegistryRetry';
 
@@ -17,6 +19,8 @@ export interface HeEngRegistryState {
   plan: HeEngRegistryPlan;
   cursors: Record<string, HeEngRegistryCursor>;
   seenRecords: string[];
+  /** Immutable monthly source, shared by every Companies House slice in this base. */
+  companiesHouseSnapshot?: HeEngCompaniesHouseSnapshot;
 }
 
 export interface HeEngRegistryWave {
@@ -78,6 +82,14 @@ export async function runHeEngRegistryWave(input: {
     throw new Error('ENG registry checkpoint is invalid');
   }
   state.cursors[task.id] = cursor;
+  const csv = task.provider === 'companies_house' && task.transport === 'csv';
+  if (csv && state.companiesHouseSnapshot) validateHeEngCompaniesHouseSnapshot(state.companiesHouseSnapshot);
+  if (csv && !state.companiesHouseSnapshot &&
+      (wave.pageLoaded || wave.resolved > 0 || wave.candidates.length > 0 ||
+        state.plan.tasks.some(item => item.transport === 'csv' &&
+          ((state.cursors[item.id]?.position ?? 0) > 0 || (state.cursors[item.id]?.pages ?? 0) > 0)))) {
+    throw new Error('ENG Companies House progress has no pinned snapshot');
+  }
   if (!wave.pageLoaded && !cursor.exhausted && !cursor.unavailable) {
     if (cursor.retryAt && cursor.retryAt > Date.now()) {
       throw new HeEngRegistryRetryError(cursor.retryAt - Date.now());
@@ -87,10 +99,26 @@ export async function runHeEngRegistryWave(input: {
       await input.save();
     } else {
       let page;
+      let snapshotCheckpointFailed = false;
       try {
-        page = await readHeEngRegistryPage(task, cursor.position, { signal });
+        if (csv) {
+          if (!state.companiesHouseSnapshot) {
+            const snapshot = await getHeEngCompaniesHouseSnapshot({ signal, onActivity: ctx.onActivity });
+            validateHeEngCompaniesHouseSnapshot(snapshot);
+            state.companiesHouseSnapshot = structuredClone(snapshot);
+            // The source pin is durable before a page import or any paid resolution.
+            // A failed DB checkpoint is not a failed registry read.
+            try { await input.save(); }
+            catch (error) { snapshotCheckpointFailed = true; throw error; }
+          }
+          page = await readHeEngCompaniesHouseCsvPage(task, cursor.position, state.companiesHouseSnapshot,
+            { signal, onActivity: ctx.onActivity });
+        } else {
+          page = await readHeEngRegistryPage(task, cursor.position, { signal });
+        }
       } catch (error) {
         signal?.throwIfAborted();
+        if (snapshotCheckpointFailed || error instanceof HeEngRegistryRetryError) throw error;
         if (error && typeof error === 'object' && (error as { heJobInterruption?: unknown }).heJobInterruption) throw error;
         const message = error instanceof Error ? error.message : '';
         const transient = /^registry_(?:timeout|network_error|http_(?:408|429|5\d\d))$/.test(message);

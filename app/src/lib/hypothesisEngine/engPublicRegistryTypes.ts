@@ -6,6 +6,8 @@ export interface HeEngRegistryTask {
   provider: HeEngRegistryProvider;
   country: string;
   category: string;
+  /** New Companies House plans use the monthly snapshot; absence preserves API plans. */
+  transport?: 'csv';
   minEmployees?: number;
   maxEmployees?: number;
 }
