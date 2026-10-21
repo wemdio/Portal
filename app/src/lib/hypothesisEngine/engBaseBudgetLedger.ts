@@ -11,14 +11,25 @@ export type HeEngBaseBudgetReason =
   | 'missing_history'
   | 'unavailable';
 
+type BudgetRpc = 'he_eng_base_budget_begin' | 'he_eng_base_budget_reserve' | 'he_eng_base_budget_settle';
+export interface HeEngBaseBudgetDiagnostics {
+  rpc: BudgetRpc;
+  code: string | null;
+  status: number | null;
+  transport: 'aborted' | 'timeout' | 'network' | 'database' | 'http' | 'unknown';
+  attempts: number;
+}
+
 export class HeEngBaseBudgetError extends Error {
   readonly heJobTerminal = true as const;
   readonly heEngBaseBudgetError = true as const;
 
-  constructor(readonly reason: HeEngBaseBudgetReason) {
+  constructor(readonly reason: HeEngBaseBudgetReason, readonly diagnostics?: HeEngBaseBudgetDiagnostics) {
     // Persisted in he_jobs/base errors and projected to the client. Never include
     // database errors, provider responses, addresses or credentials in this text.
-    super(`ENG base budget: ${reason}. Paid work stopped to protect the $5 limit for this base.`);
+    super(`ENG base budget: ${reason}. Paid work stopped to protect the $5 limit for this base.` +
+      (diagnostics ? ` [rpc=${diagnostics.rpc}; code=${diagnostics.code ?? 'none'}; status=${diagnostics.status ?? 'none'}; ` +
+        `transport=${diagnostics.transport}; attempts=${diagnostics.attempts}]` : ''));
     this.name = 'HeEngBaseBudgetError';
   }
 }
@@ -105,20 +116,82 @@ interface RpcResult {
   snapshot?: HeEngBaseBudgetSnapshot;
 }
 
+const RPC_RETRY_DELAYS_MS = [250, 1000] as const;
+const TRANSIENT_RPC_CODES = /^(?:08[A-Z0-9]{3}|40001|40P01|57P0[123]|53[23]00|PGRST00[0-3]|PGRST202)$/;
+const TRANSIENT_RPC_STATUSES = new Set([408, 429, 502, 503, 504]);
+const NETWORK_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL',
+  'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
+  'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+]);
+
+/** Classify locally; never retain the raw error, message, details, URL or RPC arguments. */
+function rpcFailure(error: unknown, status: unknown, rpc: BudgetRpc, attempts: number): {
+  diagnostics: HeEngBaseBudgetDiagnostics; retryable: boolean;
+} {
+  let code: string | null = null;
+  let aborted = false;
+  let network = false;
+  let timeout = false;
+  for (let current = error, depth = 0; current && typeof current === 'object' && depth < 4; depth++) {
+    const item = current as { code?: unknown; name?: unknown; message?: unknown; hint?: unknown; cause?: unknown };
+    // postgrest-js flattens transport errors, including AbortError, into text.
+    // Only known markers affect classification; none of that text leaves here.
+    const message = typeof item.message === 'string' ? item.message : '';
+    aborted ||= item.name === 'AbortError' || item.code === 'ABORT_ERR' ||
+      /^(?:AbortError:|HeStageDbTimeoutError:|HE job aborted:)/.test(message) ||
+      (typeof item.hint === 'string' && item.hint.startsWith('Request was aborted (timeout or manual cancellation)'));
+    timeout ||= item.name === 'TimeoutError' || item.name === 'HeStageDbTimeoutError';
+    if (typeof item.code === 'string') {
+      if (/^(?:[A-Z0-9]{5}|PGRST[0-9]{3})$/.test(item.code)) code ??= item.code;
+      if (NETWORK_CODES.has(item.code)) {
+        code ??= item.code;
+        network = true;
+        timeout ||= item.code.includes('TIMEOUT') || item.code === 'ETIMEDOUT';
+      }
+    }
+    network ||= /^(?:TypeError|FetchError): fetch failed$/.test(message) ||
+      ((item.name === 'TypeError' || item.name === 'FetchError') && message === 'fetch failed');
+    current = item.cause;
+  }
+  const httpStatus = typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+  const diagnostics: HeEngBaseBudgetDiagnostics = {
+    rpc, code, status: httpStatus, attempts,
+    transport: aborted ? 'aborted' : timeout ? 'timeout' : network ? 'network' : code ? 'database' : httpStatus ? 'http' : 'unknown',
+  };
+  // Auth/schema/constraint failures and cancellations must not be disguised by
+  // a gateway status or an inner network error. SQL 57014 is cancellation too.
+  const retryable = !aborted && httpStatus !== 401 && httpStatus !== 403 &&
+    (code ? TRANSIENT_RPC_CODES.test(code) || NETWORK_CODES.has(code)
+      : network || timeout || (httpStatus !== null && TRANSIENT_RPC_STATUSES.has(httpStatus)));
+  return { diagnostics, retryable };
+}
+
 async function call(
   db: SupabaseClient,
-  name: string,
+  name: BudgetRpc,
   args: Record<string, unknown>,
   baseId: string,
   projectId: string,
 ): Promise<RpcResult> {
-  let result: { data: unknown; error: unknown };
-  try {
-    result = await db.rpc(name, args);
-  } catch {
-    throw new HeEngBaseBudgetError('unavailable');
+  let result: { data: unknown; error: unknown; status?: number };
+  const savedArgs = Object.freeze({ ...args });
+  for (let attempt = 1; ; attempt++) {
+    try {
+      result = await db.rpc(name, savedArgs);
+    } catch (error) {
+      result = { data: null, error };
+    }
+    if (!result.error) break;
+    const failure = rpcFailure(result.error, result.status, name, attempt);
+    if (!failure.retryable || attempt > RPC_RETRY_DELAYS_MS.length) {
+      throw new HeEngBaseBudgetError('unavailable', failure.diagnostics);
+    }
+    // Retry only the same DB operation. In particular, a committed reserve
+    // whose response was lost will return request_reused and still be refused;
+    // it never authorizes a second provider HTTP request or releases a hold.
+    await new Promise((resolve) => setTimeout(resolve, RPC_RETRY_DELAYS_MS[attempt - 1]));
   }
-  if (result.error) throw new HeEngBaseBudgetError('unavailable');
   if (!result.data || typeof result.data !== 'object' || Array.isArray(result.data)) {
     throw new HeEngBaseBudgetError('invalid_ledger');
   }

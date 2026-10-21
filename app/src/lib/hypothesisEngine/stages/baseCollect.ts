@@ -203,6 +203,7 @@ import { heEngBaseBudgetActive, rethrowHeEngBaseBudgetError } from '../engBaseBu
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
+import { heEngPdlPlanForCache, prioritizeHeEngPdlNameSlices, type HeEngPdlNamePriority } from '../engPdlNamePriority';
 import { withHeEngCollectionCommitLock } from '../engCollectionLocks';
 import {
   sanitizeEngContactDiagnostics,
@@ -1062,7 +1063,8 @@ function summarizeEngContactDiagnostics(value: unknown): HeEngContactDiagnostics
  */
 export interface HeRelevanceGateInfo {
   /**
-   * Гейт ОТРАБОТАЛ: строки действительно судились (моделью или префильтром).
+   * Гейт ОТРАБОТАЛ: строки судились (моделью или префильтром) либо ENG-проход
+   * бесплатно пропущен из-за недостаточных описаний (отдельный счётчик).
    * false — запись есть, а суда не было (провайдер не ответил ни на один батч,
    * у вертикали пустое имя, гейт бросил). Такой записи не верим: следующий тик
    * судит заново, а дошедшая до импорта база судится после импорта прежним
@@ -1073,10 +1075,12 @@ export interface HeRelevanceGateInfo {
   ran: boolean;
   /** Почему гейт не отработал (только при ran=false; текст для staff). */
   error?: string;
-  /** Строк отдано модели (внутренний кап гейта MAX_ROWS_TO_CHECK). */
+  /** Строк взято в проход (внутренний кап гейта MAX_ROWS_TO_CHECK). */
   checked: number;
   /** Строк ПОЛУЧИЛО вердикт модели (батчи без ответа не считаются). */
   judged: number;
+  /** ENG only: kept for website qualification without paying for insufficient catalog text. */
+  skipped_insufficient_evidence?: number;
   /** Строк снял дешёвый префильтр ДО модели (findOffTargetRows). */
   off_target: number;
   /**
@@ -1119,6 +1123,7 @@ export interface HeRelevanceGateInfo {
     scope_key: string;
     excluded_total: number;
     omitted: number;
+    skipped_insufficient_evidence?: number;
     companies: Array<{
       company_key: string;
       company: string;
@@ -1217,6 +1222,8 @@ export interface HeSliceProbe {
 }
 
 export interface HeCollectInfo {
+  /** Free manual ENG candidate slices stay out of the reusable/refill plan. */
+  eng_pdl_name_priority?: HeEngPdlNamePriority;
   /** Trusted provider countries survive constructor grids and harvest cleanup. */
   eng_source_countries?: HeEngSourceCountryRegistry;
   /** ENG client only: checkpointed company/site evidence, separate from the legacy gate. */
@@ -6165,6 +6172,7 @@ async function judgeRowsBeforeConstruct(input: {
   for (const i of offTarget) flaggedKeys.add(heCompanyRowKey(rows[i]));
   let checked = 0;
   let judgedRows = 0;
+  let skippedInsufficientEvidenceRows: number | undefined;
   let tokensUsed = 0;
   let costUsd = 0;
   let hypothesisScope: HeGateHypothesisScopeUsed | null = null;
@@ -6184,6 +6192,7 @@ async function judgeRowsBeforeConstruct(input: {
     });
     checked = gate.checkedRows;
     judgedRows = gate.judgedRows;
+    skippedInsufficientEvidenceRows = gate.skippedInsufficientEvidenceRows;
     tokensUsed = gate.tokensUsed;
     costUsd = gate.costUsd;
     hypothesisScope = gate.hypothesisScope;
@@ -6192,11 +6201,12 @@ async function judgeRowsBeforeConstruct(input: {
     // Ни одного вердикта на непустом входе: модуль глотает падение батча сам
     // (never-throw), поэтому «все батчи упали» приходит сюда молча — как пустой
     // flagged при checkedRows>0. Это НЕ суд.
-    if (judgedRows === 0 && judged.length > 0) {
+    if (judgedRows === 0 && judged.length > 0 &&
+        !(skippedInsufficientEvidenceRows !== undefined && checked > 0 && skippedInsufficientEvidenceRows === checked)) {
       error =
         checked === 0
           ? `гейту нечего было судить: у вертикали «${vertical.name}» пустое имя`
-          : `модель не дала ни одного вердикта по ${checked} строкам`;
+          : `модель не дала ни одного вердикта по ${checked - (skippedInsufficientEvidenceRows ?? 0)} строкам`;
     }
   } catch (e) {
     rethrowHeEngBaseBudgetError(e);
@@ -6211,6 +6221,7 @@ async function judgeRowsBeforeConstruct(input: {
       scope_key: engSelectionScopeKey,
       excluded_total: excluded.length,
       omitted: Math.max(0, excluded.length - 2000),
+      ...(skippedInsufficientEvidenceRows !== undefined ? { skipped_insufficient_evidence: skippedInsufficientEvidenceRows } : {}),
       companies: excluded.slice(0, 2000).map(({ row, i }) => {
         const description = engCatalogText(row._eng_source_description, 1200);
         return {
@@ -6227,12 +6238,14 @@ async function judgeRowsBeforeConstruct(input: {
   }
   return {
     // Суд состоялся, если вердикт получила хоть одна строка ЛИБО судить моделью
-    // было нечего, потому что префильтр снял всё сам (детерминированный проход,
-    // модель ему не нужна).
+    // было нечего: префильтр снял всё сам либо ENG-описания недостаточны для
+    // исключения. Последнее — бесплатный пропуск, не вердикт модели; отдельный
+    // счётчик отличает его от сбоя и не даёт покупать тот же проход на повторе.
     ran: error === null,
     ...(error ? { error: error.slice(0, 300) } : {}),
     checked,
     judged: judgedRows,
+    ...(skippedInsufficientEvidenceRows !== undefined ? { skipped_insufficient_evidence: skippedInsufficientEvidenceRows } : {}),
     off_target: offTarget.size,
     flagged_keys: [...flaggedKeys],
     tokens_used: tokensUsed,
@@ -7246,6 +7259,22 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         .eq('id', baseId);
       throw new Error(note);
     }
+    // Adapt new and reusable catalogue plans for verified ENG clients for
+    // free. This stays inside !info.plan: an in-flight base keeps its exact
+    // tasks, harvest and paid checkpoint, even after a deployment.
+    if (engEmailPolicy && !isRefill) {
+      const prioritized = prioritizeHeEngPdlNameSlices({
+        plan: info.plan,
+        selectedHypotheses: planned.usedHypotheses,
+        requestedHypothesisIds: payloadStringArray(job, 'hypothesis_ids'),
+        maxTasks: HE_PLAN_MAX_TASKS,
+      });
+      info.plan = prioritized.plan;
+      if (prioritized.priority) info.eng_pdl_name_priority = prioritized.priority;
+      if (prioritized.addedNames.length > 0) {
+        stageLog(ctx, `[base_collect] ENG name-priority candidates: ${prioritized.addedNames.join(', ')}; broad fallback retained, fit not yet verified`);
+      }
+    }
     info.tasks = info.plan.tasks.map((task) => ({
       source: task.source,
       status: 'pending' as const,
@@ -7264,7 +7293,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // сборка починит его заново, а не унаследует отказ навсегда.
     if (!reusedPlan && catalog) {
       if (heRememberablePlan(info)) {
-        await catalog.rememberPlan(info.plan, planned.planKey);
+        await catalog.rememberPlan(engEmailPolicy ? heEngPdlPlanForCache(info.plan, info.eng_pdl_name_priority) : info.plan, planned.planKey);
       } else {
         stageLog(
           ctx,
@@ -7612,7 +7641,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         // оставило бы стор без купленного среза, и за него платила бы КАЖДАЯ
         // следующая ночь той же вертикали. Не дошла запись и здесь — её
         // повторит тик импорта этой же базы (ветка ниже).
-        if (heRememberablePlan(info)) await replanCatalog.rememberPlan(info.plan, input.planKey);
+        if (heRememberablePlan(info)) {
+          await replanCatalog.rememberPlan(engEmailPolicy ? heEngPdlPlanForCache(info.plan, info.eng_pdl_name_priority) : info.plan, input.planKey);
+        }
         // Купленный срез — каталожный: ключам выборки нужен список Do not contact.
         const stopped = await ensureDnc();
         if (stopped) return stopped;
@@ -7630,7 +7661,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
      * срезами — записи нет, остаётся одно чтение стора.
      */
     const planKey = boughtWidening.plan_key;
-    const plan = info.plan;
+    const plan = engEmailPolicy ? heEngPdlPlanForCache(info.plan, info.eng_pdl_name_priority) : info.plan;
     const storeCatalog = await getCatalog();
     if (storeCatalog && !storeCatalog.storedPlanCovers(plan, planKey)) {
       stageLog(ctx, '[base_collect] план с купленным срезом в сторе вертикали не найден — записываем повторно');
@@ -8017,9 +8048,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // базы НЕ исчезают: они дописываются после импорта — клиент и воронка должны
   // видеть, что именно исключено.
   //
-  // Запись collect_info.relevance_gate с ran=true = доказательство оплаты: гейт
+  // Запись collect_info.relevance_gate с ran=true = завершённый проход: гейт
   // считается ровно один раз на сборку, а его ключи переживают все тики ожидания
-  // конструктора (фаза CONSTRUCT растянута на несколько заходов джобы).
+  // конструктора (фаза CONSTRUCT растянута на несколько заходов джобы). ENG-проход
+  // может быть бесплатным: skipped_insufficient_evidence оставлены для сайта,
+  // judged при этом не выдумывает вердикты модели.
   //
   // Запись с ran=false — не доказательство, а протокол отказа: судить второй раз
   // тут не «платить дважды», а платить впервые. Такой тик бывает (гейт записан,
@@ -8068,7 +8101,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       relevanceGate.ran
         ? `[base_collect] релевант-гейт до конструктора: судили ${relevanceGate.judged} из ${merged.length} строк, ` +
             `${relevanceGate.hypothesis_scope ? 'вне гипотез вертикали' : 'вне вертикали'} ${relevanceGate.flagged_keys.length}` +
-            (relevanceGate.off_target > 0 ? ` (из них ${relevanceGate.off_target} — префильтром, без модели)` : '')
+            (relevanceGate.off_target > 0 ? ` (из них ${relevanceGate.off_target} — префильтром, без модели)` : '') +
+            (relevanceGate.skipped_insufficient_evidence
+              ? `; ${relevanceGate.skipped_insufficient_evidence} без достаточного описания оставлены для проверки сайта, без оплаты модели` : '')
         : `[base_collect] релевант-гейт до конструктора НЕ отработал (${relevanceGate.error ?? 'без причины'}): ` +
             `${merged.length} строк уходят конструктору целиком, проверка — после импорта`,
     );

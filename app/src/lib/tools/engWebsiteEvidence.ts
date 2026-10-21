@@ -17,13 +17,17 @@ export interface EngWebsiteEvidence {
   pages: EngWebsiteEvidencePage[];
 }
 
-function cleanUrl(raw: string): string | null {
+function cleanUrl(raw: string, keepSearch = false): string | null {
   try {
     const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) return null;
     const parsed = parse(url.hostname, { allowPrivateDomains: true });
     if (parsed.isIp || !parsed.domain) return null;
-    url.search = ''; url.hash = '';
+    // Company identity keeps its old query-free form. A fetched page must
+    // retain its query: index.php?page=about and ?page=funds are different
+    // documents, and an invented query-free URL is not their provenance.
+    if (!keepSearch) url.search = '';
+    url.hash = '';
     return url.href;
   } catch { return null; }
 }
@@ -41,7 +45,7 @@ export function buildEngWebsiteEvidence(website: string, input: EngWebsiteEviden
   const pages: EngWebsiteEvidencePage[] = [];
   let remaining = MAX_CHARS;
   for (const page of input) {
-    const url = cleanUrl(page.url);
+    const url = cleanUrl(page.url, true);
     if (!url || boundary(url) !== boundary(root) || (root.startsWith('https:') && !url.startsWith('https:')) ||
         pages.some((saved) => saved.url === url) || typeof page.text !== 'string') continue;
     const cleaned = stripUnstorableJsonChars(page.text.replace(EMAIL, '[email removed]')).trim();
