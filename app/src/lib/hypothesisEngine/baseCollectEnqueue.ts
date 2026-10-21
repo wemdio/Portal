@@ -42,6 +42,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { normalizeHeMarket } from './market';
 import { readHeProjectCancelMarker } from './projectCancelMarker';
 import { readHeEngBaseFirst } from './engBaseFirst';
+import { createHeEngCollectionTarget, createHeEngCollectionPool } from './engCollectionTarget';
 
 /*
  * ───────────── «До N адресов одной компании» (he_*) ─────────────
@@ -239,7 +240,19 @@ export async function enqueueHeBaseCollect(
   // initialise a zero ledger after doing unrecorded work during deployment.
   if (budgetOwner?.market === 'us') {
     try {
-      if (await readHeEngBaseFirst(supabase, budgetOwner)) collectInfo.eng_base_budget_version = 1;
+      if (await readHeEngBaseFirst(supabase, budgetOwner)) {
+        collectInfo.eng_base_budget_version = 1;
+        // Opt in only NEW manual client bases. Existing paid runs, staff and
+        // campaign refill keep their exact historical execution contract.
+        if (!refill) {
+          collectInfo.eng_collection_target = createHeEngCollectionTarget();
+          collectInfo.eng_collection_work = { version: 1, round: 1, batch_size: 100,
+            active_source_key: null, seen_companies: [], history: [] };
+          collectInfo.eng_collection_pool = createHeEngCollectionPool({
+            maxEmailsPerCompany: contactCap ?? HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
+          });
+        }
+      }
     } catch {
       return { ok: false, message: 'ENG base budget: unavailable' };
     }
