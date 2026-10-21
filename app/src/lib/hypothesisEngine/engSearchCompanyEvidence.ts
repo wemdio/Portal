@@ -3,7 +3,7 @@ import { discoverContactLinks, fetchFollowingGuarded, readBodyCapped, WEBSITE_AC
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { readHeEngSourceCountry, withHeEngSourceCountry } from './engCompanyCountry';
-import { extractHeEngOfficialCountryEvidence, type HeEngOfficialCountryEvidence } from './engCompanySearchCountry';
+import { extractHeEngOfficialCountryEvidence, HE_ENG_OWN_ORGANIZATION_TYPES, type HeEngOfficialCountryEvidence } from './engCompanySearchCountry';
 import type { HeEngCompanySearchCandidate } from './engCompanySearch';
 import { ENG_COUNTRIES, normalizeEngCountry } from './engCountries';
 import { readHeIcpFrame } from './icpFrame';
@@ -14,8 +14,6 @@ import type { HeStageContext } from './stages/shared';
 const MAX_CATALOG_MATCHES = 20;
 const MAX_PAGE_BYTES = 1_500_000;
 const MAX_OFFICIAL_PAGES = 3;
-const OWN_ORGANIZATION_TYPES = new Set(['Organization', 'Corporation', 'LocalBusiness', 'FinancialService',
-  'BankOrCreditUnion', 'InsuranceAgency', 'ProfessionalService', 'LegalService', 'AccountingService']);
 
 type Row = Record<string, unknown>;
 export interface HeEngEmployeeRange { min: number; max: number | null }
@@ -126,6 +124,55 @@ function employeeConstraint(raw: string): HeEngEmployeeRange | null {
 }
 
 /** Unrecognized explicit size restrictions are not silently removed for web search. */
+function hypothesisEmployeeRanges(hypothesis: { title?: string; description?: string }): { valid: boolean; ranges: HeEngEmployeeRange[] } {
+  const relation = /\b(?:serving|selling\s+to|supplying(?:\s+to)?|supporting|targeting|for|whose\s+(?:clients|customers)|(?:their|its)\s+(?:clients|customers))\b/i;
+  const rangePattern = /((?:(?:at least|up to|no fewer than|no more than|more than|greater than|over|less than|fewer than|under|minimum|maximum|min\.?|max\.?)\s+|[<>]=?\s*|[≥≤]\s*)?\d[\d,]*(?:\s*[–—-]\s*\d[\d,]*|\s*\+|\s+(?:or more|and above))?|between\s+\d[\d,]*\s+and\s+\d[\d,]*)\s*(?:employees?|staff|people|headcount)\b/gi;
+  const audience = (hypothesis.title ?? '').split(relation)[0].toLowerCase().replace(/\([^)]*\)|\d[^,;]*/g, ' ')
+    .match(/[a-z]+/g)?.join(' ').replace(/\s+(?:with|having|employing|has|have|employs?)$/, '') ?? '';
+  const audienceNoun = audience.split(' ').at(-1) ?? '';
+  const specificNouns = new Set(['vendors', 'providers', 'manufacturers', 'administrators', 'banks', 'insurers', 'hospitals',
+    'clinics', 'practices', 'carriers', 'operators', 'funds', 'managers', 'consultancies', 'consultants', 'integrators', 'hotels']);
+  const explicitTarget = (clause: string) => {
+    const start = clause.toLowerCase().replace(/^(?:the|these|those)\s+/, '').trim();
+    return /^(?:target|selected|prospect|candidate)\s+(?:companies|firms|organizations|organisations|businesses|entities)\b/.test(start) ||
+      /^target audience\b/.test(start) ||
+      (!!audience && start.startsWith(`${audience} `)) ||
+      (specificNouns.has(audienceNoun) && start.startsWith(`${audienceNoun} `));
+  };
+  const ranges: HeEngEmployeeRange[] = [];
+  for (const raw of [hypothesis.title, hypothesis.description]) {
+    let customerContext = false;
+    const clauses = (raw ?? '').replace(/\b(min|max)\.\s*/gi, '$1 ').split(/[.;!?]+/).map(value => value.trim()).filter(Boolean);
+    for (const clause of clauses) {
+      const link = relation.exec(clause);
+      const explicitCustomer = /^(?:(?:their|its|these|those|the)\s+)?(?:clients|customers)\b/i.test(clause);
+      const target = explicitTarget(clause) || !customerContext && !explicitCustomer;
+      const matches = [...clause.matchAll(rangePattern)];
+      if (!matches.length && /\d[^.;]{0,30}\b(?:employees?|staff|people|headcount)\b/i.test(clause)) return { valid: false, ranges: [] };
+      for (const match of matches) {
+        const afterRelation = link && match.index! >= link.index + link[0].length;
+        if (afterRelation || explicitCustomer) {
+          const between = clause.slice(afterRelation ? link!.index + link![0].length : 0, match.index);
+          if (afterRelation && !/[a-z]/i.test(clause.slice(0, link!.index))) return { valid: false, ranges: [] };
+          // The size must syntactically belong to the customer named after the
+          // relationship. A comma or pronoun-only continuation can refer back
+          // to the target; silently dropping that size would widen collection.
+          if (/[,;:]/.test(between) || !/\b(?:with|having|employing|has|have|employs?)\s+(?:(?:at least|up to|no fewer than|no more than|more than|greater than|over|less than|fewer than|under|minimum|maximum|min|max)\s+)?$/i.test(between)) {
+            return { valid: false, ranges: [] };
+          }
+          continue;
+        }
+        if (!target) return { valid: false, ranges: [] };
+        const range = employeeConstraint(match[1]);
+        if (!range) return { valid: false, ranges: [] };
+        ranges.push(range);
+      }
+      customerContext = !!link || explicitCustomer || (customerContext && !explicitTarget(clause));
+    }
+  }
+  return { valid: true, ranges };
+}
+
 export function heEngSearchEmployeeConstraint(scope: HeEngSearchEvidenceScope): {
   valid: boolean; range: HeEngEmployeeRange | null;
 } {
@@ -134,12 +181,11 @@ export function heEngSearchEmployeeConstraint(scope: HeEngSearchEvidenceScope): 
   if (size && !global) return { valid: false, range: null };
   const alternatives: HeEngEmployeeRange[] = [];
   for (const hypothesis of scope.hypotheses) {
-    const description = `${hypothesis.title ?? ''} ${hypothesis.description ?? ''}`;
-    const matches = [...description.matchAll(/((?:(?:at least|up to|no fewer than|no more than|more than|greater than|over|less than|fewer than|under|minimum|maximum|min\.?|max\.?)\s+)?\d[\d,]*(?:\s*[–—-]\s*\d[\d,]*|\s*\+|\s+(?:or more|and above))?|between\s+\d[\d,]*\s+and\s+\d[\d,]*)\s*(?:employees?|staff|people|headcount)\b/gi)];
-    const ranges = matches.map(match => employeeConstraint(match[1]));
-    if (matches.length === 0 && /\d[^.;]{0,30}\b(?:employees?|staff|people|headcount)\b/i.test(description)) return { valid: false, range: null };
-    if (ranges.some(range => !range) || ranges.length > 1) return { valid: false, range: null };
-    if (ranges[0]) alternatives.push(ranges[0]);
+    const parsed = hypothesisEmployeeRanges(hypothesis);
+    if (!parsed.valid) return { valid: false, range: null };
+    const unique = [...new Map(parsed.ranges.map(range => [JSON.stringify(range), range])).values()];
+    if (unique.length > 1) return { valid: false, range: null };
+    if (unique[0]) alternatives.push(unique[0]);
   }
   const distinct = new Map(alternatives.map(range => [JSON.stringify(range), range]));
   if (distinct.size > 1) return { valid: false, range: null };
@@ -176,7 +222,7 @@ function ownOrganizationFacts(page: OfficialPage, evidence: HeEngOfficialCountry
     if (!org) return;
     let ownUrl: string | null = null;
     try { ownUrl = new URL(text(org.url, 2048), page.url).href; } catch { /* No own Organization URL. */ }
-    if (text(org.url) && ownUrl && host(ownUrl) === host(evidence.companyWebsite) && typeList(org['@type']).some(type => OWN_ORGANIZATION_TYPES.has(type))) {
+    if (text(org.url) && ownUrl && host(ownUrl) === host(evidence.companyWebsite) && typeList(org['@type']).some(type => HE_ENG_OWN_ORGANIZATION_TYPES.has(type))) {
       const addresses = Array.isArray(org.address) ? org.address : [org.address];
       // Headcount belongs to the same Organization that supplied the address,
       // never another entity in the page's graph (parent, tenant, or customer).

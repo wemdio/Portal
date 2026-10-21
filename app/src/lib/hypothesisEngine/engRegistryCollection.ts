@@ -8,6 +8,9 @@ import type { HeEngSearchEvidenceScope } from './engSearchCompanyEvidence';
 import type { HeStageContext } from './stages/shared';
 import { heStageSignal } from './stages/io';
 import { addHeSite, heCompanySiteIdentity, heSameCompanySite, newHeSiteSet } from './collectionIdentity';
+import { HeEngRegistryRetryError } from './engRegistryRetry';
+
+export { HeEngRegistryRetryError } from './engRegistryRetry';
 
 type Row = Record<string, unknown>;
 export interface HeEngRegistryState {
@@ -65,6 +68,8 @@ export async function runHeEngRegistryWave(input: {
   const cursor = state.cursors[task.id] ?? { position: 0, pages: 0, exhausted: false };
   if (!Number.isSafeInteger(cursor.position) || cursor.position < 0 ||
       !Number.isSafeInteger(cursor.pages) || cursor.pages < 0 || cursor.pages > 80 ||
+      (cursor.readFailures !== undefined && (!Number.isSafeInteger(cursor.readFailures) || cursor.readFailures < 0 || cursor.readFailures > 3)) ||
+      (cursor.retryAt !== undefined && (!Number.isSafeInteger(cursor.retryAt) || cursor.retryAt < 0)) ||
       typeof cursor.exhausted !== 'boolean' || !Array.isArray(state.seenRecords) ||
       state.seenRecords.some(id => typeof id !== 'string' || id.length > 100) ||
       !Array.isArray(wave.candidates) || !Array.isArray(wave.rows) || !Array.isArray(wave.decisions) ||
@@ -74,6 +79,9 @@ export async function runHeEngRegistryWave(input: {
   }
   state.cursors[task.id] = cursor;
   if (!wave.pageLoaded && !cursor.exhausted && !cursor.unavailable) {
+    if (cursor.retryAt && cursor.retryAt > Date.now()) {
+      throw new HeEngRegistryRetryError(cursor.retryAt - Date.now());
+    }
     if (cursor.pages >= 80 || state.seenRecords.length >= 20_000) {
       cursor.unavailable = 'registry_safety_limit';
       await input.save();
@@ -85,6 +93,21 @@ export async function runHeEngRegistryWave(input: {
         signal?.throwIfAborted();
         if (error && typeof error === 'object' && (error as { heJobInterruption?: unknown }).heJobInterruption) throw error;
         const message = error instanceof Error ? error.message : '';
+        const transient = /^registry_(?:timeout|network_error|http_(?:408|429|5\d\d))$/.test(message);
+        if (transient) {
+          cursor.readFailures = (cursor.readFailures ?? 0) + 1;
+          if (cursor.readFailures < 3) {
+            const requested = Number((error as { retryAfterMs?: unknown }).retryAfterMs ?? 0);
+            const delay = Math.max(30_000 * cursor.readFailures,
+              Number.isFinite(requested) && requested > 0 && requested <= 86_400_000 ? requested : 0);
+            cursor.retryAt = Date.now() + Math.ceil(delay);
+            // No page/cursor advance and no paid resolver call on a failed read.
+            // The stage requeues the same pending task; history is not marked failed.
+            await input.save();
+            throw new HeEngRegistryRetryError(delay);
+          }
+        }
+        delete cursor.retryAt;
         cursor.unavailable = /^registry_[a-z0-9_]{1,60}$/.test(message) ? message : 'registry_unavailable';
         await input.save();
         return { rows: [], exhausted: false, error: cursor.unavailable };
@@ -104,6 +127,8 @@ export async function runHeEngRegistryWave(input: {
         wave.candidates.push(candidate);
       }
       state.seenRecords = [...seen];
+      delete cursor.readFailures;
+      delete cursor.retryAt;
       wave.recordsRead = page.recordsRead;
       for (const [reason, count] of Object.entries(page.excluded)) bump(wave.excluded, reason, count);
       wave.pageLoaded = true;

@@ -7,6 +7,10 @@ import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryProvider, 
 const PAGE_SIZE = 25;
 const MAX_BYTES = 3 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 25_000;
+// Official Brreg legal entities, partnerships and registered foreign branches.
+// ENK/PERS (individuals), associations and bare fund vehicles are not included.
+// Helseforetak use SÆR; there is no HF organisation-form code in this API.
+const BRREG_COMPANY_FORMS = ['AS', 'ASA', 'ANS', 'DA', 'BA', 'SA', 'SE', 'SF', 'SPA', 'GFS', 'IKS', 'KS', 'SÆR', 'NUF'] as const;
 const US_STATES = new Set('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY'.split(' '));
 const ENDPOINTS: Readonly<Record<HeEngRegistryProvider, string>> = {
   brreg: 'https://data.brreg.no/enhetsregisteret/api/enheter',
@@ -31,6 +35,19 @@ function integer(raw: unknown): number | null {
 function joined(values: unknown[]): string { return sliceWholeChars(values.map(value => str(value)).filter(Boolean).join(', '), 0, 1500); }
 function list(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function fail(code: string): never { throw new Error(code); }
+function httpFailure(status: number, retryAfter: string | null): never {
+  const error = new Error(`registry_http_${status}`) as Error & { retryAfterMs?: number };
+  if ((status === 408 || status === 429 || status >= 500) && retryAfter?.trim()) {
+    const value = retryAfter.trim();
+    // A numeric-looking malformed delay is not an HTTP date (Date.parse accepts
+    // values such as "1.5"). Accept the HTTP date family only after a weekday.
+    const delay = /^\d+$/.test(value) ? Number(value) * 1000
+      : /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)/i.test(value) ? Date.parse(value) - Date.now() : NaN;
+    if (delay > 24 * 60 * 60 * 1000) fail('registry_retry_after_too_long');
+    if (Number.isFinite(delay)) error.retryAfterMs = Math.max(0, Math.ceil(delay));
+  }
+  throw error;
+}
 function exclude(counts: Record<string, number>, reason: string): null { counts[reason] = (counts[reason] ?? 0) + 1; return null; }
 function website(raw: unknown): string {
   const value = str(raw, 2048);
@@ -71,7 +88,7 @@ function request(task: HeEngRegistryTask, position: number): { url: URL; headers
   const q = url.searchParams;
   switch (task.provider) {
     case 'brreg':
-      q.set('naeringskode', task.category); q.set('organisasjonsform', 'AS,ASA'); q.set('konkurs', 'false');
+      q.set('naeringskode', task.category); q.set('organisasjonsform', BRREG_COMPANY_FORMS.join(',')); q.set('konkurs', 'false');
       q.set('forretningsadresse.landkode', 'NO'); q.set('size', String(PAGE_SIZE)); q.set('page', String(position / PAGE_SIZE));
       q.set('sort', 'organisasjonsnummer,ASC');
       // Brreg suppresses exact headcounts 1–4. Query overlapping bounds and retain
@@ -121,7 +138,7 @@ async function jsonResponse(task: HeEngRegistryTask, position: number, options: 
     // No redirects, provider-returned URLs, user-controlled hosts or paid fallback.
     const response = await (options.fetch ?? fetch)(url, { method: 'GET', headers, redirect: 'error', signal: controller.signal });
     if (response.status === 404 && task.provider === 'companies_house') return { items: [], hits: 0 };
-    if (!response.ok) fail(`registry_http_${response.status}`);
+    if (!response.ok) httpFailure(response.status, response.headers.get('retry-after'));
     const declared = integer(response.headers.get('content-length'));
     if (declared !== null && declared > MAX_BYTES) fail('registry_response_too_large');
     if (!response.body) fail('registry_invalid_response');
@@ -150,7 +167,20 @@ async function jsonResponse(task: HeEngRegistryTask, position: number, options: 
 function brreg(row: Row, task: HeEngRegistryTask, excluded: Record<string, number>): HeEngRegistryCandidate | null {
   const recordId = str(row.organisasjonsnummer); const company = str(row.navn);
   if (!/^\d{9}$/.test(recordId) || !company) return exclude(excluded, 'missing_identity');
-  if (!['AS', 'ASA'].includes(str(object(row.organisasjonsform)?.kode))) return exclude(excluded, 'not_company');
+  const form = str(object(row.organisasjonsform)?.kode);
+  if (!(BRREG_COMPANY_FORMS as readonly string[]).includes(form)) return exclude(excluded, 'not_company');
+  if (form === 'NUF') {
+    // NUF also covers foreign sole proprietors. Only explicit home-country legal
+    // form evidence admits a corporate branch; a company-looking name is not it.
+    const home = object(row.foretaksformIHjemlandet);
+    const homeDescription = joined([home?.beskrivelseBokmaal, home?.beskrivelse]).toLowerCase();
+    const homeCode = str(home?.kode).toUpperCase().replace(/[.\s/]/g, '');
+    if (/enkeltperson|sole (?:propriet|trad)|individual|einzelunternehmen/i.test(homeDescription)) return exclude(excluded, 'not_company');
+    if (!['AS', 'ASA', 'AB', 'OY', 'OYJ', 'LTD', 'LIMITED', 'PLC', 'LLC', 'INC', 'GMBH', 'AG', 'SA', 'SAS', 'SARL', 'BV', 'NV', 'APS'].includes(homeCode) &&
+      !/(?:aksjeselskap|aktiebolag|limited (?:liability|company)|selskap med begrenset ansvar|allmennaksjeselskap)/i.test(homeDescription)) {
+      return exclude(excluded, 'organization_form_unconfirmed');
+    }
+  }
   if (row.konkurs !== false || row.underAvvikling === true || row.underTvangsavviklingEllerTvangsopplosning === true || row.slettedato) return exclude(excluded, 'inactive');
   const address = object(row.forretningsadresse);
   if (str(address?.landkode) !== 'NO' || !str(address?.poststed) || !str(address?.postnummer)) return exclude(excluded, 'country_unconfirmed');

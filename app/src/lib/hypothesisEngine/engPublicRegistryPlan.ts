@@ -5,9 +5,9 @@ import type { HeEngRegistryPlan, HeEngRegistryProvider, HeEngRegistryTask } from
 
 /** Closed catalogue: a source can only run a reviewed, sector-specific query. */
 export const HE_ENG_REGISTRY_CATEGORIES: Readonly<Record<HeEngRegistryProvider, readonly string[]>> = {
-  brreg: ['62', '64', '65', '66', '86.10', '86.2', '86.23', '49.41', '41', '55.10', '28'],
-  france: ['62.01Z', '62.02A', '64.19Z', '65.12Z', '66.19B', '66.30Z', '86.10Z', '86.21Z', '86.23Z', '49.41A', '49.41B', '41.20B', '55.10Z', '28.99B'],
-  companies_house: ['62012', '62020', '64191', '64192', '65120', '66190', '66300', '86101', '86210', '86230', '49410', '41201', '41202', '55100', '28990'],
+  brreg: ['58.29', '62', '64', '65', '66', '86.10', '86.2', '86.23', '49.41', '41', '55.10', '28'],
+  france: ['58.29A', '58.29B', '58.29C', '62.01Z', '62.02A', '64.19Z', '65.12Z', '66.19B', '66.30Z', '86.10Z', '86.21Z', '86.23Z', '49.41A', '49.41B', '41.20B', '55.10Z', '28.99B'],
+  companies_house: ['58290', '62012', '62020', '64191', '64192', '65120', '66190', '66300', '86101', '86210', '86230', '49410', '41201', '41202', '55100', '28990'],
   fdic: ['banks'],
   nppes: ['Dentist', 'Clinic/Center', 'General Acute Care Hospital', 'Clinical Medical Laboratory'],
   fmcsa: ['freight_carriers'],
@@ -17,13 +17,16 @@ const PROVIDER_ISO: Readonly<Record<HeEngRegistryProvider, string>> = {
   brreg: 'no', france: 'fr', companies_house: 'gb', fdic: 'us', nppes: 'us', fmcsa: 'us',
 };
 const MAX_TASKS = 120;
-type Sector = { match: RegExp; sources: Partial<Record<HeEngRegistryProvider, readonly string[]>> };
+type Sector = { match: RegExp; omit?: RegExp; sources: Partial<Record<HeEngRegistryProvider, readonly string[]>> };
 // Official classifications: Brreg SN, INSEE NAF rev.2, Companies House condensed
 // SIC, CMS taxonomy. These are discovery categories, not evidence of suitability.
 const SECTORS: readonly Sector[] = [
-  { match: /\b(?:software (?:vendors?|companies|developers?|providers?|products?)|saas|it (?:services?|companies|consultanc(?:y|ies))|cloud (?:platform|software) vendors?)\b/i,
-    sources: { brreg: ['62'], france: ['62.01Z', '62.02A'], companies_house: ['62012', '62020'] } },
+  { match: /\b(?:software (?:vendors?|companies|developers?|providers?|products?|publishers?|publishing)|saas|it (?:services?|companies|consultanc(?:y|ies))|cloud (?:platform|software) vendors?)\b/i,
+    // Standard software publishers are explicitly outside NAF 62.01Z.
+    sources: { brreg: ['58.29', '62'], france: ['58.29A', '58.29B', '58.29C', '62.01Z', '62.02A'], companies_house: ['58290', '62012', '62020'] } },
   { match: /\b(?:banks?|banking institutions|credit institutions|building societies)\b/i,
+    // Custody specialists do not authorize scanning every retail/commercial bank.
+    omit: /\b(?:custodian|custodial|custody|depositary|depository)[ -]+banks?\b/gi,
     sources: { brreg: ['64'], france: ['64.19Z'], companies_house: ['64191', '64192'], fdic: ['banks'] } },
   { match: /\b(?:fund (?:services?|administrators?|administration)|custodians?|depositar(?:y|ies)|transfer agents?|investor services?|mancos?)\b/i,
     sources: { brreg: ['66'], france: ['66.19B', '66.30Z'], companies_house: ['66190', '66300'] } },
@@ -59,9 +62,19 @@ function fingerprint(scopeKey: string, tasks: readonly HeEngRegistryTask[]): str
   return hash([1, scopeKey, tasks.map(task => [task.id, ...fields(task)])]);
 }
 function audienceClause(raw: string | undefined): string {
-  return sliceWholeChars(stripUnstorableJsonChars(raw ?? ''), 0, 1000).replace(/https?:\S+|\S+@\S+/gi, ' ')
+  const clause = sliceWholeChars(stripUnstorableJsonChars(raw ?? ''), 0, 1000).replace(/https?:\S+|\S+@\S+/gi, ' ')
     .replace(/^(?:these are|targets? (?:are|include)|companies include)\s+/i, '')
     .split(/\b(?:with|where|whose|which|that|serving|serve|helping|help|selling|sold|providing|for|to|using|used|needing|seeking|targeting|supporting|focused)\b|[.;]/i)[0];
+  // An exclusion is not another buyer category. Keep affirmative clauses,
+  // including "not banks but software companies" and "not only ... but also".
+  // For an ambiguous trailing exclusion, ordinary search can recover candidates;
+  // never turn its excluded industry into a new registry scan.
+  return clause
+    .replace(/\(\s*(?:not(?!\s+only\b)|no|without|exclud(?:e[sd]?|ing)|except)\b[^)]*\)/gi, ' ')
+    .replace(/\bnon-[a-z]+\b/gi, ' ')
+    .split(/\bbut(?:\s+(?:also|instead))?\b/i)
+    .map(part => part.split(/\b(?:not(?!\s+only\b)|no|without|exclud(?:e[sd]?|ing)|except|other\s+than|rather\s+than|instead\s+of)\b/i)[0])
+    .join(' ');
 }
 
 export function createHeEngRegistryPlan(input: {
@@ -86,7 +99,7 @@ export function createHeEngRegistryPlan(input: {
   }))].sort();
   const terms = input.hypotheses.slice(0, 20).flatMap(h => [audienceClause(h.title), audienceClause(h.description)]);
   const selections = new Set<string>();
-  for (const sector of SECTORS) if (terms.some(term => sector.match.test(term))) {
+  for (const sector of SECTORS) if (terms.some(term => sector.match.test(sector.omit ? term.replace(sector.omit, '') : term))) {
     for (const [provider, categories] of Object.entries(sector.sources)) {
       for (const category of categories) selections.add(`${provider}:${category}`);
     }

@@ -39,6 +39,9 @@ export interface HeEngRegistryCursor {
   pages: number;
   exhausted: boolean;
   unavailable?: string;
+  /** Bounded free-read retries for the current position; never a paid-call retry. */
+  readFailures?: number;
+  retryAt?: number;
 }
 
 export interface HeEngRegistryPage {

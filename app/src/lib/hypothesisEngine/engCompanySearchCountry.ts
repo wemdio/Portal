@@ -19,8 +19,10 @@ export interface HeEngOfficialCountryEvidence {
   };
 }
 
-const OWN_ORGANIZATION_TYPES = new Set(['Organization', 'Corporation', 'LocalBusiness', 'FinancialService',
-  'BankOrCreditUnion', 'InsuranceAgency', 'ProfessionalService', 'LegalService', 'AccountingService']);
+/** The same own-business types must be understood by identity, country and size readers. */
+export const HE_ENG_OWN_ORGANIZATION_TYPES = new Set(['Organization', 'Corporation', 'LocalBusiness', 'FinancialService',
+  'BankOrCreditUnion', 'InsuranceAgency', 'ProfessionalService', 'LegalService', 'AccountingService',
+  'MedicalOrganization', 'Dentist', 'Hospital', 'Physician', 'MedicalClinic']);
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -82,7 +84,7 @@ export function extractHeEngOfficialCountryEvidence(input: {
     if (Array.isArray(value)) { for (const child of value.slice(0, 200)) walk(child, depth + 1); return; }
     const org = record(value);
     if (!org) return;
-    if (types(org['@type']).some(type => OWN_ORGANIZATION_TYPES.has(type))) {
+    if (types(org['@type']).some(type => HE_ENG_OWN_ORGANIZATION_TYPES.has(type))) {
       // url identifies an organization. A page-local #organization @id alone
       // does not: third-party organizations commonly get local identifiers too.
       const ownUrl = publicUrl(text(org.url), page.href);

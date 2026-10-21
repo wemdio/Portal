@@ -5,12 +5,13 @@ import { discoverContactLinks } from '@/lib/enrich/websiteParser';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { readHeEngSourceCountry, withHeEngSourceCountry } from './engCompanyCountry';
-import { extractHeEngOfficialCountryEvidence } from './engCompanySearchCountry';
+import { extractHeEngOfficialCountryEvidence, HE_ENG_OWN_ORGANIZATION_TYPES } from './engCompanySearchCountry';
 import { createHeEngCompanySearchCheckpoint, createHeEngRegistryWebsiteSearchPlan, runHeEngCompanySearchPage,
   type HeEngCompanySearchCandidate, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchPlan } from './engCompanySearch';
 import { HeEngBaseBudgetError, isHeEngBaseBudgetError } from './engBaseBudgetLedger';
 import { ENG_COUNTRIES, normalizeEngCountry } from './engCountries';
 import type { HeEngRegistryCandidate } from './engPublicRegistryTypes';
+import { HeEngRegistryRetryError } from './engRegistryRetry';
 import { fetchHeEngOfficialCompanyPage, heEngEmployeeRangeFit, heEngSearchEmployeeConstraint,
   readHeEngEmployeeRange, readHeEngOfficialOrganizationFacts, type HeEngEmployeeRange,
   type HeEngSearchEvidenceScope, type OfficialPage } from './engSearchCompanyEvidence';
@@ -23,9 +24,6 @@ const MAX_CATALOG_ROWS = 20;
 const MAX_SITES = 3;
 const MAX_PAGES_PER_SITE = 3;
 const MAX_PAGE_BYTES = 1_500_000;
-const OWN_TYPES = new Set(['Organization', 'Corporation', 'LocalBusiness', 'FinancialService', 'BankOrCreditUnion',
-  'InsuranceAgency', 'ProfessionalService', 'LegalService', 'AccountingService', 'MedicalOrganization', 'Dentist',
-  'Hospital', 'Physician', 'MedicalClinic']);
 const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com', 'crunchbase.com', 'zoominfo.com',
   'dnb.com', 'opencorporates.com', 'wikipedia.org', 'brreg.no', 'data.gouv.fr', 'companieshouse.gov.uk',
   'company-information.service.gov.uk', 'npiregistry.cms.hhs.gov', 'fmcsa.dot.gov', 'fdic.gov']);
@@ -41,6 +39,8 @@ export interface HeEngRegistryResolutionCheckpoint {
   catalogChecked: boolean;
   catalogRows: Row[];
   search?: { plan: HeEngCompanySearchPlan; checkpoint: HeEngCompanySearchCheckpoint; candidates: HeEngCompanySearchCandidate[] };
+  websiteReadFailures?: number;
+  retryAt?: string;
   result?: HeEngRegistryResolutionResult;
 }
 /** All injected operations are reads; paid search still uses the base ledger in production. */
@@ -48,6 +48,7 @@ export interface HeEngRegistryResolutionReads {
   catalog?: (company: string, country: string, signal?: AbortSignal) => Promise<Row[]>;
   page?: (url: string, signal?: AbortSignal) => Promise<OfficialPage | null>;
   searchPage?: typeof runHeEngCompanySearchPage;
+  now?: () => number;
 }
 
 function record(value: unknown): Row | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Row : null; }
@@ -91,16 +92,41 @@ function normalizeCatalog(rows: readonly Row[], candidate: HeEngRegistryCandidat
       .map(field => [field, text(row[field], field === 'description' ? 1200 : 400)])));
 }
 function identifierKey(value: unknown): string { return key(value).replace(/\s/g, ''); }
+type FrenchIdentifierNamespace = 'siren' | 'siret' | 'vat';
+function frenchNamespace(raw: unknown): FrenchIdentifierNamespace | null {
+  const namespace = identifierKey(raw);
+  if (namespace === 'siren' || namespace === 'siret') return namespace;
+  return ['vat', 'vatid', 'vatnumber', 'tva', 'tvaintracommunautaire'].includes(namespace) ? 'vat' : null;
+}
+function frenchIdentifierMatches(raw: unknown, siren: string, namespace?: FrenchIdentifierNamespace): boolean {
+  if (typeof raw !== 'string' && typeof raw !== 'number') return false;
+  const value = identifierKey(String(raw));
+  if (!/^\d{9}$/.test(siren)) return false;
+  // INSEE: SIRET = SIREN (9) + NIC (5). French tax authority: VAT =
+  // FR + numeric key (2) + SIREN (9). These relations establish identity,
+  // never operating-country proof. No unlabelled suffix/substring inference.
+  // https://www.insee.fr/fr/metadonnees/definition/c1841
+  // https://www.impots.gouv.fr/professionnel/les-numeros-didentification
+  if (namespace === 'siret') return /^\d{14}$/.test(value) && value.slice(0, 9) === siren;
+  if (namespace === 'vat') return /^fr\d{11}$/.test(value) && value.slice(4) === siren;
+  return /^\d{9}$/.test(value) && value === siren;
+}
 function hasRegistryIdentifier(org: Row, candidate: HeEngRegistryCandidate): boolean {
   const expected = identifierKey(candidate.recordId);
-  const visit = (raw: unknown, depth: number): boolean => {
+  const visit = (raw: unknown, depth: number, namespace?: FrenchIdentifierNamespace): boolean => {
     if (depth > 4) return false;
-    if (typeof raw === 'string' || typeof raw === 'number') return identifierKey(String(raw)) === expected;
-    if (Array.isArray(raw)) return raw.slice(0, 20).some(value => visit(value, depth + 1));
+    if (typeof raw === 'string' || typeof raw === 'number') return candidate.provider === 'france'
+      ? frenchIdentifierMatches(raw, expected, namespace) : identifierKey(String(raw)) === expected;
+    if (Array.isArray(raw)) return raw.slice(0, 20).some(value => visit(value, depth + 1, namespace));
     const item = record(raw);
-    return !!item && ['value', 'identifier'].some(field => visit(item[field], depth + 1));
+    if (!item) return false;
+    const declared = item.propertyID ?? item.name;
+    const explicit = declared === undefined ? namespace : frenchNamespace(declared);
+    if (candidate.provider === 'france' && declared !== undefined && explicit === null) return false;
+    return ['value', 'identifier'].some(field => visit(item[field], depth + 1, explicit ?? undefined));
   };
-  return expected.length >= 5 && ['identifier', 'taxID', 'vatID'].some(field => visit(org[field], 0));
+  return expected.length >= 5 && ['identifier', 'taxID', 'vatID'].some(field =>
+    visit(org[field], 0, candidate.provider === 'france' && field === 'vatID' ? 'vat' : undefined));
 }
 function addressMatches(raw: unknown, candidate: HeEngRegistryCandidate): boolean {
   const address = record(raw);
@@ -126,11 +152,21 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate): b
   const id = identifierKey(candidate.recordId);
   // A labelled registry identifier in the company's own legal footer is a
   // second identity fact. Arbitrary numbers in articles/testimonials are not.
-  const registryNumber = id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${id.split('').join('[\\s.-]*')})(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)`, 'iu').test(value);
+  const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+  const registryNumber = candidate.provider === 'france' ? ([
+    ['siren', 'SIREN', '\\d(?:[\\s.-]*\\d){8}'],
+    ['siret', 'SIRET', '\\d(?:[\\s.-]*\\d){13}'],
+    ['vat', '(?:TVA(?:\\s+intracommunautaire)?|VAT(?:\\s+(?:number|ID))?)', 'FR[\\s.-]*\\d(?:[\\s.-]*\\d){10}'],
+  ] as const).some(([namespace, label, pattern]) => {
+    const matches = value.matchAll(new RegExp(`\\b${label}\\b[\\s:./#-]{0,12}(${pattern})${end}`, 'giu'));
+    return [...matches].some(match => frenchIdentifierMatches(match[1], id, namespace));
+  }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${id.split('').join('[\\s.-]*')})${end}`, 'iu').test(value);
   if (registryNumber) return true;
   const countryDefinition = ENG_COUNTRIES.find(item => item.value === country(candidate.country));
   const countryWords = new Set(key(`${countryDefinition?.value ?? ''} ${countryDefinition?.label ?? ''} ${countryDefinition?.iso2 ?? ''}`).split(' '));
-  const addressWords = [...new Set(key(candidate.address).split(' ').filter(word => word.length >= 2 && !countryWords.has(word)))];
+  // Single-character address parts still matter: dropping "1" or "A" would
+  // match a different house or street belonging to an unrelated namesake.
+  const addressWords = [...new Set(key(candidate.address).split(' ').filter(word => word.length > 0 && !countryWords.has(word)))];
   return addressWords.length >= 3 && addressWords.some(word => /\d/.test(word)) && addressWords.every(word => normalized.includes(` ${word} `));
 }
 interface OwnFacts { identity: boolean; employees: HeEngEmployeeRange | null }
@@ -151,7 +187,7 @@ export function readHeEngRegistryOwnSiteFacts(
     let ownUrl = '';
     try { if (text(org.url)) ownUrl = new URL(text(org.url, 2048), page.url).href; } catch { /* Invalid identity URL. */ }
     const name = text(org.legalName) || text(org.name);
-    if (types.some(type => OWN_TYPES.has(type)) && sameSite(ownUrl, page.url) && key(name) === key(candidate.company)) {
+    if (types.some(type => HE_ENG_OWN_ORGANIZATION_TYPES.has(type)) && sameSite(ownUrl, page.url) && key(name) === key(candidate.company)) {
       const addresses = Array.isArray(org.address) ? org.address.slice(0, 30) : [org.address];
       matching.push({ identity: hasRegistryIdentifier(org, candidate) || addresses.some(address => addressMatches(address, candidate)),
         employees: readHeEngEmployeeRange(org.numberOfEmployees) });
@@ -194,6 +230,7 @@ export async function resolveHeEngRegistryCandidate(
 ): Promise<HeEngRegistryResolutionResult> {
   const signal = heStageSignal(ctx);
   signal?.throwIfAborted();
+  const now = options.reads?.now ?? Date.now;
   const size = heEngSearchEmployeeConstraint(scope);
   const allowed = scope.allowedCountries.map(country);
   const identityFingerprint = candidateFingerprint(candidate);
@@ -205,10 +242,16 @@ export async function resolveHeEngRegistryCandidate(
       typeof state.catalogChecked !== 'boolean' || !Array.isArray(state.catalogRows) || state.catalogRows.length > MAX_CATALOG_ROWS) {
     throw new Error('ENG registry resolution checkpoint belongs to a different company or scope.');
   }
+  if ((state.websiteReadFailures !== undefined && (!Number.isInteger(state.websiteReadFailures) || state.websiteReadFailures < 0 || state.websiteReadFailures > 2)) ||
+      (state.retryAt !== undefined && (typeof state.retryAt !== 'string' || !Number.isFinite(Date.parse(state.retryAt)) || state.websiteReadFailures !== 1))) {
+    throw new Error('ENG registry website retry checkpoint is invalid.');
+  }
   if (state.search && (!record(state.search) || !record(state.search.checkpoint) || !record(state.search.plan))) {
     throw new Error('ENG registry website search checkpoint is invalid.');
   }
   if (state.search?.checkpoint.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
+  if (state.retryAt && Date.parse(state.retryAt) > now()) throw new HeEngRegistryRetryError(Math.max(1000, Date.parse(state.retryAt) - now()));
+  delete state.retryAt;
   const finish = async (result: HeEngRegistryResolutionResult) => {
     state.result = result;
     await options.onCheckpoint(structuredClone(state));
@@ -266,7 +309,22 @@ export async function resolveHeEngRegistryCandidate(
   }
   const catalogRows = normalizeCatalog(state.catalogRows, candidate);
   const checkedSites = new Set<string>();
+  let anyPageRead = false;
   let lastReason: HeEngRegistryResolutionReason = 'website_not_found';
+  let contentReason: HeEngRegistryResolutionReason | null = null;
+  const finishUnresolved = async () => {
+    // Only an entirely unreadable free-site pass may retry. Source candidates,
+    // catalog decisions and paid SERP receipts remain frozen in this checkpoint.
+    if (checkedSites.size > 0 && !anyPageRead) {
+      state.websiteReadFailures = (state.websiteReadFailures ?? 0) + 1;
+      if (state.websiteReadFailures === 1) {
+        state.retryAt = new Date(now() + 30_000).toISOString();
+        await options.onCheckpoint(structuredClone(state));
+        throw new HeEngRegistryRetryError(30_000);
+      }
+    }
+    return finish({ row: null, reason: contentReason ?? lastReason });
+  };
   const trySite = async (site: string, trusted: boolean): Promise<HeEngRegistryResolutionResult | null> => {
     if (checkedSites.has(site) || checkedSites.size >= MAX_SITES) return null;
     checkedSites.add(site);
@@ -306,6 +364,7 @@ export async function resolveHeEngRegistryCandidate(
       } catch (error) { interruption(ctx, error); continue; }
       ctx.onActivity?.();
       if (!page || !page.url.startsWith('https:') || !sameSite(page.url, site) || page.html.length > MAX_PAGE_BYTES) continue;
+      anyPageRead = true;
       const facts = readHeEngRegistryOwnSiteFacts(page, candidate, { trustedWebsite: trusted });
       const identity = trusted || facts.identity;
       if (!identity) lastReason = 'identity_unconfirmed';
@@ -332,6 +391,7 @@ export async function resolveHeEngRegistryCandidate(
           lastReason = 'country_unconfirmed';
         }
       }
+      contentReason = lastReason;
       if (seen.size === 1) {
         for (const link of discoverContactLinks(page.html, page.url)) {
           if (link.startsWith('https:') && sameSite(link, site) && !seen.has(link)) queue.push(link);
@@ -348,7 +408,7 @@ export async function resolveHeEngRegistryCandidate(
   }
   // A registry-provided site is already linked to the entity. Search must not
   // replace a failed/undersized known website with a convenient namesake.
-  if (trustedWebsite) return finish({ row: null, reason: lastReason });
+  if (trustedWebsite) return finishUnresolved();
   const plan = createHeEngRegistryWebsiteSearchPlan(candidate);
   if (state.search && (state.search.plan.fingerprint !== plan.fingerprint || !Array.isArray(state.search.candidates) || state.search.candidates.length > 10)) {
     throw new Error('ENG registry website search checkpoint does not match the legal entity.');
@@ -373,5 +433,5 @@ export async function resolveHeEngRegistryCandidate(
     const result = await trySite(site, false);
     if (result) return finish(result);
   }
-  return finish({ row: null, reason: lastReason });
+  return finishUnresolved();
 }

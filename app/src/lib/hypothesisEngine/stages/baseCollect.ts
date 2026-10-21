@@ -213,7 +213,7 @@ import {
 } from '../engCompanySearch';
 import { resolveHeEngSearchCompanyEvidence, heEngSearchEmployeeConstraint } from '../engSearchCompanyEvidence';
 import { createHeEngRegistryPlan } from '../engPublicRegistryPlan';
-import { createHeEngRegistryWave, heEngRegistrySourceTasks, runHeEngRegistryWave,
+import { createHeEngRegistryWave, heEngRegistrySourceTasks, runHeEngRegistryWave, HeEngRegistryRetryError,
   type HeEngRegistryState, type HeEngRegistryWave } from '../engRegistryCollection';
 
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
@@ -5353,6 +5353,10 @@ function emailPoorRows(rows: HeUnifiedRow[]): boolean {
  *    site_timeout_ms и может только ДОБАВИТЬ адрес, а не включить — стоит
  *    компаний. Монотонность здесь и есть гарантия: пометки гейта не могут отнять
  *    у базы шаг, который она получила бы без него.
+ *    ENG-реестры всегда дополняем поиском на сайте: исходный адрес ещё не
+ *    проверен, может оказаться нерабочим и не заменяет остальные контакты
+ *    компании. source_detail сохраняется в harvest и после проверки компаний;
+ *    достаточно такого источника в любом из двух наборов. RU это не меняет.
  *  - enrich_descriptions — по САМОЙ сетке: порог CONSTRUCT_ENRICH_MAX_ROWS это
  *    срок на per-site фетч КАЖДОЙ строки джобы в шестичасовом окне, а строки, не
  *    попавшие в сетку, конструктор не качает вовсе. Мерить их значило бы терять
@@ -5364,7 +5368,9 @@ function constructStepsFor(
   harvest: HeUnifiedRow[] = rows,
 ): string[] {
   const poor = emailPoorRows(rows) || emailPoorRows(harvest);
-  const find = poor ? ['find_emails'] : [];
+  const registry = market === 'us' && [...rows, ...harvest]
+    .some(row => row.source_detail?.startsWith('eng_registry:') === true);
+  const find = poor || registry ? ['find_emails'] : [];
   if (market !== 'us') {
     const tail =
       rows.length > CONSTRUCT_ENRICH_MAX_ROWS
@@ -7927,7 +7933,14 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   };
   for (const state of tasks) {
     if (state.status !== 'pending') continue;
-    await runDispatch(state, dispatchCatalog);
+    try {
+      await runDispatch(state, dispatchCatalog);
+    } catch (error) {
+      if (!(error instanceof HeEngRegistryRetryError)) throw error;
+      await requeueSelf(ctx, job, error.delayMs);
+      return { result: { waiting: true, base_id: baseId, registry_retry: true },
+        tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+    }
   }
 
   /**
