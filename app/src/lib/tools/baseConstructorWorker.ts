@@ -847,7 +847,12 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
       );
     }
 
-    let data: string[][] = applyColumnMapping(job.data || [], stepConfig.column_mapping, locale);
+    // JSON-задачи (включая старые checkpoint'ы) могут содержать числа/null,
+    // хотя шаги работают со строками: trim/match вызываются и на теле базы.
+    // Нормализуем до маппинга и любого шага, сохраняя 0 и исходный текст.
+    const inputRows: unknown[][] = job.data || [];
+    const textRows = inputRows.map((row) => row.map((cell) => String(cell ?? '')));
+    let data: string[][] = applyColumnMapping(textRows, stepConfig.column_mapping, locale);
     // EN-локаль: после явного маппинга нормализуем оставшиеся известные
     // английские заголовки (Company Name/Organization/URL/E-Mail/…) к
     // каноническим именам — шаги найдут свои колонки, экспорт будет на
