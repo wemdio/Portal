@@ -121,8 +121,8 @@ PERIODS = [
     ("2026-01-01", date.today().isoformat()),
 ]
 
-POLL_ATTEMPTS = 30
-POLL_INTERVAL_SEC = 1.5
+POLL_ATTEMPTS = 8
+POLL_INTERVAL_SEC = 90
 
 
 class TochkaStatementError(RuntimeError):
@@ -327,6 +327,9 @@ def map_transaction(
 
 class BankTochkaSync(SyncSource):
     name = "bank_tochka"
+    # Eight 90-second waits, plus bounded HTTP calls and database writes.
+    # Accounts run concurrently, so this budget does not grow per account.
+    recent_timeout_sec = 30 * 60
 
     def __init__(self, periods: list[tuple[str, str]] | None = None):
         self.periods = periods
@@ -354,7 +357,10 @@ class BankTochkaSync(SyncSource):
                 b["accountId"] for b in bal.json().get("Data", {}).get("Balance", [])
             })
 
-            for account_index, acc in enumerate(accounts, 1):
+            write_lock = asyncio.Lock()
+
+            async def sync_account(account_index: int, acc: str) -> None:
+                nonlocal total
                 for st, en in periods:
                     # Изоляция периода: сбой одного счёта/периода (сеть, битые
                     # данные, ошибка upsert) не должен обрывать остальные —
@@ -364,8 +370,11 @@ class BankTochkaSync(SyncSource):
                             client, acc, st, en, skip_counts, status_counts
                         )
                         if rows:
-                            await self._upsert(conn, rows)
-                            total += len(rows)
+                            # asyncpg allows one operation on this connection.
+                            # Only bank HTTP waits overlap; writes stay serial.
+                            async with write_lock:
+                                await self._upsert(conn, rows)
+                                total += len(rows)
                     except Exception as e:
                         reason = str(e) if isinstance(e, TochkaStatementError) else type(e).__name__
                         failures.append(f"счёт {account_index}, {st}..{en}: {reason}")
@@ -373,6 +382,8 @@ class BankTochkaSync(SyncSource):
                             f"[bank_tochka] period FAIL acc={acc} {st}..{en}: {e}\n{traceback.format_exc()}",
                             flush=True,
                         )
+
+            await asyncio.gather(*(sync_account(index, acc) for index, acc in enumerate(accounts, 1)))
 
         if skip_counts:
             total_skipped = sum(skip_counts.values())
@@ -419,6 +430,9 @@ class BankTochkaSync(SyncSource):
         stmt = None
         last_response = "ответ не получен"
         for _ in range(POLL_ATTEMPTS):
+            # One statement order, checked at 1:30, 3:00, ... 12:00.
+            # No extra sleep after the last unsuccessful check.
+            await asyncio.sleep(POLL_INTERVAL_SEC)
             r = await client.get(f"{API_BASE}/accounts/{accq}/statements/{sid}")
             last_response = f"HTTP {r.status_code}"
             if r.status_code in (401, 403):
@@ -436,10 +450,10 @@ class BankTochkaSync(SyncSource):
                         break
                 else:
                     last_response += ", выписка отсутствует в ответе"
-            await asyncio.sleep(POLL_INTERVAL_SEC)
         if not stmt:
             raise TochkaStatementError(
-                f"Готовая выписка не получена за {POLL_ATTEMPTS} проверок; последний ответ: {last_response}"
+                f"Готовая выписка не получена за {POLL_ATTEMPTS} проверок "
+                f"с интервалом {POLL_INTERVAL_SEC} с; последний ответ: {last_response}"
             )
 
         mapped_rows: list[dict] = []

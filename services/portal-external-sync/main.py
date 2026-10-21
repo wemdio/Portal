@@ -129,7 +129,8 @@ async def run_source(conn: asyncpg.Connection, src, mode: str = "full") -> None:
         run_id = await log_run_start(conn, src.name)
         try:
             if mode == "recent":
-                n = await asyncio.wait_for(src.run(conn), timeout=90 if src.name == "fx_cbr" else 240)
+                timeout = 90 if src.name == "fx_cbr" else getattr(src, "recent_timeout_sec", 240)
+                n = await asyncio.wait_for(src.run(conn), timeout=timeout)
             else:
                 n = await src.run(conn)
             await log_run_finish(conn, run_id, "success", records=n, meta={"mode": mode})

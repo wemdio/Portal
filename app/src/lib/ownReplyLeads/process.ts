@@ -232,12 +232,14 @@ async function enqueuePush(db: SupabaseClient, row: QualRow, ctx: ThreadContext,
   const companyName = (lead?.company_name ?? '').trim() || null;
   // Бесплатные почтовые домены (gmail, mail.ru…) сайтом компании не бывают.
   const website = companySite(lead?.website) ?? companySite(lead?.company_domain) ?? corporateDomain(row.lead_email);
+  // Контакт в AMO — тот, кто написал ответ (не обязательно адрес рассылки): с него и ответим.
+  const contactEmail = (ctx.replyEmail.from_address_email ?? '').trim().toLowerCase() || row.lead_email;
   const { error } = await db.from('own_reply_crm_pushes').insert({
     qualification_id: row.email_id,
     connection: POLZA_CONNECTION,
     pipeline_id: OWN_REPLY_PIPELINE_ID,
     status_id: OWN_REPLY_STATUS_ID,
-    lead_email: row.lead_email,
+    lead_email: contactEmail,
     lead_name: leadName,
     company_name: companyName,
     website,
@@ -245,7 +247,7 @@ async function enqueuePush(db: SupabaseClient, row: QualRow, ctx: ThreadContext,
     sub_source: subSourceOf(messages, row.reply_preview),
     message_text: buildOwnReplyCard({
       campaignName: row.campaign_name,
-      leadEmail: row.lead_email,
+      leadEmail: contactEmail,
       leadName,
       companyName,
       phone: (lead?.phone ?? '').trim() || null,
