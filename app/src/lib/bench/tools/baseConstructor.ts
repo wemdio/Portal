@@ -70,7 +70,8 @@ export const baseConstructorTool: BenchJobTool = {
       user_id: ownerId,
       workload_origin: 'manual',
       file_name: p.file_name ?? null,
-      data: p.data,
+      // Шаги конструктора работают с текстом, включая числовые колонки базы.
+      data: p.data.map((row) => row.map((cell) => String(cell ?? ''))),
       selected_steps: p.selected_steps,
       step_config: p.step_config,
       initial_row_count: p.data.length - 1,
