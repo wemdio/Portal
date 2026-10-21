@@ -1,11 +1,13 @@
 """
-portal-external-sync — daily sync of external data into main-postgres.
+portal-external-sync — external data sync and bank income notifications.
 
 Sources: Yandex Metrika, AMO CRM (сделки, события, задачи, комментарии), Точка
 Банк, Т-Банк, Brocard, USDT TRC-20, курсы ЦБ, применение правил разметки
 расходов.
 
 Расписание:
+- Банки: короткая выписка каждые 10 минут (`BANK_SYNC_CRON`), затем новые
+  клиентские поступления → ветка оплат через PolzaSiteFeedbackBot.
 - Cron `EXTERNAL_SYNC_CRON` (default '5 6,9,12,15,18 * * *' UTC = 9:05, 12:05,
   15:05, 18:05, 21:05 МСК) через APScheduler. С 30.09.2026 пять раз в день, а не
   раз в сутки: правка в AMO или оплата доезжают до дашбордов за часы, а сломанный
@@ -43,6 +45,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from alerts import send_worker_alert
+from bank_income import (
+    IncomeConfig, income_config, prepare_income, dispatch_income,
+    recent_bank_periods, LOCK_NAMESPACE,
+)
 from db import log_run_start, log_run_finish
 from sources.metrika import MetrikaSync
 from sources.amo import AmoSync
@@ -62,6 +68,7 @@ from sources.renewal_marks import RenewalMarksSync
 # ── Config ────────────────────────────────────────────────────────────────
 
 CRON = os.environ.get("EXTERNAL_SYNC_CRON", "5 6,9,12,15,18 * * *")  # 9:05…21:05 МСК, каждые 3 ч
+BANK_CRON = os.environ.get("BANK_SYNC_CRON", "*/10 * * * *")
 DATABASE_URL = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 # Отметка (по МСК), после которой рестарт контейнера считает нужным
@@ -110,6 +117,72 @@ SOURCES = [
 
 # ── Run pipeline ──────────────────────────────────────────────────────────
 
+async def run_source(conn: asyncpg.Connection, src, mode: str = "full") -> None:
+    # Both schedules share a session lock per bank, also across worker replicas.
+    lock_id = {"bank_tochka": 1, "bank_tbank": 2}.get(src.name)
+    if lock_id is not None:
+        locked = await conn.fetchval("SELECT pg_try_advisory_lock($1, $2)", LOCK_NAMESPACE, lock_id)
+        if not locked:
+            print(f"[{src.name}] {mode}: another bank sync is running", flush=True)
+            return
+    try:
+        run_id = await log_run_start(conn, src.name)
+        try:
+            if mode == "recent":
+                n = await asyncio.wait_for(src.run(conn), timeout=240)
+            else:
+                n = await src.run(conn)
+            await log_run_finish(conn, run_id, "success", records=n, meta={"mode": mode})
+            print(f"[{src.name}] {mode}: ok — upserted {n}", flush=True)
+        except NotImplementedError as e:
+            await log_run_finish(conn, run_id, "partial", error=str(e), meta={"mode": mode})
+            print(f"[{src.name}] skipped — {e}", flush=True)
+        except Exception as e:
+            tb = traceback.format_exc()
+            await log_run_finish(conn, run_id, "error", error=str(e), meta={"mode": mode})
+            print(f"[{src.name}] FAIL — {e}\n{tb}", flush=True)
+            await send_worker_alert(
+                worker_id="portal-external-sync", subject=f"{src.name} failed",
+                error=e, context={"source": src.name, "mode": mode},
+            )
+    finally:
+        if lock_id is not None:
+            await conn.execute("SELECT pg_advisory_unlock($1, $2)", LOCK_NAMESPACE, lock_id)
+
+
+async def prepare_bank_income(conn: asyncpg.Connection) -> IncomeConfig | None:
+    try:
+        config = income_config()
+        if config:
+            await prepare_income(conn, config)
+        return config
+    except Exception as e:
+        await send_worker_alert("bank-income", "уведомления не подготовлены", type(e).__name__)
+        print(f"[bank-income] prepare failed ({type(e).__name__})", flush=True)
+        return None
+
+
+async def run_banks() -> None:
+    if not DATABASE_URL:
+        print("[banks] DATABASE_URL not set", flush=True)
+        return
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        config = await prepare_bank_income(conn)
+        periods = recent_bank_periods(datetime.now(timezone.utc))
+        for src in (BankTochkaSync(periods), BankTBankSync(periods)):
+            await run_source(conn, src, mode="recent")
+        if config:
+            try:
+                await dispatch_income(conn, config)
+            except Exception as e:
+                # Never forward httpx request URLs (they contain the bot token).
+                await send_worker_alert("bank-income", "сбой обработки уведомлений", type(e).__name__)
+                print(f"[bank-income] dispatch failed ({type(e).__name__})", flush=True)
+    finally:
+        await conn.close()
+
+
 async def run_all() -> None:
     if not DATABASE_URL:
         print("[main] FATAL: SUPABASE_DB_URL / DATABASE_URL not set", flush=True)
@@ -119,25 +192,7 @@ async def run_all() -> None:
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         for src in SOURCES:
-            run_id = await log_run_start(conn, src.name)
-            try:
-                n = await src.run(conn)
-                await log_run_finish(conn, run_id, "success", records=n)
-                print(f"[{src.name}] ok — upserted {n}", flush=True)
-            except NotImplementedError as e:
-                # Source не готов — не ошибка, а «пока пропускаем».
-                await log_run_finish(conn, run_id, "partial", error=str(e))
-                print(f"[{src.name}] skipped — {e}", flush=True)
-            except Exception as e:
-                tb = traceback.format_exc()
-                await log_run_finish(conn, run_id, "error", error=str(e))
-                print(f"[{src.name}] FAIL — {e}\n{tb}", flush=True)
-                await send_worker_alert(
-                    worker_id="portal-external-sync",
-                    subject=f"{src.name} failed",
-                    error=e,
-                    context={"source": src.name},
-                )
+            await run_source(conn, src)
     finally:
         await conn.close()
         print("[main] cycle finished", flush=True)
@@ -160,8 +215,8 @@ async def _should_catchup_on_startup() -> bool:
     external_sync_runs за сегодня после этой отметки нет ни одного запуска —
     возвращаем True (нужно догнать пропущенный cron сразу на старте).
 
-    Так деплой/рестарт в любое время после 16:45 автоматически даст свежий
-    sync до отчёта продаж в 17:10; обычные рестарты до 16:45 ничего не делают.
+    После 18:05 пропущенный полный sync догоняется сразу; короткие банковские
+    проверки не считаются запуском полного pipeline перед отчётом в 18:15.
     """
     now_msk = datetime.now(MSK_TZ)
     start_hour, start_minute = _parse_msk_time(STARTUP_WINDOW_START_MSK)
@@ -188,7 +243,7 @@ async def _should_catchup_on_startup() -> bool:
         row = await conn.fetchrow(
             "SELECT MAX(started_at) AS last_run "
             "FROM external_sync_runs "
-            "WHERE started_at >= $1",
+            "WHERE started_at >= $1 AND (meta->>'mode') IS DISTINCT FROM 'recent'",
             scheduled_today_utc,
         )
     finally:
@@ -215,7 +270,17 @@ async def _should_catchup_on_startup() -> bool:
 # ── Entry ─────────────────────────────────────────────────────────────────
 
 async def main() -> None:
-    print(f"portal-external-sync starting; cron='{CRON}'", flush=True)
+    print(f"portal-external-sync starting; cron='{CRON}', bank_cron='{BANK_CRON}'", flush=True)
+
+    # Establish the baseline before either schedule can insert bank rows. Only
+    # bot verification runs here: a slow bank must not delay the sales catchup.
+    if DATABASE_URL:
+        conn = await asyncpg.connect(DATABASE_URL)
+        try:
+            await prepare_bank_income(conn)
+        finally:
+            await conn.close()
+    catchup = await _should_catchup_on_startup()
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -225,9 +290,15 @@ async def main() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        run_banks,
+        CronTrigger.from_crontab(BANK_CRON, timezone="UTC"),
+        id="bank_sync", max_instances=1, coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
     scheduler.start()
 
-    if await _should_catchup_on_startup():
+    if catchup:
         await run_all()
 
     # Держим event loop живым; APScheduler крутится в фоне.
