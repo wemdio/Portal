@@ -15,6 +15,7 @@ import {
 } from './api';
 import { SendConfirmDialog } from './SendConfirmDialog';
 import { playChime, primeChime } from '@/lib/doneChime';
+import { normalizeReplyText } from '@/lib/replyPersonalization/normalizeReplyText';
 import type { ReplyLanguage, ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
 
 function formatTime(iso?: string) {
@@ -178,15 +179,15 @@ export function ReplyDetailPanel({
     const savedText = readStore(TEXT_KEY(item.id));
     const genStartedAt = Number(readStore(GEN_KEY(item.id)) ?? 0);
     const genInFlight = genStartedAt > 0 && Date.now() - genStartedAt < GEN_MAX_MS;
-    if (savedText) setDraftText(savedText);
+    if (savedText) setDraftText(normalizeReplyText(savedText));
     if (genInFlight) setGenerating(true);
 
     const apply = (found: (GenerateResponse & { createdAt: string }) | null) => {
       if (!found) return false;
-      setDraft(found);
+      setDraft({ ...found, text: normalizeReplyText(found.text) });
       setRecipient(found.recipientEmail ?? null);
       // Свой текст главнее: он мог быть правкой этого же черновика.
-      if (!readStore(TEXT_KEY(item.id))) setDraftText(found.text);
+      if (!readStore(TEXT_KEY(item.id))) setDraftText(normalizeReplyText(found.text));
       return true;
     };
 
@@ -243,9 +244,9 @@ export function ReplyDetailPanel({
       const result = await generateReply(qualificationId, projectId, recipient, language, recipient === null ? ccEmails : []);
       // Новый черновик заменяет набранный текст — и в браузере тоже.
       writeStore(TEXT_KEY(qualificationId), null);
-      setDraft(result);
+      setDraft({ ...result, text: normalizeReplyText(result.text) });
       setDraftCc(recipient === null ? ccEmails : []);
-      setDraftText(result.text);
+      setDraftText(normalizeReplyText(result.text));
       chime('done');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сгенерировать ответ');
@@ -267,7 +268,7 @@ export function ReplyDetailPanel({
   };
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(draftText).catch(() => {});
+    navigator.clipboard.writeText(normalizeReplyText(draftText)).catch(() => {});
   };
 
   /**
@@ -375,7 +376,7 @@ export function ReplyDetailPanel({
                   {m.fromUs ? 'Мы' : 'Адресат'}
                   {m.timestamp ? ` · ${formatTime(m.timestamp)}` : ''}
                 </div>
-                <div className="whitespace-pre-wrap break-words text-gray-900">{m.text}</div>
+                <div className="whitespace-pre-wrap break-words text-gray-900">{m.fromUs ? normalizeReplyText(m.text) : m.text}</div>
               </div>
             </div>
           ))
@@ -543,7 +544,7 @@ export function ReplyDetailPanel({
 
         <SendConfirmDialog
           open={confirmOpen && !replyBlocked && !blocking}
-          text={draftText}
+          text={normalizeReplyText(draftText)}
           onCancel={() => setConfirmOpen(false)}
           onSent={() => {
             setConfirmOpen(false);
@@ -552,7 +553,7 @@ export function ReplyDetailPanel({
             // после «Отправить» менялся только статус в списке слева, и было
             // непонятно, ушло письмо или нет. Поле ответа при этом очищаем:
             // текст уже не черновик, а отправленное письмо.
-            const sentText = draftText;
+            const sentText = normalizeReplyText(draftText);
             forgetLocal();
             setThread((prev) => [
               ...prev,

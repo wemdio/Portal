@@ -17,6 +17,7 @@ import { getDraftById, markDraftSent, updateDraftText } from './db';
 import { fetchReplyThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
+import { normalizeReplyText } from './normalizeReplyText';
 import type { Email } from '@/lib/instantly/types';
 import type { QualificationRow } from './types';
 
@@ -94,6 +95,7 @@ export async function sendDraft(
   if (finalText.length > MAX_SEND_TEXT_LENGTH) {
     throw new SendDraftError('Текст ответа слишком длинный', 422);
   }
+  finalText = normalizeReplyText(finalText);
 
   const draft = await getDraftById(draftId);
   if (!draft) throw new SendDraftError('Черновик не найден', 404);
