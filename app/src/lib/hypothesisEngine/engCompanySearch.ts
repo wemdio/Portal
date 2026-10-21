@@ -192,6 +192,20 @@ function validateCheckpoint(plan: HeEngCompanySearchPlan, saved?: HeEngCompanySe
   return state;
 }
 
+/**
+ * Read-only coverage of the frozen term/country plan. A next-page cursor of 2
+ * proves the first response was saved, including an empty response. Exhausted
+ * IDs alone do not prove a page was read. Invalid or in-flight checkpoints keep
+ * their normal errors; coverage must never hide an unknown paid attempt.
+ */
+export function heEngCompanySearchFirstPassComplete(
+  plan: HeEngCompanySearchPlan,
+  checkpoint?: HeEngCompanySearchCheckpoint,
+): boolean {
+  const state = validateCheckpoint(plan, checkpoint);
+  return plan.tasks.every(task => (state.pages[task.id] ?? 1) >= 2);
+}
+
 /** Returned search hits are untrusted candidates, not qualified companies. */
 export function heEngCompanySearchCandidates(input: {
   items: readonly unknown[]; task: HeEngCompanySearchTask; seenWebsites?: readonly string[];

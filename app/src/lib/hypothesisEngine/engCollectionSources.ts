@@ -13,6 +13,8 @@ export interface HeEngSourceHistoryEntry {
 export interface HeEngTargetSourceOptions {
   searchExhausted?: boolean;
   searchUnavailable?: boolean;
+  /** Every frozen term/country task has a durably completed first result page. */
+  searchFirstPassComplete?: boolean;
   /** Frozen server-generated registry slices, kept outside reusable source plans. */
   registryTasks?: readonly HeCollectTask[];
 }
@@ -68,6 +70,17 @@ function inactiveReason(
   const rounds = sourceHistory(choice, history);
   if (rounds.some((round) => round.exhausted)) return 'sources_exhausted';
   if (rounds.some((round) => round.failed)) return 'error';
+  if (choice.task.source === 'web_search') {
+    // Search waves contain at most 50 hits BEFORE duplicate/site filtering.
+    // Requiring 50 in each wave made sparse, repeatedly unproductive searches
+    // evade the catalogue rule below. Compare completed waves cumulatively,
+    // but only after every frozen term/country has received its first page:
+    // poor early countries must not suppress still-untried audience branches.
+    const candidates = rounds.reduce((sum, round) => sum + round.candidates, 0);
+    const contacts = rounds.reduce((sum, round) => sum + round.readyContacts, 0);
+    return options.searchFirstPassComplete === true && rounds.length >= 2 &&
+      candidates >= 100 && contacts / candidates < 0.05 ? 'low_yield' : null;
+  }
   if (choice.task.source === 'eng_registry') {
     // Public APIs serve smaller pages. Four weak pages are enough to suspend
     // this slice, without changing the legacy catalogue/search thresholds.

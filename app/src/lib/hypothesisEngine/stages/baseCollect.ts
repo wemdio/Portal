@@ -209,6 +209,7 @@ import { pickHeEngTargetSource, heEngTargetSourceStopReason, type HeEngSourceHis
 import { buildHeEngReadyBaseAnalysis } from '../engReadyBaseAnalysis';
 import {
   createHeEngCompanySearchPlan, createHeEngCompanySearchCheckpoint, runHeEngCompanySearchPage,
+  heEngCompanySearchFirstPassComplete,
   type HeEngCompanySearchPlan, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchCandidate,
 } from '../engCompanySearch';
 import { resolveHeEngSearchCompanyEvidence, heEngSearchEmployeeConstraint } from '../engSearchCompanyEvidence';
@@ -311,6 +312,7 @@ import {
 import { heCheckpointSupabase, isHeStageDbInterruption } from '../stageDb';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import { compactHeEngCollectionQualificationMemo } from '../engCollectionAudit';
+import { recoverHeEngCollectCheckpoint } from '../engCollectCheckpoint';
 // Только типы восстановления (collect_info.revalidation и
 // construct.late_import_undo): модуль сам импортирует стадию, поэтому здесь —
 // import type, без цикла в рантайме.
@@ -1595,6 +1597,13 @@ export function paidCheckpointDb(ctx: HeStageContext): HeStageContext['supabase'
   return heCheckpointSupabase() ?? ctx.supabase;
 }
 
+// Opt in only after the adaptive ENG client/budget checks below. Associating
+// the in-memory info object with its claim avoids treating an arbitrary market
+// or JSON field as authorization and leaves legacy/RU checkpoint behavior intact.
+const engCollectCheckpointOwners = new WeakMap<HeCollectInfo, {
+  ctx: HeStageContext; job: Pick<HeJob, 'id' | 'started_at'>;
+}>();
+
 async function persistCollectInfo(
   ctx: HeStageContext,
   baseId: string,
@@ -1623,8 +1632,13 @@ async function persistCollectInfo(
    * Читает это один вызывающий — резерв джобы конструктора (dispatchConstructJob):
    * базе, которую успели отменить, джобу конструктора не ставят.
    */
-  const update = { collect_info: info, updated_at: new Date().toISOString() };
-  const { data, error } = options?.paidCheckpoint
+  const owner = engCollectCheckpointOwners.get(info);
+  const recoveryOwner = owner?.ctx === ctx ? owner.job : undefined;
+  // Capture exactly what this attempt serializes, before any await. Readback
+  // must not accidentally confirm a subsequently mutated in-memory checkpoint.
+  const snapshot = recoveryOwner ? JSON.parse(JSON.stringify(info)) as HeCollectInfo : info;
+  const update = { collect_info: snapshot, updated_at: new Date().toISOString() };
+  const { data, error, status } = options?.paidCheckpoint
     ? await paidCheckpointDb(ctx)
         .from('he_bases')
         .update(update)
@@ -1637,7 +1651,12 @@ async function persistCollectInfo(
         .eq('id', baseId)
         .eq('status', 'collecting')
         .select('id');
-  if (error) throw new Error(`he_bases collect_info update: ${error.message}`);
+  if (error) {
+    if (recoveryOwner && await recoverHeEngCollectCheckpoint({
+      ctx, baseId, job: recoveryOwner, snapshot, error, status,
+    })) return true;
+    throw new Error(`he_bases collect_info update: ${error.message}`);
+  }
   return Array.isArray(data) && data.length > 0;
 }
 
@@ -6798,6 +6817,12 @@ async function dispatchHeEngSearchBatch(
   // websites. Do not buy every result page before learning whether it works.
   while ((work.search_pages ?? 0) < 5 && !search.checkpoint.unavailable &&
       search.checkpoint.exhaustedTaskIds.length < search.plan.tasks.length) {
+    // Learn the result of every term/country's first page before buying deeper
+    // pages. This also catches a restart after the boundary checkpoint was saved
+    // but before the last response returned to this loop. A new wave has zero
+    // search_pages and may proceed only after the source policy selected it.
+    if ((work.search_pages ?? 0) > 0 && search.checkpoint.calls === search.plan.tasks.length &&
+        heEngCompanySearchFirstPassComplete(search.plan, search.checkpoint)) break;
     const before = search.checkpoint.calls;
     const result = await runHeEngCompanySearchPage({
       db: paidCheckpointDb(ctx), baseId, projectId: job.project_id,
@@ -6896,13 +6921,16 @@ async function finishHeEngTargetRound(
       for (const row of [...waveCandidates, ...searched]) seen.set(heEngCompanyKey(row), { company: row.company, website: row.website });
       work.seen_companies = [...seen.values()];
     }
-    const search = info.eng_company_search;
-    const sourceOptions = { searchExhausted: search ? search.checkpoint.exhaustedTaskIds.length === search.plan.tasks.length : false,
-      searchUnavailable: !!search?.checkpoint.unavailable, registryTasks: heEngRegistrySourceTasks(info.eng_public_registry) };
-    if (round.target.phase !== 'complete' && round.target.phase !== 'stopped' &&
-        !pickHeEngTargetSource(info.plan?.tasks ?? [], work.history, sourceOptions)) {
-      round.target = stopHeEngCollectionTarget(round.target,
-        heEngTargetSourceStopReason(info.plan?.tasks ?? [], work.history, sourceOptions));
+    if (round.target.phase !== 'complete' && round.target.phase !== 'stopped') {
+      const search = info.eng_company_search;
+      const sourceOptions = { searchExhausted: search ? search.checkpoint.exhaustedTaskIds.length === search.plan.tasks.length : false,
+        searchUnavailable: !!search?.checkpoint.unavailable,
+        searchFirstPassComplete: search ? heEngCompanySearchFirstPassComplete(search.plan, search.checkpoint) : false,
+        registryTasks: heEngRegistrySourceTasks(info.eng_public_registry) };
+      if (!pickHeEngTargetSource(info.plan?.tasks ?? [], work.history, sourceOptions)) {
+        round.target = stopHeEngCollectionTarget(round.target,
+          heEngTargetSourceStopReason(info.plan?.tasks ?? [], work.history, sourceOptions));
+      }
     }
     if (info.eng_company_qualification) {
       info.eng_company_qualification = compactHeEngCollectionQualificationMemo(info.eng_company_qualification);
@@ -7142,6 +7170,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       throw new Error('ENG collection: invalid saved source progress');
     }
     limit = work.batch_size;
+    engCollectCheckpointOwners.set(info, { ctx, job: { id: job.id, started_at: job.started_at } });
   }
 
   // Resume paid criteria before entering any earlier collection phases. A memo
@@ -7651,7 +7680,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   if (adaptive && !info.eng_collection_work!.active_source_key) {
     const search = info.eng_company_search;
     const options = { searchExhausted: search ? search.checkpoint.exhaustedTaskIds.length === search.plan.tasks.length : false,
-      searchUnavailable: !!search?.checkpoint.unavailable, registryTasks: heEngRegistrySourceTasks(info.eng_public_registry) };
+      searchUnavailable: !!search?.checkpoint.unavailable,
+      searchFirstPassComplete: search ? heEngCompanySearchFirstPassComplete(search.plan, search.checkpoint) : false,
+      registryTasks: heEngRegistrySourceTasks(info.eng_public_registry) };
     const choice = pickHeEngTargetSource(info.plan?.tasks ?? [], info.eng_collection_work!.history, options);
     if (!choice) {
       return finishHeEngTargetRound(ctx, job, base, info, [], [], usage,
