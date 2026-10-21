@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AVAILABLE_STEPS } from '@/lib/tools/processingSteps';
+import { normalizeConstructorRows } from '@/lib/tools/baseConstructorData';
 import type { BenchJobTool, JobRow } from '../types';
 
 /**
@@ -70,7 +71,7 @@ export const baseConstructorTool: BenchJobTool = {
       user_id: ownerId,
       workload_origin: 'manual',
       file_name: p.file_name ?? null,
-      data: p.data,
+      data: normalizeConstructorRows(p.data),
       selected_steps: p.selected_steps,
       step_config: p.step_config,
       initial_row_count: p.data.length - 1,

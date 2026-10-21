@@ -33,6 +33,7 @@ import {
   WEBSITE_EMAIL_PREFERENCE_COL,
 } from './baseConstructorCheckpoint';
 import { extractEmail, extractEmails, findColumnIndex } from './dfybUtils';
+import { normalizeConstructorRows } from './baseConstructorData';
 import { parseFoundEmailOrigin, shouldTrackFoundEmailOrigin } from './foundEmailOrigin';
 import { uploadExportArtifact } from './csvExportArtifact';
 import { taJevEnabled } from '@/lib/taScoringJev';
@@ -886,7 +887,9 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
       );
     }
 
-    let data: string[][] = applyColumnMapping(job.data || [], stepConfig.column_mapping, locale);
+    let data: string[][] = applyColumnMapping(
+      normalizeConstructorRows(job.data || []), stepConfig.column_mapping, locale,
+    );
     // EN-локаль: после явного маппинга нормализуем оставшиеся известные
     // английские заголовки (Company Name/Organization/URL/E-Mail/…) к
     // каноническим именам — шаги найдут свои колонки, экспорт будет на
