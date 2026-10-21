@@ -1902,6 +1902,10 @@ function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string, evidenceTe
   const base = new URL(pageUrl);
   const host = base.hostname.replace(/^www\./, '');
   const domain = getDomain(base.hostname, { allowPrivateDomains: true });
+  // Selected ENG service terms opt into targeted evidence discovery. Some
+  // sites route their services through index.php?page=...; legacy callers
+  // retain the original query-free link policy.
+  const keepPageQueries = evidenceTerms.length > 0;
   const links: CompanyEvidenceLink[] = [];
   const seen = new Map<string, CompanyEvidenceLink>();
   $('a[href]').each((_, el) => {
@@ -1913,7 +1917,7 @@ function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string, evidenceTe
       || !!domain && getDomain(url.hostname, { allowPrivateDomains: true }) === domain;
     if (!['http:', 'https:'].includes(url.protocol)
       || !sameCompanyDomain
-      || url.port !== base.port || url.username || url.password || url.search || url.hash
+      || url.port !== base.port || url.username || url.password || (!keepPageQueries && url.search) || url.hash
       || (base.protocol === 'https:' && url.protocol !== 'https:')) return;
     const path = url.pathname;
     if (/\/(?:auth|account|login|logout|sign[-_]?in|sign[-_]?up|careers?|jobs?|karriere|facebook|twitter|linkedin|instagram|youtube)(?:\/|$)/i.test(path)
@@ -1967,7 +1971,7 @@ function companyEvidenceLinks($: cheerio.CheerioAPI, pageUrl: string, evidenceTe
         + Number(businessOverview) * 70 + Number(organizationService) * 35
         - Number(peripheral && !(serviceLeaf && hits > 0)) * 100;
     }
-    const key = `${url.hostname.replace(/^www\./, '')}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}`;
+    const key = `${url.hostname.replace(/^www\./, '')}${url.port ? `:${url.port}` : ''}${path.replace(/\/$/, '')}${keepPageQueries ? url.search : ''}`;
     const previous = seen.get(key);
     if (previous && (previous.priority ?? 0) >= priority) return;
     const link = { url: url.href, kind, priority, ...(label ? { label } : {}) };

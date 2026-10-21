@@ -53,6 +53,8 @@ export interface HeEngCompanyQualificationAssessment {
   status: HeEngCompanyFitDecision['status'];
   reason: string;
   hypothesisId: string | null;
+  /** Missing in older audits; preserves the exact exclusion selected by each assessment. */
+  exclusionCause?: HeEngCompanyFitDecision['exclusionCause'];
   quoteIds: string[];
   explanation: string;
 }
@@ -95,6 +97,8 @@ export interface HeEngQualificationMemo {
       pages: Array<{ url: string; text: string; evidenceSource?: 'constructor_website' | 'website' }>;
       retryableFailure: boolean;
       collectedJobId?: string;
+      /** Missing = legacy paid quote IDs; v2 retains every long-paragraph segment. */
+      excerptVersion?: 2;
     }>;
     /** Durable before the request; a missing response must not buy it again. */
     inFlight?: { reservationId: string; companyKeys: string[]; phase?: 'classifier' | 'review' };

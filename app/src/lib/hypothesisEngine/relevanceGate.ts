@@ -347,8 +347,9 @@ export interface HeRelevanceGateResult {
    */
   checkedRows: number;
   /**
-   * Сколько строк ПОЛУЧИЛО вердикт модели. Меньше checkedRows на строки
-   * батчей, которые упали или вернули мусор: этот модуль их глотает (never-throw,
+   * Сколько строк ПОЛУЧИЛО вердикт модели. Меньше checkedRows на бесплатные
+   * ENG-пропуски skippedInsufficientEvidenceRows и строки батчей, которые
+   * упали или вернули мусор: этот модуль их глотает (never-throw,
    * см. шапку), поэтому по одному пустому `flagged` не отличить «модель никого
    * не вычеркнула» от «модель не ответила ни разу». Вызывающему это различие
    * обязательно: во втором случае гейт НЕ отработал, и верить его результату —
@@ -356,6 +357,8 @@ export interface HeRelevanceGateResult {
    * следующий тик второй раз не судит).
    */
   judgedRows: number;
+  /** Verified ENG only: insufficient descriptions kept without buying a model verdict. */
+  skippedInsufficientEvidenceRows?: number;
   tokensUsed: number;
   costUsd: number;
   /**
@@ -1124,6 +1127,16 @@ export async function findIrrelevantRows(input: {
     return out;
   };
 
+  // Use exactly the same normalized field and threshold as the defensive
+  // exclusion guard below. Paying for these rows cannot change their outcome:
+  // missing/short descriptions must survive for later website qualification.
+  const hasEngExclusionEvidence = (row: HeGateRow): boolean => (row.description?.trim().length ?? 0) >= 80;
+  const eligible = selectedEngScope ? checked.map(gateRowOf).filter(hasEngExclusionEvidence) : null;
+  if (eligible) result.skippedInsufficientEvidenceRows = checked.length - eligible.length;
+  // Retain the original i values even across skipped rows, batches and splits.
+  // Legacy EN/RU use the original mapper/batching path unchanged.
+  const candidateCount = eligible ? eligible.length : checked.length;
+
   /**
    * Бюджет символов на вызов — только EN. На RU-ветке бюджета нет вовсе, а не
    * «большой»: у её строк потолки прежние, и любое число здесь могло бы в
@@ -1199,7 +1212,7 @@ export async function findIrrelevantRows(input: {
         // exclusion. Keep such ENG candidates even if the model overreaches.
         // Legacy EN and RU retain their existing matching rules.
         const own = new Set(segment
-          .filter((row) => !selectedEngScope || (row.description?.trim().length ?? 0) >= 80)
+          .filter((row) => !selectedEngScope || hasEngExclusionEvidence(row))
           .map((r) => r.i));
         for (const idx of llm.data.irrelevant) if (own.has(idx)) result.flagged.add(idx);
         result.judgedRows += segment.length;
@@ -1351,11 +1364,11 @@ export async function findIrrelevantRows(input: {
   // charBudget символов. Размер строки мерим её же JSON'ом — тем самым, который
   // уедет в промпт, — чтобы новое поле попадало в бюджет само, без второго
   // места, где перечислены поля и их длины.
-  for (let start = 0; start < checked.length && !stopped; ) {
+  for (let start = 0; start < candidateCount && !stopped; ) {
     const batch: HeGateRow[] = [];
     let chars = 0;
-    while (batch.length < BATCH_SIZE && start + batch.length < checked.length) {
-      const row = gateRowOf(checked[start + batch.length], start + batch.length);
+    while (batch.length < BATCH_SIZE && start + batch.length < candidateCount) {
+      const row = eligible ? eligible[start + batch.length] : gateRowOf(checked[start + batch.length], start + batch.length);
       const size = JSON.stringify(row).length + 1;
       // Первая строка входит в батч ВСЕГДА, даже если одна не помещается в
       // бюджет: батча из нуля строк быть не может — внешний цикл сдвигается на
