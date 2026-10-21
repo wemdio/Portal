@@ -203,6 +203,7 @@ import { heEngBaseBudgetActive, rethrowHeEngBaseBudgetError } from '../engBaseBu
 import { callLLMWithSchema, getHeModel, LLMValidationError } from '../llm';
 import { readHeCollectCountries } from '../engCountries';
 import { readHeEngEmailPolicy, selectHeEngEmailRows } from '../engEmailPolicy';
+import { heEngPdlPlanForCache, prioritizeHeEngPdlNameSlices, type HeEngPdlNamePriority } from '../engPdlNamePriority';
 import { withHeEngCollectionCommitLock } from '../engCollectionLocks';
 import {
   sanitizeEngContactDiagnostics,
@@ -1221,6 +1222,8 @@ export interface HeSliceProbe {
 }
 
 export interface HeCollectInfo {
+  /** Free manual ENG candidate slices stay out of the reusable/refill plan. */
+  eng_pdl_name_priority?: HeEngPdlNamePriority;
   /** Trusted provider countries survive constructor grids and harvest cleanup. */
   eng_source_countries?: HeEngSourceCountryRegistry;
   /** ENG client only: checkpointed company/site evidence, separate from the legacy gate. */
@@ -7256,6 +7259,22 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         .eq('id', baseId);
       throw new Error(note);
     }
+    // Adapt new and reusable catalogue plans for verified ENG clients for
+    // free. This stays inside !info.plan: an in-flight base keeps its exact
+    // tasks, harvest and paid checkpoint, even after a deployment.
+    if (engEmailPolicy && !isRefill) {
+      const prioritized = prioritizeHeEngPdlNameSlices({
+        plan: info.plan,
+        selectedHypotheses: planned.usedHypotheses,
+        requestedHypothesisIds: payloadStringArray(job, 'hypothesis_ids'),
+        maxTasks: HE_PLAN_MAX_TASKS,
+      });
+      info.plan = prioritized.plan;
+      if (prioritized.priority) info.eng_pdl_name_priority = prioritized.priority;
+      if (prioritized.addedNames.length > 0) {
+        stageLog(ctx, `[base_collect] ENG name-priority candidates: ${prioritized.addedNames.join(', ')}; broad fallback retained, fit not yet verified`);
+      }
+    }
     info.tasks = info.plan.tasks.map((task) => ({
       source: task.source,
       status: 'pending' as const,
@@ -7274,7 +7293,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // сборка починит его заново, а не унаследует отказ навсегда.
     if (!reusedPlan && catalog) {
       if (heRememberablePlan(info)) {
-        await catalog.rememberPlan(info.plan, planned.planKey);
+        await catalog.rememberPlan(engEmailPolicy ? heEngPdlPlanForCache(info.plan, info.eng_pdl_name_priority) : info.plan, planned.planKey);
       } else {
         stageLog(
           ctx,
@@ -7622,7 +7641,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         // оставило бы стор без купленного среза, и за него платила бы КАЖДАЯ
         // следующая ночь той же вертикали. Не дошла запись и здесь — её
         // повторит тик импорта этой же базы (ветка ниже).
-        if (heRememberablePlan(info)) await replanCatalog.rememberPlan(info.plan, input.planKey);
+        if (heRememberablePlan(info)) {
+          await replanCatalog.rememberPlan(engEmailPolicy ? heEngPdlPlanForCache(info.plan, info.eng_pdl_name_priority) : info.plan, input.planKey);
+        }
         // Купленный срез — каталожный: ключам выборки нужен список Do not contact.
         const stopped = await ensureDnc();
         if (stopped) return stopped;
@@ -7640,7 +7661,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
      * срезами — записи нет, остаётся одно чтение стора.
      */
     const planKey = boughtWidening.plan_key;
-    const plan = info.plan;
+    const plan = engEmailPolicy ? heEngPdlPlanForCache(info.plan, info.eng_pdl_name_priority) : info.plan;
     const storeCatalog = await getCatalog();
     if (storeCatalog && !storeCatalog.storedPlanCovers(plan, planKey)) {
       stageLog(ctx, '[base_collect] план с купленным срезом в сторе вертикали не найден — записываем повторно');
