@@ -28,6 +28,8 @@ export async function GET(req: NextRequest) {
     const since = days === null ? null : new Date(Date.now() - days * 86_400_000).toISOString();
     const campaign = params.get('campaign') || null;
     if (campaign && !UUID_RE.test(campaign)) return jsonError('Неизвестная кампания', 400);
+    const source = params.get('source') || null;
+    if (source && source !== 'polza_ru' && source !== 'polza_en') return jsonError('Неизвестный автоаутрич', 400);
     const onlyLinked = params.get('scope') !== 'all';
 
     const code = params.get('code');
@@ -36,6 +38,7 @@ export async function GET(req: NextRequest) {
         p_since: since,
         p_campaign_id: campaign,
         p_only_linked: onlyLinked,
+        p_source_kind: source,
       });
       if (error) return jsonError(error.message, 500);
       return NextResponse.json({ codes: data ?? [] });
@@ -48,6 +51,7 @@ export async function GET(req: NextRequest) {
       p_campaign_id: campaign,
       p_only_linked: onlyLinked,
       p_limit: 100,
+      p_source_kind: source,
     });
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ events: data ?? [] });

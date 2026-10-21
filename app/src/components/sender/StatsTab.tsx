@@ -29,6 +29,7 @@ import {
   type SenderStatsDto,
   type SenderStatsPeriod,
   type SenderStatsScope,
+  type SenderStatsSource,
 } from './api';
 
 /**
@@ -543,8 +544,12 @@ const SCOPES: { id: SenderStatsScope; label: string; hint: string }[] = [
 /** initialCampaignId — кампания, из строки которой нажали «Статистика». */
 export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: string | null } = {}) {
   const [period, setPeriod] = useState<SenderStatsPeriod>('30d');
-  // null — все кампании сразу.
-  const [campaignId, setCampaignId] = useState<string | null>(initialCampaignId);
+  // Пустая строка — все кампании; source:* — весь автоаутрич одного языка.
+  const [campaignSelection, setCampaignSelection] = useState(initialCampaignId ?? '');
+  const source: SenderStatsSource | null = campaignSelection === 'source:polza_ru'
+    ? 'polza_ru'
+    : campaignSelection === 'source:polza_en' ? 'polza_en' : null;
+  const campaignId = source ? null : campaignSelection || null;
   const [campaignList, setCampaignList] = useState<Pick<CampaignDto, 'id' | 'name'>[]>([]);
   // ours — входящие и отказы только по письмам «Рассылки»: наши ящики шлют и
   // другие инструменты, их отбойники иначе портят доставляемость.
@@ -575,7 +580,7 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
       setLoading(true);
       setError(null);
       try {
-        const res = await fetchSenderStats(period, campaignId, scope);
+        const res = await fetchSenderStats(period, campaignId, scope, source);
         if (!cancelled) setData(res);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить статистику');
@@ -586,7 +591,7 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
     return () => {
       cancelled = true;
     };
-  }, [period, campaignId, scope, reloadKey]);
+  }, [period, campaignId, scope, source, reloadKey]);
 
   const t = data?.totals;
   const replyRate = t ? rate(t.replied, t.reached) : null;
@@ -613,19 +618,21 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
             ))}
           </div>
           <select
-            value={campaignId ?? ''}
-            onChange={(e) => setCampaignId(e.target.value || null)}
+            value={campaignSelection}
+            onChange={(e) => setCampaignSelection(e.target.value)}
             disabled={loading}
             aria-label="Кампания"
             className="max-w-xs rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 disabled:opacity-60"
           >
             <option value="">Все кампании</option>
+            <option value="source:polza_ru">Автоаутрич RU — все кампании</option>
+            <option value="source:polza_en">Автоаутрич EN — все кампании</option>
             {campaignList.map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
-          {/* С выбранной кампанией всё и так только её — переключать нечего. */}
-          {campaignId === null && (
+          {/* С кампанией или автоаутричем считаем только связанные письма. */}
+          {campaignId === null && source === null && (
             <div className="inline-flex gap-1 rounded-xl border border-zinc-200 bg-white p-1" role="group" aria-label="Чьи письма считать">
               {SCOPES.map((s) => (
                 <button
@@ -724,7 +731,10 @@ export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: str
 
           <DomainDeliverability domains={data.domains} />
 
-          <BounceCodes period={period} campaignId={campaignId} scope={scope} reloadKey={reloadKey} />
+          <BounceCodes
+            key={`${period}:${campaignSelection}:${scope}:${reloadKey}`}
+            period={period} campaignId={campaignId} scope={scope} source={source} reloadKey={reloadKey}
+          />
 
           <BreakdownTable data={data} />
         </div>
