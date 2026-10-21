@@ -1609,7 +1609,7 @@ services:
       # `5 18`. Две разные системы отсчёта, легко перепутать.
       - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-5 6,9,12,15,18 * * *}  # 9:05, 12:05, 15:05, 18:05, 21:05 МСК; 18:05 обязателен — на нём отчёт продаж в 18:15
       # Short bank + confirmed USDT pulls; history keeps EXTERNAL_SYNC_CRON.
-      - BANK_SYNC_CRON=${BANK_SYNC_CRON:-*/10 * * * *}
+      - BANK_SYNC_CRON=${BANK_SYNC_CRON:-*/15 * * * *}
       # Explicit activation after applying the private delivery journal migration.
       - BANK_INCOME_NOTIFICATIONS_ENABLED=${BANK_INCOME_NOTIFICATIONS_ENABLED:-false}
       - BANK_INCOME_TELEGRAM_BOT_TOKEN=${BANK_INCOME_TELEGRAM_BOT_TOKEN:-}
