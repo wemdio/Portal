@@ -1,6 +1,6 @@
 # instantly-db-prod — перенос Instantly-баз со 144 на прод (139)
 
-> Статус на 22.07.2026: боевое переключение завершено; Instantly prod/dev и
+> Статус на 22.07.2026: боевое переключение завершено; Instantly prod и
 > `instantly_dataset` работают на `139.60.162.12`. Хост `144.31.54.166` временно
 > сохраняется только для rollback и вспомогательных сервисов. Ниже оставлена
 > история и процедура переезда.
@@ -16,7 +16,7 @@
 
 Здесь только скрипты переезда:
 - `dump-instantly.sh` — запускается НА 144: globals (роли instantly + dataset_ro
-  с паролями) + дампы instantly (79MB) / instantly_dataset (12GB) / dev (9MB).
+  с паролями) + дампы instantly (79MB) / instantly_dataset (12GB).
 - `restore-instantly.sh` — на проде, в СВЕЖЕподнятые контейнеры баз (только базы,
   без migrator — см. шапку скрипта).
 - `verify-instantly.sh` — проверка: размеры, роли, счётчики датасета, PostgREST.
@@ -29,8 +29,7 @@
 2. прод: скопировать конфиги со 144 (`/opt/instantly-db`: docker-compose.yml, .env,
    migrations/, scripts/) и дампы (`/root/instantly-dumps`) — заодно замеряется
    скорость WAN 144→139 (нужна для окна боевой ночи main).
-3. прод: `cd /opt/instantly-db && docker compose up -d instantly-postgres-prod
-   instantly-postgres-dev` → `restore-instantly.sh` → `docker compose up -d` →
+3. прод: `cd /opt/instantly-db && docker compose up -d instantly-postgres-prod` → `restore-instantly.sh` → `docker compose up -d` →
    `verify-instantly.sh`.
 
 ## Боевое переключение (в ту же ночь, что и main)
@@ -40,7 +39,7 @@
 2. Свежий dump-instantly.sh на 144 → scp → на проде `down -v` instantly-стека →
    up баз → restore → полный up → verify.
 3. Переключение конфигов:
-   - прод `.env` приложения: в `INSTANTLY_DATABASE_URL`, `INSTANTLY_DEV_DATABASE_URL`,
+   - прод `.env` приложения: в `INSTANTLY_DATABASE_URL`,
      `INSTANTLY_SUPABASE_URL` (порт 35401), `INSTANTLY_DATASET_DB_URL` — хост
      144.31.54.166 → 139.60.162.12;
    - Semaphore: `INSTANTLY_DB_SSH_HOST` → 139.60.162.12 (креды SSH прода);
