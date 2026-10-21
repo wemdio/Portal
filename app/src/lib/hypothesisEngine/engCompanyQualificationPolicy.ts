@@ -53,6 +53,8 @@ export interface HeEngCompanyQualificationAssessment {
   status: HeEngCompanyFitDecision['status'];
   reason: string;
   hypothesisId: string | null;
+  /** Missing in older audits; preserves the exact exclusion selected by each assessment. */
+  exclusionCause?: HeEngCompanyFitDecision['exclusionCause'];
   quoteIds: string[];
   explanation: string;
 }

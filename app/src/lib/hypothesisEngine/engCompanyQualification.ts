@@ -36,6 +36,7 @@ const MAX_COMPANY_QUOTES = 24;
 const EMAIL = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu;
 const AssessmentSchema = z.object({ model: z.string().max(100), status: z.enum(['match', 'mismatch', 'unverified']),
   reason: z.string().max(100), hypothesisId: z.string().max(200).nullable(), quoteIds: z.array(z.string().max(200)).max(2),
+  exclusionCause: z.string().min(1).max(1000).nullable().optional(),
   explanation: z.string().max(400) });
 const AuditSchema = z.object({ version: z.literal(1),
   quotes: z.array(z.object({ id: z.string().max(200), url: z.string().max(2000), text: z.string().min(12).max(1400),
@@ -467,7 +468,7 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     await checkpoint;
   }
   function assessment(model: string, decision: HeEngCompanyFitDecision): HeEngCompanyQualificationAssessment {
-    return { model, status: decision.status, reason: decision.reason, hypothesisId: decision.hypothesisId,
+    return { model, status: decision.status, reason: decision.reason, hypothesisId: decision.hypothesisId, exclusionCause: decision.exclusionCause,
       quoteIds: [...decision.activityQuoteIds], explanation: withoutEmails(decision.explanation).slice(0, 400) };
   }
   function finish(key: string, verdict: HeEngCompanyVerdict, classifier?: HeEngCompanyFitDecision, review?: HeEngCompanyFitDecision): void {
