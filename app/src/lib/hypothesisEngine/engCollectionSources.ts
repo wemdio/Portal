@@ -13,6 +13,8 @@ export interface HeEngSourceHistoryEntry {
 export interface HeEngTargetSourceOptions {
   searchExhausted?: boolean;
   searchUnavailable?: boolean;
+  /** Frozen server-generated registry slices, kept outside reusable source plans. */
+  registryTasks?: readonly HeCollectTask[];
 }
 
 interface Choice {
@@ -66,6 +68,14 @@ function inactiveReason(
   const rounds = sourceHistory(choice, history);
   if (rounds.some((round) => round.exhausted)) return 'sources_exhausted';
   if (rounds.some((round) => round.failed)) return 'error';
+  if (choice.task.source === 'eng_registry') {
+    // Public APIs serve smaller pages. Four weak pages are enough to suspend
+    // this slice, without changing the legacy catalogue/search thresholds.
+    const pages = rounds.slice(-4);
+    if (pages.length === 4 && pages.every(round => round.candidates >= 20 &&
+        round.readyContacts / round.candidates < 0.05) &&
+        pages.reduce((sum, round) => sum + round.candidates, 0) >= 100) return 'low_yield';
+  }
   const recent = rounds.slice(-2);
   if (recent.length === 2 && recent.every((round) => round.candidates >= 50 &&
       round.readyContacts / round.candidates < 0.05) &&
@@ -73,12 +83,13 @@ function inactiveReason(
   return null;
 }
 
-function choices(planTasks: readonly HeCollectTask[]): Choice[] {
+function choices(planTasks: readonly HeCollectTask[], options: HeEngTargetSourceOptions): Choice[] {
   // The Maps child job does not yet inherit the base's $5 ledger. Keep it out
   // of new adaptive collections until every physical request is guarded;
   // existing plans and the legacy dispatcher remain unchanged.
   const allowed = new Set(['pdl', 'funded', 'eng_hiring', 'web_search']);
   const tasks: HeCollectTask[] = [
+    ...(options.registryTasks ?? []).filter(task => task.source === 'eng_registry' && task.registry_query),
     ...planTasks.filter((task) => allowed.has(task.source)),
     { source: 'web_search', rationale: 'Discover companies through ordinary search within the frozen target and countries.' },
   ];
@@ -92,9 +103,10 @@ function choices(planTasks: readonly HeCollectTask[]): Choice[] {
 }
 
 function priority(choice: Choice): number {
-  if (choice.task.source === 'pdl' && choice.task.pdl_filters?.name?.trim()) return 0;
-  if (['pdl', 'funded', 'eng_hiring'].includes(choice.task.source)) return 1;
-  return 2;
+  if (choice.task.source === 'eng_registry') return 0;
+  if (choice.task.source === 'pdl' && choice.task.pdl_filters?.name?.trim()) return 1;
+  if (['pdl', 'funded', 'eng_hiring'].includes(choice.task.source)) return 2;
+  return 3;
 }
 
 /**
@@ -108,7 +120,7 @@ export function pickHeEngTargetSource(
   options: HeEngTargetSourceOptions = {},
 ): Choice | null {
   assertHistory(history);
-  const available = choices(planTasks).filter((choice) => !inactiveReason(choice, history, options));
+  const available = choices(planTasks, options).filter((choice) => !inactiveReason(choice, history, options));
   const web = available.find((choice) => choice.task.source === 'web_search');
   const catalogues = available.filter((choice) => choice.task.source !== 'web_search');
   const last = history.at(-1);
@@ -125,7 +137,7 @@ export function heEngTargetSourceStopReason(
   options: HeEngTargetSourceOptions = {},
 ): InactiveReason {
   assertHistory(history);
-  const reasons = choices(planTasks).map((choice) => inactiveReason(choice, history, options));
+  const reasons = choices(planTasks, options).map((choice) => inactiveReason(choice, history, options));
   if (reasons.some((reason) => reason === null)) {
     throw new Error('ENG collection: an available source cannot be reported as exhausted');
   }

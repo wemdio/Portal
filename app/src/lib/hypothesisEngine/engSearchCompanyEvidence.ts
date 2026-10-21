@@ -31,7 +31,7 @@ export interface HeEngSearchCompanyEvidenceResult {
   reason: HeEngSearchEvidenceReason;
   countrySource?: 'pdl' | 'company_website';
 }
-interface OfficialPage { url: string; html: string }
+export interface OfficialPage { url: string; html: string }
 /** Injectable reads support offline checks without live network/provider calls. */
 export interface HeEngSearchCompanyEvidenceReads {
   catalog?: (websites: string[], signal?: AbortSignal) => Promise<Row[]>;
@@ -231,6 +231,14 @@ async function officialPage(ctx: HeStageContext, url: string, parent: AbortSigna
     return { url: response.url, html };
   });
 }
+
+// The registry path shares these bounded readers without changing web-search
+// admission rules or importing any RU/internal Vertical Engine behavior.
+export {
+  officialPage as fetchHeEngOfficialCompanyPage,
+  ownOrganizationFacts as readHeEngOfficialOrganizationFacts,
+  satisfiesSize as heEngEmployeeRangeFit,
+};
 
 /**
  * Search locates a website only. Country and size come from an exact catalog

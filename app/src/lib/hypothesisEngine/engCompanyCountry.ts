@@ -1,5 +1,7 @@
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { ENG_COUNTRIES, ENG_COUNTRY_US, normalizeEngCountry } from './engCountries';
+import { heEngRegistryRecordValid } from './engRegistryIdentity';
+import type { HeEngRegistryProvider } from './engPublicRegistryTypes';
 
 // Same actual-address rule as the existing Maps country gate. Kept local so
 // this proof reader does not import catalogCursor and its database clients.
@@ -8,7 +10,7 @@ function verifiedUsMapsAddress(address: string): boolean {
   return new RegExp(`\\b(?:${US_STATE_CODES})\\s+\\d{5}(?:-\\d{4})?\\b`).test(address) || /,\s*(?:united states|usa)\s*$/i.test(address);
 }
 
-export type HeEngCountrySource = 'pdl' | 'funded' | 'eng_hiring' | 'google_maps' | 'company_website';
+export type HeEngCountrySource = 'pdl' | 'funded' | 'eng_hiring' | 'google_maps' | 'company_website' | 'public_registry';
 
 export interface HeEngOfficialPostalAddress {
   streetAddress: string;
@@ -33,6 +35,7 @@ export interface HeEngSourceCountryProof {
   sourcePage?: string;
   sourceOrganizationWebsite?: string;
   sourcePostalAddress?: HeEngOfficialPostalAddress;
+  registryProvider?: HeEngRegistryProvider;
 }
 
 export interface HeEngCountryRow {
@@ -81,13 +84,16 @@ function sourceCountry(raw: unknown): string | null {
 function verifiedProof(row: HeEngCountryRow, raw: unknown): HeEngSourceCountryProof | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const proof = raw as Partial<HeEngSourceCountryProof>;
-  if (proof.version !== 1 || !['pdl', 'funded', 'eng_hiring', 'google_maps', 'company_website'].includes(String(proof.source))) return null;
+  if (proof.version !== 1 || !['pdl', 'funded', 'eng_hiring', 'google_maps', 'company_website', 'public_registry'].includes(String(proof.source))) return null;
   const key = heEngSourceCountryKey(row);
   if (!key || key !== heEngSourceCountryKey({ company: proof.sourceName, website: proof.sourceWebsite })) return null;
   const country = sourceCountry(proof.sourceCountry);
   if (!country || country !== proof.country) return null;
   if (proof.sourceCountryCode !== undefined && sourceCountry(proof.sourceCountryCode) !== country) return null;
   if (proof.source === 'google_maps' && (country !== ENG_COUNTRY_US || !verifiedUsMapsAddress(text(proof.sourceAddress)))) return null;
+  if (proof.source === 'public_registry' && (proof.registryProvider === 'companies_house' ||
+      text(proof.sourceAddress).length < 5 ||
+      !heEngRegistryRecordValid(proof.registryProvider, proof.sourceId, country, proof.sourcePage))) return null;
   if (proof.source === 'company_website') {
     const address = proof.sourcePostalAddress;
     const host = siteKey(row.website);
@@ -106,6 +112,7 @@ function verifiedProof(row: HeEngCountryRow, raw: unknown): HeEngSourceCountryPr
     ...(proof.sourceCountryCode !== undefined ? { sourceCountryCode: text(proof.sourceCountryCode) } : {}),
     ...(proof.sourceAddress !== undefined ? { sourceAddress: text(proof.sourceAddress) } : {}),
     ...(proof.sourceId !== undefined ? { sourceId: text(proof.sourceId) } : {}),
+    ...(proof.source === 'public_registry' ? { registryProvider: proof.registryProvider!, sourcePage: text(proof.sourcePage) } : {}),
     ...(proof.source === 'company_website' ? {
       sourcePage: text(proof.sourcePage), sourceOrganizationWebsite: text(proof.sourceOrganizationWebsite),
       sourcePostalAddress: {
@@ -131,6 +138,7 @@ export function withHeEngSourceCountry<T extends HeEngCountryRow>(
     page?: string;
     organizationWebsite?: string;
     postalAddress?: HeEngOfficialPostalAddress;
+    registryProvider?: HeEngRegistryProvider;
   },
 ): T {
   const { _eng_source_country: _discarded, ...clean } = row;
@@ -142,6 +150,9 @@ export function withHeEngSourceCountry<T extends HeEngCountryRow>(
     sourceName: text(input.sourceName), sourceWebsite: text(input.sourceWebsite),
     ...(text(input.countryCode) ? { sourceCountryCode: text(input.countryCode) } : {}),
     ...(input.source === 'google_maps' ? { sourceAddress: text(input.address) } : {}),
+    ...(input.source === 'public_registry' ? {
+      sourceAddress: text(input.address), sourcePage: text(input.page), registryProvider: input.registryProvider,
+    } : {}),
     ...(input.source === 'company_website' ? {
       sourceAddress: text(input.address), sourcePage: text(input.page),
       sourceOrganizationWebsite: text(input.organizationWebsite), sourcePostalAddress: input.postalAddress,
