@@ -1528,11 +1528,28 @@ export default function UsersPage() {
     setError('');
     setSaveSuccessMessage(null);
     try {
+      const currentProfile = users.find(u => u.id === actionModalUserId);
+      const profilePatch: { full_name?: string; email?: string } = {};
+      const fullName = modalFullName.trim();
+      const email = modalEmail.trim().toLowerCase();
+      if (fullName !== (currentProfile?.full_name ?? '')) profilePatch.full_name = fullName;
+      if (email !== (currentProfile?.email ?? '').trim().toLowerCase()) profilePatch.email = email;
+
+      if (Object.keys(profilePatch).length > 0) {
+        await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(profilePatch),
+        });
+        setUsers(prev => prev.map(u => u.id === actionModalUserId ? { ...u, ...profilePatch } : u));
+        setModalFullName(fullName);
+        setModalEmail(email);
+      }
+
       await apiFetch<{ ok: true }>(`/api/admin/users/${actionModalUserId}/role`, {
         method: 'POST',
         body: JSON.stringify({ role: modalRole }),
       });
-      setUsers(users.map(u => (u.id === actionModalUserId ? { ...u, role: modalRole } : u)));
+      setUsers(prev => prev.map(u => (u.id === actionModalUserId ? { ...u, role: modalRole } : u)));
       void logAudit('admin.users.role.updated', 'User role updated', {
         targetUserId: actionModalUserId,
         role: modalRole,

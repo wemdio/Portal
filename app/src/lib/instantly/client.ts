@@ -682,14 +682,27 @@ export async function getLeadListVerificationStats(id: string) {
 
 // ─── Block List ───────────────────────────────────────────────────────────────
 
-export async function listBlockListEntries(params?: PaginationParams) {
-  return request<PaginatedResponse<BlockListEntry>>('/block-lists-entries', {
-    params: params as Record<string, string | number>,
-  });
+type ProviderBlockListEntry = Omit<BlockListEntry, 'value'> & { bl_value: string; is_domain: boolean };
+
+function normalizeBlockListEntry(entry: ProviderBlockListEntry): BlockListEntry {
+  return { ...entry, value: entry.bl_value, type: entry.is_domain ? 'domain' : 'email' };
 }
 
-export async function createBlockListEntry(payload: { value: string; type?: string }) {
-  return request<BlockListEntry>('/block-lists-entries', { method: 'POST', body: payload });
+export async function listBlockListEntries(
+  params?: PaginationParams & { search?: string; domains_only?: boolean },
+  options?: InstantlyRequestOptions,
+) {
+  const result = await request<PaginatedResponse<ProviderBlockListEntry>>('/block-lists-entries', {
+    params: params as Record<string, string | number | boolean>,
+  }, options);
+  return { ...result, items: result.items.map(normalizeBlockListEntry) };
+}
+
+export async function createBlockListEntry(payload: { value: string; type?: string }, options?: InstantlyRequestOptions) {
+  const result = await request<ProviderBlockListEntry>('/block-lists-entries', {
+    method: 'POST', body: { bl_value: payload.value },
+  }, options);
+  return normalizeBlockListEntry(result);
 }
 
 export async function updateBlockListEntry(id: string, payload: { value?: string }) {

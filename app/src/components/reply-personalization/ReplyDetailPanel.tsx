@@ -1,11 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Bell, BellOff } from 'lucide-react';
+import { Ban, Bell, BellOff } from 'lucide-react';
 import { EditorResizeHandle, useEditorHeight } from '@/components/ResizableEditor';
 import {
   fetchOpenDraft,
   fetchThread,
+  fetchContactBlock,
+  blockReplyContact,
   generateReply,
   saveReplyLanguage,
   skipReply,
@@ -85,6 +87,12 @@ export function ReplyDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  const blockKey = `${projectId}:${item.id}`;
+  const [blockStatus, setBlockStatus] = useState<{ key: string; blocked: boolean; error: string | null } | null>(null);
+  const blockLoading = blockStatus?.key !== blockKey;
+  const contactBlocked = !blockLoading && blockStatus.blocked;
+  const blockError = !blockLoading ? blockStatus.error : null;
+  const [blocking, setBlocking] = useState(false);
   /** Адреса, на которые адресат перенаправил («пишите Екатерине, почта ...»). */
   const [referredEmails, setReferredEmails] = useState<string[]>([]);
   /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
@@ -117,6 +125,18 @@ export function ReplyDetailPanel({
   useEffect(() => {
     setSoundOn(readStore(SOUND_KEY) !== 'off');
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchContactBlock(item.id, projectId)
+      .then((result) => {
+        if (!cancelled) setBlockStatus({ key: blockKey, blocked: result.blocked, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setBlockStatus({ key: blockKey, blocked: false, error: 'Не удалось проверить стоп-лист. При отправке проверим повторно.' });
+      });
+    return () => { cancelled = true; };
+  }, [item.id, projectId, blockKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -268,21 +288,60 @@ export function ReplyDetailPanel({
     }
   };
 
+  const handleBlock = async () => {
+    if (!window.confirm(
+      `Заблокировать ${item.leadEmail}?\n\nInstantly прекратит рассылки на этот адрес со всех ящиков во всех кампаниях этого аккаунта. Новые загрузки также будут учитывать блокировку.`,
+    )) return;
+    setBlocking(true);
+    setBlockStatus({ key: blockKey, blocked: false, error: null });
+    setConfirmOpen(false);
+    try {
+      const result = await blockReplyContact(item.id, projectId);
+      setBlockStatus({ key: blockKey, blocked: result.blocked, error: null });
+    } catch (err) {
+      setBlockStatus({ key: blockKey, blocked: false, error: err instanceof Error ? err.message : 'Не удалось заблокировать контакт' });
+    } finally {
+      setBlocking(false);
+    }
+  };
+
+  const replyBlocked = contactBlocked && recipient === null;
+
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       {/* Шапка диалога */}
       <div className="border-b border-gray-100 px-4 py-2.5">
-        <div className="text-sm font-semibold text-gray-900">{item.companyName || item.leadEmail}</div>
-        <div className="text-xs text-gray-500">
-          {item.leadEmail}
-          {item.source === 'others'
-            ? item.eaccount
-              ? ` · пришло на ${item.eaccount}`
-              : ''
-            : item.campaignName
-              ? ` · ${item.campaignName}`
-              : ''}
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-gray-900">{item.companyName || item.leadEmail}</div>
+            <div className="text-xs text-gray-500">
+              {item.leadEmail}
+              {item.source === 'others'
+                ? item.eaccount
+                  ? ` · пришло на ${item.eaccount}`
+                  : ''
+                : item.campaignName
+                  ? ` · ${item.campaignName}`
+                  : ''}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleBlock}
+            disabled={blockLoading || blocking || contactBlocked}
+            title="Запретить рассылки на email контакта во всех кампаниях этого аккаунта Instantly"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+          >
+            <Ban className="h-3.5 w-3.5" />
+            {blocking ? 'Блокируем...' : blockLoading ? 'Проверяем блокировку...' : contactBlocked ? 'Контакт заблокирован' : 'Заблокировать контакт'}
+          </button>
         </div>
+        {contactBlocked ? (
+          <p role="status" className="mt-2 text-xs text-red-700">
+            Рассылки на {item.leadEmail} запрещены во всех кампаниях этого аккаунта Instantly.
+          </p>
+        ) : null}
+        {blockError ? <p role="alert" className="mt-2 text-xs text-red-600">{blockError}</p> : null}
       </div>
 
       {/* Переписка пузырями */}
@@ -389,7 +448,7 @@ export function ReplyDetailPanel({
           <button
             type="button"
             onClick={handleGenerate}
-            disabled={generating}
+            disabled={generating || replyBlocked || blocking}
             className="rounded-lg bg-blue-600 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
           >
             {generating ? 'Генерирую...' : draft ? 'Сгенерировать заново' : 'Сгенерировать ответ'}
@@ -464,7 +523,7 @@ export function ReplyDetailPanel({
           <button
             type="button"
             onClick={() => setConfirmOpen(true)}
-            disabled={!draftText.trim()}
+            disabled={!draftText.trim() || replyBlocked || blocking || blockLoading}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
           >
             Отправить ответ
@@ -474,7 +533,7 @@ export function ReplyDetailPanel({
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
 
         <SendConfirmDialog
-          open={confirmOpen}
+          open={confirmOpen && !replyBlocked && !blocking}
           text={draftText}
           onCancel={() => setConfirmOpen(false)}
           onSent={() => {
