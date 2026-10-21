@@ -324,6 +324,9 @@ def map_transaction(
 class BankTochkaSync(SyncSource):
     name = "bank_tochka"
 
+    def __init__(self, periods: list[tuple[str, str]] | None = None):
+        self.periods = periods
+
     async def run(self, conn: asyncpg.Connection) -> int:
         if not JWT:
             raise NotImplementedError("TOCHKA_JWT не задан")
@@ -332,6 +335,11 @@ class BankTochkaSync(SyncSource):
         total = 0
         skip_counts: dict[str, int] = {}
         status_counts: dict[str, int] = {}
+        failures: list[str] = []
+        # End date must move even when the worker has not restarted for days.
+        periods = self.periods if self.periods is not None else [
+            *PERIODS[:-1], (PERIODS[-1][0], date.today().isoformat()),
+        ]
 
         async with httpx.AsyncClient(
             timeout=90, headers=headers, verify=tochka_ssl_context()
@@ -343,7 +351,7 @@ class BankTochkaSync(SyncSource):
             })
 
             for acc in accounts:
-                for st, en in PERIODS:
+                for st, en in periods:
                     # Изоляция периода: сбой одного счёта/периода (сеть, битые
                     # данные, ошибка upsert) не должен обрывать остальные —
                     # источник обязан дойти до конца и залить то, что удалось.
@@ -355,6 +363,7 @@ class BankTochkaSync(SyncSource):
                             await self._upsert(conn, rows)
                             total += len(rows)
                     except Exception as e:
+                        failures.append(f"{st}..{en}: {type(e).__name__}")
                         print(
                             f"[bank_tochka] period FAIL acc={acc} {st}..{en}: {e}\n{traceback.format_exc()}",
                             flush=True,
@@ -380,6 +389,8 @@ class BankTochkaSync(SyncSource):
             )
             print(f"[bank_tochka] statuses seen: {breakdown}", flush=True)
 
+        if failures:
+            raise RuntimeError(f"Точка: залито {total}, неполная синхронизация: {'; '.join(failures)}")
         return total
 
     async def _fetch_period(
@@ -396,7 +407,7 @@ class BankTochkaSync(SyncSource):
             json={"Data": {"Statement": {"accountId": acc, "startDateTime": st, "endDateTime": en}}},
         )
         if create.status_code >= 400:
-            return []
+            raise RuntimeError(f"Создание выписки: HTTP {create.status_code}")
         sid = create.json()["Data"]["Statement"]["statementId"]
         accq = quote(acc, safe="")
 
@@ -410,7 +421,7 @@ class BankTochkaSync(SyncSource):
                     break
             await asyncio.sleep(POLL_INTERVAL_SEC)
         if not stmt:
-            return []
+            raise RuntimeError("Банк не подготовил выписку за отведённое время")
 
         mapped_rows: list[dict] = []
         for t in stmt.get("Transaction", []) or []:
@@ -432,6 +443,12 @@ class BankTochkaSync(SyncSource):
                  purpose, is_revenue, exclude_reason, raw
                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
                ON CONFLICT (bank, transaction_id) DO UPDATE SET
+                 occurred_at    = EXCLUDED.occurred_at,
+                 amount         = EXCLUDED.amount,
+                 currency       = EXCLUDED.currency,
+                 payer_name     = EXCLUDED.payer_name,
+                 payer_inn      = EXCLUDED.payer_inn,
+                 purpose        = EXCLUDED.purpose,
                  direction      = EXCLUDED.direction,
                  payee_name     = EXCLUDED.payee_name,
                  payee_inn      = EXCLUDED.payee_inn,
