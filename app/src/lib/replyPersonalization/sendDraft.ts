@@ -11,6 +11,7 @@ import {
 } from '@/lib/clientCampaignReplies/quoteHistory';
 import { forwardEmail, getEmail, replyToEmail, sendTestEmail } from '@/lib/instantly/client';
 import { isNotPartOfCampaignError } from '@/lib/instantly/notPartOfCampaign';
+import { isContactBlocked } from '@/lib/instantly/contactBlocklist';
 import { getDraftById, markDraftSent, updateDraftText } from './db';
 import { fetchReplyThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
@@ -133,6 +134,17 @@ export async function sendDraft(
     }
   }
 
+  // Check live provider state, including CC and redirected contacts. This also
+  // protects an old open draft and the /emails/test fallback from bypassing DNC.
+  const checkBlocklist = async () => {
+    for (const email of new Set([newContact || qualification.leadEmail, ...cc])) {
+      if (await isContactBlocked(email, accountId)) {
+        throw new SendDraftError(`Адрес ${email} заблокирован в Instantly. Отправка запрещена.`, 409);
+      }
+    }
+  };
+  await checkBlocklist();
+
   await updateDraftText(draftId, finalText);
 
   // Instantly рендерит тело как HTML: голый { text } с \n схлопывается в один
@@ -147,12 +159,14 @@ export async function sendDraft(
     // отвечает 400 «not part of an Instantly campaign». Отправляем новым
     // письмом с того же ящика, как кабинет клиента и передача лида; заведомо
     // провальный reply не тратим.
-    const sendAsNewLetter = () =>
-      sendTestEmail(
+    const sendAsNewLetter = async () => {
+      await checkBlocklist();
+      return sendTestEmail(
         // У тест-эндпоинта нет cc: копию кладём в список получателей.
         { eaccount, to_address_email_list: [qualification.leadEmail, ...cc].join(', '), subject, body: { html: bodyHtml } },
         { accountId },
       );
+    };
     if (qualification.outOfCampaign) {
       await sendAsNewLetter();
     } else {
@@ -193,6 +207,7 @@ export async function sendDraft(
       );
     } catch (err) {
       if (!isNotPartOfCampaignError(err)) throw err;
+      await checkBlocklist();
       await sendTestEmail(
         {
           eaccount: qualification.eaccount,
