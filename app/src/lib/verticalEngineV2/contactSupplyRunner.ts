@@ -14,13 +14,14 @@ import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
 import { hasPendingSupplyNames } from './contactSupplyNameRecovery';
 import { isVeProviderBillingError } from './collectionErrors';
+import { VE_COLLECTION_BUDGET_CAP_REASON } from './collectionTarget';
 import { describePortalProjectTerm, loadPortalProjectTerm, localIsoDate } from './portalDeliveryTerm';
 
 const BUFFER_WORKDAYS = 2;
 export { buildContactSupplyRequests } from './contactSupplyPlanner';
 type SupplyStop = 'active' | 'exhausted' | 'limited' | 'error';
 type SupplyProgress = { status?: unknown; reason?: unknown; ready_rows?: unknown; stop_cause?: unknown };
-type SupplyOutcome = { status: SupplyStop; reason: string | null; stop_cause?: 'low_yield' };
+type SupplyOutcome = { status: SupplyStop; reason: string | null; stop_cause?: 'low_yield' | 'budget_cap' };
 export interface ContactSupplyPlanRow {
   id: string;
   project_id: string;
@@ -67,7 +68,9 @@ function sourceOutcome(progress: SupplyProgress | null | undefined): SupplyOutco
   if (progress?.status === 'target_reached') return { status: 'active', reason };
   if (progress?.status === 'exhausted' || progress?.status === 'limited' || progress?.status === 'error') {
     return { status: progress.status, reason,
-      ...(progress.status === 'limited' && progress.stop_cause === 'low_yield' ? { stop_cause: 'low_yield' as const } : {}) };
+      ...(progress.status === 'limited' && progress.stop_cause === 'low_yield' ? { stop_cause: 'low_yield' as const }
+        : progress.status === 'limited' && progress.stop_cause == null && reason === VE_COLLECTION_BUDGET_CAP_REASON
+          ? { stop_cause: 'budget_cap' as const } : {}) };
   }
   return { status: 'error', reason: 'Сбор не подтвердил полный результат и состояние источников' };
 }
@@ -85,8 +88,10 @@ export function confirmedAppendOutcome(source: SupplyOutcome, count: unknown, br
     throw new Error('Supply append result did not confirm an exact inserted count');
   }
   // A fresh batch may continue a broad sector after its ordinary batch cap,
-  // but must not erase an explicit economic stop and repurchase the same source.
-  if (broad && count > 0 && source.status === 'limited' && source.stop_cause !== 'low_yield') {
+  // Idle, dry widened slices and unconfirmed continuation also use "limited",
+  // including older checkpoints without stop_cause. Only a proven batch cap
+  // may open another batch; prior yield alone cannot justify repeating a source.
+  if (broad && count > 0 && source.status === 'limited' && source.stop_cause === 'budget_cap') {
     return { appendedCount: count, status: 'active' as const, reason: null };
   }
   return {

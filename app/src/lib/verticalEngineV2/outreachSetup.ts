@@ -94,7 +94,14 @@ export async function loadVeOutreachSetup(db: SupabaseClient, projectId: string)
 export async function autoResumeVeTransientPreparations(
   db: SupabaseClient, scope: { limit?: number } = {},
 ): Promise<{ resumed: number }> {
+  // A queue-write outage resumes the same paid checkpoint and original caps;
+  // it must not go through the generic explicit-preparation retry path.
+  const queue = await db.rpc('ve_auto_resume_queue_persistence_failures', { p_limit: scope.limit ?? 10 });
+  // During a rolling deployment the worker can precede the migration/schema
+  // cache. Keep the independent existing recovery available in that case only.
+  if (queue.error && !['PGRST202', '42883'].includes(queue.error.code)) throw new Error(queue.error.message);
+  const recovered = typeof queue.data === 'number' && Number.isSafeInteger(queue.data) && queue.data > 0 ? queue.data : 0;
   const { data, error } = await db.rpc('ve_auto_resume_transient_preparations', { p_limit: scope.limit ?? 10 });
   if (error) throw new Error(error.message);
-  return { resumed: typeof data === 'number' && Number.isSafeInteger(data) && data > 0 ? data : 0 };
+  return { resumed: recovered + (typeof data === 'number' && Number.isSafeInteger(data) && data > 0 ? data : 0) };
 }

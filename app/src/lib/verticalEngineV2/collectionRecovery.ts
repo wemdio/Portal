@@ -15,6 +15,7 @@ import { isVeRenewableSourceTask, reopenVeSourceTask } from './sourceRenewal';
 import { validVeAdaptiveCollection, veAdaptiveSourceDeferred, veAdaptiveSourceDry, veSourceStrategyKey, type VeAdaptiveCollection } from './adaptiveCollection';
 import type { VeCollectTask } from './prompts/sourcePlan';
 import { needsVeKnownWebsiteContinuation } from './knownWebsiteDirectory';
+import { needsVeRestaurantSourceContinuation } from './restaurantSourcePolicy';
 import type { VeStaffingCorrectionScope } from './staffingCorrection';
 import { relevanceHash } from './relevanceCheckpoint';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, veNicheRubricAllowed, type VeNicheSourceProfile } from './nicheSourcePolicy';
@@ -136,6 +137,12 @@ export function getVeCollectionContinuation(base: Record<string, unknown>, curre
   // own predicate requires BOTH original budgets and a quiescent free slot.
   if (needsVeKnownWebsiteContinuation(base, currentHypothesis)) {
     return available('source_update', 'Доступна проверка официальных сайтов платформ в пределах сохранённого бюджета.', 'resume_collection');
+  }
+  if (needsVeRestaurantSourceContinuation(base, currentHypothesis)) {
+    return available('source_update', 'Доступен готовый каталог профильных заведений в пределах сохранённого бюджета.', 'resume_collection');
+  }
+  if (info.restaurant_source_refresh) {
+    return unavailable('sources_exhausted', 'Доступное продолжение по каталогу завершено. Проверенные контакты сохранены.');
   }
   if (record(info.known_website_source)?.continuation_only === true) {
     return unavailable('sources_exhausted', 'Проверка доступных официальных сайтов завершена. Проверенные контакты сохранены.');

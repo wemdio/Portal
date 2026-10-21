@@ -8,6 +8,8 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isTransientDbError } from '@/lib/db/transientError';
+import { VeJobQueuePersistenceError } from '../jobFailureTransition';
 
 import type { VeMarket } from '../market';
 import type { VeJob, VeProject, VeStage } from '../types';
@@ -58,13 +60,74 @@ export function stageLog(ctx: VeStageContext, msg: string): void {
 
 /** Worker preserves this pending state after a waiting stage returns. */
 export async function requeueVeJob(ctx: VeStageContext, job: VeJob, cooldownMs = 30_000): Promise<void> {
-  const { error } = await ctx.supabase.from('ve_jobs').update({
+  const stamp = new Date().toISOString();
+  const patch = {
     status: 'pending',
     started_at: null,
     run_after: new Date(Date.now() + cooldownMs).toISOString(),
-    updated_at: new Date().toISOString(),
-  }).eq('id', job.id).eq('status', 'running');
-  if (error) throw new Error(`ve_jobs requeue: ${error.message}`);
+    updated_at: stamp,
+  };
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    ctx.signal?.throwIfAborted();
+    let failure: unknown;
+    const writeSignal = AbortSignal.timeout(10_000);
+    try {
+      let write = ctx.supabase.from('ve_jobs').update(patch).eq('id', job.id).eq('status', 'running');
+      write = job.started_at == null ? write.is('started_at', null) : write.eq('started_at', job.started_at);
+      const { data, error, status } = await write.select('id').abortSignal(writeSignal).maybeSingle();
+      ctx.signal?.throwIfAborted();
+      if (data && !error) return;
+      failure = error;
+      if (error && !writeSignal.aborted && !isTransientDbError(error, status) && !/VE_JOB_LEASE_LOST/.test(error.message)) {
+        throw new Error(`ve_jobs requeue: ${error.message}`);
+      }
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (!writeSignal.aborted && !isTransientDbError(error) && !/VE_JOB_LEASE_LOST/.test(error instanceof Error ? error.message : '')) throw error;
+      failure = error;
+    }
+    ctx.signal?.throwIfAborted();
+    // A gateway can lose the response after COMMIT. Confirm before another
+    // write; the stage-write trigger correctly rejects the now-released claim.
+    const readSignal = AbortSignal.timeout(10_000);
+    try {
+      const { data: current, error, status } = await ctx.supabase.from('ve_jobs')
+        .select('status,started_at,run_after,updated_at').eq('id', job.id)
+        .abortSignal(readSignal).maybeSingle();
+      ctx.signal?.throwIfAborted();
+      if (error) {
+        if (!readSignal.aborted && !isTransientDbError(error, status)) throw new Error(`ve_jobs requeue confirmation: ${error.message}`);
+        failure = error;
+      }
+      else {
+        if (current?.status === 'pending' && current.started_at == null
+          && Date.parse(current.run_after) === Date.parse(patch.run_after)
+          && Date.parse(current.updated_at) === Date.parse(stamp)) return;
+        // Cancellation, pause and a new owner always win. Do not restore a
+        // stale pending transition or turn a completed job into a failure.
+        if (!current || current.status !== 'running'
+          || (current.started_at !== job.started_at
+            && Date.parse(current.started_at ?? '') !== Date.parse(job.started_at ?? ''))) return;
+      }
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (!readSignal.aborted && !isTransientDbError(error)) throw error;
+      failure = error;
+    }
+    lastError = failure ?? new Error('queue transition was not confirmed');
+    if (attempt < 5) await new Promise<void>((resolve, reject) => {
+      const done = () => { ctx.signal?.removeEventListener('abort', aborted); resolve(); };
+      const timer = setTimeout(done, Math.min(1_000 * 2 ** attempt, 10_000));
+      const aborted = () => { clearTimeout(timer); ctx.signal?.removeEventListener('abort', aborted); reject(ctx.signal?.reason); };
+      ctx.signal?.addEventListener('abort', aborted, { once: true });
+      if (ctx.signal?.aborted) aborted();
+    });
+  }
+  // Bounded retries keep the same invocation/paid result. A prolonged outage
+  // then uses the worker's bounded interruption allowance, not provider retries.
+  throw new VeJobQueuePersistenceError(lastError instanceof Error ? lastError
+    : new Error((lastError as { message?: string } | null)?.message ?? 'queue transition was not confirmed'));
 }
 
 export function truncate(text: string, max: number): string {

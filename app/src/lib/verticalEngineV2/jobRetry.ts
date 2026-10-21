@@ -18,6 +18,7 @@ import { isVeStageDbInterruption } from './stageDb';
 import type { VeJob } from './types';
 import { VeJobInactivityError } from './workerLiveness';
 import { readRelevanceCheckpoint } from './relevanceCheckpoint';
+import { VeJobQueuePersistenceError } from './jobFailureTransition';
 
 /** Попытки для постоянных ошибок — как было до автоповтора. */
 export const PERMANENT_MAX_ATTEMPTS = 3;
@@ -75,7 +76,7 @@ export const VE_JOB_FREE_INTERRUPTIONS = 10;
 
 /** The stage was interrupted (inactivity guard, its database request timed out or lost the connection); it did not fail by itself. */
 export function isVeJobInterruption(error: unknown): boolean {
-  if (error instanceof VeJobInactivityError) return true;
+  if (error instanceof VeJobInactivityError || error instanceof VeJobQueuePersistenceError) return true;
   return isVeStageDbInterruption(error instanceof Error ? error.message : String(error));
 }
 
@@ -114,8 +115,9 @@ export function planVeJobFailure(job: Pick<VeJob, 'id' | 'attempts' | 'payload'>
   const resumeJournal = msg === 'Provider usage journal could not be saved.' && job.stage === 'base_collect'
     && typeof checkpoint?.context_hash === 'string'
     && Object.keys(readRelevanceCheckpoint(checkpoint, checkpoint.context_hash).verdicts).length > 0;
-  const retryable = resumeJournal || isRetryableStageError(msg);
-  const attemptCap = resumeJournal ? RETRYABLE_MAX_ATTEMPTS : maxAttemptsFor(msg);
+  const queuePersistence = error instanceof VeJobQueuePersistenceError;
+  const retryable = resumeJournal || queuePersistence || isRetryableStageError(msg);
+  const attemptCap = resumeJournal || queuePersistence ? RETRYABLE_MAX_ATTEMPTS : maxAttemptsFor(msg);
   const rateLimit = error instanceof VeLlmRateLimitError ? error : undefined;
   const interrupted = isVeJobInterruption(error);
   const count = interrupted ? veJobInterruptions(job.payload) + 1 : 0;

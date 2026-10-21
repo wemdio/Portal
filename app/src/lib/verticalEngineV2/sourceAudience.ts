@@ -7,6 +7,7 @@ import { VE_YANDEX_CATALOG_MAPPING_REVISION } from './yandexCatalog';
 import { veSourceStrategyKey } from './adaptiveCollection';
 import { projectMarket, type VeMarket } from './market';
 import type { VeCollectTask, VeSourcePlan } from './prompts/sourcePlan';
+import { isVeRestaurantCatalogAudience } from './restaurantSourcePolicy';
 
 export interface VeSourceAudienceHypothesis {
   id: string; title: string; description?: string | null; status: string | null;
@@ -23,7 +24,7 @@ export interface VeSourceCostPolicy { version: 1; website_discovery: 'existing_o
 export async function withVeRetailRefreshMarket<T extends Record<string, unknown>>(
   db: SupabaseClient, projectId: string, hypothesis: T,
 ): Promise<T & { collection_market?: VeMarket }> {
-  if (!deriveVeRetailAudienceScope(hypothesis as unknown as VeSourceAudienceHypothesis)) return hypothesis;
+  if (!deriveVeRetailAudienceScope(hypothesis as unknown as VeSourceAudienceHypothesis) && !isVeRestaurantCatalogAudience(hypothesis)) return hypothesis;
   const { data, error } = await db.from('ve_projects').select('market').eq('id', projectId).maybeSingle();
   if (error || !data) throw new Error(`Collection audience market: ${error?.message ?? 'project unavailable'}`);
   return { ...hypothesis, collection_market: projectMarket(data) };
