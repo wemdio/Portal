@@ -125,6 +125,10 @@ POLL_ATTEMPTS = 30
 POLL_INTERVAL_SEC = 1.5
 
 
+class TochkaStatementError(RuntimeError):
+    """Controlled error text, safe to include in the health alert."""
+
+
 def _parse_amount(t: dict) -> float | None:
     """Amount.amount → float через общий coerce_amount (см. _bank_common)."""
     return coerce_amount((t.get("Amount") or {}).get("amount"))
@@ -350,7 +354,7 @@ class BankTochkaSync(SyncSource):
                 b["accountId"] for b in bal.json().get("Data", {}).get("Balance", [])
             })
 
-            for acc in accounts:
+            for account_index, acc in enumerate(accounts, 1):
                 for st, en in periods:
                     # Изоляция периода: сбой одного счёта/периода (сеть, битые
                     # данные, ошибка upsert) не должен обрывать остальные —
@@ -363,7 +367,8 @@ class BankTochkaSync(SyncSource):
                             await self._upsert(conn, rows)
                             total += len(rows)
                     except Exception as e:
-                        failures.append(f"{st}..{en}: {type(e).__name__}")
+                        reason = str(e) if isinstance(e, TochkaStatementError) else type(e).__name__
+                        failures.append(f"счёт {account_index}, {st}..{en}: {reason}")
                         print(
                             f"[bank_tochka] period FAIL acc={acc} {st}..{en}: {e}\n{traceback.format_exc()}",
                             flush=True,
@@ -407,21 +412,35 @@ class BankTochkaSync(SyncSource):
             json={"Data": {"Statement": {"accountId": acc, "startDateTime": st, "endDateTime": en}}},
         )
         if create.status_code >= 400:
-            raise RuntimeError(f"Создание выписки: HTTP {create.status_code}")
+            raise TochkaStatementError(f"Создание выписки: HTTP {create.status_code}")
         sid = create.json()["Data"]["Statement"]["statementId"]
         accq = quote(acc, safe="")
 
         stmt = None
+        last_response = "ответ не получен"
         for _ in range(POLL_ATTEMPTS):
             r = await client.get(f"{API_BASE}/accounts/{accq}/statements/{sid}")
+            last_response = f"HTTP {r.status_code}"
+            if r.status_code in (401, 403):
+                raise TochkaStatementError(f"Получение выписки: {last_response}")
             if r.status_code == 200:
                 st_arr = r.json().get("Data", {}).get("Statement") or []
-                if st_arr and st_arr[0].get("status") == "Ready":
-                    stmt = st_arr[0]
-                    break
+                if st_arr:
+                    status = str(st_arr[0].get("status") or "missing")
+                    # Never place arbitrary response bodies, URLs or account IDs
+                    # in the alert. The status is a short bank-provided enum.
+                    safe_status = "".join(c for c in status if c.isascii() and (c.isalnum() or c in "_-"))[:32]
+                    last_response += f", status={safe_status or 'unknown'}"
+                    if status == "Ready":
+                        stmt = st_arr[0]
+                        break
+                else:
+                    last_response += ", выписка отсутствует в ответе"
             await asyncio.sleep(POLL_INTERVAL_SEC)
         if not stmt:
-            raise RuntimeError("Банк не подготовил выписку за отведённое время")
+            raise TochkaStatementError(
+                f"Готовая выписка не получена за {POLL_ATTEMPTS} проверок; последний ответ: {last_response}"
+            )
 
         mapped_rows: list[dict] = []
         for t in stmt.get("Transaction", []) or []:
