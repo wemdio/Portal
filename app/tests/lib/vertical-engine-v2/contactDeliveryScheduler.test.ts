@@ -516,11 +516,16 @@ describe('VE2 contact delivery scheduler', () => {
     // Every batch is a new base with its own 10 000-candidate / round budget,
     // so the cap is per batch. For a whole sector it is not the end of the market.
     const cap = { status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана', ready_rows: 40 };
-    for (const [broad, appended, expected, stopCause] of [
-      [true, 40, 'active', undefined], [false, 40, 'limited', undefined], [true, 0, 'limited', undefined],
-      [true, 1, 'limited', 'low_yield'],
+    for (const [broad, appended, expected, stopCause, reason] of [
+      [true, 40, 'active', undefined, cap.reason], [false, 40, 'limited', undefined, cap.reason],
+      [true, 0, 'limited', undefined, cap.reason], [true, 1, 'limited', 'low_yield', cap.reason],
+      [true, 16, 'limited', undefined, '5 проходов подряд не принесли ни одной новой компании: источники отдают только уже проверенные'],
+      [true, 62, 'limited', undefined, 'Расширенный срез тоже дал низкий выход: последние 200 компаний дали 0 новых готовых контактов.'],
+      [true, 40, 'limited', undefined, 'Нет подтверждённого продолжения источников; исчерпание рынка не доказано'],
+      [true, 40, 'limited', undefined, null],
+      [true, 40, 'limited', 'unknown_cause', cap.reason],
     ] as const) {
-      const progress = { ...cap, ...(stopCause ? { stop_cause: stopCause } : {}) };
+      const progress = { ...cap, reason, ...(stopCause ? { stop_cause: stopCause } : {}) };
       const portal = createMockSupabase({
         tables: {
           ve_hypotheses: [{ id: 'hyp', project_id: 've', broad }],
@@ -549,8 +554,8 @@ describe('VE2 contact delivery scheduler', () => {
       const input = { portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-07T06:00:00Z') };
       await runProjectContactSupply(input);
       expect([broad, appended, portal.getRows('ve_contact_supply_plans')[0].status]).toEqual([broad, appended, expected]);
-      if (stopCause) {
-        // A committed append replay must preserve the economic stop too.
+      if (expected === 'limited') {
+        // A committed append replay must preserve non-budget stops too.
         await portal.from('ve_contact_supply_plans').update({ status: 'active', source_state: {} }).eq('id', 'plan');
         await runProjectContactSupply(input);
         expect(portal.getRows('ve_contact_supply_plans')[0].status).toBe('limited');

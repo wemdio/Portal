@@ -52,6 +52,7 @@ try {
     assert.ok(frozenPredicate);
     await db.exec(frozenPredicate);
     await db.exec(migration('20261020_0006_ve_legacy_requesty_preview_recovery.sql'));
+    await db.exec(migration('20261021_0004_ve_queue_persistence_recovery.sql'));
   }
   const now = '2030-09-02T10:00:00Z'; // Monday, independent of machine weekday.
   const id = Object.fromEntries(['project', 'period', 've', 'actor', 'vertical', 'hypothesis', 'base', 'template', 'audit', 'reservation', 'preset']
@@ -647,6 +648,89 @@ try {
     await f.query('rollback to savepoint preview_failure');
     assert.deepEqual(await f.snapshot(), before, 'late write failure rolls back job and base too');
   });
+  // NAFI: a saved constructor batch survived, but the parent's self-requeue
+  // failed at the DB gateway. Recover only that same checkpoint and allowance.
+  const queueError = 've_jobs requeue: An invalid response was received from the upstream server';
+  const withQueueFailure = run => withBillingPreview(async f => {
+    await f.query(`update ve_jobs set status='failed',error=$2,attempts=3 where id=$1`, [f.key.job, queueError]);
+    const info = { ...f.info, target_progress: { ...f.info.target_progress, reason: queueError },
+      tasks: f.info.tasks.map(task => ({ ...task, status: 'done' })),
+      construct: { bc_job_id: f.key.child, status: 'dispatched' },
+      preview_pipeline: { ...f.info.preview_pipeline, batches: [{ id: f.key.child, inserted: true,
+        rows: [{ company: 'Already paid', website: 'saved.example.org' }] }] } };
+    await f.query('update ve_bases set error=$2,collect_info=$3 where id=$1', [f.key.base, queueError, info]);
+    await f.query('update ve_outreach_preparations set last_error=$2 where base_id=$1', [f.key.base, queueError]);
+    const recover = async () => (await f.one('select ve_auto_resume_queue_persistence_failures(10,$1) result', ['2030-09-02T11:00:00Z'])).result;
+    await run({ ...f, recover });
+  }, { pipeline: true, closed: false });
+  await withQueueFailure(async f => {
+    const before = await f.snapshot();
+    assert.equal(await f.recover(), 1);
+    const after = await f.snapshot();
+    assert.equal(after.base.status, 'collecting');
+    assert.equal(after.preparation.status, 'collecting');
+    assert.equal(after.job.status, 'pending');
+    assert.equal(after.job.attempts, 3, 'original attempt allowance is not reset');
+    for (const field of ['data', 'row_count', 'sample_rows', 'columns']) assert.deepEqual(after.base[field], before.base[field]);
+    const expectedInfo = structuredClone(before.base.collect_info);
+    expectedInfo.target_progress.status = 'collecting'; delete expectedInfo.target_progress.reason;
+    assert.deepEqual(after.base.collect_info, expectedInfo, 'all source, child, paid result and budget checkpoints are unchanged');
+    for (const field of ['result', 'tokens_used', 'cost_usd']) assert.deepEqual(after.job[field], before.job[field]);
+    assert.deepEqual(after.child, before.child);
+    assert.deepEqual(after.counts, before.counts, 'no replacement job/base/child');
+    assert.equal(after.job.payload.queue_persistence_recovery.count, 1);
+    assert.equal(await f.recover(), 0, 'an already recovered job is not enqueued twice');
+    assert.deepEqual(await f.snapshot(), after);
+  });
+  for (const [name, mutate] of [
+    ['paused', f => f.query("update ve_outreach_preparations set paused_at=now() where base_id=$1", [f.key.base])],
+    ['cancelled', f => f.query("update ve_outreach_preparations set cancelled_at=now() where base_id=$1", [f.key.base])],
+    ['new owner', f => f.query("update ve_jobs set status='running' where id=$1", [f.key.job])],
+    ['newer job', f => f.query(`insert into ve_jobs(project_id,stage,status,payload,created_at) values($1,'base_collect','cancelled',$2,'2100-01-01')`,
+      [f.key.project, { base_id: f.key.base, hypothesis_id: f.key.hypothesis }])],
+    ['changed preparation', f => f.query('update ve_outreach_preparations set base_id=null where base_id=$1', [f.key.base])],
+    ['unselected legacy preparation', async f => {
+      await f.query('update ve_outreach_preparations set independent_control=false where base_id=$1', [f.key.base]);
+      await f.query("update ve_outreach_setups set selected_hypothesis_ids='{}' where project_id=$1", [f.key.project]);
+    }],
+    ['approved audience', f => f.query('update ve_outreach_setups set approved_bases=$2 where project_id=$1', [f.key.project, { [f.key.base]: {} }])],
+    ['missing checkpoint', f => f.query("update ve_bases set collect_info=collect_info-'target_checkpoint' where id=$1", [f.key.base])],
+    ['wrong saved round', f => f.query("update ve_bases set collect_info=jsonb_set(collect_info,'{target_checkpoint,completed_round}','24') where id=$1", [f.key.base])],
+    ['unfinished child', f => f.query("update base_constructor_jobs set status='processing' where id=$1", [f.key.child])],
+    ['billing wait', f => f.query(`update ve_jobs set payload=payload||'{"requesty_billing_wait":{"version":1}}' where id=$1`, [f.key.job])],
+    ['billing error', async f => {
+      await f.query('update ve_jobs set error=$2 where id=$1', [f.key.job, billingError]);
+      await f.query('update ve_bases set error=$2 where id=$1', [f.key.base, billingError]);
+      await f.query('update ve_outreach_preparations set last_error=$2 where base_id=$1', [f.key.base, billingError]);
+    }],
+    ['recovery cap', f => f.query(`update ve_jobs set payload=payload||'{"queue_persistence_recovery":{"version":1,"count":3}}' where id=$1`, [f.key.job])],
+  ]) await withQueueFailure(async f => {
+    await mutate(f); const before = await f.snapshot();
+    assert.equal(await f.recover(), 0, name);
+    assert.deepEqual(await f.snapshot(), before, name);
+  });
+  await withQueueFailure(async f => {
+    await f.query('set local role service_role');
+    assert.equal(await f.recover(), 1, 'worker role can execute recovery');
+    await f.query('reset role');
+  });
+  await withQueueFailure(async f => {
+    // A page full of obsolete preparations must not starve a newer eligible
+    // checkpoint. They fail before any retained JSON checkpoint is loaded.
+    for (let index = 0; index < 11; index += 1) {
+      const hypothesis = randomUUID();
+      await f.query(`insert into ve_hypotheses(id,project_id,vertical_id,title,tier,status)
+        values($1,$2,$3,'Obsolete preparation',1,'accepted')`, [hypothesis, f.key.project, f.key.vertical]);
+      await f.query(`insert into ve_outreach_preparations(project_id,hypothesis_id,template_id,independent_control,last_error,updated_at)
+        values($1,$2,$3,true,$4,'2030-09-02T09:00:00Z')`, [f.key.project, hypothesis, id.template, queueError]);
+    }
+    assert.equal((await f.one('select ve_auto_resume_queue_persistence_failures(1,$1) result', ['2030-09-02T11:00:00Z'])).result, 1);
+    assert.equal((await f.one('select status from ve_jobs where id=$1', [f.key.job])).status, 'pending');
+    assert.equal((await f.one("select count(*)::int n from ve_outreach_preparations where project_id=$1 and status='error'", [f.key.project])).n, 11);
+  });
+  assert.equal(await scalar('select ve_transient_collect_error($1) result', [queueError]), false);
+  assert.equal(await scalar("select ve_transient_collect_error('ve_jobs requeue: fetch failed') result"), false);
+  assert.equal(await scalar("select ve_transient_collect_error('Requesty 503: unavailable') result"), true);
   await rows("update ve_templates set letters='[{\"body\":\"Changed\"}]' where id=$1", [id.template]);
   assert.equal(await scalar('select ve_contact_supply_approval_current($1) result', [plan.id]), false);
   await fails(() => scalar('select ve_reserve_contact_delivery_day($1,$2,0) result', [id.ve, now]), /approval is stale/);
@@ -661,6 +745,7 @@ try {
     [plan.id, now, fingerprint, fundedCredit, now, now]), /permission denied/i);
   await fails(() => scalar('select ve_resume_legacy_requesty_preview($1,$2,$3,$4,$5,$6,$7,$8) result',
     [id.ve,id.hypothesis,id.base,now,fingerprint,fundedCredit,now,now]), /permission denied/i);
+  await fails(() => scalar('select ve_auto_resume_queue_persistence_failures(10,$1) result', [now]), /permission denied/i);
   await db.exec('reset role');
   console.log('PASS continuous supply: approval, atomic enqueue/append/replay, campaign reuse, pause/stale rules, empty-day retry, saved billing-batch resume, and automatic credit recovery/rollback.');
 } catch (error) {

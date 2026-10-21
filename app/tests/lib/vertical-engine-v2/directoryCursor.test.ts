@@ -121,7 +121,8 @@ describe('строка реестра', () => {
     // оставались без вердикта.
     const row = mapDirectoryRow({
       name: 'ООО "Ромашка"', inn: '7700000001', website: 'https://romashka.ru', email: 'info@romashka.ru',
-      okved_code: '28.30', okved_name: 'Производство машин и оборудования для сельского и лесного хозяйства',
+      okved_code: '28.30', okved_code_exact: '28.30', okved_code_mapped: '28',
+      okved_name: 'Производство машин и оборудования для сельского и лесного хозяйства',
       activity_type: 'Сельхозтехника', address: 'Тула', employees_count: 120, revenue: 500000000, phones: '+7 999 000-00-00, +7 999 111-11-11',
     });
     expect(row.category.split('\n')).toEqual([
@@ -131,6 +132,22 @@ describe('строка реестра', () => {
     ]);
     // Остальное разбирается как раньше: телефон — первый из списка.
     expect(row).toMatchObject({ company: 'ООО "Ромашка"', inn: '7700000001', phone: '+7 999 000-00-00', source_detail: 'реестр' });
+
+    // Real incident: a taxonomy-derived 68.31 title disguised expert/appraisal
+    // companies as real-estate agents. Keep their actual source activity.
+    const expert = { name: 'Бюро экспертиз', email: 'office@expert.test', inn: '7700000002',
+      okved_code: '68.31', okved_code_mapped: '68.31', okved_code_exact: null,
+      okved_name: 'Деятельность агентств недвижимости', activity_type: 'Экспертные и оценочные услуги' };
+    for (const provenance of [null, undefined, '']) {
+      expect(mapDirectoryRow({ ...expert, okved_code_exact: provenance })).toMatchObject({
+        company: expert.name, email: expert.email, inn: expert.inn,
+        category: 'Экспертные и оценочные услуги\n68.31',
+      });
+    }
+    expect(mapDirectoryRow({ ...expert, okved_code_exact: '71.20.2' }).category)
+      .toBe('Экспертные и оценочные услуги\n71.20.2');
+    expect(mapDirectoryRow({ ...expert, okved_code_exact: '68.31' }).category)
+      .toBe('Деятельность агентств недвижимости\nЭкспертные и оценочные услуги\n68.31');
 
     const requests: URL[] = [];
     const fetchNiche: typeof fetch = async (input) => {
@@ -155,6 +172,7 @@ describe('строка реестра', () => {
     expect(found.rows[1]).toMatchObject({ okved_code: '64.1', okved_code_mapped: '64.1', okved_name: 'Посредничество' });
     expect(mapDirectoryRow(found.rows[0])).toMatchObject({ company: 'Финтех пример', email: 'mail@payments.test',
       website: 'payments.test', category: 'Денежное посредничество\nПлатежи\n64.19' });
+    expect(mapDirectoryRow(found.rows[1]).category).toBe('64.1');
     const request = requests.find((url) => url.pathname.endsWith('/companies_directory'))!;
     // Query the intersection of name AND activity. Two .or calls would let
     // PostgREST replace one predicate and silently buy an unrelated slice.

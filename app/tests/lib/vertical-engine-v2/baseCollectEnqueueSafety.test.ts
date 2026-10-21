@@ -19,6 +19,8 @@ import { getVeCollectionContinuation } from '@/lib/verticalEngineV2/collectionRe
 import { addVeKnownWebsiteSource, canAddVeKnownWebsiteSource, VE_KNOWN_WEBSITE_CATALOG } from '@/lib/verticalEngineV2/knownWebsiteDirectory';
 import type { VeCollectInfo } from '@/lib/verticalEngineV2/stages/baseCollect';
 import { VeSourcePlanSchema } from '@/lib/verticalEngineV2/schemas';
+import { needsVeRestaurantSourceContinuation, normalizeVeRestaurantSourcePlan } from '@/lib/verticalEngineV2/restaurantSourcePolicy';
+import { veAutomaticAudienceReviewRows } from '@/lib/verticalEngineV2/audienceReviewHold';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -42,6 +44,71 @@ const input = {
 };
 
 describe('VE2 base collection enqueue recovery', () => {
+  it('replaces an empty completed hiring slot with a bounded restaurant catalogue without reviewing the old reserve', async () => {
+    const h = { id: 'restaurant', project_id: input.projectId, vertical_id: input.verticalId, status: 'proposed',
+      origin: 'generated' as const, broad: false, title: 'Сетевые ресторанные альянсы и гастромаркеты',
+      description: 'Ресторанные холдинги, сети концептуальных кафе и фудмоллы. Необходимость привлекать трафик гостей в непиковые часы и презентовать сезонные меню.' };
+    const registry = { source: 'companies_directory' as const, rationale: 'Реестр', directory_filters: { okvedCodes: ['56.10', '56.30'] } };
+    const hh = { source: 'hh_live' as const, rationale: 'ЛПР', hh_query: { area: '113', text: 'директор по маркетингу (ресторан OR кафе)', date_from: '2025-07-01', date_to: '2026-07-01' } };
+    const plan = { tasks: [registry, hh, { ...hh, hh_query: { ...hh.hh_query, text: 'управляющий (сеть OR сетевой) ресторан' } }] };
+    const original = JSON.stringify(plan);
+    const fixed = normalizeVeRestaurantSourcePlan(plan, { market: 'ru', hypotheses: [h] });
+    expect(fixed.changed).toBe(true);
+    expect(fixed.plan.tasks).toHaveLength(3);
+    expect(fixed.plan.tasks[1]).toMatchObject({ source: 'yandex_maps', maps_query: { queries: ['Рестораны', 'Кафе', 'Фудмоллы'], geo: 'Россия' } });
+    expect(JSON.stringify(plan)).toBe(original);
+    expect(normalizeVeRestaurantSourcePlan(fixed.plan, { market: 'ru', hypotheses: [h] }).changed).toBe(false);
+    const target = { mode: 'preview' as const, status: 'limited' as const, round: 10, max_rounds: 104,
+      candidates_processed: 103, max_candidates: 10000, ready_rows: 0, ready_target: 500, idle_streak: 5 };
+    const oldRows = Array.from({ length: 127 }, (_, i) => ({ company: `Old ${i}`, website: `old${i}.test`, email: `a@old${i}.test`, _relevance_unchecked: true }));
+    const info: VeCollectInfo = { collection_mode: 'preview', hypotheses: [h], plan,
+      target_progress: target, target_checkpoint: { completed_round: 10, seen_rows: [], processed_rows: 138 },
+      tasks: plan.tasks.map((task, i) => ({ source: task.source, task, status: 'done', rows: i === 0 ? 77 : 0,
+        child_job_id: i ? `finished-hh-${i}` : null, ...(i === 0 ? { exhausted: true, directory_cursors: { original: 77 } } : {}), harvest: [] })),
+      construct: { status: 'done', bc_job_id: 'finished-constructor' }, adaptive_collection: newVeAdaptiveCollection(),
+      relevance_reserve: { version: 1, rows: oldRows } };
+    const base = { id: 'restaurant-base', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: h.id,
+      source: 'auto', status: 'analyzed', row_count: 0, data: [], collect_info: info, updated_at: '2026-10-21T12:44:00Z' };
+    const current = { ...h, collection_market: 'ru' };
+    expect(getVeCollectionContinuation(base, current)).toMatchObject({ available: true, code: 'source_update', action: 'resume_collection' });
+    for (const altered of [ { ...current, origin: 'manual' }, { ...current, collection_market: 'us' },
+      { ...current, title: 'Ресторанные сети и отели' }, { ...current, description: 'Ресторанные холдинги. Только в Омске.' },
+      { ...current, description: 'Ресторанные сети, нанимающие директора.' }, { ...current, description: 'Ресторанные холдинги.' },
+      { ...current, audience_scope: { version: 1, kind: 'segment', any_of: ['Ресторанные сети'], required: ['Найм'], excluded: [] } },
+    ]) expect(needsVeRestaurantSourceContinuation(base, altered)).toBe(false);
+    for (const alter of [
+      (copy: VeCollectInfo) => { copy.tasks![1].status = 'dispatched'; },
+      (copy: VeCollectInfo) => { copy.tasks![1].rows = 1; },
+      (copy: VeCollectInfo) => { copy.tasks![1].task.hh_query!.area = '2'; },
+      (copy: VeCollectInfo) => { copy.target_progress!.max_rounds = 10; },
+      (copy: VeCollectInfo) => { copy.target_progress!.candidates_processed = 10000; },
+      (copy: VeCollectInfo) => { copy.target_checkpoint!.completed_round = 9; },
+      (copy: VeCollectInfo) => { copy.validation_retry = true; },
+      (copy: VeCollectInfo) => { copy.collection_mode = 'supply'; },
+    ]) { const copy = structuredClone(info); alter(copy); expect(needsVeRestaurantSourceContinuation({ ...base, collect_info: copy }, current)).toBe(false); }
+    for (const mode of ['explicit', 'routine', 'launched'] as const) {
+      const before = structuredClone(info);
+      const db = createMockSupabase({ tables: { ve_hypotheses: [h], ve_projects: [{ id: input.projectId, market: 'ru' }],
+        ve_bases: [structuredClone(base)], ve_jobs: [], ve_templates: mode === 'launched' ? [{ id: 'live', base_id: base.id, launch_info: { campaign_id: 'live' } }] : [] } });
+      const args = { ...input, hypothesisIds: [h.id], collectionMode: 'preview' as const, ...(mode === 'routine' ? {} : { resumeBaseId: base.id }) };
+      await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+      const stored = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      if (mode !== 'explicit') { expect(stored.restaurant_source_refresh).toBeUndefined(); continue; }
+      expect(stored.restaurant_source_refresh).toMatchObject({ version: 1, previous_task: before.tasks![1], previous_construct: before.construct });
+      expect(stored.tasks).toHaveLength(3);
+      expect(stored.tasks![0]).toEqual(before.tasks![0]); expect(stored.tasks![2]).toEqual(before.tasks![2]);
+      expect(stored.target_progress).toEqual({ ...target, round: 11, status: 'collecting' });
+      expect(stored.relevance_reserve).toEqual(before.relevance_reserve);
+      expect(veAutomaticAudienceReviewRows(oldRows, stored.restaurant_source_refresh!.held_review_companies)).toEqual([]);
+      expect(stored.cost_policy).toEqual({ version: 1, website_discovery: 'existing_only' });
+      expect(stored.adaptive_collection?.replan_attempts).toBe(before.adaptive_collection?.replan_attempts);
+      expect(stored.adaptive_collection?.widenings).toBe(before.adaptive_collection?.widenings);
+      expect(stored).not.toHaveProperty('construct'); expect(stored).not.toHaveProperty('validation_retry'); expect(stored).not.toHaveProperty('relevance_review_requested');
+      await enqueueVeBaseCollect(db as unknown as SupabaseClient, args);
+      expect(db.getRows('ve_jobs')).toHaveLength(1);
+      expect(needsVeRestaurantSourceContinuation({ ...base, collect_info: stored }, current)).toBe(false);
+    }
+  });
   it('refreshes audited retail previews before optional old reserve work without changing paid receipts or limits', async () => {
     // The bounded official-site correction shares the explicit source-only
     // lifecycle; it cannot reopen the old reserve or buy another HH scrape.
@@ -792,16 +859,34 @@ describe('VE2 base collection enqueue recovery', () => {
     // иначе воркер годами «поднимал бы ноль» и никто бы не заметил.
     const resumeCalls: Array<Record<string, unknown>> = [];
     const resumeDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_queue_persistence_failures: () => ({ data: 2 }),
       ve_auto_resume_transient_preparations: (params: Record<string, unknown>) => { resumeCalls.push(params); return { data: 3 }; },
     } });
-    await expect(autoResumeVeTransientPreparations(resumeDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 3 });
+    await expect(autoResumeVeTransientPreparations(resumeDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 5 });
     expect(resumeCalls).toEqual([{ p_limit: 10 }]);
     const brokenDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_queue_persistence_failures: () => ({ data: 0 }),
       ve_auto_resume_transient_preparations: () => ({ data: null, error: { message: 'rpc down' } }),
     } });
     await expect(autoResumeVeTransientPreparations(brokenDb as unknown as SupabaseClient)).rejects.toThrow('rpc down');
-    const oddDb = createMockSupabase({ rpcHandlers: { ve_auto_resume_transient_preparations: () => ({ data: null }) } });
+    const oddDb = createMockSupabase({ rpcHandlers: { ve_auto_resume_transient_preparations: () => ({ data: null }),
+      ve_auto_resume_queue_persistence_failures: () => ({ data: null }) } });
     await expect(autoResumeVeTransientPreparations(oddDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 0 });
+    for (const code of ['PGRST202', '42883', '42501']) {
+      const fallback = jest.fn(() => ({ data: 3 }));
+      const rollingDb = createMockSupabase({ rpcHandlers: {
+        ve_auto_resume_queue_persistence_failures: () => ({ data: null, error: { code, message: 'queue recovery unavailable' } }),
+        ve_auto_resume_transient_preparations: fallback,
+      } });
+      const resume = autoResumeVeTransientPreparations(rollingDb as unknown as SupabaseClient);
+      if (code === '42501') {
+        await expect(resume).rejects.toThrow('queue recovery unavailable');
+        expect(fallback).not.toHaveBeenCalled();
+      } else {
+        await expect(resume).resolves.toEqual({ resumed: 3 });
+        expect(fallback).toHaveBeenCalledTimes(1);
+      }
+    }
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
