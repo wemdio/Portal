@@ -112,6 +112,42 @@ function normalizeQuotedText(value: string): string {
     .trim();
 }
 
+/** Search returns the latest reply in a thread, which can already include a
+ * later CC participant. It is history, not a replacement for the dispatched
+ * inbound. Keep its identity/body and never let later messages explain it. */
+export function contextForDispatchedReply(context: ThreadContext, reply: Email): ThreadContext {
+  const replyAt = emailTs(reply);
+  // In particular, preserve the existing exact-inbound Others recovery
+  // context, whose saved outbound preview has no provider timestamp.
+  if (context.replyEmail === reply && ![...context.threadEmails,
+    ...(context.lastOutbound ? [context.lastOutbound] : []),
+  ].some(email => replyAt > 0 && emailTs(email) > replyAt)) return context;
+  const history = [...context.threadEmails, ...(context.lastOutbound ? [context.lastOutbound] : [])]
+    .filter((email, index, all) => (!reply.id || email.id !== reply.id) &&
+      (!email.id || all.findIndex(candidate => candidate.id === email.id &&
+        candidate.campaign_id === email.campaign_id) === index) &&
+      replyAt > 0 && emailTs(email) > 0 && emailTs(email) <= replyAt);
+  const isPriorOutbound = (email: Email): boolean =>
+    (email.ue_type === 1 || email.ue_type === 3) && emailTs(email) > 0 && emailTs(email) < replyAt;
+  // Retain an explicitly verified parent, even if a campaign-wide evidence
+  // page also contains newer unrelated sends. Only reselect when the fetched
+  // last outbound is too late for this inbound.
+  const lastOutbound = context.lastOutbound && isPriorOutbound(context.lastOutbound)
+    ? context.lastOutbound
+    : context.lastOutbound
+      ? history.filter(isPriorOutbound).sort((a, b) => emailTs(b) - emailTs(a))[0] ?? null
+      : null;
+  return {
+    ...context,
+    replyEmail: reply,
+    threadEmails: [...history, reply].sort((a, b) => emailTs(a) - emailTs(b)),
+    lastOutbound,
+    // A latest-reply lookup may have hidden a partial-history flag because it
+    // found an outbound AFTER this inbound. That is not complete prior proof.
+    ...(!lastOutbound && context.lastOutbound ? { historyFetchFailed: true } : {}),
+  };
+}
+
 function correctedContext(
   reply: Email,
   campaignId: string,
@@ -125,14 +161,14 @@ function correctedContext(
       email.id !== correctedReply.id &&
       all.findIndex((candidate) => candidate.id === email.id) === index,
   );
-  return {
+  return contextForDispatchedReply({
     replyEmail: correctedReply,
     threadEmails: [...uniqueCampaignEmails, correctedReply].sort(
       (a, b) => emailTs(a) - emailTs(b),
     ),
     lastOutbound: parent,
     campaignOutboundMailboxes: [mailbox],
-  };
+  }, correctedReply);
 }
 
 /** Strongest available evidence that an outbound is the parent of `reply`. */
@@ -1410,12 +1446,12 @@ export async function resolveEffectiveReplyOwner(args: {
   // A missing search result must not discard the authoritative inbound already
   // saved by polling/recovery. Keep history explicitly incomplete until the
   // workspace evidence scan proves otherwise; never fabricate an outbound.
-  const providerContext: ThreadContext = fetchedProviderContext ?? {
+  const providerContext: ThreadContext = contextForDispatchedReply(fetchedProviderContext ?? {
     replyEmail: reply,
     threadEmails: [reply],
     lastOutbound: null,
     historyFetchFailed: true,
-  };
+  }, reply);
   const mailbox = normalizeMailbox(reply.eaccount);
   if (!mailbox) {
     // A quote alone can be forwarded or forged. Use exactly one sender that

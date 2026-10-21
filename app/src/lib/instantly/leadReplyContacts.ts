@@ -110,10 +110,13 @@ function companyWebsite(raw: string): string | null {
 function websitesInLine(line: string): string[] {
   // A mail client can render "first.last <mailto:first.last@host> @host".
   // The display label must not be interpreted as a company website.
-  line = line.replace(/[^\s<>]+\s*<mailto:[^>]+>\s*(?:@[^\s<>]+)?/giu, '')
+  // Begin each cleanup at a token boundary. Retrying a greedy token match at
+  // every byte of a long (possibly truncated) inline image is quadratic.
+  // Keep the entire body and any real contact following that token intact.
+  line = line.replace(/(?<![^\s<>])[^\s<>]+\s*<mailto:[^>]+>\s*(?:@[^\s<>]+)?/giu, '')
     .replace(/mailto:[^\s<>]+/giu, '')
-    .replace(/[^\s<>]+\s+@[^\s<>]+/gu, '')
-    .replace(/[^\s<>]+@[^\s<>]+/gu, '');
+    .replace(/(?<![^\s<>])[^\s<>]+\s+@[^\s<>]+/gu, '')
+    .replace(/(?<![^\s<>])[^\s<>]+@[^\s<>]+/gu, '');
   return [...line.matchAll(URL_CANDIDATE)]
     .filter((match) => line[match.index + match[0].length] !== '@')
     // Copied logos sometimes mix Latin and Cyrillic lookalikes in a domain
@@ -363,12 +366,35 @@ function introducedLeadName(body: string[]): string | null {
 function replyLeadName(body: string[], signature: string[]): string | null {
   const contactCards = body.map((line) => /^(\p{Lu}[\p{L}’'-]+(?:\s+\p{Lu}[\p{L}’'-]+){1,2})\s+[^\s<>]+@[^\s<>]+(?:\s+\[[^\]]+\])?\s*$/u.exec(line)?.[1])
     .filter((value): value is string => Boolean(value && signatureNameInLine(value)));
+  // A personal call invitation can end with an unmarked name: "Свяжитесь
+  // со мной по тф <phone>, пожалуйста. Имя Фамилия" or three separate lines
+  // "Давайте созвонимся. / <phone> / Имя". Require this first-person framing,
+  // a validated phone and a terminal name; do not mine third-party referrals
+  // or arbitrary standalone names. History has already been removed.
+  const ownPhoneInvitation = /^(?:пожалуйста[,!]?\s+)?(?:свяжитесь\s+со\s+мной|(?:позвоните|перезвоните|наберите)\s+мне)(?:\s+(?:по|на))?(?:\s+(?:тф|тел(?:ефону)?\.?|номер(?:у)?))?\s*[:—-]?\s*$/iu;
+  // An unmarked quote can still say "со мной" on behalf of a colleague.
+  // Apply this veto only to the two new call-card forms, not existing names.
+  const reportedCall = /(?:переда[юе]|пересылаю|цитирую|цитата|дословно|написал[аи]?|пишет|сказал[аи]?|ответил[аи]?|попросил[аи]?|текст\s+(?:ответа|письма)|(?:его|е[её])\s+ответ)[^\n]{0,120}:\s*(?:\n|$)/iu;
   for (const [index, line] of body.entries()) {
     // A labelled contact card, not a greeting or an arbitrary name in prose.
     if (signatureNameInLine(line) && isRoleTitle(body[index - 1] ?? '') &&
       phoneInLine(body[index + 1] ?? '', false)) contactCards.push(signatureNameInLine(line)!);
     for (const phone of leadPhoneCandidates(line)) {
       const before = line.slice(0, phone.start).trim();
+      const ownCallContext = !signature.length && !reportedCall.test(body.slice(0, index).join('\n'));
+      if (ownCallContext && index === body.length - 1 && ownPhoneInvitation.test(before) && phoneInLine(line, false)) {
+        const tail = line.slice(phone.end).replace(/^[\s,;.!]+/u, '')
+          .replace(/^пожалуйста(?:[\s,;.!]+|$)/iu, '');
+        const ownName = signatureNameInLine(tail);
+        if (ownName) contactCards.push(ownName);
+      }
+      if (ownCallContext && index === body.length - 2 && !before && !line.slice(phone.end).trim() &&
+        phoneInLine(line, false) &&
+        (/^(?:давайте\s+)?созвонимся[.!:]?$/iu.test(body[index - 1] ?? '') ||
+          ownPhoneInvitation.test(body[index - 1] ?? ''))) {
+        const ownName = signatureNameInLine(body[index + 1]);
+        if (ownName) contactCards.push(ownName);
+      }
       const after = line.slice(phone.end).trim().split(/\.\s+(?=[А-ЯЁA-Z])/u)[0];
       const leading = before.replace(/\s+(?:тел(?:ефон)?\.?)\s*:?$/iu, '').trim();
       const name = (!after && signatureNameInLine(leading)) ||
