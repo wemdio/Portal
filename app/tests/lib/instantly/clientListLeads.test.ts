@@ -31,6 +31,11 @@
 const ORIGINAL_API_KEY = process.env.INSTANTLY_API_KEY;
 const mockEmailBudgetRpc = jest.fn();
 
+jest.mock('@/lib/instantly/projectContactBlocks', () => ({
+  filterProjectBlockedLeads: async (leads: unknown[]) => ({ leads, indexes: leads.map((_, index) => index) }),
+  recheckProjectBlocksAfterImport: async () => {},
+}));
+
 jest.mock('@/lib/supabaseAdmin', () => ({
   supabaseAdmin: { rpc: (...args: unknown[]) => mockEmailBudgetRpc(...args) },
 }));

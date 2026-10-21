@@ -1,4 +1,4 @@
-import { createBlockListEntry, listBlockListEntries } from './client';
+import { listBlockListEntries } from './client';
 
 const normalize = (value: string) => value.trim().toLowerCase();
 
@@ -29,20 +29,4 @@ export async function isContactBlocked(email: string, accountId: string): Promis
   }
   if (await contains(address, accountId)) return true;
   return contains(address.slice(address.lastIndexOf('@') + 1), accountId, true);
-}
-
-/** The workspace comes from the campaign, never from a browser-supplied account id. */
-export async function blockContact(email: string, accountId: string): Promise<void> {
-  const address = normalize(email);
-  if (await isContactBlocked(address, accountId)) return;
-  try {
-    const entry = await createBlockListEntry({ value: address }, {
-      accountId, requestPriority: 'interactive', consumer: 'personalization_blocklist',
-    });
-    if (normalize(entry.value) !== address) throw new Error('Instantly не подтвердил блокировку адреса');
-  } catch (error) {
-    // Concurrent clicks / an ambiguous POST may have already added this address.
-    if (await isContactBlocked(address, accountId)) return;
-    throw error;
-  }
 }

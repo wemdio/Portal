@@ -88,7 +88,7 @@ export function ReplyDetailPanel({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [skipping, setSkipping] = useState(false);
   const blockKey = `${projectId}:${item.id}`;
-  const [blockStatus, setBlockStatus] = useState<{ key: string; blocked: boolean; error: string | null } | null>(null);
+  const [blockStatus, setBlockStatus] = useState<{ key: string; blocked: boolean; syncPending?: boolean; error: string | null } | null>(null);
   const blockLoading = blockStatus?.key !== blockKey;
   const contactBlocked = !blockLoading && blockStatus.blocked;
   const blockError = !blockLoading ? blockStatus.error : null;
@@ -128,15 +128,22 @@ export function ReplyDetailPanel({
 
   useEffect(() => {
     let cancelled = false;
-    fetchContactBlock(item.id, projectId)
-      .then((result) => {
-        if (!cancelled) setBlockStatus({ key: blockKey, blocked: result.blocked, error: null });
-      })
-      .catch(() => {
-        if (!cancelled) setBlockStatus({ key: blockKey, blocked: false, error: 'Не удалось проверить стоп-лист. При отправке проверим повторно.' });
-      });
-    return () => { cancelled = true; };
-  }, [item.id, projectId, blockKey]);
+    let timer: ReturnType<typeof setTimeout>;
+    const read = async () => {
+      try {
+        const result = await fetchContactBlock(item.id, projectId);
+        if (cancelled) return;
+        setBlockStatus({ key: blockKey, ...result, error: null });
+        if (result.syncPending) timer = setTimeout(read, 10_000);
+      } catch {
+        if (cancelled) return;
+        setBlockStatus((previous) => ({ key: blockKey, blocked: previous?.key === blockKey && previous.blocked, error: 'Не удалось проверить стоп-лист проекта. При отправке проверим повторно.' }));
+        timer = setTimeout(read, 10_000);
+      }
+    };
+    void read();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [item.id, projectId, blockKey, blocking]);
 
   useEffect(() => {
     let cancelled = false;
@@ -290,14 +297,14 @@ export function ReplyDetailPanel({
 
   const handleBlock = async () => {
     if (!window.confirm(
-      `Заблокировать ${item.leadEmail}?\n\nInstantly прекратит рассылки на этот адрес со всех ящиков во всех кампаниях этого аккаунта. Новые загрузки также будут учитывать блокировку.`,
+      `Заблокировать ${item.leadEmail} только в выбранном проекте?\n\nОстановим рассылки в кампаниях этого проекта и запретим повторную загрузку адреса через портал. Другие проекты не затрагиваются.`,
     )) return;
     setBlocking(true);
     setBlockStatus({ key: blockKey, blocked: false, error: null });
     setConfirmOpen(false);
     try {
       const result = await blockReplyContact(item.id, projectId);
-      setBlockStatus({ key: blockKey, blocked: result.blocked, error: null });
+      setBlockStatus({ key: blockKey, ...result, error: null });
     } catch (err) {
       setBlockStatus({ key: blockKey, blocked: false, error: err instanceof Error ? err.message : 'Не удалось заблокировать контакт' });
     } finally {
@@ -329,7 +336,7 @@ export function ReplyDetailPanel({
             type="button"
             onClick={handleBlock}
             disabled={blockLoading || blocking || contactBlocked}
-            title="Запретить рассылки на email контакта во всех кампаниях этого аккаунта Instantly"
+            title="Запретить рассылки на email контакта только в выбранном проекте"
             className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
           >
             <Ban className="h-3.5 w-3.5" />
@@ -338,7 +345,9 @@ export function ReplyDetailPanel({
         </div>
         {contactBlocked ? (
           <p role="status" className="mt-2 text-xs text-red-700">
-            Рассылки на {item.leadEmail} запрещены во всех кампаниях этого аккаунта Instantly.
+            {blockStatus?.syncPending
+              ? `Адрес ${item.leadEmail} заблокирован в проекте. Останавливаем рассылки в его текущих кампаниях...`
+              : `Рассылки на ${item.leadEmail} запрещены только в выбранном проекте.`}
           </p>
         ) : null}
         {blockError ? <p role="alert" className="mt-2 text-xs text-red-600">{blockError}</p> : null}

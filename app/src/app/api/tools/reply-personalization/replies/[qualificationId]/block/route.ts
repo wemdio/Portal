@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { blockContact, isContactBlocked } from '@/lib/instantly/contactBlocklist';
+import { getProjectContactBlock, projectBlockDb } from '@/lib/instantly/projectContactBlocks';
 import { getProjectCampaignIds, listVisibleProjects } from '@/lib/replyPersonalization/db';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 
@@ -24,11 +24,17 @@ async function handle(req: NextRequest, user: { id: string }, params?: Record<st
   }
   // Only the actual correspondent; body.email/accountId cannot change the target.
   const email = reply.qualification.leadEmail.trim().toLowerCase();
-  if (req.method === 'POST') {
-    await blockContact(email, reply.accountId);
-    return NextResponse.json({ email, blocked: true });
+  if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(email)) {
+    return NextResponse.json({ error: 'Некорректный email контакта' }, { status: 422 });
   }
-  return NextResponse.json({ email, blocked: await isContactBlocked(email, reply.accountId) });
+  if (req.method === 'POST') {
+    const { error } = await projectBlockDb().rpc('project_contact_block_enqueue', {
+      p_project_id: projectId, p_email: email, p_created_by: user.id,
+    });
+    if (error) throw new Error(`Не удалось сохранить блокировку проекта: ${error.message}`);
+    return NextResponse.json({ email, blocked: true, syncPending: true }, { status: 202 });
+  }
+  return NextResponse.json({ email, ...await getProjectContactBlock(projectId, email) });
 }
 
 export const GET = withAuth(handle);
