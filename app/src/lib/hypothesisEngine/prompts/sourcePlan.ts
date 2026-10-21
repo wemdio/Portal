@@ -18,7 +18,7 @@
 import type { LLMMessage } from '../llm';
 
 export interface HeCollectTask {
-  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring';
+  source: 'companies_directory' | 'hh_live' | 'yandex_maps' | 'google_maps' | 'pdl' | 'funded' | 'eng_hiring' | 'web_search';
   /** Что и зачем собираем, 1 строка. */
   rationale: string;
   directory_filters?: {

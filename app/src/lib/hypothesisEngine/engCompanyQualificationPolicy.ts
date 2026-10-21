@@ -41,8 +41,15 @@ export interface HeEngCollectedCompanyEvidence {
 
 export interface HeEngCompanyQualificationAudit {
   version: 1;
-  /** Exact bounded classifier input; retained in the memo, not copied to contact rows. */
+  /** Exact bounded classifier input, or cited passages when compaction is present. */
   quotes: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website' }>;
+  /** New adaptive bases compact finished waves, preserving every decision citation. */
+  compaction?: {
+    version: 1;
+    strategy: 'decision_quotes';
+    originalQuoteCount: number;
+    originalQuotesSha256: string;
+  };
   collectedJobId?: string;
   classifier?: HeEngCompanyQualificationAssessment;
   review?: HeEngCompanyQualificationAssessment;

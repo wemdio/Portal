@@ -1,4 +1,4 @@
-import { isHeEngBaseBudgetPreflightFailure, rethrowHeEngBaseBudgetError } from './engBaseBudget';
+import { heEngBaseBudgetActive, isHeEngBaseBudgetPreflightFailure, rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import { z } from 'zod';
 
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
@@ -21,6 +21,7 @@ import { callLLMText, heLlmFailureOf, isHeLlmTimeout } from './llm';
 import {
   readHeEngQualificationBudget, reserveHeEngQualificationModel, settleHeEngQualificationModel,
   heEngQualificationBudgetHoldReason, HE_ENG_QUALIFICATION_REVIEW_MODEL, HE_ENG_QUALIFICATION_MODEL,
+  HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD,
 } from './engQualificationBudget';
 import { heStageSignal, isHeSiteUnreachable, resolveFetchPage, type HeFetchedPage, type HeFetchPageFn } from './stages/io';
 import type { HeStageContext } from './stages/shared';
@@ -41,8 +42,13 @@ const AssessmentSchema = z.object({ model: z.string().max(100), status: z.enum([
 const AuditSchema = z.object({ version: z.literal(1),
   quotes: z.array(z.object({ id: z.string().max(200), url: z.string().max(2000), text: z.string().min(12).max(1400),
     source: z.enum(['constructor_website', 'website']) })).max(MAX_COMPANY_QUOTES),
+  compaction: z.object({ version: z.literal(1), strategy: z.literal('decision_quotes'),
+    originalQuoteCount: z.number().int().min(1).max(MAX_COMPANY_QUOTES),
+    originalQuotesSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).optional(),
   collectedJobId: z.string().uuid().optional(), classifier: AssessmentSchema.optional(), review: AssessmentSchema.optional(),
-}).refine((audit) => audit.quotes.reduce((sum, quote) => sum + quote.text.length, 0) <= MAX_COMPANY_SOURCE_CHARS);
+}).refine((audit) => audit.quotes.reduce((sum, quote) => sum + quote.text.length, 0) <= MAX_COMPANY_SOURCE_CHARS &&
+  (!audit.compaction || audit.quotes.length < audit.compaction.originalQuoteCount));
 const StoredVerdictSchema = z.object({
   version: z.union([z.literal(2), z.literal(3)]),
   scopeKey: z.string(), companyKey: z.string(),
@@ -367,8 +373,13 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   ctx: HeStageContext,
   input: { rows: T[]; scope: HeEngQualificationScope; memo?: HeEngQualificationMemo; maxCompanies?: number;
     collectedEvidence?: Readonly<Record<string, HeEngCollectedCompanyEvidence>>;
+    /** Only a new manual target base may opt in, under the same global $5 ledger. */
+    collectionTargetBudget?: true;
     onCheckpoint: (memo: HeEngQualificationMemo) => Promise<void> },
 ): Promise<{ rows: T[]; memo: HeEngQualificationMemo; tokensUsed: number; costUsd: number; complete: boolean; retryAfterMs?: number; pendingCompanyCount: number }> {
+  if (input.collectionTargetBudget && !heEngBaseBudgetActive()) {
+    throw new HeEngQualificationScopeError('adaptive qualification requires the global base budget');
+  }
   const { scope } = input;
   const version = heEngQualificationVersion(scope);
   if (!version || !scope.hypotheses.length) throw new HeEngQualificationScopeError('valid selected hypotheses and country policy are required');
@@ -431,7 +442,12 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       !saved.proposals || typeof saved.proposals !== 'object' || Array.isArray(saved.proposals))) throw new HeEngQualificationScopeError('invalid saved economy state');
   const budget = readHeEngQualificationBudget(saved?.budget, {
     hasPaidHistory: !!input.memo && !saved && (Object.keys(memo.verdicts).length > 0 || Object.keys(memo.attempts!).length > 0 || Object.keys(input.memo.partial ?? {}).length > 0),
+    ...(input.collectionTargetBudget ? { freshLimitMicrousd: HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD } : {}),
   });
+  if (budget.limitMicrousd === HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD &&
+      (!input.collectionTargetBudget || !heEngBaseBudgetActive())) {
+    throw new HeEngQualificationScopeError('adaptive qualification budget cannot run outside its global base ledger');
+  }
   memo.economy = { version: 1, workflow: 'fit_review_v3_single', budget, prepared: {}, proposals: {} };
   const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT),
     evidenceSource: z.enum(['constructor_website', 'website']).optional() })).max(MAX_PAGES + 3),

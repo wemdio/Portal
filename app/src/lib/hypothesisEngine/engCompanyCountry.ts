@@ -8,7 +8,15 @@ function verifiedUsMapsAddress(address: string): boolean {
   return new RegExp(`\\b(?:${US_STATE_CODES})\\s+\\d{5}(?:-\\d{4})?\\b`).test(address) || /,\s*(?:united states|usa)\s*$/i.test(address);
 }
 
-export type HeEngCountrySource = 'pdl' | 'funded' | 'eng_hiring' | 'google_maps';
+export type HeEngCountrySource = 'pdl' | 'funded' | 'eng_hiring' | 'google_maps' | 'company_website';
+
+export interface HeEngOfficialPostalAddress {
+  streetAddress: string;
+  addressLocality: string;
+  postalCode: string;
+  addressCountry: string;
+  addressRegion?: string;
+}
 
 /** Server-origin metadata, never a CSV column or a client's country selection. */
 export interface HeEngSourceCountryProof {
@@ -21,6 +29,10 @@ export interface HeEngSourceCountryProof {
   sourceWebsite: string;
   sourceAddress?: string;
   sourceId?: string;
+  /** Only company_website: the final safe-read page and its own Organization. */
+  sourcePage?: string;
+  sourceOrganizationWebsite?: string;
+  sourcePostalAddress?: HeEngOfficialPostalAddress;
 }
 
 export interface HeEngCountryRow {
@@ -69,19 +81,39 @@ function sourceCountry(raw: unknown): string | null {
 function verifiedProof(row: HeEngCountryRow, raw: unknown): HeEngSourceCountryProof | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const proof = raw as Partial<HeEngSourceCountryProof>;
-  if (proof.version !== 1 || !['pdl', 'funded', 'eng_hiring', 'google_maps'].includes(String(proof.source))) return null;
+  if (proof.version !== 1 || !['pdl', 'funded', 'eng_hiring', 'google_maps', 'company_website'].includes(String(proof.source))) return null;
   const key = heEngSourceCountryKey(row);
   if (!key || key !== heEngSourceCountryKey({ company: proof.sourceName, website: proof.sourceWebsite })) return null;
   const country = sourceCountry(proof.sourceCountry);
   if (!country || country !== proof.country) return null;
   if (proof.sourceCountryCode !== undefined && sourceCountry(proof.sourceCountryCode) !== country) return null;
   if (proof.source === 'google_maps' && (country !== ENG_COUNTRY_US || !verifiedUsMapsAddress(text(proof.sourceAddress)))) return null;
+  if (proof.source === 'company_website') {
+    const address = proof.sourcePostalAddress;
+    const host = siteKey(row.website);
+    if (!host || !text(proof.sourcePage).startsWith('https://') || siteKey(proof.sourcePage) !== host || siteKey(proof.sourceOrganizationWebsite) !== host ||
+        !address || typeof address !== 'object' || Array.isArray(address) ||
+        text(address.streetAddress).length < 5 || text(address.addressLocality).length < 2 ||
+        text(address.postalCode).length < 3 || !/[\p{L}\p{N}]/u.test(text(address.postalCode)) ||
+        /^(?:n\/?a|none|unknown|null|not available|not applicable)$/i.test(text(address.postalCode)) ||
+        sourceCountry(address.addressCountry) !== country ||
+        [address.streetAddress, address.addressLocality, address.addressRegion, address.postalCode, address.addressCountry]
+          .map(text).filter(Boolean).join(', ') !== text(proof.sourceAddress)) return null;
+  }
   return {
     version: 1, source: proof.source as HeEngCountrySource, country,
     sourceCountry: text(proof.sourceCountry), sourceName: text(proof.sourceName), sourceWebsite: text(proof.sourceWebsite),
     ...(proof.sourceCountryCode !== undefined ? { sourceCountryCode: text(proof.sourceCountryCode) } : {}),
     ...(proof.sourceAddress !== undefined ? { sourceAddress: text(proof.sourceAddress) } : {}),
     ...(proof.sourceId !== undefined ? { sourceId: text(proof.sourceId) } : {}),
+    ...(proof.source === 'company_website' ? {
+      sourcePage: text(proof.sourcePage), sourceOrganizationWebsite: text(proof.sourceOrganizationWebsite),
+      sourcePostalAddress: {
+        streetAddress: text(proof.sourcePostalAddress!.streetAddress), addressLocality: text(proof.sourcePostalAddress!.addressLocality),
+        postalCode: text(proof.sourcePostalAddress!.postalCode), addressCountry: text(proof.sourcePostalAddress!.addressCountry),
+        ...(text(proof.sourcePostalAddress!.addressRegion) ? { addressRegion: text(proof.sourcePostalAddress!.addressRegion) } : {}),
+      },
+    } : {}),
   };
 }
 
@@ -96,6 +128,9 @@ export function withHeEngSourceCountry<T extends HeEngCountryRow>(
     countryCode?: unknown;
     address?: unknown;
     id?: unknown;
+    page?: string;
+    organizationWebsite?: string;
+    postalAddress?: HeEngOfficialPostalAddress;
   },
 ): T {
   const { _eng_source_country: _discarded, ...clean } = row;
@@ -107,6 +142,10 @@ export function withHeEngSourceCountry<T extends HeEngCountryRow>(
     sourceName: text(input.sourceName), sourceWebsite: text(input.sourceWebsite),
     ...(text(input.countryCode) ? { sourceCountryCode: text(input.countryCode) } : {}),
     ...(input.source === 'google_maps' ? { sourceAddress: text(input.address) } : {}),
+    ...(input.source === 'company_website' ? {
+      sourceAddress: text(input.address), sourcePage: text(input.page),
+      sourceOrganizationWebsite: text(input.organizationWebsite), sourcePostalAddress: input.postalAddress,
+    } : {}),
     ...(text(input.id) ? { sourceId: text(input.id) } : {}),
   };
   return verifiedProof(clean, proof) ? { ...clean, _eng_source_country: proof } as T : clean as T;

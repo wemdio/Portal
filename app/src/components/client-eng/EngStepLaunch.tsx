@@ -84,6 +84,7 @@ import {
 } from './engText';
 import { EngPaidAccessNotice, EngResendLinkControls, EngSupportText } from './EngPaidAccess';
 import { EngSendingBlock } from './EngSending';
+import { EngCollectionTargetSummary, engCollectionTargetView } from './EngCollectionTarget';
 import { heProjectAwaitsDescription } from './clientFailureText';
 import {
   AutopilotDecisions,
@@ -1075,6 +1076,16 @@ function preparingLine(
       return { text: 'Checking the contacts…', tone: 'muted', spinner: true, actions: [] };
     }
     if (base.status === 'analyzed') {
+      const collectionTarget = engCollectionTargetView(base);
+      if (collectionTarget?.shortfall) {
+        return {
+          text: base.row_count > 0
+            ? 'The collection ended below its target. Review the saved contacts before writing letters.'
+            : 'The collection ended below its target. No contacts are ready in the first batch.',
+          tone: 'amber',
+          actions: [],
+        };
+      }
       if (base.row_count <= 0) {
         return {
           text: 'The latest collection came back with no contacts, so there is nothing to send from it. Message Support.',
@@ -1541,6 +1552,7 @@ function MarketCard({
       )}
 
       {base && base.status === 'collecting' && <CollectProgress base={base} />}
+      {base && base.status !== 'collecting' && <EngCollectionTargetSummary base={base} />}
       {/* Объём «к отправке» — до запуска рынка, в том числе у готовых
           итоговых писем, которые ждут автозапуска или «Launch now»; после
           запуска строка выше печатает факт (`leads_count`). */}
