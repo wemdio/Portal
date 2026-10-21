@@ -114,7 +114,9 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
     requestPriority: 'bulk' as const, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true };
   const original = await getEmail(row.source_id, requestOptions);
   const sender = original.eaccount;
-  if (!sender || norm(original.from_address_email ?? '') !== norm(row.lead_email) || original.campaign_id !== q.campaign_id) {
+  // Отвечаем тому, кто написал: это может быть не тот адрес, на который мы слали (коллега, пересылка).
+  const replier = norm(original.from_address_email ?? '');
+  if (!sender || !replier.includes('@') || replier === norm(sender) || original.campaign_id !== q.campaign_id) {
     throw new SkipHandoff('Не удалось подтвердить отправителя и кампанию переписки');
   }
   const response = await listEmails({ campaign_id: q.campaign_id, search: q.lead_email,
@@ -122,7 +124,7 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
   if (response.next_starting_after) throw new Error('Переписка слишком длинная для автоматической передачи');
   const thread = (response.items ?? []).filter(e => original.thread_id
     ? e.thread_id === original.thread_id
-    : norm(e.from_address_email ?? '') === norm(row.lead_email) || norm(e.lead ?? '') === norm(row.lead_email));
+    : [norm(row.lead_email), replier].includes(norm(e.from_address_email ?? '')) || norm(e.lead ?? '') === norm(row.lead_email));
   if (!thread.some(e => e.id === original.id)) throw new Error('Входящее не найдено в живой переписке');
   if (thread.some(e => stamp(e) > stamp(original))) {
     throw new SkipHandoff('После квалификации переписка продолжилась: нужна ручная передача');
@@ -132,11 +134,11 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
     .gte('sent_at', new Date(stamp(original)).toISOString()).limit(1);
   if (manualError) throw new Error(manualError.message);
   if (manual?.length) throw new SkipHandoff('В переписке уже ответил оператор');
-  const cc = mergeCcLists(ccFor(settings, sender, row.lead_email), computeReplyAllCc(original, { eaccount: sender, leadEmail: row.lead_email }));
+  const cc = mergeCcLists(ccFor(settings, sender, replier), computeReplyAllCc(original, { eaccount: sender, leadEmail: replier }));
   const text = handoffText(settings, row.id);
   const history = [...thread.filter(e => e.id !== original.id), original]
     .sort((a, b) => stamp(a) - stamp(b))
-    .map(e => `${e.from_address_email || (e.ue_type === 2 ? row.lead_email : sender)}:\n${getBodyText(e.body)}`).join('\n\n');
+    .map(e => `${e.from_address_email || (e.ue_type === 2 ? replier : sender)}:\n${getBodyText(e.body)}`).join('\n\n');
   const body = withHistory(text, history);
   // Persist the external side-effect boundary. Never replay an interrupted/ambiguous POST.
   const { data: claimed, error: claimError } = await db.from('agency_lead_handoffs')
