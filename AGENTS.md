@@ -49,6 +49,10 @@
 - Never let a test live through a real backoff or cooldown — advance fake timers, or set the configurable delay to 0.
 - Do not add tests just because you touched a file. Add one for a bug you found or a new branch of logic; renames, wording, and code moves need none.
 
+## Язык коммитов и pull request
+
+- Сообщения коммитов (заголовки и описания), а также заголовки и описания pull request (PR) для проекта Portal писать на русском языке.
+
 ## Release and production boundary (critical)
 
 - Do not create a new branch for each feature or fix automatically. Before creating any new branch, ask the user whether this task should use a new branch and wait for an explicit yes. If the user already requested a new branch for this task, that request is sufficient. Otherwise, use the current working branch within the authorization below; if that branch is not authorized, ask the user which existing branch to use.
