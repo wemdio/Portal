@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { getProviderUsageScope, ProviderUsageWriteError } from '@/lib/providerUsage';
 import { logInfo } from '@/lib/loggerServer';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
-import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
+import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, getVeRelevanceModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, VE_RELEVANCE_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
@@ -369,7 +369,13 @@ export async function findIrrelevantRows(input: {
 }): Promise<VeRelevanceGateResult> {
   const signal = input.signal ?? getVeActiveJobSignal(); signal?.throwIfAborted();
   const audienceScope = readVeAudienceScope(input.audienceScope);
-  const model = getVeModel('gate'), reviewModel = getVeModel('relevanceReview');
+  // A configured relevance model both classifies and reviews: its own review is
+  // final, without the gpt-5-mini confirmation reserved for VE_COLLECTION_MODEL.
+  // Measured only without a frozen audience or geography (23.10.2026): it left
+  // geography quotes empty or looped filling them, and enforced every structured
+  // requirement literally (59% vs 92% of admissions kept), so those keep the pair.
+  const relevanceModel = input.geography || audienceScope ? null : getVeRelevanceModel();
+  const model = relevanceModel ?? getVeModel('gate'), reviewModel = relevanceModel ?? getVeModel('relevanceReview');
   const cacheModel = veCollectionCacheModel('gate', model), cacheReviewModel = veCollectionCacheModel('relevanceReview', reviewModel);
   // Target-scope rules changed: reuse only decisions made under these rules.
   const contextHash = relevanceHash(['relevance-evidence-v5-single-citation-repair', input.checkpointScope ?? '', cacheModel, cacheReviewModel, input.language,
@@ -883,7 +889,7 @@ export async function findIrrelevantRows(input: {
         ? { ...entry.fields, description: '', website_text: '', category: '', excerpts: excerpts[i] } : entry.fields);
       const llm = await invoke(messages(scope, fields, input.language, secondPass, secondPass, input.hypothesisOrigin, audienceScope, input.geography), schema,
         { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema,
-          ...(model === VE_COLLECTION_MODEL ? { maxHttpAttempts: 2 as const, timeoutMs: 90_000 } : {}),
+          ...(model === VE_COLLECTION_MODEL || model === VE_RELEVANCE_MODEL ? { maxHttpAttempts: 2 as const, timeoutMs: 90_000 } : {}),
           ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
       signal?.throwIfAborted(); const data = schema.parse(llm.data);
       classified = true;

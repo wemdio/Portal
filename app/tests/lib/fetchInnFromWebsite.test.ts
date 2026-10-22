@@ -184,6 +184,49 @@ describe('fetchInnFromWebsite', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
+  it('reads an English site directly first, then through a node outside the priority group', async () => {
+    const pool = await import('@/lib/enrich/proxyPool');
+    const ru = {} as import('undici').Dispatcher;
+    const other = {} as import('undici').Dispatcher;
+    jest.mocked(pool.getProxyDispatcher).mockImplementation(async (priority = true) => priority ? ru : other);
+    jest.mocked(pool.getNonPriorityProxyDispatcher).mockResolvedValue(other);
+    const routes: unknown[] = [];
+    let answering: (route: unknown) => boolean = () => true;
+    global.fetch = jest.fn(async (_input, init) => {
+      const route = (init as RequestInit & { dispatcher?: unknown })?.dispatcher;
+      routes.push(route);
+      return answering(route)
+        ? new Response('<html><body><p>Acme Insurance writes commercial policies.</p></body></html>', {
+          status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
+        })
+        : new Response('Blocked', { status: 403, headers: { 'content-type': 'text/html' } });
+    }) as typeof fetch;
+    const { fetchSinglePage } = await import('@/lib/enrich/websiteParser');
+    const english = { timeout: 1_000, routeOrder: 'direct-first' as const };
+
+    // Our own egress answers: one request, no proxy.
+    expect((await fetchSinglePage('https://acme.com', english))?.text).toContain('commercial policies');
+    expect(routes).toEqual([undefined]);
+
+    // The site refuses the direct request: the retry goes through a node
+    // outside the priority group, never through RU.
+    routes.length = 0;
+    answering = (route) => route === other;
+    expect((await fetchSinglePage('https://acme.com', english))?.text).toContain('commercial policies');
+    expect(routes).toEqual([undefined, other]);
+
+    // Without such a node the retry stays direct instead of going to RU.
+    routes.length = 0;
+    jest.mocked(pool.getNonPriorityProxyDispatcher).mockResolvedValue(undefined);
+    expect(await fetchSinglePage('https://acme.com', english)).toBeNull();
+    expect(routes).toEqual([undefined, undefined]);
+
+    // Callers without the option keep the RU-first ladder.
+    routes.length = 0;
+    expect((await fetchSinglePage('https://acme.com', { timeout: 1_000 }))?.text).toContain('commercial policies');
+    expect(routes).toEqual([ru, other]);
+  });
+
   /**
    * Source-level guard. The original prod outage was caused by:
    *   await import(/* webpackIgnore: true *\/ './innExtractor')

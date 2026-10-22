@@ -474,6 +474,29 @@ const activeCollections = new Map<string, HeActiveCollection>();
 const engUsageProjects = new Set<string>();
 
 /**
+ * Полоса ENG-сборов будится к сроку, а не к запасному опросу. Тик сборки
+ * встаёт в очередь сам (requeueSelf) с паузой 1–15 с, а realtime будит воркер
+ * в момент записи — когда run_after ещё впереди. Без срока следующий опрос
+ * был через 30 с (FALLBACK_POLL_MS в _shared.ts), и каждая пауза в 1 с
+ * становилась паузой до 30 с: по логам сбора 22.10.2026 ожидание заняло
+ * 44 из 132 минут. Полоса serial (RU и остальные стадии) — как раньше.
+ */
+const ENG_LANE_WAKES = WORKER_LANE === 'eng_collections';
+let wakeEngLane: (() => void) | null = null;
+
+/** Через сколько мс наступит ближайший run_after ожидающей сборки; null — такой нет. */
+async function nextEngCollectionDueInMs(): Promise<number | null> {
+  const now = Date.now();
+  const { data, error } = await db.from('he_jobs').select('run_after')
+    .eq('status', 'pending').eq('stage', 'base_collect').gt('run_after', new Date(now).toISOString())
+    .order('run_after', { ascending: true }).limit(1).maybeSingle();
+  if (error || !data) return null;
+  const at = Date.parse(String((data as { run_after?: unknown }).run_after));
+  // Строго после срока: claimJob сравнивает run_after с часами этого же процесса.
+  return Number.isFinite(at) ? Math.max(250, at - now + 100) : null;
+}
+
+/**
  * Свой провайдерский ключ движка (C3). До сих пор V1 и V2 читали ОДНУ
  * переменную OPENROUTER_HYPOTHESIS_ENGINE_API_KEY (docker-compose.prod.yml
  * передаёт обоим воркерам одно значение), поэтому расход и rate limit одного
@@ -3825,7 +3848,12 @@ async function pollOnce(): Promise<boolean> {
       markJobStranded(job, 'parallel collection handler failed', { failure: error });
       log('error', `ENG collection ${job.id} left for recovery: ${error instanceof Error ? error.message : String(error)}`);
     })
-    .finally(() => { activeCollections.delete(job.id); });
+    .finally(() => {
+      activeCollections.delete(job.id);
+      // Слот свободен, а только что вставшая в очередь сборка могла быть уже
+      // к сроку, пока её прогон дописывал итог: опрос — сейчас, не через 30 с.
+      wakeEngLane?.();
+    });
   activeCollections.set(job.id, { ...scope, task });
   log('info', `ENG collection ${job.id} admitted (${activeCollections.size}/${HE_ENG_COLLECTION_CONCURRENCY} slots)`);
   return true;
@@ -3881,6 +3909,10 @@ async function main() {
       shouldStop,
       pollOnce,
       realtimeTables: ['he_jobs'],
+      ...(ENG_LANE_WAKES ? {
+        nextDueInMs: nextEngCollectionDueInMs,
+        registerWake: (wake: () => void) => { wakeEngLane = wake; },
+      } : {}),
     });
     // SIGTERM stops admission, not already-paid work. Wait for every running
     // collection's stage and finalization before the final recovery sweep.
