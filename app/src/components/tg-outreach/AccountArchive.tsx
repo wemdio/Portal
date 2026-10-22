@@ -28,12 +28,16 @@ export function AccountArchiveSection({
   items,
   restoringIds,
   onRestore,
+  flat = false,
 }: {
   items: OutreachAccount[];
   restoringIds: string[];
   onRestore: (ids: string[]) => void;
+  /** Без раскрывающейся шапки: список архива всегда на виду (отдельный вид экрана). */
+  flat?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [openState, setOpen] = useState(false);
+  const open = flat || openState;
 
   const byReason = useMemo(() => {
     const counts = new Map<string, number>();
@@ -43,6 +47,17 @@ export function AccountArchiveSection({
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
+      {flat ? (
+        byReason.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-4 py-3">
+            {byReason.map(([reason, count]) => (
+              <span key={reason} className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
+                {archiveReasonLabel(reason)}: {count}
+              </span>
+            ))}
+          </div>
+        )
+      ) : (
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -62,9 +77,10 @@ export function AccountArchiveSection({
           </span>
         )}
       </button>
+      )}
 
       {open && (
-        <div className="border-t border-gray-100">
+        <div className={flat ? 'border-t border-gray-100' : 'border-t border-gray-100'}>
           {items.length === 0 ? (
             <p className="px-4 py-6 text-center text-sm text-gray-400">
               В архиве пусто. Отметьте аккаунты в списке и нажмите «В архив».

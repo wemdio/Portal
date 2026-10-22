@@ -43,7 +43,7 @@ import {
   Eye,
   ShieldCheck,
   FileSpreadsheet,
-  LayoutDashboard,
+  BarChart3,
   Power,
   PowerOff,
   FolderPlus,
@@ -2678,6 +2678,7 @@ function CampaignAccountsTab({
   const [archivedAccounts, setArchivedAccounts] = useState<OutreachAccount[]>([]);
   /** Кого убираем в архив — открытое окно выбора причины. */
   const [archiveTarget, setArchiveTarget] = useState<string[] | null>(null);
+  const [accountsView, setAccountsView] = useState<'active' | 'archive'>('active');
   const [archiveSaving, setArchiveSaving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [restoringIds, setRestoringIds] = useState<string[]>([]);
@@ -2695,8 +2696,8 @@ function CampaignAccountsTab({
    */
   const [queuePending, setQueuePending] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showAdd, setShowAdd] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const addFilesRef = useRef<HTMLInputElement>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
   /** Страна партии со слов оператора — см. выпадающий список у кнопки загрузки. */
@@ -2707,20 +2708,12 @@ function CampaignAccountsTab({
    * рядом с кнопкой загрузки: проставить цену потом, по одной строке на
    * полсотни аккаунтов, оператор не станет. Пусто — цена не указана.
    */
-  /** Цена для аккаунта, добавляемого вручную. */
-  const [newPrice, setNewPrice] = useState('');
   /** Цена, которую проставляем выбранным строкам разом. */
   const [bulkPrice, setBulkPrice] = useState('');
   const [bulkPriceSaving, setBulkPriceSaving] = useState(false);
   /** Аккаунт, у которого сейчас правят цену прямо в строке. */
   const [editingPriceFor, setEditingPriceFor] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState('');
-  const [sessionName, setSessionName] = useState('');
-  const [apiId, setApiId] = useState('');
-  const [apiHash, setApiHash] = useState('');
-  const [phone, setPhone] = useState('');
-  const [proxyId, setProxyId] = useState('');
-  const [saving, setSaving] = useState(false);
   const [editingProxyFor, setEditingProxyFor] = useState<string | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -3026,27 +3019,6 @@ function CampaignAccountsTab({
     0,
   );
   const accountsWithoutPrice = accounts.filter((a) => a.price === null || a.price === undefined).length;
-
-  const addAccount = async () => {
-    if (!sessionName.trim() || !apiId.trim() || !apiHash.trim()) return;
-    setSaving(true);
-    await authFetch(`${API_BASE}/accounts`, {
-      method: 'POST',
-      body: JSON.stringify({
-        campaign_id: campaignId,
-        session_name: sessionName.trim(),
-        api_id: Number(apiId),
-        api_hash: apiHash.trim(),
-        phone: phone.trim(),
-        proxy_id: proxyId || null,
-        price: newPrice.trim() === '' ? null : Number(newPrice.trim().replace(',', '.')),
-      }),
-    });
-    setSaving(false);
-    setSessionName(''); setApiId(''); setApiHash(''); setPhone(''); setProxyId(''); setNewPrice('');
-    setShowAdd(false);
-    void load();
-  };
 
   /**
    * Прочитать профиль одного аккаунта из Telegram и обновить строку списка.
@@ -3637,13 +3609,36 @@ function CampaignAccountsTab({
     }
   }, [deadAccounts, campaignId, load]);
 
+  /** Переключатель «Активные / Архив»: архив — отдельный вид, а не свёрнутый блок над списком. */
+  const viewSwitch = (
+    <div className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white p-1">
+      <button type="button" onClick={() => setAccountsView('active')}
+        className={`rounded-full px-4 py-1.5 text-xs font-medium transition cursor-pointer ${accountsView === 'active' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+        Активные · {accounts.length}
+      </button>
+      <button type="button" onClick={() => setAccountsView('archive')}
+        className={`rounded-full px-4 py-1.5 text-xs font-medium transition cursor-pointer ${accountsView === 'archive' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>
+        Архив · {archivedAccounts.length}
+      </button>
+    </div>
+  );
+
+  if (accountsView === 'archive') {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">{viewSwitch}</div>
+        <AccountArchiveSection
+          flat
+          items={archivedAccounts}
+          restoringIds={restoringIds}
+          onRestore={(ids) => { void restoreAccounts(ids); }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
-      <AccountArchiveSection
-        items={archivedAccounts}
-        restoringIds={restoringIds}
-        onRestore={(ids) => { void restoreAccounts(ids); }}
-      />
       {archiveTarget && (
         <ArchiveAccountsDialog
           count={archiveTarget.length}
@@ -3655,9 +3650,7 @@ function CampaignAccountsTab({
       )}
 
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-sm font-medium text-gray-700">
-          Аккаунты кампании <span className="text-gray-400 font-normal">({accounts.length})</span>
-        </span>
+        {viewSwitch}
         <div className="flex items-center gap-2">
           {/* Первой кнопкой — уборка: пока в списке висят мёртвые номера, они
               съедают время круга и контакты из базы, а искать их глазами среди
@@ -3697,17 +3690,14 @@ function CampaignAccountsTab({
                 ? `Обновить профили выбранных (${syncTargets.length})`
                 : `Обновить профили всех (${syncTargets.length})`}
           </button>
-          <label
+          {/* «Добавить» открывает выбор файлов: tdata — zip-архивами (можно сразу
+              несколько), старый формат — парами .session и .json. Ручная форма
+              с API ID/Hash убрана 22.10.2026 — аккаунты заводят только файлами. */}
+          <input ref={addFilesRef} type="file" multiple accept=".json,.session,.zip" className="hidden" onChange={e => { void handleFiles(e); }} />
+          <button type="button" onClick={() => addFilesRef.current?.click()} disabled={uploading}
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
-            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
-          >
-            {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-            Загрузить файлы
-            <input type="file" multiple accept=".json,.session,.zip" className="hidden" onChange={e => { void handleFiles(e); }} />
-          </label>
-          <button type="button" onClick={() => setShowAdd(!showAdd)}
-            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
-            <Plus className="h-3.5 w-3.5" /> Добавить
+            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-60 cursor-pointer">
+            {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Добавить
           </button>
         </div>
       </div>
@@ -3835,59 +3825,6 @@ function CampaignAccountsTab({
           <button type="button" onClick={() => setSyncSummary(null)} className="text-gray-400 hover:text-gray-600 cursor-pointer">
             <X className="h-3.5 w-3.5" />
           </button>
-        </div>
-      )}
-
-      {showAdd && (
-        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <label className="space-y-1 col-span-2">
-              <span className="text-[11px] font-medium text-gray-500">Session name</span>
-              <input value={sessionName} onChange={e => setSessionName(e.target.value)} placeholder="my_account"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">API ID</span>
-              <input type="number" value={apiId} onChange={e => setApiId(e.target.value)}
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">API Hash</span>
-              <input value={apiHash} onChange={e => setApiHash(e.target.value)}
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Телефон</span>
-              <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+79001234567"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Цена, ₽</span>
-              <input type="number" min={0} step="1" value={newPrice} onChange={e => setNewPrice(e.target.value)} placeholder="—"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            {/* Не <label>: внутри теперь кнопка со своим списком, а клик по
-                подписи в этом случае никуда не ведёт. */}
-            <div className="space-y-1">
-              <span className="block text-[11px] font-medium text-gray-500">Прокси</span>
-              <ProxyPicker
-                value={proxyId}
-                proxies={freeProxies}
-                now={healthNow}
-                ariaLabel="Прокси нового аккаунта"
-                onChange={setProxyId}
-                className="py-1.5"
-              />
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => { void addAccount(); }} disabled={saving || !sessionName.trim() || !apiId || !apiHash.trim()}
-              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
-            </button>
-            <button type="button" onClick={() => setShowAdd(false)}
-              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
-          </div>
         </div>
       )}
 
@@ -7303,10 +7240,10 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
 
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
-  // Сводка первой и стартовой: открывая кампанию, оператор спрашивает «как
-  // дела», а не «какие тут настройки» — их заводят один раз и больше не трогают.
-  { id: 'dashboard', label: 'Сводка', icon: LayoutDashboard },
+  // 22.10.2026: первой — настройки (их открывают чаще всего), второй —
+  // статистика значком-графиком вместо блоков.
   { id: 'settings', label: 'Настройки', icon: Settings },
+  { id: 'dashboard', label: 'Статистика', icon: BarChart3 },
   // Дальше — в порядке заполнения кампании: аккаунты, им прокси, базы, прогрев.
   { id: 'accounts', label: 'Аккаунты', icon: Users },
   { id: 'proxies', label: 'Прокси', icon: Network },
@@ -7323,7 +7260,26 @@ function CampaignView({ campaign, onUpdate, onDelete, onBack }: {
   onDelete: (id: string) => void;
   onBack: () => void;
 }) {
-  const [tab, setTab] = useState<string>('dashboard');
+  // Вкладка живёт в адресе (?tab=…) и в localStorage: после перезагрузки
+  // открывается последняя, а первое открытие — «Настройки».
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const [tab, setTabState] = useState<string>(() => {
+    const fromUrl = searchParams.get('tab');
+    if (fromUrl && TABS.some((t) => t.id === fromUrl)) return fromUrl;
+    try {
+      const saved = window.localStorage.getItem('tg-outreach-last-tab');
+      if (saved && TABS.some((t) => t.id === saved)) return saved;
+    } catch { /* localStorage недоступен — идём с вкладкой по умолчанию */ }
+    return 'settings';
+  });
+  const setTab = useCallback((next: string) => {
+    setTabState(next);
+    try { window.localStorage.setItem('tg-outreach-last-tab', next); } catch { /* */ }
+    // replace, а не push: переключение вкладок не должно забивать историю «Назад».
+    router.replace(`${pathname}?campaign=${campaign.id}&tab=${next}` as Route, { scroll: false });
+  }, [router, pathname, campaign.id]);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const archived = Boolean(campaign.archived_at);
