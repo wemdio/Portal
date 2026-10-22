@@ -327,6 +327,18 @@ ${list}
   return null;
 }
 
+/**
+ * Сообщение задаёт больше вопросов, чем в списке кампании. Так бывает, когда в
+ * системном промпте лежат примеры ответов со своими тремя вопросами, а
+ * контрольный вопрос один: модель копирует пример (22.10.2026, Polza Agency).
+ * Считаем знаки вопроса — грубо, но честно: лишний вопрос всегда добавляет «?».
+ */
+export function asksMoreThanQuestionList(reply: string, questions: string[]): boolean {
+  if (questions.length === 0) return false;
+  const marks = (reply.match(/[?]/g) ?? []).length;
+  return marks > questions.length;
+}
+
 /** Указание модели: задать только контрольные вопросы, передачу не делать. */
 export function qualificationInstruction(questions: string[], phrase: string | null): string {
   const list = questions.map((q, i) => `${i + 1}. ${q}`).join('\n');

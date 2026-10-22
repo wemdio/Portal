@@ -24,7 +24,7 @@ import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionStri
 import type { LoopControl } from './watchdog';
 import { dialogEditKey, dialogRevision, dialogUnchanged, withoutDeletedMessages, withDialogWrite, withDialogDeletion, clearDialogEdits, type DeleteMessageTarget } from './dialogEdits';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, parseQualificationQuestions, checkQualification, qualificationInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
+import { asksMoreThanQuestionList, openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, parseQualificationQuestions, checkQualification, qualificationInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
   stripRepeatGreeting, needsReplyTranslation, ensureReplyLanguage,
 } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
@@ -1238,6 +1238,22 @@ export async function handleChat(
       const stripped = stripHandoffPhrase(replyText, phrase);
       if (stripped) replyText = stripped;
       removedUntranslatedHandoff = true;
+    }
+    // Включена обязательная квалификация, а модель задала больше вопросов, чем
+    // в списке кампании (скопировала их из примеров промпта): переспрашиваем
+    // строго по списку. Передачу в этой ветке не делаем — вопросы ещё не заданы.
+    const listedQuestions = oai.qualification_required ? parseQualificationQuestions(oai.qualification_questions) : [];
+    if (!interested && listedQuestions.length > 0 && asksMoreThanQuestionList(replyText, listedQuestions)) {
+      log('warning', `${displayName}: в ответе вопросов больше, чем в контрольных (${listedQuestions.length}) — переписываю строго по списку`);
+      const strict = await openaiGenerate(oai, chatMessages, {
+        extraInstruction: `${qualificationInstruction(listedQuestions, phrase)} Примеры ответов с другими вопросами из системного промпта игнорируй: других вопросов, кроме списка выше, не задавай.`,
+        factsRule: true,
+      });
+      if (strict && !asksMoreThanQuestionList(strict, listedQuestions)) {
+        replyText = phrase ? stripHandoffPhrase(strict, phrase) : strict;
+      } else {
+        throw new Error('Модель снова задала лишние вопросы вместо контрольных');
+      }
     }
     let forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
     if (interested && phrase && !qualifying && !translateHandoff) {
