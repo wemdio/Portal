@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
+import { BarChart3, Megaphone, ScrollText, Search, Users, UserCircle } from 'lucide-react';
+import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 
 // ---- Types ------------------------------------------------------------------
 
@@ -905,14 +907,14 @@ export default function LiOutreachPage() {
 
   // ---- Tab bar --------------------------------------------------------------
 
-  const tabs: { key: Tab; label: string }[] = [
-    { key: 'dashboard', label: 'Дашборд' },
-    { key: 'campaigns', label: 'Кампании' },
-    { key: 'leads', label: 'Лиды' },
-    { key: 'scraper', label: 'Скрапер' },
-    { key: 'accounts', label: 'Аккаунты' },
-    { key: 'logs', label: 'Логи' },
-  ];
+  const tabs = [
+    { id: 'dashboard', label: 'Дашборд', icon: BarChart3 },
+    { id: 'campaigns', label: 'Кампании', icon: Megaphone },
+    { id: 'leads', label: 'Лиды', icon: Users },
+    { id: 'scraper', label: 'Скрапер', icon: Search },
+    { id: 'accounts', label: 'Аккаунты', icon: UserCircle },
+    { id: 'logs', label: 'Логи', icon: ScrollText },
+  ] as const;
 
   const selectedCampaign = useMemo(() => campaigns.find((c) => c.id === selectedCampaignId) ?? null, [campaigns, selectedCampaignId]);
 
@@ -924,27 +926,14 @@ export default function LiOutreachPage() {
   const dashFunnel = dashFunnelCampaign ? dashFunnelCampaign.funnel : dashData?.funnel ?? null;
 
   return (
-    <div className="space-y-6 text-left max-w-full">
+    <div className="min-w-0 space-y-6 overflow-x-clip text-left max-w-full lg:pl-14">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">LinkedIn Outreach</h1>
         <p className="text-sm text-gray-500">Кампании, AI-персонализация, скрапинг лидов через Unipile.</p>
       </div>
 
-      {/* Tab bar. Активная вкладка получает усиленную тень + кольцо
-       *  blue-400/30 — нужно чтобы её было видно на тёмной теме
-       *  (без кольца bg-white→pd-surface почти не отличался от pd-bg).
-       *  shadow-md и ring работают в обеих темах. */}
-      <div className="flex gap-1 rounded-xl bg-gray-100 p-1">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${tab === t.key ? 'bg-white text-gray-900 shadow-md ring-1 ring-blue-400/30' : 'text-gray-500 hover:text-gray-700'}`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      {/* Разделы — колонкой значков слева, как в TG-аутриче. */}
+      <CampaignRail items={tabs} active={tab} onSelect={(id) => setTab(id as Tab)} />
 
       {/* Dashboard */}
       {tab === 'dashboard' && (
@@ -952,7 +941,7 @@ export default function LiOutreachPage() {
           {dashLoading && !dashData && <div className="text-center py-8 text-sm text-gray-400">Загрузка статистики…</div>}
 
           {/* Top stats row */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [&>*]:min-w-0">
             <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active && a.user_id === currentUserId).length} total={accounts.filter((a) => a.user_id === currentUserId).length} accent="green" />
             <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
             <StatCard
@@ -971,7 +960,7 @@ export default function LiOutreachPage() {
           {/* Lead funnel + 30-day activity — стоят рядом на широких экранах
            *  (lg+) чтобы не растягивать дашборд вертикально, на мобилке
            *  пакуются в одну колонку. */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 [&>*]:min-w-0">
             {/* Lead funnel (visual) — выбираемая по кампании */}
             {dashData && dashFunnel && (
               <div className="rounded-xl border border-gray-200 bg-white p-5">
