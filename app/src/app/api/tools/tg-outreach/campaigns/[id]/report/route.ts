@@ -17,10 +17,12 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import {
   buildCampaignReport,
+  formatBaseCells,
   formatDate,
   type CampaignReport,
   type ReportContact,
   type ReportDialog,
+  type ReportForward,
 } from '@/lib/tgOutreach/report';
 
 export const dynamic = 'force-dynamic';
@@ -123,9 +125,16 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const { data: dialogRows } = await auth.supabase
         .from('tg_outreach_dialogs')
-        .select('tg_user_id, tg_username, status, messages, last_message_at, can_send_changed_at, can_send_changed_reason')
+        .select('id, tg_user_id, tg_username, status, messages, last_message_at, auto_forwarded_at, lead_marked_at')
         .eq('campaign_id', campaignId)
         .limit(20_000);
+
+      // Ручные передачи карточки: «целевой ответ» — это переданный клиенту лид.
+      const { data: forwardRows } = await auth.supabase
+        .from('tg_outreach_lead_forwards')
+        .select('dialog_id, status, requested_at, sent_at')
+        .eq('campaign_id', campaignId)
+        .eq('kind', 'lead');
 
       /**
        * Задачи парсера сюда больше не приходят. Раньше «обработанные чаты»
@@ -141,6 +150,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         dialogs: (dialogRows ?? []) as ReportDialog[],
         contacts,
         bases,
+        forwards: (forwardRows ?? []) as ReportForward[],
       });
 
       if (url.searchParams.get('format') !== 'xlsx') {
@@ -195,8 +205,7 @@ const SECTION_1_HEADER = [
   'Кол-во подобранных контактов',
   'Сообщений доставлено',
   'Кол-во любых ответов',
-  'Кол-во целевых ответов',
-  'Кол-во блокировок',
+  'Кол-во целевых ответов (передано лидов)',
   'Конверсия "Отправлено - ответ", %',
 ];
 
@@ -238,9 +247,17 @@ function buildWorkbook(report: CampaignReport, campaignName: string, from: strin
   rows.push(['1. Рассылка и реакция']);
   rows.push(SECTION_1_HEADER);
   for (const w of [...report.weeks, report.total]) {
+    // Разбивку по гипотезам кладём в ту же ячейку после суммы, в одну строку:
+    // перенос строки без стиля переноса Excel всё равно покажет слитно.
+    const bases = w.bases ?? [];
+    const withBreakdown = (sum: string | number, field: 'chats' | 'contacts') =>
+      bases.length ? `${sum} (${formatBaseCells(bases, field).join('; ')})` : sum;
     rows.push([
-      w.period, w.chats === null ? '—' : w.chats, w.contacts, w.delivered,
-      w.anyReplies, w.targetReplies, w.blocks,
+      w.period,
+      withBreakdown(w.chats === null ? '—' : w.chats, 'chats'),
+      withBreakdown(w.contacts, 'contacts'),
+      w.delivered,
+      w.anyReplies, w.targetReplies,
       w.conversion === null ? '—' : w.conversion,
     ]);
   }
@@ -248,7 +265,14 @@ function buildWorkbook(report: CampaignReport, campaignName: string, from: strin
 
   rows.push(['2. Лиды']);
   rows.push(SECTION_2_HEADER);
+  // Больше одной недели — лиды под заголовками недель, как строки раздела 1.
+  const byWeek = report.weeks.length > 1;
+  let currentWeek: string | null = null;
   for (const l of report.leads) {
+    if (byWeek && l.week !== currentWeek) {
+      currentWeek = l.week ?? '';
+      rows.push([currentWeek]);
+    }
     rows.push([l.sourceChat, l.criterion, l.nickname, l.offerSentAt, l.offerNumber, l.quality, l.handedOverAt]);
   }
   // Пустая строка под ручное дозаполнение, если лидов за период не было.

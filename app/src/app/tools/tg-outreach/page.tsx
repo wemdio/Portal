@@ -97,6 +97,7 @@ import { accountLabel } from '@/lib/tgOutreach/accountLabel';
 import { leadMarkLabel, type LeadByFilter } from '@/lib/tgOutreach/leadMark';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
+import { CopyTableButton, type CopyRow } from '@/components/tg-outreach/CopyTableButton';
 import {
   takenProxyUrls,
   selectableProxies,
@@ -7035,11 +7036,13 @@ interface ReportResponse {
   report: {
     weeks: Array<{
       period: string; chats: number | null; contacts: number; delivered: number;
-      anyReplies: number; targetReplies: number; blocks: number; conversion: number | null;
+      anyReplies: number; targetReplies: number; conversion: number | null;
+      /** Разбивка по гипотезам; в отчётах, собранных до 22.10.2026, её нет. */
+      bases?: Array<{ base: string; chats: number | null; contacts: number }>;
     }>;
     total: ReportResponse['report']['weeks'][number];
     leads: Array<{
-      sourceChat: string; criterion: string; nickname: string; offerSentAt: string;
+      week?: string; sourceChat: string; criterion: string; nickname: string; offerSentAt: string;
       offerNumber: string; quality: string; handedOverAt: string;
     }>;
     offers: Array<{
@@ -7063,10 +7066,34 @@ function toDateInput(ms: number): string {
  * закрытой прошлой неделе значило бы прятать свежие дни. Даты можно менять —
  * форма допускает и длинный период с накоплением недельных строк.
  *
- * Колонки, которых в данных нет (номер оффера, критерий отбора, качество лида,
- * дата передачи клиенту), отдаются пустыми и заполняются руками уже в файле.
- * Показывать вместо них догадку было бы хуже пустоты: цифры уходят клиенту.
+ * Таблицы копируются кнопкой целиком — в документ ложатся таблицей, в Sheets
+ * по ячейкам. Пустым остаётся только «Критерий отбора»: его в данных нет.
  */
+const REPORT_SECTION_1_HEADERS = [
+  'Период', 'Обработано чатов', 'Подобрано контактов', 'Доставлено',
+  'Любых ответов', 'Целевых ответов (передано лидов)', 'Конверсия, %',
+];
+const REPORT_SECTION_2_HEADERS = [
+  'Чат/группа', 'Критерий отбора', 'Никнейм', 'Дата оффера', '№ оффера', 'Качество лида', 'Передан клиенту',
+];
+
+/** Разбивка по гипотезам под суммой: «Гипотеза 3 — 4». */
+function formatBaseLines(
+  bases: ReportResponse['report']['weeks'][number]['bases'],
+  field: 'chats' | 'contacts',
+): string[] {
+  return (bases ?? []).map((b) => `${b.base} — ${b[field] === null ? 'не указаны' : b[field]}`);
+}
+
+function BaseBreakdown({ lines }: { lines: string[] }) {
+  if (!lines.length) return null;
+  return (
+    <div className="mt-0.5 space-y-px text-[10px] font-normal leading-snug text-gray-400">
+      {lines.map((l, i) => <div key={i}>{l}</div>)}
+    </div>
+  );
+}
+
 /** Строка истории отчётов: без самих цифр, они открываются по клику. */
 interface ReportHistoryItem {
   id: string;
@@ -7183,6 +7210,34 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
   const cell = 'px-2 py-1.5 text-xs text-gray-700 border border-gray-200';
   const head = 'px-2 py-1.5 text-[11px] font-medium text-gray-500 border border-gray-200 bg-gray-50 text-left';
 
+  // Те же строки и на экране, и в буфере обмена — чтобы вставленное не
+  // расходилось с тем, что видно.
+  const section1Rows: CopyRow[] = data ? [...data.weeks, data.total].map((w) => {
+    const chats = w.chats === null ? '—' : String(w.chats);
+    const chatLines = formatBaseLines(w.bases, 'chats');
+    const contactLines = formatBaseLines(w.bases, 'contacts');
+    return [
+      w.period,
+      chatLines.length ? [chats, ...chatLines] : chats,
+      contactLines.length ? [String(w.contacts), ...contactLines] : String(w.contacts),
+      w.delivered, w.anyReplies, w.targetReplies,
+      w.conversion === null ? '—' : w.conversion,
+    ];
+  }) : [];
+  // Период длиннее недели — лиды под заголовками недель, как строки раздела 1.
+  const section2Rows: CopyRow[] = [];
+  if (data) {
+    const byWeek = data.weeks.length > 1;
+    let week: string | null = null;
+    for (const l of data.leads) {
+      if (byWeek && (l.week ?? '') !== week) {
+        week = l.week ?? '';
+        if (week) section2Rows.push({ group: week });
+      }
+      section2Rows.push([l.sourceChat, l.criterion, l.nickname, l.offerSentAt, l.offerNumber, l.quality, l.handedOverAt]);
+    }
+  }
+
   return (
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
     <div className="min-w-0 space-y-4">
@@ -7223,97 +7278,70 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
       {data && (
         <div className="space-y-6">
           <div className="space-y-2">
-            <h3 className="text-sm font-medium text-gray-800">1. Рассылка и реакция</h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-gray-800">1. Рассылка и реакция</h3>
+              <CopyTableButton headers={REPORT_SECTION_1_HEADERS} rows={section1Rows} />
+            </div>
             <div className="overflow-x-auto">
               <table className="min-w-full border-collapse">
                 <thead>
-                  <tr>
-                    <th className={head}>Период</th>
-                    <th className={head}>Обработано чатов</th>
-                    <th className={head}>Подобрано контактов</th>
-                    <th className={head}>Доставлено</th>
-                    <th className={head}>Любых ответов</th>
-                    <th className={head}>Целевых ответов</th>
-                    <th className={head}>Блокировок</th>
-                    <th className={head}>Конверсия, %</th>
-                  </tr>
+                  <tr>{REPORT_SECTION_1_HEADERS.map((h) => <th key={h} className={head}>{h}</th>)}</tr>
                 </thead>
                 <tbody>
                   {[...data.weeks, data.total].map((w, i) => (
                     <tr key={w.period + i} className={w.period === 'Итого' ? 'font-medium bg-gray-50' : ''}>
-                      <td className={cell}>{w.period}</td>
-                      <td className={cell}>{w.chats === null ? '—' : w.chats}</td>
-                      <td className={cell}>{w.contacts}</td>
-                      <td className={cell}>{w.delivered}</td>
-                      <td className={cell}>{w.anyReplies}</td>
-                      <td className={cell}>{w.targetReplies}</td>
-                      <td className={cell}>{w.blocks}</td>
-                      <td className={cell}>{w.conversion === null ? '—' : w.conversion}</td>
+                      <td className={`${cell} whitespace-nowrap align-top`}>{w.period}</td>
+                      <td className={`${cell} align-top`}>
+                        {w.chats === null ? '—' : w.chats}
+                        <BaseBreakdown lines={formatBaseLines(w.bases, 'chats')} />
+                      </td>
+                      <td className={`${cell} align-top`}>
+                        {w.contacts}
+                        <BaseBreakdown lines={formatBaseLines(w.bases, 'contacts')} />
+                      </td>
+                      <td className={`${cell} align-top`}>{w.delivered}</td>
+                      <td className={`${cell} align-top`}>{w.anyReplies}</td>
+                      <td className={`${cell} align-top`}>{w.targetReplies}</td>
+                      <td className={`${cell} align-top`}>{w.conversion === null ? '—' : w.conversion}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            {/* Оговорки, без которых цифрам нельзя доверять вслепую. Уходят
-                клиенту — лучше знать заранее, что именно они означают. */}
             <p className="text-[10px] text-gray-400">
-              Блокировки — только выявленные: мы узнаём о них, когда пытаемся написать
-              повторно, поэтому заблокировавшие сразу после первого касания сюда не попадают.
-              Обработанные чаты — уникальные чаты-источники контактов, загруженных в базы этой
-              кампании за период. Целевые ответы отнесены к неделе последнего сообщения диалога:
-              момент срабатывания триггера в базе не хранится.
+              Гипотеза попадает в неделю, когда по ней ушло первое сообщение. Ответы — только на наше касание, целевые — переданные клиенту лиды.
             </p>
-            {[...data.weeks, data.total].every((w) => w.chats === null) && (
-              <p className="text-[11px] text-amber-600">
-                «Обработано чатов» — прочерк: в файлах базы этой кампании нет колонки
-                «Ссылка на источник», и портал не знает, из каких чатов взяты контакты.
-                Добавьте её при следующей загрузке базы — TG-парсер отдаёт её в выгрузке, —
-                и цифра начнёт считаться сама. За прошлые недели впишите её в файл руками.
-              </p>
-            )}
           </div>
 
           <div className="space-y-2">
-            <h3 className="text-sm font-medium text-gray-800">
-              2. Лиды <span className="font-normal text-gray-400">({data.leads.length})</span>
-            </h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-gray-800">
+                2. Лиды <span className="font-normal text-gray-400">({data.leads.length})</span>
+              </h3>
+              {data.leads.length > 0 && <CopyTableButton headers={REPORT_SECTION_2_HEADERS} rows={section2Rows} />}
+            </div>
             {data.leads.length === 0 ? (
-              <p className="text-xs text-gray-400">За период целевых ответов не было.</p>
+              <p className="text-xs text-gray-400">За период лидов клиенту не передавали.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full border-collapse">
                   <thead>
-                    <tr>
-                      <th className={head}>Чат/группа</th>
-                      <th className={head}>Критерий отбора</th>
-                      <th className={head}>Никнейм</th>
-                      <th className={head}>Дата оффера</th>
-                      <th className={head}>№ оффера</th>
-                      <th className={head}>Качество лида</th>
-                      <th className={head}>Передан клиенту</th>
-                    </tr>
+                    <tr>{REPORT_SECTION_2_HEADERS.map((h) => <th key={h} className={head}>{h}</th>)}</tr>
                   </thead>
                   <tbody>
-                    {data.leads.map((l, i) => (
-                      <tr key={l.nickname + i}>
-                        <td className={cell}>{l.sourceChat || <span className="text-gray-300">—</span>}</td>
-                        <td className={cell} />
-                        <td className={cell}>{l.nickname}</td>
-                        <td className={cell}>{l.offerSentAt}</td>
-                        <td className={cell} />
-                        <td className={cell} />
-                        <td className={cell} />
+                    {section2Rows.map((row, i) => (Array.isArray(row) ? (
+                      <tr key={i}>
+                        {row.map((c, j) => <td key={j} className={cell}>{c || <span className="text-gray-300">—</span>}</td>)}
                       </tr>
-                    ))}
+                    ) : (
+                      <tr key={i}>
+                        <td colSpan={REPORT_SECTION_2_HEADERS.length} className={`${cell} bg-gray-50 font-medium`}>{row.group}</td>
+                      </tr>
+                    )))}
                   </tbody>
                 </table>
               </div>
             )}
-            <p className="text-[10px] text-gray-400">
-              Пустые колонки портал не заполняет — их дописывают руками в выгруженном файле.
-              Чат-источник берётся из колонки «Ссылка на источник» загруженного файла базы;
-              если её при загрузке не было, останется пусто.
-            </p>
           </div>
 
           <div className="space-y-2">
@@ -7349,7 +7377,7 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
               </table>
             </div>
             <p className="text-[10px] text-gray-400">
-              Строка на каждую базу кампании. Цифры считает портал, остальное — из плана работ.
+              Строка на каждую гипотезу, по которой в периоде что-то было. Цифры считает портал, остальное — из плана работ.
             </p>
           </div>
         </div>
