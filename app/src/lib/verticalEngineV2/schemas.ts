@@ -450,7 +450,7 @@ export const VeDirectoryFiltersSchema = z
 
 export const VeHhQuerySchema = z.object({
   text: z.string().min(1).max(300),
-  area: z.string().optional(),
+  area: z.union([z.string(), z.array(z.string().min(1)).min(1).max(100)]).optional(),
   date_from: VeDateSchema.optional(),
   date_to: VeDateSchema.optional(),
 });

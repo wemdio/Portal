@@ -1,3 +1,4 @@
+import { applyVeCollectionGeographyToPlan, readVeCollectionGeography, type VeCollectionGeography } from '../collectionGeography';
 import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
 import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
 /**
@@ -124,9 +125,11 @@ import { getVeDirectoryPlanPopulation, veDirectoryPopulationSlice, veUnsizedSour
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { veRelevanceGeographySourceRows } from '../relevanceGeography';
 import { isVePaidWebsiteSearchEnabled } from '../paidSearchPolicy';
 import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
 import { capVeContactsPerCompany, countVeTargetContacts, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
+import { readVeGeographyRepair, type VeGeographyRepairReceipt } from '../collectionGeographyRepair';
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
   buildVeRelevanceReviewBatch, compactVeRelevanceReserve, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
@@ -745,6 +748,10 @@ export interface VeSliceProbe {
 }
 
 export interface VeCollectInfo {
+  /** Frozen on preview creation; supply inherits the approved source base. */
+  collection_geography?: VeCollectionGeography;
+  /** Explicit operator repair: freezes the existing collection envelope and source list. */
+  geography_repair?: VeGeographyRepairReceipt;
   known_website_source?: VeKnownWebsiteSourceReceipt;
   restaurant_source_refresh?: VeRestaurantSourceRefresh;
   /** Frozen source/relevance audience; a rollout flag change never reinterprets it. */
@@ -1137,6 +1144,7 @@ async function buildPlan(
   hypothesisId: string | null,
   strategyFeedback?: string,
   audienceSnapshot?: VeCollectionAudienceSnapshot,
+  collectionGeography?: VeCollectionGeography,
 ): Promise<{
   plan: VeSourcePlan;
   planRepair?: VePlanRepair;
@@ -1228,6 +1236,7 @@ async function buildPlan(
     synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
     hypotheses: broad ? hypotheses.map((h) => ({ ...h, broad: true })) : hypotheses,
     audienceScope: audienceSnapshot?.hypotheses[0].audience_scope,
+    collectionGeography,
     companyTypes,
   };
 
@@ -1243,12 +1252,12 @@ async function buildPlan(
   // Рынок РФ: живой Google Maps заменяется готовым каталогом Яндекс Карт.
   const ruMaps = market === 'us' ? null : veRuMapsUseCatalog(llm.data);
   if (ruMaps?.replaced) stageLog(ctx, `[base_collect] план: ${ruMaps.replaced} задач Google Maps переведены на готовый каталог Яндекс Карт`);
-  const withCatalog = await ensureCatalogSource(ctx, ruMaps?.plan ?? llm.data, promptInput, usage, market);
+  const withCatalog = await ensureCatalogSource(ctx, applyVeCollectionGeographyToPlan(ruMaps?.plan ?? llm.data, collectionGeography), promptInput, usage, market);
   // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
   // не существует, а добавленный срез проверяется на общих основаниях.
   const { plan: probed, sliceProbe } = await ensureSliceMatchesVertical(
     ctx,
-    withCatalog.plan,
+    applyVeCollectionGeographyToPlan(withCatalog.plan, collectionGeography),
     vertical,
     promptInput,
     usage,
@@ -1279,7 +1288,7 @@ async function buildPlan(
   const restaurant = normalizeVeRestaurantSourcePlan(media ? normalizeVeMediaSourcePlan(generation.plan, media).plan : generation.plan, {
     market, hypotheses: !structuredAudience && hypothesisId && broadFlag === false ? hypotheses.map((h) => ({ ...h, broad: false })) : [],
   });
-  const plan = restaurant.plan;
+  const plan = applyVeCollectionGeographyToPlan(restaurant.plan, collectionGeography);
   if (generation.changed) stageLog(ctx, '[base_collect] план генерации: профильные каталоги впереди, водоканалы исключены, вакансии ограничены отраслью');
   if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {
@@ -3019,8 +3028,30 @@ export function applyVeAudienceSourceRefresh(info: VeCollectInfo, snapshot: VeCo
   return true;
 }
 
+/** Apply after every policy rewrite; never reinterpret an already dispatched child.
+ * Only a fresh/pending task can receive changed source filters. */
+function applyCollectionGeography(info: VeCollectInfo): boolean {
+  if (!readVeCollectionGeography(info.collection_geography)?.required || !info.tasks?.length) return false;
+  const tasks = applyVeCollectionGeographyToPlan({ tasks: info.tasks.map((state) => state.task) }, info.collection_geography).tasks;
+  let changed = false;
+  info.tasks.forEach((state, index) => {
+    if (JSON.stringify(state.task) === JSON.stringify(tasks[index])) return;
+    if (state.status !== 'pending' || state.child_job_id || state.rows > 0 || state.harvest?.length) {
+      throw new Error('Collection geography differs from a saved source task; explicit preview correction is required');
+    }
+    if (info.adaptive_collection?.active_source === veSourceStrategyKey(state.task)) {
+      info.adaptive_collection.active_source = veSourceStrategyKey(tasks[index]);
+    }
+    state.task = tasks[index];
+    delete state.catalog;
+    changed = true;
+  });
+  if (changed) info.plan = { ...info.plan, tasks: info.tasks.map((state) => state.task) };
+  return changed;
+}
+
 async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo, market: VeMarket, generationVersion: unknown): Promise<void> {
-  if (info.audience_snapshot) return; // Persisted snapshots survive rollout rollback.
+  if (info.audience_snapshot && (info.collection_mode !== 'supply' || info.collection_geography !== undefined)) return; // Persisted snapshots survive rollout rollback.
   const refreshing = info.audience_scope_refresh_requested === true;
   const isNew = !info.plan && !info.construct && !info.tasks?.length && !info.preview_pipeline?.batches.length
     && !info.target_progress?.candidates_processed && !info.target_checkpoint;
@@ -3035,9 +3066,12 @@ async function pinCollectionAudience(ctx: VeStageContext, job: VeJob, base: VeAu
     const approved = await loadVeApprovedSupplyAudience(ctx.supabase, { projectId: job.project_id,
       hypothesisId: base.hypothesis_id, batchId: info.supply_batch_id, baseId: base.id });
     if (approved) {
-      info.audience_snapshot = approved.snapshot;
-      info.cost_policy = approved.costPolicy;
-      info.hypotheses = approved.snapshot.hypotheses;
+      if (approved.snapshot) {
+        info.audience_snapshot = approved.snapshot;
+        info.cost_policy = approved.costPolicy!;
+        info.hypotheses = approved.snapshot.hypotheses;
+      }
+      if (approved.geography) info.collection_geography = approved.geography;
       await persistCollectInfo(ctx, base.id, info);
     }
     return;
@@ -3099,6 +3133,9 @@ async function pinNicheSourceProfile(ctx: VeStageContext, job: VeJob, base: VeAu
  * A changed scope receives a new cursor key, while old rows retain their exact
  * attribution and all spend/seen/limit checkpoints remain intact. */
 export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNicheSourceProfile): boolean {
+  // An explicit geography repair already froze its reviewed source keys. All
+  // callers, including the post-plan path, must preserve that exact scope.
+  if (info.geography_repair) return false;
   const upgradingPayments = profile === 'payments' && info.source_selection?.profile === 'payments' && info.source_selection.version === 1;
   if (!info.plan || !info.tasks?.length || (info.source_selection && !upgradingPayments) || (info.construct && info.construct.status !== 'done') || info.adaptive_collection?.pending
     || info.preview_pipeline?.batches.length || info.tasks.some((task) => task.status === 'dispatched')) return false;
@@ -3107,7 +3144,7 @@ export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNich
     // Already paid HH jobs are immutable. A newly built plan receives the
     // narrower query, but a code update must not launch another HH job.
     if (state.source === 'hh_live' && state.status !== 'pending') continue;
-    const task = normalizeVeNicheSourceTask(state.task, profile);
+    const task = applyVeCollectionGeographyToPlan({ tasks: [normalizeVeNicheSourceTask(state.task, profile)] }, info.collection_geography).tasks[0];
     const wrongCatalog = state.catalog?.filters.categories?.some((label) => !veNicheRubricAllowed(profile, label));
     if (veSourceStrategyKey(task) === veSourceStrategyKey(state.task) && !wrongCatalog) continue;
     previous.push({ task: state.task, catalog: state.catalog, directory_cursors: state.directory_cursors,
@@ -3135,9 +3172,10 @@ export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNich
 
 /** New acquisitions only: never use this guard to discard saved/in-flight rows. */
 function boundedSourceContinuation(info: VeCollectInfo): boolean {
-  return !!info.known_website_source?.continuation_only || !!info.restaurant_source_refresh;
+  return !!info.known_website_source?.continuation_only || !!info.restaurant_source_refresh || !!info.geography_repair;
 }
 function continuationSourceAllowed(info: VeCollectInfo, task: VeCollectTaskState): boolean {
+  if (info.geography_repair) return info.geography_repair.source_keys.includes(veSourceStrategyKey(task.task));
   if (info.restaurant_source_refresh) return veSourceStrategyKey(task.task) === info.restaurant_source_refresh.source_key;
   return !info.known_website_source?.continuation_only || task.source === 'known_websites';
 }
@@ -3189,7 +3227,7 @@ function clinicProfileForInfo(info: VeCollectInfo, market: VeMarket | undefined,
  * This restores audience metadata, never source cursors, verdicts or budgets. */
 async function pinMediaAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
   market: VeMarket): Promise<void> {
-  if (info.audience_snapshot || !base.hypothesis_id || info.hypotheses?.length !== 1 || info.hypotheses[0].broad !== undefined
+  if (info.geography_repair || info.audience_snapshot || !base.hypothesis_id || info.hypotheses?.length !== 1 || info.hypotheses[0].broad !== undefined
     || !detectVeMediaSourceProfile({ market, hypotheses: info.hypotheses.map((hypothesis) => ({ ...hypothesis, broad: false })) })) return;
   const { data, error } = await ctx.supabase.from('ve_hypotheses').select('id,title,description,status,broad')
     .eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
@@ -3201,7 +3239,7 @@ async function pinMediaAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBas
 /** Old saved SaaS verdicts may be corrected only against the current selected
  * hypothesis, not a stale title-only plan. No candidate fields are rewritten. */
 async function pinStaffingReviewAudience(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<void> {
-  if (info.audience_snapshot || !base.hypothesis_id || info.hypotheses?.length !== 1
+  if (info.geography_repair || info.audience_snapshot || !base.hypothesis_id || info.hypotheses?.length !== 1
     || !/^B2B\s+SaaS\b/i.test(info.hypotheses[0].title)) return;
   const { data, error } = await ctx.supabase.from('ve_hypotheses').select('id,title,description,status,broad,origin')
     .eq('id', base.hypothesis_id).eq('project_id', job.project_id).maybeSingle();
@@ -3294,7 +3332,7 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
       // Запрос вакансий — сигнал найма, а не граница рынка: по всей России
       // (area 113 или пусто) он ничего не сужает. 9f82e79d стояла на 5
       // контактах, потому что любая замена hh_live считалась нарушением.
-      || (original.hh_query?.area && !['113', ''].includes(original.hh_query.area.trim()));
+      || (original.hh_query?.area && (Array.isArray(original.hh_query.area) ? original.hh_query.area : [original.hh_query.area]).some((area) => !['113', ''].includes(area.trim())));
     if (restricted || (preserveSize && SIZE_FILTER_KEYS.some((key) => original.directory_filters?.[key] !== undefined))) return null;
   }
   if (candidate.source === 'companies_directory' && original.source === candidate.source) return {
@@ -3364,7 +3402,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
       const feedback = planExhausted
         ? `Источники плана исчерпаны, а цель базы не набрана. Предложи ДРУГОЙ срез того же рынка: соседние или более общие коды ОКВЭД, готовый каталог Яндекс Карт или другой запрос. ${rules} Предыдущий план (без порогов размера): ${previous}`
         : `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. ${rules} Предыдущий план (без порогов размера): ${previous}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.slice(-6))}`;
-      const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback, info.audience_snapshot);
+      const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback, info.audience_snapshot, info.collection_geography);
       if (replacement.sliceProbe?.outcome === 'rejected') throw new Error('alternative_slice_rejected');
       const known = new Set(tasks.map((task) => veSourceStrategyKey(task.task)));
       const next = replacement.plan.tasks.map((task) => safeAlternativeTask(task, original.task, !!info.audience_snapshot?.hypotheses.some((h) => h.audience_scope?.required.length)))
@@ -3904,15 +3942,22 @@ async function checkCollectedRelevance(args: {
         }
       }
     }
+    const geography = readVeCollectionGeography(info.collection_geography)?.required;
+    const evidenceRows = args.evidenceRows ? projectAllowedRows(ctx, args.evidenceRows) : [];
+    if (geography) evidenceRows.push(...veRelevanceGeographySourceRows(storedRows, [
+      ...readVeRelevanceSourceRows(info.relevance_reserve).filter((row) => row._ve_geography_source === true),
+      ...(info.tasks ?? []).flatMap((state) => state.harvest ?? []),
+    ]));
     const gate = await findIrrelevantRows({
       rows: storedRows,
-      evidenceRows: args.evidenceRows ? projectAllowedRows(ctx, args.evidenceRows) : undefined,
+      evidenceRows: evidenceRows.length ? evidenceRows : undefined,
       verticalName,
       verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
       hypothesisTitle,
       hypothesisDescription,
       hypothesisOrigin,
       audienceScope: frozenHypothesis?.audience_scope,
+      geography,
       language: market === 'us' ? 'en' : 'ru',
       log: (m) => stageLog(ctx, m),
       signal: ctx.signal,
@@ -4469,9 +4514,9 @@ async function widenExhaustedPlan(
   // Only proposed NEW tasks are normalized. The original paid tasks, cursors,
   // harvest and strategy keys remain untouched, including on a retry.
   const mandatorySize = !!frozen?.some((h) => h.audience_scope?.required.some(veHypothesisSizeBasis));
-  const added = normalizeVeGenerationSourcePlan({ tasks: mandatorySize ? [] : veSecondQueueTasks(existingTasks, sizeBasis) }, {
+  const added = applyVeCollectionGeographyToPlan(normalizeVeGenerationSourcePlan({ tasks: mandatorySize ? [] : veSecondQueueTasks(existingTasks, sizeBasis) }, {
     market: ctx.market ?? '', hypotheses, existingTasks,
-  }).plan.tasks;
+  }).plan, info.collection_geography).tasks;
   if (added.length) {
     for (const task of added) tasks.push({ source: task.source, task, status: 'pending', child_job_id: null, rows: 0 });
     policy.active_source = veSourceStrategyKey(added[0]);
@@ -4579,10 +4624,14 @@ async function completeTargetRound(args: {
       companies: new Set(contactRows.map(veContactLimitKey)).size, applied_at: new Date().toISOString() };
     if (capped.overCap.length) stageLog(ctx, `[base_collect] лимит ${contactLimit} адресов на компанию: в готовой базе ${contactRows.length}, сверх лимита сохранено в резерве ${capped.overCap.length}`);
   } else delete info.company_contact_cap;
-  info.relevance_reserve = { version: 1, rows: reserveRows,
-    source_rows: mergeVeRelevanceRows(readVeRelevanceSourceRows(info.relevance_reserve),
-      args.candidates.map((row) => ({ ...row, _ve_source_candidate: true }))),
-  };
+  const previousSource = readVeRelevanceSourceRows(info.relevance_reserve);
+  const sourceRows = mergeVeRelevanceRows(previousSource.filter((row) => row._ve_geography_source !== true),
+    args.candidates.map((row) => ({ ...row, _ve_source_candidate: true })));
+  if (readVeCollectionGeography(info.collection_geography)?.required) sourceRows.push(...veRelevanceGeographySourceRows(
+    sourceRows, [...previousSource.filter((row) => row._ve_geography_source === true),
+      ...(info.tasks ?? []).flatMap((state) => state.harvest ?? [])],
+  ));
+  info.relevance_reserve = { version: 1, rows: reserveRows, source_rows: sourceRows };
   info.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
   // Бюджет раундов расходует только раунд, отправивший в проверку что-то новое
   // для базы. Повторный проход того же раунда (проверка, названия, резерв)
@@ -5083,7 +5132,8 @@ async function completeTargetRound(args: {
     && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target) {
     next = { ...next, round: progress.round, status: 'limited', max_rounds: progress.max_rounds,
-      reason: info.restaurant_source_refresh ? 'Доступный каталог профильных заведений обработан. Проверенные контакты сохранены; это не оценка всего рынка.'
+      reason: info.geography_repair ? 'Доступный источник в выбранной географии обработан. Проверенные контакты сохранены.'
+        : info.restaurant_source_refresh ? 'Доступный каталог профильных заведений обработан. Проверенные контакты сохранены; это не оценка всего рынка.'
         : 'Доступные официальные сайты платформ проверены. Проверенные контакты сохранены; это не оценка всего рынка.' };
     info.target_progress = next;
   }
@@ -5120,7 +5170,7 @@ async function completeTargetRound(args: {
   const idleRounds = info.idle_rounds;
   const status = next.status === 'collecting' ? 'collecting'
     : next.status === 'error' ? 'failed'
-      : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
+      : next.mode === 'preview' && readyRows.length > 0 && !info.geography_repair?.preserve_analysis ? 'analyzing' : 'analyzed';
   await persistCollectInfo(ctx, base.id, info, {
     data: cleaned.rows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
@@ -5210,6 +5260,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+  readVeGeographyRepair(info); // Reject cap/source tampering before acquisition or paid work.
   if (base.project_id !== job.project_id) throw new Error('Collection base does not belong to the job project');
   const frozenAudience = readVeCollectionAudienceSnapshot(info.audience_snapshot);
   if (frozenAudience && (frozenAudience.hypotheses.length !== 1 || frozenAudience.hypotheses[0].id !== base.hypothesis_id)) {
@@ -5397,14 +5448,16 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // The public wrapper already cloned the per-invocation context. Preserve
   // that identity so the loaded project rules accompany every helper call.
   ctx.market = market;
+  readVeCollectionGeography(info.collection_geography); // Corrupt durable scope never becomes unrestricted.
   await pinCollectionAudience(ctx, job, base, info, market, project.audience_generation_version);
+  if (applyCollectionGeography(info)) await persistCollectInfo(ctx, baseId, info);
   await pinMediaAudience(ctx, job, base, info, market);
   await pinStaffingReviewAudience(ctx, job, base, info);
   // Pin the cost policy before recovery early returns. Paid children keep
   // their immutable inputs; a resume does not buy search for their old backlog.
   if (target && market !== 'us' && !isRefill) {
     const profile = await pinNicheSourceProfile(ctx, job, base, info);
-    if (profile && applyVeNicheSourceSelection(info, profile)) await persistCollectInfo(ctx, baseId, info);
+    if (profile && !info.geography_repair && applyVeNicheSourceSelection(info, profile)) await persistCollectInfo(ctx, baseId, info);
   }
   if (info.company_name_recovery) {
     if (!target) throw new Error('Company name recovery requires a collection target');
@@ -5448,6 +5501,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       hypothesisId,
       undefined,
       info.audience_snapshot,
+      info.collection_geography,
     );
     info.plan = plan;
     if (planRepair) info.plan_repair = planRepair;
@@ -5489,6 +5543,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     if (profile && applyVeNicheSourceSelection(info, profile)) await persistCollectInfo(ctx, baseId, info);
   }
   if (target) await adaptCollectionSources(ctx, job, base, info, vertical, market, usage);
+  if (applyCollectionGeography(info)) await persistCollectInfo(ctx, baseId, info);
 
   // Базы, чей план был сохранён до появления estimate, получают его при
   // следующем безопасном тике, не переигрывая LLM-план и сбор источников.
