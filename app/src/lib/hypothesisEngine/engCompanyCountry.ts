@@ -91,8 +91,9 @@ function verifiedProof(row: HeEngCountryRow, raw: unknown): HeEngSourceCountryPr
   if (!country || country !== proof.country) return null;
   if (proof.sourceCountryCode !== undefined && sourceCountry(proof.sourceCountryCode) !== country) return null;
   if (proof.source === 'google_maps' && (country !== ENG_COUNTRY_US || !verifiedUsMapsAddress(text(proof.sourceAddress)))) return null;
-  if (proof.source === 'public_registry' && (proof.registryProvider === 'companies_house' ||
-      text(proof.sourceAddress).length < 5 ||
+  // A validated registry country is sufficient source evidence, including a
+  // Companies House registered office. It does not prove a local service team.
+  if (proof.source === 'public_registry' && (text(proof.sourceAddress).length < 5 ||
       !heEngRegistryRecordValid(proof.registryProvider, proof.sourceId, country, proof.sourcePage))) return null;
   if (proof.source === 'company_website') {
     const address = proof.sourcePostalAddress;

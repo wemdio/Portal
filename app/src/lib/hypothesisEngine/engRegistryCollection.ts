@@ -5,6 +5,7 @@ import { validateHeEngRegistryPlan } from './engPublicRegistryPlan';
 import type { HeEngRegistryCandidate, HeEngRegistryCursor, HeEngRegistryPlan } from './engPublicRegistryTypes';
 import { resolveHeEngRegistryCandidate, type HeEngRegistryResolutionCheckpoint } from './engRegistryCompanyEvidence';
 import type { HeEngSearchEvidenceScope } from './engSearchCompanyEvidence';
+import type { HeEngSourceEvidenceAudit } from './engSourceEvidenceAudit';
 import type { HeStageContext } from './stages/shared';
 import { heStageSignal } from './stages/io';
 import { addHeSite, heCompanySiteIdentity, heSameCompanySite, newHeSiteSet } from './collectionIdentity';
@@ -31,7 +32,8 @@ export interface HeEngRegistryWave {
   resolved: number;
   rows: Row[];
   excluded: Record<string, number>;
-  decisions: Array<{ provider: string; recordId: string; reason: string }>;
+  decisions: Array<{ provider: string; recordId: string; reason: string;
+    company?: string; country?: string; website?: string; audit?: HeEngSourceEvidenceAudit }>;
   resolution?: HeEngRegistryResolutionCheckpoint;
 }
 
@@ -177,12 +179,16 @@ export async function runHeEngRegistryWave(input: {
     const candidate = wave.candidates[wave.resolved];
     const preExcluded = input.excluded({ company: candidate.company, website: candidate.website, email: candidate.emails.join('; ') });
     let reason: string;
+    let audit: HeEngSourceEvidenceAudit | undefined;
+    let resolvedWebsite = candidate.website;
     if (preExcluded && !wave.resolution) { reason = preExcluded; bump(wave.excluded, preExcluded); }
     else {
       const result = await resolveHeEngRegistryCandidate(ctx, candidate, input.scope, {
         db: input.db, baseId: input.baseId, projectId: input.projectId, saved: wave.resolution,
         onCheckpoint: async checkpoint => { wave.resolution = checkpoint; await input.save(); },
       });
+      audit = result.audit;
+      if (typeof result.row?.website === 'string') resolvedWebsite = result.row.website;
       const site = result.row ? heCompanySiteIdentity(result.row.website) : null;
       const excluded = result.row ? input.excluded(result.row) ??
         (site && heSameCompanySite(seenSites, site) ? 'duplicate_company_website' : null) : result.reason;
@@ -193,7 +199,9 @@ export async function runHeEngRegistryWave(input: {
         if (site) addHeSite(seenSites, site);
       }
     }
-    wave.decisions.push({ provider: candidate.provider, recordId: candidate.recordId, reason });
+    wave.decisions.push({ provider: candidate.provider, recordId: candidate.recordId, reason,
+      company: candidate.company, country: candidate.country,
+      ...(resolvedWebsite ? { website: resolvedWebsite } : {}), ...(audit ? { audit } : {}) });
     wave.resolved += 1;
     delete wave.resolution;
     ctx.onActivity?.();
