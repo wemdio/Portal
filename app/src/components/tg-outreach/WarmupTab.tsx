@@ -607,7 +607,7 @@ export default function WarmupTab({
               <label
                 key={a.id}
                 title={a.is_active ? undefined : 'Аккаунт выключен в портале — греть его нечем'}
-                className={`flex items-center gap-2 border-t border-gray-100 py-1.5 first:border-t-0 ${
+                className={`flex items-center gap-2 rounded-lg px-1 py-1.5 ${
                   disabled ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'
                 }`}
               >

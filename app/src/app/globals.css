@@ -3892,11 +3892,9 @@ html[data-portal-theme='dark'] .portal-shell .sender-table-head {
    (без «прыжка»). Свечение остаётся, пока строка выбрана. */
 .tg-check:checked,
 .tg-check:indeterminate {
-  background-image: linear-gradient(135deg, #a5b4fc 0%, #6366f1 55%, #4f46e5 100%);
-  border-color: #c7d2fe;
-  box-shadow:
-    0 0 0 2px rgba(129, 140, 248, 0.2),
-    0 0 10px 1px rgba(129, 140, 248, 0.45);
+  background-image: linear-gradient(135deg, #818cf8 0%, #6366f1 60%, #4f46e5 100%);
+  border-color: #818cf8;
+  box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.12), 0 0 6px 0 rgba(129, 140, 248, 0.25);
   animation: tg-check-in 280ms ease-out;
 }
 .tg-check:checked::after {
@@ -3907,7 +3905,7 @@ html[data-portal-theme='dark'] .portal-shell .sender-table-head {
   border-bottom: 2.5px solid #ffffff;
   transform: translateY(-1px) rotate(-45deg);
   animation: tg-check-mark 260ms 40ms ease-out both;
-  filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.6));
+  filter: none;
 }
 .tg-check:indeterminate::after {
   content: '';
