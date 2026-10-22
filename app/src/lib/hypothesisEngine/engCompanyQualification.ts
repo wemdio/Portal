@@ -29,6 +29,14 @@ import type { HeStageContext } from './stages/shared';
 
 const MAX_PAGES = 9;
 const MAX_PAGE_DEPTH = 3;
+// A page that does not answer costs two attempts of ~8 s, and a site has up to
+// nine pages: one such company held a whole run for minutes while every other
+// company was already read (berkleyah.com, 22.10.2026: 12 unanswered pages, a
+// 136 s run against a 50 s median). Once the site has answered, two unanswered
+// pages in a row end its crawl; no site is read for more than 60 s. The models
+// assess the pages already read.
+const MAX_UNANSWERED_PAGES_IN_ROW = 2;
+const SITE_READ_BUDGET_MS = 60_000;
 const MAX_COMPANY_ATTEMPTS = 3;
 // Pause before re-reading sites that failed transiently, when only such
 // companies are left. 30 s until 23.10.2026: retries rarely recover a site
@@ -191,8 +199,12 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     queue.unshift({ url: alternative.href, depth: 0, priority: 1000, kind: 'home' });
     return true;
   }
+  const readStarted = Date.now();
+  let answered = false;
+  let unansweredInRow = 0;
   while (queue.length && attempted.size < MAX_PAGES) {
     interrupted(ctx);
+    if (Date.now() - readStarted >= SITE_READ_BUDGET_MS || (answered && unansweredInRow >= MAX_UNANSWERED_PAGES_IN_ROW)) break;
     // Activity and company overview pages take priority over legal boilerplate.
     const count = (kind: string) => attemptedKinds.filter((value) => value === kind).length;
     for (let i = queue.length - 1; i >= 0; i -= 1) {
@@ -219,9 +231,13 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     catch (error) {
       interrupted(ctx, error);
       retryableFailure ||= !(isHeSiteUnreachable(error) && error.kind === 'dns');
+      unansweredInRow += 1;
       if (candidate.depth === 0 && !fallbackOrigin()) break;
       continue;
     }
+    // Any answer, even a missing page, shows the site responds.
+    answered = true;
+    unansweredInRow = 0;
     interrupted(ctx);
     if (page && !own(page.url) && companySiteAlias(page.url, website, company)) {
       aliasSites.add(siteBoundary(page.url) ?? page.url);
