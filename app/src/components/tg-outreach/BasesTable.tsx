@@ -1,6 +1,6 @@
 'use client';
 
-import type { BaseStats } from '@/lib/tgOutreach/baseStats';
+import { formatForecastDate, type BaseStats, type SendForecast } from '@/lib/tgOutreach/baseStats';
 
 /**
  * Строка на каждую базу кампании.
@@ -18,7 +18,7 @@ import type { BaseStats } from '@/lib/tgOutreach/baseStats';
  * Прочерк вместо нуля там, где делить не на что: «0 %» и «мы ещё не отправляли»
  * читаются очень по-разному, и это то же правило, что в воронке и в отчёте.
  */
-export default function BasesTable({ bases }: { bases: BaseStats[] }) {
+export default function BasesTable({ bases, forecast }: { bases: BaseStats[]; forecast?: SendForecast | null }) {
   const head = 'px-2 py-1.5 text-left text-[10px] font-medium text-gray-400';
   const cell = 'px-2 py-1.5 text-xs text-gray-700 tabular-nums';
 
@@ -35,13 +35,18 @@ export default function BasesTable({ bases }: { bases: BaseStats[] }) {
             <th className={head} title="Ушли менеджеру — и автоматом по триггеру, и вручную кнопкой">Переданы</th>
             <th className={head} title="Человек прочитал и закрыл нам доступ. Растёт — снижайте темп">Блокировки</th>
             <th className={head} title="Контактов, которым ещё ни разу не писали">Осталось</th>
-            <th className={head} title="На сколько дней хватит остатка при текущем темпе этой базы">Хватит на</th>
+            <th className={head} title="На сколько дней и до какой даты хватит остатка при текущем темпе. В цепочке дата — с учётом баз, что идут раньше">Хватит на</th>
           </tr>
         </thead>
         <tbody>
           {bases.map((b) => (
             <tr key={b.baseId} className="border-t border-gray-200">
-              <td className={`${cell} font-medium text-gray-900`}>{b.name}</td>
+              <td className={`${cell} font-medium text-gray-900`}>
+                {b.name}
+                {forecast?.currentBaseId === b.baseId && (
+                  <span className="ml-1.5 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">сейчас</span>
+                )}
+              </td>
               <td className={cell}>{b.total}</td>
               <td className={cell}>{b.sent}</td>
               <td className={cell}>
@@ -65,12 +70,21 @@ export default function BasesTable({ bases }: { bases: BaseStats[] }) {
                 {b.remaining === 0 ? (
                   <span className="text-rose-600 font-medium">кончилась</span>
                 ) : b.daysLeft === null ? (
-                  <span className="text-gray-400" title="За период с этой базы ничего не отправлялось — делить не на что">
-                    —
-                  </span>
+                  forecast?.bases[b.baseId]?.endsAt ? (
+                    <span title="База ещё не рассылалась — дата по темпу всей кампании, после баз, что идут раньше">
+                      до {formatForecastDate(forecast.bases[b.baseId].endsAt!)}
+                    </span>
+                  ) : (
+                    <span className="text-gray-400" title="За период с этой базы ничего не отправлялось — делить не на что">
+                      —
+                    </span>
+                  )
                 ) : (
                   <span className={b.daysLeft <= 3 ? 'text-amber-600 font-medium' : ''}>
                     {b.daysLeft} дн.
+                    {forecast?.bases[b.baseId]?.endsAt && (
+                      <span className="ml-1 text-[10px] text-gray-400">до {formatForecastDate(forecast.bases[b.baseId].endsAt!)}</span>
+                    )}
                   </span>
                 )}
               </td>
