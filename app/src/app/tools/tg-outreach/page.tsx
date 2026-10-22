@@ -623,7 +623,9 @@ function SettingsTab({ campaign, onSave }: {
             ограничения кампания берёт из сохранённых значений, а новая — из
             DEFAULT_TELEGRAM_SETTINGS (lib/tgOutreach/types.ts). */}
         <SettingsGroup title="Рассылка" hint="Сколько первых сообщений уходит и когда аккаунты молчат.">
-          <div className="flex flex-wrap items-start gap-x-8 gap-y-4">
+          {/* Одна строка: норма, периоды сна, часовой пояс. Периоды сна узкие —
+              в них помещается «00:00-08:00». Пояснение по сну — под полем. */}
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-4">
             <StepperField
               label="Первых сообщений на аккаунт в сутки"
               value={telegram.first_touch_per_account_per_day ?? 3}
@@ -632,11 +634,11 @@ function SettingsTab({ campaign, onSave }: {
               onChange={v => setTG('first_touch_per_account_per_day', v)}
               title="Дневная норма первых сообщений на каждый аккаунт. Ноль выключает рассылку."
             />
+            <div className="w-44 space-y-1">
+              <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00" />
+              <p className="text-[11px] text-gray-400">В эти часы аккаунты молчат.</p>
+            </div>
             <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
-          </div>
-          <div className="space-y-1">
-            <Field half label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
-            <p className="text-[11px] text-gray-400">По часовому поясу выше. В эти часы аккаунты не пишут и не отвечают.</p>
           </div>
         </SettingsGroup>
 
