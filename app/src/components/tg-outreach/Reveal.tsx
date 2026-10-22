@@ -35,10 +35,14 @@ export function Reveal({ open, children }: { open: boolean; children: ReactNode 
         visible ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
       }`}
     >
-      {/* Верхний отступ (16 px) лежит внутри, а не как margin родителя: иначе при
-          появлении блок прыгал бы на 16 px до начала анимации. Поля внутри не должны обрезаться по рамке фокуса: отступ с обратным
-          полем даёт кольцу фокуса место и не сдвигает вёрстку. */}
-      <div className="-m-1 min-h-0 overflow-hidden p-1 pt-5">{children}</div>
+      {/* Верхний отступ (16 px) лежит во вложенном слое, а не как margin родителя
+          и не как padding обрезающего слоя: вертикальный padding того, кто
+          обрезает, не схлопывается до нуля, и блок закрывался бы в два
+          прохода (сначала до 24 px, потом скачком). Боковой запас px-1/-mx-1
+          оставляет место кольцу фокуса и не сдвигает вёрстку. */}
+      <div className="-mx-1 min-h-0 overflow-hidden px-1">
+        <div className="pb-1 pt-4">{children}</div>
+      </div>
     </div>
   );
 }
