@@ -8,6 +8,7 @@ export const HE_ENG_COMPANIES_HOUSE_CSV_HEADERS = [
   'CompanyName', 'CompanyNumber', 'RegAddress.AddressLine1', 'RegAddress.AddressLine2',
   'RegAddress.PostTown', 'RegAddress.Country', 'RegAddress.PostCode', 'CompanyStatus',
   'SICCode.SicText_1', 'SICCode.SicText_2', 'SICCode.SicText_3', 'SICCode.SicText_4',
+  'Accounts.AccountCategory',
 ] as const;
 
 export const HE_ENG_COMPANIES_HOUSE_CSV_LIMITS = Object.freeze({
@@ -22,6 +23,8 @@ export interface HeEngCompaniesHouseCsvRow {
   company_name: string;
   company_status: 'active';
   sic_codes: string[];
+  /** Type of the last filed accounts («FULL», «MICRO ENTITY», …): a size hint, not a headcount. */
+  accounts_category: string;
   registered_office_address: {
     address_line_1: string;
     address_line_2: string;
@@ -60,6 +63,7 @@ export function mapHeEngCompaniesHouseCsvRow(raw: Readonly<Record<string, string
     company_name: companyName,
     company_status: 'active',
     sic_codes: sicCodes,
+    accounts_category: clean(raw['Accounts.AccountCategory']).toUpperCase(),
     registered_office_address: {
       address_line_1: clean(raw['RegAddress.AddressLine1']),
       address_line_2: clean(raw['RegAddress.AddressLine2']),

@@ -160,7 +160,18 @@ function htmlText(html: string): string {
       return;
     }
     const visible = node.text().trim();
-    const tel = /^tel:/i.test(href) ? href.replace(/^tel:/i, '').split(/[;?]/)[0] : null;
+    let tel: string | null = null;
+    if (/^tel:/i.test(href)) {
+      try {
+        const decoded = decodeURIComponent(href.replace(/^tel:/i, '').split(/[;?]/)[0]).trim()
+          .replace(/(?<=\d)[\u2010-\u2015\u2212](?=\d)/gu, '-');
+        const phones = leadPhoneCandidates(decoded);
+        // Never turn encoded line breaks/prose into signature fields.
+        if (phones.length === 1 && phones[0].start === 0 && phones[0].end === decoded.length &&
+          !/[\r\n]/u.test(decoded)) tel = decoded;
+      }
+      catch { /* Malformed optional href: keep the visible label only. */ }
+    }
     const site = /^https?:\/\//i.test(href) ? companyWebsite(href) : null;
     const target = tel ? `tel: ${tel}` : site;
     if (target && !visible.includes(target)) node.text(`${visible} ${target}`);
@@ -175,6 +186,18 @@ function htmlText(html: string): string {
 }
 
 function phoneInLine(line: string, signature: boolean): string | null {
+  // Providers copy telephone hrefs beside their visible label, sometimes as
+  // <+7%20926%20393-42-69>. Decode only a bracketed, phone-shaped target;
+  // otherwise the encoded tail becomes a bogus second local phone. Do not
+  // decode arbitrary URLs, whose digits must remain excluded below.
+  line = line.replace(/([<\[])(\+?(?:\d|%(?:20|2b|28|29|2d)|[ ().-]){3,80})([>\]])/giu,
+    (raw, open: string, target: string, close: string) => {
+      if (!target.includes('%') || (open === '<' ? close !== '>' : close !== ']')) return raw;
+      const decoded = decodeURIComponent(target).trim();
+      const phones = leadPhoneCandidates(decoded);
+      return phones.length === 1 && phones[0].start === 0 && phones[0].end === decoded.length
+        ? `${open}${decoded}${close}` : '';
+    }).replace(/(?<=\d)[\u2010-\u2015\u2212](?=\d)/gu, '-');
   // "Наш номер в реестре ..." is an identifier, not an invitation to call.
   const registry = /(?:^|\s)номер\s+(?:в\s+)?реестр(?:е|а|ов[а-яё]*)?(?=\s|[.:,;!?]|$)/iu.exec(line);
   const nextPhoneLabel = registry
@@ -184,6 +207,13 @@ function phoneInLine(line: string, signature: boolean): string | null {
   const framed = PHONE_LABEL.test(line);
   const phones: string[] = [];
   const candidates = leadPhoneCandidates(line);
+  // An unlabelled contact row may contain several full numbers. Removing
+  // just one leaves the other number looking like prose and rejects both.
+  let contactRowResidue = line;
+  for (const phone of [...candidates].reverse()) {
+    contactRowResidue = contactRowResidue.slice(0, phone.start) + contactRowResidue.slice(phone.end);
+  }
+  const onlyPhoneRow = candidates.length > 1 && /^[\s,;|/()<>.\[\]-]*$/u.test(contactRowResidue);
   for (const { value, digits, start, end } of candidates) {
     if (registry && start >= registry.index && start < nextPhoneLabel) continue;
     const before = line.slice(0, start);
@@ -202,7 +232,7 @@ function phoneInLine(line: string, signature: boolean): string | null {
     const contactName = (line.slice(0, start) + line.slice(end))
       .replace(/\S+@\S+/gu, '').replace(/\([^)]*(?:\)|$)/gu, '')
       .replace(/[:;,|/<>.]/gu, ' ').trim();
-    if (!signature && !framed && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
+    if (!signature && !framed && !onlyPhoneRow && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
     phones.push(value);
   }
   return joinLeadPhones(phones);
