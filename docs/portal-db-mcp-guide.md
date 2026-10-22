@@ -541,6 +541,10 @@ HTTP-ошибки не повторяются; исчерпание попыто
 
 ### Outreach-слой (только если спрашивают про TG/LinkedIn outreach — не про Instantly!)
 - `tg_outreach_campaigns` (11), `tg_outreach_dialogs` (1144), `tg_outreach_logs` (242 900)
+- С миграцией `20261022_0060` подготовлена `tg_outreach_dialogs.reply_failure`:
+  последний неотправленный черновик, причина, попытки и исход доставки. Это не
+  отправленное сообщение и не часть `messages`; подробнее в
+  [описании ошибок и перегенерации](./tg-outreach-reply-failures.md).
 - `li_leads` (8277), `li_campaigns`, `li_accounts`
 
 Удаление исходящего сообщения TG выполняется через очередь `tg_outreach_jobs`
