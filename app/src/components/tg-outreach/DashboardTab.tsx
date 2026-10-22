@@ -587,7 +587,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
                 В кампании нет ни одной базы контактов.
               </div>
             ) : (
-              <BasesTable bases={bases} forecast={forecast} />
+              <BasesTable bases={bases} />
             )}
           </div>
 
