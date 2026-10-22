@@ -15,7 +15,9 @@ const US_STATES = new Set('AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY
 const ENDPOINTS: Readonly<Record<HeEngRegistryProvider, string>> = {
   brreg: 'https://data.brreg.no/enhetsregisteret/api/enheter',
   france: 'https://recherche-entreprises.api.gouv.fr/search',
-  fdic: 'https://banks.data.fdic.gov/api/institutions',
+  // The old banks.data.fdic.gov/api host answers 301 to this one, and the
+  // reader refuses redirects: every FDIC page failed as a network error.
+  fdic: 'https://api.fdic.gov/banks/institutions',
   nppes: 'https://npiregistry.cms.hhs.gov/api/',
   fmcsa: 'https://data.transportation.gov/resource/az4n-8mr2.json',
   companies_house: 'https://api.company-information.service.gov.uk/advanced-search/companies',
