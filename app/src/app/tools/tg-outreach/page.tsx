@@ -493,11 +493,12 @@ function SettingsTab({ campaign, onSave }: {
   return (
     <div className="pb-20" onChangeCapture={() => { setSaved(false); setSaveError(null); }}>
       <div className="rounded-2xl border border-gray-200 bg-white px-5 md:px-7">
+        {/* «Название проекта» (openai.project_name) убрано с экрана 22.10.2026:
+            оно лишь подставлялось в промпт вместо {project_name}, а на 22.10 ни
+            один промпт этой подстановки не содержал — поле дублировало
+            название кампании. Сохранённое значение воркер читает как раньше. */}
         <SettingsGroup title="Кампания" hint="Название видно в списке кампаний.">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <Field label="Название кампании" value={campaignName} onChange={setCampaignName} />
-            <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
-          </div>
+          <Field half label="Название кампании" value={campaignName} onChange={setCampaignName} />
         </SettingsGroup>
 
         <SettingsGroup title="Как отвечает бот" hint="Роль, тон и правила, по которым GPT ведёт переписку.">
