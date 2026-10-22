@@ -1,5 +1,5 @@
 /** Server-generated ENG discovery inputs. Registry records are never validated contacts. */
-export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house';
+export type HeEngRegistryProvider = 'brreg' | 'france' | 'fdic' | 'nppes' | 'fmcsa' | 'companies_house' | 'gleif' | 'osm';
 
 export interface HeEngRegistryTask {
   id: string;
@@ -8,6 +8,12 @@ export interface HeEngRegistryTask {
   category: string;
   /** New Companies House plans use the monthly snapshot; absence preserves API plans. */
   transport?: 'csv';
+  /**
+   * Global sources (GLEIF, OpenStreetMap) read every allowed country in one
+   * slice, so a project with ten countries does not get ten slices per sector
+   * ahead of its catalogue. `country` is then 'global'.
+   */
+  countries?: string[];
   minEmployees?: number;
   maxEmployees?: number;
 }
@@ -30,6 +36,8 @@ export interface HeEngRegistryCandidate {
   category: string;
   employees?: string;
   employeeYear?: number;
+  /** GLEIF: the entity's number in its local register («HRB 7876»), checked on its own site. */
+  localRegistryId?: string;
   website: string;
   emails: string[];
   description: string;

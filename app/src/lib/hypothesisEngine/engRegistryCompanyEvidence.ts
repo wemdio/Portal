@@ -48,6 +48,11 @@ const LEGAL_FORM_PHRASES: readonly string[][] = [
   ['limited', 'company'], ['ltd'], ['limited'], ['plc'], ['llp'], ['lp'], ['llc'], ['inc'], ['incorporated'], ['corp'],
   ['corporation'], ['gmbh'], ['ag'], ['sa'], ['sas'], ['sarl'], ['bv'], ['nv'], ['as'], ['asa'], ['ab'], ['oy'],
   ['oyj'], ['aps'],
+  // Continental forms as GLEIF and sites write them: «GmbH & Co. KG», «B.V.», «S.p.A.», «UG (haftungsbeschränkt)».
+  ['gmbh', 'co', 'kg'], ['ag', 'co', 'kg'], ['co', 'kg'], ['kg'], ['mbh'], ['se'], ['ug', 'haftungsbeschränkt'], ['eg'],
+  ['b', 'v'], ['n', 'v'], ['s', 'a'], ['a', 'g'], ['a', 's'], ['a', 'b'], ['s', 'e'], ['spa'], ['s', 'p', 'a'], ['srl'],
+  ['s', 'r', 'l'], ['sl'], ['s', 'l'], ['dac'], ['vvag'], ['aktiengesellschaft'], ['kommanditgesellschaft'],
+  ['gesellschaft', 'mit', 'beschränkter', 'haftung'],
 ];
 
 export type HeEngRegistryResolutionReason = 'confirmed_registry' | 'confirmed_website' | 'invalid_website' |
@@ -125,7 +130,9 @@ function fingerprint(value: unknown): string { return createHash('sha256').updat
 function candidateFingerprint(candidate: HeEngRegistryCandidate): string {
   return fingerprint([candidate.provider, candidate.recordId, candidate.company, candidate.country, candidate.address,
     candidate.addressKind, candidate.category, candidate.employees ?? '', candidate.employeeYear ?? null, candidate.website,
-    candidate.emails, candidate.description, candidate.sourceUrl]);
+    candidate.emails, candidate.description, candidate.sourceUrl,
+    // Only GLEIF records carry it; older candidates keep their fingerprint.
+    ...(candidate.localRegistryId !== undefined ? [candidate.localRegistryId] : [])]);
 }
 function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
   // The adapter validates the record address; never infer country from the
@@ -155,6 +162,10 @@ function normalizeCatalog(rows: readonly Row[], candidate: HeEngRegistryCandidat
 const CATALOG_LEGAL_FORMS: Readonly<Record<string, readonly string[]>> = {
   'united kingdom': ['ltd', 'limited', 'plc', 'llp'], norway: ['as', 'asa'], france: ['sa', 'sas', 'sarl'],
   'united states': ['inc', 'llc', 'corp', 'corporation', 'co'],
+  germany: ['gmbh', 'ag', 'se', 'gmbh & co. kg', 'kg'], austria: ['gmbh', 'ag'], switzerland: ['ag', 'sa', 'gmbh'],
+  netherlands: ['bv', 'b.v.', 'nv', 'n.v.'], belgium: ['nv', 'bv', 'sa', 'srl'], luxembourg: ['sa', 's.a.', 'sarl'],
+  denmark: ['a/s', 'aps'], sweden: ['ab'], finland: ['oy', 'oyj'], ireland: ['ltd', 'limited', 'dac', 'plc'],
+  spain: ['sa', 'sl', 's.a.', 's.l.'], italy: ['spa', 'srl', 's.p.a.', 's.r.l.'],
 };
 function catalogNameVariants(company: string, countryValue: string): string[] {
   // Quotes and backslashes never reach a filter value: «"FIVE TOWNS PLUS" …».
@@ -280,6 +291,10 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
       + '|registration\\s+(?:number|no|nr)'
       + '|registered\\s+(?:in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)\\s*)?(?:company\\s+)?(?:number|no|nr)'
       + '|reg\\.?\\s*(?:number|no|nr)|under\\s+(?:registration\\s+)?(?:number|no)|crn)',
+    // The LEI itself; the local register number is matched separately below.
+    gleif: 'lei|legal\\s+entity\\s+identifier',
+    // An OpenStreetMap element id never appears on a company site.
+    osm: '(?!)',
   };
   const id = identifierKey(candidate.recordId);
   const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
@@ -297,7 +312,7 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
   }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${idPattern})${end}`, 'iu').test(value);
   if (registryNumber && options.numberAlone) return true;
   if (!legalName || !named.includes(` ${legalName} `)) return false;
-  if (registryNumber) return true;
+  if (registryNumber || localRegistryNumber(value, candidate)) return true;
   // A long legal page contains most address words somewhere; only the number counts there.
   if (options.numberRequired) return false;
   const countryDefinition = ENG_COUNTRIES.find(item => item.value === country(candidate.country));
@@ -325,6 +340,29 @@ function nameWindows(value: string, company: string): string[] {
     if (windows.length >= 12) break;
   }
   return windows;
+}
+// Labels that precede a local company number across GLEIF's countries: German
+// Handelsregister, Dutch KvK, Danish CVR, Nordic org. numbers, Finnish Y-tunnus,
+// Irish CRO, Luxembourg RCS, Austrian Firmenbuch, Belgian KBO and others.
+const LOCAL_REGISTRY_LABELS = '(?:handelsregister|registernummer|registergericht|hr[ab]|kvk|kamer\\s+van\\s+koophandel|cvr|'
+  + 'org(?:anisations|anisasjons)?\\.?[\\s-]*(?:nr|nummer|number|no)|y-tunnus|business\\s+id|fo-nummer|cro|rcs|firmenbuch|fn|'
+  + 'kbo|ondernemingsnummer|company\\s+(?:reg(?:istration)?\\.?\\s*)?(?:no|number|nr)|registration\\s+(?:no|number|nr)|'
+  + 'registered\\s+(?:no|number)|reg\\.?\\s*(?:no|nr)|krs|nip|regon|cif|nif|p\\.?\\s*iva|partita\\s+iva)';
+/**
+ * GLEIF's `registeredAs`: «HRB 7876», «B123456», «12345678». A number with its
+ * own letters is matched as written; a bare number needs a register label.
+ * Local numbers repeat between courts and countries, so the caller also
+ * requires the legal name in the same block.
+ */
+function localRegistryNumber(value: string, candidate: HeEngRegistryCandidate): boolean {
+  if (candidate.provider !== 'gleif' || !candidate.localRegistryId) return false;
+  const chars = candidate.localRegistryId.normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
+  if (chars.length < 5 || chars.length > 30) return false;
+  const pattern = chars.split('').map(char => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s.:/-]*');
+  const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
+  return /\p{L}/u.test(chars)
+    ? new RegExp(`(?<![\\p{L}\\p{N}])${pattern}${end}`, 'iu').test(value)
+    : new RegExp(`\\b${LOCAL_REGISTRY_LABELS}\\b[\\s:./#-]{0,16}${pattern}${end}`, 'iu').test(value);
 }
 interface OwnFacts { identity: boolean; employees: HeEngEmployeeRange | null }
 /** Site identity is verified from its own Organization, never a search result title/snippet. */
@@ -621,11 +659,12 @@ export async function resolveHeEngRegistryCandidate(
   // A registry-provided site is already linked to the entity. Search must not
   // replace a failed/undersized known website with a convenient namesake.
   if (trustedWebsite) return finishUnresolved();
-  // A page already bought under the v1 query keeps its plan; an unpaid v1
-  // checkpoint moves to the v2 query, which no longer asks for the «LTD.» string.
-  const legacyPlan = createHeEngRegistryWebsiteSearchPlan(candidate, 1);
+  // A page already bought under an older query keeps its plan; an unpaid older
+  // checkpoint moves to the current query (v2 dropped «LTD.», v3 also «N.V.», «GmbH & Co. KG»).
   let plan = createHeEngRegistryWebsiteSearchPlan(candidate);
-  if (state.search?.plan.fingerprint === legacyPlan.fingerprint) {
+  const legacyPlan = [createHeEngRegistryWebsiteSearchPlan(candidate, 1), createHeEngRegistryWebsiteSearchPlan(candidate, 2)]
+    .find(older => older.fingerprint !== plan.fingerprint && older.fingerprint === state.search?.plan.fingerprint);
+  if (state.search && legacyPlan) {
     if (state.search.checkpoint.calls > 0 || state.search.checkpoint.unavailable) plan = legacyPlan;
     else delete state.search;
   }

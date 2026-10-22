@@ -1,4 +1,19 @@
+import { ENG_COUNTRIES } from './engCountries';
 import type { HeEngRegistryProvider } from './engPublicRegistryTypes';
+
+/** ISO 17442: an LEI is 18 characters plus two check digits, valid when mod 97 equals 1. */
+function validLei(id: string): boolean {
+  if (!/^[A-Z0-9]{18}\d{2}$/.test(id)) return false;
+  let remainder = 0;
+  for (const char of id) {
+    const digits = /\d/.test(char) ? char : String(char.charCodeAt(0) - 55);
+    for (const digit of digits) remainder = (remainder * 10 + Number(digit)) % 97;
+  }
+  return remainder === 1;
+}
+function engCountry(country: unknown): boolean {
+  return typeof country === 'string' && ENG_COUNTRIES.some(item => item.value === country);
+}
 
 /** Fixed public record URLs: neither a search result nor a selected country is proof. */
 export function heEngRegistryRecordValid(provider: unknown, id: unknown, country: unknown, page: unknown): provider is HeEngRegistryProvider {
@@ -21,6 +36,11 @@ export function heEngRegistryRecordValid(provider: unknown, id: unknown, country
       url.searchParams.get('query_param') === 'USDOT' && url.searchParams.get('query_string') === id;
     case 'companies_house': return country === 'united kingdom' && /^[A-Z0-9]{8}$/.test(id) &&
       url.href === `https://find-and-update.company-information.service.gov.uk/company/${id}`;
+    // Global sources: the country comes from the record itself (GLEIF headquarters,
+    // or the OpenStreetMap country boundary containing the premises).
+    case 'gleif': return engCountry(country) && validLei(id) && url.href === `https://api.gleif.org/api/v1/lei-records/${id}`;
+    case 'osm': return engCountry(country) && /^(?:node|way|relation)\/\d{1,15}$/.test(id) &&
+      url.href === `https://www.openstreetmap.org/${id}`;
     default: return false;
   }
 }

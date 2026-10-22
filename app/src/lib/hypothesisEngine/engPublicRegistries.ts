@@ -1,12 +1,15 @@
 import { isIP } from 'node:net';
 import { sliceWholeChars, stripUnstorableJsonChars } from '../jsonbSafe';
-import { normalizeEngCountry } from './engCountries';
-import { validateHeEngRegistryTask } from './engPublicRegistryPlan';
+import { ENG_COUNTRIES, engCountryIso2, normalizeEngCountry } from './engCountries';
+import { HE_ENG_OSM_TAGS, heEngGleifTerms } from './engGlobalRegistryCatalog';
+import { heEngRegistryTaskCountries, validateHeEngRegistryTask } from './engPublicRegistryPlan';
 import type { HeEngRegistryCandidate, HeEngRegistryPage, HeEngRegistryProvider, HeEngRegistryTask } from './engPublicRegistryTypes';
 
 const PAGE_SIZE = 25;
 const MAX_BYTES = 3 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 25_000;
+// A QLever page over several countries measured ~10 s; leave room for load.
+const OSM_REQUEST_TIMEOUT_MS = 60_000;
 // Official Brreg legal entities, partnerships and registered foreign branches.
 // ENK/PERS (individuals), associations and bare fund vehicles are not included.
 // Helseforetak use SÆR; there is no HF organisation-form code in this API.
@@ -21,7 +24,50 @@ const ENDPOINTS: Readonly<Record<HeEngRegistryProvider, string>> = {
   nppes: 'https://npiregistry.cms.hhs.gov/api/',
   fmcsa: 'https://data.transportation.gov/resource/az4n-8mr2.json',
   companies_house: 'https://api.company-information.service.gov.uk/advanced-search/companies',
+  // Free, keyless LEI register API; 60 requests a minute per client.
+  gleif: 'https://api.gleif.org/api/v1/lei-records',
+  // OpenStreetMap through the University of Freiburg's QLever SPARQL service:
+  // it pages a country's premises in seconds, while the public Overpass server
+  // took ~100 s a page and asks automated users to run their own instance.
+  osm: 'https://qlever.dev/api/osm-planet',
 };
+// Legal entities that are not businesses: foundations, associations, churches, councils.
+// Lookarounds, not \b: \b treats «ö» or a final «.» as a word edge and misses «Säätiö», «e. V.».
+const GLEIF_NOT_COMPANY = /(?<![\p{L}\p{N}])(?:stiftung|e\.\s?v\.|verein|stichting|vereniging|foundation|fondation|fundaci[oó]n|fondazione|funda[cç][aã]o|s[aä][aä]ti[oö]|yhdistys|forening(?:en)?|f[oö]rening(?:en)?|church|kirche|municipality|kommune|gemeinde)(?![\p{L}\p{N}])/iu;
+// Holding vehicles («… Holding ApS», «… Beheer B.V.», «Beteiligungsgesellschaft») are
+// rarely the operating company an outreach targets, and each costs a website search.
+const GLEIF_HOLDING = /(?<![\p{L}\p{N}])(?:holding|holdings|beheer|beteiligungs\p{L}*)(?![\p{L}\p{N}])/iu;
+function countryFromIso(raw: string): string | null {
+  return ENG_COUNTRIES.find(country => country.iso2 === raw.toLowerCase())?.value ?? null;
+}
+function countryLabel(country: string): string {
+  return ENG_COUNTRIES.find(item => item.value === country)?.label ?? country;
+}
+function isoCodes(task: HeEngRegistryTask): string[] {
+  return heEngRegistryTaskCountries(task).map(country => (engCountryIso2(country) ?? '').toUpperCase());
+}
+/** One 25-row page of named premises with a website; every term comes from a fixed catalogue. */
+function osmQuery(task: HeEngRegistryTask, position: number): string {
+  const iso = isoCodes(task);
+  const tags = HE_ENG_OSM_TAGS[task.category] ?? [];
+  if (!iso.length || iso.some(code => !/^[A-Z]{2}$/.test(code)) || !tags.length ||
+    tags.some(([key, value]) => !/^[a-z_]+$/.test(key) || !/^[a-z_]+$/.test(value))) fail('registry_invalid_task');
+  return [
+    'PREFIX osmkey: <https://www.openstreetmap.org/wiki/Key:>',
+    'PREFIX ogc: <http://www.opengis.net/rdf#>',
+    'SELECT ?obj ?iso (SAMPLE(?name) AS ?n) (SAMPLE(?web) AS ?w) (SAMPLE(?mail) AS ?e) (SAMPLE(?street) AS ?st)',
+    '  (SAMPLE(?house) AS ?h) (SAMPLE(?postcode) AS ?p) (SAMPLE(?city) AS ?c) WHERE {',
+    `  VALUES ?iso { ${iso.map(code => `"${code}"`).join(' ')} }`,
+    '  ?country osmkey:ISO3166-1 ?iso ; osmkey:admin_level 2 ; ogc:sfContains ?obj .',
+    `  ${tags.map(([key, value]) => `{ ?obj osmkey:${key} "${value}" }`).join(' UNION ')}`,
+    '  ?obj osmkey:name ?name .',
+    '  { ?obj osmkey:website ?web } UNION { ?obj osmkey:contact:website ?web }',
+    '  OPTIONAL { { ?obj osmkey:email ?mail } UNION { ?obj osmkey:contact:email ?mail } }',
+    '  OPTIONAL { ?obj osmkey:addr:street ?street } OPTIONAL { ?obj osmkey:addr:housenumber ?house }',
+    '  OPTIONAL { ?obj osmkey:addr:postcode ?postcode } OPTIONAL { ?obj osmkey:addr:city ?city }',
+    `} GROUP BY ?obj ?iso ORDER BY ?obj LIMIT ${PAGE_SIZE} OFFSET ${position}`,
+  ].join('\n');
+}
 type Row = Record<string, unknown>;
 function object(raw: unknown): Row | null { return raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw as Row : null; }
 function str(raw: unknown, max = 500): string {
@@ -125,6 +171,23 @@ function request(task: HeEngRegistryTask, position: number): { url: URL; headers
       q.set('sic_codes', task.category); q.set('company_status', 'active'); q.set('size', String(PAGE_SIZE)); q.set('start_index', String(position));
       break;
     }
+    case 'gleif': {
+      const iso = isoCodes(task);
+      const terms = heEngGleifTerms(task.category, iso);
+      if (!terms.length || iso.some(code => !/^[A-Z]{2}$/.test(code))) fail('registry_invalid_task');
+      // Comma-separated filter values are alternatives. The API filters the
+      // legal seat only; the record's headquarters must also be in scope (gleif()).
+      q.set('filter[entity.legalAddress.country]', iso.join(','));
+      q.set('filter[entity.status]', 'ACTIVE'); q.set('filter[entity.category]', 'GENERAL');
+      q.set('filter[entity.names]', terms.join(','));
+      q.set('sort', 'lei'); q.set('page[size]', String(PAGE_SIZE)); q.set('page[number]', String(position / PAGE_SIZE + 1));
+      headers.Accept = 'application/vnd.api+json';
+      break;
+    }
+    case 'osm':
+      q.set('query', osmQuery(task, position));
+      headers.Accept = 'application/sparql-results+json';
+      break;
   }
   return { url, headers };
 }
@@ -135,7 +198,7 @@ async function jsonResponse(task: HeEngRegistryTask, position: number, options: 
   const onAbort = () => controller.abort();
   if (options.signal?.aborted) fail('registry_aborted');
   options.signal?.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), task.provider === 'osm' ? OSM_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
   try {
     // No redirects, provider-returned URLs, user-controlled hosts or paid fallback.
     const response = await (options.fetch ?? fetch)(url, { method: 'GET', headers, redirect: 'error', signal: controller.signal });
@@ -291,6 +354,46 @@ export function mapHeEngCompaniesHouseRecord(row: Row, task: HeEngRegistryTask, 
     sourceUrl: `https://find-and-update.company-information.service.gov.uk/company/${recordId}` };
 }
 
+function gleif(row: Row, task: HeEngRegistryTask, excluded: Record<string, number>): HeEngRegistryCandidate | null {
+  const attributes = object(row.attributes); const entity = object(attributes?.entity);
+  const recordId = str(attributes?.lei).toUpperCase(); const company = str(object(entity?.legalName)?.name);
+  if (!/^[A-Z0-9]{18}\d{2}$/.test(recordId) || !company) return exclude(excluded, 'missing_identity');
+  if (entity?.status !== 'ACTIVE') return exclude(excluded, 'inactive');
+  if (entity?.category !== 'GENERAL' || GLEIF_NOT_COMPANY.test(company)) return exclude(excluded, 'not_company');
+  if (GLEIF_HOLDING.test(company)) return exclude(excluded, 'holding_company');
+  const office = object(entity?.headquartersAddress);
+  const country = countryFromIso(str(office?.country));
+  if (!country || !heEngRegistryTaskCountries(task).includes(country) || !str(office?.city) || !list(office?.addressLines).some(line => str(line))) {
+    return exclude(excluded, 'country_unconfirmed');
+  }
+  const registeredAs = str(entity?.registeredAs, 60);
+  return { provider: task.provider, recordId, company, country,
+    address: joined([...list(office?.addressLines), office?.postalCode, office?.city, countryLabel(country)]), addressKind: 'business',
+    category: `GLEIF ${task.category.replace(/_/g, ' ')}`, ...(registeredAs && registeredAs !== recordId ? { localRegistryId: registeredAs } : {}),
+    website: '', emails: [],
+    description: `Active legal entity in the global LEI register (GLEIF)${registeredAs ? `, registered as ${registeredAs}` : ''}; its name matched the ${task.category.replace(/_/g, ' ')} words. Headquarters address from GLEIF. Website, employee count and activity require verification.`,
+    sourceUrl: `https://api.gleif.org/api/v1/lei-records/${recordId}` };
+}
+
+function osm(row: Row, task: HeEngRegistryTask, excluded: Record<string, number>): HeEngRegistryCandidate | null {
+  const value = (key: string, max = 500) => str(object(row[key])?.value, max);
+  const element = /^https:\/\/www\.openstreetmap\.org\/(node|way|relation)\/(\d{1,15})$/.exec(value('obj', 200));
+  const company = value('n', 300);
+  if (!element || !company) return exclude(excluded, 'missing_identity');
+  const recordId = `${element[1]}/${element[2]}`;
+  const country = countryFromIso(value('iso'));
+  if (!country || !heEngRegistryTaskCountries(task).includes(country)) return exclude(excluded, 'country_unconfirmed');
+  const site = website(value('w', 2048));
+  if (!site) return exclude(excluded, 'website_missing');
+  const city = value('c');
+  const tags = (HE_ENG_OSM_TAGS[task.category] ?? []).map(([key, tag]) => `${key}=${tag}`).join(' or ');
+  return { provider: task.provider, recordId, company, country,
+    address: joined([[value('st'), value('h')].filter(Boolean).join(' '), [value('p'), city].filter(Boolean).join(' '), countryLabel(country)]),
+    addressKind: 'business', category: `OpenStreetMap ${task.category.replace(/_/g, ' ')}`, website: site, emails: emails(value('e', 1000)),
+    description: `Premises mapped in OpenStreetMap as ${tags}${city ? ` in ${city}` : ''}; the website and any e-mail come from the map. Employee count and activity require verification.`,
+    sourceUrl: `https://www.openstreetmap.org/${recordId}` };
+}
+
 /** One bounded public page. The caller checkpoints only completed pages and caps total pages. */
 export async function readHeEngRegistryPage(task: HeEngRegistryTask, position: number,
   options: { signal?: AbortSignal; fetch?: typeof fetch } = {}): Promise<HeEngRegistryPage> {
@@ -324,19 +427,30 @@ export async function readHeEngRegistryPage(task: HeEngRegistryTask, position: n
     case 'companies_house':
       if (!body || !Array.isArray(body.items) || integer(body.hits) === null) fail('registry_invalid_response');
       rows = body.items; total = integer(body.hits); break;
+    case 'gleif': {
+      const pagination = object(object(body?.meta)?.pagination);
+      if (!body || !Array.isArray(body.data) || integer(pagination?.total) === null) fail('registry_invalid_response');
+      rows = body.data; total = integer(pagination?.total); break;
+    }
+    case 'osm': {
+      const bindings = object(body?.results)?.bindings;
+      if (!Array.isArray(bindings)) fail('registry_invalid_response');
+      rows = bindings; break;
+    }
   }
   if (rows.length > PAGE_SIZE) fail('registry_invalid_response');
   // A contradictory empty page is not permission to skip records or declare a
   // source exhausted. Preserve the cursor and let the controller record failure.
   if (rows.length === 0 && total !== null && total > position) fail('registry_invalid_response');
   const excluded: Record<string, number> = {}; const candidates: HeEngRegistryCandidate[] = []; const seen = new Set<string>();
-  const mapper = { brreg, france, fdic, nppes, fmcsa, companies_house: mapHeEngCompaniesHouseRecord }[task.provider];
+  const mapper = { brreg, france, fdic, nppes, fmcsa, companies_house: mapHeEngCompaniesHouseRecord, gleif, osm }[task.provider];
+  const countries = heEngRegistryTaskCountries(task);
   for (const rawRow of rows) {
     const row = object(rawRow);
     if (!row) { exclude(excluded, 'invalid_record'); continue; }
     const candidate = mapper(row, task, excluded);
     if (!candidate) continue;
-    if (candidate.country !== task.country) { exclude(excluded, 'country_unconfirmed'); continue; }
+    if (!countries.includes(candidate.country)) { exclude(excluded, 'country_unconfirmed'); continue; }
     if (seen.has(candidate.recordId)) { exclude(excluded, 'duplicate_record'); continue; }
     seen.add(candidate.recordId); candidates.push(candidate);
   }

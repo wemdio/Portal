@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { HeCollectTask } from './prompts/sourcePlan';
 import { readHeEngRegistryPage } from './engPublicRegistries';
-import { validateHeEngRegistryPlan } from './engPublicRegistryPlan';
+import { heEngRegistryTaskCountries, validateHeEngRegistryPlan } from './engPublicRegistryPlan';
 import type { HeEngRegistryCandidate, HeEngRegistryCursor, HeEngRegistryPlan } from './engPublicRegistryTypes';
 import { resolveHeEngRegistryCandidate, type HeEngRegistryResolutionCheckpoint } from './engRegistryCompanyEvidence';
 import type { HeEngSearchEvidenceScope } from './engSearchCompanyEvidence';
@@ -39,7 +39,7 @@ export interface HeEngRegistryWave {
 
 export function heEngRegistrySourceTasks(state?: HeEngRegistryState): HeCollectTask[] {
   return state?.plan.tasks.map(task => ({ source: 'eng_registry',
-    rationale: `Public registry: ${task.provider}, ${task.country}, ${task.category}`,
+    rationale: `Public registry: ${task.provider}, ${task.countries ? `${task.countries.length} countries` : task.country}, ${task.category}`,
     registry_query: { task_id: task.id, plan_fingerprint: state.plan.fingerprint },
   })) ?? [];
 }
@@ -68,7 +68,7 @@ export async function runHeEngRegistryWave(input: {
   const query = input.task.registry_query;
   const task = state.plan.tasks.find(item => item.id === query?.task_id);
   if (input.task.source !== 'eng_registry' || !task || query?.plan_fingerprint !== state.plan.fingerprint ||
-      wave.taskId !== task.id || !input.scope.allowedCountries.includes(task.country)) {
+      wave.taskId !== task.id || heEngRegistryTaskCountries(task).some(country => !input.scope.allowedCountries.includes(country))) {
     throw new Error('ENG registry task does not match its frozen audience');
   }
   const cursor = state.cursors[task.id] ?? { position: 0, pages: 0, exhausted: false };
@@ -148,7 +148,7 @@ export async function runHeEngRegistryWave(input: {
           page.candidates.length > page.recordsRead) throw new Error('ENG registry page progress is invalid');
       const seen = new Set(state.seenRecords);
       for (const candidate of page.candidates) {
-        if (candidate.provider !== task.provider || candidate.country !== task.country) {
+        if (candidate.provider !== task.provider || !heEngRegistryTaskCountries(task).includes(candidate.country)) {
           bump(wave.excluded, 'outside_registry_scope'); continue;
         }
         const id = `${candidate.provider}:${candidate.recordId}`;
