@@ -60,7 +60,14 @@ export const TELEGRAM_TUNNEL_TIMEOUT_MS = Number(process.env.TG_OUTREACH_PROXY_C
  * худший случай для 40 мёртвых прокси ≈ 4 волны × 15с ≈ минута, при этом
  * одновременно открыто не больше 10 сокетов.
  */
-export const PROXY_CHECK_CONCURRENCY = 10;
+/*
+ * 22.10.2026: было 10, стало 30. Тысячу прокси при 10 потоках проверяли ~10 минут
+ * (страна — отдельный запрос через каждый прокси). 30 одновременных сокетов —
+ * компромисс между скоростью и риском, описанным выше (блокировка нашего IP
+ * пулом): ~3 минуты на тысячу. Меняется переменной окружения
+ * TG_OUTREACH_PROXY_CHECK_CONCURRENCY без правки кода.
+ */
+export const PROXY_CHECK_CONCURRENCY = Number(process.env.TG_OUTREACH_PROXY_CHECK_CONCURRENCY) || 30;
 
 export type ProxyCheckStatus =
   /** и прокси жив, и Telegram через него доступен */

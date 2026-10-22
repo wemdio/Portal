@@ -5,6 +5,7 @@ import type { Route } from 'next';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
+import { proxyCountryLabel } from '@/lib/tgOutreach/proxyCountry';
 import { RowMenu } from '@/components/tg-outreach/RowMenu';
 import { Reveal } from '@/components/tg-outreach/Reveal';
 import { ArchiveCampaignDialog, CampaignList, DeleteCampaignDialog, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
@@ -115,6 +116,8 @@ import type { AccountCheckResult, OtherSession } from '@/lib/tgOutreach/accountC
 import type { ProxyCheckResult } from '@/lib/tgOutreach/proxyCheck';
 
 const API_BASE = '/api/tools/tg-outreach';
+/** Прокси в одной пачке проверки (сервер берёт до 200): 150 — быстро и без таймаута запроса. */
+const CHECK_BATCH = 150;
 /**
  * Со скольких дней молчания аккаунт считается неживым.
  *
@@ -6120,6 +6123,40 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     }
   };
 
+  /**
+   * Определить страну только что добавленных прокси: проверка пачками по 150 с
+   * записью страны в строку, без раскладки по спискам. Список остаётся там, куда
+   * его добавили, а страна появляется в колонке «Страна».
+   */
+  const detectCountries = async (ids: string[]) => {
+    if (!ids.length || sortRun) return;
+    setProxyError(null);
+    setSortRun({ done: 0, total: ids.length, working: 0 });
+    let working = 0;
+    try {
+      for (let i = 0; i < ids.length; i += CHECK_BATCH) {
+        const batch = ids.slice(i, i + CHECK_BATCH);
+        const res = await authFetch(`${API_BASE}/proxies/check`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: batch, detect_country: true, save: true }),
+        });
+        const body = (await res.json().catch(() => null)) as { items?: ProxyCheckResult[]; error?: string } | null;
+        if (!res.ok || !body?.items) {
+          setProxyError(body?.error ?? `Определение страны остановилось на ${i} из ${ids.length} (HTTP ${res.status})`);
+          break;
+        }
+        working += body.items.filter((r) => r.status === 'ok').length;
+        setSortRun({ done: Math.min(i + batch.length, ids.length), total: ids.length, working });
+      }
+      setSortRun({ done: ids.length, total: ids.length, working, note: 'Страна указана в колонке «Страна».' });
+    } catch (e) {
+      setProxyError(`Проверка не дошла до сервера: ${e instanceof Error ? e.message : String(e)}`);
+      setSortRun(null);
+    } finally {
+      void reloadAll();
+    }
+  };
+
   const addProxy = async () => {
     if (!url.trim()) return;
     setSaving(true);
@@ -6139,8 +6176,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         setProxyError(errBody?.error ?? `Ошибка сервера (${res.status})`);
         return;
       }
+      const created = (await res.json().catch(() => null)) as { id?: string; duplicate?: boolean } | null;
       setUrl(''); setName(''); setShowAdd(false);
       void reloadAll();
+      if (created?.id && !created.duplicate) void detectCountries([created.id]);
     } finally {
       setSaving(false);
     }
@@ -6167,8 +6206,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         setProxyError(errBody?.error ?? `Не удалось загрузить прокси (ошибка ${res.status})`);
         return;
       }
+      const added = (await res.json().catch(() => null)) as { items?: { id: string }[] } | null;
       setBulkText(''); setShowBulk(false);
       void reloadAll();
+      void detectCountries((added?.items ?? []).map((i) => i.id));
     } finally {
       setSaving(false);
     }
@@ -6195,10 +6236,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       const items: ProxyCheckResult[] = [];
       let missing = 0;
       let checkedAt = new Date().toISOString();
-      for (let i = 0; i < ids.length; i += 50) {
+      for (let i = 0; i < ids.length; i += CHECK_BATCH) {
         const res = await authFetch(`${API_BASE}/proxies/check`, {
           method: 'POST',
-          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids.slice(i, i + 50), detect_country: true, save: true }),
+          body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids.slice(i, i + CHECK_BATCH), detect_country: true, save: true }),
         });
         const body = (await res.json().catch(() => null)) as
           | { items?: ProxyCheckResult[]; checked_at?: string; missing_ids?: string[]; error?: string }
@@ -6242,6 +6283,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
    * определением страны. После неё прокси «Неопределённых» и автосписков
    * раскладываются по странам; списки, названные вручную, остаются как есть.
    */
+  /** «Авто · …» и «Не работают» раскладываются по странам; созданные вручную остаются как есть. */
+  const activeListName = lists.find((l) => l.id === activeList)?.name ?? '';
+  const activeListIsAuto = activeListName.startsWith('Авто · ') || activeListName === 'Не работают';
   const recheckActiveList = () => checkListAndSort(proxies.filter((p) => (p.proxy_list_id ?? null) === activeList).map((p) => p.id), activeList);
 
   const checkListAndSort = async (targets: string[], sortListId: string | null) => {
@@ -6250,8 +6294,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setSortRun({ done: 0, total: targets.length, working: 0 });
     let working = 0;
     try {
-      for (let i = 0; i < targets.length; i += 50) {
-        const ids = targets.slice(i, i + 50);
+      for (let i = 0; i < targets.length; i += CHECK_BATCH) {
+        const ids = targets.slice(i, i + CHECK_BATCH);
         const res = await authFetch(`${API_BASE}/proxies/check`, {
           method: 'POST',
           body: JSON.stringify({ campaign_id: campaignId, proxy_ids: ids, detect_country: true, save: true }),
@@ -6633,7 +6677,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                 className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-60">
                 {sortRun && sortRun.done < sortRun.total
                   ? `Проверяю ${sortRun.done} из ${sortRun.total}…`
-                  : 'Перепроверить список и определить страну'}
+                  : (activeListIsAuto ? 'Перепроверить и разложить' : 'Определить страну')}
               </button>
             )}
             {activeList === null && (
@@ -6669,7 +6713,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           <div className="flex items-start justify-between gap-2 rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-900">
             <span>
               {sortRun.done < sortRun.total
-                ? `Проверка неопределённых: ${sortRun.done} из ${sortRun.total}, работает ${sortRun.working}`
+                ? `Проверка прокси: ${sortRun.done} из ${sortRun.total}, работает ${sortRun.working}`
                 : `Проверено ${sortRun.total}, работает ${sortRun.working}. ${sortRun.note ?? ''}`}
             </span>
             {sortRun.done >= sortRun.total && (
@@ -6879,16 +6923,16 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           </div>
         ) : (
           <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-            <div className="grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+            <div className="grid grid-cols-[32px_1fr_150px_80px_180px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
               <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
-              <span>URL / Название</span><span>Активен</span><span>Список</span><span />
+              <span>URL / Название</span><span>Страна</span><span>Активен</span><span>Список</span><span />
             </div>
             {pagedProxies.map(p => {
               const check = checkById.get(p.id);
               return (
               <div
                 key={p.id}
-                className={`grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 items-center px-4 py-2.5 transition-colors duration-300 ease-out ${isSelected(p.id) ? 'bg-[rgba(99,102,241,0.07)]' : ''}`}
+                className={`grid grid-cols-[32px_1fr_150px_80px_180px_40px] gap-4 items-center px-4 py-2.5 transition-colors duration-300 ease-out ${isSelected(p.id) ? 'bg-[rgba(99,102,241,0.07)]' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -6920,6 +6964,10 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
                     </div>
                   )}
                 </div>
+                {/* Страна выхода прокси — из проверки; пусто, пока не определена. */}
+                <span className="truncate text-xs text-gray-600" title={p.country_code ?? ''}>
+                  {p.country_code ? proxyCountryLabel(p.country_code) : <span className="text-gray-300">—</span>}
+                </span>
                 <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {p.is_active ? 'Да' : 'Нет'}
