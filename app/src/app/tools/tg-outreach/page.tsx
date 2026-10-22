@@ -1226,6 +1226,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
    * загруженной страницы врала бы про количество.
    */
   const [filterAccountId, setFilterAccountId] = useState('');
+  /** Открытый справа диалог; пока не выбран — первый в списке. */
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
@@ -1613,6 +1614,33 @@ function DialogsTab({ campaignId, crmEnabled }: {
   const totalPages = Math.ceil(total / limit);
   const currentPage = Math.floor(offset / limit) + 1;
 
+  const selectedDialog = dialogs.find((x) => x.id === expandedId) ?? dialogs[0] ?? null;
+  const listRef = useRef<HTMLUListElement>(null);
+  const messagesEndKey = selectedDialog ? `${selectedDialog.id}:${selectedDialog.messages.length}` : '';
+
+  // Переписка открывается на последних сообщениях, как в мессенджере.
+  useEffect(() => {
+    const box = document.querySelector<HTMLElement>('[data-dialog-messages]');
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [messagesEndKey]);
+
+  // Стрелки вверх/вниз листают список, пока курсор не в поле ввода.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const idx = dialogs.findIndex((x) => x.id === (selectedDialog?.id ?? ''));
+      const next = dialogs[idx + (e.key === 'ArrowDown' ? 1 : -1)];
+      if (!next) return;
+      e.preventDefault();
+      setExpandedId(next.id);
+      listRef.current?.querySelector(`[data-dialog-id="${next.id}"]`)?.scrollIntoView({ block: 'nearest' });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dialogs, selectedDialog?.id]);
+
   return (
     <div className="space-y-4">
       {/*
@@ -1799,18 +1827,75 @@ function DialogsTab({ campaignId, crmEnabled }: {
                       : 'Нет диалогов'}
         </p>
       ) : (
-        <div className="space-y-2">
-          {dialogs.map(d => {
-            const isExpanded = expandedId === d.id;
-            const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
-            const autoMark = describeAutoForward(d);
-            const leadMark = leadMarkLabel(d);
-            return (
-              <div key={d.id} className="rounded-xl border border-gray-200 bg-white shadow-sm">
-                <button type="button" onClick={() => setExpandedId(isExpanded ? null : d.id)}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-100 transition rounded-xl cursor-pointer">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+        <div className="grid h-[calc(100vh-250px)] min-h-[520px] grid-cols-1 gap-3 lg:grid-cols-[340px_minmax(0,1fr)]">
+          {/* Слева — список: выбрал строку, справа сразу переписка. Раскрывать
+              карточки по одной больше не нужно. */}
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white/50">
+            <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2 text-[11px] text-gray-500">
+              <span>Диалогов: {total}</span>
+              <span className="text-gray-400">↑ ↓ — переключать</span>
+            </div>
+            <ul ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
+              {dialogs.map((d) => {
+                const active = selectedDialog?.id === d.id;
+                const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
+                const last = d.messages.at(-1);
+                // Последним написал человек — ход за нами.
+                const waiting = last?.role === 'user' && d.status === 'none';
+                return (
+                  <li key={d.id} data-dialog-id={d.id}>
+                    <button
+                      type="button"
+                      onClick={() => setExpandedId(d.id)}
+                      className={`tg-list-item block w-full border-b border-gray-100 px-3 py-2.5 text-left ${active ? 'tg-list-item--active' : ''}`}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        {waiting && <span title="Человек ответил — ждёт нас" className="h-2 w-2 shrink-0 rounded-full bg-indigo-500" />}
+                        <span className={`min-w-0 flex-1 truncate text-xs ${active ? 'font-semibold text-indigo-700' : 'font-medium text-gray-900'}`}>
+                          {d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}
+                        </span>
+                        {d.status !== 'none' && <span className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium ${st.cls}`}>{st.label}</span>}
+                        {d.can_send === false && <Ban className="h-3 w-3 shrink-0 text-rose-500" />}
+                        <span className="shrink-0 text-[10px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : ''}</span>
+                      </span>
+                      <span className="mt-0.5 block truncate text-[11px] text-gray-500">
+                        {last?.role === 'assistant' ? 'Вы: ' : ''}{last?.content ?? '—'}
+                      </span>
+                      {(d.base || accountLabelMap.get(d.account_id)) && (
+                        <span className="mt-1 flex items-center gap-1.5 text-[10px] text-gray-400">
+                          {d.base && <span className="truncate text-violet-600">{d.base.name}</span>}
+                          {accountLabelMap.get(d.account_id) && <span className="shrink-0">· {accountLabelMap.get(d.account_id)}</span>}
+                          <span className="ml-auto shrink-0">{d.messages.length} сообщ.</span>
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            {totalPages > 1 && (
+              <div className="flex items-center justify-center gap-2 border-t border-gray-200 px-2 py-1.5">
+                <button type="button" disabled={currentPage <= 1} onClick={() => setOffset(Math.max(0, offset - limit))}
+                  className="rounded-full border border-gray-200 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 hover:border-indigo-300 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Назад</button>
+                <span className="text-[11px] text-gray-500">{currentPage} / {totalPages}</span>
+                <button type="button" disabled={currentPage >= totalPages} onClick={() => setOffset(offset + limit)}
+                  className="rounded-full border border-gray-200 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 hover:border-indigo-300 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Вперёд</button>
+              </div>
+            )}
+          </div>
+
+          {/* Справа — выбранная переписка: шапка и действия сверху, сообщения
+              занимают всё свободное место, поле ввода прижато к низу. */}
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white/50">
+            {selectedDialog && (() => {
+              const d = selectedDialog;
+              const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
+              const autoMark = describeAutoForward(d);
+              const leadMark = leadMarkLabel(d);
+              return (
+                <>
+                  <div className="shrink-0 border-b border-gray-200 px-4 py-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium text-gray-900">{d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}</span>
                       {/* Из какой гипотезы человек — сразу за ником: база
                           отвечает на вопрос «кто это», а не «что с ним
@@ -1888,28 +1973,9 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           : <span title="Не прочитано"><Check className="h-3.5 w-3.5 text-gray-400" /></span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : '—'}</span>
-                      {/* С какого нашего аккаунта идёт переписка. В кампании их
-                          несколько, а раньше это было видно только внутри
-                          раскрытого диалога, в подписях сообщений: чтобы
-                          понять, кому писать дальше, приходилось разворачивать
-                          каждую строку. */}
-                      {accountLabelMap.get(d.account_id) && (
-                        <span
-                          title={`Переписку ведёт наш аккаунт ${accountLabelMap.get(d.account_id)}`}
-                          className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700"
-                        >
-                          <Send className="h-3 w-3" />
-                          {accountLabelMap.get(d.account_id)}
-                        </span>
-                      )}
-                    </div>
                   </div>
-                  {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
-                </button>
-                {isExpanded && (
-                  <div className="border-t border-gray-100 px-4 py-3 space-y-3">
+                  <div className="flex min-h-0 flex-1 flex-col gap-2.5 px-4 py-3">
+                    <div className="max-h-[38%] shrink-0 space-y-2.5 overflow-y-auto">
                     {dialogSaveError?.id === d.id && (
                       <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
                         <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
@@ -2108,7 +2174,8 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         )}
                       </div>
                     )}
-                    <div className="max-h-72 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
+                    </div>
+                    <div data-dialog-messages className="min-h-0 flex-1 overflow-auto space-y-1.5 rounded-lg bg-gray-50 p-2">
                       {d.messages.map((m, i) => {
                         const senderName = m.role === 'user'
                           ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
@@ -2168,22 +2235,13 @@ function DialogsTab({ campaignId, crmEnabled }: {
                       </button>
                     </div>
                   </div>
-                )}
-              </div>
-            );
-          })}
+                </>
+              );
+            })()}
+          </div>
         </div>
       )}
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2">
-          <button type="button" disabled={currentPage <= 1} onClick={() => setOffset(Math.max(0, offset - limit))}
-            className="rounded-full px-4 py-2 text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Назад</button>
-          <span className="text-xs text-gray-500">{currentPage} / {totalPages}</span>
-          <button type="button" disabled={currentPage >= totalPages} onClick={() => setOffset(offset + limit)}
-            className="rounded-full px-4 py-2 text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Вперёд</button>
-        </div>
-      )}
     </div>
   );
 }
