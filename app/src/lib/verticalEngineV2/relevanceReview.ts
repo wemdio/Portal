@@ -18,10 +18,12 @@ export const VE_STRUCTURED_RELEVANCE_RULES = [
   PAYMENT_POINT_EVIDENCE_RULE,
 ].join('\n');
 
+const veGeographyEvidenceSchema = z.array(z.object({ field: z.enum(['address', 'description', 'website_text']), quote: z.string().min(1).max(400) }).strict()).max(2);
+
 export const veRelevanceReviewResultSchema = z.object({
   result: z.enum(['direct_match', 'direct_conflict', 'insufficient']),
   reason: z.string().min(1).max(400),
-  geography_evidence: z.array(z.object({ field: z.enum(['address', 'description', 'website_text']), quote: z.string().min(1).max(400) }).strict()).max(2).optional(),
+  geography_evidence: veGeographyEvidenceSchema.optional(),
 }).strict();
 export type VeRelevanceReviewResult = z.infer<typeof veRelevanceReviewResultSchema>;
 export interface VeRelevanceReviewCompany {
@@ -109,19 +111,27 @@ export async function reviewVeRelevanceEvidence(input: {
     field: z.enum(['description', 'website_text', 'category', 'address']), quote: z.string().min(1).max(400),
   }).strict()).min(1).max(3), address: z.string().max(600).optional() }).strict()).parse(input.companies);
   const resultSchema = input.geography ? veRelevanceReviewResultSchema : veRelevanceReviewResultSchema.omit({ geography_evidence: true });
-  const schema = z.object({ reviews: z.array(resultSchema.extend({
+  const reviewsOf = <T extends z.ZodRawShape>(result: z.ZodObject<T>) => z.object({ reviews: z.array(result.extend({
     i: z.number().int().nonnegative(),
     // Explanatory verbosity must not waste a paid, otherwise valid decision.
     // Persist/UI reasons retain the strict 400-character checkpoint contract.
     reason: z.string().min(1).max(2000).transform((reason) => sliceWholeChars(stripUnstorableJsonChars(reason), 0, 400)),
   }).strict())
-    .length(companies.length) }).strict().superRefine((data, ctx) => {
+    .length(companies.length) }).strict();
+  const schema = reviewsOf(resultSchema).superRefine((data, ctx) => {
     if (new Set(data.reviews.map((review) => review.i)).size !== companies.length
       || data.reviews.some((review) => review.i >= companies.length)) ctx.addIssue({ code: 'custom', message: 'Every local i must occur exactly once' });
   });
+  // Strict structured outputs reject an optional property with HTTP 400 (gpt-5-mini
+  // stopped six geography-repaired Solo bases on 22.10.2026). The request asks for
+  // the list on every review, empty without proof; validation still accepts a
+  // provider that omits it.
+  const nativeSchema = input.geography
+    ? reviewsOf(veRelevanceReviewResultSchema.extend({ geography_evidence: veGeographyEvidenceSchema }))
+    : schema;
   const model = input.model ?? getVeModel('relevanceReview');
   const response: LLMResult<{ reviews: Array<VeRelevanceReviewResult & { i: number }> }> = await callLLMWithSchema(relevanceReviewMessages(input.scope, companies, input.language, input.hypothesisOrigin, input.audienceScope, input.geography), schema, {
-    model, maxTokens: 8192, jsonSchema: veNativeJsonSchema(model, 've_relevance_review', schema),
+    model, maxTokens: 8192, jsonSchema: veNativeJsonSchema(model, 've_relevance_review', nativeSchema),
     maxHttpAttempts: 1, maxSchemaAttempts: 1, timeoutMs: 90_000, requireCompleteJson: true,
     signal: input.signal, onUsage: input.onUsage,
   });

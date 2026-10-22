@@ -146,13 +146,32 @@ export function veCollectionCacheModel(kind: 'gate' | 'relevanceReview', model: 
     : model;
 }
 
+/** OpenAI strict outputs require every object property in `required`. */
+function veStrictOutputCompatible(node: unknown): boolean {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return true;
+  const schema = node as Record<string, unknown>;
+  const children: unknown[] = [schema.items, schema.additionalProperties, schema.not];
+  if (schema.properties && typeof schema.properties === 'object') {
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    if (Object.keys(schema.properties).some((key) => !required.includes(key))) return false;
+    children.push(...Object.values(schema.properties));
+  }
+  for (const key of ['anyOf', 'oneOf', 'allOf', 'prefixItems']) if (Array.isArray(schema[key])) children.push(...schema[key]);
+  for (const key of ['$defs', 'definitions']) if (schema[key] && typeof schema[key] === 'object') children.push(...Object.values(schema[key]));
+  return children.every(veStrictOutputCompatible);
+}
+
 /** Native output constraints verified in the Requesty collection-model pilot.
  * Other configured providers retain JSON mode plus the same local validation. */
 export function veNativeJsonSchema(model: string, name: string, schema: z.ZodType) {
   if (model !== VE_COLLECTION_MODEL && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
-  return { name, schema: z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
+  const jsonSchema = z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
     if (jsonSchema.type === 'object') jsonSchema.additionalProperties = false;
-  } }) };
+  } });
+  // OpenAI answers an optional property with HTTP 400, which stops the whole
+  // base as a configuration failure (22.10.2026). JSON mode still validates locally.
+  if (model !== VE_COLLECTION_MODEL && !veStrictOutputCompatible(jsonSchema)) return undefined;
+  return { name, schema: jsonSchema };
 }
 
 /* ─────────────────────── Базовые типы/вызов ─────────────────────── */
