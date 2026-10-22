@@ -103,7 +103,6 @@ import {
   describeSending,
   healthToneClass,
   describeProxy,
-  countSendingAccounts,
   pickDeadAccounts,
   type AccountSendingStat,
   type HealthMark,
@@ -3567,34 +3566,11 @@ function CampaignAccountsTab({
     [accounts, errorCounts, loadedAt],
   );
 
-  /**
-   * Сколько аккаунтов реально ведут рассылку.
-   *
-   * Отдельно от «жив» и «Активен»: и то, и другое — про разрешения, а не про
-   * работу. Аккаунт может быть живым, включённым, с рабочим прокси — и при этом
-   * не написать никому ни разу, потому что кончилась очередь контактов или круг
-   * до него не доходит.
-   */
-  const sendingCount = useMemo(
-    () => countSendingAccounts(accounts, sendingStats),
-    [accounts, sendingStats],
-  );
-
   /** Кого Telegram хоть раз за сутки прижал: ошибка или предупреждение в логах.
    *  FLOOD_WAIT, PEER_FLOOD, повторное подключение и т.п. — это и читается
    *  сводным словом «ограничены». Считается поверх alive/dead — отдельно от
    *  статуса проверки и отдельно от фактических отправок. */
   const restrictedCount = accountStats.withErrors + accountStats.withWarningsOnly;
-
-  /** Кто именно не рассылает — под курсор на плашке, чтобы не искать глазами. */
-  const notSendingNames = useMemo(
-    () => accounts
-      .filter((a) => (sendingStats[a.id]?.sent_24h ?? 0) === 0)
-      .map((a) => a.session_name)
-      .slice(0, 12)
-      .join(', '),
-    [accounts, sendingStats],
-  );
 
   /**
    * Кого предлагает выключить кнопка «Снять неживые с рассылки».
@@ -3777,16 +3753,6 @@ function CampaignAccountsTab({
                 · без цены {accountsWithoutPrice}
               </span>
             )}
-          </span>
-
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${sendingCount > 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}
-            title={
-              `За сутки первое сообщение ушло с ${sendingCount} из ${accounts.length} аккаунтов.`
-              + (notSendingNames ? ` Не рассылают: ${notSendingNames}${accounts.length - sendingCount > 12 ? ' и другие' : ''}. Причина по каждому — в колонке «Рассылка».` : '')
-            }
-          >
-            рассылали за 24ч {sendingCount} из {accounts.length}
           </span>
 
           <span className="ml-auto text-[10px] text-gray-400">
