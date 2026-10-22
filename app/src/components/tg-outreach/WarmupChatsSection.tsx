@@ -10,7 +10,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
-import { AlertCircle, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { AlertCircle, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import type { CampaignStatus } from '@/lib/tgOutreach/types';
 import type { WarmupChat } from '@/lib/tgOutreach/warmup/types';
 
@@ -69,8 +69,8 @@ export default function WarmupChatsSection({
     onChanged?.();
   };
 
-  const addChats = async () => {
-    const links = bulkText.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
+  const addChats = async (raw: string = bulkText) => {
+    const links = raw.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
     if (!links.length) return;
     setAdding(true);
     setError(null);
@@ -221,25 +221,25 @@ export default function WarmupChatsSection({
         </div>
       )}
 
+      {/* Чаты добавляются сами: при вставке, а набранное руками — когда
+          уходите из поля. Кнопки «Добавить» нет. */}
       <textarea
         value={bulkText}
         onChange={(e) => setBulkText(e.target.value)}
+        onPaste={(e) => {
+          const pasted = e.clipboardData.getData('text');
+          if (!pasted.trim()) return;
+          e.preventDefault();
+          void addChats(`${bulkText}\n${pasted}`);
+        }}
+        onBlur={() => { if (bulkText.trim() && !adding) void addChats(); }}
         rows={2}
-        placeholder={'t.me/chat_name\n@another_chat'}
-        className="block w-full resize-y rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-indigo-400"
+        placeholder={'Вставьте ссылки: t.me/chat_name или @another_chat'}
+        className="block w-full resize-y rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-indigo-400"
       />
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => { void addChats(); }}
-          disabled={adding || !bulkText.trim()}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {adding ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-          Добавить
-        </button>
-        <span className="text-[10px] text-gray-400">Закрытые чаты по приглашениям не поддерживаются</span>
-      </div>
+      {adding && (
+        <div className="flex items-center gap-1.5 text-[11px] text-gray-500"><Loader2 className="h-3 w-3 animate-spin" />Добавляю…</div>
+      )}
 
       {error && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>

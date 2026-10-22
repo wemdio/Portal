@@ -11,7 +11,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
-import { Check, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import type { CampaignStatus } from '@/lib/tgOutreach/types';
 import {
   FIELD_BOUNDS,
@@ -98,11 +98,8 @@ export default function WarmupSettingsPanel({
       const saved = (data.settings ?? sent) as WarmupSettings;
       lastSaved.current = JSON.stringify(saved);
       if (JSON.stringify(draftRef.current) === sentKey) setDraft(saved);
-      setNotice(
-        data.applies_next_day
-          ? 'Сохранено. План сегодняшнего дня уже составлен — новые числа вступят со следующего.'
-          : 'Сохранено. Применится при следующем запуске прогрева.',
-      );
+      // Говорим только то, что действительно важно: сегодняшний план уже составлен.
+      setNotice(data.applies_next_day ? 'План сегодняшнего дня уже составлен — новые числа вступят со следующего.' : null);
       onSaved();
     } finally {
       setSaving(false);
@@ -203,15 +200,6 @@ export default function WarmupSettingsPanel({
             <div className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-[11px] text-gray-600">{notice}</div>
           )}
 
-          <div className="flex items-center justify-end gap-1.5 border-t border-gray-100 pt-2 text-[11px] text-gray-400">
-            {saving ? (
-              <><Loader2 className="h-3 w-3 animate-spin" />Сохраняю…</>
-            ) : dirty ? (
-              'Изменения сохранятся сами'
-            ) : (
-              <><Check className="h-3 w-3 text-emerald-500" />Все изменения сохранены</>
-            )}
-          </div>
         </div>
       )}
     </div>
