@@ -26,6 +26,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
 import { canResumePartialPreview, getVeCollectionContinuation, grantVeResumeRoundBudget, needsVeControlledAudienceRefresh, openNextVeCollectionRound, previewRecoveryKind, type VeCollectionContinuation } from './collectionRecovery';
+import { prepareVeGeographyRepairContinuation } from './collectionGeographyRepair';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 import { isVeResumableDirectoryError } from './collectionErrors';
@@ -34,6 +35,7 @@ import { veAudienceReviewHold } from './audienceReviewHold';
 import { readVeSourceCostPolicy, withVeRetailRefreshMarket } from './sourceAudience';
 import { addVeKnownWebsiteSource, needsVeKnownWebsiteContinuation } from './knownWebsiteDirectory';
 import { applyVeRestaurantSourceContinuation, needsVeRestaurantSourceContinuation } from './restaurantSourcePolicy';
+import { veCollectionGeographyFromBrief, type VeCollectionGeography } from './collectionGeography';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -159,20 +161,31 @@ async function resumeFailedPreview(
   const refreshAudience = input.resumeBaseId === saved.id && continuation.code === 'source_update'
     && continuation.action === 'resume_collection' && needsVeControlledAudienceRefresh(saved, currentHypothesis);
   const pendingAudienceRefresh = saved.collect_info?.audience_scope_refresh_requested === true;
+  const refreshGeography = saved.status === 'analyzed' && saved.collect_info?.geography_repair !== undefined;
   if (pendingAudienceRefresh) {
     try {
       if (readVeSourceCostPolicy(saved.collect_info.cost_policy)?.website_discovery !== 'existing_only') throw new Error('Missing source refresh cost policy');
     } catch { return { ok: false, message: 'Сохранённое обновление источников требует проверки условий расходов.' }; }
   }
-  const sourceRefresh = refreshAudience || pendingAudienceRefresh || refreshKnownWebsites || refreshRestaurant
+  const sourceRefresh = refreshGeography || refreshAudience || pendingAudienceRefresh || refreshKnownWebsites || refreshRestaurant
     || saved.collect_info?.known_website_source?.continuation_only === true || !!saved.collect_info?.restaurant_source_refresh;
   const info = { ...saved.collect_info,
-    ...(currentHypothesis && (refreshAudience || (!pendingAudienceRefresh && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')))) ? { hypotheses: [currentHypothesis] } : {}),
+    ...(saved.collect_info?.geography_repair === undefined && currentHypothesis && (refreshAudience || (!pendingAudienceRefresh && /^B2B\s+SaaS\b/i.test(String(currentHypothesis.title ?? '')))) ? { hypotheses: [currentHypothesis] } : {}),
     ...(previewRecoveryKind(saved) === 'validation' && !sourceRefresh ? { validation_retry: true } : {}),
     ...(saved.status === 'analyzed' && !sourceRefresh ? { validation_retry: true, relevance_review_requested: true } : {}),
     ...(refreshAudience ? { audience_scope_refresh_requested: true,
       cost_policy: { version: 1, website_discovery: 'existing_only' } } : {}),
   };
+  if (refreshGeography) {
+    try {
+      const prepared = prepareVeGeographyRepairContinuation(info);
+      if (!prepared.can_continue) return { ok: true, created: false, base: saved, continuation };
+      Object.assign(info, prepared.collect_info);
+      // Object.assign does not remove the closed constructor; it must never
+      // be imported into the new round a second time.
+      delete info.construct;
+    } catch { return { ok: false, message: 'Сохранённые условия исправления базы требуют проверки.' }; }
+  }
   if (refreshRestaurant) {
     applyVeRestaurantSourceContinuation(info, currentHypothesis!, veAudienceReviewHold(readVeRelevanceReserve(info.relevance_reserve)));
   }
@@ -349,6 +362,9 @@ export async function enqueueVeBaseCollect(
 
   const created: Array<Record<string, unknown>> = [];
   const existing: Array<Record<string, unknown>> = [];
+  // Read lazily after reuse/recovery checks. A retry owns its saved audience;
+  // only a genuinely new preview freezes the current project geography.
+  let collectionGeography: VeCollectionGeography | undefined;
 
   // A new preview starts with the project's "addresses per company" limit. A
   // failed read (or a database without the column) means no limit, and the
@@ -531,6 +547,21 @@ export async function enqueueVeBaseCollect(
         if (!resumed.created && resumed.continuation && !resumed.continuation.available) return resumed;
         (resumed.created ? created : existing).push(resumed.base);
         continue;
+      }
+    }
+
+    if (input.collectionMode === 'preview' && !refill) {
+      try {
+        if (!collectionGeography) {
+          const { data: project, error: projectError } = await supabase.from('ve_projects')
+            .select('brief').eq('id', projectId).maybeSingle();
+          if (projectError || !project) return { ok: false,
+            message: `Не удалось сохранить географию базы: ${projectError?.message ?? 'проект не найден'}` };
+          collectionGeography = veCollectionGeographyFromBrief(project.brief);
+        }
+        collectInfo.collection_geography = { ...collectionGeography };
+      } catch (error) {
+        return { ok: false, message: `Не удалось сохранить географию базы: ${error instanceof Error ? error.message : 'ошибка чтения брифа'}` };
       }
     }
 

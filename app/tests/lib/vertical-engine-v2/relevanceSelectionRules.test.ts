@@ -21,6 +21,7 @@ import { createVeCollectionAudienceSnapshot } from '@/lib/verticalEngineV2/sourc
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { resetVeTriageState, veScopedTriageRubric, veTriageRubricMessages } from '@/lib/verticalEngineV2/relevanceTriage';
 import { VE_RELEVANCE_TARGET_RULES, veStaffingScopeNote, relevanceReviewMessages } from '@/lib/verticalEngineV2/relevanceReview';
+import { veRelevanceGeographyFacts, veRelevanceGeographySourceRows, hasVeGeographyEvidence } from '@/lib/verticalEngineV2/relevanceGeography';
 import { readRelevanceCheckpoint, relevanceHash } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import type { VeRelevanceDecision } from '@/lib/verticalEngineV2/relevanceDecision';
 import savedBeforeRelease from './fixtures/relevanceCheckpointBeforeRulesV2.json';
@@ -105,7 +106,7 @@ interface Captured { kind: 'rubric' | 'classify' | 'review' | 'repair'; model: s
  * with that HTTP status, `malformed` answers it with a broken body. */
 function provider(review: (model: string) => Result = () => 'direct_match',
   secondPass: { status: 'relevant' | 'irrelevant' | 'needs_review'; ids: number[] } = { status: 'relevant', ids: [0] },
-  options: { reviewStatus?: number; malformed?: (user: string) => boolean } = {}) {
+  options: { reviewStatus?: number; malformed?: (user: string) => boolean; geographyQuote?: string; classifyAddress?: boolean } = {}) {
   const calls = { rubric: 0, classify: 0, deepseek: 0, confirm: 0, jev: 0, reviewed: 0, requests: [] as Captured[], jevStates: [] as unknown[] };
   global.fetch = jest.fn(async (_url: string, init: { body: string }) => {
     const body = JSON.parse(init.body);
@@ -127,21 +128,23 @@ function provider(review: (model: string) => Result = () => 'direct_match',
       calls.requests.push({ kind: 'review', model: body.model, system, user });
       if (options.reviewStatus) return reply(options.reviewStatus, {});
       if (options.malformed?.(user)) return llm({ reviews: 'нет ответа' });
-      return llm({ reviews: companies.map((item) => ({ i: item.i, result: review(body.model), reason: 'Проверено по цитатам' })) });
+      return llm({ reviews: companies.map((item) => ({ i: item.i, result: review(body.model), reason: 'Проверено по цитатам',
+        ...(options.geographyQuote !== undefined ? { geography_evidence: [{ field: 'address', quote: options.geographyQuote }] } : {}) })) });
     }
     if (system.startsWith('Repair citations')) {
       calls.requests.push({ kind: 'repair', model: body.model, system, user });
       return llm({ evidence_ids: [] });
     }
     calls.classify += 1; calls.requests.push({ kind: 'classify', model: body.model, system, user });
-    const batch = JSON.parse(user.split(/Rows, local indices [^\n]*:\n/)[1]) as Array<{ i: number; description: string }>;
+    const batch = JSON.parse(user.split(/Rows, local indices [^\n]*:\n/)[1]) as Array<{ i: number; description: string; address?: string }>;
     if (system.includes('Independent second look')) {
       return llm({ decisions: batch.map((item) => ({ i: item.i, status: secondPass.status,
         reason: secondPass.status === 'relevant' ? 'Производство по сайту' : 'По сайту видны признаки производства, но деталей мало.',
         evidence_ids: secondPass.ids })) });
     }
     return llm({ decisions: batch.map((item) => ({ i: item.i, status: 'relevant', reason: 'Собственное производство',
-      evidence: [{ field: 'description', quote: item.description }] })) });
+      evidence: [{ field: 'description', quote: item.description },
+        ...(options.classifyAddress && item.address ? [{ field: 'address', quote: item.address }] : [])] })) });
   }) as unknown as typeof fetch;
   return calls;
 }
@@ -166,6 +169,95 @@ describe('VE2 relevance selection rules', () => {
     delete process.env.VE_RELEVANCE_TRIAGE; delete process.env.VE_RELEVANCE_TRIAGE_PROJECTS;
   });
   afterEach(() => { process.env = { ...env }; });
+
+  it('requires company-specific geography evidence even when every activity verdict is positive', async () => {
+    const calls = provider(() => 'direct_match', undefined, { geographyQuote: 'Москва, ул. Примерная, 10' });
+    const rows = [
+      { company: 'Столичный завод', inn: '7701000001', email: 'hello@capital.example', description: QUOTES.meat, address: 'Москва, ул. Примерная, 10' },
+      { company: 'Тульский завод', inn: '7101000001', email: 'hello@tula.example', description: QUOTES.meat, address: 'Тульская область, Тула, ул. Заводская, 1' },
+      { company: 'Без адреса', inn: '7801000001', email: 'hello@unknown.example', description: QUOTES.meat },
+    ];
+    const fetchEvidence = offline();
+    const input = { ...HYPOTHESES.meat, rows, language: 'ru' as const, geography: 'Москва и МО', fetchEvidence, allowPaidSearch: false };
+    const result = await findIrrelevantRows(input);
+    expect(result.decisions.get(0)?.status).toBe('relevant');
+    expect(result.decisions.get(1)?.status).not.toBe('relevant');
+    expect(result.decisions.get(2)?.status).not.toBe('relevant');
+    for (const request of calls.requests.filter((item) => item.kind === 'review' || item.kind === 'classify')) {
+      expect(request.system).toContain('MANDATORY COLLECTION GEOGRAPHY');
+      expect(request.user).toContain('Москва и МО');
+    }
+    const firstReview = calls.requests.find((item) => item.kind === 'review')!;
+    expect(firstReview.user).toContain(rows[1].address);
+    expect(firstReview.user).not.toContain('hello@');
+    const before = calls.requests.length;
+    const resumed = await findIrrelevantRows({ ...input, checkpoint: result.checkpoint });
+    expect(resumed.decisions.get(0)?.status).toBe('relevant');
+    expect(calls.requests.length).toBe(before); // deployment/retry cannot re-buy unchanged verdicts
+
+    // A complete short address is valid proof, not a truncated activity quote:
+    // retaining it must not buy a citation repair or website call.
+    const shortCalls = provider(() => 'direct_match', undefined, { geographyQuote: 'Омск', classifyAddress: true });
+    const shortFetch = offline();
+    const short = await findIrrelevantRows({ ...input, rows: [{ ...rows[0], address: 'Омск' }],
+      geography: 'Омск', fetchEvidence: shortFetch });
+    expect(short.decisions.get(0)?.status).toBe('relevant');
+    expect(shortCalls.requests.some((request) => request.kind === 'repair')).toBe(false);
+    expect(shortFetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy geography-free caches intact but cannot reuse them for a constrained review', async () => {
+    const calls = provider();
+    const row = { company: 'Завод', inn: '7701000001', email: 'hello@example.test', description: QUOTES.meat };
+    const input = { ...HYPOTHESES.meat, rows: [row], language: 'ru' as const, fetchEvidence: offline(), allowPaidSearch: false };
+    const legacy = await findIrrelevantRows(input);
+    expect(legacy.decisions.get(0)?.status).toBe('relevant');
+    const count = calls.requests.length;
+    const unchanged = await findIrrelevantRows({ ...input, checkpoint: legacy.checkpoint, geography: null });
+    expect(unchanged.checkpoint?.context_hash).toBe(legacy.checkpoint?.context_hash);
+    expect(calls.requests.length).toBe(count);
+    const constrained = await findIrrelevantRows({ ...input, checkpoint: legacy.checkpoint, geography: 'Москва и МО' });
+    expect(constrained.checkpoint?.context_hash).not.toBe(legacy.checkpoint?.context_hash);
+    expect(constrained.decisions.get(0)?.status).not.toBe('relevant'); // positive label without geographic proof is insufficient
+  });
+
+  it('keeps location facts separate from activity and never infers company geography from vacancies or INN', () => {
+    expect(veRelevanceGeographyFacts([{ inn: '7701000001', vacancy_area: 'Москва', company: 'Москва завод', website: 'moscow.example' }])).toBe('');
+    expect(veRelevanceGeographyFacts([{ source_detail: 'hh: менеджер', address: 'Москва' }])).toBe('');
+    expect(veRelevanceGeographyFacts([{ source_detail: 'реестр\nhh: менеджер', address: 'Казань\nМосква' }])).toBe('');
+    expect(veRelevanceGeographyFacts([{ source_detail: 'реестр\nhh: менеджер', address: 'Казань\nМосква' },
+      { source_detail: 'реестр', address: 'Казань' }])).toBe('Казань');
+    const recipient = { company: 'Завод', inn: '7701000001', website: 'factory.test', email: 'hello@factory.test',
+      address: 'Казань\nМосква', source_detail: 'реестр\nhh: менеджер' };
+    const saved = veRelevanceGeographySourceRows([recipient], [recipient,
+      { ...recipient, source_detail: 'реестр', address: 'Казань', description: 'Производим снеки' },
+      { ...recipient, inn: '7701000002', source_detail: 'реестр', address: 'Тула' },
+      { company: 'Завод', source_detail: 'реестр', address: 'Омск' }]);
+    expect(saved).toEqual([{ company: 'Завод', inn: '7701000001', website: 'factory.test',
+      address: 'Казань', source_detail: 've:geography-source', _ve_geography_source: true }]);
+    expect(veRelevanceGeographySourceRows([recipient], saved)).toEqual(saved);
+    expect(veRelevanceGeographyFacts([recipient, ...saved])).toBe('Казань');
+    expect(hasVeGeographyEvidence('Омск', [{ field: 'address', quote: 'Омск' }], { address: 'Омск', evidence: [] })).toBe(true);
+    expect(veRelevanceGeographyFacts([{ address: 'Московская область, Химки' }, { address: 'Московская область, Химки' }]))
+      .toBe('Московская область, Химки');
+    expect(hasVeGeographyEvidence('Москва', [{ field: 'address', quote: 'Москва' }], { address: 'Тула', evidence: [] })).toBe(false);
+    for (const [required, quote] of [['Москва и МО', 'Московская обл., Химки'], ['Москва', 'Офис в Москве'],
+      ['Новосибирск', 'Офис в Новосибирске'], ['СПб и ЛО', 'Ленинградская область'], ['Казань', 'Офис в Казани'],
+      ['Россия', 'Тульская область'], ['Россия', 'Казань'], ['Россия', 'Российская Федерация'], ['МО', 'Подмосковье']]) {
+      expect(hasVeGeographyEvidence(required, [{ field: 'address', quote }], { address: quote, evidence: [] })).toBe(true);
+    }
+    for (const [required, quote] of [['Москва и МО', 'Производим снеки'], ['Москва', 'Московская область'],
+      ['Москва', 'Moscow region'], ['Москва', 'Московский проспект'], ['Москва и МО', 'Тульская область'],
+      ['Новосибирск', 'Новосибирская область'], ['МО', 'Москва'], ['Казань', 'Республика Татарстан']]) {
+      expect(hasVeGeographyEvidence(required, [{ field: 'website_text', quote }],
+        { evidence: [{ field: 'website_text', quote }] })).toBe(false);
+    }
+    const messages = relevanceReviewMessages('Target hypothesis: заводы', [{ evidence: [{ field: 'category', quote: 'Пищевое производство' }], address: 'Тула' }], 'ru', undefined,
+      { version: 1, kind: 'sector', any_of: ['Производители продуктов'], required: [], excluded: [] }, 'Москва и МО');
+    expect(messages[0].content).toContain('additional buyer requirement');
+    expect(messages[1].content).toContain('Москва и МО');
+    expect(messages[1].content).toContain('Тула');
+  });
 
   it('corrects only the audited generated retail scopes and preserves explicit conditions and exclusions', () => {
     const materials = { origin: 'generated' as const, title: 'Производители строительно-отделочных материалов',

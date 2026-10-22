@@ -27,7 +27,8 @@ export function isVeRestaurantCatalogAudience(value: unknown): boolean {
 export function normalizeVeRestaurantSourcePlan(plan: VeSourcePlan, input: { market: string; hypotheses: readonly unknown[] }): { plan: VeSourcePlan; changed: boolean } {
   if (input.market !== 'ru' || input.hypotheses.length !== 1 || !isVeRestaurantCatalogAudience(input.hypotheses[0])
     || !plan.tasks.length || plan.tasks.length > 6 || plan.tasks.some((t) => !['companies_directory', 'hh_live'].includes(t.source))
-    || plan.tasks.some((t) => t.directory_filters?.regionCodes?.length || (t.hh_query?.area && t.hh_query.area !== '113'))) return { plan, changed: false };
+    || plan.tasks.some((t) => t.directory_filters?.regionCodes?.length || (t.hh_query?.area
+      && (Array.isArray(t.hh_query.area) ? t.hh_query.area : [t.hh_query.area]).some((area) => !['', '113'].includes(area.trim()))))) return { plan, changed: false };
   const index = plan.tasks.findIndex((t) => t.source === 'hh_live' && !!t.hh_query?.text);
   if (index < 0) return { plan, changed: false };
   const h = record(input.hypotheses[0])!;

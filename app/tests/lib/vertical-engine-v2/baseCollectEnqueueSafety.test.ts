@@ -44,6 +44,55 @@ const input = {
 };
 
 describe('VE2 base collection enqueue recovery', () => {
+  it('freezes project geography only for new previews and preserves it across brief edits and orphan repair', async () => {
+    for (const required of ['Москва и МО', 'Казань', 'Germany and France', null]) {
+      const brief = required ? { client_brief: { icp: { geo: required } } } : {};
+      const hypotheses = ['geo-1', 'geo-2'].map((id) => ({ id, title: id, project_id: input.projectId, vertical_id: input.verticalId }));
+      const db = createMockSupabase({ tables: { ve_projects: [{ id: input.projectId, brief }], ve_hypotheses: hypotheses } });
+      const args = { ...input, hypothesisIds: hypotheses.map((h) => h.id), collectionMode: 'preview' as const };
+      await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, args)).resolves.toMatchObject({ ok: true, created: true });
+      expect(db.getRows('ve_bases')).toHaveLength(2);
+      for (const base of db.getRows('ve_bases')) expect(base.collect_info).toMatchObject({
+        collection_geography: { version: 1, required },
+      });
+      expect(db.selects.filter((read) => read.table === 've_projects')).toHaveLength(1);
+
+      await db.from('ve_projects').update({ brief: { client_brief: { icp: { geo: 'Другой регион' } } } }).eq('id', input.projectId);
+      await db.from('ve_jobs').delete(); // The same saved audience must survive an orphan repair too.
+      await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, args)).resolves.toMatchObject({ ok: true, created: false });
+      expect(db.getRows('ve_bases')).toHaveLength(2);
+      expect(db.getRows('ve_jobs')).toHaveLength(2);
+      for (const base of db.getRows('ve_bases')) expect(base.collect_info).toMatchObject({
+        collection_geography: { version: 1, required },
+      });
+      expect(db.selects.filter((read) => read.table === 've_projects')).toHaveLength(1);
+    }
+
+    const legacy = createMockSupabase({ tables: { ve_bases: [{ id: 'legacy-preview', project_id: input.projectId,
+      vertical_id: input.verticalId, hypothesis_id: 'legacy-h', source: 'auto', status: 'collecting',
+      collect_info: { collection_mode: 'preview', hypothesis_id: 'legacy-h', limit: 100 } }] },
+      errorTables: { ve_projects: 'Project unavailable' } });
+    await expect(enqueueVeBaseCollect(legacy as unknown as SupabaseClient, {
+      ...input, collectionMode: 'preview', hypothesisIds: ['legacy-h'],
+    })).resolves.toMatchObject({ ok: true, created: false });
+    expect(legacy.getRows('ve_bases')[0].collect_info).not.toHaveProperty('collection_geography');
+    expect(legacy.selects.some((read) => read.table === 've_projects')).toBe(false);
+
+    for (const failure of ['missing', 'read-error', 'malformed-geo'] as const) {
+      const unavailable = createMockSupabase({
+        ...(failure === 'read-error' ? { errorTables: { ve_projects: 'Project read failed' } } : {}),
+        ...(failure === 'malformed-geo' ? { tables: {
+          ve_projects: [{ id: input.projectId, brief: { client_brief: { icp: { geo: 77 } } } }],
+        } } : {}),
+      });
+      await expect(enqueueVeBaseCollect(unavailable as unknown as SupabaseClient, {
+        ...input, collectionMode: 'preview', hypothesisIds: ['new-h'],
+      })).resolves.toMatchObject({ ok: false });
+      expect(unavailable.getRows('ve_bases')).toHaveLength(0);
+      expect(unavailable.getRows('ve_jobs')).toHaveLength(0);
+    }
+  });
+
   it('replaces an empty completed hiring slot with a bounded restaurant catalogue without reviewing the old reserve', async () => {
     const h = { id: 'restaurant', project_id: input.projectId, vertical_id: input.verticalId, status: 'proposed',
       origin: 'generated' as const, broad: false, title: 'Сетевые ресторанные альянсы и гастромаркеты',
@@ -321,6 +370,7 @@ describe('VE2 base collection enqueue recovery', () => {
       tasks: [{ source: 'directory', rows: 25, harvest: [{ email: 'raw@example.com' }] }],
     };
     mockRouteDb = createMockSupabase({ tables: {
+      ve_projects: [{ id: input.projectId, brief: {} }],
       ve_verticals: [{ id: input.verticalId, project_id: input.projectId, name: input.verticalName }],
       ve_hypotheses: ['hypothesis-1', 'hypothesis-2'].map((id) => ({ id, title: id,
         project_id: input.projectId, vertical_id: input.verticalId })),
@@ -348,6 +398,7 @@ describe('VE2 base collection enqueue recovery', () => {
   it('continues with the remaining hypotheses when one selected base already exists', async () => {
     const db = createMockSupabase({
       tables: {
+        ve_projects: [{ id: input.projectId, brief: {} }],
         ve_hypotheses: [
           { id: 'hypothesis-1', title: 'Первая', project_id: input.projectId, vertical_id: input.verticalId },
           { id: 'hypothesis-2', title: 'Вторая', project_id: input.projectId, vertical_id: input.verticalId },

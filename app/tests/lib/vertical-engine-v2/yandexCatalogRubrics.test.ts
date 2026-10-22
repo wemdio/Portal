@@ -19,16 +19,23 @@ import { isVeRubricVariant, resolveVeYandexCatalogFilters, veRuMapsUseCatalog } 
 import type { VeCollectTask } from '@/lib/verticalEngineV2/prompts/sourcePlan';
 import { detectVeNicheSourceProfile, normalizeVeNicheSourceTask, normalizeVeRetailSourcePlan,
   veNicheDirectoryNameTerms, veNicheRubricAllowed, veRetailRubricAllowed } from '@/lib/verticalEngineV2/nicheSourcePolicy';
+import { applyVeCollectionGeographyToPlan, readVeCollectionGeography, veCollectionGeographyFromBrief,
+  veCollectionGeographyPlaces } from '@/lib/verticalEngineV2/collectionGeography';
+import { buildSourcePlanMessages } from '@/lib/verticalEngineV2/prompts/sourcePlan';
+import { buildSourcePlanMessagesEn, buildCatalogRepairMessagesEn } from '@/lib/verticalEngineV2/prompts/sourcePlan.en';
+import { VeHhQuerySchema } from '@/lib/verticalEngineV2/schemas';
+import { normalizeVeRestaurantSourcePlan } from '@/lib/verticalEngineV2/restaurantSourcePolicy';
 
 /** Справочник и счёт «есть ли организации рубрики в стране», как у настоящей
  * функции каталога: рубрики сравниваются без учёта регистра. */
 function catalog(rubrics: Array<[string, number]>, inRussia: Record<string, number>,
-  scope: { countries?: string[]; cities?: string[] } = { countries: ['Россия'] }) {
+  scope: { countries?: string[]; cities?: string[] } = { countries: ['Россия'] },
+  places = [{ country: 'Россия', region: 'Москва и Московская область', city: 'Москва' }]) {
   const counted: string[] = [];
   const db = {
     from: (table: string) => {
       const rows = table === 'yandex_maps_catalog_rubrics' ? rubrics.map(([rubric, companies]) => ({ rubric, companies }))
-        : [{ country: 'Россия', region: 'Москва и Московская область', city: 'Москва' }];
+        : places;
       let start = 0, end = 999;
       const query = { select: () => query, order: () => query,
         range: (from: number, to: number) => { start = from; end = to; return query; },
@@ -66,6 +73,89 @@ beforeEach(() => {
 });
 
 describe('готовый каталог Яндекс Карт: выбор рубрик', () => {
+  it('сохраняет географию брифа отдельно от legacy и сужает источники без новых задач или лимитов', () => {
+    const geography = veCollectionGeographyFromBrief({ client_brief: { icp: { geo: '  Москва и МО  ' } } });
+    expect(geography).toEqual({ version: 1, required: 'Москва и МО' });
+    expect(veCollectionGeographyPlaces('г.Москва, Московская обл.')?.map((place) => place.regionCode)).toEqual(['77', '50']);
+    expect(veCollectionGeographyPlaces('СПб и ЛО')?.map((place) => place.regionCode)).toEqual(['78', '47']);
+    expect(veCollectionGeographyPlaces('Грузия')?.map((place) => place.hhArea)).toEqual(['28']);
+    for (const geo of [undefined, null, '', ' — ', '---', 'не указано', 'без ограничений', 'весь мир'])
+      expect(veCollectionGeographyFromBrief({ client_brief: { icp: { geo } } })).toEqual({ version: 1, required: null });
+    expect(() => veCollectionGeographyFromBrief({ client_brief: { icp: { geo: ['Москва'] } } })).toThrow('Invalid client brief geography');
+    expect(readVeCollectionGeography(undefined)).toBeNull();
+    expect(() => readVeCollectionGeography({ version: 1 })).toThrow('Invalid collection geography');
+    expect(() => readVeCollectionGeography({ version: 2, required: null })).toThrow('Invalid collection geography');
+    const tasks: VeCollectTask[] = [
+      { source: 'companies_directory', rationale: 'Производители', directory_filters: { okvedCodes: ['10'], employeesFrom: 3 } },
+      { source: 'hh_live', rationale: 'Найм', hh_query: { text: 'пищевая промышленность', area: '113' } },
+      { source: 'yandex_maps', rationale: 'Каталог', maps_query: { queries: ['производство продуктов'], geo: 'Россия' } },
+    ];
+    const original = structuredClone(tasks);
+    const plan = { tasks };
+    expect(applyVeCollectionGeographyToPlan(plan)).toBe(plan);
+    expect(applyVeCollectionGeographyToPlan(plan, { version: 1, required: null })).toBe(plan);
+    const scoped = applyVeCollectionGeographyToPlan(plan, geography);
+    expect(scoped.tasks).toHaveLength(tasks.length);
+    expect(scoped.tasks[0].directory_filters).toEqual({ ...tasks[0].directory_filters, regionCodes: ['77', '50'] });
+    expect(scoped.tasks[1].hh_query).toEqual({ ...tasks[1].hh_query, area: ['1', '2019'] });
+    expect(scoped.tasks[2].maps_query).toEqual({ ...tasks[2].maps_query, geo: 'Москва, Московская область', collection_geography: geography });
+    expect(VeHhQuerySchema.parse(scoped.tasks[1].hh_query).area).toEqual(['1', '2019']);
+    expect(VeHhQuerySchema.safeParse({ text: 'Найм', area: [] }).success).toBe(false);
+    const restaurants = { market: 'ru', hypotheses: [{ origin: 'generated', broad: false,
+      title: 'Ресторанные сети', description: 'Ресторанные сети.' }] };
+    for (const area of ['113', ['113']]) expect(normalizeVeRestaurantSourcePlan({ tasks: [{ ...tasks[1],
+      hh_query: { text: 'ресторан', area } }] }, restaurants).changed).toBe(true);
+    for (const area of ['1', ['1', '2019']]) expect(normalizeVeRestaurantSourcePlan({ tasks: [{ ...tasks[1],
+      hh_query: { text: 'ресторан', area } }] }, restaurants).changed).toBe(false);
+    expect(applyVeCollectionGeographyToPlan(scoped, geography)).toEqual(scoped);
+    expect(tasks).toEqual(original);
+    const kazan = applyVeCollectionGeographyToPlan(plan, { version: 1, required: 'Казань' });
+    expect(kazan.tasks[0].directory_filters).toEqual(tasks[0].directory_filters); // Казань не весь Татарстан.
+    expect(kazan.tasks[1].hh_query?.area).toBe('88');
+    const oblast = applyVeCollectionGeographyToPlan(plan, { version: 1, required: 'Новосибирская область' });
+    expect(oblast.tasks[0].directory_filters?.regionCodes).toEqual(['54']);
+    expect(oblast.tasks[1].hh_query?.area).toBe('1202');
+    const restricted = 'РФ кроме Москвы';
+    expect(veCollectionGeographyPlaces(restricted)).toBeNull();
+    expect(applyVeCollectionGeographyToPlan(plan, { version: 1, required: restricted }).tasks[2].maps_query?.geo).toBe(restricted);
+    for (const builder of [buildSourcePlanMessages, buildSourcePlanMessagesEn, buildCatalogRepairMessagesEn]) {
+      const messages = builder({ verticalName: 'Производители', hypotheses: [{ title: 'Снеки' }], collectionGeography: geography });
+      expect(String(messages[0].content)).toContain(JSON.stringify(geography.required));
+      expect(String(messages[0].content)).toContain('MANDATORY COLLECTION GEOGRAPHY');
+    }
+  });
+
+  it('география каталога сохраняет всю Москву и область, не расширяет город и не покупает сопоставление', async () => {
+    const geography = { version: 1 as const, required: 'Москва и МО' };
+    const { db } = catalog([['Кафе', 100]], { кафе: 5 }, { cities: ['Москва и Московская область', 'Москва'] });
+    await expect(resolveVeYandexCatalogFilters({ db, query: {
+      queries: ['кафе'], geo: 'Москва, Московская область', collection_geography: geography,
+    } })).resolves.toEqual({ categories: ['Кафе'], cities: ['Москва и Московская область', 'Москва'] });
+    const onlyCity = catalog([['Кафе', 100]], { кафе: 5 }, { cities: ['Москва'] });
+    await expect(resolveVeYandexCatalogFilters({ db: onlyCity.db, query: { queries: ['кафе'], geo: 'Москва',
+      collection_geography: { version: 1, required: 'Москва' } } })).resolves.toEqual({ categories: ['Кафе'], cities: ['Москва'] });
+    const foreign = catalog([['Кафе', 100]], { кафе: 5 }, { countries: ['France', 'Germany'] }, [
+      { country: 'France', region: 'Île-de-France', city: 'Paris' }, { country: 'Germany', region: 'Berlin', city: 'Berlin' },
+    ]);
+    await expect(resolveVeYandexCatalogFilters({ db: foreign.db, query: { queries: ['кафе'], geo: 'France, Germany',
+      collection_geography: { version: 1, required: 'France, Germany' } } })).resolves.toEqual({ categories: ['Кафе'], countries: ['France', 'Germany'] });
+    for (const required of ['РФ кроме Москвы', 'Москва и неизвестный город', 'СНГ'])
+      await expect(resolveVeYandexCatalogFilters({ db, query: { queries: ['кафе'], geo: required,
+        collection_geography: { version: 1, required } } })).rejects.toThrow('расширение географии запрещено');
+    expect(callLLMWithSchema).not.toHaveBeenCalled();
+  });
+
+  it('модель сопоставляет только рубрику и не может урезать обязательную географию', async () => {
+    const { db } = catalog([['Кафе', 100]], { кафе: 5 }, { cities: ['Москва и Московская область', 'Москва'] });
+    modelPicks(['Кафе']);
+    await expect(resolveVeYandexCatalogFilters({ db, query: { queries: ['семейное кафе'], geo: 'Россия',
+      collection_geography: { version: 1, required: 'Москва и МО' } } })).resolves.toEqual({ categories: ['Кафе'], cities: ['Москва и Московская область', 'Москва'] });
+    expect(callLLMWithSchema).toHaveBeenCalledTimes(1);
+    const prompt = JSON.parse(String(jest.mocked(callLLMWithSchema).mock.calls[0][0].at(-1)?.content));
+    expect(prompt.places).toEqual([]);
+    expect(prompt.fixed_geography).toEqual({ cities: ['Москва и Московская область', 'Москва'] });
+  });
+
   it('«агентство недвижимости» в России берёт рубрику с организациями, а не пустую в единственном числе', async () => {
     // База 3cfcfbbd: дословное совпадение давало рубрику без единой организации
     // в России, то есть 0 строк и ложное «Источники выбранного плана исчерпаны».

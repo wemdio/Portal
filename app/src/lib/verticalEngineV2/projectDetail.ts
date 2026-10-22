@@ -90,15 +90,18 @@ async function readDetailPages(
 // Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { restaurant_source_refresh?: unknown; known_website_source?: unknown; audience_source_refresh?: unknown; adaptive_collection?: VeAdaptiveCollection; tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; project_exclusion_reserve?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
+  const info = base.collect_info as { geography_repair?: unknown; restaurant_source_refresh?: unknown; known_website_source?: unknown; audience_source_refresh?: unknown; adaptive_collection?: VeAdaptiveCollection; tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; project_exclusion_reserve?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
   const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
   if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info) && !('project_exclusion_reserve' in info)
-    && !('restaurant_source_refresh' in info) && !('known_website_source' in info) && !('audience_source_refresh' in info) && !('adaptive_collection' in info) && !('search_policy' in info) && !('source_contact_recovery' in info) && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info) && !('preview_pipeline' in info)) return base;
+    && !('geography_repair' in info) && !('restaurant_source_refresh' in info) && !('known_website_source' in info) && !('audience_source_refresh' in info) && !('adaptive_collection' in info) && !('search_policy' in info) && !('source_contact_recovery' in info) && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info) && !('preview_pipeline' in info)) return base;
   const publicInfo = { ...info };
+  // The repair receipt archives full excluded contacts and source checkpoints.
+  // DB public_info already uses a whitelist; collect POST responses need this guard too.
+  delete publicInfo.geography_repair;
   delete publicInfo.audience_source_refresh;
   delete publicInfo.known_website_source;
   delete publicInfo.restaurant_source_refresh;
