@@ -2,7 +2,10 @@
  * Supply PGLITE_MODULE when @electric-sql/pglite is installed outside this repo.
  */
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
+import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -10,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 const { PGlite } = await import(process.env.PGLITE_MODULE || '@electric-sql/pglite');
 const root = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 const db = new PGlite();
+let geographyBundleDir;
 const rows = async (sql, args = []) => (await db.query(sql, args)).rows;
 const scalar = async (sql, args = []) => (await rows(sql, args))[0].result;
 const fails = async (run, pattern) => {
@@ -898,10 +902,142 @@ try {
   await fails(() => rows('select * from ve_claim_outreach_preparation()'), /permission denied/i);
   await fails(() => scalar('select ve_completed_preparation_recoverable($1,$2) result', [id.ve, id.hypothesis]), /permission denied/i);
   await db.exec('reset role');
+
+  // The operator uses the same PostgreSQL connection for the entire transaction.
+  // Execute its actual TS implementation against local PostgreSQL; no HTTP/model
+  // mock can conceal a partial write or a second enqueue here.
+  geographyBundleDir = mkdtempSync(resolve(tmpdir(), 've-geography-apply-'));
+  const geographyBundle = resolve(geographyBundleDir, 'apply.cjs');
+  await build({ stdin: { contents: `export * from './src/lib/verticalEngineV2/collectionGeographyRepairApply';
+    export {veGeographyRepairHash} from './src/lib/verticalEngineV2/collectionGeographyRepair';`,
+    resolveDir: resolve(root, 'app'), loader: 'ts' }, outfile: geographyBundle, bundle: true,
+    platform: 'node', format: 'cjs', conditions: ['react-server'], logLevel: 'silent', tsconfig: resolve(root, 'app/tsconfig.json') });
+  const { applyVeCollectionGeographyRepair: repair, veGeographyRepairHash: repairHash } = createRequire(import.meta.url)(geographyBundle);
+  await db.exec(`alter table ve_outreach_setups add column if not exists revision bigint not null default 1;
+    alter table ve_outreach_preparations add column if not exists resume_collection_requested boolean not null default false;
+    alter table ve_bases add column if not exists max_emails_per_company integer;
+    alter table base_constructor_jobs add column completed_at timestamptz, add column created_at timestamptz default now();
+    create table ve_preparation_children(kind text, child_id uuid, project_id uuid, base_id uuid);`);
+  const geographyFixture = async () => {
+    const key = Object.fromEntries(['project', 'vertical', 'hypothesis', 'base', 'job', 'child', 'template', 'otherHypothesis', 'otherBase']
+      .map(name => [name, randomUUID()]));
+    const data = [0, 1, 2].map(i => ({ company: `Reviewed ${i}`, email: `reviewed${i}@example.test`,
+      address: i === 1 ? 'Казань' : 'Москва', _email_status: 'ok',
+      _ve_relevance: { status: 'relevant', context_hash: 'saved-paid-context' },
+      _ve_company_name: { version: 1, source: `Reviewed ${i}`, website: '', status: 'ready', value: `Reviewed ${i}` } }));
+    const info = { collection_mode: 'preview', ready_target: 500, limit: 100,
+      target_progress: { mode: 'preview', ready_target: 500, ready_rows: 3, round: 88, max_rounds: 100,
+        candidates_processed: 6806, max_candidates: 10000, status: 'limited' },
+      target_checkpoint: { completed_round: 88, seen_rows: data },
+      preview_pipeline: { version: 1, revision: 8, batches: [], completed_batches: 88, job_ids: [key.child] },
+      relevance_reserve: { version: 1, rows: [data[1]] },
+      tasks: [{ source: 'companies_directory', status: 'done', child_job_id: null, rows: 300,
+        task: { source: 'companies_directory', rationale: 'Saved source', directory_filters: { okvedCodes: ['10'] } },
+        directory_cursors: { existing: 2000 }, harvest: data }] };
+    await rows(`insert into ve_projects(id,created_by,name,website_url,status)
+      values($1,$2,'Geography repair','https://example.test','researched')`, [key.project, id.actor]);
+    await rows("insert into ve_verticals(id,project_id,name,potential_pct) values($1,$2,'Food',50)", [key.vertical, key.project]);
+    for (const hypothesis of [key.hypothesis, key.otherHypothesis]) await rows(`insert into ve_hypotheses(id,project_id,vertical_id,title,tier,status)
+      values($1,$2,$3,'Reviewed audience',1,'accepted')`, [hypothesis, key.project, key.vertical]);
+    await rows('insert into ve_outreach_setups(project_id,selected_hypothesis_ids,revision) values($1,$2,18)',
+      [key.project, [key.hypothesis, key.otherHypothesis]]);
+    for (const [base, hypothesis] of [[key.base, key.hypothesis], [key.otherBase, key.otherHypothesis]]) {
+      await rows(`insert into ve_bases(id,project_id,vertical_id,hypothesis_id,source,status,collect_info,data,row_count,analysis,columns,sample_rows)
+        values($1,$2,$3,$4,'auto','analyzed',$5,$6,3,'{"saved":"paid analysis"}','["company","email","address"]',$6)`,
+      [base, key.project, key.vertical, hypothesis, info, data]);
+      await rows(`insert into ve_outreach_preparations(project_id,hypothesis_id,base_id,status,pause_state)
+        values($1,$2,$3,'ready','{"saved":"preparation"}')`, [key.project, hypothesis, base]);
+    }
+    await rows(`insert into ve_templates(id,base_id,vertical_id,status,letters) values($1,$2,$3,'ready','[{"subject":"Saved","body":"Paid letters"}]')`,
+      [key.template, key.base, key.vertical]);
+    await rows(`insert into ve_jobs(id,project_id,stage,status,payload,result,attempts,tokens_used,cost_usd)
+      values($1,$2,'base_collect','done',$3,'{"relevance_checkpoint":{"verdicts":{"saved":"paid"}}}',3,1234,0.01)`,
+      [key.job, key.project, { base_id: key.base, hypothesis_id: key.hypothesis }]);
+    await rows("insert into base_constructor_jobs(id,status,completed_at) values($1,'completed',now())", [key.child]);
+    await rows("insert into ve_preparation_children values('base_constructor_jobs',$1,$2,$3)", [key.child, key.project, key.base]);
+    const artifact = { version: 1, project_id: key.project, hypothesis_id: key.hypothesis, base_id: key.base, setup_revision: 18,
+      request: { repair_id: `review-${key.base}`, required: { version: 1, required: 'Москва и МО' },
+        reviewed_data_hash: repairHash(data), ready_row_indices: [0, 2], prepared_at: '2030-09-02T12:00:00Z' } };
+    const snapshot = async () => ({
+      bases: await rows('select to_jsonb(b) value from ve_bases b where project_id=$1 order by id', [key.project]),
+      prep: await rows('select to_jsonb(p) value from ve_outreach_preparations p where project_id=$1 order by hypothesis_id', [key.project]),
+      jobs: await rows('select to_jsonb(j) value from ve_jobs j where project_id=$1 order by id', [key.project]),
+      templates: await rows('select to_jsonb(t) value from ve_templates t where base_id=$1 order by id', [key.base]),
+    });
+    return { key, artifact, data, info, snapshot };
+  };
+  const geo = await geographyFixture(), geoBefore = await geo.snapshot();
+  const dry = await repair(db, geo.artifact);
+  assert.equal(dry.status, 'dry_run'); assert.equal(dry.persistent_writes, false);
+  assert.equal(dry.ready_before, 3); assert.equal(dry.ready_after, 2); assert.equal(dry.held_rows, 1);
+  assert.deepEqual(await geo.snapshot(), geoBefore, 'dry-run writes nothing, including timestamps');
+  await assert.rejects(() => repair(db, geo.artifact, { apply: true }), /reviewed dry-run artifact/);
+  await rows('update ve_templates set letters=$2 where id=$1', [geo.key.template, [{ subject: 'Edited', body: 'A specialist edited this' }]]);
+  const editedBefore = await geo.snapshot();
+  await assert.rejects(() => repair(db, dry.artifact, { apply: true, continueCollection: true }), /changed since dry-run/);
+  assert.deepEqual(await geo.snapshot(), editedBefore, 'concurrent template edit rejects the stale artifact');
+  const fresh = await repair(db, geo.artifact);
+  const failAfterBase = { query: async (sql, args) => {
+    if (/insert into public\.ve_jobs/i.test(sql)) throw new Error('Injected late enqueue failure');
+    return db.query(sql, args);
+  } };
+  await assert.rejects(() => repair(failAfterBase, fresh.artifact, { apply: true, continueCollection: true }), /Injected late enqueue failure/);
+  assert.deepEqual(await geo.snapshot(), editedBefore, 'late enqueue failure rolls back base and preparation together');
+  const applied = await repair(db, fresh.artifact, { apply: true, continueCollection: true });
+  assert.equal(applied.status, 'applied'); assert.equal(applied.persistent_writes, true);
+  const geoAfter = await geo.snapshot(), repairedBase = geoAfter.bases.find(r => r.value.id === geo.key.base).value;
+  assert.deepEqual(repairedBase.data, [geo.data[0], geo.data[2]]);
+  assert.equal(repairedBase.status, 'collecting'); assert.equal(repairedBase.analysis, null, 'old paid analysis is archived, not displayed for a changed audience');
+  assert.deepEqual(repairedBase.collect_info.geography_repair.previous_analysis, { saved: 'paid analysis' });
+  assert.deepEqual(repairedBase.collect_info.geography_repair.held_ready_rows, [geo.data[1]]);
+  assert.deepEqual(repairedBase.collect_info.target_checkpoint, geo.info.target_checkpoint);
+  assert.equal(repairedBase.collect_info.target_progress.max_candidates, 10000);
+  assert.equal(repairedBase.collect_info.target_progress.candidates_processed, 6806);
+  assert.equal(repairedBase.collect_info.target_progress.max_rounds, 100);
+  assert.equal(repairedBase.collect_info.target_progress.round, 89);
+  assert.equal(geoAfter.jobs.length, 2, 'only one new bounded parent');
+  assert.deepEqual(geoAfter.jobs.find(r => r.value.id === geo.key.job), geoBefore.jobs[0], 'terminal result and cost stay byte-for-byte unchanged');
+  assert.deepEqual(geoAfter.templates, editedBefore.templates, 'letters remain unchanged');
+  assert.deepEqual(geoAfter.bases.find(r => r.value.id === geo.key.otherBase), geoBefore.bases.find(r => r.value.id === geo.key.otherBase));
+  assert.deepEqual(geoAfter.prep.find(r => r.value.base_id === geo.key.otherBase), geoBefore.prep.find(r => r.value.base_id === geo.key.otherBase));
+  const newJob = geoAfter.jobs.find(r => r.value.id === applied.job_id).value;
+  assert.equal(newJob.payload.base_id, geo.key.base); assert.equal(newJob.status, 'pending');
+  assert.equal(newJob.payload.geography_repair_id, geo.artifact.request.repair_id);
+  // An operator retry after a worker has added contacts must resolve the same
+  // receipt; applying original row indices again would corrupt new results.
+  await rows("update ve_bases set data=data||$2::jsonb,row_count=row_count+1 where id=$1", [geo.key.base, [{ email: 'new-after-repair@example.test' }]]);
+  const afterGrowth = await geo.snapshot();
+  const repeated = await repair(db, fresh.artifact, { apply: true, continueCollection: true });
+  assert.equal(repeated.status, 'already_applied'); assert.equal(repeated.job_id, applied.job_id);
+  assert.deepEqual(await geo.snapshot(), afterGrowth, 'retry neither reprojects nor enqueues twice after growth');
+  for (const [name, mutate, reason] of [
+    ['paused', f => rows('update ve_outreach_preparations set paused_at=now() where base_id=$1', [f.key.base]), 'paused_preparation_requires_separate_review'],
+    ['cancelled', f => rows('update ve_outreach_preparations set cancelled_at=now() where base_id=$1', [f.key.base]), 'paused_preparation_requires_separate_review'],
+    ['approved', f => rows('update ve_outreach_setups set approved_bases=$2 where project_id=$1', [f.key.project, { [f.key.base]: {} }]), 'approved_or_launched'],
+    ['frozen', f => rows("update ve_templates set launch_info='{}' where id=$1", [f.key.template]), 'approved_or_launched'],
+    ['accepted launch', f => rows('insert into ve_outreach_runs values($1,$2,\'queued\',$3)', [randomUUID(), f.key.project, { items: [{ base_id: f.key.base }] }]), 'approved_or_launched'],
+    ['active parent', f => rows("update ve_jobs set status='running' where id=$1", [f.key.job]), 'active_parent_job'],
+    ['active child', f => rows("update base_constructor_jobs set status='processing' where id=$1", [f.key.child]), 'active_child_job'],
+    ['lease', f => rows('update ve_outreach_preparations set claim_token=gen_random_uuid(),locked_until=now() where base_id=$1', [f.key.base]), 'coordinator_lease_not_released'],
+    ['deselected', f => rows("update ve_outreach_setups set selected_hypothesis_ids='{}' where project_id=$1", [f.key.project]), 'not_selected'],
+  ]) {
+    const f = await geographyFixture(), reviewed = await repair(db, f.artifact);
+    await mutate(f); const before = await f.snapshot();
+    const blocked = await repair(db, reviewed.artifact, { apply: true, continueCollection: true });
+    assert.equal(blocked.status, 'blocked', name); assert.ok(blocked.reasons.includes(reason), `${name}: ${blocked.reasons}`);
+    assert.deepEqual(await f.snapshot(), before, name);
+  }
+  const staleGeo = await geographyFixture(), staleReviewed = await repair(db, staleGeo.artifact);
+  await rows('update ve_outreach_setups set revision=19 where project_id=$1', [staleGeo.key.project]);
+  const staleBefore = await staleGeo.snapshot();
+  await assert.rejects(() => repair(db, staleReviewed.artifact, { apply: true }), /setup or base binding changed/);
+  assert.deepEqual(await staleGeo.snapshot(), staleBefore);
+  console.log('PASS geography repair: read-only projection, stale CAS/template guards, pause/launch/worker guards, atomic rollback, bounded single enqueue and replay after growth.');
   console.log('PASS continuous supply: approval, atomic enqueue/append/replay, campaign reuse, pause/stale rules, empty-day retry, saved billing-batch resume, automatic credit recovery/rollback, and preparation claims without heavy checks of unrelated history.');
 } catch (error) {
   console.error(error.message, error.where || '', error.stack?.split('\n').slice(1, 3).join('\n') || '');
   process.exitCode = 1;
 } finally {
   await db.close();
+  if (geographyBundleDir) rmSync(geographyBundleDir, { recursive: true, force: true });
 }
