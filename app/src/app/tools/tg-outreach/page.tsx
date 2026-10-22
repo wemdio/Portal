@@ -6408,9 +6408,9 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         <button
           type="button"
           onClick={() => setActiveList(null)}
-          className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition cursor-pointer ${
+          className={`tg-list-item flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition cursor-pointer ${
             activeList === null
-              ? 'bg-indigo-50 text-indigo-700 font-semibold'
+              ? 'tg-list-item--active bg-indigo-50 text-indigo-700 font-semibold'
               : 'text-gray-700 hover:bg-gray-50'
           }`}
         >
@@ -6431,8 +6431,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           return (
             <div key={l.id} className="space-y-1">
               <div
-                className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition ${
-                  active ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700 hover:bg-gray-50'
+                className={`tg-list-item group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition ${
+                  active ? 'tg-list-item--active bg-indigo-50 text-indigo-700' : 'text-gray-700 hover:bg-gray-50'
                 }`}
               >
                 <Folder className="h-3.5 w-3.5 shrink-0 ml-1" />
@@ -6585,7 +6585,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
           <button
             type="button"
             onClick={() => setShowCreateList(true)}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-indigo-600 hover:bg-indigo-50 transition cursor-pointer"
+            className="tg-list-item tg-list-item--add flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-indigo-600 hover:bg-indigo-50 transition cursor-pointer"
           >
             <FolderPlus className="h-3.5 w-3.5" />
             Создать список
