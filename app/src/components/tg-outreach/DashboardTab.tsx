@@ -19,7 +19,8 @@ import { AlertCircle } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import EChart from '@/components/charts/EChart';
 import BasesTable from '@/components/tg-outreach/BasesTable';
-import type { BaseStats } from '@/lib/tgOutreach/baseStats';
+import type { BaseStats, SendForecast } from '@/lib/tgOutreach/baseStats';
+import { BasesForecastLine } from '@/components/tg-outreach/BasesForecast';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -295,6 +296,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
    * ручка гарантирует, что два экрана не разойдутся в числах.
    */
   const [bases, setBases] = useState<BaseStats[]>([]);
+  const [forecast, setForecast] = useState<SendForecast | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -322,10 +324,12 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
         // Цифры по базам — дополнение к сводке: если они не пришли, показываем
         // сводку без них, а не пустой экран с ошибкой.
         if (basesRes.ok) {
-          const body = (await basesRes.json()) as { bases: BaseStats[] };
+          const body = (await basesRes.json()) as { bases: BaseStats[]; forecast?: SendForecast | null };
           setBases(body.bases ?? []);
+          setForecast(body.forecast ?? null);
         } else {
           setBases([]);
+          setForecast(null);
         }
       } catch {
         setError('Не удалось загрузить сводку');
@@ -561,6 +565,16 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
               />
             </div>
 
+            {forecast && forecast.remaining > 0 && (
+              <>
+                <div className="text-[11px] font-medium text-gray-400">До какой даты хватит баз</div>
+                <BasesForecastLine
+                  forecast={forecast}
+                  currentName={bases.find((b) => b.baseId === forecast.currentBaseId)?.name}
+                />
+              </>
+            )}
+
             {/* Раньше здесь стояли два числа по всем базам разом — «осталось
                 контактов 320». На вопрос «это одна база или пять, и какая из
                 них заканчивается» они не отвечали вовсе. Теперь строка на
@@ -573,7 +587,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
                 В кампании нет ни одной базы контактов.
               </div>
             ) : (
-              <BasesTable bases={bases} />
+              <BasesTable bases={bases} forecast={forecast} />
             )}
           </div>
 

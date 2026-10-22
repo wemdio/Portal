@@ -69,6 +69,7 @@ import { AccountArchiveSection, ArchiveAccountsDialog } from '@/components/tg-ou
 import type { ArchiveReason } from '@/lib/tgOutreach/accountArchive';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
+import BasesForecast from '@/components/tg-outreach/BasesForecast';
 import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import CrmSettingsPanel, { type CrmSettings } from '@/components/tg-outreach/CrmSettingsPanel';
@@ -5670,6 +5671,9 @@ function CampaignBasesTab({
     <div className="space-y-4">
       {/* Пока список не пришёл, шапка («Базы контактов (0)», поле имени, кнопка)
           не рисуется: «(0)» врал, а форма создания мигала до загрузки. */}
+      {!loading && bases.length > 0 && (
+        <BasesForecast campaignId={campaignId} refreshKey={`${[...linked].join(',')}|${chain}`} />
+      )}
       {!loading && (
       <div className="flex items-center justify-between flex-wrap gap-2">
         <span className="text-sm font-medium text-gray-700">
