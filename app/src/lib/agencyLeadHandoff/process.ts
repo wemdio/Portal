@@ -22,6 +22,7 @@ interface HandoffRow {
 }
 
 class SkipHandoff extends Error {}
+const MAX_HISTORY_PAGES = 20;
 const norm = (s: string) => s.trim().toLowerCase();
 const stamp = (e: { timestamp_email?: string; timestamp_created?: string }) =>
   Date.parse(e.timestamp_email ?? e.timestamp_created ?? '') || 0;
@@ -119,13 +120,18 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
   if (!sender || !replier.includes('@') || replier === norm(sender) || original.campaign_id !== q.campaign_id) {
     throw new SkipHandoff('Не удалось подтвердить отправителя и кампанию переписки');
   }
-  const response = await listEmails({ campaign_id: q.campaign_id, search: q.lead_email,
-    mode: 'emode_all', sort_order: 'desc', limit: 100 }, requestOptions);
-  // Instantly отдаёт курсор и на неполной странице (2 письма — тоже с курсором): длинная — только полная страница.
-  if (response.next_starting_after && (response.items ?? []).length >= 100) {
-    throw new Error('Переписка слишком длинная для автоматической передачи');
+  // Читаем всю переписку постранично: менеджеру нужна она целиком, а не первые 100 писем.
+  const all: Awaited<ReturnType<typeof listEmails>>['items'] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_HISTORY_PAGES; page++) {
+    const response = await listEmails({ campaign_id: q.campaign_id, search: q.lead_email,
+      mode: 'emode_all', sort_order: 'desc', limit: 100, starting_after: after }, requestOptions);
+    all.push(...(response.items ?? []));
+    after = response.next_starting_after || undefined;
+    if (!after) break;
   }
-  const thread = (response.items ?? []).filter(e => original.thread_id
+  if (after) throw new Error(`Переписка длиннее ${MAX_HISTORY_PAGES * 100} писем — нужна ручная передача`);
+  const thread = all.filter(e => original.thread_id
     ? e.thread_id === original.thread_id
     : [norm(row.lead_email), replier].includes(norm(e.from_address_email ?? '')) || norm(e.lead ?? '') === norm(row.lead_email));
   if (!thread.some(e => e.id === original.id)) throw new Error('Входящее не найдено в живой переписке');
