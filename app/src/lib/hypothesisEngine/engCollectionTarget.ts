@@ -3,6 +3,8 @@ import type { HeEngBaseBudgetSnapshot } from './engBaseBudgetLedger';
 
 /** Targets count checked, qualified, unique addresses, never source candidates. */
 export const HE_ENG_READY_CONTACT_TARGET = 500;
+export const HE_ENG_RESERVE_CONTACT_DEFAULT = 0;
+/** Historical paid-reserve checkpoints remain readable; new runs do not buy one. */
 export const HE_ENG_RESERVE_CONTACT_MIN = 2_000;
 export const HE_ENG_RESERVE_CONTACT_MAX = 5_000;
 export const HE_ENG_COLLECTION_MAX_ROUNDS = 100;
@@ -65,9 +67,28 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function assertReserveTarget(value: number): void {
-  if (!integer(value, HE_ENG_RESERVE_CONTACT_MIN, HE_ENG_RESERVE_CONTACT_MAX)) {
-    throw new Error('ENG collection: reserve target must be between 2000 and 5000 contacts');
+  if (value !== 0 && !integer(value, HE_ENG_RESERVE_CONTACT_MIN, HE_ENG_RESERVE_CONTACT_MAX)) {
+    throw new Error('ENG collection: reserve target must be zero or a historical target between 2000 and 5000');
   }
+}
+
+/** A zero reserve target never means that an empty or partial base is complete. */
+export function heEngCollectionTargetPhase(
+  readyCount: number, reserveCount: number, reserveTarget: number,
+): 'collecting' | 'building_reserve' | 'complete' {
+  return readyCount < HE_ENG_READY_CONTACT_TARGET ? 'collecting'
+    : reserveCount >= reserveTarget ? 'complete' : 'building_reserve';
+}
+
+/**
+ * Apply only at a completed-wave boundary, after retaining paid results. The
+ * pool, counters and history are unchanged; an old terminal record is history,
+ * not an instruction to resume or rewrite that collection.
+ */
+export function applyHeEngReadyOnlyTargetPolicy(target: HeEngCollectionTarget): HeEngCollectionTarget {
+  if (target.phase === 'complete' || target.phase === 'stopped' || target.reserve_target === 0) return target;
+  return { ...target, reserve_target: 0,
+    phase: heEngCollectionTargetPhase(target.ready_count, target.reserve_count, 0) };
 }
 
 function assertCompanyCap(value: number): void {
@@ -77,7 +98,7 @@ function assertCompanyCap(value: number): void {
 export function createHeEngCollectionTarget(
   input: { reserveTarget?: number } = {},
 ): HeEngCollectionTarget {
-  const reserveTarget = input.reserveTarget ?? HE_ENG_RESERVE_CONTACT_MIN;
+  const reserveTarget = input.reserveTarget ?? HE_ENG_RESERVE_CONTACT_DEFAULT;
   assertReserveTarget(reserveTarget);
   return {
     version: 1, ready_target: HE_ENG_READY_CONTACT_TARGET, reserve_target: reserveTarget,
@@ -165,7 +186,7 @@ export function readHeEngCollectionCheckpoint(
   const fail = (): never => { throw new Error('ENG collection: invalid saved target or contact pool'); };
   if (!record(rawTarget) || !record(rawPool) || rawTarget.version !== 1 || rawPool.version !== 1 ||
       rawTarget.ready_target !== HE_ENG_READY_CONTACT_TARGET ||
-      !integer(rawTarget.reserve_target, HE_ENG_RESERVE_CONTACT_MIN, HE_ENG_RESERVE_CONTACT_MAX) ||
+      (rawTarget.reserve_target !== 0 && !integer(rawTarget.reserve_target, HE_ENG_RESERVE_CONTACT_MIN, HE_ENG_RESERVE_CONTACT_MAX)) ||
       !integer(rawPool.max_emails_per_company, 1, 100) ||
       !integer(rawPool.candidates_processed, 0, HE_ENG_COLLECTION_MAX_CANDIDATES) ||
       !Array.isArray(rawPool.rows) || !rawPool.rows.every(record) ||
@@ -187,8 +208,7 @@ export function readHeEngCollectionCheckpoint(
   if (ready + reserve !== rawPool.rows.length || rawTarget.ready_count !== ready ||
       rawTarget.reserve_count !== reserve || rawTarget.total_ready !== ready + reserve ||
       rawTarget.rounds_completed !== ids.size) return fail();
-  const expectedPhase = reserve >= rawTarget.reserve_target ? 'complete'
-    : ready >= HE_ENG_READY_CONTACT_TARGET ? 'building_reserve' : 'collecting';
+  const expectedPhase = heEngCollectionTargetPhase(ready, reserve, rawTarget.reserve_target as number);
   if (rawTarget.phase === 'stopped') {
     if (!STOP_REASONS.has(rawTarget.stop_reason as HeEngCollectionStopReason)) return fail();
   } else if (rawTarget.phase !== expectedPhase || rawTarget.stop_reason !== null) return fail();
@@ -252,6 +272,8 @@ export function appendHeEngCollectionRound(input: {
   sourcesExhausted?: boolean;
   stopReason?: HeEngCollectionStopReason;
   budget?: HeEngBaseBudgetSnapshot;
+  /** New ENG policy; finish the already-started wave, then stop at 500 ready. */
+  readyOnly?: boolean;
 }): HeEngCollectionCheckpoint & { duplicateRound: boolean; nextBatchSize: number } {
   const saved = readHeEngCollectionCheckpoint(input.target, input.pool);
   if (saved.pool.rounds.some((round) => round.id === input.roundId)) {
@@ -280,9 +302,12 @@ export function appendHeEngCollectionRound(input: {
   let target: HeEngCollectionTarget = {
     ...saved.target, ready_count: partition.readyRows.length, reserve_count: partition.reserveRows.length,
     total_ready: rows.length, rounds_completed: pool.rounds.length, stop_reason: null,
-    phase: partition.reserveRows.length >= saved.target.reserve_target ? 'complete'
-      : partition.readyRows.length >= HE_ENG_READY_CONTACT_TARGET ? 'building_reserve' : 'collecting',
+    phase: heEngCollectionTargetPhase(partition.readyRows.length, partition.reserveRows.length, saved.target.reserve_target),
   };
+  // This is an active input being committed now, not a historical terminal
+  // record. Retain any overshoot/already-built reserve without buying more.
+  if (input.readyOnly) target = { ...target, reserve_target: 0,
+    phase: heEngCollectionTargetPhase(target.ready_count, target.reserve_count, 0) };
   const reason = input.stopReason ?? budgetStop(input.budget) ??
     (input.sourcesExhausted ? 'sources_exhausted' : null) ??
     (pool.rounds.length >= HE_ENG_COLLECTION_MAX_ROUNDS ||

@@ -202,7 +202,8 @@ import type { HeCompanyCleanRow } from '../companyNames';
 import { heEngBaseBudgetActive, rethrowHeEngBaseBudgetError } from '../engBaseBudget';
 import {
   appendHeEngCollectionRound, readHeEngCollectionCheckpoint, nextHeEngCollectionBatchSize,
-  stopHeEngCollectionTarget, partitionHeEngCollectionRows,
+  stopHeEngCollectionTarget, partitionHeEngCollectionRows, heEngCollectionTargetPhase,
+  applyHeEngReadyOnlyTargetPolicy,
   type HeEngCollectionTarget, type HeEngCollectionPool, type HeEngCollectionStopReason,
 } from '../engCollectionTarget';
 import { pickHeEngTargetSource, heEngTargetSourceStopReason, type HeEngSourceHistoryEntry } from '../engCollectionSources';
@@ -6871,6 +6872,7 @@ async function finishHeEngTargetRound(
   ctx: HeStageContext, job: HeJob, base: HeAutoBase, info: HeCollectInfo,
   rows: readonly Record<string, unknown>[], columns: readonly string[], usage: HeUsage,
   forcedStop?: HeEngCollectionStopReason,
+  settleExistingPool = false,
 ): Promise<HeStageResult> {
   const baseId = base.id;
   const project = await readProject(paidCheckpointDb(ctx), job.project_id);
@@ -6903,15 +6905,22 @@ async function finishHeEngTargetRound(
     const previousRows = [...previous.readyRows, ...previous.reserveRows];
     const previousTarget: HeEngCollectionTarget = { ...saved.target,
       ready_count: previous.readyRows.length, reserve_count: previous.reserveRows.length, total_ready: previousRows.length,
-      phase: previous.reserveRows.length >= saved.target.reserve_target ? 'complete'
-        : previous.readyRows.length >= saved.target.ready_target ? 'building_reserve' : 'collecting', stop_reason: null };
+      phase: heEngCollectionTargetPhase(previous.readyRows.length, previous.reserveRows.length, saved.target.reserve_target),
+      stop_reason: null };
     const active = info.tasks?.[0];
     const waveCandidates = work.candidate_rows ?? active?.harvest?.map(({ company, website }) => ({ company, website })) ?? [];
     const searched = work.search_candidates ?? [];
     const candidatesProcessed = active?.source === 'web_search' ? searched.length
       : active?.source === 'eng_registry' ? work.registry_wave?.recordsRead ?? 0 : waveCandidates.length;
-    const round = appendHeEngCollectionRound({ target: previousTarget, pool: { ...saved.pool, rows: previousRows },
-      roundId: String(work.round), qualifiedRows: checked(rows), candidatesProcessed, stopReason: forcedStop });
+    // A deployed policy change can find 500 ready addresses between waves.
+    // Recheck them under the commit lock, without inventing a finished round
+    // or dropping/repurchasing any already-started constructor/search work.
+    const round = settleExistingPool
+      ? { target: applyHeEngReadyOnlyTargetPolicy(previousTarget), pool: { ...saved.pool, rows: previousRows },
+        ...previous, duplicateRound: true }
+      : appendHeEngCollectionRound({ target: previousTarget, pool: { ...saved.pool, rows: previousRows },
+        roundId: String(work.round), qualifiedRows: checked(rows), candidatesProcessed, stopReason: forcedStop, readyOnly: true });
+    if (settleExistingPool && forcedStop) round.target = stopHeEngCollectionTarget(round.target, forcedStop);
     if (!round.duplicateRound && work.active_source_key && active) {
       work.history.push({ sourceKey: work.active_source_key, source: active.source,
         candidates: candidatesProcessed, readyContacts: Math.max(0, round.pool.rows.length - previousRows.length),
@@ -6956,10 +6965,10 @@ async function finishHeEngTargetRound(
       ok_contacts: readyCount, finished_at: new Date().toISOString() };
     // Reset only per-wave work. Paid qualification decisions, countries, search
     // cursor, seen candidates, real contact pool and ledger remain intact.
-    info.eng_collection_work = { version: 1, round: work.round + 1,
+    info.eng_collection_work = { version: 1, round: work.round + (settleExistingPool ? 0 : 1),
       batch_size: Math.max(1, nextHeEngCollectionBatchSize(round)), active_source_key: null,
       seen_companies: work.seen_companies, history: work.history };
-    info.eng_collection_round_audit = [...(info.eng_collection_round_audit ?? []), {
+    if (!settleExistingPool) info.eng_collection_round_audit = [...(info.eng_collection_round_audit ?? []), {
       round: work.round, ...(info.construct ? { constructor: info.construct } : {}),
       ...(work.search_exclusions ? { search_exclusions: work.search_exclusions } : {}),
       ...(work.registry_wave ? { registry: { taskId: work.registry_wave.taskId, recordsRead: work.registry_wave.recordsRead,
@@ -7194,6 +7203,21 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // dispatch. The append guard remains in place for changes during this tick.
     const refillScope = await readHeEngRefillQualificationTarget(ctx, project, base.vertical_id, info);
     if (refillScope) companyQualificationScope = refillScope;
+  }
+
+  if (adaptive && info.eng_collection_target!.phase === 'building_reserve') {
+    const work = info.eng_collection_work!;
+    const economy = info.eng_company_qualification?.economy;
+    // Only the untouched boundary after a committed wave may finish early.
+    // A dispatched constructor, saved search response, prepared assessment or
+    // uncertain model outcome must first follow its existing recovery path.
+    if (!work.active_source_key && !(info.tasks?.length) && !info.construct?.bc_job_id &&
+        !work.candidate_rows?.length && !work.search_candidates?.length && !work.search_rows?.length &&
+        !work.search_pages && !work.search_resolved && !work.registry_wave &&
+        !economy?.inFlight && !Object.keys(economy?.prepared ?? {}).length &&
+        !Object.keys(economy?.proposals ?? {}).length) {
+      return finishHeEngTargetRound(ctx, job, base, info, [], [], usage, undefined, true);
+    }
   }
 
   // ─── СПИСОК СТРАН СБОРА (§1A плана docs/handoff/2026-10-16-eng-countries) ───

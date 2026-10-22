@@ -8,8 +8,8 @@ const STOP_EXPLANATIONS: Record<NonNullable<EngCollectionTarget['stop_reason']>,
   budget_limit: 'Collection stopped at the spending limit for this base.',
   sources_exhausted: 'The current sources have no more matching companies to check.',
   low_yield: 'Collection stopped because the latest batches added too few matching contacts.',
-  safety_limit: 'Collection reached its collection limit before both targets were met.',
-  error: 'Collection stopped before both targets were met. The contacts already checked are saved.',
+  safety_limit: 'Collection stopped at its processing limit.',
+  error: 'Collection stopped because of an error.',
 };
 
 /** The target is absent on older collections. Never infer it from row_count. */
@@ -17,29 +17,23 @@ export function engCollectionTargetView(base: EngBaseSummary) {
   const target = base.collect_info?.eng_collection_target;
   if (!target || target.version !== 1) return null;
   const counts = [target.ready_target, target.reserve_target, target.ready_count, target.reserve_count, target.total_ready];
-  if (counts.some((count) => !Number.isSafeInteger(count) || count < 0) || target.ready_target === 0 || target.reserve_target === 0) {
+  if (counts.some((count) => !Number.isSafeInteger(count) || count < 0) || target.ready_target === 0) {
     return null;
   }
   const ready = Math.min(target.ready_count, target.ready_target);
-  const reserve = target.reserve_count;
-  const firstBatchReached = ready >= target.ready_target;
-  const reserveReached = reserve >= target.reserve_target;
-  const complete = target.phase === 'complete' && firstBatchReached && reserveReached;
+  const additionalCollected = target.reserve_count;
+  const readyTargetReached = ready >= target.ready_target;
+  const complete = target.phase === 'complete' && readyTargetReached && base.status !== 'failed';
   const active = base.status === 'collecting' && (target.phase === 'collecting' || target.phase === 'building_reserve');
   const remainingReady = Math.max(0, target.ready_target - ready);
-  const remainingReserve = Math.max(0, target.reserve_target - reserve);
-  const headline = complete
-    ? 'First batch and reserve collected'
-    : active
-      ? firstBatchReached ? 'First batch collected. Building the reserve…' : 'Collecting your first batch…'
-      : firstBatchReached && reserveReached ? 'Contact targets collected' : 'Collection ended before both targets were reached';
+  const headline = readyTargetReached
+    ? `${formatCount(ready)} contacts ready${active ? '. Collection is still running…' : ''}`
+    : active ? 'Collecting ready contacts…' : 'Collection ended before the contact target was reached';
   const shortfall = active || complete ? null : remainingReady > 0
-    ? `The first batch is ${formatCount(remainingReady)} contacts short of its target.`
-    : remainingReserve > 0
-      ? `The first batch is collected. The reserve is ${formatCount(remainingReserve)} contacts short of its target.`
-      : null;
+    ? `The collection is ${formatCount(remainingReady)} contacts short of its target.`
+    : null;
   return {
-    target, ready, reserve, firstBatchReached, reserveReached, complete, active, headline, shortfall,
+    target, ready, additionalCollected, readyTargetReached, complete, active, headline, shortfall,
     stopExplanation: !active && !complete && target.stop_reason ? STOP_EXPLANATIONS[target.stop_reason] : null,
   };
 }
@@ -71,7 +65,7 @@ function ContactTargetProgress({ label, count, target }: { label: string; count:
   );
 }
 
-/** The reserve is saved, validated contacts; it is never a market-size forecast. */
+/** The target counts ready contacts; any actual extras are not a forecast. */
 export function EngCollectionTargetSummary({ base }: { base: EngBaseSummary }) {
   const view = engCollectionTargetView(base);
   if (!view) return null;
@@ -80,13 +74,18 @@ export function EngCollectionTargetSummary({ base }: { base: EngBaseSummary }) {
       <div role="status" style={{ color: view.complete ? 'var(--cp-green)' : 'var(--cp-amber)' }}>
         {view.headline}
       </div>
-      <ContactTargetProgress label="First batch" count={view.ready} target={view.target.ready_target} />
-      <ContactTargetProgress label="Reserve collected" count={view.reserve} target={view.target.reserve_target} />
+      <ContactTargetProgress label="Ready contacts" count={view.ready} target={view.target.ready_target} />
       <div className="flex flex-col gap-1 text-[11px]">
         {view.stopExplanation && <div>{view.stopExplanation}</div>}
         {view.shortfall && <div>{view.shortfall}</div>}
+        {view.additionalCollected > 0 && (
+          <div>Additional contacts collected: {formatCount(view.additionalCollected)}.</div>
+        )}
         <div style={{ color: 'var(--cp-text-l)' }}>
-          Only checked, unique contacts from matching companies count toward these targets.
+          Only checked, unique contacts from matching companies count toward the target.
+        </div>
+        <div style={{ color: 'var(--cp-text-l)' }}>
+          Additional collection potential has not been estimated.
         </div>
       </div>
     </div>

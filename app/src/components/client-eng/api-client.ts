@@ -230,8 +230,10 @@ export interface EngConstructInfo {
 export interface EngCollectionTarget {
   version: 1;
   ready_target: number;
+  /** Zero for new collections; older checkpoints may retain their reserve goal. */
   reserve_target: number;
   ready_count: number;
+  /** Additional checked contacts collected, never an estimate of future potential. */
   reserve_count: number;
   total_ready: number;
   phase: 'collecting' | 'building_reserve' | 'complete' | 'stopped';
