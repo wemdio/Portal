@@ -434,6 +434,21 @@ function Collapsible({ title, hint, badge, children }: {
 }
 
 /* =================== SETTINGS TAB =================== */
+/**
+ * Поля настроек, которых нет на экране (22.10.2026). Экран не пишет их в базу,
+ * если у кампании их не было: старая кампания продолжает работать на значениях
+ * воркера по умолчанию, а не на дефолтах экрана.
+ */
+const HIDDEN_TELEGRAM_KEYS = [
+  'account_cooldown_hours',
+  'account_concurrency',
+  'first_touch_gap_minutes',
+  'first_touch_per_gap',
+  'read_reply_delay_range',
+  'cycle_delay_range',
+  'account_loop_delay_range',
+] as const satisfies ReadonlyArray<keyof TelegramSettings>;
+
 function SettingsTab({ campaign, onSave }: {
   campaign: OutreachCampaign;
   onSave: (name: string, openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => Promise<void>;
@@ -460,27 +475,81 @@ function SettingsTab({ campaign, onSave }: {
     (campaign.telegram_settings?.blocked_usernames ?? []).join(', ')
   );
 
-  const handleSave = async () => {
-    if (!campaignName.trim()) {
-      setSaveError('Название кампании обязательно');
-      setSaved(false);
+  /**
+   * Что уходит в базу. Скрытые с экрана поля (паузы, порции, параллельность)
+   * пишем, только если они у кампании уже были: иначе дефолты экрана молча
+   * поменяли бы поведение старой кампании, у которой воркер берёт свои.
+   * CRM без воронки и этапа не сохраняем — остальное сохраняется.
+   */
+  const buildPayload = () => {
+    const original = (campaign.telegram_settings ?? {}) as Partial<TelegramSettings>;
+    const tgOut: Partial<TelegramSettings> = {
+      ...telegram,
+      blocked_usernames: blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean),
+    };
+    for (const key of HIDDEN_TELEGRAM_KEYS) {
+      if (!(key in original)) delete tgOut[key];
+    }
+    return { name: campaignName.trim(), openai, telegram: tgOut as TelegramSettings, crm: crmIncomplete ? null : crm };
+  };
+
+  /**
+   * Автосохранение: через 0,8 с после последней правки. Работающая кампания
+   * подхватывает новые настройки на ходу (refreshSettings в campaignLoop) —
+   * перед следующим аккаунтом круга. Сохранения идут строго по очереди:
+   * правка во время записи сохранится следующим заходом.
+   */
+  const payload = buildPayload();
+  const payloadKey = JSON.stringify(payload);
+  const lastSavedKey = useRef(payloadKey);
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+  const latestPayload = useRef(payload);
+  const onSaveRef = useRef(onSave);
+  // Таймер сохранения читает последние значения через ref: сам эффект
+  // пересоздаётся только при смене снимка.
+  useEffect(() => {
+    latestPayload.current = payload;
+    onSaveRef.current = onSave;
+  });
+  const [retryTick, setRetryTick] = useState(0);
+  // Блок CRM отдаёт свой выбор сразу после монтирования. Это не правка
+  // оператора: первый такой снимок — точка отсчёта, а не повод сохранять.
+  const baselineTaken = useRef(false);
+
+  useEffect(() => {
+    if (crm === null) return;
+    if (!baselineTaken.current) {
+      baselineTaken.current = true;
+      lastSavedKey.current = payloadKey;
       return;
     }
-    setSaving(true);
-    setSaveError(null);
-    setSaved(false);
-    const parsed = blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
-    const updatedTelegram = { ...telegram, blocked_usernames: parsed };
-    try {
-      await onSave(campaignName.trim(), openai, updatedTelegram, crm);
-      setCampaignName(campaignName.trim());
-      setSaved(true);
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : 'Не удалось сохранить настройки');
-    } finally {
-      setSaving(false);
+    if (payloadKey === lastSavedKey.current) return;
+    if (!campaignName.trim()) {
+      setSaveError('Название кампании обязательно');
+      return;
     }
-  };
+    setSaved(false);
+    setSaveError(null);
+    const timer = setTimeout(() => {
+      saveChain.current = saveChain.current.then(async () => {
+        const p = latestPayload.current;
+        const key = JSON.stringify(p);
+        if (key === lastSavedKey.current) return;
+        setSaving(true);
+        try {
+          await onSaveRef.current(p.name, p.openai, p.telegram, p.crm);
+          lastSavedKey.current = key;
+          setSaved(true);
+          setSaveError(null);
+        } catch (e) {
+          setSaveError(e instanceof Error ? e.message : 'Не удалось сохранить настройки');
+        } finally {
+          setSaving(false);
+        }
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [payloadKey, campaignName, crm, retryTick]);
 
   const setOAI = <K extends keyof OpenAISettings>(k: K, v: OpenAISettings[K]) =>
     setOpenai(prev => ({ ...prev, [k]: v }));
@@ -492,7 +561,7 @@ function SettingsTab({ campaign, onSave }: {
   // Форма из групп: слева — что настраивается и зачем, справа — поля. Раньше
   // поля шли сплошной стеной без заголовков, и найти нужное было тяжело.
   return (
-    <div className="pb-20" onChangeCapture={() => { setSaved(false); setSaveError(null); }}>
+    <div className="pb-20">
       <div className="rounded-2xl border border-gray-200 bg-white px-5 md:px-7">
         {/* «Название проекта» (openai.project_name) убрано с экрана 22.10.2026:
             оно лишь подставлялось в промпт вместо {project_name}, а на 22.10 ни
@@ -632,21 +701,24 @@ function SettingsTab({ campaign, onSave }: {
         </SettingsGroup>
       </div>
 
-      {/* Кнопка прилипает к низу экрана: форма длинная, и раньше до неё
-          приходилось листать после каждой правки. */}
       <div className="sticky bottom-0 z-20 mt-4">
-      <div className="flex w-full flex-col items-center gap-2 rounded-2xl border border-gray-200 bg-white/95 px-6 py-3 text-center shadow-lg backdrop-blur">
-        {!saved && (
-          <span className="text-xs font-medium text-amber-500">Не забудьте сохранить настройки</span>
+      <div className="flex w-full flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl border border-gray-200 bg-white/95 px-6 py-2.5 text-center text-xs shadow-lg backdrop-blur" aria-live="polite">
+        {saving ? (
+          <span className="inline-flex items-center gap-1.5 text-gray-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Сохраняю…</span>
+        ) : saveError ? (
+          <>
+            <span role="alert" className="text-red-600">{saveError}</span>
+            <button type="button" onClick={() => { lastSavedKey.current = ''; setRetryTick((n) => n + 1); }}
+              className="rounded-full border border-red-300 px-3 py-1 font-medium text-red-600 hover:bg-red-50 cursor-pointer">
+              Повторить
+            </button>
+          </>
+        ) : saved ? (
+          <span role="status" className="inline-flex items-center gap-1 text-emerald-600"><Check className="h-3.5 w-3.5" />Сохранено, кампания применит сразу</span>
+        ) : (
+          <span className="text-gray-400">Изменения сохраняются автоматически</span>
         )}
-        <button type="button" onClick={handleSave} disabled={saving || crmIncomplete || !campaignName.trim()}
-          className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-          Сохранить настройки
-        </button>
-        {crmIncomplete && <span className="text-xs text-amber-600">Выберите воронку и этап CRM</span>}
-        {saveError && <span role="alert" className="text-xs text-red-600">{saveError}</span>}
-        {saved && <span role="status" className="inline-flex items-center gap-1 text-xs text-emerald-600"><Check className="h-3.5 w-3.5" />Сохранено</span>}
+        {crmIncomplete && <span className="text-amber-600">CRM не сохранится, пока не выбраны воронка и этап</span>}
       </div>
       </div>
     </div>

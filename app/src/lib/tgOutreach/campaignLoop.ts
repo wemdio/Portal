@@ -1811,8 +1811,40 @@ export async function runCampaignLoop(
     return;
   }
 
-  const tg = campaign.telegram_settings as TelegramSettings;
-  const _oai = campaign.openai_settings as OpenAISettings;
+  // `let`: настройки перечитываются на ходу (refreshSettings ниже), и все
+  // чтения `tg.*` в круге видят свежие значения.
+  let tg = campaign.telegram_settings as TelegramSettings;
+
+  /**
+   * Перечитать настройки работающей кампании из базы.
+   *
+   * С 22.10.2026 настройки на экране сохраняются сами, без кнопки, и должны
+   * действовать сразу, а не после перезапуска кампании. Раньше строка кампании
+   * читалась один раз при старте круга: правка промпта или нормы до остановки
+   * не доходила. Объект `campaign` правим на месте — его же получают
+   * handleChat/handleFollowUp, поэтому промпт, чёрный список и follow-up
+   * подхватываются в том же месте. Сбой чтения — работаем на прежних.
+   */
+  let lastSettingsAt = '';
+  const refreshSettings = async (): Promise<void> => {
+    const { data: row, error } = await db
+      .from('tg_outreach_campaigns')
+      .select('name, telegram_settings, openai_settings, crm_settings')
+      .eq('id', campaignId)
+      .single();
+    if (error || !row) return;
+    // Сравниваем сами настройки, а не updated_at: его двигает и смена статуса.
+    const stamp = JSON.stringify(row);
+    if (stamp === lastSettingsAt) return;
+    const changed = lastSettingsAt !== '';
+    lastSettingsAt = stamp;
+    campaign.name = row.name;
+    campaign.telegram_settings = row.telegram_settings;
+    campaign.openai_settings = row.openai_settings;
+    campaign.crm_settings = row.crm_settings;
+    tg = campaign.telegram_settings as TelegramSettings;
+    if (changed) log('info', 'Настройки кампании изменились — применяю новые без перезапуска.');
+  };
 
   if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
     log('error', 'Не задан ключ OpenRouter (OPENROUTER_TG_OUTREACH_API_KEY в .env) — без него GPT не сможет отвечать. Кампания переведена в статус "ошибка".');
@@ -2219,6 +2251,7 @@ export async function runCampaignLoop(
     while (!shouldStop()) {
       tick();
       try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
+      await refreshSettings();
 
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
         if (!inSleepPeriod) {
@@ -2302,6 +2335,9 @@ export async function runCampaignLoop(
         // accounts (outer while-loop heartbeat is written only once per full
         // pass through ALL accounts, which can take 1-2 hours).
         try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
+        // Круг длится часами — правка настроек должна доходить до следующего
+        // аккаунта, а не ждать конца круга. Один лёгкий запрос на аккаунт.
+        await refreshSettings();
 
         const now = new Date();
         if (account.check_status === 'frozen' && !account.check_requested_at) {
