@@ -534,7 +534,7 @@ function SettingsTab({ campaign, onSave }: {
             hint="Сначала ответы на контрольные вопросы, потом передача."
           />
           {openai.qualification_required === true && (
-            <div className="space-y-1 pl-12">
+            <div className="space-y-1">
               <FieldArea label="Контрольные вопросы, по одному в строке" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
               <p className="text-[11px] text-gray-400">
                 Не ответил на все — бот спросит один раз. Опять нет — лид уйдёт с пометкой «без полной квалификации».
@@ -613,7 +613,7 @@ function SettingsTab({ campaign, onSave }: {
             hint="Только если последнее сообщение наше, один раз на человека, не тем, кто уже обработан."
           />
           {telegram.follow_up.enabled && (
-            <div className="space-y-4 pl-12">
+            <div className="space-y-4">
               <div className="flex flex-wrap gap-4">
                 <div className="w-40">
                   <FieldNum label="Через, часов" value={telegram.follow_up.delay_hours} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_hours: v })} />

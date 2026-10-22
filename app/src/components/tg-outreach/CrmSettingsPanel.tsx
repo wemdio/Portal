@@ -190,7 +190,7 @@ export default function CrmSettingsPanel({ initial, onChange }: {
       </label>
 
       {settings.enabled && (
-        <div className="space-y-4 pl-12">
+        <div className="space-y-4">
           <div className="inline-flex items-center gap-1 rounded-lg border border-gray-300/70 bg-white/50 p-1">
             <button type="button" onClick={() => pickTarget('own')} className={segCls(target === 'own')}>Наша amoCRM</button>
             <button type="button" onClick={() => pickTarget('client')} className={segCls(target === 'client')}>amoCRM клиента</button>
