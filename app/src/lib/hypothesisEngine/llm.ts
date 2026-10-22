@@ -1170,7 +1170,7 @@ async function rawCall(
       journalRequestyCall(model, 'failed', httpStatus);
       journaled = true;
       // HTTP failures do not establish a zero provider charge. A scoped ENG
-      // base pauses instead of paying for another uncertain request.
+      // base books the full reserve for it (settleHeEngRequestyCall).
       await settleHeEngRequestyCall(budgetCall, undefined);
     } catch (err) {
       // Пригодного ответа нет: отмена, свой срок, обрыв, тело 200 не

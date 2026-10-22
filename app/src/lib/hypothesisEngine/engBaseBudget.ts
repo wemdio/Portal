@@ -273,7 +273,14 @@ export async function reserveHeEngRequestyCall(
   }
 }
 
-/** Null/unknown charge is retained at the full reserve and blocks further work. */
+/**
+ * An unknown charge (timeout, broken connection, HTTP error, a reply without
+ * usage) is booked at the full reserve. The reserve already bounds the whole
+ * body and the output ceiling at the highest catalogue rates with a 2x cushion,
+ * so the ledger never under-counts. It used to hold the base instead, and one
+ * slow model answer ended the collection. Only a charge that cannot be saved
+ * stops further paid work.
+ */
 export async function settleHeEngRequestyCall(
   call: HeEngRequestyReservation | null,
   reportedCostUsd: unknown,
@@ -282,18 +289,12 @@ export async function settleHeEngRequestyCall(
   // Set before awaiting: an ambiguous DB response must not trigger a second
   // settlement with different facts or another paid model request.
   call.settled = true;
-  const actualMicrousd = finiteRate(reportedCostUsd) &&
+  const reportedMicrousd = finiteRate(reportedCostUsd) &&
     Number.isSafeInteger(Math.ceil(reportedCostUsd * USD_MICROS))
     ? Math.ceil(reportedCostUsd * USD_MICROS)
     : null;
   try {
-    await call.scope.ledger.settle(call.reservation, { actualMicrousd });
-    if (actualMicrousd === null) {
-      throw new HeEngBaseBudgetGuardError(
-        'charge_unknown',
-        'the provider charge could not be confirmed; its full reserve is retained and further paid work is stopped.',
-      );
-    }
+    await call.scope.ledger.settle(call.reservation, { actualMicrousd: reportedMicrousd ?? call.reservation.reservedMicrousd });
   } catch (error) {
     const failure = budgetFailure(
       error, 'settlement_failed', 'the provider charge could not be saved; further paid work is stopped.',
