@@ -4826,7 +4826,7 @@ function AccountProfileModal({
           <label className="space-y-1 block">
             <span className="text-[11px] font-medium text-gray-500">Описание ({bio.length}/70)</span>
             <textarea value={bio} onChange={(e) => setBio(e.target.value)} maxLength={70} rows={2}
-              className="block w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y" />
+              className="block w-full rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y" />
           </label>
 
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div>}
@@ -6733,7 +6733,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
             </p>
             <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
               placeholder={'host:port@user:pass\nuser:pass@host:port\nhost:port:user:pass\nпо одному прокси на строку'}
-              className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
+              className="block w-full rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
             <div className="flex gap-2">
               <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
                 className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
@@ -7615,12 +7615,13 @@ function CampaignView({ campaign, onUpdate, onDelete, onBack }: {
 /* half — поле на половину ширины: у «Периодов сна» внутри строка вида
    «00:00-08:00», растянутая на весь экран она читалась как место под длинный
    список. */
+/** Общий вид полей ввода: полупрозрачный фон, одинаковый в светлой и тёмной теме. */const INPUT_BG = 'bg-white/50';const INPUT_BORDER = 'border-gray-300/70';
 function Field({ label, value, onChange, placeholder, type, half }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string; half?: boolean }) {
   return (
     <label className="block space-y-1">
       <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type={type ?? 'text'} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        className={`${half ? 'w-full md:w-1/2' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
+        className={`${half ? 'w-full md:w-1/2' : 'w-full'} block rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
@@ -7630,7 +7631,7 @@ function FieldNum({ label, value, onChange, compact }: { label: string; value: n
     <label className="space-y-1">
       <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type="number" value={value} onChange={e => onChange(Number(e.target.value))}
-        className={`${compact ? 'w-20 text-center' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
+        className={`${compact ? 'w-20 text-center' : 'w-full'} block rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
@@ -7640,7 +7641,7 @@ function FieldArea({ label, value, onChange, rows, placeholder }: { label: strin
     <label className="space-y-1">
       <span className="text-[11px] font-medium text-gray-500">{label}</span>
       <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows ?? 3} placeholder={placeholder}
-        className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 resize-y" />
+        className={`block w-full rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 resize-y`} />
     </label>
   );
 }
@@ -7688,7 +7689,7 @@ function TimezoneField({ value, onChange }: { value: number; onChange: (v: numbe
           вроде «UTC+3 — Москва, Минск, Стамбул», растянутое поле выглядело
           пустым. max-w держит список в рамках колонки на узком экране. */}
       <select value={value} onChange={e => onChange(Number(e.target.value))}
-        className="block w-auto max-w-full cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400">
+        className={`block w-auto max-w-full cursor-pointer rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400`}>
         {!known && <option value={value}>{formatUtcOffset(value)} — сохранённое значение</option>}
         {TIMEZONE_ZONES.map(z => (
           <option key={z.offset} value={z.offset}>{formatUtcOffset(z.offset)} — {z.cities}</option>
@@ -7709,7 +7710,7 @@ function StepperField({ label, value, min, max, onChange, title }: { label: stri
       <div className="flex items-center gap-1">
         <input type="number" min={min} max={max} value={value}
           onChange={e => onChange(clamp(Number(e.target.value) || min))}
-          className="w-14 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" />
+          className={`w-14 rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none`} />
         <span className="flex flex-col">
           <button type="button" aria-label="Больше" disabled={value >= max} onClick={() => onChange(clamp(value + 1))}
             className={`${arrow} rounded-t-md`}>▲</button>
