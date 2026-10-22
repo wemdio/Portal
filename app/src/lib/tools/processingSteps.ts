@@ -932,6 +932,8 @@ export async function stepFindEmails(
         stopAtFirstUsableEmail,
         locale,
         ...(contactDiagnosticsEnabled ? { contactPageStrategy: 'eng_contact_first' as const } : {}),
+        ...(contactDiagnosticsEnabled && companyIdx >= 0 && body[item.i][companyIdx]?.trim()
+          ? { companyName: body[item.i][companyIdx].trim() } : {}),
         ...(options?.reuseWebsiteDescription ? { includeDescription: true } : {}),
         ...(controller ? { signal: controller.signal } : {}),
         ...(enRead ?? {}),

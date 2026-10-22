@@ -11,6 +11,7 @@
 import iconv from 'iconv-lite';
 import type { LookupAddress, LookupOptions } from 'node:dns';
 import type { Agent } from 'undici';
+import { companySiteAlias, companySiteBoundary, sameCompanySiteBoundary } from '@/lib/enrich/companySiteAlias';
 import {
   getNonPriorityProxyDispatcher,
   getProxyDispatcher,
@@ -131,6 +132,9 @@ function getGuardedDirectDispatcher(
         const [{ Agent: UndiciAgent }, dns] = await Promise.all([import('undici'), import('node:dns')]);
         return new UndiciAgent({
           connect: { rejectUnauthorized: false, lookup: guardCheckedLookup(guard, dns.lookup, refuse) },
+          // Corporate sites behind Akamai/F5 send cookie headers over undici's
+          // 16 KiB default; the whole page was lost as "fetch failed".
+          maxHeaderSize: 64 * 1024,
         });
       } catch {
         return guard.directDispatcher;
@@ -917,10 +921,11 @@ function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
   return decoded;
 }
 
-function isHtmlLikeContentType(contentType: string | null): boolean {
+function isHtmlLikeContentType(contentType: string | null, acceptXml = false): boolean {
   if (!contentType) return true;
   const ct = contentType.toLowerCase();
-  return ct.includes('text/html') || ct.includes('application/xhtml') || ct.startsWith('text/plain');
+  return ct.includes('text/html') || ct.includes('application/xhtml') || ct.startsWith('text/plain')
+    || (acceptXml && ct.includes('xml'));
 }
 
 type PageFetchResult = {
@@ -946,6 +951,8 @@ async function fetchPage(
     dispatcher?: unknown;
     limits?: PageReadLimits;
     trackFinalUrl?: boolean;
+    /** ENG sitemap read: XML answers are documents too. */
+    acceptXml?: boolean;
   },
 ): Promise<PageFetchResult> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
@@ -975,6 +982,7 @@ async function fetchPage(
         dispatcher: options?.dispatcher,
         limits: options?.limits,
         trackFinalUrl: options?.trackFinalUrl,
+        acceptXml: options?.acceptXml,
       }),
       bounded,
     ]);
@@ -993,6 +1001,7 @@ async function fetchPageInner(
     dispatcher?: unknown;
     limits?: PageReadLimits;
     trackFinalUrl?: boolean;
+    acceptXml?: boolean;
   },
 ): Promise<PageFetchResult> {
   const { timeout } = options;
@@ -1022,14 +1031,14 @@ async function fetchPageInner(
       redirect: 'follow',
       ...(options.dispatcher ? { dispatcher: options.dispatcher } : dispatcher ? { dispatcher } : {}),
     } as RequestInit;
-    if (options.limits) return await fetchPageLimited(url, init, options.limits, options.dispatcher, controller.signal, options.trackFinalUrl);
+    if (options.limits) return await fetchPageLimited(url, init, options.limits, options.dispatcher, controller.signal, options.trackFinalUrl, options.acceptXml);
     const res = await fetch(url, init);
     const finalUrl = options.trackFinalUrl ? { finalUrl: res.url || url } : {};
     if (res.status >= 400) {
       return { html: null, failure: describeFetchStatus(res.status), status: res.status, ...finalUrl };
     }
     const contentType = res.headers.get('content-type');
-    if (!isHtmlLikeContentType(contentType)) {
+    if (!isHtmlLikeContentType(contentType, options.acceptXml)) {
       return { html: null, failure: 'Страница не отдала HTML', status: res.status, ...finalUrl };
     }
     const body = await res.arrayBuffer();
@@ -1069,6 +1078,7 @@ async function fetchPageLimited(
   proxyDispatcher: unknown,
   signal: AbortSignal,
   trackFinalUrl = false,
+  acceptXml = false,
 ): Promise<PageFetchResult> {
   const parser = await import('@/lib/enrich/websiteParser');
   let res: Response;
@@ -1096,7 +1106,7 @@ async function fetchPageLimited(
     return { html: null, failure: describeFetchStatus(res.status), status: res.status, ...finalUrl };
   }
   const contentType = res.headers.get('content-type');
-  if (!isHtmlLikeContentType(contentType)) {
+  if (!isHtmlLikeContentType(contentType, acceptXml)) {
     return { html: null, failure: 'Страница не отдала HTML', status: res.status, ...finalUrl };
   }
   const body = limits.maxBytes ? await parser.readBodyCapped(res, limits.maxBytes, url) : await res.arrayBuffer();
@@ -1239,7 +1249,7 @@ type EngContactFailure =
   | 'invalid_url' | 'http_error' | 'timeout' | 'dns' | 'tls' | 'connection'
   | 'network_error' | 'address_refused' | 'cross_site_redirect' | 'non_html' | 'parse_error';
 type EngContactPageKind = 'home' | 'contact' | 'legal' | 'about' | 'team' | 'fallback';
-type EngContactPageSource = 'input' | 'discovered' | 'static' | 'www_fallback';
+type EngContactPageSource = 'input' | 'discovered' | 'static' | 'www_fallback' | 'http_fallback' | 'sitemap';
 
 /** Operational counts and bounded, redacted URLs; never mailbox values or response bodies. */
 export type EngContactDiagnostics = {
@@ -1286,15 +1296,38 @@ function contactDiagnosticUrl(raw: string): string {
   } catch { return '[invalid-url]'; }
 }
 
-function sameContactSite(candidate: string, root: string): boolean {
+function plainWebUrl(candidate: string): boolean {
   try {
     const a = new URL(candidate);
-    const b = new URL(root);
     return (a.protocol === 'https:' || a.protocol === 'http:')
       && !a.username && !a.password
-      && (!a.port || a.port === '80' || a.port === '443')
-      && a.hostname.toLowerCase().replace(/^www\./, '') === b.hostname.toLowerCase().replace(/^www\./, '');
+      && (!a.port || a.port === '80' || a.port === '443');
   } catch { return false; }
+}
+
+function sameContactSite(candidate: string, root: string): boolean {
+  try {
+    return plainWebUrl(candidate)
+      && new URL(candidate).hostname.toLowerCase().replace(/^www\./, '') === new URL(root).hostname.toLowerCase().replace(/^www\./, '');
+  } catch { return false; }
+}
+
+/** Sitemap entries worth a page read; the rest of a large sitemap is ignored. */
+const SITEMAP_MAX_LOCS = 5000;
+/** Per page kind: a sitemap with ten «contact-…» pages must not crowd out the legal page. */
+const SITEMAP_PAGES_PER_KIND = 2;
+/** Contact pages read per site, whatever their source; the legal page often holds the address. */
+const MAX_CONTACT_PAGE_ATTEMPTS = 3;
+/** Enough for thousands of entries; a site map of a big portal is not read whole. */
+const SITEMAP_MAX_BYTES = 1024 * 1024;
+
+function sitemapLocs(xml: string): string[] {
+  const locs: string[] = [];
+  for (const match of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)) {
+    locs.push(match[1].replace(/&amp;/g, '&'));
+    if (locs.length >= SITEMAP_MAX_LOCS) break;
+  }
+  return locs;
 }
 
 /** ENG pages may route by query; the shared legacy cache key intentionally does not. */
@@ -1324,7 +1357,7 @@ function contactCandidateKind(href: string, text: string): { kind: EngContactPag
   return null;
 }
 
-async function discoverEngContactPages(html: string, baseUrl: string, root: string, depth: number): Promise<EngContactCandidate[]> {
+async function discoverEngContactPages(html: string, baseUrl: string, ownSite: (url: string) => boolean, depth: number): Promise<EngContactCandidate[]> {
   const cheerio = await import('cheerio');
   const $ = cheerio.load(html);
   const seen = new Set<string>();
@@ -1334,7 +1367,7 @@ async function discoverEngContactPages(html: string, baseUrl: string, root: stri
     if (!href || /^(#|mailto:|tel:|javascript:)/i.test(href)) return;
     let url: string;
     try { url = new URL(href, baseUrl).href; } catch { return; }
-    if (!sameContactSite(url, root)) return;
+    if (!ownSite(url)) return;
     const normalized = engContactPageKey(url);
     if (seen.has(normalized)) return;
     const kind = contactCandidateKind(url, ($(el).text() ?? '').trim());
@@ -1409,10 +1442,15 @@ async function scrapeEngContactEmails(
   const readFinalUrls = new Set<string>();
   const queue: EngContactCandidate[] = [];
   const queued = new Set<string>();
+  // The company's own site: the catalog host with its subdomains, plus a
+  // domain of the same brand that one of its pages redirected to.
+  const aliasSites = new Set<string>();
+  const ownSite = (url: string) => sameContactSite(url, root)
+    || (plainWebUrl(url) && (sameCompanySiteBoundary(url, root) || aliasSites.has(companySiteBoundary(url) ?? '')));
   const canFetch = () => !controller.signal.aborted && diagnostics.attempts < maxAttempts && diagnostics.pagesRead < maxPages;
   const enqueue = (candidate: EngContactCandidate) => {
     const key = engContactPageKey(candidate.url);
-    if (!sameContactSite(candidate.url, root) || seen.has(key) || queued.has(key)) return;
+    if (!ownSite(candidate.url) || seen.has(key) || queued.has(key)) return;
     queued.add(key);
     queue.push(candidate);
     queue.sort((a, b) => b.priority - a.priority);
@@ -1443,10 +1481,15 @@ async function scrapeEngContactEmails(
     };
     diagnostics.pages.push(page);
     const finalUrl = result.finalUrl || candidate.url;
-    if (!sameContactSite(finalUrl, root)) {
-      page.outcome = 'address_refused';
-      page.failure = 'cross_site_redirect';
-      return { html: null, failure: ADDRESS_REFUSED_FAILURE, refused: true };
+    if (!ownSite(finalUrl)) {
+      // Only an observed redirect introduces another domain, and only one of the same brand.
+      const alias = options.companyName && plainWebUrl(finalUrl) ? companySiteAlias(finalUrl, root, options.companyName) : null;
+      if (!alias) {
+        page.outcome = 'address_refused';
+        page.failure = 'cross_site_redirect';
+        return { html: null, failure: ADDRESS_REFUSED_FAILURE, refused: true };
+      }
+      aliasSites.add(companySiteBoundary(finalUrl) ?? finalUrl);
     }
     if (!result.html) {
       const failure = contactFetchFailure(result);
@@ -1487,7 +1530,7 @@ async function scrapeEngContactEmails(
     }
     if (candidate.depth < 2) {
       try {
-        for (const link of await discoverEngContactPages(result.html, finalUrl, root, candidate.depth + 1)) enqueue(link);
+        for (const link of await discoverEngContactPages(result.html, finalUrl, ownSite, candidate.depth + 1)) enqueue(link);
       } catch {
         page.outcome = 'parse_error';
         page.failure = 'parse_error';
@@ -1515,6 +1558,43 @@ async function scrapeEngContactEmails(
     }
     return result;
   };
+  // Contact pages that a script menu hides from the HTML are often listed in
+  // sitemap.xml. One index hop at most; every read spends the attempt budget.
+  const readSitemap = async (base: string): Promise<void> => {
+    let url: string | null = new URL('/sitemap.xml', base).href;
+    const sitemapLimits: PageReadLimits = {
+      ...(limits ?? { counts: { refused: 0, capped: 0 } }),
+      maxBytes: Math.min(limits?.maxBytes ?? SITEMAP_MAX_BYTES, SITEMAP_MAX_BYTES),
+    };
+    for (let hop = 0; url && hop < 2 && canFetch(); hop += 1) {
+      diagnostics.attempts += 1;
+      let result: PageFetchResult;
+      try {
+        result = await fetchPage(url, {
+          timeout: Math.min(Math.max(1, options.timeout ?? FETCH_TIMEOUT_MS), 8_000),
+          signal: controller.signal, acceptLanguage: EN_ACCEPT_LANGUAGE, limits: sitemapLimits, trackFinalUrl: true, acceptXml: true,
+        });
+      } catch { return; }
+      if (!result.html || !ownSite(result.finalUrl || url)) return;
+      const locs = sitemapLocs(result.html).filter(ownSite);
+      if (/<sitemapindex/i.test(result.html)) {
+        url = locs.find((loc) => /page/i.test(new URL(loc).pathname)) ?? locs[0] ?? null;
+        continue;
+      }
+      const perKind = new Map<EngContactPageKind, number>();
+      const pages = locs.flatMap((loc) => {
+        const kind = contactCandidateKind(loc, '');
+        return kind ? [{ url: loc, ...kind }] : [];
+      }).sort((a, b) => b.priority - a.priority || a.url.length - b.url.length)
+        .filter((page) => {
+          const taken = perKind.get(page.kind) ?? 0;
+          perKind.set(page.kind, taken + 1);
+          return taken < SITEMAP_PAGES_PER_KIND;
+        });
+      for (const page of pages) enqueue({ ...page, source: 'sitemap', depth: 1 });
+      return;
+    }
+  };
   try {
     let home: PageFetchResult = { html: null, failure: null };
     if (canFetch()) home = await readHome({ url: root, kind: 'home', source: 'input', priority: 200, depth: 0 });
@@ -1525,16 +1605,27 @@ async function scrapeEngContactEmails(
       www.hostname = `www.${www.hostname}`;
       home = await readHome({ url: www.href, kind: 'home', source: 'www_fallback', priority: 200, depth: 0 });
     }
+    // TLS that Node cannot negotiate, or a closed 443, often still leaves the site on plain http.
+    const homeFailure = home.html || home.refused ? null : contactFetchFailure(home);
+    if (rootUrl.protocol === 'https:' && (homeFailure === 'tls' || homeFailure === 'connection') && canFetch()) {
+      const plain = new URL(root);
+      plain.protocol = 'http:';
+      home = await readHome({ url: plain.href, kind: 'home', source: 'http_fallback', priority: 200, depth: 0 });
+    }
     mainFailure = home.html ? null : home.failure;
     const base = home.html && home.finalUrl ? home.finalUrl : root;
+    if (home.html) await readSitemap(base);
     const staticPaths = ['/contact', '/contact-us', '/kontakt', '/impressum', '/imprint', '/privacy', '/datenschutz', '/legal'];
     for (const path of staticPaths) {
       enqueue({ url: new URL(path, base).href, kind: 'fallback', source: 'static', priority: 10, depth: 1 });
     }
+    let contactAttempts = 0;
     while (queue.length > 0 && canFetch()) {
       if (options.stopAtFirstUsableEmail && filterJunkEmails([...allEmails]).length > 0) break;
       const candidate = queue.shift()!;
       if (seen.has(engContactPageKey(candidate.url))) continue;
+      if (candidate.kind === 'contact' && contactAttempts >= MAX_CONTACT_PAGE_ATTEMPTS) continue;
+      if (candidate.kind === 'contact') contactAttempts += 1;
       await read(candidate);
     }
     if (controller.signal.aborted) diagnostics.stopReason = 'deadline';
@@ -1634,6 +1725,11 @@ export async function scrapeEmails(
     maxBytes?: number;
     /** Страницы, которые уже скачаны или ещё понадобятся вызывающему (fetchSitePageHtml). */
     pageCache?: SitePageCache;
+    /**
+     * ENG contact-first only: the company name lets a redirect to a domain of
+     * the same brand count as the company's site (companySiteAlias).
+     */
+    companyName?: string;
   },
 ): Promise<ScrapeEmailsResult> {
   if (options?.locale === 'en' && options.contactPageStrategy === 'eng_contact_first') {
