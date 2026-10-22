@@ -53,17 +53,19 @@ async function readError(res: Response): Promise<string> {
   return body?.error ?? `Ошибка ${res.status}`;
 }
 
-export default function CrmSettingsPanel({ campaignId, onChange }: {
-  campaignId: string;
-  /** null — настройки ещё не загружены, сохранять их нечего. */
+export default function CrmSettingsPanel({ initial, onChange }: {
+  /** Сохранённые настройки кампании: берём из объекта кампании, отдельного запроса нет. */
+  initial?: Partial<CrmSettings> | null;
   onChange: (settings: CrmSettings | null) => void;
 }) {
-  const [settings, setSettings] = useState<CrmSettings>(EMPTY);
+  const [settings, setSettings] = useState<CrmSettings>(
+    initial ? { ...EMPTY, ...initial, connection: initial.connection ?? POLZA } : EMPTY,
+  );
   const [connections, setConnections] = useState<CrmConnection[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [pipelinesError, setPipelinesError] = useState<string | null>(null);
   const [loadingPipelines, setLoadingPipelines] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const loaded = true;
 
   const [adding, setAdding] = useState(false);
   // Выбран режим «amoCRM клиента» — даже когда подключения ещё нет и connection null.
@@ -79,24 +81,11 @@ export default function CrmSettingsPanel({ campaignId, onChange }: {
     setConnections(body.connections ?? []);
   }, []);
 
-  // Настройки читаем с сервера, а не из пропсов: объект кампании у страницы
-  // может быть снят до последнего сохранения этого блока.
+  // Подключения клиентов подгружаем, только когда передача включена: пока она
+  // выключена, блок — один переключатель и ничего не запрашивает.
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const [campRes] = await Promise.all([
-        authFetch(`${API_BASE}/campaigns/${campaignId}`),
-        loadConnections(),
-      ]);
-      if (cancelled) return;
-      if (campRes.ok) {
-        const camp = (await campRes.json()) as { crm_settings?: CrmSettings | null };
-        if (camp.crm_settings) setSettings({ ...EMPTY, ...camp.crm_settings, connection: camp.crm_settings.connection ?? POLZA });
-      }
-      setLoaded(true);
-    })();
-    return () => { cancelled = true; };
-  }, [campaignId, loadConnections]);
+    if (settings.enabled) void loadConnections();
+  }, [settings.enabled, loadConnections]);
 
   // Воронки выбранного подключения. Пустой выбор воронки — подставляем
   // разумный по умолчанию: у нашей AMO «Первичные продажи», у клиента главную.
@@ -161,10 +150,6 @@ export default function CrmSettingsPanel({ campaignId, onChange }: {
     await loadConnections();
     if (settings.connection === conn.id) setSettings({ ...EMPTY });
   };
-
-  if (!loaded) {
-    return <div className="flex items-center gap-2 text-xs text-gray-400"><Loader2 className="h-3.5 w-3.5 animate-spin" /> CRM…</div>;
-  }
 
   const selected = connections.find((c) => c.id === settings.connection) ?? null;
   const clientConnections = connections.filter((c) => !c.builtin);

@@ -545,7 +545,7 @@ function SettingsTab({ campaign, onSave }: {
 
         {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
         <SettingsGroup title="Сделка в CRM" hint="Переданный лид сразу становится сделкой.">
-          <CrmSettingsPanel campaignId={campaign.id} onChange={setCrm} />
+          <CrmSettingsPanel initial={campaign.crm_settings} onChange={setCrm} />
         </SettingsGroup>
 
         {/* 22.10.2026 на экране оставлены только пояс и дневная норма (решение
