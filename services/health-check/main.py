@@ -131,7 +131,7 @@ SENDER_OVERDUE_MIN_MESSAGES = max(1, int(os.environ.get("HEALTH_SENDER_OVERDUE_M
 SENDER_LAG_ALERT_MINUTES = max(SENDER_OVERDUE_MINUTES, int(os.environ.get("HEALTH_SENDER_LAG_ALERT_MIN", "180")))
 # Пока проблема держится — напоминание раз в столько минут.
 SENDER_REPEAT_MINUTES = max(30, int(os.environ.get("HEALTH_SENDER_REPEAT_MIN", "120")))
-SENDER_ALERT_MENTION = os.environ.get("HEALTH_SENDER_ALERT_MENTION", "@kuladmedDm").strip()
+SENDER_ALERT_MENTION = os.environ.get("HEALTH_SENDER_ALERT_MENTION", "").strip()
 # Алерт о копиях — только для передач, созданных после выкладки этого фикса:
 # старые передачи ушли без переписки, их не разбираем.
 # Простой дольше года — не простой, а служебная метка 1970 (см. check_stuck_jobs).
