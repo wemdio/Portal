@@ -6,7 +6,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 import { Reveal } from '@/components/tg-outreach/Reveal';
-import { ArchiveCampaignDialog, CampaignList, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
+import { ArchiveCampaignDialog, CampaignList, DeleteCampaignDialog, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
@@ -7840,17 +7840,13 @@ function CampaignsSection() {
     }
   };
 
-  const deleteCampaign = async (id: string) => {
-    // С 12.08.2026 базы принадлежат кампании и уходят вместе с ней по cascade.
-    // Раньше они переживали удаление, поэтому прежний текст «это действие
-    // необратимо» больше не описывает масштаб потери.
-    if (!confirm(
-      'Удалить кампанию? Вместе с ней будут удалены её базы контактов и вся история отправок по ним.'
-      + ' Это действие необратимо. Если кампания просто больше не нужна — уберите её в архив.',
-    )) return;
-    await authFetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE' });
-    if (selectedId === id) backToList();
-    void fetchCampaigns();
+  // Окно удаления вместо системного confirm. С 12.08.2026 базы принадлежат
+  // кампании и уходят вместе с ней по cascade — окно говорит об этом прямо.
+  const [deleteTarget, setDeleteTarget] = useState<OutreachCampaign | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<OutreachCampaign | null>(null);
+  const deleteCampaign = (id: string) => {
+    const c = campaigns.find((x) => x.id === id);
+    if (c) setDeleteTarget(c);
   };
 
   const selected = campaigns.find(c => c.id === selectedId) ?? null;
@@ -7892,6 +7888,26 @@ function CampaignsSection() {
             Кампания не найдена.{' '}
             <button type="button" onClick={backToList} className="text-indigo-600 hover:underline cursor-pointer">К списку</button>
           </div>
+        )}
+
+        {deleteTarget && (
+          <DeleteCampaignDialog
+            campaign={deleteTarget}
+            onClose={() => setDeleteTarget(null)}
+            onDeleted={() => {
+              if (selectedId === deleteTarget.id) backToList();
+              setDeleteTarget(null);
+              void fetchCampaigns();
+            }}
+            onArchive={() => { setArchiveTarget(deleteTarget); setDeleteTarget(null); }}
+          />
+        )}
+        {archiveTarget && (
+          <ArchiveCampaignDialog
+            campaign={archiveTarget}
+            onClose={() => setArchiveTarget(null)}
+            onDone={() => { setArchiveTarget(null); void fetchCampaigns(); }}
+          />
         )}
 
         {selected && (
