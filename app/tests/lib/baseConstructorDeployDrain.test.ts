@@ -58,7 +58,7 @@ describe('BaseConstructor deploy drain', () => {
     expect(drainWorker).toContain(
       'patch_rows "base_constructor_jobs" "status=eq.processing"',
     );
-    expect(drainWorker).toContain('"started_at":"1970-01-01T00:00:00Z"');
+    expect(drainWorker).toContain('\\"started_at\\":\\"${handoff_at}\\"');
 
     const stopIndex = drainWorker.indexOf('for c in "${bc_containers[@]}"');
     const waitIndex = drainWorker.indexOf('\n  wait', stopIndex);
