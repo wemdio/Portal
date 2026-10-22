@@ -5,15 +5,17 @@ import { discoverContactLinks } from '@/lib/enrich/websiteParser';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { readHeEngSourceCountry, withHeEngSourceCountry } from './engCompanyCountry';
-import { extractHeEngOfficialCountryEvidence, HE_ENG_OWN_ORGANIZATION_TYPES } from './engCompanySearchCountry';
+import { HE_ENG_OWN_ORGANIZATION_TYPES } from './engCompanySearchCountry';
 import { createHeEngCompanySearchCheckpoint, createHeEngRegistryWebsiteSearchPlan, runHeEngCompanySearchPage,
   type HeEngCompanySearchCandidate, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchPlan } from './engCompanySearch';
 import { HeEngBaseBudgetError, isHeEngBaseBudgetError } from './engBaseBudgetLedger';
 import { ENG_COUNTRIES, normalizeEngCountry } from './engCountries';
 import type { HeEngRegistryCandidate } from './engPublicRegistryTypes';
+import { heEngRegistryRecordValid } from './engRegistryIdentity';
 import { HeEngRegistryRetryError } from './engRegistryRetry';
+import { createHeEngSourceEvidenceAudit, recordHeEngSourcePageAudit, type HeEngSourceEvidenceAudit } from './engSourceEvidenceAudit';
 import { fetchHeEngOfficialCompanyPage, heEngEmployeeRangeFit, heEngSearchEmployeeConstraint,
-  readHeEngEmployeeRange, readHeEngOfficialOrganizationFacts, type HeEngEmployeeRange,
+  readHeEngEmployeeRange, type HeEngEmployeeRange,
   type HeEngSearchEvidenceScope, type OfficialPage } from './engSearchCompanyEvidence';
 import { withHeDeadline } from './operationDeadline';
 import { heStageSignal } from './stages/io';
@@ -31,7 +33,7 @@ const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com'
 export type HeEngRegistryResolutionReason = 'confirmed_registry' | 'confirmed_website' | 'invalid_website' |
   'website_not_found' | 'website_search_unavailable' | 'website_unavailable' | 'identity_unconfirmed' |
   'size_scope_ambiguous' | 'size_unconfirmed' | 'outside_size' | 'country_unconfirmed' | 'country_outside';
-export interface HeEngRegistryResolutionResult { row: Row | null; reason: HeEngRegistryResolutionReason }
+export interface HeEngRegistryResolutionResult { row: Row | null; reason: HeEngRegistryResolutionReason; audit?: HeEngSourceEvidenceAudit }
 export interface HeEngRegistryResolutionCheckpoint {
   version: 1;
   candidateFingerprint: string;
@@ -41,6 +43,7 @@ export interface HeEngRegistryResolutionCheckpoint {
   search?: { plan: HeEngCompanySearchPlan; checkpoint: HeEngCompanySearchCheckpoint; candidates: HeEngCompanySearchCandidate[] };
   websiteReadFailures?: number;
   retryAt?: string;
+  audit?: HeEngSourceEvidenceAudit;
   result?: HeEngRegistryResolutionResult;
 }
 /** All injected operations are reads; paid search still uses the base ledger in production. */
@@ -84,6 +87,15 @@ function candidateFingerprint(candidate: HeEngRegistryCandidate): string {
   return fingerprint([candidate.provider, candidate.recordId, candidate.company, candidate.country, candidate.address,
     candidate.addressKind, candidate.category, candidate.employees ?? '', candidate.employeeYear ?? null, candidate.website,
     candidate.emails, candidate.description, candidate.sourceUrl]);
+}
+function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
+  // The adapter validates the record address; never infer country from the
+  // discovery task. UK and French adapters supply validated domestic
+  // registered offices; accepting their country does not claim a local team.
+  return (candidate.addressKind === 'business' ||
+      (['companies_house', 'france'].includes(candidate.provider) && candidate.addressKind === 'registered')) &&
+    text(candidate.address).length >= 5 &&
+    heEngRegistryRecordValid(candidate.provider, candidate.recordId, country(candidate.country), candidate.sourceUrl);
 }
 function normalizeCatalog(rows: readonly Row[], candidate: HeEngRegistryCandidate): Row[] {
   if (rows.length > MAX_CATALOG_ROWS) return [];
@@ -252,15 +264,19 @@ export async function resolveHeEngRegistryCandidate(
   if (state.search?.checkpoint.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
   if (state.retryAt && Date.parse(state.retryAt) > now()) throw new HeEngRegistryRetryError(Math.max(1000, Date.parse(state.retryAt) - now()));
   delete state.retryAt;
+  const audit = state.audit ??= createHeEngSourceEvidenceAudit('public_registry', country(candidate.country) ?? undefined);
   const finish = async (result: HeEngRegistryResolutionResult) => {
-    state.result = result;
+    state.result = { ...result, audit: structuredClone(audit) };
     await options.onCheckpoint(structuredClone(state));
-    return result;
+    return state.result;
   };
   if (!size.valid) return finish({ row: null, reason: 'size_scope_ambiguous' });
   const candidateCountry = country(candidate.country);
   if (!candidateCountry || !allowed.length || allowed.some(value => value === null)) return finish({ row: null, reason: 'country_unconfirmed' });
   if (!allowed.includes(candidateCountry)) return finish({ row: null, reason: 'country_outside' });
+  if (!hasRegistryCountry(candidate)) return finish({ row: null, reason: 'country_unconfirmed' });
+  audit.countrySource = 'public_registry';
+  audit.country = candidateCountry;
   if (state.result) {
     const result = record(state.result), row = record(result?.row);
     const validReasons: HeEngRegistryResolutionReason[] = ['confirmed_registry', 'confirmed_website', 'invalid_website', 'website_not_found',
@@ -270,7 +286,7 @@ export async function resolveHeEngRegistryCandidate(
     const original = row ? record(row._eng_registry_candidate) : null;
     const accepted = ['confirmed_registry', 'confirmed_website'].includes(String(result?.reason));
     const proofBound = proof && (proof.source === 'public_registry'
-      ? candidate.addressKind === 'business' && proof.registryProvider === candidate.provider && proof.sourceId === candidate.recordId &&
+      ? hasRegistryCountry(candidate) && proof.registryProvider === candidate.provider && proof.sourceId === candidate.recordId &&
         proof.sourcePage === candidate.sourceUrl && proof.sourceAddress === candidate.address && proof.country === candidateCountry &&
         result?.reason === 'confirmed_registry'
       : proof.source === 'company_website' && result?.reason === 'confirmed_website');
@@ -308,6 +324,7 @@ export async function resolveHeEngRegistryCandidate(
     await options.onCheckpoint(structuredClone(state));
   }
   const catalogRows = normalizeCatalog(state.catalogRows, candidate);
+  audit.catalogMatches = catalogRows.length;
   const checkedSites = new Set<string>();
   let anyPageRead = false;
   let lastReason: HeEngRegistryResolutionReason = 'website_not_found';
@@ -338,7 +355,7 @@ export async function resolveHeEngRegistryCandidate(
       _eng_source_description: text(candidate.description, 1200), _eng_registry_candidate: structuredClone(candidate),
     });
     const admitRegistry = (range: HeEngEmployeeRange | null): HeEngRegistryResolutionResult | null => {
-      if (candidate.addressKind !== 'business') return null;
+      if (!hasRegistryCountry(candidate)) return null;
       const row = withHeEngSourceCountry(rowFor(range), { source: 'public_registry', sourceName: candidate.company,
         sourceWebsite: site, country: candidate.country, address: candidate.address, id: candidate.recordId,
         page: candidate.sourceUrl, registryProvider: candidate.provider });
@@ -361,33 +378,30 @@ export async function resolveHeEngRegistryCandidate(
       try {
         page = options.reads?.page ? await withHeDeadline('ENG registry company website', 12_000, signal, pageSignal => options.reads!.page!(url, pageSignal))
           : await fetchHeEngOfficialCompanyPage(ctx, url, signal);
-      } catch (error) { interruption(ctx, error); continue; }
+      } catch (error) {
+        recordHeEngSourcePageAudit(audit, url, null);
+        interruption(ctx, error); continue;
+      }
       ctx.onActivity?.();
+      const pageAudit = recordHeEngSourcePageAudit(audit, url, page);
       if (!page || !page.url.startsWith('https:') || !sameSite(page.url, site) || page.html.length > MAX_PAGE_BYTES) continue;
       anyPageRead = true;
       const facts = readHeEngRegistryOwnSiteFacts(page, candidate, { trustedWebsite: trusted });
       const identity = trusted || facts.identity;
+      pageAudit.identity = identity;
       if (!identity) lastReason = 'identity_unconfirmed';
       else {
         // A coarse source band may overlap the scope without proving it. Exact
         // own-site or same-entity catalog headcount can resolve that uncertainty.
         range = heEngEmployeeRangeFit(registrySize, size.range) === 'match' ? registrySize : facts.employees ?? catalogSize;
         const fit = heEngEmployeeRangeFit(range, size.range);
+        pageAudit.employeeFit = fit;
         if (fit !== 'match') lastReason = fit === 'outside' ? 'outside_size' : 'size_unconfirmed';
         else {
           const admitted = admitRegistry(range);
           if (admitted) return admitted;
-          // A registered office is not automatically a business location. Its
-          // actual presence must be proven on this exact company's own website.
-          const evidence = extractHeEngOfficialCountryEvidence({ companyWebsite: site, pageUrl: page.url, html: page.html,
-            allowedCountries: allowed as string[] });
-          const own = evidence ? readHeEngOfficialOrganizationFacts(page, evidence) : null;
-          if (evidence && own && key(own.name) === key(candidate.company)) {
-            const row = withHeEngSourceCountry(rowFor(range), { source: 'company_website', sourceName: candidate.company,
-              sourceWebsite: site, country: evidence.sourceCountry, address: evidence.sourceAddress, page: evidence.pageUrl,
-              organizationWebsite: evidence.sourceOrganizationWebsite, postalAddress: evidence.sourcePostalAddress });
-            if (readHeEngSourceCountry(row)) return { row, reason: 'confirmed_website' };
-          }
+          // A valid source country is already known. Failure to bind its
+          // proof must not be repaired by borrowing another website address.
           lastReason = 'country_unconfirmed';
         }
       }

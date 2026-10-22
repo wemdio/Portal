@@ -1,6 +1,7 @@
 import { heEngBaseBudgetActive, isHeEngBaseBudgetPreflightFailure, rethrowHeEngBaseBudgetError } from './engBaseBudget';
 import { z } from 'zod';
 
+import { companySiteAlias } from '@/lib/enrich/companySiteAlias';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { normalizeLeadWebsite } from '@/lib/instantly/leadContactValues';
 import { heCompanySiteIdentity } from './collectionIdentity';
@@ -91,6 +92,15 @@ function sameSite(raw: string, website: string): boolean {
   return !!expected && !!actual && expected === actual;
 }
 
+/**
+ * Own site, or a domain of the same brand (companySiteAlias). Pages of such a
+ * domain are read only after the company's own page redirected there; stored
+ * evidence is re-checked with this same deterministic rule.
+ */
+function companySite(raw: string, website: string, company: string): boolean {
+  return sameSite(raw, website) || (!!company && companySiteAlias(raw, website, company) !== null);
+}
+
 function interrupted(ctx: HeStageContext, error?: unknown): void {
   heStageSignal(ctx)?.throwIfAborted();
   const candidate = error as { name?: unknown; heJobInterruption?: unknown } | undefined;
@@ -140,9 +150,12 @@ function hypothesisWords(scope: HeEngQualificationScope, titlesOnly = false): Se
     .filter((word) => !generic.has(word)).map(serviceStem));
 }
 
-async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, website: string, scope: HeEngQualificationScope): Promise<PageRead> {
+async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, website: string, company: string, scope: HeEngQualificationScope): Promise<PageRead> {
   const pages: HeFetchedPage[] = [];
   const attempted = new Set<string>();
+  // Same-brand domains the company's own pages redirected to (companySiteAlias).
+  const aliasSites = new Set<string>();
+  const own = (url: string) => sameSite(url, website) || aliasSites.has(siteBoundary(url) ?? '');
   const words = hypothesisWords(scope);
   const titleWords = hypothesisWords(scope, true);
   type Candidate = { url: string; depth: number; priority: number; kind: string; specificService?: boolean };
@@ -184,7 +197,7 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     for (const kind of preferred) { next = queue.findIndex((item) => item.kind === kind); if (next >= 0) break; }
     const candidate = queue.splice(next >= 0 ? next : 0, 1)[0];
     const key = urlKey(candidate.url);
-    if (!key || attempted.has(key) || !sameSite(candidate.url, website)) continue;
+    if (!key || attempted.has(key) || !own(candidate.url)) continue;
     attempted.add(key);
     attemptedKinds.push(candidate.kind);
     let page: HeFetchedPage | null;
@@ -196,8 +209,11 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
       continue;
     }
     interrupted(ctx);
-    if (!page || !sameSite(page.url, website) || (website.startsWith('https:') && !page.url.startsWith('https:'))) {
-      unverifiedRedirect ||= !!page && !sameSite(page.url, website);
+    if (page && !own(page.url) && companySiteAlias(page.url, website, company)) {
+      aliasSites.add(siteBoundary(page.url) ?? page.url);
+    }
+    if (!page || !own(page.url) || (website.startsWith('https:') && !page.url.startsWith('https:'))) {
+      unverifiedRedirect ||= !!page && !own(page.url);
       if (candidate.depth === 0) { retryableFailure ||= !page; if (!fallbackOrigin()) break; }
       continue;
     }
@@ -208,7 +224,7 @@ async function companyPages(ctx: HeStageContext, fetchPage: HeFetchPageFn, websi
     if (candidate.depth >= MAX_PAGE_DEPTH) continue;
     for (const link of page.companyEvidenceLinks ?? []) {
       const linkKey = urlKey(link.url);
-      if (!linkKey || attempted.has(linkKey) || !sameSite(link.url, website) || (website.startsWith('https:') && !link.url.startsWith('https:')) || queue.some((item) => urlKey(item.url) === linkKey)) continue;
+      if (!linkKey || attempted.has(linkKey) || !own(link.url) || (website.startsWith('https:') && !link.url.startsWith('https:')) || queue.some((item) => urlKey(item.url) === linkKey)) continue;
       const path = new URL(link.url).pathname;
       const labelWords = `${link.label ?? ''} ${path}`.toLowerCase().match(/[a-z]{4,}/g) ?? [];
       const stemmed = labelWords.map(serviceStem);
@@ -290,7 +306,7 @@ function fitInput(key: string, row: HeEngQualificationRow, website: string, page
   const words = hypothesisWords(scope);
   const candidates: Array<{ id: string; url: string; text: string; source: 'constructor_website' | 'website'; normalized: string; score: number; order: number }> = [];
   for (const [pageIndex, page] of pages.entries()) {
-    if (!sameSite(page.url, website)) continue;
+    if (!companySite(page.url, website, typeof row.company === 'string' ? row.company : '')) continue;
     const add = (raw: string) => {
       const text = quoteText(raw);
       if (text.length < 12 || text.length > 1400 || (!page.evidenceSource && text.includes('[email removed]')) ||
@@ -451,19 +467,23 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   memo.economy = { version: 1, workflow: 'fit_review_v3_single', budget, prepared: {}, proposals: {} };
   const preparedSchema = z.object({ website: z.string().min(1).max(2000), pages: z.array(z.object({ url: z.string().max(2000), text: z.string().max(MAX_PAGE_TEXT),
     evidenceSource: z.enum(['constructor_website', 'website']).optional() })).max(MAX_PAGES + 3),
-    retryableFailure: z.boolean(), collectedJobId: z.string().uuid().optional(), excerptVersion: z.literal(2).optional() });
+    retryableFailure: z.boolean(), collectedJobId: z.string().uuid().optional(), excerptVersion: z.literal(2).optional(),
+    // Present only when a page came from a same-brand domain (companySiteAlias).
+    company: z.string().min(1).max(1000).optional() });
   if (Object.keys(saved?.prepared ?? {}).length > 16 || Object.keys(saved?.proposals ?? {}).length > 16) throw new HeEngQualificationScopeError('too many cached companies');
   const preparedHistory = new Set<string>();
   for (const [key, raw] of Object.entries(saved?.prepared ?? {})) {
     const item = preparedSchema.safeParse(raw);
     if (!/^[a-f0-9]{64}$/.test(key) || !item.success || !normalizeLeadWebsite(item.data.website) || item.data.pages.some((page) =>
-      !sameSite(page.url, item.data.website) || (item.data.website.startsWith('https:') && !page.url.startsWith('https:')) || withoutEmails(page.text) !== page.text)) throw new HeEngQualificationScopeError('invalid cached company evidence');
+      !companySite(page.url, item.data.website, item.data.company ?? '') || (item.data.website.startsWith('https:') && !page.url.startsWith('https:')) || withoutEmails(page.text) !== page.text)) throw new HeEngQualificationScopeError('invalid cached company evidence');
     preparedHistory.add(key);
     const row = pending.get(key);
     if (!row) continue;
     const normalized = normalizeLeadWebsite(row.website);
     const website = normalized && (/^https?:\/\//i.test(normalized) ? normalized : `https://${normalized}`);
-    if (item.data.website !== website) throw new HeEngQualificationScopeError('invalid cached company identity');
+    if (item.data.website !== website || (item.data.company !== undefined && item.data.company !== row.company)) {
+      throw new HeEngQualificationScopeError('invalid cached company identity');
+    }
     memo.economy.prepared[key] = item.data;
   }
   const safeScope = JSON.parse(withoutEmails(JSON.stringify(scope))) as HeEngQualificationScope;
@@ -554,13 +574,14 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
         const sufficient = reused.length > 0 && !collected!.pages.some((page) => page.truncated) &&
           enoughCollectedText(fitInput(key, row, website, reused, scope, 2), scope);
         const read: PageRead = sufficient ? { pages: [], retryableFailure: false, unverifiedRedirect: false }
-          : await companyPages(ctx, fetchPage, website, scope);
+          : await companyPages(ctx, fetchPage, website, row.company, scope);
         const pages: QualificationPage[] = [...reused, ...read.pages.map(({ url, text }) => ({ url, text, evidenceSource: 'website' as const }))];
         if (!pages.length) {
           const attempts = Math.min(MAX_COMPANY_ATTEMPTS, (memo.attempts![key]?.attempts ?? 0) + 1);
           memo.attempts![key] = { attempts, kind: read.retryableFailure ? 'site_transient' : 'site_unavailable' };
           if (!read.retryableFailure || attempts >= MAX_COMPANY_ATTEMPTS) finish(key, unverified(scope, key, read.unverifiedRedirect ? 'website_redirect_unverified' : 'site_unavailable_exhausted'));
         } else memo.economy!.prepared[key] = { website, pages, retryableFailure: read.retryableFailure, excerptVersion: 2,
+          ...(pages.some((page) => !sameSite(page.url, website)) ? { company: row.company } : {}),
           ...(reused.length ? { collectedJobId: collected!.jobId } : {}) };
         await save();
       } catch (error) { if (!failed) { failed = true; readFailure = error; } }

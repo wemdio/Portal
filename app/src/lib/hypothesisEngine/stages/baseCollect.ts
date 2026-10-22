@@ -214,6 +214,7 @@ import {
   type HeEngCompanySearchPlan, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchCandidate,
 } from '../engCompanySearch';
 import { resolveHeEngSearchCompanyEvidence, heEngSearchEmployeeConstraint } from '../engSearchCompanyEvidence';
+import { compactHeEngSourceEvidenceAudits, type HeEngSourceEvidenceAudit } from '../engSourceEvidenceAudit';
 import { createHeEngRegistryPlan } from '../engPublicRegistryPlan';
 import { createHeEngRegistryWave, heEngRegistrySourceTasks, runHeEngRegistryWave, HeEngRegistryRetryError,
   type HeEngRegistryState, type HeEngRegistryWave } from '../engRegistryCollection';
@@ -1254,6 +1255,7 @@ interface HeEngCollectionWork {
   search_resolved?: number;
   search_rows?: HeUnifiedRow[];
   search_exclusions?: Record<string, number>;
+  search_decisions?: Array<{ website: string; reason: string; audit?: HeEngSourceEvidenceAudit }>;
   registry_wave?: HeEngRegistryWave;
 }
 
@@ -1262,6 +1264,7 @@ export interface HeCollectInfo {
   eng_collection_pool?: HeEngCollectionPool;
   eng_collection_work?: HeEngCollectionWork;
   eng_collection_round_audit?: Array<{ round: number; constructor?: HeConstructInfo; search_exclusions?: Record<string, number>;
+    search_decisions?: HeEngCollectionWork['search_decisions'];
     registry?: { taskId: string; recordsRead: number; resolved: number; eligible: number; excluded: Record<string, number>;
       decisions: HeEngRegistryWave['decisions']; pending?: HeEngRegistryWave } }>;
 
@@ -5451,13 +5454,14 @@ function constructWaitExpired(construct: HeConstructInfo): boolean {
 const CONSTRUCT_FIND_EMAILS_SITE_DEADLINE_MS = 30_000;
 
 /**
- * Страниц на сайт при глубоком обходе (market='us'). Дефолт шага — 5, берём 4:
- * столько же, сколько V2 оставил после замеров, и заведомо не больше, чем
- * обходилось до включения глубокого поиска. Контакты лежат на главной и на
- * «contact/about», хвост страниц даёт адреса всё реже, а платим за него
- * временем каждого сайта.
+ * Страниц на сайт при глубоком обходе (market='us'). Было 4, как у V2. Замер
+ * 22.10.2026 на 792 кандидатах HST Asset managers: у 135 компаний сайт читался,
+ * а почты не нашлось, и только 41 из них дошла до страницы контактов — четыре
+ * страницы и восемь попыток уходили на главную, «about» и угаданные адреса с
+ * 404. Шесть страниц (двенадцать попыток) оставляют место для контактов и
+ * юридической страницы; срок на сайт (30 с) тот же, он и держит цену.
  */
-const CONSTRUCT_FIND_EMAILS_MAX_PAGES = 4;
+const CONSTRUCT_FIND_EMAILS_MAX_PAGES = 6;
 
 /**
  * Потолок адресов с одного сайта — предохранитель от «сайта-простыни»
@@ -6839,8 +6843,8 @@ async function dispatchHeEngSearchBatch(
     });
     if (result.status !== 'more') break;
   }
-  // Country/size come from independent catalogue or own structured address,
-  // never the search phrase. These reads are free, bounded and checkpointed.
+  // Reuse actual catalogue country independently of size. Without a catalogue
+  // record, read own-site location; the search phrase is never a country fact.
   const candidates = work.search_candidates ?? [];
   while ((work.search_resolved ?? 0) < candidates.length) {
     const candidate = candidates[work.search_resolved ?? 0];
@@ -6857,6 +6861,8 @@ async function dispatchHeEngSearchBatch(
       work.search_exclusions ??= {};
       work.search_exclusions[evidence.reason] = (work.search_exclusions[evidence.reason] ?? 0) + 1;
     }
+    work.search_decisions = [...(work.search_decisions ?? []), { website: candidate.website, reason: evidence.reason,
+      ...(evidence.audit ? { audit: evidence.audit } : {}) }];
     work.search_resolved = (work.search_resolved ?? 0) + 1;
     if (!(await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true }))) throw new Error('ENG collection cancelled');
   }
@@ -6944,13 +6950,27 @@ async function finishHeEngTargetRound(
     if (info.eng_company_qualification) {
       info.eng_company_qualification = compactHeEngCollectionQualificationMemo(info.eng_company_qualification);
     }
+    if (!settleExistingPool) info.eng_collection_round_audit = [...(info.eng_collection_round_audit ?? []), {
+      round: work.round, ...(info.construct ? { constructor: info.construct } : {}),
+      ...(work.search_exclusions ? { search_exclusions: work.search_exclusions } : {}),
+      ...(work.search_decisions ? { search_decisions: work.search_decisions } : {}),
+      ...(work.registry_wave ? { registry: { taskId: work.registry_wave.taskId, recordsRead: work.registry_wave.recordsRead,
+        resolved: work.registry_wave.resolved, eligible: work.registry_wave.rows.length, excluded: work.registry_wave.excluded,
+        decisions: work.registry_wave.decisions,
+        ...(work.registry_wave.resolution || work.registry_wave.resolved < work.registry_wave.candidates.length
+          ? { pending: work.registry_wave } : {}) } } : {}),
+    }];
+    compactHeEngSourceEvidenceAudits((info.eng_collection_round_audit ?? []).flatMap(audit => [
+      ...(audit.search_decisions ?? []).map(decision => decision.audit),
+      ...(audit.registry?.decisions ?? []).map(decision => decision.audit),
+    ]));
     // Do not start another paid wave with an ever-growing JSON checkpoint.
     // Keep every verdict/proof and the actual contacts; stop truthfully before
     // accumulated history can turn each small model checkpoint into a huge write.
     const durableBytes = Buffer.byteLength(JSON.stringify({
       memo: info.eng_company_qualification, pool: round.pool,
       countries: info.eng_source_countries, seen: work.seen_companies, history: work.history,
-      registry: info.eng_public_registry,
+      registry: info.eng_public_registry, roundAudit: info.eng_collection_round_audit,
     }), 'utf8');
     if (durableBytes > 16 * 1024 * 1024 && round.target.phase !== 'stopped') {
       round.target = stopHeEngCollectionTarget(round.target, 'safety_limit');
@@ -6968,15 +6988,7 @@ async function finishHeEngTargetRound(
     info.eng_collection_work = { version: 1, round: work.round + (settleExistingPool ? 0 : 1),
       batch_size: Math.max(1, nextHeEngCollectionBatchSize(round)), active_source_key: null,
       seen_companies: work.seen_companies, history: work.history };
-    if (!settleExistingPool) info.eng_collection_round_audit = [...(info.eng_collection_round_audit ?? []), {
-      round: work.round, ...(info.construct ? { constructor: info.construct } : {}),
-      ...(work.search_exclusions ? { search_exclusions: work.search_exclusions } : {}),
-      ...(work.registry_wave ? { registry: { taskId: work.registry_wave.taskId, recordsRead: work.registry_wave.recordsRead,
-        resolved: work.registry_wave.resolved, eligible: work.registry_wave.rows.length, excluded: work.registry_wave.excluded,
-        decisions: work.registry_wave.decisions,
-        ...(work.registry_wave.resolution || work.registry_wave.resolved < work.registry_wave.candidates.length
-          ? { pending: work.registry_wave } : {}) } } : {}),
-    }];
+
     if (continuing) delete info.construct;
     else info.construct = { bc_job_id: null, status: 'done', contact_cap: saved.pool.max_emails_per_company,
       valid_count: readyCount, note: 'Completed checked contact batches; per-batch results retained in the collection audit.' };
