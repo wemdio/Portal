@@ -2196,6 +2196,41 @@ async def _check_sender(conn) -> list[str]:
         more = f"\n…и ещё {len(fresh) - 15}" if len(fresh) > 15 else ""
         problems.append(f"🟠 <b>Рассылка: ящики перешли в «Ошибка» ({len(fresh)})</b>\n{lines}{more}")
 
+    # 4. Копия лида на общую почту AMO не ушла: без неё менеджеры не ведут переписку.
+    try:
+        handoffs = await conn.fetch(
+            "SELECT h.id::text AS id, h.scope, h.lead_email, h.status, h.attempts, h.error, h.updated_at, "
+            "       mm.status AS mm_status, mm.error AS mm_error "
+            "FROM public.agency_lead_handoffs h "
+            "LEFT JOIN public.sender_manual_messages mm ON mm.agency_handoff_id = h.id "
+            "WHERE h.updated_at > now() - interval '3 days' AND ("
+            "  h.status IN ('failed','skipped','unknown') "
+            "  OR (h.status = 'sending' AND h.updated_at < now() - interval '15 minutes') "
+            "  OR (h.status = 'queued' AND mm.status = 'failed') "
+            "  OR (h.status = 'queued' AND mm.status IN ('queued','sending') "
+            "      AND mm.updated_at < now() - interval '30 minutes') "
+            "  OR (h.status = 'pending' AND h.attempts >= 3)) "
+            "ORDER BY h.updated_at LIMIT 30"
+        )
+    except Exception as e:
+        print(f"[health] agency handoff query skipped: {e}")
+        handoffs = []
+    lines = []
+    for r in handoffs:
+        state = f"{r['status']}/{r['mm_status']}" if r["mm_status"] else r["status"]
+        if not await _claim_job_alert(conn, f"handoff:{r['id']}:{state}"):
+            continue
+        reason = str(r["mm_error"] or r["error"] or "без текста ошибки")[:300]
+        lines.append(
+            f"• <code>{html.escape(str(r['scope']))}</code> {html.escape(str(r['lead_email']))} · "
+            f"{html.escape(state)} · попыток {r['attempts']}\n  <code>{html.escape(reason)}</code>"
+        )
+    if lines:
+        problems.append(
+            f"🔴 <b>Копия лида не ушла на polza@ ({len(lines)})</b>\n" + "\n".join(lines)
+            + "\nПередать вручную: в AMO нет переписки, менеджер не видит диалог."
+        )
+
     return problems
 
 
