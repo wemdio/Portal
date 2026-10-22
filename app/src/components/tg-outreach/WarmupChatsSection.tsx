@@ -43,6 +43,8 @@ export default function WarmupChatsSection({
   const [adding, setAdding] = useState(false);
   const [checking, setChecking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /** Жёлтая подсказка про формат: не ошибка сервера, а просьба поправить ввод. */
+  const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Проверка чатов занимает аккаунт кампании, поэтому доступна только на
@@ -70,8 +72,17 @@ export default function WarmupChatsSection({
   };
 
   const addChats = async (raw: string = bulkText) => {
-    const links = raw.split(/[\n,;\s]+/).map((s) => s.trim()).filter(Boolean);
+    // Одна ссылка на строку: запятые и пробелы — не разделитель. Если в строке
+    // больше одной ссылки, ничего не добавляем и просим разнести по строкам.
+    const links = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (!links.length) return;
+    if (links.some((l) => /[\s,;]/.test(l))) {
+      setBulkText(raw);
+      setNotice(null);
+      setWarning('Один чат на строку. Ссылки через запятую или пробел не принимаются — поставьте каждую с новой строки.');
+      return;
+    }
+    setWarning(null);
     setAdding(true);
     setError(null);
     setNotice(null);
@@ -225,7 +236,7 @@ export default function WarmupChatsSection({
           уходите из поля. Кнопки «Добавить» нет. */}
       <textarea
         value={bulkText}
-        onChange={(e) => setBulkText(e.target.value)}
+        onChange={(e) => { setBulkText(e.target.value); if (warning) setWarning(null); }}
         onPaste={(e) => {
           const pasted = e.clipboardData.getData('text');
           if (!pasted.trim()) return;
@@ -233,10 +244,16 @@ export default function WarmupChatsSection({
           void addChats(`${bulkText}\n${pasted}`);
         }}
         onBlur={() => { if (bulkText.trim() && !adding) void addChats(); }}
-        rows={2}
-        placeholder={'Вставьте ссылки: t.me/chat_name или @another_chat'}
+        rows={3}
+        placeholder={'По одной ссылке на строку:\nt.me/chat_name\n@another_chat'}
         className="block w-full resize-y rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-indigo-400"
       />
+      {warning && (
+        <div className="flex items-start gap-1.5 rounded-lg border border-amber-300/60 bg-amber-400/10 px-2.5 py-1.5 text-[11px] text-amber-600">
+          <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+          {warning}
+        </div>
+      )}
       {adding && (
         <div className="flex items-center gap-1.5 text-[11px] text-gray-500"><Loader2 className="h-3 w-3 animate-spin" />Добавляю…</div>
       )}
