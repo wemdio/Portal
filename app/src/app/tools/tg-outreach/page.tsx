@@ -5513,6 +5513,9 @@ function CampaignBasesTab({
 
   return (
     <div className="space-y-4">
+      {/* Пока список не пришёл, шапка («Базы контактов (0)», поле имени, кнопка)
+          не рисуется: «(0)» врал, а форма создания мигала до загрузки. */}
+      {!loading && (
       <div className="flex items-center justify-between flex-wrap gap-2">
         <span className="text-sm font-medium text-gray-700">
           Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
@@ -5530,6 +5533,7 @@ function CampaignBasesTab({
           </button>
         </div>
       </div>
+      )}
 
       {notice && (
         <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-900">{notice}</div>
@@ -5539,7 +5543,11 @@ function CampaignBasesTab({
       )}
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        <div className="space-y-2" aria-busy="true" aria-label="Загрузка баз">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-16 animate-pulse rounded-xl border border-gray-200 bg-white/50" style={{ animationDelay: `${i * 120}ms` }} />
+          ))}
+        </div>
       ) : bases.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
           <Database className="mx-auto h-8 w-8 text-gray-300 mb-2" />
