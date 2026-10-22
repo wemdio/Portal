@@ -432,22 +432,6 @@ function Collapsible({ title, hint, badge, children }: {
   );
 }
 
-/* Переключатель вместо галочки: follow-up включают и выключают целиком, и
-   состояние должно читаться с расстояния — залитый синим тумблер видно сразу,
-   пустой квадратик галочки нет. Ползунок ездит слева направо и обратно. */
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <label className="flex w-fit cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
-      <span className="relative inline-flex shrink-0">
-        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="peer sr-only" />
-        <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
-      </span>
-      {label}
-    </label>
-  );
-}
-
 /* =================== SETTINGS TAB =================== */
 function SettingsTab({ campaign, onSave }: {
   campaign: OutreachCampaign;
@@ -502,77 +486,73 @@ function SettingsTab({ campaign, onSave }: {
   const setTG = <K extends keyof TelegramSettings>(k: K, v: TelegramSettings[K]) =>
     setTelegram(prev => ({ ...prev, [k]: v }));
 
+  const blockedCount = blockedRaw.split(',').map(x => x.trim()).filter(Boolean).length;
+
+  // Форма из групп: слева — что настраивается и зачем, справа — поля. Раньше
+  // поля шли сплошной стеной без заголовков, и найти нужное было тяжело.
   return (
-    <div className="space-y-6" onChangeCapture={() => { setSaved(false); setSaveError(null); }}>
-      {/* Промпт, триггеры и чаты-приёмники. Заголовка нет намеренно: «OpenRouter»
-          называл поставщика модели, а не то, что оператор здесь настраивает. */}
-      <section className="space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1">
+    <div className="pb-20" onChangeCapture={() => { setSaved(false); setSaveError(null); }}>
+      <div className="rounded-2xl border border-gray-200 bg-white px-5 md:px-7">
+        <SettingsGroup title="Кампания" hint="Название видно в списке кампаний.">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Field label="Название кампании" value={campaignName} onChange={setCampaignName} />
-            <p className="text-[10px] text-gray-400">Отображается в списке кампаний и заголовке.</p>
+            <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
           </div>
-          <Field label="Название проекта" value={openai.project_name} onChange={v => setOAI('project_name', v)} />
-        </div>
-        <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={6} />
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <FieldArea label="Триггер (положительный)" value={openai.trigger_phrases_positive} onChange={v => setOAI('trigger_phrases_positive', v)} rows={2} />
-          <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
-        </div>
+        </SettingsGroup>
+
+        <SettingsGroup title="Как отвечает бот" hint="Роль, тон и правила, по которым GPT ведёт переписку.">
+          <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={8} />
+        </SettingsGroup>
+
         {/* Чат пересылки наполняет автоматика по триггерной фразе; ручные
             передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же.
             Пустой чат — передача лида становится просто пометкой «Лид». */}
-        <p className="text-[10px] text-gray-400 -mt-2">
-          В чат пересылки бот отправляет сам по триггерной фразе. Пусто — контакт только помечается лидом.
-        </p>
-        {/* Для кампаний, где квалификацию (роль, объём, бюджет) ведёт промпт:
-            общая проверка интереса передавала лида на «расскажите подробнее»
-            в обход промпта. См. OpenAISettings.handoff_direct_request_only. */}
-        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-          <input type="checkbox" checked={openai.handoff_direct_request_only === true} onChange={e => setOAI('handoff_direct_request_only', e.target.checked)} className="rounded border-gray-300" />
-          Передавать сам только по прямой просьбе: менеджер, созвон, встреча
-        </label>
-        {/* Жёсткое правило поверх промпта: лид уходит менеджеру только после
-            ответов на эти вопросы. См. OpenAISettings.qualification_required. */}
-        <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-          <input type="checkbox" checked={openai.qualification_required === true} onChange={e => setOAI('qualification_required', e.target.checked)} className="rounded border-gray-300" />
-          Передавать только после квалификации
-        </label>
-        {openai.qualification_required === true && (
-          <>
-            <FieldArea label="Контрольные вопросы (по одному в строке)" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
-            <p className="text-[10px] text-gray-400 -mt-2">
-              Не ответил на все — бот спросит один раз. Всё равно не ответил — лид уйдёт с пометкой «без полной квалификации».
-            </p>
-          </>
-        )}
-      </section>
+        <SettingsGroup title="Передача лида" hint="Когда бот сам передаёт человека менеджеру и куда.">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <FieldArea label="Триггерная фраза" value={openai.trigger_phrases_positive} onChange={v => setOAI('trigger_phrases_positive', v)} rows={2} />
+            <div className="space-y-1">
+              <Field label="Чат для пересылки" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
+              <p className="text-[11px] text-gray-400">Пусто — контакт только помечается лидом.</p>
+            </div>
+          </div>
+          {/* Для кампаний, где квалификацию (роль, объём, бюджет) ведёт промпт:
+              общая проверка интереса передавала лида на «расскажите подробнее»
+              в обход промпта. См. OpenAISettings.handoff_direct_request_only. */}
+          <SwitchRow
+            checked={openai.handoff_direct_request_only === true}
+            onChange={v => setOAI('handoff_direct_request_only', v)}
+            label="Только по прямой просьбе"
+            hint="Передавать, когда человек сам просит менеджера, созвон или встречу."
+          />
+          {/* Жёсткое правило поверх промпта: лид уходит менеджеру только после
+              ответов на эти вопросы. См. OpenAISettings.qualification_required. */}
+          <SwitchRow
+            checked={openai.qualification_required === true}
+            onChange={v => setOAI('qualification_required', v)}
+            label="Только после квалификации"
+            hint="Сначала ответы на контрольные вопросы, потом передача."
+          />
+          {openai.qualification_required === true && (
+            <div className="space-y-1 pl-12">
+              <FieldArea label="Контрольные вопросы, по одному в строке" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
+              <p className="text-[11px] text-gray-400">
+                Не ответил на все — бот спросит один раз. Опять нет — лид уйдёт с пометкой «без полной квалификации».
+              </p>
+            </div>
+          )}
+        </SettingsGroup>
 
-      {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
-      <CrmSettingsPanel campaignId={campaign.id} onChange={setCrm} />
+        {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
+        <SettingsGroup title="Сделка в CRM" hint="Переданный лид сразу становится сделкой.">
+          <CrmSettingsPanel campaignId={campaign.id} onChange={setCrm} />
+        </SettingsGroup>
 
-      {/* Заголовок «Telegram» снят с секции: экран целиком про Telegram-аутрич,
-          и подпись ничего не отделяла от соседних блоков. */}
-      <section className="space-y-4">
-        {/* Названия сверены с кодом: каждое поле подписано тем, что оно делает
-            на самом деле, а не тем, как называется переменная. Три подписи были
-            неверны и вводили в заблуждение — история в комментариях ниже. */}
-        {/* «Сообщений в пересылке» и «Сообщений в контексте GPT» убраны с экрана
-            09.09.2026: пересылка лида шлёт 5 последних сообщений, модель читает
-            20 — дефолты подходят всегда, сохранённые значения кампаний воркер
-            продолжает читать как раньше. */}
         {/* 22.10.2026 на экране оставлены только пояс и дневная норма (решение
             пользователя). Паузы, порции, параллельность и паузу после
             ограничения кампания берёт из сохранённых значений, а новая — из
             DEFAULT_TELEGRAM_SETTINGS (lib/tgOutreach/types.ts). */}
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
-          <div className="w-auto space-y-1">
-            <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
-            <p className="text-[10px] text-gray-400">
-              Влияет только на «Периоды сна».
-            </p>
-          </div>
-          <div className="w-52 space-y-1">
+        <SettingsGroup title="Рассылка" hint="Сколько первых сообщений уходит и когда аккаунты молчат.">
+          <div className="flex flex-wrap items-start gap-x-8 gap-y-4">
             <StepperField
               label="Первых сообщений на аккаунт в сутки"
               value={telegram.first_touch_per_account_per_day ?? 3}
@@ -581,102 +561,127 @@ function SettingsTab({ campaign, onSave }: {
               onChange={v => setTG('first_touch_per_account_per_day', v)}
               title="Дневная норма первых сообщений на каждый аккаунт. Ноль выключает рассылку."
             />
+            <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
           </div>
-        </div>
-        {/* «Окно ожидания диалога» (dialog_wait_window_range) убрано с экрана:
-            ключ есть в TelegramSettings и в дефолтах, но НИ ОДНА строка кода его
-            не читает — поле ничего не делало, а операторы его крутили. Значение
-            в БД оставлено как есть, чтобы не трогать сохранённые кампании. */}
-        <Field half label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
-        <div className="flex flex-col gap-2">
-          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.reply_only_if_previously_wrote} onChange={e => setTG('reply_only_if_previously_wrote', e.target.checked)} className="rounded border-gray-300" />
-            Отвечать только если ранее писали
-          </label>
-          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.auto_allow_new_dialogs} onChange={e => setTG('auto_allow_new_dialogs', e.target.checked)} className="rounded border-gray-300" />
-            Новым диалогам разрешать отправку автоматически
-          </label>
-          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.ignore_no_username} onChange={e => setTG('ignore_no_username', e.target.checked)} className="rounded border-gray-300" />
-            Игнорировать без имени пользователя
-          </label>
-        </div>
+          <div className="space-y-1">
+            <Field half label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
+            <p className="text-[11px] text-gray-400">По часовому поясу выше. В эти часы аккаунты не пишут и не отвечают.</p>
+          </div>
+        </SettingsGroup>
+
         {/* Галочки «Писать только контактам из баз» и «Игнорировать ботов» сняты
             с экрана 10.09.2026: обе теперь заложены в инструмент и работают
-            всегда (campaignLoop). Выключать их было незачем — выключенная первая
-            возвращала ответы партнёрам по прогреву и фальшивые лиды. */}
-      </section>
-
-      {/* Оба чёрных списка — рядом: заполняют их редко и обычно вместе, а по
-          отдельности каждый занимал целую строку экрана. */}
-      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
-        <Collapsible
-          title="Чёрный список username"
-          hint="Через запятую. Этим аккаунтам кампания не пишет и не отвечает."
-          badge={blockedRaw.trim() ? `${blockedRaw.split(',').map(x => x.trim()).filter(Boolean).length}` : undefined}
-        >
-          <Field
-            label="Через запятую"
-            value={blockedRaw}
-            onChange={setBlockedRaw}
-            placeholder="SpamBot, another_bot"
+            всегда (campaignLoop). */}
+        <SettingsGroup title="Кому отвечать" hint="Фильтры входящих сообщений.">
+          <SwitchRow
+            checked={telegram.reply_only_if_previously_wrote}
+            onChange={v => setTG('reply_only_if_previously_wrote', v)}
+            label="Только тем, кому мы уже писали"
           />
-        </Collapsible>
-        <GlobalBlocklistSection />
+          <SwitchRow
+            checked={telegram.auto_allow_new_dialogs}
+            onChange={v => setTG('auto_allow_new_dialogs', v)}
+            label="Сразу разрешать отправку в новых диалогах"
+          />
+          <SwitchRow
+            checked={telegram.ignore_no_username}
+            onChange={v => setTG('ignore_no_username', v)}
+            label="Игнорировать людей без username"
+          />
+        </SettingsGroup>
+
+        {/* Оба чёрных списка — рядом: заполняют их редко и обычно вместе. */}
+        <SettingsGroup title="Чёрные списки" hint="Этим людям кампания не пишет и не отвечает.">
+          <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-2">
+            <Collapsible
+              title="Username кампании"
+              hint="Через запятую. Действует только в этой кампании."
+              badge={blockedCount ? `${blockedCount}` : undefined}
+            >
+              <Field label="Через запятую" value={blockedRaw} onChange={setBlockedRaw} placeholder="SpamBot, another_bot" />
+            </Collapsible>
+            <GlobalBlocklistSection />
+          </div>
+        </SettingsGroup>
+
+        <SettingsGroup title="Follow-up" hint="Одно напоминание, если человек не ответил.">
+          <SwitchRow
+            checked={telegram.follow_up.enabled}
+            onChange={v => setTG('follow_up', { ...telegram.follow_up, enabled: v })}
+            label="Отправлять follow-up"
+            hint="Только если последнее сообщение наше, один раз на человека, не тем, кто уже обработан."
+          />
+          {telegram.follow_up.enabled && (
+            <div className="space-y-4 pl-12">
+              <div className="flex flex-wrap gap-4">
+                <div className="w-40">
+                  <FieldNum label="Через, часов" value={telegram.follow_up.delay_hours} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_hours: v })} />
+                </div>
+                <div className="w-40">
+                  <FieldNum label="и минут" value={telegram.follow_up.delay_minutes ?? 0} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_minutes: v })} />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <FieldArea label="Промпт для follow-up" value={telegram.follow_up.prompt} onChange={v => setTG('follow_up', { ...telegram.follow_up, prompt: v })} rows={4} placeholder="Напиши короткое напоминание о себе..." />
+                <p className="text-[11px] text-gray-400">GPT учтёт историю переписки.</p>
+              </div>
+            </div>
+          )}
+        </SettingsGroup>
       </div>
 
-      {/* Follow-up */}
-      <section className="space-y-4">
-        {/* Пояснение вынесено в сам заголовок: отдельная строка под ним занимала
-            место ради одной фразы. */}
-        <h3 className="text-sm font-semibold text-gray-800">
-          Настройки Follow-up сообщений{' '}
-          <span className="font-normal text-gray-400">(уходит один раз на диалог, если человек не ответил)</span>
-        </h3>
-        <Toggle
-          checked={telegram.follow_up.enabled}
-          onChange={v => setTG('follow_up', { ...telegram.follow_up, enabled: v })}
-          label="Включить Follow-up сообщения"
-        />
-        {telegram.follow_up.enabled && (
-          <div className="space-y-4 rounded-lg border border-gray-200 p-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <FieldNum label="Задержка перед отправкой (часы)" value={telegram.follow_up.delay_hours} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_hours: v })} />
-              </div>
-              <div>
-                <FieldNum label="Задержка (минуты)" value={telegram.follow_up.delay_minutes ?? 0} onChange={v => setTG('follow_up', { ...telegram.follow_up, delay_minutes: v })} />
-              </div>
-            </div>
-            <p className="text-[11px] text-gray-500">Через сколько времени без ответа отправить follow-up (по умолчанию: 24 часа 0 минут)</p>
-            <div>
-              <FieldArea label="Промпт для генерации сообщения" value={telegram.follow_up.prompt} onChange={v => setTG('follow_up', { ...telegram.follow_up, prompt: v })} rows={4} placeholder="Напиши короткое напоминание о себе..." />
-              <p className="mt-1 text-[11px] text-gray-500">GPT учтёт историю переписки. Опишите, каким должно быть сообщение.</p>
-            </div>
-            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 text-[11px] text-gray-700">
-              <strong>Важно:</strong>
-              <ul className="mt-1 list-inside list-disc space-y-0.5">
-                <li>Отправляется только если последнее сообщение от бота</li>
-                <li>Только 1 раз для каждого пользователя</li>
-                <li>Не отправляется для уже обработанных клиентов</li>
-              </ul>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <div className="flex items-center gap-3">
+      {/* Кнопка прилипает к низу экрана: форма длинная, и раньше до неё
+          приходилось листать после каждой правки. */}
+      <div className="sticky bottom-0 z-20 mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white/95 px-5 py-3 shadow-lg backdrop-blur">
         <button type="button" onClick={handleSave} disabled={saving || crmIncomplete || !campaignName.trim()}
-          className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+          className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           Сохранить настройки
         </button>
-        {crmIncomplete && <span className="text-[11px] text-amber-600">Выберите воронку и этап CRM</span>}
+        {crmIncomplete && <span className="text-xs text-amber-600">Выберите воронку и этап CRM</span>}
+        {saveError && <span role="alert" className="text-xs text-red-600">{saveError}</span>}
+        {saved && <span role="status" className="inline-flex items-center gap-1 text-xs text-emerald-600"><Check className="h-3.5 w-3.5" />Сохранено</span>}
       </div>
-      {saveError && <p role="alert" className="text-xs text-red-600">{saveError}</p>}
-      {saved && <p role="status" className="text-xs text-emerald-600">Настройки сохранены</p>}
     </div>
+  );
+}
+
+/** Группа формы настроек: слева название и пояснение, справа поля. */
+function SettingsGroup({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <section className="grid grid-cols-1 gap-x-10 gap-y-3 border-t border-gray-100 py-6 first:border-t-0 md:grid-cols-[13rem_minmax(0,1fr)]">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+        {hint && <p className="mt-1 text-xs leading-relaxed text-gray-500">{hint}</p>}
+      </div>
+      <div className="min-w-0 space-y-4">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * Переключатель с подписью и необязательным пояснением под ней. Ползунок —
+ * `bg-[#ffffff]`, а не `bg-white`: тёмная тема перекрашивает bg-white в цвет
+ * поверхности, и ползунок сливался с дорожкой.
+ */
+function SwitchRow({ checked, onChange, label, hint }: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  hint?: string;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-3">
+      <span className="relative mt-0.5 inline-flex shrink-0">
+        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="peer sr-only" />
+        <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-[#ffffff] shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm text-gray-800">{label}</span>
+        {hint && <span className="mt-0.5 block text-xs text-gray-500">{hint}</span>}
+      </span>
+    </label>
   );
 }
 
