@@ -7718,7 +7718,11 @@ function FieldArea({ label, value, onChange, rows, placeholder }: { label: strin
   return (
     <label className="space-y-1">
       <span className="text-[11px] font-medium text-gray-500">{label}</span>
+      {/* Растягивать можно, сжимать — не ниже исходной высоты: иначе поле
+          сжималось до полоски, в которой не видно ни строки. 1rem — строка
+          text-xs, 0.75rem — вертикальные отступы и рамка. */}
       <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows ?? 3} placeholder={placeholder}
+        style={{ minHeight: `${(rows ?? 3) + 0.75}rem` }}
         className={`block w-full rounded-lg border ${INPUT_BORDER} ${INPUT_BG} px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 resize-y`} />
     </label>
   );
