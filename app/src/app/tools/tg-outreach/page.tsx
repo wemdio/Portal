@@ -5,6 +5,7 @@ import type { Route } from 'next';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
+import { RowMenu } from '@/components/tg-outreach/RowMenu';
 import { Reveal } from '@/components/tg-outreach/Reveal';
 import { ArchiveCampaignDialog, CampaignList, DeleteCampaignDialog, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
@@ -4349,19 +4350,15 @@ function CampaignAccountsTab({
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {a.is_active ? 'Да' : 'Нет'}
                 </button>
-                <div className="flex items-center gap-0.5">
-                  <button type="button" onClick={() => setSelectedAccount(a)} title="Логи и информация"
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
-                    <ScrollText className="h-3.5 w-3.5" />
-                  </button>
-                  <button type="button" onClick={() => { setArchiveError(null); setArchiveTarget([a.id]); }} title="Убрать в архив"
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
-                    <Archive className="h-3.5 w-3.5" />
-                  </button>
-                  <button type="button" onClick={() => { void deleteAccount(a.id); }} title="Удалить аккаунт"
-                    className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                <div className="flex items-center justify-end">
+                  <RowMenu
+                    label={`Действия: ${a.session_name}`}
+                    items={[
+                      { label: 'Логи и информация', icon: <ScrollText className="h-3.5 w-3.5" />, onClick: () => setSelectedAccount(a) },
+                      { label: 'Убрать в архив', icon: <Archive className="h-3.5 w-3.5" />, onClick: () => { setArchiveError(null); setArchiveTarget([a.id]); } },
+                      { label: 'Удалить аккаунт', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, onClick: () => { void deleteAccount(a.id); } },
+                    ]}
+                  />
                 </div>
               </div>
             );
