@@ -6397,13 +6397,13 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   }, [lists, moveTarget]);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4">
+    <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-[240px_1fr]">
       {/* Сайдбар списков. Виртуальный «Неопределённые» — первым, потому что
           на старте у всех 140 прокси именно он. Иконка Inbox читается как
           «всё подряд», не как именованная папка. */}
       {/* Списки — отдельной карточкой: раньше пункты висели прямо на фоне и не
           читались как единый список. */}
-      <aside className="space-y-1 self-start rounded-2xl border border-gray-200 bg-white p-3">
+      <aside className="space-y-1 rounded-2xl border border-gray-200 bg-white/50 p-4 backdrop-blur-sm">
         <div className="px-3 pb-2 pt-1 text-sm font-semibold text-gray-800">Списки прокси</div>
         <button
           type="button"
@@ -6593,7 +6593,8 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         )}
       </aside>
 
-      <div className="space-y-4 min-w-0">
+      {/* Правая часть — такая же полупрозрачная карточка на одном уровне со списком. */}
+      <div className="min-w-0 space-y-4 rounded-2xl border border-gray-200 bg-white/50 p-4 backdrop-blur-sm">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="min-w-0">
             <div className="text-sm font-medium text-gray-700">
