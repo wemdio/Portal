@@ -8,6 +8,7 @@ import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 import { proxyCountryLabel } from '@/lib/tgOutreach/proxyCountry';
 import { RowMenu } from '@/components/tg-outreach/RowMenu';
 import { Reveal } from '@/components/tg-outreach/Reveal';
+import { PageLoader } from '@/components/tg-outreach/PageLoader';
 import { ArchiveCampaignDialog, CampaignList, DeleteCampaignDialog, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
@@ -1775,7 +1776,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
       </div>
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        <PageLoader />
       ) : dialogs.length === 0 ? (
         <p className="text-xs text-gray-400 py-8 text-center">
           {query.trim()
@@ -4013,7 +4014,7 @@ function CampaignAccountsTab({
       )}
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        <PageLoader />
       ) : accounts.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
           <Users className="mx-auto h-8 w-8 text-gray-300 mb-2" />
@@ -5543,9 +5544,7 @@ function CampaignBasesTab({
       )}
 
       {loading ? (
-        <div className="flex justify-center py-16" aria-busy="true" aria-label="Загрузка баз">
-          <Loader2 className="h-5 w-5 animate-spin text-gray-400" />
-        </div>
+        <PageLoader />
       ) : bases.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
           <Database className="mx-auto h-8 w-8 text-gray-300 mb-2" />
@@ -6917,7 +6916,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         )}
 
         {loading ? (
-          <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+          <PageLoader />
         ) : proxies.length === 0 ? (
           <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
             <Network className="mx-auto h-8 w-8 text-gray-300 mb-2" />
@@ -7854,11 +7853,7 @@ function CampaignsSection() {
           </header>
         )}
 
-        {loading && (
-          <div className="flex items-center justify-center py-12 text-gray-400">
-            <Loader2 className="h-5 w-5 animate-spin mr-2" />Загрузка...
-          </div>
-        )}
+        {loading && <PageLoader />}
 
         {!loading && !selected && (
           <CampaignList

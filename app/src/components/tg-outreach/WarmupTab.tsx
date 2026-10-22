@@ -37,6 +37,7 @@ import {
 } from '@/lib/tgOutreach/warmup/settings';
 import WarmupSettingsPanel from './WarmupSettingsPanel';
 import { NumField } from './NumField';
+import { PageLoader } from './PageLoader';
 
 const API_BASE = '/api/tools/tg-outreach';
 
@@ -394,11 +395,7 @@ export default function WarmupTab({
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center gap-2 p-8 text-xs text-gray-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Загружаю прогрев…
-      </div>
-    );
+    return <PageLoader />;
   }
 
   const run = status?.run ?? null;
