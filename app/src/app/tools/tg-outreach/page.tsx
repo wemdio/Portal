@@ -47,6 +47,7 @@ import {
   Flame,
   Database,
   Eye,
+  Eraser,
   ShieldCheck,
   FileSpreadsheet,
   BarChart3,
@@ -5515,6 +5516,29 @@ function CampaignBasesTab({
     </button>
   );
 
+  /** Один скрытый выбор файла на все строки: меню открывается порталом, label внутри него не живёт. */
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadTargetRef = useRef<string | null>(null);
+
+  /** Убрать все контакты, оставив базу: имя, чаты-источники и привязка к кампании сохраняются. */
+  const clearBase = async (base: OutreachBase) => {
+    const sentNote = base.counts.sent > 0
+      ? ` По ней уже отправлено ${base.counts.sent} сообщений — история «кому писали» будет потеряна.`
+      : '';
+    if (!confirm(`Очистить базу «${base.name}»: удалить все ${base.counts.total} контактов? Сама база останется, и в неё можно загрузить файл заново.${sentNote}`)) return;
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}/contacts?confirm_total=${base.counts.total}`, { method: 'DELETE' });
+      const d = (await res.json().catch(() => null)) as { error?: string; deleted?: number } | null;
+      if (!res.ok) {
+        setError(d?.error ?? `Не удалось очистить базу (${res.status})`);
+        return;
+      }
+      setNotice(`База «${base.name}» очищена: удалено контактов — ${d?.deleted ?? 0}.`);
+      void refreshBases();
+    } finally { setBusy(false); }
+  };
+
   const deleteBase = async (base: OutreachBase) => {
     // Предупреждаем про отправленных отдельно: контакты уйдут каскадом, и
     // история «кому мы уже писали по этой гипотезе» пропадёт вместе с базой.
@@ -5648,10 +5672,12 @@ function CampaignBasesTab({
           {/* «Отложено» (status=failed) раньше не показывали вовсе: контакты
               копились в невидимой колонке, и база, вставшая на пороге длины,
               выглядела просто пустеющей. */}
-          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_48px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <span />
             <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
+          {/* Видно пять баз (строка ~88 px), остальные — прокруткой. */}
+          <div className="max-h-[450px] divide-y divide-gray-100 overflow-y-auto">
           {bases.map((b) => {
             const chats = (b.source_chats ?? '')
               .split(/[\n,;]+/)
@@ -5659,7 +5685,7 @@ function CampaignBasesTab({
               .filter(Boolean);
             return (
             <React.Fragment key={b.id}>
-            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_48px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
               <input
                 type="checkbox"
                 checked={linked.has(b.id)}
@@ -5726,32 +5752,18 @@ function CampaignBasesTab({
               <span className={`text-xs ${b.counts.failed > 0 ? 'text-amber-600 font-medium' : 'text-gray-600'}`}>
                 {b.counts.failed}
               </span>
-              <div className="flex items-center gap-1">
-              <label className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer w-fit">
-                <Upload className="h-3 w-3" /> Загрузить
-                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
-                  onChange={(e) => { void uploadContacts(b.id, e); }} />
-              </label>
-                {exportButton(b)}
-                {/* Просмотр базы: до него она была чёрным ящиком — видно
-                    только счётчики. Убрать один неверный ник значило выгрузить
-                    файл, поправить и залить обратно, потеряв статусы отправки
-                    по всей базе. */}
-                <button type="button" onClick={() => setViewingBase({ id: b.id, name: b.name })} disabled={busy}
-                  title="Посмотреть контакты базы, поправить или удалить отдельные, очистить базу целиком"
-                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-50">
-                  <Eye className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" onClick={() => { void requeueBase(b); }} disabled={busy || b.counts.failed === 0}
-                  title="Вернуть отложенные контакты в очередь — например, после того как подняли порог длины первого сообщения"
-                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent">
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
-                  title="Удалить базу вместе с контактами"
-                  className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+              <div className="flex justify-end">
+                <RowMenu
+                  label={`Действия: ${b.name}`}
+                  items={[
+                    { label: 'Загрузить контакты', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => { uploadTargetRef.current = b.id; uploadInputRef.current?.click(); } },
+                    { label: 'Посмотреть и править', icon: <Eye className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
+                    ...(b.counts.total > 0 ? [{ label: 'Скачать в Excel', icon: <Download className="h-3.5 w-3.5" />, onClick: () => { void downloadBase(b); } }] : []),
+                    ...(b.counts.failed > 0 ? [{ label: 'Вернуть отложенные в очередь', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => { void requeueBase(b); } }] : []),
+                    ...(b.counts.total > 0 ? [{ label: 'Очистить базу', icon: <Eraser className="h-3.5 w-3.5" />, danger: true, onClick: () => { void clearBase(b); } }] : []),
+                    { label: 'Удалить базу', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, onClick: () => { void deleteBase(b); } },
+                  ]}
+                />
               </div>
             </div>
             {attachmentsFor === b.id && <BaseAttachmentsPanel baseId={b.id} baseName={b.name} />}
@@ -5815,6 +5827,7 @@ function CampaignBasesTab({
             </React.Fragment>
             );
           })}
+          </div>
         </div>
       )}
 
@@ -5865,6 +5878,18 @@ function CampaignBasesTab({
           </div>
         </div>
       )}
+
+      <input
+        ref={uploadInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        className="hidden"
+        onChange={(e) => {
+          const id = uploadTargetRef.current;
+          if (id) void uploadContacts(id, e);
+          else e.target.value = '';
+        }}
+      />
 
       {viewingBase && (
         <BaseContactsModal
