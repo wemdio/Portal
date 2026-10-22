@@ -1,7 +1,11 @@
 'use client';
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { Suspense, useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import type { Route } from 'next';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
+import { ArchiveCampaignDialog, CampaignList, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
@@ -47,6 +51,8 @@ import {
   Move,
   Pencil,
   Archive,
+  ArchiveRestore,
+  ArrowLeft,
   UserPen,
   Check,
   CheckCheck,
@@ -7366,12 +7372,16 @@ const TABS = [
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
 ] as const;
 
-function CampaignView({ campaign, onUpdate, onDelete }: {
+function CampaignView({ campaign, onUpdate, onDelete, onBack }: {
   campaign: OutreachCampaign;
   onUpdate: () => void;
   onDelete: (id: string) => void;
+  onBack: () => void;
 }) {
   const [tab, setTab] = useState<string>('dashboard');
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const archived = Boolean(campaign.archived_at);
   const [actionLoading, setActionLoading] = useState<'start' | 'stop' | null>(null);
   /** Текст ошибки последнего действия. Раньше ответ ручки не читали вовсе. */
   const [actionError, setActionError] = useState<string | null>(null);
@@ -7516,9 +7526,41 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   const stopping = displayStatus === 'stopping';
   const starting = displayStatus === 'starting';
   const running = displayStatus === 'running';
+  // Блокировку берём с учётом живого статуса шапки, а не только списка.
+  const archiveBlocked = archiveBlockReason({ ...campaign, status: displayStatus as CampaignStatus });
+
+  const restore = async () => {
+    setRestoring(true);
+    setActionError(null);
+    const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/archive`, { method: 'DELETE' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      setActionError(body?.error || `Не удалось вернуть кампанию (${res.status})`);
+    }
+    setRestoring(false);
+    onUpdate();
+  };
 
   return (
     <div className="space-y-4">
+      <CampaignRail items={TABS} active={tab} onSelect={setTab} />
+      <button type="button" onClick={onBack}
+        className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-indigo-700 cursor-pointer">
+        <ArrowLeft className="h-3.5 w-3.5" /> Все кампании
+      </button>
+      {archived && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <span>
+            Кампания в архиве с {new Date(campaign.archived_at as string).toLocaleDateString('ru-RU')}
+            {campaign.archive_reason ? ` — ${campaign.archive_reason}` : ''}. Запуск и прогрев недоступны.
+          </span>
+          <button type="button" onClick={() => void restore()} disabled={restoring}
+            className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-white px-3 py-1 font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50 cursor-pointer">
+            {restoring ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArchiveRestore className="h-3 w-3" />}
+            Вернуть из архива
+          </button>
+        </div>
+      )}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-bold text-gray-900">{campaign.name}</h2>
@@ -7585,7 +7627,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               {actionLoading === 'stop' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
               Остановить
             </button>
-          ) : (
+          ) : archived ? null : (
             <button type="button" onClick={() => void doAction('start')}
               disabled={actionLoading !== null}
               className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
@@ -7593,12 +7635,26 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               Запустить
             </button>
           )}
-          <button type="button" onClick={() => onDelete(campaign.id)}
+          {!archived && (
+            <button type="button" onClick={() => setArchiveOpen(true)} disabled={Boolean(archiveBlocked)}
+              title={archiveBlocked ?? 'Убрать в архив'}
+              className="rounded-full border border-gray-200 p-2.5 text-gray-400 hover:text-amber-700 hover:border-amber-300 hover:bg-amber-50 transition disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer">
+              <Archive className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <button type="button" onClick={() => onDelete(campaign.id)} title="Удалить кампанию"
             className="rounded-full border border-gray-200 p-2.5 text-gray-400 hover:text-rose-600 hover:border-rose-300 hover:bg-rose-50 transition cursor-pointer">
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
+      {archiveOpen && (
+        <ArchiveCampaignDialog
+          campaign={campaign}
+          onClose={() => setArchiveOpen(false)}
+          onDone={() => { setArchiveOpen(false); onUpdate(); }}
+        />
+      )}
 
       {/* Отказ ручки виден оператору. До 09.10.2026 ответ не читали вовсе:
           кампания не запускалась, а на экране не было ни слова почему. */}
@@ -7613,19 +7669,6 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           Кампания ещё сворачивает прошлый круг — это занимает пару минут. Запустим её сами, как только он закроется; страницу можно не трогать.
         </div>
       )}
-
-      <div className="flex gap-1 border-b border-gray-200">
-        {TABS.map(t => {
-          const Icon = t.icon;
-          return (
-            <button key={t.id} type="button" onClick={() => setTab(t.id)}
-              className={`inline-flex items-center gap-1.5 px-5 py-3 text-xs font-medium transition border-b-2 -mb-px cursor-pointer ${tab === t.id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}>
-              <Icon className="h-3.5 w-3.5" />
-              {t.label}
-            </button>
-          );
-        })}
-      </div>
 
       <div>
         {tab === 'dashboard' && <DashboardTab campaignId={campaign.id} />}
@@ -7787,13 +7830,18 @@ function StepperField({ label, value, min, max, onChange, title }: { label: stri
 }
 
 /* =================== CAMPAIGNS SECTION =================== */
+/**
+ * Список кампаний таблицей и открытая кампания отдельным экраном. Открытая
+ * кампания живёт в адресе (`?campaign=<id>`): «Назад» браузера и кнопка
+ * «Все кампании» возвращают к списку, ссылку на кампанию можно переслать.
+ */
 function CampaignsSection() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const selectedId = searchParams.get('campaign');
   const [campaigns, setCampaigns] = useState<OutreachCampaign[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [creating, setCreating] = useState(false);
 
   const fetchCampaigns = useCallback(async () => {
     const token = await getAccessToken();
@@ -7802,33 +7850,30 @@ function CampaignsSection() {
     if (res.ok) {
       const d = await res.json() as { items: OutreachCampaign[] };
       setCampaigns(d.items);
-      // Открываем первую кампанию сразу, чтобы инструмент не встречал пустым
-      // экраном с одними табами — в 99% случаев следующий клик всё равно был
-      // по ней. Функциональная форма, а не чтение selectedId: иначе он попал бы
-      // в зависимости useCallback, тот бы пересоздавался на каждый выбор
-      // кампании и перезапускал загрузку списка. `prev ??` заодно бережёт
-      // ручной выбор при фоновых обновлениях списка.
-      setSelectedId((prev) => prev ?? d.items[0]?.id ?? null);
     }
     setLoading(false);
   }, []);
 
   useEffect(() => { queueMicrotask(() => { void fetchCampaigns(); }); }, [fetchCampaigns]);
 
-  const createCampaign = async () => {
-    if (!newName.trim()) return;
-    setCreating(true);
+  // `as Route` — типизированные маршруты не выводят адрес с query-строкой.
+  const openCampaign = useCallback((id: string) => {
+    router.push(`${pathname}?campaign=${id}` as Route);
+  }, [router, pathname]);
+  const backToList = useCallback(() => {
+    router.push(pathname as Route);
+  }, [router, pathname]);
+
+  const createCampaign = async (name: string) => {
     const res = await authFetch(`${API_BASE}/campaigns`, {
       method: 'POST',
-      body: JSON.stringify({ name: newName.trim() }),
+      body: JSON.stringify({ name }),
     });
+    await fetchCampaigns();
     if (res.ok) {
       const c = await res.json() as OutreachCampaign;
-      setSelectedId(c.id);
-      setNewName(''); setShowCreate(false);
+      openCampaign(c.id);
     }
-    setCreating(false);
-    void fetchCampaigns();
   };
 
   const deleteCampaign = async (id: string) => {
@@ -7837,60 +7882,29 @@ function CampaignsSection() {
     // необратимо» больше не описывает масштаб потери.
     if (!confirm(
       'Удалить кампанию? Вместе с ней будут удалены её базы контактов и вся история отправок по ним.'
-      + ' Это действие необратимо.',
+      + ' Это действие необратимо. Если кампания просто больше не нужна — уберите её в архив.',
     )) return;
     await authFetch(`${API_BASE}/campaigns/${id}`, { method: 'DELETE' });
-    if (selectedId === id) setSelectedId(null);
+    if (selectedId === id) backToList();
     void fetchCampaigns();
   };
 
   const selected = campaigns.find(c => c.id === selectedId) ?? null;
 
   return (
-    <div className="w-full text-left">
+    <div className={`w-full text-left ${selected ? 'lg:pl-14' : ''}`}>
       <div className="min-w-0 w-full space-y-6">
-        {/* Header */}
-        <header className="space-y-2">
-          <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
-            <MessageSquareMore className="h-3.5 w-3.5" />
-            TG Аутрич
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900">Telegram Аутрич</h1>
-          <p className="max-w-2xl text-sm text-gray-500">
-            Массовый B2B-аутрич через Telegram. Управление кампаниями, автоответы GPT, квалификация лидов.
-          </p>
-        </header>
-
-        {/* Campaign selector */}
-        <div className="flex items-center gap-3 flex-wrap">
-          {campaigns.map(c => {
-            const st = STATUS_LABELS[c.status] ?? STATUS_LABELS.stopped;
-            return (
-              <button key={c.id} type="button" onClick={() => setSelectedId(c.id)} title={st.label}
-                className={`inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-xs font-medium transition border cursor-pointer ${selectedId === c.id ? 'bg-indigo-600 text-white border-indigo-600 font-semibold ring-2 ring-indigo-300 ring-offset-2 ring-offset-transparent shadow-md' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm'}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass(c.status)}`} />
-                {c.name}
-                {selectedId === c.id && <span className="rounded-full bg-white/20 px-2 py-0.5 text-[10px] uppercase tracking-wide">открыта</span>}
-              </button>
-            );
-          })}
-          <button type="button" onClick={() => setShowCreate(!showCreate)}
-            className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-gray-300 px-5 py-2.5 text-xs font-medium text-gray-500 hover:border-indigo-300 hover:text-indigo-600 hover:bg-indigo-50/50 transition cursor-pointer">
-            <Plus className="h-3.5 w-3.5" /> Новая кампания
-          </button>
-        </div>
-
-        {showCreate && (
-          <div className="flex items-center gap-2 rounded-lg border border-gray-200 p-3">
-            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Название кампании"
-              className="flex-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs outline-none focus:border-indigo-400"
-              onKeyDown={e => { if (e.key === 'Enter') void createCampaign(); }} />
-            <button type="button" onClick={createCampaign} disabled={creating}
-              className="rounded-full bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Создать'}
-            </button>
-            <button type="button" onClick={() => setShowCreate(false)} className="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition cursor-pointer"><X className="h-4 w-4" /></button>
-          </div>
+        {!selected && (
+          <header className="space-y-2">
+            <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+              <MessageSquareMore className="h-3.5 w-3.5" />
+              TG Аутрич
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">Telegram Аутрич</h1>
+            <p className="max-w-2xl text-sm text-gray-500">
+              Массовый B2B-аутрич через Telegram. Управление кампаниями, автоответы GPT, квалификация лидов.
+            </p>
+          </header>
         )}
 
         {loading && (
@@ -7899,10 +7913,20 @@ function CampaignsSection() {
           </div>
         )}
 
-        {!loading && campaigns.length === 0 && !showCreate && (
-          <div className="rounded-2xl border border-gray-200 bg-white/90 p-8 text-center">
-            <MessageSquareMore className="mx-auto h-10 w-10 text-gray-300 mb-3" />
-            <p className="text-sm text-gray-500">Нет кампаний. Создайте первую для начала работы.</p>
+        {!loading && !selected && (
+          <CampaignList
+            campaigns={campaigns}
+            statusOf={(s) => STATUS_LABELS[s] ?? STATUS_LABELS.stopped}
+            onOpen={openCampaign}
+            onChanged={() => void fetchCampaigns()}
+            onCreate={createCampaign}
+          />
+        )}
+
+        {!loading && selectedId && !selected && (
+          <div className="rounded-2xl border border-gray-200 bg-white/90 p-6 text-center text-sm text-gray-500">
+            Кампания не найдена.{' '}
+            <button type="button" onClick={backToList} className="text-indigo-600 hover:underline cursor-pointer">К списку</button>
           </div>
         )}
 
@@ -7918,6 +7942,7 @@ function CampaignsSection() {
             campaign={selected}
             onUpdate={() => void fetchCampaigns()}
             onDelete={deleteCampaign}
+            onBack={backToList}
           />
         )}
       </div>
@@ -7927,9 +7952,12 @@ function CampaignsSection() {
 
 /* =================== MAIN PAGE =================== */
 export default function TgOutreachPage() {
+  // useSearchParams требует границы Suspense, иначе сборка падает на статике.
   return (
     <div className="w-full text-left">
-      <CampaignsSection />
+      <Suspense fallback={null}>
+        <CampaignsSection />
+      </Suspense>
     </div>
   );
 }

@@ -276,6 +276,12 @@ export interface OutreachCampaign {
    * параллельно.
    */
   warming_accounts?: number;
+  /** Активных аккаунтов кампании — для списка кампаний; тоже считает ручка списка. */
+  active_accounts?: number;
+  /** В архиве с этого момента; null — кампания в работе. */
+  archived_at?: string | null;
+  /** Почему убрали в архив — обязательна при архивации. */
+  archive_reason?: string | null;
 }
 
 export interface OutreachProxy {
