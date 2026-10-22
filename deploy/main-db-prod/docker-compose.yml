@@ -286,7 +286,13 @@ services:
           cpus: '1.0'
           pids: 512
     networks:
-      - main-db-net
+      main-db-net:
+        # Realtime берёт тенанта из первого слова имени хоста в запросе. Kong
+        # ходит сюда как realtime-dev — это тенант, которого создаёт
+        # SEED_SELF_HOST. Под именем realtime сервис отвечал TenantNotFound
+        # всем клиентам, и уведомления о задачах не работали (до 23.10.2026).
+        aliases:
+          - realtime-dev
 
   # ─── Storage API: метаданные файлов; сами файлы в S3 (TWC) ────────────────────
   # FORCE_PATH_STYLE=true обязательно для не-AWS S3 (TWC, MinIO и пр.).
