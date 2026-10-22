@@ -84,6 +84,7 @@ import { getHeActiveJobSignal, heLlmFailureOf, heLlmMaxAttemptMs, isHeLlmTimeout
 import { HE_ENG_COLLECTION_CONCURRENCY, selectHeEngCollectionCandidate } from '@/lib/hypothesisEngine/engCollectionQueue';
 import type { HeEngCollectionScope } from '@/lib/hypothesisEngine/engCollectionQueue';
 import { readHeEngCollectionScope } from '@/lib/hypothesisEngine/engCollectionScope';
+import { heWorkerLaneTakes, readHeWorkerLane } from '@/lib/hypothesisEngine/heWorkerLane';
 import { withHeEngProjectUsageLock } from '@/lib/hypothesisEngine/engProjectUsage';
 import type { HeLlmSpend } from '@/lib/hypothesisEngine/llm';
 // Клиент БД СТАДИЙ: срок на заголовки И на паузу между кусками тела, обрыв по
@@ -150,6 +151,8 @@ import { createHeEngDncRemovalTicker } from '@/lib/hypothesisEngine/engDncRemova
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
+/** Which jobs this process takes; unset = all, the original single process (heWorkerLane.ts). */
+const WORKER_LANE = readHeWorkerLane();
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
 const MAX_ATTEMPTS = 3;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
@@ -1756,6 +1759,19 @@ async function resetStuckJobs() {
     );
     rows = rows.filter((row) => !strandedJobs.has(row.id));
   }
+  // Split lanes: the other process may be running its rows right now. Re-queue
+  // only this lane's; an unclassifiable row stays for its owner's restart.
+  if (WORKER_LANE !== 'all') {
+    const own: HeJob[] = [];
+    for (const row of rows) {
+      try {
+        if (heWorkerLaneTakes(WORKER_LANE, await readHeEngCollectionScope(db, row))) own.push(row);
+      } catch (e) {
+        log('error', `Stuck job ${row.id} (${row.stage}) left running: its lane is unknown (${e instanceof Error ? e.message : String(e)})`);
+      }
+    }
+    rows = own;
+  }
   if (!rows.length) return;
   log('info', `Resetting ${rows.length} stuck running jobs to pending`);
   for (const row of rows) {
@@ -1779,6 +1795,22 @@ async function resetStuckJobs() {
       );
     }
   }
+}
+
+/**
+ * Split lanes only: the other HE process may be running this project's other
+ * kind of work. A project never ran a collection beside an exclusive stage in
+ * the single process, and its usage write is serialized only in-process
+ * (engProjectUsage.ts). An unread state counts as busy until the next poll.
+ */
+async function projectBusyInOtherLane(job: HeJob): Promise<boolean> {
+  const { data, error } = await db.from('he_jobs').select('id')
+    .eq('project_id', job.project_id).eq('status', 'running').limit(50);
+  if (error) {
+    log('error', `Running he_jobs of project ${job.project_id} could not be read: ${error.message}`);
+    return true;
+  }
+  return (data ?? []).some((row) => row.id !== job.id && !activeCollections.has(row.id));
 }
 
 async function claimJob(): Promise<{ job: HeJob; scope: HeEngCollectionScope } | null> {
@@ -1807,15 +1839,20 @@ async function claimJob(): Promise<{ job: HeJob; scope: HeEngCollectionScope } |
       } catch (error) {
         // Unknown ownership is not permission to run beside another client.
         log('error', `Job ${pending.id} collection scope unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        // A split lane cannot tell whose job this is; the next poll reads it again.
+        if (WORKER_LANE !== 'all') continue;
         if (active.length > 0) return null;
         // Preserve the old exclusive path at idle. Its owner/budget guards
         // decide the job's outcome; a broken scope read must not wedge RU too.
         scope = { id: pending.id, project_id: pending.project_id, baseId: null, verticalId: null, parallelEligible: false };
       }
+      // The other process's job is not a barrier here: it does not wait on this lane.
+      if (!heWorkerLaneTakes(WORKER_LANE, scope)) continue;
       if (!selectHeEngCollectionCandidate([scope], active, { blockedProjectIds: blockedProjects })) {
         if (!scope.parallelEligible) return null;
         continue;
       }
+      if (WORKER_LANE !== 'all' && await projectBusyInOtherLane(pending)) continue;
       if (shouldStop()) return null;
       const at = new Date().toISOString();
       // Do not increment attempts: base_collect legitimately yields many times.
@@ -3760,7 +3797,9 @@ async function pollOnce(): Promise<boolean> {
   // до конца, и эта джоба исполняется как текущая.
   if (shouldStop()) return false;
   // Заблокированные ENG-аккаунты — между джобами (см. heEngBlockSweep).
-  if (activeCollections.size === 0) {
+  // Полоса только ENG-сборов служебных проходов не делает: их ведёт процесс
+  // остальных стадий, один на сервер.
+  if (activeCollections.size === 0 && WORKER_LANE !== 'eng_collections') {
     await heEngBlockSweep.maybeRun();
     // «Do not contact» — снятие с идущих кампаний клиента (см. heEngDncRemoval).
     await heEngDncRemoval.maybeRun();
@@ -3794,7 +3833,11 @@ async function pollOnce(): Promise<boolean> {
 
 async function main() {
   log('info', 'Hypothesis Engine worker starting…');
-  log('info', `ENG collection concurrency: ${HE_ENG_COLLECTION_CONCURRENCY}; one HE process; all other stages exclusive`);
+  log('info', WORKER_LANE === 'all'
+    ? `ENG collection concurrency: ${HE_ENG_COLLECTION_CONCURRENCY}; one HE process; all other stages exclusive`
+    : WORKER_LANE === 'eng_collections'
+      ? `Lane eng_collections: only verified ENG collections, ${HE_ENG_COLLECTION_CONCURRENCY} slots`
+      : 'Lane serial: every stage except verified ENG collections, one at a time');
 
   const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
   log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
