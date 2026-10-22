@@ -186,19 +186,6 @@ const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   warming: { label: 'Прогрев', cls: 'bg-blue-100 text-blue-700' },
 };
 
-/** Цвет точки кампании в списке. */
-function statusDotClass(status: string): string {
-  switch (status) {
-    case 'running': return 'bg-emerald-400';
-    case 'starting': return 'bg-emerald-300 animate-pulse';
-    case 'stopping': return 'bg-amber-400 animate-pulse';
-    case 'paused': return 'bg-amber-400';
-    case 'warming': return 'bg-blue-400';
-    case 'error': return 'bg-rose-400';
-    default: return 'bg-gray-400';
-  }
-}
-
 /** Как часто шапка кампании перечитывает состояние с сервера. */
 const PHASE_POLL_MS = 4000;
 /** Сколько ждём окончания остановки, прежде чем сказать, что запуск не вышел. */
@@ -574,32 +561,15 @@ function SettingsTab({ campaign, onSave }: {
             09.09.2026: пересылка лида шлёт 5 последних сообщений, модель читает
             20 — дефолты подходят всегда, сохранённые значения кампаний воркер
             продолжает читать как раньше. */}
-        {/* Две строки вместо трёх сеток по два поля: сверху — что кампания
-            рассылает (пояс, пауза после ограничения, дневная норма, длина
-            письма), снизу — с каким темпом. Поля узкие, поэтому в строку
-            влезает по четыре-шесть штук. */}
+        {/* 22.10.2026 на экране оставлены только пояс и дневная норма (решение
+            пользователя). Паузы, порции, параллельность и паузу после
+            ограничения кампания берёт из сохранённых значений, а новая — из
+            DEFAULT_TELEGRAM_SETTINGS (lib/tgOutreach/types.ts). */}
         <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
           <div className="w-auto space-y-1">
             <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
             <p className="text-[10px] text-gray-400">
               Влияет только на «Периоды сна».
-            </p>
-          </div>
-          {/* Было «Пауза аккаунта (часов)» — читалось как штатная пауза между
-              заходами и создавало ложное чувство, что нагрузка размазана по
-              суткам. На деле пауза включается ТОЛЬКО после того, как Telegram
-              ограничил аккаунт (FloodError/Frozen), см. campaignLoop:1507. */}
-          <div className="w-52 space-y-1">
-            <StepperField
-              label="Пауза после ограничения (часов)"
-              value={telegram.account_cooldown_hours}
-              min={1}
-              max={72}
-              onChange={v => setTG('account_cooldown_hours', v)}
-              title="Сколько часов аккаунт не берётся в работу после ограничения Telegram."
-            />
-            <p className="text-[10px] text-gray-400">
-              Сколько аккаунт отдыхает после PEER_FLOOD / FloodWait.
             </p>
           </div>
           <div className="w-52 space-y-1">
@@ -612,70 +582,6 @@ function SettingsTab({ campaign, onSave }: {
               title="Дневная норма первых сообщений на каждый аккаунт. Ноль выключает рассылку."
             />
           </div>
-          {/* Рядом с дневной нормой: вместе они и отвечают на вопрос «сколько
-              уйдёт за круг». Ждать друг друга аккаунтам незачем — у каждого своя
-              сессия и свой прокси; ограничение упирается в прокси-хост, а не в
-              Telegram. */}
-          <div className="w-52 space-y-1">
-            <StepperField
-              label="Аккаунтов одновременно рассылает"
-              value={telegram.account_concurrency ?? 6}
-              min={1}
-              max={20}
-              onChange={v => setTG('account_concurrency', v)}
-              title="Сколько аккаунтов кампания обходит параллельно. Больше — быстрее круг, но выше нагрузка на прокси-хост."
-            />
-          </div>
-          {/* «Максимум знаков в первом сообщении» убран с экрана 10.09.2026:
-              порог один на все кампании (DEFAULT_MAX_MESSAGE_CHARS, 600 знаков,
-              меняется переменной окружения TG_FIRST_TOUCH_MAX_CHARS). */}
-        </div>
-        {/* Вторая строка — темп: разнос нормы по дню и паузы обхода.
-            09.09.2026 в ATOL-1 Telegram выдал PEER_FLOOD свежим аккаунтам после
-            3–6 первых сообщений подряд при суточной норме 4. Спасает не норма, а
-            расстояние между отправками: порция уходит, дальше аккаунт молчит.
-            «Пауза перед прочтением» с экрана убрана — теперь всегда рандом
-            5–15 сек (campaignLoop), настройкой не управляется. */}
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
-          <div className="w-44 space-y-1">
-            <FieldNum
-              compact
-              label="Пауза между порциями (минут)"
-              value={telegram.first_touch_gap_minutes ?? 60}
-              onChange={v => setTG('first_touch_gap_minutes', v)}
-            />
-            <p className="text-[10px] text-gray-400">
-              Сколько аккаунт молчит между порциями. Ноль — вся норма уйдёт сразу, одной очередью.
-            </p>
-          </div>
-          {/* Прежняя подпись объясняла порцию через саму порцию («сколько писем
-              в порции») и оператору ничего не давала. Пример с числами — самый
-              короткий способ показать, что поле делает с дневной нормой. */}
-          <div className="w-56 space-y-1">
-            <StepperField
-              label="Писем в одной порции"
-              value={telegram.first_touch_per_gap ?? 2}
-              min={1}
-              max={20}
-              onChange={v => setTG('first_touch_per_gap', v)}
-              title="Сколько первых сообщений аккаунт отправляет подряд, прежде чем замолчать до следующей порции."
-            />
-            <p className="text-[10px] text-gray-400">
-              Норма 6, в порции 2, пауза 60 минут: два письма, час тишины, ещё два, час тишины, ещё два.
-            </p>
-          </div>
-          {/* Было «Задержка до ответа» — подпись покрывала лишь одно из четырёх
-              применений. Тот же диапазон задаёт паузу между ПЕРВЫМИ сообщениями
-              внутри дневной нормы (firstTouch/send.ts, gapMs), а при 5–10 сек
-              аккаунт пишет всю норму незнакомым людям за полминуты — самый
-              короткий путь к ограничению. */}
-          <RangeField compact label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
-          {/* Пауза между полными кругами по всем аккаунтам. Раньше была
-              захардкожена в 30 секунд, что на «горячих» mobile-pool IP
-              слишком быстро (Telegram продолжал отвечать silent throttle).
-              Сейчас вынесено в настройки с дефолтом [300, 600] сек. */}
-          <RangeField compact label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
-          <RangeField compact label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
         </div>
         {/* «Окно ожидания диалога» (dialog_wait_window_range) убрано с экрана:
             ключ есть в TelegramSettings и в дефолтах, но НИ ОДНА строка кода его
@@ -7729,26 +7635,6 @@ function FieldArea({ label, value, onChange, rows, placeholder }: { label: strin
       <span className="text-[11px] font-medium text-gray-500">{label}</span>
       <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows ?? 3} placeholder={placeholder}
         className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 resize-y" />
-    </label>
-  );
-}
-
-/* compact — поля под числа в 2–4 знака: тянуть их на всю колонку незачем,
-   и ряд из трёх пауз влезает в строку, не расползаясь на пол-экрана. */
-function RangeField({ label, value, onChange, compact }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void; compact?: boolean }) {
-  const box = compact
-    ? 'w-16 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400'
-    : 'block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400';
-  return (
-    <label className="space-y-1">
-      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
-      <div className="flex items-center gap-1">
-        <input type="number" value={value[0]} onChange={e => onChange([Number(e.target.value), value[1]])}
-          className={box} />
-        <span className="text-gray-400 text-xs">—</span>
-        <input type="number" value={value[1]} onChange={e => onChange([value[0], Number(e.target.value)])}
-          className={box} />
-      </div>
     </label>
   );
 }
