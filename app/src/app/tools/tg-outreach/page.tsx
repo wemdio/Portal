@@ -634,7 +634,8 @@ function SettingsTab({ campaign, onSave }: {
 
       {/* Кнопка прилипает к низу экрана: форма длинная, и раньше до неё
           приходилось листать после каждой правки. */}
-      <div className="sticky bottom-0 z-20 mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 rounded-2xl border border-gray-200 bg-white/95 px-5 py-3 text-center shadow-lg backdrop-blur">
+      <div className="sticky bottom-0 z-20 mt-4 flex justify-center">
+      <div className="flex flex-col items-center gap-2 rounded-2xl border border-gray-200 bg-white/95 px-6 py-3 text-center shadow-lg backdrop-blur">
         {!saved && (
           <span className="text-xs font-medium text-amber-500">Не забудьте сохранить настройки</span>
         )}
@@ -646,6 +647,7 @@ function SettingsTab({ campaign, onSave }: {
         {crmIncomplete && <span className="text-xs text-amber-600">Выберите воронку и этап CRM</span>}
         {saveError && <span role="alert" className="text-xs text-red-600">{saveError}</span>}
         {saved && <span role="status" className="inline-flex items-center gap-1 text-xs text-emerald-600"><Check className="h-3.5 w-3.5" />Сохранено</span>}
+      </div>
       </div>
     </div>
   );
