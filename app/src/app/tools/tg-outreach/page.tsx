@@ -5543,10 +5543,8 @@ function CampaignBasesTab({
       )}
 
       {loading ? (
-        <div className="space-y-2" aria-busy="true" aria-label="Загрузка баз">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="h-16 animate-pulse rounded-xl border border-gray-200 bg-white/50" style={{ animationDelay: `${i * 120}ms` }} />
-          ))}
+        <div className="flex justify-center py-16" aria-busy="true" aria-label="Загрузка баз">
+          <Loader2 className="h-5 w-5 animate-spin text-gray-400" />
         </div>
       ) : bases.length === 0 ? (
         <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
