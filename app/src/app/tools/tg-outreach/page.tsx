@@ -634,8 +634,8 @@ function SettingsTab({ campaign, onSave }: {
 
       {/* Кнопка прилипает к низу экрана: форма длинная, и раньше до неё
           приходилось листать после каждой правки. */}
-      <div className="sticky bottom-0 z-20 mt-4 flex justify-center">
-      <div className="flex flex-col items-center gap-2 rounded-2xl border border-gray-200 bg-white/95 px-6 py-3 text-center shadow-lg backdrop-blur">
+      <div className="sticky bottom-0 z-20 mt-4">
+      <div className="flex w-full flex-col items-center gap-2 rounded-2xl border border-gray-200 bg-white/95 px-6 py-3 text-center shadow-lg backdrop-blur">
         {!saved && (
           <span className="text-xs font-medium text-amber-500">Не забудьте сохранить настройки</span>
         )}
