@@ -172,15 +172,21 @@ export default function WarmupSettingsPanel({
 
             {chatsEnabled && (
               <>
-                <div className="flex items-center justify-between gap-3 py-1">
-                  <span className="text-[11px] text-gray-600">Чатов на аккаунт</span>
+                {/* Число стоит сразу в фразе, а не у правого края: раньше поле уезжало
+                    от подписи на всю ширину, и непонятно было, что именно менять. */}
+                <div className="flex flex-wrap items-center gap-2 py-1 text-[12px] text-gray-700">
+                  Каждый аккаунт вступит в
                   <NumField
                     min={FIELD_BOUNDS.chats_per_account.min}
                     max={FIELD_BOUNDS.chats_per_account.max}
                     value={draft.chats_per_account}
                     onChange={(v) => setDraft((d) => ({ ...d, chats_per_account: v }))}
-                    className="w-14 rounded-lg border border-gray-300/70 bg-white/50 px-1.5 py-1 text-center text-[11px] text-gray-800 outline-none focus:border-indigo-400"
+                    className="w-14 rounded-lg border border-gray-300/70 bg-white/50 px-1.5 py-1 text-center text-[12px] text-gray-800 outline-none focus:border-indigo-400"
                   />
+                  чатов из списка ниже
+                  <span className="text-[11px] text-gray-400">
+                    (от {FIELD_BOUNDS.chats_per_account.min} до {FIELD_BOUNDS.chats_per_account.max})
+                  </span>
                 </div>
                 <div className="mt-2">
                   <WarmupChatsSection
