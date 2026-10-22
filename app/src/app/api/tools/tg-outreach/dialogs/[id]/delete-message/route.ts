@@ -52,7 +52,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         })
         .select()
         .single();
-      if (error) return jsonError(error.message, 500);
+      if (error) {
+        if (error.code === '23514' && error.message.includes('tg_outreach_jobs_action_check')) {
+          return jsonError('Для удаления сообщений требуется обновление базы портала. Сообщение не удалено.', 503);
+        }
+        return jsonError(error.message, 500);
+      }
 
       return NextResponse.json(data, { status: 201 });
     },
