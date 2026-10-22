@@ -428,6 +428,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const campaignBases = await fdb.loadCampaignBases(db, campaignId);
   const baseIds = fdb.basesAllowedForAccount(campaignBases, account.id);
   if (!baseIds.length) return result;
+  const basesChain = await fdb.loadBasesChain(db, campaignId);
 
   /**
    * Норма — это ОТПРАВЛЕННЫЕ письма, а не взятые из очереди контакты.
@@ -489,7 +490,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
      */
     const picked = await withClaimLock(async () => {
       const perBase = await fdb.loadPendingByBase(db, baseIds, WINDOW, account.id);
-      const chosen = selectNextContacts({ perBase, limit: WINDOW })
+      const chosen = selectNextContacts({ perBase, limit: WINDOW, sequential: basesChain })
         .filter((c) => !claimed.has(c.id))
         .slice(0, Math.max(1, sendBudget - result.sent));
       for (const c of chosen) claimed.add(c.id);

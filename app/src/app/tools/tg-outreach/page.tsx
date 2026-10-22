@@ -5239,7 +5239,10 @@ function CampaignBasesTab({
    * оператор перенёс их руками.
    */
   const [orphans, setOrphans] = useState<OutreachBase[]>([]);
+  /** Выбранные базы в порядке цепочки (Set помнит порядок вставки). */
   const [linked, setLinked] = useState<Set<string>>(new Set());
+  /** Режим: false — базы идут по кругу, true — одна за другой. */
+  const [chain, setChain] = useState(false);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -5299,8 +5302,9 @@ function CampaignBasesTab({
       setOrphans(d.orphans ?? []);
     }
     if (linkRes.ok) {
-      const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
+      const d = (await linkRes.json()) as { items: Array<{ base_id: string }>; chain?: boolean };
       setLinked(new Set(d.items.map((i) => i.base_id)));
+      setChain(Boolean(d.chain));
     }
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
@@ -5365,14 +5369,13 @@ function CampaignBasesTab({
     } finally { setBusy(false); }
   };
 
-  const toggleLink = async (baseId: string) => {
-    const next = new Set(linked);
-    if (next.has(baseId)) next.delete(baseId); else next.add(baseId);
+  const saveLinks = async (next: Set<string>, nextChain: boolean) => {
     setLinked(next);
+    setChain(nextChain);
     setError(null);
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/bases`, {
       method: 'PUT',
-      body: JSON.stringify({ base_ids: [...next] }),
+      body: JSON.stringify({ base_ids: [...next], chain: nextChain }),
     });
     if (!res.ok) {
       const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -5381,6 +5384,13 @@ function CampaignBasesTab({
       // а на сервере ничего не изменилось.
       void load();
     }
+  };
+
+  /** Поставить/снять галочку: новая база встаёт в конец цепочки. */
+  const toggleLink = async (baseId: string) => {
+    const next = new Set(linked);
+    if (next.has(baseId)) next.delete(baseId); else next.add(baseId);
+    await saveLinks(next, chain);
   };
 
   /** Забрать базу без владельца в эту кампанию. */
@@ -5635,6 +5645,25 @@ function CampaignBasesTab({
           Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
         </span>
         <div className="flex items-center gap-2">
+          {linked.size > 1 && (
+            <div
+              role="group"
+              aria-label="Режим рассылки баз"
+              title="Параллельно: по контакту из каждой базы по кругу. Цепочкой: сначала вся первая, как закончится — сразу вторая, и так далее без остановки."
+              className="inline-flex rounded-full border border-gray-200 p-0.5 text-[11px] font-medium"
+            >
+              {([false, true] as const).map((mode) => (
+                <button
+                  key={String(mode)}
+                  type="button"
+                  onClick={() => { if (chain !== mode) void saveLinks(linked, mode); }}
+                  className={`rounded-full px-3 py-1 transition cursor-pointer ${chain === mode ? 'bg-[#4f46e5] text-white' : 'text-gray-500 hover:text-gray-800'}`}
+                >
+                  {mode ? 'Цепочкой' : 'Параллельно'}
+                </button>
+              ))}
+            </div>
+          )}
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
@@ -5686,16 +5715,36 @@ function CampaignBasesTab({
             return (
             <React.Fragment key={b.id}>
             <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_48px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
-              <input
-                type="checkbox"
-                checked={linked.has(b.id)}
-                onChange={() => { void toggleLink(b.id); }}
-                title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
-                aria-label={`Участвует в рассылке: база ${b.name}`}
-                className="tg-check"
-              />
+              {/* Пустую базу выбрать нельзя: при наведении вместо галочки — крестик.
+                  Уже выбранную пустую снять можно. */}
+              <span className="group relative inline-flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={linked.has(b.id)}
+                  disabled={b.counts.total === 0 && !linked.has(b.id)}
+                  onChange={() => { void toggleLink(b.id); }}
+                  title={b.counts.total === 0 && !linked.has(b.id)
+                    ? 'В базе нет контактов — выбрать нельзя'
+                    : 'Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются'}
+                  aria-label={`Участвует в рассылке: база ${b.name}`}
+                  className="tg-check disabled:cursor-not-allowed disabled:opacity-40"
+                />
+                {b.counts.total === 0 && !linked.has(b.id) && (
+                  <X className="pointer-events-none absolute left-0 top-0 h-[18px] w-[18px] p-0.5 text-rose-500 opacity-0 transition-opacity group-hover:opacity-100" />
+                )}
+              </span>
               <div className="min-w-0">
-                <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
+                <div className="flex items-center gap-2 text-xs font-medium text-gray-800">
+                  {chain && linked.has(b.id) && (
+                    <span
+                      title={`Место в цепочке: ${[...linked].indexOf(b.id) + 1}`}
+                      className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-[#4f46e5] px-1 text-[10px] font-semibold text-white"
+                    >
+                      {[...linked].indexOf(b.id) + 1}
+                    </span>
+                  )}
+                  <span className="truncate">{b.name}</span>
+                </div>
                 {/* Чаты-источники живут в строке базы, а не в отдельном экране:
                     их спрашивает отчёт по договору, и заполнить их проще там
                     же, где базу заводят. */}
@@ -7541,18 +7590,16 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
 
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
-  // 22.10.2026: первой — настройки (их открывают чаще всего), второй —
-  // статистика значком-графиком вместо блоков.
+  // 22.10.2026, порядок по просьбе: рабочие вкладки сверху, логи — последними.
   { id: 'settings', label: 'Настройки', icon: Settings },
-  { id: 'dashboard', label: 'Статистика', icon: BarChart3 },
-  // Дальше — в порядке заполнения кампании: аккаунты, им прокси, базы, прогрев.
   { id: 'accounts', label: 'Аккаунты', icon: Users },
-  { id: 'proxies', label: 'Прокси', icon: Network },
-  { id: 'bases', label: 'Базы', icon: Database },
-  { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
+  { id: 'bases', label: 'Базы', icon: Database },
+  { id: 'proxies', label: 'Прокси', icon: Network },
+  { id: 'dashboard', label: 'Статистика', icon: BarChart3 },
+  { id: 'warmup', label: 'Прогрев', icon: Flame },
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
+  { id: 'logs', label: 'Логи', icon: ScrollText },
 ] as const;
 
 function CampaignView({ campaign, onUpdate, onDelete, onBack }: {

@@ -91,6 +91,8 @@ export interface BaseStats {
   leadList: BaseLead[];
   /** Аккаунты, которыми база рассылалась за период. */
   accountIds: string[];
+  /** Последняя отправка из базы за всё время — по ней видно, какая база рассылает сейчас. */
+  lastSentAt: string | null;
   /** Среднесуточные отправки за период, один знак. */
   perDay: number;
   /**
@@ -243,6 +245,10 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
     }
 
     const remaining = contacts.filter((c) => !c.sent_at).length;
+    const lastSentMs = contacts.reduce<number | null>((max, c) => {
+      const t = ts(c.sent_at);
+      return t !== null && (max === null || t > max) ? t : max;
+    }, null);
     // Делим на прошедшие сутки периода, а не на его номинальную длину: у базы,
     // залитой три дня назад, «за 30 дней» занизило бы темп в десять раз.
     const spanDays = Math.max(Math.round((lastDay - firstDay) / DAY_MS) + 1, 1);
@@ -263,6 +269,7 @@ export function buildBaseStats(input: BaseStatsInput): BaseStats[] {
       // Свежие сверху: разметку смотрят «что там нового», а не с начала базы.
       leadList: leadList.sort((x, y) => (y.at ?? '').localeCompare(x.at ?? '')),
       accountIds: [...accountIds],
+      lastSentAt: lastSentMs === null ? null : new Date(lastSentMs).toISOString(),
       perDay,
       daysLeft: perDay > 0 ? Math.round((remaining / perDay) * 10) / 10 : null,
       days: [...days.values()],

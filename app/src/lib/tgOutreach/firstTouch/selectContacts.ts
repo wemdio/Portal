@@ -24,6 +24,11 @@ export interface SelectParams {
   /** Ожидающие контакты, сгруппированные по базам кампании. */
   perBase: Array<{ baseId: string; contacts: PendingContact[] }>;
   limit: number;
+  /**
+   * Цепочка: базы идут одна за другой в порядке `perBase` — следующая
+   * начинается, как только предыдущая выдала всё, что в ней есть, без паузы.
+   */
+  sequential?: boolean;
 }
 
 /**
@@ -33,8 +38,9 @@ export interface SelectParams {
  * через день, и у гипотез окажется разное время на сбор ответов — сравнивать
  * будет нечего.
  */
-export function selectNextContacts({ perBase, limit }: SelectParams): PendingContact[] {
+export function selectNextContacts({ perBase, limit, sequential }: SelectParams): PendingContact[] {
   if (limit <= 0) return [];
+  if (sequential) return perBase.flatMap((b) => b.contacts).slice(0, limit);
 
   const out: PendingContact[] = [];
   const cursors = perBase.map(() => 0);
