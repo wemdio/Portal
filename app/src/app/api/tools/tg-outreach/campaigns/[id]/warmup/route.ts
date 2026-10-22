@@ -181,10 +181,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
       const { data: campaign } = await supabase
         .from('tg_outreach_campaigns')
-        .select('id, status, warmup_settings')
+        .select('*')
         .eq('id', id)
         .single();
       if (!campaign) return jsonError('Кампания не найдена', 404);
+      if (campaign.archived_at) return jsonError('Кампания в архиве — достаньте её из архива, чтобы греть аккаунты', 409);
 
       /**
        * Запущенная кампания прогреву больше не мешает.

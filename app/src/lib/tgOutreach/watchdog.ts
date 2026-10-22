@@ -53,6 +53,7 @@
  */
 export interface LoopControl {
   forceDisconnect?: () => Promise<void>;
+  deleteMessage?: (target: import('./dialogEdits').DeleteMessageTarget) => Promise<void>;
 }
 
 export interface WatchdogSnapshot {

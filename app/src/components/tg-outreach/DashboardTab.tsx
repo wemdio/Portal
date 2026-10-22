@@ -11,9 +11,10 @@
  * Здесь только раскладка уже готовых чисел, ничего не пересчитывается.
  */
 
+import { PageLoader } from './PageLoader';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 
 import { authFetch } from '@/lib/authFetch';
 import EChart from '@/components/charts/EChart';
@@ -419,9 +420,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
       </div>
 
       {loading ? (
-        <div className="flex items-center gap-2 p-8 text-xs text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" /> Загружаю сводку…
-        </div>
+        <PageLoader />
       ) : error ? (
         <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800">
           <AlertCircle className="mt-px h-4 w-4 shrink-0" />

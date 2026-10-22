@@ -26,6 +26,7 @@ UPSERT по (bank='tbank', transaction_id).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import traceback
@@ -50,6 +51,11 @@ API_BASE = "https://business.tbank.ru/openapi/api/v1"
 #: путей /accounts и /company/accounts не существует (404).
 ACCOUNTS_URL = f"{API_BASE}/bank-accounts"
 API_URL = f"{API_BASE}/bank-statement"
+
+# Только GET и только сбои установления соединения: повтор не дублирует
+# операции. Короткий connect timeout оставляет время на повторы в recent (4 мин).
+CONNECT_TIMEOUT_SEC = 15
+CONNECT_RETRY_DELAYS = (2, 5)
 
 #: Числовой код валюты (ISO 4217) → буквенный. Счёт Т-Банка отдаёт валюту
 #: числом ("643"), а bank_transactions.currency хранит буквенный код — тот
@@ -120,7 +126,38 @@ def _fail_summary(e: BaseException) -> str:
     Уходит в external_sync_runs.error и в алерт, поэтому короткая и тоже
     с затёртыми токенами.
     """
-    return redact_tokens(f"{type(e).__name__}: {e}")[:300]
+    detail = str(e).strip()
+    if not detail and isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+        detail = "не удалось установить соединение с API Т-Банка"
+    return redact_tokens(f"{type(e).__name__}: {detail}")[:300]
+
+
+async def _get_with_connect_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    label: str,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """До трёх попыток GET при ConnectError/ConnectTimeout.
+
+    HTTP-ответы (в том числе 401/403), чтение и разбор данных обрабатываются
+    вызывающим кодом как раньше. Отмена внешним таймаутом не перехватывается.
+    """
+    for attempt in range(len(CONNECT_RETRY_DELAYS) + 1):
+        try:
+            return await client.get(url, params=params)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            if attempt == len(CONNECT_RETRY_DELAYS):
+                raise
+            delay = CONNECT_RETRY_DELAYS[attempt]
+            print(
+                f"[bank_tbank] {label}: {_fail_summary(e)}; "
+                f"повтор {attempt + 2}/{len(CONNECT_RETRY_DELAYS) + 1} через {delay}с",
+                flush=True,
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 class TBankSyncIncomplete(RuntimeError):
@@ -446,10 +483,13 @@ class BankTBankSync(SyncSource):
         # сертификата включена, стандартные корни сохранены, корень
         # добавлен с проверкой отпечатка (см. bank_tochka.tochka_ssl_context).
         async with httpx.AsyncClient(
-            timeout=120, headers=headers, verify=tochka_ssl_context()
+            timeout=httpx.Timeout(120, connect=CONNECT_TIMEOUT_SEC),
+            headers=headers, verify=tochka_ssl_context(),
         ) as client:
             try:
-                resp = await client.get(ACCOUNTS_URL)
+                resp = await _get_with_connect_retry(
+                    client, ACCOUNTS_URL, label=f"{label} список счетов"
+                )
                 resp.raise_for_status()
                 payload = resp.json()
             except Exception as e:
@@ -516,8 +556,10 @@ class BankTBankSync(SyncSource):
             # ошибка upsert) не должен обрывать остальные — источник обязан
             # дойти до конца и залить то, что удалось.
             try:
-                resp = await client.get(
+                resp = await _get_with_connect_retry(
+                    client,
                     API_URL,
+                    label=f"{label} выписка {frm}..{till}",
                     params={
                         "accountNumber": account.number,
                         "from": frm,

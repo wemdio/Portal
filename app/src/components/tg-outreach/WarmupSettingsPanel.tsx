@@ -9,66 +9,21 @@
  * второй, рядом с числами, которые им управляют.
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
-import { ChevronDown, ChevronRight, Loader2, Save } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import type { CampaignStatus } from '@/lib/tgOutreach/types';
 import {
   FIELD_BOUNDS,
-  curveToPerDay,
   perDayForEditing,
   type WarmupParamKey,
   type WarmupSettings,
 } from '@/lib/tgOutreach/warmup/settings';
 import WarmupChatsSection from './WarmupChatsSection';
+import { NumField } from './NumField';
 import WarmupDayTable from './WarmupDayTable';
 
 const API_BASE = '/api/tools/tg-outreach';
-
-const PARAM_LABEL: Record<WarmupParamKey, string> = {
-  conversations: 'Переписок в день на аккаунт',
-  messages: 'Сообщений в одной переписке',
-  chat_messages: 'Сообщений в день на аккаунт',
-  chat_reactions: 'Реакций в день на аккаунт',
-};
-
-/** Пара полей «первый день → потолок» одного параметра. */
-function CurveRow({
-  paramKey,
-  first,
-  peak,
-  disabled,
-  onChange,
-}: {
-  paramKey: WarmupParamKey;
-  first: number;
-  peak: number;
-  disabled: boolean;
-  onChange: (field: 'first' | 'peak', value: number) => void;
-}) {
-  const bounds = FIELD_BOUNDS[paramKey];
-  const input = (field: 'first' | 'peak', value: number) => (
-    <input
-      type="number"
-      min={bounds.min}
-      max={bounds.max}
-      value={value}
-      disabled={disabled}
-      onChange={(e) => onChange(field, Number(e.target.value))}
-      className="w-14 rounded-lg border border-gray-200 bg-gray-50 px-1.5 py-1 text-center text-[11px] text-gray-800 outline-none focus:border-indigo-400 disabled:opacity-40"
-    />
-  );
-  return (
-    <div className="flex items-center justify-between gap-3 py-1">
-      <span className="text-[11px] text-gray-600">{PARAM_LABEL[paramKey]}</span>
-      <span className="flex shrink-0 items-center gap-1.5">
-        {input('first', first)}
-        <span className="text-[11px] text-gray-400">→</span>
-        {input('peak', peak)}
-      </span>
-    </div>
-  );
-}
 
 export default function WarmupSettingsPanel({
   campaignId,
@@ -90,27 +45,25 @@ export default function WarmupSettingsPanel({
   onSaved: () => void;
 }) {
   const [open, setOpen] = useState(!runActive);
-  const [draft, setDraft] = useState<WarmupSettings>(settings);
+  // Режим всегда «по дням вручную»: старая кривая разгона один раз переносится в
+  // таблицу, дальше правятся только её клетки.
+  const [draft, setDraft] = useState<WarmupSettings>(() => (
+    settings.mode === 'manual' && settings.per_day.length
+      ? settings
+      : { ...settings, mode: 'manual', per_day: perDayForEditing(settings, days) }
+  ));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const dirty = useMemo(
-    () => JSON.stringify(draft) !== JSON.stringify(settings),
-    [draft, settings],
-  );
-
-  /** Предпросмотр кривой: без него «2 → 8» ничего не говорит про среду. */
-  const preview = useMemo(() => curveToPerDay(draft, Math.min(days, 7)), [draft, days]);
+  // Автосохранение (22.10.2026): правка уходит на сервер через 0,8 с сама, кнопки
+  // «Сохранить» нет. lastSaved — то, что сервер уже знает: по нему отличаем
+  // правку оператора от обновления настроек сверху.
+  const lastSaved = useRef(JSON.stringify(settings));
+  const draftKey = JSON.stringify(draft);
+  const dirty = draftKey !== lastSaved.current;
 
   const tableRows = useMemo(() => perDayForEditing(draft, days), [draft, days]);
-
-  const setCurve = (key: WarmupParamKey, field: 'first' | 'peak', value: number) => {
-    setDraft((d) => ({
-      ...d,
-      curve: { ...d.curve, [key]: { ...d.curve[key], [field]: value } },
-    }));
-  };
 
   const setCell = (dayIndex: number, key: WarmupParamKey, value: number) => {
     setDraft((d) => {
@@ -120,46 +73,54 @@ export default function WarmupSettingsPanel({
     });
   };
 
-  /**
-   * Включение ручного режима фиксирует текущую кривую в таблице: правят потом
-   * пару клеток, а не заполняют двадцать полей с нуля.
-   */
-  const toggleManual = (manual: boolean) => {
-    setDraft((d) => ({
-      ...d,
-      mode: manual ? 'manual' : 'curve',
-      per_day: manual && !d.per_day.length ? perDayForEditing(d, days) : d.per_day,
-    }));
-  };
+  const draftRef = useRef(draft);
+  useEffect(() => { draftRef.current = draft; });
 
   const save = useCallback(async () => {
+    const sent = draftRef.current;
+    const sentKey = JSON.stringify(sent);
     setSaving(true);
     setError(null);
-    setNotice(null);
     try {
       const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/warmup/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: draft }),
+        body: JSON.stringify({ settings: sent }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        // Отправленное считаем «известным», иначе автосохранение зациклилось бы
+        // на отказе; следующая правка снимет ошибку и уйдёт снова.
+        lastSaved.current = sentKey;
         setError(data.error ?? 'Не получилось сохранить');
         return;
       }
-      // Забираем то, что сервер реально записал: он мог зажать число в границы,
-      // и без этой строки панель осталась бы «не сохранено» навсегда.
-      if (data.settings) setDraft(data.settings as WarmupSettings);
-      setNotice(
-        data.applies_next_day
-          ? 'Сохранено. План сегодняшнего дня уже составлен — новые числа вступят со следующего.'
-          : 'Сохранено. Применится при следующем запуске прогрева.',
-      );
+      // Забираем то, что сервер реально записал: он мог зажать число в границы.
+      const saved = (data.settings ?? sent) as WarmupSettings;
+      lastSaved.current = JSON.stringify(saved);
+      if (JSON.stringify(draftRef.current) === sentKey) setDraft(saved);
+      // Говорим только то, что действительно важно: сегодняшний план уже составлен.
+      setNotice(data.applies_next_day ? 'План сегодняшнего дня уже составлен — новые числа вступят со следующего.' : null);
       onSaved();
     } finally {
       setSaving(false);
     }
-  }, [campaignId, draft, onSaved]);
+  }, [campaignId, onSaved]);
+
+  useEffect(() => {
+    if (draftKey === lastSaved.current) return;
+    setNotice(null);
+    const timer = setTimeout(() => { void save(); }, 800);
+    return () => clearTimeout(timer);
+  }, [draftKey, save]);
+
+  // Настройки пришли сверху (загрузка, другой оператор): подхватываем, если
+  // у нас нет несохранённой правки.
+  useEffect(() => {
+    const incoming = JSON.stringify(settings);
+    if (JSON.stringify(draftRef.current) === lastSaved.current) setDraft(settings);
+    lastSaved.current = incoming;
+  }, [settings]);
 
   const chatsEnabled = draft.public_chats;
 
@@ -173,47 +134,37 @@ export default function WarmupSettingsPanel({
         <span className="flex items-center gap-1.5 text-xs font-medium text-gray-800">
           {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
           Настройки прогрева
-          {dirty && <span className="text-[10px] font-normal text-amber-600">не сохранено</span>}
+          {saving ? <Loader2 className="h-3 w-3 animate-spin text-gray-400" /> : dirty ? <span className="text-[10px] font-normal text-amber-600">сохраняю…</span> : null}
         </span>
         <span className="text-[11px] text-gray-400">
-          {draft.mode === 'manual' ? 'по дням вручную' : 'разгон по кривой'} · дней: {days}
+          по дням · дней: {days}
         </span>
       </button>
 
       {open && (
         <div className="space-y-3 border-t border-gray-100 px-4 py-3">
+          {/* Нагрузка задаётся по дням вручную: кривая разгона убрана 22.10.2026,
+              таблица — единственный режим. Число дней берётся из полосы
+              управления выше. */}
           <div>
-            <p className="mb-1 text-[10px] uppercase tracking-wide text-gray-400">Между своими</p>
-            <CurveRow
-              paramKey="conversations"
-              first={draft.curve.conversations.first}
-              peak={draft.curve.conversations.peak}
-              disabled={draft.mode === 'manual'}
-              onChange={(f, v) => setCurve('conversations', f, v)}
+            <p className="mb-2 text-[10px] uppercase tracking-wide text-gray-400">Нагрузка по дням</p>
+            <WarmupDayTable
+              rows={tableRows}
+              currentDay={currentDay}
+              chatsEnabled={chatsEnabled}
+              disabled={false}
+              onChange={setCell}
             />
-            <CurveRow
-              paramKey="messages"
-              first={draft.curve.messages.first}
-              peak={draft.curve.messages.peak}
-              disabled={draft.mode === 'manual'}
-              onChange={(f, v) => setCurve('messages', f, v)}
-            />
-            {draft.mode === 'curve' && (
-              <p className="mt-1 text-[10px] text-gray-400">
-                {preview
-                  .map((r, i) => `день ${i + 1} · ${r.conversations}×${r.messages}`)
-                  .join('  →  ')}
-              </p>
-            )}
           </div>
 
+          {/* Публичные чаты используют редко — поэтому ниже и под переключателем. */}
           <div className="border-t border-gray-100 pt-3">
             <label className="mb-1 flex cursor-pointer items-center gap-2">
               <input
                 type="checkbox"
                 checked={chatsEnabled}
                 onChange={(e) => setDraft((d) => ({ ...d, public_chats: e.target.checked }))}
-                className="h-3.5 w-3.5 accent-indigo-600"
+                className="tg-check"
               />
               <span className="text-[10px] uppercase tracking-wide text-gray-400">
                 В публичных чатах
@@ -222,30 +173,21 @@ export default function WarmupSettingsPanel({
 
             {chatsEnabled && (
               <>
-                <CurveRow
-                  paramKey="chat_messages"
-                  first={draft.curve.chat_messages.first}
-                  peak={draft.curve.chat_messages.peak}
-                  disabled={draft.mode === 'manual'}
-                  onChange={(f, v) => setCurve('chat_messages', f, v)}
-                />
-                <CurveRow
-                  paramKey="chat_reactions"
-                  first={draft.curve.chat_reactions.first}
-                  peak={draft.curve.chat_reactions.peak}
-                  disabled={draft.mode === 'manual'}
-                  onChange={(f, v) => setCurve('chat_reactions', f, v)}
-                />
-                <div className="flex items-center justify-between gap-3 py-1">
-                  <span className="text-[11px] text-gray-600">Чатов на аккаунт</span>
-                  <input
-                    type="number"
+                {/* Число стоит сразу в фразе, а не у правого края: раньше поле уезжало
+                    от подписи на всю ширину, и непонятно было, что именно менять. */}
+                <div className="flex flex-wrap items-center gap-2 py-1 text-[12px] text-gray-700">
+                  Каждый аккаунт вступит в
+                  <NumField
                     min={FIELD_BOUNDS.chats_per_account.min}
                     max={FIELD_BOUNDS.chats_per_account.max}
                     value={draft.chats_per_account}
-                    onChange={(e) => setDraft((d) => ({ ...d, chats_per_account: Number(e.target.value) }))}
-                    className="w-14 rounded-lg border border-gray-200 bg-gray-50 px-1.5 py-1 text-center text-[11px] text-gray-800 outline-none focus:border-indigo-400"
+                    onChange={(v) => setDraft((d) => ({ ...d, chats_per_account: v }))}
+                    className="w-14 rounded-lg border border-gray-300/70 bg-white/50 px-1.5 py-1 text-center text-[12px] text-gray-800 outline-none focus:border-indigo-400"
                   />
+                  чатов из списка ниже
+                  <span className="text-[11px] text-gray-400">
+                    (от {FIELD_BOUNDS.chats_per_account.min} до {FIELD_BOUNDS.chats_per_account.max})
+                  </span>
                 </div>
                 <div className="mt-2">
                   <WarmupChatsSection
@@ -258,33 +200,6 @@ export default function WarmupSettingsPanel({
             )}
           </div>
 
-          <div className="border-t border-gray-100 pt-3">
-            <label className="flex cursor-pointer items-center gap-2 text-[11px] text-gray-600">
-              <input
-                type="checkbox"
-                checked={draft.mode === 'manual'}
-                onChange={(e) => toggleManual(e.target.checked)}
-                className="h-3.5 w-3.5 accent-indigo-600"
-              />
-              Задать по дням вручную
-            </label>
-            {draft.mode === 'manual' && (
-              <div className="mt-2">
-                <WarmupDayTable
-                  rows={tableRows}
-                  currentDay={currentDay}
-                  chatsEnabled={chatsEnabled}
-                  disabled={false}
-                  onChange={setCell}
-                />
-                <p className="mt-1.5 text-[10px] text-gray-400">
-                  Пока галочка стоит, поля выше не действуют. Снимете — вернётся разгон по кривой,
-                  а таблица сохранится до следующего включения.
-                </p>
-              </div>
-            )}
-          </div>
-
           {error && (
             <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>
           )}
@@ -292,25 +207,6 @@ export default function WarmupSettingsPanel({
             <div className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-[11px] text-gray-600">{notice}</div>
           )}
 
-          <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-3">
-            <button
-              type="button"
-              disabled={!dirty || saving}
-              onClick={() => setDraft(settings)}
-              className="rounded-lg px-3 py-1.5 text-[11px] text-gray-500 transition hover:bg-gray-50 disabled:opacity-40"
-            >
-              Отменить
-            </button>
-            <button
-              type="button"
-              disabled={!dirty || saving}
-              onClick={() => void save()}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-              Сохранить
-            </button>
-          </div>
         </div>
       )}
     </div>

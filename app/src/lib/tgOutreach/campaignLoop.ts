@@ -21,9 +21,10 @@ import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
+import { dialogEditKey, dialogRevision, dialogUnchanged, withoutDeletedMessages, withDialogWrite, withDialogDeletion, clearDialogEdits, type DeleteMessageTarget } from './dialogEdits';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, parseQualificationQuestions, checkQualification, qualificationInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
-  stripRepeatGreeting,
+  stripRepeatGreeting, needsReplyTranslation, ensureReplyLanguage,
 } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
 import { addReferralToBase, findReferredUsername, referralFirstTouchInstruction } from './referral';
@@ -643,56 +644,60 @@ async function upsertDialog(
   // читают диалоги из базы и могут дотянуться до старых строк с 777000.
   if (tgUserId === TG_SERVICE_NOTIFICATIONS_USER_ID) return;
 
-  const { data: existing } = await db
-    .from('tg_outreach_dialogs')
-    .select('id, messages, status, can_send, tg_is_bot')
-    .eq('campaign_id', campaignId)
-    .eq('account_id', accountId)
-    .eq('tg_user_id', tgUserId)
-    .maybeSingle();
+  return withDialogWrite(dialogEditKey(campaignId, accountId, tgUserId), messages, async (messages) => {
+    const { data: existing } = await db
+      .from('tg_outreach_dialogs')
+      .select('id, messages, status, can_send, tg_is_bot')
+      .eq('campaign_id', campaignId)
+      .eq('account_id', accountId)
+      .eq('tg_user_id', tgUserId)
+      .maybeSingle();
 
-  const now = new Date().toISOString();
-  // last_message_at — таймстамп РЕАЛЬНОГО последнего сообщения, а не wall-clock
-  // now(). Иначе любой повторный upsert старого диалога (handleChat трогает
-  // его ещё до проверки can_send, backfill, refetch) поднимал дату на «сейчас»
-  // — старые лиды всплывали в списке как сегодняшние. fallback на now() только
-  // если у сообщений нет таймстампов (пустой диалог / старые данные).
-  const lastMessageAt = lastMessageTimestamp(messages) ?? now;
+    const now = new Date().toISOString();
+    // last_message_at — таймстамп РЕАЛЬНОГО последнего сообщения, а не wall-clock
+    // now(). Иначе любой повторный upsert старого диалога (handleChat трогает
+    // его ещё до проверки can_send, backfill, refetch) поднимал дату на «сейчас»
+    // — старые лиды всплывали в списке как сегодняшние. fallback на now() только
+    // если у сообщений нет таймстампов (пустой диалог / старые данные).
+    const lastMessageAt = lastMessageTimestamp(messages) ?? now;
 
-  if (existing) {
-    const updatePayload: Record<string, unknown> = {
-      messages,
-      tg_username: tgUsername,
-      last_message_at: lastMessageAt,
-      tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
-      ...(status ? { status } : {}),
-      // Лидом его сделал ИИ — если до этого лидом не отметил сотрудник.
-      ...(status === 'lead' && existing.status !== 'lead' ? aiLeadMark() : {}),
-      ...autoForwardPayload(opts?.autoForward),
-    };
-    // initialCanSend применяется ТОЛЬКО при insert — иначе перезапишет ручной
-    // toggle оператора в UI при следующем витке цикла.
-    if (typeof opts?.canSend === 'boolean') {
-      updatePayload.can_send = opts.canSend;
+    if (existing) {
+      const updatePayload: Record<string, unknown> = {
+        messages,
+        tg_username: tgUsername,
+        last_message_at: lastMessageAt,
+        tg_is_bot: opts?.tgIsBot ?? existing.tg_is_bot ?? false,
+        ...(status ? { status } : {}),
+        // Лидом его сделал ИИ — если до этого лидом не отметил сотрудник.
+        ...(status === 'lead' && existing.status !== 'lead' ? aiLeadMark() : {}),
+        ...autoForwardPayload(opts?.autoForward),
+      };
+      // initialCanSend применяется ТОЛЬКО при insert — иначе перезапишет ручной
+      // toggle оператора в UI при следующем витке цикла.
+      if (typeof opts?.canSend === 'boolean') {
+        updatePayload.can_send = opts.canSend;
+      }
+      const { error } = await db.from('tg_outreach_dialogs').update({
+        ...updatePayload,
+      }).eq('id', existing.id);
+      if (error) throw new Error(error.message);
+    } else {
+      const { error } = await db.from('tg_outreach_dialogs').insert({
+        campaign_id: campaignId,
+        account_id: accountId,
+        tg_user_id: tgUserId,
+        tg_username: tgUsername,
+        messages,
+        status: status ?? 'none',
+        tg_is_bot: opts?.tgIsBot ?? false,
+        can_send: opts?.canSend ?? opts?.initialCanSend ?? !(opts?.tgIsBot ?? false),
+        last_message_at: lastMessageAt,
+        ...(status === 'lead' ? aiLeadMark() : {}),
+        ...autoForwardPayload(opts?.autoForward),
+      });
+      if (error) throw new Error(error.message);
     }
-    await db.from('tg_outreach_dialogs').update({
-      ...updatePayload,
-    }).eq('id', existing.id);
-  } else {
-    await db.from('tg_outreach_dialogs').insert({
-      campaign_id: campaignId,
-      account_id: accountId,
-      tg_user_id: tgUserId,
-      tg_username: tgUsername,
-      messages,
-      status: status ?? 'none',
-      tg_is_bot: opts?.tgIsBot ?? false,
-      can_send: opts?.canSend ?? opts?.initialCanSend ?? !(opts?.tgIsBot ?? false),
-      last_message_at: lastMessageAt,
-      ...(status === 'lead' ? aiLeadMark() : {}),
-      ...autoForwardPayload(opts?.autoForward),
-    });
-  }
+  });
 }
 
 /**
@@ -967,6 +972,8 @@ export async function handleChat(
   }
 
   const tgUserId = Number(entity.id);
+  const editKey = dialogEditKey(campaign.id, account.id, tgUserId);
+  const revision = dialogRevision(editKey);
   const tgUsername = entity.username ?? null;
   const tgIsBot = Boolean(entity.bot);
   const displayName = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
@@ -988,10 +995,9 @@ export async function handleChat(
     log('info', `${displayName}: это бот — пропускаю`);
     return { replied: false, triggerType: null };
   }
-  if (tg.ignore_no_username && !tgUsername) {
-    log('info', `${displayName}: у пользователя нет @username — пропускаю (включена настройка "игнорировать без username")`);
-    return { replied: false, triggerType: null };
-  }
+  // «Игнорировать без username» снято с экрана 22.10.2026 и не проверяется:
+  // в базах только username-контакты, и тот, кто писал по базе, а потом убрал
+  // @username, всё равно наш лид (диалог ищется по tg_user_id, а не по нику).
 
   const preReadDelay = randomRange(PRE_READ_DELAY_RANGE_SEC) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
@@ -1024,7 +1030,7 @@ export async function handleChat(
       throw err;
     }
   }
-  const chatMessages = await extractMessagesFromHistory(client, [...history].reverse(), log, displayName);
+  const chatMessages = withoutDeletedMessages(editKey, await extractMessagesFromHistory(client, [...history].reverse(), log, displayName));
 
   if (chatMessages.length === 0) {
     return { replied: false, triggerType: null };
@@ -1032,7 +1038,10 @@ export async function handleChat(
 
   await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, {
     tgIsBot,
-    initialCanSend: Boolean(tg.auto_allow_new_dialogs) && !tgIsBot,
+    // Новый диалог сразу разрешён к отправке (настройка снята с экрана
+    // 22.10.2026: у всех кампаний она стояла включённой). Ручное «отключить
+    // диалог» в «Диалогах» по-прежнему работает — его проверяет canSendToDialog.
+    initialCanSend: !tgIsBot,
   });
 
   if (!(await canSendToDialog(db, campaign.id, account.id, tgUserId))) {
@@ -1053,10 +1062,12 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  if (tg.reply_only_if_previously_wrote) {
+  // Отвечаем только тем, кому писали сами. Проверка безусловная: настройку
+  // сняли с экрана 22.10.2026 (она стояла включённой у всех кампаний).
+  {
     const hasOurMessage = chatMessages.some(m => m.role === 'assistant');
     if (!hasOurMessage) {
-      log('info', `${displayName}: ранее не писали этому пользователю — пропускаю (включена настройка "отвечать только тем, кому уже писали")`);
+      log('info', `${displayName}: ранее не писали этому пользователю — пропускаю (отвечаем только тем, кому писали мы)`);
       return { replied: false, triggerType: null };
     }
   }
@@ -1195,12 +1206,13 @@ export async function handleChat(
     log('warning', `${displayName}: в сообщении с вопросами была фраза передачи — убираю, ждём ответ клиента`);
     replyText = stripHandoffPhrase(replyText, phrase);
   }
-  // Модель берёт русскую фразу из промпта кампании и дописывает её как есть,
-  // несмотря на просьбу перевести (19.10.2026: английский ответ кончался
-  // «Передаю ваш контакт менеджеру.»). Оставшийся русский хвост срезаем.
+  // Убираем буквальный русский триггер, сохраняя прежние правила передачи.
+  // Перед отправкой ниже проверяем и основной текст: он тоже мог быть русским.
+  let removedUntranslatedHandoff = false;
   if (translateHandoff && phrase && replyText.toLowerCase().includes(phrase.toLowerCase())) {
     const stripped = stripHandoffPhrase(replyText, phrase);
     if (stripped) replyText = stripped;
+    removedUntranslatedHandoff = true;
   }
   let forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
   if (interested && phrase && !qualifying && !translateHandoff) {
@@ -1240,9 +1252,44 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
+  // Последняя проверка языка — после fallback, передачи и повторного запроса
+  // квалификации: любой из этих путей может вернуть русский текст.
+  let triggerBeforeTranslation: 'positive' | 'negative' | null = null;
+  if (needsReplyTranslation(replyText, chatMessages) || (removedUntranslatedHandoff && forcePositive)) {
+    log('warning', `${displayName}: русский текст в латинской переписке — исправляю язык перед отправкой`);
+    try {
+      const originalTrigger = forcePositive ? 'positive' : detectTrigger(replyText, oai);
+      // Если срезали русский триггер готового лида, переводим и саму передачу,
+      // чтобы собеседник узнал о ней, а не получил только «Thanks».
+      const draft = removedUntranslatedHandoff && forcePositive && phrase
+        ? ensureHandoffPhrase(replyText, phrase) : replyText;
+      const translated = await ensureReplyLanguage(oai, chatMessages, draft, originalTrigger === 'positive' ? phrase : null);
+      if (!translated) {
+        log('error', `${displayName}: исправить язык ответа не удалось — НЕ отправляю`);
+        return { replied: false, triggerType: null };
+      }
+      replyText = stripRepeatGreeting(translated, chatMessages);
+      if (isLowValueReply(replyText) || isRepeatOfOurs(replyText, chatMessages)
+        || (originalTrigger === 'positive' && asksOpenQuestions(replyText))) {
+        log('warning', `${displayName}: перевод не прошёл проверки ответа — НЕ отправляю`);
+        return { replied: false, triggerType: null };
+      }
+      // Перевод может перефразировать настроенный триггер. Его смысл уже
+      // проверен квалификацией выше; сохраняем исход передачи/отказа.
+      triggerBeforeTranslation = originalTrigger;
+    } catch (err) {
+      log('error', `${displayName}: ошибка исправления языка — НЕ отправляю: ${err instanceof Error ? err.message : String(err)}`);
+      return { replied: false, triggerType: null };
+    }
+  }
+
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
 
+  if (!dialogUnchanged(editKey, revision)) {
+    log('info', `${displayName}: оператор изменил переписку — отменяю ответ по старой истории`);
+    return { replied: false, triggerType: null };
+  }
   const sent = await withTimeout(
     client.sendMessage(entity, { message: replyText }),
     TG_SEND_TIMEOUT_MS,
@@ -1256,7 +1303,7 @@ export async function handleChat(
     timestamp: new Date().toISOString(),
   });
 
-  const triggerType = forcePositive ? 'positive' : detectTrigger(replyText, oai);
+  const triggerType = forcePositive ? 'positive' : triggerBeforeTranslation ?? detectTrigger(replyText, oai);
 
   if (triggerType) {
     const triggerLabel = triggerType === 'positive' ? 'положительный (заинтересован)' : 'отрицательный (не заинтересован)';
@@ -1428,7 +1475,9 @@ async function handleFollowUp(
     if (!contacts.has(Number(tgUserId))) { stats.skip_not_campaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
 
-    const messages = dialog.messages as DialogMessage[];
+    const editKey = dialogEditKey(campaign.id, account.id, tgUserId);
+    const revision = dialogRevision(editKey);
+    const messages = withoutDeletedMessages(editKey, dialog.messages as DialogMessage[]);
     if (messages.length === 0) { stats.skip_empty++; continue; }
     const lastMsg = messages[messages.length - 1];
     if (lastMsg.role !== 'assistant') { stats.skip_last_not_assistant++; continue; }
@@ -1457,6 +1506,7 @@ async function handleFollowUp(
         TG_RESOLVE_TIMEOUT_MS,
         'поиск собеседника по id',
       );
+      if (!dialogUnchanged(editKey, revision)) continue;
       await withTimeout(
         client.sendMessage(entity, { message: reply }),
         TG_SEND_TIMEOUT_MS,
@@ -1581,7 +1631,9 @@ async function handleMissedRepliesLastDays(
     if (!contacts.has(Number(tgUserId))) { skipNotCampaign++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
 
-    const messages = Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : [];
+    const editKey = dialogEditKey(campaign.id, account.id, tgUserId);
+    const revision = dialogRevision(editKey);
+    const messages = withoutDeletedMessages(editKey, Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : []);
     if (messages.length === 0) { skipEmpty++; continue; }
     const lastMessage = messages[messages.length - 1];
     if (lastMessage.role !== 'user') { skipLastNotUser++; continue; }
@@ -1627,6 +1679,7 @@ async function handleMissedRepliesLastDays(
         }
         else throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
       }
+      if (!dialogUnchanged(editKey, revision)) continue;
       await withTimeout(
         client.sendMessage(entity, { message: reply }),
         TG_SEND_TIMEOUT_MS,
@@ -1794,8 +1847,40 @@ export async function runCampaignLoop(
     return;
   }
 
-  const tg = campaign.telegram_settings as TelegramSettings;
-  const _oai = campaign.openai_settings as OpenAISettings;
+  // `let`: настройки перечитываются на ходу (refreshSettings ниже), и все
+  // чтения `tg.*` в круге видят свежие значения.
+  let tg = campaign.telegram_settings as TelegramSettings;
+
+  /**
+   * Перечитать настройки работающей кампании из базы.
+   *
+   * С 22.10.2026 настройки на экране сохраняются сами, без кнопки, и должны
+   * действовать сразу, а не после перезапуска кампании. Раньше строка кампании
+   * читалась один раз при старте круга: правка промпта или нормы до остановки
+   * не доходила. Объект `campaign` правим на месте — его же получают
+   * handleChat/handleFollowUp, поэтому промпт, чёрный список и follow-up
+   * подхватываются в том же месте. Сбой чтения — работаем на прежних.
+   */
+  let lastSettingsAt = '';
+  const refreshSettings = async (): Promise<void> => {
+    const { data: row, error } = await db
+      .from('tg_outreach_campaigns')
+      .select('name, telegram_settings, openai_settings, crm_settings')
+      .eq('id', campaignId)
+      .single();
+    if (error || !row) return;
+    // Сравниваем сами настройки, а не updated_at: его двигает и смена статуса.
+    const stamp = JSON.stringify(row);
+    if (stamp === lastSettingsAt) return;
+    const changed = lastSettingsAt !== '';
+    lastSettingsAt = stamp;
+    campaign.name = row.name;
+    campaign.telegram_settings = row.telegram_settings;
+    campaign.openai_settings = row.openai_settings;
+    campaign.crm_settings = row.crm_settings;
+    tg = campaign.telegram_settings as TelegramSettings;
+    if (changed) log('info', 'Настройки кампании изменились — применяю новые без перезапуска.');
+  };
 
   if (!process.env.OPENROUTER_TG_OUTREACH_API_KEY) {
     log('error', 'Не задан ключ OpenRouter (OPENROUTER_TG_OUTREACH_API_KEY в .env) — без него GPT не сможет отвечать. Кампания переведена в статус "ошибка".');
@@ -1953,6 +2038,16 @@ export async function runCampaignLoop(
   // соседние. Замыкание читает `clients` в момент вызова, поэтому переживает
   // переподключение ниже.
   if (control) control.forceDisconnect = () => disconnectAll(clients);
+  const activeDeletions = new Set<Promise<void>>();
+  if (control) control.deleteMessage = (target) => {
+    if (shouldStop()) return Promise.reject(new Error('Кампания останавливается — повторите удаление после остановки'));
+    const pending = deleteDialogMessages(campaignId, db, target, {
+      getClient: (accountId) => clients.find((entry) => entry.account.id === accountId)?.client ?? null,
+    });
+    activeDeletions.add(pending);
+    void pending.finally(() => activeDeletions.delete(pending)).catch(() => {});
+    return pending;
+  };
   // При пустом составе (все на прогреве или в отлёжке) строка «подключились 0
   // из 0» только сбивает с толку — про ожидание уже сказано выше.
   if (accounts.length) {
@@ -2192,6 +2287,7 @@ export async function runCampaignLoop(
     while (!shouldStop()) {
       tick();
       try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
+      await refreshSettings();
 
       if (isInSleepPeriod(tg.sleep_periods, tg.timezone_offset)) {
         if (!inSleepPeriod) {
@@ -2275,6 +2371,9 @@ export async function runCampaignLoop(
         // accounts (outer while-loop heartbeat is written only once per full
         // pass through ALL accounts, which can take 1-2 hours).
         try { fs.writeFileSync('/tmp/tg-outreach-heartbeat', Date.now().toString()); } catch { /* */ }
+        // Круг длится часами — правка настроек должна доходить до следующего
+        // аккаунта, а не ждать конца круга. Один лёгкий запрос на аккаунт.
+        await refreshSettings();
 
         const now = new Date();
         if (account.check_status === 'frozen' && !account.check_requested_at) {
@@ -3095,11 +3194,14 @@ export async function runCampaignLoop(
     }
   } finally {
     forwardsStopped = true;
+    if (control) control.deleteMessage = undefined;
+    await Promise.allSettled([...activeDeletions]);
     await disconnectAll(clients);
     // Опрос выходит сам по флагу выше, не позже чем через секунду; зависшая
     // отправка ограничена своим таймаутом. Дождаться его надо: иначе он
     // допишет статус задачи уже после строки «Кампания остановлена».
     await forwardPoller;
+    clearDialogEdits(campaignId);
     // On worker shutdown we must preserve campaign status (running/paused), otherwise
     // auto-resume on the next worker start will skip it.
     // Explicit stop is handled by worker handler which sets status=stopped before signaling stop.
@@ -3276,7 +3378,8 @@ export async function refetchEmptyDialogs(
 export async function deleteDialogMessages(
   campaignId: string,
   db: SupabaseClient,
-  target: { dialogId: string; timestamp: string | null; content: string },
+  target: DeleteMessageTarget,
+  live?: { getClient: (accountId: string) => TelegramClient | null },
 ) {
   const log: LogFn = (level, msg) => {
     console.log(`[tg-outreach-delete][${campaignId.slice(0, 8)}][${level}] ${msg}`);
@@ -3295,70 +3398,89 @@ export async function deleteDialogMessages(
     .maybeSingle();
   if (!dialog) throw new Error('Диалог не найден');
 
-  const { data: accounts } = await db
-    .from('tg_outreach_accounts')
-    .select('*')
-    .eq('id', dialog.account_id as string)
-    .eq('is_active', true);
-  if (!accounts?.length) throw new Error('Аккаунт диалога неактивен — удалить сообщение нельзя');
+  // Работающая кампания владеет сессией. Второе подключение запрещено,
+  // даже если нужный аккаунт сейчас на паузе или ещё не попал в состав круга.
+  const liveClient = live?.getClient(dialog.account_id as string);
+  if (live && !liveClient) throw new Error('Соединение аккаунта пока недоступно — повторите удаление позже');
+  if (!live && ['running', 'warming', 'paused'].includes(campaign.status)) {
+    throw new Error('Кампания ещё не предоставила соединение для удаления — повторите позже');
+  }
+  const clients: ActiveClient[] = [];
+  if (!liveClient) {
+    const { data: accounts } = await db
+      .from('tg_outreach_accounts')
+      .select('*')
+      .eq('id', dialog.account_id as string)
+      .eq('is_active', true);
+    if (!accounts?.length) throw new Error('Аккаунт диалога неактивен — удалить сообщение нельзя');
 
-  const { data: proxies } = await db
-    .from('tg_outreach_proxies')
-    .select('*')
-    .eq('campaign_id', campaignId)
-    .eq('is_active', true);
+    const { data: proxies } = await db
+      .from('tg_outreach_proxies')
+      .select('*')
+      .eq('campaign_id', campaignId)
+      .eq('is_active', true);
 
-  const clients = await buildClients(accounts as OutreachAccount[], proxies ?? [], log, (p: string) => downloadSessionToTemp(db, p), db);
-  if (clients.length === 0) throw new Error('Аккаунт не подключился к Telegram');
+    clients.push(...await buildClients(accounts as OutreachAccount[], proxies ?? [], log, (p: string) => downloadSessionToTemp(db, p), db));
+    if (clients.length === 0) throw new Error('Аккаунт не подключился к Telegram');
+  }
 
   try {
-    const client = clients[0].client;
+    const client = liveClient ?? clients[0].client;
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
-    let entity;
-    try {
-      entity = await withTimeout(client.getEntity(tgUserId), TG_RESOLVE_TIMEOUT_MS, 'поиск собеседника по id');
-    } catch {
-      if (!tgUsername) throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
-      entity = await withTimeout(client.getEntity(tgUsername), TG_RESOLVE_TIMEOUT_MS, 'поиск собеседника по юзернейму');
-    }
+    await withDialogDeletion(dialogEditKey(campaignId, dialog.account_id as string, tgUserId), async (recordDeleted) => {
+      let entity;
+      try {
+        entity = await withTimeout(client.getEntity(tgUserId), TG_RESOLVE_TIMEOUT_MS, 'поиск собеседника по id');
+      } catch {
+        if (!tgUsername) throw new Error(`Не удалось найти пользователя ID:${tgUserId}`);
+        entity = await withTimeout(client.getEntity(tgUsername), TG_RESOLVE_TIMEOUT_MS, 'поиск собеседника по юзернейму');
+      }
 
-    const history = await withTimeout(
-      client.getMessages(entity, { limit: tg.history_limit }),
-      TG_HISTORY_TIMEOUT_MS,
-      'чтение истории диалога',
-    );
+      const history = await withTimeout(
+        client.getMessages(entity, { limit: tg.history_limit }),
+        TG_HISTORY_TIMEOUT_MS,
+        'чтение истории диалога',
+      );
 
-    const wantedText = target.content.trim();
-    const wantedAt = target.timestamp ? Date.parse(target.timestamp) : NaN;
-    const candidates = history
-      .filter((m) => m.out && (m.message ?? '').trim() === wantedText)
-      .sort((a, b) => {
-        if (!Number.isFinite(wantedAt)) return 0;
-        return Math.abs((a.date ?? 0) * 1000 - wantedAt) - Math.abs((b.date ?? 0) * 1000 - wantedAt);
-      });
-    const found = candidates[0];
-    if (!found) throw new Error('Сообщение не нашлось в Telegram — возможно, его уже удалили');
+      const wantedText = target.content.trim();
+      const wantedAt = target.timestamp ? Date.parse(target.timestamp) : NaN;
+      const candidates = history
+        .filter((m) => m.out && (m.message ?? '').trim() === wantedText)
+        .sort((a, b) => {
+          if (!Number.isFinite(wantedAt)) return 0;
+          return Math.abs((a.date ?? 0) * 1000 - wantedAt) - Math.abs((b.date ?? 0) * 1000 - wantedAt);
+        });
+      const found = candidates[0];
+      if (!found) throw new Error('Сообщение не нашлось в Telegram — возможно, его уже удалили');
+      if (Number.isFinite(wantedAt) && Math.abs((found.date ?? 0) * 1000 - wantedAt) > 5000) {
+        throw new Error('Сообщение с этой датой не нашлось в Telegram — обновите переписку');
+      }
 
-    await withTimeout(
-      client.deleteMessages(entity, [found.id], { revoke: true }),
-      TG_SEND_TIMEOUT_MS,
-      'удаление сообщения',
-    );
-    log('info', `Удалил в Telegram сообщение нашего аккаунта для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
+      await withTimeout(
+        client.deleteMessages(entity, [found.id], { revoke: true }),
+        TG_SEND_TIMEOUT_MS,
+        'удаление сообщения',
+      );
+      log('info', `Удалил в Telegram сообщение нашего аккаунта для ${tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`}`);
 
-    const fresh = await withTimeout(
-      client.getMessages(entity, { limit: tg.history_limit }),
-      TG_HISTORY_TIMEOUT_MS,
-      'чтение истории диалога',
-    );
-    const label = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
-    const chatMessages = await extractMessagesFromHistory(client, [...fresh].reverse(), log, label);
-    await upsertDialog(
-      db, campaignId, dialog.account_id as string,
-      tgUserId, tgUsername, chatMessages, undefined,
-      { tgIsBot: Boolean(dialog.tg_is_bot) },
-    );
+      const fresh = await withTimeout(
+        client.getMessages(entity, { limit: tg.history_limit }),
+        TG_HISTORY_TIMEOUT_MS,
+        'чтение истории диалога',
+      );
+      if (fresh.some((message) => message.id === found.id)) {
+        throw new Error('Telegram ещё не подтвердил удаление сообщения — обновите переписку и повторите');
+      }
+      recordDeleted(target.content, [target.timestamp, new Date((found.date ?? 0) * 1000).toISOString()]);
+      const label = tgUsername ? `@${tgUsername}` : `ID:${tgUserId}`;
+      const chatMessages = await extractMessagesFromHistory(client, [...fresh].reverse(), log, label);
+      await upsertDialog(
+        db, campaignId, dialog.account_id as string,
+        tgUserId, tgUsername, chatMessages, undefined,
+        { tgIsBot: Boolean(dialog.tg_is_bot) },
+      );
+    });
   } finally {
     await disconnectAll(clients);
   }

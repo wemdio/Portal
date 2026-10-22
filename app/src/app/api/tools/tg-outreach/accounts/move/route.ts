@@ -13,12 +13,16 @@ const MAX_REASON = 500;
  * Обе кампании обязаны быть остановлены, и это не формальность: круг рассылки
  * держит сессии живыми и раздаёт аккаунтам прокси по ходу работы. Переезд из-под
  * работающего круга означает, что часть аккаунта уже уехала, а сессию всё ещё
- * держит чужая кампания.
+ * держит чужая кампания (две сессии на один аккаунт — AUTH_KEY_DUPLICATED).
  *
- * Прокси не едет вместе с аккаунтом: пул мобильных прокси закреплён за
- * кампанией (один клиент — свои прокси), поэтому на новом месте прокси
- * назначается заново. Сессия у мобильных прокси липкая, так что смена адреса
- * для Telegram ничем не отличается от обычной ротации.
+ * Аккаунт переезжает в том состоянии, в каком он был: включённый остаётся
+ * включённым, цена, профиль и история на месте. С ним едет и его прокси
+ * (22.10.2026): прокси принадлежит кампании, и без него аккаунт на новом месте
+ * подключился бы с IP сервера.
+ *
+ * Куда переносить — любая остановленная кампания. Правило «перенесённый можно
+ * только вернуть домой» снято 22.10.2026: переезды идут между кампаниями
+ * свободно, а след остаётся в журнале переносов и в пометке «откуда пришёл».
  */
 export async function POST(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.tg-outreach.accounts.move.post' }, async () => {
@@ -45,7 +49,7 @@ export async function POST(req: NextRequest) {
 
     const { data: accounts, error: accError } = await auth.supabase
       .from('tg_outreach_accounts')
-      .select('id, campaign_id, session_name, moved_from_campaign_id, moved_from_campaign_name')
+      .select('id, campaign_id, session_name, proxy_id, moved_from_campaign_id, moved_from_campaign_name')
       .in('id', ids);
     if (accError) return jsonError(accError.message, 500);
     if (!accounts?.length) return jsonError('Аккаунты не найдены', 404);
@@ -57,35 +61,6 @@ export async function POST(req: NextRequest) {
     const fromCampaignId = fromIds[0];
     if (fromCampaignId === toCampaignId) {
       return jsonError('Аккаунты уже в этой кампании', 400);
-    }
-
-    /**
-     * Перенесённый аккаунт переносить дальше нельзя — только вернуть домой.
-     *
-     * Иначе аккаунт кочует по кампаниям, и на вопрос «чей он вообще» ответа
-     * нет: строка помнит одну исходную кампанию, а их к тому моменту три.
-     * Возврат — это тот же перенос, но в ту кампанию, откуда аккаунт пришёл.
-     */
-    const guests = accounts.filter((a) => a.moved_from_campaign_id);
-    const returning = guests.length > 0;
-    if (returning) {
-      if (guests.length !== accounts.length) {
-        return jsonError(
-          'В выборке и перенесённые аккаунты, и свои — разделите их: перенесённый можно только вернуть обратно',
-          400,
-        );
-      }
-      const homes = [...new Set(guests.map((a) => String(a.moved_from_campaign_id)))];
-      if (homes.length > 1) {
-        return jsonError('Выбранные аккаунты пришли из разных кампаний — возвращайте по одной', 400);
-      }
-      if (homes[0] !== toCampaignId) {
-        const home = guests[0].moved_from_campaign_name || 'исходную кампанию';
-        return jsonError(
-          `Эти аккаунты уже перенесены из «${home}» — их можно только вернуть обратно, а не переносить дальше`,
-          409,
-        );
-      }
     }
 
     const { data: campaigns, error: campError } = await auth.supabase
@@ -133,30 +108,89 @@ export async function POST(req: NextRequest) {
     if (logError) return jsonError(logError.message, 500);
 
     /**
-     * Прокси снимается, аккаунт выключается.
+     * Прокси едет вместе с аккаунтом.
      *
-     * Прокси принадлежит прежней кампании, и на новом месте его нет. Аккаунт
-     * без прокси в работу не берут, но выключаем мы его отдельно и намеренно:
-     * так он не уедет в бой раньше, чем оператор назначит ему прокси и
-     * посмотрит, что с ним вообще.
+     * Строка прокси принадлежит кампании (круг читает прокси по campaign_id),
+     * поэтому её переписываем на новую кампанию — со списком «без списка»: списки
+     * тоже принадлежат старой кампании. Если тем же прокси пользуются аккаунты,
+     * которые остаются, — переносим копию (адрес тот же, статистика с нуля),
+     * чтобы не оставить их без прокси.
      */
-    const { data: moved, error: moveError } = await auth.supabase
-      .from('tg_outreach_accounts')
-      .update({
-        campaign_id: toCampaignId,
-        proxy_id: null,
-        is_active: false,
-        // Возврат снимает пометку: аккаунт дома, гостить ему больше негде.
-        // Обычный перенос её ставит — по ней в списке видно, откуда аккаунт, и
-        // по ней же запрещён следующий переезд.
-        moved_from_campaign_id: returning ? null : fromCampaignId,
-        moved_from_campaign_name: returning ? null : ((from?.name as string | null) ?? null),
-        moved_reason: returning ? null : reason,
-        moved_at: returning ? null : new Date().toISOString(),
-      })
-      .in('id', accounts.map((a) => a.id))
-      .select('id');
-    if (moveError) return jsonError(moveError.message, 500);
+    const movedIds = new Set(accounts.map((a) => String(a.id)));
+    const proxyIds = [...new Set(accounts.map((a) => a.proxy_id).filter((p): p is string => Boolean(p)))];
+    const newProxyFor = new Map<string, string>();
+    let proxiesMoved = 0;
+    let proxiesCopied = 0;
+    if (proxyIds.length) {
+      const { data: sharedRows, error: sharedError } = await auth.supabase
+        .from('tg_outreach_accounts')
+        .select('id, proxy_id')
+        .in('proxy_id', proxyIds);
+      if (sharedError) return jsonError(sharedError.message, 500);
+      const stays = new Set(
+        (sharedRows ?? []).filter((r) => !movedIds.has(String(r.id))).map((r) => String(r.proxy_id)),
+      );
+
+      const { data: proxyRows, error: proxyError } = await auth.supabase
+        .from('tg_outreach_proxies')
+        .select('id, url, name, is_active, country_code')
+        .in('id', proxyIds);
+      if (proxyError) return jsonError(proxyError.message, 500);
+
+      for (const proxy of proxyRows ?? []) {
+        const proxyId = String(proxy.id);
+        if (stays.has(proxyId)) {
+          const { data: copy, error: copyError } = await auth.supabase
+            .from('tg_outreach_proxies')
+            .insert({
+              campaign_id: toCampaignId,
+              url: proxy.url,
+              name: proxy.name,
+              is_active: proxy.is_active,
+              country_code: proxy.country_code,
+            })
+            .select('id')
+            .single();
+          if (copyError) return jsonError(copyError.message, 500);
+          newProxyFor.set(proxyId, String(copy.id));
+          proxiesCopied += 1;
+        } else {
+          const { error: moveProxyError } = await auth.supabase
+            .from('tg_outreach_proxies')
+            .update({ campaign_id: toCampaignId, proxy_list_id: null })
+            .eq('id', proxyId);
+          if (moveProxyError) return jsonError(moveProxyError.message, 500);
+          newProxyFor.set(proxyId, proxyId);
+          proxiesMoved += 1;
+        }
+      }
+    }
+
+    /**
+     * Сам перенос. Включённость, цена, профиль и остальное не трогаем — аккаунт
+     * переезжает как есть. Меняются кампания, прокси (на перенесённый или его
+     * копию) и пометка «откуда пришёл».
+     *
+     * Пометка: возврат в кампанию, откуда аккаунт пришёл, снимает её — он дома.
+     * Любой другой перенос записывает, из какой кампании аккаунт приехал сейчас.
+     * Пишем по одному: у аккаунтов разные прокси и разная история.
+     */
+    const movedAt = new Date().toISOString();
+    for (const a of accounts) {
+      const returning = a.moved_from_campaign_id != null && String(a.moved_from_campaign_id) === toCampaignId;
+      const { error: moveError } = await auth.supabase
+        .from('tg_outreach_accounts')
+        .update({
+          campaign_id: toCampaignId,
+          ...(a.proxy_id ? { proxy_id: newProxyFor.get(String(a.proxy_id)) ?? a.proxy_id } : {}),
+          moved_from_campaign_id: returning ? null : fromCampaignId,
+          moved_from_campaign_name: returning ? null : ((from?.name as string | null) ?? null),
+          moved_reason: returning ? null : reason,
+          moved_at: returning ? null : movedAt,
+        })
+        .eq('id', a.id);
+      if (moveError) return jsonError(moveError.message, 500);
+    }
 
     /**
      * Журналы обеих кампаний.
@@ -171,9 +205,11 @@ export async function POST(req: NextRequest) {
      */
     const who = byName ?? 'неизвестно кто';
     const names = accounts.map((a) => String(a.session_name)).join(', ');
-    const verb = returning ? 'вернул аккаунты' : 'перенёс аккаунты';
+    const proxyNote = proxyIds.length
+      ? ` Прокси: перенесено ${proxiesMoved}${proxiesCopied ? `, скопировано ${proxiesCopied}` : ''}.`
+      : '';
     const moveLine = (direction: string) =>
-      `${who}: ${verb} ${direction}. Аккаунтов ${accounts.length} (${names}). Причина: ${reason}`;
+      `${who}: перенёс аккаунты ${direction}. Аккаунтов ${accounts.length} (${names}).${proxyNote} Причина: ${reason}`;
 
     await Promise.all([
       from
@@ -193,8 +229,9 @@ export async function POST(req: NextRequest) {
     ]);
 
     return NextResponse.json({
-      moved: moved?.length ?? 0,
-      returned: returning,
+      moved: accounts.length,
+      proxies_moved: proxiesMoved,
+      proxies_copied: proxiesCopied,
       to_campaign_name: to.name ?? null,
     });
   });

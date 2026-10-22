@@ -276,6 +276,12 @@ export interface OutreachCampaign {
    * параллельно.
    */
   warming_accounts?: number;
+  /** Активных аккаунтов кампании — для списка кампаний; тоже считает ручка списка. */
+  active_accounts?: number;
+  /** В архиве с этого момента; null — кампания в работе. */
+  archived_at?: string | null;
+  /** Почему убрали в архив — обязательна при архивации. */
+  archive_reason?: string | null;
 }
 
 export interface OutreachProxy {
@@ -688,10 +694,12 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   // очередь за полминуты покупает PEER_FLOOD быстрее, чем успевает сработать
   // суточная норма. Ноль в gap выключает разнос обратно в очередь.
   first_touch_gap_minutes: 60,
-  first_touch_per_gap: 2,
-  // Норма первых сообщений: 3 письма на аккаунт в сутки — нижняя ступень
-  // лестницы из подсказки на экране. Раньше ключа в дефолтах не было вовсе,
-  // и новая кампания заводилась с выключенной рассылкой (undefined → 0).
-  first_touch_per_account_per_day: 3,
+  // 22.10.2026 дефолты новой кампании выставлены по рабочей настройке
+  // пользователя: 2 первых сообщения в сутки, порция 6, 6 аккаунтов параллельно.
+  first_touch_per_gap: 6,
+  // Норма первых сообщений на аккаунт в сутки. Раньше ключа в дефолтах не было
+  // вовсе, и новая кампания заводилась с выключенной рассылкой (undefined → 0).
+  first_touch_per_account_per_day: 2,
+  account_concurrency: 6,
   follow_up: DEFAULT_FOLLOW_UP,
 };
