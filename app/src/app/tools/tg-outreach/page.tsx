@@ -3539,12 +3539,6 @@ function CampaignAccountsTab({
     [accounts, errorCounts, loadedAt],
   );
 
-  /** Кого Telegram хоть раз за сутки прижал: ошибка или предупреждение в логах.
-   *  FLOOD_WAIT, PEER_FLOOD, повторное подключение и т.п. — это и читается
-   *  сводным словом «ограничены». Считается поверх alive/dead — отдельно от
-   *  статуса проверки и отдельно от фактических отправок. */
-  const restrictedCount = accountStats.withErrors + accountStats.withWarningsOnly;
-
   /**
    * Кого предлагает выключить кнопка «Снять неживые с рассылки».
    *
@@ -3713,17 +3707,17 @@ function CampaignAccountsTab({
       {!loading && accounts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
           <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.alive > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}
-            title="Последняя проверка вернула «жив». Проверку теперь ставит и сама рассылка: каждый успешный круг аккаунта — это подтверждение, что он жив, без остановки кампании."
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.healthy > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}
+            title="Аккаунты, которые сейчас могут работать: не под кулдауном и не мёртвые. Вместе с «ограничены» дают всю партию."
           >
-            живо {accountStats.alive} из {accounts.length}
+            живо {accountStats.healthy} из {accounts.length}
           </span>
 
           <span
-            className={`rounded-md px-2 py-1 font-medium ${restrictedCount > 0 ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-400'}`}
-            title="За сутки в логах аккаунта были ошибки или предупреждения — обычно это временные ограничения Telegram (FLOOD_WAIT, PEER_FLOOD), разрыв соединения со второй попытки или отложенный контакт. Считается по факту работы за сутки, а не по статусу проверки."
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.restricted > 0 ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-400'}`}
+            title="Сейчас не могут работать: кулдаун после ограничения Telegram, мёртвая сессия, бан, заморозка. Сбои связи с прокси сюда не входят."
           >
-            ограничены {restrictedCount} из {accounts.length}
+            ограничены {accountStats.restricted} из {accounts.length}
           </span>
 
           {/* Деньги партии: сумма считается только по строкам с проставленной

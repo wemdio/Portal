@@ -16,6 +16,8 @@ export interface AccountsSummaryAccount {
   /** Из набора check_status; null/undefined — проверка ни разу не запускалась. */
   check_status?: string | null;
   checked_at?: string | null;
+  /** Кулдаун после ограничения Telegram: пока в будущем — аккаунт отдыхает. */
+  cooldown_until?: string | null;
 }
 
 export interface AccountsSummary {
@@ -34,6 +36,14 @@ export interface AccountsSummary {
   newestCheck: number | null;
   /** Возраст самой свежей проверки в часах. null — считать не от чего. */
   ageHours: number | null;
+  /**
+   * Ограничены сейчас: кулдаун ещё идёт, либо последняя проверка вернула не
+   * «жив» (сессия мертва, бан, заморозка и т.п.). `healthy + restricted`
+   * всегда равно числу аккаунтов — это разбиение, а не пересечение.
+   */
+  restricted: number;
+  /** Все остальные: не под кулдауном и не мёртвые (в том числе ещё не проверенные). */
+  healthy: number;
   /** Аккаунты, у которых за окно была хоть одна строка уровня «ошибка». */
   withErrors: number;
   /** Были только предупреждения, ошибок не было. */
@@ -52,11 +62,16 @@ export function summarizeAccounts(
   let dead = 0;
   let unchecked = 0;
   let disabled = 0;
+  let restricted = 0;
   const byStatus: Record<string, number> = {};
   let newestCheck: number | null = null;
 
   for (const a of accounts) {
     if (!a.is_active) disabled++;
+
+    const cooldownUntil = a.cooldown_until ? new Date(a.cooldown_until).getTime() : NaN;
+    const coolingDown = now !== null && Number.isFinite(cooldownUntil) && cooldownUntil > now;
+    if (coolingDown || (a.check_status && a.check_status !== 'ok')) restricted++;
 
     // Разбиение, а не пересечение: «не проверялись» обязано быть отдельным
     // числом, иначе 12 живых из 20 читаются как 8 мёртвых, хотя восемь из них
@@ -93,6 +108,7 @@ export function summarizeAccounts(
 
   return {
     alive, dead, unchecked, disabled, byStatus,
+    restricted, healthy: accounts.length - restricted,
     newestCheck, ageHours,
     withErrors, withWarningsOnly, errorTotal,
   };
