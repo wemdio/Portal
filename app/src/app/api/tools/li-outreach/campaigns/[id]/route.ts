@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError, checkIsAdmin } from '@/lib/liOutreach/apiHelpers';
 import { collectUnknownPlaceholders, unknownPlaceholderError } from '@/lib/liOutreach/campaignTextCheck';
 import { normalizeTimezoneOffset, normalizeWorkingHours } from '@/lib/liOutreach/schedule';
+import { saveCampaignAccounts } from '@/lib/liOutreach/campaignAccounts';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -70,6 +71,16 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     }
     if ('timezone_offset' in body) {
       patch.timezone_offset = normalizeTimezoneOffset(body.timezone_offset);
+    }
+
+    // Список аккаунтов сохраняется отдельно (и сам выставляет основной).
+    const accountIds = Array.isArray(body.account_ids)
+      ? (body.account_ids as unknown[]).filter((v): v is string => typeof v === 'string' && v !== '')
+      : null;
+    if (accountIds) {
+      delete patch.account_id;
+      const accError = await saveCampaignAccounts(supabaseAdmin, id, accountIds);
+      if (accError) return jsonError(accError, 409);
     }
 
     const { error } = await supabaseAdmin
