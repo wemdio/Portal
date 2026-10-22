@@ -14,14 +14,14 @@ import {
 import {
   HE_ENG_COMPANY_QUALIFICATION_VERSION, HeEngQualificationScopeError,
   heEngCompanyKey, heEngCompanyQualified, heEngQualificationVersion,
-  type HeEngCompanyVerdict, type HeEngQualificationMemo,
+  type HeEngCompanyVerdict, type HeEngQualificationInFlight, type HeEngQualificationMemo,
   type HeEngQualificationRow, type HeEngQualificationScope,
   type HeEngCollectedCompanyEvidence, type HeEngCompanyQualificationAssessment,
 } from './engCompanyQualificationPolicy';
 import { callLLMText, heLlmFailureOf, isHeLlmTimeout } from './llm';
 import {
   readHeEngQualificationBudget, reserveHeEngQualificationModel, settleHeEngQualificationModel,
-  heEngQualificationBudgetHoldReason, HE_ENG_QUALIFICATION_REVIEW_MODEL, HE_ENG_QUALIFICATION_MODEL,
+  type HeEngQualificationModelReservation, heEngQualificationBudgetHoldReason, HE_ENG_QUALIFICATION_REVIEW_MODEL, HE_ENG_QUALIFICATION_MODEL,
   HE_ENG_COLLECTION_QUALIFICATION_LIMIT_MICROUSD,
 } from './engQualificationBudget';
 import { heStageSignal, isHeSiteUnreachable, resolveFetchPage, type HeFetchedPage, type HeFetchPageFn } from './stages/io';
@@ -30,7 +30,18 @@ import type { HeStageContext } from './stages/shared';
 const MAX_PAGES = 9;
 const MAX_PAGE_DEPTH = 3;
 const MAX_COMPANY_ATTEMPTS = 3;
-const COMPANY_RETRY_MS = 30_000;
+// Pause before re-reading sites that failed transiently, when only such
+// companies are left. 30 s until 23.10.2026: retries rarely recover a site
+// (3 of ~90 in two collections), so the wait mostly delayed the next wave.
+const COMPANY_RETRY_MS = 10_000;
+// Per run: sites read at once and paid model requests in flight at once.
+// Measured 22.10.2026: a run of 16 companies spent ~76 s reading sites four at
+// a time, then ~28 s on one model request after another, with the worker
+// mostly idle (CPU 0–30%). Models now start as soon as a company is read.
+const SITE_READERS = 8;
+const MODEL_REQUESTS_IN_PARALLEL = 4;
+/** One request per company, at most 16 companies per run: a longer saved list is corrupt. */
+const MAX_LOST_FLIGHTS = 16;
 // Model failures in a row before this run pauses; billing/key failures pause at once.
 const MAX_MODEL_FAILURES_IN_RUN = 3;
 const MODEL_PAUSE_MS = 60_000;
@@ -534,16 +545,24 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
     memo.attempts![key] = { attempts, kind: 'model_transient' };
     return attempts >= MAX_COMPANY_ATTEMPTS;
   }
-  if (saved?.inFlight) {
-    const flight = saved.inFlight;
-    if (!['classifier', 'review'].includes(flight.phase ?? '') || typeof flight.reservationId !== 'string' || !Object.hasOwn(budget.reservations, flight.reservationId) ||
-        !Array.isArray(flight.companyKeys) || !flight.companyKeys.length || flight.companyKeys.length > MODEL_BATCH_SIZE ||
-        new Set(flight.companyKeys).size !== flight.companyKeys.length || flight.companyKeys.some((key) =>
-          typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key) || (!preparedHistory.has(key) && !Object.hasOwn(memo.verdicts, key)))) throw new HeEngQualificationScopeError('invalid interrupted request');
-    // A request lost to a restart or a cancelled job: its reserve stays booked
-    // as spent (the reservation keeps it), its companies get a later attempt,
-    // and checking goes on with everyone else instead of stopping the base.
-    for (const key of flight.companyKeys) {
+  // Requests lost to a restart or a cancelled job: the marker of the old
+  // one-at-a-time format and the current list. Each reserve stays booked as
+  // spent (the reservation keeps it), its company gets a later attempt, and
+  // checking goes on with everyone else instead of stopping the base.
+  const savedFlights = saved?.inFlights;
+  if (savedFlights !== undefined && !Array.isArray(savedFlights)) throw new HeEngQualificationScopeError('invalid interrupted request');
+  const lostFlights = [...(saved?.inFlight ? [saved.inFlight] : []), ...(savedFlights ?? [])];
+  const validFlight = (flight: HeEngQualificationInFlight | undefined): boolean => !!flight &&
+    ['classifier', 'review'].includes(flight.phase ?? '') && typeof flight.reservationId === 'string' && Object.hasOwn(budget.reservations, flight.reservationId) &&
+    Array.isArray(flight.companyKeys) && flight.companyKeys.length > 0 && flight.companyKeys.length <= MODEL_BATCH_SIZE &&
+    new Set(flight.companyKeys).size === flight.companyKeys.length && flight.companyKeys.every((key) =>
+      typeof key === 'string' && /^[a-f0-9]{64}$/.test(key) && (preparedHistory.has(key) || Object.hasOwn(memo.verdicts, key)));
+  const lostKeys = lostFlights.flatMap((flight) => validFlight(flight) ? flight.companyKeys : []);
+  if (lostFlights.length > MAX_LOST_FLIGHTS || !lostFlights.every(validFlight) ||
+      new Set(lostFlights.map((flight) => flight.reservationId)).size !== lostFlights.length ||
+      new Set(lostKeys).size !== lostKeys.length) throw new HeEngQualificationScopeError('invalid interrupted request');
+  if (lostFlights.length) {
+    for (const key of lostKeys) {
       if (!memo.verdicts[key] && modelAttemptFailed(key)) finish(key, unverified(scope, key, 'model_response_unavailable'));
     }
     await save();
@@ -564,11 +583,22 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
   const candidates = [...pending].filter(([key]) => !memo.verdicts[key]).sort(([a], [b]) =>
     Number(!!memo.economy!.proposals![b]) - Number(!!memo.economy!.proposals![a]) ||
     Number(!!memo.economy!.prepared[b]) - Number(!!memo.economy!.prepared[a]) || (memo.attempts![a]?.attempts ?? 0) - (memo.attempts![b]?.attempts ?? 0)).slice(0, limit);
+  // Companies whose evidence is ready for the models, in candidate order: the
+  // models start on the first one while the other sites are still being read.
+  const ready = candidates.filter(([key]) => memo.economy!.prepared[key]).map(([key]) => key);
+  // Assessors wait here for a newly read company, a finished request or a stop.
+  const waiters: Array<() => void> = [];
+  const wakeAll = () => { for (const wake of waiters.splice(0)) wake(); };
+  const changed = () => new Promise<void>((resolve) => { waiters.push(resolve); });
+  let readersDone = false;
+  // Why this run stops buying; set from inside the readers and the assessors.
+  const run: { failure?: { error: unknown }; holdReason?: string; modelPaused?: boolean } = {};
+  let modelFailures = 0;
+  const stopped = () => !!run.failure || !!run.holdReason || !!run.modelPaused;
+  const fail = (error: unknown) => { run.failure ??= { error }; wakeAll(); };
   let cursor = 0;
-  let readFailure: unknown;
-  let failed = false;
   async function prepare(): Promise<void> {
-    while (!failed && cursor < candidates.length) {
+    while (!stopped() && cursor < candidates.length) {
       const [key, row] = candidates[cursor++];
       try {
         interrupted(ctx);
@@ -593,29 +623,49 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
           ...(pages.some((page) => !sameSite(page.url, website)) ? { company: row.company } : {}),
           ...(reused.length ? { collectedJobId: collected!.jobId } : {}) };
         await save();
-      } catch (error) { if (!failed) { failed = true; readFailure = error; } }
+        if (memo.economy!.prepared[key] && !memo.verdicts[key]) { ready.push(key); wakeAll(); }
+      } catch (error) { fail(error); }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(4, candidates.length) }, () => prepare()));
-  if (failed) throw readFailure;
-  const ready = candidates.flatMap(([key, row]) => {
-    const company = memo.economy!.prepared[key];
-    if (!company || memo.verdicts[key]) return [];
-    const evidence = fitInput(key, row, company.website, company.pages, scope, company.excerptVersion);
-    if (evidence.quotes.length) return [evidence];
-    finish(key, unverified(scope, key, 'activity_unverified'));
-    return [];
-  });
-  await save();
-  let purchaseHold: string | null = null;
-  let modelFailures = 0;
-  let modelPaused = false;
+  // Paid requests that have not answered yet. Each one is durable before it is
+  // sent; a restart treats every one listed here as lost (see above).
+  const flights: HeEngQualificationInFlight[] = [];
+  function syncFlights(): void {
+    if (flights.length) memo.economy!.inFlights = [...flights];
+    else delete memo.economy!.inFlights;
+  }
+  function dropFlight(flight: HeEngQualificationInFlight): void {
+    const index = flights.indexOf(flight);
+    if (index >= 0) flights.splice(index, 1);
+    syncFlights();
+    wakeAll();
+  }
   // Budget, selected company keys and phase are durable before each paid request.
-  // null ends this run; 'failed' means these companies wait for a later attempt.
+  // null stops buying in this run; 'failed' means the company waits for a later attempt.
   async function purchase(request: HeEngCompanyFitRequest, companies: HeEngCompanyFitInput[], review: boolean): Promise<Map<string, HeEngCompanyFitDecision> | 'failed' | null> {
-    const reservation = reserveHeEngQualificationModel(budget, request.messages, review ? 2500 : 1100, { review, jsonSchema: request.jsonSchema });
-    if (!reservation) { finishRemaining(heEngQualificationBudgetHoldReason(budget) ?? 'model_budget_exhausted'); await save(); return null; }
-    memo.economy!.inFlight = { reservationId: reservation.id, companyKeys: companies.map((company) => company.id), phase: review ? 'review' : 'classifier' };
+    let reservation: HeEngQualificationModelReservation | null = null;
+    while (!reservation) {
+      // After a failed request, buy one at a time until one succeeds: a failing
+      // provider must not burn the attempts of several companies at once.
+      while (modelFailures > 0 && flights.length > 0 && !stopped()) await changed();
+      if (stopped()) return null;
+      // A request that does not fit while others are unanswered waits for their
+      // settlement, which returns unused reserve. Alone, it is a real hold, as
+      // in the one-at-a-time order: parallel requests never end the budget early.
+      const others = flights.length > 0;
+      reservation = reserveHeEngQualificationModel(budget, request.messages, review ? 2500 : 1100,
+        { review, jsonSchema: request.jsonSchema, ...(others ? { holdIfShort: false as const } : {}) });
+      if (reservation) break;
+      if (!others) {
+        run.holdReason ??= heEngQualificationBudgetHoldReason(budget) ?? 'model_budget_exhausted';
+        wakeAll();
+        return null;
+      }
+      await changed();
+    }
+    const flight: HeEngQualificationInFlight = { reservationId: reservation.id, companyKeys: companies.map((company) => company.id), phase: review ? 'review' : 'classifier' };
+    flights.push(flight);
+    syncFlights();
     await save();
     interrupted(ctx);
     try {
@@ -625,79 +675,96 @@ export async function runHeEngCompanyQualification<T extends HeEngQualificationR
       // An answer without a reported price keeps its full reserve booked as spent.
       settleHeEngQualificationModel(budget, reservation, reportedCost);
       const result = parseHeEngCompanyFitResponse(response.finishReason === 'length' ? '' : response.text, companies, safeScope, request);
-      delete memo.economy!.inFlight;
+      dropFlight(flight);
       modelFailures = 0;
-      purchaseHold = heEngQualificationBudgetHoldReason(budget);
-      if (purchaseHold && !review) {
-        finishRemaining(purchaseHold); await save(); return null;
-      }
+      const purchaseHold = heEngQualificationBudgetHoldReason(budget);
+      if (purchaseHold) { run.holdReason ??= purchaseHold; wakeAll(); }
+      // A first answer under a fresh hold is not used; an independent review is kept (see assess).
+      if (purchaseHold && !review) { await save(); return null; }
       return result;
     } catch (error) {
       // This purchase is a single callLLMText attempt, transportRetries: 0,
       // with no model/schema fallback. Only a live transport receipt can prove
       // zero provider work. Clear our local marker before propagating the stop,
       // so a future approved resume does not discard all remaining companies.
-      // Global ledger holds/reservations and historical inFlight stay intact.
+      // Global ledger holds/reservations and historical in-flight markers stay intact.
       if (isHeEngBaseBudgetPreflightFailure(error)) {
         settleHeEngQualificationModel(budget, reservation, 0);
-        delete memo.economy!.inFlight;
+        dropFlight(flight);
         await save();
       }
       rethrowHeEngBaseBudgetError(error);
       // Unknown implementation errors/abort keep the durable in-flight marker.
       interrupted(ctx, error);
-      const failure = heLlmFailureOf(error);
-      if (!failure && !isHeLlmTimeout(error)) throw error;
-      // The model did not answer: the reserve stays booked as spent and these
-      // companies get a later attempt (three in all). Checking goes on with the
+      const llmFailure = heLlmFailureOf(error);
+      if (!llmFailure && !isHeLlmTimeout(error)) throw error;
+      // The model did not answer: the reserve stays booked as spent and this
+      // company gets a later attempt (three in all). Checking goes on with the
       // next company; repeated failures, or a billing/key problem, pause this
       // run for a minute instead of stopping the base.
-      delete memo.economy!.inFlight;
+      dropFlight(flight);
       for (const company of companies) {
         if (!memo.verdicts[company.id] && modelAttemptFailed(company.id)) finish(company.id, unverified(scope, company.id, 'model_provider_unavailable'));
       }
       modelFailures += 1;
-      modelPaused = modelFailures >= MAX_MODEL_FAILURES_IN_RUN || failure?.kind === 'billing' || failure?.kind === 'configuration';
+      if (modelFailures >= MAX_MODEL_FAILURES_IN_RUN || llmFailure?.kind === 'billing' || llmFailure?.kind === 'configuration') {
+        run.modelPaused = true;
+        wakeAll();
+      }
       await save();
-      return modelPaused ? null : 'failed';
+      return run.modelPaused ? null : 'failed';
     }
   }
+  async function assess(key: string): Promise<void> {
+    const row = pending.get(key)!;
+    const prepared = memo.economy!.prepared[key];
+    if (!prepared || memo.verdicts[key]) return;
+    const company = fitInput(key, row, prepared.website, prepared.pages, scope, prepared.excerptVersion);
+    if (!company.quotes.length) { finish(key, unverified(scope, key, 'activity_unverified')); await save(); return; }
+    if (!memo.economy!.proposals![key]) {
+      const proposals = await purchase(buildHeEngCompanyFitClassifierRequest([company], safeScope), [company], false);
+      if (!proposals || proposals === 'failed') return;
+      const proposal = proposals.get(key)!;
+      if (!heEngCompanyFitNeedsReview(proposal)) finish(key, fitVerdict(row, company, scope,
+        finalizeHeEngCompanyFit(new Map([[key, proposal]]), new Map()).get(key)!), proposal);
+      else memo.economy!.proposals![key] = proposal;
+      await save(); // Persist the first paid answer before buying independent review.
+      if (memo.verdicts[key]) return;
+    }
+    const proposals = new Map([[key, memo.economy!.proposals![key]]]);
+    const request = buildHeEngCompanyFitReviewRequest([company], proposals, safeScope);
+    if (!request) throw new HeEngQualificationScopeError('missing independent review request');
+    const reviews = await purchase(request, request.companies, true);
+    if (!reviews || reviews === 'failed') return;
+    const final = finalizeHeEngCompanyFit(proposals, reviews);
+    finish(key, fitVerdict(row, company, scope, final.get(key)!), proposals.get(key), reviews.get(key));
+    // Keep a completed, independently checked result even if its charge is unknown.
+    // The same durable hold prevents any further purchase in this base.
+    await save();
+  }
+  async function nextReady(): Promise<string | null> {
+    for (;;) {
+      if (stopped()) return null;
+      const key = ready.shift();
+      if (key !== undefined) return key;
+      if (readersDone) return null;
+      await changed();
+    }
+  }
+  async function assessReady(): Promise<void> {
+    for (let key = await nextReady(); key !== null; key = await nextReady()) {
+      try { interrupted(ctx); await assess(key); } catch (error) { fail(error); return; }
+    }
+  }
+  const readers = Promise.all(Array.from({ length: Math.min(SITE_READERS, candidates.length) }, () => prepare()))
+    .finally(() => { readersDone = true; wakeAll(); });
+  // Nothing outlives this call: every reader and assessor settles before it returns or throws.
+  await Promise.allSettled([readers, ...Array.from({ length: MODEL_REQUESTS_IN_PARALLEL }, () => assessReady())]);
+  if (run.failure) throw run.failure.error;
   const paused = () => {
     const result = output();
     return result.complete ? result : { ...result, retryAfterMs: Math.max(result.retryAfterMs ?? 0, MODEL_PAUSE_MS) };
   };
-  for (let start = 0; start < ready.length; start += MODEL_BATCH_SIZE) {
-    interrupted(ctx);
-    const companies = ready.slice(start, start + MODEL_BATCH_SIZE);
-    const fresh = companies.filter((company) => !memo.economy!.proposals![company.id]);
-    if (fresh.length) {
-      const proposals = await purchase(buildHeEngCompanyFitClassifierRequest(fresh, safeScope), fresh, false);
-      if (!proposals) return modelPaused ? paused() : output();
-      if (proposals === 'failed') continue;
-      for (const company of fresh) {
-        const proposal = proposals.get(company.id)!;
-        if (!heEngCompanyFitNeedsReview(proposal)) finish(company.id, fitVerdict(pending.get(company.id)!, company, scope,
-          finalizeHeEngCompanyFit(new Map([[company.id, proposal]]), new Map()).get(company.id)!), proposal);
-        else memo.economy!.proposals![company.id] = proposal;
-      }
-      await save(); // Persist the first paid answer before buying independent review.
-    }
-    const remaining = companies.filter((company) => !memo.verdicts[company.id]);
-    if (!remaining.length) continue;
-    const proposals = new Map(remaining.map((company) => [company.id, memo.economy!.proposals![company.id]]));
-    const request = buildHeEngCompanyFitReviewRequest(remaining, proposals, safeScope);
-    if (!request) throw new HeEngQualificationScopeError('missing independent review request');
-    const reviews = await purchase(request, request.companies, true);
-    if (!reviews) return modelPaused ? paused() : output();
-    if (reviews === 'failed') continue;
-    const final = finalizeHeEngCompanyFit(proposals, reviews);
-    for (const company of remaining) finish(company.id, fitVerdict(pending.get(company.id)!, company, scope, final.get(company.id)!),
-      proposals.get(company.id), reviews.get(company.id));
-    // Keep a completed, independently checked result even if its charge is unknown.
-    // The same durable hold prevents any further purchase in this base.
-    if (purchaseHold) finishRemaining(purchaseHold);
-    await save();
-    if (purchaseHold) return output();
-  }
-  return output();
+  if (run.holdReason) { finishRemaining(run.holdReason); await save(); }
+  return run.modelPaused ? paused() : output();
 }

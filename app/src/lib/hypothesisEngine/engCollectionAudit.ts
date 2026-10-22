@@ -14,7 +14,7 @@ import type { HeEngQualificationMemo } from './engCompanyQualificationPolicy';
 export function compactHeEngCollectionQualificationMemo(
   memo: HeEngQualificationMemo,
 ): HeEngQualificationMemo {
-  if (memo.economy?.inFlight || Object.keys(memo.economy?.prepared ?? {}).length > 0 ||
+  if (memo.economy?.inFlight || memo.economy?.inFlights?.length || Object.keys(memo.economy?.prepared ?? {}).length > 0 ||
       Object.keys(memo.economy?.proposals ?? {}).length > 0) return memo;
 
   let changed = false;
