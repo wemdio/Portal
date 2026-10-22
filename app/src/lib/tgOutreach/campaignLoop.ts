@@ -24,7 +24,7 @@ import type { LoopControl } from './watchdog';
 import { dialogEditKey, dialogRevision, dialogUnchanged, withoutDeletedMessages, withDialogWrite, withDialogDeletion, clearDialogEdits, type DeleteMessageTarget } from './dialogEdits';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, needsTranslatedHandoff, parseQualificationQuestions, checkQualification, qualificationInstruction, ensureHandoffPhrase, asksOpenQuestions, stripHandoffPhrase,
-  stripRepeatGreeting,
+  stripRepeatGreeting, needsReplyTranslation, ensureReplyLanguage,
 } from './openaiChat';
 import { isRoleOnlyReply } from './roleFirstGate';
 import { addReferralToBase, findReferredUsername, referralFirstTouchInstruction } from './referral';
@@ -1206,12 +1206,13 @@ export async function handleChat(
     log('warning', `${displayName}: в сообщении с вопросами была фраза передачи — убираю, ждём ответ клиента`);
     replyText = stripHandoffPhrase(replyText, phrase);
   }
-  // Модель берёт русскую фразу из промпта кампании и дописывает её как есть,
-  // несмотря на просьбу перевести (19.10.2026: английский ответ кончался
-  // «Передаю ваш контакт менеджеру.»). Оставшийся русский хвост срезаем.
+  // Убираем буквальный русский триггер, сохраняя прежние правила передачи.
+  // Перед отправкой ниже проверяем и основной текст: он тоже мог быть русским.
+  let removedUntranslatedHandoff = false;
   if (translateHandoff && phrase && replyText.toLowerCase().includes(phrase.toLowerCase())) {
     const stripped = stripHandoffPhrase(replyText, phrase);
     if (stripped) replyText = stripped;
+    removedUntranslatedHandoff = true;
   }
   let forcePositive = Boolean(interested && phrase && !qualifying && translateHandoff);
   if (interested && phrase && !qualifying && !translateHandoff) {
@@ -1251,6 +1252,37 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
+  // Последняя проверка языка — после fallback, передачи и повторного запроса
+  // квалификации: любой из этих путей может вернуть русский текст.
+  let triggerBeforeTranslation: 'positive' | 'negative' | null = null;
+  if (needsReplyTranslation(replyText, chatMessages) || (removedUntranslatedHandoff && forcePositive)) {
+    log('warning', `${displayName}: русский текст в латинской переписке — исправляю язык перед отправкой`);
+    try {
+      const originalTrigger = forcePositive ? 'positive' : detectTrigger(replyText, oai);
+      // Если срезали русский триггер готового лида, переводим и саму передачу,
+      // чтобы собеседник узнал о ней, а не получил только «Thanks».
+      const draft = removedUntranslatedHandoff && forcePositive && phrase
+        ? ensureHandoffPhrase(replyText, phrase) : replyText;
+      const translated = await ensureReplyLanguage(oai, chatMessages, draft, originalTrigger === 'positive' ? phrase : null);
+      if (!translated) {
+        log('error', `${displayName}: исправить язык ответа не удалось — НЕ отправляю`);
+        return { replied: false, triggerType: null };
+      }
+      replyText = stripRepeatGreeting(translated, chatMessages);
+      if (isLowValueReply(replyText) || isRepeatOfOurs(replyText, chatMessages)
+        || (originalTrigger === 'positive' && asksOpenQuestions(replyText))) {
+        log('warning', `${displayName}: перевод не прошёл проверки ответа — НЕ отправляю`);
+        return { replied: false, triggerType: null };
+      }
+      // Перевод может перефразировать настроенный триггер. Его смысл уже
+      // проверен квалификацией выше; сохраняем исход передачи/отказа.
+      triggerBeforeTranslation = originalTrigger;
+    } catch (err) {
+      log('error', `${displayName}: ошибка исправления языка — НЕ отправляю: ${err instanceof Error ? err.message : String(err)}`);
+      return { replied: false, triggerType: null };
+    }
+  }
+
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
   if (shouldStop) await interruptibleSleep(readReplyDelay, shouldStop); else await sleep(readReplyDelay);
 
@@ -1271,7 +1303,7 @@ export async function handleChat(
     timestamp: new Date().toISOString(),
   });
 
-  const triggerType = forcePositive ? 'positive' : detectTrigger(replyText, oai);
+  const triggerType = forcePositive ? 'positive' : triggerBeforeTranslation ?? detectTrigger(replyText, oai);
 
   if (triggerType) {
     const triggerLabel = triggerType === 'positive' ? 'положительный (заинтересован)' : 'отрицательный (не заинтересован)';
