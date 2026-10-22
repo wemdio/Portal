@@ -76,10 +76,15 @@ describe('готовый каталог Яндекс Карт: выбор руб
   it('сохраняет географию брифа отдельно от legacy и сужает источники без новых задач или лимитов', () => {
     const geography = veCollectionGeographyFromBrief({ client_brief: { icp: { geo: '  Москва и МО  ' } } });
     expect(geography).toEqual({ version: 1, required: 'Москва и МО' });
+    for (const geo of ['Москва\nМО', '  Москва\r\n\r\nМО  ']) {
+      const multiline = veCollectionGeographyFromBrief({ client_brief: { icp: { geo } } });
+      expect(multiline).toEqual({ version: 1, required: 'Москва, МО' });
+      expect(veCollectionGeographyPlaces(multiline.required!)?.map((place) => place.regionCode)).toEqual(['77', '50']);
+    }
     expect(veCollectionGeographyPlaces('г.Москва, Московская обл.')?.map((place) => place.regionCode)).toEqual(['77', '50']);
     expect(veCollectionGeographyPlaces('СПб и ЛО')?.map((place) => place.regionCode)).toEqual(['78', '47']);
     expect(veCollectionGeographyPlaces('Грузия')?.map((place) => place.hhArea)).toEqual(['28']);
-    for (const geo of [undefined, null, '', ' — ', '---', 'не указано', 'без ограничений', 'весь мир'])
+    for (const geo of [undefined, null, '', ' — ', '---', '---\n---', 'не указано', 'без ограничений', 'весь мир'])
       expect(veCollectionGeographyFromBrief({ client_brief: { icp: { geo } } })).toEqual({ version: 1, required: null });
     expect(() => veCollectionGeographyFromBrief({ client_brief: { icp: { geo: ['Москва'] } } })).toThrow('Invalid client brief geography');
     expect(readVeCollectionGeography(undefined)).toBeNull();

@@ -62,6 +62,19 @@ export interface VeGeographyEvidence { field: 'address' | 'description' | 'websi
 const normalized = (value: string) => value.toLowerCase().replace(/ё/g, 'е').replace(/[‐‑–—]/g, '-').replace(/\s+/g, ' ').trim();
 const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const mentions = (value: string, pattern: string) => new RegExp(`(?:^|[^\\p{L}\\p{N}])(?:${pattern})(?=$|[^\\p{L}\\p{N}])`, 'u').test(value);
+// Only countries already supported by the shared HH geography dictionary.
+// Complete inflected names accept "офис в Беларуси", never the adjective in
+// "Белорусская улица". The semantic review still proves an actual location.
+const countryNamePatterns: Readonly<Record<string, string>> = {
+  'Казахстан': 'казахстан(?:а|е|у|ом)?',
+  'Украина': 'украин(?:а|ы|е|у|ой|ою)',
+  'Беларусь': 'беларус(?:ь|и|ью)|белорусси(?:я|и|ю|ей|ею)',
+  'Грузия': 'грузи(?:я|и|ю|ей|ею)',
+  'Кыргызстан': 'кыргызстан(?:а|е|у|ом)?|киргизи(?:я|и|ю|ей|ею)',
+  'Узбекистан': 'узбекистан(?:а|е|у|ом)?',
+  'Армения': 'армени(?:я|и|ю|ей|ею)',
+  'Азербайджан': 'азербайджан(?:а|е|у|ом)?',
+};
 function placeNamePattern(name: string): string {
   return normalized(name).replace(/^г\.\s*/, '').split(/\s+/).map((word) => {
     if (word === 'область') return 'обл(?:асть|асти|астью|\\.)?';
@@ -88,6 +101,8 @@ function placeMention(quote: string, place: VeGeographyPlace): boolean {
       || HH_REGIONS.some((region) => region.group === 'Города России'
         && placeMention(value, { name: region.name, kind: 'city', hhArea: region.id }));
   }
+  if (place.kind === 'country' && countryNamePatterns[place.name]
+    && mentions(value, countryNamePatterns[place.name])) return true;
   if (mentions(value, placeNamePattern(place.name))) return true;
   if (place.kind === 'region') {
     const withoutRepublic = place.name.replace(/^Республика\s+/i, '').replace(/\s+Республика$/i, '');

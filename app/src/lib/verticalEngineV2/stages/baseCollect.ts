@@ -3133,6 +3133,9 @@ async function pinNicheSourceProfile(ctx: VeStageContext, job: VeJob, base: VeAu
  * A changed scope receives a new cursor key, while old rows retain their exact
  * attribution and all spend/seen/limit checkpoints remain intact. */
 export function applyVeNicheSourceSelection(info: VeCollectInfo, profile: VeNicheSourceProfile): boolean {
+  // An explicit geography repair already froze its reviewed source keys. All
+  // callers, including the post-plan path, must preserve that exact scope.
+  if (info.geography_repair) return false;
   const upgradingPayments = profile === 'payments' && info.source_selection?.profile === 'payments' && info.source_selection.version === 1;
   if (!info.plan || !info.tasks?.length || (info.source_selection && !upgradingPayments) || (info.construct && info.construct.status !== 'done') || info.adaptive_collection?.pending
     || info.preview_pipeline?.batches.length || info.tasks.some((task) => task.status === 'dispatched')) return false;
@@ -5129,7 +5132,8 @@ async function completeTargetRound(args: {
     && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && targetRows < progress.ready_target) {
     next = { ...next, round: progress.round, status: 'limited', max_rounds: progress.max_rounds,
-      reason: info.restaurant_source_refresh ? 'Доступный каталог профильных заведений обработан. Проверенные контакты сохранены; это не оценка всего рынка.'
+      reason: info.geography_repair ? 'Доступный источник в выбранной географии обработан. Проверенные контакты сохранены.'
+        : info.restaurant_source_refresh ? 'Доступный каталог профильных заведений обработан. Проверенные контакты сохранены; это не оценка всего рынка.'
         : 'Доступные официальные сайты платформ проверены. Проверенные контакты сохранены; это не оценка всего рынка.' };
     info.target_progress = next;
   }

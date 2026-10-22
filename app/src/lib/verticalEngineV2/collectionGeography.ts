@@ -24,8 +24,12 @@ export function readVeCollectionGeography(value: unknown): VeCollectionGeography
 export function veCollectionGeographyFromBrief(brief: unknown): VeCollectionGeography {
   const value = record(record(record(brief).client_brief).icp).geo;
   if (value !== undefined && value !== null && typeof value !== 'string') throw new Error('Invalid client brief geography');
-  const required = typeof value === 'string' ? clean(value) : '';
-  return { version: 1, required: !required || EMPTY.test(required) ? null : required };
+  // A brief can list places on separate lines. Preserve that union before
+  // collapsing whitespace, otherwise "Москва\nМО" becomes an unknown place.
+  const text = typeof value === 'string' ? value : '';
+  const required = clean(text);
+  return { version: 1, required: !required || EMPTY.test(required) ? null
+    : text.split(/[\r\n]+/u).map(clean).filter(Boolean).join(', ') };
 }
 
 export interface VeGeographyPlace {

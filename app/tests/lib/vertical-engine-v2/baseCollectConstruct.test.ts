@@ -5828,6 +5828,13 @@ describe('explicit saved-preview geography repair planner', () => {
     expect(plan.patch.analysis).toBeNull();
     expect(plan.patch.collect_info.geography_repair?.previous_analysis).toBe(original.base.analysis);
     expect(plan.patch).not.toHaveProperty('letters');
+    // The worker applies niche normalization both before and after planning.
+    // Neither path may replace the repair's frozen source keys and then drop
+    // those sources from acquisition or reject the next saved checkpoint.
+    const repairedBeforeNiche = JSON.stringify(plan.patch.collect_info);
+    expect(applyVeNicheSourceSelection(plan.patch.collect_info, 'payments')).toBe(false);
+    expect(JSON.stringify(plan.patch.collect_info)).toBe(repairedBeforeNiche);
+    expect(() => readVeGeographyRepair(plan.patch.collect_info)).not.toThrow();
     // The superseded all-Russia source receipt must not reject the newly
     // scoped task; its prior paid/source history stays available for audit.
     const restaurant = fixture();
@@ -5918,6 +5925,8 @@ describe('explicit saved-preview geography repair planner', () => {
     const saved = db.getRows('ve_bases')[0];
     expect((saved.collect_info as VeCollectInfo).target_progress).toMatchObject({ max_rounds: 100, max_candidates: 10000, candidates_processed: 6806 });
     expect((saved.collect_info as VeCollectInfo).target_progress!.round).toBeLessThanOrEqual(100);
+    expect((saved.collect_info as VeCollectInfo).target_progress?.reason)
+      .toBe('Доступный источник в выбранной географии обработан. Проверенные контакты сохранены.');
     expect(saved.analysis).toBeNull();
     expect((saved.collect_info as VeCollectInfo).geography_repair?.previous_analysis).toEqual(snapshot.base.analysis);
     expect(saved.status).toBe('analyzed');
