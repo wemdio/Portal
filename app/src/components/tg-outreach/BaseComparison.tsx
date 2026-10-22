@@ -18,7 +18,7 @@ import {
   type ChartTheme,
 } from '@/components/charts/theme';
 import { authFetch } from '@/lib/authFetch';
-import { formatForecastDate, type BaseStats, type SendForecast } from '@/lib/tgOutreach/baseStats';
+import type { BaseStats } from '@/lib/tgOutreach/baseStats';
 
 /**
  * Сравнение двух гипотез.
@@ -265,7 +265,6 @@ export default function BaseComparison({
   const [rightPick, setRightId] = useState<string>('');
   const [period, setPeriod] = useState<'7d' | '30d' | 'all'>('30d');
   const [stats, setStats] = useState<BaseStats[]>([]);
-  const [forecast, setForecast] = useState<SendForecast | null>(null);
   const [loading, setLoading] = useState(false);
   const [metric, setMetric] = useState(0);
 
@@ -281,9 +280,8 @@ export default function BaseComparison({
           `/api/tools/tg-outreach/campaigns/${campaignId}/bases-stats?period=${period}`,
         );
         if (res.ok) {
-          const body = (await res.json()) as { bases: BaseStats[]; forecast?: SendForecast | null };
+          const body = (await res.json()) as { bases: BaseStats[] };
           setStats(body.bases ?? []);
-          setForecast(body.forecast ?? null);
         }
       } finally {
         setLoading(false);
@@ -401,9 +399,7 @@ export default function BaseComparison({
                 <div className="text-gray-400">
                   темп {s.perDay}/день · {s.remaining === 0
                     ? 'база кончилась'
-                    : s.daysLeft === null
-                      ? (forecast?.bases[s.baseId]?.endsAt ? `хватит до ${formatForecastDate(forecast.bases[s.baseId].endsAt!)}` : 'остатка хватит — темп нулевой')
-                      : `хватит на ${s.daysLeft} дн.${forecast?.bases[s.baseId]?.endsAt ? ` (до ${formatForecastDate(forecast.bases[s.baseId].endsAt!)})` : ''}`}
+                    : s.daysLeft === null ? 'остатка хватит — темп нулевой' : `хватит на ${s.daysLeft} дн.`}
                 </div>
               </div>
             ))}

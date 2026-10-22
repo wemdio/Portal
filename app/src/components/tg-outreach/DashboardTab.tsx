@@ -19,7 +19,8 @@ import { AlertCircle } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import EChart from '@/components/charts/EChart';
 import BasesTable from '@/components/tg-outreach/BasesTable';
-import { formatForecastDate, type BaseStats, type SendForecast } from '@/lib/tgOutreach/baseStats';
+import type { BaseStats, SendForecast } from '@/lib/tgOutreach/baseStats';
+import { BasesForecastLine } from '@/components/tg-outreach/BasesForecast';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -567,25 +568,10 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
             {forecast && forecast.remaining > 0 && (
               <>
                 <div className="text-[11px] font-medium text-gray-400">До какой даты хватит баз</div>
-                <div className="grid grid-cols-2 gap-2">
-                  {forecast.chain && (
-                    <Metric
-                      label="Текущая база"
-                      value={forecast.currentEndsAt ? `до ${formatForecastDate(forecast.currentEndsAt)}` : '—'}
-                      caption={bases.find((b) => b.baseId === forecast.currentBaseId)?.name}
-                    />
-                  )}
-                  <Metric
-                    label={forecast.chain ? 'Вся цепочка баз' : 'Все базы вместе'}
-                    value={forecast.endsAt ? `до ${formatForecastDate(forecast.endsAt)}` : '—'}
-                    caption={
-                      forecast.endsAt
-                        ? `осталось ${forecast.remaining} контактов, темп ${forecast.perDay}/день`
-                        : 'за период ничего не отправлялось — темп нулевой, дату не посчитать'
-                    }
-                    tone={forecast.endsAt ? undefined : 'warn'}
-                  />
-                </div>
+                <BasesForecastLine
+                  forecast={forecast}
+                  currentName={bases.find((b) => b.baseId === forecast.currentBaseId)?.name}
+                />
               </>
             )}
 
