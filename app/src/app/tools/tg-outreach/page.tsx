@@ -2981,6 +2981,25 @@ function CampaignAccountsTab({
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
 
   /**
+   * Живые цифры: список и сводка («живо», «ограничены», потрачено) перечитываются
+   * сами каждые 15 секунд, пока вкладка открыта и видна, и сразу при возвращении
+   * на неё. Тихо — без заглушки «Загрузка…» и без прокрутки в начало.
+   * Кулдауны и статусы меняет воркер, и без этого экран показывал состояние на
+   * момент открытия.
+   */
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void load({ silent: true });
+    };
+    const timer = setInterval(refresh, 15_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [load]);
+
+  /**
    * Цена одной строки. Пустое поле стирает цену (null), а не ставит ноль:
    * ноль означает «достался бесплатно» и попадает в сумму партии.
    */
