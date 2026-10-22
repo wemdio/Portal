@@ -1935,7 +1935,6 @@ function DialogsTab({ campaignId, crmEnabled }: {
           <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white/50">
             {selectedDialog && (() => {
               const d = selectedDialog;
-              const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
               const autoMark = describeAutoForward(d);
               const leadMark = leadMarkLabel(d);
               return (
@@ -1963,7 +1962,6 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           {d.base.alsoIn.length > 0 && <span className="opacity-70">+{d.base.alsoIn.length}</span>}
                         </span>
                       )}
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>{st.label}</span>
                       {/* Кто сделал лидом — сразу за статусом: ИИ или сотрудник. */}
                       {leadMark && (
                         <span

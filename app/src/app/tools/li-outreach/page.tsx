@@ -85,6 +85,8 @@ type LiCampaign = {
   owner_name: string | null;
   name: string;
   account_id: string | null;
+  /** Все аккаунты кампании по порядку (отдаёт GET /campaigns). */
+  account_ids?: string[];
   lead_list_id: string | null;
   steps: unknown[];
   status: string;
@@ -136,7 +138,8 @@ const UNLISTED_LEAD_LIST_QUERY = '__none';
 
 const DEFAULT_CAMPAIGN_FORM = {
   name: '',
-  account_id: '',
+  /** Аккаунты кампании: несколько, но один аккаунт — только в одной кампании. */
+  account_ids: [] as string[],
   lead_list_id: '',
   invite_message: 'Привет! Заметил вашу активность в LinkedIn. Хотел бы добавить вас в профессиональную сеть.',
   welcome_message: 'Спасибо за добавление! Рад расширить профессиональную сеть.',
@@ -564,7 +567,7 @@ export default function LiOutreachPage() {
 
   const createCampaign = async () => {
     if (!cf.name.trim()) { alert('Введите название кампании'); return; }
-    if (!cf.account_id) { alert('Выберите аккаунт'); return; }
+    if (cf.account_ids.length === 0) { alert('Выберите хотя бы один аккаунт'); return; }
     setCreating(true);
     try {
       const steps: { type: string; message?: string; days?: number; hours?: number }[] = [
@@ -580,7 +583,7 @@ export default function LiOutreachPage() {
         method: editingCampaignId ? 'PUT' : 'POST',
         json: {
           name: cf.name,
-          account_id: cf.account_id,
+          account_ids: cf.account_ids,
           lead_list_id: cf.lead_list_id || null,
           steps,
           use_ai: cf.use_ai,
@@ -640,7 +643,7 @@ export default function LiOutreachPage() {
     setCf({
       ...DEFAULT_CAMPAIGN_FORM,
       name: campaign.name ?? '',
-      account_id: campaign.account_id ?? '',
+      account_ids: campaign.account_ids?.length ? campaign.account_ids : campaign.account_id ? [campaign.account_id] : [],
       lead_list_id: campaign.lead_list_id ?? '',
       invite_message: typeof inviteStep?.message === 'string' ? inviteStep.message : DEFAULT_CAMPAIGN_FORM.invite_message,
       followup1_message: followup1Message,
@@ -1231,17 +1234,45 @@ export default function LiOutreachPage() {
                   <input type="text" placeholder="Моя кампания" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
                 </div>
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">Аккаунт *</label>
-                  <select value={cf.account_id} onChange={(e) => setCf({ ...cf, account_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                    <option value="">Выберите...</option>
-                    {accounts
-                      .filter((a) => a.is_active || a.id === cf.account_id)
-                      .map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name || a.unipile_account_id}
-                        </option>
-                      ))}
-                  </select>
+                  <label className="text-xs text-gray-600 block mb-1">Аккаунты * <span className="text-gray-400">({cf.account_ids.length})</span></label>
+                  <details className="group relative">
+                    <summary className="flex w-full cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                      <span className="truncate">
+                        {cf.account_ids.length === 0
+                          ? 'Выберите...'
+                          : cf.account_ids.map((id) => { const a = accounts.find((x) => x.id === id); return a?.name || a?.unipile_account_id || 'аккаунт'; }).join(', ')}
+                      </span>
+                      <span className="text-gray-400 transition group-open:rotate-180">▾</span>
+                    </summary>
+                    <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-gray-200 bg-[#16171c] p-1 shadow-xl">
+                      {accounts
+                        .filter((a) => a.is_active || cf.account_ids.includes(a.id))
+                        .map((a) => {
+                          // Чужая кампания держит аккаунт — выбрать нельзя.
+                          const busyIn = (a.campaigns ?? []).find((c) => c.id !== editingCampaignId);
+                          const checked = cf.account_ids.includes(a.id);
+                          return (
+                            <label
+                              key={a.id}
+                              title={busyIn ? `Занят кампанией «${busyIn.name}»` : undefined}
+                              className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${busyIn && !checked ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-white/5'}`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={Boolean(busyIn) && !checked}
+                                onChange={() => setCf({
+                                  ...cf,
+                                  account_ids: checked ? cf.account_ids.filter((id) => id !== a.id) : [...cf.account_ids, a.id],
+                                })}
+                              />
+                              <span className="min-w-0 flex-1 truncate">{a.name || a.unipile_account_id}</span>
+                              {busyIn && !checked && <span className="shrink-0 text-[10px] text-amber-500">занят: {busyIn.name}</span>}
+                            </label>
+                          );
+                        })}
+                    </div>
+                  </details>
                 </div>
                 <div>
                   <label className="text-xs text-gray-600 block mb-1">Список лидов</label>

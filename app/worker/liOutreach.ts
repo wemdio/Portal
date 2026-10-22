@@ -22,7 +22,7 @@
  * Runs every LI_CAMPAIGN_TICK_INTERVAL_MS (default 5 min).
  */
 
-import { runCampaignTick } from '@/lib/liOutreach/campaignRunner';
+import { runCampaignTickAllAccounts } from '@/lib/liOutreach/campaignRunner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown } from './_shared';
 
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
@@ -40,7 +40,7 @@ async function runCampaignGroup(campaigns: CampaignRow[]): Promise<boolean> {
   let anyWork = false;
   for (const c of campaigns) {
     try {
-      const result = await runCampaignTick(c.id, c.user_id);
+      const result = await runCampaignTickAllAccounts(c.id, c.user_id);
       if (result.processed > 0 || result.errors > 0) {
         log('info', `Campaign "${c.name}" (${c.id}): processed=${result.processed}, errors=${result.errors}`);
         anyWork = true;
