@@ -634,7 +634,10 @@ function SettingsTab({ campaign, onSave }: {
 
       {/* Кнопка прилипает к низу экрана: форма длинная, и раньше до неё
           приходилось листать после каждой правки. */}
-      <div className="sticky bottom-0 z-20 mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white/95 px-5 py-3 shadow-lg backdrop-blur">
+      <div className="sticky bottom-0 z-20 mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 rounded-2xl border border-gray-200 bg-white/95 px-5 py-3 text-center shadow-lg backdrop-blur">
+        {!saved && (
+          <span className="text-xs font-medium text-amber-500">Не забудьте сохранить настройки</span>
+        )}
         <button type="button" onClick={handleSave} disabled={saving || crmIncomplete || !campaignName.trim()}
           className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
           {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
