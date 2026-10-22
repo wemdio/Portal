@@ -14,6 +14,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
+import { Reveal } from './Reveal';
 import { Loader2, Plus, Save, Trash2, X } from 'lucide-react';
 
 const API_BASE = '/api/tools/tg-outreach';
@@ -189,7 +190,7 @@ export default function CrmSettingsPanel({ initial, onChange }: {
         </span>
       </label>
 
-      {settings.enabled && (
+      <Reveal open={settings.enabled}>
         <div className="space-y-4">
           <div className="inline-flex items-center gap-1 rounded-lg border border-gray-300/70 bg-white/50 p-1">
             <button type="button" onClick={() => pickTarget('own')} className={segCls(target === 'own')}>Наша amoCRM</button>
@@ -289,7 +290,7 @@ export default function CrmSettingsPanel({ initial, onChange }: {
             </p>
           )}
         </div>
-      )}
+      </Reveal>
     </div>
   );
 }

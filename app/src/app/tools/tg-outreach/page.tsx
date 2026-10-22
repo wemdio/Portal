@@ -5,6 +5,7 @@ import type { Route } from 'next';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
+import { Reveal } from '@/components/tg-outreach/Reveal';
 import { ArchiveCampaignDialog, CampaignList, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
@@ -533,14 +534,14 @@ function SettingsTab({ campaign, onSave }: {
             label="Только после квалификации"
             hint="Сначала ответы на контрольные вопросы, потом передача."
           />
-          {openai.qualification_required === true && (
+          <Reveal open={openai.qualification_required === true}>
             <div className="space-y-1">
               <FieldArea label="Контрольные вопросы, по одному в строке" value={openai.qualification_questions ?? ''} onChange={v => setOAI('qualification_questions', v)} rows={4} />
               <p className="text-[11px] text-gray-400">
                 Не ответил на все — бот спросит один раз. Опять нет — лид уйдёт с пометкой «без полной квалификации».
               </p>
             </div>
-          )}
+          </Reveal>
         </SettingsGroup>
 
         {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
@@ -612,7 +613,7 @@ function SettingsTab({ campaign, onSave }: {
             label="Отправлять follow-up"
             hint="Только если последнее сообщение наше, один раз на человека, не тем, кто уже обработан."
           />
-          {telegram.follow_up.enabled && (
+          <Reveal open={telegram.follow_up.enabled}>
             <div className="space-y-4">
               <div className="flex flex-wrap gap-4">
                 <div className="w-40">
@@ -627,7 +628,7 @@ function SettingsTab({ campaign, onSave }: {
                 <p className="text-[11px] text-gray-400">GPT учтёт историю переписки.</p>
               </div>
             </div>
-          )}
+          </Reveal>
         </SettingsGroup>
       </div>
 
