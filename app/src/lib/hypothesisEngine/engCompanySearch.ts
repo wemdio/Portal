@@ -88,10 +88,19 @@ function cleanText(value: unknown, max: number): string {
 }
 
 /** A legal name without its trailing legal form: «ACME UK LTD.» → «ACME UK». */
-export function heEngLegalNameCore(value: string): string {
+const LEGAL_FORMS_V2 = 'public limited company|limited liability partnership|limited liability company|limited company|ltd|limited|plc|llp|lp|llc|inc|incorporated|corp|corporation|gmbh|ag|sa|sas|sarl|bv|nv|as|asa|ab|oy|oyj|aps';
+// v3 adds continental forms as GLEIF writes them: «GmbH & Co. KG», «N.V.», «S.p.A.», «A/S», «UG (haftungsbeschränkt)».
+const LEGAL_FORMS_V3 = `gmbh\\s*&\\s*co\\.?\\s*kg|ag\\s*&\\s*co\\.?\\s*kg|ug\\s*\\(haftungsbeschränkt\\)|co\\.?\\s*kg|kg|mbh|se|eg|vvag|dac|`
+  + `aktiengesellschaft|kommanditgesellschaft|gesellschaft mit beschränkter haftung|`
+  + `b\\.v|n\\.v|s\\.a|s\\.p\\.a|spa|s\\.r\\.l|srl|s\\.l|sl|a\\/s|${LEGAL_FORMS_V2}`;
+function legalNameCore(value: string, forms: string): string {
   const trimmed = value.replace(/\s+/g, ' ').trim().replace(/[.,;]+$/, '');
-  const core = trimmed.replace(/(?:[\s,]+(?:public limited company|limited liability partnership|limited liability company|limited company|ltd|limited|plc|llp|lp|llc|inc|incorporated|corp|corporation|gmbh|ag|sa|sas|sarl|bv|nv|as|asa|ab|oy|oyj|aps)\.?)+$/i, '').trim();
+  const core = trimmed.replace(new RegExp(`(?:[\\s,]+(?:${forms})\\.?)+$`, 'i'), '').trim();
   return core.length >= 2 ? core : trimmed;
+}
+/** A legal name without its trailing legal form: «ACME UK LTD.» → «ACME UK», «Acme B.V.» → «Acme». */
+export function heEngLegalNameCore(value: string): string {
+  return legalNameCore(value, LEGAL_FORMS_V3);
 }
 
 function searchTerm(value: string): string {
@@ -164,16 +173,17 @@ export function createHeEngCompanySearchCheckpoint(plan: HeEngCompanySearchPlan)
  */
 export function createHeEngRegistryWebsiteSearchPlan(
   candidate: Pick<HeEngRegistryCandidate, 'provider' | 'recordId' | 'company' | 'country'>,
-  version: 1 | 2 = 2,
+  version: 1 | 2 | 3 = 3,
 ): HeEngCompanySearchPlan {
   const country = normalizeEngCountry(candidate.country);
   const legal = cleanText(candidate.company, 250);
-  const term = searchTerm(version === 1 ? legal : heEngLegalNameCore(legal));
+  // v3 differs from v2 only in which trailing legal forms it drops.
+  const term = searchTerm(version === 1 ? legal : legalNameCore(legal, version === 2 ? LEGAL_FORMS_V2 : LEGAL_FORMS_V3));
   if (!country || !engCountryIso2(country) || term.length < 3 || !candidate.recordId) {
     throw new Error('ENG registry website search requires a legal name, registry ID and country.');
   }
   const tasks: HeEngCompanySearchTask[] = [{
-    id: createHash('sha256').update(JSON.stringify([`registry-website-v${version}`, candidate.provider, candidate.recordId, term, country])).digest('hex').slice(0, 24),
+    id: createHash('sha256').update(JSON.stringify([`registry-website-v${version === 3 ? 2 : version}`, candidate.provider, candidate.recordId, term, country])).digest('hex').slice(0, 24),
     query: version === 1
       ? `"${term}" ${engCountryLabel(country)} official website -site:linkedin.com -site:facebook.com -site:crunchbase.com`
       : `"${term}" ${engCountryLabel(country)} -site:linkedin.com -site:facebook.com -site:crunchbase.com -site:company-information.service.gov.uk -site:register.fca.org.uk -site:kompass.com -site:endole.co.uk -site:companycheck.co.uk -site:opencorporates.com -site:cylex-uk.co.uk`,

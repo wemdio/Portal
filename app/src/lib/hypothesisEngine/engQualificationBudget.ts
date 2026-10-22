@@ -154,7 +154,16 @@ export function reserveHeEngQualificationModel(
   budget: HeEngQualificationBudget,
   messages: readonly LLMMessage[],
   maxTokens: number,
-  options: { review?: boolean; jsonSchema?: HeLlmTextCallOptions['jsonSchema'] } = {},
+  options: {
+    review?: boolean;
+    jsonSchema?: HeLlmTextCallOptions['jsonSchema'];
+    /**
+     * false: a request that does not fit returns null without holding the
+     * budget. Only while other requests are unanswered: their settlement
+     * returns unused reserve, and the caller asks again after it.
+     */
+    holdIfShort?: false;
+  } = {},
 ): HeEngQualificationModelReservation | null {
   assertBudget(budget);
   if (heEngQualificationBudgetHoldReason(budget)) return null;
@@ -173,7 +182,7 @@ export function reserveHeEngQualificationModel(
     (inputTokenBound * (options.review ? REVIEW_INPUT_RATE_HUNDREDTHS : INPUT_RATE_HUNDREDTHS)
       + maxTokens * (options.review ? REVIEW_OUTPUT_RATE_HUNDREDTHS : OUTPUT_RATE_HUNDREDTHS)) / 100);
   if (!Number.isSafeInteger(reservedMicrousd) || reservedMicrousd > budget.limitMicrousd - budget.reservedMicrousd) {
-    budget.holdReason = 'model_budget_exhausted';
+    if (options.holdIfShort !== false || !Number.isSafeInteger(reservedMicrousd)) budget.holdReason = 'model_budget_exhausted';
     return null;
   }
   const id = String(budget.nextReservationId++);

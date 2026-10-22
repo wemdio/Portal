@@ -20,7 +20,7 @@ const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
   process.env.WEBSITE_ENRICHMENT_MIN_MAIN_TEXT_TO_SKIP_ABOUT ?? '220',
 );
 
-import { getNonPriorityProxyDispatcher, getProxyDispatcher, getProxyGroups } from '@/lib/enrich/proxyPool';
+import { getNonPriorityProxyDispatcher, getProxyDispatcher } from '@/lib/enrich/proxyPool';
 
 type Dispatcher = import('undici').Dispatcher;
 
@@ -91,18 +91,19 @@ const EXTRACT_TEXT_LABELS: Record<WebsiteTextLanguage, { about: string; home: st
 export const WEBSITE_NO_TEXT_STUB_EN = EXTRACT_TEXT_LABELS.en.noText;
 
 /**
- * Порядок групп прокси в лестнице попыток fetchHtmlWithRetry.
+ * Порядок маршрутов в лестнице попыток fetchHtmlWithRetry.
  *
  *  - 'priority-first' — ДЕФОЛТ и сегодняшний маршрут всех вызывающих:
  *    приоритетная (российская) группа на первой попытке, fallback на повторе.
  *    Трогать его нельзя: инцидент 28.07.2026 — 9 из 12 нод общего пула HK/EU,
  *    .ru-сайты отдавали им 403/геоблок, success rate ИНН-парсера 27%
  *    (подробности в proxyPool.ts).
- *  - 'non-priority-first' — обратный порядок для англоязычных сайтов: сначала
- *    нода ВНЕ приоритетной группы, RU-группа остаётся вторым шансом. Включается
- *    только из английского кабинета (hypothesisEngine/stages/io.ts, market 'us').
+ *  - 'direct-first' — для англоязычных сайтов: первая попытка напрямую с
+ *    нашего сервера (американский адрес), повтор — нода ВНЕ приоритетной
+ *    группы; RU-группа не участвует. Включается только из английского кабинета
+ *    (hypothesisEngine/stages/io.ts, market 'us').
  */
-export type WebsiteFetchRouteOrder = 'priority-first' | 'non-priority-first';
+export type WebsiteFetchRouteOrder = 'priority-first' | 'direct-first';
 
 const ABOUT_PATHS = [
   '/about',
@@ -1287,71 +1288,6 @@ async function fetchHtml(url: string, options?: FetchHtmlOptions): Promise<{ htm
   return outcome.kind === 'html' ? { html: outcome.html, status: outcome.status } : null;
 }
 
-/**
- * Перевёрнутая лестница ('non-priority-first') без «другой» ноды — СТРОКА В ЛОГ.
- *
- * Что происходит без неё. Первая попытка тогда идёт обычным выбором пула с
- * preferPriority=false (proxyPool.pickProxyUrl): нода из списка
- * YANDEXMAPS_PROXY_URLS или legacy PROXY_URLS, где перечислены и RU-ноды; если
- * этот список пуст — RU-группа; если живой ноды не нашлось — напрямую. Вторая
- * попытка — RU-группа. То есть лестница схлопывается почти в сегодняшний
- * маршрут, а вызывающий об этом не узнаёт: результат выглядит как обычное
- * чтение сайта. Причин две, и строка их различает, потому что лечатся они
- * по-разному:
- *  - группы вне приоритетной НЕТ (в YANDEXMAPS_PROXY_URLS нет ни одной ноды,
- *    которой нет в YANDEXMAPS_PROXY_URLS_PRIORITY) — это конфигурация, и
- *    правка порядка на этом хосте не делает ничего;
- *  - группа есть, но все её ноды сейчас выбыли (proxyPool, «Выбывание нод»)
- *    или агент ноды не создался — это состояние, оно проходит само.
- *
- * Не чаще раза в ROUTE_FALLBACK_WARN_EVERY_MS на процесс, с числом
- * схлопнувшихся запросов с прошлой такой строки: один сайт — это до десятка
- * запросов цепочки fetchAndExtract, и строка на каждый утопила бы лог. Счётчик
- * живёт в памяти процесса и обнуляется рестартом — это строка лога, а не учёт.
- * Никогда не бросает: диагностика не имеет права сорвать чтение сайта (в том
- * числе там, где пул подменён и getProxyGroups нет).
- */
-const ROUTE_FALLBACK_WARN_EVERY_MS = 10 * 60_000;
-let routeFallbackWarnedAt = 0;
-let routeFallbackSuppressed = 0;
-
-function warnNonPriorityRouteMissing(url: string): void {
-  try {
-    const now = Date.now();
-    if (now - routeFallbackWarnedAt < ROUTE_FALLBACK_WARN_EVERY_MS) {
-      routeFallbackSuppressed += 1;
-      return;
-    }
-    const suppressed = routeFallbackSuppressed;
-    routeFallbackWarnedAt = now;
-    routeFallbackSuppressed = 0;
-    let reason = 'нет живой ноды вне приоритетной группы';
-    try {
-      const { priority, fallback } = getProxyGroups();
-      reason = fallback.some((u) => !priority.includes(u))
-        ? 'все ноды вне приоритетной группы сейчас выбыли или их агент не создался'
-        : 'группы вне приоритетной нет: в YANDEXMAPS_PROXY_URLS нет нод сверх YANDEXMAPS_PROXY_URLS_PRIORITY';
-    } catch {
-      // Пул недоступен или подменён — причина остаётся общей.
-    }
-    let host = url;
-    try {
-      host = new URL(url).hostname;
-    } catch {
-      // Невалидный адрес — печатаем как есть.
-    }
-    console.warn(
-      `[fetchHtml] порядок non-priority-first не выполнен (${host}): ${reason}. ` +
-        'Первая попытка идёт обычным выбором пула (YANDEXMAPS_PROXY_URLS, при пустом списке — RU-группа, ' +
-        'без живой ноды — напрямую), то есть почти прежним маршрутом' +
-        (suppressed > 0 ? `; с прошлой такой строки — ещё ${suppressed} запросов` : '') +
-        '. Следующая такая строка — не раньше чем через 10 мин.',
-    );
-  } catch {
-    // Строка лога не должна сорвать запрос.
-  }
-}
-
 type FetchHtmlWithRetryOptions = {
   timeout?: number;
   signal?: AbortSignal;
@@ -1364,7 +1300,7 @@ type FetchHtmlWithRetryOptions = {
   preferPriority?: boolean;
   /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
   acceptLanguage?: string;
-  /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+  /** Порядок маршрутов; не передан — 'priority-first', сегодняшняя лестница. */
   routeOrder?: WebsiteFetchRouteOrder;
   /** Защита чтения (WebsiteFetchGuard); не передана — redirect: 'follow'. */
   guard?: WebsiteFetchGuard;
@@ -1388,33 +1324,31 @@ async function fetchHtmlOutcomeWithRetry(
   retryable: (outcome: HtmlFetchOutcome) => boolean,
 ): Promise<HtmlFetchOutcome> {
   const retries = Math.max(0, Math.floor(options?.retries ?? FETCH_RETRIES));
-  const nonPriorityFirst = options?.routeOrder === 'non-priority-first';
+  // Явный preferPriority вызывающего сильнее порядка: он и был, и остаётся
+  // способом прибить все попытки к одной группе.
+  const directFirst = options?.routeOrder === 'direct-first' && options?.preferPriority === undefined;
   let outcome: HtmlFetchOutcome = { kind: 'failed' };
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     // Первая попытка — приоритетный пул (RU). Retry — уходим в fallback:
     // если RU-прокси упал/дал 403 на .ru-сайте, второй раз через тот же
     // RU-прокси обычно ничего не даст; шанс через HK/EU выше нуля.
     //
-    // 'non-priority-first' переворачивает лестницу для англоязычного сайта:
-    // первой идёт нода вне приоритетной группы, RU становится вторым шансом —
-    // ни один маршрут не теряется, меняется только порядок. Явный
-    // preferPriority вызывающего сильнее порядка: он и был, и остаётся
-    // способом прибить все попытки к одной группе.
-    const preferPriority =
-      options?.preferPriority ?? (nonPriorityFirst ? attempt > 0 : attempt === 0);
-    // Строго «не RU» умеет только pickNonPriorityProxyUrl: preferPriority=false
-    // берёт YANDEXMAPS_PROXY_URLS, где приоритетные ноды тоже перечислены.
-    // Такой группы нет (пусто или совпадает с приоритетной) — остаёмся на
-    // обычном выборе, то есть почти на сегодняшнем маршруте, и говорим это
-    // строкой в лог (warnNonPriorityRouteMissing): молча схлопнувшаяся
-    // лестница неотличима от работающей.
-    const wantsOtherNode = nonPriorityFirst && attempt === 0 && options?.preferPriority === undefined;
-    const otherNode = wantsOtherNode ? await getNonPriorityProxyDispatcher() : undefined;
-    if (wantsOtherNode && !otherNode) warnNonPriorityRouteMissing(url);
+    // 'direct-first' (англоязычный сайт): первая попытка напрямую — сервер
+    // стоит в Нью-Йорке; повтор — нода вне приоритетной группы
+    // (pickNonPriorityProxyUrl), без живой такой ноды — снова напрямую. С
+    // защитой чтения прямой маршрут идёт через её диспетчер (fetchHtmlOutcome).
+    // RU-группы здесь нет: замер 23.10.2026 на боевом воркере — из 40
+    // читаемых англоязычных сайтов RU-прокси открыли 9, а 15 из 79 «недоступных»
+    // крупных сайтов (CareFirst, Wellmark, LexisNexis…) отвечали напрямую и
+    // отказывали обеим группам прокси (403, обрыв соединения, таймаут).
+    const preferPriority = options?.preferPriority ?? attempt === 0;
+    const dispatcher = directFirst
+      ? (attempt === 0 ? null : (await getNonPriorityProxyDispatcher()) ?? null)
+      : undefined;
     outcome = await fetchHtmlOutcome(url, {
       ...options,
       preferPriority,
-      ...(otherNode ? { dispatcher: otherNode } : {}),
+      ...(dispatcher !== undefined ? { dispatcher } : {}),
     });
     if (outcome.kind === 'html') return outcome;
     if (options?.signal?.aborted) return { kind: 'aborted' };
@@ -1719,7 +1653,7 @@ export async function fetchAndExtract(
     signal?: AbortSignal;
     /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
     acceptLanguage?: string;
-    /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+    /** Порядок маршрутов; не передан — 'priority-first', сегодняшняя лестница. */
     routeOrder?: WebsiteFetchRouteOrder;
     /**
      * Язык служебного текста результата (подписи склейки, заглушка «текста
@@ -2239,7 +2173,7 @@ export async function fetchSinglePage(
     retries?: number;
     /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
     acceptLanguage?: string;
-    /** Порядок групп прокси; не передан — 'priority-first'. */
+    /** Порядок маршрутов; не передан — 'priority-first'. */
     routeOrder?: WebsiteFetchRouteOrder;
     /** Защита чтения (WebsiteFetchGuard); не передана — redirect: 'follow'. */
     guard?: WebsiteFetchGuard;

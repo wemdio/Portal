@@ -108,9 +108,17 @@ export interface HeEngQualificationMemo {
       /** Missing = legacy paid quote IDs; v2 retains every long-paragraph segment. */
       excerptVersion?: 2;
     }>;
-    /** Durable before the request; a missing response must not buy it again. */
-    inFlight?: { reservationId: string; companyKeys: string[]; phase?: 'classifier' | 'review' };
+    /** Written before 2026-10-23 (one request at a time); read only, never written. */
+    inFlight?: HeEngQualificationInFlight;
+    /** Durable before each request; a missing response must not buy it again. */
+    inFlights?: HeEngQualificationInFlight[];
   };
+}
+
+export interface HeEngQualificationInFlight {
+  reservationId: string;
+  companyKeys: string[];
+  phase?: 'classifier' | 'review';
 }
 
 export interface HeEngQualificationAttempt {

@@ -66,7 +66,7 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     DISPATCH-CONSTRUCT резервирует id BC-джобы в collect_info.construct ДО
  *     вставки и вставляет её upsert'ом по этому id (повтор стадии второй джобы
  *     не создаёт — см. dispatchConstructJob), затем уходит в self-requeue с
- *     паузой 60с (CAS по своей строке: отмену не перетирает — см.
+ *     паузой 60с, у ENG 15с (CAS по своей строке: отмену не перетирает — см.
  *     requeueSelf); WAIT-CONSTRUCT опрашивает её до
  *     терминального статуса (таймаут 6ч → база failed, у ночного долива —
  *     по серии отказов, closeHeRefillBaseUndelivered; у ENG сама BC-джоба
@@ -4593,7 +4593,7 @@ type HeRequeueOutcome = 'requeued' | 'cancelled' | 'closed';
 /**
  * Вернуть свою джобу в pending БЕЗ инкремента attempts — воркер клеймит её
  * не раньше run_after (пауза между тиками ожидания: 30с — дочерние парсеры,
- * 60с — конструктор баз; без паузы цикл claim→requeue крутился с нулевой
+ * 60с — конструктор баз, у ENG 15с; без паузы цикл claim→requeue крутился с нулевой
  * задержкой, ~10 запросов к БД на итерацию в течение всего ожидания).
  * Финальный done-апдейт воркер пропускает, видя, что строка больше не running
  * (см. app/worker/hypothesisEngine.ts).
@@ -5411,6 +5411,18 @@ const CONSTRUCT_HEADERS_EN = ['Company', 'Site', 'Email', 'Phone', 'Vacancy', 'A
 const CONSTRUCT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 /** Пауза между тиками ожидания BC-джобы (run_after). */
 const CONSTRUCT_REQUEUE_MS = 60_000;
+/**
+ * То же для ENG (market 'us'). EN-джоба конструктора одной волны идёт 2–4
+ * минуты: поиск почт ~15 с, описания до минуты, проверка адресов около двух.
+ * Минутный опрос добавлял к каждой волне в среднем полминуты простоя, а тик
+ * ожидания лёгкий — статус джобы по первичному ключу и self-requeue (см.
+ * WAIT-CONSTRUCT). RU опрашивает по-прежнему раз в минуту.
+ */
+const CONSTRUCT_REQUEUE_US_MS = 15_000;
+
+function constructRequeueMs(market: HeMarket): number {
+  return market === 'us' ? CONSTRUCT_REQUEUE_US_MS : CONSTRUCT_REQUEUE_MS;
+}
 
 /**
  * Джоба конструктора закончила работу: дальше импорт, а не ожидание.
@@ -7055,7 +7067,7 @@ export async function finishHeEngTargetBudgetStop(job: HeJob, ctx: HeStageContex
     if (constructor && !isConstructJobSettled(constructor.status) && !constructWaitExpired(info.construct)) {
       // A previously dispatched constructor may still be settling its own
       // charge. Observe it for free; never re-dispatch or release its reserve.
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_US_MS);
       return { result: { waiting: true, base_id: baseId, budget_stop: reason }, ...newUsage() };
     }
     const project = await readProject(ctx.supabase, job.project_id);
@@ -7226,7 +7238,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     if (!work.active_source_key && !(info.tasks?.length) && !info.construct?.bc_job_id &&
         !work.candidate_rows?.length && !work.search_candidates?.length && !work.search_rows?.length &&
         !work.search_pages && !work.search_resolved && !work.registry_wave &&
-        !economy?.inFlight && !Object.keys(economy?.prepared ?? {}).length &&
+        !economy?.inFlight && !economy?.inFlights?.length && !Object.keys(economy?.prepared ?? {}).length &&
         !Object.keys(economy?.proposals ?? {}).length) {
       return finishHeEngTargetRound(ctx, job, base, info, [], [], usage, undefined, true);
     }
@@ -7763,7 +7775,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
    *  - ПЕРЕПИСЫВАЛ `he_bases.collect_info` целиком тем же значением
    *    (запись в WAIT тогда была безусловной) — до 82 МБ jsonb каждые 60 с.
    *
-   * Что осталось прежним: сам опрос BC-джобы, пауза 60 с и self-requeue. Окно
+   * Что осталось прежним: сам опрос BC-джобы, пауза (60 с, у ENG 15 с) и self-requeue. Окно
    * таймаута и терминальный статус спрашиваем ТЕМИ ЖЕ предикатами, что и фаза
    * CONSTRUCT ниже, — и любой их исход, кроме «джоба ещё идёт», проваливается в
    * обычный путь, где живут импорт, повтор без split_emails и терминал таймаута
@@ -7785,7 +7797,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // сборку. Протаскивать значение через две фазы дороже, чем этот запрос.
     const awaited = await readConstructJobStatus(ctx, awaitedConstruct.bc_job_id);
     if (awaited && !isConstructJobSettled(awaited.status)) {
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      await requeueSelf(ctx, job, constructRequeueMs(market));
       return {
         result: { waiting: true, base_id: baseId, construct: awaited.status },
         tokensUsed: usage.tokensUsed,
@@ -8695,7 +8707,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     if (!construct?.bc_job_id || reservedConstruct) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct ДО вставки; дальше WAIT с
-      // паузой 60с.
+      // паузой 60с (у ENG 15с, constructRequeueMs).
       const dispatched = await dispatchConstructJob({
         ctx,
         job,
@@ -8727,7 +8739,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           (gateHeldRows.length > 0 ? `; ${gateHeldRows.length} строк вне вертикали не оплачиваем` : '') +
           `)`,
       );
-      const requeue = await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      const requeue = await requeueSelf(ctx, job, constructRequeueMs(market));
       // Отмена легла, пока ставилась джоба конструктора: её результат не
       // импортирует никто. Только ENG — как у таймаута ниже: у RU-инструмента
       // джоба конструктора видна сотруднику в /tools/base-constructor, и её
@@ -8819,7 +8831,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           `[base_collect] construct: legacy job ${construct.bc_job_id} без split_emails → ` +
             `повтор ${replacement.bcJobId}`,
         );
-        const requeue = await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+        const requeue = await requeueSelf(ctx, job, constructRequeueMs(market));
         // Отмена легла во время постановки — как у первичной постановки выше.
         if (requeue === 'cancelled' && market === 'us') await cancelAbandonedConstructJob(ctx, replacement.bcJobId);
         return {
@@ -9018,7 +9030,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         if (market === 'us' && !timeoutWriteErr) await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
         throw new Error(note);
       }
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      await requeueSelf(ctx, job, constructRequeueMs(market));
       return {
         result: { waiting: true, base_id: baseId, construct: bc?.status ?? 'missing' },
         tokensUsed: usage.tokensUsed,
