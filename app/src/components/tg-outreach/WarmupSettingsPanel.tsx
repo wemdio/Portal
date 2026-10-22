@@ -16,6 +16,7 @@ import type { CampaignStatus } from '@/lib/tgOutreach/types';
 import {
   FIELD_BOUNDS,
   perDayForEditing,
+  type WarmupParamKey,
   type WarmupSettings,
 } from '@/lib/tgOutreach/warmup/settings';
 import WarmupChatsSection from './WarmupChatsSection';
