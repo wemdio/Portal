@@ -3834,7 +3834,9 @@ function CampaignAccountsTab({
           ближайшем круге. Раньше кнопка была просто заблокирована, и «жив/не
           жив» на экране устаревал неделями. */}
       <BulkActionsBar
-        selectedCount={selectedIds.length}
+        // Пока список грузится, панели нет: выбор относится к строкам, которых
+        // на экране ещё нет, и действие ушло бы вслепую.
+        selectedCount={loading ? 0 : selectedIds.length}
         deleting={bulkDeleting}
         onClear={clear}
         onDelete={() => { void deleteSelected(); }}
@@ -6731,7 +6733,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         )}
 
         <BulkActionsBar
-          selectedCount={selectedIds.length}
+          selectedCount={loading ? 0 : selectedIds.length}
           deleting={bulkDeleting}
           onClear={clear}
           onDelete={() => { void deleteSelected(); }}
