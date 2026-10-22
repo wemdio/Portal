@@ -14,6 +14,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '@/lib/authFetch';
+import { Reveal } from './Reveal';
 import { Loader2, Plus, Save, Trash2, X } from 'lucide-react';
 
 const API_BASE = '/api/tools/tg-outreach';
@@ -46,26 +47,30 @@ export interface CrmSettings {
 
 const EMPTY: CrmSettings = { enabled: false, connection: POLZA, pipeline_id: null, status_id: null };
 
-const inputCls = 'block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 disabled:opacity-50';
+const inputCls = 'block w-full rounded-lg border border-gray-300/70 bg-white/50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 disabled:opacity-50';
 
 async function readError(res: Response): Promise<string> {
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
   return body?.error ?? `Ошибка ${res.status}`;
 }
 
-export default function CrmSettingsPanel({ campaignId, onChange }: {
-  campaignId: string;
-  /** null — настройки ещё не загружены, сохранять их нечего. */
+export default function CrmSettingsPanel({ initial, onChange }: {
+  /** Сохранённые настройки кампании: берём из объекта кампании, отдельного запроса нет. */
+  initial?: Partial<CrmSettings> | null;
   onChange: (settings: CrmSettings | null) => void;
 }) {
-  const [settings, setSettings] = useState<CrmSettings>(EMPTY);
+  const [settings, setSettings] = useState<CrmSettings>(
+    initial ? { ...EMPTY, ...initial, connection: initial.connection ?? POLZA } : EMPTY,
+  );
   const [connections, setConnections] = useState<CrmConnection[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [pipelinesError, setPipelinesError] = useState<string | null>(null);
   const [loadingPipelines, setLoadingPipelines] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const loaded = true;
 
   const [adding, setAdding] = useState(false);
+  // Выбран режим «amoCRM клиента» — даже когда подключения ещё нет и connection null.
+  const [clientsMode, setClientsMode] = useState(false);
   const [form, setForm] = useState({ name: '', base_url: '', token: '' });
   const [formBusy, setFormBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -77,24 +82,11 @@ export default function CrmSettingsPanel({ campaignId, onChange }: {
     setConnections(body.connections ?? []);
   }, []);
 
-  // Настройки читаем с сервера, а не из пропсов: объект кампании у страницы
-  // может быть снят до последнего сохранения этого блока.
+  // Подключения клиентов подгружаем, только когда передача включена: пока она
+  // выключена, блок — один переключатель и ничего не запрашивает.
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const [campRes] = await Promise.all([
-        authFetch(`${API_BASE}/campaigns/${campaignId}`),
-        loadConnections(),
-      ]);
-      if (cancelled) return;
-      if (campRes.ok) {
-        const camp = (await campRes.json()) as { crm_settings?: CrmSettings | null };
-        if (camp.crm_settings) setSettings({ ...EMPTY, ...camp.crm_settings, connection: camp.crm_settings.connection ?? POLZA });
-      }
-      setLoaded(true);
-    })();
-    return () => { cancelled = true; };
-  }, [campaignId, loadConnections]);
+    if (settings.enabled) void loadConnections();
+  }, [settings.enabled, loadConnections]);
 
   // Воронки выбранного подключения. Пустой выбор воронки — подставляем
   // разумный по умолчанию: у нашей AMO «Первичные продажи», у клиента главную.
@@ -160,112 +152,145 @@ export default function CrmSettingsPanel({ campaignId, onChange }: {
     if (settings.connection === conn.id) setSettings({ ...EMPTY });
   };
 
-  if (!loaded) {
-    return <div className="flex items-center gap-2 text-xs text-gray-400"><Loader2 className="h-3.5 w-3.5 animate-spin" /> CRM…</div>;
-  }
-
   const selected = connections.find((c) => c.id === settings.connection) ?? null;
   const clientConnections = connections.filter((c) => !c.builtin);
+  // Куда уходят сделки: в нашу amoCRM или в amoCRM клиента. «Клиента» без
+  // единого подключения — это connection null, пока его не подключат.
+  const target: 'own' | 'client' = clientsMode || (settings.connection !== null && settings.connection !== POLZA) ? 'client' : 'own';
+
+  const pickTarget = (next: 'own' | 'client') => {
+    if (next === 'own') {
+      setClientsMode(false);
+      setAdding(false);
+      setSettings((prev) => ({ ...prev, connection: POLZA, pipeline_id: null, status_id: null }));
+    } else {
+      setClientsMode(true);
+      const first = clientConnections[0]?.id ?? null;
+      if (!first) setAdding(true);
+      setSettings((prev) => ({ ...prev, connection: first, pipeline_id: null, status_id: null }));
+    }
+  };
+
+  const segCls = (on: boolean) =>
+    `rounded-md px-3.5 py-1.5 text-xs font-medium transition cursor-pointer ${on ? 'bg-[#6366f1] text-[#ffffff] shadow-sm' : 'text-gray-500 hover:text-gray-800'}`;
 
   return (
-    <section className="space-y-3 rounded-lg border border-gray-200 p-3">
-      <label className="flex w-fit cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
-        <span className="relative inline-flex shrink-0">
+    <div className="space-y-4">
+      <label className="flex cursor-pointer items-start gap-3">
+        <span className="relative mt-0.5 inline-flex shrink-0">
           <input type="checkbox" checked={settings.enabled}
             onChange={(e) => setSettings((prev) => ({ ...prev, enabled: e.target.checked, connection: prev.connection ?? POLZA }))}
             className="peer sr-only" />
-          <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
-          <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
+          <span className="block h-5 w-9 rounded-full bg-[#6b7280] transition-colors duration-200 peer-checked:bg-[#6366f1] peer-focus-visible:ring-2 peer-focus-visible:ring-[#a5b4fc]" />
+          <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-[#ffffff] shadow-md transition-transform duration-200 peer-checked:translate-x-4" />
         </span>
-        Передавать лидов в CRM
+        <span className="min-w-0">
+          <span className="block text-sm text-gray-800">Передавать лидов в CRM</span>
+          <span className="mt-0.5 block text-xs text-gray-500">Лид станет сделкой: контакт @ник, тег оффера, переписка в примечании.</span>
+        </span>
       </label>
-      <p className="text-[10px] text-gray-400">Переданный лид станет сделкой: контакт @ник, тег оффера, переписка в примечании.</p>
 
-      {settings.enabled && (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <label className="block space-y-1">
-            <span className="block text-[11px] font-medium text-gray-500">Куда</span>
-            <select value={settings.connection ?? POLZA}
-              onChange={(e) => setSettings((prev) => ({ ...prev, connection: e.target.value, pipeline_id: null, status_id: null }))}
-              className={inputCls}>
-              {connections.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}{c.status === 'error' ? ' — ошибка' : ''}</option>
-              ))}
-            </select>
-          </label>
-          <label className="block space-y-1">
-            <span className="block text-[11px] font-medium text-gray-500">Воронка</span>
-            <select value={settings.pipeline_id ?? ''} disabled={loadingPipelines || !pipelines.length}
-              onChange={(e) => {
-                const p = pipelines.find((x) => x.id === Number(e.target.value));
-                setSettings((prev) => ({ ...prev, pipeline_id: p?.id ?? null, status_id: p?.statuses[0]?.id ?? null }));
-              }}
-              className={inputCls}>
-              {!pipelines.length && <option value="">{loadingPipelines ? 'Загружаю…' : '—'}</option>}
-              {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </label>
-          <label className="block space-y-1">
-            <span className="block text-[11px] font-medium text-gray-500">Этап</span>
-            <select value={settings.status_id ?? ''} disabled={!pipeline}
-              onChange={(e) => setSettings((prev) => ({ ...prev, status_id: Number(e.target.value) || null }))}
-              className={inputCls}>
-              {!pipeline && <option value="">—</option>}
-              {pipeline?.statuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </label>
+      <Reveal open={settings.enabled}>
+        <div className="space-y-4">
+          <div className="inline-flex items-center gap-1 rounded-lg border border-gray-300/70 bg-white/50 p-1">
+            <button type="button" onClick={() => pickTarget('own')} className={segCls(target === 'own')}>Наша amoCRM</button>
+            <button type="button" onClick={() => pickTarget('client')} className={segCls(target === 'client')}>amoCRM клиента</button>
+          </div>
+
+          {/* amoCRM клиентов: подключают наши сотрудники, токен после сохранения не показывается. */}
+          {target === 'client' && (
+            <div className="space-y-2">
+              {clientConnections.length > 0 && (
+                <label className="block max-w-sm space-y-1">
+                  <span className="block text-[11px] font-medium text-gray-500">Клиент</span>
+                  <div className="flex items-center gap-2">
+                    <select value={settings.connection ?? ''}
+                      onChange={(e) => setSettings((prev) => ({ ...prev, connection: e.target.value || null, pipeline_id: null, status_id: null }))}
+                      className={inputCls}>
+                      {clientConnections.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}{c.status === 'error' ? ' — ошибка' : ''}</option>
+                      ))}
+                    </select>
+                    {selected && !selected.builtin && (
+                      <button type="button" onClick={() => void deleteConnection(selected)} title="Удалить подключение"
+                        className="shrink-0 cursor-pointer rounded p-1.5 text-gray-400 hover:bg-rose-50 hover:text-rose-600">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  {selected && !selected.builtin && (
+                    <span className="block text-[11px] text-gray-400">{selected.base_url.replace(/^https:\/\//, '')}</span>
+                  )}
+                </label>
+              )}
+
+              {adding ? (
+                <div className="space-y-2 rounded-lg border border-gray-300/70 bg-white/50 p-3">
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                    <input placeholder="Название клиента" value={form.name}
+                      onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className={inputCls} />
+                    <input placeholder="client.amocrm.ru" value={form.base_url}
+                      onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))} className={inputCls} />
+                  </div>
+                  <textarea placeholder="Долгосрочный токен amoCRM" value={form.token} rows={3}
+                    onChange={(e) => setForm((f) => ({ ...f, token: e.target.value }))} className={`${inputCls} font-mono`} />
+                  {formError && <p className="text-[11px] text-rose-600">{formError}</p>}
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => void addConnection()} disabled={formBusy}
+                      className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-50">
+                      {formBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                      Проверить и сохранить
+                    </button>
+                    {clientConnections.length > 0 && (
+                      <button type="button" onClick={() => { setAdding(false); setFormError(null); }}
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-gray-300/70 px-3 py-1.5 text-[11px] text-gray-600 hover:bg-gray-100">
+                        <X className="h-3 w-3" /> Отмена
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setAdding(true)}
+                  className="inline-flex cursor-pointer items-center gap-1.5 text-xs font-medium text-indigo-500 hover:text-indigo-400">
+                  <Plus className="h-3 w-3" /> Подключить amoCRM клиента
+                </button>
+              )}
+            </div>
+          )}
+
+          {settings.connection && (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-gray-500">Воронка</span>
+                <select value={settings.pipeline_id ?? ''} disabled={loadingPipelines || !pipelines.length}
+                  onChange={(e) => {
+                    const p = pipelines.find((x) => x.id === Number(e.target.value));
+                    setSettings((prev) => ({ ...prev, pipeline_id: p?.id ?? null, status_id: p?.statuses[0]?.id ?? null }));
+                  }}
+                  className={inputCls}>
+                  {!pipelines.length && <option value="">{loadingPipelines ? 'Загружаю…' : '—'}</option>}
+                  {pipelines.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-gray-500">Этап</span>
+                <select value={settings.status_id ?? ''} disabled={!pipeline}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, status_id: Number(e.target.value) || null }))}
+                  className={inputCls}>
+                  {!pipeline && <option value="">—</option>}
+                  {pipeline?.statuses.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </label>
+            </div>
+          )}
+
+          {(pipelinesError || selected?.last_error) && (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700">
+              {pipelinesError || selected?.last_error}
+            </p>
+          )}
         </div>
-      )}
-      {settings.enabled && (pipelinesError || selected?.last_error) && (
-        <p className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-700">
-          {pipelinesError || selected?.last_error}
-        </p>
-      )}
-
-      {/* amoCRM клиентов: подключают наши сотрудники, токен после сохранения не показывается. */}
-      <div className="space-y-2 border-t border-gray-100 pt-3">
-        {clientConnections.map((c) => (
-          <div key={c.id} className="flex items-center gap-2 text-[11px] text-gray-600">
-            <span className="font-medium text-gray-800">{c.name}</span>
-            <span className="text-gray-400">{c.base_url.replace(/^https:\/\//, '')}</span>
-            {c.status === 'error' && <span className="text-rose-600">ошибка</span>}
-            <button type="button" onClick={() => void deleteConnection(c)} title="Удалить подключение"
-              className="ml-auto cursor-pointer rounded p-1 text-gray-400 hover:bg-rose-50 hover:text-rose-600">
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        ))}
-
-        {adding ? (
-          <div className="space-y-2 rounded-lg bg-gray-50 p-2.5">
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-              <input placeholder="Название (клиент)" value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className={inputCls} />
-              <input placeholder="client.amocrm.ru" value={form.base_url}
-                onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))} className={inputCls} />
-            </div>
-            <textarea placeholder="Долгосрочный токен amoCRM" value={form.token} rows={3}
-              onChange={(e) => setForm((f) => ({ ...f, token: e.target.value }))} className={`${inputCls} font-mono`} />
-            {formError && <p className="text-[10px] text-rose-600">{formError}</p>}
-            <div className="flex gap-2">
-              <button type="button" onClick={() => void addConnection()} disabled={formBusy}
-                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-indigo-700 disabled:opacity-50">
-                {formBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
-                Проверить и сохранить
-              </button>
-              <button type="button" onClick={() => { setAdding(false); setFormError(null); }}
-                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-[11px] text-gray-600 hover:bg-gray-100">
-                <X className="h-3 w-3" /> Отмена
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button type="button" onClick={() => setAdding(true)}
-            className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-indigo-600 hover:text-indigo-800">
-            <Plus className="h-3 w-3" /> Подключить amoCRM клиента
-          </button>
-        )}
-      </div>
-    </section>
+      </Reveal>
+    </div>
   );
 }

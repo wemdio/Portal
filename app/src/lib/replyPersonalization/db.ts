@@ -30,7 +30,7 @@ export async function isSupervisor(userId: string): Promise<boolean> {
   return SUPERVISOR_ROLES.includes((data?.role as string) ?? '');
 }
 
-/** Проекты, видимые пользователю — тот же критерий, что у /api/instantly/my-projects. */
+/** Проекты пользователя, включая паузу: на уже полученные письма всё ещё нужно отвечать. */
 export async function listVisibleProjects(userId: string): Promise<{
   /** briefText — бриф из карточки проекта: по нему видно, чего проекту не хватает. */
   projects: { id: string; client: string; briefText: string }[];
@@ -43,7 +43,7 @@ export async function listVisibleProjects(userId: string): Promise<{
   let query = admin
     .from('projects')
     .select('id, client, name, specialist, specialist_user_id, brief_text')
-    .in('status', ['В работе', 'Тестирование', 'Подготовка'])
+    .in('status', ['В работе', 'Тестирование', 'Подготовка', 'На паузе'])
     .order('client');
   if (!supervisor) query = query.eq('specialist_user_id', userId);
 
