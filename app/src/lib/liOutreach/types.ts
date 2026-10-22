@@ -158,6 +158,8 @@ export interface LiCampaign {
   daily_invite_limit: number;
   invites_sent_today: number;
   last_invite_date: string | null;
+  /** Служебное: тик идёт за один из нескольких аккаунтов, счётчик инвайтов — его собственный. */
+  per_account_counter?: boolean;
   welcome_message: string | null;
   message_existing_connections: boolean;
   use_ai_welcome: boolean;

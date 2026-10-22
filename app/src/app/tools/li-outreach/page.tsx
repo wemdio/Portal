@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch, authFetchJson, getAccessToken } from '@/lib/authFetch';
+import { BarChart3, Megaphone, ScrollText, Search, Users, UserCircle } from 'lucide-react';
+import { CampaignRail } from '@/components/tg-outreach/CampaignRail';
 
 // ---- Types ------------------------------------------------------------------
 
@@ -83,6 +85,8 @@ type LiCampaign = {
   owner_name: string | null;
   name: string;
   account_id: string | null;
+  /** Все аккаунты кампании по порядку (отдаёт GET /campaigns). */
+  account_ids?: string[];
   lead_list_id: string | null;
   steps: unknown[];
   status: string;
@@ -134,7 +138,8 @@ const UNLISTED_LEAD_LIST_QUERY = '__none';
 
 const DEFAULT_CAMPAIGN_FORM = {
   name: '',
-  account_id: '',
+  /** Аккаунты кампании: несколько, но один аккаунт — только в одной кампании. */
+  account_ids: [] as string[],
   lead_list_id: '',
   invite_message: 'Привет! Заметил вашу активность в LinkedIn. Хотел бы добавить вас в профессиональную сеть.',
   welcome_message: 'Спасибо за добавление! Рад расширить профессиональную сеть.',
@@ -562,7 +567,7 @@ export default function LiOutreachPage() {
 
   const createCampaign = async () => {
     if (!cf.name.trim()) { alert('Введите название кампании'); return; }
-    if (!cf.account_id) { alert('Выберите аккаунт'); return; }
+    if (cf.account_ids.length === 0) { alert('Выберите хотя бы один аккаунт'); return; }
     setCreating(true);
     try {
       const steps: { type: string; message?: string; days?: number; hours?: number }[] = [
@@ -578,7 +583,7 @@ export default function LiOutreachPage() {
         method: editingCampaignId ? 'PUT' : 'POST',
         json: {
           name: cf.name,
-          account_id: cf.account_id,
+          account_ids: cf.account_ids,
           lead_list_id: cf.lead_list_id || null,
           steps,
           use_ai: cf.use_ai,
@@ -638,7 +643,7 @@ export default function LiOutreachPage() {
     setCf({
       ...DEFAULT_CAMPAIGN_FORM,
       name: campaign.name ?? '',
-      account_id: campaign.account_id ?? '',
+      account_ids: campaign.account_ids?.length ? campaign.account_ids : campaign.account_id ? [campaign.account_id] : [],
       lead_list_id: campaign.lead_list_id ?? '',
       invite_message: typeof inviteStep?.message === 'string' ? inviteStep.message : DEFAULT_CAMPAIGN_FORM.invite_message,
       followup1_message: followup1Message,
@@ -905,14 +910,14 @@ export default function LiOutreachPage() {
 
   // ---- Tab bar --------------------------------------------------------------
 
-  const tabs: { key: Tab; label: string }[] = [
-    { key: 'dashboard', label: 'Дашборд' },
-    { key: 'campaigns', label: 'Кампании' },
-    { key: 'leads', label: 'Лиды' },
-    { key: 'scraper', label: 'Скрапер' },
-    { key: 'accounts', label: 'Аккаунты' },
-    { key: 'logs', label: 'Логи' },
-  ];
+  const tabs = [
+    { id: 'dashboard', label: 'Дашборд', icon: BarChart3 },
+    { id: 'campaigns', label: 'Кампании', icon: Megaphone },
+    { id: 'leads', label: 'Лиды', icon: Users },
+    { id: 'scraper', label: 'Скрапер', icon: Search },
+    { id: 'accounts', label: 'Аккаунты', icon: UserCircle },
+    { id: 'logs', label: 'Логи', icon: ScrollText },
+  ] as const;
 
   const selectedCampaign = useMemo(() => campaigns.find((c) => c.id === selectedCampaignId) ?? null, [campaigns, selectedCampaignId]);
 
@@ -924,27 +929,14 @@ export default function LiOutreachPage() {
   const dashFunnel = dashFunnelCampaign ? dashFunnelCampaign.funnel : dashData?.funnel ?? null;
 
   return (
-    <div className="space-y-6 text-left max-w-full">
+    <div className="min-w-0 space-y-6 overflow-x-clip text-left max-w-full lg:pl-14">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">LinkedIn Outreach</h1>
         <p className="text-sm text-gray-500">Кампании, AI-персонализация, скрапинг лидов через Unipile.</p>
       </div>
 
-      {/* Tab bar. Активная вкладка получает усиленную тень + кольцо
-       *  blue-400/30 — нужно чтобы её было видно на тёмной теме
-       *  (без кольца bg-white→pd-surface почти не отличался от pd-bg).
-       *  shadow-md и ring работают в обеих темах. */}
-      <div className="flex gap-1 rounded-xl bg-gray-100 p-1">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${tab === t.key ? 'bg-white text-gray-900 shadow-md ring-1 ring-blue-400/30' : 'text-gray-500 hover:text-gray-700'}`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      {/* Разделы — колонкой значков слева, как в TG-аутриче. */}
+      <CampaignRail items={tabs} active={tab} onSelect={(id) => setTab(id as Tab)} />
 
       {/* Dashboard */}
       {tab === 'dashboard' && (
@@ -952,7 +944,7 @@ export default function LiOutreachPage() {
           {dashLoading && !dashData && <div className="text-center py-8 text-sm text-gray-400">Загрузка статистики…</div>}
 
           {/* Top stats row */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [&>*]:min-w-0">
             <StatCard label="Аккаунты" value={accounts.filter((a) => a.is_active && a.user_id === currentUserId).length} total={accounts.filter((a) => a.user_id === currentUserId).length} accent="green" />
             <StatCard label="Кампании" value={campaigns.filter((c) => c.status === 'running').length} total={campaigns.length} accent="blue" />
             <StatCard
@@ -971,7 +963,7 @@ export default function LiOutreachPage() {
           {/* Lead funnel + 30-day activity — стоят рядом на широких экранах
            *  (lg+) чтобы не растягивать дашборд вертикально, на мобилке
            *  пакуются в одну колонку. */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 [&>*]:min-w-0">
             {/* Lead funnel (visual) — выбираемая по кампании */}
             {dashData && dashFunnel && (
               <div className="rounded-xl border border-gray-200 bg-white p-5">
@@ -1242,17 +1234,45 @@ export default function LiOutreachPage() {
                   <input type="text" placeholder="Моя кампания" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
                 </div>
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">Аккаунт *</label>
-                  <select value={cf.account_id} onChange={(e) => setCf({ ...cf, account_id: e.target.value })} className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm">
-                    <option value="">Выберите...</option>
-                    {accounts
-                      .filter((a) => a.is_active || a.id === cf.account_id)
-                      .map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name || a.unipile_account_id}
-                        </option>
-                      ))}
-                  </select>
+                  <label className="text-xs text-gray-600 block mb-1">Аккаунты * <span className="text-gray-400">({cf.account_ids.length})</span></label>
+                  <details className="group relative">
+                    <summary className="flex w-full cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm">
+                      <span className="truncate">
+                        {cf.account_ids.length === 0
+                          ? 'Выберите...'
+                          : cf.account_ids.map((id) => { const a = accounts.find((x) => x.id === id); return a?.name || a?.unipile_account_id || 'аккаунт'; }).join(', ')}
+                      </span>
+                      <span className="text-gray-400 transition group-open:rotate-180">▾</span>
+                    </summary>
+                    <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-gray-200 bg-[#16171c] p-1 shadow-xl">
+                      {accounts
+                        .filter((a) => a.is_active || cf.account_ids.includes(a.id))
+                        .map((a) => {
+                          // Чужая кампания держит аккаунт — выбрать нельзя.
+                          const busyIn = (a.campaigns ?? []).find((c) => c.id !== editingCampaignId);
+                          const checked = cf.account_ids.includes(a.id);
+                          return (
+                            <label
+                              key={a.id}
+                              title={busyIn ? `Занят кампанией «${busyIn.name}»` : undefined}
+                              className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${busyIn && !checked ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-white/5'}`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={Boolean(busyIn) && !checked}
+                                onChange={() => setCf({
+                                  ...cf,
+                                  account_ids: checked ? cf.account_ids.filter((id) => id !== a.id) : [...cf.account_ids, a.id],
+                                })}
+                              />
+                              <span className="min-w-0 flex-1 truncate">{a.name || a.unipile_account_id}</span>
+                              {busyIn && !checked && <span className="shrink-0 text-[10px] text-amber-500">занят: {busyIn.name}</span>}
+                            </label>
+                          );
+                        })}
+                    </div>
+                  </details>
                 </div>
                 <div>
                   <label className="text-xs text-gray-600 block mb-1">Список лидов</label>
