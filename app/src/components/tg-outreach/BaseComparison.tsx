@@ -289,8 +289,20 @@ export default function BaseComparison({
     })();
   }, [campaignId, period]);
 
-  const leftId = leftPick || bases[0]?.id || '';
-  const rightId = rightPick || bases[1]?.id || '';
+  /**
+   * По умолчанию сравниваем ту базу, что рассылает сейчас (самая свежая
+   * отправка), и ту, что рассылала перед ней. Запоминать ничего не нужно:
+   * момент перехода виден по последним отправкам баз.
+   */
+  const recent = useMemo(() => {
+    const ids = new Set(bases.map((b) => b.id));
+    return stats
+      .filter((s) => ids.has(s.baseId) && s.lastSentAt)
+      .sort((a, b) => (b.lastSentAt ?? '').localeCompare(a.lastSentAt ?? ''))
+      .map((s) => s.baseId);
+  }, [stats, bases]);
+  const leftId = leftPick || recent[0] || bases[0]?.id || '';
+  const rightId = rightPick || recent[1] || bases.find((b) => b.id !== (leftPick || recent[0]))?.id || bases[1]?.id || '';
 
   const left = useMemo(() => stats.find((s) => s.baseId === leftId), [stats, leftId]);
   const right = useMemo(() => stats.find((s) => s.baseId === rightId), [stats, rightId]);

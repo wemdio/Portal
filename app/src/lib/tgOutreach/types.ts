@@ -507,6 +507,16 @@ export interface DialogMessage {
   timestamp?: string;
 }
 
+export interface ReplyFailure {
+  text: string;
+  reason: string;
+  timestamp: string;
+  incomingKey: string;
+  attempts: number;
+  retrying: boolean;
+  delivery: 'not_sent' | 'unknown';
+}
+
 export interface OutreachDialog {
   id: string;
   campaign_id: string;
@@ -536,6 +546,8 @@ export interface OutreachDialog {
    */
   can_send_changed_reason?: string | null;
   messages: DialogMessage[];
+  /** Неотправленный черновик; не входит в messages и контекст модели. */
+  reply_failure?: ReplyFailure | null;
   /** Прочитал ли собеседник наше последнее сообщение; null — неизвестно или последнее не наше. */
   out_read?: boolean | null;
   status: DialogStatus;

@@ -9,6 +9,7 @@ import { proxyCountryLabel } from '@/lib/tgOutreach/proxyCountry';
 import { RowMenu } from '@/components/tg-outreach/RowMenu';
 import { Reveal } from '@/components/tg-outreach/Reveal';
 import { PageLoader } from '@/components/tg-outreach/PageLoader';
+import { FailedReplyBubble, ReplyFailureIndicator } from '@/components/tg-outreach/FailedReplyBubble';
 import { ArchiveCampaignDialog, CampaignList, DeleteCampaignDialog, archiveBlockReason } from '@/components/tg-outreach/CampaignList';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
@@ -41,9 +42,12 @@ import {
   Ban,
   RefreshCw,
   AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
   Flame,
   Database,
   Eye,
+  Eraser,
   ShieldCheck,
   FileSpreadsheet,
   BarChart3,
@@ -1190,6 +1194,16 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 // Флага «своя/чужая кампания» здесь больше нет. Он появился как зеркало RLS из
 // 20260320_0003 (читать всем, писать владельцу) — а 20260807_0004 это правило
 // сняла: аутрич командный, кампанию ведут несколько специалистов.
+/**
+ * Цвет счётчика сообщений: две и больше — разговор завязался, по таким
+ * диалогам и проверяют работу. Явные цвета (белый текст на сплошной заливке),
+ * чтобы одинаково читалось в светлой и тёмной теме.
+ */
+function messageCountClass(n: number): string {
+  // Ответ был (2 и больше) — зелёный; одно наше сообщение — тусклый серый.
+  return n >= 2 ? 'bg-[#16a34a] text-white' : 'bg-[#e5e7eb] text-[#6b7280]';
+}
+
 function DialogsTab({ campaignId, crmEnabled }: {
   campaignId: string;
   /** Включена ли у кампании передача в CRM — тогда у лидов без сделки есть кнопка «В CRM». */
@@ -1312,6 +1326,14 @@ function DialogsTab({ campaignId, crmEnabled }: {
   }, [search, query]);
 
   useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); void fetchBases(); }); }, [fetchDialogs, fetchAccounts, fetchBases]);
+
+  // Ошибка/автоперегенерация ответа видна в открытой вкладке без перезагрузки.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void fetchDialogs({ silent: true });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [fetchDialogs]);
 
   // Создание задачи ещё не означает удаление в Telegram. Ждём её результата,
   // обновляем открытую переписку и возвращаем кнопку при ошибке воркера.
@@ -1616,7 +1638,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
 
   const selectedDialog = dialogs.find((x) => x.id === expandedId) ?? dialogs[0] ?? null;
   const listRef = useRef<HTMLUListElement>(null);
-  const messagesEndKey = selectedDialog ? `${selectedDialog.id}:${selectedDialog.messages.length}` : '';
+  const messagesEndKey = selectedDialog ? `${selectedDialog.id}:${selectedDialog.messages.length}:${selectedDialog.reply_failure?.timestamp ?? ''}:${selectedDialog.reply_failure?.retrying ?? ''}` : '';
 
   // Переписка открывается на последних сообщениях, как в мессенджере.
   useEffect(() => {
@@ -1854,8 +1876,15 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         <span className={`min-w-0 flex-1 truncate text-xs ${active ? 'font-semibold text-indigo-700' : 'font-medium text-gray-900'}`}>
                           {d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}
                         </span>
+                        <span
+                          title={`Сообщений в переписке: ${d.messages.length}`}
+                          className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums ${messageCountClass(d.messages.length)}`}
+                        >
+                          {d.messages.length} сообщ.
+                        </span>
                         {d.status !== 'none' && <span className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium ${st.cls}`}>{st.label}</span>}
                         {d.can_send === false && <Ban className="h-3 w-3 shrink-0 text-rose-500" />}
+                        {d.reply_failure && <ReplyFailureIndicator failure={d.reply_failure} />}
                         <span className="shrink-0 text-[10px] text-gray-400">{d.last_message_at ? formatDate(d.last_message_at) : ''}</span>
                       </span>
                       <span className="mt-0.5 block truncate text-[11px] text-gray-500">
@@ -1865,7 +1894,6 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         <span className="mt-1 flex items-center gap-1.5 text-[10px] text-gray-400">
                           {d.base && <span className="truncate text-violet-600">{d.base.name}</span>}
                           {accountLabelMap.get(d.account_id) && <span className="shrink-0">· {accountLabelMap.get(d.account_id)}</span>}
-                          <span className="ml-auto shrink-0">{d.messages.length} сообщ.</span>
                         </span>
                       )}
                     </button>
@@ -2223,6 +2251,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
                           </div>
                         );
                       })}
+                      {d.reply_failure && <FailedReplyBubble failure={d.reply_failure} />}
                     </div>
                     <div className="flex gap-2">
                       <input value={sendText} onChange={e => setSendText(e.target.value)}
@@ -2722,6 +2751,24 @@ function HealthCell({ mark }: { mark: HealthMark }) {
   return (
     <span title={mark.detail} className={`w-fit cursor-help rounded-md px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
       {mark.label}
+    </span>
+  );
+}
+
+/**
+ * Здоровье прокси значком перед адресом: зелёная галочка — работает, жёлтый
+ * треугольник — сбоит или ещё не проверялся, красный круг — не работает.
+ * Причина — в подсказке при наведении.
+ */
+function ProxyHealthIcon({ mark }: { mark: HealthMark }) {
+  const icon = mark.tone === 'ok'
+    ? <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+    : mark.tone === 'bad'
+      ? <AlertCircle className="h-4 w-4 text-rose-500" />
+      : <AlertTriangle className="h-4 w-4 text-amber-500" />;
+  return (
+    <span title={`${mark.label}. ${mark.detail}`.trim()} className="inline-flex shrink-0 cursor-help">
+      {icon}
     </span>
   );
 }
@@ -4351,6 +4398,7 @@ function CampaignAccountsTab({
                   )}
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
+                {proxy && editingProxyFor !== a.id && <ProxyHealthIcon mark={proxyMark} />}
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -4380,8 +4428,6 @@ function CampaignAccountsTab({
                     {proxy ? (proxy.name || proxy.url) : <HealthCell mark={proxyMark} />}
                   </button>
                 )}
-                  {/* Нет прокси — «не назначен» стоит на месте прочерка, а не сбоку. */}
-                  {proxy ? <HealthCell mark={proxyMark} /> : null}
                 </div>
                 {editingPriceFor === a.id ? (
                   <input
@@ -5208,7 +5254,10 @@ function CampaignBasesTab({
    * оператор перенёс их руками.
    */
   const [orphans, setOrphans] = useState<OutreachBase[]>([]);
+  /** Выбранные базы в порядке цепочки (Set помнит порядок вставки). */
   const [linked, setLinked] = useState<Set<string>>(new Set());
+  /** Режим: false — базы идут по кругу, true — одна за другой. */
+  const [chain, setChain] = useState(false);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -5268,8 +5317,9 @@ function CampaignBasesTab({
       setOrphans(d.orphans ?? []);
     }
     if (linkRes.ok) {
-      const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
+      const d = (await linkRes.json()) as { items: Array<{ base_id: string }>; chain?: boolean };
       setLinked(new Set(d.items.map((i) => i.base_id)));
+      setChain(Boolean(d.chain));
     }
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
@@ -5334,14 +5384,13 @@ function CampaignBasesTab({
     } finally { setBusy(false); }
   };
 
-  const toggleLink = async (baseId: string) => {
-    const next = new Set(linked);
-    if (next.has(baseId)) next.delete(baseId); else next.add(baseId);
+  const saveLinks = async (next: Set<string>, nextChain: boolean) => {
     setLinked(next);
+    setChain(nextChain);
     setError(null);
     const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/bases`, {
       method: 'PUT',
-      body: JSON.stringify({ base_ids: [...next] }),
+      body: JSON.stringify({ base_ids: [...next], chain: nextChain }),
     });
     if (!res.ok) {
       const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -5350,6 +5399,13 @@ function CampaignBasesTab({
       // а на сервере ничего не изменилось.
       void load();
     }
+  };
+
+  /** Поставить/снять галочку: новая база встаёт в конец цепочки. */
+  const toggleLink = async (baseId: string) => {
+    const next = new Set(linked);
+    if (next.has(baseId)) next.delete(baseId); else next.add(baseId);
+    await saveLinks(next, chain);
   };
 
   /** Забрать базу без владельца в эту кампанию. */
@@ -5485,6 +5541,29 @@ function CampaignBasesTab({
     </button>
   );
 
+  /** Один скрытый выбор файла на все строки: меню открывается порталом, label внутри него не живёт. */
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadTargetRef = useRef<string | null>(null);
+
+  /** Убрать все контакты, оставив базу: имя, чаты-источники и привязка к кампании сохраняются. */
+  const clearBase = async (base: OutreachBase) => {
+    const sentNote = base.counts.sent > 0
+      ? ` По ней уже отправлено ${base.counts.sent} сообщений — история «кому писали» будет потеряна.`
+      : '';
+    if (!confirm(`Очистить базу «${base.name}»: удалить все ${base.counts.total} контактов? Сама база останется, и в неё можно загрузить файл заново.${sentNote}`)) return;
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${base.id}/contacts?confirm_total=${base.counts.total}`, { method: 'DELETE' });
+      const d = (await res.json().catch(() => null)) as { error?: string; deleted?: number } | null;
+      if (!res.ok) {
+        setError(d?.error ?? `Не удалось очистить базу (${res.status})`);
+        return;
+      }
+      setNotice(`База «${base.name}» очищена: удалено контактов — ${d?.deleted ?? 0}.`);
+      void refreshBases();
+    } finally { setBusy(false); }
+  };
+
   const deleteBase = async (base: OutreachBase) => {
     // Предупреждаем про отправленных отдельно: контакты уйдут каскадом, и
     // история «кому мы уже писали по этой гипотезе» пропадёт вместе с базой.
@@ -5581,6 +5660,25 @@ function CampaignBasesTab({
           Базы контактов <span className="text-gray-400 font-normal">({bases.length})</span>
         </span>
         <div className="flex items-center gap-2">
+          {linked.size > 1 && (
+            <div
+              role="group"
+              aria-label="Режим рассылки баз"
+              title="Параллельно: по контакту из каждой базы по кругу. Цепочкой: сначала вся первая, как закончится — сразу вторая, и так далее без остановки."
+              className="inline-flex rounded-full border border-gray-200 p-0.5 text-[11px] font-medium"
+            >
+              {([false, true] as const).map((mode) => (
+                <button
+                  key={String(mode)}
+                  type="button"
+                  onClick={() => { if (chain !== mode) void saveLinks(linked, mode); }}
+                  className={`rounded-full px-3 py-1 transition cursor-pointer ${chain === mode ? 'bg-[#4f46e5] text-white' : 'text-gray-500 hover:text-gray-800'}`}
+                >
+                  {mode ? 'Цепочкой' : 'Параллельно'}
+                </button>
+              ))}
+            </div>
+          )}
           <input
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
@@ -5618,10 +5716,12 @@ function CampaignBasesTab({
           {/* «Отложено» (status=failed) раньше не показывали вовсе: контакты
               копились в невидимой колонке, и база, вставшая на пороге длины,
               выглядела просто пустеющей. */}
-          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_48px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <span />
             <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
+          {/* Видно пять баз (строка ~88 px), остальные — прокруткой. */}
+          <div className="max-h-[450px] divide-y divide-gray-100 overflow-y-auto">
           {bases.map((b) => {
             const chats = (b.source_chats ?? '')
               .split(/[\n,;]+/)
@@ -5629,17 +5729,37 @@ function CampaignBasesTab({
               .filter(Boolean);
             return (
             <React.Fragment key={b.id}>
-            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
-              <input
-                type="checkbox"
-                checked={linked.has(b.id)}
-                onChange={() => { void toggleLink(b.id); }}
-                title="Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются"
-                aria-label={`Участвует в рассылке: база ${b.name}`}
-                className="tg-check"
-              />
+            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_48px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+              {/* Пустую базу выбрать нельзя: при наведении вместо галочки — крестик.
+                  Уже выбранную пустую снять можно. */}
+              <span className="group relative inline-flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={linked.has(b.id)}
+                  disabled={b.counts.total === 0 && !linked.has(b.id)}
+                  onChange={() => { void toggleLink(b.id); }}
+                  title={b.counts.total === 0 && !linked.has(b.id)
+                    ? 'В базе нет контактов — выбрать нельзя'
+                    : 'Участвует в рассылке. Снятая галочка ставит базу на паузу, контакты и счётчики сохраняются'}
+                  aria-label={`Участвует в рассылке: база ${b.name}`}
+                  className="tg-check disabled:cursor-not-allowed disabled:opacity-40"
+                />
+                {b.counts.total === 0 && !linked.has(b.id) && (
+                  <X className="pointer-events-none absolute left-0 top-0 h-[18px] w-[18px] p-0.5 text-rose-500 opacity-0 transition-opacity group-hover:opacity-100" />
+                )}
+              </span>
               <div className="min-w-0">
-                <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
+                <div className="flex items-center gap-2 text-xs font-medium text-gray-800">
+                  {chain && linked.has(b.id) && (
+                    <span
+                      title={`Место в цепочке: ${[...linked].indexOf(b.id) + 1}`}
+                      className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-[#4f46e5] px-1 text-[10px] font-semibold text-white"
+                    >
+                      {[...linked].indexOf(b.id) + 1}
+                    </span>
+                  )}
+                  <span className="truncate">{b.name}</span>
+                </div>
                 {/* Чаты-источники живут в строке базы, а не в отдельном экране:
                     их спрашивает отчёт по договору, и заполнить их проще там
                     же, где базу заводят. */}
@@ -5696,32 +5816,18 @@ function CampaignBasesTab({
               <span className={`text-xs ${b.counts.failed > 0 ? 'text-amber-600 font-medium' : 'text-gray-600'}`}>
                 {b.counts.failed}
               </span>
-              <div className="flex items-center gap-1">
-              <label className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50 transition cursor-pointer w-fit">
-                <Upload className="h-3 w-3" /> Загрузить
-                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={busy}
-                  onChange={(e) => { void uploadContacts(b.id, e); }} />
-              </label>
-                {exportButton(b)}
-                {/* Просмотр базы: до него она была чёрным ящиком — видно
-                    только счётчики. Убрать один неверный ник значило выгрузить
-                    файл, поправить и залить обратно, потеряв статусы отправки
-                    по всей базе. */}
-                <button type="button" onClick={() => setViewingBase({ id: b.id, name: b.name })} disabled={busy}
-                  title="Посмотреть контакты базы, поправить или удалить отдельные, очистить базу целиком"
-                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-50">
-                  <Eye className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" onClick={() => { void requeueBase(b); }} disabled={busy || b.counts.failed === 0}
-                  title="Вернуть отложенные контакты в очередь — например, после того как подняли порог длины первого сообщения"
-                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent">
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" onClick={() => { void deleteBase(b); }} disabled={busy}
-                  title="Удалить базу вместе с контактами"
-                  className="p-1 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+              <div className="flex justify-end">
+                <RowMenu
+                  label={`Действия: ${b.name}`}
+                  items={[
+                    { label: 'Загрузить контакты', icon: <Upload className="h-3.5 w-3.5" />, onClick: () => { uploadTargetRef.current = b.id; uploadInputRef.current?.click(); } },
+                    { label: 'Посмотреть и править', icon: <Eye className="h-3.5 w-3.5" />, onClick: () => setViewingBase({ id: b.id, name: b.name }) },
+                    ...(b.counts.total > 0 ? [{ label: 'Скачать в Excel', icon: <Download className="h-3.5 w-3.5" />, onClick: () => { void downloadBase(b); } }] : []),
+                    ...(b.counts.failed > 0 ? [{ label: 'Вернуть отложенные в очередь', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => { void requeueBase(b); } }] : []),
+                    ...(b.counts.total > 0 ? [{ label: 'Очистить базу', icon: <Eraser className="h-3.5 w-3.5" />, danger: true, onClick: () => { void clearBase(b); } }] : []),
+                    { label: 'Удалить базу', icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, onClick: () => { void deleteBase(b); } },
+                  ]}
+                />
               </div>
             </div>
             {attachmentsFor === b.id && <BaseAttachmentsPanel baseId={b.id} baseName={b.name} />}
@@ -5785,6 +5891,7 @@ function CampaignBasesTab({
             </React.Fragment>
             );
           })}
+          </div>
         </div>
       )}
 
@@ -5835,6 +5942,18 @@ function CampaignBasesTab({
           </div>
         </div>
       )}
+
+      <input
+        ref={uploadInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        className="hidden"
+        onChange={(e) => {
+          const id = uploadTargetRef.current;
+          if (id) void uploadContacts(id, e);
+          else e.target.value = '';
+        }}
+      />
 
       {viewingBase && (
         <BaseContactsModal
@@ -7486,18 +7605,16 @@ function CampaignReportTab({ campaignId }: { campaignId: string }) {
 
 /* =================== CAMPAIGN VIEW (5 tabs) =================== */
 const TABS = [
-  // 22.10.2026: первой — настройки (их открывают чаще всего), второй —
-  // статистика значком-графиком вместо блоков.
+  // 22.10.2026, порядок по просьбе: рабочие вкладки сверху, логи — последними.
   { id: 'settings', label: 'Настройки', icon: Settings },
-  { id: 'dashboard', label: 'Статистика', icon: BarChart3 },
-  // Дальше — в порядке заполнения кампании: аккаунты, им прокси, базы, прогрев.
   { id: 'accounts', label: 'Аккаунты', icon: Users },
-  { id: 'proxies', label: 'Прокси', icon: Network },
-  { id: 'bases', label: 'Базы', icon: Database },
-  { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
+  { id: 'bases', label: 'Базы', icon: Database },
+  { id: 'proxies', label: 'Прокси', icon: Network },
+  { id: 'dashboard', label: 'Статистика', icon: BarChart3 },
+  { id: 'warmup', label: 'Прогрев', icon: Flame },
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
+  { id: 'logs', label: 'Логи', icon: ScrollText },
 ] as const;
 
 function CampaignView({ campaign, onUpdate, onDelete, onBack }: {

@@ -146,11 +146,13 @@ export function CampaignList({ campaigns, statusOf, onOpen, onChanged, onCreate 
                   <td className="px-4 py-3 font-semibold text-gray-900">{c.name}</td>
                   <td className="px-4 py-3">
                     <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${st.cls}`}>{st.label}</span>
-                    {(c.warming_accounts ?? 0) > 0 && c.status !== 'warming' && (
+                  </td>
+                  <td className="px-4 py-3 text-gray-700">
+                    {c.active_accounts ?? 0}
+                    {(c.warming_accounts ?? 0) > 0 && (
                       <span className="ml-1.5 text-[10px] text-amber-700">греется {c.warming_accounts}</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-gray-700">{c.active_accounts ?? 0}</td>
                   {view === 'archive' ? (
                     <>
                       <td className="max-w-xs truncate px-4 py-3 text-gray-600" title={c.archive_reason ?? ''}>{c.archive_reason || '—'}</td>

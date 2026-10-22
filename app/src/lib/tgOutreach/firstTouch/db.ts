@@ -20,8 +20,9 @@ export async function loadCampaignBases(
 ): Promise<CampaignBase[]> {
   const { data: links } = await db
     .from('tg_outreach_campaign_bases')
-    .select('base_id')
+    .select('base_id, position')
     .eq('campaign_id', campaignId)
+    .order('position', { ascending: true })
     .limit(500);
   const baseIds = (links ?? []).map((r) => (r as { base_id: string }).base_id);
   if (!baseIds.length) return [];
@@ -37,7 +38,20 @@ export async function loadCampaignBases(
       .in('id', baseIds.slice(i, i + 100));
     out.push(...((bases ?? []) as Array<{ id: string; sending_account_ids: string[] | null }>));
   }
+  // `in()` порядок не хранит — возвращаем в порядке цепочки.
+  const rank = new Map(baseIds.map((id, i) => [id, i]));
+  out.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
   return out;
+}
+
+/** Идут ли базы кампании цепочкой (одна за другой), а не по кругу. */
+export async function loadBasesChain(db: SupabaseClient, campaignId: string): Promise<boolean> {
+  const { data } = await db
+    .from('tg_outreach_campaigns')
+    .select('bases_chain')
+    .eq('id', campaignId)
+    .maybeSingle();
+  return Boolean((data as { bases_chain?: boolean } | null)?.bases_chain);
 }
 
 /**
