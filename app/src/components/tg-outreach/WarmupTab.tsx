@@ -21,8 +21,6 @@ import {
   ChevronDown,
   AlertCircle,
   Download,
-  ChevronsDown,
-  ChevronsUp,
 } from 'lucide-react';
 import type { CampaignStatus, OutreachAccount } from '@/lib/tgOutreach/types';
 import type {
@@ -148,8 +146,6 @@ export default function WarmupTab({
   const [exporting, setExporting] = useState(false);
   /** Логи внизу свёрнуты: их открывают, когда что-то не так. */
   const [logsOpen, setLogsOpen] = useState(false);
-  /** Список «Кого греем» растянут на весь экран. */
-  const [accountsExpanded, setAccountsExpanded] = useState(false);
   const [allAccountsLogs, setAllAccountsLogs] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -594,14 +590,6 @@ export default function WarmupTab({
               Нужно минимум два — они греются, переписываясь друг с другом.
             </span>
           )}
-          <button
-            type="button"
-            onClick={() => setAccountsExpanded((v) => !v)}
-            className="ml-auto inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 transition hover:text-gray-900 cursor-pointer"
-          >
-            {accountsExpanded ? <ChevronsUp className="h-3.5 w-3.5" /> : <ChevronsDown className="h-3.5 w-3.5" />}
-            {accountsExpanded ? 'Свернуть' : 'Развернуть'}
-          </button>
         </div>
 
         {/*
@@ -610,7 +598,11 @@ export default function WarmupTab({
           авторегов четыре «Дмитрия» и три «Виталия», и по такому списку нельзя
           понять, кого отмечаешь.
         */}
-        <div className={`mt-2 grid grid-cols-1 gap-x-4 overflow-y-auto sm:grid-cols-2 ${accountsExpanded ? 'max-h-[80vh]' : 'max-h-72'}`}>
+        {/* Высоту тянут за правый нижний угол: от одной строки аккаунтов до любой. */}
+        <div
+          style={{ resize: 'vertical', height: 288, minHeight: 64 }}
+          className="mt-2 grid grid-cols-1 content-start gap-x-4 overflow-y-auto sm:grid-cols-2 xl:grid-cols-3"
+        >
           {ordered.map((a) => {
             const disabled = isRunning || !a.is_active;
             const fullName = [a.first_name, a.last_name].filter(Boolean).join(' ').trim();

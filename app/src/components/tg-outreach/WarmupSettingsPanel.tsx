@@ -15,9 +15,7 @@ import { Check, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import type { CampaignStatus } from '@/lib/tgOutreach/types';
 import {
   FIELD_BOUNDS,
-  curveToPerDay,
   perDayForEditing,
-  type WarmupParamKey,
   type WarmupSettings,
 } from '@/lib/tgOutreach/warmup/settings';
 import WarmupChatsSection from './WarmupChatsSection';
@@ -25,50 +23,6 @@ import { NumField } from './NumField';
 import WarmupDayTable from './WarmupDayTable';
 
 const API_BASE = '/api/tools/tg-outreach';
-
-const PARAM_LABEL: Record<WarmupParamKey, string> = {
-  conversations: 'Переписок в день на аккаунт',
-  messages: 'Сообщений в одной переписке',
-  chat_messages: 'Сообщений в день на аккаунт',
-  chat_reactions: 'Реакций в день на аккаунт',
-};
-
-/** Пара полей «первый день → потолок» одного параметра. */
-function CurveRow({
-  paramKey,
-  first,
-  peak,
-  disabled,
-  onChange,
-}: {
-  paramKey: WarmupParamKey;
-  first: number;
-  peak: number;
-  disabled: boolean;
-  onChange: (field: 'first' | 'peak', value: number) => void;
-}) {
-  const bounds = FIELD_BOUNDS[paramKey];
-  const input = (field: 'first' | 'peak', value: number) => (
-    <NumField
-      min={bounds.min}
-      max={bounds.max}
-      value={value}
-      disabled={disabled}
-      onChange={(v) => onChange(field, v)}
-      className="w-14 rounded-lg border border-gray-300/70 bg-white/50 px-1.5 py-1 text-center text-[11px] text-gray-800 outline-none focus:border-indigo-400 disabled:opacity-40"
-    />
-  );
-  return (
-    <div className="flex items-center justify-between gap-3 py-1">
-      <span className="text-[11px] text-gray-600">{PARAM_LABEL[paramKey]}</span>
-      <span className="flex shrink-0 items-center gap-1.5">
-        {input('first', first)}
-        <span className="text-[11px] text-gray-400">→</span>
-        {input('peak', peak)}
-      </span>
-    </div>
-  );
-}
 
 export default function WarmupSettingsPanel({
   campaignId,
@@ -90,7 +44,13 @@ export default function WarmupSettingsPanel({
   onSaved: () => void;
 }) {
   const [open, setOpen] = useState(!runActive);
-  const [draft, setDraft] = useState<WarmupSettings>(settings);
+  // Режим всегда «по дням вручную»: старая кривая разгона один раз переносится в
+  // таблицу, дальше правятся только её клетки.
+  const [draft, setDraft] = useState<WarmupSettings>(() => (
+    settings.mode === 'manual' && settings.per_day.length
+      ? settings
+      : { ...settings, mode: 'manual', per_day: perDayForEditing(settings, days) }
+  ));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -102,17 +62,7 @@ export default function WarmupSettingsPanel({
   const draftKey = JSON.stringify(draft);
   const dirty = draftKey !== lastSaved.current;
 
-  /** Предпросмотр кривой: без него «2 → 8» ничего не говорит про среду. */
-  const preview = useMemo(() => curveToPerDay(draft, Math.min(days, 7)), [draft, days]);
-
   const tableRows = useMemo(() => perDayForEditing(draft, days), [draft, days]);
-
-  const setCurve = (key: WarmupParamKey, field: 'first' | 'peak', value: number) => {
-    setDraft((d) => ({
-      ...d,
-      curve: { ...d.curve, [key]: { ...d.curve[key], [field]: value } },
-    }));
-  };
 
   const setCell = (dayIndex: number, key: WarmupParamKey, value: number) => {
     setDraft((d) => {
@@ -120,18 +70,6 @@ export default function WarmupSettingsPanel({
       rows[dayIndex] = { ...rows[dayIndex], [key]: value };
       return { ...d, per_day: rows };
     });
-  };
-
-  /**
-   * Включение ручного режима фиксирует текущую кривую в таблице: правят потом
-   * пару клеток, а не заполняют двадцать полей с нуля.
-   */
-  const toggleManual = (manual: boolean) => {
-    setDraft((d) => ({
-      ...d,
-      mode: manual ? 'manual' : 'curve',
-      per_day: manual && !d.per_day.length ? perDayForEditing(d, days) : d.per_day,
-    }));
   };
 
   const draftRef = useRef(draft);
@@ -201,37 +139,27 @@ export default function WarmupSettingsPanel({
           {saving ? <Loader2 className="h-3 w-3 animate-spin text-gray-400" /> : dirty ? <span className="text-[10px] font-normal text-amber-600">сохраняю…</span> : null}
         </span>
         <span className="text-[11px] text-gray-400">
-          {draft.mode === 'manual' ? 'по дням вручную' : 'разгон по кривой'} · дней: {days}
+          по дням · дней: {days}
         </span>
       </button>
 
       {open && (
         <div className="space-y-3 border-t border-gray-100 px-4 py-3">
+          {/* Нагрузка задаётся по дням вручную: кривая разгона убрана 22.10.2026,
+              таблица — единственный режим. Число дней берётся из полосы
+              управления выше. */}
           <div>
-            <p className="mb-1 text-[10px] uppercase tracking-wide text-gray-400">Между своими</p>
-            <CurveRow
-              paramKey="conversations"
-              first={draft.curve.conversations.first}
-              peak={draft.curve.conversations.peak}
-              disabled={draft.mode === 'manual'}
-              onChange={(f, v) => setCurve('conversations', f, v)}
+            <p className="mb-2 text-[10px] uppercase tracking-wide text-gray-400">Нагрузка по дням</p>
+            <WarmupDayTable
+              rows={tableRows}
+              currentDay={currentDay}
+              chatsEnabled={chatsEnabled}
+              disabled={false}
+              onChange={setCell}
             />
-            <CurveRow
-              paramKey="messages"
-              first={draft.curve.messages.first}
-              peak={draft.curve.messages.peak}
-              disabled={draft.mode === 'manual'}
-              onChange={(f, v) => setCurve('messages', f, v)}
-            />
-            {draft.mode === 'curve' && (
-              <p className="mt-1 text-[10px] text-gray-400">
-                {preview
-                  .map((r, i) => `день ${i + 1} · ${r.conversations}×${r.messages}`)
-                  .join('  →  ')}
-              </p>
-            )}
           </div>
 
+          {/* Публичные чаты используют редко — поэтому ниже и под переключателем. */}
           <div className="border-t border-gray-100 pt-3">
             <label className="mb-1 flex cursor-pointer items-center gap-2">
               <input
@@ -247,20 +175,6 @@ export default function WarmupSettingsPanel({
 
             {chatsEnabled && (
               <>
-                <CurveRow
-                  paramKey="chat_messages"
-                  first={draft.curve.chat_messages.first}
-                  peak={draft.curve.chat_messages.peak}
-                  disabled={draft.mode === 'manual'}
-                  onChange={(f, v) => setCurve('chat_messages', f, v)}
-                />
-                <CurveRow
-                  paramKey="chat_reactions"
-                  first={draft.curve.chat_reactions.first}
-                  peak={draft.curve.chat_reactions.peak}
-                  disabled={draft.mode === 'manual'}
-                  onChange={(f, v) => setCurve('chat_reactions', f, v)}
-                />
                 <div className="flex items-center justify-between gap-3 py-1">
                   <span className="text-[11px] text-gray-600">Чатов на аккаунт</span>
                   <NumField
@@ -279,33 +193,6 @@ export default function WarmupSettingsPanel({
                   />
                 </div>
               </>
-            )}
-          </div>
-
-          <div className="border-t border-gray-100 pt-3">
-            <label className="flex cursor-pointer items-center gap-2 text-[11px] text-gray-600">
-              <input
-                type="checkbox"
-                checked={draft.mode === 'manual'}
-                onChange={(e) => toggleManual(e.target.checked)}
-                className="tg-check"
-              />
-              Задать по дням вручную
-            </label>
-            {draft.mode === 'manual' && (
-              <div className="mt-2">
-                <WarmupDayTable
-                  rows={tableRows}
-                  currentDay={currentDay}
-                  chatsEnabled={chatsEnabled}
-                  disabled={false}
-                  onChange={setCell}
-                />
-                <p className="mt-1.5 text-[10px] text-gray-400">
-                  Пока галочка стоит, поля выше не действуют. Снимете — вернётся разгон по кривой,
-                  а таблица сохранится до следующего включения.
-                </p>
-              </div>
             )}
           </div>
 
