@@ -121,7 +121,10 @@ async function sendInstantly(db: SupabaseClient, row: HandoffRow, settings: Agen
   }
   const response = await listEmails({ campaign_id: q.campaign_id, search: q.lead_email,
     mode: 'emode_all', sort_order: 'desc', limit: 100 }, requestOptions);
-  if (response.next_starting_after) throw new Error('Переписка слишком длинная для автоматической передачи');
+  // Instantly отдаёт курсор и на неполной странице (2 письма — тоже с курсором): длинная — только полная страница.
+  if (response.next_starting_after && (response.items ?? []).length >= 100) {
+    throw new Error('Переписка слишком длинная для автоматической передачи');
+  }
   const thread = (response.items ?? []).filter(e => original.thread_id
     ? e.thread_id === original.thread_id
     : [norm(row.lead_email), replier].includes(norm(e.from_address_email ?? '')) || norm(e.lead ?? '') === norm(row.lead_email));
