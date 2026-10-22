@@ -634,7 +634,7 @@ function SettingsTab({ campaign, onSave }: {
               onChange={v => setTG('first_touch_per_account_per_day', v)}
               title="Дневная норма первых сообщений на каждый аккаунт. Ноль выключает рассылку."
             />
-            <div className="w-56 space-y-1">
+            <div className="w-64 space-y-1">
               <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00" />
               <p className="text-[11px] text-gray-400">В эти часы аккаунты молчат.</p>
             </div>
