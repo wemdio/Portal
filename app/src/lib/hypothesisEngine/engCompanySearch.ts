@@ -76,6 +76,13 @@ function cleanText(value: unknown, max: number): string {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : '';
 }
 
+/** A legal name without its trailing legal form: «ACME UK LTD.» → «ACME UK». */
+export function heEngLegalNameCore(value: string): string {
+  const trimmed = value.replace(/\s+/g, ' ').trim().replace(/[.,;]+$/, '');
+  const core = trimmed.replace(/(?:[\s,]+(?:public limited company|limited liability partnership|limited liability company|limited company|ltd|limited|plc|llp|lp|llc|inc|incorporated|corp|corporation|gmbh|ag|sa|sas|sarl|bv|nv|as|asa|ab|oy|oyj|aps)\.?)+$/i, '').trim();
+  return core.length >= 2 ? core : trimmed;
+}
+
 function searchTerm(value: string): string {
   // User/model text is data: no search operators or URL/email fragments survive.
   return value.replace(/https?:\S+|\S+@\S+/gi, ' ').replace(/[^\p{L}\p{N}\s]/gu, ' ')
@@ -136,17 +143,29 @@ export function createHeEngCompanySearchCheckpoint(plan: HeEngCompanySearchPlan)
 }
 
 /** One exact-entity lookup plan; its caller permits only one paid result page. */
+/**
+ * One search page for a registry company's website. v2 searches the name
+ * without its legal form: the exact «… LTD.» string is what directories carry,
+ * while the company's own site uses «Limited» or the bare brand. It also drops
+ * «official website» and excludes the registers and directories that filled
+ * most of the ten results in October collections. v1 stays buildable so a
+ * paid v1 checkpoint is still recognised.
+ */
 export function createHeEngRegistryWebsiteSearchPlan(
   candidate: Pick<HeEngRegistryCandidate, 'provider' | 'recordId' | 'company' | 'country'>,
+  version: 1 | 2 = 2,
 ): HeEngCompanySearchPlan {
   const country = normalizeEngCountry(candidate.country);
-  const term = searchTerm(cleanText(candidate.company, 250));
+  const legal = cleanText(candidate.company, 250);
+  const term = searchTerm(version === 1 ? legal : heEngLegalNameCore(legal));
   if (!country || !engCountryIso2(country) || term.length < 3 || !candidate.recordId) {
     throw new Error('ENG registry website search requires a legal name, registry ID and country.');
   }
   const tasks: HeEngCompanySearchTask[] = [{
-    id: createHash('sha256').update(JSON.stringify(['registry-website-v1', candidate.provider, candidate.recordId, term, country])).digest('hex').slice(0, 24),
-    query: `"${term}" ${engCountryLabel(country)} official website -site:linkedin.com -site:facebook.com -site:crunchbase.com`,
+    id: createHash('sha256').update(JSON.stringify([`registry-website-v${version}`, candidate.provider, candidate.recordId, term, country])).digest('hex').slice(0, 24),
+    query: version === 1
+      ? `"${term}" ${engCountryLabel(country)} official website -site:linkedin.com -site:facebook.com -site:crunchbase.com`
+      : `"${term}" ${engCountryLabel(country)} -site:linkedin.com -site:facebook.com -site:crunchbase.com -site:company-information.service.gov.uk -site:register.fca.org.uk -site:kompass.com -site:endole.co.uk -site:companycheck.co.uk -site:opencorporates.com -site:cylex-uk.co.uk`,
     country, gl: engCountryIso2(country)!,
   }];
   return { version: 1, fingerprint: companySearchPlanFingerprint(tasks), tasks };

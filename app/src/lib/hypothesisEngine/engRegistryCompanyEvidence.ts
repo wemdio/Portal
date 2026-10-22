@@ -6,7 +6,7 @@ import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { heCompanySiteIdentity } from './collectionIdentity';
 import { readHeEngSourceCountry, withHeEngSourceCountry } from './engCompanyCountry';
 import { HE_ENG_OWN_ORGANIZATION_TYPES } from './engCompanySearchCountry';
-import { createHeEngCompanySearchCheckpoint, createHeEngRegistryWebsiteSearchPlan, runHeEngCompanySearchPage,
+import { createHeEngCompanySearchCheckpoint, createHeEngRegistryWebsiteSearchPlan, heEngLegalNameCore, runHeEngCompanySearchPage,
   type HeEngCompanySearchCandidate, type HeEngCompanySearchCheckpoint, type HeEngCompanySearchPlan } from './engCompanySearch';
 import { HeEngBaseBudgetError, isHeEngBaseBudgetError } from './engBaseBudgetLedger';
 import { ENG_COUNTRIES, normalizeEngCountry } from './engCountries';
@@ -24,11 +24,31 @@ import type { HeStageContext } from './stages/shared';
 type Row = Record<string, unknown>;
 const MAX_CATALOG_ROWS = 20;
 const MAX_SITES = 3;
-const MAX_PAGES_PER_SITE = 3;
+// Home, the legal notice (where a company number or SIREN lives) and contact.
+const MAX_PAGES_PER_SITE = 4;
 const MAX_PAGE_BYTES = 1_500_000;
+// Business directories and registers list the legal name and number but are
+// never the company's own site. Searching a legal name returns mostly these;
+// without the list they took the three site slots before the real website.
 const DIRECTORY_HOSTS = new Set(['linkedin.com', 'facebook.com', 'instagram.com', 'crunchbase.com', 'zoominfo.com',
   'dnb.com', 'opencorporates.com', 'wikipedia.org', 'brreg.no', 'data.gouv.fr', 'companieshouse.gov.uk',
-  'company-information.service.gov.uk', 'npiregistry.cms.hhs.gov', 'fmcsa.dot.gov', 'fdic.gov']);
+  'company-information.service.gov.uk', 'npiregistry.cms.hhs.gov', 'fmcsa.dot.gov', 'fdic.gov',
+  'fca.org.uk', 'kompass.com', 'endole.co.uk', 'companycheck.co.uk', 'formationdata.co.uk', 'doogal.co.uk',
+  'ukcompaniesdata.uk', 'opendata.bot', 'ceoemail.com', 'verified.com', 'dbsnow.co.uk', 'bizdb.co.uk',
+  'companiesintheuk.co.uk', 'checkcompany.co.uk', 'opengovuk.com', 'find-open-data.co.uk', 'yell.com',
+  'thomsonlocal.com', '192.com', 'cylex-uk.co.uk', 'cylex.de', 'hackforddata.com', 'rooplex.co.uk',
+  'scoriff.co.uk', 'businessmad.com', 'northdata.com', 'northdata.de', 'bloomberg.com', 'rocketreach.co',
+  'apollo.io', 'signalhire.com', 'lusha.com', 'cbinsights.com', 'pitchbook.com', 'preqin.com', 'legal500.com',
+  'chambers.com', 'vat-search.ie', 'solocheck.ie', 'societe.com', 'pappers.fr', 'infogreffe.fr', 'verif.com',
+  'manageo.fr', 'proff.no', 'purehelp.no', '1881.no', 'gulesider.no', 'bizapedia.com', 'manta.com',
+  'buzzfile.com', 'yelp.com', 'bbb.org', 'sophymarine.com', 'experian.com', 'ebay.com', 'amazon.com']);
+// Legal-form words: the register says «LTD», the company's own footer «Limited».
+const LEGAL_FORM_PHRASES: readonly string[][] = [
+  ['public', 'limited', 'company'], ['limited', 'liability', 'partnership'], ['limited', 'liability', 'company'],
+  ['limited', 'company'], ['ltd'], ['limited'], ['plc'], ['llp'], ['lp'], ['llc'], ['inc'], ['incorporated'], ['corp'],
+  ['corporation'], ['gmbh'], ['ag'], ['sa'], ['sas'], ['sarl'], ['bv'], ['nv'], ['as'], ['asa'], ['ab'], ['oy'],
+  ['oyj'], ['aps'],
+];
 
 export type HeEngRegistryResolutionReason = 'confirmed_registry' | 'confirmed_website' | 'invalid_website' |
   'website_not_found' | 'website_search_unavailable' | 'website_unavailable' | 'identity_unconfirmed' |
@@ -49,6 +69,8 @@ export interface HeEngRegistryResolutionCheckpoint {
 /** All injected operations are reads; paid search still uses the base ledger in production. */
 export interface HeEngRegistryResolutionReads {
   catalog?: (company: string, country: string, signal?: AbortSignal) => Promise<Row[]>;
+  /** Same-host catalog rows of a site whose identity is already proven (headcount only). */
+  catalogByWebsite?: (variants: string[], signal?: AbortSignal) => Promise<Row[]>;
   page?: (url: string, signal?: AbortSignal) => Promise<OfficialPage | null>;
   searchPage?: typeof runHeEngCompanySearchPage;
   now?: () => number;
@@ -59,6 +81,23 @@ function text(value: unknown, max = 400): string {
   return typeof value === 'string' ? sliceWholeChars(stripUnstorableJsonChars(value).replace(/\s+/g, ' ').trim(), 0, max) : '';
 }
 function key(value: unknown): string { return text(value, 3000).normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+/gu)?.join(' ') ?? ''; }
+/** Words of a text without «the»/«and»: «A & G» and «A and G» compare equal. */
+function nameWords(value: unknown): string[] {
+  return key(value).split(' ').filter(word => word && word !== 'the' && word !== 'and');
+}
+/** The legal name without its trailing legal form, for comparing register, catalog and site. */
+function legalNameKey(value: unknown): string {
+  const words = nameWords(value);
+  for (let changed = true; changed && words.length > 1;) {
+    changed = false;
+    for (const phrase of LEGAL_FORM_PHRASES) {
+      if (words.length > phrase.length && phrase.every((word, i) => words[words.length - phrase.length + i] === word)) {
+        words.splice(words.length - phrase.length); changed = true; break;
+      }
+    }
+  }
+  return words.join(' ');
+}
 function website(value: unknown): string | null {
   const raw = text(value, 2048);
   try {
@@ -99,11 +138,76 @@ function hasRegistryCountry(candidate: HeEngRegistryCandidate): boolean {
 }
 function normalizeCatalog(rows: readonly Row[], candidate: HeEngRegistryCandidate): Row[] {
   if (rows.length > MAX_CATALOG_ROWS) return [];
-  return rows.filter(row => record(row) && key(row.name) === key(candidate.company) && country(row.country) === country(candidate.country) && website(row.website))
+  const legalName = legalNameKey(candidate.company);
+  return rows.filter(row => record(row) && legalName && legalNameKey(row.name) === legalName && country(row.country) === country(candidate.country) && website(row.website))
     .map(row => Object.fromEntries(['id', 'name', 'website', 'country', 'region', 'locality', 'industry', 'size', 'description']
       .map(field => [field, text(row[field], field === 'description' ? 1200 : 400)])));
 }
+/**
+ * Catalog spellings of one legal name: the register form, without its legal
+ * form, with the country's usual legal forms, and with «&»/«and» swapped.
+ * The register says «1 ANSWER INSURANCE SERVICES LTD.», the catalog
+ * «1 answer insurance services» or «… limited»; an exact match missed both.
+ * The catalog stores names in lower case, so equality is exact; it uses the
+ * trigram index (≈1 s), while an OR of ILIKE patterns scanned the whole
+ * country (12 s on production, over the 10 s lookup deadline).
+ */
+const CATALOG_LEGAL_FORMS: Readonly<Record<string, readonly string[]>> = {
+  'united kingdom': ['ltd', 'limited', 'plc', 'llp'], norway: ['as', 'asa'], france: ['sa', 'sas', 'sarl'],
+  'united states': ['inc', 'llc', 'corp', 'corporation', 'co'],
+};
+function catalogNameVariants(company: string, countryValue: string): string[] {
+  // Quotes and backslashes never reach a filter value: «"FIVE TOWNS PLUS" …».
+  const exact = text(company, 250).toLowerCase().replace(/["\\]/g, '').replace(/\s+/g, ' ').trim();
+  const core = heEngLegalNameCore(exact).toLowerCase();
+  const variants = new Set([exact, exact.replace(/[.,;]+$/, ''), core,
+    ...(CATALOG_LEGAL_FORMS[countryValue] ?? ['ltd', 'limited', 'inc']).map(form => `${core} ${form}`)]);
+  for (const value of [...variants]) {
+    if (/\s&\s/.test(value)) variants.add(value.replace(/\s&\s/g, ' and '));
+    if (/\sand\s/.test(value)) variants.add(value.replace(/\sand\s/g, ' & '));
+  }
+  return [...variants].filter(value => value.length >= 3).slice(0, 16);
+}
+function websiteVariants(site: string): string[] {
+  const host = heCompanySiteIdentity(site)?.host;
+  if (!host) return [];
+  return [...new Set([host, `www.${host}`].flatMap(domain => [domain, `${domain}/`, `https://${domain}`, `https://${domain}/`, `http://${domain}`, `http://${domain}/`]))];
+}
+const GENERIC_NAME_WORDS = new Set(['insurance', 'services', 'service', 'financial', 'finance', 'group', 'holdings',
+  'holding', 'management', 'capital', 'investments', 'investment', 'international', 'global', 'solutions',
+  'consulting', 'partners', 'company', 'limited', 'brokers', 'broking', 'underwriting', 'risk', 'uk', 'europe']);
+/** Search hits whose domain carries the company's own words come first. */
+function brandScore(site: string, company: string): number {
+  const label = (heCompanySiteIdentity(site)?.registrable ?? '').split('.')[0].replace(/[^a-z0-9]/g, '');
+  const words = legalNameKey(company).split(' ').filter(word => word.length >= 3 && !GENERIC_NAME_WORDS.has(word));
+  return label ? words.reduce((score, word) => score + (label.includes(word) ? word.length : 0), 0) : 0;
+}
+// Pages where UK/EU law puts the company number: legal notice, terms, privacy.
+const LEGAL_LINK = /\b(?:legal|impressum|imprint|mentions[\s-]*l[ée]gales|regulatory|company[\s-]*(?:information|details)|important[\s-]*information|terms|privacy)\b/i;
+// Insurers sell «legal expenses» cover; those product pages are not legal notices.
+const LEGAL_PRODUCT = /\blegal[\s-]*(?:expenses?|cover|protection|services?|advice|aid|insurance|assistance)\b/i;
+function legalLinkRank(label: string): number {
+  return /\bterms\b/i.test(label) ? 1 : /\bprivacy\b/i.test(label) ? 2 : 0;
+}
+/** Same-origin legal pages linked from the home page, legal notice first. */
+function legalLinks(html: string, baseUrl: string): string[] {
+  const $ = cheerio.load(html);
+  const found = new Map<string, number>();
+  $('a[href]').slice(0, 600).each((_index, node) => {
+    const href = ($(node).attr('href') ?? '').trim();
+    const label = `${href} ${$(node).text()}`.slice(0, 300);
+    if (!href || /^(?:#|mailto:|tel:|javascript:)/i.test(href) || !LEGAL_LINK.test(label) || LEGAL_PRODUCT.test(label)) return;
+    try {
+      const url = new URL(href, baseUrl);
+      url.hash = '';
+      if (url.origin === new URL(baseUrl).origin && !found.has(url.href)) found.set(url.href, legalLinkRank(label));
+    } catch { /* Not a link. */ }
+  });
+  return [...found].sort((a, b) => a[1] - b[1]).map(([url]) => url);
+}
 function identifierKey(value: unknown): string { return key(value).replace(/\s/g, ''); }
+/** Companies House pads numbers to eight characters; sites often drop the zeros («No. 354568»). */
+function companiesHouseDigits(id: string): string { return /^0+[1-9]\d{3,}$/.test(id) ? id.replace(/^0+/, '') : id; }
 type FrenchIdentifierNamespace = 'siren' | 'siret' | 'vat';
 function frenchNamespace(raw: unknown): FrenchIdentifierNamespace | null {
   const namespace = identifierKey(raw);
@@ -128,7 +232,10 @@ function hasRegistryIdentifier(org: Row, candidate: HeEngRegistryCandidate): boo
   const visit = (raw: unknown, depth: number, namespace?: FrenchIdentifierNamespace): boolean => {
     if (depth > 4) return false;
     if (typeof raw === 'string' || typeof raw === 'number') return candidate.provider === 'france'
-      ? frenchIdentifierMatches(raw, expected, namespace) : identifierKey(String(raw)) === expected;
+      ? frenchIdentifierMatches(raw, expected, namespace)
+      : candidate.provider === 'companies_house'
+        ? companiesHouseDigits(identifierKey(String(raw))) === companiesHouseDigits(expected)
+        : identifierKey(String(raw)) === expected;
     if (Array.isArray(raw)) return raw.slice(0, 20).some(value => visit(value, depth + 1, namespace));
     const item = record(raw);
     if (!item) return false;
@@ -152,16 +259,31 @@ function addressMatches(raw: unknown, candidate: HeEngRegistryCandidate): boolea
   // Match all three independent address parts, not a country word or TLD.
   return [street, locality, postcode].every(part => registered.includes(` ${part} `));
 }
-function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate): boolean {
+/**
+ * A legal block names this entity. With `numberAlone` (the site's own footer) a
+ * labelled registry number is enough by itself: the number is unique, and a
+ * directory page lists other companies' numbers in its body, not in its footer.
+ * With `numberRequired` (a whole legal page) the name must come with the number.
+ */
+function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate,
+  options: { numberAlone?: boolean; numberRequired?: boolean } = {}): boolean {
   const normalized = ` ${key(value)} `;
-  const legalName = key(candidate.company);
-  if (!legalName || !normalized.includes(` ${legalName} `)) return false;
+  const named = ` ${nameWords(value).join(' ')} `;
+  const legalName = legalNameKey(candidate.company);
   const labels: Record<HeEngRegistryCandidate['provider'], string> = {
     brreg: 'org(?:anisasjons|anisation)?[\\s.-]*(?:nummer|number|nr)?',
     france: 'siren|siret', fdic: 'fdic\\s*(?:certificate|cert)?', nppes: 'npi',
-    fmcsa: '(?:us\\s*)?dot(?:\\s*number)?', companies_house: '(?:company(?:\\s*registration)?|registration)\\s*(?:number|no)',
+    fmcsa: '(?:us\\s*)?dot(?:\\s*number)?',
+    // «Company No.», «Registration number», «Registered in England and Wales
+    // No.», «Registered number», «Reg. No.», «under number», «CRN».
+    companies_house: '(?:company\\s+(?:registration\\s+|reg(?:istered)?\\.?\\s*)?(?:number|no|nr)'
+      + '|registration\\s+(?:number|no|nr)'
+      + '|registered\\s+(?:in\\s+(?:england(?:\\s*(?:and|&)\\s*wales)?|wales|scotland|northern\\s+ireland)\\s*)?(?:company\\s+)?(?:number|no|nr)'
+      + '|reg\\.?\\s*(?:number|no|nr)|under\\s+(?:registration\\s+)?(?:number|no)|crn)',
   };
   const id = identifierKey(candidate.recordId);
+  const digits = candidate.provider === 'companies_house' ? companiesHouseDigits(id) : id;
+  const idPattern = `${digits !== id ? '(?:0[\\s.-]*)*' : ''}${digits.split('').join('[\\s.-]*')}`;
   // A labelled registry identifier in the company's own legal footer is a
   // second identity fact. Arbitrary numbers in articles/testimonials are not.
   const end = '(?![\\p{L}\\p{N}]|[\\s.-]{1,3}\\d)';
@@ -172,19 +294,42 @@ function legalBlockIdentity(value: string, candidate: HeEngRegistryCandidate): b
   ] as const).some(([namespace, label, pattern]) => {
     const matches = value.matchAll(new RegExp(`\\b${label}\\b[\\s:./#-]{0,12}(${pattern})${end}`, 'giu'));
     return [...matches].some(match => frenchIdentifierMatches(match[1], id, namespace));
-  }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${id.split('').join('[\\s.-]*')})${end}`, 'iu').test(value);
+  }) : id.length >= 5 && new RegExp(`\\b(?:${labels[candidate.provider]})\\b[\\s:./#-]{0,12}(${idPattern})${end}`, 'iu').test(value);
+  if (registryNumber && options.numberAlone) return true;
+  if (!legalName || !named.includes(` ${legalName} `)) return false;
   if (registryNumber) return true;
+  // A long legal page contains most address words somewhere; only the number counts there.
+  if (options.numberRequired) return false;
   const countryDefinition = ENG_COUNTRIES.find(item => item.value === country(candidate.country));
-  const countryWords = new Set(key(`${countryDefinition?.value ?? ''} ${countryDefinition?.label ?? ''} ${countryDefinition?.iso2 ?? ''}`).split(' '));
+  // Companies House ends a registered office with «ENGLAND»/«WALES»/«SCOTLAND»;
+  // the company's own pages rarely repeat it after the postcode.
+  const countryWords = new Set(key(`${countryDefinition?.value ?? ''} ${countryDefinition?.label ?? ''} ${countryDefinition?.iso2 ?? ''}${
+    countryDefinition?.value === 'united kingdom' ? ' uk england wales scotland northern ireland' : ''}`).split(' '));
   // Single-character address parts still matter: dropping "1" or "A" would
   // match a different house or street belonging to an unrelated namesake.
   const addressWords = [...new Set(key(candidate.address).split(' ').filter(word => word.length > 0 && !countryWords.has(word)))];
   return addressWords.length >= 3 && addressWords.some(word => /\d/.test(word)) && addressWords.every(word => normalized.includes(` ${word} `));
 }
+/**
+ * Short passages around each mention of the legal name: «issued by 1st Sure Ltd …
+ * Our registered office is at: 6 Station Close, Potters Bar EN6 1TL». Address
+ * words only count this close to the name, not scattered over a long page.
+ */
+function nameWindows(value: string, company: string): string[] {
+  const words = legalNameKey(company).split(' ').filter(Boolean);
+  if (!words.length) return [];
+  const pattern = new RegExp(words.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^\\p{L}\\p{N}]+(?:(?:and|the)[^\\p{L}\\p{N}]+)?'), 'giu');
+  const windows: string[] = [];
+  for (const match of value.matchAll(pattern)) {
+    windows.push(value.slice(Math.max(0, match.index - 300), match.index + match[0].length + 500));
+    if (windows.length >= 12) break;
+  }
+  return windows;
+}
 interface OwnFacts { identity: boolean; employees: HeEngEmployeeRange | null }
 /** Site identity is verified from its own Organization, never a search result title/snippet. */
 export function readHeEngRegistryOwnSiteFacts(
-  page: OfficialPage, candidate: HeEngRegistryCandidate, options: { trustedWebsite?: boolean } = {},
+  page: OfficialPage, candidate: HeEngRegistryCandidate, options: { trustedWebsite?: boolean; legalPage?: boolean } = {},
 ): OwnFacts {
   if (!website(page.url) || page.html.length > MAX_PAGE_BYTES) return { identity: false, employees: null };
   const $ = cheerio.load(page.html);
@@ -199,7 +344,8 @@ export function readHeEngRegistryOwnSiteFacts(
     let ownUrl = '';
     try { if (text(org.url)) ownUrl = new URL(text(org.url, 2048), page.url).href; } catch { /* Invalid identity URL. */ }
     const name = text(org.legalName) || text(org.name);
-    if (types.some(type => HE_ENG_OWN_ORGANIZATION_TYPES.has(type)) && sameSite(ownUrl, page.url) && key(name) === key(candidate.company)) {
+    if (types.some(type => HE_ENG_OWN_ORGANIZATION_TYPES.has(type)) && sameSite(ownUrl, page.url) &&
+        legalNameKey(candidate.company) && legalNameKey(name) === legalNameKey(candidate.company)) {
       const addresses = Array.isArray(org.address) ? org.address.slice(0, 30) : [org.address];
       matching.push({ identity: hasRegistryIdentifier(org, candidate) || addresses.some(address => addressMatches(address, candidate)),
         employees: readHeEngEmployeeRange(org.numberOfEmployees) });
@@ -211,17 +357,29 @@ export function readHeEngRegistryOwnSiteFacts(
     if (json.length > 256_000) return;
     try { walk(JSON.parse(json), 0); } catch { /* Invalid structured data proves nothing. */ }
   });
-  const footerMatch = $('footer, [role="contentinfo"]').slice(0, 8).toArray()
-    .some(node => legalBlockIdentity($(node).text().slice(0, 20_000), candidate));
-  const ownHeading = $('title, h1').slice(0, 8).toArray()
-    .some(node => ` ${key($(node).text())} `.includes(` ${key(candidate.company)} `));
+  $('script, style, noscript, template').remove();
+  // A legal page linked from the home page of this site (terms, privacy, legal
+  // notice) names the entity with its number: «Acme Ltd, company number …».
+  const legalText = options.legalPage ? $('body').text().replace(/\s+/g, ' ').slice(0, 200_000) : '';
+  const legalPageMatch = !!options.legalPage && (legalBlockIdentity(legalText, candidate, { numberRequired: true }) ||
+    nameWindows(legalText, candidate.company).some(window => legalBlockIdentity(window, candidate)));
+  // Many sites build the footer from a div named «footer»/«copyright», not the
+  // <footer> element. A long block is a page wrapper, not a footer.
+  const footerMatch = $('footer, [role="contentinfo"], [id*="footer"], [class*="footer"], [id*="copyright"], [class*="copyright"]')
+    .slice(0, 16).toArray()
+    .some(node => !$(node).is('body, html') && $(node).text().length <= 6_000 &&
+      legalBlockIdentity($(node).text(), candidate, { numberAlone: true }));
+  const legalName = legalNameKey(candidate.company);
+  const ownHeading = !!legalName && $('title, h1').slice(0, 8).toArray()
+    .some(node => ` ${nameWords($(node).text()).join(' ')} `.includes(` ${legalName} `));
   // Contact/legal blocks only establish ownership if the page itself names the
   // legal entity. A directory article mentioning a firm is not its own website.
   const contactMatch = ownHeading && $('address, #contact, .contact, #legal, .legal, #imprint, .imprint').slice(0, 12).toArray()
     .some(node => legalBlockIdentity($(node).text().slice(0, 20_000), candidate));
   const declared = [...new Map(matching.filter(item => item.employees && (item.identity || options.trustedWebsite))
     .map(item => [JSON.stringify(item.employees), item.employees])).values()];
-  return { identity: footerMatch || contactMatch || matching.some(item => item.identity), employees: declared.length === 1 ? declared[0] : null };
+  return { identity: footerMatch || legalPageMatch || contactMatch || matching.some(item => item.identity),
+    employees: declared.length === 1 ? declared[0] : null };
 }
 
 /**
@@ -311,9 +469,9 @@ export async function resolveHeEngRegistryCandidate(
       try {
         rows = await withHeDeadline('ENG registry exact company catalog lookup', 10_000, signal, async lookupSignal => {
           if (options.reads?.catalog) return options.reads.catalog(candidate.company, candidateCountry, lookupSignal);
-          const exactName = text(candidate.company, 250).replace(/[\\%_]/g, '\\$&');
           const result = await ctx.supabase.from('pdl_companies').select('id,name,website,country,region,locality,industry,size,description')
-            .ilike('name', exactName).eq('country', candidateCountry).limit(MAX_CATALOG_ROWS + 1).abortSignal(lookupSignal);
+            .in('name', catalogNameVariants(candidate.company, candidateCountry)).eq('country', candidateCountry)
+            .limit(MAX_CATALOG_ROWS + 1).abortSignal(lookupSignal);
           if (result.error) throw new Error('ENG registry company catalog lookup failed.');
           return Array.isArray(result.data) ? result.data : [];
         });
@@ -329,6 +487,9 @@ export async function resolveHeEngRegistryCandidate(
   let anyPageRead = false;
   let lastReason: HeEngRegistryResolutionReason = 'website_not_found';
   let contentReason: HeEngRegistryResolutionReason | null = null;
+  // The entity's own site is found but its size does not fit or is unknown:
+  // another site could only be a namesake or a partner portal.
+  let ownSiteFound = false;
   const finishUnresolved = async () => {
     // Only an entirely unreadable free-site pass may retry. Source candidates,
     // catalog decisions and paid SERP receipts remain frozen in this checkpoint.
@@ -361,6 +522,31 @@ export async function resolveHeEngRegistryCandidate(
         page: candidate.sourceUrl, registryProvider: candidate.provider });
       return readHeEngSourceCountry(row) ? { row, reason: 'confirmed_registry' } : null;
     };
+    // The catalog often files a big company under its brand («Aviva»), not the
+    // legal name, so the name lookup misses its headcount. Once this site is
+    // proven to be the entity's own, the catalog rows of the same site count.
+    let siteCatalogSize: HeEngEmployeeRange | null | undefined;
+    const sizeBySite = async (): Promise<HeEngEmployeeRange | null> => {
+      if (siteCatalogSize !== undefined) return siteCatalogSize;
+      siteCatalogSize = null;
+      const variants = websiteVariants(site);
+      if (!variants.length) return null;
+      try {
+        const rows = await withHeDeadline('ENG registry site catalog lookup', 10_000, signal, async lookupSignal => {
+          if (options.reads?.catalogByWebsite) return options.reads.catalogByWebsite(variants, lookupSignal);
+          const result = await ctx.supabase.from('pdl_companies').select('website,size')
+            .in('website', variants).limit(MAX_CATALOG_ROWS + 1).abortSignal(lookupSignal);
+          if (result.error) throw new Error('ENG registry site catalog lookup failed.');
+          return Array.isArray(result.data) ? result.data : [];
+        });
+        const ranges = rows.length > MAX_CATALOG_ROWS ? [] : [...new Map(rows.filter(row => record(row) && sameSite(row.website, site))
+          .map(row => readHeEngEmployeeRange(row.size)).filter((value): value is HeEngEmployeeRange => value !== null)
+          .map(value => [JSON.stringify(value), value])).values()];
+        siteCatalogSize = ranges.length === 1 ? ranges[0] : null;
+      } catch (error) { interruption(ctx, error); }
+      ctx.onActivity?.();
+      return siteCatalogSize;
+    };
     let range = heEngEmployeeRangeFit(registrySize, size.range) === 'match' ? registrySize : catalogSize;
     if (trusted && heEngEmployeeRangeFit(range, size.range) === 'match') {
       const admitted = admitRegistry(range);
@@ -368,6 +554,7 @@ export async function resolveHeEngRegistryCandidate(
     }
     const queue = [site];
     const seen = new Set<string>();
+    const legalPages = new Set<string>();
     lastReason = 'website_unavailable';
     while (queue.length && seen.size < MAX_PAGES_PER_SITE) {
       signal?.throwIfAborted();
@@ -386,15 +573,20 @@ export async function resolveHeEngRegistryCandidate(
       const pageAudit = recordHeEngSourcePageAudit(audit, url, page);
       if (!page || !page.url.startsWith('https:') || !sameSite(page.url, site) || page.html.length > MAX_PAGE_BYTES) continue;
       anyPageRead = true;
-      const facts = readHeEngRegistryOwnSiteFacts(page, candidate, { trustedWebsite: trusted });
+      const facts = readHeEngRegistryOwnSiteFacts(page, candidate, { trustedWebsite: trusted, legalPage: legalPages.has(url) });
       const identity = trusted || facts.identity;
       pageAudit.identity = identity;
-      if (!identity) lastReason = 'identity_unconfirmed';
+      // A later page without the legal footer does not undo a proven identity.
+      if (!identity) { if (!ownSiteFound) lastReason = 'identity_unconfirmed'; }
       else {
         // A coarse source band may overlap the scope without proving it. Exact
         // own-site or same-entity catalog headcount can resolve that uncertainty.
         range = heEngEmployeeRangeFit(registrySize, size.range) === 'match' ? registrySize : facts.employees ?? catalogSize;
-        const fit = heEngEmployeeRangeFit(range, size.range);
+        let fit = heEngEmployeeRangeFit(range, size.range);
+        if (fit === 'unknown') {
+          const bySite = await sizeBySite();
+          if (bySite) { range = bySite; fit = heEngEmployeeRangeFit(range, size.range); }
+        }
         pageAudit.employeeFit = fit;
         if (fit !== 'match') lastReason = fit === 'outside' ? 'outside_size' : 'size_unconfirmed';
         else {
@@ -404,12 +596,17 @@ export async function resolveHeEngRegistryCandidate(
           // proof must not be repaired by borrowing another website address.
           lastReason = 'country_unconfirmed';
         }
+        // The rest of this site may still declare a headcount; other sites are not tried.
+        ownSiteFound = true;
       }
       contentReason = lastReason;
       if (seen.size === 1) {
+        // Two legal pages (where the company number lives), then contact pages.
+        const legal = legalLinks(page.html, page.url).filter(link => link.startsWith('https:') && sameSite(link, site) && !seen.has(link)).slice(0, 2);
+        for (const link of legal) { queue.push(link); legalPages.add(link); }
         for (const link of discoverContactLinks(page.html, page.url)) {
-          if (link.startsWith('https:') && sameSite(link, site) && !seen.has(link)) queue.push(link);
           if (queue.length >= MAX_PAGES_PER_SITE - 1) break;
+          if (link.startsWith('https:') && sameSite(link, site) && !seen.has(link) && !queue.includes(link)) queue.push(link);
         }
       }
     }
@@ -419,11 +616,19 @@ export async function resolveHeEngRegistryCandidate(
   for (const site of initialSites) {
     const result = await trySite(site, trustedWebsite === site);
     if (result) return finish(result);
+    if (ownSiteFound) return finishUnresolved();
   }
   // A registry-provided site is already linked to the entity. Search must not
   // replace a failed/undersized known website with a convenient namesake.
   if (trustedWebsite) return finishUnresolved();
-  const plan = createHeEngRegistryWebsiteSearchPlan(candidate);
+  // A page already bought under the v1 query keeps its plan; an unpaid v1
+  // checkpoint moves to the v2 query, which no longer asks for the «LTD.» string.
+  const legacyPlan = createHeEngRegistryWebsiteSearchPlan(candidate, 1);
+  let plan = createHeEngRegistryWebsiteSearchPlan(candidate);
+  if (state.search?.plan.fingerprint === legacyPlan.fingerprint) {
+    if (state.search.checkpoint.calls > 0 || state.search.checkpoint.unavailable) plan = legacyPlan;
+    else delete state.search;
+  }
   if (state.search && (state.search.plan.fingerprint !== plan.fingerprint || !Array.isArray(state.search.candidates) || state.search.candidates.length > 10)) {
     throw new Error('ENG registry website search checkpoint does not match the legal entity.');
   }
@@ -441,11 +646,15 @@ export async function resolveHeEngRegistryCandidate(
   }
   if (state.search.checkpoint.inFlight) throw new HeEngBaseBudgetError('unknown_cost');
   if (state.search.checkpoint.unavailable) return finish({ row: null, reason: 'website_search_unavailable' });
-  for (const hit of state.search.candidates) {
-    const site = website(hit.website);
-    if (!site) continue;
+  // Only three sites are read: hits whose domain carries the company's own
+  // words go first, directories and namesakes after, search rank breaks ties.
+  const hits = [...new Set(state.search.candidates.map(hit => website(hit.website)).filter((site): site is string => site !== null))]
+    .map((site, rank) => ({ site, rank, score: brandScore(site, candidate.company) }))
+    .sort((a, b) => b.score - a.score || a.rank - b.rank);
+  for (const { site } of hits) {
     const result = await trySite(site, false);
     if (result) return finish(result);
+    if (ownSiteFound) break;
   }
   return finishUnresolved();
 }

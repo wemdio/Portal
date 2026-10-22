@@ -23,11 +23,20 @@ const PART_TIME_MS = 4 * 60_000;
 const LOCK_STALE_MS = 10 * 60_000;
 const SIC = HE_ENG_REGISTRY_CATEGORIES.companies_house;
 const PAGE_SIZE = 25;
+// Parser 2 adds a second index per SIC code: companies whose last accounts
+// were medium, full or group accounts. Small and micro companies file
+// abridged/micro accounts, so a 50+ employee search skips them instead of
+// paging alphabetically through thousands of one-person companies. Accounts
+// type is only a hint; employee count still needs its own evidence.
+const PARSER_VERSION = 2;
+const SIZED_ACCOUNTS = new Set(['FULL', 'GROUP', 'MEDIUM']);
+const SIZED_MIN_EMPLOYEES = 50;
 // Bump parserVersion when normalization/filter/order changes: offsets must not
 // silently point into rebuilt data produced by a different parser.
 export interface HeEngCompaniesHouseSnapshot {
   version: 1;
-  parserVersion: 1;
+  /** 1: one index per SIC code (pinned by older bases). 2: plus `<sic>.sized`. */
+  parserVersion: 1 | 2;
   date: string;
   parts: Array<{ file: string; size: number; etag: string }>;
   fingerprint: string;
@@ -41,7 +50,8 @@ interface Options {
   now?: () => number;
 }
 interface PartIndex {
-  version: 1; snapshot: string; file: string; archiveSha256: string; csvSha256: string;
+  /** Equals the snapshot's parserVersion. */
+  version: 1 | 2; snapshot: string; file: string; archiveSha256: string; csvSha256: string;
   counts: Record<string, number>; bytes: Record<string, number>; hashes: Record<string, string>;
   checksum: string;
 }
@@ -57,9 +67,13 @@ function sha(value: string): string { return createHash('sha256').update(value).
 function snapshotHash(value: HeEngCompaniesHouseSnapshot): string {
   return sha(JSON.stringify([value.version, value.parserVersion, value.date, value.parts.map(p => [p.file, p.size, p.etag])]));
 }
+/** Index files of one part. Parser 1 keys stay byte-for-byte as before. */
+function indexKeys(parserVersion: 1 | 2): string[] {
+  return parserVersion === 1 ? [...SIC] : SIC.flatMap(sic => [sic, `${sic}.sized`]);
+}
 function indexHash(value: PartIndex): string {
   return sha(JSON.stringify([value.version, value.snapshot, value.file, value.archiveSha256, value.csvSha256,
-    SIC.map(sic => [sic, value.counts[sic], value.bytes[sic], value.hashes[sic]])]));
+    indexKeys(value.version).map(key => [key, value.counts[key], value.bytes[key], value.hashes[key]])]));
 }
 function integer(value: unknown, min: number, max: number): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max;
@@ -73,7 +87,7 @@ function validDate(value: unknown): value is string {
     Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 }
 export function validateHeEngCompaniesHouseSnapshot(value: HeEngCompaniesHouseSnapshot): void {
-  if (!value || value.version !== 1 || value.parserVersion !== 1 || !validDate(value.date) ||
+  if (!value || value.version !== 1 || ![1, 2].includes(value.parserVersion) || !validDate(value.date) ||
       !Array.isArray(value.parts) || !integer(value.parts.length, 1, MAX_PARTS)) fail('invalid_snapshot');
   for (const [i, part] of value.parts.entries()) {
     if (!part || part.file !== `BasicCompanyData-${value.date}-part${i + 1}_${value.parts.length}.zip` ||
@@ -138,12 +152,15 @@ async function timed<T>(options: Options, milliseconds: number, operation: (boun
 export async function getHeEngCompaniesHouseSnapshot(options: Options = {}): Promise<HeEngCompaniesHouseSnapshot> {
   options.signal?.throwIfAborted();
   const directory = root(options); await mkdir(directory, { recursive: true, mode: 0o700 });
-  const latestFile = path.join(directory, 'latest.json');
+  // Parser 1 code reads latest.json and rejects any other parser version, so
+  // a newer listing lives in its own file and never breaks an older worker.
+  const latestFile = path.join(directory, `latest-v${PARSER_VERSION}.json`);
   const cached = await jsonFile<{ checkedAt: number; snapshot: HeEngCompaniesHouseSnapshot }>(latestFile);
   const now = (options.now ?? Date.now)();
   if (cached) {
     validateHeEngCompaniesHouseSnapshot(cached.snapshot);
-    if (integer(cached.checkedAt, 0, now) && now - cached.checkedAt < 24 * 3600_000 && now - Date.parse(cached.snapshot.date) < 62 * 86_400_000) return cached.snapshot;
+    if (cached.snapshot.parserVersion === PARSER_VERSION && integer(cached.checkedAt, 0, now) &&
+        now - cached.checkedAt < 24 * 3600_000 && now - Date.parse(cached.snapshot.date) < 62 * 86_400_000) return cached.snapshot;
   }
   return timed(options, 60_000, async bounded => {
     const html = await boundedText(await request(LISTING, bounded), 512 * 1024);
@@ -161,7 +178,7 @@ export async function getHeEngCompaniesHouseSnapshot(options: Options = {}): Pro
     }
     const date = [...sets.keys()].sort().reverse().find(d => sets.get(d)!.size === totals.get(d));
     if (!date || Date.parse(date) > now || now - Date.parse(date) > 62 * 86_400_000) fail('stale_or_missing_snapshot');
-    const snapshot: HeEngCompaniesHouseSnapshot = { version: 1, parserVersion: 1, date, parts: [], fingerprint: '' };
+    const snapshot: HeEngCompaniesHouseSnapshot = { version: 1, parserVersion: PARSER_VERSION, date, parts: [], fingerprint: '' };
     for (const [, file] of [...sets.get(date)!].sort((a, b) => a[0] - b[0])) {
       const response = await request(`${ORIGIN}/${file}`, bounded, { method: 'HEAD' });
       snapshot.parts.push({ file, size: Number(response.headers.get('content-length')), etag: response.headers.get('etag') ?? '' });
@@ -291,10 +308,10 @@ async function inspectZipDirectory(file: string, size: number): Promise<void> {
 async function readPart(directory: string, snapshot: HeEngCompaniesHouseSnapshot, part: number): Promise<PartIndex | null> {
   const metadata = await jsonFile<PartIndex>(path.join(directory, snapshot.fingerprint, `part-${part + 1}`, 'index.json'));
   if (!metadata) return null;
-  if (metadata.version !== 1 || metadata.snapshot !== snapshot.fingerprint || metadata.file !== snapshot.parts[part].file ||
+  if (metadata.version !== snapshot.parserVersion || metadata.snapshot !== snapshot.fingerprint || metadata.file !== snapshot.parts[part].file ||
       !/^[a-f0-9]{64}$/.test(metadata.archiveSha256) || !/^[a-f0-9]{64}$/.test(metadata.csvSha256) ||
-      !metadata.counts || !metadata.bytes || !metadata.hashes || SIC.some(sic => !integer(metadata.counts[sic], 0, 1_500_000) ||
-        !integer(metadata.bytes[sic], 0, MAX_INDEX) || !/^[a-f0-9]{64}$/.test(metadata.hashes[sic]))) fail('cache_metadata');
+      !metadata.counts || !metadata.bytes || !metadata.hashes || indexKeys(snapshot.parserVersion).some(key => !integer(metadata.counts[key], 0, 1_500_000) ||
+        !integer(metadata.bytes[key], 0, MAX_INDEX) || !/^[a-f0-9]{64}$/.test(metadata.hashes[key]))) fail('cache_metadata');
   // Skipped parts still influence offsets: protect counts even when their data
   // file is not read for this page, otherwise corruption silently shifts rows.
   if (metadata.checksum !== indexHash(metadata)) fail('cache_metadata');
@@ -323,12 +340,13 @@ async function importPart(directory: string, snapshot: HeEngCompaniesHouseSnapsh
       if (entry.path !== spec.file.replace(/\.zip$/, '.csv') || entry.type !== 'File' || entry.compressionMethod !== 8 ||
           (entry.flags & 1) !== 0 || !integer(entry.uncompressedSize, 1, MAX_CSV) ||
           !integer(entry.compressedSize, 1, spec.size) || !integer(entry.crc32, 0, 0xffffffff)) fail('archive_entry');
+      const keys = indexKeys(snapshot.parserVersion);
       const counts: Record<string, number> = {}, bytes: Record<string, number> = {}, buffers: Record<string, string> = {};
-      const hashes = new Map(SIC.map(sic => [sic, createHash('sha256')]));
-      for (const sic of SIC) { counts[sic] = 0; bytes[sic] = 0; buffers[sic] = ''; }
-      const flush = async (sic: string) => {
-        if (!buffers[sic]) return;
-        await appendFile(path.join(staging, `${sic}.ndjson`), buffers[sic], { mode: 0o600 }); buffers[sic] = '';
+      const hashes = new Map(keys.map(key => [key, createHash('sha256')]));
+      for (const key of keys) { counts[key] = 0; bytes[key] = 0; buffers[key] = ''; }
+      const flush = async (key: string) => {
+        if (!buffers[key]) return;
+        await appendFile(path.join(staging, `${key}.ndjson`), buffers[key], { mode: 0o600 }); buffers[key] = '';
       };
       const stream = entry.stream(); let csvBytes = 0, crc = -1, indexedBytes = 0, records = 0;
       const csvHash = createHash('sha256');
@@ -347,21 +365,22 @@ async function importPart(directory: string, snapshot: HeEngCompaniesHouseSnapsh
           const categories = [...new Set(row.sic_codes)].filter(sic => SIC.includes(sic));
           if (!categories.length) continue;
           const line = `${JSON.stringify(row)}\n`; const length = Buffer.byteLength(line);
-          for (const sic of categories) {
-            counts[sic]++; bytes[sic] += length; indexedBytes += length;
+          const sized = snapshot.parserVersion === 2 && SIZED_ACCOUNTS.has(row.accounts_category);
+          for (const key of categories.flatMap(sic => sized ? [sic, `${sic}.sized`] : [sic])) {
+            counts[key]++; bytes[key] += length; indexedBytes += length;
             if (indexedBytes > MAX_INDEX || used + spec.size + indexedBytes > MAX_CACHE) fail('index_size');
-            hashes.get(sic)!.update(line); buffers[sic] += line;
-            if (Buffer.byteLength(buffers[sic]) >= 64 * 1024) await flush(sic);
+            hashes.get(key)!.update(line); buffers[key] += line;
+            if (Buffer.byteLength(buffers[key]) >= 64 * 1024) await flush(key);
           }
           if (records % 2048 === 0) await yieldLoop();
         }
         if (csvBytes !== entry.uncompressedSize || ((crc ^ -1) >>> 0) !== entry.crc32) fail('csv_checksum');
-        for (const sic of SIC) { await flush(sic); if (bytes[sic] === 0) await writeFile(path.join(staging, `${sic}.ndjson`), '', { mode: 0o600 }); }
+        for (const key of keys) { await flush(key); if (bytes[key] === 0) await writeFile(path.join(staging, `${key}.ndjson`), '', { mode: 0o600 }); }
       } catch (error) {
         if (error instanceof HeEngCompaniesHouseCsvError) fail(`parse_${error.reason}`);
         throw error;
       } finally { bounded.signal?.removeEventListener('abort', abort); stream.destroy(); }
-      const index: PartIndex = { version: 1, snapshot: snapshot.fingerprint, file: spec.file, archiveSha256,
+      const index: PartIndex = { version: snapshot.parserVersion, snapshot: snapshot.fingerprint, file: spec.file, archiveSha256,
         csvSha256: csvHash.digest('hex'), counts, bytes, hashes: Object.fromEntries([...hashes].map(([sic, hash]) => [sic, hash.digest('hex')])), checksum: '' };
       index.checksum = indexHash(index);
       await rm(archive); await writeFile(path.join(staging, 'index.json'), JSON.stringify(index), { mode: 0o600 });
@@ -371,8 +390,8 @@ async function importPart(directory: string, snapshot: HeEngCompaniesHouseSnapsh
     });
   } finally { if (staging) await rm(staging, { recursive: true, force: true }); await release(); }
 }
-async function indexRows(file: string, index: PartIndex, sic: string, skip: number, count: number, options: Options): Promise<HeEngCompaniesHouseCsvRow[]> {
-  if ((await stat(file)).size !== index.bytes[sic]) fail('index_corrupt');
+async function indexRows(file: string, index: PartIndex, key: string, skip: number, count: number, options: Options): Promise<HeEngCompaniesHouseCsvRow[]> {
+  if ((await stat(file)).size !== index.bytes[key]) fail('index_corrupt');
   const hash = createHash('sha256'); let tail = '', rowNumber = 0; const rows: HeEngCompaniesHouseCsvRow[] = [];
   for await (const chunk of createReadStream(file, { encoding: 'utf8' })) {
     options.signal?.throwIfAborted(); hash.update(chunk); tail += chunk;
@@ -388,7 +407,7 @@ async function indexRows(file: string, index: PartIndex, sic: string, skip: numb
     }
     if (tail.length > 128 * 1024) fail('index_corrupt'); options.onActivity?.();
   }
-  if (tail || rowNumber !== index.counts[sic] || hash.digest('hex') !== index.hashes[sic]) fail('index_corrupt');
+  if (tail || rowNumber !== index.counts[key] || hash.digest('hex') !== index.hashes[key]) fail('index_corrupt');
   return rows;
 }
 
@@ -399,6 +418,8 @@ export async function readHeEngCompaniesHouseCsvPage(task: HeEngRegistryTask, po
   validateHeEngRegistryTask(task); validateHeEngCompaniesHouseSnapshot(snapshot);
   if (task.provider !== 'companies_house' || task.transport !== 'csv' || !integer(position, 0, 20_000) || position % PAGE_SIZE) fail('position');
   const directory = root(options); await mkdir(directory, { recursive: true, mode: 0o700 });
+  // A 50+ employee task reads only medium/large accounts filers (parser 2 pins).
+  const key = snapshot.parserVersion === 2 && (task.minEmployees ?? 0) >= SIZED_MIN_EMPLOYEES ? `${task.category}.sized` : task.category;
   const rows: HeEngCompaniesHouseCsvRow[] = []; let remaining = position; let more = false;
   for (let part = 0; part < snapshot.parts.length; part++) {
     const index = await readPart(directory, snapshot, part);
@@ -408,12 +429,12 @@ export async function readHeEngCompaniesHouseCsvPage(task: HeEngRegistryTask, po
       // One free archive per invocation; source cursor and paid resolver stay untouched.
       throw new HeEngRegistryRetryError(1000);
     }
-    const length = index.counts[task.category];
+    const length = index.counts[key];
     if (remaining >= length) { remaining -= length; continue; }
     if (rows.length === PAGE_SIZE) { more = true; break; }
     const take = Math.min(PAGE_SIZE - rows.length, length - remaining);
-    rows.push(...await indexRows(path.join(directory, snapshot.fingerprint, `part-${part + 1}`, `${task.category}.ndjson`),
-      index, task.category, remaining, take, options));
+    rows.push(...await indexRows(path.join(directory, snapshot.fingerprint, `part-${part + 1}`, `${key}.ndjson`),
+      index, key, remaining, take, options));
     more = remaining + take < length; remaining = 0;
     if (more) break;
   }
