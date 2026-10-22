@@ -1255,7 +1255,10 @@ function DialogsTab({ campaignId, crmEnabled }: {
   const [forwarding, setForwarding] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [crmPushing, setCrmPushing] = useState<string | null>(null);
-  const limit = 30;
+  /** Порция подгрузки: первые 50, дальше по 50 при прокрутке списка вниз. */
+  const limit = 50;
+  const dialogsCountRef = useRef(0);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const fetchAccounts = useCallback(async () => {
     const res = await authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`);
@@ -1295,8 +1298,13 @@ function DialogsTab({ campaignId, crmEnabled }: {
    * наверх, и после каждой пометки место приходилось искать заново.
    */
   const fetchDialogs = useCallback(async (options?: { silent?: boolean }) => {
-    if (!options?.silent) setLoading(true);
-    const params = new URLSearchParams({ campaign_id: campaignId, limit: String(limit), offset: String(offset) });
+    // offset > 0 — подгрузка следующей порции: дописываем к списку. Тихое
+    // обновление перечитывает всё уже загруженное одним запросом.
+    const append = !options?.silent && offset > 0;
+    if (!options?.silent && !append) setLoading(true);
+    if (append) setLoadingMore(true);
+    const pageSize = options?.silent ? Math.max(limit, dialogsCountRef.current) : limit;
+    const params = new URLSearchParams({ campaign_id: campaignId, limit: String(pageSize), offset: String(options?.silent || !append ? 0 : offset) });
     if (query.trim()) params.set('q', query.trim());
     if (filterStatus) params.set('status', filterStatus);
     if (filterCanSend === 'enabled') params.set('can_send', 'true');
@@ -1310,9 +1318,17 @@ function DialogsTab({ campaignId, crmEnabled }: {
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
-      setDialogs(d.items); setTotal(d.total);
+      setDialogs((cur) => {
+        const next = append
+          ? [...cur, ...d.items.filter((x) => !cur.some((c) => c.id === x.id))]
+          : d.items;
+        dialogsCountRef.current = next.length;
+        return next;
+      });
+      setTotal(d.total);
     }
     setLoading(false);
+    setLoadingMore(false);
   }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages, filterLeadBy]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
@@ -1633,9 +1649,6 @@ function DialogsTab({ campaignId, crmEnabled }: {
     URL.revokeObjectURL(url);
   };
 
-  const totalPages = Math.ceil(total / limit);
-  const currentPage = Math.floor(offset / limit) + 1;
-
   const selectedDialog = dialogs.find((x) => x.id === expandedId) ?? dialogs[0] ?? null;
   const listRef = useRef<HTMLUListElement>(null);
   const messagesEndKey = selectedDialog ? `${selectedDialog.id}:${selectedDialog.messages.length}:${selectedDialog.reply_failure?.timestamp ?? ''}:${selectedDialog.reply_failure?.retrying ?? ''}` : '';
@@ -1857,7 +1870,16 @@ function DialogsTab({ campaignId, crmEnabled }: {
               <span>Диалогов: {total}</span>
               <span className="text-gray-400">↑ ↓ — переключать</span>
             </div>
-            <ul ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
+            <ul
+              ref={listRef}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                if (el.scrollHeight - el.scrollTop - el.clientHeight < 200 && !loadingMore && !loading && dialogs.length < total) {
+                  setOffset(dialogs.length);
+                }
+              }}
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
               {dialogs.map((d) => {
                 const active = selectedDialog?.id === d.id;
                 const st = DIALOG_STATUS_LABELS[d.status] ?? DIALOG_STATUS_LABELS.none;
@@ -1901,13 +1923,9 @@ function DialogsTab({ campaignId, crmEnabled }: {
                 );
               })}
             </ul>
-            {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-2 border-t border-gray-200 px-2 py-1.5">
-                <button type="button" disabled={currentPage <= 1} onClick={() => setOffset(Math.max(0, offset - limit))}
-                  className="rounded-full border border-gray-200 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 hover:border-indigo-300 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Назад</button>
-                <span className="text-[11px] text-gray-500">{currentPage} / {totalPages}</span>
-                <button type="button" disabled={currentPage >= totalPages} onClick={() => setOffset(offset + limit)}
-                  className="rounded-full border border-gray-200 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 hover:border-indigo-300 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Вперёд</button>
+            {loadingMore && (
+              <div className="flex items-center justify-center gap-1.5 border-t border-gray-200 px-2 py-1.5 text-[11px] text-gray-500">
+                <Loader2 className="h-3 w-3 animate-spin" /> Загружаю ещё…
               </div>
             )}
           </div>
