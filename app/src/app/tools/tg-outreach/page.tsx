@@ -1194,6 +1194,19 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 // Флага «своя/чужая кампания» здесь больше нет. Он появился как зеркало RLS из
 // 20260320_0003 (читать всем, писать владельцу) — а 20260807_0004 это правило
 // сняла: аутрич командный, кампанию ведут несколько специалистов.
+/**
+ * Цвет счётчика сообщений: чем длиннее переписка, тем она ценнее — по таким
+ * диалогам и проверяют работу. Явные цвета (белый текст на сплошной заливке),
+ * чтобы одинаково читалось в светлой и тёмной теме.
+ */
+function messageCountClass(n: number): string {
+  if (n >= 6) return 'bg-[#16a34a] text-white';
+  if (n >= 4) return 'bg-[#0d9488] text-white';
+  if (n === 3) return 'bg-[#2563eb] text-white';
+  if (n === 2) return 'bg-[#7c3aed] text-white';
+  return 'bg-[#e5e7eb] text-[#6b7280]';
+}
+
 function DialogsTab({ campaignId, crmEnabled }: {
   campaignId: string;
   /** Включена ли у кампании передача в CRM — тогда у лидов без сделки есть кнопка «В CRM». */
@@ -1866,6 +1879,12 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         <span className={`min-w-0 flex-1 truncate text-xs ${active ? 'font-semibold text-indigo-700' : 'font-medium text-gray-900'}`}>
                           {d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`}
                         </span>
+                        <span
+                          title={`Сообщений в переписке: ${d.messages.length}`}
+                          className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums ${messageCountClass(d.messages.length)}`}
+                        >
+                          {d.messages.length} сообщ.
+                        </span>
                         {d.status !== 'none' && <span className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium ${st.cls}`}>{st.label}</span>}
                         {d.can_send === false && <Ban className="h-3 w-3 shrink-0 text-rose-500" />}
                         {d.reply_failure && <ReplyFailureIndicator failure={d.reply_failure} />}
@@ -1878,7 +1897,6 @@ function DialogsTab({ campaignId, crmEnabled }: {
                         <span className="mt-1 flex items-center gap-1.5 text-[10px] text-gray-400">
                           {d.base && <span className="truncate text-violet-600">{d.base.name}</span>}
                           {accountLabelMap.get(d.account_id) && <span className="shrink-0">· {accountLabelMap.get(d.account_id)}</span>}
-                          <span className="ml-auto shrink-0">{d.messages.length} сообщ.</span>
                         </span>
                       )}
                     </button>
