@@ -122,8 +122,9 @@ services:
             - anon
 
   - name: realtime-v1-ws
-    _comment: "Realtime: /realtime/v1/* -> ws://realtime:4000/socket/*"
-    url: http://realtime:4000/socket
+    # Имя хоста задаёт тенанта Realtime: realtime-dev (сетевое имя сервиса в compose).
+    _comment: "Realtime: /realtime/v1/* -> ws://realtime-dev:4000/socket/*"
+    url: http://realtime-dev:4000/socket
     protocol: http
     routes:
       - name: realtime-v1-ws
@@ -144,7 +145,7 @@ services:
 
   - name: realtime-v1-rest
     _comment: "Realtime REST API"
-    url: http://realtime:4000/api
+    url: http://realtime-dev:4000/api
     protocol: http
     routes:
       - name: realtime-v1-rest

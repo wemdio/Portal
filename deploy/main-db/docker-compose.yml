@@ -147,7 +147,13 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - instantly-network
+      instantly-network:
+        # Realtime берёт тенанта из первого слова имени хоста в запросе. Kong
+        # ходит сюда как realtime-dev — это тенант, которого создаёт
+        # SEED_SELF_HOST. Под именем realtime сервис отвечал TenantNotFound
+        # всем клиентам, и уведомления о задачах не работали (до 23.10.2026).
+        aliases:
+          - realtime-dev
 
   # ─── Storage API: загрузка/раздача файлов через S3-протокол ───────────────────
   # Бэкенд: TWC Cloud Storage (S3-совместимое хранилище). Все файлы летят в один

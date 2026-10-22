@@ -256,3 +256,23 @@ portal и **все** воркеры ещё работают; дренаж (ша�
 путь без действий (правка в `.semaphore/`). Иначе закладывай полный деплой в окно,
 включая возможный перезапуск Instantly Postgres на плавающем теге `postgres:16-alpine`.
 Пути `deploy/main-db-prod/*` и `docs/*` план не выбирает.
+
+## Realtime (уведомления о задачах, с 23.10.2026)
+
+Realtime определяет тенанта по первому слову имени хоста, на которое пришёл
+запрос. Засеянный (`SEED_SELF_HOST`) тенант — `realtime-dev`, поэтому:
+
+- у сервиса `realtime` в compose есть сетевое имя `realtime-dev`;
+- в `/opt/main-db/kong.yml` маршруты `realtime-v1-ws` и `realtime-v1-rest` ведут на
+  `http://realtime-dev:4000/...` (шаблон — `deploy/main-db/kong.yml`).
+
+С июльского переезда до 23.10.2026 Kong ходил на `realtime:4000`, сервис отвечал
+`TenantNotFound: Tenant not found: realtime`, и все воркеры жили на запасном
+опросе раз в 30 с. Второе условие — публикация `supabase_realtime`: она не
+пережила переезд и создаётся миграцией
+`supabase/migrations/20261023_0001_realtime_publication.sql` (очереди воркеров и
+чат поддержки; самые частые очереди оставлены на опросе — см. миграцию).
+
+Проверка: в `docker logs main-realtime` нет `TenantNotFound`, в логах воркеров
+`Realtime subscribed to: …`, в `pg_replication_slots` есть слот
+`supabase_realtime_replication_slot…`.
