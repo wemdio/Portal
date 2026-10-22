@@ -3964,21 +3964,25 @@ html[data-portal-theme='dark'] .portal-shell .sender-table-head {
 .tg-menu--light .tg-menu-sep { background: #e4e4e7; }
 .tg-menu--dark .tg-menu-sep { background: rgba(255, 255, 255, 0.1); }
 
-/* ─── Список списков прокси в TG-аутриче, тёмная тема ───────────────────────
-   Подсветка при наведении и выбранный список. Светлые утилиты (indigo-50)
-   на тёмном фоне давали белёсую плашку; здесь явные тёмные цвета. */
+/* ─── Список списков прокси в TG-аутриче ────────────────────────────────────
+   Фон наведения и выбранного списка задан только здесь, а не утилитами Tailwind:
+   в тёмной теме их светлые варианты (indigo-50, gray-50) давали белую плашку. */
 .tg-list-item { position: relative; transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease; }
-html[data-portal-theme='dark'] .tg-list-item:hover {
-  background: rgba(255, 255, 255, 0.06) !important;
+.tg-list-item:hover { background: #f4f4f5; }
+.tg-list-item--add:hover { background: #eef2ff; }
+.tg-list-item--active, .tg-list-item--active:hover {
+  background: #eef2ff;
+  box-shadow: inset 3px 0 0 #6366f1;
 }
+html[data-portal-theme='dark'] .tg-list-item:hover { background: rgba(255, 255, 255, 0.05) !important; }
 html[data-portal-theme='dark'] .tg-list-item--add { color: #a5b4fc !important; }
 html[data-portal-theme='dark'] .tg-list-item--add:hover {
-  background: rgba(99, 102, 241, 0.14) !important;
+  background: rgba(99, 102, 241, 0.12) !important;
   color: #c7d2fe !important;
 }
 html[data-portal-theme='dark'] .tg-list-item--active,
 html[data-portal-theme='dark'] .tg-list-item--active:hover {
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.32), rgba(99, 102, 241, 0.08)) !important;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.26), rgba(99, 102, 241, 0.05)) !important;
   color: #e0e7ff !important;
-  box-shadow: inset 3px 0 0 #818cf8, 0 0 18px rgba(99, 102, 241, 0.18);
+  box-shadow: inset 3px 0 0 #818cf8;
 }
