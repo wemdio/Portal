@@ -162,6 +162,21 @@ export default function WarmupTab({
     else if (data.defaults?.default_days) setDays(data.defaults.default_days);
   }, [campaignId]);
 
+  /** Аккаунты, что за последние сутки слали первые сообщения: рассылают в боевом режиме. */
+  const [inBattle, setInBattle] = useState<Set<string>>(new Set());
+  const loadBattle = useCallback(async () => {
+    const res = await authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/sending`);
+    if (!res.ok) return;
+    const data = (await res.json().catch(() => null)) as { stats?: Record<string, { sent_24h?: number }> } | null;
+    setInBattle(new Set(Object.entries(data?.stats ?? {}).filter(([, v]) => (v?.sent_24h ?? 0) > 0).map(([id]) => id)));
+  }, [campaignId]);
+  useEffect(() => { queueMicrotask(() => { void loadBattle(); }); }, [loadBattle]);
+  // Попавший в рассылку аккаунт выпадает из выбора для прогрева.
+  useEffect(() => {
+    if (!inBattle.size) return;
+    setSelected((prev) => (([...prev].some((id) => inBattle.has(id))) ? new Set([...prev].filter((id) => !inBattle.has(id))) : prev));
+  }, [inBattle]);
+
   const loadAccounts = useCallback(async () => {
     const res = await authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`);
     if (!res.ok) return;
@@ -424,7 +439,7 @@ export default function WarmupTab({
   const warmingCount = selected.size;
   const tooFewSelected = warmingCount < 2;
   /** Выключенные в портале греть нечем — в «выбрать все» их не берём. */
-  const selectableIds = accounts.filter((a) => a.is_active).map((a) => a.id);
+  const selectableIds = accounts.filter((a) => a.is_active && !inBattle.has(a.id)).map((a) => a.id);
 
   /**
    * По дате добавления, свежие внизу.
@@ -601,12 +616,13 @@ export default function WarmupTab({
           className="mt-2 grid grid-cols-1 content-start gap-x-4 overflow-y-auto sm:grid-cols-2 xl:grid-cols-3"
         >
           {ordered.map((a) => {
-            const disabled = isRunning || !a.is_active;
+            const battle = inBattle.has(a.id);
+            const disabled = isRunning || !a.is_active || battle;
             const fullName = [a.first_name, a.last_name].filter(Boolean).join(' ').trim();
             return (
               <label
                 key={a.id}
-                title={a.is_active ? undefined : 'Аккаунт выключен в портале — греть его нечем'}
+                title={battle ? 'Аккаунт рассылает в боевом режиме — греть его нельзя' : a.is_active ? undefined : 'Аккаунт выключен в портале — греть его нечем'}
                 className={`flex items-center gap-2 rounded-lg px-1 py-1.5 ${
                   disabled ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'
                 }`}
@@ -628,6 +644,11 @@ export default function WarmupTab({
                     <span className="truncate text-xs font-medium text-gray-800">
                       {a.tg_user_id ?? a.session_name}
                     </span>
+                    {battle && (
+                      <span className="shrink-0 rounded bg-emerald-50 px-1 py-0.5 text-[10px] text-emerald-700">
+                        в рассылке
+                      </span>
+                    )}
                     {warmingIds.has(a.id) && (
                       <span className="shrink-0 rounded bg-indigo-50 px-1 py-0.5 text-[10px] text-indigo-700">
                         греется
